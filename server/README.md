@@ -712,6 +712,127 @@ A public IPv6 address is reported too, but it needs a friend whose own network
 has IPv6, and most routers firewall inbound IPv6 by default, so it usually
 still wants a pinhole.
 
+### On a VPS, end to end
+
+Option 2 in full, on a fresh Ubuntu box — DigitalOcean, Hetzner, Linode, they
+are the same five commands. Run them as `root`:
+
+```sh
+# 1. Docker, if the image you booted has none
+curl -fsSL https://get.docker.com | sh
+
+# 2. The code
+git clone --depth 1 --branch v0.2.0 https://github.com/alamops/RBYMMOMod.git
+cd RBYMMOMod/server
+
+# 3. Build and run
+docker compose up -d --build
+
+# 4. The passcode (see below -- it is deliberately not in `docker compose logs`)
+docker compose exec hub rby-mmo-hub invite list --reveal
+
+# 5. What the hub thinks of itself
+docker compose exec hub rby-mmo-hub doctor
+```
+
+#### Reading the passcode out of a container
+
+The first run mints one and **does not print it to the log**, because a
+container's stdout is the log: the json-file driver writes it to the host's
+disk and an orchestrator ships it onward to wherever logs are collected. That
+is durable, replicated storage for a credential, which is the one place it
+should never be. So the log gets a signpost instead, and this is what you will
+find in `docker compose logs hub` on a first boot:
+
+```
+first run: a join code was generated, and is deliberately not in this log.
+  read it:  docker compose exec hub rby-mmo-hub invite list --reveal
+  or:       docker compose exec hub cat /data/join-code.txt
+```
+
+The verb is the way to do it, at any time, not just the first boot:
+
+```console
+$ docker compose exec hub rby-mmo-hub invite list --reveal
+ID       LABEL              CREATED           EXPIRES  USES  STATUS  CODE
+primary  Primary join code  2026-08-03 22:11  never    0     active  AGNMVC
+
+Codes are shown in full because --reveal was given. Anything that
+records this terminal now holds them.
+```
+
+Without `--reveal` the `CODE` column is `******`, which is what makes
+`invite list` safe to leave on screen while somebody is watching.
+
+`/data/join-code.txt` is the other one the signpost names: the first run's
+output, captured verbatim at mode `0600` on the volume beside `config.json`.
+It is a convenience for the first boot and nothing reads it back — deleting it
+costs you nothing, and is tidy if you would rather one fewer copy existed.
+
+The passcode is also in `/data/config.json` in plaintext, because the hub has
+to compute an HMAC with it. That file is `0600` in a `0700` directory owned by
+the container's non-root user, and `start` refuses to run if its mode is
+looser. Copying that volume copies a live credential.
+
+Then open the port. A new droplet does not have one open for you:
+
+```sh
+ufw allow OpenSSH && ufw allow 7788/tcp && ufw --force enable
+```
+
+Friends use `<public-ip>:7788` and the passcode. That is the whole deployment.
+
+**Build on the box; do not push an image to it.** Almost every VPS is x86_64
+and most laptops worth developing on are now arm64, so an image built at home
+and pushed will refuse to run with an exec-format error. Building on the
+target costs nothing here — the app has no dependencies, so the build is a
+copy, not a compile — and it gets the architecture right by construction.
+The image is about 165 MB on top of the base layers, which is a disk
+consideration, never a memory one.
+
+**Two settings worth changing before you hand out the address.** `doctor` will
+say `perIpConnections (4) is not below maxPlayers (4)`, which on a public
+address means one address could take every seat:
+
+```sh
+docker compose exec hub rby-mmo-hub config set maxPlayers 8
+docker compose exec hub rby-mmo-hub config set limits.perIpConnections 2
+docker compose restart hub
+```
+
+**Check it from outside before you tell anyone.** `doctor` reads the machine's
+own interfaces, so it cannot know whether anything in front of the box drops
+the port — that is the honesty described above, not a gap. From your own
+laptop:
+
+```sh
+nc -vz <public-ip> 7788
+```
+
+Connects, and the game will too. Hangs, and it is a firewall — and on most
+providers there are **two** of them: `ufw` on the machine, and a cloud
+firewall in the provider's control panel that `ufw` knows nothing about.
+Both have to allow 7788. This is the single most common way a hub that is
+running perfectly looks broken.
+
+**Afterwards.** `restart: unless-stopped` is already in `compose.yml`, so the
+hub comes back on reboot with no systemd unit to write. The passcode lives on
+the named volume, so it survives restarts and rebuilds — `git pull &&
+docker compose up -d --build` upgrades in place without your friends needing
+a new code. `docker compose down -v` destroys that volume, which is also how
+you deliberately rotate a code that has leaked.
+
+**And the part that a public address changes.** Nothing here is encrypted
+(see [The link is still not encrypted](#the-link-is-still-not-encrypted)). On
+a LAN that is a small exposure; on a VPS your traffic crosses the open
+internet, where anyone on the path can read chat and, from one captured
+handshake, recover the passcode offline at their leisure. The throttle does
+not apply to that — it cannot, it never sees the attempt. For a friends-only
+world that is a normal trade. If it is not the trade you want, put the VPS on
+an overlay network (option 3) and share the overlay address instead: same
+hub, encrypted transport, and the `7788` firewall rule can then go away
+entirely.
+
 ### UPnP
 
 ```sh
