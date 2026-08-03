@@ -534,11 +534,65 @@ function loadForEdit(ctx) {
   return config.load({ path: ctx.file, env: {}, flags: {}, cwd: ctx.cwd });
 }
 
+/**
+ * The other places a config plausibly is, when it is not where we looked.
+ *
+ * Only paths that exist and are not the one already tried, so this can only
+ * ever name a real file. `/data/config.json` is on the list because it is
+ * where the container image puts one, and the commonest way to arrive here is
+ * running a verb on the host that belongs inside the container.
+ */
+function configsElsewhere(ctx) {
+  const candidates = [
+    ctx.env.RBY_MMO_CONFIG,
+    path.join(ctx.cwd, 'config.json'),
+    '/data/config.json',
+  ];
+  const seen = new Set([path.resolve(ctx.file)]);
+  const found = [];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const full = path.resolve(candidate);
+    if (seen.has(full)) continue;
+    seen.add(full);
+    try {
+      if (fs.statSync(full).isFile()) found.push(full);
+    } catch { /* not there, or not ours to read -- either way, not a lead */ }
+  }
+  return found;
+}
+
+/**
+ * Refuse a verb that edits a config which is not there -- and, crucially, do
+ * not answer with "run init".
+ *
+ * That advice used to be the first line, and it is the wrong first move
+ * roughly whenever it is read. Standing in the wrong directory, or running a
+ * verb on the host that belongs inside a container, lands here with a perfectly
+ * good hub a few metres away; `init` then mints a *second* config with a *new
+ * passcode*, and the hub the host actually cares about carries on unchanged
+ * with the old one. They then change a setting, restart, and watch nothing
+ * happen -- which is exactly the report that produced this comment.
+ *
+ * So: say where we looked, name any config we can actually see, and mention
+ * `init` last and only when there is nothing to find -- with what it costs.
+ */
 function requireExistingConfig(ctx) {
   const loaded = loadForEdit(ctx);
   if (!loaded.exists) {
     ctx.warn(`No configuration at ${ctx.file}.`);
-    ctx.warn(`Run \`${PROGRAM} init\` first, or point at another file with --config.`);
+    const elsewhere = configsElsewhere(ctx);
+    if (elsewhere.length) {
+      ctx.warn('There is one here, though:');
+      for (const other of elsewhere) ctx.warn(`    ${other}`);
+      ctx.warn(`Point at it with \`--config <path>\`, or run from its directory.`);
+    } else {
+      ctx.warn('If this hub runs in Docker, its config is inside the container');
+      ctx.warn('and not on this machine at all:');
+      ctx.warn(`    docker compose exec hub ${PROGRAM} <command>`);
+      ctx.warn(`Only if this is a brand new hub, \`${PROGRAM} init\` writes one --`);
+      ctx.warn('it mints a fresh passcode, which nobody you play with has yet.');
+    }
     return null;
   }
   return loaded;

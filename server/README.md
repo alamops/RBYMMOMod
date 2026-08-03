@@ -764,10 +764,19 @@ records this terminal now holds them.
 Without `--reveal` the `CODE` column is `******`, which is what makes
 `invite list` safe to leave on screen while somebody is watching.
 
-`/data/join-code.txt` is the other one the signpost names: the first run's
-output, captured verbatim at mode `0600` on the volume beside `config.json`.
-It is a convenience for the first boot and nothing reads it back — deleting it
-costs you nothing, and is tidy if you would rather one fewer copy existed.
+`/data/join-code.txt` is the other one the signpost names: the passcode the
+hub was created with, at mode `0600` on the volume beside `config.json`, under
+two comment lines. It is a convenience for the first boot and nothing reads it
+back — deleting it costs you nothing, and is tidy if you would rather one fewer
+copy existed.
+
+It holds the code **and nothing else**, deliberately. It used to hold the whole
+of `init`'s output, settings summary included, and since nothing ever rewrites
+it, the first `config set maxPlayers 16` turned it into a stale file claiming
+`players up to 4` — in the file this README tells you to read. If you are
+looking at a hub whose settings you have changed, `status` is the answer and
+this file is not; the only thing here that can still go stale is the code
+itself, if you rotate it, which is what its comment lines say.
 
 The passcode is also in `/data/config.json` in plaintext, because the hub has
 to compute an HMAC with it. That file is `0600` in a `0700` directory owned by
