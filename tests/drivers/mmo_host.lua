@@ -11,6 +11,14 @@
 --
 --   POKEPORT_IDENTITY=mmohost POKEPORT_DRIVER=mods/rby_mmo/tests/drivers/mmo_host.lua love .
 
+-- Muted at load rather than in mmo_util, which is only reached once the game
+-- is ready -- by then the title music is already playing. Nothing here ever
+-- asserts on a sound, and two instances playing a battle at each other for
+-- minutes is not something a background run should do to a room.
+if os.getenv("MMO_SOUND") ~= "1" and love and love.audio then
+  love.audio.setVolume(0)
+end
+
 return function(game)
   local H = dofile("mods/rby_mmo/tests/drivers/mmo_util.lua")
   local U = H.U
@@ -18,6 +26,11 @@ return function(game)
   local ADDR_FILE = os.getenv("MMO_ADDR_FILE") or "/tmp/rby_mmo_addr.txt"
   local SHOT_DIR = os.getenv("SHOT_DIR") or "/tmp/rby_mmo_shots"
   local LIMIT = tonumber(os.getenv("MMO_LIMIT") or "") or 2
+  -- There is no switch for the join code, and there deliberately is not one
+  -- any more: HostServer:start refuses to bind a port without one, so a run
+  -- with the code turned off would be testing a game that cannot be hosted.
+  -- MMO_JOIN_CODE=0 used to select exactly that, and selecting an impossible
+  -- configuration is worse than having no switch at all.
 
   local function log(...) U.log(TAG, ...) end
   local events = H.captureEvents({ "battle.started", "battle.ended", "link.desync" })
@@ -33,6 +46,7 @@ return function(game)
   end
 
   os.remove(ADDR_FILE)
+  os.remove(ADDR_FILE .. ".tmp")
 
   U.newGame(game)
   -- U.newGame mashes A through the naming grid, so both sides would
@@ -97,16 +111,111 @@ return function(game)
 
   check(H.selectLabel(game, "HOST"), "confirmed the trainer and moved on")
 
+  -- HOST GAME no longer opens the size list. The join code needed somewhere
+  -- to live and a bare number box had no room for it, so both sit on a setup
+  -- menu with START under them, and hosting begins when the host says so
+  -- rather than the moment a size is picked.
+  U.wait(20)
+  check(H.classify(H.top(game)) == "menu", "the host setup menu opened")
+  U.shot(game, SHOT_DIR .. "/host-setup.png")
+
   -- the size picker is a named list now, so the run picks its row by name
+  check(H.selectLabel(game, "PLAYERS"), "PLAYERS opens the size list")
   U.wait(20)
   check(H.classify(H.top(game)) == "menu", "the limit picker opened")
   U.shot(game, SHOT_DIR .. "/host-limit.png")
   local picked = H.selectLabel(game, ("%d PLAYERS"):format(LIMIT))
   check(picked, "chose " .. LIMIT .. " PLAYERS")
+  U.wait(20)
+  -- picking a size is a setting, not a start: it comes back here
+  check(H.classify(H.top(game)) == "menu", "and came back to the setup menu")
+
+  -- ------- the join code, already set before anyone can knock
+  --
+  -- Read back off the screen rather than out of the mod: the code is
+  -- deliberately absent from every log and every export, and a host who
+  -- cannot read theirs has a game nobody can join -- so what the screen
+  -- prints IS the feature.
+  --
+  -- Nothing here turns the code on any more. It is a requirement, so the
+  -- setup screen mints one on the way in and the JOIN CODE row reads it out
+  -- -- six characters a host can say down a phone, where that row used to
+  -- say ON and send them somewhere else to find out what "on" meant. The run
+  -- asserts the row arrives carrying a code, then changes it deliberately
+  -- and asserts the row followed.
+
+  local minted = H.menuRow(game, "JOIN CODE")
+  local mintedCode = minted and H.codeFrom(tostring(minted.right))
+  check(mintedCode ~= nil,
+        "the setup screen arrives with a code on its JOIN CODE row: "
+          .. tostring(minted and minted.right))
+
+  local joinCode = mintedCode
+  if check(H.selectLabel(game, "JOIN CODE"), "JOIN CODE opens the lock menu") then
+    U.wait(20)
+    check(H.classify(H.top(game)) == "menu", "the lock menu opened")
+    U.shot(game, SHOT_DIR .. "/host-codemenu.png")
+
+    -- The row that is gone. A game with no code is one any stranger who can
+    -- reach the port walks into, and HostServer will not open a port without
+    -- one -- so an escape hatch here would lead nowhere but a refusal at
+    -- START, which is a worse way to learn it than not being offered.
+    local labels = H.menuLabels(game)
+    log("lock menu:", table.concat(labels, ","))
+    local hasNoCode = false
+    for _, label in ipairs(labels) do
+      if label == "NO CODE" then hasNoCode = true end
+    end
+    check(not hasNoCode, "and offers no way to host without a code")
+
+    check(H.selectLabel(game, "NEW CODE"), "asked the game to make one")
+    U.wait(30)
+    local shown = H.textOf(H.top(game))
+    local fresh = H.codeFrom(shown)
+    check(fresh ~= nil,
+          "the screen reads out a code a friend could type: "
+            .. H.formatCode(fresh or ""))
+    -- and it is genuinely a new one: at 30 bits the odds of drawing the
+    -- minted code again are about one in a billion, so a match here means
+    -- NEW CODE showed the old one rather than minting anything
+    check(fresh ~= nil and fresh ~= mintedCode,
+          "and it is a different code from the one already set")
+    -- printed, not merely open: the six characters are the entire content of
+    -- this screen, and a capture taken while the typewriter is still on
+    -- "Players will" shows none of them. H.shotPrinted waits for the box to
+    -- say it has stopped typing rather than sleeping a guessed number of
+    -- frames -- see M.printed in mmo_util.
+    H.shotPrinted(game, SHOT_DIR .. "/host-newcode.png")
+    joinCode = fresh or mintedCode
+
+    -- The box's onDone puts the setup menu back. Frames: this is a local
+    -- text box being dismissed by local button presses, with nothing on
+    -- the wire and no second process involved.
+    local back = H.waitFor(game, function()
+      local top = H.top(game)
+      if top and type(top.items) == "table" then return true end
+      U.tap(game, "a")
+      return false
+    end, 240, "the setup menu after setting a code")
+    check(back, "and setting one returns to the setup menu")
+
+    -- the row carries the code itself, which is where a host reads it back
+    -- without opening the code screen again
+    local row = H.menuRow(game, "JOIN CODE")
+    check(joinCode ~= nil and row ~= nil
+          and tostring(row.right) == H.formatCode(joinCode),
+          "the JOIN CODE row reads the code back: "
+            .. tostring(row and row.right))
+  end
+
+  check(H.selectLabel(game, "START"), "START begins the game")
   U.wait(30)
 
   -- ------- the listener is real
 
+  -- Frames, and deliberately: socket.bind either works on the step START ran
+  -- on or does not work at all. Nothing outside this process is involved, so
+  -- there is nothing here for the other window's frame rate to skew.
   local hosting = H.waitFor(game, function() return exports.isHosting() end,
                             240, "the listener to come up")
   check(hosting, "hosting started (a real socket is bound)")
@@ -114,13 +223,19 @@ return function(game)
     log("RESULT " .. failures .. " failure(s)")
     return
   end
-  U.shot(game, SHOT_DIR .. "/host-address.png")
+  -- Same again, and the reason is sharper here: this box is three lines --
+  -- "Tell your friends:", the address, then CODE: -- so the two lines that
+  -- matter are the two that are only on screen once it has finished printing
+  -- and scrolled.
+  H.shotPrinted(game, SHOT_DIR .. "/host-address.png")
 
   local address = exports.hostAddress and exports.hostAddress() or nil
   check(type(address) == "string" and address:find(":"),
         "an address is published: " .. tostring(address))
 
-  -- the host is a player on its own hub, over loopback
+  -- The host is a player on its own hub, over loopback. Frames: HostServer's
+  -- localNet hands messages straight to Hub in-process, so this handshake
+  -- completes in a fixed handful of steps with no second process in it.
   local joinedSelf = H.waitFor(game, function() return exports.isConnected() end,
                                240, "the host to join its own game")
   check(joinedSelf, "the host joined its own game over loopback")
@@ -148,18 +263,32 @@ return function(game)
 
   -- The guest connects to 127.0.0.1; the LAN address is what a human would
   -- read aloud, so publish both and let the joiner pick.
-  local handle = io.open(ADDR_FILE, "w")
+  --
+  -- Second line: the join code, which is always there now -- a hosted game
+  -- without one cannot exist. This is the channel the two processes already
+  -- have -- the address travels it -- and a code is the other half of the
+  -- same sentence a host reads out, so it belongs here rather than in a
+  -- second file with its own race.
+  --
+  -- Written and renamed rather than written in place: the wrapper script and
+  -- the guest both watch for this path to exist, and a two-line file caught
+  -- mid-write would hand the guest an address and no code.
+  local handle = io.open(ADDR_FILE .. ".tmp", "w")
   if handle then
-    handle:write(tostring(address) .. "\n")
+    handle:write(tostring(address) .. "\n" .. (joinCode or "") .. "\n")
     handle:close()
+    os.rename(ADDR_FILE .. ".tmp", ADDR_FILE)
   end
-  log("hosting", tostring(address), "limit", LIMIT)
+  log("hosting", tostring(address), "limit", LIMIT,
+      "code " .. H.formatCode(joinCode))
 
   -- ------- a real remote player shows up
 
-  local sawGuest = H.waitFor(game, function()
+  -- Seconds: the guest is another process, walking its own intro at its own
+  -- frame rate. See H.waitSeconds -- this is the wait that taught us why.
+  local sawGuest = H.waitSeconds(game, function()
     return #exports.players() > 0
-  end, 60 * 420, "the guest to connect")
+  end, 400, "the guest to connect")
   check(sawGuest, "a remote player joined over a real socket")
 
   if sawGuest then
@@ -188,10 +317,10 @@ return function(game)
     -- presence: the guest walks, and the host's roster follows
     local before = exports.players()[1]
     local startX, startY = before.x, before.y
-    local moved = H.waitFor(game, function()
+    local moved = H.waitSeconds(game, function()
       local now = exports.players()[1]
       return now and (now.x ~= startX or now.y ~= startY)
-    end, 60 * 20, "the guest to move")
+    end, 45, "the guest to move")
     check(moved, "the guest's movement reaches the host")
 
     -- The roster moving proves the wire works. Whether the *avatar* moved
@@ -208,8 +337,14 @@ return function(game)
       return a ~= nil and b ~= nil and math.abs(a - b) < 0.01
     end
 
+    -- Bounded by the clock, not by a sample count, for the same reason
+    -- everything else here is: what it is waiting for is a remote player's
+    -- step arriving, and 400 samples is however many seconds this window's
+    -- frame rate says it is. The *sampling* stays fine-grained -- that part
+    -- really is about frames.
     local followed, sawWalking, samples = false, false, 0
-    for _ = 1, 400 do
+    local sampleUntil = os.time() + 60
+    while os.time() < sampleUntil do
       local rows = exports.avatarState()
       local row = rows and rows[1]
       if row then
@@ -304,12 +439,12 @@ return function(game)
 
     exports.say("global", "HELLO FROM HOST")
     log("said hello")
-    local heardGuest = H.waitFor(game, function()
+    local heardGuest = H.waitSeconds(game, function()
       for _, line in ipairs(exports.chat()) do
         if line.text == "HELLO FROM GUEST" then return true end
       end
       return false
-    end, 60 * 60, "the guest's chat line")
+    end, 120, "the guest's chat line")
     check(heardGuest, "the guest's chat reached the host")
 
     -- ------- 1. the guest leaves the map, and comes back
@@ -318,20 +453,20 @@ return function(game)
     -- roster keeps them, the avatar does not.
 
     H.await(game, "guest_left_map")
-    local despawned = H.waitFor(game, function()
+    local despawned = H.waitSeconds(game, function()
       local row = H.avatarRow(exports)
       return row ~= nil and row.spawned == false
-    end, 60 * 40, "the avatar to despawn")
+    end, 45, "the avatar to despawn")
     check(despawned, "a player who leaves the map loses their avatar")
     local stillListed = #exports.players() > 0
     check(stillListed, "but stays on the roster")
     H.signal("host_saw_despawn")
 
     H.await(game, "guest_back_on_map")
-    local respawned = H.waitFor(game, function()
+    local respawned = H.waitSeconds(game, function()
       local row = H.avatarRow(exports)
       return row ~= nil and row.spawned == true
-    end, 60 * 40, "the avatar to come back")
+    end, 45, "the avatar to come back")
     check(respawned, "and gets it back on returning to the map")
     U.shot(game, SHOT_DIR .. "/host-guest-returned.png")
 
@@ -352,12 +487,15 @@ return function(game)
 
     H.await(game, "guest_trade_requested")
     local wanted = "PIKACHU"
+    -- seconds; PHASE.host_trade_done is derived from this number
+    local record, prompts = H.promptLog()
     local traded, trail = H.drivePrompts(game, function()
       return H.partySpecies(game)[1] == wanted
-    end, 60 * 90)
+    end, 120, record)
     log("host party now:", table.concat(H.partySpecies(game), ","))
     if not traded then
       log("trade stalled -- prompts answered:", trail == "" and "(none)" or trail)
+      log("  boxes:", table.concat(prompts, " | "))
     end
     check(traded, "the host received the guest's " .. wanted)
     U.shot(game, SHOT_DIR .. "/host-after-trade.png")
@@ -371,10 +509,10 @@ return function(game)
     -- reports, and link.desync is the one that matters: two games
     -- disagreeing mid-battle is exactly what lockstep exists to prevent.
 
-    H.await(game, "guest_battle_requested", 60 * 90)
+    H.await(game, "guest_battle_requested")
     local started, btrail = H.drivePrompts(game, function()
       return events["battle.started"] > 0
-    end, 60 * 60)
+    end, 90)
     if not started then
       log("battle never started -- prompts answered:",
           btrail == "" and "(none)" or btrail)
@@ -386,6 +524,10 @@ return function(game)
     -- entirely. Capture it rather than reason about it -- but wait for the
     -- battle state to be on top first: battle.started fires before the
     -- transition finishes, and a shot taken then is still the overworld.
+    --
+    -- Frames, and this one genuinely is: a battle transition is a fixed
+    -- number of drawn frames on this machine alone. The peer already did its
+    -- part -- battle.started has fired -- so nothing here waits on it.
     local inBattle = H.waitFor(game, function()
       local top = H.top(game)
       return top ~= nil and top.enemy ~= nil
@@ -400,7 +542,7 @@ return function(game)
 
     local ended = H.drivePrompts(game, function()
       return events["battle.ended"] > 0
-    end, 60 * 240)
+    end, 240)
     check(ended, "and ran to a decision")
     check(events["link.desync"] == 0, "with no desync reported")
     log(("battle events: started=%d ended=%d desync=%d"):format(
@@ -426,7 +568,13 @@ return function(game)
       log("address screen reads:", shown)
       check(shown:find(tostring(address), 1, true) ~= nil,
             "the address can be re-viewed from the MMO menu")
-      U.shot(game, SHOT_DIR .. "/host-address-recheck.png")
+      -- and the code with it: they are read out in the same breath, and a
+      -- host who set one and cannot find it again has a locked game nobody
+      -- can get into. Unconditional -- every hosted game has a code, so a
+      -- screen without one on it is a fault rather than a configuration.
+      check(joinCode ~= nil and H.codeFrom(shown) == joinCode,
+            "and the join code is on the same screen")
+      H.shotPrinted(game, SHOT_DIR .. "/host-address-recheck.png")
     else
       check(false, "no ADDRESS row while hosting")
     end
@@ -435,10 +583,10 @@ return function(game)
 
     -- ------- 8. and the guest leaving is seen here
 
-    H.await(game, "guest_left_game", 60 * 120)
-    local gone = H.waitFor(game, function()
+    H.await(game, "guest_left_game")
+    local gone = H.waitSeconds(game, function()
       return #exports.players() == 0
-    end, 60 * 40, "the guest to drop off the roster")
+    end, 90, "the guest to drop off the roster")
     check(gone, "a guest who leaves drops off the host's roster")
     check(exports.isHosting(), "and the host is still hosting afterwards")
   end

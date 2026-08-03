@@ -1,0 +1,60 @@
+# Build context for server/Dockerfile.
+#
+# The context root is server/, so the Lua mod above it is already outside it --
+# but a build run from the repo root (`docker build -f server/Dockerfile .`)
+# would drag the whole mod, docs/ and .git in before the first instruction ran,
+# so the mod is denied by name here too. Nothing in src/, tests/ or assets/ is
+# reachable from Node; shipping it would only make the image bigger and the
+# supply chain wider.
+#
+# Two other things follow from the "no ROM-derived bytes, ever" rule in
+# CLAUDE.md: docs/screenshots/ is composited from the player's own ROM, and
+# any imported game data is likewise theirs. Neither may enter a container
+# image any more than it may enter the packed archive. Denying the mod tree
+# wholesale is the version of that rule that cannot be got wrong later.
+
+# --- the mod, when the context is the repo root ---
+src/
+tests/
+assets/
+docs/
+tools/
+mods/
+data/
+*.lua
+manifest.json
+mod.card
+.modkitignore
+
+# --- VCS, editors, CI ---
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# --- host-side and machine-specific ---
+.env
+.env.example
+AGENTS_CONFIG.yml
+node_modules/
+npm-debug.log*
+*.log
+
+# --- the hub's own non-runtime files ---
+# Tests are Phase 6's and run on the host, never in the image. config.json is
+# a specific hazard: a host who ran `rby-mmo-hub init` in server/ before
+# building would otherwise bake their live join code into an image layer,
+# where it survives every `docker rm` and every rebuild of a later stage.
+*.test.js
+config.json
+config.json.*
+
+# --- packaging: needed to build, not needed inside the result ---
+Dockerfile
+compose.yml
+docker-compose.yml
+.dockerignore

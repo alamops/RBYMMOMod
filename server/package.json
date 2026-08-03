@@ -1,0 +1,42 @@
+{
+  "//": "SOURCE OF TRUTH FOR version IS ../manifest.json. Bump both together. The release workflow reads only manifest.json; `rby-mmo-hub --version` reads only this file (lib/cli.js:230-241), so a one-sided bump makes the CLI report a version no release has. Nothing enforces it mechanically -- the cheapest place to add that is an assertion in one of the *.test.js files here, which `npm test` already discovers.",
+  "name": "rby-mmo-hub",
+  "version": "0.2.0",
+  "description": "Self-hosted relay for the RBY MMO mod: shared-overworld presence, chat, trades and link battles for a group of friends. Zero dependencies, Node core only.",
+  "license": "MIT",
+  "private": true,
+  "bin": {
+    "rby-mmo-hub": "./bin/rby-mmo-hub.js"
+  },
+  "main": "./lib/server.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node bin/rby-mmo-hub.js start",
+    "hub": "node hub.js",
+    "test": "node --test"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "hub.js",
+    "README.md"
+  ],
+  "keywords": [
+    "gen1recomp",
+    "rby-mmo",
+    "game-server",
+    "relay",
+    "self-hosted"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alamops/RBYMMOMod.git",
+    "directory": "server"
+  },
+  "homepage": "https://github.com/alamops/RBYMMOMod/tree/main/server#readme",
+  "bugs": {
+    "url": "https://github.com/alamops/RBYMMOMod/issues"
+  }
+}

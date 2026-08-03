@@ -1,0 +1,131 @@
+# RBY MMO hub -- the whole hosting story, in one file.
+#
+#   cd server/
+#   docker compose up -d          # build, start, and mint a join code
+#   docker compose exec hub rby-mmo-hub invite list --reveal   # <- your code
+#   docker compose exec hub rby-mmo-hub invite    # another code, for a friend
+#   docker compose exec hub rby-mmo-hub doctor    # what can reach you, and how
+#   docker compose down           # stop; the volume, and the join code, remain
+#
+# The first `up` on an empty volume runs `rby-mmo-hub init --yes` for you (see
+# the long comment at the bottom of Dockerfile). That means the hub comes up
+# *requiring a join code* -- it is not possible to publish an open world by
+# forgetting a step. Every later start re-uses the same config and the same
+# code.
+#
+# The code is **not** in `docker compose logs`, and that is deliberate: the log
+# is a file on this machine's disk and, under an orchestrator, a copy in
+# whatever collects logs. `init`'s output goes to /data/join-code.txt at mode
+# 0600 instead, beside config.json on the volume, and the log gets one line
+# pointing at it. Read it back with the `invite list --reveal` above, or with
+# `docker compose exec hub cat /data/join-code.txt`.
+
+services:
+  hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # A friendly name in `docker ps`; nothing depends on it.
+    container_name: rby-mmo-hub
+
+    # --- exposure ----------------------------------------------------------
+    ports:
+      # host:container. The left number is the port on *this machine* and the
+      # one your friends type; the right one is fixed by the image.
+      - "7788:7788"
+      #
+      # Most-edited line in this file. Some variants:
+      # - "25565:7788"            # 7788 already taken, or you want camouflage
+      # - "127.0.0.1:7788:7788"   # local only, for testing before you open up
+      #
+      # Changing the *container* port instead means setting RBY_MMO_PORT below,
+      # which the config, the listener and the healthcheck all read.
+
+    environment:
+      # Where the config lives. Do not change this without also changing the
+      # volume mount below -- it is the one writable path in the container.
+      RBY_MMO_CONFIG: /data/config.json
+      #
+      # Everything here is read by `init` on first run and by `start` on every
+      # run, and beats the config file (flag > env > file > default). Anything
+      # not set here is set once into config.json and managed afterwards with
+      # `docker compose exec hub rby-mmo-hub config set <key> <value>`.
+      #
+      # RBY_MMO_MAX: "8"            # players at once, 2..64 (default 4)
+      # RBY_MMO_PORT: "7788"        # container-side port; keep ports: in step
+      # RBY_MMO_LOG_LEVEL: "debug"  # debug | info | warn | error | silent
+      #
+      # There is deliberately no setting here that turns the passcode off.
+      # RBY_MMO_AUTH_REQUIRED=false used to open the hub to anyone who could
+      # reach the port; it now makes the hub refuse to start, so a container
+      # carrying it restart-loops instead of quietly serving an open world.
+      # A LAN or VPN hub still wants a passcode -- it costs one `docker
+      # compose exec hub rby-mmo-hub invite list --reveal` to read it out.
+
+    # --- persistence -------------------------------------------------------
+    volumes:
+      # config.json -- the join code, the bans, the allowlist -- lives here and
+      # nowhere else, together with the join-code.txt the first run writes
+      # beside it. Losing this volume loses the join code your friends have
+      # already saved. Both files are 0600 inside a 0700 directory; anything
+      # that copies this volume off the machine is copying a credential.
+      - rby-mmo-data:/data
+
+    # --- sandbox -----------------------------------------------------------
+    # IMPORTANT: read_only: true and the config write are compatible *only*
+    # because /data is a volume. Volume mounts are writable regardless of the
+    # read-only rootfs; the rest of the filesystem is not. If you delete the
+    # `volumes:` block above but leave read_only: true, the first run will fail
+    # with EROFS while trying to write /data/config.json -- which reads like a
+    # bug in the hub and is not. Keep them together, or change neither.
+    read_only: true
+    tmpfs:
+      # Node wants somewhere scratch; nothing here is meant to survive.
+      - /tmp
+    cap_drop:
+      # The hub binds 7788, which is above 1024, so it needs no capability at
+      # all -- not even NET_BIND_SERVICE.
+      - ALL
+    security_opt:
+      # No setuid binary inside can gain privileges, so a bug in the hub cannot
+      # become root even in the container's own namespace.
+      - no-new-privileges:true
+    # Matches the image's own user. Stated here as well so that a host who
+    # rebuilds from a modified Dockerfile cannot silently end up running as
+    # root, and so the UID that owns the volume is visible in this file.
+    user: "10001:10001"
+
+    # --- lifecycle ---------------------------------------------------------
+    # No `init: true` here, deliberately. The image already runs tini as its
+    # entrypoint, which is what makes SIGTERM reach the hub so the goodbye it
+    # sends to the players still connected actually goes out -- and it does
+    # that for `docker run` too, not only for compose.
+    #
+    # Adding compose's init on top is not harmless, which is what this comment
+    # used to claim: it puts docker-init at PID 1 and leaves tini nested at
+    # PID 7, where it logs
+    #     Tini is not running as PID 1 and isn't registered as a child subreaper
+    # on every single start. Signals still forward correctly through both --
+    # measured: `docker compose stop` returns in 0s with `shutting down` in the
+    # log and exit code 0 -- so this is one line of noise per boot for nothing.
+    # One init, in the image, where every way of running it gets it.
+    # Long enough for that drain to finish before Docker escalates to SIGKILL.
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+    healthcheck:
+      # A raw TCP connect using Node's own net module -- the image has no curl
+      # and no nc, and does not need them. Mirrors the HEALTHCHECK in the
+      # Dockerfile; compose overrides it, so the two are kept in step.
+      test:
+        - CMD
+        - node
+        - -e
+        - "const net=require('node:net');const port=Number(process.env.RBY_MMO_PORT)||7788;const s=net.connect({host:'127.0.0.1',port});const bye=(c)=>{s.destroy();process.exit(c)};s.setTimeout(4000);s.on('connect',()=>bye(0));s.on('error',()=>bye(1));s.on('timeout',()=>bye(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  rby-mmo-data:

@@ -31,9 +31,16 @@ M.RESPOND       = "mmo.respond"
 M.RELAY         = "mmo.relay"
 M.SESSION_LEAVE = "mmo.session_leave"
 M.PING          = "mmo.ping"
+-- the answer to a challenge: { response }, an HMAC of the nonce keyed by
+-- the join code.  The code itself never crosses the wire.
+M.AUTH          = "mmo.auth"
 
 -- hub -> client
 M.WELCOME     = "mmo.welcome"
+-- { nonce }, sent after hello and only when the hub wants a join code.  A
+-- hub with no code configured never sends it, so the exchange stays exactly
+-- what it was.
+M.CHALLENGE   = "mmo.challenge"
 M.JOIN        = "mmo.join"
 M.PART        = "mmo.part"
 M.DECLINE     = "mmo.decline"
@@ -85,6 +92,66 @@ function M.id(value)
   if type(value) ~= "string" then return nil end
   if not value:match("^[%w_%-]+$") then return nil end
   return value:sub(1, 40)
+end
+
+-- A nonce or a digest.  Hex is not an id, and cannot borrow M.id.
+--
+-- M.id caps at 40 characters and a SHA-256 response is 64, so a digest run
+-- through M.id would come back truncated -- every valid answer silently
+-- rejected, with a sanitiser that looked like it had done its job.  Nor can
+-- it borrow M.text: the allowlist there is prose, and it drops nothing a
+-- digest carries only because a digest happens to be alphanumeric.
+--
+-- Lowercase only.  Both ends emit lowercase hex, and the thing this feeds
+-- is a byte compare, so accepting two spellings of the same value would
+-- mean a correct answer that fails to match.
+function M.hex(value, maxLen)
+  if type(value) ~= "string" then return nil end
+  if not value:match("^[0-9a-f]+$") then return nil end
+  if #value > (maxLen or Config.DIGEST_HEX) then return nil end
+  return value
+end
+
+local CODE_SET = {}
+for i = 1, #Config.CODE_ALPHABET do
+  CODE_SET[Config.CODE_ALPHABET:sub(i, i)] = true
+end
+
+-- A join code the way a player actually types or pastes one.
+--
+-- Normalisation is total and symmetric with normalizeCode in
+-- server/lib/auth.js: upper-case first, then drop every character outside
+-- the alphabet.  Spaces, lower case off a chat message, a dash someone
+-- added out of habit and whatever punctuation came with it all fall away,
+-- so both ends key the HMAC off the same bytes however the code was
+-- entered.  Asymmetry here would lock a player out with nothing to read but
+-- "wrong code".
+--
+-- Exactly Config.CODE_LEN symbols survive or nothing does: a short code is
+-- a typo, not a shorter key.
+function M.code(value)
+  if type(value) ~= "string" then return nil end
+  local upper = value:upper()
+  local kept = {}
+  for i = 1, #upper do
+    local c = upper:sub(i, i)
+    if CODE_SET[c] then kept[#kept + 1] = c end
+  end
+  local code = table.concat(kept)
+  if #code ~= Config.CODE_LEN then return nil end
+  return code
+end
+
+-- The display form of a normalised code.
+--
+-- At six characters there is nothing to group -- A7K3P9 is already the way
+-- it is read out -- so this is a passthrough.  It is kept rather than
+-- deleted because the screens and the e2e drivers call it, and because it
+-- is still the one place that decides how a code is shown: if a display
+-- form ever comes back, it comes back here and every caller follows.
+function M.formatCode(normalized)
+  if type(normalized) ~= "string" then return nil end
+  return normalized
 end
 
 function M.int(value, min, max)

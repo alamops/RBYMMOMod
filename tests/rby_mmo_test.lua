@@ -229,6 +229,95 @@ local Chat = need("Chat")
 local SessionNet = need("SessionNet")
 local Transport = need("Transport")
 
+-- ------------------------------------------------------------------
+-- Sha256: pinned against the published standard, then against Node
+-- ------------------------------------------------------------------
+--
+-- src/Sha256.lua is a from-scratch SHA-256 / HMAC-SHA256 (its own header
+-- explains why: love.data is unavailable under this headless suite). A
+-- hand-written digest is exactly the kind of code that can be subtly wrong
+-- and still agree with itself, so every check below is against an outside
+-- source of truth -- RFC 4231, FIPS 180-4, or Node's node:crypto via
+-- tests/fixtures/hmac_vectors.lua -- never Sha256 asserting against Sha256.
+
+local Sha256 = need("Sha256")
+local Vectors = dofile(MOD_PATH .. "/tests/fixtures/hmac_vectors.lua")
+
+-- hex -> raw bytes, for RFC 4231's keys and messages, several of which are
+-- not text (a 20/131-byte key of 0x0b/0xaa, 50 bytes of 0xdd)
+local function fromHex(hex)
+  return (hex:gsub("..", function(cc) return string.char(tonumber(cc, 16)) end))
+end
+
+for _, v in ipairs(Vectors.SHA256) do
+  eq(Sha256.hex(v.input), v.digest,
+     "Sha256.hex matches the standard vector: " .. v.label)
+end
+
+for _, v in ipairs(Vectors.RFC_HMAC) do
+  eq(Sha256.hmacHex(fromHex(v.keyHex), fromHex(v.dataHex)), v.digest,
+     "Sha256.hmacHex matches RFC 4231 test case " .. v.case)
+end
+-- case 6 alone exercises the key-longer-than-the-block path (131 bytes into
+-- a 64-byte block), so it is worth naming on its own rather than trusting
+-- the loop above to have covered it
+local case6
+for _, v in ipairs(Vectors.RFC_HMAC) do
+  if v.case == 6 then case6 = v end
+end
+check(case6 ~= nil, "RFC 4231 case 6 is present in the fixture")
+eq(#fromHex(case6.keyHex), 131,
+   "case 6's key really is longer than the HMAC block size")
+
+-- the cross-language known-answer vector server/auth.test.js already fixes.
+-- The Lua-side key is the *normalised* code as ASCII bytes -- never the
+-- dashed display form -- which is what Wire.code produces and what Hub.lua
+-- actually signs with, so this doubles as a Wire.code cross-check.
+eq(Wire.code(Vectors.KAT.code), Vectors.KAT.code,
+   "the known-answer vector's code normalises the way the digest assumes")
+eq(Sha256.hmacHex(Wire.code(Vectors.KAT.code), Vectors.KAT.nonce), Vectors.KAT.digest,
+   "the cross-language known-answer vector (also fixed by server/auth.test.js) "
+   .. "reproduces exactly")
+
+-- the generated cross-language set: (code, nonce) -> digest triples Node
+-- produced, covering canonical/lowercase/messy/old-dashed-habit spellings of
+-- one code, an I/L/O/U-noise spelling, every character of
+-- Config.CODE_ALPHABET across the set, and 32-hex nonces throughout. A drift
+-- in either Wire.code or Sha256.hmacHex shows up here as a specific failing
+-- label, not as "wrong join code" in the field.
+for _, v in ipairs(Vectors.CROSS) do
+  eq(Wire.code(v.code), v.normalized,
+     "Wire.code normalises like Node's normalizeCode: " .. v.label)
+  eq(Sha256.hmacHex(v.normalized, v.nonce), v.digest,
+     "Sha256.hmacHex matches the Node-generated vector: " .. v.label)
+end
+
+-- embedded \0 does not truncate the digest the way a C-string read would
+local withNul = fromHex("6162630064656600676869")
+eq(#withNul, 11, "the embedded-\\0 fixture really is 11 raw bytes")
+eq(Sha256.hex(withNul), "039829b9687ee660b05223c59daa86348bf5856dda159e65412a454c57dc1911",
+   "a NUL byte inside the message does not truncate the digest")
+
+-- the 55/56/64-byte padding boundaries: FIPS 180-4 padding needs a 0x80
+-- byte plus an 8-byte length field, so a message must be under 56 bytes to
+-- keep its padding inside the same block; 56 spills into a second block,
+-- and 64 is exactly one full block with the pad occupying an entire block
+-- of its own
+eq(Sha256.hex(string.rep("a", 55)), "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+   "55 bytes -- padding still fits in the same block")
+eq(Sha256.hex(string.rep("a", 56)), "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+   "56 bytes -- padding spills into a second block")
+eq(Sha256.hex(string.rep("a", 64)), "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+   "64 bytes -- exactly one full block, padding is a block of its own")
+
+-- ------- Sha256.equals: constant-time, but still just equality
+
+check(Sha256.equals("abc123", "abc123"), "equals is true for identical strings")
+check(not Sha256.equals("abc123", "abc124"), "and false for a one-character difference")
+check(not Sha256.equals("abc", "abcd"), "and false when the lengths differ")
+check(Sha256.equals(fromHex("610062"), fromHex("610062")),
+      "and true for equal strings containing \\0")
+
 -- ------- Wire: the trust boundary
 
 eq(Wire.text("HELLO"), "HELLO", "plain text survives")
@@ -321,6 +410,74 @@ eq(Wire.payloadOk(nest(Config.PAYLOAD_MAX_DEPTH + 5)), false,
 local wide = {}
 for i = 1, Config.PAYLOAD_MAX_NODES + 50 do wide[i] = i end
 eq(Wire.payloadOk(wide), false, "an over-wide payload is refused")
+
+-- ------- Wire.code / Wire.hex / Wire.formatCode: the join-code sanitisers
+--
+-- Wire.code normalises exactly the way server/lib/auth.js's normalizeCode
+-- does -- same inputs, same verdicts -- so both suites assert the same
+-- cases from testNormalization() in server/auth.test.js rather than two
+-- suites that quietly drift apart on what a "valid code" is.
+
+local CODE_CANON = "A7K3P9"
+local CODE_LOWER = "a7k3p9"
+local CODE_MESSY = " a7k-3p9, ?? "
+local CODE_DASH_HABIT = "A7K-3P9" -- someone who remembers the old grouped form
+local CODE_NOISY = "IA7LK3OP9U" -- I, L, O, U interspersed as noise
+
+eq(Wire.code(CODE_CANON), CODE_CANON, "the canonical form is unchanged")
+eq(Wire.code(CODE_LOWER), CODE_CANON, "lowercase normalises the same as uppercase")
+eq(Wire.code(CODE_MESSY), CODE_CANON, "spaces and stray punctuation are stripped")
+eq(Wire.code(CODE_DASH_HABIT), CODE_CANON,
+   "a dash typed out of old 16-character habit still normalises to the same passcode")
+
+-- I, L, O and U are outside the alphabet, so they are dropped as noise like
+-- any other stray character -- never folded to a lookalike (O -> 0, I -> 1).
+-- A Lua half that aliased them would derive a different key from the same
+-- typed input and every such player would see "wrong passcode".
+eq(Wire.code(CODE_NOISY), CODE_CANON,
+   "I, L, O and U are dropped as noise, leaving the code intact")
+eq(Wire.code("A7K3PO"), nil,
+   "typing O for 0 drops a character and fails the length check, rather than aliasing to 0")
+check(Wire.code("A7K3P1") ~= Wire.code("A7K3PI"), "and I is not an alias for 1")
+
+eq(Wire.code("A7K3P"), nil, "a too-short input is rejected")
+eq(Wire.code("A7K3P99"), nil, "a too-long input is rejected")
+eq(Wire.code("ABCD-EFGH-JKMN-PQRS"), nil,
+   "a legacy 16-character code is refused outright, not truncated to 6")
+
+eq(Wire.code(42), nil, "a number is not a code")
+eq(Wire.code(true), nil, "a boolean is not a code")
+eq(Wire.code({}), nil, "a table is not a code")
+eq(Wire.code(nil), nil, "nil is not a code")
+
+eq(Wire.formatCode(Wire.code(CODE_CANON)), CODE_CANON,
+   "formatCode(code(x)) round-trips the canonical form")
+eq(Wire.formatCode(Wire.code(CODE_MESSY)), CODE_CANON,
+   "a messy input round-trips to the same canonical form")
+check(not Wire.formatCode(CODE_CANON):find("-"),
+      "formatCode adds no grouping at 6 characters")
+
+-- ------- Wire.hex: the digest/nonce sanitiser
+--
+-- Not "exactly N hex characters" but "hex, and no longer than the caller's
+-- budget" -- the same string accepts a 64-char digest with the default cap
+-- and a 32-char nonce under Config.NONCE_HEX, which is exactly the two
+-- shapes that cross the wire (mmo.challenge's nonce, mmo.auth's response).
+
+local HEX64 = string.rep("a1", 32)
+local HEX32 = string.rep("b2", 16)
+
+eq(Wire.hex(HEX64), HEX64, "64 lowercase hex characters is accepted at the digest length")
+eq(#Wire.hex(HEX64), Config.DIGEST_HEX, "matching the digest length exactly")
+eq(Wire.hex(HEX32, Config.NONCE_HEX), HEX32, "32 lowercase hex characters is accepted as a nonce")
+eq(Wire.hex(HEX64, Config.NONCE_HEX), nil, "64 hex characters exceeds the 32-hex nonce budget")
+
+eq(Wire.hex(HEX64:upper()), nil, "uppercase hex is rejected")
+eq(Wire.hex(HEX64 .. "a1"), nil, "past the default digest budget is rejected")
+eq(Wire.hex("not-hex-at-all!!"), nil, "non-hex characters are rejected")
+eq(Wire.hex(""), nil, "an empty string is rejected")
+eq(Wire.hex(12345), nil, "a non-string is rejected")
+eq(Wire.hex(nil), nil, "nil is rejected")
 
 -- ------- Roster
 
@@ -579,7 +736,7 @@ eq(idleHub.players, 2, "both became players")
 eq(idleHub:isFull(), true, "which is what fills the game")
 
 -- ...and the silent one is reaped once its welcome runs out
-idleHub:update(Config.HELLO_TIMEOUT + 1)
+idleHub:update(Config.HANDSHAKE_TIMEOUT + 1)
 check(idlePeer.closed, "the silent connection is dropped after the deadline")
 check(take(idlePeer, Wire.ERROR) ~= nil, "having been told why")
 eq(idleHub.clients[idle.id], nil, "and is gone from the table")
@@ -592,6 +749,334 @@ for _ = 1, Config.MAX_PENDING + 6 do
 end
 eq(accepted, Config.MAX_PENDING, "pending connections are capped")
 eq(floodHub.players, 0, "and none of them are players")
+
+-- ------- authentication: an optional join-code gate in front of admission
+--
+-- Same handshake server/lib/relay.js drives on the Node side: hello, then
+-- -- only when the hub carries a code -- a challenge, then an HMAC response
+-- before the peer is admitted. A hub with no code configured must behave
+-- exactly as it always did: hello admits straight away and no challenge
+-- ever crosses the wire, which is the regression guard every player who
+-- joined before codes existed depends on.
+
+local openHub = Hub.new({ maxPlayers = 3 })
+eq(openHub:requiresCode(), false, "a hub built with no join code does not require one")
+local openClient, openPeer = join(openHub, "OPENPLAYER", "PALLET", 1, 1)
+check(openClient ~= nil, "a hub with no join code still admits on hello")
+eq(openHub.players, 1, "immediately -- no challenge round trip")
+eq(take(openPeer, Wire.CHALLENGE), nil, "and no challenge is ever sent")
+check(take(openPeer, Wire.WELCOME) ~= nil, "the welcome arrives exactly as before codes existed")
+
+-- mmo.auth with no outstanding challenge (never issued one, on a hub with
+-- no code) is a no-op, not an error
+openPeer.outbox = {}
+openHub:receive(openClient, { type = Wire.AUTH, response = string.rep("0", 64) })
+eq(#openPeer.outbox, 0, "mmo.auth with no outstanding challenge is a no-op")
+
+-- ------- a coded hub
+
+local JOIN_CODE = "A7K3P9"
+local codedHub = Hub.new({ maxPlayers = 3, joinCode = JOIN_CODE })
+eq(codedHub:requiresCode(), true, "a hub constructed with a join code requires one")
+
+-- the answer a client owes for a given nonce, computed the way a real
+-- client would: normalise the code it was handed, then HMAC the nonce with
+-- it -- mirroring src/Sessions.lua / src/Ui.lua, not reaching into the hub
+local function answer(rawCode, nonce)
+  return Sha256.hmacHex(Wire.code(rawCode), nonce)
+end
+
+local codedPeer = fakePeer()
+local codedClient = codedHub:accept(codedPeer)
+codedHub:receive(codedClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+  name = "ASH", map = "PALLET", x = 1, y = 1, facing = "down" })
+
+eq(codedHub.players, 0, "hello alone does not seat a player on a coded hub")
+eq(codedHub:isFull(), false, "so a coded hub with only unanswered challenges is not full")
+local challenge = take(codedPeer, Wire.CHALLENGE)
+check(challenge ~= nil, "a challenge is sent instead of a welcome")
+eq(#challenge.nonce, Config.NONCE_HEX, "the nonce is 32 hex characters")
+check(challenge.nonce:match("^[0-9a-f]+$") ~= nil, "and lowercase hex")
+eq(take(codedPeer, Wire.WELCOME), nil, "no welcome until the challenge is answered")
+
+-- the correct response admits, and only now charges the seat
+codedHub:receive(codedClient, { type = Wire.AUTH, response = answer(JOIN_CODE, challenge.nonce) })
+check(take(codedPeer, Wire.WELCOME) ~= nil, "the correct response admits the player")
+eq(codedHub.players, 1, "and the seat is charged only on a successful answer")
+
+-- replaying the same accepted response again does nothing: the nonce was
+-- consumed the moment it was read, and the client is ready besides
+codedPeer.outbox = {}
+codedHub:receive(codedClient, { type = Wire.AUTH, response = answer(JOIN_CODE, challenge.nonce) })
+eq(#codedPeer.outbox, 0, "auth after admission is a no-op, not a re-welcome")
+
+-- a wrong response is refused and the connection dropped
+local wrongPeer = fakePeer()
+local wrongClient = codedHub:accept(wrongPeer)
+codedHub:receive(wrongClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "MISTY" })
+local wrongChallenge = take(wrongPeer, Wire.CHALLENGE)
+check(wrongChallenge ~= nil, "a second connection is challenged independently")
+
+codedHub:receive(wrongClient,
+  { type = Wire.AUTH, response = answer("Z9Y8X7", wrongChallenge.nonce) })
+local wrongError = take(wrongPeer, Wire.ERROR)
+check(wrongError ~= nil, "a wrong response is refused")
+check(wrongError.message:find("code"), "naming the join code as the problem")
+check(wrongPeer.closed, "and the connection is closed")
+eq(codedHub.clients[wrongClient.id], nil, "the client record is gone, not merely refused")
+eq(codedHub.players, 1, "and no seat was ever charged for it")
+
+-- a second mmo.auth on a connection that already failed is silently
+-- nothing, since the client record no longer exists to receive it
+wrongPeer.outbox = {}
+codedHub:receive(wrongClient, { type = Wire.AUTH, response = answer(JOIN_CODE, wrongChallenge.nonce) })
+eq(#wrongPeer.outbox, 0, "a message from a client the hub already forgot goes nowhere")
+
+-- a response captured for one connection's nonce does not work on another:
+-- the HMAC is bound to the nonce it answers, not just to the join code
+local nonceOwnerPeer = fakePeer()
+local nonceOwnerClient = codedHub:accept(nonceOwnerPeer)
+codedHub:receive(nonceOwnerClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "OWNER" })
+local ownerNonce = take(nonceOwnerPeer, Wire.CHALLENGE).nonce
+
+local replayPeer = fakePeer()
+local replayClient = codedHub:accept(replayPeer)
+codedHub:receive(replayClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "REPLAY" })
+local replayNonce = take(replayPeer, Wire.CHALLENGE).nonce
+check(ownerNonce ~= replayNonce, "two connections are challenged with different nonces")
+
+codedHub:receive(replayClient, { type = Wire.AUTH, response = answer(JOIN_CODE, ownerNonce) })
+eq(take(replayPeer, Wire.WELCOME), nil,
+   "a response computed for another connection's nonce does not admit this one")
+check(take(replayPeer, Wire.ERROR) ~= nil, "and is refused just like a wrong code")
+
+-- a code typed messily still authenticates: both sides normalise through
+-- Wire.code, so the display form the player typed does not have to match
+-- the display form the host was given
+local messyPeer = fakePeer()
+local messyClient = codedHub:accept(messyPeer)
+codedHub:receive(messyClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "MESSY" })
+local messyNonce = take(messyPeer, Wire.CHALLENGE).nonce
+codedHub:receive(messyClient,
+  { type = Wire.AUTH, response = answer("  a7k 3p9!! ", messyNonce) })
+check(take(messyPeer, Wire.WELCOME) ~= nil,
+      "a code typed lowercase and messily still authenticates")
+
+-- An unanswered challenge does not hold a slot forever, and it buys no
+-- extra time either: HANDSHAKE_TIMEOUT is one budget covering hello, the
+-- challenge and the answer, anchored at accept.  That is deliberately the
+-- same budget server/lib/limits.js measures from register, so one client
+-- meets one deadline whichever hosting path it dialled -- the Lua side used
+-- to hand a challenged peer HELLO_TIMEOUT + AUTH_TIMEOUT (twenty seconds)
+-- for the identical exchange.
+local ghostPeer = fakePeer()
+local ghostClient = codedHub:accept(ghostPeer)
+codedHub:receive(ghostClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "GHOST" })
+check(take(ghostPeer, Wire.CHALLENGE) ~= nil, "the ghost connection is challenged")
+
+codedHub:update(Config.HANDSHAKE_TIMEOUT - 1)
+check(not ghostPeer.closed, "a challenged peer is not reaped inside the budget")
+
+codedHub:update(2)
+check(ghostPeer.closed,
+      "but being challenged does not extend it past HANDSHAKE_TIMEOUT")
+check(take(ghostPeer, Wire.ERROR) ~= nil, "having been told why")
+eq(codedHub.clients[ghostClient.id], nil, "and the slot is freed, not held forever")
+
+-- the same deadline, to the second, on an uncoded hub: a peer that says
+-- nothing and a peer that says hello and stalls are given identical rope
+local budgetHub = Hub.new({ maxPlayers = 2 })
+local silentPeer = fakePeer()
+local silentClient = budgetHub:accept(silentPeer)
+budgetHub:update(Config.HANDSHAKE_TIMEOUT - 1)
+check(not silentPeer.closed, "an ungreeted peer is not reaped inside the budget either")
+budgetHub:update(2)
+check(silentPeer.closed, "and is reaped at the same deadline a challenged one is")
+eq(budgetHub.clients[silentClient.id], nil, "leaving no record behind")
+
+-- MAX_PENDING and greeted-only isFull() behave the same with a code
+-- configured: a challenged-but-unanswered peer is still just pending
+local pendingHub = Hub.new({ maxPlayers = 2, joinCode = "ZZZZZZ" })
+local pendingClient, pendingPeer = join(pendingHub, "WAITING")
+check(pendingClient ~= nil, "a hello on a coded hub is still accepted")
+check(take(pendingPeer, Wire.CHALLENGE) ~= nil, "and still challenged")
+eq(pendingHub.players, 0, "but is not a player yet")
+eq(pendingHub:isFull(), false, "so isFull() does not count it")
+
+local floodCodedHub = Hub.new({ maxPlayers = 2, joinCode = "ZZZZZZ" })
+local floodAccepted = 0
+for _ = 1, Config.MAX_PENDING + 6 do
+  if floodCodedHub:accept(fakePeer()) then floodAccepted = floodAccepted + 1 end
+end
+eq(floodAccepted, Config.MAX_PENDING, "pending connections are capped the same with a code configured")
+eq(floodCodedHub.players, 0, "and none of them are players")
+
+-- ------- the cap holds on a hub that challenges
+--
+-- The regression this exists for: isFull() was checked at hello, but on a
+-- coded hub hello does not charge a seat -- answering the challenge does.
+-- So every peer that greeted while there was room passed a gate nobody
+-- repeated, and then every one of them was seated. A hub built for two
+-- admitted six, and the identical bug was reproduced in server/lib/relay.js
+-- before both were moved to check inside admit(), where the seat is
+-- actually charged.
+
+local CAP = 2
+local capHub = Hub.new({ maxPlayers = CAP, joinCode = JOIN_CODE })
+local rush = {}
+for i = 1, 6 do
+  local peer = fakePeer()
+  local client = capHub:accept(peer)
+  capHub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+    name = "RUSH" .. i, map = "PALLET", x = i, y = 1, facing = "down" })
+  local challenge = take(peer, Wire.CHALLENGE)
+  rush[i] = { peer = peer, client = client, nonce = challenge and challenge.nonce }
+end
+
+local challenged = 0
+for _, entry in ipairs(rush) do
+  if entry.nonce then challenged = challenged + 1 end
+end
+eq(challenged, 6, "six peers all greet, and all are challenged, while there is room")
+eq(capHub.players, 0, "none of them is a player on the strength of hello alone")
+
+-- ...and now every one of them answers correctly, before any of them has
+-- been admitted
+local welcomed, refused, saidFull, closed = 0, 0, 0, 0
+for _, entry in ipairs(rush) do
+  capHub:receive(entry.client,
+    { type = Wire.AUTH, response = answer(JOIN_CODE, entry.nonce) })
+  if take(entry.peer, Wire.WELCOME) then welcomed = welcomed + 1 end
+  local err = take(entry.peer, Wire.ERROR)
+  if err then
+    refused = refused + 1
+    if err.message:find("full") and err.message:find(tostring(CAP)) then
+      saidFull = saidFull + 1
+    end
+  end
+  if entry.peer.closed then closed = closed + 1 end
+end
+
+eq(welcomed, CAP, "only as many peers are welcomed as the host bought seats for")
+eq(capHub.players, CAP, "which is what the hub counts too")
+eq(capHub:isFull(), true, "and the hub is full, not oversubscribed")
+eq(refused, 6 - CAP, "the overflow is refused rather than seated")
+eq(saidFull, 6 - CAP, "each with the full-hub sentence, naming the cap")
+eq(closed, 6 - CAP, "and each connection closed")
+
+local lingering = 0
+for _, entry in ipairs(rush) do
+  local record = capHub.clients[entry.client.id]
+  if record and not record.ready then lingering = lingering + 1 end
+end
+eq(lingering, 0, "no refused connection is left holding a pending slot")
+eq(capHub.count, CAP, "so the hub is left holding exactly the connections it seated")
+
+-- ------- the entropy pool behind both credentials
+--
+-- Hub.Entropy backs the nonces above and the join code the HOST screen
+-- offers, and its own header is honest about what it is: material folded in
+-- over a session -- frame timings, clocks, heap size, button presses -- not
+-- a CSPRNG. What is worth pinning is not how it hashes, which is its
+-- business, but the property the one-instantaneous-sample code it replaced
+-- did not have: what is stirred in is what makes two draws differ. Its seed
+-- and clock arguments exist so that can be asserted rather than hoped for.
+
+local Entropy = Hub.Entropy
+
+-- a clock that advances a microsecond per reading, so the draw-time jitter
+-- burst is repeatable here even though it is not on a real machine
+local function steadyClock()
+  local t = 0
+  return function() t = t + 1e-6; return t end
+end
+
+-- what a few seconds of play looks like from the pool's side: one stir per
+-- fixed step, carrying the step's duration, the clock, the heap, and a
+-- fourth number that differs per "machine"
+local function played(pool, steps, flavour)
+  for i = 1, steps do
+    pool:stir(0.0166 + i * 1e-7, i * 1e-3, 900 + (i % 37), flavour + i)
+  end
+  return pool
+end
+
+local COLD = "an identical cold state"
+
+local twinA = played(Entropy.new(COLD, steadyClock()), 200, 1)
+local twinB = played(Entropy.new(COLD, steadyClock()), 200, 1)
+eq(twinA:code(), twinB:code(),
+   "a pool is worth exactly what is stirred into it: identical state plus "
+   .. "identical material draws an identical code, and nothing here pretends "
+   .. "otherwise")
+
+-- ...so two hubs off identically cold pools diverge only because the
+-- material they were fed diverged, which is the whole claim
+local hubA = Hub.new({ maxPlayers = 2, joinCode = JOIN_CODE,
+                       entropy = played(Entropy.new(COLD, steadyClock()), 200, 3) })
+local hubB = Hub.new({ maxPlayers = 2, joinCode = JOIN_CODE,
+                       entropy = played(Entropy.new(COLD, steadyClock()), 200, 8) })
+local collisions, repeats, malformed, nonceSeen = 0, 0, 0, {}
+for _ = 1, 32 do
+  local a, b = hubA:newNonce(), hubB:newNonce()
+  if a == b then collisions = collisions + 1 end
+  for _, nonce in ipairs({ a, b }) do
+    if type(nonce) ~= "string" or #nonce ~= Config.NONCE_HEX
+       or not nonce:match("^[0-9a-f]+$") then
+      malformed = malformed + 1
+    end
+    if nonceSeen[nonce] then repeats = repeats + 1 end
+    nonceSeen[nonce] = true
+  end
+end
+eq(collisions, 0,
+   "two hubs started identically cold and fed different material never "
+   .. "challenge with the same nonce")
+eq(repeats, 0, "and no nonce in 64 draws repeats at all")
+eq(malformed, 0, "every one of them 32 lowercase hex characters")
+
+-- codes drawn from a pool that has been played, on the real clock and the
+-- real jitter burst, are distinct and typeable
+local livePool = played(Entropy.new(), 400, 5)
+local SAMPLE = 256
+local codeSeen, repeatedCode, unusable = {}, 0, 0
+for _ = 1, SAMPLE do
+  local code = livePool:code()
+  -- Wire.code is what the hub will normalise the player's typing through,
+  -- so a drawn code that is not its own normal form is a code that cannot
+  -- be typed back in
+  if type(code) ~= "string" or Wire.code(code) ~= code then
+    unusable = unusable + 1
+  end
+  if codeSeen[code] then repeatedCode = repeatedCode + 1 end
+  codeSeen[code] = true
+end
+eq(unusable, 0, "every drawn code is already-normalised Wire.code input")
+eq(repeatedCode, 0, SAMPLE .. " codes drawn from one pool are all distinct")
+
+-- a code drawn before a single frame has been played is weaker -- the pool
+-- header says by how much -- but it is never malformed
+local coldCode = Entropy.new():code()
+eq(Wire.code(coldCode), coldCode,
+   "a code drawn cold, before anything has been stirred in, is still typeable")
+
+-- the pool answers rather than raising, which is what lets Client.newJoinCode
+-- log a remediation instead of breaking a mod callback
+local tooWide, why = Entropy.new():bytes(64)
+eq(tooWide, nil, "a draw wider than one digest is refused")
+check(type(why) == "string", "with a reason, not a raise")
+
+-- and a hub whose pool cannot answer refuses the peer instead of admitting
+-- it unchallenged
+local brokenHub = Hub.new({ maxPlayers = 2, joinCode = JOIN_CODE,
+                            entropy = { bytes = function() return nil, "no pool" end } })
+local brokenPeer = fakePeer()
+local brokenClient = brokenHub:accept(brokenPeer)
+brokenHub:receive(brokenClient,
+  { type = Wire.HELLO, proto = Config.PROTOCOL, name = "NONONCE" })
+eq(take(brokenPeer, Wire.CHALLENGE), nil, "a hub that cannot draw a nonce does not challenge")
+check(take(brokenPeer, Wire.ERROR) ~= nil, "it refuses, with something to read")
+eq(brokenHub.players, 0, "and never seats a peer it could not challenge")
 
 -- the host occupies a slot like anyone else, so a freed one reopens
 hub:drop(cal)
@@ -982,5 +1467,309 @@ eq(Client.setJoinAddress(Client, ""), nil, "an empty address is refused")
 eq(Client.joinAddress(), "192.168.1.7:7788", "leaving the previous one intact")
 
 eq(Client.isHosting(), false, "a fresh client is not hosting")
+
+-- ------------------------------------------------------------------
+-- 8. Trading, and the one invariant that matters
+-- ------------------------------------------------------------------
+--
+-- Either both sides of a trade apply it or neither does.  Nothing else in
+-- this suite is worth as much: the failure mode is silent, permanent, and
+-- costs a player a Pokemon.
+--
+-- It is driven end to end -- two Sessions instances, the real Hub between
+-- them, and the engine's own Protocol.TradeSession doing the trading -- so
+-- the thing under test is the message ordering a real pair of clients sees.
+-- pump() is deliberately shaped like src/Client.lua's tick: every message
+-- the hub queued is dispatched first, and only then does the session get
+-- its update.  That gap is where the duplication bug lived, so a harness
+-- that collapsed the two would not be able to see it.
+--
+-- Wrapped in a function purely for scope: the chunk above it is already
+-- close to Lua's 200-local ceiling for one function body.
+
+;(function()
+
+local Sessions = need("Sessions")
+local Data = T.fixtures.load()
+local Pokemon = require("src.pokemon.Pokemon")
+
+local warns = {}
+local function clearWarns()
+  for i = #warns, 1, -1 do warns[i] = nil end
+end
+stubMod.log.warn = function(_, fmt, ...)
+  local ok, line = pcall(string.format, fmt, ...)
+  warns[#warns + 1] = ok and line or tostring(fmt)
+end
+
+local function tradeSide(hub, name, species)
+  local side = { name = name, said = {} }
+  side.peer = fakePeer()
+  side.client = hub:accept(side.peer)
+  side.transport = {
+    send = function(_, msgType, payload)
+      local msg = {}
+      if type(payload) == "table" then
+        for k, v in pairs(payload) do msg[k] = v end
+      end
+      msg.type = msgType
+      hub:receive(side.client, msg)
+      return true
+    end,
+    isReady = function() return true end,
+  }
+  side.ui = {
+    say = function(_, text) side.said[#side.said + 1] = text end,
+    confirm = function(_, _, text, cb) side.confirmText = text; side.confirmBox = cb end,
+    pickPartyMon = function(_, _, _, cb) side.pickBox = cb end,
+    pushState = function() end,
+  }
+  side.sessions = Sessions.new(side.transport, side.ui)
+  side.game = {
+    data = Data,
+    save = {
+      party = { Pokemon.new(Data, species, 12) },
+      player = { name = name },
+      pokedex = { seen = {}, owned = {} },
+    },
+  }
+  hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+                             name = name, map = "FIX_TOWN", x = 1, y = 1 })
+  return side
+end
+
+local sessionDispatch = {
+  [Wire.SESSION] = function(s, m) s.sessions:onSession(s.game, m) end,
+  [Wire.RELAY] = function(s, m) s.sessions:onRelay(m) end,
+  [Wire.SESSION_END] = function(s, m) s.sessions:onSessionEnd(m.reason) end,
+  [Wire.REQUEST] = function(s, m) s.sessions:onRequest(s.game, m) end,
+  [Wire.DECLINE] = function(s, m) s.sessions:onDecline(m) end,
+}
+
+local function pump(side, dt)
+  local batch = side.peer.outbox
+  side.peer.outbox = {}
+  for _, msg in ipairs(batch) do
+    local handler = sessionDispatch[msg.type]
+    if handler then handler(side, msg) end
+  end
+  side.sessions:update(side.game, dt or 0)
+end
+
+local function partyOf(side)
+  local names = {}
+  for _, mon in ipairs(side.game.save.party) do names[#names + 1] = mon.species end
+  return table.concat(names, ",")
+end
+
+local function answerPick(side, index)
+  local box = side.pickBox
+  side.pickBox = nil
+  box(index)
+end
+
+local function answerConfirm(side, yes)
+  local box = side.confirmBox
+  side.confirmBox = nil
+  box(yes)
+end
+
+-- Two players, paired through the hub, driven as far as both confirm boxes
+-- being open -- which is the fork every ordering below takes from.
+local function pairAtConfirm()
+  -- the hub counts its own refusals, so a scenario can say out loud whether
+  -- a message died on the way through it or after it arrived
+  local hub = Hub.new({ maxPlayers = 2 })
+  hub.dropped = 0
+  hub.onDrop = function() hub.dropped = hub.dropped + 1 end
+  local a = tradeSide(hub, "ANN", "FIXMON_B")
+  local b = tradeSide(hub, "BOB", "FIXMON_C")
+
+  a.sessions:request({ id = b.client.id, name = "BOB" }, "trade")
+  pump(b)                     -- the ask lands, and BOB says yes
+  answerConfirm(b, true)
+  pump(a); pump(b)            -- paired: both send hello
+  pump(a); pump(b)            -- hello in, party out
+  pump(a); pump(b)            -- party in, both picking
+  answerPick(a, 1); answerPick(b, 1)
+  pump(a); pump(b)            -- picks crossed, both confirming
+  return hub, a, b
+end
+
+local hubX, ann, bob = pairAtConfirm()
+check(ann.confirmBox ~= nil and bob.confirmBox ~= nil,
+      "both sides reach the confirm box")
+eq(partyOf(ann), "FIXMON_B", "ANN starts with her own POKéMON and nothing else")
+eq(partyOf(bob), "FIXMON_C", "and BOB with his")
+
+-- ------- the box does not ask twice
+--
+-- The machine sits in "confirming" from the moment this side answers until
+-- the peer's answer arrives, so a prompt driven off the stage alone re-opened
+-- the instant the player closed it -- asking them to agree to the same trade
+-- again, and putting a second confirm on the wire each time.
+
+answerConfirm(ann, true)
+pump(ann); pump(ann)
+eq(ann.confirmBox, nil, "answering the confirm box does not re-open it")
+
+-- ------- local-first: this side completes before the peer does
+
+pump(bob)                     -- BOB sees ANN's confirm; his box is still open
+answerConfirm(bob, true)      -- ...and now he completes first
+pump(bob)
+pump(ann)
+pump(bob)
+pump(ann)
+
+eq(partyOf(ann), "FIXMON_C", "peer-completes-first: ANN ends up with BOB's POKéMON")
+eq(partyOf(bob), "FIXMON_B", "and BOB with ANN's")
+eq(#ann.game.save.party, 1, "ANN's party did not grow")
+eq(#bob.game.save.party, 1, "nor did BOB's")
+eq(ann.sessions.active, nil, "and the session is closed on ANN's side")
+eq(bob.sessions.active, nil, "and on BOB's")
+
+-- ------- the other ordering, which used to decide who lost a POKéMON
+
+local hubY, ann2, bob2 = pairAtConfirm()
+answerConfirm(bob2, true)
+pump(ann2)
+answerConfirm(ann2, true)     -- ANN completes first this time
+pump(ann2)
+
+-- The rule the whole fix rests on: finishing locally is not what ends a
+-- session.  ANN has applied, and BOB's confirm is still in flight to nobody
+-- -- if she hung up here the hub would tell BOB "peer_left" and the message
+-- he needs would go down with the session.
+eq(partyOf(ann2), "FIXMON_C", "ANN has applied her half")
+check(ann2.sessions.active ~= nil,
+      "but the session outlives local completion rather than ending on it")
+eq(ann2.sessions.active.stage, "settling",
+   "waiting on the peer to say it applied too")
+
+pump(bob2)
+pump(ann2)
+pump(bob2)
+
+eq(hubY.dropped, 0, "and the hub refused nothing along the way")
+eq(partyOf(ann2), "FIXMON_C", "local-completes-first: ANN still ends up with BOB's")
+eq(partyOf(bob2), "FIXMON_B", "and BOB with ANN's")
+eq(ann2.sessions.active, nil, "with the session closed on ANN's side")
+eq(bob2.sessions.active, nil, "and on BOB's")
+
+-- ------- the regression: peer_left arriving with a confirm still unread
+--
+-- The failure this whole section exists for.  BOB finishes, applies, and his
+-- process goes away in the same breath; the hub forwards his confirm and
+-- then tells ANN "peer_left", and both land in one batch.  Dropping the
+-- session on peer_left threw away the confirm that was already sitting in
+-- its inbox, so ANN never applied: two of BOB's POKéMON in the world and
+-- none of ANN's.  Nothing errored, which is the whole signature.
+
+local hubZ, ann3, bob3 = pairAtConfirm()
+answerConfirm(ann3, true)     -- ANN's confirm goes on the wire
+pump(bob3)
+answerConfirm(bob3, true)
+pump(bob3)                    -- BOB applies his half
+eq(partyOf(bob3), "FIXMON_B", "BOB applied his half before leaving")
+
+hubZ:receive(bob3.client, { type = Wire.SESSION_LEAVE })
+pump(ann3)                    -- confirm, then peer_left, in one batch
+
+eq(partyOf(ann3), "FIXMON_C",
+   "a peer that leaves in the same batch as its confirm does not strand us")
+eq(partyOf(bob3), "FIXMON_B", "and BOB is left holding exactly one POKéMON")
+eq(#ann3.game.save.party, 1, "ANN holds exactly one too")
+eq(ann3.sessions.active, nil, "and the session is finished, not left hanging")
+
+-- neither FIXMON exists twice across the two parties, which is the invariant
+-- stated as the thing it actually protects
+local census = {}
+for _, side in ipairs({ ann3, bob3 }) do
+  for _, mon in ipairs(side.game.save.party) do
+    census[mon.species] = (census[mon.species] or 0) + 1
+  end
+end
+eq(census.FIXMON_B, 1, "exactly one of the POKéMON ANN put up")
+eq(census.FIXMON_C, 1, "and exactly one of BOB's -- neither duplicated nor lost")
+eq(hubZ.dropped, 0,
+   "and the hub refused nothing -- the message that used to vanish was "
+   .. "relayed fine and died a layer further in, which is why nobody saw it")
+
+-- ------- a peer that never acknowledges does not pin the session open
+--
+-- An older build of this mod, or one whose acknowledgement is lost with the
+-- connection, simply never sends it.  Both halves are applied by then, so
+-- the settling clock is a courtesy rather than a commitment.
+
+local _, ann7, bob7 = pairAtConfirm()
+answerConfirm(bob7, true)
+pump(ann7)
+answerConfirm(ann7, true)
+pump(ann7)
+eq(ann7.sessions.active.stage, "settling", "ANN is settling")
+bob7.peer.outbox = {}         -- BOB's half of the world goes quiet
+pump(ann7, 11)
+eq(ann7.sessions.active, nil, "an acknowledgement that never comes still ends it")
+eq(partyOf(ann7), "FIXMON_C", "with the applied trade left exactly as it was")
+
+-- ------- the timeout fails closed
+--
+-- ANN answers, BOB never does.  What must not happen is ANN keeping a copy
+-- of both: a trade that times out is a trade that did not happen, on both
+-- sides.
+
+local _, ann4, bob4 = pairAtConfirm()
+answerConfirm(ann4, true)
+pump(ann4, 30)
+check(ann4.sessions.active ~= nil, "a wait shorter than the timeout is still live")
+pump(ann4, 31)
+
+eq(ann4.sessions.active, nil, "silence past the timeout ends the session")
+eq(partyOf(ann4), "FIXMON_B", "and leaves ANN's party exactly as it started")
+eq(#ann4.game.save.party, 1, "with nothing gained")
+local timedOut = false
+for _, line in ipairs(ann4.said) do
+  if line:find("never answered") then timedOut = true end
+end
+check(timedOut, "with something on screen saying why")
+
+pump(bob4)
+eq(partyOf(bob4), "FIXMON_C", "and BOB's party exactly as it started too")
+eq(bob4.sessions.active, nil, "his session ends on the goodbye rather than hanging")
+
+-- ------- the second silent drop, given a voice
+--
+-- onRelay used to swallow a refused payload without a word, which is how the
+-- duplication above stayed invisible: src/Hub.lua counted zero drops because
+-- the message was relayed fine and died one layer further in.
+
+local _, ann5, bob5 = pairAtConfirm()
+clearWarns()
+ann5.sessions:onRelay({ from = "999999", payload = { type = "confirm" } })
+eq(#warns, 1, "a relay from someone who is not the peer is logged, not swallowed")
+check(warns[1]:find("MMO"), "and the warning names somewhere to go from")
+
+ann5.sessions:onRelay({ from = bob5.client.id, payload = "not a table" })
+ann5.sessions:onRelay({ from = "999999", payload = {} })
+eq(#warns, 1, "further drops in the same session stay quiet -- one line, not a flood")
+
+-- ...and the count starts again with the next session, so a later trade that
+-- goes wrong is not silenced by an earlier one that did
+local _, ann6 = pairAtConfirm()
+clearWarns()
+ann6.sessions:onRelay({ from = "999999", payload = {} })
+eq(#warns, 1, "a fresh session gets its own warning")
+
+-- a relay arriving with no session at all is the same story
+clearWarns()
+local orphan = Sessions.new(ann6.transport, ann6.ui)
+orphan:onRelay({ from = "1", payload = {} })
+orphan:onRelay({ from = "1", payload = {} })
+eq(#warns, 1, "a relay with no session open is logged exactly once")
+
+stubMod.log.warn = function() end
+
+end)()
 
 T.finish("rby_mmo")

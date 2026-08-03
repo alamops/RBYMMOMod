@@ -16,6 +16,11 @@ local function mod_current(game)
   return { mapId = ow.map.id, x = ow.player.cellX, y = ow.player.cellY }
 end
 
+-- Muted at load, for the reason given at the top of mmo_host.lua.
+if os.getenv("MMO_SOUND") ~= "1" and love and love.audio then
+  love.audio.setVolume(0)
+end
+
 return function(game)
   local H = dofile("mods/rby_mmo/tests/drivers/mmo_util.lua")
   local U = H.U
@@ -59,17 +64,30 @@ return function(game)
   -- The host writes its address once the listener is up; that file is the
   -- start gun. This side still dials the default 127.0.0.1:7788, because
   -- both instances are on one machine.
-  local ready = H.waitFor(game, function()
+  --
+  -- Its second line is the join code, which the host always has: hosting
+  -- without one is refused at the socket. Taking it off the file rather than
+  -- off an env flag of this side's own is still the right shape -- two
+  -- drivers reading the same switch and disagreeing about it is a whole
+  -- class of confusing failure that never has to exist -- and it now doubles
+  -- as the check that the host really did publish one.
+  local hostAddress, joinCode
+  local ready = H.waitSeconds(game, function()
     local handle = io.open(ADDR_FILE, "r")
     if not handle then return false end
+    hostAddress = handle:read("*l")
+    local line = handle:read("*l")
     handle:close()
+    joinCode = (line ~= nil and line ~= "") and line or nil
     return true
-  end, 60 * 60, "the host to publish its address")
+  end, 240, "the host to publish its address")
   check(ready, "the host came up")
   if not ready then
     log("RESULT " .. failures .. " failure(s)")
     return
   end
+  log("host published", tostring(hostAddress),
+      joinCode and ("code " .. H.formatCode(joinCode)) or "with NO CODE")
 
   -- ------- join, through the real menus
 
@@ -89,24 +107,143 @@ return function(game)
   check(H.classify(H.top(game)) == "menu", "character creation opened")
   check(H.selectLabel(game, "JOIN"), "confirmed the trainer and moved on")
 
-  -- The naming screen opens prefilled with the saved address, so START
-  -- confirms it as-is. That the field is prefilled at all is the point:
-  -- the vanilla grid has no digits, so a default that already reads
-  -- 127.0.0.1:7788 is what makes this reachable without typing.
+  -- The naming screen carries the saved address as its `default`, and START
+  -- submits that when nothing has been typed. That it has a default at all
+  -- is the point: the vanilla grid has no digits, so a default that already
+  -- reads 127.0.0.1:7788 is what makes this reachable without typing.
+  --
+  -- Identified by title, not merely by "a grid is up": the code screen is
+  -- also a naming screen and is one keypress away, so the two have to be
+  -- told apart or a run could type its address into the wrong one.
   U.wait(20)
-  local naming = H.top(game)
-  if naming and naming.glyphs then
-    log("address field reads", '"' .. table.concat(naming.glyphs) .. '"')
+  local naming = H.addressGrid(game)
+  if naming then
+    log("address screen: typed", '"' .. table.concat(naming.glyphs) .. '"',
+        "default", '"' .. tostring(naming.default) .. '"')
   else
-    log("WARN the top state is not a naming screen:",
-        tostring(naming and naming.title))
+    log("WARN the top state is not the address screen:",
+        tostring(H.top(game) and (H.top(game).title or "?")))
   end
-  U.shot(game, SHOT_DIR .. "/join-address.png")
+  check(naming ~= nil, "the address screen opened")
+
+  -- Type the address out on the grid, and then take it back off again.
+  --
+  -- Two things come out of this that nothing else covers. The first is the
+  -- claim src/Ui.lua makes for this screen and never checks: that an address
+  -- is *typeable* at all. The vanilla grid has no digits, so "127.0.0.1:7788"
+  -- is untypeable on it; the mod's digits page is what makes this screen
+  -- answerable by somebody whose friend read them a number, and the only
+  -- proof of that is putting one in through the d-pad. The second is B as an
+  -- eraser, which is the other half of the rule the screen prints under
+  -- itself ("B ERASES" with a character on the line, "B GOES BACK" without).
+  --
+  -- Then it is cleared, deliberately, so what follows is unchanged: START on
+  -- an *empty* line is what submits the stored default, and that is the path
+  -- a player who was never told an address takes. Erasing to empty rather
+  -- than submitting the typed copy keeps that path the one this run drives.
+  if naming and type(naming.default) == "string" and naming.default ~= "" then
+    local typed = H.typeOnGrid(game, naming.default)
+    check(typed, "the address grid takes a full address: " .. naming.default)
+    check(typed and table.concat(naming.glyphs) == naming.default,
+          "and the line reads back what was typed: "
+            .. table.concat(naming.glyphs))
+    -- What is on the line is not always what is on the screen. NamingScreen
+    -- draws the field from x=56 in 8px cells, so 13 of them fit across a
+    -- 160px screen while this screen's maxLen is 32 -- "127.0.0.1:7788" is
+    -- 14 characters and loses its last one off the right edge. Logged rather
+    -- than asserted: it is a drawing bug in a screen this file does not own,
+    -- and turning it into a failure here would stop the run reporting on the
+    -- things it does own.
+    local VISIBLE_CELLS = 13
+    if #naming.default > VISIBLE_CELLS then
+      log(("WARN the address field draws %d cells but holds %d characters, so "
+        .. "%q shows as %q"):format(VISIBLE_CELLS, #naming.default,
+        naming.default, naming.default:sub(1, VISIBLE_CELLS)))
+    end
+    check(H.clearGrid(game, naming), "B erases it back to an empty line")
+
+    -- The other thing this field takes, and the one that fits: a hostname.
+    -- src/Ui.lua sizes the field for "mybox.example.com:7788" precisely
+    -- because a name is what somebody on a LAN reads out, and no other test
+    -- puts a letter on this grid. It is typed, photographed and erased -- the
+    -- run still dials the default below, untouched.
+    local HOSTNAME = "MYPC.LAN:7788"
+    check(H.typeOnGrid(game, HOSTNAME) and
+          table.concat(naming.glyphs) == HOSTNAME,
+          "and a hostname, across both pages, just as well: " .. HOSTNAME)
+    U.shot(game, SHOT_DIR .. "/join-address.png")
+    check(H.clearGrid(game, naming), "erased again, so START submits the default")
+  else
+    check(false, "the address screen carries a default to dial")
+    U.shot(game, SHOT_DIR .. "/join-address.png")
+  end
+
   U.tap(game, "start")
   U.wait(60)
 
-  local connected = H.waitFor(game, function() return exports.isConnected() end,
-                              60 * 30, "the connection to open")
+  -- ------- the join code, asked for before anything is dialled
+  --
+  -- The one path no other suite can reach. tests/rby_mmo_test.lua drives Hub
+  -- with fake peers, so it can prove the HMAC is checked but never that a
+  -- player can answer a challenge: the answer has to be typed on a d-pad
+  -- grid with no digits on its first page, and every part of that is UI.
+  --
+  -- The order changed with the six-character passcode. It used to be
+  -- address, dial, and then a challenge from the hub pushing a text box over
+  -- a handshake that was already spending its ten-second budget; now the
+  -- address screen hands straight over to the code grid and the socket is
+  -- not opened until both have been answered. The challenge path still
+  -- exists and is still driven below -- it is what a *wrong* code lands back
+  -- on, which is why the wrong one goes first: that is where a player ends
+  -- up when they mistype, and a refusal that leaves them staring at a dead
+  -- screen with no way back is worse than one that never came.
+  check(joinCode ~= nil, "the host published a join code with its address")
+  if joinCode then
+    -- Frames, and only here: the grid is pushed by the address screen's own
+    -- onDone, inside this process, with nothing yet on the wire -- which is
+    -- exactly what the assertion under it says.
+    local asked = H.waitFor(game, function()
+      return H.codeGrid(game) ~= nil
+    end, 240, "the join-code grid")
+    check(asked, "the address screen hands straight over to the code grid")
+    check(exports.isConnected() == false,
+          "and nothing is dialled until the code is answered")
+    U.shot(game, SHOT_DIR .. "/join-code-asked.png")
+
+    -- The same screen with something on its line, which is what it looks like
+    -- to somebody halfway through reading a code off a phone -- and the one
+    -- frame where the hint under the grid reads B ERASES rather than B GOES
+    -- BACK. Erased again straight after, so the entry below still starts from
+    -- an empty line the way a real attempt does.
+    local codeScreen = H.codeGrid(game)
+    if codeScreen then
+      check(H.typeOnGrid(game, joinCode:sub(1, 3)),
+            "the code grid takes characters mid-entry")
+      U.shot(game, SHOT_DIR .. "/join-code-typing.png")
+      check(H.clearGrid(game, codeScreen), "and B erases them again")
+    end
+
+    local wrong = H.wrongCode(joinCode)
+    check(H.enterJoinCode(game, wrong),
+          "a wrong code can be typed on the grid")
+    local refused = H.waitSeconds(game, function()
+      local top = H.top(game)
+      return top ~= nil and H.textOf(top):find("not accepted", 1, true) ~= nil
+    end, 60, "the refusal")
+    check(refused, "a wrong join code is refused, and says so on screen")
+    check(exports.isConnected() == false, "and leaves us outside")
+    -- printed: the refusal's whole value as a picture is the sentence the
+    -- hub sent, and the frame after the box opens carries three words of it
+    H.shotPrinted(game, SHOT_DIR .. "/join-code-refused.png")
+
+    check(H.enterJoinCode(game, joinCode),
+          "and the host's code can be typed on the same grid")
+    U.wait(60)
+  end
+
+  -- the hub has to accept, challenge and welcome, so: seconds
+  local connected = H.waitSeconds(game, function() return exports.isConnected() end,
+                                  60, "the connection to open")
   check(connected, "joined over a real socket")
   if not connected then
     -- Transport puts a player-facing sentence in the box on failure, so the
@@ -126,9 +263,9 @@ return function(game)
 
   -- ------- the host is a player over here too
 
-  local sawHost = H.waitFor(game, function()
+  local sawHost = H.waitSeconds(game, function()
     return #exports.players() > 0
-  end, 60 * 20, "the host to appear on the roster")
+  end, 60, "the host to appear on the roster")
   check(sawHost, "the host appears on the guest's roster")
   if sawHost then
     log("host is", tostring(exports.players()[1].name))
@@ -162,29 +299,29 @@ return function(game)
   H.signal("guest_baseline_taken")
   H.await(game, "host_walk_done")
 
-  local hostMoved = H.waitFor(game, function()
+  local hostMoved = H.waitSeconds(game, function()
     local row = H.avatarRow(exports)
     return row and (row.rosterX ~= fromX or row.rosterY ~= fromY)
-  end, 60 * 40, "the host to move on this side")
+  end, 45, "the host to move on this side")
   check(hostMoved, "the host's movement reaches the guest")
 
-  local hostAvatarFollowed = H.waitFor(game, function()
+  local hostAvatarFollowed = H.waitSeconds(game, function()
     local row = H.avatarRow(exports)
     return row and row.spawned
       and math.abs((row.avatarX or -99) - row.rosterX) < 0.01
       and math.abs((row.avatarY or -99) - row.rosterY) < 0.01
-  end, 60 * 40, "the host's avatar to catch up")
+  end, 45, "the host's avatar to catch up")
   check(hostAvatarFollowed, "and its avatar walks to where the host is")
   U.shot(game, SHOT_DIR .. "/join-host-walked.png")
 
   -- ------- 3. chat crosses the wire in both directions
 
-  local heardHost = H.waitFor(game, function()
+  local heardHost = H.waitSeconds(game, function()
     for _, line in ipairs(exports.chat()) do
       if line.text == "HELLO FROM HOST" then return true end
     end
     return false
-  end, 60 * 60, "the host's chat line")
+  end, 90, "the host's chat line")
   check(heardHost, "the host's chat arrived")
 
   exports.say("global", "HELLO FROM GUEST")
@@ -217,12 +354,12 @@ return function(game)
     U.teleport(game, hostRow.map, hostRow.rosterX, hostRow.rosterY + 1, "up")
     U.wait(90)
 
-    local facing = H.waitFor(game, function()
+    local facing = H.waitSeconds(game, function()
       local row = H.avatarRow(exports)
       return row and row.spawned
         and math.abs((row.avatarX or -99) - hostRow.rosterX) < 0.01
         and math.abs((row.avatarY or -99) - hostRow.rosterY) < 0.01
-    end, 60 * 30, "the host's avatar to settle on its cell")
+    end, 60, "the host's avatar to settle on its cell")
     check(facing, "the host's avatar is on the cell we are facing")
 
     U.shot(game, SHOT_DIR .. "/join-before-interact.png")
@@ -279,22 +416,33 @@ return function(game)
 
     H.signal("guest_interact_done")
     -- likewise: never ask somebody who is mid-session
-    H.waitFor(game, function()
+    H.waitSeconds(game, function()
       local row = H.avatarRow(exports)
       return row ~= nil and not row.busy
-    end, 60 * 20, "the host to be free")
+    end, 45, "the host to be free")
     if H.selectLabel(game, "TRADE") then
       log("asked to trade")
       H.signal("guest_trade_requested")
 
       local wanted = "CHARIZARD"
-      local traded = H.drivePrompts(game, function()
+      -- seconds, and it must match the host's own trade budget: the two are
+      -- driving one flow, and whichever gives up first abandons the other
+      local record, prompts = H.promptLog()
+      local traded, trail = H.drivePrompts(game, function()
         return H.partySpecies(game)[1] == wanted
-      end, 60 * 90)
+      end, 120, record)
       log("guest party now:", table.concat(H.partySpecies(game), ","))
+      if not traded then
+        -- the same diagnosis the host prints, which this side was missing:
+        -- "the trade did not happen" cannot distinguish a prompt that never
+        -- arrived from one that was answered and went nowhere
+        log("trade stalled -- prompts answered:", trail == "" and "(none)" or trail,
+            "top is", tostring(H.top(game) and (H.top(game).title or "?")))
+        log("  boxes:", table.concat(prompts, " | "))
+      end
       check(traded, "the guest received the host's " .. wanted)
       U.shot(game, SHOT_DIR .. "/join-after-trade.png")
-      H.await(game, "host_trade_done", 60 * 60)
+      H.await(game, "host_trade_done")
 
       -- ------- 6. and a real link battle, to a decision
       --
@@ -312,10 +460,10 @@ return function(game)
       -- is refused, and the run then waits for a battle that was never
       -- going to start. The roster carries their busy flag, so wait on it
       -- rather than on a guessed interval.
-      local free = H.waitFor(game, function()
+      local free = H.waitSeconds(game, function()
         local row = H.avatarRow(exports)
         return row ~= nil and not row.busy
-      end, 60 * 30, "the host to finish the trade")
+      end, 60, "the host to finish the trade")
       if not free then log("WARN host still busy; asking anyway") end
       U.wait(30)
       local reopened = false
@@ -333,19 +481,19 @@ return function(game)
 
         local started = H.drivePrompts(game, function()
           return events["battle.started"] > 0
-        end, 60 * 60)
+        end, 90)
         check(started, "a link battle started on the guest")
 
         local ended = H.drivePrompts(game, function()
           return events["battle.ended"] > 0
-        end, 60 * 240)
+        end, 240)
         check(ended, "and ran to a decision")
         check(events["link.desync"] == 0, "with no desync reported")
         log(("battle events: started=%d ended=%d desync=%d"):format(
           events["battle.started"], events["battle.ended"],
           events["link.desync"]))
         U.shot(game, SHOT_DIR .. "/join-after-battle.png")
-        H.await(game, "host_battle_done", 60 * 120)
+        H.await(game, "host_battle_done")
 
         -- ------- 7. leave the game and keep playing
         --
@@ -355,7 +503,7 @@ return function(game)
         -- disconnecting cleanly is easy, staying playable afterwards is
         -- where a teardown bug would show.
 
-        H.await(game, "host_address_checked", 60 * 120)
+        H.await(game, "host_address_checked")
         H.closeToOverworld(game)
         local opened = H.openMmo(game)
         if opened then
@@ -371,7 +519,7 @@ return function(game)
         if opened and H.selectLabel(game, "LEAVE") then
           H.drivePrompts(game, function()
             return not exports.isConnected()
-          end, 60 * 30)
+          end, 60)
           check(not exports.isConnected(), "LEAVE disconnects the guest")
           check(not exports.isHosting(), "without it having been the host")
           check(#exports.players() == 0, "and clears the roster")

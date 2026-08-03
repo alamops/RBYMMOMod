@@ -13,6 +13,7 @@
 
 local need, mod = ...
 local Config = need("Config")
+local Wire = need("Wire")
 local Chat = need("Chat")
 local World = need("World")
 local Chars = need("Chars")
@@ -32,8 +33,11 @@ local SCREEN = {
   COMPOSE  = "RbyMmoCompose",
   PICK     = "RbyMmoPick",
   HOSTSET  = "RbyMmoHostSetup",
+  HOSTSIZE = "RbyMmoHostSize",
+  HOSTCODE = "RbyMmoHostCode",
   HOSTINFO = "RbyMmoHostInfo",
   JOINADDR = "RbyMmoJoinAddress",
+  JOINCODE = "RbyMmoJoinCode",
   CHARSET  = "RbyMmoCharSetup",
   CHARPICK = "RbyMmoCharPick",
   PROFILE  = "RbyMmoProfile",
@@ -225,6 +229,24 @@ function M:install()
     return ctxInfo.lower and DIGITS or LETTERS
   end)
 
+  -- The mod manager opens its own naming screen for a text option and
+  -- titles it "<LABEL>?", which is a title this mod never pushes and so
+  -- would fall through to the vanilla grid -- the one with no digits on it.
+  -- A join code is half digits, so the JOIN CODE option row would be
+  -- untypeable there. Claiming that title too is the whole fix.
+  ownTitle("JOIN CODE?")
+
+  -- Six characters fit anywhere a code is shown -- a text box is 18 columns
+  -- and a list row's right column holds eight -- so there is no splitting
+  -- left to do and this is Wire.formatCode with a safe answer for nil.  It
+  -- stays a named seam because every screen that shows a code goes through
+  -- it: the host reading it out and the guest typing it in are looking at
+  -- the same thing, and if a display form ever comes back it comes back
+  -- here.
+  local function codeText(code)
+    return Wire.formatCode(code) or ""
+  end
+
   screens:register(SCREEN.TEXT, { new = function(game, opts)
     opts = opts or {}
     return mod.ui.TextBox.new(game, opts.text or "", opts.onDone)
@@ -331,6 +353,14 @@ function M:install()
           })
         end,
       }
+      -- JOIN GAME asks for a code on the way in, so this row is not the
+      -- only door to one -- it is the standing code, changed deliberately
+      -- without dialling anything, and the fallback for a hub whose code
+      -- was never typed against its own address.
+      items[#items + 1] = {
+        label = "JOIN CODE",
+        onSelect = function() mod.ui.push(game, SCREEN.JOINCODE) end,
+      }
     end
 
     local menu = mod.ui.Menu.new(game, items, {
@@ -427,7 +457,96 @@ function M:install()
   -- choice like this anyway.
   local SIZES = { 2, 4, 8, 16, 32, 64 }
 
+  -- What the game will be before it starts: how many people, and the code
+  -- they will need to get in.
+  --
+  -- The code is not a setting any more, it is a requirement -- HostServer
+  -- refuses to open the port without one -- so it is minted on the way in
+  -- rather than offered as a choice a host could decline. The common path
+  -- is therefore zero typing: the row already reads six characters the host
+  -- can say out loud, and the screen behind it is only for changing them.
+  -- Showing the code itself is what six characters bought; a list row's
+  -- right column had no room for the old dashed form, which is why that row
+  -- used to say ON and send the host somewhere else to find out what was.
   screens:register(SCREEN.HOSTSET, { new = function(game)
+    local client = ctx.client
+    local code = client:hostJoinCode()
+    if not code then code = client:setHostJoinCode(client:newJoinCode()) end
+    local items = {
+      { label = "PLAYERS", right = tostring(client:maxPlayers()), key = "players" },
+      -- "SET ONE" only when the pool could not mint one; the row still
+      -- leads to the screen that fixes it, so the way out never moves
+      { label = "JOIN CODE", right = code and codeText(code) or "SET ONE",
+        key = "code" },
+      { label = "START", key = "go" },
+    }
+    return mod.ui.ListMenu.new(game, "HOST", items, {
+      onChoose = function(item, menu)
+        menu:close()
+        if item.key == "players" then
+          mod.ui.push(game, SCREEN.HOSTSIZE)
+        elseif item.key == "code" then
+          mod.ui.push(game, SCREEN.HOSTCODE)
+        elseif not code then
+          -- client:host would surface HostServer's own refusal here, which
+          -- is a sentence about a port; naming the row that fixes it is
+          -- what the host can actually act on
+          mod.ui.push(game, SCREEN.TEXT, {
+            text = "Set a join code\nfirst -- players\nneed it to get in.",
+            onDone = function() mod.ui.push(game, SCREEN.HOSTCODE) end,
+          })
+        elseif client:host(game) then
+          -- and on failure client:host has already said why, in the same
+          -- box every other refusal uses
+          mod.ui.push(game, SCREEN.HOSTINFO)
+        end
+      end,
+      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+    })
+  end })
+
+  -- Changing the code, once there is one.
+  --
+  -- No "no code" row: a game with no code is one any stranger who can reach
+  -- the port walks into, and the hub will not open a port without one, so
+  -- the escape led nowhere but a refusal at START. Generating stays first
+  -- because it is the answer nearly every host wants; typing is for a host
+  -- who wants a code they chose, or one a friend already has.
+  screens:register(SCREEN.HOSTCODE, { new = function(game)
+    local client = ctx.client
+    local items = {
+      {
+        label = "NEW CODE",
+        onSelect = function()
+          local code = client:setHostJoinCode(client:newJoinCode())
+          if not code then
+            -- newJoinCode already warned with a remediation; the player gets
+            -- the short version and the other row still works
+            return mod.ui.push(game, SCREEN.TEXT, {
+              text = "Couldn't make a\ncode. Type one\ninstead.",
+              onDone = function() mod.ui.push(game, SCREEN.HOSTCODE) end,
+            })
+          end
+          mod.ui.push(game, SCREEN.TEXT, {
+            text = ("Players will need:\n%s"):format(codeText(code)),
+            onDone = function() mod.ui.push(game, SCREEN.HOSTSET) end,
+          })
+        end,
+      },
+      {
+        label = "TYPE ONE",
+        onSelect = function()
+          mod.ui.push(game, SCREEN.JOINCODE, { host = true })
+        end,
+      },
+    }
+    return mod.ui.Menu.new(game, items, {
+      tx = 8, ty = 0, tw = 12,
+      onCancel = function() mod.ui.push(game, SCREEN.HOSTSET) end,
+    })
+  end })
+
+  screens:register(SCREEN.HOSTSIZE, { new = function(game)
     local client = ctx.client
     local current = client:maxPlayers()
 
@@ -449,16 +568,14 @@ function M:install()
         label = ("%d PLAYERS"):format(n),
         onSelect = function()
           client:setMaxPlayers(n)
-          if client:host(game) then
-            mod.ui.push(game, SCREEN.HOSTINFO)
-          end
+          mod.ui.push(game, SCREEN.HOSTSET)
         end,
       }
     end
 
     local menu = mod.ui.Menu.new(game, items, {
       tx = 8, ty = 0, tw = 12, maxVisible = 8,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() mod.ui.push(game, SCREEN.HOSTSET) end,
     })
     -- open on what is already configured, so confirming is one button
     menu.index = start
@@ -472,30 +589,243 @@ function M:install()
       return mod.ui.TextBox.new(game, "You aren't hosting.")
     end
     local address = client:hostAddress()
+    -- The code belongs with the address, because they are read out in the
+    -- same breath: a friend needs both to get in, and a host who set one and
+    -- cannot find it again has a game nobody can join.
+    local code = client:hostJoinCode()
+    local codeRow = code and ("\nCODE: " .. codeText(code)) or ""
     -- Net.lanIP() answers nil when it cannot work out which interface faces
     -- the network, and "?:7788" tells a player nothing they can act on.
     -- Name the port instead -- it is the half they need to forward anyway.
     if type(address) ~= "string" or address:find("^%?") then
       return mod.ui.TextBox.new(game, ("Hosting on port %d.\nYour IP is "
-        .. "hidden -- check\nyour network settings."):format(Config.DEFAULT_PORT))
+        .. "hidden -- check\nyour network settings.%s")
+        :format(Config.DEFAULT_PORT, codeRow))
     end
-    return mod.ui.TextBox.new(game, ("Tell your friends:\n%s"):format(address))
+    return mod.ui.TextBox.new(game,
+      ("Tell your friends:\n%s%s"):format(address, codeRow))
   end })
 
-  -- ------- joining: type an address, then connect
+  -- ------- joining: where, then the code, then dial
+  --
+  -- Both halves are asked before a socket is opened. They used to be split
+  -- across the connection -- address, dial, and then the hub's challenge
+  -- pushing a code screen over a handshake that was already spending its
+  -- ten-second budget. Asking for what a player has been told anyway (an
+  -- address and a code, said in one breath) is one straight line, and the
+  -- challenge path below survives as what a mistyped code lands on.
+
+  -- ------- the way out of a naming grid
+  --
+  -- NamingScreen (src/ui/NamingScreen.lua) pops only from confirm(): it
+  -- takes no onCancel, and its B is the backspace. That was survivable while
+  -- the code screen appeared only over a live handshake; it is not now that
+  -- JOIN GAME asks for the address and then the code on the way in. A player
+  -- who opens either without the answer to hand was stuck on it, with no way
+  -- back to the overworld short of quitting the game.
+  --
+  -- So B on an empty line leaves. B with nothing to erase is a press that
+  -- already does nothing, so no typing is taken away to buy it, and backing
+  -- out with B is what every other screen here does -- it is the button
+  -- somebody stuck reaches for. What is on the line is the whole test: one
+  -- glyph and B is an eraser again, so a mistyped code is fixed where it was
+  -- made instead of being read as "gave up" and thrown back to the menu.
+  --
+  -- `emptyConfirm` reads START and the ED cell the same way. True for the
+  -- code grid, where an empty line has never carried an answer: there is
+  -- deliberately no `default` there, so confirm() submits the widget's own
+  -- "A", which is refused, which puts the grid straight back -- the loop
+  -- this fixes. False for the address grid, where an empty line means "the
+  -- hub I already have" and START is how that is accepted.
+  --
+  -- Nothing here touches game.stack. The escape leaves by the widget's own
+  -- confirm(), which pops itself and then calls onDone, so answering
+  -- somewhere else is only a question of what onDone is; the fabricated name
+  -- it passes is ignored.
+  local function escapable(screen, onEscape, emptyConfirm)
+    local baseUpdate, baseConfirm, baseDraw = screen.update, screen.confirm,
+                                              screen.draw
+    if type(baseUpdate) ~= "function" or type(baseConfirm) ~= "function"
+       or type(baseDraw) ~= "function" then
+      mod.log:warn("the naming screen is not the shape this mod wraps, so "
+        .. "B-to-go-back is off on it -- update the mod for this engine build")
+      return screen
+    end
+
+    local function empty(self)
+      return type(self.glyphs) ~= "table" or #self.glyphs == 0
+    end
+
+    local function leave(self)
+      self.onDone = onEscape
+      return baseConfirm(self)
+    end
+
+    screen.confirm = function(self, ...)
+      if emptyConfirm and empty(self) then return leave(self) end
+      return baseConfirm(self, ...)
+    end
+
+    screen.update = function(self, dt)
+      local input = self.game and self.game.input
+      if input and input:wasPressed("b") and empty(self) then
+        return leave(self)
+      end
+      return baseUpdate(self, dt)
+    end
+
+    -- Nothing in this game teaches "B on an empty line", so the screen says
+    -- it, on the row both of this mod's pages leave free under the grid --
+    -- and says something else the moment there is a character to erase,
+    -- which is the rule itself, drawn. A page tall enough to reach that row
+    -- keeps its own layout and goes without.
+    screen.draw = function(self, ...)
+      local out = baseDraw(self, ...)
+      local Font = mod.ui.Font
+      local rows = type(self.grid) == "function" and #self:grid() or 0
+      local y = 32 + (rows + 1) * 16
+      if not (Font and Font.draw) or rows == 0 or y > 136 then return out end
+      -- the widget signs off with the colour set to white, which is the
+      -- colour of its own background. Letters and spaces only: punctuation
+      -- would ride on charmap entries a retheme is free to drop.
+      love.graphics.setColor(0, 0, 0, 1)
+      Font.draw(empty(self) and "B GOES BACK" or "B ERASES", 8, y)
+      love.graphics.setColor(1, 1, 1, 1)
+      return out
+    end
+
+    return screen
+  end
+
+  -- A refused attempt, put back on the line it was typed on.
+  --
+  -- Only ever the player's own keystrokes coming straight back -- never a
+  -- stored code, which is a different thing and stays off (see the note on
+  -- `default` below). One character wrong then costs one press to fix
+  -- instead of six to retype, which is the whole difference between telling
+  -- somebody they got it wrong and starting them over.
+  local function seed(screen, text)
+    if type(text) ~= "string" or type(screen.glyphs) ~= "table" then
+      return screen
+    end
+    for i = 1, math.min(#text, tonumber(screen.maxLen) or 0) do
+      local char = text:sub(i, i)
+      local byte = char:byte()
+      -- printable ASCII only: every glyph on this mod's pages is one byte,
+      -- and anything else could only be half of a character the grid drew
+      if byte >= 32 and byte <= 126 then
+        screen.glyphs[#screen.glyphs + 1] = char
+      end
+    end
+    return screen
+  end
 
   screens:register(SCREEN.JOINADDR, { new = function(game)
     local client = ctx.client
-    return mod.ui.NamingScreen.new(game, {
+    local screen = mod.ui.NamingScreen.new(game, {
       title = ownTitle("JOIN"),
-      -- long enough for "255.255.255.255:65535"
-      maxLen = 21,
+      -- An address or a hostname: "255.255.255.255:65535" is 21, but
+      -- "mybox.example.com:7788" is 22, and a name is what a host on a LAN
+      -- is likelier to read out. The grid carries the dot, the colon and
+      -- the dash a hostname needs, and the name goes to the socket
+      -- untouched, so the only thing that could refuse one is this number.
+      maxLen = 32,
       default = client:joinAddress(),
       onDone = function(address)
-        if not client:setJoinAddress(address) then return end
-        client:connect(game)
+        -- the *stored* form, not what was typed: setJoinAddress fills in
+        -- the port, and the code is filed under the address connect dials
+        local target = client:setJoinAddress(address)
+        if not target then return end
+        mod.ui.push(game, SCREEN.JOINCODE, { address = target, connect = true })
       end,
     })
+    -- B on an empty line backs out to the MMO menu, which is one more B from
+    -- the world. START is left alone: on an empty line it still submits the
+    -- address already stored, which is what makes this screen answerable
+    -- without typing a character.
+    return escapable(screen, function() mod.ui.push(game, SCREEN.MAIN) end)
+  end })
+
+  -- ------- joining: the code that gets you past the door
+
+  -- Reached four ways: from JOIN GAME, right after the address and before
+  -- anything is dialled; deliberately, from the MMO menu; automatically,
+  -- when a hub challenges a copy whose code is absent or was refused; and
+  -- from the host setup, to choose the code this copy will ask *for*. One
+  -- grid every time -- the glyphs and the length are the same question --
+  -- and opts says where the answer goes: opts.host stores it as this copy's
+  -- own code, opts.connect says a connection is waiting on it and dials
+  -- rather than leaving the player to walk back through the menu, and
+  -- opts.typed is an attempt this screen itself refused, coming back.
+  --
+  -- Every one of those four is a road somebody can walk without the code in
+  -- front of them, which is why the screen has a door out (escapable, above)
+  -- rather than only a way forward.
+  screens:register(SCREEN.JOINCODE, { new = function(game, opts)
+    opts = opts or {}
+    local client = ctx.client
+    local address = opts.address or client:joinAddress()
+    local screen = mod.ui.NamingScreen.new(game, {
+      title = ownTitle("JOIN CODE"),
+      -- the entry cap, not CODE_LEN: a code copied off a chat line or a
+      -- screenshot arrives with spaces and stray punctuation around its six
+      -- characters, and normalisation is what removes the difference
+      maxLen = Config.CODE_ENTRY_MAX,
+      -- Deliberately no `default`, on every path: NamingScreen uses it as
+      -- the answer when nothing was typed, so a stored code would be
+      -- silently re-submitted by pressing ED on an empty line -- and on the
+      -- challenge path that is exactly the code that was just refused,
+      -- resubmitted with no way to tell. Having no answer to give an empty
+      -- line is what leaves it free to mean "let me out" instead.
+      onDone = function(text)
+        local code = Wire.code(text)
+        if not code then
+          -- Something was typed and it is not a code, which is a typo and
+          -- not a change of mind -- the empty line is what means "out", and
+          -- escapable has already taken it. So: say what shape a code is,
+          -- and come back to the same grid with the same characters still on
+          -- it. A code that vanished into nothing would look like it was
+          -- accepted, and a menu would cost the player the five characters
+          -- they got right.
+          local again = { typed = text }
+          for key, value in pairs(opts) do
+            if again[key] == nil then again[key] = value end
+          end
+          return mod.ui.push(game, SCREEN.TEXT, {
+            text = ("That isn't a join\ncode. It's %d\nletters and digits."):
+              format(Config.CODE_LEN),
+            onDone = function() mod.ui.push(game, SCREEN.JOINCODE, again) end,
+          })
+        end
+        if opts.host then
+          client:setHostJoinCode(code)
+          return mod.ui.push(game, SCREEN.TEXT, {
+            text = ("Players will need:\n%s"):format(codeText(code)),
+            onDone = function() mod.ui.push(game, SCREEN.HOSTSET) end,
+          })
+        end
+        client:setJoinCode(address, code)
+        if opts.connect then
+          client:connect(game)
+          return
+        end
+        mod.ui.push(game, SCREEN.TEXT, {
+          text = ("Join code saved:\n%s"):format(codeText(code)),
+        })
+      end,
+    })
+    -- Only what this screen refused a moment ago, and only from this screen:
+    -- a code the hub refused comes back through Client.askJoinCode, which
+    -- carries no `typed`, because there the six characters are exactly what
+    -- is in question and putting them back would invite resubmitting them.
+    seed(screen, opts.typed)
+    -- Where B lands: the lock menu for a host who came here to choose the
+    -- code they ask *for*, the MMO menu for everyone typing one in -- in
+    -- both cases the screen this one was opened from, and never a socket
+    -- left half-dialled, because nothing has been dialled yet.
+    return escapable(screen, function()
+      mod.ui.push(game, opts.host and SCREEN.HOSTCODE or SCREEN.MAIN)
+    end, true)
   end })
 
   -- ------- who is online

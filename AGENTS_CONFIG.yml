@@ -1,0 +1,48 @@
+# AGENTS_CONFIG.yml — model routing for /implement
+#
+# Preset: quality. Re-run `/implement --config` to change it.
+
+defaults:
+  fallback_model: sonnet
+  allow_orchestrator_override: true
+
+phases:
+  investigate:
+    strategy: distribute
+    runners:
+      - type: claude
+        model: sonnet
+
+  planning:
+    runners:
+      - type: self
+
+  implementation:
+    strategy: distribute
+    runners:
+      - type: claude
+        model: opus
+
+  code_review:
+    strategy: distribute
+    runners:
+      - type: claude
+        model: opus
+
+  tests_creation:
+    strategy: distribute
+    runners:
+      - type: claude
+        model: sonnet
+
+  tests_running:
+    strategy: distribute
+    runners:
+      - type: claude
+        model: haiku
+
+  tests_fixes:
+    strategy: distribute
+    runners:
+      - type: claude
+        model: opus

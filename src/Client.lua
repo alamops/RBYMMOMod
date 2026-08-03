@@ -10,6 +10,7 @@
 local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
+local Sha256 = need("Sha256")
 local Transport = need("Transport")
 local Roster = need("Roster")
 local Avatars = need("Avatars")
@@ -20,6 +21,12 @@ local Sessions = need("Sessions")
 local World = need("World")
 local HostServer = need("HostServer")
 local Chars = need("Chars")
+-- Only for its entropy pool: this file mints join codes and Hub mints
+-- challenge nonces, and both have to come off one pool (see Hub.lua's
+-- "the entropy pool" header for why it lives there and what it is worth).
+-- Hub is already in this file's dependency graph through HostServer, so
+-- naming it costs nothing.
+local Hub = need("Hub")
 
 local M = {}
 
@@ -43,6 +50,15 @@ ctx.server = server
 
 local presenceClock = 0
 local lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
+
+-- Which hub this connection is talking to, and whether its challenge has
+-- already been answered.  Both belong to exactly one connection: an
+-- mmo.error means "wrong join code" only when it lands after we answered a
+-- challenge and before we were welcomed, and only the hub we dialled may be
+-- offered the code stored for it.  nil while hosting -- the local net has no
+-- address, so the host's own copy answers with the option row's code.
+local dialled = nil
+local authSent = false
 
 -- ------- helpers
 
@@ -95,19 +111,155 @@ function M.setMaxPlayers(a, b)
   return limit
 end
 
+-- An address with its port filled in.
+--
+-- An IP and a hostname both reach the socket untouched -- Net:connectTCP
+-- splits a trailing ":<digits>" off and hands the rest to luasocket, which
+-- resolves a name -- so the only half this mod has to supply is the port a
+-- bare "mybox" does not carry. It matters which: Net's own fallback is
+-- 7778, the *pokeserver relay's*, and a player who typed the name they were
+-- read out would dial a port nothing is listening on and be told the relay
+-- was unreachable. Applied on every read and every write, so the string
+-- that is dialled is also the string a join code is filed under.
+local function withPort(address)
+  if type(address) ~= "string" or address == "" then return nil end
+  if address:match(":%d+$") then return address end
+  return ("%s:%d"):format(address, Config.DEFAULT_PORT)
+end
+
 function M.joinAddress()
-  local stored = mod.save:get("hub")
-  if type(stored) == "string" and stored ~= "" then return stored end
-  local option = mod.options:get("hub")
-  if type(option) == "string" and option ~= "" then return option end
+  local stored = withPort(mod.save:get("hub"))
+  if stored then return stored end
+  local option = withPort(mod.options:get("hub"))
+  if option then return option end
   return Config.DEFAULT_HUB
 end
 
 function M.setJoinAddress(a, b)
-  local address = arg1(a, b)
-  if type(address) ~= "string" or address == "" then return nil end
+  local address = withPort(arg1(a, b))
+  if not address then return nil end
   mod.save:set("hub", address)
   return address
+end
+
+-- Where a hub's join code is kept.
+--
+-- One key per hub, because a player who plays on two of them should not have
+-- to retype either -- and because the code is a secret that belongs to one
+-- hub: keying it to the address it was typed for is what stops one hub being
+-- handed another's. The address is lower-cased and stripped of spaces so the
+-- same hub, typed twice, is one key; nothing else is inferred from it (a
+-- guessed default port would key a hub the transport never dials).
+local function codeKey(address)
+  if type(address) ~= "string" then return nil end
+  local clean = address:lower():gsub("%s+", "")
+  if clean == "" then return nil end
+  return "code:" .. clean
+end
+
+-- The join code for a hub, normalised into the bytes the HMAC is keyed with.
+--
+-- No address means no per-hub code -- hosting, where the local net has no
+-- address -- and falls through to the option row, which is the standing code
+-- for a player who only ever plays on one hub. Same shape as joinAddress:
+-- the in-game value wins, the option is the default.
+function M.joinCode(a, b)
+  local key = codeKey(arg1(a, b))
+  local stored = key and mod.save:get(key)
+  return Wire.code(stored) or Wire.code(mod.options:get("code"))
+end
+
+-- Stores the *normalised* form, never what was typed: the dashes, the case
+-- and any punctuation that came with a pasted code are all noise the HMAC
+-- key must not carry. Refuses anything that is not a code rather than
+-- storing a half-code that would fail every challenge silently.
+function M.setJoinCode(a, b, c)
+  local address, value
+  if a == M then address, value = b, c else address, value = a, b end
+  local code = Wire.code(value)
+  local key = codeKey(address)
+  if not (code and key) then return nil end
+  mod.save:set(key, code)
+  return code
+end
+
+-- The code this copy asks for when it hosts.
+--
+-- One key, not one per address: there is only ever one game this copy is
+-- running. A code is required now rather than optional, so absent is not a
+-- setting -- it is a game that cannot start, and the host screen mints one
+-- on the way in so the usual answer is six characters nobody had to invent.
+function M.hostJoinCode()
+  return Wire.code(mod.save:get("hostcode"))
+end
+
+-- nil or "" clears the stored code; anything else is stored normalised or
+-- refused. No screen clears it any more, but the path stays: a code left by
+-- an older build that will not normalise has to be droppable, and clearing
+-- it stops a game rather than opening one. Refused, never stored
+-- half-formed: a host who believes their game is locked and finds it open
+-- is the failure this whole feature exists to prevent.
+function M.setHostJoinCode(a, b)
+  local value = arg1(a, b)
+  if value == nil or value == "" then
+    mod.save:set("hostcode", nil)
+    return nil
+  end
+  local code = Wire.code(value)
+  if not code then return nil end
+  mod.save:set("hostcode", code)
+  return code
+end
+
+-- A fresh code for the host to read out, so nobody has to invent one on a
+-- d-pad.
+--
+-- The code *is* the credential, and the attack on a weak one is offline:
+-- anyone who captures a single mmo.challenge/mmo.auth pair can grind
+-- candidate codes locally against HMAC(code, nonce) at hardware speed, where
+-- none of the hub's connect-rate or per-IP limits apply. So the bytes come
+-- off the session entropy pool -- fed on every fixed step with frame
+-- timings, clock deltas, heap size and the player's own button presses --
+-- and not from one instantaneous sample the way they used to.
+--
+-- **It is still not a CSPRNG**, and the honest numbers are in Hub.lua's pool
+-- header rather than here so there is one copy of them: about 35-45 bits if
+-- something contrives to draw before a single frame has run, and a claimed
+-- 64 from a game that has been playing for more than a moment, which is
+-- every game that has reached this screen. At six characters the code
+-- itself carries 30 bits (Config.CODE_LEN), so on that second path the
+-- length is the binding constraint and not the pool -- what a code is worth
+-- is argued out in Config, next to the number that decides it. A host who
+-- wants a code they chose types their own.
+function M.newJoinCode()
+  local code, why = Hub.Entropy.shared:code()
+  -- The pool answers nil plus a reason rather than raising. `why` never
+  -- carries a drawn byte, and the code itself never reaches a log -- here or
+  -- anywhere else -- which is the whole reason this returns it instead of
+  -- reporting it.
+  if type(code) ~= "string" then
+    mod.log:warn("could not generate a join code (%s) -- type one instead "
+      .. "from START > MMO > HOST GAME > JOIN CODE", tostring(why))
+    return nil
+  end
+  return code
+end
+
+-- Put the player in front of the code screen.
+--
+-- The fallback, not the main road: JOIN GAME now asks for a code straight
+-- after the address, so this is what a mistyped one lands on -- a hub asking
+-- for a code this copy does not have, or refusing the one it does. Either
+-- way the alternative is a connection that simply stops, with nothing on
+-- screen to act on.
+function M.askJoinCode(game, address, reconnect)
+  game = game or ctx.game
+  if not game then return false end
+  mod.ui.push(game, Ui.SCREEN.JOINCODE, {
+    address = address,
+    connect = reconnect and true or false,
+  })
+  return true
 end
 
 -- The name other players see.
@@ -236,12 +388,14 @@ function M.connect(a, b)
     return false
   end
 
-  local ok, err = transport:connect(M.joinAddress())
+  local address = M.joinAddress()
+  local ok, err = transport:connect(address)
   if not ok then
     ui:say(tostring(err or "Couldn't connect."))
     return false
   end
 
+  dialled, authSent = address, false
   M.sendHello(game)
   M.applyLook(game)
   return true
@@ -263,7 +417,15 @@ function M.host(a, b)
   end
 
   local limit = M.maxPlayers()
-  local ok, err = server:start(Config.DEFAULT_PORT, limit)
+  -- The code goes in at start, so the hub is locked from its first accept
+  -- rather than from whenever the host got round to it. HostServer refuses
+  -- to open the port at all on a code that is missing or unusable, which is
+  -- the right answer -- a game the host believes is locked and is not would
+  -- be worse than one that did not start -- so its sentence is read out on
+  -- screen like any other refusal rather than failing silently. The host
+  -- screen mints a code before START is reachable, so a player only meets
+  -- that sentence when the entropy pool could not produce one.
+  local ok, err = server:start(Config.DEFAULT_PORT, limit, M.hostJoinCode())
   if not ok then
     ui:say(tostring(err or "Couldn't start hosting."))
     return false
@@ -277,6 +439,7 @@ function M.host(a, b)
   end
 
   transport:attach(net)
+  dialled, authSent = nil, false
   M.sendHello(game)
   M.applyLook(game)
   return true
@@ -315,6 +478,7 @@ function M.disconnect()
   ctx.chat:clear()
   transport:close()
   lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
+  dialled, authSent = nil, false
 end
 
 -- Leaving covers both shapes so callers never have to ask which they are:
@@ -390,6 +554,63 @@ end
 
 local handlers = {}
 
+-- The hub wants a join code before it will let anyone in.
+--
+-- It sends a nonce; the answer is an HMAC of that nonce keyed by the code,
+-- so the code itself never crosses the wire -- a capture cannot be replayed
+-- (the nonce is single-use) and cannot be turned back into the code. The
+-- exact contract is mirrored by server/lib/auth.js: key is the normalised
+-- code as ASCII, message is the nonce as its lowercase-hex *string*, and a
+-- drift in either reaches the player as nothing but "wrong join code".
+--
+-- Every hub this mod ships now requires a code, and the join flow asks for
+-- one before it dials, so in the ordinary case this arrives with an answer
+-- already in hand and the player never sees it. What it still handles is
+-- the case that made it: a stored code that is absent or wrong, and a
+-- third-party hub that runs without one and never sends this at all.
+handlers[Wire.CHALLENGE] = function(game, msg)
+  -- the hub is a stranger's process like every other peer, so its framing
+  -- is checked exactly as hard as a player's
+  local nonce = Wire.hex(msg.nonce, Config.NONCE_HEX)
+  if not nonce then
+    mod.log:warn("the hub sent a challenge we cannot read; ignoring it -- if "
+      .. "joining keeps failing, the hub is running a different build")
+    return
+  end
+
+  local address = dialled
+  local code = M.joinCode(address)
+  if not code then
+    -- Nothing to answer with. Hang up first: a hub gives the whole handshake
+    -- ten seconds (Config.HANDSHAKE_TIMEOUT), measured from when the socket
+    -- landed and not extended for the challenge -- both hosting paths, the
+    -- one in src/Hub.lua and the one in server/lib/limits.js, hold to that
+    -- same budget. Some of it is already spent by the time this arrives, and
+    -- even six characters on a d-pad is not reliably under what is left, so
+    -- holding the socket open only buys the player a connection that dies
+    -- behind the screen they are still typing on.
+    M.disconnect()
+    ui:say("This game needs a\njoin code.", function()
+      M.askJoinCode(game, address, address ~= nil)
+    end)
+    return
+  end
+
+  local response, why = Sha256.hmacHex(code, nonce)
+  if not response then
+    -- `why` names the argument, never its value: the code does not go to the
+    -- log, here or anywhere else
+    mod.log:warn("could not answer the hub's challenge (%s) -- re-enter the "
+      .. "code from START > MMO > JOIN CODE", tostring(why))
+    M.disconnect()
+    ui:say("Couldn't answer\nthis game's code.")
+    return
+  end
+
+  authSent = true
+  transport:send(Wire.AUTH, { response = response })
+end
+
 handlers[Wire.WELCOME] = function(game, msg)
   local id = Wire.id(msg.id)
   if not id then
@@ -460,17 +681,70 @@ handlers[Wire.SESSION_END] = function(_, msg)
   sessions:onSessionEnd(msg and msg.reason)
 end
 
-handlers[Wire.ERROR] = function(_, msg)
+handlers[Wire.ERROR] = function(game, msg)
   local text = Wire.text(msg.message, 120) or "The hub refused the connection."
+  -- A refusal that lands after we answered a challenge and before we were
+  -- welcomed is the wrong join code, whatever sentence the hub chose to say
+  -- it in -- so the hub's words are shown, and then the code screen, rather
+  -- than a refusal with nowhere to go from. The stored code is kept: a typo
+  -- is likelier than a rotated code, and clearing it would cost the player
+  -- the one they had.
+  local wrongCode = authSent and not transport:isReady()
+  local address = dialled
   transport:fail(text)
-  ui:say(text)
+  if wrongCode then
+    ui:say(text, function() M.askJoinCode(game, address, address ~= nil) end)
+  else
+    ui:say(text)
+  end
 end
 
 -- ------- the tick
 
+-- Feeding the entropy pool.
+--
+-- The pool is only worth what goes into it, and the cheapest genuinely
+-- varying material this process can see is right here: how long the last
+-- step took, where the CPU clock stands and how far it moved, and how big
+-- the heap is -- plus love.math.random() in game, which is a seeded xorshift
+-- and worth little on its own but whose position in its own sequence is not
+-- something an outsider knows.
+--
+-- This runs on every fixed step whether or not the player is connected, so
+-- by the time anyone reaches the HOST screen the pool has absorbed thousands
+-- of samples. It therefore obeys the hot-path rule: four numbers written
+-- into a table the pool allocated once, no strings, no garbage. The hashing
+-- happens on the pool's own schedule (one fold per 24 stirs), not here.
+--
+-- Nothing below can raise: every source is looked up before it is called and
+-- a missing one is simply not stirred.
+local lastClock = 0
+local loveRandom = nil
+local loveChecked = false
+
+local function stirEntropy(dt)
+  if not loveChecked then
+    loveChecked = true
+    if type(love) == "table" and type(love.math) == "table"
+       and type(love.math.random) == "function" then
+      loveRandom = love.math.random
+    end
+  end
+  local clock = (os and os.clock) and os.clock() or 0
+  local delta = clock - lastClock
+  lastClock = clock
+  -- The fourth slot is love.math.random() where there is a LOVE to ask, and
+  -- the step-to-step clock delta where there is not (the headless suite):
+  -- the delta is derivable from consecutive clock samples the pool already
+  -- has, so nothing is lost by trading it for the one that is not.
+  Hub.Entropy.shared:stir(dt, clock, collectgarbage("count"),
+    loveRandom and loveRandom() or delta)
+end
+
 local function tick(game, dt)
   ctx.game = game
   dt = dt or 0
+  stirEntropy(dt)
 
   -- The server pumps first. Reading sockets and running the hub is what
   -- fills the host's own loopback inbox, so doing it after the client poll
@@ -523,6 +797,15 @@ function M.install()
       default = Config.DEFAULT_PLAYERS,
       min = Config.MIN_PLAYERS, max = Config.MAX_PLAYERS, step = 1 },
     { key = "hub", label = "JOIN", type = "text", default = Config.DEFAULT_HUB },
+    -- The standing join code, so it can be seen and changed deliberately
+    -- rather than only when a hub happens to ask for it. A code typed for a
+    -- particular hub is stored against that hub (see M.joinCode); this row
+    -- is the fallback, and the one a player who only ever plays on one hub
+    -- ever needs. maxLen so the manager's own naming screen -- which
+    -- defaults to seven -- takes a whole code plus whatever punctuation a
+    -- pasted one brings, rather than cutting it short.
+    { key = "code", label = "JOIN CODE", type = "text", default = "",
+      maxLen = Config.CODE_ENTRY_MAX },
     { key = "sprite", label = "MY SPRITE", type = "choice",
       default = Config.DEFAULT_SPRITE, choices = spriteChoices },
     { key = "bubbles", label = "BUBBLES", type = "toggle", default = true },
@@ -579,6 +862,10 @@ function M.install()
   -- nothing to say (these NPCs carry no text), so this adds the interaction
   -- rather than replacing one.
   mod.events:on("world.interacted", function(payload)
+    -- An A-press is a human deciding to press A, which is the least
+    -- predictable timing this process ever sees; it goes into the pool
+    -- before anything else here can return early.
+    stirEntropy(0)
     if not (payload and payload.kind == "npc") then return end
     if not transport:isReady() then return end
     local player = ctx.roster:at(payload.mapId, payload.x, payload.y)

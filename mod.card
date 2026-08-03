@@ -23,8 +23,11 @@ return {
       "No NAT traversal. A host behind a router must forward port 7788 for "
         .. "anyone outside their LAN; a standalone hub (server/hub.js) on a "
         .. "public box is the alternative.",
-      "No host migration. If the host leaves, the game ends for everyone -- "
-        .. "they are told rather than left hanging.",
+      "No host migration when a player is the host. Hosting from the game "
+        .. "runs the relay inside that copy, so if the host leaves the game "
+        .. "ends for everyone -- they are told rather than left hanging, and "
+        .. "nobody else can take it over. A dedicated hub has no host at all: "
+        .. "a player leaving is just a player leaving.",
       "Remote players freeze mid-step while you have a menu or text box "
         .. "open, and resume when you close it. The engine updates only the "
         .. "top state, so the whole overworld pauses under a modal -- this "

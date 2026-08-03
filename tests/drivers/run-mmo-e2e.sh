@@ -16,6 +16,12 @@
 #
 # Two windows will open and drive themselves. Leave them alone until it
 # finishes -- clicking into them steals the input the drivers are queueing.
+#
+# The host locks the game with a six-character passcode -- it cannot do
+# otherwise; HostServer refuses to bind a port without one -- and the guest
+# types it on the real naming grid before anything is dialled, wrong once and
+# then right. There is no switch to skip it: MMO_JOIN_CODE=0 used to select a
+# game with no code, which is now a game that cannot start.
 
 set -uo pipefail
 cd "$(dirname "$0")/../../../.." || exit 1
@@ -40,7 +46,16 @@ HOST_ID="mmohost-$$"
 GUEST_ID="mmoguest-$$"
 HOST_LOG="/tmp/rby_mmo_host_$$.log"
 GUEST_LOG="/tmp/rby_mmo_guest_$$.log"
-TIMEOUT="${MMO_TIMEOUT:-420}"
+# Wall-clock budget per phase (host coming up, then both sides reaching DONE).
+#
+# This is a backstop, not an expectation: a healthy run finishes in about
+# seven minutes and the loop below exits the moment both sides print DONE, so
+# a larger number costs a good run nothing. It has to clear the longest
+# barrier in mmo_util's PHASE table (host_battle_done, 540s) with room, or the
+# harness kills a run that was about to report properly and replaces a real
+# verdict with "incomplete" -- which is how the frame-budget bug stayed
+# invisible for as long as it did.
+TIMEOUT="${MMO_TIMEOUT:-900}"
 
 # ------------------------------------------------------------------ preflight
 
@@ -76,7 +91,7 @@ SYNC_DIR="${MMO_SYNC_DIR:-/tmp/rby_mmo_sync}"
 # through an import.
 check_rom_config || exit 2
 
-rm -f "$ADDR_FILE" "$HOST_LOG" "$GUEST_LOG"
+rm -f "$ADDR_FILE" "$ADDR_FILE.tmp" "$HOST_LOG" "$GUEST_LOG"
 # stale phase markers would let a rerun skip straight past every barrier
 rm -rf "$SYNC_DIR"
 mkdir -p "$SHOT_DIR" "$SYNC_DIR"
@@ -182,7 +197,8 @@ else
   echo "        importer. Set ROM_PATH in $ENV_FILE to make this reliable."
 fi
 
-echo "  host limit: $LIMIT   shots: $SHOT_DIR"
+echo "  host limit: $LIMIT   join code: required (6 chars, minted in game)"
+echo "  shots: $SHOT_DIR"
 echo "  starting host..."
 MMO_ADDR_FILE="$ADDR_FILE" SHOT_DIR="$SHOT_DIR" MMO_LIMIT="$LIMIT" MMO_SYNC_DIR="$SYNC_DIR" \
   POKEPORT_IDENTITY="$HOST_ID" POKEPORT_DRIVER="$DRIVERS/mmo_host.lua" \
@@ -200,7 +216,8 @@ done
   tail -30 "$HOST_LOG" >&2
   exit 1
 }
-echo "  host is up at $(cat "$ADDR_FILE")"
+# first line only: the second is the join code, and it is not for a log
+echo "  host is up at $(head -1 "$ADDR_FILE")"
 
 echo "  starting guest..."
 MMO_ADDR_FILE="$ADDR_FILE" SHOT_DIR="$SHOT_DIR" MMO_SYNC_DIR="$SYNC_DIR" \

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "jubarteai": {
+      "source": "jubarteai/jubarteai-skills",
+      "sourceType": "github",
+      "skillPath": "skills/jubarteai/SKILL.md",
+      "computedHash": "be0df9a1f7722e4babbb836d2417b961c6b00c7047e5ab70a0b5a4633a4bb8f5"
+    }
+  }
+}

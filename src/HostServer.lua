@@ -13,6 +13,7 @@
 
 local need, mod = ...
 local Config = need("Config")
+local Wire = need("Wire")
 local Hub = need("Hub")
 
 local M = {}
@@ -96,8 +97,34 @@ end
 
 -- ------- lifecycle
 
-function M:start(port, maxPlayers)
+-- joinCode is required, and this is the layer that enforces it.
+--
+-- Hub is deliberately left able to run without one: it is pure logic, the
+-- suite builds it directly, and both halves of the handshake -- challenged
+-- and unchallenged -- have to stay exercisable under plain luajit.  This
+-- file is the only thing in the mod that opens a socket, so it is the only
+-- place where "no code" would mean a game a stranger can walk into.  Putting
+-- the invariant here makes it true of every hub anyone can actually reach,
+-- without making Hub untestable.
+--
+-- Absent and unusable are told apart because the remedies differ: one is
+-- "choose a code", the other "that one won't do".  Both are returned rather
+-- than raised -- the caller is inside a mod callback and has a screen to put
+-- the sentence on.  The code itself never reaches self.error and never
+-- reaches mod.log: an error string is read out on screen, and a log line
+-- outlives the game that wrote it.
+function M:start(port, maxPlayers, joinCode)
   if self.running then return false, "already hosting" end
+
+  if type(joinCode) ~= "string" or joinCode == "" then
+    self.error = "hosting needs a join code; set one from HOST > JOIN CODE"
+    return false, self.error
+  end
+  local code = Wire.code(joinCode)
+  if not code then
+    self.error = "that join code can't be used; pick another"
+    return false, self.error
+  end
 
   local socket = luasocket()
   if not socket then
@@ -119,7 +146,21 @@ function M:start(port, maxPlayers)
 
   self.server = server
   self.port = port
-  self.hub = Hub.new({ maxPlayers = maxPlayers })
+  -- Hub is pure logic and owns no logger; this is where a refused relay
+  -- payload becomes something a host can actually see. Trade and battle are
+  -- the only traffic on that path, so one of these lines is the difference
+  -- between "the trade half-happened" and knowing why. Hub only calls this
+  -- once per connection, so a peer sending nothing but junk cannot flood it.
+  self.hub = Hub.new({
+    maxPlayers = maxPlayers,
+    joinCode = code,
+    onDrop = function(reason, clientId)
+      mod.log:warn("refused a relayed message from player %s (%s); "
+        .. "if a trade or battle stalled, this is why -- ask them to "
+        .. "reconnect, and report it if it repeats",
+        tostring(clientId), tostring(reason))
+    end,
+  })
   self.conns = {}
   self.running = true
   self.error = nil
@@ -188,7 +229,13 @@ function M:localNet()
     close = function() net.closed = true end,
   }
 
-  client = self.hub:accept(peer)
+  -- Trusted, and only this one is: the handle above never leaves this
+  -- process, so nothing off the network can obtain it -- and a join code is
+  -- for keeping strangers out, not for making the host type their own code
+  -- to walk into the game they just started.  This is what keeps the code
+  -- being mandatory from locking the host out of their own hub: start()
+  -- refuses to run uncoded, and the host still walks in without typing it.
+  client = self.hub:accept(peer, true)
   if not client then return nil, "the game is full" end
 
   net.send = function(_, msg)

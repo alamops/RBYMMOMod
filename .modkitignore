@@ -8,18 +8,60 @@
 # fatal.
 tests/rby_mmo_test.lua
 
+# Test-fixture data, not mod content: the shared HMAC vectors that pin the Lua
+# client's auth answer against the Node hub's. Only tests/rby_mmo_test.lua
+# loads it, and that file is ignored one line above -- shipping the vectors
+# without the suite that reads them puts a table nothing in the archive can
+# open in front of a player.
+tests/fixtures/hmac_vectors.lua
+
 # The end-to-end drivers reach engine test infrastructure
 # (tests/drivers/util.lua) and only mean anything inside a checkout.
 tests/drivers/mmo_util.lua
 tests/drivers/mmo_host.lua
 tests/drivers/mmo_join.lua
 tests/drivers/run-mmo-e2e.sh
+# The dedicated-hub scenario: the same two reasons, plus a wrapper that shells
+# out to node. Listed by name because a bare tests/drivers/ line would do
+# nothing -- see the note at the top of this file.
+tests/drivers/mmo_guest.lua
+tests/drivers/run-hub-e2e.sh
 
-# Working notes for whoever picks this up next; not mod content.
+# Working notes for whoever picks this up next; not mod content. The two
+# machine-readable ones describe how coding agents are driven in this
+# checkout -- they configure a tool, not a game, and a player who unpacks the
+# archive has no use for either.
 CLAUDE.md
+AGENTS_CONFIG.yml
+skills-lock.json
 
 # server/ is deliberately NOT ignored: hub.js is plain node with no engine
 # imports, and someone who installs the package should be able to host.
+#
+# That reasoning now covers more files, and it still holds for all of them.
+# server/bin/, server/lib/, server/package.json, server/Dockerfile and
+# server/compose.yml stay in the archive for exactly the reason hub.js does:
+# the person who unpacks this should be able to host a world without going
+# back to GitHub for the missing half. `docker compose up` is only a complete
+# answer if the compose file, the Dockerfile it builds and the package.json
+# they describe all travel together -- ignoring any one of them would ship a
+# compose file that cannot build. They are inert to the game client, which
+# never opens anything under server/, and they carry no ROM-derived bytes, so
+# neither `lint` nor the fatal-warning `pack` gate has anything to say about
+# them.
+#
+# server/.dockerignore needs no entry and must not get one: modkit skips every
+# dot-prefixed file when it walks the tree (tools/modkit.py:174-176), so it
+# cannot be packed in the first place. The same is true of the .env and
+# .github entries below, which are kept only as documentation of intent.
+#
+# server/*.test.js is likewise left shipping, unchanged from before: hub.test.js
+# drives the hub over real sockets, and auth/cli/config/limits/server.test.js
+# cover the modules beside them. Every one of them requires only ./lib/* and
+# node core -- nothing from the engine, which is what earns
+# `tests/rby_mmo_test.lua` its entry above and not these. `npm test` is
+# `node --test`, which discovers all six, so shipping them is what makes
+# "check the copy you just unpacked" a command a host can actually run.
 
 # tools/play.sh and tools/env.sh assume the engine checkout layout, and
 # .env is machine-specific -- neither belongs in a distributed archive.
@@ -29,8 +71,12 @@ tools/play.sh
 .env.example
 
 # Repo furniture, not mod content: the release pipeline and its notes.
+# Implementation plans are working notes for contributors, on the same footing
+# as CLAUDE.md above; each new one belongs on this list by name, because a
+# bare docs/plans/ line would do nothing.
 .github/workflows/release.yml
 docs/plans/in-game-hosting.md
+docs/plans/self-hosting-server-app.md
 
 # Screenshots of a running game are composited from tiles, sprites and font
 # glyphs decoded from the player's own ROM. They illustrate a GitHub page
@@ -47,3 +93,17 @@ docs/screenshots/chat-log.png
 docs/screenshots/interact-menu.png
 docs/screenshots/link-battle.png
 docs/screenshots/trainer-card.png
+#
+# The in-game hosting and joining flows, captured by
+# tests/drivers/run-mmo-e2e.sh. Four of these are pure UI -- a list menu and
+# two naming grids, drawn by the engine's widgets and this mod, with no map
+# under them -- and the other three are text boxes over the overworld, which
+# is the same composite overworld-presence.png above already is. Either way
+# the rule is the file's, not the linter's, so each one is listed by name.
+docs/screenshots/host-setup.png
+docs/screenshots/host-passcode-menu.png
+docs/screenshots/host-passcode-shown.png
+docs/screenshots/host-address.png
+docs/screenshots/join-address.png
+docs/screenshots/join-passcode.png
+docs/screenshots/join-connected.png

@@ -11,6 +11,13 @@
 --   * hand the resulting session to the engine's machinery,
 --   * and tear it down when either side leaves.
 --
+-- One rule runs through the teardown, and it is the only thing standing
+-- between a trade and a duplicated Pokemon: **finishing locally is not what
+-- ends a session.** A session ends when both sides have applied, when the
+-- connection genuinely drops, or on a timeout measured in tens of seconds --
+-- never on this process getting there first. Everything in the lifecycle
+-- section below is a consequence of that.
+--
 -- Running the real handshake matters.  It is what decides whether two
 -- players with different mod sets may battle at all, and it produces the
 -- `strict` and `verdict` values the trade and battle code need to refuse a
@@ -23,6 +30,30 @@ local SessionNet = need("SessionNet")
 
 local M = {}
 M.__index = M
+
+-- The one message this file adds to the engine's link vocabulary: "I have
+-- applied my half of the trade."  It exists so that neither side has to
+-- guess when the session is safe to take down -- see advanceTrade's `done`
+-- branch for what happens when the guess is wrong.  Prefixed, because it
+-- travels inside the same envelope as hello/party/pick/confirm and must not
+-- collide with anything the engine may add later; TradeSession:handle
+-- ignores a type it does not know, so a peer running an older build of this
+-- mod simply never hears it and falls back to its own teardown.
+local APPLIED = "mmo_applied"
+
+-- How long this side waits for the peer once it can no longer make progress
+-- on its own.  Both are long relative to a hub round trip on purpose: being
+-- impatient here is exactly what broke the trade in the first place.
+--
+-- CONFIRM_TIMEOUT covers "our confirm is on the wire, theirs has not come
+-- back" -- there is a human on the other end reading a yes/no box, so it is
+-- generous.  Nothing has been applied when it fires, and nothing can have
+-- been applied on the far side either: a peer that never sent its confirm
+-- never reached `done`.
+local CONFIRM_TIMEOUT = 60
+-- SETTLE_TIMEOUT covers the acknowledgement after both sides have applied.
+-- No human is involved and nothing is at stake by then, so it is short.
+local SETTLE_TIMEOUT = 10
 
 local linkModules, linkTried
 
@@ -50,6 +81,7 @@ function M.new(transport, ui)
     active = nil,      -- the one live session; two at once is never valid
     outgoing = nil,    -- { to, kind } while waiting for an answer
     incoming = nil,    -- { from, name, kind } while the prompt is up
+    drops = 0,         -- relays refused since the current session began
   }, M)
 end
 
@@ -116,6 +148,9 @@ function M:onSession(game, msg)
   local modules = link()
   if not modules then return end
 
+  -- one warning per session, so the count starts again with the session
+  self.drops = 0
+
   local net = SessionNet.new(self.transport, peerId, peerName)
   self.active = {
     peerId = peerId,
@@ -133,23 +168,72 @@ function M:onSession(game, msg)
   net:send(myHello)
 end
 
+-- A refused relay is the same silence src/Hub.lua's onDrop was given a voice
+-- for, one layer further in.  Nothing but trade and battle rides this path,
+-- so a payload dropped here is a trade that half-happened -- and until this
+-- existed it left no trace at all, on either side of the wire.
+--
+-- Once per session, and never again for it: a peer sending nothing but junk
+-- costs the host one line, not a flooded terminal.  The count is reset in
+-- onSession, which is the only place a session begins.
+function M:noteDrop(reason)
+  self.drops = (self.drops or 0) + 1
+  if self.drops ~= 1 then return end
+  mod.log:warn("dropped a relay from the hub (%s); if a trade or battle "
+    .. "seems stuck, leave it from START > MMO and ask again", reason)
+end
+
 function M:onRelay(msg)
   local session = self.active
-  if not session then return end
-  if Wire.id(msg.from) ~= session.peerId then return end
-  if type(msg.payload) ~= "table" then return end
+  if not session then
+    return self:noteDrop("no session is open on this side")
+  end
+  if Wire.id(msg.from) ~= session.peerId then
+    return self:noteDrop("from someone who is not the peer")
+  end
+  if type(msg.payload) ~= "table" then
+    return self:noteDrop("the payload is not a table")
+  end
   session.net:deliver(msg.payload)
 end
 
+-- The hub says the other side is gone.
+--
+-- Marked, not deleted, while a trade is live.  The hub forwards in order, so
+-- a relay sent before the goodbye arrives before it -- but both land in the
+-- same batch of inbound messages, and deleting the session here threw away a
+-- confirm that had already been delivered into its inbox and was one poll
+-- away from completing the trade.  That is the duplication bug: whichever
+-- side finished first applied and left, and the other was cut off before it
+-- could.  So update() gets one more pass to drain what already arrived, and
+-- ends the session itself once it has.
+--
+-- Every other stage has nothing buffered worth reading -- the battle owns
+-- its own inbox and watches net.closed -- so those end here as before.
 function M:onSessionEnd(reason)
   local session = self.active
-  self.active = nil
   self.outgoing = nil
-  if not session then return end
+  if not session then
+    self.active = nil
+    return
+  end
+  session.peerGone = reason or "peer_left"
   session.net.closed = true
+  if session.stage == "trade" or session.stage == "settling" then return end
+  self.active = nil
   if reason == "peer_left" then
     self.ui:say(("%s disconnected."):format(session.peerName))
   end
+end
+
+-- What to put on screen when a session ends because the peer left.  A trade
+-- that completed has said everything worth saying already; "X disconnected."
+-- stacked on top of "X was traded over!" reads as a failure when it was a
+-- success.
+function M:leaveMessage(session)
+  if session.peerGone ~= "peer_left" then return nil end
+  if session.applied then return nil end
+  return ("%s disconnected."):format(session.peerName)
 end
 
 function M:endSession(message)
@@ -246,7 +330,12 @@ function M:advanceTrade(game, session)
       session.net:send(trade:pick(index))
     end)
 
-  elseif trade.stage == "confirming" and not session.confirmOpen then
+  -- myConfirm, not just the box flag: the machine sits in "confirming" from
+  -- the moment this side answers until the peer's answer arrives, so a test
+  -- on the stage alone re-opened the box the instant the player closed it
+  -- and asked them to agree to the same trade over and over.
+  elseif trade.stage == "confirming" and trade.myConfirm == nil
+         and not session.confirmOpen then
     session.confirmOpen = true
     local theirs = trade.theirParty and trade.theirParty[trade.theirPick]
     local label = theirs and tostring(theirs.species) or "their POKéMON"
@@ -258,11 +347,33 @@ function M:advanceTrade(game, session)
   elseif trade.stage == "done" and not session.applied then
     session.applied = true
     local ok, received = pcall(function() return trade:apply(game) end)
+
+    -- Reaching "done" means two things at once: the peer's confirm is in
+    -- hand, and this side's own confirm went out before the machine could
+    -- get here.  So the peer is one already-sent message away from applying
+    -- too -- and tearing the session down at this point, which is what this
+    -- used to do, pulled the relay out from under that message.  The hub
+    -- told the other side "peer_left", it dropped its session, and the
+    -- confirm it was holding was never read: one Pokemon on both sides and
+    -- none on the other, decided by nothing but which process got here
+    -- first.
+    --
+    -- The session therefore outlives local completion.  It ends when the
+    -- peer says it applied too, when the connection genuinely drops, or on
+    -- SETTLE_TIMEOUT -- never on this side finishing.
+    session.stage = "settling"
+    session.settleClock = 0
+    session.net:send({ type = APPLIED })
+
     if ok then
       local name = received and tostring(received.species) or "a POKéMON"
-      self:endSession(("%s was\ntraded over!"):format(name))
+      self.ui:say(("%s was\ntraded over!"):format(name))
     else
-      self:endSession("The trade failed\nto complete.")
+      -- The peer has our confirm and will apply regardless, so there is no
+      -- undo to offer; what there is, is a way to see what actually landed.
+      mod.log:warn("applying the finished trade raised (%s) -- check the "
+        .. "party from START > POKéMON before trading again", tostring(received))
+      self.ui:say("The trade failed\nto complete.")
     end
 
   elseif trade.stage == "cancelled" and not session.applied then
@@ -279,7 +390,12 @@ function M:update(game, dt)
   if not session then return end
 
   session.net:update()
-  if session.net.closed and session.stage ~= "ended" then
+  -- A transport that died under us is not a peer that finished, so nothing
+  -- is applied here that was not applied already.  peerGone is excluded
+  -- because onSessionEnd closes the net deliberately and the drain below is
+  -- the whole point of still being here.
+  if session.net.closed and not session.peerGone then
+    if session.applied then return self:endSession(nil) end
     return self:endSession(("The link with %s\nwas lost."):format(session.peerName))
   end
 
@@ -293,7 +409,12 @@ function M:update(game, dt)
 
   for _, msg in ipairs(session.net:poll()) do
     if type(msg) == "table" and type(msg.type) == "string" then
-      if session.stage == "handshake" then
+      -- Read before the stage is consulted, because it can arrive in the
+      -- same batch as the confirm that puts this side into "settling" --
+      -- the peer sends both in that order and the hub forwards in order.
+      if msg.type == APPLIED then
+        session.peerApplied = true
+      elseif session.stage == "handshake" then
         self:handleHandshake(game, session, msg, modules)
       elseif session.stage == "battleWait" then
         self:handleBattleWait(game, session, msg, modules)
@@ -304,6 +425,51 @@ function M:update(game, dt)
   end
 
   if session.stage == "trade" then self:advanceTrade(game, session) end
+  -- advanceTrade can end the session itself (a cancelled trade), and an
+  -- ended session must not be timed out or torn down twice
+  if self.active ~= session then return end
+
+  -- Last, and only after the drain above: a peer that finished the trade on
+  -- its way out is applied here before its goodbye is acted on.
+  if session.peerGone then
+    return self:endSession(self:leaveMessage(session))
+  end
+
+  self:waitOut(session, dt)
+end
+
+-- The two places a session can no longer make progress on its own, and how
+-- long each is given.  Everything else it might be waiting on is a human
+-- looking at a menu, and a human is allowed to take as long as they like --
+-- arming a clock against one of those would abandon live trades.
+function M:waitOut(session, dt)
+  dt = dt or 0
+
+  if session.stage == "settling" then
+    -- Both halves are applied by now; all that is outstanding is the other
+    -- end saying so, and neither party changes whichever way this goes.
+    if session.peerApplied then return self:endSession(nil) end
+    session.settleClock = (session.settleClock or 0) + dt
+    if session.settleClock >= SETTLE_TIMEOUT then
+      return self:endSession(nil)
+    end
+    return
+  end
+
+  local trade = session.stage == "trade" and session.trade
+  if trade and trade.stage == "confirming" and trade.myConfirm ~= nil then
+    session.confirmClock = (session.confirmClock or 0) + dt
+    if session.confirmClock >= CONFIRM_TIMEOUT then
+      -- Fails closed, and it can only fail closed: the peer never sent the
+      -- confirm this was waiting for, so the peer never reached "done"
+      -- either and neither party has been touched.  The bye says so out
+      -- loud rather than leaving them on a box that will never resolve.
+      session.net:send({ type = "bye" })
+      return self:endSession("They never answered.\nThe trade is off.")
+    end
+  else
+    session.confirmClock = 0
+  end
 end
 
 return M
