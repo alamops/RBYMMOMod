@@ -155,18 +155,30 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # it onward to wherever it collects logs. That is durable, replicated storage
 # for a credential, sitting outside the 0600 config file that exists to hold
 # it, and it is exactly what lib/cli.js:29-34 refuses to do when it keeps join
-# codes away from the logger. So `init`'s output is redirected into
-# /data/join-code.txt (created under `umask 077`, so 0600 before a byte of it
-# exists, on the 0700 volume beside config.json), and the log gets one line
-# saying a code was made and how to read it back.
+# codes away from the logger. So the code goes to /data/join-code.txt (created
+# under `umask 077`, so 0600 before a byte of it exists, on the 0700 volume
+# beside config.json), and the log gets one line saying a code was made and how
+# to read it back.
+#
+# **The code, and nothing else.** This file used to hold `init`'s whole output,
+# which included its summary of the settings -- port, player cap, log level --
+# as they were at first boot. Nothing ever rewrites the file, so the moment
+# somebody ran `config set maxPlayers 16` that summary became a lie sitting on
+# disk, in the file the README tells people to read. It was read, it said 4,
+# and a working hub looked broken. A snapshot of settings has no reader; the
+# passcode does. So only the passcode is written, under two comment lines
+# saying what would make even that stale (a rotation) and what is authoritative
+# when it is (`invite list --reveal`, which reads the live config).
 #
 # On failure the captured output *is* printed, to stderr, and the file is
 # removed -- a first run that cannot write its config must say why, and the
-# thing it failed to write holds no secret.
+# thing it failed to write holds no secret. That capture goes to /tmp rather
+# than /data now: it exists only to be shown on the failure path, and /tmp is
+# a tmpfs under compose, so it cannot outlive the boot that produced it.
 #
 # CMD stays overridable, so every other verb still works:
 #   docker compose exec hub rby-mmo-hub invite
 #   docker run --rm -v rby-mmo-data:/data rby-mmo-hub doctor
 # ---------------------------------------------------------------------------
-ENTRYPOINT ["/sbin/tini", "--", "/bin/sh", "-c", "if [ ! -f \"$RBY_MMO_CONFIG\" ]; then code=\"$(dirname \"$RBY_MMO_CONFIG\")/join-code.txt\"; (umask 077; : > \"$code\") || { echo \"cannot write $code -- is /data writable?\" >&2; exit 1; }; if node /app/bin/rby-mmo-hub.js init --yes > \"$code\" 2>&1; then chmod 0600 \"$code\"; echo \"first run: a join code was generated, and is deliberately not in this log.\"; echo \"  read it:  docker compose exec hub rby-mmo-hub invite list --reveal\"; echo \"  or:       docker compose exec hub cat $code\"; else cat \"$code\" >&2; rm -f \"$code\"; exit 1; fi; fi; exec node /app/bin/rby-mmo-hub.js \"$@\"", "rby-mmo-hub"]
+ENTRYPOINT ["/sbin/tini", "--", "/bin/sh", "-c", "if [ ! -f \"$RBY_MMO_CONFIG\" ]; then code=\"$(dirname \"$RBY_MMO_CONFIG\")/join-code.txt\"; out=\"/tmp/rby-init.$$\"; (umask 077; : > \"$code\") || { echo \"cannot write $code -- is /data writable?\" >&2; exit 1; }; if node /app/bin/rby-mmo-hub.js init --yes > \"$out\" 2>&1; then { echo '# The join code this hub was created with, and nothing else -- the'; echo '# settings that used to be in this file went stale the first time one'; echo '# of them was changed. Nothing rewrites this, so if the code has been'; echo '# rotated since, the live one is: rby-mmo-hub invite list --reveal'; node /app/bin/rby-mmo-hub.js invite list --reveal | awk '$NF ~ /^[0-9A-HJKMNP-TV-Z]{6}$/ { print $NF; exit }'; } > \"$code\"; chmod 0600 \"$code\"; rm -f \"$out\"; echo \"first run: a join code was generated, and is deliberately not in this log.\"; echo \"  read it:  docker compose exec hub rby-mmo-hub invite list --reveal\"; echo \"  or:       docker compose exec hub cat $code\"; else cat \"$out\" >&2; rm -f \"$out\" \"$code\"; exit 1; fi; fi; exec node /app/bin/rby-mmo-hub.js \"$@\"", "rby-mmo-hub"]
 CMD ["start"]
