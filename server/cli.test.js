@@ -338,6 +338,50 @@ async function initScenarios() {
 // a passcode is required: init cannot be talked into an open hub
 // =====================================================================
 
+// A verb that edits a config which is not there must not answer "run init".
+//
+// This is a regression test for a real incident, not a hypothetical. A host set
+// maxPlayers on a hub running in Docker, from the host shell rather than inside
+// the container; the config was not there, the CLI said to run `init`, they
+// did, and `init` minted a second config with a fresh passcode and the default
+// cap. The hub they cared about never changed, so the setting "did not stick"
+// and a healthy hub looked broken. `init` is the last resort here, never the
+// opening suggestion.
+async function missingConfigAdviceScenario() {
+  const dir = scratchDir('missing-config');
+  const absent = path.join(dir, 'nope.json');
+
+  const bare = await runCli(['config', 'set', 'maxPlayers', '16', '--config', absent], { cwd: dir });
+  ok(bare.code !== cli.OK, 'editing a config that is not there fails');
+  ok(new RegExp(absent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(bare.stderr),
+    'and says which path it looked at, so a wrong --config is visible');
+  ok(/docker compose exec/.test(bare.stderr),
+    'it raises the container case, which is how most people arrive here');
+  const initAt = bare.stderr.indexOf('init');
+  const dockerAt = bare.stderr.indexOf('docker compose exec');
+  ok(dockerAt !== -1 && (initAt === -1 || dockerAt < initAt),
+    'and it never leads with init -- that is what mints a duplicate hub');
+  ok(/fresh passcode|new passcode/i.test(bare.stderr),
+    'when init is mentioned at all, it says it mints a passcode nobody has');
+
+  // --- a config that exists somewhere obvious is named, and init is not
+  //     suggested at all: there is nothing to create.
+  const real = path.join(dir, 'config.json');
+  const made = await runCli(['init', '--yes', '--config', real], { cwd: dir });
+  ok(made.code === cli.OK, 'a real config exists to be found');
+
+  const elsewhere = path.join(dir, 'elsewhere.json');
+  const found = await runCli(['config', 'set', 'maxPlayers', '16', '--config', elsewhere],
+    { cwd: dir, env: { RBY_MMO_CONFIG: real } });
+  ok(found.code !== cli.OK, 'still refuses to edit the file that is not there');
+  ok(found.stderr.includes(real),
+    'but names the config it can actually see, by full path');
+  ok(/--config/.test(found.stderr),
+    'and says how to point at it');
+  ok(!/\binit\b/.test(found.stderr),
+    'and does not mention init at all -- there is nothing to create');
+}
+
 async function authIsMandatoryScenario() {
   const dir = scratchDir('auth-required');
 
@@ -1094,6 +1138,7 @@ async function main() {
     await startSurvivesAnUnreachableRouterScenario();
     await throttleVisibilityScenario();
     await doctorScenario();
+    await missingConfigAdviceScenario();
     await exitCodesScenario();
     await spawnExitCodeScenario();
   } finally {
