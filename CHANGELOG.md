@@ -4,7 +4,15 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [0.2.3] - 2026-08-03
+## [0.2.5] - 2026-08-03
+
+Not 0.2.3, which this branch originally claimed: `v0.2.3` and `v0.2.4` were
+already tagged on `main` for the two fixes at the end of `Fixed` below, and
+neither bumped `manifest.version` — which stood at 0.2.2 while two releases
+went out on top of it. The first of them left no entry here at all and the
+second left its notes under `Unreleased`. Both are written up below, under
+the first version number nobody has used, which is what makes the heading
+and the manifest agree again. Same slip as 0.2.1, recorded the same way.
 
 ### Added
 
@@ -56,6 +64,28 @@ here must match `manifest.version`.
   degraded to `PLAYER` for anyone who never opened the character creator,
   instead of falling back to the save's trainer name. Both now use the same
   `arg1` shim the rest of the module's entry points do.
+- **The typed line ran off the right of the screen.** `NamingScreen` lays its
+  line out as `maxLen` slots of 8px from a fixed x=56, a layout sized for the
+  vanilla seven-character name; every grid this mod opens is longer, so an
+  address ran out to 312 and the port — the half most worth checking —
+  disappeared off the edge. `Ui.fieldLayout` is a pure centred-and-windowed
+  layout the mod repaints that one row with, on its own screens only. Shipped
+  as tag `v0.2.3` with no entry here; written up now.
+- **Leaving a game left you wearing the character you picked for it.** The
+  chosen look is re-worn whenever the world may have rebuilt the player, and
+  that path used to throw away the stashed trainer sheet first — but the
+  overworld hands back the *same* player object across an ordinary map
+  change, so what got stashed the second time was this mod's own renderer.
+  One doorway was enough: leaving then "restored" you to the hub character,
+  in your own single-player game, permanently. The original is now pinned to
+  the entity it was taken from, so re-wearing cannot overwrite it and a
+  player the engine genuinely rebuilt is left with its own sheet.
+- **A dropped connection never gave the trainer back at all.** A timeout, a
+  socket error or a hub hanging up tore down the roster and the avatars but
+  nothing else, so a player who was disconnected rather than leaving stayed
+  dressed as their hub character — and any trade session stayed open on a
+  socket that was gone. An unasked-for leave now runs the same teardown a
+  deliberate one does. Shipped as tag `v0.2.4`, under `Unreleased` until now.
 
 ## [0.2.2] - 2026-08-03
 
@@ -238,6 +268,16 @@ in a sentence the game already renders rather than failing silently.
 
 ### Fixed
 
+- **The address you type ran off the right of the screen.** `NamingScreen`
+  lays its typed line out as `maxLen` slots of 8px from a fixed x=56, which
+  fits the vanilla seven-character name and nothing longer. Every grid this
+  mod opens is longer: at 32 the line ran to 312 on a 160-wide screen, so
+  `192.168.1.20:7788` lost its port off the edge — the half a player most
+  needs to check — and what was left sat hard against the right side instead
+  of centred. Chat (16) overflowed too and a join code (12) stopped exactly on
+  the edge. The mod now repaints that one row on its own grids: as many slots
+  as fit between the margins, centred, showing the end of the line once it is
+  longer than the window. No other screen is touched.
 - **Silent sockets could lock everyone out of the hub.** `hub.js` registered a
   connection in its client table on accept, so the player cap counted peers
   that had never said `hello` — four of them held a four-player hub shut for
