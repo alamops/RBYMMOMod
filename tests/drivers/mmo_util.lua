@@ -118,6 +118,73 @@ function M.exports(game)
   return loader and loader.exports and loader.exports.rby_mmo or nil
 end
 
+-- Which characters of `text` the live font cannot draw.
+--
+-- **A character with no glyph is not an error anywhere -- it is a silence.**
+-- Font.draw draws nothing for it while Font.width still advances eight
+-- pixels, so a label carrying one renders a glyph too wide with a blank hole
+-- in it: wrong on screen, and invisible to every assertion that reads the
+-- string rather than the pixels. A party marker of `*` shipped that way and
+-- survived a fully green end-to-end run.
+--
+-- Asked of Font.split rather than of data.font.charmap, and the difference
+-- matters: the charmap is a numeric-keyed *list*, so `charmap["*"]` is nil
+-- for every character including the ones that draw perfectly well, and a
+-- check written that way passes everything. split() is the renderer's own
+-- resolution path -- greedy, multi-byte aware, and aware of pages a mod
+-- registered -- and it marks an unresolved span with `code == nil`.
+--
+-- Only a real run can answer this. The committed fixture font carries
+-- letters and digits and nothing else, so a headless suite would reject a
+-- bracket the game draws happily.
+--
+-- A span carries `from`/`to` into the source string and, once resolved, a
+-- `code`; a span with no `code` is a character with no glyph. The characters
+-- come back out with text:sub(from, to) rather than from the span, because
+-- a span holds indices and not the text it covers.
+--
+-- Returns a list, empty when every character is drawable.
+--
+-- **Guarded against an unloaded font, which is the failure this helper would
+-- otherwise invent.** Font.split resolves nothing at all before Font.load
+-- has run, so every span comes back code-less and a naive version reports
+-- every character of every string as undrawable -- a wall of false failures
+-- that says nothing about the text. So a control string is asked first: if
+-- the letter A has no glyph, the font is not ready and that is what gets
+-- said, rather than a list blaming the caller's text.
+local UNDRAWABLE_CONTROL = "A"
+
+function M.undrawable(game, text)
+  if type(text) ~= "string" or text == "" then return {} end
+  local ok, Font = pcall(require, "src.render.Font")
+  if not (ok and Font and Font.split) then
+    return { "?FONT-UNAVAILABLE" }
+  end
+
+  local function spansOf(s)
+    local got, spans = pcall(Font.split, s)
+    if got and type(spans) == "table" then return spans end
+    return nil
+  end
+
+  local control = spansOf(UNDRAWABLE_CONTROL)
+  if not (control and control[1] and control[1].code) then
+    return { "?FONT-NOT-LOADED" }
+  end
+
+  local spans = spansOf(text)
+  if not spans then return { "?FONT-SPLIT-FAILED" } end
+
+  local missing = {}
+  for _, span in ipairs(spans) do
+    if type(span) == "table" and span.code == nil then
+      local char = text:sub(span.from or 1, span.to or 0)
+      if char ~= " " and char ~= "" then missing[#missing + 1] = char end
+    end
+  end
+  return missing
+end
+
 -- The mod ships experimental, so a run where the wrapper forgot to enable
 -- it would otherwise fail deep inside a menu that never appears. Say so up
 -- front instead.
@@ -505,6 +572,15 @@ local PHASE = {
   -- both sides repeat their lines until they hear the other's, in two scopes
   hub_a_chat             = 300,  -- 150 chat drive
   hub_b_chat             = 300,  -- the same
+  -- b waits on a walking the PLAYERS menu and picking INVITE
+  hub_a_party_asked      = 180,  -- menus
+  -- each waits on the other reaching the far side of the members screen:
+  -- forming the party, watching the flag land, and walking two menus
+  hub_a_party            = 300,  -- 90 forming + 60 flag + menus
+  hub_b_party            = 300,  -- the same
+  -- b presses LEAVE; a only watches, so its budget is the menus b walks
+  hub_a_partyleft        = 180,  -- menus + the confirm box
+  hub_b_partyleft        = 180,  -- the same
   -- b waits on a walking the PLAYERS menu, reading the card and asking
   hub_a_trade_asked      = 180,  -- menus + profile card
   -- each waits on the other's half of the trade

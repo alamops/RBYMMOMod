@@ -8,7 +8,16 @@ M.MOD_ID = "rby_mmo"
 -- Bumped when a wire change is not backward compatible.  The hub refuses a
 -- client whose PROTOCOL differs, with a message naming both versions --
 -- silently talking a different dialect is the worst failure mode here.
-M.PROTOCOL = 2
+--
+-- 3 added parties.  Nothing was removed, so an older client's messages would
+-- all still parse -- but the failure that mattered is the other direction:
+-- against a protocol-2 hub, an invite and a party chat line are message
+-- types and a scope that hub has never heard of, and its handler table
+-- answers an unknown type with silence.  The player would press INVITE and
+-- watch nothing happen, forever, with nothing on screen to act on.  A
+-- refusal that names both versions is the better sentence, so the number
+-- moved.
+M.PROTOCOL = 3
 
 M.DEFAULT_HUB = "127.0.0.1:7788"
 M.DEFAULT_PORT = 7788
@@ -48,8 +57,21 @@ M.PRESENCE_INTERVAL = 0.125
 -- drift lasts, so it is despawned and respawned at the true cell instead.
 M.RESYNC_DISTANCE = 6
 
--- Chat
-M.CHAT_SCOPES = { "global", "local", "private" }
+-- Parties: you and one friend, travelling together.
+--
+-- Two is the whole design, not a first step towards six.  A party here is a
+-- standing pair -- one marker over one head, one extra chat scope, one
+-- members list that fits in a command box -- and every rule that makes it
+-- feel solid follows from the pair: an invite is only offered when *both*
+-- sides are unattached, and either member leaving ends it for both, because
+-- with two people "the party continues without you" is not a thing that
+-- exists.  Raising this number would not widen the feature, it would make
+-- all three of those rules wrong at once.
+M.PARTY_MAX = 2
+
+-- Chat.  "party" is delivered to the other member wherever they are, so it
+-- is the one scope with neither a radius nor a name to type.
+M.CHAT_SCOPES = { "global", "local", "private", "party" }
 M.LOCAL_RADIUS = 12          -- tiles, and same map
 M.CHAT_HISTORY = 64          -- lines kept for the chat screen
 M.BUBBLE_SECONDS = 5         -- how long a bubble floats over a head

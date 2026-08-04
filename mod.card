@@ -1,7 +1,9 @@
 return {
-  summary = "Play Kanto with friends: see them walk, chat, trade and battle.",
+  summary = "Play Kanto with friends: see them walk, team up, chat, trade "
+    .. "and battle.",
   author = "alamo",
-  tags = { "multiplayer", "mmo", "chat", "trade", "ui", "experimental" },
+  tags = { "multiplayer", "mmo", "chat", "party", "trade", "ui",
+           "experimental" },
 
   differences = {
     changed = {
@@ -13,7 +15,14 @@ return {
       "HOST GAME and JOIN GAME in the MMO menu -- no separate server to "
         .. "install; one player hosts from inside the game and picks the "
         .. "limit (2-64) while doing it.",
-      "Global, nearby and private chat, composed on the naming grid.",
+      "Global, nearby, party and private chat, composed on the naming grid.",
+      "Parties of two: invite a friend from the menu you get by walking up "
+        .. "and pressing A, and travel together -- open the TOWN MAP and "
+        .. "their character is standing at the city they are in, they are "
+        .. "on your map as their own character with their nickname over its "
+        .. "head marked with the cursor glyph, the PLAYERS list marks them, "
+        .. "and a members list carries both trainer cards and a chat scope "
+        .. "that reaches them anywhere.",
       "Trade and battle requests from anywhere, run by the engine's own "
         .. "link code over the hub.",
       "A number page on this mod's naming screens, because the vanilla "
@@ -50,6 +59,10 @@ return {
         .. "the engine before the menu opens: the avatar is a real NPC with "
         .. "no dialogue, and the engine warns on that path.",
       "Only one trade or battle at a time, per player.",
+      "A party is exactly two players, and either one leaving ends it for "
+        .. "both -- there is no party of one and no third seat. An invite "
+        .. "that is never answered stays outstanding until one of them "
+        .. "disconnects; nothing expires it.",
       "The hub has a flood gate but no moderation, accounts, or bans. Run "
         .. "one for people you know.",
       "No position interpolation: a remote player walks tile to tile at the "

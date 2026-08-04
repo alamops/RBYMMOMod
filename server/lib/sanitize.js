@@ -115,16 +115,35 @@ function payloadOk(value) {
 
 const FACINGS = new Set(['up', 'down', 'left', 'right']);
 const KINDS = new Set(['trade', 'battle']);
-const SCOPES = new Set(['global', 'local', 'private']);
+const SCOPES = new Set(['global', 'local', 'private', 'party']);
+
+// You and one friend. The rules that make a party feel solid all follow from
+// the pair -- an invite is only offered when both sides are unattached, and
+// either member leaving ends it for both -- so this is the design, not a
+// first step towards six. Kept in step with Config.PARTY_MAX.
+const PARTY_MAX = 2;
 
 const NAME_MAX = 10;
 const MESSAGE_MAX = 60;
 const LOCAL_RADIUS = 12;
 const MAX_LINE = 64 * 1024;
 
+// One row of a party's members list. Mirrors Wire.member: identity only,
+// never position -- where a member is standing already arrives several times
+// a second as mmo.move, and a stale second copy would give the members
+// screen an answer that visibly disagreed with the map.
+function cleanMember(value) {
+  if (value === null || typeof value !== 'object') return null;
+  const id = cleanId(value.id);
+  const name = cleanText(value.name, NAME_MAX);
+  if (!id || !name) return null;
+  return { id, name };
+}
+
 module.exports = {
   cleanText,
   cleanId,
+  cleanMember,
   cleanSpriteId,
   cleanMapId,
   cleanInt,
@@ -135,6 +154,7 @@ module.exports = {
   FACINGS,
   KINDS,
   SCOPES,
+  PARTY_MAX,
   NAME_MAX,
   MESSAGE_MAX,
   LOCAL_RADIUS,

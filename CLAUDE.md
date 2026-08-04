@@ -24,6 +24,7 @@ src/Transport.lua    hub connection, built on src/link/Net.lua's TCP framing
 src/Roster.lua       who is online and where
 src/Avatars.lua      remote players as runtime NPCs, driven by scriptMove
 src/Chat.lua         scrollback + speech bubbles
+src/Party.lua        the two-player party, and the invite that forms one
 src/Overlay.lua      render.hud drawing (nameplates, bubbles)
 src/Ui.lua           every registered screen
 src/SessionNet.lua   a Net-shaped shim so engine link code runs over the hub
