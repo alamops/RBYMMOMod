@@ -17,7 +17,13 @@ M.MOD_ID = "rby_mmo"
 -- watch nothing happen, forever, with nothing on screen to act on.  A
 -- refusal that names both versions is the better sentence, so the number
 -- moved.
-M.PROTOCOL = 3
+--
+-- 4 adds ranked PVP, and moved for the same reason rather than a different
+-- one: a protocol-3 hub has never heard of a battle result or a leaderboard
+-- request, so a newer client would report every match into silence and open
+-- a RANK screen that never fills.  This number lives here and in
+-- server/lib/relay.js -- bump them together.
+M.PROTOCOL = 4
 
 M.DEFAULT_HUB = "127.0.0.1:7788"
 M.DEFAULT_PORT = 7788
@@ -161,5 +167,53 @@ M.SPRITES = {
 M.DEFAULT_SPRITE = "SPRITE_RED"
 
 M.NAME_MAX = 10
+
+-- ------- ranked PVP
+--
+-- The arithmetic these feed is in src/Rank.lua, and the reasoning about what
+-- the numbers buy is in its header rather than here -- this is the dial
+-- board, that is the argument. Every one of them is mirrored in
+-- server/lib/rank.js: two hubs that price a win differently are two
+-- rankings, so they move together or not at all.
+
+-- The most one match can move a rating, before the rematch discount. 32 is
+-- Elo's usual figure for a pool that turns over, and at RANK_START = 0 it
+-- means an even first match is worth 16 -- enough that one win puts you on
+-- the board, small enough that ten do not decide the season.
+M.RANK_K = 32
+-- The rating gap at which a win is worth roughly a tenth of RANK_K. Elo's
+-- 400 again: it is the number the curve was drawn for.
+M.RANK_SCALE = 400
+-- Everybody starts unranked, and the board only lists points > 0, so a
+-- player appears on it by winning rather than by connecting.
+M.RANK_START = 0
+-- Four digits is what a trainer-card row has room for beside the badge
+-- count, and no realistic season reaches it.
+M.RANK_MAX = 9999
+-- How many rows the RANK screen asks for, and the brief's number.
+M.RANK_TOP = 10
+-- A claim token, lowercase hex on the wire: 16 bytes, the same shape and the
+-- same source as a challenge nonce. It says "this name is mine" and nothing
+-- else -- see src/Rank.lua's header for what that is worth, and what it is
+-- not. The hub keeps only its SHA-256.
+M.RANK_TOKEN_HEX = 32
+-- How long a pairing stays "recently played" for the rematch discount, and
+-- how many meetings inside it take a win to nothing (halving each time, so
+-- the sixth rematch in the window is already worth zero).
+M.RANK_REPEAT_WINDOW = 3600
+M.RANK_REPEAT_FADE = 6
+-- Smallest gap between two leaderboard requests from one player. Answering
+-- one means sorting every rating the hub holds, and a screen that asks on
+-- open is a screen somebody can hold open -- so it is gated like chat is.
+M.RANK_QUERY_GATE = 1
+-- When the per-pair table is bigger than this, expired pairings are swept.
+-- A ceiling on bookkeeping, not on play: nothing is refused when it is hit.
+M.RANK_PAIRS_MAX = 512
+-- How long a finished battle stays reportable after the hub tears its
+-- session down. Both players must report before anything is scored, and
+-- their two reports are separated by however long each side spends on the
+-- end-of-battle messages -- plus a hub round trip. Sixty seconds is far more
+-- than that gap and far less than a session.
+M.RANK_REPORT_GRACE = 60
 
 return M

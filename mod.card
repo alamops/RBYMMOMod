@@ -2,7 +2,8 @@ return {
   summary = "Play Kanto with friends: see them walk, team up, chat, trade "
     .. "and battle.",
   author = "alamo",
-  tags = { "multiplayer", "mmo", "chat", "party", "trade", "ui",
+  tags = { "multiplayer", "mmo", "chat", "party", "trade", "pvp", "ranking",
+           "ui",
            "experimental" },
 
   differences = {
@@ -27,6 +28,12 @@ return {
         .. "link code over the hub.",
       "A number page on this mod's naming screens, because the vanilla "
         .. "grid has no digits and an address cannot be typed without one.",
+      "Ranked PVP: every link battle is scored by the hub on an Elo curve, "
+        .. "so the opponent's rating decides the size of the swing, and a "
+        .. "rematch inside the hour is worth half, then a quarter, then "
+        .. "nothing. Points floor at 0. A RANK row on the MMO menu shows "
+        .. "the top ten -- place, character, name, points -- and the score "
+        .. "sits on every trainer card.",
     },
     known = {
       "No NAT traversal. A host behind a router must forward port 7788 for "
@@ -63,6 +70,17 @@ return {
         .. "both -- there is no party of one and no third seat. An invite "
         .. "that is never answered stays outstanding until one of them "
         .. "disconnects; nothing expires it.",
+      "A ranked result needs both players to report the same outcome, so a "
+        .. "player who quits mid-battle is scored as a draw for the side "
+        .. "still standing -- rage-quitting avoids the loss. Believing one "
+        .. "side alone is the larger hole: anyone could then mint wins "
+        .. "against a player who never connected.",
+      "A rating belongs to a trainer name on a hub, held by a claim ticket "
+        .. "the hub mints on the first visit and the player's save carries "
+        .. "back. It is a ticket and not an account: it lives in a save file "
+        .. "and crosses the same unencrypted link the join code does, so "
+        .. "anyone who can read either can take the name. Somebody typing a "
+        .. "claimed name without it plays normally and scores nothing.",
       "The hub has a flood gate but no moderation, accounts, or bans. Run "
         .. "one for people you know.",
       "No position interpolation: a remote player walks tile to tile at the "

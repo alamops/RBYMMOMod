@@ -41,6 +41,15 @@ M.PARTY_LEAVE   = "mmo.party_leave"
 -- the answer to a challenge: { response }, an HMAC of the nonce keyed by
 -- the join code.  The code itself never crosses the wire.
 M.AUTH          = "mmo.auth"
+-- How a link battle ended, as the side sending it saw it: { session,
+-- outcome }.  One of these on its own scores nothing -- the hub waits for
+-- both players to say the same thing before any rating moves -- so a client
+-- cannot report itself a winner.
+M.RESULT        = "mmo.result"
+-- "send me the leaderboard": no fields.  A request rather than a push,
+-- because the board changes for everybody on every match and nobody is
+-- looking at it most of the time.
+M.RANKS         = "mmo.ranks"
 
 -- hub -> client
 M.WELCOME     = "mmo.welcome"
@@ -62,9 +71,21 @@ M.PONG        = "mmo.pong"
 M.PARTY         = "mmo.party"
 M.PARTY_END     = "mmo.party_end"
 M.PARTY_DECLINE = "mmo.party_decline"
+-- One player's rating changed: { id, points }.  Broadcast to everybody
+-- including the player it is about, so a roster row, a trainer card and
+-- your own MMO menu all move at the same moment.
+M.RANK        = "mmo.rank"
+-- The answer to mmo.ranks: { entries = { { name, sprite, points } } },
+-- already sorted and already cut to the top ten by the hub -- the client
+-- draws what it is given rather than deciding who is on the board.
+M.RANKING     = "mmo.ranking"
 
 M.FACINGS = { up = true, down = true, left = true, right = true }
 M.KINDS = { trade = true, battle = true }
+-- What a client may claim about a battle it just finished.  "draw" is a real
+-- answer and not a refusal to answer: a dropped link, a mutual run and a
+-- desync all end that way, and all three score nothing.
+M.OUTCOMES = { win = true, loss = true, draw = true }
 
 local SCOPES = {}
 for _, scope in ipairs(Config.CHAT_SCOPES) do SCOPES[scope] = true end
@@ -182,6 +203,32 @@ end
 function M.facing(value)
   if M.FACINGS[value] then return value end
   return nil
+end
+
+-- The secret that says a trainer name is yours on this hub.  Hex like a
+-- nonce, and held to exactly the length the hub mints: a short "token" is a
+-- truncated one, which would fail every check with nothing to read.
+function M.token(value)
+  local hex = M.hex(value, Config.RANK_TOKEN_HEX)
+  if hex and #hex == Config.RANK_TOKEN_HEX then return hex end
+  return nil
+end
+
+function M.outcome(value)
+  if M.OUTCOMES[value] then return value end
+  return nil
+end
+
+-- A rating, as it arrives from a hub.
+--
+-- Bounded rather than trusted even though the hub is the one that computes
+-- it: the hub is another process, a modified one is a normal thing to meet,
+-- and this number is drawn straight onto a trainer card. Out of range is
+-- zero rather than nil -- a card row that says 0 is honest about a hub whose
+-- answer we would not believe, whereas a missing row reads as "this build
+-- has no ranking" and sends the player looking for a mod update.
+function M.points(value)
+  return M.int(value, 0, Config.RANK_MAX) or 0
 end
 
 -- A map id reaches Data.maps as a table key, so it is held to the same
@@ -308,9 +355,41 @@ function M.presence(raw)
     -- any client in the game map out who is travelling with whom.
     party = raw.party and true or false,
     profile = M.profile(raw.profile),
+    -- Ranked points ride with presence rather than with the trainer card,
+    -- because they are not a snapshot of who somebody was when they joined:
+    -- they move mid-session, and a card built from a stale hello would show
+    -- a rating the player has already changed.
+    points = M.points(raw.points),
   }
   if not (out.map and out.x and out.y) then
     out.map, out.x, out.y = nil, nil, nil
+  end
+  return out
+end
+
+-- A leaderboard, as the hub sent it.
+--
+-- Rows that will not sanitise are dropped rather than repaired: a nameless
+-- row is not a player, and inventing "?" for one would put a ghost between
+-- two real trainers. The order is the hub's -- it is the thing that knows
+-- every rating, including the players who are offline -- but the *length* is
+-- ours, because a hub that answered with ten thousand rows would otherwise
+-- be a hub that decides how much memory this screen uses.
+function M.ranking(raw)
+  local out = {}
+  if type(raw) ~= "table" then return out end
+  for _, row in ipairs(raw) do
+    if type(row) == "table" then
+      local name = M.name(row.name)
+      if name then
+        out[#out + 1] = {
+          name = name,
+          sprite = M.spriteId(row.sprite) or Config.DEFAULT_SPRITE,
+          points = M.points(row.points),
+        }
+      end
+    end
+    if #out >= Config.RANK_TOP then break end
   end
   return out
 end

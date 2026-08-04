@@ -45,6 +45,15 @@ function M:move(id, map, x, y, facing)
   return player
 end
 
+-- A rating that moved while the player stood still.  Its own message rather
+-- than part of a move, because a battle ends with both players out of the
+-- world -- there is no cell to send with it.
+function M:setPoints(id, points)
+  local player = self.players[id]
+  if player then player.points = points end
+  return player
+end
+
 function M:setBusy(id, busy)
   local player = self.players[id]
   if player then player.busy = busy and true or false end

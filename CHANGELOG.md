@@ -4,10 +4,114 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [0.3.0] - 2026-08-03
+## [0.4.0] - 2026-08-04
 
 ### Added
 
+- **Ranked PVP.** Every link battle is scored, on the hub, for both players.
+  A win adds points and a loss takes them away, never below `0` — and how
+  many depends on who you beat: Elo's own curve, so turning over somebody 300
+  points above you is worth 27 and beating somebody 300 below is worth 5.
+  Hunting the weakest player in the room pays almost nothing, which is the
+  anti-farm rule stated the way Elo already states it.
+- **A rematch discount, because Elo alone does not close the loop.** Two
+  friends can trade wins forever and each collect the fair price of an even
+  match, so a pairing already played inside the hour is worth half, then a
+  quarter, then nothing — counted in *both* directions, so alternating wins
+  does not reset it. Nobody is stopped from playing their friend; the sixth
+  rematch of the hour simply is not worth points.
+- **A result needs two voices.** Both games report how the battle ended and
+  the hub scores it only when the two reports agree. One side claiming a win
+  is worth exactly nothing, a retraction cannot manufacture agreement (the
+  first answer from each player stands), and a bystander cannot vote on
+  somebody else's battle. What that leaves open is written down rather than
+  papered over: a dropped link is a draw for the side still standing — the
+  engine's own `LinkBattle` ends one that way — and a draw scores nothing, so
+  quitting mid-battle avoids the loss. Believing one side alone would be the
+  larger hole, since anyone could then mint wins against a player who never
+  connected.
+- **`RANK` on the MMO menu**, under `MY PROFILE`: the top ten, best first, as
+  `[place] [character] [name] [points]`. The character is the player's
+  portrait rather than their character *label*, because a label runs to
+  seventeen glyphs (`MIDDLE AGED WOMAN`) — the whole row on its own — so the
+  row shows the art the trainer card already draws. That costs the row its
+  height, so six rows are on screen at once and the list scrolls with up and
+  down, with a `1-6 OF 10` footer saying which part of it you are looking at.
+  Players on `0` are not listed: everybody starts unranked, and the board is
+  something you get onto by winning.
+- **A `RANK` row on the trainer card**, on both cards at the same height, so
+  what you check before showing yourself off is what everybody else is
+  reading. It shares the badge row, right-aligned against the border: the
+  card holds seven rows at this spacing and all seven were spoken for, and
+  `BADGES/8` is the one that leaves most of its row empty. Points ride with
+  presence rather than with the card, so the number is live rather than a
+  snapshot of whoever joined an hour ago.
+- **`ranking.json`, beside the dedicated hub's `config.json`.** A hub that
+  forgot every rating when it restarted would not be a ranking. A file of its
+  own and not a section of the config: that file is the host's to edit and
+  the CLI rewrites it whole, so a hub writing scores into it would race their
+  edits — and a season is state, not configuration. Written whole and renamed
+  over, debounced the way credential counts already are, so a player is never
+  waiting on a filesystem. A corrupt file is named and then treated as a
+  fresh season; a leaderboard is not a reason to take a hub off the air.
+- **A claim ticket, so a rating belongs to a player and not to a nickname.**
+  Ratings have to be keyed by trainer name — keying on the connection id
+  would reset everybody's on every reconnect — and a name is typed, not
+  proved, so on its own it meant anyone who knew yours could put your rating
+  on and spend it. The first time a hub sees a name it now mints a 16-byte
+  token, sends it once in the welcome, and keeps only its SHA-256; the client
+  stores it per-hub in `mod.save` and presents it on every later hello.
+  Somebody typing a claimed name without the ticket is admitted and plays
+  normally, scores nothing, and cannot move the holder's rating — the `RANK`
+  screen says so outright rather than leaving them to infer it from a zero.
+  Not thrown out, deliberately: a friend who lost their save should not lose
+  the hub. It is a claim ticket and not an account — it lives in a save file
+  and crosses the same unencrypted link the join code does — and the README
+  says exactly that.
+- **`mod.exports.points`, `.ranking`, `.requestRanking` and `.isRanked`**, so
+  a mod that wants a leaderboard of its own reads this one instead of
+  inventing a second scoring system.
+
+### Fixed
+
+- **The character on a trainer card no longer stands on the row beneath it.**
+  The portrait is 16px drawn at 2x from y=56, so its last row was y=87 and
+  the badge row began at y=88: no overlap, and no gap either, which read as a
+  rendering fault once that row grew a `RANK` value on the right. It moved up
+  four pixels, which also centres it better against the two rows it belongs
+  to. The leaderboard rows had the same crowding — four columns wanting
+  exactly the eighteen glyphs a row has — so they now spend the slack on
+  gaps and trim a name only when a four-figure rating leaves no room, which
+  `Ui.nameRoom` decides and the suite pins.
+
+### Changed
+
+- **`PROTOCOL` 3 → 4**, in `src/Config.lua` and `server/lib/relay.js`
+  together. Nothing was removed and an old client still parses everything a
+  new hub sends, so the breaking direction is the other one: a protocol-3 hub
+  has never heard of a battle result or a leaderboard request, so a newer
+  client would report every match into silence and open a `RANK` screen that
+  never fills, forever, with nothing on screen to act on. A refusal naming
+  both versions is the better failure — the same reasoning parties moved the
+  number for one version earlier.
+- **`server/package.json` is 0.4.0**, which is also the version
+  `manifest.json` carries — `server/config.test.js` asserts they match.
+- **The end-to-end run now leaves and comes back.** The claim ticket is four
+  files deep — the client stores it under the address it dialled, reads it
+  back for that same address, puts it on the next hello, and the hub matches
+  it against a digest it loaded rather than the token it minted — and none of
+  those links fails loudly: the player is simply not scored any more, quietly,
+  under their own name. So the guest now LEAVEs, rejoins through the real
+  menus, and asserts it is recognised on that *second* connection, where the
+  name is already claimed and only a ticket that survived the whole round trip
+  can produce a yes. `guest_left_game`'s patience grew to match the extra leg.
+- **Screenshots recaptured out of the end-to-end runs**, the way the rest of
+  them are: `mmo-menu.png` (there is a `RANK` row now), `trainer-card.png`
+  and `my-profile.png` (both carry the score), plus `rank.png`, which is new.
+
+## [0.3.0] - 2026-08-03
+
+#### Added
 - **Parties.** You and one friend, agreed to explicitly and visible from
   everywhere: on the **TOWN MAP** their character stands at the city they are
   actually in with their nickname over it, in the world their nameplate
@@ -74,6 +178,7 @@ here must match `manifest.version`.
   no party left to continue, and a party of one that still offered a members
   list and a chat scope with nowhere to send would be worse than none. The
   same is true of a member who disconnects.
+
 ## [0.2.5] - 2026-08-03
 
 Not 0.2.3, which this branch originally claimed: `v0.2.3` and `v0.2.4` were

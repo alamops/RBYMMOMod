@@ -563,7 +563,13 @@ local PHASE = {
   -- guest waits on the host re-opening the MMO menu
   host_address_checked   = 150,  -- menus only
   -- host waits on the guest leaving and proving the world still works
-  guest_left_game        = 240,  -- 60 leave drive + walk test
+  -- 60 leave drive + walk test, and then the whole way back in: the menus,
+  -- the address screen, six characters of passcode on a d-pad grid, a second
+  -- handshake, and out again. A ceiling, not an expectation -- the host is
+  -- released the moment the guest signals -- so the headroom costs a healthy
+  -- run nothing and stops a slow machine reporting "incomplete" for a leg
+  -- that was about to pass.
+  guest_left_game        = 420,
 
   -- ------- the dedicated-hub scenario (tests/drivers/run-hub-e2e.sh)
   --
@@ -965,6 +971,159 @@ function M.clearGrid(game, screen)
   U.log("WARN could not clear the naming grid; it still holds",
         table.concat(screen.glyphs))
   return false
+end
+
+-- ------- ranked PVP, after a link battle
+--
+-- What this can assert is bounded by what a driver can know. Which side won
+-- is the engine's business and neither driver is told; what both sides *can*
+-- see is that the hub settled the match -- somebody's rating moved -- and
+-- that the leaderboard it hands back has the winner on it.
+--
+-- So: read both ratings (this player's own through `points`, the other
+-- player's off the roster, where presence now carries it), and only insist
+-- on a board when the match was decisive. A link battle can legitimately end
+-- in a draw -- a dropped link, a mutual run -- and a draw scores nothing by
+-- design, so demanding a leaderboard after one would be demanding that the
+-- design be different.
+--
+-- Returns mine, theirs.
+function M.rankAfterBattle(game, exports, check, seconds)
+  local function theirs()
+    local best = 0
+    for _, player in ipairs(exports.players() or {}) do
+      best = math.max(best, tonumber(player.points) or 0)
+    end
+    return best
+  end
+
+  -- Both reports have to reach the hub and the answer has to come back, so
+  -- this is seconds and not frames: there is another process in the loop.
+  M.waitSeconds(game, function()
+    return (tonumber(exports.points()) or 0) > 0 or theirs() > 0
+  end, seconds or 60, "the hub to settle the battle")
+
+  local mine, other = tonumber(exports.points()) or 0, theirs()
+  U.log(("ranked points: mine=%d theirs=%d"):format(mine, other))
+
+  exports.requestRanking()
+  local arrived = M.waitSeconds(game, function()
+    return #(exports.ranking() or {}) > 0
+  end, 30, "the leaderboard to arrive")
+
+  if mine + other > 0 then
+    check(arrived, "a decided link battle put somebody on the leaderboard")
+    local board = exports.ranking() or {}
+    if #board > 0 then
+      U.log(("leaderboard: 1. %s %d (%d row(s))"):format(
+        tostring(board[1].name), tonumber(board[1].points) or -1, #board))
+      check((tonumber(board[1].points) or 0) > 0,
+            "and nobody at zero is on it")
+      check(board[1].sprite ~= nil,
+            "with a character to draw beside the name")
+    end
+  else
+    -- Not a failure, and worth saying out loud: a draw is a real outcome
+    -- here and it is worth nothing on purpose.
+    U.log("the battle was a draw or was never settled; nothing was scored")
+  end
+  return mine, other
+end
+
+-- Open the RANK screen from the MMO menu and photograph it.
+--
+-- The row is only there while connected, so its absence is a real failure
+-- rather than a variation. B backs out to the MMO menu, the way every other
+-- screen here does.
+function M.shotRank(game, path, check)
+  if not M.selectLabel(game, "RANK") then
+    check(false, "no RANK row on the MMO menu while connected")
+    return false
+  end
+  -- the screen asks the hub on the way in, so give the answer a moment to
+  -- land before the picture is taken
+  U.wait(60)
+  U.shot(game, path)
+  check(M.top(game) ~= nil, "the RANK screen opened")
+  U.tap(game, "b")
+  U.wait(25)
+  return true
+end
+
+-- Dial the same hub again, through the menus a player uses.
+--
+-- Exists for one assertion, and it is one no unit test can make: that a
+-- returning player is recognised as themselves. The claim ticket is stored by
+-- the client, keyed by the address it dialled, replayed on the next hello and
+-- matched by the hub against a digest -- four separate files, none of which
+-- errors when it is wrong. Driving the real menus is what makes the second
+-- connection a genuine second connection.
+--
+-- Everything typed here is deliberately the short path: START on an empty
+-- address line submits the stored default, and the code is typed out because
+-- there is no other way past the door. Returns whether the connection opened.
+function M.rejoin(game, exports, joinCode, check, log)
+  -- Settle first, and this is not belt and braces: the leg before this one
+  -- walks the player to prove single-player still works, and the overworld
+  -- swallows START while a step is in flight -- so the first run of this
+  -- reported "no MMO row" about a menu that was simply not listening yet.
+  -- Back to the overworld, let the step land, and only then press anything.
+  M.closeToOverworld(game)
+  U.wait(30)
+
+  local opened = false
+  for _ = 1, 3 do
+    if M.openMmo(game) then
+      opened = true
+      break
+    end
+    -- whatever came up instead goes away, and the press is tried again
+    M.closeToOverworld(game)
+    U.wait(20)
+  end
+  if not opened then
+    check(false, "the MMO menu opens again after leaving")
+    return false
+  end
+  if not M.selectLabel(game, "JOIN GAME") then
+    check(false, "JOIN GAME is back on the menu once disconnected")
+    return false
+  end
+  U.wait(20)
+  if not M.selectLabel(game, "JOIN") then
+    check(false, "character creation confirms on the way back in")
+    return false
+  end
+
+  -- the address screen still carries the hub we just left as its default, so
+  -- an empty line and START is the whole answer
+  U.wait(40)
+  if M.addressGrid(game) == nil then
+    check(false, "the address screen opens on the way back in")
+    return false
+  end
+  U.tap(game, "start")
+  U.wait(60)
+
+  if joinCode then
+    local asked = M.waitFor(game, function()
+      return M.codeGrid(game) ~= nil
+    end, 240, "the join-code grid on the way back in")
+    if asked and not M.enterJoinCode(game, joinCode) then
+      check(false, "the code can be typed again")
+      return false
+    end
+    U.wait(60)
+  end
+
+  local back = M.waitSeconds(game, function() return exports.isConnected() end,
+                             60, "the second connection to open")
+  check(back, "the same player can join the same game again")
+  if not back and log then
+    log("top state after the second attempt:",
+        tostring(M.top(game) and (M.top(game).title or "?")))
+  end
+  return back
 end
 
 -- open the START menu and step into MMO

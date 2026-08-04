@@ -115,7 +115,7 @@ local screens = run.loader.content.screens
 for _, id in ipairs({
   "RbyMmoMain", "RbyMmoRoster", "RbyMmoActions", "RbyMmoChatLog",
   "RbyMmoScope", "RbyMmoCompose", "RbyMmoPick", "RbyMmoText",
-  "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile",
+  "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile", "RbyMmoRank",
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
   "RbyMmoParty", "RbyMmoPartyList",
 }) do
@@ -423,6 +423,67 @@ for i = 1, Config.PARTY_MAX + 1 do
 end
 eq(Wire.members(overfull), nil,
    "a hub claiming more members than PARTY_MAX is refused, not truncated")
+
+-- ------- ranked fields off the wire
+--
+-- A rating is drawn straight onto a trainer card and a leaderboard row, so
+-- it is re-derived like everything else here: the hub is another process,
+-- and a modified one is a normal thing to meet.
+
+eq(Wire.outcome("win"), "win", "a win is an outcome")
+eq(Wire.outcome("loss"), "loss", "so is a loss")
+eq(Wire.outcome("draw"), "draw", "and a draw, which scores nothing")
+eq(Wire.outcome("WIN"), nil, "the vocabulary is exact, not case-folded")
+eq(Wire.outcome("victory"), nil, "an invented outcome is refused")
+eq(Wire.outcome(1), nil, "and so is a number")
+
+local TOKEN = string.rep("ab", 16)
+eq(Wire.token(TOKEN), TOKEN, "a claim token is 32 lowercase hex characters")
+eq(Wire.token(string.rep("ab", 8)), nil,
+   "a short one is refused rather than kept: it would fail every claim, "
+   .. "silently, from then on")
+eq(Wire.token(string.rep("ab", 40)), nil, "and a long one too")
+eq(Wire.token(TOKEN:upper()), nil, "upper case is a different string, not the same token")
+eq(Wire.token("zz" .. TOKEN:sub(3)), nil, "and a non-hex character is not a token")
+eq(Wire.token(nil), nil, "nothing is not a token")
+
+eq(Wire.points(120), 120, "a rating in range survives")
+eq(Wire.points(0), 0, "zero is a rating, not a missing one")
+eq(Wire.points(-5), 0, "below the floor reads as zero rather than negative")
+eq(Wire.points(Config.RANK_MAX + 1), 0,
+   "and so does a value past the ceiling -- a card says 0 rather than "
+   .. "drawing a number the hub could not have meant")
+eq(Wire.points("many"), 0, "a non-number is zero, never nil: the row draws either way")
+
+eq(Wire.presence({ id = "p9", name = "GARY", points = 250 }).points, 250,
+   "presence carries the rating, so a card shows the live number")
+eq(Wire.presence({ id = "p9", name = "GARY" }).points, 0,
+   "and an absent one reads as unranked")
+
+-- wrapped so the locals below are released again: this chunk is close to
+-- Lua's 200-local ceiling for one function body, which is why the trade
+-- section further down lives inside a function of its own
+do
+local board = Wire.ranking({
+  { name = "ALPHA", sprite = "SPRITE_RED", points = 300 },
+  { name = "BRAVO", sprite = "SPRITE_LASS", points = 100 },
+})
+eq(#board, 2, "a leaderboard survives the trip")
+eq(board[1].name, "ALPHA", "in the hub's order, which is the ranking")
+eq(board[2].points, 100, "with the points intact")
+eq(Wire.ranking({ { name = "   ", points = 5 }, { name = "CAL", points = 4 } })[1]
+   .name, "CAL", "a nameless row is dropped rather than repaired")
+eq(Wire.ranking({ { name = "DEL" } })[1].sprite, Config.DEFAULT_SPRITE,
+   "a row with no character falls back to one everybody has")
+eq(#Wire.ranking("not a list"), 0, "a non-list leaderboard is an empty one")
+
+local overlong = {}
+for i = 1, Config.RANK_TOP + 5 do
+  overlong[i] = { name = "P" .. i, points = 100 - i }
+end
+eq(#Wire.ranking(overlong), Config.RANK_TOP,
+   "the length is ours, not the hub's: a hub cannot decide how big this screen is")
+end
 
 -- ------- payload shape (the relay's only defence)
 
@@ -743,12 +804,15 @@ local function saw(peer, msgType)
   return take(peer, msgType) ~= nil
 end
 
-local function join(hub, name, map, x, y)
+-- `token` is the claim ticket a returning player presents; a first visit
+-- has none, which is what makes the hub mint one.
+local function join(hub, name, map, x, y, token)
   local peer = fakePeer()
   local client = hub:accept(peer)
   if client then
     hub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
-      name = name, map = map, x = x, y = y, facing = "down" })
+      name = name, map = map, x = x, y = y, facing = "down",
+      rankToken = token })
   end
   return client, peer
 end
@@ -1412,6 +1476,383 @@ check(shutPeer.closed, "and closes their connection")
 eq(hub2.count, 0, "leaving the hub empty")
 
 -- ------------------------------------------------------------------
+-- 3b. Ranked PVP: the arithmetic, and the hub that applies it
+-- ------------------------------------------------------------------
+--
+-- Two halves, and the second is the one that matters.
+--
+-- The arithmetic is pinned against numbers written out by hand, because
+-- server/lib/rank.js has to produce the same ones -- a win worth 27 points
+-- on a dedicated hub and 16 on a hosted game is not a ranking, it is two,
+-- and the only way that stays true is if both suites assert the same table.
+--
+-- The hub half is the anti-cheat: a result is a claim by a stranger's
+-- process, and the whole defence is that two independent claims have to
+-- agree. Every way of getting points without winning a battle is tried here.
+
+do
+
+local Rank = need("Rank")
+
+-- ------- the curve
+
+-- Even ratings are an even match, whatever the number
+eq(Rank.expected(0, 0), 0.5, "two unranked players are even")
+eq(Rank.expected(500, 500), 0.5, "and so are two equal ratings anywhere")
+check(Rank.expected(400, 0) > 0.9, "400 points of gap is a heavy favourite")
+check(Rank.expected(0, 400) < 0.1, "seen from the other side")
+
+-- ------- what a match is worth
+--
+-- The brief's rule, in numbers: beating somebody above you pays more than
+-- beating somebody below you, and the loss mirrors it.
+
+local evenGain, evenLoss = Rank.swing(0, 0)
+eq(evenGain, 16, "an even match is worth half of RANK_K")
+eq(evenLoss, 16, "and costs the loser the same")
+
+local upsetGain, upsetLoss = Rank.swing(0, 300)
+local farmGain, farmLoss = Rank.swing(300, 0)
+check(upsetGain > evenGain, "beating somebody far above you is worth more")
+check(farmGain < evenGain, "and beating somebody far below you is worth less")
+eq(upsetGain + upsetLoss, 32, "the two halves of one match add up to RANK_K")
+eq(upsetLoss, farmGain, "and the curve is symmetric about the gap")
+
+-- ------- the rematch discount
+
+eq(Rank.discount(16, 0), 16, "a first meeting is worth full price")
+eq(Rank.discount(16, 1), 8, "the rematch is worth half")
+eq(Rank.discount(16, 2), 4, "and the one after that a quarter")
+eq(Rank.discount(16, Config.RANK_REPEAT_FADE), 0,
+   "far enough in, a rematch is worth nothing at all")
+eq(Rank.discount(16, 9999), 0,
+   "and an absurd count is zero rather than a division by an infinity")
+
+-- ------- the board
+
+local season = Rank.newBoard()
+eq(season:points("ASH"), Config.RANK_START, "everybody starts unranked")
+
+local first = season:record("ASH", "GARY", 0)
+check(first ~= nil, "a match between two players settles")
+eq(first.winner.points, 16, "the winner is on the board")
+eq(first.loser.points, 0, "and the loser cannot go below zero")
+eq(season:points("ASH"), 16, "which is what the board now says")
+
+-- Names are the identity, and they are the *same* identity in any case.
+eq(season:points("ash"), 16, "a name is matched case-insensitively")
+eq(season:record("ASH", "ash", 0), nil, "and nobody can beat themselves")
+eq(season:record("ASH", nil, 0), nil, "a nameless opponent is not a match")
+
+-- Farming: the same two players, over and over, inside the window.
+local farm = Rank.newBoard()
+local earned = {}
+for i = 1, 6 do
+  local settled = farm:record("ALPHA", "BRAVO", 10 * i)
+  earned[i] = settled.winner.gained
+end
+check(earned[1] > 0, "the first win pays")
+check(earned[2] < earned[1], "the rematch pays less")
+check(earned[3] < earned[2], "and so on down")
+eq(earned[6], 0, "until a rematch inside the window is worth nothing")
+check(farm:points("BRAVO") == 0, "and the loser bottoms out at zero")
+
+-- ...and the discount does not care which way round the wins go, so two
+-- friends cannot take turns.
+local swapped = Rank.newBoard()
+local there = swapped:record("ALPHA", "BRAVO", 0).winner.gained
+local back = swapped:record("BRAVO", "ALPHA", 1).winner.gained
+check(back < there, "alternating wins is the same pairing, and is discounted")
+
+-- Once the window has passed, the pairing is fresh again. Two boards played
+-- identically up to the rematch, so the ratings are the same at that point
+-- and the only thing that differs is how long the players waited.
+local soon, later = Rank.newBoard(), Rank.newBoard()
+soon:record("ALPHA", "BRAVO", 0)
+later:record("ALPHA", "BRAVO", 0)
+local sooner = soon:record("ALPHA", "BRAVO", 1).winner.gained
+local waited = later:record("ALPHA", "BRAVO",
+                            Config.RANK_REPEAT_WINDOW + 1).winner.gained
+check(waited > sooner, "a rematch after the window is worth full price again")
+
+-- ------- claiming a name
+--
+-- A rating is keyed by trainer name, so without this anybody who knows your
+-- nickname can put your rating on and spend it. The ticket is what turns
+-- "types the same name" into "is the same player".
+
+local claims = Rank.newBoard()
+local TICKET = string.rep("a1", 16)
+local OTHER = string.rep("b2", 16)
+
+eq(claims:claimed("ASH"), false, "a name nobody has used is unclaimed")
+eq(claims:claim("ASH", nil, TICKET), "claimed", "the first player to use it claims it")
+eq(claims:claimed("ASH"), true, "and it is claimed from then on")
+eq(claims:claim("ASH", TICKET, OTHER), "owner",
+   "the holder of the ticket is the owner, and does not re-claim it")
+eq(claims:claim("ash", TICKET, OTHER), "owner", "whatever case they type it in")
+eq(claims:claim("ASH", nil, OTHER), "impostor",
+   "somebody typing the name with no ticket is not the owner")
+eq(claims:claim("ASH", OTHER, nil), "impostor", "nor is a wrong ticket")
+eq(claims:claimed("ASH"), true, "and neither attempt took the name over")
+
+-- The ticket itself is never kept -- only its digest -- so a leaked board
+-- file lists who is ranked and gives nobody a way to be them.
+local stored = claims:get("ASH")
+check(stored.tokenHash ~= nil, "a claimed name carries a digest")
+check(stored.tokenHash ~= TICKET, "which is not the ticket")
+check(not tostring(stored.tokenHash):find(TICKET, 1, true),
+      "and does not contain it")
+
+-- A hub that cannot mint (its entropy pool refused) leaves the name open
+-- rather than locking it: everybody scores as they did before tickets.
+local unmintable = Rank.newBoard()
+eq(unmintable:claim("NOBODY", nil, nil), "open", "no ticket to give means no claim")
+eq(unmintable:claimed("NOBODY"), false, "and the name stays free for the next one")
+eq(unmintable:claim("NOBODY", nil, TICKET), "claimed", "who can still claim it")
+
+-- Claims survive the file, because a season that forgot them would hand
+-- every name back to whoever typed it first after a restart.
+local reloaded = Rank.newBoard():import(claims:export())
+eq(reloaded:claim("ASH", TICKET, OTHER), "owner", "a ticket still works after a reload")
+eq(reloaded:claim("ASH", OTHER, nil), "impostor", "and a wrong one still does not")
+local corrupt = Rank.newBoard():import({
+  { name = "ASH", points = 10, tokenHash = "not a digest" },
+})
+eq(corrupt:claimed("ASH"), false,
+   "a hash that is not a hash is dropped -- a name nobody can claim would be "
+   .. "worse than one anybody can")
+
+-- Nothing that leaves the hub carries the digest.
+claims:record("ASH", "GARY", 0)
+for _, row in ipairs(claims:top(Config.RANK_TOP)) do
+  eq(row.tokenHash, nil, "the leaderboard sent to clients carries no digests")
+end
+
+-- ------- the leaderboard
+
+local ladder = Rank.newBoard()
+for i = 1, 14 do
+  ladder:seen("WINNER" .. i, "SPRITE_RED")
+  -- everybody beats the same punchbag once, so every winner is on the board
+  ladder:record("WINNER" .. i, "PUNCHBAG" .. i, i)
+end
+ladder:seen("LURKER", "SPRITE_LASS")
+
+local top = ladder:top(Config.RANK_TOP)
+eq(#top, Config.RANK_TOP, "the board is cut to the top ten")
+check(top[1].points >= top[2].points, "best first")
+check(top[#top].points > 0, "and nobody with nothing to show is on it")
+for _, row in ipairs(top) do
+  check(row.name ~= "LURKER", "a player who has never won is not ranked")
+  check(row.name:find("PUNCHBAG") == nil, "and neither is one who only lost")
+end
+
+-- Persistence: the same board, through a file and back.
+local saved = ladder:export()
+check(#saved > #top, "everything is exported, not only the visible ten")
+local restored = Rank.newBoard():import(saved)
+eq(restored:points(top[1].name), top[1].points, "a rating survives a round trip")
+eq(#restored:top(Config.RANK_TOP), #top, "and so does the board it makes")
+local mangled = Rank.newBoard():import({ "not a row", { name = "OK", points = 40 },
+                                         { points = 9 } })
+eq(mangled:points("OK"), 40, "a corrupt row costs its own rating, not the file's")
+
+end
+
+do
+
+-- ------- the hub half: two reports, one result
+
+local ranked = Hub.new({ maxPlayers = 4 })
+local one, onePeer = join(ranked, "ONE", "PALLET", 1, 1)
+local two, twoPeer = join(ranked, "TWO", "PALLET", 2, 1)
+
+local hello = take(onePeer, Wire.WELCOME)
+eq(hello.points, 0, "a welcome carries your own rating, which starts at zero")
+local joinMsg = take(onePeer, Wire.JOIN)
+eq(joinMsg.player.points, 0, "and presence carries everybody else's")
+
+-- pair them for a battle, the way two players who accepted one are paired
+-- Both sides out of whatever they were in first: the hub refuses a request
+-- from a player who is already paired, and a fight that never started would
+-- make every assertion after it pass by doing nothing.
+local function fight(hub, a, aPeer, b, bPeer)
+  hub:receive(a, { type = Wire.SESSION_LEAVE })
+  hub:receive(b, { type = Wire.SESSION_LEAVE })
+  aPeer.outbox, bPeer.outbox = {}, {}
+  hub:receive(a, { type = Wire.REQUEST, to = b.id, kind = "battle" })
+  hub:receive(b, { type = Wire.RESPOND, to = a.id, kind = "battle", accept = true })
+  local session = take(aPeer, Wire.SESSION)
+  take(bPeer, Wire.SESSION)
+  check(session ~= nil, "the battle this scenario needs actually started")
+  return session and session.id
+end
+
+local matchId = fight(ranked, one, onePeer, two, twoPeer)
+check(matchId ~= nil, "a battle session has an id to file a result under")
+
+-- One side alone proves nothing.
+ranked:receive(one, { type = Wire.RESULT, session = matchId, outcome = "win" })
+eq(ranked.board:points("ONE"), 0, "one report on its own scores nothing")
+eq(take(onePeer, Wire.RANK), nil, "and moves nobody")
+
+-- A bystander cannot vote on somebody else's battle.
+local three = join(ranked, "THREE", "PALLET", 9, 9)
+ranked:receive(three, { type = Wire.RESULT, session = matchId, outcome = "loss" })
+eq(ranked.board:points("ONE"), 0, "a player who was not in the battle is ignored")
+
+-- The loser agreeing is what settles it.
+ranked:receive(two, { type = Wire.RESULT, session = matchId, outcome = "loss" })
+eq(ranked.board:points("ONE"), 16, "two agreeing reports settle the match")
+eq(ranked.board:points("TWO"), 0, "and the loser floors at zero")
+local rankMsg = take(onePeer, Wire.RANK)
+check(rankMsg ~= nil, "the winner is told their new rating")
+eq(rankMsg.points, 16, "with the number")
+check(saw(twoPeer, Wire.RANK), "and so is the loser -- both, in the same breath")
+
+-- Re-reporting a settled match pays nothing a second time.
+ranked:receive(one, { type = Wire.RESULT, session = matchId, outcome = "win" })
+ranked:receive(two, { type = Wire.RESULT, session = matchId, outcome = "loss" })
+eq(ranked.board:points("ONE"), 16, "a settled match cannot be settled twice")
+
+-- Disagreement scores nothing at all: this is the lie, and it does not pay.
+local liarId = fight(ranked, one, onePeer, two, twoPeer)
+ranked:receive(one, { type = Wire.RESULT, session = liarId, outcome = "win" })
+ranked:receive(two, { type = Wire.RESULT, session = liarId, outcome = "win" })
+eq(ranked.board:points("ONE"), 16, "two players both claiming the win score nothing")
+eq(ranked.board:points("TWO"), 0, "neither of them")
+
+-- A player cannot revise their answer until it matches.
+local revisedId = fight(ranked, one, onePeer, two, twoPeer)
+ranked:receive(one, { type = Wire.RESULT, session = revisedId, outcome = "loss" })
+ranked:receive(one, { type = Wire.RESULT, session = revisedId, outcome = "win" })
+ranked:receive(two, { type = Wire.RESULT, session = revisedId, outcome = "loss" })
+eq(ranked.board:points("TWO"), 0,
+   "the first answer stands, so a retraction cannot manufacture agreement")
+eq(ranked.board:points("ONE"), 16, "and nothing was paid out")
+
+-- An agreed draw is a real answer, and it is worth nothing.
+local drawId = fight(ranked, one, onePeer, two, twoPeer)
+ranked:receive(one, { type = Wire.RESULT, session = drawId, outcome = "draw" })
+ranked:receive(two, { type = Wire.RESULT, session = drawId, outcome = "draw" })
+eq(ranked.board:points("ONE"), 16, "a draw moves nobody")
+
+-- A trade is not a battle, so there is nothing to report on one.
+ranked:receive(one, { type = Wire.SESSION_LEAVE })
+ranked:receive(two, { type = Wire.SESSION_LEAVE })
+onePeer.outbox, twoPeer.outbox = {}, {}
+ranked:receive(one, { type = Wire.REQUEST, to = two.id, kind = "trade" })
+ranked:receive(two, { type = Wire.RESPOND, to = one.id, kind = "trade",
+                      accept = true })
+local tradeSession = take(onePeer, Wire.SESSION)
+check(tradeSession ~= nil, "a trade session starts like any other")
+local tradeId = tradeSession and tradeSession.id
+take(twoPeer, Wire.SESSION)
+ranked:receive(one, { type = Wire.RESULT, session = tradeId, outcome = "win" })
+ranked:receive(two, { type = Wire.RESULT, session = tradeId, outcome = "loss" })
+eq(ranked.board:points("ONE"), 16, "a trade cannot be reported as a won battle")
+ranked:receive(one, { type = Wire.SESSION_LEAVE })
+
+-- ------- the report window
+--
+-- The two players do not finish at the same instant, so a report has to
+-- survive the session being torn down -- but not forever.
+
+local lateId = fight(ranked, one, onePeer, two, twoPeer)
+ranked:receive(one, { type = Wire.RESULT, session = lateId, outcome = "win" })
+ranked:receive(one, { type = Wire.SESSION_LEAVE })
+ranked:update(1)
+ranked:receive(two, { type = Wire.RESULT, session = lateId, outcome = "loss" })
+check(ranked.board:points("ONE") > 16,
+   "a report that lands after the session ended still counts")
+
+local staleId = fight(ranked, one, onePeer, two, twoPeer)
+local carried = ranked.board:points("ONE")
+ranked:receive(one, { type = Wire.RESULT, session = staleId, outcome = "win" })
+ranked:receive(one, { type = Wire.SESSION_LEAVE })
+ranked:update(Config.RANK_REPORT_GRACE + 1)
+ranked:receive(two, { type = Wire.RESULT, session = staleId, outcome = "loss" })
+eq(ranked.board:points("ONE"), carried,
+   "but a report long after the grace period has nothing left to settle")
+eq(next(ranked.matches), nil, "and the paperwork is not kept forever")
+
+-- ------- the leaderboard, over the wire
+
+onePeer.outbox = {}
+ranked:receive(one, { type = Wire.RANKS })
+local answer = take(onePeer, Wire.RANKING)
+check(answer ~= nil, "asking for the ranking is answered")
+check(#answer.entries > 0, "with the players who have won something")
+eq(answer.entries[1].name, "ONE", "best first")
+check(answer.entries[1].points > 0, "and nobody at zero is on it")
+for _, row in ipairs(answer.entries) do
+  check(row.name ~= "TWO", "a player who has only lost is not ranked")
+end
+
+-- ...but not as fast as a client can ask.
+ranked:receive(one, { type = Wire.RANKS })
+eq(take(onePeer, Wire.RANKING), nil, "a second request in the same second is dropped")
+ranked:update(Config.RANK_QUERY_GATE + 0.1)
+ranked:receive(one, { type = Wire.RANKS })
+check(take(onePeer, Wire.RANKING) ~= nil, "and answered again once the gate opens")
+
+-- ------- a rating belongs to the name, not the connection
+
+local returning = Hub.new({ maxPlayers = 4 })
+local rejoinA, rejoinAPeer = join(returning, "COMEBACK")
+local rejoinB = join(returning, "VICTIM")
+-- the ticket the hub minted for this name, handed over exactly once
+local ticket = take(rejoinAPeer, Wire.WELCOME).rankToken
+check(Wire.token(ticket) ~= nil, "a first visit is handed a claim ticket")
+local rejoinId = nil
+returning:receive(rejoinA, { type = Wire.REQUEST, to = rejoinB.id, kind = "battle" })
+returning:receive(rejoinB, { type = Wire.RESPOND, to = rejoinA.id,
+                             kind = "battle", accept = true })
+for _, client in pairs(returning.clients) do
+  if client.sessionId then rejoinId = client.sessionId end
+end
+returning:receive(rejoinA, { type = Wire.RESULT, session = rejoinId, outcome = "win" })
+returning:receive(rejoinB, { type = Wire.RESULT, session = rejoinId, outcome = "loss" })
+local won = returning.board:points("COMEBACK")
+check(won > 0, "the winner has a rating")
+returning:drop(rejoinA)
+
+-- Back with the ticket: the same player, and their rating with them.
+local backAgain, backPeer = join(returning, "COMEBACK", nil, nil, nil, ticket)
+eq(backAgain.points, won, "which is still theirs when they reconnect")
+local backWelcome = take(backPeer, Wire.WELCOME)
+eq(backWelcome.points, won, "and the welcome says so")
+eq(backWelcome.ranked, true, "they are scored, as themselves")
+eq(backWelcome.rankToken, nil,
+   "and the ticket is not re-sent: a hub that handed it to whoever asked "
+   .. "would not be checking anything")
+returning:drop(backAgain)
+
+-- Somebody else typing the same name: admitted, and worth nothing.
+local faker, fakerPeer = join(returning, "COMEBACK")
+local fakeWelcome = take(fakerPeer, Wire.WELCOME)
+eq(fakeWelcome.ranked, false, "a stranger typing a claimed name is told they are not scored")
+eq(fakeWelcome.points, 0,
+   "and wears none of that name's rating -- the ticket would buy nothing otherwise")
+eq(fakeWelcome.rankToken, nil, "no ticket is handed out for a name already claimed")
+
+-- ...and their battles do not move the real player's rating.
+local victim = join(returning, "VICTIM2")
+returning:receive(faker, { type = Wire.REQUEST, to = victim.id, kind = "battle" })
+returning:receive(victim, { type = Wire.RESPOND, to = faker.id,
+                            kind = "battle", accept = true })
+local fakeId = faker.sessionId
+returning:receive(faker, { type = Wire.RESULT, session = fakeId, outcome = "win" })
+returning:receive(victim, { type = Wire.RESULT, session = fakeId, outcome = "loss" })
+eq(returning.board:points("COMEBACK"), won,
+   "an unranked player cannot add to the rating of the name they borrowed")
+eq(returning.board:points("VICTIM2"), 0,
+   "and their opponent loses nothing to a match that was never scored")
+
+end
+
+-- ------------------------------------------------------------------
 -- 4. The host joins its own game over loopback
 -- ------------------------------------------------------------------
 --
@@ -1920,6 +2361,42 @@ eq(#codeCells, Config.CODE_ENTRY_MAX, "a short field keeps all its slots")
 eq(table.concat(codeCells), "AB" .. ("-"):rep(Config.CODE_ENTRY_MAX - 2),
    "with dashes standing in for what is not typed yet")
 
+-- ------- and the leaderboard row, which is the same question
+--
+-- Four columns want eighteen glyphs and the row is eighteen glyphs, so
+-- packing them left the portrait touching a name on one side and a place on
+-- the other -- which is what the trainer card's own portrait did to the row
+-- beneath it until it moved up four pixels. The name is the column that
+-- pays for the gaps, and only when the score is wide enough to need it.
+--
+-- No wrapper of its own: the section this now sits inside is already a
+-- function (the merge that brought parties in scoped it), so these locals
+-- are released with it.
+do
+  -- read off the screen's own layout, so this cannot drift from what draws
+  local L = Ui.RANK_LAYOUT
+  check(L.artX >= L.posX + 16, "the portrait clears the place column")
+  check(L.nameX >= L.artX + 16, "and the name clears the portrait")
+  -- the digit boundaries, which is the only place the arithmetic changes --
+  -- 1429 iterations of the same three cases would drown the suite's count
+  -- without asserting anything the list below does not
+  for _, points in ipairs({ 0, 1, 9, 10, 99, 100, 999, 1000, Config.RANK_MAX }) do
+    local room = Ui.nameRoom(points)
+    local nameRight = L.nameX + room * 8
+    local scoreLeft = L.right - 8 * #tostring(points)
+    check(nameRight <= scoreLeft,
+          ("a name beside %d never reaches its score"):format(points))
+    check(room >= 1, "and there is always at least one glyph of it to read")
+  end
+
+  eq(Ui.nameRoom(16) >= Config.NAME_MAX, true,
+     "an ordinary rating leaves room for the longest name there is")
+  eq(Ui.nameRoom(999) >= Config.NAME_MAX, true, "and so does a three-figure one")
+  eq(Ui.nameRoom(0) >= Config.NAME_MAX, true, "and an unranked zero")
+  check(Ui.nameRoom(Config.RANK_MAX) < Config.NAME_MAX,
+        "only a four-figure rating trims a full-length name, by one glyph")
+end
+
 end)()
 
 -- ------------------------------------------------------------------
@@ -1955,6 +2432,47 @@ eq(Client.setJoinAddress(Client, ""), nil, "an empty address is refused")
 eq(Client.joinAddress(), "192.168.1.7:7788", "leaving the previous one intact")
 
 eq(Client.isHosting(), false, "a fresh client is not hosting")
+
+-- ------- the claim ticket, as the client keeps it
+--
+-- The hub's half of this is tested above; this is the client's, and it is
+-- the half that has to survive the save file. A ticket filed under the wrong
+-- key, or stored half-formed, does not fail loudly -- the player simply
+-- stops being ranked one day, with nothing on screen to connect it to.
+
+local TICKET_A = string.rep("c3", 16)
+local TICKET_B = string.rep("d4", 16)
+
+eq(Client.rankToken(Client, "hub.example.com:7788"), nil,
+   "a hub never played on has no ticket")
+eq(Client.setRankToken(Client, "hub.example.com:7788", TICKET_A), TICKET_A,
+   "one the hub minted is stored")
+eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
+   "and comes back for that hub")
+eq(Client.rankToken(Client, "HUB.EXAMPLE.COM:7788"), TICKET_A,
+   "however the address was capitalised -- one hub, one key")
+eq(Client.rankToken(Client, "other.example.com:7788"), nil,
+   "and never for a different one: a ticket is only worth anything to the "
+   .. "hub that minted it")
+
+eq(Client.setRankToken(Client, "other.example.com:7788", TICKET_B), TICKET_B,
+   "a player on two hubs holds two")
+eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
+   "and neither overwrites the other")
+
+eq(Client.setRankToken(Client, "hub.example.com:7788", "not a token"), nil,
+   "something that is not a ticket is refused")
+eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
+   "leaving the real one where it was")
+eq(Client.setRankToken(Client, "hub.example.com:7788", TICKET_A:sub(1, 8)), nil,
+   "and so is a truncated one, which would fail every claim from then on")
+
+-- Hosting has no address to file under, and still has a name to hold.
+eq(Client.setRankToken(Client, nil, TICKET_B), TICKET_B,
+   "a hosting copy stores its own ticket")
+eq(Client.rankToken(Client, nil), TICKET_B, "under a key of its own")
+eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
+   "which is not the one any dialled hub uses")
 
 -- ------------------------------------------------------------------
 -- 10. Trading, and the one invariant that matters
@@ -2257,6 +2775,30 @@ orphan:onRelay({ from = "1", payload = {} })
 eq(#warns, 1, "a relay with no session open is logged exactly once")
 
 stubMod.log.warn = function() end
+
+-- ------- a ranked battle's paperwork survives the session it belonged to
+--
+-- The result is reported after the battle ends, which is after either side
+-- may have torn the session down -- so Sessions keeps the hub's session id
+-- and the state it handed the engine, and answers exactly once.
+
+local _, ann8, bob8 = pairAtConfirm()
+local liveId = ann8.sessions.active and ann8.sessions.active.id
+check(liveId ~= nil, "a session carries the hub's id for it")
+eq(liveId, bob8.sessions.active.id, "and both sides file under the same one")
+
+-- what beginBattle records when it hands a battle to the engine
+local fought = { kind = "link" }
+ann8.sessions.lastBattle =
+  { id = liveId, peerId = bob8.client.id, peerName = "BOB", state = fought }
+
+eq(ann8.sessions:claimBattle({ kind = "wild" }), nil,
+   "a different battle -- a wild encounter, a cable-club link -- claims nothing")
+local claimed = ann8.sessions:claimBattle(fought)
+check(claimed ~= nil, "the battle this mod handed over is claimed")
+eq(claimed.id, liveId, "under the session it was fought in")
+eq(ann8.sessions:claimBattle(fought), nil,
+   "and only once, so a result cannot be reported twice")
 
 end)()
 

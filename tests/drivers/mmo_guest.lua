@@ -897,6 +897,21 @@ return function(game)
   shot("after-battle")
   check(rendezvous("battle"), "both guests came out of the battle")
 
+  -- ------- the ranking a dedicated hub keeps
+  --
+  -- Same settlement as the in-game host run, through the Node hub instead:
+  -- two reports, one result, and a leaderboard that comes back over the
+  -- wire. The two hubs price a win identically, and this is where that stops
+  -- being a claim about two files and starts being a claim about two
+  -- programs.
+  H.closeToOverworld(game)
+  H.rankAfterBattle(game, exports, check)
+  if H.openMmo(game) then
+    U.wait(25)
+    H.shotRank(game, ("%s/hub-%s-rank.png"):format(SHOT_DIR, ROLE), check)
+  end
+  H.closeToOverworld(game)
+
   -- ------- leaving the party
   --
   -- One member leaves and it ends for both: at two people there is no party

@@ -36,6 +36,7 @@ local need = ...
 local Config = need("Config")
 local Wire = need("Wire")
 local Sha256 = need("Sha256")
+local Rank = need("Rank")
 
 local M = {}
 M.__index = M
@@ -243,6 +244,14 @@ function M.new(opts)
     players = 0,      -- of those, the ones that have been admitted
     sessions = {},    -- sessionId -> { a, b, kind }
     parties = {},     -- partyId -> { memberId, ... }
+    -- Ranked PVP.  The board is what a rating *is* -- the hub owns it,
+    -- because a client that owned its own score would simply write itself a
+    -- better one -- and `matches` is the paperwork for one battle: who was
+    -- in it and what each side has said about how it ended.  A caller may
+    -- hand over a board that was loaded from somewhere (the dedicated hub
+    -- does; a hosted game starts fresh each time it is opened).
+    board = opts.board or Rank.newBoard(),
+    matches = {},     -- sessionId -> { a, b, aName, bName, reports, endedAt }
     nextId = 1,
     nextSession = 1,
     nextParty = 1,
@@ -314,6 +323,22 @@ function M:newNonce()
   return digest:sub(1, Config.NONCE_HEX)
 end
 
+-- A fresh claim token: 16 bytes off the same pool the nonces come from,
+-- lowercase hex, and the only copy that will ever exist outside the player's
+-- save file -- the board keeps its digest and nothing else.
+--
+-- nil when the pool cannot answer, which is not fatal: a name claimed with
+-- no token is simply left unclaimed, and the player scores under it the way
+-- everybody did before tokens existed.
+function M:newToken()
+  self.nextToken = (self.nextToken or 0) + 1
+  local raw = self.entropy and self.entropy:bytes(Config.RANK_TOKEN_HEX / 2)
+  if type(raw) ~= "string" then return nil end
+  local digest = Sha256.hex(raw .. "|token|" .. self.nextToken .. "|" .. self.clock)
+  if type(digest) ~= "string" then return nil end
+  return digest:sub(1, Config.RANK_TOKEN_HEX)
+end
+
 -- ------- plumbing
 
 local function send(client, msgType, payload)
@@ -341,6 +366,10 @@ local function presenceOf(client)
     -- the party needs the id, so the id does not leave the hub.
     party = client.partyId ~= nil,
     profile = client.profile,
+    -- Carried with presence rather than with the card: a rating moves while
+    -- the player is standing there, and the card is a snapshot of their
+    -- hello. Every roster row and every trainer card reads this field.
+    points = client.points or Config.RANK_START,
   }
 end
 
@@ -443,6 +472,27 @@ function M:admit(client)
   client.facing = hello.facing or "down"
   client.hello, client.nonce = nil, nil
   client.ready = true
+  -- Who is behind the name.
+  --
+  -- A first visit claims it and is handed the ticket to come back with; a
+  -- returning player presents theirs and gets their rating; anybody else
+  -- typing that name plays as normal and scores nothing. `minted` is sent on
+  -- in the welcome and then forgotten -- the hub keeps only the digest, so
+  -- this is the one moment the token exists here.
+  local minted = self:newToken()
+  local verdict = self.board:claim(client.name, hello.token, minted)
+  client.ranked = verdict ~= "impostor"
+  client.mintedToken = (verdict == "claimed") and minted or nil
+
+  -- The rating this name already carries on this hub, and the character it
+  -- is wearing today -- so the leaderboard can draw a portrait for a player
+  -- who is not online, and a returning player is not silently reset to zero.
+  -- An unranked player is shown as zero rather than as the rating of the
+  -- name they typed: it is not theirs, and putting it on their card would be
+  -- the claim ticket buying nothing.
+  self.board:seen(client.name, client.sprite)
+  client.points = client.ranked and self.board:points(client.name)
+    or Config.RANK_START
   self.players = self.players + 1
 
   local players = {}
@@ -451,7 +501,23 @@ function M:admit(client)
       players[#players + 1] = presenceOf(other)
     end
   end
-  send(client, Wire.WELCOME, { id = client.id, players = players })
+  -- `points` is this player's own rating, spelled out rather than left to be
+  -- fished out of the roster: the roster a client keeps deliberately has no
+  -- entry for itself (Roster:isSelf), so the welcome is the only place your
+  -- own score can arrive from.
+  send(client, Wire.WELCOME, {
+    id = client.id, players = players, points = client.points,
+    -- Sent exactly once, on the visit that claimed the name. The client
+    -- stores it against this hub and presents it next time; nothing here
+    -- re-sends it, because a hub that would hand the ticket to whoever asked
+    -- would not be checking anything.
+    rankToken = client.mintedToken,
+    -- Said out loud rather than left to be inferred from a zero: "your
+    -- battles will not score here" is a thing a player can act on (change
+    -- the name), and a silent zero is not.
+    ranked = client.ranked,
+  })
+  client.mintedToken = nil
   self:broadcast(Wire.JOIN, { player = presenceOf(client) }, client.id)
   return true
 end
@@ -494,6 +560,16 @@ function M:endSession(client, reason)
   self.sessions[id] = nil
   client.sessionId = nil
 
+  -- A battle's paperwork outlives its session, briefly.
+  --
+  -- The two players do not finish at the same instant -- each is reading
+  -- its own end-of-battle messages -- and whichever leaves first takes the
+  -- session down with it, so scoring only while the session is live would
+  -- score nothing at all. The match therefore starts a clock here instead
+  -- (Config.RANK_REPORT_GRACE) and update() reaps it.
+  local match = self.matches[id]
+  if match and not match.endedAt then match.endedAt = self.clock end
+
   if session then
     local otherId = session.a == client.id and session.b or session.a
     local other = self.clients[otherId]
@@ -513,6 +589,21 @@ function M:startSession(a, b, kind)
   self.nextSession = self.nextSession + 1
   self.sessions[id] = { a = a.id, b = b.id, kind = kind }
   a.sessionId, b.sessionId = id, id
+
+  -- Only a battle can be scored, so only a battle gets paperwork. The names
+  -- are copied *now*, from what each player was admitted under, so the
+  -- rating lands on whoever actually fought even if one of them is gone by
+  -- the time the second report arrives.
+  if kind == "battle" then
+    self.matches[id] = {
+      a = a.id, b = b.id, aName = a.name, bName = b.name,
+      -- taken now, from the players in the battle: whether a result may
+      -- touch the board is a fact about who they are, not about what they
+      -- report afterwards
+      aRanked = a.ranked ~= false, bRanked = b.ranked ~= false,
+      reports = {}, startedAt = self.clock,
+    }
+  end
 
   -- The requester hosts. Someone has to deal the battle's shared RNG seed,
   -- and picking the side that asked keeps it deterministic rather than
@@ -592,6 +683,73 @@ function M:endParty(client, reason)
   end
 end
 
+-- ------- ranked PVP
+
+-- Tell the whole hub what somebody is worth now.
+--
+-- Broadcast with no exception, so the player it is about hears it too: their
+-- own score is not in their own roster (a client drops its own presence),
+-- and a menu that only updated for other people would be the one place the
+-- number was stale.
+function M:publishPoints(clientId, points)
+  local client = self.clients[clientId]
+  if not client then return end
+  client.points = points
+  self:broadcast(Wire.RANK, { id = clientId, points = points })
+end
+
+-- Score a battle, but only once both sides have said the same thing about
+-- it.
+--
+-- **This is the whole anti-cheat story, and it is deliberately small.** A
+-- result is a claim by a stranger's process; the only cheap thing that makes
+-- it worth more is a second, independent claim that agrees. So a lone report
+-- scores nothing, two reports that disagree score nothing, and the first
+-- answer from a given player is the one that counts -- otherwise a client
+-- could keep re-reporting until its opponent's answer happened to match.
+--
+-- What that leaves open is stated rather than papered over: a player who
+-- quits mid-battle is a draw for the side still standing (the engine's own
+-- LinkBattle ends a dead link that way), so rage-quitting avoids the loss.
+-- Deciding otherwise would mean believing one side alone, which is the
+-- larger hole -- anyone could then mint wins against a player who never
+-- connected.
+function M:settleMatch(id)
+  local match = self.matches[id]
+  if not match then return nil end
+  local first, second = match.reports[match.a], match.reports[match.b]
+  if not (first and second) then return nil end
+
+  -- One match, one settlement: the paperwork goes whatever the verdict is,
+  -- so a pair cannot re-report their way to a second payout.
+  self.matches[id] = nil
+
+  local winner, loser
+  if first == "win" and second == "loss" then
+    winner, loser = match.aName, match.bName
+  elseif first == "loss" and second == "win" then
+    winner, loser = match.bName, match.aName
+  else
+    -- Agreed draw, or two clients telling different stories. Neither is
+    -- worth points, and neither is worth a sentence on anybody's screen.
+    return nil
+  end
+
+  -- A battle is only worth points when both players are who they say they
+  -- are. One impostor and the whole match scores nothing: paying out half of
+  -- it would move a rating that belongs to somebody who was not playing.
+  if not (match.aRanked and match.bRanked) then return nil end
+
+  local settled = self.board:record(winner, loser, self.clock)
+  if not settled then return nil end
+
+  local winnerId = (winner == match.aName) and match.a or match.b
+  local loserId = (winnerId == match.a) and match.b or match.a
+  self:publishPoints(winnerId, settled.winner.points)
+  self:publishPoints(loserId, settled.loser.points)
+  return settled
+end
+
 -- ------- handlers
 
 local handlers = {}
@@ -617,6 +775,9 @@ handlers[Wire.HELLO] = function(self, client, msg)
   -- player yet, and half-applied fields would be a player nobody admitted.
   client.hello = {
     name = name,
+    -- the ticket that says this name is theirs, if they have been here
+    -- before; absent on a first visit and on a copy that lost its save
+    token = Wire.token(msg.rankToken),
     sprite = Wire.spriteId(msg.sprite) or Config.DEFAULT_SPRITE,
     profile = Wire.profile(msg.profile),
     map = Wire.mapId(msg.map),
@@ -833,6 +994,37 @@ handlers[Wire.SESSION_LEAVE] = function(self, client)
   self:endSession(client, "peer_left")
 end
 
+handlers[Wire.RESULT] = function(self, client, msg)
+  if not client.ready then return end
+  local id = Wire.id(msg.session)
+  local outcome = Wire.outcome(msg.outcome)
+  if not (id and outcome) then return end
+
+  local match = self.matches[id]
+  -- No paperwork means the battle was never here, was scored already, or
+  -- finished longer ago than the grace period. All three are the same
+  -- answer: nothing happens, and nobody is told off for it.
+  if not match then return end
+  if client.id ~= match.a and client.id ~= match.b then return end
+  -- First answer stands. A client that could revise its report could keep
+  -- trying until it matched whatever its opponent said.
+  if match.reports[client.id] then return end
+
+  match.reports[client.id] = outcome
+  self:settleMatch(id)
+end
+
+handlers[Wire.RANKS] = function(self, client)
+  if not client.ready then return end
+  -- Gated like chat: answering means sorting every rating this hub holds,
+  -- and the screen that asks is one a player can sit on.
+  if self.clock - (client.lastRanks or -math.huge) < Config.RANK_QUERY_GATE then
+    return
+  end
+  client.lastRanks = self.clock
+  send(client, Wire.RANKING, { entries = self.board:top(Config.RANK_TOP) })
+end
+
 handlers[Wire.PING] = function(self, client)
   send(client, Wire.PONG, {})
 end
@@ -874,6 +1066,19 @@ function M:update(dt)
     end
     self:drop(client)
   end
+
+  -- Finished battles nobody ever agreed on. Dropped rather than guessed at:
+  -- one report is not a result, and a hub that kept them would grow a table
+  -- of unfinished arguments for as long as it ran.
+  local expired
+  for id, match in pairs(self.matches) do
+    if match.endedAt
+       and (self.clock - match.endedAt) > Config.RANK_REPORT_GRACE then
+      expired = expired or {}
+      expired[#expired + 1] = id
+    end
+  end
+  for _, id in ipairs(expired or {}) do self.matches[id] = nil end
 end
 
 -- Tell everyone the game is over, then forget them. Called when the host
@@ -891,6 +1096,10 @@ function M:shutdown(message)
   end
   self.clients, self.count, self.players = {}, 0, 0
   self.sessions, self.parties = {}, {}
+  -- The board survives: it is the hub's record, not the connection's, and a
+  -- host who stops and starts a game has not un-won anybody's battles. The
+  -- half-reported matches do not -- their sessions are gone.
+  self.matches = {}
 end
 
 M.presenceOf = presenceOf

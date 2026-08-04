@@ -54,6 +54,25 @@ ctx.server = server
 local presenceClock = 0
 local lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
 
+-- Ranked PVP, as this client sees it.
+--
+-- Both are the hub's answers held for the screens to draw, never worked out
+-- locally: the hub owns every rating, so a client that computed its own
+-- would be showing the player a number nobody else agrees with. `myPoints`
+-- arrives in the welcome and moves on mmo.rank; `ranking` is whatever the
+-- last mmo.ranks request came back with. The two flags are what let the RANK
+-- screen tell three silences apart -- not in a game, waiting on the hub, and
+-- a hub where nobody has won anything yet -- which are one empty list to
+-- anything that only counts rows.
+local myPoints = Config.RANK_START
+local ranking = {}
+local rankingAsked = false
+local rankingSeen = false
+-- Whether this hub is scoring us at all. False means the trainer name we
+-- joined under is claimed by somebody else's copy, which is a thing the RANK
+-- screen says out loud rather than leaving to be inferred from a zero.
+local rankedHere = true
+
 -- Which hub this connection is talking to, and whether its challenge has
 -- already been answered.  Both belong to exactly one connection: an
 -- mmo.error means "wrong join code" only when it lands after we answered a
@@ -184,6 +203,41 @@ function M.setJoinCode(a, b, c)
   if not (code and key) then return nil end
   mod.save:set(key, code)
   return code
+end
+
+-- Where a hub's claim ticket is kept.
+--
+-- One key per hub, like the join code and for the same reason: the ticket
+-- only means anything to the hub that minted it, and a player who plays on
+-- two of them holds two. Keyed off the address that was dialled, so the
+-- ticket presented is the one the hub in question issued.
+--
+-- Hosting has no address -- the local net is in-process -- so it falls back
+-- to a fixed key. That copy's board is rebuilt every time it starts hosting
+-- anyway, so what the ticket buys there is one session's worth of "this name
+-- is mine" against the friends who joined, which is exactly the case it is
+-- for.
+local function tokenKey(address)
+  if type(address) ~= "string" or address == "" then return "rank:self" end
+  local clean = address:lower():gsub("%s+", "")
+  if clean == "" then return "rank:self" end
+  return "rank:" .. clean
+end
+
+function M.rankToken(a, b)
+  return Wire.token(mod.save:get(tokenKey(arg1(a, b))))
+end
+
+-- Stored only if it is the shape a hub mints. A half-token would fail every
+-- claim from then on, and silently: the player would simply stop being
+-- ranked, with nothing on screen to connect it to.
+function M.setRankToken(a, b, c)
+  local address, value
+  if a == M then address, value = b, c else address, value = a, b end
+  local token = Wire.token(value)
+  if not token then return nil end
+  mod.save:set(tokenKey(address), token)
+  return token
 end
 
 -- The code this copy asks for when it hosts.
@@ -373,7 +427,58 @@ function M.ownCard(a, b)
     sprite = M.spriteChoice(),
     profile = M.profile(game),
     money = save and math.floor(tonumber(save.money) or 0) or 0,
+    -- the hub's number, not a local one: this is the row everybody else is
+    -- reading off your card
+    points = myPoints,
   }
+end
+
+-- ------- ranked PVP
+
+-- What this player is worth on the hub they are on.  Zero while offline: a
+-- rating is a fact about a hub, and there is no hub to have one on.
+function M.points()
+  return myPoints
+end
+
+-- The last leaderboard the hub sent, newest first, and whether one has been
+-- asked for yet.  The screen draws from here every frame, so an answer that
+-- arrives while it is open simply appears.
+function M.ranking()
+  return ranking, rankingAsked, rankingSeen
+end
+
+-- Is this hub scoring us?  False only when the name we joined under belongs
+-- to somebody else's copy here.
+function M.isRanked()
+  return rankedHere
+end
+
+function M.requestRanking()
+  if not transport:isReady() then return false end
+  rankingAsked = true
+  transport:send(Wire.RANKS, {})
+  return true
+end
+
+-- Tell the hub how a ranked battle ended.
+--
+-- Sent by both players, and worth nothing on its own: the hub scores a match
+-- only when the two reports agree (see Hub:settleMatch), so this is a vote,
+-- not a verdict. Reported even when it is a loss -- a client that could
+-- withhold one would be a client that never loses points.
+-- The transport is checked *before* the claim, not after: claiming is what
+-- spends it, so asking a closed connection to carry a report would throw the
+-- battle away rather than leaving it reportable.
+function M.reportBattle(state, result)
+  if not transport:isReady() then return false end
+  local battle = sessions:claimBattle(state)
+  if not (battle and battle.id) then return false end
+  local outcome = "draw"
+  if result == "win" then outcome = "win"
+  elseif result == "lose" then outcome = "loss" end
+  transport:send(Wire.RESULT, { session = battle.id, outcome = outcome })
+  return true
 end
 
 -- ------- your own look, in your own game
@@ -538,6 +643,9 @@ function M.sendHello(game)
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
     name = M.playerName(game),
+    -- "this name is mine, and here is the ticket you gave me" -- absent on a
+    -- first visit, which is what makes the hub mint one
+    rankToken = M.rankToken(dialled),
     sprite = M.spriteChoice(),
     profile = M.profile(game),
     map = current and current.mapId,
@@ -557,6 +665,12 @@ function M.disconnect()
   transport:close()
   lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
   dialled, authSent = nil, false
+  -- A rating belongs to the hub that keeps it, so leaving takes it off the
+  -- screen rather than leaving a stale number on your own card in
+  -- single-player.
+  myPoints, ranking = Config.RANK_START, {}
+  rankingAsked, rankingSeen = false, false
+  rankedHere = true
 end
 
 -- Leaving covers both shapes so callers never have to ask which they are:
@@ -709,6 +823,19 @@ handlers[Wire.WELCOME] = function(game, msg)
   -- includes us and the roster deliberately does not.
   party:reset()
   party:setSelf(id)
+  -- your own rating, which cannot come from the roster: it has no entry for
+  -- you, by design
+  myPoints = Wire.points(msg.points)
+  ranking, rankingAsked, rankingSeen = {}, false, false
+  -- A hub that just claimed this name for us sends the ticket once and never
+  -- again, so this is the only chance to keep it. Stored against the address
+  -- we dialled -- the same key the next hello reads it back from.
+  local granted = Wire.token(msg.rankToken)
+  if granted then M.setRankToken(dialled, granted) end
+  -- Absent means an older hub that does not score at all, which is not the
+  -- same as being refused a name; treat silence as ranked and let the empty
+  -- leaderboard speak for itself.
+  rankedHere = msg.ranked ~= false
   for _, raw in ipairs(msg.players or {}) do
     ctx.roster:put(Wire.presence(raw))
   end
@@ -771,6 +898,24 @@ handlers[Wire.PARTY_INVITE] = function(game, msg) party:onInvite(game, msg) end
 handlers[Wire.PARTY_DECLINE] = function(_, msg) party:onDecline(msg) end
 handlers[Wire.PARTY] = function(_, msg) party:onParty(msg) end
 handlers[Wire.PARTY_END] = function(_, msg) party:onEnd(msg) end
+
+-- A rating moved -- ours or somebody else's.  One message covers both, so a
+-- battle's two halves land on every screen in the same frame.
+handlers[Wire.RANK] = function(_, msg)
+  local id = Wire.id(msg.id)
+  if not id then return end
+  local points = Wire.points(msg.points)
+  if ctx.roster:isSelf(id) then
+    myPoints = points
+  else
+    ctx.roster:setPoints(id, points)
+  end
+end
+
+handlers[Wire.RANKING] = function(_, msg)
+  ranking = Wire.ranking(msg.entries)
+  rankingAsked, rankingSeen = true, true
+end
 
 handlers[Wire.REQUEST] = function(game, msg) sessions:onRequest(game, msg) end
 handlers[Wire.DECLINE] = function(_, msg) sessions:onDecline(msg) end
@@ -982,6 +1127,19 @@ function M.install()
     end
   end)
 
+  -- A ranked battle just ended, so tell the hub how it went.
+  --
+  -- The engine's own event, carrying the state that finished and the result
+  -- its simulation reached -- so what is reported is what the game decided,
+  -- not what this mod thought was happening. Sessions matches the state
+  -- against the one it handed over, so a wild encounter or a cable-club link
+  -- fought while connected reports nothing.
+  mod.events:on("battle.ended", function(payload)
+    if not (payload and payload.battle) then return end
+    if not transport:isReady() then return end
+    M.reportBattle(payload.battle, payload.result)
+  end)
+
   -- Leaving to the title screen or loading another save must not leave a
   -- stale roster pointing at a world that is gone -- and if this copy was
   -- hosting, the listener has to come down with it rather than serving a
@@ -999,6 +1157,13 @@ function M.install()
   -- this to tell "the invite was accepted" from "the box appeared".
   mod.exports.party = function() return party:list() end
   mod.exports.say = function(scope, text, to) return M.say(scope, text, to) end
+  -- ranked PVP: this player's points, and the hub's top ten as last asked
+  -- for. A mod that wants a leaderboard of its own reads these rather than
+  -- inventing a second scoring system.
+  mod.exports.points = function() return myPoints end
+  mod.exports.isRanked = function() return rankedHere end
+  mod.exports.ranking = function() return ranking end
+  mod.exports.requestRanking = function() return M.requestRanking() end
   -- newest last, same order the chat screen scrolls
   mod.exports.chat = function() return ctx.chat:recent() end
   -- Where each remote player is according to the roster, and where their

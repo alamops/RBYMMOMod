@@ -43,6 +43,7 @@ local SCREEN = {
   CHARSET  = "RbyMmoCharSetup",
   CHARPICK = "RbyMmoCharPick",
   PROFILE  = "RbyMmoProfile",
+  RANK     = "RbyMmoRank",
 }
 M.SCREEN = SCREEN
 
@@ -176,6 +177,11 @@ Card.isOpaque = true
 
 -- The character's own portrait, taken from the overworld sheet.
 --
+-- Where a full-width row runs out. The text column starts at x=16 and the
+-- right border begins at 152, so 17 glyphs is a row -- and anything drawn
+-- right-aligned is placed off this rather than off a guess.
+local CARD_RIGHT = 152
+
 -- Chars.portrait owns the loading and the cache, because the town map draws
 -- the same front-facing pose at a party member's city and a second copy
 -- would mean a second copy of every sheet -- on a path that draws each
@@ -229,11 +235,19 @@ function Card:draw()
   -- prints a class before a name: ALPHA, a COOLTRAINER M.
   Font.draw(Chars.label(p.sprite or ""), 16, 40)
 
-  -- portrait on the right, level with the two fixed-width rows below
+  -- Portrait on the right, level with the two fixed-width rows below.
+  --
+  -- y=52 and not 56, which is where it sat until the badge row grew a score.
+  -- The art is 16px drawn at 2x, so from 56 its last row is y=87 and the row
+  -- beneath it starts at y=88: no overlap, and no gap either, so the
+  -- character's feet stood on the tops of the letters and read as a bug.
+  -- Four pixels up buys 4px of air both above and below -- the character
+  -- label above ends at y=48 -- and it centres the art better against the
+  -- two rows it belongs to (56..80 has its middle at 68; so does 52..84).
   local art = portrait(p.sprite)
   if art then
     love.graphics.setColor(1, 1, 1, 1)
-    love.graphics.draw(art.image, art.quad, 116, 56, 0, 2, 2)
+    love.graphics.draw(art.image, art.quad, 116, 52, 0, 2, 2)
   end
 
   -- money is local-only, so it is also what tells the two cards apart
@@ -277,11 +291,193 @@ function Card:draw()
   -- card is for, and it is not sent either -- transmitting a value nothing
   -- displays would be exposure for nothing.
   Font.draw(("BADGES/%d"):format(card.badges or 0), 16, 88)
+
+  -- Ranked points share the badge row, right-aligned against the border.
+  --
+  -- There is no eighth row to give them: the box holds seven at the 16px
+  -- spacing the rest of the card uses, and all seven were spoken for. The
+  -- badge count is the one that leaves most of its row empty -- "BADGES/8"
+  -- is eight glyphs of the seventeen -- so the score goes in the space it
+  -- was already not using, and right-aligned means a four-figure rating
+  -- grows towards the badges rather than through the border. It is on both
+  -- cards at the same height, like every other shared row: what you check
+  -- here is what everybody else is reading about you.
+  --
+  -- Points ride on presence, not on the card (Wire.presence), so this is the
+  -- live number and not a snapshot of whoever joined an hour ago.
+  local rank = ("RANK/%d"):format(p.points or 0)
+  Font.draw(rank, CARD_RIGHT - 8 * #rank, 88)
   Font.draw(("SEEN/%d OWN/%d"):format(card.seen or 0, card.owned or 0), 16, 104)
   if own then
     -- last row of the 18-tile box: y=120 leaves the bottom border clear,
     -- the way the dex line does at 104
     Font.draw(("MONEY/¥%d"):format(p.money), 16, 120)
+  end
+end
+
+-- ------- the leaderboard
+--
+-- `[position] [character] [name] [points]`, best first, the top ten as the
+-- hub ranked them.
+--
+-- A hand-drawn state rather than a ListMenu, for one reason: the character
+-- belongs in the row. A list row is a line of text, and a character *label*
+-- does not fit beside a name and a score -- "MIDDLE AGED WOMAN" is seventeen
+-- glyphs, the whole row on its own -- so the row shows the portrait instead,
+-- the same front-facing frame the trainer card uses. That costs the row its
+-- height: sixteen pixels of art means six rows on screen where text would
+-- have given twelve, so the list scrolls with up and down.
+--
+-- Nothing here decides who is on the board. The hub sends ten rows already
+-- sorted and already filtered to players with points, because it is the only
+-- side that knows the ratings of players who are not online.
+local Ranks = {}
+Ranks.__index = Ranks
+Ranks.isOpaque = true
+
+-- The row, left to right, and why the gaps are where they are.
+--
+-- The box's interior is 8..152, which is eighteen glyphs. The four columns
+-- want two (a place, up to "10"), two (the portrait, 16px), ten (a name at
+-- Config.NAME_MAX) and four (a score at Config.RANK_MAX) -- exactly
+-- eighteen, with nothing left for air. Packed that tightly the art touched
+-- both its neighbours and read as a rendering fault rather than a layout.
+--
+-- So every column is given its air and the *name* pays for it, and only when
+-- it has to: `nameRoom` works out how many glyphs are left before the score
+-- and trims to fit. The budget works out at 16 + 2 + 16 + 2 + 80 + 4 + 24 =
+-- 144, which is the row exactly -- so a full ten-character name and a
+-- three-figure rating both fit whole, and only a four-figure one costs a
+-- long name its last glyph.
+local RANK_ROWS = 6        -- rows visible at once
+local RANK_FIRST_Y = 24    -- the top one, under the title
+local RANK_ROW_H = 16      -- one portrait tall
+local RANK_POS_X = 8       -- "10", right up against the left border
+local RANK_ART_X = 26      -- 2px clear of the place
+local RANK_NAME_X = 44     -- 2px clear of the art
+local RANK_RIGHT = 152     -- where a right-aligned score ends
+local RANK_GAP = 4         -- kept between the name and the score
+local RANK_TEXT_DY = 4     -- text centred against a 16px portrait
+local RANK_FOOT_Y = 120
+
+-- Exported so the suite asserts against the layout the screen actually
+-- draws with, rather than a second copy of these numbers that can drift.
+M.RANK_LAYOUT = {
+  posX = RANK_POS_X, artX = RANK_ART_X, nameX = RANK_NAME_X,
+  right = RANK_RIGHT, gap = RANK_GAP, rows = RANK_ROWS,
+}
+
+-- How much of a name fits before the score does, in glyphs.  Pure, so the
+-- arithmetic that decides "does this fit" is pinned by the suite rather than
+-- by looking at a screenshot -- the same reason M.fieldLayout is.
+function M.nameRoom(points)
+  local width = 8 * #tostring(points or 0)
+  return math.max(math.floor(
+    (RANK_RIGHT - width - RANK_GAP - RANK_NAME_X) / 8), 1)
+end
+
+function Ranks.new(game, client, onCancel)
+  -- Asked for on the way in rather than pushed by the hub: the board moves
+  -- on every battle anybody fights, and nobody is looking at it most of the
+  -- time. The screen draws from the client's copy every frame, so the answer
+  -- appears when it lands without anything having to wait for it.
+  client:requestRanking()
+  return setmetatable({
+    game = game, client = client, onCancel = onCancel, offset = 0,
+  }, Ranks)
+end
+
+function Ranks:entries()
+  local rows = self.client:ranking()
+  return type(rows) == "table" and rows or {}
+end
+
+function Ranks:update()
+  local input = self.game.input
+  local rows = self:entries()
+  local maxOffset = math.max(#rows - RANK_ROWS, 0)
+  -- clamped every frame, not only on input: an answer that arrives while the
+  -- screen is open can make the list shorter than where it is scrolled to
+  if self.offset > maxOffset then self.offset = maxOffset end
+
+  if input:wasPressed("down") then
+    self.offset = math.min(self.offset + 1, maxOffset)
+  elseif input:wasPressed("up") then
+    self.offset = math.max(self.offset - 1, 0)
+  elseif input:wasPressed("b") or input:wasPressed("a") then
+    self.game.stack:pop()
+    if self.onCancel then self.onCancel() end
+  end
+end
+
+function Ranks:draw()
+  local Font = mod.ui.Font
+  if not (Font and Font.draw) then return end
+  Font.drawBox(0, 0, 20, 18)
+  Font.draw("RANK", 16, 8)
+
+  local rows = self:entries()
+  local _, asked, seen = self.client:ranking()
+  if #rows == 0 then
+    -- Three silences that are one empty list to anything counting rows, and
+    -- three different things to a player: nothing was asked (there is no hub
+    -- to ask), the answer has not come back yet, or it came back empty.
+    -- Saying "nobody has won" while the request is still in flight would
+    -- send somebody looking for a bug that is not there.
+    if not asked then
+      Font.draw("NOT IN A GAME.", 16, 48)
+      Font.draw("JOIN ONE FIRST.", 16, 64)
+    elseif not self.client:isRanked() then
+      -- The name this player joined under belongs to somebody else's copy on
+      -- this hub, so their battles will not score. Said here, with the whole
+      -- page to say it in, and with the thing to do about it -- a zero on a
+      -- card cannot explain itself.
+      Font.draw("THAT NAME IS TAKEN", 16, 48)
+      Font.draw("ON THIS HUB, SO NO", 16, 64)
+      Font.draw("BATTLES WILL SCORE.", 16, 80)
+      Font.draw("PICK ANOTHER NAME.", 16, 96)
+    elseif not seen then
+      Font.draw("ASKING THE HUB...", 16, 48)
+    else
+      Font.draw("NOBODY HAS WON", 16, 48)
+      Font.draw("A BATTLE HERE YET.", 16, 64)
+    end
+    return
+  end
+
+  local last = math.min(self.offset + RANK_ROWS, #rows)
+  for slot = 1, last - self.offset do
+    local place = self.offset + slot
+    local row = rows[place]
+    local y = RANK_FIRST_Y + (slot - 1) * RANK_ROW_H
+
+    -- %2d so the ones and the tens line up under each other, the way the
+    -- original right-aligns a quantity
+    Font.draw(("%2d"):format(place), RANK_POS_X, y + RANK_TEXT_DY)
+
+    local art = portrait(row.sprite)
+    if art then
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.draw(art.image, art.quad, RANK_ART_X, y)
+    end
+
+    local points = tostring(row.points or 0)
+    local name = tostring(row.name):sub(1, M.nameRoom(points))
+    Font.draw(name, RANK_NAME_X, y + RANK_TEXT_DY)
+    Font.draw(points, RANK_RIGHT - 8 * #points, y + RANK_TEXT_DY)
+  end
+
+  -- Only when there is something off-screen, and it says *which* part of the
+  -- list is on screen rather than only that there is more: an arrow alone
+  -- does not tell a player whether they are looking at the top ten or the
+  -- bottom of it.
+  -- One footer row, and being unranked wins it: which slice of the list is on
+  -- screen is a nicety, and "nothing you do here counts" is not.
+  if not self.client:isRanked() then
+    Font.draw("NOT RANKED HERE.", 16, RANK_FOOT_Y)
+  elseif #rows > RANK_ROWS then
+    Font.draw(("%d-%d OF %d"):format(self.offset + 1, last, #rows),
+              16, RANK_FOOT_Y)
   end
 end
 
@@ -450,6 +646,17 @@ function M:install()
             })
           end,
         }
+        -- Under MY PROFILE, because that is where the points on your own
+        -- card send you next: the card says what you are worth, this says
+        -- against whom.
+        items[#items + 1] = {
+          label = "RANK",
+          onSelect = function()
+            mod.ui.push(game, SCREEN.RANK, {
+              onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+            })
+          end,
+        }
       end
       items[#items + 1] = {
         label = hosting and "END GAME" or "LEAVE",
@@ -600,6 +807,13 @@ function M:install()
       return mod.ui.TextBox.new(game, "They just went\noffline.")
     end
     return Card.new(game, player, opts.onCancel)
+  end })
+
+  -- ------- the leaderboard
+
+  screens:register(SCREEN.RANK, { new = function(game, opts)
+    opts = opts or {}
+    return Ranks.new(game, ctx.client, opts.onCancel)
   end })
 
   -- How many players, as a menu of sizes rather than a bare number box.

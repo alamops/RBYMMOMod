@@ -29,9 +29,13 @@
 
 const {
   cleanText, cleanId, cleanSpriteId, cleanMapId, cleanInt, cleanHex,
-  cleanProfile, payloadOk, FACINGS, KINDS, SCOPES, NAME_MAX, MESSAGE_MAX,
-  LOCAL_RADIUS,
+  cleanProfile, cleanOutcome, cleanPoints, cleanToken, payloadOk, FACINGS,
+  KINDS, SCOPES, NAME_MAX, MESSAGE_MAX, LOCAL_RADIUS,
 } = require('./sanitize');
+const {
+  Board, mintToken, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
+  RANK_QUERY_GATE_MS,
+} = require('./rank');
 const { createLog, safe } = require('./log');
 
 const DEFAULT_PLAYERS = 4;
@@ -41,8 +45,11 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // party chat line sent to a protocol-2 hub would meet a handler table that
 // answers an unknown type with silence, and a player pressing INVITE and
 // watching nothing happen is a worse sentence than a refusal that names both
-// versions. Kept in step with Config.PROTOCOL on the mod side.
-const PROTOCOL = 3;
+// versions. 4 is ranked PVP, and moved for the same reason rather than a
+// different one -- a protocol-3 hub has never heard of a battle result or a
+// leaderboard request, so a newer client would report every match into
+// silence. Kept in step with Config.PROTOCOL on the mod side.
+const PROTOCOL = 4;
 // A SHA-256 response is 64 hex characters; the slack is for a future digest,
 // not for an unbounded field.
 const RESPONSE_MAX = 128;
@@ -94,6 +101,11 @@ function presenceOf(client) {
     // stay interchangeable. Null is a peer on an older build with no card
     // to show, which the profile screen says plainly.
     profile: client.profile,
+    // Ranked points ride with presence rather than with the trainer card,
+    // because they are not a snapshot of who somebody was when they joined:
+    // they move mid-session, and a card built from a stale hello would show
+    // a rating the player has already changed.
+    points: client.points || RANK_START,
   };
 }
 
@@ -127,6 +139,9 @@ handlers['mmo.hello'] = (relay, client, msg) => {
   // anyone's roster, and it is not admitted until the challenge is answered.
   client.hello = {
     name,
+    // the ticket that says this name is theirs, if they have been here
+    // before; absent on a first visit and on a copy that lost its save
+    token: cleanToken(msg.rankToken),
     sprite: cleanSpriteId(msg.sprite) || DEFAULT_SPRITE,
     profile: cleanProfile(msg.profile),
     map: cleanMapId(msg.map),
@@ -371,6 +386,37 @@ handlers['mmo.ping'] = (relay, client) => {
   relay.send(client, 'mmo.pong', {});
 };
 
+handlers['mmo.result'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  const id = cleanId(msg.session);
+  const outcome = cleanOutcome(msg.outcome);
+  if (!id || !outcome) return;
+
+  const match = relay.matches.get(id);
+  // No paperwork means the battle was never here, was scored already, or
+  // finished longer ago than the grace period. All three are the same
+  // answer -- nothing happens -- and none of them is worth a log line, since
+  // a late report is a normal thing for a slow connection to produce.
+  if (!match) return;
+  if (client.id !== match.a && client.id !== match.b) return;
+  // First answer stands: a client that could revise its report could keep
+  // trying until it matched whatever its opponent said.
+  if (match.reports.has(client.id)) return;
+
+  match.reports.set(client.id, outcome);
+  relay.settleMatch(id);
+};
+
+handlers['mmo.ranks'] = (relay, client) => {
+  if (!client.ready) return;
+  // Gated like chat: answering means sorting every rating this hub holds,
+  // and the screen that asks is one a player can sit on.
+  const now = relay.now();
+  if (now - client.lastRanks < RANK_QUERY_GATE_MS) return;
+  client.lastRanks = now;
+  relay.send(client, 'mmo.ranking', { entries: relay.leaderboard() });
+};
+
 // --------------------------------------------------------------------- relay
 
 class Relay {
@@ -395,6 +441,19 @@ class Relay {
     this.sessions = new Map();
     /** partyId -> [memberId, ...] */
     this.parties = new Map();
+    /*
+     * Ranked PVP. The board is what a rating *is* -- the hub owns it,
+     * because a client that owned its own score would simply write itself a
+     * better one -- and `matches` is the paperwork for one battle: who was
+     * in it, and what each side has said about how it ended. A caller may
+     * hand over a board it loaded from disk; lib/server.js does, and passes
+     * onRankChange so the file follows the ratings.
+     */
+    this.board = opts.board || new Board();
+    this.onRankChange = typeof opts.onRankChange === 'function'
+      ? opts.onRankChange : null;
+    /** sessionId -> { a, b, aName, bName, reports, endedAt } */
+    this.matches = new Map();
 
     this.nextId = 1;
     this.nextSession = 1;
@@ -445,6 +504,11 @@ class Relay {
       // -Infinity, not 0: an injected clock that starts at zero would
       // otherwise gate the very first message a player ever sends.
       lastChat: -Infinity,
+      lastRanks: -Infinity,
+      points: RANK_START,
+      // until a hello says otherwise, nobody is scored: `ranked` is decided
+      // in admit(), where the name is claimed
+      ranked: false,
       hello: null,
       nonce: null,
       credentialId: null,
@@ -482,13 +546,52 @@ class Relay {
     client.hello = null;
     client.nonce = null;
     client.ready = true;
+    /*
+     * Who is behind the name.
+     *
+     * A first visit claims it and is handed the ticket to come back with; a
+     * returning player presents theirs and gets their rating; anybody else
+     * typing that name plays as normal and scores nothing. `minted` goes out
+     * in the welcome and is then forgotten -- only the digest is kept, so
+     * this is the one moment the token exists on the hub.
+     */
+    const minted = mintToken();
+    const verdict = this.board.claim(client.name, hello.token, minted);
+    client.ranked = verdict !== 'impostor';
+    if (verdict === 'impostor') {
+      this.log.info(`${safe(client.name)} (${client.id}) joined without the ` +
+        'claim token for that name, so their battles will not be scored');
+    }
+
+    // The rating this name already carries on this hub, and the character it
+    // is wearing today -- so the leaderboard can draw a portrait for a
+    // player who is offline, and a returning player is not silently zeroed.
+    // An unranked player shows as zero rather than wearing the rating of the
+    // name they typed: it is not theirs.
+    this.board.seen(client.name, client.sprite);
+    client.points = client.ranked ? this.board.points(client.name) : RANK_START;
     this.players += 1;
 
     const players = [];
     for (const other of this.clients.values()) {
       if (other.ready && other.id !== client.id) players.push(presenceOf(other));
     }
-    this.send(client, 'mmo.welcome', { id: client.id, players });
+    // `points` is this player's own rating, spelled out rather than left to
+    // be fished out of the roster: the roster a client keeps deliberately
+    // has no entry for itself, so the welcome is the only place your own
+    // score can arrive from.
+    this.send(client, 'mmo.welcome', {
+      id: client.id,
+      players,
+      points: client.points,
+      // Sent exactly once, on the visit that claimed the name. Nothing
+      // re-sends it: a hub that handed the ticket to whoever asked would not
+      // be checking anything.
+      rankToken: verdict === 'claimed' ? minted : undefined,
+      // Said out loud rather than left to be inferred from a zero: "your
+      // battles will not score here" is something a player can act on.
+      ranked: client.ranked,
+    });
     this.broadcast('mmo.join', { player: presenceOf(client) }, client.id);
     this.log.info(`+ ${safe(client.name)} (${client.id}) -- ` +
       `${this.players} online`);
@@ -530,6 +633,10 @@ class Relay {
     this.sessions.clear();
     this.parties.clear();
     this.players = 0;
+    // The board survives a shutdown -- it is the hub's record, not the
+    // connection's, and it is what lib/server.js writes to disk. The
+    // half-reported matches do not: their sessions are gone.
+    this.matches.clear();
   }
 
   // ------- parties
@@ -658,6 +765,18 @@ class Relay {
     this.sessions.delete(id);
     client.sessionId = null;
 
+    /*
+     * A battle's paperwork outlives its session, briefly.
+     *
+     * The two players do not finish at the same instant -- each is reading
+     * its own end-of-battle messages -- and whichever leaves first takes the
+     * session down with it, so scoring only while the session was live would
+     * score nothing at all. The match starts a clock here instead, and
+     * sweepMatches() reaps it.
+     */
+    const match = this.matches.get(id);
+    if (match && !match.endedAt) match.endedAt = this.now();
+
     if (session) {
       const otherId = session.a === client.id ? session.b : session.a;
       const other = this.clients.get(otherId);
@@ -678,6 +797,22 @@ class Relay {
     a.sessionId = id;
     b.sessionId = id;
 
+    // Only a battle can be scored, so only a battle gets paperwork. The
+    // names are copied now, from what each player was admitted under, so the
+    // rating lands on whoever actually fought even if one of them is gone by
+    // the time the second report arrives.
+    if (kind === 'battle') {
+      this.matches.set(id, {
+        a: a.id, b: b.id, aName: a.name, bName: b.name,
+        // taken now, from the players in the battle: whether a result may
+        // touch the board is a fact about who they are, not about what they
+        // report afterwards
+        aRanked: a.ranked !== false, bRanked: b.ranked !== false,
+        reports: new Map(), startedAt: this.now(), endedAt: null,
+      });
+      this.sweepMatches();
+    }
+
     // The requester hosts. Someone has to deal the battle's shared RNG seed,
     // and picking the side that asked keeps it deterministic rather than
     // racing on who answers first.
@@ -689,6 +824,119 @@ class Relay {
     this.broadcast('mmo.move', presenceOf(a), a.id);
     this.broadcast('mmo.move', presenceOf(b), b.id);
     this.log.info(`session ${id}: ${safe(a.name)} <-> ${safe(b.name)} (${kind})`);
+  }
+
+  // ------- ranked PVP
+
+  /*
+   * Finished battles nobody ever agreed on. Dropped rather than guessed at:
+   * one report is not a result, and a hub that kept them would grow a table
+   * of unfinished arguments for as long as it ran. Swept when a new battle
+   * starts rather than on a timer, because that is the only moment the table
+   * can grow and there is no interval to unref here.
+   */
+  sweepMatches() {
+    const now = this.now();
+    for (const [id, match] of this.matches) {
+      if (match.endedAt && now - match.endedAt > RANK_REPORT_GRACE_MS) {
+        this.matches.delete(id);
+      }
+    }
+  }
+
+  /*
+   * Tell the whole hub what somebody is worth now. Broadcast with no
+   * exception, so the player it is about hears it too: their own score is
+   * not in their own roster, and a menu that only updated for other people
+   * would be the one place the number was stale.
+   */
+  publishPoints(clientId, points) {
+    const client = this.clients.get(clientId);
+    if (!client) return;
+    client.points = points;
+    this.broadcast('mmo.rank', { id: clientId, points: cleanPoints(points) });
+  }
+
+  /*
+   * Score a battle, but only once both sides have said the same thing about
+   * it.
+   *
+   * **This is the whole anti-cheat story, and it is deliberately small.** A
+   * result is a claim by a stranger's process; the only cheap thing that
+   * makes it worth more is a second, independent claim that agrees. So a
+   * lone report scores nothing and two reports that disagree score nothing.
+   *
+   * What that leaves open is stated rather than papered over: a player who
+   * quits mid-battle is a draw for the side still standing (the engine's own
+   * LinkBattle ends a dead link that way), so rage-quitting avoids the loss.
+   * Deciding otherwise would mean believing one side alone, which is the
+   * larger hole -- anyone could then mint wins against a player who never
+   * connected.
+   */
+  settleMatch(id) {
+    const match = this.matches.get(id);
+    if (!match) return null;
+    const first = match.reports.get(match.a);
+    const second = match.reports.get(match.b);
+    if (!first || !second) return null;
+
+    // One match, one settlement: the paperwork goes whatever the verdict is,
+    // so a pair cannot re-report their way to a second payout.
+    this.matches.delete(id);
+
+    let winner = null;
+    let loser = null;
+    if (first === 'win' && second === 'loss') {
+      winner = match.aName;
+      loser = match.bName;
+    } else if (first === 'loss' && second === 'win') {
+      winner = match.bName;
+      loser = match.aName;
+    } else {
+      // An agreed draw, or two clients telling different stories. Neither is
+      // worth points, and neither is worth a sentence on anybody's screen.
+      return null;
+    }
+
+    // A battle is only worth points when both players are who they say they
+    // are. One impostor and the whole match scores nothing: paying out half
+    // of it would move a rating belonging to somebody who was not playing.
+    if (!match.aRanked || !match.bRanked) return null;
+
+    const settled = this.board.record(winner, loser, this.now());
+    if (!settled) return null;
+
+    const winnerId = winner === match.aName ? match.a : match.b;
+    const loserId = winnerId === match.a ? match.b : match.a;
+    this.publishPoints(winnerId, settled.winner.points);
+    this.publishPoints(loserId, settled.loser.points);
+    this.log.info(`ranked: ${safe(settled.winner.name)} ` +
+      `${settled.winner.points} (+${settled.winner.gained}) beat ` +
+      `${safe(settled.loser.name)} ${settled.loser.points} ` +
+      `(-${settled.loser.lost})`);
+    if (this.onRankChange) {
+      try {
+        this.onRankChange(settled);
+      } catch (err) {
+        // Persistence is somebody else's problem and must not cost the
+        // players their result: the ratings are already correct in memory.
+        this.log.warn(`could not record a rank change: ${safe(err.message)}`);
+      }
+    }
+    return settled;
+  }
+
+  /*
+   * The top ten, as the hub ranks them. Every row goes out through the same
+   * sanitisers a client will read it with, so a name or a sprite that would
+   * not survive the trip is fixed here rather than silently dropped there.
+   */
+  leaderboard() {
+    return this.board.top(RANK_TOP).map((row) => ({
+      name: row.name,
+      sprite: cleanSpriteId(row.sprite) || DEFAULT_SPRITE,
+      points: cleanPoints(row.points),
+    }));
   }
 
   // ------- entry point
@@ -708,4 +956,7 @@ class Relay {
   }
 }
 
+// PROTOCOL is exported so the suites speak the current dialect by naming it
+// rather than by carrying a hardcoded number that has to be found and edited
+// in six places every time it moves.
 module.exports = { Relay, parseLine, presenceOf, PROTOCOL };

@@ -170,6 +170,51 @@ end-to-end suite.
   <img src="docs/screenshots/link-battle.png" width="300" alt="GUESTY wants to battle!">
 </p>
 
+### 🏆 RANKED — AND YOU CAN'T FARM IT
+Every link battle is scored, on the hub, for both players. Win and you gain
+points; lose and you lose them, never past **0**. How many depends on who you
+beat: turn over somebody 300 points above you and it's worth **27**, beat
+somebody 300 below and it's worth **5**. Elo, in other words — so hunting the
+weakest player in the room pays almost nothing.
+
+And it pays less every time. Beating the *same person* again inside an hour
+is worth half, then a quarter, then nothing — counted in both directions, so
+you and your friend can't take turns either. Play them all you like; the
+sixth rematch of the hour just isn't worth points.
+
+**Neither of you can lie about it.** Both games report how the battle ended
+and the hub scores it only when the two reports agree — one side claiming a
+win is worth exactly nothing. A dropped link is a draw for the player still
+standing, and a draw scores nothing, so nobody loses points to somebody
+pulling the cable out (and nobody can farm by pulling it either).
+
+`RANK` on the MMO menu is the top ten, best first: place, the character
+they're wearing, name, points. Players who've never won aren't on it — 0
+points means unranked, which is where everybody starts.
+
+<p align="center">
+  <img src="docs/screenshots/rank.png" width="330" alt="The RANK screen: place, portrait, name and points">
+</p>
+
+Your own points are on your trainer card, on the badge row, and so are
+everybody else's on theirs. A dedicated hub keeps the season in
+`ranking.json` between restarts; a game hosted from inside somebody's copy
+scores a fresh one each time it opens.
+
+**And the name is yours.** The first time a hub sees your trainer name it
+mints a secret, hands it to your copy once, and remembers only its hash; your
+game presents it every time you come back, and that is what says *same
+player*. Somebody who types your nickname without it plays normally — walks,
+chats, trades, battles — and simply doesn't score, which the `RANK` screen
+tells them in as many words. Nobody is thrown out for it: a friend who lost
+their save shouldn't lose the hub.
+
+Be clear about what that is worth. It's a **claim ticket, not an account**:
+it lives in your save file and crosses the same unencrypted link the join
+code does, so anyone who can read either can take the name. What it buys is
+that *typing* someone's nickname is no longer enough — which, until it
+existed, was the whole story.
+
 ### 🏠 YOU ARE THE SERVER
 `HOST GAME`, pick a room size (**2–64**), done. You're a normal player who
 happens to be the relay — you walk, chat, trade and fight like everyone else.
@@ -243,6 +288,11 @@ Yours adds one row nobody else's has: `MONEY`. It's drawn from your own
 save and never goes on the wire — `Wire.profile` refuses to carry it, so a
 card with money on it can only be your own.
 
+Both cards carry `RANK` on the badge row, right-aligned — the live number the
+hub holds, not a snapshot of whoever joined an hour ago. It shares that row
+because the card has seven rows at this spacing and all seven were already
+spoken for, and `BADGES/8` is the one that leaves most of its row empty.
+
 ### 🧩 STACKS WITH OTHER MODS
 Spawning real NPCs means whoever owns the world pass draws your friends too.
 Run it with a voxel renderer and they show up **as voxel characters**, no
@@ -269,6 +319,7 @@ behind it.
 | `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |
 | `PARTY` | connected | your party: members, party chat, and leaving it |
 | `MY PROFILE` | connected | your own trainer card, as everyone else sees it |
+| `RANK` | connected | the hub's top ten: place, character, name, points |
 | `LEAVE` | you joined | drop out and **keep playing single-player** |
 | `END GAME` | hosting | asks first — this one ends it for everybody |
 
@@ -338,6 +389,7 @@ Pick by how long you want the world to outlive the session.
 | **If the host quits** | **the game ends for everyone** | n/a — there isn't one |
 | **If any other player quits** | everyone else carries on | everyone else carries on |
 | World survives an empty room | no — it ends with the host | yes, it just sits there |
+| Ranked points | kept while the game is open | kept in `ranking.json`, across restarts |
 | Passcode | minted on the HOST screen | minted by `init`, or you pick it |
 | Passcode entropy | the game's own pool, **not** a CSPRNG | `crypto.randomBytes` |
 | Bans, allowlist, per-address limits | — | yes |
@@ -581,11 +633,16 @@ actually play; that's the LAN flow above.
 ```sh
 luajit mods/rby_mmo/tests/rby_mmo_test.lua   # from the engine root
 node server/hub.test.js                      # from this folder
+node server/rank.test.js                     # and the ranked half of it
 ```
 
 The first drives the real headless loader — same `Loader`, same merge the
 game uses — and hammers the protocol logic with fake peers. The second boots
-the Node hub as a child process and drives it over real sockets.
+the Node hub as a child process and drives it over real sockets. The third is
+ranked PVP on the Node side, and it exists as a pair: the same table of
+numbers is asserted in `rby_mmo_test.lua`, because two hubs that price a win
+differently are two rankings, and the only thing keeping them together is two
+suites checking the same answers.
 
 But neither of those ever binds a socket, renders a menu, or spawns an
 avatar. **This does:**
@@ -605,7 +662,12 @@ hosts, one joins, and both sides assert:
 - ✅ pressing A on someone opens TRADE / BATTLE
 - 🔁 **a trade completes** — each side ends holding the other's Pokémon
 - ⚔️ **a link battle runs to a decision**, zero `link.desync` on either side
+- 🏆 **and it is scored** — both sides report it, the hub settles it, and the
+  winner is on the leaderboard when `RANK` is opened
 - ✅ a guest LEAVEs and keeps playing
+- 🎫 **and can come back as themselves** — the guest rejoins through the real
+  menus, is recognised by the claim ticket its save kept, and finds its
+  rating where it left it
 
 The dedicated-hub run — `run-hub-e2e.sh`, two guests and a real Node hub, no
 in-game host anywhere — adds the party leg on top of all of that:
