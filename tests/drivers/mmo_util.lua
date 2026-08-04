@@ -47,15 +47,36 @@ end
 -- tapped "down" a fixed number of times would break the moment the menu
 -- changed shape. Menu and ListMenu both expose `items` and a 1-based
 -- `index`, so the cursor distance can be computed instead.
--- Matches a row by label, tolerating a trailing marker: the CHAT row reads
--- "CHAT*" while messages are unread, and a driver that demanded an exact
--- string would fail for the wrong reason.
+-- Matches a row by label, tolerating an unread marker on either side of it:
+-- the CHAT row reads "▶CHAT" while messages are unread, and a driver that
+-- demanded an exact string would fail for the wrong reason.
+--
+-- Leading as well as trailing, because that marker moved to the front when
+-- it stopped being "*" -- a character the extracted font cannot draw. It is
+-- stripped by byte rather than matched as a class: "▶" is three UTF-8 bytes,
+-- so a driver asking for "CHAT" against "▶CHAT" was comparing "CHAT" with
+-- the marker's own bytes and never matching. The old trailing form is still
+-- accepted so this util keeps working against an older build of the mod.
+local MARKERS = { "\226\150\182" }   -- ▶ (U+25B6)
+
 local function labelMatches(actual, wanted)
   if actual == wanted then return true end
-  return type(actual) == "string"
-    and actual:sub(1, #wanted) == wanted
+  if type(actual) ~= "string" then return false end
+  for _, marker in ipairs(MARKERS) do
+    if actual:sub(1, #marker) == marker then
+      actual = actual:sub(#marker + 1)
+      break
+    end
+  end
+  return actual:sub(1, #wanted) == wanted
     and actual:sub(#wanted + 1):match("^[%*%s]*$") ~= nil
 end
+
+-- Exported because a driver that re-implements this rule drifts from it.
+-- mmo_guest.lua had its own two-line copy spelling the marker as a trailing
+-- "*", which went on passing until the marker moved and changed character --
+-- then failed as "no chat row" on a menu that plainly had one.
+M.labelMatches = labelMatches
 
 function M.selectLabel(game, label, frames)
   local ok = M.waitFor(game, function()
@@ -98,6 +119,31 @@ function M.menuLabels(game)
     labels[#labels + 1] = tostring(item.label)
   end
   return labels
+end
+
+-- Characters in `text` the font cannot draw, as a comma-separated string
+-- ("" when every one of them renders).
+--
+-- This is the one bug class a driver asserting on strings is structurally
+-- blind to. The charmap is extracted from the ROM and carries no "*" (nor
+-- + # < > % =); Font.draw silently draws nothing for a character it cannot
+-- map while Font.width still advances 8px, so a label reads correctly to
+-- every assertion here and renders as a blank column on screen. The MMO
+-- menu's unread marker was "CHAT*" and did exactly that.
+--
+-- Only answerable on a real dataset: the committed fixture font carries
+-- letters and digits alone, so a headless suite cannot tell drawable from
+-- not. Hence a driver helper rather than a unit test.
+function M.undrawable(game, text)
+  local ok, Font = pcall(require, "src.render.Font")
+  if not (ok and Font and Font.split) then return "" end
+  local missing = {}
+  for _, span in ipairs(Font.split(tostring(text or "")) or {}) do
+    if span.code == nil then
+      missing[#missing + 1] = tostring(span.text or "?")
+    end
+  end
+  return table.concat(missing, ",")
 end
 
 -- One row of the menu on top, by label, so its right-hand column can be
