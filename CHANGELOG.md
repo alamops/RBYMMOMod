@@ -64,6 +64,19 @@ and the manifest agree again. Same slip as 0.2.1, recorded the same way.
   degraded to `PLAYER` for anyone who never opened the character creator,
   instead of falling back to the save's trainer name. Both now use the same
   `arg1` shim the rest of the module's entry points do.
+- **The unread-chat marker drew nothing at all.** The row read `CHAT*`, and
+  the font extracted from the ROM has no glyph for `*` — `Font.draw` draws
+  nothing for a character it cannot map while `Font.width` still advances
+  8px for it, so the row rendered as `CHAT` followed by a blank column that
+  looked like a layout bug rather than a marker. It is now a leading `▶`,
+  the same glyph the menu cursor is drawn with and one that is certainly on
+  the sheet. The driver's label matcher accepts a marker on either side of
+  a row name, since `▶` is three UTF-8 bytes and a leading one made every
+  `selectLabel("CHAT")` compare against the marker's own bytes; the old
+  trailing form still matches, so the util keeps working on older builds.
+  The menu rows are now checked glyph by glyph against the live font in the
+  end-to-end run — the one bug class an assertion on the label string is
+  structurally blind to, and only answerable on a real dataset.
 - **The typed line ran off the right of the screen.** `NamingScreen` lays its
   line out as `maxLen` slots of 8px from a fixed x=56, a layout sized for the
   vanilla seven-character name; every grid this mod opens is longer, so an

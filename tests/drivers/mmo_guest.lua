@@ -647,9 +647,13 @@ return function(game)
       menuLabels[#menuLabels + 1] = tostring(item.label)
     end
     log("MMO menu rows:", table.concat(menuLabels, ","))
+    -- Through the shared matcher, not a copy of it: this used to spell the
+    -- unread marker as a trailing "*" itself, and went on passing until the
+    -- marker moved to a leading one -- then reported "no chat row" about a
+    -- menu that had one.
     local function has(want)
       for _, label in ipairs(menuLabels) do
-        if label == want or label == want .. "*" then return true end
+        if H.labelMatches(label, want) then return true end
       end
       return false
     end
@@ -661,6 +665,17 @@ return function(game)
     check(not has("END GAME"), "and no END GAME row either")
     check(has("LEAVE"), "just LEAVE")
     check(has("CHAT"), "and the chat log")
+
+    -- Every row is drawable, not merely correct as a string. has("CHAT")
+    -- above passes for "CHAT*" too, and that spelling rendered as CHAT
+    -- plus a blank column for as long as it was there -- the marker is a
+    -- triangle now precisely because the font has no asterisk.
+    for _, label in ipairs(H.menuLabels(game)) do
+      local missing = H.undrawable(game, label)
+      check(missing == "",
+            ("every glyph in %q is on the font sheet%s"):format(label,
+              missing == "" and "" or " -- missing " .. missing))
+    end
     shot("mmo-menu")
 
     if H.selectLabel(game, "CHAT") then
