@@ -124,10 +124,55 @@ end
 
 -- the seams it says it wraps
 for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items",
-                        "ui.naming.grid" }) do
+                        "ui.naming.grid", "movement.speed" }) do
   local chain = run.loader.hooks.chains[hook]
   check(chain ~= nil and #chain > 0, "wraps " .. hook)
 end
+
+-- ------- movement.speed: holding B on foot halves the step
+--
+-- Driven straight off the registered chain entry rather than through a
+-- Client export, because the wrap runs entirely inside the closure the
+-- loader captured -- this is the same chain OverworldController's
+-- Player:tryMove would call, with a passthrough `next` standing in for it.
+-- `frames` is frames-per-tile, so the arithmetic is relative to whatever the
+-- engine handed in, never a hardcoded 8.
+--
+-- Wrapped for scope, the way later sections in this file are: the main
+-- chunk is close enough to Lua's 200-local ceiling that a handful of new
+-- names here is enough to cross it.
+
+;(function()
+
+local speedChain = run.loader.hooks.chains["movement.speed"]
+local speedEntry = speedChain[1]
+local passthroughNext = function(f) return f end
+
+local heldB = { isDown = function(_, b) return b == "b" end }
+local notHeldB = { isDown = function(_, b) return false end }
+
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB }), 8,
+   "on foot with B held, a 16-frame walk tile runs at 8")
+eq(speedEntry.callback(passthroughNext, 11, { input = heldB }), 5,
+   "the halving floors rather than rounds")
+check(speedEntry.callback(passthroughNext, 1, { input = heldB }) >= 1,
+      "and never drops below one frame a tile")
+
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB, onBike = true }), 16,
+   "the bike is already run-fast, so holding B changes nothing on it")
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB, surfing = true }), 16,
+   "and surfing is left alone too")
+eq(speedEntry.callback(passthroughNext, 16, { input = notHeldB }), 16,
+   "letting go of B walks at the ordinary pace")
+
+-- the loader's own option store, the same one mod.options:get reads --
+-- toggling it off is what a player who wants their old walk speed back does
+run.loader.modOptions["rby_mmo"] = { run = false }
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB }), 16,
+   "and turning B TO RUN off walks at the ordinary pace even with B held")
+run.loader.modOptions["rby_mmo"] = nil
+
+end)()
 
 -- the inter-mod surface it publishes
 local exports = run.loader.exports["rby_mmo"]
@@ -397,6 +442,18 @@ eq(Wire.presence({ id = "p5", name = "MISTY", party = true }).party, true,
 eq(Wire.presence({ id = "p6", name = "GARY", party = "7" }).party, true,
    "a party id sent where a flag belongs is reduced to the flag")
 
+-- ------- running on the wire
+--
+-- Client truth, the same coercion pattern as party: nothing the hub can see
+-- says whether a player is holding B, so the sender's word is taken and
+-- reduced to a plain boolean the same way every other flag here is.
+
+eq(presence.running, false, "presence with no running field reads as walking")
+eq(Wire.presence({ id = "p7", name = "MISTY", running = true }).running, true,
+   "and a running flag survives")
+eq(Wire.presence({ id = "p8", name = "GARY", running = "junk" }).running, true,
+   "junk in the field is coerced true, same as any other truthy value here")
+
 local member = Wire.member({ id = "m1", name = "ANN", x = 4, y = 9 })
 check(member ~= nil, "a members row sanitises")
 eq(member.name, "ANN", "keeping the name")
@@ -628,6 +685,25 @@ eq(roster:get("a").party, true, "and walking does not take it off them again")
 roster:setParty("a", false)
 eq(roster:get("a").party, false, "leaving one clears it")
 eq(roster:setParty("nosuch", true), nil, "an unknown id is a no-op")
+
+-- ------- running rides through move(), not a setter
+--
+-- The opposite choice from party, and for the reason src/Roster.lua spells
+-- out: running is a property of the step itself, so it travels through
+-- move()'s own trailing argument rather than a setParty-shaped call. A nil
+-- is an old-shaped caller with no opinion, and must leave whatever was last
+-- recorded alone -- reading "no opinion" as "not running" would stop every
+-- runner mid-stride the moment any pre-running call site fired.
+
+eq(roster:get("a").running, false,
+   "nobody starts flagged as running -- Wire.presence always coerces the field")
+roster:move("a", "PALLET", 8, 5, "right", true)
+eq(roster:get("a").running, true, "a move can flag the step as a run")
+roster:move("a", "PALLET", 9, 5, "right")
+eq(roster:get("a").running, true,
+   "and an old-shaped call with no running argument leaves it alone")
+roster:move("a", "PALLET", 10, 5, "right", false)
+eq(roster:get("a").running, false, "while an explicit false clears it")
 
 roster:setBusy("a", true)
 eq(roster:get("a").busy, true, "busy is carried the same way")
@@ -1945,6 +2021,47 @@ end
 eq(walked, 4, "two east and two south is four steps")
 eq(x, 5, "landing on the target x")
 eq(y, 8, "and the target y")
+
+-- ------- running sets the remote avatar's step pace
+--
+-- advance() writes npc.stepFrames straight onto the live NPC -- the field
+-- NPC:update reads fresh every frame, per the module's own header -- so the
+-- fake world only needs to hand back a handle whose .npc is a plain mutable
+-- table shaped like the fields advance touches.  mod.world is set directly
+-- on the shared stub for the length of this section and cleared afterward,
+-- so nothing later that touches stubMod sees a fake world it did not ask
+-- for.  Wrapped for scope, the same reason as elsewhere in this file.
+
+;(function()
+
+local fakeNpc = { cellX = 5, cellY = 5, moving = false, facing = "down" }
+local fakeWorld = {
+  npc = function(_, mapId, npcId) return { npc = fakeNpc } end,
+}
+stubMod.world = fakeWorld
+
+local avatars = Avatars.new()
+avatars.mapId = "PALLET"
+
+local av = { npcId = "n1", x = 5, y = 5, facing = "down" }
+local runnerRow = { id = "a", x = 6, y = 5, facing = "right", running = true }
+check(avatars:advance(av, runnerRow), "advance starts a step toward the new cell")
+eq(fakeNpc.stepFrames, Config.RUN_STEP_FRAMES,
+   "a running roster row paces the step at the run frame count")
+
+-- the step "completes" the way NPC:update would drive it, before the next
+-- one starts
+fakeNpc.moving = false
+fakeNpc.cellX, fakeNpc.cellY = 6, 5
+
+local walkerRow = { id = "a", x = 7, y = 5, facing = "right", running = false }
+check(avatars:advance(av, walkerRow), "advance starts the next step")
+eq(fakeNpc.stepFrames, nil,
+   "and a non-running row clears the pace back to the engine's own default")
+
+stubMod.world = nil
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 6. Characters you can wear

@@ -421,11 +421,19 @@ return function(game)
     -- left/right rather than down: Red's bedroom is small and a few tiles
     -- south runs into furniture, which would make "the host did not move"
     -- a map-geometry result rather than a networking one
+    --
+    -- B held throughout, which makes this walk do double duty: it is
+    -- already the leg that proves the host's own movement reaches the
+    -- guest, and holding B across every step of it is also this run's only
+    -- exercise of hold-B running end to end -- see the guest's poll on
+    -- "host_walk_done" for the other half. H.holdAll rather than U.hold:
+    -- running needs the direction and B down at the same moment, which two
+    -- sequential U.hold calls cannot express.
     for _ = 1, 2 do
-      U.hold(game, "left", 22)
+      H.holdAll(game, { "left", "b" }, 22)
       U.wait(8)
     end
-    U.hold(game, "right", 22)
+    H.holdAll(game, { "right", "b" }, 22)
     U.wait(8)
     local nowAt = H.playerCell(game)
     log(("host walked (%s,%s) -> (%s,%s)"):format(
