@@ -318,7 +318,31 @@ return function(game)
   local fromX, fromY = before and before.rosterX, before and before.rosterY
   log(("host baseline (%s,%s)"):format(tostring(fromX), tostring(fromY)))
   H.signal("guest_baseline_taken")
-  H.await(game, "host_walk_done")
+
+  -- ------- 2b. hold-B running reaches this side too
+  --
+  -- The host holds B for every step of the walk it is about to do (see
+  -- mmo_host.lua), so this side's copy of its roster row should say
+  -- running=true for at least part of that window. Sampled here rather
+  -- than after the fact: the flag is "my last committed step was a run"
+  -- (src/Client.lua), so it is only ever true while a run step is actually
+  -- in flight and clears on the very next ordinary step -- there is no
+  -- lingering copy to check once the barrier below has already cleared.
+  --
+  -- Deliberately not a speed measurement: this only asks whether the flag
+  -- crossed the wire at all, not how fast the avatar moved while it was up.
+  local sawHostRunning = false
+  local runSamples = 0
+  local function sampleHostRunning()
+    local row = H.avatarRow(exports)
+    if row == nil then return end
+    runSamples = runSamples + 1
+    if row.running then sawHostRunning = true end
+  end
+  H.await(game, "host_walk_done", nil, sampleHostRunning)
+  check(sawHostRunning,
+        ("the host's avatar row showed running=true while B was held "
+          .. "(%d sample(s) taken)"):format(runSamples))
 
   local hostMoved = H.waitSeconds(game, function()
     local row = H.avatarRow(exports)
