@@ -207,11 +207,18 @@ behind it.
 
 | Row | Shows up when | What it does |
 | --- | --- | --- |
+| `HOST GAME` | not in a game | make a trainer, then the room size and the passcode |
+| `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
 | `CHAT` / `SAY` | connected | the log (`CHAT*` = unread) and sending |
 | `LEAVE` | you joined | drop out and **keep playing single-player** |
 | `END GAME` | hosting | asks first — this one ends it for everybody |
+
+Two rows before you're in a game, and no third one for the passcode:
+`JOIN GAME` asks for it on the way in, so typing a different one there is how
+a saved passcode gets changed. (The screenshot above is the menu mid-game,
+which is why it shows neither.)
 
 Leaving isn't quitting. Your save, your world, your party: untouched. The
 game just carries on without the other people in it.
@@ -587,7 +594,7 @@ end
 
 ## 🚧 Known jank — read this bit
 
-It's `0.2.0` and it ships flagged `experimental` on purpose. The full list
+It's `0.2.2` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 

@@ -24,6 +24,56 @@ here must match `manifest.version`.
   socket that was gone. An unasked-for leave now runs the same teardown a
   deliberate one does.
 
+## [0.2.2] - 2026-08-03
+
+### Removed
+
+- **The `JOIN CODE` row on the MMO menu.** It sat directly under `JOIN GAME`,
+  which asks for the address and then the passcode on the way in, so two rows
+  read as two halves of joining when only one of them joins anything — and
+  the screen behind both is the same grid with the same title. Every road to
+  a passcode that a player actually walks is unchanged: `JOIN GAME` asks for
+  one before dialling and typing a different one there is how a saved
+  passcode is changed, a hub that refuses one puts the player straight back
+  on the grid, and `HOST GAME > JOIN CODE` still chooses the passcode this
+  copy asks *for*. The `JOIN CODE` option row remains the standing fallback
+  for a player who only ever plays on one hub.
+
+## [0.2.1] - 2026-08-03
+
+Hub-side only — nothing in the mod itself changed, and 0.2.0 and 0.2.1 speak
+the same protocol. Written down after the fact: this shipped as tag `v0.2.1`
+without a version bump or an entry here, so a copy of the mod reporting
+`0.2.0` may be running either.
+
+### Fixed
+
+- **`/data/join-code.txt` no longer goes stale.** It held the whole of
+  `init`'s first-boot output — the settings summary included — and nothing
+  ever rewrote it, so a host who changed `maxPlayers` and read that file back
+  saw the old number and a healthy hub looked broken. It now holds the
+  passcode and nothing else, under comment lines naming the one thing that
+  can still date it (a rotation) and what is authoritative when it does. The
+  full `init` transcript survives for the failure path in `/tmp`, where it
+  cannot outlive the boot that produced it.
+- **The CLI stopped opening with "run `init` first".** Running a verb against
+  a config it cannot see almost never means there is no hub — it means the
+  wrong directory, or the host rather than the container. Taking the old
+  advice minted a second config with a new passcode while the real hub
+  carried on unchanged. It now says where it looked, names any config it can
+  actually see, raises the container case first, and mentions `init` last,
+  with what that costs.
+
+### Added
+
+- **A VPS deployment guide in `server/README.md`** — five commands on a fresh
+  Ubuntu box, plus the four things that go wrong. Builds the image *on* the
+  box, because a laptop is arm64 and a VPS is x86_64 and there is nothing to
+  compile either way. Documents where the passcode actually lives and why it
+  is deliberately kept out of `docker compose logs`, and the failure everyone
+  hits once: two firewalls, `ufw` and the provider's own, both of which have
+  to allow the port before a perfectly healthy hub stops looking broken.
+
 ## [0.2.0] - 2026-08-03
 
 Hosting software for the standalone hub, and a **six-character passcode**,
@@ -155,6 +205,16 @@ in a sentence the game already renders rather than failing silently.
 
 ### Fixed
 
+- **The address you type ran off the right of the screen.** `NamingScreen`
+  lays its typed line out as `maxLen` slots of 8px from a fixed x=56, which
+  fits the vanilla seven-character name and nothing longer. Every grid this
+  mod opens is longer: at 32 the line ran to 312 on a 160-wide screen, so
+  `192.168.1.20:7788` lost its port off the edge — the half a player most
+  needs to check — and what was left sat hard against the right side instead
+  of centred. Chat (16) overflowed too and a join code (12) stopped exactly on
+  the edge. The mod now repaints that one row on its own grids: as many slots
+  as fit between the margins, centred, showing the end of the line once it is
+  longer than the window. No other screen is touched.
 - **Silent sockets could lock everyone out of the hub.** `hub.js` registered a
   connection in its client table on accept, so the player cap counted peers
   that had never said `hello` — four of them held a four-player hub shut for

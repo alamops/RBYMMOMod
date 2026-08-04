@@ -83,6 +83,79 @@ local function ownTitle(title)
   return title
 end
 
+-- ------- the typed line, kept on the screen
+--
+-- NamingScreen draws the line it is typing into as `maxLen` slots of 8px
+-- starting at a fixed x=56 (src/ui/NamingScreen.lua) -- a layout sized for
+-- the vanilla seven-character name, which ends at 112 on a 160-wide screen
+-- and so never had to think about the right edge.
+--
+-- Every grid this mod opens is longer than seven. An address is 32, which
+-- runs the line out to 312: a player typing "192.168.1.20:7788" watches the
+-- port -- the half they most need to check -- disappear off the screen, and
+-- what is left sits hard against the right side rather than centred. Chat
+-- at 16 overflows too, and the 12 of a join code stops exactly on the edge.
+--
+-- So this mod repaints that one row on its own screens: as many slots as
+-- fit between the margins, centred, and -- once what is typed is longer
+-- than the window -- the *end* of it, because the characters just entered
+-- are the ones being checked. Nothing else on the page moves. The title
+-- sits at y=8 and the grid starts at y=48, so the 8px row at y=24 is the
+-- mod's to paint over.
+local SCREEN_W = 160
+local FIELD_Y = 24
+local SLOT_W = 8
+local FIELD_MARGIN = 8
+local FIELD_SLOTS = math.floor((SCREEN_W - FIELD_MARGIN * 2) / SLOT_W)
+
+-- Pure, and exported, so the arithmetic that decides "does this fit" is
+-- pinned by the suite rather than by looking at a screenshot.
+function M.fieldLayout(maxLen, glyphs)
+  maxLen = math.max(tonumber(maxLen) or 0, 0)
+  glyphs = type(glyphs) == "table" and glyphs or {}
+  local slots = math.min(maxLen, FIELD_SLOTS)
+  -- nothing scrolls until it has to: the window holds the whole line while
+  -- it fits, and its last `slots` characters once it does not
+  local skip = math.max(#glyphs - slots, 0)
+  local cells = {}
+  for i = 1, slots do
+    cells[i] = glyphs[skip + i] or "-"
+  end
+  return math.floor((SCREEN_W - slots * SLOT_W) / 2), cells
+end
+
+-- Every naming grid this mod opens, built here rather than at each call
+-- site so a screen added later cannot quietly get the off-screen version.
+local function namingScreen(game, opts)
+  local screen = mod.ui.NamingScreen.new(game, opts)
+  local baseDraw = screen.draw
+  if type(baseDraw) ~= "function" then
+    mod.log:warn("the naming screen is not the shape this mod wraps, so a "
+      .. "long address may run off the right edge -- update the mod for "
+      .. "this engine build")
+    return screen
+  end
+
+  screen.draw = function(self, ...)
+    local out = baseDraw(self, ...)
+    local Font = mod.ui.Font
+    if not (Font and Font.draw) then return out end
+    local x, cells = M.fieldLayout(self.maxLen, self.glyphs)
+    -- the widget paints its page white, so painting the row it drew back to
+    -- white is what erases it; then the same black the rest of the page uses
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.rectangle("fill", 0, FIELD_Y, SCREEN_W, SLOT_W)
+    love.graphics.setColor(0, 0, 0, 1)
+    for i = 1, #cells do
+      Font.draw(cells[i], x + (i - 1) * SLOT_W, FIELD_Y)
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+    return out
+  end
+
+  return screen
+end
+
 -- A trainer card for somebody else.
 --
 -- The engine's own TrainerCard reads the local save, so it cannot be
@@ -353,14 +426,13 @@ function M:install()
           })
         end,
       }
-      -- JOIN GAME asks for a code on the way in, so this row is not the
-      -- only door to one -- it is the standing code, changed deliberately
-      -- without dialling anything, and the fallback for a hub whose code
-      -- was never typed against its own address.
-      items[#items + 1] = {
-        label = "JOIN CODE",
-        onSelect = function() mod.ui.push(game, SCREEN.JOINCODE) end,
-      }
+      -- There is deliberately no third row for the code. JOIN GAME asks for
+      -- the address and then the code, so a row called JOIN CODE sitting
+      -- under it read as the other half of joining rather than as what it
+      -- was -- somewhere to change a saved one without dialling. Two rows
+      -- that both start a join, one of which does not, is a menu that has to
+      -- be explained; the code that gets typed is now always the one on the
+      -- way in, and the standing fallback is the JOIN CODE option row.
     end
 
     local menu = mod.ui.Menu.new(game, items, {
@@ -722,7 +794,7 @@ function M:install()
 
   screens:register(SCREEN.JOINADDR, { new = function(game)
     local client = ctx.client
-    local screen = mod.ui.NamingScreen.new(game, {
+    local screen = namingScreen(game, {
       title = ownTitle("JOIN"),
       -- An address or a hostname: "255.255.255.255:65535" is 21, but
       -- "mybox.example.com:7788" is 22, and a name is what a host on a LAN
@@ -748,24 +820,24 @@ function M:install()
 
   -- ------- joining: the code that gets you past the door
 
-  -- Reached four ways: from JOIN GAME, right after the address and before
-  -- anything is dialled; deliberately, from the MMO menu; automatically,
-  -- when a hub challenges a copy whose code is absent or was refused; and
-  -- from the host setup, to choose the code this copy will ask *for*. One
-  -- grid every time -- the glyphs and the length are the same question --
-  -- and opts says where the answer goes: opts.host stores it as this copy's
-  -- own code, opts.connect says a connection is waiting on it and dials
-  -- rather than leaving the player to walk back through the menu, and
-  -- opts.typed is an attempt this screen itself refused, coming back.
+  -- Reached three ways: from JOIN GAME, right after the address and before
+  -- anything is dialled; automatically, when a hub challenges a copy whose
+  -- code is absent or was refused; and from the host setup, to choose the
+  -- code this copy will ask *for*. One grid every time -- the glyphs and the
+  -- length are the same question -- and opts says where the answer goes:
+  -- opts.host stores it as this copy's own code, opts.connect says a
+  -- connection is waiting on it and dials rather than leaving the player to
+  -- walk back through the menu, and opts.typed is an attempt this screen
+  -- itself refused, coming back.
   --
-  -- Every one of those four is a road somebody can walk without the code in
+  -- Every one of those three is a road somebody can walk without the code in
   -- front of them, which is why the screen has a door out (escapable, above)
   -- rather than only a way forward.
   screens:register(SCREEN.JOINCODE, { new = function(game, opts)
     opts = opts or {}
     local client = ctx.client
     local address = opts.address or client:joinAddress()
-    local screen = mod.ui.NamingScreen.new(game, {
+    local screen = namingScreen(game, {
       title = ownTitle("JOIN CODE"),
       -- the entry cap, not CODE_LEN: a code copied off a chat line or a
       -- screenshot arrives with spaces and stray punctuation around its six
@@ -820,9 +892,11 @@ function M:install()
     -- is in question and putting them back would invite resubmitting them.
     seed(screen, opts.typed)
     -- Where B lands: the lock menu for a host who came here to choose the
-    -- code they ask *for*, the MMO menu for everyone typing one in -- in
-    -- both cases the screen this one was opened from, and never a socket
-    -- left half-dialled, because nothing has been dialled yet.
+    -- code they ask *for* -- the screen that opened this one -- and the MMO
+    -- menu for everyone typing one in, which is the address screen's own way
+    -- out and the only answer on the challenge path, where there is no
+    -- screen behind this to go back to. Never a socket left half-dialled,
+    -- because nothing has been dialled yet.
     return escapable(screen, function()
       mod.ui.push(game, opts.host and SCREEN.HOSTCODE or SCREEN.MAIN)
     end, true)
@@ -998,7 +1072,7 @@ function M:install()
     -- length and what happens on confirm differ
     if opts.scope == "name" then
       local client = ctx.client
-      return mod.ui.NamingScreen.new(game, {
+      return namingScreen(game, {
         title = ownTitle("YOUR NAME"),
         maxLen = Config.NAME_MAX,
         default = client:playerName(game),
@@ -1012,7 +1086,7 @@ function M:install()
     local title = opts.scope == "private"
       and ("TO " .. tostring(opts.toName or "?"))
       or (opts.scope == "local" and "SAY NEARBY" or "SAY TO ALL")
-    return mod.ui.NamingScreen.new(game, {
+    return namingScreen(game, {
       title = ownTitle(title),
       maxLen = Config.COMPOSE_MAX,
       onDone = function(text)
