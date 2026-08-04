@@ -40,12 +40,16 @@ const { createLog, safe } = require('./log');
 
 const DEFAULT_PLAYERS = 4;
 const DEFAULT_SPRITE = 'SPRITE_RED';
-// Bumped from 2 for ranked PVP, in lockstep with src/Config.lua's PROTOCOL.
-// Nothing was removed, so an old client still parses everything a new hub
-// sends -- but a new client on an old hub reports its battle results into
-// silence and opens a RANK screen that never fills. A refusal naming both
-// versions is the better failure.
-const PROTOCOL = 3;
+// The wire dialect this hub speaks, and the one number both suites greet
+// with. 3 is where parties landed: nothing was removed, but an invite or a
+// party chat line sent to a protocol-2 hub would meet a handler table that
+// answers an unknown type with silence, and a player pressing INVITE and
+// watching nothing happen is a worse sentence than a refusal that names both
+// versions. 4 is ranked PVP, and moved for the same reason rather than a
+// different one -- a protocol-3 hub has never heard of a battle result or a
+// leaderboard request, so a newer client would report every match into
+// silence. Kept in step with Config.PROTOCOL on the mod side.
+const PROTOCOL = 4;
 // A SHA-256 response is 64 hex characters; the slack is for a future digest,
 // not for an unbounded field.
 const RESPONSE_MAX = 128;
@@ -86,6 +90,11 @@ function presenceOf(client) {
     y: client.y,
     facing: client.facing,
     busy: Boolean(client.sessionId),
+    // Whether they are in *a* party, never which one. It is the only thing
+    // anyone outside that party needs -- it decides whether their menus
+    // offer to invite this player -- and a party id on every presence would
+    // let any client in the game map out who is travelling with whom.
+    party: Boolean(client.partyId),
     // The trainer card the player shows others. Carried here because
     // src/Hub.lua does (Hub.lua:74): a player on a dedicated hub would
     // otherwise silently have no card, and the two hosting paths have to
@@ -225,6 +234,18 @@ handlers['mmo.chat'] = (relay, client, msg) => {
     return;
   }
 
+  // A party line reaches the party wherever they are: no radius, no map, no
+  // target to type. A client that is not in one is dropped rather than
+  // broadcast -- a scope that quietly widened to everybody would be the
+  // worst possible failure for a message somebody meant privately.
+  if (scope === 'party') {
+    if (!client.partyId) return;
+    for (const member of relay.partyMembers(client.partyId)) {
+      if (member.id !== client.id) relay.send(member, 'mmo.chat', payload);
+    }
+    return;
+  }
+
   if (scope === 'local') {
     if (!client.map) return;
     for (const other of relay.clients.values()) {
@@ -271,6 +292,60 @@ handlers['mmo.respond'] = (relay, client, msg) => {
     return relay.send(asker, 'mmo.decline', { name: client.name, kind });
   }
   relay.startSession(asker, client, kind);
+};
+
+// The invite, and the two answers to it.
+//
+// Deliberately the same shape as mmo.request above -- one outstanding ask per
+// client, only the player who was asked may answer it, and the ask is spent
+// on the first answer -- because it is the same problem, and a second subtly
+// different handshake beside the first would be two things to keep right.
+//
+// What is *not* shared is the state it guards: a party is independent of a
+// session, so two friends may team up while one of them is mid-trade. Being
+// busy stops you battling, not travelling together.
+handlers['mmo.party_invite'] = (relay, client, msg) => {
+  if (!client.ready || client.partyId) return;
+  const target = relay.clients.get(cleanId(msg.to));
+  if (!target || !target.ready || target.id === client.id) return;
+  // Answered here rather than forwarded: the asker learns at once that this
+  // player is taken, instead of waiting on a prompt nobody will ever see.
+  if (target.partyId) {
+    return relay.send(client, 'mmo.party_decline',
+      { name: target.name, reason: 'in_party' });
+  }
+  client.partyPendingTo = target.id;
+  relay.send(target, 'mmo.party_invite',
+    { from: client.id, name: client.name });
+};
+
+handlers['mmo.party_respond'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  const asker = relay.clients.get(cleanId(msg.to));
+  if (!asker || !asker.ready) return;
+
+  // only the player who was actually asked can answer, and only while the
+  // ask is still outstanding
+  if (asker.partyPendingTo !== client.id) return;
+  asker.partyPendingTo = null;
+
+  if (!msg.accept) {
+    return relay.send(asker, 'mmo.party_decline',
+      { name: client.name, reason: 'no' });
+  }
+  // Re-checked at the moment of forming, not only when the invite went out:
+  // either of them could have joined somebody else's party while this one sat
+  // on screen waiting for a human to read it.
+  if (client.partyId || asker.partyId) {
+    return relay.send(asker, 'mmo.party_decline',
+      { name: client.name, reason: 'in_party' });
+  }
+  relay.startParty(asker, client);
+};
+
+handlers['mmo.party_leave'] = (relay, client) => {
+  if (!client.ready) return;
+  relay.endParty(client, 'peer_left');
 };
 
 // A refused relay payload used to be four bare `return`s. Trade and battle
@@ -364,6 +439,8 @@ class Relay {
     this.clients = new Map();
     /** sessionId -> { a, b, kind } */
     this.sessions = new Map();
+    /** partyId -> [memberId, ...] */
+    this.parties = new Map();
     /*
      * Ranked PVP. The board is what a rating *is* -- the hub owns it,
      * because a client that owned its own score would simply write itself a
@@ -380,6 +457,7 @@ class Relay {
 
     this.nextId = 1;
     this.nextSession = 1;
+    this.nextParty = 1;
     this.players = 0;
   }
 
@@ -421,6 +499,8 @@ class Relay {
       map: null, x: null, y: null, facing: 'down',
       sessionId: null,
       pendingTo: null,
+      partyId: null,
+      partyPendingTo: null,
       // -Infinity, not 0: an injected clock that starts at zero would
       // otherwise gate the very first message a player ever sends.
       lastChat: -Infinity,
@@ -521,12 +601,17 @@ class Relay {
     const client = this.clients.get(id);
     if (!client) return false;
     this.endSession(client, 'peer_left');
+    // A party outlives a trade but not a connection: the other member is told
+    // while this one is still in the table, so the presence that goes out
+    // with it is the one where they are no longer in a party.
+    this.endParty(client, 'peer_left');
     this.clients.delete(id);
     if (client.ready) this.players -= 1;
     // an outstanding request pointed at a player who just left would leave
     // the asker waiting forever for an answer nobody can give
     for (const other of this.clients.values()) {
       if (other.pendingTo === id) other.pendingTo = null;
+      if (other.partyPendingTo === id) other.partyPendingTo = null;
     }
     if (client.ready) {
       this.broadcast('mmo.part', { id }, id);
@@ -546,11 +631,80 @@ class Relay {
     }
     this.clients.clear();
     this.sessions.clear();
+    this.parties.clear();
     this.players = 0;
     // The board survives a shutdown -- it is the hub's record, not the
     // connection's, and it is what lib/server.js writes to disk. The
     // half-reported matches do not: their sessions are gone.
     this.matches.clear();
+  }
+
+  // ------- parties
+  //
+  // Membership lives here and only here. A client is told the whole list
+  // whenever it changes, which is what stops a client and the hub disagreeing
+  // about who is in a party -- there is no delta to miss. Mirrors
+  // src/Hub.lua's own party section message for message.
+
+  partyMembers(partyId) {
+    const out = [];
+    for (const id of this.parties.get(partyId) || []) {
+      const member = this.clients.get(id);
+      if (member && member.ready) out.push(member);
+    }
+    return out;
+  }
+
+  startParty(a, b) {
+    const id = String(this.nextParty++);
+    this.parties.set(id, [a.id, b.id]);
+    a.partyId = id;
+    b.partyId = id;
+    // Neither of them can be waiting on another answer now, and an invite
+    // left armed would be answered by a player who is no longer free.
+    a.partyPendingTo = null;
+    b.partyPendingTo = null;
+
+    const members = [
+      { id: a.id, name: a.name },
+      { id: b.id, name: b.name },
+    ];
+    this.send(a, 'mmo.party', { id, members });
+    this.send(b, 'mmo.party', { id, members });
+
+    // ...and everyone else learns these two are spoken for, so the INVITE row
+    // stops being offered against them. Same shape as startSession: presence
+    // changed, so presence goes out.
+    this.broadcast('mmo.move', presenceOf(a), a.id);
+    this.broadcast('mmo.move', presenceOf(b), b.id);
+    this.log.info(`party ${id}: ${safe(a.name)} + ${safe(b.name)}`);
+  }
+
+  // One member leaving ends it for both. At PARTY_MAX = 2 there is no party
+  // left to continue, and a "party" of one that still showed a members list
+  // and a chat scope with nowhere to send would be worse than none.
+  endParty(client, reason) {
+    const id = client.partyId;
+    if (!id) return;
+    const memberIds = this.parties.get(id) || [];
+    this.parties.delete(id);
+    client.partyId = null;
+
+    for (const memberId of memberIds) {
+      const other = this.clients.get(memberId);
+      if (other && other.id !== client.id && other.partyId === id) {
+        other.partyId = null;
+        this.send(other, 'mmo.party_end', { reason });
+        this.broadcast('mmo.move', presenceOf(other), other.id);
+      }
+    }
+    // The leaver is told too, so a client whose party ended because the hub
+    // said so still converges. Guarded the way endSession guards its own: on
+    // a drop there is nothing left to tell.
+    if (this.clients.has(client.id)) {
+      this.send(client, 'mmo.party_end', { reason: 'left' });
+      this.broadcast('mmo.move', presenceOf(client), client.id);
+    }
   }
 
   // ------- plumbing
@@ -803,6 +957,6 @@ class Relay {
 }
 
 // PROTOCOL is exported so the suites speak the current dialect by naming it
-// rather than by carrying a hardcoded 2 that has to be found and edited in
-// six places every time the number moves.
+// rather than by carrying a hardcoded number that has to be found and edited
+// in six places every time it moves.
 module.exports = { Relay, parseLine, presenceOf, PROTOCOL };
