@@ -676,6 +676,11 @@ function M.disconnect()
   transport:close()
   lastSent =
     { map = nil, x = nil, y = nil, facing = nil, busy = nil, running = nil }
+  -- Cleared with the rest of it, because "the last step was a run" is only
+  -- true of a session: a player who sprinted, left, and rejoined standing
+  -- still would otherwise advertise running=true in their hello and go on
+  -- doing so until they took a step to clear it.
+  M.runningNow = false
   dialled, authSent = nil, false
   -- A rating belongs to the hub that keeps it, so leaving takes it off the
   -- screen rather than leaving a stale number on your own card in
@@ -730,6 +735,15 @@ end
 
 -- ------- running
 
+-- One-shot latch for the failure warn below, in the shape Avatars uses for
+-- an unknown sprite.  A step's speed is asked for several times a second,
+-- and everything that can make runSpeed throw -- an options table that no
+-- longer answers, a moveCtx of an unexpected shape -- is a standing
+-- condition rather than a blip, so an unlatched warn would say the same
+-- sentence a few times a second for as long as the game is open.  Once is
+-- the whole message; the fallback below keeps working either way.
+local runSpeedWarned = false
+
 -- What a step should cost in frames, and whether that is a sprint.
 --
 -- Declared out here rather than inside the wrap so the hot path can pcall it
@@ -762,11 +776,15 @@ local function presenceChanged(current, busy, running)
   local facing = current and current.facing
   return lastSent.map ~= mapId or lastSent.x ~= x or lastSent.y ~= y
     or lastSent.facing ~= facing or lastSent.busy ~= busy
-    -- Compared like the rest of them, and for the reason the party bug
-    -- taught: a run that starts or ends without the cell changing -- turning
-    -- on the spot, a step into a wall -- would otherwise wait for the next
-    -- move to be mentioned, and everyone else would see the wrong pace until
-    -- then.
+    -- Compared like the rest of them, defensively rather than because a
+    -- known path needs it.  Every write to runningNow happens outside this
+    -- function, in the movement.speed wrap, and that wrap only runs for a
+    -- step the engine has committed -- a turn on the spot and a step into a
+    -- wall are answered "turned"/"blocked" before the speed is ever asked
+    -- for, so neither can flip the flag.  A committed step changes the cell
+    -- too, so today the checks above would carry it; the field is compared
+    -- anyway so that a future writer of runningNow cannot silently strand a
+    -- pace change until the next move.
     or lastSent.running ~= running
 end
 
@@ -1151,9 +1169,12 @@ function M.install()
       -- pcall has put the error where the speed would have been. Whatever
       -- went wrong, the step still has to happen at *some* speed, and the
       -- honest one is the speed we were handed.
-      mod.log:warn("could not work out a running speed (%s); walking this "
-        .. "step -- turn B TO RUN off under START > OPTIONS if it repeats",
-        tostring(speed))
+      if not runSpeedWarned then
+        runSpeedWarned = true
+        mod.log:warn("could not work out a running speed (%s); walking this "
+          .. "step -- turn B TO RUN off under START > OPTIONS if it repeats",
+          tostring(speed))
+      end
       M.runningNow = false
       return next(frames, moveCtx)
     end

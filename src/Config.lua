@@ -79,12 +79,17 @@ M.RESYNC_DISTANCE = 6
 -- worth getting on for its own reasons rather than for its speed.
 M.RUN_DIVISOR = 2
 
--- What a running remote avatar's npc.stepFrames is set to.  This one is an
--- absolute count because NPCs get no movement.speed hook to divide -- their
--- speed is a field read fresh each frame, whose unset default is the
--- engine's 16 -- so the value the local runner arrives at through the
--- divisor is spelled out here for the avatars to match.
-M.RUN_STEP_FRAMES = 8
+-- What a running remote avatar's npc.stepFrames is set to.  NPCs get no
+-- movement.speed hook to divide: their pace is a field read fresh each
+-- frame, and its unset default is NPC.lua's hardcoded STEP_FRAMES = 16 --
+-- the engine's NPC walk default, *not* the player's walk speed, which the
+-- divisor above is deliberately never told.  So the count is derived from
+-- that 16 rather than written out beside it: tuning RUN_DIVISOR then moves
+-- the local runner and the remote avatar together, and one speed stays one
+-- speed.  Two independent numbers would drift apart on the first tune, and
+-- avatars pacing faster than the presence stream describes strobe past
+-- RESYNC_DISTANCE.
+M.RUN_STEP_FRAMES = math.max(1, math.floor(16 / M.RUN_DIVISOR))
 
 -- Parties: you and one friend, travelling together.
 --
