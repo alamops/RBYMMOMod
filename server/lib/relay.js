@@ -101,9 +101,13 @@ function presenceOf(client) {
     // offer to invite this player -- and a party id on every presence would
     // let any client in the game map out who is travelling with whom.
     party: Boolean(client.partyId),
-    // Whether they are sprinting, so the avatar other clients draw steps at
-    // the speed the player is actually moving. Unlike busy, this cannot be
-    // derived here: the hub never sees the B button, so the client is the
+    // One question only: is this player sprinting on foot, B held. Not "how
+    // fast are they moving" -- a player on the bike covers a tile in 8
+    // frames and is deliberately not covered here (runSpeed excludes
+    // onBike), so bike pace is not represented on the wire at all and a
+    // cycling player's avatar still walks at 16 and resync-pops. That gap
+    // predates this flag and is not what it is for. Unlike busy, this cannot
+    // be derived here: the hub never sees the B button, so the client is the
     // only authority on it and this is the value it last reported.
     running: Boolean(client.running),
     // The trainer card the player shows others. Carried here because
@@ -221,10 +225,15 @@ handlers['mmo.move'] = (relay, client, msg) => {
     client.y = null;
   }
   if (FACINGS.has(msg.facing)) client.facing = msg.facing;
-  // Client-truth, and a plain coercion is the whole check: any value at all
-  // means "running" or "not", so there is nothing here a malformed one can
-  // do beyond making its own avatar step at the wrong speed.
-  client.running = Boolean(msg.running);
+  // Client-truth, and strict on purpose: only a literal boolean true counts
+  // as running, and everything else -- absent, 0, "", "yes", null -- is
+  // walking. The rule is strictness rather than coercion because this hub
+  // and the in-game Lua hub (src/Hub.lua) have to broadcast the same thing
+  // for the same wire bytes, and Lua and JS truthiness disagree on exactly
+  // the values a malformed client sends: 0 and "" are false to Boolean() and
+  // true to Lua's `and`. Comparing against true is the one test both
+  // languages answer identically for every JSON value.
+  client.running = msg.running === true;
   relay.broadcast('mmo.move', presenceOf(client), client.id);
 };
 

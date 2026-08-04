@@ -77,6 +77,7 @@ tools/play.sh
 .github/workflows/release.yml
 docs/plans/in-game-hosting.md
 docs/plans/self-hosting-server-app.md
+docs/plans/running-system.md
 
 # Screenshots of a running game are composited from tiles, sprites and font
 # glyphs decoded from the player's own ROM. They illustrate a GitHub page

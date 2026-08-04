@@ -365,10 +365,14 @@ local function presenceOf(client)
     -- whether their menus offer to invite this player -- and nobody outside
     -- the party needs the id, so the id does not leave the hub.
     party = client.partyId ~= nil,
-    -- Whether they are sprinting, so the avatar everyone else draws steps at
-    -- the speed the player is actually moving.  Unlike busy, this hub cannot
-    -- work it out: it never sees the B button, so the client is the only
-    -- authority and this is what it last reported.
+    -- One question only: is this player sprinting on foot, B held.  Not "how
+    -- fast are they moving" -- a player on the bike covers a tile in 8
+    -- frames and is deliberately not covered here (runSpeed excludes
+    -- onBike), so bike pace is not represented on the wire at all and a
+    -- cycling player's avatar still walks at 16 and resync-pops.  That gap
+    -- predates this flag and is not what it is for.  Unlike busy, this hub
+    -- cannot work it out: it never sees the B button, so the client is the
+    -- only authority and this is what it last reported.
     running = client.running == true,
     profile = client.profile,
     -- Carried with presence rather than with the card: a rating moves while
@@ -838,10 +842,15 @@ handlers[Wire.MOVE] = function(self, client, msg)
     client.map, client.x, client.y = nil, nil, nil
   end
   if Wire.facing(msg.facing) then client.facing = msg.facing end
-  -- Client-truth, and the coercion is the whole check: any value at all means
-  -- "running" or "not", so the worst a malformed one can do is make its own
-  -- avatar step at the wrong speed.
-  client.running = msg.running and true or false
+  -- Client-truth, and strict on purpose: only a literal boolean true counts
+  -- as running, and everything else -- absent, 0, "", "yes", null -- is
+  -- walking.  The rule is strictness rather than coercion because this hub
+  -- and the Node hub (server/lib/relay.js) have to broadcast the same thing
+  -- for the same wire bytes, and Lua and JS truthiness disagree on exactly
+  -- the values a malformed client sends: 0 and "" are true to Lua's `and`
+  -- and false to JS's Boolean().  Comparing against true is the one test
+  -- both languages answer identically for every JSON value.
+  client.running = msg.running == true
   self:broadcast(Wire.MOVE, presenceOf(client), client.id)
 end
 
