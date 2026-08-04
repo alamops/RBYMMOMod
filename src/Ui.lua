@@ -156,12 +156,18 @@ local function namingScreen(game, opts)
   return screen
 end
 
--- A trainer card for somebody else.
+-- A trainer card, for somebody else or for you.
 --
 -- The engine's own TrainerCard reads the local save, so it cannot be
 -- pointed at a remote player; this draws the same fields from what they
 -- sent when they joined. It is a plain state rather than a widget because
 -- there is no widget for "a page of text with a border".
+--
+-- Your own card is the same screen with the same fields, so that what you
+-- check before showing yourself off is literally what everybody else sees.
+-- The one addition is MONEY, which is on the vanilla trainer card and is
+-- never sent (Wire.profile drops it), so a card carrying money can only be
+-- the local one -- see Client.ownCard.
 local Card = {}
 Card.__index = Card
 Card.isOpaque = true
@@ -221,35 +227,85 @@ function Card:draw()
   Font.drawBox(0, 0, 20, 18)
   Font.draw("TRAINER CARD", 24, 8)
 
+  -- Why the rows are in this order, and the portrait is where it is.
+  --
+  -- Glyphs are 8px and the text column starts at x=16, so a full-width row
+  -- holds 17 characters before it reaches the right border -- but a row
+  -- level with the portrait (x=116..148) holds only 12. That makes "which
+  -- rows may sit beside the art" a width question, not a taste one, and
+  -- both of the rows that used to be there fail it: NAME is Config.NAME_MAX
+  -- (10) plus "NAME/", and a character label runs to 17 ("MIDDLE AGED
+  -- WOMAN"). That is how LOOK/COOLTRAINER M came to be drawn straight
+  -- through the portrait.
+  --
+  -- IDNo and TIME are the only two rows whose width is bounded by their
+  -- own format string -- 10 and 11 characters, whatever the values -- so
+  -- the portrait sits beside those instead, and everything that varies
+  -- with a player's choices gets the whole row.
   Font.draw(("NAME/%s"):format(tostring(p.name or "?")), 16, 24)
-  Font.draw(("LOOK/%s"):format(Chars.label(p.sprite or "")), 16, 40)
 
-  -- portrait on the right, clear of the text column
+  -- The character, on its own row and with no "LOOK/" in front of it.
+  -- The longest label in the catalog is exactly 17 characters -- the whole
+  -- row -- so there is no prefix that fits every case, and one that appears
+  -- only on short names would make the card change shape per character.
+  -- Sat directly under the trainer's own name it reads the way the original
+  -- prints a class before a name: ALPHA, a COOLTRAINER M.
+  Font.draw(Chars.label(p.sprite or ""), 16, 40)
+
+  -- portrait on the right, level with the two fixed-width rows below
   local art = portrait(p.sprite)
   if art then
     love.graphics.setColor(1, 1, 1, 1)
-    love.graphics.draw(art.image, art.quad, 116, 24, 0, 2, 2)
+    love.graphics.draw(art.image, art.quad, 116, 56, 0, 2, 2)
   end
+
+  -- money is local-only, so it is also what tells the two cards apart
+  local own = p.money ~= nil
 
   local card = p.profile
   if not card then
     -- An older build sends no card. Say so, rather than draw zeros that
     -- read as "this trainer has nothing".
-    Font.draw("NO CARD SENT.", 16, 64)
-    Font.draw("THEIR BUILD IS", 16, 80)
-    Font.draw("OLDER THAN YOURS.", 16, 96)
+    --
+    -- Below the portrait, not beside it: the rows this message would
+    -- otherwise use are the ones the art now occupies. "OLDER THAN YOURS."
+    -- is 17 characters, which is the full row exactly.
+    if own then
+      -- Not reachable from the menu, which needs a running game to open --
+      -- but a card with no save behind it must not accuse your own build
+      -- of being out of date.
+      Font.draw("NO SAVE LOADED.", 16, 88)
+      return
+    end
+    Font.draw("NO CARD SENT.", 16, 88)
+    Font.draw("THEIR BUILD IS", 16, 104)
+    Font.draw("OLDER THAN YOURS.", 16, 120)
     return
   end
 
-  -- No money row. Somebody else's wallet is not information this card is
-  -- for, and it is not sent either -- transmitting a value nothing displays
-  -- would be exposure for nothing.
+  -- The shared rows sit at the same y on both cards, so the one you check
+  -- before showing yourself off is the one everybody else is reading.
+  --
+  -- These two are the fixed-width pair the portrait sits beside: "IDNo/"
+  -- plus %05d is always 10, and %3d:%02d is always 11 because playtime is
+  -- capped at 999 hours on the way in (Wire.profile).
   Font.draw(("IDNo/%05d"):format(card.idNo or 0), 16, 56)
   Font.draw(("TIME/%3d:%02d"):format(
     math.floor((card.playtime or 0) / 3600),
     math.floor(((card.playtime or 0) % 3600) / 60)), 16, 72)
+
+  -- Back to the full width, below the art.
+  --
+  -- No money row on somebody else's: their wallet is not information this
+  -- card is for, and it is not sent either -- transmitting a value nothing
+  -- displays would be exposure for nothing.
   Font.draw(("BADGES/%d"):format(card.badges or 0), 16, 88)
   Font.draw(("SEEN/%d OWN/%d"):format(card.seen or 0, card.owned or 0), 16, 104)
+  if own then
+    -- last row of the 18-tile box: y=120 leaves the bottom border clear,
+    -- the way the dex line does at 104
+    Font.draw(("MONEY/¥%d"):format(p.money), 16, 120)
+  end
 end
 
 function M.new(ctx)
@@ -373,15 +429,37 @@ function M:install()
           label = "PLAYERS",
           onSelect = function() mod.ui.push(game, SCREEN.ROSTER) end,
         }
-        -- an asterisk for unread, the way the original marks state in a
-        -- label rather than with a second column the box has no room for
+        -- A marker for unread, the way the original marks state in a label
+        -- rather than with a second column the box has no room for.
+        --
+        -- The marker leads rather than trails, and is a triangle rather
+        -- than the asterisk this used to carry: the extracted font has no
+        -- glyph for "*", and Font.draw silently draws nothing for a
+        -- character it cannot map while Font.width still advances 8px for
+        -- it -- so "CHAT*" rendered as CHAT followed by a blank column that
+        -- looked like a layout bug. "▶" is on the sheet (it is the same
+        -- glyph the menu cursor uses), so the row now actually shows what
+        -- it claims to.
         items[#items + 1] = {
-          label = ctx.chat.unread > 0 and "CHAT*" or "CHAT",
+          label = ctx.chat.unread > 0 and "▶CHAT" or "CHAT",
           onSelect = function() mod.ui.push(game, SCREEN.CHATLOG) end,
         }
         items[#items + 1] = {
           label = "SAY",
           onSelect = function() mod.ui.push(game, SCREEN.SCOPE) end,
+        }
+        -- The other side of PLAYERS: that one shows you everybody else's
+        -- card, and until now there was no way to see the one they are
+        -- reading about you. Same screen, same rows -- so what you check
+        -- here is what they see.
+        items[#items + 1] = {
+          label = "MY PROFILE",
+          onSelect = function()
+            mod.ui.push(game, SCREEN.PROFILE, {
+              own = true,
+              onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+            })
+          end,
         }
       end
       items[#items + 1] = {
@@ -510,14 +588,21 @@ function M:install()
     return menu
   end })
 
-  -- ------- somebody else's trainer card
+  -- ------- a trainer card: somebody else's, or your own
 
+  -- One screen for both, because they are the same card. opts.own takes it
+  -- from the local save instead of the roster -- which has no entry for you
+  -- to look up, by design (Roster:isSelf).
   screens:register(SCREEN.PROFILE, { new = function(game, opts)
-    local player = ctx.roster:get(opts and opts.playerId)
+    opts = opts or {}
+    if opts.own then
+      return Card.new(game, ctx.client:ownCard(game), opts.onCancel)
+    end
+    local player = ctx.roster:get(opts.playerId)
     if not player then
       return mod.ui.TextBox.new(game, "They just went\noffline.")
     end
-    return Card.new(game, player, opts and opts.onCancel)
+    return Card.new(game, player, opts.onCancel)
   end })
 
   -- How many players, as a menu of sizes rather than a bare number box.

@@ -115,7 +115,7 @@ local screens = run.loader.content.screens
 for _, id in ipairs({
   "RbyMmoMain", "RbyMmoRoster", "RbyMmoActions", "RbyMmoChatLog",
   "RbyMmoScope", "RbyMmoCompose", "RbyMmoPick", "RbyMmoText",
-  "RbyMmoConfirm", "RbyMmoState",
+  "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile",
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
 }) do
   check(screens:get(id) ~= nil, "screen " .. id .. " is registered")
@@ -1365,6 +1365,66 @@ eq(Chars.resolve(nil), Config.DEFAULT_SPRITE, "as does nothing at all")
 eq(Chars.resolve("SPRITE_BOULDER"), Config.DEFAULT_SPRITE,
    "and so does a real sprite that is not a character")
 
+-- ------- the trainer card fits the box it is drawn in
+--
+-- Wrapped for scope, like the look-bookkeeping section below: this file's
+-- main chunk is close enough to Lua's 200-local ceiling that two branches
+-- adding a section each is enough to cross it, which is how it failed the
+-- moment the address-layout work and this met.
+--
+-- The card is a 20-tile box. Glyphs are 8px and the text column starts at
+-- x=16, so a row reaches the right border after 17 characters -- and a row
+-- level with the portrait (x=116) after only 12.
+
+;(function()
+--
+-- The regression this pins: NAME and the character label are the two rows
+-- whose width the *player* decides, and both were drawn beside the portrait,
+-- where neither fits. "LOOK/COOLTRAINER M" (18) was rendered straight
+-- through the art. They now get full-width rows, which is only correct for
+-- as long as nothing can exceed 17 -- so that is what is asserted, against
+-- the real catalog rather than the stub above.
+
+local ROW_CHARS = 17          -- (152 - 16) / 8, border to text column
+local BESIDE_ART_CHARS = 12   -- (116 - 16) / 8, portrait's left edge
+
+check(#"NAME/" + Config.NAME_MAX <= ROW_CHARS,
+      "a full-length trainer name still fits its row")
+check(#"NAME/" + Config.NAME_MAX > BESIDE_ART_CHARS,
+      "and would not have fit beside the portrait -- why the row moved")
+
+-- The catalog half needs the real thing. The committed fixture carries two
+-- walkers ("FIX PLAYER", 10 chars), so asserting against it would pass
+-- without ever seeing a name long enough to fail -- a green tick for
+-- coverage that is not there. Real dataset or an honest skip, the way
+-- tests/mod_examples_tests.lua handles the same gap.
+local generated = loadfile("data/generated/sprites.lua")
+if not generated then
+  print("rby_mmo: card-width check skipped -- no data/generated/sprites.lua "
+    .. "to measure real character names against")
+else
+  local longest, longestId = 0, nil
+  local wearable = 0
+  for id, record in pairs(generated() or {}) do
+    if type(id) == "string" and type(record) == "table"
+       and record.walker == true and not Chars.excluded(id) then
+      wearable = wearable + 1
+      local label = Chars.label(id)
+      if #label > longest then longest, longestId = #label, id end
+    end
+  end
+  check(wearable > 0, "the real catalog offers wearable characters")
+  check(longest <= ROW_CHARS,
+        ("the longest character label fits its row (%s, %d chars)")
+          :format(tostring(longestId), longest))
+  -- The prefix this row used to carry cannot come back: the longest label
+  -- is the whole row on its own, so "LOOK/" would put it 5 over.
+  check(#"LOOK/" + longest > ROW_CHARS,
+        "and a LOOK/ prefix would not -- the bare label is not a style choice")
+end
+
+end)()
+
 -- ------- the trainer card on the wire
 
 local card = Wire.profile({ idNo = 12345, money = 3000, badges = 3,
@@ -1389,6 +1449,54 @@ local withCard = Wire.presence({ id = "p9", name = "ASH",
 eq(withCard.profile.badges, 8, "presence carries the card")
 eq(Wire.presence({ id = "p9", name = "ASH" }).profile, nil,
    "and a player who sent none simply has none")
+
+-- ------- the card this copy builds, for the wire and for MY PROFILE
+--
+-- Client is loaded here rather than at the top of this section because
+-- requiring it constructs the transport, the host server and the UI; none
+-- of that is wanted by the pure-module tests above.
+--
+-- Wrapped for scope for the same reason as the section above.
+
+;(function()
+
+local Client = need("Client")
+
+local saveGame = { save = {
+  player = { id = 4242, name = "GREEN" },
+  money = 1234,
+  -- camelCase, the way src/core/SaveData.lua writes it
+  playTime = 3661,
+  pokedex = { seen = { A = true, B = true, C = true }, owned = { A = true } },
+} }
+
+-- The regression: this read save.playtime, which no engine save has, so
+-- every card ever sent said TIME/  0:00 and nobody could tell it was a bug
+-- rather than a new file.
+eq(Client.profile(saveGame).playtime, 3661, "playtime comes off save.playTime")
+eq(Client.profile({ save = { playtime = 99 } }).playtime, 99,
+   "and a save that used the lowercase key is still read")
+
+eq(Client.profile(saveGame).money, nil,
+   "the card that goes on the wire has no money on it")
+eq(Client.profile(saveGame).seen, 3, "the dex is counted, not guessed")
+eq(Client.profile(saveGame).owned, 1, "both halves of it")
+
+-- Your own card is roster-shaped so the same screen draws it, and money is
+-- what tells the two apart -- Wire.profile can never produce it, so a card
+-- carrying money is necessarily the local one.
+local mine = Client.ownCard(saveGame)
+eq(mine.name, "GREEN", "your own card falls back to the save's trainer name")
+eq(mine.sprite, Config.DEFAULT_SPRITE, "and to the default look")
+eq(mine.money, 1234, "your own card shows your own wallet")
+eq(mine.profile.idNo, 4242, "and carries the same fields peers are sent")
+
+-- The menus call these with a colon, which puts the module table in the
+-- first slot; without arg1 the save fallback above silently became PLAYER.
+eq(Client:ownCard(saveGame).name, "GREEN", "the colon form reaches the save")
+eq(Client:playerName(saveGame), "GREEN", "and so does playerName's")
+
+end)()
 
 stubSprites = {}
 
