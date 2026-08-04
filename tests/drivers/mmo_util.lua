@@ -588,6 +588,23 @@ function M.playerCell(game)
   return { mapId = ow.map.id, x = ow.player.cellX, y = ow.player.cellY }
 end
 
+-- The renderer this game's own player is drawn with, by identity.
+--
+-- Not which sprite was *chosen* -- exports.myLook already answers that, and
+-- it kept answering correctly while the player was visibly wearing someone
+-- else. This is the live object on the entity, which is the only thing that
+-- says what is actually on screen, and comparing it to the one taken before
+-- connecting is how "leaving gives you your own trainer back" is checkable
+-- at all.
+function M.playerSheet(game)
+  local ow
+  for i = #game.stack.states, 1, -1 do
+    if game.stack.states[i].isOverworld then ow = game.stack.states[i] break end
+  end
+  ow = ow or game.overworld
+  return ow and ow.player and ow.player.sprite or nil
+end
+
 -- the other side's avatar, as this game sees it
 function M.avatarRow(exports, name)
   for _, row in ipairs(exports.avatarState() or {}) do
