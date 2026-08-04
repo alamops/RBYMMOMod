@@ -268,12 +268,15 @@ end
 -- someone be "ASH" online without renaming their single-player file. It
 -- falls back to the save name, so a player who never opens the creator is
 -- still recognisable.
-function M.playerName(game)
+-- arg1 for the same reason setMaxPlayers has it: the menus call
+-- client:playerName(game), which would otherwise land the module table in
+-- the game slot and lose the save-name fallback to "PLAYER".
+function M.playerName(a, b)
   local chosen = mod.save:get("name")
   if type(chosen) == "string" and chosen ~= "" then
     return Wire.name(chosen) or "PLAYER"
   end
-  game = game or ctx.game
+  local game = arg1(a, b) or ctx.game
   local name = game and game.save and game.save.player and game.save.player.name
   return Wire.name(name) or "PLAYER"
 end
@@ -305,8 +308,8 @@ end
 
 -- The trainer-card fields this player shows to others. Read from the save
 -- at hello time, so it is a snapshot of who you were when you joined.
-function M.profile(game)
-  game = game or ctx.game
+function M.profile(a, b)
+  local game = arg1(a, b) or ctx.game
   local save = game and game.save
   if not save then return nil end
   local dex = save.pokedex or {}
@@ -325,12 +328,41 @@ function M.profile(game)
 
   -- Deliberately no money: the card does not show another player's wallet,
   -- so there is no reason to put it on the wire.
+  --
+  -- playTime, not playtime: the engine's field is camel-cased
+  -- (src/core/SaveData.lua, and every screen that shows a clock reads it
+  -- that way). The lowercase spelling read nil, so every card this mod
+  -- ever sent said TIME/  0:00. The old key is still consulted so a save
+  -- written by something that used it is not thrown away.
   return {
     idNo = tonumber(save.player and save.player.id) or 0,
     badges = badges,
     seen = seen,
     owned = owned,
-    playtime = math.floor(tonumber(save.playtime) or 0),
+    playtime = math.floor(tonumber(save.playTime or save.playtime) or 0),
+  }
+end
+
+-- Your own trainer card, shaped like a roster entry so the same screen can
+-- draw it.
+--
+-- Built here rather than looked up: the roster deliberately drops your own
+-- presence (Roster:isSelf) so you are not spawned as your own avatar, which
+-- leaves nothing to point the card screen at.
+--
+-- Money rides along, and only here. It is the one field Wire.profile
+-- refuses to carry, so it can never arrive from the wire -- which is what
+-- makes its presence the honest test for "this card is mine", and keeps
+-- another player's wallet unreachable by construction.
+function M.ownCard(a, b)
+  local game = arg1(a, b) or ctx.game
+  local save = game and game.save
+  return {
+    id = ctx.roster.selfId,
+    name = M.playerName(game),
+    sprite = M.spriteChoice(),
+    profile = M.profile(game),
+    money = save and math.floor(tonumber(save.money) or 0) or 0,
   }
 end
 

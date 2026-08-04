@@ -425,6 +425,46 @@ return function(game)
   shot("chat")
   check(rendezvous("chat"), "both guests finished the chat leg")
 
+  -- ------- your own card
+  --
+  -- Both roles walk this: it reads nothing but the local save, so there is
+  -- no barrier to pair and no reason for only one side to prove it. The
+  -- assertion that matters is `money` -- Wire.profile refuses to carry it,
+  -- so a card holding one cannot have come off the wire, which is what
+  -- makes this the local player's card and not a peer's.
+
+  H.closeToOverworld(game)
+  if check(H.openMmo(game), "the MMO menu opens for MY PROFILE") then
+    if H.selectLabel(game, "MY PROFILE") then
+      U.wait(40)
+      local mine = H.top(game)
+      check(mine ~= nil and mine.player ~= nil, "MY PROFILE opened a card")
+      if mine and mine.player then
+        log("own card", tostring(mine.player.name),
+            "look", tostring(mine.player.sprite),
+            "money", tostring(mine.player.money))
+        check(mine.player.name == ME.name, "showing this guest's own trainer")
+        check(mine.player.money ~= nil,
+              "with the money row only your own card carries")
+        check(mine.player.profile ~= nil,
+              "and the same fields the peers were sent")
+        -- Deliberately only a presence check, and named as one. Each run
+        -- gets its own LOVE identity (mmohub-a-$$), so the save is always
+        -- minutes old and TIME reads 0:00 -- which the *old* save.playtime
+        -- bug produced too. Nothing here can tell them apart; the value
+        -- itself is pinned headless against a save with a real playTime.
+        check(mine.player.profile and type(mine.player.profile.playtime) == "number",
+              "playtime is a number on it (its value is pinned headless)")
+      end
+      shot("my-profile")
+      U.tap(game, "b")
+      U.wait(30)
+      check(H.classify(H.top(game)) == "menu", "and B returns to the MMO menu")
+    else
+      check(false, "no MY PROFILE row on the MMO menu while connected")
+    end
+  end
+
   -- ------- a real trade, run to completion
   --
   -- Reached from START > MMO > PLAYERS rather than by walking up and

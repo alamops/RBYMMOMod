@@ -183,10 +183,26 @@ trainer card, laid out like your own:
   <img src="docs/screenshots/trainer-card.png" width="330" alt="Another player's trainer card, with their portrait">
 </p>
 
-Their portrait, who they are, who they're dressed as, trainer ID, hours
-played, badges earned, and how much of the dex they've seen and caught. Not
-their money — that's nobody else's business, so it isn't shown and isn't
-sent.
+Their name, the character they're wearing on the line beneath it, their
+portrait, trainer ID, hours played, badges earned, and how much of the dex
+they've seen and caught. Not their money — that's nobody else's business, so
+it isn't shown and isn't sent.
+
+The character gets a whole row to itself because the longest name in the
+game, `MIDDLE AGED WOMAN`, is exactly as wide as one. The portrait sits
+beside `IDNo` and `TIME` instead — the two rows whose width can't vary.
+
+**`MY PROFILE`** on the MMO menu opens the same card for you — the same
+rows in the same places, so what you check before showing off is exactly
+what everyone else is reading:
+
+<p align="center">
+  <img src="docs/screenshots/my-profile.png" width="330" alt="Your own trainer card: the same rows, plus MONEY">
+</p>
+
+Yours adds one row nobody else's has: `MONEY`. It's drawn from your own
+save and never goes on the wire — `Wire.profile` refuses to carry it, so a
+card with money on it can only be your own.
 
 ### 🧩 STACKS WITH OTHER MODS
 Spawning real NPCs means whoever owns the world pass draws your friends too.
@@ -212,6 +228,7 @@ behind it.
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
 | `CHAT` / `SAY` | connected | the log (`CHAT*` = unread) and sending |
+| `MY PROFILE` | connected | your own trainer card, as everyone else sees it |
 | `LEAVE` | you joined | drop out and **keep playing single-player** |
 | `END GAME` | hosting | asks first — this one ends it for everybody |
 
