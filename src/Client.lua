@@ -53,17 +53,24 @@ ctx.server = server
 
 local presenceClock = 0
 local lastSent =
-  { map = nil, x = nil, y = nil, facing = nil, busy = nil, running = nil }
+  { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
 
--- Whether the last step this player committed was a run.  Written by the
--- movement.speed wrap, which is the only place that can know it -- holding B
--- is a fact about the local keyboard, and nothing else in the process sees
--- it.  Read by pushPresence, so everyone else's copy can draw the sprint.
+-- Whether the last step this player committed was a fast one -- sprinted
+-- with B on foot, *or* taken on the bike.  Not "was it a run": a run and a
+-- bike both cost 8 frames a tile, so one boolean says everything a watcher
+-- needs and asking which would only give them a distinction they cannot
+-- draw.  Written by the movement.speed wrap, which is the only place that
+-- can know it -- held B is a fact about the local keyboard and moveCtx.onBike
+-- is a fact about the step, and nothing else in the process sees either.
+-- Read by pushPresence, so everyone else's copy paces the avatar to match.
+--
+-- Surfing is not fast: it is a 16-frame step like walking, so it stays
+-- false and a surfer's avatar keeps the engine's own default pace.
 --
 -- It is deliberately "the last step", not "B is down right now": a stale
 -- true while standing still costs nothing, because an avatar that is not
 -- stepping has no step to speed up, and the next ordinary step clears it.
-M.runningNow = false
+M.fastNow = false
 
 -- Ranked PVP, as this client sees it.
 --
@@ -675,12 +682,12 @@ function M.disconnect()
   ctx.chat:clear()
   transport:close()
   lastSent =
-    { map = nil, x = nil, y = nil, facing = nil, busy = nil, running = nil }
-  -- Cleared with the rest of it, because "the last step was a run" is only
-  -- true of a session: a player who sprinted, left, and rejoined standing
-  -- still would otherwise advertise running=true in their hello and go on
-  -- doing so until they took a step to clear it.
-  M.runningNow = false
+    { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
+  -- Cleared with the rest of it, because "the last step was a fast one" is
+  -- only true of a session: a player who sprinted or cycled, left, and
+  -- rejoined standing still would otherwise advertise fast=true in their
+  -- hello and go on doing so until they took a step to clear it.
+  M.fastNow = false
   dialled, authSent = nil, false
   -- A rating belongs to the hub that keeps it, so leaving takes it off the
   -- screen rather than leaving a stale number on your own card in
@@ -756,6 +763,11 @@ local runSpeedWarned = false
 -- bike is excluded because it is already this fast and because held B is
 -- taken there -- it is Cycling Road's brake -- and surfing because a sprint
 -- across water is not a thing any of these games has.
+--
+-- "Untouched" is about the *speed*, not about the wire: a bike step still
+-- goes out as a fast one, because it is one. The wrap below is what ORs the
+-- two together, so this function stays the one answer to "how long does this
+-- step take" and never has to say why.
 local function runSpeed(frames, moveCtx)
   if mod.options:get("run") == false then return frames, false end
   if type(frames) ~= "number" then return frames, false end
@@ -769,7 +781,7 @@ end
 
 -- ------- presence
 
-local function presenceChanged(current, busy, running)
+local function presenceChanged(current, busy, fast)
   local mapId = current and current.mapId
   local x = current and current.x
   local y = current and current.y
@@ -777,23 +789,23 @@ local function presenceChanged(current, busy, running)
   return lastSent.map ~= mapId or lastSent.x ~= x or lastSent.y ~= y
     or lastSent.facing ~= facing or lastSent.busy ~= busy
     -- Compared like the rest of them, defensively rather than because a
-    -- known path needs it.  Every write to runningNow happens outside this
+    -- known path needs it.  Every write to fastNow happens outside this
     -- function, in the movement.speed wrap, and that wrap only runs for a
     -- step the engine has committed -- a turn on the spot and a step into a
     -- wall are answered "turned"/"blocked" before the speed is ever asked
     -- for, so neither can flip the flag.  A committed step changes the cell
     -- too, so today the checks above would carry it; the field is compared
-    -- anyway so that a future writer of runningNow cannot silently strand a
+    -- anyway so that a future writer of fastNow cannot silently strand a
     -- pace change until the next move.
-    or lastSent.running ~= running
+    or lastSent.fast ~= fast
 end
 
 local function pushPresence(force)
   if not transport:isReady() then return end
   local current = World.current()
   local busy = sessions:isBusy()
-  local running = M.runningNow and true or false
-  if not force and not presenceChanged(current, busy, running) then return end
+  local fast = M.fastNow and true or false
+  if not force and not presenceChanged(current, busy, fast) then return end
 
   lastSent = {
     map = current and current.mapId,
@@ -801,7 +813,7 @@ local function pushPresence(force)
     y = current and current.y,
     facing = current and current.facing,
     busy = busy,
-    running = running,
+    fast = fast,
   }
   transport:send(Wire.MOVE, {
     map = lastSent.map,
@@ -809,7 +821,7 @@ local function pushPresence(force)
     y = lastSent.y,
     facing = lastSent.facing,
     busy = busy,
-    running = running,
+    fast = fast,
   })
 end
 
@@ -939,14 +951,16 @@ handlers[Wire.MOVE] = function(_, msg)
   ctx.roster:setBusy(id, msg.busy)
   ctx.roster:setParty(id, msg.party)
   -- Coerced here rather than trusted: this is the raw message, and the
-  -- roster stores what it is given.
-  local running = msg.running and true or false
+  -- roster stores what it is given.  Strict, the way Wire.presence and both
+  -- hubs are -- only a literal true is a fast step, so a client sending 0 or
+  -- "" is read the same here as it is everywhere else on the wire.
+  local fast = msg.fast == true
   if map and x and y then
-    ctx.roster:move(id, map, x, y, facing, running)
+    ctx.roster:move(id, map, x, y, facing, fast)
   else
     -- no cell: the player is in a battle or a menu, so they leave the world
     -- without leaving the roster
-    ctx.roster:move(id, nil, nil, nil, facing, running)
+    ctx.roster:move(id, nil, nil, nil, facing, fast)
     ctx.avatars:despawn(id)
   end
 end
@@ -1163,7 +1177,16 @@ function M.install()
   -- network happens to report, not a multiplayer one, so it works the same
   -- in a single-player game with the hub switched off. What crosses the wire
   -- is only the flag recorded here.
+  --
+  -- The flag is "this step was fast", not "B was held": a bike step is fast
+  -- without a sprint and without this wrap changing its speed at all, so it
+  -- is ORed in below. Reading onBike out here rather than inside runSpeed is
+  -- what keeps it true of the step whatever runSpeed decided -- including
+  -- the failure branch, where the pace is still known even though the speed
+  -- was not -- and the type test is what stops a moveCtx of an unexpected
+  -- shape turning a field read into a throw of its own.
   mod.hooks:wrap("movement.speed", function(next, frames, moveCtx)
+    local onBike = type(moveCtx) == "table" and moveCtx.onBike == true
     local ok, speed, sprint = pcall(runSpeed, frames, moveCtx)
     if not ok then
       -- pcall has put the error where the speed would have been. Whatever
@@ -1175,10 +1198,10 @@ function M.install()
           .. "step -- turn B TO RUN off under START > OPTIONS if it repeats",
           tostring(speed))
       end
-      M.runningNow = false
+      M.fastNow = onBike
       return next(frames, moveCtx)
     end
-    M.runningNow = sprint and true or false
+    M.fastNow = sprint == true or onBike
     return next(speed, moveCtx)
   end)
 
@@ -1284,8 +1307,9 @@ function M.install()
         spawned = ctx.avatars.spawned[player.id] ~= nil,
         walking = ctx.avatars:isWalking(player.id),
         -- the roster's word, not the NPC's: this is what the sender said
-        -- about their own last step, which is what the drivers assert on
-        running = player.running and true or false,
+        -- about the pace of their own last step, which is what the drivers
+        -- assert on
+        fast = player.fast and true or false,
         avatarMap = ctx.avatars.mapId,
       }
     end

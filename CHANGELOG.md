@@ -19,11 +19,19 @@ here must match `manifest.version`.
 - **Remote players run too.** A running player's avatar steps at the same
   8-frames-a-tile the bike already gives NPCs on everyone else's screen —
   one more field on the per-step write that already moves `x`, `y` and
-  `facing`, set the same way the Pikachu follower speeds itself up. `running`
-  rides `mmo.move` and every presence snapshot, coerced to a plain boolean
-  the way `party` already is, and threads straight through `Roster:move`
-  itself rather than living beside it — the exact shape of bug parties
-  shipped with, not repeated here.
+  `facing`, set the same way the Pikachu follower speeds itself up. `fast`
+  rides `mmo.move` and every presence snapshot, taken strictly (only a
+  literal `true` counts, so both hubs read the same bytes the same way) and
+  threaded straight through `Roster:move` itself rather than living beside
+  it — the exact shape of bug parties shipped with, not repeated here.
+- **And bikes finally ride like bikes on other people's screens.** The flag
+  says *fast*, not *running*, so a step earns it by being sprinted **or** by
+  being taken on the bike — both cost 8 frames a tile, so one boolean carries
+  both. Cycling has been on the wire as walking since the first version of
+  this mod: a remote cyclist's avatar plodded at 16 while their real player
+  covered tiles at 8, shed roughly four tiles a second, and got yanked
+  forward by the resync teleport every couple of seconds for the whole ride.
+  Cycling Road is watchable now.
 - **`B TO RUN`, on by default**, next to `BUBBLES` in the options list. Cheap
   and reversible: turn it off and B goes back to meaning nothing everywhere
   running would apply, since the one place held B already meant something —
@@ -34,11 +42,11 @@ here must match `manifest.version`.
 - **`PROTOCOL` 4 → 5**, in `src/Config.lua` and `server/lib/relay.js`
   together. Nothing already on the wire changed shape, so an old client still
   parses everything a new hub sends — but both hubs rebuild their broadcast
-  from a fixed field list, and a protocol-4 hub has never heard of `running`
-  on `mmo.move`: it would drop the flag silently rather than error on it, and
-  every remote sprinter would look like they were walking, forever, with
-  nothing on screen saying why. A refusal naming both versions beats that
-  quietly — the same call ranked PVP made one version ago.
+  from a fixed field list, and a protocol-4 hub has never heard of `fast` on
+  `mmo.move`: it would drop the flag silently rather than error on it, and
+  every remote sprinter and cyclist would look like they were walking,
+  forever, with nothing on screen saying why. A refusal naming both versions
+  beats that quietly — the same call ranked PVP made one version ago.
 
 ## [0.4.0] - 2026-08-04
 
