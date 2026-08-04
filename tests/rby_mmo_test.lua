@@ -115,7 +115,7 @@ local screens = run.loader.content.screens
 for _, id in ipairs({
   "RbyMmoMain", "RbyMmoRoster", "RbyMmoActions", "RbyMmoChatLog",
   "RbyMmoScope", "RbyMmoCompose", "RbyMmoPick", "RbyMmoText",
-  "RbyMmoConfirm", "RbyMmoState",
+  "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile",
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
   "RbyMmoParty", "RbyMmoPartyList",
 }) do
@@ -1561,6 +1561,66 @@ eq(Chars.resolve(nil), Config.DEFAULT_SPRITE, "as does nothing at all")
 eq(Chars.resolve("SPRITE_BOULDER"), Config.DEFAULT_SPRITE,
    "and so does a real sprite that is not a character")
 
+-- ------- the trainer card fits the box it is drawn in
+--
+-- Wrapped for scope, like the look-bookkeeping section below: this file's
+-- main chunk is close enough to Lua's 200-local ceiling that two branches
+-- adding a section each is enough to cross it, which is how it failed the
+-- moment the address-layout work and this met.
+--
+-- The card is a 20-tile box. Glyphs are 8px and the text column starts at
+-- x=16, so a row reaches the right border after 17 characters -- and a row
+-- level with the portrait (x=116) after only 12.
+
+;(function()
+--
+-- The regression this pins: NAME and the character label are the two rows
+-- whose width the *player* decides, and both were drawn beside the portrait,
+-- where neither fits. "LOOK/COOLTRAINER M" (18) was rendered straight
+-- through the art. They now get full-width rows, which is only correct for
+-- as long as nothing can exceed 17 -- so that is what is asserted, against
+-- the real catalog rather than the stub above.
+
+local ROW_CHARS = 17          -- (152 - 16) / 8, border to text column
+local BESIDE_ART_CHARS = 12   -- (116 - 16) / 8, portrait's left edge
+
+check(#"NAME/" + Config.NAME_MAX <= ROW_CHARS,
+      "a full-length trainer name still fits its row")
+check(#"NAME/" + Config.NAME_MAX > BESIDE_ART_CHARS,
+      "and would not have fit beside the portrait -- why the row moved")
+
+-- The catalog half needs the real thing. The committed fixture carries two
+-- walkers ("FIX PLAYER", 10 chars), so asserting against it would pass
+-- without ever seeing a name long enough to fail -- a green tick for
+-- coverage that is not there. Real dataset or an honest skip, the way
+-- tests/mod_examples_tests.lua handles the same gap.
+local generated = loadfile("data/generated/sprites.lua")
+if not generated then
+  print("rby_mmo: card-width check skipped -- no data/generated/sprites.lua "
+    .. "to measure real character names against")
+else
+  local longest, longestId = 0, nil
+  local wearable = 0
+  for id, record in pairs(generated() or {}) do
+    if type(id) == "string" and type(record) == "table"
+       and record.walker == true and not Chars.excluded(id) then
+      wearable = wearable + 1
+      local label = Chars.label(id)
+      if #label > longest then longest, longestId = #label, id end
+    end
+  end
+  check(wearable > 0, "the real catalog offers wearable characters")
+  check(longest <= ROW_CHARS,
+        ("the longest character label fits its row (%s, %d chars)")
+          :format(tostring(longestId), longest))
+  -- The prefix this row used to carry cannot come back: the longest label
+  -- is the whole row on its own, so "LOOK/" would put it 5 over.
+  check(#"LOOK/" + longest > ROW_CHARS,
+        "and a LOOK/ prefix would not -- the bare label is not a style choice")
+end
+
+end)()
+
 -- ------- the trainer card on the wire
 
 local card = Wire.profile({ idNo = 12345, money = 3000, badges = 3,
@@ -1585,6 +1645,54 @@ local withCard = Wire.presence({ id = "p9", name = "ASH",
 eq(withCard.profile.badges, 8, "presence carries the card")
 eq(Wire.presence({ id = "p9", name = "ASH" }).profile, nil,
    "and a player who sent none simply has none")
+
+-- ------- the card this copy builds, for the wire and for MY PROFILE
+--
+-- Client is loaded here rather than at the top of this section because
+-- requiring it constructs the transport, the host server and the UI; none
+-- of that is wanted by the pure-module tests above.
+--
+-- Wrapped for scope for the same reason as the section above.
+
+;(function()
+
+local Client = need("Client")
+
+local saveGame = { save = {
+  player = { id = 4242, name = "GREEN" },
+  money = 1234,
+  -- camelCase, the way src/core/SaveData.lua writes it
+  playTime = 3661,
+  pokedex = { seen = { A = true, B = true, C = true }, owned = { A = true } },
+} }
+
+-- The regression: this read save.playtime, which no engine save has, so
+-- every card ever sent said TIME/  0:00 and nobody could tell it was a bug
+-- rather than a new file.
+eq(Client.profile(saveGame).playtime, 3661, "playtime comes off save.playTime")
+eq(Client.profile({ save = { playtime = 99 } }).playtime, 99,
+   "and a save that used the lowercase key is still read")
+
+eq(Client.profile(saveGame).money, nil,
+   "the card that goes on the wire has no money on it")
+eq(Client.profile(saveGame).seen, 3, "the dex is counted, not guessed")
+eq(Client.profile(saveGame).owned, 1, "both halves of it")
+
+-- Your own card is roster-shaped so the same screen draws it, and money is
+-- what tells the two apart -- Wire.profile can never produce it, so a card
+-- carrying money is necessarily the local one.
+local mine = Client.ownCard(saveGame)
+eq(mine.name, "GREEN", "your own card falls back to the save's trainer name")
+eq(mine.sprite, Config.DEFAULT_SPRITE, "and to the default look")
+eq(mine.money, 1234, "your own card shows your own wallet")
+eq(mine.profile.idNo, 4242, "and carries the same fields peers are sent")
+
+-- The menus call these with a colon, which puts the module table in the
+-- first slot; without arg1 the save fallback above silently became PLAYER.
+eq(Client:ownCard(saveGame).name, "GREEN", "the colon form reaches the save")
+eq(Client:playerName(saveGame), "GREEN", "and so does playerName's")
+
+end)()
 
 stubSprites = {}
 
@@ -1629,6 +1737,12 @@ eq(overlay:worldIsFlat(gameWith({ voxel = 3, tiltshift = 1 })), false,
    "at any level, alongside any post-process")
 
 stubPipelines = {}
+
+-- Wrapped in a function purely for scope, the way the trade scenario below
+-- is: this chunk sits at Lua's 200-local ceiling for one function body, and
+-- the merge put two branches' worth of new top-level names into it at once.
+
+;(function()
 
 -- ------- the party marker on a nameplate
 --
@@ -1744,8 +1858,72 @@ eq(#townOverlay:townMapMarks({ mode = "grid" }), 0,
    "a town map with no index places nobody")
 eq(#townOverlay:townMapMarks(nil), 0, "and neither does no screen at all")
 
+end)()
+
 -- ------------------------------------------------------------------
--- 7. Settings the player changes in game
+-- 8. The typed line staying on a 160-wide screen
+-- ------------------------------------------------------------------
+--
+-- Scoped like the sections around it: this file is at Lua's 200-local
+-- ceiling for one function body, and the merge that brought parties in
+-- added another branch's worth of names to the same chunk.
+
+;(function()
+
+--
+-- NamingScreen lays its field out from a fixed x=56 for maxLen slots of
+-- 8px, which was written for the vanilla seven-character name.  Every grid
+-- this mod opens is longer, and at 32 -- an address -- the line ran to 312
+-- on a 160-wide screen: "192.168.1.20:7788" typed in and the port gone off
+-- the right edge, with no way to check it.  The whole point of the layout
+-- below is that no length the mod uses can do that again, so the lengths
+-- are read out of Config rather than written down here.
+
+local Ui = need("Ui")
+
+local function fits(maxLen, typed)
+  local glyphs = {}
+  for i = 1, #(typed or "") do glyphs[i] = typed:sub(i, i) end
+  local x, cells = Ui.fieldLayout(maxLen, glyphs)
+  return x, cells, x + #cells * 8
+end
+
+for _, case in ipairs({
+  { "an address", 32 },
+  { "a chat line", Config.COMPOSE_MAX },
+  { "a join code", Config.CODE_ENTRY_MAX },
+  { "a trainer name", Config.NAME_MAX },
+}) do
+  local label, maxLen = case[1], case[2]
+  local x, cells, right = fits(maxLen)
+  check(x >= 0 and right <= 160, label .. " draws inside the screen")
+  eq(x, 160 - right, label .. " is centred, not pushed to one side")
+  check(#cells > 0, label .. " shows something to type into")
+end
+
+-- The case the screenshot was taken of: the whole address, readable.
+local addrX, addrCells = fits(32, "192.168.1.20:7788")
+eq(table.concat(addrCells):sub(1, 17), "192.168.1.20:7788",
+   "a full ip and port is on the line, port included")
+check(addrX + #addrCells * 8 <= 160, "and still inside the right edge")
+
+-- Longer than the window: the end is what is kept, because the characters
+-- just entered are the ones being checked.
+local _, longCells = fits(32, "averylonghostname.example.com:77")
+eq(#longCells, 18, "the window is as many slots as fit between the margins")
+eq(table.concat(longCells), "ame.example.com:77",
+   "and holds the end of a line too long to show whole")
+
+-- Short lines pad with dashes exactly as the vanilla field does.
+local _, codeCells = fits(Config.CODE_ENTRY_MAX, "AB")
+eq(#codeCells, Config.CODE_ENTRY_MAX, "a short field keeps all its slots")
+eq(table.concat(codeCells), "AB" .. ("-"):rep(Config.CODE_ENTRY_MAX - 2),
+   "with dashes standing in for what is not typed yet")
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 9. Settings the player changes in game
 -- ------------------------------------------------------------------
 --
 -- Menu code calls these as client:setMaxPlayers(n) -- the colon form, which
@@ -1779,7 +1957,7 @@ eq(Client.joinAddress(), "192.168.1.7:7788", "leaving the previous one intact")
 eq(Client.isHosting(), false, "a fresh client is not hosting")
 
 -- ------------------------------------------------------------------
--- 8. Trading, and the one invariant that matters
+-- 10. Trading, and the one invariant that matters
 -- ------------------------------------------------------------------
 --
 -- Either both sides of a trade apply it or neither does.  Nothing else in
@@ -2083,7 +2261,7 @@ stubMod.log.warn = function() end
 end)()
 
 -- ------------------------------------------------------------------
--- 9. Parties, both sides of the invite
+-- 11. Parties, both sides of the invite
 -- ------------------------------------------------------------------
 --
 -- Driven the way the trade scenario above is: two real Party instances with
@@ -2306,6 +2484,110 @@ cal.party.incoming = { from = "y", name = "Y" }
 cal.party:reset()
 eq(cal.party.outgoing, nil, "a disconnect drops an unanswered invite")
 eq(cal.party.incoming, nil, "and a prompt that was still up")
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 12. Leaving gives the player their own trainer back
+-- ------------------------------------------------------------------
+--
+-- Wearing a hub character has to be undone on the way out, or a player who
+-- joins once is a Rocket grunt in their own single-player game forever.
+--
+-- The trap is that the overworld reuses one player object across map
+-- changes -- OverworldController:setMap calls Player.new only when it has
+-- none -- while this mod re-wears the look on every map.entered. Re-reading
+-- "the original" on each of those reads back the renderer the mod itself
+-- installed, so leaving restored the hub character. One door was enough to
+-- lose the real one, which is why the entity the original came from is
+-- pinned here alongside it.
+--
+-- Wrapped for scope, like section 8.
+
+;(function()
+
+local Client = need("Client")
+
+-- The real renderer needs a graphics context; the bookkeeping under test
+-- does not care what the object is, only which one is where.
+package.loaded["src.render.SpriteRenderer"] = {
+  new = function(record, kind) return { worn = record, kind = kind } end,
+}
+
+stubSprites.SPRITE_RED = { walker = true }
+stubSprites.SPRITE_ROCKET = { walker = true }
+stubSave.sprite = "SPRITE_ROCKET"
+eq(Client.spriteChoice(), "SPRITE_ROCKET", "the chosen character resolves")
+
+local overworld = { player = nil }
+stubMod.world = { overworld = function() return overworld end }
+
+local function newPlayer(name)
+  return { sprite = { vanilla = name } }
+end
+
+-- ------- one player object, walked through a door
+
+local red = newPlayer("red")
+overworld.player = red
+local redSheet = red.sprite
+
+check(Client.applyLook(), "joining wears the chosen character")
+check(red.sprite ~= redSheet, "which really does swap the live renderer")
+
+-- map.entered, twice, on the player object the overworld handed back
+check(Client.refreshLook(), "entering a map re-wears it")
+check(Client.refreshLook(), "and again, as a long session would")
+check(red.sprite ~= redSheet, "still wearing it")
+
+Client.restoreLook()
+eq(red.sprite, redSheet, "leaving gives the player their own trainer back")
+
+Client.restoreLook()
+eq(red.sprite, redSheet, "and leaving twice is not a second restore")
+
+-- ------- the same, through the client's own teardown
+--
+-- disconnect() is the one path both a deliberate leave and a dropped
+-- connection go through, so the restore is pinned on it and not only on
+-- restoreLook directly.
+
+check(Client.applyLook(), "wearing it again for the teardown")
+check(red.sprite ~= redSheet, "worn")
+Client.disconnect()
+eq(red.sprite, redSheet, "disconnecting puts the trainer back")
+
+-- ------- nothing worn, nothing to re-wear
+
+eq(Client.refreshLook(), false,
+   "a map change outside a game does not dress the player up")
+eq(red.sprite, redSheet, "and leaves the trainer alone")
+
+-- ------- a player the engine really did rebuild
+
+check(Client.applyLook(), "worn, and then the world rebuilds the player")
+local blue = newPlayer("blue")
+local blueSheet = blue.sprite
+overworld.player = blue
+
+-- the map that rebuilt the player re-wears on the new one, and the sheet it
+-- stashes is that one's own -- not the renderer left on the object that died
+check(Client.refreshLook(), "the rebuilt player wears the character")
+check(blue.sprite ~= blueSheet, "worn")
+Client.restoreLook()
+eq(blue.sprite, blueSheet, "and gets its own sheet back, not the old one's")
+
+-- and a restore aimed at an entity that is already gone stays its hand
+check(Client.applyLook(), "worn on the current player")
+local ghost = newPlayer("ghost")
+local ghostSheet = ghost.sprite
+overworld.player = ghost
+Client.restoreLook()
+eq(ghost.sprite, ghostSheet, "a player swapped in since is left exactly as it is")
+
+stubMod.world = nil
+stubSave.sprite = nil
+stubSprites.SPRITE_ROCKET = nil
 
 end)()
 

@@ -47,15 +47,36 @@ end
 -- tapped "down" a fixed number of times would break the moment the menu
 -- changed shape. Menu and ListMenu both expose `items` and a 1-based
 -- `index`, so the cursor distance can be computed instead.
--- Matches a row by label, tolerating a trailing marker: the CHAT row reads
--- "CHAT*" while messages are unread, and a driver that demanded an exact
--- string would fail for the wrong reason.
+-- Matches a row by label, tolerating an unread marker on either side of it:
+-- the CHAT row reads "▶CHAT" while messages are unread, and a driver that
+-- demanded an exact string would fail for the wrong reason.
+--
+-- Leading as well as trailing, because that marker moved to the front when
+-- it stopped being "*" -- a character the extracted font cannot draw. It is
+-- stripped by byte rather than matched as a class: "▶" is three UTF-8 bytes,
+-- so a driver asking for "CHAT" against "▶CHAT" was comparing "CHAT" with
+-- the marker's own bytes and never matching. The old trailing form is still
+-- accepted so this util keeps working against an older build of the mod.
+local MARKERS = { "\226\150\182" }   -- ▶ (U+25B6)
+
 local function labelMatches(actual, wanted)
   if actual == wanted then return true end
-  return type(actual) == "string"
-    and actual:sub(1, #wanted) == wanted
+  if type(actual) ~= "string" then return false end
+  for _, marker in ipairs(MARKERS) do
+    if actual:sub(1, #marker) == marker then
+      actual = actual:sub(#marker + 1)
+      break
+    end
+  end
+  return actual:sub(1, #wanted) == wanted
     and actual:sub(#wanted + 1):match("^[%*%s]*$") ~= nil
 end
+
+-- Exported because a driver that re-implements this rule drifts from it.
+-- mmo_guest.lua had its own two-line copy spelling the marker as a trailing
+-- "*", which went on passing until the marker moved and changed character --
+-- then failed as "no chat row" on a menu that plainly had one.
+M.labelMatches = labelMatches
 
 function M.selectLabel(game, label, frames)
   local ok = M.waitFor(game, function()
@@ -100,6 +121,72 @@ function M.menuLabels(game)
   return labels
 end
 
+-- Characters in `text` the font cannot draw, as a comma-separated string
+-- ("" when every one of them renders).
+--
+-- This is the one bug class a driver asserting on strings is structurally
+-- blind to. The charmap is extracted from the ROM and carries no "*" (nor
+-- + # < > % =); Font.draw silently draws nothing for a character it cannot
+-- map while Font.width still advances 8px, so a label reads correctly to
+-- every assertion here and renders as a blank column on screen. The MMO
+-- menu's unread marker was "CHAT*" and did exactly that.
+--
+-- Only answerable on a real dataset: the committed fixture font carries
+-- letters and digits alone, so a headless suite cannot tell drawable from
+-- not. Hence a driver helper rather than a unit test.
+--
+-- **Both sides of the merge wrote this helper independently**, after being
+-- bitten by the same silence -- main by "CHAT*" on the MMO menu, the party
+-- branch by a "*" nameplate marker. Git kept both, and Lua kept whichever
+-- was defined last, which is how two versions with *different return types*
+-- -- a comma-joined string and a list -- ended up one `==` away from a
+-- caller that could never pass. This is the one function, taking the better
+-- half of each:
+--
+--   * main's signature and return value, because that is the published one
+--     and `missing == ""` reads better than `#missing == 0` at a call site;
+--   * the branch's character extraction, because a span carries `from`/`to`
+--     into the source string and *not* the text it covers -- `span.text` is
+--     nil, so the other version named every offending character "?" and
+--     could not say which one was wrong;
+--   * the branch's not-loaded guard, because Font.split resolves nothing
+--     before Font.load has run: every span comes back code-less and an
+--     unguarded version calls every character of every string undrawable.
+--     In game the font is always loaded, so this only bites a standalone
+--     probe -- but a wall of false failures blaming the caller's text is
+--     worse than saying plainly that the font was not ready.
+local UNDRAWABLE_CONTROL = "A"
+
+function M.undrawable(game, text)
+  local subject = tostring(text or "")
+  if subject == "" then return "" end
+  local ok, Font = pcall(require, "src.render.Font")
+  if not (ok and Font and Font.split) then return "?FONT-UNAVAILABLE" end
+
+  local function spansOf(s)
+    local got, spans = pcall(Font.split, s)
+    if got and type(spans) == "table" then return spans end
+    return nil
+  end
+
+  local control = spansOf(UNDRAWABLE_CONTROL)
+  if not (control and control[1] and control[1].code) then
+    return "?FONT-NOT-LOADED"
+  end
+
+  local spans = spansOf(subject)
+  if not spans then return "?FONT-SPLIT-FAILED" end
+
+  local missing = {}
+  for _, span in ipairs(spans) do
+    if span.code == nil then
+      local char = subject:sub(span.from or 1, span.to or 0)
+      if char ~= " " and char ~= "" then missing[#missing + 1] = char end
+    end
+  end
+  return table.concat(missing, ",")
+end
+
 -- One row of the menu on top, by label, so its right-hand column can be
 -- read. That column carries the join code itself on the HOST screen -- it
 -- used to say ON -- and reading it back is the only way to check the thing a
@@ -116,73 +203,6 @@ end
 function M.exports(game)
   local loader = game.mods
   return loader and loader.exports and loader.exports.rby_mmo or nil
-end
-
--- Which characters of `text` the live font cannot draw.
---
--- **A character with no glyph is not an error anywhere -- it is a silence.**
--- Font.draw draws nothing for it while Font.width still advances eight
--- pixels, so a label carrying one renders a glyph too wide with a blank hole
--- in it: wrong on screen, and invisible to every assertion that reads the
--- string rather than the pixels. A party marker of `*` shipped that way and
--- survived a fully green end-to-end run.
---
--- Asked of Font.split rather than of data.font.charmap, and the difference
--- matters: the charmap is a numeric-keyed *list*, so `charmap["*"]` is nil
--- for every character including the ones that draw perfectly well, and a
--- check written that way passes everything. split() is the renderer's own
--- resolution path -- greedy, multi-byte aware, and aware of pages a mod
--- registered -- and it marks an unresolved span with `code == nil`.
---
--- Only a real run can answer this. The committed fixture font carries
--- letters and digits and nothing else, so a headless suite would reject a
--- bracket the game draws happily.
---
--- A span carries `from`/`to` into the source string and, once resolved, a
--- `code`; a span with no `code` is a character with no glyph. The characters
--- come back out with text:sub(from, to) rather than from the span, because
--- a span holds indices and not the text it covers.
---
--- Returns a list, empty when every character is drawable.
---
--- **Guarded against an unloaded font, which is the failure this helper would
--- otherwise invent.** Font.split resolves nothing at all before Font.load
--- has run, so every span comes back code-less and a naive version reports
--- every character of every string as undrawable -- a wall of false failures
--- that says nothing about the text. So a control string is asked first: if
--- the letter A has no glyph, the font is not ready and that is what gets
--- said, rather than a list blaming the caller's text.
-local UNDRAWABLE_CONTROL = "A"
-
-function M.undrawable(game, text)
-  if type(text) ~= "string" or text == "" then return {} end
-  local ok, Font = pcall(require, "src.render.Font")
-  if not (ok and Font and Font.split) then
-    return { "?FONT-UNAVAILABLE" }
-  end
-
-  local function spansOf(s)
-    local got, spans = pcall(Font.split, s)
-    if got and type(spans) == "table" then return spans end
-    return nil
-  end
-
-  local control = spansOf(UNDRAWABLE_CONTROL)
-  if not (control and control[1] and control[1].code) then
-    return { "?FONT-NOT-LOADED" }
-  end
-
-  local spans = spansOf(text)
-  if not spans then return { "?FONT-SPLIT-FAILED" } end
-
-  local missing = {}
-  for _, span in ipairs(spans) do
-    if type(span) == "table" and span.code == nil then
-      local char = text:sub(span.from or 1, span.to or 0)
-      if char ~= " " and char ~= "" then missing[#missing + 1] = char end
-    end
-  end
-  return missing
 end
 
 -- The mod ships experimental, so a run where the wrapper forgot to enable
@@ -662,6 +682,23 @@ function M.playerCell(game)
   ow = ow or game.overworld
   if not (ow and ow.map and ow.player) then return nil end
   return { mapId = ow.map.id, x = ow.player.cellX, y = ow.player.cellY }
+end
+
+-- The renderer this game's own player is drawn with, by identity.
+--
+-- Not which sprite was *chosen* -- exports.myLook already answers that, and
+-- it kept answering correctly while the player was visibly wearing someone
+-- else. This is the live object on the entity, which is the only thing that
+-- says what is actually on screen, and comparing it to the one taken before
+-- connecting is how "leaving gives you your own trainer back" is checkable
+-- at all.
+function M.playerSheet(game)
+  local ow
+  for i = #game.stack.states, 1, -1 do
+    if game.stack.states[i].isOverworld then ow = game.stack.states[i] break end
+  end
+  ow = ow or game.overworld
+  return ow and ow.player and ow.player.sprite or nil
 end
 
 -- the other side's avatar, as this game sees it
