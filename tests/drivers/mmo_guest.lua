@@ -427,6 +427,52 @@ return function(game)
   shot("chat")
   check(rendezvous("chat"), "both guests finished the chat leg")
 
+  -- Two legs landed here in the same merge, both reached from the end of
+  -- the chat leg, and both are kept: MY PROFILE reads nothing but the local
+  -- save and pairs with nobody, so it runs first and unpaired; the party
+  -- leg below is the one with barriers in it.
+
+  -- ------- your own card
+  --
+  -- Both roles walk this: it reads nothing but the local save, so there is
+  -- no barrier to pair and no reason for only one side to prove it. The
+  -- assertion that matters is `money` -- Wire.profile refuses to carry it,
+  -- so a card holding one cannot have come off the wire, which is what
+  -- makes this the local player's card and not a peer's.
+
+  H.closeToOverworld(game)
+  if check(H.openMmo(game), "the MMO menu opens for MY PROFILE") then
+    if H.selectLabel(game, "MY PROFILE") then
+      U.wait(40)
+      local mine = H.top(game)
+      check(mine ~= nil and mine.player ~= nil, "MY PROFILE opened a card")
+      if mine and mine.player then
+        log("own card", tostring(mine.player.name),
+            "look", tostring(mine.player.sprite),
+            "money", tostring(mine.player.money))
+        check(mine.player.name == ME.name, "showing this guest's own trainer")
+        check(mine.player.money ~= nil,
+              "with the money row only your own card carries")
+        check(mine.player.profile ~= nil,
+              "and the same fields the peers were sent")
+        -- Deliberately only a presence check, and named as one. Each run
+        -- gets its own LOVE identity (mmohub-a-$$), so the save is always
+        -- minutes old and TIME reads 0:00 -- which the *old* save.playtime
+        -- bug produced too. Nothing here can tell them apart; the value
+        -- itself is pinned headless against a save with a real playTime.
+        check(mine.player.profile and type(mine.player.profile.playtime) == "number",
+              "playtime is a number on it (its value is pinned headless)")
+      end
+      shot("my-profile")
+      U.tap(game, "b")
+      U.wait(30)
+      check(H.classify(H.top(game)) == "menu", "and B returns to the MMO menu")
+    else
+      check(false, "no MY PROFILE row on the MMO menu while connected")
+    end
+  end
+
+
   -- ------- a party, formed and then left
   --
   -- The half of parties the headless suite structurally cannot reach. That
@@ -563,9 +609,11 @@ return function(game)
   -- trap is not, and it belongs to anything that ever reaches a plate.
   local unpaintable = {}
   for _, plate in ipairs(drew) do
-    for _, char in ipairs(H.undrawable(game, plate)) do
-      unpaintable[#unpaintable + 1] = char
-    end
+    -- H.undrawable answers with a comma-joined string, "" when every glyph
+    -- renders -- the shape main's copy of this helper published, and the one
+    -- the merge settled on for both.
+    local missing = H.undrawable(game, plate)
+    if missing ~= "" then unpaintable[#unpaintable + 1] = missing end
   end
   check(#unpaintable == 0, "every glyph the overlay drew is one the font has"
     .. (#unpaintable > 0
@@ -912,9 +960,13 @@ return function(game)
       menuLabels[#menuLabels + 1] = tostring(item.label)
     end
     log("MMO menu rows:", table.concat(menuLabels, ","))
+    -- Through the shared matcher, not a copy of it: this used to spell the
+    -- unread marker as a trailing "*" itself, and went on passing until the
+    -- marker moved to a leading one -- then reported "no chat row" about a
+    -- menu that had one.
     local function has(want)
       for _, label in ipairs(menuLabels) do
-        if label == want or label == want .. "*" then return true end
+        if H.labelMatches(label, want) then return true end
       end
       return false
     end
@@ -926,6 +978,17 @@ return function(game)
     check(not has("END GAME"), "and no END GAME row either")
     check(has("LEAVE"), "just LEAVE")
     check(has("CHAT"), "and the chat log")
+
+    -- Every row is drawable, not merely correct as a string. has("CHAT")
+    -- above passes for "CHAT*" too, and that spelling rendered as CHAT
+    -- plus a blank column for as long as it was there -- the marker is a
+    -- triangle now precisely because the font has no asterisk.
+    for _, label in ipairs(H.menuLabels(game)) do
+      local missing = H.undrawable(game, label)
+      check(missing == "",
+            ("every glyph in %q is on the font sheet%s"):format(label,
+              missing == "" and "" or " -- missing " .. missing))
+    end
     shot("mmo-menu")
 
     if H.selectLabel(game, "CHAT") then

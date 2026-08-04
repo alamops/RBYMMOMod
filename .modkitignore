@@ -118,3 +118,12 @@ docs/screenshots/join-connected.png
 docs/screenshots/party-map.png
 docs/screenshots/party-townmap.png
 docs/screenshots/party-members.png
+#
+# my-profile.png arrived on main without a line here, and `pack` duly put it
+# in the archive -- 45 files instead of 44, with a composited frame inside.
+# Neither side of the merge could see that on its own: lint has nothing to
+# say about a whole frame (see the note above), and the count only looks
+# wrong once both branches' screenshots are in one tree. It is the trap this
+# block is for, so the fix belongs with the rest of the list rather than in a
+# follow-up.
+docs/screenshots/my-profile.png

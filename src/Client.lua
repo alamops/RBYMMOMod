@@ -271,12 +271,15 @@ end
 -- someone be "ASH" online without renaming their single-player file. It
 -- falls back to the save name, so a player who never opens the creator is
 -- still recognisable.
-function M.playerName(game)
+-- arg1 for the same reason setMaxPlayers has it: the menus call
+-- client:playerName(game), which would otherwise land the module table in
+-- the game slot and lose the save-name fallback to "PLAYER".
+function M.playerName(a, b)
   local chosen = mod.save:get("name")
   if type(chosen) == "string" and chosen ~= "" then
     return Wire.name(chosen) or "PLAYER"
   end
-  game = game or ctx.game
+  local game = arg1(a, b) or ctx.game
   local name = game and game.save and game.save.player and game.save.player.name
   return Wire.name(name) or "PLAYER"
 end
@@ -308,8 +311,8 @@ end
 
 -- The trainer-card fields this player shows to others. Read from the save
 -- at hello time, so it is a snapshot of who you were when you joined.
-function M.profile(game)
-  game = game or ctx.game
+function M.profile(a, b)
+  local game = arg1(a, b) or ctx.game
   local save = game and game.save
   if not save then return nil end
   local dex = save.pokedex or {}
@@ -328,30 +331,48 @@ function M.profile(game)
 
   -- Deliberately no money: the card does not show another player's wallet,
   -- so there is no reason to put it on the wire.
+  --
+  -- playTime, not playtime: the engine's field is camel-cased
+  -- (src/core/SaveData.lua, and every screen that shows a clock reads it
+  -- that way). The lowercase spelling read nil, so every card this mod
+  -- ever sent said TIME/  0:00. The old key is still consulted so a save
+  -- written by something that used it is not thrown away.
   return {
     idNo = tonumber(save.player and save.player.id) or 0,
     badges = badges,
     seen = seen,
     owned = owned,
-    playtime = math.floor(tonumber(save.playtime) or 0),
+    playtime = math.floor(tonumber(save.playTime or save.playtime) or 0),
   }
 end
 
--- Your own trainer card, in the shape the card screen draws.
+-- Your own trainer card, shaped like a roster entry so the same screen can
+-- draw it.
 --
--- The roster is every player *except* you (Roster:isSelf is what keeps you
--- from being drawn as your own remote avatar), so there is no entry to look
--- your own card up from -- it is built from the local save instead. The
--- party members list is the first screen that needs one: it lists both
--- members, and a row that opened "they just went offline" against yourself
--- would be nonsense.
+-- Built here rather than looked up: the roster deliberately drops your own
+-- presence (Roster:isSelf) so you are not spawned as your own avatar, which
+-- leaves nothing to point the card screen at.
+--
+-- Money rides along, and only here. It is the one field Wire.profile
+-- refuses to carry, so it can never arrive from the wire -- which is what
+-- makes its presence the honest test for "this card is mine", and keeps
+-- another player's wallet unreachable by construction.
+--
+-- Two callers now, arrived at independently and wanting the same thing:
+-- MY PROFILE on the MMO menu, and the party members list, which lists both
+-- members and would otherwise open "they just went offline" against
+-- yourself. The party branch built a second copy of this without the money
+-- row; there is one, and it is this one, because a card that is missing the
+-- field that identifies it as yours is the weaker of the two.
 function M.ownCard(a, b)
   local game = arg1(a, b) or ctx.game
+  local save = game and game.save
   return {
     id = ctx.roster.selfId,
     name = M.playerName(game),
     sprite = M.spriteChoice(),
     profile = M.profile(game),
+    money = save and math.floor(tonumber(save.money) or 0) or 0,
   }
 end
 
@@ -365,7 +386,17 @@ end
 -- once the player exists -- the renderer has to be swapped on the live
 -- object. The original is kept so leaving a game puts your own trainer
 -- back, rather than leaving you dressed as a Rocket grunt in single-player.
+--
+-- It is kept *against the entity it was taken from*. The overworld reuses
+-- one player object across map changes -- OverworldController:setMap only
+-- calls Player.new when it has none -- so re-wearing the look on map.entered
+-- reads back the renderer this mod installed a moment ago. Stashing that as
+-- "the original" is what used to hand a leaving player their hub character
+-- instead of their trainer; the owner is what tells a genuinely rebuilt
+-- player, from a new save or a new controller, apart from the same one
+-- walking through a door.
 local originalLook = nil
+local lookOwner = nil
 
 local function playerEntity()
   local world = mod.world
@@ -388,15 +419,40 @@ function M.applyLook(game)
     mod.log:warn("could not wear %s; staying as you are", tostring(id))
     return false
   end
-  if originalLook == nil then originalLook = player.sprite end
+  if lookOwner ~= player then
+    originalLook = player.sprite
+    lookOwner = player
+  end
   player.sprite = renderer
   return true
 end
 
+-- Entering a map can rebuild the player, taking the chosen look with it, so
+-- the look is re-worn from map.entered rather than watched for.
+--
+-- It is a named function and not a line inside that listener because this is
+-- where the bug was: the listener used to clear the stashed original first,
+-- and since the overworld usually hands back the *same* player object, what
+-- applyLook then stashed was the mod's own renderer. One door and the real
+-- trainer was gone. applyLook re-reads the original only when the entity
+-- really changed, so the re-wear is safe now -- and the suite can say so.
+--
+-- The gate is "already wearing one, or in a game and meant to be": the
+-- second half keeps a look that failed to apply at connect time retrying on
+-- the next map, which is what the transport check here used to do alone.
+function M.refreshLook()
+  if lookOwner == nil and not transport:isReady() then return false end
+  return M.applyLook(ctx.game)
+end
+
 function M.restoreLook()
-  local player = playerEntity()
-  if player and originalLook ~= nil then player.sprite = originalLook end
-  originalLook = nil
+  -- Only onto the entity the original was taken from: a player rebuilt
+  -- since then is already wearing its own sheet, and writing a stale
+  -- renderer over it would be this same bug pointing the other way.
+  if lookOwner and originalLook ~= nil and playerEntity() == lookOwner then
+    lookOwner.sprite = originalLook
+  end
+  originalLook, lookOwner = nil, nil
 end
 
 -- ------- connect / disconnect
@@ -802,13 +858,23 @@ local function tick(game, dt)
     if handler then handler(game, msg) end
   end
 
-  -- a failure surfaced inside update (timeout, socket error) tears the
-  -- world state down so nothing is left drawn over a dead connection
+  -- A failure surfaced inside update (timeout, socket error, the hub
+  -- hanging up) is a leave the player did not choose, so it tears down
+  -- exactly what an asked-for leave does -- their own trainer back
+  -- included. Tearing down only part of it left a dropped player standing
+  -- in single-player wearing whoever they picked for the hub, and a trade
+  -- session still open on a socket that is gone.
   if not transport:isOpen() then
-    if transport.error then ui:say(tostring(transport.error)) end
-    ctx.avatars:clear()
-    ctx.roster:reset()
-    party:reset()
+    -- M.disconnect(), not a partial teardown. Both sides of the merge were
+    -- fixing the same shape of bug -- a dropped player left holding state a
+    -- deliberate LEAVE would have cleared -- and main's answer subsumes the
+    -- party branch's: the party reset this used to do inline lives inside
+    -- disconnect() with the roster, the avatars, the session and the
+    -- restored look, so there is now one teardown and no second list to
+    -- keep in step with it.
+    local reason = transport.error
+    M.disconnect()
+    if reason then ui:say(tostring(reason)) end
     return
   end
 
@@ -896,12 +962,7 @@ function M.install()
   mod.events:on("player.warped", function() pushPresence(true) end)
   mod.events:on("map.entered", function()
     pushPresence(true)
-    -- entering a map can rebuild the player, taking the chosen look with
-    -- it; re-wearing it here is cheaper than watching for that
-    if transport:isReady() then
-      originalLook = nil
-      M.applyLook(ctx.game)
-    end
+    M.refreshLook()
   end)
 
   -- Facing a remote player and pressing A opens the same menu the roster
