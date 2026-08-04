@@ -365,15 +365,13 @@ local function presenceOf(client)
     -- whether their menus offer to invite this player -- and nobody outside
     -- the party needs the id, so the id does not leave the hub.
     party = client.partyId ~= nil,
-    -- One question only: is this player sprinting on foot, B held.  Not "how
-    -- fast are they moving" -- a player on the bike covers a tile in 8
-    -- frames and is deliberately not covered here (runSpeed excludes
-    -- onBike), so bike pace is not represented on the wire at all and a
-    -- cycling player's avatar still walks at 16 and resync-pops.  That gap
-    -- predates this flag and is not what it is for.  Unlike busy, this hub
-    -- cannot work it out: it never sees the B button, so the client is the
-    -- only authority and this is what it last reported.
-    running = client.running == true,
+    -- One question only: was that step a fast one.  Not "why" -- a sprint on
+    -- foot and a bike both cover a tile in 8 frames, so both set this and
+    -- neither is told apart, which is all a watcher can draw anyway.  Unlike
+    -- busy, this hub cannot work it out: it never sees the B button or the
+    -- bike, so the client is the only authority and this is what it last
+    -- reported.
+    fast = client.fast == true,
     profile = client.profile,
     -- Carried with presence rather than with the card: a rating moves while
     -- the player is standing there, and the card is a snapshot of their
@@ -437,7 +435,7 @@ function M:accept(peer, trusted)
     name = nil,
     sprite = Config.DEFAULT_SPRITE,
     map = nil, x = nil, y = nil, facing = "down",
-    running = false,  -- nobody arrives mid-sprint; the first move says otherwise
+    fast = false,     -- nobody arrives mid-stride; the first move says otherwise
     sessionId = nil,
     pendingTo = nil,
     partyId = nil,
@@ -843,14 +841,15 @@ handlers[Wire.MOVE] = function(self, client, msg)
   end
   if Wire.facing(msg.facing) then client.facing = msg.facing end
   -- Client-truth, and strict on purpose: only a literal boolean true counts
-  -- as running, and everything else -- absent, 0, "", "yes", null -- is
-  -- walking.  The rule is strictness rather than coercion because this hub
-  -- and the Node hub (server/lib/relay.js) have to broadcast the same thing
-  -- for the same wire bytes, and Lua and JS truthiness disagree on exactly
-  -- the values a malformed client sends: 0 and "" are true to Lua's `and`
-  -- and false to JS's Boolean().  Comparing against true is the one test
-  -- both languages answer identically for every JSON value.
-  client.running = msg.running == true
+  -- as a fast step -- a sprint or a bike, the sender's business which --
+  -- and everything else -- absent, 0, "", "yes", null -- is walking pace.
+  -- The rule is strictness rather than coercion because this hub and the
+  -- Node hub (server/lib/relay.js) have to broadcast the same thing for the
+  -- same wire bytes, and Lua and JS truthiness disagree on exactly the
+  -- values a malformed client sends: 0 and "" are true to Lua's `and` and
+  -- false to JS's Boolean().  Comparing against true is the one test both
+  -- languages answer identically for every JSON value.
+  client.fast = msg.fast == true
   self:broadcast(Wire.MOVE, presenceOf(client), client.id)
 end
 

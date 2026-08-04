@@ -100,7 +100,9 @@ heads; chat bubbles pop when they talk.
 
 Hold **B** on foot and you run — bike speed, no bike, off the moment you're
 biking or surfing — and everyone else sees it too: your avatar steps at that
-same doubled clock on their screen, not just yours.
+same doubled clock on their screen, not just yours. The wire carries the
+*pace*, not the reason for it, so a player on a bicycle rides at bicycle
+speed on your screen as well.
 
 <p align="center">
   <img src="docs/screenshots/overworld-presence.png" width="300" alt="Another player standing in the room with a nameplate">

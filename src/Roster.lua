@@ -38,22 +38,22 @@ end
 -- replaces: a player who walks must not lose the name, sprite or trainer
 -- card that arrived with their join.
 --
--- `running` rides here rather than getting a setter of its own like busy and
+-- `fast` rides here rather than getting a setter of its own like busy and
 -- party did, and the difference is what the flag is *about*: busy and party
 -- change while a player stands still, so they need a way in that does not
--- involve a cell.  Running is a property of the step itself -- it is decided
--- by the same input that moved them, it changes with the movement, and every
--- mmo.move already carries it -- so threading it through the argument that
--- delivers the step keeps the two from ever disagreeing.  A nil is a caller
--- that predates the field, and leaves the stored value alone: reading "no
--- opinion" as "not running" would have every old-shaped call stop a runner
--- mid-stride.
-function M:move(id, map, x, y, facing, running)
+-- involve a cell.  Pace is a property of the step itself -- it is decided by
+-- the same input and the same bike that moved them, it changes with the
+-- movement, and every mmo.move already carries it -- so threading it through
+-- the argument that delivers the step keeps the two from ever disagreeing.
+-- A nil is a caller that predates the field, and leaves the stored value
+-- alone: reading "no opinion" as "not fast" would have every old-shaped call
+-- stop a runner mid-stride.
+function M:move(id, map, x, y, facing, fast)
   local player = self.players[id]
   if not player then return nil end
   player.map, player.x, player.y = map, x, y
   player.facing = facing or player.facing
-  if running ~= nil then player.running = running and true or false end
+  if fast ~= nil then player.fast = fast and true or false end
   return player
 end
 

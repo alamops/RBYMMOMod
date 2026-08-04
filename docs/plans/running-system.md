@@ -156,6 +156,10 @@ into the worktree; free port 7799 first; `SHOT_DIR=<scratchpad>/shots`.
 - Old hub + new client: `running` silently dropped — mitigated by the PROTOCOL bump (refusal at
   hello names both versions).
 - Cycling Road held-B brake: unreachable (sprint requires not-onBike; brake requires onBike).
+- ~~Bike pace is not on the wire at all: a remote cyclist keeps stepping at 16 while their own
+  game moves them at 8, so they shed ~3.75 tiles/s and trip `RESYNC_DISTANCE` repeatedly. A
+  pre-existing gap this feature neither causes nor fixes.~~ **Closed by §9** — the flag was
+  renamed to `fast` and a bike step now sets it.
 - `presenceChanged` miss: forgetting the comparison field means run-state flips only piggyback
   on position changes — TT1/TT2 cover the flip explicitly.
 - Peer overlap: `feature/nire-char` (new playable characters) may touch sprites/avatars;
@@ -166,10 +170,44 @@ into the worktree; free port 7799 first; `SHOT_DIR=<scratchpad>/shots`.
 
 1. Run speed = 2× walk (bike-equivalent), the Gen 3+ convention. Not configurable beyond on/off.
 2. Sprint also disabled while **surfing** (modern-game parity; the request literally says only
-   "not riding the bike" — revisit if the owner wants B-sprint on water).
+   "not riding the bike" — revisit if the owner wants B-sprint on water). *Still true of the
+   speed after §9; the bike now reports its pace on the wire, but B still does nothing to it.*
 3. Works offline as well as online (movement feature, not connection feature).
 4. Added a `run` options toggle, default **on** (not requested; cheap and reversible).
 5. PROTOCOL bumped 4 → 5 per fleet canon; the alternative reading ("cosmetic-only degradation,
    no bump") was considered and rejected for consistency with the parties precedent.
 6. No walk-animation speed-up (engine has no seam; bike already looks this way).
 7. Version bumped 0.4.0 → 0.5.0 (feature-commit convention observed in git history).
+
+## 9. Follow-up (same release): the `fast` flag
+
+Approved follow-up, landed on `feature/running-system` before 0.5.0 shipped.
+
+**What changed.** The wire flag meant "B held on foot" and was called `running`. It now means
+"this committed step was taken at the fast pace" and is called `fast`, set when the step was
+sprinted **or** `moveCtx.onBike == true`. Run speed and bike speed are both 8 frames/tile, so
+one boolean carries both and a watcher gets the only distinction they could ever draw. Surfing
+stays not-fast (16 frames, like walking). The speed arithmetic is untouched: `runSpeed` still
+refuses to divide a bike step, and the OR lives in the `movement.speed` wrap.
+
+**Why it was free.** 0.5.0 and `PROTOCOL 5` are unreleased — no hub and no client anywhere has
+ever spoken the old field name — so the rename is not a compatibility event. `PROTOCOL` stays
+**5** and the version stays **0.5.0**; only the `Config.PROTOCOL` / `relay.js` comments record
+that the field is `fast`.
+
+**Bug it closes.** The §7 item struck above. Bike pace had never been on the wire, from the
+mod's first version: a remote cyclist's avatar walked at 16 frames/tile while their real player
+covered tiles at 8, fell behind at ~3.75 tiles/s, and hit `RESYNC_DISTANCE` every couple of
+seconds — a despawn/respawn teleport pop for the length of the ride. A cyclist's presence now
+says `fast`, `Avatars:advance` paces them at `FAST_STEP_FRAMES`, and they stay in step with
+their own stream. The open item is closed.
+
+**Renames.** `Client.runningNow` → `fastNow`; wire/roster/hub field `running` → `fast`
+(`src/Wire.lua`, `src/Roster.lua:move`'s trailing arg, `src/Avatars.lua`, `src/Hub.lua`,
+`server/lib/relay.js`, `exports.avatarState`); `Config.RUN_STEP_FRAMES` → `FAST_STEP_FRAMES`.
+`RUN_DIVISOR` keeps its name — it is about the sprint divisor specifically, and the derived
+constant is what serves both paces.
+
+**Coercion.** Strict `== true` / `=== true` on every consumer now, including `Wire.presence`
+(which used the truthy form). Both hubs must answer the same for the same bytes, and Lua and JS
+disagree on `0` and `""`.

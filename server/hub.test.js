@@ -172,45 +172,47 @@ async function main() {
     bob.send('mmo.move', { map: 'PALLET', x: 7, y: 5, facing: 'right' });
     await ann.expect('mmo.move');
 
-    // ------- running
+    // ------- pace
     //
-    // Client-truth: only the sender knows whether B is held, so the hub's
-    // whole job is coercing whatever rides along and relaying it -- the same
-    // whitelist-and-coerce shape as `party` above.
+    // Client-truth: only the sender knows whether B is held or a bike is
+    // under them, so the hub's whole job is coercing whatever rides along
+    // and relaying it -- the same whitelist-and-coerce shape as `party`
+    // above. One flag for both, because a sprint and a bike are the same 8
+    // frames a tile.
 
-    bob.send('mmo.move', { map: 'PALLET', x: 8, y: 5, facing: 'right', running: true });
+    bob.send('mmo.move', { map: 'PALLET', x: 8, y: 5, facing: 'right', fast: true });
     const sprinting = await ann.expect('mmo.move');
-    ok(sprinting.running === true, 'a sprinting move broadcasts running: true');
+    ok(sprinting.fast === true, 'a fast move broadcasts fast: true');
 
     // the next move omits the field entirely -- an absent field is not a
     // literal true, so the strict rule reads it as walking, not "unchanged"
     bob.send('mmo.move', { map: 'PALLET', x: 9, y: 5, facing: 'right' });
     const walking = await ann.expect('mmo.move');
-    ok(walking.running === false, 'an absent field is broadcast as not running');
+    ok(walking.fast === false, 'an absent field is broadcast as walking pace');
 
-    // strict: only a literal boolean true is running. A truthy junk value is
+    // strict: only a literal boolean true is fast. A truthy junk value is
     // not trusted -- and it must not be, because the same bytes reaching the
     // in-game Lua hub have to produce the same broadcast, and Lua and JS
     // truthiness part ways on exactly this kind of value.
-    bob.send('mmo.move', { map: 'PALLET', x: 10, y: 5, facing: 'right', running: 'yes' });
+    bob.send('mmo.move', { map: 'PALLET', x: 10, y: 5, facing: 'right', fast: 'yes' });
     const junk = await ann.expect('mmo.move');
-    ok(junk.running === false, 'a junk value is never trusted as running');
-    ok(typeof junk.running === 'boolean', 'and is never echoed back raw');
+    ok(junk.fast === false, 'a junk value is never trusted as fast');
+    ok(typeof junk.fast === 'boolean', 'and is never echoed back raw');
 
-    // leave bob running, so the welcome-roster snapshot below has something
-    // to report
-    bob.send('mmo.move', { map: 'PALLET', x: 10, y: 5, facing: 'right', running: true });
+    // leave bob moving fast, so the welcome-roster snapshot below has
+    // something to report
+    bob.send('mmo.move', { map: 'PALLET', x: 10, y: 5, facing: 'right', fast: true });
     await ann.expect('mmo.move');
 
     // a fresh player's welcome roster is built from presenceOf same as any
-    // broadcast, so a sprinting player already on the map should show it
+    // broadcast, so a player already crossing the map fast should show it
     const dan = new Client(PORT);
     await dan.ready();
     dan.send('mmo.hello', { proto: PROTOCOL, name: 'DAN', map: 'PALLET', x: 1, y: 1 });
     const danWelcome = await dan.expect('mmo.welcome');
     const bobRow = danWelcome.players.find((p) => p.name === 'BOB');
-    ok(!!bobRow, 'the roster snapshot includes the sprinting player');
-    ok(bobRow.running === true, 'and its running flag');
+    ok(!!bobRow, 'the roster snapshot includes the fast-moving player');
+    ok(bobRow.fast === true, 'and its pace flag');
     dan.close();
     // consumed here, not left in ann's inbox, where the party teardown much
     // later expects the very next mmo.part to be CAL's departure
