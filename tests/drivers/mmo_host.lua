@@ -550,6 +550,20 @@ return function(game)
     U.shot(game, SHOT_DIR .. "/host-after-battle.png")
     H.signal("host_battle_done")
 
+    -- ------- the battle was ranked, so the ranking moved
+    --
+    -- Both sides report how it ended and the hub scores it only when the two
+    -- agree, so this is the one place the whole ranked path -- report, agree,
+    -- settle, broadcast -- is exercised against a real battle rather than a
+    -- fabricated result.
+    H.closeToOverworld(game)
+    H.rankAfterBattle(game, exports, check)
+    if H.openMmo(game) then
+      U.wait(25)
+      H.shotRank(game, SHOT_DIR .. "/host-rank.png", check)
+    end
+    H.closeToOverworld(game)
+
     -- ------- 7. the address stays re-viewable for as long as the game is up
     --
     -- It is read out once when hosting starts and then scrolls away, so the

@@ -269,6 +269,12 @@ return function(game)
         tostring(H.top(game) and (H.top(game).title or "?")))
   end
   check(exports.isHosting() == false, "and is not the host")
+  -- A first visit claims this trainer name and is handed the ticket to come
+  -- back with; the reconnect at the end of the run is where that ticket is
+  -- actually put to the test.
+  if connected then
+    check(exports.isRanked(), "and is scored under this trainer name")
+  end
   if not connected then
     log("RESULT " .. failures .. " failure(s)")
     return
@@ -525,6 +531,19 @@ return function(game)
         U.shot(game, SHOT_DIR .. "/join-after-battle.png")
         H.await(game, "host_battle_done")
 
+        -- ------- and the ranking moved with it
+        --
+        -- The guest sees the same settlement the host does: whoever won,
+        -- the hub told both sides, and the leaderboard has the winner on
+        -- it. Which of the two it is, is the engine's business.
+        H.closeToOverworld(game)
+        H.rankAfterBattle(game, exports, check)
+        if H.openMmo(game) then
+          U.wait(25)
+          H.shotRank(game, SHOT_DIR .. "/join-rank.png", check)
+        end
+        H.closeToOverworld(game)
+
         -- ------- 7. leave the game and keep playing
         --
         -- Walking out of someone else's game is not quitting: the save,
@@ -546,6 +565,14 @@ return function(game)
             U.wait(25)
           end
         end
+        -- Read *before* the LEAVE, and that is the whole point of where it
+        -- sits: disconnecting clears the rating off this player's own screen
+        -- deliberately -- a rating is a fact about a hub, and there is no hub
+        -- to have one on once you have left -- so a copy taken afterwards is
+        -- always zero and would compare a rejoining player against nothing.
+        local pointsBefore = exports.points()
+        log("points while still in the game:", tostring(pointsBefore))
+
         if opened and H.selectLabel(game, "LEAVE") then
           H.drivePrompts(game, function()
             return not exports.isConnected()
@@ -580,6 +607,48 @@ return function(game)
           check(H.playerSheet(game) == ownSheet,
                 "and back in their own trainer, not the hub character")
           U.shot(game, SHOT_DIR .. "/join-after-leaving.png")
+
+          -- ------- 8. and back again, as the same player
+          --
+          -- The claim ticket, end to end and through the real menus, which
+          -- is the only place it can be seen working.
+          --
+          -- A rating is filed under a trainer name, so the hub minted a
+          -- secret the first time it saw this one, sent it once in the
+          -- welcome, and kept only its hash. Every link after that lives in
+          -- a different file: the client had to store it under the address
+          -- it dialled, read it back for the *same* address, put it on the
+          -- next hello, and the hub had to match it against a digest it
+          -- loaded rather than the token it minted.
+          --
+          -- Break any one of those and nothing errors -- the player is
+          -- simply not scored any more, quietly, under their own name. So
+          -- what is asserted is `isRanked` on the *second* connection: the
+          -- name is claimed by then, and the only thing that can produce a
+          -- true there is a ticket that survived the whole round trip.
+          check(exports.points() == 0,
+                "leaving takes the rating off this player's own screen")
+
+          if H.rejoin(game, exports, joinCode, check, log) then
+            check(exports.isRanked(),
+                  "reconnecting under a claimed name is recognised as the "
+                  .. "same player -- the ticket made the round trip")
+            check(exports.points() == pointsBefore,
+                  ("and the rating came back with them (%s)")
+                    :format(tostring(exports.points())))
+            U.shot(game, SHOT_DIR .. "/join-reconnected.png")
+
+            -- ...and out again, so the host's own teardown checks see the
+            -- roster empty exactly as they did before this leg existed.
+            H.closeToOverworld(game)
+            if H.openMmo(game) and H.selectLabel(game, "LEAVE") then
+              H.drivePrompts(game, function()
+                return not exports.isConnected()
+              end, 60)
+            end
+            check(not exports.isConnected(), "and left again cleanly")
+            H.closeToOverworld(game)
+          end
         else
           check(false, "no LEAVE row while connected as a guest")
         end

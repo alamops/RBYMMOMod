@@ -46,7 +46,10 @@ const fs = require('node:fs');
 const net = require('node:net');
 const process = require('node:process');
 
+const path = require('node:path');
+
 const { Relay, parseLine } = require('./relay.js');
+const { Board } = require('./rank.js');
 const { Limits, normalizeIp } = require('./limits.js');
 const {
   save: saveConfig,
@@ -82,6 +85,19 @@ const CONNECTION_SLACK = 8;
 // once costs one write; short enough that a kill -9 loses at most a second
 // of counting.
 const CREDENTIAL_SAVE_INTERVAL_MS = 1000;
+
+// The leaderboard file, beside config.json, and how long a run of battles
+// may accumulate before it reaches the disk.
+//
+// A file of its own rather than a section of config.json, for two reasons
+// that both come down to ownership: config.json is a file a *host* edits and
+// the CLI rewrites wholesale (`invite`, `ban`), so a hub writing ratings
+// into it would race the host's own edits; and ratings are state, not
+// configuration -- deleting this file resets the season and changes nothing
+// about how the hub runs. Same debounce as the credential counts, and for
+// the same reason: a player must never be waiting on a filesystem.
+const RANKING_FILENAME = 'ranking.json';
+const RANKING_SAVE_INTERVAL_MS = 1000;
 
 // How long a refused socket may sit between its goodbye and its destruction.
 // It is invisible to limits.js on purpose (charging a refusal would let a
@@ -413,9 +429,39 @@ function start(options = {}) {
     },
   };
 
+  /*
+   * The season, loaded from beside the config file.
+   *
+   * A hub that forgot every rating when it restarted would not be a ranking,
+   * so this is read once at start and written back (debounced) whenever a
+   * battle moves somebody. A file that is missing is a fresh season, which
+   * is the ordinary first run; a file that is corrupt is *named* and then
+   * treated as a fresh season, because refusing to start would take a whole
+   * hub off the air over a leaderboard.
+   */
+  const rankingPath = configPath
+    ? path.join(path.dirname(configPath), RANKING_FILENAME) : null;
+  const board = new Board();
+  if (rankingPath) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(rankingPath, 'utf8'));
+      board.import(Array.isArray(raw) ? raw : raw && raw.players);
+      log.info(`loaded ${board.export().length} ranked player(s) from ` +
+        `${safe(rankingPath)}`);
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') {
+        log.error(`could not read ${safe(rankingPath)} (${safe(err.message)}); ` +
+          'starting from an empty ranking. Move the file aside if you want to ' +
+          'keep it, or delete it to silence this.');
+      }
+    }
+  }
+
   const relay = new Relay({
     maxPlayers: config.maxPlayers,
     chatIntervalMs: config.limits && config.limits.chatIntervalMs,
+    board,
+    onRankChange: () => noteRankChange(),
     // Not a config.json setting: `protocol` is an embedding/test seam the
     // schema deliberately does not know about, so it is read from the object
     // as given rather than from the validated copy validate() pruned it out of.
@@ -446,6 +492,8 @@ function start(options = {}) {
   let stopping = false;
   let creditTimer = null;
   let creditsDirty = false;
+  let rankTimer = null;
+  let rankDirty = false;
 
   // -------------------------------------------------------- use counting
 
@@ -495,6 +543,50 @@ function start(options = {}) {
       // is still authoritative for this run, so the limit still holds; it
       // just will not survive a restart.
       log.error(`could not record credential use in ${safe(configPath)}: ` +
+        `${safe(err.message)}`);
+    }
+  }
+
+  // ------------------------------------------------------------ the season
+
+  /*
+   * A battle moved somebody's rating. The board is already correct in
+   * memory -- that happened on the connection's own path, inside the relay
+   * -- and all that is left is getting it onto the disk, which is deferred
+   * and coalesced for the same reason the credential counts are: a tournament
+   * running through a hub must never be waiting on a filesystem. The timer
+   * is unref'd, so a pending write can never be why the process stays up, and
+   * close() flushes so an orderly shutdown loses nothing.
+   */
+  function noteRankChange() {
+    if (!rankingPath) return;      // an embedded hub keeps its season in RAM
+    rankDirty = true;
+    if (rankTimer) return;
+    rankTimer = setTimeout(flushRanking, RANKING_SAVE_INTERVAL_MS);
+    rankTimer.unref();
+  }
+
+  function flushRanking() {
+    if (rankTimer) {
+      clearTimeout(rankTimer);
+      rankTimer = null;
+    }
+    if (!rankDirty || !rankingPath) return;
+    rankDirty = false;
+    try {
+      // Written whole and then renamed over the old file, so a hub killed
+      // mid-write leaves the previous season intact rather than half a JSON
+      // document that will not parse on the way back up.
+      const temporary = `${rankingPath}.tmp`;
+      fs.writeFileSync(temporary,
+        `${JSON.stringify({ version: 1, players: board.export() }, null, 2)}\n`,
+        { mode: 0o600 });
+      fs.renameSync(temporary, rankingPath);
+    } catch (err) {
+      // A full disk, a read-only mount, a volume that went away. None of
+      // those is a reason to stop scoring battles: the board in memory is
+      // still authoritative for this run, it just will not survive a restart.
+      log.error(`could not save the ranking to ${safe(rankingPath)}: ` +
         `${safe(err.message)}`);
     }
   }
@@ -856,8 +948,10 @@ function start(options = {}) {
     clearInterval(sweeper);
     detach();
     // Before anything else: a use charged in the last second is a use, and
-    // losing it on a clean shutdown would hand a spent invite back out.
+    // losing it on a clean shutdown would hand a spent invite back out. The
+    // same goes for a battle somebody won a moment ago.
     flushCredentials();
+    flushRanking();
 
     // Started here rather than after the sockets are gone: undoing a port
     // mapping and saying goodbye to the players are independent, and shutdown
@@ -986,6 +1080,9 @@ function start(options = {}) {
         host: boundHost,
         port: boundPort,
         configPath,
+        // where the season is kept, so a caller (the CLI, a suite) can say
+        // which file it is talking about rather than re-deriving the path
+        rankingPath,
         relay,
         limits,
         close,
