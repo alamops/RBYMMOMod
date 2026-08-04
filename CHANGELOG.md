@@ -4,7 +4,7 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [0.3.0] - 2026-08-03
+## [0.4.0] - 2026-08-04
 
 ### Added
 
@@ -86,16 +86,16 @@ here must match `manifest.version`.
 
 ### Changed
 
-- **`PROTOCOL` 2 → 3**, in `src/Config.lua` and `server/lib/relay.js`
+- **`PROTOCOL` 3 → 4**, in `src/Config.lua` and `server/lib/relay.js`
   together. Nothing was removed and an old client still parses everything a
-  new hub sends, so the breaking direction is the other one: a new client on
-  an old hub would report its results into silence and open a `RANK` screen
-  that never fills, forever, with nothing on screen to act on. A refusal
-  naming both versions is the better failure. The Node suites now read
-  `PROTOCOL` from `relay.js` rather than each carrying a hardcoded `2`.
-- **`server/package.json` is 0.3.0**, which is also the version `manifest.json`
-  carries. The two had been apart since 0.2.2 — `server/config.test.js`
-  asserts they match, and had been failing on that alone.
+  new hub sends, so the breaking direction is the other one: a protocol-3 hub
+  has never heard of a battle result or a leaderboard request, so a newer
+  client would report every match into silence and open a `RANK` screen that
+  never fills, forever, with nothing on screen to act on. A refusal naming
+  both versions is the better failure — the same reasoning parties moved the
+  number for one version earlier.
+- **`server/package.json` is 0.4.0**, which is also the version
+  `manifest.json` carries — `server/config.test.js` asserts they match.
 - **The end-to-end run now leaves and comes back.** The claim ticket is four
   files deep — the client stores it under the address it dialled, reads it
   back for that same address, puts it on the next hello, and the hub matches
@@ -108,6 +108,76 @@ here must match `manifest.version`.
 - **Screenshots recaptured out of the end-to-end runs**, the way the rest of
   them are: `mmo-menu.png` (there is a `RANK` row now), `trainer-card.png`
   and `my-profile.png` (both carry the score), plus `rank.png`, which is new.
+
+## [0.3.0] - 2026-08-03
+
+#### Added
+- **Parties.** You and one friend, agreed to explicitly and visible from
+  everywhere: on the **TOWN MAP** their character stands at the city they are
+  actually in with their nickname over it, in the world their nameplate
+  carries a leading `▶` so you can pick them out of a crowd, the `PLAYERS`
+  list marks them `PARTY`, and a new `PARTY` row on the MMO menu
+  holds the members list, a chat scope that reaches them wherever they are,
+  and the way out. Two members is the whole design rather than a first step
+  towards six — the rules that make it feel solid all follow from the pair,
+  and `Config.PARTY_MAX` argues that out where the number is.
+- **`INVITE`, on the menu you already get by walking up to somebody and
+  pressing A** (and from `PLAYERS`, which opens the same menu). The row is
+  present only when a party could actually be formed — neither of you
+  already in one — because the hub would refuse it otherwise, and a button
+  whose usual answer is "no" is worse than no button.
+- **Your party member on the TOWN MAP.** Open the full Kanto map and their
+  character is standing at the city they are in, nickname above it, moving as
+  they travel. The overworld can only ever show the room you are in; this is
+  the screen that answers *where are they*, and it already existed — the mod
+  reads the screen's own `mapId → cell` index, so a member indoors shows at
+  the town the building is in and a map with no square on the map places
+  nobody rather than guessing. Party members only: every player on a busy hub
+  drawn at once would bury Kanto under characters. The Pokédex `AREA` view is
+  the same screen class and is deliberately left alone — it is asking a
+  different question — while the `FLY` picker is not, because knowing where
+  your friend is while choosing where to go is the point.
+- **A `party` chat scope.** No radius and no name to type: it reaches the
+  other member wherever they are in the world, is tagged `[P]` in the log,
+  and bubbles over their head the way `NEARBY` does. That is the same rule
+  and not an exception to it — a bubble is only drawn in the game of
+  somebody who received the line, and a party line goes to the party alone.
+- **The members list opens a trainer card, including your own.** The roster
+  is deliberately every player *but* you, so `Client.ownCard` builds yours
+  from the save rather than looking it up.
+- **`Overlay:state()` now reports the nameplate text each frame committed**,
+  not just which drawing path it took, so the two-instance driver can assert
+  what a plate actually says instead of inferring it from a screenshot — and
+  can check every glyph of it against the real extracted charmap.
+  That check earned itself immediately. The party marker started life as a
+  `*`, and **the font has no asterisk**: `Font.draw` draws nothing for an
+  unmapped character while `Font.width` still advances eight pixels for it,
+  so it rendered as a plate one glyph too wide with a blank hole at the
+  front, and passed a full end-to-end run before anyone looked at the
+  pixels. It is `▶` now — the game's own cursor glyph, which the extracted
+  font genuinely carries, and which costs one glyph of plate where brackets
+  cost two. The guard stays: the trap belongs to anything that ever reaches
+  a plate. It is also three bytes of UTF-8, which turned up a byte-counting
+  width cap in the corner-list fallback that had been quietly wrong for as
+  long as every name was ASCII; it cuts on glyph boundaries now.
+
+### Changed
+
+- **`PROTOCOL` is 3.** Nothing was removed, so an older client's messages
+  would all still parse — but the failure that mattered runs the other way:
+  against a protocol-2 hub an invite and a party chat line are a type and a
+  scope that hub has never heard of, and its handler table answers an unknown
+  type with silence. A player pressing `INVITE` and watching nothing happen,
+  forever, is a worse sentence than a refusal that names both versions. Hub
+  and mod must be updated together.
+- **Presence carries whether a player is in a party**, never which one. It is
+  the only part anyone outside that party needs — it is what gates their
+  `INVITE` row — and a party id on every presence would let any client in the
+  game map out who is travelling with whom.
+- **Either member leaving ends the party for both.** At two people there is
+  no party left to continue, and a party of one that still offered a members
+  list and a chat scope with nowhere to send would be worse than none. The
+  same is true of a member who disconnects.
 
 ## [0.2.5] - 2026-08-03
 

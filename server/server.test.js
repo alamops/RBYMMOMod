@@ -37,7 +37,9 @@ const { spawn } = require('child_process');
 const assert = require('assert');
 
 const { start } = require('./lib/server.js');
-// the dialect the hub speaks today, named rather than hardcoded
+// Read from the relay rather than typed in, so a protocol bump is one edit
+// in one file and not a hunt through two suites for the greeting that still
+// says the old number.
 const { PROTOCOL } = require('./lib/relay.js');
 
 const CHILD_PORT = 8801 + (process.pid % 200); // clear of hub.test.js's 7801-8002

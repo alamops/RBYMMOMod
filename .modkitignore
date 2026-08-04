@@ -107,3 +107,23 @@ docs/screenshots/host-address.png
 docs/screenshots/join-address.png
 docs/screenshots/join-passcode.png
 docs/screenshots/join-connected.png
+#
+# The party, captured by tests/drivers/run-hub-e2e.sh. party-map.png is a
+# composited overworld frame like the ones above and party-townmap.png is
+# the extracted Kanto map with a character drawn on it, which is ROM art
+# twice over; party-members.png is a plain list menu with no map under it.
+# All three are listed anyway, because the rule this block enforces is the
+# file's and not the linter's, and a screenshot that is safe today stops
+# being safe the moment somebody recaptures it standing somewhere else.
+docs/screenshots/party-map.png
+docs/screenshots/party-townmap.png
+docs/screenshots/party-members.png
+#
+# my-profile.png arrived on main without a line here, and `pack` duly put it
+# in the archive -- 45 files instead of 44, with a composited frame inside.
+# Neither side of the merge could see that on its own: lint has nothing to
+# say about a whole frame (see the note above), and the count only looks
+# wrong once both branches' screenshots are in one tree. It is the trap this
+# block is for, so the fix belongs with the rest of the list rather than in a
+# follow-up.
+docs/screenshots/my-profile.png

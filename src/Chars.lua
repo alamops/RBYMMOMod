@@ -93,4 +93,48 @@ function M.resolve(id)
   return Config.DEFAULT_SPRITE
 end
 
+-- ------- the character's front-facing pose, as a drawable
+--
+-- Not a battle pic: those exist only for trainer *classes*, so most of the
+-- 36 characters have none.  Every character has an overworld sheet --
+-- 16x96, six 16x16 frames, the first being stand-down
+-- (src/render/SpriteRenderer.lua) -- which is the front-facing pose and the
+-- one everybody has.
+--
+-- Lives here rather than beside either of its callers because there are now
+-- two: the trainer card draws it as a portrait, and the town map draws it at
+-- a party member's city.  Two copies of a cache would mean two copies of the
+-- image, and the second caller is a per-frame draw.
+--
+-- Cached per sheet path, including the failures: a missing sheet is
+-- remembered as `false` so a broken path is not retried on every frame.
+local FRONT_FRAME = { 0, 0, 16, 16 }
+local sheets = {}
+
+function M.portrait(spriteId)
+  local registry = mod.content and mod.content.sprites
+  local ok, record = pcall(function() return registry and registry:get(spriteId) end)
+  local path = ok and type(record) == "table" and record.image or nil
+  if type(path) ~= "string" then return nil end
+
+  local entry = sheets[path]
+  if entry == nil then
+    local loaded, img = pcall(love.graphics.newImage, path)
+    if loaded and img then
+      entry = {
+        image = img,
+        quad = love.graphics.newQuad(FRONT_FRAME[1], FRONT_FRAME[2],
+                                     FRONT_FRAME[3], FRONT_FRAME[4],
+                                     img:getDimensions()),
+      }
+    else
+      entry = false
+    end
+    sheets[path] = entry
+  end
+  return entry or nil
+end
+
+M.FRONT_FRAME = FRONT_FRAME
+
 return M
