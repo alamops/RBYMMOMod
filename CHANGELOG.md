@@ -4,6 +4,59 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.2.3] - 2026-08-03
+
+### Added
+
+- **`MY PROFILE` on the MMO menu.** Every other trainer's card was one A
+  press away and your own was nowhere, so the one card you could not check
+  was the one being read about you. It opens the same screen the `PROFILE`
+  row opens for a peer, with the same rows at the same heights — what you
+  look at here is literally what they see. It sits under `SAY`, so the rows
+  people already reach for by muscle memory have not moved.
+- **A `MONEY` row, on your own card only.** It is on the vanilla trainer
+  card, and the reason it is absent from a peer's — somebody else's wallet
+  is not this card's business — does not apply to your own. `Wire.profile`
+  still refuses to carry money, so it cannot arrive from the network: a card
+  holding a money value is necessarily the local one, which is what the
+  screen keys off.
+
+### Changed
+
+- **`docs/screenshots/mmo-menu.png` recaptured, and `my-profile.png` added.**
+  Both out of the end-to-end run, the way the rest of them are, so they are
+  the build rather than a drawing of it. The menu shot had gone stale the
+  moment the row landed — and it shows the box growing to fit `MY PROFILE`
+  and nudging itself back on-screen, which is `Menu` sizing itself, not a
+  layout that was hand-placed.
+
+### Fixed
+
+- **The trainer card drew names straight through the portrait.** `LOOK/` plus
+  a character name was rendered at the same height as the art, where only 12
+  characters fit, so anyone wearing one of the six longer characters was
+  shown as `LOOK/COOLTRAI` with the rest under their own picture. `NAME/`
+  had the same fault and needed a 9-character name to show it. Both rows are
+  ones the *player* fills in, so neither can sit beside the art: the portrait
+  now sits beside `IDNo` and `TIME`, the only two rows whose width their
+  format strings bound. The character moved to a full-width row of its own
+  and lost the `LOOK/` prefix — at 17 characters the longest name in the
+  catalog *is* the whole row, so no prefix fits every case, and one that
+  appeared only on short names would change the card's shape per character.
+  Under the trainer's own name it reads the way the original prints a class
+  before one. Both cards change together, so they still match row for row.
+- **`TIME` on a trainer card always read `0:00`.** The card was built from
+  `save.playtime`, and the engine's field is `save.playTime` — so the value
+  was never there to send, and every peer's card claimed a brand-new file no
+  matter how long they had played. The camelCase key is now read, with the
+  old spelling still consulted so nothing that wrote it is discarded.
+- **`client:playerName(game)` and `client:profile(game)` lost their
+  argument.** Both were declared to take `game` directly while the menus call
+  them with a colon, which puts the module table in that slot. `playerName`
+  degraded to `PLAYER` for anyone who never opened the character creator,
+  instead of falling back to the save's trainer name. Both now use the same
+  `arg1` shim the rest of the module's entry points do.
+
 ## [0.2.2] - 2026-08-03
 
 ### Removed
