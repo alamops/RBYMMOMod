@@ -185,6 +185,16 @@ in a sentence the game already renders rather than failing silently.
 
 ### Fixed
 
+- **The address you type ran off the right of the screen.** `NamingScreen`
+  lays its typed line out as `maxLen` slots of 8px from a fixed x=56, which
+  fits the vanilla seven-character name and nothing longer. Every grid this
+  mod opens is longer: at 32 the line ran to 312 on a 160-wide screen, so
+  `192.168.1.20:7788` lost its port off the edge — the half a player most
+  needs to check — and what was left sat hard against the right side instead
+  of centred. Chat (16) overflowed too and a join code (12) stopped exactly on
+  the edge. The mod now repaints that one row on its own grids: as many slots
+  as fit between the margins, centred, showing the end of the line once it is
+  longer than the window. No other screen is touched.
 - **Silent sockets could lock everyone out of the hub.** `hub.js` registered a
   connection in its client table on accept, so the player cap counted peers
   that had never said `hello` — four of them held a four-player hub shut for
