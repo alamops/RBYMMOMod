@@ -33,6 +33,14 @@
 -- When it falls further behind than RESYNC_DISTANCE (a warp we never saw, a
 -- long stall), it is respawned rather than walked all the way.
 --
+-- A running player is the same arithmetic with the 16 halved. NPC:update
+-- reads `stepFrames or 16` fresh every frame, so the sixth field written
+-- below sets the pace of the step it starts: RUN_STEP_FRAMES while the
+-- roster says they are holding B, and nil -- back to the engine's own
+-- default -- the moment it says they are not. At 8 frames a tile a runner
+-- covers 0.133s per tile against a 0.125s presence interval, still about one
+-- update per tile, so nothing about the catch-up above needed rethinking.
+--
 -- What the mod API is missing is a "step this NPC" primitive on Handle --
 -- an upstream RFC, not something to fake with a cutscene queue.
 
@@ -212,12 +220,17 @@ function M:advance(av, player)
     return self:resync(player)
   end
 
-  -- The five fields NPC:update needs to animate a step itself.
+  -- The five fields NPC:update needs to animate a step itself, plus the one
+  -- that decides how long it takes.
   npc.facing = dir
   npc.targetX, npc.targetY = tx, ty
   npc.moving = true
   npc.marching = false
   npc.progress = 0
+  -- Set per step rather than once, because the flag is per step: clearing it
+  -- to nil hands the pace back to NPC:update's own default instead of
+  -- leaving the avatar sprinting after its player stopped.
+  npc.stepFrames = player.running and Config.RUN_STEP_FRAMES or nil
   av.facing = dir
   return true
 end
