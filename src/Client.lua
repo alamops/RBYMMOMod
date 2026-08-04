@@ -601,7 +601,7 @@ handlers[Wire.CHALLENGE] = function(game, msg)
     -- `why` names the argument, never its value: the code does not go to the
     -- log, here or anywhere else
     mod.log:warn("could not answer the hub's challenge (%s) -- re-enter the "
-      .. "code from START > MMO > JOIN CODE", tostring(why))
+      .. "code from START > MMO > JOIN GAME", tostring(why))
     M.disconnect()
     ui:say("Couldn't answer\nthis game's code.")
     return
@@ -798,7 +798,9 @@ function M.install()
       min = Config.MIN_PLAYERS, max = Config.MAX_PLAYERS, step = 1 },
     { key = "hub", label = "JOIN", type = "text", default = Config.DEFAULT_HUB },
     -- The standing join code, so it can be seen and changed deliberately
-    -- rather than only when a hub happens to ask for it. A code typed for a
+    -- rather than only when a hub happens to ask for it -- and, since the
+    -- MMO menu no longer carries a JOIN CODE row of its own, the only place
+    -- a code is set without dialling something. A code typed for a
     -- particular hub is stored against that hub (see M.joinCode); this row
     -- is the fallback, and the one a player who only ever plays on one hub
     -- ever needs. maxLen so the manager's own naming screen -- which
