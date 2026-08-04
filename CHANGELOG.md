@@ -4,6 +4,26 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [Unreleased]
+
+### Fixed
+
+- **Leaving a game left you wearing the character you picked for it.** The
+  chosen look is re-worn whenever the world may have rebuilt the player, and
+  that path used to throw away the stashed trainer sheet first — but the
+  overworld hands back the *same* player object across an ordinary map
+  change, so what got stashed the second time was this mod's own renderer.
+  One doorway was enough: leaving then "restored" you to the hub character,
+  in your own single-player game, permanently. The original is now pinned to
+  the entity it was taken from, so re-wearing cannot overwrite it and a
+  player the engine genuinely rebuilt is left with its own sheet.
+- **A dropped connection never gave the trainer back at all.** A timeout, a
+  socket error or a hub hanging up tore down the roster and the avatars but
+  nothing else, so a player who was disconnected rather than leaving stayed
+  dressed as their hub character — and any trade session stayed open on a
+  socket that was gone. An unasked-for leave now runs the same teardown a
+  deliberate one does.
+
 ## [0.2.2] - 2026-08-03
 
 ### Removed

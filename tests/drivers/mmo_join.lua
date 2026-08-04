@@ -61,6 +61,13 @@ return function(game)
     return
   end
 
+  -- The trainer this player owns, taken before anything is dialled. Joining
+  -- swaps the live renderer for the chosen character and leaving has to put
+  -- this exact object back -- so it is held by identity from here to the
+  -- LEAVE check at the end of the run.
+  local ownSheet = H.playerSheet(game)
+  check(ownSheet ~= nil, "the player is drawn with something to begin with")
+
   -- The host writes its address once the listener is up; that file is the
   -- start gun. This side still dials the default 127.0.0.1:7788, because
   -- both instances are on one machine.
@@ -336,6 +343,13 @@ return function(game)
   log("said hello")
   U.wait(60)
 
+  -- Joining changes what *this* player sees too, not just what the host
+  -- sees. Checked before the map change below so the restore check at the
+  -- end cannot pass vacuously on a look that was never worn.
+  local wornSheet = H.playerSheet(game)
+  check(wornSheet ~= nil and wornSheet ~= ownSheet,
+        "joining put the chosen character on this player")
+
   -- ------- 1. leave the map and come back
 
   local home = mod_current(game)
@@ -348,6 +362,14 @@ return function(game)
   U.teleport(game, home.mapId, home.x, home.y, "down")
   U.wait(60)
   log("back on " .. tostring(home.mapId))
+
+  -- A map change re-wears the look, and the overworld usually hands back the
+  -- same player object when it does. That is where the trainer sheet used to
+  -- be lost: it was replaced with the mod's own renderer, and leaving then
+  -- "restored" the player to the character they picked for the hub. Still
+  -- wearing it here, and still able to get back, is the pair that says so.
+  check(H.playerSheet(game) ~= ownSheet,
+        "still wearing the chosen character after a map change")
   H.signal("guest_back_on_map")
 
   -- ------- 4. interact with the host, and get the trade/battle menu
@@ -551,6 +573,12 @@ return function(game)
                 and (after.x ~= before.x or after.y ~= before.y),
                 "and the world is still playable afterwards")
           check(#H.partySpecies(game) > 0, "with the party intact")
+          -- and as themselves. Walking out of someone else's game must not
+          -- leave this player wearing the character they picked for it --
+          -- the same object they were drawn with before dialling, not
+          -- merely something that is not the hub character.
+          check(H.playerSheet(game) == ownSheet,
+                "and back in their own trainer, not the hub character")
           U.shot(game, SHOT_DIR .. "/join-after-leaving.png")
         else
           check(false, "no LEAVE row while connected as a guest")

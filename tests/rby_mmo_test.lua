@@ -1825,4 +1825,108 @@ stubMod.log.warn = function() end
 
 end)()
 
+-- ------------------------------------------------------------------
+-- 9. Leaving gives the player their own trainer back
+-- ------------------------------------------------------------------
+--
+-- Wearing a hub character has to be undone on the way out, or a player who
+-- joins once is a Rocket grunt in their own single-player game forever.
+--
+-- The trap is that the overworld reuses one player object across map
+-- changes -- OverworldController:setMap calls Player.new only when it has
+-- none -- while this mod re-wears the look on every map.entered. Re-reading
+-- "the original" on each of those reads back the renderer the mod itself
+-- installed, so leaving restored the hub character. One door was enough to
+-- lose the real one, which is why the entity the original came from is
+-- pinned here alongside it.
+--
+-- Wrapped for scope, like section 8.
+
+;(function()
+
+local Client = need("Client")
+
+-- The real renderer needs a graphics context; the bookkeeping under test
+-- does not care what the object is, only which one is where.
+package.loaded["src.render.SpriteRenderer"] = {
+  new = function(record, kind) return { worn = record, kind = kind } end,
+}
+
+stubSprites.SPRITE_RED = { walker = true }
+stubSprites.SPRITE_ROCKET = { walker = true }
+stubSave.sprite = "SPRITE_ROCKET"
+eq(Client.spriteChoice(), "SPRITE_ROCKET", "the chosen character resolves")
+
+local overworld = { player = nil }
+stubMod.world = { overworld = function() return overworld end }
+
+local function newPlayer(name)
+  return { sprite = { vanilla = name } }
+end
+
+-- ------- one player object, walked through a door
+
+local red = newPlayer("red")
+overworld.player = red
+local redSheet = red.sprite
+
+check(Client.applyLook(), "joining wears the chosen character")
+check(red.sprite ~= redSheet, "which really does swap the live renderer")
+
+-- map.entered, twice, on the player object the overworld handed back
+check(Client.refreshLook(), "entering a map re-wears it")
+check(Client.refreshLook(), "and again, as a long session would")
+check(red.sprite ~= redSheet, "still wearing it")
+
+Client.restoreLook()
+eq(red.sprite, redSheet, "leaving gives the player their own trainer back")
+
+Client.restoreLook()
+eq(red.sprite, redSheet, "and leaving twice is not a second restore")
+
+-- ------- the same, through the client's own teardown
+--
+-- disconnect() is the one path both a deliberate leave and a dropped
+-- connection go through, so the restore is pinned on it and not only on
+-- restoreLook directly.
+
+check(Client.applyLook(), "wearing it again for the teardown")
+check(red.sprite ~= redSheet, "worn")
+Client.disconnect()
+eq(red.sprite, redSheet, "disconnecting puts the trainer back")
+
+-- ------- nothing worn, nothing to re-wear
+
+eq(Client.refreshLook(), false,
+   "a map change outside a game does not dress the player up")
+eq(red.sprite, redSheet, "and leaves the trainer alone")
+
+-- ------- a player the engine really did rebuild
+
+check(Client.applyLook(), "worn, and then the world rebuilds the player")
+local blue = newPlayer("blue")
+local blueSheet = blue.sprite
+overworld.player = blue
+
+-- the map that rebuilt the player re-wears on the new one, and the sheet it
+-- stashes is that one's own -- not the renderer left on the object that died
+check(Client.refreshLook(), "the rebuilt player wears the character")
+check(blue.sprite ~= blueSheet, "worn")
+Client.restoreLook()
+eq(blue.sprite, blueSheet, "and gets its own sheet back, not the old one's")
+
+-- and a restore aimed at an entity that is already gone stays its hand
+check(Client.applyLook(), "worn on the current player")
+local ghost = newPlayer("ghost")
+local ghostSheet = ghost.sprite
+overworld.player = ghost
+Client.restoreLook()
+eq(ghost.sprite, ghostSheet, "a player swapped in since is left exactly as it is")
+
+stubMod.world = nil
+stubSave.sprite = nil
+stubSprites.SPRITE_ROCKET = nil
+
+end)()
+
 T.finish("rby_mmo")
