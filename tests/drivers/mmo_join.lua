@@ -61,6 +61,13 @@ return function(game)
     return
   end
 
+  -- The trainer this player owns, taken before anything is dialled. Joining
+  -- swaps the live renderer for the chosen character and leaving has to put
+  -- this exact object back -- so it is held by identity from here to the
+  -- LEAVE check at the end of the run.
+  local ownSheet = H.playerSheet(game)
+  check(ownSheet ~= nil, "the player is drawn with something to begin with")
+
   -- The host writes its address once the listener is up; that file is the
   -- start gun. This side still dials the default 127.0.0.1:7788, because
   -- both instances are on one machine.
@@ -147,19 +154,27 @@ return function(game)
     check(typed and table.concat(naming.glyphs) == naming.default,
           "and the line reads back what was typed: "
             .. table.concat(naming.glyphs))
-    -- What is on the line is not always what is on the screen. NamingScreen
-    -- draws the field from x=56 in 8px cells, so 13 of them fit across a
-    -- 160px screen while this screen's maxLen is 32 -- "127.0.0.1:7788" is
-    -- 14 characters and loses its last one off the right edge. Logged rather
-    -- than asserted: it is a drawing bug in a screen this file does not own,
-    -- and turning it into a failure here would stop the run reporting on the
-    -- things it does own.
-    local VISIBLE_CELLS = 13
-    if #naming.default > VISIBLE_CELLS then
-      log(("WARN the address field draws %d cells but holds %d characters, so "
-        .. "%q shows as %q"):format(VISIBLE_CELLS, #naming.default,
-        naming.default, naming.default:sub(1, VISIBLE_CELLS)))
-    end
+    -- What is on the line has to be what is on the screen, which is not the
+    -- same claim. NamingScreen draws its field from a fixed x=56 in 8px
+    -- cells, so only 13 fit across a 160px screen while this screen's maxLen
+    -- is 32: "127.0.0.1:7788" is 14 characters and used to lose its last one
+    -- -- part of the port, the half a player most needs to check -- off the
+    -- right edge, with the rest pushed hard against that edge rather than
+    -- centred. src/Ui.lua repaints the row now (M.fieldLayout), so 18 cells
+    -- fit between the margins and this is a real check rather than the WARN
+    -- it was while the bug belonged to a screen nothing here owned.
+    --
+    -- The port, specifically, is what is asserted. "Everything fits" would
+    -- be the wrong claim: maxLen is 32 precisely so a hostname can be typed,
+    -- and "mybox.example.com:7788" is 22 -- longer than the window on
+    -- purpose. What the fix guarantees for *any* length is that the window
+    -- holds the end of the line, so the port never scrolls away.
+    local VISIBLE_CELLS = 18
+    local shown = naming.default:sub(-VISIBLE_CELLS)
+    local port = naming.default:match(":(%d+)$")
+    check(port ~= nil and shown:find(":" .. port, 1, true) ~= nil,
+          ("the port is on screen, not cut off the right edge: %q shows as %q")
+            :format(naming.default, shown))
     check(H.clearGrid(game, naming), "B erases it back to an empty line")
 
     -- The other thing this field takes, and the one that fits: a hostname.
@@ -328,6 +343,13 @@ return function(game)
   log("said hello")
   U.wait(60)
 
+  -- Joining changes what *this* player sees too, not just what the host
+  -- sees. Checked before the map change below so the restore check at the
+  -- end cannot pass vacuously on a look that was never worn.
+  local wornSheet = H.playerSheet(game)
+  check(wornSheet ~= nil and wornSheet ~= ownSheet,
+        "joining put the chosen character on this player")
+
   -- ------- 1. leave the map and come back
 
   local home = mod_current(game)
@@ -340,6 +362,14 @@ return function(game)
   U.teleport(game, home.mapId, home.x, home.y, "down")
   U.wait(60)
   log("back on " .. tostring(home.mapId))
+
+  -- A map change re-wears the look, and the overworld usually hands back the
+  -- same player object when it does. That is where the trainer sheet used to
+  -- be lost: it was replaced with the mod's own renderer, and leaving then
+  -- "restored" the player to the character they picked for the hub. Still
+  -- wearing it here, and still able to get back, is the pair that says so.
+  check(H.playerSheet(game) ~= ownSheet,
+        "still wearing the chosen character after a map change")
   H.signal("guest_back_on_map")
 
   -- ------- 4. interact with the host, and get the trade/battle menu
@@ -543,6 +573,12 @@ return function(game)
                 and (after.x ~= before.x or after.y ~= before.y),
                 "and the world is still playable afterwards")
           check(#H.partySpecies(game) > 0, "with the party intact")
+          -- and as themselves. Walking out of someone else's game must not
+          -- leave this player wearing the character they picked for it --
+          -- the same object they were drawn with before dialling, not
+          -- merely something that is not the hub character.
+          check(H.playerSheet(game) == ownSheet,
+                "and back in their own trainer, not the hub character")
           U.shot(game, SHOT_DIR .. "/join-after-leaving.png")
         else
           check(false, "no LEAVE row while connected as a guest")
