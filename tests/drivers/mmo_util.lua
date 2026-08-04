@@ -134,13 +134,54 @@ end
 -- Only answerable on a real dataset: the committed fixture font carries
 -- letters and digits alone, so a headless suite cannot tell drawable from
 -- not. Hence a driver helper rather than a unit test.
+--
+-- **Both sides of the merge wrote this helper independently**, after being
+-- bitten by the same silence -- main by "CHAT*" on the MMO menu, the party
+-- branch by a "*" nameplate marker. Git kept both, and Lua kept whichever
+-- was defined last, which is how two versions with *different return types*
+-- -- a comma-joined string and a list -- ended up one `==` away from a
+-- caller that could never pass. This is the one function, taking the better
+-- half of each:
+--
+--   * main's signature and return value, because that is the published one
+--     and `missing == ""` reads better than `#missing == 0` at a call site;
+--   * the branch's character extraction, because a span carries `from`/`to`
+--     into the source string and *not* the text it covers -- `span.text` is
+--     nil, so the other version named every offending character "?" and
+--     could not say which one was wrong;
+--   * the branch's not-loaded guard, because Font.split resolves nothing
+--     before Font.load has run: every span comes back code-less and an
+--     unguarded version calls every character of every string undrawable.
+--     In game the font is always loaded, so this only bites a standalone
+--     probe -- but a wall of false failures blaming the caller's text is
+--     worse than saying plainly that the font was not ready.
+local UNDRAWABLE_CONTROL = "A"
+
 function M.undrawable(game, text)
+  local subject = tostring(text or "")
+  if subject == "" then return "" end
   local ok, Font = pcall(require, "src.render.Font")
-  if not (ok and Font and Font.split) then return "" end
+  if not (ok and Font and Font.split) then return "?FONT-UNAVAILABLE" end
+
+  local function spansOf(s)
+    local got, spans = pcall(Font.split, s)
+    if got and type(spans) == "table" then return spans end
+    return nil
+  end
+
+  local control = spansOf(UNDRAWABLE_CONTROL)
+  if not (control and control[1] and control[1].code) then
+    return "?FONT-NOT-LOADED"
+  end
+
+  local spans = spansOf(subject)
+  if not spans then return "?FONT-SPLIT-FAILED" end
+
   local missing = {}
-  for _, span in ipairs(Font.split(tostring(text or "")) or {}) do
+  for _, span in ipairs(spans) do
     if span.code == nil then
-      missing[#missing + 1] = tostring(span.text or "?")
+      local char = subject:sub(span.from or 1, span.to or 0)
+      if char ~= " " and char ~= "" then missing[#missing + 1] = char end
     end
   end
   return table.concat(missing, ",")
@@ -551,6 +592,15 @@ local PHASE = {
   -- both sides repeat their lines until they hear the other's, in two scopes
   hub_a_chat             = 300,  -- 150 chat drive
   hub_b_chat             = 300,  -- the same
+  -- b waits on a walking the PLAYERS menu and picking INVITE
+  hub_a_party_asked      = 180,  -- menus
+  -- each waits on the other reaching the far side of the members screen:
+  -- forming the party, watching the flag land, and walking two menus
+  hub_a_party            = 300,  -- 90 forming + 60 flag + menus
+  hub_b_party            = 300,  -- the same
+  -- b presses LEAVE; a only watches, so its budget is the menus b walks
+  hub_a_partyleft        = 180,  -- menus + the confirm box
+  hub_b_partyleft        = 180,  -- the same
   -- b waits on a walking the PLAYERS menu, reading the card and asking
   hub_a_trade_asked      = 180,  -- menus + profile card
   -- each waits on the other's half of the trade

@@ -31,6 +31,13 @@ M.RESPOND       = "mmo.respond"
 M.RELAY         = "mmo.relay"
 M.SESSION_LEAVE = "mmo.session_leave"
 M.PING          = "mmo.ping"
+-- Parties.  PARTY_INVITE travels both ways, the way REQUEST does: the field
+-- set says which direction it is going (`to` outbound, `from` inbound), and
+-- one name for one idea is easier to follow across two hub implementations
+-- than a matched pair that has to be kept in step.
+M.PARTY_INVITE  = "mmo.party_invite"
+M.PARTY_RESPOND = "mmo.party_respond"
+M.PARTY_LEAVE   = "mmo.party_leave"
 -- the answer to a challenge: { response }, an HMAC of the nonce keyed by
 -- the join code.  The code itself never crosses the wire.
 M.AUTH          = "mmo.auth"
@@ -48,6 +55,13 @@ M.SESSION     = "mmo.session"
 M.SESSION_END = "mmo.session_end"
 M.ERROR       = "mmo.error"
 M.PONG        = "mmo.pong"
+-- The party you are now in, with everyone in it.  Sent whole rather than as
+-- a join delta: at two members the whole thing *is* the delta, and a client
+-- that rebuilds its list from one authoritative message can never end up
+-- holding a member the hub has already forgotten.
+M.PARTY         = "mmo.party"
+M.PARTY_END     = "mmo.party_end"
+M.PARTY_DECLINE = "mmo.party_decline"
 
 M.FACINGS = { up = true, down = true, left = true, right = true }
 M.KINDS = { trade = true, battle = true }
@@ -239,6 +253,38 @@ function M.profile(raw)
   }
 end
 
+-- One row of a party's members list: who they are, and nothing else.
+--
+-- Deliberately not a presence.  Where a member is standing changes several
+-- times a second and already arrives as mmo.move, so carrying a stale copy
+-- of it here would give the members screen a second, slower answer to a
+-- question the roster already answers -- and the two would visibly
+-- disagree.  Identity is the part that does not move.
+function M.member(raw)
+  if type(raw) ~= "table" then return nil end
+  local id = M.id(raw.id)
+  local name = M.name(raw.name)
+  if not (id and name) then return nil end
+  return { id = id, name = name }
+end
+
+-- The members of a party, in the order the hub listed them.  A list with a
+-- bad row in it is refused whole rather than delivered short: a party you
+-- are told has one member when it has two is worse than one you are told
+-- nothing about, because the screens would draw the wrong thing confidently.
+function M.members(raw)
+  if type(raw) ~= "table" then return nil end
+  local out = {}
+  for _, entry in ipairs(raw) do
+    local member = M.member(entry)
+    if not member then return nil end
+    if #out >= Config.PARTY_MAX then return nil end
+    out[#out + 1] = member
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
 -- Presence as it appears in a welcome roster, a join, or a move.  Position
 -- is optional so a player sitting in a menu or a battle can still be listed
 -- without claiming a cell in the world.
@@ -256,6 +302,11 @@ function M.presence(raw)
     y = M.int(raw.y, 0, 4096),
     facing = M.facing(raw.facing) or "down",
     busy = raw.busy and true or false,
+    -- Whether they are already in *a* party, never which one.  It is the
+    -- only thing anyone outside that party needs -- it decides whether the
+    -- INVITE row is offered -- and a party id on every presence would let
+    -- any client in the game map out who is travelling with whom.
+    party = raw.party and true or false,
     profile = M.profile(raw.profile),
   }
   if not (out.map and out.x and out.y) then

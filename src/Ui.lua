@@ -29,6 +29,8 @@ local SCREEN = {
   ROSTER   = "RbyMmoRoster",
   ACTIONS  = "RbyMmoActions",
   CHATLOG  = "RbyMmoChatLog",
+  PARTY    = "RbyMmoParty",
+  MEMBERS  = "RbyMmoPartyList",
   SCOPE    = "RbyMmoScope",
   COMPOSE  = "RbyMmoCompose",
   PICK     = "RbyMmoPick",
@@ -174,37 +176,12 @@ Card.isOpaque = true
 
 -- The character's own portrait, taken from the overworld sheet.
 --
--- Not a battle pic: those exist only for trainer *classes*, so most of the
--- 36 characters have none and the card would be blank for them. Every
--- character has an overworld sheet -- 16x96, six 16x16 frames, the first
--- being stand-down (src/render/SpriteRenderer.lua) -- which is the
--- front-facing pose, and the one everybody has.
-local FRONT_FRAME = { 0, 0, 16, 16 }
-local sheets = {}
-
-local function portrait(spriteId)
-  local registry = mod.content and mod.content.sprites
-  local record = registry and registry:get(spriteId)
-  local path = record and record.image
-  if type(path) ~= "string" then return nil end
-
-  local entry = sheets[path]
-  if entry == nil then
-    local ok, img = pcall(love.graphics.newImage, path)
-    if ok and img then
-      entry = {
-        image = img,
-        quad = love.graphics.newQuad(FRONT_FRAME[1], FRONT_FRAME[2],
-                                     FRONT_FRAME[3], FRONT_FRAME[4],
-                                     img:getDimensions()),
-      }
-    else
-      entry = false      -- remembered, so a missing sheet is not retried
-    end
-    sheets[path] = entry
-  end
-  return entry or nil
-end
+-- Chars.portrait owns the loading and the cache, because the town map draws
+-- the same front-facing pose at a party member's city and a second copy
+-- would mean a second copy of every sheet -- on a path that draws each
+-- frame.  The reasoning for why it is the overworld sheet and not a battle
+-- pic lives there with it.
+local portrait = Chars.portrait
 
 function Card.new(game, player, onCancel)
   return setmetatable({ game = game, player = player, onCancel = onCancel }, Card)
@@ -448,10 +425,22 @@ function M:install()
           label = "SAY",
           onSelect = function() mod.ui.push(game, SCREEN.SCOPE) end,
         }
+        -- Its own row rather than a corner of PLAYERS: a party is a standing
+        -- arrangement with its own chat, its own list and its own way out,
+        -- and burying all three under the roster would make the one thing
+        -- you check most often the thing you have to go looking for.
+        items[#items + 1] = {
+          label = "PARTY",
+          onSelect = function() mod.ui.push(game, SCREEN.PARTY) end,
+        }
         -- The other side of PLAYERS: that one shows you everybody else's
         -- card, and until now there was no way to see the one they are
         -- reading about you. Same screen, same rows -- so what you check
         -- here is what they see.
+        --
+        -- Last of the four, and after PARTY, because the rows read outwards
+        -- to inwards: everybody on the hub, then talking to them, then the
+        -- one person you are travelling with, then yourself.
         items[#items + 1] = {
           label = "MY PROFILE",
           onSelect = function()
@@ -595,6 +584,14 @@ function M:install()
   -- to look up, by design (Roster:isSelf).
   screens:register(SCREEN.PROFILE, { new = function(game, opts)
     opts = opts or {}
+    -- Both sides of the merge added opts.own for the same reason -- the
+    -- roster is everyone *but* you, so your own card has to be built rather
+    -- than looked up -- and reached it from opposite ends: MY PROFILE on the
+    -- menu, and the party members list, which lists both of you. One
+    -- implementation, and it is main's early return: the branch version
+    -- folded the two into a single expression, where an ownCard that came
+    -- back nil would fall through to "They just went offline." about
+    -- yourself.
     if opts.own then
       return Card.new(game, ctx.client:ownCard(game), opts.onCancel)
     end
@@ -987,6 +984,107 @@ function M:install()
     end, true)
   end })
 
+  -- ------- your party
+
+  -- What the PARTY row opens.  Two different screens behind one label,
+  -- because "party" means two different things depending on whether you are
+  -- in one, and a menu of greyed-out rows would be the worse answer: it
+  -- would say what you cannot do without saying what you can.
+  screens:register(SCREEN.PARTY, { new = function(game)
+    local party = ctx.party
+    if not party:has() then
+      -- Not a dead end.  The sentence says how a party starts and then hands
+      -- over the list to start one from, so the row leads somewhere even
+      -- when there is nothing to show yet.
+      return mod.ui.TextBox.new(game,
+        "No party yet.\nPick a player to\ninvite.", function()
+          mod.ui.push(game, SCREEN.ROSTER)
+        end)
+    end
+
+    local items = {
+      {
+        label = "MEMBERS",
+        onSelect = function() mod.ui.push(game, SCREEN.MEMBERS) end,
+      },
+      {
+        label = "SAY",
+        onSelect = function()
+          mod.ui.push(game, SCREEN.COMPOSE, { scope = "party" })
+        end,
+      },
+      {
+        label = "LEAVE",
+        onSelect = function()
+          -- Asked first, and the question names them: leaving ends the party
+          -- for both of you, which is not what "leave" usually implies and
+          -- is not something to discover by pressing A.
+          local name = party:partnerName() or "your friend"
+          mod.ui.push(game, SCREEN.CONFIRM, {
+            text = ("Leave the party\nwith %s?"):format(name),
+            onChoose = function(yes)
+              if not yes then return mod.ui.push(game, SCREEN.PARTY) end
+              party:leave()
+              mod.ui.push(game, SCREEN.TEXT, { text = "You left the party." })
+            end,
+          })
+        end,
+      },
+    }
+    return mod.ui.Menu.new(game, items, {
+      tx = 9, ty = 0, tw = 11,
+      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+    })
+  end })
+
+  -- Who is in it, where they are, and their card.
+  --
+  -- Position is read from the roster rather than from the party, which holds
+  -- names only: the roster is already being updated several times a second
+  -- by mmo.move, and a second copy would be a slower answer to the same
+  -- question that visibly disagreed with the map.
+  screens:register(SCREEN.MEMBERS, { new = function(game)
+    local party = ctx.party
+    local current = World.current()
+    local items = {}
+    for _, member in ipairs(party:list()) do
+      local mine, right = party:isSelf(member.id), nil
+      if mine then
+        right = "YOU"
+      else
+        local player = ctx.roster:get(member.id)
+        if not player then
+          -- On the list but not on the roster: they dropped a moment ago and
+          -- the hub's mmo.party_end has not landed yet.
+          right = "GONE"
+        elseif player.busy then
+          right = "BUSY"
+        elseif current and player.map == current.mapId then
+          right = "HERE"
+        else
+          right = "AWAY"
+        end
+      end
+      items[#items + 1] = {
+        label = member.name, right = right, value = member.id, mine = mine,
+      }
+    end
+    if #items == 0 then
+      items[#items + 1] = { label = "Nobody." }
+    end
+    return mod.ui.ListMenu.new(game, "PARTY", items, {
+      onChoose = function(item, menu)
+        if not item.value then return end
+        menu:close()
+        local back = function() mod.ui.push(game, SCREEN.MEMBERS) end
+        mod.ui.push(game, SCREEN.PROFILE, {
+          own = item.mine, playerId = item.value, onCancel = back,
+        })
+      end,
+      onCancel = function() mod.ui.push(game, SCREEN.PARTY) end,
+    })
+  end })
+
   -- ------- who is online
 
   screens:register(SCREEN.ROSTER, { new = function(game)
@@ -994,9 +1092,20 @@ function M:install()
     local items = {}
     for _, player in ipairs(ctx.roster:sorted()) do
       local here = current and player.map == current.mapId
+      -- Party first: it is the one thing about a player that stays true
+      -- while they walk in and out of your map, and it is what tells you the
+      -- INVITE row will not be offered against them.
+      local right
+      if ctx.party:isPartner(player.id) then
+        right = "PARTY"
+      elseif player.busy then
+        right = "BUSY"
+      elseif here then
+        right = "HERE"
+      end
       items[#items + 1] = {
         label = player.name,
-        right = player.busy and "BUSY" or (here and "HERE" or nil),
+        right = right,
         value = player.id,
       }
     end
@@ -1027,29 +1136,40 @@ function M:install()
       return mod.ui.TextBox.new(game, "They just went\noffline.")
     end
 
-    -- Three commands about the person in front of you: a small box, the
-    -- way the original asks CUT/SURF or a party submenu. Sized to the
-    -- widest label by Menu itself and nudged on-screen, so it stays right
-    -- however long a trainer's name is.
+    -- The commands about the person in front of you: a small box, the way
+    -- the original asks CUT/SURF or a party submenu. Sized to the widest
+    -- label by Menu itself and nudged on-screen, so it stays right however
+    -- long a trainer's name is.
     -- PROFILE first: knowing who you are looking at should come before
     -- deciding to trade with them
-    local items = {
-      { label = "PROFILE", profile = true },
-      { label = "TRADE", kind = "trade" },
-      { label = "BATTLE", kind = "battle" },
-      { label = "WHISPER" },
-    }
+    local items = { { label = "PROFILE", profile = true } }
+
+    -- INVITE appears only when a party could actually be formed -- neither
+    -- of you already in one. Offered-then-refused is the failure this
+    -- avoids: the hub would answer with a decline, so a row that is always
+    -- there would be a button whose usual result is a box saying no.
+    -- Absent, not greyed: the menu is sized to its rows, and a permanently
+    -- dead row in a four-line box is a line the useful commands do not get.
+    if not (ctx.party:has() or player.party) then
+      items[#items + 1] = { label = "INVITE", invite = true }
+    end
+
+    items[#items + 1] = { label = "TRADE", kind = "trade" }
+    items[#items + 1] = { label = "BATTLE", kind = "battle" }
+    items[#items + 1] = { label = "WHISPER" }
 
     local reopen = function()
       mod.ui.push(game, SCREEN.ACTIONS,
         { playerId = player.id, onCancel = opts and opts.onCancel })
     end
     for _, item in ipairs(items) do
-      local kind, wantsProfile = item.kind, item.profile
+      local kind, wantsProfile, wantsInvite = item.kind, item.profile, item.invite
       item.onSelect = function()
         if wantsProfile then
           mod.ui.push(game, SCREEN.PROFILE,
             { playerId = player.id, onCancel = reopen })
+        elseif wantsInvite then
+          ctx.party:invite(player)
         elseif kind then
           ctx.sessions:request(player, kind)
         else
@@ -1062,8 +1182,14 @@ function M:install()
     return mod.ui.Menu.new(game, items, {
       -- low and to the right, clear of the two characters this menu is
       -- about: a command box that covers the person you are talking to
-      -- reads as a bug even when it is not one
-      tx = 11, ty = 7, tw = 9,
+      -- reads as a bug even when it is not one.
+      --
+      -- ty is computed rather than fixed because the row count now varies.
+      -- Menu grows its box downwards to fit (th = rows * 2 + 2) and nudges
+      -- only sideways, so a fifth row at the old ty=7 ran off the bottom of
+      -- an 18-tile screen; this keeps the box's last row on 18 and leaves
+      -- the four-row case exactly where it was.
+      tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
       -- back to whatever opened this: the roster if you came from the menu,
       -- the world if you walked up and pressed A
       onCancel = opts and opts.onCancel,
@@ -1138,6 +1264,13 @@ function M:install()
       { label = "EVERYONE", scope = "global" },
       { label = "NEARBY", scope = "local" },
     }
+    -- Only while there is a party to say it to. The row is also on the PARTY
+    -- menu; it is repeated here because SAY is where somebody who wants to
+    -- talk goes, and having to leave it and find another menu to reach one
+    -- of the four scopes would be the odd one out.
+    if ctx.party:has() then
+      items[#items + 1] = { label = "PARTY", scope = "party" }
+    end
     for _, item in ipairs(items) do
       local scope = item.scope
       item.onSelect = function()
@@ -1170,6 +1303,7 @@ function M:install()
 
     local title = opts.scope == "private"
       and ("TO " .. tostring(opts.toName or "?"))
+      or (opts.scope == "party" and "SAY TO PARTY")
       or (opts.scope == "local" and "SAY NEARBY" or "SAY TO ALL")
     return namingScreen(game, {
       title = ownTitle(title),

@@ -104,12 +104,14 @@ return function(game)
   -- here. Dropping every marker this side owns lets the peer walk its own
   -- assertions and fail honestly, in seconds.
   local function abandon()
-    for _, tag in ipairs({ "ready", "walk", "chat", "trade", "battle", "left" }) do
+    for _, tag in ipairs({ "ready", "walk", "chat", "party", "partyleft",
+                           "trade", "battle", "left" }) do
       H.signal(marker(ROLE, tag))
     end
     if ROLE == "a" then
       H.signal("hub_a_walk_start")
       H.signal("hub_a_walk_done")
+      H.signal("hub_a_party_asked")
       H.signal("hub_a_trade_asked")
     else
       H.signal("hub_b_baseline")
@@ -425,6 +427,11 @@ return function(game)
   shot("chat")
   check(rendezvous("chat"), "both guests finished the chat leg")
 
+  -- Two legs landed here in the same merge, both reached from the end of
+  -- the chat leg, and both are kept: MY PROFILE reads nothing but the local
+  -- save and pairs with nobody, so it runs first and unpaired; the party
+  -- leg below is the one with barriers in it.
+
   -- ------- your own card
   --
   -- Both roles walk this: it reads nothing but the local save, so there is
@@ -464,6 +471,272 @@ return function(game)
       check(false, "no MY PROFILE row on the MMO menu while connected")
     end
   end
+
+
+  -- ------- a party, formed and then left
+  --
+  -- The half of parties the headless suite structurally cannot reach. That
+  -- suite pins the protocol with fake peers on both sides; what it never
+  -- does is open the real ACTIONS menu and find out whether INVITE is on it,
+  -- whether the box that appears says the right thing, or whether the party
+  -- screens the mod registers actually build. Every one of those is a
+  -- registration or a menu-geometry question, and every one of them fails
+  -- silently -- the party still forms, the player just cannot reach it.
+  --
+  -- Run before the trade on purpose: the last assertion here is that being
+  -- in a party does not stop the two of them trading, and the trade leg
+  -- immediately below is what proves it.
+
+  H.closeToOverworld(game)
+  if ROLE == "a" then
+    check(H.openMmo(game), "the MMO menu opens before inviting")
+    U.wait(25)
+    check(H.menuRow(game, "PARTY") ~= nil,
+          "the MMO menu carries a PARTY row while connected")
+    if H.selectLabel(game, "PLAYERS") then
+      U.wait(25)
+      check(H.selectLabel(game, THEM.name), "the other guest is on the PLAYERS list")
+      U.wait(30)
+      local labels = H.menuLabels(game)
+      log("actions menu:", table.concat(labels, ","))
+      local hasInvite = false
+      for _, label in ipairs(labels) do
+        if label == "INVITE" then hasInvite = true end
+      end
+      check(hasInvite, "INVITE is offered against a player who is unattached")
+      shot("invite-menu")
+      check(H.selectLabel(game, "INVITE"), "asked the other guest to team up")
+    else
+      check(false, "no PLAYERS row to invite from")
+    end
+    H.signal("hub_a_party_asked")
+  else
+    H.await(game, "hub_a_party_asked")
+  end
+
+  -- b answers the box; a is already past its own "Asked BETA to team up."
+  -- text box. drivePrompts answers a choice with YES, which is what the
+  -- invited side is being asked, and taps through a's text box on the other.
+  local inParty = H.drivePrompts(game, function()
+    return #exports.party() == 2
+  end, 90)
+  check(inParty, "the party formed on this side")
+  local members = {}
+  for _, member in ipairs(exports.party()) do
+    members[#members + 1] = tostring(member.name)
+  end
+  log("party members:", table.concat(members, ","))
+  check(#members == 2, "with exactly two members")
+  local sawPartner = false
+  for _, name in ipairs(members) do
+    if name == THEM.name then sawPartner = true end
+  end
+  check(sawPartner, "the other guest among them")
+
+  -- Their presence now says so, which is what gates everyone else's INVITE
+  -- row -- and the roster screen's PARTY column, and the map marker.
+  local flagged = H.waitSeconds(game, function()
+    local peerRow = exports.players()[1]
+    return peerRow ~= nil and peerRow.party == true
+  end, 60, "the party flag to reach this side's roster")
+  check(flagged, "the other guest's presence carries the party flag")
+
+  -- ------- your party member, on the actual map
+  --
+  -- What a party looks like in the world: their character standing there,
+  -- with the nickname they chose over its head. Nothing decorative -- being
+  -- in a party is said by PLAYERS and the PARTY screen, not by the plate.
+  --
+  -- Nothing headless can make this assertion. The mod's own suite stubs the
+  -- world entirely: no avatar is ever spawned and no frame is ever drawn, so
+  -- "their character is there, named" is only answerable by a real client
+  -- looking at a real frame. Both guests have been standing in the same room
+  -- since the walk leg, so the avatar is on screen and its plate is being
+  -- drawn every frame.
+
+  H.closeToOverworld(game)
+
+  -- Their character, spawned as a real overworld NPC at the cell the network
+  -- says they are on -- the half a nameplate cannot tell you about.
+  local row = H.avatarRow(exports, THEM.name)
+  check(row ~= nil and row.spawned,
+        "the party member's character is on the map as a real NPC")
+  if row then
+    log(("their avatar: map=%s roster=(%s,%s) avatar=(%s,%s)"):format(
+      tostring(row.map), tostring(row.rosterX), tostring(row.rosterY),
+      tostring(row.avatarX), tostring(row.avatarY)))
+    check(row.avatarX == row.rosterX and row.avatarY == row.rosterY,
+          "standing where the network says they are")
+  end
+
+  -- ...and the plate over it, carrying the party marker so they can be told
+  -- apart from anyone else standing on the same map. exports.overlayState()
+  -- reports what the last frame actually committed, so this reads the real
+  -- text off a real frame rather than inferring it from a screenshot.
+  -- The marker as the renderer spells it: U+25B6, three bytes. Written as
+  -- escapes rather than pasted so this file stays plain ASCII and cannot be
+  -- broken by an editor that re-encodes it.
+  local MARKED = "\226\150\182" .. THEM.name
+  local named, drew = false, {}
+  local nameDeadline = os.time() + 60
+  while os.time() < nameDeadline and not named do
+    local ov = exports.overlayState and exports.overlayState() or {}
+    drew = ov.names or {}
+    for _, name in ipairs(drew) do
+      if name == MARKED then named = true end
+    end
+    if not named then U.wait(6) end
+  end
+  log("nameplates drawn:", #drew == 0 and "(none)" or table.concat(drew, ","))
+  check(named, "their nickname is drawn over their head, marked as party")
+
+  -- ...and it is a marker, not an extra label: the plain plate is replaced,
+  -- not accompanied.
+  local plainToo = false
+  for _, name in ipairs(drew) do
+    if name == THEM.name then plainToo = true end
+  end
+  check(not plainToo, "replacing the unmarked plate rather than adding to it")
+
+  -- Every glyph of it is one the font can actually draw.
+  --
+  -- Not paranoia: this leg first shipped with a `*` marker on the plate, and
+  -- **the font has no asterisk**. Font.draw draws nothing for a character it
+  -- cannot map while Font.width still advances eight pixels for it, so the
+  -- plate came out a glyph too wide with a blank hole in it -- and the
+  -- string check above passed the whole time, because the overlay had
+  -- honestly *requested* text it could not render. The marker is gone; the
+  -- trap is not, and it belongs to anything that ever reaches a plate.
+  local unpaintable = {}
+  for _, plate in ipairs(drew) do
+    -- H.undrawable answers with a comma-joined string, "" when every glyph
+    -- renders -- the shape main's copy of this helper published, and the one
+    -- the merge settled on for both.
+    local missing = H.undrawable(game, plate)
+    if missing ~= "" then unpaintable[#unpaintable + 1] = missing end
+  end
+  check(#unpaintable == 0, "every glyph the overlay drew is one the font has"
+    .. (#unpaintable > 0
+        and (" -- missing: " .. table.concat(unpaintable, " ")) or ""))
+
+  -- Let the chat leg's last bubble expire before the shot.
+  --
+  -- Two things at once. The screenshot is a README image, and a bubble left
+  -- over from a previous leg floating above the nameplate makes it look like
+  -- the name is something the player said. And waiting for it is an
+  -- assertion in its own right: Config.BUBBLE_SECONDS is 5, so a plate that
+  -- has not settled to the name alone well past that is a bubble that never
+  -- expired -- which would be a leak nothing else here would notice.
+  local settled, lastSeen = false, drew
+  local settleDeadline = os.time() + 20
+  while os.time() < settleDeadline and not settled do
+    local ov = exports.overlayState and exports.overlayState() or {}
+    lastSeen = ov.names or {}
+    settled = #lastSeen == 1 and lastSeen[1] == MARKED
+    if not settled then U.wait(12) end
+  end
+  check(settled, "the plate settles to the marked name alone -- old bubbles "
+    .. "expire (saw: "
+    .. (#lastSeen == 0 and "(none)" or table.concat(lastSeen, ",")) .. ")")
+  shot("party-map")
+
+  -- ------- your party member on the TOWN MAP
+  --
+  -- The full Kanto map, with your friend's character standing at the city
+  -- they are actually in and their nickname over it. The overworld can only
+  -- ever show the room you are in; this is the screen that answers "where
+  -- are they".
+  --
+  -- Pushed directly rather than opened from the bag, because the driver's
+  -- fresh save has no TOWN MAP item and buying one is a different test. How
+  -- the screen got opened is the engine's business; what this leg is about
+  -- is what the mod draws once it is.
+  --
+  -- Both guests are in Red's bedroom, so both resolve to PALLET TOWN -- the
+  -- screen's own index points an interior at its town's square, which is
+  -- exactly the case worth seeing drawn.
+
+  H.closeToOverworld(game)
+  local okTown, TownMapUi = pcall(require, "src.ui.TownMap")
+  if okTown and TownMapUi and TownMapUi.new then
+    local built, screen = pcall(TownMapUi.new, game, {})
+    if built and screen then
+      game.stack:push(screen)
+      U.wait(30)
+      local ov = exports.overlayState and exports.overlayState() or {}
+      log(("town map: reached=%s drawn=%s names=%s"):format(
+        tostring(ov.reached), tostring(ov.drawn),
+        (ov.names and #ov.names > 0) and table.concat(ov.names, ",") or "(none)"))
+      check(ov.reached == "townmap",
+            "the overlay recognises the TOWN MAP and draws on it")
+      check((ov.drawn or 0) >= 1,
+            "your party member is placed on it")
+      local namedThere = false
+      for _, name in ipairs(ov.names or {}) do
+        if name == THEM.name then namedThere = true end
+      end
+      check(namedThere, "with their nickname over their character")
+      shot("party-townmap")
+      U.tap(game, "b")
+      U.wait(25)
+      H.closeToOverworld(game)
+    else
+      check(false, "could not build a TOWN MAP to draw on")
+    end
+  else
+    check(false, "the engine's TOWN MAP screen could not be reached")
+  end
+
+  -- The screens the PARTY row leads to actually build. A screen that failed
+  -- to register throws on push and takes the frame with it, so reaching the
+  -- members list at all is most of the assertion.
+  H.closeToOverworld(game)
+  check(H.openMmo(game), "the MMO menu re-opens")
+  if H.selectLabel(game, "PARTY") then
+    U.wait(25)
+    check(H.selectLabel(game, "MEMBERS"), "the party menu opens the members list")
+    U.wait(30)
+    local rows = H.menuLabels(game)
+    log("members screen:", table.concat(rows, ","))
+    check(#rows == 2, "which lists both of you")
+    shot("party-members")
+    U.tap(game, "b")
+    U.wait(25)
+  else
+    check(false, "no PARTY row to open once in a party")
+  end
+  H.closeToOverworld(game)
+  -- Synced here rather than the moment the party formed: the exchange below
+  -- is two sides shouting at each other for a bounded window, and a side
+  -- that started 60 seconds ahead of its partner would spend most of that
+  -- window talking to somebody still walking a menu.
+  check(rendezvous("party"), "both guests are in the party")
+
+  -- Party chat: no radius, no name to type, and it reaches them wherever
+  -- they are. Both sides say their line and wait to hear the other's, the
+  -- way the chat leg above does -- a one-sided assertion cannot tell "sent"
+  -- from "delivered".
+  -- Repeated until heard, for the same reason the chat leg above repeats: a
+  -- line is fan-out and never retried, so the side that gets there first
+  -- would otherwise stop saying the line the other is still waiting on.
+  local mine, theirs = "PARTY " .. ME.name, "PARTY " .. THEM.name
+  local heardParty = false
+  local partyDeadline, lastSaid = os.time() + 90, -99
+  while os.time() < partyDeadline and not heardParty do
+    if os.time() - lastSaid >= 3 then
+      exports.say("party", mine)
+      lastSaid = os.time()
+    end
+    for _, line in ipairs(exports.chat()) do
+      if line.text == theirs and line.scope == "party" then heardParty = true end
+    end
+    U.wait(6)
+  end
+  check(heardParty, "a party line from the other guest arrived, tagged party")
+
+  -- ...and being in one does not stop them trading, which the leg below is
+  -- about to demonstrate for real.
+  check(#exports.party() == 2, "the party survives everything above it")
 
   -- ------- a real trade, run to completion
   --
@@ -623,6 +896,46 @@ return function(game)
     events["battle.started"], events["battle.ended"], events["link.desync"]))
   shot("after-battle")
   check(rendezvous("battle"), "both guests came out of the battle")
+
+  -- ------- leaving the party
+  --
+  -- One member leaves and it ends for both: at two people there is no party
+  -- left to continue. Only b presses the button, and *a* is where the
+  -- assertion that matters lives -- a never touched a menu, so a party that
+  -- emptied on this side proves the hub told it rather than that it decided
+  -- for itself.
+
+  H.closeToOverworld(game)
+  if ROLE == "b" then
+    check(#exports.party() == 2, "still in the party after the battle")
+    if check(H.openMmo(game), "the MMO menu opens to leave the party") then
+      U.wait(25)
+      if H.selectLabel(game, "PARTY") then
+        U.wait(25)
+        check(H.selectLabel(game, "LEAVE"), "the party menu offers a way out")
+        -- the confirm box, and then "You left the party."
+        H.drivePrompts(game, function() return #exports.party() == 0 end, 60)
+      else
+        check(false, "no PARTY row to leave from")
+      end
+    end
+    check(#exports.party() == 0, "leaving empties the party on the leaver's side")
+  end
+  H.closeToOverworld(game)
+  check(rendezvous("partyleft"), "both guests reached the end of the party")
+
+  local emptied = H.waitSeconds(game, function()
+    return #exports.party() == 0
+  end, 90, "the party to end on this side")
+  check(emptied, "one member leaving ends the party for both")
+
+  -- ...and each of them is free to be asked again, which is the flag the
+  -- INVITE row is gated on.
+  local freed = H.waitSeconds(game, function()
+    local peerRow = exports.players()[1]
+    return peerRow ~= nil and peerRow.party == false
+  end, 90, "the party flag to clear on the other guest's presence")
+  check(freed, "and clears the party flag everyone else reads")
 
   -- ------- leaving
   --

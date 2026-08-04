@@ -103,14 +103,53 @@ heads; chat bubbles pop when they talk.
   <img src="docs/screenshots/chat-log.png" width="300" alt="The chat log showing two global messages">
 </p>
 
+### 🤝 TEAM UP
+Walk up to a friend, press **A**, pick `INVITE`. They get asked; if they say
+yes you're a **party** — you and one other trainer, and that's the whole
+design, not a first step towards six.
+
+<p align="center">
+  <img src="docs/screenshots/party-townmap.png" width="300" alt="The Kanto TOWN MAP with your party member's character standing at Pallet Town, their nickname above it">
+  <img src="docs/screenshots/party-map.png" width="300" alt="Your party member in the overworld, their nameplate drawn as ▶ALPHA">
+</p>
+<p align="center">
+  <img src="docs/screenshots/party-members.png" width="300" alt="The PARTY members list: ALPHA HERE, BETA YOU">
+  <img src="docs/screenshots/interact-menu.png" width="300" alt="PROFILE / INVITE / TRADE / BATTLE / WHISPER menu">
+</p>
+
+What a party buys you:
+
+- **open the TOWN MAP and they're on it** — their character standing at the
+  city they're actually in, right now, with their nickname over it. Kanto
+  already had a screen for "where is that", and this is that question with a
+  person as the answer. It updates as they walk;
+- **them in the world too**, when you're on the same map — their character
+  with a `▶` in front of their nickname over its head, so you can pick your
+  friend out of a crowd at a glance. `PARTY` next to their name on the
+  `PLAYERS` list says the same thing in menu form;
+- a chat scope that reaches them **wherever they are** — no radius, no name
+  to type;
+- a `PARTY` row on the MMO menu holding the members list (their card is one
+  press away, and so is yours), and the way out.
+
+The `INVITE` row only appears when a party could actually be formed — neither
+of you already in one — because a button whose usual answer is *no* is worse
+than no button. Either of you leaving ends it for both; at two people there
+is no party left to continue. So does either of you disconnecting.
+
 ### 💬 TALK TRASH ON A GAME BOY KEYBOARD
-Three scopes, composed on the vanilla naming grid:
+Four scopes, composed on the vanilla naming grid:
 
 | Scope | Who hears it | Floats over your head |
 | --- | --- | --- |
 | `EVERYONE` | the whole hub | ✅ |
 | `NEARBY` | same map, 12 tiles | ✅ |
+| `PARTY` | the friend you teamed up with, anywhere | ✅ |
 | `WHISPER` | one player | ❌ — it's a whisper |
+
+A party line bubbles and a whisper does not, and that is the same rule rather
+than an exception to it: a bubble is only ever drawn in the game of somebody
+who *received* the line, and the hub sends a party line to the party alone.
 
 Unread messages flag the menu with `CHAT*`. And because the vanilla grid has
 **no digits at all**, this mod adds a number page to its own screens —
@@ -127,7 +166,7 @@ link cable runs, carried over the wire. **Zero desyncs** across the full
 end-to-end suite.
 
 <p align="center">
-  <img src="docs/screenshots/interact-menu.png" width="300" alt="PROFILE / TRADE / BATTLE / WHISPER menu">
+  <img src="docs/screenshots/interact-menu.png" width="300" alt="PROFILE / INVITE / TRADE / BATTLE / WHISPER menu">
   <img src="docs/screenshots/link-battle.png" width="300" alt="GUESTY wants to battle!">
 </p>
 
@@ -227,7 +266,8 @@ behind it.
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
-| `CHAT` / `SAY` | connected | the log (`CHAT*` = unread) and sending |
+| `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |
+| `PARTY` | connected | your party: members, party chat, and leaving it |
 | `MY PROFILE` | connected | your own trainer card, as everyone else sees it |
 | `LEAVE` | you joined | drop out and **keep playing single-player** |
 | `END GAME` | hosting | asks first — this one ends it for everybody |
@@ -241,7 +281,20 @@ Leaving isn't quitting. Your save, your world, your party: untouched. The
 game just carries on without the other people in it.
 
 Pressing **A** at another trainer opens a second, smaller box —
-`PROFILE` / `TRADE` / `BATTLE` / `WHISPER` — about that player.
+`PROFILE` / `INVITE` / `TRADE` / `BATTLE` / `WHISPER` — about that player.
+`INVITE` is there only while a party could be formed: it disappears once
+either of you is in one, and comes back when that party ends.
+
+`PARTY` leads to a menu of its own once you're in one:
+
+| Row | What it does |
+| --- | --- |
+| `MEMBERS` | both of you, with `HERE` / `AWAY` / `BUSY` next to them — and either card |
+| `SAY` | a line to your party, wherever they are |
+| `LEAVE` | asks first, then ends the party for **both** of you |
+
+Before you're in one, the row explains how a party starts and drops you on
+the `PLAYERS` list to start one from.
 
 ---
 
@@ -553,6 +606,30 @@ hosts, one joins, and both sides assert:
 - 🔁 **a trade completes** — each side ends holding the other's Pokémon
 - ⚔️ **a link battle runs to a decision**, zero `link.desync` on either side
 - ✅ a guest LEAVEs and keeps playing
+
+The dedicated-hub run — `run-hub-e2e.sh`, two guests and a real Node hub, no
+in-game host anywhere — adds the party leg on top of all of that:
+
+- 🤝 `INVITE` is on the menu, the other side is asked, and **a party forms**
+- ✅ **your party member is in the world** — their character spawned as a real
+  NPC at the cell the network says, with their marked nickname drawn over its
+  head, read back off a live frame via `overlayState().names`. Every glyph
+  the overlay drew is then checked against the real extracted charmap, which
+  is not paranoia: the first version of that marker was a `*`, which drew a
+  blank hole because the font has no asterisk, and passed every string-level
+  assertion that existed at the time
+- 🗺️ **and on the TOWN MAP** — a real `src.ui.TownMap` is opened and the
+  overlay is asked what it drew on it: their character placed at the city
+  their current map resolves to, named
+- ✅ the party flag reaches the *other* player's roster (this is the one that
+  caught a real bug: the flag rode on a presence update the client was
+  throwing away, so `INVITE` went on being offered against somebody who could
+  no longer accept it)
+- ✅ the members list opens and lists both of you
+- ✅ a party line crosses the hub, tagged `party`
+- ✅ the party survives a trade *and* a link battle
+- ✅ one member pressing `LEAVE` ends it for **both**, and frees them in
+  everyone else's presence
 
 Screenshots land in `/tmp/rby_mmo_shots` so you can see it, not just read a
 pass count.

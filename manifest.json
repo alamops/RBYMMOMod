@@ -1,7 +1,7 @@
 {
   "id": "rby_mmo",
   "name": "RBY MMO",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -17,6 +17,6 @@
   "dependencies": [],
   "optional_dependencies": [],
   "conflicts": [],
-  "description": "Play Kanto with friends: shared overworld presence, nicknames and chat bubbles over other players' heads, a scoped chat box, and trade or battle requests from anywhere in the world.",
+  "description": "Play Kanto with friends: shared overworld presence, nicknames and chat bubbles over other players' heads, a scoped chat box, parties of two with their own chat and marker, and trade or battle requests from anywhere in the world.",
   "github": "alamops/RBYMMOMod"
 }

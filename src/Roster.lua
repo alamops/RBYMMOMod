@@ -51,6 +51,23 @@ function M:setBusy(id, busy)
   return player
 end
 
+-- Whether this player is in a party.  Its own setter for the same reason
+-- busy has one: a presence update merges rather than replaces, so a flag
+-- that is not copied across explicitly is a flag that only ever has the
+-- value it had at join time.
+--
+-- That was the bug.  A party formed after both players were already online
+-- broadcast a presence saying so, the roster kept the join-time false, and
+-- so the INVITE row went on being offered against somebody who could no
+-- longer accept it -- and the PARTY column and the map marker never
+-- appeared.  Nothing in the headless suite could see it: the hub sent the
+-- right message and the client threw the field away.
+function M:setParty(id, party)
+  local player = self.players[id]
+  if player then player.party = party and true or false end
+  return player
+end
+
 function M:remove(id)
   if not self.players[id] then return nil end
   local gone = self.players[id]

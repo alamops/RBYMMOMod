@@ -242,8 +242,10 @@ function M.new(opts)
     count = 0,        -- connections
     players = 0,      -- of those, the ones that have been admitted
     sessions = {},    -- sessionId -> { a, b, kind }
+    parties = {},     -- partyId -> { memberId, ... }
     nextId = 1,
     nextSession = 1,
+    nextParty = 1,
     nextNonce = 0,
     -- The process-wide pool unless a caller hands over its own; only the
     -- suite does, so that two hubs can be started from identical pools and
@@ -334,6 +336,10 @@ local function presenceOf(client)
     y = client.y,
     facing = client.facing,
     busy = client.sessionId ~= nil,
+    -- Whether, not which.  Everyone needs this -- it is what decides
+    -- whether their menus offer to invite this player -- and nobody outside
+    -- the party needs the id, so the id does not leave the hub.
+    party = client.partyId ~= nil,
     profile = client.profile,
   }
 end
@@ -395,6 +401,8 @@ function M:accept(peer, trusted)
     map = nil, x = nil, y = nil, facing = "down",
     sessionId = nil,
     pendingTo = nil,
+    partyId = nil,
+    partyPendingTo = nil,   -- the invite this client is waiting on an answer to
     lastChat = -math.huge,
     hello = nil,      -- what it said, held until it is admitted
     nonce = nil,      -- the challenge it still owes an answer to
@@ -451,6 +459,10 @@ end
 function M:drop(client)
   if not client or not self.clients[client.id] then return false end
   self:endSession(client, "peer_left")
+  -- A party outlives a trade but not a connection: the other member is told
+  -- while this one is still in the table, so the presence that goes out with
+  -- it is the one where they are no longer in a party.
+  self:endParty(client, "peer_left")
   self.clients[client.id] = nil
   self.count = self.count - 1
   if client.ready then self.players = self.players - 1 end
@@ -458,6 +470,7 @@ function M:drop(client)
   -- asker wait forever for an answer nobody can give
   for _, other in pairs(self.clients) do
     if other.pendingTo == client.id then other.pendingTo = nil end
+    if other.partyPendingTo == client.id then other.partyPendingTo = nil end
   end
   if client.ready then
     self:broadcast(Wire.PART, { id = client.id }, client.id)
@@ -511,6 +524,72 @@ function M:startSession(a, b, kind)
 
   self:broadcast(Wire.MOVE, presenceOf(a), a.id)
   self:broadcast(Wire.MOVE, presenceOf(b), b.id)
+end
+
+-- ------- parties
+--
+-- Membership lives here and only here.  A client is told the whole list
+-- whenever it changes, which is what stops a client and the hub disagreeing
+-- about who is in a party -- there is no delta to miss.
+
+function M:partyMembers(partyId)
+  local out = {}
+  for _, id in ipairs(self.parties[partyId] or {}) do
+    local member = self.clients[id]
+    if member and member.ready then out[#out + 1] = member end
+  end
+  return out
+end
+
+function M:startParty(a, b)
+  local id = tostring(self.nextParty)
+  self.nextParty = self.nextParty + 1
+  self.parties[id] = { a.id, b.id }
+  a.partyId, b.partyId = id, id
+  -- Neither of them can be waiting on another answer now, and an invite
+  -- left armed would be answered by a player who is no longer free.
+  a.partyPendingTo, b.partyPendingTo = nil, nil
+
+  local members = {
+    { id = a.id, name = a.name },
+    { id = b.id, name = b.name },
+  }
+  send(a, Wire.PARTY, { id = id, members = members })
+  send(b, Wire.PARTY, { id = id, members = members })
+
+  -- ...and everyone else learns these two are spoken for, so the INVITE row
+  -- stops being offered against them.  Same shape as startSession: presence
+  -- changed, so presence goes out.
+  self:broadcast(Wire.MOVE, presenceOf(a), a.id)
+  self:broadcast(Wire.MOVE, presenceOf(b), b.id)
+end
+
+-- One member leaving ends it for both.  At two people there is no party left
+-- to continue, and a "party" of one that still showed a PARTY row and a
+-- party chat scope with nowhere to send would be worse than none.
+function M:endParty(client, reason)
+  local id = client.partyId
+  if not id then return end
+  local memberIds = self.parties[id]
+  self.parties[id] = nil
+  client.partyId = nil
+
+  for _, memberId in ipairs(memberIds or {}) do
+    local other = self.clients[memberId]
+    if other and other.id ~= client.id and other.partyId == id then
+      other.partyId = nil
+      send(other, Wire.PARTY_END, { reason = reason })
+      self:broadcast(Wire.MOVE, presenceOf(other), other.id)
+    end
+  end
+  -- The leaver is told too, so a client that did not initiate this locally
+  -- -- one whose party ended because the hub said so -- still converges.
+  -- Guarded the way endSession guards its own: on a drop there is nothing
+  -- left to tell.
+  if self.clients[client.id] then
+    send(client, Wire.PARTY_END, { reason = "left" })
+    self:broadcast(Wire.MOVE, presenceOf(client), client.id)
+  end
 end
 
 -- ------- handlers
@@ -613,6 +692,18 @@ handlers[Wire.CHAT] = function(self, client, msg)
     return
   end
 
+  -- A party line reaches the party wherever they are: no radius, no map,
+  -- no target to type.  A client that is not in one is dropped rather than
+  -- broadcast -- a scope that quietly widened to everybody would be the
+  -- worst possible failure for a message somebody meant privately.
+  if scope == "party" then
+    if not client.partyId then return end
+    for _, member in ipairs(self:partyMembers(client.partyId)) do
+      if member.id ~= client.id then send(member, Wire.CHAT, payload) end
+    end
+    return
+  end
+
   if scope == "local" then
     if not client.map then return end
     for id, other in pairs(self.clients) do
@@ -663,6 +754,59 @@ handlers[Wire.RESPOND] = function(self, client, msg)
     return send(asker, Wire.DECLINE, { name = client.name, kind = kind })
   end
   self:startSession(asker, client, kind)
+end
+
+-- The invite, and the two answers to it.
+--
+-- Deliberately the same shape as the trade/battle request above -- one
+-- outstanding ask per client, only the player who was asked may answer it,
+-- and the ask is spent on the first answer -- because it is the same
+-- problem, and a second, subtly different handshake living beside the first
+-- would be two things to keep right instead of one.
+--
+-- What is *not* shared is the state it guards: a party is independent of a
+-- session, so two friends may team up while one of them is mid-trade.  Being
+-- busy stops you battling, not travelling together.
+handlers[Wire.PARTY_INVITE] = function(self, client, msg)
+  if not client.ready or client.partyId then return end
+  local target = self.clients[Wire.id(msg.to) or ""]
+  if not (target and target.ready) or target.id == client.id then return end
+  -- Answered here rather than forwarded: the asker learns at once that this
+  -- player is taken, instead of waiting on a prompt nobody will ever see.
+  if target.partyId then
+    return send(client, Wire.PARTY_DECLINE,
+      { name = target.name, reason = "in_party" })
+  end
+  client.partyPendingTo = target.id
+  send(target, Wire.PARTY_INVITE, { from = client.id, name = client.name })
+end
+
+handlers[Wire.PARTY_RESPOND] = function(self, client, msg)
+  if not client.ready then return end
+  local asker = self.clients[Wire.id(msg.to) or ""]
+  if not (asker and asker.ready) then return end
+
+  -- only the player who was actually asked can answer, and only while the
+  -- ask is still outstanding
+  if asker.partyPendingTo ~= client.id then return end
+  asker.partyPendingTo = nil
+
+  if not msg.accept then
+    return send(asker, Wire.PARTY_DECLINE, { name = client.name, reason = "no" })
+  end
+  -- Re-checked at the moment of forming, not only when the invite went out:
+  -- either of them could have joined somebody else's party while this one
+  -- sat on screen waiting for a human to read it.
+  if client.partyId or asker.partyId then
+    return send(asker, Wire.PARTY_DECLINE,
+      { name = client.name, reason = "in_party" })
+  end
+  self:startParty(asker, client)
+end
+
+handlers[Wire.PARTY_LEAVE] = function(self, client)
+  if not client.ready then return end
+  self:endParty(client, "peer_left")
 end
 
 handlers[Wire.RELAY] = function(self, client, msg)
@@ -745,7 +889,8 @@ function M:shutdown(message)
       client.peer:close()
     end
   end
-  self.clients, self.count, self.players, self.sessions = {}, 0, 0, {}
+  self.clients, self.count, self.players = {}, 0, 0
+  self.sessions, self.parties = {}, {}
 end
 
 M.presenceOf = presenceOf

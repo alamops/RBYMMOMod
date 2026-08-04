@@ -117,6 +117,7 @@ for _, id in ipairs({
   "RbyMmoScope", "RbyMmoCompose", "RbyMmoPick", "RbyMmoText",
   "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile",
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
+  "RbyMmoParty", "RbyMmoPartyList",
 }) do
   check(screens:get(id) ~= nil, "screen " .. id .. " is registered")
 end
@@ -141,6 +142,8 @@ check(type(exports.isConnected) == "function", "exports isConnected")
 check(type(exports.players) == "function", "exports players")
 eq(exports.isConnected(), false, "reports disconnected before connecting")
 eq(#exports.players(), 0, "the roster starts empty")
+check(type(exports.party) == "function", "exports party")
+eq(#exports.party(), 0, "and nobody is in one before connecting")
 
 -- Vanilla must be untouched.  This mod adds multiplayer; it does not change
 -- Gen 1 content, which is exactly what affects_link=false promises about
@@ -382,6 +385,45 @@ eq(partial.x, nil, "x goes with it")
 eq(Wire.presence({ id = "p4", name = "BROCK" }).sprite, Config.DEFAULT_SPRITE,
    "a missing sprite falls back rather than failing")
 
+-- ------- parties on the wire
+--
+-- Presence carries whether somebody is in a party and never which one: it is
+-- what decides whether the INVITE row is offered, and a party id on every
+-- presence would let any client map out who is travelling with whom.
+
+eq(presence.party, false, "presence with no party field reads as unattached")
+eq(Wire.presence({ id = "p5", name = "MISTY", party = true }).party, true,
+   "and a party flag survives")
+eq(Wire.presence({ id = "p6", name = "GARY", party = "7" }).party, true,
+   "a party id sent where a flag belongs is reduced to the flag")
+
+local member = Wire.member({ id = "m1", name = "ANN", x = 4, y = 9 })
+check(member ~= nil, "a members row sanitises")
+eq(member.name, "ANN", "keeping the name")
+eq(member.x, nil, "and dropping a position it has no business carrying")
+eq(Wire.member({ name = "NOID" }), nil, "a row without an id is rejected")
+eq(Wire.member({ id = "m2" }), nil, "and one without a name")
+
+local members = Wire.members({ { id = "m1", name = "ANN" },
+                               { id = "m2", name = "BOB" } })
+eq(#members, 2, "a full members list survives")
+eq(members[2].name, "BOB", "in the order the hub sent it")
+
+-- A list refused whole, never delivered short: a party you are told has one
+-- member when it has two is worse than one you are told nothing about,
+-- because every screen would draw the wrong thing confidently.
+eq(Wire.members({ { id = "m1", name = "ANN" }, { name = "BROKEN" } }), nil,
+   "one bad row refuses the whole list")
+eq(Wire.members({}), nil, "an empty party is not a party")
+eq(Wire.members("nonsense"), nil, "and neither is a string")
+
+local overfull = {}
+for i = 1, Config.PARTY_MAX + 1 do
+  overfull[i] = { id = "m" .. i, name = "P" .. i }
+end
+eq(Wire.members(overfull), nil,
+   "a hub claiming more members than PARTY_MAX is refused, not truncated")
+
 -- ------- payload shape (the relay's only defence)
 
 local function nest(depth)
@@ -509,6 +551,26 @@ eq(roster:get("a").name, "ANN", "a move keeps the name")
 eq(roster:get("a").sprite, Config.DEFAULT_SPRITE, "a move keeps the sprite")
 eq(roster:get("a").x, 6, "and applies the new position")
 
+-- ...and the flags that ride on a presence update are actually applied.
+--
+-- The regression, found by the two-instance run and invisible to every
+-- assertion that came before it: a party formed after both players were
+-- already online arrives as a presence update, and a merge that copied the
+-- position but not the flag left the roster on its join-time false forever.
+-- What the player saw was an INVITE row still offered against somebody who
+-- could no longer accept, and no PARTY column and no map marker at all.
+eq(roster:get("a").party, false, "a player joins unattached")
+roster:setParty("a", true)
+eq(roster:get("a").party, true, "a presence update can put them in a party")
+roster:move("a", "PALLET", 7, 5, "right")
+eq(roster:get("a").party, true, "and walking does not take it off them again")
+roster:setParty("a", false)
+eq(roster:get("a").party, false, "leaving one clears it")
+eq(roster:setParty("nosuch", true), nil, "an unknown id is a no-op")
+
+roster:setBusy("a", true)
+eq(roster:get("a").busy, true, "busy is carried the same way")
+
 local sorted = roster:sorted()
 eq(sorted[1].name, "ANN", "sorted is stable and alphabetical")
 eq(sorted[3].name, "CAL", "all the way down")
@@ -546,8 +608,17 @@ eq(chat:bubbleFor("a"), "over here", "a global message bubbles")
 chat:bubble("a", "newer", "global")
 eq(chat:bubbleFor("a"), "newer", "a newer bubble replaces the older one")
 
+eq(chat:line({ name = "ANN", scope = "party", text = "this way" }),
+   "[P]ANN: this way", "and a party line differently again")
+
 eq(chat:bubble("b", "secret", "private"), nil, "a whisper never bubbles")
 eq(chat:bubbleFor("b"), nil, "so nothing is drawn over their head")
+
+-- A party line does bubble, and that is the same rule rather than an
+-- exception to it: a bubble is only ever drawn in the game of somebody who
+-- received the line, and the hub sends a party line to the party alone.
+chat:bubble("c", "over here", "party")
+eq(chat:bubbleFor("c"), "over here", "a party message bubbles over their head")
 
 chat:update(Config.BUBBLE_SECONDS - 0.1)
 check(chat:bubbleFor("a") ~= nil, "a bubble survives until its time is up")
@@ -1179,6 +1250,131 @@ local ended = take(bobPeer, Wire.SESSION_END)
 check(ended ~= nil, "leaving ends the session for the other side")
 eq(ended.reason, "peer_left", "with a reason")
 
+-- ------- parties
+--
+-- Driven on their own hub so the scenario is not reading traffic the trade
+-- above left behind.  These are the same behaviours server/hub.test.js pins
+-- over real sockets on the Node side; two implementations of one protocol
+-- only stay honest if both are tested.
+--
+-- Wrapped in a function for scope, like the trade scenario further down:
+-- this chunk is already at Lua's 200-local ceiling for one function body,
+-- and a dozen more names at the top level is what tips it over.
+
+;(function()
+
+local partyHub = Hub.new({ maxPlayers = 4 })
+local pAnn, pAnnPeer = join(partyHub, "ANN", "PALLET", 5, 5)
+local pBob, pBobPeer = join(partyHub, "BOB", "PALLET", 6, 5)
+local pCal, pCalPeer = join(partyHub, "CAL", "PALLET", 7, 5)
+pAnnPeer.outbox, pBobPeer.outbox, pCalPeer.outbox = {}, {}, {}
+
+-- an invite reaches its target, and nobody else
+partyHub:receive(pAnn, { type = Wire.PARTY_INVITE, to = pBob.id })
+local invite = take(pBobPeer, Wire.PARTY_INVITE)
+check(invite ~= nil, "an invite reaches the player it names")
+eq(invite.name, "ANN", "with the asker's name")
+eq(invite.from, pAnn.id, "and their id to answer to")
+eq(take(pCalPeer, Wire.PARTY_INVITE), nil, "and reaches nobody else")
+
+-- only the player who was asked may answer it
+partyHub:receive(pCal, { type = Wire.PARTY_RESPOND, to = pAnn.id, accept = true })
+eq(take(pAnnPeer, Wire.PARTY), nil, "a third party cannot accept for them")
+
+partyHub:receive(pBob, { type = Wire.PARTY_RESPOND, to = pAnn.id, accept = true })
+local annParty = take(pAnnPeer, Wire.PARTY)
+local bobParty = take(pBobPeer, Wire.PARTY)
+check(annParty ~= nil and bobParty ~= nil, "accepting forms the party for both")
+eq(annParty.id, bobParty.id, "both sides share a party id")
+eq(#annParty.members, 2, "and the whole membership, not a delta")
+eq(#partyHub:partyMembers(annParty.id), 2, "which the hub agrees with")
+
+-- everyone else is told, because the flag is what gates their INVITE row
+local seen = take(pCalPeer, Wire.MOVE)
+check(seen ~= nil, "the rest of the game hears the presence change")
+eq(seen.party, true, "and sees them as spoken for")
+
+-- the ask is spent: answering twice cannot form a second party
+partyHub:receive(pBob, { type = Wire.PARTY_RESPOND, to = pAnn.id, accept = true })
+eq(take(pAnnPeer, Wire.PARTY), nil, "the same ask cannot be accepted twice")
+
+-- somebody already in a party is refused before the prompt is ever shown
+pCalPeer.outbox = {}
+partyHub:receive(pCal, { type = Wire.PARTY_INVITE, to = pBob.id })
+local refused = take(pCalPeer, Wire.PARTY_DECLINE)
+check(refused ~= nil, "inviting someone who is taken is declined at once")
+eq(refused.reason, "in_party", "with a reason worth telling apart from a no")
+eq(take(pBobPeer, Wire.PARTY_INVITE), nil, "and never reaches them")
+
+-- ...and so is inviting *out* of a party you are already in
+partyHub:receive(pAnn, { type = Wire.PARTY_INVITE, to = pCal.id })
+eq(take(pCalPeer, Wire.PARTY_INVITE), nil,
+   "a player already in a party cannot invite anyone")
+
+-- party chat reaches the party and stops there
+partyHub:update(Config.CHAT_GATE * 2)
+pAnnPeer.outbox, pBobPeer.outbox, pCalPeer.outbox = {}, {}, {}
+partyHub:receive(pAnn, { type = Wire.CHAT, scope = "party", text = "this way" })
+local partyLine = take(pBobPeer, Wire.CHAT)
+check(partyLine ~= nil, "a party line reaches the other member")
+eq(partyLine.scope, "party", "tagged party")
+eq(take(pCalPeer, Wire.CHAT), nil, "and nobody outside it")
+
+-- a player with no party has nowhere to say it, so it is dropped rather than
+-- widened -- a scope that silently became "everyone" is the worst failure a
+-- message somebody meant privately could have
+partyHub:update(Config.CHAT_GATE * 2)
+partyHub:receive(pCal, { type = Wire.CHAT, scope = "party", text = "anyone?" })
+eq(take(pAnnPeer, Wire.CHAT), nil, "party chat with no party goes nowhere")
+eq(take(pBobPeer, Wire.CHAT), nil, "not even to a party that exists")
+
+-- leaving ends it for both, and tells the rest of the game
+pAnnPeer.outbox, pBobPeer.outbox, pCalPeer.outbox = {}, {}, {}
+partyHub:receive(pAnn, { type = Wire.PARTY_LEAVE })
+local bobEnd = take(pBobPeer, Wire.PARTY_END)
+check(bobEnd ~= nil, "leaving ends the party for the other member")
+eq(bobEnd.reason, "peer_left", "and says which of the two it was")
+local annEnd = take(pAnnPeer, Wire.PARTY_END)
+check(annEnd ~= nil, "the leaver is told too, so a client always converges")
+eq(annEnd.reason, "left", "with the reason that suppresses a box")
+eq(pAnn.partyId, nil, "the hub holds no party for either of them")
+eq(pBob.partyId, nil, "on either side")
+eq(take(pCalPeer, Wire.MOVE).party, false, "and everyone sees them free again")
+
+-- and now they can be asked again
+partyHub:receive(pCal, { type = Wire.PARTY_INVITE, to = pBob.id })
+check(take(pBobPeer, Wire.PARTY_INVITE) ~= nil,
+      "a player whose party ended can be invited again")
+partyHub:receive(pBob, { type = Wire.PARTY_RESPOND, to = pCal.id, accept = false })
+local said = take(pCalPeer, Wire.PARTY_DECLINE)
+check(said ~= nil, "declining answers the asker")
+eq(said.reason, "no", "as a no rather than as a taken player")
+
+-- a party does not survive the connection that made it
+partyHub:receive(pCal, { type = Wire.PARTY_INVITE, to = pBob.id })
+partyHub:receive(pBob, { type = Wire.PARTY_RESPOND, to = pCal.id, accept = true })
+take(pBobPeer, Wire.PARTY); take(pCalPeer, Wire.PARTY)
+partyHub:drop(pCal)
+local dropEnd = take(pBobPeer, Wire.PARTY_END)
+check(dropEnd ~= nil, "a member disconnecting ends the party")
+eq(dropEnd.reason, "peer_left", "as a peer leaving")
+eq(pBob.partyId, nil, "and the survivor is not left in a party of one")
+
+-- a party outlives a trade: being busy stops you battling, not travelling
+partyHub:receive(pAnn, { type = Wire.PARTY_INVITE, to = pBob.id })
+partyHub:receive(pBob, { type = Wire.PARTY_RESPOND, to = pAnn.id, accept = true })
+local together = take(pAnnPeer, Wire.PARTY)
+check(together ~= nil, "two free players team up")
+partyHub:receive(pAnn, { type = Wire.REQUEST, to = pBob.id, kind = "trade" })
+partyHub:receive(pBob, { type = Wire.RESPOND, to = pAnn.id, kind = "trade",
+                         accept = true })
+check(take(pAnnPeer, Wire.SESSION) ~= nil, "and can still trade with each other")
+eq(pAnn.partyId, together.id, "without the trade ending the party")
+partyHub:receive(pAnn, { type = Wire.SESSION_LEAVE })
+eq(pAnn.partyId, together.id, "or ending it when the trade does")
+
+end)()
+
 -- ------- refusals and liveness
 
 -- the cap is charged at hello, so a stranger connects and is then refused
@@ -1542,9 +1738,138 @@ eq(overlay:worldIsFlat(gameWith({ voxel = 3, tiltshift = 1 })), false,
 
 stubPipelines = {}
 
+-- Wrapped in a function purely for scope, the way the trade scenario below
+-- is: this chunk sits at Lua's 200-local ceiling for one function body, and
+-- the merge put two branches' worth of new top-level names into it at once.
+
+;(function()
+
+-- ------- the party marker on a nameplate
+--
+-- A `▶` in front of your party member's nickname, so that on a map with
+-- several players standing on it "which of these is my friend" is answerable
+-- at a glance. Everybody else keeps their own name.
+--
+-- What this cannot check is whether the marker is *drawable*: the committed
+-- fixture font carries letters and digits and nothing else, so asking it
+-- about `▶` would fail on a glyph the real extracted font has. The
+-- two-instance driver asks that question against the real charmap -- and it
+-- is not hypothetical, it is the bug this marker had. An asterisk drew
+-- nothing at all, and every string-level assertion here passed anyway.
+
+local Party = need("Party")
+local plateParty = Party.new({ send = function() end },
+                             { say = function() end })
+plateParty:setSelf("me")
+eq(overlay:nameFor({ id = "them", name = "BOB" }), "BOB",
+   "with no party in play, a player is drawn under their own name")
+
+plateParty:onParty({ id = "1", members = { { id = "me", name = "ANN" },
+                                           { id = "them", name = "BOB" } } })
+local partied = Overlay.new({ chat = Chat.new(), party = plateParty })
+
+eq(partied:nameFor({ id = "them", name = "BOB" }),
+   Overlay.PARTY_MARK .. "BOB",
+   "your party member's plate carries the marker, in front of the name")
+eq(partied:nameFor({ id = "them", name = "BOB" }), "\226\150\182BOB",
+   "which is the game's own cursor glyph -- the font has no asterisk to draw")
+eq(partied:nameFor({ id = "other", name = "CAL" }), "CAL",
+   "a player outside the party is not marked")
+eq(partied:nameFor({ id = "me", name = "ANN" }), "ANN",
+   "nor are you, on the one screen you never appear on anyway")
+
+-- One glyph, three bytes. Every length this file measures for the screen is
+-- measured in glyphs, and a marker that is one character but three bytes long
+-- is exactly what tells a byte-counting cap from a glyph-counting one.
+eq(#Overlay.PARTY_MARK, 3, "the marker is three bytes of UTF-8")
+eq(#partied:nameFor({ id = "them", name = "BOB" }), 6,
+   "so a marked name is longer in bytes than it is on screen")
+
+-- ------- your party member on the TOWN MAP
+--
+-- Where in Kanto they are, which is the one question the overworld cannot
+-- answer -- it only ever shows the room you are standing in.
+--
+-- Only the placement is asserted here, because only the placement can be
+-- wrong in an interesting way: which member lands on which city, and who is
+-- left off. The drawing itself is four love.graphics calls that plain luajit
+-- has no love to make, so the two-instance driver opens a real TOWN MAP and
+-- reads back what the frame committed.
+--
+-- The fake state is the shape src/ui/TownMap builds for itself: byMap is its
+-- mapId -> {name, x, y} index, and markerXY puts a cell at x*8+16, y*8+8.
+
+local townRoster = Roster.new()
+townRoster:setSelf("me")
+townRoster:put(Wire.presence({ id = "them", name = "BOB", sprite = "SPRITE_BLUE",
+                               map = "CERULEAN_CITY", x = 3, y = 4 }))
+local townParty = Party.new({ send = function() end }, { say = function() end })
+townParty:setSelf("me")
+local townOverlay = Overlay.new({ roster = townRoster, party = townParty,
+                                  chat = Chat.new() })
+local TOWN_STATE = {
+  mode = "grid",
+  byMap = {
+    CERULEAN_CITY = { name = "CERULEAN CITY", x = 10, y = 5 },
+    PALLET_TOWN   = { name = "PALLET TOWN",   x = 3,  y = 15 },
+    REDS_HOUSE_2F = { name = "PALLET TOWN",   x = 3,  y = 15 },
+  },
+}
+
+eq(#townOverlay:townMapMarks(TOWN_STATE), 0,
+   "with no party there is nobody to put on the map")
+
+townParty:onParty({ id = "1", members = { { id = "me", name = "ANN" },
+                                          { id = "them", name = "BOB" } } })
+local marks = townOverlay:townMapMarks(TOWN_STATE)
+eq(#marks, 1, "a party member standing in a known city gets a mark")
+eq(marks[1].name, "BOB", "carrying their nickname")
+eq(marks[1].sprite, "SPRITE_BLUE", "and the character they chose")
+eq(marks[1].place, "CERULEAN CITY", "at the city they are actually in")
+-- markerXY: the nybble grid sits two tiles in and one tile down
+eq(marks[1].x, 10 * 8 + 16, "on the cell's own screen column")
+eq(marks[1].y, 5 * 8 + 8, "and row")
+
+-- an interior points at its town's square, the way the screen's own index does
+townRoster:move("them", "REDS_HOUSE_2F", 1, 1, "down")
+eq(townOverlay:townMapMarks(TOWN_STATE)[1].place, "PALLET TOWN",
+   "a member indoors shows at the town the building is in")
+
+-- ...and a map the town map has no square for leaves them off rather than
+-- putting them at a guessed cell
+townRoster:move("them", "SOME_MODDED_MAP", 1, 1, "down")
+eq(#townOverlay:townMapMarks(TOWN_STATE), 0,
+   "a map with no square on the town map places nobody")
+
+-- a member in a battle or a menu has no cell at all, and so no city
+townRoster:move("them", nil, nil, nil, "down")
+eq(#townOverlay:townMapMarks(TOWN_STATE), 0,
+   "and neither does a member who is not in the world right now")
+
+-- you are never drawn: the screen already blinks your own location, and a
+-- second marker on the same city reads as two people standing there
+townRoster:move("them", "CERULEAN_CITY", 3, 4, "down")
+local mine = townOverlay:townMapMarks(TOWN_STATE)
+eq(#mine, 1, "back on the map once they are somewhere again")
+eq(mine[1].id, "them", "and it is them, never you")
+
+-- a screen with no coordinates at all (the list-mode fallback) has no cells
+eq(#townOverlay:townMapMarks({ mode = "grid" }), 0,
+   "a town map with no index places nobody")
+eq(#townOverlay:townMapMarks(nil), 0, "and neither does no screen at all")
+
+end)()
+
 -- ------------------------------------------------------------------
 -- 8. The typed line staying on a 160-wide screen
 -- ------------------------------------------------------------------
+--
+-- Scoped like the sections around it: this file is at Lua's 200-local
+-- ceiling for one function body, and the merge that brought parties in
+-- added another branch's worth of names to the same chunk.
+
+;(function()
+
 --
 -- NamingScreen lays its field out from a fixed x=56 for maxLen slots of
 -- 8px, which was written for the vanilla seven-character name.  Every grid
@@ -1594,6 +1919,8 @@ local _, codeCells = fits(Config.CODE_ENTRY_MAX, "AB")
 eq(#codeCells, Config.CODE_ENTRY_MAX, "a short field keeps all its slots")
 eq(table.concat(codeCells), "AB" .. ("-"):rep(Config.CODE_ENTRY_MAX - 2),
    "with dashes standing in for what is not typed yet")
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 9. Settings the player changes in game
@@ -1934,7 +2261,234 @@ stubMod.log.warn = function() end
 end)()
 
 -- ------------------------------------------------------------------
--- 9. Leaving gives the player their own trainer back
+-- 11. Parties, both sides of the invite
+-- ------------------------------------------------------------------
+--
+-- Driven the way the trade scenario above is: two real Party instances with
+-- the real Hub between them, and a pump() shaped like src/Client.lua's tick
+-- -- dispatch everything the hub queued, then let the client act.  Half of
+-- what a party has to get right is about *two* clients agreeing (an invite
+-- one of them can no longer accept, a leave the other has to hear), and a
+-- single instance asserted against a fake hub cannot see any of it.
+
+;(function()
+
+local Party = need("Party")
+
+local function partySide(hub, name)
+  local side = { name = name, said = {}, chat = Chat.new() }
+  side.peer = fakePeer()
+  side.client = hub:accept(side.peer)
+  side.transport = {
+    send = function(_, msgType, payload)
+      local msg = {}
+      if type(payload) == "table" then
+        for k, v in pairs(payload) do msg[k] = v end
+      end
+      msg.type = msgType
+      hub:receive(side.client, msg)
+      return true
+    end,
+    isReady = function() return true end,
+  }
+  side.ui = {
+    say = function(_, text) side.said[#side.said + 1] = text end,
+    confirm = function(_, _, text, cb) side.confirmText = text; side.confirmBox = cb end,
+  }
+  side.party = Party.new(side.transport, side.ui, side.chat)
+  hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+                             name = name, map = "FIX_TOWN", x = 1, y = 1 })
+  local welcome = take(side.peer, Wire.WELCOME)
+  side.party:setSelf(welcome and welcome.id)
+  return side
+end
+
+local partyDispatch = {
+  [Wire.PARTY_INVITE] = function(s, m) s.party:onInvite({}, m) end,
+  [Wire.PARTY_DECLINE] = function(s, m) s.party:onDecline(m) end,
+  [Wire.PARTY] = function(s, m) s.party:onParty(m) end,
+  [Wire.PARTY_END] = function(s, m) s.party:onEnd(m) end,
+}
+
+local function pumpParty(side)
+  local batch = side.peer.outbox
+  side.peer.outbox = {}
+  for _, msg in ipairs(batch) do
+    local handler = partyDispatch[msg.type]
+    if handler then handler(side, msg) end
+  end
+end
+
+local function answer(side, yes)
+  local box = side.confirmBox
+  side.confirmBox = nil
+  box(yes)
+end
+
+local function saidSomething(side, needle)
+  for _, line in ipairs(side.said) do
+    if line:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+local hub = Hub.new({ maxPlayers = 4 })
+local ann = partySide(hub, "ANN")
+local bob = partySide(hub, "BOB")
+local cal = partySide(hub, "CAL")
+
+eq(ann.party:has(), false, "nobody starts in a party")
+eq(#ann.party:list(), 0, "with nothing to list")
+
+-- ------- the invite, accepted
+
+ann.party:invite({ id = bob.client.id, name = "BOB" })
+check(saidSomething(ann, "Asked BOB"), "the asker is told the invite went out")
+pumpParty(bob)
+check(bob.confirmBox ~= nil, "and the invited player is asked")
+check(bob.confirmText:find("ANN"), "by name")
+
+answer(bob, true)
+pumpParty(ann); pumpParty(bob)
+eq(ann.party:has(), true, "accepting puts the asker in a party")
+eq(bob.party:has(), true, "and the answerer")
+eq(ann.party:count(), 2, "of two")
+eq(ann.party:partnerName(), "BOB", "each knowing who the other is")
+eq(bob.party:partnerName(), "ANN", "from both sides")
+check(saidSomething(ann, "party"), "and both are told on screen")
+check(saidSomething(bob, "party"), "not just the one who accepted")
+
+-- you are on your own members list, which is the one list that includes you
+eq(#ann.party:list(), 2, "the members list carries both of you")
+eq(ann.party:isSelf(ann.client.id), true, "and knows which one is you")
+eq(ann.party:isPartner(ann.client.id), false, "so the marker is not drawn on you")
+eq(ann.party:isPartner(bob.client.id), true, "and is on them")
+
+-- the party's own history says when it started
+local note = ann.chat:recent()[1]
+check(note ~= nil and note.text:find("BOB"), "the chat log records the teaming up")
+eq(note.scope, "party", "as a party line")
+eq(ann.chat.unread, 0, "which does not put an asterisk on the CHAT row")
+
+-- ------- what an invite cannot do
+
+cal.said = {}
+cal.party:invite({ id = bob.client.id, name = "BOB" })
+pumpParty(cal)
+check(saidSomething(cal, "already"), "inviting a taken player says so plainly")
+eq(cal.party:has(), false, "and forms nothing")
+
+ann.said = {}
+ann.party:invite({ id = cal.client.id, name = "CAL" })
+check(saidSomething(ann, "already in"), "and neither can somebody already in one")
+pumpParty(cal)
+eq(cal.confirmBox, nil, "the prompt never reaches them")
+
+-- an invite that arrives while you are in a party is refused on your behalf,
+-- rather than queued behind whatever you are doing
+cal.party.outgoing = nil
+cal.party:invite({ id = ann.client.id, name = "ANN" })
+pumpParty(ann)
+eq(ann.confirmBox, nil, "a player in a party is not prompted")
+pumpParty(cal)
+check(saidSomething(cal, "ANN"), "and the asker hears back rather than waiting")
+
+-- ------- party chat
+
+hub:update(Config.CHAT_GATE * 2)
+ann.peer.outbox, bob.peer.outbox, cal.peer.outbox = {}, {}, {}
+hub:receive(ann.client, { type = Wire.CHAT, scope = "party", text = "this way" })
+check(take(bob.peer, Wire.CHAT) ~= nil, "a party line reaches your partner")
+eq(take(cal.peer, Wire.CHAT), nil, "and stops at the party")
+
+-- ------- leaving
+
+bob.said = {}
+ann.said = {}
+eq(ann.party:leave(), true, "leaving reports that it happened")
+eq(ann.party:has(), false, "and clears immediately, without waiting on the hub")
+pumpParty(bob)
+eq(bob.party:has(), false, "the other member's party ends too")
+check(saidSomething(bob, "ANN left"), "and they are told who left")
+
+-- the hub's own confirmation lands on a client with nothing left to clear,
+-- which is the ordinary case rather than an error
+ann.said = {}
+pumpParty(ann)
+eq(ann.party:has(), false, "the leaver stays out")
+eq(#ann.said, 0, "and is not told what they just did")
+
+-- ------- a member who disconnects
+
+ann.party:invite({ id = bob.client.id, name = "BOB" })
+pumpParty(bob); answer(bob, true)
+pumpParty(ann); pumpParty(bob)
+eq(ann.party:has(), true, "they can team up again afterwards")
+
+bob.said = {}
+hub:drop(ann.client)
+pumpParty(bob)
+eq(bob.party:has(), false, "a member disconnecting ends the party")
+check(saidSomething(bob, "left"), "and the survivor is told rather than left alone")
+eq(bob.party:partnerName(), nil, "with nobody left to name")
+
+-- ------- an ask that can never be answered is not left hanging
+--
+-- Both of these leave the *asker* stuck, not the person who walked away:
+-- an outgoing invite is held until an answer comes back, and this client's
+-- own "You already asked X." then refuses every later invite. A player
+-- locked out of the feature by somebody else's timing, naming a trainer who
+-- may not even be online, is the failure worth pinning.
+
+-- (a) the player we asked disconnects before answering
+cal.said = {}
+cal.party:invite({ id = bob.client.id, name = "BOB" })
+eq(cal.party.outgoing ~= nil, true, "an unanswered invite is held")
+cal.peer.outbox = {}
+hub:drop(bob.client)
+cal.party:onPeerGone(bob.client.id)
+eq(cal.party.outgoing, nil, "a peer going offline releases the ask")
+check(saidSomething(cal, "offline"), "and says why, naming them")
+eq(cal.party:onPeerGone(ann.client.id), nil,
+   "somebody else leaving is not our business")
+
+-- (b) we join a party while somebody else's prompt is still on our screen
+local dan = partySide(hub, "DAN")
+local eve = partySide(hub, "EVE")
+local fay = partySide(hub, "FAY")
+fay.party:invite({ id = dan.client.id, name = "DAN" })
+pumpParty(dan)
+check(dan.confirmBox ~= nil, "DAN has FAY's prompt up")
+eve.party:invite({ id = dan.client.id, name = "DAN" })
+pumpParty(dan)
+-- DAN's client refuses EVE outright: it already has a prompt up, and two
+-- boxes for the same question is not a choice anybody can make
+pumpParty(eve)
+check(saidSomething(eve, "DAN"), "a second asker hears back rather than waiting")
+
+-- ...and now DAN teams up with somebody else while FAY's prompt is still on
+-- screen. The answer FAY is waiting for has to arrive, and it has to be no.
+dan.confirmBox = nil
+fay.said, fay.peer.outbox = {}, {}
+dan.party:onParty({ id = "9", members = { { id = dan.client.id, name = "DAN" },
+                                          { id = eve.client.id, name = "EVE" } } })
+check(take(fay.peer, Wire.PARTY_DECLINE) ~= nil,
+      "joining a party answers the prompt that was still up, rather than "
+      .. "leaving the asker waiting on a box that is gone")
+eq(dan.party.incoming, nil, "and the prompt is spent")
+
+-- ------- and a reset takes everything, including a half-finished invite
+
+cal.party.outgoing = { to = "x", name = "X" }
+cal.party.incoming = { from = "y", name = "Y" }
+cal.party:reset()
+eq(cal.party.outgoing, nil, "a disconnect drops an unanswered invite")
+eq(cal.party.incoming, nil, "and a prompt that was still up")
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 12. Leaving gives the player their own trainer back
 -- ------------------------------------------------------------------
 --
 -- Wearing a hub character has to be undone on the way out, or a player who

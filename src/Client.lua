@@ -15,6 +15,7 @@ local Transport = need("Transport")
 local Roster = need("Roster")
 local Avatars = need("Avatars")
 local Chat = need("Chat")
+local Party = need("Party")
 local Ui = need("Ui")
 local Overlay = need("Overlay")
 local Sessions = need("Sessions")
@@ -42,10 +43,12 @@ local server = HostServer.new()
 local ui = Ui.new(ctx)
 local overlay = Overlay.new(ctx)
 local sessions = Sessions.new(transport, ui)
+local party = Party.new(transport, ui, ctx.chat)
 
 ctx.client = M
 ctx.ui = ui
 ctx.sessions = sessions
+ctx.party = party
 ctx.server = server
 
 local presenceClock = 0
@@ -354,6 +357,13 @@ end
 -- refuses to carry, so it can never arrive from the wire -- which is what
 -- makes its presence the honest test for "this card is mine", and keeps
 -- another player's wallet unreachable by construction.
+--
+-- Two callers now, arrived at independently and wanting the same thing:
+-- MY PROFILE on the MMO menu, and the party members list, which lists both
+-- members and would otherwise open "they just went offline" against
+-- yourself. The party branch built a second copy of this without the money
+-- row; there is one, and it is this one, because a card that is missing the
+-- field that identifies it as yours is the weaker of the two.
 function M.ownCard(a, b)
   local game = arg1(a, b) or ctx.game
   local save = game and game.save
@@ -540,6 +550,7 @@ end
 function M.disconnect()
   M.restoreLook()
   sessions:endSession(nil)
+  party:reset()
   ctx.avatars:clear()
   ctx.roster:reset()
   ctx.chat:clear()
@@ -563,6 +574,13 @@ function M.say(a, b, c, d)
   if a == M then scope, text, to = b, c, d else scope, text, to = a, b, c end
   if not transport:isReady() then return false end
   if not Wire.SCOPES[scope] then return false end
+  -- The hub drops a party line from somebody with no party, which is right
+  -- -- but the local echo below would still put it in the scrollback, so the
+  -- player would watch their own message land and assume it went somewhere.
+  if scope == "party" and not party:has() then
+    ui:say("You're not in\na party.")
+    return false
+  end
 
   local clean = Wire.text(text, Config.MESSAGE_MAX)
   if not clean then
@@ -686,6 +704,11 @@ handlers[Wire.WELCOME] = function(game, msg)
   end
   ctx.roster:reset()
   ctx.roster:setSelf(id)
+  -- A party never survives a connection, so it starts empty -- but the party
+  -- has to be told which id is ours, because it is the one list that
+  -- includes us and the roster deliberately does not.
+  party:reset()
+  party:setSelf(id)
   for _, raw in ipairs(msg.players or {}) do
     ctx.roster:put(Wire.presence(raw))
   end
@@ -710,6 +733,10 @@ handlers[Wire.PART] = function(_, msg)
   if not id then return end
   ctx.roster:remove(id)
   ctx.avatars:despawn(id)
+  -- An invite in flight to somebody who just left will never be answered,
+  -- and a client that kept waiting for that answer could never invite
+  -- anybody again.
+  party:onPeerGone(id)
 end
 
 handlers[Wire.MOVE] = function(_, msg)
@@ -719,6 +746,7 @@ handlers[Wire.MOVE] = function(_, msg)
   local x, y = Wire.int(msg.x, 0, 4096), Wire.int(msg.y, 0, 4096)
   local facing = Wire.facing(msg.facing)
   ctx.roster:setBusy(id, msg.busy)
+  ctx.roster:setParty(id, msg.party)
   if map and x and y then
     ctx.roster:move(id, map, x, y, facing)
   else
@@ -738,6 +766,11 @@ handlers[Wire.CHAT] = function(_, msg)
   ctx.chat:push({ from = from, name = name, scope = scope, text = text })
   if from then ctx.chat:bubble(from, text, scope) end
 end
+
+handlers[Wire.PARTY_INVITE] = function(game, msg) party:onInvite(game, msg) end
+handlers[Wire.PARTY_DECLINE] = function(_, msg) party:onDecline(msg) end
+handlers[Wire.PARTY] = function(_, msg) party:onParty(msg) end
+handlers[Wire.PARTY_END] = function(_, msg) party:onEnd(msg) end
 
 handlers[Wire.REQUEST] = function(game, msg) sessions:onRequest(game, msg) end
 handlers[Wire.DECLINE] = function(_, msg) sessions:onDecline(msg) end
@@ -832,6 +865,13 @@ local function tick(game, dt)
   -- in single-player wearing whoever they picked for the hub, and a trade
   -- session still open on a socket that is gone.
   if not transport:isOpen() then
+    -- M.disconnect(), not a partial teardown. Both sides of the merge were
+    -- fixing the same shape of bug -- a dropped player left holding state a
+    -- deliberate LEAVE would have cleared -- and main's answer subsumes the
+    -- party branch's: the party reset this used to do inline lives inside
+    -- disconnect() with the roster, the avatars, the session and the
+    -- restored look, so there is now one teardown and no second list to
+    -- keep in step with it.
     local reason = transport.error
     M.disconnect()
     if reason then ui:say(tostring(reason)) end
@@ -954,6 +994,10 @@ function M.install()
   -- somewhere of its own should not have to reach into HostServer for it
   mod.exports.hostAddress = function() return M.isHosting() and server:address() end
   mod.exports.players = function() return ctx.roster:sorted() end
+  -- Who you are travelling with, you included, in the order the hub listed
+  -- them -- empty when you are not in a party. The end-to-end driver reads
+  -- this to tell "the invite was accepted" from "the box appeared".
+  mod.exports.party = function() return party:list() end
   mod.exports.say = function(scope, text, to) return M.say(scope, text, to) end
   -- newest last, same order the chat screen scrolls
   mod.exports.chat = function() return ctx.chat:recent() end

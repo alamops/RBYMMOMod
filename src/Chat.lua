@@ -14,7 +14,7 @@ M.__index = M
 
 -- One-character scope tags.  The chat box is 20 tiles wide at Game Boy
 -- resolution, so a full word per line would cost a third of it.
-M.TAG = { global = "G", ["local"] = "L", private = "W" }
+M.TAG = { global = "G", ["local"] = "L", private = "W", party = "P" }
 
 function M.new()
   return setmetatable({ history = {}, bubbles = {}, unread = 0 }, M)
@@ -50,6 +50,13 @@ end
 -- once over one head is unreadable, and the newer line is the one that
 -- matters.  Private messages never bubble -- a whisper drawn over the
 -- sender's head in the middle of the world is not private.
+--
+-- Party messages do bubble, and that is not an exception to the rule above
+-- but the same rule applied.  A bubble is drawn only in the game of
+-- somebody who *received* the line, and the hub sends a party line to the
+-- party and nobody else -- so the only screen it can appear on is your
+-- partner's.  Seeing what they said float over their head as you walk
+-- together is the point of travelling together.
 function M:bubble(playerId, text, scope)
   if scope == "private" then return nil end
   if not (playerId and text) then return nil end
