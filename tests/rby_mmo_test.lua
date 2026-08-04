@@ -1435,7 +1435,60 @@ eq(overlay:worldIsFlat(gameWith({ voxel = 3, tiltshift = 1 })), false,
 stubPipelines = {}
 
 -- ------------------------------------------------------------------
--- 7. Settings the player changes in game
+-- 8. The typed line staying on a 160-wide screen
+-- ------------------------------------------------------------------
+--
+-- NamingScreen lays its field out from a fixed x=56 for maxLen slots of
+-- 8px, which was written for the vanilla seven-character name.  Every grid
+-- this mod opens is longer, and at 32 -- an address -- the line ran to 312
+-- on a 160-wide screen: "192.168.1.20:7788" typed in and the port gone off
+-- the right edge, with no way to check it.  The whole point of the layout
+-- below is that no length the mod uses can do that again, so the lengths
+-- are read out of Config rather than written down here.
+
+local Ui = need("Ui")
+
+local function fits(maxLen, typed)
+  local glyphs = {}
+  for i = 1, #(typed or "") do glyphs[i] = typed:sub(i, i) end
+  local x, cells = Ui.fieldLayout(maxLen, glyphs)
+  return x, cells, x + #cells * 8
+end
+
+for _, case in ipairs({
+  { "an address", 32 },
+  { "a chat line", Config.COMPOSE_MAX },
+  { "a join code", Config.CODE_ENTRY_MAX },
+  { "a trainer name", Config.NAME_MAX },
+}) do
+  local label, maxLen = case[1], case[2]
+  local x, cells, right = fits(maxLen)
+  check(x >= 0 and right <= 160, label .. " draws inside the screen")
+  eq(x, 160 - right, label .. " is centred, not pushed to one side")
+  check(#cells > 0, label .. " shows something to type into")
+end
+
+-- The case the screenshot was taken of: the whole address, readable.
+local addrX, addrCells = fits(32, "192.168.1.20:7788")
+eq(table.concat(addrCells):sub(1, 17), "192.168.1.20:7788",
+   "a full ip and port is on the line, port included")
+check(addrX + #addrCells * 8 <= 160, "and still inside the right edge")
+
+-- Longer than the window: the end is what is kept, because the characters
+-- just entered are the ones being checked.
+local _, longCells = fits(32, "averylonghostname.example.com:77")
+eq(#longCells, 18, "the window is as many slots as fit between the margins")
+eq(table.concat(longCells), "ame.example.com:77",
+   "and holds the end of a line too long to show whole")
+
+-- Short lines pad with dashes exactly as the vanilla field does.
+local _, codeCells = fits(Config.CODE_ENTRY_MAX, "AB")
+eq(#codeCells, Config.CODE_ENTRY_MAX, "a short field keeps all its slots")
+eq(table.concat(codeCells), "AB" .. ("-"):rep(Config.CODE_ENTRY_MAX - 2),
+   "with dashes standing in for what is not typed yet")
+
+-- ------------------------------------------------------------------
+-- 9. Settings the player changes in game
 -- ------------------------------------------------------------------
 --
 -- Menu code calls these as client:setMaxPlayers(n) -- the colon form, which
@@ -1469,7 +1522,7 @@ eq(Client.joinAddress(), "192.168.1.7:7788", "leaving the previous one intact")
 eq(Client.isHosting(), false, "a fresh client is not hosting")
 
 -- ------------------------------------------------------------------
--- 8. Trading, and the one invariant that matters
+-- 10. Trading, and the one invariant that matters
 -- ------------------------------------------------------------------
 --
 -- Either both sides of a trade apply it or neither does.  Nothing else in

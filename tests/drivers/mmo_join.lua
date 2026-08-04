@@ -147,19 +147,27 @@ return function(game)
     check(typed and table.concat(naming.glyphs) == naming.default,
           "and the line reads back what was typed: "
             .. table.concat(naming.glyphs))
-    -- What is on the line is not always what is on the screen. NamingScreen
-    -- draws the field from x=56 in 8px cells, so 13 of them fit across a
-    -- 160px screen while this screen's maxLen is 32 -- "127.0.0.1:7788" is
-    -- 14 characters and loses its last one off the right edge. Logged rather
-    -- than asserted: it is a drawing bug in a screen this file does not own,
-    -- and turning it into a failure here would stop the run reporting on the
-    -- things it does own.
-    local VISIBLE_CELLS = 13
-    if #naming.default > VISIBLE_CELLS then
-      log(("WARN the address field draws %d cells but holds %d characters, so "
-        .. "%q shows as %q"):format(VISIBLE_CELLS, #naming.default,
-        naming.default, naming.default:sub(1, VISIBLE_CELLS)))
-    end
+    -- What is on the line has to be what is on the screen, which is not the
+    -- same claim. NamingScreen draws its field from a fixed x=56 in 8px
+    -- cells, so only 13 fit across a 160px screen while this screen's maxLen
+    -- is 32: "127.0.0.1:7788" is 14 characters and used to lose its last one
+    -- -- part of the port, the half a player most needs to check -- off the
+    -- right edge, with the rest pushed hard against that edge rather than
+    -- centred. src/Ui.lua repaints the row now (M.fieldLayout), so 18 cells
+    -- fit between the margins and this is a real check rather than the WARN
+    -- it was while the bug belonged to a screen nothing here owned.
+    --
+    -- The port, specifically, is what is asserted. "Everything fits" would
+    -- be the wrong claim: maxLen is 32 precisely so a hostname can be typed,
+    -- and "mybox.example.com:7788" is 22 -- longer than the window on
+    -- purpose. What the fix guarantees for *any* length is that the window
+    -- holds the end of the line, so the port never scrolls away.
+    local VISIBLE_CELLS = 18
+    local shown = naming.default:sub(-VISIBLE_CELLS)
+    local port = naming.default:match(":(%d+)$")
+    check(port ~= nil and shown:find(":" .. port, 1, true) ~= nil,
+          ("the port is on screen, not cut off the right edge: %q shows as %q")
+            :format(naming.default, shown))
     check(H.clearGrid(game, naming), "B erases it back to an empty line")
 
     -- The other thing this field takes, and the one that fits: a hostname.
