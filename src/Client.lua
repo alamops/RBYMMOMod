@@ -52,7 +52,18 @@ ctx.party = party
 ctx.server = server
 
 local presenceClock = 0
-local lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
+local lastSent =
+  { map = nil, x = nil, y = nil, facing = nil, busy = nil, running = nil }
+
+-- Whether the last step this player committed was a run.  Written by the
+-- movement.speed wrap, which is the only place that can know it -- holding B
+-- is a fact about the local keyboard, and nothing else in the process sees
+-- it.  Read by pushPresence, so everyone else's copy can draw the sprint.
+--
+-- It is deliberately "the last step", not "B is down right now": a stale
+-- true while standing still costs nothing, because an avatar that is not
+-- stepping has no step to speed up, and the next ordinary step clears it.
+M.runningNow = false
 
 -- Ranked PVP, as this client sees it.
 --
@@ -663,7 +674,8 @@ function M.disconnect()
   ctx.roster:reset()
   ctx.chat:clear()
   transport:close()
-  lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
+  lastSent =
+    { map = nil, x = nil, y = nil, facing = nil, busy = nil, running = nil }
   dialled, authSent = nil, false
   -- A rating belongs to the hub that keeps it, so leaving takes it off the
   -- screen rather than leaving a stale number on your own card in
@@ -716,22 +728,54 @@ function M.say(a, b, c, d)
   return true
 end
 
+-- ------- running
+
+-- What a step should cost in frames, and whether that is a sprint.
+--
+-- Declared out here rather than inside the wrap so the hot path can pcall it
+-- by name and allocate nothing per step. The arithmetic is deliberately
+-- relative: the engine hands us this game's walk speed, and dividing it is
+-- the only way that stays true on a data pack that says a tile is not 16
+-- frames. `frames` is frames-per-tile, so lower is faster.
+--
+-- Everything that is not a plain on-foot step falls through untouched. The
+-- bike is excluded because it is already this fast and because held B is
+-- taken there -- it is Cycling Road's brake -- and surfing because a sprint
+-- across water is not a thing any of these games has.
+local function runSpeed(frames, moveCtx)
+  if mod.options:get("run") == false then return frames, false end
+  if type(frames) ~= "number" then return frames, false end
+  if not moveCtx or moveCtx.onBike or moveCtx.surfing then return frames, false end
+  local input = moveCtx.input
+  if not (input and input.isDown and input:isDown("b")) then
+    return frames, false
+  end
+  return math.max(1, math.floor(frames / Config.RUN_DIVISOR)), true
+end
+
 -- ------- presence
 
-local function presenceChanged(current, busy)
+local function presenceChanged(current, busy, running)
   local mapId = current and current.mapId
   local x = current and current.x
   local y = current and current.y
   local facing = current and current.facing
   return lastSent.map ~= mapId or lastSent.x ~= x or lastSent.y ~= y
     or lastSent.facing ~= facing or lastSent.busy ~= busy
+    -- Compared like the rest of them, and for the reason the party bug
+    -- taught: a run that starts or ends without the cell changing -- turning
+    -- on the spot, a step into a wall -- would otherwise wait for the next
+    -- move to be mentioned, and everyone else would see the wrong pace until
+    -- then.
+    or lastSent.running ~= running
 end
 
 local function pushPresence(force)
   if not transport:isReady() then return end
   local current = World.current()
   local busy = sessions:isBusy()
-  if not force and not presenceChanged(current, busy) then return end
+  local running = M.runningNow and true or false
+  if not force and not presenceChanged(current, busy, running) then return end
 
   lastSent = {
     map = current and current.mapId,
@@ -739,6 +783,7 @@ local function pushPresence(force)
     y = current and current.y,
     facing = current and current.facing,
     busy = busy,
+    running = running,
   }
   transport:send(Wire.MOVE, {
     map = lastSent.map,
@@ -746,6 +791,7 @@ local function pushPresence(force)
     y = lastSent.y,
     facing = lastSent.facing,
     busy = busy,
+    running = running,
   })
 end
 
@@ -874,12 +920,15 @@ handlers[Wire.MOVE] = function(_, msg)
   local facing = Wire.facing(msg.facing)
   ctx.roster:setBusy(id, msg.busy)
   ctx.roster:setParty(id, msg.party)
+  -- Coerced here rather than trusted: this is the raw message, and the
+  -- roster stores what it is given.
+  local running = msg.running and true or false
   if map and x and y then
-    ctx.roster:move(id, map, x, y, facing)
+    ctx.roster:move(id, map, x, y, facing, running)
   else
     -- no cell: the player is in a battle or a menu, so they leave the world
     -- without leaving the roster
-    ctx.roster:move(id, nil, nil, nil, facing)
+    ctx.roster:move(id, nil, nil, nil, facing, running)
     ctx.avatars:despawn(id)
   end
 end
@@ -1067,6 +1116,11 @@ function M.install()
     { key = "sprite", label = "MY SPRITE", type = "choice",
       default = Config.DEFAULT_SPRITE, choices = spriteChoices },
     { key = "bubbles", label = "BUBBLES", type = "toggle", default = true },
+    -- Holding B to run.  On by default because it is the reason the feature
+    -- exists, and a row at all because B already means "cancel" everywhere
+    -- else -- a player who finds their walk unexpectedly fast should have
+    -- somewhere to turn it off without uninstalling the mod.
+    { key = "run", label = "B TO RUN", type = "toggle", default = true },
   })
 
   ui:install()
@@ -1082,6 +1136,29 @@ function M.install()
       pcall(M.leave)
     end
     return next(game, dt)
+  end)
+
+  -- One committed step's speed.  The engine asks once per step, never per
+  -- frame, and floors whatever comes back to at least 1.
+  --
+  -- Not gated on being connected: running is a movement feature that the
+  -- network happens to report, not a multiplayer one, so it works the same
+  -- in a single-player game with the hub switched off. What crosses the wire
+  -- is only the flag recorded here.
+  mod.hooks:wrap("movement.speed", function(next, frames, moveCtx)
+    local ok, speed, sprint = pcall(runSpeed, frames, moveCtx)
+    if not ok then
+      -- pcall has put the error where the speed would have been. Whatever
+      -- went wrong, the step still has to happen at *some* speed, and the
+      -- honest one is the speed we were handed.
+      mod.log:warn("could not work out a running speed (%s); walking this "
+        .. "step -- turn B TO RUN off under START > OPTIONS if it repeats",
+        tostring(speed))
+      M.runningNow = false
+      return next(frames, moveCtx)
+    end
+    M.runningNow = sprint and true or false
+    return next(speed, moveCtx)
   end)
 
   mod.hooks:wrap("render.hud", function(next, game, viewport)
@@ -1185,6 +1262,9 @@ function M.install()
         avatarX = ax, avatarY = ay,
         spawned = ctx.avatars.spawned[player.id] ~= nil,
         walking = ctx.avatars:isWalking(player.id),
+        -- the roster's word, not the NPC's: this is what the sender said
+        -- about their own last step, which is what the drivers assert on
+        running = player.running and true or false,
         avatarMap = ctx.avatars.mapId,
       }
     end

@@ -23,7 +23,14 @@ M.MOD_ID = "rby_mmo"
 -- request, so a newer client would report every match into silence and open
 -- a RANK screen that never fills.  This number lives here and in
 -- server/lib/relay.js -- bump them together.
-M.PROTOCOL = 4
+--
+-- 5 adds running, and it moves for the third time on the same rule: a
+-- protocol-4 hub rebuilds every broadcast from its own fixed field list, so
+-- the `running` flag on mmo.move is not misread, it is dropped without a
+-- word.  The runner would see themselves sprint and everyone else would
+-- watch them walk, with nothing anywhere to explain the difference -- so a
+-- refusal naming both versions is again the better sentence.
+M.PROTOCOL = 5
 
 M.DEFAULT_HUB = "127.0.0.1:7788"
 M.DEFAULT_PORT = 7788
@@ -62,6 +69,22 @@ M.PRESENCE_INTERVAL = 0.125
 -- stall).  Walking it back one tile at a time would take longer than the
 -- drift lasts, so it is despawned and respawned at the true cell instead.
 M.RESYNC_DISTANCE = 6
+
+-- Running: hold B on foot and a tile takes half as long.
+--
+-- A divisor rather than a frame count, because the walk speed it divides is
+-- not ours to know: 16 is vanilla, but a data pack may say otherwise, and
+-- hardcoding 8 here would quietly *slow a modded runner down*.  Two is the
+-- Gen 3+ figure -- running is bike-fast, which is what makes the bike still
+-- worth getting on for its own reasons rather than for its speed.
+M.RUN_DIVISOR = 2
+
+-- What a running remote avatar's npc.stepFrames is set to.  This one is an
+-- absolute count because NPCs get no movement.speed hook to divide -- their
+-- speed is a field read fresh each frame, whose unset default is the
+-- engine's 16 -- so the value the local runner arrives at through the
+-- divisor is spelled out here for the avatars to match.
+M.RUN_STEP_FRAMES = 8
 
 -- Parties: you and one friend, travelling together.
 --

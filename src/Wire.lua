@@ -354,6 +354,11 @@ function M.presence(raw)
     -- INVITE row is offered -- and a party id on every presence would let
     -- any client in the game map out who is travelling with whom.
     party = raw.party and true or false,
+    -- Whether their last step was a run.  Client truth, and the only kind
+    -- available: nothing the hub can see says whether a player is holding B,
+    -- so this is taken on the sender's word the same way `party` is -- the
+    -- worst a liar buys is an avatar that walks at the wrong speed.
+    running = raw.running and true or false,
     profile = M.profile(raw.profile),
     -- Ranked points ride with presence rather than with the trainer card,
     -- because they are not a snapshot of who somebody was when they joined:

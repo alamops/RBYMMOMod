@@ -48,8 +48,14 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // versions. 4 is ranked PVP, and moved for the same reason rather than a
 // different one -- a protocol-3 hub has never heard of a battle result or a
 // leaderboard request, so a newer client would report every match into
-// silence. Kept in step with Config.PROTOCOL on the mod side.
-const PROTOCOL = 4;
+// silence. 5 is running: a sprinting client sends a `running` flag on
+// mmo.move, and a protocol-4 hub rebuilds every broadcast from a field list
+// that has never heard of it -- so two players who both installed the feature
+// would watch each other walk, for the whole session, with nothing said. The
+// rule each of these bumps follows is the same one: bump whenever a client can
+// send something a hub silently ignores. Kept in step with Config.PROTOCOL on
+// the mod side.
+const PROTOCOL = 5;
 // A SHA-256 response is 64 hex characters; the slack is for a future digest,
 // not for an unbounded field.
 const RESPONSE_MAX = 128;
@@ -95,6 +101,11 @@ function presenceOf(client) {
     // offer to invite this player -- and a party id on every presence would
     // let any client in the game map out who is travelling with whom.
     party: Boolean(client.partyId),
+    // Whether they are sprinting, so the avatar other clients draw steps at
+    // the speed the player is actually moving. Unlike busy, this cannot be
+    // derived here: the hub never sees the B button, so the client is the
+    // only authority on it and this is the value it last reported.
+    running: Boolean(client.running),
     // The trainer card the player shows others. Carried here because
     // src/Hub.lua does (Hub.lua:74): a player on a dedicated hub would
     // otherwise silently have no card, and the two hosting paths have to
@@ -210,6 +221,10 @@ handlers['mmo.move'] = (relay, client, msg) => {
     client.y = null;
   }
   if (FACINGS.has(msg.facing)) client.facing = msg.facing;
+  // Client-truth, and a plain coercion is the whole check: any value at all
+  // means "running" or "not", so there is nothing here a malformed one can
+  // do beyond making its own avatar step at the wrong speed.
+  client.running = Boolean(msg.running);
   relay.broadcast('mmo.move', presenceOf(client), client.id);
 };
 
@@ -497,6 +512,9 @@ class Relay {
       sprite: DEFAULT_SPRITE,
       profile: null,
       map: null, x: null, y: null, facing: 'down',
+      // nobody arrives mid-sprint: the first mmo.move says otherwise or it
+      // stays false
+      running: false,
       sessionId: null,
       pendingTo: null,
       partyId: null,

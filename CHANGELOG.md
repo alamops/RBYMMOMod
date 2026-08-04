@@ -4,6 +4,42 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.5.0] - 2026-08-04
+
+### Added
+
+- **Hold B to run.** Hold the B button on foot and you move at bike speed —
+  half the frames per tile, the same 2× the Running Shoes gave Gen 3 — with
+  no bike and no menu. It hooks `movement.speed` and halves whatever `frames`
+  the engine hands it rather than hardcoding a number, so a data pack that
+  changes walk or bike speed keeps its own numbers, just halved. It turns
+  itself off the instant you're on the bike or surfing — Cycling Road's own
+  held-B brake already means something there, and running only ever checks
+  "not those two" before it does anything at all.
+- **Remote players run too.** A running player's avatar steps at the same
+  8-frames-a-tile the bike already gives NPCs on everyone else's screen —
+  one more field on the per-step write that already moves `x`, `y` and
+  `facing`, set the same way the Pikachu follower speeds itself up. `running`
+  rides `mmo.move` and every presence snapshot, coerced to a plain boolean
+  the way `party` already is, and threads straight through `Roster:move`
+  itself rather than living beside it — the exact shape of bug parties
+  shipped with, not repeated here.
+- **`B TO RUN`, on by default**, next to `BUBBLES` in the options list. Cheap
+  and reversible: turn it off and B goes back to meaning nothing everywhere
+  running would apply, since the one place held B already meant something —
+  the bike's own brake — is precisely where running has no effect anyway.
+
+### Changed
+
+- **`PROTOCOL` 4 → 5**, in `src/Config.lua` and `server/lib/relay.js`
+  together. Nothing already on the wire changed shape, so an old client still
+  parses everything a new hub sends — but both hubs rebuild their broadcast
+  from a fixed field list, and a protocol-4 hub has never heard of `running`
+  on `mmo.move`: it would drop the flag silently rather than error on it, and
+  every remote sprinter would look like they were walking, forever, with
+  nothing on screen saying why. A refusal naming both versions beats that
+  quietly — the same call ranked PVP made one version ago.
+
 ## [0.4.0] - 2026-08-04
 
 ### Added

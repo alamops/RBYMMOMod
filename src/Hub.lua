@@ -365,6 +365,11 @@ local function presenceOf(client)
     -- whether their menus offer to invite this player -- and nobody outside
     -- the party needs the id, so the id does not leave the hub.
     party = client.partyId ~= nil,
+    -- Whether they are sprinting, so the avatar everyone else draws steps at
+    -- the speed the player is actually moving.  Unlike busy, this hub cannot
+    -- work it out: it never sees the B button, so the client is the only
+    -- authority and this is what it last reported.
+    running = client.running == true,
     profile = client.profile,
     -- Carried with presence rather than with the card: a rating moves while
     -- the player is standing there, and the card is a snapshot of their
@@ -428,6 +433,7 @@ function M:accept(peer, trusted)
     name = nil,
     sprite = Config.DEFAULT_SPRITE,
     map = nil, x = nil, y = nil, facing = "down",
+    running = false,  -- nobody arrives mid-sprint; the first move says otherwise
     sessionId = nil,
     pendingTo = nil,
     partyId = nil,
@@ -832,6 +838,10 @@ handlers[Wire.MOVE] = function(self, client, msg)
     client.map, client.x, client.y = nil, nil, nil
   end
   if Wire.facing(msg.facing) then client.facing = msg.facing end
+  -- Client-truth, and the coercion is the whole check: any value at all means
+  -- "running" or "not", so the worst a malformed one can do is make its own
+  -- avatar step at the wrong speed.
+  client.running = msg.running and true or false
   self:broadcast(Wire.MOVE, presenceOf(client), client.id)
 end
 
