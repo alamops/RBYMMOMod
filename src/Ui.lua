@@ -353,14 +353,13 @@ function M:install()
           })
         end,
       }
-      -- JOIN GAME asks for a code on the way in, so this row is not the
-      -- only door to one -- it is the standing code, changed deliberately
-      -- without dialling anything, and the fallback for a hub whose code
-      -- was never typed against its own address.
-      items[#items + 1] = {
-        label = "JOIN CODE",
-        onSelect = function() mod.ui.push(game, SCREEN.JOINCODE) end,
-      }
+      -- There is deliberately no third row for the code. JOIN GAME asks for
+      -- the address and then the code, so a row called JOIN CODE sitting
+      -- under it read as the other half of joining rather than as what it
+      -- was -- somewhere to change a saved one without dialling. Two rows
+      -- that both start a join, one of which does not, is a menu that has to
+      -- be explained; the code that gets typed is now always the one on the
+      -- way in, and the standing fallback is the JOIN CODE option row.
     end
 
     local menu = mod.ui.Menu.new(game, items, {
@@ -748,17 +747,17 @@ function M:install()
 
   -- ------- joining: the code that gets you past the door
 
-  -- Reached four ways: from JOIN GAME, right after the address and before
-  -- anything is dialled; deliberately, from the MMO menu; automatically,
-  -- when a hub challenges a copy whose code is absent or was refused; and
-  -- from the host setup, to choose the code this copy will ask *for*. One
-  -- grid every time -- the glyphs and the length are the same question --
-  -- and opts says where the answer goes: opts.host stores it as this copy's
-  -- own code, opts.connect says a connection is waiting on it and dials
-  -- rather than leaving the player to walk back through the menu, and
-  -- opts.typed is an attempt this screen itself refused, coming back.
+  -- Reached three ways: from JOIN GAME, right after the address and before
+  -- anything is dialled; automatically, when a hub challenges a copy whose
+  -- code is absent or was refused; and from the host setup, to choose the
+  -- code this copy will ask *for*. One grid every time -- the glyphs and the
+  -- length are the same question -- and opts says where the answer goes:
+  -- opts.host stores it as this copy's own code, opts.connect says a
+  -- connection is waiting on it and dials rather than leaving the player to
+  -- walk back through the menu, and opts.typed is an attempt this screen
+  -- itself refused, coming back.
   --
-  -- Every one of those four is a road somebody can walk without the code in
+  -- Every one of those three is a road somebody can walk without the code in
   -- front of them, which is why the screen has a door out (escapable, above)
   -- rather than only a way forward.
   screens:register(SCREEN.JOINCODE, { new = function(game, opts)
@@ -820,9 +819,11 @@ function M:install()
     -- is in question and putting them back would invite resubmitting them.
     seed(screen, opts.typed)
     -- Where B lands: the lock menu for a host who came here to choose the
-    -- code they ask *for*, the MMO menu for everyone typing one in -- in
-    -- both cases the screen this one was opened from, and never a socket
-    -- left half-dialled, because nothing has been dialled yet.
+    -- code they ask *for* -- the screen that opened this one -- and the MMO
+    -- menu for everyone typing one in, which is the address screen's own way
+    -- out and the only answer on the challenge path, where there is no
+    -- screen behind this to go back to. Never a socket left half-dialled,
+    -- because nothing has been dialled yet.
     return escapable(screen, function()
       mod.ui.push(game, opts.host and SCREEN.HOSTCODE or SCREEN.MAIN)
     end, true)

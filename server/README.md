@@ -109,11 +109,13 @@ case-insensitive. **Leave the port off and the mod fills in 7788**
 7778, the pokeserver relay's, and a bare hostname dialled there would report
 the relay as unreachable.
 
-`START > MMO > JOIN CODE` is still there for changing a saved passcode
-deliberately. The other way onto that screen is a mistyped one: a hub that
+There is no separate menu row for the passcode — `JOIN GAME` is the whole
+path, and typing a different one there is how a saved passcode is changed.
+The other way onto the passcode screen is a mistyped one: a hub that
 challenges a copy whose passcode is absent or wrong hangs up, says *"This
 game needs a join code."*, and puts the player back on the entry screen,
-which dials again on save.
+which dials again on save. The `JOIN CODE` option row in the mod manager is
+the standing fallback for a player who only ever plays on one hub.
 
 Every character in a passcode is on the mod's own naming grid, and
 **SELECT** flips it between letters and digits — the vanilla grid has no
@@ -722,7 +724,7 @@ are the same five commands. Run them as `root`:
 curl -fsSL https://get.docker.com | sh
 
 # 2. The code
-git clone --depth 1 --branch v0.2.0 https://github.com/alamops/RBYMMOMod.git
+git clone --depth 1 --branch v0.2.2 https://github.com/alamops/RBYMMOMod.git
 cd RBYMMOMod/server
 
 # 3. Build and run
