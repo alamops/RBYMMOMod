@@ -1007,13 +1007,27 @@ on a relay connection.
 | `mmo.session` | `peer, peerName, kind, role, id` — the asker hosts |
 | `mmo.relay` | `from, payload` |
 | `mmo.session_end` | `reason` |
+| `mmo.party_invite` | `from, name` — inbound; outbound it carries `to` |
+| `mmo.party` | `id, members[]` — the whole membership, never a delta |
+| `mmo.party_decline` | `name, reason` — `no`, or `in_party` |
+| `mmo.party_end` | `reason` — `left` to the member who left, `peer_left` to the other |
 | `mmo.error` | `message` — always fatal to the connection |
 | `mmo.pong` | — |
+
+Parties are two players and no more. The hub forms one only when *both* sides
+are unattached, re-checks that at the moment of forming (either of them could
+have joined somebody else's while the prompt sat on screen), and ends it for
+both when either leaves or disconnects. A presence carries `party: true|false`
+and never the party id — that flag is what gates the other players' `INVITE`
+row, and an id on every presence would let any client map out who is
+travelling with whom. `chat` gains a `party` scope, delivered to the party
+alone with no radius; from a client with no party it is dropped, never
+widened.
 
 The handshake, in full:
 
 ```
-client → hub    mmo.hello      { proto: 2, name, sprite, profile, map, x, y, facing }
+client → hub    mmo.hello      { proto: 3, name, sprite, profile, map, x, y, facing }
 hub    → client mmo.challenge  { nonce }        ← only when a passcode is required
 client → hub    mmo.auth       { response }     ← HMAC-SHA256(passcode, nonce), 64 hex
 hub    → client mmo.welcome    { id, players[] }   ← or mmo.error, which the game shows
@@ -1030,11 +1044,20 @@ On the one path where no passcode is required — the `node hub.js` shim — the
 exchange is byte-identical to what it has always been: `hello`, then
 `welcome`.
 
-**`PROTOCOL` is 2**, and it lives in **`lib/relay.js`** (not `hub.js` any
+**`PROTOCOL` is 3**, and it lives in **`lib/relay.js`** (not `hub.js` any
 more) and in **`src/Config.lua`**. Bump both together on any incompatible
 change. The hub refuses a mismatched client by name and version — *"This hub
-speaks protocol 2; your mod speaks 1."* — rather than letting two dialects
+speaks protocol 3; your mod speaks 2."* — rather than letting two dialects
 talk past each other, and the game renders that sentence.
+
+3 is where parties landed, and it is worth saying why a purely *additive*
+change moved the number. Nothing was removed, so an old client's messages all
+still parse — but a **new** client on an **old** hub is the case that
+matters: an invite and a party chat line are a message type and a scope that
+hub has never heard of, and its handler table answers an unknown type with
+silence. The player presses `INVITE` and watches nothing happen, forever,
+with nothing on screen to act on. A refusal that names both versions is the
+better sentence. **Update the hub and the mod together.**
 
 ---
 
