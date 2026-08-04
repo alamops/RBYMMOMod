@@ -148,11 +148,17 @@ function M:onSession(game, msg)
   local modules = link()
   if not modules then return end
 
+  -- The hub's id for this pairing.  Carried since the first version of the
+  -- protocol and ignored until now: it is what a battle result is filed
+  -- under, and the hub will not score a report that does not name one.
+  local sessionId = Wire.id(msg.id)
+
   -- one warning per session, so the count starts again with the session
   self.drops = 0
 
   local net = SessionNet.new(self.transport, peerId, peerName)
   self.active = {
+    id = sessionId,
     peerId = peerId,
     peerName = peerName,
     kind = kind,
@@ -303,9 +309,34 @@ function M:handleBattleWait(game, session, msg, modules)
     return self:endSession(err or "That battle can't\nstart.")
   end
   session.stage = "battle"
+
+  -- Remembered past the end of the session, because that is when it is
+  -- needed: the battle finishes, the engine emits battle.ended, and by then
+  -- either side may already have torn the session down. The state object
+  -- itself is kept so the result can be matched to *this* battle -- a player
+  -- who steps into a cable-club link or a wild encounter afterwards must not
+  -- have that battle reported as a ranked one.
+  self.lastBattle = {
+    id = session.id,
+    peerId = session.peerId,
+    peerName = session.peerName,
+    state = state,
+  }
+
   -- the engine owns the battle from here; the mod only watches for the
   -- connection dying underneath it
   self.ui:pushState(game, state)
+end
+
+-- The battle this result belongs to, if the state that just ended is the one
+-- this mod handed to the engine.  Answers once: a result is reported to the
+-- hub exactly once, and a second call for the same battle gets nothing.
+function M:claimBattle(state)
+  local last = self.lastBattle
+  if not last then return nil end
+  if state ~= nil and last.state ~= state then return nil end
+  self.lastBattle = nil
+  return last
 end
 
 function M:handleTrade(game, session, msg)

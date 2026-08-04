@@ -116,6 +116,36 @@ function payloadOk(value) {
 const FACINGS = new Set(['up', 'down', 'left', 'right']);
 const KINDS = new Set(['trade', 'battle']);
 const SCOPES = new Set(['global', 'local', 'private']);
+// What a client may claim about a battle it just finished. 'draw' is a real
+// answer rather than a refusal to answer: a dropped link, a mutual run and a
+// desync all end that way, and all three score nothing.
+const OUTCOMES = new Set(['win', 'loss', 'draw']);
+
+function cleanOutcome(value) {
+  return OUTCOMES.has(value) ? value : null;
+}
+
+/*
+ * A rating on its way out to a client. Bounded here as well as in rank.js so
+ * the field on the wire is the field src/Wire.lua's Wire.points will accept:
+ * a hub that sent a number outside the range would have it silently read as
+ * zero on every card that drew it.
+ */
+const RANK_MAX = 9999;
+// A claim token: 16 bytes as lowercase hex, exactly. Held to the length the
+// hub mints, because a short "token" is a truncated one -- it would fail
+// every claim from then on, silently.
+const RANK_TOKEN_HEX = 32;
+
+function cleanToken(value) {
+  const hex = cleanHex(value, RANK_TOKEN_HEX);
+  return hex && hex.length === RANK_TOKEN_HEX ? hex : null;
+}
+
+function cleanPoints(value) {
+  const n = cleanInt(value, 0, RANK_MAX);
+  return n === null ? 0 : n;
+}
 
 const NAME_MAX = 10;
 const MESSAGE_MAX = 60;
@@ -131,10 +161,16 @@ module.exports = {
   cleanHex,
   cleanCode,
   cleanProfile,
+  cleanOutcome,
+  cleanPoints,
+  cleanToken,
   payloadOk,
   FACINGS,
   KINDS,
   SCOPES,
+  OUTCOMES,
+  RANK_MAX,
+  RANK_TOKEN_HEX,
   NAME_MAX,
   MESSAGE_MAX,
   LOCAL_RADIUS,

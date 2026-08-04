@@ -273,6 +273,30 @@ order:
 3. `./config.json` next to where you ran the command
 4. `/data/config.json`, when `/data` exists — the container's volume
 
+Next to it, the hub keeps one file it writes itself: **`ranking.json`**, the
+ranked-PVP season. It holds a line per trainer name — points, character, and
+how many battles they have played and won — and it is written (debounced)
+whenever a battle moves somebody's rating. Nothing reads it but this hub, no
+setting points at it, and deleting it starts a fresh season and changes
+nothing else. It is deliberately *not* a section of `config.json`: that file
+is yours to edit and the CLI rewrites it whole, and a hub writing scores into
+it would race your own edits.
+
+If the file is corrupt the hub says so and starts from an empty ranking
+rather than refusing to run — a leaderboard is not a reason to take a hub off
+the air.
+
+Ratings are keyed by **trainer name**, and a name is *claimed* by whoever
+first used it here. The hub mints a 16-byte token on that first visit
+(`crypto.randomBytes`), sends it once in the welcome, and stores only its
+SHA-256 — so this file lists who is ranked, which is public anyway, and gives
+nobody a way to be them. A player returning with the token is that player; a
+player typing the same name without it is admitted, plays normally and scores
+nothing, and their battles cannot move the real holder's rating. It is a
+claim ticket, not an account: it sits in a save file and crosses the same
+unencrypted link the passcode does, with the same consequence if either is
+captured. Deleting `ranking.json` releases every name along with every score.
+
 Precedence, everywhere, without exception:
 
 > **command-line flag > `RBY_MMO_*` env var > config file > built-in default**
