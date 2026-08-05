@@ -22,13 +22,17 @@ here must match `manifest.version`.
 - **You are always the one in front.** When two characters share a tile the
   overworld had no answer for which draws on top — it sorts by pixel depth,
   the two are equal, and the winner changed from frame to frame, so your own
-  trainer flickered in and out from behind someone else's. Avatars now sit a
-  hundredth of a pixel further back, which is invisible on screen and decides
-  the tie every time: your character draws over theirs, deterministically.
-  The offset is applied only on whole-pixel frames, so a player standing
-  still does not creep up the screen, and it is taken off again when the
-  avatar despawns — the engine reuses those NPC tables, and residue would
-  come back as a vanilla character you could walk through.
+  trainer flickered in and out from behind someone else's. Avatars now sort a
+  hundredth of a pixel further back, which decides the tie every time: your
+  character draws over theirs, deterministically. That hundredth is invisible
+  because it never leaves the sort — the renderer and the nameplates are
+  handed the true pixel back, so nobody moves so much as a pixel for it. The
+  offset is applied only on whole-pixel frames, so a player standing still
+  does not creep up the screen, and everything it wrote is taken off the NPC
+  when the avatar despawns, from the table this mod kept rather than one the
+  engine will not hand back once you have left the map — the engine reuses
+  those tables, and residue would come back as a vanilla character you could
+  walk through.
 
 ## [0.4.0] - 2026-08-04
 
