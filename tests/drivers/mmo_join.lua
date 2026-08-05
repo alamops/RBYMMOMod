@@ -427,9 +427,12 @@ return function(game)
 
     U.hold(game, "left", 22)
     U.wait(8)
+    -- "at or beyond", not "exactly at": a 22-frame hold can land two steps,
+    -- and a poll that demands one transient cell misses the crossing it is
+    -- there to prove. Ending further west is stronger evidence, not a miss.
     local pastStander = H.waitSeconds(game, function()
       local cell = H.playerCell(game)
-      return cell ~= nil and cell.x == standerX - 1 and cell.y == standerY
+      return cell ~= nil and cell.x <= standerX - 1 and cell.y == standerY
     end, 20, "the walker to continue past the stander's tile")
     check(pastStander,
           "and kept walking through it rather than stopping on it")
