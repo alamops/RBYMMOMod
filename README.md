@@ -265,7 +265,13 @@ moment you leave.
 
 **And some of them are special characters from talented artists**, drawn for
 this mod rather than lifted out of your ROM — `NIRE` and `NIRE HOOD` so far,
-by [Mirasein](https://www.mirasein.me). They sit in the same list as everyone
+by [Mirasein](https://www.mirasein.me):
+
+<p align="center">
+  <img src="docs/screenshots/nire-overworld.png" width="300" alt="NIRE standing in the overworld, facing the camera">
+  <img src="docs/screenshots/nire-hood-overworld.png" width="300" alt="NIRE HOOD standing in the same spot">
+</p>
+ They sit in the same list as everyone
 else, marked with a **`▷`** in the cursor's column so you can tell which is
 which, and work the same way — worn on the map, sent over the wire, drawn on
 your trainer card — but they go one step further than a borrowed ROM
@@ -276,6 +282,14 @@ in a game, exactly like the walking sprite; leave and Red is back.
 
 <p align="center">
   <img src="docs/screenshots/nire-battle.png" width="330" alt="A link battle starting, with NIRE's back pic where Red's would be">
+</p>
+
+Same card, same badges, a different trainer on it — `NIRE` on the left,
+`NIRE HOOD` on the right:
+
+<p align="center">
+  <img src="docs/screenshots/nire-card.png" width="300" alt="The game's trainer card with NIRE's pic where Red's would be">
+  <img src="docs/screenshots/nire-hood-card.png" width="300" alt="The same card wearing NIRE HOOD">
 </p>
 
 If someone picks a character your ROM doesn't have, they show up as RED on

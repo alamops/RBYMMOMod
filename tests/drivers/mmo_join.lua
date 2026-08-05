@@ -404,6 +404,28 @@ return function(game)
   -- wearing it here, and still able to get back, is the pair that says so.
   check(H.playerSheet(game) ~= ownSheet,
         "still wearing the chosen character after a map change")
+
+  -- The guest's own character, in the world, facing the camera. Here for the
+  -- same reason the host's is where it is: the guest has just teleported
+  -- home, so the host is not on this map and no nameplate is over it.
+  local shownLook = H.shotLook(game, SHOT_DIR .. "/join-overworld-look.png")
+  log("overworld look:", tostring(shownLook))
+  check(shownLook ~= nil, "the character is on screen in the overworld")
+
+  -- Same check the host makes, from the other side: the front pic, which no
+  -- screen in either flow used to open. Here rather than earlier because the
+  -- look has just survived a map change, so the pic is being read at the
+  -- point the sprite has already proved it is still worn.
+  local guestCard = H.shotTrainerCard(game, SHOT_DIR .. "/join-trainer-card.png")
+  local wearing = exports.wornLook and exports.wornLook() or nil
+  log("trainer card pic:", tostring(guestCard), "wearing", tostring(wearing))
+  check(type(guestCard) == "string" and guestCard ~= "",
+        "the trainer card resolves a pic to draw")
+  if tostring(wearing):find("SPRITE_NIRE", 1, true) then
+    check(tostring(guestCard):find("assets/chars/", 1, true) ~= nil,
+          "and a character the mod brought draws its own")
+  end
+
   H.signal("guest_back_on_map")
 
   -- ------- 4. interact with the host, and get the trade/battle menu
