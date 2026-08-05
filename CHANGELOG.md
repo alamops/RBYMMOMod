@@ -4,6 +4,36 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.6.2] - 2026-08-04
+
+### Fixed
+
+- **Other players cannot stand in your way any more.** An avatar was an
+  ordinary runtime NPC, and the engine counts every one of those as solid, so
+  a friend idling on a doorway, a staircase or a cave mouth sealed it — you
+  pressed into them and the step was simply refused, which also meant the
+  warp on that tile never fired. The same refusal was quietly costing ledge
+  hops and boulder pushes their landing tile. Avatars are now marked
+  `passable`, the flag the engine already uses to keep the Pikachu follower
+  out of the player's path, so every occupancy check skips them and you walk
+  straight through whoever is standing there. Genuine NPCs still block you as
+  they always did, and the crowd cuts both ways: the town's own wanderers now
+  walk through remote players rather than being penned in by them.
+- **You are always the one in front.** When two characters share a tile the
+  overworld had no answer for which draws on top — it sorts by pixel depth,
+  the two are equal, and the winner changed from frame to frame, so your own
+  trainer flickered in and out from behind someone else's. Avatars now sort a
+  hundredth of a pixel further back, which decides the tie every time: your
+  character draws over theirs, deterministically. That hundredth is invisible
+  because it never leaves the sort — the renderer and the nameplates are
+  handed the true pixel back, so nobody moves so much as a pixel for it. The
+  offset is applied only on whole-pixel frames, so a player standing still
+  does not creep up the screen, and everything it wrote is taken off the NPC
+  when the avatar despawns, from the table this mod kept rather than one the
+  engine will not hand back once you have left the map — the engine reuses
+  those tables, and residue would come back as a vanilla character you could
+  walk through.
+
 ## [0.6.0] - 2026-08-04
 
 ### Added

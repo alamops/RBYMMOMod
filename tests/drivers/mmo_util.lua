@@ -572,8 +572,9 @@ local PHASE = {
   guest_back_on_map      =  90,  -- floor
   -- guest waits on the host noticing the respawn
   host_ready_for_interact=  90,  -- 45 respawn
-  -- host waits on the guest walking up, reading the card and closing it
-  guest_interact_done    = 240,  -- 60 facing + menu + profile card
+  -- host waits on the guest walking through the host's own tile first
+  -- (non-blocking avatars), then walking up, reading the card and closing it
+  guest_interact_done    = 300,  -- 60 walk-through + 60 facing + menu + card
   -- host waits on the guest waiting for it to be free, then picking TRADE
   guest_trade_requested  = 120,  -- 45 free
   -- guest waits on the host driving its half of the trade

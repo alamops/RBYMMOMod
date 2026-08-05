@@ -78,6 +78,28 @@ M.PRESENCE_INTERVAL = 0.125
 -- drift lasts, so it is despawned and respawned at the true cell instead.
 M.RESYNC_DISTANCE = 6
 
+-- How far an avatar is pushed up the draw order so the local player always
+-- wins a shared tile.  The overworld sorts entities by their pixel `py`, and
+-- that sort is unstable, so on a tie the two characters swap places from
+-- frame to frame -- a hundredth of a pixel is the smallest thing that
+-- decides it and the largest thing nobody can see.
+--
+-- It rests on two facts, and stops being safe without either.  Engine `py`
+-- values are always whole pixels (a step's progress is floored and a landing
+-- snaps to `cell * 16`), so any fraction at all breaks the tie in the
+-- player's favour.  And the nudge is only ever applied when `py % 1 == 0`,
+-- which is what keeps an avatar standing still from drifting up the screen
+-- a hundredth of a pixel per frame.
+--
+-- "Nobody can see it" is only true because it never leaves the sort.  The
+-- renderer floors `py - camY` against a whole camera, so a hundredth of a
+-- pixel there is a whole pixel on screen -- so src/Avatars.lua adds this
+-- back on the two ways out of the avatar layer, the pose the renderer draws
+-- from and the cell cellOf reports.  Subtracting and re-adding it is exact
+-- in doubles at overworld magnitudes, so a compensated position is equal to
+-- the original, not merely close.
+M.AVATAR_DEPTH_NUDGE = 0.01
+
 -- Running: hold B on foot and a tile takes half as long.
 --
 -- A divisor rather than a frame count, because the walk speed it divides is

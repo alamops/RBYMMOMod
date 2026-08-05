@@ -435,6 +435,71 @@ return function(game)
   check(hostRow ~= nil and hostRow.rosterX ~= nil,
         "the host has a cell to stand next to")
 
+  -- ------- non-blocking avatars: walk straight through the host's own tile
+  --
+  -- The host is stood still for the whole interact leg below -- it is
+  -- blocked on H.await("guest_interact_done") the entire time -- which
+  -- makes this the one place in the flow where a "the stander never moves"
+  -- assumption is actually true rather than merely likely. Section 2 above
+  -- already proved this exact row walkable end to end: the host held here
+  -- after two lefts and a right along it, each one a real keypress the
+  -- engine's own collision accepted. Putting the walker on one proven-clear
+  -- tile and stepping it across the host's cell to the next isolates
+  -- exactly the one variable this driver can reach: whether an avatar
+  -- sitting on a tile refuses the step onto it. Pre-fix, Collision.canMove
+  -- answers "entity" and the walker never arrives; post-fix it crosses like
+  -- any other floor tile, the same mechanism a door tile reduces to.
+  --
+  -- The crossing runs west, because that is the direction the host's own
+  -- walk actually proved: its two lefts covered spawn->spawn-1 and
+  -- spawn-1->spawn-2 leftward, so both tile *pairs* on this path have
+  -- passed the engine's real collision in the direction used here. The
+  -- eastward pair past the stander never was, and in practice something
+  -- east of it refuses the step -- tile pairs are directional (ledges),
+  -- so a row proven one way is only proven that way.
+  if hostRow and hostRow.rosterX then
+    local standerX, standerY = hostRow.rosterX, hostRow.rosterY
+    U.teleport(game, hostRow.map, standerX + 1, standerY, "left")
+    U.wait(30)
+    local walkerStart = H.playerCell(game)
+    check(walkerStart ~= nil and walkerStart.x == standerX + 1
+          and walkerStart.y == standerY,
+          "walker starts one tile short of the stander")
+
+    U.hold(game, "left", 22)
+    U.wait(8)
+    local onStander = H.waitSeconds(game, function()
+      local cell = H.playerCell(game)
+      return cell ~= nil and cell.x == standerX and cell.y == standerY
+    end, 20, "the walker to step onto the stander's own tile")
+    check(onStander,
+          "the walker's own position reached the tile the stander occupies")
+
+    U.hold(game, "left", 22)
+    U.wait(8)
+    -- "at or beyond", not "exactly at": a 22-frame hold can land two steps,
+    -- and a poll that demands one transient cell misses the crossing it is
+    -- there to prove. Ending further west is stronger evidence, not a miss.
+    local pastStander = H.waitSeconds(game, function()
+      local cell = H.playerCell(game)
+      return cell ~= nil and cell.x <= standerX - 1 and cell.y == standerY
+    end, 20, "the walker to continue past the stander's tile")
+    check(pastStander,
+          "and kept walking through it rather than stopping on it")
+
+    local walkerEnd = H.playerCell(game)
+    log(("walk-through: stander at (%s,%s), walker (%s,%s) -> (%s,%s)"):format(
+      tostring(standerX), tostring(standerY),
+      tostring(walkerStart and walkerStart.x), tostring(walkerStart and walkerStart.y),
+      tostring(walkerEnd and walkerEnd.x), tostring(walkerEnd and walkerEnd.y)))
+
+    local standerAfter = H.avatarRow(exports)
+    check(standerAfter ~= nil and standerAfter.rosterX == standerX
+          and standerAfter.rosterY == standerY,
+          "the walk-through left the stander's avatar exactly where it stood")
+    U.shot(game, SHOT_DIR .. "/join-walked-through-host.png")
+  end
+
   if hostRow and hostRow.rosterX then
     -- stand directly below the host and face up at them
     U.teleport(game, hostRow.map, hostRow.rosterX, hostRow.rosterY + 1, "up")

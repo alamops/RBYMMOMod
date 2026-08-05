@@ -2132,6 +2132,168 @@ stubMod.world = nil
 end)()
 
 -- ------------------------------------------------------------------
+-- 5b. Avatars decorate / undecorate -- the depth-nudge compensation
+-- ------------------------------------------------------------------
+--
+-- decorate/undecorate patch a live NPC's update and pose so an avatar
+-- always loses a draw-order tie against the player: a whole-pixel py is
+-- nudged up by AVATAR_DEPTH_NUDGE right after NPC:update recomputes it, and
+-- both ways a position leaves the avatar layer -- pose, for the renderer,
+-- and cellOf, for a caller comparing against the roster -- add it back so
+-- nothing downstream of the sort ever sees the fraction.  See
+-- src/Config.lua's AVATAR_DEPTH_NUDGE and src/Avatars.lua's decorate for the
+-- full argument.
+--
+-- A stub class stands in for the engine's NPC: update writes a new
+-- whole-pixel py only while moving -- exactly like NPC:update landing a
+-- step -- and pose reads py back out seven values wide, the same shape
+-- src/Avatars.lua wraps.  cellOf itself reaches through mod.world:npc, a
+-- live overworld handle this headless suite does not stand up -- that call
+-- is e2e territory, exercised by run-mmo-e2e.sh.  What is pinned here
+-- instead is the arithmetic cellOf leans on just as much as pose does: case
+-- 5 below proves the round trip -- subtract the nudge, add it back -- lands
+-- on the exact original whole pixel.
+--
+-- Wrapped for scope, like the trainer-card section below: this file's main
+-- chunk sits close enough to Lua's 200-local ceiling that one more section's
+-- worth of locals is what tips it over.
+
+;(function()
+
+local NUDGE = Config.AVATAR_DEPTH_NUDGE
+
+local StubNpcClass = {}
+StubNpcClass.__index = StubNpcClass
+
+function StubNpcClass:update(...)
+  if self.moving then self.py = self.targetPy end
+  return "base-update", 42
+end
+
+function StubNpcClass:pose(...)
+  return "sprite", self.px, self.py, self.facing, self.phase, self.flip, self.hop
+end
+
+local function newStubNpc(py)
+  return setmetatable({
+    px = 48, py = py, facing = "down", phase = 2, flip = true, hop = false,
+    moving = false,
+  }, StubNpcClass)
+end
+
+-- a bare-table fingerprint, so "undecorate leaves it indistinguishable from
+-- a table that was never decorated" is a real comparison and not a
+-- hand-picked field list
+local function keyList(t)
+  local ks = {}
+  for k in pairs(t) do ks[#ks + 1] = tostring(k) end
+  table.sort(ks)
+  return table.concat(ks, ",")
+end
+
+-- 1. decorate marks the NPC and installs instance-level update/pose
+local originalPy = 80
+local npc = newStubNpc(originalPy)
+Avatars.decorate(npc)
+eq(npc.mmoAvatar, true, "decorate marks the NPC as an avatar")
+eq(npc.passable, true, "and makes it passable, the same escape hatch the follower uses")
+check(type(rawget(npc, "update")) == "function",
+      "update is shadowed on the instance, not left resolving through the metatable")
+check(type(rawget(npc, "pose")) == "function", "so is pose")
+
+-- 2. idle drift-proofing: a hundred no-op updates nudge exactly once
+for i = 1, 100 do npc:update() end
+eq(npc.py, originalPy - NUDGE,
+   "a whole py is nudged once and then never again -- the fraction is the guard")
+
+-- 3. moving recompute: the base update writes a fresh whole py, and that
+-- gets nudged too, from the new value rather than stacking on the old one
+local newPy = 96
+npc.moving = true
+npc.targetPy = newPy
+npc:update()
+eq(npc.py, newPy - NUDGE, "a freshly-landed step is nudged from its own new py")
+
+-- 4. the override forwards whatever the base update returned, arity and all
+npc.moving = false
+local r1, r2 = npc:update()
+eq(r1, "base-update", "the wrapped update forwards the base call's first return value")
+eq(r2, 42, "and its second -- the wrapper does not narrow the base method's arity")
+
+-- 5. pose hands back the true pixel, not the sort's nudged one -- and this
+-- is also the round trip cellOf leans on, since it undoes the same nudge
+-- the same way
+local sprite, px, poseP, facing, phase, flip, hop = npc:pose()
+eq(poseP, newPy, "pose adds the nudge back, landing exactly on the whole pixel again")
+eq(poseP, (newPy - NUDGE) + NUDGE,
+   "the same round trip cellOf performs -- subtract, then add back -- is exact in doubles")
+eq(sprite, "sprite", "pose forwards the sprite untouched")
+eq(px, npc.px, "and px untouched")
+eq(facing, npc.facing, "and facing")
+eq(phase, npc.phase, "and the walk phase")
+eq(flip, npc.flip, "and the step flip")
+eq(hop, npc.hop, "and the hop flag -- only py is ever touched")
+
+-- 6. decorate is idempotent: an already-marked NPC is untouched, not
+-- rewrapped, so a second nudge never stacks on the first
+local updateFn, poseFn = rawget(npc, "update"), rawget(npc, "pose")
+local pyBeforeRedecorate = npc.py
+Avatars.decorate(npc)
+eq(rawget(npc, "update"), updateFn, "redecorating keeps the same update closure")
+eq(rawget(npc, "pose"), poseFn, "and the same pose closure")
+eq(npc.py, pyBeforeRedecorate, "and touches no field -- the marker alone is the guard")
+
+-- 7. undecorate restores a table indistinguishable from one that was never
+-- decorated -- the engine pools NPC tables, so anything left behind would
+-- be born again on some later, ordinary NPC
+local plainNpc = newStubNpc(64)
+local plainKeys = keyList(plainNpc)
+Avatars.decorate(plainNpc)
+Avatars.undecorate(plainNpc)
+eq(keyList(plainNpc), plainKeys,
+   "the key set after decorate+undecorate matches the table before either ran")
+eq(rawget(plainNpc, "update"), nil, "update falls back to the metatable again")
+eq(rawget(plainNpc, "pose"), nil, "so does pose")
+eq(plainNpc.update, StubNpcClass.update, "which resolves to the class method")
+eq(plainNpc.pose, StubNpcClass.pose, "for both")
+
+-- 8. a pre-existing instance override survives a decorate/undecorate round
+-- trip -- decorate has to wrap *that*, not the class method underneath it,
+-- and undecorate has to hand back that exact function, not nil
+local overridden = newStubNpc(64)
+local preexisting = function(self, ...) return "pre-existing" end
+rawset(overridden, "update", preexisting)
+Avatars.decorate(overridden)
+check(rawget(overridden, "update") ~= preexisting,
+      "decorate wraps whatever was already shadowing update on the instance")
+Avatars.undecorate(overridden)
+eq(rawget(overridden, "update"), preexisting,
+   "and undecorate hands back that exact pre-existing function, not the class method")
+
+-- 9. half-decoration refusal: nothing is written until both class methods
+-- are in hand, and undecorate never touches a table it did not mark
+local NoUpdateClass = { pose = StubNpcClass.pose }
+NoUpdateClass.__index = NoUpdateClass
+local broken = setmetatable({ py = 64 }, NoUpdateClass)
+local brokenKeys = keyList(broken)
+Avatars.decorate(broken)
+eq(keyList(broken), brokenKeys,
+   "a class with no update method gets no fields written at all -- half a decoration")
+eq(broken.mmoAvatar, nil,
+   "not even the marker, so decorating the same table again after it is fixed still works")
+
+local untouched = newStubNpc(64)
+local sentinelUpdate = function(self, ...) return "sentinel" end
+rawset(untouched, "update", sentinelUpdate)
+local untouchedKeys = keyList(untouched)
+Avatars.undecorate(untouched)
+eq(keyList(untouched), untouchedKeys, "undecorate on a table it never marked is a no-op")
+eq(rawget(untouched, "update"), sentinelUpdate,
+   "and never blanks an instance slot that was already there")
+
+end)()
+
+-- ------------------------------------------------------------------
 -- 6. Characters you can wear
 -- ------------------------------------------------------------------
 --
