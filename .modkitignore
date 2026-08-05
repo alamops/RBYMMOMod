@@ -101,6 +101,8 @@ docs/screenshots/trainer-card.png
 docs/screenshots/nire-battle.png
 docs/screenshots/nire-card.png
 docs/screenshots/nire-hood-card.png
+docs/screenshots/nire-overworld.png
+docs/screenshots/nire-hood-overworld.png
 #
 # The in-game hosting and joining flows, captured by
 # tests/drivers/run-mmo-e2e.sh. Four of these are pure UI -- a list menu and

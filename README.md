@@ -265,7 +265,13 @@ moment you leave.
 
 **And some of them are special characters from talented artists**, drawn for
 this mod rather than lifted out of your ROM — `NIRE` and `NIRE HOOD` so far,
-by [Mirasein](https://www.mirasein.me). They sit in the same list as everyone
+by [Mirasein](https://www.mirasein.me):
+
+<p align="center">
+  <img src="docs/screenshots/nire-overworld.png" width="300" alt="NIRE standing in the overworld, facing the camera">
+  <img src="docs/screenshots/nire-hood-overworld.png" width="300" alt="NIRE HOOD standing in the same spot">
+</p>
+ They sit in the same list as everyone
 else, marked with a **`▷`** in the cursor's column so you can tell which is
 which, and work the same way — worn on the map, sent over the wire, drawn on
 your trainer card — but they go one step further than a borrowed ROM

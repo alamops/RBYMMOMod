@@ -405,6 +405,13 @@ return function(game)
   check(H.playerSheet(game) ~= ownSheet,
         "still wearing the chosen character after a map change")
 
+  -- The guest's own character, in the world, facing the camera. Here for the
+  -- same reason the host's is where it is: the guest has just teleported
+  -- home, so the host is not on this map and no nameplate is over it.
+  local shownLook = H.shotLook(game, SHOT_DIR .. "/join-overworld-look.png")
+  log("overworld look:", tostring(shownLook))
+  check(shownLook ~= nil, "the character is on screen in the overworld")
+
   -- Same check the host makes, from the other side: the front pic, which no
   -- screen in either flow used to open. Here rather than earlier because the
   -- look has just survived a map change, so the pic is being read at the

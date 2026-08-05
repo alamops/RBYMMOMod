@@ -258,6 +258,13 @@ return function(game)
         and tostring(wornImage):find(tostring(record.image), 1, true) ~= nil,
         "the local player wears the chosen character")
 
+  -- The character itself, stood in the world facing the camera. Taken here
+  -- because the host is still alone in its own game -- once the guest
+  -- arrives there is a nameplate across the picture.
+  local shownLook = H.shotLook(game, SHOT_DIR .. "/host-overworld-look.png")
+  log("overworld look:", tostring(shownLook))
+  check(shownLook ~= nil, "the character is on screen in the overworld")
+
   -- The pic the trainer card draws you as, which is the front half of the
   -- same hook the battle back pic rides. A character the mod brought answers
   -- it with art of its own; a ROM character leaves the game's own pic alone,
