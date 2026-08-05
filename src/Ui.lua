@@ -863,6 +863,27 @@ function M:install()
             })
           end,
         }
+        -- The end of the same walk inwards: everybody on the hub, then
+        -- talking to them, then the one person you travel with, then your
+        -- own card and where it ranks -- and then the character wearing all
+        -- of it, which is the most-yourself row there is. So it sits last,
+        -- just before the way out.
+        --
+        -- Inside `connected` rather than beside LEAVE, so the
+        -- hosting-but-not-connected state above keeps its two rows: the
+        -- occupant of a copy that is only running a listener is not on the
+        -- hub as a player, and has nobody to show a new face to.
+        --
+        -- Same door as the offline row, and the same call behind it: the
+        -- picker saves the choice and wears it on the spot, and the client
+        -- tells the hub, which passes it to everyone else's roster and
+        -- avatars.
+        items[#items + 1] = {
+          label = "CHARACTER",
+          onSelect = function()
+            mod.ui.push(game, SCREEN.CHARPICK, { backTo = SCREEN.MAIN })
+          end,
+        }
       end
       items[#items + 1] = {
         label = hosting and "END GAME" or "LEAVE",
@@ -925,9 +946,14 @@ function M:install()
       -- (Client.setSpriteChoice), so this row is where somebody not playing
       -- online today picks the character they will be tomorrow.
       --
-      -- Offline only, like the two above it: the hub is told which character
-      -- a player is at hello and never again, so a swap mid-game would show
-      -- everyone else the old one.
+      -- It belongs on the offline menu because you do not need a game to be
+      -- yourself: the choice is saved and worn locally, so the row does its
+      -- whole job with nothing connected and nobody to tell.
+      --
+      -- It is no longer the only door, though. The connected branch above
+      -- carries the same row, because a change made mid-session now reaches
+      -- the hub and everybody on it -- so these two are one option in two
+      -- states, not an offline-only concession.
       items[#items + 1] = {
         label = "CHARACTER",
         onSelect = function()
@@ -958,10 +984,15 @@ function M:install()
 
   -- ------- character creation
   --
-  -- Who you are online, asked once before you host or join, rather than
+  -- Who you are online, asked before you host or join, rather than
   -- inheriting the save's trainer name and a sprite nobody chose. The name
   -- is separate from the save file's, so somebody can be ASH online without
   -- renaming their single-player game.
+  --
+  -- Asked here once, but only the name is settled here: the look half has a
+  -- row of its own on the MMO menu, offline and connected alike, and a
+  -- change made there is passed on to everyone already in the game. This
+  -- screen is where both halves start, not where either of them ends.
 
   screens:register(SCREEN.CHARSET, { new = function(game, opts)
     opts = opts or {}

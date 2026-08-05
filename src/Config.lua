@@ -38,7 +38,18 @@ M.MOD_ID = "rby_mmo"
 -- shipped, so no hub and no client anywhere speaks the old name and the
 -- rename cost nothing.  This number lives here and in server/lib/relay.js --
 -- bump them together.
-M.PROTOCOL = 5
+--
+-- 6 lets a player change character in the middle of a game, and it is the
+-- fourth instance of the same rule.  A protocol-5 hub learns your sprite
+-- once, in your hello, and never asks again; mmo.sprite is a message type it
+-- has never heard of, and both hubs answer an unknown type with silence.  So
+-- the player would walk to the CHARACTER row, pick somebody, watch their own
+-- trainer change on their own screen -- the look is worn locally either way
+-- -- and be the only person in the game who could see it, with nothing
+-- anywhere to explain why.  A refusal at hello naming both versions is again
+-- the better sentence.  This number lives here and in server/lib/relay.js --
+-- bump them together.
+M.PROTOCOL = 6
 
 M.DEFAULT_HUB = "127.0.0.1:7788"
 M.DEFAULT_PORT = 7788

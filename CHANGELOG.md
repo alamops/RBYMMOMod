@@ -8,20 +8,35 @@ here must match `manifest.version`.
 
 ### Added
 
-- **`CHARACTER` on the MMO menu, under `HOST GAME` and `JOIN GAME`.** Until
-  now the character list was a step on the way into a game and nowhere else:
-  the only door to it was hosting or joining, so a player who simply wanted
-  to look like somebody else had to open a connection to do it, and there was
-  no way at all to change your mind between sessions without starting one.
-  The row opens the same list the character creator opens, applies the choice
-  the moment you make it, and hands you back to the menu you came from. It
-  writes the same save field the creator always wrote, so the character you
-  are wearing is part of the game you save and comes back with it — and the
-  next game you join is told about it at hello, exactly as if you had picked
-  it on the way in. The row is deliberately there only while you are *not* in
-  a game: the hub learns which character you are wearing when you say hello
-  and there is no message that changes it afterwards, so a row that let you
-  swap mid-game would change you on your own screen and nobody else's.
+- **`CHARACTER` on the MMO menu — before a game, and in one.** Until now the
+  character list was a step on the way into a game and nowhere else: the only
+  door to it was hosting or joining, so a player who simply wanted to look
+  like somebody else had to open a connection to do it, and there was no way
+  at all to change your mind between sessions without starting one. There are
+  two doors to it now and they open the same list, the one the character
+  creator opens: under `HOST GAME` and `JOIN GAME` while you are on your own,
+  and under `RANK` — above `LEAVE` and `END GAME` — while you are in a game.
+  Either way the choice applies the moment you make it and hands you back to
+  the menu you came from, and it writes the same save field the creator always
+  wrote, so the character you are wearing is part of the game you save and
+  comes back with it.
+- **Changing character mid-game changes you for everybody, immediately.** The
+  in-game row would have been a lie without this: the hub used to learn which
+  character you were wearing when you said hello and there was no message that
+  changed it afterwards, so swapping mid-session would have re-dressed you on
+  your own screen and nobody else's. Your copy now tells the hub, the hub
+  relearns your face and passes it on to everyone in the game — including you,
+  so there is one path rather than two that have to agree — and each of their
+  copies rebuilds its walking view of you on the spot rather than waiting for
+  you to leave the map and come back. A trainer card of yours that somebody
+  has open at that moment turns over with it, because the change is written
+  into the roster entry the card is holding rather than into a replacement for
+  it. From then on every ordinary movement update carries the new character
+  too, so a player who joined a second later, or missed the message, is
+  corrected without anybody doing anything. The one screen that does not
+  follow live is a leaderboard already open on somebody's screen: it keeps the
+  portrait it was drawn with until it is next asked to refresh — exactly the
+  staleness the points on it already have.
 - **The character list shows you what you are picking.** Every row now
   carries that character's 16x16 front-facing frame to the left of its name —
   the same picture the trainer card and the leaderboard already draw, read
@@ -38,6 +53,18 @@ here must match `manifest.version`.
 
 ### Changed
 
+- **`PROTOCOL` 5 → 6**, in `src/Config.lua` and `server/lib/relay.js`
+  together, for the one new message a character change sends. Nothing already
+  on the wire changed shape, so an old client still parses everything a new
+  hub sends — the breaking direction is the other one, as it has been every
+  time: a protocol-5 hub has never heard of that message and answers an
+  unknown type with silence, so a player would pick a character on the
+  connected menu, watch themselves change, and be the only person in the game
+  who could see it, forever, with nothing on screen saying why. A refusal
+  naming both versions beats that quietly. So a 0.6.x hub and a 0.7.0 client
+  turn each other away at the door, as do a 0.7.0 hub and a 0.6.x client:
+  **the mod and its hub have to be updated together.** The same call parties,
+  ranked PVP and the running pace each made, one version apart.
 - **Leaving a game no longer takes your character off.** The chosen look was
   worn between connecting and disconnecting and at no other time, so quitting
   a game — deliberately, or because the hub hung up, or because you loaded a

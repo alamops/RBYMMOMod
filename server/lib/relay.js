@@ -51,16 +51,29 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // silence. 5 is pace: a client moving fast sends a `fast` flag on mmo.move,
 // and a protocol-4 hub rebuilds every broadcast from a field list that has
 // never heard of it -- so two players who both installed the feature would
-// watch each other walk, for the whole session, with nothing said. The rule
-// each of these bumps follows is the same one: bump whenever a client can
-// send something a hub silently ignores. The field was called `running`
-// during 0.5.0's development and renamed to `fast` before release, which cost
-// nothing because protocol 5 has never shipped. Kept in step with
-// Config.PROTOCOL on the mod side.
-const PROTOCOL = 5;
+// watch each other walk, for the whole session, with nothing said. 6 is the
+// character a player is wearing: it used to be settled at hello and never
+// again, a client can now change it mid-session and says so with mmo.sprite,
+// and a protocol-5 hub has never heard of that type -- so the player would
+// pick a new character, watch themselves change, and be the only one in the
+// game who ever saw it. The rule each of these bumps follows is the same one:
+// bump whenever a client can send something a hub silently ignores. The field
+// was called `running` during 0.5.0's development and renamed to `fast`
+// before release, which cost nothing because protocol 5 has never shipped.
+// Kept in step with Config.PROTOCOL on the mod side.
+const PROTOCOL = 6;
 // A SHA-256 response is 64 hex characters; the slack is for a future digest,
 // not for an unbounded field.
 const RESPONSE_MAX = 128;
+// Smallest gap between two character changes from one player. The chat
+// gate's window (500ms), for a sharper reason than scrollback: an avatar
+// bakes its sheet when it spawns, so every other client in the game despawns
+// and respawns this player to redraw them, and an ungated change is one
+// client making everyone else's world flicker for free. A constant rather
+// than a host setting like chatIntervalMs, because src/Hub.lua has to refuse
+// at exactly the same moment for the same bytes -- one number moving would
+// leave the two hosting paths gating differently.
+const SPRITE_GATE_MS = 500;
 
 // A value that came off the wire and is about to be quoted back to its
 // sender. Bounded because the sentence is the point, not a faithful echo of
@@ -236,6 +249,40 @@ handlers['mmo.move'] = (relay, client, msg) => {
   // answer identically for every JSON value.
   client.fast = msg.fast === true;
   relay.broadcast('mmo.move', presenceOf(client), client.id);
+};
+
+/*
+ * The character a player is wearing, changed mid-session.
+ *
+ * The one field of a presence that used to be settled at hello and never
+ * again. It is stored here and said once; from then on presenceOf carries the
+ * new value in every mmo.move, mmo.join and mmo.welcome by itself, so a
+ * client that missed this message -- or joined after it -- is healed by the
+ * player's next step rather than by anything extra sent from here.
+ */
+handlers['mmo.sprite'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  // The identifier sanitiser, exactly as hello uses it (cleanSpriteId, never
+  // cleanText -- prose rules eat the underscore). An id this hub cannot make
+  // sense of costs its sender the message and nothing more.
+  const sprite = cleanSpriteId(msg.sprite);
+  if (!sprite || sprite === client.sprite) return;
+
+  // Checked after the no-op above, so a client re-sending the character it is
+  // already wearing does not arm the gate against the next real change.
+  const now = relay.now();
+  if (now - client.lastSprite < SPRITE_GATE_MS) return;
+  client.lastSprite = now;
+
+  client.sprite = sprite;
+  // The board learns the new face too, so an mmo.ranking answer given after
+  // this draws the character the player is wearing now rather than the one
+  // they greeted in. The same call admit() makes, for the same reason.
+  relay.board.seen(client.name, client.sprite);
+  // Broadcast with no exception, like publishPoints: the player it is about
+  // hears it too. Their own presence is not in their own roster, so this is
+  // the message that confirms the hub took the change.
+  relay.broadcast('mmo.sprite', { id: client.id, sprite });
 };
 
 handlers['mmo.chat'] = (relay, client, msg) => {
@@ -555,6 +602,8 @@ class Relay {
       // otherwise gate the very first message a player ever sends.
       lastChat: -Infinity,
       lastRanks: -Infinity,
+      // last mid-session character change
+      lastSprite: -Infinity,
       points: RANK_START,
       // until a hello says otherwise, nobody is scored: `ranked` is decided
       // in admit(), where the name is claimed

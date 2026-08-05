@@ -589,19 +589,40 @@ function M.explicitChoice()
   return id
 end
 
--- Choosing a character wears it there and then.
+-- Tell the hub which character you are now.
+--
+-- Sent at the moment of the change and never on a tick: a look is not
+-- presence, it does not move, and once the hub has stored it every later
+-- broadcast carries it anyway -- so a player who joins afterwards is told the
+-- new character by the ordinary presence stream, with nothing extra to send.
+--
+-- Offline is silence, not a failure: picking a character outside a game is
+-- the ordinary case, the choice is saved and worn either way, and there is
+-- simply nobody to tell.
+function M.pushSprite()
+  if not transport:isReady() then return false end
+  transport:send(Wire.SPRITE, { sprite = M.spriteChoice() })
+  return true
+end
+
+-- Choosing a character wears it there and then, and tells the hub.
 --
 -- The picker is reachable outside a game now, so a screen that changed who
 -- you are without changing what you see would read as broken -- and the
 -- older path, where the look only appeared at connect time, was that same
--- delay in a place nobody noticed it. The contract callers rely on is
--- unchanged (the id on success, nil for a character this game does not
--- have), so no screen has to know a look was applied.
+-- delay in a place nobody noticed it. The same argument reaches one step
+-- further: the hub used to learn your character once, in your hello, so a
+-- character picked mid-game was one only you could see. Three lines in one
+-- order -- save it, wear it, say it -- so that what goes on the wire is the
+-- choice that was actually kept. The contract callers rely on is unchanged
+-- (the id on success, nil for a character this game does not have), so no
+-- screen has to know a look was applied or a message sent.
 function M.setSpriteChoice(a, b)
   local id = arg1(a, b)
   if not Chars.available(id) then return nil end
   mod.save:set("sprite", id)
   M.syncLook()
+  M.pushSprite()
   return id
 end
 
@@ -938,6 +959,9 @@ function M.sendHello(game)
     -- "this name is mine, and here is the ticket you gave me" -- absent on a
     -- first visit, which is what makes the hub mint one
     rankToken = M.rankToken(dialled, name),
+    -- who you are walking in as, and no longer the only chance to say it:
+    -- mmo.sprite moves it mid-game (M.pushSprite), so this is the opening
+    -- value rather than the whole of the answer
     sprite = M.spriteChoice(),
     profile = M.profile(game),
     map = current and current.mapId,
@@ -1290,6 +1314,33 @@ handlers[Wire.RANK] = function(_, msg)
   else
     ctx.roster:setPoints(id, points)
   end
+end
+
+-- Somebody changed character in the middle of the game.
+--
+-- Broadcast with no exception, the way a rating is, so the player it is about
+-- hears it too -- which is why the self branch is a deliberate nothing rather
+-- than a case that was forgotten. Our own copy is already wearing the new
+-- character: setSpriteChoice puts it on before it tells the hub, so there is
+-- nothing here that is not already true locally.
+--
+-- The refresh is the part that is not optional. An avatar reads its sprite
+-- once, when it is spawned, and neither advance nor sync ever looks again --
+-- so writing the roster alone would move every screen that draws from the
+-- roster and leave the character walking around the overworld as whoever they
+-- used to be. Avatars:refresh is a no-op unless that player's avatar is
+-- actually up, so a player standing on another map costs nothing here and
+-- simply spawns as their new self when they come into view.
+handlers[Wire.SPRITE] = function(_, msg)
+  local id = Wire.id(msg.id)
+  if not id then return end
+  -- an identifier, so the identifier sanitiser -- Wire.text would eat the
+  -- underscore and quietly turn everyone into RED; see Wire.spriteId
+  local sprite = Wire.spriteId(msg.sprite)
+  if not sprite then return end
+  if ctx.roster:isSelf(id) then return end
+  local player = ctx.roster:setSprite(id, sprite)
+  if player then ctx.avatars:refresh(player) end
 end
 
 handlers[Wire.RANKING] = function(_, msg)
@@ -1648,6 +1699,16 @@ function M.install()
         -- about the pace of their own last step, which is what the drivers
         -- assert on
         fast = player.fast and true or false,
+        -- Who this avatar is drawn as. The roster's word again, and honest
+        -- about it: the avatar layer bakes the sprite in at spawn and is
+        -- rebuilt whenever this value moves (Avatars:refresh), so for a
+        -- spawned player the two agree by construction -- what the roster
+        -- says is what was last spawned with. The one gap is a sprite this
+        -- game's catalog does not carry, which spriteFor draws as the
+        -- fallback while the roster keeps the id its owner actually chose.
+        -- Read it beside `spawned`: a character change is only on screen
+        -- when both have moved.
+        sprite = player.sprite,
         avatarMap = ctx.avatars.mapId,
       }
     end
