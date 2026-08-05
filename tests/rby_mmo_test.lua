@@ -3267,6 +3267,108 @@ do
         "only a four-figure rating trims a full-length name, by one glyph")
 end
 
+-- ------- and the roster row, where the trade runs the other way
+--
+-- ROSTER_LAYOUT is RANK_LAYOUT's mirror image: there the score is
+-- fixed-width and the name pays for the gaps, here the name is what the
+-- player reads the row by and never pays, so the place name spends
+-- whatever `placeRoom` works out is left over.  Read off M.ROSTER_LAYOUT
+-- and M.placeRoom themselves, for the same reason the RANK block above
+-- reads off M.RANK_LAYOUT and M.nameRoom -- so this cannot drift from what
+-- the screen actually draws with.
+do
+  local L = Ui.ROSTER_LAYOUT
+  eq(L.labelX, 16, "the label starts where ListMenu starts one")
+  eq(L.right, 152, "the right column ends where RANK's does")
+  eq(L.gap, 8, "one glyph of air is kept between name and place")
+  eq(L.min, 3, "below three glyphs a place name is not worth showing")
+
+  -- room = max(floor((right - labelX - 8*#name - gap) / 8), 0) -- pinned
+  -- against a hand-worked copy of the formula, not only the inequality it
+  -- exists to satisfy, for every length a trainer name can actually be.
+  for n = 1, Config.NAME_MAX do
+    local name = ("A"):rep(n)
+    local want = math.max(
+      math.floor((L.right - L.labelX - 8 * n - L.gap) / 8), 0)
+    local room = Ui.placeRoom(name)
+    eq(room, want, ("placeRoom matches the formula at %d glyphs"):format(n))
+    check(L.labelX + 8 * n + L.gap + 8 * room <= L.right,
+          ("a place beside a %d-glyph name never reaches the right edge"):format(n))
+  end
+
+  eq(Ui.placeRoom(("A"):rep(Config.NAME_MAX)), 6,
+     "a full-length name still leaves the PALLET of PALLET TOWN")
+  check(Ui.placeRoom(("A"):rep(Config.NAME_MAX)) >= L.min,
+        "and that is still enough of a place name to be worth showing")
+
+  eq(Ui.placeRoom(("A"):rep(80)), 0,
+     "an absurdly long name leaves nothing for a place -- clamped, not negative")
+end
+
+-- ------- Places.name: what the player's own town map calls a map id
+--
+-- The resolver never ships a name of its own -- it reads whatever the
+-- engine already decoded from the player's ROM into
+-- game.data.field.townMap, tolerating both shapes src/ui/TownMap.lua does,
+-- and falls back to the engine's own gsub (TownMap.lua's entryName) when
+-- there is nothing to read.  Driven directly, through the same resolver
+-- every other module in this file goes through.
+do
+  local Places = need("Places")
+
+  local flatGame = { data = { field = { townMap = {
+    PALLET_TOWN = { x = 5, y = 6, name = "PALLET TOWN" },
+  } } } }
+  eq(Places.name(flatGame, "PALLET_TOWN"), "PALLET TOWN",
+     "a flat townMap resolves a name directly")
+
+  local nestedGame = { data = { field = { townMap = { locations = {
+    PALLET_TOWN = { name = "PALLET TOWN" },
+  } } } } }
+  eq(Places.name(nestedGame, "PALLET_TOWN"), "PALLET TOWN",
+     "and so does the .locations shape the extractor can nest it under")
+
+  local labelGame = { data = { field = { townMap = {
+    CERULEAN_CITY = { label = "CERULEAN CITY" },
+  } } } }
+  eq(Places.name(labelGame, "CERULEAN_CITY"), "CERULEAN CITY",
+     "an entry with only a .label reads too, like the engine's own reader")
+
+  eq(Places.name(flatGame, "REDS_HOUSE_1F"), "REDS HOUSE 1F",
+     "a miss falls back to the id with underscores turned to spaces")
+
+  local emptyNameGame = { data = { field = { townMap = {
+    VIRIDIAN_CITY = { name = "" },
+  } } } }
+  eq(Places.name(emptyNameGame, "VIRIDIAN_CITY"), "VIRIDIAN CITY",
+     "an entry whose .name is the empty string is a miss too, not a blank row")
+
+  eq(Places.name(flatGame, nil), nil,
+     "no map id, no place -- nil, not a placeholder string")
+  eq(Places.name(flatGame, ""), nil,
+     "and an empty one is treated the same as none at all")
+
+  -- Nothing here may raise: this runs once per roster row from inside a
+  -- mod callback, and the doc comment on Places.lua is explicit that an
+  -- unexpected shape is allowed to cost a nice name, never the screen.
+  for _, case in ipairs({
+    { "no game at all", nil },
+    { "a game with no .data", {} },
+    { "a .data that is not a table", { data = "junk" } },
+    { "a .field that is not a table", { data = { field = "junk" } } },
+    { "a .townMap that is not a table", { data = { field = { townMap = "junk" } } } },
+    { "a .locations that is not a table",
+      { data = { field = { townMap = { locations = "junk" } } } } },
+  }) do
+    local label, junkGame = case[1], case[2]
+    local ok, result = pcall(Places.name, junkGame, "REDS_HOUSE_1F")
+    check(ok, "Places.name does not raise on " .. label)
+    if ok then
+      eq(result, "REDS HOUSE 1F", "and still falls back to the gsub form on " .. label)
+    end
+  end
+end
+
 end)()
 
 -- ------------------------------------------------------------------
