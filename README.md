@@ -38,8 +38,13 @@ until you say otherwise — installing it is never what opens a socket.
 
 Character creation comes first: pick a **NAME** (your save file keeps its
 own) and a **LOOK** from the 36 walking characters in the game — plus
-**special characters from talented artists**, marked `▷` in the list.
-Confirm, pick a room size, and you're live.
+**special characters from talented artists**, marked `▷` in the list. Each
+row shows that character's face beside their name, so you're picking a person
+rather than reading a label. Confirm, pick a room size, and you're live.
+
+You don't have to be here to choose, either: **`CHARACTER` on the MMO menu**
+opens the same list any time you're not in a game, no hosting and no joining
+required. See [Be somebody else](#-be-somebody-else).
 
 The HOST screen mints a **six-character passcode** on the way in and shows it
 in the `JOIN CODE` row — `A7K3P9`, letters and digits, no dashes. There's
@@ -268,14 +273,38 @@ in full and does not soften it.
 
 ### 🚪 DROP OUT, KEEP PLAYING
 `LEAVE` disconnects and hands you straight back to single-player. Save,
-world, party — untouched. No "returning to title screen".
+world, party — untouched, and so is the character you're wearing: you walk
+out of the game looking exactly like you did in it. No "returning to title
+screen".
 
 ### 🎭 BE SOMEBODY ELSE
 Before you host or join, character creation asks who you are: a name of your
 own (your save file keeps its own), and **any walking character in the
 game** — 36 of them. Be Lance. Be Giovanni. Be a Rocket grunt, a Biker, a
-Swimmer, Oak. You see it too, not just everyone else — and it's put back the
-moment you leave.
+Swimmer, Oak. You see it too, not just everyone else.
+
+**Or just pick one — no game required.** `CHARACTER` sits on the MMO menu
+under `HOST GAME` and `JOIN GAME`, and it opens that same list whenever
+you're not in a game. Choose, and you're wearing it before the menu has
+closed. The choice goes in your save file, so it's still on you next time you
+load that game, and the next hub you join is told about it the moment you
+connect.
+
+Every row shows the character's face to the left of their name — the same
+portrait your trainer card draws — because `MIDDLE AGED WOMAN` and
+`COOLTRAINER` don't actually tell you what you're about to look like:
+
+<p align="center">
+  <img src="docs/screenshots/character-picker.png" width="300" alt="The character list, each row showing a portrait beside the name, scrolled to NIRE">
+  <img src="docs/screenshots/mmo-menu.png" width="300" alt="The MMO menu">
+</p>
+
+**And you keep it.** Leaving a game, losing the connection, quitting to the
+title and pressing CONTINUE — none of them undress you any more. You wear the
+character you picked until you pick a different one, and picking `RED` is how
+you put yourself back. (A save that has never chosen one is left completely
+alone: never opened this list, never moved `MY SPRITE` off its default, and
+the game draws exactly what it always drew.)
 
 **And some of them are special characters from talented artists**, drawn for
 this mod rather than lifted out of your ROM — `NIRE` and `NIRE HOOD` so far,
@@ -291,8 +320,9 @@ which, and work the same way — worn on the map, sent over the wire, drawn on
 your trainer card — but they go one step further than a borrowed ROM
 character can. Wear one and it's you in **battle** too: the back pic over
 your shoulder when a battle starts, the pic on your trainer card, and the one
-Oak shrinks into if you start a new game. That only lasts as long as you're
-in a game, exactly like the walking sprite; leave and Red is back.
+Oak shrinks into if you start a new game. That follows the walking sprite
+exactly: it's you for as long as you're wearing them, in a game or on your
+own, until you pick somebody else.
 
 <p align="center">
   <img src="docs/screenshots/nire-battle.png" width="330" alt="A link battle starting, with NIRE's back pic where Red's would be">
@@ -358,13 +388,14 @@ B goes back. The cursor remembers where you left it. The world stays visible
 behind it.
 
 <p align="center">
-  <img src="docs/screenshots/mmo-menu.png" width="300" alt="The MMO menu while hosting">
+  <img src="docs/screenshots/mmo-menu.png" width="300" alt="The MMO menu">
 </p>
 
 | Row | Shows up when | What it does |
 | --- | --- | --- |
 | `HOST GAME` | not in a game | make a trainer, then the room size and the passcode |
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
+| `CHARACTER` | not in a game | change who you look like, right now, without connecting to anything |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
 | `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |
@@ -374,10 +405,13 @@ behind it.
 | `LEAVE` | you joined | drop out and **keep playing single-player** |
 | `END GAME` | hosting | asks first — this one ends it for everybody |
 
-Two rows before you're in a game, and no third one for the passcode:
+Three rows before you're in a game, and none of them is for the passcode:
 `JOIN GAME` asks for it on the way in, so typing a different one there is how
-a saved passcode gets changed. (The screenshot above is the menu mid-game,
-which is why it shows neither.)
+a saved passcode gets changed. `CHARACTER` is the one row here that touches
+no network at all — it's for changing who you look like when you aren't
+playing with anybody, and what it changes stays changed. (A shot of this menu
+only ever shows one of the two states; the rows for the other one aren't
+hidden, they just don't apply yet.)
 
 Leaving isn't quitting. Your save, your world, your party: untouched. The
 game just carries on without the other people in it.
@@ -409,7 +443,7 @@ the `PLAYERS` list to start one from.
 | `MAX PLAYERS` | 4 | room size for games you host (2–64, you count) |
 | `JOIN` | `127.0.0.1:7788` | where JOIN GAME starts from |
 | `JOIN CODE` | *(empty)* | the passcode used for a hub you haven't typed one for |
-| `MY SPRITE` | RED | how everyone else sees you |
+| `MY SPRITE` | RED | who you look like, to everyone including you — the `CHARACTER` row is the in-game way to the same thing, and its choice sticks to your save |
 | `BUBBLES` | on | names and chat over heads |
 | `B TO RUN` | on | hold B on foot to move at bike speed |
 
@@ -802,7 +836,7 @@ end
 
 ## 🚧 Known jank — read this bit
 
-It's `0.2.2` and it ships flagged `experimental` on purpose. The full list
+It's `0.7.0` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 
