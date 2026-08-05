@@ -4,6 +4,68 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.7.0] - 2026-08-05
+
+### Added
+
+- **The hub can tell you who is on it, from the terminal.**
+  `rby-mmo-hub players` lists every connected trainer with where they are —
+  `PALLET TOWN`, not `PALLET_TOWN` — along with `BUSY`/`PARTY` and their
+  ranked points. Until now the only way to answer "who is in my world right
+  now" was to launch the game and open the `PLAYERS` screen, which is an odd
+  thing to have to do to a machine you are already logged into. A player who
+  is mid-battle or sitting in a menu shows a dash rather than a place, because
+  the hub is genuinely not told a cell while they are there, and the command
+  says so instead of looking broken. `--json` prints the rows as they are
+  held, for anyone piping this into something else.
+- **…and the leaderboard, too.** `rby-mmo-hub ranking` prints the persisted
+  season — place, name, points — top ten by default and `--all` for everybody
+  who has ever scored. It reads `ranking.json`, the file the hub has been
+  keeping all along, so nothing new had to be plumbed for it and a hub that is
+  switched off still answers.
+- **A small `status.json` beside the config, so those two commands have
+  something to read.** The CLI is a short-lived process with no channel into
+  the running hub — that is why `status` has always printed *configured*
+  numbers and said so. Rather than open an admin socket (a port, an auth
+  story, and a thing to get wrong), the hub now writes a snapshot of its
+  roster next to `config.json` and `ranking.json`: written whole and renamed
+  over the old one at mode 0600 like the ranking already was, refreshed
+  whenever somebody joins, leaves or moves, and beating every ten seconds even
+  when nothing happens. That heartbeat is what makes the file **honest**: a
+  reader that finds one older than two and a half beats says the hub appears
+  to be down rather than reporting a room full of players who left hours ago,
+  a clean shutdown stamps `stoppedAt` and empties the roster, and a missing
+  file is reported as a hub that has not run rather than an error. It holds
+  names, characters, map cells and points — no join codes, no ticket hashes,
+  no session ids, no addresses — so it is as safe to `cat` on a shared screen
+  as `invite list` is.
+- **The `PLAYERS` list in the game says where everyone is.** The column that
+  read `HERE` now reads the place: `VIRIDIAN FOREST`, `CELADON CITY`,
+  `PALLET TOWN`. That is strictly more than `HERE` was telling you — your own
+  map's name against somebody's row still reads as *here*, and the rows that
+  used to be blank now answer the question `HERE` could not, which is where
+  everybody else went. `PARTY` and `BUSY` keep the column when they apply,
+  because who you can talk to outranks where they are, and a name long enough
+  to crowd the row trims the place rather than itself. The names are real
+  ones, resolved from the town-map data the engine decodes out of **your own**
+  ROM at runtime, with the engine's own `PALLET_TOWN` → `PALLET TOWN` fallback
+  for a map with no entry there — so nothing ROM-derived is shipped to get
+  them. Nothing new goes on the wire either: the map id has ridden along with
+  presence since the first release, and this is the mod finally reading it out
+  loud.
+
+### Notes
+
+- **No wire change.** `PROTOCOL` stays **5** and no message type was added,
+  so a 0.6.3 copy and a 0.7.0 copy still play together; the two new commands
+  read files, and the location names are resolved on the client from data it
+  already had. `affects_link` stays `false`.
+- `server/README.md`'s protocol section had been left behind at protocol 3
+  and never learned about ranked PVP or the pace flag. It now documents
+  protocol 5, `mmo.result` / `mmo.ranks` / `mmo.ranking` / `mmo.rank`, the
+  party messages that only ever appeared in one direction of the table, and
+  the `fast` field on a presence record.
+
 ## [0.6.3] - 2026-08-05
 
 ### Fixed

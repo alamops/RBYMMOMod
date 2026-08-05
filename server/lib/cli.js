@@ -55,6 +55,7 @@ const config = require('./config.js');
 const auth = require('./auth.js');
 const limits = require('./limits.js');
 const log = require('./log.js');
+const rank = require('./rank.js');
 const reachability = require('./reachability.js');
 const upnp = require('./upnp.js');
 
@@ -68,7 +69,31 @@ const FALLBACK_VERSION = '0.0.0-dev';
 // Flags that are switches, so `--yes start` does not eat `start` as a value.
 const SWITCHES = new Set([
   'yes', 'force', 'reveal', 'clear', 'help', 'version', 'quiet', 'insecureConfig',
+  'json', 'all',
 ]);
+
+/*
+ * The two files the hub writes for itself, beside the config file: the
+ * leaderboard it has always kept, and the roster snapshot `players` reads.
+ *
+ * Both are read here and written nowhere here -- this process is not the hub
+ * (see throttleLines() for the long version of that). The snapshot's contract
+ * is fixed in the plan (docs/plans/server-side-listing.md §3): a JSON object
+ * with `version`, `updatedAt`, `stoppedAt` and a `players` array carrying
+ * name / map / x / y / busy / party / points / ranked, written atomically on
+ * every roster change and refreshed as a heartbeat every STATUS_HEARTBEAT_MS
+ * so that its *age* is the honest answer to "is the hub still there".
+ *
+ * The staleness ceiling is 2.5 heartbeats. One missed write is a busy event
+ * loop or a slow disk and means nothing; two and a half missed writes in a
+ * row is a hub that has stopped without saying so -- a crash, a `kill -9`, a
+ * container that went away -- and that is worth saying out loud rather than
+ * printing a roster from an hour ago as if it were the truth.
+ */
+const STATUS_FILENAME = 'status.json';
+const RANKING_FILENAME = 'ranking.json';
+const STATUS_HEARTBEAT_MS = 10000;
+const STATUS_STALE_MS = STATUS_HEARTBEAT_MS * 2.5;
 
 /*
  * How long `start` will wait for the router to acknowledge the removal of its
@@ -362,6 +387,11 @@ const HELP = {
     '  config get <path>           one setting, e.g. limits.maxPending',
     '  config set <path> <value>   change one setting (clamped, then saved)',
     '',
+    'Who is playing',
+    '  players [--json]            who is connected and where they are standing,',
+    '                              from the snapshot the running hub writes',
+    '  ranking [--json] [--all]    the leaderboard, read off the disk',
+    '',
     'Who may join',
     '  invite [options]            mint a new join code and print it once',
     '  invite list [--reveal]      list join codes; masked unless --reveal',
@@ -438,6 +468,45 @@ const HELP = {
     'Prints every setting with the value in force and where it came from, so',
     '"why is it still 4 players" has an answer, then the wrong-passcode',
     'throttle in plain words. Passcodes are masked.',
+  ],
+  players: [
+    `Usage: ${PROGRAM} players [--json]`,
+    '',
+    'Who is connected right now, where each of them is standing, and what they',
+    `are scored at. Read from ${STATUS_FILENAME}, which the running hub writes`,
+    'beside its config file -- on every join and leave, and every',
+    `${humanMs(STATUS_HEARTBEAT_MS)} as a heartbeat.`,
+    '',
+    'This command is not the hub and has no line to it, so the one thing it can',
+    'be sure of is how old that file is -- and it says so. A snapshot older',
+    `than ${humanMs(STATUS_STALE_MS)} is reported as a hub that appears to be down, rather`,
+    'than as an empty world.',
+    '',
+    '  LOCATION  the map the player is on. A dash means the hub cannot see one',
+    '            -- they are in a battle or a menu, where no position is sent.',
+    '  STATUS    BUSY (in a trade or battle), PARTY (in a two-player party),',
+    '            or blank.',
+    '  POINTS    the ranked score; blank for a player who is not ranked.',
+    '',
+    '  --json    print the snapshot\'s player list as JSON, for a script.',
+  ],
+  ranking: [
+    `Usage: ${PROGRAM} ranking [--json] [--all]`,
+    '',
+    `The leaderboard, read from ${RANKING_FILENAME} beside the config file --`,
+    'the same file the hub reloads when it restarts, so it survives one. The',
+    'hub saves it within a second of a ranked battle being settled; nothing',
+    'here is live, and nothing here needs a game client.',
+    '',
+    `Top ${rank.RANK_TOP} by default, best first, ties broken by name -- the same order`,
+    'players see in game.',
+    '',
+    '  --all     every ranked player, not just the top ' + `${rank.RANK_TOP}.`,
+    '  --json    print the rows as JSON. The stored token digest is not among',
+    '            the fields; it is the hub\'s business and nobody else\'s.',
+    '',
+    'A player who has never won a point is not on the board at all: zero means',
+    '"never won" and "lost it all back" alike, and neither is a placing.',
   ],
   config: [
     `Usage: ${PROGRAM} config list`,
@@ -647,9 +716,14 @@ function limitOf(cfg, key) {
  * recentFailures, lockdown, throttledAddresses and the rest -- but that object
  * lives inside the running hub's process, reached only through the handle
  * `server.start()` resolves. `status` and `doctor` are separate short-lived
- * processes that read a config file; there is no admin socket, no status file
- * and no signal that answers, so they have nothing to read those counters
- * from. Inventing a number here would be worse than not printing one.
+ * processes that read a config file; there is no admin socket and no signal
+ * that answers, so they have nothing to read those counters from. Inventing a
+ * number here would be worse than not printing one.
+ *
+ * The status snapshot `players` reads is not a way round this. It carries the
+ * roster the hub is willing to publish -- who is online, and where -- and
+ * deliberately not the limiter's internals, so the throttle's live counts are
+ * still the hub's log's business and nobody else's.
  *
  * What a host who is being hammered actually sees is the hub's own log, which
  * is where limits.js's decisions surface. These lines tell them what those
@@ -1862,6 +1936,344 @@ async function verbDoctor(ctx) {
   return failed ? ERROR : OK;
 }
 
+// ------------------------------------------------- who is playing, and where
+
+/**
+ * A file the hub keeps beside its config. The config path is the one thing a
+ * host has already told us (flag, env, cwd, /data in a container), and
+ * server.js derives the ranking path from it the same way -- so following it
+ * is what makes `--config` point both verbs at the right hub with no second
+ * flag to get wrong.
+ */
+function dataFile(ctx, name) {
+  return path.join(path.dirname(path.resolve(ctx.file)), name);
+}
+
+/**
+ * Read one of them. Three outcomes worth telling apart: not there (which is
+ * usually a hub that has never run, and is not an error), there but not
+ * readable or not JSON (which is), and a document.
+ */
+function readJsonFile(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { missing: true };
+    return { error: err && err.message ? err.message : String(err) };
+  }
+  try {
+    return { data: JSON.parse(text) };
+  } catch (err) {
+    return { corrupt: true, error: err && err.message ? err.message : String(err) };
+  }
+}
+
+function finite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+/** An age a host reads at a glance. Coarse on purpose: seconds, then minutes. */
+function humanAge(ms) {
+  const seconds = Math.max(0, Math.round(Number(ms) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+/*
+ * Text out of a file anybody can edit, on its way to a terminal. Control
+ * characters in a name would move the cursor, repaint the line or worse, and
+ * a trainer name is at most a handful of characters anyway -- so they are
+ * flattened and the field is capped. The hub sanitises names on the way in;
+ * this is the second half of that, for the file it wrote them to.
+ */
+function plain(value, max) {
+  if (value === null || value === undefined) return '';
+  const text = String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  const cap = max || 24;
+  return text.length > cap ? text.slice(0, cap) : text;
+}
+
+/**
+ * `PALLET_TOWN` -> `PALLET TOWN`. A display transform and nothing else: the
+ * file keeps the engine's own map id, because that is the thing the hub was
+ * told and the thing a bug report needs. Null is not a missing value here --
+ * it is the hub saying the player is in a battle or a menu, where no position
+ * is sent at all (that is why the column shows a dash rather than a blank).
+ */
+function mapName(value) {
+  if (typeof value !== 'string') return null;
+  const name = plain(value.replace(/_+/g, ' '), 28).replace(/\s+/g, ' ');
+  return name === '' ? null : name;
+}
+
+/**
+ * How old the snapshot is, and what that means. The three answers are the
+ * three states a reader can honestly be in: the hub said goodbye, the hub has
+ * gone quiet, or the hub is writing.
+ */
+function snapshotAge(snapshot, now) {
+  const stoppedAt = finite(snapshot.stoppedAt);
+  if (stoppedAt !== null && stoppedAt > 0) {
+    return { state: 'stopped', at: stoppedAt, age: Math.max(0, now - stoppedAt) };
+  }
+  const updatedAt = finite(snapshot.updatedAt);
+  if (updatedAt === null || updatedAt <= 0) return { state: 'undated', age: null };
+  const age = Math.max(0, now - updatedAt);
+  return { state: age > STATUS_STALE_MS ? 'stale' : 'live', at: updatedAt, age };
+}
+
+function printTable(ctx, headers, rows) {
+  const widths = headers.map((header, column) =>
+    Math.max(header.length, ...rows.map((row) => String(row[column]).length)));
+  ctx.say(headers.map((header, column) => pad(header, widths[column])).join('  ').trimEnd());
+  for (const row of rows) {
+    ctx.say(row.map((cell, column) => pad(cell, widths[column])).join('  ').trimEnd());
+  }
+}
+
+/*
+ * Where to look when the snapshot is not where we looked -- the same shape of
+ * answer requireExistingConfig() gives, and for the same reason: the commonest
+ * way to arrive here is running the verb on the host when the hub is in a
+ * container, and "the hub is not running" would be a confident wrong answer.
+ */
+function noSnapshotLines(file) {
+  return [
+    `No status snapshot at ${file}.`,
+    '',
+    '  The hub writes that file while it runs -- at startup, whenever somebody',
+    `  joins or leaves, and every ${humanMs(STATUS_HEARTBEAT_MS)} as a heartbeat -- and leaves it`,
+    '  behind on the way out. So there being none means one of three things:',
+    '  this hub has not been started since the software gained the file, it',
+    '  keeps its files somewhere else, or it has never run at all.',
+    '',
+    `  The snapshot sits beside the config file, so \`--config <path>\` moves`,
+    '  both. If the hub runs in Docker, its files are inside the container:',
+    `      docker compose exec hub ${PROGRAM} players`,
+  ];
+}
+
+function verbPlayers(ctx) {
+  const wantsJson = ctx.flags.json === true;
+  const file = dataFile(ctx, STATUS_FILENAME);
+  const read = readJsonFile(file);
+
+  if (read.missing) {
+    // Nothing to show is not a failure -- `invite list` with no codes exits 0
+    // too. The explanation goes to stderr so `--json` still emits a document
+    // a script can parse.
+    if (wantsJson) ctx.say('[]');
+    for (const line of noSnapshotLines(file)) ctx.warn(line);
+    return OK;
+  }
+  if (read.corrupt) {
+    ctx.warn(`${file} is not readable as JSON: ${read.error}`);
+    ctx.warn('The hub writes it whole and renames it into place, so a half-written');
+    ctx.warn('one should not be possible -- this is a file that has been edited, or');
+    ctx.warn('a disk that lost it. Deleting it costs nothing: the hub writes a fresh');
+    ctx.warn('one on its next heartbeat.');
+    return ERROR;
+  }
+  if (read.error) {
+    ctx.warn(`Could not read ${file}: ${read.error}`);
+    return ERROR;
+  }
+
+  const snapshot = read.data && typeof read.data === 'object' && !Array.isArray(read.data)
+    ? read.data : null;
+  if (!snapshot) {
+    ctx.warn(`${file} does not hold a status snapshot (expected a JSON object).`);
+    return ERROR;
+  }
+
+  const players = Array.isArray(snapshot.players) ? snapshot.players : [];
+  const now = Date.now();
+  const age = snapshotAge(snapshot, now);
+
+  const version = finite(snapshot.version);
+  const newer = version !== null && version > 1;
+
+  if (wantsJson) {
+    ctx.say(JSON.stringify(players, null, 2));
+    // Every honesty note goes to stderr in this mode: the point of --json is
+    // that stdout is exactly the array and nothing else.
+    if (age.state === 'stopped') {
+      ctx.warn(`note: the hub stopped ${humanAge(age.age)} ago; this list is what it left behind.`);
+    } else if (age.state === 'stale') {
+      ctx.warn(`note: last heartbeat ${humanAge(age.age)} ago, so the hub appears to be down; ` +
+        'this list is the last thing it wrote.');
+    } else if (age.state === 'undated') {
+      ctx.warn('note: the snapshot does not say when it was written, so its age is unknown.');
+    }
+    if (newer) ctx.warn(`note: snapshot version ${version}; this command reads version 1.`);
+    return OK;
+  }
+
+  if (newer) {
+    ctx.warn(`note: ${file} says version ${version}; this command knows version 1, so`);
+    ctx.warn('      anything newer in it is not shown here.');
+  }
+
+  const where = [];
+  if (snapshot.host !== undefined && snapshot.port !== undefined) {
+    where.push(`${plain(snapshot.host, 45)}:${plain(snapshot.port, 5)}`);
+  }
+  const maxPlayers = finite(snapshot.maxPlayers);
+
+  if (age.state === 'stopped') {
+    ctx.say(`The hub stopped ${humanAge(age.age)} ago${where.length ? ` (${where[0]})` : ''}, ` +
+      'so nobody is online.');
+    ctx.say(`It said so itself, on the way out. \`${PROGRAM} start\` runs it again.`);
+    return OK;
+  }
+  if (age.state === 'stale') {
+    ctx.say(`The hub appears to be down: the last heartbeat was ${humanAge(age.age)} ago,`);
+    ctx.say(`and a running hub writes one every ${humanMs(STATUS_HEARTBEAT_MS)}. It did not stop cleanly --`);
+    ctx.say('there is no shutdown recorded in the snapshot -- so this is a crash, a');
+    ctx.say('kill, or a machine that went away.');
+    ctx.say('');
+    if (!players.length) {
+      ctx.say('Nobody was online in the last thing it wrote.');
+      return OK;
+    }
+    ctx.say('The last thing it wrote, which is not who is online now:');
+    ctx.say('');
+  } else if (age.state === 'undated') {
+    ctx.say(`${file} does not say when it was written, so how current this is`);
+    ctx.say('cannot be told from here. Taking it at face value:');
+    ctx.say('');
+  } else if (!players.length) {
+    ctx.say(`Nobody is online${where.length ? ` on ${where[0]}` : ''} ` +
+      `(snapshot ${humanAge(age.age)} old).`);
+    return OK;
+  } else {
+    const seats = maxPlayers !== null ? ` of ${maxPlayers}` : '';
+    ctx.say(`${players.length} player(s) online${seats}` +
+      `${where.length ? ` on ${where[0]}` : ''}, snapshot ${humanAge(age.age)} old.`);
+    ctx.say('');
+  }
+
+  const rows = players.map((player) => {
+    const entry = player && typeof player === 'object' ? player : {};
+    const location = mapName(entry.map);
+    const status = entry.busy ? 'BUSY' : (entry.party ? 'PARTY' : '');
+    const points = entry.ranked ? String(finite(entry.points) === null ? 0 : finite(entry.points)) : '';
+    return [plain(entry.name) || '-', location || '-', status, points];
+  });
+
+  printTable(ctx, ['NAME', 'LOCATION', 'STATUS', 'POINTS'], rows);
+
+  ctx.say('');
+  if (rows.some((row) => row[1] === '-')) {
+    ctx.say('A dash for LOCATION is a player in a battle or a menu: the hub is not');
+    ctx.say('sent a position while they are there, so it does not have one to show.');
+  }
+  ctx.say('STATUS is BUSY in a trade or battle, PARTY in a two-player party.');
+  ctx.say('POINTS is the ranked score, blank for a player who is not ranked --');
+  ctx.say(`\`${PROGRAM} ranking\` prints the whole board, including the players`);
+  ctx.say('who are not online now.');
+  return OK;
+}
+
+// ------------------------------------------------------------------ ranking
+
+function verbRanking(ctx) {
+  const wantsJson = ctx.flags.json === true;
+  const wantsAll = ctx.flags.all === true;
+  const file = dataFile(ctx, RANKING_FILENAME);
+  const read = readJsonFile(file);
+
+  if (read.missing) {
+    if (wantsJson) ctx.say('[]');
+    ctx.warn(`No ranking file at ${file}.`);
+    ctx.warn('');
+    ctx.warn('  The hub writes one within a second of the first ranked battle being');
+    ctx.warn('  settled, and not before -- so this is a hub where nobody has finished');
+    ctx.warn('  a ranked battle yet, or one whose files live somewhere else.');
+    ctx.warn(`  The ranking sits beside the config file, so \`--config <path>\` moves both;`);
+    ctx.warn('  in Docker it is inside the container:');
+    ctx.warn(`      docker compose exec hub ${PROGRAM} ranking`);
+    return OK;
+  }
+  if (read.corrupt) {
+    ctx.warn(`${file} is not readable as JSON: ${read.error}`);
+    ctx.warn('The hub writes it whole and renames it into place, so this is a file');
+    ctx.warn('that has been edited by hand or damaged. The hub will refuse to load');
+    ctx.warn('it too, and start the season empty rather than guess.');
+    return ERROR;
+  }
+  if (read.error) {
+    ctx.warn(`Could not read ${file}: ${read.error}`);
+    return ERROR;
+  }
+
+  // Both shapes the hub itself accepts on the way in: the documented
+  // `{ version, players }` object, and a bare array from an older file.
+  const raw = read.data;
+  const stored = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.players) ? raw.players : null);
+  if (!stored) {
+    ctx.warn(`${file} does not hold a ranking (expected { "version": 1, "players": [...] }).`);
+    return ERROR;
+  }
+
+  /*
+   * Zero is filtered, and the order is points-then-name, because that is what
+   * Board.top does (rank.js) and what every player already sees in game. Two
+   * lists of the same board that disagree about who is third would be worse
+   * than one list that is a second out of date.
+   */
+  const ranked = stored
+    .filter((row) => row && typeof row === 'object' && (finite(row.points) || 0) > 0)
+    .map((row) => ({
+      name: plain(row.name) || '-',
+      sprite: typeof row.sprite === 'string' ? plain(row.sprite, 32) : null,
+      points: finite(row.points) || 0,
+      played: Math.max(0, Math.floor(finite(row.played) || 0)),
+      won: Math.max(0, Math.floor(finite(row.won) || 0)),
+    }))
+    .sort((a, b) => (b.points - a.points) || (a.name < b.name ? -1 : 1));
+
+  if (!ranked.length) {
+    if (wantsJson) ctx.say('[]');
+    else {
+      ctx.say('The ranking is empty: no ranked battle has been settled on this hub');
+      ctx.say('yet, or every result since has been lost back. A player only appears');
+      ctx.say('here once they are above zero.');
+    }
+    return OK;
+  }
+
+  const shown = wantsAll ? ranked : ranked.slice(0, rank.RANK_TOP);
+
+  if (wantsJson) {
+    // Deliberately not the stored rows: ranking.json also carries the token
+    // digest that proves who owns a name, and that is the hub's business
+    // alone -- rank.js keeps it off the wire for the same reason.
+    ctx.say(JSON.stringify(shown.map((row, index) => Object.assign({ place: index + 1 }, row)), null, 2));
+    return OK;
+  }
+
+  printTable(ctx, ['PLACE', 'NAME', 'POINTS'], shown.map((row, index) => [
+    String(index + 1), row.name, String(row.points),
+  ]));
+
+  ctx.say('');
+  if (shown.length < ranked.length) {
+    ctx.say(`Top ${shown.length} of ${ranked.length} ranked player(s). --all prints every one.`);
+  } else {
+    ctx.say(`${ranked.length} ranked player(s) -- the whole board.`);
+  }
+  ctx.say('Read from the file the hub keeps, which it saves within a second of');
+  ctx.say('each result. A battle settled in the last moment may not be in it yet.');
+  return OK;
+}
+
 // --------------------------------------------------------------------- upnp
 
 async function verbUpnp(ctx, rest) {
@@ -1995,6 +2407,8 @@ async function run(argv, io) {
       case 'init': return await verbInit(ctx);
       case 'start': return await verbStart(ctx);
       case 'status': return verbStatus(ctx);
+      case 'players': return verbPlayers(ctx);
+      case 'ranking': return verbRanking(ctx);
       case 'config': return verbConfig(ctx, rest);
       case 'invite': return verbInvite(ctx, rest);
       case 'revoke': return verbRevoke(ctx, rest);

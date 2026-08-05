@@ -43,6 +43,23 @@ return {
         .. "nothing. Points floor at 0. A RANK row on the MMO menu shows "
         .. "the top ten -- place, character, name, points -- and the score "
         .. "sits on every trainer card.",
+      "The PLAYERS list says where everybody is: the column that read HERE "
+        .. "now carries the place name of the map that player is standing "
+        .. "on, resolved from the town-map data the engine decodes out of "
+        .. "the player's own ROM at runtime, with the engine's own "
+        .. "underscore-stripping fallback for a map that has no entry there. "
+        .. "PARTY and BUSY still take the column ahead of it, a place name "
+        .. "trims to whatever room the trainer name leaves, and a player in "
+        .. "a battle or a menu reports no cell at all, so their row is "
+        .. "unchanged.",
+      "Operator commands on the dedicated hub for the same two lists, with "
+        .. "no game client: `rby-mmo-hub players` prints who is connected, "
+        .. "where, busy or in a party, and their points; `rby-mmo-hub "
+        .. "ranking` prints the season out of ranking.json. players reads a "
+        .. "small status.json the hub keeps beside its config -- roster only, "
+        .. "no secrets, rewritten atomically and heartbeat-stamped -- so a "
+        .. "hub that is stopped or wedged is reported as such rather than as "
+        .. "a room full of players who left.",
       "Hold-B running: on foot, holding B halves the frames per tile, the "
         .. "same speed a bike gives, with a `B TO RUN` option (default on) "
         .. "to turn it off. Other players see it too -- presence carries the "
@@ -103,6 +120,11 @@ return {
         .. "under right now is not transferable, and neither is one that has "
         .. "scored: from then on, somebody typing it without the ticket plays "
         .. "normally and scores nothing.",
+      "The locations `rby-mmo-hub players` prints are map ids with their "
+        .. "underscores taken out (PALLET_TOWN reads as PALLET TOWN), not the "
+        .. "names Kanto itself uses. The real ones live in the ROM, which a "
+        .. "hub has never had and must never be shipped one; only the game "
+        .. "can resolve them, which is what the in-game PLAYERS list does.",
       "The hub has a flood gate but no moderation, accounts, or bans. Run "
         .. "one for people you know.",
       "No position interpolation: a remote player walks tile to tile at the "

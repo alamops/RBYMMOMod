@@ -210,6 +210,9 @@ handlers['mmo.auth'] = (relay, client, msg) => {
 
 handlers['mmo.move'] = (relay, client, msg) => {
   if (!client.ready) return;
+  // Where they were before this step, so the roster hook can be told about a
+  // change of *place* and stay silent about a change of tile.
+  const wasOn = client.map;
   const map = cleanMapId(msg.map);
   const x = cleanInt(msg.x, 0, 4096);
   const y = cleanInt(msg.y, 0, 4096);
@@ -236,6 +239,10 @@ handlers['mmo.move'] = (relay, client, msg) => {
   // answer identically for every JSON value.
   client.fast = msg.fast === true;
   relay.broadcast('mmo.move', presenceOf(client), client.id);
+  // Crossing into another map -- or out of the world entirely, into a battle
+  // or a menu, which is what a null cell means -- is the only part of a step
+  // an operator's list of places can see.
+  if (client.map !== wasOn) relay.noteRosterChange();
 };
 
 handlers['mmo.chat'] = (relay, client, msg) => {
@@ -477,6 +484,14 @@ class Relay {
     this.board = opts.board || new Board();
     this.onRankChange = typeof opts.onRankChange === 'function'
       ? opts.onRankChange : null;
+    /*
+     * The same arrangement one step out: whoever owns the files is told that
+     * *who is here* changed, and decides for itself what that is worth.
+     * lib/server.js passes this and writes the operator snapshot from
+     * roster(); an embedded hub passes nothing and the roster stays in RAM.
+     */
+    this.onRosterChange = typeof opts.onRosterChange === 'function'
+      ? opts.onRosterChange : null;
     /** sessionId -> { a, b, aName, bName, reports, endedAt } */
     this.matches = new Map();
 
@@ -506,6 +521,58 @@ class Relay {
   greeted(id) {
     const client = this.clients.get(id);
     return Boolean(client && client.ready);
+  }
+
+  /*
+   * Who is on this hub, for somebody who is not in the game.
+   *
+   * The operator's view, not a player's: no client ids, no session or party
+   * ids, no addresses, no token material. busy and party are the same
+   * booleans presenceOf publishes and for the same reason -- the answer an
+   * onlooker needs is "can this player be asked for a battle", never who
+   * they are travelling with -- and a snapshot written to a file that
+   * outlives the process is the last place an id worth guessing should
+   * appear. Only ready clients: a socket that has not said hello is not a
+   * player and is on nobody's roster, here least of all.
+   */
+  roster() {
+    const out = [];
+    for (const client of this.clients.values()) {
+      if (!client.ready) continue;
+      out.push({
+        name: client.name,
+        sprite: client.sprite,
+        map: client.map,
+        x: client.x,
+        y: client.y,
+        busy: Boolean(client.sessionId),
+        party: Boolean(client.partyId),
+        points: client.points || RANK_START,
+        ranked: Boolean(client.ranked),
+      });
+    }
+    return out;
+  }
+
+  /*
+   * Somebody joined, left, sat down to a battle, teamed up, or was scored --
+   * anything roster() would answer differently now. Told the same way a rank
+   * change is (see noteRankChange): the hub is already correct in memory, so
+   * a listener that throws is a full disk and not a lost player.
+   *
+   * Deliberately *not* fired for every step. A snapshot of where everyone is
+   * standing is a list of places, and the writer behind this hook debounces
+   * anyway -- but marking it dirty eight times a second while four people
+   * walk around would turn an idle hub into a file the disk never stops
+   * being asked about, for a value that did not change.
+   */
+  noteRosterChange() {
+    if (!this.onRosterChange) return;
+    try {
+      this.onRosterChange();
+    } catch (err) {
+      this.log.warn(`could not record a roster change: ${safe(err.message)}`);
+    }
   }
 
   /*
@@ -680,6 +747,7 @@ class Relay {
     this.broadcast('mmo.join', { player: presenceOf(client) }, client.id);
     this.log.info(`+ ${safe(client.name)} (${client.id}) -- ` +
       `${this.players} online`);
+    this.noteRosterChange();
   }
 
   drop(id) {
@@ -701,6 +769,7 @@ class Relay {
     if (client.ready) {
       this.broadcast('mmo.part', { id }, id);
       this.log.info(`- ${safe(client.name)} (${id}) -- ${this.players} online`);
+      this.noteRosterChange();
     }
     return true;
   }
@@ -762,6 +831,7 @@ class Relay {
     // changed, so presence goes out.
     this.broadcast('mmo.move', presenceOf(a), a.id);
     this.broadcast('mmo.move', presenceOf(b), b.id);
+    this.noteRosterChange();
     this.log.info(`party ${id}: ${safe(a.name)} + ${safe(b.name)}`);
   }
 
@@ -790,6 +860,7 @@ class Relay {
       this.send(client, 'mmo.party_end', { reason: 'left' });
       this.broadcast('mmo.move', presenceOf(client), client.id);
     }
+    this.noteRosterChange();
   }
 
   // ------- plumbing
@@ -874,6 +945,7 @@ class Relay {
     if (this.clients.has(client.id)) {
       this.broadcast('mmo.move', presenceOf(client), client.id);
     }
+    this.noteRosterChange();
   }
 
   startSession(a, b, kind) {
@@ -914,6 +986,7 @@ class Relay {
 
     this.broadcast('mmo.move', presenceOf(a), a.id);
     this.broadcast('mmo.move', presenceOf(b), b.id);
+    this.noteRosterChange();
     this.log.info(`session ${id}: ${safe(a.name)} <-> ${safe(b.name)} (${kind})`);
   }
 
@@ -956,6 +1029,7 @@ class Relay {
     if (!client) return;
     client.points = points;
     this.broadcast('mmo.rank', { id: clientId, points: cleanPoints(points) });
+    this.noteRosterChange();
   }
 
   /*

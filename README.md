@@ -110,6 +110,17 @@ speed on your screen as well.
   <img src="docs/screenshots/chat-log.png" width="300" alt="The chat log showing two global messages">
 </p>
 
+**And `PLAYERS` says where they all are.** Every row on the list carries the
+place that trainer is standing in — `VIRIDIAN FOREST`, `CELADON CITY` — so
+"where is everyone" is one menu away rather than a lap of Kanto. That column
+used to read `HERE`, which the place name says better: your own map's name
+against somebody's row reads as *here* without being told, and it answers the
+question `HERE` couldn't, which is where the rest of them went. The names come
+out of the town-map data your own game decodes from your own ROM, so they read
+the way the game reads. `PARTY` and `BUSY` still win the column when they
+apply, and a player in a battle or a menu isn't standing anywhere nameable, so
+theirs stays as it was.
+
 ### 🤝 TEAM UP
 Walk up to a friend, press **A**, pick `INVITE`. They get asked; if they say
 yes you're a **party** — you and one other trainer, and that's the whole
@@ -366,7 +377,7 @@ behind it.
 | `HOST GAME` | not in a game | make a trainer, then the room size and the passcode |
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
-| `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
+| `PLAYERS` | connected | who's on and **where** — `n/limit` if you're hosting |
 | `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |
 | `PARTY` | connected | your party: members, party chat, and leaving it |
 | `MY PROFILE` | connected | your own trainer card, as everyone else sees it |
@@ -445,6 +456,7 @@ Pick by how long you want the world to outlive the session.
 | Passcode | minted on the HOST screen | minted by `init`, or you pick it |
 | Passcode entropy | the game's own pool, **not** a CSPRNG | `crypto.randomBytes` |
 | Bans, allowlist, per-address limits | — | yes |
+| Who's online, from a terminal | — | `rby-mmo-hub players` |
 | Good for | the same Wi-Fi, an evening | friends across the internet, 24/7 |
 
 The two bold rows are the whole difference. Hosting from the game puts the
@@ -574,6 +586,8 @@ Codes are masked. --reveal prints them in full.
 | take one back | `rby-mmo-hub revoke <id>` |
 | change any setting | `rby-mmo-hub config set maxPlayers 8` |
 | see where a value came from | `rby-mmo-hub status` |
+| see who's online, and where | `rby-mmo-hub players` |
+| read the leaderboard | `rby-mmo-hub ranking` |
 | throw somebody out | `rby-mmo-hub ban 203.0.113.7` |
 | check it's actually reachable | `rby-mmo-hub doctor` |
 
@@ -597,6 +611,22 @@ Reachability
     en0     192.168.1.125    private network
     lo0     127.0.0.1        loopback (this machine only)
 ```
+
+And **`players` answers "who's in my world right now"** without launching the
+game to find out — with where each of them is standing:
+
+```console
+$ rby-mmo-hub players
+2 player(s) online of 8 on 0.0.0.0:7788, snapshot 3s old.
+
+NAME   LOCATION         STATUS  POINTS
+HOSTY  PALLET TOWN              1012
+ALPHA  VIRIDIAN FOREST  PARTY   1004
+```
+
+`rby-mmo-hub ranking` prints the season the same way. Both read files the hub
+keeps beside its config, so when the hub isn't running they say so plainly
+rather than reporting a room that emptied hours ago.
 
 Credentials, bans and the allowlist reload on `SIGHUP`, so revoking a leaked
 passcode doesn't interrupt the people already playing. The full config table —
@@ -802,7 +832,7 @@ end
 
 ## 🚧 Known jank — read this bit
 
-It's `0.2.2` and it ships flagged `experimental` on purpose. The full list
+It's `0.7.0` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 

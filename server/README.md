@@ -154,6 +154,8 @@ container, where it is on `PATH`.
 | `init` | first-run wizard: writes `config.json` at mode 0600 and prints a passcode once. Refuses to overwrite an existing file. | `--yes` (ask nothing, take flags and defaults), `--force` (replace an existing config), `--code CODE` (use this passcode instead of a generated one), plus any config flag below |
 | `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
 | `status` | every effective setting, its value, and where that value came from (`flag` / `env` / `file` / `default`). Codes masked. | — |
+| `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (the snapshot's player rows verbatim, unformatted) |
+| `ranking` | the ranked season out of `ranking.json`: place, name, points. Top ten, best first. | `--json`, `--all` (every player who has scored, not just the top ten) |
 | `config list` | every setting, its current value, and its clamp range | — |
 | `config get <path>` | one setting, e.g. `limits.maxPending` | — |
 | `config set <path> <value>` | change one setting: clamped, reported, then saved | — |
@@ -171,6 +173,84 @@ container, where it is on `PATH`.
 † **These edit `config.json`; a hub that is already running does not notice
 until you tell it to look.** See
 [Changing things while the hub is running](#changing-things-while-the-hub-is-running).
+
+### Who is on it, and who is winning
+
+Two read-only verbs, neither of which needs a game client and neither of which
+changes anything:
+
+```console
+$ docker compose exec hub rby-mmo-hub players
+3 player(s) online of 8 on 0.0.0.0:7788, snapshot 2s old.
+
+NAME   LOCATION         STATUS  POINTS
+HOSTY  PALLET TOWN              1012
+ALPHA  VIRIDIAN FOREST  PARTY   1004
+BETA   -                BUSY    996
+
+A dash for LOCATION is a player in a battle or a menu: the hub is not
+sent a position while they are there, so it does not have one to show.
+STATUS is BUSY in a trade or battle, PARTY in a two-player party.
+POINTS is the ranked score, blank for a player who is not ranked --
+`rby-mmo-hub ranking` prints the whole board, including the players
+who are not online now.
+```
+
+```console
+$ docker compose exec hub rby-mmo-hub ranking
+PLACE  NAME   POINTS
+1      HOSTY  1012
+2      ALPHA  1004
+3      BETA   996
+
+3 ranked player(s) -- the whole board.
+```
+
+Bare Node is the same line without the `docker compose exec hub` in front of
+it, and both take `--config <file>` like every other command — the two files
+they read sit beside it.
+
+**A dash in `LOCATION` is not a bug.** A player in a battle, a trade or a menu
+is not standing anywhere the hub can name — `mmo.move` sends no cell while
+they are there, deliberately, so a menu does not pin somebody to the tile they
+opened it on. They stay on the roster and stay listed; only the place is
+unknown, and the dash says exactly that.
+
+Place names are the map id with its underscores taken out — `PALLET_TOWN`
+becomes `PALLET TOWN`. That is a hub-side formatting of what the client
+reported and nothing more; the names Kanto itself uses are decoded from the
+player's own ROM, which is a thing only the game has, which is why the
+in-game `PLAYERS` list reads better than this one does.
+
+**`players` reads a snapshot, and is honest about it.** The CLI is a
+short-lived process with no channel into the running hub (the same reason
+`status` prints configured numbers rather than live counts), so the hub leaves
+one behind: `status.json`, next to `config.json`, rewritten whenever the
+roster changes and beaten every ten seconds regardless. Four things can come
+back:
+
+- **live** — a heartbeat inside the last twenty-five seconds. The header says
+  how old the reading is, because two seconds of lag is worth knowing about
+  and worth not hiding.
+- **stopped** — the hub shut down cleanly and stamped the file on its way out.
+  *"The hub stopped 12m ago (0.0.0.0:7788), so nobody is online."* No roster,
+  because it left none.
+- **apparently down** — the file is there and the heartbeat is stale (older
+  than 2.5 beats). The hub was killed, is wedged, or cannot write to `/data`.
+  The last roster it wrote is still printed, under a heading that says in as
+  many words that it is *not* who is online now — deleting the evidence would
+  be less useful than labelling it.
+- **no snapshot** — no `status.json` at all: this hub has not run since the
+  feature shipped, keeps its files elsewhere, or has never run. Said in a
+  sentence, in `doctor`'s tone, naming all three possibilities and the
+  `docker compose exec` line that catches the commonest one.
+
+All four **exit `0`**. "Nobody is home" is an answer, not a failure.
+
+`ranking` has no such problem: `ranking.json` is written within a second of
+any rating moving and does not go stale when the hub stops, because a finished
+season is still the season. An absent or empty file is reported the same
+gentle way — nobody has scored here yet.
 
 ### `--code`, and the flag that is gone
 
@@ -273,7 +353,11 @@ order:
 3. `./config.json` next to where you ran the command
 4. `/data/config.json`, when `/data` exists — the container's volume
 
-Next to it, the hub keeps one file it writes itself: **`ranking.json`**, the
+Next to it, the hub keeps two files it writes itself. Neither is a setting and
+neither is yours to edit; both can be deleted without consequence beyond what
+they hold.
+
+The first is **`ranking.json`**, the
 ranked-PVP season. It holds a line per trainer name — points, character, and
 how many battles they have played and won — and it is written (debounced)
 whenever a battle moves somebody's rating. Nothing reads it but this hub, no
@@ -296,6 +380,58 @@ nothing, and their battles cannot move the real holder's rating. It is a
 claim ticket, not an account: it sits in a save file and crosses the same
 unencrypted link the passcode does, with the same consequence if either is
 captured. Deleting `ranking.json` releases every name along with every score.
+
+The second is **`status.json`**, the snapshot [`players`](#who-is-on-it-and-who-is-winning)
+reads. It is the running hub's answer to a question a short-lived CLI process
+cannot otherwise ask it — who is connected, and where:
+
+```json
+{
+  "version": 1,
+  "startedAt": 1754300000000,
+  "updatedAt": 1754300012345,
+  "stoppedAt": null,
+  "host": "0.0.0.0", "port": 7788, "protocol": 5, "maxPlayers": 8,
+  "players": [
+    { "name": "RED", "sprite": "SPRITE_RED", "map": "PALLET_TOWN",
+      "x": 5, "y": 6, "busy": false, "party": false,
+      "points": 12, "ranked": true }
+  ]
+}
+```
+
+- **Written whole and renamed over the old file, at mode 0600**, exactly the
+  way `ranking.json` is: a hub killed mid-write leaves the previous snapshot
+  intact rather than half a document nothing can parse.
+- **Written on four occasions**: at startup, on a roster change (debounced a
+  second), on a heartbeat every **10 seconds** whether or not anything
+  changed, and once more on a clean shutdown — that last one sets `stoppedAt`
+  and empties `players`, which is what lets a reader distinguish "stopped"
+  from "died". A reader treats a gap of more than 2.5 heartbeats as a hub that
+  is no longer running.
+- **A step is not a roster change.** Joining, leaving, starting or finishing a
+  trade or battle, teaming up, being scored, and *crossing into another map*
+  all mark it dirty; walking around inside one map does not, because the
+  snapshot is a list of places and the place did not change. `x`/`y` therefore
+  catch up on the next heartbeat rather than on the next step, which is the
+  difference between a file and a file the disk is asked about eight times a
+  second per player.
+- **It holds no secrets.** Names, characters, map cells and points — the same
+  things every other player in the world can already see. No join codes, no
+  claim-ticket hashes, no session or party ids, no IP addresses. It is safe to
+  `cat` on a shared screen, which `config.json` is not.
+- `map` stays the raw engine id (`PALLET_TOWN`); turning that into
+  `PALLET TOWN` is the reader's job, not the file's.
+- Deleting it costs one heartbeat. It is state about *this instant*, not
+  history, and nothing reads it but the CLI.
+- **A hub with no config file writes none.** The snapshot's home is "beside
+  `config.json`", so `node hub.js` and an embedding caller — neither of which
+  has one — keep their roster in memory and nowhere else. `players` on such a
+  hub reports no snapshot, which is the truth.
+- A write that fails — full disk, read-only mount, a volume that went away —
+  is a `WARN` in the log and nothing more. A hub that stopped relaying because
+  it could not write a status file would have failed at the job the file only
+  reports on.
 
 Precedence, everywhere, without exception:
 
@@ -988,7 +1124,7 @@ anybody. It is **unauthenticated and has no per-address or connection-rate
 limits**, and it says so at startup:
 
 ```
-2026-08-03T03:02:39.208Z INFO RBY MMO hub listening on 0.0.0.0:7992 (protocol 2)
+2026-08-03T03:02:39.208Z INFO RBY MMO hub listening on 0.0.0.0:7992 (protocol 5)
 2026-08-03T03:02:39.209Z WARN This entry point is unauthenticated and has no per-address or connection-rate limits; run bin/rby-mmo-hub.js for a hub with a join code and the limits turned on.
 ```
 
@@ -1008,14 +1144,19 @@ on a relay connection.
 
 | Type | Payload |
 | --- | --- |
-| `mmo.hello` | `proto, name, sprite, profile, map, x, y, facing` |
+| `mmo.hello` | `proto, name, sprite, profile, map, x, y, facing, rankToken` — the ticket is absent on a first visit and on a copy that lost it |
 | `mmo.auth` | `response` — 64 lowercase hex chars, `HMAC-SHA256(joinCode, nonce)` |
-| `mmo.move` | `map, x, y, facing, busy` — an absent cell means "not in the world" |
+| `mmo.move` | `map, x, y, facing, fast` — an absent cell means "not in the world"; `fast` is `true` only when literally `true`, and means the step covered a tile at the doubled clock (a sprint or a bike, and the hub is not told which) |
 | `mmo.chat` | `scope, to, text` |
 | `mmo.request` | `to, kind` (`trade` \| `battle`) |
 | `mmo.respond` | `to, kind, accept` |
 | `mmo.relay` | `to, payload` — opaque |
 | `mmo.session_leave` | — |
+| `mmo.party_invite` | `to` — outbound; the same type arrives carrying `from` |
+| `mmo.party_respond` | `to, accept` |
+| `mmo.party_leave` | — |
+| `mmo.result` | `session, outcome` (`win` \| `loss` \| `draw`) — how the sender saw a link battle end. One on its own scores nothing: the hub waits for both sides to say the same thing |
+| `mmo.ranks` | — "send me the leaderboard". Rate-gated like chat |
 | `mmo.ping` | — |
 
 **Hub → client**
@@ -1023,7 +1164,7 @@ on a relay connection.
 | Type | Payload |
 | --- | --- |
 | `mmo.challenge` | `nonce` — 32 lowercase hex chars, per-connection, single-use. Sent by every hub that requires a passcode, which is every hub but the `node hub.js` shim |
-| `mmo.welcome` | `id, players[]` |
+| `mmo.welcome` | `id, players[], points, ranked` — plus `rankToken` on the one visit that claimed the name, and only that visit |
 | `mmo.join` / `mmo.part` | `player` / `id` |
 | `mmo.move` | a presence record |
 | `mmo.chat` | `from, name, scope, text` |
@@ -1035,8 +1176,19 @@ on a relay connection.
 | `mmo.party` | `id, members[]` — the whole membership, never a delta |
 | `mmo.party_decline` | `name, reason` — `no`, or `in_party` |
 | `mmo.party_end` | `reason` — `left` to the member who left, `peer_left` to the other |
+| `mmo.rank` | `id, points` — one player's rating moved. Broadcast to everybody including the player it is about, so a roster row, a trainer card and their own menu all change at the same moment |
+| `mmo.ranking` | `entries[]` of `name, sprite, points` — the answer to `mmo.ranks`, already sorted and already cut to the top ten by the hub |
 | `mmo.error` | `message` — always fatal to the connection |
 | `mmo.pong` | — |
+
+**A presence record** — what `mmo.welcome`, `mmo.join` and `mmo.move` all
+carry — is `id, name, sprite, map, x, y, facing, busy, party, fast, profile,
+points`. `map`/`x`/`y` are null while that player is in a battle or a menu.
+`busy` and `party` are booleans and never a session or party id: the flags are
+all anyone outside needs to decide whether to offer `TRADE` or `INVITE`, and
+ids on every presence would let any client map out who is with whom. `points`
+rides here rather than on the trainer card because a rating moves mid-session
+and a card built at `hello` would show a stale one.
 
 Parties are two players and no more. The hub forms one only when *both* sides
 are unattached, re-checks that at the moment of forming (either of them could
@@ -1051,10 +1203,11 @@ widened.
 The handshake, in full:
 
 ```
-client → hub    mmo.hello      { proto: 3, name, sprite, profile, map, x, y, facing }
+client → hub    mmo.hello      { proto: 5, name, sprite, profile, map, x, y, facing, rankToken? }
 hub    → client mmo.challenge  { nonce }        ← only when a passcode is required
 client → hub    mmo.auth       { response }     ← HMAC-SHA256(passcode, nonce), 64 hex
-hub    → client mmo.welcome    { id, players[] }   ← or mmo.error, which the game shows
+hub    → client mmo.welcome    { id, players[], points, ranked, rankToken? }
+                                                ← or mmo.error, which the game shows
 ```
 
 The whole exchange has one ten-second budget, measured from when the socket
@@ -1068,20 +1221,27 @@ On the one path where no passcode is required — the `node hub.js` shim — the
 exchange is byte-identical to what it has always been: `hello`, then
 `welcome`.
 
-**`PROTOCOL` is 3**, and it lives in **`lib/relay.js`** (not `hub.js` any
+**`PROTOCOL` is 5**, and it lives in **`lib/relay.js`** (not `hub.js` any
 more) and in **`src/Config.lua`**. Bump both together on any incompatible
 change. The hub refuses a mismatched client by name and version — *"This hub
-speaks protocol 3; your mod speaks 2."* — rather than letting two dialects
+speaks protocol 5; your mod speaks 4."* — rather than letting two dialects
 talk past each other, and the game renders that sentence.
 
-3 is where parties landed, and it is worth saying why a purely *additive*
-change moved the number. Nothing was removed, so an old client's messages all
-still parse — but a **new** client on an **old** hub is the case that
-matters: an invite and a party chat line are a message type and a scope that
-hub has never heard of, and its handler table answers an unknown type with
-silence. The player presses `INVITE` and watches nothing happen, forever,
-with nothing on screen to act on. A refusal that names both versions is the
-better sentence. **Update the hub and the mod together.**
+Every bump so far has been *additive*, and it is worth saying why an additive
+change moves the number at all. Nothing has ever been removed, so an old
+client's messages all still parse — but a **new** client on an **old** hub is
+the case that matters, because a handler table answers a type it has never
+heard of with silence, and silence is the one failure a player cannot act on.
+So the rule is: **bump whenever a client can send something an older hub would
+ignore.**
+
+| | What landed | What an older hub would have swallowed |
+| --- | --- | --- |
+| **3** | parties | `INVITE` pressed, nothing happens, forever |
+| **4** | ranked PVP | every battle result and every leaderboard request reported into silence |
+| **5** | pace | the `fast` flag dropped from every rebroadcast, so two players who both installed running would watch each other walk for the whole session |
+
+**Update the hub and the mod together.**
 
 ---
 

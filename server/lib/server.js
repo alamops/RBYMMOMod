@@ -99,6 +99,23 @@ const CREDENTIAL_SAVE_INTERVAL_MS = 1000;
 const RANKING_FILENAME = 'ranking.json';
 const RANKING_SAVE_INTERVAL_MS = 1000;
 
+// The operator snapshot: who is connected and where, written beside the
+// config so a separate short-lived process (`rby-mmo-hub players`) can read
+// it without a live channel into a running hub.
+//
+// A file rather than an admin socket, because a socket would be a second
+// door into a process whose whole security story is the one door it already
+// has. The cost is that a reader sees the hub as it was up to a second ago
+// and cannot tell a stopped hub from a wedged one -- which is what the
+// heartbeat and `stoppedAt` are for: refreshed on a timer even when nothing
+// happens, so a snapshot older than a few heartbeats is a hub that is not
+// running, and a reader may say so plainly instead of printing a roster of
+// ghosts. Same debounce as the ranking, for the same reason: nobody plays
+// slower so that a file can be current.
+const STATUS_FILENAME = 'status.json';
+const STATUS_SAVE_INTERVAL_MS = 1000;
+const STATUS_HEARTBEAT_MS = 10000;
+
 // How long a refused socket may sit between its goodbye and its destruction.
 // It is invisible to limits.js on purpose (charging a refusal would let a
 // flooder fill the table it was just refused by), but it is *not* invisible to
@@ -457,11 +474,22 @@ function start(options = {}) {
     }
   }
 
+  /*
+   * Where the operator snapshot goes. Beside the season and the config, and
+   * absent for the same reason they are: a hub started without a file (the
+   * hub.js shim, a suite, an embedder) has no data directory to write into,
+   * and inventing one under the process's cwd would leave litter nobody
+   * asked for.
+   */
+  const statusPath = configPath
+    ? path.join(path.dirname(configPath), STATUS_FILENAME) : null;
+
   const relay = new Relay({
     maxPlayers: config.maxPlayers,
     chatIntervalMs: config.limits && config.limits.chatIntervalMs,
     board,
     onRankChange: () => noteRankChange(),
+    onRosterChange: () => noteRosterChange(),
     // Not a config.json setting: `protocol` is an embedding/test seam the
     // schema deliberately does not know about, so it is read from the object
     // as given rather than from the validated copy validate() pruned it out of.
@@ -494,6 +522,9 @@ function start(options = {}) {
   let creditsDirty = false;
   let rankTimer = null;
   let rankDirty = false;
+  let statusTimer = null;
+  let statusDirty = false;
+  let statusBeat = null;
 
   // -------------------------------------------------------- use counting
 
@@ -594,6 +625,80 @@ function start(options = {}) {
       log.error(`could not save the ranking to ${safe(rankingPath)}: ` +
         `${safe(err.message)}`);
     }
+  }
+
+  // -------------------------------------------------------- the snapshot
+
+  /*
+   * The hub as an onlooker sees it, on disk. Same shape every time -- an
+   * empty roster is a hub with nobody on it, never a missing key -- because
+   * the reader is a different process on a different release cycle, and a
+   * field that comes and goes is a field every reader has to guess about.
+   *
+   * `stoppedAt` is the difference between "nobody is online" and "nothing is
+   * running", which are the same file otherwise and mean opposite things to
+   * somebody deciding whether to restart the hub.
+   *
+   * Written whole and renamed over the old file, like the ranking: a reader
+   * polling this while the hub writes it must never meet half a document.
+   * Only ever called after the bind, so boundHost/boundPort are the real
+   * ones rather than what was asked for.
+   */
+  function writeStatus(players, stoppedAt) {
+    if (!statusPath) return;
+    const snapshot = {
+      version: 1,
+      startedAt,
+      updatedAt: Date.now(),
+      stoppedAt: stoppedAt || null,
+      host: boundHost,
+      port: boundPort,
+      protocol: relay.protocol,
+      maxPlayers: relay.maxPlayers,
+      players,
+    };
+    try {
+      const temporary = `${statusPath}.tmp`;
+      fs.writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`,
+        { mode: 0o600 });
+      fs.renameSync(temporary, statusPath);
+    } catch (err) {
+      // Warn, not error, and never throw: this file is a convenience for
+      // whoever is watching the hub, and a hub that stopped relaying because
+      // its status file could not be written would have failed at the one
+      // job the file is only reporting on.
+      log.warn(`could not write the status snapshot to ${safe(statusPath)}: ` +
+        `${safe(err.message)}`);
+    }
+  }
+
+  /*
+   * Who is here changed. Deferred and coalesced exactly like the ranking --
+   * a player joining must not put a filesystem write on anybody's connection
+   * path -- and unref'd, so a pending snapshot is never why the process is
+   * still up. The relay is strict about what counts as a change (see
+   * Relay#noteRosterChange): a step within a map does not.
+   */
+  function noteRosterChange() {
+    if (!statusPath) return;
+    statusDirty = true;
+    if (statusTimer) return;
+    statusTimer = setTimeout(flushStatus, STATUS_SAVE_INTERVAL_MS);
+    statusTimer.unref();
+  }
+
+  // `force` is the heartbeat and the first write: a snapshot whose only
+  // change is that it is still true, which is the whole way a reader tells a
+  // quiet hub from a dead one.
+  function flushStatus(force) {
+    if (statusTimer) {
+      clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+    if (!statusPath) return;
+    if (!statusDirty && !force) return;
+    statusDirty = false;
+    writeStatus(relay.roster(), null);
   }
 
   // ------------------------------------------------------------ refusals
@@ -951,12 +1056,34 @@ function start(options = {}) {
   function close() {
     if (closePromise) return closePromise;
     clearInterval(sweeper);
+    if (statusBeat) {
+      clearInterval(statusBeat);
+      statusBeat = null;
+    }
     detach();
     // Before anything else: a use charged in the last second is a use, and
     // losing it on a clean shutdown would hand a spent invite back out. The
     // same goes for a battle somebody won a moment ago.
     flushCredentials();
     flushRanking();
+
+    /*
+     * The last thing the snapshot says. Everyone is about to be disconnected
+     * whether they like it or not, so the roster is empty by the time this
+     * matters and writing it as empty now is the honest version -- and
+     * `stoppedAt` turns the file from "a hub that has gone quiet" into "a hub
+     * that stopped, at this time", which is the difference between a reader
+     * warning about a wedged process and one simply saying it is down.
+     *
+     * Synchronous and best-effort: writeStatus swallows its own failures, and
+     * a shutdown must not be able to fail on a file nobody is waiting for.
+     */
+    if (statusTimer) {
+      clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+    statusDirty = false;
+    writeStatus([], Date.now());
 
     // Started here rather than after the sockets are gone: undoing a port
     // mapping and saying goodbye to the players are independent, and shutdown
@@ -1081,6 +1208,17 @@ function start(options = {}) {
       log.info(`RBY MMO hub listening on ${boundHost}:${boundPort} ` +
         `(protocol ${relay.protocol})`);
 
+      // The snapshot starts the moment there is something to describe: an
+      // empty hub that is definitely up, so a reader that arrives before the
+      // first player finds a live file rather than none at all. The heartbeat
+      // keeps it true afterwards and is unref'd like every other timer here --
+      // a status file must never be the reason a process will not exit.
+      flushStatus(true);
+      if (statusPath) {
+        statusBeat = setInterval(() => flushStatus(true), STATUS_HEARTBEAT_MS);
+        statusBeat.unref();
+      }
+
       resolve({
         host: boundHost,
         port: boundPort,
@@ -1088,6 +1226,8 @@ function start(options = {}) {
         // where the season is kept, so a caller (the CLI, a suite) can say
         // which file it is talking about rather than re-deriving the path
         rankingPath,
+        // ...and where the operator snapshot is, for the same reason
+        statusPath,
         relay,
         limits,
         close,
@@ -1117,4 +1257,9 @@ function start(options = {}) {
   });
 }
 
-module.exports = { start, MAX_LINE, SWEEP_INTERVAL_MS };
+// STATUS_* is exported for the same reason SWEEP_INTERVAL_MS is: a suite that
+// waits on a heartbeat should name the budget it is waiting for rather than
+// carry its own copy of the number.
+module.exports = {
+  start, MAX_LINE, SWEEP_INTERVAL_MS, STATUS_FILENAME, STATUS_HEARTBEAT_MS,
+};
