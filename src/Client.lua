@@ -554,10 +554,44 @@ function M.spriteChoice()
   return Chars.resolve(chosen)
 end
 
+-- The same choice, but nil when the player never actually made one.
+--
+-- spriteChoice always has an answer, because everybody has to be drawn as
+-- somebody. This one separates "picked RED" from "never opened the picker",
+-- which is what decides whether a look is worn outside a game at all: a save
+-- that says nothing and a global option still sitting on the default mean
+-- this player never touched the character side of the mod, and their
+-- single-player game keeps the renderer the engine built for it. Installing
+-- the mod must not silently swap anybody's trainer. Choosing RED on purpose
+-- does count, and wearing RED changes nothing anyone can see.
+--
+-- Resolved like spriteChoice, so what comes back is always a character this
+-- game can actually draw.
+function M.explicitChoice()
+  local chosen = mod.save:get("sprite")
+  if type(chosen) ~= "string" or chosen == "" then
+    chosen = mod.options:get("sprite")
+    if type(chosen) ~= "string" or chosen == ""
+       or chosen == Config.DEFAULT_SPRITE then
+      return nil
+    end
+  end
+  return Chars.resolve(chosen)
+end
+
+-- Choosing a character wears it there and then.
+--
+-- The picker is reachable outside a game now, so a screen that changed who
+-- you are without changing what you see would read as broken -- and the
+-- older path, where the look only appeared at connect time, was that same
+-- delay in a place nobody noticed it. The contract callers rely on is
+-- unchanged (the id on success, nil for a character this game does not
+-- have), so no screen has to know a look was applied.
 function M.setSpriteChoice(a, b)
   local id = arg1(a, b)
   if not Chars.available(id) then return nil end
   mod.save:set("sprite", id)
+  M.syncLook()
   return id
 end
 
@@ -687,8 +721,10 @@ end
 -- The overworld player takes its sheet from field.playerSprites at
 -- Player.new time (src/world/Player.lua), so there is no option to flip
 -- once the player exists -- the renderer has to be swapped on the live
--- object. The original is kept so leaving a game puts your own trainer
--- back, rather than leaving you dressed as a Rocket grunt in single-player.
+-- object. The original is kept because the look is not always on: a player
+-- who never chose a character has theirs put back the moment there is
+-- nothing standing to wear (M.syncLook), rather than being left dressed as a
+-- Rocket grunt in a single-player game they never asked to change.
 --
 -- It is kept *against the entity it was taken from*. The overworld reuses
 -- one player object across map changes -- OverworldController:setMap only
@@ -740,11 +776,18 @@ end
 -- trainer was gone. applyLook re-reads the original only when the entity
 -- really changed, so the re-wear is safe now -- and the suite can say so.
 --
--- The gate is "already wearing one, or in a game and meant to be": the
--- second half keeps a look that failed to apply at connect time retrying on
--- the next map, which is what the transport check here used to do alone.
+-- The gate is "already wearing one, in a game and meant to be, or standing
+-- on a choice". The middle clause keeps a look that failed to apply at
+-- connect time retrying on the next map, which is what the transport check
+-- here used to do alone. The last one is how an offline save gets dressed at
+-- all: nothing is worn yet and no transport will ever open, but the choice
+-- was made long ago and the first map is the first moment there is a player
+-- object to put it on.
 function M.refreshLook()
-  if lookOwner == nil and not transport:isReady() then return false end
+  if lookOwner == nil and not transport:isReady()
+     and not M.explicitChoice() then
+    return false
+  end
   return M.applyLook(ctx.game)
 end
 
@@ -758,13 +801,38 @@ function M.restoreLook()
   originalLook, lookOwner = nil, nil
 end
 
+-- Put the player in whatever their standing choice says they are.
+--
+-- The one place that policy lives, so every path that could change the
+-- answer -- leaving a game, picking a character, another save taking over --
+-- asks the same question instead of each deciding for itself. Named, and
+-- not a line inside the callers, because the rule is the interesting part
+-- and the suite has to be able to state it.
+--
+-- The rule: a choice outlives the session that first wore it. Leaving used
+-- to hand every player their trainer back, which meant a character chosen in
+-- the creator existed only while connected -- you could not see your own
+-- character in your own game. Now only a player with no choice at all is
+-- undressed, and for them this is exactly the restore it replaced.
+--
+-- Answers true when a chosen look is on the player afterwards.
+function M.syncLook()
+  if not M.explicitChoice() then
+    M.restoreLook()
+    return false
+  end
+  return M.applyLook(ctx.game)
+end
+
 -- The character you are wearing right now, or nil.
 --
 -- Not the same question as M.spriteChoice(): the choice is what you picked
 -- and keeps its answer forever, while this is only true between applyLook
--- and restoreLook -- that is, while you are actually in a game. The battle
--- and trainer-card pics below hang off *this* one, so a single-player game
--- you never connected in draws exactly what vanilla draws.
+-- and restoreLook -- that is, whenever a look is actually installed on the
+-- player, which now includes a single-player game nobody ever connected in.
+-- The battle and trainer-card pics below hang off *this* one, so a save
+-- whose player never chose a character still draws exactly what vanilla
+-- draws, and one that did carries the character everywhere the pics go.
 function M.wornLook()
   if lookOwner == nil then return nil end
   return M.spriteChoice()
@@ -870,7 +938,12 @@ function M.sendHello(game)
 end
 
 function M.disconnect()
-  M.restoreLook()
+  -- Not a plain restore any more: the character belongs to the player, not
+  -- to the session, so every way out of a game -- walking out, stopping a
+  -- host, or the tick funnelling a dropped transport through here -- leaves
+  -- it on. A player who never chose one still gets their trainer back,
+  -- because for them syncLook *is* the restore.
+  M.syncLook()
   sessions:endSession(nil)
   party:reset()
   ctx.avatars:clear()
@@ -899,6 +972,25 @@ function M.leave()
   if M.isHosting() then return M.stopHosting() end
   M.disconnect()
   return true
+end
+
+-- Another save has taken over the world.
+--
+-- Three steps, and the order is the whole of it. The session belongs to the
+-- world that is going away, so it comes down first. The stashed original
+-- belongs to *that* world's player entity, so it is dropped rather than
+-- carried across -- restoreLook writes back only onto the entity it was
+-- taken from, which makes a torn-down world a no-op and clears the stale
+-- stash either way. Only then does the freshly loaded save get to say who it
+-- is, which may be a different character, or nobody.
+--
+-- applyLook can come up empty here, because the new world often does not
+-- exist yet when the event lands. That is not a failure worth reporting:
+-- refreshLook wears the choice on the first map.entered instead.
+function M.saveLoaded()
+  M.leave()
+  M.restoreLook()
+  M.syncLook()
 end
 
 -- ------- outgoing chat
@@ -1482,8 +1574,9 @@ function M.install()
   -- Leaving to the title screen or loading another save must not leave a
   -- stale roster pointing at a world that is gone -- and if this copy was
   -- hosting, the listener has to come down with it rather than serving a
-  -- world nobody is standing in.
-  mod.events:on("save.loaded", function() M.leave() end)
+  -- world nobody is standing in. The character goes with the save too: the
+  -- one being loaded may have chosen somebody else, or nobody.
+  mod.events:on("save.loaded", function() M.saveLoaded() end)
 
   mod.exports.isConnected = M.isConnected
   mod.exports.isHosting = M.isHosting
@@ -1514,10 +1607,11 @@ function M.install()
   -- what this player looks like in their own game, for tests and for a mod
   -- that wants to know
   mod.exports.myLook = function() return M.spriteChoice() end
-  -- What you are wearing rather than what you picked -- nil in a
-  -- single-player game. The end-to-end driver reads this to tell "the
-  -- character was chosen" from "the character is actually being worn",
-  -- which is the difference the battle and trainer-card pics hang off.
+  -- What you are wearing rather than what you picked -- nil until a look is
+  -- actually on the player, which happens offline too once a character has
+  -- been chosen. The end-to-end driver reads this to tell "the character was
+  -- chosen" from "the character is actually being worn", which is the
+  -- difference the battle and trainer-card pics hang off.
   mod.exports.wornLook = function() return M.wornLook() end
   mod.exports.avatarState = function()
     local out = {}
