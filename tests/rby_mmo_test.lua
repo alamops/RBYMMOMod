@@ -117,7 +117,7 @@ for _, id in ipairs({
   "RbyMmoScope", "RbyMmoCompose", "RbyMmoPick", "RbyMmoText",
   "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile", "RbyMmoRank",
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
-  "RbyMmoParty", "RbyMmoPartyList",
+  "RbyMmoParty", "RbyMmoPartyList", "RbyMmoCharSetup", "RbyMmoCharPick",
 }) do
   check(screens:get(id) ~= nil, "screen " .. id .. " is registered")
 end
@@ -128,6 +128,20 @@ for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items",
                         "movement.speed" }) do
   local chain = run.loader.hooks.chains[hook]
   check(chain ~= nil and #chain > 0, "wraps " .. hook)
+end
+
+-- NEW GAME emits save.created, never save.loaded -- so a mod that only
+-- listens for one leaves the other world half torn down (see Client.lua's
+-- own header on why: the engine reuses one player entity for the life of
+-- the process, so a stash taken before QUIT is still standing after the
+-- title screen unless something drops it). Both have to be subscribed, not
+-- just one, and this is the seam that says so without needing a live
+-- world to fire either event through.
+for _, name in ipairs({ "save.loaded", "save.created" }) do
+  local listeners = run.loader.events.listeners[name]
+  check(listeners ~= nil and #listeners > 0,
+        "subscribes to " .. name .. ", so a fresh save is resynced exactly "
+        .. "like a loaded one")
 end
 
 -- ------- movement.speed: holding B on foot halves the step
@@ -4149,19 +4163,23 @@ eq(cal.party.incoming, nil, "and a prompt that was still up")
 end)()
 
 -- ------------------------------------------------------------------
--- 12. Leaving gives the player their own trainer back
+-- 12. A chosen character survives the door it was worn through
 -- ------------------------------------------------------------------
 --
--- Wearing a hub character has to be undone on the way out, or a player who
--- joins once is a Rocket grunt in their own single-player game forever.
+-- The old rule was "leaving hands the trainer back, always." The new one
+-- keeps a character that was actually *chosen*: syncLook wears the
+-- standing choice whenever explicitChoice() answers, and restores vanilla
+-- only when it does not -- so disconnect, a map change with nothing worn
+-- yet, and another save taking over all ask that one question instead of
+-- each assuming its own answer.
 --
--- The trap is that the overworld reuses one player object across map
--- changes -- OverworldController:setMap calls Player.new only when it has
--- none -- while this mod re-wears the look on every map.entered. Re-reading
--- "the original" on each of those reads back the renderer the mod itself
--- installed, so leaving restored the hub character. One door was enough to
--- lose the real one, which is why the entity the original came from is
--- pinned here alongside it.
+-- The trap is unchanged from before: the overworld reuses one player
+-- object across map changes -- OverworldController:setMap calls Player.new
+-- only when it has none -- while this mod re-wears the look on every
+-- map.entered. Re-reading "the original" on each of those reads back the
+-- renderer the mod itself installed, so leaving restored the hub
+-- character. One door was enough to lose the real one, which is why the
+-- entity the original came from is pinned here alongside it.
 --
 -- Wrapped for scope, like section 8.
 
@@ -4179,6 +4197,8 @@ stubSprites.SPRITE_RED = { walker = true }
 stubSprites.SPRITE_ROCKET = { walker = true }
 stubSave.sprite = "SPRITE_ROCKET"
 eq(Client.spriteChoice(), "SPRITE_ROCKET", "the chosen character resolves")
+eq(Client.explicitChoice(), "SPRITE_ROCKET",
+   "and it counts as an explicit choice -- worth wearing outside a session")
 
 local overworld = { player = nil }
 stubMod.world = { overworld = function() return overworld end }
@@ -4204,33 +4224,168 @@ check(Client.refreshLook(), "and again, as a long session would")
 check(red.sprite ~= redSheet, "still wearing it")
 
 Client.restoreLook()
-eq(red.sprite, redSheet, "leaving gives the player their own trainer back")
--- The battle and trainer-card pics hang off this one, so a game left is a
--- game whose pics go back to vanilla in the same breath as the sprite.
-eq(Client.wornLook(), nil, "and leaving is wearing nothing again")
+eq(red.sprite, redSheet, "restoreLook itself still gives the trainer back")
+-- The battle and trainer-card pics hang off this one, so a direct restore
+-- is a game whose pics go back to vanilla in the same breath as the sprite.
+eq(Client.wornLook(), nil, "and restoreLook alone is wearing nothing again")
 
 Client.restoreLook()
-eq(red.sprite, redSheet, "and leaving twice is not a second restore")
+eq(red.sprite, redSheet, "and restoring twice is not a second restore")
 
--- ------- the same, through the client's own teardown
+-- ------- explicitChoice: what counts as "asked to be somebody else"
 --
--- disconnect() is the one path both a deliberate leave and a dropped
--- connection go through, so the restore is pinned on it and not only on
--- restoreLook directly.
+-- spriteChoice always answers -- everybody has to be drawn as somebody --
+-- but syncLook, disconnect and the widened refreshLook all have to tell
+-- "chose a character" apart from "left it to the game", and that is this
+-- predicate's whole job.
 
-check(Client.applyLook(), "wearing it again for the teardown")
+stubSave.sprite, stubOptions.sprite = nil, nil
+eq(Client.explicitChoice(), nil,
+   "neither the save field nor the option is set -- nobody touched this")
+
+stubSave.sprite = "SPRITE_RED"
+eq(Client.explicitChoice(), nil,
+   "picking RED resolves to the engine's own default, which is a restore "
+   .. "wearing it, not a choice")
+
+stubSave.sprite = "SPRITE_ROCKET"
+eq(Client.explicitChoice(), "SPRITE_ROCKET",
+   "a character this game can actually draw comes back as itself")
+
+stubSave.sprite = "SPRITE_FROM_ANOTHER_ROM"
+eq(Client.explicitChoice(), nil,
+   "a save carried over from a different catalog degrades to RED, and "
+   .. "that degrade reads as no choice rather than as RED chosen on purpose")
+
+stubSave.sprite = nil
+stubOptions.sprite = "SPRITE_ROCKET"
+eq(Client.explicitChoice(), "SPRITE_ROCKET",
+   "with no save field, the global option is the standing choice")
+
+stubSave.sprite = "SPRITE_RED"
+stubOptions.sprite = "SPRITE_ROCKET"
+eq(Client.explicitChoice(), nil,
+   "the save field wins over the option even when the save is only RED")
+
+stubOptions.sprite = nil
+
+-- ------- the choice follows you out the door
+--
+-- disconnect() used to be a plain restore; now it runs syncLook(), which
+-- keeps a chosen look on and only undresses a player who never asked for
+-- one. Driven through the client's own teardown, not just restoreLook
+-- directly, because disconnect is the one path a deliberate leave and a
+-- dropped connection both funnel through.
+
+stubSave.sprite = "SPRITE_ROCKET"
+red.sprite = redSheet
+check(Client.applyLook(), "wearing the chosen character again")
 check(red.sprite ~= redSheet, "worn")
 Client.disconnect()
-eq(red.sprite, redSheet, "disconnecting puts the trainer back")
+check(red.sprite ~= redSheet,
+      "disconnecting keeps the chosen look -- it belongs to the player, "
+      .. "not to the session that first wore it")
+eq(Client.wornLook(), "SPRITE_ROCKET", "and it is still what is worn")
 
--- ------- nothing worn, nothing to re-wear
+-- Setting the choice applies it there and then -- the whole point of the
+-- offline picker row is that it does not need a game to be started.
+eq(Client.setSpriteChoice("SPRITE_RED"), "SPRITE_RED",
+   "setSpriteChoice succeeds for a character this game can draw")
+eq(red.sprite, redSheet,
+   "and picking RED wears the engine's own renderer -- which, since red "
+   .. "was already vanilla, means putting it straight back")
+eq(Client.wornLook(), nil,
+   "RED is not a look anybody 'wears': explicitChoice reads it as no "
+   .. "choice, so syncLook routes it through restoreLook")
 
+-- Explicit choice again, this time through setSpriteChoice rather than a
+-- save write behind its back -- the offline row's whole path.
+eq(Client.setSpriteChoice("SPRITE_ROCKET"), "SPRITE_ROCKET",
+   "choosing the grunt again")
+check(red.sprite ~= redSheet,
+      "setSpriteChoice wears the look immediately, offline included -- "
+      .. "there is no game running here, and it still applied")
+eq(Client.wornLook(), "SPRITE_ROCKET", "and that is what is worn")
+
+check(Client.setSpriteChoice("SPRITE_NOT_IN_THIS_CATALOG") == nil,
+      "a character this game cannot draw is refused")
+eq(stubSave.sprite, "SPRITE_ROCKET",
+   "and the refusal does not disturb the choice already standing")
+
+Client.disconnect()
+check(red.sprite ~= redSheet, "the teardown keeps that choice on too")
+
+-- ------- nothing chosen, nothing to keep
+
+stubSave.sprite, stubOptions.sprite = nil, nil
+check(Client.applyLook(),
+      "the game still draws whoever spriteChoice resolves to -- "
+      .. "everybody has to be drawn as somebody")
+Client.disconnect()
+eq(red.sprite, redSheet,
+   "but with no explicit choice standing, disconnecting is exactly the "
+   .. "restore it always was")
+eq(Client.wornLook(), nil, "and nothing is worn once it has")
+
+-- ------- refreshLook's widened gate: an offline save wears its choice too
+--
+-- The old gate was "already wearing one, or in a game" -- which is exactly
+-- why a single-player save with a character picked never showed it until
+-- this widened. The third clause is what a save that was never connected
+-- rides in on.
+
+Client.restoreLook()
+red.sprite = redSheet
 eq(Client.refreshLook(), false,
-   "a map change outside a game does not dress the player up")
+   "a map change with nothing worn, no game, and no choice does not "
+   .. "dress the player up")
 eq(red.sprite, redSheet, "and leaves the trainer alone")
+
+stubSave.sprite = "SPRITE_ROCKET"
+eq(Client.refreshLook(), true,
+   "the same map change, once a choice is standing, wears it -- this is "
+   .. "what dresses an offline save on its first map.entered")
+check(red.sprite ~= redSheet, "and it really is worn")
+eq(Client.wornLook(), "SPRITE_ROCKET", "the chosen character")
+
+Client.restoreLook()
+red.sprite = redSheet
+
+-- ------- a fresh save drops the old stash
+--
+-- M.saveLoaded() is leave(); restoreLook(); syncLook() -- in that order,
+-- because the stash belongs to the world that is going away and the new
+-- save may have chosen somebody else, or nobody. NEW GAME has to run
+-- through here too: the engine reuses one player entity for the life of
+-- the process, so a fresh file that never resynced would inherit whatever
+-- the last save left worn.
+
+stubSave.sprite = "SPRITE_ROCKET"
+check(Client.applyLook(), "the outgoing save's character is worn")
+check(red.sprite ~= redSheet, "worn")
+
+stubSave.sprite = nil
+Client.saveLoaded()
+eq(red.sprite, redSheet,
+   "a save with no choice at all drops the outgoing look -- a NEW GAME "
+   .. "must not inherit the last file's character")
+eq(Client.wornLook(), nil, "and wears nothing until told to")
+
+stubSprites.SPRITE_GENTLEMAN = { walker = true }
+check(Client.applyLook(), "worn again for the next handoff")
+stubSave.sprite = "SPRITE_GENTLEMAN"
+Client.saveLoaded()
+eq(Client.wornLook(), "SPRITE_GENTLEMAN",
+   "a save loaded in on top of it wears its own choice, not the "
+   .. "previous file's")
+check(red.sprite ~= redSheet, "worn")
+Client.restoreLook()
+red.sprite = redSheet
+stubSprites.SPRITE_GENTLEMAN = nil
 
 -- ------- a player the engine really did rebuild
 
+stubSave.sprite = "SPRITE_ROCKET"
 check(Client.applyLook(), "worn, and then the world rebuilds the player")
 local blue = newPlayer("blue")
 local blueSheet = blue.sprite
@@ -4254,6 +4409,204 @@ eq(ghost.sprite, ghostSheet, "a player swapped in since is left exactly as it is
 stubMod.world = nil
 stubSave.sprite = nil
 stubSprites.SPRITE_ROCKET = nil
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 13. previewRows: which visible rows get a portrait
+-- ------------------------------------------------------------------
+--
+-- The picker's portrait sits in the gutter to the *left* of every visible
+-- row that names a character -- unlike the "came with the mod" mark above,
+-- a portrait is not a distinction between rows, so the row under the
+-- cursor gets one exactly like its neighbours. Pinned here the same way
+-- markedRows is: the rule has to hold while the list scrolls, and this
+-- headless suite has no graphics context to read a frame with.
+
+;(function()
+
+local UiPreview = need("Ui").previewRows
+
+local list = {
+  { label = "  ALPHA", value = "SPRITE_ALPHA" },
+  { label = "  BETA", value = "SPRITE_BETA" },
+  { label = "  GAMMA", value = "SPRITE_GAMMA" },
+}
+
+local function ids(index, scroll, rows)
+  local out = {}
+  for _, preview in ipairs(UiPreview({ items = list, index = index,
+                                       scroll = scroll or 0, rows = rows or 7 })) do
+    out[#out + 1] = list[(scroll or 0) + preview.row].value
+  end
+  return table.concat(out, ",")
+end
+
+eq(ids(1), "SPRITE_ALPHA,SPRITE_BETA,SPRITE_GAMMA",
+   "every visible row previews, cursor row included")
+eq(ids(2), "SPRITE_ALPHA,SPRITE_BETA,SPRITE_GAMMA",
+   "unlike the mark, the row under the cursor is not skipped")
+
+-- The rows are the *visible* ones, so a scrolled list previews what is on
+-- screen rather than the whole catalog.
+eq(ids(1, 1, 7), "SPRITE_BETA,SPRITE_GAMMA",
+   "a scrolled list previews what is on screen")
+eq(ids(1, 0, 2), "SPRITE_ALPHA,SPRITE_BETA",
+   "and a short window stops at its last row")
+
+-- The y it hands back is the widget's own row geometry, same as markedRows.
+local rows = UiPreview({ items = list, index = 1, scroll = 0, rows = 7 })
+eq(rows[1].row, 1, "the first row previews first")
+eq(rows[1].y, 8 + 1 * 16, "at the y that row's label is drawn on")
+eq(rows[1].id, "SPRITE_ALPHA", "the id comes from item.value")
+
+eq(#UiPreview(nil), 0, "no menu previews nothing")
+eq(#UiPreview({}), 0, "and neither does one with no items")
+eq(#UiPreview({ items = { { label = "no value" } } }), 0,
+   "a row with no value -- not a character row -- previews nothing")
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 14. The offline character row, and the picker's two doors
+-- ------------------------------------------------------------------
+--
+-- SCREEN.MAIN's CHARACTER row and SCREEN.CHARPICK's backTo opt are pinned
+-- against a fake client and a stubbed mod.ui rather than the real widgets:
+-- what is under test is Ui.lua's own branching -- which rows exist, and
+-- where a choice sends the player back to -- not Menu/ListMenu's layout,
+-- which needs a graphics context this suite does not have.
+
+;(function()
+
+local Ui = need("Ui")
+local SCREEN = Ui.SCREEN
+
+-- what SCREEN.MAIN and SCREEN.CHARPICK actually read off the client
+local function fakeClient(state)
+  state = state or {}
+  return {
+    isHosting = function() return state.hosting == true end,
+    isConnected = function() return state.connected == true end,
+    spriteChoice = function() return state.choice or "SPRITE_ALPHA" end,
+    setSpriteChoice = function(_, id) state.choice = id return id end,
+  }
+end
+
+local pushed
+local screensStore = {}
+stubMod.ui = {
+  push = function(game, id, opts) pushed = { id = id, opts = opts } end,
+  Menu = { new = function(game, items, opts)
+    return { items = items, opts = opts, clampScroll = function() end }
+  end },
+  ListMenu = { new = function(game, title, items, opts)
+    return { title = title, items = items, opts = opts, index = 1,
+             scroll = 0, close = function() end }
+  end },
+}
+stubMod.hooks = { wrap = function() end }
+stubMod.content.screens = {
+  register = function(_, id, record) screensStore[id] = record end,
+  get = function(_, id) return screensStore[id] end,
+}
+
+local ctx = { client = fakeClient(), chat = { unread = 0 } }
+local ui = Ui.new(ctx)
+ui:install()
+
+-- ------- the row itself
+
+local function mainItems()
+  return screensStore[SCREEN.MAIN].new({}).items
+end
+
+do
+  local items = mainItems()
+  eq(#items, 3, "offline, the menu is HOST GAME / JOIN GAME / CHARACTER")
+  eq(items[1].label, "HOST GAME", "first")
+  eq(items[2].label, "JOIN GAME", "second")
+  eq(items[3].label, "CHARACTER", "and third, the new row")
+
+  pushed = nil
+  items[3].onSelect()
+  eq(pushed and pushed.id, SCREEN.CHARPICK, "CHARACTER opens the picker")
+  eq(pushed and pushed.opts and pushed.opts.backTo, SCREEN.MAIN,
+     "and tells it to come straight back to the MMO menu, not the "
+     .. "host/join setup flow")
+end
+
+ctx.client = fakeClient({ connected = true })
+do
+  local items = mainItems()
+  for _, item in ipairs(items) do
+    check(item.label ~= "CHARACTER",
+          "connected, the picker is only reachable from TRAINER -- "
+          .. "changing characters mid-game would not reach the hub")
+  end
+end
+
+ctx.client = fakeClient({ hosting = true })
+do
+  local items = mainItems()
+  for _, item in ipairs(items) do
+    check(item.label ~= "CHARACTER", "hosting hides the row too")
+  end
+end
+
+ctx.client = fakeClient()
+
+-- ------- CHARPICK's two doors
+
+stubSprites = {}
+stubSprites.SPRITE_ALPHA = { walker = true }
+stubSprites.SPRITE_MIDDLE_AGED_WOMAN = { walker = true }
+
+do
+  local menu = screensStore[SCREEN.CHARPICK].new({}, { backTo = SCREEN.MAIN })
+  local labels, values = {}, {}
+  for _, item in ipairs(menu.items) do
+    labels[#labels + 1] = item.label
+    values[#values + 1] = item.value
+  end
+  check(table.concat(labels, "|"):find("  MIDDLE AGED WOMA", 1, true) ~= nil,
+        "the label is indented past the gutter and trimmed to 16 glyphs, "
+        .. "dropping the trailing N")
+  check(table.concat(values, "|"):find("SPRITE_MIDDLE_AGED_WOMAN", 1, true)
+        ~= nil,
+        "but item.value stays the bare id, which is what the choice reads")
+
+  pushed = nil
+  menu.opts.onChoose(menu.items[1], menu)
+  eq(pushed.id, SCREEN.MAIN, "choosing with a backTo opt returns straight to it")
+  eq(next(pushed.opts), nil, "with no leftover setup opts to carry back")
+
+  pushed = nil
+  menu.opts.onCancel()
+  eq(pushed.id, SCREEN.MAIN, "and cancelling goes the same way")
+end
+
+do
+  -- no backTo: the older door, still open for the TRAINER flow
+  local setupOpts = { verb = "HOST" }
+  local menu = screensStore[SCREEN.CHARPICK].new({}, { back = setupOpts })
+
+  pushed = nil
+  menu.opts.onChoose(menu.items[1], menu)
+  eq(pushed.id, SCREEN.CHARSET,
+     "with no backTo, choosing still goes back to the setup flow")
+  check(pushed.opts == setupOpts,
+        "carrying the exact setup opts it arrived with")
+
+  pushed = nil
+  menu.opts.onCancel()
+  eq(pushed.id, SCREEN.CHARSET, "cancelling keeps the same door")
+end
+
+stubSprites = {}
+stubMod.ui = nil
+stubMod.hooks = nil
+stubMod.content.screens = nil
 
 end)()
 
