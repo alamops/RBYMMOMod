@@ -37,11 +37,23 @@ end
 -- A move carries only the fields that moved, so it merges rather than
 -- replaces: a player who walks must not lose the name, sprite or trainer
 -- card that arrived with their join.
-function M:move(id, map, x, y, facing)
+--
+-- `fast` rides here rather than getting a setter of its own like busy and
+-- party did, and the difference is what the flag is *about*: busy and party
+-- change while a player stands still, so they need a way in that does not
+-- involve a cell.  Pace is a property of the step itself -- it is decided by
+-- the same input and the same bike that moved them, it changes with the
+-- movement, and every mmo.move already carries it -- so threading it through
+-- the argument that delivers the step keeps the two from ever disagreeing.
+-- A nil is a caller that predates the field, and leaves the stored value
+-- alone: reading "no opinion" as "not fast" would have every old-shaped call
+-- stop a runner mid-stride.
+function M:move(id, map, x, y, facing, fast)
   local player = self.players[id]
   if not player then return nil end
   player.map, player.x, player.y = map, x, y
   player.facing = facing or player.facing
+  if fast ~= nil then player.fast = fast and true or false end
   return player
 end
 
@@ -71,6 +83,9 @@ end
 -- longer accept it -- and the PARTY column and the map marker never
 -- appeared.  Nothing in the headless suite could see it: the hub sent the
 -- right message and the client threw the field away.
+--
+-- Running is the flag that did *not* get one of these, for the reason spelled
+-- out over M:move -- it belongs to a step, so it travels with the step.
 function M:setParty(id, party)
   local player = self.players[id]
   if player then player.party = party and true or false end

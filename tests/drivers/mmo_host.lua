@@ -258,6 +258,26 @@ return function(game)
         and tostring(wornImage):find(tostring(record.image), 1, true) ~= nil,
         "the local player wears the chosen character")
 
+  -- The character itself, stood in the world facing the camera. Taken here
+  -- because the host is still alone in its own game -- once the guest
+  -- arrives there is a nameplate across the picture.
+  local shownLook = H.shotLook(game, SHOT_DIR .. "/host-overworld-look.png")
+  log("overworld look:", tostring(shownLook))
+  check(shownLook ~= nil, "the character is on screen in the overworld")
+
+  -- The pic the trainer card draws you as, which is the front half of the
+  -- same hook the battle back pic rides. A character the mod brought answers
+  -- it with art of its own; a ROM character leaves the game's own pic alone,
+  -- which is the behaviour worth pinning either way.
+  local cardPic = H.shotTrainerCard(game, SHOT_DIR .. "/host-trainer-card.png")
+  log("trainer card pic:", tostring(cardPic))
+  check(type(cardPic) == "string" and cardPic ~= "",
+        "the trainer card resolves a pic to draw")
+  if tostring(mine):find("SPRITE_NIRE", 1, true) then
+    check(tostring(cardPic):find("assets/chars/", 1, true) ~= nil,
+          "and a character the mod brought draws its own")
+  end
+
   -- close the menus so the overworld is on top when the guest arrives
   H.closeToOverworld(game)
 
@@ -421,11 +441,19 @@ return function(game)
     -- left/right rather than down: Red's bedroom is small and a few tiles
     -- south runs into furniture, which would make "the host did not move"
     -- a map-geometry result rather than a networking one
+    --
+    -- B held throughout, which makes this walk do double duty: it is
+    -- already the leg that proves the host's own movement reaches the
+    -- guest, and holding B across every step of it is also this run's only
+    -- exercise of hold-B running end to end -- see the guest's poll on
+    -- "host_walk_done" for the other half. H.holdAll rather than U.hold:
+    -- running needs the direction and B down at the same moment, which two
+    -- sequential U.hold calls cannot express.
     for _ = 1, 2 do
-      U.hold(game, "left", 22)
+      H.holdAll(game, { "left", "b" }, 22)
       U.wait(8)
     end
-    U.hold(game, "right", 22)
+    H.holdAll(game, { "right", "b" }, 22)
     U.wait(8)
     local nowAt = H.playerCell(game)
     log(("host walked (%s,%s) -> (%s,%s)"):format(
