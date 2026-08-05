@@ -48,8 +48,16 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // versions. 4 is ranked PVP, and moved for the same reason rather than a
 // different one -- a protocol-3 hub has never heard of a battle result or a
 // leaderboard request, so a newer client would report every match into
-// silence. Kept in step with Config.PROTOCOL on the mod side.
-const PROTOCOL = 4;
+// silence. 5 is pace: a client moving fast sends a `fast` flag on mmo.move,
+// and a protocol-4 hub rebuilds every broadcast from a field list that has
+// never heard of it -- so two players who both installed the feature would
+// watch each other walk, for the whole session, with nothing said. The rule
+// each of these bumps follows is the same one: bump whenever a client can
+// send something a hub silently ignores. The field was called `running`
+// during 0.5.0's development and renamed to `fast` before release, which cost
+// nothing because protocol 5 has never shipped. Kept in step with
+// Config.PROTOCOL on the mod side.
+const PROTOCOL = 5;
 // A SHA-256 response is 64 hex characters; the slack is for a future digest,
 // not for an unbounded field.
 const RESPONSE_MAX = 128;
@@ -95,6 +103,13 @@ function presenceOf(client) {
     // offer to invite this player -- and a party id on every presence would
     // let any client in the game map out who is travelling with whom.
     party: Boolean(client.partyId),
+    // One question only: was that step a fast one. Not "why" -- a sprint on
+    // foot and a bike both cover a tile in 8 frames, so both set this and
+    // neither is told apart, which is all a watcher can draw anyway. Unlike
+    // busy, this cannot be derived here: the hub never sees the B button or
+    // the bike, so the client is the only authority on it and this is the
+    // value it last reported.
+    fast: Boolean(client.fast),
     // The trainer card the player shows others. Carried here because
     // src/Hub.lua does (Hub.lua:74): a player on a dedicated hub would
     // otherwise silently have no card, and the two hosting paths have to
@@ -210,6 +225,16 @@ handlers['mmo.move'] = (relay, client, msg) => {
     client.y = null;
   }
   if (FACINGS.has(msg.facing)) client.facing = msg.facing;
+  // Client-truth, and strict on purpose: only a literal boolean true counts
+  // as a fast step -- a sprint or a bike, the sender's business which -- and
+  // everything else -- absent, 0, "", "yes", null -- is walking pace. The
+  // rule is strictness rather than coercion because this hub and the in-game
+  // Lua hub (src/Hub.lua) have to broadcast the same thing for the same wire
+  // bytes, and Lua and JS truthiness disagree on exactly the values a
+  // malformed client sends: 0 and "" are false to Boolean() and true to
+  // Lua's `and`. Comparing against true is the one test both languages
+  // answer identically for every JSON value.
+  client.fast = msg.fast === true;
   relay.broadcast('mmo.move', presenceOf(client), client.id);
 };
 
@@ -497,6 +522,9 @@ class Relay {
       sprite: DEFAULT_SPRITE,
       profile: null,
       map: null, x: null, y: null, facing: 'down',
+      // nobody arrives mid-stride: the first mmo.move says otherwise or it
+      // stays false
+      fast: false,
       sessionId: null,
       pendingTo: null,
       partyId: null,

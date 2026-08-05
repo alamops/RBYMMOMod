@@ -40,6 +40,28 @@ function M.waitFor(game, predicate, frames, what)
   return false
 end
 
+-- Hold several buttons down together for n frames, then release all of
+-- them.
+--
+-- tests/drivers/util.lua's U.hold only drives one input for its whole span;
+-- running needs a direction and B held at the same moment, and two
+-- sequential U.hold calls cannot express that -- they hold one, release it,
+-- then hold the other, so B is never down while the step is in flight. Same
+-- shape as U.hold underneath (raw pressQueue + state, one coroutine.yield
+-- per frame), so it costs nothing against the frame-shaped waits around it.
+function M.holdAll(game, btns, n)
+  for _ = 1, n do
+    for _, btn in ipairs(btns) do
+      table.insert(game.input.pressQueue, btn)
+      game.input.state[btn] = true
+    end
+    coroutine.yield()
+  end
+  for _, btn in ipairs(btns) do
+    game.input.state[btn] = false
+  end
+end
+
 -- Pick a row by its label rather than by counting taps.
 --
 -- The START menu's length depends on save state (POKéDEX only appears once
@@ -656,10 +678,17 @@ end
 -- Seconds, not frames, and by default the seconds PHASE says. See the rule
 -- above; `seconds` is here for a caller that genuinely knows better, not as
 -- the normal way to set a budget.
-function M.await(game, name, seconds)
+--
+-- `sample`, if given, is called on every poll tick while the barrier is
+-- still open -- for a caller that needs to observe something on the far
+-- side of the wire during exactly the window a barrier already bounds,
+-- rather than only at the moment it clears. Optional and side-effecting
+-- only: it does not change whether or how long this waits.
+function M.await(game, name, seconds, sample)
   seconds = seconds or M.patience(name)
   local spent
   local ok = M.waitSeconds(game, function()
+    if sample then sample() end
     local handle = io.open(M.syncPath(name), "r")
     if not handle then return false end
     spent = tonumber(handle:read("*a") or "")

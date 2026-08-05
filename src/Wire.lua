@@ -354,6 +354,19 @@ function M.presence(raw)
     -- INVITE row is offered -- and a party id on every presence would let
     -- any client in the game map out who is travelling with whom.
     party = raw.party and true or false,
+    -- Whether their last step was taken at the fast pace -- sprinting on
+    -- foot or riding the bike, which cost the same 8 frames a tile and so
+    -- need no telling apart here.  Client truth, and the only kind
+    -- available: nothing the hub can see says whether a player is holding B
+    -- or sitting on a bike, so this is taken on the sender's word the same
+    -- way `party` is -- the worst a liar buys is an avatar that walks at the
+    -- wrong speed.
+    --
+    -- Strict rather than truthy, unlike the flags above it: this one value
+    -- is re-derived by both hubs from the same wire bytes, and `raw.fast`
+    -- reaching Lua as 0 or "" would be true here and false in JS.  Comparing
+    -- against true is the one test both languages answer identically.
+    fast = raw.fast == true,
     profile = M.profile(raw.profile),
     -- Ranked points ride with presence rather than with the trainer card,
     -- because they are not a snapshot of who somebody was when they joined:
