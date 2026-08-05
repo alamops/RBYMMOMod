@@ -17,6 +17,7 @@ local Wire = need("Wire")
 local Chat = need("Chat")
 local World = need("World")
 local Chars = need("Chars")
+local Cast = need("Cast")
 
 local M = {}
 M.__index = M
@@ -125,6 +126,82 @@ function M.fieldLayout(maxLen, glyphs)
     cells[i] = glyphs[skip + i] or "-"
   end
   return math.floor((SCREEN_W - slots * SLOT_W) / 2), cells
+end
+
+-- ------- marking the characters that came with the mod
+--
+-- The CHARACTER list is 36 names the ROM carries and two the mod brings, and
+-- nothing on the row says which is which. A mark in the cursor's own column
+-- is what "this row is different" looks like in this game -- the hollow
+-- arrow `▷` the engine already draws on a chosen row, one glyph, no new art
+-- and nothing shifted, so `MIDDLE AGED WOMAN` still starts where every other
+-- label starts.
+--
+-- The mark yields on the row the cursor is actually on: they share a cell,
+-- and two triangles stacked in it would read worse than one. What that costs
+-- is small -- every *other* special row still carries its mark, so the list
+-- still says how many there are and where they are.
+--
+-- The row geometry is the widget's (src/ui/ListMenu.lua:draw): an 8px cursor
+-- column at x=8, labels from x=16, row `n` at y = 8 + n * 16. Copied rather
+-- than asked for, because the widget exposes no seam for a per-row
+-- decoration -- so if upstream ever moves a row, this moves with it.
+local MARK_X = 8
+local MARK_Y0 = 8
+local MARK_H = 16
+local LIST_ROWS = 7
+
+-- Which visible rows get the mark, as { row, y } pairs.
+--
+-- Pure, and exported, for the same reason M.fieldLayout is: the rule is
+-- "ours, and not the one under the cursor", it has to hold while the list
+-- scrolls, and a headless suite has no graphics context to read it off a
+-- frame with.
+function M.markedRows(menu)
+  local out = {}
+  if type(menu) ~= "table" or type(menu.items) ~= "table" then return out end
+  local scroll = tonumber(menu.scroll) or 0
+  local rows = tonumber(menu.rows) or LIST_ROWS
+  for row = 1, rows do
+    local i = scroll + row
+    local item = menu.items[i]
+    if not item then break end
+    if i ~= menu.index and Cast.owns(item.value) then
+      out[#out + 1] = { row = row, y = MARK_Y0 + row * MARK_H }
+    end
+  end
+  return out
+end
+
+-- Wraps a list menu's draw to stamp the mark. Same shape as namingScreen
+-- below: if the widget is not what this expects, the list still works and
+-- the characters are merely unmarked.
+local function markOwnCharacters(menu)
+  local baseDraw = menu and menu.draw
+  if type(baseDraw) ~= "function" then
+    mod.log:warn("the character list is not the shape this mod marks, so the "
+      .. "characters it adds will be listed without their mark -- update the "
+      .. "mod for this engine build")
+    return menu
+  end
+
+  menu.draw = function(self, ...)
+    local out = baseDraw(self, ...)
+    local Font, Theme = mod.ui.Font, mod.ui.Theme
+    if not (Font and Font.drawCode and Theme and Theme.cursorHollow) then
+      return out
+    end
+    -- the widget signs off in white, and the mark is the same black the
+    -- labels are drawn in
+    love.graphics.setColor(0, 0, 0, 1)
+    for _, mark in ipairs(M.markedRows(self)) do
+      Font.drawCode(Theme.cursorHollow, MARK_X, mark.y)
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+    return out
+  end
+
+  return menu
 end
 
 -- Every naming grid this mod opens, built here rather than at each call
@@ -781,7 +858,7 @@ function M:install()
       end,
     })
     menu.index = start
-    return menu
+    return markOwnCharacters(menu)
   end })
 
   -- ------- a trainer card: somebody else's, or your own
