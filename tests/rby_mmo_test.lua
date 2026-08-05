@@ -124,9 +124,99 @@ end
 
 -- the seams it says it wraps
 for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items",
-                        "ui.naming.grid" }) do
+                        "ui.naming.grid", "player.sprite",
+                        "movement.speed" }) do
   local chain = run.loader.hooks.chains[hook]
   check(chain ~= nil and #chain > 0, "wraps " .. hook)
+end
+
+-- ------- movement.speed: holding B on foot halves the step
+--
+-- Driven straight off the registered chain entry rather than through a
+-- Client export, because the wrap runs entirely inside the closure the
+-- loader captured -- this is the same chain OverworldController's
+-- Player:tryMove would call, with a passthrough `next` standing in for it.
+-- `frames` is frames-per-tile, so the arithmetic is relative to whatever the
+-- engine handed in, never a hardcoded 8.
+--
+-- Wrapped for scope, the way later sections in this file are: the main
+-- chunk is close enough to Lua's 200-local ceiling that a handful of new
+-- names here is enough to cross it.
+
+;(function()
+
+local speedChain = run.loader.hooks.chains["movement.speed"]
+local speedEntry = speedChain[1]
+local passthroughNext = function(f) return f end
+
+local heldB = { isDown = function(_, b) return b == "b" end }
+local notHeldB = { isDown = function(_, b) return false end }
+
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB }), 8,
+   "on foot with B held, a 16-frame walk tile runs at 8")
+eq(speedEntry.callback(passthroughNext, 11, { input = heldB }), 5,
+   "the halving floors rather than rounds")
+check(speedEntry.callback(passthroughNext, 1, { input = heldB }) >= 1,
+      "and never drops below one frame a tile")
+
+-- Only the *speed* passes through here. What the step is reported as is a
+-- separate question, and a bike step is reported fast -- the wire flag means
+-- pace, not "B was held" (src/Client.lua). That side of the wrap writes to a
+-- Client local the loader gives this suite no handle on, so it is covered
+-- where it lands instead: the roster and Avatars sections below drive a
+-- `fast` row through to npc.stepFrames, and the e2e drivers assert the flag
+-- actually crossed the wire.
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB, onBike = true }), 16,
+   "the bike is already fast, so holding B changes nothing about its speed")
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB, surfing = true }), 16,
+   "and surfing is left alone too")
+eq(speedEntry.callback(passthroughNext, 16, { input = notHeldB }), 16,
+   "letting go of B walks at the ordinary pace")
+
+-- the loader's own option store, the same one mod.options:get reads --
+-- toggling it off is what a player who wants their old walk speed back does
+run.loader.modOptions["rby_mmo"] = { run = false }
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB }), 16,
+   "and turning B TO RUN off walks at the ordinary pace even with B held")
+run.loader.modOptions["rby_mmo"] = nil
+
+end)()
+
+-- ------- the characters it brings of its own
+--
+-- Asserted through the real loader rather than a stub because the shape is
+-- the point: Chars.list offers a sprite only if the *catalog* says it walks,
+-- and SpriteRenderer cuts frames out of `image` on the strength of `frames`.
+-- A record that registered but lied about either would be a character that
+-- appears in the picker and then draws wrongly on every other player's
+-- screen, which no unit test of this mod's own code could see.
+for _, id in ipairs({ "SPRITE_NIRE", "SPRITE_NIRE_HOOD" }) do
+  local record = run.loader.content.sprites:get(id)
+  check(record ~= nil, id .. " is in the character catalog")
+  if record then
+    eq(record.walker, true, id .. " walks, so it can be worn")
+    eq(record.frames, 6, id .. " carries a full six-frame sheet")
+    check(type(record.image) == "string"
+          and record.image:find(MOD_PATH, 1, true) == 1,
+          id .. "'s art comes out of the mod folder")
+  end
+  -- and the game's own view of the catalog sees it, which is what the
+  -- renderer and the avatar layer actually read
+  check((run.data.sprites or {})[id] ~= nil, id .. " reaches the merged data")
+end
+
+-- The back pic is 48x48 against the 32x32 the engine sizes a trainer back
+-- for, so it ships the scale that keeps its feet in the same place. Missing,
+-- it would draw half again too tall and stand in the text box.
+for _, id in ipairs({ "rby_mmo_nire_back", "rby_mmo_nire_hood_back" }) do
+  local scale = run.loader.content.battle_sprite_scales:get(id)
+  check(scale ~= nil, id .. " sizes its back pic")
+  if scale then
+    check(scale.scale > 1 and scale.scale < 2, id .. " draws between 1x and 2x")
+    check(type(scale.path) == "string"
+          and scale.path:find(MOD_PATH, 1, true) == 1,
+          id .. " points at the mod's own art")
+  end
 end
 
 -- the inter-mod surface it publishes
@@ -159,6 +249,7 @@ run.release()
 
 local stubSave, stubOptions, stubPipelines = {}, {}, {}
 local stubSprites = {}
+local stubScales = {}
 
 local stubMod = {
   id = "rby_mmo",
@@ -182,7 +273,10 @@ local stubMod = {
     define = function() end,
     get = function(_, key) return stubOptions[key] end,
   },
-  -- only what Overlay's pipeline query touches
+  -- the mod's own files, addressed the way the loader addresses them
+  assets = { path = function(_, relative) return MOD_PATH .. "/" .. relative end },
+  -- only what Overlay's pipeline query touches, plus the two registries Cast
+  -- writes the mod's own characters into
   content = {
     sprites = {
       each = function()
@@ -194,6 +288,11 @@ local stubMod = {
         end
       end,
       get = function(_, id) return stubSprites[id] end,
+      register = function(_, id, record) stubSprites[id] = record end,
+    },
+    battle_sprite_scales = {
+      get = function(_, id) return stubScales[id] end,
+      register = function(_, id, record) stubScales[id] = record end,
     },
     render_pipelines = {
       each = function(self)
@@ -396,6 +495,20 @@ eq(Wire.presence({ id = "p5", name = "MISTY", party = true }).party, true,
    "and a party flag survives")
 eq(Wire.presence({ id = "p6", name = "GARY", party = "7" }).party, true,
    "a party id sent where a flag belongs is reduced to the flag")
+
+-- ------- pace on the wire
+--
+-- Client truth, the same shape as party: nothing the hub can see says
+-- whether a player is holding B or riding a bike, so the sender's word is
+-- taken. The coercion is *stricter* than party's, though -- both hubs
+-- re-derive this one field from the same wire bytes, and Lua and JS
+-- truthiness part ways on 0 and "", so only a literal true counts.
+
+eq(presence.fast, false, "presence with no fast field reads as walking pace")
+eq(Wire.presence({ id = "p7", name = "MISTY", fast = true }).fast, true,
+   "and a fast flag survives")
+eq(Wire.presence({ id = "p8", name = "GARY", fast = "junk" }).fast, false,
+   "while junk in the field is walking pace -- only a literal true is fast")
 
 local member = Wire.member({ id = "m1", name = "ANN", x = 4, y = 9 })
 check(member ~= nil, "a members row sanitises")
@@ -628,6 +741,25 @@ eq(roster:get("a").party, true, "and walking does not take it off them again")
 roster:setParty("a", false)
 eq(roster:get("a").party, false, "leaving one clears it")
 eq(roster:setParty("nosuch", true), nil, "an unknown id is a no-op")
+
+-- ------- pace rides through move(), not a setter
+--
+-- The opposite choice from party, and for the reason src/Roster.lua spells
+-- out: pace is a property of the step itself, so it travels through move()'s
+-- own trailing argument rather than a setParty-shaped call. A nil is an
+-- old-shaped caller with no opinion, and must leave whatever was last
+-- recorded alone -- reading "no opinion" as "not fast" would stop every
+-- runner mid-stride the moment any pre-pace call site fired.
+
+eq(roster:get("a").fast, false,
+   "nobody starts flagged as fast -- Wire.presence always coerces the field")
+roster:move("a", "PALLET", 8, 5, "right", true)
+eq(roster:get("a").fast, true, "a move can flag the step as a fast one")
+roster:move("a", "PALLET", 9, 5, "right")
+eq(roster:get("a").fast, true,
+   "and an old-shaped call with no fast argument leaves it alone")
+roster:move("a", "PALLET", 10, 5, "right", false)
+eq(roster:get("a").fast, false, "while an explicit false clears it")
 
 roster:setBusy("a", true)
 eq(roster:get("a").busy, true, "busy is carried the same way")
@@ -2323,6 +2455,221 @@ eq(walked, 4, "two east and two south is four steps")
 eq(x, 5, "landing on the target x")
 eq(y, 8, "and the target y")
 
+-- ------- a fast step sets the remote avatar's step pace
+--
+-- advance() writes npc.stepFrames straight onto the live NPC -- the field
+-- NPC:update reads fresh every frame, per the module's own header -- so the
+-- fake world only needs to hand back a handle whose .npc is a plain mutable
+-- table shaped like the fields advance touches.  mod.world is set directly
+-- on the shared stub for the length of this section and cleared afterward,
+-- so nothing later that touches stubMod sees a fake world it did not ask
+-- for.  Wrapped for scope, the same reason as elsewhere in this file.
+
+;(function()
+
+local fakeNpc = { cellX = 5, cellY = 5, moving = false, facing = "down" }
+local fakeWorld = {
+  npc = function(_, mapId, npcId) return { npc = fakeNpc } end,
+}
+stubMod.world = fakeWorld
+
+local avatars = Avatars.new()
+avatars.mapId = "PALLET"
+
+local av = { npcId = "n1", x = 5, y = 5, facing = "down" }
+local runnerRow = { id = "a", x = 6, y = 5, facing = "right", fast = true }
+check(avatars:advance(av, runnerRow), "advance starts a step toward the new cell")
+eq(fakeNpc.stepFrames, Config.FAST_STEP_FRAMES,
+   "a fast roster row paces the step at the fast frame count")
+
+-- the step "completes" the way NPC:update would drive it, before the next
+-- one starts
+fakeNpc.moving = false
+fakeNpc.cellX, fakeNpc.cellY = 6, 5
+
+local walkerRow = { id = "a", x = 7, y = 5, facing = "right", fast = false }
+check(avatars:advance(av, walkerRow), "advance starts the next step")
+eq(fakeNpc.stepFrames, nil,
+   "and a walking-pace row clears it back to the engine's own default")
+
+-- The bug this flag's rename fixed: a cyclist's row says fast the same way a
+-- sprinter's does, because the wire carries the pace and not the reason for
+-- it. Before that, a remote cyclist stepped at 16 while their own game moved
+-- them at 8 and they drifted straight through RESYNC_DISTANCE.
+fakeNpc.moving = false
+fakeNpc.cellX, fakeNpc.cellY = 7, 5
+
+local cyclistRow = { id = "a", x = 8, y = 5, facing = "right", fast = true }
+check(avatars:advance(av, cyclistRow), "advance starts a cyclist's step")
+eq(fakeNpc.stepFrames, Config.FAST_STEP_FRAMES,
+   "and a cyclist is paced by the same one flag a sprinter is")
+
+stubMod.world = nil
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 5b. Avatars decorate / undecorate -- the depth-nudge compensation
+-- ------------------------------------------------------------------
+--
+-- decorate/undecorate patch a live NPC's update and pose so an avatar
+-- always loses a draw-order tie against the player: a whole-pixel py is
+-- nudged up by AVATAR_DEPTH_NUDGE right after NPC:update recomputes it, and
+-- both ways a position leaves the avatar layer -- pose, for the renderer,
+-- and cellOf, for a caller comparing against the roster -- add it back so
+-- nothing downstream of the sort ever sees the fraction.  See
+-- src/Config.lua's AVATAR_DEPTH_NUDGE and src/Avatars.lua's decorate for the
+-- full argument.
+--
+-- A stub class stands in for the engine's NPC: update writes a new
+-- whole-pixel py only while moving -- exactly like NPC:update landing a
+-- step -- and pose reads py back out seven values wide, the same shape
+-- src/Avatars.lua wraps.  cellOf itself reaches through mod.world:npc, a
+-- live overworld handle this headless suite does not stand up -- that call
+-- is e2e territory, exercised by run-mmo-e2e.sh.  What is pinned here
+-- instead is the arithmetic cellOf leans on just as much as pose does: case
+-- 5 below proves the round trip -- subtract the nudge, add it back -- lands
+-- on the exact original whole pixel.
+--
+-- Wrapped for scope, like the trainer-card section below: this file's main
+-- chunk sits close enough to Lua's 200-local ceiling that one more section's
+-- worth of locals is what tips it over.
+
+;(function()
+
+local NUDGE = Config.AVATAR_DEPTH_NUDGE
+
+local StubNpcClass = {}
+StubNpcClass.__index = StubNpcClass
+
+function StubNpcClass:update(...)
+  if self.moving then self.py = self.targetPy end
+  return "base-update", 42
+end
+
+function StubNpcClass:pose(...)
+  return "sprite", self.px, self.py, self.facing, self.phase, self.flip, self.hop
+end
+
+local function newStubNpc(py)
+  return setmetatable({
+    px = 48, py = py, facing = "down", phase = 2, flip = true, hop = false,
+    moving = false,
+  }, StubNpcClass)
+end
+
+-- a bare-table fingerprint, so "undecorate leaves it indistinguishable from
+-- a table that was never decorated" is a real comparison and not a
+-- hand-picked field list
+local function keyList(t)
+  local ks = {}
+  for k in pairs(t) do ks[#ks + 1] = tostring(k) end
+  table.sort(ks)
+  return table.concat(ks, ",")
+end
+
+-- 1. decorate marks the NPC and installs instance-level update/pose
+local originalPy = 80
+local npc = newStubNpc(originalPy)
+Avatars.decorate(npc)
+eq(npc.mmoAvatar, true, "decorate marks the NPC as an avatar")
+eq(npc.passable, true, "and makes it passable, the same escape hatch the follower uses")
+check(type(rawget(npc, "update")) == "function",
+      "update is shadowed on the instance, not left resolving through the metatable")
+check(type(rawget(npc, "pose")) == "function", "so is pose")
+
+-- 2. idle drift-proofing: a hundred no-op updates nudge exactly once
+for i = 1, 100 do npc:update() end
+eq(npc.py, originalPy - NUDGE,
+   "a whole py is nudged once and then never again -- the fraction is the guard")
+
+-- 3. moving recompute: the base update writes a fresh whole py, and that
+-- gets nudged too, from the new value rather than stacking on the old one
+local newPy = 96
+npc.moving = true
+npc.targetPy = newPy
+npc:update()
+eq(npc.py, newPy - NUDGE, "a freshly-landed step is nudged from its own new py")
+
+-- 4. the override forwards whatever the base update returned, arity and all
+npc.moving = false
+local r1, r2 = npc:update()
+eq(r1, "base-update", "the wrapped update forwards the base call's first return value")
+eq(r2, 42, "and its second -- the wrapper does not narrow the base method's arity")
+
+-- 5. pose hands back the true pixel, not the sort's nudged one -- and this
+-- is also the round trip cellOf leans on, since it undoes the same nudge
+-- the same way
+local sprite, px, poseP, facing, phase, flip, hop = npc:pose()
+eq(poseP, newPy, "pose adds the nudge back, landing exactly on the whole pixel again")
+eq(poseP, (newPy - NUDGE) + NUDGE,
+   "the same round trip cellOf performs -- subtract, then add back -- is exact in doubles")
+eq(sprite, "sprite", "pose forwards the sprite untouched")
+eq(px, npc.px, "and px untouched")
+eq(facing, npc.facing, "and facing")
+eq(phase, npc.phase, "and the walk phase")
+eq(flip, npc.flip, "and the step flip")
+eq(hop, npc.hop, "and the hop flag -- only py is ever touched")
+
+-- 6. decorate is idempotent: an already-marked NPC is untouched, not
+-- rewrapped, so a second nudge never stacks on the first
+local updateFn, poseFn = rawget(npc, "update"), rawget(npc, "pose")
+local pyBeforeRedecorate = npc.py
+Avatars.decorate(npc)
+eq(rawget(npc, "update"), updateFn, "redecorating keeps the same update closure")
+eq(rawget(npc, "pose"), poseFn, "and the same pose closure")
+eq(npc.py, pyBeforeRedecorate, "and touches no field -- the marker alone is the guard")
+
+-- 7. undecorate restores a table indistinguishable from one that was never
+-- decorated -- the engine pools NPC tables, so anything left behind would
+-- be born again on some later, ordinary NPC
+local plainNpc = newStubNpc(64)
+local plainKeys = keyList(plainNpc)
+Avatars.decorate(plainNpc)
+Avatars.undecorate(plainNpc)
+eq(keyList(plainNpc), plainKeys,
+   "the key set after decorate+undecorate matches the table before either ran")
+eq(rawget(plainNpc, "update"), nil, "update falls back to the metatable again")
+eq(rawget(plainNpc, "pose"), nil, "so does pose")
+eq(plainNpc.update, StubNpcClass.update, "which resolves to the class method")
+eq(plainNpc.pose, StubNpcClass.pose, "for both")
+
+-- 8. a pre-existing instance override survives a decorate/undecorate round
+-- trip -- decorate has to wrap *that*, not the class method underneath it,
+-- and undecorate has to hand back that exact function, not nil
+local overridden = newStubNpc(64)
+local preexisting = function(self, ...) return "pre-existing" end
+rawset(overridden, "update", preexisting)
+Avatars.decorate(overridden)
+check(rawget(overridden, "update") ~= preexisting,
+      "decorate wraps whatever was already shadowing update on the instance")
+Avatars.undecorate(overridden)
+eq(rawget(overridden, "update"), preexisting,
+   "and undecorate hands back that exact pre-existing function, not the class method")
+
+-- 9. half-decoration refusal: nothing is written until both class methods
+-- are in hand, and undecorate never touches a table it did not mark
+local NoUpdateClass = { pose = StubNpcClass.pose }
+NoUpdateClass.__index = NoUpdateClass
+local broken = setmetatable({ py = 64 }, NoUpdateClass)
+local brokenKeys = keyList(broken)
+Avatars.decorate(broken)
+eq(keyList(broken), brokenKeys,
+   "a class with no update method gets no fields written at all -- half a decoration")
+eq(broken.mmoAvatar, nil,
+   "not even the marker, so decorating the same table again after it is fixed still works")
+
+local untouched = newStubNpc(64)
+local sentinelUpdate = function(self, ...) return "sentinel" end
+rawset(untouched, "update", sentinelUpdate)
+local untouchedKeys = keyList(untouched)
+Avatars.undecorate(untouched)
+eq(keyList(untouched), untouchedKeys, "undecorate on a table it never marked is a no-op")
+eq(rawget(untouched, "update"), sentinelUpdate,
+   "and never blanks an instance slot that was already there")
+
+end)()
+
 -- ------------------------------------------------------------------
 -- 6. Characters you can wear
 -- ------------------------------------------------------------------
@@ -2512,7 +2859,153 @@ eq(Client:playerName(saveGame), "GREEN", "and so does playerName's")
 
 end)()
 
+-- ------- the characters the mod brings of its own
+--
+-- Wrapped for scope like the two sections above, for the same reason: this
+-- chunk is close enough to Lua's 200-local ceiling that one more section at
+-- the top level is enough to cross it.
+
+;(function()
+
+local Cast = need("Cast")
+
 stubSprites = {}
+stubScales = {}
+check(Cast.install(), "the mod's own characters register")
+
+local ids = Cast.ids()
+eq(#ids, 2, "two of them")
+eq(ids[1], "SPRITE_NIRE", "NIRE")
+eq(ids[2], "SPRITE_NIRE_HOOD", "and NIRE HOOD")
+
+-- Installing twice would be a duplicate registration, which the loader is
+-- entitled to refuse -- and F5 in dev mode re-runs the entry chunk.
+check(Cast.install(), "installing again is a no-op rather than a second try")
+eq(#Cast.ids(), 2, "and does not double the cast")
+
+-- The catalog is what everything downstream reads, so what matters is that
+-- the record satisfies the same filter every other wearable character does.
+local offered = {}
+for _, id in ipairs(Chars.list()) do offered[id] = true end
+check(offered.SPRITE_NIRE and offered.SPRITE_NIRE_HOOD,
+      "so the CHARACTER screen offers them like any other character")
+eq(Chars.available("SPRITE_NIRE"), true, "and a peer wearing one can draw it")
+eq(Chars.label("SPRITE_NIRE_HOOD"), "NIRE HOOD", "under a readable name")
+
+-- Every character in the options row has to be a character that exists, or
+-- the row offers a choice that silently resolves back to RED.
+for _, row in ipairs(Config.SPRITES) do
+  if row[2] == "SPRITE_NIRE" or row[2] == "SPRITE_NIRE_HOOD" then
+    offered[row[2]] = "listed"
+  end
+end
+eq(offered.SPRITE_NIRE, "listed", "NIRE is offered in the options row too")
+eq(offered.SPRITE_NIRE_HOOD, "listed", "and so is NIRE HOOD")
+
+-- ------- the pics the catalog does not cover
+--
+-- "front" is the trainer card, Oak's intro and the Hall of Fame; "back" is
+-- the battle pic. A vanilla character answers nothing at all, which is what
+-- keeps wearing COOLTRAINER from changing what you fight as.
+local back = Cast.pic("SPRITE_NIRE", "back")
+local front = Cast.pic("SPRITE_NIRE", "front")
+check(back and back:find("back.png", 1, true), "NIRE has a battle back pic")
+check(front and front:find("front.png", 1, true), "and a trainer-card pic")
+eq(Cast.pic("SPRITE_NIRE", nil), front, "an unnamed side is the front one")
+eq(Cast.pic("SPRITE_RED", "back"), nil, "RED keeps the pics the game gave it")
+eq(Cast.pic(nil, "back"), nil, "and wearing nothing changes nothing")
+eq(Cast.owns("SPRITE_NIRE"), true, "NIRE is ours")
+eq(Cast.owns("SPRITE_RED"), false, "RED is not")
+
+-- ------- the art is really there, and really the size the engine reads it at
+--
+-- A PNG's IHDR is its first chunk, so width and height are bytes 17..24 --
+-- enough to catch the failure this cannot otherwise see: a sheet that is one
+-- frame short, or a back pic resaved at another size, loads without
+-- complaint and then draws wrongly. The scale registered for the back pic is
+-- only correct for the size asserted here.
+local function pngSize(path)
+  local handle = io.open(path, "rb")
+  if not handle then return nil end
+  local head = handle:read(24)
+  handle:close()
+  if type(head) ~= "string" or #head < 24 then return nil end
+  local function be32(at)
+    local a, b, c, d = head:byte(at, at + 3)
+    return ((a * 256 + b) * 256 + c) * 256 + d
+  end
+  return be32(17), be32(21)
+end
+
+for _, char in ipairs(Config.OWN_CHARS) do
+  for file, want in pairs({ ["walk.png"] = { 16, 96 },
+                            ["front.png"] = { 56, 56 },
+                            ["back.png"] = { 48, 48 } }) do
+    local w, h = pngSize(MOD_PATH .. "/" .. char.dir .. "/" .. file)
+    eq(w, want[1], char.label .. "'s " .. file .. " is " .. want[1] .. " wide")
+    eq(h, want[2], "and " .. want[2] .. " tall")
+  end
+end
+
+-- 48 * (64/48) = 64: the same screen height the 32x32 the engine sizes a
+-- trainer back for reaches at its default 2x, so the feet land where they
+-- have always landed.
+for _, char in ipairs(Config.OWN_CHARS) do
+  local scale = stubScales[Cast.scaleId(char)]
+  check(scale ~= nil, char.label .. "'s back pic is sized")
+  check(scale and math.abs(scale.scale * 48 - 64) < 0.001,
+        "to the height a vanilla back pic draws")
+end
+
+-- ------- the mark that says a character came with the mod
+--
+-- The CHARACTER list is 36 ROM characters and two of ours, and the rule for
+-- the mark is small enough to state exactly: ours, visible, and not the one
+-- under the cursor -- which is the only row where the mark and the cursor
+-- would land in the same cell. Pinned here rather than off a screenshot,
+-- because it has to keep holding as the list scrolls.
+local UiRows = need("Ui").markedRows
+
+local list = {
+  { label = "MR FUJI", value = "SPRITE_MR_FUJI" },
+  { label = "NIRE", value = "SPRITE_NIRE" },
+  { label = "NIRE HOOD", value = "SPRITE_NIRE_HOOD" },
+  { label = "OAK", value = "SPRITE_OAK" },
+}
+
+local function marked(index, scroll, rows)
+  local out = {}
+  for _, mark in ipairs(UiRows({ items = list, index = index,
+                                 scroll = scroll or 0, rows = rows or 7 })) do
+    out[#out + 1] = list[(scroll or 0) + mark.row].label
+  end
+  return table.concat(out, ",")
+end
+
+eq(marked(1), "NIRE,NIRE HOOD", "both of ours are marked, and nothing else")
+eq(marked(2), "NIRE HOOD",
+   "except the one under the cursor -- it would share the cursor's cell")
+eq(marked(3), "NIRE", "and the other way round")
+eq(marked(4), "NIRE,NIRE HOOD", "a vanilla row under the cursor marks neither")
+
+-- The rows are the *visible* ones, so a scrolled list marks by what is on
+-- screen rather than by position in the whole catalog.
+eq(marked(1, 2, 7), "NIRE HOOD", "a scrolled list marks what is on screen")
+eq(marked(1, 0, 2), "NIRE", "and a short window stops at its last row")
+
+-- The y it hands back is the widget's own row geometry: row 1 at y=24, then
+-- every 16 after it. Wrong by one row and the mark lands on the neighbour.
+local rows = UiRows({ items = list, index = 1, scroll = 0, rows = 7 })
+eq(rows[1].row, 2, "the mark is on the second visible row")
+eq(rows[1].y, 8 + 2 * 16, "at the y that row's label is drawn on")
+
+eq(#UiRows(nil), 0, "no menu marks nothing")
+eq(#UiRows({}), 0, "and neither does one with no items")
+
+stubSprites = {}
+stubScales = {}
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 7. Playing nicely with a mod that owns the world pass
@@ -3700,8 +4193,10 @@ local red = newPlayer("red")
 overworld.player = red
 local redSheet = red.sprite
 
+eq(Client.wornLook(), nil, "before joining you are wearing nothing of ours")
 check(Client.applyLook(), "joining wears the chosen character")
 check(red.sprite ~= redSheet, "which really does swap the live renderer")
+eq(Client.wornLook(), "SPRITE_ROCKET", "and that is what is worn")
 
 -- map.entered, twice, on the player object the overworld handed back
 check(Client.refreshLook(), "entering a map re-wears it")
@@ -3710,6 +4205,9 @@ check(red.sprite ~= redSheet, "still wearing it")
 
 Client.restoreLook()
 eq(red.sprite, redSheet, "leaving gives the player their own trainer back")
+-- The battle and trainer-card pics hang off this one, so a game left is a
+-- game whose pics go back to vanilla in the same breath as the sprite.
+eq(Client.wornLook(), nil, "and leaving is wearing nothing again")
 
 Client.restoreLook()
 eq(red.sprite, redSheet, "and leaving twice is not a second restore")

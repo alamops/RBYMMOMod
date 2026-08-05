@@ -318,7 +318,35 @@ return function(game)
   local fromX, fromY = before and before.rosterX, before and before.rosterY
   log(("host baseline (%s,%s)"):format(tostring(fromX), tostring(fromY)))
   H.signal("guest_baseline_taken")
-  H.await(game, "host_walk_done")
+
+  -- ------- 2b. the pace flag reaches this side too
+  --
+  -- The host holds B for every step of the walk it is about to do (see
+  -- mmo_host.lua), so this side's copy of its roster row should say
+  -- fast=true for at least part of that window. Sampled here rather than
+  -- after the fact: the flag is "my last committed step was a fast one"
+  -- (src/Client.lua), so it is only ever true while a fast step is actually
+  -- in flight and clears on the very next ordinary step -- there is no
+  -- lingering copy to check once the barrier below has already cleared.
+  --
+  -- Held B is only one of the two ways to earn the flag; the bike is the
+  -- other, and it is covered at the unit tier rather than here, where
+  -- getting a bicycle into the bag would be most of the run.
+  --
+  -- Deliberately not a speed measurement: this only asks whether the flag
+  -- crossed the wire at all, not how fast the avatar moved while it was up.
+  local sawHostFast = false
+  local runSamples = 0
+  local function sampleHostFast()
+    local row = H.avatarRow(exports)
+    if row == nil then return end
+    runSamples = runSamples + 1
+    if row.fast then sawHostFast = true end
+  end
+  H.await(game, "host_walk_done", nil, sampleHostFast)
+  check(sawHostFast,
+        ("the host's avatar row showed fast=true while B was held "
+          .. "(%d sample(s) taken)"):format(runSamples))
 
   local hostMoved = H.waitSeconds(game, function()
     local row = H.avatarRow(exports)
@@ -376,6 +404,28 @@ return function(game)
   -- wearing it here, and still able to get back, is the pair that says so.
   check(H.playerSheet(game) ~= ownSheet,
         "still wearing the chosen character after a map change")
+
+  -- The guest's own character, in the world, facing the camera. Here for the
+  -- same reason the host's is where it is: the guest has just teleported
+  -- home, so the host is not on this map and no nameplate is over it.
+  local shownLook = H.shotLook(game, SHOT_DIR .. "/join-overworld-look.png")
+  log("overworld look:", tostring(shownLook))
+  check(shownLook ~= nil, "the character is on screen in the overworld")
+
+  -- Same check the host makes, from the other side: the front pic, which no
+  -- screen in either flow used to open. Here rather than earlier because the
+  -- look has just survived a map change, so the pic is being read at the
+  -- point the sprite has already proved it is still worn.
+  local guestCard = H.shotTrainerCard(game, SHOT_DIR .. "/join-trainer-card.png")
+  local wearing = exports.wornLook and exports.wornLook() or nil
+  log("trainer card pic:", tostring(guestCard), "wearing", tostring(wearing))
+  check(type(guestCard) == "string" and guestCard ~= "",
+        "the trainer card resolves a pic to draw")
+  if tostring(wearing):find("SPRITE_NIRE", 1, true) then
+    check(tostring(guestCard):find("assets/chars/", 1, true) ~= nil,
+          "and a character the mod brought draws its own")
+  end
+
   H.signal("guest_back_on_map")
 
   -- ------- 4. interact with the host, and get the trade/battle menu
@@ -384,6 +434,71 @@ return function(game)
   local hostRow = H.avatarRow(exports)
   check(hostRow ~= nil and hostRow.rosterX ~= nil,
         "the host has a cell to stand next to")
+
+  -- ------- non-blocking avatars: walk straight through the host's own tile
+  --
+  -- The host is stood still for the whole interact leg below -- it is
+  -- blocked on H.await("guest_interact_done") the entire time -- which
+  -- makes this the one place in the flow where a "the stander never moves"
+  -- assumption is actually true rather than merely likely. Section 2 above
+  -- already proved this exact row walkable end to end: the host held here
+  -- after two lefts and a right along it, each one a real keypress the
+  -- engine's own collision accepted. Putting the walker on one proven-clear
+  -- tile and stepping it across the host's cell to the next isolates
+  -- exactly the one variable this driver can reach: whether an avatar
+  -- sitting on a tile refuses the step onto it. Pre-fix, Collision.canMove
+  -- answers "entity" and the walker never arrives; post-fix it crosses like
+  -- any other floor tile, the same mechanism a door tile reduces to.
+  --
+  -- The crossing runs west, because that is the direction the host's own
+  -- walk actually proved: its two lefts covered spawn->spawn-1 and
+  -- spawn-1->spawn-2 leftward, so both tile *pairs* on this path have
+  -- passed the engine's real collision in the direction used here. The
+  -- eastward pair past the stander never was, and in practice something
+  -- east of it refuses the step -- tile pairs are directional (ledges),
+  -- so a row proven one way is only proven that way.
+  if hostRow and hostRow.rosterX then
+    local standerX, standerY = hostRow.rosterX, hostRow.rosterY
+    U.teleport(game, hostRow.map, standerX + 1, standerY, "left")
+    U.wait(30)
+    local walkerStart = H.playerCell(game)
+    check(walkerStart ~= nil and walkerStart.x == standerX + 1
+          and walkerStart.y == standerY,
+          "walker starts one tile short of the stander")
+
+    U.hold(game, "left", 22)
+    U.wait(8)
+    local onStander = H.waitSeconds(game, function()
+      local cell = H.playerCell(game)
+      return cell ~= nil and cell.x == standerX and cell.y == standerY
+    end, 20, "the walker to step onto the stander's own tile")
+    check(onStander,
+          "the walker's own position reached the tile the stander occupies")
+
+    U.hold(game, "left", 22)
+    U.wait(8)
+    -- "at or beyond", not "exactly at": a 22-frame hold can land two steps,
+    -- and a poll that demands one transient cell misses the crossing it is
+    -- there to prove. Ending further west is stronger evidence, not a miss.
+    local pastStander = H.waitSeconds(game, function()
+      local cell = H.playerCell(game)
+      return cell ~= nil and cell.x <= standerX - 1 and cell.y == standerY
+    end, 20, "the walker to continue past the stander's tile")
+    check(pastStander,
+          "and kept walking through it rather than stopping on it")
+
+    local walkerEnd = H.playerCell(game)
+    log(("walk-through: stander at (%s,%s), walker (%s,%s) -> (%s,%s)"):format(
+      tostring(standerX), tostring(standerY),
+      tostring(walkerStart and walkerStart.x), tostring(walkerStart and walkerStart.y),
+      tostring(walkerEnd and walkerEnd.x), tostring(walkerEnd and walkerEnd.y)))
+
+    local standerAfter = H.avatarRow(exports)
+    check(standerAfter ~= nil and standerAfter.rosterX == standerX
+          and standerAfter.rosterY == standerY,
+          "the walk-through left the stander's avatar exactly where it stood")
+    U.shot(game, SHOT_DIR .. "/join-walked-through-host.png")
+  end
 
   if hostRow and hostRow.rosterX then
     -- stand directly below the host and face up at them
