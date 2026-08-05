@@ -1059,6 +1059,29 @@ function M.rankAfterBattle(game, exports, check, seconds)
   return mine, other
 end
 
+-- Open the game's own TRAINER CARD and photograph it, returning the path
+-- the player pic resolved to.
+--
+-- This is the other half of the player.sprite hook. The back pic is checked
+-- where it is drawn -- a battle -- but the *front* one, which the trainer
+-- card, Oak's intro and the Hall of Fame all share, had nothing in either
+-- flow that opened a screen carrying it. A character whose front pic never
+-- resolved would have looked exactly like one that did, from here.
+--
+-- Pushed by id rather than driven through the START menu: that row is
+-- labelled with the player's *name*, which each side chooses, so selecting
+-- it by label would be a second thing to keep in sync for no gain.
+function M.shotTrainerCard(game, path)
+  local pic = require("src.pokemon.Sprites").playerPath(game.data, "front",
+                                                        { kind = "trainer_card" })
+  require("src.ui.Screens").push(game, "TrainerCard", {})
+  U.wait(30)
+  U.shot(game, path)
+  M.closeToOverworld(game)
+  U.wait(10)
+  return pic
+end
+
 -- Open the RANK screen from the MMO menu and photograph it.
 --
 -- The row is only there while connected, so its absence is a real failure
