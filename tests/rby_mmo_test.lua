@@ -1761,6 +1761,239 @@ for _, row in ipairs(claims:top(Config.RANK_TOP)) do
   eq(row.tokenHash, nil, "the leaderboard sent to clients carries no digests")
 end
 
+-- ------- a claim is provisional until it is proved
+--
+-- Board:claim's own header explains the rule; what follows pins it case by
+-- case, mirroring server/rank.test.js's claim scenarios one for one so the
+-- two Board twins stay honest about the same thing.
+
+local mintTokenCounter = 0
+local function mintToken()
+  mintTokenCounter = mintTokenCounter + 1
+  return Sha256.hex("rby_mmo_test/board_twin_token|" .. mintTokenCounter)
+             :sub(1, Config.RANK_TOKEN_HEX)
+end
+
+-- A fresh claim starts life unproved.
+do
+  local board = Rank.newBoard()
+  local token = mintToken()
+  eq(board:claim("ASH", nil, token), "claimed", "the name is free, so it is claimed")
+  eq(board:get("ASH").confirmed, false,
+     "but a mint only says a ticket was posted, not that anyone proved holding it")
+  -- ...and it is not written down. A row nobody has proved, played or scored
+  -- under is one Board:claim will hand to the next player who asks, so
+  -- persisting it buys nothing -- and a hub anybody can dial would otherwise
+  -- grow (and rewrite) a row per passing hello.
+  local exported
+  for _, row in ipairs(board:export()) do
+    if row.name == "ASH" then exported = row end
+  end
+  eq(exported, nil,
+     "and an unproved, unplayed, unrated claim is not written to the file at all")
+end
+
+-- The claim moves for a name nobody is *using*. A holder who is connected and
+-- ranked under it right now is the one thing board state cannot see, and
+-- without it the leniency above is a theft: the second player takes the
+-- claim, and the first player's next win lands on it.
+do
+  local board = Rank.newBoard()
+  local held = mintToken()
+  eq(board:claim("ASH", nil, held), "claimed", "first visit mints a claim")
+
+  eq(board:claim("ASH", nil, mintToken(), true), "impostor",
+     "a tokenless hello while the holder is connected and ranked is an impostor")
+  eq(board:claim("ASH", mintToken(), mintToken(), true), "impostor",
+     "and so is a wrong ticket")
+  eq(board:claim("ASH", held, mintToken(), true), "owner",
+     "the holder themselves is still the owner, live or not")
+
+  -- The lockout this whole branch exists to fix has the owner *gone*, so it
+  -- is untouched: same board, nobody connected, same tokenless hello.
+  local gone = Rank.newBoard()
+  gone:claim("ASH", nil, mintToken())
+  local fresh = mintToken()
+  eq(gone:claim("ASH", nil, fresh, false), "claimed",
+     "with the holder disconnected the reclaim still works")
+  eq(gone:claim("ASH", fresh, mintToken()), "owner",
+     "and the ticket it minted is the one that answers")
+end
+
+-- A row with a rating but no games behind it is not reclaimable either.
+-- `played` is the rule; this is the belt on top of it, for a hand-edited
+-- ranking.json where the two disagree.
+do
+  local edited = Rank.newBoard():import({
+    { name = "EDITED", points = 500, played = 0, won = 0, confirmed = false,
+      tokenHash = ("a"):rep(64) },
+  })
+  eq(edited:get("EDITED").points, 500, "sanity: the imported row has a rating")
+  eq(edited:get("EDITED").played, 0, "and no games behind it")
+  eq(edited:claim("EDITED", nil, mintToken()), "impostor",
+     "points above the starting value block a reclaim on their own")
+end
+
+-- The ticket holder returning confirms the claim, and from then on nothing
+-- reclaims it -- not even a hello with no ticket at all.
+do
+  local board = Rank.newBoard()
+  local token = mintToken()
+  eq(board:claim("ASH", nil, token), "claimed", "first visit mints a claim")
+  eq(board:get("ASH").confirmed, false, "not proved yet")
+
+  eq(board:claim("ASH", token, mintToken()), "owner",
+     "the ticket holder returns and is recognised")
+  eq(board:get("ASH").confirmed, true,
+     "a proved ticket confirms the claim, even though nothing has scored")
+
+  eq(board:claim("ASH", nil, mintToken()), "impostor",
+     "and a confirmed claim is never reclaimed, even at zero games played")
+end
+
+-- Unconfirmed and unscored: any hello for the name moves the claim, right
+-- ticket, wrong ticket or none at all -- until somebody proves it.
+do
+  local board = Rank.newBoard()
+  local oldToken = mintToken()
+  eq(board:claim("ASH", nil, oldToken), "claimed", "first visit mints a claim")
+  eq(board:get("ASH").confirmed, false, "nobody has proved it yet")
+
+  local newToken = mintToken()
+  eq(board:claim("ASH", nil, newToken), "claimed",
+     "a second tokenless hello for an unconfirmed, unscored name re-mints "
+     .. "rather than locking the name shut")
+
+  -- The claim is still unproved, so even a *wrong* ticket moves it again
+  -- instead of being told apart from a missing one -- "unconfirmed and
+  -- unscored" is the whole test, not which ticket was presented.
+  local staleToken = mintToken()
+  eq(board:claim("ASH", oldToken, staleToken), "claimed",
+     "a wrong ticket on a still-unconfirmed, unscored name reclaims once "
+     .. "more rather than answering impostor")
+
+  eq(board:claim("ASH", staleToken, mintToken()), "owner",
+     "the latest ticket is the one that answers now")
+  eq(board:get("ASH").confirmed, true, "and proving it confirms the claim")
+
+  eq(board:claim("ASH", newToken, mintToken()), "impostor",
+     "now that it is proved, an earlier ticket is worthless")
+end
+
+-- A name that has settled a battle is never up for grabs, ticket or not --
+-- even a legacy row that reached disk unconfirmed.
+do
+  local board = Rank.newBoard()
+  local token = mintToken()
+  board:claim("ASH", nil, token)
+  board:record("ASH", "GARY", 0)
+  local row
+  for _, r in ipairs(board:export()) do if r.name == "ASH" then row = r end end
+  eq(row.played, 1, "sanity: this name has scored")
+  eq(row.confirmed, true, "and settling confirmed it too")
+
+  row.confirmed = false
+  local reloaded = Rank.newBoard():import({ row })
+  eq(reloaded:get("ASH").confirmed, false,
+     "the imported state: unconfirmed on file, but already scored")
+  eq(reloaded:get("ASH").played, 1, "and scored")
+  eq(reloaded:claim("ASH", nil, mintToken()), "impostor",
+     "played > 0 blocks reclaim on its own, independent of confirmed")
+end
+
+-- Settling a match confirms both names in the same breath, ticket or not.
+do
+  local board = Rank.newBoard()
+  eq(board:get("ALPHA"), nil, "sanity: neither name is on the board yet")
+  board:record("ALPHA", "BRAVO", 0)
+  eq(board:get("ALPHA").confirmed, true,
+     "the winner is confirmed by having played, ticket or not")
+  eq(board:get("BRAVO").confirmed, true,
+     "and so is the loser -- a settled battle proves both names at once")
+end
+
+-- confirmed round-trips through export/import, both ways.
+do
+  -- The unconfirmed side of the trip has to be a row the file actually keeps,
+  -- and export drops the throwaway ones -- so this is an unproved claim on a
+  -- name that has played, which is what a legacy file looks like.
+  local board = Rank.newBoard():import({
+    { name = "PROVISIONAL", points = 12, played = 1, won = 1, confirmed = false,
+      tokenHash = ("b"):rep(64) },
+  })
+  eq(board:get("PROVISIONAL").confirmed, false, "sanity: unconfirmed")
+
+  local provenToken = mintToken()
+  board:claim("PROVEN", nil, provenToken)
+  board:claim("PROVEN", provenToken, mintToken())
+  eq(board:get("PROVEN").confirmed, true, "sanity: confirmed by its owner")
+
+  local reloaded = Rank.newBoard():import(board:export())
+  eq(reloaded:get("PROVISIONAL").confirmed, false,
+     "an unconfirmed claim comes back unconfirmed")
+  eq(reloaded:get("PROVEN").confirmed, true,
+     "and a confirmed one comes back confirmed -- both directions of the trip")
+end
+
+-- What the file is allowed to grow. Every first hello under a new name claims
+-- it, so a hub anybody can dial would otherwise write a row per connection --
+-- and rewrite the whole file each time. Only claims worth surviving a restart
+-- are written: proved, played, or carrying a rating.
+do
+  local board = Rank.newBoard()
+  board:claim("DRIFTER", nil, mintToken())
+  board:seen("WATCHER", "SPRITE_RED")
+  eq(#board:export(), 0,
+     "a board of nothing but fresh claims and passers-by writes no rows at all")
+
+  local proved = mintToken()
+  board:claim("PROVER", nil, proved)
+  board:claim("PROVER", proved, mintToken())
+  board:record("WINNER", "LOSER", 0)
+  local names = {}
+  for _, row in ipairs(board:export()) do names[#names + 1] = row.name end
+  table.sort(names)
+  eq(table.concat(names, ","), "LOSER,PROVER,WINNER",
+     "and a proved claim, a win and a loss are all kept -- those are what a "
+     .. "restart has to survive")
+end
+
+-- A legacy row with no `confirmed` field is judged by its results: played is
+-- proof, and nothing played is exactly the leniency a fresh claim gets.
+do
+  local hashOf = function(char) return char:rep(64) end
+  local legacy = Rank.newBoard():import({
+    { name = "VETERAN", points = 40, played = 3, won = 2, tokenHash = hashOf("a") },
+    { name = "ROOKIE", points = 0, played = 0, won = 0, tokenHash = hashOf("b") },
+  })
+  eq(legacy:get("VETERAN").confirmed, true,
+     "a legacy row with no confirmed field, but with results, is read as confirmed")
+  eq(legacy:get("ROOKIE").confirmed, false,
+     "and one with no results yet is read as provisional -- the same leniency "
+     .. "a fresh claim gets")
+  eq(legacy:claim("VETERAN", nil, mintToken()), "impostor",
+     "so the veteran cannot be reclaimed")
+  eq(legacy:claim("ROOKIE", nil, mintToken()), "claimed",
+     "but the rookie can be -- nothing has scored under that name yet")
+end
+
+-- The twin drift: import's tokenHash shape tightens to exactly what
+-- server/lib/rank.js has always required, /^[0-9a-f]{64}$/ (D4 in the plan).
+do
+  local hash64 = ("a1"):rep(32)
+  eq(#hash64, 64, "sanity: the fixture hash is 64 characters")
+  local board = Rank.newBoard():import({
+    { name = "SHORT", points = 5, tokenHash = hash64:sub(1, 63) },
+    { name = "LONG", points = 5, tokenHash = hash64 .. "a" },
+    { name = "SHOUTY", points = 5, tokenHash = hash64:upper() },
+    { name = "EXACT", points = 5, tokenHash = hash64 },
+  })
+  eq(board:claimed("SHORT"), false, "63 hex characters is rejected")
+  eq(board:claimed("LONG"), false, "65 hex characters is rejected")
+  eq(board:claimed("SHOUTY"), false, "uppercase hex is rejected")
+  eq(board:claimed("EXACT"), true, "exactly 64 lowercase hex characters is accepted")
+end
+
 -- ------- the leaderboard
 
 local ladder = Rank.newBoard()
@@ -1981,6 +2214,150 @@ eq(returning.board:points("COMEBACK"), won,
    "an unranked player cannot add to the rating of the name they borrowed")
 eq(returning.board:points("VICTIM2"), 0,
    "and their opponent loses nothing to a match that was never scored")
+
+-- ------- reclaim, over the wire -- the same rule server/lib/relay.js runs
+--
+-- Mirrors testReclaimOverTheWire in server/rank.test.js: welcome.ranked and
+-- welcome.rankToken are what a client actually reads, so the twin is pinned
+-- there and not only against Board:claim's return value.
+
+-- Wrapped in a function purely for scope, like section 8/10 below: this
+-- do-block is already close to Lua's 200-local ceiling.
+;(function()
+
+local reclaimHub = Hub.new({ maxPlayers = 8 })
+
+local delta1, delta1Peer = join(reclaimHub, "DELTA")
+local oldTicket = take(delta1Peer, Wire.WELCOME).rankToken
+check(Wire.token(oldTicket) ~= nil, "a first visit mints a claim ticket")
+reclaimHub:drop(delta1)
+
+-- Back without the ticket -- a save that never carried it -- before ever
+-- proving it or playing a scored battle.
+local delta2, delta2Peer = join(reclaimHub, "DELTA")
+local delta2Welcome = take(delta2Peer, Wire.WELCOME)
+eq(delta2Welcome.ranked, true,
+   "an unconfirmed, unscored name follows the player who is here now")
+local newTicket = delta2Welcome.rankToken
+check(Wire.token(newTicket) ~= nil, "a fresh ticket goes out with the reclaim")
+check(newTicket ~= oldTicket, "and it is not the one that got lost")
+reclaimHub:drop(delta2)
+
+-- Prove the fresh ticket, which is the moment the claim stops moving.
+local delta3, delta3Peer = join(reclaimHub, "DELTA", nil, nil, nil, newTicket)
+eq(take(delta3Peer, Wire.WELCOME).ranked, true, "the new ticket is recognised")
+reclaimHub:drop(delta3)
+
+local delta4, delta4Peer = join(reclaimHub, "DELTA", nil, nil, nil, oldTicket)
+local delta4Welcome = take(delta4Peer, Wire.WELCOME)
+eq(delta4Welcome.ranked, false,
+   "the ticket that got lost is worthless once the claim has moved on and "
+   .. "been proved")
+eq(delta4Welcome.rankToken, nil,
+   "no ticket is handed to somebody presenting a stale one")
+reclaimHub:drop(delta4)
+
+local delta5, delta5Peer = join(reclaimHub, "DELTA", nil, nil, nil, newTicket)
+local delta5Welcome = take(delta5Peer, Wire.WELCOME)
+eq(delta5Welcome.ranked, true, "the proven ticket is the one that answers now")
+eq(delta5Welcome.rankToken, nil,
+   "and a confirmed owner is not re-sent a ticket they already hold")
+
+end)()
+
+-- ------- a name somebody is standing in is not up for grabs
+--
+-- The impostor gate the board cannot see for itself, through the hub that
+-- computes it: a second player typing a name somebody is connected and ranked
+-- under does not take the claim. Reachable by accident -- two copies that
+-- never changed the default trainer name -- and permanent if it went through,
+-- because the first player's next settled win would confirm the taker's
+-- claim. Mirrors testLiveHolderOverTheWire in server/rank.test.js.
+
+;(function()
+
+local liveHub = Hub.new({ maxPlayers = 8 })
+local claimed = {}
+liveHub.onClaim = function(what, name) claimed[#claimed + 1] = what .. ":" .. name end
+
+local holder, holderPeer = join(liveHub, "ECHO")
+eq(take(holderPeer, Wire.WELCOME).ranked, true, "the first ECHO is ranked")
+local held = liveHub:claimHash("ECHO")
+check(held ~= nil, "and holds an unproved claim on the name")
+
+local second, secondPeer = join(liveHub, "ECHO")
+local secondWelcome = take(secondPeer, Wire.WELCOME)
+eq(secondWelcome.ranked, false,
+   "a second ECHO arriving while the first is still here is not scored")
+eq(secondWelcome.rankToken, nil, "and is handed no ticket")
+eq(liveHub:claimHash("ECHO"), held, "the claim did not move")
+eq(holder.ranked, true, "and the holder is still ranked")
+eq(claimed[1], "unscored:ECHO",
+   "the host is told, which is the seam server/lib/relay.js logs on")
+liveHub:drop(second)
+
+-- The lockout this branch exists to fix is the *disconnected* owner, and it
+-- still works: same tokenless hello, once the holder is gone.
+liveHub:drop(holder)
+local later, laterPeer = join(liveHub, "ECHO")
+local laterWelcome = take(laterPeer, Wire.WELCOME)
+eq(laterWelcome.ranked, true,
+   "with the holder gone, an unproved, unscored claim follows whoever is here")
+check(Wire.token(laterWelcome.rankToken) ~= nil, "and a fresh ticket goes out")
+check(liveHub:claimHash("ECHO") ~= held, "the claim moved this time")
+eq(claimed[2], "taken:ECHO", "and the host is told about that too")
+liveHub:drop(later)
+
+end)()
+
+-- ------- a battle is scored into the claims it started against, or not at all
+--
+-- A claim that moved between the first turn and the last report belongs to
+-- somebody else now, and Board:record would confirm it into permanence on the
+-- way past. Mirrors testClaimMovedMidMatch in server/rank.test.js.
+
+;(function()
+
+local midHub = Hub.new({ maxPlayers = 8 })
+
+local function battle(a, b)
+  midHub:receive(a, { type = Wire.REQUEST, to = b.id, kind = "battle" })
+  midHub:receive(b, { type = Wire.RESPOND, to = a.id, kind = "battle",
+                      accept = true })
+  return a.sessionId
+end
+
+-- The control: the same battle, nobody's claim touched, settles normally.
+local control = join(midHub, "CONTROL")
+local sparring = join(midHub, "SPARRING")
+local firstId = battle(control, sparring)
+midHub:receive(control, { type = Wire.RESULT, session = firstId, outcome = "win" })
+midHub:receive(sparring, { type = Wire.RESULT, session = firstId, outcome = "loss" })
+eq(midHub.board:points("CONTROL"), 16, "sanity: an untouched match scores")
+
+local nova = join(midHub, "NOVA")
+local vega = join(midHub, "VEGA")
+local matchId = battle(nova, vega)
+local startedWith = midHub:claimHash("NOVA")
+
+-- NOVA reports and leaves -- the paperwork outlives the session by design --
+-- and with nobody connected under the name, its unproved claim is up for
+-- grabs again.
+midHub:receive(nova, { type = Wire.RESULT, session = matchId, outcome = "win" })
+midHub:drop(nova)
+local taker = join(midHub, "NOVA")
+check(midHub:claimHash("NOVA") ~= startedWith, "sanity: the claim moved")
+
+midHub:receive(vega, { type = Wire.RESULT, session = matchId, outcome = "loss" })
+eq(midHub.board:points("NOVA"), 0,
+   "the settlement is dropped: those points would have landed on a claim the "
+   .. "winner does not hold")
+eq(midHub.board:points("VEGA"), 0, "and the loser pays nothing for it")
+eq(midHub.board:get("NOVA").confirmed, false,
+   "nor is the new claim confirmed by somebody else's battle")
+eq(taker.ranked, true, "sanity: the taker is a normal player")
+
+end)()
 
 end
 
@@ -2966,6 +3343,255 @@ eq(Client.setRankToken(Client, nil, TICKET_B), TICKET_B,
 eq(Client.rankToken(Client, nil), TICKET_B, "under a key of its own")
 eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
    "which is not the one any dialled hub uses")
+
+-- ------- the claim ticket's file store: love.filesystem, stubbed
+--
+-- D1 adds a file of the mod's own, in the LOVE save directory, that a save
+-- reload cannot take away -- the section above is mod.save alone, which is
+-- exactly what a headless suite already had. This is the other half.
+--
+-- Wrapped in a function purely for scope, like section 10 below: the chunk
+-- above it is already close to Lua's 200-local ceiling for one function
+-- body.
+--
+-- tests.modkit (required at the very top of this file) already installs a
+-- global `love` stub with its own in-memory love.filesystem, shared by the
+-- whole suite -- everything from here on assumes it is there. Each case
+-- below swaps in a *private* filesystem of its own, isolated from that
+-- shared one and from every other case, and always restores the ambient
+-- stub afterward rather than nulling it out -- leaving `love` absent would
+-- break every other section that follows (Stats.randomDVs reaches for
+-- love.math.random with no guard, the way real game code does).
+--
+-- Client.lua's tokenStore and json() results are module-level caches loaded
+-- once per chunk, so each case below asks resolver() for a fresh Client --
+-- and `love` is swapped in *before* that require runs, per the same
+-- instruction, though src/Client.lua's own filesystem() reads it lazily at
+-- call time and would work either order.
+
+;(function()
+
+local ambientLove = _G.love
+
+local function loveFilesystem(seed)
+  local files = {}
+  if type(seed) == "table" then
+    for path, body in pairs(seed) do files[path] = body end
+  end
+  local fs = { files = files }
+  -- Called as fs.read(path) / fs.write(path, data) -- plain functions, not
+  -- methods, because that is how src/Client.lua's filesystem() calls them.
+  function fs.read(path)
+    local body = files[path]
+    if body == nil then return nil, "could not open " .. tostring(path) end
+    return body
+  end
+  function fs.write(path, data)
+    files[path] = data
+    return true
+  end
+  -- The real love.filesystem has one, and src/Client.lua uses it to tell "no
+  -- file" from "a file that would not open" -- which read() alone answers
+  -- with the same nil either way.
+  function fs.getInfo(path)
+    if files[path] == nil then return nil end
+    return { type = "file", size = #files[path] }
+  end
+  return fs
+end
+
+-- The same encoder Client.lua reaches for (src.link.Json) -- a file of our
+-- own here would be a second thing to keep in step with it.
+local RealJson = require("src.link.Json")
+
+-- A welcome's grant is written to the file, keyed by the address dialled and
+-- the upper-cased trainer name -- not mod.save's key, which is address alone.
+do
+  stubSave = {}
+  local fs = loveFilesystem()
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  local granted = string.rep("e5", 16)
+  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
+     granted, "the grant is stored")
+  local body = fs.files[Config.RANK_TOKEN_FILE]
+  check(type(body) == "string", "and the file was written")
+  local decoded = RealJson.decode(body)
+  eq(decoded["hub.example.com:7788|ASH"], granted,
+     "under the address and the upper-cased name, however it was typed")
+  _G.love = ambientLove
+end
+
+-- A ticket the file holds survives mod.save being wiped wholesale -- the
+-- shape of a CONTINUE, which replaces the whole save table (Game.lua's
+-- restoreSave), not just the one key this mod happened to write.
+do
+  stubSave = {}
+  local fs = loveFilesystem()
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  local granted = string.rep("f6", 16)
+  fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash")
+  stubSave = {}
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
+     "the file still answers, though mod.save was just wiped")
+  _G.love = ambientLove
+end
+
+-- A different name on the same hub has no ticket of its own -- the file
+-- keys by hub *and* name, where mod.save (checked below) keys by hub alone.
+do
+  stubSave = {}
+  local fs = loveFilesystem({
+    [Config.RANK_TOKEN_FILE] = RealJson.encode({
+      ["hub.example.com:7788|ASH"] = string.rep("07", 16),
+    }),
+  })
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "gary"), nil,
+     "a different name on the same hub has no ticket of its own")
+  _G.love = ambientLove
+end
+
+-- Neither does the same name on a different hub.
+do
+  stubSave = {}
+  local fs = loveFilesystem({
+    [Config.RANK_TOKEN_FILE] = RealJson.encode({
+      ["hub.example.com:7788|ASH"] = string.rep("07", 16),
+    }),
+  })
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  eq(fileClient.rankToken(fileClient, "other.example.com:7788", "ash"), nil,
+     "and neither does the same name on a different hub")
+  _G.love = ambientLove
+end
+
+-- A file that will not decode is warned about once and treated as empty --
+-- never a lockout -- and the next grant overwrites it whole, repairing it.
+do
+  stubSave = {}
+  local fs = loveFilesystem({ [Config.RANK_TOKEN_FILE] = "not json at all {" })
+  _G.love = { filesystem = fs }
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+  local fileClient = resolver()("Client")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), nil,
+     "a file that will not decode is treated as empty")
+  check(#warns > 0, "and the corruption is warned about")
+  check(warns[1]:find(Config.RANK_TOKEN_FILE, 1, true) ~= nil,
+     "naming the file, so a player who reads the log knows what to delete")
+
+  local granted = string.rep("18", 16)
+  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
+     granted, "the next grant still stores")
+  local decoded = RealJson.decode(fs.files[Config.RANK_TOKEN_FILE])
+  eq(decoded["hub.example.com:7788|ASH"], granted,
+     "overwriting the file whole, which repairs it")
+
+  stubMod.log.warn = function() end
+  _G.love = ambientLove
+end
+
+-- A read that *fails* is not a file that is absent, and only one of the two
+-- may be overwritten. Rewriting the whole table after a failed read would
+-- hand back a file holding one key and throw away every other hub's ticket --
+-- so nothing is written at all, and the file on disk is left exactly as it
+-- was.
+do
+  stubSave = {}
+  local other = string.rep("4b", 16)
+  local seeded = RealJson.encode({ ["other.example.com:7788|GARY"] = other })
+  local fs = loveFilesystem({ [Config.RANK_TOKEN_FILE] = seeded })
+  -- The file is there -- getInfo still says so -- and will not open.
+  fs.read = function() return nil, "permission denied" end
+  _G.love = { filesystem = fs }
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+  local fileClient = resolver()("Client")
+  local granted = string.rep("5c", 16)
+  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
+     granted, "the grant is still stored -- in mod.save, which never failed")
+  eq(fs.files[Config.RANK_TOKEN_FILE], seeded,
+     "and the file is untouched: the other hub's ticket is still in it")
+  check(#warns > 0, "the failure is warned about")
+  check(warns[1]:find(Config.RANK_TOKEN_FILE, 1, true) ~= nil,
+        "naming the file, so a player who reads the log knows which one")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
+     "and this session still answers with the ticket it was just handed")
+
+  stubMod.log.warn = function() end
+  _G.love = ambientLove
+end
+
+-- A write that fails leaves mod.save holding the newer ticket, so the older
+-- one the file still has must not shadow it: a real SAVE and relaunch would
+-- otherwise present the stale one and be told it is an impostor.
+do
+  stubSave = {}
+  local stale = string.rep("6d", 16)
+  local fs = loveFilesystem({
+    [Config.RANK_TOKEN_FILE] = RealJson.encode({
+      ["hub.example.com:7788|ASH"] = stale,
+    }),
+  })
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), stale,
+     "sanity: the file answers first while it is the only answer")
+
+  fs.write = function() return false, "disk full" end
+  stubMod.log.warn = function() end
+  local granted = string.rep("7e", 16)
+  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
+     granted, "the grant is stored in mod.save even though the file refused it")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
+     "and it is what answers: a key the write did not land is dropped from "
+     .. "this session rather than left in front of the newer one")
+  _G.love = ambientLove
+end
+
+-- A ticket that predates the file store, living only in mod.save, is still
+-- found -- back-compat with every ticket already issued before this fix.
+do
+  stubSave = {}
+  local fs = loveFilesystem()
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  local legacy = string.rep("29", 16)
+  stubSave["rank:hub.example.com:7788"] = legacy
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), legacy,
+     "a ticket that predates the file store is still found, in mod.save")
+  _G.love = ambientLove
+end
+
+-- With no love global at all -- any copy running outside LOVE -- behaviour
+-- is identical to before this fix: mod.save only. (The suite itself always
+-- has the ambient stub, per the header above; this case removes it on
+-- purpose, for the one case that needs it gone, and puts it straight back.)
+do
+  stubSave = {}
+  _G.love = nil
+  local headlessClient = resolver()("Client")
+  local token = string.rep("3a", 16)
+  eq(headlessClient.setRankToken(headlessClient, "hub.example.com:7788", token, "ash"),
+     token, "setRankToken still stores to mod.save with no love global")
+  eq(headlessClient.rankToken(headlessClient, "hub.example.com:7788", "ash"), token,
+     "and rankToken still reads it back -- exactly the old, save-only behaviour")
+  eq(stubSave["rank:hub.example.com:7788"], token,
+     "written to mod.save, and nowhere else to check")
+  _G.love = ambientLove
+end
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 10. Trading, and the one invariant that matters

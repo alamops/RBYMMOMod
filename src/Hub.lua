@@ -268,6 +268,17 @@ function M.new(opts)
     -- wire to a log at all: a peer that sends nothing but junk costs one
     -- line, not a flooded terminal.
     onDrop = opts.onDrop,
+    -- Optional, and the same shape as onDrop above and for the same reason:
+    -- this file owns no logger, so a fact a host would want to see is handed
+    -- to a caller that can phrase it. Called as onClaim(what, name, clientId)
+    -- when a hello changes what a name means on this hub -- "taken" when a
+    -- claim nobody had proved moved to the player connecting now, "unscored"
+    -- when somebody was admitted without the ticket for a claimed name, and
+    -- "mid_battle" when a settled result was dropped because a claim moved
+    -- underneath it. server/lib/relay.js writes the same three lines to its
+    -- own log; without this the Lua host was the only one of the two that
+    -- saw a name change hands and said nothing.
+    onClaim = opts.onClaim,
     clock = 0,
   }, M)
 end
@@ -291,6 +302,37 @@ end
 
 function M:pendingCount()
   return self.count - self.players
+end
+
+-- Is somebody else on this hub *ranked* under this name right now?
+--
+-- Board:claim will hand an unproved, unscored claim to whoever is connecting
+-- -- which is the whole fix for a lost ticket -- and this is the one thing
+-- the board cannot see: that the holder is sitting right here, still playing
+-- under it. Without it, a second player typing the same name (two copies that
+-- never changed the default one is enough) takes the claim, and the first
+-- player's next settled win is recorded against the taker's ticket. Matched
+-- on the board's own key, so it is the same "same name" the claim is about.
+-- server/lib/relay.js computes this the same way over its own client table.
+function M:nameInUse(client)
+  local key = Rank.keyOf(client.name)
+  if not key then return false end
+  for id, other in pairs(self.clients) do
+    if id ~= client.id and other.ready and other.ranked
+       and Rank.keyOf(other.name) == key then
+      return true
+    end
+  end
+  return false
+end
+
+-- Which claim a name is carrying, as one comparable value. nil for a name
+-- with no claim on it at all, which is a legitimate state (a hub whose
+-- entropy pool could not mint) and has to compare equal to itself rather
+-- than being missing.
+function M:claimHash(name)
+  local entry = self.board:get(name)
+  return entry and entry.tokenHash or nil
 end
 
 -- Is this hub asking for a join code?  Unchanged in meaning, and still
@@ -487,10 +529,32 @@ function M:admit(client)
   -- typing that name plays as normal and scores nothing. `minted` is sent on
   -- in the welcome and then forgotten -- the hub keeps only the digest, so
   -- this is the one moment the token exists here.
+  --
+  -- A claim nobody has ever proved, on a name nothing has scored under and
+  -- nobody is ranked under right now, is transferred to whoever is connecting
+  -- now and answered "claimed" with a ticket of its own -- Board:claim is
+  -- where that rule lives and why, including why a connected holder blocks
+  -- it. This board is session-scoped, so it has no file to fall out of step
+  -- with; server/lib/relay.js runs the same verdicts against one that does,
+  -- and the two must answer a given hello alike.
+  --
+  -- The claim as it stood before is read first, because the verdict alone
+  -- does not say what changed: "claimed" is a first mint on a free name and a
+  -- transfer of a provisional one, and those read differently in a log.
+  local before = self.board:get(client.name)
+  local wasClaimed = before ~= nil and before.tokenHash ~= nil
   local minted = self:newToken()
-  local verdict = self.board:claim(client.name, hello.token, minted)
+  local verdict = self.board:claim(client.name, hello.token, minted,
+                                   self:nameInUse(client))
   client.ranked = verdict ~= "impostor"
   client.mintedToken = (verdict == "claimed") and minted or nil
+  if self.onClaim then
+    if verdict == "impostor" then
+      self.onClaim("unscored", client.name, client.id)
+    elseif verdict == "claimed" and wasClaimed then
+      self.onClaim("taken", client.name, client.id)
+    end
+  end
 
   -- The rating this name already carries on this hub, and the character it
   -- is wearing today -- so the leaderboard can draw a portrait for a player
@@ -515,10 +579,12 @@ function M:admit(client)
   -- own score can arrive from.
   send(client, Wire.WELCOME, {
     id = client.id, players = players, points = client.points,
-    -- Sent exactly once, on the visit that claimed the name. The client
-    -- stores it against this hub and presents it next time; nothing here
-    -- re-sends it, because a hub that would hand the ticket to whoever asked
-    -- would not be checking anything.
+    -- Sent on the visit that claimed the name, and only then -- including
+    -- the visit that took over a claim nobody had proved, which is a claim
+    -- like any other and needs its ticket. The client stores it against this
+    -- hub and presents it next time; a confirmed name never re-sends one,
+    -- because a hub that would hand the ticket to whoever asked would not be
+    -- checking anything.
     rankToken = client.mintedToken,
     -- Said out loud rather than left to be inferred from a zero: "your
     -- battles will not score here" is a thing a player can act on (change
@@ -609,6 +675,12 @@ function M:startSession(a, b, kind)
       -- touch the board is a fact about who they are, not about what they
       -- report afterwards
       aRanked = a.ranked ~= false, bRanked = b.ranked ~= false,
+      -- ...and *which* claim each name was, for the same reason. A claim can
+      -- move between the first turn and the last report -- that is exactly
+      -- what an unproved claim is allowed to do -- and paying a settled
+      -- result into a claim that has since changed hands would put one
+      -- player's win on another player's name.
+      aHash = self:claimHash(a.name), bHash = self:claimHash(b.name),
       reports = {}, startedAt = self.clock,
     }
   end
@@ -747,6 +819,18 @@ function M:settleMatch(id)
   -- are. One impostor and the whole match scores nothing: paying out half of
   -- it would move a rating that belongs to somebody who was not playing.
   if not (match.aRanked and match.bRanked) then return nil end
+
+  -- ...and only while both names are still the *same* claims they were when
+  -- the battle started. A claim that moved in between belongs to somebody
+  -- else now, and Board:record would confirm it into permanence on the way
+  -- past. Dropped rather than redirected: there is no honest name to pay.
+  if self:claimHash(match.aName) ~= match.aHash
+     or self:claimHash(match.bName) ~= match.bHash then
+    if self.onClaim then
+      self.onClaim("mid_battle", match.aName, match.a)
+    end
+    return nil
+  end
 
   local settled = self.board:record(winner, loser, self.clock)
   if not settled then return nil end

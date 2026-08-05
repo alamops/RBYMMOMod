@@ -33,7 +33,7 @@ const {
   KINDS, SCOPES, NAME_MAX, MESSAGE_MAX, LOCAL_RADIUS,
 } = require('./sanitize');
 const {
-  Board, mintToken, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
+  Board, mintToken, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
   RANK_QUERY_GATE_MS,
 } = require('./rank');
 const { createLog, safe } = require('./log');
@@ -508,6 +508,28 @@ class Relay {
     return Boolean(client && client.ready);
   }
 
+  /*
+   * Is somebody else on this hub *ranked* under this name right now?
+   *
+   * Board.claim will hand an unproved, unscored claim to whoever is
+   * connecting -- which is the whole fix for a lost ticket -- and this is the
+   * one thing the board cannot see: that the holder is sitting right here,
+   * still playing under it. Without this, a second player typing the same
+   * name (two copies that never changed the default one is enough) takes the
+   * claim, and the first player's next settled win is recorded against the
+   * taker's ticket. Matched on the board's own key, so it is the same
+   * "same name" the claim is about.
+   */
+  nameInUse(client) {
+    const key = keyOf(client.name);
+    if (!key) return false;
+    for (const other of this.clients.values()) {
+      if (other.id === client.id || !other.ready || !other.ranked) continue;
+      if (keyOf(other.name) === key) return true;
+    }
+    return false;
+  }
+
   // ------- connection lifecycle
 
   // A peer that got this far has a socket (or a loopback) but has not said
@@ -582,13 +604,46 @@ class Relay {
      * typing that name plays as normal and scores nothing. `minted` goes out
      * in the welcome and is then forgotten -- only the digest is kept, so
      * this is the one moment the token exists on the hub.
+     *
+     * The claim as it stood before is read first, because the verdict alone
+     * does not say what changed: 'claimed' is a first mint on a free name and
+     * a transfer of a provisional one, and those read differently in a log.
      */
+    const before = this.board.get(client.name);
+    const wasClaimed = Boolean(before && before.tokenHash);
+    const wasConfirmed = Boolean(before && before.confirmed);
     const minted = mintToken();
-    const verdict = this.board.claim(client.name, hello.token, minted);
+    const verdict = this.board.claim(client.name, hello.token, minted,
+      this.nameInUse(client));
     client.ranked = verdict !== 'impostor';
     if (verdict === 'impostor') {
       this.log.info(`${safe(client.name)} (${client.id}) joined without the ` +
         'claim token for that name, so their battles will not be scored');
+    } else if (verdict === 'claimed' && wasClaimed) {
+      // Not an impostor: the claim on this name was never proved, the name
+      // has never scored, and nobody was connected under it, so it follows
+      // the player who is here now. Worth a line, because it is the one path
+      // where a name changes hands.
+      this.log.info(`${safe(client.name)} (${client.id}) took over an ` +
+        'unconfirmed claim on that name -- nothing had scored under it, so a ' +
+        'fresh ticket goes out with the welcome');
+    }
+    /*
+     * A claim changed *in a way the file can hold*, so the file that outlives
+     * this process should say so before the first battle does. That is one
+     * case and not three: a ticket proved for the first time, which is what
+     * stops the claim being transferable and what Board.export() starts
+     * writing the row for.
+     *
+     * A mint and a transfer are deliberately not flushed. Both leave a row
+     * that is unproved, unplayed and at the starting rating, which export()
+     * drops on purpose -- so the write would produce a file byte-identical to
+     * the one already on disk, once per hello, on a hub anybody can dial in a
+     * loop. The claim they made still holds for this session, and the moment
+     * it is worth persisting -- proved, or scored -- it is written.
+     */
+    if (verdict === 'owner' && !wasConfirmed) {
+      this.noteRankChange(null);
     }
 
     // The rating this name already carries on this hub, and the character it
@@ -612,9 +667,11 @@ class Relay {
       id: client.id,
       players,
       points: client.points,
-      // Sent exactly once, on the visit that claimed the name. Nothing
-      // re-sends it: a hub that handed the ticket to whoever asked would not
-      // be checking anything.
+      // Sent on the visit that claimed the name, and only then -- including
+      // the visit that took over a claim nobody had proved, which is a claim
+      // like any other and needs its ticket. A confirmed name never re-sends
+      // one: a hub that handed the ticket to whoever asked would not be
+      // checking anything.
       rankToken: verdict === 'claimed' ? minted : undefined,
       // Said out loud rather than left to be inferred from a zero: "your
       // battles will not score here" is something a player can act on.
@@ -836,6 +893,12 @@ class Relay {
         // touch the board is a fact about who they are, not about what they
         // report afterwards
         aRanked: a.ranked !== false, bRanked: b.ranked !== false,
+        // ...and *which* claim each name was, for the same reason. A claim can
+        // move between the first turn and the last report -- a hub restart
+        // aside, that is exactly what an unproved claim is allowed to do --
+        // and paying a settled result into a claim that has since changed
+        // hands would put one player's win on another player's name.
+        aHash: this.claimHash(a.name), bHash: this.claimHash(b.name),
         reports: new Map(), startedAt: this.now(), endedAt: null,
       });
       this.sweepMatches();
@@ -855,6 +918,16 @@ class Relay {
   }
 
   // ------- ranked PVP
+
+  /*
+   * Which claim a name is carrying, as one comparable value. Null for a name
+   * with no claim on it at all, which is a legitimate state (a hub that could
+   * not mint) and has to compare equal to itself rather than being missing.
+   */
+  claimHash(name) {
+    const entry = this.board.get(name);
+    return (entry && entry.tokenHash) || null;
+  }
 
   /*
    * Finished battles nobody ever agreed on. Dropped rather than guessed at:
@@ -931,6 +1004,17 @@ class Relay {
     // of it would move a rating belonging to somebody who was not playing.
     if (!match.aRanked || !match.bRanked) return null;
 
+    // ...and only while both names are still the *same* claims they were when
+    // the battle started. A claim that moved in between belongs to somebody
+    // else now, and record() would confirm it into permanence on the way past.
+    // Dropped rather than redirected: there is no honest name to pay.
+    if (this.claimHash(match.aName) !== match.aHash
+        || this.claimHash(match.bName) !== match.bHash) {
+      this.log.info(`a claim changed hands mid-battle (${safe(match.aName)} ` +
+        `vs ${safe(match.bName)}), so the result is not scored`);
+      return null;
+    }
+
     const settled = this.board.record(winner, loser, this.now());
     if (!settled) return null;
 
@@ -942,16 +1026,28 @@ class Relay {
       `${settled.winner.points} (+${settled.winner.gained}) beat ` +
       `${safe(settled.loser.name)} ${settled.loser.points} ` +
       `(-${settled.loser.lost})`);
-    if (this.onRankChange) {
-      try {
-        this.onRankChange(settled);
-      } catch (err) {
-        // Persistence is somebody else's problem and must not cost the
-        // players their result: the ratings are already correct in memory.
-        this.log.warn(`could not record a rank change: ${safe(err.message)}`);
-      }
-    }
+    this.noteRankChange(settled);
     return settled;
+  }
+
+  /*
+   * The board moved: a rating, or a claim. Whoever owns the file is told, and
+   * whatever they do about it is their business -- the board in memory is
+   * already correct, so a hook that throws is a full disk and not a lost
+   * result.
+   *
+   * `settled` is the match that moved the ratings, or null for a claim
+   * change, which has no match behind it.
+   */
+  noteRankChange(settled) {
+    if (!this.onRankChange) return;
+    try {
+      this.onRankChange(settled || null);
+    } catch (err) {
+      // Persistence is somebody else's problem and must not cost the
+      // players their result: the ratings are already correct in memory.
+      this.log.warn(`could not record a rank change: ${safe(err.message)}`);
+    }
   }
 
   /*

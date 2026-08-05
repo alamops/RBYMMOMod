@@ -4,6 +4,47 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.6.3] - 2026-08-05
+
+### Fixed
+
+- **Your name is no longer "taken" by a ticket you never got to keep.** The
+  claim ticket lived only inside the game save, and the save is written when
+  the player saves — so quitting to the title and pressing CONTINUE without
+  having saved threw the ticket away, and the next connection was told its own
+  name was taken, permanently. Two repairs, one per side of the wire. The
+  client now banks tickets in a small file of its own
+  (`rby_mmo_rank_tokens.json`, one entry per hub and name), written the moment
+  a ticket is granted, so it survives CONTINUE, a relaunch, and a save that
+  never happened; the copy in the save file is still honoured. And the hub now
+  treats a claim as *provisional until proven*: a name whose ticket has never
+  been shown back and has never scored a battle is re-issued to whoever is
+  actually connecting under it, instead of locking out its own owner after a
+  lost welcome or a hub restart. A name that has scored — or whose owner has
+  returned even once — is protected exactly as before; the anti-theft rule
+  gives nothing away, because an unproven, unscored claim protects nothing
+  worth stealing. A claim is also written into `ranking.json` the first time
+  it is *proven*, not only when a battle settles, so a restart no longer
+  silently reopens a name whose owner has been back since the last scored
+  match. (An unproven one is deliberately not written: it is a claim the hub
+  hands to whoever connects next by design, so a row for it would be a file
+  rewritten once per hello and worth nothing on the way back in.)
+- **…and a name somebody is standing in cannot be taken.** The rule above
+  reads board state, which cannot see that the holder is *connected right
+  now* — so a second player typing a name already in ranked use (two copies
+  that never changed the default trainer name is enough) would have taken the
+  claim, and the first player's next win would have landed on it. A live,
+  ranked holder now refuses the transfer exactly as a proven or scored claim
+  does. A battle is likewise scored into the claims it started against or not
+  at all: a claim that changed hands between the first turn and the last
+  report drops the settlement rather than paying somebody else's name.
+- **The two claim implementations agree on what a ticket hash is.** The
+  Lua-hosted hub accepted a stored hash of any length where the dedicated hub
+  required exactly 64 hex characters; both now require 64.
+
+### Changed
+
+- **`filesystem` joined the declared permissions**, for the ticket file above.
 ## [0.6.2] - 2026-08-04
 
 ### Fixed

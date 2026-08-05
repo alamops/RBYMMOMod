@@ -434,10 +434,10 @@ function start(options = {}) {
    *
    * A hub that forgot every rating when it restarted would not be a ranking,
    * so this is read once at start and written back (debounced) whenever a
-   * battle moves somebody. A file that is missing is a fresh season, which
-   * is the ordinary first run; a file that is corrupt is *named* and then
-   * treated as a fresh season, because refusing to start would take a whole
-   * hub off the air over a leaderboard.
+   * battle moves somebody or a name changes hands. A file that is missing is
+   * a fresh season, which is the ordinary first run; a file that is corrupt
+   * is *named* and then treated as a fresh season, because refusing to start
+   * would take a whole hub off the air over a leaderboard.
    */
   const rankingPath = configPath
     ? path.join(path.dirname(configPath), RANKING_FILENAME) : null;
@@ -550,13 +550,18 @@ function start(options = {}) {
   // ------------------------------------------------------------ the season
 
   /*
-   * A battle moved somebody's rating. The board is already correct in
-   * memory -- that happened on the connection's own path, inside the relay
-   * -- and all that is left is getting it onto the disk, which is deferred
-   * and coalesced for the same reason the credential counts are: a tournament
-   * running through a hub must never be waiting on a filesystem. The timer
-   * is unref'd, so a pending write can never be why the process stays up, and
-   * close() flushes so an orderly shutdown loses nothing.
+   * A battle moved somebody's rating, or a name was claimed, taken over or
+   * proved. The board is already correct in memory -- that happened on the
+   * connection's own path, inside the relay -- and all that is left is
+   * getting it onto the disk, which is deferred and coalesced for the same
+   * reason the credential counts are: a tournament running through a hub must
+   * never be waiting on a filesystem. The timer is unref'd, so a pending
+   * write can never be why the process stays up, and close() flushes so an
+   * orderly shutdown loses nothing.
+   *
+   * Claims are written for the same reason ratings are: a claim the file
+   * never heard about is one a restart hands back to whoever reconnects
+   * first, which is the lockout this whole flag exists to end.
    */
   function noteRankChange() {
     if (!rankingPath) return;      // an embedded hub keeps its season in RAM

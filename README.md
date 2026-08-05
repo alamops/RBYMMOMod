@@ -208,19 +208,33 @@ everybody else's on theirs. A dedicated hub keeps the season in
 `ranking.json` between restarts; a game hosted from inside somebody's copy
 scores a fresh one each time it opens.
 
-**And the name is yours.** The first time a hub sees your trainer name it
-mints a secret, hands it to your copy once, and remembers only its hash; your
-game presents it every time you come back, and that is what says *same
-player*. Somebody who types your nickname without it plays normally — walks,
-chats, trades, battles — and simply doesn't score, which the `RANK` screen
-tells them in as many words. Nobody is thrown out for it: a friend who lost
-their save shouldn't lose the hub.
+**And the name is yours — once you've proved it is.** The first time a hub
+sees your trainer name it mints a secret, hands it to your copy once, and
+remembers only its hash; your game presents it every time you come back, and
+that is what says *same player*.
 
-Be clear about what that is worth. It's a **claim ticket, not an account**:
-it lives in your save file and crosses the same unencrypted link the join
-code does, so anyone who can read either can take the name. What it buys is
-that *typing* someone's nickname is no longer enough — which, until it
-existed, was the whole story.
+A claim starts out **provisional**, because a minted ticket only means one was
+posted — the welcome carrying it can be lost, the hub can restart before it
+writes anything down, a save can go without it. So until a name is *proven*
+(your game came back and presented the ticket) or *scored* (a ranked battle
+settled under it), the claim simply follows whoever is actually connecting,
+and they get a fresh ticket of their own. Nothing is stolen by that: an
+unproven, unscored name holds no rating, and if you lost the race you take it
+back the same way. Two exceptions, both obvious once said: a name somebody is
+*already connected and ranked under* isn't up for grabs while they're standing
+there, and neither is one that has ever scored.
+
+Once the name is proven or has scored, it's locked. Somebody typing it without
+the ticket plays normally — walks, chats, trades, battles — and simply doesn't
+score, which the `RANK` screen tells them in as many words. Nobody is thrown
+out for it: a friend who lost their save shouldn't lose the hub.
+
+Be clear about what that is worth. It's a **claim ticket, not an account**: it
+lives in your save file *and* in `rby_mmo_rank_tokens.json` in the game's save
+folder — the file is what carries it through a CONTINUE you never saved — and
+it crosses the same unencrypted link the join code does, so anyone who can
+read either can take the name. What it buys is that *typing* someone's
+nickname is no longer enough — which, until it existed, was the whole story.
 
 ### 🏠 YOU ARE THE SERVER
 `HOST GAME`, pick a room size (**2–64**), done. You're a normal player who

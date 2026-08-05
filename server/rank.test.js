@@ -190,6 +190,213 @@ function testClaims() {
     'the leaderboard sent to clients carries no digests');
 }
 
+/*
+ * A claim is provisional until it is proved -- see Board.claim's own header
+ * for why. What follows pins that rule case by case: a fresh claim starts
+ * unproved, proving it locks the name down (even with nothing scored), an
+ * unproved and unscored claim moves rather than locking anyone out, and a
+ * name that has settled a battle is never up for grabs regardless.
+ */
+function testFreshClaimIsUnconfirmed() {
+  const board = new Board();
+  const token = mintToken();
+  ok(board.claim('ASH', null, token) === 'claimed', 'the name is free, so it is claimed');
+  const entry = board.get('ASH');
+  ok(entry.confirmed === false,
+    'but a mint only says a ticket was posted, not that anyone proved holding it');
+  // ...and it is not written down. A row nobody has proved, played or scored
+  // under is one claim() will hand to the next player who asks, so persisting
+  // it buys nothing -- and a hub anybody can dial would otherwise grow (and
+  // rewrite) a row per passing hello.
+  ok(board.export().find((row) => row.name === 'ASH') === undefined,
+    'and an unproved, unplayed, unrated claim is not written to the file at all');
+}
+
+/*
+ * The claim moves for a name nobody is *using*. A holder who is connected and
+ * ranked under it right now is the one thing board state cannot see, and
+ * without it the leniency above is a theft: the second player takes the
+ * claim, and the first player's next win lands on it.
+ */
+function testLiveHolderBlocksReclaim() {
+  const board = new Board();
+  const held = mintToken();
+  ok(board.claim('ASH', null, held) === 'claimed', 'first visit mints a claim');
+
+  ok(board.claim('ASH', null, mintToken(), true) === 'impostor',
+    'a tokenless hello while the holder is connected and ranked is an impostor');
+  ok(board.claim('ASH', mintToken(), mintToken(), true) === 'impostor',
+    'and so is a wrong ticket');
+  ok(board.claim('ASH', held, mintToken(), true) === 'owner',
+    'the holder themselves is still the owner, live or not');
+
+  // The lockout this whole branch exists to fix has the owner *gone*, so it
+  // is untouched: same board, nobody connected, same tokenless hello.
+  const gone = new Board();
+  gone.claim('ASH', null, mintToken());
+  const fresh = mintToken();
+  ok(gone.claim('ASH', null, fresh, false) === 'claimed',
+    'with the holder disconnected the reclaim still works');
+  ok(gone.claim('ASH', fresh, mintToken()) === 'owner',
+    'and the ticket it minted is the one that answers');
+}
+
+/*
+ * A row with a rating but no games behind it is not reclaimable either.
+ * `played` is the rule; this is the belt on top of it, for a hand-edited
+ * ranking.json where the two disagree.
+ */
+function testPointsWithoutGamesBlockReclaim() {
+  const hashed = new Board();
+  const token = mintToken();
+  hashed.claim('EDITED', null, token);
+  const row = hashed.export().find((r) => r.name === 'EDITED');
+  ok(row === undefined, 'sanity: an unproved, unplayed, unrated row is not exported');
+
+  const edited = new Board().import([{
+    name: 'EDITED', points: 500, played: 0, won: 0, confirmed: false,
+    tokenHash: 'a'.repeat(64),
+  }]);
+  ok(edited.get('EDITED').points === 500 && edited.get('EDITED').played === 0,
+    'sanity: the imported row has a rating and no games');
+  ok(edited.claim('EDITED', null, mintToken()) === 'impostor',
+    'points above the starting value block a reclaim on their own');
+}
+
+function testOwnerReturnConfirmsAndBlocksReclaim() {
+  const board = new Board();
+  const token = mintToken();
+  ok(board.claim('ASH', null, token) === 'claimed', 'first visit mints a claim');
+  ok(board.get('ASH').confirmed === false, 'not proved yet');
+
+  ok(board.claim('ASH', token, mintToken()) === 'owner',
+    'the ticket holder returns and is recognised');
+  ok(board.get('ASH').confirmed === true,
+    'a proved ticket confirms the claim, even though nothing has scored');
+
+  ok(board.claim('ASH', null, mintToken()) === 'impostor',
+    'and a confirmed claim is never reclaimed, even at zero games played');
+}
+
+function testUnconfirmedUnscoredReclaims() {
+  const board = new Board();
+  const oldToken = mintToken();
+  ok(board.claim('ASH', null, oldToken) === 'claimed', 'first visit mints a claim');
+  ok(board.get('ASH').confirmed === false, 'nobody has proved it yet');
+
+  const newToken = mintToken();
+  ok(board.claim('ASH', null, newToken) === 'claimed',
+    'a second tokenless hello for an unconfirmed, unscored name re-mints ' +
+    'rather than locking the name shut');
+
+  // The claim is still unproved, so even a *wrong* ticket moves it again
+  // instead of being told apart from a missing one -- "unconfirmed and
+  // unscored" is the whole test, not which ticket was presented.
+  const staleToken = mintToken();
+  ok(board.claim('ASH', oldToken, staleToken) === 'claimed',
+    'a wrong ticket on a still-unconfirmed, unscored name reclaims once ' +
+    'more rather than answering impostor');
+
+  ok(board.claim('ASH', staleToken, mintToken()) === 'owner',
+    'the latest ticket is the one that answers now');
+  ok(board.get('ASH').confirmed === true, 'and proving it confirms the claim');
+
+  ok(board.claim('ASH', newToken, mintToken()) === 'impostor',
+    'now that it is proved, an earlier ticket is worthless');
+}
+
+function testScoredNameNeverReclaimed() {
+  const board = new Board();
+  const token = mintToken();
+  board.claim('ASH', null, token);
+  board.record('ASH', 'GARY', 0);
+  const row = board.export().find((r) => r.name === 'ASH');
+  ok(row.played === 1 && row.confirmed === true,
+    'sanity: this name has scored, and settling confirmed it too');
+
+  // Even a row that somehow reached disk unconfirmed -- a legacy file, a
+  // hand-edited one -- must not reopen a name that has already scored:
+  // `played` alone is the gate, `confirmed` is the belt on top of it.
+  row.confirmed = false;
+  const reloaded = new Board().import([row]);
+  ok(reloaded.get('ASH').confirmed === false && reloaded.get('ASH').played === 1,
+    'the imported state: unconfirmed on file, but already scored');
+  ok(reloaded.claim('ASH', null, mintToken()) === 'impostor',
+    'played > 0 blocks reclaim on its own, independent of confirmed');
+}
+
+function testSettlementConfirmsBothSides() {
+  const board = new Board();
+  ok(board.get('ALPHA') === null, 'sanity: neither name is on the board yet');
+  board.record('ALPHA', 'BRAVO', 0);
+  ok(board.get('ALPHA').confirmed === true,
+    'the winner is confirmed by having played, ticket or not');
+  ok(board.get('BRAVO').confirmed === true,
+    'and so is the loser -- a settled battle proves both names at once');
+}
+
+function testConfirmedRoundTrips() {
+  // The unconfirmed side of the trip has to be a row the file actually keeps,
+  // and export() drops the throwaway ones -- so this is an unproved claim on a
+  // name that has played, which is what a legacy file looks like.
+  const board = new Board().import([{
+    name: 'PROVISIONAL', points: 12, played: 1, won: 1, confirmed: false,
+    tokenHash: 'b'.repeat(64),
+  }]);
+  ok(board.get('PROVISIONAL').confirmed === false, 'sanity: unconfirmed');
+
+  const provenToken = mintToken();
+  board.claim('PROVEN', null, provenToken);
+  board.claim('PROVEN', provenToken, mintToken());
+  ok(board.get('PROVEN').confirmed === true, 'sanity: confirmed by its owner');
+
+  const reloaded = new Board().import(board.export());
+  ok(reloaded.get('PROVISIONAL').confirmed === false,
+    'an unconfirmed claim comes back unconfirmed');
+  ok(reloaded.get('PROVEN').confirmed === true,
+    'and a confirmed one comes back confirmed -- both directions of the trip');
+}
+
+/*
+ * What the file is allowed to grow. Every first hello under a new name claims
+ * it, so a hub anybody can dial would otherwise write a row per connection --
+ * and rewrite the whole file each time. Only claims worth surviving a restart
+ * are written: proved, played, or carrying a rating.
+ */
+function testThrowawayClaimsAreNotExported() {
+  const board = new Board();
+  board.claim('DRIFTER', null, mintToken());
+  board.seen('WATCHER', 'SPRITE_RED');
+  ok(board.export().length === 0,
+    'a board of nothing but fresh claims and passers-by writes no rows at all');
+
+  const proved = mintToken();
+  board.claim('PROVER', null, proved);
+  board.claim('PROVER', proved, mintToken());
+  board.record('WINNER', 'LOSER', 0);
+  const names = board.export().map((row) => row.name).sort();
+  ok(names.join(',') === 'LOSER,PROVER,WINNER',
+    'and a proved claim, a win and a loss are all kept -- those are what a ' +
+    'restart has to survive');
+}
+
+function testLegacyImportInfersConfirmed() {
+  const fakeHash = (c) => c.repeat(64);
+  const legacy = new Board().import([
+    { name: 'VETERAN', points: 40, played: 3, won: 2, tokenHash: fakeHash('a') },
+    { name: 'ROOKIE', points: 0, played: 0, won: 0, tokenHash: fakeHash('b') },
+  ]);
+  ok(legacy.get('VETERAN').confirmed === true,
+    'a legacy row with no confirmed field, but with results, is read as confirmed');
+  ok(legacy.get('ROOKIE').confirmed === false,
+    'and one with no results yet is read as provisional -- the same leniency ' +
+    'a fresh claim gets');
+  ok(legacy.claim('VETERAN', null, mintToken()) === 'impostor',
+    'so the veteran cannot be reclaimed');
+  ok(legacy.claim('ROOKIE', null, mintToken()) === 'claimed',
+    'but the rookie can be -- nothing has scored under that name yet');
+}
+
 /* The same story through the relay, which is where a player meets it. */
 function testClaimsOverTheWire() {
   const clock = makeClock();
@@ -236,6 +443,172 @@ function testClaimsOverTheWire() {
     'an unranked player cannot add to the rating of the name they borrowed');
   ok(relay.board.points('BETA') === 0,
     'and their opponent loses nothing to a match that was never scored');
+}
+
+/*
+ * The reclaim rule again, but through the relay and the wire fields a
+ * client actually reads -- welcome.ranked, welcome.rankToken -- and with
+ * the persistence hook wired up, so the reclaim is pinned as a board change
+ * the hub must be told about, not only as a Board return value.
+ */
+function testReclaimOverTheWire() {
+  const clock = makeClock();
+  const seen = [];
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    onRankChange: (settled) => seen.push(settled),
+  });
+
+  const dial = (name, token) => {
+    const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => {};
+    const id = relay.accept(peer);
+    relay.handle(id, { type: 'mmo.hello', proto: PROTOCOL, name, rankToken: token });
+    const welcome = peer.outbox.find((m) => m.type === 'mmo.welcome');
+    return { id, peer, welcome };
+  };
+
+  const first = dial('DELTA');
+  const oldTicket = first.welcome.rankToken;
+  ok(cleanToken(oldTicket) !== null, 'a first visit mints a claim');
+  ok(seen.length === 0,
+    'and nothing is flushed for it: an unproved claim is a row export() ' +
+    'drops, so the write would rewrite the file to what it already says');
+  relay.drop(first.id);
+
+  // The player is back without the ticket -- a save that never carried it,
+  // say -- before ever proving it or playing a scored battle.
+  const back = dial('DELTA');
+  ok(back.welcome.ranked === true,
+    'an unconfirmed, unscored name follows the player who is here now');
+  const newTicket = back.welcome.rankToken;
+  ok(cleanToken(newTicket) !== null, 'a fresh ticket goes out with the reclaim');
+  ok(newTicket !== oldTicket, 'and it is not the one that got lost');
+  ok(seen.length === 0, 'a transfer is not flushed either, for the same reason');
+  relay.drop(back.id);
+
+  // Prove the fresh ticket, which is the moment the claim stops moving --
+  // and the moment it becomes a row the file keeps, so this is the one that
+  // is flushed.
+  const proving = dial('DELTA', newTicket);
+  ok(proving.welcome.ranked === true, 'the new ticket is recognised');
+  ok(seen.length === 1 && seen[0] === null,
+    'being proved for the first time tells the persistence hook, with no ' +
+    'match behind it');
+  relay.drop(proving.id);
+
+  const provenAgain = dial('DELTA', newTicket);
+  ok(seen.length === 1,
+    'and an owner returning to a claim that was already proved changes ' +
+    'nothing, so it writes nothing');
+  relay.drop(provenAgain.id);
+
+  const withOld = dial('DELTA', oldTicket);
+  ok(withOld.welcome.ranked === false,
+    'the ticket that got lost is worthless once the claim has moved on and ' +
+    'been proved');
+  ok(withOld.welcome.rankToken === undefined,
+    'no ticket is handed to somebody presenting a stale one');
+  relay.drop(withOld.id);
+
+  const withNew = dial('DELTA', newTicket);
+  ok(withNew.welcome.ranked === true, 'the proven ticket is the one that answers now');
+  ok(withNew.welcome.rankToken === undefined,
+    'and a confirmed owner is not re-sent a ticket they already hold');
+}
+
+/*
+ * The impostor gate the board cannot see for itself, through the relay that
+ * computes it: a second player typing a name somebody is connected and ranked
+ * under does not take the claim. Reachable by accident -- two copies that
+ * never changed the default trainer name -- and permanent if it went through,
+ * because the first player's next settled win would confirm the taker's claim.
+ */
+function testLiveHolderOverTheWire() {
+  const clock = makeClock();
+  const relay = new Relay({ maxPlayers: 8, log: quiet, now: clock.now });
+
+  const dial = (name, token) => {
+    const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => {};
+    const id = relay.accept(peer);
+    relay.handle(id, { type: 'mmo.hello', proto: PROTOCOL, name, rankToken: token });
+    const welcome = peer.outbox.find((m) => m.type === 'mmo.welcome');
+    return { id, peer, welcome };
+  };
+
+  const holder = dial('ECHO');
+  ok(holder.welcome.ranked === true, 'the first ECHO is ranked');
+  const held = relay.claimHash('ECHO');
+  ok(held !== null, 'and holds an unproved claim on the name');
+
+  const second = dial('ECHO');
+  ok(second.welcome.ranked === false,
+    'a second ECHO arriving while the first is still here is not scored');
+  ok(second.welcome.rankToken === undefined, 'and is handed no ticket');
+  ok(relay.claimHash('ECHO') === held, 'the claim did not move');
+  ok(relay.get(holder.id).ranked === true, 'and the holder is still ranked');
+  relay.drop(second.id);
+
+  // The lockout this branch exists to fix is the *disconnected* owner, and it
+  // still works: same tokenless hello, once the holder is gone.
+  relay.drop(holder.id);
+  const later = dial('ECHO');
+  ok(later.welcome.ranked === true,
+    'with the holder gone, an unproved, unscored claim follows whoever is here');
+  ok(cleanToken(later.welcome.rankToken) !== null, 'and a fresh ticket goes out');
+  ok(relay.claimHash('ECHO') !== held, 'the claim moved this time');
+}
+
+/*
+ * A battle is scored into the claims it started against, or not at all. A
+ * claim that moved in between belongs to somebody else now, and record()
+ * would confirm it into permanence on the way past.
+ */
+function testClaimMovedMidMatch() {
+  const clock = makeClock();
+  const relay = new Relay({ maxPlayers: 8, log: quiet, now: clock.now });
+
+  const dial = (name, token) => {
+    const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => {};
+    const id = relay.accept(peer);
+    relay.handle(id, { type: 'mmo.hello', proto: PROTOCOL, name, rankToken: token });
+    return { id, peer };
+  };
+
+  // The control: the same battle, nobody's claim touched, settles normally.
+  const control = dial('CONTROL');
+  const sparring = dial('SPARRING');
+  const first = fight(relay, control, sparring);
+  relay.handle(control.id, { type: 'mmo.result', session: first, outcome: 'win' });
+  relay.handle(sparring.id, { type: 'mmo.result', session: first, outcome: 'loss' });
+  ok(relay.board.points('CONTROL') === 16, 'sanity: an untouched match scores');
+
+  const nova = dial('NOVA');
+  const vega = dial('VEGA');
+  const matchId = fight(relay, nova, vega);
+  const startedWith = relay.claimHash('NOVA');
+
+  // NOVA reports and leaves -- the paperwork outlives the session by design --
+  // and with nobody connected under the name, its unproved claim is up for
+  // grabs again.
+  relay.handle(nova.id, { type: 'mmo.result', session: matchId, outcome: 'win' });
+  relay.drop(nova.id);
+  const taker = dial('NOVA');
+  ok(relay.claimHash('NOVA') !== startedWith, 'sanity: the claim moved');
+
+  relay.handle(vega.id, { type: 'mmo.result', session: matchId, outcome: 'loss' });
+  ok(relay.board.points('NOVA') === 0,
+    'the settlement is dropped: those points would have landed on a claim ' +
+    'the winner does not hold');
+  ok(relay.board.points('VEGA') === 0, 'and the loser pays nothing for it');
+  ok(relay.board.get('NOVA').confirmed === false,
+    'nor is the new claim confirmed by somebody else\'s battle');
+  ok(relay.get(taker.id).ranked === true, 'sanity: the taker is a normal player');
 }
 
 function testLeaderboard() {
@@ -510,13 +883,38 @@ function testPersistenceHook() {
     relay.handle(id, { type: 'mmo.hello', proto: PROTOCOL, name });
     return { id, peer };
   });
+  // Two fresh hellos, two fresh claims -- and neither is flushed. Both leave a
+  // row export() drops on purpose, so the file would be rewritten to exactly
+  // what it already holds, once per hello, on a hub anybody can dial in a
+  // loop.
+  ok(seen.length === 0, 'a fresh claim is not a change the file can hold');
+
+  // Kept before the fight, which clears the outboxes it works in.
+  const ticket = players[0].peer.outbox
+    .find((m) => m.type === 'mmo.welcome').rankToken;
+
   const matchId = fight(relay, players[0], players[1]);
   relay.handle(players[0].id,
     { type: 'mmo.result', session: matchId, outcome: 'win' });
   relay.handle(players[1].id,
     { type: 'mmo.result', session: matchId, outcome: 'loss' });
-  ok(seen.length === 1, 'a settled match tells the caller so, once');
+  ok(seen.length === 1, 'a settled match does tell the caller');
   ok(seen[0].winner.name === 'A', 'naming who won');
+
+  // A ticket proved for the first time is the other way a row starts being
+  // written -- but this name was already confirmed by its own battle, so
+  // returning with the ticket changes nothing and writes nothing. (Claim-time
+  // changes carry no match, which is how a caller tells "a name was claimed"
+  // from "a name was settled" apart; testReclaimOverTheWire pins the flush
+  // itself.)
+  relay.drop(players[0].id);
+  const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => {};
+  const backId = relay.accept(peer);
+  relay.handle(backId,
+    { type: 'mmo.hello', proto: PROTOCOL, name: 'A', rankToken: ticket });
+  ok(seen.length === 1, 'so the hook has still been called exactly once');
 
   // A hook that throws is the disk being full, and must not cost the players
   // their result: the ratings are already correct in memory.
@@ -550,6 +948,18 @@ function main() {
   testClamps();
   testBoardBasics();
   testClaims();
+  testFreshClaimIsUnconfirmed();
+  testLiveHolderBlocksReclaim();
+  testPointsWithoutGamesBlockReclaim();
+  testOwnerReturnConfirmsAndBlocksReclaim();
+  testUnconfirmedUnscoredReclaims();
+  testScoredNameNeverReclaimed();
+  testSettlementConfirmsBothSides();
+  testConfirmedRoundTrips();
+  testThrowawayClaimsAreNotExported();
+  testLegacyImportInfersConfirmed();
+  testLiveHolderOverTheWire();
+  testClaimMovedMidMatch();
   testFarmingIsWorthless();
   testLeaderboard();
   testResultsNeedTwoVoices();
@@ -558,6 +968,7 @@ function main() {
   testLeaderboardOverTheWire();
   testRatingBelongsToTheName();
   testClaimsOverTheWire();
+  testReclaimOverTheWire();
   testPersistenceHook();
 
   console.log(`\n  ${passed}/${passed} checks passed  (rank)\n`);

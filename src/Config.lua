@@ -302,6 +302,18 @@ M.RANK_TOP = 10
 -- else -- see src/Rank.lua's header for what that is worth, and what it is
 -- not. The hub keeps only its SHA-256.
 M.RANK_TOKEN_HEX = 32
+-- Where claim tickets are kept, in the LOVE save directory, next to the
+-- engine's own save files.
+--
+-- They are written to mod.save as well, but mod.save is RAM the engine
+-- happens to flush with the rest of a save: nothing in connecting or
+-- disconnecting reaches disk, and CONTINUE replaces the whole table with
+-- whatever was last written. A ticket minted this session and never saved is
+-- gone by the next connect -- and the hub, which has not forgotten, then
+-- answers the name's rightful owner as an impostor. This file is what a save
+-- reload cannot take away. One flat JSON object; the key format and why it
+-- carries the trainer name are in src/Client.lua.
+M.RANK_TOKEN_FILE = "rby_mmo_rank_tokens.json"
 -- How long a pairing stays "recently played" for the rematch discount, and
 -- how many meetings inside it take a win to nothing (halving each time, so
 -- the sixth rematch in the window is already worth zero).

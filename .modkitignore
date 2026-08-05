@@ -77,6 +77,7 @@ tools/play.sh
 .github/workflows/release.yml
 docs/plans/in-game-hosting.md
 docs/plans/self-hosting-server-app.md
+docs/plans/fix-taken-nick-on-ranking.md
 docs/plans/running-system.md
 
 # Screenshots of a running game are composited from tiles, sprites and font
@@ -137,3 +138,10 @@ docs/screenshots/party-members.png
 # block is for, so the fix belongs with the rest of the list rather than in a
 # follow-up.
 docs/screenshots/my-profile.png
+#
+# rank.png arrived with ranked PVP the same way my-profile.png did, and for
+# the same reason nothing caught it: it is the RANK screen, a list menu drawn
+# over portraits decoded from the player's own ROM, which lint has nothing to
+# say about. Found while packing this branch, listed here rather than left for
+# the next person to trip over.
+docs/screenshots/rank.png
