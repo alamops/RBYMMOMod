@@ -627,6 +627,337 @@ async function statusPrecedenceScenario() {
 }
 
 // =====================================================================
+// players / ranking -- fixture files written by hand, never a real hub
+// =====================================================================
+//
+// Neither verb goes anywhere near lib/server.js (plan §3, docs/plans/
+// server-side-listing.md): the contract *is* the interface, so every
+// scenario below writes status.json / ranking.json into a scratch config
+// dir exactly as the plan describes them, and drives `players` / `ranking`
+// against that. server.test.js is where the hub is proven to write files
+// this shape; this file only proves the CLI reads them honestly.
+
+const CONTRACT_FIELDS = [
+  'name', 'sprite', 'map', 'x', 'y', 'busy', 'party', 'points', 'ranked',
+].sort();
+
+function writeJson(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+function statusFixture(overrides = {}) {
+  return Object.assign({
+    version: 1,
+    startedAt: Date.now() - 60000,
+    updatedAt: Date.now(),
+    stoppedAt: null,
+    heartbeatMs: 10000,
+    host: '0.0.0.0',
+    port: 7788,
+    protocol: 5,
+    maxPlayers: 8,
+    players: [],
+  }, overrides);
+}
+
+function playerRow(overrides = {}) {
+  return Object.assign({
+    name: 'RED', sprite: 'SPRITE_RED', map: 'PALLET_TOWN', x: 5, y: 6,
+    busy: false, party: false, points: 12, ranked: true,
+  }, overrides);
+}
+
+/*
+ * "No raw control characters on stderr" does not mean "no newlines" --
+ * ctx.warn() ends every line of its own output with one, and that is the
+ * formatting the terminal is supposed to see. What must never reach it is a
+ * byte that came out of a file somebody hand-edited and could move the
+ * cursor or repaint the line -- an ESC among them. \n, \r and \t are the
+ * CLI's own formatting and are excluded on purpose.
+ */
+function hasRawControlChars(text) {
+  return /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(String(text));
+}
+
+async function playersLiveScenario() {
+  const dir = scratchDir('players-live');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'status.json'), statusFixture({
+    players: [
+      playerRow({ name: 'RED', map: 'PALLET_TOWN', points: 12, ranked: true }),
+      playerRow({
+        name: 'BLUE', map: null, x: null, y: null, busy: true, points: 0, ranked: false,
+      }),
+    ],
+  }));
+
+  const result = await runCli(['players', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'a live snapshot succeeds');
+  ok(/2 player\(s\) online/.test(result.stdout), 'and reports the count');
+  ok(result.stdout.includes('PALLET TOWN'), 'PALLET_TOWN is formatted for reading');
+  ok(!result.stdout.includes('PALLET_TOWN'),
+    'and the underscored engine id itself is never shown');
+
+  const redRow = result.stdout.split('\n').find((line) => line.startsWith('RED'));
+  ok(!!redRow && /\b12\b/.test(redRow), 'a ranked player shows their points');
+
+  const blueRow = result.stdout.split('\n').find((line) => line.startsWith('BLUE'));
+  ok(!!blueRow, 'the second player has a row');
+  const blueCells = blueRow.trimEnd().split(/\s{2,}/);
+  ok(blueCells[1] === '-', 'a null map (in a battle or menu) prints as a dash for LOCATION');
+  ok(/BUSY/.test(blueRow), 'and their BUSY status shows');
+  ok(blueCells[blueCells.length - 1] !== '0',
+    'an unranked player shows a blank POINTS cell, not a zero');
+}
+
+async function playersEmptyScenario() {
+  const dir = scratchDir('players-empty');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'status.json'), statusFixture({ players: [] }));
+
+  const result = await runCli(['players', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'an empty roster is not an error');
+  ok(/Nobody is online/i.test(result.stdout), 'and says plainly that nobody is online');
+}
+
+async function playersStoppedScenario() {
+  const dir = scratchDir('players-stopped');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'status.json'), statusFixture({
+    stoppedAt: Date.now() - 5000, players: [],
+  }));
+
+  const result = await runCli(['players', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'a cleanly-stopped hub is not reported as an error');
+  ok(/stopped/i.test(result.stdout), 'and says the hub stopped');
+  ok(/nobody is online/i.test(result.stdout), 'because nobody can be, once it has');
+}
+
+async function playersStaleScenario() {
+  const dir = scratchDir('players-stale');
+  const file = path.join(dir, 'config.json');
+  // default heartbeatMs is 10000, so 2.5x is 25000 -- 30s old is well past it.
+  writeJson(path.join(dir, 'status.json'), statusFixture({
+    updatedAt: Date.now() - 30000,
+    players: [playerRow({ name: 'GHOST' })],
+  }));
+
+  const result = await runCli(['players', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'a stale snapshot is reported, not treated as an error');
+  ok(/appears to be down/i.test(result.stdout), 'and says the hub appears to be down');
+}
+
+async function playersStaleRespectsNonstandardHeartbeatScenario() {
+  const dir = scratchDir('players-heartbeat');
+  const file = path.join(dir, 'config.json');
+  const statusFile = path.join(dir, 'status.json');
+
+  // heartbeatMs 30000 -> the 2.5x staleness ceiling is 75000ms, not the
+  // built-in default's 25000 -- the snapshot's own schedule has to win.
+  writeJson(statusFile, statusFixture({
+    heartbeatMs: 30000, updatedAt: Date.now() - 60000, players: [],
+  }));
+  const live = await runCli(['players', '--config', file], { cwd: dir });
+  ok(!/appears to be down/i.test(live.stdout),
+    '60s old is still live against a 30s heartbeat (threshold 75s)');
+
+  writeJson(statusFile, statusFixture({
+    heartbeatMs: 30000, updatedAt: Date.now() - 100000, players: [],
+  }));
+  const stale = await runCli(['players', '--config', file], { cwd: dir });
+  ok(/appears to be down/i.test(stale.stdout),
+    '100s old is stale against the same 30s heartbeat (threshold 75s)');
+}
+
+async function playersMissingScenario() {
+  const dir = scratchDir('players-missing');
+  const file = path.join(dir, 'config.json');
+
+  const result = await runCli(['players', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'a missing snapshot is not an error');
+  ok(/No status snapshot/.test(result.stderr),
+    'and says plainly that there is none, on stderr');
+}
+
+async function playersCorruptJsonScenario() {
+  const dir = scratchDir('players-corrupt');
+  const file = path.join(dir, 'config.json');
+  // An ESC byte, deliberately: V8's JSON.parse error message quotes the
+  // offending bytes back verbatim, and a hand-edited file is exactly the
+  // thing this path exists to survive -- the hub's own writes are always
+  // well-formed.
+  fs.writeFileSync(path.join(dir, 'status.json'),
+    `{"version":1,"players":[${String.fromCharCode(0x1b)}]}`);
+
+  const result = await runCli(['players', '--config', file], { cwd: dir });
+  ok(result.code === cli.ERROR, 'a corrupt snapshot is a runtime error');
+  ok(/not readable as JSON/.test(result.stderr), 'naming what is wrong with it');
+  ok(!hasRawControlChars(result.stderr),
+    'and the parse error is sanitised before it reaches the terminal');
+}
+
+async function playersUndatedEmptyScenario() {
+  const dir = scratchDir('players-undated');
+  const file = path.join(dir, 'config.json');
+  const fixture = statusFixture({ players: [] });
+  delete fixture.updatedAt;
+  writeJson(path.join(dir, 'status.json'), fixture);
+
+  const result = await runCli(['players', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'an undated, empty snapshot is not an error');
+  ok(/cannot be told/i.test(result.stdout), 'and says its age cannot be told');
+  ok(/Nobody was online/i.test(result.stdout), 'short-circuiting straight to the empty case');
+}
+
+async function playersJsonScenario() {
+  const dir = scratchDir('players-json');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'status.json'), statusFixture({
+    players: [Object.assign(playerRow({ party: true }), {
+      // extras a newer hub, or a hand-edit, might carry -- none of this is
+      // part of the contract and none of it may survive the projection.
+      id: '1', sessionId: '2', partyId: '3', address: '203.0.113.1', tokenHash: 'x',
+    })],
+  }));
+
+  const result = await runCli(['players', '--json', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, '--json succeeds against a live snapshot');
+  const parsed = JSON.parse(result.stdout);
+  ok(Array.isArray(parsed) && parsed.length === 1, 'the players array comes through');
+  ok(JSON.stringify(Object.keys(parsed[0]).sort()) === JSON.stringify(CONTRACT_FIELDS),
+    '--json emits exactly the nine contract fields, in some order');
+  ok(!('id' in parsed[0]) && !('sessionId' in parsed[0]) && !('partyId' in parsed[0])
+    && !('address' in parsed[0]) && !('tokenHash' in parsed[0]),
+    'and every extra field is dropped rather than passed through');
+}
+
+async function playersHonoursConfigScenario() {
+  const targetDir = scratchDir('players-config-target');
+  const otherDir = scratchDir('players-config-other');
+  const file = path.join(targetDir, 'config.json');
+
+  writeJson(path.join(targetDir, 'status.json'),
+    statusFixture({ players: [playerRow({ name: 'HERE' })] }));
+  // A second, different snapshot sitting beside the *current working
+  // directory* -- which must be ignored the moment --config points elsewhere.
+  writeJson(path.join(otherDir, 'status.json'),
+    statusFixture({ players: [playerRow({ name: 'WRONGDIR' })] }));
+
+  const result = await runCli(['players', '--config', file], { cwd: otherDir });
+  ok(result.code === cli.OK, 'players succeeds with an explicit --config');
+  ok(result.stdout.includes('HERE'), 'and reads the snapshot beside the given config file');
+  ok(!result.stdout.includes('WRONGDIR'),
+    'never the one that happens to sit beside the current working directory');
+}
+
+// ---------------------------------------------------------------- ranking
+
+async function rankingTopTenScenario() {
+  const dir = scratchDir('ranking-top10');
+  const file = path.join(dir, 'config.json');
+  // Eleven ranked players plus one at zero: a tie at the cutoff boundary
+  // (TWOA/TWOB, both 20) to pin the name-ascending tiebreak, and an 11th
+  // ranked player (ONE) that only --all should surface.
+  const players = [
+    { name: 'TEN', points: 100 }, { name: 'NINE', points: 90 },
+    { name: 'EIGHT', points: 80 }, { name: 'SEVEN', points: 70 },
+    { name: 'SIX', points: 60 }, { name: 'FIVE', points: 50 },
+    { name: 'FOUR', points: 40 }, { name: 'THREE', points: 30 },
+    { name: 'TWOB', points: 20 }, { name: 'TWOA', points: 20 },
+    { name: 'ONE', points: 10 }, { name: 'ZERO', points: 0 },
+  ].map((row) => Object.assign({ sprite: 'SPRITE_RED', played: 1, won: 1 }, row));
+  writeJson(path.join(dir, 'ranking.json'), { version: 1, players });
+
+  // A table row is a place number followed by the column padding (2+
+  // spaces); the closing "N ranked player(s) -- the whole board." sentence
+  // also starts with a digit, but with a single space, so this tells them
+  // apart without depending on how many rows are on screen.
+  const rowNames = (stdout) => stdout.split('\n')
+    .filter((line) => /^\d+\s{2,}/.test(line))
+    .map((line) => line.trim().split(/\s+/)[1]);
+
+  const top = await runCli(['ranking', '--config', file], { cwd: dir });
+  ok(top.code === cli.OK, 'ranking succeeds against a fixture ranking.json');
+  const topNames = rowNames(top.stdout);
+  ok(topNames.length === 10, 'the default cut is ten rows');
+  ok(topNames.join(',') === 'TEN,NINE,EIGHT,SEVEN,SIX,FIVE,FOUR,THREE,TWOA,TWOB',
+    'sorted by points descending, ties broken by name ascending (TWOA before TWOB)');
+  ok(!topNames.includes('ONE'), 'the 11th-ranked player is cut by the default top ten');
+  ok(!top.stdout.includes('ZERO'), 'and a zero-point player never appears, cut or not');
+
+  const all = await runCli(['ranking', '--all', '--config', file], { cwd: dir });
+  ok(all.code === cli.OK, '--all succeeds');
+  const allNames = rowNames(all.stdout);
+  ok(allNames.length === 11, '--all prints every ranked player');
+  ok(allNames.includes('ONE'), 'including the one the default cut left out');
+  ok(!all.stdout.includes('ZERO'), 'but still never the zero-point player');
+}
+
+async function rankingJsonScenario() {
+  const dir = scratchDir('ranking-json');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'ranking.json'), {
+    version: 1,
+    players: [
+      { name: 'ASH', sprite: 'SPRITE_RED', points: 40, played: 3, won: 2, tokenHash: 'a'.repeat(64) },
+      { name: 'GARY', sprite: 'SPRITE_RED', points: 0, played: 1, won: 0, tokenHash: 'b'.repeat(64) },
+    ],
+  });
+
+  const result = await runCli(['ranking', '--json', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'ranking --json succeeds');
+  const parsed = JSON.parse(result.stdout);
+  ok(parsed.length === 1, 'the zero-point row is excluded from --json too');
+  ok(parsed[0].name === 'ASH' && parsed[0].place === 1, 'the ranked player is named, with a place');
+  ok(!('tokenHash' in parsed[0]),
+    'the stored claim-ticket digest is the hub\'s business and never reaches this output');
+}
+
+async function rankingEmptyScenario() {
+  const dir = scratchDir('ranking-empty');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'ranking.json'), { version: 1, players: [] });
+
+  const result = await runCli(['ranking', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'an empty ranking is not an error');
+  ok(/ranking is empty/i.test(result.stdout), 'and says so');
+
+  const zeroDir = scratchDir('ranking-empty-allzero');
+  const zeroFile = path.join(zeroDir, 'config.json');
+  writeJson(path.join(zeroDir, 'ranking.json'),
+    { version: 1, players: [{ name: 'NOBODY', points: 0 }] });
+  const zeroResult = await runCli(['ranking', '--config', zeroFile], { cwd: zeroDir });
+  ok(zeroResult.code === cli.OK, 'a board of nothing but zero-point rows is also empty');
+  ok(/ranking is empty/i.test(zeroResult.stdout), 'and reported the same way');
+}
+
+async function rankingMissingScenario() {
+  const dir = scratchDir('ranking-missing');
+  const file = path.join(dir, 'config.json');
+
+  const result = await runCli(['ranking', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'a missing ranking file is not an error');
+  ok(/No ranking file/.test(result.stderr), 'and says plainly that there is none');
+}
+
+async function rankingHonoursConfigScenario() {
+  const targetDir = scratchDir('ranking-config-target');
+  const otherDir = scratchDir('ranking-config-other');
+  const file = path.join(targetDir, 'config.json');
+
+  writeJson(path.join(targetDir, 'ranking.json'),
+    { version: 1, players: [{ name: 'HERE', points: 10 }] });
+  writeJson(path.join(otherDir, 'ranking.json'),
+    { version: 1, players: [{ name: 'WRONGDIR', points: 10 }] });
+
+  const result = await runCli(['ranking', '--config', file], { cwd: otherDir });
+  ok(result.code === cli.OK, 'ranking succeeds with an explicit --config');
+  ok(result.stdout.includes('HERE'), 'and reads the ranking beside the given config file');
+  ok(!result.stdout.includes('WRONGDIR'),
+    'never the one that happens to sit beside the current working directory');
+}
+
+// =====================================================================
 // secrets discipline
 // =====================================================================
 
@@ -1128,6 +1459,21 @@ async function main() {
     await configLeafPathScenario();
     await clampReportScenario();
     await statusPrecedenceScenario();
+    await playersLiveScenario();
+    await playersEmptyScenario();
+    await playersStoppedScenario();
+    await playersStaleScenario();
+    await playersStaleRespectsNonstandardHeartbeatScenario();
+    await playersMissingScenario();
+    await playersCorruptJsonScenario();
+    await playersUndatedEmptyScenario();
+    await playersJsonScenario();
+    await playersHonoursConfigScenario();
+    await rankingTopTenScenario();
+    await rankingJsonScenario();
+    await rankingEmptyScenario();
+    await rankingMissingScenario();
+    await rankingHonoursConfigScenario();
     await secretsDisciplineScenario();
     await inviteScenario();
     await revokeScenario();

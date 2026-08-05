@@ -941,6 +941,161 @@ function testPersistenceHook() {
     'a failing persistence hook does not undo the match');
 }
 
+// --------------------------------------------------------------- the roster
+//
+// `Relay#roster()` and `#noteRosterChange()` are lib/server.js's whole window
+// onto "who is here" (docs/plans/server-side-listing.md §3) -- server.test.js
+// proves the file that gets written from it; this is the relay-level half,
+// socket-free like everything else above.
+
+const ROSTER_CONTRACT_FIELDS = [
+  'name', 'sprite', 'map', 'x', 'y', 'busy', 'party', 'points', 'ranked',
+].sort();
+
+/*
+ * Only greeted players appear, and each one is exactly the nine fields the
+ * plan names -- no client id, no session or party id, no address. Any of
+ * those on a snapshot that outlives the process is the last place an id
+ * worth guessing should turn up.
+ */
+function testRosterFieldsAndReadyOnly() {
+  const clock = makeClock();
+  const { relay, players } = makeHub(clock, ['RED', 'BLUE']);
+
+  // A socket that connected but never said hello: not a player, and on
+  // nobody's roster, here least of all.
+  const ghost = { outbox: [], remoteAddress: '127.0.0.1' };
+  ghost.send = (msg) => ghost.outbox.push(msg);
+  ghost.close = () => {};
+  relay.accept(ghost);
+
+  const roster = relay.roster();
+  ok(roster.length === players.length,
+    'only the greeted players appear; the silent socket does not');
+
+  for (const entry of roster) {
+    const keys = Object.keys(entry).sort();
+    ok(JSON.stringify(keys) === JSON.stringify(ROSTER_CONTRACT_FIELDS),
+      `the roster entry for ${entry.name} carries exactly the nine contract fields`);
+  }
+  ok(!roster.some((entry) => 'id' in entry), 'no roster entry carries a client id');
+  ok(!roster.some((entry) => 'sessionId' in entry), 'nor a session id');
+  ok(!roster.some((entry) => 'partyId' in entry), 'nor a party id');
+  ok(!roster.some((entry) => 'address' in entry), 'nor the connecting address');
+}
+
+/*
+ * busy and party track a session and a party exactly, and clear again once
+ * either ends -- the same two booleans presenceOf() publishes over the wire,
+ * read back through the operator's window instead.
+ */
+function testRosterBusyAndPartyFlags() {
+  const clock = makeClock();
+  const { relay, players } = makeHub(clock, ['ONE', 'TWO']);
+  const [one, two] = players;
+
+  const byName = (name) => relay.roster().find((entry) => entry.name === name);
+
+  ok(byName('ONE').busy === false && byName('ONE').party === false,
+    'a freshly-joined player is neither busy nor partied');
+
+  fight(relay, one, two);
+  ok(byName('ONE').busy === true && byName('TWO').busy === true,
+    'both sides of a session show busy');
+  ok(byName('ONE').party === false,
+    'and a session alone does not make them appear partied');
+
+  relay.handle(one.id, { type: 'mmo.session_leave' });
+  ok(byName('ONE').busy === false && byName('TWO').busy === false,
+    'ending the session clears busy for both');
+
+  relay.handle(one.id, { type: 'mmo.party_invite', to: two.id });
+  relay.handle(two.id, { type: 'mmo.party_respond', to: one.id, accept: true });
+  ok(byName('ONE').party === true && byName('TWO').party === true,
+    'forming a party shows party for both members');
+
+  relay.handle(one.id, { type: 'mmo.party_leave' });
+  ok(byName('ONE').party === false && byName('TWO').party === false,
+    'and leaving it clears party for both, not just the one who left');
+}
+
+/*
+ * Every event that can change what roster() would answer tells
+ * onRosterChange -- and, just as deliberately, a step that only moves a
+ * player around the same map does not. lib/server.js debounces on this
+ * signal; a hook that fired on every footstep would turn an idle hub into a
+ * file the disk never stops being asked about.
+ */
+function testRosterChangeNotifications() {
+  const clock = makeClock();
+  let changes = 0;
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    onRosterChange: () => { changes += 1; },
+  });
+
+  const dial = (name) => {
+    const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => {};
+    const id = relay.accept(peer);
+    relay.handle(id, {
+      type: 'mmo.hello', proto: PROTOCOL, name,
+      map: 'PALLET', x: 1, y: 1, facing: 'down',
+    });
+    return { id, peer };
+  };
+
+  ok(changes === 0, 'sanity: nothing has happened yet');
+
+  const one = dial('ONE');
+  ok(changes === 1, 'admitting a player fires the hook');
+
+  const two = dial('TWO');
+  ok(changes === 2, 'and so does the next one');
+
+  const beforeStep = changes;
+  relay.handle(one.id, { type: 'mmo.move', map: 'PALLET', x: 2, y: 2, facing: 'down' });
+  ok(changes === beforeStep,
+    'a step that stays on the same map does not fire the hook');
+
+  const beforeCross = changes;
+  relay.handle(one.id, { type: 'mmo.move', map: 'VIRIDIAN', x: 0, y: 0, facing: 'up' });
+  ok(changes === beforeCross + 1, 'crossing into another map fires it exactly once');
+
+  const beforeMenu = changes;
+  // No map/x/y at all -- the client saying "not in the world right now" (a
+  // battle or a menu), which is a change of place just as much as a warp.
+  relay.handle(one.id, { type: 'mmo.move', facing: 'up' });
+  ok(changes === beforeMenu + 1,
+    'leaving the world for a battle or a menu counts as a crossing too');
+
+  const beforeSession = changes;
+  const matchId = fight(relay, one, two);
+  ok(changes === beforeSession + 1, 'starting a session fires the hook');
+
+  const beforeSessionEnd = changes;
+  relay.handle(one.id, { type: 'mmo.session_leave' });
+  ok(changes === beforeSessionEnd + 1, 'ending it fires the hook again');
+
+  const beforeParty = changes;
+  relay.handle(one.id, { type: 'mmo.party_invite', to: two.id });
+  relay.handle(two.id, { type: 'mmo.party_respond', to: one.id, accept: true });
+  ok(changes === beforeParty + 1, 'forming a party fires the hook');
+
+  const beforePartyEnd = changes;
+  relay.handle(one.id, { type: 'mmo.party_leave' });
+  ok(changes === beforePartyEnd + 1, 'ending the party fires it once more, not twice');
+
+  const beforePoints = changes;
+  relay.publishPoints(one.id, 50);
+  ok(changes === beforePoints + 1, 'publishing a new rating fires the hook');
+
+  const beforeDrop = changes;
+  relay.drop(two.id);
+  ok(changes === beforeDrop + 1, 'a player leaving the hub fires the hook');
+}
+
 function main() {
   testExpected();
   testSwing();
@@ -970,6 +1125,9 @@ function main() {
   testClaimsOverTheWire();
   testReclaimOverTheWire();
   testPersistenceHook();
+  testRosterFieldsAndReadyOnly();
+  testRosterBusyAndPartyFlags();
+  testRosterChangeNotifications();
 
   console.log(`\n  ${passed}/${passed} checks passed  (rank)\n`);
 }

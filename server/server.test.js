@@ -36,7 +36,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('child_process');
 const assert = require('assert');
 
-const { start } = require('./lib/server.js');
+const { start, STATUS_FILENAME, STATUS_HEARTBEAT_MS } = require('./lib/server.js');
 // Read from the relay rather than typed in, so a protocol bump is one edit
 // in one file and not a hunt through two suites for the greeting that still
 // says the old number.
@@ -1381,6 +1381,182 @@ async function passcodeRequiredTest() {
 }
 
 // =========================================================================
+// the status snapshot -- docs/plans/server-side-listing.md §3
+// =========================================================================
+//
+// `players`/`ranking` (server/cli.test.js) read status.json/ranking.json by
+// hand, against fixtures -- the contract is the interface, and that suite
+// never starts a real hub. This is the other half: proving the hub actually
+// writes the file that contract describes, at the moments it describes.
+//
+// Every scenario here needs a real configPath (statusPath is derived from
+// it -- see lib/server.js), unlike startServer()'s ephemeral-port helper
+// above, which never sets one at all.
+
+function statusServerConfig(overrides = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rby-mmo-status-test-'));
+  const configPath = path.join(dir, 'config.json');
+  const cfg = baseConfig(overrides);
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  return { dir, configPath, cfg };
+}
+
+async function startStatusServer(overrides = {}, extra = {}) {
+  const { dir, configPath, cfg } = statusServerConfig(overrides);
+  const handle = await start(Object.assign({
+    config: cfg, log: NULL_LOG, configPath, handleSignals: false,
+    allowUnauthenticated: true,
+  }, extra));
+  return { handle, dir };
+}
+
+function readStatus(handle) {
+  return JSON.parse(fs.readFileSync(handle.statusPath, 'utf8'));
+}
+
+const STATUS_CONTRACT_FIELDS = [
+  'name', 'sprite', 'map', 'x', 'y', 'busy', 'party', 'points', 'ranked',
+].sort();
+
+async function statusSnapshotCreatedAtStartupTest() {
+  const { handle, dir } = await startStatusServer();
+  try {
+    ok(handle.statusPath === path.join(dir, STATUS_FILENAME),
+      'the status snapshot lives beside the config file, named as documented');
+    ok(fs.existsSync(handle.statusPath),
+      'a snapshot exists the moment the hub is listening, before any player arrives');
+
+    const snapshot = readStatus(handle);
+    ok(snapshot.version === 1, 'the snapshot is versioned');
+    ok(Array.isArray(snapshot.players) && snapshot.players.length === 0,
+      'and starts with an empty roster, not a missing key');
+    ok(snapshot.stoppedAt === null, 'a running hub has not stopped');
+    ok(snapshot.heartbeatMs === STATUS_HEARTBEAT_MS,
+      'the snapshot names its own heartbeat schedule');
+    ok(typeof snapshot.startedAt === 'number' && snapshot.startedAt > 0,
+      'and timestamps when it started');
+    ok(typeof snapshot.updatedAt === 'number' && snapshot.updatedAt > 0,
+      'and when this copy was written');
+
+    const mode = fs.statSync(handle.statusPath).mode & 0o777;
+    ok(mode === 0o600, 'the file is written 0600, exactly like the ranking');
+    ok(!fs.existsSync(`${handle.statusPath}.tmp`),
+      'and the temporary file used for the atomic write is not left behind');
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function statusUpdatesAfterJoinAndLeaveTest() {
+  const { handle, dir } = await startStatusServer({ maxPlayers: 4 });
+  const port = handle.port;
+  try {
+    const client = new Client(port);
+    await client.ready();
+    client.send('mmo.hello', { proto: PROTOCOL, name: 'JOINER' });
+    await client.expect('mmo.welcome');
+
+    // Bounded by the exported heartbeat, not a copied number: whatever the
+    // hub's own debounce is, a heartbeat later is a moment the contract
+    // guarantees the file is current -- waitFor exits the instant it is.
+    const updated = await waitFor(() => {
+      try {
+        return readStatus(handle).players.length === 1;
+      } catch (err) {
+        return false;
+      }
+    }, STATUS_HEARTBEAT_MS);
+    ok(updated, 'the snapshot picks up a join within its debounce budget');
+
+    const entry = readStatus(handle).players[0];
+    ok(entry.name === 'JOINER', 'and the joined player is the one it names');
+    ok(JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(STATUS_CONTRACT_FIELDS),
+      'carrying exactly the nine contract fields, nothing else');
+    ok(!fs.existsSync(`${handle.statusPath}.tmp`),
+      'that write leaves no temporary file behind either');
+
+    client.close();
+    const emptied = await waitFor(() => {
+      try {
+        return readStatus(handle).players.length === 0;
+      } catch (err) {
+        return false;
+      }
+    }, STATUS_HEARTBEAT_MS);
+    ok(emptied, 'and the roster empties again once the player disconnects');
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function statusStoppedAtOnCloseTest() {
+  const { handle, dir } = await startStatusServer();
+  const port = handle.port;
+  try {
+    const client = new Client(port);
+    await client.ready();
+    client.send('mmo.hello', { proto: PROTOCOL, name: 'LEAVER' });
+    await client.expect('mmo.welcome');
+
+    await handle.close();
+
+    const snapshot = readStatus(handle);
+    ok(typeof snapshot.stoppedAt === 'number' && snapshot.stoppedAt > 0,
+      'a clean shutdown records when it stopped');
+    ok(Array.isArray(snapshot.players) && snapshot.players.length === 0,
+      'and the roster is emptied in the same write, whoever was still connected');
+    ok(!fs.existsSync(`${handle.statusPath}.tmp`),
+      'the final write leaves no temporary file behind either');
+
+    client.close();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function statusSnapshotCarriesNothingSensitiveTest() {
+  const code = 'NPQR34';
+  const { handle, dir } = await startStatusServer({
+    auth: { required: true, credentials: [credential('primary', code)] },
+  });
+  const port = handle.port;
+  try {
+    const client = new Client(port);
+    await client.ready();
+    client.send('mmo.hello', { proto: PROTOCOL, name: 'SECRET' });
+    const challenge = await client.expect('mmo.challenge');
+    client.send('mmo.auth', { response: hmacHex(code, challenge.nonce) });
+    await client.expect('mmo.welcome');
+
+    const updated = await waitFor(() => {
+      try {
+        return readStatus(handle).players.length === 1;
+      } catch (err) {
+        return false;
+      }
+    }, STATUS_HEARTBEAT_MS);
+    ok(updated, 'the authenticated player reaches the snapshot');
+
+    const raw = fs.readFileSync(handle.statusPath, 'utf8');
+    ok(!raw.includes(code), 'the join code used to authenticate never appears in the snapshot');
+    ok(!/token/i.test(raw), 'nor any claim-token material');
+    ok(!/credential/i.test(raw), 'nor a credential id');
+
+    const entry = readStatus(handle).players[0];
+    ok(!('id' in entry) && !('sessionId' in entry) && !('partyId' in entry)
+      && !('address' in entry),
+      'and the player entry itself carries no client id, session id, party id or address');
+
+    client.close();
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// =========================================================================
 // driver
 // =========================================================================
 
@@ -1403,6 +1579,10 @@ async function main() {
   await shutdownHookTest();
   await gracefulShutdownInProcessTest();
   await gracefulShutdownSigtermTest();
+  await statusSnapshotCreatedAtStartupTest();
+  await statusUpdatesAfterJoinAndLeaveTest();
+  await statusStoppedAtOnCloseTest();
+  await statusSnapshotCarriesNothingSensitiveTest();
 
   console.log(`\n  ${passed}/${passed} checks passed  (server)\n`);
 }
