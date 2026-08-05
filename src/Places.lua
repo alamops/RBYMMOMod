@@ -19,8 +19,6 @@
 -- unexpected shape has to cost a nice name and nothing else.  Nothing here
 -- raises.
 
-local need = ...            -- entry-chunk shape; this module resolves nothing
-
 local M = {}
 
 -- The per-map entries, whichever of the two shapes the extractor settled

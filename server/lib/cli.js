@@ -89,6 +89,11 @@ const SWITCHES = new Set([
  * row is a hub that has stopped without saying so -- a crash, a `kill -9`, a
  * container that went away -- and that is worth saying out loud rather than
  * printing a roster from an hour ago as if it were the truth.
+ *
+ * Which heartbeat, though, is the snapshot's own to say: it carries
+ * `heartbeatMs`, and snapshotAge() measures against that. The constant below
+ * is the default for a file written before the hub started saying, and the
+ * number the help text quotes when there is no file to ask.
  */
 const STATUS_FILENAME = 'status.json';
 const RANKING_FILENAME = 'ranking.json';
@@ -2018,14 +2023,24 @@ function mapName(value) {
  * gone quiet, or the hub is writing.
  */
 function snapshotAge(snapshot, now) {
+  // The file says how often it is refreshed, so overdue is measured against
+  // the schedule the writer actually keeps rather than the one compiled in
+  // here. STATUS_HEARTBEAT_MS is only the answer for a file written before
+  // the hub started saying.
+  const beat = finite(snapshot.heartbeatMs);
+  const heartbeatMs = beat !== null && beat > 0 ? beat : STATUS_HEARTBEAT_MS;
+  const staleMs = heartbeatMs * 2.5;
+
   const stoppedAt = finite(snapshot.stoppedAt);
   if (stoppedAt !== null && stoppedAt > 0) {
-    return { state: 'stopped', at: stoppedAt, age: Math.max(0, now - stoppedAt) };
+    return {
+      state: 'stopped', at: stoppedAt, age: Math.max(0, now - stoppedAt), heartbeatMs,
+    };
   }
   const updatedAt = finite(snapshot.updatedAt);
-  if (updatedAt === null || updatedAt <= 0) return { state: 'undated', age: null };
+  if (updatedAt === null || updatedAt <= 0) return { state: 'undated', age: null, heartbeatMs };
   const age = Math.max(0, now - updatedAt);
-  return { state: age > STATUS_STALE_MS ? 'stale' : 'live', at: updatedAt, age };
+  return { state: age > staleMs ? 'stale' : 'live', at: updatedAt, age, heartbeatMs };
 }
 
 function printTable(ctx, headers, rows) {
@@ -2073,7 +2088,11 @@ function verbPlayers(ctx) {
     return OK;
   }
   if (read.corrupt) {
-    ctx.warn(`${file} is not readable as JSON: ${read.error}`);
+    // Node quotes the offending bytes back at you in that message, and those
+    // bytes came out of a file anybody can edit -- so they go through plain()
+    // like every other borrowed string here, generously capped because the
+    // position and the snippet are the useful half of the answer.
+    ctx.warn(`${file} is not readable as JSON: ${plain(read.error, 200)}`);
     ctx.warn('The hub writes it whole and renames it into place, so a half-written');
     ctx.warn('one should not be possible -- this is a file that has been edited, or');
     ctx.warn('a disk that lost it. Deleting it costs nothing: the hub writes a fresh');
@@ -2100,7 +2119,32 @@ function verbPlayers(ctx) {
   const newer = version !== null && version > 1;
 
   if (wantsJson) {
-    ctx.say(JSON.stringify(players, null, 2));
+    /*
+     * Projected, never republished. What goes out is exactly the nine fields
+     * the contract names (docs/plans/server-side-listing.md §3), read through
+     * the same sanitisers the table uses -- so a field a newer hub added, or
+     * one a hand-edit slipped in, does not become part of what scripts here
+     * are entitled to. `map` keeps the engine's own id rather than the
+     * display spelling: the reader wants the thing the hub was told.
+     */
+    const projected = players.map((player) => {
+      const entry = player && typeof player === 'object' ? player : {};
+      return {
+        name: plain(entry.name) || '-',
+        sprite: typeof entry.sprite === 'string' ? plain(entry.sprite, 32) : null,
+        map: typeof entry.map === 'string' ? plain(entry.map, 28) : null,
+        // Guarded on the type rather than coerced: null here is the hub
+        // saying the player is in a battle or a menu and sends no position,
+        // and finite(null) is 0 -- a tile nobody is standing on.
+        x: typeof entry.x === 'number' ? finite(entry.x) : null,
+        y: typeof entry.y === 'number' ? finite(entry.y) : null,
+        busy: Boolean(entry.busy),
+        party: Boolean(entry.party),
+        points: finite(entry.points) || 0,
+        ranked: Boolean(entry.ranked),
+      };
+    });
+    ctx.say(JSON.stringify(projected, null, 2));
     // Every honesty note goes to stderr in this mode: the point of --json is
     // that stdout is exactly the array and nothing else.
     if (age.state === 'stopped') {
@@ -2134,7 +2178,7 @@ function verbPlayers(ctx) {
   }
   if (age.state === 'stale') {
     ctx.say(`The hub appears to be down: the last heartbeat was ${humanAge(age.age)} ago,`);
-    ctx.say(`and a running hub writes one every ${humanMs(STATUS_HEARTBEAT_MS)}. It did not stop cleanly --`);
+    ctx.say(`and a running hub writes one every ${humanMs(age.heartbeatMs)}. It did not stop cleanly --`);
     ctx.say('there is no shutdown recorded in the snapshot -- so this is a crash, a');
     ctx.say('kill, or a machine that went away.');
     ctx.say('');
@@ -2146,6 +2190,12 @@ function verbPlayers(ctx) {
     ctx.say('');
   } else if (age.state === 'undated') {
     ctx.say(`${file} does not say when it was written, so how current this is`);
+    if (!players.length) {
+      // No table to take at face value, and no legend worth printing under an
+      // empty one.
+      ctx.say('cannot be told from here. Nobody was online in it.');
+      return OK;
+    }
     ctx.say('cannot be told from here. Taking it at face value:');
     ctx.say('');
   } else if (!players.length) {
@@ -2202,7 +2252,9 @@ function verbRanking(ctx) {
     return OK;
   }
   if (read.corrupt) {
-    ctx.warn(`${file} is not readable as JSON: ${read.error}`);
+    // Sanitised for the same reason verbPlayers does it: the parse error
+    // carries the file's own bytes, escapes and all.
+    ctx.warn(`${file} is not readable as JSON: ${plain(read.error, 200)}`);
     ctx.warn('The hub writes it whole and renames it into place, so this is a file');
     ctx.warn('that has been edited by hand or damaged. The hub will refuse to load');
     ctx.warn('it too, and start the season empty rather than guess.');

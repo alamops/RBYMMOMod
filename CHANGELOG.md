@@ -30,15 +30,16 @@ here must match `manifest.version`.
   story, and a thing to get wrong), the hub now writes a snapshot of its
   roster next to `config.json` and `ranking.json`: written whole and renamed
   over the old one at mode 0600 like the ranking already was, refreshed
-  whenever somebody joins, leaves or moves, and beating every ten seconds even
-  when nothing happens. That heartbeat is what makes the file **honest**: a
-  reader that finds one older than two and a half beats says the hub appears
-  to be down rather than reporting a room full of players who left hours ago,
-  a clean shutdown stamps `stoppedAt` and empties the roster, and a missing
-  file is reported as a hub that has not run rather than an error. It holds
-  names, characters, map cells and points — no join codes, no ticket hashes,
-  no session ids, no addresses — so it is as safe to `cat` on a shared screen
-  as `invite list` is.
+  whenever somebody joins, leaves, or crosses into another map, and beating
+  every ten seconds even when nothing happens. That heartbeat is what makes the
+  file **honest**: a reader that finds one older than two and a half beats says
+  the hub appears to be down rather than reporting a room full of players who
+  left hours ago, a clean shutdown stamps `stoppedAt` and empties the roster,
+  and a missing file is reported as a hub that has not run rather than an
+  error. It holds names, characters, map cells and points — no join codes, no
+  ticket hashes, no session ids, no player addresses — so it is as safe to
+  `cat` on a shared screen as `invite list` is. (The hub's *own* bound host and
+  port are in there, but those are already in `config.json`.)
 - **The `PLAYERS` list in the game says where everyone is.** The column that
   read `HERE` now reads the place: `VIRIDIAN FOREST`, `CELADON CITY`,
   `PALLET TOWN`. That is strictly more than `HERE` was telling you — your own

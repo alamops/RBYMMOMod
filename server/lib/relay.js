@@ -547,7 +547,7 @@ class Relay {
         y: client.y,
         busy: Boolean(client.sessionId),
         party: Boolean(client.partyId),
-        points: client.points || RANK_START,
+        points: client.points,
         ranked: Boolean(client.ranked),
       });
     }
