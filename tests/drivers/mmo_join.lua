@@ -399,16 +399,24 @@ return function(game)
   -- sitting on a tile refuses the step onto it. Pre-fix, Collision.canMove
   -- answers "entity" and the walker never arrives; post-fix it crosses like
   -- any other floor tile, the same mechanism a door tile reduces to.
+  --
+  -- The crossing runs west, because that is the direction the host's own
+  -- walk actually proved: its two lefts covered spawn->spawn-1 and
+  -- spawn-1->spawn-2 leftward, so both tile *pairs* on this path have
+  -- passed the engine's real collision in the direction used here. The
+  -- eastward pair past the stander never was, and in practice something
+  -- east of it refuses the step -- tile pairs are directional (ledges),
+  -- so a row proven one way is only proven that way.
   if hostRow and hostRow.rosterX then
     local standerX, standerY = hostRow.rosterX, hostRow.rosterY
-    U.teleport(game, hostRow.map, standerX - 1, standerY, "right")
+    U.teleport(game, hostRow.map, standerX + 1, standerY, "left")
     U.wait(30)
     local walkerStart = H.playerCell(game)
-    check(walkerStart ~= nil and walkerStart.x == standerX - 1
+    check(walkerStart ~= nil and walkerStart.x == standerX + 1
           and walkerStart.y == standerY,
           "walker starts one tile short of the stander")
 
-    U.hold(game, "right", 22)
+    U.hold(game, "left", 22)
     U.wait(8)
     local onStander = H.waitSeconds(game, function()
       local cell = H.playerCell(game)
@@ -417,11 +425,11 @@ return function(game)
     check(onStander,
           "the walker's own position reached the tile the stander occupies")
 
-    U.hold(game, "right", 22)
+    U.hold(game, "left", 22)
     U.wait(8)
     local pastStander = H.waitSeconds(game, function()
       local cell = H.playerCell(game)
-      return cell ~= nil and cell.x == standerX + 1 and cell.y == standerY
+      return cell ~= nil and cell.x == standerX - 1 and cell.y == standerY
     end, 20, "the walker to continue past the stander's tile")
     check(pastStander,
           "and kept walking through it rather than stopping on it")
