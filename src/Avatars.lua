@@ -88,6 +88,56 @@ function M:handle(av)
   return handle
 end
 
+-- Avatars are scenery, not obstacles -- and they lose every tie for depth.
+--
+-- Both halves are written straight onto the live NPC, because neither has a
+-- seam on the facade.  `passable` is the engine's own escape hatch:
+-- Collision.occupied skips any entity carrying it, which is exactly how the
+-- engine keeps its Pikachu follower out of the player's way.  Wrapping
+-- movement.collision instead would not cover it -- ledge hops and boulder
+-- landings ask Collision.occupied directly, so a wrapper would leave
+-- avatars blocking the steps that hurt most, doors and map exits included.
+--
+-- Depth is the other half.  The overworld draws by sorting entities on py,
+-- and that sort is unstable, so two characters standing on one tile trade
+-- places from frame to frame; there is no z-order to ask for.  Lifting the
+-- avatar by AVATAR_DEPTH_NUDGE loses it every tie against the player, whose
+-- py is always a whole pixel, and changes nothing else.  It has to be
+-- applied *after* NPC:update rather than from this mod's own tick: the
+-- engine recomputes py mid-step -- and only while `moving` -- so a value
+-- written from the pump is overwritten before the frame is drawn.  Hence a
+-- per-instance override that runs the class method first, and the
+-- whole-pixel guard that keeps an idle avatar from drifting a hundredth of
+-- a pixel every frame it stands still.
+--
+-- undecorate has to leave the table indistinguishable from a vanilla one.
+-- The engine pools NPC tables, so a leftover `passable` would be born again
+-- on some later ordinary NPC and quietly let the player walk through it.
+function M.decorate(npc)
+  if type(npc) ~= "table" or npc.mmoAvatar then return end
+  npc.mmoAvatar = true
+  npc.passable = true
+
+  -- resolves through the metatable to the engine's class method
+  local base = npc.update
+  if type(base) ~= "function" then return end
+  rawset(npc, "update", function(self, ...)
+    base(self, ...)
+    local py = self.py
+    if py and py % 1 == 0 then
+      self.py = py - Config.AVATAR_DEPTH_NUDGE
+    end
+  end)
+end
+
+function M.undecorate(npc)
+  if type(npc) ~= "table" then return end
+  npc.mmoAvatar = nil
+  npc.passable = nil
+  -- back to the class method via the metatable
+  rawset(npc, "update", nil)
+end
+
 function M:spawn(player)
   if not (player.map and player.x and player.y) then return nil end
   local sprite = self:spriteFor(player.sprite)
@@ -113,6 +163,11 @@ function M:spawn(player)
     y = player.y,
     facing = player.facing,
   }
+
+  -- A handle the engine will not hand over yet is not a failed spawn: the
+  -- avatar is already on the map, and advance re-decorates on the next tick.
+  local handle = self:handle(self.spawned[player.id])
+  M.decorate(handle and handle.npc)
   return npcId
 end
 
@@ -120,6 +175,10 @@ function M:despawn(playerId)
   local av = self.spawned[playerId]
   if not av then return false end
   self.spawned[playerId] = nil
+  -- before the NPC goes back in the pool, and tolerant of a handle that has
+  -- already gone: undecorate on nil is a no-op
+  local handle = self:handle(av)
+  M.undecorate(handle and handle.npc)
   mod.world:removeNpc(av.npcId)
   return true
 end
@@ -185,6 +244,10 @@ function M:advance(av, player)
   local handle = self:handle(av)
   local npc = handle and handle.npc
   if not npc then return self:resync(player) end
+
+  -- Heals an avatar the engine rebuilt under us, and costs one comparison
+  -- when it did not: decorate returns immediately on an already-marked NPC.
+  M.decorate(npc)
 
   -- mid-step: let NPC:update finish it. Interrupting would strand px/py
   -- between two cells.
