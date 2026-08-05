@@ -75,7 +75,9 @@ Board.__index = Board
 -- away: they play, chat, trade and battle as normal, and their results
 -- simply do not score. Refusing the connection would mean a lost save file
 -- costs somebody the hub; scoring them into a stranger's rating would mean
--- the ticket bought nothing.
+-- the ticket bought nothing. And while the claim is still only *minted* --
+-- never proved by a returning token, never scored under -- the name follows
+-- whoever is here now rather than locking; Board:claim states why.
 local function keyOf(name)
   if type(name) ~= "string" then return nil end
   local clean = name:upper():gsub("^%s+", ""):gsub("%s+$", "")
@@ -147,7 +149,11 @@ function Board:entry(name)
               points = Config.RANK_START, played = 0, won = 0,
               -- the digest of whatever claimed this name, or nil for a name
               -- nobody has claimed yet
-              tokenHash = nil }
+              tokenHash = nil,
+              -- whether that claim was ever *proved* -- see Board:claim. A
+              -- minted claim is provisional: nobody has yet shown they hold
+              -- the ticket.
+              confirmed = false }
     self.entries[key] = entry
     self.count = self.count + 1
   end
@@ -160,39 +166,89 @@ end
 --
 -- Answers one of four words, and the caller acts on it:
 --
---   "claimed"  -- the name was free; `fresh` now owns it and must be handed
---                 to the player, once. They score.
---   "owner"    -- the token presented matches the one on file. They score.
+--   "claimed"  -- the name was free, or its claim was still provisional;
+--                 `fresh` now owns it and must be handed to the player,
+--                 once. They score.
+--   "owner"    -- the token presented matches the one on file. They score,
+--                 and the claim is confirmed from here on.
 --   "impostor" -- the name is claimed and this is not the holder. They play
 --                 exactly as before and their battles score nothing.
 --   "open"     -- the name is free and there was no token to claim it with
 --                 (the hub could not mint one). They score, and the name
 --                 stays claimable by whoever turns up with one next.
 --
+-- **A claim is provisional until it is proved.** Minting one only says a
+-- ticket was posted, not that it arrived: a welcome that never reached the
+-- client, a hub restarted before its file was written, or a save that never
+-- carried the token to disk all leave a name claimed by nobody who can
+-- present it -- and under the old rule that locked the rightful owner out of
+-- their own name forever. So an unconfirmed claim on a name that has never
+-- scored is transferred to whoever is connecting now. Nothing is stolen by
+-- that: an unscored name holds no rating, and the owner who lost the race
+-- takes it back the same way. The moment a name is proved (a returning
+-- token) or worth something (a settled battle) it is confirmed, and from
+-- then on the wrong ticket is refused exactly as before.
+--
+-- `inUse` is the caller's answer to "is somebody *ranked* connected under
+-- this name right now" -- board state alone cannot see it, and without it the
+-- leniency above becomes theft: a player sitting on an unproved, unscored
+-- claim would have it taken from under them by the next hello for the same
+-- name, and their next settled win would land on the taker's claim. Two
+-- friends who never changed the default trainer name are enough to reach
+-- that by accident. So a live holder is an impostor gate like `confirmed`
+-- and `played`, and the reclaim this rule exists for -- where the owner is
+-- not connected at all -- is untouched.
+--
+-- **One caller-shaped divergence from server/lib/rank.js, stated rather than
+-- hidden:** the board rules below are identical, but the `fresh` these two
+-- are handed is not. Hub:newToken() can answer nil (the entropy pool has no
+-- state to draw from), where the node hub's crypto.randomBytes cannot fail
+-- that way -- so on a reclaim with a dead pool this side answers "impostor"
+-- where the node hub answers "claimed". That is the two hubs being handed
+-- different arguments, not the two boards disagreeing about the same ones.
+--
 -- Only the digest is kept. A ranking file that leaks tells an attacker who
 -- is on the board, which is public anyway, and gives them no way to be any
 -- of them.
-function Board:claim(name, presented, fresh)
+function Board:claim(name, presented, fresh, inUse)
   local entry = self:entry(name)
   if not entry then return "impostor" end
 
   if entry.tokenHash then
-    if type(presented) ~= "string" or presented == "" then return "impostor" end
-    local hash = Sha256.hex(presented)
-    -- Sha256.equals, never ==: a plain compare returns as soon as two bytes
-    -- differ, which is the same leak the join-code check avoids. The value
-    -- here is a digest rather than the secret, so the leak is small -- but
-    -- the constant-time compare is already in the building.
-    if type(hash) ~= "string" or not Sha256.equals(entry.tokenHash, hash) then
+    if type(presented) == "string" and presented ~= "" then
+      local hash = Sha256.hex(presented)
+      -- Sha256.equals, never ==: a plain compare returns as soon as two bytes
+      -- differ, which is the same leak the join-code check avoids. The value
+      -- here is a digest rather than the secret, so the leak is small -- but
+      -- the constant-time compare is already in the building.
+      if type(hash) == "string" and Sha256.equals(entry.tokenHash, hash) then
+        entry.confirmed = true
+        return "owner"
+      end
+    end
+    -- Unproved, unscored, worth nothing and nobody's right now: the claim
+    -- moves rather than shutting the name. `played` is the usual test --
+    -- Board:record is the only thing that raises it, and a draw is never
+    -- recorded -- and `points` is the belt on top of it, so a hand-edited
+    -- file with a rating but no games behind it is not a name anybody can
+    -- walk into.
+    if entry.confirmed or entry.played > 0
+       or entry.points > Config.RANK_START then
       return "impostor"
     end
-    return "owner"
+    if inUse then return "impostor" end
+    if type(fresh) ~= "string" or fresh == "" then return "impostor" end
+    local minted = Sha256.hex(fresh)
+    if type(minted) ~= "string" then return "impostor" end
+    entry.tokenHash = minted
+    return "claimed"
   end
 
   if type(fresh) ~= "string" or fresh == "" then return "open" end
   local hash = Sha256.hex(fresh)
   if type(hash) ~= "string" then return "open" end
   entry.tokenHash = hash
+  entry.confirmed = false
   return "claimed"
 end
 
@@ -307,6 +363,9 @@ function Board:record(winnerName, loserName, now)
   loser.points = clampPoints(loser.points - loss)
   winner.played, loser.played = winner.played + 1, loser.played + 1
   winner.won = winner.won + 1
+  -- Both names now hold a result, so neither claim is provisional any more:
+  -- from here the ticket is the only way back in (see Board:claim).
+  winner.confirmed, loser.confirmed = true, true
 
   self:noteMeeting(winner.key, loser.key, now)
   self:sweep(now)
@@ -355,16 +414,33 @@ end
 -- neither side has to know the other's table layout.  Meetings are
 -- deliberately *not* saved: they are a one-hour anti-farm window, and a hub
 -- that restarts has already lost the sessions they belonged to.
+--
+-- A row that is unproved, unplayed and still at the starting rating is not
+-- written at all.  Nothing is lost by that -- Board:claim hands such a name
+-- to whoever connects next by design, so persisting it buys exactly nothing
+-- -- and what it stops is the file growing a row (and being rewritten) for
+-- every passing hello, which on a hub anyone can dial is a connect loop with
+-- a random name each time.  Confirmed and scored claims are what restarting
+-- has to survive, and those still travel.
 
 function Board:export()
   local out = {}
   for _, entry in pairs(self.entries) do
-    out[#out + 1] = { name = entry.name, sprite = entry.sprite,
-                      points = entry.points, played = entry.played,
-                      won = entry.won,
-                      -- the digest, never the token: a hub that loses this
-                      -- file loses the season, not everybody's identity
-                      tokenHash = entry.tokenHash }
+    local throwaway = not entry.confirmed and entry.played <= 0
+                      and entry.points <= Config.RANK_START
+    if not throwaway then
+      out[#out + 1] = { name = entry.name, sprite = entry.sprite,
+                        points = entry.points, played = entry.played,
+                        won = entry.won,
+                        -- the digest, never the token: a hub that loses this
+                        -- file loses the season, not everybody's identity
+                        tokenHash = entry.tokenHash,
+                        -- Additive, and read back below. A hub built before
+                        -- this field ignores it on the way in -- import copies
+                        -- the fields it knows and nothing else -- so a new
+                        -- hub's file still loads on an old one.
+                        confirmed = entry.confirmed }
+    end
   end
   table.sort(out, function(a, b)
     if a.points ~= b.points then return a.points > b.points end
@@ -391,10 +467,21 @@ function Board:import(rows)
         entry.won = math.max(math.floor(tonumber(row.won) or 0), 0)
         -- A hash that is not a hash is dropped rather than kept: a row with
         -- rubbish in this field would refuse its rightful owner forever,
-        -- whereas an unclaimed name can simply be claimed again.
-        if type(row.tokenHash) == "string"
+        -- whereas an unclaimed name can simply be claimed again. The length
+        -- is part of the shape, and server/lib/rank.js checks the same 64:
+        -- a file the two hubs read differently is two boards.
+        if type(row.tokenHash) == "string" and #row.tokenHash == 64
            and row.tokenHash:match("^[0-9a-f]+$") then
           entry.tokenHash = row.tokenHash
+        end
+        -- A file written before `confirmed` existed says nothing about
+        -- proof, so the results decide: a name that has settled a battle is
+        -- worth protecting and is taken as confirmed, and one that has not
+        -- stays provisional -- the same leniency a fresh claim gets.
+        if type(row.confirmed) == "boolean" then
+          entry.confirmed = row.confirmed
+        else
+          entry.confirmed = entry.played > 0
         end
       end
     end
