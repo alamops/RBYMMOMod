@@ -603,17 +603,24 @@ end
 -- renderer's own multi-byte-aware pass, the same seam src/Overlay.lua clips
 -- on; the byte path stays for a build without it.
 local function clipPlace(text, room)
+  local cut
   local Font = mod.ui and mod.ui.Font
   if type(Font) == "table" and type(Font.split) == "function" then
     local ok, spans = pcall(Font.split, text)
     if ok and type(spans) == "table" then
       if #spans <= room then return text end
       local last = spans[room]
-      return text:sub(1, (last and last.to) or room)
+      cut = text:sub(1, (last and last.to) or room)
     end
   end
-  if #text > room then return text:sub(1, room) end
-  return text
+  if not cut then
+    if #text <= room then return text end
+    cut = text:sub(1, room)
+  end
+  -- A cut that lands on a space -- the "PALLET " of PALLET TOWN -- would sit
+  -- a glyph left of the right edge once ListMenu right-aligns it, out of
+  -- line with the PARTY and BUSY rows above, and the space says nothing.
+  return (cut:gsub("%s+$", ""))
 end
 
 -- The right-hand column for a player who is neither in your party nor busy:

@@ -639,6 +639,11 @@ function start(options = {}) {
    * running", which are the same file otherwise and mean opposite things to
    * somebody deciding whether to restart the hub.
    *
+   * `heartbeatMs` is the schedule the file promises to keep. A reader decides
+   * "overdue" by comparing the age against it, and the only honest source for
+   * that number is the process doing the writing -- a reader with its own
+   * constant would call a hub down the moment the two releases disagreed.
+   *
    * Written whole and renamed over the old file, like the ranking: a reader
    * polling this while the hub writes it must never meet half a document.
    * Only ever called after the bind, so boundHost/boundPort are the real
@@ -650,6 +655,7 @@ function start(options = {}) {
       version: 1,
       startedAt,
       updatedAt: Date.now(),
+      heartbeatMs: STATUS_HEARTBEAT_MS,
       stoppedAt: stoppedAt || null,
       host: boundHost,
       port: boundPort,

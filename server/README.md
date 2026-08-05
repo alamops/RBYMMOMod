@@ -154,7 +154,7 @@ container, where it is on `PATH`.
 | `init` | first-run wizard: writes `config.json` at mode 0600 and prints a passcode once. Refuses to overwrite an existing file. | `--yes` (ask nothing, take flags and defaults), `--force` (replace an existing config), `--code CODE` (use this passcode instead of a generated one), plus any config flag below |
 | `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
 | `status` | every effective setting, its value, and where that value came from (`flag` / `env` / `file` / `default`). Codes masked. | — |
-| `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (the snapshot's player rows verbatim, unformatted) |
+| `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (one object per player, the nine contract fields only) |
 | `ranking` | the ranked season out of `ranking.json`: place, name, points. Top ten, best first. | `--json`, `--all` (every player who has scored, not just the top ten) |
 | `config list` | every setting, its current value, and its clamp range | — |
 | `config get <path>` | one setting, e.g. `limits.maxPending` | — |
@@ -229,9 +229,10 @@ one behind: `status.json`, next to `config.json`, rewritten whenever the
 roster changes and beaten every ten seconds regardless. Four things can come
 back:
 
-- **live** — a heartbeat inside the last twenty-five seconds. The header says
-  how old the reading is, because two seconds of lag is worth knowing about
-  and worth not hiding.
+- **live** — a heartbeat inside the last 2.5 beats (twenty-five seconds, at the
+  default ten-second beat; the file carries its own `heartbeatMs` and the CLI
+  measures against that). The header says how old the reading is, because two
+  seconds of lag is worth knowing about and worth not hiding.
 - **stopped** — the hub shut down cleanly and stamped the file on its way out.
   *"The hub stopped 12m ago (0.0.0.0:7788), so nobody is online."* No roster,
   because it left none.
@@ -390,6 +391,7 @@ cannot otherwise ask it — who is connected, and where:
   "version": 1,
   "startedAt": 1754300000000,
   "updatedAt": 1754300012345,
+  "heartbeatMs": 10000,
   "stoppedAt": null,
   "host": "0.0.0.0", "port": 7788, "protocol": 5, "maxPlayers": 8,
   "players": [
@@ -409,6 +411,11 @@ cannot otherwise ask it — who is connected, and where:
   and empties `players`, which is what lets a reader distinguish "stopped"
   from "died". A reader treats a gap of more than 2.5 heartbeats as a hub that
   is no longer running.
+- **The file says how often it is written.** `heartbeatMs` is the interval the
+  writing hub is actually keeping, and `players` measures staleness against
+  *that* rather than against a number of its own — so a hub on a slower beat is
+  not called down for keeping it. 10 seconds is only the assumption for a file
+  written before the field existed.
 - **A step is not a roster change.** Joining, leaving, starting or finishing a
   trade or battle, teaming up, being scored, and *crossing into another map*
   all mark it dirty; walking around inside one map does not, because the
@@ -418,8 +425,10 @@ cannot otherwise ask it — who is connected, and where:
   second per player.
 - **It holds no secrets.** Names, characters, map cells and points — the same
   things every other player in the world can already see. No join codes, no
-  claim-ticket hashes, no session or party ids, no IP addresses. It is safe to
-  `cat` on a shared screen, which `config.json` is not.
+  claim-ticket hashes, no session or party ids, no player addresses — the
+  hub's own bound `host`/`port` are in there, but those are already in
+  `config.json`. It is safe to `cat` on a shared screen, which `config.json`
+  is not.
 - `map` stays the raw engine id (`PALLET_TOWN`); turning that into
   `PALLET TOWN` is the reader's job, not the file's.
 - Deleting it costs one heartbeat. It is state about *this instant*, not
