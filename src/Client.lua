@@ -22,6 +22,7 @@ local Sessions = need("Sessions")
 local World = need("World")
 local HostServer = need("HostServer")
 local Chars = need("Chars")
+local Cast = need("Cast")
 -- Only for its entropy pool: this file mints join codes and Hub mints
 -- challenge nonces, and both have to come off one pool (see Hub.lua's
 -- "the entropy pool" header for why it lives there and what it is worth).
@@ -52,7 +53,25 @@ ctx.party = party
 ctx.server = server
 
 local presenceClock = 0
-local lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
+local lastSent =
+  { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
+
+-- Whether the last step this player committed was a fast one -- sprinted
+-- with B on foot, *or* taken on the bike.  Not "was it a run": a run and a
+-- bike both cost 8 frames a tile, so one boolean says everything a watcher
+-- needs and asking which would only give them a distinction they cannot
+-- draw.  Written by the movement.speed wrap, which is the only place that
+-- can know it -- held B is a fact about the local keyboard and moveCtx.onBike
+-- is a fact about the step, and nothing else in the process sees either.
+-- Read by pushPresence, so everyone else's copy paces the avatar to match.
+--
+-- Surfing is not fast: it is a 16-frame step like walking, so it stays
+-- false and a surfer's avatar keeps the engine's own default pace.
+--
+-- It is deliberately "the last step", not "B is down right now": a stale
+-- true while standing still costs nothing, because an avatar that is not
+-- stepping has no step to speed up, and the next ordinary step clears it.
+M.fastNow = false
 
 -- Ranked PVP, as this client sees it.
 --
@@ -739,6 +758,18 @@ function M.restoreLook()
   originalLook, lookOwner = nil, nil
 end
 
+-- The character you are wearing right now, or nil.
+--
+-- Not the same question as M.spriteChoice(): the choice is what you picked
+-- and keeps its answer forever, while this is only true between applyLook
+-- and restoreLook -- that is, while you are actually in a game. The battle
+-- and trainer-card pics below hang off *this* one, so a single-player game
+-- you never connected in draws exactly what vanilla draws.
+function M.wornLook()
+  if lookOwner == nil then return nil end
+  return M.spriteChoice()
+end
+
 -- ------- connect / disconnect
 
 function M.connect(a, b)
@@ -846,7 +877,13 @@ function M.disconnect()
   ctx.roster:reset()
   ctx.chat:clear()
   transport:close()
-  lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
+  lastSent =
+    { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
+  -- Cleared with the rest of it, because "the last step was a fast one" is
+  -- only true of a session: a player who sprinted or cycled, left, and
+  -- rejoined standing still would otherwise advertise fast=true in their
+  -- hello and go on doing so until they took a step to clear it.
+  M.fastNow = false
   dialled, authSent = nil, false
   -- A rating belongs to the hub that keeps it, so leaving takes it off the
   -- screen rather than leaving a stale number on your own card in
@@ -899,22 +936,72 @@ function M.say(a, b, c, d)
   return true
 end
 
+-- ------- running
+
+-- One-shot latch for the failure warn below, in the shape Avatars uses for
+-- an unknown sprite.  A step's speed is asked for several times a second,
+-- and everything that can make runSpeed throw -- an options table that no
+-- longer answers, a moveCtx of an unexpected shape -- is a standing
+-- condition rather than a blip, so an unlatched warn would say the same
+-- sentence a few times a second for as long as the game is open.  Once is
+-- the whole message; the fallback below keeps working either way.
+local runSpeedWarned = false
+
+-- What a step should cost in frames, and whether that is a sprint.
+--
+-- Declared out here rather than inside the wrap so the hot path can pcall it
+-- by name and allocate nothing per step. The arithmetic is deliberately
+-- relative: the engine hands us this game's walk speed, and dividing it is
+-- the only way that stays true on a data pack that says a tile is not 16
+-- frames. `frames` is frames-per-tile, so lower is faster.
+--
+-- Everything that is not a plain on-foot step falls through untouched. The
+-- bike is excluded because it is already this fast and because held B is
+-- taken there -- it is Cycling Road's brake -- and surfing because a sprint
+-- across water is not a thing any of these games has.
+--
+-- "Untouched" is about the *speed*, not about the wire: a bike step still
+-- goes out as a fast one, because it is one. The wrap below is what ORs the
+-- two together, so this function stays the one answer to "how long does this
+-- step take" and never has to say why.
+local function runSpeed(frames, moveCtx)
+  if mod.options:get("run") == false then return frames, false end
+  if type(frames) ~= "number" then return frames, false end
+  if not moveCtx or moveCtx.onBike or moveCtx.surfing then return frames, false end
+  local input = moveCtx.input
+  if not (input and input.isDown and input:isDown("b")) then
+    return frames, false
+  end
+  return math.max(1, math.floor(frames / Config.RUN_DIVISOR)), true
+end
+
 -- ------- presence
 
-local function presenceChanged(current, busy)
+local function presenceChanged(current, busy, fast)
   local mapId = current and current.mapId
   local x = current and current.x
   local y = current and current.y
   local facing = current and current.facing
   return lastSent.map ~= mapId or lastSent.x ~= x or lastSent.y ~= y
     or lastSent.facing ~= facing or lastSent.busy ~= busy
+    -- Compared like the rest of them, defensively rather than because a
+    -- known path needs it.  Every write to fastNow happens outside this
+    -- function, in the movement.speed wrap, and that wrap only runs for a
+    -- step the engine has committed -- a turn on the spot and a step into a
+    -- wall are answered "turned"/"blocked" before the speed is ever asked
+    -- for, so neither can flip the flag.  A committed step changes the cell
+    -- too, so today the checks above would carry it; the field is compared
+    -- anyway so that a future writer of fastNow cannot silently strand a
+    -- pace change until the next move.
+    or lastSent.fast ~= fast
 end
 
 local function pushPresence(force)
   if not transport:isReady() then return end
   local current = World.current()
   local busy = sessions:isBusy()
-  if not force and not presenceChanged(current, busy) then return end
+  local fast = M.fastNow and true or false
+  if not force and not presenceChanged(current, busy, fast) then return end
 
   lastSent = {
     map = current and current.mapId,
@@ -922,6 +1009,7 @@ local function pushPresence(force)
     y = current and current.y,
     facing = current and current.facing,
     busy = busy,
+    fast = fast,
   }
   transport:send(Wire.MOVE, {
     map = lastSent.map,
@@ -929,6 +1017,7 @@ local function pushPresence(force)
     y = lastSent.y,
     facing = lastSent.facing,
     busy = busy,
+    fast = fast,
   })
 end
 
@@ -1058,12 +1147,17 @@ handlers[Wire.MOVE] = function(_, msg)
   local facing = Wire.facing(msg.facing)
   ctx.roster:setBusy(id, msg.busy)
   ctx.roster:setParty(id, msg.party)
+  -- Coerced here rather than trusted: this is the raw message, and the
+  -- roster stores what it is given.  Strict, the way Wire.presence and both
+  -- hubs are -- only a literal true is a fast step, so a client sending 0 or
+  -- "" is read the same here as it is everywhere else on the wire.
+  local fast = msg.fast == true
   if map and x and y then
-    ctx.roster:move(id, map, x, y, facing)
+    ctx.roster:move(id, map, x, y, facing, fast)
   else
     -- no cell: the player is in a battle or a menu, so they leave the world
     -- without leaving the roster
-    ctx.roster:move(id, nil, nil, nil, facing)
+    ctx.roster:move(id, nil, nil, nil, facing, fast)
     ctx.avatars:despawn(id)
   end
 end
@@ -1224,6 +1318,11 @@ end
 -- ------- install
 
 function M.install()
+  -- First, because everything that reads the character catalog reads it
+  -- after this: the options row built two lines down offers these ids, and
+  -- the CHARACTER screen lists whatever the catalog holds when it opens.
+  Cast.install()
+
   local spriteChoices = {}
   for _, row in ipairs(Config.SPRITES) do
     spriteChoices[#spriteChoices + 1] = { row[1], row[2] }
@@ -1251,6 +1350,11 @@ function M.install()
     { key = "sprite", label = "MY SPRITE", type = "choice",
       default = Config.DEFAULT_SPRITE, choices = spriteChoices },
     { key = "bubbles", label = "BUBBLES", type = "toggle", default = true },
+    -- Holding B to run.  On by default because it is the reason the feature
+    -- exists, and a row at all because B already means "cancel" everywhere
+    -- else -- a player who finds their walk unexpectedly fast should have
+    -- somewhere to turn it off without uninstalling the mod.
+    { key = "run", label = "B TO RUN", type = "toggle", default = true },
   })
 
   ui:install()
@@ -1268,12 +1372,63 @@ function M.install()
     return next(game, dt)
   end)
 
+  -- One committed step's speed.  The engine asks once per step, never per
+  -- frame, and floors whatever comes back to at least 1.
+  --
+  -- Not gated on being connected: running is a movement feature that the
+  -- network happens to report, not a multiplayer one, so it works the same
+  -- in a single-player game with the hub switched off. What crosses the wire
+  -- is only the flag recorded here.
+  --
+  -- The flag is "this step was fast", not "B was held": a bike step is fast
+  -- without a sprint and without this wrap changing its speed at all, so it
+  -- is ORed in below. Reading onBike out here rather than inside runSpeed is
+  -- what keeps it true of the step whatever runSpeed decided -- including
+  -- the failure branch, where the pace is still known even though the speed
+  -- was not -- and the type test is what stops a moveCtx of an unexpected
+  -- shape turning a field read into a throw of its own.
+  mod.hooks:wrap("movement.speed", function(next, frames, moveCtx)
+    local onBike = type(moveCtx) == "table" and moveCtx.onBike == true
+    local ok, speed, sprint = pcall(runSpeed, frames, moveCtx)
+    if not ok then
+      -- pcall has put the error where the speed would have been. Whatever
+      -- went wrong, the step still has to happen at *some* speed, and the
+      -- honest one is the speed we were handed.
+      if not runSpeedWarned then
+        runSpeedWarned = true
+        mod.log:warn("could not work out a running speed (%s); walking this "
+          .. "step -- turn B TO RUN off under START > OPTIONS if it repeats",
+          tostring(speed))
+      end
+      M.fastNow = onBike
+      return next(frames, moveCtx)
+    end
+    M.fastNow = sprint == true or onBike
+    return next(speed, moveCtx)
+  end)
+
   mod.hooks:wrap("render.hud", function(next, game, viewport)
     local result = next(game, viewport)
     if mod.options:get("bubbles") ~= false then
       overlay:draw(game, viewport)
     end
     return result
+  end)
+
+  -- The rest of the character, for the three screens the sprite catalog does
+  -- not reach: the battle back pic, the trainer card and Oak's intro all ask
+  -- Sprites.playerPath for a pic, and this hook is the last word on what it
+  -- answers. Only while you are wearing one of the mod's own characters --
+  -- Cast.pic returns nil for every vanilla id, so picking COOLTRAINER still
+  -- fights as Red, exactly as it always has.
+  --
+  -- Decorating after next() rather than instead of it: a mod that replaced
+  -- the pic for a reason of its own still runs, and still wins whenever this
+  -- player is not wearing a NIRE.
+  mod.hooks:wrap("player.sprite", function(next, path, ctx)
+    local drawn = next(path, ctx)
+    local mine = Cast.pic(M.wornLook(), ctx and ctx.side)
+    return mine or drawn
   end)
 
   mod.hooks:wrap("ui.start_menu.items", function(next, game, items)
@@ -1359,6 +1514,11 @@ function M.install()
   -- what this player looks like in their own game, for tests and for a mod
   -- that wants to know
   mod.exports.myLook = function() return M.spriteChoice() end
+  -- What you are wearing rather than what you picked -- nil in a
+  -- single-player game. The end-to-end driver reads this to tell "the
+  -- character was chosen" from "the character is actually being worn",
+  -- which is the difference the battle and trainer-card pics hang off.
+  mod.exports.wornLook = function() return M.wornLook() end
   mod.exports.avatarState = function()
     local out = {}
     for _, player in ipairs(ctx.roster:sorted()) do
@@ -1369,6 +1529,10 @@ function M.install()
         avatarX = ax, avatarY = ay,
         spawned = ctx.avatars.spawned[player.id] ~= nil,
         walking = ctx.avatars:isWalking(player.id),
+        -- the roster's word, not the NPC's: this is what the sender said
+        -- about the pace of their own last step, which is what the drivers
+        -- assert on
+        fast = player.fast and true or false,
         avatarMap = ctx.avatars.mapId,
       }
     end
