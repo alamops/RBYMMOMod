@@ -94,6 +94,10 @@ docs/screenshots/chat-log.png
 docs/screenshots/interact-menu.png
 docs/screenshots/link-battle.png
 docs/screenshots/trainer-card.png
+# The mod's own character in a battle. The trainer pic in it is this mod's
+# art, but everything around it -- the box, the font, the ball icons -- is
+# still decoded from the player's ROM, so the rule is the same one.
+docs/screenshots/nire-battle.png
 #
 # The in-game hosting and joining flows, captured by
 # tests/drivers/run-mmo-e2e.sh. Four of these are pure UI -- a list menu and

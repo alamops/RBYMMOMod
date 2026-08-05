@@ -22,6 +22,7 @@ local Sessions = need("Sessions")
 local World = need("World")
 local HostServer = need("HostServer")
 local Chars = need("Chars")
+local Cast = need("Cast")
 -- Only for its entropy pool: this file mints join codes and Hub mints
 -- challenge nonces, and both have to come off one pool (see Hub.lua's
 -- "the entropy pool" header for why it lives there and what it is worth).
@@ -578,6 +579,18 @@ function M.restoreLook()
   originalLook, lookOwner = nil, nil
 end
 
+-- The character you are wearing right now, or nil.
+--
+-- Not the same question as M.spriteChoice(): the choice is what you picked
+-- and keeps its answer forever, while this is only true between applyLook
+-- and restoreLook -- that is, while you are actually in a game. The battle
+-- and trainer-card pics below hang off *this* one, so a single-player game
+-- you never connected in draws exactly what vanilla draws.
+function M.wornLook()
+  if lookOwner == nil then return nil end
+  return M.spriteChoice()
+end
+
 -- ------- connect / disconnect
 
 function M.connect(a, b)
@@ -1121,6 +1134,11 @@ end
 -- ------- install
 
 function M.install()
+  -- First, because everything that reads the character catalog reads it
+  -- after this: the options row built two lines down offers these ids, and
+  -- the CHARACTER screen lists whatever the catalog holds when it opens.
+  Cast.install()
+
   local spriteChoices = {}
   for _, row in ipairs(Config.SPRITES) do
     spriteChoices[#spriteChoices + 1] = { row[1], row[2] }
@@ -1213,6 +1231,22 @@ function M.install()
     return result
   end)
 
+  -- The rest of the character, for the three screens the sprite catalog does
+  -- not reach: the battle back pic, the trainer card and Oak's intro all ask
+  -- Sprites.playerPath for a pic, and this hook is the last word on what it
+  -- answers. Only while you are wearing one of the mod's own characters --
+  -- Cast.pic returns nil for every vanilla id, so picking COOLTRAINER still
+  -- fights as Red, exactly as it always has.
+  --
+  -- Decorating after next() rather than instead of it: a mod that replaced
+  -- the pic for a reason of its own still runs, and still wins whenever this
+  -- player is not wearing a NIRE.
+  mod.hooks:wrap("player.sprite", function(next, path, ctx)
+    local drawn = next(path, ctx)
+    local mine = Cast.pic(M.wornLook(), ctx and ctx.side)
+    return mine or drawn
+  end)
+
   mod.hooks:wrap("ui.start_menu.items", function(next, game, items)
     local out = next(game, items)
     if type(out) ~= "table" then return out end
@@ -1296,6 +1330,11 @@ function M.install()
   -- what this player looks like in their own game, for tests and for a mod
   -- that wants to know
   mod.exports.myLook = function() return M.spriteChoice() end
+  -- What you are wearing rather than what you picked -- nil in a
+  -- single-player game. The end-to-end driver reads this to tell "the
+  -- character was chosen" from "the character is actually being worn",
+  -- which is the difference the battle and trainer-card pics hang off.
+  mod.exports.wornLook = function() return M.wornLook() end
   mod.exports.avatarState = function()
     local out = {}
     for _, player in ipairs(ctx.roster:sorted()) do

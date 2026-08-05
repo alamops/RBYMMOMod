@@ -207,6 +207,48 @@ M.SPRITES = {
 }
 M.DEFAULT_SPRITE = "SPRITE_RED"
 
+-- ------- the characters this mod brings of its own
+--
+-- The dial board for src/Cast.lua; the argument for every number is in that
+-- file's header.  These are the only sprite ids in this file that the
+-- engine's catalog does *not* already carry -- Cast registers them, which is
+-- why they can be offered in the options row above alongside ids the ROM
+-- guarantees.
+--
+-- `dir` holds three files, all original art shaped like the engine's own:
+-- walk.png (16x96, six 16x16 frames), front.png (56x56, the trainer-card and
+-- intro pic) and back.png (48x48, the battle back pic).
+--
+-- backScale is what a 48x48 back pic has to draw at.  The engine's default
+-- for a back pic is 2x, sized for the 32x32 the ROM carries -- 64 screen
+-- pixels with the feet pinned at y=96.  These are drawn at half again the
+-- detail, so 64/48 keeps the same footprint on screen: a taller trainer
+-- would stand in the text box.
+M.OWN_CHARS = {
+  { id = "SPRITE_NIRE", label = "NIRE",
+    dir = "assets/chars/nire", backScale = 64 / 48 },
+  { id = "SPRITE_NIRE_HOOD", label = "NIRE HOOD",
+    dir = "assets/chars/nire_hood", backScale = 64 / 48 },
+}
+
+-- Offered in the options row like any other character.  Built from the table
+-- above rather than written out twice: a character added there and forgotten
+-- here would be wearable from the CHARACTER screen and invisible in options,
+-- which is the kind of split nobody notices until a player reports it.
+for _, char in ipairs(M.OWN_CHARS) do
+  M.SPRITES[#M.SPRITES + 1] = { char.label, char.id }
+end
+
+-- Six 16x16 frames, the shape SpriteRenderer reads an overworld sheet in.
+M.CHAR_FRAMES = 6
+
+-- Mod art may opt into a ROM sprite's Advanced-mode OBJ palette assignment
+-- without claiming the pixels came from the ROM (sprites.paletteSource).
+-- Index 0 of the sprite-sheet table is the player's own, which is the one
+-- these characters are drawn to wear -- and the palette the sheets they came
+-- from were coloured with.
+M.CHAR_PALETTE_SOURCE = "ROM:SpriteSheetPointerTable[0]"
+
 M.NAME_MAX = 10
 
 -- ------- ranked PVP

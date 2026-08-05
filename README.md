@@ -37,8 +37,9 @@ until you say otherwise — installing it is never what opens a socket.
 **3. One of you hosts.** `START → MMO → HOST GAME`.
 
 Character creation comes first: pick a **NAME** (your save file keeps its
-own) and a **LOOK** from the 36 walking characters in the game. Confirm, pick
-a room size, and you're live.
+own) and a **LOOK** from the 36 walking characters in the game — plus
+**special characters from talented artists**, marked `▷` in the list.
+Confirm, pick a room size, and you're live.
 
 The HOST screen mints a **six-character passcode** on the way in and shows it
 in the `JOIN CODE` row — `A7K3P9`, letters and digits, no dashes. There's
@@ -47,7 +48,7 @@ Change it from that row if you'd rather pick your own.
 
 <p align="center">
   <img src="docs/screenshots/character-creation.png" width="270" alt="Character creation: NAME, LOOK and HOST rows">
-  <img src="docs/screenshots/character-picker.png" width="270" alt="The character list, scrolled to LANCE">
+  <img src="docs/screenshots/character-picker.png" width="270" alt="The character list, scrolled to NIRE">
   <img src="docs/screenshots/room-size.png" width="270" alt="Room size picker">
 </p>
 
@@ -262,8 +263,24 @@ game** — 36 of them. Be Lance. Be Giovanni. Be a Rocket grunt, a Biker, a
 Swimmer, Oak. You see it too, not just everyone else — and it's put back the
 moment you leave.
 
+**And some of them are special characters from talented artists**, drawn for
+this mod rather than lifted out of your ROM — `NIRE` and `NIRE HOOD` so far,
+by [Mirasein](https://www.mirasein.me). They sit in the same list as everyone
+else, marked with a **`▷`** in the cursor's column so you can tell which is
+which, and work the same way — worn on the map, sent over the wire, drawn on
+your trainer card — but they go one step further than a borrowed ROM
+character can. Wear one and it's you in **battle** too: the back pic over
+your shoulder when a battle starts, the pic on your trainer card, and the one
+Oak shrinks into if you start a new game. That only lasts as long as you're
+in a game, exactly like the walking sprite; leave and Red is back.
+
+<p align="center">
+  <img src="docs/screenshots/nire-battle.png" width="330" alt="A link battle starting, with NIRE's back pic where Red's would be">
+</p>
+
 If someone picks a character your ROM doesn't have, they show up as RED on
-your screen rather than not at all.
+your screen rather than not at all. That covers the artists' characters too,
+for anyone playing with an older copy of the mod.
 
 ### 🪪 CHECK THEIR CARD
 Walk up, press **A**, and **PROFILE** sits at the top of the menu — their
@@ -798,7 +815,19 @@ you:
 
 ---
 
+## 🙌 Credits
+
+- **[Mirasein](https://www.mirasein.me)** — original character art:
+  [`NIRE` and `NIRE HOOD`](#-be-somebody-else).
+- **[bryanthaboi](https://github.com/bryanthaboi/gen1recomp)** — Gen1Recomp,
+  and the link stack this mod's trade and battle run on unmodified.
+
+---
+
 ## Licence
 
 MIT, matching the engine. Bring your own ROM — this repo ships no game data
 and never will.
+
+Art credited above belongs to its author; it ships with this mod, not under
+its own separate terms.

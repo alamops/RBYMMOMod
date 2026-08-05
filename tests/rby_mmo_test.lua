@@ -124,7 +124,8 @@ end
 
 -- the seams it says it wraps
 for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items",
-                        "ui.naming.grid", "movement.speed" }) do
+                        "ui.naming.grid", "player.sprite",
+                        "movement.speed" }) do
   local chain = run.loader.hooks.chains[hook]
   check(chain ~= nil and #chain > 0, "wraps " .. hook)
 end
@@ -181,6 +182,43 @@ run.loader.modOptions["rby_mmo"] = nil
 
 end)()
 
+-- ------- the characters it brings of its own
+--
+-- Asserted through the real loader rather than a stub because the shape is
+-- the point: Chars.list offers a sprite only if the *catalog* says it walks,
+-- and SpriteRenderer cuts frames out of `image` on the strength of `frames`.
+-- A record that registered but lied about either would be a character that
+-- appears in the picker and then draws wrongly on every other player's
+-- screen, which no unit test of this mod's own code could see.
+for _, id in ipairs({ "SPRITE_NIRE", "SPRITE_NIRE_HOOD" }) do
+  local record = run.loader.content.sprites:get(id)
+  check(record ~= nil, id .. " is in the character catalog")
+  if record then
+    eq(record.walker, true, id .. " walks, so it can be worn")
+    eq(record.frames, 6, id .. " carries a full six-frame sheet")
+    check(type(record.image) == "string"
+          and record.image:find(MOD_PATH, 1, true) == 1,
+          id .. "'s art comes out of the mod folder")
+  end
+  -- and the game's own view of the catalog sees it, which is what the
+  -- renderer and the avatar layer actually read
+  check((run.data.sprites or {})[id] ~= nil, id .. " reaches the merged data")
+end
+
+-- The back pic is 48x48 against the 32x32 the engine sizes a trainer back
+-- for, so it ships the scale that keeps its feet in the same place. Missing,
+-- it would draw half again too tall and stand in the text box.
+for _, id in ipairs({ "rby_mmo_nire_back", "rby_mmo_nire_hood_back" }) do
+  local scale = run.loader.content.battle_sprite_scales:get(id)
+  check(scale ~= nil, id .. " sizes its back pic")
+  if scale then
+    check(scale.scale > 1 and scale.scale < 2, id .. " draws between 1x and 2x")
+    check(type(scale.path) == "string"
+          and scale.path:find(MOD_PATH, 1, true) == 1,
+          id .. " points at the mod's own art")
+  end
+end
+
 -- the inter-mod surface it publishes
 local exports = run.loader.exports["rby_mmo"]
 check(type(exports) == "table", "publishes exports")
@@ -211,6 +249,7 @@ run.release()
 
 local stubSave, stubOptions, stubPipelines = {}, {}, {}
 local stubSprites = {}
+local stubScales = {}
 
 local stubMod = {
   id = "rby_mmo",
@@ -234,7 +273,10 @@ local stubMod = {
     define = function() end,
     get = function(_, key) return stubOptions[key] end,
   },
-  -- only what Overlay's pipeline query touches
+  -- the mod's own files, addressed the way the loader addresses them
+  assets = { path = function(_, relative) return MOD_PATH .. "/" .. relative end },
+  -- only what Overlay's pipeline query touches, plus the two registries Cast
+  -- writes the mod's own characters into
   content = {
     sprites = {
       each = function()
@@ -246,6 +288,11 @@ local stubMod = {
         end
       end,
       get = function(_, id) return stubSprites[id] end,
+      register = function(_, id, record) stubSprites[id] = record end,
+    },
+    battle_sprite_scales = {
+      get = function(_, id) return stubScales[id] end,
+      register = function(_, id, record) stubScales[id] = record end,
     },
     render_pipelines = {
       each = function(self)
@@ -2273,7 +2320,153 @@ eq(Client:playerName(saveGame), "GREEN", "and so does playerName's")
 
 end)()
 
+-- ------- the characters the mod brings of its own
+--
+-- Wrapped for scope like the two sections above, for the same reason: this
+-- chunk is close enough to Lua's 200-local ceiling that one more section at
+-- the top level is enough to cross it.
+
+;(function()
+
+local Cast = need("Cast")
+
 stubSprites = {}
+stubScales = {}
+check(Cast.install(), "the mod's own characters register")
+
+local ids = Cast.ids()
+eq(#ids, 2, "two of them")
+eq(ids[1], "SPRITE_NIRE", "NIRE")
+eq(ids[2], "SPRITE_NIRE_HOOD", "and NIRE HOOD")
+
+-- Installing twice would be a duplicate registration, which the loader is
+-- entitled to refuse -- and F5 in dev mode re-runs the entry chunk.
+check(Cast.install(), "installing again is a no-op rather than a second try")
+eq(#Cast.ids(), 2, "and does not double the cast")
+
+-- The catalog is what everything downstream reads, so what matters is that
+-- the record satisfies the same filter every other wearable character does.
+local offered = {}
+for _, id in ipairs(Chars.list()) do offered[id] = true end
+check(offered.SPRITE_NIRE and offered.SPRITE_NIRE_HOOD,
+      "so the CHARACTER screen offers them like any other character")
+eq(Chars.available("SPRITE_NIRE"), true, "and a peer wearing one can draw it")
+eq(Chars.label("SPRITE_NIRE_HOOD"), "NIRE HOOD", "under a readable name")
+
+-- Every character in the options row has to be a character that exists, or
+-- the row offers a choice that silently resolves back to RED.
+for _, row in ipairs(Config.SPRITES) do
+  if row[2] == "SPRITE_NIRE" or row[2] == "SPRITE_NIRE_HOOD" then
+    offered[row[2]] = "listed"
+  end
+end
+eq(offered.SPRITE_NIRE, "listed", "NIRE is offered in the options row too")
+eq(offered.SPRITE_NIRE_HOOD, "listed", "and so is NIRE HOOD")
+
+-- ------- the pics the catalog does not cover
+--
+-- "front" is the trainer card, Oak's intro and the Hall of Fame; "back" is
+-- the battle pic. A vanilla character answers nothing at all, which is what
+-- keeps wearing COOLTRAINER from changing what you fight as.
+local back = Cast.pic("SPRITE_NIRE", "back")
+local front = Cast.pic("SPRITE_NIRE", "front")
+check(back and back:find("back.png", 1, true), "NIRE has a battle back pic")
+check(front and front:find("front.png", 1, true), "and a trainer-card pic")
+eq(Cast.pic("SPRITE_NIRE", nil), front, "an unnamed side is the front one")
+eq(Cast.pic("SPRITE_RED", "back"), nil, "RED keeps the pics the game gave it")
+eq(Cast.pic(nil, "back"), nil, "and wearing nothing changes nothing")
+eq(Cast.owns("SPRITE_NIRE"), true, "NIRE is ours")
+eq(Cast.owns("SPRITE_RED"), false, "RED is not")
+
+-- ------- the art is really there, and really the size the engine reads it at
+--
+-- A PNG's IHDR is its first chunk, so width and height are bytes 17..24 --
+-- enough to catch the failure this cannot otherwise see: a sheet that is one
+-- frame short, or a back pic resaved at another size, loads without
+-- complaint and then draws wrongly. The scale registered for the back pic is
+-- only correct for the size asserted here.
+local function pngSize(path)
+  local handle = io.open(path, "rb")
+  if not handle then return nil end
+  local head = handle:read(24)
+  handle:close()
+  if type(head) ~= "string" or #head < 24 then return nil end
+  local function be32(at)
+    local a, b, c, d = head:byte(at, at + 3)
+    return ((a * 256 + b) * 256 + c) * 256 + d
+  end
+  return be32(17), be32(21)
+end
+
+for _, char in ipairs(Config.OWN_CHARS) do
+  for file, want in pairs({ ["walk.png"] = { 16, 96 },
+                            ["front.png"] = { 56, 56 },
+                            ["back.png"] = { 48, 48 } }) do
+    local w, h = pngSize(MOD_PATH .. "/" .. char.dir .. "/" .. file)
+    eq(w, want[1], char.label .. "'s " .. file .. " is " .. want[1] .. " wide")
+    eq(h, want[2], "and " .. want[2] .. " tall")
+  end
+end
+
+-- 48 * (64/48) = 64: the same screen height the 32x32 the engine sizes a
+-- trainer back for reaches at its default 2x, so the feet land where they
+-- have always landed.
+for _, char in ipairs(Config.OWN_CHARS) do
+  local scale = stubScales[Cast.scaleId(char)]
+  check(scale ~= nil, char.label .. "'s back pic is sized")
+  check(scale and math.abs(scale.scale * 48 - 64) < 0.001,
+        "to the height a vanilla back pic draws")
+end
+
+-- ------- the mark that says a character came with the mod
+--
+-- The CHARACTER list is 36 ROM characters and two of ours, and the rule for
+-- the mark is small enough to state exactly: ours, visible, and not the one
+-- under the cursor -- which is the only row where the mark and the cursor
+-- would land in the same cell. Pinned here rather than off a screenshot,
+-- because it has to keep holding as the list scrolls.
+local UiRows = need("Ui").markedRows
+
+local list = {
+  { label = "MR FUJI", value = "SPRITE_MR_FUJI" },
+  { label = "NIRE", value = "SPRITE_NIRE" },
+  { label = "NIRE HOOD", value = "SPRITE_NIRE_HOOD" },
+  { label = "OAK", value = "SPRITE_OAK" },
+}
+
+local function marked(index, scroll, rows)
+  local out = {}
+  for _, mark in ipairs(UiRows({ items = list, index = index,
+                                 scroll = scroll or 0, rows = rows or 7 })) do
+    out[#out + 1] = list[(scroll or 0) + mark.row].label
+  end
+  return table.concat(out, ",")
+end
+
+eq(marked(1), "NIRE,NIRE HOOD", "both of ours are marked, and nothing else")
+eq(marked(2), "NIRE HOOD",
+   "except the one under the cursor -- it would share the cursor's cell")
+eq(marked(3), "NIRE", "and the other way round")
+eq(marked(4), "NIRE,NIRE HOOD", "a vanilla row under the cursor marks neither")
+
+-- The rows are the *visible* ones, so a scrolled list marks by what is on
+-- screen rather than by position in the whole catalog.
+eq(marked(1, 2, 7), "NIRE HOOD", "a scrolled list marks what is on screen")
+eq(marked(1, 0, 2), "NIRE", "and a short window stops at its last row")
+
+-- The y it hands back is the widget's own row geometry: row 1 at y=24, then
+-- every 16 after it. Wrong by one row and the mark lands on the neighbour.
+local rows = UiRows({ items = list, index = 1, scroll = 0, rows = 7 })
+eq(rows[1].row, 2, "the mark is on the second visible row")
+eq(rows[1].y, 8 + 2 * 16, "at the y that row's label is drawn on")
+
+eq(#UiRows(nil), 0, "no menu marks nothing")
+eq(#UiRows({}), 0, "and neither does one with no items")
+
+stubSprites = {}
+stubScales = {}
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 7. Playing nicely with a mod that owns the world pass
@@ -3212,8 +3405,10 @@ local red = newPlayer("red")
 overworld.player = red
 local redSheet = red.sprite
 
+eq(Client.wornLook(), nil, "before joining you are wearing nothing of ours")
 check(Client.applyLook(), "joining wears the chosen character")
 check(red.sprite ~= redSheet, "which really does swap the live renderer")
+eq(Client.wornLook(), "SPRITE_ROCKET", "and that is what is worn")
 
 -- map.entered, twice, on the player object the overworld handed back
 check(Client.refreshLook(), "entering a map re-wears it")
@@ -3222,6 +3417,9 @@ check(red.sprite ~= redSheet, "still wearing it")
 
 Client.restoreLook()
 eq(red.sprite, redSheet, "leaving gives the player their own trainer back")
+-- The battle and trainer-card pics hang off this one, so a game left is a
+-- game whose pics go back to vanilla in the same breath as the sprite.
+eq(Client.wornLook(), nil, "and leaving is wearing nothing again")
 
 Client.restoreLook()
 eq(red.sprite, redSheet, "and leaving twice is not a second restore")

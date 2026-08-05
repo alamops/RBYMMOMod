@@ -30,6 +30,13 @@ return {
         .. "link code over the hub.",
       "A number page on this mod's naming screens, because the vanilla "
         .. "grid has no digits and an address cannot be typed without one.",
+      "Two characters of the mod's own, NIRE and NIRE HOOD, in the same "
+        .. "list as the 36 the ROM carries -- original art, registered as "
+        .. "ordinary sprite records, and marked with the engine's hollow "
+        .. "arrow in the cursor's column so the two are told apart from the "
+        .. "ROM's own cast. Wearing one also changes the pics the "
+        .. "game draws you with: the battle back pic, the trainer card and "
+        .. "Oak's intro, for as long as you are in a game.",
       "Ranked PVP: every link battle is scored by the hub on an Elo curve, "
         .. "so the opponent's rating decides the size of the swing, and a "
         .. "rematch inside the hour is worth half, then a quarter, then "
@@ -95,6 +102,14 @@ return {
         .. "than smooth motion.",
       "Untested against a modded peer with a different link fingerprint "
         .. "beyond what the engine's own handshake already refuses.",
+      "A peer running an older copy of this mod does not have NIRE or NIRE "
+        .. "HOOD in their catalog, so somebody wearing one shows up as RED "
+        .. "on their screen -- the same fallback a character their ROM does "
+        .. "not carry already gets.",
+      "The battle and trainer-card pics only follow the two characters this "
+        .. "mod ships. A ROM character is a walking sheet and nothing else, "
+        .. "so wearing GIOVANNI on the map still fights as Red -- there is "
+        .. "no back pic in the catalog to borrow.",
     },
   },
 
@@ -107,6 +122,8 @@ return {
   },
 
   credits = {
+    { who = "Mirasein (https://www.mirasein.me)",
+      for_ = "original character art: NIRE and NIRE HOOD" },
     { who = "bryanthaboi", for_ = "Gen1Recomp, and the link stack this "
       .. "mod's trade and battle run on unmodified" },
   },

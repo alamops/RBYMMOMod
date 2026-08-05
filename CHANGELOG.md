@@ -4,6 +4,55 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.6.0] - 2026-08-04
+
+### Added
+
+- **Two characters of the mod's own: `NIRE` and `NIRE HOOD`**, drawn by
+  [Mirasein](https://www.mirasein.me). Until now
+  every character this mod offered was one the ROM already carried — it read
+  the sprite catalog and never wrote to it. These are the first entries it
+  puts there itself, as original art shipped with the mod, and they are
+  registered in the engine's own record shape (`image`, `frames`, `walker`)
+  so nothing downstream had to be taught about them: the CHARACTER screen
+  lists them because it walks the catalog, a peer wearing one draws because
+  the avatar layer looks the id up in the catalog, and the trainer card
+  portrait falls out of the same walking sheet as everyone else's.
+- **They go further than a borrowed character can.** A ROM character is a
+  16x96 walking sheet and nothing else, which is why wearing `COOLTRAINER`
+  has never changed what you look like in a battle. These ship the other two
+  pics as well, so while you are wearing one the game draws *you* as them:
+  the battle back pic, the trainer card, Oak's intro and the Hall of Fame.
+  That rides on the engine's `player.sprite` hook — the one seam over
+  `field.playerPics` — rather than on anything reaching past the mod API.
+- **A mark on the two rows that are the mod's own.** The CHARACTER list is
+  36 names the ROM carries and two it does not, and nothing on the row said
+  which was which. They now carry `▷` in the cursor's own column — the
+  engine's own hollow arrow, one glyph, nothing shifted, so
+  `MIDDLE AGED WOMAN` still starts where every other label starts. The mark
+  yields on the row the cursor is actually on, because they share that cell
+  and two triangles stacked in it would read worse than one.
+- **Worn, not merely chosen.** The pics follow the same rule the walking
+  sprite already followed: they apply between joining a game and leaving it,
+  and a single-player game you never connected in draws exactly what vanilla
+  draws. `mod.exports.wornLook()` is the new answer to "what is actually
+  being worn right now", next to the existing `myLook()` for "what was
+  picked".
+
+### Notes
+
+- `affects_link` stays `false`. `sprites` and `battle_sprite_scales` are not
+  link registries, and the suite still asserts the link surface is
+  byte-identical with the mod installed — two players, one with these
+  characters and one without, still link.
+- The back pic is 48x48 against the 32x32 the engine sizes a trainer back
+  for, so it ships a `battle_sprite_scales` entry of 64/48. Without it the
+  pic would draw half again too tall and stand in the text box.
+- Shade 0 of an overworld sheet is transparent on real hardware and in this
+  engine, so the handful of white pixels inside these walking frames read as
+  transparent rather than white — the same rule every ROM sprite is drawn
+  under.
+
 ## [0.5.0] - 2026-08-04
 
 ### Added
