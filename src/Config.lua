@@ -23,7 +23,22 @@ M.MOD_ID = "rby_mmo"
 -- request, so a newer client would report every match into silence and open
 -- a RANK screen that never fills.  This number lives here and in
 -- server/lib/relay.js -- bump them together.
-M.PROTOCOL = 4
+--
+-- 5 adds pace, and it moves for the third time on the same rule: a
+-- protocol-4 hub rebuilds every broadcast from its own fixed field list, so
+-- the pace flag on mmo.move is not misread, it is dropped without a word.
+-- The fast player would see themselves move and everyone else would watch
+-- them walk, with nothing anywhere to explain the difference -- so a refusal
+-- naming both versions is again the better sentence.
+--
+-- The field is `fast`, not `running`: it means "this step was taken at the
+-- fast pace" and is set by a sprint *or* by the bike, since both cost 8
+-- frames a tile and one boolean carries them.  It was called `running`
+-- during 0.5.0's development and renamed before release -- 5 has never
+-- shipped, so no hub and no client anywhere speaks the old name and the
+-- rename cost nothing.  This number lives here and in server/lib/relay.js --
+-- bump them together.
+M.PROTOCOL = 5
 
 M.DEFAULT_HUB = "127.0.0.1:7788"
 M.DEFAULT_PORT = 7788
@@ -62,6 +77,32 @@ M.PRESENCE_INTERVAL = 0.125
 -- stall).  Walking it back one tile at a time would take longer than the
 -- drift lasts, so it is despawned and respawned at the true cell instead.
 M.RESYNC_DISTANCE = 6
+
+-- Running: hold B on foot and a tile takes half as long.
+--
+-- A divisor rather than a frame count, because the walk speed it divides is
+-- not ours to know: 16 is vanilla, but a data pack may say otherwise, and
+-- hardcoding 8 here would quietly *slow a modded runner down*.  Two is the
+-- Gen 3+ figure -- running is bike-fast, which is what makes the bike still
+-- worth getting on for its own reasons rather than for its speed.
+M.RUN_DIVISOR = 2
+
+-- What a remote avatar moving at the fast pace has its npc.stepFrames set
+-- to.  One number for two ways of getting there: a sprinter and a cyclist
+-- both cover a tile in 8 frames, so the wire says "fast" rather than "which"
+-- and this count serves both.
+--
+-- NPCs get no movement.speed hook to divide: their pace is a field read
+-- fresh each frame, and its unset default is NPC.lua's hardcoded
+-- STEP_FRAMES = 16 -- the engine's NPC walk default, *not* the player's walk
+-- speed, which the divisor above is deliberately never told.  So the count
+-- is derived from that 16 rather than written out beside it: tuning
+-- RUN_DIVISOR then moves the local runner and the remote avatar together,
+-- and one speed stays one speed.  Two independent numbers would drift apart
+-- on the first tune, and avatars pacing faster than the presence stream
+-- describes strobe past RESYNC_DISTANCE -- which is exactly what remote
+-- cyclists did for as long as the wire had no way to say they were fast.
+M.FAST_STEP_FRAMES = math.max(1, math.floor(16 / M.RUN_DIVISOR))
 
 -- Parties: you and one friend, travelling together.
 --

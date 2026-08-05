@@ -33,6 +33,23 @@
 -- When it falls further behind than RESYNC_DISTANCE (a warp we never saw, a
 -- long stall), it is respawned rather than walked all the way.
 --
+-- A player moving at the fast pace is the same arithmetic with the 16
+-- halved. NPC:update reads `stepFrames or 16` fresh every frame, so the
+-- sixth field written below sets the pace of the step it starts:
+-- FAST_STEP_FRAMES while the roster says that step was a fast one, and nil
+-- -- back to the engine's own default -- the moment it says otherwise. At 8
+-- frames a tile a fast avatar covers 0.133s per tile against a 0.125s
+-- presence interval, still about one update per tile, so nothing about the
+-- catch-up above needed rethinking.
+--
+-- One flag, two ways to earn it: a sprint and a bike both cost 8 frames a
+-- tile, so cyclists ride at cycling pace here too. Before the wire carried
+-- pace rather than "B is held", a remote cyclist stepped at 16 while their
+-- real player covered tiles at 8, shed about 3.75 tiles a second and hit
+-- RESYNC_DISTANCE over and over -- a despawn/respawn pop every couple of
+-- seconds for the whole ride. That loop is closed: nothing a cyclist does
+-- now outruns their own presence stream.
+--
 -- What the mod API is missing is a "step this NPC" primitive on Handle --
 -- an upstream RFC, not something to fake with a cutscene queue.
 
@@ -212,12 +229,17 @@ function M:advance(av, player)
     return self:resync(player)
   end
 
-  -- The five fields NPC:update needs to animate a step itself.
+  -- The five fields NPC:update needs to animate a step itself, plus the one
+  -- that decides how long it takes.
   npc.facing = dir
   npc.targetX, npc.targetY = tx, ty
   npc.moving = true
   npc.marching = false
   npc.progress = 0
+  -- Set per step rather than once, because the flag is per step: clearing it
+  -- to nil hands the pace back to NPC:update's own default instead of
+  -- leaving the avatar sprinting after its player stopped.
+  npc.stepFrames = player.fast and Config.FAST_STEP_FRAMES or nil
   av.facing = dir
   return true
 end
