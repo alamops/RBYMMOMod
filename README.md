@@ -43,8 +43,9 @@ row shows that character's face beside their name, so you're picking a person
 rather than reading a label. Confirm, pick a room size, and you're live.
 
 You don't have to be here to choose, either: **`CHARACTER` on the MMO menu**
-opens the same list any time you're not in a game, no hosting and no joining
-required. See [Be somebody else](#-be-somebody-else).
+opens the same list whenever you like — before you connect to anything, and
+in the middle of a game, where everyone else sees you change as you do it.
+See [Be somebody else](#-be-somebody-else).
 
 The HOST screen mints a **six-character passcode** on the way in and shows it
 in the `JOIN CODE` row — `A7K3P9`, letters and digits, no dashes. There's
@@ -283,12 +284,19 @@ own (your save file keeps its own), and **any walking character in the
 game** — 36 of them. Be Lance. Be Giovanni. Be a Rocket grunt, a Biker, a
 Swimmer, Oak. You see it too, not just everyone else.
 
-**Or just pick one — no game required.** `CHARACTER` sits on the MMO menu
-under `HOST GAME` and `JOIN GAME`, and it opens that same list whenever
-you're not in a game. Choose, and you're wearing it before the menu has
-closed. The choice goes in your save file, so it's still on you next time you
-load that game, and the next hub you join is told about it the moment you
-connect.
+**Or just pick one, whenever you like.** `CHARACTER` sits on the MMO menu
+under `HOST GAME` and `JOIN GAME` when you're on your own, and under `RANK`
+when you're in a game — same row, same list, both doors. Choose, and you're
+wearing it before the menu has closed. The choice goes in your save file, so
+it's still on you next time you load that game.
+
+**And if you're in a game, so does everyone else.** Change character
+mid-session and the whole hub is told: your walking character switches on
+their screens where they're standing, not the next time you leave the map,
+and a trainer card of yours somebody has open turns over while they're
+looking at it. Anyone who joins a moment later gets the new one too. (One
+exception: a `RANK` screen that's already open keeps the portrait it was
+drawn with until it next refreshes — the same lag the points on it have.)
 
 Every row shows the character's face to the left of their name — the same
 portrait your trainer card draws — because `MIDDLE AGED WOMAN` and
@@ -338,7 +346,10 @@ Same card, same badges, a different trainer on it — `NIRE` on the left,
 
 If someone picks a character your ROM doesn't have, they show up as RED on
 your screen rather than not at all. That covers the artists' characters too,
-for anyone playing with an older copy of the mod.
+for anyone playing with an older copy of the mod — though not one older than
+`0.7.0`, which speaks a protocol the mid-game character change moved: a
+`0.6.x` copy and a `0.7.0` one refuse each other at the door and say which
+version each of them is. **Update the hub and the mod together.**
 
 ### 🪪 CHECK THEIR CARD
 Walk up, press **A**, and **PROFILE** sits at the top of the menu — their
@@ -395,7 +406,7 @@ behind it.
 | --- | --- | --- |
 | `HOST GAME` | not in a game | make a trainer, then the room size and the passcode |
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
-| `CHARACTER` | not in a game | change who you look like, right now, without connecting to anything |
+| `CHARACTER` | not in a game, or connected | change who you look like, right now — in a game it sits under `RANK` and everyone sees it |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
 | `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |
@@ -407,11 +418,12 @@ behind it.
 
 Three rows before you're in a game, and none of them is for the passcode:
 `JOIN GAME` asks for it on the way in, so typing a different one there is how
-a saved passcode gets changed. `CHARACTER` is the one row here that touches
-no network at all — it's for changing who you look like when you aren't
-playing with anybody, and what it changes stays changed. (A shot of this menu
-only ever shows one of the two states; the rows for the other one aren't
-hidden, they just don't apply yet.)
+a saved passcode gets changed. `CHARACTER` is the one row that's on the menu
+in both states — offline it changes who you look like when you aren't playing
+with anybody, and in a game it changes who *everybody* sees you as, on the
+spot. Either way what it changes stays changed. (A shot of this menu only
+ever shows one of the two states; the rows for the other one aren't hidden,
+they just don't apply yet.)
 
 Leaving isn't quitting. Your save, your world, your party: untouched. The
 game just carries on without the other people in it.
@@ -443,7 +455,7 @@ the `PLAYERS` list to start one from.
 | `MAX PLAYERS` | 4 | room size for games you host (2–64, you count) |
 | `JOIN` | `127.0.0.1:7788` | where JOIN GAME starts from |
 | `JOIN CODE` | *(empty)* | the passcode used for a hub you haven't typed one for |
-| `MY SPRITE` | RED | who you look like, to everyone including you — the `CHARACTER` row is the in-game way to the same thing, and its choice sticks to your save |
+| `MY SPRITE` | RED | who you look like, to everyone including you — the `CHARACTER` row is the in-game way to the same thing, on your own or mid-game, and its choice sticks to your save |
 | `BUBBLES` | on | names and chat over heads |
 | `B TO RUN` | on | hold B on foot to move at bike speed |
 

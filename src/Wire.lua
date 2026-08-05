@@ -50,6 +50,16 @@ M.RESULT        = "mmo.result"
 -- because the board changes for everybody on every match and nobody is
 -- looking at it most of the time.
 M.RANKS         = "mmo.ranks"
+-- The character you are wearing, changed mid-session.  One name for both
+-- directions, the way CHAT is: outbound it carries { sprite }, and the hub
+-- answers everybody -- the sender included, the way RANK does -- with
+-- { id, sprite }.  The field set says which direction it is going, and a
+-- matched pair of names would have to be kept in step across two hub
+-- implementations for no gain.
+--
+-- Sanitised with M.spriteId at every boundary and never M.text; the
+-- underscore trap that makes that mandatory is written out above spriteId.
+M.SPRITE        = "mmo.sprite"
 
 -- hub -> client
 M.WELCOME     = "mmo.welcome"
