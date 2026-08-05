@@ -54,6 +54,12 @@ const DEFAULTS = {
   version: SCHEMA_VERSION,
   listen: { host: '0.0.0.0', port: 7788 },
   maxPlayers: 4,
+  // The one line the hub hands every player on arrival -- it rides on the
+  // welcome and lands in their chat log as a HUB line. Empty means the hub
+  // says nothing, which is the right default: a greeting the host never wrote
+  // is worse than silence, and an empty string is also the signal the relay
+  // reads to leave the field off the wire entirely.
+  motd: '',
   auth: { required: true, credentials: [] },
   limits: {
     perIpConnections: 4,
@@ -79,8 +85,40 @@ const DEFAULTS = {
   bans: [],
   allowlist: [],
   network: { upnp: { enabled: false, leaseSeconds: 3600 } },
+  // The operator's web page, and the two halves of its default are both
+  // deliberate. Off, because a browser page is a second surface on a process
+  // whose only door until now was the game port, and growing one should be a
+  // decision somebody made rather than one they inherited by upgrading.
+  // Loopback, because publishing that surface past this machine is then a
+  // separate second decision -- the same shape as compose.yml refusing to map
+  // a port the host did not ask for. Nothing in this section is a secret:
+  // logging in reuses the join codes in auth.credentials, so there is nothing
+  // here for redact() to mask.
+  dashboard: { enabled: false, host: '127.0.0.1', port: 7790 },
   log: { level: 'info' },
 };
+
+/*
+ * How long a MOTD may be, and the only thing about it that is a hard number.
+ *
+ * 120 rather than the wire's MESSAGE_MAX of 60: a chat line is typed by a
+ * player mid-game, a MOTD is written once by the host and is the only sentence
+ * the hub gets to say for itself, so it gets twice the budget. It stays one
+ * line and one charset with chat all the same, because it is delivered through
+ * the same field a client already knows how to render.
+ *
+ * sanitize.js owns this contract -- MOTD_MAX and cleanText() there are what
+ * the relay actually applies before the value goes on the wire. The value and
+ * the character class are spelled out again here only because this module
+ * deliberately requires nothing from its siblings (see the header note on
+ * keeping that dependency one-directional), and a config store that pulled in
+ * the wire sanitiser to check one string would trade that property for very
+ * little. The copy is small, and the two are pinned together by the suite
+ * rather than by an import: if they ever disagree, the config file is merely
+ * stricter or looser than a value that gets cleaned again downstream anyway.
+ */
+const MOTD_MAX = 120;
+const MOTD_ALLOWED = /[^A-Za-z0-9 .,!?'\-:;()/]/g;
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'silent'];
 
@@ -115,6 +153,11 @@ const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'silent'];
  *                                            expires mid-game; a week is the
  *                                            longest a stale mapping should
  *                                            outlive the process
+ *   dashboard.port            1 .. 65535     the TCP port space again, the
+ *                                            same range as listen.port and for
+ *                                            the same reason -- it is a port,
+ *                                            and nothing narrower about it is
+ *                                            true
  *
  * And the authentication-failure throttle, every range of it taken verbatim
  * from limits.js for the reason in the paragraph below:
@@ -159,6 +202,7 @@ const BOUNDS = {
   'limits.authGlobalWindowMs': [1000, 3600000],
   'limits.authLockoutMs': [1000, 3600000],
   'network.upnp.leaseSeconds': [60, 604800],
+  'dashboard.port': [1, 65535],
 };
 
 /*
@@ -347,6 +391,58 @@ function validateBoolean(config, dotted, warnings) {
   setPath(config, dotted, bool);
 }
 
+/*
+ * A bind address. Not resolved and not checked against this machine's
+ * interfaces -- reachability.js is the module that has an opinion about
+ * whether an address is *reachable*, and a config store guessing at it would
+ * only be a second, worse answer. All this refuses is a value that cannot be
+ * a host at all: a number, a list, a run of spaces.
+ */
+function validateHost(config, dotted, warnings) {
+  const fallback = getPath(DEFAULTS, dotted);
+  const raw = getPath(config, dotted);
+  if (typeof raw !== 'string' || !raw.trim()) {
+    if (raw !== undefined && raw !== null) {
+      warnings.push(`${dotted}: "${raw}" is not an address, using ${fallback}`);
+    }
+    setPath(config, dotted, fallback);
+    return;
+  }
+  setPath(config, dotted, raw.trim());
+}
+
+/*
+ * The MOTD, normalised rather than judged -- the one leaf here that never
+ * produces a warning.
+ *
+ * Everything else in this file that fixes a value also says so, because a host
+ * who wrote 900000 for a timeout meant something by it and deserves to know it
+ * did not happen. Prose is different: a MOTD with a tab in it, or a 200th
+ * character, is not a host reaching past a limit, it is a host writing a
+ * sentence. The relay would clean the same string the same way on its way to
+ * the wire (sanitize.js's cleanText, MOTD_MAX), so warning here would only
+ * report the cost of a rule the value was going to meet anyway. An over-long
+ * MOTD becomes a truncated MOTD, quietly, and `config get motd` shows exactly
+ * what the players will see.
+ *
+ * A non-string -- a number, a list, a leftover null -- is not a sentence at
+ * all, so it becomes the empty default: no MOTD, which is the same thing an
+ * absent field means.
+ */
+function validateMotd(config) {
+  const raw = getPath(config, 'motd');
+  if (typeof raw !== 'string') {
+    setPath(config, 'motd', DEFAULTS.motd);
+    return;
+  }
+  // Same order as cleanText: strip what the charset does not allow (which is
+  // how control characters and newlines leave), then collapse the whitespace
+  // that survives, then trim, then cap. Stripping first is what keeps a
+  // newline from silently becoming a word break the wire would not agree with.
+  const clean = raw.replace(MOTD_ALLOWED, '').replace(/\s+/g, ' ').trim();
+  setPath(config, 'motd', clean.slice(0, MOTD_MAX));
+}
+
 function validateStringList(config, dotted, warnings) {
   const raw = getPath(config, dotted);
   if (raw === undefined || raw === null) {
@@ -469,20 +565,15 @@ function validate(config) {
   if (version === null) working.version = SCHEMA_VERSION;
   else working.version = version;
 
-  const host = working.listen && working.listen.host;
-  if (typeof host !== 'string' || !host.trim()) {
-    if (host !== undefined && host !== null) {
-      warnings.push(`listen.host: "${host}" is not an address, using ${DEFAULTS.listen.host}`);
-    }
-    setPath(working, 'listen.host', DEFAULTS.listen.host);
-  } else {
-    setPath(working, 'listen.host', host.trim());
-  }
+  validateHost(working, 'listen.host', warnings);
+  validateHost(working, 'dashboard.host', warnings);
 
   for (const dotted of Object.keys(BOUNDS)) clampNumber(working, dotted, warnings);
 
   validateBoolean(working, 'auth.required', warnings);
   validateBoolean(working, 'network.upnp.enabled', warnings);
+  validateBoolean(working, 'dashboard.enabled', warnings);
+  validateMotd(working);
   validateCredentials(working, warnings);
   validateStringList(working, 'bans', warnings);
   validateStringList(working, 'allowlist', warnings);
