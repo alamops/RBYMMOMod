@@ -23,7 +23,22 @@ M.MOD_ID = "rby_mmo"
 -- request, so a newer client would report every match into silence and open
 -- a RANK screen that never fills.  This number lives here and in
 -- server/lib/relay.js -- bump them together.
-M.PROTOCOL = 4
+--
+-- 5 adds pace, and it moves for the third time on the same rule: a
+-- protocol-4 hub rebuilds every broadcast from its own fixed field list, so
+-- the pace flag on mmo.move is not misread, it is dropped without a word.
+-- The fast player would see themselves move and everyone else would watch
+-- them walk, with nothing anywhere to explain the difference -- so a refusal
+-- naming both versions is again the better sentence.
+--
+-- The field is `fast`, not `running`: it means "this step was taken at the
+-- fast pace" and is set by a sprint *or* by the bike, since both cost 8
+-- frames a tile and one boolean carries them.  It was called `running`
+-- during 0.5.0's development and renamed before release -- 5 has never
+-- shipped, so no hub and no client anywhere speaks the old name and the
+-- rename cost nothing.  This number lives here and in server/lib/relay.js --
+-- bump them together.
+M.PROTOCOL = 5
 
 M.DEFAULT_HUB = "127.0.0.1:7788"
 M.DEFAULT_PORT = 7788
@@ -84,6 +99,32 @@ M.RESYNC_DISTANCE = 6
 -- in doubles at overworld magnitudes, so a compensated position is equal to
 -- the original, not merely close.
 M.AVATAR_DEPTH_NUDGE = 0.01
+
+-- Running: hold B on foot and a tile takes half as long.
+--
+-- A divisor rather than a frame count, because the walk speed it divides is
+-- not ours to know: 16 is vanilla, but a data pack may say otherwise, and
+-- hardcoding 8 here would quietly *slow a modded runner down*.  Two is the
+-- Gen 3+ figure -- running is bike-fast, which is what makes the bike still
+-- worth getting on for its own reasons rather than for its speed.
+M.RUN_DIVISOR = 2
+
+-- What a remote avatar moving at the fast pace has its npc.stepFrames set
+-- to.  One number for two ways of getting there: a sprinter and a cyclist
+-- both cover a tile in 8 frames, so the wire says "fast" rather than "which"
+-- and this count serves both.
+--
+-- NPCs get no movement.speed hook to divide: their pace is a field read
+-- fresh each frame, and its unset default is NPC.lua's hardcoded
+-- STEP_FRAMES = 16 -- the engine's NPC walk default, *not* the player's walk
+-- speed, which the divisor above is deliberately never told.  So the count
+-- is derived from that 16 rather than written out beside it: tuning
+-- RUN_DIVISOR then moves the local runner and the remote avatar together,
+-- and one speed stays one speed.  Two independent numbers would drift apart
+-- on the first tune, and avatars pacing faster than the presence stream
+-- describes strobe past RESYNC_DISTANCE -- which is exactly what remote
+-- cyclists did for as long as the wire had no way to say they were fast.
+M.FAST_STEP_FRAMES = math.max(1, math.floor(16 / M.RUN_DIVISOR))
 
 -- Parties: you and one friend, travelling together.
 --
@@ -187,6 +228,48 @@ M.SPRITES = {
   { "COOLTRAINER", "SPRITE_COOLTRAINER_M" },
 }
 M.DEFAULT_SPRITE = "SPRITE_RED"
+
+-- ------- the characters this mod brings of its own
+--
+-- The dial board for src/Cast.lua; the argument for every number is in that
+-- file's header.  These are the only sprite ids in this file that the
+-- engine's catalog does *not* already carry -- Cast registers them, which is
+-- why they can be offered in the options row above alongside ids the ROM
+-- guarantees.
+--
+-- `dir` holds three files, all original art shaped like the engine's own:
+-- walk.png (16x96, six 16x16 frames), front.png (56x56, the trainer-card and
+-- intro pic) and back.png (48x48, the battle back pic).
+--
+-- backScale is what a 48x48 back pic has to draw at.  The engine's default
+-- for a back pic is 2x, sized for the 32x32 the ROM carries -- 64 screen
+-- pixels with the feet pinned at y=96.  These are drawn at half again the
+-- detail, so 64/48 keeps the same footprint on screen: a taller trainer
+-- would stand in the text box.
+M.OWN_CHARS = {
+  { id = "SPRITE_NIRE", label = "NIRE",
+    dir = "assets/chars/nire", backScale = 64 / 48 },
+  { id = "SPRITE_NIRE_HOOD", label = "NIRE HOOD",
+    dir = "assets/chars/nire_hood", backScale = 64 / 48 },
+}
+
+-- Offered in the options row like any other character.  Built from the table
+-- above rather than written out twice: a character added there and forgotten
+-- here would be wearable from the CHARACTER screen and invisible in options,
+-- which is the kind of split nobody notices until a player reports it.
+for _, char in ipairs(M.OWN_CHARS) do
+  M.SPRITES[#M.SPRITES + 1] = { char.label, char.id }
+end
+
+-- Six 16x16 frames, the shape SpriteRenderer reads an overworld sheet in.
+M.CHAR_FRAMES = 6
+
+-- Mod art may opt into a ROM sprite's Advanced-mode OBJ palette assignment
+-- without claiming the pixels came from the ROM (sprites.paletteSource).
+-- Index 0 of the sprite-sheet table is the player's own, which is the one
+-- these characters are drawn to wear -- and the palette the sheets they came
+-- from were coloured with.
+M.CHAR_PALETTE_SOURCE = "ROM:SpriteSheetPointerTable[0]"
 
 M.NAME_MAX = 10
 

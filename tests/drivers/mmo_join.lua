@@ -318,7 +318,35 @@ return function(game)
   local fromX, fromY = before and before.rosterX, before and before.rosterY
   log(("host baseline (%s,%s)"):format(tostring(fromX), tostring(fromY)))
   H.signal("guest_baseline_taken")
-  H.await(game, "host_walk_done")
+
+  -- ------- 2b. the pace flag reaches this side too
+  --
+  -- The host holds B for every step of the walk it is about to do (see
+  -- mmo_host.lua), so this side's copy of its roster row should say
+  -- fast=true for at least part of that window. Sampled here rather than
+  -- after the fact: the flag is "my last committed step was a fast one"
+  -- (src/Client.lua), so it is only ever true while a fast step is actually
+  -- in flight and clears on the very next ordinary step -- there is no
+  -- lingering copy to check once the barrier below has already cleared.
+  --
+  -- Held B is only one of the two ways to earn the flag; the bike is the
+  -- other, and it is covered at the unit tier rather than here, where
+  -- getting a bicycle into the bag would be most of the run.
+  --
+  -- Deliberately not a speed measurement: this only asks whether the flag
+  -- crossed the wire at all, not how fast the avatar moved while it was up.
+  local sawHostFast = false
+  local runSamples = 0
+  local function sampleHostFast()
+    local row = H.avatarRow(exports)
+    if row == nil then return end
+    runSamples = runSamples + 1
+    if row.fast then sawHostFast = true end
+  end
+  H.await(game, "host_walk_done", nil, sampleHostFast)
+  check(sawHostFast,
+        ("the host's avatar row showed fast=true while B was held "
+          .. "(%d sample(s) taken)"):format(runSamples))
 
   local hostMoved = H.waitSeconds(game, function()
     local row = H.avatarRow(exports)
@@ -376,6 +404,28 @@ return function(game)
   -- wearing it here, and still able to get back, is the pair that says so.
   check(H.playerSheet(game) ~= ownSheet,
         "still wearing the chosen character after a map change")
+
+  -- The guest's own character, in the world, facing the camera. Here for the
+  -- same reason the host's is where it is: the guest has just teleported
+  -- home, so the host is not on this map and no nameplate is over it.
+  local shownLook = H.shotLook(game, SHOT_DIR .. "/join-overworld-look.png")
+  log("overworld look:", tostring(shownLook))
+  check(shownLook ~= nil, "the character is on screen in the overworld")
+
+  -- Same check the host makes, from the other side: the front pic, which no
+  -- screen in either flow used to open. Here rather than earlier because the
+  -- look has just survived a map change, so the pic is being read at the
+  -- point the sprite has already proved it is still worn.
+  local guestCard = H.shotTrainerCard(game, SHOT_DIR .. "/join-trainer-card.png")
+  local wearing = exports.wornLook and exports.wornLook() or nil
+  log("trainer card pic:", tostring(guestCard), "wearing", tostring(wearing))
+  check(type(guestCard) == "string" and guestCard ~= "",
+        "the trainer card resolves a pic to draw")
+  if tostring(wearing):find("SPRITE_NIRE", 1, true) then
+    check(tostring(guestCard):find("assets/chars/", 1, true) ~= nil,
+          "and a character the mod brought draws its own")
+  end
+
   H.signal("guest_back_on_map")
 
   -- ------- 4. interact with the host, and get the trade/battle menu
