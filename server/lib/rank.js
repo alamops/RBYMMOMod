@@ -133,6 +133,9 @@ class Board {
         // the digest of whatever claimed this name, or null for a name
         // nobody has claimed yet
         tokenHash: null,
+        // whether that claim was ever *proved* -- see claim(). A minted
+        // claim is provisional: nobody has yet shown they hold the ticket.
+        confirmed: false,
       };
       this.entries.set(key, found);
     }
@@ -157,33 +160,73 @@ class Board {
    * Who is behind this name, as far as a hub can tell. Mirrors
    * Board:claim in src/Rank.lua, verdict for verdict:
    *
-   *   'claimed'  -- the name was free; `fresh` now owns it and must be
-   *                 handed to the player, once. They score.
-   *   'owner'    -- the presented token matches the one on file. They score.
+   *   'claimed'  -- the name was free, or its claim was still provisional;
+   *                 `fresh` now owns it and must be handed to the player,
+   *                 once. They score.
+   *   'owner'    -- the presented token matches the one on file. They score,
+   *                 and the claim is confirmed from here on.
    *   'impostor' -- the name is claimed and this is not the holder. They
    *                 play as normal and their battles score nothing.
    *   'open'     -- free, and no token to claim it with. They score, and the
    *                 name stays claimable.
    *
+   * **A claim is provisional until it is proved.** Minting one only says a
+   * ticket was posted, not that it arrived: a welcome that never reached the
+   * client, a hub restarted before the file was written, or a save that never
+   * carried the token to disk all leave a name claimed by nobody who can
+   * present it -- and under the old rule that locked the rightful owner out
+   * of their own name forever. So an unconfirmed claim on a name that has
+   * never scored is transferred to whoever is connecting now. Nothing is
+   * stolen by that: an unscored name holds no rating, and the owner who lost
+   * the race takes it back the same way. The moment a name is proved (a
+   * returning token) or worth something (a settled battle) it is confirmed,
+   * and from then on the wrong ticket is refused exactly as before.
+   *
+   * `inUse` is the caller's answer to "is somebody *ranked* on this hub
+   * connected under this name right now" -- board state alone cannot see it,
+   * and without it the leniency above becomes theft: a player sitting on an
+   * unproved, unscored claim would have it taken from under them by the next
+   * hello for the same name, and their next settled win would land on the
+   * taker's claim. Two friends who never changed the default trainer name are
+   * enough to reach that by accident. So a live holder is an impostor gate
+   * like `confirmed` and `played`, and the reclaim this rule exists for --
+   * where the owner is not connected at all -- is untouched.
+   *
    * Only the digest is kept, so a leaked ranking.json gives away nobody's
    * name -- it lists who is on the board, which is public anyway.
    */
-  claim(name, presented, fresh) {
+  claim(name, presented, fresh, inUse) {
     const entry = this.entry(name);
     if (!entry) return 'impostor';
 
     if (entry.tokenHash) {
-      if (typeof presented !== 'string' || !presented) return 'impostor';
-      const seen = Buffer.from(digest(presented), 'utf8');
-      const held = Buffer.from(entry.tokenHash, 'utf8');
-      // timingSafeEqual, like the credential check next door: it throws on a
-      // length mismatch, which a stored hash of the wrong shape would cause.
-      if (seen.length !== held.length) return 'impostor';
-      return crypto.timingSafeEqual(seen, held) ? 'owner' : 'impostor';
+      if (typeof presented === 'string' && presented) {
+        const seen = Buffer.from(digest(presented), 'utf8');
+        const held = Buffer.from(entry.tokenHash, 'utf8');
+        // timingSafeEqual, like the credential check next door: it throws on
+        // a length mismatch, which a stored hash of the wrong shape causes.
+        if (seen.length === held.length && crypto.timingSafeEqual(seen, held)) {
+          entry.confirmed = true;
+          return 'owner';
+        }
+      }
+      // Unproved, unscored, worth nothing and nobody's right now: the claim
+      // moves rather than shutting the name. `played` is the usual test --
+      // record() is the only thing that raises it, and a draw is not recorded
+      // -- and `points` is the belt on top of it, so a hand-edited file with a
+      // rating but no games behind it is not a name anybody can walk into.
+      if (entry.confirmed || entry.played > 0 || entry.points > RANK_START) {
+        return 'impostor';
+      }
+      if (inUse) return 'impostor';
+      if (typeof fresh !== 'string' || !fresh) return 'impostor';
+      entry.tokenHash = digest(fresh);
+      return 'claimed';
     }
 
     if (typeof fresh !== 'string' || !fresh) return 'open';
     entry.tokenHash = digest(fresh);
+    entry.confirmed = false;
     return 'claimed';
   }
 
@@ -272,6 +315,10 @@ class Board {
     winner.played += 1;
     loser.played += 1;
     winner.won += 1;
+    // Both names now hold a result, so neither claim is provisional any
+    // more: from here the ticket is the only way back in (see claim()).
+    winner.confirmed = true;
+    loser.confirmed = true;
 
     this.noteMeeting(winner.key, loser.key, at);
     this.sweep(at);
@@ -321,16 +368,31 @@ class Board {
    * side has to know the other's tables. Meetings are deliberately not
    * saved: they are a one-hour anti-farm window, and a hub that restarted
    * has already lost the sessions they belonged to.
+   *
+   * A row that is unproved, unplayed and still at the starting rating is not
+   * written at all. Nothing is lost by that -- claim() hands such a name to
+   * whoever connects next by design, so persisting it buys exactly nothing --
+   * and what it stops is the file growing a row (and being rewritten) for
+   * every passing hello, which on a hub anyone can dial is a connect loop with
+   * a random name each time. Confirmed and scored claims are what restarting
+   * has to survive, and those still travel.
    */
   export() {
     const out = [];
     for (const entry of this.entries.values()) {
+      if (!entry.confirmed && entry.played <= 0 && entry.points <= RANK_START) {
+        continue;
+      }
       out.push({
         name: entry.name, sprite: entry.sprite, points: entry.points,
         played: entry.played, won: entry.won,
         // the digest, never the token: a hub that loses this file loses the
         // season, not everybody's identity
         tokenHash: entry.tokenHash,
+        // Additive, and read back below. A hub built before this field
+        // ignores it on the way in -- import() copies the fields it knows
+        // and nothing else -- so a new hub's file still loads on an old one.
+        confirmed: entry.confirmed,
       });
     }
     out.sort((a, b) => (b.points - a.points) || (a.name < b.name ? -1 : 1));
@@ -359,6 +421,12 @@ class Board {
       if (typeof row.tokenHash === 'string' && /^[0-9a-f]{64}$/.test(row.tokenHash)) {
         entry.tokenHash = row.tokenHash;
       }
+      // A file written before `confirmed` existed says nothing about proof,
+      // so the results decide: a name that has settled a battle is worth
+      // protecting and is taken as confirmed, and one that has not stays
+      // provisional -- which is the same leniency a fresh claim gets.
+      entry.confirmed = typeof row.confirmed === 'boolean'
+        ? row.confirmed : entry.played > 0;
     }
     return this;
   }
