@@ -63,6 +63,20 @@ M.PRESENCE_INTERVAL = 0.125
 -- drift lasts, so it is despawned and respawned at the true cell instead.
 M.RESYNC_DISTANCE = 6
 
+-- How far an avatar is pushed up the draw order so the local player always
+-- wins a shared tile.  The overworld sorts entities by their pixel `py`, and
+-- that sort is unstable, so on a tie the two characters swap places from
+-- frame to frame -- a hundredth of a pixel is the smallest thing that
+-- decides it and the largest thing nobody can see.
+--
+-- It rests on two facts, and stops being safe without either.  Engine `py`
+-- values are always whole pixels (a step's progress is floored and a landing
+-- snaps to `cell * 16`), so any fraction at all breaks the tie in the
+-- player's favour.  And the nudge is only ever applied when `py % 1 == 0`,
+-- which is what keeps an avatar standing still from drifting up the screen
+-- a hundredth of a pixel per frame.
+M.AVATAR_DEPTH_NUDGE = 0.01
+
 -- Parties: you and one friend, travelling together.
 --
 -- Two is the whole design, not a first step towards six.  A party here is a
