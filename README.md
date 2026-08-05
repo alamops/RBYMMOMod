@@ -278,6 +278,14 @@ in a game, exactly like the walking sprite; leave and Red is back.
   <img src="docs/screenshots/nire-battle.png" width="330" alt="A link battle starting, with NIRE's back pic where Red's would be">
 </p>
 
+Same card, same badges, a different trainer on it — `NIRE` on the left,
+`NIRE HOOD` on the right:
+
+<p align="center">
+  <img src="docs/screenshots/nire-card.png" width="300" alt="The game's trainer card with NIRE's pic where Red's would be">
+  <img src="docs/screenshots/nire-hood-card.png" width="300" alt="The same card wearing NIRE HOOD">
+</p>
+
 If someone picks a character your ROM doesn't have, they show up as RED on
 your screen rather than not at all. That covers the artists' characters too,
 for anyone playing with an older copy of the mod.
