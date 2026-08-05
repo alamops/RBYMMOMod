@@ -58,7 +58,7 @@ local RANGE_OF = {
 
 function M.new()
   return setmetatable({
-    spawned = {},   -- playerId -> { npcId, x, y, facing }
+    spawned = {},   -- playerId -> { npcId, x, y, facing, npc }
     mapId = nil,
     spriteWarned = {},
   }, M)
@@ -88,6 +88,20 @@ function M:handle(av)
   return handle
 end
 
+-- Applies the depth nudge below and then hands back whatever the wrapped
+-- method returned.  The values arrive here as varargs, so the engine
+-- method's own arity is forwarded whole -- NPC:update returns nothing today
+-- and Player:update returns a value, so the contract is not one to guess --
+-- and no table is allocated to do it, on a path that runs once per avatar
+-- per frame.
+local function nudged(self, ...)
+  local py = self.py
+  if py and py % 1 == 0 then
+    self.py = py - Config.AVATAR_DEPTH_NUDGE
+  end
+  return ...
+end
+
 -- Avatars are scenery, not obstacles -- and they lose every tie for depth.
 --
 -- Both halves are written straight onto the live NPC, because neither has a
@@ -102,40 +116,76 @@ end
 -- and that sort is unstable, so two characters standing on one tile trade
 -- places from frame to frame; there is no z-order to ask for.  Lifting the
 -- avatar by AVATAR_DEPTH_NUDGE loses it every tie against the player, whose
--- py is always a whole pixel, and changes nothing else.  It has to be
--- applied *after* NPC:update rather than from this mod's own tick: the
--- engine recomputes py mid-step -- and only while `moving` -- so a value
--- written from the pump is overwritten before the frame is drawn.  Hence a
--- per-instance override that runs the class method first, and the
--- whole-pixel guard that keeps an idle avatar from drifting a hundredth of
--- a pixel every frame it stands still.
+-- py is always a whole pixel.  It has to be applied *after* NPC:update
+-- rather than from this mod's own tick: the engine recomputes py mid-step
+-- -- and only while `moving` -- so a value written from the pump is
+-- overwritten before the frame is drawn.  Hence a per-instance override
+-- that runs the class method first, and the whole-pixel guard that keeps an
+-- idle avatar from drifting a hundredth of a pixel every frame it stands
+-- still.
+--
+-- But py is not only a sort key, and a hundredth of a pixel is not free
+-- everywhere: SpriteRenderer floors `py - camY` and camY is whole, so a
+-- sprite drawn straight off the nudged value sits a whole pixel high for as
+-- long as it stands still.  So the nudge is confined to the sort.  A second
+-- per-instance override on pose -- the one call both the flat and the
+-- tilted draw path go through, seven values wide -- hands the renderer the
+-- true pixel back, and cellOf does the same for anything reading a position
+-- out of the avatar layer.  Shadowing a method on the instance is the
+-- engine's own idiom here: its Pikachu follower does exactly this to
+-- walkPhase.
+--
+-- Nothing is written until both class methods are in hand, because a
+-- half-decorated NPC would be passable and marked, and the marker is what
+-- stops advance from ever retrying it.
 --
 -- undecorate has to leave the table indistinguishable from a vanilla one.
 -- The engine pools NPC tables, so a leftover `passable` would be born again
 -- on some later ordinary NPC and quietly let the player walk through it.
+-- Whatever was in the two slots beforehand goes back, rather than nil:
+-- nothing promises they were empty.
 function M.decorate(npc)
   if type(npc) ~= "table" or npc.mmoAvatar then return end
+
+  -- resolves through the metatable to the engine's class methods -- unless
+  -- something already shadowed one on this instance, in which case that is
+  -- what gets wrapped and what has to be put back
+  local baseUpdate, basePose = npc.update, npc.pose
+  if type(baseUpdate) ~= "function" or type(basePose) ~= "function" then
+    return
+  end
+
+  npc.mmoPrevUpdate = rawget(npc, "update")
+  npc.mmoPrevPose = rawget(npc, "pose")
   npc.mmoAvatar = true
   npc.passable = true
 
-  -- resolves through the metatable to the engine's class method
-  local base = npc.update
-  if type(base) ~= "function" then return end
   rawset(npc, "update", function(self, ...)
-    base(self, ...)
-    local py = self.py
-    if py and py % 1 == 0 then
-      self.py = py - Config.AVATAR_DEPTH_NUDGE
-    end
+    -- arguments are evaluated first, so the base call has already
+    -- recomputed py by the time the nudge is applied to it
+    return nudged(self, baseUpdate(self, ...))
+  end)
+
+  rawset(npc, "pose", function(self, ...)
+    -- NPC:pose -- sheet, px, py, facing, walk phase, step flip, hop flag
+    local sprite, px, py, facing, phase, flip, hop = basePose(self, ...)
+    if py then py = py + Config.AVATAR_DEPTH_NUDGE end
+    return sprite, px, py, facing, phase, flip, hop
   end)
 end
 
 function M.undecorate(npc)
-  if type(npc) ~= "table" then return end
+  -- a table this mod never decorated owns its own slots; leave them alone
+  if type(npc) ~= "table" or not npc.mmoAvatar then return end
+  local prevUpdate, prevPose = npc.mmoPrevUpdate, npc.mmoPrevPose
   npc.mmoAvatar = nil
   npc.passable = nil
-  -- back to the class method via the metatable
-  rawset(npc, "update", nil)
+  npc.mmoPrevUpdate = nil
+  npc.mmoPrevPose = nil
+  -- nil in the ordinary case, which is back to the class method via the
+  -- metatable
+  rawset(npc, "update", prevUpdate)
+  rawset(npc, "pose", prevPose)
 end
 
 function M:spawn(player)
@@ -167,7 +217,10 @@ function M:spawn(player)
   -- A handle the engine will not hand over yet is not a failed spawn: the
   -- avatar is already on the map, and advance re-decorates on the next tick.
   local handle = self:handle(self.spawned[player.id])
-  M.decorate(handle and handle.npc)
+  local npc = handle and handle.npc
+  -- kept because despawn cannot ask for it again; see there
+  self.spawned[player.id].npc = npc
+  M.decorate(npc)
   return npcId
 end
 
@@ -175,10 +228,19 @@ function M:despawn(playerId)
   local av = self.spawned[playerId]
   if not av then return false end
   self.spawned[playerId] = nil
-  -- before the NPC goes back in the pool, and tolerant of a handle that has
-  -- already gone: undecorate on nil is a no-op
-  local handle = self:handle(av)
-  M.undecorate(handle and handle.npc)
+  -- The table itself, held since it was decorated, because the handle is no
+  -- use here: WorldAPI:npc answers nil the moment its map stops being the
+  -- active one, or there is no overworld at all -- which is precisely the
+  -- map change and the walk into a battle, the two paths that despawn every
+  -- avatar at once.  Looking it up there would skip undecorate exactly when
+  -- the most tables are going back in the pool.
+  local npc = av.npc
+  if not npc then
+    local handle = self:handle(av)
+    npc = handle and handle.npc
+  end
+  M.undecorate(npc)
+  av.npc = nil
   mod.world:removeNpc(av.npcId)
   return true
 end
@@ -198,7 +260,19 @@ function M:cellOf(playerId)
   local npc = handle and handle.npc
   -- Pixel position expressed in cells, so the nameplate glides with the
   -- sprite through a step instead of jumping a whole tile when it lands.
-  if npc and npc.px and npc.py then return npc.px / 16, npc.py / 16 end
+  if npc and npc.px and npc.py then
+    -- with the depth nudge taken back off, the same way pose does it for
+    -- the renderer: the lift is a tie-breaker for the draw sort and nothing
+    -- else, and a caller comparing this against the roster's cell is
+    -- entitled to the number the network agreed on.  A whole py is one the
+    -- nudge has not been applied to yet (freshly decorated, not yet
+    -- updated), so the fraction is the test.
+    local py = npc.py
+    if npc.mmoAvatar and py % 1 ~= 0 then
+      py = py + Config.AVATAR_DEPTH_NUDGE
+    end
+    return npc.px / 16, py / 16
+  end
   if handle then
     local x, y = handle:position()
     if x and y then return x, y end
@@ -244,6 +318,7 @@ function M:advance(av, player)
   local handle = self:handle(av)
   local npc = handle and handle.npc
   if not npc then return self:resync(player) end
+  av.npc = npc
 
   -- Heals an avatar the engine rebuilt under us, and costs one comparison
   -- when it did not: decorate returns immediately on an already-marked NPC.
