@@ -554,29 +554,39 @@ function M.spriteChoice()
   return Chars.resolve(chosen)
 end
 
--- The same choice, but nil when the player never actually made one.
+-- The same choice, but nil when the player is not asking to be anybody else.
 --
 -- spriteChoice always has an answer, because everybody has to be drawn as
--- somebody. This one separates "picked RED" from "never opened the picker",
--- which is what decides whether a look is worn outside a game at all: a save
--- that says nothing and a global option still sitting on the default mean
--- this player never touched the character side of the mod, and their
--- single-player game keeps the renderer the engine built for it. Installing
--- the mod must not silently swap anybody's trainer. Choosing RED on purpose
--- does count, and wearing RED changes nothing anyone can see.
+-- somebody. This one separates "asked for a character" from "left it to the
+-- game", which is what decides whether a look is worn outside a session at
+-- all: a save that says nothing and a global option still sitting on the
+-- default mean this player never touched the character side of the mod, and
+-- their single-player game keeps the renderer the engine built for it.
+-- Installing the mod must not silently swap anybody's trainer.
 --
--- Resolved like spriteChoice, so what comes back is always a character this
--- game can actually draw.
+-- The rule is that explicitness is a property of what would actually be
+-- *worn*, not of the string as it was typed. Whichever of the two sources
+-- answers is resolved first, and a value that resolves to RED comes back as
+-- nil -- because RED is the trainer the engine already draws, so putting it
+-- on is a restore rather than a wear, and syncLook reads that nil as exactly
+-- the restore it is. That is what makes picking RED in the creator really
+-- hand the engine's own renderer back, which is what the card and the README
+-- promise. Deciding it after the resolve is also what keeps a value carried
+-- over from another ROM honest: an id this catalog cannot draw degrades to
+-- RED, and "leave them alone" is the right reading of it, not "explicitly
+-- RED" -- a choice nobody here ever made.
+--
+-- Resolved like spriteChoice, so what does come back is always a character
+-- this game can actually draw.
 function M.explicitChoice()
   local chosen = mod.save:get("sprite")
   if type(chosen) ~= "string" or chosen == "" then
     chosen = mod.options:get("sprite")
-    if type(chosen) ~= "string" or chosen == ""
-       or chosen == Config.DEFAULT_SPRITE then
-      return nil
-    end
   end
-  return Chars.resolve(chosen)
+  if type(chosen) ~= "string" or chosen == "" then return nil end
+  local id = Chars.resolve(chosen)
+  if id == Config.DEFAULT_SPRITE then return nil end
+  return id
 end
 
 -- Choosing a character wears it there and then.
@@ -1577,6 +1587,17 @@ function M.install()
   -- world nobody is standing in. The character goes with the save too: the
   -- one being loaded may have chosen somebody else, or nobody.
   mod.events:on("save.loaded", function() M.saveLoaded() end)
+
+  -- NEW GAME needs the very same resync, and it does not announce itself the
+  -- same way: starting a fresh file emits save.created, never save.loaded, so
+  -- listening for one alone leaves the other world half torn down. It matters
+  -- here because the overworld keeps *one* player entity for the life of the
+  -- process -- setMap only builds a new one when it has none -- so a stash
+  -- taken before QUIT is still standing after the title screen, and the mod's
+  -- own renderer still on the player. The fresh save has chosen nobody, and
+  -- dropping the stash is what lets that non-choice be honoured instead of
+  -- refreshLook re-wearing the last game's character on the first map.
+  mod.events:on("save.created", function() M.saveLoaded() end)
 
   mod.exports.isConnected = M.isConnected
   mod.exports.isHosting = M.isHosting

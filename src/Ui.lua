@@ -234,12 +234,18 @@ end
 -- the row that loses a glyph is a row that gained a face.
 local PREVIEW_X = 16                    -- the gutter, right of the cursor
 local PREVIEW_INDENT = "  "             -- two glyphs = 16px = the gutter
+-- Where the widget itself starts a label: ListMenu:draw calls
+-- Font.draw(item.label, 16, y) with the x hardcoded and no offset to pass
+-- (src/ui/ListMenu.lua:draw). It is a fact about the widget rather than a
+-- choice of ours, and it equals PREVIEW_X only by coincidence -- so how much
+-- room a name has left is measured from here, not from where the art lands.
+local LIST_LABEL_X = 16
 -- The label is an 8px glyph drawn at the row's y and the art is 16px tall,
 -- so the art is lifted 4px to put the two on the same middle line -- the
 -- same centring the leaderboard does from the other side (RANK_TEXT_DY).
 local PREVIEW_DY = -4
 local PREVIEW_LABEL_MAX =
-  math.floor((SCREEN_W - PREVIEW_X - #PREVIEW_INDENT * SLOT_W) / SLOT_W)
+  math.floor((SCREEN_W - LIST_LABEL_X - #PREVIEW_INDENT * SLOT_W) / SLOT_W)
 
 -- A character's row label: indented past the gutter, and never wider than
 -- what is left of the row.
@@ -254,7 +260,7 @@ end
 -- to read it off a frame with. It answers for every visible row that names a
 -- character, including the one under the cursor -- a portrait is what the row
 -- *is*, not a marker on it -- and leaves "is there art for this id" to the
--- draw, which is the only side that can load an image.
+-- wrap below, which is the only side that can load an image.
 function M.previewRows(menu)
   local out = {}
   if type(menu) ~= "table" or type(menu.items) ~= "table" then return out end
@@ -278,8 +284,15 @@ end
 --
 -- A character with no art draws nothing and says nothing: the sheet is
 -- missing for a whole class of reason the player already knows about (no ROM
--- imported yet), Chars.portrait remembers the failure so it is not retried
--- every frame, and a warning on a draw path would repeat sixty times a second.
+-- imported yet), it is left out of the table below so nothing retries it, and
+-- a warning on a draw path would repeat sixty times a second.
+--
+-- Which art each row gets is settled here, once, rather than per row per
+-- frame. The list a picker is built with never changes for as long as the
+-- screen is open, and while Chars.portrait caches the sheet it loads, asking
+-- it again still costs a registry lookup wrapped in a closure and a pcall --
+-- seven of those every frame for an answer that cannot have changed. What the
+-- draw keeps is one table index.
 local function previewCharacters(menu)
   local baseDraw = menu and menu.draw
   if type(baseDraw) ~= "function" then
@@ -289,15 +302,27 @@ local function previewCharacters(menu)
     return menu
   end
 
+  -- id -> the { image, quad } Chars.portrait hands back. An id with no art is
+  -- simply absent, which is the same miss the draw tested for before.
+  local art = {}
+  if type(menu.items) == "table" then
+    for _, item in ipairs(menu.items) do
+      local id = type(item) == "table" and item.value or nil
+      if type(id) == "string" and art[id] == nil then
+        art[id] = Chars.portrait(id)
+      end
+    end
+  end
+
   menu.draw = function(self, ...)
     local out = baseDraw(self, ...)
     -- sprite art is drawn untinted, and the widget signs off in white
     -- anyway; set it explicitly so a caller's colour cannot stain a portrait
     love.graphics.setColor(1, 1, 1, 1)
     for _, preview in ipairs(M.previewRows(self)) do
-      local art = Chars.portrait(preview.id)
-      if art then
-        love.graphics.draw(art.image, art.quad, PREVIEW_X,
+      local pic = art[preview.id]
+      if pic then
+        love.graphics.draw(pic.image, pic.quad, PREVIEW_X,
                            preview.y + PREVIEW_DY)
       end
     end
