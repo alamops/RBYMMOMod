@@ -124,10 +124,62 @@ end
 
 -- the seams it says it wraps
 for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items",
-                        "ui.naming.grid" }) do
+                        "ui.naming.grid", "movement.speed" }) do
   local chain = run.loader.hooks.chains[hook]
   check(chain ~= nil and #chain > 0, "wraps " .. hook)
 end
+
+-- ------- movement.speed: holding B on foot halves the step
+--
+-- Driven straight off the registered chain entry rather than through a
+-- Client export, because the wrap runs entirely inside the closure the
+-- loader captured -- this is the same chain OverworldController's
+-- Player:tryMove would call, with a passthrough `next` standing in for it.
+-- `frames` is frames-per-tile, so the arithmetic is relative to whatever the
+-- engine handed in, never a hardcoded 8.
+--
+-- Wrapped for scope, the way later sections in this file are: the main
+-- chunk is close enough to Lua's 200-local ceiling that a handful of new
+-- names here is enough to cross it.
+
+;(function()
+
+local speedChain = run.loader.hooks.chains["movement.speed"]
+local speedEntry = speedChain[1]
+local passthroughNext = function(f) return f end
+
+local heldB = { isDown = function(_, b) return b == "b" end }
+local notHeldB = { isDown = function(_, b) return false end }
+
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB }), 8,
+   "on foot with B held, a 16-frame walk tile runs at 8")
+eq(speedEntry.callback(passthroughNext, 11, { input = heldB }), 5,
+   "the halving floors rather than rounds")
+check(speedEntry.callback(passthroughNext, 1, { input = heldB }) >= 1,
+      "and never drops below one frame a tile")
+
+-- Only the *speed* passes through here. What the step is reported as is a
+-- separate question, and a bike step is reported fast -- the wire flag means
+-- pace, not "B was held" (src/Client.lua). That side of the wrap writes to a
+-- Client local the loader gives this suite no handle on, so it is covered
+-- where it lands instead: the roster and Avatars sections below drive a
+-- `fast` row through to npc.stepFrames, and the e2e drivers assert the flag
+-- actually crossed the wire.
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB, onBike = true }), 16,
+   "the bike is already fast, so holding B changes nothing about its speed")
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB, surfing = true }), 16,
+   "and surfing is left alone too")
+eq(speedEntry.callback(passthroughNext, 16, { input = notHeldB }), 16,
+   "letting go of B walks at the ordinary pace")
+
+-- the loader's own option store, the same one mod.options:get reads --
+-- toggling it off is what a player who wants their old walk speed back does
+run.loader.modOptions["rby_mmo"] = { run = false }
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB }), 16,
+   "and turning B TO RUN off walks at the ordinary pace even with B held")
+run.loader.modOptions["rby_mmo"] = nil
+
+end)()
 
 -- the inter-mod surface it publishes
 local exports = run.loader.exports["rby_mmo"]
@@ -397,6 +449,20 @@ eq(Wire.presence({ id = "p5", name = "MISTY", party = true }).party, true,
 eq(Wire.presence({ id = "p6", name = "GARY", party = "7" }).party, true,
    "a party id sent where a flag belongs is reduced to the flag")
 
+-- ------- pace on the wire
+--
+-- Client truth, the same shape as party: nothing the hub can see says
+-- whether a player is holding B or riding a bike, so the sender's word is
+-- taken. The coercion is *stricter* than party's, though -- both hubs
+-- re-derive this one field from the same wire bytes, and Lua and JS
+-- truthiness part ways on 0 and "", so only a literal true counts.
+
+eq(presence.fast, false, "presence with no fast field reads as walking pace")
+eq(Wire.presence({ id = "p7", name = "MISTY", fast = true }).fast, true,
+   "and a fast flag survives")
+eq(Wire.presence({ id = "p8", name = "GARY", fast = "junk" }).fast, false,
+   "while junk in the field is walking pace -- only a literal true is fast")
+
 local member = Wire.member({ id = "m1", name = "ANN", x = 4, y = 9 })
 check(member ~= nil, "a members row sanitises")
 eq(member.name, "ANN", "keeping the name")
@@ -628,6 +694,25 @@ eq(roster:get("a").party, true, "and walking does not take it off them again")
 roster:setParty("a", false)
 eq(roster:get("a").party, false, "leaving one clears it")
 eq(roster:setParty("nosuch", true), nil, "an unknown id is a no-op")
+
+-- ------- pace rides through move(), not a setter
+--
+-- The opposite choice from party, and for the reason src/Roster.lua spells
+-- out: pace is a property of the step itself, so it travels through move()'s
+-- own trailing argument rather than a setParty-shaped call. A nil is an
+-- old-shaped caller with no opinion, and must leave whatever was last
+-- recorded alone -- reading "no opinion" as "not fast" would stop every
+-- runner mid-stride the moment any pre-pace call site fired.
+
+eq(roster:get("a").fast, false,
+   "nobody starts flagged as fast -- Wire.presence always coerces the field")
+roster:move("a", "PALLET", 8, 5, "right", true)
+eq(roster:get("a").fast, true, "a move can flag the step as a fast one")
+roster:move("a", "PALLET", 9, 5, "right")
+eq(roster:get("a").fast, true,
+   "and an old-shaped call with no fast argument leaves it alone")
+roster:move("a", "PALLET", 10, 5, "right", false)
+eq(roster:get("a").fast, false, "while an explicit false clears it")
 
 roster:setBusy("a", true)
 eq(roster:get("a").busy, true, "busy is carried the same way")
@@ -1945,6 +2030,59 @@ end
 eq(walked, 4, "two east and two south is four steps")
 eq(x, 5, "landing on the target x")
 eq(y, 8, "and the target y")
+
+-- ------- a fast step sets the remote avatar's step pace
+--
+-- advance() writes npc.stepFrames straight onto the live NPC -- the field
+-- NPC:update reads fresh every frame, per the module's own header -- so the
+-- fake world only needs to hand back a handle whose .npc is a plain mutable
+-- table shaped like the fields advance touches.  mod.world is set directly
+-- on the shared stub for the length of this section and cleared afterward,
+-- so nothing later that touches stubMod sees a fake world it did not ask
+-- for.  Wrapped for scope, the same reason as elsewhere in this file.
+
+;(function()
+
+local fakeNpc = { cellX = 5, cellY = 5, moving = false, facing = "down" }
+local fakeWorld = {
+  npc = function(_, mapId, npcId) return { npc = fakeNpc } end,
+}
+stubMod.world = fakeWorld
+
+local avatars = Avatars.new()
+avatars.mapId = "PALLET"
+
+local av = { npcId = "n1", x = 5, y = 5, facing = "down" }
+local runnerRow = { id = "a", x = 6, y = 5, facing = "right", fast = true }
+check(avatars:advance(av, runnerRow), "advance starts a step toward the new cell")
+eq(fakeNpc.stepFrames, Config.FAST_STEP_FRAMES,
+   "a fast roster row paces the step at the fast frame count")
+
+-- the step "completes" the way NPC:update would drive it, before the next
+-- one starts
+fakeNpc.moving = false
+fakeNpc.cellX, fakeNpc.cellY = 6, 5
+
+local walkerRow = { id = "a", x = 7, y = 5, facing = "right", fast = false }
+check(avatars:advance(av, walkerRow), "advance starts the next step")
+eq(fakeNpc.stepFrames, nil,
+   "and a walking-pace row clears it back to the engine's own default")
+
+-- The bug this flag's rename fixed: a cyclist's row says fast the same way a
+-- sprinter's does, because the wire carries the pace and not the reason for
+-- it. Before that, a remote cyclist stepped at 16 while their own game moved
+-- them at 8 and they drifted straight through RESYNC_DISTANCE.
+fakeNpc.moving = false
+fakeNpc.cellX, fakeNpc.cellY = 7, 5
+
+local cyclistRow = { id = "a", x = 8, y = 5, facing = "right", fast = true }
+check(avatars:advance(av, cyclistRow), "advance starts a cyclist's step")
+eq(fakeNpc.stepFrames, Config.FAST_STEP_FRAMES,
+   "and a cyclist is paced by the same one flag a sprinter is")
+
+stubMod.world = nil
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 6. Characters you can wear

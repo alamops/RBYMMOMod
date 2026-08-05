@@ -318,7 +318,35 @@ return function(game)
   local fromX, fromY = before and before.rosterX, before and before.rosterY
   log(("host baseline (%s,%s)"):format(tostring(fromX), tostring(fromY)))
   H.signal("guest_baseline_taken")
-  H.await(game, "host_walk_done")
+
+  -- ------- 2b. the pace flag reaches this side too
+  --
+  -- The host holds B for every step of the walk it is about to do (see
+  -- mmo_host.lua), so this side's copy of its roster row should say
+  -- fast=true for at least part of that window. Sampled here rather than
+  -- after the fact: the flag is "my last committed step was a fast one"
+  -- (src/Client.lua), so it is only ever true while a fast step is actually
+  -- in flight and clears on the very next ordinary step -- there is no
+  -- lingering copy to check once the barrier below has already cleared.
+  --
+  -- Held B is only one of the two ways to earn the flag; the bike is the
+  -- other, and it is covered at the unit tier rather than here, where
+  -- getting a bicycle into the bag would be most of the run.
+  --
+  -- Deliberately not a speed measurement: this only asks whether the flag
+  -- crossed the wire at all, not how fast the avatar moved while it was up.
+  local sawHostFast = false
+  local runSamples = 0
+  local function sampleHostFast()
+    local row = H.avatarRow(exports)
+    if row == nil then return end
+    runSamples = runSamples + 1
+    if row.fast then sawHostFast = true end
+  end
+  H.await(game, "host_walk_done", nil, sampleHostFast)
+  check(sawHostFast,
+        ("the host's avatar row showed fast=true while B was held "
+          .. "(%d sample(s) taken)"):format(runSamples))
 
   local hostMoved = H.waitSeconds(game, function()
     local row = H.avatarRow(exports)

@@ -98,6 +98,12 @@ right depth sorting, right palette — walking tile to tile on the engine's own
 16-frame step clock. Not a sprite bolted on top. Nameplates ride over their
 heads; chat bubbles pop when they talk.
 
+Hold **B** on foot and you run — bike speed, no bike, off the moment you're
+biking or surfing — and everyone else sees it too: your avatar steps at that
+same doubled clock on their screen, not just yours. The wire carries the
+*pace*, not the reason for it, so a player on a bicycle rides at bicycle
+speed on your screen as well.
+
 <p align="center">
   <img src="docs/screenshots/overworld-presence.png" width="300" alt="Another player standing in the room with a nameplate">
   <img src="docs/screenshots/chat-log.png" width="300" alt="The chat log showing two global messages">
@@ -360,6 +366,7 @@ the `PLAYERS` list to start one from.
 | `JOIN CODE` | *(empty)* | the passcode used for a hub you haven't typed one for |
 | `MY SPRITE` | RED | how everyone else sees you |
 | `BUBBLES` | on | names and chat over heads |
+| `B TO RUN` | on | hold B on foot to move at bike speed |
 
 These are just the *defaults* — HOST GAME asks the room size every time and
 JOIN GAME lets you type an address and a passcode, and those in-game choices
