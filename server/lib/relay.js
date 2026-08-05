@@ -30,7 +30,7 @@
 const {
   cleanText, cleanId, cleanSpriteId, cleanMapId, cleanInt, cleanHex,
   cleanProfile, cleanOutcome, cleanPoints, cleanToken, payloadOk, FACINGS,
-  KINDS, SCOPES, NAME_MAX, MESSAGE_MAX, LOCAL_RADIUS,
+  KINDS, SCOPES, NAME_MAX, MESSAGE_MAX, MOTD_MAX, LOCAL_RADIUS,
 } = require('./sanitize');
 const {
   Board, mintToken, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
@@ -61,6 +61,17 @@ const PROTOCOL = 5;
 // A SHA-256 response is 64 hex characters; the slack is for a future digest,
 // not for an unbounded field.
 const RESPONSE_MAX = 128;
+
+// The name the hub itself speaks under. A message of the day and an
+// operator's broadcast both arrive as ordinary chat with this name on them
+// and no sender id, so the name is the only thing telling a player that the
+// hub said it -- which is why no player may wear it (see the hello handler).
+// Held as a board key, because that is the "same name" the rest of the hub
+// already means: case folded, trimmed.
+const HUB_NAME = 'HUB';
+// What a kicked player is told when the operator did not say. Honest about
+// who did it and short enough to fit the error box the client draws.
+const KICK_REASON = 'An operator removed you from this hub.';
 
 // A value that came off the wire and is about to be quoted back to its
 // sender. Bounded because the sentence is the point, not a faithful echo of
@@ -141,6 +152,16 @@ handlers['mmo.hello'] = (relay, client, msg) => {
   }
   const name = cleanText(msg.name, NAME_MAX);
   if (!name) return relay.refuse(client, 'That trainer name cannot be used here.');
+
+  // ...and one name is spoken for. The hub's own lines carry no sender id, so
+  // a player wearing this name could put words in the hub's mouth and nothing
+  // on the receiving side could tell the two apart. Matched on the board's key
+  // rule, so HUB, hub and Hub are all the same name here, as they are
+  // everywhere else.
+  if (keyOf(name) === HUB_NAME) {
+    return relay.refuse(client, 'That name belongs to the hub itself; ' +
+      'pick another trainer name and connect again.');
+  }
 
   // The seat is claimed here, by someone who has identified themselves.
   // Charging it on connect meant a peer that connected and said nothing
@@ -464,6 +485,15 @@ class Relay {
     this.protocol = Number.isFinite(Number(opts.protocol))
       ? Number(opts.protocol) : PROTOCOL;
     this.auth = opts.auth || null;
+    /*
+     * The hub's message of the day, as the operator typed it. Held raw and
+     * cleaned at admit-time on purpose: lib/server.js reassigns this field
+     * when the config is re-read on SIGHUP, and a value folded into a
+     * pre-built welcome payload here would go on greeting players with the
+     * message the hub started with until somebody restarted it. Empty means
+     * there is nothing to say, and the welcome then carries no field at all.
+     */
+    this.motd = typeof opts.motd === 'string' ? opts.motd : '';
     this.log = opts.log || createLog();
     this.now = typeof opts.now === 'function' ? opts.now : Date.now;
 
@@ -484,6 +514,16 @@ class Relay {
     this.board = opts.board || new Board();
     this.onRankChange = typeof opts.onRankChange === 'function'
       ? opts.onRankChange : null;
+    /*
+     * One settled battle, told once. Separate from onRankChange because it
+     * answers a different question: onRankChange says "the board moved, write
+     * it out" and fires for claims too, while this fires only for a battle
+     * that actually scored and carries the whole result -- who fought, what
+     * it cost, when it started. A hub that keeps no history simply passes
+     * nothing and the record is never built.
+     */
+    this.onMatchSettled = typeof opts.onMatchSettled === 'function'
+      ? opts.onMatchSettled : null;
     /*
      * The same arrangement one step out: whoever owns the files is told that
      * *who is here* changed, and decides for itself what that is worth.
@@ -726,6 +766,10 @@ class Relay {
     for (const other of this.clients.values()) {
       if (other.ready && other.id !== client.id) players.push(presenceOf(other));
     }
+    // Read now, not at construction: an operator who edits the message and
+    // sends a HUP expects the next player through the door to see it.
+    const motd = cleanText(this.motd, MOTD_MAX);
+
     // `points` is this player's own rating, spelled out rather than left to
     // be fished out of the roster: the roster a client keeps deliberately
     // has no entry for itself, so the welcome is the only place your own
@@ -743,6 +787,13 @@ class Relay {
       // Said out loud rather than left to be inferred from a zero: "your
       // battles will not score here" is something a player can act on.
       ranked: client.ranked,
+      // The hub's greeting, when it has one to give. Absent rather than empty
+      // when it does not, and absent is also what every older client sees:
+      // this rides on the welcome instead of arriving as a new message type
+      // precisely so a build that has never heard of a MOTD reads past the
+      // key and joins exactly as it always did. Nothing new travels the other
+      // way, which is why the protocol number does not move for it.
+      motd: motd || undefined,
     });
     this.broadcast('mmo.join', { player: presenceOf(client) }, client.id);
     this.log.info(`+ ${safe(client.name)} (${client.id}) -- ` +
@@ -903,6 +954,79 @@ class Relay {
     for (const client of this.clients.values()) {
       if (client.id !== exceptId && client.ready) this.send(client, type, payload);
     }
+  }
+
+  // ------- operator actions
+  //
+  // The two things somebody standing at the terminal can do to a running
+  // hub. Both are plain methods rather than a channel of their own: whatever
+  // carries the operator's request -- an admin socket today -- decides how it
+  // is trusted, and the relay only decides what it means.
+
+  /*
+   * Remove everybody playing under a name.
+   *
+   * Everybody, not somebody: a name is unique only among *ranked* players
+   * (see nameInUse), so two copies that never changed the default one can
+   * both be here as RED and an operator kicking RED means both. The count and
+   * the names actually removed go back so the caller can say what happened
+   * rather than assuming one.
+   *
+   * The targets are collected before any of them is touched, because refuse()
+   * deletes clients from the very map being walked -- and the second match is
+   * exactly the one that would quietly survive the kick.
+   */
+  kickByName(name, reason) {
+    const key = keyOf(cleanText(name, NAME_MAX));
+    const out = { kicked: 0, names: [] };
+    if (!key) return out;
+    // Capped like a chat line, and for the same reason: it is drawn in the
+    // client's error box, which was never sized for an essay.
+    const message = cleanText(reason, MESSAGE_MAX) || KICK_REASON;
+
+    const targets = [];
+    for (const client of this.clients.values()) {
+      if (client.ready && keyOf(client.name) === key) targets.push(client);
+    }
+    for (const client of targets) {
+      // The same three steps a refused hello gets -- tell them why, close the
+      // socket, forget them -- because a kick is the same event arriving
+      // later: drop() alone would leave the peer holding an open connection
+      // to a hub that no longer believes in it.
+      out.names.push(client.name);
+      out.kicked += 1;
+      this.refuse(client, message);
+    }
+    if (out.kicked) {
+      this.log.info(`kicked ${out.kicked} player(s) named ${safe(out.names[0])}`);
+    }
+    return out;
+  }
+
+  /*
+   * Say something to everyone, as the hub.
+   *
+   * An ordinary mmo.chat line with the hub's name on it, deliberately with no
+   * `from`: every client renders a chat line from name, text and scope, and
+   * the only thing `from` feeds is the speech bubble over that player's head
+   * -- which the hub does not have. An id here would either be a real
+   * player's (words in their mouth) or a made-up one, and a made-up one is
+   * stored against nobody and drawn nowhere. Leaving it out is the honest
+   * spelling of "this did not come from a trainer", and it is what makes the
+   * line safe on clients that predate this feature.
+   */
+  announce(text) {
+    const clean = cleanText(text, MESSAGE_MAX);
+    if (!clean) return { delivered: 0 };
+    let delivered = 0;
+    for (const client of this.clients.values()) {
+      if (client.ready) delivered += 1;
+    }
+    // No exception: there is no player to leave out.
+    this.broadcast('mmo.chat',
+      { name: HUB_NAME, scope: 'global', text: clean });
+    this.log.info(`announced to ${delivered} player(s): ${safe(clean)}`);
+    return { delivered };
   }
 
   // ------- sessions
@@ -1101,6 +1225,32 @@ class Relay {
       `${safe(settled.loser.name)} ${settled.loser.points} ` +
       `(-${settled.loser.lost})`);
     this.noteRankChange(settled);
+    // Told here and nowhere else, while `match` is still in scope: this is
+    // the one point where a result is known to be real -- both sides agreed,
+    // both were ranked, both claims held -- and the only place the battle's
+    // own clock is still readable. Every earlier return above is a battle
+    // that scored nothing, and a history of those would be a history of
+    // arguments.
+    this.noteMatchSettled({
+      // When it ended: the moment the session came down, or -- for a pair
+      // that both reported before either left the session, which is a normal
+      // race and not an error -- the moment it settled, which is now. Never
+      // null: a history line whose timestamp is missing is a line no reader
+      // can sort or print.
+      at: match.endedAt || this.now(),
+      startedAt: match.startedAt,
+      repeats: settled.repeats,
+      winner: {
+        name: settled.winner.name,
+        points: settled.winner.points,
+        gained: settled.winner.gained,
+      },
+      loser: {
+        name: settled.loser.name,
+        points: settled.loser.points,
+        lost: settled.loser.lost,
+      },
+    });
     return settled;
   }
 
@@ -1121,6 +1271,21 @@ class Relay {
       // Persistence is somebody else's problem and must not cost the
       // players their result: the ratings are already correct in memory.
       this.log.warn(`could not record a rank change: ${safe(err.message)}`);
+    }
+  }
+
+  /*
+   * A battle finished and was paid. Guarded exactly like noteRankChange, and
+   * for exactly the same reason: the ratings are already correct in memory
+   * and the players have already been told, so a listener that throws is a
+   * line missing from a log file, never a lost result.
+   */
+  noteMatchSettled(record) {
+    if (!this.onMatchSettled) return;
+    try {
+      this.onMatchSettled(record);
+    } catch (err) {
+      this.log.warn(`could not record a settled match: ${safe(err.message)}`);
     }
   }
 
