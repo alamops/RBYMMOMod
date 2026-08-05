@@ -1059,6 +1059,51 @@ function M.rankAfterBattle(game, exports, check, seconds)
   return mine, other
 end
 
+-- Photograph the character you are wearing, stood in the overworld facing
+-- the camera, and hand back the sheet it drew from.
+--
+-- Deliberately taken while this side is alone on its map: a remote player
+-- brings a nameplate, and this mod's nameplates sit a tile low -- straight
+-- across the character's chest and head, which is exactly what a picture of
+-- a character must not have over it.
+--
+-- The facing is set on the entity rather than walked into, because a tapped
+-- direction moves a tile and the tile it moves to is not always free. Frame
+-- 0 of an overworld sheet is stand-down (SpriteRenderer), so facing down is
+-- what puts the character's front to the camera.
+--
+-- "Alone" cannot be arranged on the guest's side -- both trainers spend the
+-- run in one room -- so the overlay is switched off for the length of the
+-- shot instead, through the same option a player toggles, and switched back
+-- immediately. Nothing else in the run is affected: every nameplate and
+-- bubble assertion happens outside these few frames, and the option going
+-- off and on again is itself the proof that BUBBLES reaches the overlay.
+function M.shotLook(game, path)
+  local ow
+  for i = #game.stack.states, 1, -1 do
+    if game.stack.states[i].isOverworld then ow = game.stack.states[i] break end
+  end
+  ow = ow or game.overworld
+  local player = ow and ow.player
+  if not player then return nil end
+
+  local opts = game.mods and game.mods.modOptions
+  local mine = opts and opts["rby_mmo"]
+  local hadBubbles = mine and mine.bubbles
+  if mine then mine.bubbles = false end
+
+  M.closeToOverworld(game)
+  player.facing = "down"
+  U.wait(20)
+  U.shot(game, path)
+
+  if mine then mine.bubbles = hadBubbles end
+  U.wait(5)
+
+  local worn = player.sprite
+  return worn and (worn.def and worn.def.image or worn.image) or nil
+end
+
 -- Open the game's own TRAINER CARD and photograph it, returning the path
 -- the player pic resolved to.
 --
