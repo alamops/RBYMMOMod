@@ -117,10 +117,14 @@ const STATUS_STALE_MS = STATUS_HEARTBEAT_MS * 2.5;
  * reader honours it, which is why readHistoryFile() skips a line it cannot
  * parse instead of refusing the file the way readJsonFile() rightly does.
  *
+ * It arrives in two generations, because the hub rotates it: see
+ * readHistoryLedger() for why both are read and what it would cost not to.
+ *
  * `admin.sock` is the one live channel this process has. It exists only while
  * a hub is running, so its absence is ordinary news and not an error.
  */
 const HISTORY_FILENAME = 'history.jsonl';
+const HISTORY_ROTATED_SUFFIX = '.1';
 const ADMIN_FILENAME = 'admin.sock';
 
 /*
@@ -597,6 +601,10 @@ const HELP = {
     '',
     `Last ${HISTORY_DEFAULT} by default.`,
     '',
+    'The hub keeps that ledger in two generations: past a size ceiling it',
+    `renames it to ${HISTORY_FILENAME}${HISTORY_ROTATED_SUFFIX} and starts a fresh one. Both are read`,
+    'here, older generation first, so a rotation costs nothing to read across.',
+    '',
     '  WHEN      how long ago the battle settled.',
     '  POINTS    what the winner gained and the loser lost, e.g. +16/-16.',
     '  REMATCH   shown only when a pair had met recently: x3 is the third time',
@@ -604,14 +612,15 @@ const HELP = {
     '            counts. The winner gains less each time, so this column is',
     '            usually the answer to "why was that worth so little".',
     '',
-    '  -n N      how many to print. The whole file is kept bounded by the hub,',
-    '            so a large N simply prints everything there is.',
-    '  --json    print the records as JSON, newest first, same cut.',
+    '  -n N      how many to print. Both generations are kept bounded by the',
+    '            hub, so a large N simply prints everything there is.',
+    '  --json    print the records as one JSON array, newest first, same cut.',
     '',
     'Only agreed, ranked results are here. A draw, a disagreement between the',
     'two clients, or an unranked battle scores nothing and writes nothing.',
-    'A line the reader cannot parse is skipped rather than fatal: the file is',
-    'appended to, so a hub that was killed mid-write leaves a torn last line.',
+    'A line the reader cannot parse is skipped rather than fatal: the ledger is',
+    'appended to, so a hub that was killed mid-write leaves a torn last line --',
+    'in either generation, since a rotation freezes whatever it left behind.',
   ],
   kick: [
     `Usage: ${PROGRAM} kick <name> [--reason TEXT]`,
@@ -2708,6 +2717,44 @@ function readHistoryFile(file) {
 }
 
 /*
+ * The ledger, both generations of it, oldest line first.
+ *
+ * The hub does not let the file grow forever: past its ceiling the write that
+ * would cross it renames `history.jsonl` to `history.jsonl.1` and starts a
+ * fresh one (server.js, appendHistory). So at any moment after the first
+ * rotation, up to half of everything the hub has kept is in the older file --
+ * and a reader that opened only the current one would answer "all of them"
+ * over a ledger it had read half of, which is worse than reading none.
+ *
+ * The two are one append-only stream, so `.1` is read first and its records
+ * sit before the current file's; the reversal in verbHistory then puts the
+ * newest of *both* at the top and `-n` cuts across the pair.
+ *
+ * Absence is ordinary in both directions -- there is no `.1` before the first
+ * rotation, and no current file for a host who moved one aside by hand -- so
+ * only both missing is "no match history". The skipped count spans both, for
+ * the same reason: a rotation freezes whatever torn line the crash left in
+ * the generation it moved.
+ */
+function readHistoryLedger(file) {
+  const records = [];
+  const present = [];
+  let skipped = 0;
+
+  for (const generation of [`${file}${HISTORY_ROTATED_SUFFIX}`, file]) {
+    const read = readHistoryFile(generation);
+    if (read.missing) continue;
+    if (read.error) return { error: read.error, errorFile: generation };
+    present.push(generation);
+    for (const record of read.records) records.push(record);
+    skipped += read.skipped;
+  }
+
+  if (!present.length) return { missing: true };
+  return { records, skipped, present };
+}
+
+/*
  * A stored record, projected -- the same discipline `players --json` keeps.
  * What comes out is exactly the fields the contract names (plan §3), read
  * through plain() and finite(), so a field a newer hub added or a hand-edit
@@ -2795,7 +2842,7 @@ function verbHistory(ctx, rest) {
   }
 
   const file = dataFile(ctx, HISTORY_FILENAME);
-  const read = readHistoryFile(file);
+  const read = readHistoryLedger(file);
 
   if (read.missing) {
     // Nothing to show is not a failure, and --json still gets a document.
@@ -2804,7 +2851,7 @@ function verbHistory(ctx, rest) {
     return OK;
   }
   if (read.error) {
-    ctx.warn(`Could not read ${file}: ${read.error}`);
+    ctx.warn(`Could not read ${read.errorFile}: ${read.error}`);
     return ERROR;
   }
 
@@ -2820,15 +2867,21 @@ function verbHistory(ctx, rest) {
   // at all, because a reader that silently dropped lines would be a reader
   // nobody could trust about the ones it kept.
   if (read.skipped) {
-    ctx.warn(`note: ${read.skipped} line(s) in ${HISTORY_FILENAME} could not be read, and were`);
-    ctx.warn('      skipped. One torn last line is normal after a hub was killed');
-    ctx.warn('      mid-write; more than that means the file has been edited.');
+    const where = read.present.length > 1
+      ? `${HISTORY_FILENAME} and ${HISTORY_FILENAME}${HISTORY_ROTATED_SUFFIX}`
+      : path.basename(read.present[0]);
+    ctx.warn(`note: ${read.skipped} line(s) in ${where} could not be read, and were`);
+    ctx.warn('      skipped. One torn last line per generation is normal after a hub');
+    ctx.warn('      was killed mid-write; more than that means it has been edited.');
   }
 
   if (!records.length) {
     if (wantsJson) ctx.say('[]');
     else {
-      ctx.say(`${file} is there, but holds no results yet.`);
+      const where = read.present.length > 1
+        ? 'The match history beside the config file'
+        : read.present[0];
+      ctx.say(`${where} is there, but holds no results yet.`);
       ctx.say('The hub writes a line only when a ranked battle settles and both');
       ctx.say('clients agree on who won. A draw, a disagreement, or an unranked');
       ctx.say('battle scores nothing and is not history.');
@@ -2860,9 +2913,11 @@ function verbHistory(ctx, rest) {
     return row;
   });
 
+  // "all the ledger holds", not "all of them": both generations are counted
+  // here, and what fell off the older end of a rotated ledger is gone.
   ctx.say(shown.length < records.length
     ? `The last ${shown.length} of ${records.length} settled ranked battle(s), newest first.`
-    : `${records.length} settled ranked battle(s), newest first -- all of them.`);
+    : `${records.length} settled ranked battle(s), newest first -- all the ledger holds.`);
   ctx.say('');
   printTable(ctx, headers, rows);
 

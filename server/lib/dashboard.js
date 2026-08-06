@@ -95,11 +95,15 @@ const SECURITY_HEADERS = Object.freeze({
   // The JSON APIs answer with names a stranger chose. `nosniff` above stops a
   // browser from deciding one of them is HTML; this stops anything that did
   // get parsed from reaching the network. `connect-src 'self'` is what the
-  // page's own fetch loop needs and the only network permission granted.
+  // page's own fetch loop needs and the only network permission granted, and
+  // `frame-ancestors 'none'` is the frame protection itself -- the page has no
+  // frames and belongs in none, so no other document may embed it and collect
+  // a logged-in host's clicks.
   'Content-Security-Policy':
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
-    "connect-src 'self'",
-  // The page has no frames and belongs in none.
+    "connect-src 'self'; frame-ancestors 'none'",
+  // There is no other origin this page has anything to say to, and a URL from
+  // a hub's dashboard is not a fact worth handing out.
   'Referrer-Policy': 'no-referrer',
 });
 
@@ -144,6 +148,31 @@ function seconds(ms) {
 function remoteIp(req) {
   const socket = req && req.socket;
   return (socket && socket.remoteAddress) || '';
+}
+
+/**
+ * The Host header, lowercased and always carrying a port.
+ *
+ * A header with no port means the scheme's default, and this listener only
+ * ever speaks plain HTTP, so that is 80 -- spelling it out keeps the
+ * comparison one string equality instead of two cases. IPv6 authorities
+ * arrive bracketed (`[::1]:7790`), so the port is the colon *after* the
+ * bracket and never one inside the address.
+ */
+function hostAuthority(value) {
+  if (typeof value !== 'string') return null;
+  const header = value.trim().toLowerCase();
+  if (!header) return null;
+  const afterBracket = header.startsWith('[') ? header.indexOf(']') : 0;
+  if (afterBracket < 0) return null; // an unclosed bracket is not an authority
+  return header.indexOf(':', afterBracket) >= 0 ? header : `${header}:80`;
+}
+
+/** The authority a browser would type for one bind, IPv6 bracketed. */
+function authorityOf(host, port) {
+  const name = String(host === null || host === undefined ? '' : host);
+  const bracketed = name.includes(':') && !name.startsWith('[') ? `[${name}]` : name;
+  return `${bracketed}:${port}`.toLowerCase();
 }
 
 function cookieToken(req) {
@@ -458,6 +487,29 @@ function start(options = {}) {
   const port = Number.isFinite(Number(settings.port))
     ? Number(settings.port) : DEFAULT_PORT;
 
+  /*
+   * The names this listener answers to, and why it checks at all.
+   *
+   * A browser can be sent to a name the attacker controls and then have that
+   * name re-resolved to 127.0.0.1 -- DNS rebinding -- at which point every
+   * request the attacker's script makes is same-origin with *their* name, the
+   * session cookie rides along, and SameSite has nothing to say because there
+   * is no cross-site anything happening. Checking the Host header is the
+   * standard mitigation for a loopback HTTP server: a request has to name the
+   * address this hub was actually reached at, which an attacker's domain
+   * never does. It is refreshed from the bound address after listen, because
+   * with `dashboard.port: 0` the configured port is not the port a browser
+   * will type.
+   */
+  const authoritiesFor = (boundHost, boundPort) => new Set([
+    authorityOf(host, port),
+    authorityOf(boundHost, boundPort),
+    `127.0.0.1:${boundPort}`,
+    `[::1]:${boundPort}`,
+    `localhost:${boundPort}`,
+  ]);
+  let allowedHosts = authoritiesFor(host, port);
+
   const liveCredentials = () => {
     const current = config && config.auth && config.auth.credentials;
     return Array.isArray(current) ? current : [];
@@ -587,13 +639,20 @@ function start(options = {}) {
    */
   function codeAccepted(submitted) {
     const given = normalizeCode(submitted);
+    // Shape before secret, the idiom lib/auth.js uses: a null here is a
+    // submission that is not a join code at all, and refusing it up front
+    // leaks only the code's *format* -- six characters of a published
+    // alphabet, printed on every invite and written down in the README. What
+    // stays constant-time and exit-free is the part that is actually secret,
+    // which is *which* six characters, compared below.
+    if (given === null) return false;
+
     const active = activeCredentials(liveCredentials());
     let hit = false;
 
     for (const credential of active) {
       const key = normalizeCode(credential.secret);
       if (key === null) continue; // a stored secret that will not normalise
-      if (given === null) continue;
       const expected = Buffer.from(key, 'ascii');
       const offered = Buffer.from(given, 'ascii');
       const same = expected.length === offered.length &&
@@ -717,6 +776,18 @@ function start(options = {}) {
   // --------------------------------------------------------------- routing
 
   function route(req, res) {
+    // Before anything else, including the method check: a request that names
+    // a host this page is not is not a request for this page, and nothing
+    // about it -- not a session, not a login, not a 405 -- should be answered.
+    // See `authoritiesFor` above for the rebinding attack this closes.
+    const authority = hostAuthority(req.headers && req.headers.host);
+    if (!authority || !allowedHosts.has(authority)) {
+      send(res, 403, TEXT,
+        'This page only answers to the address it is bound to, or to ' +
+        'localhost on this machine.\n');
+      return;
+    }
+
     const method = req.method || 'GET';
 
     /*
@@ -778,11 +849,32 @@ function start(options = {}) {
         return;
       }
       if (path === '/api/status') {
+        /*
+         * Projected to what the page draws, not spread.
+         *
+         * `stats()` carries `perIp` -- the throttle's table of who is
+         * connected from which address -- and `limits.stats()` carries the
+         * same table again. Anyone holding a join code can log in here, which
+         * is every player on the hub, and other players' addresses are not
+         * theirs to read: the roster is deliberately built without them
+         * (relay.js roster(), "no addresses, no token material") and this
+         * endpoint must not put back what that projection left out. Naming
+         * the fields means a future counter added to either stats() cannot
+         * arrive on this page by accident.
+         */
         const base = stats ? stats() : {};
-        sendJson(res, 200, Object.assign({}, base, {
+        const counts = limits && typeof limits.stats === 'function' ? limits.stats() : {};
+        sendJson(res, 200, {
+          host: base.host,
+          port: base.port,
+          maxPlayers: base.maxPlayers,
           players: relay && typeof relay.roster === 'function' ? relay.roster() : [],
-          limits: limits && typeof limits.stats === 'function' ? limits.stats() : {},
-        }));
+          limits: {
+            connections: counts.connections,
+            pending: counts.pending,
+            auth: counts.auth,
+          },
+        });
       } else {
         /*
          * Projected to exactly the five fields the page draws, rather than
@@ -880,6 +972,7 @@ function start(options = {}) {
       const address = server.address();
       const boundHost = address && address.address ? address.address : host;
       const boundPort = address && address.port ? address.port : port;
+      allowedHosts = authoritiesFor(boundHost, boundPort);
 
       if (log) {
         log.info(`dashboard listening on http://${boundHost}:${boundPort} ` +

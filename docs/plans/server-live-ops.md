@@ -123,10 +123,12 @@ e2e needs `.env` and a free port 7799; SHOT_DIR moved to scratchpad.
 
 ## 3. Approach & key decisions
 
-1. **MOTD rides `mmo.welcome.motd`** (not a synthetic chat): no bump, no
-   unread-badge pollution, old clients ignore it. The **new** client renders
-   it as a chat-scrollback line `{name = "HUB", scope = "global", text}`
-   with no `from` (no bubble, no modal). Rests on traced client code, §2.
+1. **MOTD rides `mmo.welcome.motd`** (not a synthetic chat): no bump, old
+   clients ignore it. The **new** client renders it as a chat-scrollback
+   line `{name = "HUB", scope = "global", text}` with no `from` (no bubble,
+   no modal). It does light the CHAT unread badge — deliberately, after
+   review: a greeting nobody notices is a greeting nobody reads. Rests on
+   traced client code, §2.
 2. **The name `HUB` becomes reserved** at hello (case-insensitive refuse with
    a remediation message) so hub-originated lines can't be impersonated.
 3. **Broadcast reuses `mmo.chat`** with `name: 'HUB'`, `scope: 'global'`, no

@@ -157,7 +157,7 @@ container, where it is on `PATH`.
 | `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (one object per player, the nine contract fields only) |
 | `ranking` | the ranked season out of `ranking.json`: place, name, points, and how many battles each player has won and lost. Top ten, best first. | `--json`, `--all` (every player who has scored, not just the top ten) |
 | `watch` | the `players` frame, repainted until Ctrl-C. Clears the screen between frames only when stdout is a terminal. | `--interval <s>` (seconds between frames, default 2, clamped 1–60), `--once` (one frame, then exit), `--json` |
-| `history` | settled ranked battles out of `history.jsonl`, newest first: when, who beat whom, and what it moved. | `-n N` (how many, default 20), `--json` (the stored records, one per line) |
+| `history` | settled ranked battles out of `history.jsonl` and the rotated `history.jsonl.1`, newest first: when, who beat whom, and what it moved. | `-n N` (how many, default 20), `--json` (the same cut as one JSON array, projected records, newest first) |
 | `kick <name>` ‡ | remove a connected player. Matches the name case-insensitively and may hit nobody or several people; says which. | `--reason TEXT` (what the player is shown; defaults to *"An operator removed you from this hub."*) |
 | `broadcast <text>` ‡ | say one line to everybody connected. It arrives in their chat log as `HUB`. | — |
 | `config list` | every setting, its current value, and its clamp range | — |
@@ -334,10 +334,18 @@ battle, which the hub scores lower than the first.
 - **`REMATCH` appears only when one is in view.** It is why a result scored
   what it did: the hub pays a pairing that has already met inside the hour
   half, then a quarter, then nothing.
-- Newest first is the file read backwards, not a sort on the timestamps: the
+- Newest first is the ledger read backwards, not a sort on the timestamps: the
   hub appends in the order it settles battles, and sorting would let one
   hand-edited `at` reorder the lot.
-- `--json` prints the same records, same cut, as JSON.
+- **Both generations are read**, older first, so a rotation is invisible from
+  here: `history.jsonl.1` is opened before `history.jsonl`, the two are treated
+  as one append-only stream, and `-n` and the count in the header span the
+  pair. Either being absent is ordinary — there is no `.1` before the first
+  rotation — and only both missing is "no match history".
+- `--json` prints the same cut as **one JSON array**, newest first, carrying
+  the projected records rather than the stored lines verbatim: a field a newer
+  hub added, or a hand-edit slipped in, is not republished as part of this
+  output.
 - **A battle both players did not agree about is not history.** The hub scores
   a match only when the two reports match, so a draw, a disagreement, a
   dropped link and a battle played under a name whose claim was not proven all
@@ -351,8 +359,10 @@ battle, which the hub scores lower than the first.
 - **A line the reader cannot parse is skipped, and counted out loud** on
   stderr: a torn last line is normal after a hub was killed (the file is
   appended to — see [`history.jsonl`](#configuration) below), and more than
-  one means somebody has been editing it. A reader that silently dropped
-  lines would be a reader nobody could trust about the ones it kept.
+  one per generation means somebody has been editing it. A rotation freezes
+  whatever torn line it moved aside, so the count covers both files. A reader
+  that silently dropped lines would be a reader nobody could trust about the
+  ones it kept.
 
 ### Talking to a hub that is running
 
@@ -701,6 +711,10 @@ as each ranked battle settles, oldest line first.
   three and six thousand of them and the older half falls off the end. If you
   want to keep a season forever, copy the file; nothing here will do it for
   you, and nothing here will grow without bound either.
+- **`history` reads both generations**, `.1` first, so a rotation does not
+  hide half the ledger from the verb that exists to print it. The `.1` is a
+  plain file of the same lines in the same format — `cat` it, feed it to
+  anything that reads the current one, or move it somewhere else to keep it.
 - **It holds no secrets** — trainer names and numbers, the same things
   `ranking.json` already holds in public. Safe to `cat`, safe to hand to
   somebody writing a stats page.
@@ -942,8 +956,12 @@ found:
 
 ```
 INFO SIGHUP: re-reading the config
-INFO reloaded "/data/config.json": 2 join code(s), 2 usable; 1 ban(s); 0 allowlist entr(y/ies)
+INFO reloaded "/data/config.json": 2 join code(s), 2 usable; 1 ban(s); 0 allowlist entr(y/ies); a MOTD
 ```
+
+The last field is `a MOTD` or `no MOTD` — the sentence itself is not logged,
+because the count is what a host is checking and the greeting is already in
+`config get motd`.
 
 **Exactly four things are re-applied:** `auth.credentials`, `bans`,
 `allowlist` — the decisions about *who may be here* — and `motd`, which is a
