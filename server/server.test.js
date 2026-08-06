@@ -1527,6 +1527,7 @@ function readStatus(handle) {
 
 const STATUS_CONTRACT_FIELDS = [
   'name', 'sprite', 'map', 'x', 'y', 'busy', 'party', 'points', 'ranked',
+  'admin',  // 0.9.0: which connection holds an admin code -- operator surfaces only
 ].sort();
 
 async function statusSnapshotCreatedAtStartupTest() {
@@ -2087,6 +2088,13 @@ async function dashboardTest(handle) {
     'exactly the page\'s own inline script tag -- nothing injected alongside it');
 
   special.close();
+  // close() is a destroy, and the hub frees the seat only when the socket's
+  // close event lands. The shared hub runs at the default cap of 4, so a
+  // caller who hellos right after this returns can race the drop and be
+  // refused a full hub -- wait for the roster to actually shrink.
+  ok(await waitFor(
+    () => !handle.relay.roster().some((p) => p.name === "AL'RIGHT"), 2000),
+  'and the special-name player is really gone before the scenario moves on');
 }
 
 // ------- the dashboard's two ways of not being there at all
@@ -2134,7 +2142,7 @@ async function operatorFeaturesTest() {
   const dir = shortTmpDir('rbyops-');
   const configPath = path.join(dir, 'config.json');
   const cfg = baseConfig({
-    auth: { required: false, credentials: [credential('opdash', DASHBOARD_CODE)] },
+    auth: { required: false, credentials: [credential('opdash', DASHBOARD_CODE, { admin: true })] },
     dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT },
     motd: '',
   });
