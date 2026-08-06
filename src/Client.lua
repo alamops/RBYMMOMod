@@ -16,6 +16,11 @@ local Roster = need("Roster")
 local Avatars = need("Avatars")
 local Chat = need("Chat")
 local Party = need("Party")
+local Coop = need("Coop")
+-- For one flag it owns. Required rather than reached through `coop.state`,
+-- which is an *instance* and is nil between battles -- which is exactly when
+-- a save is loaded.
+local CoopBattle = need("CoopBattle")
 local Ui = need("Ui")
 local Overlay = need("Overlay")
 local Sessions = need("Sessions")
@@ -45,11 +50,13 @@ local ui = Ui.new(ctx)
 local overlay = Overlay.new(ctx)
 local sessions = Sessions.new(transport, ui)
 local party = Party.new(transport, ui, ctx.chat)
+local coop = Coop.new(transport, ui, party, ctx.roster, ctx.chat)
 
 ctx.client = M
 ctx.ui = ui
 ctx.sessions = sessions
 ctx.party = party
+ctx.coop = coop
 ctx.server = server
 
 local presenceClock = 0
@@ -873,6 +880,7 @@ function M.disconnect()
   M.restoreLook()
   sessions:endSession(nil)
   party:reset()
+  coop:reset()
   ctx.avatars:clear()
   ctx.roster:reset()
   ctx.chat:clear()
@@ -1095,6 +1103,7 @@ handlers[Wire.WELCOME] = function(game, msg)
   -- includes us and the roster deliberately does not.
   party:reset()
   party:setSelf(id)
+  coop:reset()
   -- your own rating, which cannot come from the roster: it has no entry for
   -- you, by design
   myPoints = Wire.points(msg.points)
@@ -1137,6 +1146,9 @@ handlers[Wire.PART] = function(_, msg)
   -- and a client that kept waiting for that answer could never invite
   -- anybody again.
   party:onPeerGone(id)
+  -- Same shape, one feature along: an offer from somebody who is gone can
+  -- never be joined, and a four-way ask is short a player.
+  coop:onPeerGone(id)
 end
 
 handlers[Wire.MOVE] = function(_, msg)
@@ -1175,7 +1187,24 @@ end
 handlers[Wire.PARTY_INVITE] = function(game, msg) party:onInvite(game, msg) end
 handlers[Wire.PARTY_DECLINE] = function(_, msg) party:onDecline(msg) end
 handlers[Wire.PARTY] = function(_, msg) party:onParty(msg) end
-handlers[Wire.PARTY_END] = function(_, msg) party:onEnd(msg) end
+
+-- The party ending takes the co-op state with it, and in that order: an offer
+-- outliving the party it was made inside is an offer with nobody left who
+-- could accept it.
+handlers[Wire.PARTY_END] = function(_, msg)
+  party:onEnd(msg)
+  coop:onPartyEnd()
+end
+
+handlers[Wire.COOP_OFFER] = function(_, msg) coop:onOffer(msg) end
+handlers[Wire.COOP_OFFER_END] = function(_, msg) coop:onOfferEnd(msg) end
+handlers[Wire.COOP_JOINED] = function(game, msg) coop:onJoined(game, msg) end
+handlers[Wire.COOP_ASK] = function(game, msg) coop:onAsk(game, msg) end
+handlers[Wire.COOP_DECLINE] = function(_, msg) coop:onDecline(msg) end
+handlers[Wire.COOP_BATTLE] = function(game, msg) coop:onBattle(game, msg) end
+-- Battle traffic from one of the other three. Coop keeps the party exchange
+-- and hands everything else to the live battle's inbox.
+handlers[Wire.COOP_MSG] = function(game, msg) coop:onMessage(game, msg) end
 
 -- A rating moved -- ours or somebody else's.  One message covers both, so a
 -- battle's two halves land on every screen in the same frame.
@@ -1305,6 +1334,7 @@ local function tick(game, dt)
 
   ctx.chat:update(dt)
   sessions:update(game, dt)
+  coop:update(dt)
 
   presenceClock = presenceClock + dt
   if presenceClock >= Config.PRESENCE_INTERVAL then
@@ -1370,6 +1400,62 @@ function M.install()
       pcall(M.leave)
     end
     return next(game, dt)
+  end)
+
+  -- Co-op against an NPC: the wait/alone choice, in front of any trainer.
+  --
+  -- **Watched rather than intercepted, and that is what makes it reach every
+  -- trainer.** An earlier version wrapped `script.command` and yielded the
+  -- script runner's coroutine, which worked -- and only for script-driven
+  -- battles. The other way a trainer starts, walking into one in the
+  -- overworld, goes through `OverworldState:engageTrainer`, which emits an
+  -- event and cannot be cancelled; there is no seam there to hold at.
+  --
+  -- Both paths end in the same place: `game.stack:push(battle)`. So this
+  -- listens for the push instead of trying to prevent it, and puts the prompt
+  -- **on top of** the battle that just arrived. A StateStack only updates its
+  -- top, so the battle underneath is frozen and completely untouched -- which
+  -- is why BATTLE ALONE costs nothing but closing a menu, and why a player who
+  -- is not in a party never notices any of this happened.
+  --
+  -- src/Coop.lua's onTrainerBattle is where the two answers diverge, and its
+  -- header explains what the co-op one does with the battle it took.
+  mod.events:on("screen.pushed", function(payload)
+    local state = payload and payload.state
+    if not (state and state.kind == "trainer") then return end
+    if not transport:isReady() then return end
+    local current = World.current()
+    local ok, err = pcall(function()
+      coop:onTrainerBattle(ctx.game, state, current and current.mapId)
+    end)
+    if not ok then
+      mod.log:warn("the co-op prompt failed (%s); this trainer is fought the "
+        .. "ordinary way -- the battle itself is unaffected", tostring(err))
+    end
+  end)
+
+  -- Palette zones for the 2-on-2 screen.
+  --
+  -- **A state cannot supply its own.** The colourising display modes take their
+  -- zones from the engine, and Game.lua offers exactly one seam to change them
+  -- -- this hook. Without it a co-op battle inherits whatever the current mode
+  -- decided for a surface it knows nothing about, which is why the same battle
+  -- came out in colour on one client and pink monochrome on another: the two
+  -- players simply had different display modes.
+  --
+  -- The answer is the true-colour opt-out WideBattle takes for the same
+  -- reason. Every pixel on this screen is already palette-correct -- the
+  -- pictures come out of the engine's cache with their species palette applied
+  -- and the boxes and glyphs are the engine's own -- so there is nothing left
+  -- to remap, and remapping it anyway is what broke it.
+  mod.hooks:wrap("render.zones", function(next, game, zones)
+    local out = next(game, zones)
+    local top = game and game.stack and game.stack:top()
+    if top and top.sim and top.zones then
+      local ok, mine = pcall(top.zones, top)
+      if ok and mine then return mine end
+    end
+    return out
   end)
 
   -- One committed step's speed.  The engine asks once per step, never per
@@ -1483,7 +1569,14 @@ function M.install()
   -- stale roster pointing at a world that is gone -- and if this copy was
   -- hosting, the listener has to come down with it rather than serving a
   -- world nobody is standing in.
-  mod.events:on("save.loaded", function() M.leave() end)
+  mod.events:on("save.loaded", function()
+    M.leave()
+    -- "Once per session" for the unranked explanation meant once per
+    -- *process*, so a player who loaded a different save was never told why a
+    -- co-op trainer win paid nothing -- which is precisely the player who has
+    -- not heard it. Reset with the save.
+    CoopBattle.saidUnranked = nil
+  end)
 
   mod.exports.isConnected = M.isConnected
   mod.exports.isHosting = M.isHosting
@@ -1495,6 +1588,61 @@ function M.install()
   -- them -- empty when you are not in a party. The end-to-end driver reads
   -- this to tell "the invite was accepted" from "the box appeared".
   mod.exports.party = function() return party:list() end
+  -- Co-op, as the end-to-end driver has to be able to read it: whether this
+  -- client is standing at a fight waiting, what its partner is offering, and
+  -- the plan the last agreement produced. Three separate answers because the
+  -- three failures they catch are separate -- an offer that was never sent, an
+  -- offer that arrived and was never shown, and an agreement that was reached
+  -- and never handed over.
+  mod.exports.coopWaiting = function()
+    local waiting = coop.waiting
+    if not waiting then return nil end
+    return { battle = waiting.battle, label = waiting.label, map = waiting.map }
+  end
+  mod.exports.coopOffer = function()
+    local offer = coop:pendingOffer()
+    if not offer then return nil end
+    return {
+      from = offer.from, name = offer.name,
+      battle = offer.battle, label = offer.label,
+    }
+  end
+  mod.exports.coopPlan = function() return coop.lastPlan end
+  -- The four-way PARTY BATTLE ask, while it is in flight.
+  --
+  -- One player asks and the other three are put a question; the asker is
+  -- never asked. Without this there is no way for a test to tell "the ask
+  -- reached all three" from "the ask reached nobody and the battle started
+  -- for an unrelated reason", nor to see a refusal clear it -- both of which
+  -- are the whole of the four-way handshake.
+  mod.exports.coopAsk = function()
+    local ask = coop.ask
+    if not ask then return nil end
+    return { role = ask.role, name = ask.name, side = ask.side }
+  end
+  -- Whether the 2-on-2 screen ever failed to draw.
+  --
+  -- draw() is guarded so a broken renderer cannot stop the game, and that
+  -- guard is exactly why this export has to exist: without it a layout bug
+  -- degrades to one log line and a blank battle, and an end-to-end run sails
+  -- past it green. That is precisely what happened -- a dangling PANEL_POS
+  -- drew nothing for a whole battle and the run never said so.
+  -- How the last co-op battle held together on the wire: turns missed, and
+  -- turns that arrived but left this copy disagreeing with the host. Both
+  -- should be zero on a healthy connection, and both are silent by design --
+  -- the battle recovers rather than stopping -- so without an export nothing
+  -- could ever assert they did not happen.
+  mod.exports.coopSync = function()
+    local state = coop.state
+    return {
+      gaps = (state and state.gaps) or 0,
+      desyncs = (state and state.desyncs) or 0,
+      resyncs = (state and state.resyncs) or 0,
+    }
+  end
+  mod.exports.coopDrawFailed = function()
+    return coop.state ~= nil and coop.state.drawFailed or false
+  end
   mod.exports.say = function(scope, text, to) return M.say(scope, text, to) end
   -- ranked PVP: this player's points, and the hub's top ten as last asked
   -- for. A mod that wants a leaderboard of its own reads these rather than

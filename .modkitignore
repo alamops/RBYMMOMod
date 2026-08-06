@@ -79,6 +79,11 @@ docs/plans/in-game-hosting.md
 docs/plans/self-hosting-server-app.md
 docs/plans/fix-taken-nick-on-ranking.md
 docs/plans/running-system.md
+# The upstream RFC behind co-op battles. It is a proposal against the *engine*,
+# not mod content -- a player unpacking this archive has no use for a document
+# arguing about BattleState's battler slots. Listed by name for the same reason
+# every entry here is: a bare docs/rfcs/ line would do nothing.
+docs/rfcs/0001-double-battles.md
 
 # Screenshots of a running game are composited from tiles, sprites and font
 # glyphs decoded from the player's own ROM. They illustrate a GitHub page
@@ -139,9 +144,11 @@ docs/screenshots/party-members.png
 # follow-up.
 docs/screenshots/my-profile.png
 #
-# rank.png arrived with ranked PVP the same way my-profile.png did, and for
-# the same reason nothing caught it: it is the RANK screen, a list menu drawn
-# over portraits decoded from the player's own ROM, which lint has nothing to
-# say about. Found while packing this branch, listed here rather than left for
-# the next person to trip over.
+# rank.png arrived with ranked PVP and missed this list the same way
+# my-profile.png did one release earlier -- and for the same reason nothing
+# caught it: lint has nothing to say about a whole composited frame, and the
+# file count only looks wrong to somebody who knows what it should be. It is a
+# full-screen list menu like party-members.png, and it is listed for the reason
+# that one is: the rule here is the file's, not the linter's, and a screenshot
+# that is safe today stops being safe the moment somebody recaptures it.
 docs/screenshots/rank.png

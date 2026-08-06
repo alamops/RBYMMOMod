@@ -118,13 +118,14 @@ for _, id in ipairs({
   "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile", "RbyMmoRank",
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
   "RbyMmoParty", "RbyMmoPartyList",
+  "RbyMmoChoose", "RbyMmoChooseMenu",
 }) do
   check(screens:get(id) ~= nil, "screen " .. id .. " is registered")
 end
 
 -- the seams it says it wraps
 for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items",
-                        "ui.naming.grid", "player.sprite",
+                        "ui.naming.grid", "render.zones", "player.sprite",
                         "movement.speed" }) do
   local chain = run.loader.hooks.chains[hook]
   check(chain ~= nil and #chain > 0, "wraps " .. hook)
@@ -234,6 +235,10 @@ eq(exports.isConnected(), false, "reports disconnected before connecting")
 eq(#exports.players(), 0, "the roster starts empty")
 check(type(exports.party) == "function", "exports party")
 eq(#exports.party(), 0, "and nobody is in one before connecting")
+-- The four-way PARTY BATTLE ask, which only a four-client run can exercise
+-- for real -- so the seat it is watched through has to exist here.
+check(type(exports.coopAsk) == "function", "exports coopAsk")
+eq(exports.coopAsk(), nil, "with nothing asked before connecting")
 
 -- Vanilla must be untouched.  This mod adds multiplayer; it does not change
 -- Gen 1 content, which is exactly what affects_link=false promises about
@@ -250,6 +255,8 @@ run.release()
 local stubSave, stubOptions, stubPipelines = {}, {}, {}
 local stubSprites = {}
 local stubScales = {}
+
+local stubEvents = {}
 
 local stubMod = {
   id = "rby_mmo",
@@ -272,6 +279,19 @@ local stubMod = {
   options = {
     define = function() end,
     get = function(_, key) return stubOptions[key] end,
+  },
+  -- Every event the mod emits, kept rather than dropped.
+  --
+  -- There was no `events` on this stub at all, so `mod.events:emit` threw
+  -- inside the pcall that guards it and every announcement the mod makes was
+  -- swallowed in silence -- which is exactly the shape of bug an event is for
+  -- reporting. A recorder makes them assertable.
+  events = {
+    emit = function(_, name, payload)
+      stubEvents[#stubEvents + 1] = { name = name, payload = payload }
+    end,
+    on = function() end,
+    once = function() end,
   },
   -- the mod's own files, addressed the way the loader addresses them
   assets = { path = function(_, relative) return MOD_PATH .. "/" .. relative end },
@@ -1572,6 +1592,11 @@ eq(pAnn.partyId, together.id, "or ending it when the trade does")
 end)()
 
 -- ------- refusals and liveness
+--
+-- One do-block for the section: its dozen locals are the section's own, and
+-- handing their slots back is what keeps the main chunk under Lua's 200-local
+-- ceiling now that two branches' suites live in one file.
+do
 
 -- the cap is charged at hello, so a stranger connects and is then refused
 local stranger, strangerPeer = join(hub, "STRANGER", "PALLET", 1, 1)
@@ -1606,6 +1631,8 @@ local goodbye = take(shutPeer, Wire.ERROR)
 check(goodbye ~= nil, "shutdown tells every player")
 check(shutPeer.closed, "and closes their connection")
 eq(hub2.count, 0, "leaving the hub empty")
+
+end
 
 -- ------------------------------------------------------------------
 -- 3b. Ranked PVP: the arithmetic, and the hub that applies it
@@ -1695,6 +1722,122 @@ local swapped = Rank.newBoard()
 local there = swapped:record("ALPHA", "BRAVO", 0).winner.gained
 local back = swapped:record("BRAVO", "ALPHA", 1).winner.gained
 check(back < there, "alternating wins is the same pairing, and is discounted")
+
+-- ------- a team battle is rated as a team battle
+--
+-- A 2-on-2 was scored as two 1v1s paired by slot index, which reused the whole
+-- rating machinery unchanged and was arbitrary in the way that matters:
+-- nothing about a four-way says who fought whom. Both players attack both
+-- opponents, a move redirects across the pair when a target falls, and the
+-- side loses together. What each player actually played is *them against the
+-- other pair*, and that is now what is scored.
+
+;(function()
+  local board = Rank.newBoard()
+  local settled = board:recordTeam({ "ANN", "BOB" }, { "CAL", "DEE" }, 0)
+  check(settled ~= nil, "a two-a-side battle settles")
+  eq(#settled.winners, 2, "both winners are rated")
+  eq(#settled.losers, 2, "and both losers are")
+  check(settled.winners[1].gained > 0, "the winners gained")
+  check(settled.losers[1].lost >= 0, "and the losers paid")
+  eq(board:points("ANN"), board:points("BOB"),
+     "team-mates who went in level come out level")
+
+  -- Everyone played one battle, not two, and not none.
+  for _, name in ipairs({ "ANN", "BOB", "CAL", "DEE" }) do
+    eq(board:entry(name).played, 1, name .. " has exactly one rated result")
+  end
+
+  -- ------- and the order they are listed in changes nothing
+  --
+  -- This is the whole of what was wrong before. Under slot pairing, the same
+  -- four players with the same ratings and the same result were rated
+  -- *differently* depending on which of them the hub happened to list first --
+  -- so putting your stronger player in the other seat moved everybody's
+  -- points. The rating is now about the two sides, and a side is a set.
+  -- The two opponents have to be *differently* rated, and only one side's
+  -- order may change. Swap both sides symmetrically and slot pairing happens
+  -- to match the same people up anyway, so the test would pass under the very
+  -- design it exists to reject. Under slot pairing this exact swap moved three
+  -- of the four ratings: 43/16/10 became 42/17/11 for the same four people,
+  -- the same battle and the same result.
+  local SEATS = { "STRONG", "WEAK", "RIVAL", "ROOKIE" }
+  local function play(winners, losers)
+    local seat = Rank.newBoard()
+    for _ = 1, 6 do seat:record("STRONG", "PADDING", 0) end
+    for _ = 1, 3 do seat:record("RIVAL", "PADDING2", 0) end
+    seat:recordTeam(winners, losers, 500)
+    local after = {}
+    for _, name in ipairs(SEATS) do after[name] = seat:points(name) end
+    return after
+  end
+
+  local straight = play({ "STRONG", "WEAK" }, { "RIVAL", "ROOKIE" })
+  local reseated = play({ "STRONG", "WEAK" }, { "ROOKIE", "RIVAL" })
+  for _, name in ipairs(SEATS) do
+    eq(reseated[name], straight[name],
+       name .. " is rated the same whichever seat they were listed in")
+  end
+
+  -- ...and the strength that decides it is the pair's, not one member's.
+  local carried = Rank.newBoard()
+  for _ = 1, 4 do carried:record("CARRY", "FODDER", 0) end
+  local strongPair = carried:recordTeam({ "ROOKIE1", "ROOKIE2" },
+                                        { "CARRY", "FODDER" }, 100)
+  local evenPair = Rank.newBoard():recordTeam({ "ROOKIE1", "ROOKIE2" },
+                                              { "PLAIN1", "PLAIN2" }, 100)
+  check(strongPair.loserSide > evenPair.loserSide,
+        "a pair carrying a rated player is worth more than a pair of unknowns")
+  check(strongPair.winners[1].gained > evenPair.winners[1].gained,
+        "and beating them pays more -- the side's strength is what is rated, "
+        .. "not whoever happened to be listed first")
+
+  -- ------- farming a 2-on-2 is discounted like farming a 1v1
+  local afternoon = Rank.newBoard()
+  local paid = {}
+  for i = 1, 5 do
+    local round = afternoon:recordTeam({ "P1", "P2" }, { "P3", "P4" }, 10 * i)
+    paid[i] = round.winners[1].gained
+  end
+  check(paid[1] > 0, "the first party battle pays")
+  check(paid[2] < paid[1], "running it again pays less")
+  check(paid[3] < paid[2], "and less again")
+  eq(paid[5], 0, "until the same four are worth nothing to each other")
+
+  -- ...whichever side wins, because it is the same four people arranging
+  -- results between themselves.
+  local taking = Rank.newBoard()
+  local wentOut = taking:recordTeam({ "Q1", "Q2" }, { "Q3", "Q4" }, 0)
+  local cameBack = taking:recordTeam({ "Q3", "Q4" }, { "Q1", "Q2" }, 1)
+  check(cameBack.winners[1].gained < wentOut.winners[1].gained,
+        "two parties taking turns to win is the same meeting, and discounted")
+
+  -- ...and bringing in somebody genuinely new is worth its full value, because
+  -- a fight nobody has had before is not a fight anyone can be farming.
+  local fresh = Rank.newBoard()
+  for _ = 1, 3 do fresh:recordTeam({ "R1", "R2" }, { "R3", "R4" }, 0) end
+  local stale = fresh:recordTeam({ "R1", "R2" }, { "R3", "R4" }, 1)
+  local newcomer = fresh:recordTeam({ "R1", "R2" }, { "R3", "NEWBIE" }, 2)
+  check(newcomer.winners[1].gained > stale.winners[1].gained,
+        "a new opponent on the other side makes the battle worth playing again")
+
+  -- ------- and what is not a match
+  eq(Rank.newBoard():recordTeam({ "X", "Y" }, { "Y", "Z" }, 0), nil,
+     "a player on both sides is not a battle between four people")
+  eq(Rank.newBoard():recordTeam({ "X", "X" }, { "Y", "Z" }, 0), nil,
+     "and neither is the same name twice on one side")
+  eq(Rank.newBoard():recordTeam({}, { "Y", "Z" }, 0), nil, "an empty side is not a side")
+  -- A name that will not resolve takes the whole battle down with it, rather
+  -- than quietly rating the three players who did have one against a side
+  -- that is short a member.
+  eq(Rank.newBoard():recordTeam({ "X", "   " }, { "Y", "Z" }, 0), nil,
+     "nor is one carrying a name that resolves to nobody")
+
+  -- The mean is what a side is worth, and it is stated rather than implied.
+  eq(Rank.teamPoints({ { points = 100 }, { points = 200 } }), 150,
+     "a side is worth the average of its members")
+  eq(Rank.teamPoints({}), 0, "and an empty one is worth nothing")
+end)()
 
 -- Once the window has passed, the pairing is fresh again. Two boards played
 -- identically up to the rematch, so the ratings are the same at that point
@@ -4254,6 +4397,6478 @@ eq(ghost.sprite, ghostSheet, "a player swapped in since is left exactly as it is
 stubMod.world = nil
 stubSave.sprite = nil
 stubSprites.SPRITE_ROCKET = nil
+
+end)()
+
+-- ------- co-op battles
+--
+-- Driven exactly the way the party scenario above is -- real Coop instances
+-- with the real Hub between them -- because every rule this feature has is
+-- about two clients disagreeing about the same fight, and none of it is
+-- visible from one instance asserted against a fake hub.
+--
+-- The four rules from the brief, each asserted here by name:
+--
+--   * the choice cannot be escaped, and B is BATTLE ALONE;
+--   * a no leaves nothing behind, so the waiter keeps waiting and the same
+--     ask is made again next time;
+--   * nobody joins a battle that has started;
+--   * PARTY BATTLE refuses an opponent with no party, and a partner who is
+--     not on this map, and needs all four to agree.
+
+;(function()
+
+local Coop = need("Coop")
+local Party = need("Party")
+local Ui = need("Ui")
+
+-- A client, with the two prompt widgets recorded rather than drawn.
+--
+-- `chosen` is what makes the unescapable choice testable at all: Ui:choose
+-- hands over a row list, and pressing B runs the *last* row -- so the harness
+-- keeps the rows and offers both "pick by label" and "press B" as separate
+-- moves, which is the only way to tell the two apart.
+local function coopSide(hub, name, mapId)
+  local side = { name = name, said = {}, chat = Chat.new() }
+  -- A stand-in for the engine's StateStack. The co-op prompt goes on top of
+  -- the trainer battle rather than replacing it, so "did BATTLE ALONE work"
+  -- is the question "is the engine's battle back on top", and that needs a
+  -- stack to ask it of.
+  side.stack = {
+    states = {},
+    top = function(self) return self.states[#self.states] end,
+    pop = function(self) return table.remove(self.states) end,
+    push = function(self, st) self.states[#self.states + 1] = st end,
+  }
+  side.game = { stack = side.stack, save = { party = {}, inventory = {} } }
+  side.peer = fakePeer()
+  side.client = hub:accept(side.peer)
+  side.roster = Roster.new()
+  side.transport = {
+    send = function(_, msgType, payload)
+      local msg = {}
+      if type(payload) == "table" then
+        for k, v in pairs(payload) do msg[k] = v end
+      end
+      msg.type = msgType
+      hub:receive(side.client, msg)
+      return true
+    end,
+    isReady = function() return true end,
+  }
+  -- Every prompt this module raises is a state on the stack, so the fakes put
+  -- one there: without it `unwindTo` would have nothing to unwind and the
+  -- BATTLE ALONE assertions would pass for the wrong reason.
+  side.ui = {
+    say = function(_, text, onDone)
+      side.said[#side.said + 1] = text
+      side.sayDone = onDone
+    end,
+    confirm = function(_, _, text, cb)
+      side.confirmText = text; side.confirmBox = cb
+      side.stack:push({ prompt = "confirm" })
+    end,
+    choose = function(_, _, text, items)
+      side.chooseText = text; side.chosen = items
+      side.stack:push({ prompt = "choose" })
+    end,
+    pushState = function(_, _, state) side.stack:push(state) end,
+  }
+  side.party = Party.new(side.transport, side.ui, side.chat)
+  side.coop = Coop.new(side.transport, side.ui, side.party, side.roster,
+                       side.chat)
+  hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+                             name = name, map = mapId or "FIX_TOWN",
+                             x = 1, y = 1 })
+  local welcome = take(side.peer, Wire.WELCOME)
+  side.id = welcome and welcome.id
+  side.party:setSelf(side.id)
+  side.roster:setSelf(side.id)
+  -- The welcome carries everyone already online, and the roster has to hold
+  -- them: co-op refuses a fight whose partner it cannot see standing anywhere,
+  -- so a harness that skipped this would fail for the wrong reason.
+  for _, raw in ipairs((welcome and welcome.players) or {}) do
+    side.roster:put(Wire.presence(raw))
+  end
+  return side
+end
+
+local coopDispatch = {
+  [Wire.PARTY_INVITE] = function(s, m) s.party:onInvite({}, m) end,
+  [Wire.PARTY] = function(s, m) s.party:onParty(m) end,
+  [Wire.PARTY_END] = function(s, m) s.party:onEnd(m); s.coop:onPartyEnd() end,
+  [Wire.COOP_OFFER] = function(s, m) s.coop:onOffer(m) end,
+  [Wire.COOP_OFFER_END] = function(s, m) s.coop:onOfferEnd(m) end,
+  [Wire.COOP_JOINED] = function(s, m) s.coop:onJoined({}, m) end,
+  [Wire.COOP_ASK] = function(s, m) s.coop:onAsk({}, m) end,
+  [Wire.COOP_DECLINE] = function(s, m) s.coop:onDecline(m) end,
+  [Wire.COOP_BATTLE] = function(s, m) s.coop:onBattle({}, m) end,
+  [Wire.JOIN] = function(s, m) s.roster:put(Wire.presence(m.player)) end,
+  [Wire.MOVE] = function(s, m)
+    local id = Wire.id(m.id)
+    if not id then return end
+    s.roster:setParty(id, m.party)
+    s.roster:move(id, Wire.mapId(m.map), Wire.int(m.x, 0, 4096),
+                  Wire.int(m.y, 0, 4096), Wire.facing(m.facing))
+  end,
+}
+
+local function pump(side)
+  local batch = side.peer.outbox
+  side.peer.outbox = {}
+  for _, msg in ipairs(batch) do
+    local handler = coopDispatch[msg.type]
+    if handler then handler(side, msg) end
+  end
+end
+
+local function said(side, needle)
+  for _, line in ipairs(side.said) do
+    if line:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+-- Pick a row of the unescapable choice by its label.
+local function pick(side, label)
+  for _, item in ipairs(side.chosen or {}) do
+    if item.label == label then
+      side.chosen = nil
+      item.onSelect()
+      return true
+    end
+  end
+  return false
+end
+
+-- Press B on it.
+--
+-- Ui.cancelRow is the screen's own rule, called here rather than copied:
+-- reproducing "the last row" in the harness would let the screen stop obeying
+-- it without a single check going red, which is exactly the regression rule 2
+-- cannot afford.
+local function pressB(side)
+  local row = Ui.cancelRow(side.chosen)
+  side.chosen = nil
+  if not row then return false end
+  row.onSelect()
+  return true
+end
+
+eq(Ui.cancelRow({ { label = "WAIT" }, { label = "ALONE" } }).label, "ALONE",
+   "B selects the last row of a choice")
+eq(Ui.cancelRow({}), nil, "and an empty choice has no row to select")
+
+-- Run whatever a ui:say was given as its continuation.
+--
+-- In game the player presses A and the box closes; here nothing does, so the
+-- handoff's own "and now hand the encounter back" step would never run and
+-- `running` would stay set -- which is rule 3 refusing every later prompt for
+-- the rest of the suite. Draining it is what the player pressing A is.
+local function settle(side)
+  local done = side.sayDone
+  side.sayDone = nil
+  if done then done() end
+  return done ~= nil
+end
+
+local function answerConfirm(side, yes)
+  local box = side.confirmBox
+  side.confirmBox = nil
+  if not box then return false end
+  box(yes)
+  return true
+end
+
+-- The engine pushing a trainer battle, which is the thing the mod now watches
+-- for. The object carries the three fields the real one carries and this code
+-- actually reads: what kind it is, who the trainer is, the party it built, and
+-- the onFinish that runs the whole post-battle flow.
+local function engage(side, oppClass)
+  local battle = {
+    kind = "trainer",
+    oppClass = oppClass or "OPP_BUG_CATCHER",
+    enemyParty = { { species = "FIXMON_A" }, { species = "FIXMON_B" } },
+    onFinish = function(result) side.finished = result end,
+  }
+  side.engine = battle
+  side.finished = nil
+  side.stack:push(battle)
+  return side.coop:onTrainerBattle(side.game, battle, "FIX_TOWN"), battle
+end
+
+-- BATTLE ALONE leaves the engine's own battle on top, untouched.
+local function fightsAlone(side)
+  return side.stack:top() == side.engine
+end
+
+local FIGHT = Coop.battleKey("FIX_TOWN", "OPP_BUG_CATCHER", "FIXMON_A", nil)
+local OTHER = Coop.battleKey("FIX_TOWN", "OPP_LASS", "FIXMON_A", nil)
+
+-- ------- the key is derived, not invented
+
+check(FIGHT ~= OTHER, "two trainers on one map get different keys")
+eq(Coop.battleKey("FIX_TOWN", "OPP_BUG_CATCHER", "FIXMON_A", nil), FIGHT,
+   "and the same trainer gets the same key from both sides")
+check(Wire.battleKey(FIGHT) == FIGHT,
+      "a derived key survives its own sanitiser")
+check(Wire.battleKey("FIX|TOWN; DROP") == nil,
+      "and one carrying anything else does not")
+
+local hub = Hub.new({ maxPlayers = 8 })
+local ann = coopSide(hub, "ANN")
+local bob = coopSide(hub, "BOB")
+pump(ann); pump(bob)
+
+-- ------- a lone player never sees any of it
+
+eq(engage(ann), false,
+   "a player with no party is not offered co-op at all")
+eq(ann.chosen, nil, "no prompt is raised")
+
+-- ------- team up
+
+ann.party:invite({ id = bob.client.id, name = "BOB" })
+pump(bob)
+answerConfirm(bob, true)
+pump(ann); pump(bob)
+eq(ann.party:has(), true, "ANN and BOB are a party")
+
+-- ------- the first player reaches the trainer
+
+ann.said = {}
+eq(engage(ann), true,
+   "a party member walking into a trainer is asked first")
+check(ann.chooseText:find("BOB"), "and the question names their partner")
+eq(#ann.chosen, 2, "with exactly two answers")
+eq(ann.chosen[2].label, "ALONE",
+   "and BATTLE ALONE last -- which is what B selects")
+
+-- ------- rule 2: B is an answer, not an escape
+
+pressB(ann)
+check(fightsAlone(ann), "pressing B fights the trainer rather than dodging it")
+eq(ann.coop:isWaiting(), false, "and starts no wait")
+
+-- ------- waiting, and what the partner is told
+
+engage(ann)
+pick(ann, "WAIT")
+eq(ann.coop:isWaiting(), true, "choosing WAIT starts a wait")
+check(not fightsAlone(ann), "and does not hand the battle back yet")
+check(ann.chosen ~= nil, "a waiting box is put up")
+
+pump(bob)
+local offer = bob.coop:pendingOffer()
+check(offer ~= nil, "the partner is told about the fight")
+eq(offer.battle, FIGHT, "by key")
+eq(offer.name, "ANN", "and by who is standing there")
+eq(offer.label, "BUG CATCHER", "with something to call the trainer")
+
+-- ------- rule 2 again: backing out of waiting reopens the choice
+
+ann.said = {}
+pressB(ann)
+eq(ann.coop:isWaiting(), false, "B on the waiting box stops waiting")
+check(not fightsAlone(ann), "without handing the battle back yet")
+eq(#(ann.chosen or {}), 2, "and reopens the wait/alone choice")
+eq(ann.chosen[2].label, "ALONE", "still with ALONE as the B answer")
+pump(bob)
+eq(bob.coop:pendingOffer(), nil, "the partner's offer is taken down with it")
+
+-- ...and from there the player is still cornered
+pressB(ann)
+check(fightsAlone(ann), "so the way out of waiting is still into a battle")
+
+-- ------- rule 1: a no leaves nothing behind
+
+engage(ann)
+pick(ann, "WAIT")
+pump(bob)
+check(bob.coop:pendingOffer() ~= nil, "ANN is waiting again")
+
+eq(engage(bob), true,
+   "the second player reaching the same fight is asked to join")
+check(bob.confirmText:find("ANN"), "naming who is waiting")
+eq(bob.chosen, nil, "and is not asked to wait for anybody")
+
+answerConfirm(bob, false)
+check(fightsAlone(bob), "saying no fights that trainer alone")
+pump(ann)
+eq(ann.coop:isWaiting(), true,
+   "but does NOT decide anything for the player who is waiting")
+check(not said(ann, "alone"), "who is not even told")
+
+-- ...and the ask is made again, because nothing recorded the refusal
+eq(engage(bob), true,
+   "walking back into the same fight asks again")
+check(bob.confirmBox ~= nil, "with the same yes/no")
+
+-- a different trainer is not that fight, and is not offered as one
+answerConfirm(bob, false)
+engage(bob, "OPP_LASS")
+eq(bob.confirmBox, nil, "another trainer on the same map is not the same fight")
+check(bob.chosen ~= nil, "so BOB gets the wait/alone choice for it instead")
+pick(bob, "ALONE")
+
+-- ------- yes: both sides reach the handoff
+
+engage(bob)
+answerConfirm(bob, true)
+pump(ann); pump(bob)
+
+eq(ann.coop:isWaiting(), false, "a yes ends the wait")
+check(ann.coop.lastPlan ~= nil, "and the waiting player reaches the handoff")
+check(bob.coop.lastPlan ~= nil, "as does the one who joined")
+eq(ann.coop.lastPlan.kind, "npc", "as a co-op fight against an NPC")
+eq(#ann.coop.lastPlan.allies, 2, "with both of them on the same side")
+
+-- Both sides now put their party on the wire, which is the first step of
+-- assembling a real four-slot field. Neither has an engine to build one with
+-- under luajit, so both abandon with a sentence rather than half-starting --
+-- and rule 2 still holds: the trainer each of them walked into is handed back.
+--
+-- Two releases, and that is right rather than a double count: each walked into
+-- that trainer and each has a script suspended in front of it.
+settle(ann); settle(bob)
+eq(ann.coop.running, false, "neither is left marked as mid-battle")
+
+-- ------- rule 3: nobody joins once it has started
+
+ann.coop.running = true
+eq(engage(ann), false,
+   "a trainer met while a co-op battle is running is left to the engine")
+ann.coop.running = false
+
+-- an offer taken up twice starts one fight, not two
+engage(ann)
+pick(ann, "WAIT")
+pump(bob)
+bob.transport.send(nil, Wire.COOP_JOIN, { to = ann.id, battle = FIGHT })
+bob.transport.send(nil, Wire.COOP_JOIN, { to = ann.id, battle = FIGHT })
+local joins = 0
+for _, msg in ipairs(ann.peer.outbox) do
+  if msg.type == Wire.COOP_JOINED then joins = joins + 1 end
+end
+eq(joins, 1, "a second join finds nothing left to accept")
+pump(ann); pump(bob)
+-- both are mid-handoff again; hand their encounters back before moving on
+settle(ann); settle(bob)
+
+-- ------- PARTY BATTLE: the refusals the brief names
+
+local cal = coopSide(hub, "CAL")
+local dee = coopSide(hub, "DEE")
+pump(ann); pump(bob); pump(cal); pump(dee)
+
+ann.said = {}
+eq(ann.coop:challenge({}, { id = cal.id, name = "CAL", party = false },
+                      "FIX_TOWN"), false,
+   "PARTY BATTLE refuses an opponent who is not in a party")
+check(said(ann, "isn't in"), "and says exactly that")
+
+-- CAL and DEE pair up, on the same map
+cal.party:invite({ id = dee.client.id, name = "DEE" })
+pump(dee)
+answerConfirm(dee, true)
+pump(cal); pump(dee); pump(ann); pump(bob)
+
+-- ...but ANN's own partner has wandered off
+hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
+pump(ann)
+ann.said = {}
+eq(ann.coop:challenge({}, { id = cal.id, name = "CAL", party = true },
+                      "FIX_TOWN"), false,
+   "and refuses when your own partner is not on this map")
+check(said(ann, "BOB"), "naming the member who is elsewhere")
+
+-- bring BOB back
+hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_TOWN", x = 1, y = 1 })
+pump(ann)
+
+-- ------- all four have to agree
+
+ann.said = {}
+eq(ann.coop:challenge({}, { id = cal.id, name = "CAL", party = true },
+                      "FIX_TOWN"), true, "with all four in place, the ask goes out")
+pump(bob); pump(cal); pump(dee)
+check(bob.confirmBox ~= nil, "your own partner is asked")
+check(cal.confirmBox ~= nil, "the player you challenged is asked")
+check(dee.confirmBox ~= nil, "and so is theirs -- all four, not two")
+eq(ann.confirmBox, nil, "the asker is not asked again")
+
+-- one no ends it for everyone
+ann.coop.lastPlan, bob.coop.lastPlan = nil, nil
+cal.coop.lastPlan, dee.coop.lastPlan = nil, nil
+answerConfirm(bob, true)
+answerConfirm(cal, true)
+pump(ann); pump(bob); pump(cal); pump(dee)
+eq(ann.coop.lastPlan, nil, "three yesses out of four start nothing")
+eq(cal.coop.lastPlan, nil, "on either side")
+answerConfirm(dee, false)
+pump(ann); pump(bob); pump(cal); pump(dee)
+check(said(cal, "said no") or said(ann, "said no"),
+      "one refusal is told to the others")
+eq(ann.coop.ask, nil, "and the ask is off")
+
+-- ...and with every yes, all four reach the handoff
+ann.said, bob.said, cal.said, dee.said = {}, {}, {}, {}
+ann.coop.lastPlan, bob.coop.lastPlan = nil, nil
+cal.coop.lastPlan, dee.coop.lastPlan = nil, nil
+eq(ann.coop:challenge({}, { id = cal.id, name = "CAL", party = true },
+                      "FIX_TOWN"), true, "asked again")
+pump(bob); pump(cal); pump(dee)
+answerConfirm(bob, true)
+answerConfirm(cal, true)
+answerConfirm(dee, true)
+pump(ann); pump(bob); pump(cal); pump(dee)
+
+for _, side in ipairs({ ann, bob, cal, dee }) do
+  check(side.coop.lastPlan ~= nil, side.name .. " reaches the handoff")
+  eq(side.coop.lastPlan.kind, "party", "as a party battle")
+  eq(#side.coop.lastPlan.allies, 2, "with two on their side")
+  eq(#side.coop.lastPlan.foes, 2, "and two against")
+end
+eq(ann.coop.lastPlan.side, bob.coop.lastPlan.side,
+   "partners are told they are on the same side")
+check(ann.coop.lastPlan.side ~= cal.coop.lastPlan.side,
+      "and opponents are not")
+
+-- ------- the engine's battle is finished off, not left hanging
+--
+-- The bug this catches: a co-op battle stands in for the trainer battle the
+-- engine built, so that battle has to be told how it went. Its `onFinish` is
+-- the entire post-battle flow -- the defeated-trainer flag, the victory
+-- rewards, the whiteout on a wipe, the script that has been waiting in front
+-- of the trainer. Dropping it instead of calling it leaves all of that undone
+-- and the map script suspended for good.
+
+ann.coop.running = false
+engage(ann)
+pick(ann, "WAIT")
+check(ann.coop.encounter ~= nil, "the encounter is held while waiting")
+eq(ann.finished, nil, "and the engine's battle has not been told anything yet")
+
+ann.coop.engineBattle = ann.engine
+ann.coop:onBattleOver("win")
+eq(ann.finished, "win",
+   "a finished co-op battle hands its result to the engine's own battle")
+eq(ann.coop.encounter, nil, "and the encounter is spent")
+
+-- ...and BATTLE ALONE hands it nothing, because nothing stood in for it: the
+-- engine's battle was underneath the prompt the whole time and simply resumes.
+engage(ann)
+check(not fightsAlone(ann), "the prompt is on top of the battle")
+pressB(ann)
+check(fightsAlone(ann), "B closes the prompt and the engine's battle resumes")
+eq(ann.finished, nil, "with nothing finished off behind its back")
+
+-- ------- a ranked 2-on-2 needs all four to agree
+--
+-- The hub scores a party battle as one team match -- each player against the
+-- other pair's combined strength -- so every player gets exactly one rated
+-- result, and, exactly as in a 1v1, one report is worth nothing on its own.
+
+;(function()
+  local id = nil
+  for askId in pairs(hub.coopMatches or {}) do id = askId end
+  if not id then
+    -- The four-way above settled its ask into a battle, which is where the
+    -- paperwork is created; if it is not there the rest cannot be asserted.
+    check(false, "a settled party battle leaves ranking paperwork")
+    return
+  end
+  local match = hub.coopMatches[id]
+  eq(#match.a, 2, "the paperwork holds one side of two...")
+  eq(#match.b, 2, "...against the other side of two")
+  eq(#match.everyone, 4, "and needs all four to report")
+
+  -- three reports settle nothing
+  hub:receive(ann.client, { type = Wire.RESULT, session = id, outcome = "win" })
+  hub:receive(bob.client, { type = Wire.RESULT, session = id, outcome = "win" })
+  hub:receive(cal.client, { type = Wire.RESULT, session = id, outcome = "loss" })
+  check(hub.coopMatches[id] ~= nil, "three reports out of four settle nothing")
+
+  -- a player cannot revise their answer into agreement
+  hub:receive(ann.client, { type = Wire.RESULT, session = id, outcome = "loss" })
+  eq(match.reports[ann.client.id], "win", "the first answer from each stands")
+
+  hub:receive(dee.client, { type = Wire.RESULT, session = id, outcome = "loss" })
+  eq(hub.coopMatches[id], nil, "the fourth report settles it, once")
+
+  -- and it moved somebody: the winning side gained, the losing side lost
+  local board = hub.board
+  check(board ~= nil, "the hub keeps a board")
+  -- Read straight off the board's entries: everybody starts at RANK_START, so
+  -- somebody above it is somebody a co-op battle paid.
+  local winners, losers = 0, 0
+  for _, entry in pairs(board.entries or {}) do
+    if (entry.points or 0) > Config.RANK_START then winners = winners + 1 end
+    if (entry.played or 0) > 0 and (entry.points or 0) <= Config.RANK_START then
+      losers = losers + 1
+    end
+  end
+  eq(winners, 2, "both winners gained points")
+  eq(losers, 2, "and both losers were rated too")
+
+  -- a report for a battle that was already settled is simply ignored
+  hub:receive(ann.client, { type = Wire.RESULT, session = id, outcome = "win" })
+  check(true, "a late report after settlement is not an error")
+end)()
+
+-- ------- a finished co-op battle is reclaimed by the hub
+--
+-- The leak this pins: a relay group was opened when four players agreed and
+-- only ever closed when somebody *disconnected*. Nothing told the hub a battle
+-- had merely ended, so a server that ran for a week held one dead group per
+-- battle ever fought -- each still routing traffic at players who had walked
+-- away, and each holding their coopBattleId so the hub thought they were still
+-- in it.
+
+;(function()
+  -- The four-way above left a live group behind it -- and so did the earlier
+  -- NPC join, which opens a group of two. Selected by shape rather than by
+  -- whichever `pairs` happened to yield first, or this passes or fails
+  -- depending on a hash order.
+  local liveId
+  for id, group in pairs(hub.coopBattles or {}) do
+    if #(group.members or {}) == 4 then liveId = id end
+  end
+  check(liveId ~= nil, "agreeing on a party battle opens a relay group")
+  local group = hub.coopBattles[liveId]
+  eq(#group.members, 4, "with all four in it")
+  eq(ann.client.coopBattleId, liveId, "and each of them filed under it")
+
+  -- one goodbye closes it for everybody
+  hub:receive(ann.client, { type = Wire.COOP_LEAVE })
+  eq(hub.coopBattles[liveId], nil, "one goodbye reclaims the whole group")
+  eq(ann.client.coopBattleId, nil, "the player who said it is let out")
+  eq(bob.client.coopBattleId, nil, "and so is everybody else -- it ends at once")
+
+  -- and traffic sent afterwards goes nowhere rather than to a dead group
+  bob.peer.outbox = {}
+  hub:receive(cal.client,
+    { type = Wire.COOP_RELAY, payload = { t = "act" } })
+  eq(take(bob.peer, Wire.COOP_MSG), nil,
+     "relaying into a closed group reaches nobody")
+
+  -- a goodbye from somebody in no battle is ignored rather than an error
+  hub:receive(ann.client, { type = Wire.COOP_LEAVE })
+  check(true, "a goodbye with no battle behind it is harmless")
+
+  -- the backstop: a group whose battle never said goodbye is aged out
+  local staleId = hub:openCoopBattle("stale", { ann.client.id, bob.client.id })
+  check(hub.coopBattles[staleId] ~= nil, "a group can be opened directly")
+  hub.coopBattles[staleId].startedAt = hub.clock - (Config.COOP_BATTLE_MAX + 1)
+  hub:update(0)
+  eq(hub.coopBattles[staleId], nil,
+     "a group whose battle never ended is reclaimed on age")
+  eq(ann.client.coopBattleId, nil, "and its members are let out of it too")
+end)()
+
+-- ------- partner gating: two layers, and both are checked
+--
+-- Menu truth (Ui.lua, ctx.party:isPartner) and state truth (Coop:challenge's
+-- own guard) are meant to agree: the row is the courtesy, the guard is what
+-- makes the state genuinely unreachable if the row is ever forced or reached
+-- some other way. Both are asserted here, independently.
+
+;(function()
+  -- The row, built exactly as the real ACTIONS screen builds it -- through
+  -- Ui:install and the registered screen's own constructor, not a copy of
+  -- the conditional written here. `mod.ui.Menu` is stubbed to hand the item
+  -- list straight back rather than draw it, and `mod.content.screens` and
+  -- `mod.hooks` are given just enough to let `install` register without
+  -- throwing -- neither is touched by any other test in this file.
+  local screenRegistry = {}
+  stubMod.content.screens = {
+    register = function(_, id, def) screenRegistry[id] = def end,
+    get = function(_, id) return screenRegistry[id] end,
+  }
+  stubMod.hooks = { wrap = function() end }
+  stubMod.ui = {
+    Menu = { new = function(_, items, opts) return { items = items, opts = opts } end },
+  }
+
+  local ctx = { party = ann.party, roster = ann.roster, coop = ann.coop }
+  local ui = Ui.new(ctx)
+  local installed = pcall(function() ui:install() end)
+  check(installed, "the real ACTIONS screen registers under a minimal stub")
+
+  local def = screenRegistry[Ui.SCREEN.ACTIONS]
+  check(def ~= nil, "and the screen the brief names is the one that registered")
+
+  local function hasRow(playerId, label)
+    local menu = def.new({}, { playerId = playerId })
+    for _, item in ipairs(menu.items) do
+      if item.label == label then return true end
+    end
+    return false
+  end
+
+  eq(hasRow(bob.id, "PARTY BATTLE"), false,
+     "PARTY BATTLE is absent from your own partner's menu")
+  eq(hasRow(cal.id, "PARTY BATTLE"), true,
+     "and present against anybody else -- CAL is nobody's partner here")
+
+  stubMod.content.screens, stubMod.hooks, stubMod.ui = nil, nil, nil
+end)()
+
+-- ------- partner gating: the guard makes the state unreachable
+--
+-- Even if the row above were forced, `challenge()` refuses a partner before
+-- anything is written down: no ask, no message sent, and -- the bug this
+-- closes -- no ~70s "You already asked" soft-lock, because self.ask is never
+-- set in the first place.
+
+;(function()
+  ann.said = {}
+  eq(ann.coop:challenge({}, { id = bob.client.id, name = "BOB", party = true },
+                        "FIX_TOWN"), false,
+     "PARTY BATTLE against your own partner is refused before anything is sent")
+  check(said(ann, "already\non your team"),
+        "and says so, naming the reason rather than staying silent")
+  eq(ann.coop.ask, nil,
+     "no ask is recorded -- the ~70s soft-lock (COOP_ASK_TIMEOUT + "
+     .. "COOP_ASK_GRACE) has nothing left to grab onto")
+
+  bob.peer.outbox = {}
+  pump(bob)
+  check(bob.confirmBox == nil, "and the partner is never asked at all")
+end)()
+
+-- ------- a dead party cannot enter a 2-on-2
+--
+-- Belt-and-braces: after the blackout rule the state should be unreachable,
+-- but buildField refuses it anyway -- the first (and only) place full HP
+-- exists before a field is built. Pure, against `Coop:buildField` directly,
+-- the same way the badge and NPC-field tests elsewhere in this file drive it.
+
+;(function()
+  local Coop = need("Coop")
+  local assembler = setmetatable({}, { __index = Coop })
+
+  local function packed(hp) return { species = "FIXMON_A", level = 10, hp = hp } end
+  local function planOf(over)
+    local base = {
+      hostId = "ann",
+      allies = { { id = "ann", name = "ANN" }, { id = "bob", name = "BOB" } },
+      foes = { { id = "cal", name = "CAL" }, { id = "dee", name = "DEE" } },
+    }
+    for k, v in pairs(over or {}) do base[k] = v end
+    return base
+  end
+  local function build(parties, over)
+    return assembler:buildField({}, { parties = parties, badges = {},
+                                       plan = planOf(over) }, {})
+  end
+
+  local field = build({ ann = { packed(50) }, bob = { packed(50) },
+                        cal = { packed(50) }, dee = { packed(50) } })
+  check(field ~= nil, "a field where both sides can stand up assembles")
+
+  local nilField, why, closeGroup = build({
+    ann = { packed(0) }, bob = { packed(0) },
+    cal = { packed(50) }, dee = { packed(50) },
+  })
+  eq(nilField, nil, "a side with nothing healthy is refused a field")
+  check(tostring(why):find("healthy", 1, true) ~= nil,
+        "and the reason names what is wrong")
+  eq(closeGroup, true,
+     "and asks the caller to close the group over it, not just abandon the "
+     .. "assembly")
+
+  local nilFieldB, whyB, closeB = build({
+    ann = { packed(50) }, bob = { packed(50) },
+    cal = { packed(0) }, dee = { packed(0) },
+  })
+  eq(nilFieldB, nil, "and refused from either side")
+  eq(closeB, true, "with the same close-the-group answer")
+
+  local mixed = build({
+    ann = { packed(0) }, bob = { packed(50) },
+    cal = { packed(50) }, dee = { packed(50) },
+  })
+  check(mixed ~= nil,
+        "one fainted trainer beside a standing partner is not a wiped side "
+        .. "-- there is still somebody to send out")
+
+  -- A placeholder/string party carries no HP this host can read, and is
+  -- deliberately NOT judged: "unreadable" is not "fainted".
+  local placeholder = build({
+    ann = { "GHOST" }, bob = { packed(50) },
+    cal = { packed(50) }, dee = { packed(50) },
+  })
+  check(placeholder ~= nil,
+        "a party this host cannot read HP from is not refused -- only a "
+        .. "genuinely readable wipe is")
+end)()
+
+-- ------- fromHost: who may end the assembly, and who may not
+--
+-- `abort` and `field` are declarations about the battle as a whole, and only
+-- the host's word counts -- everything else per-slot stays open, because the
+-- battle checks the owner of each action itself.
+
+;(function()
+  local Coop = need("Coop")
+
+  local named = setmetatable({ battle = { plan = { hostId = "ann" } } },
+                              { __index = Coop })
+  eq(named:fromHost("ann"), true, "the named host is believed")
+  eq(named:fromHost("bob"), false, "and nobody else is")
+
+  local permissive = setmetatable({ battle = { plan = {} } }, { __index = Coop })
+  eq(permissive:fromHost("bob"), true,
+     "a plan naming no host at all is permissive -- an older peer that never "
+     .. "sent one must not break a battle")
+  eq(permissive:fromHost(nil), true, "and so is a sender with no id of its own")
+
+  -- ...and it is really what gates the two host-only messages, not merely
+  -- what a unit test of fromHost alone would prove.
+  local function client(hostId)
+    return setmetatable({
+      battle = { ready = false, plan = { hostId = hostId }, parties = {}, badges = {} },
+      running = true,
+      ui = { say = function() end },
+      transport = { send = function() end, isReady = function() return true end },
+      party = { isSelf = function() return false end, selfId = "ann" },
+    }, { __index = Coop })
+  end
+
+  local c1 = client("ann")
+  Coop.onMessage(c1, {}, { from = "cal", payload = { t = "abort" } })
+  check(c1.battle ~= nil, "an abort claimed by a non-host does nothing")
+
+  local c2 = client("ann")
+  Coop.onMessage(c2, {}, { from = "ann", payload = { t = "abort" } })
+  eq(c2.battle, nil, "the host's own abort closes the assembly")
+
+  local c3 = client(nil)
+  Coop.onMessage(c3, {}, { from = "cal", payload = { t = "abort" } })
+  eq(c3.battle, nil,
+     "with no host named, an abort is taken from anybody -- an older-peer "
+     .. "compatibility case, not a hole")
+
+  local c4 = client("ann")
+  Coop.onMessage(c4, {}, { from = "cal",
+    payload = { t = "field", field = { slots = {}, host = "cal" } } })
+  check(c4.battle ~= nil and not c4.battle.ready,
+        "a field claimed by a non-host is never built")
+end)()
+
+-- ------- tryStart: a dead-party host relays abort, never field, then leaves
+--
+-- No hub needed here -- tryStart's whole job is deciding what to send, and a
+-- fake transport can watch that as well as a real one.
+
+;(function()
+  local Coop = need("Coop")
+  local function packed(hp) return { species = "FIXMON_A", level = 10, hp = hp } end
+
+  local sent, saidText = {}, {}
+  local host = setmetatable({
+    transport = {
+      send = function(_, t, payload) sent[#sent + 1] = { type = t, payload = payload } end,
+      isReady = function() return true end,
+    },
+    ui = { say = function(_, text) saidText[#saidText + 1] = text end },
+    party = { selfId = "ann", isSelf = function(_, id) return id == "ann" end },
+    running = true,
+    battle = {
+      host = true, ready = false,
+      parties = { ann = { packed(0) }, bob = { packed(0) },
+                  cal = { packed(50) }, dee = { packed(50) } },
+      badges = {},
+      plan = {
+        hostId = "ann",
+        allies = { { id = "ann", name = "ANN" }, { id = "bob", name = "BOB" } },
+        foes = { { id = "cal", name = "CAL" }, { id = "dee", name = "DEE" } },
+      },
+    },
+  }, { __index = Coop })
+
+  Coop.tryStart(host, {})
+
+  -- transport:send's second argument is `{ payload = <relay payload> }` --
+  -- the wrapper `coopSide`'s fake transport flattens elsewhere in this file,
+  -- and this harness deliberately does not, so it is unwrapped here instead.
+  local sawAbort, sawField, sawLeave = false, false, false
+  for _, m in ipairs(sent) do
+    local relayed = type(m.payload) == "table" and m.payload.payload
+    if m.type == Wire.COOP_RELAY and type(relayed) == "table"
+       and relayed.t == "abort" then sawAbort = true end
+    if m.type == Wire.COOP_RELAY and type(relayed) == "table"
+       and relayed.t == "field" then sawField = true end
+    if m.type == Wire.COOP_LEAVE then sawLeave = true end
+  end
+  check(sawAbort, "a dead-party host relays an abort")
+  check(not sawField,
+        "and never relays the field that would have started a broken battle")
+  check(sawLeave,
+        "and says goodbye -- the same one-goodbye-closes-all a finished "
+        .. "battle uses")
+  eq(host.battle, nil, "its own assembly is abandoned")
+  eq(host.running, false, "and it is no longer marked mid-battle")
+end)()
+
+-- ------- the ask box: only ever taken down when it is what is on screen
+--
+-- unwindTo pops up to sixteen states hunting for its target; aimed at a box
+-- that is buried under something the player opened on purpose, that would
+-- throw the wrong thing away. So closeAskBox only ever pops the box when it
+-- is genuinely on top -- and forgets the held reference either way, because
+-- there is nothing left for a stale one to do.
+
+;(function()
+  local Coop = need("Coop")
+  local function stackOf()
+    return {
+      states = {},
+      top = function(self) return self.states[#self.states] end,
+      pop = function(self) return table.remove(self.states) end,
+      push = function(self, st) self.states[#self.states + 1] = st end,
+    }
+  end
+
+  -- The ordinary case: the box is what the player is looking at.
+  local stack1 = stackOf()
+  local box1 = { name = "askbox" }
+  stack1:push(box1)
+  local c1 = setmetatable({ askBox = { box = box1, game = { stack = stack1 } } },
+                           { __index = Coop })
+  eq(c1:closeAskBox(), true, "a box that is top-of-stack is taken down")
+  eq(#stack1.states, 0, "and really comes off the stack")
+  eq(c1.askBox, nil, "and is forgotten either way")
+
+  -- Buried: something was pushed on top of it -- a battle screen, in the
+  -- real bug. Left exactly alone rather than popped blind.
+  local stack2 = stackOf()
+  local box2 = { name = "askbox" }
+  stack2:push(box2)
+  stack2:push({ name = "battle" })
+  local c2 = setmetatable({ askBox = { box = box2, game = { stack = stack2 } } },
+                           { __index = Coop })
+  eq(c2:closeAskBox(), false, "a buried box is left exactly where it is")
+  eq(#stack2.states, 2, "nothing is popped hunting for it")
+  eq(c2.askBox, nil,
+     "but the held reference is dropped either way -- there is nothing left "
+     .. "this ask owns")
+
+  -- No box at all: harmless.
+  local c3 = setmetatable({}, { __index = Coop })
+  eq(c3:closeAskBox(), false, "nothing to close is not an error")
+
+  -- A box already gone from the stack some other way is not hunted for
+  -- either.
+  local stack4 = stackOf()
+  stack4:push({ name = "something else" })
+  local c4 = setmetatable({
+    askBox = { box = { name = "gone" }, game = { stack = stack4 } },
+  }, { __index = Coop })
+  eq(c4:closeAskBox(), false,
+     "a box that is no longer on the stack at all is left alone rather than "
+     .. "hunted for")
+  eq(#stack4.states, 1, "so the state that is there is untouched")
+
+  -- ------- and every resolution path really calls it
+  local function bareCoop(askBox)
+    return setmetatable({ askBox = askBox, ui = { say = function() end } },
+                         { __index = Coop })
+  end
+
+  local d1 = bareCoop({ box = {}, game = {} })
+  d1:onDecline({ reason = "declined" })
+  eq(d1.askBox, nil, "onDecline takes the asker's box down")
+
+  local d2 = bareCoop({ box = {}, game = {} })
+  d2.ask = { role = "asker", peer = "cal" }
+  d2:onPeerGone("cal")
+  eq(d2.askBox, nil, "so does losing the peer the ask was aimed at")
+
+  local d3 = bareCoop({ box = {}, game = {} })
+  d3.ask = { role = "asker" }
+  d3:onPartyEnd()
+  eq(d3.askBox, nil, "and so does the party dissolving mid-ask")
+
+  local d4 = bareCoop({ box = {}, game = {} })
+  d4.ask = { role = "asker",
+             clock = Config.COOP_ASK_TIMEOUT + Config.COOP_ASK_GRACE }
+  d4.transport = { send = function() end }
+  d4.clock = 0
+  d4:update(0)
+  eq(d4.askBox, nil, "and so does the deadline backstop")
+
+  local d5 = bareCoop({ box = {}, game = {} })
+  d5:onBattle({}, { side = "not-a-side" })
+  eq(d5.askBox, nil, "and the ask being resolved -- reaching a real battle")
+
+  local d6 = bareCoop({ box = {}, game = {} })
+  d6:reset()
+  eq(d6.askBox, nil, "and a full reset")
+end)()
+
+-- ------- blackout: one rule, healed and taxed and sent home
+--
+-- Coop.blacksOut, Coop:consume's translation, and Coop:blackout's mod-side
+-- ritual for the battle the engine never ran -- a party-versus-party co-op
+-- battle, or a won trainer battle whose winner's own team was wiped.
+
+;(function()
+  local Coop = need("Coop")
+
+  -- ------- blacksOut: the matrix
+
+  eq(Coop.blacksOut("loss", { save = { party = {} } }), true,
+     "a reported loss blacks out regardless of what the party looks like")
+
+  local wiped = { save = { party = {
+    { hp = 0, stats = { hp = 50 } }, { hp = 0, stats = { hp = 30 } },
+  } } }
+  eq(Coop.blacksOut("win", wiped), true,
+     "a win with nothing left standing blacks out too -- the engine's own "
+     .. "safety net, adopted here because consume steps around it")
+  eq(Coop.blacksOut("draw", wiped), true, "and so does a wiped draw")
+
+  local standing = { save = { party = {
+    { hp = 0, stats = { hp = 50 } }, { hp = 10, stats = { hp = 30 } },
+  } } }
+  eq(Coop.blacksOut("win", standing), false,
+     "one monster still standing is not a blackout")
+  eq(Coop.blacksOut("draw", standing), false, "on a draw either")
+
+  eq(Coop.blacksOut("win", { save = { party = {} } }), false,
+     "an empty party is never a blackout -- there is no team to have lost")
+  eq(Coop.blacksOut("win", { save = {} }), false,
+     "nor a save with no party at all")
+  eq(Coop.blacksOut("win", nil), false, "nor no game at all")
+
+  -- ------- healPoint: save's own Center, then the world's boot heal, then spawn
+
+  eq(Coop.healPoint({ save = { lastHeal = { map = "CENTER", x = 3, y = 4 } } }).map,
+     "CENTER", "the save's own last heal wins when there is one")
+  eq(Coop.healPoint({
+    save = {}, data = { field = { boot = { lastHeal = { map = "BOOT_CENTER" } } } },
+  }).map, "BOOT_CENTER",
+     "falling back to the world's declared boot heal point")
+  local spawnOnly = Coop.healPoint({
+    save = {},
+    data = { field = { boot = { startMap = "PALLET", startX = 5, startY = 6 } } },
+  })
+  eq(spawnOnly.map, "PALLET", "and finally the spawn cell")
+  eq(spawnOnly.x, 5, "with its coordinates")
+  eq(Coop.healPoint({ save = {}, data = {} }), nil,
+     "nil for a build with no field data at all, rather than a guessed map")
+
+  -- ------- healParty: the Pokemon.heal mirror
+
+  local movesData = { FIX_TACKLE = { pp = 20 } }
+  local party = {
+    { stats = { hp = 60 }, hp = 1, status = "PSN",
+      moves = { { id = "FIX_TACKLE", pp = 2, ppUps = 1 } } },
+  }
+  check(Coop.healParty({ data = { moves = movesData }, save = { party = party } }),
+        "healParty runs over a real save")
+  eq(party[1].hp, 60, "hp goes to the stat")
+  eq(party[1].status, nil, "status clears")
+  eq(party[1].moves[1].pp, 24,
+     "and PP restores to base plus the PP UP bonus (20 + floor(20/5)*1)")
+  eq(Coop.healParty({ save = {} }), false,
+     "no party at all is answered rather than thrown through")
+
+  -- ------- consume: the translation, and who ends up owing the ritual
+
+  local c1 = setmetatable({}, { __index = Coop })
+  eq(c1:consume("win", false), false, "no encounter at all: nothing to consume")
+
+  local c2 = setmetatable({ encounter = { engine = {} } }, { __index = Coop })
+  eq(c2:consume("win", false), false,
+     "an engine with no onFinish is the same as no engine")
+  eq(c2.encounter, nil, "but the encounter is still spent either way")
+
+  local seen
+  local c3 = setmetatable({
+    encounter = { engine = { onFinish = function(r) seen = r end } },
+  }, { __index = Coop })
+  local handled3, ritual3 = c3:consume("loss", true)
+  eq(seen, "lose",
+     "a reported loss with blackout owed is translated to the engine's own "
+     .. "word -- \"loss\" would have skipped afterBattle's ritual entirely")
+  eq(handled3, true, "the engine took the battle")
+  eq(ritual3, true, "and ran its own ritual -- ours is not owed")
+
+  seen = nil
+  local c4 = setmetatable({
+    encounter = { engine = { onFinish = function(r) seen = r end } },
+  }, { __index = Coop })
+  local handled4, ritual4 = c4:consume("win", true)
+  eq(seen, "win",
+     "a WIN is never translated, even with the party wiped -- "
+     .. "Commands.start_battle reads it back as ctx.lastCheck")
+  eq(ritual4, false, "so the ritual it did not run is still owed to us")
+
+  seen = nil
+  local c5 = setmetatable({
+    encounter = { engine = { onFinish = function(r) seen = r end } },
+  }, { __index = Coop })
+  local handled5, ritual5 = c5:consume("draw", false)
+  eq(seen, "draw", "no blackout owed: the result passes through untranslated")
+  eq(ritual5, false, "and nothing is owed on either side")
+
+  -- A throwing onFinish still spends the encounter, and hands the ritual
+  -- back to the caller -- the engine never got as far as running its own.
+  local warnings = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warnings[#warnings + 1] = ok and line or tostring(fmt)
+  end
+  local c6 = setmetatable({
+    encounter = { engine = { onFinish = function() error("boom") end } },
+  }, { __index = Coop })
+  local handled6, ritual6 = c6:consume("loss", true)
+  eq(handled6, true, "the engine 'took' the battle -- there is no third state")
+  eq(ritual6, false, "but its ritual never ran, so ours is still owed")
+  check(#warnings > 0, "and the failure is said out loud, not swallowed")
+
+  -- Prize money: at the level of the trainer's strongest monster, before the
+  -- blackout that would otherwise tax it away.
+  local save7 = { money = 100 }
+  local c7 = setmetatable({
+    encounter = {
+      game = { save = save7 },
+      engine = { onFinish = function() end, trainer = { baseMoney = 10 },
+                 enemyParty = { { level = 5 }, { level = 12 } } },
+    },
+  }, { __index = Coop })
+  c7:consume("win", false)
+  eq(save7.money, 220,
+     "the prize is baseMoney * the strongest opponent's level (10 * 12), "
+     .. "added to what was already there")
+
+  local save8 = { money = 999990 }
+  local c8 = setmetatable({
+    encounter = {
+      game = { save = save8 },
+      engine = { onFinish = function() end, trainer = { baseMoney = 100 },
+                 enemyParty = { { level = 50 } } },
+    },
+  }, { __index = Coop })
+  c8:consume("win", false)
+  eq(save8.money, 999999, "and the prize is capped rather than overflowing")
+
+  -- ------- blackout / pumpBlackout: heal and tax now, warp when the screen
+  -- comes free
+
+  local calls = {}
+  stubMod.world = {
+    warpTo = function(_, map, x, y, facing)
+      calls[#calls + 1] = { map = map, x = x, y = y, facing = facing }
+      return true
+    end,
+  }
+
+  warnings = {}
+  local nosave = setmetatable({}, { __index = Coop })
+  eq(nosave:blackout({}), false, "a blackout with no save to write is refused")
+  check(#warnings > 0, "and says so")
+
+  -- The ordinary case: nothing on top of the world but the world itself, so
+  -- the warp fires in the same call.
+  warnings, calls = {}, {}
+  local moves = { FIX_TACKLE = { pp = 20 } }
+  local game1 = {
+    data = { moves = moves },
+    save = {
+      money = 101, forcedBike = true,
+      party = { { stats = { hp = 40 }, hp = 0, status = "PSN",
+                  moves = { { id = "FIX_TACKLE", pp = 0 } } } },
+      lastHeal = { map = "PALLET_CENTER", x = 3, y = 4 },
+    },
+    stack = { top = function() return { isOverworld = true } end },
+  }
+  local ok1 = setmetatable({}, { __index = Coop })
+  local fired1 = ok1:blackout(game1)
+  eq(fired1, true,
+     "with nothing covering the world, the warp fires in the same call as "
+     .. "the rest of the ritual")
+  eq(game1.save.party[1].hp, 40, "the party is healed first")
+  eq(game1.save.party[1].status, nil, "status cleared")
+  eq(game1.save.party[1].moves[1].pp, 20, "PP restored")
+  eq(game1.save.money, 50, "money halved and floored (101 / 2)")
+  eq(game1.save.forcedBike, nil, "and the forced-bike flag cleared")
+  eq(#calls, 1, "exactly one warp went out")
+  eq(calls[1].map, "PALLET_CENTER", "to this player's own last heal")
+  eq(ok1.pendingWarp, nil,
+     "and nothing is left waiting for a screen that already arrived")
+
+  -- Deferred: a menu is up, so the warp waits -- and fires once, when the
+  -- world comes back on top.
+  warnings, calls = {}, {}
+  local topRef = { isOverworld = false }
+  local game2 = {
+    data = { moves = moves },
+    save = {
+      money = 10, party = { { stats = { hp = 30 }, hp = 0, moves = {} } },
+      lastHeal = { map = "VIRIDIAN_CENTER", x = 1, y = 1 },
+    },
+    stack = { top = function() return topRef end },
+  }
+  local ok2 = setmetatable({}, { __index = Coop })
+  local fired2 = ok2:blackout(game2)
+  eq(fired2, false, "a menu on top of the world defers the warp")
+  eq(#calls, 0, "so nothing has warped yet")
+  check(ok2.pendingWarp ~= nil, "and a warp is held, waiting for the screen")
+  eq(game2.save.party[1].hp, 30,
+     "the heal already landed, though -- it is a save write, not a screen")
+
+  topRef.isOverworld = true
+  eq(ok2:pumpBlackout(0.5), true,
+     "the deferred warp fires once the world is back on top")
+  eq(#calls, 1, "exactly once")
+  eq(ok2.pendingWarp, nil, "and the wait is spent")
+
+  eq(ok2:pumpBlackout(0.5), false,
+     "pumping again with nothing pending does nothing")
+  eq(#calls, 1, "still just the one warp")
+
+  -- Expiry: the world never comes back, and the wait gives up rather than
+  -- firing blind.
+  warnings, calls = {}, {}
+  local stuck = { isOverworld = false }
+  local game3 = {
+    data = { moves = moves },
+    save = { money = 10, party = {}, lastHeal = { map = "X" } },
+    stack = { top = function() return stuck end },
+  }
+  local ok3 = setmetatable({}, { __index = Coop })
+  ok3:blackout(game3)
+  check(ok3.pendingWarp ~= nil, "armed, waiting on a screen that never clears")
+  eq(ok3:pumpBlackout(61), false, "past the wait, the warp gives up")
+  eq(ok3.pendingWarp, nil,
+     "and disarms rather than firing blind wherever the player has wandered "
+     .. "to by then")
+  check(#warnings > 0, "and says so")
+  eq(#calls, 0, "no warp ever went out")
+
+  -- No heal point anywhere: healed and taxed, but told rather than guessed.
+  warnings = {}
+  local game4 = { data = {}, save = { money = 10, party = {} } }
+  local ok4 = setmetatable({}, { __index = Coop })
+  eq(ok4:blackout(game4), false,
+     "with nowhere to send the player, the warp is declined rather than "
+     .. "guessed")
+  check(#warnings > 0, "and said out loud")
+  eq(ok4.pendingWarp, nil,
+     "nothing is left armed for a target that does not exist")
+
+  -- Divisor: the world's own constant, when it names one; two otherwise.
+  local gameDiv = {
+    data = { moves = {}, constants = { world = { blackoutMoneyDivisor = 4 } } },
+    save = { money = 100, party = {} },
+    stack = { top = function() return { isOverworld = true } end },
+  }
+  local okDiv = setmetatable({}, { __index = Coop })
+  okDiv:blackout(gameDiv)
+  eq(gameDiv.save.money, 25,
+     "a world that names its own divisor is honoured (100 / 4)")
+
+  stubMod.world = nil
+  stubMod.log.warn = function() end
+end)()
+
+-- ------- the party dissolving takes the co-op with it
+
+ann.coop.running = false
+ann.said = {}
+engage(ann)
+pick(ann, "WAIT")
+eq(ann.coop:isWaiting(), true, "ANN is waiting again")
+bob.party:leave()
+pump(ann)
+eq(ann.coop:isWaiting(), false, "BOB leaving the party ends the wait")
+if ann.sayDone then ann.sayDone() end
+check(fightsAlone(ann),
+      "and hands the trainer back rather than leaving ANN standing there")
+
+end)()
+
+-- ------- the host port is overridable, and the default address follows it
+--
+-- Two end-to-end runs on one machine used to host on the same port, so the
+-- second silently joined the first's game -- which surfaced as a roster that
+-- had strangers in it rather than as the harness collision it was.
+
+;(function()
+  local Config = need("Config")
+  check(Config.DEFAULT_PORT > 0 and Config.DEFAULT_PORT < 65536,
+        "the default port is a port")
+  eq(Config.DEFAULT_HUB, ("127.0.0.1:%d"):format(Config.DEFAULT_PORT),
+     "and the default address is built from it rather than repeating a literal")
+end)()
+
+-- ------- the 2-on-2 simulation
+--
+-- CoopSim is the part Gen1Recomp does not have: four battlers on one field,
+-- an ordering over all of them, a target on every action, and a side that
+-- loses only when both its trainers are out of mons.
+--
+-- Damage is injected as a flat stub here **on purpose**. The engine already
+-- owns the damage formula and already tests it; what has never existed before
+-- is the field around it, so these checks are about turn order, targeting,
+-- redirection, faints, send-outs and the win condition -- each of which would
+-- be invisible under a random roll.
+
+;(function()
+
+local CoopSim = need("CoopSim")
+
+local DATA = {
+  pokemon = {
+    RATTATA = { name = "RATTATA", types = { "NORMAL" }, baseStats = { speed = 72 } },
+    PIDGEY  = { name = "PIDGEY",  types = { "NORMAL" }, baseStats = { speed = 56 } },
+    SLOWPOKE= { name = "SLOWPOKE",types = { "WATER" },  baseStats = { speed = 15 } },
+  },
+  moves = {
+    TACKLE = { id = "TACKLE", name = "TACKLE", power = 40, type = "NORMAL",
+               accuracy = 100, category = "physical" },
+    GROWL  = { id = "GROWL",  name = "GROWL",  power = 0,  type = "NORMAL",
+               accuracy = 100, category = "status" },
+    QUICK  = { id = "QUICK_ATTACK", name = "QUICK ATTACK", power = 40,
+               type = "NORMAL", accuracy = 100, category = "physical" },
+  },
+}
+DATA.moves.QUICK_ATTACK = DATA.moves.QUICK
+
+local function mon(species, hp, speed, moves)
+  return {
+    species = species, level = 10, hp = hp,
+    stats = { hp = hp, attack = 20, defense = 20, special = 20, speed = speed },
+    moves = moves or { { id = "TACKLE", pp = 20 } },
+  }
+end
+
+-- A fixed 10 a hit, so every assertion below is about the field and never
+-- about a roll.
+local FLAT = {
+  compute = function() return 10, { crit = false, typeMult = 10 } end,
+  accuracyRoll = function() return true end,
+}
+
+local function build(slots)
+  return CoopSim.new({
+    data = DATA, ruleset = {}, damage = FLAT,
+    rng = function(a) return a end,
+  }, slots)
+end
+
+local function fourWay()
+  return build({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon("RATTATA", 30, 72) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon("SLOWPOKE", 30, 15) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon("PIDGEY", 30, 56) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon("PIDGEY", 30, 56) } },
+  })
+end
+
+-- ------- four on the field, which is the whole point
+
+local sim = fourWay()
+eq(#sim.slots, 4, "a co-op battle has four slots")
+eq(#sim:living(), 4, "all four start standing")
+eq(#sim:living("a"), 2, "two to a side")
+eq(#sim:targetsFor(sim:slot(1)), 2, "and two things to aim at")
+eq(sim:targetsFor(sim:slot(1))[1].side, "b", "which are the opponents")
+eq(sim:targetsFor(sim:slot(3))[1].side, "a", "from either side")
+
+-- an ally is never a target: Gen 1 has no move that wants one
+for _, target in ipairs(sim:targetsFor(sim:slot(1))) do
+  check(target.index ~= 2, "your partner is not on your target list")
+end
+
+-- ------- ordering over four, not two pairs
+
+local order = sim:order({
+  { slot = 1, move = 1, target = 3 },   -- RATTATA, speed 72
+  { slot = 2, move = 1, target = 3 },   -- SLOWPOKE, speed 15
+  { slot = 3, move = 1, target = 1 },   -- PIDGEY, speed 56
+  { slot = 4, move = 1, target = 1 },   -- PIDGEY, speed 56
+})
+eq(#order, 4, "every living slot gets a place in the turn")
+eq(order[1].slot.index, 1, "the fastest of all four moves first")
+eq(order[4].slot.index, 2, "and the slowest of all four moves last")
+-- the two identical PIDGEYs are ordered by slot, not by a coin flip: four
+-- clients have to agree, and a per-pair roll would give four answers
+eq(order[2].slot.index, 3, "a speed tie breaks on slot index...")
+eq(order[3].slot.index, 4, "...stably, so every client agrees")
+
+-- Priority beats speed, across all four -- and the move it reads is looked up
+-- against the battler that is out, because an action carries a *slot in the
+-- move list* and not a move record.
+local quick = build({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon("SLOWPOKE", 30, 15, { { id = "QUICK_ATTACK", pp = 20 } }) } },
+  { side = "a", owner = "bob", name = "BOB", party = { mon("RATTATA", 30, 72) } },
+  { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 30, 56) } },
+  { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 30, 4) } },
+})
+local priority = quick:order({
+  { slot = 2, move = 1, target = 3 },   -- speed 72, ordinary move
+  { slot = 1, move = 1, target = 3 },   -- speed 15, QUICK ATTACK
+})
+eq(priority[1].slot.index, 1,
+   "a priority move goes first even from the slowest thing on the field")
+
+-- ------- a turn resolves, and damage lands on the chosen target
+
+sim = fourWay()
+local events = sim:resolveTurn({
+  { slot = 1, move = 1, target = 4 },
+  { slot = 2, move = 1, target = 4 },
+  { slot = 3, move = 1, target = 1 },
+  { slot = 4, move = 1, target = 1 },
+})
+check(#events > 0, "a turn produces events")
+eq(sim:slot(4).battler.mon.hp, 10, "both allies hit the target they chose")
+eq(sim:slot(3).battler.mon.hp, 30, "and the one they did not is untouched")
+eq(sim:slot(1).battler.mon.hp, 10, "while both foes concentrated on one ally")
+
+-- PP is spent
+eq(sim:slot(1).battler.curMoves[1].pp, 19, "using a move spends a PP")
+
+-- ------- a target that falls mid-turn redirects rather than fizzling
+--
+-- Ordinary in a four-way field and near-impossible in a 1v1: the fast ally
+-- knocks the target over before the slow one swings at it.
+
+sim = build({
+  { side = "a", owner = "ann", name = "ANN", party = { mon("RATTATA", 30, 72) } },
+  { side = "a", owner = "bob", name = "BOB", party = { mon("RATTATA", 30, 60) } },
+  { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 10, 5) } },
+  { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 30, 4) } },
+})
+sim:resolveTurn({
+  { slot = 1, move = 1, target = 3 },
+  { slot = 2, move = 1, target = 3 },
+})
+check(sim:isDown(sim:slot(3)), "the first attacker knocks the target out")
+eq(sim:slot(4).battler.mon.hp, 20,
+   "and the second swings at whoever is still standing instead of losing its turn")
+
+-- ------- a faint pulls the next mon out of that trainer's own party
+
+sim = build({
+  { side = "a", owner = "ann", name = "ANN", party = { mon("RATTATA", 30, 72) } },
+  { side = "a", owner = "bob", name = "BOB", party = { mon("RATTATA", 30, 60) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon("PIDGEY", 10, 5), mon("SLOWPOKE", 25, 5) } },
+  { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 30, 4) } },
+})
+events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+eq(sim:slot(3).battler.mon.species, "SLOWPOKE",
+   "a fainted slot sends out that trainer's next mon")
+eq(sim:slot(3).active, 2, "and remembers which one is out")
+local sawSend = false
+for _, event in ipairs(events) do
+  if event.kind == "send" then sawSend = true end
+end
+check(sawSend, "and says so in an event, so the replayers follow")
+
+-- ------- a side loses only when BOTH its trainers are out
+
+sim = build({
+  { side = "a", owner = "ann", name = "ANN", party = { mon("RATTATA", 30, 72) } },
+  { side = "a", owner = "bob", name = "BOB", party = { mon("RATTATA", 30, 60) } },
+  { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 10, 5) } },
+  { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 10, 4) } },
+})
+sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+eq(sim.over, nil, "one opponent down is not a win")
+check(sim:isDown(sim:slot(3)), "even though that slot is empty")
+eq(sim:sideBeaten("b"), false, "because the other trainer is still there")
+
+events = sim:resolveTurn({ { slot = 1, move = 1, target = 4 } })
+eq(sim.over, "a", "both of them down is a win for the other side")
+local sawOver = false
+for _, event in ipairs(events) do
+  if event.kind == "over" then sawOver = true end
+end
+check(sawOver, "announced as an event like everything else")
+
+-- a battle that is over resolves nothing further
+eq(#sim:resolveTurn({ { slot = 1, move = 1, target = 4 } }), 0,
+   "and a finished battle takes no more turns")
+
+-- ------- an NPC picks for itself, and picks sensibly
+
+sim = build({
+  { side = "a", owner = "ann", name = "ANN", party = { mon("RATTATA", 30, 72) } },
+  { side = "a", owner = "bob", name = "BOB", party = { mon("RATTATA", 8, 60) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon("PIDGEY", 30, 56,
+      { { id = "GROWL", pp = 20 }, { id = "TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 30, 4) } },
+})
+local npc = sim:npcAction(sim:slot(3))
+check(npc ~= nil, "an unowned slot chooses its own action")
+eq(npc.move, 2, "taking the move with power over the one without")
+eq(npc.target, 2, "and aiming at the opponent closest to falling")
+
+-- ------- a slot nobody filed an action for is skipped, not defaulted
+
+sim = fourWay()
+events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+eq(sim:slot(3).battler.mon.hp, 20, "the one action that was filed happens")
+eq(sim:slot(1).battler.mon.hp, 30,
+   "and a slot with no action does nothing rather than guessing a move")
+
+-- ------- defaultAction: what the deadline files for a slot nobody answered
+--
+-- Not an AI, and not a description of one -- the exact legality rules the
+-- turn deadline leans on: the first move that still has PP, at the first
+-- living opponent, and nil for anything that cannot act at all.
+
+;(function()
+  local function fieldOf(moves1)
+    return build({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon("RATTATA", 30, 72, moves1) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon("RATTATA", 30, 60) } },
+      { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 10, 5) } },
+      { side = "b", owner = nil, name = "FOE", party = { mon("PIDGEY", 30, 4) } },
+    })
+  end
+
+  local live = fieldOf({ { id = "GROWL", pp = 0 }, { id = "TACKLE", pp = 20 } })
+  local action = live:defaultAction(1)
+  check(action ~= nil, "a slot that can act gets an action")
+  eq(action.move, 2, "the first move that still has PP -- not the one the "
+     .. "menu would offer first")
+  eq(action.target, 3, "aimed at the first living opponent")
+
+  local spent = fieldOf({ { id = "TACKLE", pp = 0 }, { id = "GROWL", pp = 0 } })
+  eq(spent:defaultAction(1).move, 1,
+     "nothing left in any move falls back to the first slot -- runAction is "
+     .. "what turns it into Struggle, not this file inventing a move")
+
+  local down = fieldOf(nil)
+  down:slot(1).battler.mon.hp = 0
+  eq(down:defaultAction(1), nil, "a fainted slot gets nothing to file")
+
+  local gone = fieldOf(nil)
+  gone:forfeit("bob")
+  eq(gone:defaultAction(2), nil, "and neither does a slot that has left")
+
+  local stranded = fieldOf(nil)
+  stranded:slot(3).battler.mon.hp = 0
+  stranded:slot(4).battler.mon.hp = 0
+  eq(stranded:defaultAction(1), nil,
+     "and a slot that could act gets nothing either, once there is no living "
+     .. "opponent left to aim a default at")
+
+  eq(live:defaultAction(99), nil,
+     "an index the field does not have answers nil, not an error")
+end)()
+
+end)()
+
+-- ------- the engine's own move effects, on a four-slot field
+--
+-- This is the block that justifies src/CoopField.lua existing.
+--
+-- The claim it has to support is not "damage happens" -- the block above
+-- already covers the field, and the engine already tests damage. It is that
+-- **the engine's real `performMove` runs against four slots**, with the real
+-- `move_effects` records behind it. If that is true, then charge moves, stat
+-- stages, Substitute, recoil, multi-hit and everything else in the registry
+-- work in a co-op battle for free, because none of them are reimplemented.
+--
+-- So: real BattleState, real EffectRegistry, real effect records from the
+-- fixture dataset, driven through the adapter.
+
+;(function()
+
+local CoopSim = need("CoopSim")
+local CoopField = need("CoopField")
+
+local okBS, BattleState = pcall(require, "src.battle.BattleState")
+if not okBS then
+  check(false, "BattleState is requirable headlessly")
+  return
+end
+
+-- The fixture dataset, plus two moves built on real effect records. The
+-- records are the engine's; only the moves pointing at them are ours, because
+-- the fixture ships four moves and none of them charge.
+-- Loaded through the SDK rather than T.fixtures: the effect *records* are
+-- merged registry content (the engine registers MoveEffects into it), and a
+-- bare fixture table carries the moves without them.
+local base = T.sdk.loadNone()
+local fixtures = base.data
+local data = {}
+for k, v in pairs(fixtures) do data[k] = v end
+data.moves = {}
+for k, v in pairs(fixtures.moves or {}) do data.moves[k] = v end
+
+check(data.move_effects ~= nil, "the fixture carries the engine's effect records")
+check(data.move_effects.ATTACK_UP1_EFFECT ~= nil, "including a stat-stage one")
+check(data.move_effects.CHARGE_EFFECT ~= nil, "and a charge one")
+
+data.moves.FIX_BOOST = {
+  id = "FIX_BOOST", name = "FIX BOOST", power = 0, accuracy = 100,
+  type = "NORMAL", category = "status", pp = 20,
+  effect = "ATTACK_UP1_EFFECT",
+}
+-- The engine's own STRUGGLE record, which the fixture dataset does not carry.
+-- Recoil is what makes it Struggle rather than a weak Normal move, so the
+-- effect is named rather than left off.
+data.moves.STRUGGLE = {
+  id = "STRUGGLE", name = "STRUGGLE", power = 50, accuracy = 100,
+  type = "NORMAL", category = "physical", pp = 1,
+  effect = data.move_effects and data.move_effects.RECOIL_EFFECT
+    and "RECOIL_EFFECT" or nil,
+}
+
+data.moves.FIX_CHARGE = {
+  id = "FIX_CHARGE", name = "FIX CHARGE", power = 40, accuracy = 100,
+  type = "NORMAL", category = "physical", pp = 10,
+  effect = "CHARGE_EFFECT",
+}
+
+-- Status- and volatile-inducing moves, each pointing at the engine's own
+-- move_effects record -- sleep, a flinch chance, Hyper Beam's recharge and
+-- Leech Seed's drain, reached through this same adapter rather than a
+-- description of any of them written here.
+check(data.move_effects.SLEEP_EFFECT ~= nil, "a sleep-inducing record")
+check(data.move_effects.FLINCH_SIDE_EFFECT1 ~= nil, "a flinch side effect")
+check(data.move_effects.HYPER_BEAM_EFFECT ~= nil, "a recharge one")
+check(data.move_effects.LEECH_SEED_EFFECT ~= nil, "and a Leech Seed one")
+
+data.moves.FIX_SLEEP = {
+  id = "FIX_SLEEP", name = "FIX SLEEP", power = 0, accuracy = 100,
+  type = "NORMAL", category = "status", pp = 20, effect = "SLEEP_EFFECT",
+}
+data.moves.FIX_FLINCH = {
+  id = "FIX_FLINCH", name = "FIX FLINCH", power = 30, accuracy = 100,
+  type = "NORMAL", category = "physical", pp = 20,
+  effect = "FLINCH_SIDE_EFFECT1",
+}
+data.moves.FIX_HYPER = {
+  id = "FIX_HYPER", name = "FIX HYPER", power = 150, accuracy = 100,
+  type = "NORMAL", category = "special", pp = 5, effect = "HYPER_BEAM_EFFECT",
+}
+data.moves.FIX_LEECH = {
+  id = "FIX_LEECH", name = "FIX LEECH", power = 0, accuracy = 100,
+  type = "GRASS", category = "status", pp = 20, effect = "LEECH_SEED_EFFECT",
+}
+
+local species = "FIXMON_A"
+local function mon(hp, speed, moves)
+  return {
+    species = species, level = 20, hp = hp,
+    stats = { hp = hp, attack = 30, defense = 30, special = 30, speed = speed },
+    moves = moves,
+  }
+end
+
+local game = {
+  data = data,
+  save = { inventory = {}, options = {}, party = {} },
+}
+local ruleset = (data.rulesets and data.rulesets.gen1_faithful) or {}
+
+local function fieldSim(slots)
+  local rng = function(a) return a end
+  local holder = {}
+  local field = CoopField.new(
+    { BattleState = BattleState, rng = rng }, game, holder, ruleset)
+  local sim = CoopSim.new({
+    data = data, ruleset = ruleset, rng = rng,
+    trainerAI = require("src.battle.TrainerAI"),
+    damage = require("src.battle.Damage"),
+    status = require("src.battle.Status"),
+    turnOrder = require("src.battle.TurnOrder"),
+    field = field, drain = CoopField.drain,
+    -- The engine's own battler builder, which is what the real client hands
+    -- in. Without it every test here ran against CoopSim's fallback -- a
+    -- different object, with no sprite, no merged registries and no badges --
+    -- so anything that depends on how a battler is *built* was untested.
+    makeBattler = BattleState.makeBattler,
+    itemUse = require("src.inventory.ItemEffects").use,
+    experience = require("src.battle.Experience"),
+    save = game.save,
+    -- Surfaced rather than swallowed: a move that throws inside the engine's
+    -- pipeline is exactly the failure this block exists to catch, and a silent
+    -- pcall here would have let the charge-release bug pass as "no damage".
+    onError = function(err) check(false, "a move resolved cleanly: " .. tostring(err)) end,
+  }, slots)
+  field.slots = sim.slots
+  return sim, field
+end
+
+-- A variant of `fieldSim` with the rng swapped out. The status gate's own
+-- rolls -- paralysis's full-stop, confusion's self-hit -- are deterministic
+-- under the fixture rng (`function(a) return a end` always answers its lower
+-- bound), so proving the *other* branch of either needs a purpose-built one.
+local function fieldSimRng(rngFn, slots)
+  local holder = {}
+  local field = CoopField.new(
+    { BattleState = BattleState, rng = rngFn }, game, holder, ruleset)
+  local sim = CoopSim.new({
+    data = data, ruleset = ruleset, rng = rngFn,
+    trainerAI = require("src.battle.TrainerAI"),
+    damage = require("src.battle.Damage"),
+    status = require("src.battle.Status"),
+    turnOrder = require("src.battle.TurnOrder"),
+    field = field, drain = CoopField.drain,
+    makeBattler = BattleState.makeBattler,
+    itemUse = require("src.inventory.ItemEffects").use,
+    experience = require("src.battle.Experience"),
+    save = game.save,
+    onError = function(err) check(false, "a move resolved cleanly: " .. tostring(err)) end,
+  }, slots)
+  field.slots = sim.slots
+  return sim, field
+end
+
+-- Clears the paralysis (63/256) and confusion self-hit (128/256) thresholds
+-- -- one short of the upper bound handed to the roll, rather than the bound
+-- itself: `gen1_faithful.oneIn256Miss` makes a roll of exactly 255 miss even
+-- a 100%-accurate move (Damage.accuracyRoll), so an rng that always answered
+-- the true maximum would turn every "proceeds" scenario below into a miss
+-- instead of the landed hit it is meant to prove.
+local function highRng(a, b)
+  if not b then return a end
+  return b - 1
+end
+
+-- ------- a stat-stage move, run by the engine
+
+local sim, field = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(60, 50, { { id = "FIX_BOOST", pp = 20 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+
+check(getmetatable(field) ~= nil, "the field is a BattleState-shaped object")
+eq(type(field.performMove), "function",
+   "and inherits performMove from the engine rather than defining one")
+eq(field.performMove, BattleState.performMove,
+   "-- the very same function, not a copy")
+
+local before = sim:slot(1).battler.stages.attack or 0
+local events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+local after = sim:slot(1).battler.stages.attack or 0
+eq(after, before + 1,
+   "a status move raised a stat stage -- the engine's effect record ran")
+check(#events > 0, "and the turn produced messages to replay")
+
+local sawUsed = false
+for _, event in ipairs(events) do
+  if event.kind == "msg" and tostring(event.text):find("FIX BOOST") then
+    sawUsed = true
+  end
+end
+check(sawUsed, "including the engine's own \"used <move>!\" line")
+
+-- PP came off through the engine's own decrement
+eq(sim:slot(1).battler.curMoves[1].pp, 19, "and the engine spent the PP")
+
+-- ------- a charge move: two turns, which is the thing a 1v1-only registry
+-- was supposed to make impossible here
+
+sim, field = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(60, 50, { { id = "FIX_CHARGE", pp = 10 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(200, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(200, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+
+local foeHP = sim:slot(3).battler.mon.hp
+sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+check(sim:slot(1).battler.charging ~= nil,
+      "turn one of a charge move charges instead of hitting")
+eq(sim:slot(3).battler.mon.hp, foeHP, "and deals nothing yet")
+
+sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+eq(sim:slot(1).battler.charging, nil, "turn two releases it")
+check(sim:slot(3).battler.mon.hp < foeHP, "and it lands")
+
+-- ------- small helpers the status blocks below all share
+
+local function fourFixSlots(overrides)
+  local raw = {
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  }
+  for k, v in pairs(overrides or {}) do raw[k] = v end
+  return raw
+end
+
+local function msgTexts(events, fromSlot)
+  local out = {}
+  for _, e in ipairs(events) do
+    if e.kind == "msg" and (fromSlot == nil or e.from == fromSlot) then
+      out[#out + 1] = tostring(e.text)
+    end
+  end
+  return out
+end
+
+local function anyFind(list, needle)
+  for _, t in ipairs(list) do
+    if t:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+-- ------- SING is enforced: a sleeping battler skips its turn for real
+--
+-- Plan finding 1. `CoopSim.runAction` had no status gate at all -- a slept
+-- monster attacked on schedule, same as an awake one. The gate is the
+-- engine's own `BattleState:statusInterrupt`, reached through the field
+-- adapter exactly as it is for a 1v1; this pins that the sleeper's turn stays
+-- lost, prints the original's own wording, ticks the counter, and hands the
+-- move back once the counter reaches zero.
+
+;(function()
+  -- A real infliction first: SING's own effect record, run through the
+  -- four-slot adapter, actually lands SLP -- the claim CoopField exists to
+  -- support in the first place.
+  local landing = fieldSim(fourFixSlots({
+    [1] = { side = "a", owner = "ann", name = "ANN",
+            party = { mon(60, 50, { { id = "FIX_SLEEP", pp = 20 } }) } },
+  }))
+  landing:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  eq(landing:slot(3).battler.mon.status, "SLP",
+     "SLEEP_EFFECT lands through the four-slot adapter, not only a 1v1")
+
+  -- The enforcement itself, with the duration under this test's own control
+  -- rather than the fixture rng's -- the fixed rng rolls the shortest
+  -- possible nap (`rng(1, 7)` returns 1), and three real turns of "is fast
+  -- asleep!" is the point.
+  local sim = fieldSim(fourFixSlots())
+  local sleeper = sim:slot(3).battler
+  sleeper.mon.status = "SLP"
+  sleeper.sleepTurns = 2
+
+  local hpBefore = sim:slot(1).battler.mon.hp
+  local ppBefore = sleeper.curMoves[1].pp
+  local events = sim:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  local texts = msgTexts(events)
+  check(anyFind(texts, "fast asleep"), "the sleeper's own turn says so")
+  check(not anyFind(texts, "FIX TACKLE"),
+        "and never prints the move it would have used")
+  eq(sim:slot(1).battler.mon.hp, hpBefore,
+     "the monster it would have hit takes nothing")
+  eq(sleeper.curMoves[1].pp, ppBefore,
+     "and no PP is spent on a turn that never happened")
+  eq(sleeper.sleepTurns, 1, "the counter ticks down, once, on this turn alone")
+
+  -- Turn two: the counter reaches zero and the mon wakes -- but waking is
+  -- itself the whole of this turn, the same as the original's.
+  events = sim:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  texts = msgTexts(events)
+  check(anyFind(texts, "woke up"), "the wake message lands on schedule")
+  check(not anyFind(texts, "FIX TACKLE"), "the waking turn is still not a move")
+  eq(sim:slot(3).battler.mon.status, nil, "and the status is actually gone")
+
+  -- Turn three: free to act, and it does.
+  hpBefore = sim:slot(1).battler.mon.hp
+  events = sim:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  texts = msgTexts(events)
+  check(anyFind(texts, "FIX TACKLE"), "the move flows again once the mon is awake")
+  check((sim:slot(1).battler.mon.hp or 0) < hpBefore,
+        "and it actually lands on its target")
+end)()
+
+-- ------- paralysis, in both directions
+--
+-- The fixed suite rng returns the minimum for every roll, which always
+-- clears the 63/256 full-stop threshold. Proving the *other* branch -- a
+-- paralysed mon moving normally on the turns it is not stopped -- needs a
+-- roll that clears it instead of falling under it, which is what `highRng`
+-- buys. Paralysis's speed cut is pinned elsewhere (TurnOrder); this is the
+-- beforeMove gate alone.
+
+;(function()
+  -- Fixed rng: always the 63/256 full-stop.
+  local stopped = fieldSim(fourFixSlots())
+  stopped:slot(3).battler.mon.status = "PAR"
+  local hpBefore = stopped:slot(1).battler.mon.hp
+  local events = stopped:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  local texts = msgTexts(events)
+  check(anyFind(texts, "fully paralyzed"),
+        "the fixed rng's 0/256 roll always clears the 63/256 threshold")
+  check(not anyFind(texts, "FIX TACKLE"),
+        "and the move it would have used never prints")
+  eq(stopped:slot(1).battler.mon.hp, hpBefore, "so the target takes nothing")
+
+  -- An rng that always answers above the threshold: the same mon, the same
+  -- turn, and this time it moves.
+  local proceeds = fieldSimRng(highRng, fourFixSlots())
+  proceeds:slot(3).battler.mon.status = "PAR"
+  hpBefore = proceeds:slot(1).battler.mon.hp
+  events = proceeds:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  texts = msgTexts(events)
+  check(not anyFind(texts, "fully paralyzed"),
+        "a roll clear of the threshold does not full-stop")
+  check(anyFind(texts, "FIX TACKLE"), "and the paralysed mon's move proceeds")
+  check((proceeds:slot(1).battler.mon.hp or 0) < hpBefore,
+        "landing on its target like any other turn")
+end)()
+
+-- ------- confusion: the self-hit, the proceed, and the snap-out
+--
+-- `confusedTurns` is a volatile independent of `mon.status` -- a mon can be
+-- confused and nothing else -- so it is set directly, the same choice sleep
+-- and paralysis make above.
+
+;(function()
+  -- Fixed rng: the 0/256 roll clears the 128/256 self-hit threshold every
+  -- time, so the confused mon hits itself instead of its intended target.
+  local hit = fieldSim(fourFixSlots())
+  hit:slot(1).battler.confusedTurns = 2
+  local targetHpBefore = hit:slot(3).battler.mon.hp
+  local selfHpBefore = hit:slot(1).battler.mon.hp
+  local events = hit:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  local texts = msgTexts(events, 1)
+  check(anyFind(texts, "is confused"), "the confusion tick always prints first")
+  check(anyFind(texts, "hurt itself"), "and the roll lands the self-hit")
+  eq(hit:slot(3).battler.mon.hp, targetHpBefore,
+     "the monster it meant to hit is untouched")
+  check((hit:slot(1).battler.mon.hp or 0) < selfHpBefore,
+        "the damage lands on the confused mon itself instead")
+
+  -- Low enough to die of it: the self-hit's faint reaches the same flow any
+  -- other knockout does.
+  local dying = fieldSim(fourFixSlots({
+    [1] = { side = "a", owner = "ann", name = "ANN",
+            party = { mon(1, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  }))
+  dying:slot(1).battler.confusedTurns = 2
+  events = dying:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  local sawFaint, sawFaintMsg = false, false
+  for _, e in ipairs(events) do
+    if e.kind == "faint" and e.slot == 1 then sawFaint = true end
+    if e.kind == "msg" and tostring(e.text):find("fainted", 1, true) then
+      sawFaintMsg = true
+    end
+  end
+  check(sawFaint, "a confused mon that kills itself faints through the same "
+        .. "event the field uses for any other knockout")
+  check(sawFaintMsg, "and is announced the same way")
+  check(dying:isDown(dying:slot(1)), "the field actually recognises it as down")
+
+  -- An rng clear of the threshold: still confused, still says so, but this
+  -- time the move it picked is the one that lands.
+  local proceeds = fieldSimRng(highRng, fourFixSlots())
+  proceeds:slot(1).battler.confusedTurns = 2
+  local hpBefore = proceeds:slot(3).battler.mon.hp
+  events = proceeds:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  texts = msgTexts(events, 1)
+  check(anyFind(texts, "is confused"),
+        "the tick still prints -- confusion has not gone anywhere")
+  check(anyFind(texts, "FIX TACKLE"), "but the move it picked flows this time")
+  check(not anyFind(texts, "hurt itself"), "and it does not hit itself")
+  check((proceeds:slot(3).battler.mon.hp or 0) < hpBefore,
+        "landing on the target it actually aimed at")
+
+  -- The counter reaching zero snaps out of it, and the move that turn
+  -- proceeds normally -- the original's own rule, not a self-hit avoided.
+  local snapping = fieldSim(fourFixSlots())
+  snapping:slot(1).battler.confusedTurns = 1
+  hpBefore = snapping:slot(3).battler.mon.hp
+  events = snapping:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  texts = msgTexts(events, 1)
+  check(anyFind(texts, "snapped out"), "the counter reaching zero ends it")
+  eq(snapping:slot(1).battler.confusedTurns, nil,
+     "and the volatile is really gone")
+  check(anyFind(texts, "FIX TACKLE"), "the turn it snaps out on is a normal move")
+  check((snapping:slot(3).battler.mon.hp or 0) < hpBefore, "which lands")
+end)()
+
+-- ------- freeze holds, with no self-thaw
+;(function()
+  local sim = fieldSim(fourFixSlots())
+  sim:slot(3).battler.mon.status = "FRZ"
+  for turn = 1, 3 do
+    local hpBefore = sim:slot(1).battler.mon.hp
+    local events = sim:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+    local texts = msgTexts(events)
+    check(anyFind(texts, "frozen solid"),
+          ("turn %d: the freeze message prints again"):format(turn))
+    check(not anyFind(texts, "FIX TACKLE"),
+          ("turn %d: and the move never runs"):format(turn))
+    eq(sim:slot(1).battler.mon.hp, hpBefore,
+       ("turn %d: so the target takes nothing"):format(turn))
+    eq(sim:slot(3).battler.mon.status, "FRZ",
+       ("turn %d: with no self-thaw -- nothing in this gate clears it"):format(turn))
+  end
+end)()
+
+-- ------- Wrap/Bind holds, now that boundTurns is refreshed before the gate
+--
+-- `battler.boundTurns` is a mirror of whichever living opponent is holding
+-- this slot in a trap, refreshed immediately before every action -- the
+-- refresh `CoopSim.runAction` now does that nothing here used to. A held mon
+-- skips its turn exactly the way a slept or paralysed one does.
+;(function()
+  local sim = fieldSim(fourFixSlots())
+  sim:slot(3).battler.trappingTurns = 2
+  local hpBefore = sim:slot(3).battler.mon.hp
+  local events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  check(anyFind(msgTexts(events), "can't move"),
+        "a mon held by a living trapper skips its turn")
+  eq(sim:slot(3).battler.mon.hp, hpBefore,
+     "so the trapper it would have hit takes nothing")
+end)()
+
+-- ------- flinch bites the second mover, and does not outlive its turn
+--
+-- Plan finding: flinch discipline. `resolveTurn` clears every slot's
+-- `flinched` at the top of the turn (sparing a recharging/raging one -- the
+-- Hyper Beam glitch below), and the gate itself runs inline per-slot inside
+-- the execution loop -- so a first mover's flinch bites a later mover the
+-- same turn, and does not leak into a turn nothing caused it on.
+
+;(function()
+  -- ANN (speed 90) moves before CAL (speed 10) in the same turn. The fixed
+  -- rng's 0/256 roll always clears FLINCH_SIDE_EFFECT1's 26/256 chance, so
+  -- CAL is flinched before its own action comes up.
+  local sim = fieldSim(fourFixSlots({
+    [1] = { side = "a", owner = "ann", name = "ANN",
+            party = { mon(60, 90, { { id = "FIX_FLINCH", pp = 20 } }) } },
+    [3] = { side = "b", owner = "cal", name = "CAL",
+            party = { mon(60, 10, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  }))
+  local annTargetHp = sim:slot(3).battler.mon.hp
+  local calTargetHp = sim:slot(1).battler.mon.hp
+  local calPP = sim:slot(3).battler.curMoves[1].pp
+  local events = sim:resolveTurn({
+    { slot = 1, move = 1, target = 3 }, { slot = 3, move = 1, target = 1 },
+  })
+  check(anyFind(msgTexts(events, 3), "flinched"),
+        "the second mover's own turn prints the flinch, not the attack that "
+        .. "caused it")
+  eq(sim:slot(1).battler.mon.hp, calTargetHp,
+     "the flinched mon's intended target takes nothing from it")
+  eq(sim:slot(3).battler.curMoves[1].pp, calPP,
+     "and no PP is spent on a turn that never happened")
+  check((sim:slot(3).battler.mon.hp or 0) < annTargetHp,
+        "ANN's own attack still landed -- the flinch is CAL's turn, not ANN's")
+
+  -- ------- an ordinary battler does not carry a stale flag into its own turn
+  --
+  -- Whatever set `flinched` to true, the top-of-turn sweep wipes it before an
+  -- ordinary battler's own action is reached, so a flag left over from
+  -- outside this turn (however it got there) never eats a turn nothing
+  -- actually caused this time.
+  local ordinary = fieldSim(fourFixSlots())
+  ordinary:slot(3).battler.flinched = true
+  local hpBefore = ordinary:slot(1).battler.mon.hp
+  events = ordinary:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  local texts = msgTexts(events)
+  check(not anyFind(texts, "flinched"),
+        "a stale flag is cleared before this mon's own turn")
+  check(anyFind(texts, "FIX TACKLE"), "and the turn is an ordinary move")
+  check((ordinary:slot(1).battler.mon.hp or 0) < hpBefore, "which lands")
+
+  -- ------- the Hyper Beam glitch: a recharging battler is spared the sweep
+  --
+  -- core.asm skips the top-of-turn clear for a mon that must recharge or is
+  -- locked into Rage, so a flag already sitting on one survives to be read by
+  -- its own recharge check instead -- eating the recharge turn on a flinch
+  -- rather than clearing the flag for free. Built directly: both flags are
+  -- fixture state a fast attacker would otherwise have to land in the same
+  -- turn to produce, and the point under test is the sweep's own exception,
+  -- not how the flag got there.
+  local recharging = fieldSim(fourFixSlots())
+  local battler = recharging:slot(3).battler
+  battler.flinched = true
+  battler.mustRecharge = true
+  local ppBefore = battler.curMoves[1].pp
+  events = recharging:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  texts = msgTexts(events)
+  check(anyFind(texts, "flinched"),
+        "the sweep spared this slot, so the stale flag survived to be read")
+  check(not anyFind(texts, "must recharge"),
+        "and it is read before the recharge check ever runs")
+  check(battler.mustRecharge == true,
+        "which means the recharge itself was never consumed -- an extra "
+        .. "recharge turn is now owed")
+  eq(battler.curMoves[1].pp, ppBefore, "no PP moves on a turn spent flinching")
+end)()
+
+-- ------- a Hyper Beam-class move actually recharges
+--
+-- Plan finding: recharge discipline. `BattleState:executeAction` routes a
+-- battler with `mustRecharge` through `preRechargeChecks` and never reaches
+-- `performMove` -- but nothing in the co-op path used to read the flag at
+-- all, so Hyper Beam fired every turn, free. This pins the fix: it fires,
+-- sets the flag, recharges the next turn instead of firing again, and is
+-- free to move on the one after.
+
+;(function()
+  local sim = fieldSim(fourFixSlots({
+    [1] = { side = "a", owner = "ann", name = "ANN",
+            party = { mon(60, 50, { { id = "FIX_HYPER", pp = 5 } }) } },
+    [3] = { side = "b", owner = "cal", name = "CAL",
+            party = { mon(400, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  }))
+  local user = sim:slot(1).battler
+
+  -- Turn one: it fires, and hits hard enough that the target survives to owe
+  -- the recharge (Gen 1 skips it only on a KO).
+  local hpAfterFirst = sim:slot(3).battler.mon.hp
+  sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  check(user.mustRecharge == true,
+        "landing sets the recharge flag -- the half MoveEffects had nowhere "
+        .. "to be read from before this file")
+  check((sim:slot(3).battler.mon.hp or 0) < hpAfterFirst, "and it actually hit")
+
+  -- Turn two: this used to fire Hyper Beam again, free, every turn -- the bug
+  -- this whole gate exists to close. Now it recharges instead.
+  local hpBeforeSecond = sim:slot(3).battler.mon.hp
+  local ppBefore = user.curMoves[1].pp
+  local events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  local texts = msgTexts(events)
+  check(anyFind(texts, "must recharge"), "turn two recharges instead of moving")
+  check(not anyFind(texts, "FIX HYPER"),
+        "the pre-fix behaviour -- firing every turn -- is gone")
+  eq(sim:slot(3).battler.mon.hp, hpBeforeSecond,
+     "so the target it was aimed at takes nothing")
+  eq(user.curMoves[1].pp, ppBefore, "and no PP is spent on a recharge turn")
+  eq(user.mustRecharge, nil, "reaching the recharge announcement clears the flag")
+
+  -- Turn three: free to move again.
+  hpBeforeSecond = sim:slot(3).battler.mon.hp
+  events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  check(anyFind(msgTexts(events), "FIX HYPER"), "and the third turn moves again")
+  check((sim:slot(3).battler.mon.hp or 0) < hpBeforeSecond, "landing once more")
+end)()
+
+-- ------- Leech Seed actually drains, to the seeder, and never throws
+--
+-- Plan finding: the residual repair. `Status.residual` indexes
+-- `opponent.mon.hp` for the drain right after mutating the PSN/BRN tick's own
+-- HP, and the sim used to hand it `nil` for every seeded battler -- a throw
+-- the surrounding pcall swallowed along with the message and the `damage`
+-- event for HP that had already moved. This pins the fix: the drain lands
+-- both ways, the seeder pointer survives a replacement and is cleared by one,
+-- and a seeded-but-orphaned battler still gets its PSN/BRN half with nothing
+-- thrown.
+
+;(function()
+  local sim = fieldSim(fourFixSlots({
+    [1] = { side = "a", owner = "ann", name = "ANN",
+            party = { mon(200, 50, { { id = "FIX_LEECH", pp = 20 },
+                                      { id = "FIX_TACKLE", pp = 20 } }) } },
+    [2] = { side = "a", owner = "bob", name = "BOB",
+            party = { mon(200, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    [3] = { side = "b", owner = "cal", name = "CAL",
+            party = { mon(200, 30, { { id = "FIX_TACKLE", pp = 20 } }),
+                      mon(200, 10, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    [4] = { side = "b", owner = "dee", name = "DEE",
+            party = { mon(200, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  }))
+  -- FIXMON_A is GRASS, which LEECH_SEED_EFFECT refuses outright -- the same
+  -- immunity a real GRASS-type target has. Overridden on the live battler
+  -- rather than by minting a whole second species, since that is the only
+  -- field the effect actually reads.
+  sim:slot(3).battler.curTypes = { "NORMAL" }
+  sim:slot(4).battler.curTypes = { "NORMAL" }
+
+  sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  check(sim:slot(3).battler.leechSeeded == true,
+        "the primary effect lands through the four-slot adapter")
+  eq(sim:slot(3).seededBy, 1,
+     "and the sim remembers who seeded it -- the pointer the engine's own "
+     .. "battler never needed at two slots")
+
+  -- The drain: a whole turn later, at the residual step, in both directions.
+  -- CAL also attacks the seeder this turn -- both directions have to be
+  -- visible even in the same turn as an ordinary hit, and a seeder sitting
+  -- at full HP would have the heal capped invisibly at the cap, proving
+  -- nothing about whether it actually landed.
+  local seedHpBefore = sim:slot(3).battler.mon.hp
+  local events = sim:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  local sawSeedMsg, sawSeedLoss = false, false
+  local seederHp = {}
+  for _, e in ipairs(events) do
+    if e.kind == "msg" and tostring(e.text):find("LEECH SEED", 1, true) then
+      sawSeedMsg = true
+    end
+    if e.kind == "damage" and e.slot == 3 and (e.amount or 0) > 0 then
+      sawSeedLoss = true
+    end
+    if e.kind == "damage" and e.slot == 1 and e.hp then
+      seederHp[#seederHp + 1] = e.hp
+    end
+  end
+  check(sawSeedMsg, "the drain says so")
+  check(sawSeedLoss, "with a damage event for the seeded mon's loss")
+  check(#seederHp >= 2,
+        "and the seeder's HP is reported twice this turn -- once for the "
+        .. "hit it took from CAL, once for the drain that partly healed it")
+  check(#seederHp >= 2 and seederHp[#seederHp] > seederHp[1],
+        "with the later number higher than the first -- both directions ride "
+        .. "the wire, not just the one HP a client happens to be drawing")
+  check((sim:slot(3).battler.mon.hp or 0) < seedHpBefore, "and the field agrees")
+
+  -- Cleared on replacement: the seed pointer belongs to the monster that is
+  -- out, not the slot, so a fresh send-out starts owing nobody.
+  sim:sendOut(sim:slot(3), 2)
+  eq(sim:slot(3).seededBy, nil,
+     "a replacement is not still feeding whoever seeded the monster it replaced")
+
+  -- A seeded, poisoned battler whose seeder is gone: the PSN half still fires
+  -- and nothing throws.
+  local orphan = fieldSim(fourFixSlots())
+  orphan:slot(3).battler.curTypes = { "NORMAL" }
+  local victim = orphan:slot(3).battler
+  victim.mon.status = "PSN"
+  victim.leechSeeded = true
+  orphan:slot(3).seededBy = nil -- the seeder never existed for this battler
+  local before = victim.mon.hp
+  local out = {}
+  orphan:runResidual(orphan:slot(3), function(e) out[#out + 1] = e end)
+  check(anyFind(msgTexts(out), "hurt by poison"),
+        "the PSN half still prints -- a missing seeder does not swallow the "
+        .. "part of the tick that has somewhere to go")
+  check((victim.mon.hp or 0) < before, "and the poison damage really lands")
+  eq(victim.leechSeeded, true,
+     "the seed itself is untouched -- lifted for the length of the call, not "
+     .. "cured by a seeder that happens to be missing")
+end)()
+
+-- ------- the assembled field is not taken on trust
+--
+-- It was the one inbound payload that skipped Wire, and the least defensible
+-- one to skip it: the sender is another player's client, and this table says
+-- how many monsters are on the field, whose they are, and what is drawn over
+-- them. Four things were reachable from a modified peer -- the slot count, the
+-- side, the name, and the party length.
+
+;(function()
+  local packedMon = { species = "X", level = 5 }
+  local function slot(over)
+    local out = { side = "a", owner = "ann", name = "ANN",
+                  party = { packedMon } }
+    for k, v in pairs(over or {}) do
+      if v == "\0" then out[k] = nil else out[k] = v end
+    end
+    return out
+  end
+  local function fieldOf(slots, over)
+    local out = { slots = slots, host = "ann" }
+    for k, v in pairs(over or {}) do out[k] = v end
+    return out
+  end
+  local function four(over)
+    local slots = {}
+    for i = 1, Config.COOP_FIGHTERS do
+      slots[i] = slot(i > 2 and { side = "b", owner = "cal", name = "CAL" } or nil)
+    end
+    if over then for k, v in pairs(over) do slots[1][k] = v end end
+    return fieldOf(slots)
+  end
+
+  local clean = Wire.coopField(four())
+  check(clean ~= nil, "a well-formed field is accepted")
+  eq(#clean.slots, Config.COOP_FIGHTERS, "with its four slots")
+  eq(clean.slots[1].name, "ANN", "and the names it carried")
+
+  -- the count, which buildField only ever checked on the sending side
+  local three = four()
+  table.remove(three.slots)
+  eq(Wire.coopField(three), nil, "a field with the wrong number of slots is refused")
+  local five = four()
+  five.slots[5] = slot()
+  eq(Wire.coopField(five), nil, "and so is one with too many")
+
+  -- the side, which decides who may be attacked
+  eq(Wire.coopField(four({ side = "c" })), nil,
+     "a side that is neither a nor b is refused")
+
+  -- the name, which is drawn on screen and put in events other mods read
+  local shouty = Wire.coopField(four({ name = string.rep("!", 400) }))
+  check(shouty == nil or #shouty.slots[1].name <= Config.COOP_LABEL_MAX,
+        "a name is cleaned and bounded before it can reach a screen")
+
+  -- the party length, which decides how long a battle can possibly last
+  local horde = {}
+  for i = 1, Config.COOP_TEAM_MAX + 5 do horde[i] = packedMon end
+  eq(Wire.coopField(four({ party = horde })), nil,
+     "a party longer than a Gen 1 team is refused -- unbounded, every faint "
+     .. "is answered by another monster and the battle never ends")
+  eq(Wire.coopField(four({ party = {} })), nil, "and an empty one is not a team")
+
+  -- an owner that is not an id at all, told apart from an NPC's absent one
+  eq(Wire.coopField(four({ owner = { evil = true } })), nil,
+     "an owner that is not an id is refused")
+  local npc = four()
+  npc.slots[3].owner, npc.slots[4].owner = nil, nil
+  npc.slots[3].name, npc.slots[4].name = "BUG CATCHER", "BUG CATCHER"
+  local wild = Wire.coopField(npc)
+  check(wild ~= nil, "a slot with no owner is fine -- that is an NPC")
+  eq(wild and wild.slots[3].owner, nil, "and stays owned by nobody")
+
+  -- and the shape as a whole
+  eq(Wire.coopField(nil), nil, "no field is not a field")
+  eq(Wire.coopField({ slots = "nope" }), nil, "and neither is one with no slots")
+  eq(Wire.coopField(fieldOf({ slot(), slot(), slot(), "nope" })), nil,
+     "a slot that is not a table is refused")
+
+  -- ...and the receiving code really uses it.
+  --
+  -- Testing the sanitiser alone proves nothing about the door it guards: with
+  -- `Wire.coopField` removed from `onMessage` every check above still passed.
+  -- Driven through the real handler instead.
+  local Coop = need("Coop")
+  local said = {}
+  local client = setmetatable({
+    battle = { ready = false, plan = {}, parties = {}, badges = {} },
+    running = true,
+    ui = { say = function(_, text) said[#said + 1] = text end },
+    transport = { send = function() end, isReady = function() return true end },
+    -- Enough of a party for `startBattle` to get *past* the guard when the
+    -- guard is removed. Without it the sabotage aborts the whole run on a nil
+    -- index, which proves the line matters but says nothing about what it
+    -- does -- and a crash is a poor substitute for a named failure.
+    party = { isSelf = function() return false end, selfId = "ann" },
+  }, { __index = Coop })
+
+  local bogus = four()
+  bogus.slots[5] = slot()          -- one slot too many
+  Coop.onMessage(client, { data = data },
+                 { from = "ann", payload = { t = "field", field = bogus } })
+  eq(client.battle, nil,
+     "a field that fails the sanitiser is refused by the handler, not built")
+  -- On the *sanitiser's* sentence, not merely on "something went wrong".
+  -- Without the check, `startBattle` gets the malformed field and gives up
+  -- later when a party will not unpack -- which also clears the battle and
+  -- also says something, so an assertion that only looked for a refusal
+  -- passed either way and proved nothing about the guard.
+  local blamedField = false
+  for _, text in ipairs(said) do
+    if tostring(text):find("field", 1, true) then blamedField = true end
+  end
+  check(blamedField,
+        "and refused as an unreadable *field* -- rejected at the door rather "
+        .. "than half-built and abandoned deeper in")
+end)()
+
+-- ------- an item paid for on a turn that never happened comes back
+--
+-- The bag is debited when the action is committed, because only this client
+-- owns it. But the battle can end before that action ever resolves -- the host
+-- drops, the stall clock fires -- and the potion was simply gone, having
+-- healed nobody.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local bag = { POTION = 2 }
+  local client = setmetatable({
+    sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    }),
+    host = false, mine = 1, messages = {}, owed = "POTION",
+    game = { data = data, save = { inventory = bag, party = {} } },
+  }, { __index = CoopBattle })
+
+  -- Through `exit`, which is what actually runs when a battle ends -- calling
+  -- `refundUnspent` directly would pass with the call removed from `exit`,
+  -- which is the whole of what makes this work.
+  CoopBattle.exit(client)
+  eq(bag.POTION, 3, "a battle that ended without resolving the turn gives it back")
+  eq(client.owed, nil, "and only once")
+  CoopBattle.exit(client)
+  eq(bag.POTION, 3, "however many times the teardown runs")
+
+  -- ...and a turn that *did* resolve settles the debt, so nothing is refunded
+  client.owed = "POTION"
+  CoopBattle.applyTurn(client, { seq = 1, events = {} })
+  eq(client.owed, nil, "a resolved turn clears what was owed")
+  CoopBattle.refundUnspent(client)
+  eq(bag.POTION, 3, "so it is not handed back a second time")
+end)()
+
+-- ------- and when the clock runs out, the host picks for you
+--
+-- The other half of the countdown. When it reaches zero the host sends out the
+-- next living reserve and the battle moves again -- but the picker belongs to
+-- the player who ran out of time, and closing it was left to the button they
+-- never pressed. They were parked in a bench list for a slot that was already
+-- filled, could not take their next turn, and their eventual pick was dropped
+-- as a stale duplicate.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local function field()
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(400, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(400, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(1, 30, { { id = "FIX_TACKLE", pp = 20 } }),
+                  mon(400, 25, { { id = "FIX_TACKLE", pp = 20 } }),
+                  mon(400, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(400, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+
+  -- CAL is the host here, so the clock and the picker are on one client --
+  -- the case where "the host picked for me" is easiest to get wrong.
+  local sim = field()
+  local sent = {}
+  local host = setmetatable({
+    sim = sim, host = true, mine = 3, messages = {}, pending = {}, seq = 0,
+    phase = "messages",
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function() return {} end,
+            send = function(payload) sent[#sent + 1] = payload end },
+  }, { __index = CoopBattle })
+
+  sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  CoopBattle.playEvents(host, { { kind = "choose", slot = 3, trainer = "CAL" } })
+  eq(host.replacing, true, "the player whose monster fell is asked to choose")
+
+  -- Nothing happens before the clock runs out.
+  CoopBattle.tickStalls(host, Config.COOP_CHOICE_TIMEOUT - 1)
+  eq(host.replacing, true, "and is left to decide while there is time")
+  eq(sim:slot(3).awaiting, true, "with the field still waiting on them")
+
+  -- ...and then it does.
+  CoopBattle.tickStalls(host, 2)
+  eq(sim:slot(3).awaiting, nil, "when it runs out the field stops waiting")
+  eq(sim:slot(3).active, 2, "the next living reserve is sent out")
+  eq(host.replacing, nil,
+     "and the picker closes on the event rather than on a button the player "
+     .. "never pressed")
+
+  -- Everyone is told it was the clock, not a choice.
+  -- A queued line is a row, not a bare string -- it carries who acted, so the
+  -- spotlight can move when the line is *shown* rather than when the turn
+  -- arrived. Read the text out of it.
+  local blamed = false
+  for _, row in ipairs(host.messages) do
+    local text = type(row) == "table" and row.text or row
+    if type(text) == "string" and text:find("too long", 1, true) then
+      blamed = true
+    end
+  end
+  check(blamed, "and it is said out loud that the time ran out, so a choice "
+        .. "made by a clock does not read as one the player made")
+
+  -- The same on a client that is only watching the answer arrive.
+  local guest = setmetatable({
+    sim = field(), host = false, mine = 3, messages = {}, replacing = true,
+    switchIndex = 2,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.playEvents(guest, { { kind = "send", slot = 3, index = 2,
+                                   name = "X", trainer = "CAL" } })
+  eq(guest.replacing, nil,
+     "a replacement that arrives off the wire closes the picker too")
+  eq(guest.switchIndex, 1, "and puts the cursor back")
+
+  -- Somebody else's replacement leaves my picker alone.
+  local mine = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {}, replacing = true,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.playEvents(mine, { { kind = "send", slot = 3, index = 2 } })
+  eq(mine.replacing, true,
+     "but another player's replacement does not close mine")
+end)()
+
+-- ------- the turn deadline: one clock, every slot, the host's own included
+--
+-- The old clock ran backwards -- it forfeited the one player who *had*
+-- answered and left an idle host unbounded. This is its replacement: one
+-- deadline per turn, and on expiry every slot that still owes an action is
+-- defaulted for, the host's own slot no exception. All-or-nothing, though:
+-- one slot `defaultAction` cannot answer for abandons the whole attempt
+-- rather than filing half a turn.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(200, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(200, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(200, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(200, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local sent = {}
+  local host = setmetatable({
+    sim = sim, host = true, mine = 1, messages = {}, pending = {}, seq = 0,
+    phase = "wait",
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function() return {} end,
+            send = function(payload) sent[#sent + 1] = payload end },
+  }, { __index = CoopBattle })
+
+  -- BOB and CAL have already answered. ANN -- the host's own slot -- and DEE
+  -- have not: the deadline belongs to the turn, not to whichever phase the
+  -- host's own screen happens to be sitting in.
+  host.pending[2] = { slot = 2, kind = "move", move = 1, target = 3 }
+  host.pending[3] = { slot = 3, kind = "move", move = 1, target = 1 }
+
+  CoopBattle.openTurn(host)
+  eq(host.turnOpened, 0, "the deadline is armed the moment the turn opens")
+
+  CoopBattle.tickStalls(host, Config.COOP_TURN_TIMEOUT - 1)
+  check(#sent == 0, "short of the deadline, nothing has been decided for anybody")
+
+  local hpBefore = sim:slot(1).battler.mon.hp
+  CoopBattle.tickStalls(host, 2)
+  check(#sent > 0, "past it, the turn resolves and goes out on the wire")
+  local events = sent[#sent].events or {}
+  local blamed = {}
+  for _, event in ipairs(events) do
+    if event.kind == "msg" and tostring(event.text):find("too long", 1, true) then
+      blamed[#blamed + 1] = tostring(event.text)
+    end
+  end
+  check(#blamed == 2, "exactly the two idle slots are named -- BOB and CAL, "
+        .. "who had already answered, are not")
+  local sawAnn, sawDee = false, false
+  for _, text in ipairs(blamed) do
+    if text:find("ANN", 1, true) then sawAnn = true end
+    if text:find("DEE", 1, true) then sawDee = true end
+  end
+  check(sawAnn, "the host's own idle slot is defaulted for -- the half the "
+        .. "old self-forfeit clock could never do")
+  check(sawDee, "and so is the other player's")
+  check((sim:slot(1).battler.mon.hp or 0) < hpBefore,
+        "and the turn actually resolved -- the attacks it produced landed")
+  eq(host.turnOpened, nil,
+     "the deadline that just fired is spent -- `tryResolve` disarms it the "
+     .. "moment a turn commits to resolving, and the next one is armed at "
+     .. "the next handover, not left running")
+
+  -- ------- all-or-nothing: one un-defaultable slot aborts the whole attempt
+  --
+  -- `defaultAction` answers nil when a slot has nothing left to aim at.
+  -- Filing what *could* be defaulted and leaving the rest used to be exactly
+  -- the half-resolved state nothing could recover from: `pending` half full,
+  -- the clock disarmed by the caller with nothing left to re-arm it. Now the
+  -- picks are gathered before any of them is filed, and one nil abandons the
+  -- whole attempt.
+  local sim3 = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(200, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(200, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(200, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(200, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  -- Both foes are down without the battle having resolved it -- an
+  -- artificial but legal field state (a real one reaches it mid-turn,
+  -- between the last knockout and `checkOver` catching up), and the one
+  -- that leaves ANN with nothing to default to.
+  sim3:slot(3).battler.mon.hp = 0
+  sim3:slot(4).battler.mon.hp = 0
+  local sent3 = {}
+  local host3 = setmetatable({
+    sim = sim3, host = true, mine = 1, messages = {}, pending = {}, seq = 0,
+    phase = "wait",
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function() return {} end,
+            send = function(payload) sent3[#sent3 + 1] = payload end },
+  }, { __index = CoopBattle })
+  host3.pending[2] = { slot = 2, kind = "move", move = 1, target = 3 }
+
+  CoopBattle.openTurn(host3)
+  CoopBattle.tickStalls(host3, Config.COOP_TURN_TIMEOUT + 1)
+  eq(#sent3, 0, "nothing goes out -- one slot with no target to default to "
+     .. "means the whole attempt is abandoned, not filed half-full")
+  check(host3.pending[2] ~= nil,
+        "the one real commitment already on file is untouched")
+  eq(host3.pending[1], nil,
+     "and nothing was invented for the slot that could not be defaulted")
+  eq(host3.turnOpened, 0,
+     "the clock re-arms instead of firing again on the very next frame")
+
+  -- And nobody is late for a menu they have not been offered yet: the
+  -- messages phase is the previous turn still being read, not a wait for an
+  -- answer.
+  local narrating = setmetatable({
+    sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(200, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(200, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(200, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(200, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    }),
+    host = true, mine = 1, messages = {}, pending = {}, seq = 0,
+    phase = "messages",
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function() return {} end, send = function() end },
+  }, { __index = CoopBattle })
+  eq(CoopBattle.autoPickLate(narrating), false,
+     "the deadline never fires against a turn nobody has been offered yet")
+
+  -- ------- the clock freezes during a replacement pause
+  --
+  -- A faint stops the field for the shorter clock; if the turn deadline kept
+  -- counting through that pause, a slow replacement would burn most of the
+  -- next turn's budget before anybody still owing one was even asked.
+  local sim2 = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(1, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(200, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(200, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(200, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(200, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local host2 = setmetatable({
+    sim = sim2, host = true, mine = 2, messages = {}, pending = {}, seq = 0,
+    phase = "wait",
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function() return {} end, send = function() end },
+  }, { __index = CoopBattle })
+
+  sim2:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+  check(sim2:awaitingChoice() ~= nil,
+        "ANN's monster fell, and the field is paused for a send-out")
+  host2.turnOpened = 5 -- as though a turn had already been open five seconds
+
+  CoopBattle.tickStalls(host2, Config.COOP_CHOICE_TIMEOUT - 1)
+  eq(host2.turnOpened, 5, "not a second of it is spent while the field is "
+     .. "paused for something else entirely")
+  check(sim2:awaitingChoice() ~= nil, "and the pause itself is still open")
+
+  CoopBattle.tickStalls(host2, 2)
+  eq(sim2:awaitingChoice(), nil,
+     "past its own threshold, the replacement clock resolves the pause on "
+     .. "its own schedule -- independent of the frozen deadline beside it")
+  eq(host2.turnOpened, 5,
+     "which still has not moved -- tickStalls returns before reaching clock "
+     .. "one on the same tick the pause clears")
+
+  CoopBattle.tickStalls(host2, 1)
+  eq(host2.turnOpened, 6,
+     "resumed, the clock picks up from where it was left -- one real second "
+     .. "passes and it moves by exactly one, not by the whole pause")
+end)()
+
+-- ------- every kind on the wire has a name
+--
+-- `KINDS` is the allow-list a client's action is checked against, and it read
+-- as though it were exhaustive. It was not: a replacement travels down the
+-- same wire with `kind = "replace"`, and nothing in the vocabulary said so --
+-- a bare string in one caller and an implicit default in another.
+--
+-- The fix is *not* to add it to KINDS. KINDS is what `resolveTurn` dispatches,
+-- and a "replace" reaching that would be handed to `runOther`, which has no
+-- branch for it -- so the slot would silently do nothing for a turn instead of
+-- falling back to a move. It is named separately, which is what it is.
+
+;(function()
+  local CoopSim = need("CoopSim")
+  local CoopBattle = need("CoopBattle")
+
+  eq(CoopSim.REPLACE, "replace", "the off-turn action has a name")
+  eq(CoopSim.KINDS[CoopSim.REPLACE], nil,
+     "and is deliberately not a turn action -- resolveTurn would dispatch it "
+     .. "to a branch that does not exist, and the slot would lose its turn")
+
+  -- Everything KINDS *does* claim is really dispatched. A kind in the
+  -- allow-list with nowhere to go is the same bug from the other side: it
+  -- passes validation and then does nothing.
+  local field = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(90, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  for kind in pairs(CoopSim.KINDS) do
+    if kind ~= "move" then
+      local reached = false
+      local emitted = {}
+      local ok = pcall(function()
+        field:runOther(field:slot(1),
+                       { slot = 1, kind = kind, index = 2, item = "NONE" },
+                       function(event) emitted[#emitted + 1] = event end)
+        reached = true
+      end)
+      check(ok and reached,
+            ("the turn kind %q is dispatched rather than falling through"):format(kind))
+    end
+  end
+
+  -- The client sends the named constant, not a string that happens to match.
+  local sent = {}
+  local picker = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(90, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  picker:slot(1).battler.mon.hp = 0
+  local client = setmetatable({
+    sim = picker, host = false, mine = 1, messages = {}, replacing = true,
+    switchIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    sendAction = function(_, action) sent[#sent + 1] = action end,
+  }, { __index = CoopBattle })
+  CoopBattle.updateReplace(client,
+    { wasPressed = function(_, key) return key == "a" end })
+  eq(sent[1] and sent[1].kind, CoopSim.REPLACE,
+     "a replacement goes out under the name the vocabulary gives it")
+
+  -- ------- and a stale one is dropped rather than turned into a move
+  --
+  -- The bug the gap was hiding. A duplicate replacement -- a retry, or one
+  -- that raced the first -- arrives for a slot that has already answered. The
+  -- kind is not in KINDS, so the fallback turned it into a *move* and filed it
+  -- for that slot, overwriting whatever the player had actually chosen for the
+  -- turn. It is now recognised and ignored.
+  local host = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local inbox = { { t = "act", from = "cal",
+                    action = { slot = 3, kind = CoopSim.REPLACE, index = 1 } } }
+  local hostClient = setmetatable({
+    sim = host, host = true, mine = 1, messages = {}, pending = {}, seq = 0,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function() local out = inbox; inbox = {}; return out end,
+            send = function() end },
+  }, { __index = CoopBattle })
+  eq(host:slot(3).awaiting, nil, "the slot is not waiting on anything")
+  CoopBattle.drainNet(hostClient)
+  eq(hostClient.pending[3], nil,
+     "a replacement for a slot that already answered files nothing -- it does "
+     .. "not become a move that player never chose")
+end)()
+
+-- ------- a wait says what it is waiting for
+--
+-- A player who has not answered a faint stops the whole field -- nothing
+-- resolves while any slot is awaiting -- so the other three sit in front of a
+-- battle that cannot move. It used to cost a full minute in front of an empty
+-- message box, which is indistinguishable from a battle that has hung, and
+-- that ambiguity is exactly how the first wedged co-op battle got reported.
+--
+-- Two changes, and the second is the one that matters: the pause that blocks
+-- everything gets the *shorter* clock, and every client says who it is waiting
+-- for and counts down.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  check(Config.COOP_CHOICE_TIMEOUT < Config.COOP_TURN_TIMEOUT,
+        "a pause that stops the whole field is given less rope than one that "
+        .. "holds up a single turn")
+
+  -- **Two fields, not one.** The host resolves on its own copy and the
+  -- replayer only ever hears events -- so a test that pointed both at one sim
+  -- would find `awaiting` already set by the host's own faint and pass whether
+  -- or not a replayer is ever told anything. That is precisely the state this
+  -- is about: the three clients who did not resolve the turn.
+  local function field()
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(400, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(400, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(1, 30, { { id = "FIX_TACKLE", pp = 20 } }),
+                  mon(400, 25, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(400, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+  local host, sim = field(), field()
+  -- ANN's client: not the one being asked, so the one that has to be told.
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "wait",
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  -- Waiting on the others generally: named, but no clock yet.
+  local budget, named = CoopBattle.waitingOn(client)
+  check(budget == Config.COOP_TURN_TIMEOUT and named == nil,
+        "a client that has committed is waiting on the other trainers")
+  eq(CoopBattle.waitLine(client), nil,
+     "and says nothing about it for the first few seconds -- an ordinary turn "
+     .. "has all four deciding at once")
+
+  CoopBattle.tickStalls(client, Config.COOP_WAIT_HINT + 1)
+  local line = CoopBattle.waitLine(client)
+  check(line ~= nil and line:find("Waiting", 1, true) ~= nil,
+        "once it has gone on, it says so")
+  -- ------- and now the number is honest, because the deadline is real
+  --
+  -- The turn deadline used to be host-only in effect: `tickStalls` spent the
+  -- general-wait budget on the host alone, so a replayer that counted the
+  -- same number down to zero sat on "(0)" for the rest of the wait -- the bug
+  -- Finding 5 pinned. Nothing on a replayer's own client ever fired at that
+  -- mark. `openTurn`/`autoPickLate` now enforce one deadline per turn for
+  -- every slot, the host's own included, so the countdown a non-host shows is
+  -- a promise the host really keeps -- and it prints alongside the name.
+  check(line:find("(", 1, true) ~= nil,
+        "and a countdown -- the deadline is enforced host-side for every "
+        .. "slot now, so the number is no longer theatre")
+  check(line:find("BOB", 1, true) ~= nil,
+        "naming the first trainer who has not answered yet")
+
+  -- The host's own forfeit clock is real, so its general wait still counts
+  -- down -- the one place a number is not theatre.
+  local hostWaiter = setmetatable({
+    sim = field(), host = true, mine = 1, messages = {}, phase = "wait",
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.tickStalls(hostWaiter, Config.COOP_WAIT_HINT + 1)
+  local hostLine = CoopBattle.waitLine(hostWaiter)
+  check(hostLine ~= nil and hostLine:find("(", 1, true) ~= nil,
+        "but the host's own general wait still counts down -- its forfeit "
+        .. "clock really is running")
+
+  -- CAL's monster falls, and CAL is asked. Every client is told the field is
+  -- paused, not only CAL's -- which is what lets ANN's name the person.
+  local events = host:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  eq(sim:slot(3).awaiting, nil,
+     "the replayer knows nothing about the pause until it is told")
+  CoopBattle.playEvents(client, events)
+  check(sim:slot(3).awaiting == true,
+        "the paused slot is marked on a replayer too, not only on the host")
+
+  client.waitShown = 0
+  local clock, who = CoopBattle.waitingOn(client)
+  eq(who, "CAL", "so the wait names the player it is waiting for")
+  eq(clock, Config.COOP_CHOICE_TIMEOUT, "on the shorter of the two clocks")
+  CoopBattle.tickStalls(client, Config.COOP_WAIT_HINT + 1)
+  local paused = CoopBattle.waitLine(client)
+  check(paused ~= nil and paused:find("CAL", 1, true) ~= nil,
+        "and says their name on screen rather than showing an empty box")
+
+  -- ------- and every line of it fits the box
+  --
+  -- The message box is eighteen characters wide. A trainer name is up to ten,
+  -- and "<NAME> is choosing... (30)" on one line ran off the right edge -- the
+  -- way a clipped line always ships, by looking fine for every short name
+  -- anybody happens to test with. Checked against the longest name the wire
+  -- will carry rather than against a convenient one.
+  local LONGEST = string.rep("W", Config.NAME_MAX)
+  local function widest(text)
+    local most = 0
+    for line in tostring(text or ""):gmatch("[^\n]+") do
+      most = math.max(most, #line)
+    end
+    return most
+  end
+  eq(widest("123456789012345678"), 18, "the ruler measures what it says")
+
+  sim:slot(3).name = LONGEST
+  client.waitShown = Config.COOP_WAIT_HINT + 1
+  local longLine = CoopBattle.waitLine(client)
+  check(longLine ~= nil, "the longest name still produces a line")
+  check(widest(longLine) <= 18,
+        ("and it fits the box (%d columns): %q"):format(
+          widest(longLine), tostring(longLine)))
+
+  -- The other side of it: the generic wait, with the larger clock in it.
+  local generic = setmetatable({
+    sim = fieldSim({
+      { side = "a", owner = "ann", name = LONGEST,
+        party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    }),
+    host = false, mine = 1, messages = {}, phase = "wait",
+    waitShown = Config.COOP_WAIT_HINT + 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  local waitLine = CoopBattle.waitLine(generic)
+  check(waitLine ~= nil and widest(waitLine) <= 18,
+        ("the general wait fits too (%d columns): %q"):format(
+          widest(waitLine), tostring(waitLine)))
+  sim:slot(3).name = "CAL"
+
+  -- The player being asked is not told to wait for themselves.
+  local theirs = setmetatable({
+    sim = sim, host = false, mine = 3, messages = {}, phase = "wait",
+    replacing = true,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  eq(CoopBattle.waitingOn(theirs), nil,
+     "the player being asked is choosing, not waiting")
+
+  -- Answering it clears the wait everywhere, including on the replayer that
+  -- only ever hears about it.
+  local sent = {}
+  host:replace(3, 2, function(event) sent[#sent + 1] = event end)
+  CoopBattle.playEvents(client, sent)
+  eq(sim:slot(3).awaiting, nil, "sending one out clears the pause")
+  client.phase = "choose"
+  eq(CoopBattle.waitingOn(client), nil, "and nobody is waiting on anybody")
+
+  -- ------- and now it counts across the whole turn, reset only at the handover
+  --
+  -- `waitShown` used to reset the instant `waitingOn()` went quiet -- which is
+  -- also the instant this client's own commit does -- so the number a slow
+  -- player was shown depended on how fast *they* answered, not on when the
+  -- turn actually opened. It now ticks unconditionally (see `tickStalls`) and
+  -- is reset in exactly one place: the messages->choose handover in `update`,
+  -- beside `openTurn` -- the same event that starts the host's own deadline,
+  -- so all four clients' counters agree with what the deadline is actually
+  -- counting against.
+  CoopBattle.tickStalls(client, 1)
+  eq(client.waitShown, 7,
+     "ticking on regardless -- there is no answer left here that would clear "
+     .. "it early")
+
+  -- The handover is what really puts it away: a fresh batch of messages
+  -- draining to nothing hands the box back to a menu, and that is the one
+  -- place `waitShown` goes back to zero.
+  client.phase, client.after, client.messages, client.frame =
+    "messages", "choose", {}, 0
+  CoopBattle.update(client, 0.1)
+  eq(client.phase, "choose", "the handover actually happened")
+  eq(client.waitShown, 0,
+     "and that is where the clock is really reset -- at the event every "
+     .. "client reaches from its own copy of the same batch, not whenever "
+     .. "this one client happens to stop waiting")
+end)()
+
+-- ------- acted tracking: what the wait line above is actually reading
+--
+-- The name in `waitLine` comes from `missingActors`, and that list is only as
+-- honest as the `acted` bookkeeping behind it: your own commit, the host's
+-- own pending file, and -- the new part -- an `act` a replayer merely
+-- overheard on the wire (see `drainNet`'s "watched, never acted on" branch).
+-- This pins each contributor and the two moments the whole table is thrown
+-- away and started again.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+
+  -- Committing marks the slot that just answered.
+  local committer = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, pending = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.commit(committer, { slot = 1, move = 1, target = 3 })
+  check(committer.acted and committer.acted[1] == true,
+        "committing an action marks this slot acted, on the client that sent it")
+
+  -- A fanned `act` for an ordinary move marks it on a replayer that never
+  -- resolved anything -- the fix itself: until now these were read only by
+  -- the host and dropped by everybody else.
+  local watcher = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function()
+              return { { t = "act", from = "bob",
+                         action = { slot = 2, kind = "move", move = 1, target = 3 } } }
+            end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(watcher)
+  check(watcher.acted and watcher.acted[2] == true,
+        "a replayer marks a slot the moment its `act` is fanned out -- it does "
+        .. "not have to wait for the turn to resolve to know who has answered")
+
+  -- But a replacement is not a turn action, and marking it acted would be a
+  -- lie: the slot that sent it still owes this turn a move, and the case
+  -- that makes the lie visible is a lost `res` recovered by snapshot, where
+  -- nothing ever resets `acted` and the slot stays silently omitted from the
+  -- wait line for the rest of the turn. So the branch reads the kind on the
+  -- message -- it is all a replayer has, and nothing is simulated from it --
+  -- and a REPLACE marks nothing at all.
+  local watcher2 = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function()
+              return { { t = "act", from = "cal",
+                         action = { slot = 3, kind = CoopSim.REPLACE, index = 2 } } }
+            end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(watcher2)
+  check(not (watcher2.acted and watcher2.acted[3]),
+        "a replacement act marks nothing -- its slot still owes this turn a move")
+
+  -- And the sender has to own the slot it names, the same rule the host has
+  -- always applied to the actions it actually files. A claim for somebody
+  -- else's slot marks nothing either.
+  local impostor = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function()
+              return { { t = "act", from = "dee",
+                         action = { slot = 3, kind = "move", move = 1, target = 1 } } }
+            end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(impostor)
+  check(not (impostor.acted and impostor.acted[3]),
+        "an act claimed for a slot the sender does not own marks nothing")
+
+  -- A resolved turn throws the whole table away, on the client that resolved
+  -- it and on the one that only replayed it.
+  local clearer = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, seq = 0,
+    acted = { [2] = true, [3] = true },
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.applyTurn(clearer,
+    { seq = 1, sig = sim:signature(), events = {} })
+  eq(clearer.acted, nil,
+     "a turn landing clears every slot's acted flag, ready for the next one")
+
+  -- ------- who missingActors excludes, and who it does not
+  --
+  -- Self, an NPC partner (nobody to wait for), a downed slot and a gone one
+  -- are all the same kind of "nothing owed" -- excluded together rather than
+  -- one at a time, because a wait line that named any of the four would be a
+  -- bug report of its own.
+  local excludeSim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = nil, name = "PARTNER",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  excludeSim:slot(3).battler.mon.hp = 0
+  excludeSim:forfeit("dee")
+  local excluded = setmetatable({
+    sim = excludeSim, host = false, mine = 1, messages = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  eq(#CoopBattle.missingActors(excluded), 0,
+     "self, an NPC partner, a downed slot and a gone one are all excluded -- "
+     .. "with only those four on the field, nobody is left to wait for")
+
+  -- ------- and who it names, at the width the box actually has
+  local named = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = string.rep("B", Config.NAME_MAX),
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local waiter = setmetatable({
+    sim = named, host = false, mine = 1, messages = {}, phase = "wait",
+    waitShown = Config.COOP_WAIT_HINT + 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  local missing = CoopBattle.missingActors(waiter)
+  eq(#missing, 3, "BOB, CAL and DEE are all still owed a turn")
+  eq(missing[1], string.rep("B", Config.NAME_MAX),
+     "named in slot order -- the first one who has not answered, first")
+
+  local line = CoopBattle.waitLine(waiter)
+  local function widest(text)
+    local most = 0
+    for l in tostring(text or ""):gmatch("[^\n]+") do most = math.max(most, #l) end
+    return most
+  end
+  check(line ~= nil and line:find(string.rep("B", Config.NAME_MAX), 1, true) ~= nil,
+        "the wait line names the first missing player at the full ten characters")
+  -- ------- the fit rule's priority order, pinned at the point it bites
+  --
+  -- Eighteen columns, and at NAME_MAX (10) the three pieces cannot all have
+  -- them: name (10) + "..." (3) + " (54)" (5) is already eighteen, with
+  -- nothing left for " +2". The name is never truncated and the number is
+  -- kept -- it is the half the deadline makes true -- so the tail that goes
+  -- is " +N", the least load-bearing of the three.
+  check(line:find("+2", 1, true) == nil,
+        "and drops the '+N' tail rather than the name or the number -- there "
+        .. "is no room for all three at NAME_MAX")
+  check(line:find("(", 1, true) ~= nil,
+        "the countdown survives the same squeeze -- it is the half that "
+        .. "makes the deadline honest")
+  check(widest(line) <= 18,
+        ("and still fits the eighteen-column box (%d columns): %q"):format(
+          widest(line), tostring(line)))
+
+  -- A short name leaves room for all three: the full name, the countdown,
+  -- and the "+N" tail that says how many others are also still deciding.
+  local shortNamed = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local shortWaiter = setmetatable({
+    sim = shortNamed, host = false, mine = 1, messages = {}, phase = "wait",
+    waitShown = Config.COOP_WAIT_HINT + 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  local shortLine = CoopBattle.waitLine(shortWaiter)
+  check(shortLine ~= nil and shortLine:find("BOB", 1, true) ~= nil,
+        "a short name still names the first trainer")
+  check(shortLine:find("+2", 1, true) ~= nil,
+        "and this time all three fit -- the '+N' tail is not dropped when "
+        .. "there is room for it")
+  check(shortLine:find("(", 1, true) ~= nil, "alongside the countdown")
+  check(widest(shortLine) <= 18,
+        ("and still within the box (%d columns): %q"):format(
+          widest(shortLine), tostring(shortLine)))
+end)()
+
+-- ------- a fresh line survives the tick it was created on
+--
+-- Finding 1. A line used to offer its own dismiss window on the very tick it
+-- appeared, so a player holding A -- every player -- swallowed lines they
+-- never saw: press A on ITEM with an empty bag and "You have nothing to use!"
+-- was queued, shown and eaten in one frame. And the queue-empty fall-through
+-- that hands the box back to a menu ran on the very next tick regardless, so
+-- a batch of exactly one line was never readable at all. `MSG_MIN_DWELL`
+-- fixes the first; the split between "what is queued" and "what is on
+-- screen" (see CoopBattle.lua's `M:update`) fixes the second.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local NOPRESS = { wasPressed = function() return false end }
+  local function pressA() return { wasPressed = function(_, k) return k == "a" end } end
+  local function messageClient(text)
+    return setmetatable({
+      phase = "messages", after = "choose", messages = { text }, frame = 0,
+      game = { input = NOPRESS, data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+  end
+
+  -- The line is shown and dwell-checked on the same call -- that is what
+  -- makes this the same-tick case rather than a later one. A dt of one
+  -- frame is far short of the floor, so the press this tick is refused.
+  local flicker = messageClient("You have nothing\nto use!")
+  flicker.game.input = pressA()
+  CoopBattle.update(flicker, 0.1)
+  check(flicker.shown ~= nil,
+        "an A pressed on the very tick a line appears does not eat it -- the "
+        .. "dwell floor covers the tick the line was created on too")
+
+  -- It survives being looked at, not merely the one press -- and it survives
+  -- past the floor itself with nobody touching a button.
+  flicker.game.input = NOPRESS
+  CoopBattle.update(flicker, 0.1)
+  check(flicker.shown ~= nil, "and an unread line does not vanish on its own")
+  CoopBattle.update(flicker, 0.1)
+  check(flicker.shown ~= nil,
+        "even once the floor (0.25s) has passed, nothing dismisses it but a "
+        .. "press or the full 1.6s dwell")
+
+  -- Past the floor, a deliberate press finally lands.
+  flicker.game.input = pressA()
+  CoopBattle.update(flicker, 0.1)
+  check(flicker.shown == nil, "and now a press dismisses it")
+
+  -- The queue was empty and the last (only) line has just been dismissed --
+  -- the exact case the flicker lived in. The box hands back to the menu
+  -- rather than sitting wedged on an empty line forever.
+  flicker.game.input = NOPRESS
+  CoopBattle.update(flicker, 0.1)
+  eq(flicker.phase, "choose",
+     "a one-line batch, once dismissed, hands the turn back rather than "
+     .. "wedging on an empty message box")
+
+  -- The other way out: the 1.6s auto-advance, untouched by the floor.
+  -- Fifteen tenths of a second first, well clear of both the dwell floor and
+  -- the floating-point edge of 1.6 itself, then a push well past it -- the
+  -- claim is "eventually, unattended", not the exact millisecond.
+  local auto = messageClient("There's no one\nelse to send out!")
+  for _ = 1, 15 do CoopBattle.update(auto, 0.1) end
+  check(auto.shown ~= nil,
+        "a second and a half is past the dwell floor but short of the 1.6s "
+        .. "auto-advance -- so it is not gone early")
+  CoopBattle.update(auto, 0.2)
+  check(auto.shown == nil,
+        "but past 1.6s it advances on its own, with nobody having pressed anything")
+  CoopBattle.update(auto, 0.1)
+  eq(auto.phase, "choose",
+     "and hands the box back here too, not only after a deliberate press")
+end)()
+
+-- ------- run consent: a question Gen 1 never had to ask
+--
+-- RUN in a party-versus-party battle is not the trainer refusal and not a
+-- unilateral escape: it prompts the partner, commits nothing until they
+-- answer, and only a yes ends the battle -- for all four, with the runners'
+-- ranked loss the same "over" event a knockout produces.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local CoopSim = need("CoopSim")
+
+  local function field()
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+
+  -- ------- partyBattle: told apart from an NPC fight by ownership, not by
+  -- a flag either side could get out of step with
+
+  local npcClient = setmetatable({
+    sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    }),
+    mine = 1,
+  }, { __index = CoopBattle })
+  eq(CoopBattle.partyBattle(npcClient), false,
+     "an NPC's two ownerless slots are not a party battle")
+
+  local pvpClient = setmetatable({ sim = field(), mine = 1 }, { __index = CoopBattle })
+  eq(CoopBattle.partyBattle(pvpClient), true, "four owned slots are")
+  local partner = CoopBattle.partnerOf(pvpClient, pvpClient.sim:slot(1))
+  eq(partner and partner.index, 2, "and the partner is the other slot on the same side")
+
+  -- ------- RUN, from the command menu: PvP asks, NPC refuses as always
+
+  local pvpMenu = setmetatable({
+    sim = field(), mine = 1, phase = "choose", commandIndex = 1, pending = {},
+    net = { send = function() end },
+  }, { __index = CoopBattle })
+  local pvpCommands = CoopBattle.COMMANDS or {}
+  local runIndex
+  for i, c in ipairs(pvpCommands) do if c == "RUN" then runIndex = i end end
+  check(runIndex ~= nil, "RUN is one of the four commands")
+  pvpMenu.commandIndex = runIndex
+  CoopBattle.updateCommand(pvpMenu, { wasPressed = function(_, k) return k == "a" end })
+  check(pvpMenu.runAsk ~= nil, "RUN in a party battle raises the ask rather "
+        .. "than committing an action")
+  eq(pvpMenu.runAsk.role, "asking", "from the asker's own side, it is 'asking'")
+  eq(next(pvpMenu.pending), nil, "and commits nothing -- no action was filed")
+  eq(pvpMenu.phase, "choose", "the phase itself is untouched by asking")
+
+  local npcMenu = setmetatable({
+    sim = npcClient.sim, mine = 1, phase = "choose", commandIndex = runIndex,
+    pending = {},
+  }, { __index = CoopBattle })
+  local committed
+  npcMenu.commit = function(_, action) committed = action end
+  CoopBattle.updateCommand(npcMenu, { wasPressed = function(_, k) return k == "a" end })
+  eq(npcMenu.runAsk, nil, "against an NPC, RUN never raises a prompt")
+  check(committed ~= nil and committed.kind == "run",
+        "it is filed as the ordinary refused action instead -- byte-identical "
+        .. "to today")
+
+  -- ------- the partner's prompt: NO by default, and a settle floor before
+  -- any button counts
+
+  eq(CoopBattle.RUN_DEFAULT, 2, "the default cursor position is the second row")
+  eq(CoopBattle.RUN_ANSWERS[CoopBattle.RUN_DEFAULT], "NO",
+     "which is the answer that costs nothing")
+
+  local asked = setmetatable({
+    sim = field(), mine = 2, host = false,
+    runAsk = { role = "deciding", slot = 1, name = "ANN", clock = 0 },
+  }, { __index = CoopBattle })
+  local answeredWith
+  asked.answerRun = function(_, ok) answeredWith = ok end
+
+  -- A-press at the very moment the prompt opens does not confirm anything --
+  -- the settle floor covers the tick a fresh prompt appears on, exactly as it
+  -- does for an ordinary message line.
+  CoopBattle.updateRunAsk(asked, { wasPressed = function(_, k) return k == "a" end }, 0.1)
+  eq(answeredWith, nil, "an A press inside the settle floor answers nothing")
+  eq(asked.runAsk.role, "deciding", "the prompt is still up")
+
+  -- ...but moving the cursor is exempt from the same floor: it is not an
+  -- answer, and a player who pre-positions on YES during the floor and then
+  -- presses A has made exactly the two-step decision this is asking for.
+  eq(asked.runAsk.index, CoopBattle.RUN_DEFAULT,
+     "the cursor has already latched onto the default (NO) -- driven, even "
+     .. "though the floor refused to act on it")
+  CoopBattle.updateRunAsk(asked, { wasPressed = function(_, k) return k == "left" end }, 0)
+  eq(asked.runAsk.index, 1, "a directional press moves the cursor even inside "
+     .. "the floor")
+
+  -- Past the floor, A confirms whatever the cursor is on.
+  CoopBattle.updateRunAsk(asked, { wasPressed = function(_, k) return k == "a" end }, 0.3)
+  eq(answeredWith, true, "and now A really answers -- here, YES, because the "
+     .. "cursor was moved onto it")
+
+  -- B always answers NO, the same way it does on every other picker.
+  local askedB = setmetatable({
+    sim = field(), mine = 2, host = false,
+    runAsk = { role = "deciding", slot = 1, name = "ANN", clock = 1 },
+  }, { __index = CoopBattle })
+  local bAnswer
+  askedB.answerRun = function(_, ok) bAnswer = ok end
+  CoopBattle.updateRunAsk(askedB, { wasPressed = function(_, k) return k == "b" end }, 0)
+  eq(bAnswer, false, "B backs out of the prompt exactly like it says no")
+
+  -- ------- spam: a repeated ask for the same slot does not reset the prompt
+
+  local spammed = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {},
+    runAsk = { role = "deciding", slot = 2, name = "BOB", index = 1, clock = 5 },
+    net = { poll = function() return { { t = Wire.COOP_RUN_ASK, from = "bob" } } end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(spammed)
+  eq(spammed.runAsk.index, 1,
+     "a repeated ask for the same slot does not reset the cursor")
+  eq(spammed.runAsk.clock, 5, "nor restart the settle floor")
+
+  -- ------- simultaneous RUNs: mutual consent, no tie-break needed
+
+  local crossed = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {},
+    runAsk = { role = "asking", slot = 2, name = "BOB" },
+    net = { poll = function() return { { t = Wire.COOP_RUN_ASK, from = "bob" } } end },
+  }, { __index = CoopBattle })
+  local crossedAnswer
+  crossed.answerRun = function(_, ok) crossedAnswer = ok end
+  CoopBattle.drainNet(crossed)
+  eq(crossedAnswer, true,
+     "a run_ask arriving while this client is itself asking is taken as "
+     .. "consent -- a player who has just asked to leave has already agreed "
+     .. "to leaving")
+
+  -- ------- the host: refuses consent with no ask behind it
+
+  local warnings = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warnings[#warnings + 1] = ok and line or tostring(fmt)
+  end
+  local lonelyHost = setmetatable({ sim = field(), host = true, mine = 1 },
+                                   { __index = CoopBattle })
+  eq(CoopBattle.hostRunAnswer(lonelyHost, 2, true), false,
+     "a yes with no recorded ask behind it is refused")
+  check(#warnings > 0, "and says so, so the pair can just ask again")
+  stubMod.log.warn = function() end
+
+  -- ------- partner gone: no consent needed, the flee is immediate
+
+  local soloSim = field()
+  soloSim:forfeit("bob")
+  local soloHost = setmetatable({ sim = soloSim, host = true, mine = 1,
+                                   messages = {}, pending = {}, seq = 0,
+                                   game = { data = data,
+                                            save = { inventory = {}, party = {} } },
+                                   net = { send = function() end } },
+                                 { __index = CoopBattle })
+  eq(CoopBattle.hostRunAsk(soloHost, 1), true,
+     "asking with nobody left on your side resolves the flee, not a prompt")
+  check(soloHost.result ~= nil, "the battle ends right there -- there is "
+        .. "nobody to hold it open for")
+
+  -- ------- yes: the flee, broadcast as an ordinary resolved batch, with the
+  -- runners' loss and the opponents' win landing on the host AND a replayer
+
+  local sent = {}
+  local host = setmetatable({
+    sim = field(), host = true, mine = 1, messages = {}, pending = {}, seq = 0,
+    phase = "wait",
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { poll = function() return {} end,
+            send = function(p) sent[#sent + 1] = p end },
+  }, { __index = CoopBattle })
+
+  eq(CoopBattle.hostRunAsk(host, 1), true, "ANN's ask is recorded")
+  check(host.result == nil, "and nothing is decided yet -- BOB has not answered")
+  eq(CoopBattle.hostRunAnswer(host, 2, true), true, "BOB's yes resolves it")
+  check(host.result ~= nil, "the battle is over on the host")
+  eq(host.result, "loss",
+     "ANN's own side fled, so the host -- sitting in that same slot -- "
+     .. "reports a ranked loss")
+
+  local last = sent[#sent]
+  eq(last.t, "res", "the flee reaches the wire as an ordinary resolved batch")
+  check(type(last.sig) == "string" and #last.sig > 0,
+        "signed with the field's signature like any other turn")
+  local sawOver, overWinner = false, nil
+  for _, event in ipairs(last.events or {}) do
+    if event.kind == "over" then sawOver, overWinner = true, event.winner end
+  end
+  check(sawOver, "and carries the same 'over' event a knockout produces")
+  eq(overWinner, "b", "naming the side that was left standing")
+
+  -- A replayer on the winning side applies the very same batch and reaches
+  -- the opposite, honestly-different verdict.
+  local replaySim = field()
+  local replayer = setmetatable({
+    sim = replaySim, host = false, mine = 3, messages = {}, seq = 0,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.applyTurn(replayer, last)
+  eq(replayer.result, "win",
+     "CAL -- on the side that was left standing -- sees a win from the exact "
+     .. "same batch")
+  eq(host.sim:signature(), replaySim:signature(),
+     "and the two fields agree, byte for byte, on how it ended")
+
+  -- ------- no: the asker alone sees the refusal, and nothing was committed
+
+  local declined = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {},
+    runAsk = { role = "asking", slot = 2, name = "BOB" },
+    net = { poll = function()
+      return { { t = Wire.COOP_RUN_ANSWER, from = "bob", ok = false } }
+    end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(declined)
+  eq(declined.runAsk.role, "refused", "the asker's own prompt turns into a "
+     .. "refusal to read")
+  eq(declined.runAsk.name, "BOB", "naming who said no")
+
+  -- Read like any other line: nothing before the settle floor, a press after
+  -- it, and the same 1.6s auto-advance untouched by any of this.
+  local advanced = false
+  CoopBattle.updateRunAsk(declined,
+    { wasPressed = function(_, k) return k == "a" end }, 0.1)
+  check(declined.runAsk ~= nil, "not dismissed inside the floor")
+  CoopBattle.updateRunAsk(declined,
+    { wasPressed = function(_, k) return k == "a" end }, 0.3)
+  eq(declined.runAsk, nil, "but a deliberate press past it clears the line")
+
+  local lingered = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {},
+    runAsk = { role = "refused", name = "BOB", clock = 0 },
+  }, { __index = CoopBattle })
+  for _ = 1, 15 do
+    CoopBattle.updateRunAsk(lingered, { wasPressed = function() return false end }, 0.1)
+  end
+  check(lingered.runAsk ~= nil, "past the dwell floor but short of the "
+        .. "auto-advance, nobody touched it")
+  CoopBattle.updateRunAsk(lingered, { wasPressed = function() return false end }, 0.3)
+  eq(lingered.runAsk, nil, "and past it, the line clears itself -- nobody "
+     .. "has to press anything")
+
+  -- ------- deadline teardown: the ask and the record die with the turn
+
+  local expiredHost = setmetatable({
+    sim = field(), host = true, mine = 1, messages = {}, pending = {}, seq = 0,
+    runAsks = { [1] = true },
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { send = function() end },
+  }, { __index = CoopBattle })
+  -- Filled in as though the deadline's auto-pick had already gathered every
+  -- slot's action -- tryResolve only needs `pending` complete to fire.
+  expiredHost.pending[1] = { slot = 1, kind = "move", move = 1, target = 3 }
+  expiredHost.pending[2] = { slot = 2, kind = "move", move = 1, target = 3 }
+  expiredHost.pending[3] = { slot = 3, kind = "move", move = 1, target = 1 }
+  expiredHost.pending[4] = { slot = 4, kind = "move", move = 1, target = 1 }
+  CoopBattle.tryResolve(expiredHost)
+  eq(expiredHost.runAsks, nil,
+     "tryResolve throws away any ask the host was holding -- it belonged to "
+     .. "the turn that just resolved")
+
+  local expiredClient = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {},
+    runAsk = { role = "deciding", slot = 2, name = "BOB", clock = 3 },
+  }, { __index = CoopBattle })
+  CoopBattle.playEvents(expiredClient, { { kind = "msg", text = "..." } })
+  eq(expiredClient.runAsk, nil,
+     "and every client's own prompt comes down with the same batch, "
+     .. "whether or not a turn actually resolved")
+
+  local expiredHost2 = setmetatable({
+    sim = field(), host = true, mine = 1, messages = {},
+    runAsks = { [1] = true },
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.playEvents(expiredHost2, { { kind = "msg", text = "..." } })
+  eq(expiredHost2.runAsks, nil,
+     "the host's record dies in playEvents too -- not only in tryResolve -- "
+     .. "so a batch that plays without resolving a turn (a forced send-out) "
+     .. "does not leave a stale ask a forged yes could still be accepted "
+     .. "against")
+
+  -- ------- a run_ask that arrives mid-narration is deferred, not driven
+  -- straight through the message queue
+
+  local narrating = setmetatable({
+    frame = 0, phase = "messages", after = "choose",
+    messages = { "still reading..." },
+    runAsk = { role = "deciding", slot = 2, name = "BOB", clock = 5 },
+    game = { input = { wasPressed = function(_, k) return k == "a" end },
+             data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  local drove = false
+  narrating.updateRunAsk = function() drove = true end
+  CoopBattle.update(narrating, 0.1)
+  eq(drove, false,
+     "while a batch of messages is still up, the ask is left alone rather "
+     .. "than opening a picker over a turn nobody has finished watching")
+
+  -- ------- NPC battles: the refusal is byte-identical, and fled() mirrors
+  -- a knockout's own event
+
+  local text = {}
+  npcClient.sim:runOther(npcClient.sim:slot(1), { kind = "run" },
+    function(e) text[#text + 1] = e end)
+  check(#text == 1 and text[1].kind == "msg",
+        "against a trainer, RUN still produces the original's own refusal")
+  check(tostring(text[1].text):find("running", 1, true) ~= nil
+        or tostring(text[1].text):find("No!", 1, true) ~= nil,
+        "in the original's words")
+
+  local fleeEvents = {}
+  local fledOk = npcClient.sim:fled("a",
+    function(e) fleeEvents[#fleeEvents + 1] = e end)
+  eq(fledOk, true, "fled() succeeds once, for a side that has not already lost")
+  eq(#fleeEvents, 1, "with exactly one event")
+  eq(fleeEvents[1].kind, "over", "the same kind a knockout's checkOver emits")
+  eq(fleeEvents[1].winner, "b", "naming the side that was left standing")
+  eq(npcClient.sim:fled("a", function() end), false,
+     "and refused a second time -- the battle is already decided")
+end)()
+
+-- ------- the wedge fix: the "(0)" freeze, pinned at the exact clocks that
+-- used to get it wrong
+--
+-- One resync per wait, armed only past the deadline's own grace -- and a
+-- snapshot that answers a flagged wedge hands the menu back rather than
+-- merely correcting the numbers underneath it.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local function field()
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+
+  local function watcher()
+    local resent = {}
+    local w = setmetatable({
+      sim = field(), host = false, mine = 1, messages = {}, phase = "wait",
+      net = { poll = function() return {} end,
+              send = function(p) resent[#resent + 1] = p end },
+    }, { __index = CoopBattle })
+    w.resent = resent
+    return w
+  end
+
+  -- Exactly at the deadline: nothing yet. The grace is real headroom.
+  local atDeadline = watcher()
+  atDeadline.waitShown = Config.COOP_TURN_TIMEOUT
+  CoopBattle.tickStalls(atDeadline, 0)
+  eq(#atDeadline.resent, 0,
+     "no resync fires at exactly the turn deadline")
+  eq(atDeadline.wedged, nil, "and the client is not flagged wedged yet")
+
+  -- One tick later than the grace allows: exactly one resync.
+  local pastGrace = watcher()
+  pastGrace.waitShown = Config.COOP_TURN_TIMEOUT + Config.COOP_ASK_GRACE
+  CoopBattle.tickStalls(pastGrace, 0)
+  eq(#pastGrace.resent, 1, "past the grace, exactly one resync goes out")
+  eq(pastGrace.resent[1].t, "resync", "asking the host for the field")
+  eq(pastGrace.wedged, true, "and the client flags itself wedged")
+  eq(pastGrace.wedgeAsked, true, "so a second expiry does not ask again")
+
+  CoopBattle.tickStalls(pastGrace, 1)
+  CoopBattle.tickStalls(pastGrace, 1)
+  eq(#pastGrace.resent, 1,
+     "one request per wait -- ticking on past it does not pile up more")
+
+  -- A snapshot answering a flagged wedge hands the menu back and refunds
+  -- whatever the reopened turn owed.
+  local sim = field()
+  local wedgedClient = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "wait",
+    wedged = true, wedgeAsked = true, owed = "POTION",
+    game = { data = data, save = { inventory = { POTION = 0 }, party = {} } },
+    net = { poll = function()
+      return { { t = "state", seq = 5, slots = sim:snapshot() } }
+    end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(wedgedClient)
+  eq(wedgedClient.phase, "choose",
+     "a snapshot answering a flagged wedge hands the menu back")
+  eq(wedgedClient.game.save.inventory.POTION, 1,
+     "and refunds the item the reopened turn had already spent")
+  eq(wedgedClient.wedged, nil, "the flag is spent")
+  eq(wedgedClient.wedgeAsked, nil, "both halves of it")
+
+  -- Unwedge on a client that never flagged a wedge is a no-op.
+  local calm = setmetatable({ phase = "choose", owed = "POTION",
+                               game = { save = { inventory = { POTION = 0 } } } },
+                             { __index = CoopBattle })
+  eq(CoopBattle.unwedge(calm), false,
+     "unwedge on a client that is not flagged wedged does nothing")
+  eq(calm.phase, "choose", "leaving whatever phase it found")
+  eq(calm.game.save.inventory.POTION, 0, "and refunding nothing nobody asked for")
+
+  -- The host-silence clock is only ever moved by the host's own traffic --
+  -- another player's act does not touch it, a forged 'res' from the wrong
+  -- sender does not either, and the real host's message does.
+  local untouched = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {}, hostClock = 10,
+    net = { poll = function()
+      return { { t = "act", from = "cal",
+                 action = { slot = 3, kind = "move", move = 1, target = 1 } } }
+    end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(untouched)
+  eq(untouched.hostClock, 10,
+     "a peer's own move does not reset the host-silence clock")
+
+  local forged = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {}, hostClock = 10,
+    hostId = "ann",
+    net = { poll = function()
+      return { { t = "res", seq = 1, from = "cal", events = {} } }
+    end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(forged)
+  eq(forged.hostClock, 10,
+     "and neither does a 'res' forged from somebody who is not the host")
+
+  local real = setmetatable({
+    sim = field(), host = false, mine = 1, messages = {}, hostClock = 10,
+    hostId = "ann",
+    net = { poll = function()
+      return { { t = "res", seq = 1, from = "ann", events = {} } }
+    end },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(real)
+  eq(real.hostClock, 0, "but the real host's own message resets it")
+
+  -- And the handover itself resets hostClock, wedged and wedgeAsked
+  -- together, on every client -- not only when a host message happens to
+  -- arrive.
+  local handover = setmetatable({
+    frame = 0, phase = "messages", after = "choose", messages = {},
+    hostClock = 50, wedged = true, wedgeAsked = true,
+    game = { input = { wasPressed = function() return false end },
+             data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.update(handover, 0.1)
+  eq(handover.phase, "choose", "the handover really happened")
+  eq(handover.hostClock, 0, "and hostClock is reset there too")
+  eq(handover.wedged, nil, "wedged is cleared at the same event")
+  eq(handover.wedgeAsked, nil, "and so is wedgeAsked -- a client that "
+     .. "recovered the ordinary way does not carry the flag into whatever "
+     .. "the next wait turns out to need it for")
+end)()
+
+-- ------- needsTarget: the truth table behind Finding 2
+--
+-- A zero-power move whose merged effect record is `primary` and is not
+-- `accuracyChecked` is self-targeting by construction (MoveEffects.lua's own
+-- comment: everything else in `primary` "is self-targeting and never rolls
+-- accuracy"). Three effects break that rule by reading the target they are
+-- given even though the numbers say self-only, and everything else --
+-- missing records, `kind ~= "primary"`, any power, a nil moveInst -- is
+-- conservative in the picker's favour: a needless press costs less than a
+-- wrongly-skipped one costs a turn.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local moves = {}
+  for k, v in pairs(data.moves) do moves[k] = v end
+  local gdata = {}
+  for k, v in pairs(data) do gdata[k] = v end
+  gdata.moves = moves
+  local c = setmetatable({ game = { data = gdata } }, { __index = CoopBattle })
+
+  eq(CoopBattle.needsTarget(c, { id = "FIX_BOOST" }), false,
+     "a stat-up move (power 0, a primary record, never accuracy-checked) "
+     .. "commits without a picker")
+  eq(CoopBattle.needsTarget(c, { id = "FIX_TACKLE" }), true,
+     "anything with power keeps the picker")
+
+  moves.FIX_GHOST_MOVE = nil
+  eq(CoopBattle.needsTarget(c, { id = "FIX_GHOST_MOVE" }), true,
+     "a move id nothing in the dataset defines keeps the picker -- "
+     .. "conservative rather than guessing it is self-only")
+
+  moves.FIX_UNKNOWN_EFFECT = {
+    id = "FIX_UNKNOWN_EFFECT", name = "FIX UNKNOWN", power = 0, accuracy = 100,
+    type = "NORMAL", category = "status", pp = 20,
+    effect = "NOT_A_REGISTERED_EFFECT",
+  }
+  eq(CoopBattle.needsTarget(c, { id = "FIX_UNKNOWN_EFFECT" }), true,
+     "and a move whose effect record cannot be found keeps it too")
+
+  -- Growl's family: a primary record, but accuracy-checked, so it does
+  -- reach across the field unlike Swords Dance.
+  moves.FIX_GROWL = {
+    id = "FIX_GROWL", name = "FIX GROWL", power = 0, accuracy = 100,
+    type = "NORMAL", category = "status", pp = 20, effect = "ATTACK_DOWN1_EFFECT",
+  }
+  eq(CoopBattle.needsTarget(c, { id = "FIX_GROWL" }), true,
+     "an accuracy-checked status effect keeps the picker")
+
+  -- The three proven exceptions: zero-power, primary, never accuracy-checked
+  -- by the numbers -- and still not self-only, because each reads the target
+  -- it is handed.
+  for _, effect in ipairs({ "HAZE_EFFECT", "CONVERSION_EFFECT", "TRANSFORM_EFFECT" }) do
+    check(data.move_effects[effect] ~= nil,
+          ("the merged registry carries %s to test against"):format(effect))
+    moves["FIX_" .. effect] = {
+      id = "FIX_" .. effect, name = effect:sub(1, 9), power = 0, accuracy = 100,
+      type = "NORMAL", category = "status", pp = 20, effect = effect,
+    }
+    eq(CoopBattle.needsTarget(c, { id = "FIX_" .. effect }), true,
+       effect .. " keeps the picker even though the numbers say self-only")
+  end
+
+  eq(CoopBattle.needsTarget(c, nil), true,
+     "a nil moveInst is conservative too, not a crash")
+end)()
+
+-- ------- a self-only move commits itself, straight from the move menu
+--
+-- Finding 2's other half: what the move menu actually does with the answer
+-- above. A move `needsTarget` says no to is committed on the spot, with the
+-- first living opponent as the (inert) wire target -- CoopSim.runAction never
+-- reads it for a self-targeting effect. A damaging move on the same list
+-- still opens the picker exactly as before.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_BOOST", pp = 20 },
+                              { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local committed = {}
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "move",
+    moveIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    commit = function(_, action) committed[#committed + 1] = action end,
+  }, { __index = CoopBattle })
+  local function pressA() return { wasPressed = function(_, k) return k == "a" end } end
+
+  CoopBattle.updateMove(client, pressA())
+  eq(#committed, 1, "a self-only move commits on its own, straight from the "
+     .. "move menu")
+  eq(committed[1].target, sim:targetsFor(sim:slot(1))[1].index,
+     "with the first living opponent as the target -- inert, but present, "
+     .. "so the wire shape is the one it always was")
+  eq(client.phase, "move", "and the phase never became the picker for it")
+
+  client.moveIndex = 2
+  CoopBattle.updateMove(client, pressA())
+  eq(#committed, 1, "the damaging move on the same list did not commit itself")
+  eq(client.phase, "target", "it opens the picker exactly as before")
+end)()
+
+-- ------- the target picker is a list of both, not one name at a time
+--
+-- Finding 3. `drawTarget` shows both living opponents through `drawList`,
+-- and `updateTarget` navigates the pair the way that list is drawn: LEFT and
+-- RIGHT (as well as UP/DOWN, which hold -- there is no second row in a pair
+-- of two) move the cursor, clamped rather than wrapping, matching every
+-- other picker on this screen.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "target",
+    moveIndex = 1, targetIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  local function press(key) return { wasPressed = function(_, k) return k == key end } end
+
+  eq(#sim:targetsFor(sim:slot(1)), 2, "two living foes to aim the picker at")
+  CoopBattle.updateTarget(client, press("right"))
+  eq(client.targetIndex, 2, "RIGHT moves onto the second")
+  CoopBattle.updateTarget(client, press("right"))
+  eq(client.targetIndex, 2, "and clamps there -- it does not wrap back to the first")
+  CoopBattle.updateTarget(client, press("left"))
+  eq(client.targetIndex, 1, "LEFT returns")
+  CoopBattle.updateTarget(client, press("up"))
+  eq(client.targetIndex, 1, "UP holds -- there is no second row in a pair")
+  client.targetIndex = 2
+  CoopBattle.updateTarget(client, press("down"))
+  eq(client.targetIndex, 2, "and so does DOWN")
+
+  -- One foe faints: the picker clamps to the one still standing rather than
+  -- pointing at a name that is no longer on the list.
+  sim:slot(4).battler.mon.hp = 0
+  eq(#sim:targetsFor(sim:slot(1)), 1, "one target left")
+  CoopBattle.updateTarget(client, press("right"))
+  eq(client.targetIndex, 1, "the clamp holds against a list that just got shorter")
+  eq(client.phase, "target", "and the picker is still open -- one foe left is not none")
+
+  -- Both faint: the picker cannot stay open on an empty list, and there is
+  -- no key that would get a player out of it if it did.
+  sim:slot(3).battler.mon.hp = 0
+  CoopBattle.updateTarget(client, press("a"))
+  eq(client.phase, "choose",
+     "an empty target list backs out to the command menu instead of a picker "
+     .. "with nothing on it")
+end)()
+
+-- ------- vertical target list: real navigation, not a coincidental clamp
+--
+-- The picker test above starts each direction already at the edge it is
+-- checking, so UP and DOWN clamping there is indistinguishable from UP and
+-- DOWN doing nothing at all. This starts away from both edges to show they
+-- actually move the cursor -- the column `drawTarget`/`drawColumn` now draws
+-- one name per row down, not two names side by side (LEFT/RIGHT staying
+-- aliases is already pinned above).
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "target",
+    moveIndex = 1, targetIndex = 2,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  local function press(key) return { wasPressed = function(_, k) return k == key end } end
+
+  CoopBattle.updateTarget(client, press("up"))
+  eq(client.targetIndex, 1, "UP genuinely moves the cursor up the column")
+  CoopBattle.updateTarget(client, press("up"))
+  eq(client.targetIndex, 1, "and clamps at the top rather than wrapping")
+  CoopBattle.updateTarget(client, press("down"))
+  eq(client.targetIndex, 2, "DOWN moves it back down")
+  CoopBattle.updateTarget(client, press("down"))
+  eq(client.targetIndex, 2, "and clamps at the bottom")
+
+  -- ------- foe scale, keyed off the layout, not off who is watching
+  eq(CoopBattle.FOE_SCALE, 0.85,
+     "the far pair draws fifteen percent smaller -- published for the suite "
+     .. "since there is no graphics device here to measure a drawn pixel")
+  eq(CoopBattle.scaleFor(client, 1), 1, "slots 1 and 2 draw at plain scale...")
+  eq(CoopBattle.scaleFor(client, 2), 1, "...regardless of who is watching")
+  eq(CoopBattle.scaleFor(client, 3), CoopBattle.FOE_SCALE,
+     "slots 3 and 4 draw smaller...")
+  eq(CoopBattle.scaleFor(client, 4), CoopBattle.FOE_SCALE,
+     "...because that is where SLOT_POS puts them on every client")
+
+  -- And that holds from every seat, not just this one -- `scaleFor` used to
+  -- ask the viewer-relative `foeSide`, which shrank whichever pair the
+  -- reader was *not* in: for the two players actually sitting in slots 3 and
+  -- 4, that was their own pair drawn small in the corner with room to spare,
+  -- while the opposition stood full size where the shrink exists to
+  -- declutter. A slot-3 client must see its own pair exactly as small as
+  -- everyone else does.
+  local fromSlot3 = setmetatable({
+    sim = sim, host = false, mine = 3, messages = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  eq(CoopBattle.scaleFor(fromSlot3, 3), CoopBattle.FOE_SCALE,
+     "slot 3's own pair still draws small from slot 3's own seat")
+  eq(CoopBattle.scaleFor(fromSlot3, 1), 1,
+     "and slot 1's pair -- the opposition, from here -- still draws at plain "
+     .. "scale")
+
+  -- ------- foeSide: viewer-relative, and only ever a label
+  --
+  -- Unlike `scaleFor`, this one is genuinely about who is watching -- it
+  -- answers "is this the side that is not mine", which is what a label
+  -- should answer to and not what the layout is keyed off.
+  check(not CoopBattle.foeSide(client, 1), "my own slot is not a foe")
+  check(not CoopBattle.foeSide(client, 2), "neither is my partner's")
+  check(CoopBattle.foeSide(client, 3), "the other side is")
+  check(CoopBattle.foeSide(client, 4), "both of their slots")
+  check(CoopBattle.foeSide(fromSlot3, 1), "from CAL's seat, ANN's slot is the foe")
+  check(not CoopBattle.foeSide(fromSlot3, 3), "and CAL's own is not")
+
+  -- ------- picOriginFor: one shared anchor for the pic, the cursor, the anim
+  local fakeSprite = { getDimensions = function() return 56, 56 end }
+  local rawX, rawY, rawScale = CoopBattle.picOriginFor(client, 3)
+  check(rawX ~= nil and rawScale == 1,
+        "with no sprite to measure, the offset falls back to plain scale and "
+        .. "the raw position -- the same fallback drawField has always used")
+  local adjX, adjY, adjScale = CoopBattle.picOriginFor(client, 3, fakeSprite)
+  eq(adjScale, CoopBattle.FOE_SCALE, "measured, a foe slot reports the shrink")
+  check(adjX > rawX and adjY > rawY,
+        "and is pushed down and in to keep the sprite's feet and centreline "
+        .. "where a full-size one had them")
+
+  local allyRawX, allyRawY = CoopBattle.picOriginFor(client, 1)
+  local allyX, allyY, allyScale = CoopBattle.picOriginFor(client, 1, fakeSprite)
+  eq(allyScale, 1, "an ally slot never shrinks, sprite or not")
+  eq(allyX, allyRawX, "so its position never moves for a sprite, either")
+  eq(allyY, allyRawY, "same for the y")
+
+  eq(CoopBattle.picOriginFor(client, 99), nil,
+     "a slot with no position answers nil")
+
+  -- ------- paint order: the hovered target comes forward while picking
+  local order = CoopBattle.paintOrder(client)
+  eq(order[#order], 4,
+     "with the cursor on DEE (targetIndex 2), DEE paints last -- in front of "
+     .. "everything else on the field")
+  client.targetIndex = 1
+  order = CoopBattle.paintOrder(client)
+  eq(order[#order], 3, "moving the cursor to CAL brings CAL forward instead")
+
+  -- Outside the target phase the spotlight decides it instead -- whoever is
+  -- being narrated, or this client's own monster with nobody narrated yet.
+  client.phase = "choose"
+  client.acting = nil
+  order = CoopBattle.paintOrder(client)
+  eq(order[#order], client.mine,
+     "with nobody narrated, your own monster paints last -- the one you are "
+     .. "looking at while you decide")
+  client.acting = 3
+  order = CoopBattle.paintOrder(client)
+  eq(order[#order], 3,
+     "and whoever is being narrated takes it once a turn is playing out")
+end)()
+
+-- ------- the command box, against the engine's own 2x2 truth table
+--
+-- Finding 4, first half. FIGHT/ITEM top row, SWITCH/RUN bottom row --
+-- BattleState.lua:1544-1557's own col/row decomposition and clamp, index
+-- row-major, transferred directly rather than approximated. All sixteen
+-- combinations, because a grid that is right on the ones anybody tries by
+-- hand and wrong on the rest is how this shipped broken the first time.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local NAMES = { "FIGHT", "ITEM", "SWITCH", "RUN" }
+  local truth = {
+    { 1, "left", 1 }, { 1, "right", 2 }, { 1, "up", 1 }, { 1, "down", 3 },
+    { 2, "left", 1 }, { 2, "right", 2 }, { 2, "up", 2 }, { 2, "down", 4 },
+    { 3, "left", 3 }, { 3, "right", 4 }, { 3, "up", 1 }, { 3, "down", 3 },
+    { 4, "left", 3 }, { 4, "right", 4 }, { 4, "up", 2 }, { 4, "down", 4 },
+  }
+  for _, row in ipairs(truth) do
+    local from, direction, expect = row[1], row[2], row[3]
+    local client = setmetatable({ commandIndex = from }, { __index = CoopBattle })
+    CoopBattle.updateCommand(client,
+      { wasPressed = function(_, k) return k == direction end })
+    eq(client.commandIndex, expect,
+       ("%s %s from %s lands on %s"):format(
+         NAMES[from], direction, NAMES[from], NAMES[expect]))
+  end
+end)()
+
+-- ------- the move grid, and the hold rule a short list needs
+--
+-- Finding 4, second half. Drawn 2x2 like the command box, so it takes the
+-- same rule -- except a move list can be shorter than four, and a direction
+-- pointing at a slot nothing occupies has to hold rather than land on a row
+-- that is not drawn (WideBattle.lua:351-377's own rule for the same shape
+-- of grid).
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local function press(key) return { wasPressed = function(_, k) return k == key end } end
+
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 },
+                              { id = "FIX_TACKLE", pp = 20 },
+                              { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "move",
+    moveIndex = 2,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  eq(#CoopBattle.liveMoves(client), 3, "three moves on the list")
+  CoopBattle.updateMove(client, press("down"))
+  eq(client.moveIndex, 2,
+     "DOWN from the second move would be a fourth slot nothing draws -- it holds")
+
+  client.moveIndex = 1
+  CoopBattle.updateMove(client, press("down"))
+  eq(client.moveIndex, 3, "DOWN from the first lands on the third -- that slot exists")
+
+  client.moveIndex = 3
+  CoopBattle.updateMove(client, press("right"))
+  eq(client.moveIndex, 3, "RIGHT from the third would be a fourth slot too -- it holds as well")
+
+  -- With one move, every arrow holds -- there is nowhere else to go.
+  local lone = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local loner = setmetatable({
+    sim = lone, host = false, mine = 1, messages = {}, phase = "move",
+    moveIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  for _, direction in ipairs({ "left", "right", "up", "down" }) do
+    CoopBattle.updateMove(loner, press(direction))
+    eq(loner.moveIndex, 1, direction .. " holds with only one move on the list")
+  end
+end)()
+
+-- ------- the gap between two lines is not a stage for the wait line
+--
+-- Dismissing a line leaves `shown` empty for one tick before the next row is
+-- popped. drawMessage's fallback used to run in that gap, so with a
+-- replacement pause overlapping a playing batch the box flashed
+-- "X is choosing... (n)" for a single frame between every pair of battle
+-- lines -- reported as "the battle kinda flickers during a moment of
+-- waiting". The fallback belongs to a finished queue only.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(1, 30, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(90, 25, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  -- A replacement pause is live (CAL owes a monster), so waitingOn answers --
+  -- and the client is mid-batch with one line dismissed and one still queued:
+  -- the exact frame that used to flash the countdown.
+  sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  check(sim:awaitingChoice() ~= nil, "a choice is pending while the batch plays")
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, phase = "messages", shown = nil,
+    messages = { { text = "NEXT LINE" } },
+    waitShown = Config.COOP_WAIT_HINT + 2,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  check(CoopBattle.waitLine(client) ~= nil,
+        "the countdown line is available in this state -- the hazard is real")
+  -- The REAL decision, not a mirror of it. The first version of this test
+  -- copied drawMessage's logic into the test and passed with the guard
+  -- removed -- a test of nothing. boxText is the method drawMessage draws.
+  local function boxTextOf(c) return CoopBattle.boxText(c) end
+  eq(boxTextOf(client), "",
+     "mid-batch, the one-tick gap draws the empty page gap, not the countdown")
+  client.shown = "A LINE"
+  eq(boxTextOf(client), "A LINE", "a shown line always wins")
+  client.shown = nil
+  client.phase = "wait"
+  client.messages = {}
+  check(boxTextOf(client) ~= "",
+        "and once the queue is truly over, the reassurance lines return")
+end)()
+
+-- ------- a co-op battle tells the rest of the game it happened
+--
+-- **The engine's own `battle.started` and `battle.ended` never fire for one.**
+-- `battle.started` is emitted from `BattleState:enter`, and the trainer battle
+-- a co-op one displaces is taken off the stack before it ever enters;
+-- `battle.ended` is emitted from `BattleState:finish`, and the co-op flow calls
+-- that battle's `onFinish` directly rather than finishing it. So a mod watching
+-- the engine sees nothing at all -- not a co-op battle starting, and not a
+-- trainer being beaten by two people.
+--
+-- A mod cannot emit an engine event: `mod.events:emit` is namespaced to
+-- `mod.<id>.*` so that no mod can forge one. So the mod emits its own pair,
+-- and what matters is that the payload is worth listening to -- a listener
+-- that has to reach into `battle` for everything might as well not have been
+-- told.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+
+  -- `false` for a slot nobody owns, never nil: a table constructor drops
+  -- trailing nils, so { "ann", "bob", nil, nil } is a list of *two* and the
+  -- field would quietly be built with two slots instead of four.
+  local function fieldOf(owners)
+    local built = {}
+    for i = 1, #owners do
+      local owner = owners[i] or nil
+      built[i] = { side = (i <= 2) and "a" or "b",
+                   owner = owner ~= false and owner or nil,
+                   name = owner and tostring(owner):upper() or "FOE",
+                   party = { mon(90, 60 - i * 5,
+                                 { { id = "FIX_TACKLE", pp = 20 } }) } }
+    end
+    return fieldSim(built)
+  end
+
+  local function heard(name)
+    for _, row in ipairs(stubEvents) do
+      if row.name == name then return row.payload end
+    end
+    return nil
+  end
+
+  -- Against a trainer: two humans and two slots belonging to nobody.
+  stubEvents = {}
+  local npc = setmetatable({
+    sim = fieldOf({ "ann", "bob", false, false }), host = true, mine = 1,
+    messages = {}, ranksPoints = false, trainer = { id = "OPP_BUG_CATCHER" },
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.enter(npc)
+
+  local started = heard("mod.rby_mmo.coop_battle_started")
+  check(started ~= nil, "a co-op battle announces that it started")
+  if started then
+    eq(started.kind, "npc", "saying what kind of battle it is -- as a word")
+    eq(started.fighters, 4, "how many are on the field")
+    eq(started.humans, 2, "and how many of them are people")
+    eq(started.mine, 1, "which one this client is")
+    eq(started.side, "a", "and which side that puts them on")
+    eq(started.host, true, "whether this client is the one simulating")
+    eq(started.trainerId, "OPP_BUG_CATCHER", "who they are fighting")
+    eq(started.ranked, false, "and whether it is worth any points")
+    eq(#(started.slots or {}), 4, "with a row per slot")
+    eq(started.slots[1].name, "ANN", "naming each trainer")
+    check(started.slots[1].species ~= nil, "and what they sent out")
+    eq(started.slots[3].owner, nil, "an NPC slot belongs to nobody")
+  end
+
+  -- The pair: ending is announced too, with the result.
+  stubEvents = {}
+  npc.result = "win"
+  npc.onDone = function() end
+  CoopBattle.exit(npc)
+  local ended = heard("mod.rby_mmo.coop_battle_ended")
+  check(ended ~= nil, "and announces that it ended")
+  if ended then
+    eq(ended.result, "win", "carrying how it went")
+    eq(ended.kind, "npc", "and the same shape as the start, so one listener "
+       .. "can read both")
+  end
+
+  -- Against another party: four humans, and `kind` says so. This is the field
+  -- the old payload could not describe at all -- it reported the slot *count*
+  -- under the name `kind`, so a listener asking "is this a party battle?" got
+  -- 4 and could only be wrong.
+  stubEvents = {}
+  local versus = setmetatable({
+    sim = fieldOf({ "ann", "bob", "cal", "dee" }), host = false, mine = 3,
+    messages = {}, ranksPoints = true,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  CoopBattle.enter(versus)
+  local party = heard("mod.rby_mmo.coop_battle_started")
+  check(party ~= nil, "a party battle announces itself too")
+  if party then
+    eq(party.kind, "party", "and is a different kind of battle")
+    eq(party.humans, 4, "with four people in it")
+    eq(party.mine, 3, "seen from whichever seat this client is in")
+    eq(party.side, "b", "on whichever side that is")
+    eq(party.host, false, "and this one is not the host")
+    eq(party.trainerId, nil, "there is no trainer to name")
+    eq(party.ranked, true, "and it is worth points")
+  end
+  stubEvents = {}
+end)()
+
+-- ------- what a co-op battle is worth, and what it is not
+--
+-- **An NPC co-op battle pays no ranked points, deliberately.** Elo rates you
+-- against an opponent's rating and a trainer has none, so there is nothing for
+-- the curve to say. Inventing one from the trainer's party would be worse than
+-- silence: NPCs are an infinite, respawning supply, and the rematch discount
+-- -- the one thing that stops a rating being farmed -- is keyed on pairs of
+-- *players* and would never fire against a trainer. Two friends could grind
+-- gym leaders to the top of the board without ever meeting anybody.
+--
+-- It was already the behaviour. What it was not was a decision: it fell out of
+-- `coopMatches` only ever being created on the four-human path, it lived as an
+-- inline condition in two places, nothing asserted it, and -- worst -- nothing
+-- told the player, who won a battle and watched a number not move.
+
+;(function()
+  local Coop = need("Coop")
+
+  -- The rule itself, in the one place it is now written down.
+  check(Coop.ranksPoints({ hostId = "ann",
+    allies = { { id = "ann" }, { id = "bob" } },
+    foes = { { id = "cal" }, { id = "dee" } } }),
+    "a battle against another party is worth points")
+  check(not Coop.ranksPoints({ hostId = "ann",
+    allies = { { id = "ann" }, { id = "bob" } },
+    engine = { enemyParty = {} } }),
+    "a battle against a trainer is not")
+  check(not Coop.ranksPoints({ hostId = "ann", foes = {} }),
+        "and neither is one with an empty other side")
+  check(not Coop.ranksPoints(nil), "nor no plan at all")
+
+  -- ...and it is the same answer the badge decision reads, because both are
+  -- the same question -- "are the other two people?" -- and a second copy of
+  -- it would be a second copy to get out of step.
+  local assembler = setmetatable({}, { __index = Coop })
+  local packed = { "packed" }
+  local versus = assembler:buildField({ data = data }, {
+    parties = { ann = packed, bob = packed, cal = packed, dee = packed },
+    badges = { ann = { BOULDERBADGE = true } },
+    plan = { hostId = "ann",
+             allies = { { id = "ann", name = "ANN" }, { id = "bob", name = "BOB" } },
+             foes = { { id = "cal", name = "CAL" }, { id = "dee", name = "DEE" } } },
+  }, {})
+  check(versus ~= nil and versus.slots[1].badges == nil,
+        "the battle that pays points is the battle where badges do not count "
+        .. "-- one rule, read in both places")
+end)()
+
+-- ------- and the player is told, once
+--
+-- The half that was actually missing. A player who wins a 2-on-2 against a
+-- trainer and is never told why their rating did not move concludes the
+-- ranking is broken. Said on a win, because that is when they would look --
+-- and once per session, because a rule explained is a courtesy and a rule
+-- repeated after every fight is a nag.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local said = {}
+  local function fourSlots()
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(90, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(90, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(90, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(90, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+  local function battle(ranks)
+    return setmetatable({
+      sim = fourSlots(), host = false, mine = 1,
+      messages = {}, ranksPoints = ranks, turnCount = 1,
+      game = { data = data, save = { inventory = {}, party = {} } },
+      say = function(_, text) said[#said + 1] = text end,
+    }, { __index = CoopBattle })
+  end
+  local function saidIt()
+    for _, text in ipairs(said) do
+      if tostring(text):find("No points", 1, true) then return true end
+    end
+    return false
+  end
+
+  CoopBattle.saidUnranked = nil
+
+  -- Losing is not the moment: nobody expects points for losing.
+  said = {}
+  CoopBattle.playEvents(battle(false), { { kind = "over", winner = "b" } })
+  check(not saidIt(), "losing an unranked battle explains nothing")
+
+  -- Winning one is.
+  said = {}
+  CoopBattle.playEvents(battle(false), { { kind = "over", winner = "a" } })
+  check(saidIt(), "winning one says why it paid nothing")
+
+  -- ...and only the first time.
+  said = {}
+  CoopBattle.playEvents(battle(false), { { kind = "over", winner = "a" } })
+  check(not saidIt(), "and does not say it again for the rest of the session")
+
+  -- A battle that *does* pay never says it, whether or not it has been said.
+  CoopBattle.saidUnranked = nil
+  said = {}
+  CoopBattle.playEvents(battle(true), { { kind = "over", winner = "a" } })
+  check(not saidIt(), "a battle that pays points explains nothing -- there is "
+        .. "nothing to explain")
+  CoopBattle.saidUnranked = nil
+end)()
+
+-- ------- badges reach the field they were earned for
+--
+-- Gen 1 gives the player x9/8 on a stat per badge, and the engine applies it
+-- from the battler's own `badges` set -- which `makeBattler` fills only when
+-- it is handed a save. A co-op battle is built by the host, and the host holds
+-- one save out of four, so every battler was built with `nil` and **nobody's
+-- badges counted**: two players beating a trainer together hit weaker than
+-- either of them would have done alone.
+--
+-- The set therefore travels with the party it belongs to, and is applied where
+-- the engine would apply it -- which is not everywhere. See buildField.
+
+;(function()
+  local Damage = require("src.battle.Damage")
+  local rows = (data.constants and data.constants.badgeBoosts)
+    or Damage.BADGE_BOOSTS
+  local attack
+  for _, row in ipairs(rows or {}) do
+    if row.stat == "attack" then attack = row.badge end
+  end
+  if not attack then
+    check(true, "(this build has no attack badge to boost)")
+    return
+  end
+
+  -- A hitter, not the shared `mon` helper: its attack is 30, and x9/8 of 30
+  -- is 33 -- a rise the damage formula floors away entirely at this level, so
+  -- a correct badge would read as a broken one.
+  local function hitter()
+    return { species = species, level = 20, hp = 200,
+             stats = { hp = 200, attack = 240, defense = 30,
+                       special = 30, speed = 50 },
+             moves = { { id = "FIX_TACKLE", pp = 20 } } }
+  end
+
+  local function fieldWith(badges)
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN", badges = badges,
+        party = { hitter() } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(200, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(400, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(400, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+
+  local bare = fieldWith(nil)
+  eq(bare:slot(1).battler.badges, nil,
+     "a trainer who brought no badges has no badge set")
+
+  local badged = fieldWith({ [attack] = true })
+  check(badged:slot(1).battler.badges ~= nil,
+        "and one who did has the set the engine reads")
+  eq(badged:slot(1).battler.badges[attack], true, "carrying the badge itself")
+
+  -- ...and it is worth something, asserted at the point where it can be:
+  -- straight through the engine's own damage calculation, with the two
+  -- battlers the co-op field built and the crit pinned off.
+  --
+  -- **The crit has to be pinned, and that is a fact about Gen 1 rather than
+  -- about this test.** `gen1_faithful` sets `critIgnoresStages`, and a
+  -- critical hit recomputes from unmodified stats -- so it skips stat stages
+  -- *and* badge boosts together. This harness's rng returns its argument,
+  -- which crits every time, so a badge measured through resolveTurn here
+  -- would read as worth nothing whether it worked or not.
+  local Damage = require("src.battle.Damage")
+  local ruleset = (data.rulesets and data.rulesets.gen1_faithful) or {}
+  local move = data.moves.FIX_TACKLE
+  local target = bare:slot(3).battler
+  local rng = function(a) return a end
+
+  local plain = Damage.compute(ruleset, bare:slot(1).battler, target, move,
+                               { rng = rng, forceCrit = false })
+  local boosted = Damage.compute(ruleset, badged:slot(1).battler, target, move,
+                                 { rng = rng, forceCrit = false })
+  check(plain > 0 and boosted > 0, "both attacks land")
+  check(boosted > plain,
+        "a badge earned in the single-player game is worth something in a "
+        .. "co-op battle -- it used to be worth nothing")
+
+  -- ...and on a critical hit it is worth nothing, to both of them equally,
+  -- which is the original's rule and not a bug in the line above.
+  eq(Damage.compute(ruleset, badged:slot(1).battler, target, move,
+                    { rng = rng, forceCrit = true }),
+     Damage.compute(ruleset, bare:slot(1).battler, target, move,
+                    { rng = rng, forceCrit = true }),
+     "a critical hit ignores badge boosts, as it ignores stat stages")
+
+  -- ------- and what the wire will accept
+  eq(Wire.badges(nil), nil, "no badges is not a badge set")
+  eq(Wire.badges({}), nil, "and neither is an empty list")
+  eq(Wire.badges("BOULDERBADGE"), nil, "a bare string is not a list of them")
+  local ok = Wire.badges({ attack, attack })
+  check(ok ~= nil and ok[attack] == true, "a list becomes the set the engine reads")
+  local counted = 0
+  for _ in pairs(ok) do counted = counted + 1 end
+  eq(counted, 1, "with a repeat counted once")
+  local long = {}
+  for i = 1, Config.COOP_BADGES_MAX + 20 do long[i] = "BADGE_" .. i end
+  local bounded = Wire.badges(long)
+  local size = 0
+  for _ in pairs(bounded or {}) do size = size + 1 end
+  check(size <= Config.COOP_BADGES_MAX,
+        "and a list longer than the cap is cut to it rather than forwarded")
+  eq(Wire.badges({ "not a badge!" }), nil,
+     "an id that is not id-shaped is dropped, not indexed")
+end)()
+
+-- ------- two parties meet on even terms
+--
+-- The other half of the decision, and the one that is easy to get wrong by
+-- being generous. `BattleState.makeBattler` says it in its own comment --
+-- "LinkBattle builds clamped copies with save=nil (no badge boosts)" -- so the
+-- engine's own human-versus-human battle gives neither side theirs. A party
+-- battle that handed them out would be a different game from a link battle,
+-- and would do it *asymmetrically*: the engine gates badges on `isPlayer`,
+-- which on this shared field is a fact about which side you stand on, so side
+-- A would get boosts and side B could not.
+
+;(function()
+  local Coop = need("Coop")
+  local CoopBattle = need("CoopBattle")
+  local assembler = setmetatable({}, { __index = Coop })
+  local packed = { "packed-party" }
+  local badges = { BOULDERBADGE = true }
+
+  local function fieldFor(plan)
+    return assembler:buildField({ data = data }, {
+      parties = { ann = packed, bob = packed, cal = packed, dee = packed },
+      badges = { ann = badges, bob = badges, cal = badges, dee = badges },
+      plan = plan,
+    }, {})
+  end
+
+  -- Four humans: nobody's badges are on the field.
+  local versus = fieldFor({
+    hostId = "ann",
+    allies = { { id = "ann", name = "ANN" }, { id = "bob", name = "BOB" } },
+    foes = { { id = "cal", name = "CAL" }, { id = "dee", name = "DEE" } },
+  })
+  check(versus ~= nil, "a party-versus-party field assembles")
+  for _, slot in ipairs(versus and versus.slots or {}) do
+    eq(slot.badges, nil,
+       (slot.name or "?") .. " brings no badge boosts to a party battle")
+  end
+
+  -- Two humans against a trainer: they do.
+  local trainerId
+  for id, record in pairs(data.trainers or {}) do
+    if record.parties and record.parties[1] and #record.parties[1] > 0 then
+      trainerId = id break
+    end
+  end
+  if trainerId then
+    local enemy = CoopBattle.trainerParty({ data = data }, trainerId, 1)
+    local npc = fieldFor({
+      hostId = "ann", label = "TRAINER",
+      allies = { { id = "ann", name = "ANN" }, { id = "bob", name = "BOB" } },
+      engine = { enemyParty = enemy, trainer = { id = trainerId } },
+    })
+    check(npc ~= nil, "an NPC co-op field assembles")
+    local withBadges, without = 0, 0
+    for _, slot in ipairs(npc and npc.slots or {}) do
+      if slot.badges then withBadges = withBadges + 1 else without = without + 1 end
+    end
+    eq(withBadges, 2, "both players bring their badges to a trainer battle")
+    eq(without, 2, "and the trainer's two bring none -- badges are the "
+       .. "player's side of a Gen 1 battle")
+  end
+end)()
+
+-- ------- the replay contract
+--
+-- **The single most important invariant in the whole design.** One client
+-- resolves and the other three apply what it says happened; if a turn's events
+-- are not enough to rebuild the field from them, the three replayers are
+-- looking at a battle that is not the one being played. Every fault this
+-- feature has had at the protocol level has been a violation of exactly this,
+-- and each one survived because nothing asserted it: HP that never moved for
+-- an attack, a replacement the host filed as a turn, a snapshot that rewound
+-- the wrong client.
+--
+-- Two things make this a real test rather than a restatement of the code:
+--
+--   1. **The replayer is the real one.** `CoopBattle.playEvents` is called
+--      through the metatable on a stand-in carrying only the fields it reads,
+--      so this exercises the path a client actually runs. A hand-written copy
+--      of "what a replayer does" would agree with itself forever while the
+--      shipped code drifted out from under it.
+--   2. **The comparison is the one the wire makes.** `signature()`, slot for
+--      slot, exactly as CoopBattle compares the host's stamp against its own.
+--
+-- Checked after *every* turn, never only at the end: a divergence that is
+-- corrected by a later event still means somebody watched a wrong number.
+
+;(function()
+
+local CoopBattle = need("CoopBattle")
+if not CoopBattle.loadEngine() then
+  check(true, "(the engine's battle modules are unavailable here)")
+  return
+end
+
+-- A fresh description each call. The two fields must not share a single mon
+-- table, or the host damaging its copy would silently damage the replayer's
+-- and every comparison would pass for the worst possible reason.
+local function describe(build)
+  local out = {}
+  for _, raw in ipairs(build) do
+    local party = {}
+    for _, entry in ipairs(raw.party) do
+      local moves = {}
+      for _, mv in ipairs(entry.moves) do
+        moves[#moves + 1] = { id = mv.id, pp = mv.pp }
+      end
+      party[#party + 1] = mon(entry.hp, entry.speed, moves)
+    end
+    out[#out + 1] = { side = raw.side, owner = raw.owner, name = raw.name,
+                      party = party }
+  end
+  return out
+end
+
+-- The client, as thin as it can be and still be the real thing: `playEvents`
+-- reads `sim`, `host`, `mine`, `messages`, `game` and calls its own `say`,
+-- `gainExp`, `learnMove` and `resultFor` -- all of which come off the
+-- metatable, not from here.
+local function replayer(sim, mine)
+  return setmetatable({
+    sim = sim, host = false, mine = mine, messages = {}, pending = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+end
+
+-- One scenario: build both fields, run the turns on the host, replay the
+-- events on the guest, and compare after each. `turns` is a list of functions
+-- that each return a list of actions -- a function so a scenario can look at
+-- the host's live field to decide what to do next.
+local function conform(what, build, turns, mine)
+  local host = fieldSim(describe(build))
+  local guest = fieldSim(describe(build))
+  local client = replayer(guest, mine or 1)
+
+  if guest:signature() ~= host:signature() then
+    check(false, what .. ": the two copies start identical")
+    return host, guest, client
+  end
+
+  for i, turn in ipairs(turns) do
+    if host.over then break end
+    local actions = turn(host)
+    local events = host:resolveTurn(actions)
+    CoopBattle.playEvents(client, events)
+    if guest:signature() ~= host:signature() then
+      check(false, ("%s: the replayer matches the host after turn %d"):format(what, i))
+      print(("    host  %s"):format(host:signature()))
+      print(("    guest %s"):format(guest:signature()))
+      return host, guest, client
+    end
+  end
+  check(true, what .. ": the replayer matches the host after every turn")
+  return host, guest, client
+end
+
+local function tackle(n) return { id = "FIX_TACKLE", pp = n or 20 } end
+
+-- ------- four humans trading blows until somebody falls
+--
+-- The ordinary case, and the one that was broken: the engine's move pipeline
+-- writes HP straight onto the monster, so a turn that announced nothing left
+-- every bar frozen.
+local FOUR = {
+  { side = "a", owner = "ann", name = "ANN",
+    party = { { hp = 120, speed = 50, moves = { tackle() } },
+              { hp = 120, speed = 45, moves = { tackle() } } } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { { hp = 120, speed = 40, moves = { tackle() } },
+              { hp = 120, speed = 35, moves = { tackle() } } } },
+  { side = "b", owner = "cal", name = "CAL",
+    party = { { hp = 120, speed = 30, moves = { tackle() } },
+              { hp = 120, speed = 25, moves = { tackle() } } } },
+  { side = "b", owner = "dee", name = "DEE",
+    party = { { hp = 120, speed = 20, moves = { tackle() } },
+              { hp = 120, speed = 15, moves = { tackle() } } } },
+}
+
+local function allAttack()
+  return { { slot = 1, move = 1, target = 3 }, { slot = 2, move = 1, target = 4 },
+           { slot = 3, move = 1, target = 1 }, { slot = 4, move = 1, target = 2 } }
+end
+
+local brawl = {}
+for _ = 1, 12 do brawl[#brawl + 1] = allAttack end
+conform("four humans attacking", FOUR, brawl)
+
+-- ...and from the seat of a player on the *other* side, because `mine` is what
+-- decides which events a client applies to itself.
+conform("seen from the other side", FOUR, brawl, 3)
+
+-- ------- and the harness has teeth
+--
+-- A test that compares two copies is worth exactly what it is worth when they
+-- differ. One damage event dropped on the floor -- the precise shape of the
+-- bug this exists for -- must be caught, or every green run above means
+-- nothing.
+;(function()
+  local host = fieldSim(describe(FOUR))
+  local guest = fieldSim(describe(FOUR))
+  local client = replayer(guest, 1)
+  local events = host:resolveTurn(allAttack())
+  local kept, dropped = {}, false
+  for _, event in ipairs(events) do
+    if event.kind == "damage" and not dropped then dropped = true
+    else kept[#kept + 1] = event end
+  end
+  check(dropped, "a turn of four attacks produces at least one damage event")
+  CoopBattle.playEvents(client, kept)
+  check(guest:signature() ~= host:signature(),
+        "and losing one of them is caught -- the comparison is not vacuous")
+end)()
+
+-- ------- a switch by choice
+conform("a switch mid-battle", FOUR, {
+  allAttack,
+  function() return { { slot = 1, kind = "switch", index = 2 },
+                      { slot = 3, move = 1, target = 1 },
+                      { slot = 4, move = 1, target = 2 } } end,
+  allAttack,
+  function() return { { slot = 3, kind = "switch", index = 2 },
+                      { slot = 1, move = 1, target = 3 } } end,
+  allAttack,
+})
+
+-- ------- a status move, which changes a stage and no HP
+--
+-- The silent case: nothing about the field's numbers moves, so a replayer that
+-- was quietly re-simulating rather than replaying would still agree here. It
+-- is in the list because a turn that emits only text must also leave the two
+-- copies equal.
+conform("a status move", {
+  { side = "a", owner = "ann", name = "ANN",
+    party = { { hp = 200, speed = 50, moves = { { id = "FIX_BOOST", pp = 20 } } } } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { { hp = 200, speed = 40, moves = { tackle() } } } },
+  { side = "b", owner = "cal", name = "CAL",
+    party = { { hp = 200, speed = 30, moves = { tackle() } } } },
+  { side = "b", owner = "dee", name = "DEE",
+    party = { { hp = 200, speed = 20, moves = { tackle() } } } },
+}, { allAttack, allAttack, allAttack })
+
+-- ------- a charge move, which spans two turns
+--
+-- Half a move on turn one and the rest on turn two. A replayer holds no
+-- `charging` state of its own -- it never runs an effect -- so what has to
+-- survive is that the HP it is told about lands on the right turn.
+conform("a charge move", {
+  { side = "a", owner = "ann", name = "ANN",
+    party = { { hp = 200, speed = 50, moves = { { id = "FIX_CHARGE", pp = 10 } } } } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { { hp = 200, speed = 40, moves = { tackle() } } } },
+  { side = "b", owner = "cal", name = "CAL",
+    party = { { hp = 200, speed = 30, moves = { tackle() } } } },
+  { side = "b", owner = "dee", name = "DEE",
+    party = { { hp = 200, speed = 20, moves = { tackle() } } } },
+}, { allAttack, allAttack, allAttack, allAttack })
+
+-- ------- out of PP, which is Struggle and its recoil
+--
+-- Recoil takes HP off the *attacker*, which is the case a "damage goes to the
+-- target" assumption gets wrong -- and the announcement has to cover whoever
+-- lost it, not whoever was aimed at.
+conform("struggling with no PP", {
+  { side = "a", owner = "ann", name = "ANN",
+    party = { { hp = 200, speed = 50, moves = { tackle(0) } } } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { { hp = 200, speed = 40, moves = { tackle() } } } },
+  { side = "b", owner = "cal", name = "CAL",
+    party = { { hp = 200, speed = 30, moves = { tackle() } } } },
+  { side = "b", owner = "dee", name = "DEE",
+    party = { { hp = 200, speed = 20, moves = { tackle() } } } },
+}, { allAttack, allAttack, allAttack })
+
+-- ------- an NPC pair, whose moves only the host ever chooses
+--
+-- Two of the four slots belong to nobody, so their actions are decided on the
+-- host and exist nowhere else. If a turn's events did not carry what an NPC
+-- did, the replayers would be watching two monsters that never act.
+conform("an NPC pair", {
+  { side = "a", owner = "ann", name = "ANN",
+    party = { { hp = 150, speed = 50, moves = { tackle() } } } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { { hp = 150, speed = 40, moves = { tackle() } } } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { { hp = 150, speed = 30, moves = { tackle() } } } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { { hp = 150, speed = 20, moves = { tackle() } } } },
+}, {
+  function(host)
+    local actions = { { slot = 1, move = 1, target = 3 },
+                      { slot = 2, move = 1, target = 4 } }
+    for _, index in ipairs({ 3, 4 }) do
+      local npc = host:npcAction(host:slot(index))
+      if npc then actions[#actions + 1] = npc end
+    end
+    return actions
+  end,
+  function(host)
+    local actions = { { slot = 1, move = 1, target = 3 },
+                      { slot = 2, move = 1, target = 4 } }
+    for _, index in ipairs({ 3, 4 }) do
+      local npc = host:npcAction(host:slot(index))
+      if npc then actions[#actions + 1] = npc end
+    end
+    return actions
+  end,
+})
+
+-- ------- a faint, the pause, and the replacement that ends it
+--
+-- The replacement is not part of a turn -- it is answered while the field is
+-- stopped -- so it travels as its own message and its events go through the
+-- same replay path. This is where the deadlock lived, and where a replayer can
+-- most easily end up with the wrong monster on the field.
+;(function()
+  local build = {
+    { side = "a", owner = "ann", name = "ANN",
+      party = { { hp = 400, speed = 50, moves = { tackle() } } } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { { hp = 400, speed = 40, moves = { tackle() } } } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { { hp = 1, speed = 30, moves = { tackle() } },
+                { hp = 400, speed = 25, moves = { tackle() } } } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { { hp = 400, speed = 20, moves = { tackle() } } } },
+  }
+  local host = fieldSim(describe(build))
+  local guest = fieldSim(describe(build))
+  local client = replayer(guest, 1)
+
+  CoopBattle.playEvents(client,
+    host:resolveTurn({ { slot = 1, move = 1, target = 3 } }))
+  eq(guest:signature(), host:signature(),
+     "a faint leaves the replayer where the host is")
+  local waiting = host:awaitingChoice()
+  check(waiting ~= nil and waiting.index == 3,
+        "and the field is stopped, waiting on that slot's owner")
+
+  -- The owner answers. On the host this is `replace`; on the other three it is
+  -- whatever `replace` emitted, replayed.
+  local sent = {}
+  check(host:replace(3, 2, function(event) sent[#sent + 1] = event end),
+        "the owner's choice is accepted")
+  CoopBattle.playEvents(client, sent)
+  eq(guest:signature(), host:signature(),
+     "and the replayer sends out the same monster the host did")
+  eq(guest:slot(3).active, 2, "which is the one that was chosen")
+  eq(host:awaitingChoice(), nil, "with the field moving again")
+
+  CoopBattle.playEvents(client, host:resolveTurn(allAttack()))
+  eq(guest:signature(), host:signature(),
+     "and the turn after a replacement still agrees")
+end)()
+
+-- ------- somebody closes the game
+--
+-- A forfeit is not announced as a turn event at all: the host writes the slot
+-- off and tells the other three separately. It is in this list because "gone"
+-- is part of the signature, so a client that missed one would disagree about
+-- who is still in the fight -- and about whether the battle is over.
+;(function()
+  local host = fieldSim(describe(FOUR))
+  local guest = fieldSim(describe(FOUR))
+  local client = replayer(guest, 1)
+
+  CoopBattle.playEvents(client, host:resolveTurn(allAttack()))
+  eq(guest:signature(), host:signature(), "the two copies agree before anyone leaves")
+
+  local left = host:forfeit("dee")
+  check(left ~= nil and left.index == 4, "the host writes off the player who left")
+  check(guest:forfeit("dee") ~= nil, "and the message puts the others in step")
+  eq(guest:signature(), host:signature(), "which leaves the copies equal again")
+
+  CoopBattle.playEvents(client, host:resolveTurn({
+    { slot = 1, move = 1, target = 3 }, { slot = 2, move = 1, target = 3 },
+    { slot = 3, move = 1, target = 1 },
+  }))
+  eq(guest:signature(), host:signature(),
+     "and the battle carries on three ways, still in step")
+end)()
+
+-- ------- and the host has to accept the answer when it comes off the wire
+--
+-- Everything above drives the host directly. The other half of the contract is
+-- how a *message* reaches it, and that is where the replacement deadlock lived:
+-- a non-host's choice arrives down the same wire as an ordinary action, and
+-- the host filed it in the queue of pending turn actions and then asked itself
+-- to resolve -- which it refuses to do while any slot is awaiting. The pause
+-- waited on itself. Driven through the real `drainNet`, because the routing
+-- decision *is* the bug.
+;(function()
+  local build = {
+    { side = "a", owner = "ann", name = "ANN",
+      party = { { hp = 400, speed = 50, moves = { tackle() } } } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { { hp = 400, speed = 40, moves = { tackle() } } } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { { hp = 1, speed = 30, moves = { tackle() } },
+                { hp = 400, speed = 25, moves = { tackle() } } } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { { hp = 400, speed = 20, moves = { tackle() } } } },
+  }
+  local host = fieldSim(describe(build))
+  local inbox, sent = {}, {}
+  local hostClient = setmetatable({
+    sim = host, host = true, mine = 1, messages = {}, pending = {}, seq = 0,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = {
+      poll = function() local out = inbox; inbox = {}; return out end,
+      send = function(payload) sent[#sent + 1] = payload end,
+    },
+  }, { __index = CoopBattle })
+
+  host:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  local waiting = host:awaitingChoice()
+  check(waiting ~= nil and waiting.index == 3,
+        "the field is waiting on the player whose monster fell")
+
+  -- CAL answers, from another machine. Shaped exactly as CoopBattle:sendAction
+  -- puts it on the wire, and stamped with the sender the way Coop does.
+  inbox[#inbox + 1] = { t = "act", from = "cal",
+                        action = { slot = 3, index = 2 } }
+  CoopBattle.drainNet(hostClient)
+
+  eq(host:awaitingChoice(), nil,
+     "a replacement off the wire is applied rather than queued as a turn")
+  eq(host:slot(3).active, 2, "with the monster its owner actually chose")
+  eq(hostClient.pending[3], nil,
+     "and nothing is left in the pending actions to be resolved later")
+  local told = false
+  for _, payload in ipairs(sent) do
+    if payload.t == "res" then
+      for _, event in ipairs(payload.events or {}) do
+        if event.kind == "send" and event.slot == 3 then told = true end
+      end
+    end
+  end
+  check(told, "and the other three are told, in a numbered turn like any other")
+
+  -- The same message shape for a slot that is *not* awaiting is an ordinary
+  -- action and must still be queued -- the fix is a fork, not a redirect.
+  sent = {}
+  inbox[#inbox + 1] = { t = "act", from = "dee",
+                        action = { slot = 4, move = 1, target = 1 } }
+  CoopBattle.drainNet(hostClient)
+  check(hostClient.pending[4] ~= nil or host.over ~= nil,
+        "an ordinary action from the same wire is still filed as a turn action")
+
+  -- And a slot cannot be answered for by somebody who does not own it.
+  host:resolveTurn({ { slot = 1, move = 1, target = 4 } })
+  local before = host:signature()
+  inbox[#inbox + 1] = { t = "act", from = "ann",
+                        action = { slot = 3, index = 1 } }
+  CoopBattle.drainNet(hostClient)
+  eq(host:signature(), before,
+     "and nobody can send out somebody else's monster")
+end)()
+
+-- ------- a turn that never arrived, and one that arrived wrong
+--
+-- Two different failures behind one recovery, and both are silent by design:
+-- the battle repairs itself rather than stopping, so without these counters
+-- nothing anywhere would ever say a client had been shown numbers that were
+-- never true.
+--
+--   * a **gap** is a message that never came -- the sequence skips;
+--   * a **desync** is one where every message arrived and the two copies still
+--     disagree -- the sequence is right and the signature is not.
+--
+-- Driven through the real `applyTurn`, because the ordering inside it is the
+-- substance: the events are played *before* the signature is compared, so a
+-- comparison made against the pre-turn field would report a desync on every
+-- healthy turn.
+;(function()
+  local sim = fieldSim(describe(FOUR))
+  local asked = {}
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, seq = 0,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = { send = function(payload) asked[#asked + 1] = payload end },
+  }, { __index = CoopBattle })
+
+  -- A healthy turn: right sequence, right signature, nothing reported.
+  local host = fieldSim(describe(FOUR))
+  local events = host:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  CoopBattle.applyTurn(client, { seq = 1, sig = host:signature(), events = events })
+  eq(client.gaps, nil, "a turn that arrives in order reports no gap")
+  eq(client.desyncs, nil, "and one that leaves the copies agreeing reports no drift")
+  eq(#asked, 0, "so nothing is asked of the host")
+  eq(client.seq, 1, "and the sequence moves on")
+
+  -- A gap: turn 2 never arrived and turn 3 is here.
+  local skipped = host:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  CoopBattle.applyTurn(client, { seq = 3, sig = host:signature(), events = skipped })
+  eq(client.gaps, 1, "a sequence that skips is counted as a missed turn")
+  eq(client.seq, 3, "the client takes the host's number rather than its own")
+  eq(#asked, 1, "and asks for the field")
+  eq(asked[1] and asked[1].t, "resync", "which is what a resync request is")
+
+  -- A desync: the sequence is right, every message arrived, and the two copies
+  -- still disagree. The events are applied first either way -- a client that
+  -- refused a turn it could not verify would fall further behind with every
+  -- one it refused.
+  asked = {}
+  client.seq = 3
+  local more = host:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  CoopBattle.applyTurn(client, { seq = 4, sig = "1:1:1:0|2:1:1:0|3:1:1:0|4:1:1:0",
+                                 events = more })
+  eq(client.desyncs, 1, "a signature that disagrees is counted as drift")
+  eq(#asked, 1, "and also asks for the field")
+  eq(asked[1] and asked[1].t, "resync", "by the same means")
+
+  -- A turn carrying no signature at all -- an older host -- is applied and not
+  -- second-guessed. Nothing is worse than a client that treats "cannot check"
+  -- as "wrong" and re-syncs on every turn forever.
+  asked = {}
+  local before = client.desyncs
+  local plain = host:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  CoopBattle.applyTurn(client, { seq = 5, events = plain })
+  eq(client.desyncs, before, "a turn with no signature reports no drift")
+  eq(#asked, 0, "and asks for nothing")
+
+  -- The counters are what the export reports, which is the only way an
+  -- end-to-end run can ever see any of this.
+  eq(client.gaps, 1, "the gap count is what a run reads back")
+  eq(client.desyncs, 1, "and so is the drift count")
+end)()
+
+-- ------- putting one client right must not put the others wrong
+--
+-- The repair path, which is part of this contract rather than an aside: when a
+-- replayer notices it has drifted it asks for the field, and the host answers
+-- with a snapshot. Every message on this wire is fanned out to all four, so an
+-- unaddressed answer was applied by all three replayers -- and the two who
+-- were perfectly in step had their sequence set back to the host's, which the
+-- next turn read as a gap, which made them ask too. One client a single
+-- message behind became a resync storm that never converged.
+;(function()
+  local sim = fieldSim(describe(FOUR))
+  local client = setmetatable({
+    sim = sim, host = false, mine = 2, messages = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  eq(sim:slot(2).owner, "bob", "this client is sitting in BOB's slot")
+  check(CoopBattle.addressedToMe(client, { to = "bob" }),
+        "a snapshot addressed to this client is for this client")
+  check(not CoopBattle.addressedToMe(client, { to = "cal" }),
+        "and one addressed to somebody else is not -- which is what stops a "
+        .. "client that was never behind having its sequence rewound")
+  check(CoopBattle.addressedToMe(client, {}),
+        "an answer with no address is still taken: a snapshot is the host's "
+        .. "own field and is always safe to apply")
+
+  -- ...and the host addresses it. Driven through drainNet so the assertion is
+  -- about what the host actually puts on the wire.
+  local hostSim = fieldSim(describe(FOUR))
+  local inbox, sent = { { t = "resync", from = "cal" } }, {}
+  local hostClient = setmetatable({
+    sim = hostSim, host = true, mine = 1, messages = {}, pending = {}, seq = 7,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    net = {
+      poll = function() local out = inbox; inbox = {}; return out end,
+      send = function(payload) sent[#sent + 1] = payload end,
+    },
+  }, { __index = CoopBattle })
+  CoopBattle.drainNet(hostClient)
+  local answer
+  for _, payload in ipairs(sent) do
+    if payload.t == "state" then answer = payload end
+  end
+  check(answer ~= nil, "the host answers a request for the field")
+  eq(answer and answer.to, "cal", "addressed to whoever asked, and nobody else")
+  eq(answer and answer.seq, 7, "carrying the turn the field is at")
+end)()
+
+-- ------- display sequencing: sim truth and the screen are two different clocks
+--
+-- Everything above this line is about *what happened* -- the replay contract,
+-- turn for turn. This is about *when it is shown*: `mon.hp` lands the instant
+-- a `damage` event is applied, on every client, but `battler.shownHP` -- the
+-- number the bar is actually drawn from -- and the fainted flag that decides
+-- whether a monster is even still drawn only move once the messages queue
+-- reaches the row that was queued for them. That gap is deliberate (it is the
+-- animation), and it is also exactly where a display bug hides: nothing about
+-- the replay contract above would notice a bar that teleported, a monster
+-- that vanished a frame early, or a same-turn NPC replacement that ate its
+-- predecessor's exit. These blocks drive real frames through the real
+-- `CoopBattle:update` -- never a hand simulation of what it "should" do -- and
+-- pin the four rules the header above `M.startDrain` and `M.playEvents`
+-- claims: the drain rate, the faint sink, the display shadow, and the fact
+-- that none of it can be hurried past with a button.
+
+;(function()
+  -- 1. Truth and display are two clocks.
+  --
+  -- A `damage` event moves `mon.hp` the moment `playEvents` applies it -- has
+  -- to, since a replayer's signature is compared against the host's from that
+  -- instant. The *bar* is a queued row like any other text line, so it only
+  -- starts falling once the messages phase reaches it, it falls at the
+  -- engine's own maxHP/96 a frame, and the rest of the queue -- the very next
+  -- line of text -- is held hostage until it lands exactly on the target.
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+  })
+  local client = replayer(sim, 1)
+  client.phase, client.frame = "messages", 0
+  client.game.input = { wasPressed = function() return false end }
+
+  local battler = sim:slot(1).battler
+  local preHP = battler.mon.hp
+
+  CoopBattle.playEvents(client, {
+    { kind = "damage", slot = 1, hp = preHP - 20 },
+    { kind = "msg", text = "next line" },
+  })
+  eq(battler.mon.hp, preHP - 20, "sim truth moves the instant the event lands")
+  eq(battler.shownHP, preHP,
+     "and the display has not moved at all -- it is still queued behind the "
+     .. "drain row playEvents built for it")
+
+  CoopBattle.update(client, 1 / 60)
+  check(client.draining ~= nil,
+        "one frame reaches the queued drain row and starts it")
+  eq(battler.shownHP, preHP, "starting the drain does not itself move the bar")
+  eq(#client.messages, 1, "and the text queued behind it is still waiting")
+
+  local steps = 0
+  while client.draining and steps < 200 do
+    local before = battler.shownHP
+    CoopBattle.update(client, 1 / 60)
+    steps = steps + 1
+    if client.draining then
+      eq(before - battler.shownHP, math.max(1, battler.mon.stats.hp) / 96,
+         "every frame the bar falls by maxHP/96, the engine's own rate")
+    end
+    eq(client.shown, nil,
+       "and the queue stays blocked -- no text shows while the bar still owes "
+       .. "its fall")
+  end
+  eq(steps, 20, "a 96 HP bar losing 20 takes exactly maxHP/96 steps to land")
+  eq(battler.shownHP, preHP - 20, "and it lands exactly on the target, not past it")
+
+  CoopBattle.update(client, 1 / 60)
+  eq(client.shown, "next line",
+     "only once the bar has finished does the line behind it show")
+end)()
+
+;(function()
+  -- 2. Rounding at draw.
+  --
+  -- `displayHP` -- the file's own draw-time helper -- is not exported, on
+  -- purpose: drawing is not this suite's job to touch, and exporting a
+  -- function just to make it reachable would change the file for the test.
+  -- It is reached instead through its real upvalue chain off `M.drawPanel`,
+  -- which is exported, so this pins the exact closure the screen draws with
+  -- rather than a rewritten copy of what it is supposed to do. The rule it
+  -- pins: a fractional bar rounds up while it is still falling, so the number
+  -- on screen never claims to be lower than the bar has visibly reached, and
+  -- rounds down while healing, for the same reason run the other way.
+  local function findDisplayHP()
+    local i = 1
+    while true do
+      local name, value = debug.getupvalue(CoopBattle.drawPanel, i)
+      if not name then return nil end
+      if name == "drawReadout" then
+        local j = 1
+        while true do
+          local innerName, innerValue = debug.getupvalue(value, j)
+          if not innerName then return nil end
+          if innerName == "displayHP" then return innerValue end
+          j = j + 1
+        end
+      end
+      i = i + 1
+    end
+  end
+  local displayHP = findDisplayHP()
+  check(type(displayHP) == "function",
+        "the draw-time HP helper is reachable off drawPanel's own upvalues")
+
+  eq(displayHP({ shownHP = 10.7, mon = { hp = 5 } }), 11,
+     "draining down, a fractional bar rounds up -- it never undercounts what "
+     .. "has not visibly fallen yet")
+  eq(displayHP({ shownHP = 4.3, mon = { hp = 10 } }), 4,
+     "and healing up, it rounds down for the same reason run the other way")
+  eq(displayHP({ shownHP = 7, mon = { hp = 7 } }), 7,
+     "a bar that has already arrived reads exactly where it landed")
+  eq(displayHP({ shownHP = nil, mon = { hp = 42 } }), 42,
+     "and a battler this screen never animated reads the true HP rather than "
+     .. "inventing a descent from nowhere")
+end)()
+
+;(function()
+  -- 3. Not skippable.
+  --
+  -- The engine reads a button only for a text page that has finished
+  -- printing; `M:stepDrain` and `M:stepFaint` never consult input at all.
+  -- Pinned by mashing A and B through both and counting frames against a run
+  -- that never presses anything -- if either state ever started listening for
+  -- a button, this is the only place that would notice the descent got
+  -- shorter.
+  local function buildSlots()
+    return {
+      { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+      { side = "b", owner = "cal", name = "CAL", party = { mon(96, 30, { tackle() }) } },
+      { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+    }
+  end
+
+  local function drainRun(pressed)
+    local sim = fieldSim(buildSlots())
+    local client = replayer(sim, 1)
+    client.phase, client.frame = "messages", 0
+    client.game.input = { wasPressed = function() return pressed end }
+    local battler = sim:slot(1).battler
+    CoopBattle.playEvents(client,
+      { { kind = "damage", slot = 1, hp = battler.mon.hp - 20 } })
+    local calls = 0
+    for i = 1, 200 do
+      CoopBattle.update(client, 1 / 60)
+      calls = i
+      if not client.draining then break end
+    end
+    return calls, battler.shownHP
+  end
+
+  local quietCalls, quietHP = drainRun(false)
+  local mashedCalls, mashedHP = drainRun(true)
+  eq(mashedCalls, quietCalls,
+     "mashing A and B through a drain does not shorten it by one frame")
+  eq(mashedHP, quietHP, "and it lands on exactly the same number either way")
+
+  local function faintRun(pressed)
+    local sim = fieldSim(buildSlots())
+    local client = replayer(sim, 1)
+    client.phase, client.frame = "messages", 0
+    client.game.input = { wasPressed = function() return pressed end }
+    local battler = sim:slot(1).battler
+    client.messages = { { faintfx = battler, slot = 1 } }
+    CoopBattle.update(client, 1 / 60) -- pops the row, starts the sink
+    local calls = 0
+    for i = 1, 60 do
+      CoopBattle.update(client, 1 / 60)
+      calls = i
+      if not client.faintFx then break end
+    end
+    return calls
+  end
+
+  eq(faintRun(true), faintRun(false),
+     "and mashing through the 30-frame faint sink does not shorten it either")
+end)()
+
+;(function()
+  -- 4. Faint order and the sink.
+  --
+  -- `CoopSim.announceFaint` queues the `faint` event before the "fainted!"
+  -- text -- the original's own order, sprite sliding first and the words
+  -- printed over it. The display's `fainted` flag is not allowed to follow
+  -- the *event* that early, though: it goes up only when the faint row is
+  -- actually reached and the sink starts, or a client reading messages a
+  -- moment slower than the host watches a monster vanish before anything on
+  -- screen explained why.
+  local build = {
+    { side = "a", owner = "ann", name = "ANN", party = { mon(400, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(400, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(1, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(400, 20, { tackle() }) } },
+  }
+  local host = fieldSim(describe(build))
+  local events = host:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+
+  local faintIdx, faintMsgIdx
+  for i, event in ipairs(events) do
+    if event.kind == "faint" and not faintIdx then faintIdx = i end
+    if event.kind == "msg" and not faintMsgIdx
+       and tostring(event.text):find("fainted!", 1, true) then
+      faintMsgIdx = i
+    end
+  end
+  check(faintIdx ~= nil and faintMsgIdx ~= nil and faintIdx < faintMsgIdx,
+        "the sim's own event list puts the faint before the fainted! text")
+
+  local guest = fieldSim(describe(build))
+  local client = replayer(guest, 1)
+  client.phase, client.frame = "messages", 0
+  client.game.input = { wasPressed = function() return false end }
+
+  CoopBattle.playEvents(client, events)
+  eq(guest:slot(3).battler.fainted, nil,
+     "receiving the turn does not itself mark the battler fainted -- that is "
+     .. "the display's flag, and the display has not reached the row yet")
+
+  local sinkStart, sinkEnd, textFrame
+  local wasSinking = false
+  for i = 1, 1000 do
+    CoopBattle.update(client, 1 / 60)
+    local isSinking = client.faintFx ~= nil
+    if isSinking and not sinkStart then
+      sinkStart = i
+      eq(guest:slot(3).battler.fainted, true,
+         "and it is set the instant the faint row starts the sink, not before")
+    end
+    if wasSinking and not isSinking and not sinkEnd then sinkEnd = i - 1 end
+    wasSinking = isSinking
+    if not textFrame and type(client.shown) == "string"
+       and client.shown:find("fainted!", 1, true) then
+      textFrame = i
+    end
+    if textFrame then break end
+  end
+  check(sinkStart ~= nil and sinkEnd ~= nil, "the sink actually ran")
+  eq(sinkEnd - sinkStart + 1, 30,
+     "and blocked the queue for exactly the engine's 30 frames")
+  check(textFrame ~= nil and textFrame > sinkEnd,
+        "the fainted! text is shown only once the sink has fully played")
+end)()
+
+;(function()
+  -- 5. Engine-placed drains.
+  --
+  -- `CoopField.drain` turns the engine's own queued rows into events, and a
+  -- `drain` row's position is the engine's, not this mod's: one per hit,
+  -- after the flash, before the effectiveness or critical line, carrying the
+  -- HP the bar is allowed to stop at. The later `damage` event -- the one
+  -- that actually moves `mon.hp` -- is the catch-all, and it has to agree
+  -- with what the drain already promised.
+  local sim = fieldSim(describe(FOUR))
+  local events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+
+  local drainIdx, textIdx, damageIdx, drainTo, damageHp
+  for i, event in ipairs(events) do
+    if event.kind == "drain" and not drainIdx then
+      drainIdx, drainTo = i, event.to
+    end
+    if event.kind == "msg" and drainIdx and not textIdx
+       and (tostring(event.text):find("Critical", 1, true)
+            or tostring(event.text):find("effective", 1, true)) then
+      textIdx = i
+    end
+    if event.kind == "damage" and not damageIdx then
+      damageIdx, damageHp = i, event.hp
+    end
+  end
+  check(drainIdx ~= nil, "a damaging turn carries at least one drain row")
+  check(textIdx ~= nil and drainIdx < textIdx,
+        "placed before the hit's own effectiveness/critical text")
+  check(damageIdx ~= nil and drainIdx < damageIdx,
+        "and before the damage event that actually moves the HP")
+  eq(drainTo, damageHp,
+     "the drain's stop and the damage event's final HP are the same number")
+end)()
+
+;(function()
+  -- 6. Same-turn NPC replacement keeps its exit.
+  --
+  -- An NPC slot has nobody to pause for, so `CoopSim` sends its next monster
+  -- out inside the very turn that felled the last one -- sim truth moves on
+  -- immediately, mid-`resolveTurn`. The display cannot: the fallen monster is
+  -- still owed its drain and its 30-frame sink. `M:holdDisplay` is what makes
+  -- that possible, catching the outgoing battler in a shadow *before*
+  -- `resolveTurn` moves the slot on -- called here the way `tryResolve` calls
+  -- it, in the same order. This is the bug the file's own header names
+  -- (`dropDisplayFor`, which purged the dying monster's rows instead of
+  -- playing them): without the shadow the replacement simply appears, with no
+  -- fall in between.
+  local build = {
+    { side = "a", owner = "ann", name = "ANN", party = { mon(400, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(400, 40, { tackle() }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(1, 30, { tackle() }), mon(300, 25, { tackle() }) } },
+    { side = "b", owner = nil, name = "FOE2", party = { mon(300, 20, { tackle() }) } },
+  }
+  local sim = fieldSim(build)
+  local host = replayer(sim, 1)
+  host.host = true
+  host.phase, host.frame = "messages", 0
+  host.game.input = { wasPressed = function() return true end }
+
+  local oldBattler = sim:slot(3).battler
+  -- The pieces `tryResolve` runs, in the order it runs them.
+  CoopBattle.holdDisplay(host)
+  local events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  check(sim:slot(3).battler ~= oldBattler,
+        "sim truth already stands the replacement in the slot the instant "
+        .. "resolveTurn returns")
+  eq(sim:slot(3).battler.mon.hp, 300,
+     "-- the reserve, untouched this turn, not the one that just fell")
+  CoopBattle.playEvents(host, events)
+
+  eq(CoopBattle.shownBattlerAt(host, 3), oldBattler,
+     "but the display still shows the one that fell, until its rows play")
+
+  local sawFaintingOld = false
+  for i = 1, 400 do
+    CoopBattle.update(host, 1 / 60)
+    if host.faintFx and host.faintFx.battler == oldBattler then
+      sawFaintingOld = true
+    end
+    if host.phase ~= "messages" then break end
+  end
+  check(sawFaintingOld, "the sink that plays is the departed monster's own")
+  eq(host.phase, "choose", "the queue drains all the way back to a menu")
+  eq(CoopBattle.shownBattlerAt(host, 3), sim:slot(3).battler,
+     "and once it has, the shadow lets go -- the display shows the replacement")
+  local newBattler = sim:slot(3).battler
+  eq(newBattler.shownHP, newBattler.mon.hp,
+     "with the bar already sitting on the replacement's own HP -- snapDisplay, "
+     .. "run automatically on the way back to the menu, closed the gap")
+end)()
+
+;(function()
+  -- 7. Text stays up through effects.
+  --
+  -- A queued effect row (anim, drain, faint) is taken off the head of the
+  -- queue *ahead of* the ordinary text-dwell check, which is what lets the
+  -- last line stay on screen while the flash or the fall plays under it: the
+  -- box would otherwise go blank for the whole of every hit, naming a move
+  -- nothing on screen still credits. The dwell clock is not ticked while an
+  -- effect runs, either -- so a line shown a moment before a long drain does
+  -- not silently expire mid-effect and lose the words to the thing they were
+  -- describing.
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+  })
+  local client = replayer(sim, 1)
+  client.phase, client.frame = "messages", 0
+  client.game.input = { wasPressed = function() return false end }
+
+  client.messages = { { text = "Line A" } }
+  CoopBattle.update(client, 1 / 60)
+  eq(client.shown, "Line A", "the line shows on the frame it is reached")
+  local frozenClock = client.msgClock
+
+  local battler = sim:slot(1).battler
+  client.messages[#client.messages + 1] =
+    { drain = battler, slot = 1, to = battler.mon.hp - 20 }
+  CoopBattle.update(client, 1 / 60) -- pops the drain row, starts it
+  eq(client.shown, "Line A",
+     "an effect reaching the head of the queue does not clear the line above it")
+  check(client.draining ~= nil, "and the drain really did start")
+
+  for _ = 1, 30 do
+    if not client.draining then break end
+    CoopBattle.update(client, 1 / 60)
+  end
+  check(client.draining == nil, "the drain ran to completion")
+  eq(client.shown, "Line A", "the same line is still up once it has")
+  eq(client.msgClock, frozenClock,
+     "and its dwell clock never advanced while the effect was running")
+end)()
+
+;(function()
+  -- 8. Unknown kinds are ignored, both directions.
+  --
+  -- The event vocabulary is meant to grow, and a client running an older
+  -- build must not choke on a kind it has never heard of, nor queue anything
+  -- from it that could wedge the messages phase for whatever comes after.
+  -- `playEvents` has no branch for a kind it does not recognise, so it is
+  -- simply dropped.
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+  })
+  local client = replayer(sim, 1)
+  client.phase, client.frame = "messages", 0
+  client.game.input = { wasPressed = function() return false end }
+
+  local ok = pcall(CoopBattle.playEvents, client,
+    { { kind = "sparkle", slot = 1, glitter = true } })
+  check(ok, "a kind this build has never heard of does not throw")
+  eq(#client.messages, 0, "and queues nothing that could wedge the messages phase")
+
+  -- A real event still either side of it works normally, so the drop is
+  -- silent rather than derailing the rest of the batch.
+  CoopBattle.playEvents(client,
+    { { kind = "sparkle" }, { kind = "msg", text = "still here" },
+      { kind = "sparkle" } })
+  eq(#client.messages, 1, "a real event survives sitting next to unknown ones")
+  CoopBattle.update(client, 1 / 60)
+  eq(client.shown, "still here", "and plays normally")
+end)()
+
+;(function()
+  -- 9. Snap points.
+  --
+  -- The moments a half-played animation would be a lie rather than a lag: the
+  -- host's numbers have just changed underneath the display -- mid-drain, in
+  -- this case -- and nothing about the running `shownHP` still means
+  -- anything. Driven through the real `state` branch of `drainNet`, because
+  -- that is what a resync actually runs: `sim:restore` followed by
+  -- `snapDisplay`, the same pair `M:drainNet`'s `state` handler calls.
+  local build = {
+    { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+  }
+  local hostSim = fieldSim(describe(build))
+  local guestSim = fieldSim(describe(build))
+  local guest = replayer(guestSim, 1)
+  guest.phase, guest.frame = "messages", 0
+  guest.game.input = { wasPressed = function() return false end }
+  local inbox = {}
+  guest.net = { poll = function() local out = inbox; inbox = {}; return out end,
+                send = function() end }
+
+  hostSim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+
+  -- The guest is mid-drain on a number the host never sent -- standing in for
+  -- the ordinary trigger, a lost message, without reproducing the exact turn.
+  CoopBattle.playEvents(guest,
+    { { kind = "damage", slot = 1, hp = guestSim:slot(1).battler.mon.hp - 10 } })
+  CoopBattle.update(guest, 1 / 60)
+  check(guest.draining ~= nil, "the guest is mid-drain when the resync lands")
+  check(guestSim:slot(1).battler.shownHP ~= guestSim:slot(1).battler.mon.hp,
+        "-- display and truth genuinely disagree at this instant")
+
+  inbox[#inbox + 1] = { t = "state", seq = 9, slots = hostSim:snapshot() }
+  CoopBattle.drainNet(guest)
+
+  check(guest.draining == nil, "the resync clears a running drain outright")
+  check(guest.faintFx == nil, "and any faint sink with it")
+  check(next(guest.shownBattler or {}) == nil,
+        "the display shadow is cleared -- nothing is owed an exit any more")
+  for i, slot in ipairs(guestSim.slots) do
+    if slot.battler then
+      eq(slot.battler.shownHP, slot.battler.mon.hp,
+         ("slot %d reads exactly where the host's numbers put it"):format(i))
+    end
+  end
+  local sawSwapGhost = false
+  for _, row in ipairs(guest.messages) do
+    if type(row) == "table" and row.swap then sawSwapGhost = true end
+  end
+  check(not sawSwapGhost,
+        "and no queued swap row survives to put a monster the field no longer "
+        .. "holds back on screen seconds later")
+end)()
+
+-- ------- what a faint does to the four people watching it
+--
+-- The lifecycle, rule by rule, because "a 2-on-2 works" is four separate
+-- claims and only one of them is about damage:
+--
+--   * a monster that falls with team-mates left **stops the battle** and its
+--     owner is asked, at once, which one follows it;
+--   * nobody else's turn resolves while that question is open;
+--   * a monster that falls with nothing left does **not** stop anything -- its
+--     trainer is simply out, and watches;
+--   * a side is beaten only when **both** its trainers are;
+--   * and a monster that has fainted never comes back onto the field.
+;(function()
+  -- ANN is huge and does the killing. CAL has a reserve; DEE does not.
+  local build = {
+    { side = "a", owner = "ann", name = "ANN",
+      party = { { hp = 400, speed = 50, moves = { tackle() } } } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { { hp = 400, speed = 45, moves = { tackle() } } } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { { hp = 1, speed = 30, moves = { tackle() } },
+                { hp = 400, speed = 25, moves = { tackle() } } } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { { hp = 1, speed = 20, moves = { tackle() } } } },
+  }
+
+  -- ------- with a reserve: the battle stops and the owner is asked
+  local sim = fieldSim(describe(build))
+  local events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  local asked, fainted = nil, false
+  for _, event in ipairs(events) do
+    if event.kind == "choose" then asked = event end
+    if event.kind == "faint" and event.slot == 3 then fainted = true end
+  end
+  check(fainted, "a monster that falls is announced as fainted")
+  check(asked ~= nil and asked.slot == 3,
+        "and its owner is asked which one follows, immediately")
+  check(asked ~= nil and asked.trainer == "CAL",
+        "the ask names whose choice it is")
+  local waiting = sim:awaitingChoice()
+  check(waiting ~= nil and waiting.index == 3, "the field is stopped on that slot")
+
+  -- Nobody else moves in the meantime. This is the claim that makes the pause
+  -- a pause rather than a prompt: a turn resolved around an empty slot would
+  -- spend three people's moves on a field that is about to change.
+  local hpBefore = sim:slot(1).battler.mon.hp
+  local ignored = sim:resolveTurn({ { slot = 4, move = 1, target = 1 } })
+  eq(sim:slot(1).battler.mon.hp, hpBefore,
+     "no turn resolves while a replacement is outstanding")
+  eq(#ignored, 0, "and nothing is announced to anyone")
+
+  -- ...and answering it starts the battle again.
+  check(sim:replace(3, 2, function() end), "the owner's answer is taken")
+  eq(sim:awaitingChoice(), nil, "which releases the field")
+  eq(sim:slot(3).active, 2, "with the monster they chose out")
+  check((sim:slot(3).battler.mon.hp or 0) > 0, "and it is a live one")
+  sim:resolveTurn({ { slot = 4, move = 1, target = 1 } })
+  check((sim:slot(1).battler.mon.hp or 0) < hpBefore,
+        "and turns resolve again afterwards")
+
+  -- ------- a fainted monster never comes back
+  --
+  -- Asked for by index, the way a client asks. `replace` is the only door onto
+  -- the field, so this is the whole of the guarantee -- and the index comes
+  -- off the wire, where a stale or modified client can put anything.
+  local revive = fieldSim(describe(build))
+  revive:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  check(revive:awaitingChoice() ~= nil, "CAL is asked again")
+  check(revive:replace(3, 1, function() end),
+        "a request naming the monster that just fainted is accepted...")
+  eq(revive:slot(3).active, 2,
+     "...but sends out a living one instead -- a fainted POKeMON is never "
+     .. "put back on the field")
+  check((revive:slot(3).battler.mon.hp or 0) > 0, "and it is standing")
+
+  -- ------- with nothing left: no pause, no ask, and the side fights on
+  -- Its own field, with CAL healthy: the build above leaves CAL on one hit
+  -- point, and a CAL that faints in the middle of this would put the battle
+  -- back into the *paused* state and prove nothing about the unpaused one.
+  local out = fieldSim(describe({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { { hp = 400, speed = 50, moves = { tackle() } } } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { { hp = 400, speed = 45, moves = { tackle() } } } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { { hp = 400, speed = 30, moves = { tackle() } } } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { { hp = 1, speed = 20, moves = { tackle() } } } },
+  }))
+  local downEvents = out:resolveTurn({ { slot = 1, move = 1, target = 4 } })
+  local askedAnyone = false
+  for _, event in ipairs(downEvents) do
+    if event.kind == "choose" then askedAnyone = true end
+  end
+  check(not askedAnyone,
+        "a trainer with nothing left is not asked to send anything out")
+  eq(out:awaitingChoice(), nil, "and the battle is not stopped for them")
+  check(out:isDown(out:slot(4)), "their slot is out of the fight")
+  check(out.over == nil,
+        "but the battle is not over -- a side falls only when both its "
+        .. "trainers do")
+  check(#out:targetsFor(out:slot(1)) == 1,
+        "and they cannot be attacked any more -- one target left, not two")
+
+  -- Their partner fights on, and the turn resolves without waiting for them.
+  local before = out:slot(1).battler.mon.hp
+  out:resolveTurn({ { slot = 1, move = 1, target = 3 },
+                    { slot = 3, move = 1, target = 1 } })
+  check((out:slot(1).battler.mon.hp or 0) < before,
+        "the remaining trainer on that side still takes their turn")
+
+  -- ...and only when the partner falls too is the side beaten.
+  out:slot(3).battler.mon.hp = 1
+  out:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  eq(out.over, "a", "and when the last one falls, the other side wins")
+end)()
+
+-- ------- and the player who is out is a spectator, not a prompt
+--
+-- The rule above is the field's. This is the client's, and it was the one that
+-- was missing: the host stops waiting on a slot that is down and files nothing
+-- for it, but the player was still shown the command menu -- so they picked a
+-- move, were dropped into a wait, and were asked again next turn, for the rest
+-- of a battle they were no longer in.
+;(function()
+  local sim = fieldSim(describe({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { { hp = 400, speed = 50, moves = { tackle() } } } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { { hp = 1, speed = 45, moves = { tackle() } },
+                { hp = 400, speed = 40, moves = { tackle() } } } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { { hp = 400, speed = 30, moves = { tackle() } } } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { { hp = 400, speed = 20, moves = { tackle() } } } },
+  }))
+  local client = setmetatable({
+    sim = sim, host = false, mine = 2, messages = {}, phase = "choose",
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  check(not CoopBattle.spectating(client),
+        "a player whose monster is standing is not a spectator")
+
+  -- BOB's monster falls, and BOB has one left: this is the *replacing* state,
+  -- which is a decision rather than a spectacle.
+  sim:slot(2).battler.mon.hp = 0
+  client.replacing = true
+  check(not CoopBattle.spectating(client),
+        "nor is one who has been asked to send out their next")
+
+  -- ...and once BOB has nothing left, they are.
+  client.replacing = false
+  sim:slot(2).party[2].hp = 0
+  check(CoopBattle.spectating(client),
+        "a player with nothing left to send out is watching, not choosing")
+  eq(sim:hasReserve(sim:slot(2)), nil, "which is what having no reserve means")
+
+  -- The field agrees: their side is still alive, so the battle continues
+  -- around them rather than ending.
+  check(not sim:sideBeaten("a"),
+        "their side fights on while their partner stands")
+
+  -- And a forfeited slot is the same kind of out.
+  local gone = fieldSim(describe(FOUR))
+  local goneClient = setmetatable({
+    sim = gone, host = false, mine = 1, messages = {}, phase = "choose",
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  check(not CoopBattle.spectating(goneClient), "a connected player chooses")
+  gone:forfeit("ann")
+  check(CoopBattle.spectating(goneClient),
+        "and a slot written off after a disconnect is out the same way")
+
+  -- Once the battle is decided nobody is a spectator -- the result screen is
+  -- for everyone, and a spectator gate that outlived the battle would swallow
+  -- the button that closes it.
+  goneClient.result = "loss"
+  check(not CoopBattle.spectating(goneClient),
+        "and once the battle is over, nobody is left watching it")
+end)()
+
+-- ------- all the way to a decision
+--
+-- Run until somebody wins rather than for a fixed count, so the last turn --
+-- the one carrying the faints, the exp and the verdict, and the most crowded
+-- turn a battle has -- is covered rather than stopped short of.
+;(function()
+  local build = {
+    { side = "a", owner = "ann", name = "ANN",
+      party = { { hp = 150, speed = 50, moves = { tackle() } } } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { { hp = 150, speed = 40, moves = { tackle() } } } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { { hp = 60, speed = 30, moves = { tackle() } } } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { { hp = 60, speed = 20, moves = { tackle() } } } },
+  }
+  local host = fieldSim(describe(build))
+  local guest = fieldSim(describe(build))
+  local client = replayer(guest, 1)
+
+  local turns, matched = 0, true
+  while not host.over and turns < 30 do
+    CoopBattle.playEvents(client, host:resolveTurn(allAttack()))
+    turns = turns + 1
+    if guest:signature() ~= host:signature() then matched = false break end
+  end
+  check(host.over ~= nil, "the battle reaches a decision")
+  check(matched, "and the replayer agrees with the host on every turn of it")
+  eq(client.result, "win",
+     "and the client is told the verdict from its own side's point of view")
+end)()
+
+-- ------- replay conformance holds with statuses in play
+--
+-- The status gate changes a resolved turn's own event stream -- more
+-- messages, animations, and a turn a battler simply skips -- so the same
+-- comparison the wire makes gets one scenario carrying sleep and paralysis
+-- through several turns, checked against the host after every one.
+
+;(function()
+  local build = {
+    { side = "a", owner = "ann", name = "ANN",
+      party = { { hp = 200, speed = 50, moves = { tackle() } } } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { { hp = 200, speed = 45, moves = { tackle() } } } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { { hp = 200, speed = 30, moves = { tackle() } } } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { { hp = 200, speed = 20, moves = { tackle() } } } },
+  }
+  local host = fieldSim(describe(build))
+  local guest = fieldSim(describe(build))
+  local client = replayer(guest, 1)
+
+  -- Only the host needs the status -- it is the only copy that ever
+  -- simulates; the replayer's job is to agree on the HP the events carry,
+  -- not to hold the same volatile state.
+  host:slot(3).battler.mon.status = "SLP"
+  host:slot(3).battler.sleepTurns = 2
+  host:slot(4).battler.mon.status = "PAR"
+
+  local function turn()
+    return { { slot = 1, move = 1, target = 3 }, { slot = 2, move = 1, target = 4 } }
+  end
+
+  -- Turn one: CAL is asleep, DEE fully paralysed (the fixed rng's 0/256 roll
+  -- always clears the 63/256 threshold).
+  CoopBattle.playEvents(client, host:resolveTurn(turn()))
+  eq(guest:signature(), host:signature(),
+     "the replayer agrees while both statuses are gating a turn")
+
+  -- Turn two: CAL wakes (losing the turn on the wake itself), DEE stays
+  -- paralysed.
+  CoopBattle.playEvents(client, host:resolveTurn(turn()))
+  eq(guest:signature(), host:signature(),
+     "and still agrees on the wake-up turn -- a message-only difference from "
+     .. "an ordinary one, and no ordinary turn was ever the risk")
+
+  -- Turn three: CAL is free and actually swings.
+  CoopBattle.playEvents(client, host:resolveTurn(turn()))
+  eq(guest:signature(), host:signature(),
+     "and agrees again once the gate stops firing and the move actually lands")
+end)()
+
+end)()
+
+-- ------- a replacement is not a turn
+--
+-- When a monster faints its slot is *awaiting*, and nothing resolves until it
+-- has sent the next one out. A non-host files that choice down the same wire
+-- as an ordinary action, and the host used to put it in the queue of pending
+-- turn actions and then ask itself to resolve -- which it refuses to do while
+-- anything is awaiting. The pause waited on itself: every non-host player
+-- whose monster fainted froze the battle for all four until a stall timeout
+-- picked for them a minute later. Four clients found it; two never could,
+-- because with an NPC pair the only human who can faint is usually the host.
+
+;(function()
+  local pause = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(400, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(400, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(1, 5, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(400, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(400, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+
+  pause:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  local waiting = pause:awaitingChoice()
+  check(waiting ~= nil and waiting.index == 3,
+        "a fainted slot with a reserve stops the field and asks its owner")
+
+  -- The state the wedge lived in: while a slot is awaiting, there is nothing
+  -- to aim at on that side, so a player who opens FIGHT has an empty target
+  -- list -- which is why CoopBattle refuses to open the picker at all.
+  eq(#pause:targetsFor(pause:slot(1)), 1,
+     "the other side still has one target while the fainted slot chooses")
+
+  -- And the choice itself resolves the pause. `replace` is what the host runs
+  -- for a replacement, whoever sent it -- the fix is that a non-host's arrives
+  -- here rather than in the pending-actions queue.
+  local sent = {}
+  check(pause:replace(3, 2, function(event) sent[#sent + 1] = event end),
+        "the owner's choice is accepted")
+  eq(pause:awaitingChoice(), nil, "and the field stops waiting")
+  eq(pause:slot(3).active, 2, "with the chosen monster out")
+  local announced = false
+  for _, event in ipairs(sent) do
+    if event.kind == "send" and event.slot == 3 then announced = true end
+  end
+  check(announced, "and the other three are told which one it was")
+end)()
+
+-- ------- levelling up offers the move the species learns
+--
+-- The trap this pins: the host resolves every slot, so a move written onto the
+-- host's *copy* of somebody else's monster is thrown away with the copy --
+-- the same shape of bug that made items free for everyone but the host. The
+-- level-up therefore *announces* the move and each client applies it to its
+-- own live party.
+
+;(function()
+  local species = "FIXMON_A"
+  local def = data.pokemon[species]
+  -- The learn is driven off the species' own learnset, so the test needs one
+  -- to exist; if the fixture has none there is nothing to assert.
+  local Experience = require("src.battle.Experience")
+  local learnLevel, learnMove
+  for level = 2, 60 do
+    local ok, moves = pcall(Experience.movesLearnedAt, def, level)
+    if ok and moves and moves[1] then learnLevel, learnMove = level, moves[1] break end
+  end
+
+  if not learnLevel then
+    check(true, "(the fixture species has no level-up learnset to check)")
+    return
+  end
+
+  local learnSim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(1, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  -- one level short of the one that teaches something, with almost enough exp
+  local learner = learnSim:slot(1).battler.mon
+  learner.level = learnLevel - 1
+  learner.exp = 0
+  learner.statExp = {}
+
+  local out = learnSim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+  local learned, grew = nil, false
+  for _, event in ipairs(out) do
+    if event.kind == "learn" then learned = event end
+    if event.kind == "msg" and tostring(event.text):find("grew to") then grew = true end
+  end
+
+  if not grew then
+    check(true, "(the fixture payout was not enough to level; nothing to learn)")
+    return
+  end
+  check(learned ~= nil, "reaching the level announces the move as an event")
+  eq(learned.slot, 1, "naming the slot it belongs to, so only its owner applies it")
+  check(learned.move ~= nil, "and which move it is")
+end)()
+
+-- ------- an NPC picks through the engine's own trainer AI
+--
+-- The heuristic this replaced was strongest-move/weakest-target, which is not
+-- what a Gen 1 trainer does: the real AI discourages a move the defender
+-- resists, encourages status on a healthy target, and -- per trainer class --
+-- spends items and switches instead of attacking. Those layers are the
+-- engine's and are now driven rather than approximated.
+
+;(function()
+  local aiSim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(8, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 },
+                              { id = "FIX_SCRATCH", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+
+  local action = aiSim:npcAction(aiSim:slot(3))
+  check(action ~= nil, "an unowned slot still chooses an action")
+  eq(action.slot, 3, "for itself")
+  -- Targeting stays this file's job: Gen 1 has no notion of two opponents, so
+  -- nothing in the engine can answer "which of these two".
+  eq(action.target, 2, "aiming at the opponent closest to falling")
+  check(action.move ~= nil, "with a move chosen")
+  check(action.move >= 1 and action.move <= 2,
+        "and the move is an index into what it actually knows")
+
+  -- With every move spent the AI reaches Struggle rather than nothing, which
+  -- is the fallback path the old heuristic had no answer for at all.
+  for _, moveInst in ipairs(aiSim:slot(3).battler.curMoves) do moveInst.pp = 0 end
+  local spent = aiSim:npcAction(aiSim:slot(3))
+  check(spent ~= nil, "a monster with nothing left still takes its turn")
+  eq(aiSim:hasPP(aiSim:slot(3).battler), false, "having genuinely nothing left")
+end)()
+
+-- ------- out of PP means Struggle, not a lost turn
+
+sim = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 0 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(200, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(200, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+eq(sim:hasPP(sim:slot(1).battler), false, "a monster with no PP has none left")
+eq(sim:hasPP(sim:slot(2).battler), true, "and one with PP does")
+
+local emptyFoe = sim:slot(3).battler.mon.hp
+events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+check(sim:slot(3).battler.mon.hp < emptyFoe,
+      "a monster with nothing left still attacks -- it Struggles")
+local saidStruggle = false
+for _, event in ipairs(events) do
+  if event.kind == "msg" and tostring(event.text):find("STRUGGLE") then
+    saidStruggle = true
+  end
+end
+check(saidStruggle, "and the battle says so by name")
+
+-- ...and it costs the attacker, which is the whole of what makes Struggle
+-- Struggle rather than a weak Normal move. It runs through the engine's own
+-- STRUGGLE record and its RECOIL_EFFECT, so the recoil is the engine's -- not
+-- an approximation of it written here.
+local struggler = sim:slot(1).battler.mon
+check((struggler.hp or 0) < (struggler.stats.hp or 0),
+      "Struggle hurts the POKeMON using it -- the recoil is the engine's own")
+
+-- ------- and the choice of who follows is the player's
+--
+-- The picker itself, driven through the real `updateReplace`: what it offers,
+-- what it refuses, and what it puts on the wire. It is the one menu in this
+-- battle that **cannot be cancelled** -- the slot is empty and there is no
+-- turn to go back to -- so B doing nothing is a feature and worth pinning.
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local picker = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local sent = {}
+  local client = setmetatable({
+    sim = picker, host = false, mine = 1, messages = {}, replacing = true,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    sendAction = function(_, action) sent[#sent + 1] = action end,
+  }, { __index = CoopBattle })
+  local function press(key)
+    return { wasPressed = function(_, which) return which == key end }
+  end
+
+  -- The active one has fallen, and the third is dead: the bench is what is
+  -- left, and only what is left.
+  picker:slot(1).battler.mon.hp = 0
+  picker:slot(1).party[3].hp = 0
+  local bench = CoopBattle.benchOf(client, picker:slot(1))
+  eq(#bench, 1, "the bench offers the living reserves and nothing else")
+  eq(bench[1].index, 2, "by their place in the party")
+
+  -- B is not a way out.
+  CoopBattle.updateReplace(client, press("b"))
+  eq(client.replacing, true, "B does not cancel a replacement -- there is no "
+     .. "turn to go back to")
+  eq(#sent, 0, "and files nothing")
+
+  -- A takes what the cursor is on, files it, and closes the picker.
+  CoopBattle.updateReplace(client, press("a"))
+  eq(client.replacing, nil, "A answers it")
+  eq(#sent, 1, "and puts exactly one choice on the wire")
+  eq(sent[1].slot, 1, "for this player's own slot")
+  eq(sent[1].index, 2, "naming the monster they picked")
+
+  -- With two on the bench the cursor moves, and wraps.
+  picker:slot(1).party[3].hp = 60
+  client.replacing, client.switchIndex, sent = true, 1, {}
+  eq(#CoopBattle.benchOf(client, picker:slot(1)), 2, "two reserves, two rows")
+  CoopBattle.updateReplace(client, press("down"))
+  eq(client.switchIndex, 2, "down moves the cursor")
+  CoopBattle.updateReplace(client, press("down"))
+  eq(client.switchIndex, 1, "and wraps at the end of a short list")
+  CoopBattle.updateReplace(client, press("up"))
+  eq(client.switchIndex, 2, "as does up, the other way")
+  CoopBattle.updateReplace(client, press("a"))
+  eq(sent[1] and sent[1].index, 3, "and A files whichever row it landed on")
+
+  -- Nothing left to choose from is not a menu. It closes itself rather than
+  -- holding a player in front of an empty list they cannot leave.
+  picker:slot(1).party[2].hp = 0
+  picker:slot(1).party[3].hp = 0
+  client.replacing = true
+  CoopBattle.updateReplace(client, press("a"))
+  eq(client.replacing, nil, "an empty bench closes the picker instead of "
+     .. "trapping the player in it")
+end)()
+
+-- a monster that still has *something* is not made to Struggle
+sim = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 0 },
+                            { id = "FIX_SCRATCH", pp = 5 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(200, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(200, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+eq(sim:hasPP(sim:slot(1).battler), true, "one empty move is not empty-handed")
+events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+local struggled = false
+for _, event in ipairs(events) do
+  if event.kind == "msg" and tostring(event.text):find("STRUGGLE") then
+    struggled = true
+  end
+end
+check(not struggled,
+      "picking an empty move falls through to a usable one, not to Struggle")
+
+-- ------- running is refused, in the game's own words
+
+sim = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+events = sim:resolveTurn({ { slot = 1, kind = "run" } })
+local refused = false
+for _, event in ipairs(events) do
+  if event.kind == "msg" and tostring(event.text):lower():find("running") then
+    refused = true
+  end
+end
+check(refused, "RUN is refused -- a co-op battle is always a trainer battle")
+
+-- ------- switching by choice costs the turn and swaps the mon
+
+sim = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+              mon(45, 60, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+eq(sim:slot(1).active, 1, "the first mon is out")
+sim:resolveTurn({ { slot = 1, kind = "switch", index = 2 } })
+eq(sim:slot(1).active, 2, "SWITCH sends out the chosen one")
+eq(sim:slot(1).battler.mon.stats.hp, 45, "and the field holds the new battler")
+
+-- switching to something that is not there is refused rather than crashing
+sim:resolveTurn({ { slot = 1, kind = "switch", index = 5 } })
+eq(sim:slot(1).active, 2, "an impossible switch leaves the field alone")
+
+-- ------- a ball is blocked, the way a trainer battle blocks one
+
+local ballId
+for id, def in pairs(data.items or {}) do
+  if id:find("BALL") and not def.key then ballId = id break end
+end
+if ballId then
+  sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) }, bag = { [ballId] = 5 } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  events = sim:resolveTurn({ { slot = 1, kind = "item", item = ballId } })
+  local blocked = false
+  for _, event in ipairs(events) do
+    if event.kind == "msg" and tostring(event.text):lower():find("blocked") then
+      blocked = true
+    end
+  end
+  check(blocked, "a ball thrown in a co-op battle is blocked by the trainer")
+else
+  check(true, "(no ball in the fixture dataset to throw)")
+end
+
+-- ------- beating something pays both winners, as an event
+--
+-- The bug this pins is the one that took items and move learning before it:
+-- the host resolves every slot but holds the real party for only its own, so
+-- exp applied *here* paid the host and nobody else -- while still printing
+-- "gained 136 EXP. Points!" on all four screens. So the payout is announced,
+-- already divided, and each client applies it to the party its own save keeps.
+
+sim = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(1, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+for _, slot in ipairs({ sim:slot(1), sim:slot(2) }) do
+  slot.battler.mon.exp = 0
+  slot.battler.mon.statExp = {}
+end
+
+events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+check(sim:isDown(sim:slot(3)), "the foe goes down")
+
+local paid = {}
+for _, event in ipairs(events) do
+  if event.kind == "exp" then paid[event.slot] = event end
+end
+check(paid[1] ~= nil, "the trainer who swung is paid")
+check(paid[2] ~= nil, "and so is their partner -- both were in the fight")
+eq(paid[1].winners, 2, "with the share divided between the two of them")
+check(paid[1].amount > 0, "and it is worth something")
+eq(paid[1].amount, paid[2].amount, "the same to each")
+eq(paid[1].species, "FIXMON_A", "naming what was beaten, so a client can price it")
+
+-- **Nothing was applied here.** That is the whole point: the host must not be
+-- the only player who keeps what they earned.
+eq(sim:slot(1).battler.mon.exp, 0,
+   "the host applies nothing -- each client pays its own monster")
+eq(sim:slot(2).battler.mon.exp, 0, "including its partner's")
+
+-- the event carries what a client needs to price it for itself: EXP.ALL
+-- doubles the divisor on the winner and spreads the other half across the
+-- party, and none of that can be decided by the host
+check(paid[1].level ~= nil, "the event names the level that was beaten")
+check(paid[1].species ~= nil, "and the species, so the client can price it")
+
+-- and the share is the engine's own arithmetic, halved for two winners
+local solo = sim:expShare(sim:slot(3).battler.def, 30, 1)
+local pair = sim:expShare(sim:slot(3).battler.def, 30, 2)
+check(solo > 0, "one winner is owed something")
+check(pair < solo, "and two winners each get less than one would")
+
+-- ------- a fainted monster's replacement is its owner's choice
+--
+-- Auto-sending the next one is the easy implementation and it quietly removes
+-- one of the few real decisions a Gen 1 battle offers. An NPC still sends out
+-- whatever comes next -- there is nobody to ask.
+
+sim = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(1, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+              mon(45, 60, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(1, 30, { { id = "FIX_TACKLE", pp = 20 } }),
+              mon(50, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = nil, name = "FOE",
+    party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+
+events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+eq(sim:slot(3).active, 2, "an NPC sends out its next one without being asked")
+
+sim:slot(1).battler.mon.hp = 0
+local asked = {}
+sim:announceFaint(sim:slot(1), function(e) asked[#asked + 1] = e end)
+local sawChoose = false
+for _, event in ipairs(asked) do
+  if event.kind == "choose" and event.slot == 1 then sawChoose = true end
+end
+check(sawChoose, "a player's slot asks instead of choosing for them")
+check(sim:awaitingChoice() ~= nil, "and the field knows it is waiting")
+eq(sim:slot(1).active, 1, "with nothing sent out yet")
+eq(sim:sideBeaten("a"), false, "their side is not beaten while a reserve waits")
+
+check(sim:replace(1, 2, function() end), "answering sends out the chosen one")
+eq(sim:slot(1).active, 2, "which is the one that was asked for")
+eq(sim:awaitingChoice(), nil, "and nobody is waiting any more")
+
+-- ------- a player who leaves mid-battle forfeits, rather than deadlocking
+--
+-- The host resolves a turn only once every human has filed an action, so a
+-- player who closes the game would otherwise leave the other three sitting on
+-- a turn that never comes. A client that is still connected but silent is the
+-- same problem wearing a disguise, and lands on the same answer.
+
+sim = fieldSim({
+  { side = "a", owner = "ann", name = "ANN",
+    party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+              mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "a", owner = "bob", name = "BOB",
+    party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = "cal", name = "CAL",
+    party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  { side = "b", owner = "dee", name = "DEE",
+    party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+})
+
+eq(#sim:living(), 4, "four are standing")
+local left = sim:forfeit("cal")
+check(left ~= nil, "the player who left is found by id")
+eq(left.index, 3, "and it is their slot")
+check(sim:isDown(sim:slot(3)), "a gone slot counts as out of the fight")
+eq(sim:hasReserve(sim:slot(3)), nil, "with no reserve to send out")
+eq(#sim:living(), 3, "so three are left standing")
+eq(sim:sideBeaten("b"), false, "their side fights on while their partner is up")
+
+sim:forfeit("dee")
+eq(sim:sideBeaten("b"), true, "both of them gone beats the side")
+eq(sim:forfeit("cal"), nil, "a player cannot leave twice")
+
+-- the timeouts are ordered the way the design says -- but the other way round
+-- from a first guess. The turn deadline is a *guarantee*: a turn opens, and
+-- within COOP_TURN_TIMEOUT the host either resolves it or auto-picks for
+-- whoever is late and resolves it anyway, so a `res` lands inside that many
+-- seconds of every turn opening on a healthy host. The stall clock is what
+-- asks "has the host said anything at all", and that question only means
+-- something once a healthy host would have had to speak -- so it has to
+-- exceed the guarantee, not undercut it. A shorter stall clock used to trip
+-- every replayer into a resync on a legitimately quiet turn (four players
+-- thinking, nobody late enough to be auto-picked yet) as an *expected* state.
+check(Config.COOP_TURN_TIMEOUT > 0, "the host waits a finite time on a choice")
+check(Config.COOP_STALL_TIMEOUT > 0, "and a replayer waits a finite time on the host")
+check(Config.COOP_STALL_TIMEOUT > Config.COOP_TURN_TIMEOUT,
+      "with the replayer's patience set past the deadline that guarantees "
+      .. "the host will have spoken by then -- silence past that really is "
+      .. "silence, not just an ordinary quiet turn")
+
+-- ------- assembling an NPC side from a trainer record
+--
+-- This is where two real bugs lived, and neither was reachable from the field
+-- tests: a trainer's `parties` entries are *specs* (species and level), not
+-- monsters, and every party crosses the wire packed. A slot handed either one
+-- raw has nothing to fight with.
+
+local CoopBattle = need("CoopBattle")
+
+local trainerId
+for id, record in pairs(data.trainers or {}) do
+  if record.parties and record.parties[1] and #record.parties[1] > 0 then
+    trainerId = id
+    break
+  end
+end
+
+if trainerId then
+  local built = CoopBattle.trainerParty({ data = data }, trainerId, 1)
+  check(built ~= nil, "a trainer's party builds into real monsters")
+  check(#built > 0, "with something in it")
+  local first = built[1]
+  check(first.stats ~= nil and (first.stats.hp or 0) > 0,
+        "each one has stats -- a spec has none, which is the bug this catches")
+  eq(first.hp, first.stats.hp, "and starts at full health")
+  check(type(first.moves) == "table" and #first.moves > 0, "and knows moves")
+
+  -- ...and it survives the round trip every party makes over the wire
+  local packed = CoopBattle.packParty(built)
+  check(packed ~= nil, "a built party packs for the wire")
+  local rebuilt = CoopBattle.unpackParty({ data = data }, packed)
+  check(rebuilt ~= nil, "and unpacks on the other side")
+  eq(#rebuilt, #built, "with everyone still in it")
+  eq(rebuilt[1].species, first.species, "as the same species")
+  check((rebuilt[1].stats.hp or 0) > 0, "with stats recomputed, not lost")
+else
+  check(true, "(no trainer with a party in the fixture dataset)")
+end
+
+-- ------- the field names the trainer, so nobody has to have met them
+--
+-- Only the player who walked into the NPC holds the trainer record; anyone who
+-- joined by answering an invitation has never seen it. The assembled field is
+-- what closes that gap -- without the id on it, three of the four clients play
+-- the wrong music and fight with an AI that has no class to reason from.
+
+if trainerId then
+  local Coop = need("Coop")
+  local enemy = CoopBattle.trainerParty({ data = data }, trainerId, 1)
+  local assembler = setmetatable({}, { __index = Coop })
+  local battle = {
+    parties = { ["ann"] = CoopBattle.packParty(enemy) },
+    plan = {
+      hostId = "ann", label = "TRAINER",
+      allies = { { id = "ann", name = "ANN" }, { id = "bob", name = "BOB" } },
+      engine = { enemyParty = enemy, trainer = { id = trainerId } },
+    },
+  }
+  battle.parties["bob"] = battle.parties["ann"]
+  local built = assembler:buildField({ data = data }, battle,
+    battle.plan.allies)
+  check(built ~= nil, "an NPC co-op field assembles")
+  if built then
+    eq(built.trainer, trainerId, "and names the trainer it was built against")
+    eq(#built.slots, 4, "with four slots on it")
+  end
+
+  -- ...and the joiner reads it back. This is the client the whole id exists
+  -- for: it answered an invitation, it never walked into this trainer, and so
+  -- it has no engine battle to take the record off.
+  local world = { data = data }
+  local joined = Coop.trainerFor(world, built, nil)
+  check(joined ~= nil, "a client that never met the trainer still resolves it")
+  eq(joined, data.trainers[trainerId], "as this build's own record, not a copy")
+
+  -- the client that did walk into them keeps what it already has, even if the
+  -- field disagrees -- the record in hand is the one the engine built the
+  -- displaced battle from
+  local own = { trainer = { id = "OPP_SOMETHING_ELSE" } }
+  eq(Coop.trainerFor(world, built, own), own.trainer,
+     "and whoever walked into them keeps the record they already hold")
+
+  -- the id is off the wire, so it is sanitised before it is used as a key
+  eq(Coop.trainerFor(world, { trainer = { evil = true } }, nil), nil,
+     "a trainer id that is not a string resolves to nothing")
+  eq(Coop.trainerFor(world, { trainer = "../../etc/passwd" }, nil), nil,
+     "and one that is not id-shaped is refused rather than looked up")
+  eq(Coop.trainerFor(world, { trainer = "OPP_NOT_IN_THIS_BUILD" }, nil), nil,
+     "an id this build has no record for leaves the battle faceless")
+  eq(Coop.trainerFor(world, {}, nil), nil,
+     "and a field with no trainer on it -- two parties -- names nobody")
+end
+
+-- ------- and the id is what picks the theme
+--
+-- The point of carrying it: a gym leader has their own battle music, and the
+-- rule that decides so reads a badge table off the trainer's id. A client that
+-- resolved no trainer plays the ordinary theme -- so before the id travelled,
+-- the host heard the gym leader's music and everyone else heard a stranger's.
+
+local eng = CoopBattle.loadEngine()
+if eng and eng.BattleState then
+  local function kindFor(trainer)
+    return CoopBattle.musicKind({ trainer = trainer })
+  end
+
+  -- The subject comes from the badge table the rule itself reads, rather than
+  -- from a name written down here: a leader renamed upstream would otherwise
+  -- quietly turn this into a test of nothing. Only the id is needed -- the rule
+  -- never looks at the rest of the record.
+  local okBadges, victories = pcall(require, "data.scripts.victories")
+  local leader
+  if okBadges and type(victories) == "table" then
+    for key, reward in pairs(victories) do
+      if reward.badge and key:find("#", 1, true) then
+        leader = key:sub(1, key:find("#", 1, true) - 1)
+        break
+      end
+    end
+  end
+
+  if leader then
+    eq(kindFor({ id = leader }), "gym",
+       "a gym leader's co-op battle plays the gym leader's theme")
+    check(kindFor({ id = "OPP_NOT_A_LEADER" }) ~= "gym",
+          "and an ordinary trainer's does not -- the id really is deciding it")
+  else
+    check(true, "(this build ships no badge table to read leaders from)")
+  end
+  eq(kindFor(nil), "link",
+     "two parties fighting each other get the link theme, not a trainer's")
+
+  -- ------- and it is actually asked for, at the right moment
+  --
+  -- This build ships no audio data, so nothing can be heard here and
+  -- Music.playBattle would return without doing anything. What can be checked
+  -- is the boundary: that the battle asks for the right song at the right
+  -- point. The three things that go wrong silently are all here -- a fanfare
+  -- played to a closed screen, a victory theme that loops on into the
+  -- overworld because nothing restored the map, and a "finalWin" jingle no
+  -- build has.
+  local realMusic = eng.Music
+  local asked = {}
+  eng.Music = {
+    playBattle = function(_, kind) asked[#asked + 1] = "battle:" .. tostring(kind) end,
+    playVictory = function(_, kind) asked[#asked + 1] = "win:" .. tostring(kind) end,
+    restoreMap = function() asked[#asked + 1] = "restore" end,
+  }
+
+  local function battle(trainer)
+    return setmetatable({
+      game = { data = data }, trainer = trainer, messages = {},
+      announce = function() end, say = function() end,
+    }, { __index = CoopBattle })
+  end
+
+  local fight = battle(leader and { id = leader } or { id = "OPP_ANY" })
+  fight:enter()
+  eq(asked[1], "battle:" .. (leader and "gym" or "trainer"),
+     "opening the battle asks for the battle theme")
+
+  asked = {}
+  fight.result = "win"
+  fight:playVictoryMusic()
+  fight:playVictoryMusic()
+  eq(#asked, 1, "the fanfare starts once, however often the result is reached")
+  fight:exit()
+  eq(asked[2], "restore",
+     "and the map theme comes back on the way out -- a victory theme loops "
+     .. "forever, so a win that did not restore would play on in the overworld")
+
+  -- a loss restores too, and never sounds a fanfare
+  asked = {}
+  local lost = battle({ id = "OPP_ANY" })
+  lost.result = "loss"
+  lost:playVictoryMusic()
+  lost:exit()
+  eq(#asked, 1, "a loss asks for exactly one thing")
+  eq(asked[1], "restore", "and that thing is the map, not a fanfare")
+
+  -- the rival's last fight: its own battle theme, the gym leader's jingle
+  asked = {}
+  local final = battle({ id = "OPP_RIVAL3" })
+  if final:musicKind() == "final" then
+    final.result = "win"
+    final:playVictoryMusic()
+    eq(asked[1], "win:gym",
+       "the rival's last fight answers with the gym leader's jingle -- there "
+       .. "is no such song as finalWin")
+  else
+    check(true, "(this build has no final-rival theme to fold)")
+  end
+
+  eng.Music = realMusic
+end
+
+-- ------- exp is priced on the client, not handed down
+--
+-- The host resolves the knockout but holds nobody's party except its own, so
+-- what crosses the wire is a description of the kill -- species, level, how
+-- many shared it -- and each client runs the engine's own arithmetic over its
+-- own live monster. This asserts the two things that description has to buy:
+-- that a shared knockout really is divided, and that an EXP.ALL in the bag
+-- reaches a monster that never left its ball.
+
+if eng and eng.Experience then
+  local species = next(data.pokemon)
+  local function monster(level)
+    local built = eng.Pokemon.new(data, species, level or 5)
+    built.statExp = built.statExp or {}
+    return built
+  end
+  local function harness(inventory, party)
+    local active = party[1]
+    return setmetatable({
+      mine = 1,
+      game = { data = data, save = { inventory = inventory, party = party } },
+      sim = { slot = function() return { battler = { mon = active,
+                                                     name = "ACTIVE" } } end },
+      say = function() end,
+    }, { __index = CoopBattle })
+  end
+  local event = { slot = 1, species = species, level = 40, winners = 2 }
+  -- A monster built at a level already carries the exp that level costs, so
+  -- every assertion below is on the *gain*, not on the total.
+  local baseline = monster().exp
+  local function gained(mon) return mon.exp - baseline end
+
+  -- one winner against two: the second must be worth strictly less
+  local solo = monster()
+  harness({}, { solo }):gainExp({ slot = 1, species = species, level = 40,
+                                  winners = 1 })
+  local shared = monster()
+  harness({}, { shared }):gainExp(event)
+  check(gained(shared) < gained(solo),
+        "a knockout two players shared is worth less each than one alone")
+  check(gained(shared) > 0, "but not nothing")
+
+  -- EXP.ALL: the fighter takes less, and the bench stops being left out
+  local benchOff, benchOn = monster(), monster()
+  local fighterOff, fighterOn = monster(), monster()
+  harness({}, { fighterOff, benchOff }):gainExp(event)
+  harness({ EXP_ALL = 1 }, { fighterOn, benchOn }):gainExp(event)
+  eq(gained(benchOff), 0, "without an EXP.ALL the bench gains nothing")
+  check(gained(benchOn) > 0, "with one it does")
+  check(gained(fighterOn) < gained(fighterOff),
+        "and the monster that fought takes the halved share, as in the "
+        .. "original -- an EXP.ALL costs the fighter, it is not free exp")
+
+  -- a fainted party member is still left out
+  local fainted = monster()
+  fainted.hp = 0
+  harness({ EXP_ALL = 1 }, { monster(), fainted }):gainExp(event)
+  eq(gained(fainted), 0,
+     "a fainted party member shares nothing, EXP.ALL or not")
+else
+  check(true, "(engine battle modules unavailable here)")
+end
+
+base.release()
 
 end)()
 

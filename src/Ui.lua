@@ -45,6 +45,8 @@ local SCREEN = {
   CHARPICK = "RbyMmoCharPick",
   PROFILE  = "RbyMmoProfile",
   RANK     = "RbyMmoRank",
+  CHOOSE   = "RbyMmoChoose",
+  MENU_CHOOSE = "RbyMmoChooseMenu",
 }
 M.SCREEN = SCREEN
 
@@ -566,16 +568,49 @@ end
 
 -- ------- primitives other modules call
 
+-- Returns the box it pushed, which is a screen on the engine's stack and so
+-- something a caller can take back down again. Coop is the one that needs it:
+-- its "Asked NAME for a 2-on-2 battle." dismisses itself when the player
+-- presses A, and a player who does not press A is holding it when the battle
+-- screen goes up on top of it.
 function M:say(text, onDone)
   local game = self.ctx.game
-  if not game then return end
-  mod.ui.push(game, SCREEN.TEXT, { text = text, onDone = onDone })
+  if not game then return nil end
+  return mod.ui.push(game, SCREEN.TEXT, { text = text, onDone = onDone })
 end
 
 function M:confirm(game, text, onChoose)
   game = game or self.ctx.game
   if not game then return end
   mod.ui.push(game, SCREEN.CONFIRM, { text = text, onChoose = onChoose })
+end
+
+-- A question with named answers, where **B is an answer and not an escape**.
+--
+-- CONFIRM is the yes/no box, and its B is a no that returns the player to
+-- whatever they came from.  That is exactly wrong for a fight that has already
+-- been triggered: the engine has committed to the encounter by the time the
+-- mod is asked, so a prompt that could be backed out of would be a prompt that
+-- skipped a trainer.  Here B selects the **last row** instead -- which the
+-- callers order so that the last row is the one that costs the player nothing
+-- they had not already accepted (BATTLE ALONE, or reopening the choice).
+--
+-- The rows are a Menu, not a TextBox choice, because there can be more than
+-- two of them and because they are commands rather than an answer to a
+-- sentence -- the same widget the ACTIONS box uses, for the same reason.
+-- Which row B selects.  A named function with no widget in it, so the rule
+-- can be asserted directly rather than only through a screen the headless
+-- suite would have to build a game to construct -- and so there is exactly one
+-- statement of it for the screen and the suite to share.
+function M.cancelRow(items)
+  if type(items) ~= "table" or #items == 0 then return nil end
+  return items[#items]
+end
+
+function M:choose(game, text, items)
+  game = game or self.ctx.game
+  if not (game and items and #items > 0) then return end
+  mod.ui.push(game, SCREEN.CHOOSE, { text = text, items = items })
 end
 
 function M:pushState(game, state)
@@ -645,6 +680,40 @@ function M:install()
 
   screens:register(SCREEN.STATE, { new = function(_, opts)
     return opts and opts.state
+  end })
+
+  -- The unescapable choice.  See M:choose for why B is a row and not a way
+  -- out; this is that decision, spelled.
+  --
+  -- The sentence is printed first and the box opens under it, which is the
+  -- vanilla rhythm CONFIRM already follows -- a question and its answers
+  -- appearing at the same instant reads as two screens fighting over the
+  -- bottom of the display.
+  screens:register(SCREEN.CHOOSE, { new = function(game, opts)
+    opts = opts or {}
+    local items = opts.items or {}
+    return mod.ui.TextBox.new(game, opts.text or "", function()
+      mod.ui.push(game, SCREEN.MENU_CHOOSE,
+        { items = items, last = M.cancelRow(items) })
+    end)
+  end })
+
+  -- The box itself, split out so CHOOSE can print its line before opening it.
+  -- Registered rather than pushed as a bare widget for the reason the file
+  -- header gives: mod.ui.push is the supported door, game.stack is not.
+  screens:register(SCREEN.MENU_CHOOSE, { new = function(game, opts)
+    opts = opts or {}
+    local items = opts.items or {}
+    local last = opts.last
+    return mod.ui.Menu.new(game, items, {
+      tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
+      -- B is the last row, run as though it had been selected. Not nil, and
+      -- not a close: a co-op prompt with a working cancel is a trainer the
+      -- player walked away from mid-encounter.
+      onCancel = function()
+        if last and last.onSelect then last.onSelect() end
+      end,
+    })
   end })
 
   -- ------- the main MMO menu
@@ -1445,8 +1514,35 @@ function M:install()
       items[#items + 1] = { label = "INVITE", invite = true }
     end
 
+    -- JOIN, and only against the partner who is actually standing at a fight
+    -- waiting for us. This is the third way into the co-op yes/no in the
+    -- brief -- walking up to the person who is waiting and pressing A -- and
+    -- it is offered rather than always present for the same reason INVITE is:
+    -- a row whose usual answer is "there is nothing to join" is a row the
+    -- useful commands do not get.
+    local offer = ctx.coop:pendingOffer()
+    if offer and offer.from == player.id then
+      items[#items + 1] = { label = "JOIN", join = true }
+    end
+
     items[#items + 1] = { label = "TRADE", kind = "trade" }
     items[#items + 1] = { label = "BATTLE", kind = "battle" }
+    -- Directly under BATTLE, which is where the brief puts it and where it
+    -- belongs: it is the same verb with twice the people. Offered against
+    -- almost everybody, and deliberately so -- unlike INVITE, whose refusals
+    -- are facts about the two of you that the menu can see, most ways this one
+    -- can be refused are a sentence naming what to fix (no party, they have no
+    -- party, your friend is elsewhere), and a row that vanished would say none
+    -- of it.
+    --
+    -- Your own partner is the exception, and the reason is that there is
+    -- nothing to fix. A 2-on-2 is two parties and the two of you are one, so
+    -- it is not a battle that could be arranged by moving somewhere or waiting
+    -- for someone -- it is a battle that does not exist. Absent, like INVITE
+    -- against someone already in a party.
+    if not ctx.party:isPartner(player.id) then
+      items[#items + 1] = { label = "PARTY BATTLE", party = true }
+    end
     items[#items + 1] = { label = "WHISPER" }
 
     local reopen = function()
@@ -1455,12 +1551,20 @@ function M:install()
     end
     for _, item in ipairs(items) do
       local kind, wantsProfile, wantsInvite = item.kind, item.profile, item.invite
+      local wantsJoin, wantsParty = item.join, item.party
       item.onSelect = function()
         if wantsProfile then
           mod.ui.push(game, SCREEN.PROFILE,
             { playerId = player.id, onCancel = reopen })
         elseif wantsInvite then
           ctx.party:invite(player)
+        elseif wantsJoin then
+          ctx.coop:joinFromMenu(game)
+        elseif wantsParty then
+          -- The current map is read here and handed down, because Coop holds
+          -- no engine dependency of its own -- see M:challenge's header.
+          local current = World.current()
+          ctx.coop:challenge(game, player, current and current.mapId)
         elseif kind then
           ctx.sessions:request(player, kind)
         else
