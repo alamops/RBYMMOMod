@@ -155,7 +155,11 @@ container, where it is on `PATH`.
 | `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
 | `status` | every effective setting, its value, and where that value came from (`flag` / `env` / `file` / `default`). Codes masked. | — |
 | `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (one object per player, the nine contract fields only) |
-| `ranking` | the ranked season out of `ranking.json`: place, name, points. Top ten, best first. | `--json`, `--all` (every player who has scored, not just the top ten) |
+| `ranking` | the ranked season out of `ranking.json`: place, name, points, and how many battles each player has won and lost. Top ten, best first. | `--json`, `--all` (every player who has scored, not just the top ten) |
+| `watch` | the `players` frame, repainted until Ctrl-C. Clears the screen between frames only when stdout is a terminal. | `--interval <s>` (seconds between frames, default 2, clamped 1–60), `--once` (one frame, then exit), `--json` |
+| `history` | settled ranked battles out of `history.jsonl`, newest first: when, who beat whom, and what it moved. | `-n N` (how many, default 20), `--json` (the stored records, one per line) |
+| `kick <name>` ‡ | remove a connected player. Matches the name case-insensitively and may hit nobody or several people; says which. | `--reason TEXT` (what the player is shown; defaults to *"An operator removed you from this hub."*) |
+| `broadcast <text>` ‡ | say one line to everybody connected. It arrives in their chat log as `HUB`. | — |
 | `config list` | every setting, its current value, and its clamp range | — |
 | `config get <path>` | one setting, e.g. `limits.maxPending` | — |
 | `config set <path> <value>` | change one setting: clamped, reported, then saved | — |
@@ -173,6 +177,11 @@ container, where it is on `PATH`.
 † **These edit `config.json`; a hub that is already running does not notice
 until you tell it to look.** See
 [Changing things while the hub is running](#changing-things-while-the-hub-is-running).
+
+‡ **These two are the opposite: they talk to the running hub and touch no
+file at all.** They dial `admin.sock` beside the config, so they work only
+while the hub is up — see [Talking to a hub that is
+running](#talking-to-a-hub-that-is-running).
 
 ### Who is on it, and who is winning
 
@@ -198,13 +207,20 @@ who are not online now.
 
 ```console
 $ docker compose exec hub rby-mmo-hub ranking
-PLACE  NAME   POINTS
-1      HOSTY  1012
-2      ALPHA  1004
-3      BETA   996
+PLACE  NAME   POINTS  W   L
+1      HOSTY  1012    14  3
+2      ALPHA  1004    11  6
+3      BETA   996     8   9
 
 3 ranked player(s) -- the whole board.
 ```
+
+`W` and `L` are wins and losses, and they are not new bookkeeping: the season
+file has recorded how many battles each name has *played* and *won* since
+ranked play shipped, and the two columns are that pair, projected. A player's
+losses are `played - won`, which is why a draw — a battle that scored
+nothing — appears in neither column. `--json` carries `played` and `won` as they are
+stored, as it always has.
 
 Bare Node is the same line without the `docker compose exec hub` in front of
 it, and both take `--config <file>` like every other command — the two files
@@ -252,6 +268,169 @@ All four **exit `0`**. "Nobody is home" is an answer, not a failure.
 any rating moving and does not go stale when the hub stops, because a finished
 season is still the season. An absent or empty file is reported the same
 gentle way — nobody has scored here yet.
+
+### Watching it happen
+
+`watch` is `players` and a loop: the same frame, repainted every couple of
+seconds, until Ctrl-C.
+
+```console
+$ docker compose exec hub rby-mmo-hub watch
+3 player(s) online of 8 on 0.0.0.0:7788, snapshot 1s old.
+
+NAME   LOCATION         STATUS  POINTS
+HOSTY  PALLET TOWN              1012
+ALPHA  VIRIDIAN FOREST  PARTY   1004
+BETA   -                BUSY    996
+
+Read at 21:14:03, again in 2s. Ctrl-C stops.
+```
+
+- `--interval <s>` changes the two seconds, between **1 and 60**; anything
+  outside that is pulled to the nearest end and reported rather than refused.
+  There is little point below the hub's own heartbeat for an idle world — the
+  snapshot is rewritten within a second of anybody joining, leaving or
+  crossing a map, and every ten seconds regardless, so a faster repaint mostly
+  redraws the same numbers with a larger age on them.
+- `--once` prints exactly one frame and exits with **that frame's own exit
+  code**, exactly as `players` would. That is the form a script, a cron line
+  or a test wants.
+- `--json` prints one JSON document per frame instead of the table, for
+  something that is watching this rather than someone.
+- Ctrl-C is a success, not an interruption: the verb stops, says that nothing
+  it did ever spoke to the hub, and exits `0`.
+- **The screen is only cleared when stdout is a terminal.** Redirected to a
+  file or piped into something, `watch` writes plain frames one after another
+  with no escape sequences in them — the difference between a log you can read
+  later and a log full of `\x1b[2J`.
+- Every state `players` can report, `watch` reports the same way, on every
+  frame: a hub that stops mid-watch starts saying so rather than freezing on
+  its last good roster, and a hub that comes back is picked up on the next
+  repaint. Nothing here holds a connection to the hub; it is the file, read
+  again.
+
+### What has been played
+
+`ranking.json` says who is on 1012 points. `history.jsonl` says how they got
+there — one line per settled ranked battle, appended as it settles.
+
+```console
+$ docker compose exec hub rby-mmo-hub history -n 3
+The last 3 of 412 settled ranked battle(s), newest first.
+
+WHEN  WINNER  LOSER  POINTS   REMATCH
+4m    HOSTY   BETA   +16/-16
+21m   ALPHA   BETA   +8/-8    x2
+50m   HOSTY   ALPHA  +16/-16
+
+WHEN is how long ago the battle settled. POINTS is what the winner
+gained and the loser lost; `rby-mmo-hub ranking` has the totals.
+REMATCH marks a pair who had met before -- x2 is their second settled
+battle, which the hub scores lower than the first.
+```
+
+- **Default is the last 20**, newest first; `-n N` asks for more or fewer, and
+  a number larger than the file simply prints everything there is.
+- **`REMATCH` appears only when one is in view.** It is why a result scored
+  what it did: the hub pays a pairing that has already met inside the hour
+  half, then a quarter, then nothing.
+- Newest first is the file read backwards, not a sort on the timestamps: the
+  hub appends in the order it settles battles, and sorting would let one
+  hand-edited `at` reorder the lot.
+- `--json` prints the same records, same cut, as JSON.
+- **A battle both players did not agree about is not history.** The hub scores
+  a match only when the two reports match, so a draw, a disagreement, a
+  dropped link and a battle played under a name whose claim was not proven all
+  score nothing — and what scores nothing is not written here. This file is
+  the ledger of the season, not of every battle that was started.
+- **Missing or empty is an answer, not an error.** No file names all three
+  things it can mean — no ranked battle has settled here yet, this hub
+  predates the ledger, or it keeps its files somewhere else — and a file with
+  no results in it says what does and does not get written. Both exit `0`,
+  the way `ranking` treats an empty board, and `--json` still prints `[]`.
+- **A line the reader cannot parse is skipped, and counted out loud** on
+  stderr: a torn last line is normal after a hub was killed (the file is
+  appended to — see [`history.jsonl`](#configuration) below), and more than
+  one means somebody has been editing it. A reader that silently dropped
+  lines would be a reader nobody could trust about the ones it kept.
+
+### Talking to a hub that is running
+
+`players`, `watch`, `history` and `ranking` all read files, which is why they
+work on a hub that is switched off. **`kick` and `broadcast` are the other
+kind**: they are instructions, they need the hub to be up, and they reach it
+through a Unix socket the running hub opens beside its config —
+`admin.sock`.
+
+```console
+$ docker compose exec hub rby-mmo-hub broadcast Server restart in 5 minutes.
+Delivered to 3 player(s).
+
+$ docker compose exec hub rby-mmo-hub kick BETA --reason Take the evening off
+Kicked 1 player(s): BETA.
+They were shown: Take the evening off
+A kick is not a ban: the same passcode gets them back in. `ban <ip>`
+or `revoke <id>`, then a reload, is what keeps somebody out.
+```
+
+- **Quotes are optional on both.** Everything after `broadcast` is the
+  message, and everything after `--reason` is the reason, joined with spaces —
+  the same rule `config set` already follows for a multi-word value.
+- **The kicked player is told why.** The reason is delivered as the same
+  fatal error the game already renders for a refused join, so it appears on
+  their screen rather than only in your log; with no `--reason` it is *"An
+  operator removed you from this hub."* They are then disconnected and taken
+  off everybody's roster, and any trade or battle they were in ends the way it
+  does for any player who drops.
+- **A kick is not a ban.** They can reconnect immediately with the same
+  passcode, which is what the verb says as it reports. To keep somebody out,
+  `ban` their address or `revoke` the code they used, reload, *then* kick.
+- **A name can match nobody, or several people.** Trainer names are unique
+  only among *ranked* players — two friends who never changed the default can
+  both be `RED` — so the match is case-insensitive, hits every connected
+  player wearing that name, and the verb reports the count and the names. A
+  kick that matched nobody says *"Nobody by that name is connected. Nothing
+  was done."* and exits `0`: the hub was reachable and the instruction was
+  carried out, there was simply nobody to carry it out on.
+- **A broadcast is an ordinary chat line named `HUB`.** It lands in the chat
+  log of everybody connected, with no bubble over anybody's head, and it is
+  held to the same length and the same characters as any other chat message.
+  A delivery count of zero says the two things it can mean: nobody is in the
+  world, or nothing survived that cleaning.
+- **`HUB` is a reserved trainer name.** A hub-originated line carries no sender
+  id, so the name is the only thing telling a player the hub said it — which
+  is why a player connecting as `HUB`, in any spelling, is refused and asked
+  to pick another name.
+
+**When the socket is not there**, both verbs say the two things that can mean,
+and exit `0` — an absent hub is an answer, the same way `players` treats a
+missing snapshot:
+
+```
+$ rby-mmo-hub broadcast hello
+No admin socket at /data/admin.sock.
+
+  The hub opens that socket while it runs and removes it on the way
+  out, so there being none means one of two things: no hub is running
+  against this config file, or the hub that is running predates the
+  admin channel and has to be restarted before it will open one.
+
+  It sits beside the config file, so `--config <path>` moves both. If
+  the hub runs in Docker, the socket is inside the container:
+      docker compose exec hub rby-mmo-hub broadcast hello
+```
+
+Two neighbouring cases are told apart rather than folded in: a socket file
+with nothing listening on it is a hub that was **killed** — Unix sockets
+outlive the process that made them, and starting the hub again clears it — and
+a socket this user may not open is a real failure with a real fix (run as the
+user the hub runs as; `docker compose exec hub` already does), which exits
+`1`.
+
+The socket is documented with the rest of the hub's files under
+[Configuration](#configuration), including the one thing worth knowing before
+you rely on it: **there is no password on it, and the data directory's own
+permissions are the whole boundary.**
 
 ### `--code`, and the flag that is gone
 
@@ -305,7 +484,9 @@ Global options, valid on every command:
 - `--help` — the command's own help instead of running it.
 
 Flags are long-form only: `--flag`, `--flag value`, `--flag=value`,
-`--no-flag`, and `--` to stop parsing. There are no short options.
+`--no-flag`, and `--` to stop parsing. There are no short options, with one
+exception: `history -n <count>`, which is the spelling every other tool that
+prints the last N of something already uses.
 
 Short spellings for the settings a host actually types: `--host`, `--port`,
 `--max` (or `--max-players`), `--auth`, `--per-ip`, `--connect-burst`,
@@ -343,6 +524,109 @@ Codes are masked. --reveal prints them in full.
 
 ---
 
+## Dashboard
+
+An optional web page showing the same things the CLI shows, for a host who
+would rather leave a tab open than a terminal. **It is off by default, it
+binds to `127.0.0.1` by default, and it is plain HTTP.** Read the last of
+those three before you move the first two.
+
+It draws three things, refreshed every five seconds:
+
+- **PLAYERS** — who is online, where, `BUSY`/`PARTY`, points. The `players`
+  table, live.
+- **RANKING** — the season: place, name, points, W, L.
+- **THE DOOR** — connections, pending handshakes, wrong join codes, and
+  whether the hub-wide lockdown is currently tripped. These are live
+  in-process counters that reach no file at all, so this page and
+  `admin.sock`'s `stats` are the only two places outside the log they can be
+  seen.
+
+**There is no button on it.** No kick, no config editor, no verb of any kind:
+a page that can only look has a leak for a worst case rather than a takeover,
+and the instructions live on the admin socket behind filesystem permissions
+where they can be reasoned about separately.
+
+### Turning it on
+
+```sh
+rby-mmo-hub config set dashboard.enabled true
+rby-mmo-hub config set dashboard.port 7790      # optional; this is the default
+# restart the hub -- a listener cannot be bound by a reload
+docker compose restart hub                      # or Ctrl-C and `start` again
+```
+
+Then open `http://127.0.0.1:7790/` **on the machine the hub runs on**, and log
+in with a join code.
+
+Two things refuse rather than surprise you:
+
+- **`dashboard.enabled` is not re-applied by `SIGHUP`.** It binds a socket, so
+  it is a start-time decision like `listen.port` — see [Changing things while
+  the hub is running](#changing-things-while-the-hub-is-running).
+- **A dashboard with no working join code does not start.** If every
+  credential is revoked, expired or used up at the moment the hub comes up,
+  the listener is not opened and the log names the command that fixes it
+  (`rby-mmo-hub invite`, or turn the dashboard off). A login page nobody can
+  get through is a hole with a form on it, not a feature. That check runs once
+  at start: revoking the last code *while* the hub runs leaves the page up and
+  refusing everybody, rather than tearing a listener out from under a host who
+  is mid-look.
+
+### Logging in is the join code, and nothing new
+
+There is **no dashboard password**. The login form takes any join code that
+still works — the same codes players type, filtered the same way, read out of
+the config live at every attempt. That is one set of credentials with one set
+of rules:
+
+- **Revoking or rotating a code revokes or rotates dashboard access with it,
+  at the same moment** it stops working on the game port. `invite` mints one
+  that works for both. There is deliberately no second secret to rotate and
+  forget about.
+- **A wrong code typed here is charged to the same throttle** a wrong code
+  answered on the wire is: the per-address grace and escalating backoff, and
+  the hub-wide ceiling. The throttle is consulted *before* anything is
+  verified, so a locked-out address cannot use this page to keep guessing, and
+  a tripped hub-wide ceiling turns the page and the game port away together.
+- A session is a random token in an `HttpOnly`, `SameSite=Strict` cookie held
+  in memory for twelve hours. It is never written anywhere, so **restarting
+  the hub signs everybody out**, and nothing here logs a code, a token or a
+  request body.
+
+### It is plain HTTP — treat it exactly like the game port
+
+**There is no TLS on this page, for the same reason there is none on the game
+port: this program is Node core and zero dependencies, and the mod's own
+client could not speak it either.** So the join code you type into the form,
+the session cookie that comes back, and every roster line the page draws all
+**cross the network in the clear**, and anyone on the path can read the code
+and replay the cookie.
+
+That is why the default is `enabled: false` and the default bind is
+`127.0.0.1`: on loopback the "network" is the host's own machine and there is
+no path to be on. **Publishing this port is a second, separate decision from
+publishing the game port, and it is a bigger one** — the game port leaks
+gameplay, this one leaks the credential that opens the game port.
+
+If you want it from another machine, do what the game port's own section says
+to do: put both ends on an **encrypted overlay network** (WireGuard,
+Tailscale, ZeroTier) and bind the dashboard to that interface, or leave it on
+loopback and reach it through an **SSH tunnel**:
+
+```sh
+ssh -N -L 7790:127.0.0.1:7790 you@your-hub-box   # then open http://127.0.0.1:7790/
+```
+
+Setting `dashboard.host` to `0.0.0.0` on a box with a public address puts a
+login form for your join codes on the open internet, in plaintext. Nothing in
+this software stops you; nothing in it makes that safe either.
+
+Under Docker the port is **not** published. `compose.yml` carries the mapping
+commented out, with the same reasoning beside it.
+
+---
+
 ## Configuration
 
 One file, `config.json`, written at mode `0600` because it holds join codes in
@@ -354,9 +638,9 @@ order:
 3. `./config.json` next to where you ran the command
 4. `/data/config.json`, when `/data` exists — the container's volume
 
-Next to it, the hub keeps two files it writes itself. Neither is a setting and
-neither is yours to edit; both can be deleted without consequence beyond what
-they hold.
+Next to it, the hub keeps three files it writes itself and opens one socket.
+None of them is a setting and none of them is yours to edit; each can be
+deleted without consequence beyond what it holds.
 
 The first is **`ranking.json`**, the
 ranked-PVP season. It holds a line per trainer name — points, character, and
@@ -382,7 +666,48 @@ claim ticket, not an account: it sits in a save file and crosses the same
 unencrypted link the passcode does, with the same consequence if either is
 captured. Deleting `ranking.json` releases every name along with every score.
 
-The second is **`status.json`**, the snapshot [`players`](#who-is-on-it-and-who-is-winning)
+The second is **`history.jsonl`**, the match ledger
+[`history`](#what-has-been-played) reads: one JSON object per line, appended
+as each ranked battle settles, oldest line first.
+
+```json
+{ "at": 1754300012345, "startedAt": 1754300000000, "repeats": 0,
+  "winner": { "name": "RED", "points": 27, "gained": 16 },
+  "loser":  { "name": "BLUE", "points": 3, "lost": 16 } }
+```
+
+- `at` and `startedAt` are when the battle settled and when it began;
+  `points` on each side is the rating **after** the match, and
+  `gained`/`lost` is what moved. `repeats` is how many times that pairing had
+  already met inside the rematch window, which is why the swing on the third
+  meeting of an evening is smaller than the first.
+- **Only settled ranked battles are here.** A draw, two players who reported
+  different outcomes, and a match under a claim the hub would not honour all
+  score nothing, and what scores nothing is not written.
+- **This is the one file the hub appends to** rather than writing whole and
+  renaming over, and deliberately: a history is only ever the old lines plus
+  one more, so rewriting it to add a line would mean reading back every battle
+  ever played on the path of the one that just finished, and putting all of
+  them at risk on every write. Created at mode 0600 like everything else here.
+- **The cost of appending is a torn last line**, if the hub is killed
+  mid-write. There is no way to append and be atomic at once; the reader skips
+  a line it cannot parse and carries on, which bounds the damage to at most
+  one line per crash.
+- **It is bounded at roughly a megabyte, in two generations.** Before an
+  append that would take it past **512 KiB**, the file is renamed to
+  `history.jsonl.1` — replacing any previous `.1` — and a fresh ledger is
+  started. A rename is atomic and cannot lose the file it is moving. Half a
+  megabyte is somewhere around three thousand battles, so a hub holds between
+  three and six thousand of them and the older half falls off the end. If you
+  want to keep a season forever, copy the file; nothing here will do it for
+  you, and nothing here will grow without bound either.
+- **It holds no secrets** — trainer names and numbers, the same things
+  `ranking.json` already holds in public. Safe to `cat`, safe to hand to
+  somebody writing a stats page.
+- Deleting it loses the record and nothing else: the ratings live in
+  `ranking.json` and are not recomputed from here.
+
+The third is **`status.json`**, the snapshot [`players`](#who-is-on-it-and-who-is-winning)
 reads. It is the running hub's answer to a question a short-lived CLI process
 cannot otherwise ask it — who is connected, and where:
 
@@ -442,6 +767,44 @@ cannot otherwise ask it — who is connected, and where:
   it could not write a status file would have failed at the job the file only
   reports on.
 
+And the socket: **`admin.sock`**, opened by the running hub beside its config
+and removed when it stops. It is what [`kick` and
+`broadcast`](#talking-to-a-hub-that-is-running) dial, and it carries two more
+commands nothing ships a verb for yet — `who`, the live roster, and `stats`,
+the hub's counters including the wrong-passcode throttle's live numbers.
+
+```console
+$ printf '{"cmd":"who"}\n' | nc -U /data/admin.sock
+{"ok":true,"players":[…],"count":3,"maxPlayers":8,"uptimeMs":4210233}
+```
+
+- **One JSON object in, one JSON object out, per connection.** No sessions,
+  nothing server-initiated, a request line capped at 4 KiB. A line that is not
+  JSON, not an object, or not one of the four commands comes back as
+  `{"ok":false,"error":"…"}` — always a sentence, never a stack trace, and
+  never an exception into the hub.
+- **The trust model is the filesystem, and there is deliberately no in-band
+  auth.** The socket sits inside the data directory, which is 0700, beside the
+  `config.json` that holds every join code in plaintext. A process that can
+  open this socket can already read those codes: a password here would guard
+  nothing that is not already lost, and would put a second secret in the same
+  directory as the first. **Anything that grants another user access to this
+  directory grants them the hub**, which was already true of `config.json` and
+  is now true of a live kick as well.
+- **It is in `/data` and not `/tmp` on purpose.** The data volume is what
+  `docker compose exec` shares with the container; the container's `/tmp` is a
+  private tmpfs, so a socket there would be unreachable from the command a
+  host actually types.
+- **A hub with no config file opens none**, for the same reason it writes no
+  snapshot: `node hub.js` and an embedding caller have no data directory to
+  put one in.
+- A stale socket file left by a hub that was killed does not block the next
+  start: the hub checks that the path really is a socket, unlinks it, and
+  binds once more. It refuses to unlink anything that is not one.
+- Nothing that crosses it is a secret, but everything that crosses it is an
+  instruction. It is not `cat`-safe in the way `status.json` is — not because
+  of what it says, but because of what it can be told.
+
 Precedence, everywhere, without exception:
 
 > **command-line flag > `RBY_MMO_*` env var > config file > built-in default**
@@ -459,6 +822,7 @@ end and reported, never obeyed.
 | `listen.host` | `0.0.0.0` | — | `RBY_MMO_HOST` | address to bind. `0.0.0.0` accepts on every address this machine has |
 | `listen.port` | `7788` | 1–65535 | `RBY_MMO_PORT` | TCP port to listen on |
 | `maxPlayers` | `4` | 2–64 | `RBY_MMO_MAX` | greeted players before new ones are refused |
+| `motd` | `""` | ≤120 chars | — | the message of the day, shown to everyone who connects. Empty means no greeting. Re-applied on `SIGHUP` |
 | `auth.required` | `true` | — | `RBY_MMO_AUTH_REQUIRED` | whether a passcode is demanded. **`false` means the hub refuses to start** — it is still settable, so a config can be scripted or a report reproduced, but `start` exits `1` and `doctor` calls it a `[fail]` |
 | `auth.credentials` | `[]` | — | — | the join codes. Managed with `invite` / `revoke` |
 | `limits.perIpConnections` | `4` | 1–64 | `RBY_MMO_PER_IP` | connections one address may hold at once |
@@ -479,12 +843,20 @@ end and reported, never obeyed.
 | `limits.authLockoutMs` | `60000` | 1000–3600000 | `RBY_MMO_AUTH_LOCKOUT_MS` | how long a tripped ceiling refuses new join attempts. Players already in the world are untouched |
 | `bans` | `[]` | — | — | addresses refused outright. Managed with `ban` / `unban` |
 | `allowlist` | `[]` | — | — | when non-empty, the **only** addresses that may connect. Managed with `allow` |
+| `dashboard.enabled` | `false` | — | — | whether the [web dashboard](#dashboard) listener is opened at all. Binds a socket, so a restart applies it |
+| `dashboard.host` | `127.0.0.1` | — | — | address the dashboard binds. Loopback by default, and moving it publishes a **plaintext** login form for your join codes |
+| `dashboard.port` | `7790` | 1–65535 | — | TCP port for the dashboard. Not published by `compose.yml` |
 | `network.upnp.enabled` | `false` | — | `RBY_MMO_UPNP` | whether `start` asks the router to forward the port |
 | `network.upnp.leaseSeconds` | `3600` | 60–604800 | `RBY_MMO_UPNP_LEASE_SECONDS` | how long that mapping lasts before it expires on its own |
 | `log.level` | `info` | `debug` `info` `warn` `error` `silent` | `RBY_MMO_LOG_LEVEL` | how much the hub says |
 
 `RBY_MMO_CONFIG` is the odd one out: it names *where the file is*, not a value
 inside it.
+
+`motd` and the three `dashboard.*` leaves have **no environment variable**.
+They are config-file settings, set with `config set` like everything else, and
+the dashboard in particular is deliberately not something a stray variable in
+a shell profile or a compose file can switch on.
 
 The seven `auth*` limits are the wrong-passcode throttle, and they are the
 reason a six-character passcode is defensible online at all — the arithmetic
@@ -499,9 +871,12 @@ running hub and show up in its log, not in this command):
 ```
 
 Those are the **configured** numbers, not a live reading. How many wrong
-passcodes have actually arrived is known only to the running hub, which says
-so in its own log; `status` and `doctor` are short-lived processes that read
-a file, and there is no admin socket for them to ask through. `doctor` also
+passcodes have actually arrived is known to the running hub, which says so in
+its own log; `status` and `doctor` are short-lived processes that read a file
+and do not ask it. The live counts are reachable two other ways —
+`admin.sock`'s `stats` command, and THE DOOR panel on the
+[dashboard](#dashboard) — both of which talk to the running process rather
+than to a file. `doctor` also
 warns about settings that would bite the host rather than an attacker — a
 `authGlobalFailures` no higher than `maxPlayers`, for instance, means a full
 house mistyping the passcode once each can shut new joins.
@@ -516,6 +891,39 @@ house mistyping the passcode once each can shut new joins.
 
 Nothing else needs the file opened by hand. If you do open it, that should be
 curiosity rather than necessity.
+
+### The message of the day
+
+`motd` is the one sentence the hub gets to say for itself. Set it, tell the
+hub to re-read the config, and everybody who connects from then on is greeted
+with it:
+
+```sh
+rby-mmo-hub config set motd "Tournament Saturday 8pm. Bring a full party."
+docker compose kill -s SIGHUP hub          # or: kill -HUP $(pgrep -f 'rby-mmo-hub.js start')
+```
+
+It arrives on the welcome and the game shows it as a **`HUB` line at the top
+of the chat log** — no box to dismiss, no bubble over anybody's head, nothing
+to press. A player who joined before you set it does not see it; this is a
+greeting, not a broadcast, and [`broadcast`](#talking-to-a-hub-that-is-running)
+is what reaches the people already in the world.
+
+- **120 characters, one line.** Twice chat's 60, because a host writes this
+  once and a player types chat mid-game, but the same one-line budget and the
+  same characters chat allows — it is delivered through the field the client
+  already knows how to render. Anything longer is truncated and anything
+  outside the charset is dropped, quietly and on the way in, so
+  `config get motd` shows you exactly what players will see.
+- `config set` re-joins its arguments, so quoting is a courtesy rather than a
+  requirement: `config set motd Tournament Saturday 8pm` stores the same
+  string.
+- **Empty is the default and means no greeting** — the field is simply not
+  sent, and a hub with no MOTD looks to a client exactly like a hub from
+  before the feature existed.
+- **A hub older than the MOTD, or a client older than it, both cope.** The
+  field rides on a message that already existed and nothing on either side
+  rejects an unknown key, which is why this cost no protocol bump.
 
 ### Changing things while the hub is running
 
@@ -537,17 +945,20 @@ INFO SIGHUP: re-reading the config
 INFO reloaded "/data/config.json": 2 join code(s), 2 usable; 1 ban(s); 0 allowlist entr(y/ies)
 ```
 
-**Exactly three things are re-applied:** `auth.credentials`, `bans`,
-`allowlist` — the decisions about *who may be here*. Everything else in the
-file is a bind-time parameter and needs a restart:
+**Exactly four things are re-applied:** `auth.credentials`, `bans`,
+`allowlist` — the decisions about *who may be here* — and `motd`, which is a
+sentence the relay holds rather than anything bound to a socket. Everything
+else in the file is a bind-time parameter and needs a restart:
 
 | Change | Reload is enough | Needs a restart |
 | --- | --- | --- |
 | `invite` / `revoke` | ✓ the next handshake is judged against the new list | |
 | `ban` / `unban` / `allow` | ✓ the next connection is admitted or refused by the new list | |
+| `motd` | ✓ the next player to connect is greeted with the new one | |
 | `listen.port`, `listen.host` | | ✓ cannot change under a live listener |
 | `maxPlayers` | | ✓ |
 | `auth.required` (code demanded at all) | | ✓ the relay is handed a challenge port, or not, once at bind |
+| `dashboard.*` | | ✓ a second listener, bound once, at start |
 | `limits.*`, `log.level`, `network.upnp.*` | | ✓ |
 
 For the four a host is most likely to have edited by mistake — `listen.host`,
@@ -561,16 +972,19 @@ WARN reload: listen.host, listen.port and maxPlayers were not re-applied -- they
      players until it is restarted.
 ```
 
-The rest of the file — `limits.*`, `log.level`, `network.upnp.*` — is not
-re-applied and not remarked on either. Restart for those.
+The rest of the file — `limits.*`, `log.level`, `network.upnp.*`,
+`dashboard.*` — is not re-applied and not remarked on either. Restart for
+those.
 
 Two things a reload does **not** do, both worth knowing before you rely on it:
 
 - **It does not disconnect anybody.** Bans and the allowlist are checked when a
   connection is *admitted*. Someone already in the world stays there; a
   revoked code does not eject the player who already answered a challenge with
-  it. To remove someone who is currently connected you still restart the hub —
-  after which the new list keeps them out.
+  it. Removing somebody who is connected right now is
+  [`kick`](#talking-to-a-hub-that-is-running), which reaches the running hub
+  directly — `ban` then `SIGHUP` is what keeps them from coming back, and the
+  two are worth doing in that order.
 - **A file it cannot read changes nothing.** Config files get edited in place,
   so half a file is a normal thing to meet at an arbitrary instant. Bad JSON
   is logged and the credentials, bans and allowlist already in force are kept;
@@ -727,6 +1141,14 @@ plain `socket.tcp()`. That is also what makes the offline attack on the
 passcode possible at all. Putting everyone on an encrypted overlay network
 (WireGuard, Tailscale, ZeroTier) and sharing the overlay address is the only
 thing that closes either gap.
+
+**The same is true of the [web dashboard](#dashboard), and worse.** It is
+plain HTTP for the same reason — there is no TLS anywhere in this program —
+so the join code typed into its login form and the session cookie that comes back
+are both readable by anyone on the path. The game port leaks gameplay; that
+page leaks the credential that opens the game port. It is off by default and
+bound to `127.0.0.1` by default for exactly that reason, and the same overlay
+network is the same answer.
 
 ### Connection hardening
 
@@ -1079,7 +1501,18 @@ What compose sets up:
   purpose: the host who needs to shell in and read a code back out is exactly
   the audience.
 - **A named volume at `/data`**, holding `config.json` — the join code, the
-  bans, the allowlist. Losing the volume loses the code your friends saved.
+  bans, the allowlist — along with `ranking.json`, `status.json`,
+  `history.jsonl` and the `admin.sock` the running hub opens. Losing the
+  volume loses the code your friends saved. **The socket is in `/data` for a
+  reason**: the volume is what `docker compose exec` shares, while the
+  container's `/tmp` is a private tmpfs, so
+  `docker compose exec hub rby-mmo-hub kick BETA` works and would not if the
+  socket lived there.
+- **The dashboard port is not published.** `compose.yml` carries the mapping
+  commented out beside the game port, because turning the dashboard on and
+  exposing it off this machine are two decisions and only the first of them is
+  a config setting. See [Dashboard](#dashboard) for what publishing a
+  plaintext login form costs.
 - **A first run that keeps the code out of the log.** When `config.json` is
   absent the entrypoint runs `init --yes` with its output redirected into
   `/data/join-code.txt`, created under `umask 077` so it is 0600 before a byte
@@ -1173,10 +1606,10 @@ on a relay connection.
 | Type | Payload |
 | --- | --- |
 | `mmo.challenge` | `nonce` — 32 lowercase hex chars, per-connection, single-use. Sent by every hub that requires a passcode, which is every hub but the `node hub.js` shim |
-| `mmo.welcome` | `id, players[], points, ranked` — plus `rankToken` on the one visit that claimed the name, and only that visit |
+| `mmo.welcome` | `id, players[], points, ranked` — plus `rankToken` on the one visit that claimed the name, and only that visit, and `motd` when this hub has one configured (absent when it does not) |
 | `mmo.join` / `mmo.part` | `player` / `id` |
 | `mmo.move` | a presence record |
-| `mmo.chat` | `from, name, scope, text` |
+| `mmo.chat` | `from, name, scope, text` — **or, when the hub itself is speaking, `name: "HUB"`, `scope: "global"` and no `from` at all**: an operator's `broadcast`. A line with no sender is a line no player sent |
 | `mmo.request` / `mmo.decline` | `from, name, kind` / `name, kind` |
 | `mmo.session` | `peer, peerName, kind, role, id` — the asker hosts |
 | `mmo.relay` | `from, payload` |
@@ -1209,13 +1642,38 @@ travelling with whom. `chat` gains a `party` scope, delivered to the party
 alone with no radius; from a client with no party it is dropped, never
 widened.
 
+**The hub speaks as `HUB`, and no player may.** Two things it says arrive as
+ordinary hub→client traffic with that name on them: the MOTD, carried on the
+welcome and rendered by the client as a chat line, and an operator's
+`broadcast`, which *is* a chat line. Neither carries a `from`, because neither
+came from a player — so the name is the only thing on the receiving side that
+tells the two apart, which is why `mmo.hello` refuses it:
+
+```
+client → hub    mmo.hello   { proto: 5, name: "HUB", … }
+hub    → client mmo.error   { message: "That name belongs to the hub itself;
+                              pick another trainer name and connect again." }
+```
+
+The match is the board's own key rule — case-folded and trimmed — so `HUB`,
+`hub` and ` Hub ` are one name.
+
+**Neither addition moved the protocol number**, and the rule is what says so:
+a bump is owed when a *client* can send something an older *hub* would ignore.
+`motd` is a field on a message that already existed, travelling hub→client,
+which an older client never reads and is no worse for; a hub-originated chat
+line is a message type that already existed, and an older client renders it as
+a chat line with an unknown sender — the log line appears, and the bubble that
+would have been drawn over a player who does not exist is stored, never drawn,
+and expires. Nothing new travels client→hub at all.
+
 The handshake, in full:
 
 ```
 client → hub    mmo.hello      { proto: 5, name, sprite, profile, map, x, y, facing, rankToken? }
 hub    → client mmo.challenge  { nonce }        ← only when a passcode is required
 client → hub    mmo.auth       { response }     ← HMAC-SHA256(passcode, nonce), 64 hex
-hub    → client mmo.welcome    { id, players[], points, ranked, rankToken? }
+hub    → client mmo.welcome    { id, players[], points, ranked, rankToken?, motd? }
                                                 ← or mmo.error, which the game shows
 ```
 

@@ -5,6 +5,8 @@
 #   docker compose exec hub rby-mmo-hub invite list --reveal   # <- your code
 #   docker compose exec hub rby-mmo-hub invite    # another code, for a friend
 #   docker compose exec hub rby-mmo-hub doctor    # what can reach you, and how
+#   docker compose exec hub rby-mmo-hub watch     # who is on it, live
+#   docker compose exec hub rby-mmo-hub broadcast "back in 5"   # tell them so
 #   docker compose down           # stop; the volume, and the join code, remain
 #
 # The first `up` on an empty volume runs `rby-mmo-hub init --yes` for you (see
@@ -40,6 +42,26 @@ services:
       #
       # Changing the *container* port instead means setting RBY_MMO_PORT below,
       # which the config, the listener and the healthcheck all read.
+      #
+      # The web dashboard, deliberately left commented out:
+      # - "127.0.0.1:7790:7790"   # dashboard, this machine only
+      #
+      # It is off by default -- `docker compose exec hub rby-mmo-hub config set
+      # dashboard.enabled true` and a restart turn it on -- and turning it on
+      # is deliberately not the same decision as letting it off this machine.
+      # Only the first of the two is a setting; this line is the second.
+      #
+      # Two edits, not one, if you do want it: uncomment above *and* set
+      # dashboard.host to 0.0.0.0, because the default binds the container's own
+      # loopback and a port mapping cannot reach that. Leave the host side of
+      # this mapping at 127.0.0.1 all the same. The page is PLAIN HTTP --
+      # there is no TLS anywhere in this program -- and you log into it with a
+      # join code, so anything past this machine puts a login form for the
+      # credential that opens your hub on the network in the clear. To reach it
+      # from elsewhere, tunnel to the loopback binding instead:
+      #     ssh -N -L 7790:127.0.0.1:7790 you@your-hub-box
+      # or put both ends on an encrypted overlay network. See "Dashboard" in
+      # README.md.
 
     environment:
       # Where the config lives. Do not change this without also changing the
@@ -69,6 +91,13 @@ services:
       # beside it. Losing this volume loses the join code your friends have
       # already saved. Both files are 0600 inside a 0700 directory; anything
       # that copies this volume off the machine is copying a credential.
+      #
+      # The hub's own files sit here too -- ranking.json, status.json, the
+      # history.jsonl ledger -- along with admin.sock, the socket `kick` and
+      # `broadcast` talk to. That socket is here rather than in /tmp precisely
+      # because this mount is what `docker compose exec` shares and the
+      # container's tmpfs is not; the directory's 0700 is the only thing
+      # authorising it, which is the same boundary config.json already had.
       - rby-mmo-data:/data
 
     # --- sandbox -----------------------------------------------------------

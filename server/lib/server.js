@@ -5,8 +5,16 @@
  *
  * Everything that decides *anything* already lives somewhere else: the
  * protocol in lib/relay.js, the hardening in lib/limits.js, the crypto in
- * lib/auth.js, the file in lib/config.js. This module owns the one thing
- * none of them may touch -- a real net.Server -- and hands them the bytes.
+ * lib/auth.js, the file in lib/config.js, the operator's socket in
+ * lib/admin.js, the operator's web page in lib/dashboard.js. This module owns
+ * the one thing none of them may touch -- the listener friends actually play
+ * through -- and hands them the bytes.
+ *
+ * The two operator listeners are started from here and owned there, and that
+ * split is the point: neither of them may be a reason the game port fails to
+ * come up. The game listener binds first because it is why the process
+ * exists; the admin socket and the dashboard are attempted after it, and a
+ * failure in either is a logged sentence and a hub that keeps relaying.
  *
  * Keeping the split that strict is what makes the hub testable at all. The
  * relay is driven by peer handles, so a suite can pair two of them in memory
@@ -57,6 +65,8 @@ const {
   migrate: migrateConfig,
 } = require('./config.js');
 const auth = require('./auth.js');
+const admin = require('./admin.js');
+const dashboard = require('./dashboard.js');
 const { createLog, safe } = require('./log.js');
 
 // The ceiling on a single unterminated line, unchanged from hub.js:34. A
@@ -115,6 +125,38 @@ const RANKING_SAVE_INTERVAL_MS = 1000;
 const STATUS_FILENAME = 'status.json';
 const STATUS_SAVE_INTERVAL_MS = 1000;
 const STATUS_HEARTBEAT_MS = 10000;
+
+// The match ledger, beside the season it explains, and the size at which the
+// hub starts a new one.
+//
+// A ledger, not a document -- which is the whole reason this is the one file
+// in the hub written by appending rather than by the tmp+rename dance the
+// ranking and the snapshot use. Those two are single values that happen to be
+// large: the current season, the current roster, rewritten whole because the
+// new copy *replaces* the old one. A history is the opposite -- it is only
+// ever the old lines plus one more -- and rewriting it to add a line would
+// mean reading back every battle ever played, on the path of the battle that
+// just finished, and would put every one of them at risk on every write.
+//
+// The cost of appending is that a hub killed mid-write can leave a torn last
+// line, and there is no way to append and be atomic at once. That is the
+// reader's problem to skip and a cheap one to solve (plan §7): a JSON line
+// either parses or it does not, at most one line per crash is affected, and
+// the alternative -- losing the whole ledger to a rewrite that was
+// interrupted -- is not cheap at all.
+//
+// Rotation is one generation, renamed rather than trimmed: a rename is atomic
+// and cannot lose the file it is moving, and half a megabyte is somewhere
+// around three thousand battles, so a hub keeps between three and six
+// thousand of them and never grows past about a megabyte on its own.
+const HISTORY_FILENAME = 'history.jsonl';
+const HISTORY_MAX_BYTES = 512 * 1024;
+
+// The operator's live channel, beside the config it is authorised by. See
+// lib/admin.js for the trust model -- in one line: the data directory's own
+// permissions are the whole boundary, exactly as they already are for the
+// join codes sitting in config.json next to it.
+const ADMIN_SOCKET_FILENAME = 'admin.sock';
 
 // How long a refused socket may sit between its goodbye and its destruction.
 // It is invisible to limits.js on purpose (charging a refusal would let a
@@ -484,12 +526,27 @@ function start(options = {}) {
   const statusPath = configPath
     ? path.join(path.dirname(configPath), STATUS_FILENAME) : null;
 
+  // The ledger and the operator socket live beside the rest, and are absent
+  // for the same reason: no config file, no data directory, nothing to own
+  // them. A hub started without one (the hub.js shim, a suite, an embedder)
+  // keeps its history nowhere and answers no admin commands, which is the
+  // honest version of having no place to put either.
+  const historyPath = configPath
+    ? path.join(path.dirname(configPath), HISTORY_FILENAME) : null;
+  const adminPath = configPath
+    ? path.join(path.dirname(configPath), ADMIN_SOCKET_FILENAME) : null;
+
   const relay = new Relay({
     maxPlayers: config.maxPlayers,
     chatIntervalMs: config.limits && config.limits.chatIntervalMs,
     board,
     onRankChange: () => noteRankChange(),
     onRosterChange: () => noteRosterChange(),
+    onMatchSettled: (record) => appendHistory(record),
+    // The greeting line, if the host wrote one. Mutable on the relay and
+    // re-applied by reload(), because a message of the day whose whole point
+    // is to say what is happening today must not need a restart to change.
+    motd: config.motd,
     // Not a config.json setting: `protocol` is an embedding/test seam the
     // schema deliberately does not know about, so it is read from the object
     // as given rather than from the validated copy validate() pruned it out of.
@@ -525,6 +582,10 @@ function start(options = {}) {
   let statusTimer = null;
   let statusDirty = false;
   let statusBeat = null;
+  // The two operator listeners, or null when they were not asked for or did
+  // not come up. Only close() reads them, and it has to cope with both.
+  let adminHandle = null;
+  let dashboardHandle = null;
 
   // -------------------------------------------------------- use counting
 
@@ -705,6 +766,60 @@ function start(options = {}) {
     if (!statusDirty && !force) return;
     statusDirty = false;
     writeStatus(relay.roster(), null);
+  }
+
+  // -------------------------------------------------------- the match ledger
+
+  /*
+   * A ranked battle was agreed and paid for. One line, appended.
+   *
+   * Not debounced, unlike everything above it, because there is nothing to
+   * coalesce: each record is a different line rather than a newer version of
+   * the same document, so a buffer would only be a set of results a crash
+   * could take with it. A settled battle is also rare on the scale a
+   * filesystem cares about -- a few a minute on a busy hub, against the
+   * hundreds of steps a second the snapshot is throttled for -- so the write
+   * is not on a path anybody is waiting on in practice.
+   *
+   * Appended, and see HISTORY_FILENAME for why: a history is only ever its
+   * old lines plus one more, and tmp+rename would rewrite every battle ever
+   * played in order to add the one that just happened.
+   *
+   * Rotation happens here rather than on a timer so there is no schedule to
+   * miss: the write that would push the file past the ceiling is the write
+   * that moves it aside first. The rename replaces any previous `.1` in one
+   * step -- the generation that falls off the end is the only thing lost --
+   * and the append then creates the file fresh.
+   */
+  function appendHistory(record) {
+    if (!historyPath) return;   // no data directory, nowhere to keep a ledger
+    try {
+      const line = `${JSON.stringify(record)}\n`;
+
+      let size = 0;
+      try {
+        size = fs.statSync(historyPath).size;
+      } catch (err) {
+        // A ledger that does not exist yet is the ordinary first battle.
+        if (!err || err.code !== 'ENOENT') throw err;
+      }
+      if (size > 0 && size + line.length > HISTORY_MAX_BYTES) {
+        fs.renameSync(historyPath, `${historyPath}.1`);
+      }
+
+      // 0600 applies on create, which after a rotation is every time the
+      // ledger starts over: who beat whom is nobody's business but the
+      // host's, same as the season and the snapshot.
+      fs.appendFileSync(historyPath, line, { mode: 0o600 });
+    } catch (err) {
+      // Warn, not error, and never throw -- the same discipline the snapshot
+      // keeps. The battle is over, the ratings already moved and both players
+      // have already been told; a full disk costs the host a line in a log of
+      // results, and must not cost anybody the result itself.
+      log.warn(`could not append to the match history at ${safe(historyPath)}: ` +
+        `${safe(err.message)}. The battle still counted; free some space or ` +
+        'move the file aside to start recording again.');
+    }
   }
 
   // ------------------------------------------------------------ refusals
@@ -947,7 +1062,12 @@ function start(options = {}) {
    * which means dropping everyone mid-battle to eject one person, so in
    * practice it meant the change did not happen at all.
    *
-   * Exactly three things are re-applied: auth.credentials, bans, allowlist.
+   * Exactly four things are re-applied: auth.credentials, bans, allowlist,
+   * motd. The first three are about who may be here; the fourth is about what
+   * they are told when they arrive, which is the same kind of decision -- a
+   * host announcing that the hub is going down in ten minutes is doing it
+   * because something is happening right now, and a message of the day that
+   * needed a restart to change would announce it to nobody.
    *
    * Not the port, the bind address or the player cap. Those cannot change
    * under a live listener -- and a reload that silently ignored a host's edit
@@ -974,13 +1094,13 @@ function start(options = {}) {
       raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     } catch (err) {
       log.error(`reload: could not read ${safe(configPath)} ` +
-        `(${safe(err.message)}); keeping the credentials, bans and allowlist ` +
-        'already in force. Fix the file and send SIGHUP again.');
+        `(${safe(err.message)}); keeping the credentials, bans, allowlist and ` +
+        'MOTD already in force. Fix the file and send SIGHUP again.');
       return false;
     }
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       log.error(`reload: ${safe(configPath)} is not a JSON object; keeping the ` +
-        'credentials, bans and allowlist already in force.');
+        'credentials, bans, allowlist and MOTD already in force.');
       return false;
     }
 
@@ -997,12 +1117,18 @@ function start(options = {}) {
     config.allowlist = next.allowlist;
     limits.setBans(config.bans);
     limits.setAllowlist(config.allowlist);
+    // The relay cleans and caps it on the way out, on every welcome, so the
+    // hub never has to hold a second cleaned copy of the host's sentence --
+    // and an edited MOTD reaches the very next player to arrive.
+    config.motd = next.motd;
+    relay.motd = config.motd;
 
     const total = config.auth.credentials.length;
     const usable = auth.activeCredentials(config.auth.credentials).length;
     log.info(`reloaded ${safe(configPath)}: ${total} join code(s), ${usable} ` +
       `usable; ${config.bans.length} ban(s); ` +
-      `${config.allowlist.length} allowlist entr(y/ies)`);
+      `${config.allowlist.length} allowlist entr(y/ies); ` +
+      `${config.motd ? 'a MOTD' : 'no MOTD'}`);
 
     if (Boolean(next.auth.required) !== Boolean(relay.auth)) {
       log.warn(`reload: auth.required is now ${next.auth.required} but this hub ` +
@@ -1016,7 +1142,146 @@ function start(options = {}) {
         `still ${boundHost}:${boundPort} for ${relay.maxPlayers} players ` +
         'until it is restarted.');
     }
+    /*
+     * Said for the same reason, about the other listener. Which *codes* open
+     * the dashboard is live -- lib/dashboard.js re-reads the credential list
+     * at every login, so revoking one locks it immediately -- but whether
+     * there is a dashboard at all, and where, is a bind, and a bind is not a
+     * thing a running process can be talked into changing.
+     */
+    const runningDashboard = config.dashboard || {};
+    const editedDashboard = next.dashboard || {};
+    if (Boolean(editedDashboard.enabled) !== Boolean(runningDashboard.enabled) ||
+        editedDashboard.host !== runningDashboard.host ||
+        Number(editedDashboard.port) !== Number(runningDashboard.port)) {
+      log.warn('reload: the dashboard section was not re-applied -- starting, ' +
+        'moving or stopping a listener takes a restart. ' +
+        (dashboardHandle
+          ? `The dashboard is still on ${dashboardHandle.host}:${dashboardHandle.port}.`
+          : 'No dashboard is running on this hub.'));
+    }
     return true;
+  }
+
+  // ------------------------------------------------- what the operators see
+
+  /*
+   * The shape the CLI's `status` verb prints, the admin socket's `stats`
+   * answers and the dashboard polls. Derived on every call so it can never be
+   * a stale copy of the thing it is describing, and a plain function rather
+   * than a method on the handle because two of those three consumers are
+   * started before the handle exists.
+   */
+  function stats() {
+    const counts = limits.stats();
+    return {
+      host: boundHost,
+      port: boundPort,
+      protocol: relay.protocol,
+      maxPlayers: relay.maxPlayers,
+      players: relay.playerCount,
+      pending: relay.pendingCount,
+      connections: counts.connections,
+      perIp: counts.perIp,
+      authRequired: Boolean(relay.auth),
+      startedAt,
+      uptimeMs: Date.now() - startedAt,
+    };
+  }
+
+  /*
+   * The leaderboard as a web page wants it: the board's own top rows, in the
+   * board's own order, numbered.
+   *
+   * `place` is derived from the position rather than stored, because the
+   * order is the ranking -- a place carried alongside the rows would be a
+   * second copy of the same fact, free to disagree with the sort next to it.
+   * What is deliberately *not* here is `tokenHash`: board.top() already
+   * leaves it out (rank.js:352) and this projection names its fields
+   * explicitly so a future column on the board cannot arrive on a page by
+   * accident. A name digest is how the hub proves a claim; it belongs in
+   * ranking.json and nowhere a browser can reach.
+   */
+  function rankingRows() {
+    return board.top().map((row, index) => ({
+      place: index + 1,
+      name: row.name,
+      points: row.points,
+      played: row.played,
+      won: row.won,
+    }));
+  }
+
+  /*
+   * The two listeners that are not the hub, started once the hub is up.
+   *
+   * Never rejects, and that is the whole contract: an operator convenience
+   * that could stop a hub from serving players would be a worse trade than
+   * not having the convenience. Each failure is a sentence in the log naming
+   * what the operator gets instead -- the CLI's `kick` says "hub not running
+   * or too old" on its own when the socket is absent, which is honest, and a
+   * host who asked for a dashboard and did not get one needs to be told here
+   * because nothing else will tell them.
+   */
+  function startExtras() {
+    const jobs = [];
+
+    /*
+     * A Ctrl-C can land in the milliseconds between the game listener binding
+     * and one of these finishing its own bind: close() has already run by
+     * then, looked at a null handle and found nothing to stop, so a listener
+     * that arrives afterwards has to take itself away. Otherwise a hub that
+     * was stopped during startup leaves a bound socket -- and an admin.sock
+     * file -- behind it.
+     */
+    const keep = (handle, assign) => {
+      if (closePromise) {
+        Promise.resolve(handle.close()).catch(() => {});
+        return;
+      }
+      assign(handle);
+    };
+
+    if (adminPath) {
+      jobs.push(admin.start({ path: adminPath, relay, stats, limits, log })
+        .then((handle) => {
+          keep(handle, (kept) => { adminHandle = kept; });
+        }, (err) => {
+          log.warn(`the admin socket did not start: ` +
+            `${safe(err && err.message ? err.message : err)}. This hub is ` +
+            'relaying normally; `rby-mmo-hub kick` and `broadcast` will say it ' +
+            'cannot be reached until it is restarted.');
+        }));
+    }
+
+    if (config.dashboard && config.dashboard.enabled) {
+      jobs.push(dashboard.start({
+        config, relay, limits, stats, ranking: rankingRows, log,
+      }).then((handle) => {
+        keep(handle, (kept) => { dashboardHandle = kept; });
+      }, (err) => {
+        /*
+         * The reason is already on the operator's screen in full: both ways
+         * dashboard.start() can reject -- no credential that opens it, and a
+         * port it cannot have -- log themselves on the way out, and in more
+         * words than an echo through safe()'s 120 characters would survive.
+         * Repeating a truncated copy of a sentence printed a millisecond ago
+         * is not a second warning, it is a worse one.
+         *
+         * What this adds is the part the module cannot know: that the hub
+         * itself came up, so nobody's game is waiting on this. The rejection
+         * still goes to debug, for the case where a future failure path in
+         * there forgets to say anything at all.
+         */
+        log.debug(`dashboard.start rejected: ` +
+          `${safe(err && err.message ? err.message : err)}`);
+        log.error('the dashboard is not running -- the dashboard error just ' +
+          'above says why. This hub is relaying normally without it; fix the ' +
+          'dashboard section of the config and restart to get the page back.');
+      }));
+    }
+
+    return Promise.all(jobs);
   }
 
   // ------------------------------------------------------------- shutdown
@@ -1097,6 +1362,34 @@ function start(options = {}) {
     // on it, and it cannot reject.
     const hookDone = runShutdownHook();
 
+    /*
+     * The operator listeners come down beside the players' goodbyes, for the
+     * same reason and on the same clock -- neither a kick nor a web page is
+     * worth adding to the time a Ctrl-C takes, and a hub that is already
+     * emptying has nothing useful left to answer either of them with. Both
+     * are best-effort: a close that fails belongs to a process that is about
+     * to exit, and the admin socket's own close() is the thing that unlinks
+     * the file, so a warning here is also the note explaining a leftover
+     * `admin.sock` the next start will have to clear.
+     */
+    const closeExtra = (handle, what) => {
+      if (!handle) return Promise.resolve();
+      const complain = (err) => {
+        log.warn(`could not stop the ${what}: ` +
+          `${safe(err && err.message ? err.message : err)}`);
+      };
+      try {
+        return Promise.resolve(handle.close()).catch(complain);
+      } catch (err) {
+        complain(err);
+        return Promise.resolve();
+      }
+    };
+    const extrasDone = Promise.all([
+      closeExtra(adminHandle, 'admin socket'),
+      closeExtra(dashboardHandle, 'dashboard'),
+    ]);
+
     const socketsDone = new Promise((resolve) => {
       let forced = null;
       let settled = false;
@@ -1124,7 +1417,8 @@ function start(options = {}) {
       forced.unref();
     });
 
-    closePromise = Promise.all([socketsDone, hookDone]).then(() => undefined);
+    closePromise = Promise.all([socketsDone, hookDone, extrasDone])
+      .then(() => undefined);
     return closePromise;
   }
 
@@ -1225,47 +1519,60 @@ function start(options = {}) {
         statusBeat.unref();
       }
 
-      resolve({
-        host: boundHost,
-        port: boundPort,
-        configPath,
-        // where the season is kept, so a caller (the CLI, a suite) can say
-        // which file it is talking about rather than re-deriving the path
-        rankingPath,
-        // ...and where the operator snapshot is, for the same reason
-        statusPath,
-        relay,
-        limits,
-        close,
-        // The same thing SIGHUP does, for a caller that has no signal to send
-        // (an embedder, a suite). Returns whether the file was re-read.
-        reload,
-        // The shape the CLI's `status` verb prints. Derived on every call so
-        // it can never be a stale copy of the thing it is describing.
-        stats() {
-          const counts = limits.stats();
-          return {
-            host: boundHost,
-            port: boundPort,
-            protocol: relay.protocol,
-            maxPlayers: relay.maxPlayers,
-            players: relay.playerCount,
-            pending: relay.pendingCount,
-            connections: counts.connections,
-            perIp: counts.perIp,
-            authRequired: Boolean(relay.auth),
-            startedAt,
-            uptimeMs: Date.now() - startedAt,
-          };
-        },
+      /*
+       * The operator listeners are attempted here -- after the players' one
+       * is up, and before the handle goes out.
+       *
+       * After, because the game port is the reason the process exists and
+       * nothing optional may delay or endanger it; before the resolve,
+       * because `dashboard` on the handle has to be the truth about a
+       * listener that either came up or did not, and a caller that reads it
+       * the instant start() resolves must not be racing a bind. startExtras()
+       * never rejects, so this cannot turn a live hub into a failed start().
+       */
+      startExtras().then(() => {
+        resolve({
+          host: boundHost,
+          port: boundPort,
+          configPath,
+          // where the season is kept, so a caller (the CLI, a suite) can say
+          // which file it is talking about rather than re-deriving the path
+          rankingPath,
+          // ...and where the operator snapshot is, for the same reason
+          statusPath,
+          // ...and the match ledger, and the socket the CLI's `kick` and
+          // `broadcast` dial. Both are null on a hub with no data directory,
+          // which is the same "there is no such file" every other path here
+          // reports the same way.
+          historyPath,
+          adminPath,
+          // Where the web page ended up, or null when it was switched off,
+          // never asked for, or refused to start. A caller cannot tell those
+          // apart from here on purpose: the log said which, and the only
+          // thing left to decide is whether there is a page to open.
+          dashboard: dashboardHandle
+            ? { host: dashboardHandle.host, port: dashboardHandle.port } : null,
+          relay,
+          limits,
+          close,
+          // The same thing SIGHUP does, for a caller that has no signal to send
+          // (an embedder, a suite). Returns whether the file was re-read.
+          reload,
+          // The shape the CLI's `status` verb prints -- the same function the
+          // admin socket and the dashboard were handed above, so all three
+          // can only ever describe the hub the same way.
+          stats,
+        });
       });
     });
   });
 }
 
-// STATUS_* is exported for the same reason SWEEP_INTERVAL_MS is: a suite that
-// waits on a heartbeat should name the budget it is waiting for rather than
-// carry its own copy of the number.
+// The filenames and the budgets are exported for the same reason
+// SWEEP_INTERVAL_MS is: a suite (or the CLI) that waits on a heartbeat, looks
+// for a ledger or dials the admin socket should name the one number or the
+// one filename rather than carry its own copy of it.
 module.exports = {
   start, MAX_LINE, SWEEP_INTERVAL_MS, STATUS_FILENAME, STATUS_HEARTBEAT_MS,
+  HISTORY_FILENAME, HISTORY_MAX_BYTES, ADMIN_SOCKET_FILENAME,
 };

@@ -4,6 +4,120 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.8.0] - 2026-08-05
+
+Five things the *host* of a dedicated hub has been doing without: a live view,
+a record of what was played, a way to say something or remove somebody while
+the hub is up, a greeting for people arriving, and a page to look at all of it
+from. Nothing on the wire moved for any of them.
+
+### Added
+
+- **`rby-mmo-hub watch` — `players`, repainted.** The listing verb answers
+  "who is on it" once and exits, which is the wrong shape for the evening a
+  host actually spends: watching people arrive, team up and start battles.
+  `watch` prints the same frame every two seconds (`--interval <s>`) until
+  Ctrl-C, and `--once` prints exactly one and exits, which is also how the
+  suite drives it. The screen is cleared between frames **only when stdout is
+  a terminal** — piped into a file or a pipeline it is plain frames, one after
+  another, with no escape sequences buried in them. It reads the same
+  `status.json` `players` does and inherits every honest state that file has:
+  a stale heartbeat still says *this hub appears to be down* on every repaint
+  rather than quietly repainting the last roster it saw as though it were now.
+- **Match history, in a ledger beside the season it explains.** `ranking.json`
+  has always held the *result* of every battle and never the battles, so a
+  host could see that somebody was on 1012 points and had no way to see how
+  they got there. Every settled ranked battle is now one JSON line appended to
+  **`history.jsonl`** — when it ended, when it started, both names, both
+  scores after it, what was gained and lost, and how many times that pairing
+  had already met inside the hour. `rby-mmo-hub history` prints them newest
+  first (`-n N`, `--json`), and `ranking` grows **`W` and `L` columns**, which
+  is a projection of the `played`/`won` counts that file was already keeping
+  rather than anything new to record. Only a battle both players reported the
+  same way is history: a draw, a disagreement and a match under an unproven
+  claim all score nothing and are all written nowhere.
+  The ledger is **the one file this hub appends to** rather than rewriting
+  whole, because a history is only ever the old lines plus one more and
+  rewriting it would put every past battle at risk on every new one. The cost
+  is that a hub killed mid-write can leave a torn last line, so the reader
+  skips a line it cannot parse instead of dying on it. And it is **bounded**:
+  at 512 KiB the file is renamed to `history.jsonl.1` — replacing any previous
+  one — and a fresh ledger started, so a hub holds somewhere between three and
+  six thousand battles and never grows past about a megabyte on its own.
+- **An admin channel, so the hub can be told something and not only asked.**
+  `status.json` let a short-lived CLI process *read* a running hub; it can no
+  more carry an instruction than any other file can. There is now a Unix
+  socket, **`admin.sock`, beside `config.json`**, speaking one JSON line in
+  and one back per connection: `who` (the live roster), `stats` (the hub's
+  counters *including* the wrong-passcode throttle's live numbers, which reach
+  no file and were previously visible only in the log), `kick` and
+  `broadcast`. The last two have CLI verbs. **`rby-mmo-hub kick <name>
+  [--reason TEXT]`** removes a player with a sentence they actually see — the
+  game renders it in the same box a refused join lands in — defaulting to *"An
+  operator removed you from this hub."* Names are unique only among ranked
+  players, so a kick matches case-insensitively, may land on nobody or on
+  several people, and reports which. **`rby-mmo-hub broadcast <text>`** arrives
+  in every connected game as an ordinary chat line named `HUB`.
+  **The trust model is the filesystem and there is deliberately no password
+  on it.** The socket sits in the data directory, which is 0700, beside the
+  `config.json` that holds every join code in plaintext: anything that can
+  open the socket can already read the codes, so a second secret in the same
+  directory as the first would protect nothing. In Docker that is also why it
+  is in `/data` and not `/tmp` — the volume is what `docker compose exec`
+  shares, the container's tmpfs is not.
+- **A message of the day.** `config set motd "Tournament Saturday 8pm"`, then
+  `SIGHUP`, and everybody who connects from then on is greeted with it: the
+  hub sends it on the welcome and the game shows it as a **`HUB` line in the
+  chat log** — no modal to dismiss, no bubble over anybody's head, just the
+  first line of the scrollback. It is one line of the same characters chat
+  allows, capped at **120** rather than chat's 60, because a host writes it
+  once and it is the only sentence the hub gets to say for itself. Empty is
+  the default and means no greeting.
+- **An optional web dashboard**, `dashboard.enabled true` and a restart, on
+  **127.0.0.1:7790** by default. One page, read-only: who is online and where,
+  the season with W/L, and the door — connections, pending handshakes, wrong
+  codes and whether the hub-wide lockdown is tripped. It refreshes itself
+  every five seconds and has no button that changes anything; the verbs live
+  on the admin socket, behind filesystem permissions, where they can be
+  reasoned about on their own.
+  **You log in with any join code that still works** — the same codes players
+  type, read live at every login, charged to the same per-address backoff and
+  turned away by the same hub-wide ceiling. There is deliberately no second
+  secret: rotating or revoking a code rotates dashboard access with it. A hub
+  told to run the dashboard with no usable code left **refuses to start the
+  listener** and says which command fixes it, because a login page nobody can
+  get through is a hole rather than a feature.
+  **It is plain HTTP, and there is no TLS anywhere in this program** — the
+  same gap the game port has, for the same zero-dependency reason. The join
+  code, the session cookie and every roster line cross the network in the
+  clear. Hence off by default and loopback by default: reach it from another
+  machine over an encrypted overlay network (WireGuard, Tailscale, ZeroTier)
+  or an SSH tunnel and leave the listener where it is.
+
+### Notes
+
+- **The name `HUB` is now reserved.** A player who connects under it — in any
+  spelling; the match is the same case-folded rule the ranking uses — is
+  refused with a sentence asking them to pick another trainer name and connect
+  again. The MOTD and a broadcast arrive as chat with no sender id, so the
+  name is the only thing on the receiving side that distinguishes the hub's
+  own voice from a player's, and a player wearing it could put words in the
+  hub's mouth. It is a real, if unlikely, eviction: somebody whose trainer is
+  called HUB has to rename to get back in.
+- **No wire change.** `PROTOCOL` stays **5** and no message type was added, so
+  a 0.7.0 copy and a 0.8.0 copy still play together. Everything new here
+  travels hub→client or does not travel at all: the MOTD is a field on a
+  welcome an older client never reads, a broadcast is an ordinary `mmo.chat`
+  with no `from` (a bubble for an unknown id is stored and never drawn, and
+  expires), and the watch, history, admin and dashboard surfaces are the
+  host's terminal and the host's own machine. The bump rule asks whether a
+  *client* can now send something an older *hub* would ignore, and nothing
+  here does. `affects_link` stays `false`.
+- **The in-game hub gets none of this.** `src/Hub.lua` hosts from inside a
+  copy of the game: no config file to hold a MOTD, no data directory to put a
+  socket or a ledger in, and no terminal to watch. These are dedicated-hub
+  operator features and are scoped as such.
+
 ## [0.7.0] - 2026-08-05
 
 ### Added
