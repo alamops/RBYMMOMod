@@ -7,50 +7,39 @@ here must match `manifest.version`.
 ## [0.9.0] - 2026-08-06
 
 One credential learns to mean something more. Until now every join code was
-the same code: it let somebody into the world, and — since 0.8.0 — it also let
-them into the web dashboard, which shows every player's name, location and
-score. Those are two different things to be allowed to do, and this release
-separates them by marking a code rather than by inventing a second password.
+the same code: it let somebody into the world, and that was the whole of what
+it said about the person holding it. But the host of a hub is also its
+operator, and the in-game operator features that are coming need to know which
+connection belongs to one. This release answers that by marking a code rather
+than by inventing a second password.
 
 ### Added
 
 - **Admin join codes.** `rby-mmo-hub invite --admin` mints an ordinary join
   code with one flag set on it. It joins the game exactly like any other code —
   same six characters, same screen, same handshake, nothing about admission
-  changes — and it additionally opens the **web dashboard**, which as of this
-  release accepts nothing else. It is revoked like any other code
-  (`revoke <id>`), and `invite list` grows a **`KIND`** column reading `ADMIN`
-  or `player`, shown with *and* without `--reveal`, because what a code unlocks
-  is not a secret; only the code itself is.
-  **The hub marks the connection an admin code opened.** The welcome tells that
-  client about itself (`admin: true`, and only when true), and operator
-  views — `roster()`, and so `status.json`, the admin socket's `who`, and the
-  dashboard's players table — carry the flag. **Other players never see it**:
-  it is deliberately absent from the presence record that is broadcast to
-  everybody, so nobody in the world learns who holds power. The flag is derived
-  server-side from the credential that answered the challenge and from nothing
-  else, so no message a client sends can claim it.
+  changes — and what the flag buys is that **the hub marks the connection it
+  opened**. It is revoked like any other code (`revoke <id>`), and `invite
+  list` grows a **`KIND`** column reading `ADMIN` or `player`, shown with *and*
+  without `--reveal`, because what a code marks is not a secret; only the code
+  itself is.
+  **The mark is for operators and for the features that come later.** The
+  welcome tells that client about itself (`admin: true`, and only when true),
+  and operator views — `roster()`, and so `status.json` and the admin socket's
+  `who` — carry the flag. **Other players never see it**: it is deliberately
+  absent from the presence record that is broadcast to everybody, so nobody in
+  the world learns who holds power. The flag is derived server-side from the
+  credential that answered the challenge and from nothing else, so no message a
+  client sends can claim it.
   **No in-game admin feature ships in this release.** There is no operator menu,
   no command, no button — the flag exists so the features that want one have
   something to check when they are built. On a hub with `auth.required` false,
   and on the `node hub.js` shim, nobody is admin at all: the flag rides a
   credential, and there is no credential.
-
-### Changed
-
-- **The dashboard no longer accepts a player's join code** — a behaviour change
-  from 0.8.0, where any active code logged in. The login page, the start-time
-  check and the code comparison all run over the *admin* subset of the
-  credential list. A player's code submitted there fails exactly like a wrong
-  one: same refusal, same charge to the throttle, and the comparison loop still
-  has no early exit, so a real-but-unprivileged code cannot be told from a guess
-  by how long the answer took.
-  **A hub with the dashboard enabled needs `invite --admin` run once.** If no
-  active admin code exists when the hub starts, the dashboard listener is not
-  opened and the log names that command — the same refusal 0.8.0 had for an
-  empty credential list, now counting admin codes only. The game port is
-  unaffected: existing player codes keep working for playing, which is what
-  they were handed out for.
+  An admin code is worth more to a thief than a player's one is, so
+  `invite --admin --expires 24h` is the shape to prefer for an evening or a
+  guest operator; nothing about one is precious, and minting a fresh one costs
+  a command.
 
 ### Notes
 
@@ -69,10 +58,10 @@ separates them by marking a code rather than by inventing a second password.
 
 ## [0.8.0] - 2026-08-05
 
-Five things the *host* of a dedicated hub has been doing without: a live view,
+Four things the *host* of a dedicated hub has been doing without: a live view,
 a record of what was played, a way to say something or remove somebody while
-the hub is up, a greeting for people arriving, and a page to look at all of it
-from. Nothing on the wire moved for any of them.
+the hub is up, and a greeting for people arriving. Nothing on the wire moved
+for any of them.
 
 ### Added
 
@@ -136,26 +125,6 @@ from. Nothing on the wire moved for any of them.
   allows, capped at **120** rather than chat's 60, because a host writes it
   once and it is the only sentence the hub gets to say for itself. Empty is
   the default and means no greeting.
-- **An optional web dashboard**, `dashboard.enabled true` and a restart, on
-  **127.0.0.1:7790** by default. One page, read-only: who is online and where,
-  the season with W/L, and the door — connections, pending handshakes, wrong
-  codes and whether the hub-wide lockdown is tripped. It refreshes itself
-  every five seconds and has no button that changes anything; the verbs live
-  on the admin socket, behind filesystem permissions, where they can be
-  reasoned about on their own.
-  **You log in with any join code that still works** — the same codes players
-  type, read live at every login, charged to the same per-address backoff and
-  turned away by the same hub-wide ceiling. There is deliberately no second
-  secret: rotating or revoking a code rotates dashboard access with it. A hub
-  told to run the dashboard with no usable code left **refuses to start the
-  listener** and says which command fixes it, because a login page nobody can
-  get through is a hole rather than a feature.
-  **It is plain HTTP, and there is no TLS anywhere in this program** — the
-  same gap the game port has, for the same zero-dependency reason. The join
-  code, the session cookie and every roster line cross the network in the
-  clear. Hence off by default and loopback by default: reach it from another
-  machine over an encrypted overlay network (WireGuard, Tailscale, ZeroTier)
-  or an SSH tunnel and leave the listener where it is.
 
 ### Notes
 
@@ -172,8 +141,8 @@ from. Nothing on the wire moved for any of them.
   travels hub→client or does not travel at all: the MOTD is a field on a
   welcome an older client never reads, a broadcast is an ordinary `mmo.chat`
   with no `from` (a bubble for an unknown id is stored and never drawn, and
-  expires), and the watch, history, admin and dashboard surfaces are the
-  host's terminal and the host's own machine. The bump rule asks whether a
+  expires), and the watch, history and admin surfaces are the host's terminal
+  and the host's own machine. The bump rule asks whether a
   *client* can now send something an older *hub* would ignore, and nothing
   here does. `affects_link` stays `false`.
 - **The in-game hub gets none of this.** `src/Hub.lua` hosts from inside a

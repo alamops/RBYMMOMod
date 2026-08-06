@@ -308,11 +308,11 @@ function newCredential(options = {}) {
     revoked: false,
   };
 
-  // An admin credential is an ordinary join code that additionally opens the
-  // operator side: today the web dashboard admits nothing else, and the hub
-  // marks the connection it admits so in-game operator features have a flag to
-  // check when they exist. Nothing about admission changes -- an admin code
-  // joins the game exactly like a player's.
+  // An admin credential is an ordinary join code that additionally marks the
+  // connection it admits, so in-game operator features have a flag to check
+  // when they exist -- and so operator views can already say who holds one.
+  // Nothing about admission changes -- an admin code joins the game exactly
+  // like a player's.
   //
   // The flag is written only when it is true, so a player's credential is the
   // byte-identical object it was before this field existed and no config

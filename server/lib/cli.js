@@ -473,8 +473,8 @@ const HELP = {
     '',
     'Who may join',
     '  invite [options]            mint a new join code and print it once',
-    '  invite --admin              the same, but the code also opens the web',
-    '                              dashboard (which accepts nothing else)',
+    '  invite --admin              the same, but the hub marks the connection',
+    '                              and the code shows as ADMIN on these views',
     '  invite list [--reveal]      list join codes; masked unless --reveal',
     '  revoke <id>                 revoke one join code, admin or not',
     '  ban <ip> [--reason X]       refuse an address',
@@ -713,21 +713,20 @@ const HELP = {
     '',
     '  --expires   30m, 24h, 7d -- minutes, hours or days. Nothing else.',
     '  --uses N    how many times it may be used to join the game before it',
-    '              stops working. Signing into the dashboard spends nothing,',
-    '              so on an admin code this is a count of game joins only --',
-    '              but a code with none left is a spent credential, so it opens',
-    '              no new dashboard session either, and a hub whose only admin',
-    '              code is spent refuses to start the dashboard at all.',
+    '              stops working. Joins are the only thing that spends a use,',
+    '              on an admin code as much as on a player\'s.',
     '  --code CODE use this passcode rather than a generated one:',
     `              ${auth.CODE_LEN} characters from ${auth.ALPHABET}.`,
     '              Dashes, spaces and lower case are normalised away. Use it',
     '              to reuse the passcode from your in-game LAN game, or to',
     '              pick one your friends can remember.',
     '  --admin     mint an admin code. It joins the game exactly like any',
-    '              other code, and it also opens the web dashboard -- which',
-    '              accepts nothing else -- and whatever operator features',
-    '              arrive in game later. Consider pairing it with --expires:',
-    '              an admin code is worth more to a thief than a player\'s is.',
+    '              other code; what differs is that the hub marks the',
+    '              connection, so the operator features that arrive in game',
+    '              later will look for it. Until then the mark shows as ADMIN',
+    '              on this hub\'s own views. Consider pairing it with',
+    '              --expires: an admin code is worth more to a thief than a',
+    '              player\'s is.',
     '',
     'Every code is revoked the same way, admin or not: `revoke <id>`, with the',
     'id from `invite list`.',
@@ -993,8 +992,8 @@ function throttleConcerns(cfg) {
  *
  * `options.admin` swaps the paragraph under the box, and only the paragraph:
  * an admin code is typed into the same in-game screen, in the same format, and
- * the one thing that differs about it is what it opens -- so that is the one
- * thing the text differs about.
+ * the one thing that differs about it is the mark it leaves on the connection
+ * -- so that is the one thing the text differs about.
  */
 function joinCodeBlock(ctx, code, extra, options) {
   const admin = Boolean(options && options.admin);
@@ -1008,14 +1007,15 @@ function joinCodeBlock(ctx, code, extra, options) {
   if (admin) {
     ctx.say('  That is an admin code. It joins the world exactly like any other');
     ctx.say('  code -- typed once, in game, on the screen where this hub\'s address');
-    ctx.say('  goes -- and it opens two more things:');
+    ctx.say('  goes -- and what it adds is a mark on the connection:');
     ctx.say('');
-    ctx.say('    - the web dashboard, if this hub runs one. It is the only kind of');
-    ctx.say('      code that page accepts, and it shows every player\'s name,');
-    ctx.say('      location and score, plus how hard the door is being knocked on.');
     ctx.say('    - whatever operator features arrive in game later. Nothing uses');
     ctx.say('      it there yet; the hub already marks the connection, so when');
     ctx.say('      those exist this code is what they will look for.');
+    ctx.say('    - today the mark is visible where you watch from: ADMIN in the');
+    ctx.say(`      KIND column of \`${PROGRAM} invite list\`, and on the connection`);
+    ctx.say('      in the rosters -- status.json, `players --json`, and the');
+    ctx.say('      `who` answer on the admin socket.');
     ctx.say('');
     ctx.say('  Give it only to someone you would hand the hub itself to.');
   } else {
@@ -1706,8 +1706,8 @@ function verbInviteList(ctx) {
    * shouted and `player` is not, on purpose -- the row worth noticing in a
    * list of twenty is the privileged one, and it is marked whether or not
    * --reveal was given, because what a code unlocks is not a secret. Read
-   * through auth.isAdminCredential so this table and the dashboard's door
-   * cannot come to different readings of the same flag.
+   * through auth.isAdminCredential so this table and the door that marks the
+   * connection cannot come to different readings of the same flag.
    */
   const rows = credentials.map((credential, index) => [
     credential.id || '-',
@@ -1731,11 +1731,13 @@ function verbInviteList(ctx) {
 
   ctx.say('');
   if (credentials.some((credential) => auth.isAdminCredential(credential))) {
-    ctx.say('KIND ADMIN: joins the game like any code, and is the only kind the');
-    ctx.say(`web dashboard admits. \`${PROGRAM} revoke <id>\` takes one back.`);
+    ctx.say('KIND ADMIN: joins the game like any code, but the hub marks the');
+    ctx.say('connection for the operator features arriving in game later, and');
+    ctx.say(`shows it as ADMIN here and in the rosters. \`${PROGRAM} revoke <id>\``);
+    ctx.say('takes one back.');
   } else {
     ctx.say(`KIND: none of these is an admin code. \`${PROGRAM} invite --admin\` mints`);
-    ctx.say('one; the web dashboard admits nothing else.');
+    ctx.say('one; the hub marks that connection and shows it as ADMIN.');
   }
   ctx.say('');
   if (reveal) {
@@ -1879,12 +1881,10 @@ function verbInvite(ctx, rest) {
   ctx.say(`    kill -HUP $(pgrep -f '${PROGRAM}.js start')   # bare node`);
   ctx.say('    docker compose kill -s SIGHUP hub              # docker');
   if (admin) {
-    // The one thing a reload cannot do: bind a listener. A dashboard that
-    // refused to start for want of an admin code was never bound, and no
-    // signal brings it up.
-    ctx.say('If the dashboard refused to start for want of an admin code, that one');
-    ctx.say('needs a restart rather than a reload: a listener cannot be bound by a');
-    ctx.say('signal. A dashboard already running admits this code on the reload.');
+    // Nothing extra to bring up for an admin code: the mark is read off the
+    // credential at join time, so a reload is the whole of it.
+    ctx.say('That is all an admin code needs: the mark is read off the credential');
+    ctx.say('when somebody joins with it, so there is nothing further to start.');
   }
   return OK;
 }
@@ -1928,8 +1928,8 @@ function verbRevoke(ctx, rest) {
   ctx.say(`    kill -HUP $(pgrep -f '${PROGRAM}.js start')   # bare node`);
   ctx.say('    docker compose kill -s SIGHUP hub              # docker');
   ctx.say('Players already connected keep the connection they have (`kick` ends');
-  ctx.say('that). A dashboard signed in with this code is signed out at its next');
-  ctx.say('request once the hub has re-read the list.');
+  ctx.say('that), and a connection that joined on an admin code keeps its mark');
+  ctx.say('until it ends. Revoking decides who may join next, not who is in.');
 
   // A warning, not a refusal: locking yourself out is sometimes exactly what
   // you meant to do, and the software should not argue with a deliberate act.
