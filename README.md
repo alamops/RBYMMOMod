@@ -430,6 +430,7 @@ time is dropped first, and a favorite is never the one that goes.
 <p align="center">
   <img src="docs/screenshots/servers-list.png" width="300" alt="The SERVERS list: a favorited hub, marked with an arrow in the right-hand column">
   <img src="docs/screenshots/servers-submenu.png" width="300" alt="The per-server submenu: CONNECT, UNFAVORITE, EDIT HOST, EDIT CODE, RENAME, DELETE">
+  <img src="docs/screenshots/servers-confirm.png" width="300" alt="The DELETE confirmation asking to forget the server, with the cursor starting on NO">
 </p>
 
 ### 🎭 BE SOMEBODY ELSE
