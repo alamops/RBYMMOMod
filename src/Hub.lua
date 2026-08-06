@@ -973,15 +973,27 @@ handlers[Wire.SPRITE] = function(self, client, msg)
   client.lastSprite = self.clock
 
   client.sprite = sprite
-  -- The board learns the new face too, so a RANKING answer given after this
-  -- draws the character the player is wearing now rather than the one they
-  -- greeted in.  The same call admit() makes, under the same guard: a player
-  -- who does not own the name has no business writing to its row.
-  if client.ranked then self.board:seen(client.name, client.sprite) end
   -- Broadcast with no exception, like publishPoints: the player it is about
   -- hears it too.  Their own presence is not in their own roster, so this is
   -- the message that confirms the hub took the change.
+  --
+  -- **Nothing fallible sits between the store above and this line, and the
+  -- announcement goes out before anything else that could throw.** The store
+  -- is what arms the no-op guard at the top of this handler, so a store that
+  -- was never announced is not a lost message -- it is a permanently lost
+  -- one: the client's reconcile loop (src/Client.lua's SPRITE_RETRY) re-sends
+  -- the same id for the rest of the session and every retry is eaten by
+  -- `sprite == client.sprite`, with nobody else ever told. That is a whole
+  -- session's worth of silence bought by one throw, so the order is the
+  -- invariant: say it, then do the rest.
   self:broadcast(Wire.SPRITE, { id = client.id, sprite = sprite })
+  -- The board learns the new face too, so a RANKING answer given after this
+  -- draws the character the player is wearing now rather than the one they
+  -- greeted in.  The same call admit() makes, under the same guard: a player
+  -- who does not own the name has no business writing to its row.  Last,
+  -- because it is the one call here that reaches state this handler does not
+  -- own, and a leaderboard portrait is not worth anyone's announcement.
+  if client.ranked then self.board:seen(client.name, client.sprite) end
 end
 
 handlers[Wire.CHAT] = function(self, client, msg)

@@ -227,6 +227,51 @@ function testRankedOwnerReseedsTheBoard() {
     'a ranked owner\'s change re-seeds the board\'s face');
 }
 
+/*
+ * The announcement is not behind anything that can fail.
+ *
+ * Mirrors src/rby_mmo_test.lua's case of the same name, and pins the same
+ * order for the same reason: the store at the top of the handler arms its own
+ * no-op guard, so a throw between the store and the broadcast does not cost
+ * one message -- it costs the session. The client re-sends the same id every
+ * SPRITE_RETRY, each retry is eaten by `sprite === client.sprite`, and nobody
+ * else in the game is ever told. The board is the call that could do it, so
+ * the board goes last, and this drives it with one that throws.
+ *
+ * Worse on this hub than on the Lua one, which is why the case is worth
+ * running on both: Relay.handle catches whatever a handler throws and writes
+ * a line to its log. Nothing crashes, nothing disconnects, nobody is told --
+ * the failure's only symptom would be one player's character never changing
+ * for anyone else, for the rest of the session.
+ */
+function testABrokenBoardCannotSwallowTheAnnouncement() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const one = dial(relay, 'FOURTEEN', { sprite: 'SPRITE_RED' });
+  const two = dial(relay, 'FIFTEEN', { sprite: 'SPRITE_RED' });
+  ok(one.welcome.ranked === true,
+    'sanity: the sender owns its name, so the board is in play');
+  one.peer.outbox = [];
+  two.peer.outbox = [];
+
+  let reached = false;
+  relay.board.seen = () => {
+    reached = true;
+    throw new Error('the board could not take that name');
+  };
+
+  relay.handle(one.id, { type: 'mmo.sprite', sprite: 'SPRITE_GREEN' });
+  ok(reached, 'sanity: the board really was called, and really did throw');
+  ok(take(two, 'mmo.sprite') !== null,
+    'a board that fails does not cost everyone else the announcement');
+  ok(take(one, 'mmo.sprite') !== null,
+    'nor the sender their acknowledgement');
+  ok(relay.get(one.id).sprite === 'SPRITE_GREEN',
+    'and what the hub is holding is exactly what it announced -- never a '
+    + 'value stored but never said, which the no-op guard would then eat '
+    + 'every retry of');
+}
+
 // ------------------------------------------------------------------- guards
 
 function testUngreetedClientCannotChangeSprite() {
@@ -309,6 +354,7 @@ function main() {
   testChangeAfterTheGateOpensGoesThrough();
   testImpostorCannotRepaintBoard();
   testRankedOwnerReseedsTheBoard();
+  testABrokenBoardCannotSwallowTheAnnouncement();
   testUngreetedClientCannotChangeSprite();
   testLaterJoinerWelcomeCarriesTheChangedSprite();
   testProtocolMismatchNamesBothVersionsFromTheConstant();
