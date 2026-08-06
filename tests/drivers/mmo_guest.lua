@@ -140,6 +140,23 @@ return function(game)
   game.save.party = { Pokemon.new(game.data, ME.species, ME.level) }
   -- so the driven battle actually resolves; see frontloadDamage
   local lead = H.frontloadDamage(game.data, game.save.party[1])
+
+  -- A badge in the bag, on one side only.
+  --
+  -- Gen 1 gives the player x9/8 on a stat per badge, and a co-op battle used
+  -- to give it to nobody: the host builds all four battlers and holds one save
+  -- out of four, so every battler was built without one. Put here rather than
+  -- inside the co-op leg because it has to be in the bag before the party is
+  -- packed and sent -- the badge set travels with the party it belongs to.
+  local Damage = require("src.battle.Damage")
+  local badgeRows = (game.data.constants and game.data.constants.badgeBoosts)
+    or Damage.BADGE_BOOSTS
+  local myBadge = ROLE == "a" and badgeRows[1] and badgeRows[1].badge or nil
+  if myBadge then
+    game.save.inventory = game.save.inventory or {}
+    game.save.inventory[myBadge] = 1
+    log("carrying", myBadge)
+  end
   log("in the overworld as", ME.name, "with",
       table.concat(H.partySpecies(game), ","), "leading with", tostring(lead))
 
@@ -737,6 +754,386 @@ return function(game)
   -- ...and being in one does not stop them trading, which the leg below is
   -- about to demonstrate for real.
   check(#exports.party() == 2, "the party survives everything above it")
+
+  -- ------- a co-op 2-on-2 against a real trainer
+  --
+  -- The leg the headless suite structurally cannot reach. That suite drives
+  -- CoopSim and CoopField with hand-built monsters and a fake stack; what it
+  -- never does is find out whether the prompt actually appears in front of a
+  -- **real** BattleState the engine built, whether the four-slot screen builds
+  -- and draws, or whether the battle that was displaced ever gets its result
+  -- back. Every one of those fails silently in the suite's world.
+  --
+  -- Both instances push the same trainer battle themselves. That is not a
+  -- shortcut around the interception -- it is exactly what the engine does at
+  -- the end of both of its own paths (`game.stack:push(battle)`), which is the
+  -- thing src/Client.lua listens for. The alternative, walking a driver into a
+  -- trainer's line of sight, would test the engine's pathfinding rather than
+  -- this mod.
+
+  H.closeToOverworld(game)
+
+  -- The same trainer on both sides, chosen from the data rather than named --
+  -- a hardcoded class goes away when the dataset changes -- and specifically
+  -- the **weakest** one with two POKeMON.
+  --
+  -- Sorting by id picked AGATHA, and an Elite Four win pays exp by the level of
+  -- what it beat: the party rocketed, every level-up queued its own box with an
+  -- evolution offer behind it, and the trade leg below found its request
+  -- answered by a client still working through them. The battle machinery was
+  -- fine; the leg was leaving the game somewhere the next one could not start
+  -- from. Weakest keeps the payout small and the aftermath short.
+  -- MMO_SKIP_COOP=1 runs the scenario without this leg.
+  --
+  -- Not a convenience: it is the bisect. The trade and the link battle below
+  -- passed for months before this leg existed, so "does the leg cause it" is
+  -- the first question worth answering when one of them stalls, and answering
+  -- it should not mean editing a driver.
+  local skipCoop = os.getenv("MMO_SKIP_COOP") == "1"
+  if skipCoop then log("co-op leg SKIPPED (MMO_SKIP_COOP=1)") end
+
+  local coopClass
+  if not skipCoop then
+    local best
+    for id, record in pairs(game.data.trainers or {}) do
+      local party = record.parties and record.parties[1]
+      if party and #party >= 2 then
+        local total = 0
+        for _, spec in ipairs(party) do total = total + (spec.level or 0) end
+        -- id as the tiebreak, so both instances land on the same trainer
+        if best == nil or total < best.total
+           or (total == best.total and id < best.id) then
+          best = { id = id, total = total }
+        end
+      end
+    end
+    coopClass = best and best.id
+    if best then log("co-op trainer:", best.id, "total level", best.total) end
+    check(coopClass ~= nil, "the dataset has a trainer with two POKeMON to fight")
+  end
+
+  -- SWITCH and ITEM need something to switch to and something to use, and a
+  -- fresh driver save has one monster and an empty bag. Both are added here
+  -- rather than assumed, so the leg tests the commands rather than skipping
+  -- them on an empty list.
+  local switchTarget, potionId, addedMon
+  if coopClass then
+    local Pokemon = require("src.pokemon.Pokemon")
+    if #(game.save.party or {}) < 2 then
+      local ok, extra = pcall(Pokemon.new, game.data, "PIDGEY", 12)
+      if ok and extra then
+        game.save.party[#game.save.party + 1] = extra
+        switchTarget = extra.species
+        addedMon = true
+      end
+    else
+      switchTarget = game.save.party[2].species
+    end
+    for id, def in pairs(game.data.items or {}) do
+      if id:find("POTION") and not def.key then potionId = id break end
+    end
+    if potionId then
+      game.save.inventory[potionId] = (game.save.inventory[potionId] or 0) + 3
+    end
+    log("switch target:", tostring(switchTarget), "item:", tostring(potionId))
+  end
+
+  local finished = nil
+  local staged = nil
+  local function stageTrainer()
+    local BattleState = require("src.battle.BattleState")
+    local battle = BattleState.newTrainer(game, coopClass, 1)
+    -- Softened, not gutted. The engine's trainers are built for a full
+    -- playthrough and these drivers carry a starter, so without this the leg
+    -- would be a twenty-minute battle rather than a test of the machinery
+    -- around one -- but setting them to exactly 1 HP drew both enemy bars as
+    -- empty, which reads on a screenshot as a broken HP bar rather than as a
+    -- deliberately weakened opponent. A quarter still dies to one hit and
+    -- still looks like a monster that is alive.
+    for _, mon in ipairs(battle.enemyParty or {}) do
+      mon.hp = math.max(1, math.floor((mon.stats and mon.stats.hp or 4) / 4))
+    end
+    -- The callers of newTrainer are what attach onFinish -- the overworld
+    -- attaches the defeated-trainer flag and the rewards, the script runner
+    -- attaches its own resume. Attaching one here is what lets this leg assert
+    -- the co-op battle hands its result back to the battle it displaced.
+    battle.onFinish = function(result) finished = result end
+    game.stack:push(battle)
+    return battle
+  end
+
+  if coopClass then
+    if ROLE == "a" then
+      staged = stageTrainer()
+      -- The prompt is a text box and then a two-row menu; tap through the box
+      -- rather than mashing, because row one of that menu is WAIT and a stray
+      -- A would answer the question this is trying to observe.
+      local asked = H.waitFor(game, function()
+        for _, label in ipairs(H.menuLabels(game)) do
+          if label == "WAIT" then return true end
+        end
+        local top = H.top(game)
+        if top and top.items == nil then U.tap(game, "a") end
+        return false
+      end, 60 * 6, "the co-op prompt in front of the trainer")
+      check(asked, "the co-op prompt appears in front of a real trainer battle")
+      shot("coop-prompt")
+      check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
+      local waiting = H.waitSeconds(game, function()
+        return exports.coopWaiting() ~= nil
+      end, 20, "this side to be waiting at the fight")
+      check(waiting, "and this side is standing at the fight, waiting")
+      H.signal("coop_a_waiting")
+    else
+      H.await(game, "coop_a_waiting")
+      -- The offer has to have crossed a real hub to get here.
+      local offered = H.waitSeconds(game, function()
+        return exports.coopOffer() ~= nil
+      end, 60, "the partner's co-op offer to arrive")
+      check(offered, "the partner's offer reaches this side over the hub")
+      local offer = exports.coopOffer()
+      if offer then log("offer:", tostring(offer.name), tostring(offer.battle)) end
+
+      staged = stageTrainer()
+      -- Reaching the same fight asks to join it; YES is row one.
+      local joined = H.drivePrompts(game, function()
+        local top = H.top(game)
+        return top ~= nil and top.sim ~= nil
+      end, 90)
+      check(joined, "reaching the same fight offers to join, and joining starts it")
+      H.signal("coop_b_joined")
+    end
+  end
+
+  if coopClass then
+    if ROLE == "a" then H.await(game, "coop_b_joined") end
+
+    -- The command grid is only there once the opening line has gone --
+    -- H.awaitCommandMenu is the wait, and its header is why. It lives in
+    -- mmo_util now because the host and quad drivers photograph the same box
+    -- and were taking their pictures of the opening line.
+
+    -- Four monsters, on one field, on both clients.
+    local onField = H.waitSeconds(game, function()
+      local top = H.top(game)
+      return top ~= nil and top.sim ~= nil and #top.sim.slots == 4
+    end, 90, "the 2-on-2 to come up")
+    check(onField, "a four-slot co-op battle is on screen")
+    local top = H.top(game)
+    if top and top.sim then
+      local names = {}
+      for _, slot in ipairs(top.sim.slots) do
+        names[#names + 1] = tostring(slot.name) .. "/" ..
+          tostring(slot.battler and slot.battler.mon and slot.battler.mon.species)
+      end
+      log("field:", table.concat(names, " "))
+      local allies, foes = 0, 0
+      for _, slot in ipairs(top.sim.slots) do
+        if slot.side == "a" then allies = allies + 1 else foes = foes + 1 end
+      end
+      check(allies == 2, "two on your side")
+      check(foes == 2, "and two against")
+
+      -- The badge reached the field it was earned for. Only one side carries
+      -- one, so this is also a check that a badge set does not leak across
+      -- slots: the host builds all four battlers and must give each trainer
+      -- their own, not its own to everybody.
+      local ours = top.sim:slot(top.mine)
+      local theirBadges = {}
+      for _, slot in ipairs(top.sim.slots) do
+        if slot.battler and slot.battler.badges then
+          theirBadges[#theirBadges + 1] = tostring(slot.name)
+        end
+      end
+      log("badges on the field:", #theirBadges == 0 and "(none)"
+          or table.concat(theirBadges, ","))
+      if myBadge then
+        check(ours and ours.battler and ours.battler.badges ~= nil
+              and ours.battler.badges[myBadge] == true,
+              "the badge in this trainer's bag is on their battler")
+      else
+        check(ours ~= nil and ours.battler ~= nil
+              and ours.battler.badges == nil,
+              "a trainer with no badges brings none")
+      end
+      check(#theirBadges == 1,
+            "and exactly one of the four carries a badge set -- the host does "
+            .. "not hand its own to everybody")
+      -- The command box is what this screenshot is of, so it waits for it.
+      check(H.awaitCommandMenu(game, "the command menu for the battle shot"),
+            "the co-op command grid opens once the opening line is done")
+      U.wait(30)
+      shot("coop-battle")
+      -- The screen is guarded against a draw error, so a layout bug is one log
+      -- line and a blank battle rather than a crash. That makes it invisible
+      -- to a run that only checks the battle happened -- so check the guard
+      -- itself, or the next broken layout ships green.
+      check(exports.coopDrawFailed() == false,
+            "the 2-on-2 screen drew without error")
+      -- The battle recovers from a lost message rather than stopping, so a
+      -- desync leaves no visible trace -- which is exactly why it has to be
+      -- asserted rather than watched for.
+      local sync = exports.coopSync()
+      check(sync.gaps == 0, "no turn went missing on the wire")
+      check(sync.desyncs == 0, "and this copy never drifted from the host")
+    end
+
+    -- ------- SWITCH and ITEM, through the real menus
+    --
+    -- Both are commands this screen owns rather than the engine's, so the only
+    -- way to know they work is to press them. One instance does each, and the
+    -- other keeps tapping FIGHT so the turn still resolves -- a co-op turn
+    -- needs every living slot to file something.
+    if ROLE == "a" and switchTarget then
+      local before = H.top(game)
+      local activeBefore = before and before.sim and before.sim:slot(before.mine)
+      local speciesBefore = activeBefore and activeBefore.battler
+        and activeBefore.battler.mon.species
+      -- The command box is a 2x2 grid navigated as one (FIGHT ITEM on the top
+      -- row, SWITCH RUN on the bottom), so SWITCH is directly *below* FIGHT --
+      -- one press, not the two the old linear cycle took.
+      check(H.awaitCommandMenu(game, "the command menu before SWITCH"),
+            "the command grid is answerable before SWITCH is pressed")
+      U.tap(game, "down"); U.wait(6)
+      U.tap(game, "a");    U.wait(10)   -- open the bench
+      U.tap(game, "a");    U.wait(20)   -- take the first one on it
+      local after = H.waitSeconds(game, function()
+        local now = H.top(game)
+        local slot = now and now.sim and now.sim:slot(now.mine)
+        local species = slot and slot.battler and slot.battler.mon.species
+        return species ~= nil and species ~= speciesBefore
+      end, 45, "the switch to take effect")
+      check(after, "SWITCH sends out the other POKeMON mid-battle")
+      log("switched from", tostring(speciesBefore), "to", tostring(switchTarget))
+      shot("coop-switch")
+    end
+
+    if ROLE == "b" and potionId then
+      local held = (game.save.inventory or {})[potionId] or 0
+      -- Hurt the active monster first, or a potion has nothing to heal and
+      -- the engine refuses it -- which would pass a test that proved nothing.
+      local now = H.top(game)
+      local slot = now and now.sim and now.sim:slot(now.mine)
+      local mon = slot and slot.battler and slot.battler.mon
+      if mon then mon.hp = math.max(1, math.floor((mon.stats.hp or 2) / 2)) end
+      local hurt = mon and mon.hp or 0
+      -- ITEM sits to the *right* of FIGHT on the command grid's top row, so
+      -- this is a right press rather than the down the linear cycle needed.
+      check(H.awaitCommandMenu(game, "the command menu before ITEM"),
+            "the command grid is answerable before ITEM is pressed")
+      U.tap(game, "right"); U.wait(6)
+      U.tap(game, "a");    U.wait(10)   -- open the bag
+      U.tap(game, "a");    U.wait(20)   -- use the first thing in it
+      local healed = H.waitSeconds(game, function()
+        return mon ~= nil and (mon.hp or 0) > hurt
+      end, 45, "the potion to heal")
+      check(healed, "ITEM uses a POTION mid-battle and it heals")
+      local left = (game.save.inventory or {})[potionId] or 0
+      check(left < held, "and the item is spent from the bag")
+      log(("potion: %d -> %d, hp %d -> %d"):format(held, left, hurt, mon and mon.hp or 0))
+      shot("coop-item")
+    end
+
+    -- Drive it. Every menu in this battle takes A on row one -- FIGHT, then
+    -- the first move, then the first target -- so tapping through is a real
+    -- player playing it badly rather than a test poking at internals.
+    local coopPrompts = {}
+    local over = H.drivePrompts(game, function()
+      local now = H.top(game)
+      return now == nil or now.sim == nil
+    end, 120, function()
+      local now = H.top(game)
+      local text = now and now.shown
+      if type(text) == "string" and text ~= "" then
+        -- Flattened as it is captured. A battle line is two rows joined by a
+        -- newline, and U.log writes one line -- so an unflattened list logs
+        -- everything up to the first newline and silently drops the rest,
+        -- which made a passing assertion look like a failing one.
+        coopPrompts[#coopPrompts + 1] = text:gsub("\n", " / ")
+      end
+      U.tap(game, "a")
+    end)
+    check(over, "the 2-on-2 runs to an end")
+    shot("coop-after")
+
+    -- ...and the two copies still agree, which is a different claim from the
+    -- one made before the first turn. Checked only at the start, this leg
+    -- passed for a long time while every replayer was a whole turn behind:
+    -- the engine's move pipeline writes HP straight onto the monster and the
+    -- turn announced nothing, so the bars only moved when the desync check
+    -- hauled them into line once a turn. A resync is a repair, and a repair
+    -- happening every turn is a protocol that is not working.
+    local after = exports.coopSync()
+    log(("sync after: gaps=%d desyncs=%d resyncs=%d"):format(
+      after.gaps, after.desyncs, after.resyncs))
+    check(after.gaps == 0, "no turn went missing across the whole battle")
+    check(after.desyncs == 0, "and this copy never drifted from the host")
+    check(after.resyncs == 0,
+          "and never needed the field re-sent -- a resync per turn is the "
+          .. "repair standing in for the protocol")
+
+    -- Beating a trainer together pays no ranked points, and the screen says
+    -- so rather than leaving a number that did not move to speak for itself.
+    -- Read off the prompts the drive actually answered, so this is what a
+    -- player was shown and not what the code intended to show.
+    local explained = false
+    for _, line in ipairs(coopPrompts or {}) do
+      if tostring(line):find("No points", 1, true) then explained = true end
+    end
+    log("post-battle prompts:", #(coopPrompts or {}) == 0 and "(none)"
+        or table.concat(coopPrompts, " | "))
+    check(explained,
+          "a 2-on-2 against a trainer says why it paid no ranked points")
+    check(exports.points() == 0,
+          "and pays none -- an NPC has no rating to be measured against")
+
+    -- ...and the battle it displaced is told how it went, which is what runs
+    -- the whole post-battle flow in a real game.
+    local handed = H.waitSeconds(game, function()
+      return finished ~= nil
+    end, 30, "the engine's battle to be finished off")
+    check(handed, "the displaced trainer battle got its result back")
+    log("co-op result handed back:", tostring(finished))
+
+    -- Back to the world *properly* before anybody signals. Winning queues the
+    -- engine's own aftermath -- exp boxes, any level-up, the evolution offer
+    -- afterBattle raises -- and a leg that rendezvoused on top of that would
+    -- hand the next one a client still tapping through boxes. This is the
+    -- difference between "the battle ended" and "the game is playable again".
+    local settled = H.drivePrompts(game, function()
+      local now = H.top(game)
+      return now == nil or now == game.overworld or now.isOverworld
+    end, 120)
+    check(settled, "the world comes back after the 2-on-2")
+
+    -- Put the party back the way this leg found it.
+    --
+    -- The second monster exists only so SWITCH has somewhere to switch to, and
+    -- the trade leg below asserts the party is exactly one -- so leaving it
+    -- behind fails a later leg with a defect this one invented. A leg that
+    -- changes the save owns undoing it.
+    if addedMon and #(game.save.party or {}) > 1 then
+      table.remove(game.save.party)
+      log("removed the extra POKeMON the switch test needed")
+    end
+    -- **Re-baseline the engine's battle counters.**
+    --
+    -- The co-op leg pushes a real trainer battle, which fires battle.started
+    -- on enter -- and then the co-op path pops it and fights in its place, so
+    -- that battle never fires battle.ended. The counters are cumulative for
+    -- the whole run, so from here on every later leg reads started=2 ended=1
+    -- and any predicate of the form "has a battle started yet" is answered
+    -- yes by a battle that finished minutes ago.
+    --
+    -- That is a fact about instrumenting a leg that *substitutes* one battle
+    -- for another, not a defect in either battle -- so the counters are reset
+    -- to zero here and the legs below count from their own beginning.
+    for name in pairs(events) do events[name] = 0 end
+    log("battle counters re-baselined after the co-op leg")
+
+    H.closeToOverworld(game)
+    check(rendezvous("coop"), "both guests came out of the 2-on-2")
+  end
 
   -- ------- a real trade, run to completion
   --
