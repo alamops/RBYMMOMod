@@ -516,4 +516,30 @@ function M:setCode(key, code)
   return entry
 end
 
+-- The player is finished with this hub.
+--
+-- Dropped rather than emptied, and marked as dropped for the same reason
+-- eviction and EDIT HOST mark theirs: the write re-reads the file and folds
+-- in rows it has never seen, so the copy of this row still sitting on disk --
+-- written by another save slot, or by this session a moment ago -- would walk
+-- straight back in on the very write that was meant to remove it. The mark is
+-- what makes a delete a delete.
+--
+-- Nothing is handed to _persist as the row to keep, which every other mutator
+-- does: this is the one write that wants the list shorter, so the eviction
+-- that follows a fold-in has no row here to protect.
+function M:remove(key)
+  local entry = self:get(key)
+  if not entry then
+    self:_warn("no server is stored for %s, so there is nothing to delete -- "
+      .. "open START > MMO > SERVERS and pick a row that is on the list",
+      tostring(key))
+    return nil
+  end
+  self.entries[entry.key] = nil
+  self.dropped[entry.key] = true
+  self:_persist()
+  return entry
+end
+
 return M
