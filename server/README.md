@@ -748,7 +748,7 @@ are the same five commands. Run them as `root`:
 curl -fsSL https://get.docker.com | sh
 
 # 2. The code
-git clone --depth 1 --branch v0.2.2 https://github.com/alamops/RBYMMOMod.git
+git clone --depth 1 --branch v0.7.2 https://github.com/alamops/RBYMMOMod.git
 cd RBYMMOMod/server
 
 # 3. Build and run

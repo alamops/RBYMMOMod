@@ -4,6 +4,39 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.7.2] - 2026-08-06
+
+### Fixed
+
+- **The distributed archive no longer carries the co-op end-to-end drivers.**
+  `tests/drivers/mmo_quad.lua` and `tests/drivers/run-quad-e2e.sh` arrived with
+  co-op battles and never reached `.modkitignore`, so `pack` duly put both in
+  the v0.7.1 zip — two files that reach engine test infrastructure and mean
+  nothing to somebody who has just unpacked a mod. Nothing mechanical was going
+  to catch it: `lint` has no opinion about a driver script, and the file count
+  only looks wrong to a reader who already knows what it should be. That is the
+  trap `my-profile.png` and `rank.png` each fell into one release apart, and the
+  fix is the same one — name the files. Both drivers are listed now, along with
+  the seven screenshots taken since the block was last touched
+  (`coop-battle.png`, `coop-item.png`, `coop-switch.png`, `party-ask.png`,
+  `party-battle.png`, `party-spectating.png`, `two-parties.png`), so
+  `modkit pack` leaves all nine behind — the release workflow already dropped
+  `docs/` wholesale, so only the two drivers ever reached a published zip.
+  Seven plan files join them on the same footing as every other plan entry —
+  `submit-to-mod-index.md` plus the six that had accumulated without a line
+  (`coop-battle-hp-sequencing.md`, `coop-battle-status-and-timeout.md`,
+  `coop-battle-ux-findings.md`, `coop-run-consent-and-blackout.md`,
+  `nire-back-sprite-pixel-ratio.md`, `non-blocking-avatars.md`): working notes
+  for whoever picks this up next, not mod content.
+
+### Changed
+
+- **Two version numbers in the docs caught up with the mod.** `README.md`'s
+  known-jank section still opened by calling this `0.5.0`, and
+  `server/README.md`'s VPS walkthrough still cloned `--branch v0.2.2` — a tag
+  from before the hub that walkthrough then tells you to build existed at all.
+  Both now name the current release.
+
 ## [0.7.1] - 2026-08-05
 
 ### Fixed
