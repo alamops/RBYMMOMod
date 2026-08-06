@@ -1135,4 +1135,4 @@ class Relay {
 // PROTOCOL is exported so the suites speak the current dialect by naming it
 // rather than by carrying a hardcoded number that has to be found and edited
 // in six places every time it moves.
-module.exports = { Relay, parseLine, presenceOf, PROTOCOL };
+module.exports = { Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE };
