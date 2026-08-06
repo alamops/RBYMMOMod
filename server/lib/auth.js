@@ -257,7 +257,7 @@ function verify(nonce, response, credentials, now = Date.now()) {
  * never invents one by hand.
  */
 function newCredential(options = {}) {
-  const { label, secret, expiresAt = null, maxUses = null } = options;
+  const { label, secret, expiresAt = null, maxUses = null, admin = false } = options;
 
   let stored;
   if (secret === undefined || secret === null || secret === '') {
@@ -294,7 +294,7 @@ function newCredential(options = {}) {
     uses = max;
   }
 
-  return {
+  const credential = {
     // Short and hex: it goes in log lines and `revoke <id>`, so it has to be
     // repeatable off a terminal without being guessable enough to matter --
     // and it is an identifier, not a secret.
@@ -307,6 +307,33 @@ function newCredential(options = {}) {
     uses: 0,
     revoked: false,
   };
+
+  // An admin credential is an ordinary join code that additionally opens the
+  // operator side: today the web dashboard admits nothing else, and the hub
+  // marks the connection it admits so in-game operator features have a flag to
+  // check when they exist. Nothing about admission changes -- an admin code
+  // joins the game exactly like a player's.
+  //
+  // The flag is written only when it is true, so a player's credential is the
+  // byte-identical object it was before this field existed and no config
+  // written by an older hub needs migrating: absent reads as false everywhere
+  // (see isAdminCredential, and validateCredentials in lib/config.js).
+  //
+  // It is not itself a secret -- it says what a code unlocks, not what the
+  // code is -- so redaction leaves it alone. The secret is still the code.
+  if (admin) credential.admin = true;
+
+  return credential;
+}
+
+/**
+ * The one reading of the flag every consumer should use, so "is this an admin
+ * credential?" cannot drift into six different truthiness tests. Strictly
+ * `true`: a stored `admin: "no"` or `admin: 1` is a config nobody canonicalised
+ * and this gate does not guess in favour of privilege.
+ */
+function isAdminCredential(credential) {
+  return Boolean(credential) && credential.admin === true;
 }
 
 module.exports = {
@@ -322,4 +349,5 @@ module.exports = {
   isActive,
   activeCredentials,
   newCredential,
+  isAdminCredential,
 };

@@ -76,7 +76,7 @@ const FALLBACK_VERSION = '0.0.0-dev';
 // Flags that are switches, so `--yes start` does not eat `start` as a value.
 const SWITCHES = new Set([
   'yes', 'force', 'reveal', 'clear', 'help', 'version', 'quiet', 'insecureConfig',
-  'json', 'all', 'once',
+  'json', 'all', 'once', 'admin',
 ]);
 
 /*
@@ -473,8 +473,10 @@ const HELP = {
     '',
     'Who may join',
     '  invite [options]            mint a new join code and print it once',
+    '  invite --admin              the same, but the code also opens the web',
+    '                              dashboard (which accepts nothing else)',
     '  invite list [--reveal]      list join codes; masked unless --reveal',
-    '  revoke <id>                 revoke one join code',
+    '  revoke <id>                 revoke one join code, admin or not',
     '  ban <ip> [--reason X]       refuse an address',
     '  unban <ip>                  stop refusing an address',
     '  allow [<ip>|--clear]        allowlist: when it has entries, ONLY those',
@@ -701,11 +703,13 @@ const HELP = {
   ],
   invite: [
     `Usage: ${PROGRAM} invite [--label TEXT] [--expires 30m|24h|7d] [--uses N]`,
-    '                         [--code CODE]',
+    '                         [--code CODE] [--admin]',
     `       ${PROGRAM} invite list [--reveal]`,
     '',
     'Mints a join code and prints it once. Codes are masked in `invite list`',
-    'unless --reveal is given, so the list is safe to screen-share.',
+    'unless --reveal is given, so the list is safe to screen-share; the KIND',
+    'column marks admin codes either way, since what a code opens is not a',
+    'secret.',
     '',
     '  --expires   30m, 24h, 7d -- minutes, hours or days. Nothing else.',
     '  --uses N    how many times it may be used before it stops working.',
@@ -714,6 +718,14 @@ const HELP = {
     '              Dashes, spaces and lower case are normalised away. Use it',
     '              to reuse the passcode from your in-game LAN game, or to',
     '              pick one your friends can remember.',
+    '  --admin     mint an admin code. It joins the game exactly like any',
+    '              other code, and it also opens the web dashboard -- which',
+    '              accepts nothing else -- and whatever operator features',
+    '              arrive in game later. Consider pairing it with --expires:',
+    '              an admin code is worth more to a thief than a player\'s is.',
+    '',
+    'Every code is revoked the same way, admin or not: `revoke <id>`, with the',
+    'id from `invite list`.',
   ],
   revoke: [
     `Usage: ${PROGRAM} revoke <id>`,
@@ -973,8 +985,14 @@ function throttleConcerns(cfg) {
  * a host must copy correctly, and the least emphatic thing on it. The box is
  * drawn to the code instead, so it stays deliberate at any length the format
  * ever takes.
+ *
+ * `options.admin` swaps the paragraph under the box, and only the paragraph:
+ * an admin code is typed into the same in-game screen, in the same format, and
+ * the one thing that differs about it is what it opens -- so that is the one
+ * thing the text differs about.
  */
-function joinCodeBlock(ctx, code, extra) {
+function joinCodeBlock(ctx, code, extra, options) {
+  const admin = Boolean(options && options.admin);
   const inner = `   ${String(code)}   `;
   const rule = `+${'-'.repeat(inner.length)}+`;
   ctx.say('');
@@ -982,10 +1000,27 @@ function joinCodeBlock(ctx, code, extra) {
   ctx.say(`      |${inner}|`);
   ctx.say(`      ${rule}`);
   ctx.say('');
-  ctx.say('  Give that to the friends you want in your world. They type it once,');
-  ctx.say('  in game, on the screen where they enter this hub\'s address. Anyone');
-  ctx.say('  without it is refused, in one sentence, and cannot get in.');
-  for (const line of extra || []) ctx.say(`  ${line}`);
+  if (admin) {
+    ctx.say('  That is an admin code. It joins the world exactly like any other');
+    ctx.say('  code -- typed once, in game, on the screen where this hub\'s address');
+    ctx.say('  goes -- and it opens two more things:');
+    ctx.say('');
+    ctx.say('    - the web dashboard, if this hub runs one. It is the only kind of');
+    ctx.say('      code that page accepts, and it shows every player\'s name,');
+    ctx.say('      location and score, plus how hard the door is being knocked on.');
+    ctx.say('    - whatever operator features arrive in game later. Nothing uses');
+    ctx.say('      it there yet; the hub already marks the connection, so when');
+    ctx.say('      those exist this code is what they will look for.');
+    ctx.say('');
+    ctx.say('  Give it only to someone you would hand the hub itself to.');
+  } else {
+    ctx.say('  Give that to the friends you want in your world. They type it once,');
+    ctx.say('  in game, on the screen where they enter this hub\'s address. Anyone');
+    ctx.say('  without it is refused, in one sentence, and cannot get in.');
+  }
+  // An empty note is a deliberate blank line between two groups of them, not
+  // an indent with nothing after it.
+  for (const line of extra || []) ctx.say(line ? `  ${line}` : '');
   ctx.say('');
   ctx.say('  This is the only time it is printed in full. To see it again:');
   ctx.say(`      ${PROGRAM} invite list --reveal`);
@@ -1660,6 +1695,15 @@ function verbInviteList(ctx) {
   const shown = reveal ? credentials : maskedCredentials(credentials);
   const now = Date.now();
 
+  /*
+   * KIND, not a bare yes/no: this column answers "what does this code open",
+   * and both of its answers should be readable without the header. ADMIN is
+   * shouted and `player` is not, on purpose -- the row worth noticing in a
+   * list of twenty is the privileged one, and it is marked whether or not
+   * --reveal was given, because what a code unlocks is not a secret. Read
+   * through auth.isAdminCredential so this table and the dashboard's door
+   * cannot come to different readings of the same flag.
+   */
   const rows = credentials.map((credential, index) => [
     credential.id || '-',
     credential.label || '-',
@@ -1667,10 +1711,11 @@ function verbInviteList(ctx) {
     credential.expiresAt ? shortDate(credential.expiresAt) : 'never',
     credential.maxUses ? `${credential.uses || 0}/${credential.maxUses}` : String(credential.uses || 0),
     credentialState(credential, now),
+    auth.isAdminCredential(credential) ? 'ADMIN' : 'player',
     shown[index] ? shown[index].secret : '-',
   ]);
 
-  const headers = ['ID', 'LABEL', 'CREATED', 'EXPIRES', 'USES', 'STATUS', 'CODE'];
+  const headers = ['ID', 'LABEL', 'CREATED', 'EXPIRES', 'USES', 'STATUS', 'KIND', 'CODE'];
   const widths = headers.map((header, column) =>
     Math.max(header.length, ...rows.map((row) => String(row[column]).length)));
 
@@ -1679,6 +1724,14 @@ function verbInviteList(ctx) {
     ctx.say(row.map((cell, column) => pad(cell, widths[column])).join('  ').trimEnd());
   }
 
+  ctx.say('');
+  if (credentials.some((credential) => auth.isAdminCredential(credential))) {
+    ctx.say('KIND ADMIN: joins the game like any code, and is the only kind the');
+    ctx.say(`web dashboard admits. \`${PROGRAM} revoke <id>\` takes one back.`);
+  } else {
+    ctx.say(`KIND: none of these is an admin code. \`${PROGRAM} invite --admin\` mints`);
+    ctx.say('one; the web dashboard admits nothing else.');
+  }
   ctx.say('');
   if (reveal) {
     ctx.say('Codes are shown in full because --reveal was given. Anything that');
@@ -1726,9 +1779,32 @@ function verbInvite(ctx, rest) {
     maxUses = n;
   }
 
+  /*
+   * `--admin` is a switch (see SWITCHES), so the plain spelling arrives as
+   * `true` and `--no-admin` as `false`. `--admin=true` and `--admin=off` are
+   * still handed through as *strings* by the parser, and those are read here
+   * rather than quietly discarded: a host who typed `--admin=true`, was given
+   * a player's code, and read "New join code" without the word admin in it
+   * has been told the truth in a way that is very easy to miss. Anything that
+   * is neither a yes nor a no is a usage error -- this flag never guesses in
+   * favour of privilege.
+   */
+  let admin = false;
+  if (ctx.flags.admin !== undefined) {
+    const spelled = String(ctx.flags.admin).trim().toLowerCase();
+    if (ctx.flags.admin === true || ['true', 'yes', 'on', 'y', '1'].includes(spelled)) {
+      admin = true;
+    } else if (!saysNo(ctx.flags.admin)) {
+      ctx.warn(`--admin takes no value: write \`${PROGRAM} invite --admin\`.`);
+      ctx.warn('Nothing has been minted, because an admin code is not something to');
+      ctx.warn('hand out on a guess at what was meant.');
+      return USAGE;
+    }
+  }
+
   const label = typeof ctx.flags.label === 'string' && ctx.flags.label
     ? ctx.flags.label
-    : 'Invite';
+    : (admin ? 'Admin' : 'Invite');
 
   const loaded = requireExistingConfig(ctx);
   if (!loaded) return ERROR;
@@ -1757,7 +1833,7 @@ function verbInvite(ctx, rest) {
 
   let credential;
   try {
-    credential = auth.newCredential({ label, expiresAt, maxUses, secret: supplied.code });
+    credential = auth.newCredential({ label, expiresAt, maxUses, admin, secret: supplied.code });
   } catch (err) {
     ctx.warn(`Could not mint a join code: ${err.message}`);
     return ERROR;
@@ -1769,9 +1845,18 @@ function verbInvite(ctx, rest) {
   const notes = [];
   if (expiresAt) notes.push(`It stops working at ${shortDate(expiresAt)} UTC.`);
   if (maxUses) notes.push(`It can be used ${maxUses} time(s).`);
+  if (admin && !expiresAt) {
+    // Said once, where the code is, and only when there is no expiry to say
+    // instead: a stolen admin code is worth more than a stolen player's, and
+    // an end date is the one protection that does not depend on noticing.
+    notes.push('');
+    notes.push('It has no expiry. An admin code is worth more to a thief than a');
+    notes.push('player\'s one is, so if this is for one evening or one person,');
+    notes.push('mint it with `--expires 24h` and let it stop working on its own.');
+  }
 
-  ctx.say(`New join code (id ${credential.id}, ${credential.label})`);
-  joinCodeBlock(ctx, credential.secret, notes);
+  ctx.say(`New ${admin ? 'admin ' : ''}join code (id ${credential.id}, ${credential.label})`);
+  joinCodeBlock(ctx, credential.secret, notes, { admin });
 
   if (!cfg.auth.required) {
     ctx.warn('warning: auth.required is false in this config, and a passcode is');

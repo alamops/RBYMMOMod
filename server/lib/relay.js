@@ -132,6 +132,10 @@ function presenceOf(client) {
     // they move mid-session, and a card built from a stale hello would show
     // a rating the player has already changed.
     points: client.points || RANK_START,
+    // No `admin` here, deliberately: presence is what every other player in
+    // the game is told, and other players do not learn who holds power. The
+    // flag goes to the operator's own client on welcome and to operator views
+    // through roster(), and stops there.
   };
 }
 
@@ -226,6 +230,10 @@ handlers['mmo.auth'] = (relay, client, msg) => {
     return relay.refuse(client, 'That join code was not accepted.');
   }
   client.credentialId = verdict.credentialId || null;
+  // Set from the verdict and only from the verdict: the credential decides who
+  // is an operator, so nothing in the message that got us here -- or in any
+  // message this peer sends later -- can turn the flag on.
+  client.admin = verdict.admin === true;
   relay.admit(client);
 };
 
@@ -589,6 +597,12 @@ class Relay {
         party: Boolean(client.partyId),
         points: client.points,
         ranked: Boolean(client.ranked),
+        // Operator surfaces may carry this -- status.json, `who`, the
+        // dashboard's players table -- because they are already the view for
+        // somebody outside the game. Whether any of them draws it is their
+        // question; carrying it here is enough. Always a boolean, so a row
+        // never has to be read as "absent means no".
+        admin: Boolean(client.admin),
       });
     }
     return out;
@@ -669,6 +683,10 @@ class Relay {
       hello: null,
       nonce: null,
       credentialId: null,
+      // Nobody is an operator until a credential says so in mmo.auth. A hub
+      // with auth off never sets this, which is the whole answer for an
+      // unauthenticated hub: no credential, no admin.
+      admin: false,
     };
     this.clients.set(client.id, client);
     this.log.debug(`accepted ${client.id} from ${safe(client.address)}`);
@@ -794,6 +812,14 @@ class Relay {
       // key and joins exactly as it always did. Nothing new travels the other
       // way, which is why the protocol number does not move for it.
       motd: motd || undefined,
+      // Told to the operator about themselves, and to nobody else. Present
+      // only when true, the same way motd and rankToken are: a build that has
+      // never heard of it reads past the key, and an ordinary player's welcome
+      // is byte-identical to the one 0.8.0 sent. Hub->client only, derived
+      // from the credential server-side -- nothing a client sends can set it
+      // -- and nothing new travels the other way, which is why the protocol
+      // number does not move for it.
+      admin: client.admin || undefined,
     });
     this.broadcast('mmo.join', { player: presenceOf(client) }, client.id);
     this.log.info(`+ ${safe(client.name)} (${client.id}) -- ` +

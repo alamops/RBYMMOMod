@@ -13,15 +13,26 @@
  * the trade this thing is built on. Operator actions live on the admin socket,
  * behind filesystem permissions, where they can be reasoned about separately.
  *
- * Who gets in: anyone holding an **active join code** -- the same codes
- * players type, filtered the same way (`auth.activeCredentials`), read live
- * out of `config.auth.credentials` at every login so SIGHUP's replacement of
- * that array takes effect on the next attempt and a revoked code stops
- * working here at the same moment it stops working on the game port. One set
- * of credentials, one throttle, one lockdown: a wrong code typed at this page
- * is charged to `limits.noteAuthFailure` exactly like a wrong code answered on
- * the wire, and the hub-wide ceiling turns both away together. There is
- * deliberately no second secret to rotate and forget.
+ * Who gets in: anyone holding an active **admin** join code -- one minted with
+ * `rby-mmo-hub invite --admin`. It is still an ordinary join code on the game
+ * port, and it is still read live out of `config.auth.credentials` at every
+ * login (filtered by `auth.activeCredentials`, then by the admin flag) so
+ * SIGHUP's replacement of that array takes effect on the next attempt and a
+ * revoked code stops working here at the same moment it stops working on the
+ * game port. There is deliberately no second secret to rotate and forget.
+ *
+ * **A player's join code no longer opens this page** -- a change from 0.8.0,
+ * where any active code did. This page shows every player's name, location and
+ * score, and the door's failure counters; that is an operator's view of the
+ * hub, not a thing every guest holding an invite is owed. A player code
+ * submitted here fails exactly like a wrong one: same 403, same sentence, same
+ * charge to the throttle, and the login loop below runs over the admin subset
+ * without an early exit, so the refusal cannot be timed to tell a real-but-
+ * unprivileged code apart from a guess.
+ *
+ * One set of credentials, one throttle, one lockdown: a wrong code typed at
+ * this page is charged to `limits.noteAuthFailure` exactly like a wrong code
+ * answered on the wire, and the hub-wide ceiling turns both away together.
  *
  * **This page is plain HTTP and there is no TLS anywhere in this program.**
  * That is not an oversight to be fixed with a flag: the whole server is Node
@@ -51,7 +62,7 @@
 const http = require('node:http');
 const crypto = require('node:crypto');
 
-const { activeCredentials, normalizeCode } = require('./auth');
+const { activeCredentials, isAdminCredential, normalizeCode } = require('./auth');
 const { safe } = require('./log');
 
 // The cookie is short and unmemorable on purpose: it is not a brand, it is a
@@ -112,6 +123,21 @@ const JSON_TYPE = 'application/json; charset=utf-8';
 const TEXT = 'text/plain; charset=utf-8';
 
 // ------------------------------------------------------------------ helpers
+
+/**
+ * The credentials this page admits: active *and* admin, in that order.
+ *
+ * One function rather than two filters written twice, because the two callers
+ * are the start-time check ("is there anybody who could ever log in?") and the
+ * login loop ("is this them?"), and those two answers disagreeing is the shape
+ * of an auth bug -- a page that refuses to start for want of an admin code but
+ * would have let a player's code in, or the reverse. `isAdminCredential` is
+ * auth.js's own reading of the flag (strictly `true`), so a config carrying
+ * `admin: "no"` cannot become privilege here by truthiness.
+ */
+function adminCredentials(list) {
+  return activeCredentials(list).filter(isAdminCredential);
+}
 
 /**
  * The five characters that can turn a value into markup. `'` and `"` are here
@@ -276,8 +302,9 @@ function loginPage(message) {
     ? `<p class="note">${escapeHtml(message)}</p>`
     : '';
   return page('RBY MMO hub', `<h1>RBY MMO HUB</h1>
-<p class="lede">Sign in with a join code &mdash; the same code players type to
-get on the hub. Revoking a code closes this page to it too.</p>
+<p class="lede">Sign in with an admin join code &mdash; one minted with
+<code>rby-mmo-hub invite --admin</code>. An ordinary player's code joins the
+game but does not open this page. Revoking a code closes this page to it too.</p>
 <form method="post" action="/login">
 <input name="code" aria-label="Join code" autocomplete="off"
  autocapitalize="characters" autocorrect="off" spellcheck="false"
@@ -521,15 +548,19 @@ function start(options = {}) {
    * nothing behind the form. Refuse rather than serve that, and name the
    * command that fixes it, in the spirit of lib/server.js's openDoorRefusal.
    *
+   * "No code that opens it" means no *admin* code: a hub full of player codes
+   * has exactly this problem, because none of them is accepted here.
+   *
    * This is a *start-time* check on purpose, and the only one: the login path
-   * re-reads the credential list every time, so revoking the last code while
-   * the hub runs correctly leaves the page up and refusing everybody rather
-   * than tearing a listener down under a host who is mid-look.
+   * re-reads the credential list every time, so revoking the last admin code
+   * while the hub runs correctly leaves the page up and refusing everybody
+   * rather than tearing a listener down under a host who is mid-look.
    */
-  if (activeCredentials(liveCredentials()).length === 0) {
-    const refusal = 'the dashboard has no join code that still works, so ' +
-      'nobody could log into it. Run `rby-mmo-hub invite` to add one, or set ' +
-      'dashboard.enabled to false.';
+  if (adminCredentials(liveCredentials()).length === 0) {
+    const refusal = 'the dashboard has no admin join code that still works, ' +
+      'so nobody could log into it. Since 0.9.0 this page admits admin codes ' +
+      'only, not the codes players join with. Run `rby-mmo-hub invite --admin` ' +
+      'to mint one, or set dashboard.enabled to false.';
     if (log) log.error(refusal);
     return Promise.reject(new Error(refusal));
   }
@@ -636,6 +667,13 @@ function start(options = {}) {
    * buffers, and **no early exit** -- matching the first credential must take
    * the same time as matching the last, or the refusal becomes an oracle for
    * how many codes a hub is carrying and which one opened it.
+   *
+   * The set it compares against is the *admin* subset, and that is the whole
+   * of how a player's code is refused here: it is never in the list, so it
+   * misses like any wrong code and the loop's shape is unchanged -- same
+   * number of comparisons whatever was submitted, no branch that says "that
+   * is a real code, just not one of ours". A hub with three player codes and
+   * one admin code answers a guess and a player's own code identically.
    */
   function codeAccepted(submitted) {
     const given = normalizeCode(submitted);
@@ -647,10 +685,10 @@ function start(options = {}) {
     // which is *which* six characters, compared below.
     if (given === null) return false;
 
-    const active = activeCredentials(liveCredentials());
+    const admitted = adminCredentials(liveCredentials());
     let hit = false;
 
-    for (const credential of active) {
+    for (const credential of admitted) {
       const key = normalizeCode(credential.secret);
       if (key === null) continue; // a stored secret that will not normalise
       const expected = Buffer.from(key, 'ascii');
@@ -854,13 +892,15 @@ function start(options = {}) {
          *
          * `stats()` carries `perIp` -- the throttle's table of who is
          * connected from which address -- and `limits.stats()` carries the
-         * same table again. Anyone holding a join code can log in here, which
-         * is every player on the hub, and other players' addresses are not
-         * theirs to read: the roster is deliberately built without them
-         * (relay.js roster(), "no addresses, no token material") and this
-         * endpoint must not put back what that projection left out. Naming
-         * the fields means a future counter added to either stats() cannot
-         * arrive on this page by accident.
+         * same table again. Only an admin reaches this endpoint now, which is
+         * a reason to keep the projection rather than to drop it: a page that
+         * spread whatever stats() happens to carry would put every player's
+         * address into a browser over plain HTTP, where the session cookie
+         * and the response are readable by anyone on the path. The roster is
+         * deliberately built without them (relay.js roster(), "no addresses,
+         * no token material") and this endpoint must not put back what that
+         * projection left out. Naming the fields means a future counter added
+         * to either stats() cannot arrive on this page by accident.
          */
         const base = stats ? stats() : {};
         const counts = limits && typeof limits.stats === 'function' ? limits.stats() : {};
@@ -976,7 +1016,7 @@ function start(options = {}) {
 
       if (log) {
         log.info(`dashboard listening on http://${boundHost}:${boundPort} ` +
-          '(plain HTTP, join-code login)');
+          '(plain HTTP, admin join-code login)');
         if (boundHost !== '127.0.0.1' && boundHost !== '::1' &&
             boundHost !== 'localhost') {
           log.warn(`the dashboard is bound to ${safe(boundHost)}, not loopback: ` +

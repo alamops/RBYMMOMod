@@ -519,7 +519,7 @@ function validateCredentials(config, warnings) {
 
     const uses = asInteger(entry.uses);
 
-    out.push({
+    const shaped = {
       id: typeof entry.id === 'string' && entry.id ? entry.id : `credential-${index}`,
       label: typeof entry.label === 'string' && entry.label ? entry.label : 'Join code',
       secret: entry.secret.trim(),
@@ -528,7 +528,22 @@ function validateCredentials(config, warnings) {
       maxUses,
       uses: uses !== null && uses > 0 ? uses : 0,
       revoked: asBoolean(entry.revoked) === true,
-    });
+    };
+
+    // `admin` marks a credential the dashboard (and, later, in-game operator
+    // features) will admit. It has to survive this function untouched: the
+    // save path rewrites every credential from the validated shape, so a flag
+    // this rebuild forgot would be dropped the next time the hub persisted a
+    // use count -- an admin quietly demoted to a player.
+    //
+    // Canonical form is present-and-true or absent, never `admin: false`, so
+    // the credentials an older hub wrote stay byte-identical and a player's
+    // code gains no field. Written only for a value that reads as true; a
+    // `null` from asBoolean is an unreadable setting, and an unreadable
+    // privilege flag is not one to resolve in favour of privilege.
+    if (asBoolean(entry.admin) === true) shaped.admin = true;
+
+    out.push(shaped);
   });
 
   setPath(config, 'auth.credentials', out);

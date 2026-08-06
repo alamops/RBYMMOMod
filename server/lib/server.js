@@ -324,6 +324,17 @@ function authPort(config, onUse, throttle) {
         used.uses = (Number(used.uses) || 0) + 1;
         onUse(used);
       }
+      /*
+       * Whether this connection is an operator's is decided here and nowhere
+       * else. The flag rides the credential that just opened the door -- the
+       * same object the use count is charged against -- so it is derived
+       * entirely server-side and there is no message a client could send to
+       * claim it. Always a boolean, never absent: a hub with auth off never
+       * reaches this function at all (authPort returns null), and a peer that
+       * failed the challenge returned above, so every verdict a relay sees
+       * from here answers the question one way or the other.
+       */
+      verdict.admin = Boolean(used && used.admin);
       return verdict;
     },
   };

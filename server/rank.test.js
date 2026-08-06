@@ -950,6 +950,7 @@ function testPersistenceHook() {
 
 const ROSTER_CONTRACT_FIELDS = [
   'name', 'sprite', 'map', 'x', 'y', 'busy', 'party', 'points', 'ranked',
+  'admin',  // 0.9.0: which connection holds an admin code -- operator surfaces only
 ].sort();
 
 /*
