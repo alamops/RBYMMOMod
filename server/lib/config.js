@@ -834,7 +834,11 @@ function load(options = {}) {
  */
 function save(file, config) {
   const directory = path.dirname(file);
-  fs.mkdirSync(directory, { recursive: true });
+  // 0700 when this call is the one that creates it: the directory ends up
+  // holding the join codes, the match ledger and a live admin socket, and
+  // mode applies only on creation -- a directory that already exists keeps
+  // whatever the host gave it.
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 
   const temporary = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   const text = `${JSON.stringify(config, null, 2)}\n`;

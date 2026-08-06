@@ -803,7 +803,10 @@ function start(options = {}) {
         // A ledger that does not exist yet is the ordinary first battle.
         if (!err || err.code !== 'ENOENT') throw err;
       }
-      if (size > 0 && size + line.length > HISTORY_MAX_BYTES) {
+      // byteLength, not length: statSync counts bytes and a name can carry
+      // multibyte characters, so both sides of this comparison stay in one
+      // unit rather than nearly the same one.
+      if (size > 0 && size + Buffer.byteLength(line) > HISTORY_MAX_BYTES) {
         fs.renameSync(historyPath, `${historyPath}.1`);
       }
 
@@ -1527,10 +1530,11 @@ function start(options = {}) {
        * nothing optional may delay or endanger it; before the resolve,
        * because `dashboard` on the handle has to be the truth about a
        * listener that either came up or did not, and a caller that reads it
-       * the instant start() resolves must not be racing a bind. startExtras()
-       * never rejects, so this cannot turn a live hub into a failed start().
+       * the instant start() resolves must not be racing a bind. The handover
+       * below runs whichever way startExtras() settles, so nothing optional
+       * can turn a live hub into a failed start().
        */
-      startExtras().then(() => {
+      const handOver = () => {
         resolve({
           host: boundHost,
           port: boundPort,
@@ -1563,6 +1567,22 @@ function start(options = {}) {
           // can only ever describe the hub the same way.
           stats,
         });
+      };
+
+      /*
+       * Both settlements hand the handle over. startExtras() is written never
+       * to reject -- every job of its own catches -- but the caller is holding
+       * a hub that is already listening to players, and a promise that only
+       * resolves on success would strand it: no handle means no close(), so a
+       * bug in an *optional* listener would leave a live socket nobody can
+       * stop. The rejection path is a warning and then the same handover.
+       */
+      startExtras().then(handOver, (err) => {
+        log.warn('an optional listener failed on its way up: ' +
+          `${safe(err && err.message ? err.message : err)}. The hub is ` +
+          'listening and relaying normally; whichever of the admin socket and ' +
+          'the dashboard is missing said so above.');
+        handOver();
       });
     });
   });

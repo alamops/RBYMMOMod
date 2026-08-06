@@ -55,6 +55,20 @@ const MAX_REQUEST_BYTES = 4096;
 // has no other way to notice.
 const EXCHANGE_TIMEOUT_MS = 10000;
 
+// The outer budget: how long a connection may exist at all, counted from
+// accept and never extended. The idle timeout above is cleared the moment a
+// reply starts, so that one alone leaves a peer which asks and then never
+// reads holding a descriptor for as long as it likes. This is the one clock
+// nothing resets -- generous enough that no local exchange is ever cut short,
+// finite so an fd cannot be parked here.
+const EXCHANGE_DEADLINE_MS = 60000;
+
+// How many connections may be open at once. Each one is a request line and a
+// reply; there is no honest reason for more than a handful, and a cap means a
+// script that dials in a loop is refused at accept rather than left to grow
+// the hub's descriptor table.
+const MAX_CONNECTIONS = 16;
+
 // The commands, named once so the "unknown command" sentence cannot drift
 // away from what the dispatch table actually answers.
 const COMMANDS = ['who', 'stats', 'kick', 'broadcast'];
@@ -225,7 +239,11 @@ function bind(server, socketPath, log, mayRetry) {
 
       let info = null;
       try {
-        info = fs.statSync(socketPath);
+        // lstat, not stat: the question is what is *at* this path. A symlink
+        // pointing somewhere that happens to be a socket would answer yes to
+        // stat, and unlinking it would be this hub deleting a link somebody
+        // else put here to reach a socket of their own.
+        info = fs.lstatSync(socketPath);
       } catch (statErr) {
         info = null;
       }
@@ -237,14 +255,21 @@ function bind(server, socketPath, log, mayRetry) {
       }
 
       if (info) {
+        let removed = true;
         try {
           fs.unlinkSync(socketPath);
         } catch (unlinkErr) {
-          return reject(new Error(`${socketPath} is a leftover socket that ` +
-            `could not be removed (${unlinkErr.message}). Delete it and start ` +
-            'the hub again.'));
+          // ENOENT is the state this was trying to reach: something else --
+          // another hub's shutdown, a host with a shell open -- got there
+          // between the lstat and here, and the bind can simply proceed.
+          if (!unlinkErr || unlinkErr.code !== 'ENOENT') {
+            return reject(new Error(`${socketPath} is a leftover socket that ` +
+              `could not be removed (${unlinkErr.message}). Delete it and start ` +
+              'the hub again.'));
+          }
+          removed = false;
         }
-        log.info(`admin: removed a leftover socket at ${safe(socketPath)}`);
+        if (removed) log.info(`admin: removed a leftover socket at ${safe(socketPath)}`);
       }
 
       resolve(bind(server, socketPath, log, false));
@@ -253,6 +278,28 @@ function bind(server, socketPath, log, mayRetry) {
     server.once('error', onError);
     server.listen(socketPath, () => {
       server.removeListener('error', onError);
+      /*
+       * The socket enforces its own boundary.
+       *
+       * The header above promises the trust model is filesystem permissions,
+       * and inside the container that is the 0700 data directory. Outside it
+       * the directory may be older than this hub, or made by hand, or made
+       * under a loose umask -- and the socket is created under that umask
+       * too. 0600 says the thing the trust model already assumed: the owner
+       * gets the verbs, nobody else does.
+       *
+       * A chmod that fails is not a reason to take the channel away -- the
+       * caller only warns, so rejecting here would leave a bound socket with
+       * no one watching it. It is a reason to say so loudly.
+       */
+      try {
+        if (process.platform !== 'win32') fs.chmodSync(socketPath, 0o600);
+      } catch (modeErr) {
+        log.warn(`admin: could not restrict ${safe(socketPath)} to its owner ` +
+          `(${safe(modeErr.message)}); anyone who can open that path can kick ` +
+          'players and broadcast. Put the socket in a directory only you can ' +
+          'enter (chmod 700) and restart the hub.');
+      }
       resolve();
     });
   });
@@ -301,11 +348,25 @@ function start(options = {}) {
     socket.on('error', (err) => {
       log.debug(`admin: connection error: ${safe(err && err.message ? err.message : err)}`);
     });
-    socket.on('close', () => sockets.delete(socket));
-
     socket.setTimeout(EXCHANGE_TIMEOUT_MS, () => {
       log.debug('admin: a connection said nothing in time and was dropped');
       socket.destroy();
+    });
+
+    // The idle clock above stops when the reply starts; this one does not
+    // stop for anything but the close that ends the exchange, so a peer that
+    // sends its line and then never reads the answer cannot hold a descriptor
+    // open indefinitely. Unref'd: a deadline must never be the reason a
+    // process stays alive.
+    const deadline = setTimeout(() => {
+      log.debug('admin: a connection outlived its deadline and was dropped');
+      socket.destroy();
+    }, EXCHANGE_DEADLINE_MS);
+    if (typeof deadline.unref === 'function') deadline.unref();
+
+    socket.on('close', () => {
+      clearTimeout(deadline);
+      sockets.delete(socket);
     });
 
     const reply = (payload) => {
@@ -351,11 +412,7 @@ function start(options = {}) {
     });
   });
 
-  // After the bind, an error is something that happened to one accept, not a
-  // reason to take the admin channel -- let alone the hub -- away.
-  server.on('error', (err) => {
-    log.error(`admin: listener error: ${safe(err && err.message ? err.message : err)}`);
-  });
+  server.maxConnections = MAX_CONNECTIONS;
 
   function removeSocketFile() {
     // Node unlinks the path on a graceful close, so this is usually a
@@ -389,6 +446,16 @@ function start(options = {}) {
   }
 
   return bind(server, socketPath, log, true).then(() => {
+    // After the bind, an error is something that happened to one accept, not
+    // a reason to take the admin channel -- let alone the hub -- away.
+    // Attached here rather than at construction so the EADDRINUSE that the
+    // stale-socket recovery above expects, handles and recovers from is not
+    // also logged as a hub error nobody needs to read (lib/dashboard.js
+    // orders its two error listeners the same way, for the same reason).
+    server.on('error', (err) => {
+      log.error(`admin: listener error: ${safe(err && err.message ? err.message : err)}`);
+    });
+
     log.info(`admin socket listening at ${safe(socketPath)}`);
     return { path: socketPath, close };
   });
@@ -397,4 +464,11 @@ function start(options = {}) {
 // MAX_REQUEST_BYTES is exported for the same reason the server's budgets
 // are: a suite (or a CLI verb) that has an opinion about the cap should name
 // the one number rather than carry a copy of it.
-module.exports = { start, MAX_REQUEST_BYTES, EXCHANGE_TIMEOUT_MS, COMMANDS };
+module.exports = {
+  start,
+  MAX_REQUEST_BYTES,
+  EXCHANGE_TIMEOUT_MS,
+  EXCHANGE_DEADLINE_MS,
+  MAX_CONNECTIONS,
+  COMMANDS,
+};
