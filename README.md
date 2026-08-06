@@ -292,7 +292,7 @@ it's still on you next time you load that game.
 
 **And if you're in a game, so does everyone else.** Change character
 mid-session and the whole hub is told: your walking character switches on
-their screens where they're standing, not the next time you leave the map,
+their screens as you walk, not the next time you leave the map,
 and a trainer card of yours somebody has open turns over while they're
 looking at it. Anyone who joins a moment later gets the new one too. (One
 exception: a `RANK` screen that's already open keeps the portrait it was

@@ -277,8 +277,9 @@ handlers['mmo.sprite'] = (relay, client, msg) => {
   client.sprite = sprite;
   // The board learns the new face too, so an mmo.ranking answer given after
   // this draws the character the player is wearing now rather than the one
-  // they greeted in. The same call admit() makes, for the same reason.
-  relay.board.seen(client.name, client.sprite);
+  // they greeted in. The same call admit() makes, under the same guard: a
+  // player who does not own the name has no business writing to its row.
+  if (client.ranked) relay.board.seen(client.name, client.sprite);
   // Broadcast with no exception, like publishPoints: the player it is about
   // hears it too. Their own presence is not in their own roster, so this is
   // the message that confirms the hub took the change.
@@ -699,8 +700,10 @@ class Relay {
     // is wearing today -- so the leaderboard can draw a portrait for a
     // player who is offline, and a returning player is not silently zeroed.
     // An unranked player shows as zero rather than wearing the rating of the
-    // name they typed: it is not theirs.
-    this.board.seen(client.name, client.sprite);
+    // name they typed: it is not theirs. Gated on `ranked` for that same
+    // reason: a player who does not own the name has no business writing to
+    // its row, portrait included -- and this row outlives the session.
+    if (client.ranked) this.board.seen(client.name, client.sprite);
     client.points = client.ranked ? this.board.points(client.name) : RANK_START;
     this.players += 1;
 

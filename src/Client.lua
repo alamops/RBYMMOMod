@@ -589,18 +589,69 @@ function M.explicitChoice()
   return id
 end
 
+-- ------- telling the hub which character you are
+--
+-- The character the hub has confirmed for us, and how long ago we last said
+-- it.
+--
+-- A push is one message into a gate: both hubs refuse a second character
+-- change from one client inside half a second (src/Hub.lua's SPRITE_GATE and
+-- server/lib/relay.js, both the CHAT_GATE window), and a refused one is
+-- silent. Fire and forget therefore had a permanent failure in it -- the
+-- player wears the new character in their own game while the hub goes on
+-- putting the old one in every mmo.move, for the rest of the session, with
+-- nothing that would ever say it again.
+--
+-- So the character is reconciled rather than announced. `spriteAcked` is what
+-- we know the hub is holding; the tick re-pushes while the choice has moved
+-- away from it and stops the moment the two agree. Only two things write it
+-- -- the hello that seeds it, and the hub's own broadcast of our change --
+-- so it is always the hub's answer and never our own optimism, which is what
+-- keeps the loop from chasing itself.
+--
+-- The same loop is also the only thing that carries a change made from the
+-- global MY SPRITE row in the mod manager: that writes the option and calls
+-- nothing, so without this a player who changed character there told nobody.
+-- Anything else that moves spriteChoice in future is carried for free.
+--
+-- The clock is seconds since the last push, not a running session time: every
+-- push resets it, so a retry can never land inside the window that refused
+-- the last one. It also paces how often the choice is *read* -- resolving one
+-- costs a pcall through the sprite registry (Chars.available), which is not
+-- something to do sixty times a second for an answer that only changes when
+-- the player does something.
+local spriteAcked = nil
+local spriteClock = 0
+-- Twice the gate, so a re-push is always clear of it rather than racing it.
+-- Named off CHAT_GATE because that is the window both hubs actually gate a
+-- character change with (Hub.lua's SPRITE_GATE header says so out loud), and
+-- a retry paced off anything else would drift away from it silently.
+local SPRITE_RETRY = Config.CHAT_GATE * 2
+
 -- Tell the hub which character you are now.
 --
--- Sent at the moment of the change and never on a tick: a look is not
--- presence, it does not move, and once the hub has stored it every later
--- broadcast carries it anyway -- so a player who joins afterwards is told the
--- new character by the ordinary presence stream, with nothing extra to send.
+-- Sent at the moment of the change, and re-sent by the tick for as long as
+-- the hub has not confirmed it. Not presence, though: there is nothing
+-- periodic here, because once the hub has stored a character every later
+-- broadcast carries it anyway -- a player who joins afterwards is told by the
+-- ordinary presence stream, with nothing extra sent from here.
+--
+-- What goes on the wire is always the *resolved choice* (M.spriteChoice()),
+-- never the worn/not-worn distinction M.explicitChoice() draws. Picking RED
+-- mid-session broadcasts SPRITE_RED to everyone else while syncLook hands the
+-- engine's own renderer back locally -- the two are assumed to draw the same
+-- picture, which is the assumption explicitChoice's header states and this is
+-- its echo at the wire boundary. If those two ever stop matching, they stop
+-- matching here first.
 --
 -- Offline is silence, not a failure: picking a character outside a game is
 -- the ordinary case, the choice is saved and worn either way, and there is
 -- simply nobody to tell.
 function M.pushSprite()
   if not transport:isReady() then return false end
+  -- before the send, so a send that throws still costs the retry its full
+  -- window rather than re-firing on the next tick
+  spriteClock = 0
   transport:send(Wire.SPRITE, { sprite = M.spriteChoice() })
   return true
 end
@@ -953,6 +1004,17 @@ function M.sendHello(game)
   -- it was minted for, so the name claimed and the name the ticket is looked
   -- up by have to be the same string, not two calls that could disagree.
   local name = M.playerName(game)
+  -- Read once and sent once, for the same reason the name above is: this is
+  -- also the value spriteAcked starts at, and seeding it from a second call
+  -- would be seeding it with an answer we did not actually send.
+  --
+  -- The hub stores what hello says and broadcasts nothing back for it, so
+  -- this is the one write to spriteAcked that is not the hub's own word --
+  -- and it is the hub's state all the same, because storing it is all the
+  -- hub does with it. Without the seed the reconcile below would open every
+  -- session by re-pushing a character the hub already has.
+  local sprite = M.spriteChoice()
+  spriteAcked, spriteClock = sprite, 0
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
     name = name,
@@ -962,7 +1024,7 @@ function M.sendHello(game)
     -- who you are walking in as, and no longer the only chance to say it:
     -- mmo.sprite moves it mid-game (M.pushSprite), so this is the opening
     -- value rather than the whole of the answer
-    sprite = M.spriteChoice(),
+    sprite = sprite,
     profile = M.profile(game),
     map = current and current.mapId,
     x = current and current.x,
@@ -986,6 +1048,13 @@ function M.disconnect()
   transport:close()
   lastSent =
     { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
+  -- Cleared for the same reason lastSent is: what a hub is holding for us is
+  -- a fact about one connection. Carrying it across would have the next
+  -- session's reconcile weigh the choice against a hub that never heard it --
+  -- silent when it should push, if the two happened to agree. The next hello
+  -- seeds it again, so nil is only ever read while offline, where the tick
+  -- that would read it does not run.
+  spriteAcked, spriteClock = nil, 0
   -- Cleared with the rest of it, because "the last step was a fast one" is
   -- only true of a session: a player who sprinted or cycled, left, and
   -- rejoined standing still would otherwise advertise fast=true in their
@@ -1319,10 +1388,14 @@ end
 -- Somebody changed character in the middle of the game.
 --
 -- Broadcast with no exception, the way a rating is, so the player it is about
--- hears it too -- which is why the self branch is a deliberate nothing rather
--- than a case that was forgotten. Our own copy is already wearing the new
--- character: setSpriteChoice puts it on before it tells the hub, so there is
--- nothing here that is not already true locally.
+-- hears it too -- and that copy is not a curiosity, it is the acknowledgement.
+-- Nothing else on the wire says "the hub took your change": a push that hit
+-- the half-second gate is refused in silence, so the one thing that tells the
+-- two apart is whether this message came back. The self branch records it and
+-- stops there. There is nothing to draw -- our own copy is already wearing
+-- the new character, because setSpriteChoice puts it on before it tells the
+-- hub -- and nothing to spawn, because our own presence is not in our own
+-- roster.
 --
 -- The refresh is the part that is not optional. An avatar reads its sprite
 -- once, when it is spawned, and neither advance nor sync ever looks again --
@@ -1338,7 +1411,12 @@ handlers[Wire.SPRITE] = function(_, msg)
   -- underscore and quietly turn everyone into RED; see Wire.spriteId
   local sprite = Wire.spriteId(msg.sprite)
   if not sprite then return end
-  if ctx.roster:isSelf(id) then return end
+  if ctx.roster:isSelf(id) then
+    -- the hub's word on what it is holding for us, which is what the tick
+    -- reconciles the choice against
+    spriteAcked = sprite
+    return
+  end
   local player = ctx.roster:setSprite(id, sprite)
   if player then ctx.avatars:refresh(player) end
 end
@@ -1463,6 +1541,18 @@ local function tick(game, dt)
   if presenceClock >= Config.PRESENCE_INTERVAL then
     presenceClock = 0
     pushPresence(false)
+  end
+
+  -- The character, reconciled rather than resent. Shaped like the presence
+  -- block above it -- accumulate, cross, reset -- and quiet in exactly the
+  -- same way: the send happens only when the hub's answer and the choice
+  -- actually disagree, which is never, apart from the seconds after a push
+  -- the gate refused or an option row nobody told the hub about. Two numbers
+  -- and a string compare on the ticks in between; no closure, no table.
+  spriteClock = spriteClock + dt
+  if spriteClock >= SPRITE_RETRY then
+    spriteClock = 0
+    if M.spriteChoice() ~= spriteAcked then M.pushSprite() end
   end
 
   ctx.avatars:sync(ctx.roster, World.current())
