@@ -6,15 +6,14 @@
  * Everything that decides *anything* already lives somewhere else: the
  * protocol in lib/relay.js, the hardening in lib/limits.js, the crypto in
  * lib/auth.js, the file in lib/config.js, the operator's socket in
- * lib/admin.js, the operator's web page in lib/dashboard.js. This module owns
- * the one thing none of them may touch -- the listener friends actually play
- * through -- and hands them the bytes.
+ * lib/admin.js. This module owns the one thing none of them may touch -- the
+ * listener friends actually play through -- and hands them the bytes.
  *
- * The two operator listeners are started from here and owned there, and that
- * split is the point: neither of them may be a reason the game port fails to
- * come up. The game listener binds first because it is why the process
- * exists; the admin socket and the dashboard are attempted after it, and a
- * failure in either is a logged sentence and a hub that keeps relaying.
+ * The operator's listener is started from here and owned there, and that
+ * split is the point: it may not be a reason the game port fails to come up.
+ * The game listener binds first because it is why the process exists; the
+ * admin socket is attempted after it, and a failure there is a logged
+ * sentence and a hub that keeps relaying.
  *
  * Keeping the split that strict is what makes the hub testable at all. The
  * relay is driven by peer handles, so a suite can pair two of them in memory
@@ -66,7 +65,6 @@ const {
 } = require('./config.js');
 const auth = require('./auth.js');
 const admin = require('./admin.js');
-const dashboard = require('./dashboard.js');
 const { createLog, safe } = require('./log.js');
 
 // The ceiling on a single unterminated line, unchanged from hub.js:34. A
@@ -335,9 +333,9 @@ function authPort(config, onUse, throttle) {
        * from here answers the question one way or the other.
        *
        * Read through auth.isAdminCredential and not by truthiness, so this
-       * agrees with the dashboard's door and with every other reader of the
-       * flag: one gate, one reading, and a stored `admin: "no"` cannot become
-       * privilege here by being a non-empty string. `used` may be undefined
+       * agrees with every other reader of the flag: one gate, one reading,
+       * and a stored `admin: "no"` cannot become privilege here by being a
+       * non-empty string. `used` may be undefined
        * (a verdict naming a credential the list no longer holds), which the
        * helper answers false for.
        */
@@ -600,10 +598,9 @@ function start(options = {}) {
   let statusTimer = null;
   let statusDirty = false;
   let statusBeat = null;
-  // The two operator listeners, or null when they were not asked for or did
-  // not come up. Only close() reads them, and it has to cope with both.
+  // The operator's listener, or null when it was not asked for or did not
+  // come up. Only close() reads it, and it has to cope with both.
   let adminHandle = null;
-  let dashboardHandle = null;
 
   // -------------------------------------------------------- use counting
 
@@ -1163,37 +1160,16 @@ function start(options = {}) {
         `still ${boundHost}:${boundPort} for ${relay.maxPlayers} players ` +
         'until it is restarted.');
     }
-    /*
-     * Said for the same reason, about the other listener. Which *codes* open
-     * the dashboard is live -- lib/dashboard.js re-reads the credential list
-     * at every login and on every signed-in request, so the array replaced
-     * just above both locks out the next login and ends the sessions a
-     * revoked code had already opened -- but whether there is a dashboard at
-     * all, and where, is a bind, and a bind is not a thing a running process
-     * can be talked into changing.
-     */
-    const runningDashboard = config.dashboard || {};
-    const editedDashboard = next.dashboard || {};
-    if (Boolean(editedDashboard.enabled) !== Boolean(runningDashboard.enabled) ||
-        editedDashboard.host !== runningDashboard.host ||
-        Number(editedDashboard.port) !== Number(runningDashboard.port)) {
-      log.warn('reload: the dashboard section was not re-applied -- starting, ' +
-        'moving or stopping a listener takes a restart. ' +
-        (dashboardHandle
-          ? `The dashboard is still on ${dashboardHandle.host}:${dashboardHandle.port}.`
-          : 'No dashboard is running on this hub.'));
-    }
     return true;
   }
 
   // ------------------------------------------------- what the operators see
 
   /*
-   * The shape the CLI's `status` verb prints, the admin socket's `stats`
-   * answers and the dashboard polls. Derived on every call so it can never be
-   * a stale copy of the thing it is describing, and a plain function rather
-   * than a method on the handle because two of those three consumers are
-   * started before the handle exists.
+   * The shape the CLI's `status` verb prints and the admin socket's `stats`
+   * answers. Derived on every call so it can never be a stale copy of the
+   * thing it is describing, and a plain function rather than a method on the
+   * handle because the admin socket is started before the handle exists.
    */
   function stats() {
     const counts = limits.stats();
@@ -1213,38 +1189,16 @@ function start(options = {}) {
   }
 
   /*
-   * The leaderboard as a web page wants it: the board's own top rows, in the
-   * board's own order, numbered.
-   *
-   * `place` is derived from the position rather than stored, because the
-   * order is the ranking -- a place carried alongside the rows would be a
-   * second copy of the same fact, free to disagree with the sort next to it.
-   * What is deliberately *not* here is `tokenHash`: board.top() already
-   * leaves it out (rank.js:352) and this projection names its fields
-   * explicitly so a future column on the board cannot arrive on a page by
-   * accident. A name digest is how the hub proves a claim; it belongs in
-   * ranking.json and nowhere a browser can reach.
-   */
-  function rankingRows() {
-    return board.top().map((row, index) => ({
-      place: index + 1,
-      name: row.name,
-      points: row.points,
-      played: row.played,
-      won: row.won,
-    }));
-  }
-
-  /*
-   * The two listeners that are not the hub, started once the hub is up.
+   * The listeners that are not the hub, started once the hub is up. Today
+   * there is exactly one of them -- the admin socket -- and the shape stays
+   * plural because what it guarantees is about *any* of them.
    *
    * Never rejects, and that is the whole contract: an operator convenience
    * that could stop a hub from serving players would be a worse trade than
    * not having the convenience. Each failure is a sentence in the log naming
    * what the operator gets instead -- the CLI's `kick` says "hub not running
-   * or too old" on its own when the socket is absent, which is honest, and a
-   * host who asked for a dashboard and did not get one needs to be told here
-   * because nothing else will tell them.
+   * or too old" on its own when the socket is absent, which is honest, but a
+   * host still deserves to be told here why it went missing.
    */
   function startExtras() {
     const jobs = [];
@@ -1275,33 +1229,6 @@ function start(options = {}) {
             'relaying normally; `rby-mmo-hub kick` and `broadcast` will say it ' +
             'cannot be reached until it is restarted.');
         }));
-    }
-
-    if (config.dashboard && config.dashboard.enabled) {
-      jobs.push(dashboard.start({
-        config, relay, limits, stats, ranking: rankingRows, log,
-      }).then((handle) => {
-        keep(handle, (kept) => { dashboardHandle = kept; });
-      }, (err) => {
-        /*
-         * The reason is already on the operator's screen in full: both ways
-         * dashboard.start() can reject -- no credential that opens it, and a
-         * port it cannot have -- log themselves on the way out, and in more
-         * words than an echo through safe()'s 120 characters would survive.
-         * Repeating a truncated copy of a sentence printed a millisecond ago
-         * is not a second warning, it is a worse one.
-         *
-         * What this adds is the part the module cannot know: that the hub
-         * itself came up, so nobody's game is waiting on this. The rejection
-         * still goes to debug, for the case where a future failure path in
-         * there forgets to say anything at all.
-         */
-        log.debug(`dashboard.start rejected: ` +
-          `${safe(err && err.message ? err.message : err)}`);
-        log.error('the dashboard is not running -- the dashboard error just ' +
-          'above says why. This hub is relaying normally without it; fix the ' +
-          'dashboard section of the config and restart to get the page back.');
-      }));
     }
 
     return Promise.all(jobs);
@@ -1386,14 +1313,13 @@ function start(options = {}) {
     const hookDone = runShutdownHook();
 
     /*
-     * The operator listeners come down beside the players' goodbyes, for the
-     * same reason and on the same clock -- neither a kick nor a web page is
-     * worth adding to the time a Ctrl-C takes, and a hub that is already
-     * emptying has nothing useful left to answer either of them with. Both
-     * are best-effort: a close that fails belongs to a process that is about
-     * to exit, and the admin socket's own close() is the thing that unlinks
-     * the file, so a warning here is also the note explaining a leftover
-     * `admin.sock` the next start will have to clear.
+     * The operator's listener comes down beside the players' goodbyes, for
+     * the same reason and on the same clock -- a kick is not worth adding to
+     * the time a Ctrl-C takes, and a hub that is already emptying has nothing
+     * useful left to answer one with. Best-effort: a close that fails belongs
+     * to a process that is about to exit, and the admin socket's own close()
+     * is the thing that unlinks the file, so a warning here is also the note
+     * explaining a leftover `admin.sock` the next start will have to clear.
      */
     const closeExtra = (handle, what) => {
       if (!handle) return Promise.resolve();
@@ -1410,7 +1336,6 @@ function start(options = {}) {
     };
     const extrasDone = Promise.all([
       closeExtra(adminHandle, 'admin socket'),
-      closeExtra(dashboardHandle, 'dashboard'),
     ]);
 
     const socketsDone = new Promise((resolve) => {
@@ -1543,16 +1468,15 @@ function start(options = {}) {
       }
 
       /*
-       * The operator listeners are attempted here -- after the players' one
+       * The operator's listener is attempted here -- after the players' one
        * is up, and before the handle goes out.
        *
        * After, because the game port is the reason the process exists and
-       * nothing optional may delay or endanger it; before the resolve,
-       * because `dashboard` on the handle has to be the truth about a
-       * listener that either came up or did not, and a caller that reads it
-       * the instant start() resolves must not be racing a bind. The handover
-       * below runs whichever way startExtras() settles, so nothing optional
-       * can turn a live hub into a failed start().
+       * nothing optional may delay or endanger it; before the resolve, so a
+       * caller holding the handle the instant start() resolves is not racing
+       * an optional bind. The handover below runs whichever way startExtras()
+       * settles, so nothing optional can turn a live hub into a failed
+       * start().
        */
       const handOver = () => {
         resolve({
@@ -1570,12 +1494,6 @@ function start(options = {}) {
           // reports the same way.
           historyPath,
           adminPath,
-          // Where the web page ended up, or null when it was switched off,
-          // never asked for, or refused to start. A caller cannot tell those
-          // apart from here on purpose: the log said which, and the only
-          // thing left to decide is whether there is a page to open.
-          dashboard: dashboardHandle
-            ? { host: dashboardHandle.host, port: dashboardHandle.port } : null,
           relay,
           limits,
           close,
@@ -1583,8 +1501,8 @@ function start(options = {}) {
           // (an embedder, a suite). Returns whether the file was re-read.
           reload,
           // The shape the CLI's `status` verb prints -- the same function the
-          // admin socket and the dashboard were handed above, so all three
-          // can only ever describe the hub the same way.
+          // admin socket was handed above, so the two can only ever describe
+          // the hub the same way.
           stats,
         });
       };
@@ -1600,8 +1518,8 @@ function start(options = {}) {
       startExtras().then(handOver, (err) => {
         log.warn('an optional listener failed on its way up: ' +
           `${safe(err && err.message ? err.message : err)}. The hub is ` +
-          'listening and relaying normally; whichever of the admin socket and ' +
-          'the dashboard is missing said so above.');
+          'listening and relaying normally; the listener that is missing said ' +
+          'so above.');
         handOver();
       });
     });

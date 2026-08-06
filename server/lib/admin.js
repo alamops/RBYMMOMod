@@ -450,8 +450,7 @@ function start(options = {}) {
     // a reason to take the admin channel -- let alone the hub -- away.
     // Attached here rather than at construction so the EADDRINUSE that the
     // stale-socket recovery above expects, handles and recovers from is not
-    // also logged as a hub error nobody needs to read (lib/dashboard.js
-    // orders its two error listeners the same way, for the same reason).
+    // also logged as a hub error nobody needs to read.
     server.on('error', (err) => {
       log.error(`admin: listener error: ${safe(err && err.message ? err.message : err)}`);
     });

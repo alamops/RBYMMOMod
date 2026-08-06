@@ -85,16 +85,6 @@ const DEFAULTS = {
   bans: [],
   allowlist: [],
   network: { upnp: { enabled: false, leaseSeconds: 3600 } },
-  // The operator's web page, and the two halves of its default are both
-  // deliberate. Off, because a browser page is a second surface on a process
-  // whose only door until now was the game port, and growing one should be a
-  // decision somebody made rather than one they inherited by upgrading.
-  // Loopback, because publishing that surface past this machine is then a
-  // separate second decision -- the same shape as compose.yml refusing to map
-  // a port the host did not ask for. Nothing in this section is a secret:
-  // logging in reuses the join codes in auth.credentials, so there is nothing
-  // here for redact() to mask.
-  dashboard: { enabled: false, host: '127.0.0.1', port: 7790 },
   log: { level: 'info' },
 };
 
@@ -153,11 +143,6 @@ const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'silent'];
  *                                            expires mid-game; a week is the
  *                                            longest a stale mapping should
  *                                            outlive the process
- *   dashboard.port            1 .. 65535     the TCP port space again, the
- *                                            same range as listen.port and for
- *                                            the same reason -- it is a port,
- *                                            and nothing narrower about it is
- *                                            true
  *
  * And the authentication-failure throttle, every range of it taken verbatim
  * from limits.js for the reason in the paragraph below:
@@ -202,7 +187,6 @@ const BOUNDS = {
   'limits.authGlobalWindowMs': [1000, 3600000],
   'limits.authLockoutMs': [1000, 3600000],
   'network.upnp.leaseSeconds': [60, 604800],
-  'dashboard.port': [1, 65535],
 };
 
 /*
@@ -530,8 +514,8 @@ function validateCredentials(config, warnings) {
       revoked: asBoolean(entry.revoked) === true,
     };
 
-    // `admin` marks a credential the dashboard (and, later, in-game operator
-    // features) will admit. It has to survive this function untouched: the
+    // `admin` marks a credential the in-game operator features arriving later
+    // will admit. It has to survive this function untouched: the
     // save path rewrites every credential from the validated shape, so a flag
     // this rebuild forgot would be dropped the next time the hub persisted a
     // use count -- an admin quietly demoted to a player.
@@ -581,13 +565,11 @@ function validate(config) {
   else working.version = version;
 
   validateHost(working, 'listen.host', warnings);
-  validateHost(working, 'dashboard.host', warnings);
 
   for (const dotted of Object.keys(BOUNDS)) clampNumber(working, dotted, warnings);
 
   validateBoolean(working, 'auth.required', warnings);
   validateBoolean(working, 'network.upnp.enabled', warnings);
-  validateBoolean(working, 'dashboard.enabled', warnings);
   validateMotd(working);
   validateCredentials(working, warnings);
   validateStringList(working, 'bans', warnings);

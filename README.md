@@ -469,7 +469,7 @@ Pick by how long you want the world to outlive the session.
 | Every ranked battle, on the record | — | `history.jsonl`, read with `rby-mmo-hub history` |
 | Throwing somebody out mid-game | — | `rby-mmo-hub kick <name> --reason "…"` |
 | Saying something to everyone | — | a message of the day, and `rby-mmo-hub broadcast` |
-| A web page to watch it from | — | optional, off by default, loopback only |
+| Operating it from another machine | — | SSH to the box and run the same verbs |
 | Good for | the same Wi-Fi, an evening | friends across the internet, 24/7 |
 
 The two bold rows are the whole difference. Hosting from the game puts the
@@ -590,7 +590,7 @@ ID       LABEL              CREATED           EXPIRES  USES  STATUS  KIND    COD
 primary  Primary join code  2026-08-03 17:48  never    0     active  player  ******
 
 KIND: none of these is an admin code. `rby-mmo-hub invite --admin` mints
-one; the web dashboard admits nothing else.
+one; the hub marks that connection and shows it as ADMIN.
 
 Codes are masked. --reveal prints them in full.
 ```
@@ -599,7 +599,7 @@ Codes are masked. --reveal prints them in full.
 | --- | --- |
 | run it | `rby-mmo-hub start`, or `docker compose up -d` |
 | hand out a second code | `rby-mmo-hub invite --label ash --expires 24h --uses 1` |
-| mint the code that opens the web page | `rby-mmo-hub invite --admin --expires 24h` |
+| mint a code that marks its connection as an operator's | `rby-mmo-hub invite --admin --expires 24h` |
 | take one back | `rby-mmo-hub revoke <id>` |
 | change any setting | `rby-mmo-hub config set maxPlayers 8` |
 | see where a value came from | `rby-mmo-hub status` |
@@ -669,23 +669,24 @@ They were shown: Take the evening off
 ```
 
 The kicked player sees the reason on their own screen — and a kick is not a
-ban, so `ban` or `revoke` first if you want it to stick. And there's an
-**optional web page** — players, ranking, and how hard the door is being
-knocked on — which is **off by default and bound to loopback**, and is plain
-HTTP with no TLS anywhere, so it wants an SSH tunnel or an overlay network
-rather than a published port.
-[server/README.md](server/README.md#dashboard) says all of that at length.
+ban, so `ban` or `revoke` first if you want it to stick.
 
-**That page logs in with an admin join code, and nothing else.**
-`rby-mmo-hub invite --admin` mints one: it joins the game exactly like any
-other code — same six characters, same screen — and it additionally opens the
-dashboard, which since `0.9.0` refuses the codes you handed your friends.
-`invite list` marks which is which in a `KIND` column, `revoke <id>` takes one
-back like any other, and it's worth pairing with `--expires`, because an admin
-code is worth more to a thief than a player's one is. The hub also *marks* the
-connection an admin code opened — the client is told, operator views carry it,
-other players are never shown it — which is groundwork: **there is no in-game
-operator feature yet**, just a flag for the ones that come later.
+**The operator surface is the CLI, and there is no web page.** To run it from
+somewhere other than the hub's own machine, SSH to the box and type the same
+verbs (`docker compose exec hub rby-mmo-hub …` once you are on it). Everything
+a page could have shown you is `watch`, `players`, `ranking` and `history` —
+and reached that way it is already encrypted and authenticated, by SSH itself,
+which is more than a login form on a plaintext port would have managed.
+
+**Admin join codes mark a connection.** `rby-mmo-hub invite --admin` mints
+one: it joins the game exactly like any other code — same six characters, same
+screen — and the hub *marks* the connection it opened. The client is told
+about itself, operator views show it as `ADMIN` (`invite list`'s `KIND`
+column, `players --json`, `status.json`, the admin socket's `who`), and other
+players are never shown it. `revoke <id>` takes one back like any other, and
+it's worth pairing with `--expires`, because an admin code is worth more to a
+thief than a player's one is. It is groundwork: **there is no in-game operator
+feature yet**, just the flag the ones that come later will check.
 
 Credentials, bans, the allowlist and the message of the day reload on
 `SIGHUP`, so revoking a leaked passcode doesn't interrupt the people already

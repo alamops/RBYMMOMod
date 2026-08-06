@@ -598,10 +598,10 @@ class Relay {
         points: client.points,
         ranked: Boolean(client.ranked),
         // Operator surfaces may carry this -- status.json, `who`, the
-        // dashboard's players table -- because they are already the view for
-        // somebody outside the game. Whether any of them draws it is their
-        // question; carrying it here is enough. Always a boolean, so a row
-        // never has to be read as "absent means no".
+        // `players --json` projection -- because they are already the view
+        // for somebody outside the game. Whether any of them draws it is
+        // their question; carrying it here is enough. Always a boolean, so a
+        // row never has to be read as "absent means no".
         admin: Boolean(client.admin),
       });
     }
