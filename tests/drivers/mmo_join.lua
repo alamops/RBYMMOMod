@@ -585,36 +585,41 @@ return function(game)
     -- `guest_interact_done` (signalled just below) before touching its
     -- menu, then signals `host_char_changed` once its own worn look proves
     -- the pick landed, and waits on `guest_saw_char_change` before moving
-    -- on to the trade. Two tiers, the same shape every other "did the
-    -- peer's local change reach me" check in this file uses: first that
-    -- the values actually moved at all (true regardless of which character
-    -- was chosen), then, only once the poll actually landed, that it moved
-    -- to exactly the one the host picked -- a stalled propagation should
-    -- report one failure, not a second one that only restates it.
-    local function watchHostCharChange()
+    -- on to the trade.
+    --
+    -- **The baseline is read before the barrier, not after it, and the poll
+    -- is for the id rather than for "different".** This is the one "did the
+    -- peer's change reach me" check in this file where the barrier cannot be
+    -- a fence: mmo.sprite goes out at the instant the host's own look moves,
+    -- so it is already on this side's roster by the time
+    -- `host_char_changed` -- which the host writes a second later, after
+    -- closing its menus -- shows up here. A baseline sampled after that
+    -- barrier is the *new* value, and "wait for it to differ from itself"
+    -- can only ever time out. So the sample is taken on the way in, a
+    -- second before the host is even told it may pick, and the assertion
+    -- names SPRITE_NIRE outright: an absolute answer cannot be raced, and
+    -- the baseline's job shrinks to proving there was something to change
+    -- from.
+    local function watchHostCharChange(before)
+      local beforeSprite = before and before.sprite
+      check(beforeSprite ~= nil and beforeSprite ~= "SPRITE_NIRE",
+            "the host is on the roster as somebody other than NIRE to begin with")
+
       H.await(game, "host_char_changed")
 
-      local before = H.avatarRow(exports)
-      local beforeSprite = before and before.sprite
       local sawRoster, sawAvatar = false, false
-      local landed = H.waitSeconds(game, function()
+      H.waitSeconds(game, function()
         local player = exports.players()[1]
         local avatar = H.avatarRow(exports)
-        sawRoster = player ~= nil and player.sprite ~= beforeSprite
-        sawAvatar = avatar ~= nil and avatar.sprite ~= beforeSprite
+        sawRoster = player ~= nil and player.sprite == "SPRITE_NIRE"
+        sawAvatar = avatar ~= nil and avatar.sprite == "SPRITE_NIRE"
         return sawRoster and sawAvatar
       end, 45, "the host's character change to reach the guest")
 
-      check(sawRoster, "the host's roster row picked up a different sprite")
+      check(sawRoster, "the host's roster row picked up the character they chose")
       check(sawAvatar,
-            "and the respawned avatar row shows a different sprite too")
-      if landed then
-        local player = exports.players()[1]
-        local avatar = H.avatarRow(exports)
-        check(player ~= nil and player.sprite == "SPRITE_NIRE",
-              "and it is exactly the character the host picked, on the roster")
-        check(avatar ~= nil and avatar.sprite == "SPRITE_NIRE",
-              "and on the respawned avatar too")
+            "and the respawned avatar row shows that character too")
+      if sawRoster and sawAvatar then
         U.shot(game, SHOT_DIR .. "/join-host-recharacter.png")
       end
 
@@ -628,8 +633,13 @@ return function(game)
     -- TradeSession:apply files the received mon. Nothing about the trade
     -- itself is this mod's code.
 
+    -- Sampled here, one line above the barrier that lets the host start
+    -- picking, and never after it: see watchHostCharChange's header for why
+    -- a baseline read on the far side of `host_char_changed` is already the
+    -- answer it is supposed to be measured against.
+    local hostCharBefore = H.avatarRow(exports)
     H.signal("guest_interact_done")
-    watchHostCharChange()
+    watchHostCharChange(hostCharBefore)
     -- likewise: never ask somebody who is mid-session
     H.waitSeconds(game, function()
       local row = H.avatarRow(exports)

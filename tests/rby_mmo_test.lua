@@ -2520,6 +2520,49 @@ eq(boardHub.board:get("FACE").sprite, "SPRITE_BLUE",
 
 end)()
 
+-- ------- the announcement is not behind anything that can fail
+--
+-- The failure this pins is specific and it is permanent, which is what makes
+-- it worth a case of its own. The store at the top of the handler is what
+-- arms its own no-op guard: once client.sprite has moved, every later
+-- mmo.sprite carrying the same id returns at `sprite == client.sprite`. So a
+-- throw *between* the store and the broadcast does not cost one message -- it
+-- costs the whole session. The client's reconcile loop re-sends the same id
+-- every SPRITE_RETRY for as long as the player stays connected, the hub eats
+-- each one as a no-op, and nobody else in the game is ever told, with nothing
+-- anywhere to say why.
+--
+-- The board is the call that could do it: it is the one thing this handler
+-- touches that it does not own. So the order is the invariant -- announce,
+-- then reseed -- and this drives it with a board that throws, which is the
+-- only way to state "the announcement does not depend on that call" without
+-- waiting for a real bug in Rank. server/sprite.test.js runs the same case.
+
+;(function()
+
+local orderHub = Hub.new({ maxPlayers = 8 })
+local one, onePeer = join(orderHub, "ORDER1", "PALLET", 1, 1)
+local two, twoPeer = join(orderHub, "ORDER2", "PALLET", 2, 1)
+eq(one.ranked, true, "sanity: the sender owns its name, so the board is in play")
+onePeer.outbox, twoPeer.outbox = {}, {}
+
+orderHub.board.seen = function()
+  error("the board could not take that name", 0)
+end
+
+local ok = pcall(orderHub.receive, orderHub, one,
+                 { type = Wire.SPRITE, sprite = "SPRITE_BLUE" })
+eq(ok, false, "sanity: the board really did throw")
+check(take(twoPeer, Wire.SPRITE) ~= nil,
+      "a board that fails does not cost everyone else the announcement")
+check(take(onePeer, Wire.SPRITE) ~= nil, "nor the sender their acknowledgement")
+eq(one.sprite, "SPRITE_BLUE",
+   "and what the hub is holding is exactly what it announced -- never a "
+   .. "value stored but never said, which the no-op guard would then eat "
+   .. "every retry of")
+
+end)()
+
 -- ------------------------------------------------------------------
 -- 4. The host joins its own game over loopback
 -- ------------------------------------------------------------------
@@ -2563,6 +2606,24 @@ local third = hosted.hub:accept(thirdPeer)
 hosted.hub:receive(third, { type = Wire.HELLO, proto = Config.PROTOCOL,
                             name = "THIRD" })
 check(take(thirdPeer, Wire.ERROR) ~= nil, "a second friend does not")
+
+-- ------- the host's own peer cannot take the fan-out down with it
+--
+-- Hub:broadcast walks every client in table order and hands each one's peer
+-- the message. The socket peers guard their encoder (HostServer's Peer:send
+-- says why); this handle is the odd one out, and it is odd in the direction
+-- that matters -- a throw here happens *inside* somebody else's broadcast,
+-- abandoning the loop, so the host's own copy of a message could cost every
+-- other player theirs, and leave the hub holding state it had committed and
+-- never finished announcing. What reaches this peer is Hub's own payloads,
+-- so nothing ordinary can fail; the point is that nothing extraordinary can
+-- either.
+local hostOwn = hosted.localClient
+check(hostOwn ~= nil, "hosting keeps a handle on the host's own client")
+check(pcall(function()
+  hostOwn.peer:send({ type = "mmo.unencodable", nope = print })
+end), "a message the encoder cannot take does not throw out of the host's "
+   .. "own peer, so the broadcast carrying it still reaches everyone else")
 
 -- the friend is still on; only the host's own seat is given back
 localNet:close()
@@ -3998,6 +4059,133 @@ stubMod.content.screens = nil
 stubSprites.SPRITE_RED = nil
 stubSprites.SPRITE_BLUE = nil
 stubSprites.SPRITE_YOUNGSTER = nil
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 9c. mmo.sprite end to end, in hosting mode: pick -> hub -> other player
+-- ------------------------------------------------------------------
+--
+-- The gap this closes. Every other case in this file drives one end of the
+-- loop against a stand-in: 3c drives Hub with fake peers and no client, 9b
+-- drives Client with a fake net and no hub. Both were green while the real
+-- thing was not, because the seam neither of them crosses is the one a
+-- hosting player actually uses -- Client's transport is HostServer:localNet,
+-- whose send() runs Hub:receive *synchronously, inside the UI callback that
+-- picked the character*, with the JSON round trip in the middle and no pcall
+-- anywhere on the way. That is where a change made from the CHARACTER row
+-- either reaches the other players or silently does not, and nothing headless
+-- had ever run it.
+--
+-- So this is the whole path, with only the socket taken out: the real Client
+-- in hosting mode, the real HostServer local peer, the real Hub, and a second
+-- player attached to that hub the way section 3 attaches one. The assertion
+-- is the one the end-to-end driver makes from the other side of the wire --
+-- the other player is told, by id, which character this one is now wearing.
+
+;(function()
+
+stubSave, stubOptions = {}, {}
+
+local capturedTick
+stubMod.exports = {}
+stubMod.events = { on = function() end }
+stubMod.hooks = {
+  wrap = function(_, name, fn)
+    if name == "input.step" then capturedTick = fn end
+  end,
+}
+stubMod.ui = { push = function() end, insertBefore = function(_, items) return items end }
+stubMod.content.screens = { register = function() end, get = function() end }
+
+local hostClient = resolver()("Client")
+hostClient.install()
+check(capturedTick ~= nil, "sanity: install() wrapped input.step")
+-- Cast.install() ran inside install() and wrote the mod's own characters into
+-- the stub catalog, so this is the same id the picker offers and the same one
+-- the end-to-end driver picks.
+check(stubSprites.SPRITE_NIRE ~= nil,
+      "sanity: the mod's own characters are in the catalog to be picked")
+stubSprites.SPRITE_RED = { walker = true }
+
+-- Hosting, wired exactly as Client.host() wires it. start() is skipped
+-- because it opens a real port and plain luajit has no luasocket (section 4
+-- says the same); accept/flush are the two members of update() that need one,
+-- so they are stubbed and everything else -- the hub's clock, the local peer,
+-- the reaper -- runs for real.
+local hosted = hostClient.ctx.server
+hosted.hub = Hub.new({ maxPlayers = 4 })
+hosted.running = true
+hosted.accept = function() end
+hosted.flush = function() end
+
+local localNet = hosted:localNet()
+check(localNet ~= nil, "the host gets a local net to join its own game with")
+hostClient.transport:attach(localNet)
+
+-- The other player, on the same hub, holding an outbox instead of a socket
+local friendPeer = fakePeer()
+local friend = hosted.hub:accept(friendPeer)
+hosted.hub:receive(friend, { type = Wire.HELLO, proto = Config.PROTOCOL,
+                             name = "FRIEND", map = "PALLET", x = 1, y = 1,
+                             facing = "down" })
+check(take(friendPeer, Wire.WELCOME) ~= nil, "and is welcomed onto it")
+
+local function drive(dt) capturedTick(function() end, {}, dt or 0.016) end
+
+stubSave.name = "HOSTY"
+hostClient.sendHello({ save = { name = "HOSTY" } })
+drive()
+check(hostClient.transport:isReady(),
+      "the host is welcomed by its own hub and reaches the ready state")
+local hostId = hostClient.ctx.roster.selfId
+check(hostId ~= nil, "and knows the id the hub gave it")
+
+-- past the gate the hello left behind, and with the friend's outbox clean, so
+-- what arrives below can only have been caused by the pick
+hosted.hub:update(Config.CHAT_GATE * 4)
+drive()
+friendPeer.outbox = {}
+
+-- ------- the pick, through the same call the CHARACTER row makes
+
+eq(hostClient.setSpriteChoice("SPRITE_NIRE"), "SPRITE_NIRE",
+   "the host picks a character mid-session, the way the CHARACTER row does")
+eq(hostClient.spriteChoice(), "SPRITE_NIRE", "and is wearing it locally")
+
+local told = take(friendPeer, Wire.SPRITE)
+check(told ~= nil,
+      "picking a character while hosting reaches the other player in the "
+      .. "game -- the whole loop, from the UI call to a peer's outbox")
+eq(told.id, hostId, "naming the host by the id that player already knows them by")
+eq(told.sprite, "SPRITE_NIRE", "and the character just picked")
+eq(hosted.hub.clients[hostId].sprite, "SPRITE_NIRE",
+   "and the hub is holding it, so a player who joins later is told by the "
+   .. "ordinary presence stream")
+
+-- ------- and the host's own echo settles the reconcile loop
+--
+-- The other half of the same round trip: the broadcast has no exception, so
+-- the host hears its own change back, and that copy is the acknowledgement.
+-- Without it the tick would re-push forever against a hub already holding the
+-- answer.
+drive()
+friendPeer.outbox = {}
+drive(Config.CHAT_GATE * 2 + 0.1)
+eq(take(friendPeer, Wire.SPRITE), nil,
+   "the hub's own echo acks it, so the reconcile tick goes quiet rather than "
+   .. "re-pushing a character the hub already has")
+
+localNet:close()
+hosted.running = false
+hosted.hub = nil
+
+stubMod.exports = nil
+stubMod.events = nil
+stubMod.hooks = nil
+stubMod.ui = nil
+stubMod.content.screens = nil
+stubSprites.SPRITE_RED = nil
 
 end)()
 
