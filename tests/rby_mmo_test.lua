@@ -11743,12 +11743,13 @@ ctx.servers = storeWith({ "one.example" })
 local rows = mainLabels()
 eq(hasLabel(rows, "SERVERS"), true,
    "a non-empty list adds the row while disconnected")
-local joinIdx, serversIdx
+local hostIdx, serversIdx
 for i, label in ipairs(rows) do
-  if label == "JOIN GAME" then joinIdx = i end
+  if label == "HOST GAME" then hostIdx = i end
   if label == "SERVERS" then serversIdx = i end
 end
-eq(serversIdx, (joinIdx or 0) + 1, "directly after JOIN GAME")
+eq(serversIdx, 1, "first on the menu")
+eq(hostIdx, serversIdx + 1, "directly above HOST GAME")
 
 ctx.client = fakeClient(true, false)
 eq(hasLabel(mainLabels(), "SERVERS"), false,
