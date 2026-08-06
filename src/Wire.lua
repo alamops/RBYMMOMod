@@ -126,10 +126,20 @@ end
 -- which then missed the catalog lookup and drew *every* remote player as
 -- the fallback sprite. The bug was invisible because the fallback works:
 -- everyone just looked like RED. Identifiers get an identifier sanitiser.
+--
+-- Too long is refused rather than trimmed, so both hubs answer the same
+-- bytes the same way: server/lib/sanitize.js's cleanSpriteId is
+-- /^\w{1,40}$/ and drops anything past 40 outright, and a Lua side that
+-- truncated instead would accept, store and re-broadcast an id the node hub
+-- had already thrown away. Truncation buys nothing on its own terms either
+-- -- a cut id matches no catalog entry, so all it can do is put a name
+-- nobody can draw into a presence and onto the rank board, where it renders
+-- as the fallback and looks like a bug in the catalog.
 function M.spriteId(value)
   if type(value) ~= "string" then return nil end
   if not value:match("^[%w_]+$") then return nil end
-  return value:sub(1, 40)
+  if #value > 40 then return nil end
+  return value
 end
 
 -- an id is opaque to us; it only ever has to round-trip and index a table

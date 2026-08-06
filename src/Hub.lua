@@ -563,7 +563,10 @@ function M:admit(client)
   -- An unranked player is shown as zero rather than as the rating of the
   -- name they typed: it is not theirs, and putting it on their card would be
   -- the claim ticket buying nothing.
-  self.board:seen(client.name, client.sprite)
+  --
+  -- Gated on `ranked` for the same reason the rating is: a player who does not
+  -- own the name has no business writing to its row, portrait included.
+  if client.ranked then self.board:seen(client.name, client.sprite) end
   client.points = client.ranked and self.board:points(client.name)
     or Config.RANK_START
   self.players = self.players + 1
@@ -966,14 +969,15 @@ handlers[Wire.SPRITE] = function(self, client, msg)
 
   -- Checked after the no-op above, so a client re-sending the character it
   -- is already wearing does not arm the gate against the next real change.
-  if self.clock - (client.lastSprite or -math.huge) < SPRITE_GATE then return end
+  if self.clock - client.lastSprite < SPRITE_GATE then return end
   client.lastSprite = self.clock
 
   client.sprite = sprite
   -- The board learns the new face too, so a RANKING answer given after this
   -- draws the character the player is wearing now rather than the one they
-  -- greeted in.  The same call admit() makes, for the same reason.
-  self.board:seen(client.name, client.sprite)
+  -- greeted in.  The same call admit() makes, under the same guard: a player
+  -- who does not own the name has no business writing to its row.
+  if client.ranked then self.board:seen(client.name, client.sprite) end
   -- Broadcast with no exception, like publishPoints: the player it is about
   -- hears it too.  Their own presence is not in their own roster, so this is
   -- the message that confirms the hub took the change.
