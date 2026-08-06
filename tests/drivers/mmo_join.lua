@@ -579,6 +579,48 @@ return function(game)
       check(false, "could not open PROFILE")
     end
 
+    -- ------- 4b. the host changes character mid-session; watch it land here
+    --
+    -- The mirror of mmo_host.lua's own leg of the same name: it waits on
+    -- `guest_interact_done` (signalled just below) before touching its
+    -- menu, then signals `host_char_changed` once its own worn look proves
+    -- the pick landed, and waits on `guest_saw_char_change` before moving
+    -- on to the trade. Two tiers, the same shape every other "did the
+    -- peer's local change reach me" check in this file uses: first that
+    -- the values actually moved at all (true regardless of which character
+    -- was chosen), then, only once the poll actually landed, that it moved
+    -- to exactly the one the host picked -- a stalled propagation should
+    -- report one failure, not a second one that only restates it.
+    local function watchHostCharChange()
+      H.await(game, "host_char_changed")
+
+      local before = H.avatarRow(exports)
+      local beforeSprite = before and before.sprite
+      local sawRoster, sawAvatar = false, false
+      local landed = H.waitSeconds(game, function()
+        local player = exports.players()[1]
+        local avatar = H.avatarRow(exports)
+        sawRoster = player ~= nil and player.sprite ~= beforeSprite
+        sawAvatar = avatar ~= nil and avatar.sprite ~= beforeSprite
+        return sawRoster and sawAvatar
+      end, 45, "the host's character change to reach the guest")
+
+      check(sawRoster, "the host's roster row picked up a different sprite")
+      check(sawAvatar,
+            "and the respawned avatar row shows a different sprite too")
+      if landed then
+        local player = exports.players()[1]
+        local avatar = H.avatarRow(exports)
+        check(player ~= nil and player.sprite == "SPRITE_NIRE",
+              "and it is exactly the character the host picked, on the roster")
+        check(avatar ~= nil and avatar.sprite == "SPRITE_NIRE",
+              "and on the respawned avatar too")
+        U.shot(game, SHOT_DIR .. "/join-host-recharacter.png")
+      end
+
+      H.signal("guest_saw_char_change")
+    end
+
     -- ------- 5. take the menu up on it: a real trade, end to end
     --
     -- Everything past here runs the engine's own TradeSession over the
@@ -587,6 +629,7 @@ return function(game)
     -- itself is this mod's code.
 
     H.signal("guest_interact_done")
+    watchHostCharChange()
     -- likewise: never ask somebody who is mid-session
     H.waitSeconds(game, function()
       local row = H.avatarRow(exports)
@@ -813,6 +856,12 @@ return function(game)
     end
   else
     H.signal("guest_interact_done")
+    -- No hostRow to stand next to, so nothing here can watch the host's
+    -- character change land -- but the host is waiting on
+    -- guest_saw_char_change regardless, and staying silent would only
+    -- relocate this leg's failure onto a timeout over there instead of the
+    -- "no interact target" failure this branch already means.
+    H.signal("guest_saw_char_change")
     H.signal("guest_trade_requested")
   end
 

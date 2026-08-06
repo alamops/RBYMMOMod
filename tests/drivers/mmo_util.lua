@@ -584,6 +584,13 @@ local PHASE = {
   -- host waits on the guest walking through the host's own tile first
   -- (non-blocking avatars), then walking up, reading the card and closing it
   guest_interact_done    = 300,  -- 60 walk-through + 60 facing + menu + card
+  -- guest waits on the host reopening the MMO menu and picking a new
+  -- character through it -- no network round trip on this side of the
+  -- barrier, just the host's own menu frames
+  host_char_changed      = 150,  -- menus + a pick, same order as host_address_checked
+  -- host waits on the guest's roster and avatar rows to pick up the new
+  -- sprite (the hub broadcast, then the roster write and avatar respawn)
+  guest_saw_char_change  =  90,  -- 45 propagate + margin
   -- host waits on the guest waiting for it to be free, then picking TRADE
   guest_trade_requested  = 120,  -- 45 free
   -- guest waits on the host driving its half of the trade
