@@ -79,6 +79,7 @@ docs/plans/in-game-hosting.md
 docs/plans/self-hosting-server-app.md
 docs/plans/fix-taken-nick-on-ranking.md
 docs/plans/running-system.md
+docs/plans/last-connected-servers.md
 # The upstream RFC behind co-op battles. It is a proposal against the *engine*,
 # not mod content -- a player unpacking this archive has no use for a document
 # arguing about BattleState's battler slots. Listed by name for the same reason
