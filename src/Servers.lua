@@ -72,12 +72,27 @@ end
 -- What a hub is called before anybody names it.
 --
 -- Its own address, which is the only thing known about it at record time and
--- the string the player was read out. It is run through the display
--- sanitiser like any typed name, so a hostname longer than the row has room
--- for arrives shortened rather than overflowing the menu -- and the full
--- address is still on the entry, which is what CONNECT dials.
+-- the string the player was read out.
+--
+-- The default port comes off first, because the sanitiser truncates rather
+-- than wraps and a bare truncation lies: at sixteen characters
+-- "192.168.1.20:7788" is drawn as "192.168.1.20:778", which is a port nothing
+-- is listening on and reads as an address the player could type. Eliding a
+-- port that is the one every hub of ours uses anyway costs no information --
+-- ":7788" is what normalize just filled in -- and buys five characters, which
+-- is the difference between a name that is true and a name that is not.
+-- Truncation is still the last resort for what does not fit even then.
+--
+-- Compared as plain text rather than matched, so the port never has to be
+-- read as a pattern. Only the label is shortened: entry.address keeps the
+-- whole dialable string, which is what CONNECT dials.
 local function defaultName(address)
-  return Wire.text(address, Config.SERVER_NAME_MAX) or address
+  local shown = address
+  local suffix = ":" .. tostring(Config.DEFAULT_PORT)
+  if #shown > #suffix and shown:sub(-#suffix) == suffix then
+    shown = shown:sub(1, #shown - #suffix)
+  end
+  return Wire.text(shown, Config.SERVER_NAME_MAX) or shown
 end
 
 local function now()
@@ -122,12 +137,26 @@ function M.new(ctx)
     -- in the moment it was dropped here.
     dropped = {},
     loaded = false,
+    -- Which of the file complaints below have already been said once. The
+    -- file is re-read on every write, so a broken one is a standing condition
+    -- and not a blip: unlatched, a player toggling FAVORITE would be told
+    -- their save folder is unreadable once per keypress, which buries the
+    -- sentence that mattered under the sentence that mattered.
+    said = {},
   }, M)
 end
 
 function M:_warn(fmt, ...)
   local log = self.mod and self.mod.log
   if log and type(log.warn) == "function" then log:warn(fmt, ...) end
+end
+
+-- The same, for a complaint about the file itself: said the first time this
+-- session and never again, however many writes go past it afterwards.
+function M:_warnOnce(what, fmt, ...)
+  if self.said[what] then return end
+  self.said[what] = true
+  self:_warn(fmt, ...)
 end
 
 -- ------- persistence
@@ -179,8 +208,9 @@ function M:_read()
 
   local decoded = Json.decode(body)
   if type(decoded) ~= "table" then
-    self:_warn("%s is not readable as JSON -- delete it from the game's save "
-      .. "folder to reset this copy's server list", Config.SERVERS_FILE)
+    self:_warnOnce("decode", "%s is not readable as JSON -- delete it from the "
+      .. "game's save folder to reset this copy's server list",
+      Config.SERVERS_FILE)
     return nil, false
   end
   return decoded, false
@@ -209,31 +239,6 @@ function M:_ingest(rows, only)
   end
 end
 
--- Read once a session. The save mirror goes in first and the file over the top
--- of it, key by key, because the file is the durable copy and mod.save is the
--- one a CONTINUE can rewind.
-function M:_load()
-  if self.loaded then return end
-  self.loaded = true
-  self:_ingest(self:_saved())
-  local rows = self:_read()
-  if rows then self:_ingest(rows) end
-end
-
--- Sorted the way the menu draws them, so the array is also what gets written:
--- favourites first, and within each group the address descending. Descending
--- because that is what was asked for; the keys are unique, so there are no
--- ties to break.
-function M:_rows()
-  local out = {}
-  for _, entry in pairs(self.entries) do out[#out + 1] = entry end
-  table.sort(out, function(a, b)
-    if a.fav ~= b.fav then return a.fav end
-    return a.key > b.key
-  end)
-  return out
-end
-
 -- The cap, applied by throwing away the hub you have not been to in longest.
 --
 -- A favourite is never a candidate: marking one is the player saying "keep
@@ -245,6 +250,14 @@ end
 -- `keep` is the row the caller is in the middle of returning: the entry just
 -- recorded is the newest of them all and cannot be the eviction, except in the
 -- one case where every other row is a favourite and it is the only candidate.
+-- Every caller that has such a row has to pass it, because "newest" is only
+-- the tie-break when the clock is answering: under a degraded now() every row
+-- reads as 0, the tie falls to the key, and the entry being returned is as
+-- likely to lose it as any other.
+--
+-- Declared above the readers rather than beside the writers, which is where it
+-- belongs by subject, because both of them apply it and a local is only in
+-- scope below itself.
 local function evict(self, keep)
   local count = 0
   for _ in pairs(self.entries) do count = count + 1 end
@@ -267,6 +280,38 @@ local function evict(self, keep)
   end
 end
 
+-- Read once a session. The save mirror goes in first and the file over the top
+-- of it, key by key, because the file is the durable copy and mod.save is the
+-- one a CONTINUE can rewind.
+--
+-- Then the cap, because nothing so far has applied it: the two halves are
+-- merged key by key and either of them may be longer than the list is allowed
+-- to be -- a file hand-edited to forty rows, or two halves that overlap in
+-- only some of theirs. Recording a hub is not the only way rows arrive, so it
+-- cannot be the only place the cap is kept.
+function M:_load()
+  if self.loaded then return end
+  self.loaded = true
+  self:_ingest(self:_saved())
+  local rows = self:_read()
+  if rows then self:_ingest(rows) end
+  evict(self)
+end
+
+-- Sorted the way the menu draws them, so the array is also what gets written:
+-- favourites first, and within each group the address descending. Descending
+-- because that is what was asked for; the keys are unique, so there are no
+-- ties to break.
+function M:_rows()
+  local out = {}
+  for _, entry in pairs(self.entries) do out[#out + 1] = entry end
+  table.sort(out, function(a, b)
+    if a.fav ~= b.fav then return a.fav end
+    return a.key > b.key
+  end)
+  return out
+end
+
 -- Write both halves, and in that order: the mirror always, the file
 -- best-effort.
 --
@@ -279,11 +324,18 @@ end
 -- write is the whole list, so a file that exists and would not open is left
 -- exactly as it is: the mirror still took the change, and the file repairs
 -- itself the next time it reads.
-function M:_persist()
+--
+-- `keep` is the caller's row, and it is here for the same reason it is on the
+-- record path: folding another copy's rows in can push the list over the cap,
+-- and the eviction that follows must not be allowed to throw away the very
+-- hub this write exists to remember. Without it a degraded clock -- every
+-- row's `last` reading 0, the tie falling to the key -- can drop the fresh
+-- entry and hand the caller back a row that is no longer in the list.
+function M:_persist(keep)
   local rows, unreadable = self:_read()
   if rows then
     self:_ingest(rows, true)
-    evict(self)
+    evict(self, keep)
   end
 
   local list = self:_rows()
@@ -293,10 +345,10 @@ function M:_persist()
   local fs, Json = filesystem(), json()
   if not (fs and Json) then return false end
   if unreadable then
-    self:_warn("%s could not be read, so this session's server list was not "
-      .. "written to it and nothing in it was overwritten -- the list still "
-      .. "works for this game; delete the file from the game's save folder if "
-      .. "this repeats", Config.SERVERS_FILE)
+    self:_warnOnce("unreadable", "%s could not be read, so this session's "
+      .. "server list was not written to it and nothing in it was overwritten "
+      .. "-- the list still works for this game; delete the file from the "
+      .. "game's save folder if this repeats", Config.SERVERS_FILE)
     return false
   end
 
@@ -363,7 +415,10 @@ function M:record(address, code)
   self.dropped[key] = nil
 
   evict(self, key)
-  self:_persist()
+  -- Twice, and the second one is not redundant: _persist folds in rows this
+  -- session has never seen before it writes, which can put the list back over
+  -- the cap, and the eviction it runs then has to be told about this row too.
+  self:_persist(key)
   return entry
 end
 
@@ -384,7 +439,7 @@ function M:rename(key, name)
     return nil
   end
   entry.name = clean
-  self:_persist()
+  self:_persist(entry.key)
   return entry
 end
 
@@ -396,7 +451,7 @@ function M:setFavorite(key, fav)
     return nil
   end
   entry.fav = fav and true or false
-  self:_persist()
+  self:_persist(entry.key)
   return entry
 end
 
@@ -431,7 +486,7 @@ function M:setAddress(key, newAddress)
     entry.key = id
   end
   entry.address = clean
-  self:_persist()
+  self:_persist(entry.key)
   return entry
 end
 
@@ -457,7 +512,7 @@ function M:setCode(key, code)
     return nil
   end
   entry.code = clean
-  self:_persist()
+  self:_persist(entry.key)
   return entry
 end
 

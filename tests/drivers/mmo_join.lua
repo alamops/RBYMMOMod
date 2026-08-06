@@ -869,8 +869,43 @@ return function(game)
             -- already filled in from the entry, no grids in between. Same
             -- assertions H.rejoin's second connection made: a claimed name
             -- is recognised again, and the rating is still attached to it.
-            if H.reconnectViaServers(game, exports, hostAddress, joinCode,
-                                      check, log) then
+            --
+            -- The list this leg is about to walk, read off the store first.
+            -- Two welcomes off one address are one row, and that row's
+            -- `address` is the whole dialable string whatever the row is
+            -- *named* -- the name has the standard port left off, which is
+            -- what H.serverLabel reconstructs below. A second row here would
+            -- mean the same hub was filed under two keys.
+            check(type(exports.servers) == "function",
+                  "the mod publishes its server list to other mods")
+            local stored = (type(exports.servers) == "function"
+                            and exports.servers()) or {}
+            check(#stored == 1,
+                  ("two connections to one hub leave exactly one SERVERS row "
+                   .. "(got %d)"):format(#stored))
+
+            -- What this player actually dialled, which is *not* what the host
+            -- published: the host reads its LAN IP out (HostServer:address),
+            -- while this side has been dialling the loopback address the
+            -- wrapper wrote into its options, both times. Only asserted when
+            -- the wrapper is the one running this -- a hand-driven run sets no
+            -- such variable, and the row itself is then the only witness of
+            -- what was dialled.
+            local wrapperDialled = os.getenv("MMO_JOIN_ADDRESS")
+            if wrapperDialled then
+              check(stored[1] and stored[1].address == wrapperDialled,
+                    ("and it holds the address that was dialled -- %s (row "
+                     .. "says %s)"):format(tostring(wrapperDialled),
+                                    tostring(stored[1] and stored[1].address)))
+            end
+            local dialled = wrapperDialled
+              or (stored[1] and stored[1].address) or hostAddress
+            log("SERVERS row", tostring(stored[1] and stored[1].name),
+                "at", tostring(stored[1] and stored[1].address),
+                "dialled", tostring(dialled))
+
+            if H.reconnectViaServers(game, exports, dialled, joinCode,
+                                      check, log, SHOT_DIR) then
               check(exports.isRanked(),
                     "reconnecting through SERVERS is recognised as the "
                     .. "same player too")

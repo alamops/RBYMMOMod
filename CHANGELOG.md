@@ -14,11 +14,14 @@ here must match `manifest.version`.
   and passcode. It stays off the menu until there is a first entry to show
   it, and it disappears again the moment you're hosting or connected, the
   same rule `ADDRESS` and `PLAYERS` already follow.
-- **Favorites pinned on top; everyone else by address, descending.** A
-  favorited entry sorts above every plain one no matter when it was last
-  used; within each group, entries sort by their normalised `host:port`
-  string, Z before A. Recency decides nothing about where an entry sits on
-  the list — only whether a non-favorite survives the next eviction.
+- **Favorites pinned on top, marked `▶`; everyone else by address,
+  descending.** A favorited entry carries a `▶` in the row's right-hand
+  column — the game's own cursor glyph, the same mark the `PLAYERS` and
+  `CHAT` rows already use — and sorts above every plain one no matter when it
+  was last used; within each group, entries sort by their normalised
+  `host:port` string, Z before A. Recency decides nothing about where an
+  entry sits on the list — only whether a non-favorite survives the next
+  eviction.
 - **Picking an entry opens a submenu of its own.** `CONNECT` dials it the
   same way `JOIN GAME` does — the same CHARSET naming step first, then the
   same challenge if the stored passcode turns out to be wrong.
@@ -30,8 +33,13 @@ here must match `manifest.version`.
 - **A new connection writes its own entry, and only once it's real.** The
   recording happens at `WELCOME` — not on every dial — so a wrong passcode or
   a refused connection never litters the list with a hub you never actually
-  reached. The address you dialled becomes the entry's name by default;
-  hosting your own game records nothing, because there's no address you
+  reached. The entry is named after the address you dialled, with the
+  standard port left off — `192.168.1.20:7788` lists as `192.168.1.20`, since
+  that port is the one every hub here uses and sixteen characters is all a
+  row has. A hub on any other port keeps it in the name, because there it is
+  the difference between an address that dials and one that doesn't. Either
+  way the entry still holds the whole address, which is what `CONNECT` dials.
+  Hosting your own game records nothing, because there's no address you
   dialled to remember.
 - **Renamed like anything else typed on this mod's grids: sixteen
   characters, same sanitiser.** A rename that would leave the name empty is
