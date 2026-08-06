@@ -643,7 +643,45 @@ local PHASE = {
   -- b waits on a leaving first, so it can watch the roster empty
   hub_a_left             = 240,  -- menus + the chat log + LEAVE
   -- a waits on b noticing that, then leaving too
-  hub_b_left             = 300,  -- 120 watching + menus + LEAVE
+  hub_b_left             = 300,
+
+  -- ------- the co-op leg of the LAN scenario (tests/drivers/run-mmo-e2e.sh)
+  --
+  -- The other transport. Everything above rides the dedicated Node hub; this
+  -- pair rides `src/Hub.lua`, running *inside* one of the two games. The
+  -- co-op handlers there have unit tests and had never carried a real battle
+  -- between two real clients.
+  -- the host waits on the guest coming off the RANK screen and standing still
+  guest_ready_for_party  = 180,  -- menus + closeToOverworld
+  host_party_asked       = 180,  -- menus
+  guest_party_joined     = 180,  -- the invite box + the flag
+  host_coop_waiting      = 180,  -- staging a trainer + the wait/alone prompt
+  guest_coop_joined      = 240,  -- staging + walking the join prompt
+  host_coop_done         = 420,  -- a whole 2-on-2 driven by two tappers
+  guest_coop_done        = 420,  -- the same
+  host_coop_left         = 180,  -- leaving the party afterwards  -- 120 watching + menus + LEAVE
+
+  -- ------- the four-client scenario (tests/drivers/run-quad-e2e.sh)
+  --
+  -- Four guests, two parties, one 2-on-2 between them. Written without the
+  -- role in the key: every barrier here comes in a set of four rather than a
+  -- pair, and four identical rows differing only in a letter would be four
+  -- places to forget to raise together. `patience` folds quad_<role>_<tag>
+  -- onto quad_<tag>, so the budget lives once, next to the work.
+  --
+  -- Every budget here is larger than its two-client cousin for a reason that
+  -- has nothing to do with the mod: four LOVE instances share a machine. Four
+  -- windows compositing, four Lua VMs and four copies of the game's data on
+  -- the same cores is a slower frame each, so the same work takes longer in
+  -- wall-clock even when nothing is waiting on anything.
+  quad_ready             = 900,  -- cold boot + menus + a code, times four
+  quad_seen              = 240,  -- three peers to arrive on each roster
+  quad_paired            = 420,  -- two invitations at once + both flags
+  quad_refused           = 420,  -- menus + the ask out to three + one no back
+  quad_agreed            = 480,  -- the same again, then four parties to a host
+  quad_fought            = 900,  -- a whole 2-on-2 driven by four tappers
+  quad_ranked            = 360,  -- the hub scoring two winners and two losers
+  quad_left              = 300,  -- menus + LEAVE
 }
 
 local SYNC_DIR = os.getenv("MMO_SYNC_DIR") or "/tmp/rby_mmo_sync"
@@ -657,7 +695,14 @@ function M.syncPath(name)
 end
 
 function M.patience(name)
-  return PHASE[name] or 180
+  if PHASE[name] then return PHASE[name] end
+  -- A four-client barrier is named per role -- quad_c_fought -- but budgeted
+  -- once. Four rows differing only in a letter would be four places to forget
+  -- to raise together, and the first one forgotten is a run reporting
+  -- "incomplete" about a leg that was working.
+  local shared = name:match("^quad_%a_(.+)$")
+  if shared and PHASE["quad_" .. shared] then return PHASE["quad_" .. shared] end
+  return 180
 end
 
 function M.signal(name)
@@ -917,6 +962,115 @@ function M.captureEvents(names)
   Runtime.emit = function(name, payload)
     if seen[name] ~= nil then seen[name] = seen[name] + 1 end
     return realEmit(name, payload)
+  end
+  return seen
+end
+
+-- The trainer a co-op leg fights, chosen the same way on every instance.
+--
+-- The weakest one with two POKeMON, with the id as the tiebreak so two
+-- processes reading the same dataset land on the same trainer without talking
+-- to each other. Weakest because a co-op leg is a test of the machinery around
+-- a battle rather than of the battle: the strongest was picked once by
+-- accident (alphabetically) and its exp cascaded level-ups into the leg after
+-- it.
+function M.coopTrainer(data)
+  local best
+  for id, record in pairs(data.trainers or {}) do
+    local party = record.parties and record.parties[1]
+    if party and #party >= 2 then
+      local total = 0
+      for _, spec in ipairs(party) do total = total + (spec.level or 0) end
+      if best == nil or total < best.total
+         or (total == best.total and id < best.id) then
+        best = { id = id, total = total }
+      end
+    end
+  end
+  return best and best.id, best and best.total
+end
+
+-- Put a real trainer battle on the stack, the way the overworld does.
+--
+-- Softened, not gutted: the engine's trainers are built for a full playthrough
+-- and these drivers carry a starter, so without this a leg would be a
+-- twenty-minute battle rather than a test of the machinery around one. A
+-- quarter of full health still dies to one hit and still *looks* like a
+-- monster that is alive -- exactly 1 HP drew both enemy bars empty, which
+-- reads on a screenshot as a broken bar rather than a weakened opponent.
+--
+-- `onFinish` is attached here because the callers of newTrainer are what
+-- normally attach it -- the overworld hangs the defeated flag and the rewards
+-- on it -- and it is what lets a co-op leg assert the battle it displaced was
+-- told how it went.
+function M.stageTrainer(game, class, onFinish)
+  local BattleState = require("src.battle.BattleState")
+  local ok, battle = pcall(BattleState.newTrainer, game, class, 1)
+  if not (ok and battle) then return nil end
+  for _, mon in ipairs(battle.enemyParty or {}) do
+    mon.hp = math.max(1, math.floor((mon.stats and mon.stats.hp or 4) / 4))
+  end
+  battle.onFinish = onFinish
+  game.stack:push(battle)
+  return battle
+end
+
+-- Wait until the co-op command grid is really the thing on screen.
+--
+-- "2 on 2 battle!" holds the message box for up to its full dwell (1.6s, or
+-- until somebody presses A), so the command box is *not* up the instant the
+-- battle screen is. Two things went wrong without this, and both looked like
+-- something else:
+--
+--   * a driver that tapped an arrow into the message phase moved nothing, and
+--     every press behind it landed one step out of order -- a failure about
+--     the driver's timing wearing the clothes of a failure about the menus;
+--   * a screenshot taken on a fixed `U.wait(30)` photographed the opening
+--     line instead of the grid. Those images are the shipped evidence of what
+--     the 2x2 layout looks like, so a picture of a text box is a picture of
+--     nothing anybody was asking about.
+--
+-- Hardened past "phase == choose", because that phase is reachable while the
+-- grid is still not what the player is looking at: `replacing` outranks the
+-- turn and draws the bench instead, and a battle that has already been decided
+-- carries a `result` while its last messages drain. Both would have satisfied
+-- the loose predicate and neither is a command grid.
+--
+-- Seconds, not frames, and it must be: the grid only opens once the *other*
+-- clients have got there too. Returns whether it happened, so a caller can
+-- `check` it rather than walking on into a menu that never opened.
+function M.awaitCommandMenu(game, what)
+  return M.waitSeconds(game, function()
+    local top = M.top(game)
+    return top ~= nil and top.sim ~= nil and top.phase == "choose"
+      and not top.replacing and top.result == nil
+  end, 30, what or "the co-op command menu")
+end
+
+-- Listen for the mod's *own* events, the way another mod would.
+--
+-- Two buses, and they are not the same one. `Runtime.emit` carries the
+-- engine's events and is what captureEvents wraps; a mod's own announcements
+-- go through the loader's `events` bus instead, because `mod.events:emit` is
+-- namespaced -- it refuses anything that is not `mod.<id>.*` so that no mod
+-- can forge an engine event. A run that watched only Runtime saw a co-op
+-- battle announce nothing and reported a hole that was not there.
+--
+-- Subscribing rather than wrapping the emitter on purpose: what is worth
+-- asserting is that a *listener hears it*, which is the thing another mod
+-- actually does. Returns a table of name -> count, and the payload of the
+-- last one of each, so a test can check the shape as well as the fact.
+function M.listenForModEvents(game, names)
+  local loader = game and game.mods
+  local bus = loader and loader.events
+  local seen = { payloads = {} }
+  for _, name in ipairs(names) do seen[name] = 0 end
+  if not (bus and bus.on) then return seen end
+  for _, name in ipairs(names) do
+    bus:on(name, function(payload)
+      seen[name] = seen[name] + 1
+      seen.payloads[name] = payload
+    end, 0, "mmo_driver")
   end
   return seen
 end

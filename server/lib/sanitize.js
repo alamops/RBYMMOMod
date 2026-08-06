@@ -171,10 +171,56 @@ function cleanMember(value) {
   return { id, name };
 }
 
+// The identity of one fight, as two partners standing in front of it derive
+// it. Mirrors Wire.battleKey.
+//
+// The ':' and '|' are the point: the key is map and trainer joined with a
+// separator, and cleanText would strip that separator and collapse two
+// different trainers on one map into the same key -- which is the one thing
+// this value exists to tell apart. So it gets a pattern of its own rather
+// than borrowing the prose one.
+const COOP_KEY_MAX = 64;
+
+// What a fight is called, as opposed to what identifies it. Prose, so it
+// borrows cleanText -- but with its own limit, because a trainer class is not
+// a player name and NAME_MAX cuts "BUG CATCHER" to "BUG CATCHE".
+const COOP_LABEL_MAX = 16;
+
+function cleanLabel(value) {
+  return cleanText(value, COOP_LABEL_MAX);
+}
+
+function cleanBattleKey(value) {
+  if (typeof value !== 'string') return null;
+  if (value.length > COOP_KEY_MAX) return null;
+  return /^[\w.\-:|]+$/.test(value) ? value : null;
+}
+
+// Which side of a co-op battle somebody is on, and why an offer or an ask
+// ended. Both are closed sets rather than free text: each value picks a
+// different sentence on the client, and an unknown one has to degrade to the
+// vague case rather than being printed raw.
+const SIDES = { a: true, b: true };
+const COOP_REASONS = {
+  alone: true, left: true, started: true, no: true, gone: true, timeout: true,
+};
+
+function cleanSide(value) {
+  return SIDES[value] ? value : null;
+}
+
+function cleanCoopReason(value) {
+  return COOP_REASONS[value] ? value : null;
+}
+
 module.exports = {
   cleanText,
   cleanId,
   cleanMember,
+  cleanBattleKey,
+  cleanLabel,
+  cleanSide,
+  cleanCoopReason,
   cleanSpriteId,
   cleanMapId,
   cleanInt,
@@ -198,4 +244,8 @@ module.exports = {
   MAX_LINE,
   PAYLOAD_MAX_DEPTH,
   PAYLOAD_MAX_NODES,
+  COOP_KEY_MAX,
+  COOP_LABEL_MAX,
+  SIDES,
+  COOP_REASONS,
 };

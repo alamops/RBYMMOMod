@@ -177,6 +177,133 @@ end-to-end suite.
   <img src="docs/screenshots/link-battle.png" width="300" alt="GUESTY wants to battle!">
 </p>
 
+### 🤜 CO-OP — WAIT FOR YOUR FRIEND
+Walk into a trainer while you're in a party and the game asks you first:
+**wait for your friend, or go in alone.** Waiting tells them exactly where
+you're standing. When they reach the same fight — or just walk up to you —
+they're offered the chance to join.
+
+Four rules make it feel solid rather than fiddly:
+
+- **No costs nothing.** Turn down a join and *nothing* is remembered. Your
+  friend keeps waiting and isn't even told, and walking back into that fight
+  asks you again. There's no record of the refusal for anything to consult.
+- **You can't dodge the fight.** The engine has already committed to the
+  encounter by the time the mod gets asked, so every way out of every prompt
+  ends in a battle. **B is BATTLE ALONE**, not "never mind" — and B while
+  waiting reopens that same choice rather than releasing you.
+- **The door shuts.** Nobody joins a battle that's already started, and an
+  offer is taken exactly once.
+- **PARTY BATTLE** sits right under BATTLE on the walk-up menu: two parties,
+  four trainers, and **all four have to say yes**. It tells you plainly if
+  they aren't in a party, or if your own partner has wandered off this map.
+
+**And it's a real four-monster field.** Not two 1v1s side by side — one turn
+order over all four, a target picked per attack, and your move redirecting if
+your partner drops your target before you swing. A side only loses when *both*
+its trainers are out of mons.
+
+The engine has no double battles, so the mod brings its own field
+(`src/CoopSim.lua`). What sits underneath it is still the engine's: damage,
+crits, type effectiveness, STAB, badge boosts, burn, screens, the random
+factor, status and turn speed all come from `src/battle/*`, so a POKéMON hits
+for exactly the same number here as it does in the grass.
+
+**Every move effect the game has works**, because none of them are
+reimplemented. `src/CoopField.lua` is a `BattleState`-shaped object over the
+four slots whose lookup chain ends at the engine's own `BattleState` — so the
+move that runs *is* `BattleState.performMove`, driving the real `move_effects`
+registry. Charge moves charge, SUBSTITUTE absorbs, HYPER BEAM recharges,
+METRONOME calls, multi-hit hits, recoil recoils, BIDE stores.
+
+<p align="center">
+  <img src="docs/screenshots/coop-battle.png" width="300" alt="Four monsters on one field: WEEDLE and CATERPIE reading out top-left, CHARIZARD and PIKACHU bottom-right, FIGHT / ITEM / SWITCH / RUN below">
+  <img src="docs/screenshots/coop-item.png" width="300" alt="The same field from the other player's screen, their own PIKACHU marked with the cursor">
+</p>
+
+All four commands are there — **FIGHT, ITEM, SWITCH, RUN** — with items going
+through the engine's own item effects. Against a trainer, RUN and a thrown
+ball are *refused*, in the game's own words, because Gen 1 lets you do
+neither in a trainer battle. Against another party, **RUN asks your partner
+first**: they get a yes/no box in the battle itself (it opens on NO, so a
+button held through the messages can't answer it), a no costs you nothing but
+the asking, and a yes ends the battle for all four — as the runners' loss and
+the opponents' win, so fleeing at match point buys nothing.
+
+**Exp is priced on each player's own machine.** The host resolves the knockout
+but holds nobody's party except its own, so what crosses the wire is a
+*description* of the kill — what fell, at what level, and how many shared it —
+and every client runs the engine's own `Experience` over its own live monster.
+That is what makes a shared knockout genuinely worth half each rather than full
+each, divides the stat exp the same way Gen 1 does, and lets an **EXP.ALL** in
+your bag do exactly what it does anywhere else: halve what the fighter takes
+and spread the other half over everyone still standing, level-ups, new moves
+and evolutions included.
+
+And it's dressed like a trainer battle, because it is one: the **trainer's
+picture** holds the field through the opening lines and steps aside before the
+first menu, their **battle theme** plays — the gym leader's, if they're a gym
+leader — the **victory theme** answers it, and their **parting line** is said
+before the world comes back.
+
+The prompt appears in front of **every** trainer — walked into or scripted —
+and the engine's own battle runs the whole post-battle flow afterwards: the
+defeated flag, badges and prizes, the whiteout if you're wiped, and whatever
+script was waiting. Animations play, through the engine's own player, moved
+onto whichever of the four monsters acted.
+
+<p align="center">
+  <img src="docs/screenshots/party-battle.png" width="300" alt="Four humans on one field: BLASTOISE and VENUSAUR against CHARIZARD and PIKACHU">
+  <img src="docs/screenshots/party-ask.png" width="300" alt="ALPHA wants a 2-on-2 battle! -- the four-way ask, as it reaches one of the other three">
+</p>
+
+**A faint is four different things depending on who you are.** Lose one with
+POKeMON left and the battle *stops* and asks you which follows -- nobody else
+takes a turn until you answer. Lose your last one and nothing stops: your
+partner fights on, your side is still alive, and you watch the rest of it
+rather than being handed a menu that answers nothing. A side only falls when
+**both** its trainers have.
+
+<p align="center">
+  <img src="docs/screenshots/party-spectating.png" width="300" alt="GAMMA's screen after their last POKeMON fell: their slot gone from the readout, their partner VENUSAUR still fighting">
+</p>
+
+**And losing sends you home, the way the game always did.** Every player
+whose party lost — or who walked out of any co-op battle with nothing left
+able to fight, even on the winning side — gets the whole vanilla ritual:
+party healed, money halved, and the warp to *their own* last POKéMON CENTER.
+Nobody is left standing in the tall grass at 0 HP, which also means a party
+with nothing able to fight is never wandering around to be challenged — and
+if one ever were, the battle refuses to start rather than starting broken.
+
+**And nobody can hold four people hostage.** Every turn has one 60-second
+clock, the same honest number on every screen, the host's own turn included.
+When it runs out the late player's first usable move is played for them —
+everyone is told who took too long — and the battle flows on.
+
+> One client simulates and the other three replay its events, so the host is
+> trusted the same way the engine's own link host already is.
+>
+> The wait-or-alone prompt appears in front of *script-driven* trainers.
+> Walking into one in the overworld starts a battle through a path that only
+> emits an event, and an event can't cancel —
+> [`docs/rfcs/0001-double-battles.md`](docs/rfcs/0001-double-battles.md)
+> proposes the upstream seam that would close it.
+
+**Beating a trainer together is not worth points, and the game tells you so.**
+Elo rates you against an opponent's rating and a trainer hasn't got one — and
+trainers are an infinite supply the anti-farming discount can't touch, so two
+friends could grind gym leaders to the top of the board without ever meeting
+anybody. A co-op trainer battle pays what a trainer battle pays — exp, badges,
+prize money — and no points, and says as much the first time you win one.
+
+**A party battle is scored as a team battle.** Each of the four is rated
+against the *other pair's* combined strength — which is the match they actually
+played, since both of you attack both of them and you lose together. Not two
+1v1s paired off by slot: who the hub happened to list first is not a fact about
+who fought whom, and rating it that way meant the same battle between the same
+four people paid differently depending on the seating.
+
 ### 🏆 RANKED — AND YOU CAN'T FARM IT
 Every link battle is scored, on the hub, for both players. Win and you gain
 points; lose and you lose them, never past **0**. How many depends on who you
@@ -798,11 +925,44 @@ if mmo and mmo.exports.isConnected() then
 end
 ```
 
+**Co-op battles announce themselves**, because the engine's own `battle.started`
+and `battle.ended` never fire for one and cannot be made to — `battle.started`
+comes from `BattleState:enter` and the trainer battle a co-op one displaces is
+taken off the stack before it ever enters; `battle.ended` comes from that
+battle's `finish`, which the co-op flow never calls. A mod may only emit
+`mod.<id>.*` events, so these are the mod's own:
+
+```lua
+mod.events:on("mod.rby_mmo.coop_battle_started", function(e)
+  -- e.kind      "npc" | "party"      -- a word, not a slot count
+  -- e.fighters  4                    -- how many are on the field
+  -- e.humans    2 or 4               -- how many of them are people
+  -- e.mine      1..4                 -- which slot *this* client is sitting in
+  -- e.side      "a" | "b"            -- and which side that puts them on
+  -- e.host      true on the one client that simulates the battle
+  -- e.trainerId the NPC being fought, or nil against another party
+  -- e.ranked    whether a win moves anybody's rating
+  -- e.slots     { side, owner, name, species } per slot
+  -- e.battle    the live screen, for anything the fields above missed --
+  --             READ ONLY. It is the running battle, not a copy: writing to
+  --             its sim, pending or result desyncs all four clients, and a
+  --             listener that throws is logged and skipped, not rolled back.
+end)
+
+mod.events:on("mod.rby_mmo.coop_battle_ended", function(e)
+  -- everything above, plus e.result: "win" | "loss" | "draw"
+end)
+```
+
+Both fire on **every** client in the battle, each with its own `mine` and
+`side` — so four clients see four different payloads describing the same
+fight.
+
 ---
 
 ## 🚧 Known jank — read this bit
 
-It's `0.2.2` and it ships flagged `experimental` on purpose. The full list
+It's `0.5.0` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 

@@ -3,7 +3,7 @@ return {
     .. "trade and battle.",
   author = "alamo",
   tags = { "multiplayer", "mmo", "chat", "party", "trade", "pvp", "ranking",
-           "ui",
+           "coop", "ui",
            "experimental" },
 
   differences = {
@@ -43,6 +43,25 @@ return {
         .. "nothing. Points floor at 0. A RANK row on the MMO menu shows "
         .. "the top ten -- place, character, name, points -- and the score "
         .. "sits on every trainer card.",
+      "Co-op 2-on-2 battles: walk into a trainer while you are in a party "
+        .. "and you are asked whether to wait for your friend or go in alone. "
+        .. "Waiting tells them where you are standing, and reaching the same "
+        .. "fight -- or walking up to the person standing at it -- offers to "
+        .. "join. A no costs nothing and is asked again next time; the fight "
+        .. "itself cannot be dodged, so B on that prompt is BATTLE ALONE. A "
+        .. "PARTY BATTLE row under BATTLE puts two whole parties against each "
+        .. "other, with all four having to agree. The battle itself is a real "
+        .. "four-monster field -- one turn order over all four, a target per "
+        .. "attack, and a side that loses only when both its trainers are out "
+        .. "-- with the engine's own damage, types, crits, status AND move "
+        .. "effects underneath it: the move that runs is the engine's own "
+        .. "performMove, so charge moves charge, SUBSTITUTE absorbs, recoil "
+        .. "recoils and stat stages move. All four commands are there -- "
+        .. "FIGHT, ITEM, SWITCH and RUN -- with items going through the "
+        .. "engine's own item effects. Against an NPC, RUN and a thrown ball "
+        .. "are refused the way any trainer battle refuses them; against "
+        .. "another party, RUN asks your partner first, and a consented flee "
+        .. "ends the battle as the runners' loss.",
       "Hold-B running: on foot, holding B halves the frames per tile, the "
         .. "same speed a bike gives, with a `B TO RUN` option (default on) "
         .. "to turn it off. Other players see it too -- presence carries the "
@@ -50,6 +69,14 @@ return {
         .. "doubled clock on their screens as well as yours.",
     },
     known = {
+      "One player simulates a co-op battle and the other three replay its "
+        .. "events, so a modified host could resolve a turn wrongly -- the "
+        .. "same trust the engine's own link host already takes, one player "
+        .. "wider.",
+      "A ranked 2-on-2 is scored as two matches paired by slot order, so "
+        .. "every player gets one rated result but which opponent they are "
+        .. "paired with is arbitrary. A co-op battle against an NPC scores "
+        .. "nothing -- there is nobody to rate.",
       "No NAT traversal. A host behind a router must forward port 7788 for "
         .. "anyone outside their LAN; a standalone hub (server/hub.js) on a "
         .. "public box is the alternative.",
