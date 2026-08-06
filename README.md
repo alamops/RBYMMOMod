@@ -424,6 +424,11 @@ save slots, because it's kept in its own file rather than the save. It holds
 16 entries; past that, the one you haven't reconnected to in the longest
 time is dropped first, and a favorite is never the one that goes.
 
+<p align="center">
+  <img src="docs/screenshots/servers-list.png" width="300" alt="The SERVERS list: a favorited hub, marked with an arrow in the right-hand column">
+  <img src="docs/screenshots/servers-submenu.png" width="300" alt="The per-server submenu: CONNECT, UNFAVORITE, EDIT HOST, EDIT CODE, RENAME">
+</p>
+
 ### 🎭 BE SOMEBODY ELSE
 Before you host or join, character creation asks who you are: a name of your
 own (your save file keeps its own), and **any walking character in the
