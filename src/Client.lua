@@ -1114,6 +1114,19 @@ handlers[Wire.WELCOME] = function(game, msg)
   end
   transport:markReady()
   pushPresence(true)
+  -- The hub gets the first word: its message of the day goes into the
+  -- scrollback above the connection's own status line, so the first thing
+  -- read on arrival is what the operator wrote rather than a count.
+  --
+  -- Pushed with no `from` on purpose.  A bubble is stored against a player
+  -- id and drawn over that player's head, and the hub stands on no map and
+  -- owns no avatar -- so it gets a line in the log and nothing over the
+  -- world.  A hub with nothing to say, or one too old to have the field at
+  -- all, sends nothing and this does nothing.
+  local motd = Wire.text(msg.motd, Config.MOTD_MAX)
+  if motd and motd ~= "" then
+    ctx.chat:push({ name = "HUB", scope = "global", text = motd })
+  end
   -- Deliberately not a text box. ui:say pushes a modal that sits over the
   -- world until someone presses A, and a routine status line is not worth
   -- interrupting play for -- the first real run left "Connected." covering

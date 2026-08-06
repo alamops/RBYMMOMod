@@ -44,10 +44,17 @@
  *
  * Exit codes: 0 success, 1 runtime error, 2 usage error.
  *
- * No dependencies: node:fs, node:path, node:readline/promises.
+ * Two verbs -- `kick` and `broadcast` -- are instructions rather than
+ * questions, and a file cannot carry an instruction. They dial the running
+ * hub's admin socket (lib/admin.js) instead: one JSON line out, one JSON line
+ * back, connection closed. That is the only thing here that talks to a live
+ * hub; everything else still reads a file and says how old it is.
+ *
+ * No dependencies: node:fs, node:net, node:path, node:readline/promises.
  */
 
 const fs = require('node:fs');
+const net = require('node:net');
 const path = require('node:path');
 const readline = require('node:readline/promises');
 
@@ -69,7 +76,7 @@ const FALLBACK_VERSION = '0.0.0-dev';
 // Flags that are switches, so `--yes start` does not eat `start` as a value.
 const SWITCHES = new Set([
   'yes', 'force', 'reveal', 'clear', 'help', 'version', 'quiet', 'insecureConfig',
-  'json', 'all',
+  'json', 'all', 'once',
 ]);
 
 /*
@@ -99,6 +106,58 @@ const STATUS_FILENAME = 'status.json';
 const RANKING_FILENAME = 'ranking.json';
 const STATUS_HEARTBEAT_MS = 10000;
 const STATUS_STALE_MS = STATUS_HEARTBEAT_MS * 2.5;
+
+/*
+ * The other two things beside the config file, both newer than the pair
+ * above and both read the same way: follow the config path, never guess.
+ *
+ * `history.jsonl` is append-only and deliberately not JSON as a whole -- one
+ * record per line, so a hub that dies mid-write costs the reader one torn
+ * line rather than the whole file. That shape is only worth having if the
+ * reader honours it, which is why readHistoryFile() skips a line it cannot
+ * parse instead of refusing the file the way readJsonFile() rightly does.
+ *
+ * `admin.sock` is the one live channel this process has. It exists only while
+ * a hub is running, so its absence is ordinary news and not an error.
+ */
+const HISTORY_FILENAME = 'history.jsonl';
+const ADMIN_FILENAME = 'admin.sock';
+
+/*
+ * `watch` is `players` on a timer, and the timer is the only number it owns.
+ * Two seconds is under the hub's own heartbeat, so a repaint never has to
+ * wait for news; the floor keeps a host from turning their terminal into a
+ * busy loop over a file, and the ceiling keeps `--interval 86400` from
+ * looking like a hang. Out-of-range values are pulled to the nearest end and
+ * said out loud, the way config.js clamps rather than refuses.
+ */
+const WATCH_INTERVAL_S = 2;
+const WATCH_INTERVAL_MIN_S = 1;
+const WATCH_INTERVAL_MAX_S = 60;
+
+/*
+ * How many settled battles `history` prints when nobody says. A screenful,
+ * because the file holds thousands and the question behind the verb is
+ * almost always "what just happened".
+ */
+const HISTORY_DEFAULT = 20;
+
+/*
+ * How long an admin verb waits for the hub to answer one line. The hub is on
+ * the other end of a Unix socket on this machine and answers from memory, so
+ * this is not a budget an honest exchange comes near -- it is there so a hub
+ * wedged mid-answer costs an operator five seconds and a sentence rather than
+ * a terminal that never comes back.
+ */
+const ADMIN_TIMEOUT_MS = 5000;
+
+/*
+ * The ceiling on a reply this reads before giving up on it. `kick` and
+ * `broadcast` answer in a few dozen bytes; anything past this is not the hub
+ * speaking the protocol, and reading it into memory unbounded would be the
+ * one thing a CLI verb has no excuse for.
+ */
+const ADMIN_MAX_RESPONSE_BYTES = 1024 * 1024;
 
 /*
  * How long `start` will wait for the router to acknowledge the removal of its
@@ -395,7 +454,18 @@ const HELP = {
     'Who is playing',
     '  players [--json]            who is connected and where they are standing,',
     '                              from the snapshot the running hub writes',
+    '  watch [--interval S]        that same view, repainted every few seconds',
     '  ranking [--json] [--all]    the leaderboard, read off the disk',
+    '  history [-n N] [--json]     settled ranked battles, newest first',
+    '',
+    'While the hub is running',
+    '  kick <name> [--reason X]    remove somebody who is connected now',
+    '  broadcast <text>            say one line to everybody in the world',
+    '',
+    '  Both of these are instructions rather than questions, so they need the',
+    '  hub itself: they speak to the admin socket it keeps beside its config',
+    '  file. Run them where the hub runs -- in Docker, that is',
+    `  \`docker compose exec hub ${PROGRAM} ...\`.`,
     '',
     'Who may join',
     '  invite [options]            mint a new join code and print it once',
@@ -494,6 +564,97 @@ const HELP = {
     '  POINTS    the ranked score; blank for a player who is not ranked.',
     '',
     '  --json    print the snapshot\'s player list as JSON, for a script.',
+    '',
+    `  \`${PROGRAM} watch\` prints this same view on a timer.`,
+  ],
+  watch: [
+    `Usage: ${PROGRAM} watch [--interval SECONDS] [--once] [--json]`,
+    '',
+    `Exactly what \`${PROGRAM} players\` prints, drawn again every ${WATCH_INTERVAL_S} seconds`,
+    'until you stop it with Ctrl-C. Same file, same reading, same honesty about',
+    'how old it is -- this is a view of a snapshot, not a line into the hub, and',
+    'a hub that dies mid-watch shows up as an ageing heartbeat rather than as an',
+    'empty world.',
+    '',
+    `  --interval S  seconds between repaints. ${WATCH_INTERVAL_MIN_S} to ${WATCH_INTERVAL_MAX_S}; ` +
+      'anything outside that is',
+    '                pulled to the nearest end and reported.',
+    '  --once        draw one frame and exit. For a script, a screenshot, or a',
+    '                terminal that should not be held open.',
+    '  --json        one JSON document per frame instead of the table.',
+    '',
+    'On a terminal each frame clears the screen first. Piped or redirected, it',
+    'does not: the frames follow one another as plain text, with no escape',
+    'sequences to clean out of the file afterwards.',
+  ],
+  history: [
+    `Usage: ${PROGRAM} history [-n N] [--json]`,
+    '',
+    `Settled ranked battles, newest first, read from ${HISTORY_FILENAME} beside the`,
+    'config file. The hub appends one line to it as each result is scored, so',
+    'this is the record of what the ranking is made of -- who beat whom, when,',
+    'and for how many points.',
+    '',
+    `Last ${HISTORY_DEFAULT} by default.`,
+    '',
+    '  WHEN      how long ago the battle settled.',
+    '  POINTS    what the winner gained and the loser lost, e.g. +16/-16.',
+    '  REMATCH   shown only when a pair had met recently: x3 is the third time',
+    '            these two have settled a battle inside the window the hub',
+    '            counts. The winner gains less each time, so this column is',
+    '            usually the answer to "why was that worth so little".',
+    '',
+    '  -n N      how many to print. The whole file is kept bounded by the hub,',
+    '            so a large N simply prints everything there is.',
+    '  --json    print the records as JSON, newest first, same cut.',
+    '',
+    'Only agreed, ranked results are here. A draw, a disagreement between the',
+    'two clients, or an unranked battle scores nothing and writes nothing.',
+    'A line the reader cannot parse is skipped rather than fatal: the file is',
+    'appended to, so a hub that was killed mid-write leaves a torn last line.',
+  ],
+  kick: [
+    `Usage: ${PROGRAM} kick <name> [--reason TEXT]`,
+    '',
+    'Removes a connected player: the hub shows them why, closes their',
+    'connection and tells everybody else they left. It is not a ban -- they can',
+    'reconnect immediately with the same passcode. To keep somebody out, `ban`',
+    'their address (or `revoke` the code they used) and then kick them.',
+    '',
+    'Names are matched without regard to case, and a name is unique only among',
+    'ranked players -- so this may remove nobody, one player, or several. It',
+    'says which, by name.',
+    '',
+    '  --reason TEXT   the sentence the player is shown. Put it last: every',
+    '                  word after it is part of the reason. Left out, the hub',
+    '                  uses its own wording.',
+    '',
+    `This needs the hub running on this machine: it speaks to ${ADMIN_FILENAME},`,
+    'which the hub keeps beside its config file while it is up. In Docker the',
+    'socket is inside the container:',
+    `    docker compose exec hub ${PROGRAM} kick RED`,
+  ],
+  broadcast: [
+    `Usage: ${PROGRAM} broadcast <text>`,
+    '',
+    'Says one line to everybody in the world, from HUB. It arrives as an',
+    'ordinary global chat line -- no modal, no interruption -- so it is the way',
+    'to announce a restart before pulling the plug on a shared world.',
+    '',
+    'The text is held to exactly the charset and length every other chat line',
+    'is: one line, plain characters, no newlines. A line that is empty once',
+    'cleaned is refused rather than sent as a blank.',
+    '',
+    'It prints how many players it reached, which is the honest measure -- a',
+    'world with nobody in it delivers to nobody.',
+    '',
+    `Needs the hub running on this machine (${ADMIN_FILENAME}, beside the config`,
+    'file). In Docker:',
+    `    docker compose exec hub ${PROGRAM} broadcast back in five minutes`,
+    '',
+    'For a line every player sees on the way in instead, set the MOTD:',
+    `\`${PROGRAM} config set motd <text>\`, which a running hub picks up on a`,
+    'reload rather than a restart.',
   ],
   ranking: [
     `Usage: ${PROGRAM} ranking [--json] [--all]`,
@@ -505,6 +666,10 @@ const HELP = {
     '',
     `Top ${rank.RANK_TOP} by default, best first, ties broken by name -- the same order`,
     'players see in game.',
+    '',
+    '  W and L  settled ranked battles won and lost. Both read 0 for a player',
+    '           carried over from a board saved before the hub counted them;',
+    `           \`${PROGRAM} history\` is where the individual results are.`,
     '',
     '  --all     every ranked player, not just the top ' + `${rank.RANK_TOP}.`,
     '  --json    print the rows as JSON. The stored token digest is not among',
@@ -1422,7 +1587,22 @@ function verbConfig(ctx, rest) {
         ctx.say(`      so the hub will still use ${ctx.env[name]} until it is unset.`);
       }
     }
-    ctx.say('Restart the hub for this to take effect.');
+    /*
+     * "Restart the hub" is the honest answer for a bind-time parameter and
+     * the wrong one for the MOTD, which reload() re-applies along with the
+     * join codes, bans and the allowlist. A host told to restart a shared
+     * world to change a greeting would either do it -- and throw everybody
+     * out over a sentence -- or learn to ignore this line.
+     */
+    if (dotted === 'motd') {
+      ctx.say('A running hub picks this up on a reload; no restart, nobody dropped:');
+      ctx.say(`    kill -HUP $(pgrep -f '${PROGRAM}.js start')   # bare node`);
+      ctx.say('    docker compose kill -s SIGHUP hub              # docker');
+      ctx.say('Players already in the world keep the greeting they were shown; the');
+      ctx.say('new one goes to everybody who joins after the reload.');
+    } else {
+      ctx.say('Restart the hub for this to take effect.');
+    }
     return OK;
   }
 
@@ -2074,8 +2254,26 @@ function noSnapshotLines(file) {
   ];
 }
 
-function verbPlayers(ctx) {
-  const wantsJson = ctx.flags.json === true;
+/*
+ * One frame of the roster, written straight to the streams.
+ *
+ * `players` is one call of this; `watch` is a call every couple of seconds.
+ * It is a function rather than the body of a verb because two commands that
+ * read the same file and disagreed about how to say "the hub appears to be
+ * down" would be two answers to one question -- and the difficult half of
+ * this output is exactly those sentences, not the table.
+ *
+ * Every borrowed value goes through plain() / mapName() on the way out, on
+ * every frame. A repaint is not a reason to start trusting a file, and
+ * `watch` is precisely the command that would otherwise keep re-drawing a
+ * hand-edited one until something in it moved the cursor.
+ *
+ * Returns `{ code, state }`: the exit code the single-shot verb reports, and
+ * what was found -- so a caller that is going to draw again knows whether it
+ * is looking at a hub, at a corpse, or at a file it cannot read.
+ */
+function renderPlayersFrame(ctx, options = {}) {
+  const wantsJson = options.json === true;
   const file = dataFile(ctx, STATUS_FILENAME);
   const read = readJsonFile(file);
 
@@ -2085,7 +2283,7 @@ function verbPlayers(ctx) {
     // a script can parse.
     if (wantsJson) ctx.say('[]');
     for (const line of noSnapshotLines(file)) ctx.warn(line);
-    return OK;
+    return { code: OK, state: 'missing' };
   }
   if (read.corrupt) {
     // Node quotes the offending bytes back at you in that message, and those
@@ -2097,22 +2295,22 @@ function verbPlayers(ctx) {
     ctx.warn('one should not be possible -- this is a file that has been edited, or');
     ctx.warn('a disk that lost it. Deleting it costs nothing: the hub writes a fresh');
     ctx.warn('one on its next heartbeat.');
-    return ERROR;
+    return { code: ERROR, state: 'corrupt' };
   }
   if (read.error) {
     ctx.warn(`Could not read ${file}: ${read.error}`);
-    return ERROR;
+    return { code: ERROR, state: 'unreadable' };
   }
 
   const snapshot = read.data && typeof read.data === 'object' && !Array.isArray(read.data)
     ? read.data : null;
   if (!snapshot) {
     ctx.warn(`${file} does not hold a status snapshot (expected a JSON object).`);
-    return ERROR;
+    return { code: ERROR, state: 'not-a-snapshot' };
   }
 
   const players = Array.isArray(snapshot.players) ? snapshot.players : [];
-  const now = Date.now();
+  const now = options.now === undefined ? Date.now() : options.now;
   const age = snapshotAge(snapshot, now);
 
   const version = finite(snapshot.version);
@@ -2156,7 +2354,7 @@ function verbPlayers(ctx) {
       ctx.warn('note: the snapshot does not say when it was written, so its age is unknown.');
     }
     if (newer) ctx.warn(`note: snapshot version ${version}; this command reads version 1.`);
-    return OK;
+    return { code: OK, state: age.state };
   }
 
   if (newer) {
@@ -2174,7 +2372,7 @@ function verbPlayers(ctx) {
     ctx.say(`The hub stopped ${humanAge(age.age)} ago${where.length ? ` (${where[0]})` : ''}, ` +
       'so nobody is online.');
     ctx.say(`It said so itself, on the way out. \`${PROGRAM} start\` runs it again.`);
-    return OK;
+    return { code: OK, state: age.state };
   }
   if (age.state === 'stale') {
     ctx.say(`The hub appears to be down: the last heartbeat was ${humanAge(age.age)} ago,`);
@@ -2184,7 +2382,7 @@ function verbPlayers(ctx) {
     ctx.say('');
     if (!players.length) {
       ctx.say('Nobody was online in the last thing it wrote.');
-      return OK;
+      return { code: OK, state: age.state };
     }
     ctx.say('The last thing it wrote, which is not who is online now:');
     ctx.say('');
@@ -2194,14 +2392,14 @@ function verbPlayers(ctx) {
       // No table to take at face value, and no legend worth printing under an
       // empty one.
       ctx.say('cannot be told from here. Nobody was online in it.');
-      return OK;
+      return { code: OK, state: age.state };
     }
     ctx.say('cannot be told from here. Taking it at face value:');
     ctx.say('');
   } else if (!players.length) {
     ctx.say(`Nobody is online${where.length ? ` on ${where[0]}` : ''} ` +
       `(snapshot ${humanAge(age.age)} old).`);
-    return OK;
+    return { code: OK, state: age.state };
   } else {
     const seats = maxPlayers !== null ? ` of ${maxPlayers}` : '';
     ctx.say(`${players.length} player(s) online${seats}` +
@@ -2228,6 +2426,135 @@ function verbPlayers(ctx) {
   ctx.say('POINTS is the ranked score, blank for a player who is not ranked --');
   ctx.say(`\`${PROGRAM} ranking\` prints the whole board, including the players`);
   ctx.say('who are not online now.');
+  return { code: OK, state: age.state };
+}
+
+function verbPlayers(ctx) {
+  return renderPlayersFrame(ctx, { json: ctx.flags.json === true }).code;
+}
+
+// -------------------------------------------------------------------- watch
+
+/*
+ * Clear and home, on a terminal and nowhere else.
+ *
+ * `watch` piped into a file, or into a test's sink, must produce text a human
+ * can read afterwards -- and an escape sequence in a log is at best noise and
+ * at worst a cursor movement in whatever eventually cats it. isTTY is the
+ * only honest signal for "somebody is looking at this right now", so it is
+ * the whole gate. Written straight at the stream rather than through say(),
+ * which would append a newline the sequence does not want.
+ */
+function clearScreen(ctx) {
+  if (!ctx.stdout || !ctx.stdout.isTTY) return false;
+  try {
+    ctx.stdout.write('\u001b[H\u001b[2J');
+  } catch (err) {
+    /* a stream that will not take an escape sequence will not take a frame
+     * either; the write below reports that in its own way */
+    return false;
+  }
+  return true;
+}
+
+/** HH:MM:SS, local, so "last read" means something at a glance. */
+function clockTime(date) {
+  const pair = (value) => String(value).padStart(2, '0');
+  return `${pair(date.getHours())}:${pair(date.getMinutes())}:${pair(date.getSeconds())}`;
+}
+
+/**
+ * `--interval`, clamped rather than refused -- the same bargain config.js
+ * makes with every out-of-range number: take what was meant, say what it
+ * became. A value that is not a number at all is a different thing and is a
+ * usage error, because there is nothing to take.
+ */
+function watchInterval(raw) {
+  if (raw === undefined) return { seconds: WATCH_INTERVAL_S };
+  if (raw === true || raw === false || String(raw).trim() === '') {
+    return { error: '--interval needs a number of seconds after it, e.g. `--interval 5`.' };
+  }
+  const asked = Number(String(raw).trim());
+  if (!Number.isFinite(asked)) {
+    return { error: `--interval "${plain(raw, 16)}" is not a number of seconds.` };
+  }
+  const rounded = Math.round(asked);
+  const seconds = Math.min(WATCH_INTERVAL_MAX_S, Math.max(WATCH_INTERVAL_MIN_S, rounded));
+  return { seconds, adjusted: seconds !== rounded ? rounded : null };
+}
+
+async function verbWatch(ctx) {
+  const interval = watchInterval(ctx.flags.interval);
+  if (interval.error) {
+    ctx.warn(interval.error);
+    return USAGE;
+  }
+  if (interval.adjusted !== null && interval.adjusted !== undefined) {
+    ctx.warn(`adjusted: --interval ${interval.adjusted} is outside ` +
+      `${WATCH_INTERVAL_MIN_S}-${WATCH_INTERVAL_MAX_S}s; using ${interval.seconds}s.`);
+  }
+
+  const options = { json: ctx.flags.json === true };
+
+  /*
+   * One frame and out. This is the path a script takes, the path a suite can
+   * assert on, and the only path that has an exit code worth reading -- so it
+   * reports the frame's own, exactly as `players` would.
+   */
+  if (ctx.flags.once === true) {
+    clearScreen(ctx);
+    return renderPlayersFrame(ctx, options).code;
+  }
+
+  /*
+   * Otherwise this runs until it is told to stop, and the only thing that
+   * tells it is a signal. Handlers are attached for the duration and removed
+   * in a finally -- run() is called in-process by the test suite and by
+   * anything that embeds this CLI, and a verb that left a listener on
+   * `process` behind would leak one per invocation and, worse, keep
+   * answering Ctrl-C after it had returned.
+   *
+   * Stopping is a success: the host asked for a view and then closed it.
+   */
+  let stopped = false;
+  let wake = null;
+  const onSignal = () => {
+    stopped = true;
+    if (wake) wake();
+  };
+  const signals = ['SIGINT', 'SIGTERM'];
+  const canSignal = typeof process !== 'undefined' && typeof process.on === 'function';
+  if (canSignal) for (const name of signals) process.on(name, onSignal);
+
+  try {
+    let first = true;
+    while (!stopped) {
+      // Without a terminal to clear, frames simply follow one another; a
+      // blank line between them is the whole separator, and it is one a
+      // reader (or a grep) can live with.
+      if (!clearScreen(ctx) && !first) ctx.say('');
+      first = false;
+
+      renderPlayersFrame(ctx, options);
+      if (!options.json) {
+        ctx.say('');
+        ctx.say(`Read at ${clockTime(new Date())}, again in ${interval.seconds}s. ` +
+          'Ctrl-C stops.');
+      }
+
+      if (stopped) break;
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { wake = null; resolve(); }, interval.seconds * 1000);
+        wake = () => { clearTimeout(timer); wake = null; resolve(); };
+      });
+    }
+  } finally {
+    if (canSignal) for (const name of signals) process.removeListener(name, onSignal);
+  }
+
+  ctx.say('');
+  ctx.say('Stopped watching. Nothing here ever spoke to the hub -- it only read');
+  ctx.say('the file, so the world carries on exactly as it was.');
   return OK;
 }
 
@@ -2311,8 +2638,16 @@ function verbRanking(ctx) {
     return OK;
   }
 
-  printTable(ctx, ['PLACE', 'NAME', 'POINTS'], shown.map((row, index) => [
+  /*
+   * W and L are a projection of two counters the board has always kept, not
+   * new state: `played` and `won` are already in the file and already in
+   * --json, and L is the subtraction nobody should have to do in their head.
+   * Floored at zero because the arithmetic is over two numbers out of a file
+   * a host can edit, and "-3 losses" would be a worse answer than 0.
+   */
+  printTable(ctx, ['PLACE', 'NAME', 'POINTS', 'W', 'L'], shown.map((row, index) => [
     String(index + 1), row.name, String(row.points),
+    String(row.won), String(Math.max(0, row.played - row.won)),
   ]));
 
   ctx.say('');
@@ -2321,8 +2656,468 @@ function verbRanking(ctx) {
   } else {
     ctx.say(`${ranked.length} ranked player(s) -- the whole board.`);
   }
+  ctx.say('W and L are settled ranked battles won and lost; both read 0 for a');
+  ctx.say(`player carried over from an older board. \`${PROGRAM} history\` has the`);
+  ctx.say('results themselves.');
   ctx.say('Read from the file the hub keeps, which it saves within a second of');
   ctx.say('each result. A battle settled in the last moment may not be in it yet.');
+  return OK;
+}
+
+// ------------------------------------------------------------------ history
+
+/*
+ * The one file here that is not a document.
+ *
+ * `history.jsonl` is appended to, one record per line, while a hub runs --
+ * which is exactly why it is not JSON as a whole: a hub killed mid-write
+ * costs this reader the last line and nothing else, where a single JSON
+ * array would be unreadable from the first byte. That bargain is only worth
+ * anything if the reader keeps its half, so an unparsable line is *skipped*,
+ * counted, and mentioned once -- never fatal. readJsonFile()'s refusal is
+ * right for a file written whole and renamed into place; it would be wrong
+ * here.
+ */
+function readHistoryFile(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { missing: true };
+    return { error: err && err.message ? err.message : String(err) };
+  }
+
+  const records = [];
+  let skipped = 0;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch (err) {
+      skipped += 1;
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      skipped += 1;
+      continue;
+    }
+    records.push(parsed);
+  }
+  return { records, skipped };
+}
+
+/*
+ * A stored record, projected -- the same discipline `players --json` keeps.
+ * What comes out is exactly the fields the contract names (plan §3), read
+ * through plain() and finite(), so a field a newer hub added or a hand-edit
+ * slipped in is not quietly republished as part of this output.
+ */
+function historyRecord(raw) {
+  const side = (value, gainKey) => {
+    const entry = value && typeof value === 'object' ? value : {};
+    const points = finite(entry.points);
+    const moved = finite(entry[gainKey]);
+    return {
+      name: plain(entry.name) || '-',
+      points: points === null ? 0 : points,
+      [gainKey]: moved === null ? 0 : moved,
+    };
+  };
+  return {
+    at: finite(raw.at),
+    startedAt: finite(raw.startedAt),
+    repeats: Math.max(0, Math.floor(finite(raw.repeats) || 0)),
+    winner: side(raw.winner, 'gained'),
+    loser: side(raw.loser, 'lost'),
+  };
+}
+
+/**
+ * `-n N`, which the parser leaves as positionals: it knows `--flag` and
+ * nothing shorter, and inventing short options for one verb would be a
+ * second parser to keep in step. `--n N` is accepted too, because somebody
+ * will type it.
+ */
+function historyCount(ctx, rest) {
+  let raw;
+  let given = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    const token = String(rest[i]);
+    if (token === '-n') {
+      raw = rest[i + 1];
+      given = true;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('-n')) {
+      raw = token.slice(2).replace(/^=/, '');
+      given = true;
+    }
+  }
+  if (ctx.flags.n !== undefined) {
+    raw = ctx.flags.n;
+    given = true;
+  }
+
+  if (!given) return { count: HISTORY_DEFAULT };
+  if (raw === undefined || raw === true || raw === false || String(raw).trim() === '') {
+    return { error: '-n needs a number after it, e.g. `-n 50`.' };
+  }
+  const wanted = Number(String(raw).trim());
+  if (!Number.isFinite(wanted) || Math.floor(wanted) !== wanted || wanted < 1) {
+    return { error: `-n "${plain(raw, 16)}" is not a whole number of results (1 or more).` };
+  }
+  return { count: wanted };
+}
+
+function noHistoryLines(file) {
+  return [
+    `No match history at ${file}.`,
+    '',
+    '  The hub appends one line to that file as each ranked battle is scored,',
+    '  and creates it on the first one -- so there being none means one of',
+    '  three things: no ranked battle has been settled on this hub yet, this',
+    '  hub predates the file, or it keeps its files somewhere else.',
+    '',
+    '  It sits beside the config file, so `--config <path>` moves both. If the',
+    '  hub runs in Docker, its files are inside the container:',
+    `      docker compose exec hub ${PROGRAM} history`,
+  ];
+}
+
+function verbHistory(ctx, rest) {
+  const wantsJson = ctx.flags.json === true;
+  const wanted = historyCount(ctx, rest);
+  if (wanted.error) {
+    ctx.warn(wanted.error);
+    return USAGE;
+  }
+
+  const file = dataFile(ctx, HISTORY_FILENAME);
+  const read = readHistoryFile(file);
+
+  if (read.missing) {
+    // Nothing to show is not a failure, and --json still gets a document.
+    if (wantsJson) ctx.say('[]');
+    for (const line of noHistoryLines(file)) ctx.warn(line);
+    return OK;
+  }
+  if (read.error) {
+    ctx.warn(`Could not read ${file}: ${read.error}`);
+    return ERROR;
+  }
+
+  /*
+   * Newest first, by file order reversed rather than by sorting on `at`.
+   * The hub appends in the order it settles battles, which is the truth; a
+   * sort would let one record with a hand-edited timestamp reorder the lot.
+   */
+  const records = read.records.map(historyRecord).reverse();
+  const shown = records.slice(0, wanted.count);
+
+  // Said once, on stderr, so it cannot be mistaken for a result -- and said
+  // at all, because a reader that silently dropped lines would be a reader
+  // nobody could trust about the ones it kept.
+  if (read.skipped) {
+    ctx.warn(`note: ${read.skipped} line(s) in ${HISTORY_FILENAME} could not be read, and were`);
+    ctx.warn('      skipped. One torn last line is normal after a hub was killed');
+    ctx.warn('      mid-write; more than that means the file has been edited.');
+  }
+
+  if (!records.length) {
+    if (wantsJson) ctx.say('[]');
+    else {
+      ctx.say(`${file} is there, but holds no results yet.`);
+      ctx.say('The hub writes a line only when a ranked battle settles and both');
+      ctx.say('clients agree on who won. A draw, a disagreement, or an unranked');
+      ctx.say('battle scores nothing and is not history.');
+    }
+    return OK;
+  }
+
+  if (wantsJson) {
+    ctx.say(JSON.stringify(shown, null, 2));
+    return OK;
+  }
+
+  const now = Date.now();
+  const rematches = shown.some((record) => record.repeats > 0);
+  const headers = ['WHEN', 'WINNER', 'LOSER', 'POINTS'];
+  if (rematches) headers.push('REMATCH');
+
+  const rows = shown.map((record) => {
+    const row = [
+      record.at === null ? '-' : humanAge(Math.max(0, now - record.at)),
+      record.winner.name,
+      record.loser.name,
+      `+${record.winner.gained}/-${record.loser.lost}`,
+    ];
+    // repeats counts the pair's prior meetings inside the hub's discount
+    // window, so the second battle between them is x2 -- the ordinal a
+    // player would use out loud, and the reason the gain was halved.
+    if (rematches) row.push(record.repeats > 0 ? `x${record.repeats + 1}` : '');
+    return row;
+  });
+
+  ctx.say(shown.length < records.length
+    ? `The last ${shown.length} of ${records.length} settled ranked battle(s), newest first.`
+    : `${records.length} settled ranked battle(s), newest first -- all of them.`);
+  ctx.say('');
+  printTable(ctx, headers, rows);
+
+  ctx.say('');
+  ctx.say('WHEN is how long ago the battle settled. POINTS is what the winner');
+  ctx.say(`gained and the loser lost; \`${PROGRAM} ranking\` has the totals.`);
+  if (rematches) {
+    ctx.say('REMATCH marks a pair who had met recently -- x2 is the second of');
+    ctx.say('those, and the winner gains less for each one after the first.');
+  }
+  ctx.say('Only agreed, ranked results are here: a draw, a disagreement between');
+  ctx.say('the two clients, or an unranked battle scores nothing and writes');
+  ctx.say('nothing.');
+  return OK;
+}
+
+// ---------------------------------------------- speaking to a running hub
+
+/*
+ * The other half of the CLI's relationship with the hub.
+ *
+ * Everything above reads a file and is honest about its age, which is the
+ * right shape for a question and useless for an instruction: no file can
+ * remove a player. `kick` and `broadcast` dial the admin socket lib/admin.js
+ * binds beside the config file -- one JSON line out, one JSON line back,
+ * connection closed. No auth travels here: the socket lives in the data
+ * directory, and anybody who can open it can already read every join code in
+ * config.json (plan §8.4).
+ *
+ * The absence of that socket is the interesting case, and it is not an
+ * error. A hub that is not running has none; so does a hub old enough to
+ * predate the channel. Both are answered with a sentence and exit 0, the
+ * same way `players` answers a missing snapshot -- an operator who typed a
+ * command against a hub that is not there has made no mistake worth a
+ * failing exit code. A hub that *answers* and refuses is different: that is
+ * a real refusal, and it exits 1.
+ */
+function askAdmin(ctx, request) {
+  const file = dataFile(ctx, ADMIN_FILENAME);
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = '';
+    let socket;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        if (socket) socket.destroy();
+      } catch (err) {
+        /* already gone */
+      }
+      resolve(Object.assign({ file }, result));
+    };
+
+    const timer = setTimeout(() => finish({
+      error: `the hub did not answer within ${humanMs(ADMIN_TIMEOUT_MS)}`,
+    }), ADMIN_TIMEOUT_MS);
+    // A verb waiting on an answer is the only thing this process is doing,
+    // but the timer itself must never be the reason it stays up.
+    if (timer && typeof timer.unref === 'function') timer.unref();
+
+    try {
+      socket = net.createConnection({ path: file });
+    } catch (err) {
+      return finish({ failure: err });
+    }
+
+    socket.setEncoding('utf8');
+    socket.on('connect', () => {
+      try {
+        socket.write(`${JSON.stringify(request)}\n`);
+      } catch (err) {
+        finish({ error: `the instruction could not be sent (${err.message})` });
+      }
+    });
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf('\n');
+      if (newline >= 0) return finish({ line: buffer.slice(0, newline) });
+      if (buffer.length > ADMIN_MAX_RESPONSE_BYTES) {
+        finish({ error: 'the answer was longer than one line and was abandoned' });
+      }
+    });
+    // A hub that closes without a newline still meant its bytes as the
+    // answer; admin.js ends the socket right behind the line, so this is the
+    // ordinary way a short reply arrives.
+    socket.on('end', () => {
+      if (buffer.trim()) return finish({ line: buffer });
+      finish({ error: 'the hub closed the connection without answering' });
+    });
+    socket.on('error', (err) => finish({ failure: err }));
+  });
+}
+
+/*
+ * Not-there, said in the words of whichever not-there it is. ENOENT is a hub
+ * that is not running (or one too old to open the channel); ECONNREFUSED is
+ * the file left behind by a hub that was killed, which is a different
+ * sentence and a different fix. Both exit 0.
+ */
+function reportNoAdminSocket(ctx, file, failure, example) {
+  const code = failure && failure.code;
+  if (code === 'ECONNREFUSED') {
+    ctx.warn(`Nothing is listening on ${file}.`);
+    ctx.warn('');
+    ctx.warn('  The socket file is there but the hub behind it is gone -- it was');
+    ctx.warn('  killed rather than stopped, and Unix sockets outlive the process');
+    ctx.warn(`  that made them. Starting the hub again clears it: \`${PROGRAM} start\``);
+    ctx.warn('  removes a leftover socket and binds a fresh one.');
+    return OK;
+  }
+  if (code === 'ENOTSOCK') {
+    // Something that is not a socket is sitting on the path. admin.js will
+    // not delete a file it did not create either, and neither will this --
+    // it is somebody's data until they say otherwise.
+    ctx.warn(`${file} is not a socket.`);
+    ctx.warn('');
+    ctx.warn('  Something else is at the path the hub uses for its admin channel,');
+    ctx.warn('  and the hub will refuse to bind over it for the same reason this');
+    ctx.warn('  will not delete it: it is not a file this software wrote. Move it');
+    ctx.warn('  out of the way yourself, then start the hub again.');
+    return ERROR;
+  }
+  if (code && code !== 'ENOENT') {
+    // EACCES and friends: the socket is there and this process may not use
+    // it. That is a real failure with a real fix, not an absent hub.
+    ctx.warn(`Could not reach the hub at ${file}: ${plain(failure.message, 200)}`);
+    ctx.warn('The socket belongs to the user the hub runs as, and the data');
+    ctx.warn('directory is kept private on purpose. Run this as that user -- in');
+    ctx.warn(`Docker, \`docker compose exec hub ${PROGRAM} ...\` already does.`);
+    return ERROR;
+  }
+
+  ctx.warn(`No admin socket at ${file}.`);
+  ctx.warn('');
+  ctx.warn('  The hub opens that socket while it runs and removes it on the way');
+  ctx.warn('  out, so there being none means one of two things: no hub is running');
+  ctx.warn('  against this config file, or the hub that is running predates the');
+  ctx.warn('  admin channel and has to be restarted before it will open one.');
+  ctx.warn('');
+  ctx.warn('  It sits beside the config file, so `--config <path>` moves both. If');
+  ctx.warn('  the hub runs in Docker, the socket is inside the container:');
+  ctx.warn(`      docker compose exec hub ${PROGRAM} ${example}`);
+  return OK;
+}
+
+/**
+ * One exchange, with every way it can go wrong turned into an exit code and
+ * a sentence. Returns `{ code }` when the caller has nothing left to do, or
+ * `{ response }` when the hub answered `ok: true`.
+ */
+async function adminExchange(ctx, request, example) {
+  const answer = await askAdmin(ctx, request);
+
+  if (answer.failure) {
+    return { code: reportNoAdminSocket(ctx, answer.file, answer.failure, example) };
+  }
+  if (answer.error) {
+    ctx.warn(`Could not complete that instruction: ${plain(answer.error, 200)}.`);
+    ctx.warn('The socket accepted the connection, so a hub is there -- its own log');
+    ctx.warn('is where the reason will be.');
+    return { code: ERROR };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(answer.line);
+  } catch (err) {
+    // Borrowed bytes on their way to a terminal, so through plain() like
+    // every other line that came from outside this process.
+    ctx.warn(`The hub answered something that is not JSON: ${plain(answer.line, 120)}`);
+    return { code: ERROR };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    ctx.warn('The hub answered JSON that is not a response object.');
+    return { code: ERROR };
+  }
+  if (parsed.ok !== true) {
+    ctx.warn(`The hub refused: ${plain(parsed.error, 200) || 'no reason given'}`);
+    return { code: ERROR };
+  }
+  return { response: parsed };
+}
+
+async function verbKick(ctx, rest) {
+  const name = rest.length ? String(rest[0]).trim() : '';
+  if (!name) {
+    ctx.warn(`Usage: ${PROGRAM} kick <name> [--reason TEXT]`);
+    ctx.warn(`\`${PROGRAM} players\` lists who is connected.`);
+    return USAGE;
+  }
+
+  /*
+   * The reason is prose, and prose arrives as several argv tokens. Joining
+   * with spaces is the idiom `config set` already uses for a multi-word
+   * value; everything after the name is part of it, whether it followed
+   * --reason or not, so `kick RED --reason being rude` says what it looks
+   * like it says.
+   */
+  const pieces = [];
+  if (typeof ctx.flags.reason === 'string') pieces.push(ctx.flags.reason);
+  for (const extra of rest.slice(1)) pieces.push(String(extra));
+  const reason = pieces.join(' ').trim();
+
+  if (ctx.flags.reason === true) {
+    ctx.warn('--reason needs the sentence to show the player after it.');
+    return USAGE;
+  }
+
+  const request = { cmd: 'kick', name };
+  if (reason) request.reason = reason;
+
+  const result = await adminExchange(ctx, request, `kick ${name}`);
+  if (result.code !== undefined) return result.code;
+
+  const names = Array.isArray(result.response.names) ? result.response.names : [];
+  const kicked = Number.isFinite(result.response.kicked)
+    ? result.response.kicked : names.length;
+
+  if (!kicked) {
+    ctx.say('Nobody by that name is connected. Nothing was done.');
+    ctx.say(`\`${PROGRAM} players\` lists who is, spelled the way the hub has them.`);
+    return OK;
+  }
+
+  const listed = names.map((entry) => plain(entry) || '-').join(', ');
+  ctx.say(`Kicked ${kicked} player(s)${listed ? `: ${listed}` : ''}.`);
+  if (reason) ctx.say(`They were shown: ${plain(reason, 120)}`);
+  ctx.say('A kick is not a ban: the same passcode gets them back in. `ban <ip>`');
+  ctx.say('or `revoke <id>`, then a reload, is what keeps somebody out.');
+  return OK;
+}
+
+async function verbBroadcast(ctx, rest) {
+  // Same joining rule as `config set` and as --reason above: the message is
+  // prose and the shell has already taken it apart.
+  const text = rest.map((piece) => String(piece)).join(' ').trim();
+  if (!text) {
+    ctx.warn(`Usage: ${PROGRAM} broadcast <text>`);
+    ctx.warn('Everything after the verb is the message; quotes are optional.');
+    return USAGE;
+  }
+
+  const result = await adminExchange(ctx, { cmd: 'broadcast', text }, 'broadcast hello');
+  if (result.code !== undefined) return result.code;
+
+  const delivered = Number.isFinite(result.response.delivered) ? result.response.delivered : 0;
+  ctx.say(`Delivered to ${delivered} player(s).`);
+  if (!delivered) {
+    ctx.say('Either nobody is in the world right now, or nothing survived the');
+    ctx.say('cleaning every chat line goes through -- letters, digits and simple');
+    ctx.say('punctuation, one line.');
+  }
   return OK;
 }
 
@@ -2460,7 +3255,11 @@ async function run(argv, io) {
       case 'start': return await verbStart(ctx);
       case 'status': return verbStatus(ctx);
       case 'players': return verbPlayers(ctx);
+      case 'watch': return await verbWatch(ctx);
       case 'ranking': return verbRanking(ctx);
+      case 'history': return verbHistory(ctx, rest);
+      case 'kick': return await verbKick(ctx, rest);
+      case 'broadcast': return await verbBroadcast(ctx, rest);
       case 'config': return verbConfig(ctx, rest);
       case 'invite': return verbInvite(ctx, rest);
       case 'revoke': return verbRevoke(ctx, rest);

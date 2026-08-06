@@ -173,6 +173,15 @@ Unread messages flag the menu with `CHAT*`. And because the vanilla grid has
 **no digits at all**, this mod adds a number page to its own screens —
 **SELECT** flips `ABC` ⇄ `123`.
 
+**A fifth voice you can't type as: `HUB`.** A dedicated hub can carry a
+message of the day, and it lands as a `HUB` line at the top of your chat log
+the moment you connect — no box to dismiss, nothing to press. The host can say
+something mid-evening the same way (`rby-mmo-hub broadcast "back in 5"`) and
+it arrives as another `HUB` line. Which is why nobody is allowed to *be*
+`HUB`: a hub's line carries no sender, so the name is the only thing telling
+you the hub said it, and connecting under it is refused with a sentence asking
+you to pick another.
+
 ### 🔁 TRADE — ANYWHERE
 No Cable Club. No Pokémon Center. Walk up, press **A**, pick `TRADE`. It runs
 the engine's *own* `TradeSession`, untouched — so your Kadabra still evolves,
@@ -456,7 +465,11 @@ Pick by how long you want the world to outlive the session.
 | Passcode | minted on the HOST screen | minted by `init`, or you pick it |
 | Passcode entropy | the game's own pool, **not** a CSPRNG | `crypto.randomBytes` |
 | Bans, allowlist, per-address limits | — | yes |
-| Who's online, from a terminal | — | `rby-mmo-hub players` |
+| Who's online, from a terminal | — | `rby-mmo-hub players`, or `watch` for a live one |
+| Every ranked battle, on the record | — | `history.jsonl`, read with `rby-mmo-hub history` |
+| Throwing somebody out mid-game | — | `rby-mmo-hub kick <name> --reason "…"` |
+| Saying something to everyone | — | a message of the day, and `rby-mmo-hub broadcast` |
+| A web page to watch it from | — | optional, off by default, loopback only |
 | Good for | the same Wi-Fi, an evening | friends across the internet, 24/7 |
 
 The two bold rows are the whole difference. Hosting from the game puts the
@@ -587,8 +600,13 @@ Codes are masked. --reveal prints them in full.
 | change any setting | `rby-mmo-hub config set maxPlayers 8` |
 | see where a value came from | `rby-mmo-hub status` |
 | see who's online, and where | `rby-mmo-hub players` |
-| read the leaderboard | `rby-mmo-hub ranking` |
-| throw somebody out | `rby-mmo-hub ban 203.0.113.7` |
+| watch that, live | `rby-mmo-hub watch` (`--interval 5`, `--once`) |
+| read the leaderboard | `rby-mmo-hub ranking` — now with W/L |
+| see what's actually been played | `rby-mmo-hub history -n 20` |
+| greet everyone who connects | `rby-mmo-hub config set motd "…"`, then `SIGHUP` |
+| say something to everyone, now | `rby-mmo-hub broadcast "back in 5"` |
+| remove somebody who is on right now | `rby-mmo-hub kick BETA --reason "…"` |
+| keep them from coming back | `rby-mmo-hub ban 203.0.113.7` |
 | check it's actually reachable | `rby-mmo-hub doctor` |
 
 `doctor` is the one to run before you tell anyone the address — it checks the
@@ -624,12 +642,39 @@ HOSTY  PALLET TOWN              1012
 ALPHA  VIRIDIAN FOREST  PARTY   1004
 ```
 
-`rby-mmo-hub ranking` prints the season the same way. Both read files the hub
-keeps beside its config, so when the hub isn't running they say so plainly
-rather than reporting a room that emptied hours ago.
+`rby-mmo-hub ranking` prints the season the same way — with **W and L**
+columns — and `rby-mmo-hub history` prints the battles behind it, newest
+first, out of a `history.jsonl` ledger the hub appends to as each ranked match
+settles and rotates at half a megabyte so it can never run away with the disk.
+All of those read files the hub keeps beside its config, so when the hub isn't
+running they say so plainly rather than reporting a room that emptied hours
+ago. **`rby-mmo-hub watch`** is `players` on a loop for the evenings you'd
+rather leave it up.
 
-Credentials, bans and the allowlist reload on `SIGHUP`, so revoking a leaked
-passcode doesn't interrupt the people already playing. The full config table —
+Two verbs are the other kind — they talk to the hub while it's up, over a
+socket in the same directory, so filesystem permissions are the whole
+authorisation:
+
+```console
+$ rby-mmo-hub broadcast Restarting in 5 for a config change.
+Delivered to 3 player(s).
+
+$ rby-mmo-hub kick BETA --reason Take the evening off
+Kicked 1 player(s): BETA.
+They were shown: Take the evening off
+```
+
+The kicked player sees the reason on their own screen — and a kick is not a
+ban, so `ban` or `revoke` first if you want it to stick. And there's an
+**optional web page** — players, ranking, and how hard the door is being
+knocked on — which is **off by default and bound to loopback**, logs in with
+an ordinary join code, and is plain HTTP with no TLS anywhere, so it wants an
+SSH tunnel or an overlay network rather than a published port.
+[server/README.md](server/README.md#dashboard) says all of that at length.
+
+Credentials, bans, the allowlist and the message of the day reload on
+`SIGHUP`, so revoking a leaked passcode doesn't interrupt the people already
+playing. The full config table —
 every key, default and bound, including the seven that tune the wrong-passcode
 throttle — is in [server/README.md](server/README.md).
 
@@ -832,7 +877,7 @@ end
 
 ## 🚧 Known jank — read this bit
 
-It's `0.7.0` and it ships flagged `experimental` on purpose. The full list
+It's `0.8.0` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 
