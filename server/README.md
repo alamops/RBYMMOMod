@@ -163,8 +163,8 @@ container, where it is on `PATH`.
 | `config list` | every setting, its current value, and its clamp range | — |
 | `config get <path>` | one setting, e.g. `limits.maxPending` | — |
 | `config set <path> <value>` | change one setting: clamped, reported, then saved | — |
-| `invite` † | mint a join code and print it once | `--label TEXT`, `--expires 30m\|24h\|7d`, `--uses N`, `--code CODE` (use this passcode rather than a generated one) |
-| `invite list` | every code: id, label, created, expires, uses, status. Masked by default. | `--reveal` (print them in full) |
+| `invite` † | mint a join code and print it once | `--label TEXT`, `--expires 30m\|24h\|7d`, `--uses N`, `--code CODE` (use this passcode rather than a generated one), `--admin` (the code also opens the [web dashboard](#dashboard), which accepts nothing else) |
+| `invite list` | every code: id, label, created, expires, uses, status, and **`KIND`** — `ADMIN` or `player`. Masked by default; `KIND` is shown either way. | `--reveal` (print the codes in full) |
 | `revoke <id>` † | revoke one code. Ids come from `invite list`; a unique prefix is enough. | — |
 | `ban <ip>` † | refuse an address. Normalised first, so every spelling of one address is one ban — see [Addresses](#addresses-what-one-address-means). | `--reason TEXT` (printed, **not** stored — the ban list holds addresses only) |
 | `unban <ip>` † | stop refusing an address | — |
@@ -525,12 +525,95 @@ secret. Telling two credentials apart is the `id` column's job:
 
 ```
 $ rby-mmo-hub invite list
-ID        LABEL              CREATED           EXPIRES           USES  STATUS  CODE
-primary   Primary join code  2026-08-03 16:47  never             0     active  ******
-a5fa1246  For Ash            2026-08-03 16:47  2026-08-04 16:47  0/1   active  ******
+ID        LABEL              CREATED           EXPIRES           USES  STATUS  KIND    CODE
+primary   Primary join code  2026-08-03 16:47  never             0     active  player  ******
+a5fa1246  For Ash            2026-08-03 16:47  2026-08-04 16:47  0/1   active  player  ******
+
+KIND: none of these is an admin code. `rby-mmo-hub invite --admin` mints
+one; the web dashboard admits nothing else.
 
 Codes are masked. --reveal prints them in full.
 ```
+
+### Admin codes
+
+`invite --admin` mints a join code that also opens the [dashboard](#dashboard).
+It is an ordinary join code in every respect that matters to the game — six
+characters from the same alphabet, typed on the same screen, answering the same
+challenge — and it carries one extra flag saying what else it is allowed to
+open:
+
+```console
+$ rby-mmo-hub invite --admin --label Me
+New admin join code (id f0f2711f, Me)
+
+      +------------+
+      |   74XE2H   |
+      +------------+
+
+  That is an admin code. It joins the world exactly like any other
+  code -- typed once, in game, on the screen where this hub's address
+  goes -- and it opens two more things:
+
+    - the web dashboard, if this hub runs one. It is the only kind of
+      code that page accepts, and it shows every player's name,
+      location and score, plus how hard the door is being knocked on.
+    - whatever operator features arrive in game later. Nothing uses
+      it there yet; the hub already marks the connection, so when
+      those exist this code is what they will look for.
+
+  Give it only to someone you would hand the hub itself to.
+
+  It has no expiry. An admin code is worth more to a thief than a
+  player's one is, so if this is for one evening or one person,
+  mint it with `--expires 24h` and let it stop working on its own.
+
+  This is the only time it is printed in full. To see it again:
+      rby-mmo-hub invite list --reveal
+
+Restart the hub for this code to be accepted.
+```
+
+The paragraph about expiry is printed **only when there is no `--expires`**,
+because an end date is the one protection that does not depend on somebody
+noticing a code went missing. Pair `--admin` with `--expires 24h` for an evening or a
+guest operator, and mint a fresh one when you need it — nothing about this is
+precious, and `revoke <id>` takes one back exactly as it does a player's.
+
+- **It is not a second kind of credential**, and there is no admin verb family:
+  one flag on one list, minted with `invite`, listed with `invite list`,
+  withdrawn with `revoke`. `--label` defaults to `Admin` rather than `Invite`
+  when the flag is given, so the row is legible a month later.
+- **`--admin` takes no value.** `--admin=true` and `--admin=off` are read
+  rather than quietly discarded, and anything that is neither a yes nor a no
+  refuses and mints nothing: a host who typed `--admin=true`, got a player's
+  code and read past the word *admin* has been misled in a way that is very
+  easy to miss. This flag never guesses in favour of privilege.
+- **The `KIND` column marks it either way**, with or without `--reveal`. What a
+  code unlocks is not a secret; the code itself is:
+
+```console
+$ rby-mmo-hub invite list
+ID        LABEL              CREATED           EXPIRES  USES  STATUS  KIND    CODE
+primary   Primary join code  2026-08-06 17:31  never    0     active  player  ******
+f0f2711f  Me                 2026-08-06 17:31  never    0     active  ADMIN   ******
+
+KIND ADMIN: joins the game like any code, and is the only kind the
+web dashboard admits. `rby-mmo-hub revoke <id>` takes one back.
+
+Codes are masked. --reveal prints them in full.
+```
+
+- **In game it does nothing yet.** There is no operator menu, no command and no
+  button; the hub marks the connection an admin code opened — the client is
+  told about itself on the welcome, and operator views (`status.json`, the
+  admin socket's `who`, the dashboard's players table) carry the flag — so the
+  in-game operator features that want one have something to check when they are
+  built. Other players are never told: the flag is deliberately absent from the
+  presence record broadcast to everybody.
+- **A hub with no credentials has no admins.** The flag rides a credential, so
+  `auth.required` false and the `node hub.js` shim have nobody privileged on
+  them by construction.
 
 ---
 
@@ -538,8 +621,9 @@ Codes are masked. --reveal prints them in full.
 
 An optional web page showing the same things the CLI shows, for a host who
 would rather leave a tab open than a terminal. **It is off by default, it
-binds to `127.0.0.1` by default, and it is plain HTTP.** Read the last of
-those three before you move the first two.
+binds to `127.0.0.1` by default, it is plain HTTP, and it admits [admin join
+codes](#admin-codes) only.** Read the third of those before you move the first
+two.
 
 It draws three things, refreshed every five seconds:
 
@@ -560,6 +644,7 @@ where they can be reasoned about separately.
 ### Turning it on
 
 ```sh
+rby-mmo-hub invite --admin                      # the code that opens it; see below
 rby-mmo-hub config set dashboard.enabled true
 rby-mmo-hub config set dashboard.port 7790      # optional; this is the default
 # restart the hub -- a listener cannot be bound by a reload
@@ -567,33 +652,64 @@ docker compose restart hub                      # or Ctrl-C and `start` again
 ```
 
 Then open `http://127.0.0.1:7790/` **on the machine the hub runs on**, and log
-in with a join code.
+in with that admin code.
+
+The `invite --admin` is first on purpose: **since 0.9.0 this page admits admin
+join codes only**, and a hub with nothing but player codes will refuse to open
+the listener at all.
 
 Two things refuse rather than surprise you:
 
 - **`dashboard.enabled` is not re-applied by `SIGHUP`.** It binds a socket, so
   it is a start-time decision like `listen.port` — see [Changing things while
   the hub is running](#changing-things-while-the-hub-is-running).
-- **A dashboard with no working join code does not start.** If every
-  credential is revoked, expired or used up at the moment the hub comes up,
-  the listener is not opened and the log names the command that fixes it
-  (`rby-mmo-hub invite`, or turn the dashboard off). A login page nobody can
-  get through is a hole with a form on it, not a feature. That check runs once
-  at start: revoking the last code *while* the hub runs leaves the page up and
-  refusing everybody, rather than tearing a listener out from under a host who
-  is mid-look.
+- **A dashboard with no working *admin* code does not start.** If there is no
+  active admin credential at the moment the hub comes up — none minted, or the
+  only one revoked, expired or used up — the listener is not opened and the log
+  says so:
 
-### Logging in is the join code, and nothing new
+  ```
+  ERROR the dashboard has no admin join code that still works, so nobody could
+  log into it. Since 0.9.0 this page admits admin codes only, not the codes
+  players join with. Run `rby-mmo-hub invite --admin` to mint one, or set
+  dashboard.enabled to false.
+  ```
 
-There is **no dashboard password**. The login form takes any join code that
-still works — the same codes players type, filtered the same way, read out of
-the config live at every attempt. That is one set of credentials with one set
-of rules:
+  (One line in the log; wrapped here to fit.) A login page nobody can get
+  through is a hole with a form on it, not a feature. A hub full of *player*
+  codes has exactly this problem, because none of them is accepted here. The
+  check runs once at start: revoking the last admin code *while* the hub runs
+  leaves the page up and refusing everybody, rather than tearing a listener out
+  from under a host who is mid-look.
 
-- **Revoking or rotating a code revokes or rotates dashboard access with it,
-  at the same moment** it stops working on the game port. `invite` mints one
-  that works for both. There is deliberately no second secret to rotate and
-  forget about.
+### Logging in is an admin join code, and nothing new
+
+There is **no dashboard password**. The login form takes any **admin** join
+code that still works — minted with `rby-mmo-hub invite --admin`, filtered the
+same way players' codes are (active, unexpired, unspent, unrevoked) and then
+filtered again to the admin ones, read out of the config live at every attempt.
+The page says as much above the box:
+
+> Sign in with an admin join code — one minted with `rby-mmo-hub invite
+> --admin`. An ordinary player's code joins the game but does not open this
+> page. Revoking a code closes this page to it too.
+
+That is one set of credentials with one set of rules:
+
+- **A player's join code does not open this page** — a change from 0.8.0, where
+  any active code did. This page shows every player's name, location and score,
+  and the door's failure counters; that is an operator's view of the hub, not
+  something every guest holding an invite is owed. A player's code submitted
+  here fails exactly like a wrong one: the same `That join code was not
+  accepted.`, the same charge to the throttle, and the comparison loop runs over
+  the admin subset with **no early exit**, so the refusal cannot be timed to
+  tell a real-but-unprivileged code apart from a guess.
+- **Revoking or rotating an admin code revokes or rotates dashboard access with
+  it, at the same moment** it stops working on the game port — that is the
+  *next* login attempt, once the hub has re-read the list on `SIGHUP`; a browser
+  already holding a session keeps it until the token expires or the hub
+  restarts. `invite --admin` mints one that works for both. There is
+  deliberately no second secret to rotate and forget about.
 - **A wrong code typed here is charged to the same throttle** a wrong code
   answered on the wire is: the per-address grace and escalating backoff, and
   the hub-wide ceiling. The throttle is consulted *before* anything is
@@ -608,16 +724,17 @@ of rules:
 
 **There is no TLS on this page, for the same reason there is none on the game
 port: this program is Node core and zero dependencies, and the mod's own
-client could not speak it either.** So the join code you type into the form,
-the session cookie that comes back, and every roster line the page draws all
-**cross the network in the clear**, and anyone on the path can read the code
+client could not speak it either.** So the admin join code you type into the
+form, the session cookie that comes back, and every roster line the page draws
+all **cross the network in the clear**, and anyone on the path can read the code
 and replay the cookie.
 
 That is why the default is `enabled: false` and the default bind is
 `127.0.0.1`: on loopback the "network" is the host's own machine and there is
 no path to be on. **Publishing this port is a second, separate decision from
 publishing the game port, and it is a bigger one** — the game port leaks
-gameplay, this one leaks the credential that opens the game port.
+gameplay, this one leaks the credential that opens the game port, and since
+0.9.0 that credential is specifically an admin one.
 
 If you want it from another machine, do what the game port's own section says
 to do: put both ends on an **encrypted overlay network** (WireGuard,
@@ -629,8 +746,8 @@ ssh -N -L 7790:127.0.0.1:7790 you@your-hub-box   # then open http://127.0.0.1:77
 ```
 
 Setting `dashboard.host` to `0.0.0.0` on a box with a public address puts a
-login form for your join codes on the open internet, in plaintext. Nothing in
-this software stops you; nothing in it makes that safe either.
+login form for your admin join code on the open internet, in plaintext. Nothing
+in this software stops you; nothing in it makes that safe either.
 
 Under Docker the port is **not** published. `compose.yml` carries the mapping
 commented out, with the same reasoning beside it.
@@ -838,7 +955,7 @@ end and reported, never obeyed.
 | `maxPlayers` | `4` | 2–64 | `RBY_MMO_MAX` | greeted players before new ones are refused |
 | `motd` | `""` | ≤120 chars | — | the message of the day, shown to everyone who connects. Empty means no greeting. Re-applied on `SIGHUP` |
 | `auth.required` | `true` | — | `RBY_MMO_AUTH_REQUIRED` | whether a passcode is demanded. **`false` means the hub refuses to start** — it is still settable, so a config can be scripted or a report reproduced, but `start` exits `1` and `doctor` calls it a `[fail]` |
-| `auth.credentials` | `[]` | — | — | the join codes. Managed with `invite` / `revoke` |
+| `auth.credentials` | `[]` | — | — | the join codes, each optionally marked `admin` (see [Admin codes](#admin-codes)). Managed with `invite` / `revoke` |
 | `limits.perIpConnections` | `4` | 1–64 | `RBY_MMO_PER_IP` | connections one address may hold at once |
 | `limits.connectBurst` | `10` | 1–1000 | `RBY_MMO_CONNECT_BURST` | depth of the per-address connect-rate bucket |
 | `limits.connectPerMinute` | `60` | 1–6000 | `RBY_MMO_CONNECT_PER_MINUTE` | how fast that bucket refills |
@@ -857,8 +974,8 @@ end and reported, never obeyed.
 | `limits.authLockoutMs` | `60000` | 1000–3600000 | `RBY_MMO_AUTH_LOCKOUT_MS` | how long a tripped ceiling refuses new join attempts. Players already in the world are untouched |
 | `bans` | `[]` | — | — | addresses refused outright. Managed with `ban` / `unban` |
 | `allowlist` | `[]` | — | — | when non-empty, the **only** addresses that may connect. Managed with `allow` |
-| `dashboard.enabled` | `false` | — | — | whether the [web dashboard](#dashboard) listener is opened at all. Binds a socket, so a restart applies it |
-| `dashboard.host` | `127.0.0.1` | — | — | address the dashboard binds. Loopback by default, and moving it publishes a **plaintext** login form for your join codes |
+| `dashboard.enabled` | `false` | — | — | whether the [web dashboard](#dashboard) listener is opened at all. Binds a socket, so a restart applies it. **Refuses to open with no active [admin code](#admin-codes)** |
+| `dashboard.host` | `127.0.0.1` | — | — | address the dashboard binds. Loopback by default, and moving it publishes a **plaintext** login form for your admin join code |
 | `dashboard.port` | `7790` | 1–65535 | — | TCP port for the dashboard. Not published by `compose.yml` |
 | `network.upnp.enabled` | `false` | — | `RBY_MMO_UPNP` | whether `start` asks the router to forward the port |
 | `network.upnp.leaseSeconds` | `3600` | 60–604800 | `RBY_MMO_UPNP_LEASE_SECONDS` | how long that mapping lasts before it expires on its own |
@@ -970,7 +1087,7 @@ else in the file is a bind-time parameter and needs a restart:
 
 | Change | Reload is enough | Needs a restart |
 | --- | --- | --- |
-| `invite` / `revoke` | ✓ the next handshake is judged against the new list | |
+| `invite` / `revoke` | ✓ the next handshake — and the dashboard's next login attempt — is judged against the new list, `admin` flags and all | |
 | `ban` / `unban` / `allow` | ✓ the next connection is admitted or refused by the new list | |
 | `motd` | ✓ the next player to connect is greeted with the new one | |
 | `listen.port`, `listen.host` | | ✓ cannot change under a live listener |
@@ -1003,6 +1120,14 @@ Two things a reload does **not** do, both worth knowing before you rely on it:
   [`kick`](#talking-to-a-hub-that-is-running), which reaches the running hub
   directly — `ban` then `SIGHUP` is what keeps them from coming back, and the
   two are worth doing in that order.
+- **It does re-apply which codes are admin codes.** `auth.credentials` is one
+  of the four, and the `admin` flag rides on it, so `invite --admin` followed by
+  a `SIGHUP` opens the dashboard to the new code and `revoke <id>` followed by
+  one closes the [dashboard](#dashboard)'s *next login attempt* to the old one —
+  at the same moment it stops working on the game port. A browser already
+  holding a session cookie keeps it until the hub restarts, the same as any
+  other logged-in operator; and revoking the last admin code does not tear the
+  listener down, because that check runs only at start.
 - **A file it cannot read changes nothing.** Config files get edited in place,
   so half a file is a normal thing to meet at an arbitrary instant. Bad JSON
   is logged and the credentials, bans and allowlist already in force are kept;
@@ -1086,6 +1211,14 @@ test passcodes locally, at their hardware's speed, with **no limit of any
 kind applying**. 2³⁰ HMAC-SHA256 evaluations is seconds of work on commodity
 hardware. **A captured pair should be assumed to yield the passcode.**
 
+**An [admin code](#admin-codes) is worth more to a thief than a player's one
+is** — it is the same thirty bits, but a captured pair that yields one buys the
+web dashboard as well as a seat in the world. Nothing about the sniffing
+problem changes; what changes is the prize. So prefer `invite --admin --expires
+24h` over an admin code that never ends, and rotate freely: minting a new one
+and revoking the old is two commands and a `SIGHUP`, and no player's code is
+disturbed by it.
+
 So, plainly: **a six-character passcode keeps strangers out, not
 eavesdroppers.** It stops internet scanners, anyone who merely finds the
 port, and anyone guessing from outside. It does not survive somebody who can
@@ -1162,9 +1295,10 @@ thing that closes either gap.
 
 **The same is true of the [web dashboard](#dashboard), and worse.** It is
 plain HTTP for the same reason — there is no TLS anywhere in this program —
-so the join code typed into its login form and the session cookie that comes back
-are both readable by anyone on the path. The game port leaks gameplay; that
-page leaks the credential that opens the game port. It is off by default and
+so the admin join code typed into its login form and the session cookie that
+comes back are both readable by anyone on the path. The game port leaks
+gameplay; that page leaks an [admin credential](#admin-codes), which opens the
+game port as well as the page. It is off by default and
 bound to `127.0.0.1` by default for exactly that reason, and the same overlay
 network is the same answer.
 
@@ -1624,7 +1758,7 @@ on a relay connection.
 | Type | Payload |
 | --- | --- |
 | `mmo.challenge` | `nonce` — 32 lowercase hex chars, per-connection, single-use. Sent by every hub that requires a passcode, which is every hub but the `node hub.js` shim |
-| `mmo.welcome` | `id, players[], points, ranked` — plus `rankToken` on the one visit that claimed the name, and only that visit, and `motd` when this hub has one configured (absent when it does not) |
+| `mmo.welcome` | `id, players[], points, ranked` — plus `rankToken` on the one visit that claimed the name, and only that visit; `motd` when this hub has one configured (absent when it does not); and `admin: true` when the join code this connection answered with is an [admin code](#admin-codes), absent otherwise. Both optional fields ride hub→client on a message that already existed, which is why neither moved the protocol number. `admin` is derived from the credential server-side and told to that client about itself only — it is deliberately not in the presence record other players receive |
 | `mmo.join` / `mmo.part` | `player` / `id` |
 | `mmo.move` | a presence record |
 | `mmo.chat` | `from, name, scope, text` — **or, when the hub itself is speaking, `name: "HUB"`, `scope: "global"` and no `from` at all**: an operator's `broadcast`. A line with no sender is a line no player sent |

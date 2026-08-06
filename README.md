@@ -586,8 +586,11 @@ is safe to screen-share:
 
 ```console
 $ rby-mmo-hub invite list
-ID       LABEL              CREATED           EXPIRES  USES  STATUS  CODE
-primary  Primary join code  2026-08-03 17:48  never    0     active  ******
+ID       LABEL              CREATED           EXPIRES  USES  STATUS  KIND    CODE
+primary  Primary join code  2026-08-03 17:48  never    0     active  player  ******
+
+KIND: none of these is an admin code. `rby-mmo-hub invite --admin` mints
+one; the web dashboard admits nothing else.
 
 Codes are masked. --reveal prints them in full.
 ```
@@ -596,6 +599,7 @@ Codes are masked. --reveal prints them in full.
 | --- | --- |
 | run it | `rby-mmo-hub start`, or `docker compose up -d` |
 | hand out a second code | `rby-mmo-hub invite --label ash --expires 24h --uses 1` |
+| mint the code that opens the web page | `rby-mmo-hub invite --admin --expires 24h` |
 | take one back | `rby-mmo-hub revoke <id>` |
 | change any setting | `rby-mmo-hub config set maxPlayers 8` |
 | see where a value came from | `rby-mmo-hub status` |
@@ -667,10 +671,21 @@ They were shown: Take the evening off
 The kicked player sees the reason on their own screen — and a kick is not a
 ban, so `ban` or `revoke` first if you want it to stick. And there's an
 **optional web page** — players, ranking, and how hard the door is being
-knocked on — which is **off by default and bound to loopback**, logs in with
-an ordinary join code, and is plain HTTP with no TLS anywhere, so it wants an
-SSH tunnel or an overlay network rather than a published port.
+knocked on — which is **off by default and bound to loopback**, and is plain
+HTTP with no TLS anywhere, so it wants an SSH tunnel or an overlay network
+rather than a published port.
 [server/README.md](server/README.md#dashboard) says all of that at length.
+
+**That page logs in with an admin join code, and nothing else.**
+`rby-mmo-hub invite --admin` mints one: it joins the game exactly like any
+other code — same six characters, same screen — and it additionally opens the
+dashboard, which since `0.9.0` refuses the codes you handed your friends.
+`invite list` marks which is which in a `KIND` column, `revoke <id>` takes one
+back like any other, and it's worth pairing with `--expires`, because an admin
+code is worth more to a thief than a player's one is. The hub also *marks* the
+connection an admin code opened — the client is told, operator views carry it,
+other players are never shown it — which is groundwork: **there is no in-game
+operator feature yet**, just a flag for the ones that come later.
 
 Credentials, bans, the allowlist and the message of the day reload on
 `SIGHUP`, so revoking a leaked passcode doesn't interrupt the people already
@@ -877,7 +892,7 @@ end
 
 ## 🚧 Known jank — read this bit
 
-It's `0.8.0` and it ships flagged `experimental` on purpose. The full list
+It's `0.9.0` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 
