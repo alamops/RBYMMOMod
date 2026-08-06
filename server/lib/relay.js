@@ -31,6 +31,7 @@ const {
   cleanText, cleanId, cleanSpriteId, cleanMapId, cleanInt, cleanHex,
   cleanProfile, cleanOutcome, cleanPoints, cleanToken, payloadOk, FACINGS,
   KINDS, SCOPES, NAME_MAX, MESSAGE_MAX, LOCAL_RADIUS,
+  cleanBattleKey, cleanCoopReason, cleanLabel, PARTY_MAX,
 } = require('./sanitize');
 const {
   Board, mintToken, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
@@ -48,16 +49,32 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // versions. 4 is ranked PVP, and moved for the same reason rather than a
 // different one -- a protocol-3 hub has never heard of a battle result or a
 // leaderboard request, so a newer client would report every match into
-// silence. 5 is pace: a client moving fast sends a `fast` flag on mmo.move,
-// and a protocol-4 hub rebuilds every broadcast from a field list that has
-// never heard of it -- so two players who both installed the feature would
-// watch each other walk, for the whole session, with nothing said. The rule
-// each of these bumps follows is the same one: bump whenever a client can
-// send something a hub silently ignores. The field was called `running`
-// during 0.5.0's development and renamed to `fast` before release, which cost
-// nothing because protocol 5 has never shipped. Kept in step with
-// Config.PROTOCOL on the mod side.
-const PROTOCOL = 5;
+// silence. 5 was claimed twice, by two branches that had never met -- once
+// for pace (the `fast` flag on mmo.move, which a protocol-4 hub's fixed
+// field list drops without a word) and once for co-op battles (a protocol-4
+// hub has never heard of mmo.coop_wait, so a player would press WAIT FOR
+// <friend> while their partner is never told). Each 5 was a different
+// vocabulary, so a client and hub that both said "5" could still be talking
+// past each other. 6 is the first number that means both. The rule every
+// bump follows is unchanged: bump whenever a client can send something a hub
+// silently ignores. Kept in step with Config.PROTOCOL on the mod side.
+const PROTOCOL = 6;
+
+// How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
+// Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
+// now, and an ask that outlives the moment is one somebody answers yes to long
+// after they stopped meaning it.
+const COOP_ASK_TIMEOUT_MS = 60 * 1000;
+// Mirrors Config.COOP_OFFER_TIMEOUT: how long a player may stand at a fight
+// waiting for their partner before the hub stops brokering it. The partner's
+// client already forgets a received offer on this clock, so without it the two
+// ends disagreed about whether the fight was still joinable.
+const COOP_OFFER_TIMEOUT_MS = 300 * 1000;
+// How long a co-op battle's relay group may live unattended. The belt to
+// mmo.coop_leave's braces: a client that crashes never says goodbye and never
+// disconnects cleanly, and its group would otherwise sit here for the life of
+// the process. Mirrors Config.COOP_BATTLE_MAX.
+const COOP_BATTLE_MAX_MS = 3600 * 1000;
 // A SHA-256 response is 64 hex characters; the slack is for a future digest,
 // not for an unbounded field.
 const RESPONSE_MAX = 128;
@@ -373,6 +390,178 @@ handlers['mmo.party_leave'] = (relay, client) => {
   relay.endParty(client, 'peer_left');
 };
 
+// ------- co-op battles
+//
+// The Node half of src/Hub.lua's co-op section, and it has to stay the Node
+// half: the same client dials a dedicated hub and a game hosting from inside
+// itself, so a rule only one of them enforces is a rule that holds on one of
+// the two hosting paths and not the other.
+//
+// Two things live here and a third deliberately does not. The hub decides who
+// may *hear* about an offer (only the one player its owner travels with -- a
+// client choosing its own audience would be a client inviting strangers into
+// its partner's fight) and whether all four *agreed*. It does not run the
+// battle; it says who consented and stops, exactly as it does for a 1v1.
+
+handlers['mmo.coop_wait'] = (relay, client, msg) => {
+  if (!client.ready || !client.partyId) return;
+  const battle = cleanBattleKey(msg.battle);
+  if (!battle) return;
+  const partner = relay.partnerOf(client);
+  if (!partner) return;
+
+  const label = cleanLabel(msg.label);
+  const map = cleanMapId(msg.map);
+  // startedAt so the sweep can expire it on the same clock the partner's
+  // client already uses. Mirrors src/Hub.lua.
+  client.coopOffer = { battle, label, map, startedAt: relay.now() };
+  relay.send(partner, 'mmo.coop_offer', {
+    from: client.id, name: client.name, battle, label, map,
+  });
+};
+
+handlers['mmo.coop_cancel'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  relay.clearCoopOffer(client, cleanCoopReason(msg && msg.reason) || 'left');
+};
+
+// "Yes, I'll join you." The one message that ends a wait.
+//
+// Every condition is re-derived here rather than taken on the client's word:
+// that the two are in one party, that the offer still stands, and that it is
+// the *same* fight. The last is what stops a modified client dragging its
+// partner out of wherever they are into a battle they never walked up to.
+handlers['mmo.coop_join'] = (relay, client, msg) => {
+  if (!client.ready || !client.partyId) return;
+  const host = relay.clients.get(cleanId(msg.to));
+  if (!host || !host.ready || host.id === client.id) return;
+  if (host.partyId !== client.partyId) return;
+
+  const battle = cleanBattleKey(msg.battle);
+  const offer = host.coopOffer;
+  if (!offer || !battle || offer.battle !== battle) return;
+
+  // Taken off the table before either side is told, so a second join racing
+  // this one finds nothing to accept rather than starting the fight twice.
+  host.coopOffer = null;
+  client.coopOffer = null;
+
+  const members = relay.partyMembers(client.partyId)
+    .map((m) => ({ id: m.id, name: m.name }));
+
+  // Told differently on purpose: the player who was waiting learns *who*
+  // joined -- it is the answer they have been standing there for -- and the
+  // player who joined is handed the roster, because they never had one.
+  // The pair get a fan-out group of their own, on the same footing as a
+  // four-player one: from here on the battle traffic does not care which of the
+  // two ways it was agreed.
+  const battleId = String(relay.nextCoopAsk++);
+  relay.openCoopBattle(battleId, [host.id, client.id]);
+
+  relay.send(host, 'mmo.coop_joined', { id: client.id, name: client.name });
+  // `host` names the client that simulates: the player who was already standing
+  // at the fight, since they have the trainer the joiner has never seen.
+  relay.send(client, 'mmo.coop_battle',
+    { id: battleId, side: 'a', allies: members, battle, host: host.id });
+};
+
+// Battle traffic, fanned out to everyone else in the same battle. The payload
+// is forwarded unread exactly as mmo.relay's is -- the hub does not simulate a
+// co-op battle any more than it does a 1v1 -- so its *shape* is the only thing
+// that can be judged, and payloadOk is what judges it.
+handlers['mmo.coop_relay'] = (relay, client, msg) => {
+  if (!client.ready || !client.coopBattleId) return;
+
+  if (!payloadOk(msg.payload)) {
+    return noteDrop(relay, client, 'the co-op payload is not a shape we forward');
+  }
+  const group = relay.coopBattles.get(client.coopBattleId);
+  for (const memberId of (group && group.members) || []) {
+    if (memberId === client.id) continue;
+    const member = relay.clients.get(memberId);
+    if (member && member.ready) {
+      relay.send(member, 'mmo.coop_msg', { from: client.id, payload: msg.payload });
+    }
+  }
+};
+
+// A player says their co-op battle is finished. One goodbye closes the whole
+// group rather than removing one member: a co-op battle ends for everybody at
+// the same moment, so a group that outlived one of its players would be a
+// group with nothing left to carry.
+handlers['mmo.coop_leave'] = (relay, client) => {
+  if (!client.ready || !client.coopBattleId) return;
+  relay.closeCoopBattle(client.coopBattleId);
+};
+
+handlers['mmo.coop_challenge'] = (relay, client, msg) => {
+  if (!client.ready || !client.partyId || client.coopAskId) return;
+  const target = relay.clients.get(cleanId(msg.to));
+  if (!target || !target.ready || target.id === client.id) return;
+  // No party, or *our* party: a party cannot challenge itself. The client
+  // refuses both with a sentence of its own; this is the hub declining to take
+  // a modified one at its word.
+  if (!target.partyId || target.partyId === client.partyId) return;
+  if (target.coopAskId) return;
+
+  const mine = relay.partyMembers(client.partyId);
+  const theirs = relay.partyMembers(target.partyId);
+  if (mine.length !== PARTY_MAX || theirs.length !== PARTY_MAX) return;
+
+  const id = String(relay.nextCoopAsk++);
+  const sideA = mine.map((m) => m.id);
+  const sideB = theirs.map((m) => m.id);
+  const everyone = sideA.concat(sideB);
+
+  relay.coopAsks.set(id, {
+    asker: client.id,
+    sideA,
+    sideB,
+    everyone,
+    // The asker's own yes is implied by asking; the other three are counted.
+    answers: new Set([client.id]),
+    needed: everyone.length - 1,
+    // relay.now(), not Date.now(): the suites drive this hub off an injected
+    // clock, and an ask stamped from the wall clock could never be aged out
+    // in a test that never advances one.
+    startedAt: relay.now(),
+  });
+  // Swept here rather than on a timer, for the reason sweepMatches gives:
+  // creating an ask is the only moment the table can grow, and there is no
+  // interval to unref in this process.
+  relay.sweepCoopAsks();
+  for (const memberId of everyone) {
+    const member = relay.clients.get(memberId);
+    if (member) member.coopAskId = id;
+  }
+  for (const memberId of everyone) {
+    if (memberId === client.id) continue;
+    const member = relay.clients.get(memberId);
+    const side = member.partyId === client.partyId ? 'a' : 'b';
+    relay.send(member, 'mmo.coop_ask',
+      { id, from: client.id, name: client.name, side });
+  }
+};
+
+handlers['mmo.coop_answer'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  const id = cleanId(msg.id);
+  const ask = id && relay.coopAsks.get(id);
+  if (!ask) return;
+  // Only somebody actually in this ask can answer it, and the asker cannot
+  // answer their own -- their yes was spent on asking.
+  if (client.coopAskId !== id || client.id === ask.asker) return;
+
+  if (!msg.accept) {
+    relay.endCoopAsk(id, client.name, 'no');
+    return;
+  }
+  // A Set, not a counter: a client that sends yes twice must not be able to
+  // talk the hub into starting a battle its fourth player never agreed to.
+  ask.answers.add(client.id);
+  if (ask.answers.size > ask.needed) relay.startCoopBattle(id);
+};
+
 // A refused relay payload used to be four bare `return`s. Trade and battle
 // ride that path and nothing else does, so a silent refusal there is a trade
 // that half-happened: one side applied it, the other never heard. Logged once
@@ -416,6 +605,13 @@ handlers['mmo.result'] = (relay, client, msg) => {
   const id = cleanId(msg.session);
   const outcome = cleanOutcome(msg.outcome);
   if (!id || !outcome) return;
+
+  // A co-op battle files under its own paperwork: four players report one
+  // battle rather than two.
+  if (relay.coopMatches.has(id)) {
+    relay.reportCoop(id, client, outcome);
+    return;
+  }
 
   const match = relay.matches.get(id);
   // No paperwork means the battle was never here, was scored already, or
@@ -483,6 +679,19 @@ class Relay {
     this.nextId = 1;
     this.nextSession = 1;
     this.nextParty = 1;
+    // The four-way PARTY BATTLE asks in flight: id -> { asker, sideA, sideB,
+    // everyone, answers, needed, startedAt }. Kept on the relay rather than on
+    // the asker because three other clients are holding a box for each one,
+    // and a state four connections can invalidate belongs to the thing that
+    // outlives all four.
+    this.coopAsks = new Map();
+    // id -> [clientId]: who mmo.coop_relay fans out to. Separate from coopAsks
+    // because it starts where an ask *ends*, and outlives it.
+    this.coopBattles = new Map();
+    // Paperwork for a party-vs-party co-op battle: four reports rather than
+    // two, so it is kept apart from `matches` instead of folded in.
+    this.coopMatches = new Map();
+    this.nextCoopAsk = 1;
     this.players = 0;
   }
 
@@ -686,6 +895,15 @@ class Relay {
     const client = this.clients.get(id);
     if (!client) return false;
     this.endSession(client, 'peer_left');
+    // Before endParty, deliberately: clearCoopOffer finds the partner *through*
+    // the party, so withdrawing afterwards would withdraw into nothing and
+    // leave the partner holding an offer from somebody who has left the game.
+    this.clearCoopOffer(client, 'gone');
+    this.clearCoopAsks(client, 'gone');
+    // A four-way that loses a player cannot finish, and the group goes with
+    // them: the three left would otherwise relay into an id that includes
+    // somebody who is not there.
+    if (client.coopBattleId) this.closeCoopBattle(client.coopBattleId);
     // A party outlives a trade but not a connection: the other member is told
     // while this one is still in the table, so the presence that goes out
     // with it is the one where they are no longer in a party.
@@ -771,6 +989,13 @@ class Relay {
   endParty(client, reason) {
     const id = client.partyId;
     if (!id) return;
+    // Both offers go with the party, and while it still exists: an offer is
+    // only ever shown to a party member, so one that outlived its party would
+    // be a box nothing left alive could take down.
+    this.clearCoopOffer(client, 'gone');
+    for (const member of this.partyMembers(id)) {
+      if (member.id !== client.id) this.clearCoopOffer(member, 'gone');
+    }
     const memberIds = this.parties.get(id) || [];
     this.parties.delete(id);
     client.partyId = null;
@@ -790,6 +1015,273 @@ class Relay {
       this.send(client, 'mmo.party_end', { reason: 'left' });
       this.broadcast('mmo.move', presenceOf(client), client.id);
     }
+  }
+
+  // ------- co-op battles
+
+  // The other member of this client's party, or null. At PARTY_MAX = 2 there
+  // is at most one, which is what lets an offer be forwarded without the
+  // sender naming a recipient.
+  partnerOf(client) {
+    if (!client.partyId) return null;
+    for (const member of this.partyMembers(client.partyId)) {
+      if (member.id !== client.id) return member;
+    }
+    return null;
+  }
+
+  // Drop this client's standing offer and tell whoever was being shown it.
+  //
+  // Four callers -- withdrawing, being taken up on, the party dissolving, the
+  // connection dropping -- because all four otherwise leave the partner
+  // holding a box for a fight that is no longer on offer, and a box that can
+  // only be answered into nothing is what this message exists to prevent.
+  clearCoopOffer(client, reason) {
+    if (!client || !client.coopOffer) return false;
+    client.coopOffer = null;
+    const partner = this.partnerOf(client);
+    if (partner) {
+      this.send(partner, 'mmo.coop_offer_end', { reason: reason || 'left' });
+    }
+    return true;
+  }
+
+  // Every ask this client is part of is void. A four-way short a player cannot
+  // complete and must not be left to time out: the other three are looking at
+  // a box right now, and coopAskId is what stops them being asked anything
+  // else in the meantime.
+  clearCoopAsks(client, reason) {
+    const doomed = [];
+    for (const [id, ask] of this.coopAsks) {
+      if (ask.everyone.includes(client.id)) doomed.push(id);
+    }
+    for (const id of doomed) {
+      this.endCoopAsk(id, client.name, reason || 'gone');
+    }
+  }
+
+  // Asks nobody finished answering. Every one of them is holding three
+  // players' coopAskId, which is what stops them being asked anything else --
+  // so an ask that never resolved would lock all four out of the feature for
+  // as long as the hub ran.
+  sweepCoopAsks() {
+    const now = this.now();
+    const cold = [];
+    for (const [id, ask] of this.coopAsks) {
+      if (now - (ask.startedAt || 0) > COOP_ASK_TIMEOUT_MS) cold.push(id);
+    }
+    for (const id of cold) this.endCoopAsk(id, null, 'timeout');
+
+    // Offers nobody came to, on the clock the partner's client already uses.
+    const lapsed = [];
+    for (const client of this.clients.values()) {
+      const offer = client.coopOffer;
+      if (offer && now - (offer.startedAt || 0) > COOP_OFFER_TIMEOUT_MS) {
+        lapsed.push(client);
+      }
+    }
+    for (const client of lapsed) this.clearCoopOffer(client, 'timeout');
+
+    // Co-op battles nobody finished reporting, on the same grace the 1v1
+    // paperwork gets and for the same reason.
+    for (const [id, match] of this.coopMatches) {
+      if (now - (match.startedAt || 0) > RANK_REPORT_GRACE_MS) {
+        this.coopMatches.delete(id);
+      }
+    }
+  }
+
+  // Open a co-op battle's fan-out group. One id however the battle was agreed,
+  // so mmo.coop_relay has one routing rule rather than two to keep in step.
+  openCoopBattle(id, memberIds) {
+    const members = [];
+    for (const memberId of memberIds || []) {
+      const member = this.clients.get(memberId);
+      if (!member) continue;
+      members.push(memberId);
+      member.coopBattleId = id;
+    }
+    // Reclaim any group whose battle never said goodbye -- a client that
+    // crashed rather than disconnected. Swept here, where the table grows,
+    // for the reason sweepMatches gives: there is no interval to unref.
+    const now = this.now();
+    for (const [old, group] of this.coopBattles) {
+      if (now - (group.startedAt || 0) > COOP_BATTLE_MAX_MS) {
+        this.closeCoopBattle(old);
+      }
+    }
+    this.coopBattles.set(id, { members, startedAt: now });
+    return id;
+  }
+
+  // Forget it, and let the members out. A group that survived its players would
+  // keep forwarding into ids that no longer connect.
+  closeCoopBattle(id) {
+    const group = this.coopBattles.get(id);
+    if (!group) return false;
+    this.coopBattles.delete(id);
+    for (const memberId of group.members || []) {
+      const member = this.clients.get(memberId);
+      if (member && member.coopBattleId === id) member.coopBattleId = null;
+    }
+    return true;
+  }
+
+  endCoopAsk(id, name, reason) {
+    const ask = this.coopAsks.get(id);
+    if (!ask) return false;
+    this.coopAsks.delete(id);
+    for (const memberId of ask.everyone) {
+      const member = this.clients.get(memberId);
+      if (!member) continue;
+      member.coopAskId = null;
+      this.send(member, 'mmo.coop_decline', { name, reason });
+    }
+    return true;
+  }
+
+  // All four said yes. Each is told its own side and both rosters, so no
+  // client has to work out who its allies are from a list it was not given.
+  startCoopBattle(id) {
+    const ask = this.coopAsks.get(id);
+    if (!ask) return false;
+    this.coopAsks.delete(id);
+
+    const roster = (ids) => {
+      const out = [];
+      for (const memberId of ids) {
+        const member = this.clients.get(memberId);
+        if (!member || !member.ready) return null;
+        out.push({ id: member.id, name: member.name });
+      }
+      return out;
+    };
+
+    const sideA = roster(ask.sideA);
+    const sideB = roster(ask.sideB);
+    // Re-checked at the moment of starting, not only when the ask went out:
+    // somebody may have dropped between the third yes and this line, and four
+    // players agreeing is only worth something if all four are still here.
+    if (!sideA || !sideB) {
+      this.coopAsks.set(id, ask);
+      return this.endCoopAsk(id, null, 'gone');
+    }
+
+    // The membership outlives the ask, because the battle traffic is about to
+    // need it: mmo.coop_relay goes to exactly these four and nobody else, and
+    // the hub is the only party that knows who they are.
+    this.openCoopBattle(id, ask.everyone);
+
+    // **Two sides, not two pairs.** A four-way is scored as one team match --
+    // each player against the other pair's combined strength -- because that
+    // is the match they played. See rank.js's recordTeam for why pairing them
+    // off by slot index was the wrong answer.
+    const side = (ids) => {
+      const out = [];
+      for (const memberId of ids) {
+        const member = this.clients.get(memberId);
+        if (member) {
+          out.push({ id: member.id, name: member.name,
+                     ranked: member.ranked !== false });
+        }
+      }
+      return out;
+    };
+    this.coopMatches.set(id, {
+      a: side(ask.sideA), b: side(ask.sideB),
+      reports: new Map(), everyone: ask.everyone, startedAt: this.now(),
+    });
+
+    for (const memberId of ask.sideA) {
+      const member = this.clients.get(memberId);
+      member.coopAskId = null;
+      this.send(member, 'mmo.coop_battle',
+        { id, side: 'a', allies: sideA, foes: sideB, host: ask.asker });
+    }
+    for (const memberId of ask.sideB) {
+      const member = this.clients.get(memberId);
+      member.coopAskId = null;
+      this.send(member, 'mmo.coop_battle',
+        { id, side: 'b', allies: sideB, foes: sideA, host: ask.asker });
+    }
+    return true;
+  }
+
+  /*
+   * One player's report on a 2-on-2. Same rule as a 1v1, one player wider:
+   * the first answer from each of the four stands, and nothing is scored
+   * until all four have spoken and agree. A side whose own two members tell
+   * different stories has not won anything.
+   */
+  reportCoop(id, client, outcome) {
+    const match = this.coopMatches.get(id);
+    if (!match) return null;
+    if (!match.everyone.includes(client.id)) return null;
+    if (match.reports.has(client.id)) return null;
+    match.reports.set(client.id, outcome);
+    for (const memberId of match.everyone) {
+      if (!match.reports.has(memberId)) return null;
+    }
+    return this.settleCoopMatch(id);
+  }
+
+  settleCoopMatch(id) {
+    const match = this.coopMatches.get(id);
+    if (!match) return null;
+    // One battle, one settlement, whatever the verdict.
+    this.coopMatches.delete(id);
+
+    // What each side says happened, and it has to be unanimous *within* a
+    // side before it is worth reading across sides. Two team-mates who cannot
+    // agree whether they won have not won anything -- and neither has anybody
+    // else, because a four-way has one result and this is it.
+    const verdict = (members) => {
+      let said = null;
+      for (const member of members) {
+        const report = match.reports.get(member.id);
+        if (!report) return null;
+        if (said === null) said = report;
+        else if (said !== report) return null;
+      }
+      return said;
+    };
+
+    const saidA = verdict(match.a);
+    const saidB = verdict(match.b);
+    let winners = null;
+    let losers = null;
+    if (saidA === 'win' && saidB === 'loss') {
+      winners = match.a; losers = match.b;
+    } else if (saidA === 'loss' && saidB === 'win') {
+      winners = match.b; losers = match.a;
+    } else {
+      // An agreed draw, or four players telling two different stories.
+      return null;
+    }
+
+    // One unclaimed name anywhere in the four and the whole battle scores
+    // nothing: paying out the half that is claimed would rate a team against
+    // opponents whose ratings are not moving.
+    for (const member of [...match.a, ...match.b]) {
+      if (!member.ranked) return null;
+    }
+
+    const names = (members) => members.map((member) => member.name);
+    const settled = this.board.recordTeam(names(winners), names(losers),
+                                          this.now());
+    if (!settled) return null;
+
+    // Everyone's new number goes out, winners and losers alike: four ratings
+    // moved, and a hub that announced two would leave two screens stale.
+    const byName = new Map();
+    for (const row of settled.winners) byName.set(row.name, row.points);
+    for (const row of settled.losers) byName.set(row.name, row.points);
+    for (const member of [...winners, ...losers]) {
+      if (byName.has(member.name)) {
+        this.publishPoints(member.id, byName.get(member.name));
+      }
+    }
+    return settled;
   }
 
   // ------- plumbing
