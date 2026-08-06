@@ -747,7 +747,13 @@ function M:install()
   -- Font.width still advances 8px -- the same trap the CHAT row fell into
   -- (see its note below). "▶" is on the sheet, right-aligned in the row's
   -- own second column, so a pinned server actually shows that it is one.
-  local FAV_MARK = "▶"
+  --
+  -- The trailing space is load-bearing, not a typo: ListMenu right-aligns
+  -- the second column at 160 - 8 - width, and a name at the 16-glyph cap
+  -- ends exactly where a one-glyph mark starts, so the two touch. The space
+  -- is drawn as nothing and widens the column by one 8px cell, which shifts
+  -- the arrow one cell left and leaves the gap a full-length name needs.
+  local FAV_MARK = "▶ "
 
   -- ------- the main MMO menu
 
@@ -1421,17 +1427,15 @@ function M:install()
         value = entry.key,
       }
     end
-    -- The MMO menu hides the row that opens this while the list is empty, so
-    -- an empty list here means the screen was reached some other way. A list
-    -- with nothing in it draws as a blank page, which reads as a broken
-    -- screen rather than as an answer.
-    if #items == 0 then
-      items[#items + 1] = { label = "No servers yet." }
-    end
+    -- Nothing is injected when there is nothing to show. The MMO menu hides
+    -- the row that opens this while the list is empty, so an empty list here
+    -- means the screen was re-entered while it was open and the last entry
+    -- went -- and ListMenu already draws "Nothing here." for exactly that.
+    -- A placeholder row would suppress that answer and put the cursor on a
+    -- row whose A press has to be swallowed.
     return mod.ui.ListMenu.new(game, "SERVERS", items, {
       pageJump = true,
       onChoose = function(item, menu)
-        if not item.value then return end
         menu:close()
         mod.ui.push(game, SCREEN.SERVERACT, { key = item.value })
       end,
@@ -1469,8 +1473,13 @@ function M:install()
       { label = "RENAME", field = "name" },
     }
 
-    local reopen = function()
-      mod.ui.push(game, SCREEN.SERVERACT, { key = key })
+    -- Reopening is what "rebuilt" means here (see the favourite row below),
+    -- and a rebuild that forgets where the cursor was is a rebuild that
+    -- parks it on CONNECT -- so a second press on the row you just pressed
+    -- would dial a hub nobody asked for. `row` is carried back the way the
+    -- MMO menu carries cursor.main, and is clamped on the way in.
+    local reopen = function(row)
+      mod.ui.push(game, SCREEN.SERVERACT, { key = key, row = row })
     end
 
     -- What JOIN GAME does, with both grids already answered.
@@ -1493,7 +1502,10 @@ function M:install()
           tostring(entry.address))
         return mod.ui.push(game, SCREEN.TEXT, {
           text = "That address is\nno good. Edit it\nand try again.",
-          onDone = reopen,
+          -- wrapped rather than passed straight, now that reopen takes a
+          -- row: whatever the box hands its callback is not one, and this
+          -- path came from CONNECT, which is where the cursor starts.
+          onDone = function() reopen() end,
         })
       end
       -- Only when there is one: writing nil would be refused anyway, and a
@@ -1502,7 +1514,7 @@ function M:install()
       client:connect(game)
     end
 
-    for _, item in ipairs(items) do
+    for row, item in ipairs(items) do
       local wantsConnect, wantsFav, field = item.connect, item.fav, item.field
       item.onSelect = function()
         if wantsConnect then
@@ -1518,21 +1530,29 @@ function M:install()
           -- is what "rebuilt" means here -- the same thing ACTIONS does
           -- after a command that changes what its rows should say. The list
           -- behind it re-sorts when B lands on it, because that is a fresh
-          -- push too.
-          reopen()
+          -- push too. The cursor comes back to this row, not to CONNECT: a
+          -- second press is far likelier to be "no, put it back" than a
+          -- request to dial.
+          reopen(row)
         elseif field then
           mod.ui.push(game, SCREEN.SERVEREDIT, { key = key, field = field })
         end
       end
     end
 
-    return mod.ui.Menu.new(game, items, {
+    local menu = mod.ui.Menu.new(game, items, {
       -- ACTIONS' geometry, and its arithmetic for the same reason: Menu
       -- grows the box downwards to fit its rows (th = rows * 2 + 2), so ty
       -- is what keeps the last row on an 18-tile screen.
       tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
       onCancel = function() mod.ui.push(game, SCREEN.SERVERS) end,
     })
+    -- Where a reopen puts the cursor, clamped rather than trusted: the row
+    -- count is fixed today, but an opts table is anybody's to hand in and a
+    -- Menu with its index off the end draws no arrow at all.
+    menu.index = math.min(math.max(tonumber(opts.row) or 1, 1), #items)
+    menu:clampScroll()
+    return menu
   end })
 
   -- ------- changing one of them
@@ -1589,13 +1609,21 @@ function M:install()
     opts = opts or {}
     local spec = EDIT_FIELDS[opts.field]
     if not spec then
+      -- Its own sentence, not the entry's: nothing has happened to the
+      -- server, the caller asked for a field this screen does not have. The
+      -- box says what the log says, and B lands on the entry's own menu --
+      -- which is where the three rows that do work are.
       mod.log:warn("there is no server field called '%s' to edit -- this "
         .. "screen takes field = host, code or name", tostring(opts.field))
+      return mod.ui.TextBox.new(game, "There is nothing\nto edit there.",
+        function()
+          mod.ui.push(game, SCREEN.SERVERACT, { key = opts.key })
+        end)
     end
     local store = serverStore()
-    local entry = spec and store and store.get and store:get(opts.key)
+    local entry = store and store.get and store:get(opts.key)
     if not entry then
-      -- Same sentence SERVERACT gives, for the same two reasons: the entry
+      -- Same sentence SERVERACT gives, and for its two reasons: the entry
       -- was re-keyed under another address, or it was evicted.
       return mod.ui.TextBox.new(game, "That server is\ngone.", function()
         mod.ui.push(game, SCREEN.SERVERS)
@@ -1620,8 +1648,14 @@ function M:install()
           -- answer is and come back to the same grid with the same
           -- characters still on it: one wrong character then costs one press
           -- to fix rather than a whole address to retype.
-          mod.log:warn("could not save \"%s\" as this server's %s -- %s",
-            tostring(text), tostring(opts.field), spec.warn)
+          -- What was typed does not go to the log, only how much of it: the
+          -- code field is a secret (Client's askJoinCode keeps the same
+          -- rule), and a refused code is a near-miss of one, which is the
+          -- worst kind to write down. The count is what makes "too short"
+          -- diagnosable without printing the characters.
+          mod.log:warn("could not save what was typed as this server's %s "
+            .. "(%d character(s)) -- %s",
+            tostring(opts.field), #tostring(text), spec.warn)
           local again = { key = key, field = opts.field, typed = text }
           return mod.ui.push(game, SCREEN.TEXT, {
             text = spec.refusal,

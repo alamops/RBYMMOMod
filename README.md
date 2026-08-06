@@ -404,16 +404,19 @@ onto one is a menu instead of a retyped address and passcode. It's gone
 again the moment you're hosting or connected, same as `ADDRESS` and
 `PLAYERS`.
 
-**Favorites sit on top; everyone else sorts by address, descending.** Star
-one and it stays above the rest no matter how long ago you played there —
-recency only decides which *non*-favorite gets dropped when the list is
-full.
+**Favorites sit on top, marked `▶`; everyone else sorts by address,
+descending.** Pin one and it stays above the rest no matter how long ago you
+played there — recency only decides which *non*-favorite gets dropped when
+the list is full.
 
 Pick an entry and a submenu opens: **`CONNECT`** dials it exactly the way
 `JOIN GAME` does, **`FAVORITE`/`UNFAVORITE`** flips the pin, **`EDIT HOST`**
 and **`EDIT CODE`** reopen the address or passcode on the naming grid, and
-**`RENAME`** is the only one that touches the label — entries default to
-their own address as a name, and a rename can run up to 16 characters.
+**`RENAME`** is the only one that touches the label — entries are named after
+the address you dialled with the standard port left off (`192.168.1.20:7788`
+lists as `192.168.1.20`; a hub on any other port keeps it, because there the
+port is part of dialling it), and a rename can run up to 16 characters. The
+whole address is still on the entry either way — that's what `CONNECT` dials.
 
 A hub is only added once you actually reach it — a wrong passcode never
 earns an entry — and the list survives quitting, `CONTINUE`, and switching

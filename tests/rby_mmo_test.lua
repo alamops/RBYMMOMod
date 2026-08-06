@@ -238,6 +238,10 @@ eq(exports.isConnected(), false, "reports disconnected before connecting")
 eq(#exports.players(), 0, "the roster starts empty")
 check(type(exports.party) == "function", "exports party")
 eq(#exports.party(), 0, "and nobody is in one before connecting")
+-- The rows and not the store: a hub this copy has played on is a fact another
+-- mod may want to read, and a mutator it may not.
+check(type(exports.servers) == "function", "exports servers")
+eq(#exports.servers(), 0, "with nothing on the list before a hub answers")
 -- The four-way PARTY BATTLE ask, which only a four-client run can exercise
 -- for real -- so the seat it is watched through has to exist here.
 check(type(exports.coopAsk) == "function", "exports coopAsk")
@@ -11014,8 +11018,14 @@ do
   eq(entry.address, expectedAddress,
      "withPort fills in the default port when none was typed")
   eq(entry.key, expectedAddress:lower(), "the key is the address, lower-cased")
-  eq(entry.name, expectedAddress,
-     "and the name defaults to the normalised address, port included")
+  -- The label is the address with the port every hub of ours uses left off:
+  -- the sanitiser truncates rather than wraps, and ":7788" is exactly what
+  -- normalize just filled in, so eliding it costs no information and buys the
+  -- five characters that keep a real address from being drawn as a false one.
+  -- Only the label is shortened -- entry.address above still carries the port
+  -- CONNECT dials.
+  eq(entry.name, "short-host",
+     "and the name defaults to the address with the standard port left off")
   eq(entry.fav, false, "a fresh entry is not a favourite")
   eq(entry.code, nil, "and has no code until one is given")
 
@@ -11030,6 +11040,27 @@ do
   local ported = store:record("already.has.a.port:9191")
   eq(ported.address, "already.has.a.port:9191",
      "an address that already carries a port keeps its own, not the default")
+  -- Only the *standard* port is elided. A port that is not the one every hub
+  -- of ours listens on is the difference between a name that dials and a name
+  -- that does not, so it stays -- and when what is left still will not fit,
+  -- truncation is the last resort rather than the first.
+  eq(ported.name, ("already.has.a.port:9191"):sub(1, Config.SERVER_NAME_MAX),
+     "a name too long even with the port kept is truncated, not re-ported")
+
+  local oddPort = store:record("hub:9191")
+  eq(oddPort.name, "hub:9191",
+     "a non-standard port is part of the name -- it is not the one eliding "
+     .. "assumes, so dropping it would name a hub nothing is listening on")
+
+  local longHost = store:record("a-very-long-hostname.example")
+  eq(#longHost.name, Config.SERVER_NAME_MAX,
+     "a host too long for the row is capped at the name limit")
+  eq(longHost.name, ("a-very-long-hostname.example"):sub(1,
+     Config.SERVER_NAME_MAX),
+     "from the front, and with the elided standard port never counted in")
+  eq(longHost.address, ("a-very-long-hostname.example:%d")
+     :format(Config.DEFAULT_PORT),
+     "while the address CONNECT dials is untouched by any of that")
 end
 
 -- ------- record: refresh keeps the player's own fields, and the code only
@@ -11149,6 +11180,42 @@ do
   check(store:get(existing.key) == nil,
         "so the older row gives way instead, even though it was made to "
         .. "look newer")
+
+  Config.SERVER_LIST_MAX = savedCap
+end
+
+do
+  -- The same protection on every other mutator, not just record().
+  --
+  -- Writing re-reads the file first, because another save slot -- or a second
+  -- copy under the same LOVE identity -- may have recorded a hub since we last
+  -- looked. Folding theirs in can push the list back over the cap, and the
+  -- eviction that follows must not be allowed to throw away the row the caller
+  -- is in the middle of changing and about to be handed back.
+  --
+  -- _read is stood in for rather than a file written, because love is absent
+  -- for this whole section: this is the one behaviour that only exists when
+  -- the read half answers, so the read half is what gets stubbed.
+  local savedCap = Config.SERVER_LIST_MAX
+  Config.SERVER_LIST_MAX = 1
+  stubSave = {}
+  local store = Servers.new()
+
+  local mine = store:record("zzz-host")
+  -- a degraded clock: every row's `last` reads 0, the tie falls to the key,
+  -- and by key alone this row is the one that loses it
+  mine.last = 0
+  store._read = function()
+    return { { address = "aaa-host", last = 0 } }, false
+  end
+
+  local renamed = store:rename(mine.key, "Kept Name")
+  check(renamed ~= nil, "the rename is applied")
+  check(store:get(mine.key) ~= nil,
+        "and the row it was applied to is still listed -- the write's own "
+        .. "eviction is told which row not to take")
+  eq(renamed and renamed.name, "Kept Name",
+     "so what comes back is a row that is really on the list")
 
   Config.SERVER_LIST_MAX = savedCap
 end
@@ -11401,8 +11468,55 @@ stepFn(passthroughNext, {}, 0.016)
 
 local recorded = Client.servers():get(ADDRESS_A)
 check(recorded ~= nil, "a WELCOME on a dialled connection records the hub")
-eq(recorded.code, "A7K3P9",
-   "carrying the join code already stored for that address")
+-- No challenge arrived, so nothing was answered with a code and nothing is
+-- written down as one. M.joinCode falls back to the standing JOIN CODE option
+-- when a hub has none of its own, so recording its answer here regardless
+-- would stamp that one option onto every open hub the player ever joins --
+-- pinned under the per-hub key, where it then outranks the option it came
+-- from.
+eq(recorded.code, nil,
+   "but a hub that never challenged us gets no code on its row")
+
+-- ------- a hub that did challenge: the code that answered it is kept
+--
+-- Driven through the real CHALLENGE handler rather than by setting the flag,
+-- because the flag is a private upvalue and the thing being pinned is exactly
+-- that answering is what makes it true.
+
+Client.disconnect()
+local netD = fakeNet()
+local ADDRESS_D = "challenged.example.test:9191"
+Client.setJoinAddress(ADDRESS_D)
+Client.setJoinCode(ADDRESS_D, "A7K3P9")
+Client.transport.connect = function(self)
+  self.net = netD
+  self.state = "connecting"
+  self.error = nil
+  self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+  return true
+end
+check(Client.connect({}), "connect succeeds for the challenged case")
+
+-- a whole nonce, in the shape Wire.hex accepts: lowercase hex, NONCE_HEX long
+local NONCE = ("ab"):rep(Config.NONCE_HEX / 2)
+netD.inbox = { { type = Wire.CHALLENGE, nonce = NONCE } }
+stepFn(passthroughNext, {}, 0.016)
+
+local answer
+for _, msg in ipairs(netD.outbox) do
+  if msg.type == Wire.AUTH then answer = msg end
+end
+check(answer ~= nil, "the challenge is answered from the stored code")
+eq(answer and answer.response, Sha256.hmacHex("A7K3P9", NONCE),
+   "with the HMAC the hub will check")
+
+netD.inbox = { { type = Wire.WELCOME, id = "peer-d", players = {} } }
+stepFn(passthroughNext, {}, 0.016)
+
+local challenged = Client.servers():get(ADDRESS_D)
+check(challenged ~= nil, "the hub is recorded")
+eq(challenged and challenged.code, "A7K3P9",
+   "and this time the row carries the code, because a code is what got us in")
 
 -- ------- no dial, no record -- the self-host shape
 
@@ -11412,9 +11526,9 @@ Client.transport:attach(netB)
 netB.inbox = { { type = Wire.WELCOME, id = "peer-b", players = {} } }
 stepFn(passthroughNext, {}, 0.016)
 
-eq(#Client.servers():list(), 1,
+eq(#Client.servers():list(), 2,
    "a WELCOME with nothing dialled -- hosting's own shape -- adds no row; "
-   .. "the list still holds only the one from the case above")
+   .. "the list still holds only the two from the cases above")
 
 -- ------- a servers-store failure cannot break the tick that carries it
 
@@ -11479,7 +11593,15 @@ stubMod.content.screens = {
   get = function(_, id) return screenRegistry[id] end,
 }
 stubMod.hooks = { wrap = function() end }
+-- Where a row's onSelect says to go next. Recorded rather than performed:
+-- these screens navigate by pushing, so the push *is* the observable, and a
+-- stub that actually built the next screen would be a second screen's
+-- assertions leaking into this one's.
+local pushes = {}
 stubMod.ui = {
+  push = function(_, id, opts)
+    pushes[#pushes + 1] = { id = id, opts = opts }
+  end,
   Menu = { new = function(_, items, opts)
     return { items = items, opts = opts, clampScroll = function() end }
   end },
@@ -11580,7 +11702,10 @@ do
     eq(menu.items[i].label, entry.name,
        "row " .. i .. " carries the entry's name")
     eq(menu.items[i].value, entry.key, "and its key")
-    eq(menu.items[i].right, entry.fav and "▶" or nil,
+    -- The trailing space is load-bearing, not a typo: the mark is drawn hard
+    -- against the right edge of the row, and the space is what holds it off
+    -- the border.
+    eq(menu.items[i].right, entry.fav and "▶ " or nil,
        "favourites are marked with ▶ -- never *, which this font cannot draw")
   end
 end
@@ -11588,9 +11713,11 @@ end
 ctx.servers = storeWith({})
 do
   local menu = serversDef.new({})
-  eq(#menu.items, 1, "an empty list still draws one row")
-  eq(menu.items[1].label, "No servers yet.", "saying so")
-  eq(menu.items[1].value, nil, "with no value -- there is nothing to choose")
+  -- No placeholder row. ListMenu already draws its own "Nothing here." for an
+  -- empty list, and a fake row would both suppress that answer and park the
+  -- cursor on something whose A press has to be swallowed.
+  eq(#menu.items, 0,
+     "an empty list injects no rows at all -- ListMenu says so itself")
 end
 
 -- ------- SCREEN.SERVERACT: the fixed row order, and the gone-entry case
@@ -11623,6 +11750,44 @@ do
         "and it says the server is gone")
 end
 
+-- ------- SCREEN.SERVERACT: where the cursor lands on a reopen
+--
+-- Toggling the favourite mark rebuilds this menu, because Menu pops itself
+-- before running a row -- so the rebuild has to be told where the cursor was
+-- or it parks on CONNECT, and a second press on the row just pressed would
+-- dial a hub nobody asked for.
+
+do
+  eq(actDef.new({}, { key = actKey }).index, 1,
+     "with no row asked for, the cursor starts on CONNECT")
+  eq(actDef.new({}, { key = actKey, row = 3 }).index, 3,
+     "opts.row is where a reopen puts it")
+
+  -- Clamped rather than trusted: an opts table is anybody's to hand in, and a
+  -- Menu with its index off the end draws no arrow at all.
+  local rows = #actDef.new({}, { key = actKey }).items
+  eq(actDef.new({}, { key = actKey, row = 999 }).index, rows,
+     "a row past the end is clamped to the last one")
+  eq(actDef.new({}, { key = actKey, row = 0 }).index, 1,
+     "and a row before the first is clamped up to it")
+  eq(actDef.new({}, { key = actKey, row = "not a number" }).index, 1,
+     "so is something that is not a row number at all")
+
+  -- The favourite row's own reopen: it comes back to itself, not to CONNECT.
+  -- A second press there is far likelier to be "no, put it back" than a
+  -- request to dial.
+  pushes = {}
+  local menu = actDef.new({}, { key = actKey })
+  menu.items[2].onSelect()
+  local last = pushes[#pushes]
+  check(last ~= nil, "toggling the favourite reopens the menu")
+  eq(last.id, Ui.SCREEN.SERVERACT, "on SERVERACT itself")
+  eq(last.opts and last.opts.key, actKey, "for the same entry")
+  eq(last.opts and last.opts.row, 2,
+     "with the cursor back on the row that was just pressed, not on CONNECT")
+  pushes = {}
+end
+
 -- ------- SCREEN.SERVEREDIT: opts.field, and the unknown-field case
 
 local editDef = screenRegistry[Ui.SCREEN.SERVEREDIT]
@@ -11641,15 +11806,71 @@ do
   eq(table.concat(typedScreen.glyphs), "Retry",
      "a refused attempt coming back through `typed` wins over the stored value")
 
-  local gone = editDef.new({}, { key = editKey, field = "not-a-real-field" })
-  check(gone.items == nil and gone.glyphs == nil,
-        "an unknown field is the same TextBox gone-path, not a naming grid")
-  check(type(gone.text) == "string" and gone.text:find("gone", 1, true) ~= nil,
-        "saying the server is gone, the same sentence SERVERACT gives")
+  -- An unknown field is a TextBox too, but not the *same* TextBox: nothing
+  -- has happened to the server, so saying it is gone would be a lie about the
+  -- entry rather than a complaint about the caller. B lands on the entry's own
+  -- menu, which is where the three fields that do exist are.
+  local unknown = editDef.new({}, { key = editKey, field = "not-a-real-field" })
+  check(unknown.items == nil and unknown.glyphs == nil,
+        "an unknown field is a TextBox, not a naming grid")
+  eq(unknown.text, "There is nothing\nto edit there.",
+     "and it complains about the field, never about the server")
+  check(unknown.text:find("gone", 1, true) == nil,
+        "the entry is still there, so it is not the gone sentence")
+  pushes = {}
+  unknown.onDone()
+  eq(pushes[1] and pushes[1].id, Ui.SCREEN.SERVERACT,
+     "pressing through it lands on the entry's own menu")
+  eq(pushes[1] and pushes[1].opts and pushes[1].opts.key, editKey,
+     "for the entry that was being edited")
+  pushes = {}
 
   local goneKey = editDef.new({}, { key = "missing:1", field = "host" })
   check(goneKey.items == nil and goneKey.glyphs == nil,
         "a missing key is refused the same way, whatever field was asked for")
+end
+
+-- ------- SCREEN.SERVEREDIT: a refusal says how much was typed, never what
+--
+-- A refused join code is a near-miss of a real one, which is the worst kind
+-- to write into a log file somebody will paste into a bug report. The count
+-- is what makes "too short" diagnosable without printing the characters.
+
+do
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+
+  local TYPED = "SECRETX9" -- every character is in the code alphabet; eight
+                           -- of them are not six, so the store refuses it
+  local codeScreen = editDef.new({}, { key = editKey, field = "code" })
+  check(type(codeScreen.glyphs) == "table", "EDIT CODE is a naming grid")
+  for i = 1, #TYPED do codeScreen.glyphs[i] = TYPED:sub(i, i) end
+  pushes = {}
+  codeScreen:confirm()
+
+  check(#warns > 0, "a refused code is logged")
+  local joined = table.concat(warns, "\n")
+  eq(joined:find(TYPED, 1, true), nil,
+     "and what was typed is nowhere in what was logged")
+  eq(joined:find(TYPED:sub(1, Config.CODE_LEN), 1, true), nil,
+     "not even the first six characters of it, which would be the code")
+  check(joined:find("%(%d+ character%(s%)%)") ~= nil,
+        "the length is what stands in for it")
+  check(joined:find(("(%d character(s))"):format(#TYPED), 1, true) ~= nil,
+        "and it is the length actually typed")
+  check(joined:find("code", 1, true) ~= nil, "naming the field that refused")
+
+  eq(ctx.servers:get(editKey).code, nil,
+     "the row keeps the code it had -- a refusal never writes one")
+
+  local last = pushes[#pushes]
+  check(last ~= nil and last.id == Ui.SCREEN.TEXT,
+        "the player is told in a box, not only in the log")
+  pushes = {}
+  stubMod.log.warn = function() end
 end
 
 stubMod.content.screens, stubMod.hooks, stubMod.ui = nil, nil, nil

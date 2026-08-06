@@ -143,11 +143,16 @@ function M.hostLimit()
   return server:limit()
 end
 
--- The hubs this copy has been welcomed by, for the SERVERS menu.
+-- The hubs this copy has been welcomed by.
 --
--- The store itself, not a copy of its rows: the screens both read it and
+-- The store itself, not a copy of its rows: its readers both read it and
 -- write to it (rename, favourite, edit), and two lists that could disagree
--- would be one bug waiting for a player to reopen a menu.
+-- would be one bug waiting for a player to reopen a menu. The screens reach
+-- it as ctx.servers; this is the same object for anything holding the Client
+-- instead -- the suite, and any caller that has no ctx.
+--
+-- Outside this mod it is the rows and not the store: mod.exports.servers,
+-- below, so nothing else can rename or evict what the player collected.
 function M.servers()
   return servers
 end
@@ -1148,9 +1153,16 @@ handlers[Wire.WELCOME] = function(game, msg)
   --
   -- Only a dialled address: hosting has none -- the local net is in-process --
   -- and a row that reconnects you to yourself is not a hub anybody wants
-  -- listed. The code goes on the row so a save-slot change cannot take it
-  -- away; it is the same normalised code M.joinCode just answered a challenge
-  -- with, never anything typed and unchecked.
+  -- listed.
+  --
+  -- A code goes on the row only when this connection actually answered a
+  -- challenge with one, which is what authSent records. M.joinCode falls back
+  -- to the standing JOIN CODE option when a hub has no code of its own, so
+  -- recording its answer unconditionally would stamp that option onto every
+  -- open hub the player ever joins -- and the row's copy is then pinned under
+  -- the per-hub key, where it outranks the option it came from. A hub that
+  -- never asked for a code gets nil, and the store leaves entry.code alone on
+  -- nil, so a code the player typed themselves still survives.
   --
   -- Wrapped, and the whole point of the wrapping is that this is bookkeeping
   -- on the one path every single connection takes. The store refuses rather
@@ -1159,7 +1171,7 @@ handlers[Wire.WELCOME] = function(game, msg)
   -- game they just joined.
   if dialled then
     local kept, why = pcall(function()
-      servers:record(dialled, M.joinCode(dialled))
+      servers:record(dialled, authSent and M.joinCode(dialled) or nil)
     end)
     if not kept then
       mod.log:warn("could not add %s to the server list (%s) -- it will not "
@@ -1627,6 +1639,12 @@ function M.install()
   -- nil unless this copy is hosting; a mod that wants to show the address
   -- somewhere of its own should not have to reach into HostServer for it
   mod.exports.hostAddress = function() return M.isHosting() and server:address() end
+  -- The hubs this copy has been welcomed by, in the order SERVERS draws them.
+  -- The rows and not the store, so nothing outside this mod can rename or
+  -- evict what the player collected -- and so the end-to-end driver can assert
+  -- that connecting actually recorded a hub, which is otherwise only visible
+  -- by opening a menu.
+  mod.exports.servers = function() return servers:list() end
   mod.exports.players = function() return ctx.roster:sorted() end
   -- Who you are travelling with, you included, in the order the hub listed
   -- them -- empty when you are not in a party. The end-to-end driver reads
