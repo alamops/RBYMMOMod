@@ -882,6 +882,24 @@ function M:install()
         end,
       }
     else
+      -- First on the menu, above HOST GAME, because for anyone who has
+      -- played before it is the row they came for: every hub on it answered
+      -- to this copy once, so its address and its code are known and CONNECT
+      -- is the whole flow -- the same errand as JOIN GAME with the typing
+      -- already done.
+      --
+      -- Absent while the list is empty, rather than opening a screen that
+      -- says "nothing yet": a first join has to go through JOIN GAME anyway,
+      -- and the row appears the moment there is something behind it. The
+      -- menu is also 8 rows at most, so a row that could say nothing is a
+      -- row the rows that can say something do not get -- and a first-timer's
+      -- menu still opens on HOST GAME.
+      if #serverList() > 0 then
+        items[#items + 1] = {
+          label = "SERVERS",
+          onSelect = function() mod.ui.push(game, SCREEN.SERVERS) end,
+        }
+      end
       items[#items + 1] = {
         label = "HOST GAME",
         onSelect = function()
@@ -900,21 +918,6 @@ function M:install()
           })
         end,
       }
-      -- Directly under JOIN GAME, because it is the same errand with the
-      -- typing already done: every hub on it answered to this copy once, so
-      -- its address and its code are known and CONNECT is the whole flow.
-      --
-      -- Absent while the list is empty, rather than opening a screen that
-      -- says "nothing yet": a first join has to go through JOIN GAME anyway,
-      -- and the row appears the moment there is something behind it. The
-      -- menu is also 8 rows at most, so a row that could say nothing is a
-      -- row the rows that can say something do not get.
-      if #serverList() > 0 then
-        items[#items + 1] = {
-          label = "SERVERS",
-          onSelect = function() mod.ui.push(game, SCREEN.SERVERS) end,
-        }
-      end
       -- There is deliberately no third row for the code. JOIN GAME asks for
       -- the address and then the code, so a row called JOIN CODE sitting
       -- under it read as the other half of joining rather than as what it

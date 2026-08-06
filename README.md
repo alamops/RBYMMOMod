@@ -398,9 +398,9 @@ in full and does not soften it.
 world, party — untouched. No "returning to title screen".
 
 ### 🗂️ SERVERS REMEMBERS WHERE YOU'VE BEEN
-The first time you connect anywhere, `SERVERS` shows up on the disconnected
-menu, under `JOIN GAME` — every hub you've reached before, so getting back
-onto one is a menu instead of a retyped address and passcode. It's gone
+The first time you connect anywhere, `SERVERS` shows up at the top of the
+disconnected menu, above `HOST GAME` — every hub you've reached before, so
+getting back onto one is a menu instead of a retyped address and passcode. It's gone
 again the moment you're hosting or connected, same as `ADDRESS` and
 `PLAYERS`.
 
@@ -526,9 +526,9 @@ behind it.
 
 | Row | Shows up when | What it does |
 | --- | --- | --- |
+| `SERVERS` | not in a game, and you've connected somewhere before | pick a hub you've reached before, and reconnect, rename, favorite or edit it |
 | `HOST GAME` | not in a game | make a trainer, then the room size and the passcode |
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
-| `SERVERS` | not in a game, and you've connected somewhere before | pick a hub you've reached before, and reconnect, rename, favorite or edit it |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
 | `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |

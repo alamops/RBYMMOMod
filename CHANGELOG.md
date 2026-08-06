@@ -9,8 +9,8 @@ here must match `manifest.version`.
 ### Added
 
 - **`SERVERS` remembers where you've been.** The disconnected MMO menu grows
-  a `SERVERS` row the first time you've connected anywhere, right under
-  `JOIN GAME` — the next hub you visit can be a menu, not a retyped address
+  a `SERVERS` row the first time you've connected anywhere, at the top, above
+  `HOST GAME` — the next hub you visit can be a menu, not a retyped address
   and passcode. It stays off the menu until there is a first entry to show
   it, and it disappears again the moment you're hosting or connected, the
   same rule `ADDRESS` and `PLAYERS` already follow.
