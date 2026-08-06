@@ -367,7 +367,7 @@ behind it.
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
-| `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |
+| `CHAT` / `SAY` | connected | the log and sending |
 | `PARTY` | connected | your party: members, party chat, and leaving it |
 | `MY PROFILE` | connected | your own trainer card, as everyone else sees it |
 | `RANK` | connected | the hub's top ten: place, character, name, points |
