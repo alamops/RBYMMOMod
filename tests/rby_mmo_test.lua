@@ -234,6 +234,12 @@ eq(exports.isConnected(), false, "reports disconnected before connecting")
 eq(#exports.players(), 0, "the roster starts empty")
 check(type(exports.party) == "function", "exports party")
 eq(#exports.party(), 0, "and nobody is in one before connecting")
+-- Whether the hub this copy is on treats it as an operator's connection
+-- (docs/plans/admin-join-code.md #4/D). Derived only from a credential a
+-- real hub grants; a client that never connected has none, so the honest
+-- answer is false, the same shape isHosting/isConnected already pin above.
+check(type(exports.isAdmin) == "function", "exports isAdmin")
+eq(exports.isAdmin(), false, "and reports no operator status on a fresh load")
 
 -- Vanilla must be untouched.  This mod adds multiplayer; it does not change
 -- Gen 1 content, which is exactly what affects_link=false promises about
@@ -1037,6 +1043,13 @@ check(take(annPeer, Wire.WELCOME) ~= nil, "the first player is welcomed")
 local bobWelcome = take(bobPeer, Wire.WELCOME)
 eq(#bobWelcome.players, 1, "the second sees the first on the roster")
 eq(bobWelcome.players[1].name, "ANN", "by name")
+-- The embedded hub is out of the admin-join-code feature entirely (the plan
+-- calls this out at #3.5/#8): only server/lib/relay.js's credential lookup
+-- can grant operator status, so Hub.lua's own welcome must never carry the
+-- key at all -- not even as a false -- and src/Client.lua's
+-- `myAdmin = msg.admin == true` is written to read that absence as false.
+eq(bobWelcome.admin, nil,
+   "and the in-game hub's welcome carries no admin key -- it never grants operator status")
 check(saw(annPeer, Wire.JOIN), "and the first is told about the second")
 
 -- The cap is charged at hello, not on connect. A socket that has not

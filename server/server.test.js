@@ -244,6 +244,11 @@ const DASHBOARD_PORT = 9401 + (process.pid % 200);
 const DASHBOARD_PORT_DISABLED = 9701 + (process.pid % 200);
 const DASHBOARD_PORT_NO_CREDENTIAL = 10001 + (process.pid % 200);
 const DASHBOARD_PORT_SESSION = 10301 + (process.pid % 200);
+// A hub carrying both an admin and a player credential at once (the door
+// test), and one carrying only player credentials (the start-refusal test) --
+// both distinct from DASHBOARD_PORT_NO_CREDENTIAL's empty list.
+const DASHBOARD_PORT_PLAYER_ADMIN = 10601 + (process.pid % 200);
+const DASHBOARD_PORT_ONLY_PLAYER = 10901 + (process.pid % 200);
 
 // A join code for the dashboard scenarios, distinct from PRIMARY_CODE so a
 // failure naming one cannot be misread as belonging to the other.
@@ -1669,6 +1674,70 @@ async function statusSnapshotCarriesNothingSensitiveTest() {
   }
 }
 
+// ------- the admin flag on welcome, and in status.json, for a real pair
+//
+// authHandshakeTest and the throttle scenarios drive real challenge/response
+// handshakes, but none of their credentials is an admin one; the dashboard
+// scenarios drive an admin credential, but only through the dashboard's own
+// login, never the game-port handshake. This scenario is the missing
+// combination: two real clients on one hub, one holding an admin code and one
+// holding a player code, so `welcome.admin` and the status snapshot's
+// per-connection flag are checked against each other rather than in
+// isolation.
+
+async function authAdminWelcomeAndStatusTest() {
+  const ADMIN_CODE = 'ADMN12';
+  const PLAYER_CODE = 'PYQR34';
+  const { handle, dir } = await startStatusServer({
+    auth: {
+      required: true,
+      credentials: [
+        credential('opadmin', ADMIN_CODE, { admin: true }),
+        credential('opplayer', PLAYER_CODE),
+      ],
+    },
+  });
+  const port = handle.port;
+
+  try {
+    const admin = new Client(port);
+    await admin.ready();
+    admin.send('mmo.hello', { proto: PROTOCOL, name: 'OPADMIN' });
+    const adminChallenge = await admin.expect('mmo.challenge');
+    admin.send('mmo.auth', { response: hmacHex(ADMIN_CODE, adminChallenge.nonce) });
+    const adminWelcome = await admin.expect('mmo.welcome');
+    ok(adminWelcome.admin === true, 'an admin code\'s welcome carries admin: true');
+
+    const player = new Client(port);
+    await player.ready();
+    player.send('mmo.hello', { proto: PROTOCOL, name: 'OPPLAYER' });
+    const playerChallenge = await player.expect('mmo.challenge');
+    player.send('mmo.auth', { response: hmacHex(PLAYER_CODE, playerChallenge.nonce) });
+    const playerWelcome = await player.expect('mmo.welcome');
+    ok(!('admin' in playerWelcome),
+      'a sibling client with a player code gets no admin key at all -- absent, not false');
+
+    const settled = await waitFor(() => {
+      try {
+        const byName = {};
+        for (const row of readStatus(handle).players) byName[row.name] = row;
+        return byName.OPADMIN && byName.OPADMIN.admin === true &&
+          byName.OPPLAYER && byName.OPPLAYER.admin === false;
+      } catch (err) {
+        return false;
+      }
+    }, STATUS_HEARTBEAT_MS);
+    ok(settled, 'status.json rows carry admin: true for the admin connection ' +
+      'and admin: false for the player one');
+
+    admin.close();
+    player.close();
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // =========================================================================
 // wave 2: match history, the admin socket, the web dashboard, MOTD reload
 // -- docs/plans/server-live-ops.md §3
@@ -2216,6 +2285,82 @@ async function dashboardSessionFollowsCredentialTest() {
   }
 }
 
+// ------- the dashboard's door: a player's own code fails exactly like a
+// wrong one, and only an admin code gets through
+//
+// dashboardTest's shared-hub fixture (operatorFeaturesTest) only ever holds
+// an admin credential, so it cannot show a *real, currently active* player
+// code being turned away -- only "no credential exists to try", which is
+// dashboardNoCredentialTest's scenario. This hub carries both kinds of code
+// at once, so a player's own code and a stranger's guess can be shown landing
+// on the identical refusal.
+
+async function dashboardPlayerCodeRefusedTest() {
+  const PLAYER_CODE = 'PYQR78';
+  const handle = await startServer({
+    auth: {
+      required: false,
+      credentials: [
+        credential('dashadmin2', DASHBOARD_CODE, { admin: true }),
+        credential('dashplayer', PLAYER_CODE),
+      ],
+    },
+    dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT_PLAYER_ADMIN },
+  });
+  const port = DASHBOARD_PORT_PLAYER_ADMIN;
+
+  const login = (code) => httpRequest(port, {
+    path: '/login', method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  }, `code=${code}`);
+
+  try {
+    ok(handle.dashboard && handle.dashboard.port === port,
+      'a hub carrying both an admin and a player code still starts the dashboard');
+
+    const playerLogin = await login(PLAYER_CODE);
+    const wrongLogin = await login('ZZ9ZZ9');
+    ok(playerLogin.status === 403,
+      'a player\'s own, currently active join code is refused by the admin-only door');
+    ok(wrongLogin.status === 403, 'a code belonging to nobody is refused the same way');
+    ok(playerLogin.body === wrongLogin.body,
+      'and the two refusal bodies are byte-identical -- ' +
+      'a real code cannot be told apart from a guess by looking at the page');
+    ok(!cookiePair(playerLogin.headers) && !cookiePair(wrongLogin.headers),
+      'and neither one hands back a session cookie');
+
+    const adminLogin = await login(DASHBOARD_CODE);
+    ok(adminLogin.status === 303, 'the admin code, on the very same door, signs in');
+    ok(!!cookiePair(adminLogin.headers), 'and hands back a session cookie');
+  } finally {
+    await handle.close();
+  }
+}
+
+// ------- and the converse start-time refusal: a hub can hold join codes and
+// still have no dashboard, which is a different fact from holding none at
+// all (dashboardNoCredentialTest)
+
+async function dashboardOnlyPlayerCredentialsTest() {
+  const log = recordingLog();
+  const handle = await startServer({
+    auth: { required: false, credentials: [credential('onlyplayer', 'PYQR90')] },
+    dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT_ONLY_PLAYER },
+  }, { log });
+  try {
+    ok(handle.port > 0, 'the hub itself starts with a player-only credential list');
+    ok(handle.dashboard === null,
+      'but the dashboard does not -- a player code is not an admin code, ' +
+      'even though a live credential exists');
+    ok(await portIsClosed(DASHBOARD_PORT_ONLY_PLAYER),
+      'and nothing is listening on its port either');
+    ok(log.saw(/admin join code that still works/i),
+      'and the log names exactly why: no admin code, not merely "no code"');
+  } finally {
+    await handle.close();
+  }
+}
+
 // ------- the shared hub: history, admin, dashboard and MOTD reload together
 //
 // One hub, walked through all four in sequence, per plan §5/T2's own
@@ -2317,6 +2462,7 @@ async function main() {
   await statusUpdatesAfterJoinAndLeaveTest();
   await statusStoppedAtOnCloseTest();
   await statusSnapshotCarriesNothingSensitiveTest();
+  await authAdminWelcomeAndStatusTest();
 
   await historyRotationTest();
   await adminStaleSocketRecoveryTest();
@@ -2325,6 +2471,8 @@ async function main() {
   await dashboardDisabledTest();
   await dashboardNoCredentialTest();
   await dashboardSessionFollowsCredentialTest();
+  await dashboardPlayerCodeRefusedTest();
+  await dashboardOnlyPlayerCredentialsTest();
   await operatorFeaturesTest();
 
   console.log(`\n  ${passed}/${passed} checks passed  (server)\n`);
