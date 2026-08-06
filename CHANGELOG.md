@@ -4,6 +4,24 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.7.1] - 2026-08-05
+
+### Fixed
+
+- **NIRE and NIRE HOOD's back pic draws with square pixels again.** The back
+  pics are 48x48, and they were registered at 64/48 so they would take up the
+  same 64 screen pixels vanilla's 32x32 back pics get from their default 2x —
+  which is the right footprint drawn the wrong way. The plain battle view
+  hands that number to the draw call as it stands, onto a nearest-neighbour
+  canvas, so two source pixels out of every three came out one pixel wide and
+  the third came out two: the sprite read as subtly smeared rather than
+  crisply pixelated. The back pic now draws at 1x — 48 pixels, which is
+  exactly what the alternate 3D view has been showing all along, since it
+  rounds every battle scale to a whole number before drawing. The two views
+  finally agree. And a future character that asks for a fractional scale is
+  snapped to the nearest whole number with a warning naming it, so the
+  artifact cannot come back in through a new character sheet.
+
 ## [0.7.0] - 2026-08-05
 
 ### Added

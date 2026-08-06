@@ -397,16 +397,29 @@ M.DEFAULT_SPRITE = "SPRITE_RED"
 -- walk.png (16x96, six 16x16 frames), front.png (56x56, the trainer-card and
 -- intro pic) and back.png (48x48, the battle back pic).
 --
--- backScale is what a 48x48 back pic has to draw at.  The engine's default
--- for a back pic is 2x, sized for the 32x32 the ROM carries -- 64 screen
--- pixels with the feet pinned at y=96.  These are drawn at half again the
--- detail, so 64/48 keeps the same footprint on screen: a taller trainer
--- would stand in the text box.
+-- backScale is what a 48x48 back pic has to draw at, and it has to be a whole
+-- number.  The plain battle view hands the registered scale to the draw call
+-- verbatim, onto a nearest-neighbour canvas: at a fractional scale a source
+-- pixel lands on one destination pixel in some columns and two in others, so
+-- the sprite comes out visibly uneven rather than merely smaller or larger.
+-- This mod shipped exactly that bug -- 64/48, chosen so 48x48 art would keep
+-- the 64-pixel footprint the engine's own 32x32 back pics get from their
+-- default 2x, because a taller trainer stands in the text box.  The footprint
+-- was right and every third column was a pixel wide twice over.
+--
+-- 1 is the only whole number that works at this art size.  The feet sit on
+-- the text-box top at every scale and the pic grows upward from there, so at
+-- 2 it is 96 pixels tall and covers the whole field above the text box,
+-- enemy pic and status boxes included; at 1 it is 48, the size a back pic
+-- can actually be.  It also settles a disagreement between the two
+-- battle views: the alternate 3D view already rounds every battle scale to
+-- the nearest integer before drawing, so it has been showing these back pics
+-- at 1x all along.  Both views now draw the same pic at the same size.
 M.OWN_CHARS = {
   { id = "SPRITE_NIRE", label = "NIRE",
-    dir = "assets/chars/nire", backScale = 64 / 48 },
+    dir = "assets/chars/nire", backScale = 1 },
   { id = "SPRITE_NIRE_HOOD", label = "NIRE HOOD",
-    dir = "assets/chars/nire_hood", backScale = 64 / 48 },
+    dir = "assets/chars/nire_hood", backScale = 1 },
 }
 
 -- Offered in the options row like any other character.  Built from the table

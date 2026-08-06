@@ -206,14 +206,16 @@ for _, id in ipairs({ "SPRITE_NIRE", "SPRITE_NIRE_HOOD" }) do
   check((run.data.sprites or {})[id] ~= nil, id .. " reaches the merged data")
 end
 
--- The back pic is 48x48 against the 32x32 the engine sizes a trainer back
--- for, so it ships the scale that keeps its feet in the same place. Missing,
--- it would draw half again too tall and stand in the text box.
+-- The back pic is 48x48 art that has to draw at a whole number: the classic
+-- battle view hands the registered scale straight to a nearest-neighbour
+-- draw call, so a fraction would spread some source pixels over one
+-- destination pixel and others over two. 1 is the only whole number this
+-- art size can draw at without standing in the text box.
 for _, id in ipairs({ "rby_mmo_nire_back", "rby_mmo_nire_hood_back" }) do
   local scale = run.loader.content.battle_sprite_scales:get(id)
   check(scale ~= nil, id .. " sizes its back pic")
   if scale then
-    check(scale.scale > 1 and scale.scale < 2, id .. " draws between 1x and 2x")
+    eq(scale.scale, 1, id .. " draws at exactly 1x")
     check(type(scale.path) == "string"
           and scale.path:find(MOD_PATH, 1, true) == 1,
           id .. " points at the mod's own art")
@@ -3090,14 +3092,116 @@ for _, char in ipairs(Config.OWN_CHARS) do
   end
 end
 
--- 48 * (64/48) = 64: the same screen height the 32x32 the engine sizes a
--- trainer back for reaches at its default 2x, so the feet land where they
--- have always landed.
+-- The registered scale has to be a whole number -- a fraction draws uneven
+-- pixels on the classic battle view's nearest-neighbour canvas, which was
+-- exactly this mod's shipped bug (64/48, chosen to keep a 64px footprint).
+-- It also has to keep the pic under the text-box top: feet pin at y=96
+-- regardless of scale, so the pic grows upward from there, and 96 screen
+-- pixels tall would reach all the way up over the enemy pic and status
+-- boxes. 95 is the most room there is below that ceiling.
 for _, char in ipairs(Config.OWN_CHARS) do
   local scale = stubScales[Cast.scaleId(char)]
   check(scale ~= nil, char.label .. "'s back pic is sized")
-  check(scale and math.abs(scale.scale * 48 - 64) < 0.001,
-        "to the height a vanilla back pic draws")
+  if scale then
+    eq(scale.scale % 1, 0, char.label .. "'s scale is a whole number")
+    check(48 * scale.scale <= 95,
+          char.label .. "'s back pic stays under the text-box top")
+  end
+end
+
+-- ------- the snap: a fractional or non-numeric backScale is caught and
+-- rounded, never shipped as asked
+--
+-- Config.OWN_CHARS only ever carries 1 today, so exercising the snap needs
+-- a synthetic row -- built by loading a second, disposable copy of Cast
+-- through the same resolver()-plus-preseeded-cache trick the file-store
+-- Client tests above use, with its own Config swap and its own log and
+-- registries, so none of this touches the real cast or the
+-- stubSprites/stubScales the rest of this section shares.
+local function loadCastWith(chars)
+  local scaleStub, spriteStub, warns = {}, {}, {}
+  local fakeMod = {
+    id = "rby_mmo",
+    path = MOD_PATH,
+    log = {
+      info = function() end,
+      error = function() end,
+      warn = function(_, fmt, ...)
+        local ok, line = pcall(string.format, fmt, ...)
+        warns[#warns + 1] = ok and line or tostring(fmt)
+      end,
+    },
+    assets = { path = function(_, relative) return MOD_PATH .. "/" .. relative end },
+    content = {
+      sprites = { register = function(_, id, record) spriteStub[id] = record end },
+      battle_sprite_scales = {
+        register = function(_, id, record) scaleStub[id] = record end,
+      },
+    },
+  }
+  local loadstr = loadstring or load
+  local cache = {
+    Config = {
+      MOD_ID = Config.MOD_ID,
+      CHAR_FRAMES = Config.CHAR_FRAMES,
+      CHAR_PALETTE_SOURCE = Config.CHAR_PALETTE_SOURCE,
+      OWN_CHARS = chars,
+    },
+  }
+  local function need2(name)
+    if cache[name] then return cache[name] end
+    local handle = io.open(MOD_PATH .. "/src/" .. name .. ".lua", "rb")
+    if not handle then error("missing module " .. name, 0) end
+    local body = handle:read("*a")
+    handle:close()
+    local chunk = assert(loadstr(body, "@" .. name .. ".lua"))
+    cache[name] = chunk(need2, fakeMod)
+    return cache[name]
+  end
+  local FreshCast = need2("Cast")
+  FreshCast.install()
+  return FreshCast, scaleStub, warns
+end
+
+local function snapChar(id, backScale)
+  return { id = id, label = id, dir = "assets/chars/nire", backScale = backScale }
+end
+
+do
+  local char = snapChar("SPRITE_SNAP_FRACTION", 64 / 48)
+  local FreshCast, scaleStub, warns = loadCastWith({ char })
+  local scale = scaleStub[FreshCast.scaleId(char)]
+  check(scale ~= nil, "a fractional backScale still registers a scale")
+  eq(scale and scale.scale, 1, "snapped to the nearest whole number")
+  eq(#warns, 1, "and exactly one warn fires")
+  check(warns[1] and warns[1]:find("whole-number backScale", 1, true) ~= nil,
+        "naming the whole-number remediation")
+end
+
+do
+  local char = snapChar("SPRITE_SNAP_ABSENT", nil)
+  local FreshCast, scaleStub, warns = loadCastWith({ char })
+  local scale = scaleStub[FreshCast.scaleId(char)]
+  eq(scale and scale.scale, 1, "an absent backScale defaults to 1")
+  eq(#warns, 0, "and is not treated as a mistake worth warning about")
+end
+
+do
+  local char = snapChar("SPRITE_SNAP_WHOLE", 2)
+  local FreshCast, scaleStub, warns = loadCastWith({ char })
+  local scale = scaleStub[FreshCast.scaleId(char)]
+  eq(scale and scale.scale, 2, "an already-whole backScale registers unchanged")
+  eq(#warns, 0, "and does not warn")
+end
+
+do
+  local char = snapChar("SPRITE_SNAP_NONNUMERIC", "smash")
+  local FreshCast, scaleStub, warns = loadCastWith({ char })
+  local scale = scaleStub[FreshCast.scaleId(char)]
+  eq(scale and scale.scale, 1, "a non-numeric backScale falls back to 1")
+  eq(#warns, 1, "and is warned about, not silently substituted")
+  check(warns[1] and warns[1]:find("whole-number backScale", 1, true) ~= nil,
+        "naming the same remediation")
 end
 
 -- ------- the mark that says a character came with the mod
