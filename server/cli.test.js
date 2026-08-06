@@ -25,6 +25,7 @@
 
 const fs = require('node:fs');
 const os = require('node:os');
+const net = require('node:net');
 const path = require('node:path');
 const Module = require('node:module');
 const { Readable } = require('node:stream');
@@ -518,6 +519,13 @@ function testValueFor(dotted) {
     case 'log.level': return { raw: 'debug', expected: 'debug' };
     case 'bans': return { raw: '203.0.113.9', expected: [limits.normalizeIp('203.0.113.9')] };
     case 'allowlist': return { raw: '198.51.100.4', expected: [limits.normalizeIp('198.51.100.4')] };
+    // The wave-2 leaves (docs/plans/server-live-ops.md §3): motd and two of
+    // the three dashboard fields. dashboard.port already has a BOUNDS entry
+    // and is covered by the branch above; wave 1 flagged these three as the
+    // gap the BOUNDS-only sweep would miss.
+    case 'motd': return { raw: 'Reboot at 10pm, back in five.', expected: 'Reboot at 10pm, back in five.' };
+    case 'dashboard.enabled': return { raw: 'true', expected: true };
+    case 'dashboard.host': return { raw: '10.0.0.5', expected: '10.0.0.5' };
     default: return null;
   }
 }
@@ -607,6 +615,27 @@ async function clampReportScenario() {
   ok(adjustedAt >= 0 && reportedAt > adjustedAt, 'the clamp note prints before the final value line');
 
   ok(readConfigFile(file).maxPlayers === 64, 'the clamped value, not the raw one, is what gets saved');
+}
+
+// =====================================================================
+// config set motd -- reload, not restart (docs/plans/server-live-ops.md §3)
+// =====================================================================
+
+async function configSetMotdReloadRecipeScenario() {
+  const dir = scratchDir('motd');
+  const file = path.join(dir, 'config.json');
+  await runCli(['init', '--yes', '--config', file], { cwd: dir });
+
+  const result = await runCli(
+    ['config', 'set', 'motd', 'Back in five minutes.', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'config set motd succeeds');
+  ok(readConfigFile(file).motd === 'Back in five minutes.', 'and the greeting lands on disk');
+
+  ok(/kill -HUP/.test(result.stdout), 'the reload recipe is printed for a bare node hub');
+  ok(/docker compose kill -s SIGHUP hub/.test(result.stdout), 'and for a docker one');
+  ok(!/Restart the hub for this to take effect\./.test(result.stdout),
+    'and the generic "restart the hub" line, which every other leaf gets, is not printed here -- ' +
+    'a running hub picks the MOTD up on SIGHUP, not a restart');
 }
 
 // =====================================================================
@@ -850,6 +879,82 @@ async function playersHonoursConfigScenario() {
     'never the one that happens to sit beside the current working directory');
 }
 
+// =====================================================================
+// watch -- players on a timer; --once is the whole testable path
+// =====================================================================
+//
+// The loop itself (Ctrl-C, repeated repaints) is not exercised here: it
+// runs until a signal arrives, which is not a shape a suite should be
+// racing against. `--once` is the path the plan built specifically so this
+// file could assert on it -- render one frame, report that frame's own
+// exit code, and stop.
+
+function hasEsc(text) {
+  return String(text).includes('\u001b');
+}
+
+async function watchOnceMatchesPlayersScenario() {
+  const dir = scratchDir('watch-once');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'status.json'), statusFixture({
+    players: [playerRow({ name: 'RED', map: 'PALLET_TOWN', points: 12, ranked: true })],
+  }));
+
+  const players = await runCli(['players', '--config', file], { cwd: dir });
+  const watch = await runCli(['watch', '--once', '--config', file], { cwd: dir });
+
+  ok(watch.code === cli.OK, 'watch --once succeeds');
+  ok(watch.code === players.code, 'and its exit code matches `players`\' own');
+  ok(watch.stdout === players.stdout,
+    'watch --once renders exactly the frame `players` would, byte for byte');
+  ok(watch.stderr === players.stderr, 'including anything said on stderr');
+
+  ok(!hasEsc(watch.stdout) && !hasEsc(watch.stderr),
+    'a non-TTY sink sees no ESC byte at all: the clear-screen sequence is gated on isTTY');
+}
+
+async function watchOnceJsonScenario() {
+  const dir = scratchDir('watch-once-json');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'status.json'), statusFixture({
+    players: [playerRow({ name: 'BLUE' })],
+  }));
+
+  const result = await runCli(['watch', '--once', '--json', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'watch --once --json succeeds');
+  const parsed = JSON.parse(result.stdout);
+  ok(Array.isArray(parsed) && parsed.length === 1, 'and prints one JSON frame, parseable whole');
+  ok(!hasEsc(result.stdout) && !hasEsc(result.stderr), 'still no ESC byte in a --json frame');
+}
+
+async function watchBadIntervalScenario() {
+  const dir = scratchDir('watch-bad-interval');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'status.json'), statusFixture({ players: [] }));
+
+  const nonNumeric = await runCli(
+    ['watch', '--once', '--interval', 'soon', '--config', file], { cwd: dir });
+  ok(nonNumeric.code === cli.USAGE, '--interval "soon" is a usage error (exit 2)');
+  ok(/not a number of seconds/.test(nonNumeric.stderr), 'and says why');
+
+  const noValue = await runCli(
+    ['watch', '--once', '--interval', '--config', file], { cwd: dir });
+  ok(noValue.code === cli.USAGE, '--interval with nothing after it is a usage error too');
+
+  /*
+   * --interval 0 is a number, just outside the 1-60s range -- watchInterval()
+   * clamps it the same way config.js clamps an out-of-range setting, rather
+   * than refusing it. So this is the one "bad" interval that is NOT exit 2:
+   * `--once` still renders its frame and exits OK, with the clamp reported.
+   */
+  const zero = await runCli(
+    ['watch', '--once', '--interval', '0', '--config', file], { cwd: dir });
+  ok(zero.code === cli.OK,
+    '--interval 0 is clamped to the 1-60s range rather than refused, so --once still exits 0');
+  ok(/adjusted:.*--interval 0.*using 1s/.test(zero.stderr),
+    'and the clamp is reported, the same way an out-of-range config value would be');
+}
+
 // ---------------------------------------------------------------- ranking
 
 async function rankingTopTenScenario() {
@@ -955,6 +1060,430 @@ async function rankingHonoursConfigScenario() {
   ok(result.stdout.includes('HERE'), 'and reads the ranking beside the given config file');
   ok(!result.stdout.includes('WRONGDIR'),
     'never the one that happens to sit beside the current working directory');
+}
+
+// --- W and L: a projection of played/won that has always been on the file,
+//     never new state (plan §3, docs/plans/server-live-ops.md).
+
+async function rankingWinLossScenario() {
+  const dir = scratchDir('ranking-winloss');
+  const file = path.join(dir, 'config.json');
+  writeJson(path.join(dir, 'ranking.json'), {
+    version: 1,
+    players: [
+      { name: 'ASH', sprite: 'SPRITE_RED', points: 40, played: 5, won: 3 },
+      { name: 'MISTY', sprite: 'SPRITE_RED', points: 10, played: 1, won: 1 },
+    ],
+  });
+
+  const findRow = (stdout, name) => stdout.split('\n')
+    .filter((line) => /^\d+\s{2,}/.test(line))
+    .map((line) => line.trim().split(/\s+/))
+    .find((cells) => cells[1] === name);
+
+  const result = await runCli(['ranking', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'ranking with played/won succeeds');
+  ok(/\bW\b/.test(result.stdout) && /\bL\b/.test(result.stdout), 'W and L columns are printed');
+
+  const ashRow = findRow(result.stdout, 'ASH');
+  ok(!!ashRow, 'ASH has a row');
+  ok(ashRow && ashRow[3] === '3', `ASH's W column is won (3), got ${ashRow && ashRow[3]}`);
+  ok(ashRow && ashRow[4] === '2',
+    `ASH's L column is played-won (5-3=2), got ${ashRow && ashRow[4]}`);
+
+  const mistyRow = findRow(result.stdout, 'MISTY');
+  ok(!!mistyRow, 'MISTY has a row');
+  ok(mistyRow && mistyRow[3] === '1' && mistyRow[4] === '0',
+    'a player who has never lost shows L as 0, not blank or negative');
+
+  const jsonResult = await runCli(['ranking', '--json', '--config', file], { cwd: dir });
+  ok(jsonResult.code === cli.OK, 'ranking --json succeeds');
+  const rows = JSON.parse(jsonResult.stdout);
+  const ash = rows.find((row) => row.name === 'ASH');
+  ok(!!ash && ash.played === 5 && ash.won === 3,
+    '--json carries played and won -- the fields W/L on the table are projected from');
+}
+
+// =====================================================================
+// history -- settled ranked battles, both generations, newest first
+// =====================================================================
+
+function historyRecordFixture(label, atMs) {
+  return {
+    at: atMs,
+    startedAt: atMs - 5000,
+    repeats: 0,
+    winner: { name: `${label}W`, points: 50, gained: 16 },
+    loser: { name: `${label}L`, points: 10, lost: 16 },
+  };
+}
+
+function writeHistoryFile(file, lines) {
+  fs.writeFileSync(file, `${lines
+    .map((line) => (typeof line === 'string' ? line : JSON.stringify(line)))
+    .join('\n')}\n`);
+}
+
+async function historyBothGenerationsScenario() {
+  const dir = scratchDir('history-both');
+  const file = path.join(dir, 'config.json');
+  const now = Date.now();
+
+  // Older generation: two settled battles and one torn line, in file order.
+  writeHistoryFile(path.join(dir, 'history.jsonl.1'), [
+    historyRecordFixture('OLD1', now - 4000),
+    '{not valid json',
+    historyRecordFixture('OLD2', now - 3000),
+  ]);
+  // Current generation: same shape, newer battles.
+  writeHistoryFile(path.join(dir, 'history.jsonl'), [
+    historyRecordFixture('NEW1', now - 2000),
+    '{also not valid',
+    historyRecordFixture('NEW2', now - 1000),
+  ]);
+
+  const result = await runCli(['history', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'history over two generations succeeds');
+
+  const winnerOrder = result.stdout.split('\n')
+    .filter((line) => /\+16\/-16/.test(line))
+    .map((line) => line.trim().split(/\s+/)[1]);
+  ok(winnerOrder.join(',') === 'NEW2W,NEW1W,OLD2W,OLD1W',
+    `newest first across both generations, oldest last (got ${winnerOrder.join(',')})`);
+
+  ok(/4 settled ranked battle\(s\)/.test(result.stdout),
+    'the footer count spans both generations (4, not 2 from either alone)');
+
+  ok(/note: 2 line\(s\)/.test(result.stderr),
+    'both torn lines are counted -- one per generation, not just the current one');
+  ok(/history\.jsonl and history\.jsonl\.1/.test(result.stderr),
+    'and the note names both files by name');
+}
+
+async function historyCountAndBadCountScenario() {
+  const dir = scratchDir('history-count');
+  const file = path.join(dir, 'config.json');
+  const now = Date.now();
+  writeHistoryFile(path.join(dir, 'history.jsonl.1'), [
+    historyRecordFixture('OLD1', now - 4000),
+    historyRecordFixture('OLD2', now - 3000),
+  ]);
+  writeHistoryFile(path.join(dir, 'history.jsonl'), [
+    historyRecordFixture('NEW1', now - 2000),
+    historyRecordFixture('NEW2', now - 1000),
+  ]);
+
+  const cut = await runCli(['history', '-n', '3', '--config', file], { cwd: dir });
+  ok(cut.code === cli.OK, 'history -n 3 succeeds');
+  const winnerOrder = cut.stdout.split('\n')
+    .filter((line) => /\+16\/-16/.test(line))
+    .map((line) => line.trim().split(/\s+/)[1]);
+  ok(winnerOrder.join(',') === 'NEW2W,NEW1W,OLD2W',
+    '-n 3 keeps the three newest, cutting across the generation boundary');
+
+  const badNumber = await runCli(['history', '-n', 'abc', '--config', file], { cwd: dir });
+  ok(badNumber.code === cli.USAGE, '-n abc is a usage error (exit 2)');
+
+  const badZero = await runCli(['history', '-n', '0', '--config', file], { cwd: dir });
+  ok(badZero.code === cli.USAGE, '-n 0 is a usage error too -- not one result, none at all');
+}
+
+async function historyJsonScenario() {
+  const dir = scratchDir('history-json');
+  const file = path.join(dir, 'config.json');
+  const now = Date.now();
+  writeHistoryFile(path.join(dir, 'history.jsonl'), [
+    historyRecordFixture('SOLO', now - 1000),
+  ]);
+
+  const result = await runCli(['history', '--json', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'history --json succeeds');
+  const parsed = JSON.parse(result.stdout);
+  ok(Array.isArray(parsed) && parsed.length === 1, 'one record comes through, as a JSON array');
+  const record = parsed[0];
+  ok(record.winner.name === 'SOLOW' && record.winner.gained === 16,
+    'the winner side carries name and gained, per the record contract');
+  ok(record.loser.name === 'SOLOL' && record.loser.lost === 16,
+    'the loser side carries name and lost');
+  ok(typeof record.at === 'number' && typeof record.startedAt === 'number'
+    && typeof record.repeats === 'number',
+    'and the record-level fields (at, startedAt, repeats) are projected too');
+}
+
+async function historyRotatedOnlyScenario() {
+  const dir = scratchDir('history-rotated-only');
+  const file = path.join(dir, 'config.json');
+  const now = Date.now();
+  // No current history.jsonl at all -- a hub that rotated and has settled
+  // nothing since, or a host who moved the current file aside by hand.
+  writeHistoryFile(path.join(dir, 'history.jsonl.1'), [
+    historyRecordFixture('ONLY', now - 1000),
+  ]);
+
+  const result = await runCli(['history', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'a .1-only ledger still reads');
+  ok(result.stdout.includes('ONLYW'), 'and its record shows up');
+  ok(/1 settled ranked battle/.test(result.stdout), 'counted as the one record it holds');
+}
+
+async function historyMissingScenario() {
+  const dir = scratchDir('history-missing');
+  const file = path.join(dir, 'config.json');
+
+  const result = await runCli(['history', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'no history file at all is not an error');
+  ok(/No match history/.test(result.stderr), 'and says plainly that there is none');
+
+  const asJson = await runCli(['history', '--json', '--config', file], { cwd: dir });
+  ok(asJson.code === cli.OK, 'and --json still succeeds when there is nothing to show');
+  ok(asJson.stdout.trim() === '[]', 'emitting an empty array rather than nothing at all');
+}
+
+// =====================================================================
+// kick / broadcast -- the admin socket, dialled from the CLI side
+// =====================================================================
+//
+// lib/admin.js binds the real socket and has its own suite (server.test.js,
+// T2); this section only proves the CLI's *client* half: it dials whatever
+// is at admin.sock beside the config file and turns the answer -- or its
+// absence -- into the right exit code and sentence. Every scenario below is
+// a hand-rolled fixture speaking the newline-JSON protocol documented in
+// docs/plans/server-live-ops.md §3; none of it goes through lib/admin.js.
+//
+// Unix domain socket paths are capped (~104 bytes on darwin), and the
+// scratch tree everywhere else in this file -- mkdtemp under os.tmpdir(),
+// plus a numbered subdirectory -- is already close enough to that ceiling
+// that stacking "admin.sock" on top of it is not safe. So this section
+// keeps its own short directories straight under os.tmpdir(), tracked here
+// and swept in main()'s finally alongside ROOT.
+
+const ADMIN_TMP_DIRS = [];
+function adminScratchDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rby-a-'));
+  ADMIN_TMP_DIRS.push(dir);
+  return dir;
+}
+
+function cleanupAdminScratchDirs() {
+  for (const dir of ADMIN_TMP_DIRS) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (err) { /* best effort -- a leftover temp dir costs nothing */ }
+  }
+}
+
+/**
+ * A fixture admin socket: one connection, one line in, `respond(request)`
+ * decides the line out. `respond` returning `undefined` means "never
+ * answer" -- how the CLI's own timeout path is driven, below.
+ */
+function startAdminFixture(socketPath, respond) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer((socket) => {
+      let buffer = '';
+      socket.on('error', () => { /* a client that vanishes mid-exchange is ordinary */ });
+      socket.on('data', (chunk) => {
+        buffer += chunk;
+        const newline = buffer.indexOf('\n');
+        if (newline < 0) return;
+        let request = null;
+        try {
+          request = JSON.parse(buffer.slice(0, newline));
+        } catch (err) { /* malformed on purpose, in some scenarios */ }
+        const result = respond(request);
+        if (result === undefined) return; // deliberately never answers
+        try {
+          socket.end(`${JSON.stringify(result)}\n`);
+        } catch (err) { /* the peer is already gone */ }
+      });
+    });
+    server.once('error', reject);
+    server.listen(socketPath, () => {
+      server.removeListener('error', reject);
+      resolve(server);
+    });
+  });
+}
+
+function closeAdminFixture(server) {
+  return new Promise((resolve) => server.close(resolve));
+}
+
+async function kickHappyScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  let seenRequest = null;
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'), (request) => {
+    seenRequest = request;
+    return { ok: true, kicked: 1, names: ['RED'] };
+  });
+
+  try {
+    const result = await withTimeout(
+      runCli(['kick', 'RED', '--config', file], { cwd: dir }), 5000, 'kick to answer');
+    ok(result.code === cli.OK, 'a kick the hub grants exits 0');
+    ok(result.stdout.includes('RED'), 'and the reply names who was kicked');
+    ok(!!seenRequest && seenRequest.cmd === 'kick' && seenRequest.name === 'RED',
+      'the request sent over the wire is {cmd:"kick", name: ...}');
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
+async function kickReasonScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  let seenRequest = null;
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'), (request) => {
+    seenRequest = request;
+    return { ok: true, kicked: 1, names: ['RED'] };
+  });
+
+  try {
+    const result = await withTimeout(
+      runCli(['kick', 'RED', '--reason', 'being', 'rude', '--config', file], { cwd: dir }),
+      5000, 'kick --reason to answer');
+    ok(result.code === cli.OK, 'kick with a multi-word reason still succeeds');
+    ok(!!seenRequest && seenRequest.reason === 'being rude',
+      'and the reason arrives joined back into one sentence, over the wire');
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
+async function kickNobodyScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'),
+    () => ({ ok: true, kicked: 0, names: [] }));
+
+  try {
+    const result = await withTimeout(
+      runCli(['kick', 'NOBODY', '--config', file], { cwd: dir }), 5000, 'kick 0 to answer');
+    ok(result.code === cli.OK, 'kicking nobody is still a success, not a failure');
+    ok(/Nobody by that name is connected/.test(result.stdout), 'and says so honestly');
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
+async function broadcastHappyScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  let seenRequest = null;
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'), (request) => {
+    seenRequest = request;
+    return { ok: true, delivered: 3 };
+  });
+
+  try {
+    const result = await withTimeout(
+      runCli(['broadcast', 'back', 'in', 'five', '--config', file], { cwd: dir }),
+      5000, 'broadcast to answer');
+    ok(result.code === cli.OK, 'a broadcast the hub delivers exits 0');
+    ok(/Delivered to 3 player\(s\)/.test(result.stdout), 'and reports the delivered count');
+    ok(!!seenRequest && seenRequest.cmd === 'broadcast' && seenRequest.text === 'back in five',
+      'the message arrives joined back into one line, as {cmd:"broadcast", text}');
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
+async function adminRefusalScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'),
+    () => ({ ok: false, error: 'This hub cannot kick.' }));
+
+  try {
+    const result = await withTimeout(
+      runCli(['kick', 'RED', '--config', file], { cwd: dir }), 5000, 'the refusal to answer');
+    ok(result.code === cli.ERROR, 'a hub that answers ok:false is a real refusal (exit 1)');
+    ok(/This hub cannot kick/.test(result.stderr), 'and the reason travels to the terminal');
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
+async function adminNoSocketScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  // No socket ever created at this path: the hub is not running, or it
+  // predates the admin channel entirely.
+
+  const kick = await runCli(['kick', 'RED', '--config', file], { cwd: dir });
+  ok(kick.code === cli.OK, 'no admin socket at all is not an error for kick (exit 0)');
+  ok(/No admin socket/.test(kick.stderr), 'and says plainly that there is none');
+  ok(/no hub is running/.test(kick.stderr) && /predates/.test(kick.stderr),
+    'naming both honest causes -- not running, or too old to have opened one');
+
+  const broadcast = await runCli(['broadcast', 'hello', '--config', file], { cwd: dir });
+  ok(broadcast.code === cli.OK, 'and the same is true for broadcast');
+  ok(/No admin socket/.test(broadcast.stderr), 'with the same honest sentence');
+}
+
+/**
+ * A socket file that survives its process: bind it in a child, then SIGKILL
+ * that child before it can close() and unlink its own socket. This is the
+ * one shape a graceful close() in this same process cannot reproduce --
+ * Node does remove the file on a clean close(), only not on a `kill -9`
+ * (verified empirically before writing this: see the ECONNREFUSED handling
+ * this exists to drive, cli.js's reportNoAdminSocket()).
+ */
+function spawnAdminSocketBinder(socketPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['-e', `
+      const net = require('node:net');
+      const server = net.createServer(() => {});
+      server.listen(process.argv[1], () => { process.stdout.write('ready\\n'); });
+    `, socketPath], { stdio: ['ignore', 'pipe', 'ignore'] });
+    child.once('error', reject);
+    child.stdout.once('data', () => resolve(child));
+  });
+}
+
+async function adminStaleSocketScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  const socketPath = path.join(dir, 'admin.sock');
+
+  const child = await spawnAdminSocketBinder(socketPath);
+  // Wait for the *exit*, not just for the signal to be sent: SIGKILL is
+  // asynchronous, and connecting while the process is still alive but not
+  // yet reaped can have the kernel accept the connection into the listen
+  // backlog before the process dies -- a real, if unanswered, exchange
+  // rather than the ECONNREFUSED this scenario means to drive.
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await withTimeout(exited, 5000, 'the killed admin-socket binder to exit');
+  ok(fs.existsSync(socketPath), 'the socket file survives its own process dying');
+
+  const result = await runCli(['kick', 'RED', '--config', file], { cwd: dir });
+  ok(result.code === cli.OK, 'a stale socket file with nothing listening is not an error (exit 0)');
+  ok(/Nothing is listening/.test(result.stderr), 'and says the hub behind it is gone');
+  ok(/killed rather than stopped/.test(result.stderr), 'naming why the file outlived the process');
+}
+
+async function adminTimeoutScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  // respond() returning undefined means "never answer" -- see startAdminFixture.
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'), () => undefined);
+
+  try {
+    /*
+     * cli.js's ADMIN_TIMEOUT_MS (5s) is not exported, so there is no way to
+     * shorten this from outside -- this scenario really does wait out the
+     * clock. It is the one place in this suite that costs real wall time on
+     * purpose; one such test is enough to prove the path exists at all.
+     */
+    const result = await withTimeout(
+      runCli(['kick', 'RED', '--config', file], { cwd: dir }), 8000, 'the timeout itself to fire');
+    ok(result.code === cli.ERROR, 'a hub that never answers is a runtime error (exit 1), not a hang');
+    ok(/did not answer within/.test(result.stderr), 'and says it was a timeout, not a refusal');
+  } finally {
+    await closeAdminFixture(server);
+  }
 }
 
 // =====================================================================
@@ -1458,6 +1987,7 @@ async function main() {
     await suppliedPasscodeScenario();
     await configLeafPathScenario();
     await clampReportScenario();
+    await configSetMotdReloadRecipeScenario();
     await statusPrecedenceScenario();
     await playersLiveScenario();
     await playersEmptyScenario();
@@ -1469,11 +1999,28 @@ async function main() {
     await playersUndatedEmptyScenario();
     await playersJsonScenario();
     await playersHonoursConfigScenario();
+    await watchOnceMatchesPlayersScenario();
+    await watchOnceJsonScenario();
+    await watchBadIntervalScenario();
     await rankingTopTenScenario();
     await rankingJsonScenario();
     await rankingEmptyScenario();
     await rankingMissingScenario();
     await rankingHonoursConfigScenario();
+    await rankingWinLossScenario();
+    await historyBothGenerationsScenario();
+    await historyCountAndBadCountScenario();
+    await historyJsonScenario();
+    await historyRotatedOnlyScenario();
+    await historyMissingScenario();
+    await kickHappyScenario();
+    await kickReasonScenario();
+    await kickNobodyScenario();
+    await broadcastHappyScenario();
+    await adminRefusalScenario();
+    await adminNoSocketScenario();
+    await adminStaleSocketScenario();
+    await adminTimeoutScenario();
     await secretsDisciplineScenario();
     await inviteScenario();
     await revokeScenario();
@@ -1489,6 +2036,7 @@ async function main() {
     await spawnExitCodeScenario();
   } finally {
     fs.rmSync(ROOT, { recursive: true, force: true });
+    cleanupAdminScratchDirs();
   }
   console.log(`\n  ${passed}/${passed} checks passed  (cli)\n`);
 }

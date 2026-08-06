@@ -433,6 +433,33 @@ eq(Wire.text(12345), nil, "a non-string is not a message")
 eq(#Wire.text(string.rep("a", 500)), Config.MESSAGE_MAX, "text is capped")
 eq(#Wire.name(string.rep("b", 50)), Config.NAME_MAX, "names are capped shorter")
 
+-- ------- MOTD: the same sanitiser, a bigger budget
+--
+-- src/Client.lua's welcome handler makes exactly this call --
+-- `Wire.text(msg.motd, Config.MOTD_MAX)` -- so the budget is pinned here
+-- against drift, and the call is exercised at the two edges plus the
+-- untrusted-input floor Wire.text already guarantees every other field.
+
+eq(Config.MOTD_MAX, 120, "the MOTD budget is pinned")
+check(Config.MOTD_MAX > Config.MESSAGE_MAX,
+      "a hub's message of the day gets more room than one chat line")
+
+-- Wrapped for scope, the way the movement.speed block above is: kept out of
+-- the main chunk's own locals so this file stays under Lua's 200-local cap.
+;(function()
+  local motdWhole = string.rep("m", Config.MOTD_MAX)
+  eq(Wire.text(motdWhole, Config.MOTD_MAX), motdWhole,
+     "exactly MOTD_MAX characters survive whole")
+  local motdOverlong = string.rep("m", Config.MOTD_MAX + 1)
+  local motdTruncated = Wire.text(motdOverlong, Config.MOTD_MAX)
+  eq(#motdTruncated, Config.MOTD_MAX, "one character over the budget is cut to it")
+  eq(motdTruncated, motdWhole, "and the surviving characters are the leading ones")
+end)()
+eq(Wire.text(nil, Config.MOTD_MAX), nil, "a nil motd -- an old hub's silence -- is nil")
+eq(Wire.text(42, Config.MOTD_MAX), nil, "a non-string motd is nil, not stringified")
+eq(Wire.text("", Config.MOTD_MAX), nil, "an empty motd is nil, same as an empty chat line")
+eq(Wire.text("   ", Config.MOTD_MAX), nil, "whitespace alone is nil here too")
+
 eq(Wire.id("abc_123-x"), "abc_123-x", "a well-formed id survives")
 eq(Wire.id("../../etc/passwd"), nil, "a path is not an id")
 eq(Wire.id(""), nil, "an empty id is rejected")
@@ -818,6 +845,28 @@ check(chat:bubbleFor("a") ~= nil, "a bubble survives until its time is up")
 chat:update(0.2)
 eq(chat:bubbleFor("a"), nil, "and then expires")
 
+-- ------- MOTD: the exact push shape src/Client.lua's welcome handler uses
+--
+-- `ctx.chat:push({ name = "HUB", scope = "global", text = motd })` -- no
+-- `from`, because the hub stands on no map and owns no avatar (Client.lua's
+-- comment on the welcome handler). Pinned here at the Chat seam, since the
+-- suite has no cheap way to drive the real handler live (see the note where
+-- the fake-hub tier begins below).
+
+chat:clear()
+;(function()
+  local hubEntry = chat:push({ name = "HUB", scope = "global", text = "welcome to the hub" })
+  check(hubEntry ~= nil, "the hub line is accepted with no `from`")
+  eq(chat.history[#chat.history].name, "HUB", "it lands in the scrollback under the HUB name")
+  eq(chat:line(hubEntry), "[G]HUB: welcome to the hub",
+     "and renders like any other global line -- Chat:line never reads `from`")
+end)()
+eq(chat.unread, 1,
+   "it lights the unread badge -- deliberate, per docs/plans/server-live-ops.md "
+   .. "#3: a greeting nobody notices is a greeting nobody reads")
+eq(chat:bubbleFor("HUB"), nil,
+   "and nothing bubbles for it -- the client never calls :bubble for the motd")
+
 -- ------- SessionNet: the shim the engine's link code runs over
 
 local sent = {}
@@ -913,6 +962,24 @@ check(transport.error ~= nil, "and says why")
 -- Hub is deliberately socket-free so it can be driven here with fake peers.
 -- These are the same behaviours server/hub.test.js pins on the Node side;
 -- two implementations of one protocol only stay honest if both are tested.
+--
+-- This is *not* a seam for pinning MOTD end-to-end: Hub.lua is the embedded
+-- in-game hub, which docs/plans/server-live-ops.md #3 deliberately leaves
+-- out of this feature entirely (its Wire.WELCOME below carries no `motd`
+-- field at all, and never will). The dedicated hub that does send one is
+-- server/lib/relay.js, out of this suite's reach. And src/Client.lua's own
+-- welcome handler -- the code that calls `Wire.text(msg.motd,
+-- Config.MOTD_MAX)` and pushes the HUB chat line -- lives inside the
+-- closure M.install() builds, reachable only by handing it a full mod
+-- facade (events, hooks, ui, world, transport, ...); section 1 above loads
+-- that closure through the real loader but never connects it, and section
+-- 2's `need()` resolver returns the module table without ever calling
+-- install(). Driving a real WELCOME through that handler would mean
+-- building install()'s whole facade from scratch here -- exactly the heavy
+-- scaffolding this suite avoids -- so the welcome-carries-motd behaviour is
+-- pinned one layer down instead: Config.MOTD_MAX / Wire.text(_, MOTD_MAX)
+-- above (the sanitiser the handler calls) and the Chat push shape above
+-- that (the exact table the handler builds from the result).
 
 local Hub = need("Hub")
 
