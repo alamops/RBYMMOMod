@@ -222,9 +222,13 @@ METRONOME calls, multi-hit hits, recoil recoils, BIDE stores.
 </p>
 
 All four commands are there — **FIGHT, ITEM, SWITCH, RUN** — with items going
-through the engine's own item effects. RUN and a thrown ball are *refused*, in
-the game's own words, because a co-op battle is always a trainer battle and
-Gen 1 lets you do neither in one.
+through the engine's own item effects. Against a trainer, RUN and a thrown
+ball are *refused*, in the game's own words, because Gen 1 lets you do
+neither in a trainer battle. Against another party, **RUN asks your partner
+first**: they get a yes/no box in the battle itself (it opens on NO, so a
+button held through the messages can't answer it), a no costs you nothing but
+the asking, and a yes ends the battle for all four — as the runners' loss and
+the opponents' win, so fleeing at match point buys nothing.
 
 **Exp is priced on each player's own machine.** The host resolves the knockout
 but holds nobody's party except its own, so what crosses the wire is a
@@ -263,6 +267,19 @@ rather than being handed a menu that answers nothing. A side only falls when
 <p align="center">
   <img src="docs/screenshots/party-spectating.png" width="300" alt="GAMMA's screen after their last POKeMON fell: their slot gone from the readout, their partner VENUSAUR still fighting">
 </p>
+
+**And losing sends you home, the way the game always did.** Every player
+whose party lost — or who walked out of any co-op battle with nothing left
+able to fight, even on the winning side — gets the whole vanilla ritual:
+party healed, money halved, and the warp to *their own* last POKéMON CENTER.
+Nobody is left standing in the tall grass at 0 HP, which also means a party
+with nothing able to fight is never wandering around to be challenged — and
+if one ever were, the battle refuses to start rather than starting broken.
+
+**And nobody can hold four people hostage.** Every turn has one 60-second
+clock, the same honest number on every screen, the host's own turn included.
+When it runs out the late player's first usable move is played for them —
+everyone is told who took too long — and the battle flows on.
 
 > One client simulates and the other three replay its events, so the host is
 > trusted the same way the engine's own link host already is.

@@ -300,6 +300,21 @@ return function(game)
   end, 90, "everyone else's party flag to arrive")
   check(flagged, "all three other guests read as being in a party")
   H.closeToOverworld(game)
+
+  -- Un-stack before the picture. All four spawned from the same save onto the
+  -- same tile, and players walk through each other now -- so a shot taken here
+  -- is one sprite and four nameplates z-fighting into a black bar. One step
+  -- each in three different directions puts four distinct trainers on screen,
+  -- which is the thing a screenshot called "two-parties" exists to show.
+  local SPREAD = { b = "left", c = "right", d = "down" }
+  if SPREAD[ROLE] then U.hold(game, SPREAD[ROLE], 22) end
+  U.wait(30)
+  rendezvous("spread")
+  -- The last mover's step still has to cross the wire and land in everyone
+  -- else's roster before it is drawable; a beat of settling is what separates
+  -- "four trainers" from "three trainers and a straggler mid-teleport".
+  U.wait(45)
+  H.closeToOverworld(game)
   shot("two-parties")
   rendezvous("paired")
 
@@ -346,7 +361,16 @@ return function(game)
       check(ask.role == "asked", "and the other three are put the question")
     end
   end
-  if ROLE ~= "a" then shot("ask-box") end
+  if ROLE ~= "a" then
+    -- The export is set the instant the wire message lands, which is a beat
+    -- BEFORE the box has finished printing -- the first capture of this shot
+    -- was a box reading, in its entirety, "A". Wait out the text crawl and
+    -- the YES/NO that follows it, so the picture shows the question being
+    -- asked rather than its first letter. Two seconds against the ask's
+    -- sixty-second budget costs nothing.
+    U.wait(120)
+    shot("ask-box")
+  end
 
   -- d answers NO, on the box, by walking the cursor to it. b and c answer YES.
   -- Their yesses are what make the refusal meaningful: a run where everybody
