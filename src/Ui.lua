@@ -1471,6 +1471,9 @@ function M:install()
       { label = "EDIT HOST", field = "host" },
       { label = "EDIT CODE", field = "code" },
       { label = "RENAME", field = "name" },
+      -- Last, and last on purpose: it is the one row that cannot be undone
+      -- by pressing it again, so it sits furthest from the cursor's start.
+      { label = "DELETE", remove = true },
     }
 
     -- Reopening is what "rebuilt" means here (see the favourite row below),
@@ -1516,6 +1519,7 @@ function M:install()
 
     for row, item in ipairs(items) do
       local wantsConnect, wantsFav, field = item.connect, item.fav, item.field
+      local wantsRemove = item.remove
       item.onSelect = function()
         if wantsConnect then
           mod.ui.push(game, SCREEN.CHARSET, { verb = "JOIN", onReady = dial })
@@ -1536,6 +1540,41 @@ function M:install()
           reopen(row)
         elseif field then
           mod.ui.push(game, SCREEN.SERVEREDIT, { key = key, field = field })
+        elseif wantsRemove then
+          -- Asked before it happens, and the question names the row: this
+          -- list is the only copy of an address somebody typed once, and a
+          -- delete that landed on the press would be a delete found out
+          -- about afterwards. CONFIRM's B is a no, so the answer a
+          -- mis-press gives is the answer that costs nothing -- which is
+          -- the whole reason the box is this one and not a plain TextBox.
+          self:confirm(game, ("Forget the server\n%s?"):format(entry.name),
+            function(yes)
+              -- Back to this menu with the cursor still on DELETE, the way
+              -- the favourite row comes back: "no" is an answer about this
+              -- row, and dropping the cursor onto CONNECT would put a dial
+              -- one press away from someone who just said no to something.
+              if not yes then return reopen(row) end
+              if not (store.remove and store:remove(key)) then
+                -- The entry went between the question and the answer --
+                -- evicted by a hub recorded underneath, or re-keyed. Same
+                -- sentence the menu opens with on a stale key, and the same
+                -- place to land, because the list is where it can be seen
+                -- that the row is already gone.
+                mod.log:warn("could not delete the server %s -- it is no "
+                  .. "longer on the list, so there is nothing left to "
+                  .. "remove; reopen SERVERS to see what is", tostring(entry.name))
+                return mod.ui.push(game, SCREEN.TEXT, {
+                  text = "That server is\ngone.",
+                  onDone = function() mod.ui.push(game, SCREEN.SERVERS) end,
+                })
+              end
+              -- The list, not this menu: the entry this menu is about no
+              -- longer exists, so reopening it would draw the "gone" box
+              -- about a row the player just chose to be rid of. An empty
+              -- list is ListMenu's own "Nothing here.", and the MMO menu
+              -- drops the SERVERS row the next time it opens.
+              mod.ui.push(game, SCREEN.SERVERS)
+            end)
         end
       end
     end

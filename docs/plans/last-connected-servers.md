@@ -180,6 +180,26 @@ main session (subagent background e2e gets reaped).
 - Screenshots: MAIN gains a row only when recents exist, and docs screenshots are taken on
   fresh profiles — check during T5; regenerate from the e2e run if any shot goes stale.
 
+## 9. Addendum (2026-08-06, follow-up request): DELETE with confirmation
+
+Owner asked for a DELETE row, last on the per-entry submenu, behind a Yes/No
+confirmation. Base for this increment: 8052c96.
+
+- `src/Servers.lua`: public `remove(key)` — entry or nil+warn; deletes the row,
+  marks `dropped[key]` so `_persist`'s file fold-in cannot resurrect it, persists.
+- `src/Ui.lua` SERVERACT: `DELETE` appended after RENAME (6 rows now); pushes the
+  existing `SCREEN.CONFIRM` (`M:confirm`, src/Ui.lua:585 — B is a no) asking about
+  the entry by name; yes → `store:remove` then back to SCREEN.SERVERS; no →
+  re-push SERVERACT with the cursor on DELETE (row-carry precedent).
+- Decisions: confirm defaults safe (B/no); favorites deletable (the confirm is the
+  guard); Client's per-hub `code:` save copy untouched; post-delete lands on the
+  list (empty list → widget empty state; MAIN row gone next open).
+- Tests: re-pin SERVERACT rows (6, DELETE last, ty recalc); `remove` CRUD incl.
+  dropped-set resurrection guard and unknown-key refusal; confirm wiring both
+  branches. E2e: extend the recents leg after the third LEAVE — SERVERS → entry →
+  DELETE → YES → `#exports.servers() == 0` and the MMO menu no longer offers
+  SERVERS. Recapture docs/screenshots/servers-submenu.png (row count changed).
+
 ## 8. Open questions / assumptions (autonomous mode — owner audit list)
 
 1. "DESC-sorted based on the IPs" read as descending lexicographic order of the normalized
