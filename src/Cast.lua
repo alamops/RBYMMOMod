@@ -109,6 +109,17 @@ end
 -- entry is the only lever that reaches a trainer back -- the species-level
 -- one needs a species, and a trainer pic has none.
 --
+-- The number registered here is always an integer, and this is where that is
+-- enforced. The plain battle view uses the registered scale raw, on a
+-- nearest-neighbour canvas, so a fraction spreads some source pixels over one
+-- destination pixel and others over two -- the sprite draws uneven. (The
+-- alternate 3D view already rounds every battle scale to the nearest integer
+-- before drawing, for the same reason; this only extends that precedent to
+-- the view that never had it.) A character row that asks for a fraction is
+-- snapped to the nearest whole number, floor 1, and warned about rather than
+-- refused: a slightly wrong size is a cosmetic bug, and dropping the
+-- character over it would be the larger one.
+--
 -- Split out from install so it can be read (and tested) as its own step: a
 -- missing scale is a cosmetic bug, not a missing character, so it is warned
 -- about separately and never stops a registration that already landed.
@@ -124,10 +135,17 @@ function M.installScales(content)
   local all = true
   for id, char in pairs(registered) do
     local back = assetPath(char, "back.png")
+    local scale = math.max(1, math.floor((tonumber(char.backScale) or 1) + 0.5))
+    if scale ~= char.backScale then
+      mod.log:warn("%s asked for a back-pic scale of %s and was given %d; "
+        .. "give %s a whole-number backScale in Config.OWN_CHARS -- a "
+        .. "fractional scale draws uneven pixels in battle",
+        char.label, tostring(char.backScale), scale, char.label)
+    end
     local ok = back ~= nil
     if ok then
       ok = pcall(function()
-        scales:register(scaleId(char), { path = back, scale = char.backScale })
+        scales:register(scaleId(char), { path = back, scale = scale })
       end)
     end
     if not ok then
