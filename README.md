@@ -397,6 +397,30 @@ in full and does not soften it.
 `LEAVE` disconnects and hands you straight back to single-player. Save,
 world, party — untouched. No "returning to title screen".
 
+### 🗂️ SERVERS REMEMBERS WHERE YOU'VE BEEN
+The first time you connect anywhere, `SERVERS` shows up on the disconnected
+menu, under `JOIN GAME` — every hub you've reached before, so getting back
+onto one is a menu instead of a retyped address and passcode. It's gone
+again the moment you're hosting or connected, same as `ADDRESS` and
+`PLAYERS`.
+
+**Favorites sit on top; everyone else sorts by address, descending.** Star
+one and it stays above the rest no matter how long ago you played there —
+recency only decides which *non*-favorite gets dropped when the list is
+full.
+
+Pick an entry and a submenu opens: **`CONNECT`** dials it exactly the way
+`JOIN GAME` does, **`FAVORITE`/`UNFAVORITE`** flips the pin, **`EDIT HOST`**
+and **`EDIT CODE`** reopen the address or passcode on the naming grid, and
+**`RENAME`** is the only one that touches the label — entries default to
+their own address as a name, and a rename can run up to 16 characters.
+
+A hub is only added once you actually reach it — a wrong passcode never
+earns an entry — and the list survives quitting, `CONTINUE`, and switching
+save slots, because it's kept in its own file rather than the save. It holds
+16 entries; past that, the one you haven't reconnected to in the longest
+time is dropped first, and a favorite is never the one that goes.
+
 ### 🎭 BE SOMEBODY ELSE
 Before you host or join, character creation asks who you are: a name of your
 own (your save file keeps its own), and **any walking character in the
@@ -492,6 +516,7 @@ behind it.
 | --- | --- | --- |
 | `HOST GAME` | not in a game | make a trainer, then the room size and the passcode |
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
+| `SERVERS` | not in a game, and you've connected somewhere before | pick a hub you've reached before, and reconnect, rename, favorite or edit it |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
 | `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |

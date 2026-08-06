@@ -858,6 +858,36 @@ return function(game)
             end
             check(not exports.isConnected(), "and left again cleanly")
             H.closeToOverworld(game)
+
+            -- ------- 9. and back a THIRD time, through SERVERS
+            --
+            -- The row this whole leg exists to prove: the hub this player
+            -- was just welcomed by twice is now on START > MMO > SERVERS,
+            -- named after its own address (src/Servers.lua's default), and
+            -- CONNECT on its submenu is the whole join -- CHARSET to confirm
+            -- who is connecting, then a dial with the address and code
+            -- already filled in from the entry, no grids in between. Same
+            -- assertions H.rejoin's second connection made: a claimed name
+            -- is recognised again, and the rating is still attached to it.
+            if H.reconnectViaServers(game, exports, hostAddress, joinCode,
+                                      check, log) then
+              check(exports.isRanked(),
+                    "reconnecting through SERVERS is recognised as the "
+                    .. "same player too")
+              check(exports.points() == pointsBefore,
+                    ("and the rating comes back with them again (%s)")
+                      :format(tostring(exports.points())))
+              U.shot(game, SHOT_DIR .. "/join-servers-reconnected.png")
+
+              H.closeToOverworld(game)
+              if H.openMmo(game) and H.selectLabel(game, "LEAVE") then
+                H.drivePrompts(game, function()
+                  return not exports.isConnected()
+                end, 60)
+              end
+              check(not exports.isConnected(), "and left a third time cleanly")
+              H.closeToOverworld(game)
+            end
           end
         else
           check(false, "no LEAVE row while connected as a guest")

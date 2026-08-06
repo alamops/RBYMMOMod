@@ -588,11 +588,15 @@ local PHASE = {
   -- host waits on the guest leaving and proving the world still works
   -- 60 leave drive + walk test, and then the whole way back in: the menus,
   -- the address screen, six characters of passcode on a d-pad grid, a second
-  -- handshake, and out again. A ceiling, not an expectation -- the host is
-  -- released the moment the guest signals -- so the headroom costs a healthy
-  -- run nothing and stops a slow machine reporting "incomplete" for a leg
-  -- that was about to pass.
-  guest_left_game        = 420,
+  -- handshake, and out again. Then a THIRD round trip, out and back through
+  -- SERVERS instead of JOIN GAME's grids (M.reconnectViaServers) -- no
+  -- passcode to type there, but still a menu walk, a connection to open (up
+  -- to 60s of patience of its own) and a LEAVE to drive before the guest can
+  -- signal. A ceiling, not an expectation -- the host is released the moment
+  -- the guest signals -- so the headroom costs a healthy run nothing and
+  -- stops a slow machine reporting "incomplete" for a leg that was about to
+  -- pass.
+  guest_left_game        = 600,
 
   -- ------- the dedicated-hub scenario (tests/drivers/run-hub-e2e.sh)
   --
@@ -1383,6 +1387,98 @@ function M.openMmo(game)
   U.tap(game, "start")
   U.wait(15)
   return M.selectLabel(game, "MMO")
+end
+
+-- Dial the same hub a third way: not JOIN GAME's grids, but the row that
+-- exists precisely so a returning player never has to touch them again.
+--
+-- Mirrors M.rejoin's shape and reuses its "same player, same rating"
+-- assertions -- see the comment there for why the ticket round trip is the
+-- one thing worth checking. What differs is everything between "the MMO menu
+-- is open" and "a connection is either up or it isn't": SERVERS -> the
+-- recorded entry -> CONNECT goes through CHARSET exactly as JOIN GAME does
+-- (src/Ui.lua's SERVERACT registration pushes the same SCREEN.CHARSET with
+-- verb = "JOIN"), but the address and the join code are already on the
+-- entry, so `dial()` calls `client:connect` directly with no address or code
+-- grid in between. `label` is the row to pick on the SERVERS list, which is
+-- the entry's `name` -- and a fresh entry's name is its normalised address
+-- (src/Servers.lua's `defaultName`), so the same address string a caller
+-- dialled once is the label to look for here.
+--
+-- `joinCode`, if given, is a fallback only: a hub is not expected to
+-- challenge a connect that is already carrying the code that worked before,
+-- but if one ever does (the code changed hub-side since it was recorded),
+-- this answers it exactly as a fresh join would rather than stalling on a
+-- screen this leg did not expect. Returns whether the connection opened.
+function M.reconnectViaServers(game, exports, label, joinCode, check, log)
+  -- Same reason M.rejoin settles first: a step in flight swallows START.
+  M.closeToOverworld(game)
+  U.wait(30)
+
+  local opened = false
+  for _ = 1, 3 do
+    if M.openMmo(game) then
+      opened = true
+      break
+    end
+    M.closeToOverworld(game)
+    U.wait(20)
+  end
+  if not opened then
+    check(false, "the MMO menu opens again after leaving, for the SERVERS leg")
+    return false
+  end
+
+  if not M.selectLabel(game, "SERVERS") then
+    check(false, "SERVERS is on the menu once a hub has been recorded")
+    return false
+  end
+  U.wait(20)
+
+  if not M.selectLabel(game, label) then
+    check(false, "the recorded entry (" .. tostring(label)
+                   .. ") is on the SERVERS list")
+    return false
+  end
+  U.wait(20)
+
+  if not M.selectLabel(game, "CONNECT") then
+    check(false, "CONNECT is on the entry's own submenu")
+    return false
+  end
+  U.wait(20)
+
+  if not M.selectLabel(game, "JOIN") then
+    check(false, "character creation confirms on the way back in through "
+                   .. "SERVERS")
+    return false
+  end
+  U.wait(40)
+
+  -- No address or code grid is expected here -- dial() applies both off the
+  -- entry -- but a stale code is still answerable if the hub asks anyway,
+  -- the same way an unexpected challenge is handled off the typed path.
+  if joinCode then
+    local askedOrConnected = M.waitFor(game, function()
+      return M.codeGrid(game) ~= nil or exports.isConnected()
+    end, 180, "either a SERVERS connection or an unexpected code challenge")
+    if askedOrConnected and M.codeGrid(game) ~= nil and not exports.isConnected() then
+      if not M.enterJoinCode(game, joinCode) then
+        check(false, "an unexpected code challenge can still be answered")
+        return false
+      end
+      U.wait(60)
+    end
+  end
+
+  local back = M.waitSeconds(game, function() return exports.isConnected() end,
+                             60, "the SERVERS connection to open")
+  check(back, "the same player can reconnect through SERVERS")
+  if not back and log then
+    log("top state after the SERVERS reconnect attempt:",
+        tostring(M.top(game) and (M.top(game).title or "?")))
+  end
+  return back
 end
 
 return M

@@ -119,6 +119,7 @@ for _, id in ipairs({
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
   "RbyMmoParty", "RbyMmoPartyList",
   "RbyMmoChoose", "RbyMmoChooseMenu",
+  "RbyMmoServers", "RbyMmoServerActions", "RbyMmoServerEdit",
 }) do
   check(screens:get(id) ~= nil, "screen " .. id .. " is registered")
 end
@@ -329,7 +330,13 @@ local stubMod = {
   },
 }
 
-local function resolver()
+-- `modOverride` lets a caller build a module graph against a mod facade of
+-- its own rather than the shared `stubMod` above -- the servers/WELCOME
+-- section below needs a `mod.hooks` that actually records what it is
+-- handed (to reach the per-tick chain), which would be wrong to wire onto
+-- the stub every other section in this file shares.
+local function resolver(modOverride)
+  local useMod = modOverride or stubMod
   local loadstr = loadstring or load
   local cache = {}
   local function need(name)
@@ -339,7 +346,7 @@ local function resolver()
     local body = handle:read("*a")
     handle:close()
     local chunk = assert(loadstr(body, "@" .. name .. ".lua"))
-    cache[name] = chunk(need, stubMod)
+    cache[name] = chunk(need, useMod)
     return cache[name]
   end
   return need
@@ -10973,6 +10980,680 @@ else
 end
 
 base.release()
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 13. The hubs you have played on
+-- ------------------------------------------------------------------
+--
+-- src/Servers.lua is the store behind START > MMO > SERVERS -- who this
+-- copy has connected to, a name, a favourite flag, a join code. Driven
+-- here with love removed: the module's own header says a missing love
+-- degrades it to mod.save alone, which is the half worth pinning against a
+-- headless stub -- the dual-write file half already has its own coverage
+-- pattern (the rank-token section above) and repeating it here would only
+-- be testing the same file-store shape a second time.
+
+;(function()
+
+local ambientLove = _G.love
+_G.love = nil
+
+local Servers = need("Servers")
+
+-- ------- record: creation, defaults, and the key an address is filed under
+
+do
+  stubSave = {}
+  local store = Servers.new()
+
+  local entry = store:record("short-host")
+  check(entry ~= nil, "recording a fresh address creates an entry")
+  local expectedAddress = ("short-host:%d"):format(Config.DEFAULT_PORT)
+  eq(entry.address, expectedAddress,
+     "withPort fills in the default port when none was typed")
+  eq(entry.key, expectedAddress:lower(), "the key is the address, lower-cased")
+  eq(entry.name, expectedAddress,
+     "and the name defaults to the normalised address, port included")
+  eq(entry.fav, false, "a fresh entry is not a favourite")
+  eq(entry.code, nil, "and has no code until one is given")
+
+  local spaced = store:record("  Mixed.Case.Host  ")
+  check(spaced ~= nil, "whitespace and case do not stop a record")
+  local expectedMixed = "Mixed.Case.Host:" .. tostring(Config.DEFAULT_PORT)
+  eq(spaced.address, expectedMixed,
+     "surrounding whitespace is stripped before the port is filled in")
+  eq(spaced.key, expectedMixed:lower(),
+     "the key is lower-cased and holds no whitespace, however it was typed")
+
+  local ported = store:record("already.has.a.port:9191")
+  eq(ported.address, "already.has.a.port:9191",
+     "an address that already carries a port keeps its own, not the default")
+end
+
+-- ------- record: refresh keeps the player's own fields, and the code only
+-- moves when a fresh one is actually given
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local VALID_CODE = "A7K3P9"
+
+  local first = store:record("refresh.example", VALID_CODE)
+  local key = first.key
+  eq(first.code, VALID_CODE, "the code given at record time is kept")
+
+  store:rename(key, "My Named Hub")
+  store:setFavorite(key, true)
+
+  local again = store:record("refresh.example", nil)
+  eq(again.key, key, "the same address refreshes the same row, not a new one")
+  eq(again.name, "My Named Hub",
+     "a reconnect does not overwrite the name the player chose")
+  eq(again.fav, true, "nor the favourite flag")
+  eq(again.code, VALID_CODE,
+     "and a reconnect with no code leaves the one already on the row alone")
+
+  local OTHER_CODE = "K3P9A7"
+  local recoded = store:record("refresh.example", OTHER_CODE)
+  eq(recoded.code, OTHER_CODE,
+     "but a reconnect that does carry a code updates it")
+end
+
+-- ------- list: favourites first, and address (key) DESC within each group
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  store:record("b-host")
+  store:record("a-host")
+  store:record("c-host")
+
+  local plain = store:list()
+  eq(#plain, 3, "all three are listed")
+  eq(plain[1].key:sub(1, 1), "c", "descending: c sorts above b and a")
+  eq(plain[2].key:sub(1, 1), "b", "b sits in the middle")
+  eq(plain[3].key:sub(1, 1), "a", "and a is last of the plain group")
+
+  store:setFavorite(plain[3].key, true) -- a-host
+  local withFav = store:list()
+  eq(withFav[1].key:sub(1, 1), "a",
+     "a favourite is pinned above every non-favourite, regardless of address")
+  eq(withFav[2].key:sub(1, 1), "c", "the non-favourite group is still DESC")
+  eq(withFav[3].key:sub(1, 1), "b", "with b last")
+end
+
+-- ------- eviction: the cap, LRU order, favourites, and the row just written
+
+do
+  -- the real cap, so this is the same number a player's copy enforces
+  stubSave = {}
+  local store = Servers.new()
+  for i = 1, Config.SERVER_LIST_MAX do
+    local entry = store:record(("host%02d"):format(i))
+    -- controlled recency: host01 is the oldest, host16 the newest of the
+    -- batch, so which one the cap evicts is never left to os.time()'s
+    -- one-second resolution
+    entry.last = i
+  end
+  eq(#store:list(), Config.SERVER_LIST_MAX,
+     "exactly the cap fits with no eviction yet")
+
+  local newest = store:record("host17")
+  eq(#store:list(), Config.SERVER_LIST_MAX,
+     "recording one more holds the list at the cap, not above it")
+  check(store:get("host01") == nil,
+        "the least recently connected non-favourite is the one dropped")
+  check(store:get("host17") ~= nil, "and the row just recorded is in the list")
+  check(newest ~= nil, "record() still hands back the entry it just wrote")
+end
+
+do
+  -- favourites are never eviction candidates, even once they push the list
+  -- past the cap -- so the cap is shrunk here to reach that state in a
+  -- handful of rows rather than seventeen
+  local savedCap = Config.SERVER_LIST_MAX
+  Config.SERVER_LIST_MAX = 1
+  stubSave = {}
+  local store = Servers.new()
+
+  local fav = store:record("kept-favourite")
+  store:setFavorite(fav.key, true)
+  store:record("second-row")
+
+  eq(#store:list(), 2,
+     "a favourite and the row that pushed the list past the cap both survive "
+     .. "-- there was nothing else eligible to evict")
+  check(store:get(fav.key) ~= nil, "the favourite itself is still there")
+
+  Config.SERVER_LIST_MAX = savedCap
+end
+
+do
+  -- the row record() just wrote can never be its own eviction, even set up
+  -- so that -- by recency alone -- an older row would look newer than it
+  local savedCap = Config.SERVER_LIST_MAX
+  Config.SERVER_LIST_MAX = 1
+  stubSave = {}
+  local store = Servers.new()
+
+  local existing = store:record("already-here")
+  existing.last = os.time() + 1000000 -- made to look far newer than "now"
+
+  local brandNew = store:record("just-recorded")
+  eq(#store:list(), 1, "the cap held at one")
+  check(store:get(brandNew.key) ~= nil,
+        "the row just recorded is never its own eviction, however its own "
+        .. "timestamp compares to what else is on the list")
+  check(store:get(existing.key) == nil,
+        "so the older row gives way instead, even though it was made to "
+        .. "look newer")
+
+  Config.SERVER_LIST_MAX = savedCap
+end
+
+-- ------- rename: sanitised, capped, and a garbage-only name is refused
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("rename.example")
+  local key = entry.key
+
+  local long = ("x"):rep(Config.SERVER_NAME_MAX + 10)
+  local renamed = store:rename(key, long)
+  check(renamed ~= nil, "a long name is truncated, not refused")
+  eq(#renamed.name, Config.SERVER_NAME_MAX,
+     "truncated to exactly the cap, the naming grid's own limit")
+
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+
+  eq(store:rename(key, "\1\2\3"), nil,
+     "a name with nothing the font can draw is refused")
+  eq(store:get(key).name, long:sub(1, Config.SERVER_NAME_MAX),
+     "leaving the row's real name exactly as it was")
+  check(#warns > 0, "and the refusal is logged")
+
+  eq(store:rename("no-such-key:1234", "Anything"), nil,
+     "renaming a key nothing is stored under is refused, not a crash")
+
+  stubMod.log.warn = function() end
+end
+
+-- ------- setCode: only a whole code is accepted, and a refusal never clears
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("code.example")
+  local key = entry.key
+
+  eq(store:setCode(key, "A7K3P9"), entry, "a valid code is accepted")
+  eq(store:get(key).code, "A7K3P9", "and lands on the row")
+
+  eq(store:setCode(key, "too-short"), nil, "a half-code is refused")
+  eq(store:get(key).code, "A7K3P9", "leaving the real code exactly as it was")
+
+  eq(store:setCode(key, nil), nil, "nil is refused the same way")
+  eq(store:get(key).code, "A7K3P9", "and still never clears the row")
+
+  eq(store:setCode("gone:1234", "A7K3P9"), nil,
+     "an unknown key refuses rather than creating a row")
+end
+
+-- ------- setAddress: re-keys in place, and a collision replaces the target
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("old.address:1111")
+  local key = entry.key
+  store:rename(key, "Kept Name")
+  store:setFavorite(key, true)
+  store:setCode(key, "A7K3P9")
+
+  local moved = store:setAddress(key, "new.address:2222")
+  check(moved ~= nil, "the address changes")
+  eq(moved.key, "new.address:2222", "under a new key")
+  check(store:get(key) == nil, "and the old key is gone")
+  eq(moved.name, "Kept Name", "the name travels with the row")
+  eq(moved.fav, true, "so does the favourite flag")
+  eq(moved.code, "A7K3P9", "and the join code")
+
+  -- a collision: a second row is moved onto the address the first row
+  -- already lives at
+  local other = store:record("third.address:3333")
+  local collided = store:setAddress(other.key, "new.address:2222")
+  check(collided ~= nil, "the move still succeeds")
+  eq(#store:list(), 1,
+     "the row already at that address is replaced, not duplicated")
+  eq(store:get("new.address:2222").address, "new.address:2222",
+     "one row lives at the target address afterward")
+
+  eq(store:setAddress("gone:1234", "somewhere:5555"), nil,
+     "an unknown key is refused rather than creating a row")
+end
+
+-- ------- get: a key or a raw, differently-cased address both resolve
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("Case.Example:4444")
+  eq(store:get(entry.key), entry, "the key finds it")
+  eq(store:get("CASE.example:4444"), entry,
+     "so does the raw address, however it is cased")
+  eq(store:get("nothing-stored-here:1"), nil,
+     "and an address nothing was ever recorded under answers nil")
+end
+
+-- ------- persistence: a fresh store over the same mod.save sees the same rows
+
+do
+  stubSave = {}
+  local first = Servers.new()
+  first:record("persisted.example:5555")
+
+  local second = Servers.new()
+  local list = second:list()
+  eq(#list, 1, "a new store instance sees what the old one wrote")
+  eq(list[1].address, "persisted.example:5555",
+     "the same row, over mod.save alone")
+end
+
+_G.love = ambientLove
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 14. WELCOME writes the hub this copy actually reached to the server list
+-- ------------------------------------------------------------------
+--
+-- src/Client.lua records a hub the moment it welcomes this copy in
+-- (handlers[Wire.WELCOME], gated on the private `dialled` upvalue) -- never
+-- on a dial that only timed out or was refused. `dialled` and the handler
+-- table are both private to that module, reachable only through the real
+-- per-tick pump, so this drives a whole, fresh, isolated Client instance
+-- through it: a fake Net stands in for the socket (the same shape the
+-- Transport section above uses), and `mod.hooks:wrap` is a stub that
+-- actually *records* what it is given -- which is what makes the captured
+-- "input.step" callback callable directly, exactly the way the real engine
+-- calls it once a fixed step.
+--
+-- Built against a mod facade of its own (resolver(miniMod), not the shared
+-- stubMod) so nothing here has to fight the rest of this file over
+-- `mod.hooks` / `mod.exports`, which no other section needs to be anything
+-- but a no-op. love is removed for the same reason section 13 removes it:
+-- the servers store this Client owns would otherwise dual-write through
+-- the ambient love stub's real filesystem, which is a second thing to
+-- reason about that this section does not need.
+
+;(function()
+
+local ambientLove = _G.love
+_G.love = nil
+
+local hookChains = {}
+local miniSave, miniOptions = {}, {}
+local screens = {}
+local miniWarns = {}
+
+local miniMod = {
+  id = "rby_mmo",
+  path = MOD_PATH,
+  log = {
+    info = function() end,
+    warn = function(_, fmt, ...)
+      local ok, line = pcall(string.format, fmt, ...)
+      miniWarns[#miniWarns + 1] = ok and line or tostring(fmt)
+    end,
+    error = function() end,
+  },
+  save = {
+    get = function(_, key, default)
+      local v = miniSave[key]
+      if v == nil then return default end
+      return v
+    end,
+    set = function(_, key, value) miniSave[key] = value end,
+  },
+  options = {
+    define = function() end,
+    get = function(_, key) return miniOptions[key] end,
+  },
+  events = {
+    emit = function() end,
+    on = function() end,
+    once = function() end,
+  },
+  assets = { path = function(_, relative) return MOD_PATH .. "/" .. relative end },
+  content = {
+    sprites = {
+      each = function() return function() return nil end end,
+      get = function() return nil end,
+      register = function() end,
+    },
+    battle_sprite_scales = { get = function() end, register = function() end },
+    render_pipelines = { each = function() return function() return nil end end },
+    screens = {
+      register = function(_, id, def) screens[id] = def end,
+      get = function(_, id) return screens[id] end,
+    },
+  },
+  hooks = {
+    wrap = function(_, name, fn)
+      hookChains[name] = hookChains[name] or {}
+      hookChains[name][#hookChains[name] + 1] = fn
+    end,
+  },
+  ui = {},
+  exports = {},
+}
+
+local Client = resolver(miniMod)("Client")
+check(Client ~= nil, "a Client instance builds against its own mod facade")
+Client.install()
+
+local stepFn = hookChains["input.step"] and hookChains["input.step"][1]
+check(stepFn ~= nil, "install() registers the per-tick pump")
+local passthroughNext = function() end
+
+local function fakeNet()
+  return {
+    closed = false, outbox = {}, inbox = {},
+    send = function(self, msg) self.outbox[#self.outbox + 1] = msg end,
+    update = function() end,
+    poll = function(self) local m = self.inbox; self.inbox = {}; return m end,
+    close = function(self) self.closed = true end,
+  }
+end
+
+-- ------- a dialled connection records, with the code stored for it
+
+local netA = fakeNet()
+local ADDRESS_A = "welcome.example.test:9191"
+Client.setJoinAddress(ADDRESS_A)
+Client.setJoinCode(ADDRESS_A, "A7K3P9")
+-- Client.connect dials through Transport:connect, which really opens a
+-- socket -- unreachable headless. The suite's own seam for this (attach, in
+-- the Transport-framing section far above) skips M.connect entirely and so
+-- never sets `dialled`, the field this section is about -- so :connect
+-- itself is overridden, on the one Transport instance this Client owns, to
+-- land on the fake net the way :attach would.
+Client.transport.connect = function(self)
+  self.net = netA
+  self.state = "connecting"
+  self.error = nil
+  self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+  return true
+end
+
+local connected = Client.connect({})
+check(connected, "connect succeeds against the fake net")
+
+netA.inbox = { { type = Wire.WELCOME, id = "peer-a", players = {} } }
+stepFn(passthroughNext, {}, 0.016)
+
+local recorded = Client.servers():get(ADDRESS_A)
+check(recorded ~= nil, "a WELCOME on a dialled connection records the hub")
+eq(recorded.code, "A7K3P9",
+   "carrying the join code already stored for that address")
+
+-- ------- no dial, no record -- the self-host shape
+
+Client.disconnect()
+local netB = fakeNet()
+Client.transport:attach(netB)
+netB.inbox = { { type = Wire.WELCOME, id = "peer-b", players = {} } }
+stepFn(passthroughNext, {}, 0.016)
+
+eq(#Client.servers():list(), 1,
+   "a WELCOME with nothing dialled -- hosting's own shape -- adds no row; "
+   .. "the list still holds only the one from the case above")
+
+-- ------- a servers-store failure cannot break the tick that carries it
+
+Client.disconnect()
+local netC = fakeNet()
+local ADDRESS_C = "breaks.example.test:9191"
+Client.setJoinAddress(ADDRESS_C)
+Client.transport.connect = function(self)
+  self.net = netC
+  self.state = "connecting"
+  self.error = nil
+  self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+  return true
+end
+check(Client.connect({}), "connect succeeds again for the failure case")
+
+local realRecord = Client.servers().record
+Client.servers().record = function() error("boom: a forced store failure") end
+
+netC.inbox = { { type = Wire.WELCOME, id = "peer-c", players = {} } }
+miniWarns = {}
+local ranWithoutThrowing = pcall(stepFn, passthroughNext, {}, 0.016)
+check(ranWithoutThrowing,
+      "a servers-store failure inside WELCOME is pcall-wrapped, so the tick "
+      .. "that carries it never throws")
+check(Client.isConnected(),
+      "and the connection itself survives -- only the bookkeeping failed")
+check(#miniWarns > 0, "the failure is logged")
+check((miniWarns[1] or ""):find(ADDRESS_C, 1, true) ~= nil,
+      "naming the address that could not be added to the list")
+
+Client.servers().record = realRecord
+
+_G.love = ambientLove
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 15. The three screens behind SERVERS
+-- ------------------------------------------------------------------
+--
+-- Driven the way the partner-gating section drives ACTIONS, above: through
+-- Ui:install() and the registered screen's own constructor, against a
+-- minimal stub of mod.content.screens / mod.hooks / mod.ui, swapped onto
+-- the shared stubMod for the length of this section and restored
+-- afterward -- never left nil'd on a field the rest of this file relies on.
+-- love is removed too, for section 13's reason: a store built under the
+-- ambient stub would dual-write through its real in-memory filesystem, and
+-- a fresh storeWith() below is supposed to start from nothing every time.
+
+;(function()
+
+local Servers = need("Servers")
+local Ui = need("Ui")
+
+local ambientLove = _G.love
+_G.love = nil
+
+local screenRegistry = {}
+stubMod.content.screens = {
+  register = function(_, id, def) screenRegistry[id] = def end,
+  get = function(_, id) return screenRegistry[id] end,
+}
+stubMod.hooks = { wrap = function() end }
+stubMod.ui = {
+  Menu = { new = function(_, items, opts)
+    return { items = items, opts = opts, clampScroll = function() end }
+  end },
+  ListMenu = { new = function(_, title, items, opts)
+    return { title = title, items = items, opts = opts }
+  end },
+  TextBox = { new = function(_, text, onDone)
+    return { text = text, onDone = onDone }
+  end },
+  NamingScreen = { new = function(_, opts)
+    opts = opts or {}
+    return {
+      maxLen = opts.maxLen,
+      title = opts.title,
+      glyphs = {},
+      onDone = opts.onDone,
+      update = function() end,
+      confirm = function(self)
+        if type(self.onDone) == "function" then
+          self.onDone(table.concat(self.glyphs))
+        end
+      end,
+      draw = function(self, ...) end,
+    }
+  end },
+}
+
+local function fakeClient(hosting, connected)
+  return { isHosting = function() return hosting end,
+           isConnected = function() return connected end }
+end
+
+local function storeWith(entries)
+  stubSave = {}
+  local store = Servers.new()
+  for _, addr in ipairs(entries or {}) do store:record(addr) end
+  return store
+end
+
+local ctx = { client = fakeClient(false, false), chat = { unread = 0 },
+              servers = storeWith({}) }
+local ui = Ui.new(ctx)
+check(pcall(function() ui:install() end),
+      "the real SERVERS screens register under this minimal stub")
+
+-- ------- SCREEN.MAIN: the SERVERS row
+
+local mainDef = screenRegistry[Ui.SCREEN.MAIN]
+check(mainDef ~= nil, "SCREEN.MAIN is the one that registered")
+
+local function mainLabels()
+  local out = {}
+  for i, item in ipairs(mainDef.new({}).items) do out[i] = item.label end
+  return out
+end
+local function hasLabel(list, label)
+  for _, l in ipairs(list) do if l == label then return true end end
+  return false
+end
+
+ctx.servers = storeWith({})
+eq(hasLabel(mainLabels(), "SERVERS"), false,
+   "an empty list means no SERVERS row at all")
+
+ctx.servers = storeWith({ "one.example" })
+local rows = mainLabels()
+eq(hasLabel(rows, "SERVERS"), true,
+   "a non-empty list adds the row while disconnected")
+local joinIdx, serversIdx
+for i, label in ipairs(rows) do
+  if label == "JOIN GAME" then joinIdx = i end
+  if label == "SERVERS" then serversIdx = i end
+end
+eq(serversIdx, (joinIdx or 0) + 1, "directly after JOIN GAME")
+
+ctx.client = fakeClient(true, false)
+eq(hasLabel(mainLabels(), "SERVERS"), false,
+   "hosting hides the row even with a non-empty list")
+
+ctx.client = fakeClient(false, true)
+eq(hasLabel(mainLabels(), "SERVERS"), false,
+   "and so does already being connected")
+
+ctx.client = fakeClient(false, false)
+
+-- ------- SCREEN.SERVERS: the list itself
+
+local serversDef = screenRegistry[Ui.SCREEN.SERVERS]
+check(serversDef ~= nil, "SCREEN.SERVERS registers")
+
+ctx.servers = storeWith({ "b-host", "a-host" })
+ctx.servers:setFavorite(ctx.servers:list()[2].key, true) -- a-host
+do
+  local expected = ctx.servers:list()
+  local menu = serversDef.new({})
+  eq(#menu.items, #expected, "one row per stored server")
+  for i, entry in ipairs(expected) do
+    eq(menu.items[i].label, entry.name,
+       "row " .. i .. " carries the entry's name")
+    eq(menu.items[i].value, entry.key, "and its key")
+    eq(menu.items[i].right, entry.fav and "▶" or nil,
+       "favourites are marked with ▶ -- never *, which this font cannot draw")
+  end
+end
+
+ctx.servers = storeWith({})
+do
+  local menu = serversDef.new({})
+  eq(#menu.items, 1, "an empty list still draws one row")
+  eq(menu.items[1].label, "No servers yet.", "saying so")
+  eq(menu.items[1].value, nil, "with no value -- there is nothing to choose")
+end
+
+-- ------- SCREEN.SERVERACT: the fixed row order, and the gone-entry case
+
+local actDef = screenRegistry[Ui.SCREEN.SERVERACT]
+check(actDef ~= nil, "SCREEN.SERVERACT registers")
+
+ctx.servers = storeWith({ "act.example" })
+local actKey = ctx.servers:list()[1].key
+do
+  local menu = actDef.new({}, { key = actKey })
+  local order = {}
+  for i, item in ipairs(menu.items) do order[i] = item.label end
+  local expectedOrder = { "CONNECT", "FAVORITE", "EDIT HOST", "EDIT CODE",
+                           "RENAME" }
+  eq(#order, #expectedOrder, "the five rows the plan names")
+  for i, label in ipairs(expectedOrder) do
+    eq(order[i], label, "row " .. i .. " is " .. label)
+  end
+
+  ctx.servers:setFavorite(actKey, true)
+  local refreshed = actDef.new({}, { key = actKey })
+  eq(refreshed.items[2].label, "UNFAVORITE",
+     "the second row flips once the entry is a favourite")
+
+  local gone = actDef.new({}, { key = "no-such-key:1234" })
+  check(gone.items == nil,
+        "a missing entry is the TextBox path, not a Menu -- no .items")
+  check(type(gone.text) == "string" and gone.text:find("gone", 1, true) ~= nil,
+        "and it says the server is gone")
+end
+
+-- ------- SCREEN.SERVEREDIT: opts.field, and the unknown-field case
+
+local editDef = screenRegistry[Ui.SCREEN.SERVEREDIT]
+check(editDef ~= nil, "SCREEN.SERVEREDIT registers")
+
+ctx.servers = storeWith({ "edit.example:1234" })
+local editKey = ctx.servers:list()[1].key
+do
+  local hostScreen = editDef.new({}, { key = editKey, field = "host" })
+  eq(hostScreen.title, "EDIT HOST", "the host grid carries its own title")
+  eq(table.concat(hostScreen.glyphs), "edit.example:1234",
+     "seeded with the entry's current address")
+
+  local typedScreen = editDef.new({}, { key = editKey, field = "name",
+                                        typed = "Retry" })
+  eq(table.concat(typedScreen.glyphs), "Retry",
+     "a refused attempt coming back through `typed` wins over the stored value")
+
+  local gone = editDef.new({}, { key = editKey, field = "not-a-real-field" })
+  check(gone.items == nil and gone.glyphs == nil,
+        "an unknown field is the same TextBox gone-path, not a naming grid")
+  check(type(gone.text) == "string" and gone.text:find("gone", 1, true) ~= nil,
+        "saying the server is gone, the same sentence SERVERACT gives")
+
+  local goneKey = editDef.new({}, { key = "missing:1", field = "host" })
+  check(goneKey.items == nil and goneKey.glyphs == nil,
+        "a missing key is refused the same way, whatever field was asked for")
+end
+
+stubMod.content.screens, stubMod.hooks, stubMod.ui = nil, nil, nil
+_G.love = ambientLove
 
 end)()
 

@@ -4,6 +4,50 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.8.0] - 2026-08-06
+
+### Added
+
+- **`SERVERS` remembers where you've been.** The disconnected MMO menu grows
+  a `SERVERS` row the first time you've connected anywhere, right under
+  `JOIN GAME` — the next hub you visit can be a menu, not a retyped address
+  and passcode. It stays off the menu until there is a first entry to show
+  it, and it disappears again the moment you're hosting or connected, the
+  same rule `ADDRESS` and `PLAYERS` already follow.
+- **Favorites pinned on top; everyone else by address, descending.** A
+  favorited entry sorts above every plain one no matter when it was last
+  used; within each group, entries sort by their normalised `host:port`
+  string, Z before A. Recency decides nothing about where an entry sits on
+  the list — only whether a non-favorite survives the next eviction.
+- **Picking an entry opens a submenu of its own.** `CONNECT` dials it the
+  same way `JOIN GAME` does — the same CHARSET naming step first, then the
+  same challenge if the stored passcode turns out to be wrong.
+  `FAVORITE` / `UNFAVORITE` flips the pin, the label swapping with the state
+  the way `END GAME` and `LEAVE` already do elsewhere on this menu.
+  `EDIT HOST` and `EDIT CODE` reopen the address and the passcode on the
+  naming grid without touching the entry's name. `RENAME` is the only row
+  that does.
+- **A new connection writes its own entry, and only once it's real.** The
+  recording happens at `WELCOME` — not on every dial — so a wrong passcode or
+  a refused connection never litters the list with a hub you never actually
+  reached. The address you dialled becomes the entry's name by default;
+  hosting your own game records nothing, because there's no address you
+  dialled to remember.
+- **Renamed like anything else typed on this mod's grids: sixteen
+  characters, same sanitiser.** A rename that would leave the name empty is
+  refused rather than accepted blank — the same rule `Wire.text` already
+  enforces everywhere else a name crosses the save or the wire.
+- **The list outlives the save.** Entries are dual-written to
+  `rby_mmo_servers.json`, beside the claim-ticket file, and mirrored into
+  `mod.save` for whichever copy only ever needs to read them back — the file
+  wins on a mismatch, so quitting to the title, pressing `CONTINUE` without
+  having saved, or switching save slots entirely still finds the same list
+  of hubs. The same shape the rank-token file already proved.
+- **Capacity sixteen, oldest non-favorite first.** Past sixteen entries, the
+  one that's gone longest without being reconnected to is the one evicted to
+  make room — favorites don't count against the cap and are never the one
+  removed.
+
 ## [0.7.1] - 2026-08-05
 
 ### Fixed
