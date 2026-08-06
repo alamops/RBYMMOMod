@@ -4,6 +4,69 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.9.0] - 2026-08-06
+
+One credential learns to mean something more. Until now every join code was
+the same code: it let somebody into the world, and — since 0.8.0 — it also let
+them into the web dashboard, which shows every player's name, location and
+score. Those are two different things to be allowed to do, and this release
+separates them by marking a code rather than by inventing a second password.
+
+### Added
+
+- **Admin join codes.** `rby-mmo-hub invite --admin` mints an ordinary join
+  code with one flag set on it. It joins the game exactly like any other code —
+  same six characters, same screen, same handshake, nothing about admission
+  changes — and it additionally opens the **web dashboard**, which as of this
+  release accepts nothing else. It is revoked like any other code
+  (`revoke <id>`), and `invite list` grows a **`KIND`** column reading `ADMIN`
+  or `player`, shown with *and* without `--reveal`, because what a code unlocks
+  is not a secret; only the code itself is.
+  **The hub marks the connection an admin code opened.** The welcome tells that
+  client about itself (`admin: true`, and only when true), and operator
+  views — `roster()`, and so `status.json`, the admin socket's `who`, and the
+  dashboard's players table — carry the flag. **Other players never see it**:
+  it is deliberately absent from the presence record that is broadcast to
+  everybody, so nobody in the world learns who holds power. The flag is derived
+  server-side from the credential that answered the challenge and from nothing
+  else, so no message a client sends can claim it.
+  **No in-game admin feature ships in this release.** There is no operator menu,
+  no command, no button — the flag exists so the features that want one have
+  something to check when they are built. On a hub with `auth.required` false,
+  and on the `node hub.js` shim, nobody is admin at all: the flag rides a
+  credential, and there is no credential.
+
+### Changed
+
+- **The dashboard no longer accepts a player's join code** — a behaviour change
+  from 0.8.0, where any active code logged in. The login page, the start-time
+  check and the code comparison all run over the *admin* subset of the
+  credential list. A player's code submitted there fails exactly like a wrong
+  one: same refusal, same charge to the throttle, and the comparison loop still
+  has no early exit, so a real-but-unprivileged code cannot be told from a guess
+  by how long the answer took.
+  **A hub with the dashboard enabled needs `invite --admin` run once.** If no
+  active admin code exists when the hub starts, the dashboard listener is not
+  opened and the log names that command — the same refusal 0.8.0 had for an
+  empty credential list, now counting admin codes only. The game port is
+  unaffected: existing player codes keep working for playing, which is what
+  they were handed out for.
+
+### Notes
+
+- **No wire change.** `PROTOCOL` stays **5**. `admin` is a field on a welcome,
+  travelling hub→client only and present only when true — the same argument the
+  MOTD was shipped under in 0.8.0: an older client reads past a key it does not
+  know, an ordinary player's welcome is byte-identical to the one 0.8.0 sent,
+  and nothing new travels the other way. The bump rule asks whether a *client*
+  can now send something an older *hub* would ignore, and nothing here does.
+  `affects_link` stays `false`.
+- **Old configs need no migration.** The flag is written only when it is true,
+  so a credential minted before this release is the same object it always was
+  and reads as a player's everywhere. The config validator preserves it across
+  the rewrites the hub does when it charges a use count, so an admin is never
+  quietly demoted by the save path.
+
 ## [0.8.0] - 2026-08-05
 
 Five things the *host* of a dedicated hub has been doing without: a live view,
