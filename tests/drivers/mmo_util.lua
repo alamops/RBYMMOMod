@@ -69,16 +69,17 @@ end
 -- tapped "down" a fixed number of times would break the moment the menu
 -- changed shape. Menu and ListMenu both expose `items` and a 1-based
 -- `index`, so the cursor distance can be computed instead.
--- Matches a row by label, tolerating an unread marker on either side of it:
--- the CHAT row reads "▶CHAT" while messages are unread, and a driver that
--- demanded an exact string would fail for the wrong reason.
+-- Matches a row by label, tolerating a marker on either side of it. No row
+-- carries one today -- the CHAT row's unread marker is gone, having read as
+-- a second cursor once it became "▶" -- but the tolerance stays: a driver
+-- that demanded an exact string would fail for the wrong reason against an
+-- older build, or against the next row that decides to decorate itself.
 --
 -- Leading as well as trailing, because that marker moved to the front when
 -- it stopped being "*" -- a character the extracted font cannot draw. It is
 -- stripped by byte rather than matched as a class: "▶" is three UTF-8 bytes,
 -- so a driver asking for "CHAT" against "▶CHAT" was comparing "CHAT" with
--- the marker's own bytes and never matching. The old trailing form is still
--- accepted so this util keeps working against an older build of the mod.
+-- the marker's own bytes and never matching.
 local MARKERS = { "\226\150\182" }   -- ▶ (U+25B6)
 
 local function labelMatches(actual, wanted)
