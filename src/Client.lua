@@ -27,6 +27,7 @@ local Sessions = need("Sessions")
 local World = need("World")
 local HostServer = need("HostServer")
 local Chars = need("Chars")
+local Cast = need("Cast")
 -- Only for its entropy pool: this file mints join codes and Hub mints
 -- challenge nonces, and both have to come off one pool (see Hub.lua's
 -- "the entropy pool" header for why it lives there and what it is worth).
@@ -59,7 +60,25 @@ ctx.coop = coop
 ctx.server = server
 
 local presenceClock = 0
-local lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
+local lastSent =
+  { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
+
+-- Whether the last step this player committed was a fast one -- sprinted
+-- with B on foot, *or* taken on the bike.  Not "was it a run": a run and a
+-- bike both cost 8 frames a tile, so one boolean says everything a watcher
+-- needs and asking which would only give them a distinction they cannot
+-- draw.  Written by the movement.speed wrap, which is the only place that
+-- can know it -- held B is a fact about the local keyboard and moveCtx.onBike
+-- is a fact about the step, and nothing else in the process sees either.
+-- Read by pushPresence, so everyone else's copy paces the avatar to match.
+--
+-- Surfing is not fast: it is a 16-frame step like walking, so it stays
+-- false and a surfer's avatar keeps the engine's own default pace.
+--
+-- It is deliberately "the last step", not "B is down right now": a stale
+-- true while standing still costs nothing, because an avatar that is not
+-- stepping has no step to speed up, and the next ordinary step clears it.
+M.fastNow = false
 
 -- Ranked PVP, as this client sees it.
 --
@@ -224,26 +243,205 @@ end
 -- anyway, so what the ticket buys there is one session's worth of "this name
 -- is mine" against the friends who joined, which is exactly the case it is
 -- for.
-local function tokenKey(address)
-  if type(address) ~= "string" or address == "" then return "rank:self" end
+--
+-- The address half of both keys below, and "self" when there is no address:
+-- lower-cased and stripped of spaces, so one hub typed twice is one key.
+local function tokenAddr(address)
+  if type(address) ~= "string" or address == "" then return "self" end
   local clean = address:lower():gsub("%s+", "")
-  if clean == "" then return "rank:self" end
-  return "rank:" .. clean
+  if clean == "" then return "self" end
+  return clean
 end
 
-function M.rankToken(a, b)
-  return Wire.token(mod.save:get(tokenKey(arg1(a, b))))
+local function tokenKey(address)
+  return "rank:" .. tokenAddr(address)
+end
+
+-- ...and the same ticket, kept where a save file cannot lose it.
+--
+-- mod.save alone is not durable enough to hold a claim. It is RAM until the
+-- engine writes a save, nothing in connecting or disconnecting writes one,
+-- and CONTINUE replaces the table wholesale -- so a ticket minted this
+-- session and never saved is gone by the next connect, and the hub answers
+-- the name's rightful owner as an impostor. The ticket is therefore written
+-- twice: to mod.save, still, because that is where every ticket already
+-- issued lives, and to one file of this mod's own that a reload cannot take
+-- away. Reads prefer the file and fall back to mod.save.
+--
+-- That file outlives any one save slot and is shared by all of them -- and by
+-- any two copies of the game running under one LOVE identity, which is the
+-- shape the e2e rig would have if its two sides were not given identities of
+-- their own -- so its entries are keyed by hub *and* trainer name,
+-- "<hub>|<NAME>", where mod.save can key by hub alone.
+--
+-- love is absent under the headless test interpreter and every path here
+-- answers "no file" when it is, leaving the mod.save behaviour above as the
+-- whole behaviour there.
+local tokenStore = { loaded = false, entries = {}, unreadable = false }
+local jsonModule, jsonTried = nil, false
+
+local function filesystem()
+  if type(love) ~= "table" then return nil end
+  if type(love.filesystem) ~= "table" then return nil end
+  return love.filesystem
+end
+
+-- src.link.Json is already this mod's encoder -- HostServer speaks the wire
+-- with it -- so a file of our own is not a reason to carry a second one.
+local function json()
+  if jsonTried then return jsonModule end
+  jsonTried = true
+  local ok, module = pcall(require, "src.link.Json")
+  if ok and type(module) == "table" then jsonModule = module end
+  return jsonModule
+end
+
+-- Upper-cased because the engine's own trainer names are, and because the
+-- read and the write have to agree on one spelling or the ticket is filed
+-- where nothing looks for it.
+local function tokenFileKey(address, name)
+  local who = Wire.name(name) or M.playerName()
+  return tokenAddr(address) .. "|" .. who:upper()
+end
+
+-- Read once a session; hello runs this on every connect and the file does not
+-- change under us between them.
+--
+-- Answers the entries and, second, whether the file is *there and unreadable*
+-- -- which love.filesystem.read cannot say on its own, because a missing file
+-- and a failed read are the same nil. The two want opposite things from the
+-- writer below (overwrite freely / do not touch it), so getInfo is asked
+-- which one this is.
+--
+-- A file that will not *decode* is a third case and keeps its old answer:
+-- reported once and treated as empty, so the next ticket minted rewrites it
+-- whole and repairs it. Refusing to store anything until the player deletes a
+-- file nobody told them about is the lockout this exists to end.
+local function loadTokens()
+  if tokenStore.loaded then return tokenStore.entries, tokenStore.unreadable end
+  tokenStore.loaded, tokenStore.unreadable = true, false
+  local fs, Json = filesystem(), json()
+  if not (fs and Json) then return tokenStore.entries, false end
+  local ok, body = pcall(fs.read, Config.RANK_TOKEN_FILE)
+  if not ok or type(body) ~= "string" then
+    -- Nothing came back. If the file exists, this copy just failed to read a
+    -- file it must not then overwrite.
+    local exists = false
+    if type(fs.getInfo) == "function" then
+      local asked, info = pcall(fs.getInfo, Config.RANK_TOKEN_FILE)
+      exists = asked and type(info) == "table"
+    end
+    tokenStore.unreadable = exists
+    return tokenStore.entries, exists
+  end
+  -- An empty file is readable and says nothing, which is the same as no file:
+  -- there is nothing in it to lose by writing over it.
+  if body == "" then return tokenStore.entries, false end
+  local decoded = Json.decode(body)
+  if type(decoded) ~= "table" then
+    mod.log:warn("%s is not readable as JSON -- delete it from the game's "
+      .. "save folder to reset this copy's hub name claims",
+      Config.RANK_TOKEN_FILE)
+    return tokenStore.entries
+  end
+  for key, value in pairs(decoded) do
+    local token = Wire.token(value)
+    if type(key) == "string" and token then tokenStore.entries[key] = token end
+  end
+  return tokenStore.entries
+end
+
+-- Load, modify, write the whole table -- and re-read first, because another
+-- save slot, or a second copy running under the same LOVE identity, may have
+-- added a key since we last looked, and writing our cached copy back would
+-- drop it. This runs once per welcome, so the extra read is not on any path
+-- worth counting.
+--
+-- **The one thing this must never do is turn a read failure into a wipe.**
+-- The write below is the whole table, so a re-read that came back empty
+-- because the file could not be opened -- rather than because there is no
+-- file -- would hand back a file holding one key and throw away every other
+-- hub's ticket. loadTokens says which of the two happened, and the unreadable
+-- one writes nothing at all.
+--
+-- Every failure path drops this key from the in-session cache before it
+-- returns. The cache may be holding an *older* ticket for it, read off the
+-- file; leaving that there would let it shadow the newer token M.setRankToken
+-- has just put in mod.save, and after a real save and relaunch the stale one
+-- would be the answer.
+local function storeToken(address, name, token)
+  local fs, Json = filesystem(), json()
+  if not (fs and Json) then return false end
+  local key = tokenFileKey(address, name)
+
+  local kept = tokenStore.entries
+  tokenStore.loaded, tokenStore.entries = false, {}
+  local entries, unreadable = loadTokens()
+  if unreadable then
+    -- The file is there and would not open. This session keeps what it had,
+    -- minus this key, and the ticket lives in mod.save until the file reads
+    -- again.
+    tokenStore.loaded, tokenStore.entries = true, kept
+    kept[key] = nil
+    mod.log:warn("%s could not be read, so this hub's claim ticket was not "
+      .. "added to it -- nothing was overwritten (the other hubs' tickets are "
+      .. "still in there); save the game while connected, and delete the file "
+      .. "from the game's save folder if this repeats", Config.RANK_TOKEN_FILE)
+    return false
+  end
+  entries[key] = token
+
+  local encoded
+  local ok, result = pcall(Json.encode, entries)
+  if ok and type(result) == "string" then encoded = result end
+  if not encoded then
+    entries[key] = nil
+    mod.log:warn("could not encode %s (%s) -- delete it from the game's save "
+      .. "folder if this repeats", Config.RANK_TOKEN_FILE, tostring(result))
+    return false
+  end
+
+  local called, wrote, why = pcall(fs.write, Config.RANK_TOKEN_FILE, encoded)
+  if not (called and wrote) then
+    entries[key] = nil
+    mod.log:warn("could not write %s (%s) -- this hub will stop scoring you "
+      .. "under this name after a reload unless the game is saved while "
+      .. "connected", Config.RANK_TOKEN_FILE, tostring(called and why or wrote))
+    return false
+  end
+  return true
+end
+
+-- The file wins over mod.save: a save reload is exactly the case where
+-- mod.save has the older answer.
+--
+-- The two can disagree, and this is which way it is settled when they do. A
+-- welcome writes both, so ordinarily they say the same thing; a welcome whose
+-- file write failed wrote only mod.save, and storeToken drops that key from
+-- the cache on its way out precisely so this read falls through to the newer
+-- answer instead of finding a stale one in front of it.
+function M.rankToken(a, b, c)
+  local address, name
+  if a == M then address, name = b, c else address, name = a, b end
+  local kept = loadTokens()[tokenFileKey(address, name)]
+  if kept then return kept end
+  return Wire.token(mod.save:get(tokenKey(address)))
 end
 
 -- Stored only if it is the shape a hub mints. A half-token would fail every
 -- claim from then on, and silently: the player would simply stop being
 -- ranked, with nothing on screen to connect it to.
-function M.setRankToken(a, b, c)
-  local address, value
-  if a == M then address, value = b, c else address, value = a, b end
+--
+-- The file write is best-effort and never gates the mod.save one: a copy that
+-- cannot write to its save folder is no worse off than it was before this
+-- file existed.
+function M.setRankToken(a, b, c, d)
+  local address, value, name
+  if a == M then address, value, name = b, c, d else address, value, name = a, b, c end
   local token = Wire.token(value)
   if not token then return nil end
   mod.save:set(tokenKey(address), token)
+  storeToken(address, name, token)
   return token
 end
 
@@ -567,6 +765,18 @@ function M.restoreLook()
   originalLook, lookOwner = nil, nil
 end
 
+-- The character you are wearing right now, or nil.
+--
+-- Not the same question as M.spriteChoice(): the choice is what you picked
+-- and keeps its answer forever, while this is only true between applyLook
+-- and restoreLook -- that is, while you are actually in a game. The battle
+-- and trainer-card pics below hang off *this* one, so a single-player game
+-- you never connected in draws exactly what vanilla draws.
+function M.wornLook()
+  if lookOwner == nil then return nil end
+  return M.spriteChoice()
+end
+
 -- ------- connect / disconnect
 
 function M.connect(a, b)
@@ -647,12 +857,16 @@ end
 -- themselves identically, because to the hub they are the same thing.
 function M.sendHello(game)
   local current = World.current()
+  -- Read once and used twice on purpose: the ticket is filed under the name
+  -- it was minted for, so the name claimed and the name the ticket is looked
+  -- up by have to be the same string, not two calls that could disagree.
+  local name = M.playerName(game)
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
-    name = M.playerName(game),
+    name = name,
     -- "this name is mine, and here is the ticket you gave me" -- absent on a
     -- first visit, which is what makes the hub mint one
-    rankToken = M.rankToken(dialled),
+    rankToken = M.rankToken(dialled, name),
     sprite = M.spriteChoice(),
     profile = M.profile(game),
     map = current and current.mapId,
@@ -671,7 +885,13 @@ function M.disconnect()
   ctx.roster:reset()
   ctx.chat:clear()
   transport:close()
-  lastSent = { map = nil, x = nil, y = nil, facing = nil, busy = nil }
+  lastSent =
+    { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
+  -- Cleared with the rest of it, because "the last step was a fast one" is
+  -- only true of a session: a player who sprinted or cycled, left, and
+  -- rejoined standing still would otherwise advertise fast=true in their
+  -- hello and go on doing so until they took a step to clear it.
+  M.fastNow = false
   dialled, authSent = nil, false
   -- A rating belongs to the hub that keeps it, so leaving takes it off the
   -- screen rather than leaving a stale number on your own card in
@@ -724,22 +944,72 @@ function M.say(a, b, c, d)
   return true
 end
 
+-- ------- running
+
+-- One-shot latch for the failure warn below, in the shape Avatars uses for
+-- an unknown sprite.  A step's speed is asked for several times a second,
+-- and everything that can make runSpeed throw -- an options table that no
+-- longer answers, a moveCtx of an unexpected shape -- is a standing
+-- condition rather than a blip, so an unlatched warn would say the same
+-- sentence a few times a second for as long as the game is open.  Once is
+-- the whole message; the fallback below keeps working either way.
+local runSpeedWarned = false
+
+-- What a step should cost in frames, and whether that is a sprint.
+--
+-- Declared out here rather than inside the wrap so the hot path can pcall it
+-- by name and allocate nothing per step. The arithmetic is deliberately
+-- relative: the engine hands us this game's walk speed, and dividing it is
+-- the only way that stays true on a data pack that says a tile is not 16
+-- frames. `frames` is frames-per-tile, so lower is faster.
+--
+-- Everything that is not a plain on-foot step falls through untouched. The
+-- bike is excluded because it is already this fast and because held B is
+-- taken there -- it is Cycling Road's brake -- and surfing because a sprint
+-- across water is not a thing any of these games has.
+--
+-- "Untouched" is about the *speed*, not about the wire: a bike step still
+-- goes out as a fast one, because it is one. The wrap below is what ORs the
+-- two together, so this function stays the one answer to "how long does this
+-- step take" and never has to say why.
+local function runSpeed(frames, moveCtx)
+  if mod.options:get("run") == false then return frames, false end
+  if type(frames) ~= "number" then return frames, false end
+  if not moveCtx or moveCtx.onBike or moveCtx.surfing then return frames, false end
+  local input = moveCtx.input
+  if not (input and input.isDown and input:isDown("b")) then
+    return frames, false
+  end
+  return math.max(1, math.floor(frames / Config.RUN_DIVISOR)), true
+end
+
 -- ------- presence
 
-local function presenceChanged(current, busy)
+local function presenceChanged(current, busy, fast)
   local mapId = current and current.mapId
   local x = current and current.x
   local y = current and current.y
   local facing = current and current.facing
   return lastSent.map ~= mapId or lastSent.x ~= x or lastSent.y ~= y
     or lastSent.facing ~= facing or lastSent.busy ~= busy
+    -- Compared like the rest of them, defensively rather than because a
+    -- known path needs it.  Every write to fastNow happens outside this
+    -- function, in the movement.speed wrap, and that wrap only runs for a
+    -- step the engine has committed -- a turn on the spot and a step into a
+    -- wall are answered "turned"/"blocked" before the speed is ever asked
+    -- for, so neither can flip the flag.  A committed step changes the cell
+    -- too, so today the checks above would carry it; the field is compared
+    -- anyway so that a future writer of fastNow cannot silently strand a
+    -- pace change until the next move.
+    or lastSent.fast ~= fast
 end
 
 local function pushPresence(force)
   if not transport:isReady() then return end
   local current = World.current()
   local busy = sessions:isBusy()
-  if not force and not presenceChanged(current, busy) then return end
+  local fast = M.fastNow and true or false
+  if not force and not presenceChanged(current, busy, fast) then return end
 
   lastSent = {
     map = current and current.mapId,
@@ -747,6 +1017,7 @@ local function pushPresence(force)
     y = current and current.y,
     facing = current and current.facing,
     busy = busy,
+    fast = fast,
   }
   transport:send(Wire.MOVE, {
     map = lastSent.map,
@@ -754,6 +1025,7 @@ local function pushPresence(force)
     y = lastSent.y,
     facing = lastSent.facing,
     busy = busy,
+    fast = fast,
   })
 end
 
@@ -838,9 +1110,10 @@ handlers[Wire.WELCOME] = function(game, msg)
   ranking, rankingAsked, rankingSeen = {}, false, false
   -- A hub that just claimed this name for us sends the ticket once and never
   -- again, so this is the only chance to keep it. Stored against the address
-  -- we dialled -- the same key the next hello reads it back from.
+  -- we dialled and the name we claimed -- the same two halves the next hello
+  -- reads it back by.
   local granted = Wire.token(msg.rankToken)
-  if granted then M.setRankToken(dialled, granted) end
+  if granted then M.setRankToken(dialled, granted, M.playerName(game)) end
   -- Absent means an older hub that does not score at all, which is not the
   -- same as being refused a name; treat silence as ranked and let the empty
   -- leaderboard speak for itself.
@@ -886,12 +1159,17 @@ handlers[Wire.MOVE] = function(_, msg)
   local facing = Wire.facing(msg.facing)
   ctx.roster:setBusy(id, msg.busy)
   ctx.roster:setParty(id, msg.party)
+  -- Coerced here rather than trusted: this is the raw message, and the
+  -- roster stores what it is given.  Strict, the way Wire.presence and both
+  -- hubs are -- only a literal true is a fast step, so a client sending 0 or
+  -- "" is read the same here as it is everywhere else on the wire.
+  local fast = msg.fast == true
   if map and x and y then
-    ctx.roster:move(id, map, x, y, facing)
+    ctx.roster:move(id, map, x, y, facing, fast)
   else
     -- no cell: the player is in a battle or a menu, so they leave the world
     -- without leaving the roster
-    ctx.roster:move(id, nil, nil, nil, facing)
+    ctx.roster:move(id, nil, nil, nil, facing, fast)
     ctx.avatars:despawn(id)
   end
 end
@@ -1070,6 +1348,11 @@ end
 -- ------- install
 
 function M.install()
+  -- First, because everything that reads the character catalog reads it
+  -- after this: the options row built two lines down offers these ids, and
+  -- the CHARACTER screen lists whatever the catalog holds when it opens.
+  Cast.install()
+
   local spriteChoices = {}
   for _, row in ipairs(Config.SPRITES) do
     spriteChoices[#spriteChoices + 1] = { row[1], row[2] }
@@ -1097,6 +1380,11 @@ function M.install()
     { key = "sprite", label = "MY SPRITE", type = "choice",
       default = Config.DEFAULT_SPRITE, choices = spriteChoices },
     { key = "bubbles", label = "BUBBLES", type = "toggle", default = true },
+    -- Holding B to run.  On by default because it is the reason the feature
+    -- exists, and a row at all because B already means "cancel" everywhere
+    -- else -- a player who finds their walk unexpectedly fast should have
+    -- somewhere to turn it off without uninstalling the mod.
+    { key = "run", label = "B TO RUN", type = "toggle", default = true },
   })
 
   ui:install()
@@ -1170,12 +1458,63 @@ function M.install()
     return out
   end)
 
+  -- One committed step's speed.  The engine asks once per step, never per
+  -- frame, and floors whatever comes back to at least 1.
+  --
+  -- Not gated on being connected: running is a movement feature that the
+  -- network happens to report, not a multiplayer one, so it works the same
+  -- in a single-player game with the hub switched off. What crosses the wire
+  -- is only the flag recorded here.
+  --
+  -- The flag is "this step was fast", not "B was held": a bike step is fast
+  -- without a sprint and without this wrap changing its speed at all, so it
+  -- is ORed in below. Reading onBike out here rather than inside runSpeed is
+  -- what keeps it true of the step whatever runSpeed decided -- including
+  -- the failure branch, where the pace is still known even though the speed
+  -- was not -- and the type test is what stops a moveCtx of an unexpected
+  -- shape turning a field read into a throw of its own.
+  mod.hooks:wrap("movement.speed", function(next, frames, moveCtx)
+    local onBike = type(moveCtx) == "table" and moveCtx.onBike == true
+    local ok, speed, sprint = pcall(runSpeed, frames, moveCtx)
+    if not ok then
+      -- pcall has put the error where the speed would have been. Whatever
+      -- went wrong, the step still has to happen at *some* speed, and the
+      -- honest one is the speed we were handed.
+      if not runSpeedWarned then
+        runSpeedWarned = true
+        mod.log:warn("could not work out a running speed (%s); walking this "
+          .. "step -- turn B TO RUN off under START > OPTIONS if it repeats",
+          tostring(speed))
+      end
+      M.fastNow = onBike
+      return next(frames, moveCtx)
+    end
+    M.fastNow = sprint == true or onBike
+    return next(speed, moveCtx)
+  end)
+
   mod.hooks:wrap("render.hud", function(next, game, viewport)
     local result = next(game, viewport)
     if mod.options:get("bubbles") ~= false then
       overlay:draw(game, viewport)
     end
     return result
+  end)
+
+  -- The rest of the character, for the three screens the sprite catalog does
+  -- not reach: the battle back pic, the trainer card and Oak's intro all ask
+  -- Sprites.playerPath for a pic, and this hook is the last word on what it
+  -- answers. Only while you are wearing one of the mod's own characters --
+  -- Cast.pic returns nil for every vanilla id, so picking COOLTRAINER still
+  -- fights as Red, exactly as it always has.
+  --
+  -- Decorating after next() rather than instead of it: a mod that replaced
+  -- the pic for a reason of its own still runs, and still wins whenever this
+  -- player is not wearing a NIRE.
+  mod.hooks:wrap("player.sprite", function(next, path, ctx)
+    local drawn = next(path, ctx)
+    local mine = Cast.pic(M.wornLook(), ctx and ctx.side)
+    return mine or drawn
   end)
 
   mod.hooks:wrap("ui.start_menu.items", function(next, game, items)
@@ -1323,6 +1662,11 @@ function M.install()
   -- what this player looks like in their own game, for tests and for a mod
   -- that wants to know
   mod.exports.myLook = function() return M.spriteChoice() end
+  -- What you are wearing rather than what you picked -- nil in a
+  -- single-player game. The end-to-end driver reads this to tell "the
+  -- character was chosen" from "the character is actually being worn",
+  -- which is the difference the battle and trainer-card pics hang off.
+  mod.exports.wornLook = function() return M.wornLook() end
   mod.exports.avatarState = function()
     local out = {}
     for _, player in ipairs(ctx.roster:sorted()) do
@@ -1333,6 +1677,10 @@ function M.install()
         avatarX = ax, avatarY = ay,
         spawned = ctx.avatars.spawned[player.id] ~= nil,
         walking = ctx.avatars:isWalking(player.id),
+        -- the roster's word, not the NPC's: this is what the sender said
+        -- about the pace of their own last step, which is what the drivers
+        -- assert on
+        fast = player.fast and true or false,
         avatarMap = ctx.avatars.mapId,
       }
     end
