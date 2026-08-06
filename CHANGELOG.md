@@ -4,7 +4,7 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [0.5.0] - 2026-08-04
+## [0.7.0] - 2026-08-05
 
 ### Added
 
@@ -33,7 +33,11 @@ here must match `manifest.version`.
   wire, an opponent who is not in a party and a partner of yours who is not on
   this map — then the hub refuses the same things again, because a client's
   word is not a rule.
-- Protocol 4 → 5, and `server/package.json` with it.
+- **`PROTOCOL` 5 → 6**, in `src/Config.lua` and `server/lib/relay.js`
+  together (and `server/package.json`'s version with them). Two branches
+  that had never met each claimed 5 — one for the `fast` pace flag, one for
+  the co-op vocabulary — so a client and hub could both say "5" and still
+  be talking past each other. 6 is the first number that means both.
 
 ### Added — the battle itself
 
@@ -691,6 +695,170 @@ here must match `manifest.version`.
   player gets exactly one rated result, but which opponent you are paired
   against is decided by slot order — nothing about a four-way says who fought
   whom. A 2-on-2 against an NPC scores nothing, since there is nobody to rate.
+
+## [0.6.3] - 2026-08-05
+
+### Fixed
+
+- **Your name is no longer "taken" by a ticket you never got to keep.** The
+  claim ticket lived only inside the game save, and the save is written when
+  the player saves — so quitting to the title and pressing CONTINUE without
+  having saved threw the ticket away, and the next connection was told its own
+  name was taken, permanently. Two repairs, one per side of the wire. The
+  client now banks tickets in a small file of its own
+  (`rby_mmo_rank_tokens.json`, one entry per hub and name), written the moment
+  a ticket is granted, so it survives CONTINUE, a relaunch, and a save that
+  never happened; the copy in the save file is still honoured. And the hub now
+  treats a claim as *provisional until proven*: a name whose ticket has never
+  been shown back and has never scored a battle is re-issued to whoever is
+  actually connecting under it, instead of locking out its own owner after a
+  lost welcome or a hub restart. A name that has scored — or whose owner has
+  returned even once — is protected exactly as before; the anti-theft rule
+  gives nothing away, because an unproven, unscored claim protects nothing
+  worth stealing. A claim is also written into `ranking.json` the first time
+  it is *proven*, not only when a battle settles, so a restart no longer
+  silently reopens a name whose owner has been back since the last scored
+  match. (An unproven one is deliberately not written: it is a claim the hub
+  hands to whoever connects next by design, so a row for it would be a file
+  rewritten once per hello and worth nothing on the way back in.)
+- **…and a name somebody is standing in cannot be taken.** The rule above
+  reads board state, which cannot see that the holder is *connected right
+  now* — so a second player typing a name already in ranked use (two copies
+  that never changed the default trainer name is enough) would have taken the
+  claim, and the first player's next win would have landed on it. A live,
+  ranked holder now refuses the transfer exactly as a proven or scored claim
+  does. A battle is likewise scored into the claims it started against or not
+  at all: a claim that changed hands between the first turn and the last
+  report drops the settlement rather than paying somebody else's name.
+- **The two claim implementations agree on what a ticket hash is.** The
+  Lua-hosted hub accepted a stored hash of any length where the dedicated hub
+  required exactly 64 hex characters; both now require 64.
+
+### Changed
+
+- **`filesystem` joined the declared permissions**, for the ticket file above.
+## [0.6.2] - 2026-08-04
+
+### Fixed
+
+- **Other players cannot stand in your way any more.** An avatar was an
+  ordinary runtime NPC, and the engine counts every one of those as solid, so
+  a friend idling on a doorway, a staircase or a cave mouth sealed it — you
+  pressed into them and the step was simply refused, which also meant the
+  warp on that tile never fired. The same refusal was quietly costing ledge
+  hops and boulder pushes their landing tile. Avatars are now marked
+  `passable`, the flag the engine already uses to keep the Pikachu follower
+  out of the player's path, so every occupancy check skips them and you walk
+  straight through whoever is standing there. Genuine NPCs still block you as
+  they always did, and the crowd cuts both ways: the town's own wanderers now
+  walk through remote players rather than being penned in by them.
+- **You are always the one in front.** When two characters share a tile the
+  overworld had no answer for which draws on top — it sorts by pixel depth,
+  the two are equal, and the winner changed from frame to frame, so your own
+  trainer flickered in and out from behind someone else's. Avatars now sort a
+  hundredth of a pixel further back, which decides the tie every time: your
+  character draws over theirs, deterministically. That hundredth is invisible
+  because it never leaves the sort — the renderer and the nameplates are
+  handed the true pixel back, so nobody moves so much as a pixel for it. The
+  offset is applied only on whole-pixel frames, so a player standing still
+  does not creep up the screen, and everything it wrote is taken off the NPC
+  when the avatar despawns, from the table this mod kept rather than one the
+  engine will not hand back once you have left the map — the engine reuses
+  those tables, and residue would come back as a vanilla character you could
+  walk through.
+
+## [0.6.0] - 2026-08-04
+
+### Added
+
+- **Two characters of the mod's own: `NIRE` and `NIRE HOOD`**, drawn by
+  [Mirasein](https://www.mirasein.me). Until now
+  every character this mod offered was one the ROM already carried — it read
+  the sprite catalog and never wrote to it. These are the first entries it
+  puts there itself, as original art shipped with the mod, and they are
+  registered in the engine's own record shape (`image`, `frames`, `walker`)
+  so nothing downstream had to be taught about them: the CHARACTER screen
+  lists them because it walks the catalog, a peer wearing one draws because
+  the avatar layer looks the id up in the catalog, and the trainer card
+  portrait falls out of the same walking sheet as everyone else's.
+- **They go further than a borrowed character can.** A ROM character is a
+  16x96 walking sheet and nothing else, which is why wearing `COOLTRAINER`
+  has never changed what you look like in a battle. These ship the other two
+  pics as well, so while you are wearing one the game draws *you* as them:
+  the battle back pic, the trainer card, Oak's intro and the Hall of Fame.
+  That rides on the engine's `player.sprite` hook — the one seam over
+  `field.playerPics` — rather than on anything reaching past the mod API.
+- **A mark on the two rows that are the mod's own.** The CHARACTER list is
+  36 names the ROM carries and two it does not, and nothing on the row said
+  which was which. They now carry `▷` in the cursor's own column — the
+  engine's own hollow arrow, one glyph, nothing shifted, so
+  `MIDDLE AGED WOMAN` still starts where every other label starts. The mark
+  yields on the row the cursor is actually on, because they share that cell
+  and two triangles stacked in it would read worse than one.
+- **Worn, not merely chosen.** The pics follow the same rule the walking
+  sprite already followed: they apply between joining a game and leaving it,
+  and a single-player game you never connected in draws exactly what vanilla
+  draws. `mod.exports.wornLook()` is the new answer to "what is actually
+  being worn right now", next to the existing `myLook()` for "what was
+  picked".
+
+### Notes
+
+- `affects_link` stays `false`. `sprites` and `battle_sprite_scales` are not
+  link registries, and the suite still asserts the link surface is
+  byte-identical with the mod installed — two players, one with these
+  characters and one without, still link.
+- The back pic is 48x48 against the 32x32 the engine sizes a trainer back
+  for, so it ships a `battle_sprite_scales` entry of 64/48. Without it the
+  pic would draw half again too tall and stand in the text box.
+- Shade 0 of an overworld sheet is transparent on real hardware and in this
+  engine, so the handful of white pixels inside these walking frames read as
+  transparent rather than white — the same rule every ROM sprite is drawn
+  under.
+
+## [0.5.0] - 2026-08-04
+
+### Added
+
+- **Hold B to run.** Hold the B button on foot and you move at bike speed —
+  half the frames per tile, the same 2× the Running Shoes gave Gen 3 — with
+  no bike and no menu. It hooks `movement.speed` and halves whatever `frames`
+  the engine hands it rather than hardcoding a number, so a data pack that
+  changes walk or bike speed keeps its own numbers, just halved. It turns
+  itself off the instant you're on the bike or surfing — Cycling Road's own
+  held-B brake already means something there, and running only ever checks
+  "not those two" before it does anything at all.
+- **Remote players run too.** A running player's avatar steps at the same
+  8-frames-a-tile the bike already gives NPCs on everyone else's screen —
+  one more field on the per-step write that already moves `x`, `y` and
+  `facing`, set the same way the Pikachu follower speeds itself up. `fast`
+  rides `mmo.move` and every presence snapshot, taken strictly (only a
+  literal `true` counts, so both hubs read the same bytes the same way) and
+  threaded straight through `Roster:move` itself rather than living beside
+  it — the exact shape of bug parties shipped with, not repeated here.
+- **And bikes finally ride like bikes on other people's screens.** The flag
+  says *fast*, not *running*, so a step earns it by being sprinted **or** by
+  being taken on the bike — both cost 8 frames a tile, so one boolean carries
+  both. Cycling has been on the wire as walking since the first version of
+  this mod: a remote cyclist's avatar plodded at 16 while their real player
+  covered tiles at 8, shed roughly four tiles a second, and got yanked
+  forward by the resync teleport every couple of seconds for the whole ride.
+  Cycling Road is watchable now.
+- **`B TO RUN`, on by default**, next to `BUBBLES` in the options list. Cheap
+  and reversible: turn it off and B goes back to meaning nothing everywhere
+  running would apply, since the one place held B already meant something —
+  the bike's own brake — is precisely where running has no effect anyway.
+
+### Changed
+
+- **`PROTOCOL` 4 → 5**, in `src/Config.lua` and `server/lib/relay.js`
+  together. Nothing already on the wire changed shape, so an old client still
+  parses everything a new hub sends — but both hubs rebuild their broadcast
+  from a fixed field list, and a protocol-4 hub has never heard of `fast` on
+  `mmo.move`: it would drop the flag silently rather than error on it, and
+  every remote sprinter and cyclist would look like they were walking,
+  forever, with nothing on screen saying why. A refusal naming both versions
+  beats that quietly — the same call ranked PVP made one version ago.
 
 ## [0.4.0] - 2026-08-04
 

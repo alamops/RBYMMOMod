@@ -40,6 +40,28 @@ function M.waitFor(game, predicate, frames, what)
   return false
 end
 
+-- Hold several buttons down together for n frames, then release all of
+-- them.
+--
+-- tests/drivers/util.lua's U.hold only drives one input for its whole span;
+-- running needs a direction and B held at the same moment, and two
+-- sequential U.hold calls cannot express that -- they hold one, release it,
+-- then hold the other, so B is never down while the step is in flight. Same
+-- shape as U.hold underneath (raw pressQueue + state, one coroutine.yield
+-- per frame), so it costs nothing against the frame-shaped waits around it.
+function M.holdAll(game, btns, n)
+  for _ = 1, n do
+    for _, btn in ipairs(btns) do
+      table.insert(game.input.pressQueue, btn)
+      game.input.state[btn] = true
+    end
+    coroutine.yield()
+  end
+  for _, btn in ipairs(btns) do
+    game.input.state[btn] = false
+  end
+end
+
 -- Pick a row by its label rather than by counting taps.
 --
 -- The START menu's length depends on save state (POKéDEX only appears once
@@ -550,8 +572,9 @@ local PHASE = {
   guest_back_on_map      =  90,  -- floor
   -- guest waits on the host noticing the respawn
   host_ready_for_interact=  90,  -- 45 respawn
-  -- host waits on the guest walking up, reading the card and closing it
-  guest_interact_done    = 240,  -- 60 facing + menu + profile card
+  -- host waits on the guest walking through the host's own tile first
+  -- (non-blocking avatars), then walking up, reading the card and closing it
+  guest_interact_done    = 300,  -- 60 walk-through + 60 facing + menu + card
   -- host waits on the guest waiting for it to be free, then picking TRADE
   guest_trade_requested  = 120,  -- 45 free
   -- guest waits on the host driving its half of the trade
@@ -701,10 +724,17 @@ end
 -- Seconds, not frames, and by default the seconds PHASE says. See the rule
 -- above; `seconds` is here for a caller that genuinely knows better, not as
 -- the normal way to set a budget.
-function M.await(game, name, seconds)
+--
+-- `sample`, if given, is called on every poll tick while the barrier is
+-- still open -- for a caller that needs to observe something on the far
+-- side of the wire during exactly the window a barrier already bounds,
+-- rather than only at the moment it clears. Optional and side-effecting
+-- only: it does not change whether or how long this waits.
+function M.await(game, name, seconds, sample)
   seconds = seconds or M.patience(name)
   local spent
   local ok = M.waitSeconds(game, function()
+    if sample then sample() end
     local handle = io.open(M.syncPath(name), "r")
     if not handle then return false end
     spent = tonumber(handle:read("*a") or "")
@@ -1182,6 +1212,74 @@ function M.rankAfterBattle(game, exports, check, seconds)
     U.log("the battle was a draw or was never settled; nothing was scored")
   end
   return mine, other
+end
+
+-- Photograph the character you are wearing, stood in the overworld facing
+-- the camera, and hand back the sheet it drew from.
+--
+-- Deliberately taken while this side is alone on its map: a remote player
+-- brings a nameplate, and this mod's nameplates sit a tile low -- straight
+-- across the character's chest and head, which is exactly what a picture of
+-- a character must not have over it.
+--
+-- The facing is set on the entity rather than walked into, because a tapped
+-- direction moves a tile and the tile it moves to is not always free. Frame
+-- 0 of an overworld sheet is stand-down (SpriteRenderer), so facing down is
+-- what puts the character's front to the camera.
+--
+-- "Alone" cannot be arranged on the guest's side -- both trainers spend the
+-- run in one room -- so the overlay is switched off for the length of the
+-- shot instead, through the same option a player toggles, and switched back
+-- immediately. Nothing else in the run is affected: every nameplate and
+-- bubble assertion happens outside these few frames, and the option going
+-- off and on again is itself the proof that BUBBLES reaches the overlay.
+function M.shotLook(game, path)
+  local ow
+  for i = #game.stack.states, 1, -1 do
+    if game.stack.states[i].isOverworld then ow = game.stack.states[i] break end
+  end
+  ow = ow or game.overworld
+  local player = ow and ow.player
+  if not player then return nil end
+
+  local opts = game.mods and game.mods.modOptions
+  local mine = opts and opts["rby_mmo"]
+  local hadBubbles = mine and mine.bubbles
+  if mine then mine.bubbles = false end
+
+  M.closeToOverworld(game)
+  player.facing = "down"
+  U.wait(20)
+  U.shot(game, path)
+
+  if mine then mine.bubbles = hadBubbles end
+  U.wait(5)
+
+  local worn = player.sprite
+  return worn and (worn.def and worn.def.image or worn.image) or nil
+end
+
+-- Open the game's own TRAINER CARD and photograph it, returning the path
+-- the player pic resolved to.
+--
+-- This is the other half of the player.sprite hook. The back pic is checked
+-- where it is drawn -- a battle -- but the *front* one, which the trainer
+-- card, Oak's intro and the Hall of Fame all share, had nothing in either
+-- flow that opened a screen carrying it. A character whose front pic never
+-- resolved would have looked exactly like one that did, from here.
+--
+-- Pushed by id rather than driven through the START menu: that row is
+-- labelled with the player's *name*, which each side chooses, so selecting
+-- it by label would be a second thing to keep in sync for no gain.
+function M.shotTrainerCard(game, path)
+  local pic = require("src.pokemon.Sprites").playerPath(game.data, "front",
+                                                        { kind = "trainer_card" })
+  require("src.ui.Screens").push(game, "TrainerCard", {})
+  U.wait(30)
+  U.shot(game, path)
+  M.closeToOverworld(game)
+  U.wait(10)
+  return pic
 end
 
 -- Open the RANK screen from the MMO menu and photograph it.

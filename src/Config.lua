@@ -24,12 +24,16 @@ M.MOD_ID = "rby_mmo"
 -- a RANK screen that never fills.  This number lives here and in
 -- server/lib/relay.js -- bump them together.
 --
--- 5 adds co-op battles, and the same argument decides it a third time.  A
--- protocol-4 hub has never heard of mmo.coop_wait: a player would press WAIT
--- FOR <friend>, stand there while their partner is never told, and eventually
--- give up on a feature that was working correctly on their side of the wire.
--- Silence is the failure mode this number exists to turn into a sentence.
-M.PROTOCOL = 5
+-- 5 was claimed twice, by two branches that had never met: once for pace
+-- (the `fast` flag on mmo.move -- "this step was taken at the fast pace",
+-- set by a sprint *or* the bike, since both cost 8 frames a tile) and once
+-- for co-op battles (a protocol-4 hub has never heard of mmo.coop_wait: a
+-- player would press WAIT FOR <friend> and stand there while their partner
+-- is never told).  Each 5 was a different vocabulary, so a client and hub
+-- that both said "5" could still be talking past each other -- exactly the
+-- silence this number exists to turn into a sentence.  6 is the first
+-- number that means both.
+M.PROTOCOL = 6
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -86,6 +90,54 @@ M.PRESENCE_INTERVAL = 0.125
 -- stall).  Walking it back one tile at a time would take longer than the
 -- drift lasts, so it is despawned and respawned at the true cell instead.
 M.RESYNC_DISTANCE = 6
+
+-- How far an avatar is pushed up the draw order so the local player always
+-- wins a shared tile.  The overworld sorts entities by their pixel `py`, and
+-- that sort is unstable, so on a tie the two characters swap places from
+-- frame to frame -- a hundredth of a pixel is the smallest thing that
+-- decides it and the largest thing nobody can see.
+--
+-- It rests on two facts, and stops being safe without either.  Engine `py`
+-- values are always whole pixels (a step's progress is floored and a landing
+-- snaps to `cell * 16`), so any fraction at all breaks the tie in the
+-- player's favour.  And the nudge is only ever applied when `py % 1 == 0`,
+-- which is what keeps an avatar standing still from drifting up the screen
+-- a hundredth of a pixel per frame.
+--
+-- "Nobody can see it" is only true because it never leaves the sort.  The
+-- renderer floors `py - camY` against a whole camera, so a hundredth of a
+-- pixel there is a whole pixel on screen -- so src/Avatars.lua adds this
+-- back on the two ways out of the avatar layer, the pose the renderer draws
+-- from and the cell cellOf reports.  Subtracting and re-adding it is exact
+-- in doubles at overworld magnitudes, so a compensated position is equal to
+-- the original, not merely close.
+M.AVATAR_DEPTH_NUDGE = 0.01
+
+-- Running: hold B on foot and a tile takes half as long.
+--
+-- A divisor rather than a frame count, because the walk speed it divides is
+-- not ours to know: 16 is vanilla, but a data pack may say otherwise, and
+-- hardcoding 8 here would quietly *slow a modded runner down*.  Two is the
+-- Gen 3+ figure -- running is bike-fast, which is what makes the bike still
+-- worth getting on for its own reasons rather than for its speed.
+M.RUN_DIVISOR = 2
+
+-- What a remote avatar moving at the fast pace has its npc.stepFrames set
+-- to.  One number for two ways of getting there: a sprinter and a cyclist
+-- both cover a tile in 8 frames, so the wire says "fast" rather than "which"
+-- and this count serves both.
+--
+-- NPCs get no movement.speed hook to divide: their pace is a field read
+-- fresh each frame, and its unset default is NPC.lua's hardcoded
+-- STEP_FRAMES = 16 -- the engine's NPC walk default, *not* the player's walk
+-- speed, which the divisor above is deliberately never told.  So the count
+-- is derived from that 16 rather than written out beside it: tuning
+-- RUN_DIVISOR then moves the local runner and the remote avatar together,
+-- and one speed stays one speed.  Two independent numbers would drift apart
+-- on the first tune, and avatars pacing faster than the presence stream
+-- describes strobe past RESYNC_DISTANCE -- which is exactly what remote
+-- cyclists did for as long as the wire had no way to say they were fast.
+M.FAST_STEP_FRAMES = math.max(1, math.floor(16 / M.RUN_DIVISOR))
 
 -- Parties: you and one friend, travelling together.
 --
@@ -333,6 +385,48 @@ M.SPRITES = {
 }
 M.DEFAULT_SPRITE = "SPRITE_RED"
 
+-- ------- the characters this mod brings of its own
+--
+-- The dial board for src/Cast.lua; the argument for every number is in that
+-- file's header.  These are the only sprite ids in this file that the
+-- engine's catalog does *not* already carry -- Cast registers them, which is
+-- why they can be offered in the options row above alongside ids the ROM
+-- guarantees.
+--
+-- `dir` holds three files, all original art shaped like the engine's own:
+-- walk.png (16x96, six 16x16 frames), front.png (56x56, the trainer-card and
+-- intro pic) and back.png (48x48, the battle back pic).
+--
+-- backScale is what a 48x48 back pic has to draw at.  The engine's default
+-- for a back pic is 2x, sized for the 32x32 the ROM carries -- 64 screen
+-- pixels with the feet pinned at y=96.  These are drawn at half again the
+-- detail, so 64/48 keeps the same footprint on screen: a taller trainer
+-- would stand in the text box.
+M.OWN_CHARS = {
+  { id = "SPRITE_NIRE", label = "NIRE",
+    dir = "assets/chars/nire", backScale = 64 / 48 },
+  { id = "SPRITE_NIRE_HOOD", label = "NIRE HOOD",
+    dir = "assets/chars/nire_hood", backScale = 64 / 48 },
+}
+
+-- Offered in the options row like any other character.  Built from the table
+-- above rather than written out twice: a character added there and forgotten
+-- here would be wearable from the CHARACTER screen and invisible in options,
+-- which is the kind of split nobody notices until a player reports it.
+for _, char in ipairs(M.OWN_CHARS) do
+  M.SPRITES[#M.SPRITES + 1] = { char.label, char.id }
+end
+
+-- Six 16x16 frames, the shape SpriteRenderer reads an overworld sheet in.
+M.CHAR_FRAMES = 6
+
+-- Mod art may opt into a ROM sprite's Advanced-mode OBJ palette assignment
+-- without claiming the pixels came from the ROM (sprites.paletteSource).
+-- Index 0 of the sprite-sheet table is the player's own, which is the one
+-- these characters are drawn to wear -- and the palette the sheets they came
+-- from were coloured with.
+M.CHAR_PALETTE_SOURCE = "ROM:SpriteSheetPointerTable[0]"
+
 M.NAME_MAX = 10
 
 -- ------- ranked PVP
@@ -364,6 +458,18 @@ M.RANK_TOP = 10
 -- else -- see src/Rank.lua's header for what that is worth, and what it is
 -- not. The hub keeps only its SHA-256.
 M.RANK_TOKEN_HEX = 32
+-- Where claim tickets are kept, in the LOVE save directory, next to the
+-- engine's own save files.
+--
+-- They are written to mod.save as well, but mod.save is RAM the engine
+-- happens to flush with the rest of a save: nothing in connecting or
+-- disconnecting reaches disk, and CONTINUE replaces the whole table with
+-- whatever was last written. A ticket minted this session and never saved is
+-- gone by the next connect -- and the hub, which has not forgotten, then
+-- answers the name's rightful owner as an impostor. This file is what a save
+-- reload cannot take away. One flat JSON object; the key format and why it
+-- carries the trainer name are in src/Client.lua.
+M.RANK_TOKEN_FILE = "rby_mmo_rank_tokens.json"
 -- How long a pairing stays "recently played" for the rematch discount, and
 -- how many meetings inside it take a win to nothing (halving each time, so
 -- the sixth rematch in the window is already worth zero).

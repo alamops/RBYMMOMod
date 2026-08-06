@@ -125,9 +125,99 @@ end
 
 -- the seams it says it wraps
 for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items",
-                        "ui.naming.grid", "render.zones" }) do
+                        "ui.naming.grid", "render.zones", "player.sprite",
+                        "movement.speed" }) do
   local chain = run.loader.hooks.chains[hook]
   check(chain ~= nil and #chain > 0, "wraps " .. hook)
+end
+
+-- ------- movement.speed: holding B on foot halves the step
+--
+-- Driven straight off the registered chain entry rather than through a
+-- Client export, because the wrap runs entirely inside the closure the
+-- loader captured -- this is the same chain OverworldController's
+-- Player:tryMove would call, with a passthrough `next` standing in for it.
+-- `frames` is frames-per-tile, so the arithmetic is relative to whatever the
+-- engine handed in, never a hardcoded 8.
+--
+-- Wrapped for scope, the way later sections in this file are: the main
+-- chunk is close enough to Lua's 200-local ceiling that a handful of new
+-- names here is enough to cross it.
+
+;(function()
+
+local speedChain = run.loader.hooks.chains["movement.speed"]
+local speedEntry = speedChain[1]
+local passthroughNext = function(f) return f end
+
+local heldB = { isDown = function(_, b) return b == "b" end }
+local notHeldB = { isDown = function(_, b) return false end }
+
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB }), 8,
+   "on foot with B held, a 16-frame walk tile runs at 8")
+eq(speedEntry.callback(passthroughNext, 11, { input = heldB }), 5,
+   "the halving floors rather than rounds")
+check(speedEntry.callback(passthroughNext, 1, { input = heldB }) >= 1,
+      "and never drops below one frame a tile")
+
+-- Only the *speed* passes through here. What the step is reported as is a
+-- separate question, and a bike step is reported fast -- the wire flag means
+-- pace, not "B was held" (src/Client.lua). That side of the wrap writes to a
+-- Client local the loader gives this suite no handle on, so it is covered
+-- where it lands instead: the roster and Avatars sections below drive a
+-- `fast` row through to npc.stepFrames, and the e2e drivers assert the flag
+-- actually crossed the wire.
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB, onBike = true }), 16,
+   "the bike is already fast, so holding B changes nothing about its speed")
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB, surfing = true }), 16,
+   "and surfing is left alone too")
+eq(speedEntry.callback(passthroughNext, 16, { input = notHeldB }), 16,
+   "letting go of B walks at the ordinary pace")
+
+-- the loader's own option store, the same one mod.options:get reads --
+-- toggling it off is what a player who wants their old walk speed back does
+run.loader.modOptions["rby_mmo"] = { run = false }
+eq(speedEntry.callback(passthroughNext, 16, { input = heldB }), 16,
+   "and turning B TO RUN off walks at the ordinary pace even with B held")
+run.loader.modOptions["rby_mmo"] = nil
+
+end)()
+
+-- ------- the characters it brings of its own
+--
+-- Asserted through the real loader rather than a stub because the shape is
+-- the point: Chars.list offers a sprite only if the *catalog* says it walks,
+-- and SpriteRenderer cuts frames out of `image` on the strength of `frames`.
+-- A record that registered but lied about either would be a character that
+-- appears in the picker and then draws wrongly on every other player's
+-- screen, which no unit test of this mod's own code could see.
+for _, id in ipairs({ "SPRITE_NIRE", "SPRITE_NIRE_HOOD" }) do
+  local record = run.loader.content.sprites:get(id)
+  check(record ~= nil, id .. " is in the character catalog")
+  if record then
+    eq(record.walker, true, id .. " walks, so it can be worn")
+    eq(record.frames, 6, id .. " carries a full six-frame sheet")
+    check(type(record.image) == "string"
+          and record.image:find(MOD_PATH, 1, true) == 1,
+          id .. "'s art comes out of the mod folder")
+  end
+  -- and the game's own view of the catalog sees it, which is what the
+  -- renderer and the avatar layer actually read
+  check((run.data.sprites or {})[id] ~= nil, id .. " reaches the merged data")
+end
+
+-- The back pic is 48x48 against the 32x32 the engine sizes a trainer back
+-- for, so it ships the scale that keeps its feet in the same place. Missing,
+-- it would draw half again too tall and stand in the text box.
+for _, id in ipairs({ "rby_mmo_nire_back", "rby_mmo_nire_hood_back" }) do
+  local scale = run.loader.content.battle_sprite_scales:get(id)
+  check(scale ~= nil, id .. " sizes its back pic")
+  if scale then
+    check(scale.scale > 1 and scale.scale < 2, id .. " draws between 1x and 2x")
+    check(type(scale.path) == "string"
+          and scale.path:find(MOD_PATH, 1, true) == 1,
+          id .. " points at the mod's own art")
+  end
 end
 
 -- the inter-mod surface it publishes
@@ -164,6 +254,7 @@ run.release()
 
 local stubSave, stubOptions, stubPipelines = {}, {}, {}
 local stubSprites = {}
+local stubScales = {}
 
 local stubEvents = {}
 
@@ -202,7 +293,10 @@ local stubMod = {
     on = function() end,
     once = function() end,
   },
-  -- only what Overlay's pipeline query touches
+  -- the mod's own files, addressed the way the loader addresses them
+  assets = { path = function(_, relative) return MOD_PATH .. "/" .. relative end },
+  -- only what Overlay's pipeline query touches, plus the two registries Cast
+  -- writes the mod's own characters into
   content = {
     sprites = {
       each = function()
@@ -214,6 +308,11 @@ local stubMod = {
         end
       end,
       get = function(_, id) return stubSprites[id] end,
+      register = function(_, id, record) stubSprites[id] = record end,
+    },
+    battle_sprite_scales = {
+      get = function(_, id) return stubScales[id] end,
+      register = function(_, id, record) stubScales[id] = record end,
     },
     render_pipelines = {
       each = function(self)
@@ -416,6 +515,20 @@ eq(Wire.presence({ id = "p5", name = "MISTY", party = true }).party, true,
    "and a party flag survives")
 eq(Wire.presence({ id = "p6", name = "GARY", party = "7" }).party, true,
    "a party id sent where a flag belongs is reduced to the flag")
+
+-- ------- pace on the wire
+--
+-- Client truth, the same shape as party: nothing the hub can see says
+-- whether a player is holding B or riding a bike, so the sender's word is
+-- taken. The coercion is *stricter* than party's, though -- both hubs
+-- re-derive this one field from the same wire bytes, and Lua and JS
+-- truthiness part ways on 0 and "", so only a literal true counts.
+
+eq(presence.fast, false, "presence with no fast field reads as walking pace")
+eq(Wire.presence({ id = "p7", name = "MISTY", fast = true }).fast, true,
+   "and a fast flag survives")
+eq(Wire.presence({ id = "p8", name = "GARY", fast = "junk" }).fast, false,
+   "while junk in the field is walking pace -- only a literal true is fast")
 
 local member = Wire.member({ id = "m1", name = "ANN", x = 4, y = 9 })
 check(member ~= nil, "a members row sanitises")
@@ -648,6 +761,25 @@ eq(roster:get("a").party, true, "and walking does not take it off them again")
 roster:setParty("a", false)
 eq(roster:get("a").party, false, "leaving one clears it")
 eq(roster:setParty("nosuch", true), nil, "an unknown id is a no-op")
+
+-- ------- pace rides through move(), not a setter
+--
+-- The opposite choice from party, and for the reason src/Roster.lua spells
+-- out: pace is a property of the step itself, so it travels through move()'s
+-- own trailing argument rather than a setParty-shaped call. A nil is an
+-- old-shaped caller with no opinion, and must leave whatever was last
+-- recorded alone -- reading "no opinion" as "not fast" would stop every
+-- runner mid-stride the moment any pre-pace call site fired.
+
+eq(roster:get("a").fast, false,
+   "nobody starts flagged as fast -- Wire.presence always coerces the field")
+roster:move("a", "PALLET", 8, 5, "right", true)
+eq(roster:get("a").fast, true, "a move can flag the step as a fast one")
+roster:move("a", "PALLET", 9, 5, "right")
+eq(roster:get("a").fast, true,
+   "and an old-shaped call with no fast argument leaves it alone")
+roster:move("a", "PALLET", 10, 5, "right", false)
+eq(roster:get("a").fast, false, "while an explicit false clears it")
 
 roster:setBusy("a", true)
 eq(roster:get("a").busy, true, "busy is carried the same way")
@@ -1460,6 +1592,11 @@ eq(pAnn.partyId, together.id, "or ending it when the trade does")
 end)()
 
 -- ------- refusals and liveness
+--
+-- One do-block for the section: its dozen locals are the section's own, and
+-- handing their slots back is what keeps the main chunk under Lua's 200-local
+-- ceiling now that two branches' suites live in one file.
+do
 
 -- the cap is charged at hello, so a stranger connects and is then refused
 local stranger, strangerPeer = join(hub, "STRANGER", "PALLET", 1, 1)
@@ -1494,6 +1631,8 @@ local goodbye = take(shutPeer, Wire.ERROR)
 check(goodbye ~= nil, "shutdown tells every player")
 check(shutPeer.closed, "and closes their connection")
 eq(hub2.count, 0, "leaving the hub empty")
+
+end
 
 -- ------------------------------------------------------------------
 -- 3b. Ranked PVP: the arithmetic, and the hub that applies it
@@ -1765,6 +1904,239 @@ for _, row in ipairs(claims:top(Config.RANK_TOP)) do
   eq(row.tokenHash, nil, "the leaderboard sent to clients carries no digests")
 end
 
+-- ------- a claim is provisional until it is proved
+--
+-- Board:claim's own header explains the rule; what follows pins it case by
+-- case, mirroring server/rank.test.js's claim scenarios one for one so the
+-- two Board twins stay honest about the same thing.
+
+local mintTokenCounter = 0
+local function mintToken()
+  mintTokenCounter = mintTokenCounter + 1
+  return Sha256.hex("rby_mmo_test/board_twin_token|" .. mintTokenCounter)
+             :sub(1, Config.RANK_TOKEN_HEX)
+end
+
+-- A fresh claim starts life unproved.
+do
+  local board = Rank.newBoard()
+  local token = mintToken()
+  eq(board:claim("ASH", nil, token), "claimed", "the name is free, so it is claimed")
+  eq(board:get("ASH").confirmed, false,
+     "but a mint only says a ticket was posted, not that anyone proved holding it")
+  -- ...and it is not written down. A row nobody has proved, played or scored
+  -- under is one Board:claim will hand to the next player who asks, so
+  -- persisting it buys nothing -- and a hub anybody can dial would otherwise
+  -- grow (and rewrite) a row per passing hello.
+  local exported
+  for _, row in ipairs(board:export()) do
+    if row.name == "ASH" then exported = row end
+  end
+  eq(exported, nil,
+     "and an unproved, unplayed, unrated claim is not written to the file at all")
+end
+
+-- The claim moves for a name nobody is *using*. A holder who is connected and
+-- ranked under it right now is the one thing board state cannot see, and
+-- without it the leniency above is a theft: the second player takes the
+-- claim, and the first player's next win lands on it.
+do
+  local board = Rank.newBoard()
+  local held = mintToken()
+  eq(board:claim("ASH", nil, held), "claimed", "first visit mints a claim")
+
+  eq(board:claim("ASH", nil, mintToken(), true), "impostor",
+     "a tokenless hello while the holder is connected and ranked is an impostor")
+  eq(board:claim("ASH", mintToken(), mintToken(), true), "impostor",
+     "and so is a wrong ticket")
+  eq(board:claim("ASH", held, mintToken(), true), "owner",
+     "the holder themselves is still the owner, live or not")
+
+  -- The lockout this whole branch exists to fix has the owner *gone*, so it
+  -- is untouched: same board, nobody connected, same tokenless hello.
+  local gone = Rank.newBoard()
+  gone:claim("ASH", nil, mintToken())
+  local fresh = mintToken()
+  eq(gone:claim("ASH", nil, fresh, false), "claimed",
+     "with the holder disconnected the reclaim still works")
+  eq(gone:claim("ASH", fresh, mintToken()), "owner",
+     "and the ticket it minted is the one that answers")
+end
+
+-- A row with a rating but no games behind it is not reclaimable either.
+-- `played` is the rule; this is the belt on top of it, for a hand-edited
+-- ranking.json where the two disagree.
+do
+  local edited = Rank.newBoard():import({
+    { name = "EDITED", points = 500, played = 0, won = 0, confirmed = false,
+      tokenHash = ("a"):rep(64) },
+  })
+  eq(edited:get("EDITED").points, 500, "sanity: the imported row has a rating")
+  eq(edited:get("EDITED").played, 0, "and no games behind it")
+  eq(edited:claim("EDITED", nil, mintToken()), "impostor",
+     "points above the starting value block a reclaim on their own")
+end
+
+-- The ticket holder returning confirms the claim, and from then on nothing
+-- reclaims it -- not even a hello with no ticket at all.
+do
+  local board = Rank.newBoard()
+  local token = mintToken()
+  eq(board:claim("ASH", nil, token), "claimed", "first visit mints a claim")
+  eq(board:get("ASH").confirmed, false, "not proved yet")
+
+  eq(board:claim("ASH", token, mintToken()), "owner",
+     "the ticket holder returns and is recognised")
+  eq(board:get("ASH").confirmed, true,
+     "a proved ticket confirms the claim, even though nothing has scored")
+
+  eq(board:claim("ASH", nil, mintToken()), "impostor",
+     "and a confirmed claim is never reclaimed, even at zero games played")
+end
+
+-- Unconfirmed and unscored: any hello for the name moves the claim, right
+-- ticket, wrong ticket or none at all -- until somebody proves it.
+do
+  local board = Rank.newBoard()
+  local oldToken = mintToken()
+  eq(board:claim("ASH", nil, oldToken), "claimed", "first visit mints a claim")
+  eq(board:get("ASH").confirmed, false, "nobody has proved it yet")
+
+  local newToken = mintToken()
+  eq(board:claim("ASH", nil, newToken), "claimed",
+     "a second tokenless hello for an unconfirmed, unscored name re-mints "
+     .. "rather than locking the name shut")
+
+  -- The claim is still unproved, so even a *wrong* ticket moves it again
+  -- instead of being told apart from a missing one -- "unconfirmed and
+  -- unscored" is the whole test, not which ticket was presented.
+  local staleToken = mintToken()
+  eq(board:claim("ASH", oldToken, staleToken), "claimed",
+     "a wrong ticket on a still-unconfirmed, unscored name reclaims once "
+     .. "more rather than answering impostor")
+
+  eq(board:claim("ASH", staleToken, mintToken()), "owner",
+     "the latest ticket is the one that answers now")
+  eq(board:get("ASH").confirmed, true, "and proving it confirms the claim")
+
+  eq(board:claim("ASH", newToken, mintToken()), "impostor",
+     "now that it is proved, an earlier ticket is worthless")
+end
+
+-- A name that has settled a battle is never up for grabs, ticket or not --
+-- even a legacy row that reached disk unconfirmed.
+do
+  local board = Rank.newBoard()
+  local token = mintToken()
+  board:claim("ASH", nil, token)
+  board:record("ASH", "GARY", 0)
+  local row
+  for _, r in ipairs(board:export()) do if r.name == "ASH" then row = r end end
+  eq(row.played, 1, "sanity: this name has scored")
+  eq(row.confirmed, true, "and settling confirmed it too")
+
+  row.confirmed = false
+  local reloaded = Rank.newBoard():import({ row })
+  eq(reloaded:get("ASH").confirmed, false,
+     "the imported state: unconfirmed on file, but already scored")
+  eq(reloaded:get("ASH").played, 1, "and scored")
+  eq(reloaded:claim("ASH", nil, mintToken()), "impostor",
+     "played > 0 blocks reclaim on its own, independent of confirmed")
+end
+
+-- Settling a match confirms both names in the same breath, ticket or not.
+do
+  local board = Rank.newBoard()
+  eq(board:get("ALPHA"), nil, "sanity: neither name is on the board yet")
+  board:record("ALPHA", "BRAVO", 0)
+  eq(board:get("ALPHA").confirmed, true,
+     "the winner is confirmed by having played, ticket or not")
+  eq(board:get("BRAVO").confirmed, true,
+     "and so is the loser -- a settled battle proves both names at once")
+end
+
+-- confirmed round-trips through export/import, both ways.
+do
+  -- The unconfirmed side of the trip has to be a row the file actually keeps,
+  -- and export drops the throwaway ones -- so this is an unproved claim on a
+  -- name that has played, which is what a legacy file looks like.
+  local board = Rank.newBoard():import({
+    { name = "PROVISIONAL", points = 12, played = 1, won = 1, confirmed = false,
+      tokenHash = ("b"):rep(64) },
+  })
+  eq(board:get("PROVISIONAL").confirmed, false, "sanity: unconfirmed")
+
+  local provenToken = mintToken()
+  board:claim("PROVEN", nil, provenToken)
+  board:claim("PROVEN", provenToken, mintToken())
+  eq(board:get("PROVEN").confirmed, true, "sanity: confirmed by its owner")
+
+  local reloaded = Rank.newBoard():import(board:export())
+  eq(reloaded:get("PROVISIONAL").confirmed, false,
+     "an unconfirmed claim comes back unconfirmed")
+  eq(reloaded:get("PROVEN").confirmed, true,
+     "and a confirmed one comes back confirmed -- both directions of the trip")
+end
+
+-- What the file is allowed to grow. Every first hello under a new name claims
+-- it, so a hub anybody can dial would otherwise write a row per connection --
+-- and rewrite the whole file each time. Only claims worth surviving a restart
+-- are written: proved, played, or carrying a rating.
+do
+  local board = Rank.newBoard()
+  board:claim("DRIFTER", nil, mintToken())
+  board:seen("WATCHER", "SPRITE_RED")
+  eq(#board:export(), 0,
+     "a board of nothing but fresh claims and passers-by writes no rows at all")
+
+  local proved = mintToken()
+  board:claim("PROVER", nil, proved)
+  board:claim("PROVER", proved, mintToken())
+  board:record("WINNER", "LOSER", 0)
+  local names = {}
+  for _, row in ipairs(board:export()) do names[#names + 1] = row.name end
+  table.sort(names)
+  eq(table.concat(names, ","), "LOSER,PROVER,WINNER",
+     "and a proved claim, a win and a loss are all kept -- those are what a "
+     .. "restart has to survive")
+end
+
+-- A legacy row with no `confirmed` field is judged by its results: played is
+-- proof, and nothing played is exactly the leniency a fresh claim gets.
+do
+  local hashOf = function(char) return char:rep(64) end
+  local legacy = Rank.newBoard():import({
+    { name = "VETERAN", points = 40, played = 3, won = 2, tokenHash = hashOf("a") },
+    { name = "ROOKIE", points = 0, played = 0, won = 0, tokenHash = hashOf("b") },
+  })
+  eq(legacy:get("VETERAN").confirmed, true,
+     "a legacy row with no confirmed field, but with results, is read as confirmed")
+  eq(legacy:get("ROOKIE").confirmed, false,
+     "and one with no results yet is read as provisional -- the same leniency "
+     .. "a fresh claim gets")
+  eq(legacy:claim("VETERAN", nil, mintToken()), "impostor",
+     "so the veteran cannot be reclaimed")
+  eq(legacy:claim("ROOKIE", nil, mintToken()), "claimed",
+     "but the rookie can be -- nothing has scored under that name yet")
+end
+
+-- The twin drift: import's tokenHash shape tightens to exactly what
+-- server/lib/rank.js has always required, /^[0-9a-f]{64}$/ (D4 in the plan).
+do
+  local hash64 = ("a1"):rep(32)
+  eq(#hash64, 64, "sanity: the fixture hash is 64 characters")
+  local board = Rank.newBoard():import({
+    { name = "SHORT", points = 5, tokenHash = hash64:sub(1, 63) },
+    { name = "LONG", points = 5, tokenHash = hash64 .. "a" },
+    { name = "SHOUTY", points = 5, tokenHash = hash64:upper() },
+    { name = "EXACT", points = 5, tokenHash = hash64 },
+  })
+  eq(board:claimed("SHORT"), false, "63 hex characters is rejected")
+  eq(board:claimed("LONG"), false, "65 hex characters is rejected")
+  eq(board:claimed("SHOUTY"), false, "uppercase hex is rejected")
+  eq(board:claimed("EXACT"), true, "exactly 64 lowercase hex characters is accepted")
+end
+
 -- ------- the leaderboard
 
 local ladder = Rank.newBoard()
@@ -1986,6 +2358,150 @@ eq(returning.board:points("COMEBACK"), won,
 eq(returning.board:points("VICTIM2"), 0,
    "and their opponent loses nothing to a match that was never scored")
 
+-- ------- reclaim, over the wire -- the same rule server/lib/relay.js runs
+--
+-- Mirrors testReclaimOverTheWire in server/rank.test.js: welcome.ranked and
+-- welcome.rankToken are what a client actually reads, so the twin is pinned
+-- there and not only against Board:claim's return value.
+
+-- Wrapped in a function purely for scope, like section 8/10 below: this
+-- do-block is already close to Lua's 200-local ceiling.
+;(function()
+
+local reclaimHub = Hub.new({ maxPlayers = 8 })
+
+local delta1, delta1Peer = join(reclaimHub, "DELTA")
+local oldTicket = take(delta1Peer, Wire.WELCOME).rankToken
+check(Wire.token(oldTicket) ~= nil, "a first visit mints a claim ticket")
+reclaimHub:drop(delta1)
+
+-- Back without the ticket -- a save that never carried it -- before ever
+-- proving it or playing a scored battle.
+local delta2, delta2Peer = join(reclaimHub, "DELTA")
+local delta2Welcome = take(delta2Peer, Wire.WELCOME)
+eq(delta2Welcome.ranked, true,
+   "an unconfirmed, unscored name follows the player who is here now")
+local newTicket = delta2Welcome.rankToken
+check(Wire.token(newTicket) ~= nil, "a fresh ticket goes out with the reclaim")
+check(newTicket ~= oldTicket, "and it is not the one that got lost")
+reclaimHub:drop(delta2)
+
+-- Prove the fresh ticket, which is the moment the claim stops moving.
+local delta3, delta3Peer = join(reclaimHub, "DELTA", nil, nil, nil, newTicket)
+eq(take(delta3Peer, Wire.WELCOME).ranked, true, "the new ticket is recognised")
+reclaimHub:drop(delta3)
+
+local delta4, delta4Peer = join(reclaimHub, "DELTA", nil, nil, nil, oldTicket)
+local delta4Welcome = take(delta4Peer, Wire.WELCOME)
+eq(delta4Welcome.ranked, false,
+   "the ticket that got lost is worthless once the claim has moved on and "
+   .. "been proved")
+eq(delta4Welcome.rankToken, nil,
+   "no ticket is handed to somebody presenting a stale one")
+reclaimHub:drop(delta4)
+
+local delta5, delta5Peer = join(reclaimHub, "DELTA", nil, nil, nil, newTicket)
+local delta5Welcome = take(delta5Peer, Wire.WELCOME)
+eq(delta5Welcome.ranked, true, "the proven ticket is the one that answers now")
+eq(delta5Welcome.rankToken, nil,
+   "and a confirmed owner is not re-sent a ticket they already hold")
+
+end)()
+
+-- ------- a name somebody is standing in is not up for grabs
+--
+-- The impostor gate the board cannot see for itself, through the hub that
+-- computes it: a second player typing a name somebody is connected and ranked
+-- under does not take the claim. Reachable by accident -- two copies that
+-- never changed the default trainer name -- and permanent if it went through,
+-- because the first player's next settled win would confirm the taker's
+-- claim. Mirrors testLiveHolderOverTheWire in server/rank.test.js.
+
+;(function()
+
+local liveHub = Hub.new({ maxPlayers = 8 })
+local claimed = {}
+liveHub.onClaim = function(what, name) claimed[#claimed + 1] = what .. ":" .. name end
+
+local holder, holderPeer = join(liveHub, "ECHO")
+eq(take(holderPeer, Wire.WELCOME).ranked, true, "the first ECHO is ranked")
+local held = liveHub:claimHash("ECHO")
+check(held ~= nil, "and holds an unproved claim on the name")
+
+local second, secondPeer = join(liveHub, "ECHO")
+local secondWelcome = take(secondPeer, Wire.WELCOME)
+eq(secondWelcome.ranked, false,
+   "a second ECHO arriving while the first is still here is not scored")
+eq(secondWelcome.rankToken, nil, "and is handed no ticket")
+eq(liveHub:claimHash("ECHO"), held, "the claim did not move")
+eq(holder.ranked, true, "and the holder is still ranked")
+eq(claimed[1], "unscored:ECHO",
+   "the host is told, which is the seam server/lib/relay.js logs on")
+liveHub:drop(second)
+
+-- The lockout this branch exists to fix is the *disconnected* owner, and it
+-- still works: same tokenless hello, once the holder is gone.
+liveHub:drop(holder)
+local later, laterPeer = join(liveHub, "ECHO")
+local laterWelcome = take(laterPeer, Wire.WELCOME)
+eq(laterWelcome.ranked, true,
+   "with the holder gone, an unproved, unscored claim follows whoever is here")
+check(Wire.token(laterWelcome.rankToken) ~= nil, "and a fresh ticket goes out")
+check(liveHub:claimHash("ECHO") ~= held, "the claim moved this time")
+eq(claimed[2], "taken:ECHO", "and the host is told about that too")
+liveHub:drop(later)
+
+end)()
+
+-- ------- a battle is scored into the claims it started against, or not at all
+--
+-- A claim that moved between the first turn and the last report belongs to
+-- somebody else now, and Board:record would confirm it into permanence on the
+-- way past. Mirrors testClaimMovedMidMatch in server/rank.test.js.
+
+;(function()
+
+local midHub = Hub.new({ maxPlayers = 8 })
+
+local function battle(a, b)
+  midHub:receive(a, { type = Wire.REQUEST, to = b.id, kind = "battle" })
+  midHub:receive(b, { type = Wire.RESPOND, to = a.id, kind = "battle",
+                      accept = true })
+  return a.sessionId
+end
+
+-- The control: the same battle, nobody's claim touched, settles normally.
+local control = join(midHub, "CONTROL")
+local sparring = join(midHub, "SPARRING")
+local firstId = battle(control, sparring)
+midHub:receive(control, { type = Wire.RESULT, session = firstId, outcome = "win" })
+midHub:receive(sparring, { type = Wire.RESULT, session = firstId, outcome = "loss" })
+eq(midHub.board:points("CONTROL"), 16, "sanity: an untouched match scores")
+
+local nova = join(midHub, "NOVA")
+local vega = join(midHub, "VEGA")
+local matchId = battle(nova, vega)
+local startedWith = midHub:claimHash("NOVA")
+
+-- NOVA reports and leaves -- the paperwork outlives the session by design --
+-- and with nobody connected under the name, its unproved claim is up for
+-- grabs again.
+midHub:receive(nova, { type = Wire.RESULT, session = matchId, outcome = "win" })
+midHub:drop(nova)
+local taker = join(midHub, "NOVA")
+check(midHub:claimHash("NOVA") ~= startedWith, "sanity: the claim moved")
+
+midHub:receive(vega, { type = Wire.RESULT, session = matchId, outcome = "loss" })
+eq(midHub.board:points("NOVA"), 0,
+   "the settlement is dropped: those points would have landed on a claim the "
+   .. "winner does not hold")
+eq(midHub.board:points("VEGA"), 0, "and the loser pays nothing for it")
+eq(midHub.board:get("NOVA").confirmed, false,
+   "nor is the new claim confirmed by somebody else's battle")
+eq(taker.ranked, true, "sanity: the taker is a normal player")
+
+end)()
+
 end
 
 -- ------------------------------------------------------------------
@@ -2081,6 +2597,221 @@ end
 eq(walked, 4, "two east and two south is four steps")
 eq(x, 5, "landing on the target x")
 eq(y, 8, "and the target y")
+
+-- ------- a fast step sets the remote avatar's step pace
+--
+-- advance() writes npc.stepFrames straight onto the live NPC -- the field
+-- NPC:update reads fresh every frame, per the module's own header -- so the
+-- fake world only needs to hand back a handle whose .npc is a plain mutable
+-- table shaped like the fields advance touches.  mod.world is set directly
+-- on the shared stub for the length of this section and cleared afterward,
+-- so nothing later that touches stubMod sees a fake world it did not ask
+-- for.  Wrapped for scope, the same reason as elsewhere in this file.
+
+;(function()
+
+local fakeNpc = { cellX = 5, cellY = 5, moving = false, facing = "down" }
+local fakeWorld = {
+  npc = function(_, mapId, npcId) return { npc = fakeNpc } end,
+}
+stubMod.world = fakeWorld
+
+local avatars = Avatars.new()
+avatars.mapId = "PALLET"
+
+local av = { npcId = "n1", x = 5, y = 5, facing = "down" }
+local runnerRow = { id = "a", x = 6, y = 5, facing = "right", fast = true }
+check(avatars:advance(av, runnerRow), "advance starts a step toward the new cell")
+eq(fakeNpc.stepFrames, Config.FAST_STEP_FRAMES,
+   "a fast roster row paces the step at the fast frame count")
+
+-- the step "completes" the way NPC:update would drive it, before the next
+-- one starts
+fakeNpc.moving = false
+fakeNpc.cellX, fakeNpc.cellY = 6, 5
+
+local walkerRow = { id = "a", x = 7, y = 5, facing = "right", fast = false }
+check(avatars:advance(av, walkerRow), "advance starts the next step")
+eq(fakeNpc.stepFrames, nil,
+   "and a walking-pace row clears it back to the engine's own default")
+
+-- The bug this flag's rename fixed: a cyclist's row says fast the same way a
+-- sprinter's does, because the wire carries the pace and not the reason for
+-- it. Before that, a remote cyclist stepped at 16 while their own game moved
+-- them at 8 and they drifted straight through RESYNC_DISTANCE.
+fakeNpc.moving = false
+fakeNpc.cellX, fakeNpc.cellY = 7, 5
+
+local cyclistRow = { id = "a", x = 8, y = 5, facing = "right", fast = true }
+check(avatars:advance(av, cyclistRow), "advance starts a cyclist's step")
+eq(fakeNpc.stepFrames, Config.FAST_STEP_FRAMES,
+   "and a cyclist is paced by the same one flag a sprinter is")
+
+stubMod.world = nil
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 5b. Avatars decorate / undecorate -- the depth-nudge compensation
+-- ------------------------------------------------------------------
+--
+-- decorate/undecorate patch a live NPC's update and pose so an avatar
+-- always loses a draw-order tie against the player: a whole-pixel py is
+-- nudged up by AVATAR_DEPTH_NUDGE right after NPC:update recomputes it, and
+-- both ways a position leaves the avatar layer -- pose, for the renderer,
+-- and cellOf, for a caller comparing against the roster -- add it back so
+-- nothing downstream of the sort ever sees the fraction.  See
+-- src/Config.lua's AVATAR_DEPTH_NUDGE and src/Avatars.lua's decorate for the
+-- full argument.
+--
+-- A stub class stands in for the engine's NPC: update writes a new
+-- whole-pixel py only while moving -- exactly like NPC:update landing a
+-- step -- and pose reads py back out seven values wide, the same shape
+-- src/Avatars.lua wraps.  cellOf itself reaches through mod.world:npc, a
+-- live overworld handle this headless suite does not stand up -- that call
+-- is e2e territory, exercised by run-mmo-e2e.sh.  What is pinned here
+-- instead is the arithmetic cellOf leans on just as much as pose does: case
+-- 5 below proves the round trip -- subtract the nudge, add it back -- lands
+-- on the exact original whole pixel.
+--
+-- Wrapped for scope, like the trainer-card section below: this file's main
+-- chunk sits close enough to Lua's 200-local ceiling that one more section's
+-- worth of locals is what tips it over.
+
+;(function()
+
+local NUDGE = Config.AVATAR_DEPTH_NUDGE
+
+local StubNpcClass = {}
+StubNpcClass.__index = StubNpcClass
+
+function StubNpcClass:update(...)
+  if self.moving then self.py = self.targetPy end
+  return "base-update", 42
+end
+
+function StubNpcClass:pose(...)
+  return "sprite", self.px, self.py, self.facing, self.phase, self.flip, self.hop
+end
+
+local function newStubNpc(py)
+  return setmetatable({
+    px = 48, py = py, facing = "down", phase = 2, flip = true, hop = false,
+    moving = false,
+  }, StubNpcClass)
+end
+
+-- a bare-table fingerprint, so "undecorate leaves it indistinguishable from
+-- a table that was never decorated" is a real comparison and not a
+-- hand-picked field list
+local function keyList(t)
+  local ks = {}
+  for k in pairs(t) do ks[#ks + 1] = tostring(k) end
+  table.sort(ks)
+  return table.concat(ks, ",")
+end
+
+-- 1. decorate marks the NPC and installs instance-level update/pose
+local originalPy = 80
+local npc = newStubNpc(originalPy)
+Avatars.decorate(npc)
+eq(npc.mmoAvatar, true, "decorate marks the NPC as an avatar")
+eq(npc.passable, true, "and makes it passable, the same escape hatch the follower uses")
+check(type(rawget(npc, "update")) == "function",
+      "update is shadowed on the instance, not left resolving through the metatable")
+check(type(rawget(npc, "pose")) == "function", "so is pose")
+
+-- 2. idle drift-proofing: a hundred no-op updates nudge exactly once
+for i = 1, 100 do npc:update() end
+eq(npc.py, originalPy - NUDGE,
+   "a whole py is nudged once and then never again -- the fraction is the guard")
+
+-- 3. moving recompute: the base update writes a fresh whole py, and that
+-- gets nudged too, from the new value rather than stacking on the old one
+local newPy = 96
+npc.moving = true
+npc.targetPy = newPy
+npc:update()
+eq(npc.py, newPy - NUDGE, "a freshly-landed step is nudged from its own new py")
+
+-- 4. the override forwards whatever the base update returned, arity and all
+npc.moving = false
+local r1, r2 = npc:update()
+eq(r1, "base-update", "the wrapped update forwards the base call's first return value")
+eq(r2, 42, "and its second -- the wrapper does not narrow the base method's arity")
+
+-- 5. pose hands back the true pixel, not the sort's nudged one -- and this
+-- is also the round trip cellOf leans on, since it undoes the same nudge
+-- the same way
+local sprite, px, poseP, facing, phase, flip, hop = npc:pose()
+eq(poseP, newPy, "pose adds the nudge back, landing exactly on the whole pixel again")
+eq(poseP, (newPy - NUDGE) + NUDGE,
+   "the same round trip cellOf performs -- subtract, then add back -- is exact in doubles")
+eq(sprite, "sprite", "pose forwards the sprite untouched")
+eq(px, npc.px, "and px untouched")
+eq(facing, npc.facing, "and facing")
+eq(phase, npc.phase, "and the walk phase")
+eq(flip, npc.flip, "and the step flip")
+eq(hop, npc.hop, "and the hop flag -- only py is ever touched")
+
+-- 6. decorate is idempotent: an already-marked NPC is untouched, not
+-- rewrapped, so a second nudge never stacks on the first
+local updateFn, poseFn = rawget(npc, "update"), rawget(npc, "pose")
+local pyBeforeRedecorate = npc.py
+Avatars.decorate(npc)
+eq(rawget(npc, "update"), updateFn, "redecorating keeps the same update closure")
+eq(rawget(npc, "pose"), poseFn, "and the same pose closure")
+eq(npc.py, pyBeforeRedecorate, "and touches no field -- the marker alone is the guard")
+
+-- 7. undecorate restores a table indistinguishable from one that was never
+-- decorated -- the engine pools NPC tables, so anything left behind would
+-- be born again on some later, ordinary NPC
+local plainNpc = newStubNpc(64)
+local plainKeys = keyList(plainNpc)
+Avatars.decorate(plainNpc)
+Avatars.undecorate(plainNpc)
+eq(keyList(plainNpc), plainKeys,
+   "the key set after decorate+undecorate matches the table before either ran")
+eq(rawget(plainNpc, "update"), nil, "update falls back to the metatable again")
+eq(rawget(plainNpc, "pose"), nil, "so does pose")
+eq(plainNpc.update, StubNpcClass.update, "which resolves to the class method")
+eq(plainNpc.pose, StubNpcClass.pose, "for both")
+
+-- 8. a pre-existing instance override survives a decorate/undecorate round
+-- trip -- decorate has to wrap *that*, not the class method underneath it,
+-- and undecorate has to hand back that exact function, not nil
+local overridden = newStubNpc(64)
+local preexisting = function(self, ...) return "pre-existing" end
+rawset(overridden, "update", preexisting)
+Avatars.decorate(overridden)
+check(rawget(overridden, "update") ~= preexisting,
+      "decorate wraps whatever was already shadowing update on the instance")
+Avatars.undecorate(overridden)
+eq(rawget(overridden, "update"), preexisting,
+   "and undecorate hands back that exact pre-existing function, not the class method")
+
+-- 9. half-decoration refusal: nothing is written until both class methods
+-- are in hand, and undecorate never touches a table it did not mark
+local NoUpdateClass = { pose = StubNpcClass.pose }
+NoUpdateClass.__index = NoUpdateClass
+local broken = setmetatable({ py = 64 }, NoUpdateClass)
+local brokenKeys = keyList(broken)
+Avatars.decorate(broken)
+eq(keyList(broken), brokenKeys,
+   "a class with no update method gets no fields written at all -- half a decoration")
+eq(broken.mmoAvatar, nil,
+   "not even the marker, so decorating the same table again after it is fixed still works")
+
+local untouched = newStubNpc(64)
+local sentinelUpdate = function(self, ...) return "sentinel" end
+rawset(untouched, "update", sentinelUpdate)
+local untouchedKeys = keyList(untouched)
+Avatars.undecorate(untouched)
+eq(keyList(untouched), untouchedKeys, "undecorate on a table it never marked is a no-op")
+eq(rawget(untouched, "update"), sentinelUpdate,
+   "and never blanks an instance slot that was already there")
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 6. Characters you can wear
@@ -2271,7 +3002,153 @@ eq(Client:playerName(saveGame), "GREEN", "and so does playerName's")
 
 end)()
 
+-- ------- the characters the mod brings of its own
+--
+-- Wrapped for scope like the two sections above, for the same reason: this
+-- chunk is close enough to Lua's 200-local ceiling that one more section at
+-- the top level is enough to cross it.
+
+;(function()
+
+local Cast = need("Cast")
+
 stubSprites = {}
+stubScales = {}
+check(Cast.install(), "the mod's own characters register")
+
+local ids = Cast.ids()
+eq(#ids, 2, "two of them")
+eq(ids[1], "SPRITE_NIRE", "NIRE")
+eq(ids[2], "SPRITE_NIRE_HOOD", "and NIRE HOOD")
+
+-- Installing twice would be a duplicate registration, which the loader is
+-- entitled to refuse -- and F5 in dev mode re-runs the entry chunk.
+check(Cast.install(), "installing again is a no-op rather than a second try")
+eq(#Cast.ids(), 2, "and does not double the cast")
+
+-- The catalog is what everything downstream reads, so what matters is that
+-- the record satisfies the same filter every other wearable character does.
+local offered = {}
+for _, id in ipairs(Chars.list()) do offered[id] = true end
+check(offered.SPRITE_NIRE and offered.SPRITE_NIRE_HOOD,
+      "so the CHARACTER screen offers them like any other character")
+eq(Chars.available("SPRITE_NIRE"), true, "and a peer wearing one can draw it")
+eq(Chars.label("SPRITE_NIRE_HOOD"), "NIRE HOOD", "under a readable name")
+
+-- Every character in the options row has to be a character that exists, or
+-- the row offers a choice that silently resolves back to RED.
+for _, row in ipairs(Config.SPRITES) do
+  if row[2] == "SPRITE_NIRE" or row[2] == "SPRITE_NIRE_HOOD" then
+    offered[row[2]] = "listed"
+  end
+end
+eq(offered.SPRITE_NIRE, "listed", "NIRE is offered in the options row too")
+eq(offered.SPRITE_NIRE_HOOD, "listed", "and so is NIRE HOOD")
+
+-- ------- the pics the catalog does not cover
+--
+-- "front" is the trainer card, Oak's intro and the Hall of Fame; "back" is
+-- the battle pic. A vanilla character answers nothing at all, which is what
+-- keeps wearing COOLTRAINER from changing what you fight as.
+local back = Cast.pic("SPRITE_NIRE", "back")
+local front = Cast.pic("SPRITE_NIRE", "front")
+check(back and back:find("back.png", 1, true), "NIRE has a battle back pic")
+check(front and front:find("front.png", 1, true), "and a trainer-card pic")
+eq(Cast.pic("SPRITE_NIRE", nil), front, "an unnamed side is the front one")
+eq(Cast.pic("SPRITE_RED", "back"), nil, "RED keeps the pics the game gave it")
+eq(Cast.pic(nil, "back"), nil, "and wearing nothing changes nothing")
+eq(Cast.owns("SPRITE_NIRE"), true, "NIRE is ours")
+eq(Cast.owns("SPRITE_RED"), false, "RED is not")
+
+-- ------- the art is really there, and really the size the engine reads it at
+--
+-- A PNG's IHDR is its first chunk, so width and height are bytes 17..24 --
+-- enough to catch the failure this cannot otherwise see: a sheet that is one
+-- frame short, or a back pic resaved at another size, loads without
+-- complaint and then draws wrongly. The scale registered for the back pic is
+-- only correct for the size asserted here.
+local function pngSize(path)
+  local handle = io.open(path, "rb")
+  if not handle then return nil end
+  local head = handle:read(24)
+  handle:close()
+  if type(head) ~= "string" or #head < 24 then return nil end
+  local function be32(at)
+    local a, b, c, d = head:byte(at, at + 3)
+    return ((a * 256 + b) * 256 + c) * 256 + d
+  end
+  return be32(17), be32(21)
+end
+
+for _, char in ipairs(Config.OWN_CHARS) do
+  for file, want in pairs({ ["walk.png"] = { 16, 96 },
+                            ["front.png"] = { 56, 56 },
+                            ["back.png"] = { 48, 48 } }) do
+    local w, h = pngSize(MOD_PATH .. "/" .. char.dir .. "/" .. file)
+    eq(w, want[1], char.label .. "'s " .. file .. " is " .. want[1] .. " wide")
+    eq(h, want[2], "and " .. want[2] .. " tall")
+  end
+end
+
+-- 48 * (64/48) = 64: the same screen height the 32x32 the engine sizes a
+-- trainer back for reaches at its default 2x, so the feet land where they
+-- have always landed.
+for _, char in ipairs(Config.OWN_CHARS) do
+  local scale = stubScales[Cast.scaleId(char)]
+  check(scale ~= nil, char.label .. "'s back pic is sized")
+  check(scale and math.abs(scale.scale * 48 - 64) < 0.001,
+        "to the height a vanilla back pic draws")
+end
+
+-- ------- the mark that says a character came with the mod
+--
+-- The CHARACTER list is 36 ROM characters and two of ours, and the rule for
+-- the mark is small enough to state exactly: ours, visible, and not the one
+-- under the cursor -- which is the only row where the mark and the cursor
+-- would land in the same cell. Pinned here rather than off a screenshot,
+-- because it has to keep holding as the list scrolls.
+local UiRows = need("Ui").markedRows
+
+local list = {
+  { label = "MR FUJI", value = "SPRITE_MR_FUJI" },
+  { label = "NIRE", value = "SPRITE_NIRE" },
+  { label = "NIRE HOOD", value = "SPRITE_NIRE_HOOD" },
+  { label = "OAK", value = "SPRITE_OAK" },
+}
+
+local function marked(index, scroll, rows)
+  local out = {}
+  for _, mark in ipairs(UiRows({ items = list, index = index,
+                                 scroll = scroll or 0, rows = rows or 7 })) do
+    out[#out + 1] = list[(scroll or 0) + mark.row].label
+  end
+  return table.concat(out, ",")
+end
+
+eq(marked(1), "NIRE,NIRE HOOD", "both of ours are marked, and nothing else")
+eq(marked(2), "NIRE HOOD",
+   "except the one under the cursor -- it would share the cursor's cell")
+eq(marked(3), "NIRE", "and the other way round")
+eq(marked(4), "NIRE,NIRE HOOD", "a vanilla row under the cursor marks neither")
+
+-- The rows are the *visible* ones, so a scrolled list marks by what is on
+-- screen rather than by position in the whole catalog.
+eq(marked(1, 2, 7), "NIRE HOOD", "a scrolled list marks what is on screen")
+eq(marked(1, 0, 2), "NIRE", "and a short window stops at its last row")
+
+-- The y it hands back is the widget's own row geometry: row 1 at y=24, then
+-- every 16 after it. Wrong by one row and the mark lands on the neighbour.
+local rows = UiRows({ items = list, index = 1, scroll = 0, rows = 7 })
+eq(rows[1].row, 2, "the mark is on the second visible row")
+eq(rows[1].y, 8 + 2 * 16, "at the y that row's label is drawn on")
+
+eq(#UiRows(nil), 0, "no menu marks nothing")
+eq(#UiRows({}), 0, "and neither does one with no items")
+
+stubSprites = {}
+stubScales = {}
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 7. Playing nicely with a mod that owns the world pass
@@ -2609,6 +3486,255 @@ eq(Client.setRankToken(Client, nil, TICKET_B), TICKET_B,
 eq(Client.rankToken(Client, nil), TICKET_B, "under a key of its own")
 eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
    "which is not the one any dialled hub uses")
+
+-- ------- the claim ticket's file store: love.filesystem, stubbed
+--
+-- D1 adds a file of the mod's own, in the LOVE save directory, that a save
+-- reload cannot take away -- the section above is mod.save alone, which is
+-- exactly what a headless suite already had. This is the other half.
+--
+-- Wrapped in a function purely for scope, like section 10 below: the chunk
+-- above it is already close to Lua's 200-local ceiling for one function
+-- body.
+--
+-- tests.modkit (required at the very top of this file) already installs a
+-- global `love` stub with its own in-memory love.filesystem, shared by the
+-- whole suite -- everything from here on assumes it is there. Each case
+-- below swaps in a *private* filesystem of its own, isolated from that
+-- shared one and from every other case, and always restores the ambient
+-- stub afterward rather than nulling it out -- leaving `love` absent would
+-- break every other section that follows (Stats.randomDVs reaches for
+-- love.math.random with no guard, the way real game code does).
+--
+-- Client.lua's tokenStore and json() results are module-level caches loaded
+-- once per chunk, so each case below asks resolver() for a fresh Client --
+-- and `love` is swapped in *before* that require runs, per the same
+-- instruction, though src/Client.lua's own filesystem() reads it lazily at
+-- call time and would work either order.
+
+;(function()
+
+local ambientLove = _G.love
+
+local function loveFilesystem(seed)
+  local files = {}
+  if type(seed) == "table" then
+    for path, body in pairs(seed) do files[path] = body end
+  end
+  local fs = { files = files }
+  -- Called as fs.read(path) / fs.write(path, data) -- plain functions, not
+  -- methods, because that is how src/Client.lua's filesystem() calls them.
+  function fs.read(path)
+    local body = files[path]
+    if body == nil then return nil, "could not open " .. tostring(path) end
+    return body
+  end
+  function fs.write(path, data)
+    files[path] = data
+    return true
+  end
+  -- The real love.filesystem has one, and src/Client.lua uses it to tell "no
+  -- file" from "a file that would not open" -- which read() alone answers
+  -- with the same nil either way.
+  function fs.getInfo(path)
+    if files[path] == nil then return nil end
+    return { type = "file", size = #files[path] }
+  end
+  return fs
+end
+
+-- The same encoder Client.lua reaches for (src.link.Json) -- a file of our
+-- own here would be a second thing to keep in step with it.
+local RealJson = require("src.link.Json")
+
+-- A welcome's grant is written to the file, keyed by the address dialled and
+-- the upper-cased trainer name -- not mod.save's key, which is address alone.
+do
+  stubSave = {}
+  local fs = loveFilesystem()
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  local granted = string.rep("e5", 16)
+  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
+     granted, "the grant is stored")
+  local body = fs.files[Config.RANK_TOKEN_FILE]
+  check(type(body) == "string", "and the file was written")
+  local decoded = RealJson.decode(body)
+  eq(decoded["hub.example.com:7788|ASH"], granted,
+     "under the address and the upper-cased name, however it was typed")
+  _G.love = ambientLove
+end
+
+-- A ticket the file holds survives mod.save being wiped wholesale -- the
+-- shape of a CONTINUE, which replaces the whole save table (Game.lua's
+-- restoreSave), not just the one key this mod happened to write.
+do
+  stubSave = {}
+  local fs = loveFilesystem()
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  local granted = string.rep("f6", 16)
+  fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash")
+  stubSave = {}
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
+     "the file still answers, though mod.save was just wiped")
+  _G.love = ambientLove
+end
+
+-- A different name on the same hub has no ticket of its own -- the file
+-- keys by hub *and* name, where mod.save (checked below) keys by hub alone.
+do
+  stubSave = {}
+  local fs = loveFilesystem({
+    [Config.RANK_TOKEN_FILE] = RealJson.encode({
+      ["hub.example.com:7788|ASH"] = string.rep("07", 16),
+    }),
+  })
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "gary"), nil,
+     "a different name on the same hub has no ticket of its own")
+  _G.love = ambientLove
+end
+
+-- Neither does the same name on a different hub.
+do
+  stubSave = {}
+  local fs = loveFilesystem({
+    [Config.RANK_TOKEN_FILE] = RealJson.encode({
+      ["hub.example.com:7788|ASH"] = string.rep("07", 16),
+    }),
+  })
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  eq(fileClient.rankToken(fileClient, "other.example.com:7788", "ash"), nil,
+     "and neither does the same name on a different hub")
+  _G.love = ambientLove
+end
+
+-- A file that will not decode is warned about once and treated as empty --
+-- never a lockout -- and the next grant overwrites it whole, repairing it.
+do
+  stubSave = {}
+  local fs = loveFilesystem({ [Config.RANK_TOKEN_FILE] = "not json at all {" })
+  _G.love = { filesystem = fs }
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+  local fileClient = resolver()("Client")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), nil,
+     "a file that will not decode is treated as empty")
+  check(#warns > 0, "and the corruption is warned about")
+  check(warns[1]:find(Config.RANK_TOKEN_FILE, 1, true) ~= nil,
+     "naming the file, so a player who reads the log knows what to delete")
+
+  local granted = string.rep("18", 16)
+  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
+     granted, "the next grant still stores")
+  local decoded = RealJson.decode(fs.files[Config.RANK_TOKEN_FILE])
+  eq(decoded["hub.example.com:7788|ASH"], granted,
+     "overwriting the file whole, which repairs it")
+
+  stubMod.log.warn = function() end
+  _G.love = ambientLove
+end
+
+-- A read that *fails* is not a file that is absent, and only one of the two
+-- may be overwritten. Rewriting the whole table after a failed read would
+-- hand back a file holding one key and throw away every other hub's ticket --
+-- so nothing is written at all, and the file on disk is left exactly as it
+-- was.
+do
+  stubSave = {}
+  local other = string.rep("4b", 16)
+  local seeded = RealJson.encode({ ["other.example.com:7788|GARY"] = other })
+  local fs = loveFilesystem({ [Config.RANK_TOKEN_FILE] = seeded })
+  -- The file is there -- getInfo still says so -- and will not open.
+  fs.read = function() return nil, "permission denied" end
+  _G.love = { filesystem = fs }
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+  local fileClient = resolver()("Client")
+  local granted = string.rep("5c", 16)
+  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
+     granted, "the grant is still stored -- in mod.save, which never failed")
+  eq(fs.files[Config.RANK_TOKEN_FILE], seeded,
+     "and the file is untouched: the other hub's ticket is still in it")
+  check(#warns > 0, "the failure is warned about")
+  check(warns[1]:find(Config.RANK_TOKEN_FILE, 1, true) ~= nil,
+        "naming the file, so a player who reads the log knows which one")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
+     "and this session still answers with the ticket it was just handed")
+
+  stubMod.log.warn = function() end
+  _G.love = ambientLove
+end
+
+-- A write that fails leaves mod.save holding the newer ticket, so the older
+-- one the file still has must not shadow it: a real SAVE and relaunch would
+-- otherwise present the stale one and be told it is an impostor.
+do
+  stubSave = {}
+  local stale = string.rep("6d", 16)
+  local fs = loveFilesystem({
+    [Config.RANK_TOKEN_FILE] = RealJson.encode({
+      ["hub.example.com:7788|ASH"] = stale,
+    }),
+  })
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), stale,
+     "sanity: the file answers first while it is the only answer")
+
+  fs.write = function() return false, "disk full" end
+  stubMod.log.warn = function() end
+  local granted = string.rep("7e", 16)
+  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
+     granted, "the grant is stored in mod.save even though the file refused it")
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
+     "and it is what answers: a key the write did not land is dropped from "
+     .. "this session rather than left in front of the newer one")
+  _G.love = ambientLove
+end
+
+-- A ticket that predates the file store, living only in mod.save, is still
+-- found -- back-compat with every ticket already issued before this fix.
+do
+  stubSave = {}
+  local fs = loveFilesystem()
+  _G.love = { filesystem = fs }
+  local fileClient = resolver()("Client")
+  local legacy = string.rep("29", 16)
+  stubSave["rank:hub.example.com:7788"] = legacy
+  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), legacy,
+     "a ticket that predates the file store is still found, in mod.save")
+  _G.love = ambientLove
+end
+
+-- With no love global at all -- any copy running outside LOVE -- behaviour
+-- is identical to before this fix: mod.save only. (The suite itself always
+-- has the ambient stub, per the header above; this case removes it on
+-- purpose, for the one case that needs it gone, and puts it straight back.)
+do
+  stubSave = {}
+  _G.love = nil
+  local headlessClient = resolver()("Client")
+  local token = string.rep("3a", 16)
+  eq(headlessClient.setRankToken(headlessClient, "hub.example.com:7788", token, "ash"),
+     token, "setRankToken still stores to mod.save with no love global")
+  eq(headlessClient.rankToken(headlessClient, "hub.example.com:7788", "ash"), token,
+     "and rankToken still reads it back -- exactly the old, save-only behaviour")
+  eq(stubSave["rank:hub.example.com:7788"], token,
+     "written to mod.save, and nowhere else to check")
+  _G.love = ambientLove
+end
+
+end)()
 
 -- ------------------------------------------------------------------
 -- 10. Trading, and the one invariant that matters
@@ -3210,8 +4336,10 @@ local red = newPlayer("red")
 overworld.player = red
 local redSheet = red.sprite
 
+eq(Client.wornLook(), nil, "before joining you are wearing nothing of ours")
 check(Client.applyLook(), "joining wears the chosen character")
 check(red.sprite ~= redSheet, "which really does swap the live renderer")
+eq(Client.wornLook(), "SPRITE_ROCKET", "and that is what is worn")
 
 -- map.entered, twice, on the player object the overworld handed back
 check(Client.refreshLook(), "entering a map re-wears it")
@@ -3220,6 +4348,9 @@ check(red.sprite ~= redSheet, "still wearing it")
 
 Client.restoreLook()
 eq(red.sprite, redSheet, "leaving gives the player their own trainer back")
+-- The battle and trainer-card pics hang off this one, so a game left is a
+-- game whose pics go back to vanilla in the same breath as the sprite.
+eq(Client.wornLook(), nil, "and leaving is wearing nothing again")
 
 Client.restoreLook()
 eq(red.sprite, redSheet, "and leaving twice is not a second restore")
