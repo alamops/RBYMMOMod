@@ -371,6 +371,83 @@ async function main() {
     const freed = await cal.expect('mmo.move');
     ok(freed.party === false, 'everyone sees them free to be asked again');
 
+    // ------- co-op battles
+    //
+    // The rules here are the same ones src/Hub.lua's suite asserts, driven
+    // over real sockets against the Node hub -- because "both hosting paths
+    // behave identically" is a claim about two implementations, and only
+    // testing each of them separately can support it.
+    //
+    // The scenario above ends by dissolving ANN and BOB's party, so it is
+    // formed again here rather than assumed -- an offer is only ever forwarded
+    // inside a party, and a co-op block running against no party would pass
+    // its silence checks for entirely the wrong reason.
+    ann.send('mmo.party_invite', { to: bobWelcome.id });
+    await bob.expect('mmo.party_invite');
+    bob.send('mmo.party_respond', { to: annWelcome.id, accept: true });
+    await ann.expect('mmo.party');
+    await bob.expect('mmo.party');
+    ok(true, 'ANN and BOB team up again for the co-op scenario');
+
+    const FIGHT = 'PALLET|OPP_BUG_CATCHER|1';
+
+    ann.send('mmo.coop_wait',
+      { battle: FIGHT, label: 'BUG CATCHER', map: 'PALLET' });
+    const offer = await bob.expect('mmo.coop_offer');
+    ok(offer.battle === FIGHT, 'an offer reaches the partner, keyed to the fight');
+    ok(offer.from === annWelcome.id, 'naming who is waiting');
+    ok(offer.label === 'BUG CATCHER',
+       'with the trainer name intact -- not cut to a player name length');
+    await cal.expectSilence('mmo.coop_offer');
+    ok(true, 'and reaches nobody outside the party');
+
+    // a join for a *different* fight is not this fight
+    bob.send('mmo.coop_join', { to: annWelcome.id, battle: 'PALLET|OPP_LASS|2' });
+    await ann.expectSilence('mmo.coop_joined');
+    ok(true, 'joining names the fight, and the wrong one is refused');
+
+    // ...and somebody outside the party cannot take it at all
+    cal.send('mmo.coop_join', { to: annWelcome.id, battle: FIGHT });
+    await ann.expectSilence('mmo.coop_joined');
+    ok(true, 'nor can a player outside the party join their fight');
+
+    bob.send('mmo.coop_join', { to: annWelcome.id, battle: FIGHT });
+    const joinerPlan = await bob.expect('mmo.coop_battle');
+    ok(joinerPlan.allies.length === 2, 'the joiner is handed both allies');
+    const told = await ann.expect('mmo.coop_joined');
+    ok(told.id === bobWelcome.id, 'and the waiting player learns who joined');
+
+    // the offer is spent: a second join finds nothing left to take
+    bob.send('mmo.coop_join', { to: annWelcome.id, battle: FIGHT });
+    await ann.expectSilence('mmo.coop_joined');
+    ok(true, 'an offer is taken exactly once');
+
+    // withdrawing tells the partner, with a reason they can act on
+    ann.send('mmo.coop_wait', { battle: FIGHT, label: 'BUG CATCHER' });
+    await bob.expect('mmo.coop_offer');
+    ann.send('mmo.coop_cancel', { reason: 'alone' });
+    const withdrawn = await bob.expect('mmo.coop_offer_end');
+    ok(withdrawn.reason === 'alone',
+       'withdrawing says whether they went in alone or walked away');
+
+    // a challenge against somebody with no party forms nothing
+    ann.send('mmo.coop_challenge', { to: calWelcome.id });
+    await cal.expectSilence('mmo.coop_ask');
+    ok(true, 'a party cannot challenge a player who has none');
+
+    // ...and the offer dies with the party rather than outliving it
+    ann.send('mmo.coop_wait', { battle: FIGHT, label: 'BUG CATCHER' });
+    await bob.expect('mmo.coop_offer');
+    ann.send('mmo.party_leave', {});
+    const orphaned = await bob.expect('mmo.coop_offer_end');
+    ok(orphaned.reason === 'gone',
+       'the party ending takes the standing offer down with it');
+    await ann.expect('mmo.party_end');
+    await bob.expect('mmo.party_end');
+    // ANN has to be unattached again for the scenario below, which is about
+    // a party formed with CAL and then dropped.
+    ann.drain('mmo.move');
+
     // a party does not survive the connection that made it
     ann.send('mmo.party_invite', { to: calWelcome.id });
     await cal.expect('mmo.party_invite');
@@ -396,6 +473,9 @@ async function main() {
 
   await capTest();
   await clampTest();
+  await coopRelayTest();
+  await coopRankTest();
+  coopRankMathTest();
   console.log(`\n  ${passed}/${passed} checks passed  (hub)\n`);
 }
 
@@ -472,6 +552,381 @@ async function capTest() {
     for (const player of joined) player.close();
     hub.kill('SIGTERM');
   }
+}
+
+// ------- mmo.coop_relay: who a co-op battle's traffic reaches
+//
+// The whole of a 2-on-2 rides this one message. The hub never reads a byte of
+// it -- it is the mod's own battle vocabulary and interpreting it here would
+// couple the server to a protocol the game owns -- so the only thing the hub
+// is responsible for is *routing*, and routing is exactly what this asserts.
+//
+// It matters more than a fan-out usually would. `mmo.relay` has one correct
+// destination and gets it wrong loudly; this one has three, and every way of
+// getting it wrong is quiet. Forward to too few and one player's screen
+// silently stops matching the battle. Forward to too many and somebody outside
+// the fight is fed turns for a battle they are not in. Echo it back to the
+// sender and every client applies its own turn twice. None of those close a
+// socket or log an error.
+//
+// Driven the long way round -- two real parties, a real four-way ask, real
+// agreement -- because the group this fans out to is built by that flow, and a
+// group assembled by hand would be a test of a table rather than of the hub.
+
+async function coopRelayTest() {
+  // Its own port and its own hub: this one needs five players at once, and
+  // borrowing the functional hub would leave four of them mid-battle for
+  // whatever ran next. PORT + 2 belongs to clampTest.
+  const port = PORT + 3;
+  const hub = await startHub(port, { RBY_MMO_MAX: '8' });
+  const clients = [];
+
+  const join = async (name) => {
+    const client = new Client(port);
+    await client.ready();
+    client.send('mmo.hello', {
+      proto: PROTOCOL, name, sprite: 'SPRITE_RED',
+      map: 'PALLET', x: 5, y: 5, facing: 'down',
+    });
+    client.id = (await client.expect('mmo.welcome')).id;
+    client.label = name;
+    clients.push(client);
+    return client;
+  };
+
+  const party = async (asker, invitee) => {
+    asker.send('mmo.party_invite', { to: invitee.id });
+    await invitee.expect('mmo.party_invite');
+    invitee.send('mmo.party_respond', { to: asker.id, accept: true });
+    await asker.expect('mmo.party');
+    await invitee.expect('mmo.party');
+  };
+
+  try {
+    const ann = await join('ANN');
+    const bob = await join('BOB');
+    const cal = await join('CAL');
+    const dee = await join('DEE');
+    // Connected, on the roster, and in nothing. Present for one assertion and
+    // it is the one a fan-out bug is most likely to fail: a battle's traffic
+    // must not reach somebody who is merely online.
+    const eve = await join('EVE');
+
+    await party(ann, bob);
+    await party(cal, dee);
+    ok(true, 'two parties of two form on one hub');
+
+    // ------- the four-way ask, over sockets
+
+    ann.send('mmo.coop_challenge', { to: cal.id });
+    const asked = await bob.expect('mmo.coop_ask');
+    ok(asked.name === 'ANN', 'the ask names who wants the battle');
+    ok(asked.side === 'a', "and tells a partner they are on the asker's side");
+    const askedCal = await cal.expect('mmo.coop_ask');
+    ok(askedCal.side === 'b', 'and tells the other party they are the other side');
+    await dee.expect('mmo.coop_ask');
+    await ann.expectSilence('mmo.coop_ask');
+    ok(true, 'the player who asked is not asked again');
+    await eve.expectSilence('mmo.coop_ask');
+    ok(true, 'and nobody outside the two parties is asked at all');
+
+    for (const member of [bob, cal, dee]) {
+      member.send('mmo.coop_answer', { id: asked.id, accept: true });
+    }
+
+    const started = await ann.expect('mmo.coop_battle');
+    ok(started.side === 'a', 'the asker is on side a');
+    ok(started.host === ann.id, 'and is named as the client that simulates');
+    const calStarted = await cal.expect('mmo.coop_battle');
+    ok(calStarted.side === 'b', 'the challenged party is side b');
+    ok(calStarted.allies.length === 2 && calStarted.foes.length === 2,
+       'and each side is handed two allies and two foes');
+    await bob.expect('mmo.coop_battle');
+    await dee.expect('mmo.coop_battle');
+    await eve.expectSilence('mmo.coop_battle');
+    ok(true, 'four agreements start one battle, for exactly those four');
+
+    // ------- the fan-out itself
+
+    const turn = { t: 'res', seq: 1, sig: '1:1:90:0|2:1:90:0', events: [
+      { kind: 'msg', text: 'ANN used TACKLE!' },
+      { kind: 'damage', slot: 3, amount: 12, hp: 78 },
+    ] };
+    ann.send('mmo.coop_relay', { payload: turn });
+
+    for (const member of [bob, cal, dee]) {
+      const got = await member.expect('mmo.coop_msg');
+      ok(got.from === ann.id, `${member.label} is told who sent the turn`);
+      // Deep-compared rather than spot-checked: the hub forwards the payload
+      // unread, so "unread" is the claim, and a hub that rebuilt the object --
+      // dropping a field it did not recognise, coercing a number -- would pass
+      // any check that only looked at the parts this test happened to name.
+      assert.deepStrictEqual(got.payload, turn,
+        'the payload is forwarded byte for byte');
+      passed++;
+    }
+    ok(true, 'a turn reaches all three of the other players');
+
+    await ann.expectSilence('mmo.coop_msg');
+    ok(true, 'and never comes back to the client that sent it');
+    await eve.expectSilence('mmo.coop_msg');
+    ok(true, 'and never reaches a player who is not in the battle');
+
+    // Every member is a sender, not just the host: a replayer asks for the
+    // field, a player files an action, somebody forfeits.
+    dee.send('mmo.coop_relay', { payload: { t: 'resync' } });
+    const asking = await ann.expect('mmo.coop_msg');
+    ok(asking.from === dee.id && asking.payload.t === 'resync',
+       'the fan-out is symmetric -- any member can reach the other three');
+    await bob.expect('mmo.coop_msg');
+    await cal.expect('mmo.coop_msg');
+    ok(true, 'including across the party line, in both directions');
+
+    // ------- what is refused
+
+    eve.send('mmo.coop_relay', { payload: { t: 'res', seq: 99 } });
+    for (const member of [ann, bob, cal, dee]) {
+      await member.expectSilence('mmo.coop_msg', 150);
+    }
+    ok(true, 'a player in no battle cannot inject a turn into one');
+
+    // A payload deeper than the cap. Not a malicious client so much as a
+    // broken one, and the hub must drop it rather than forward something it
+    // has not been able to judge the shape of.
+    let deep = { end: true };
+    for (let i = 0; i < 40; i++) deep = { next: deep };
+    ann.send('mmo.coop_relay', { payload: deep });
+    for (const member of [bob, cal, dee]) {
+      await member.expectSilence('mmo.coop_msg', 150);
+    }
+    ok(true, 'a payload deeper than the cap is dropped, not forwarded');
+
+    // ...and the connection survives it: a dropped payload is a dropped
+    // payload, not a dropped player.
+    ann.send('mmo.coop_relay', { payload: { t: 'res', seq: 2 } });
+    const after = await bob.expect('mmo.coop_msg');
+    ok(after.payload.seq === 2,
+       'and the sender is still in the battle afterwards');
+    bob.drain('mmo.coop_msg');
+    cal.drain('mmo.coop_msg');
+    dee.drain('mmo.coop_msg');
+
+    // ------- and the group closes for everybody at once
+
+    dee.send('mmo.coop_leave', {});
+    await sleep(150);
+    ann.send('mmo.coop_relay', { payload: { t: 'res', seq: 3 } });
+    for (const member of [bob, cal, dee]) {
+      await member.expectSilence('mmo.coop_msg', 150);
+    }
+    ok(true, 'one goodbye closes the group -- a co-op battle ends for all four');
+
+    // ...and it really is closed rather than merely quiet: the same four can
+    // agree to a new one, which they could not do while still marked as being
+    // in a battle.
+    ann.send('mmo.coop_challenge', { to: cal.id });
+    const again = await bob.expect('mmo.coop_ask');
+    ok(again.id !== asked.id, 'and the four can start a fresh battle afterwards');
+
+    // ------- the other way a group is made: two players against an NPC
+    //
+    // A pair that agreed by walking up to each other gets a fan-out group on
+    // exactly the same footing as a four-player one. That is the point of
+    // there being one routing rule, and it is worth checking rather than
+    // assuming, because the two flows build the group in different places.
+    for (const member of [bob, cal, dee]) {
+      member.send('mmo.coop_answer', { id: again.id, accept: false });
+    }
+    await sleep(150);
+    for (const member of [ann, bob, cal, dee, eve]) member.drain('mmo.coop_msg');
+
+    ann.send('mmo.coop_wait', { battle: 'PALLET:7', label: 'BUG CATCHER',
+                                map: 'PALLET' });
+    const offer = await bob.expect('mmo.coop_offer');
+    ok(offer.battle === 'PALLET:7', 'a partner is offered the fight by key');
+
+    // The key is not free-form: `#` is outside the charset cleanBattleKey
+    // accepts, and a key it rejects means no offer at all rather than an offer
+    // nobody can match. Worth pinning, because the failure is silence.
+    ann.send('mmo.coop_wait', { battle: 'PALLET#8', map: 'PALLET' });
+    await bob.expectSilence('mmo.coop_offer', 150);
+    ok(true, 'a battle key outside the accepted charset offers nothing');
+    bob.send('mmo.coop_join', { to: ann.id, battle: 'PALLET:7' });
+    await ann.expect('mmo.coop_joined');
+    await bob.expect('mmo.coop_battle');
+
+    ann.send('mmo.coop_relay', { payload: { t: 'res', seq: 1 } });
+    const pairMsg = await bob.expect('mmo.coop_msg');
+    ok(pairMsg.from === ann.id, 'a two-player group fans out the same way');
+    for (const member of [cal, dee, eve]) {
+      await member.expectSilence('mmo.coop_msg', 150);
+    }
+    ok(true, 'and reaches nobody outside the pair');
+  } finally {
+    for (const client of clients) client.close();
+    hub.kill('SIGTERM');
+  }
+}
+
+// ------- a 2-on-2 is rated as a team battle, and scored over real sockets
+//
+// The hub used to pair a four-way off by slot index -- first against first,
+// second against second -- which reused the 1v1 machinery unchanged and was
+// arbitrary in the way that matters: nothing about a four-way says who fought
+// whom. Both players attack both opponents, a move redirects across the pair
+// when a target falls, and the side loses together. It is one team match, and
+// this drives it end to end: four players agree, fight, report, and are rated.
+
+async function coopRankTest() {
+  const port = PORT + 4;
+  const hub = await startHub(port, { RBY_MMO_MAX: '8' });
+  const clients = [];
+
+  const join = async (name) => {
+    const client = new Client(port);
+    await client.ready();
+    client.send('mmo.hello', {
+      proto: PROTOCOL, name, sprite: 'SPRITE_RED',
+      map: 'PALLET', x: 5, y: 5, facing: 'down',
+    });
+    client.id = (await client.expect('mmo.welcome')).id;
+    client.label = name;
+    clients.push(client);
+    return client;
+  };
+  const party = async (asker, invitee) => {
+    asker.send('mmo.party_invite', { to: invitee.id });
+    await invitee.expect('mmo.party_invite');
+    invitee.send('mmo.party_respond', { to: asker.id, accept: true });
+    await asker.expect('mmo.party');
+    await invitee.expect('mmo.party');
+  };
+
+  try {
+    const ann = await join('ANN');
+    const bob = await join('BOB');
+    const cal = await join('CAL');
+    const dee = await join('DEE');
+    await party(ann, bob);
+    await party(cal, dee);
+
+    ann.send('mmo.coop_challenge', { to: cal.id });
+    const ask = await bob.expect('mmo.coop_ask');
+    await cal.expect('mmo.coop_ask');
+    await dee.expect('mmo.coop_ask');
+    for (const member of [bob, cal, dee]) {
+      member.send('mmo.coop_answer', { id: ask.id, accept: true });
+    }
+    const battle = await ann.expect('mmo.coop_battle');
+    for (const member of [bob, cal, dee]) await member.expect('mmo.coop_battle');
+    for (const member of [ann, bob, cal, dee]) member.drain('mmo.rank');
+
+    // Three reports settle nothing: a four-way has one result, and it is not
+    // one until all four have said the same thing about it.
+    ann.send('mmo.result', { session: battle.id, outcome: 'win' });
+    bob.send('mmo.result', { session: battle.id, outcome: 'win' });
+    cal.send('mmo.result', { session: battle.id, outcome: 'loss' });
+    await ann.expectSilence('mmo.rank', 300);
+    ok(true, 'three reports out of four score nothing');
+
+    dee.send('mmo.result', { session: battle.id, outcome: 'loss' });
+
+    // Four ratings moved, so four announcements go out -- a hub that told the
+    // winners and left the losers' screens stale would be wrong on two of the
+    // four machines.
+    const scores = new Map();
+    const deadline = Date.now() + 2000;
+    while (scores.size < 4 && Date.now() < deadline) {
+      const row = await ann.expect('mmo.rank');
+      scores.set(row.id, row.points);
+    }
+    ok(scores.size === 4, 'all four ratings are published, not just the winners');
+    ok(scores.get(ann.id) > 0 && scores.get(bob.id) > 0,
+       'both winners gained points');
+    ok(scores.get(ann.id) === scores.get(bob.id),
+       'team-mates who went in level come out level -- one team, one result');
+    ok(scores.get(cal.id) === scores.get(dee.id),
+       'and so do the two who lost');
+    ok(scores.get(cal.id) < scores.get(ann.id), 'the losing side is below the winning one');
+
+    // Reported again, and it is over: one battle, one settlement.
+    ann.drain('mmo.rank');
+    ann.send('mmo.result', { session: battle.id, outcome: 'win' });
+    await ann.expectSilence('mmo.rank', 300);
+    ok(true, 'a late report after settlement pays nothing');
+  } finally {
+    for (const client of clients) client.close();
+    hub.kill('SIGTERM');
+  }
+}
+
+// ------- ...and the arithmetic underneath it, without the sockets
+//
+// The claim the socket test cannot make cheaply: that the *order the hub
+// listed the four players in* changes nothing. That is the whole of what was
+// wrong with pairing by slot, and it only shows up with a lopsided side --
+// under slot pairing, whether the strong player faced the strong or the weak
+// opponent decided what the battle was worth.
+
+function coopRankMathTest() {
+  const { Board, teamPoints } = require('./lib/rank');
+
+  // The two opponents must be *differently* rated and only one side's order
+  // may change, or slot pairing would happen to match the same people up
+  // anyway and the test would pass under the design it is supposed to reject.
+  // Under slot pairing this exact swap moved three of the four ratings.
+  const NAMES = ['STRONG', 'WEAK', 'RIVAL', 'ROOKIE'];
+  const played = (winners, losers) => {
+    const board = new Board();
+    for (let i = 0; i < 6; i += 1) board.record('STRONG', 'PADDING', 0);
+    for (let i = 0; i < 3; i += 1) board.record('RIVAL', 'PADDING2', 0);
+    board.recordTeam(winners, losers, 500);
+    const out = {};
+    for (const name of NAMES) out[name] = board.points(name);
+    return out;
+  };
+  assert.deepStrictEqual(
+    played(['STRONG', 'WEAK'], ['ROOKIE', 'RIVAL']),
+    played(['STRONG', 'WEAK'], ['RIVAL', 'ROOKIE']),
+    'the seat a player is listed in changes no rating at all');
+  passed++;
+
+  // The side's strength is the pair's, not one member's.
+  const carried = new Board();
+  for (let i = 0; i < 4; i += 1) carried.record('CARRY', 'FODDER', 0);
+  const beatCarried = carried.recordTeam(['R1', 'R2'], ['CARRY', 'FODDER'], 100);
+  const beatUnknowns = new Board().recordTeam(['R1', 'R2'], ['P1', 'P2'], 100);
+  ok(beatCarried.loserSide > beatUnknowns.loserSide,
+     'a pair carrying a rated player is worth more than a pair of unknowns');
+  ok(beatCarried.winners[0].gained > beatUnknowns.winners[0].gained,
+     'and beating them pays more');
+
+  // Farming a 2-on-2 is discounted exactly as farming a 1v1 is.
+  const afternoon = new Board();
+  const paid = [];
+  for (let i = 1; i <= 5; i += 1) {
+    paid.push(afternoon.recordTeam(['P1', 'P2'], ['P3', 'P4'], 10 * i)
+      .winners[0].gained);
+  }
+  ok(paid[0] > 0 && paid[1] < paid[0] && paid[4] === 0,
+     'running the same party battle all afternoon stops paying');
+
+  // ...and one new face makes it worth playing again.
+  const fresh = new Board();
+  for (let i = 0; i < 3; i += 1) fresh.recordTeam(['R1', 'R2'], ['R3', 'R4'], 0);
+  const stale = fresh.recordTeam(['R1', 'R2'], ['R3', 'R4'], 1);
+  const newcomer = fresh.recordTeam(['R1', 'R2'], ['R3', 'NEWBIE'], 2);
+  ok(newcomer.winners[0].gained > stale.winners[0].gained,
+     'a new opponent on the other side is not somebody you have been farming');
+
+  ok(new Board().recordTeam(['X', 'Y'], ['Y', 'Z'], 0) === null,
+     'a player on both sides is not a battle between four people');
+  ok(new Board().recordTeam(['X', 'X'], ['Y', 'Z'], 0) === null,
+     'and neither is the same name twice on one side');
+  ok(new Board().recordTeam([], ['Y', 'Z'], 0) === null, 'an empty side is not a side');
+  ok(teamPoints([{ points: 100 }, { points: 200 }]) === 150,
+     'a side is worth the average of its members');
+  ok(teamPoints([]) === 0, 'and an empty one is worth nothing');
 }
 
 main().catch((err) => {

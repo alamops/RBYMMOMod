@@ -255,6 +255,21 @@ function M.new(opts)
     nextId = 1,
     nextSession = 1,
     nextParty = 1,
+    -- The four-way PARTY BATTLE asks in flight: id -> { asker, sideA, sideB,
+    -- everyone, answers, needed, startedAt }.  Kept here rather than on the
+    -- asker because three other clients are holding a box for it, and a state
+    -- four connections can invalidate belongs to the thing that outlives all
+    -- four.
+    coopAsks = {},
+    -- id -> { clientId, ... }: who mmo.coop_relay fans out to. Separate from
+    -- coopAsks because it starts where an ask *ends*, and outlives it.
+    coopBattles = {},
+    -- Paperwork for a party-vs-party co-op battle: id -> { pairs, reports,
+    -- startedAt }. Kept apart from `matches` because a co-op battle is four
+    -- reports rather than two, and folding them into one table would mean
+    -- every settlement had to ask which shape it was looking at.
+    coopMatches = {},
+    nextCoopAsk = 1,
     nextNonce = 0,
     -- The process-wide pool unless a caller hands over its own; only the
     -- suite does, so that two hubs can be started from identical pools and
@@ -599,6 +614,16 @@ end
 function M:drop(client)
   if not client or not self.clients[client.id] then return false end
   self:endSession(client, "peer_left")
+  -- Before endParty, deliberately: clearCoopOffer finds the partner *through*
+  -- the party, so withdrawing after the party is gone would withdraw into
+  -- nothing and leave the partner holding an offer for somebody who has left
+  -- the game.
+  self:clearCoopOffer(client, "gone")
+  self:clearCoopAsks(client, "gone")
+  -- A four-way that loses a player cannot be finished, and the group has to go
+  -- with them: the three left would otherwise keep relaying into an id that
+  -- includes somebody who is not there.
+  if client.coopBattleId then self:closeCoopBattle(client.coopBattleId) end
   -- A party outlives a trade but not a connection: the other member is told
   -- while this one is still in the table, so the presence that goes out with
   -- it is the one where they are no longer in a party.
@@ -741,6 +766,13 @@ end
 function M:endParty(client, reason)
   local id = client.partyId
   if not id then return end
+  -- Both offers go with the party, and while it still exists: an offer is only
+  -- ever shown to a party member, so one that outlived its party would be a box
+  -- on somebody's screen that nothing left alive could ever take down.
+  self:clearCoopOffer(client, "gone")
+  for _, member in ipairs(self:partyMembers(id)) do
+    if member.id ~= client.id then self:clearCoopOffer(member, "gone") end
+  end
   local memberIds = self.parties[id]
   self.parties[id] = nil
   client.partyId = nil
@@ -761,6 +793,181 @@ function M:endParty(client, reason)
     send(client, Wire.PARTY_END, { reason = "left" })
     self:broadcast(Wire.MOVE, presenceOf(client), client.id)
   end
+end
+
+-- ------- co-op battles
+--
+-- The hub owns two things here and deliberately not a third.
+--
+--   * **Who may hear about an offer.**  A co-op offer only ever reaches the
+--     one player its owner is travelling with, because the hub is the only
+--     party to the exchange that knows who that is.  A client asking to tell
+--     "everyone at this fight" would be a client choosing its own audience.
+--   * **Whether all four agreed.**  A PARTY BATTLE needs three yesses, and
+--     collecting them anywhere else means one client deciding that the other
+--     three consented.
+--
+-- What it does *not* own is the battle.  Nothing below simulates a turn; the
+-- hub says who agreed and stops, exactly as it does for a 1v1 session.
+
+-- The other member of this client's party, or nil.  At PARTY_MAX = 2 there is
+-- at most one, which is what lets an offer be forwarded without naming a
+-- recipient.
+function M:partnerOf(client)
+  if not client.partyId then return nil end
+  for _, member in ipairs(self:partyMembers(client.partyId)) do
+    if member.id ~= client.id then return member end
+  end
+  return nil
+end
+
+-- Drop this client's standing offer and tell whoever was being shown it.
+--
+-- Called from four places -- the client withdrawing, the offer being taken,
+-- the party dissolving, the connection dropping -- because all four leave the
+-- partner holding a box for a fight that is no longer on offer, and a box that
+-- can only be answered into nothing is the failure this whole message exists
+-- to prevent.
+function M:clearCoopOffer(client, reason)
+  if not client or not client.coopOffer then return false end
+  client.coopOffer = nil
+  local partner = self:partnerOf(client)
+  if partner then
+    send(partner, Wire.COOP_OFFER_END, { reason = reason or "left" })
+  end
+  return true
+end
+
+-- Every ask this client is part of is void.  A four-way that has lost a player
+-- cannot be completed and must not be left to time out, because the other
+-- three are looking at a box right now.
+function M:clearCoopAsks(client, reason)
+  local doomed
+  for id, ask in pairs(self.coopAsks or {}) do
+    for _, memberId in ipairs(ask.everyone) do
+      if memberId == client.id then
+        doomed = doomed or {}
+        doomed[#doomed + 1] = id
+        break
+      end
+    end
+  end
+  for _, id in ipairs(doomed or {}) do
+    self:endCoopAsk(id, client.name, reason or "gone")
+  end
+end
+
+function M:endCoopAsk(id, name, reason)
+  local ask = self.coopAsks and self.coopAsks[id]
+  if not ask then return false end
+  self.coopAsks[id] = nil
+  for _, memberId in ipairs(ask.everyone) do
+    local member = self.clients[memberId]
+    if member then
+      member.coopAskId = nil
+      send(member, Wire.COOP_DECLINE, { name = name, reason = reason })
+    end
+  end
+  return true
+end
+
+-- Open a co-op battle's fan-out group.
+--
+-- One id, however the battle was agreed: two partners against an NPC pair use
+-- it exactly as four players against each other do, so mmo.coop_relay has one
+-- routing rule rather than two that have to be kept in step.
+function M:openCoopBattle(id, memberIds)
+  local members = {}
+  for _, memberId in ipairs(memberIds or {}) do
+    local member = self.clients[memberId]
+    if member then
+      members[#members + 1] = memberId
+      member.coopBattleId = id
+    end
+  end
+  self.coopBattles[id] = { members = members, startedAt = self.clock }
+  return id
+end
+
+-- Forget it, and let the members out.  A battle whose group survived its
+-- players would keep forwarding into a set of ids that no longer connect.
+function M:closeCoopBattle(id)
+  local group = self.coopBattles[id]
+  if not group then return false end
+  self.coopBattles[id] = nil
+  for _, memberId in ipairs(group.members or {}) do
+    local member = self.clients[memberId]
+    if member and member.coopBattleId == id then member.coopBattleId = nil end
+  end
+  return true
+end
+
+-- All four said yes.  Each is told its own side and both rosters, so no client
+-- has to work out who its allies are from a list it was not given.
+function M:startCoopBattle(id)
+  local ask = self.coopAsks and self.coopAsks[id]
+  if not ask then return false end
+  self.coopAsks[id] = nil
+
+  local function roster(ids)
+    local out = {}
+    for _, memberId in ipairs(ids) do
+      local member = self.clients[memberId]
+      if not member or not member.ready then return nil end
+      out[#out + 1] = { id = member.id, name = member.name }
+    end
+    return out
+  end
+
+  local sideA, sideB = roster(ask.sideA), roster(ask.sideB)
+  -- Re-checked at the moment of starting rather than only when the ask went
+  -- out: somebody may have dropped between the third yes and this line, and
+  -- four players agreeing is only worth anything if all four are still here.
+  if not (sideA and sideB) then
+    self.coopAsks[id] = ask
+    return self:endCoopAsk(id, nil, "gone")
+  end
+
+  -- The membership outlives the ask, because the battle traffic is about to
+  -- need it: mmo.coop_relay is fanned out to exactly these four and nobody
+  -- else, and the hub is the only party that knows who they are.
+  self:openCoopBattle(id, ask.everyone)
+
+  -- The paperwork for a ranked 2-on-2.
+  --
+  -- **Two sides, not two pairs.** A four-way is scored as one team match --
+  -- each player against the other pair's combined strength -- because that is
+  -- the match they played. See Rank.lua's `recordTeam` for why pairing them
+  -- off by slot index was the wrong answer.
+  local function side(ids)
+    local out = {}
+    for _, memberId in ipairs(ids) do
+      local member = self.clients[memberId]
+      if member then
+        out[#out + 1] = { id = member.id, name = member.name,
+                          ranked = member.ranked ~= false }
+      end
+    end
+    return out
+  end
+  self.coopMatches[id] = {
+    a = side(ask.sideA), b = side(ask.sideB),
+    reports = {}, everyone = ask.everyone, startedAt = self.clock,
+  }
+
+  for _, memberId in ipairs(ask.sideA) do
+    local member = self.clients[memberId]
+    member.coopAskId = nil
+    send(member, Wire.COOP_BATTLE,
+      { id = id, side = "a", allies = sideA, foes = sideB, host = ask.asker })
+  end
+  for _, memberId in ipairs(ask.sideB) do
+    local member = self.clients[memberId]
+    member.coopAskId = nil
+    send(member, Wire.COOP_BATTLE,
+      { id = id, side = "b", allies = sideB, foes = sideA, host = ask.asker })
+  end
+  return true
 end
 
 -- ------- ranked PVP
@@ -839,6 +1046,93 @@ function M:settleMatch(id)
   local loserId = (winnerId == match.a) and match.b or match.a
   self:publishPoints(winnerId, settled.winner.points)
   self:publishPoints(loserId, settled.loser.points)
+  return settled
+end
+
+-- One player's report on a 2-on-2.
+--
+-- Same rule as a 1v1, one player wider: the first answer from each of the four
+-- stands, and nothing is scored until all four have spoken and agree. A side
+-- that cannot get its own two members to say the same thing has not won
+-- anything.
+function M:reportCoop(id, client, outcome)
+  local match = self.coopMatches[id]
+  if not match then return nil end
+  local inIt = false
+  for _, memberId in ipairs(match.everyone) do
+    if memberId == client.id then inIt = true break end
+  end
+  if not inIt then return nil end
+  if match.reports[client.id] then return nil end
+  match.reports[client.id] = outcome
+
+  for _, memberId in ipairs(match.everyone) do
+    if not match.reports[memberId] then return nil end
+  end
+  return self:settleCoopMatch(id)
+end
+
+function M:settleCoopMatch(id)
+  local match = self.coopMatches[id]
+  if not match then return nil end
+  -- One battle, one settlement, whatever the verdict.
+  self.coopMatches[id] = nil
+
+  -- What each side says happened, and it has to be unanimous *within* a side
+  -- before it is worth reading across sides. Two team-mates who cannot agree
+  -- whether they won have not won anything -- and neither has anybody else,
+  -- because a four-way has one result and this is it.
+  local function verdict(members)
+    local said
+    for _, member in ipairs(members) do
+      local report = match.reports[member.id]
+      if not report then return nil end
+      if said == nil then said = report elseif said ~= report then return nil end
+    end
+    return said
+  end
+
+  local saidA, saidB = verdict(match.a), verdict(match.b)
+  local winners, losers
+  if saidA == "win" and saidB == "loss" then
+    winners, losers = match.a, match.b
+  elseif saidA == "loss" and saidB == "win" then
+    winners, losers = match.b, match.a
+  else
+    -- An agreed draw, or four players telling two different stories. Neither
+    -- is worth points and neither is worth a sentence on anybody's screen.
+    return nil
+  end
+
+  -- One unclaimed name anywhere in the four and the whole battle scores
+  -- nothing, for the reason a 1v1 does: paying out would move a rating that
+  -- belongs to somebody who was not playing. All four or none -- paying out
+  -- the half that is claimed would rate a team against opponents whose
+  -- ratings are not moving.
+  for _, member in ipairs(match.everyone) do
+    local client = self.clients[member]
+    if client and client.ranked == false then return nil end
+  end
+
+  local function names(members)
+    local out = {}
+    for _, member in ipairs(members) do out[#out + 1] = member.name end
+    return out
+  end
+  local settled = self.board:recordTeam(names(winners), names(losers), self.clock)
+  if not settled then return nil end
+
+  -- Everyone's new number goes out, winners and losers alike: four ratings
+  -- moved, and a hub that announced two of them would leave two screens stale.
+  local byName = {}
+  for _, row in ipairs(settled.winners) do byName[row.name] = row.points end
+  for _, row in ipairs(settled.losers) do byName[row.name] = row.points end
+  for _, member in ipairs(winners) do
+    if byName[member.name] then self:publishPoints(member.id, byName[member.name]) end
+  end
+  for _, member in ipairs(losers) do
+    if byName[member.name] then self:publishPoints(member.id, byName[member.name]) end
+  end
   return settled
 end
 
@@ -1072,6 +1366,192 @@ handlers[Wire.PARTY_LEAVE] = function(self, client)
   self:endParty(client, "peer_left")
 end
 
+-- ------- co-op
+
+-- "I am standing at this fight, waiting."  Forwarded to exactly one player --
+-- the one this client is travelling with -- and refused outright for a client
+-- with no party, because an offer nobody can accept is a message with nowhere
+-- to go.
+handlers[Wire.COOP_WAIT] = function(self, client, msg)
+  if not client.ready or not client.partyId then return end
+  local battle = Wire.battleKey(msg.battle)
+  if not battle then return end
+  local partner = self:partnerOf(client)
+  if not partner then return end
+
+  client.coopOffer = {
+    battle = battle,
+    label = Wire.label(msg.label),
+    map = Wire.mapId(msg.map),
+    -- Stamped so the sweep can expire it on the same clock the partner's
+    -- client already uses; without one the two ends disagreed about whether
+    -- the fight was still joinable.
+    startedAt = self.clock,
+  }
+  send(partner, Wire.COOP_OFFER, {
+    from = client.id,
+    name = client.name,
+    battle = battle,
+    label = client.coopOffer.label,
+    map = client.coopOffer.map,
+  })
+end
+
+handlers[Wire.COOP_CANCEL] = function(self, client, msg)
+  if not client.ready then return end
+  self:clearCoopOffer(client, Wire.coopReason(msg and msg.reason) or "left")
+end
+
+-- "Yes, I'll join you."  The one message that ends a wait.
+--
+-- Every condition is re-checked here and not taken on the client's word: that
+-- the two are actually in one party, that the offer still stands, and that it
+-- is the *same* fight.  The last is what stops a modified client dragging its
+-- partner out of wherever they are into a battle they never walked up to.
+handlers[Wire.COOP_JOIN] = function(self, client, msg)
+  if not client.ready or not client.partyId then return end
+  local host = self.clients[Wire.id(msg.to) or ""]
+  if not (host and host.ready) or host.id == client.id then return end
+  if host.partyId ~= client.partyId then return end
+
+  local offer = host.coopOffer
+  local battle = Wire.battleKey(msg.battle)
+  if not (offer and battle and offer.battle == battle) then return end
+
+  -- Taken off the table before either side is told, so a second join racing
+  -- this one finds nothing to accept rather than starting the fight twice.
+  host.coopOffer = nil
+  client.coopOffer = nil
+
+  local members = {}
+  for _, member in ipairs(self:partyMembers(client.partyId)) do
+    members[#members + 1] = { id = member.id, name = member.name }
+  end
+
+  -- The two sides of one agreement, told differently on purpose: the player
+  -- who was waiting learns *who* joined (it is the answer they have been
+  -- standing there for), and the player who joined is handed the roster,
+  -- because they never had one.
+  -- The pair get a fan-out group of their own, on the same footing as a
+  -- four-player one: from here on the battle traffic does not care which of
+  -- the two ways it was agreed.
+  local id = tostring(self.nextCoopAsk)
+  self.nextCoopAsk = self.nextCoopAsk + 1
+  self:openCoopBattle(id, { host.id, client.id })
+
+  send(host, Wire.COOP_JOINED, { id = client.id, name = client.name })
+  -- `host` names the client that simulates. It is the player who was already
+  -- standing at the fight: they have the trainer in front of them, which is the
+  -- one thing the joiner does not have.
+  send(client, Wire.COOP_BATTLE,
+    { id = id, side = "a", allies = members, battle = battle, host = host.id })
+end
+
+-- Battle traffic, fanned out to everyone else in the same battle.
+--
+-- The payload is forwarded unread, exactly as mmo.relay's is -- the hub does
+-- not simulate a battle here any more than it does a 1v1 -- so its *shape* is
+-- the only thing that can be judged, and Wire.payloadOk is what judges it.
+handlers[Wire.COOP_RELAY] = function(self, client, msg)
+  if not client.ready or not client.coopBattleId then return end
+  if not Wire.payloadOk(msg.payload) then
+    return noteDrop(self, client, "the co-op payload is not a shape we forward")
+  end
+  local group = self.coopBattles[client.coopBattleId]
+  for _, memberId in ipairs((group and group.members) or {}) do
+    if memberId ~= client.id then
+      local member = self.clients[memberId]
+      if member and member.ready then
+        send(member, Wire.COOP_MSG, { from = client.id, payload = msg.payload })
+      end
+    end
+  end
+end
+
+-- The four-way ask.  Two parties, four players, and three answers to collect.
+-- A player says their co-op battle is finished.
+--
+-- One goodbye closes the whole group rather than removing one member: a co-op
+-- battle ends for everybody at the same moment, so a group that outlived one
+-- of its players would be a group with nothing left to carry.
+handlers[Wire.COOP_LEAVE] = function(self, client)
+  if not client.ready or not client.coopBattleId then return end
+  self:closeCoopBattle(client.coopBattleId)
+end
+
+handlers[Wire.COOP_CHALLENGE] = function(self, client, msg)
+  if not client.ready or not client.partyId then return end
+  if client.coopAskId then return end
+  local target = self.clients[Wire.id(msg.to) or ""]
+  if not (target and target.ready) or target.id == client.id then return end
+  -- Not in a party, or in *ours*: a party cannot challenge itself, and the
+  -- client already refuses both with a sentence -- this is the hub declining
+  -- to take a modified one at its word.
+  if not target.partyId or target.partyId == client.partyId then return end
+  if target.coopAskId then return end
+
+  local mine = self:partyMembers(client.partyId)
+  local theirs = self:partyMembers(target.partyId)
+  if #mine ~= Config.PARTY_MAX or #theirs ~= Config.PARTY_MAX then return end
+
+  local id = tostring(self.nextCoopAsk)
+  self.nextCoopAsk = self.nextCoopAsk + 1
+
+  local sideA, sideB, everyone = {}, {}, {}
+  for _, member in ipairs(mine) do
+    sideA[#sideA + 1] = member.id
+    everyone[#everyone + 1] = member.id
+  end
+  for _, member in ipairs(theirs) do
+    sideB[#sideB + 1] = member.id
+    everyone[#everyone + 1] = member.id
+  end
+
+  self.coopAsks[id] = {
+    asker = client.id, name = client.name,
+    sideA = sideA, sideB = sideB, everyone = everyone,
+    -- The asker's own yes is implied by asking; the other three are counted.
+    answers = { [client.id] = true },
+    needed = #everyone - 1,
+    startedAt = self.clock,
+  }
+  for _, memberId in ipairs(everyone) do
+    local member = self.clients[memberId]
+    if member then member.coopAskId = id end
+  end
+
+  for _, memberId in ipairs(everyone) do
+    if memberId ~= client.id then
+      local member = self.clients[memberId]
+      local side = member.partyId == client.partyId and "a" or "b"
+      send(member, Wire.COOP_ASK,
+        { id = id, from = client.id, name = client.name, side = side })
+    end
+  end
+end
+
+handlers[Wire.COOP_ANSWER] = function(self, client, msg)
+  if not client.ready then return end
+  local id = Wire.id(msg.id)
+  local ask = id and self.coopAsks[id]
+  if not ask then return end
+  -- Only somebody actually in this ask can answer it, and the asker cannot
+  -- answer their own -- their yes was spent on asking.
+  if client.coopAskId ~= id or client.id == ask.asker then return end
+
+  if not msg.accept then
+    return self:endCoopAsk(id, client.name, "no")
+  end
+  -- Counted rather than incremented, so a client that sends yes twice cannot
+  -- talk the hub into starting a battle its fourth player never agreed to.
+  if ask.answers[client.id] then return end
+  ask.answers[client.id] = true
+
+  local yes = 0
+  for _ in pairs(ask.answers) do yes = yes + 1 end
+  if yes > ask.needed then self:startCoopBattle(id) end
+end
+
 handlers[Wire.RELAY] = function(self, client, msg)
   if not client.ready or not client.sessionId then
     return noteDrop(self, client, "sender is not in a session")
@@ -1101,6 +1581,12 @@ handlers[Wire.RESULT] = function(self, client, msg)
   local id = Wire.id(msg.session)
   local outcome = Wire.outcome(msg.outcome)
   if not (id and outcome) then return end
+
+  -- A co-op battle files under its own paperwork, because four players report
+  -- one battle rather than two.
+  if self.coopMatches[id] then
+    return self:reportCoop(id, client, outcome)
+  end
 
   local match = self.matches[id]
   -- No paperwork means the battle was never here, was scored already, or
@@ -1181,6 +1667,43 @@ function M:update(dt)
     end
   end
   for _, id in ipairs(expired or {}) do self.matches[id] = nil end
+
+  -- Four-way asks nobody finished answering.  Reaped rather than left, because
+  -- three players are holding a box for each one and coopAskId is what stops
+  -- them being asked anything else -- an ask that never resolved would lock
+  -- all four out of the feature for as long as the hub ran.
+  local cold
+  for id, ask in pairs(self.coopAsks) do
+    if (self.clock - (ask.startedAt or 0)) > Config.COOP_ASK_TIMEOUT then
+      cold = cold or {}
+      cold[#cold + 1] = id
+    end
+  end
+  for _, id in ipairs(cold or {}) do self:endCoopAsk(id, nil, "timeout") end
+
+  -- Co-op battles nobody finished reporting, on the same grace the 1v1
+  -- paperwork gets and for the same reason: an argument nobody settled is not
+  -- a table the hub should carry for as long as it runs.
+  local stale2
+  for id, match in pairs(self.coopMatches) do
+    if (self.clock - (match.startedAt or 0)) > Config.RANK_REPORT_GRACE then
+      stale2 = stale2 or {}
+      stale2[#stale2 + 1] = id
+    end
+  end
+  for _, id in ipairs(stale2 or {}) do self.coopMatches[id] = nil end
+
+  -- Relay groups whose battle never said goodbye -- a client that crashed
+  -- rather than disconnected. Closed properly rather than dropped, so the
+  -- members are let out of it too.
+  local dead
+  for id, group in pairs(self.coopBattles) do
+    if (self.clock - (group.startedAt or 0)) > Config.COOP_BATTLE_MAX then
+      dead = dead or {}
+      dead[#dead + 1] = id
+    end
+  end
+  for _, id in ipairs(dead or {}) do self:closeCoopBattle(id) end
 end
 
 -- Tell everyone the game is over, then forget them. Called when the host
@@ -1198,6 +1721,9 @@ function M:shutdown(message)
   end
   self.clients, self.count, self.players = {}, 0, 0
   self.sessions, self.parties = {}, {}
+  -- The asks and the battles go with the connections they were between; there
+  -- is nobody left to answer one or to fight the other.
+  self.coopAsks, self.coopBattles, self.coopMatches = {}, {}, {}
   -- The board survives: it is the hub's record, not the connection's, and a
   -- host who stops and starts a game has not un-won anybody's battles. The
   -- half-reported matches do not -- their sessions are gone.

@@ -55,21 +55,44 @@ HUB_CLI="$MOD_DIR/server/bin/rby-mmo-hub.js"
 # joined instead of the Node hub -- and the run would pass while testing the
 # wrong thing entirely. A non-default port also means this run exercises the
 # `--port` config path rather than a default that happens to match.
-PORT="${MMO_HUB_PORT:-7799}"
-HUB_ADDRESS="127.0.0.1:$PORT"
+# Chosen per run, never fixed.
+#
+# A fixed port is a collision between two people -- or two agents, or two
+# worktrees -- running this at the same time, and the collision used to be
+# resolved by *killing whatever held the port*. That is the worst possible
+# answer: it takes down somebody else's seven-minute run, and their harness
+# then does the same back. Runs must be able to coexist without knowing about
+# each other.
+#
+# So: a pid-derived starting point, then scan upward for one that actually
+# binds. MMO_HUB_PORT still pins it for a run that needs a known port.
+PORT="${MMO_HUB_PORT:-}"
+# HUB_ADDRESS is set once the port has actually been chosen, further down.
 # 4 is the hub's own default and is deliberately not trimmed to 2: role a
 # dials twice (a wrong code, then the right one), and a cap that exactly fits
 # the run would turn a seat released a moment late into "this hub is full" --
 # a flake with nothing to do with what is being tested.
 MAX="${MMO_HUB_MAX:-4}"
 
-A_ID="mmohub-a-$$"
-B_ID="mmohub-b-$$"
+# Everything this run owns is namespaced by RUN_ID, so two runs never share a
+# save directory, a screenshot, a log or -- most importantly -- a barrier file.
+RUN_ID="${MMO_RUN_ID:-$$}"
+A_ID="mmohub-a-$RUN_ID"
+B_ID="mmohub-b-$RUN_ID"
 A_LOG="/tmp/rby_mmo_hub_a_$$.log"
 B_LOG="/tmp/rby_mmo_hub_b_$$.log"
 HUB_LOG="/tmp/rby_mmo_hub_server_$$.log"
-SHOT_DIR="${SHOT_DIR:-/tmp/rby_mmo_hub_shots}"
-SYNC_DIR="${MMO_SYNC_DIR:-/tmp/rby_mmo_hub_sync}"
+SHOT_DIR="${SHOT_DIR:-/tmp/rby_mmo_hub_shots-$RUN_ID}"
+# **Per run, and this one is not a nicety.**
+#
+# The barrier files are how the two instances agree on where they are in the
+# scenario. Shared between runs, one run's signal satisfies another's await:
+# phases race ahead of the state they were waiting on, both sides end up
+# somewhere the other is not, and the run reports "one side never reached
+# DONE" -- a symptom that looks exactly like a bug in the mod and is not one.
+# A stale file left by a *previous* run does the same thing to the next one.
+SYNC_OWNED=$([ -n "${MMO_SYNC_DIR:-}" ] && echo 0 || echo 1)
+SYNC_DIR="${MMO_SYNC_DIR:-/tmp/rby_mmo_hub_sync-$RUN_ID}"
 
 # Wall-clock budget per phase (the hub coming up, then both sides reaching
 # DONE).
@@ -79,7 +102,16 @@ SYNC_DIR="${MMO_SYNC_DIR:-/tmp/rby_mmo_hub_sync}"
 # longest barrier in mmo_util's PHASE table for this scenario (hub_a_ready /
 # hub_b_ready, 600s) with room, or the harness kills a run that was about to
 # report properly and replaces a real verdict with "incomplete".
-TIMEOUT="${MMO_TIMEOUT:-1200}"
+#
+# Raised twice as this scenario grew: 1200 -> 1800 when the co-op 2-on-2 leg
+# landed, and 1800 -> 2700 once the leg's own battle plus the trade and the
+# link battle after it were all running in one pass. That leg fights a whole
+# trainer battle through its real menus between the party and the trade, and at
+# 1200 the run was being killed midway through the trade with "incomplete" --
+# a harness verdict about the clock reported as though it were a verdict about
+# the mod. Since a good run exits early, the only thing a bigger number costs
+# is how long a genuinely stuck run takes to admit it.
+TIMEOUT="${MMO_TIMEOUT:-2700}"
 
 # ------------------------------------------------------------------ preflight
 
@@ -151,6 +183,14 @@ stop_hub() {
 }
 
 cleanup() {
+  # The barrier files go with the run that made them. A dir left behind is a
+  # dir the next run can read a signal out of -- which is exactly how a stale
+  # /tmp/rby_mmo_hub_sync made every await resolve instantly and reported it
+  # as "one side never reached DONE".
+  if [ "${SYNC_OWNED:-0}" = "1" ] && [ -n "${SYNC_DIR:-}" ]; then
+    rm -rf "$SYNC_DIR" 2>/dev/null
+  fi
+
   [ -n "${A_PID:-}" ] && kill "$A_PID" 2>/dev/null
   [ -n "${B_PID:-}" ] && kill "$B_PID" 2>/dev/null
   stop_hub
@@ -199,6 +239,35 @@ if [ -n "$EXTERNAL_HUB" ]; then
 fi
 
 if [ -z "$EXTERNAL_HUB" ]; then
+
+port_free() {
+  node -e '
+    const net = require("node:net");
+    const server = net.createServer();
+    server.once("error", () => process.exit(1));
+    server.listen(Number(process.argv[1]), "127.0.0.1",
+      () => server.close(() => process.exit(0)));
+  ' "$1" 2>/dev/null
+}
+
+if [ -z "$PORT" ]; then
+  # Start somewhere this pid is unlikely to share, then walk up. Nothing is
+  # killed and nothing is assumed free -- a port in use belongs to somebody,
+  # and the only correct response is to use a different one.
+  base=$(( 7800 + ($$ % 150) ))
+  for offset in $(seq 0 60); do
+    candidate=$(( base + offset ))
+    if port_free "$candidate"; then PORT="$candidate"; break; fi
+  done
+  [ -n "$PORT" ] || fail "could not find a free port in $base..$(( base + 60 ))"
+elif ! port_free "$PORT"; then
+  fail "MMO_HUB_PORT=$PORT is already in use.
+     Unset it to let this run pick its own free port, or pick another --
+     but do not kill whatever is holding it: on a shared machine that is
+     somebody else's run, and it may be minutes from reporting."
+fi
+HUB_ADDRESS="127.0.0.1:$PORT"
+
 echo "  hub config: $HUB_CONFIG"
 if ! hub_cli init --yes --host 127.0.0.1 --port "$PORT" --max "$MAX" \
      --log-level info >"$HUB_LOG" 2>&1; then
@@ -237,19 +306,6 @@ echo "  join code: ****** (6 chars, required)"
 # clients that mysteriously cannot authenticate. Node is already a hard
 # requirement here, so a five-line bind test costs nothing and needs no `nc`,
 # `lsof` or `ss` to exist on the machine.
-if ! node -e '
-  const net = require("node:net");
-  const server = net.createServer();
-  server.once("error", () => process.exit(1));
-  server.listen(Number(process.argv[1]), "127.0.0.1",
-    () => server.close(() => process.exit(0)));
-' "$PORT" 2>/dev/null; then
-  fail "something is already listening on $HUB_ADDRESS.
-     A hub left behind by an earlier run will answer this one's clients with
-     the *previous* run's join code, and every instance is refused.
-       lsof -ti tcp:$PORT | xargs kill
-     or point this run somewhere else with MMO_HUB_PORT."
-fi
 
 echo "  starting the hub on $HUB_ADDRESS (max $MAX)..."
 # `node` directly rather than the hub_cli function: backgrounding a shell
