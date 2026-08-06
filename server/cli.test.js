@@ -1575,6 +1575,85 @@ async function inviteScenario() {
 }
 
 // =====================================================================
+// invite --admin -- the credential that also opens the dashboard
+// =====================================================================
+
+async function inviteAdminScenario() {
+  const dir = scratchDir('invite-admin');
+  const file = path.join(dir, 'config.json');
+  await runCli(['init', '--yes', '--config', file], { cwd: dir });
+  const before = readConfigFile(file).auth.credentials.length;
+
+  // --- a plain invite mints a credential that carries no admin flag at all
+  const plain = await runCli(['invite', '--label', 'Friend', '--config', file], { cwd: dir });
+  ok(plain.code === cli.OK, 'a plain invite succeeds');
+  const plainId = /\(id ([0-9a-f]+),/.exec(plain.stdout)[1];
+  const plainCredential = readConfigFile(file).auth.credentials.find((c) => c.id === plainId);
+  ok(plainCredential.admin !== true, 'a plain invite does not carry admin: true');
+
+  // --- --admin mints one that does, says so in the banner, and mentions the
+  //     dashboard in the printed block
+  const admin = await runCli(['invite', '--admin', '--label', 'Op', '--config', file], { cwd: dir });
+  ok(admin.code === cli.OK, 'invite --admin succeeds');
+  ok(/New admin join code/.test(admin.stdout), 'the banner names it an admin code');
+  ok(/dashboard/i.test(admin.stdout), 'and the printed block mentions the web dashboard');
+  const adminId = /\(id ([0-9a-f]+),/.exec(admin.stdout)[1];
+  const adminCredential = readConfigFile(file).auth.credentials.find((c) => c.id === adminId);
+  ok(adminCredential.admin === true, 'and the credential really carries admin: true on disk');
+  ok(adminId !== plainId, 'sanity: the two invites minted distinct credentials');
+
+  const afterBoth = readConfigFile(file).auth.credentials.length;
+  ok(afterBoth === before + 2, 'both invites really landed on disk');
+
+  // --- --admin=garbage: neither a recognised yes nor a recognised no, so it
+  //     is refused rather than guessed at, and nothing is minted
+  const garbage = await runCli(['invite', '--admin=garbage', '--config', file], { cwd: dir });
+  ok(garbage.code === cli.USAGE, '--admin=garbage is a usage error (exit 2)');
+  ok(/--admin takes no value/.test(garbage.stderr), 'and says why');
+  ok(readConfigFile(file).auth.credentials.length === afterBoth,
+    'and nothing was minted by the refused attempt');
+}
+
+// =====================================================================
+// invite list -- the KIND column
+// =====================================================================
+
+async function inviteListKindScenario() {
+  const dir = scratchDir('invite-list-kind');
+  const file = path.join(dir, 'config.json');
+  await runCli(['init', '--yes', '--config', file], { cwd: dir });
+  await runCli(['invite', '--admin', '--label', 'Op', '--config', file], { cwd: dir });
+  await runCli(['invite', '--label', 'Friend', '--config', file], { cwd: dir });
+
+  // --- the column is there, and marks each row correctly, with and without
+  //     --reveal -- what a code unlocks is not something --reveal gates
+  for (const args of [['invite', 'list'], ['invite', 'list', '--reveal']]) {
+    const result = await runCli([...args, '--config', file], { cwd: dir });
+    ok(result.code === cli.OK, `${args.join(' ')} succeeds`);
+    ok(/\bKIND\b/.test(result.stdout), `${args.join(' ')} prints a KIND column header`);
+    ok(/\bADMIN\b/.test(result.stdout), `${args.join(' ')} marks the admin row ADMIN`);
+    ok(/\bplayer\b/.test(result.stdout), `${args.join(' ')} marks a non-admin row player`);
+    ok(/KIND ADMIN: joins the game like any code/.test(result.stdout),
+      `${args.join(' ')} prints the footer note about what an admin code opens`);
+
+    const rows = result.stdout.split('\n').filter((line) => /\b(ADMIN|player)\b/.test(line));
+    ok(rows.some((line) => /\bOp\b/.test(line) && /\bADMIN\b/.test(line)),
+      `${args.join(' ')}: the Op credential's own row is the one marked ADMIN`);
+    ok(rows.some((line) => /\bFriend\b/.test(line) && /\bplayer\b/.test(line)),
+      `${args.join(' ')}: and the Friend credential's row is marked player, not ADMIN`);
+  }
+
+  // --- the other footer note, when there is no admin credential to mark
+  const otherDir = scratchDir('invite-list-kind-none');
+  const otherFile = path.join(otherDir, 'config.json');
+  await runCli(['init', '--yes', '--config', otherFile], { cwd: otherDir });
+  const noAdmin = await runCli(['invite', 'list', '--config', otherFile], { cwd: otherDir });
+  ok(noAdmin.code === cli.OK, 'invite list succeeds with no admin credential at all');
+  ok(/none of these is an admin code/.test(noAdmin.stdout),
+    'and prints the other footer note when there is nothing to mark ADMIN');
+}
+
+// =====================================================================
 // revoke
 // =====================================================================
 
@@ -1593,6 +1672,28 @@ async function revokeScenario() {
   ok(/last usable join code/.test(revoke.stderr), 'but warns that nobody can join now');
   ok(readConfigFile(file).auth.credentials[0].revoked === true,
     'the credential is marked revoked on disk');
+}
+
+// --- an admin code is revoked exactly like any other -- `revoke` has no
+//     separate verb for it, per plan §8.3
+
+async function revokeAdminScenario() {
+  const dir = scratchDir('revoke-admin');
+  const file = path.join(dir, 'config.json');
+  await runCli(['init', '--yes', '--config', file], { cwd: dir });
+
+  const minted = await runCli(['invite', '--admin', '--label', 'Op', '--config', file], { cwd: dir });
+  ok(minted.code === cli.OK, 'invite --admin succeeds, to have one to revoke');
+  const adminId = /\(id ([0-9a-f]+),/.exec(minted.stdout)[1];
+
+  const revoke = await runCli(['revoke', adminId, '--config', file], { cwd: dir });
+  ok(revoke.code === cli.OK, 'revoking an admin code succeeds, the same as any other');
+
+  const onDisk = readConfigFile(file).auth.credentials.find((c) => c.id === adminId);
+  ok(!!onDisk, 'the credential is still on disk, revoked rather than removed');
+  ok(onDisk.revoked === true, 'and its revoked flag is set');
+  ok(onDisk.admin === true,
+    'and it is still recognisable as the admin credential it was -- revoking does not strip the flag');
 }
 
 // =====================================================================
@@ -2032,7 +2133,10 @@ async function main() {
     await adminTimeoutScenario();
     await secretsDisciplineScenario();
     await inviteScenario();
+    await inviteAdminScenario();
+    await inviteListKindScenario();
     await revokeScenario();
+    await revokeAdminScenario();
     await banAllowScenario();
     await startRefusesExposedConfigScenario();
     await startRefusesALooseConfigScenario();

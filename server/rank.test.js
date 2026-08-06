@@ -30,7 +30,7 @@ const {
   RANK_REPORT_GRACE_MS, RANK_QUERY_GATE_MS,
 } = require('./lib/rank.js');
 const { cleanToken, MESSAGE_MAX, MOTD_MAX } = require('./lib/sanitize.js');
-const { Relay, PROTOCOL } = require('./lib/relay.js');
+const { Relay, PROTOCOL, presenceOf } = require('./lib/relay.js');
 const { createLog } = require('./lib/log.js');
 
 let passed = 0;
@@ -1438,6 +1438,192 @@ function testAnnounce() {
   ok(ghost.outbox.length === 0, 'nor sent anything at all');
 }
 
+// --------------------------------------------------------- the admin flag
+//
+// docs/plans/admin-join-code.md §5 T1, the relay half: a credential's
+// `admin` bit rides mmo.auth's verdict (handlers['mmo.auth'], relay.js:236)
+// into `client.admin`, and from there to three places -- the operator's own
+// welcome, roster() for operator views, and nowhere else. Socket-free, like
+// everything above: `relay.auth` is stubbed at the same seam
+// authPort(lib/server.js) implements for a real hub, answering `newNonce`
+// and `verify(nonce, response)` with a verdict object that already carries
+// `admin` -- exactly what server.js's wrapper hands the relay after reading
+// auth.isAdminCredential() itself. What is under test here is what the relay
+// does with that verdict, not the credential lookup, which is auth.test.js's
+// job.
+
+/*
+ * A minimal `relay.auth` stub: `verify` reads the response string as a key
+ * into a table of verdicts, so a test can hand out a distinct 64-hex-char
+ * "response" per dial and get back whatever verdict it wants -- admin,
+ * player, or a rejection -- without a real credential or HMAC anywhere in
+ * the picture. `newNonce` only has to look like one; the relay never
+ * inspects it beyond storing and echoing it back to verify().
+ */
+function stubAuth(verdicts) {
+  let nonces = 0;
+  return {
+    newNonce: () => `${'a'.repeat(31)}${(nonces++ % 10)}`,
+    verify: (nonce, response) =>
+      verdicts[response] || { ok: false, credentialId: null, reason: 'rejected' },
+  };
+}
+
+const ADMIN_RESPONSE = 'a'.repeat(64);
+const PLAYER_RESPONSE = 'b'.repeat(64);
+
+/*
+ * Drives the full mmo.hello -> mmo.challenge -> mmo.auth handshake a real
+ * client goes through against an authenticated hub -- makeHub's dial()
+ * skips this because its hub has no auth configured at all.
+ */
+function dialAuthed(relay, name, response) {
+  const peer = { outbox: [], closed: false, remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => { peer.closed = true; };
+  const id = relay.accept(peer);
+  relay.handle(id, {
+    type: 'mmo.hello', proto: PROTOCOL, name, sprite: 'SPRITE_RED',
+    map: 'PALLET', x: 1, y: 1, facing: 'down',
+  });
+  const challenge = peer.outbox.find((m) => m.type === 'mmo.challenge');
+  if (challenge) relay.handle(id, { type: 'mmo.auth', response });
+  const welcome = peer.outbox.find((m) => m.type === 'mmo.welcome');
+  return { id, peer, welcome };
+}
+
+// The value on the in-memory message object may still carry a key with an
+// `undefined` value (Object.assign copies it regardless) -- only a trip
+// through JSON, which is what a real socket does to every message, drops an
+// `undefined` field outright. Same idiom testWelcomeMotd uses above.
+const wireOf = (msg) => JSON.parse(JSON.stringify(msg));
+
+/*
+ * The admin verdict, end to end: one client whose stubbed verify() answers
+ * `admin: true`, one whose verdict answers `admin: false`, admitted onto the
+ * same hub. The welcome, the roster, and every presence-shaped message they
+ * generate along the way are all checked in one pass.
+ */
+function testAdminFlagOverTheWire() {
+  const clock = makeClock();
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    auth: stubAuth({
+      [ADMIN_RESPONSE]: { ok: true, credentialId: 'cred-admin', reason: null, admin: true },
+      [PLAYER_RESPONSE]: { ok: true, credentialId: 'cred-player', reason: null, admin: false },
+    }),
+  });
+
+  const admin = dialAuthed(relay, 'OPERATOR', ADMIN_RESPONSE);
+  ok(admin.welcome !== undefined, 'the admin credential is admitted');
+  ok(admin.welcome.admin === true,
+    'the admin\'s own welcome carries admin: true');
+  ok(wireOf(admin.welcome).admin === true,
+    'and the flag survives a JSON round trip -- a real socket would send true, not drop it');
+
+  const player = dialAuthed(relay, 'CIVILIAN', PLAYER_RESPONSE);
+  ok(player.welcome !== undefined, 'the player credential is admitted too');
+  ok(player.welcome.admin === undefined,
+    'a non-admin welcome carries no admin value at all -- the motd idiom, not admin: false');
+  ok(!('admin' in wireOf(player.welcome)),
+    'and on the wire the key is entirely absent, matching what an older client already expects');
+
+  const byName = (name) => relay.roster().find((entry) => entry.name === name);
+  ok(byName('OPERATOR').admin === true,
+    'roster() carries admin: true for the admin connection');
+  ok(byName('CIVILIAN').admin === false,
+    'and admin: false -- never absent -- for the player, so a row is never read as "absent means no"');
+
+  // presenceOf() is what every player-visible message is built from --
+  // the welcome's own players[] array, the mmo.join broadcast, and every
+  // mmo.move -- and it must never carry the flag, admin or not.
+  const adminPresence = presenceOf(relay.get(admin.id));
+  ok(!('admin' in adminPresence),
+    'presenceOf() for the admin connection carries no admin key at all');
+  ok(!('admin' in wireOf(adminPresence)), 'nor once it has been round-tripped through JSON');
+
+  // The welcome the player received named the admin among `players[]` --
+  // sent before the player's own hello, so it is presence of someone else,
+  // exactly the shape other players are told about each other.
+  const adminAsSeenByPlayer = player.welcome.players.find((p) => p.name === 'OPERATOR');
+  ok(adminAsSeenByPlayer !== undefined, 'sanity: the player\'s welcome lists the admin as a peer');
+  ok(!('admin' in adminAsSeenByPlayer),
+    'and that presence entry carries no admin key -- other players never learn who holds power');
+
+  // mmo.join: broadcast to everyone already on the hub when a new player is
+  // admitted. The admin joined first, so it is the player's arrival that is
+  // heard, and it is the player's own presence being broadcast -- checked
+  // for completeness even though this one is never an admin.
+  admin.peer.outbox = [];
+  const third = dialAuthed(relay, 'BYSTANDER', PLAYER_RESPONSE);
+  const joinSeenByAdmin = admin.peer.outbox.find((m) => m.type === 'mmo.join');
+  ok(joinSeenByAdmin !== undefined, 'the admin hears the new arrival as an ordinary mmo.join');
+  ok(!('admin' in joinSeenByAdmin.player),
+    'and the broadcast presence carries no admin key either');
+
+  // mmo.move: the admin steps, and everyone else is told where -- again as
+  // ordinary presence, with no hint that the stepping player is an operator.
+  player.peer.outbox = [];
+  relay.handle(admin.id, { type: 'mmo.move', map: 'PALLET', x: 2, y: 2, facing: 'down' });
+  const moveSeenByPlayer = player.peer.outbox.find((m) => m.type === 'mmo.move');
+  ok(moveSeenByPlayer !== undefined, 'the player hears the admin move');
+  ok(!('admin' in moveSeenByPlayer),
+    'and the mmo.move payload -- itself a bare presenceOf() -- carries no admin key');
+  ok(!('admin' in wireOf(moveSeenByPlayer)), 'nor once round-tripped through JSON');
+
+  relay.drop(third.id);
+}
+
+/*
+ * A hub with no `auth` option at all -- the unauthenticated legacy path
+ * (plan §3.5: "nobody is admin -- the flag rides the credential, no
+ * credential means no admin"). makeHub()'s dial already exercises exactly
+ * this hub shape; this pins what it means for the admin flag specifically.
+ */
+function testNoAuthHubNeverAdmits() {
+  const clock = makeClock();
+  const { relay, players } = makeHub(clock, ['NOAUTH']);
+  const [solo] = players;
+
+  ok(relay.get(solo.id).admin === false,
+    'with no auth configured, the connection is never marked admin');
+  const welcome = take(solo, 'mmo.welcome');
+  ok(welcome.admin === undefined,
+    'and its welcome carries no admin value -- an unauthenticated hub has no ' +
+    'credential to derive one from');
+  ok(!('admin' in wireOf(welcome)), 'the key is absent on the wire too');
+
+  const row = relay.roster().find((entry) => entry.name === 'NOAUTH');
+  ok(row.admin === false,
+    'roster() still answers a plain false, never absent, for an unauthenticated connection');
+}
+
+/*
+ * A rejected auth attempt never reaches admit() at all, so it must never
+ * appear on the roster or be handed a welcome -- the admin flag is moot for
+ * a connection that was never let in, but a failing verify() must not leave
+ * `client.admin` set from some earlier state either.
+ */
+function testRejectedAuthNeverAdmits() {
+  const clock = makeClock();
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    auth: stubAuth({
+      [ADMIN_RESPONSE]: { ok: true, credentialId: 'cred-admin', reason: null, admin: true },
+    }),
+  });
+
+  const rejected = dialAuthed(relay, 'INTRUDER', 'c'.repeat(64));
+  ok(rejected.welcome === undefined, 'a response with no matching verdict is never welcomed');
+  ok(relay.roster().length === 0, 'and never appears on the roster');
+  ok(rejected.peer.closed === true, 'the connection is closed on refusal');
+  // refuse() drops the client outright (relay.js:973-977), so there is no
+  // lingering client object to have been left with a stray admin flag on it
+  // -- confirmed here rather than by reading a field that no longer exists.
+  ok(relay.get(rejected.id) === null,
+    'and the client is gone from the relay entirely, not merely unmarked');
+}
+
 function main() {
   testExpected();
   testSwing();
@@ -1475,6 +1661,9 @@ function main() {
   testMatchSettledHook();
   testKickByName();
   testAnnounce();
+  testAdminFlagOverTheWire();
+  testNoAuthHubNeverAdmits();
+  testRejectedAuthNeverAdmits();
 
   console.log(`\n  ${passed}/${passed} checks passed  (rank)\n`);
 }
