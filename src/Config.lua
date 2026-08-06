@@ -24,24 +24,37 @@ M.MOD_ID = "rby_mmo"
 -- a RANK screen that never fills.  This number lives here and in
 -- server/lib/relay.js -- bump them together.
 --
--- 5 adds pace, and it moves for the third time on the same rule: a
--- protocol-4 hub rebuilds every broadcast from its own fixed field list, so
--- the pace flag on mmo.move is not misread, it is dropped without a word.
--- The fast player would see themselves move and everyone else would watch
--- them walk, with nothing anywhere to explain the difference -- so a refusal
--- naming both versions is again the better sentence.
---
--- The field is `fast`, not `running`: it means "this step was taken at the
--- fast pace" and is set by a sprint *or* by the bike, since both cost 8
--- frames a tile and one boolean carries them.  It was called `running`
--- during 0.5.0's development and renamed before release -- 5 has never
--- shipped, so no hub and no client anywhere speaks the old name and the
--- rename cost nothing.  This number lives here and in server/lib/relay.js --
--- bump them together.
-M.PROTOCOL = 5
+-- 5 was claimed twice, by two branches that had never met: once for pace
+-- (the `fast` flag on mmo.move -- "this step was taken at the fast pace",
+-- set by a sprint *or* the bike, since both cost 8 frames a tile) and once
+-- for co-op battles (a protocol-4 hub has never heard of mmo.coop_wait: a
+-- player would press WAIT FOR <friend> and stand there while their partner
+-- is never told).  Each 5 was a different vocabulary, so a client and hub
+-- that both said "5" could still be talking past each other -- exactly the
+-- silence this number exists to turn into a sentence.  6 is the first
+-- number that means both.
+M.PROTOCOL = 6
 
-M.DEFAULT_HUB = "127.0.0.1:7788"
-M.DEFAULT_PORT = 7788
+-- The port an in-game host binds, and the one a bare address is completed
+-- with.
+--
+-- Overridable by environment, which is not only a test affordance: 7788 is a
+-- guess, and a player whose router or another program already has it needs a
+-- way out that is not editing the mod. It is also what lets two end-to-end
+-- runs -- two agents, two worktrees -- host at the same time on one machine
+-- instead of one silently joining the other's game.
+--
+-- Read once, at load, and validated: a junk value falls back rather than
+-- producing an address nothing can dial.
+local function portFromEnv(fallback)
+  local raw = os.getenv and os.getenv("RBY_MMO_PORT")
+  local n = tonumber(raw or "")
+  if n and n == math.floor(n) and n > 0 and n < 65536 then return n end
+  return fallback
+end
+
+M.DEFAULT_PORT = portFromEnv(7788)
+M.DEFAULT_HUB = ("127.0.0.1:%d"):format(M.DEFAULT_PORT)
 
 -- The player cap the host picks when starting a game.
 --
@@ -137,6 +150,149 @@ M.FAST_STEP_FRAMES = math.max(1, math.floor(16 / M.RUN_DIVISOR))
 -- exists.  Raising this number would not widen the feature, it would make
 -- all three of those rules wrong at once.
 M.PARTY_MAX = 2
+
+-- ------- co-op battles
+--
+-- Two players from one party fighting one battle together, and then four
+-- players fighting each other.  Three files: src/Coop.lua is the agreement
+-- (who is waiting, who may join, what a no costs), src/CoopSim.lua is the
+-- four-slot field, and src/CoopBattle.lua is the screen it is drawn on.
+--
+-- The field is the mod's own, because the engine has none: BattleState carries
+-- exactly one active battler per side and TurnOrder compares a pair.  What sits
+-- *under* the field is still the engine's -- damage, crits, types, STAB, the
+-- badge boosts, the status records -- so a mon hits for the same number here as
+-- it does in a wild battle.
+--
+-- Four fighters, because two parties of PARTY_MAX meet.  It is written as a
+-- product rather than as the literal 4 so that the day PARTY_MAX moves, the
+-- side that has to move with it is not a number somebody has to remember.
+M.COOP_SIDE = M.PARTY_MAX
+M.COOP_FIGHTERS = M.PARTY_MAX * 2
+
+-- What identifies "the same fight" to two different clients.
+--
+-- Two partners standing in front of one trainer have to agree they are
+-- talking about *that* trainer and not merely about some battle, or a player
+-- crossing a route would be asked to join a fight three screens away.  The key
+-- is built by Coop.battleKey from the map and the trainer's own identifiers,
+-- so it is derived on both sides from the world rather than passed around and
+-- trusted.
+-- How many badge ids a client may claim. Gen 1 has eight and only four of
+-- them boost a stat, so this is a bound on a payload rather than a rule about
+-- the game -- generous enough that a mod adding badges is not cut off.
+-- The most POKeMON a slot may bring, which is Gen 1's party size.
+--
+-- A bound on a *relayed* list rather than a rule about the game: the field
+-- description crosses the wire from another player's client, and a party
+-- length nobody checked is a battle that never ends -- every faint answered by
+-- another monster, for as many as the sender felt like sending.
+M.COOP_TEAM_MAX = 6
+
+M.COOP_BADGES_MAX = 32
+
+M.COOP_KEY_MAX = 64
+
+-- What a fight is *called*, as opposed to what identifies it.
+--
+-- Its own limit rather than NAME_MAX, and the difference is not cosmetic: a
+-- trainer class is not a trainer name, and at ten characters "BUG CATCHER"
+-- arrives as "BUG CATCHE" -- a box asking whether to join a friend against a
+-- misspelt opponent. Sixteen is what the sentence has room for, since the
+-- label shares a line with nothing (the box reads "Join ANN against" and then
+-- the label on its own row, and a text box is eighteen columns).
+M.COOP_LABEL_MAX = 16
+
+-- How long an unanswered co-op offer stands before it is dropped.
+--
+-- Long, and deliberately so: the whole point of WAIT FOR <friend> is that a
+-- player is prepared to stand still until their partner walks over, and a
+-- partner crossing two maps is an ordinary three minutes.  It exists at all so
+-- that an offer whose owner wandered off and forgot it cannot sit on the
+-- partner's client forever -- not to hurry anybody.
+M.COOP_OFFER_TIMEOUT = 300
+
+-- How long the four-way PARTY BATTLE ask waits for its three answers.  Shorter
+-- than an offer because every one of the four is looking at a box right now,
+-- and an ask that outlives the moment it was made is an ask somebody answers
+-- yes to long after they stopped meaning it.
+M.COOP_ASK_TIMEOUT = 60
+
+-- How much longer a *client* waits before giving up on an ask than the hub
+-- does.
+--
+-- The two clocks used to be the same number, and the asker's starts when it
+-- sends while the hub's starts a round trip later -- so the client reliably
+-- expired first, cleared its own `ask`, and said "nobody answered". The hub
+-- still held one. The player could then pick PARTY BATTLE again, the hub would
+-- drop it as a duplicate, and they were left pressing a button that did
+-- nothing until the hub's own clock caught up.
+--
+-- A margin rather than a smaller number, because the hub is the one that has
+-- to speak: it tells all four. The client giving up first is the case worth
+-- ruling out.
+M.COOP_ASK_GRACE = 10
+
+-- How long a co-op battle's relay group may live before the hub reclaims it.
+--
+-- The belt to mmo.coop_leave's braces. A client that crashes mid-battle never
+-- sends the goodbye and never disconnects cleanly enough to be dropped, and
+-- without this its group would sit in the table for the life of the process.
+-- An hour is far longer than any battle and far shorter than an uptime.
+M.COOP_BATTLE_MAX = 3600
+
+-- How long the host waits on a player who is connected but silent.
+--
+-- Generous, because it is a human choosing a move and the whole battle stops
+-- until they do -- but finite, because a connected client that has stopped
+-- answering (a wedged game, a laptop lid) is indistinguishable from one
+-- thinking, and the other three cannot be made to wait on it forever. A slot
+-- that misses this forfeits, which is the same thing that happens when its
+-- player disconnects outright.
+-- How long the field waits for a player to send out their next POKeMON.
+--
+-- Half the turn clock, and deliberately not the same number. A player still
+-- picking a *move* blocks one turn; a player who has not answered a faint
+-- blocks **everything** -- the field refuses to resolve while any slot is
+-- awaiting, so the other three are sitting in front of a battle that cannot
+-- move at all. It is also the easier decision of the two: a short list, and
+-- one button. So the pause that costs the most is given the least rope.
+M.COOP_CHOICE_TIMEOUT = 30
+
+-- How long a wait may look like nothing before it starts explaining itself.
+--
+-- Under this, nothing is drawn: an ordinary turn has all four players deciding
+-- at once and a clock that flashed up every turn would be noise. Past it, the
+-- box says who is being waited for and counts down, because the difference
+-- between "somebody is thinking" and "this has hung" is the whole of what a
+-- player cannot tell from an empty screen.
+M.COOP_WAIT_HINT = 5
+
+M.COOP_TURN_TIMEOUT = 60
+
+-- How long a replayer waits on a silent host.
+--
+-- **Longer than the turn deadline, and that is the whole rule.** This clock
+-- asks "has the client that decides everything said anything at all", and the
+-- answer only means something once a healthy host would have had to speak. The
+-- turn deadline is that guarantee: a turn opens, and within COOP_TURN_TIMEOUT
+-- the host either resolves it or auto-picks for whoever is late and resolves it
+-- anyway -- so a `res` lands inside 60 seconds of every turn opening. Silence
+-- past that really is silence.
+--
+-- It used to be 30, which is *under* the turn budget, so a legitimately quiet
+-- turn -- four players thinking, nobody late enough to be picked for -- tripped
+-- every replayer into a warning and a resync as an **expected** state: a log
+-- full of "the co-op battle has gone quiet" about a battle that was fine, and
+-- three snapshot requests the host had to answer every slow turn.
+--
+-- The cost is honest and it is paid on the one path that matters: a host that
+-- really has died is now declared after two expiries rather than one plus a
+-- resync, so up to 150 seconds worst case (75 to ask, 75 to give up) instead of
+-- 60. That is the right trade -- a dead host is rare and ends the battle either
+-- way, while a quiet turn is ordinary and used to cost a false alarm every time.
+M.COOP_STALL_TIMEOUT = 75
+
 
 -- Chat.  "party" is delivered to the other member wherever they are, so it
 -- is the one scope with neither a radius nor a name to type.

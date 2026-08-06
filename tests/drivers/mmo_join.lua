@@ -69,8 +69,10 @@ return function(game)
   check(ownSheet ~= nil, "the player is drawn with something to begin with")
 
   -- The host writes its address once the listener is up; that file is the
-  -- start gun. This side still dials the default 127.0.0.1:7788, because
-  -- both instances are on one machine.
+  -- start gun. This side dials the default the wrapper stored, which is
+  -- 127.0.0.1 on the port the host actually bound -- both instances are on one
+  -- machine, but the port is chosen per run so two runs do not join each
+  -- other, and a default left at the old fixed 7788 points at nothing.
   --
   -- Its second line is the join code, which the host always has: hosting
   -- without one is refused at the socket. Taking it off the file rather than
@@ -659,6 +661,99 @@ return function(game)
         end
         H.closeToOverworld(game)
 
+        -- ------- 6b. a co-op battle, over the *in-game* hub
+        --
+        -- The guest's half. See the host driver's matching leg for why this
+        -- one is worth having at all: every co-op battle ever fought had been
+        -- relayed by server/lib/relay.js, and `src/Hub.lua` -- running inside
+        -- the other game -- had never carried one.
+
+        -- Standing still, and *then* the host may ask.
+        --
+        -- closeToOverworld gets out of a screen by pressing B, and an invite
+        -- that arrives while it is doing that is a box in the way -- so B
+        -- answers it, which on a confirm means no. The invite went out, the
+        -- guest declined it a frame later without anybody seeing the box, and
+        -- the party simply never formed. A barrier rather than a longer wait,
+        -- because the race is about order and not about speed.
+        H.signal("guest_ready_for_party")
+        H.await(game, "host_party_asked")
+        local paired = H.drivePrompts(game, function()
+          return #exports.party() == 2
+        end, 120)
+        check(paired, "the party formed on the guest over the in-game hub")
+        local members = {}
+        for _, member in ipairs(exports.party()) do
+          members[#members + 1] = tostring(member.name)
+        end
+        log("party members:", table.concat(members, ","))
+        H.signal("guest_party_joined")
+
+        -- The same trainer, staged here too: the offer names a *fight*, and
+        -- joining one you are not standing at is exactly what the hub refuses.
+        local coopClass = H.coopTrainer(game.data)
+        local coopFinished = nil
+        H.await(game, "host_coop_waiting")
+        if coopClass then
+          H.stageTrainer(game, coopClass,
+                         function(result) coopFinished = result end)
+          -- Walking into the same trainer is how the offer is met: the prompt
+          -- this side gets is the join, not the wait/alone.
+          local offered = H.waitSeconds(game, function()
+            return exports.coopOffer() ~= nil
+          end, 90, "the partner's offer to reach this side")
+          check(offered, "the waiting partner's offer reaches the guest")
+          local offer = exports.coopOffer()
+          if offer then log("offer from:", tostring(offer.name),
+                            "battle:", tostring(offer.battle)) end
+        end
+
+        -- Say yes to whatever is in front of us until four monsters are up.
+        local joined = H.drivePrompts(game, function()
+          local top = H.top(game)
+          return top ~= nil and top.sim ~= nil and #top.sim.slots == 4
+        end, 180)
+        check(joined, "a four-slot co-op battle is on screen, over the LAN hub")
+        U.wait(30)
+        U.shot(game, SHOT_DIR .. "/join-coop-battle.png")
+        check(exports.coopDrawFailed() == false, "and it drew without error")
+        H.signal("guest_coop_joined")
+
+        local over = H.drivePrompts(game, function()
+          local top = H.top(game)
+          return top == nil or top.sim == nil
+        end, 300, function() U.tap(game, "a") end)
+        check(over, "the 2-on-2 runs to an end over the in-game hub")
+        local sync = exports.coopSync()
+        log(("coop sync: gaps=%d desyncs=%d resyncs=%d"):format(
+          sync.gaps, sync.desyncs, sync.resyncs))
+        check(sync.gaps == 0, "with no turn lost by the Lua hub")
+        check(sync.desyncs == 0, "and no drift from the host's copy")
+        check(sync.resyncs == 0, "and never needing the field re-sent")
+
+        local handed = H.waitSeconds(game, function()
+          return coopFinished ~= nil
+        end, 60, "the engine's battle to be finished off")
+        check(handed, "and the trainer battle it displaced got its result back")
+        log("co-op result:", tostring(coopFinished))
+        H.drivePrompts(game, function()
+          local top = H.top(game)
+          return top == nil or top == game.overworld or top.isOverworld
+        end, 120)
+        H.closeToOverworld(game)
+        U.shot(game, SHOT_DIR .. "/join-coop-after.png")
+        H.signal("guest_coop_done")
+        H.await(game, "host_coop_done")
+
+        -- One member leaving ends the party for both, so this side only has
+        -- to watch it empty.
+        H.await(game, "host_coop_left")
+        local emptied = H.waitSeconds(game, function()
+          return #exports.party() == 0
+        end, 60, "the party to end for this side too")
+        check(emptied, "and the party ends for both when one of them leaves")
+        H.closeToOverworld(game)
+
         -- ------- 7. leave the game and keep playing
         --
         -- Walking out of someone else's game is not quitting: the save,
@@ -779,6 +874,19 @@ return function(game)
   else
     H.signal("guest_interact_done")
     H.signal("guest_trade_requested")
+  end
+
+  -- Every marker this side owns, dropped whatever happened above.
+  --
+  -- A leg that gave up leaves the host sitting on the barriers after it for
+  -- their full budget, and what gets reported then is a wall of timeouts over
+  -- there rather than the one real failure over here. Signalling a marker
+  -- twice is harmless -- the file is written, not counted -- so this is
+  -- unconditional rather than guarded by whether the leg ran.
+  for _, tag in ipairs({ "guest_ready_for_party", "guest_party_joined",
+                         "guest_coop_joined",
+                         "guest_coop_done", "guest_left_game" }) do
+    H.signal(tag)
   end
 
   U.wait(60)

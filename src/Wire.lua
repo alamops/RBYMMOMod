@@ -50,6 +50,65 @@ M.RESULT        = "mmo.result"
 -- because the board changes for everybody on every match and nobody is
 -- looking at it most of the time.
 M.RANKS         = "mmo.ranks"
+-- Co-op battles.  Five going out, five coming back, and the asymmetry is the
+-- same one PARTY_INVITE has: the hub is what turns "I am waiting" into "your
+-- friend is waiting", because only the hub knows who is in the party.
+--
+-- COOP_WAIT carries { battle, label, map } -- the fight this player is
+-- standing in front of.  COOP_CANCEL withdraws it and takes no fields: there
+-- is only ever one offer per player, so naming which would be a second way to
+-- be wrong.  COOP_JOIN answers somebody else's offer with { to, battle }.
+--
+-- **There is no "decline" going this way, and that is the design.**  A player
+-- who says no to joining sends nothing at all, which is exactly what makes no
+-- non-binding: no state is written anywhere, so the next time they walk into
+-- the same fight the ask is simply made again.  A refusal that left a trace
+-- would have to be cleared by something, and whatever cleared it would be the
+-- thing that eventually got it wrong.
+M.COOP_WAIT      = "mmo.coop_wait"
+M.COOP_CANCEL    = "mmo.coop_cancel"
+M.COOP_JOIN      = "mmo.coop_join"
+-- The four-way PARTY BATTLE: one party challenges another, { to }.  Answered
+-- by the other three with COOP_ANSWER { accept }.
+M.COOP_CHALLENGE = "mmo.coop_challenge"
+M.COOP_ANSWER    = "mmo.coop_answer"
+-- Battle traffic between the players in one co-op battle: { payload }.
+--
+-- Its own message rather than mmo.relay, and the difference is the whole
+-- reason it exists: a relay goes to *the* session peer, and there are three of
+-- them here.  The hub fans this out to everyone else in the same battle and
+-- reads none of it, exactly as it does not read a relay payload.
+M.COOP_RELAY     = "mmo.coop_relay"
+-- Two kinds that ride *inside* a COOP_RELAY payload rather than beside it,
+-- and they are named here because this file is where the vocabulary lives --
+-- not because the hub has anything to do with them.
+--
+-- **Neither is a hub message and neither needs one.** A relay payload is
+-- forwarded unread by both hubs (server/lib/relay.js and src/Hub.lua judge
+-- its *shape* through payloadOk and nothing else), so a new kind inside the
+-- envelope reaches the other three players with no hub change on either side
+-- -- and a client built before these existed drops through its inbound
+-- dispatch without a branch and ignores them, which is exactly the degrade a
+-- mixed-version battle wants: the ask simply goes unanswered and the turn
+-- deadline files it as a refusal.
+--
+--   run_ask     -- "I want us to run." Carries no fields at all: who asked is
+--                  the `from` the hub stamps on the way out, and which slot
+--                  that is is a fact the receiving client reads off its own
+--                  copy of the field. A slot named in the payload would be a
+--                  slot a modified client could claim.
+--   run_answer  -- { ok } -- the partner's yes or no.
+M.COOP_RUN_ASK    = "run_ask"
+M.COOP_RUN_ANSWER = "run_answer"
+-- "this co-op battle is over."  No fields: a player is only ever in one, and
+-- naming which would be a second way to be wrong.
+--
+-- It exists because the hub otherwise has no idea a battle ended. A group is
+-- opened when four players agree and was only ever closed when somebody
+-- *disconnected*, so a hub that ran for a week accumulated one dead group per
+-- battle ever fought, each still routing relays to players who had long since
+-- walked away.
+M.COOP_LEAVE     = "mmo.coop_leave"
 
 -- hub -> client
 M.WELCOME     = "mmo.welcome"
@@ -79,6 +138,33 @@ M.RANK        = "mmo.rank"
 -- already sorted and already cut to the top ten by the hub -- the client
 -- draws what it is given rather than deciding who is on the board.
 M.RANKING     = "mmo.ranking"
+
+-- Co-op, coming back.
+--
+-- COOP_OFFER is your partner's standing "I am waiting for you at this fight":
+-- { from, name, battle, label, map }.  COOP_OFFER_END withdraws it, and
+-- carries a reason so the partner's client can tell "they went in alone" from
+-- "they walked away" -- two things that look identical from the outside and
+-- read very differently to the person who was going to join.
+M.COOP_OFFER     = "mmo.coop_offer"
+M.COOP_OFFER_END = "mmo.coop_offer_end"
+-- Somebody accepted yours: { id, name }.  This is the message that ends the
+-- waiting, and the only one that does.
+M.COOP_JOINED    = "mmo.coop_joined"
+-- The four-way ask, as it reaches the three players who did not start it:
+-- { id, from, name, side } -- who is asking, and which of the two sides this
+-- recipient is on.
+M.COOP_ASK       = "mmo.coop_ask"
+-- The ask is off: { name, reason }.  Sent to everyone still holding it, so a
+-- box that can no longer be answered comes down rather than being answered
+-- into nothing.
+M.COOP_DECLINE   = "mmo.coop_decline"
+-- All four agreed: { id, side, allies, foes }, each a members list.  The hub
+-- names the sides because it is the only party to the exchange that knows all
+-- four are still connected at the moment it says so.
+M.COOP_BATTLE    = "mmo.coop_battle"
+-- One player's battle traffic, as it reaches the other three: { from, payload }.
+M.COOP_MSG       = "mmo.coop_msg"
 
 M.FACINGS = { up = true, down = true, left = true, right = true }
 M.KINDS = { trade = true, battle = true }
@@ -203,6 +289,19 @@ end
 function M.facing(value)
   if M.FACINGS[value] then return value end
   return nil
+end
+
+-- A yes/no off the wire, re-derived rather than trusted for its truthiness.
+--
+-- Lua calls everything except `false` and `nil` true, so a peer that sent the
+-- string "false", the number 0 or an empty table would have all three read as
+-- yes by a bare `if value then`. The one field this guards -- a partner's
+-- consent to run, which ends a battle and books somebody a ranked loss -- is
+-- exactly the one where "anything that is not literally false means yes" is
+-- the wrong reading. Only a real boolean true is yes; everything else,
+-- including a missing field, is no.
+function M.flag(value)
+  return value == true
 end
 
 -- The secret that says a trainer name is yours on this hub.  Hex like a
@@ -330,6 +429,169 @@ function M.members(raw)
   end
   if #out == 0 then return nil end
   return out
+end
+
+-- ------- co-op
+
+-- Which of the two sides of a co-op battle somebody is on.
+M.SIDES = { a = true, b = true }
+
+function M.side(value)
+  if M.SIDES[value] then return value end
+  return nil
+end
+
+-- Why an offer or an ask ended.  A closed set rather than free text, because
+-- every one of these picks a different sentence on screen and an unknown
+-- reason has to degrade to the vague one rather than being printed raw.
+--
+--   alone     -- they got tired of waiting and went in by themselves
+--   left      -- they walked away from the fight without starting it
+--   started   -- the battle is already running, which is the one refusal the
+--                player cannot do anything about
+--   no        -- somebody in the four said no
+--   gone      -- somebody dropped
+--   timeout   -- nobody answered in time
+M.COOP_REASONS = {
+  alone = true, left = true, started = true,
+  no = true, gone = true, timeout = true,
+}
+
+function M.coopReason(value)
+  if M.COOP_REASONS[value] then return value end
+  return nil
+end
+
+-- The identity of one fight, as two clients standing in front of it derive it.
+--
+-- Not prose and not an id: it is built by Coop.battleKey by joining a map id
+-- to the trainer's own identifiers, so it carries the separator those ids are
+-- joined with.  Running it through M.text would strip that separator and turn
+-- two different trainers on one map into the same key -- which is the failure
+-- that matters here, because the whole job of this value is to tell one fight
+-- from another.
+-- What a fight is called.  Prose, so it borrows M.text -- but with its own
+-- limit, because a trainer class is not a player name and NAME_MAX cuts "BUG
+-- CATCHER" to "BUG CATCHE".
+function M.label(value)
+  return M.text(value, Config.COOP_LABEL_MAX)
+end
+
+-- The badges a player brings to a co-op battle, as a set.
+--
+-- Sent as a list and rebuilt as a set here, because a set arriving off the
+-- wire is a table with arbitrary keys and this one is about to be indexed by
+-- the engine. Every id is re-derived through M.id and the list is bounded;
+-- an id that is not one the badge rows name is inert anyway -- `makeBattler`
+-- walks the rows and asks the set, never the other way round -- so the bound
+-- is about payload size rather than about what a lie could achieve.
+--
+-- Returns nil for anything that is not a list, which is the same answer as
+-- "no badges" and is treated the same everywhere.
+function M.badges(value)
+  if type(value) ~= "table" then return nil end
+  local out, count = {}, 0
+  for _, raw in ipairs(value) do
+    local id = M.id(raw)
+    if id and not out[id] then
+      out[id] = true
+      count = count + 1
+      if count >= Config.COOP_BADGES_MAX then break end
+    end
+  end
+  if count == 0 then return nil end
+  return out
+end
+
+-- The assembled field, as it reaches the other three clients.
+--
+-- **This is the one payload that used to be taken on trust**, and it is the
+-- least defensible one to trust: the "host" is another player's client, not a
+-- server, and this table decides how many monsters are on the field, whose
+-- they are, and what is drawn over them. Everything else inbound passes
+-- through this file; this did not.
+--
+-- Four things are checked, and each was reachable:
+--
+--   * the slot **count**, because `buildField` only ever checked it on the
+--     sending side -- so a modified host could send fifty and every client
+--     would build fifty;
+--   * the **side**, because `targetsFor` reads it as one of two values and an
+--     arbitrary third makes "who may I attack" incoherent;
+--   * the **name**, because it is drawn on screen and interpolated into
+--     messages and the events other mods listen to;
+--   * the **party length**, because `unpackParty` iterates whatever it is
+--     given and payloadOk's node budget permits a few hundred -- a battle
+--     that never ends.
+--
+-- Returns a rebuilt table rather than the original: what is passed on is only
+-- the fields named here, in the shapes named here.
+function M.coopField(raw)
+  if type(raw) ~= "table" or type(raw.slots) ~= "table" then return nil end
+  if #raw.slots ~= Config.COOP_FIGHTERS then return nil end
+
+  local slots = {}
+  for i = 1, Config.COOP_FIGHTERS do
+    local slot = raw.slots[i]
+    if type(slot) ~= "table" then return nil end
+    local side = M.side(slot.side)
+    if not side then return nil end
+
+    -- An NPC slot has no owner, which is a real answer; a *malformed* owner is
+    -- not, and the two are told apart rather than both waved through.
+    local owner = nil
+    if slot.owner ~= nil then
+      owner = M.id(slot.owner)
+      if not owner then return nil end
+    end
+
+    -- Wide enough for a trainer class ("BUG CATCHER"), which is what an NPC
+    -- slot carries, and cleaned like any other text that reaches a screen.
+    local name = M.label(slot.name)
+    if not name then return nil end
+
+    if type(slot.party) ~= "table" then return nil end
+    local party = {}
+    for _, mon in ipairs(slot.party) do
+      if type(mon) ~= "table" then return nil end
+      if #party >= Config.COOP_TEAM_MAX then return nil end
+      party[#party + 1] = mon
+    end
+    if #party == 0 then return nil end
+
+    slots[i] = { side = side, owner = owner, name = name, party = party,
+                 badges = M.badges(slot.badges) }
+  end
+
+  return { slots = slots, host = M.id(raw.host),
+           trainer = M.id(raw.trainer) }
+end
+
+function M.battleKey(value)
+  if type(value) ~= "string" then return nil end
+  if not value:match("^[%w_%.%-:|]+$") then return nil end
+  if #value > Config.COOP_KEY_MAX then return nil end
+  return value
+end
+
+-- A co-op offer as it reaches the partner.  `label` is what the box calls the
+-- fight ("BUG CATCHER") and is prose; `battle` is the key and is not.  A
+-- missing label is fine and common -- a script-driven battle need not name its
+-- trainer -- so it degrades to nil and the screen says "a battle" instead of
+-- refusing the whole offer over a cosmetic field.
+function M.coopOffer(raw)
+  if type(raw) ~= "table" then return nil end
+  local from = M.id(raw.from)
+  local name = M.name(raw.name)
+  local battle = M.battleKey(raw.battle)
+  if not (from and name and battle) then return nil end
+  return {
+    from = from,
+    name = name,
+    battle = battle,
+    label = M.label(raw.label),
+    map = M.mapId(raw.map),
+  }
 end
 
 -- Presence as it appears in a welcome roster, a join, or a move.  Position
