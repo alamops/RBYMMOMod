@@ -417,6 +417,9 @@ the address you dialled with the standard port left off (`192.168.1.20:7788`
 lists as `192.168.1.20`; a hub on any other port keeps it, because there the
 port is part of dialling it), and a rename can run up to 16 characters. The
 whole address is still on the entry either way — that's what `CONNECT` dials.
+Last on the submenu, **`DELETE`** forgets the entry for good — it asks first,
+naming the entry in a yes/no confirm that defaults to "no", so a mis-press
+costs nothing.
 
 A hub is only added once you actually reach it — a wrong passcode never
 earns an entry — and the list survives quitting, `CONTINUE`, and switching
@@ -426,7 +429,7 @@ time is dropped first, and a favorite is never the one that goes.
 
 <p align="center">
   <img src="docs/screenshots/servers-list.png" width="300" alt="The SERVERS list: a favorited hub, marked with an arrow in the right-hand column">
-  <img src="docs/screenshots/servers-submenu.png" width="300" alt="The per-server submenu: CONNECT, UNFAVORITE, EDIT HOST, EDIT CODE, RENAME">
+  <img src="docs/screenshots/servers-submenu.png" width="300" alt="The per-server submenu: CONNECT, UNFAVORITE, EDIT HOST, EDIT CODE, RENAME, DELETE">
 </p>
 
 ### 🎭 BE SOMEBODY ELSE
