@@ -748,19 +748,17 @@ function M:install()
           label = "PLAYERS",
           onSelect = function() mod.ui.push(game, SCREEN.ROSTER) end,
         }
-        -- A marker for unread, the way the original marks state in a label
-        -- rather than with a second column the box has no room for.
-        --
-        -- The marker leads rather than trails, and is a triangle rather
-        -- than the asterisk this used to carry: the extracted font has no
-        -- glyph for "*", and Font.draw silently draws nothing for a
-        -- character it cannot map while Font.width still advances 8px for
-        -- it -- so "CHAT*" rendered as CHAT followed by a blank column that
-        -- looked like a layout bug. "▶" is on the sheet (it is the same
-        -- glyph the menu cursor uses), so the row now actually shows what
-        -- it claims to.
+        -- No unread marker on this row. It carried "*" first, which the
+        -- extracted font has no glyph for -- Font.draw silently drew
+        -- nothing while Font.width still advanced 8px, so "CHAT*" showed
+        -- as CHAT plus a blank column that read as a layout bug. Moving it
+        -- to a leading "▶" fixed the blank but bought a worse confusion:
+        -- "▶" *is* the menu cursor glyph, so an unread CHAT row looked
+        -- like a second cursor sitting on a row the cursor was not on.
+        -- The label is plain now; unread is still counted on Chat for
+        -- anything that wants it, it just no longer decorates this row.
         items[#items + 1] = {
-          label = ctx.chat.unread > 0 and "▶CHAT" or "CHAT",
+          label = "CHAT",
           onSelect = function() mod.ui.push(game, SCREEN.CHATLOG) end,
         }
         items[#items + 1] = {

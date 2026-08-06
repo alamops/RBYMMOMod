@@ -4276,7 +4276,7 @@ eq(ann.party:isPartner(bob.client.id), true, "and is on them")
 local note = ann.chat:recent()[1]
 check(note ~= nil and note.text:find("BOB"), "the chat log records the teaming up")
 eq(note.scope, "party", "as a party line")
-eq(ann.chat.unread, 0, "which does not put an asterisk on the CHAT row")
+eq(ann.chat.unread, 0, "which does not count as an unread line")
 
 -- ------- what an invite cannot do
 

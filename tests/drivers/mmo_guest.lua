@@ -1393,8 +1393,9 @@ return function(game)
 
     -- Every row is drawable, not merely correct as a string. has("CHAT")
     -- above passes for "CHAT*" too, and that spelling rendered as CHAT
-    -- plus a blank column for as long as it was there -- the marker is a
-    -- triangle now precisely because the font has no asterisk.
+    -- plus a blank column for as long as it was there. The row carries no
+    -- marker at all now, but the check stays: it is the only thing standing
+    -- between the next decorated label and the same silent blank.
     for _, label in ipairs(H.menuLabels(game)) do
       local missing = H.undrawable(game, label)
       check(missing == "",

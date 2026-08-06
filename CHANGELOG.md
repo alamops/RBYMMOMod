@@ -4,6 +4,20 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.7.3] - 2026-08-06
+
+### Fixed
+
+- **The `CHAT` row no longer looks like it has the cursor on it.** The unread
+  marker on that row has had two lives and neither worked: as a trailing `*`
+  it drew nothing at all (the extracted font has no glyph for it, and
+  `Font.width` advanced 8px anyway, so the row read as `CHAT` plus a blank
+  column), and as a leading `▶` it drew the menu's own cursor glyph — so a
+  row with unread messages looked like a second selection sitting on a row
+  the cursor was not on. The label is plain `CHAT` now. Unread lines are
+  still counted on the chat model; the count simply no longer decorates the
+  menu.
+
 ## [0.7.2] - 2026-08-06
 
 ### Fixed
