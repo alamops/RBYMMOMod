@@ -13,6 +13,7 @@ local Wire = need("Wire")
 local Sha256 = need("Sha256")
 local Transport = need("Transport")
 local Roster = need("Roster")
+local Servers = need("Servers")
 local Avatars = need("Avatars")
 local Chat = need("Chat")
 local Party = need("Party")
@@ -46,6 +47,10 @@ local ctx = {
 
 local transport = Transport.new()
 local server = HostServer.new()
+-- Handed its own one-field table rather than the ctx above: the store wants
+-- the mod facade and nothing else, which is what lets the suite construct one
+-- against a stub without standing up a client first.
+local servers = Servers.new({ mod = mod })
 local ui = Ui.new(ctx)
 local overlay = Overlay.new(ctx)
 local sessions = Sessions.new(transport, ui)
@@ -58,6 +63,7 @@ ctx.sessions = sessions
 ctx.party = party
 ctx.coop = coop
 ctx.server = server
+ctx.servers = servers
 
 local presenceClock = 0
 local lastSent =
@@ -135,6 +141,15 @@ end
 
 function M.hostLimit()
   return server:limit()
+end
+
+-- The hubs this copy has been welcomed by, for the SERVERS menu.
+--
+-- The store itself, not a copy of its rows: the screens both read it and
+-- write to it (rename, favourite, edit), and two lists that could disagree
+-- would be one bug waiting for a player to reopen a menu.
+function M.servers()
+  return servers
 end
 
 -- Settings that the player can change from inside the game.
@@ -1123,6 +1138,35 @@ handlers[Wire.WELCOME] = function(game, msg)
   end
   transport:markReady()
   pushPresence(true)
+  -- Remember the hub, now that it has actually let us in.
+  --
+  -- Here and not in M.connect, because a dial is not a connection: recording
+  -- there would fill the SERVERS list with addresses that refused us, timed
+  -- out, or wanted a code we did not have. And after markReady rather than
+  -- before, because until then the welcome could still turn out to be
+  -- malformed and this connection never happened.
+  --
+  -- Only a dialled address: hosting has none -- the local net is in-process --
+  -- and a row that reconnects you to yourself is not a hub anybody wants
+  -- listed. The code goes on the row so a save-slot change cannot take it
+  -- away; it is the same normalised code M.joinCode just answered a challenge
+  -- with, never anything typed and unchecked.
+  --
+  -- Wrapped, and the whole point of the wrapping is that this is bookkeeping
+  -- on the one path every single connection takes. The store refuses rather
+  -- than raises, so nothing here is expected to throw -- but a save folder
+  -- this copy cannot write must never be the reason a player is not in the
+  -- game they just joined.
+  if dialled then
+    local kept, why = pcall(function()
+      servers:record(dialled, M.joinCode(dialled))
+    end)
+    if not kept then
+      mod.log:warn("could not add %s to the server list (%s) -- it will not "
+        .. "appear under START > MMO > SERVERS; rejoin it with JOIN GAME",
+        tostring(dialled), tostring(why))
+    end
+  end
   -- Deliberately not a text box. ui:say pushes a modal that sits over the
   -- world until someone presses A, and a routine status line is not worth
   -- interrupting play for -- the first real run left "Connected." covering
