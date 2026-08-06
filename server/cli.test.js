@@ -519,13 +519,9 @@ function testValueFor(dotted) {
     case 'log.level': return { raw: 'debug', expected: 'debug' };
     case 'bans': return { raw: '203.0.113.9', expected: [limits.normalizeIp('203.0.113.9')] };
     case 'allowlist': return { raw: '198.51.100.4', expected: [limits.normalizeIp('198.51.100.4')] };
-    // The wave-2 leaves (docs/plans/server-live-ops.md §3): motd and two of
-    // the three dashboard fields. dashboard.port already has a BOUNDS entry
-    // and is covered by the branch above; wave 1 flagged these three as the
-    // gap the BOUNDS-only sweep would miss.
+    // The wave-2 leaf (docs/plans/server-live-ops.md §3) the BOUNDS-only
+    // sweep would miss.
     case 'motd': return { raw: 'Reboot at 10pm, back in five.', expected: 'Reboot at 10pm, back in five.' };
-    case 'dashboard.enabled': return { raw: 'true', expected: true };
-    case 'dashboard.host': return { raw: '10.0.0.5', expected: '10.0.0.5' };
     default: return null;
   }
 }
@@ -1575,7 +1571,7 @@ async function inviteScenario() {
 }
 
 // =====================================================================
-// invite --admin -- the credential that also opens the dashboard
+// invite --admin -- the credential that marks a connection
 // =====================================================================
 
 async function inviteAdminScenario() {
@@ -1591,12 +1587,16 @@ async function inviteAdminScenario() {
   const plainCredential = readConfigFile(file).auth.credentials.find((c) => c.id === plainId);
   ok(plainCredential.admin !== true, 'a plain invite does not carry admin: true');
 
-  // --- --admin mints one that does, says so in the banner, and mentions the
-  //     dashboard in the printed block
+  // --- --admin mints one that does, says so in the banner, and the printed
+  //     block explains the mark it leaves on the connection rather than any
+  //     web surface
   const admin = await runCli(['invite', '--admin', '--label', 'Op', '--config', file], { cwd: dir });
   ok(admin.code === cli.OK, 'invite --admin succeeds');
   ok(/New admin join code/.test(admin.stdout), 'the banner names it an admin code');
-  ok(/dashboard/i.test(admin.stdout), 'and the printed block mentions the web dashboard');
+  ok(/mark on the connection/i.test(admin.stdout),
+    'and the printed block describes the mark it leaves on the connection');
+  ok(/\bADMIN\b/.test(admin.stdout) && /KIND column/i.test(admin.stdout),
+    'naming the ADMIN mark and the KIND column of `invite list` where it shows');
   const adminId = /\(id ([0-9a-f]+),/.exec(admin.stdout)[1];
   const adminCredential = readConfigFile(file).auth.credentials.find((c) => c.id === adminId);
   ok(adminCredential.admin === true, 'and the credential really carries admin: true on disk');

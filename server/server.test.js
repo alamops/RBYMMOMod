@@ -29,7 +29,6 @@
  */
 
 const net = require('net');
-const http = require('node:http');
 const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -45,9 +44,6 @@ const {
 // in one file and not a hunt through two suites for the greeting that still
 // says the old number.
 const { PROTOCOL } = require('./lib/relay.js');
-// The cookie name is the dashboard's own spelling; a suite that hardcoded
-// "rbyd" would silently stop testing anything the day that name moved.
-const { COOKIE_NAME: DASHBOARD_COOKIE_NAME } = require('./lib/dashboard.js');
 
 const CHILD_PORT = 8801 + (process.pid % 200); // clear of hub.test.js's 7801-8002
 const SERVER_JS_PATH = path.join(__dirname, 'lib', 'server.js');
@@ -176,83 +172,6 @@ function rawConnect(port) {
 function shortTmpDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
-
-// Whether `key` appears anywhere in a JSON-shaped value, at any depth. Used
-// to prove a field the dashboard must never expose (`perIp`, the per-address
-// connection table) truly is not in there, rather than merely absent from
-// the one place it was expected.
-function hasKeyDeep(value, key) {
-  if (Array.isArray(value)) return value.some((item) => hasKeyDeep(item, key));
-  if (!value || typeof value !== 'object') return false;
-  for (const k of Object.keys(value)) {
-    if (k === key) return true;
-    if (hasKeyDeep(value[k], key)) return true;
-  }
-  return false;
-}
-
-// A plain HTTP round-trip against the dashboard: one request, the whole
-// response buffered, never a redirect followed automatically -- the tests
-// below want to see the 303 and the Set-Cookie, not the page it points to.
-function httpRequest(port, options = {}, body) {
-  return new Promise((resolve, reject) => {
-    const req = http.request(Object.assign({
-      host: '127.0.0.1', port, method: 'GET',
-    }, options), (res) => {
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => resolve({
-        status: res.statusCode,
-        headers: res.headers,
-        body: Buffer.concat(chunks).toString('utf8'),
-      }));
-    });
-    req.on('error', reject);
-    if (body !== undefined) req.write(body);
-    req.end();
-  });
-}
-
-// The `name=value` pair off a Set-Cookie header, ignoring the attributes
-// (HttpOnly, SameSite, Path) that follow the first semicolon. `headers[...]`
-// is an array when node folds repeated headers, a string on some versions --
-// both are handled so this does not become the reason a passing suite fails
-// on a different Node.
-function cookiePair(headers) {
-  const raw = headers['set-cookie'];
-  const line = Array.isArray(raw) ? raw[0] : raw;
-  if (!line) return null;
-  return line.split(';')[0];
-}
-
-// Whether something is listening at all. Used for the two "this dashboard
-// never bound" scenarios (disabled; enabled with no usable credential),
-// where the honest proof is that nobody answers on the port it would have used.
-function portIsClosed(port) {
-  return new Promise((resolve) => {
-    const socket = net.createConnection({ port, host: '127.0.0.1' });
-    socket.once('error', () => resolve(true));
-    socket.once('connect', () => { socket.destroy(); resolve(false); });
-  });
-}
-
-// Fixed ports, per-pid like CHILD_PORT above, and clear of both hub.test.js's
-// range (7801-8002) and CHILD_PORT's (8801-9000): the dashboard cannot ask
-// for an ephemeral one, because config.js's own BOUNDS clamps dashboard.port
-// up to 1 the moment it sees a 0 (a bind only root can make).
-const DASHBOARD_PORT = 9401 + (process.pid % 200);
-const DASHBOARD_PORT_DISABLED = 9701 + (process.pid % 200);
-const DASHBOARD_PORT_NO_CREDENTIAL = 10001 + (process.pid % 200);
-const DASHBOARD_PORT_SESSION = 10301 + (process.pid % 200);
-// A hub carrying both an admin and a player credential at once (the door
-// test), and one carrying only player credentials (the start-refusal test) --
-// both distinct from DASHBOARD_PORT_NO_CREDENTIAL's empty list.
-const DASHBOARD_PORT_PLAYER_ADMIN = 10601 + (process.pid % 200);
-const DASHBOARD_PORT_ONLY_PLAYER = 10901 + (process.pid % 200);
-
-// A join code for the dashboard scenarios, distinct from PRIMARY_CODE so a
-// failure naming one cannot be misread as belonging to the other.
-const DASHBOARD_CODE = 'DPQR56';
 
 // -------------------------------------------------------------- HMAC, by hand
 //
@@ -1677,13 +1596,11 @@ async function statusSnapshotCarriesNothingSensitiveTest() {
 // ------- the admin flag on welcome, and in status.json, for a real pair
 //
 // authHandshakeTest and the throttle scenarios drive real challenge/response
-// handshakes, but none of their credentials is an admin one; the dashboard
-// scenarios drive an admin credential, but only through the dashboard's own
-// login, never the game-port handshake. This scenario is the missing
-// combination: two real clients on one hub, one holding an admin code and one
-// holding a player code, so `welcome.admin` and the status snapshot's
-// per-connection flag are checked against each other rather than in
-// isolation.
+// handshakes, but none of their credentials is an admin one. This scenario
+// is the missing combination: two real clients on one hub, one holding an
+// admin code and one holding a player code, so `welcome.admin` and the
+// status snapshot's per-connection flag are checked against each other
+// rather than in isolation.
 
 async function authAdminWelcomeAndStatusTest() {
   const ADMIN_CODE = 'ADMN12';
@@ -1739,7 +1656,7 @@ async function authAdminWelcomeAndStatusTest() {
 }
 
 // =========================================================================
-// wave 2: match history, the admin socket, the web dashboard, MOTD reload
+// wave 2: match history, the admin socket, MOTD reload
 // -- docs/plans/server-live-ops.md §3
 // =========================================================================
 //
@@ -1920,7 +1837,7 @@ async function adminSocketTest(handle, battle) {
   ok(stats.stats && typeof stats.stats.limits === 'object',
     'nesting the hardening counters under limits, not merged into the top level');
   ok('auth' in stats.stats.limits,
-    'including the authentication throttle telemetry (perIp is the dashboard\'s own contract)');
+    'including the authentication throttle telemetry');
 
   // ---- kick: a connected player is told, then actually disconnected
   const target = new Client(handle.port);
@@ -2070,300 +1987,9 @@ async function adminCloseUnlinksSocketTest() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-// ------- the dashboard: login, the two JSON endpoints, the XSS posture
-
-async function dashboardTest(handle) {
-  const port = DASHBOARD_PORT;
-
-  // ---- no session: the login form, with the security headers every
-  // response gets
-  const loginPage = await httpRequest(port, { path: '/' });
-  ok(loginPage.status === 200, 'no session: the root serves the login page');
-  ok(/<form[^>]*method="post"[^>]*action="\/login"/i.test(loginPage.body),
-    'which really is a form posting to /login');
-  ok(loginPage.headers['cache-control'] === 'no-store', 'never cached');
-  ok(loginPage.headers['x-content-type-options'] === 'nosniff', 'and never sniffed');
-  ok(/frame-ancestors 'none'/.test(loginPage.headers['content-security-policy'] || ''),
-    'the CSP forbids this page from being framed');
-
-  // ---- wrong Host: the DNS-rebinding mitigation, ahead of everything else
-  const wrongHost = await httpRequest(port, {
-    path: '/', headers: { Host: 'evil.example.com' },
-  });
-  ok(wrongHost.status === 403,
-    'a request naming a Host this listener is not bound to is refused');
-
-  // ---- wrong join code
-  const wrongBody = 'code=ZZ9ZZ9';
-  const wrongLogin = await httpRequest(port, {
-    path: '/login', method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  }, wrongBody);
-  ok(wrongLogin.status === 403, 'a wrong join code is refused');
-  ok(/<form/i.test(wrongLogin.body), 'and shown the form again, not a stack trace');
-
-  // ---- the right one
-  const rightBody = `code=${DASHBOARD_CODE}`;
-  const rightLogin = await httpRequest(port, {
-    path: '/login', method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  }, rightBody);
-  ok(rightLogin.status === 303, 'the correct join code redirects');
-  const cookie = cookiePair(rightLogin.headers);
-  ok(cookie && cookie.startsWith(`${DASHBOARD_COOKIE_NAME}=`),
-    'and hands back a session cookie');
-
-  // ---- with the cookie: the two JSON endpoints
-  const status = await httpRequest(port, { path: '/api/status', headers: { Cookie: cookie } });
-  ok(status.status === 200, '/api/status answers once signed in');
-  const statusBody = JSON.parse(status.body);
-  ok(Array.isArray(statusBody.players), 'carrying a players array');
-  ok(statusBody.players.some((p) => p.name === 'RED'),
-    'including the player from the ranked battle above');
-  ok(statusBody.limits && typeof statusBody.limits.connections === 'number',
-    'and the connection count out of limits.stats()');
-  ok(!hasKeyDeep(statusBody, 'perIp'),
-    'never the per-address connection table, anywhere in the payload -- ' +
-    'that is every other player\'s own address');
-
-  const ranking = await httpRequest(port, { path: '/api/ranking', headers: { Cookie: cookie } });
-  ok(ranking.status === 200, '/api/ranking answers once signed in');
-  const rankingBody = JSON.parse(ranking.body);
-  ok(Array.isArray(rankingBody.entries) && rankingBody.entries.length > 0,
-    'carrying the season\'s rows');
-  for (const entry of rankingBody.entries) {
-    ok(Object.keys(entry).sort().join(',') === 'name,place,played,points,won',
-      'each row is projected to exactly the five documented fields');
-  }
-
-  // ---- XSS posture. cleanText already strips < > & " at hello time, so no
-  // name reaching this far can carry a tag -- but ' survives the charset,
-  // and that is enough to show the discipline: raw in the JSON API, absent
-  // from the static page, because the page never interpolates a name at all.
-  const special = new Client(handle.port);
-  await special.ready();
-  special.send('mmo.hello', { proto: PROTOCOL, name: "AL'RIGHT" });
-  await special.expect('mmo.welcome');
-
-  const statusAgain = await httpRequest(port, { path: '/api/status', headers: { Cookie: cookie } });
-  ok(statusAgain.body.includes("AL'RIGHT"),
-    'the special-character name round-trips raw through the JSON API');
-
-  const page = await httpRequest(port, { path: '/', headers: { Cookie: cookie } });
-  ok(page.status === 200, 'with a session, / serves the dashboard rather than the form');
-  ok(!page.body.includes("AL'RIGHT"),
-    'and the server-rendered page never interpolates a player name at all');
-  const scriptTags = page.body.match(/<script/g) || [];
-  ok(scriptTags.length === 1,
-    'exactly the page\'s own inline script tag -- nothing injected alongside it');
-
-  special.close();
-  // close() is a destroy, and the hub frees the seat only when the socket's
-  // close event lands. The shared hub runs at the default cap of 4, so a
-  // caller who hellos right after this returns can race the drop and be
-  // refused a full hub -- wait for the roster to actually shrink.
-  ok(await waitFor(
-    () => !handle.relay.roster().some((p) => p.name === "AL'RIGHT"), 2000),
-  'and the special-name player is really gone before the scenario moves on');
-}
-
-// ------- the dashboard's two ways of not being there at all
-
-async function dashboardDisabledTest() {
-  const handle = await startServer({
-    dashboard: { enabled: false, host: '127.0.0.1', port: DASHBOARD_PORT_DISABLED },
-  });
-  try {
-    ok(handle.dashboard === null, 'a disabled dashboard never appears on the handle');
-    ok(await portIsClosed(DASHBOARD_PORT_DISABLED),
-      'and nothing is listening on the port it would otherwise have used');
-  } finally {
-    await handle.close();
-  }
-}
-
-async function dashboardNoCredentialTest() {
-  const log = recordingLog();
-  const handle = await startServer({
-    auth: { required: false, credentials: [] },
-    dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT_NO_CREDENTIAL },
-  }, { log });
-  try {
-    ok(handle.port > 0, 'the hub itself still starts');
-    ok(handle.dashboard === null,
-      'but the dashboard does not, with no active credential to log in with');
-    ok(await portIsClosed(DASHBOARD_PORT_NO_CREDENTIAL),
-      'and nothing is listening on its port either');
-    ok(log.saw(/dashboard is not running/i), 'and the log names the reason');
-  } finally {
-    await handle.close();
-  }
-}
-
-// ------- a dashboard session belongs to the credential that minted it
+// ------- the shared hub: history, admin, and MOTD reload together
 //
-// Its own hub, its own config file and its own port, because the whole
-// scenario is a credential being taken away mid-session and a shared hub
-// cannot have one of those pulled out from under its other scenarios. The
-// revoke goes through the file and a real reload(), which is the operator's
-// actual path (`revoke` writes, SIGHUP re-reads) rather than a poke at an
-// in-memory object nobody can reach in production.
-
-async function dashboardSessionFollowsCredentialTest() {
-  const dir = shortTmpDir('rbydashsess-');
-  const configPath = path.join(dir, 'config.json');
-  const SPENT_CODE = 'SPNT77';
-  const cfg = baseConfig({
-    auth: {
-      required: false,
-      credentials: [
-        credential('dashsess', DASHBOARD_CODE, { admin: true }),
-        credential('dashspent', SPENT_CODE, { admin: true, maxUses: 1 }),
-      ],
-    },
-    dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT_SESSION },
-  });
-  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
-
-  const handle = await start({
-    config: cfg, log: NULL_LOG, configPath, handleSignals: false, allowUnauthenticated: true,
-  });
-  const port = DASHBOARD_PORT_SESSION;
-
-  const signIn = (code) => httpRequest(port, {
-    path: '/login', method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  }, `code=${code}`);
-
-  // The file is the only writer the hub reads on reload(); this is `revoke`
-  // and `start`'s use-counting, spelled the way they spell it.
-  const rewrite = (edit) => {
-    const next = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    edit(next.auth.credentials);
-    fs.writeFileSync(configPath, JSON.stringify(next, null, 2), { mode: 0o600 });
-    ok(handle.reload() === true, 'the hub re-reads the edited config file');
-  };
-
-  try {
-    // ---- a live session, then the code behind it is revoked
-    const login = await signIn(DASHBOARD_CODE);
-    ok(login.status === 303, 'an admin code signs in');
-    const cookie = cookiePair(login.headers);
-
-    let page = await httpRequest(port, { path: '/', headers: { Cookie: cookie } });
-    ok(page.status === 200 && !/<form/i.test(page.body),
-      'and that session serves the dashboard rather than the form');
-
-    rewrite((list) => { list.find((c) => c.id === 'dashsess').revoked = true; });
-
-    page = await httpRequest(port, { path: '/', headers: { Cookie: cookie } });
-    ok(/<form[^>]*action="\/login"/i.test(page.body),
-      'revoking the code signs that session out: the same cookie gets the form back');
-    const api = await httpRequest(port, {
-      path: '/api/status', headers: { Cookie: cookie },
-    });
-    ok(api.status === 401,
-      'and the page\'s own fetch loop is told 401 rather than served a roster');
-
-    // ---- the use budget is deliberately not part of that check
-    const spent = await signIn(SPENT_CODE);
-    ok(spent.status === 303, 'a --uses 1 admin code signs in like any other');
-    const spentCookie = cookiePair(spent.headers);
-
-    // The operator now joins the world with the same code, spending its one
-    // use -- which lib/server.js records in the file exactly like this.
-    rewrite((list) => { list.find((c) => c.id === 'dashspent').uses = 1; });
-
-    page = await httpRequest(port, { path: '/', headers: { Cookie: spentCookie } });
-    ok(page.status === 200 && !/<form/i.test(page.body),
-      'spending its last use does not sign the operator out of the page they are reading');
-    const refused = await signIn(SPENT_CODE);
-    ok(refused.status === 403, 'though a spent code opens no new session either');
-  } finally {
-    await handle.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-// ------- the dashboard's door: a player's own code fails exactly like a
-// wrong one, and only an admin code gets through
-//
-// dashboardTest's shared-hub fixture (operatorFeaturesTest) only ever holds
-// an admin credential, so it cannot show a *real, currently active* player
-// code being turned away -- only "no credential exists to try", which is
-// dashboardNoCredentialTest's scenario. This hub carries both kinds of code
-// at once, so a player's own code and a stranger's guess can be shown landing
-// on the identical refusal.
-
-async function dashboardPlayerCodeRefusedTest() {
-  const PLAYER_CODE = 'PYQR78';
-  const handle = await startServer({
-    auth: {
-      required: false,
-      credentials: [
-        credential('dashadmin2', DASHBOARD_CODE, { admin: true }),
-        credential('dashplayer', PLAYER_CODE),
-      ],
-    },
-    dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT_PLAYER_ADMIN },
-  });
-  const port = DASHBOARD_PORT_PLAYER_ADMIN;
-
-  const login = (code) => httpRequest(port, {
-    path: '/login', method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  }, `code=${code}`);
-
-  try {
-    ok(handle.dashboard && handle.dashboard.port === port,
-      'a hub carrying both an admin and a player code still starts the dashboard');
-
-    const playerLogin = await login(PLAYER_CODE);
-    const wrongLogin = await login('ZZ9ZZ9');
-    ok(playerLogin.status === 403,
-      'a player\'s own, currently active join code is refused by the admin-only door');
-    ok(wrongLogin.status === 403, 'a code belonging to nobody is refused the same way');
-    ok(playerLogin.body === wrongLogin.body,
-      'and the two refusal bodies are byte-identical -- ' +
-      'a real code cannot be told apart from a guess by looking at the page');
-    ok(!cookiePair(playerLogin.headers) && !cookiePair(wrongLogin.headers),
-      'and neither one hands back a session cookie');
-
-    const adminLogin = await login(DASHBOARD_CODE);
-    ok(adminLogin.status === 303, 'the admin code, on the very same door, signs in');
-    ok(!!cookiePair(adminLogin.headers), 'and hands back a session cookie');
-  } finally {
-    await handle.close();
-  }
-}
-
-// ------- and the converse start-time refusal: a hub can hold join codes and
-// still have no dashboard, which is a different fact from holding none at
-// all (dashboardNoCredentialTest)
-
-async function dashboardOnlyPlayerCredentialsTest() {
-  const log = recordingLog();
-  const handle = await startServer({
-    auth: { required: false, credentials: [credential('onlyplayer', 'PYQR90')] },
-    dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT_ONLY_PLAYER },
-  }, { log });
-  try {
-    ok(handle.port > 0, 'the hub itself starts with a player-only credential list');
-    ok(handle.dashboard === null,
-      'but the dashboard does not -- a player code is not an admin code, ' +
-      'even though a live credential exists');
-    ok(await portIsClosed(DASHBOARD_PORT_ONLY_PLAYER),
-      'and nothing is listening on its port either');
-    ok(log.saw(/admin join code that still works/i),
-      'and the log names exactly why: no admin code, not merely "no code"');
-  } finally {
-    await handle.close();
-  }
-}
-
-// ------- the shared hub: history, admin, dashboard and MOTD reload together
-//
-// One hub, walked through all four in sequence, per plan §5/T2's own
+// One hub, walked through all three in sequence, per plan §5/T2's own
 // instruction to share a hub across these where isolation allows. Only the
 // rotation test above needs a ledger pre-sized to the byte, which is not
 // something a shared hub's history could offer once other scenarios have
@@ -2372,11 +1998,7 @@ async function dashboardOnlyPlayerCredentialsTest() {
 async function operatorFeaturesTest() {
   const dir = shortTmpDir('rbyops-');
   const configPath = path.join(dir, 'config.json');
-  const cfg = baseConfig({
-    auth: { required: false, credentials: [credential('opdash', DASHBOARD_CODE, { admin: true })] },
-    dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT },
-    motd: '',
-  });
+  const cfg = baseConfig({ motd: '' });
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 
   const handle = await start({
@@ -2384,9 +2006,6 @@ async function operatorFeaturesTest() {
   });
   const opened = [];
   try {
-    ok(handle.dashboard && handle.dashboard.port === DASHBOARD_PORT,
-      'the dashboard came up on the configured port, named on the handle');
-
     // ---- MOTD: absent before anyone edits the config
     const before = new Client(handle.port);
     opened.push(before);
@@ -2402,9 +2021,6 @@ async function operatorFeaturesTest() {
 
     // ---- the admin socket
     await adminSocketTest(handle, battle);
-
-    // ---- the dashboard
-    await dashboardTest(handle);
 
     // ---- MOTD: a SIGHUP-equivalent reload() picks up an edit, without
     // touching the player already connected
@@ -2468,11 +2084,6 @@ async function main() {
   await adminStaleSocketRecoveryTest();
   await adminNonSocketFileTest();
   await adminCloseUnlinksSocketTest();
-  await dashboardDisabledTest();
-  await dashboardNoCredentialTest();
-  await dashboardSessionFollowsCredentialTest();
-  await dashboardPlayerCodeRefusedTest();
-  await dashboardOnlyPlayerCredentialsTest();
   await operatorFeaturesTest();
 
   console.log(`\n  ${passed}/${passed} checks passed  (server)\n`);
