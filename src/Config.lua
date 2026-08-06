@@ -251,9 +251,11 @@ M.DEFAULT_SPRITE = "SPRITE_RED"
 -- default 2x, because a taller trainer stands in the text box.  The footprint
 -- was right and every third column was a pixel wide twice over.
 --
--- 1 is the only whole number that works at this art size.  2 would be 96
--- pixels tall with the feet pinned at y=96, which is the text box; 1 is 48,
--- comfortably clear of it.  It also settles a disagreement between the two
+-- 1 is the only whole number that works at this art size.  The feet sit on
+-- the text-box top at every scale and the pic grows upward from there, so at
+-- 2 it is 96 pixels tall and covers the whole field above the text box,
+-- enemy pic and status boxes included; at 1 it is 48, the size a back pic
+-- can actually be.  It also settles a disagreement between the two
 -- battle views: the alternate 3D view already rounds every battle scale to
 -- the nearest integer before drawing, so it has been showing these back pics
 -- at 1x all along.  Both views now draw the same pic at the same size.

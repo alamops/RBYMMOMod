@@ -104,8 +104,9 @@ end
 
 -- The back pic is the one pic whose *size* the engine has an opinion about:
 -- it draws a trainer back at 2x, which is 64 screen pixels for the 32x32 the
--- ROM carries. These are 48x48, so without this they would draw half again
--- too tall and stand in the text box. An image-level battle_sprite_scales
+-- ROM carries. These are 48x48, so without this they would draw 96 pixels
+-- tall -- feet on the text-box top, growing upward over the whole field,
+-- enemy pic and status boxes included. An image-level battle_sprite_scales
 -- entry is the only lever that reaches a trainer back -- the species-level
 -- one needs a species, and a trainer pic has none.
 --
@@ -116,9 +117,11 @@ end
 -- alternate 3D view already rounds every battle scale to the nearest integer
 -- before drawing, for the same reason; this only extends that precedent to
 -- the view that never had it.) A character row that asks for a fraction is
--- snapped to the nearest whole number, floor 1, and warned about rather than
--- refused: a slightly wrong size is a cosmetic bug, and dropping the
--- character over it would be the larger one.
+-- snapped to the nearest whole number and warned about rather than refused:
+-- a slightly wrong size is a cosmetic bug, and dropping the character over
+-- it would be the larger one. The floor of 1 is deliberate, not a rounding
+-- artifact -- this mod's art is authored at the size it draws at, so a
+-- sub-1 scale here could only be a mistake.
 --
 -- Split out from install so it can be read (and tested) as its own step: a
 -- missing scale is a cosmetic bug, not a missing character, so it is warned
@@ -135,8 +138,9 @@ function M.installScales(content)
   local all = true
   for id, char in pairs(registered) do
     local back = assetPath(char, "back.png")
-    local scale = math.max(1, math.floor((tonumber(char.backScale) or 1) + 0.5))
-    if scale ~= char.backScale then
+    local want = tonumber(char.backScale)
+    local scale = math.max(1, math.floor((want or 1) + 0.5))
+    if char.backScale ~= nil and want ~= scale then
       mod.log:warn("%s asked for a back-pic scale of %s and was given %d; "
         .. "give %s a whole-number backScale in Config.OWN_CHARS -- a "
         .. "fractional scale draws uneven pixels in battle",
