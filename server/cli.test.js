@@ -668,6 +668,7 @@ async function statusPrecedenceScenario() {
 
 const CONTRACT_FIELDS = [
   'name', 'sprite', 'map', 'x', 'y', 'busy', 'party', 'points', 'ranked',
+  'admin',  // 0.9.0: the roster's own flag, carried through to --json
 ].sort();
 
 function writeJson(file, data) {
@@ -842,19 +843,27 @@ async function playersJsonScenario() {
   const dir = scratchDir('players-json');
   const file = path.join(dir, 'config.json');
   writeJson(path.join(dir, 'status.json'), statusFixture({
-    players: [Object.assign(playerRow({ party: true }), {
-      // extras a newer hub, or a hand-edit, might carry -- none of this is
-      // part of the contract and none of it may survive the projection.
-      id: '1', sessionId: '2', partyId: '3', address: '203.0.113.1', tokenHash: 'x',
-    })],
+    players: [
+      Object.assign(playerRow({ party: true, admin: true }), {
+        // extras a newer hub, or a hand-edit, might carry -- none of this is
+        // part of the contract and none of it may survive the projection.
+        id: '1', sessionId: '2', partyId: '3', address: '203.0.113.1', tokenHash: 'x',
+      }),
+      // A hand-edit's idea of true. `admin` is read strictly, so this is a
+      // player like any other and a script cannot be talked into believing
+      // otherwise by a snapshot somebody wrote by hand.
+      playerRow({ name: 'BLUE', admin: 'yes' }),
+    ],
   }));
 
   const result = await runCli(['players', '--json', '--config', file], { cwd: dir });
   ok(result.code === cli.OK, '--json succeeds against a live snapshot');
   const parsed = JSON.parse(result.stdout);
-  ok(Array.isArray(parsed) && parsed.length === 1, 'the players array comes through');
+  ok(Array.isArray(parsed) && parsed.length === 2, 'the players array comes through');
+  ok(parsed[0].admin === true, 'an admin connection is marked as one in --json');
+  ok(parsed[1].admin === false, 'and a truthy spelling of the flag is not privilege');
   ok(JSON.stringify(Object.keys(parsed[0]).sort()) === JSON.stringify(CONTRACT_FIELDS),
-    '--json emits exactly the nine contract fields, in some order');
+    `--json emits exactly the ${CONTRACT_FIELDS.length} contract fields, in some order`);
   ok(!('id' in parsed[0]) && !('sessionId' in parsed[0]) && !('partyId' in parsed[0])
     && !('address' in parsed[0]) && !('tokenHash' in parsed[0]),
     'and every extra field is dropped rather than passed through');

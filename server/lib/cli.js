@@ -712,7 +712,12 @@ const HELP = {
     'secret.',
     '',
     '  --expires   30m, 24h, 7d -- minutes, hours or days. Nothing else.',
-    '  --uses N    how many times it may be used before it stops working.',
+    '  --uses N    how many times it may be used to join the game before it',
+    '              stops working. Signing into the dashboard spends nothing,',
+    '              so on an admin code this is a count of game joins only --',
+    '              but a code with none left is a spent credential, so it opens',
+    '              no new dashboard session either, and a hub whose only admin',
+    '              code is spent refuses to start the dashboard at all.',
     '  --code CODE use this passcode rather than a generated one:',
     `              ${auth.CODE_LEN} characters from ${auth.ALPHABET}.`,
     '              Dashes, spaces and lower case are normalised away. Use it',
@@ -1863,7 +1868,24 @@ function verbInvite(ctx, rest) {
     ctx.warn(`         required -- \`${PROGRAM} start\` refuses to run like this.`);
     ctx.warn(`         \`${PROGRAM} config set auth.required true\` fixes it.`);
   }
-  ctx.say('Restart the hub for this code to be accepted.');
+  /*
+   * Both paths are true and the reload is the cheaper one, so both are said.
+   * reload() re-reads the credential list along with the bans, the allowlist
+   * and the MOTD -- a running world does not have to be emptied to add a
+   * player. "Restart the hub" on its own taught hosts to drop everybody over
+   * an invite.
+   */
+  ctx.say('A running hub picks this code up on a reload; a restart works too:');
+  ctx.say(`    kill -HUP $(pgrep -f '${PROGRAM}.js start')   # bare node`);
+  ctx.say('    docker compose kill -s SIGHUP hub              # docker');
+  if (admin) {
+    // The one thing a reload cannot do: bind a listener. A dashboard that
+    // refused to start for want of an admin code was never bound, and no
+    // signal brings it up.
+    ctx.say('If the dashboard refused to start for want of an admin code, that one');
+    ctx.say('needs a restart rather than a reload: a listener cannot be bound by a');
+    ctx.say('signal. A dashboard already running admits this code on the reload.');
+  }
   return OK;
 }
 
@@ -1902,7 +1924,12 @@ function verbRevoke(ctx, rest) {
   if (!saveConfig(ctx, cfg)) return ERROR;
 
   ctx.say(`Revoked ${credential.id} (${credential.label}). Anyone holding that code`);
-  ctx.say('is refused from the next restart onwards.');
+  ctx.say('is refused from the next reload onwards -- or the next restart:');
+  ctx.say(`    kill -HUP $(pgrep -f '${PROGRAM}.js start')   # bare node`);
+  ctx.say('    docker compose kill -s SIGHUP hub              # docker');
+  ctx.say('Players already connected keep the connection they have (`kick` ends');
+  ctx.say('that). A dashboard signed in with this code is signed out at its next');
+  ctx.say('request once the hub has re-read the list.');
 
   // A warning, not a refusal: locking yourself out is sometimes exactly what
   // you meant to do, and the software should not argue with a deliberate act.
@@ -2412,12 +2439,13 @@ function renderPlayersFrame(ctx, options = {}) {
 
   if (wantsJson) {
     /*
-     * Projected, never republished. What goes out is exactly the nine fields
-     * the contract names (docs/plans/server-side-listing.md §3), read through
-     * the same sanitisers the table uses -- so a field a newer hub added, or
-     * one a hand-edit slipped in, does not become part of what scripts here
-     * are entitled to. `map` keeps the engine's own id rather than the
-     * display spelling: the reader wants the thing the hub was told.
+     * Projected, never republished. What goes out is exactly the ten fields
+     * the contract names (docs/plans/server-side-listing.md §3, plus `admin`
+     * from 0.9.0), read through the same sanitisers the table uses -- so a
+     * field a newer hub added, or one a hand-edit slipped in, does not become
+     * part of what scripts here are entitled to. `map` keeps the engine's own
+     * id rather than the display spelling: the reader wants the thing the hub
+     * was told.
      */
     const projected = players.map((player) => {
       const entry = player && typeof player === 'object' ? player : {};
@@ -2434,6 +2462,12 @@ function renderPlayersFrame(ctx, options = {}) {
         party: Boolean(entry.party),
         points: finite(entry.points) || 0,
         ranked: Boolean(entry.ranked),
+        // Strictly `true`, the same reading auth.isAdminCredential gives the
+        // flag on the credential it came from: a snapshot a hand-edit put a
+        // truthy string into does not make a script here believe somebody is
+        // an operator. The table does not draw this column; a script that
+        // wants to spot the operator's own connection can.
+        admin: entry.admin === true,
       };
     });
     ctx.say(JSON.stringify(projected, null, 2));

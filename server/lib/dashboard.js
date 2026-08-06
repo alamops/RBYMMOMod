@@ -17,9 +17,15 @@
  * `rby-mmo-hub invite --admin`. It is still an ordinary join code on the game
  * port, and it is still read live out of `config.auth.credentials` at every
  * login (filtered by `auth.activeCredentials`, then by the admin flag) so
- * SIGHUP's replacement of that array takes effect on the next attempt and a
- * revoked code stops working here at the same moment it stops working on the
- * game port. There is deliberately no second secret to rotate and forget.
+ * SIGHUP's replacement of that array takes effect on the next attempt.
+ *
+ * A revoked code stops working here at the same moment it stops working on the
+ * game port, and that is meant literally: a session remembers which credential
+ * minted it, and every request re-checks that the credential is still there,
+ * still un-revoked, still unexpired and still admin. So revoking a code does
+ * not merely refuse the next login -- it ends the sessions that code already
+ * opened, on their next request. There is deliberately no second secret to
+ * rotate and forget.
  *
  * **A player's join code no longer opens this page** -- a change from 0.8.0,
  * where any active code did. This page shows every player's name, location and
@@ -304,7 +310,8 @@ function loginPage(message) {
   return page('RBY MMO hub', `<h1>RBY MMO HUB</h1>
 <p class="lede">Sign in with an admin join code &mdash; one minted with
 <code>rby-mmo-hub invite --admin</code>. An ordinary player's code joins the
-game but does not open this page. Revoking a code closes this page to it too.</p>
+game but does not open this page. Revoking a code closes this page to it at
+once, including a browser already signed in with it.</p>
 <form method="post" action="/login">
 <input name="code" aria-label="Join code" autocomplete="off"
  autocapitalize="characters" autocorrect="off" spellcheck="false"
@@ -552,9 +559,10 @@ function start(options = {}) {
    * has exactly this problem, because none of them is accepted here.
    *
    * This is a *start-time* check on purpose, and the only one: the login path
-   * re-reads the credential list every time, so revoking the last admin code
-   * while the hub runs correctly leaves the page up and refusing everybody
-   * rather than tearing a listener down under a host who is mid-look.
+   * and every signed-in request re-read the credential list, so revoking the
+   * last admin code while the hub runs turns the page into a login form
+   * nobody can get through -- correct, and cheaper than tearing a bound
+   * listener down from under a running hub.
    */
   if (adminCredentials(liveCredentials()).length === 0) {
     const refusal = 'the dashboard has no admin join code that still works, ' +
@@ -565,15 +573,63 @@ function start(options = {}) {
     return Promise.reject(new Error(refusal));
   }
 
-  // token -> expiry. In memory only: a restart signs everybody out, which is
-  // the correct behaviour for a session whose only backing was this process.
+  /*
+   * token -> { expiresAt, credentialId }. In memory only: a restart signs
+   * everybody out, which is the correct behaviour for a session whose only
+   * backing was this process.
+   *
+   * The credential id is what makes a session revocable. Without it a session
+   * is a twelve-hour bearer token that outlives the code that bought it, and
+   * "revoking a code closes this page to it" would be true of the login form
+   * and false of the browser already looking at the roster. lib/config.js
+   * gives every loaded credential a non-empty id, so this is never null on a
+   * config the hub read from disk.
+   */
   const sessions = new Map();
   let failedLogins = 0;
 
   function sweepSessions(now) {
-    for (const [token, expiresAt] of sessions) {
-      if (expiresAt <= now) sessions.delete(token);
+    for (const [token, session] of sessions) {
+      if (session.expiresAt <= now) sessions.delete(token);
     }
+  }
+
+  /*
+   * Does the credential that minted a session still admit its holder?
+   *
+   * Re-checked on every request against the *live* list, so SIGHUP's
+   * replacement of `config.auth.credentials` reaches sessions and not just
+   * logins: revoked, expired, deleted outright, or demoted out of admin, and
+   * the session is gone.
+   *
+   * Deliberately **not** the use budget, which is the one part of
+   * `auth.isActive` this does not borrow. Uses are spent by *game joins* --
+   * a dashboard login has never charged one (see handleLogin) -- so an
+   * `invite --admin --uses 1` whose single use is spent the moment the
+   * operator joins the world would otherwise log them out of the page they
+   * were reading, for doing the other thing the same code is for. A spent
+   * admin code stops opening new sessions at the next hub start, because the
+   * start-time check above runs through `activeCredentials`; it does not
+   * reach in and end one already open.
+   */
+  function credentialAdmits(credentialId, now) {
+    if (typeof credentialId !== 'string' || !credentialId) return false;
+    for (const credential of liveCredentials()) {
+      if (!credential || typeof credential !== 'object') continue;
+      if (credential.id !== credentialId) continue;
+      if (!isAdminCredential(credential)) return false;
+      if (credential.revoked) return false;
+      if (typeof credential.secret !== 'string' || !credential.secret) return false;
+      if (credential.expiresAt !== null && credential.expiresAt !== undefined) {
+        // An expiry the hub cannot read counts as expired, exactly as
+        // auth.isActive reads it: an unreadable lifetime is not one to
+        // keep a session alive on.
+        const at = Date.parse(credential.expiresAt);
+        if (!Number.isFinite(at) || at <= now) return false;
+      }
+      return true;
+    }
+    return false; // the credential is not on the list any more
   }
 
   /*
@@ -590,25 +646,32 @@ function start(options = {}) {
     if (!token) return null;
     const now = Date.now();
     sweepSessions(now);
-    const expiresAt = sessions.get(token);
-    if (expiresAt === undefined || expiresAt <= now) return null;
+    const session = sessions.get(token);
+    if (session === undefined || session.expiresAt <= now) return null;
+    // A session whose credential no longer admits is not a session. Deleted
+    // rather than merely refused, so the next request does not pay for the
+    // same scan and the map does not carry dead tokens until their TTL.
+    if (!credentialAdmits(session.credentialId, now)) {
+      sessions.delete(token);
+      return null;
+    }
     return token;
   }
 
-  function mintSession() {
+  function mintSession(credentialId) {
     const now = Date.now();
     sweepSessions(now);
     while (sessions.size >= SESSION_MAX) {
       let oldest = null;
       let oldestAt = Infinity;
-      for (const [token, expiresAt] of sessions) {
-        if (expiresAt < oldestAt) { oldest = token; oldestAt = expiresAt; }
+      for (const [token, session] of sessions) {
+        if (session.expiresAt < oldestAt) { oldest = token; oldestAt = session.expiresAt; }
       }
       if (oldest === null) break;
       sessions.delete(oldest);
     }
     const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, now + SESSION_TTL_MS);
+    sessions.set(token, { expiresAt: now + SESSION_TTL_MS, credentialId });
     return token;
   }
 
@@ -674,8 +737,17 @@ function start(options = {}) {
    * number of comparisons whatever was submitted, no branch that says "that
    * is a real code, just not one of ours". A hub with three player codes and
    * one admin code answers a guess and a player's own code identically.
+   *
+   * Returns the id of the credential that matched, or null -- the id, not a
+   * boolean, because the session minted from it is bound to that credential
+   * and dies with it (see `credentialAdmits`). Keeping the first hit rather
+   * than the last is auth.verify()'s rule, for the same reason.
+   *
+   * A credential with no id therefore cannot mint a revocable session and
+   * reads here as no match -- fail-closed, and unreachable on a config the
+   * hub loaded, since lib/config.js gives every entry an id.
    */
-  function codeAccepted(submitted) {
+  function acceptedCredentialId(submitted) {
     const given = normalizeCode(submitted);
     // Shape before secret, the idiom lib/auth.js uses: a null here is a
     // submission that is not a join code at all, and refusing it up front
@@ -683,10 +755,10 @@ function start(options = {}) {
     // alphabet, printed on every invite and written down in the README. What
     // stays constant-time and exit-free is the part that is actually secret,
     // which is *which* six characters, compared below.
-    if (given === null) return false;
+    if (given === null) return null;
 
     const admitted = adminCredentials(liveCredentials());
-    let hit = false;
+    let hit = null;
 
     for (const credential of admitted) {
       const key = normalizeCode(credential.secret);
@@ -695,7 +767,11 @@ function start(options = {}) {
       const offered = Buffer.from(given, 'ascii');
       const same = expected.length === offered.length &&
         crypto.timingSafeEqual(expected, offered);
-      if (same) hit = true;
+      // No early exit, the same discipline as the loop's shape above: the
+      // first match is kept and the rest of the list is still walked.
+      if (same && hit === null) {
+        hit = typeof credential.id === 'string' && credential.id ? credential.id : null;
+      }
     }
     return hit;
   }
@@ -737,7 +813,8 @@ function start(options = {}) {
       submitted = null; // an unparsable body is a wrong code, not an error
     }
 
-    if (!codeAccepted(submitted)) {
+    const credentialId = acceptedCredentialId(submitted);
+    if (credentialId === null) {
       failedLogins += 1;
       // Never the code, never the body. The address and the running count are
       // the whole of what a host needs to see a grind starting.
@@ -766,10 +843,11 @@ function start(options = {}) {
      * for a look at a web page would consume the invite before it was ever
      * handed out. The hub is the writer of record for `uses` (lib/server.js)
      * and this module has no path to persist a change anyway -- so it does
-     * not pretend to make one.
+     * not pretend to make one. The mirror image of that decision is in
+     * `credentialAdmits`, which does not read the budget either.
      */
     if (log) log.info(`dashboard login from ${safe(ip)}`);
-    redirect(res, '/', { 'Set-Cookie': setCookie(mintSession()) });
+    redirect(res, '/', { 'Set-Cookie': setCookie(mintSession(credentialId)) });
   }
 
   /*

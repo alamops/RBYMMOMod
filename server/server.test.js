@@ -243,6 +243,7 @@ function portIsClosed(port) {
 const DASHBOARD_PORT = 9401 + (process.pid % 200);
 const DASHBOARD_PORT_DISABLED = 9701 + (process.pid % 200);
 const DASHBOARD_PORT_NO_CREDENTIAL = 10001 + (process.pid % 200);
+const DASHBOARD_PORT_SESSION = 10301 + (process.pid % 200);
 
 // A join code for the dashboard scenarios, distinct from PRIMARY_CODE so a
 // failure naming one cannot be misread as belonging to the other.
@@ -1584,7 +1585,7 @@ async function statusUpdatesAfterJoinAndLeaveTest() {
     const entry = readStatus(handle).players[0];
     ok(entry.name === 'JOINER', 'and the joined player is the one it names');
     ok(JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(STATUS_CONTRACT_FIELDS),
-      'carrying exactly the nine contract fields, nothing else');
+      `carrying exactly the ${STATUS_CONTRACT_FIELDS.length} contract fields, nothing else`);
     ok(!fs.existsSync(`${handle.statusPath}.tmp`),
       'that write leaves no temporary file behind either');
 
@@ -2130,6 +2131,91 @@ async function dashboardNoCredentialTest() {
   }
 }
 
+// ------- a dashboard session belongs to the credential that minted it
+//
+// Its own hub, its own config file and its own port, because the whole
+// scenario is a credential being taken away mid-session and a shared hub
+// cannot have one of those pulled out from under its other scenarios. The
+// revoke goes through the file and a real reload(), which is the operator's
+// actual path (`revoke` writes, SIGHUP re-reads) rather than a poke at an
+// in-memory object nobody can reach in production.
+
+async function dashboardSessionFollowsCredentialTest() {
+  const dir = shortTmpDir('rbydashsess-');
+  const configPath = path.join(dir, 'config.json');
+  const SPENT_CODE = 'SPNT77';
+  const cfg = baseConfig({
+    auth: {
+      required: false,
+      credentials: [
+        credential('dashsess', DASHBOARD_CODE, { admin: true }),
+        credential('dashspent', SPENT_CODE, { admin: true, maxUses: 1 }),
+      ],
+    },
+    dashboard: { enabled: true, host: '127.0.0.1', port: DASHBOARD_PORT_SESSION },
+  });
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+
+  const handle = await start({
+    config: cfg, log: NULL_LOG, configPath, handleSignals: false, allowUnauthenticated: true,
+  });
+  const port = DASHBOARD_PORT_SESSION;
+
+  const signIn = (code) => httpRequest(port, {
+    path: '/login', method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  }, `code=${code}`);
+
+  // The file is the only writer the hub reads on reload(); this is `revoke`
+  // and `start`'s use-counting, spelled the way they spell it.
+  const rewrite = (edit) => {
+    const next = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    edit(next.auth.credentials);
+    fs.writeFileSync(configPath, JSON.stringify(next, null, 2), { mode: 0o600 });
+    ok(handle.reload() === true, 'the hub re-reads the edited config file');
+  };
+
+  try {
+    // ---- a live session, then the code behind it is revoked
+    const login = await signIn(DASHBOARD_CODE);
+    ok(login.status === 303, 'an admin code signs in');
+    const cookie = cookiePair(login.headers);
+
+    let page = await httpRequest(port, { path: '/', headers: { Cookie: cookie } });
+    ok(page.status === 200 && !/<form/i.test(page.body),
+      'and that session serves the dashboard rather than the form');
+
+    rewrite((list) => { list.find((c) => c.id === 'dashsess').revoked = true; });
+
+    page = await httpRequest(port, { path: '/', headers: { Cookie: cookie } });
+    ok(/<form[^>]*action="\/login"/i.test(page.body),
+      'revoking the code signs that session out: the same cookie gets the form back');
+    const api = await httpRequest(port, {
+      path: '/api/status', headers: { Cookie: cookie },
+    });
+    ok(api.status === 401,
+      'and the page\'s own fetch loop is told 401 rather than served a roster');
+
+    // ---- the use budget is deliberately not part of that check
+    const spent = await signIn(SPENT_CODE);
+    ok(spent.status === 303, 'a --uses 1 admin code signs in like any other');
+    const spentCookie = cookiePair(spent.headers);
+
+    // The operator now joins the world with the same code, spending its one
+    // use -- which lib/server.js records in the file exactly like this.
+    rewrite((list) => { list.find((c) => c.id === 'dashspent').uses = 1; });
+
+    page = await httpRequest(port, { path: '/', headers: { Cookie: spentCookie } });
+    ok(page.status === 200 && !/<form/i.test(page.body),
+      'spending its last use does not sign the operator out of the page they are reading');
+    const refused = await signIn(SPENT_CODE);
+    ok(refused.status === 403, 'though a spent code opens no new session either');
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ------- the shared hub: history, admin, dashboard and MOTD reload together
 //
 // One hub, walked through all four in sequence, per plan §5/T2's own
@@ -2238,6 +2324,7 @@ async function main() {
   await adminCloseUnlinksSocketTest();
   await dashboardDisabledTest();
   await dashboardNoCredentialTest();
+  await dashboardSessionFollowsCredentialTest();
   await operatorFeaturesTest();
 
   console.log(`\n  ${passed}/${passed} checks passed  (server)\n`);

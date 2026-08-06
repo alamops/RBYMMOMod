@@ -328,9 +328,16 @@ function newCredential(options = {}) {
 
 /**
  * The one reading of the flag every consumer should use, so "is this an admin
- * credential?" cannot drift into six different truthiness tests. Strictly
- * `true`: a stored `admin: "no"` or `admin: 1` is a config nobody canonicalised
- * and this gate does not guess in favour of privilege.
+ * credential?" cannot drift into six different truthiness tests.
+ *
+ * Strictly `true`, and that strictness is a backstop rather than the parser: a
+ * credential the hub loaded has been through `validateCredentials`
+ * (lib/config.js), which is where the generous spellings a human writes --
+ * `"yes"`, `"true"`, `1` -- are canonicalised to `true` before this gate ever
+ * sees them. What reaches here still spelled some other way is a credential
+ * that skipped that step, and a value nobody canonicalised is not one to read
+ * in favour of privilege. So this fails closed on exactly the inputs whose
+ * meaning is a guess.
  */
 function isAdminCredential(credential) {
   return Boolean(credential) && credential.admin === true;
