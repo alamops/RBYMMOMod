@@ -591,12 +591,16 @@ local PHASE = {
   -- handshake, and out again. Then a THIRD round trip, out and back through
   -- SERVERS instead of JOIN GAME's grids (M.reconnectViaServers) -- no
   -- passcode to type there, but still a menu walk, a connection to open (up
-  -- to 60s of patience of its own) and a LEAVE to drive before the guest can
-  -- signal. A ceiling, not an expectation -- the host is released the moment
-  -- the guest signals -- so the headroom costs a healthy run nothing and
-  -- stops a slow machine reporting "incomplete" for a leg that was about to
-  -- pass.
-  guest_left_game        = 600,
+  -- to 60s of patience of its own) and a LEAVE to drive. And then a FOURTH
+  -- pass through SERVERS on top of that, this one destructive: reopen the
+  -- entry, DELETE it, wait for CONFIRM's choice box, photograph it, answer
+  -- YES, then reopen the MMO menu a last time to prove the SERVERS row is
+  -- gone with it -- menu walks and a handful of frame-budgeted waits only,
+  -- no connection to open, but signalled after all of it. A ceiling, not an
+  -- expectation -- the host is released the moment the guest signals -- so
+  -- the headroom costs a healthy run nothing and stops a slow machine
+  -- reporting "incomplete" for a leg that was about to pass.
+  guest_left_game        = 690,
 
   -- ------- the dedicated-hub scenario (tests/drivers/run-hub-e2e.sh)
   --

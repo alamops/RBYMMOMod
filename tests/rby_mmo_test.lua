@@ -11333,6 +11333,59 @@ do
      "the same row, over mod.save alone")
 end
 
+-- ------- remove: the entry leaves the list, and a dropped key stays dropped
+-- until the player asks for that hub again on purpose
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("gone.example:6666")
+  local key = entry.key
+
+  local removed = store:remove(key)
+  eq(removed, entry, "remove hands back the entry it deleted")
+  check(store:get(key) == nil, "and the row is gone from the store")
+  eq(#store:list(), 0, "so the list it was the only row of is empty")
+
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+  eq(store:remove("no-such-key:1234"), nil,
+     "removing a key nothing is stored under refuses rather than crashing")
+  check(#warns > 0, "and the refusal is logged")
+  stubMod.log.warn = function() end
+
+  -- The dropped mark is what stops the file half from resurrecting a row
+  -- this session deleted on purpose: _persist folds in rows it has never
+  -- seen, and without the mark a copy of this key still sitting on disk
+  -- would walk straight back in on the very write meant to remove it. love
+  -- is absent for this whole section (see the header above), so the
+  -- fold-in this guards against is driven directly rather than through a
+  -- real file -- the same way the eviction-protection block above stands
+  -- in for _read.
+  store:_ingest({ { address = entry.address, last = 1 } }, true)
+  check(store:get(key) == nil,
+        "a fold-in of a file row filed under the deleted key does not "
+        .. "resurrect it")
+
+  -- record() is not a fold-in, though -- it is the player asking to connect
+  -- to that hub again, on purpose, and that has to win. A deleted-then-
+  -- rejoined hub reappearing is the intended shape of the guard, not a
+  -- second bug in the same corner: record() clears the drop mark itself
+  -- (src/Servers.lua, right after it fills in address/last/code) before
+  -- this write ever reaches _persist.
+  local rejoined = store:record(entry.address)
+  check(rejoined ~= nil, "recording the same address again succeeds")
+  eq(rejoined.key, key, "under the same key as before")
+  check(store:get(key) ~= nil,
+        "and it is really back in the store, not just handed back once")
+  eq(#store:list(), 1,
+     "deleted-then-rejoined reappears on the list rather than staying "
+     .. "invisible forever")
+end
+
 _G.love = ambientLove
 
 end)()
@@ -11562,6 +11615,26 @@ check((miniWarns[1] or ""):find(ADDRESS_C, 1, true) ~= nil,
 
 Client.servers().record = realRecord
 
+-- ------- forgetHub clears the stored join code, never the rank claim
+-- ticket, for the same hub
+--
+-- The code is the hub's secret, filed under "code:<hub>" (Client.lua's
+-- codeKey) and is what a "Forget this server" row should drop. The claim
+-- ticket is the player's own earned identity on that hub, filed separately
+-- under "rank:<hub>" (tokenKey) -- deleting a bookmark must not cost a
+-- rating, so it is deliberately left standing.
+
+local FORGET_ADDR = "forget.example.test:9191"
+miniSave["code:" .. FORGET_ADDR] = "A7K3P9"
+miniSave["rank:" .. FORGET_ADDR] = "a-claim-ticket"
+
+local forgot = Client.forgetHub(FORGET_ADDR)
+check(forgot == true, "forgetHub reports success")
+eq(miniSave["code:" .. FORGET_ADDR], nil,
+   "the stored join code for that hub is cleared")
+eq(miniSave["rank:" .. FORGET_ADDR], "a-claim-ticket",
+   "but the rank claim ticket for the same hub is left exactly as it was")
+
 _G.love = ambientLove
 
 end)()
@@ -11732,11 +11805,16 @@ do
   local order = {}
   for i, item in ipairs(menu.items) do order[i] = item.label end
   local expectedOrder = { "CONNECT", "FAVORITE", "EDIT HOST", "EDIT CODE",
-                           "RENAME" }
-  eq(#order, #expectedOrder, "the five rows the plan names")
+                           "RENAME", "DELETE" }
+  eq(#order, #expectedOrder, "the six rows the plan names, DELETE last")
   for i, label in ipairs(expectedOrder) do
     eq(order[i], label, "row " .. i .. " is " .. label)
   end
+  -- Menu grows the box downwards to fit its rows (th = rows * 2 + 2), so ty
+  -- is what keeps the last row on an 18-tile screen -- pinned here so a
+  -- seventh row added later trips this instead of only failing on-screen.
+  eq(menu.opts and menu.opts.ty, 18 - (#expectedOrder * 2 + 2),
+     "ty is recalculated for six rows, not left at the five-row value")
 
   ctx.servers:setFavorite(actKey, true)
   local refreshed = actDef.new({}, { key = actKey })
@@ -11785,6 +11863,222 @@ do
   eq(last.opts and last.opts.key, actKey, "for the same entry")
   eq(last.opts and last.opts.row, 2,
      "with the cursor back on the row that was just pressed, not on CONNECT")
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE, behind a yes/no CONFIRM
+
+do
+  ctx.servers = storeWith({ "delete.example:7777" })
+  local delKey = ctx.servers:list()[1].key
+  local delEntry = ctx.servers:get(delKey)
+
+  pushes = {}
+  local menu = actDef.new({}, { key = delKey })
+  menu.items[6].onSelect()
+
+  local confirmPush = pushes[#pushes]
+  check(confirmPush ~= nil and confirmPush.id == Ui.SCREEN.CONFIRM,
+        "DELETE asks first, through the same yes/no box every other "
+        .. "destructive row uses")
+  check(confirmPush.opts and confirmPush.opts.text
+        and confirmPush.opts.text:find(delEntry.name, 1, true) ~= nil,
+        "and the question names the entry, so a mis-press is caught before "
+        .. "it costs anything")
+  check(type(confirmPush.opts and confirmPush.opts.onChoose) == "function",
+        "the box is answered through onChoose, not by pressing through it")
+  eq(confirmPush.opts and confirmPush.opts.defaultNo, true,
+     "and it opens on NO -- the one confirm in this mod that does, so "
+     .. "neither a stray A nor a stray B deletes anything")
+
+  -- "no": back to this menu, cursor still on DELETE -- the same landing
+  -- spot the favourite row's reopen uses, and for the same reason: a
+  -- mis-press answered "no" should not leave a second delete one press away.
+  pushes = {}
+  confirmPush.opts.onChoose(false)
+  local declined = pushes[#pushes]
+  check(declined ~= nil and declined.id == Ui.SCREEN.SERVERACT,
+        "declining reopens SERVERACT, not the list")
+  eq(declined.opts and declined.opts.key, delKey, "for the same entry")
+  eq(declined.opts and declined.opts.row, 6, "cursor still on DELETE")
+  check(ctx.servers:get(delKey) ~= nil, "and nothing was actually deleted")
+
+  -- "yes": the row is really gone, and the list is where it lands.
+  pushes = {}
+  confirmPush.opts.onChoose(true)
+  local accepted = pushes[#pushes]
+  check(accepted ~= nil and accepted.id == Ui.SCREEN.SERVERS,
+        "accepting lands on the list, not back on the entry that no longer "
+        .. "exists")
+  check(ctx.servers:get(delKey) == nil, "the entry is gone from the store")
+  eq(#ctx.servers:list(), 0, "and so is the row it was the only one of")
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE's yes-path also asks the client to
+-- forget the hub's stored join code (see Client.forgetHub)
+
+do
+  ctx.servers = storeWith({ "clears.example:7777" })
+  local clearKey = ctx.servers:list()[1].key
+  local clearEntry = ctx.servers:get(clearKey)
+
+  local forgotten = {}
+  local realClient = ctx.client
+  ctx.client = {
+    isHosting = function() return false end,
+    isConnected = function() return false end,
+    forgetHub = function(_, address) forgotten[#forgotten + 1] = address end,
+  }
+
+  pushes = {}
+  local menu = actDef.new({}, { key = clearKey })
+  menu.items[6].onSelect()
+  local confirmPush = pushes[#pushes]
+  pushes = {}
+  confirmPush.opts.onChoose(true)
+
+  eq(#forgotten, 1,
+     "a successful delete calls client:forgetHub exactly once")
+  eq(forgotten[1], clearEntry.address,
+     "with the address the row was for, not the store key")
+  local landed = pushes[#pushes]
+  check(landed ~= nil and landed.id == Ui.SCREEN.SERVERS,
+        "and still lands on the list")
+
+  ctx.client = realClient
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE survives a client with no forgetHub
+--
+-- The older-build shape: deletion has already succeeded by the time
+-- forgetHub would be reached, so the row is gone either way -- this only
+-- warns instead of clearing the code, and must not throw.
+
+do
+  ctx.servers = storeWith({ "noforget.example:7777" })
+  local noForgetKey = ctx.servers:list()[1].key
+
+  local realClient = ctx.client
+  ctx.client = { isHosting = function() return false end,
+                 isConnected = function() return false end }
+  -- no .forgetHub field at all
+
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+
+  pushes = {}
+  local menu = actDef.new({}, { key = noForgetKey })
+  menu.items[6].onSelect()
+  local confirmPush = pushes[#pushes]
+  pushes = {}
+  local ok = pcall(confirmPush.opts.onChoose, true)
+
+  check(ok, "a client with no forgetHub does not throw the delete")
+  check(#warns > 0, "and it is logged instead")
+  local landed = pushes[#pushes]
+  check(landed ~= nil and landed.id == Ui.SCREEN.SERVERS,
+        "deletion already succeeded, so the list is still where it lands")
+  check(ctx.servers:get(noForgetKey) == nil, "and the entry really is gone")
+
+  ctx.client = realClient
+  stubMod.log.warn = function() end
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE against a store with no remove method
+--
+-- Not the same failure as remove refusing a key -- the row is still on the
+-- list and still works, so "That server is gone." would be a lie. This
+-- reopens SERVERACT instead of the gone TextBox.
+
+do
+  local fakeEntry = { key = "immutable:1", name = "immutable:1",
+                       address = "immutable.example:7777", fav = false }
+  local fakeStore = {
+    get = function(_, key)
+      if key ~= fakeEntry.key then return nil end
+      return fakeEntry
+    end,
+    -- deliberately no .remove
+  }
+  local realServers = ctx.servers
+  ctx.servers = fakeStore
+
+  pushes = {}
+  local menu = actDef.new({}, { key = fakeEntry.key })
+  menu.items[6].onSelect()
+  local confirmPush = pushes[#pushes]
+  pushes = {}
+  confirmPush.opts.onChoose(true)
+
+  local reopened = pushes[#pushes]
+  check(reopened ~= nil and reopened.id == Ui.SCREEN.SERVERACT,
+        "a store with no remove reopens SERVERACT, not the gone TextBox")
+  eq(reopened.opts and reopened.opts.key, fakeEntry.key, "for the same entry")
+  eq(reopened.opts and reopened.opts.row, 6, "cursor still on DELETE")
+
+  ctx.servers = realServers
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE answered on an entry that vanished first
+
+do
+  ctx.servers = storeWith({ "vanish.example:8888" })
+  local vanishKey = ctx.servers:list()[1].key
+
+  pushes = {}
+  local menu = actDef.new({}, { key = vanishKey })
+  menu.items[6].onSelect()
+  local confirmPush = pushes[#pushes]
+  check(confirmPush ~= nil, "DELETE still asks first")
+
+  -- The entry is removed out from under the question -- evicted, or
+  -- re-keyed by EDIT HOST elsewhere -- between the ask and the answer.
+  ctx.servers:remove(vanishKey)
+
+  pushes = {}
+  confirmPush.opts.onChoose(true)
+  local textPush = pushes[#pushes]
+  check(textPush ~= nil and textPush.id == Ui.SCREEN.TEXT,
+        "a yes on a row that is already gone is a TextBox, not a crash")
+  check(textPush.opts and textPush.opts.text
+        and textPush.opts.text:find("gone", 1, true) ~= nil,
+        "and it says so, the same sentence a stale key gets on open")
+  check(type(textPush.opts and textPush.opts.onDone) == "function",
+        "pressed through, rather than left standing")
+
+  pushes = {}
+  textPush.opts.onDone()
+  local afterDone = pushes[#pushes]
+  check(afterDone ~= nil and afterDone.id == Ui.SCREEN.SERVERS,
+        "and pressing through it lands on the list, same as the direct "
+        .. "yes path")
+  pushes = {}
+end
+
+-- ------- M:confirm with no opts at all leaves defaultNo nil
+--
+-- DELETE is the one confirm in this mod that opens on NO (pinned above),
+-- reached through a fourth opts argument. Every other caller -- and this
+-- mod has no other self:confirm site today -- hands in three arguments and
+-- must keep the vanilla YES-first box, so `opts and opts.defaultNo` has to
+-- stay nil rather than being coerced to false.
+
+do
+  pushes = {}
+  ui:confirm({}, "Some question?", function() end)
+  local plain = pushes[#pushes]
+  check(plain ~= nil and plain.id == Ui.SCREEN.CONFIRM,
+        "confirm with no opts still pushes CONFIRM")
+  eq(plain.opts and plain.opts.defaultNo, nil,
+     "and defaultNo is nil, not false -- CONFIRM's own registration is what "
+     .. "normalises it to a boolean")
   pushes = {}
 end
 

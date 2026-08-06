@@ -251,6 +251,33 @@ function M.setJoinCode(a, b, c)
   return code
 end
 
+-- Forgets what this copy is holding *for* a hub, when its row is deleted.
+--
+-- Today that is exactly the join code. The code is the hub's secret rather
+-- than the player's: they were read it out, it is filed under the address it
+-- was typed for, and a player who deletes the row has said they are done with
+-- that hub -- so keeping it would be keeping somebody else's passcode for a
+-- server no longer on the list. Cleared with a nil set, the same way
+-- setHostJoinCode drops its code.
+--
+-- The rank claim ticket is deliberately NOT cleared. It is the opposite kind
+-- of thing: the ticket is the player's own earned identity on that hub, and
+-- dropping it would silently destroy their rating the next time they came
+-- back -- the hub would answer the name's rightful owner as an impostor.
+-- Deleting a bookmark must not cost a rating. It also lives in the durable
+-- token file, which outlives every save slot, so clearing the mod.save half
+-- would only half-forget it anyway.
+--
+-- arg1 for the reason the setters above give: reached as
+-- client:forgetHub(address) from the menus, and as M.forgetHub(address) from
+-- the suite.
+function M.forgetHub(a, b)
+  local key = codeKey(arg1(a, b))
+  if not key then return nil end
+  mod.save:set(key, nil)
+  return true
+end
+
 -- Where a hub's claim ticket is kept.
 --
 -- One key per hub, like the join code and for the same reason: the ticket

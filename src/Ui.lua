@@ -582,10 +582,21 @@ function M:say(text, onDone)
   return mod.ui.push(game, SCREEN.TEXT, { text = text, onDone = onDone })
 end
 
-function M:confirm(game, text, onChoose)
+-- opts.defaultNo opens the box with the cursor on NO.
+--
+-- The engine's ChoiceBox starts on YES unless it is told otherwise, which is
+-- right for a question whose yes is what the player just asked for -- a trade,
+-- a team-up -- and wrong for one whose yes cannot be undone. Passed through
+-- rather than decided here, and absent by default, so every existing caller
+-- keeps the box it already had.
+function M:confirm(game, text, onChoose, opts)
   game = game or self.ctx.game
   if not game then return end
-  mod.ui.push(game, SCREEN.CONFIRM, { text = text, onChoose = onChoose })
+  mod.ui.push(game, SCREEN.CONFIRM, {
+    text = text,
+    onChoose = onChoose,
+    defaultNo = opts and opts.defaultNo,
+  })
 end
 
 -- A question with named answers, where **B is an answer and not an escape**.
@@ -678,6 +689,10 @@ function M:install()
       choice = function(yes)
         if opts.onChoose then opts.onChoose(yes and true or false) end
       end,
+      -- Normalised to a boolean rather than forwarded as it came: the
+      -- engine reads this field for truthiness, and a caller who handed in
+      -- a string would be opting into a default they never asked for.
+      defaultNo = opts.defaultNo == true,
     })
   end })
 
@@ -1472,7 +1487,10 @@ function M:install()
       { label = "EDIT CODE", field = "code" },
       { label = "RENAME", field = "name" },
       -- Last, and last on purpose: it is the one row that cannot be undone
-      -- by pressing it again, so it sits furthest from the cursor's start.
+      -- by pressing it again, so it comes after the corrections rather than
+      -- among them. Distance is not the guard, though -- Menu wraps, so row
+      -- 6 is a single UP from where the cursor starts, which is why the
+      -- confirm below has to open on NO.
       { label = "DELETE", remove = true },
     }
 
@@ -1544,9 +1562,11 @@ function M:install()
           -- Asked before it happens, and the question names the row: this
           -- list is the only copy of an address somebody typed once, and a
           -- delete that landed on the press would be a delete found out
-          -- about afterwards. CONFIRM's B is a no, so the answer a
-          -- mis-press gives is the answer that costs nothing -- which is
-          -- the whole reason the box is this one and not a plain TextBox.
+          -- about afterwards. Both mis-presses are free here: defaultNo
+          -- opens the box with the cursor already on NO, and CONFIRM's B is
+          -- a no as well -- so neither a stray A nor a stray B deletes
+          -- anything. That is the whole reason the box is this one and not
+          -- a plain TextBox.
           self:confirm(game, ("Forget the server\n%s?"):format(entry.name),
             function(yes)
               -- Back to this menu with the cursor still on DELETE, the way
@@ -1554,7 +1574,20 @@ function M:install()
               -- row, and dropping the cursor onto CONNECT would put a dial
               -- one press away from someone who just said no to something.
               if not yes then return reopen(row) end
-              if not (store.remove and store:remove(key)) then
+              -- A store with no remove at all is not the same failure as a
+              -- store that refused this key, and it must not be told as
+              -- one: the row is still on the list and still works, so
+              -- "That server is gone." would be a sentence the player can
+              -- see is untrue. That is the older-build store the two
+              -- helpers at the top of this section exist for -- say so in
+              -- the log and hand the menu back unchanged.
+              if not store.remove then
+                mod.log:warn("could not delete the server %s -- this build's "
+                  .. "server list cannot remove entries; back out to SERVERS, "
+                  .. "reopen it and try again", tostring(entry.name))
+                return reopen(row)
+              end
+              if not store:remove(key) then
                 -- The entry went between the question and the answer --
                 -- evicted by a hub recorded underneath, or re-keyed. Same
                 -- sentence the menu opens with on a stale key, and the same
@@ -1568,13 +1601,32 @@ function M:install()
                   onDone = function() mod.ui.push(game, SCREEN.SERVERS) end,
                 })
               end
+              -- The row said "Forget", so the hub's passcode goes with it:
+              -- the code is filed against the address rather than on the
+              -- entry, and leaving it behind would keep a secret for a hub
+              -- the player just said they were done with. The claim ticket
+              -- stays -- see Client.forgetHub for why. A build whose client
+              -- has no forgetHub only warns: the row is already deleted and
+              -- has to land on the list either way.
+              local client = ctx.client
+              if type(client) == "table" and client.forgetHub then
+                client:forgetHub(entry.address)
+              else
+                mod.log:warn("deleted the server %s but could not clear its "
+                  .. "stored join code -- this build's client has no "
+                  .. "forgetHub; clear it from the JOIN CODE option row if it "
+                  .. "should not be kept", tostring(entry.name))
+              end
               -- The list, not this menu: the entry this menu is about no
               -- longer exists, so reopening it would draw the "gone" box
               -- about a row the player just chose to be rid of. An empty
               -- list is ListMenu's own "Nothing here.", and the MMO menu
               -- drops the SERVERS row the next time it opens.
               mod.ui.push(game, SCREEN.SERVERS)
-            end)
+            end,
+            -- The one confirm in this mod that opens on NO: see the note
+            -- above the row.
+            { defaultNo = true })
         end
       end
     end

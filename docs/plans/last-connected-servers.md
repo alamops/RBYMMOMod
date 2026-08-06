@@ -191,9 +191,16 @@ confirmation. Base for this increment: 8052c96.
   existing `SCREEN.CONFIRM` (`M:confirm`, src/Ui.lua:585 — B is a no) asking about
   the entry by name; yes → `store:remove` then back to SCREEN.SERVERS; no →
   re-push SERVERACT with the cursor on DELETE (row-carry precedent).
-- Decisions: confirm defaults safe (B/no); favorites deletable (the confirm is the
-  guard); Client's per-hub `code:` save copy untouched; post-delete lands on the
-  list (empty list → widget empty state; MAIN row gone next open).
+- Decisions (corrected after review): the confirm box must OPEN ON NO — the engine
+  ChoiceBox defaults its cursor to YES unless `defaultNo` is passed, so `M:confirm`
+  gains an opts pass-through and the DELETE caller sets `defaultNo = true` (B is
+  also a no; both mis-presses are now free). Favorites deletable (the confirm is
+  the guard). DELETE clears the hub's stored join code via a small
+  `Client.forgetHub(address)` (`code:` key — the button says "Forget" and the
+  passcode is the hub's secret) but KEEPS the rank claim ticket: that is the
+  player's own earned identity, clearing it would silently destroy their rating on
+  a future rejoin, and it also lives in the durable token file. Post-delete lands
+  on the list (empty list → widget empty state; MAIN row gone next open).
 - Tests: re-pin SERVERACT rows (6, DELETE last, ty recalc); `remove` CRUD incl.
   dropped-set resurrection guard and unknown-key refusal; confirm wiring both
   branches. E2e: extend the recents leg after the third LEAVE — SERVERS → entry →

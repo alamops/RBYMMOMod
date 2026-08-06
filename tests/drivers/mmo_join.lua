@@ -922,6 +922,77 @@ return function(game)
               end
               check(not exports.isConnected(), "and left a third time cleanly")
               H.closeToOverworld(game)
+
+              -- ------- 10. DELETE, behind a yes/no confirm
+              --
+              -- The same row the SERVERS leg above just dialled through,
+              -- but this pass is destructive on purpose: reopen it, pick
+              -- the entry, DELETE it, answer CONFIRM's box YES, and check
+              -- both halves of what that promises -- the store side
+              -- (mod.exports.servers() empty) and the menu side (the MMO
+              -- menu drops the SERVERS row once the list behind it is
+              -- empty, the same rule that keeps the row off the menu
+              -- before any hub has ever been recorded).
+              local deleteLabel = H.serverLabel(exports, dialled)
+              if H.openMmo(game) and H.selectLabel(game, "SERVERS")
+                 and H.selectLabel(game, deleteLabel) then
+                U.wait(20)
+                if H.selectLabel(game, "DELETE") then
+                  -- The text prints first and the choice box comes up
+                  -- under it -- CONFIRM's own rhythm (src/Ui.lua's
+                  -- SCREEN.CONFIRM). Wait for the box itself, not just
+                  -- "a screen changed", so the photograph below is the
+                  -- box and not the sentence still printing above it.
+                  local confirmUp = H.waitFor(game, function()
+                    return H.classify(H.top(game)) == "choice"
+                  end, 90, "the DELETE confirm box")
+                  check(confirmUp, "DELETE opens the yes/no confirm")
+                  if confirmUp then
+                    U.shot(game, SHOT_DIR .. "/servers-confirm.png")
+                    -- YES is index 1 -- the same rule drivePrompts walks
+                    -- the cursor to for every other choice box in this
+                    -- suite (see M.drivePrompts above); walked by hand
+                    -- here rather than through drivePrompts so the box
+                    -- can be photographed before it is answered.
+                    local box = H.top(game)
+                    local guard = 0
+                    while (H.top(game) == box) and (box.index or 1) > 1
+                          and guard < 4 do
+                      U.tap(game, "up")
+                      U.wait(3)
+                      guard = guard + 1
+                    end
+                    U.tap(game, "a")
+                    U.wait(20)
+                  end
+
+                  local afterDelete = (type(exports.servers) == "function"
+                                        and exports.servers()) or nil
+                  check(type(afterDelete) == "table" and #afterDelete == 0,
+                        "DELETE, confirmed, empties the SERVERS list "
+                          .. ("(got %d row(s))")
+                            :format(type(afterDelete) == "table"
+                                    and #afterDelete or -1))
+
+                  H.closeToOverworld(game)
+                  if H.openMmo(game) then
+                    local stillThere = false
+                    for _, l in ipairs(H.menuLabels(game)) do
+                      if H.labelMatches(l, "SERVERS") then stillThere = true end
+                    end
+                    check(not stillThere,
+                          "and the MMO menu no longer offers a SERVERS row, "
+                            .. "the list behind it now empty")
+                  end
+                  H.closeToOverworld(game)
+                else
+                  check(false, "DELETE is on the entry's own submenu")
+                end
+              else
+                check(false, "SERVERS still opens, with the entry still on "
+                               .. "it, after the third reconnect, for the "
+                               .. "DELETE leg")
+              end
             end
           end
         else

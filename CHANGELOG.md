@@ -29,7 +29,10 @@ here must match `manifest.version`.
   the way `END GAME` and `LEAVE` already do elsewhere on this menu.
   `EDIT HOST` and `EDIT CODE` reopen the address and the passcode on the
   naming grid without touching the entry's name. `RENAME` is the only row
-  that does.
+  that does. `DELETE` is last on purpose — the one row here that can't be
+  undone by pressing it again — and asks first: a yes/no confirm names the
+  entry before anything happens, defaults to "no", and a "yes" drops the
+  row for good and returns you to the list.
 - **A new connection writes its own entry, and only once it's real.** The
   recording happens at `WELCOME` — not on every dial — so a wrong passcode or
   a refused connection never litters the list with a hub you never actually
