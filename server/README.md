@@ -154,7 +154,7 @@ container, where it is on `PATH`.
 | `init` | first-run wizard: writes `config.json` at mode 0600 and prints a passcode once. Refuses to overwrite an existing file. | `--yes` (ask nothing, take flags and defaults), `--force` (replace an existing config), `--code CODE` (use this passcode instead of a generated one), plus any config flag below |
 | `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
 | `status` | every effective setting, its value, and where that value came from (`flag` / `env` / `file` / `default`). Codes masked. | — |
-| `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (one object per player, the nine contract fields only) |
+| `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (one object per player, the ten contract fields only — the nine the table is drawn from plus `admin`, which it does not draw) |
 | `ranking` | the ranked season out of `ranking.json`: place, name, points, and how many battles each player has won and lost. Top ten, best first. | `--json`, `--all` (every player who has scored, not just the top ten) |
 | `watch` | the `players` frame, repainted until Ctrl-C. Clears the screen between frames only when stdout is a terminal. | `--interval <s>` (seconds between frames, default 2, clamped 1–60), `--once` (one frame, then exit), `--json` |
 | `history` | settled ranked battles out of `history.jsonl` and the rotated `history.jsonl.1`, newest first: when, who beat whom, and what it moved. | `-n N` (how many, default 20), `--json` (the same cut as one JSON array, projected records, newest first) |
@@ -545,10 +545,10 @@ open:
 
 ```console
 $ rby-mmo-hub invite --admin --label Me
-New admin join code (id f0f2711f, Me)
+New admin join code (id 32d04096, Me)
 
       +------------+
-      |   74XE2H   |
+      |   JMYD60   |
       +------------+
 
   That is an admin code. It joins the world exactly like any other
@@ -571,7 +571,12 @@ New admin join code (id f0f2711f, Me)
   This is the only time it is printed in full. To see it again:
       rby-mmo-hub invite list --reveal
 
-Restart the hub for this code to be accepted.
+A running hub picks this code up on a reload; a restart works too:
+    kill -HUP $(pgrep -f 'rby-mmo-hub.js start')   # bare node
+    docker compose kill -s SIGHUP hub              # docker
+If the dashboard refused to start for want of an admin code, that one
+needs a restart rather than a reload: a listener cannot be bound by a
+signal. A dashboard already running admits this code on the reload.
 ```
 
 The paragraph about expiry is printed **only when there is no `--expires`**,
@@ -589,14 +594,23 @@ precious, and `revoke <id>` takes one back exactly as it does a player's.
   refuses and mints nothing: a host who typed `--admin=true`, got a player's
   code and read past the word *admin* has been misled in a way that is very
   easy to miss. This flag never guesses in favour of privilege.
+- **`--uses` counts game joins, not dashboard logins.** Signing into the
+  dashboard has never spent a use — `--uses 1` means one player gets on the
+  hub, and charging that budget for a look at a web page would consume the
+  invite before it was handed out — so on an admin code the number is a count
+  of joins to the world only. It still bounds the page indirectly: a code with
+  no joins left is a spent credential, so it opens no new dashboard session,
+  and a hub whose only admin code is spent fails the dashboard's start-time
+  check on the next restart. A session already open is not ended by the last
+  use being spent; revoking is what ends one (below).
 - **The `KIND` column marks it either way**, with or without `--reveal`. What a
   code unlocks is not a secret; the code itself is:
 
 ```console
 $ rby-mmo-hub invite list
 ID        LABEL              CREATED           EXPIRES  USES  STATUS  KIND    CODE
-primary   Primary join code  2026-08-06 17:31  never    0     active  player  ******
-f0f2711f  Me                 2026-08-06 17:31  never    0     active  ADMIN   ******
+primary   Primary join code  2026-08-06 17:56  never    0     active  player  ******
+32d04096  Me                 2026-08-06 17:56  never    0     active  ADMIN   ******
 
 KIND ADMIN: joins the game like any code, and is the only kind the
 web dashboard admits. `rby-mmo-hub revoke <id>` takes one back.
@@ -679,8 +693,8 @@ Two things refuse rather than surprise you:
   through is a hole with a form on it, not a feature. A hub full of *player*
   codes has exactly this problem, because none of them is accepted here. The
   check runs once at start: revoking the last admin code *while* the hub runs
-  leaves the page up and refusing everybody, rather than tearing a listener out
-  from under a host who is mid-look.
+  leaves the listener up and refusing everybody — the sessions it had opened
+  end too (below) — rather than tearing a bound socket out of a running hub.
 
 ### Logging in is an admin join code, and nothing new
 
@@ -692,7 +706,8 @@ The page says as much above the box:
 
 > Sign in with an admin join code — one minted with `rby-mmo-hub invite
 > --admin`. An ordinary player's code joins the game but does not open this
-> page. Revoking a code closes this page to it too.
+> page. Revoking a code closes this page to it at once, including a browser
+> already signed in with it.
 
 That is one set of credentials with one set of rules:
 
@@ -705,11 +720,20 @@ That is one set of credentials with one set of rules:
   the admin subset with **no early exit**, so the refusal cannot be timed to
   tell a real-but-unprivileged code apart from a guess.
 - **Revoking or rotating an admin code revokes or rotates dashboard access with
-  it, at the same moment** it stops working on the game port — that is the
-  *next* login attempt, once the hub has re-read the list on `SIGHUP`; a browser
-  already holding a session keeps it until the token expires or the hub
-  restarts. `invite --admin` mints one that works for both. There is
-  deliberately no second secret to rotate and forget about.
+  it, at the same moment** it stops working on the game port — that is once the
+  hub has re-read the list on `SIGHUP` (or restarted), and it reaches sessions
+  and not just logins. A session remembers which credential minted it, and
+  every request re-checks that that credential is still on the list,
+  un-revoked, unexpired and still admin; a browser already signed in with a
+  revoked code is signed out on its next request rather than keeping a
+  twelve-hour bearer token the code no longer backs. `invite --admin` mints one
+  that works for both. There is deliberately no second secret to rotate and
+  forget about.
+- **The use budget is the one thing that check does not read.** A game join
+  spends a use and a dashboard login does not (see [Admin
+  codes](#admin-codes)), so an `invite --admin --uses 1` whose single use goes
+  on the operator's own game connection must not sign them out of the page they
+  are reading. A spent code opens no *new* session; it does not end an open one.
 - **A wrong code typed here is charged to the same throttle** a wrong code
   answered on the wire is: the per-address grace and escalating backoff, and
   the hub-wide ceiling. The throttle is consulted *before* anything is
@@ -853,7 +877,7 @@ cannot otherwise ask it — who is connected, and where:
   "players": [
     { "name": "RED", "sprite": "SPRITE_RED", "map": "PALLET_TOWN",
       "x": 5, "y": 6, "busy": false, "party": false,
-      "points": 12, "ranked": true }
+      "points": 12, "ranked": true, "admin": false }
   ]
 }
 ```
@@ -1087,7 +1111,7 @@ else in the file is a bind-time parameter and needs a restart:
 
 | Change | Reload is enough | Needs a restart |
 | --- | --- | --- |
-| `invite` / `revoke` | ✓ the next handshake — and the dashboard's next login attempt — is judged against the new list, `admin` flags and all | |
+| `invite` / `revoke` | ✓ the next handshake — and the dashboard's next login attempt, and its next request on a session already open — is judged against the new list, `admin` flags and all | ✓ only for a dashboard that never started for want of an admin code: a listener is bound, not reloaded |
 | `ban` / `unban` / `allow` | ✓ the next connection is admitted or refused by the new list | |
 | `motd` | ✓ the next player to connect is greeted with the new one | |
 | `listen.port`, `listen.host` | | ✓ cannot change under a live listener |
@@ -1758,7 +1782,7 @@ on a relay connection.
 | Type | Payload |
 | --- | --- |
 | `mmo.challenge` | `nonce` — 32 lowercase hex chars, per-connection, single-use. Sent by every hub that requires a passcode, which is every hub but the `node hub.js` shim |
-| `mmo.welcome` | `id, players[], points, ranked` — plus `rankToken` on the one visit that claimed the name, and only that visit; `motd` when this hub has one configured (absent when it does not); and `admin: true` when the join code this connection answered with is an [admin code](#admin-codes), absent otherwise. Both optional fields ride hub→client on a message that already existed, which is why neither moved the protocol number. `admin` is derived from the credential server-side and told to that client about itself only — it is deliberately not in the presence record other players receive |
+| `mmo.welcome` | `id, players[], points, ranked` — plus `rankToken` on the one visit that claimed the name, and only that visit; `motd` when this hub has one configured (absent when it does not); and `admin: true` when the join code this connection answered with is an [admin code](#admin-codes), absent otherwise. All three optional fields ride hub→client on a message that already existed, which is why none of them moved the protocol number. `admin` is derived from the credential server-side and told to that client about itself only — it is deliberately not in the presence record other players receive |
 | `mmo.join` / `mmo.part` | `player` / `id` |
 | `mmo.move` | a presence record |
 | `mmo.chat` | `from, name, scope, text` — **or, when the hub itself is speaking, `name: "HUB"`, `scope: "global"` and no `from` at all**: an operator's `broadcast`. A line with no sender is a line no player sent |

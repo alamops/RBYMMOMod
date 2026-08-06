@@ -333,8 +333,15 @@ function authPort(config, onUse, throttle) {
        * reaches this function at all (authPort returns null), and a peer that
        * failed the challenge returned above, so every verdict a relay sees
        * from here answers the question one way or the other.
+       *
+       * Read through auth.isAdminCredential and not by truthiness, so this
+       * agrees with the dashboard's door and with every other reader of the
+       * flag: one gate, one reading, and a stored `admin: "no"` cannot become
+       * privilege here by being a non-empty string. `used` may be undefined
+       * (a verdict naming a credential the list no longer holds), which the
+       * helper answers false for.
        */
-      verdict.admin = Boolean(used && used.admin);
+      verdict.admin = auth.isAdminCredential(used);
       return verdict;
     },
   };
@@ -1159,9 +1166,11 @@ function start(options = {}) {
     /*
      * Said for the same reason, about the other listener. Which *codes* open
      * the dashboard is live -- lib/dashboard.js re-reads the credential list
-     * at every login, so revoking one locks it immediately -- but whether
-     * there is a dashboard at all, and where, is a bind, and a bind is not a
-     * thing a running process can be talked into changing.
+     * at every login and on every signed-in request, so the array replaced
+     * just above both locks out the next login and ends the sessions a
+     * revoked code had already opened -- but whether there is a dashboard at
+     * all, and where, is a bind, and a bind is not a thing a running process
+     * can be talked into changing.
      */
     const runningDashboard = config.dashboard || {};
     const editedDashboard = next.dashboard || {};

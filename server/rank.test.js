@@ -954,10 +954,10 @@ const ROSTER_CONTRACT_FIELDS = [
 ].sort();
 
 /*
- * Only greeted players appear, and each one is exactly the nine fields the
- * plan names -- no client id, no session or party id, no address. Any of
- * those on a snapshot that outlives the process is the last place an id
- * worth guessing should turn up.
+ * Only greeted players appear, and each one is exactly the fields the plan
+ * names, plus 0.9.0's `admin` -- no client id, no session or party id, no
+ * address. Any of those on a snapshot that outlives the process is the last
+ * place an id worth guessing should turn up.
  */
 function testRosterFieldsAndReadyOnly() {
   const clock = makeClock();
@@ -977,7 +977,8 @@ function testRosterFieldsAndReadyOnly() {
   for (const entry of roster) {
     const keys = Object.keys(entry).sort();
     ok(JSON.stringify(keys) === JSON.stringify(ROSTER_CONTRACT_FIELDS),
-      `the roster entry for ${entry.name} carries exactly the nine contract fields`);
+      `the roster entry for ${entry.name} carries exactly the ` +
+      `${ROSTER_CONTRACT_FIELDS.length} contract fields`);
   }
   ok(!roster.some((entry) => 'id' in entry), 'no roster entry carries a client id');
   ok(!roster.some((entry) => 'sessionId' in entry), 'nor a session id');
