@@ -26,6 +26,14 @@ tests/drivers/run-mmo-e2e.sh
 # nothing -- see the note at the top of this file.
 tests/drivers/mmo_guest.lua
 tests/drivers/run-hub-e2e.sh
+# The co-op scenario: four instances driven through a 2-on-2 battle. Same two
+# reasons as every driver above -- they reach tests/drivers/util.lua and mean
+# nothing outside a checkout. Both arrived with co-op battles and missed this
+# list, so `pack` put them in the v0.7.1 archive; it is the same trap
+# my-profile.png and rank.png document further down, and nothing mechanical
+# catches it, which is why each driver is named here one per line.
+tests/drivers/mmo_quad.lua
+tests/drivers/run-quad-e2e.sh
 
 # Working notes for whoever picks this up next; not mod content. The two
 # machine-readable ones describe how coding agents are driven in this
@@ -79,6 +87,17 @@ docs/plans/in-game-hosting.md
 docs/plans/self-hosting-server-app.md
 docs/plans/fix-taken-nick-on-ranking.md
 docs/plans/running-system.md
+docs/plans/submit-to-mod-index.md
+# Six more plans had accumulated without entries here -- the same gap this
+# list already documents for my-profile.png and rank.png, just in prose form.
+# The release workflow drops docs/ wholesale so no GitHub release ever shipped
+# them, but a locally built `modkit pack` archive did. Listed by name now.
+docs/plans/coop-battle-hp-sequencing.md
+docs/plans/coop-battle-status-and-timeout.md
+docs/plans/coop-battle-ux-findings.md
+docs/plans/coop-run-consent-and-blackout.md
+docs/plans/nire-back-sprite-pixel-ratio.md
+docs/plans/non-blocking-avatars.md
 # The upstream RFC behind co-op battles. It is a proposal against the *engine*,
 # not mod content -- a player unpacking this archive has no use for a document
 # arguing about BattleState's battler slots. Listed by name for the same reason
@@ -134,6 +153,23 @@ docs/screenshots/join-connected.png
 docs/screenshots/party-map.png
 docs/screenshots/party-townmap.png
 docs/screenshots/party-members.png
+# The rest of the party's shots, from the same driver and under the same rule.
+# party-ask.png and party-battle.png are text boxes and a menu over the
+# overworld, party-spectating.png is a battle frame watched from the outside,
+# and two-parties.png is four characters standing on a composited map -- every
+# one of them ROM tiles, ROM font, or both.
+docs/screenshots/party-ask.png
+docs/screenshots/party-battle.png
+docs/screenshots/party-spectating.png
+docs/screenshots/two-parties.png
+#
+# The co-op battle's three, captured by tests/drivers/run-quad-e2e.sh. All
+# three are the battle screen itself -- the box, the font, the four monsters --
+# which is decoded from the player's ROM top to bottom, so they are the
+# clearest case this block has and they are listed like the rest.
+docs/screenshots/coop-battle.png
+docs/screenshots/coop-item.png
+docs/screenshots/coop-switch.png
 #
 # my-profile.png arrived on main without a line here, and `pack` duly put it
 # in the archive -- 45 files instead of 44, with a composited frame inside.
