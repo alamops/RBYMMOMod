@@ -1425,6 +1425,37 @@ handlers[Wire.PARTY_LEAVE] = function(self, client)
   self:endParty(client, "peer_left")
 end
 
+-- What the person you are travelling with just did in a fight.  Party-only,
+-- same fan-out as a party chat line: the sender already knows, so they are
+-- not told again.  `name` is stamped from the connection -- a client that
+-- supplied its own would be writing lines on its partner's screen under
+-- somebody else's nick.  Kept in step with server/lib/relay.js.
+handlers[Wire.PARTY_EVENT] = function(self, client, msg)
+  if not client.ready or not client.partyId then return end
+  local event = Wire.partyEvent({
+    kind = msg.kind,
+    species = msg.species,
+    level = msg.level,
+    trainer = msg.trainer,
+    -- Wire.partyEvent requires name; stamp the real one before sanitising so
+    -- a forged outbound name cannot pass validation and then get overwritten.
+    name = client.name,
+    from = client.id,
+  })
+  if not event then return end
+  local payload = {
+    kind = event.kind,
+    species = event.species,
+    level = event.level,
+    trainer = event.trainer,
+    from = client.id,
+    name = client.name,
+  }
+  for _, member in ipairs(self:partyMembers(client.partyId)) do
+    if member.id ~= client.id then send(member, Wire.PARTY_EVENT, payload) end
+  end
+end
+
 -- ------- co-op
 
 -- "I am standing at this fight, waiting."  Forwarded to exactly one player --

@@ -214,6 +214,68 @@ function cleanSide(value) {
   return SIDES[value] ? value : null;
 }
 
+/*
+ * The five things worth telling a travelling partner about, and what each one
+ * needs in order to say it: 'mon' is a species and a level, 'trainer' is the
+ * name the game shows on the opponent. Mirrors Wire.PARTY_EVENTS, because the
+ * same client talks to this hub and to a game hosting from inside itself, and
+ * a kind only one of them accepts is a note that arrives on one hosting path
+ * and vanishes on the other.
+ *
+ * A Map rather than an object literal, and that is not a style choice: with a
+ * literal, `kind: 'constructor'` finds Object's own property, reads as a
+ * required-field group, and would be forwarded as a kind no Lua client can
+ * draw -- Lua tables carry no prototype, so the two ends would disagree about
+ * whether the message exists at all.
+ */
+const PARTY_EVENTS = new Map([
+  ['defeat_wild', 'mon'],
+  ['defeated_by_wild', 'mon'],
+  ['capture', 'mon'],
+  ['defeat_trainer', 'trainer'],
+  ['defeated_by_trainer', 'trainer'],
+]);
+
+// Gen 1's cap. A bound on a number that is about to be printed on somebody
+// else's screen rather than a rule about the game.
+const LEVEL_MAX = 100;
+
+/*
+ * One thing that happened to a party member, rebuilt or refused whole.
+ *
+ * Carries only the fields the kind names, so a wild event can never travel
+ * with a trainer on it: the client picks its sentence off `kind`, and a stray
+ * field is one more thing that could disagree with the line being drawn. The
+ * required fields are part of the kind rather than a check beside it, because
+ * a half-filled event is the failure that reaches a player -- 'ANN defeated'
+ * with nothing after it is a sentence that stops mid-way.
+ *
+ * `name` is deliberately not read here. The hub stamps it from the connection
+ * the message arrived on, because it is the only identifying field in the
+ * event and the whole thing is drawn as a sentence about a named player.
+ */
+function cleanPartyEvent(value) {
+  if (value === null || typeof value !== 'object') return null;
+  const needs = PARTY_EVENTS.get(value.kind);
+  if (!needs) return null;
+
+  if (needs === 'mon') {
+    // Species is prose on its way into a line, and it gets NAME_MAX rather
+    // than the label limit: a species and a trainer nick have the same room
+    // on screen. Mirrors Wire.partyEvent field for field.
+    const species = cleanText(value.species, NAME_MAX);
+    const level = cleanInt(value.level, 1, LEVEL_MAX);
+    if (!species || level === null) return null;
+    return { kind: value.kind, species, level };
+  }
+
+  // ...and a trainer gets COOP_LABEL_MAX, because what arrives is the class
+  // the game shows and NAME_MAX cuts 'BUG CATCHER' to 'BUG CATCHE'.
+  const trainer = cleanLabel(value.trainer);
+  if (!trainer) return null;
+  return { kind: value.kind, trainer };
+}
+
 function cleanCoopReason(value) {
   return COOP_REASONS[value] ? value : null;
 }
@@ -226,6 +288,7 @@ module.exports = {
   cleanLabel,
   cleanSide,
   cleanCoopReason,
+  cleanPartyEvent,
   cleanSpriteId,
   cleanMapId,
   cleanInt,
@@ -254,4 +317,6 @@ module.exports = {
   COOP_LABEL_MAX,
   SIDES,
   COOP_REASONS,
+  PARTY_EVENTS,
+  LEVEL_MAX,
 };
