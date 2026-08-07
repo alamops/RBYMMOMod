@@ -39,10 +39,10 @@ ENV_FILE="$MOD_DIR/.env"
 . "$MOD_DIR/tools/env.sh"
 load_env "$ENV_FILE"
 DRIVERS="$MOD_DIR/tests/drivers"
-ADDR_FILE="${MMO_ADDR_FILE:-/tmp/rby_mmo_addr.txt}"
 # Namespaced by run, so two of these can run at once -- two agents, two
-# worktrees -- without overwriting each other's screenshots.
+# worktrees -- without overwriting each other's screenshots or readiness file.
 RUN_ID="${MMO_RUN_ID:-$$}"
+ADDR_FILE="${MMO_ADDR_FILE:-/tmp/rby_mmo_addr-$RUN_ID.txt}"
 # The port the in-game host binds. Derived from the pid unless pinned, so two
 # runs on one machine host two separate games instead of the second silently
 # joining the first -- which is what a fixed 7788 did, and it looked like a
