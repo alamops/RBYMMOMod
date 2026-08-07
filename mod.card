@@ -26,8 +26,8 @@ return {
         .. "every scope including their own, anybody joining or leaving the "
         .. "hub, and -- to the party alone -- what the person they are "
         .. "travelling with just defeated, was defeated by, or captured. A "
-        .. "dark plate and white text in Press Start 2P (bundled, SIL OFL, "
-        .. "original art -- the ROM font has no lowercase and no "
+        .. "dark plate and white text in Rajdhani (bundled, SIL OFL, "
+        .. "small and antialiased -- the ROM font has no lowercase and no "
         .. "punctuation), drawn from render.hud over the finished frame so a "
         .. "line arriving under a menu is still readable, five seconds each "
         .. "and five at most with the oldest dropped first. The party events "
@@ -292,8 +292,8 @@ return {
       for_ = "original character art: NIRE and NIRE HOOD" },
     { who = "bryanthaboi", for_ = "Gen1Recomp, and the link stack this "
       .. "mod's trade and battle run on unmodified" },
-    { who = "CodeMan38 (https://github.com/codeman38)",
-      for_ = "Press Start 2P, the face the notifications are set in, "
+    { who = "Indian Type Foundry (https://github.com/itfoundry/rajdhani)",
+      for_ = "Rajdhani, the face the notifications are set in, "
         .. "under the SIL Open Font License 1.1" },
   },
 

@@ -19,23 +19,19 @@ here must match `manifest.version`.
   `render.hud` over the finished frame, menus and text boxes included, so a
   line arriving while you are three levels into the START menu is still read
   where you already are.
-- **Drawn in window space, in a font that has the letters chat needs.** The
-  plates are laid out against the letterbox rather than the game's 160x144,
-  which is the one way this differs from the nameplates — a nameplate belongs
-  to a character standing on a tile and has to live in that character's
-  coordinates; a toast belongs to nobody on the map. Window space is also
-  what buys **Press Start 2P** (bundled, SIL OFL 1.1, original — no ROM bytes)
-  a real pixel per glyph pixel: it carries the lowercase and the punctuation
-  the ROM font does not, and it is legible only when its 8x8 cells land on
-  whole pixels, so the size is a whole multiple of the letterbox scale and
-  never a fraction of one. A font that fails to load costs the toasts their
-  look and never the message — LÖVE's own face is used, and the warning names
-  the folder to reinstall. **A line too long for one row is wrapped between
-  words onto the next**, up to three rows for one notification, so a sentence
-  is read whole rather than cut at the nineteen characters an eight-pixel
-  glyph leaves inside a 160-wide playfield; the plate is budgeted against the
-  window to the right of it rather than against the letterbox, capped at half
-  again the playfield so nothing runs across a maximised desktop.
+- **Drawn in window space, in a small smooth face that has the letters chat
+  needs.** The plates are laid out against the letterbox rather than the
+  game's 160x144 — a nameplate belongs to a character on a tile; a toast
+  belongs to nobody on the map. Window space is also what lets **Rajdhani**
+  (bundled, SIL OFL 1.1, original — no ROM bytes) stay antialiased at ~12px
+  instead of scaling with the letterbox the way a pixel face had to. It
+  carries the lowercase and punctuation the ROM font does not. A font that
+  fails to load costs the toasts their look and never the message — LÖVE's
+  own face is used, and the warning names the folder to reinstall. **A line
+  too long for one row is wrapped between words onto the next**, up to three
+  rows for one notification; the plate is budgeted against the window to the
+  right of it rather than against the letterbox, capped at half again the
+  playfield so nothing runs across a maximised desktop.
 - **Chat toasts, every scope, your own lines included.** `EVERYONE`,
   `NEARBY`, `PARTY` and — the one a bubble could never carry — `WHISPER`,
   because a toast is drawn in the receiving player's own corner rather than

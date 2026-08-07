@@ -349,16 +349,19 @@ M.MOTD_MAX = 120
 M.TOAST_SECONDS = 5
 M.TOAST_MAX = 5
 
--- Press Start 2P, SIL Open Font License 1.1 (assets/fonts/OFL.txt).
+-- Rajdhani Regular, SIL Open Font License 1.1 (assets/fonts/OFL.txt).
 --
 -- Its own face rather than the game's, and that is the point: the ROM font
 -- is extracted from the player's cartridge and carries no lowercase and
 -- almost no punctuation, so a chat line drawn with it loses characters
 -- silently.  A toast has to be able to show a sentence somebody typed.
 --
--- The path is relative to the mod root, which is what mod.assets:path
--- expects -- the same shape as OWN_CHARS' `dir` above.
-M.TOAST_FONT = "assets/fonts/PressStart2P-Regular.ttf"
+-- Size is in window pixels and deliberately small -- toasts are read in
+-- passing, not as a second HUD.  The path is relative to the mod root,
+-- which is what mod.assets:path expects -- the same shape as OWN_CHARS'
+-- `dir` above.
+M.TOAST_FONT = "assets/fonts/Rajdhani-Regular.ttf"
+M.TOAST_SIZE = 12
 
 -- Presence liveness.  The hub drops a client that stops pinging; the client
 -- gives up on a hub that stops answering.
