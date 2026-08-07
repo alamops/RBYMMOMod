@@ -292,6 +292,9 @@ return {
       for_ = "original character art: NIRE and NIRE HOOD" },
     { who = "bryanthaboi", for_ = "Gen1Recomp, and the link stack this "
       .. "mod's trade and battle run on unmodified" },
+    { who = "CodeMan38 (https://github.com/codeman38)",
+      for_ = "Press Start 2P, the face the notifications are set in, "
+        .. "under the SIL Open Font License 1.1" },
   },
 
   compat = { engine = ">=0.0.0-0 <2.0.0", modApi = 2 },

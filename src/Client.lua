@@ -1019,6 +1019,12 @@ end
 -- build that hands over one without the other.
 function M.narrateCatch(payload)
   if type(payload) ~= "table" then return false end
+  -- Ruled out by name, exactly as narrateBattle rules it out: a link battle
+  -- belongs to Sessions, and nothing is caught in one anyway -- a build that
+  -- fired pokemon.caught during one would put a sentence about a capture that
+  -- did not happen on a partner's screen.
+  local battle = payload.battle
+  if type(battle) == "table" and battle.kind == "link" then return false end
   local species, level = enemyMon(payload.battle)
   local mon = type(payload.mon) == "table" and payload.mon or nil
   if not species and type(payload.species) == "string" then

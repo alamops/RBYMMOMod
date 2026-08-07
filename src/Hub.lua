@@ -498,6 +498,8 @@ function M:accept(peer, trusted)
     partyId = nil,
     partyPendingTo = nil,   -- the invite this client is waiting on an answer to
     lastChat = -math.huge,
+    -- gated on the chat window too: it is prose on a partner's screen
+    lastPartyEvent = -math.huge,
     lastSprite = -math.huge,   -- last mid-session character change
     hello = nil,      -- what it said, held until it is admitted
     nonce = nil,      -- the challenge it still owes an answer to
@@ -1443,13 +1445,28 @@ handlers[Wire.PARTY_EVENT] = function(self, client, msg)
     from = client.id,
   })
   if not event then return end
+
+  -- The chat gate, on the chat window, for the same reason chat has one:
+  -- this is prose appearing unasked-for in the corner of somebody else's
+  -- screen, and a modified client sending it in a loop is the whole attack.
+  -- Honest traffic is at most one per battle, so half a second costs a
+  -- legitimate partner nothing.  server/lib/relay.js gates it at the same
+  -- moment, on the same interval.
+  if self.clock - (client.lastPartyEvent or -math.huge) < Config.CHAT_GATE then
+    return
+  end
+  client.lastPartyEvent = self.clock
+
   local payload = {
     kind = event.kind,
     species = event.species,
     level = event.level,
     trainer = event.trainer,
     from = client.id,
-    name = client.name,
+    -- The sanitised value, not the raw field it was stamped from: the two
+    -- agree today, and reading the one Wire vouched for is what keeps them
+    -- agreeing if the sanitiser ever normalises a name on the way through.
+    name = event.name,
   }
   for _, member in ipairs(self:partyMembers(client.partyId)) do
     if member.id ~= client.id then send(member, Wire.PARTY_EVENT, payload) end
