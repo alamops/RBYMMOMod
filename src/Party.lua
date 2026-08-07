@@ -104,7 +104,7 @@ end
 -- A line in the chat log, so the party's own history says when it started
 -- and when it ended rather than only what was said in between.  Marked
 -- outgoing: it is this client narrating itself, and it must not add to the
--- unread count that puts the asterisk on the CHAT row.
+-- unread count.
 function M:note(text)
   if not (self.chat and text) then return nil end
   return self.chat:push({

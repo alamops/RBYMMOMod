@@ -107,7 +107,12 @@ untouched. The naming grid is uppercase-only, which costs nothing: DNS is
 case-insensitive. **Leave the port off and the mod fills in 7788**
 (`Config.DEFAULT_PORT`) — worth knowing, because the engine's own fallback is
 7778, the pokeserver relay's, and a bare hostname dialled there would report
-the relay as unreachable.
+the relay as unreachable. "Left the port off" is judged on the slot after the
+last colon rather than on the colon itself, so `MYBOX.EXAMPLE.COM:` and
+`MYBOX.EXAMPLE.COM:HUB` fill in 7788 the same way the bare name does. A port
+that *was* typed is always the one dialled. Spaces are removed wherever they
+appear — no address may contain one — which also keeps the dialled string
+identical to the key the passcode is filed under.
 
 There is no separate menu row for the passcode — `JOIN GAME` is the whole
 path, and typing a different one there is how a saved passcode is changed.
@@ -1443,7 +1448,7 @@ are the same five commands. Run them as `root`:
 curl -fsSL https://get.docker.com | sh
 
 # 2. The code
-git clone --depth 1 --branch v0.2.2 https://github.com/alamops/RBYMMOMod.git
+git clone --depth 1 --branch v0.8.0 https://github.com/alamops/RBYMMOMod.git
 cd RBYMMOMod/server
 
 # 3. Build and run

@@ -38,8 +38,14 @@ until you say otherwise — installing it is never what opens a socket.
 
 Character creation comes first: pick a **NAME** (your save file keeps its
 own) and a **LOOK** from the 36 walking characters in the game — plus
-**special characters from talented artists**, marked `▷` in the list.
-Confirm, pick a room size, and you're live.
+**special characters from talented artists**, marked `▷` in the list. Each
+row shows that character's face beside their name, so you're picking a person
+rather than reading a label. Confirm, pick a room size, and you're live.
+
+You don't have to be here to choose, either: **`CHARACTER` on the MMO menu**
+opens the same list whenever you like — before you connect to anything, and
+in the middle of a game, where everyone else sees you change as you do it.
+See [Be somebody else](#-be-somebody-else).
 
 The HOST screen mints a **six-character passcode** on the way in and shows it
 in the `JOIN CODE` row — `A7K3P9`, letters and digits, no dashes. There's
@@ -62,7 +68,10 @@ anything is dialled. (**SELECT** flips the keyboard to digits — the vanilla
 one has none.)
 
 An IP or a hostname both work — `192.168.1.125:7788` or
-`MYBOX.EXAMPLE.COM:7788` — and leaving the port off fills in **7788**. Case
+`MYBOX.EXAMPLE.COM:7788` — and leaving the port off fills in **7788**. So does
+typing the colon and stopping there, or typing something behind it that is not
+a port a socket could dial. A port you did type is always the one dialled, and
+spaces are removed wherever they are, so nothing is lost to one. Case
 doesn't matter for a hostname; DNS doesn't care either. Dashes, spaces and
 lower case in a passcode are normalised away, so one copied out of a chat
 message works as typed.
@@ -197,6 +206,133 @@ end-to-end suite.
   <img src="docs/screenshots/link-battle.png" width="300" alt="GUESTY wants to battle!">
 </p>
 
+### 🤜 CO-OP — WAIT FOR YOUR FRIEND
+Walk into a trainer while you're in a party and the game asks you first:
+**wait for your friend, or go in alone.** Waiting tells them exactly where
+you're standing. When they reach the same fight — or just walk up to you —
+they're offered the chance to join.
+
+Four rules make it feel solid rather than fiddly:
+
+- **No costs nothing.** Turn down a join and *nothing* is remembered. Your
+  friend keeps waiting and isn't even told, and walking back into that fight
+  asks you again. There's no record of the refusal for anything to consult.
+- **You can't dodge the fight.** The engine has already committed to the
+  encounter by the time the mod gets asked, so every way out of every prompt
+  ends in a battle. **B is BATTLE ALONE**, not "never mind" — and B while
+  waiting reopens that same choice rather than releasing you.
+- **The door shuts.** Nobody joins a battle that's already started, and an
+  offer is taken exactly once.
+- **PARTY BATTLE** sits right under BATTLE on the walk-up menu: two parties,
+  four trainers, and **all four have to say yes**. It tells you plainly if
+  they aren't in a party, or if your own partner has wandered off this map.
+
+**And it's a real four-monster field.** Not two 1v1s side by side — one turn
+order over all four, a target picked per attack, and your move redirecting if
+your partner drops your target before you swing. A side only loses when *both*
+its trainers are out of mons.
+
+The engine has no double battles, so the mod brings its own field
+(`src/CoopSim.lua`). What sits underneath it is still the engine's: damage,
+crits, type effectiveness, STAB, badge boosts, burn, screens, the random
+factor, status and turn speed all come from `src/battle/*`, so a POKéMON hits
+for exactly the same number here as it does in the grass.
+
+**Every move effect the game has works**, because none of them are
+reimplemented. `src/CoopField.lua` is a `BattleState`-shaped object over the
+four slots whose lookup chain ends at the engine's own `BattleState` — so the
+move that runs *is* `BattleState.performMove`, driving the real `move_effects`
+registry. Charge moves charge, SUBSTITUTE absorbs, HYPER BEAM recharges,
+METRONOME calls, multi-hit hits, recoil recoils, BIDE stores.
+
+<p align="center">
+  <img src="docs/screenshots/coop-battle.png" width="300" alt="Four monsters on one field: WEEDLE and CATERPIE reading out top-left, CHARIZARD and PIKACHU bottom-right, FIGHT / ITEM / SWITCH / RUN below">
+  <img src="docs/screenshots/coop-item.png" width="300" alt="The same field from the other player's screen, their own PIKACHU marked with the cursor">
+</p>
+
+All four commands are there — **FIGHT, ITEM, SWITCH, RUN** — with items going
+through the engine's own item effects. Against a trainer, RUN and a thrown
+ball are *refused*, in the game's own words, because Gen 1 lets you do
+neither in a trainer battle. Against another party, **RUN asks your partner
+first**: they get a yes/no box in the battle itself (it opens on NO, so a
+button held through the messages can't answer it), a no costs you nothing but
+the asking, and a yes ends the battle for all four — as the runners' loss and
+the opponents' win, so fleeing at match point buys nothing.
+
+**Exp is priced on each player's own machine.** The host resolves the knockout
+but holds nobody's party except its own, so what crosses the wire is a
+*description* of the kill — what fell, at what level, and how many shared it —
+and every client runs the engine's own `Experience` over its own live monster.
+That is what makes a shared knockout genuinely worth half each rather than full
+each, divides the stat exp the same way Gen 1 does, and lets an **EXP.ALL** in
+your bag do exactly what it does anywhere else: halve what the fighter takes
+and spread the other half over everyone still standing, level-ups, new moves
+and evolutions included.
+
+And it's dressed like a trainer battle, because it is one: the **trainer's
+picture** holds the field through the opening lines and steps aside before the
+first menu, their **battle theme** plays — the gym leader's, if they're a gym
+leader — the **victory theme** answers it, and their **parting line** is said
+before the world comes back.
+
+The prompt appears in front of **every** trainer — walked into or scripted —
+and the engine's own battle runs the whole post-battle flow afterwards: the
+defeated flag, badges and prizes, the whiteout if you're wiped, and whatever
+script was waiting. Animations play, through the engine's own player, moved
+onto whichever of the four monsters acted.
+
+<p align="center">
+  <img src="docs/screenshots/party-battle.png" width="300" alt="Four humans on one field: BLASTOISE and VENUSAUR against CHARIZARD and PIKACHU">
+  <img src="docs/screenshots/party-ask.png" width="300" alt="ALPHA wants a 2-on-2 battle! -- the four-way ask, as it reaches one of the other three">
+</p>
+
+**A faint is four different things depending on who you are.** Lose one with
+POKeMON left and the battle *stops* and asks you which follows -- nobody else
+takes a turn until you answer. Lose your last one and nothing stops: your
+partner fights on, your side is still alive, and you watch the rest of it
+rather than being handed a menu that answers nothing. A side only falls when
+**both** its trainers have.
+
+<p align="center">
+  <img src="docs/screenshots/party-spectating.png" width="300" alt="GAMMA's screen after their last POKeMON fell: their slot gone from the readout, their partner VENUSAUR still fighting">
+</p>
+
+**And losing sends you home, the way the game always did.** Every player
+whose party lost — or who walked out of any co-op battle with nothing left
+able to fight, even on the winning side — gets the whole vanilla ritual:
+party healed, money halved, and the warp to *their own* last POKéMON CENTER.
+Nobody is left standing in the tall grass at 0 HP, which also means a party
+with nothing able to fight is never wandering around to be challenged — and
+if one ever were, the battle refuses to start rather than starting broken.
+
+**And nobody can hold four people hostage.** Every turn has one 60-second
+clock, the same honest number on every screen, the host's own turn included.
+When it runs out the late player's first usable move is played for them —
+everyone is told who took too long — and the battle flows on.
+
+> One client simulates and the other three replay its events, so the host is
+> trusted the same way the engine's own link host already is.
+>
+> The wait-or-alone prompt appears in front of *script-driven* trainers.
+> Walking into one in the overworld starts a battle through a path that only
+> emits an event, and an event can't cancel —
+> [`docs/rfcs/0001-double-battles.md`](docs/rfcs/0001-double-battles.md)
+> proposes the upstream seam that would close it.
+
+**Beating a trainer together is not worth points, and the game tells you so.**
+Elo rates you against an opponent's rating and a trainer hasn't got one — and
+trainers are an infinite supply the anti-farming discount can't touch, so two
+friends could grind gym leaders to the top of the board without ever meeting
+anybody. A co-op trainer battle pays what a trainer battle pays — exp, badges,
+prize money — and no points, and says as much the first time you win one.
+
+**A party battle is scored as a team battle.** Each of the four is rated
+against the *other pair's* combined strength — which is the match they actually
+played, since both of you attack both of them and you lose together. Not two
+1v1s paired off by slot: who the hub happened to list first is not a fact about
+who fought whom, and rating it that way meant the same battle between the same
+four people paid differently depending on the seating.
+
 ### 🏆 RANKED — AND YOU CAN'T FARM IT
 Every link battle is scored, on the hub, for both players. Win and you gain
 points; lose and you lose them, never past **0**. How many depends on who you
@@ -288,14 +424,81 @@ in full and does not soften it.
 
 ### 🚪 DROP OUT, KEEP PLAYING
 `LEAVE` disconnects and hands you straight back to single-player. Save,
-world, party — untouched. No "returning to title screen".
+world, party — untouched, and so is the character you're wearing: you walk
+out of the game looking exactly like you did in it. No "returning to title
+screen".
+
+### 🗂️ SERVERS REMEMBERS WHERE YOU'VE BEEN
+The first time you connect anywhere, `SERVERS` shows up at the top of the
+disconnected menu, above `HOST GAME` — every hub you've reached before, so
+getting back onto one is a menu instead of a retyped address and passcode. It's gone
+again the moment you're hosting or connected, same as `ADDRESS` and
+`PLAYERS`.
+
+**Favorites sit on top, marked `▶`; everyone else sorts by address,
+descending.** Pin one and it stays above the rest no matter how long ago you
+played there — recency only decides which *non*-favorite gets dropped when
+the list is full.
+
+Pick an entry and a submenu opens: **`CONNECT`** dials it exactly the way
+`JOIN GAME` does, **`FAVORITE`/`UNFAVORITE`** flips the pin, **`EDIT HOST`**
+and **`EDIT CODE`** reopen the address or passcode on the naming grid, and
+**`RENAME`** is the only one that touches the label — entries are named after
+the address you dialled with the standard port left off (`192.168.1.20:7788`
+lists as `192.168.1.20`; a hub on any other port keeps it, because there the
+port is part of dialling it), and a rename can run up to 16 characters. The
+whole address is still on the entry either way — that's what `CONNECT` dials.
+Last on the submenu, **`DELETE`** forgets the entry for good — it asks first,
+naming the entry in a yes/no confirm that defaults to "no", so a mis-press
+costs nothing.
+
+A hub is only added once you actually reach it — a wrong passcode never
+earns an entry — and the list survives quitting, `CONTINUE`, and switching
+save slots, because it's kept in its own file rather than the save. It holds
+16 entries; past that, the one you haven't reconnected to in the longest
+time is dropped first, and a favorite is never the one that goes.
+
+<p align="center">
+  <img src="docs/screenshots/servers-list.png" width="300" alt="The SERVERS list: a favorited hub, marked with an arrow in the right-hand column">
+  <img src="docs/screenshots/servers-submenu.png" width="300" alt="The per-server submenu: CONNECT, UNFAVORITE, EDIT HOST, EDIT CODE, RENAME, DELETE">
+  <img src="docs/screenshots/servers-confirm.png" width="300" alt="The DELETE confirmation asking to forget the server, with the cursor starting on NO">
+</p>
 
 ### 🎭 BE SOMEBODY ELSE
 Before you host or join, character creation asks who you are: a name of your
 own (your save file keeps its own), and **any walking character in the
 game** — 36 of them. Be Lance. Be Giovanni. Be a Rocket grunt, a Biker, a
-Swimmer, Oak. You see it too, not just everyone else — and it's put back the
-moment you leave.
+Swimmer, Oak. You see it too, not just everyone else.
+
+**Or just pick one, whenever you like.** `CHARACTER` sits on the MMO menu
+under `HOST GAME` and `JOIN GAME` when you're on your own, and under `RANK`
+when you're in a game — same row, same list, both doors. Choose, and you're
+wearing it before the menu has closed. The choice goes in your save file, so
+it's still on you next time you load that game.
+
+**And if you're in a game, so does everyone else.** Change character
+mid-session and the whole hub is told: your walking character switches on
+their screens as you walk, not the next time you leave the map,
+and a trainer card of yours somebody has open turns over while they're
+looking at it. Anyone who joins a moment later gets the new one too. (One
+exception: a `RANK` screen that's already open keeps the portrait it was
+drawn with until it next refreshes — the same lag the points on it have.)
+
+Every row shows the character's face to the left of their name — the same
+portrait your trainer card draws — because `MIDDLE AGED WOMAN` and
+`COOLTRAINER` don't actually tell you what you're about to look like:
+
+<p align="center">
+  <img src="docs/screenshots/character-picker.png" width="300" alt="The character list, each row showing a portrait beside the name, scrolled to NIRE">
+  <img src="docs/screenshots/mmo-menu.png" width="300" alt="The MMO menu">
+</p>
+
+**And you keep it.** Leaving a game, losing the connection, quitting to the
+title and pressing CONTINUE — none of them undress you any more. You wear the
+character you picked until you pick a different one, and picking `RED` is how
+you put yourself back. (A save that has never chosen one is left completely
+alone: never opened this list, never moved `MY SPRITE` off its default, and
+the game draws exactly what it always drew.)
 
 **And some of them are special characters from talented artists**, drawn for
 this mod rather than lifted out of your ROM — `NIRE` and `NIRE HOOD` so far,
@@ -311,8 +514,9 @@ which, and work the same way — worn on the map, sent over the wire, drawn on
 your trainer card — but they go one step further than a borrowed ROM
 character can. Wear one and it's you in **battle** too: the back pic over
 your shoulder when a battle starts, the pic on your trainer card, and the one
-Oak shrinks into if you start a new game. That only lasts as long as you're
-in a game, exactly like the walking sprite; leave and Red is back.
+Oak shrinks into if you start a new game. That follows the walking sprite
+exactly: it's you for as long as you're wearing them, in a game or on your
+own, until you pick somebody else.
 
 <p align="center">
   <img src="docs/screenshots/nire-battle.png" width="330" alt="A link battle starting, with NIRE's back pic where Red's would be">
@@ -328,7 +532,10 @@ Same card, same badges, a different trainer on it — `NIRE` on the left,
 
 If someone picks a character your ROM doesn't have, they show up as RED on
 your screen rather than not at all. That covers the artists' characters too,
-for anyone playing with an older copy of the mod.
+for anyone playing with an older copy of the mod — though not one older than
+`0.8.0`, which speaks a protocol the mid-game character change moved: a
+`0.7.x` copy and a `0.8.0` one refuse each other at the door and say which
+version each of them is. **Update the hub and the mod together.**
 
 ### 🪪 CHECK THEIR CARD
 Walk up, press **A**, and **PROFILE** sits at the top of the menu — their
@@ -378,26 +585,32 @@ B goes back. The cursor remembers where you left it. The world stays visible
 behind it.
 
 <p align="center">
-  <img src="docs/screenshots/mmo-menu.png" width="300" alt="The MMO menu while hosting">
+  <img src="docs/screenshots/mmo-menu.png" width="300" alt="The MMO menu">
 </p>
 
 | Row | Shows up when | What it does |
 | --- | --- | --- |
+| `SERVERS` | not in a game, and you've connected somewhere before | pick a hub you've reached before, and reconnect, rename, favorite or edit it |
 | `HOST GAME` | not in a game | make a trainer, then the room size and the passcode |
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
+| `CHARACTER` | not in a game, or connected | change who you look like, right now — in a game it sits under `RANK` and everyone sees it |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on and **where** — `n/limit` if you're hosting |
-| `CHAT` / `SAY` | connected | the log (`▶CHAT` = unread) and sending |
+| `CHAT` / `SAY` | connected | the log and sending |
 | `PARTY` | connected | your party: members, party chat, and leaving it |
 | `MY PROFILE` | connected | your own trainer card, as everyone else sees it |
 | `RANK` | connected | the hub's top ten: place, character, name, points |
 | `LEAVE` | you joined | drop out and **keep playing single-player** |
 | `END GAME` | hosting | asks first — this one ends it for everybody |
 
-Two rows before you're in a game, and no third one for the passcode:
+Three rows before you're in a game, and none of them is for the passcode:
 `JOIN GAME` asks for it on the way in, so typing a different one there is how
-a saved passcode gets changed. (The screenshot above is the menu mid-game,
-which is why it shows neither.)
+a saved passcode gets changed. `CHARACTER` is the one row that's on the menu
+in both states — offline it changes who you look like when you aren't playing
+with anybody, and in a game it changes who *everybody* sees you as, on the
+spot. Either way what it changes stays changed. (A shot of this menu only
+ever shows one of the two states; the rows for the other one aren't hidden,
+they just don't apply yet.)
 
 Leaving isn't quitting. Your save, your world, your party: untouched. The
 game just carries on without the other people in it.
@@ -429,7 +642,7 @@ the `PLAYERS` list to start one from.
 | `MAX PLAYERS` | 4 | room size for games you host (2–64, you count) |
 | `JOIN` | `127.0.0.1:7788` | where JOIN GAME starts from |
 | `JOIN CODE` | *(empty)* | the passcode used for a hub you haven't typed one for |
-| `MY SPRITE` | RED | how everyone else sees you |
+| `MY SPRITE` | RED | who you look like, to everyone including you — the `CHARACTER` row is the in-game way to the same thing, on your own or mid-game, and its choice sticks to your save |
 | `BUBBLES` | on | names and chat over heads |
 | `B TO RUN` | on | hold B on foot to move at bike speed |
 
@@ -915,6 +1128,39 @@ if mmo and mmo.exports.isConnected() then
   mmo.exports.say("global", "hello from my mod")
 end
 ```
+
+**Co-op battles announce themselves**, because the engine's own `battle.started`
+and `battle.ended` never fire for one and cannot be made to — `battle.started`
+comes from `BattleState:enter` and the trainer battle a co-op one displaces is
+taken off the stack before it ever enters; `battle.ended` comes from that
+battle's `finish`, which the co-op flow never calls. A mod may only emit
+`mod.<id>.*` events, so these are the mod's own:
+
+```lua
+mod.events:on("mod.rby_mmo.coop_battle_started", function(e)
+  -- e.kind      "npc" | "party"      -- a word, not a slot count
+  -- e.fighters  4                    -- how many are on the field
+  -- e.humans    2 or 4               -- how many of them are people
+  -- e.mine      1..4                 -- which slot *this* client is sitting in
+  -- e.side      "a" | "b"            -- and which side that puts them on
+  -- e.host      true on the one client that simulates the battle
+  -- e.trainerId the NPC being fought, or nil against another party
+  -- e.ranked    whether a win moves anybody's rating
+  -- e.slots     { side, owner, name, species } per slot
+  -- e.battle    the live screen, for anything the fields above missed --
+  --             READ ONLY. It is the running battle, not a copy: writing to
+  --             its sim, pending or result desyncs all four clients, and a
+  --             listener that throws is logged and skipped, not rolled back.
+end)
+
+mod.events:on("mod.rby_mmo.coop_battle_ended", function(e)
+  -- everything above, plus e.result: "win" | "loss" | "draw"
+end)
+```
+
+Both fire on **every** client in the battle, each with its own `mine` and
+`side` — so four clients see four different payloads describing the same
+fight.
 
 ---
 

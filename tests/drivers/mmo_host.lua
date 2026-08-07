@@ -507,6 +507,70 @@ return function(game)
     H.await(game, "guest_interact_done")
     U.shot(game, SHOT_DIR .. "/host-after-interact.png")
 
+    -- ------- 4b. change character mid-session, and the guest watches it land
+    --
+    -- The MMO menu's CHARACTER row now reaches the hub whether or not this
+    -- copy started the game: a pick made here has to push mmo.sprite, and
+    -- the guest's roster row and avatar have to follow it without either
+    -- side reconnecting (docs/plans/online-char-selection.md). Placed here
+    -- rather than earlier or later because both players are settled and
+    -- nothing else is mid-flow -- the same reason "hold still" sits where
+    -- it does.
+    --
+    -- The hosting menu also just grew a ninth row -- ADDRESS, PLAYERS,
+    -- CHAT, SAY, PARTY, MY PROFILE, RANK, CHARACTER, END GAME -- one past
+    -- Menu's maxVisible of 8, so this is the first time this screen has
+    -- ever had to scroll. H.menuRow reads `items`, which the widget keeps
+    -- whole regardless of the scroll offset, so finding END GAME there is
+    -- what "still reachable past the scroll" means for a row this driver
+    -- deliberately never presses A on -- doing that would open the END
+    -- GAME confirm and tear the session down mid-run.
+    check(H.openMmo(game), "the MMO menu reopens to change character")
+    U.wait(20)
+    local hostingLabels = H.menuLabels(game)
+    log("hosting menu (connected):", table.concat(hostingLabels, ","))
+    check(#hostingLabels == 9, "the hosting menu now carries all nine rows")
+    local rankAt, charAt
+    for i, label in ipairs(hostingLabels) do
+      if label == "RANK" then rankAt = i end
+      if label == "CHARACTER" then charAt = i end
+    end
+    check(rankAt ~= nil and charAt == (rankAt or 0) + 1,
+          "CHARACTER sits right after RANK on the hosting menu")
+    check(H.menuRow(game, "END GAME") ~= nil,
+          "END GAME is still reachable past the first-ever scroll on this menu")
+    U.shot(game, SHOT_DIR .. "/host-menu-9rows.png")
+
+    -- NIRE, the same catalog entry mmo_join.lua's offline leg already proves
+    -- is selectable, and guaranteed different from MMO_HOST_SPRITE's default
+    -- (SPRITE_RED, see run-mmo-e2e.sh) -- so the switch below is provable
+    -- rather than assumed.
+    local beforeLook = exports.wornLook and exports.wornLook() or nil
+    if check(H.selectLabel(game, "CHARACTER"),
+             "CHARACTER opens the picker while hosting and connected") then
+      U.wait(20)
+      check(H.classify(H.top(game)) == "menu", "the picker opened")
+      check(H.selectLabel(game, "NIRE"), "NIRE is a row in the connected picker too")
+      U.wait(30)
+      check(H.classify(H.top(game)) == "menu",
+            "picking returns to the MMO menu, not a fresh setup screen")
+    end
+    H.closeToOverworld(game)
+
+    local wornOk, wornLook = H.wornMatches(game, exports)
+    log("host picked live:", tostring(beforeLook), "->", tostring(wornLook))
+    check(wornLook ~= beforeLook,
+          "the host's own worn look actually changed")
+    check(wornOk and wornLook == "SPRITE_NIRE",
+          "and it is exactly the character just picked")
+
+    -- Signalled unconditionally: a failed pick above is already reported by
+    -- the checks that just ran, and the guest is waiting on this marker
+    -- regardless of how this leg went -- staying silent would only turn one
+    -- honest failure here into a timeout over there.
+    H.signal("host_char_changed")
+    H.await(game, "guest_saw_char_change")
+
     -- ------- 5. a real trade, run to completion over the wire
     --
     -- The guest asks; this side gets "GUESTY wants to trade!", the party
@@ -586,6 +650,175 @@ return function(game)
     -- fabricated result.
     H.closeToOverworld(game)
     H.rankAfterBattle(game, exports, check)
+
+    -- ------- 6b. a co-op battle, over the *in-game* hub
+    --
+    -- **The other transport.** Everything above this point has a twin in
+    -- run-hub-e2e.sh, which runs the same features against the dedicated Node
+    -- hub. This leg has no twin: a co-op battle had only ever been carried by
+    -- server/lib/relay.js. `src/Hub.lua` -- the hub that runs *inside* this
+    -- very process when a player hosts from the game -- has co-op handlers
+    -- with unit tests and had never relayed one turn of a real 2-on-2 between
+    -- two real clients.
+    --
+    -- The two hubs are written to mirror each other, which is exactly the
+    -- reason to check: a mirror is a claim, and the only thing that tests a
+    -- claim is running both.
+
+    H.closeToOverworld(game)
+    local coopClass, coopLevel = H.coopTrainer(game.data)
+    check(coopClass ~= nil, "the dataset has a trainer with two POKeMON")
+    log("co-op trainer:", tostring(coopClass), "total level", tostring(coopLevel))
+
+    -- A party first: a co-op battle is something a party does, and the LAN
+    -- scenario had never formed one at all.
+    --
+    -- Only once the guest is standing still. It is coming off the RANK screen,
+    -- and closeToOverworld gets out of a screen by pressing B -- so an invite
+    -- that lands mid-close is answered "no" by the button that was closing
+    -- something else, and the party never forms with nothing on screen to say
+    -- why.
+    H.await(game, "guest_ready_for_party")
+    if H.openMmo(game) and H.selectLabel(game, "PLAYERS") then
+      U.wait(25)
+      if H.selectLabel(game, "GUESTY") then
+        U.wait(30)
+        check(H.selectLabel(game, "INVITE"), "asked the guest to team up")
+      else
+        check(false, "found the guest on the PLAYERS list")
+      end
+    else
+      check(false, "opened the PLAYERS list to invite from")
+    end
+    H.signal("host_party_asked")
+
+    local paired = H.drivePrompts(game, function()
+      return #exports.party() == 2
+    end, 120)
+    check(paired, "the party formed over the in-game hub")
+    H.await(game, "guest_party_joined")
+    H.closeToOverworld(game)
+
+    -- Walk into the trainer, and wait rather than fight alone.
+    local coopFinished = nil
+    -- The real BattleState this side staged, held onto (not just the result
+    -- callback above) so it can be checked for gone-from-the-stack rather
+    -- than merely told-its-result once the co-op leg is over -- see the
+    -- comment on the `handed`/onStack pair below for why both matter.
+    local staged = nil
+    if coopClass then
+      staged = H.stageTrainer(game, coopClass, function(result) coopFinished = result end)
+      local asked = H.waitFor(game, function()
+        for _, label in ipairs(H.menuLabels(game)) do
+          if label == "WAIT" then return true end
+        end
+        local top = H.top(game)
+        if top and top.items == nil then U.tap(game, "a") end
+        return false
+      end, 60 * 6, "the co-op prompt in front of the trainer")
+      check(asked, "the co-op prompt appears in front of a real trainer battle")
+      U.shot(game, SHOT_DIR .. "/host-coop-prompt.png")
+      check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
+      local waiting = H.waitSeconds(game, function()
+        return exports.coopWaiting() ~= nil
+      end, 60, "this side to be standing at the fight")
+      check(waiting, "and this side is standing at the fight, waiting")
+    end
+    H.signal("host_coop_waiting")
+
+    -- The guest joins, and four monsters come up on both screens.
+    H.await(game, "guest_coop_joined")
+    local onField = H.waitSeconds(game, function()
+      local top = H.top(game)
+      return top ~= nil and top.sim ~= nil and #top.sim.slots == 4
+    end, 120, "the 2-on-2 to come up")
+    check(onField, "a four-slot co-op battle is on screen, over the LAN hub")
+    if onField then
+      -- The command grid, not the opening line. This shot is the shipped
+      -- evidence of the 2x2 layout, and a fixed wait was photographing "2 on
+      -- 2 battle!" -- see H.awaitCommandMenu for why the box holds that long.
+      check(H.awaitCommandMenu(game, "the command menu for the battle shot"),
+            "the co-op command grid opens once the opening line is done")
+      U.wait(30)
+      U.shot(game, SHOT_DIR .. "/host-coop-battle.png")
+      check(exports.coopDrawFailed() == false, "and it drew without error")
+    end
+
+    local over = H.drivePrompts(game, function()
+      local top = H.top(game)
+      return top == nil or top.sim == nil
+    end, 300, function() U.tap(game, "a") end)
+    check(over, "the 2-on-2 runs to an end over the in-game hub")
+    local sync = exports.coopSync()
+    log(("coop sync: gaps=%d desyncs=%d resyncs=%d"):format(
+      sync.gaps, sync.desyncs, sync.resyncs))
+    check(sync.gaps == 0, "with no turn lost by the Lua hub")
+    check(sync.desyncs == 0, "and no drift between the two copies")
+    check(sync.resyncs == 0, "and never needing the field re-sent")
+
+    -- Frames, not seconds, and deliberately so -- this is not a wait on the
+    -- guest the way a PHASE barrier is (see "phase barriers" in
+    -- mmo_util.lua). CoopBattle:finish pops its own screen; StateStack:pop
+    -- removes it and only then calls exit(), which is what reaches
+    -- M:onBattleOver and, through M:consume, `engine.onFinish` -- all inside
+    -- the one synchronous call that took the co-op screen off the stack. If
+    -- `coopFinished` is ever going to be set, it already is by the time
+    -- `over` above went true, so a 60-second budget here only meant a
+    -- genuinely broken handoff took a minute to report as broken.
+    local handed = H.waitFor(game, function()
+      return coopFinished ~= nil
+    end, 10, "the engine's battle to be finished off")
+    check(handed, "and the trainer battle it displaced got its result back")
+    log("co-op result:", tostring(coopFinished))
+
+    -- The bug this leg exists to catch, and why `handed` above is not enough
+    -- by itself: CoopBattle:finish only ever pops its *own* screen. Before
+    -- the fix, the trainer battle staged above was never unwound off the
+    -- stack for the player who joined -- it sat there the whole fight,
+    -- underneath the co-op screen, one slot down and invisible to a check
+    -- that only ever asks what is on top. `coopFinished` could come back
+    -- non-nil, a real handoff, while a second, real fight against the same
+    -- trainer was still sitting on the stack waiting for input.
+    --
+    -- Checked here, before the drivePrompts below presses a single button:
+    -- that drive answers whatever is on top with A, and a real trainer
+    -- battle is itself a sequence of prompts -- FIGHT, a move, a target --
+    -- so a leaked one would be fought through in total silence and still end
+    -- up back in the overworld. That is exactly how this bug could pass a
+    -- check that only looked at the end state.
+    check(not H.onStack(game, staged),
+          "the trainer battle this side staged is off the stack, not merely "
+          .. "buried under the co-op screen")
+
+    H.drivePrompts(game, function()
+      local top = H.top(game)
+      return top == nil or top == game.overworld or top.isOverworld
+    end, 120)
+    -- And the overworld that drive reached for is genuinely the overworld --
+    -- the other half of the same claim, now that nothing is left buried for
+    -- it to be hiding under (checked above, before anything here got a
+    -- chance to fight it through).
+    local top = H.top(game)
+    check(top == game.overworld or (top and top.isOverworld) == true,
+          "and the overworld -- not a leaked trainer battle -- is what's "
+          .. "actually on top, over the in-game hub too")
+    H.closeToOverworld(game)
+    U.shot(game, SHOT_DIR .. "/host-coop-after.png")
+    H.signal("host_coop_done")
+    H.await(game, "guest_coop_done")
+
+    -- ...and out of the party, so the legs after this one see the world they
+    -- expect rather than one this leg left half-arranged.
+    if H.openMmo(game) and H.selectLabel(game, "PARTY") then
+      U.wait(25)
+      H.selectLabel(game, "LEAVE")
+      H.drivePrompts(game, function()
+        return #exports.party() == 0
+      end, 60)
+    end
+    H.closeToOverworld(game)
+    check(#exports.party() == 0, "and the party is left behind cleanly")
+    H.signal("host_coop_left")
     if H.openMmo(game) then
       U.wait(25)
       H.shotRank(game, SHOT_DIR .. "/host-rank.png", check)
@@ -634,6 +867,17 @@ return function(game)
   end
 
   -- ------- teardown
+
+  -- Every marker this side owns, dropped whatever happened above -- the same
+  -- courtesy the guest does. A leg that gave up otherwise leaves the other
+  -- instance sitting on the barriers after it for their full budget, and what
+  -- gets reported is a wall of timeouts over there rather than the one real
+  -- failure over here.
+  for _, tag in ipairs({ "host_party_asked", "host_coop_waiting",
+                         "host_coop_done", "host_coop_left",
+                         "host_address_checked" }) do
+    H.signal(tag)
+  end
 
   U.wait(90)
   log("RESULT " .. failures .. " failure(s)")
