@@ -39,9 +39,17 @@ M.MOD_ID = "rby_mmo"
 -- middle of a game (mmo.sprite -- a hub that has never heard the type
 -- answers it with silence, so the player who picked somebody new would be
 -- the only person in the game who could see it).  7 is the first number
--- that means all of it.  This number lives here and in
--- server/lib/relay.js -- bump them together.
-M.PROTOCOL = 7
+-- that means all of it.
+--
+-- 8 is mmo.party_event -- what the person you are travelling with just did,
+-- fanned out by the hub to the party and to nobody else.  The rule that moved
+-- every number above moves this one: a protocol-7 hub has never heard the
+-- type, so its handler table answers it with silence, and a player would
+-- watch their partner fight all evening and never be told a thing.  Neither
+-- end could tell that from an ordinary quiet route, which is exactly the
+-- silence this number exists to turn into a sentence.  This number lives here
+-- and in server/lib/relay.js -- bump them together.
+M.PROTOCOL = 8
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

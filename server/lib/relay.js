@@ -31,7 +31,7 @@ const {
   cleanText, cleanId, cleanSpriteId, cleanMapId, cleanInt, cleanHex,
   cleanProfile, cleanOutcome, cleanPoints, cleanToken, payloadOk, FACINGS,
   KINDS, SCOPES, NAME_MAX, MESSAGE_MAX, MOTD_MAX, LOCAL_RADIUS,
-  cleanBattleKey, cleanCoopReason, cleanLabel, PARTY_MAX,
+  cleanBattleKey, cleanCoopReason, cleanLabel, cleanPartyEvent, PARTY_MAX,
 } = require('./sanitize');
 const {
   Board, mintToken, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
@@ -60,11 +60,15 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // once for the character a player is wearing -- settled at hello and never
 // again until mmo.sprite, a type a hub that predates it answers with
 // silence, so the player who picked somebody new would be the only one in
-// the game who ever saw it. 7 is the first number that means all of it. The
-// rule every bump follows is unchanged: bump whenever a client can send
-// something a hub silently ignores. Kept in step with Config.PROTOCOL on
-// the mod side.
-const PROTOCOL = 7;
+// the game who ever saw it. 7 is the first number that means all of it. 8 is
+// mmo.party_event -- what the person a player is travelling with just did,
+// fanned out from here to the party and to nobody else -- and a protocol-7 hub
+// has never heard the type, so a player would watch their partner fight all
+// evening and never be told a thing, which neither end can tell apart from an
+// ordinary quiet route. The rule every bump follows is unchanged: bump
+// whenever a client can send something a hub silently ignores. Kept in step
+// with Config.PROTOCOL on the mod side.
+const PROTOCOL = 8;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -487,6 +491,38 @@ handlers['mmo.party_respond'] = (relay, client, msg) => {
 handlers['mmo.party_leave'] = (relay, client) => {
   if (!client.ready) return;
   relay.endParty(client, 'peer_left');
+};
+
+/*
+ * What just happened to somebody's travelling partner: they beat a wild
+ * POKeMON or a trainer, were beaten by one, or caught something.
+ *
+ * Routed exactly the way the party chat scope is, and a player who is not in
+ * a party is dropped rather than broadcast for the same reason: an audience
+ * that quietly widened to the whole hub would turn a note meant for one
+ * friend into everybody's business. The fighter is left out because they
+ * watched the battle happen -- their own client narrates it without a round
+ * trip, and a copy coming back off the wire would be a second, later line
+ * about a fight they had already been shown.
+ *
+ * `name` is stamped from the connection and never read off the message. It is
+ * the only identifying field in the event and the whole event is drawn as a
+ * sentence about a named player, so a client that supplied its own would be
+ * writing lines on its partner's screen under somebody else's nick.
+ *
+ * The hub reads `kind` -- unlike a relay payload -- because it is the thing
+ * that decides which fields have to be there, and an event missing its
+ * opponent is a sentence that stops mid-way on the receiving screen.
+ */
+handlers['mmo.party_event'] = (relay, client, msg) => {
+  if (!client.ready || !client.partyId) return;
+  const event = cleanPartyEvent(msg);
+  if (!event) return;
+  const payload = Object.assign({}, event,
+    { from: client.id, name: client.name });
+  for (const member of relay.partyMembers(client.partyId)) {
+    if (member.id !== client.id) relay.send(member, 'mmo.party_event', payload);
+  }
 };
 
 // ------- co-op battles

@@ -38,6 +38,21 @@ M.PING          = "mmo.ping"
 M.PARTY_INVITE  = "mmo.party_invite"
 M.PARTY_RESPOND = "mmo.party_respond"
 M.PARTY_LEAVE   = "mmo.party_leave"
+-- What just happened to the person you are travelling with: they beat a wild
+-- POKeMON or a trainer, were beaten by one, or caught something.  One name
+-- for both directions, the way CHAT and SPRITE are -- outbound it carries
+-- { kind, species, level, trainer } and inbound the same plus { from, name }.
+--
+-- **The fighter never sends their own name and the hub never reads one.**  It
+-- is stamped from the connection the message arrived on, because `name` is
+-- the only identifying field here and the whole event is drawn as a sentence
+-- about a named player: a client that supplied its own would be narrating
+-- its partner's screen under somebody else's nick.
+--
+-- Fanned out to the rest of the party and to nobody else -- the fighter
+-- included, since they watched the battle happen and their own client can
+-- say so without a round trip.  The shape is M.partyEvent, below.
+M.PARTY_EVENT   = "mmo.party_event"
 -- the answer to a challenge: { response }, an HMAC of the nonce keyed by
 -- the join code.  The code itself never crosses the wire.
 M.AUTH          = "mmo.auth"
@@ -449,6 +464,68 @@ function M.members(raw)
     out[#out + 1] = member
   end
   if #out == 0 then return nil end
+  return out
+end
+
+-- The five things worth telling a partner about, and what each one needs in
+-- order to say it: "mon" is a species and a level, "trainer" is the name the
+-- game shows on the opponent.
+--
+-- A closed set rather than free text for the reason COOP_REASONS is one:
+-- every kind picks a different sentence on screen, so an unknown kind has
+-- nothing to draw and is refused rather than printed raw.
+--
+-- The required fields are part of the kind rather than a check beside it,
+-- because a half-filled event is the one failure that reaches a player --
+-- "ANN defeated" with nothing after it is a sentence that stops mid-way, and
+-- there is no sensible thing to put there after the fact.
+M.PARTY_EVENTS = {
+  defeat_wild         = "mon",
+  defeated_by_wild    = "mon",
+  capture             = "mon",
+  defeat_trainer      = "trainer",
+  defeated_by_trainer = "trainer",
+}
+
+-- The highest level a party event may claim.  Gen 1's cap, and a bound on a
+-- number that is about to be printed on somebody else's screen rather than a
+-- rule about the game.
+M.LEVEL_MAX = 100
+
+-- One thing that happened to a party member, as it reaches the other one.
+--
+-- Returns a rebuilt table carrying only the fields the kind names, so a wild
+-- event can never arrive with a trainer on it: the formatter picks its
+-- sentence off `kind`, and a stray field would be one more thing that could
+-- disagree with the sentence being drawn.
+--
+-- `name` is required and `from` is not.  The name is what every one of the
+-- five sentences is about, so an event without one is not something any
+-- screen can show; the id is only there because the other party messages
+-- carry one, and at PARTY_MAX = 2 there is exactly one player it could name.
+function M.partyEvent(raw)
+  if type(raw) ~= "table" then return nil end
+  local needs = M.PARTY_EVENTS[raw.kind]
+  if not needs then return nil end
+
+  local name = M.name(raw.name)
+  if not name then return nil end
+
+  local out = { kind = raw.kind, name = name, from = M.id(raw.from) }
+  if needs == "mon" then
+    -- A species name is prose on its way into a line, and it borrows M.name
+    -- rather than M.label because a species and a trainer nick have the same
+    -- room on screen -- ten characters is what the longest one needs.
+    out.species = M.name(raw.species)
+    out.level = M.int(raw.level, 1, M.LEVEL_MAX)
+    if not (out.species and out.level) then return nil end
+  else
+    -- ...and a trainer is M.label rather than M.name, because what arrives
+    -- here is the class the game shows and NAME_MAX cuts "BUG CATCHER" to
+    -- "BUG CATCHE" -- a line about a misspelt opponent.
+    out.trainer = M.label(raw.trainer)
+    if not out.trainer then return nil end
+  end
   return out
 end
 
