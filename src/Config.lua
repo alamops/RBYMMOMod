@@ -313,6 +313,22 @@ M.MESSAGE_MAX = 60           -- longest message accepted off the wire
 -- purpose: the grid shows the line being typed on one 20-tile row, and a
 -- bubble that overflows its box is worse than a message you have to split.
 M.COMPOSE_MAX = 16
+-- A hub's message of the day: one line an operator writes once and every
+-- arrival reads, delivered on the welcome and shown in the scrollback as a
+-- HUB line.  Double a chat line's room because it is doing a different job
+-- -- the house rules, where the Discord is, what time the hub goes down
+-- tonight -- and none of those is a sentence that fits in sixty characters.
+-- The hub cleans it to the same single-line charset chat uses
+-- (server/lib/sanitize.js), so nothing can arrive here that a chat line
+-- could not also carry; this number is the only thing that differs.
+--
+-- PROTOCOL did not move for it, and the rule at the top of this file is why:
+-- a bump is for a *client* saying something an older hub answers with
+-- silence.  This field only ever travels hub -> client, an older hub simply
+-- never sends it, and an older client drops a key it has never heard of and
+-- is exactly as connected as before.  Nothing goes unexplained on any
+-- screen, so nothing is owed a refusal.
+M.MOTD_MAX = 120
 
 -- Presence liveness.  The hub drops a client that stops pinging; the client
 -- gives up on a hub that stops answering.

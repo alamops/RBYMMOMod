@@ -84,9 +84,16 @@ tools/play.sh
 # bare docs/plans/ line would do nothing.
 .github/workflows/release.yml
 docs/plans/in-game-hosting.md
+# Found while packing 0.8.0: this one arrived on main without a line here,
+# the same way my-profile.png and rank.png did, and pack duly shipped it.
+docs/plans/non-blocking-avatars.md
 docs/plans/self-hosting-server-app.md
 docs/plans/fix-taken-nick-on-ranking.md
 docs/plans/running-system.md
+docs/plans/server-side-listing.md
+docs/plans/server-live-ops.md
+docs/plans/admin-join-code.md
+docs/plans/cli-only-remove-dashboard.md
 docs/plans/last-connected-servers.md
 docs/plans/new-char-selection.md
 docs/plans/online-char-selection.md

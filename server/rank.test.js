@@ -29,8 +29,8 @@ const {
   RANK_K, RANK_MAX, RANK_TOP, RANK_REPEAT_WINDOW_MS, RANK_REPEAT_FADE,
   RANK_REPORT_GRACE_MS, RANK_QUERY_GATE_MS,
 } = require('./lib/rank.js');
-const { cleanToken } = require('./lib/sanitize.js');
-const { Relay, PROTOCOL } = require('./lib/relay.js');
+const { cleanToken, MESSAGE_MAX, MOTD_MAX } = require('./lib/sanitize.js');
+const { Relay, PROTOCOL, presenceOf } = require('./lib/relay.js');
 const { createLog } = require('./lib/log.js');
 
 let passed = 0;
@@ -941,6 +941,689 @@ function testPersistenceHook() {
     'a failing persistence hook does not undo the match');
 }
 
+// --------------------------------------------------------------- the roster
+//
+// `Relay#roster()` and `#noteRosterChange()` are lib/server.js's whole window
+// onto "who is here" (docs/plans/server-side-listing.md §3) -- server.test.js
+// proves the file that gets written from it; this is the relay-level half,
+// socket-free like everything else above.
+
+const ROSTER_CONTRACT_FIELDS = [
+  'name', 'sprite', 'map', 'x', 'y', 'busy', 'party', 'points', 'ranked',
+  'admin',  // 0.9.0: which connection holds an admin code -- operator surfaces only
+].sort();
+
+/*
+ * Only greeted players appear, and each one is exactly the fields the plan
+ * names, plus 0.9.0's `admin` -- no client id, no session or party id, no
+ * address. Any of those on a snapshot that outlives the process is the last
+ * place an id worth guessing should turn up.
+ */
+function testRosterFieldsAndReadyOnly() {
+  const clock = makeClock();
+  const { relay, players } = makeHub(clock, ['RED', 'BLUE']);
+
+  // A socket that connected but never said hello: not a player, and on
+  // nobody's roster, here least of all.
+  const ghost = { outbox: [], remoteAddress: '127.0.0.1' };
+  ghost.send = (msg) => ghost.outbox.push(msg);
+  ghost.close = () => {};
+  relay.accept(ghost);
+
+  const roster = relay.roster();
+  ok(roster.length === players.length,
+    'only the greeted players appear; the silent socket does not');
+
+  for (const entry of roster) {
+    const keys = Object.keys(entry).sort();
+    ok(JSON.stringify(keys) === JSON.stringify(ROSTER_CONTRACT_FIELDS),
+      `the roster entry for ${entry.name} carries exactly the ` +
+      `${ROSTER_CONTRACT_FIELDS.length} contract fields`);
+  }
+  ok(!roster.some((entry) => 'id' in entry), 'no roster entry carries a client id');
+  ok(!roster.some((entry) => 'sessionId' in entry), 'nor a session id');
+  ok(!roster.some((entry) => 'partyId' in entry), 'nor a party id');
+  ok(!roster.some((entry) => 'address' in entry), 'nor the connecting address');
+}
+
+/*
+ * busy and party track a session and a party exactly, and clear again once
+ * either ends -- the same two booleans presenceOf() publishes over the wire,
+ * read back through the operator's window instead.
+ */
+function testRosterBusyAndPartyFlags() {
+  const clock = makeClock();
+  const { relay, players } = makeHub(clock, ['ONE', 'TWO']);
+  const [one, two] = players;
+
+  const byName = (name) => relay.roster().find((entry) => entry.name === name);
+
+  ok(byName('ONE').busy === false && byName('ONE').party === false,
+    'a freshly-joined player is neither busy nor partied');
+
+  fight(relay, one, two);
+  ok(byName('ONE').busy === true && byName('TWO').busy === true,
+    'both sides of a session show busy');
+  ok(byName('ONE').party === false,
+    'and a session alone does not make them appear partied');
+
+  relay.handle(one.id, { type: 'mmo.session_leave' });
+  ok(byName('ONE').busy === false && byName('TWO').busy === false,
+    'ending the session clears busy for both');
+
+  relay.handle(one.id, { type: 'mmo.party_invite', to: two.id });
+  relay.handle(two.id, { type: 'mmo.party_respond', to: one.id, accept: true });
+  ok(byName('ONE').party === true && byName('TWO').party === true,
+    'forming a party shows party for both members');
+
+  relay.handle(one.id, { type: 'mmo.party_leave' });
+  ok(byName('ONE').party === false && byName('TWO').party === false,
+    'and leaving it clears party for both, not just the one who left');
+}
+
+/*
+ * Every event that can change what roster() would answer tells
+ * onRosterChange -- and, just as deliberately, a step that only moves a
+ * player around the same map does not. lib/server.js debounces on this
+ * signal; a hook that fired on every footstep would turn an idle hub into a
+ * file the disk never stops being asked about.
+ */
+function testRosterChangeNotifications() {
+  const clock = makeClock();
+  let changes = 0;
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    onRosterChange: () => { changes += 1; },
+  });
+
+  const dial = (name) => {
+    const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => {};
+    const id = relay.accept(peer);
+    relay.handle(id, {
+      type: 'mmo.hello', proto: PROTOCOL, name,
+      map: 'PALLET', x: 1, y: 1, facing: 'down',
+    });
+    return { id, peer };
+  };
+
+  ok(changes === 0, 'sanity: nothing has happened yet');
+
+  const one = dial('ONE');
+  ok(changes === 1, 'admitting a player fires the hook');
+
+  const two = dial('TWO');
+  ok(changes === 2, 'and so does the next one');
+
+  const beforeStep = changes;
+  relay.handle(one.id, { type: 'mmo.move', map: 'PALLET', x: 2, y: 2, facing: 'down' });
+  ok(changes === beforeStep,
+    'a step that stays on the same map does not fire the hook');
+
+  const beforeCross = changes;
+  relay.handle(one.id, { type: 'mmo.move', map: 'VIRIDIAN', x: 0, y: 0, facing: 'up' });
+  ok(changes === beforeCross + 1, 'crossing into another map fires it exactly once');
+
+  const beforeMenu = changes;
+  // No map/x/y at all -- the client saying "not in the world right now" (a
+  // battle or a menu), which is a change of place just as much as a warp.
+  relay.handle(one.id, { type: 'mmo.move', facing: 'up' });
+  ok(changes === beforeMenu + 1,
+    'leaving the world for a battle or a menu counts as a crossing too');
+
+  const beforeSession = changes;
+  const matchId = fight(relay, one, two);
+  ok(changes === beforeSession + 1, 'starting a session fires the hook');
+
+  const beforeSessionEnd = changes;
+  relay.handle(one.id, { type: 'mmo.session_leave' });
+  ok(changes === beforeSessionEnd + 1, 'ending it fires the hook again');
+
+  const beforeParty = changes;
+  relay.handle(one.id, { type: 'mmo.party_invite', to: two.id });
+  relay.handle(two.id, { type: 'mmo.party_respond', to: one.id, accept: true });
+  ok(changes === beforeParty + 1, 'forming a party fires the hook');
+
+  const beforePartyEnd = changes;
+  relay.handle(one.id, { type: 'mmo.party_leave' });
+  ok(changes === beforePartyEnd + 1, 'ending the party fires it once more, not twice');
+
+  const beforePoints = changes;
+  relay.publishPoints(one.id, 50);
+  ok(changes === beforePoints + 1, 'publishing a new rating fires the hook');
+
+  const beforeDrop = changes;
+  relay.drop(two.id);
+  ok(changes === beforeDrop + 1, 'a player leaving the hub fires the hook');
+}
+
+// ----------------------------------------------------------- operator primitives
+//
+// Wave 1's five relay-level additions from docs/plans/server-live-ops.md §3:
+// the reserved HUB name, the MOTD riding mmo.welcome, the onMatchSettled
+// history hook, kickByName, and announce. Same socket-free style as
+// everything above -- peer fakes with an outbox, driven through relay.handle.
+
+/*
+ * The name a hub speaks under cannot be worn by a player, or a hub-originated
+ * chat line (MOTD, an operator's announcement) could be forged by anyone who
+ * typed it first. Checked case-insensitively, the same "same name" the rest
+ * of the hub already means.
+ */
+function testHubNameReserved() {
+  const clock = makeClock();
+  const relay = new Relay({ maxPlayers: 8, log: quiet, now: clock.now });
+
+  const dial = (name) => {
+    const peer = { outbox: [], closed: false, remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => { peer.closed = true; };
+    const id = relay.accept(peer);
+    relay.handle(id, { type: 'mmo.hello', proto: PROTOCOL, name });
+    return { id, peer };
+  };
+
+  for (const attempt of ['HUB', 'hub', ' hub ']) {
+    const { peer } = dial(attempt);
+    const error = peer.outbox.find((m) => m.type === 'mmo.error');
+    ok(error !== undefined, `"${attempt}" is refused with an mmo.error`);
+    ok(/hub itself/i.test(error.message),
+      `the refusal for "${attempt}" names the reason`);
+    ok(!peer.outbox.some((m) => m.type === 'mmo.welcome'),
+      `"${attempt}" is never welcomed`);
+    ok(peer.closed === true, `and the connection for "${attempt}" is closed`);
+  }
+
+  const normal = dial('RED');
+  ok(normal.peer.outbox.some((m) => m.type === 'mmo.welcome'),
+    'an ordinary name still admits');
+}
+
+/*
+ * The message of the day rides mmo.welcome. Empty means nothing to say and
+ * the field is absent entirely -- not just falsy -- which is what lets a
+ * client from before this feature existed read straight past it. It is read
+ * fresh at admit time, so an operator's SIGHUP-and-edit is visible to the
+ * very next hello without a restart.
+ */
+function testWelcomeMotd() {
+  const clock = makeClock();
+  const relay = new Relay({ maxPlayers: 8, log: quiet, now: clock.now, motd: '' });
+
+  const dial = (name) => {
+    const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => {};
+    const id = relay.accept(peer);
+    relay.handle(id, { type: 'mmo.hello', proto: PROTOCOL, name });
+    const welcome = peer.outbox.find((m) => m.type === 'mmo.welcome');
+    return { id, peer, welcome };
+  };
+
+  // The value on the in-memory message object may still carry the key with
+  // an `undefined` value (Object.assign copies it regardless) -- only a trip
+  // through JSON, which is what a real socket does to every message, drops
+  // an `undefined` field outright. This is the check that matches what an
+  // actual client on the wire receives.
+  const wireOf = (msg) => JSON.parse(JSON.stringify(msg));
+
+  const first = dial('MOTDONE');
+  ok(first.welcome.motd === undefined,
+    'no motd configured: the welcome carries no motd value');
+  ok(!('motd' in wireOf(first.welcome)),
+    'and on the wire the key is not present at all when there is nothing to say');
+
+  relay.motd = '  Server   restarts   nightly \x01\x02 at 3am!! ';
+  const second = dial('MOTDTWO');
+  ok(typeof second.welcome.motd === 'string' && second.welcome.motd.length > 0,
+    'setting relay.motd is picked up by the very next hello -- the SIGHUP contract');
+  ok(!/\s\s/.test(second.welcome.motd),
+    'internal whitespace is collapsed to single spaces');
+  ok(!/[\x00-\x1f]/.test(second.welcome.motd), 'control characters are stripped');
+  ok('motd' in wireOf(second.welcome),
+    'and the key is present on the wire once there is something to say');
+
+  relay.motd = 'B'.repeat(200);
+  const third = dial('MOTDTHREE');
+  ok(third.welcome.motd.length === MOTD_MAX,
+    'an over-long motd is capped at MOTD_MAX');
+  ok(third.welcome.motd === 'B'.repeat(MOTD_MAX),
+    'by plain truncation, not by an ellipsis or anything cleverer');
+
+  relay.motd = 'Back to something short';
+  const fourth = dial('MOTDFOUR');
+  ok(fourth.welcome.motd === 'Back to something short',
+    'a second mutation between hellos is picked up too, not just the first one');
+
+  relay.motd = '';
+  const fifth = dial('MOTDFIVE');
+  ok(fifth.welcome.motd === undefined,
+    'and clearing it back to empty removes the field again for the next joiner');
+}
+
+/*
+ * onMatchSettled: told once, and only for a battle that actually paid out --
+ * both sides agreed, both were ranked, and neither claim moved mid-battle.
+ * Every other outcome settleMatch() already refuses points for; this pins
+ * that none of them fire the history hook either, and that the one case
+ * that does fire carries exactly the record shape docs/plans/
+ * server-live-ops.md §3 promises.
+ */
+function testMatchSettledHook() {
+  const clock = makeClock();
+  const records = [];
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    onMatchSettled: (record) => records.push(record),
+  });
+
+  const dial = (name) => {
+    const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => {};
+    const id = relay.accept(peer);
+    relay.handle(id, { type: 'mmo.hello', proto: PROTOCOL, name });
+    return { id, peer, name };
+  };
+
+  const one = dial('MATCHONE');
+  const two = dial('MATCHTWO');
+  const startedAt = clock.now();
+  const matchId = fight(relay, one, two);
+  clock.advance(50);
+  const beforeWinner = relay.board.points('MATCHONE');
+  const beforeLoser = relay.board.points('MATCHTWO');
+  relay.handle(one.id, { type: 'mmo.result', session: matchId, outcome: 'win' });
+  relay.handle(two.id, { type: 'mmo.result', session: matchId, outcome: 'loss' });
+
+  ok(records.length === 1,
+    'an agreed, both-ranked settlement fires the hook exactly once');
+  const record = records[0];
+  ok(Object.keys(record).sort().join(',') === 'at,loser,repeats,startedAt,winner',
+    'the record carries exactly the contract fields, nothing else');
+  ok(Object.keys(record.winner).sort().join(',') === 'gained,name,points',
+    'the winner sub-record is exactly name, points and gained');
+  ok(Object.keys(record.loser).sort().join(',') === 'lost,name,points',
+    'the loser sub-record is exactly name, points and lost');
+  ok(record.startedAt === startedAt,
+    'startedAt is the moment the session (and its match paperwork) started');
+  // Both sides reported while still in the session -- neither left it -- so
+  // match.endedAt was never set, and settleMatch's fallback is the settlement
+  // instant itself.
+  ok(record.at === clock.now(),
+    'endedAt was never set, so at falls back to the settlement instant');
+  ok(record.at >= record.startedAt, 'at never precedes startedAt');
+  ok(record.repeats === 0, 'a first meeting between these two has no repeats');
+  ok(record.winner.name === 'MATCHONE' && record.loser.name === 'MATCHTWO',
+    'winner and loser are named correctly');
+  ok(record.winner.points === beforeWinner + record.winner.gained,
+    "the winner's points are exactly before + gained");
+  ok(record.loser.points === beforeLoser - record.loser.lost,
+    "the loser's points are exactly before - lost");
+  ok(record.winner.points >= 0 && record.loser.points >= 0,
+    'neither side is ever negative');
+  ok(record.winner.points === relay.board.points('MATCHONE'),
+    'the record agrees with the board it was drawn from');
+
+  // -------- disagreeing reports: no record --------
+  const disputeId = fight(relay, one, two);
+  relay.handle(one.id, { type: 'mmo.result', session: disputeId, outcome: 'win' });
+  relay.handle(two.id, { type: 'mmo.result', session: disputeId, outcome: 'win' });
+  ok(records.length === 1,
+    'two sides both claiming the win settles nothing, so no history record either');
+
+  // -------- one-sided report: no record --------
+  const oneSidedId = fight(relay, one, two);
+  relay.handle(one.id, { type: 'mmo.result', session: oneSidedId, outcome: 'win' });
+  ok(records.length === 1, 'a lone report is not a settlement, so no record either');
+  relay.handle(one.id, { type: 'mmo.session_leave' });
+  relay.handle(two.id, { type: 'mmo.session_leave' });
+
+  // -------- an impostor participant: no record --------
+  const holder = dial('IMPOSTORNAME');
+  const faker = dial('IMPOSTORNAME');
+  const victim = dial('MATCHTHREE');
+  ok(relay.get(faker.id).ranked === false,
+    'sanity: the second same-named player is an impostor, unranked');
+  const impostorMatch = fight(relay, faker, victim);
+  relay.handle(faker.id, { type: 'mmo.result', session: impostorMatch, outcome: 'win' });
+  relay.handle(victim.id, { type: 'mmo.result', session: impostorMatch, outcome: 'loss' });
+  ok(records.length === 1,
+    'an agreed result with an impostor on one side pays nobody, and is not history either');
+  relay.drop(holder.id);
+  relay.drop(faker.id);
+  relay.drop(victim.id);
+
+  // -------- an immediate rematch: repeats increments, the payout is discounted --------
+  const rematchId = fight(relay, one, two);
+  relay.handle(one.id, { type: 'mmo.result', session: rematchId, outcome: 'win' });
+  relay.handle(two.id, { type: 'mmo.result', session: rematchId, outcome: 'loss' });
+  ok(records.length === 2, 'the rematch settles and is recorded too');
+  const rematch = records[1];
+  ok(rematch.repeats === 1, 'an immediate rematch is the second meeting in the window');
+  ok(rematch.winner.gained < record.winner.gained,
+    'and the repeat discount means it pays less than the first meeting did');
+}
+
+/*
+ * kickByName: the operator's half of a refusal. Everybody playing under that
+ * name goes, not somebody -- a name is only unique among ranked players -- and
+ * the caller is told exactly how many and who.
+ */
+function testKickByName() {
+  const clock = makeClock();
+  const { relay, players } = makeHub(clock, ['RED', 'BLUE', 'GREEN']);
+  const [red, blue, green] = players;
+
+  // -------- no match --------
+  for (const p of players) p.peer.outbox = [];
+  const rosterAtStart = relay.roster().length;
+  const nothing = relay.kickByName('NOBODY');
+  ok(nothing.kicked === 0 && nothing.names.length === 0,
+    'kicking a name nobody plays under does nothing, reported honestly');
+  ok(relay.roster().length === rosterAtStart, 'and the roster is untouched');
+  ok(players.every((p) => p.peer.outbox.length === 0),
+    'nobody hears anything about a kick that never happened');
+
+  // -------- one match, default reason --------
+  for (const p of players) p.peer.outbox = [];
+  const rosterBefore = relay.roster().length;
+  const result = relay.kickByName('red'); // matched case-insensitively
+  ok(result.kicked === 1 && result.names[0] === 'RED',
+    'one player matched, case-insensitively');
+  const error = take(red, 'mmo.error');
+  ok(error !== null && /operator/i.test(error.message),
+    'the kicked player gets an mmo.error with a default remediation message');
+  ok(red.peer.closed === true, "and their connection is closed");
+  ok(relay.roster().length === rosterBefore - 1, 'the roster shrinks by one');
+  const partedAtBlue = take(blue, 'mmo.part');
+  ok(partedAtBlue !== null && partedAtBlue.id === red.id,
+    'everyone still connected is told the kicked player left');
+  ok(take(green, 'mmo.part') !== null, 'both of the remaining players hear it');
+
+  // -------- custom reason, cleaned like any other chat line --------
+  const { relay: relay2, players: players2 } = makeHub(clock, ['ONE', 'TWO']);
+  const [pOne] = players2;
+  pOne.peer.outbox = [];
+  const messy = '  You    were  \x07 kicked for spamming!!! '.padEnd(200, 'x');
+  const custom = relay2.kickByName('ONE', messy);
+  ok(custom.kicked === 1, 'a custom reason still kicks');
+  const customError = take(pOne, 'mmo.error');
+  ok(customError.message.length === MESSAGE_MAX,
+    'the reason is capped like any chat line (MESSAGE_MAX)');
+  ok(!/[\x00-\x1f]/.test(customError.message),
+    'and control characters are stripped from it');
+  ok(/spamming/i.test(customError.message),
+    'the cleaned custom text is what actually reaches the kicked player');
+
+  // -------- two same-key names, one ranked, one an impostor --------
+  const clock3 = makeClock();
+  const relay3 = new Relay({ maxPlayers: 8, log: quiet, now: clock3.now });
+  const dial = (name) => {
+    const peer = { outbox: [], closed: false, remoteAddress: '127.0.0.1' };
+    peer.send = (msg) => peer.outbox.push(msg);
+    peer.close = () => { peer.closed = true; };
+    const id = relay3.accept(peer);
+    relay3.handle(id, { type: 'mmo.hello', proto: PROTOCOL, name });
+    return { id, peer };
+  };
+  const holder = dial('RED');
+  const impostor = dial('red');
+  ok(relay3.get(holder.id).ranked === true, 'sanity: the first RED is ranked');
+  ok(relay3.get(impostor.id).ranked === false, 'sanity: the second is an impostor');
+  const both = relay3.kickByName('Red');
+  ok(both.kicked === 2, 'both same-key names are kicked together, ranked or not');
+  ok(holder.peer.closed === true && impostor.peer.closed === true,
+    'and both connections are closed');
+
+  // -------- kicked mid-session: the partner gets session_end --------
+  const clock4 = makeClock();
+  const { relay: relay4, players: players4 } = makeHub(clock4, ['HOST', 'GUEST']);
+  const [host, guest] = players4;
+  fight(relay4, host, guest);
+  guest.peer.outbox = [];
+  relay4.kickByName('HOST');
+  ok(take(guest, 'mmo.session_end') !== null,
+    'the partner of a kicked mid-session player is told the session ended');
+}
+
+/*
+ * announce: an ordinary mmo.chat line spoken as the hub, to everyone ready --
+ * with no `from` at all, which is what makes it safe on a client that predates
+ * this feature (no id means no bubble, and no words in a real player's mouth).
+ */
+function testAnnounce() {
+  const clock = makeClock();
+  const { relay, players } = makeHub(clock, ['ONE', 'TWO', 'THREE']);
+  for (const p of players) p.peer.outbox = [];
+
+  const result = relay.announce('Server restarts in five minutes');
+  ok(result.delivered === 3, 'all three ready players are counted');
+  for (const p of players) {
+    const chat = take(p, 'mmo.chat');
+    ok(chat !== null, `${p.name} receives the announcement as an ordinary chat line`);
+    ok(chat.name === 'HUB' && chat.scope === 'global',
+      'spoken as the hub, to everyone');
+    ok(chat.text === 'Server restarts in five minutes',
+      'the text arrives as sent, once cleaned');
+    ok(!('from' in chat),
+      'and carries no sender id at all -- not even as an explicit undefined');
+  }
+
+  // -------- cleaned and truncated to MESSAGE_MAX --------
+  for (const p of players) p.peer.outbox = [];
+  relay.announce('A'.repeat(200));
+  const long = take(players[0], 'mmo.chat');
+  ok(long.text.length === MESSAGE_MAX,
+    'an over-long announcement is capped at MESSAGE_MAX');
+
+  // -------- text that cleans to empty is refused outright --------
+  for (const p of players) p.peer.outbox = [];
+  const empty = relay.announce('\x01\x02\x03');
+  ok(empty.delivered === 0, 'text that cleans to nothing delivers to nobody');
+  for (const p of players) {
+    ok(take(p, 'mmo.chat') === null, 'and nothing is sent to anybody either');
+  }
+
+  // -------- a client mid-handshake is not counted or sent to --------
+  const ghost = { outbox: [], remoteAddress: '127.0.0.1' };
+  ghost.send = (msg) => ghost.outbox.push(msg);
+  ghost.close = () => {};
+  relay.accept(ghost); // accepted, but never said hello -- not ready
+  for (const p of players) p.peer.outbox = [];
+  const withGhost = relay.announce('hello everyone');
+  ok(withGhost.delivered === 3,
+    'a connection that never said hello is not counted');
+  ok(ghost.outbox.length === 0, 'nor sent anything at all');
+}
+
+// --------------------------------------------------------- the admin flag
+//
+// docs/plans/admin-join-code.md §5 T1, the relay half: a credential's
+// `admin` bit rides mmo.auth's verdict (handlers['mmo.auth'], relay.js:236)
+// into `client.admin`, and from there to three places -- the operator's own
+// welcome, roster() for operator views, and nowhere else. Socket-free, like
+// everything above: `relay.auth` is stubbed at the same seam
+// authPort(lib/server.js) implements for a real hub, answering `newNonce`
+// and `verify(nonce, response)` with a verdict object that already carries
+// `admin` -- exactly what server.js's wrapper hands the relay after reading
+// auth.isAdminCredential() itself. What is under test here is what the relay
+// does with that verdict, not the credential lookup, which is auth.test.js's
+// job.
+
+/*
+ * A minimal `relay.auth` stub: `verify` reads the response string as a key
+ * into a table of verdicts, so a test can hand out a distinct 64-hex-char
+ * "response" per dial and get back whatever verdict it wants -- admin,
+ * player, or a rejection -- without a real credential or HMAC anywhere in
+ * the picture. `newNonce` only has to look like one; the relay never
+ * inspects it beyond storing and echoing it back to verify().
+ */
+function stubAuth(verdicts) {
+  let nonces = 0;
+  return {
+    newNonce: () => `${'a'.repeat(31)}${(nonces++ % 10)}`,
+    verify: (nonce, response) =>
+      verdicts[response] || { ok: false, credentialId: null, reason: 'rejected' },
+  };
+}
+
+const ADMIN_RESPONSE = 'a'.repeat(64);
+const PLAYER_RESPONSE = 'b'.repeat(64);
+
+/*
+ * Drives the full mmo.hello -> mmo.challenge -> mmo.auth handshake a real
+ * client goes through against an authenticated hub -- makeHub's dial()
+ * skips this because its hub has no auth configured at all.
+ */
+function dialAuthed(relay, name, response) {
+  const peer = { outbox: [], closed: false, remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => { peer.closed = true; };
+  const id = relay.accept(peer);
+  relay.handle(id, {
+    type: 'mmo.hello', proto: PROTOCOL, name, sprite: 'SPRITE_RED',
+    map: 'PALLET', x: 1, y: 1, facing: 'down',
+  });
+  const challenge = peer.outbox.find((m) => m.type === 'mmo.challenge');
+  if (challenge) relay.handle(id, { type: 'mmo.auth', response });
+  const welcome = peer.outbox.find((m) => m.type === 'mmo.welcome');
+  return { id, peer, welcome };
+}
+
+// The value on the in-memory message object may still carry a key with an
+// `undefined` value (Object.assign copies it regardless) -- only a trip
+// through JSON, which is what a real socket does to every message, drops an
+// `undefined` field outright. Same idiom testWelcomeMotd uses above.
+const wireOf = (msg) => JSON.parse(JSON.stringify(msg));
+
+/*
+ * The admin verdict, end to end: one client whose stubbed verify() answers
+ * `admin: true`, one whose verdict answers `admin: false`, admitted onto the
+ * same hub. The welcome, the roster, and every presence-shaped message they
+ * generate along the way are all checked in one pass.
+ */
+function testAdminFlagOverTheWire() {
+  const clock = makeClock();
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    auth: stubAuth({
+      [ADMIN_RESPONSE]: { ok: true, credentialId: 'cred-admin', reason: null, admin: true },
+      [PLAYER_RESPONSE]: { ok: true, credentialId: 'cred-player', reason: null, admin: false },
+    }),
+  });
+
+  const admin = dialAuthed(relay, 'OPERATOR', ADMIN_RESPONSE);
+  ok(admin.welcome !== undefined, 'the admin credential is admitted');
+  ok(admin.welcome.admin === true,
+    'the admin\'s own welcome carries admin: true');
+  ok(wireOf(admin.welcome).admin === true,
+    'and the flag survives a JSON round trip -- a real socket would send true, not drop it');
+
+  const player = dialAuthed(relay, 'CIVILIAN', PLAYER_RESPONSE);
+  ok(player.welcome !== undefined, 'the player credential is admitted too');
+  ok(player.welcome.admin === undefined,
+    'a non-admin welcome carries no admin value at all -- the motd idiom, not admin: false');
+  ok(!('admin' in wireOf(player.welcome)),
+    'and on the wire the key is entirely absent, matching what an older client already expects');
+
+  const byName = (name) => relay.roster().find((entry) => entry.name === name);
+  ok(byName('OPERATOR').admin === true,
+    'roster() carries admin: true for the admin connection');
+  ok(byName('CIVILIAN').admin === false,
+    'and admin: false -- never absent -- for the player, so a row is never read as "absent means no"');
+
+  // presenceOf() is what every player-visible message is built from --
+  // the welcome's own players[] array, the mmo.join broadcast, and every
+  // mmo.move -- and it must never carry the flag, admin or not.
+  const adminPresence = presenceOf(relay.get(admin.id));
+  ok(!('admin' in adminPresence),
+    'presenceOf() for the admin connection carries no admin key at all');
+  ok(!('admin' in wireOf(adminPresence)), 'nor once it has been round-tripped through JSON');
+
+  // The welcome the player received named the admin among `players[]` --
+  // sent before the player's own hello, so it is presence of someone else,
+  // exactly the shape other players are told about each other.
+  const adminAsSeenByPlayer = player.welcome.players.find((p) => p.name === 'OPERATOR');
+  ok(adminAsSeenByPlayer !== undefined, 'sanity: the player\'s welcome lists the admin as a peer');
+  ok(!('admin' in adminAsSeenByPlayer),
+    'and that presence entry carries no admin key -- other players never learn who holds power');
+
+  // mmo.join: broadcast to everyone already on the hub when a new player is
+  // admitted. The admin joined first, so it is the player's arrival that is
+  // heard, and it is the player's own presence being broadcast -- checked
+  // for completeness even though this one is never an admin.
+  admin.peer.outbox = [];
+  const third = dialAuthed(relay, 'BYSTANDER', PLAYER_RESPONSE);
+  const joinSeenByAdmin = admin.peer.outbox.find((m) => m.type === 'mmo.join');
+  ok(joinSeenByAdmin !== undefined, 'the admin hears the new arrival as an ordinary mmo.join');
+  ok(!('admin' in joinSeenByAdmin.player),
+    'and the broadcast presence carries no admin key either');
+
+  // mmo.move: the admin steps, and everyone else is told where -- again as
+  // ordinary presence, with no hint that the stepping player is an operator.
+  player.peer.outbox = [];
+  relay.handle(admin.id, { type: 'mmo.move', map: 'PALLET', x: 2, y: 2, facing: 'down' });
+  const moveSeenByPlayer = player.peer.outbox.find((m) => m.type === 'mmo.move');
+  ok(moveSeenByPlayer !== undefined, 'the player hears the admin move');
+  ok(!('admin' in moveSeenByPlayer),
+    'and the mmo.move payload -- itself a bare presenceOf() -- carries no admin key');
+  ok(!('admin' in wireOf(moveSeenByPlayer)), 'nor once round-tripped through JSON');
+
+  relay.drop(third.id);
+}
+
+/*
+ * A hub with no `auth` option at all -- the unauthenticated legacy path
+ * (plan §3.5: "nobody is admin -- the flag rides the credential, no
+ * credential means no admin"). makeHub()'s dial already exercises exactly
+ * this hub shape; this pins what it means for the admin flag specifically.
+ */
+function testNoAuthHubNeverAdmits() {
+  const clock = makeClock();
+  const { relay, players } = makeHub(clock, ['NOAUTH']);
+  const [solo] = players;
+
+  ok(relay.get(solo.id).admin === false,
+    'with no auth configured, the connection is never marked admin');
+  const welcome = take(solo, 'mmo.welcome');
+  ok(welcome.admin === undefined,
+    'and its welcome carries no admin value -- an unauthenticated hub has no ' +
+    'credential to derive one from');
+  ok(!('admin' in wireOf(welcome)), 'the key is absent on the wire too');
+
+  const row = relay.roster().find((entry) => entry.name === 'NOAUTH');
+  ok(row.admin === false,
+    'roster() still answers a plain false, never absent, for an unauthenticated connection');
+}
+
+/*
+ * A rejected auth attempt never reaches admit() at all, so it must never
+ * appear on the roster or be handed a welcome -- the admin flag is moot for
+ * a connection that was never let in, but a failing verify() must not leave
+ * `client.admin` set from some earlier state either.
+ */
+function testRejectedAuthNeverAdmits() {
+  const clock = makeClock();
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    auth: stubAuth({
+      [ADMIN_RESPONSE]: { ok: true, credentialId: 'cred-admin', reason: null, admin: true },
+    }),
+  });
+
+  const rejected = dialAuthed(relay, 'INTRUDER', 'c'.repeat(64));
+  ok(rejected.welcome === undefined, 'a response with no matching verdict is never welcomed');
+  ok(relay.roster().length === 0, 'and never appears on the roster');
+  ok(rejected.peer.closed === true, 'the connection is closed on refusal');
+  // refuse() drops the client outright (relay.js:973-977), so there is no
+  // lingering client object to have been left with a stray admin flag on it
+  // -- confirmed here rather than by reading a field that no longer exists.
+  ok(relay.get(rejected.id) === null,
+    'and the client is gone from the relay entirely, not merely unmarked');
+}
+
 function main() {
   testExpected();
   testSwing();
@@ -970,6 +1653,17 @@ function main() {
   testClaimsOverTheWire();
   testReclaimOverTheWire();
   testPersistenceHook();
+  testRosterFieldsAndReadyOnly();
+  testRosterBusyAndPartyFlags();
+  testRosterChangeNotifications();
+  testHubNameReserved();
+  testWelcomeMotd();
+  testMatchSettledHook();
+  testKickByName();
+  testAnnounce();
+  testAdminFlagOverTheWire();
+  testNoAuthHubNeverAdmits();
+  testRejectedAuthNeverAdmits();
 
   console.log(`\n  ${passed}/${passed} checks passed  (rank)\n`);
 }

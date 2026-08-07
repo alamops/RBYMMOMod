@@ -4,6 +4,31 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.9.0] - 2026-08-07
+
+### Added
+
+- **Dedicated-hub operator tools.** `rby-mmo-hub players`, `ranking`,
+  `watch`, `history`, `stats`, `kick` and `broadcast` expose live roster,
+  ranking, history and operator actions without a game client. The hub writes
+  an atomic `status.json`, keeps a bounded battle ledger, and exposes live
+  in-memory counters over `admin.sock`.
+- **Admin join codes.** `rby-mmo-hub invite --admin` marks the connection
+  opened by that code as an operator connection. The flag is derived
+  server-side from the credential, shown only to operator surfaces, and kept
+  out of ordinary presence broadcasts.
+- **Hub message of the day.** A dedicated hub can greet joining players with a
+  `HUB` chat-log line, and the `HUB` name is reserved so players cannot
+  impersonate hub-originated messages.
+- **Server-side location/ranking views.** The in-game `PLAYERS` list and CLI
+  player views show where each trainer is when the hub has a current cell, and
+  ranking views include the persisted season state.
+
+### Changed
+
+- **The web dashboard is removed.** The operator surface is the CLI/admin
+  socket, so tests and docs now exercise that path directly.
+
 ## [Unreleased]
 
 ### Fixed

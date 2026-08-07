@@ -257,7 +257,7 @@ function verify(nonce, response, credentials, now = Date.now()) {
  * never invents one by hand.
  */
 function newCredential(options = {}) {
-  const { label, secret, expiresAt = null, maxUses = null } = options;
+  const { label, secret, expiresAt = null, maxUses = null, admin = false } = options;
 
   let stored;
   if (secret === undefined || secret === null || secret === '') {
@@ -294,7 +294,7 @@ function newCredential(options = {}) {
     uses = max;
   }
 
-  return {
+  const credential = {
     // Short and hex: it goes in log lines and `revoke <id>`, so it has to be
     // repeatable off a terminal without being guessable enough to matter --
     // and it is an identifier, not a secret.
@@ -307,6 +307,40 @@ function newCredential(options = {}) {
     uses: 0,
     revoked: false,
   };
+
+  // An admin credential is an ordinary join code that additionally marks the
+  // connection it admits, so in-game operator features have a flag to check
+  // when they exist -- and so operator views can already say who holds one.
+  // Nothing about admission changes -- an admin code joins the game exactly
+  // like a player's.
+  //
+  // The flag is written only when it is true, so a player's credential is the
+  // byte-identical object it was before this field existed and no config
+  // written by an older hub needs migrating: absent reads as false everywhere
+  // (see isAdminCredential, and validateCredentials in lib/config.js).
+  //
+  // It is not itself a secret -- it says what a code unlocks, not what the
+  // code is -- so redaction leaves it alone. The secret is still the code.
+  if (admin) credential.admin = true;
+
+  return credential;
+}
+
+/**
+ * The one reading of the flag every consumer should use, so "is this an admin
+ * credential?" cannot drift into six different truthiness tests.
+ *
+ * Strictly `true`, and that strictness is a backstop rather than the parser: a
+ * credential the hub loaded has been through `validateCredentials`
+ * (lib/config.js), which is where the generous spellings a human writes --
+ * `"yes"`, `"true"`, `1` -- are canonicalised to `true` before this gate ever
+ * sees them. What reaches here still spelled some other way is a credential
+ * that skipped that step, and a value nobody canonicalised is not one to read
+ * in favour of privilege. So this fails closed on exactly the inputs whose
+ * meaning is a guess.
+ */
+function isAdminCredential(credential) {
+  return Boolean(credential) && credential.admin === true;
 }
 
 module.exports = {
@@ -322,4 +356,5 @@ module.exports = {
   isActive,
   activeCredentials,
   newCredential,
+  isAdminCredential,
 };

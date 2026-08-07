@@ -252,6 +252,12 @@ eq(exports.isConnected(), false, "reports disconnected before connecting")
 eq(#exports.players(), 0, "the roster starts empty")
 check(type(exports.party) == "function", "exports party")
 eq(#exports.party(), 0, "and nobody is in one before connecting")
+-- Whether the hub this copy is on treats it as an operator's connection
+-- (docs/plans/admin-join-code.md #4/D). Derived only from a credential a
+-- real hub grants; a client that never connected has none, so the honest
+-- answer is false, the same shape isHosting/isConnected already pin above.
+check(type(exports.isAdmin) == "function", "exports isAdmin")
+eq(exports.isAdmin(), false, "and reports no operator status on a fresh load")
 -- The rows and not the store: a hub this copy has played on is a fact another
 -- mod may want to read, and a mutator it may not.
 check(type(exports.servers) == "function", "exports servers")
@@ -479,6 +485,33 @@ eq(Wire.text("   "), nil, "whitespace alone is not a message")
 eq(Wire.text(12345), nil, "a non-string is not a message")
 eq(#Wire.text(string.rep("a", 500)), Config.MESSAGE_MAX, "text is capped")
 eq(#Wire.name(string.rep("b", 50)), Config.NAME_MAX, "names are capped shorter")
+
+-- ------- MOTD: the same sanitiser, a bigger budget
+--
+-- src/Client.lua's welcome handler makes exactly this call --
+-- `Wire.text(msg.motd, Config.MOTD_MAX)` -- so the budget is pinned here
+-- against drift, and the call is exercised at the two edges plus the
+-- untrusted-input floor Wire.text already guarantees every other field.
+
+eq(Config.MOTD_MAX, 120, "the MOTD budget is pinned")
+check(Config.MOTD_MAX > Config.MESSAGE_MAX,
+      "a hub's message of the day gets more room than one chat line")
+
+-- Wrapped for scope, the way the movement.speed block above is: kept out of
+-- the main chunk's own locals so this file stays under Lua's 200-local cap.
+;(function()
+  local motdWhole = string.rep("m", Config.MOTD_MAX)
+  eq(Wire.text(motdWhole, Config.MOTD_MAX), motdWhole,
+     "exactly MOTD_MAX characters survive whole")
+  local motdOverlong = string.rep("m", Config.MOTD_MAX + 1)
+  local motdTruncated = Wire.text(motdOverlong, Config.MOTD_MAX)
+  eq(#motdTruncated, Config.MOTD_MAX, "one character over the budget is cut to it")
+  eq(motdTruncated, motdWhole, "and the surviving characters are the leading ones")
+end)()
+eq(Wire.text(nil, Config.MOTD_MAX), nil, "a nil motd -- an old hub's silence -- is nil")
+eq(Wire.text(42, Config.MOTD_MAX), nil, "a non-string motd is nil, not stringified")
+eq(Wire.text("", Config.MOTD_MAX), nil, "an empty motd is nil, same as an empty chat line")
+eq(Wire.text("   ", Config.MOTD_MAX), nil, "whitespace alone is nil here too")
 
 eq(Wire.id("abc_123-x"), "abc_123-x", "a well-formed id survives")
 eq(Wire.id("../../etc/passwd"), nil, "a path is not an id")
@@ -902,6 +935,28 @@ check(chat:bubbleFor("a") ~= nil, "a bubble survives until its time is up")
 chat:update(0.2)
 eq(chat:bubbleFor("a"), nil, "and then expires")
 
+-- ------- MOTD: the exact push shape src/Client.lua's welcome handler uses
+--
+-- `ctx.chat:push({ name = "HUB", scope = "global", text = motd })` -- no
+-- `from`, because the hub stands on no map and owns no avatar (Client.lua's
+-- comment on the welcome handler). Pinned here at the Chat seam, since the
+-- suite has no cheap way to drive the real handler live (see the note where
+-- the fake-hub tier begins below).
+
+chat:clear()
+;(function()
+  local hubEntry = chat:push({ name = "HUB", scope = "global", text = "welcome to the hub" })
+  check(hubEntry ~= nil, "the hub line is accepted with no `from`")
+  eq(chat.history[#chat.history].name, "HUB", "it lands in the scrollback under the HUB name")
+  eq(chat:line(hubEntry), "[G]HUB: welcome to the hub",
+     "and renders like any other global line -- Chat:line never reads `from`")
+end)()
+eq(chat.unread, 1,
+   "it lights the unread badge -- deliberate, per docs/plans/server-live-ops.md "
+   .. "#3: a greeting nobody notices is a greeting nobody reads")
+eq(chat:bubbleFor("HUB"), nil,
+   "and nothing bubbles for it -- the client never calls :bubble for the motd")
+
 -- ------- SessionNet: the shim the engine's link code runs over
 
 local sent = {}
@@ -997,6 +1052,24 @@ check(transport.error ~= nil, "and says why")
 -- Hub is deliberately socket-free so it can be driven here with fake peers.
 -- These are the same behaviours server/hub.test.js pins on the Node side;
 -- two implementations of one protocol only stay honest if both are tested.
+--
+-- This is *not* a seam for pinning MOTD end-to-end: Hub.lua is the embedded
+-- in-game hub, which docs/plans/server-live-ops.md #3 deliberately leaves
+-- out of this feature entirely (its Wire.WELCOME below carries no `motd`
+-- field at all, and never will). The dedicated hub that does send one is
+-- server/lib/relay.js, out of this suite's reach. And src/Client.lua's own
+-- welcome handler -- the code that calls `Wire.text(msg.motd,
+-- Config.MOTD_MAX)` and pushes the HUB chat line -- lives inside the
+-- closure M.install() builds, reachable only by handing it a full mod
+-- facade (events, hooks, ui, world, transport, ...); section 1 above loads
+-- that closure through the real loader but never connects it, and section
+-- 2's `need()` resolver returns the module table without ever calling
+-- install(). Driving a real WELCOME through that handler would mean
+-- building install()'s whole facade from scratch here -- exactly the heavy
+-- scaffolding this suite avoids -- so the welcome-carries-motd behaviour is
+-- pinned one layer down instead: Config.MOTD_MAX / Wire.text(_, MOTD_MAX)
+-- above (the sanitiser the handler calls) and the Chat push shape above
+-- that (the exact table the handler builds from the result).
 
 local Hub = need("Hub")
 
@@ -1054,6 +1127,13 @@ check(take(annPeer, Wire.WELCOME) ~= nil, "the first player is welcomed")
 local bobWelcome = take(bobPeer, Wire.WELCOME)
 eq(#bobWelcome.players, 1, "the second sees the first on the roster")
 eq(bobWelcome.players[1].name, "ANN", "by name")
+-- The embedded hub is out of the admin-join-code feature entirely (the plan
+-- calls this out at #3.5/#8): only server/lib/relay.js's credential lookup
+-- can grant operator status, so Hub.lua's own welcome must never carry the
+-- key at all -- not even as a false -- and src/Client.lua's
+-- `myAdmin = msg.admin == true` is written to read that absence as false.
+eq(bobWelcome.admin, nil,
+   "and the in-game hub's welcome carries no admin key -- it never grants operator status")
 check(saw(annPeer, Wire.JOIN), "and the first is told about the second")
 
 -- The cap is charged at hello, not on connect. A socket that has not
@@ -3818,6 +3898,108 @@ do
   eq(Ui.nameRoom(0) >= Config.NAME_MAX, true, "and an unranked zero")
   check(Ui.nameRoom(Config.RANK_MAX) < Config.NAME_MAX,
         "only a four-figure rating trims a full-length name, by one glyph")
+end
+
+-- ------- and the roster row, where the trade runs the other way
+--
+-- ROSTER_LAYOUT is RANK_LAYOUT's mirror image: there the score is
+-- fixed-width and the name pays for the gaps, here the name is what the
+-- player reads the row by and never pays, so the place name spends
+-- whatever `placeRoom` works out is left over.  Read off M.ROSTER_LAYOUT
+-- and M.placeRoom themselves, for the same reason the RANK block above
+-- reads off M.RANK_LAYOUT and M.nameRoom -- so this cannot drift from what
+-- the screen actually draws with.
+do
+  local L = Ui.ROSTER_LAYOUT
+  eq(L.labelX, 16, "the label starts where ListMenu starts one")
+  eq(L.right, 152, "the right column ends where RANK's does")
+  eq(L.gap, 8, "one glyph of air is kept between name and place")
+  eq(L.min, 3, "below three glyphs a place name is not worth showing")
+
+  -- room = max(floor((right - labelX - 8*#name - gap) / 8), 0) -- pinned
+  -- against a hand-worked copy of the formula, not only the inequality it
+  -- exists to satisfy, for every length a trainer name can actually be.
+  for n = 1, Config.NAME_MAX do
+    local name = ("A"):rep(n)
+    local want = math.max(
+      math.floor((L.right - L.labelX - 8 * n - L.gap) / 8), 0)
+    local room = Ui.placeRoom(name)
+    eq(room, want, ("placeRoom matches the formula at %d glyphs"):format(n))
+    check(L.labelX + 8 * n + L.gap + 8 * room <= L.right,
+          ("a place beside a %d-glyph name never reaches the right edge"):format(n))
+  end
+
+  eq(Ui.placeRoom(("A"):rep(Config.NAME_MAX)), 6,
+     "a full-length name still leaves the PALLET of PALLET TOWN")
+  check(Ui.placeRoom(("A"):rep(Config.NAME_MAX)) >= L.min,
+        "and that is still enough of a place name to be worth showing")
+
+  eq(Ui.placeRoom(("A"):rep(80)), 0,
+     "an absurdly long name leaves nothing for a place -- clamped, not negative")
+end
+
+-- ------- Places.name: what the player's own town map calls a map id
+--
+-- The resolver never ships a name of its own -- it reads whatever the
+-- engine already decoded from the player's ROM into
+-- game.data.field.townMap, tolerating both shapes src/ui/TownMap.lua does,
+-- and falls back to the engine's own gsub (TownMap.lua's entryName) when
+-- there is nothing to read.  Driven directly, through the same resolver
+-- every other module in this file goes through.
+do
+  local Places = need("Places")
+
+  local flatGame = { data = { field = { townMap = {
+    PALLET_TOWN = { x = 5, y = 6, name = "PALLET TOWN" },
+  } } } }
+  eq(Places.name(flatGame, "PALLET_TOWN"), "PALLET TOWN",
+     "a flat townMap resolves a name directly")
+
+  local nestedGame = { data = { field = { townMap = { locations = {
+    PALLET_TOWN = { name = "PALLET TOWN" },
+  } } } } }
+  eq(Places.name(nestedGame, "PALLET_TOWN"), "PALLET TOWN",
+     "and so does the .locations shape the extractor can nest it under")
+
+  local labelGame = { data = { field = { townMap = {
+    CERULEAN_CITY = { label = "CERULEAN CITY" },
+  } } } }
+  eq(Places.name(labelGame, "CERULEAN_CITY"), "CERULEAN CITY",
+     "an entry with only a .label reads too, like the engine's own reader")
+
+  eq(Places.name(flatGame, "REDS_HOUSE_1F"), "REDS HOUSE 1F",
+     "a miss falls back to the id with underscores turned to spaces")
+
+  local emptyNameGame = { data = { field = { townMap = {
+    VIRIDIAN_CITY = { name = "" },
+  } } } }
+  eq(Places.name(emptyNameGame, "VIRIDIAN_CITY"), "VIRIDIAN CITY",
+     "an entry whose .name is the empty string is a miss too, not a blank row")
+
+  eq(Places.name(flatGame, nil), nil,
+     "no map id, no place -- nil, not a placeholder string")
+  eq(Places.name(flatGame, ""), nil,
+     "and an empty one is treated the same as none at all")
+
+  -- Nothing here may raise: this runs once per roster row from inside a
+  -- mod callback, and the doc comment on Places.lua is explicit that an
+  -- unexpected shape is allowed to cost a nice name, never the screen.
+  for _, case in ipairs({
+    { "no game at all", nil },
+    { "a game with no .data", {} },
+    { "a .data that is not a table", { data = "junk" } },
+    { "a .field that is not a table", { data = { field = "junk" } } },
+    { "a .townMap that is not a table", { data = { field = { townMap = "junk" } } } },
+    { "a .locations that is not a table",
+      { data = { field = { townMap = { locations = "junk" } } } } },
+  }) do
+    local label, junkGame = case[1], case[2]
+    local ok, result = pcall(Places.name, junkGame, "REDS_HOUSE_1F")
+    check(ok, "Places.name does not raise on " .. label)
+    if ok then
+      eq(result, "REDS HOUSE 1F", "and still falls back to the gsub form on " .. label)
+    end
+  end
 end
 
 end)()

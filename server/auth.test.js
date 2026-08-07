@@ -25,6 +25,7 @@
 
 const crypto = require('crypto');
 const auth = require('./lib/auth.js');
+const config = require('./lib/config.js');
 
 let passed = 0;
 const ok = (cond, label) => {
@@ -519,6 +520,187 @@ function testNewCredential() {
     'two credentials with the same secret still get different ids -- the id is not derived from it');
 }
 
+// ----------------------------------------------------------- the admin flag
+//
+// docs/plans/admin-join-code.md §5 T1: `admin` on a credential (auth.js:259
+// newCredential, auth.js:342 isAdminCredential). The credential model only --
+// what a hub does with the flag once it is admitted (relay.js, server.js) is
+// server/rank.test.js's job over sockets; this pins the primitive underneath.
+
+function testAdminFlag() {
+  const plain = auth.newCredential({ secret: 'AA1111' });
+  const admin = auth.newCredential({ secret: 'AA2222', admin: true });
+
+  ok(admin.admin === true, 'newCredential({ admin: true }) sets admin: true');
+
+  // Byte-identical to the pre-0.9.0 shape: a plain credential must carry no
+  // trace of the feature existing at all, or every config.json an older hub
+  // wrote would look different from one this hub just wrote for the same
+  // options.
+  const plainKeys = Object.keys(plain).sort();
+  const expectedPreAdminKeys = [
+    'id', 'label', 'secret', 'createdAt', 'expiresAt', 'maxUses', 'uses', 'revoked',
+  ].sort();
+  ok(JSON.stringify(plainKeys) === JSON.stringify(expectedPreAdminKeys),
+    'a plain credential\'s key set is exactly the pre-0.9.0 shape -- no admin key at all');
+  ok(!('admin' in plain), 'and "admin" is not a key on it, not merely falsy');
+
+  // The admin credential differs from an equivalent plain one by exactly one
+  // key, and it is the last one appended (auth.js:324 sets it after the
+  // object literal is built) -- proven by key-set difference rather than by
+  // key order, since object key order is not part of the contract anywhere
+  // else in this codebase.
+  const adminKeys = Object.keys(admin).sort();
+  const onlyExtra = adminKeys.filter((k) => !plainKeys.includes(k));
+  ok(onlyExtra.length === 1 && onlyExtra[0] === 'admin',
+    'an admin credential\'s key set is the plain shape plus exactly one extra key: admin');
+  ok(plainKeys.every((k) => adminKeys.includes(k)),
+    'and it loses none of the plain shape\'s keys');
+
+  // admin: false is explicitly requested is documented (auth.js:311-324) to
+  // behave the same as omitting the option -- the field is written only for
+  // a truthy value, never as an explicit false.
+  const explicitFalse = auth.newCredential({ secret: 'AA3333', admin: false });
+  ok(!('admin' in explicitFalse),
+    'newCredential({ admin: false }) writes no admin key either -- never `admin: false` on disk');
+}
+
+/*
+ * isAdminCredential: the one reading everything else must use, and strict on
+ * purpose (auth.js:329-344). Only a literal `true` reads as admin -- every
+ * other spelling a human might hand-edit into config.json is a value nobody
+ * canonicalised, and this gate fails closed on it rather than guessing in
+ * favour of privilege.
+ */
+function testIsAdminCredentialStrictSemantics() {
+  ok(auth.isAdminCredential({ admin: true }) === true, 'admin: true reads as admin');
+
+  const generousSpellings = [1, 'yes', 'true', 'on', '1'];
+  for (const spelling of generousSpellings) {
+    ok(auth.isAdminCredential({ admin: spelling }) === false,
+      `admin: ${JSON.stringify(spelling)} does not read as admin here -- ` +
+      'canonicalising generous spellings is validateCredentials\' job, not this gate\'s');
+  }
+
+  ok(auth.isAdminCredential({}) === false, 'a credential with no admin key at all is not admin');
+  ok(auth.isAdminCredential({ admin: null }) === false, 'admin: null is not admin');
+  ok(auth.isAdminCredential({ admin: undefined }) === false, 'admin: undefined is not admin');
+  ok(auth.isAdminCredential({ admin: false }) === false, 'admin: false is not admin');
+
+  // A null (or otherwise absent) credential, not merely a credential with no
+  // flag -- the outer Boolean(credential) guard.
+  for (const nothing of [null, undefined, false, 0, '']) {
+    ok(auth.isAdminCredential(nothing) === false,
+      `isAdminCredential(${JSON.stringify(nothing)}) is false for a credential that is not one`);
+  }
+
+  // A credential straight out of newCredential round-trips through the one
+  // reading exactly as newCredential wrote it.
+  const admin = auth.newCredential({ admin: true });
+  const player = auth.newCredential({});
+  ok(auth.isAdminCredential(admin) === true, 'a freshly-minted admin credential reads as admin');
+  ok(auth.isAdminCredential(player) === false, 'a freshly-minted plain credential does not');
+}
+
+/*
+ * verify()'s verdict is exactly { ok, credentialId, reason } whether or not
+ * the credential that matched is an admin one -- deciding "is this connection
+ * an operator's" is lib/server.js's authPort wrapper's job (it calls
+ * auth.isAdminCredential(used) itself and adds `admin` to the verdict it
+ * hands the relay), never auth.verify()'s. This is the seam that keeps that
+ * boundary honest.
+ */
+function testVerifyVerdictUntouchedByAdminFlag() {
+  const nonce = auth.newNonce();
+  const admin = auth.newCredential({ secret: 'AA4444', admin: true });
+  const response = auth.sign('AA4444', nonce);
+
+  const result = auth.verify(nonce, response, [admin]);
+  ok(result.ok === true, 'an admin credential still verifies like any other');
+  ok(result.credentialId === admin.id, 'and is identified by its id as usual');
+  ok(result.reason === null, 'with no reason, exactly like a plain credential\'s success');
+
+  ok(JSON.stringify(Object.keys(result).sort()) === JSON.stringify(['credentialId', 'ok', 'reason']),
+    'the verdict carries exactly ok, credentialId and reason -- no admin key of its own');
+  ok(!('admin' in result),
+    'verify() never adds an admin field itself; that is the caller\'s (server.js) job');
+
+  // Same shape either way -- an admin match and a plain match are
+  // indistinguishable from outside verify(), which is the whole point: the
+  // flag only becomes visible one layer up, where the credential that
+  // matched is looked back up by id.
+  const plain = auth.newCredential({ secret: 'AA5555' });
+  const plainResult = auth.verify(nonce, auth.sign('AA5555', nonce), [plain]);
+  ok(JSON.stringify(Object.keys(result).sort()) === JSON.stringify(Object.keys(plainResult).sort()),
+    'an admin credential\'s verdict has the same key set as a plain credential\'s');
+}
+
+/*
+ * The gap this suite closes: docs/plans/admin-join-code.md §7 calls out that
+ * "validateCredentials must not strip the flag on config round-trip (the
+ * save path rewrites every credential from this shape) -- T1 pins it," but
+ * server/config.test.js (not owned by this suite) has no `admin` coverage at
+ * all as of this writing. The auth-level equivalent belongs here: it is
+ * exactly "does a credential this module minted survive the pass config.js
+ * runs it through," which is squarely this file's own concern about the
+ * shape newCredential/isAdminCredential agree on -- not a test of
+ * config.js's unrelated defaulting behaviour.
+ */
+function testAdminRoundTripsThroughConfigValidation() {
+  const adminCred = auth.newCredential({ secret: 'AA6666', admin: true });
+  const playerCred = auth.newCredential({ secret: 'AA7777' });
+
+  const { config: validated, warnings } = config.validate({
+    auth: { required: true, credentials: [adminCred, playerCred] },
+  });
+  ok(warnings.length === 0,
+    'sanity: two credentials minted by newCredential validate with no warnings');
+
+  const shapedAdmin = validated.auth.credentials.find((c) => c.secret === 'AA6666');
+  const shapedPlayer = validated.auth.credentials.find((c) => c.secret === 'AA7777');
+  ok(shapedAdmin.admin === true,
+    'the admin flag survives validateCredentials -- the save path rewrites every ' +
+    'credential from this validated shape, so a flag dropped here demotes an admin ' +
+    'to a player the next time the hub persists a use count');
+  ok(auth.isAdminCredential(shapedAdmin) === true,
+    'and the validated shape still reads as admin through the one canonical reading');
+  ok(shapedPlayer.admin === undefined,
+    'a player credential gains no admin key through validation either -- never ' +
+    'admin: false, mirroring newCredential\'s own byte-identical-to-0.8.0 shape');
+  ok(auth.isAdminCredential(shapedPlayer) === false,
+    'and the validated player shape never reads as admin');
+
+  // The generous human spellings validateCredentials is documented to accept
+  // (lib/config.js:539-544) are canonicalised to `true` before
+  // isAdminCredential ever has to guess at them -- proven end to end here.
+  for (const spelling of ['true', 'YES', 1, 'on']) {
+    const { config: hand } = config.validate({
+      auth: { required: true, credentials: [{ secret: 'AA8888', admin: spelling }] },
+    });
+    const shaped = hand.auth.credentials[0];
+    ok(shaped.admin === true,
+      `a hand-written admin: ${JSON.stringify(spelling)} canonicalises to true through validation`);
+    ok(auth.isAdminCredential(shaped) === true,
+      `...and reads as admin afterward (spelling: ${JSON.stringify(spelling)})`);
+  }
+
+  // ...and an unreadable or negative spelling is written as absent, not as
+  // admin: false and not left as whatever garbage was on disk -- an
+  // unreadable privilege flag is not one validateCredentials resolves in
+  // favour of privilege, the same rule isActive already applies to expiry
+  // and use counts.
+  for (const spelling of ['false', 0, 'no', 'nonsense', {}]) {
+    const { config: hand } = config.validate({
+      auth: { required: true, credentials: [{ secret: 'AA9999', admin: spelling }] },
+    });
+    const shaped = hand.auth.credentials[0];
+    ok(shaped.admin === undefined,
+      `a hand-written admin: ${JSON.stringify(spelling)} validates to no admin key at all`);
+    ok(auth.isAdminCredential(shaped) === false,
+      `...and never reads as admin (spelling: ${JSON.stringify(spelling)})`);
+  }
+}
+
 // --------------------------------------------------------------------- main
 
 function main() {
@@ -529,6 +711,10 @@ function main() {
   testVerify();
   testActiveCredentials();
   testNewCredential();
+  testAdminFlag();
+  testIsAdminCredentialStrictSemantics();
+  testVerifyVerdictUntouchedByAdminFlag();
+  testAdminRoundTripsThroughConfigValidation();
   console.log(`\n  ${passed}/${passed} checks passed  (auth)\n`);
   console.log(`  known-answer vector -- code: ${KAT_CODE}  nonce: ${KAT_NONCE}`);
   console.log(`  known-answer vector -- digest: ${KAT_DIGEST}\n`);

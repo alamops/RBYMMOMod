@@ -156,6 +156,11 @@ function cleanPoints(value) {
 
 const NAME_MAX = 10;
 const MESSAGE_MAX = 60;
+// A message of the day is written once by an operator and read by everyone
+// who joins, so it gets more room than a chat line -- but the same charset
+// and the same collapse to a single line, because it lands in the same
+// scrollback and is drawn by the same code.
+const MOTD_MAX = 120;
 const LOCAL_RADIUS = 12;
 const MAX_LINE = 64 * 1024;
 
@@ -240,6 +245,7 @@ module.exports = {
   RANK_TOKEN_HEX,
   NAME_MAX,
   MESSAGE_MAX,
+  MOTD_MAX,
   LOCAL_RADIUS,
   MAX_LINE,
   PAYLOAD_MAX_DEPTH,

@@ -18,6 +18,7 @@ local Chat = need("Chat")
 local World = need("World")
 local Chars = need("Chars")
 local Cast = need("Cast")
+local Places = need("Places")
 
 local M = {}
 M.__index = M
@@ -690,6 +691,80 @@ function Ranks:draw()
     Font.draw(("%d-%d OF %d"):format(self.offset + 1, last, #rows),
               16, RANK_FOOT_Y)
   end
+end
+
+-- ------- where the people on the roster are
+--
+-- The roster row is a ListMenu row, so the geometry is the widget's
+-- (src/ui/ListMenu.lua:draw): the label starts at x=16 and `right` is
+-- right-aligned to end at 152.  The two share one 160-wide row, which on a
+-- 20-tile screen leaves no room for both a full name and a full place name
+-- -- ten glyphs of "KRABBYMAN" plus eleven of "PALLET TOWN" is half a
+-- screen more than there is.
+--
+-- The name never pays.  It is what the player reads the row by and what
+-- they press A on, so the place takes whatever is left over once the name
+-- and a glyph of air have had theirs -- the opposite of the RANK row, where
+-- the score is fixed-width and the name trims to it.  A name at
+-- Config.NAME_MAX still leaves six glyphs, which is the PALLET of PALLET
+-- TOWN; the short names most players pick leave the place whole.
+local ROSTER_LABEL_X = 16   -- where ListMenu starts a label
+local ROSTER_RIGHT = 152    -- where a right-aligned column ends
+local ROSTER_GAP = 8        -- one glyph of air between the two
+local ROSTER_PLACE_MIN = 3  -- below this a place name is not a name
+
+-- Exported, like M.RANK_LAYOUT, so the suite asserts against the numbers
+-- the screen actually draws with instead of a second copy of them.
+M.ROSTER_LAYOUT = {
+  labelX = ROSTER_LABEL_X, right = ROSTER_RIGHT,
+  gap = ROSTER_GAP, min = ROSTER_PLACE_MIN,
+}
+
+-- How much of a place name fits beside a name, in glyphs.  Pure, for the
+-- same reason M.nameRoom is: a headless suite has no frame to read the
+-- answer off.
+function M.placeRoom(name)
+  local width = 8 * #tostring(name or "")
+  return math.max(math.floor(
+    (ROSTER_RIGHT - ROSTER_LABEL_X - width - ROSTER_GAP) / 8), 0)
+end
+
+-- Cut to that many glyphs, never bytes.  A name has been through Wire's
+-- sanitiser and is ASCII by construction, but a place name has not been
+-- through anything -- it comes from the player's own decoded data, where
+-- the font's charmap can hand back a multi-byte glyph -- and a cut that
+-- lands inside one hands the renderer a broken sequence.  Font.split is the
+-- renderer's own multi-byte-aware pass, the same seam src/Overlay.lua clips
+-- on; the byte path stays for a build without it.
+local function clipPlace(text, room)
+  local cut
+  local Font = mod.ui and mod.ui.Font
+  if type(Font) == "table" and type(Font.split) == "function" then
+    local ok, spans = pcall(Font.split, text)
+    if ok and type(spans) == "table" then
+      if #spans <= room then return text end
+      local last = spans[room]
+      cut = text:sub(1, (last and last.to) or room)
+    end
+  end
+  if not cut then
+    if #text <= room then return text end
+    cut = text:sub(1, room)
+  end
+  -- A cut that lands on a space -- the "PALLET " of PALLET TOWN -- would sit
+  -- a glyph left of the right edge once ListMenu right-aligns it, out of
+  -- line with the PARTY and BUSY rows above, and the space says nothing.
+  return (cut:gsub("%s+$", ""))
+end
+
+-- The right-hand column for a player who is neither in your party nor busy:
+-- where they are, trimmed to the room their name left.
+local function placeColumn(game, player)
+  local place = Places.name(game, player.map)
+  if not place then return nil end
+  local room = M.placeRoom(player.name)
+  if room < ROSTER_PLACE_MIN then return nil end
+  return clipPlace(place, room)
 end
 
 function M.new(ctx)
@@ -2080,20 +2155,27 @@ function M:install()
   -- ------- who is online
 
   screens:register(SCREEN.ROSTER, { new = function(game)
-    local current = World.current()
     local items = {}
     for _, player in ipairs(ctx.roster:sorted()) do
-      local here = current and player.map == current.mapId
       -- Party first: it is the one thing about a player that stays true
       -- while they walk in and out of your map, and it is what tells you the
-      -- INVITE row will not be offered against them.
+      -- INVITE row will not be offered against them.  BUSY next, because a
+      -- player who cannot be talked to is a fact about the row and their
+      -- whereabouts is only context.
+      --
+      -- Otherwise: where they are.  This is what used to be HERE, and the
+      -- place name says that better -- your own map's name against their
+      -- row reads as "here" without having to be told, and it also answers
+      -- the question HERE could not, which is where the rest of them went.
+      -- A player with no map at all is in a battle or a menu; the column
+      -- stays blank for them, exactly as it did before.
       local right
       if ctx.party:isPartner(player.id) then
         right = "PARTY"
       elseif player.busy then
         right = "BUSY"
-      elseif here then
-        right = "HERE"
+      else
+        right = placeColumn(game, player)
       end
       items[#items + 1] = {
         label = player.name,

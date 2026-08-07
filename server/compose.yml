@@ -5,6 +5,8 @@
 #   docker compose exec hub rby-mmo-hub invite list --reveal   # <- your code
 #   docker compose exec hub rby-mmo-hub invite    # another code, for a friend
 #   docker compose exec hub rby-mmo-hub doctor    # what can reach you, and how
+#   docker compose exec hub rby-mmo-hub watch     # who is on it, live
+#   docker compose exec hub rby-mmo-hub broadcast "back in 5"   # tell them so
 #   docker compose down           # stop; the volume, and the join code, remain
 #
 # The first `up` on an empty volume runs `rby-mmo-hub init --yes` for you (see
@@ -40,6 +42,10 @@ services:
       #
       # Changing the *container* port instead means setting RBY_MMO_PORT below,
       # which the config, the listener and the healthcheck all read.
+      #
+      # This is the only port this hub opens. The operator surface is the CLI,
+      # which needs no port at all: `docker compose exec hub rby-mmo-hub watch`
+      # from a shell on this machine, or over SSH from anywhere else.
 
     environment:
       # Where the config lives. Do not change this without also changing the
@@ -69,6 +75,13 @@ services:
       # beside it. Losing this volume loses the join code your friends have
       # already saved. Both files are 0600 inside a 0700 directory; anything
       # that copies this volume off the machine is copying a credential.
+      #
+      # The hub's own files sit here too -- ranking.json, status.json, the
+      # history.jsonl ledger -- along with admin.sock, the socket `kick` and
+      # `broadcast` talk to. That socket is here rather than in /tmp precisely
+      # because this mount is what `docker compose exec` shares and the
+      # container's tmpfs is not; the directory's 0700 is the only thing
+      # authorising it, which is the same boundary config.json already had.
       - rby-mmo-data:/data
 
     # --- sandbox -----------------------------------------------------------

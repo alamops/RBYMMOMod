@@ -119,6 +119,17 @@ speed on your screen as well.
   <img src="docs/screenshots/chat-log.png" width="300" alt="The chat log showing two global messages">
 </p>
 
+**And `PLAYERS` says where they all are.** Every row on the list carries the
+place that trainer is standing in — `VIRIDIAN FOREST`, `CELADON CITY` — so
+"where is everyone" is one menu away rather than a lap of Kanto. That column
+used to read `HERE`, which the place name says better: your own map's name
+against somebody's row reads as *here* without being told, and it answers the
+question `HERE` couldn't, which is where the rest of them went. The names come
+out of the town-map data your own game decodes from your own ROM, so they read
+the way the game reads. `PARTY` and `BUSY` still win the column when they
+apply, and a player in a battle or a menu isn't standing anywhere nameable, so
+theirs stays as it was.
+
 ### 🤝 TEAM UP
 Walk up to a friend, press **A**, pick `INVITE`. They get asked; if they say
 yes you're a **party** — you and one other trainer, and that's the whole
@@ -170,6 +181,15 @@ who *received* the line, and the hub sends a party line to the party alone.
 Unread messages flag the menu with `CHAT*`. And because the vanilla grid has
 **no digits at all**, this mod adds a number page to its own screens —
 **SELECT** flips `ABC` ⇄ `123`.
+
+**A fifth voice you can't type as: `HUB`.** A dedicated hub can carry a
+message of the day, and it lands as a `HUB` line at the top of your chat log
+the moment you connect — no box to dismiss, nothing to press. The host can say
+something mid-evening the same way (`rby-mmo-hub broadcast "back in 5"`) and
+it arrives as another `HUB` line. Which is why nobody is allowed to *be*
+`HUB`: a hub's line carries no sender, so the name is the only thing telling
+you the hub said it, and connecting under it is refused with a sentence asking
+you to pick another.
 
 ### 🔁 TRADE — ANYWHERE
 No Cable Club. No Pokémon Center. Walk up, press **A**, pick `TRADE`. It runs
@@ -575,7 +595,7 @@ behind it.
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
 | `CHARACTER` | not in a game, or connected | change who you look like, right now — in a game it sits under `RANK` and everyone sees it |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
-| `PLAYERS` | connected | who's on, `n/limit` if you're hosting |
+| `PLAYERS` | connected | who's on and **where** — `n/limit` if you're hosting |
 | `CHAT` / `SAY` | connected | the log and sending |
 | `PARTY` | connected | your party: members, party chat, and leaving it |
 | `MY PROFILE` | connected | your own trainer card, as everyone else sees it |
@@ -658,6 +678,11 @@ Pick by how long you want the world to outlive the session.
 | Passcode | minted on the HOST screen | minted by `init`, or you pick it |
 | Passcode entropy | the game's own pool, **not** a CSPRNG | `crypto.randomBytes` |
 | Bans, allowlist, per-address limits | — | yes |
+| Who's online, from a terminal | — | `rby-mmo-hub players`, or `watch` for a live one |
+| Every ranked battle, on the record | — | `history.jsonl`, read with `rby-mmo-hub history` |
+| Throwing somebody out mid-game | — | `rby-mmo-hub kick <name> --reason "…"` |
+| Saying something to everyone | — | a message of the day, and `rby-mmo-hub broadcast` |
+| Operating it from another machine | — | SSH to the box and run the same verbs |
 | Good for | the same Wi-Fi, an evening | friends across the internet, 24/7 |
 
 The two bold rows are the whole difference. Hosting from the game puts the
@@ -774,8 +799,11 @@ is safe to screen-share:
 
 ```console
 $ rby-mmo-hub invite list
-ID       LABEL              CREATED           EXPIRES  USES  STATUS  CODE
-primary  Primary join code  2026-08-03 17:48  never    0     active  ******
+ID       LABEL              CREATED           EXPIRES  USES  STATUS  KIND    CODE
+primary  Primary join code  2026-08-03 17:48  never    0     active  player  ******
+
+KIND: none of these is an admin code. `rby-mmo-hub invite --admin` mints
+one; the hub marks that connection and shows it as ADMIN.
 
 Codes are masked. --reveal prints them in full.
 ```
@@ -784,10 +812,18 @@ Codes are masked. --reveal prints them in full.
 | --- | --- |
 | run it | `rby-mmo-hub start`, or `docker compose up -d` |
 | hand out a second code | `rby-mmo-hub invite --label ash --expires 24h --uses 1` |
+| mint a code that marks its connection as an operator's | `rby-mmo-hub invite --admin --expires 24h` |
 | take one back | `rby-mmo-hub revoke <id>` |
 | change any setting | `rby-mmo-hub config set maxPlayers 8` |
 | see where a value came from | `rby-mmo-hub status` |
-| throw somebody out | `rby-mmo-hub ban 203.0.113.7` |
+| see who's online, and where | `rby-mmo-hub players` |
+| watch that, live | `rby-mmo-hub watch` (`--interval 5`, `--once`) |
+| read the leaderboard | `rby-mmo-hub ranking` — now with W/L |
+| see what's actually been played | `rby-mmo-hub history -n 20` |
+| greet everyone who connects | `rby-mmo-hub config set motd "…"`, then `SIGHUP` |
+| say something to everyone, now | `rby-mmo-hub broadcast "back in 5"` |
+| remove somebody who is on right now | `rby-mmo-hub kick BETA --reason "…"` |
+| keep them from coming back | `rby-mmo-hub ban 203.0.113.7` |
 | check it's actually reachable | `rby-mmo-hub doctor` |
 
 `doctor` is the one to run before you tell anyone the address — it checks the
@@ -811,8 +847,90 @@ Reachability
     lo0     127.0.0.1        loopback (this machine only)
 ```
 
-Credentials, bans and the allowlist reload on `SIGHUP`, so revoking a leaked
-passcode doesn't interrupt the people already playing. The full config table —
+And **`players` answers "who's in my world right now"** without launching the
+game to find out — with where each of them is standing:
+
+```console
+$ rby-mmo-hub players
+2 player(s) online of 8 on 0.0.0.0:7788, snapshot 3s old.
+
+NAME   LOCATION         STATUS  POINTS
+HOSTY  PALLET TOWN              1012
+ALPHA  VIRIDIAN FOREST  PARTY   1004
+```
+
+`rby-mmo-hub ranking` prints the season the same way — with **W and L**
+columns — and `rby-mmo-hub history` prints the battles behind it, newest
+first, out of a `history.jsonl` ledger the hub appends to as each ranked match
+settles and rotates at half a megabyte so it can never run away with the disk.
+All of those read files the hub keeps beside its config, so when the hub isn't
+running they say so plainly rather than reporting a room that emptied hours
+ago. **`rby-mmo-hub watch`** is `players` on a loop for the evenings you'd
+rather leave it up.
+
+Three verbs are the other kind — they talk to the hub while it's up, over a
+socket in the same directory, so filesystem permissions are the whole
+authorisation:
+
+```console
+$ rby-mmo-hub broadcast Restarting in 5 for a config change.
+Delivered to 3 player(s).
+
+$ rby-mmo-hub kick BETA --reason Take the evening off
+Kicked 1 player(s): BETA.
+They were shown: Take the evening off
+```
+
+The kicked player sees the reason on their own screen — and a kick is not a
+ban, so `ban` or `revoke` first if you want it to stick.
+
+**`rby-mmo-hub stats`** is the third, and the only reading no file holds: the
+door as it stands this second — connections open, handshakes in flight, wrong
+passcodes against the ceiling that trips, whether it *is* tripped, and how
+many addresses are backing off. Those counters live in the hub's memory and
+are written nowhere, so `status` can only print what they are configured to
+be. Addresses are counted, never printed, `--json` included.
+
+```console
+$ rby-mmo-hub stats
+The hub
+  address   0.0.0.0:7788
+  uptime    14s
+  protocol  5
+  players   3 of 8
+  pending   1 connection(s) not in the world yet
+
+The door
+  connections  4 open, from 1 address(es)
+  handshakes   1 connection(s) still to be greeted
+  wrong codes  1 of 100 in the last 1m
+  lockdown     no
+  throttled    0 address(es) backing off now
+  tracked      1 address(es) with failures remembered
+```
+
+**The operator surface is the CLI, and there is no web page.** To run it from
+somewhere other than the hub's own machine, SSH to the box and type the same
+verbs (`docker compose exec hub rby-mmo-hub …` once you are on it). Everything
+a page could have shown you is `watch`, `players`, `ranking`, `history` and
+`stats` — that last one for the live door counters, which no file holds — and
+reached that way it is already encrypted and authenticated, by SSH itself,
+which is more than a login form on a plaintext port would have managed.
+
+**Admin join codes mark a connection.** `rby-mmo-hub invite --admin` mints
+one: it joins the game exactly like any other code — same six characters, same
+screen — and the hub *marks* the connection it opened. The client is told
+about itself, and operator views carry the mark: `invite list`'s `KIND`
+column reads `ADMIN`, and the JSON rosters — `players --json`, `status.json`,
+the admin socket's `who` — carry an `admin` flag on the connection. Other
+players are never shown it. `revoke <id>` takes one back like any other, and
+it's worth pairing with `--expires`, because an admin code is worth more to a
+thief than a player's one is. It is groundwork: **there is no in-game operator
+feature yet**, just the flag the ones that come later will check.
+
+Credentials, bans, the allowlist and the message of the day reload on
+`SIGHUP`, so revoking a leaked passcode doesn't interrupt the people already
+playing. The full config table —
 every key, default and bound, including the seven that tune the wrong-passcode
 throttle — is in [server/README.md](server/README.md).
 
@@ -1048,7 +1166,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `0.8.0` and it ships flagged `experimental` on purpose. The full list
+It's `0.9.0` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 

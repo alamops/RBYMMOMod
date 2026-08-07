@@ -105,6 +105,19 @@ local rankingSeen = false
 -- screen says out loud rather than leaving to be inferred from a zero.
 local rankedHere = true
 
+-- Whether the hub considers this connection an operator's.
+--
+-- Derived by the hub from the credential the connection authenticated with,
+-- never from anything this client sent -- a client that could assert it
+-- would be a client that promotes itself. Older hubs and ordinary player
+-- codes send nothing, and both read as false, which is the honest answer in
+-- either case.
+--
+-- Nothing in the mod uses it yet. It exists so the operator features that
+-- arrive later have one fact to check instead of each inventing its own
+-- notion of who is in charge.
+local myAdmin = false
+
 -- Which hub this connection is talking to, and whether its challenge has
 -- already been answered.  Both belong to exactly one connection: an
 -- mmo.error means "wrong join code" only when it lands after we answered a
@@ -1155,6 +1168,11 @@ function M.disconnect()
   myPoints, ranking = Config.RANK_START, {}
   rankingAsked, rankingSeen = false, false
   rankedHere = true
+  -- Cleared with the rating, and for a sharper reason: being an operator is
+  -- a fact about one connection's credential, so carrying it out of that
+  -- connection would let a code used once quietly grant powers on the next
+  -- hub -- or in single-player -- until something happened to overwrite it.
+  myAdmin = false
 end
 
 -- Leaving covers both shapes so callers never have to ask which they are:
@@ -1399,6 +1417,10 @@ handlers[Wire.WELCOME] = function(game, msg)
   -- same as being refused a name; treat silence as ranked and let the empty
   -- leaderboard speak for itself.
   rankedHere = msg.ranked ~= false
+  -- Kept exactly as sent and compared rather than coerced: only a literal
+  -- true is an operator. Absent -- an older hub, or a plain player code --
+  -- is false, and so is anything else that arrives in the field.
+  myAdmin = msg.admin == true
   for _, raw in ipairs(msg.players or {}) do
     ctx.roster:put(Wire.presence(raw))
   end
@@ -1439,6 +1461,19 @@ handlers[Wire.WELCOME] = function(game, msg)
         .. "appear under START > MMO > SERVERS; rejoin it with JOIN GAME",
         tostring(dialled), tostring(why))
     end
+  end
+  -- The hub gets the first word: its message of the day goes into the
+  -- scrollback above the connection's own status line, so the first thing
+  -- read on arrival is what the operator wrote rather than a count.
+  --
+  -- Pushed with no `from` on purpose.  A bubble is stored against a player
+  -- id and drawn over that player's head, and the hub stands on no map and
+  -- owns no avatar -- so it gets a line in the log and nothing over the
+  -- world.  A hub with nothing to say, or one too old to have the field at
+  -- all, sends nothing and this does nothing.
+  local motd = Wire.text(msg.motd, Config.MOTD_MAX)
+  if motd and motd ~= "" then
+    ctx.chat:push({ name = "HUB", scope = "global", text = motd })
   end
   -- Deliberately not a text box. ui:say pushes a modal that sits over the
   -- world until someone presses A, and a routine status line is not worth
@@ -2026,6 +2061,11 @@ function M.install()
   mod.exports.points = function() return myPoints end
   mod.exports.isRanked = function() return rankedHere end
   mod.exports.ranking = function() return ranking end
+  -- Whether the hub this copy is on treats it as an operator's connection.
+  -- False offline, false on every hub that was joined with a player code --
+  -- a mod building an operator feature gates on this rather than on a list
+  -- of names it keeps itself.
+  mod.exports.isAdmin = function() return myAdmin == true end
   mod.exports.requestRanking = function() return M.requestRanking() end
   -- newest last, same order the chat screen scrolls
   mod.exports.chat = function() return ctx.chat:recent() end

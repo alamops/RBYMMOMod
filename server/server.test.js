@@ -36,7 +36,10 @@ const crypto = require('node:crypto');
 const { spawn } = require('child_process');
 const assert = require('assert');
 
-const { start } = require('./lib/server.js');
+const {
+  start, STATUS_FILENAME, STATUS_HEARTBEAT_MS,
+  HISTORY_FILENAME, HISTORY_MAX_BYTES, ADMIN_SOCKET_FILENAME,
+} = require('./lib/server.js');
 // Read from the relay rather than typed in, so a protocol bump is one edit
 // in one file and not a hunt through two suites for the greeting that still
 // says the old number.
@@ -70,8 +73,14 @@ class Client {
   // `host` is almost always the default. It is a parameter for exactly one
   // reason: the per-address throttle has to be shown sparing a *different*
   // address, and on a dual-stack listener ::1 is one. See secondLoopback().
-  constructor(port, host = '127.0.0.1') {
-    this.socket = net.createConnection({ port, host });
+  //
+  // The one-line variant: pass `{ path }` instead of a port to speak to a
+  // Unix socket -- the admin channel -- over the same inbox/expect machinery
+  // every game-port scenario in this file already uses.
+  constructor(portOrOptions, host = '127.0.0.1') {
+    const options = (portOrOptions && typeof portOrOptions === 'object')
+      ? portOrOptions : { port: portOrOptions, host };
+    this.socket = net.createConnection(options);
     this.socket.setEncoding('utf8');
     this.buffer = '';
     this.inbox = [];
@@ -93,6 +102,23 @@ class Client {
   }
   send(type, payload) {
     this.socket.write(JSON.stringify(Object.assign({}, payload, { type })) + '\n');
+  }
+  // The admin socket's protocol has no `type` field (it dispatches on `cmd`,
+  // and answers with `ok`), so it does not fit send()'s "merge a type in"
+  // shape. This writes exactly the object it is given.
+  sendRaw(text) {
+    this.socket.write((typeof text === 'string' ? text : JSON.stringify(text)) + '\n');
+  }
+  // For a one-shot exchange (admin.sock: one request line, one response
+  // line) where there is no `type` field to match on -- the inbox already
+  // holds whatever parsed, this just waits for the first of it.
+  async expectAny(timeoutMs = 1500) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.inbox.length) return this.inbox.shift();
+      await sleep(10);
+    }
+    throw new Error('timed out waiting for any message');
   }
   async expect(type, timeoutMs = 1500) {
     const deadline = Date.now() + timeoutMs;
@@ -135,6 +161,16 @@ function rawConnect(port) {
     socket.once('connect', () => resolve(socket));
     socket.once('error', reject);
   });
+}
+
+// ------------------------------------------------------------- small helpers
+
+// A short-named temp dir, straight under the OS temp root rather than a
+// deeply-nested one of our own -- wave 2 starts an admin.sock beside every
+// config file it is handed, and a Unix socket path is capped at ~104 bytes
+// on darwin. A long prefix here is exactly how that cap gets hit by accident.
+function shortTmpDir(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
 // -------------------------------------------------------------- HMAC, by hand
@@ -1381,6 +1417,641 @@ async function passcodeRequiredTest() {
 }
 
 // =========================================================================
+// the status snapshot -- docs/plans/server-side-listing.md §3
+// =========================================================================
+//
+// `players`/`ranking` (server/cli.test.js) read status.json/ranking.json by
+// hand, against fixtures -- the contract is the interface, and that suite
+// never starts a real hub. This is the other half: proving the hub actually
+// writes the file that contract describes, at the moments it describes.
+//
+// Every scenario here needs a real configPath (statusPath is derived from
+// it -- see lib/server.js), unlike startServer()'s ephemeral-port helper
+// above, which never sets one at all.
+
+function statusServerConfig(overrides = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rby-mmo-status-test-'));
+  const configPath = path.join(dir, 'config.json');
+  const cfg = baseConfig(overrides);
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  return { dir, configPath, cfg };
+}
+
+async function startStatusServer(overrides = {}, extra = {}) {
+  const { dir, configPath, cfg } = statusServerConfig(overrides);
+  const handle = await start(Object.assign({
+    config: cfg, log: NULL_LOG, configPath, handleSignals: false,
+    allowUnauthenticated: true,
+  }, extra));
+  return { handle, dir };
+}
+
+function readStatus(handle) {
+  return JSON.parse(fs.readFileSync(handle.statusPath, 'utf8'));
+}
+
+const STATUS_CONTRACT_FIELDS = [
+  'name', 'sprite', 'map', 'x', 'y', 'busy', 'party', 'points', 'ranked',
+  'admin',  // 0.9.0: which connection holds an admin code -- operator surfaces only
+].sort();
+
+async function statusSnapshotCreatedAtStartupTest() {
+  const { handle, dir } = await startStatusServer();
+  try {
+    ok(handle.statusPath === path.join(dir, STATUS_FILENAME),
+      'the status snapshot lives beside the config file, named as documented');
+    ok(fs.existsSync(handle.statusPath),
+      'a snapshot exists the moment the hub is listening, before any player arrives');
+
+    const snapshot = readStatus(handle);
+    ok(snapshot.version === 1, 'the snapshot is versioned');
+    ok(Array.isArray(snapshot.players) && snapshot.players.length === 0,
+      'and starts with an empty roster, not a missing key');
+    ok(snapshot.stoppedAt === null, 'a running hub has not stopped');
+    ok(snapshot.heartbeatMs === STATUS_HEARTBEAT_MS,
+      'the snapshot names its own heartbeat schedule');
+    ok(typeof snapshot.startedAt === 'number' && snapshot.startedAt > 0,
+      'and timestamps when it started');
+    ok(typeof snapshot.updatedAt === 'number' && snapshot.updatedAt > 0,
+      'and when this copy was written');
+
+    const mode = fs.statSync(handle.statusPath).mode & 0o777;
+    ok(mode === 0o600, 'the file is written 0600, exactly like the ranking');
+    ok(!fs.existsSync(`${handle.statusPath}.tmp`),
+      'and the temporary file used for the atomic write is not left behind');
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function statusUpdatesAfterJoinAndLeaveTest() {
+  const { handle, dir } = await startStatusServer({ maxPlayers: 4 });
+  const port = handle.port;
+  try {
+    const client = new Client(port);
+    await client.ready();
+    client.send('mmo.hello', { proto: PROTOCOL, name: 'JOINER' });
+    await client.expect('mmo.welcome');
+
+    // Bounded by the exported heartbeat, not a copied number: whatever the
+    // hub's own debounce is, a heartbeat later is a moment the contract
+    // guarantees the file is current -- waitFor exits the instant it is.
+    const updated = await waitFor(() => {
+      try {
+        return readStatus(handle).players.length === 1;
+      } catch (err) {
+        return false;
+      }
+    }, STATUS_HEARTBEAT_MS);
+    ok(updated, 'the snapshot picks up a join within its debounce budget');
+
+    const entry = readStatus(handle).players[0];
+    ok(entry.name === 'JOINER', 'and the joined player is the one it names');
+    ok(JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(STATUS_CONTRACT_FIELDS),
+      `carrying exactly the ${STATUS_CONTRACT_FIELDS.length} contract fields, nothing else`);
+    ok(!fs.existsSync(`${handle.statusPath}.tmp`),
+      'that write leaves no temporary file behind either');
+
+    client.close();
+    const emptied = await waitFor(() => {
+      try {
+        return readStatus(handle).players.length === 0;
+      } catch (err) {
+        return false;
+      }
+    }, STATUS_HEARTBEAT_MS);
+    ok(emptied, 'and the roster empties again once the player disconnects');
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function statusStoppedAtOnCloseTest() {
+  const { handle, dir } = await startStatusServer();
+  const port = handle.port;
+  try {
+    const client = new Client(port);
+    await client.ready();
+    client.send('mmo.hello', { proto: PROTOCOL, name: 'LEAVER' });
+    await client.expect('mmo.welcome');
+
+    await handle.close();
+
+    const snapshot = readStatus(handle);
+    ok(typeof snapshot.stoppedAt === 'number' && snapshot.stoppedAt > 0,
+      'a clean shutdown records when it stopped');
+    ok(Array.isArray(snapshot.players) && snapshot.players.length === 0,
+      'and the roster is emptied in the same write, whoever was still connected');
+    ok(!fs.existsSync(`${handle.statusPath}.tmp`),
+      'the final write leaves no temporary file behind either');
+
+    client.close();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function statusSnapshotCarriesNothingSensitiveTest() {
+  const code = 'NPQR34';
+  const { handle, dir } = await startStatusServer({
+    auth: { required: true, credentials: [credential('primary', code)] },
+  });
+  const port = handle.port;
+  try {
+    const client = new Client(port);
+    await client.ready();
+    client.send('mmo.hello', { proto: PROTOCOL, name: 'SECRET' });
+    const challenge = await client.expect('mmo.challenge');
+    client.send('mmo.auth', { response: hmacHex(code, challenge.nonce) });
+    await client.expect('mmo.welcome');
+
+    const updated = await waitFor(() => {
+      try {
+        return readStatus(handle).players.length === 1;
+      } catch (err) {
+        return false;
+      }
+    }, STATUS_HEARTBEAT_MS);
+    ok(updated, 'the authenticated player reaches the snapshot');
+
+    const raw = fs.readFileSync(handle.statusPath, 'utf8');
+    ok(!raw.includes(code), 'the join code used to authenticate never appears in the snapshot');
+    ok(!/token/i.test(raw), 'nor any claim-token material');
+    ok(!/credential/i.test(raw), 'nor a credential id');
+
+    const entry = readStatus(handle).players[0];
+    ok(!('id' in entry) && !('sessionId' in entry) && !('partyId' in entry)
+      && !('address' in entry),
+      'and the player entry itself carries no client id, session id, party id or address');
+
+    client.close();
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ------- the admin flag on welcome, and in status.json, for a real pair
+//
+// authHandshakeTest and the throttle scenarios drive real challenge/response
+// handshakes, but none of their credentials is an admin one. This scenario
+// is the missing combination: two real clients on one hub, one holding an
+// admin code and one holding a player code, so `welcome.admin` and the
+// status snapshot's per-connection flag are checked against each other
+// rather than in isolation.
+
+async function authAdminWelcomeAndStatusTest() {
+  const ADMIN_CODE = 'ADMN12';
+  const PLAYER_CODE = 'PYQR34';
+  const { handle, dir } = await startStatusServer({
+    auth: {
+      required: true,
+      credentials: [
+        credential('opadmin', ADMIN_CODE, { admin: true }),
+        credential('opplayer', PLAYER_CODE),
+      ],
+    },
+  });
+  const port = handle.port;
+
+  try {
+    const admin = new Client(port);
+    await admin.ready();
+    admin.send('mmo.hello', { proto: PROTOCOL, name: 'OPADMIN' });
+    const adminChallenge = await admin.expect('mmo.challenge');
+    admin.send('mmo.auth', { response: hmacHex(ADMIN_CODE, adminChallenge.nonce) });
+    const adminWelcome = await admin.expect('mmo.welcome');
+    ok(adminWelcome.admin === true, 'an admin code\'s welcome carries admin: true');
+
+    const player = new Client(port);
+    await player.ready();
+    player.send('mmo.hello', { proto: PROTOCOL, name: 'OPPLAYER' });
+    const playerChallenge = await player.expect('mmo.challenge');
+    player.send('mmo.auth', { response: hmacHex(PLAYER_CODE, playerChallenge.nonce) });
+    const playerWelcome = await player.expect('mmo.welcome');
+    ok(!('admin' in playerWelcome),
+      'a sibling client with a player code gets no admin key at all -- absent, not false');
+
+    const settled = await waitFor(() => {
+      try {
+        const byName = {};
+        for (const row of readStatus(handle).players) byName[row.name] = row;
+        return byName.OPADMIN && byName.OPADMIN.admin === true &&
+          byName.OPPLAYER && byName.OPPLAYER.admin === false;
+      } catch (err) {
+        return false;
+      }
+    }, STATUS_HEARTBEAT_MS);
+    ok(settled, 'status.json rows carry admin: true for the admin connection ' +
+      'and admin: false for the player one');
+
+    admin.close();
+    player.close();
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// =========================================================================
+// wave 2: match history, the admin socket, MOTD reload
+// -- docs/plans/server-live-ops.md §3
+// =========================================================================
+//
+// rank.test.js pins the arithmetic and the anti-cheat by driving lib/relay.js
+// directly with fake peer handles -- no sockets, no server.js. Nothing in
+// this codebase yet drives a *ranked battle to a settlement* over real
+// sockets, so playRankedBattle() below is that recipe, built from the wire
+// handlers themselves (mmo.request/respond -> mmo.session -> mmo.result):
+// two clients, a battle-kind session, and a result each side agrees on.
+//
+// Everything that needs a real data directory (history.jsonl, admin.sock)
+// uses shortTmpDir(): server.js starts an admin socket beside *any*
+// configPath now, and a Unix socket path is capped at ~104 bytes on darwin
+// -- see the comment on shortTmpDir() above.
+
+/*
+ * A full ranked battle, start to finish, over real TCP: hello for both,
+ * a battle request/response, the session both sides land in, and a result
+ * each of them agrees on. Returns the connected clients (left open, for a
+ * caller that wants to keep playing with them -- broadcast and kick both
+ * want a live connection to observe) and the welcomes/session id.
+ */
+async function playRankedBattle(port, winnerName, loserName) {
+  const winner = new Client(port);
+  const loser = new Client(port);
+  await winner.ready();
+  await loser.ready();
+  winner.send('mmo.hello', { proto: PROTOCOL, name: winnerName });
+  loser.send('mmo.hello', { proto: PROTOCOL, name: loserName });
+  const winnerWelcome = await winner.expect('mmo.welcome');
+  const loserWelcome = await loser.expect('mmo.welcome');
+
+  winner.send('mmo.request', { to: loserWelcome.id, kind: 'battle' });
+  await loser.expect('mmo.request');
+  loser.send('mmo.respond', { to: winnerWelcome.id, kind: 'battle', accept: true });
+
+  const winnerSession = await winner.expect('mmo.session');
+  await loser.expect('mmo.session');
+
+  winner.send('mmo.result', { session: winnerSession.id, outcome: 'win' });
+  loser.send('mmo.result', { session: winnerSession.id, outcome: 'loss' });
+
+  // publishPoints() broadcasts one mmo.rank per side, to everyone ready --
+  // each of these two included -- so both eventually see at least one.
+  await winner.expect('mmo.rank');
+  await loser.expect('mmo.rank');
+
+  return { winner, loser, winnerWelcome, loserWelcome, sessionId: winnerSession.id };
+}
+
+// One JSON line, matching the fixed contract in the plan exactly: at,
+// startedAt, repeats, winner{name,points,gained}, loser{name,points,lost} --
+// nothing else on either level.
+function assertHistoryRecordShape(record, winnerName, loserName) {
+  ok(typeof record.at === 'number' && record.at > 0,
+    'the record timestamps when the battle ended');
+  ok(typeof record.startedAt === 'number' && record.startedAt > 0,
+    'and when it started');
+  ok(Object.keys(record).sort().join(',') === 'at,loser,repeats,startedAt,winner',
+    'carrying exactly the five contract fields, nothing else');
+  ok(record.winner.name === winnerName, 'the winner is named');
+  ok(Object.keys(record.winner).sort().join(',') === 'gained,name,points',
+    'the winner sub-object carries exactly its three contract fields');
+  ok(record.loser.name === loserName, 'the loser is named');
+  ok(Object.keys(record.loser).sort().join(',') === 'lost,name,points',
+    'and the loser sub-object carries exactly its three');
+}
+
+// ------- history.jsonl: appended, 0600, one line per settled ranked battle
+
+async function historyRecordAssertions(handle, winnerName, loserName) {
+  ok(handle.historyPath === path.join(path.dirname(handle.configPath), HISTORY_FILENAME),
+    'the ledger lives beside the config, named as documented');
+
+  const written = await waitFor(() => {
+    try { return fs.readFileSync(handle.historyPath, 'utf8').trim().length > 0; }
+    catch (err) { return false; }
+  }, 2000);
+  ok(written, 'a settled ranked battle is appended to history.jsonl');
+
+  const mode = fs.statSync(handle.historyPath).mode & 0o777;
+  ok(mode === 0o600, 'the ledger is created 0600, exactly like the ranking and the snapshot');
+
+  const lines = fs.readFileSync(handle.historyPath, 'utf8').split('\n').filter(Boolean);
+  ok(lines.length === 1, 'exactly one line for exactly one settled battle');
+
+  const record = JSON.parse(lines[0]);
+  assertHistoryRecordShape(record, winnerName, loserName);
+  ok(record.repeats === 0, 'a first meeting between these two names has no repeats');
+  ok(record.winner.points === 16 && record.winner.gained === 16,
+    'an even first match pays the winner half of RANK_K, the same number rank.test.js pins');
+  ok(record.loser.points === 0 && record.loser.lost === 0,
+    'and a brand-new loser has nothing to lose in the first place -- points floor at zero');
+}
+
+// ------- history.jsonl: rotation to .1 at HISTORY_MAX_BYTES
+
+async function historyRotationTest() {
+  const dir = shortTmpDir('rbyhist-');
+  const configPath = path.join(dir, 'config.json');
+  const cfg = baseConfig({});
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+
+  const historyPath = path.join(dir, HISTORY_FILENAME);
+  const dummyRecord = {
+    at: 1, startedAt: 1, repeats: 0,
+    winner: { name: 'AAAA', points: 1, gained: 1 },
+    loser: { name: 'BBBB', points: 0, lost: 1 },
+  };
+  const dummyLine = `${JSON.stringify(dummyRecord)}\n`;
+  const lineBytes = Buffer.byteLength(dummyLine);
+  // Just under the ceiling -- close enough that the next real record (a
+  // little over a hundred bytes) is guaranteed to push it over, however its
+  // exact length varies with the names and the timestamps involved.
+  const target = HISTORY_MAX_BYTES - 60;
+  const wholeLines = Math.floor(target / lineBytes);
+  const remainder = target - wholeLines * lineBytes;
+  const fixture = dummyLine.repeat(wholeLines) + 'F'.repeat(remainder);
+  fs.writeFileSync(historyPath, fixture, { mode: 0o600 });
+  ok(fs.statSync(historyPath).size === target,
+    'the fixture is planted at a precise, known size just under the ceiling');
+
+  const handle = await start({
+    config: cfg, log: NULL_LOG, configPath, handleSignals: false, allowUnauthenticated: true,
+  });
+  const opened = [];
+  try {
+    ok(handle.historyPath === historyPath, 'the hub found the fixture already in place');
+
+    const battle = await playRankedBattle(handle.port, 'ROTATEW', 'ROTATEL');
+    opened.push(battle.winner, battle.loser);
+
+    const rotated = await waitFor(() => fs.existsSync(`${historyPath}.1`), 2000);
+    ok(rotated, 'the write that would cross the ceiling rotates the ledger first');
+
+    ok(fs.readFileSync(`${historyPath}.1`, 'utf8') === fixture,
+      'the previous generation is renamed intact, byte for byte');
+
+    const freshLines = fs.readFileSync(historyPath, 'utf8').split('\n').filter(Boolean);
+    ok(freshLines.length === 1, 'the fresh ledger holds exactly the one new line');
+    const record = JSON.parse(freshLines[0]);
+    ok(record.winner.name === 'ROTATEW',
+      'and it is the battle whose write triggered the rotation');
+  } finally {
+    for (const client of opened) client.close();
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ------- admin.sock: who / stats / kick / broadcast / malformed / unknown
+
+async function adminAsk(adminPath, payload, timeoutMs = 1500) {
+  const client = new Client({ path: adminPath });
+  await client.ready();
+  client.sendRaw(payload);
+  const response = await client.expectAny(timeoutMs);
+  client.close();
+  return response;
+}
+
+async function adminSocketTest(handle, battle) {
+  ok(fs.existsSync(handle.adminPath), 'the admin socket file exists once the hub is up');
+  const info = fs.lstatSync(handle.adminPath);
+  ok(info.isSocket(), 'and it really is a socket, not a stray file');
+  ok((info.mode & 0o777) === 0o600, 'restricted to its owner, exactly like the ranking file');
+
+  const who = await adminAsk(handle.adminPath, { cmd: 'who' });
+  ok(who.ok === true, 'who answers ok');
+  ok(Array.isArray(who.players), 'carrying a players array');
+  ok(who.count === who.players.length, 'whose count matches the array length');
+  ok(who.players.some((p) => p.name === battle.winnerWelcome.name || p.name === 'RED'),
+    'and the roster names the player from the ranked battle above');
+  ok(typeof who.maxPlayers === 'number', 'plus the configured player cap');
+
+  const stats = await adminAsk(handle.adminPath, { cmd: 'stats' });
+  ok(stats.ok === true, 'stats answers ok');
+  ok(stats.stats && typeof stats.stats.limits === 'object',
+    'nesting the hardening counters under limits, not merged into the top level');
+  ok('auth' in stats.stats.limits,
+    'including the authentication throttle telemetry');
+
+  // ---- kick: a connected player is told, then actually disconnected
+  const target = new Client(handle.port);
+  await target.ready();
+  target.send('mmo.hello', { proto: PROTOCOL, name: 'KICKME' });
+  await target.expect('mmo.welcome');
+  const closed = new Promise((resolve) => target.socket.once('close', () => resolve(true)));
+
+  const kick = await adminAsk(handle.adminPath, { cmd: 'kick', name: 'kickme' });
+  ok(kick.ok === true && kick.kicked === 1,
+    'kick matches the name case-insensitively and reports exactly one removal');
+  ok(Array.isArray(kick.names) && kick.names[0] === 'KICKME',
+    'and names who was removed, in the case they actually joined under');
+
+  const goodbye = await target.expect('mmo.error');
+  ok(/operator/i.test(goodbye.message), 'the kicked player is told an operator removed them');
+  const socketEnded = await Promise.race([closed, sleep(2000).then(() => false)]);
+  ok(socketEnded, 'and their socket is actually closed, not just told');
+  target.close();
+
+  // ---- broadcast: an ordinary HUB chat line, heard by whoever is connected
+  const text = 'Server restarting in five minutes';
+  const broadcast = await adminAsk(handle.adminPath, { cmd: 'broadcast', text });
+  ok(broadcast.ok === true && broadcast.delivered >= 1,
+    'broadcast reports how many players heard it');
+  const heard = await battle.winner.expect('mmo.chat');
+  ok(heard.name === 'HUB' && heard.scope === 'global' && heard.text === text,
+    'and a connected player hears it as an ordinary hub-authored chat line');
+
+  // ---- malformed line / unknown command
+  const malformed = await adminAsk(handle.adminPath, 'this is not json at all');
+  ok(malformed.ok === false, 'a line that is not JSON is answered, not dropped');
+
+  const unknown = await adminAsk(handle.adminPath, { cmd: 'nonsense' });
+  ok(unknown.ok === false, 'an unrecognised command is refused rather than guessed at');
+}
+
+// ------- admin.sock: stale-socket recovery, a non-socket squatter, and
+// close() actually removing the file
+
+function staleSocketHelperScript(socketPath) {
+  return [
+    "'use strict';",
+    "const net = require('net');",
+    'const s = net.createServer();',
+    `s.listen(${JSON.stringify(socketPath)}, () => { process.stdout.write('up\\n'); });`,
+  ].join('\n');
+}
+
+/*
+ * Leaves a socket file at `socketPath` with nobody listening behind it --
+ * the shape a crashed hub leaves, and the one admin.js's bind() recovery
+ * (EADDRINUSE -> lstat -> isSocket -> unlink -> retry) exists for.
+ *
+ * SIGKILL, not close(): a graceful close() on this platform unlinks the file
+ * itself (verified by hand against this Node), which would leave nothing
+ * stale to recover from. A killed process is the honest way to reproduce it.
+ */
+function plantStaleSocket(socketPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['-e', staleSocketHelperScript(socketPath)],
+      { stdio: ['ignore', 'pipe', 'inherit'] });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('the stale-socket helper never came up'));
+    }, 3000);
+    child.stdout.on('data', (chunk) => {
+      if (!String(chunk).includes('up')) return;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      setTimeout(resolve, 200);
+    });
+  });
+}
+
+async function adminStaleSocketRecoveryTest() {
+  const dir = shortTmpDir('rbyad1-');
+  const configPath = path.join(dir, 'config.json');
+  const cfg = baseConfig({});
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  const adminPath = path.join(dir, ADMIN_SOCKET_FILENAME);
+
+  await plantStaleSocket(adminPath);
+  ok(fs.existsSync(adminPath), 'the stale socket file from the crashed helper is still there');
+
+  const handle = await start({
+    config: cfg, log: NULL_LOG, configPath, handleSignals: false, allowUnauthenticated: true,
+  });
+  try {
+    ok(handle.adminPath === adminPath, 'the hub found the same path the stale socket occupied');
+    const who = await adminAsk(adminPath, { cmd: 'who' });
+    ok(who.ok === true,
+      'a stale socket left by a crashed hub is recovered, not mistaken for a live one');
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function adminNonSocketFileTest() {
+  const dir = shortTmpDir('rbyad2-');
+  const configPath = path.join(dir, 'config.json');
+  const cfg = baseConfig({});
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  const adminPath = path.join(dir, ADMIN_SOCKET_FILENAME);
+  fs.writeFileSync(adminPath, 'not a socket, just a file\n');
+
+  const log = recordingLog();
+  const handle = await start({
+    config: cfg, log, configPath, handleSignals: false, allowUnauthenticated: true,
+  });
+  try {
+    ok(handle.port > 0, 'a plain file squatting the admin path does not stop the hub itself');
+    ok(fs.readFileSync(adminPath, 'utf8') === 'not a socket, just a file\n',
+      'this module will not delete a file it did not create');
+    ok(log.saw(/admin socket did not start/i),
+      'the admin socket is reported missing, in the log, rather than silently absent');
+
+    const dialed = await new Promise((resolve) => {
+      const socket = net.createConnection({ path: adminPath });
+      socket.once('error', () => resolve(true));
+      socket.once('connect', () => { socket.destroy(); resolve(false); });
+    });
+    ok(dialed, 'and nothing is actually listening at that path');
+  } finally {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function adminCloseUnlinksSocketTest() {
+  const dir = shortTmpDir('rbyad3-');
+  const configPath = path.join(dir, 'config.json');
+  const cfg = baseConfig({});
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  const adminPath = path.join(dir, ADMIN_SOCKET_FILENAME);
+
+  const handle = await start({
+    config: cfg, log: NULL_LOG, configPath, handleSignals: false, allowUnauthenticated: true,
+  });
+  try {
+    ok(fs.lstatSync(adminPath).isSocket(), 'the socket exists while the hub is up');
+  } finally {
+    await handle.close();
+  }
+  ok(!fs.existsSync(adminPath), 'and close() removes it');
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ------- the shared hub: history, admin, and MOTD reload together
+//
+// One hub, walked through all three in sequence, per plan §5/T2's own
+// instruction to share a hub across these where isolation allows. Only the
+// rotation test above needs a ledger pre-sized to the byte, which is not
+// something a shared hub's history could offer once other scenarios have
+// already written to it -- so that one keeps its own directory.
+
+async function operatorFeaturesTest() {
+  const dir = shortTmpDir('rbyops-');
+  const configPath = path.join(dir, 'config.json');
+  const cfg = baseConfig({ motd: '' });
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+
+  const handle = await start({
+    config: cfg, log: NULL_LOG, configPath, handleSignals: false, allowUnauthenticated: true,
+  });
+  const opened = [];
+  try {
+    // ---- MOTD: absent before anyone edits the config
+    const before = new Client(handle.port);
+    opened.push(before);
+    await before.ready();
+    before.send('mmo.hello', { proto: PROTOCOL, name: 'FIRSTIN' });
+    const beforeWelcome = await before.expect('mmo.welcome');
+    ok(!('motd' in beforeWelcome), 'a hub started with no MOTD sends no motd field at all');
+
+    // ---- match history: a real ranked battle over real sockets
+    const battle = await playRankedBattle(handle.port, 'RED', 'BLUE');
+    opened.push(battle.winner, battle.loser);
+    await historyRecordAssertions(handle, 'RED', 'BLUE');
+
+    // ---- the admin socket
+    await adminSocketTest(handle, battle);
+
+    // ---- MOTD: a SIGHUP-equivalent reload() picks up an edit, without
+    // touching the player already connected
+    const updatedConfig = Object.assign({}, cfg, {
+      motd: 'Welcome trainers! Read the rules.',
+    });
+    fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 2), { mode: 0o600 });
+    const reloaded = handle.reload();
+    ok(reloaded === true, 'reload() re-reads the file and reports success');
+
+    const after = new Client(handle.port);
+    opened.push(after);
+    await after.ready();
+    after.send('mmo.hello', { proto: PROTOCOL, name: 'SECONDIN' });
+    const afterWelcome = await after.expect('mmo.welcome');
+    ok(afterWelcome.motd === 'Welcome trainers! Read the rules.',
+      'a client that joins after the reload gets the new MOTD, cleaned and verbatim');
+
+    ok(!('motd' in beforeWelcome),
+      'and the welcome the first client already received carries nothing retroactively');
+    before.send('mmo.ping', {});
+    await before.expect('mmo.pong');
+    ok(true, 'the first client is still connected and entirely unaffected by the reload');
+  } finally {
+    for (const client of opened) client.close();
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// =========================================================================
 // driver
 // =========================================================================
 
@@ -1403,6 +2074,17 @@ async function main() {
   await shutdownHookTest();
   await gracefulShutdownInProcessTest();
   await gracefulShutdownSigtermTest();
+  await statusSnapshotCreatedAtStartupTest();
+  await statusUpdatesAfterJoinAndLeaveTest();
+  await statusStoppedAtOnCloseTest();
+  await statusSnapshotCarriesNothingSensitiveTest();
+  await authAdminWelcomeAndStatusTest();
+
+  await historyRotationTest();
+  await adminStaleSocketRecoveryTest();
+  await adminNonSocketFileTest();
+  await adminCloseUnlinksSocketTest();
+  await operatorFeaturesTest();
 
   console.log(`\n  ${passed}/${passed} checks passed  (server)\n`);
 }
