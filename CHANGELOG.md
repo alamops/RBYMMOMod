@@ -30,7 +30,12 @@ here must match `manifest.version`.
   whole pixels, so the size is a whole multiple of the letterbox scale and
   never a fraction of one. A font that fails to load costs the toasts their
   look and never the message — LÖVE's own face is used, and the warning names
-  the folder to reinstall.
+  the folder to reinstall. **A line too long for one row is wrapped between
+  words onto the next**, up to three rows for one notification, so a sentence
+  is read whole rather than cut at the nineteen characters an eight-pixel
+  glyph leaves inside a 160-wide playfield; the plate is budgeted against the
+  window to the right of it rather than against the letterbox, capped at half
+  again the playfield so nothing runs across a maximised desktop.
 - **Chat toasts, every scope, your own lines included.** `EVERYONE`,
   `NEARBY`, `PARTY` and — the one a bubble could never carry — `WHISPER`,
   because a toast is drawn in the receiving player's own corner rather than
@@ -59,6 +64,9 @@ here must match `manifest.version`.
   of stopping a sentence mid-way. **The fighter is not told what they just
   watched** — both hubs leave the sender out of the fan-out — and a link,
   ranked or co-op battle sends nothing, since both sides were already there.
+  Gated on the same half-second window chat is, in both hubs: honest traffic
+  is at most one per battle, and this is prose appearing unasked-for in the
+  corner of somebody else's screen.
 - **`mod.exports.toasts()`** hands a driver the queue as a copy, plus what the
   last draw decided. A toast is not a screen anything can be pushed onto and
   it is gone five seconds later, so without this the only way to assert one

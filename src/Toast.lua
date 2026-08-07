@@ -216,22 +216,17 @@ function M.font(size)
   return font
 end
 
--- Cut a line to what the plate has room for, on a character boundary.
+-- The longest prefix of `text` that fits, and whatever is left of it.
 --
 -- Measured with the font rather than counted, because this face is bundled
 -- and the fallback is not: the two do not agree on how wide anything is, and
 -- a column count that fits one overflows the other.  The walk steps whole
--- UTF-8 sequences so a cut can never hand the renderer half a glyph -- names
--- are sanitised, but the party marker upstream is already three bytes and
--- nothing here should be the thing that assumes otherwise.
+-- UTF-8 sequences so a break can never hand the renderer half a glyph --
+-- names are sanitised, but the party marker upstream is already three bytes
+-- and nothing here should be the thing that assumes otherwise.
 local TAIL = "..."
 
-local function fit(font, text, maxWidth)
-  if maxWidth <= 0 then return "" end
-  if font:getWidth(text) <= maxWidth then return text end
-  local budget = maxWidth - font:getWidth(TAIL)
-  if budget <= 0 then return "" end
-
+local function split(font, text, maxWidth)
   local cut, index = 0, 1
   while index <= #text do
     local byte = text:byte(index)
@@ -240,11 +235,81 @@ local function fit(font, text, maxWidth)
     elseif byte >= 0xE0 then size = 3
     elseif byte >= 0xC0 then size = 2 end
     local stop = index + size - 1
-    if font:getWidth(text:sub(1, stop)) > budget then break end
+    if font:getWidth(text:sub(1, stop)) > maxWidth then break end
     cut, index = stop, stop + 1
   end
-  if cut == 0 then return "" end
-  return text:sub(1, cut) .. TAIL
+  return text:sub(1, cut), text:sub(cut + 1)
+end
+
+-- Cut a line to what the plate has room for, with an ellipsis to say so.
+-- Only ever reached for the last row of an entry that wrapped past its cap.
+local function fit(font, text, maxWidth)
+  if maxWidth <= 0 then return "" end
+  if font:getWidth(text) <= maxWidth then return text end
+  local budget = maxWidth - font:getWidth(TAIL)
+  if budget <= 0 then return "" end
+  local head = split(font, text, budget)
+  if head == "" then return "" end
+  return head .. TAIL
+end
+
+-- How many rows one queue entry may grow to.
+--
+-- A wrapped entry is still one entry against Config.TOAST_MAX -- it has to
+-- be, or a chatty friend would push an arrival off the stack twice as fast
+-- as a quiet one -- so the bound on how much screen the stack can eat has to
+-- live here instead.  Three rows times five entries is fifteen, which is the
+-- most the corner will ever hold, and a sentence that needs a fourth is the
+-- one case still worth an ellipsis.
+local WRAP_MAX = 3
+
+-- Break a line into rows the plate has room for, on word boundaries.
+--
+-- Wrapping rather than cutting is the whole point.  Press Start 2P is eight
+-- game pixels a glyph, so a plate measured against the 160-wide playfield
+-- holds nineteen characters -- fewer than "ALPHA joined the server" -- and
+-- every notification longer than that used to arrive as an ellipsis.  A
+-- sentence broken between words is read at a glance; the same sentence cut
+-- at nineteen glyphs is not read at all.
+--
+-- A single word too long for a row of its own is broken mid-word, because a
+-- name or a species with no space in it must not be the thing that decides
+-- how wide the plate is.
+local function wrap(font, text, maxWidth)
+  if maxWidth <= 0 then return {} end
+
+  local words = {}
+  for word in text:gmatch("%S+") do words[#words + 1] = word end
+
+  local rows, line, index = {}, "", 1
+  while index <= #words do
+    local word = words[index]
+    local candidate = line == "" and word or (line .. " " .. word)
+    if font:getWidth(candidate) <= maxWidth then
+      line, index = candidate, index + 1
+    elseif line ~= "" then
+      rows[#rows + 1] = line
+      line = ""
+    else
+      local head, tail = split(font, word, maxWidth)
+      -- Not even one glyph fits: there is no row to put anything on, and
+      -- looping would spin forever on a word that never shrinks.
+      if head == "" then return rows end
+      rows[#rows + 1] = head
+      words[index] = tail
+    end
+  end
+  if line ~= "" then rows[#rows + 1] = line end
+
+  if #rows > WRAP_MAX then
+    -- Everything past the cap is folded back onto the last row it fits on,
+    -- so the ellipsis lands where the sentence actually stops rather than at
+    -- a word boundary the reader cannot see.
+    local overflow = fit(font, table.concat(rows, " ", WRAP_MAX, #rows), maxWidth)
+    for n = #rows, WRAP_MAX, -1 do rows[n] = nil end
+    if overflow ~= "" then rows[WRAP_MAX] = overflow end
+  end
+  return rows
 end
 
 -- The letterbox, or the window when the viewport does not describe one.
@@ -268,6 +333,31 @@ local function geometry(viewport)
   end
   if not width or width <= 0 then width = VIEW_W * scale end
   return scale, x, y, width, derived
+end
+
+-- How wide one row of a toast may be, in window pixels.
+--
+-- Deliberately not the playfield.  A nameplate belongs to a character
+-- standing on a tile and is therefore bounded by the tiles; a toast belongs
+-- to nobody on the map and is drawn in window space, so the room it may use
+-- is the room actually to its right -- which on any window worth playing on
+-- is a good deal more than the 160 game pixels the letterbox is.
+--
+-- Capped at half again the playfield all the same: a maximised window would
+-- otherwise let one chat line run the width of the desktop, and a toast that
+-- has to be tracked across a monitor is no longer something read in passing.
+local WIDE = 1.5
+
+local function budgetWidth(viewport, scale, x, gameWidth)
+  local room = gameWidth * WIDE
+  local windowW = viewport and tonumber(viewport.width)
+  if not (windowW and windowW > 0) then
+    windowW = love.graphics.getWidth and love.graphics.getWidth() or nil
+  end
+  if windowW and windowW > 0 then
+    room = math.min(room, windowW - x - INSET * scale)
+  end
+  return room - PAD * 2 * scale
 end
 
 -- Reset the graphics state before drawing and put it back after.
@@ -296,11 +386,20 @@ local function endFrame(restore)
   love.graphics.setShader(restore.shader)
 end
 
+-- The two verdicts that cost nothing to reach, answered from a shared table
+-- rather than a fresh one.  draw() runs every frame and the queue is empty on
+-- nearly all of them, so building a diagnostic nobody asked for on the idle
+-- path is the allocation the engine's hot-path rule is about.  Read by
+-- M:state and never written by it.
+local EMPTY = { reached = "empty", drawn = 0 }
+local NO_GRAPHICS = { reached = "no-graphics", drawn = 0 }
+
 function M:draw(viewport)
-  self.last = { reached = "entered", drawn = 0 }
-  local last = self.last
-  if not (love and love.graphics) then last.reached = "no-graphics" return end
-  if #self.queue == 0 then last.reached = "empty" return end
+  if not (love and love.graphics) then self.last = NO_GRAPHICS return end
+  if #self.queue == 0 then self.last = EMPTY return end
+
+  local last = { reached = "entered", drawn = 0 }
+  self.last = last
 
   local scale, gameX, gameY, gameWidth, derived = geometry(viewport)
   last.scale, last.gameX, last.gameY, last.derived = scale, gameX, gameY, derived
@@ -308,25 +407,27 @@ function M:draw(viewport)
   local font = M.font(GLYPH * scale)
   if not font then last.reached = "no-font" return end
 
-  local maxWidth = gameWidth - (INSET * 2 + PAD * 2) * scale
+  local x = gameX + INSET * scale
+  local maxWidth = budgetWidth(viewport, scale, x, gameWidth)
   local restore = beginFrame()
   love.graphics.setFont(font)
 
-  local x = gameX + INSET * scale
+  -- One entry, one or more rows.  Each row gets a plate of its own, sized to
+  -- its own text, so a wrapped sentence reads as a block in the corner rather
+  -- than as one plate with a ragged line in it.
   local y = gameY + INSET * scale
   for _, entry in ipairs(self.queue) do
-    local text = fit(font, entry.text, maxWidth)
-    if text ~= "" then
+    for _, row in ipairs(wrap(font, entry.text, maxWidth)) do
       love.graphics.setColor(0, 0, 0, 0.65)
       love.graphics.rectangle("fill", x, y,
-        font:getWidth(text) + PAD * 2 * scale, ROW * scale)
+        font:getWidth(row) + PAD * 2 * scale, ROW * scale)
       love.graphics.setColor(1, 1, 1, 1)
-      love.graphics.print(text, x + PAD * scale, y + PAD * scale)
+      love.graphics.print(row, x + PAD * scale, y + PAD * scale)
       last.drawn = last.drawn + 1
       last.lines = last.lines or {}
-      last.lines[#last.lines + 1] = text
+      last.lines[#last.lines + 1] = row
+      y = y + STEP * scale
     end
-    y = y + STEP * scale
   end
 
   endFrame(restore)
@@ -334,6 +435,6 @@ function M:draw(viewport)
 end
 
 M.GLYPH, M.PAD, M.INSET, M.ROW, M.STEP = GLYPH, PAD, INSET, ROW, STEP
-M.VIEW_W, M.VIEW_H = VIEW_W, VIEW_H
+M.VIEW_W, M.VIEW_H, M.WRAP_MAX = VIEW_W, VIEW_H, WRAP_MAX
 
 return M

@@ -518,6 +518,16 @@ handlers['mmo.party_event'] = (relay, client, msg) => {
   if (!client.ready || !client.partyId) return;
   const event = cleanPartyEvent(msg);
   if (!event) return;
+
+  // The chat gate, on the chat interval, for the same reason chat has one:
+  // this is prose appearing unasked-for in the corner of somebody else's
+  // screen, and a modified client sending it in a loop is the whole attack.
+  // The honest traffic is at most one per battle, so half a second costs a
+  // legitimate partner nothing. src/Hub.lua gates it at the same moment.
+  const now = relay.now();
+  if (now - client.lastPartyEvent < relay.chatIntervalMs) return;
+  client.lastPartyEvent = now;
+
   const payload = Object.assign({}, event,
     { from: client.id, name: client.name });
   for (const member of relay.partyMembers(client.partyId)) {
@@ -985,6 +995,8 @@ class Relay {
       // -Infinity, not 0: an injected clock that starts at zero would
       // otherwise gate the very first message a player ever sends.
       lastChat: -Infinity,
+      // gated on the chat interval too: it is prose on a partner's screen
+      lastPartyEvent: -Infinity,
       lastRanks: -Infinity,
       // last mid-session character change
       lastSprite: -Infinity,
