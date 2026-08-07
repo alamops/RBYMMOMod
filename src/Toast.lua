@@ -10,11 +10,9 @@
 -- way this differs from src/Overlay.lua.  A nameplate belongs to a character
 -- standing on a tile, so it has to live in the same coordinates that
 -- character does; a toast belongs to nobody on the map.  Window space also
--- buys the font a real pixel per glyph pixel at any window size, and this
--- font is the reason that matters -- Press Start 2P has the lowercase and
--- the punctuation the ROM font does not, and it is only legible if its 8x8
--- cells land on whole pixels.  The size is therefore a whole multiple of the
--- letterbox scale, never a fraction of it.
+-- lets the face stay small and antialiased at any window size -- Rajdhani
+-- has the lowercase and punctuation the ROM font does not, and it is meant
+-- to be read at ~12px with a linear filter, not scaled up with the letterbox.
 --
 -- The queue is deliberately separable from the drawing: push/update/clear is
 -- plain arithmetic on a list and is pinned by the headless suite, where
@@ -31,15 +29,12 @@ M.__index = M
 -- usable scale (another mod owning the world pass -- see Overlay's draw).
 local VIEW_W, VIEW_H = 160, 144
 
--- Layout, in game pixels; every one of them is multiplied by the letterbox
--- scale before it reaches the screen.  GLYPH is Press Start 2P's design
--- size: the face is drawn on an 8x8 grid, so any whole multiple of 8 is
--- crisp and anything else is not.
-local GLYPH = 8
-local PAD = 2                       -- plate margin around the text
-local INSET = 2                     -- gap between the plate and the corner
-local ROW = GLYPH + PAD * 2
-local STEP = ROW + 1
+-- Layout in *window* pixels.  Kept small on purpose: a toast is a glance,
+-- not a second HUD, and growing with the letterbox scale made the old
+-- pixel face dominate the corner on any window larger than 1x.
+local PAD = 3                       -- plate margin around the text
+local INSET = 6                     -- gap between the plate and the corner
+local ROW_GAP = 2                   -- air between stacked rows
 
 function M.new(ctx)
   return setmetatable({ ctx = ctx, queue = {} }, M)
@@ -210,10 +205,22 @@ function M.font(size)
     font = made
   end
 
-  -- A pixel face scaled with a smoothing filter is a blurry pixel face.
-  pcall(font.setFilter, font, "nearest", "nearest")
+  -- Linear: this is a smooth HUD face at a small size, not a pixel sheet.
+  pcall(font.setFilter, font, "linear", "linear")
   fonts[size] = font
   return font
+end
+
+-- Point size for the toast face.  Anchored in window pixels so a 4x window
+-- does not get four times the type -- that was the whole complaint about
+-- the previous face.  A tiny bump above 2x keeps it readable on a big
+-- monitor without ever looking like a banner.
+local function toastSize(scale)
+  local base = tonumber(Config.TOAST_SIZE) or 12
+  scale = tonumber(scale) or 1
+  if scale >= 4 then return base + 2 end
+  if scale >= 3 then return base + 1 end
+  return base
 end
 
 -- The longest prefix of `text` that fits, and whatever is left of it.
@@ -265,12 +272,10 @@ local WRAP_MAX = 3
 
 -- Break a line into rows the plate has room for, on word boundaries.
 --
--- Wrapping rather than cutting is the whole point.  Press Start 2P is eight
--- game pixels a glyph, so a plate measured against the 160-wide playfield
--- holds nineteen characters -- fewer than "ALPHA joined the server" -- and
--- every notification longer than that used to arrive as an ellipsis.  A
--- sentence broken between words is read at a glance; the same sentence cut
--- at nineteen glyphs is not read at all.
+-- Wrapping rather than cutting is the whole point: a chat line or a capture
+-- sentence is longer than a nameplate-width plate, and a sentence broken
+-- between words is read at a glance where the same sentence cut mid-way is
+-- not read at all.
 --
 -- A single word too long for a row of its own is broken mid-word, because a
 -- name or a species with no space in it must not be the thing that decides
@@ -355,9 +360,9 @@ local function budgetWidth(viewport, scale, x, gameWidth)
     windowW = love.graphics.getWidth and love.graphics.getWidth() or nil
   end
   if windowW and windowW > 0 then
-    room = math.min(room, windowW - x - INSET * scale)
+    room = math.min(room, windowW - x - INSET)
   end
-  return room - PAD * 2 * scale
+  return math.max(0, room - PAD * 2)
 end
 
 -- Reset the graphics state before drawing and put it back after.
@@ -404,10 +409,12 @@ function M:draw(viewport)
   local scale, gameX, gameY, gameWidth, derived = geometry(viewport)
   last.scale, last.gameX, last.gameY, last.derived = scale, gameX, gameY, derived
 
-  local font = M.font(GLYPH * scale)
+  local font = M.font(toastSize(scale))
   if not font then last.reached = "no-font" return end
 
-  local x = gameX + INSET * scale
+  local rowH = font:getHeight() + PAD * 2
+  local step = rowH + ROW_GAP
+  local x = gameX + INSET
   local maxWidth = budgetWidth(viewport, scale, x, gameWidth)
   local restore = beginFrame()
   love.graphics.setFont(font)
@@ -415,18 +422,18 @@ function M:draw(viewport)
   -- One entry, one or more rows.  Each row gets a plate of its own, sized to
   -- its own text, so a wrapped sentence reads as a block in the corner rather
   -- than as one plate with a ragged line in it.
-  local y = gameY + INSET * scale
+  local y = gameY + INSET
   for _, entry in ipairs(self.queue) do
     for _, row in ipairs(wrap(font, entry.text, maxWidth)) do
       love.graphics.setColor(0, 0, 0, 0.65)
       love.graphics.rectangle("fill", x, y,
-        font:getWidth(row) + PAD * 2 * scale, ROW * scale)
+        font:getWidth(row) + PAD * 2, rowH)
       love.graphics.setColor(1, 1, 1, 1)
-      love.graphics.print(row, x + PAD * scale, y + PAD * scale)
+      love.graphics.print(row, x + PAD, y + PAD)
       last.drawn = last.drawn + 1
       last.lines = last.lines or {}
       last.lines[#last.lines + 1] = row
-      y = y + STEP * scale
+      y = y + step
     end
   end
 
@@ -434,7 +441,8 @@ function M:draw(viewport)
   last.reached = "drawn"
 end
 
-M.GLYPH, M.PAD, M.INSET, M.ROW, M.STEP = GLYPH, PAD, INSET, ROW, STEP
+M.PAD, M.INSET, M.ROW_GAP = PAD, INSET, ROW_GAP
 M.VIEW_W, M.VIEW_H, M.WRAP_MAX = VIEW_W, VIEW_H, WRAP_MAX
+M.toastSize = toastSize
 
 return M

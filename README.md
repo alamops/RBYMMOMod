@@ -218,9 +218,9 @@ their wins, their losses and their catches reach **you and nobody else** —
 the hub sends them to the party alone, and the fighter isn't told what they
 just watched happen.
 
-The font is **Press Start 2P**, bundled with the mod under the SIL Open Font
-Licence — the game's own font has no lowercase and no punctuation, which a
-chat line needs both of.
+The font is **Rajdhani**, bundled with the mod under the SIL Open Font
+Licence — small, smooth, and with the lowercase and punctuation a chat line
+needs that the game's own font does not carry.
 
 ### 🔁 TRADE — ANYWHERE
 No Cable Club. No Pokémon Center. Walk up, press **A**, pick `TRADE`. It runs
