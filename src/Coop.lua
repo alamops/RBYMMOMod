@@ -533,6 +533,23 @@ function M:onTrainerBattle(game, state, mapId)
   return true
 end
 
+-- Is this state still on the stack at all?
+--
+-- Three answers, not two: true, false, and *nil* for "this stack cannot say".
+-- A caller that treats "cannot say" as "no" would refuse to unwind anything at
+-- all against a stack that only offers a top, and a caller that treats it as
+-- "yes" is exactly as safe as it was before this existed. Both readings are
+-- used below.
+function M:onStack(game, target)
+  local stack = game and game.stack
+  local states = stack and stack.states
+  if not (target and type(states) == "table") then return nil end
+  for i = #states, 1, -1 do
+    if states[i] == target then return true end
+  end
+  return false
+end
+
 -- Take everything above `target` off the stack, and optionally `target` too.
 --
 -- The prompt is one or two widget states deep depending on how far the player
@@ -542,6 +559,18 @@ end
 function M:unwindTo(game, target, alsoPop)
   local stack = game and game.stack
   if not (stack and target) then return false end
+  -- Never go looking for something that is not there.
+  --
+  -- The loop below stops on identity or on a guard of sixteen, and there is no
+  -- third way out -- so a target that has already left the stack does not fail
+  -- to find it, it takes sixteen screens down with it hunting for it. Mid-
+  -- battle that is the battle and the world underneath.
+  --
+  -- A held reference outliving its state is not an exotic condition: a battle
+  -- that finishes itself pops itself, and every reference anybody kept to it
+  -- is stale from that instant. So this is checked rather than assumed, and
+  -- the answer to a stale target is to do nothing at all.
+  if self:onStack(game, target) == false then return false end
   local guard = 0
   while stack:top() and stack:top() ~= target and guard < 16 do
     stack:pop()
@@ -906,6 +935,48 @@ function M:onJoined(game, msg)
   })
 end
 
+-- The engine's battle *this* client walked into, when the fight it is being
+-- sent into is the one it is standing in front of.
+--
+-- The player who waited hands their own battle over through `waiting.engine`
+-- (see M:onJoined).  This is the other half of that, and it was missing for a
+-- long time.  Both players trigger the trainer, so the engine builds a real
+-- BattleState on *both* machines -- the reference is client-local and could
+-- never have crossed the wire, which is exactly why it has to be picked up
+-- here rather than read off the message.  Without it, startBattle's unwind
+-- never ran for the player who joined: their own battle sat under the co-op
+-- screen for the whole fight and resurfaced the moment it popped, so the
+-- trainer they had just beaten alongside a friend was put in front of them
+-- again, alone.  See the comment on the unwind in M:startBattle, which
+-- describes this exact failure and only ever prevented half of it.
+--
+-- Keyed on the battle the hub named rather than taken on trust, and that is
+-- the whole of the safety here.  `self.encounter` is whatever trainer this
+-- client last walked into, and two ways into a co-op battle have nothing to do
+-- with it: a party-versus-party fight, which has foes and for which no
+-- encounter is ever the right answer, and a join from the ACTIONS menu, where
+-- nobody walked into anything and nil is the correct answer.  Matching the key
+-- adopts the encounter only when it is demonstrably the same fight, and leaves
+-- a mismatched one alone rather than handing it somebody else's result.
+--
+-- Matching the key is not quite enough on its own, because an encounter can
+-- outlive its battle: a player who says yes keeps theirs deliberately (see
+-- M:askToJoin) and the hub can still drop that join -- the partner pressing
+-- STOP in the same tick is enough -- in which case they fight the trainer
+-- alone, that battle finishes itself, and the reference left behind names
+-- nothing. The key would still match a later fight against the same class on
+-- the same map, and the same lead. So the state has to still be *there*, which
+-- is the one question the stack can answer for certain.
+function M:joinedEngine(game, msg, foes)
+  if foes then return nil end
+  local encounter = self.encounter
+  if not encounter then return nil end
+  local key = Wire.battleKey(msg and msg.battle)
+  if not (key and encounter.battle == key) then return nil end
+  if self:onStack(game, encounter.engine) == false then return nil end
+  return encounter.engine
+end
+
 -- We joined theirs, or all four agreed.  One entry point for both, because
 -- from here on they are the same thing: a set of fighters the hub has just
 -- confirmed are all still connected.
@@ -927,6 +998,10 @@ function M:onBattle(game, msg)
     side = side,
     allies = allies,
     foes = foes,
+    -- The battle this client is standing in front of, so the co-op one can
+    -- stand in for it and hand it its result.  Nil on both paths that were
+    -- never standing in front of anything -- see M:joinedEngine.
+    engine = self:joinedEngine(game, msg, foes),
     -- Derived from the id the hub named rather than assumed, so exactly one of
     -- the four believes it is the host.
     host = hostId ~= nil and self.party:isSelf(hostId),
@@ -1361,8 +1436,11 @@ function M:startBattle(game, field)
   -- through its own cache, with the trainer's palette and the padding the
   -- draw offsets assume; loading the file directly would give a differently
   -- coloured, differently placed copy. So the entrance is shown by whoever
-  -- walked into them, and a client that joined by invitation opens straight
-  -- on the monsters rather than on a picture that is subtly wrong.
+  -- walked into them -- which is *both* players on the wait-and-join path,
+  -- since each of them triggered the trainer and each holds their own battle.
+  -- It is nil only for somebody who walked into nothing: a party-versus-party
+  -- fight, and a join taken from the ACTIONS menu. Those open straight on the
+  -- monsters rather than on a picture that is subtly wrong.
   local trainerPic = engine and engine.trainerPic
   for i, slot in ipairs(field.slots or {}) do
     local built = {
@@ -1440,6 +1518,25 @@ function M:startBattle(game, field)
     self:unwindTo(game, engine, true)
     self.engineBattle = engine
   end
+  -- The encounter slot is emptied here whatever was in it, and the two cases
+  -- it empties are different.
+  --
+  -- The battle we just displaced is now held in `engineBattle`, and one slot
+  -- for one battle is the whole point: `release()` unwinds *to* whatever the
+  -- encounter names, and what it named is no longer on the stack.  M:reset
+  -- takes that path on a dropped connection, mid-battle.  onBattleOver puts
+  -- the battle back in this slot when there is finally a result to hand it.
+  --
+  -- Anything *else* in the slot is a trainer this battle did not fight, and
+  -- must not be told it did.  A player can be standing at a trainer, prompt
+  -- up, when a party-versus-party ask arrives and is answered -- and a party
+  -- battle displaces nothing, so nothing here would have cleared it.  Left
+  -- there, consume() would hand that trainer the *party* battle's result:
+  -- marked beaten by a fight they were not in, and their prize money paid.
+  -- Dropped instead, their battle is still sitting on the stack and comes back
+  -- when this screen pops -- so the trainer is fought, for real, which is rule
+  -- 2 and the honest outcome.
+  self.encounter = nil
   -- And on the challenge path there is no engine battle to unwind to, which
   -- is exactly how the asker's "Asked NAME for a 2-on-2 battle." box used to
   -- get buried: nothing took it down, the battle screen went on top of it, a
