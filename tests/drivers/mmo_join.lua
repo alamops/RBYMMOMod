@@ -61,10 +61,17 @@ return function(game)
     return
   end
 
-  -- The trainer this player owns, taken before anything is dialled. Joining
-  -- swaps the live renderer for the chosen character and leaving has to put
-  -- this exact object back -- so it is held by identity from here to the
-  -- LEAVE check at the end of the run.
+  -- What this player is drawn with, before anything is dialled -- no longer
+  -- guaranteed to be the vanilla trainer the way it was before leaving
+  -- stopped restoring it. MMO_GUEST_SPRITE is an explicit choice
+  -- (SPRITE_COOLTRAINER_M, never RED -- see Client.explicitChoice), and the
+  -- widened refreshLook wears an explicit choice on the very first
+  -- map.entered (src/Client.lua's refreshLook), which already fired, more
+  -- than once, during U.newGame's walk through the intro. So this may
+  -- already be a mod-built renderer for the chosen character rather than
+  -- the engine's own -- kept only to prove *something* is drawn at all.
+  -- Every check below asks which character the sheet draws from, not
+  -- whether it is this same object (see H.wornMatches).
   local ownSheet = H.playerSheet(game)
   check(ownSheet ~= nil, "the player is drawn with something to begin with")
 
@@ -380,11 +387,20 @@ return function(game)
   U.wait(60)
 
   -- Joining changes what *this* player sees too, not just what the host
-  -- sees. Checked before the map change below so the restore check at the
+  -- sees. Checked before the map change below so the leave check at the
   -- end cannot pass vacuously on a look that was never worn.
-  local wornSheet = H.playerSheet(game)
-  check(wornSheet ~= nil and wornSheet ~= ownSheet,
-        "joining put the chosen character on this player")
+  --
+  -- Not an identity check against ownSheet any more: connect() calls
+  -- applyLook unconditionally (src/Client.lua's connect), which always
+  -- builds a fresh SpriteRenderer, so a plain `~= ownSheet` would be true
+  -- here even if joining changed nothing -- and now that an explicit choice
+  -- is worn offline too, ownSheet was already this same character before
+  -- dialling. What says the join genuinely worked is the sheet still
+  -- matching the chosen id, not merely being a different table.
+  local wornOk, wornLook, wornImage = H.wornMatches(game, exports)
+  log("worn after joining:", tostring(wornLook), tostring(wornImage))
+  check(wornOk,
+        "joining leaves the player genuinely drawn as their chosen character")
 
   -- ------- 1. leave the map and come back
 
@@ -402,10 +418,15 @@ return function(game)
   -- A map change re-wears the look, and the overworld usually hands back the
   -- same player object when it does. That is where the trainer sheet used to
   -- be lost: it was replaced with the mod's own renderer, and leaving then
-  -- "restored" the player to the character they picked for the hub. Still
-  -- wearing it here, and still able to get back, is the pair that says so.
-  check(H.playerSheet(game) ~= ownSheet,
-        "still wearing the chosen character after a map change")
+  -- "restored" the player to the character they picked for the hub.
+  --
+  -- Object-identity-free for the same reason as the join check above: a
+  -- rewear rebuilds the renderer regardless of whether the character
+  -- changed, so what a map change has to leave intact is which character
+  -- the sheet draws from, not the table it happens to live in this frame.
+  local stillOk, stillLook, stillImage = H.wornMatches(game, exports)
+  log("worn after the map change:", tostring(stillLook), tostring(stillImage))
+  check(stillOk, "still wearing the chosen character after a map change")
 
   -- The guest's own character, in the world, facing the camera. Here for the
   -- same reason the host's is where it is: the guest has just teleported
@@ -560,6 +581,53 @@ return function(game)
       check(false, "could not open PROFILE")
     end
 
+    -- ------- 4b. the host changes character mid-session; watch it land here
+    --
+    -- The mirror of mmo_host.lua's own leg of the same name: it waits on
+    -- `guest_interact_done` (signalled just below) before touching its
+    -- menu, then signals `host_char_changed` once its own worn look proves
+    -- the pick landed, and waits on `guest_saw_char_change` before moving
+    -- on to the trade.
+    --
+    -- **The baseline is read before the barrier, not after it, and the poll
+    -- is for the id rather than for "different".** This is the one "did the
+    -- peer's change reach me" check in this file where the barrier cannot be
+    -- a fence: mmo.sprite goes out at the instant the host's own look moves,
+    -- so it is already on this side's roster by the time
+    -- `host_char_changed` -- which the host writes a second later, after
+    -- closing its menus -- shows up here. A baseline sampled after that
+    -- barrier is the *new* value, and "wait for it to differ from itself"
+    -- can only ever time out. So the sample is taken on the way in, a
+    -- second before the host is even told it may pick, and the assertion
+    -- names SPRITE_NIRE outright: an absolute answer cannot be raced, and
+    -- the baseline's job shrinks to proving there was something to change
+    -- from.
+    local function watchHostCharChange(before)
+      local beforeSprite = before and before.sprite
+      check(beforeSprite ~= nil and beforeSprite ~= "SPRITE_NIRE",
+            "the host is on the roster as somebody other than NIRE to begin with")
+
+      H.await(game, "host_char_changed")
+
+      local sawRoster, sawAvatar = false, false
+      H.waitSeconds(game, function()
+        local player = exports.players()[1]
+        local avatar = H.avatarRow(exports)
+        sawRoster = player ~= nil and player.sprite == "SPRITE_NIRE"
+        sawAvatar = avatar ~= nil and avatar.sprite == "SPRITE_NIRE"
+        return sawRoster and sawAvatar
+      end, 45, "the host's character change to reach the guest")
+
+      check(sawRoster, "the host's roster row picked up the character they chose")
+      check(sawAvatar,
+            "and the respawned avatar row shows that character too")
+      if sawRoster and sawAvatar then
+        U.shot(game, SHOT_DIR .. "/join-host-recharacter.png")
+      end
+
+      H.signal("guest_saw_char_change")
+    end
+
     -- ------- 5. take the menu up on it: a real trade, end to end
     --
     -- Everything past here runs the engine's own TradeSession over the
@@ -567,7 +635,13 @@ return function(game)
     -- TradeSession:apply files the received mon. Nothing about the trade
     -- itself is this mod's code.
 
+    -- Sampled here, one line above the barrier that lets the host start
+    -- picking, and never after it: see watchHostCharChange's header for why
+    -- a baseline read on the far side of `host_char_changed` is already the
+    -- answer it is supposed to be measured against.
+    local hostCharBefore = H.avatarRow(exports)
     H.signal("guest_interact_done")
+    watchHostCharChange(hostCharBefore)
     -- likewise: never ask somebody who is mid-session
     H.waitSeconds(game, function()
       local row = H.avatarRow(exports)
@@ -857,12 +931,26 @@ return function(game)
                 and (after.x ~= before.x or after.y ~= before.y),
                 "and the world is still playable afterwards")
           check(#H.partySpecies(game) > 0, "with the party intact")
-          -- and as themselves. Walking out of someone else's game must not
-          -- leave this player wearing the character they picked for it --
-          -- the same object they were drawn with before dialling, not
-          -- merely something that is not the hub character.
-          check(H.playerSheet(game) == ownSheet,
-                "and back in their own trainer, not the hub character")
+          -- The new contract: leaving keeps the standing choice worn
+          -- rather than handing the vanilla trainer back. disconnect() now
+          -- calls syncLook(), not restoreLook() (src/Client.lua's
+          -- disconnect), so a player with an explicit choice -- this
+          -- guest's MMO_GUEST_SPRITE, never RED -- wears it forever, in or
+          -- out of a game. What proves that: wornLook() still names the
+          -- same chosen sprite it did right after joining, and the sheet on
+          -- screen still draws it -- not by identity, since syncLook's
+          -- applyLook builds a new renderer on the way out exactly as it
+          -- did on the way in.
+          local afterLeaveOk, afterLeaveLook, afterLeaveImage =
+            H.wornMatches(game, exports)
+          log("worn after leaving:", tostring(afterLeaveLook),
+              tostring(afterLeaveImage))
+          check(afterLeaveLook == wornLook,
+                "wornLook() still reports the same standing choice after "
+                  .. "leaving")
+          check(afterLeaveOk,
+                "and the rendered sheet still matches it, not merely "
+                  .. "undressed")
           U.shot(game, SHOT_DIR .. "/join-after-leaving.png")
 
           -- ------- 8. and back again, as the same player
@@ -920,8 +1008,94 @@ return function(game)
     end
   else
     H.signal("guest_interact_done")
+    -- No hostRow to stand next to, so nothing here can watch the host's
+    -- character change land -- but the host is waiting on
+    -- guest_saw_char_change regardless, and staying silent would only
+    -- relocate this leg's failure onto a timeout over there instead of the
+    -- "no interact target" failure this branch already means.
+    H.signal("guest_saw_char_change")
     H.signal("guest_trade_requested")
   end
+
+  -- ------- 9. the offline picker, fully disconnected
+  --
+  -- Everything above proves a chosen character survives a session; this
+  -- proves there does not have to be one at all. The CHARACTER row is the
+  -- third one on the offline MMO menu, reachable only while disconnected
+  -- (src/Ui.lua's comment on the row explains why: the hub only learns a
+  -- sprite at hello, so a mid-game swap would show everyone else the old
+  -- one) -- and picking a character through it has to apply immediately,
+  -- with no socket open anywhere.
+  --
+  -- Guarded rather than assumed: an earlier leg above may have left this
+  -- guest connected (a failed TRADE/BATTLE select, say), and this leg would
+  -- otherwise not find the row it is looking for and fail for a confusing
+  -- reason. Forcing the disconnect here keeps the failure, if there is one,
+  -- about the picker rather than about state this leg did not create.
+  if exports.isConnected() or exports.isHosting() then
+    H.closeToOverworld(game)
+    if H.openMmo(game) and H.selectLabel(game, "LEAVE") then
+      H.drivePrompts(game, function() return not exports.isConnected() end, 60)
+    end
+  end
+  check(not exports.isConnected() and not exports.isHosting(),
+        "fully offline before driving the picker")
+
+  if H.openMmo(game) then
+    U.wait(20)
+    local labels = H.menuLabels(game)
+    log("offline MMO menu:", table.concat(labels, ","))
+    check(labels[1] == "HOST GAME" and labels[2] == "JOIN GAME"
+          and labels[3] == "CHARACTER",
+          "the offline menu offers HOST GAME, JOIN GAME, then CHARACTER")
+    U.shot(game, SHOT_DIR .. "/join-mmo-menu-offline.png")
+
+    -- Cancelling out of the picker without choosing has to return to this
+    -- menu, not the TRAINER screen the HOST/JOIN flows share -- CHARPICK's
+    -- `backTo` opt is what tells the two doors apart (src/Ui.lua's CHARPICK
+    -- screen), and this is the one driver exchange that opened it directly
+    -- rather than through CHARSET.
+    if check(H.selectLabel(game, "CHARACTER"), "CHARACTER opens the picker") then
+      U.wait(20)
+      check(H.classify(H.top(game)) == "menu", "the character picker opened")
+      U.shot(game, SHOT_DIR .. "/join-charpick.png")
+      U.tap(game, "b")
+      U.wait(20)
+      local backLabels = H.menuLabels(game)
+      check(backLabels[1] == "HOST GAME",
+            "cancelling the picker returns to the MMO menu, not TRAINER")
+
+      -- Now actually choose one -- NIRE, not the guest's own
+      -- MMO_GUEST_SPRITE choice, so the sheet is provably a different
+      -- character afterwards rather than the same one picked again.
+      local beforeLook = exports.wornLook and exports.wornLook() or nil
+      if check(H.selectLabel(game, "CHARACTER"),
+               "CHARACTER opens the picker again") then
+        U.wait(20)
+        local picked = H.selectLabel(game, "NIRE")
+        check(picked, "NIRE is a row in the offline picker")
+        U.wait(20)
+        check(H.classify(H.top(game)) == "menu"
+              and H.menuLabels(game)[1] == "HOST GAME",
+              "choosing a character returns to the MMO menu")
+
+        local afterLook = exports.wornLook and exports.wornLook() or nil
+        log("offline pick:", tostring(beforeLook), "->", tostring(afterLook))
+        check(afterLook == "SPRITE_NIRE",
+              "the offline pick is worn as the standing choice immediately")
+
+        local pickOk, pickLook, pickImage = H.wornMatches(game, exports)
+        log("worn after the offline pick:", tostring(pickLook),
+            tostring(pickImage))
+        check(pickOk and pickLook ~= beforeLook,
+              "and the rendered sheet actually changed, with no connection "
+                .. "open")
+      end
+    end
+  else
+    check(false, "could not reach the MMO menu offline")
+  end
+  H.closeToOverworld(game)
 
   -- Every marker this side owns, dropped whatever happened above.
   --
@@ -930,7 +1104,8 @@ return function(game)
   -- there rather than the one real failure over here. Signalling a marker
   -- twice is harmless -- the file is written, not counted -- so this is
   -- unconditional rather than guarded by whether the leg ran.
-  for _, tag in ipairs({ "guest_ready_for_party", "guest_party_joined",
+  for _, tag in ipairs({ "guest_saw_char_change",
+                         "guest_ready_for_party", "guest_party_joined",
                          "guest_coop_joined",
                          "guest_coop_done", "guest_left_game" }) do
     H.signal(tag)

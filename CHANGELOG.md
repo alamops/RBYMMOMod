@@ -4,6 +4,82 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.8.0] - 2026-08-06
+
+### Added
+
+- **`CHARACTER` on the MMO menu — before a game, and in one.** Until now the
+  character list was a step on the way into a game and nowhere else: the only
+  door to it was hosting or joining, so a player who simply wanted to look
+  like somebody else had to open a connection to do it, and there was no way
+  at all to change your mind between sessions without starting one. There are
+  two doors to it now and they open the same list, the one the character
+  creator opens: under `HOST GAME` and `JOIN GAME` while you are on your own,
+  and under `RANK` — above `LEAVE` and `END GAME` — while you are in a game.
+  Either way the choice applies the moment you make it and hands you back to
+  the menu you came from, and it writes the same save field the creator always
+  wrote, so the character you are wearing is part of the game you save and
+  comes back with it.
+- **Changing character mid-game changes you for everybody, immediately.** The
+  in-game row would have been a lie without this: the hub used to learn which
+  character you were wearing when you said hello and there was no message that
+  changed it afterwards, so swapping mid-session would have re-dressed you on
+  your own screen and nobody else's. Your copy now tells the hub, the hub
+  relearns your face and passes it on to everyone in the game — including you,
+  so there is one path rather than two that have to agree — and each of their
+  copies rebuilds its walking view of you on the spot rather than waiting for
+  you to leave the map and come back. A trainer card of yours that somebody
+  has open at that moment turns over with it, because the change is written
+  into the roster entry the card is holding rather than into a replacement for
+  it. From then on every ordinary movement update carries the new character
+  too, so a player who joined a second later, or missed the message, is
+  corrected without anybody doing anything. The one screen that does not
+  follow live is a leaderboard already open on somebody's screen: it keeps the
+  portrait it was drawn with until it is next asked to refresh — exactly the
+  staleness the points on it already have.
+- **The character list shows you what you are picking.** Every row now
+  carries that character's 16x16 front-facing frame to the left of its name —
+  the same picture the trainer card and the leaderboard already draw, read
+  out of the same walking sheet, so nothing new is decoded and nothing new
+  ships. Thirty-eight names is a lot of names, and `MIDDLE AGED WOMAN` tells
+  you nothing about who that is; scrolling a list of labels to find the one
+  you meant was guesswork against a cast most players have only ever seen in
+  passing. The labels move right by one tile to open the gutter the pictures
+  sit in, and the `▷` that marks the two characters this mod ships is
+  untouched in the cursor's own column, so the row still says which is which.
+  A character with no art to show — nothing has been decoded yet — leaves its
+  gutter empty and lists as before, rather than being an error on a screen
+  whose whole job is to be looked at.
+
+### Changed
+
+- **`PROTOCOL` 6 → 7**, in `src/Config.lua` and `server/lib/relay.js`
+  together, for the one new message a character change sends. Nothing already
+  on the wire changed shape, so an old client still parses everything a new
+  hub sends — the breaking direction is the other one, as it has been every
+  time: a protocol-6 hub has never heard of that message and answers an
+  unknown type with silence, so a player would pick a character on the
+  connected menu, watch themselves change, and be the only person in the game
+  who could see it, forever, with nothing on screen saying why. A refusal
+  naming both versions beats that quietly. So a 0.7.x hub and a 0.8.0 client
+  turn each other away at the door, as do a 0.8.0 hub and a 0.7.x client:
+  **the mod and its hub have to be updated together.** The same call parties,
+  ranked PVP and the running pace each made, one version apart.
+- **Leaving a game no longer takes your character off.** The chosen look was
+  worn between connecting and disconnecting and at no other time, so quitting
+  a game — deliberately, or because the hub hung up, or because you loaded a
+  different save — put the vanilla trainer straight back on, in the overworld,
+  in your battle pics and on your own trainer card. That made sense while
+  choosing a character was something you did *to* join a game. Now that it is
+  a thing you can do on your own, it reads as the game undressing you, so it
+  stopped: once you have picked a character you keep wearing it, offline and
+  online, until you pick a different one. What has not changed is the save
+  that never chose: a player who has never touched the character list, and
+  never moved the `MY SPRITE` option off its default, is rendered by exactly
+  the same code as before and sees exactly what vanilla draws. Wearing a
+  character is now something you opt into and can undo — picking `RED` puts
+  you back — rather than something the end of a session does for you.
+
 ## [0.7.4] - 2026-08-06
 
 ### Fixed

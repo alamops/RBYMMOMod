@@ -148,6 +148,11 @@ end
 -- column at x=8, labels from x=16, row `n` at y = 8 + n * 16. Copied rather
 -- than asked for, because the widget exposes no seam for a per-row
 -- decoration -- so if upstream ever moves a row, this moves with it.
+--
+-- The mark keeps the cursor column even now that the rows carry a portrait
+-- (see below): the art sits in the 16px to the *right* of that column, so
+-- the two decorations never share a pixel and a mod character on an
+-- unselected row still says so.
 local MARK_X = 8
 local MARK_Y0 = 8
 local MARK_H = 16
@@ -198,6 +203,130 @@ local function markOwnCharacters(menu)
     love.graphics.setColor(0, 0, 0, 1)
     for _, mark in ipairs(M.markedRows(self)) do
       Font.drawCode(Theme.cursorHollow, MARK_X, mark.y)
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+    return out
+  end
+
+  return menu
+end
+
+-- ------- showing each character on its own row
+--
+-- A list of 38 names asks the player to know what a MIDDLE AGED WOMAN or a
+-- SILPH WORKER F looks like before choosing to be one. The picture is the
+-- answer, and it is the same front-facing frame the trainer card and the
+-- leaderboard already draw -- Chars.portrait owns the loading and the cache
+-- for exactly this reason, so a third caller costs no second copy of a sheet.
+--
+-- Where it goes is decided by the widget. ListMenu draws every label at a
+-- hardcoded x=16 and offers no offset (src/ui/ListMenu.lua:draw), so the only
+-- way to open a gutter is to indent the label itself: two spaces are 16px,
+-- which is exactly one portrait wide. The art then lands between the cursor
+-- column and the name, and the gutter is the same width on every row whether
+-- or not there is art to put in it -- a row that lost its picture must not
+-- also lose its alignment.
+--
+-- What that costs is the widest name. From x=16 the row held eighteen glyphs
+-- (16 + 18 * 8 = 160, the screen exactly); from x=32 it holds sixteen, and
+-- the catalog's longest wearable label is MIDDLE AGED WOMAN at seventeen --
+-- the same name the trainer card had to lay out around. It is trimmed to fit
+-- rather than drawn past the edge, which is the trade the leaderboard's name
+-- column already makes (M.nameRoom), and it is a trade the picture pays for:
+-- the row that loses a glyph is a row that gained a face.
+local PREVIEW_X = 16                    -- the gutter, right of the cursor
+local PREVIEW_INDENT = "  "             -- two glyphs = 16px = the gutter
+-- Where the widget itself starts a label: ListMenu:draw calls
+-- Font.draw(item.label, 16, y) with the x hardcoded and no offset to pass
+-- (src/ui/ListMenu.lua:draw). It is a fact about the widget rather than a
+-- choice of ours, and it equals PREVIEW_X only by coincidence -- so how much
+-- room a name has left is measured from here, not from where the art lands.
+local LIST_LABEL_X = 16
+-- The label is an 8px glyph drawn at the row's y and the art is 16px tall,
+-- so the art is lifted 4px to put the two on the same middle line -- the
+-- same centring the leaderboard does from the other side (RANK_TEXT_DY).
+local PREVIEW_DY = -4
+local PREVIEW_LABEL_MAX =
+  math.floor((SCREEN_W - LIST_LABEL_X - #PREVIEW_INDENT * SLOT_W) / SLOT_W)
+
+-- A character's row label: indented past the gutter, and never wider than
+-- what is left of the row.
+local function previewLabel(id)
+  return PREVIEW_INDENT .. Chars.label(id):sub(1, PREVIEW_LABEL_MAX)
+end
+
+-- Which visible rows get a portrait, as { row, y, id } triples.
+--
+-- Pure, and exported, for the same reason M.markedRows is: the rule has to
+-- hold while the list scrolls, and a headless suite has no graphics context
+-- to read it off a frame with. It answers for every visible row that names a
+-- character, including the one under the cursor -- a portrait is what the row
+-- *is*, not a marker on it -- and leaves "is there art for this id" to the
+-- wrap below, which is the only side that can load an image.
+function M.previewRows(menu)
+  local out = {}
+  if type(menu) ~= "table" or type(menu.items) ~= "table" then return out end
+  local scroll = tonumber(menu.scroll) or 0
+  local rows = tonumber(menu.rows) or LIST_ROWS
+  for row = 1, rows do
+    local i = scroll + row
+    local item = menu.items[i]
+    if not item then break end
+    if type(item.value) == "string" then
+      out[#out + 1] = { row = row, y = MARK_Y0 + row * MARK_H, id = item.value }
+    end
+  end
+  return out
+end
+
+-- Wraps a list menu's draw to fill the gutter. A second wrap rather than one
+-- merged with markOwnCharacters above, because the two decorations are
+-- independent -- different column, different rule for which rows get one --
+-- and stacking them keeps each rule readable and separately testable.
+--
+-- A character with no art draws nothing and says nothing: the sheet is
+-- missing for a whole class of reason the player already knows about (no ROM
+-- imported yet), it is left out of the table below so nothing retries it, and
+-- a warning on a draw path would repeat sixty times a second.
+--
+-- Which art each row gets is settled here, once, rather than per row per
+-- frame. The list a picker is built with never changes for as long as the
+-- screen is open, and while Chars.portrait caches the sheet it loads, asking
+-- it again still costs a registry lookup wrapped in a closure and a pcall --
+-- seven of those every frame for an answer that cannot have changed. What the
+-- draw keeps is one table index.
+local function previewCharacters(menu)
+  local baseDraw = menu and menu.draw
+  if type(baseDraw) ~= "function" then
+    mod.log:warn("the character list is not the shape this mod draws "
+      .. "portraits on, so the characters will be listed by name only -- "
+      .. "update the mod for this engine build")
+    return menu
+  end
+
+  -- id -> the { image, quad } Chars.portrait hands back. An id with no art is
+  -- simply absent, which is the same miss the draw tested for before.
+  local art = {}
+  if type(menu.items) == "table" then
+    for _, item in ipairs(menu.items) do
+      local id = type(item) == "table" and item.value or nil
+      if type(id) == "string" and art[id] == nil then
+        art[id] = Chars.portrait(id)
+      end
+    end
+  end
+
+  menu.draw = function(self, ...)
+    local out = baseDraw(self, ...)
+    -- sprite art is drawn untinted, and the widget signs off in white
+    -- anyway; set it explicitly so a caller's colour cannot stain a portrait
+    love.graphics.setColor(1, 1, 1, 1)
+    for _, preview in ipairs(M.previewRows(self)) do
+      local pic = art[preview.id]
+      if pic then
+        love.graphics.draw(pic.image, pic.quad, PREVIEW_X,
+                           preview.y + PREVIEW_DY)
+      end
     end
     love.graphics.setColor(1, 1, 1, 1)
     return out
@@ -801,6 +930,27 @@ function M:install()
             })
           end,
         }
+        -- The end of the same walk inwards: everybody on the hub, then
+        -- talking to them, then the one person you travel with, then your
+        -- own card and where it ranks -- and then the character wearing all
+        -- of it, which is the most-yourself row there is. So it sits last,
+        -- just before the way out.
+        --
+        -- Inside `connected` rather than beside LEAVE, so the
+        -- hosting-but-not-connected state above keeps its two rows: the
+        -- occupant of a copy that is only running a listener is not on the
+        -- hub as a player, and has nobody to show a new face to.
+        --
+        -- Same door as the offline row, and the same call behind it: the
+        -- picker saves the choice and wears it on the spot, and the client
+        -- tells the hub, which passes it to everyone else's roster and
+        -- avatars.
+        items[#items + 1] = {
+          label = "CHARACTER",
+          onSelect = function()
+            mod.ui.push(game, SCREEN.CHARPICK, { backTo = SCREEN.MAIN })
+          end,
+        }
       end
       items[#items + 1] = {
         label = hosting and "END GAME" or "LEAVE",
@@ -844,13 +994,39 @@ function M:install()
           })
         end,
       }
-      -- There is deliberately no third row for the code. JOIN GAME asks for
-      -- the address and then the code, so a row called JOIN CODE sitting
-      -- under it read as the other half of joining rather than as what it
-      -- was -- somewhere to change a saved one without dialling. Two rows
-      -- that both start a join, one of which does not, is a menu that has to
-      -- be explained; the code that gets typed is now always the one on the
-      -- way in, and the standing fallback is the JOIN CODE option row.
+      -- The third row is the character, and it is deliberately not the code.
+      --
+      -- JOIN GAME asks for the address and then the code, so a row called
+      -- JOIN CODE sitting under it read as the other half of joining rather
+      -- than as what it was -- somewhere to change a saved one without
+      -- dialling. Two rows that both start a join, one of which does not, is
+      -- a menu that has to be explained; the code that gets typed is now
+      -- always the one on the way in, and the standing fallback is the JOIN
+      -- CODE option row.
+      --
+      -- CHARACTER earns the row for the opposite reason: it starts nothing.
+      -- Until now the picker could only be reached on the way into a game,
+      -- through the TRAINER screen that HOST and JOIN both open, so "who am
+      -- I" was a question a player could only answer while dialling somebody
+      -- -- and answering it meant abandoning a setup flow they had already
+      -- begun. The choice is saved and worn on the spot
+      -- (Client.setSpriteChoice), so this row is where somebody not playing
+      -- online today picks the character they will be tomorrow.
+      --
+      -- It belongs on the offline menu because you do not need a game to be
+      -- yourself: the choice is saved and worn locally, so the row does its
+      -- whole job with nothing connected and nobody to tell.
+      --
+      -- It is no longer the only door, though. The connected branch above
+      -- carries the same row, because a change made mid-session now reaches
+      -- the hub and everybody on it -- so these two are one option in two
+      -- states, not an offline-only concession.
+      items[#items + 1] = {
+        label = "CHARACTER",
+        onSelect = function()
+          mod.ui.push(game, SCREEN.CHARPICK, { backTo = SCREEN.MAIN })
+        end,
+      }
     end
 
     local menu = mod.ui.Menu.new(game, items, {
@@ -875,10 +1051,15 @@ function M:install()
 
   -- ------- character creation
   --
-  -- Who you are online, asked once before you host or join, rather than
+  -- Who you are online, asked before you host or join, rather than
   -- inheriting the save's trainer name and a sprite nobody chose. The name
   -- is separate from the save file's, so somebody can be ASH online without
   -- renaming their single-player game.
+  --
+  -- Asked here once, but only the name is settled here: the look half has a
+  -- row of its own on the MMO menu, offline and connected alike, and a
+  -- change made there is passed on to everyone already in the game. This
+  -- screen is where both halves start, not where either of them ends.
 
   screens:register(SCREEN.CHARSET, { new = function(game, opts)
     opts = opts or {}
@@ -907,25 +1088,44 @@ function M:install()
   screens:register(SCREEN.CHARPICK, { new = function(game, opts)
     opts = opts or {}
     local client = ctx.client
+
+    -- Where A and B go, which is wherever this was opened from.
+    --
+    -- The picker has two doors now. It is the middle of the TRAINER flow
+    -- when a game is being started -- CHARSET pushes it and must get its own
+    -- setup opts back, which is what `back` carries -- and it is the whole of
+    -- it when the MMO menu's CHARACTER row opens it on its own. `backTo`
+    -- names that second door by screen id; without it a player who only
+    -- wanted to change character would be handed the host/join setup screen
+    -- they never asked for. The old call site passes neither, so the default
+    -- is the flow that was here first.
+    local direct = type(opts.backTo) == "string"
+    local backTo = direct and opts.backTo or SCREEN.CHARSET
+    local backOpts = direct and {} or (opts.back or {})
+    local function goBack() mod.ui.push(game, backTo, backOpts) end
+
     local current = client:spriteChoice()
     local items, start = {}, 1
     for i, id in ipairs(Chars.list()) do
       if id == current then start = i end
-      items[#items + 1] = { label = Chars.label(id), value = id }
+      -- previewLabel indents past the portrait gutter; the id itself stays
+      -- in `value`, which is what both decorations and the choice read
+      items[#items + 1] = { label = previewLabel(id), value = id }
     end
     local menu = mod.ui.ListMenu.new(game, "CHARACTER", items, {
       pageJump = true,
       onChoose = function(item, m)
         m:close()
+        -- setSpriteChoice both records the choice and wears it, so there is
+        -- nothing for this screen to apply -- and nothing here that could
+        -- disagree with what the CHARSET flow does with the same call
         client:setSpriteChoice(item.value)
-        mod.ui.push(game, SCREEN.CHARSET, opts.back or {})
+        goBack()
       end,
-      onCancel = function()
-        mod.ui.push(game, SCREEN.CHARSET, opts.back or {})
-      end,
+      onCancel = goBack,
     })
     menu.index = start
-    return markOwnCharacters(menu)
+    return previewCharacters(markOwnCharacters(menu))
   end })
 
   -- ------- a trainer card: somebody else's, or your own

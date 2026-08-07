@@ -55,10 +55,16 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // hub has never heard of mmo.coop_wait, so a player would press WAIT FOR
 // <friend> while their partner is never told). Each 5 was a different
 // vocabulary, so a client and hub that both said "5" could still be talking
-// past each other. 6 is the first number that means both. The rule every
-// bump follows is unchanged: bump whenever a client can send something a hub
-// silently ignores. Kept in step with Config.PROTOCOL on the mod side.
-const PROTOCOL = 6;
+// past each other. 6 is the first number that means both. And then 6 was
+// claimed twice the same way, before it ever shipped: once by that union and
+// once for the character a player is wearing -- settled at hello and never
+// again until mmo.sprite, a type a hub that predates it answers with
+// silence, so the player who picked somebody new would be the only one in
+// the game who ever saw it. 7 is the first number that means all of it. The
+// rule every bump follows is unchanged: bump whenever a client can send
+// something a hub silently ignores. Kept in step with Config.PROTOCOL on
+// the mod side.
+const PROTOCOL = 7;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -78,6 +84,15 @@ const COOP_BATTLE_MAX_MS = 3600 * 1000;
 // A SHA-256 response is 64 hex characters; the slack is for a future digest,
 // not for an unbounded field.
 const RESPONSE_MAX = 128;
+// Smallest gap between two character changes from one player. The chat
+// gate's window (500ms), for a sharper reason than scrollback: an avatar
+// bakes its sheet when it spawns, so every other client in the game despawns
+// and respawns this player to redraw them, and an ungated change is one
+// client making everyone else's world flicker for free. A constant rather
+// than a host setting like chatIntervalMs, because src/Hub.lua has to refuse
+// at exactly the same moment for the same bytes -- one number moving would
+// leave the two hosting paths gating differently.
+const SPRITE_GATE_MS = 500;
 
 // A value that came off the wire and is about to be quoted back to its
 // sender. Bounded because the sentence is the point, not a faithful echo of
@@ -253,6 +268,54 @@ handlers['mmo.move'] = (relay, client, msg) => {
   // answer identically for every JSON value.
   client.fast = msg.fast === true;
   relay.broadcast('mmo.move', presenceOf(client), client.id);
+};
+
+/*
+ * The character a player is wearing, changed mid-session.
+ *
+ * The one field of a presence that used to be settled at hello and never
+ * again. It is stored here and said once; from then on presenceOf carries the
+ * new value in every mmo.move, mmo.join and mmo.welcome by itself, so a
+ * client that missed this message -- or joined after it -- is healed by the
+ * player's next step rather than by anything extra sent from here.
+ */
+handlers['mmo.sprite'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  // The identifier sanitiser, exactly as hello uses it (cleanSpriteId, never
+  // cleanText -- prose rules eat the underscore). An id this hub cannot make
+  // sense of costs its sender the message and nothing more.
+  const sprite = cleanSpriteId(msg.sprite);
+  if (!sprite || sprite === client.sprite) return;
+
+  // Checked after the no-op above, so a client re-sending the character it is
+  // already wearing does not arm the gate against the next real change.
+  const now = relay.now();
+  if (now - client.lastSprite < SPRITE_GATE_MS) return;
+  client.lastSprite = now;
+
+  client.sprite = sprite;
+  // Broadcast with no exception, like publishPoints: the player it is about
+  // hears it too. Their own presence is not in their own roster, so this is
+  // the message that confirms the hub took the change.
+  //
+  // **Nothing fallible sits between the store above and this line, and the
+  // announcement goes out before anything else that could throw.** The store
+  // is what arms the no-op guard at the top of this handler, so a store that
+  // was never announced is not a lost message -- it is a permanently lost
+  // one: the client's reconcile loop (src/Client.lua's SPRITE_RETRY) re-sends
+  // the same id for the rest of the session and every retry is eaten by
+  // `sprite === client.sprite`, with nobody else ever told. Mirrored, line
+  // for line, by src/Hub.lua's handler -- the two hosting paths must not
+  // differ on which failures cost a player their announcement.
+  relay.broadcast('mmo.sprite', { id: client.id, sprite });
+  // The board learns the new face too, so an mmo.ranking answer given after
+  // this draws the character the player is wearing now rather than the one
+  // they greeted in. The same call admit() makes, under the same guard: a
+  // player who does not own the name has no business writing to its row.
+  // Last, because it is the one call here that reaches state this handler
+  // does not own, and a leaderboard portrait is not worth anyone's
+  // announcement.
+  if (client.ranked) relay.board.seen(client.name, client.sprite);
 };
 
 handlers['mmo.chat'] = (relay, client, msg) => {
@@ -766,6 +829,8 @@ class Relay {
       // otherwise gate the very first message a player ever sends.
       lastChat: -Infinity,
       lastRanks: -Infinity,
+      // last mid-session character change
+      lastSprite: -Infinity,
       points: RANK_START,
       // until a hello says otherwise, nobody is scored: `ranked` is decided
       // in admit(), where the name is claimed
@@ -861,8 +926,10 @@ class Relay {
     // is wearing today -- so the leaderboard can draw a portrait for a
     // player who is offline, and a returning player is not silently zeroed.
     // An unranked player shows as zero rather than wearing the rating of the
-    // name they typed: it is not theirs.
-    this.board.seen(client.name, client.sprite);
+    // name they typed: it is not theirs. Gated on `ranked` for that same
+    // reason: a player who does not own the name has no business writing to
+    // its row, portrait included -- and this row outlives the session.
+    if (client.ranked) this.board.seen(client.name, client.sprite);
     client.points = client.ranked ? this.board.points(client.name) : RANK_START;
     this.players += 1;
 
@@ -1577,4 +1644,4 @@ class Relay {
 // PROTOCOL is exported so the suites speak the current dialect by naming it
 // rather than by carrying a hardcoded number that has to be found and edited
 // in six places every time it moves.
-module.exports = { Relay, parseLine, presenceOf, PROTOCOL };
+module.exports = { Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE };

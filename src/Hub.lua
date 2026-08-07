@@ -498,6 +498,7 @@ function M:accept(peer, trusted)
     partyId = nil,
     partyPendingTo = nil,   -- the invite this client is waiting on an answer to
     lastChat = -math.huge,
+    lastSprite = -math.huge,   -- last mid-session character change
     hello = nil,      -- what it said, held until it is admitted
     nonce = nil,      -- the challenge it still owes an answer to
   }
@@ -577,7 +578,10 @@ function M:admit(client)
   -- An unranked player is shown as zero rather than as the rating of the
   -- name they typed: it is not theirs, and putting it on their card would be
   -- the claim ticket buying nothing.
-  self.board:seen(client.name, client.sprite)
+  --
+  -- Gated on `ranked` for the same reason the rating is: a player who does not
+  -- own the name has no business writing to its row, portrait included.
+  if client.ranked then self.board:seen(client.name, client.sprite) end
   client.points = client.ranked and self.board:points(client.name)
     or Config.RANK_START
   self.players = self.players + 1
@@ -1229,6 +1233,61 @@ handlers[Wire.MOVE] = function(self, client, msg)
   -- languages answer identically for every JSON value.
   client.fast = msg.fast == true
   self:broadcast(Wire.MOVE, presenceOf(client), client.id)
+end
+
+-- Smallest gap between two character changes from one player.  The chat
+-- gate's window (Config.CHAT_GATE, half a second), for a sharper reason
+-- than scrollback: an avatar bakes its sheet when it spawns, so every other
+-- client in the game despawns and respawns this player to redraw them, and
+-- an ungated change is one client making everyone else's world flicker for
+-- free.  A literal rather than Config.CHAT_GATE itself, and fixed rather
+-- than a host setting, because server/lib/relay.js has to refuse at exactly
+-- the same moment for the same bytes -- one number moving would leave the
+-- two hosting paths gating differently.
+local SPRITE_GATE = 0.5
+
+-- The character a player is wearing, changed mid-session.
+--
+-- The one field of a presence that used to be settled at hello and never
+-- again.  It is stored here and said once; from then on presenceOf carries
+-- the new value in every MOVE, JOIN and WELCOME by itself, so a client that
+-- missed this message -- or joined after it -- is healed by the player's
+-- next step rather than by anything extra sent from here.
+handlers[Wire.SPRITE] = function(self, client, msg)
+  if not client.ready then return end
+  -- The identifier sanitiser, exactly as hello uses it (Wire.spriteId, never
+  -- Wire.text -- prose rules eat the underscore).  An id this hub cannot
+  -- make sense of costs its sender the message and nothing more.
+  local sprite = Wire.spriteId(msg.sprite)
+  if not sprite or sprite == client.sprite then return end
+
+  -- Checked after the no-op above, so a client re-sending the character it
+  -- is already wearing does not arm the gate against the next real change.
+  if self.clock - client.lastSprite < SPRITE_GATE then return end
+  client.lastSprite = self.clock
+
+  client.sprite = sprite
+  -- Broadcast with no exception, like publishPoints: the player it is about
+  -- hears it too.  Their own presence is not in their own roster, so this is
+  -- the message that confirms the hub took the change.
+  --
+  -- **Nothing fallible sits between the store above and this line, and the
+  -- announcement goes out before anything else that could throw.** The store
+  -- is what arms the no-op guard at the top of this handler, so a store that
+  -- was never announced is not a lost message -- it is a permanently lost
+  -- one: the client's reconcile loop (src/Client.lua's SPRITE_RETRY) re-sends
+  -- the same id for the rest of the session and every retry is eaten by
+  -- `sprite == client.sprite`, with nobody else ever told. That is a whole
+  -- session's worth of silence bought by one throw, so the order is the
+  -- invariant: say it, then do the rest.
+  self:broadcast(Wire.SPRITE, { id = client.id, sprite = sprite })
+  -- The board learns the new face too, so a RANKING answer given after this
+  -- draws the character the player is wearing now rather than the one they
+  -- greeted in.  The same call admit() makes, under the same guard: a player
+  -- who does not own the name has no business writing to its row.  Last,
+  -- because it is the one call here that reaches state this handler does not
+  -- own, and a leaderboard portrait is not worth anyone's announcement.
+  if client.ranked then self.board:seen(client.name, client.sprite) end
 end
 
 handlers[Wire.CHAT] = function(self, client, msg)

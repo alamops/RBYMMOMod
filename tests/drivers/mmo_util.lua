@@ -101,6 +101,14 @@ end
 -- the marker's own bytes and never matching.
 local MARKERS = { "\226\150\182" }   -- ▶ (U+25B6)
 
+-- Leading whitespace, on top of the marker: the CHARPICK rows now open a
+-- 16px portrait gutter with a two-space indent (src/Ui.lua's PREVIEW_INDENT),
+-- so a character that used to render as "NIRE" arrives as "  NIRE" -- and a
+-- driver asking H.selectLabel/H.menuRow for the bare name would fail to find
+-- it for the same reason the unmarked marker used to: comparing a wanted
+-- string against one that starts with bytes the caller never asked about.
+-- Stripped after the marker rather than before it, since the marker itself
+-- carries no leading space of its own to confuse this with.
 local function labelMatches(actual, wanted)
   if actual == wanted then return true end
   if type(actual) ~= "string" then return false end
@@ -110,6 +118,7 @@ local function labelMatches(actual, wanted)
       break
     end
   end
+  actual = actual:gsub("^%s+", "")
   return actual:sub(1, #wanted) == wanted
     and actual:sub(#wanted + 1):match("^[%*%s]*$") ~= nil
 end
@@ -595,6 +604,13 @@ local PHASE = {
   -- host waits on the guest walking through the host's own tile first
   -- (non-blocking avatars), then walking up, reading the card and closing it
   guest_interact_done    = 300,  -- 60 walk-through + 60 facing + menu + card
+  -- guest waits on the host reopening the MMO menu and picking a new
+  -- character through it -- no network round trip on this side of the
+  -- barrier, just the host's own menu frames
+  host_char_changed      = 150,  -- menus + a pick, same order as host_address_checked
+  -- host waits on the guest's roster and avatar rows to pick up the new
+  -- sprite (the hub broadcast, then the roster write and avatar respawn)
+  guest_saw_char_change  =  90,  -- 45 propagate + margin
   -- host waits on the guest waiting for it to be free, then picking TRADE
   guest_trade_requested  = 120,  -- 45 free
   -- guest waits on the host driving its half of the trade
@@ -800,6 +816,35 @@ function M.playerSheet(game)
   end
   ow = ow or game.overworld
   return ow and ow.player and ow.player.sprite or nil
+end
+
+-- Whether the live player is genuinely drawn as their standing choice --
+-- by which sheet it draws from, not by object identity.
+--
+-- Client.applyLook (src/Client.lua) builds a brand-new SpriteRenderer every
+-- time it runs, and it runs on every connect, every map change and every
+-- disconnect now that the look survives leaving -- so two snapshots of the
+-- very same character are never `==`, and a driver that compared identity
+-- was only ever proving "a renderer was rebuilt", which is true whether or
+-- not the character actually changed. What identifies a look is the sheet
+-- path it draws from, which is stable across rebuilds of the same
+-- character. mmo_host.lua's own-look check (its "the local player wears
+-- the chosen character" leg) reads this straight off game.data.sprites, the
+-- same catalog Client.lua reaches through mod.content.sprites -- reachable
+-- here because a driver runs inside the engine process, behind no mod
+-- facade.
+--
+-- Returns (matches, wornLook, wornImage): the id and image path are handed
+-- back too so a caller can log what it actually saw, match or not.
+function M.wornMatches(game, exports)
+  local wornLook = exports and exports.wornLook and exports.wornLook() or nil
+  if wornLook == nil then return false, nil, nil end
+  local record = game.data and game.data.sprites and game.data.sprites[wornLook]
+  local worn = M.playerSheet(game)
+  local wornImage = worn and (worn.def and worn.def.image or worn.image) or nil
+  local ok = record ~= nil and wornImage ~= nil
+    and tostring(wornImage):find(tostring(record.image), 1, true) ~= nil
+  return ok, wornLook, wornImage
 end
 
 -- the other side's avatar, as this game sees it

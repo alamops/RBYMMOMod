@@ -36,7 +36,24 @@ return {
         .. "arrow in the cursor's column so the two are told apart from the "
         .. "ROM's own cast. Wearing one also changes the pics the "
         .. "game draws you with: the battle back pic, the trainer card and "
-        .. "Oak's intro, for as long as you are in a game.",
+        .. "Oak's intro, for as long as you are wearing them.",
+      "A CHARACTER row on the MMO menu, twice over: under HOST GAME and JOIN "
+        .. "GAME while you are on your own, and under RANK -- above LEAVE and "
+        .. "END GAME -- while you are in a game. Both open the same character "
+        .. "list, the choice applies immediately and is written into the "
+        .. "save, so it comes back with that game. Picked in a game it also "
+        .. "goes out over the wire: the hub relearns your character and "
+        .. "passes it to everyone including you, each of their copies "
+        .. "rebuilds its walking view of you on the spot, and a trainer card "
+        .. "of yours somebody has open updates while they are looking at it. "
+        .. "Every later movement update carries it too, so a late joiner or "
+        .. "a missed message corrects itself. Each row of the list carries "
+        .. "that character's 16x16 front-facing portrait -- the same one the "
+        .. "trainer card and the leaderboard draw -- beside its name, so a "
+        .. "list of 38 labels is a list of faces. And the look is kept when "
+        .. "you leave: disconnecting, deliberately or not, no longer puts the "
+        .. "vanilla trainer back on. You wear what you picked until you pick "
+        .. "something else.",
       "Ranked PVP: every link battle is scored by the hub on an Elo curve, "
         .. "so the opponent's rating decides the size of the swing, and a "
         .. "rematch inside the hour is worth half, then a quarter, then "
@@ -141,10 +158,32 @@ return {
         .. "HOOD in their catalog, so somebody wearing one shows up as RED "
         .. "on their screen -- the same fallback a character their ROM does "
         .. "not carry already gets.",
+      "The mid-game character change moved the protocol from 6 to 7, so a "
+        .. "0.7.x copy and a 0.8.0 one refuse each other at the door and name "
+        .. "both versions rather than connecting and going quiet. The mod and "
+        .. "its hub have to be updated together; there is no degraded mode "
+        .. "that connects without the live change.",
+      "A leaderboard already open on somebody's screen keeps the portrait it "
+        .. "was drawn with when a player changes character, until it is next "
+        .. "refreshed -- the same staleness the points on it already have. "
+        .. "Walking avatars, trainer cards and the roster all update live.",
       "The battle and trainer-card pics only follow the two characters this "
         .. "mod ships. A ROM character is a walking sheet and nothing else, "
         .. "so wearing GIOVANNI on the map still fights as Red -- there is "
         .. "no back pic in the catalog to borrow.",
+      "The portraits in the character list are read out of the same catalog "
+        .. "the characters themselves come from, so the 36 vanilla rows have "
+        .. "a face to show only once the player's own ROM has been imported "
+        .. "and decoded. A row with no art available lists as its name over "
+        .. "an empty gutter -- the list still works, it just shows less. The "
+        .. "two characters this mod ships carry their own art and are never "
+        .. "in that state.",
+      "A character you choose is now worn until you choose another one, in "
+        .. "single-player as well as in a game, so the way back to the "
+        .. "vanilla trainer is to pick RED rather than to leave. A save that "
+        .. "has never chosen one -- and a copy whose MY SPRITE option is "
+        .. "still on its default -- is drawn exactly as it was before, so "
+        .. "nobody gets a character they did not ask for.",
     },
   },
 

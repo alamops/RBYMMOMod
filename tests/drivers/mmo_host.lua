@@ -507,6 +507,70 @@ return function(game)
     H.await(game, "guest_interact_done")
     U.shot(game, SHOT_DIR .. "/host-after-interact.png")
 
+    -- ------- 4b. change character mid-session, and the guest watches it land
+    --
+    -- The MMO menu's CHARACTER row now reaches the hub whether or not this
+    -- copy started the game: a pick made here has to push mmo.sprite, and
+    -- the guest's roster row and avatar have to follow it without either
+    -- side reconnecting (docs/plans/online-char-selection.md). Placed here
+    -- rather than earlier or later because both players are settled and
+    -- nothing else is mid-flow -- the same reason "hold still" sits where
+    -- it does.
+    --
+    -- The hosting menu also just grew a ninth row -- ADDRESS, PLAYERS,
+    -- CHAT, SAY, PARTY, MY PROFILE, RANK, CHARACTER, END GAME -- one past
+    -- Menu's maxVisible of 8, so this is the first time this screen has
+    -- ever had to scroll. H.menuRow reads `items`, which the widget keeps
+    -- whole regardless of the scroll offset, so finding END GAME there is
+    -- what "still reachable past the scroll" means for a row this driver
+    -- deliberately never presses A on -- doing that would open the END
+    -- GAME confirm and tear the session down mid-run.
+    check(H.openMmo(game), "the MMO menu reopens to change character")
+    U.wait(20)
+    local hostingLabels = H.menuLabels(game)
+    log("hosting menu (connected):", table.concat(hostingLabels, ","))
+    check(#hostingLabels == 9, "the hosting menu now carries all nine rows")
+    local rankAt, charAt
+    for i, label in ipairs(hostingLabels) do
+      if label == "RANK" then rankAt = i end
+      if label == "CHARACTER" then charAt = i end
+    end
+    check(rankAt ~= nil and charAt == (rankAt or 0) + 1,
+          "CHARACTER sits right after RANK on the hosting menu")
+    check(H.menuRow(game, "END GAME") ~= nil,
+          "END GAME is still reachable past the first-ever scroll on this menu")
+    U.shot(game, SHOT_DIR .. "/host-menu-9rows.png")
+
+    -- NIRE, the same catalog entry mmo_join.lua's offline leg already proves
+    -- is selectable, and guaranteed different from MMO_HOST_SPRITE's default
+    -- (SPRITE_RED, see run-mmo-e2e.sh) -- so the switch below is provable
+    -- rather than assumed.
+    local beforeLook = exports.wornLook and exports.wornLook() or nil
+    if check(H.selectLabel(game, "CHARACTER"),
+             "CHARACTER opens the picker while hosting and connected") then
+      U.wait(20)
+      check(H.classify(H.top(game)) == "menu", "the picker opened")
+      check(H.selectLabel(game, "NIRE"), "NIRE is a row in the connected picker too")
+      U.wait(30)
+      check(H.classify(H.top(game)) == "menu",
+            "picking returns to the MMO menu, not a fresh setup screen")
+    end
+    H.closeToOverworld(game)
+
+    local wornOk, wornLook = H.wornMatches(game, exports)
+    log("host picked live:", tostring(beforeLook), "->", tostring(wornLook))
+    check(wornLook ~= beforeLook,
+          "the host's own worn look actually changed")
+    check(wornOk and wornLook == "SPRITE_NIRE",
+          "and it is exactly the character just picked")
+
+    -- Signalled unconditionally: a failed pick above is already reported by
+    -- the checks that just ran, and the guest is waiting on this marker
+    -- regardless of how this leg went -- staying silent would only turn one
+    -- honest failure here into a timeout over there.
+    H.signal("host_char_changed")
+    H.await(game, "guest_saw_char_change")
+
     -- ------- 5. a real trade, run to completion over the wire
     --
     -- The guest asks; this side gets "GUESTY wants to trade!", the party

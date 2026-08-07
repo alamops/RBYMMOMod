@@ -117,7 +117,7 @@ for _, id in ipairs({
   "RbyMmoScope", "RbyMmoCompose", "RbyMmoPick", "RbyMmoText",
   "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile", "RbyMmoRank",
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
-  "RbyMmoParty", "RbyMmoPartyList",
+  "RbyMmoParty", "RbyMmoPartyList", "RbyMmoCharSetup", "RbyMmoCharPick",
   "RbyMmoChoose", "RbyMmoChooseMenu",
 }) do
   check(screens:get(id) ~= nil, "screen " .. id .. " is registered")
@@ -129,6 +129,20 @@ for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items",
                         "movement.speed" }) do
   local chain = run.loader.hooks.chains[hook]
   check(chain ~= nil and #chain > 0, "wraps " .. hook)
+end
+
+-- NEW GAME emits save.created, never save.loaded -- so a mod that only
+-- listens for one leaves the other world half torn down (see Client.lua's
+-- own header on why: the engine reuses one player entity for the life of
+-- the process, so a stash taken before QUIT is still standing after the
+-- title screen unless something drops it). Both have to be subscribed, not
+-- just one, and this is the seam that says so without needing a live
+-- world to fire either event through.
+for _, name in ipairs({ "save.loaded", "save.created" }) do
+  local listeners = run.loader.events.listeners[name]
+  check(listeners ~= nil and #listeners > 0,
+        "subscribes to " .. name .. ", so a fresh save is resynced exactly "
+        .. "like a loaded one")
 end
 
 -- ------- movement.speed: holding B on foot halves the step
@@ -478,6 +492,20 @@ eq(Wire.spriteId("SPRITE_COOLTRAINER_M"), "SPRITE_COOLTRAINER_M",
 eq(Wire.spriteId("../etc/passwd"), nil, "a path is not a sprite id")
 eq(Wire.spriteId("has space"), nil, "nor is anything with a space")
 eq(Wire.spriteId(42), nil, "nor a non-string")
+
+-- Too long is refused rather than truncated, so both hubs answer the same
+-- bytes the same way -- see Wire.spriteId's own header for why a cut id is
+-- worse than a rejected one.
+eq(Wire.spriteId(string.rep("a", 40)), string.rep("a", 40),
+   "exactly forty characters is accepted")
+eq(Wire.spriteId(string.rep("a", 41)), nil,
+   "forty-one is refused outright, not trimmed back to forty")
+
+-- The message type mmo.sprite rides on -- see its header in src/Wire.lua for
+-- why one name serves both directions.
+eq(Wire.SPRITE, "mmo.sprite",
+   "the wire vocabulary carries the character-change message type")
+
 eq(Wire.presence({ id = "s1", name = "ANN", sprite = "SPRITE_BLUE" }).sprite,
    "SPRITE_BLUE", "and presence carries it through intact")
 
@@ -763,6 +791,29 @@ eq(roster:get("a").party, true, "and walking does not take it off them again")
 roster:setParty("a", false)
 eq(roster:get("a").party, false, "leaving one clears it")
 eq(roster:setParty("nosuch", true), nil, "an unknown id is a no-op")
+
+-- ------- setSprite: the character somebody is wearing, changed mid-session
+--
+-- Exact setPoints shape, and pinned the same way: an open trainer card
+-- holds this entry by reference (Card.new keeps it as self.player), so a
+-- setter that swapped the table for a fresh one would leave that card
+-- drawing the old portrait forever while the roster below it already knew
+-- better.
+
+do
+  local before = roster:get("a")
+  eq(before.sprite, Config.DEFAULT_SPRITE,
+     "sanity: ANN starts wearing the default character")
+  local returned = roster:setSprite("a", "SPRITE_BLUE")
+  eq(roster:get("a").sprite, "SPRITE_BLUE", "setSprite changes the stored character")
+  check(returned == before,
+        "and returns the very same table setSprite was called with, not a copy")
+  check(roster:get("a") == before,
+        "the roster's own entry is that same table too -- an in-place write, "
+        .. "never a put()")
+  eq(roster:setSprite("nosuch", "SPRITE_RED"), nil,
+     "an unknown id is a no-op, and returns nothing to update")
+end
 
 -- ------- pace rides through move(), not a setter
 --
@@ -2507,6 +2558,157 @@ end)()
 end
 
 -- ------------------------------------------------------------------
+-- 3c. mmo.sprite: changing character mid-session, over the hub
+-- ------------------------------------------------------------------
+--
+-- The character row is now reachable from the connected menu, not just at
+-- hello, so the hub has to learn a change and pass it on. Mirrors
+-- server/hub.test.js's (or sprite.test.js's) mmo.sprite cases one for one --
+-- identical assertion strings agreed with T-B, so the two hub twins stay
+-- honest about the same behaviour.
+
+;(function()
+
+local spriteHub = Hub.new({ maxPlayers = 8 })
+local ann2, ann2Peer = join(spriteHub, "ANN2", "PALLET", 5, 5)
+local bob2, bob2Peer = join(spriteHub, "BOB2", "PALLET", 6, 5)
+ann2Peer.outbox, bob2Peer.outbox = {}, {}
+
+spriteHub:receive(ann2, { type = Wire.SPRITE, sprite = "SPRITE_BLUE" })
+local annSees = take(ann2Peer, Wire.SPRITE)
+local bobSees = take(bob2Peer, Wire.SPRITE)
+check(annSees ~= nil and bobSees ~= nil,
+      "a sprite change is stored and broadcast to everyone, the sender too")
+eq(annSees.id, ann2.id, "naming who changed")
+eq(annSees.sprite, "SPRITE_BLUE", "and to what")
+eq(bobSees.id, ann2.id, "the same message, word for word, to everyone else")
+eq(bobSees.sprite, "SPRITE_BLUE", "the same message, word for word")
+eq(ann2.sprite, "SPRITE_BLUE", "and the hub's own record of them moved too")
+
+-- a malformed id
+ann2Peer.outbox, bob2Peer.outbox = {}, {}
+spriteHub:receive(ann2, { type = Wire.SPRITE, sprite = "bad id with spaces" })
+eq(take(ann2Peer, Wire.SPRITE), nil,
+   "a bad sprite id costs the sender nothing but the message")
+eq(take(bob2Peer, Wire.SPRITE), nil, "nobody else hears about it either")
+eq(ann2.sprite, "SPRITE_BLUE", "and the hub keeps the last good value")
+
+-- re-sending what is already stored
+ann2Peer.outbox, bob2Peer.outbox = {}, {}
+spriteHub:receive(ann2, { type = Wire.SPRITE, sprite = "SPRITE_BLUE" })
+eq(take(ann2Peer, Wire.SPRITE), nil, "an unchanged sprite is not rebroadcast")
+eq(take(bob2Peer, Wire.SPRITE), nil, "not even to somebody else")
+
+-- the gate: two real changes back to back keep only the first
+spriteHub:update(Config.CHAT_GATE * 2) -- clear whatever gate the setup left armed
+ann2Peer.outbox, bob2Peer.outbox = {}, {}
+spriteHub:receive(ann2, { type = Wire.SPRITE, sprite = "SPRITE_RED" })
+check(take(ann2Peer, Wire.SPRITE) ~= nil, "sanity: the first of the pair goes through")
+spriteHub:receive(ann2, { type = Wire.SPRITE, sprite = "SPRITE_YOUNGSTER" })
+eq(take(ann2Peer, Wire.SPRITE), nil,
+   "two changes inside the gate keep only the first")
+eq(ann2.sprite, "SPRITE_RED", "the hub is still holding the first value")
+
+-- and the gate lapsing lets the next one through
+spriteHub:update(Config.CHAT_GATE * 2)
+spriteHub:receive(ann2, { type = Wire.SPRITE, sprite = "SPRITE_YOUNGSTER" })
+check(take(ann2Peer, Wire.SPRITE) ~= nil,
+      "a change after the gate opens goes through")
+eq(ann2.sprite, "SPRITE_YOUNGSTER", "and the hub holds the new value")
+
+-- a connection that has not said hello yet is not a player and cannot be one
+local pendingPeer = fakePeer()
+local pending = spriteHub:accept(pendingPeer)
+spriteHub:receive(pending, { type = Wire.SPRITE, sprite = "SPRITE_RED" })
+eq(pending.sprite, Config.DEFAULT_SPRITE,
+   "a client that never said hello cannot change a sprite")
+eq(take(pendingPeer, Wire.SPRITE), nil, "and nothing is broadcast about it")
+
+end)()
+
+-- ------- the board learns a new face only from the name's real owner
+
+;(function()
+
+local boardHub = Hub.new({ maxPlayers = 8 })
+local owner, ownerPeer = join(boardHub, "FACE", "PALLET", 1, 1)
+take(ownerPeer, Wire.WELCOME)
+eq(owner.ranked, true, "sanity: the first FACE claims the name and is ranked")
+eq(boardHub.board:get("FACE").sprite, Config.DEFAULT_SPRITE,
+   "sanity: admit already seeded the board with the hello's sprite")
+
+ownerPeer.outbox = {}
+boardHub:receive(owner, { type = Wire.SPRITE, sprite = "SPRITE_BLUE" })
+check(take(ownerPeer, Wire.SPRITE) ~= nil, "sanity: the owner's own change went out")
+eq(boardHub.board:get("FACE").sprite, "SPRITE_BLUE",
+   "a ranked owner's change re-seeds the board's face")
+
+-- a second FACE while the first is still connected and ranked is an
+-- impostor, the same rule "a name somebody is standing in is not up for
+-- grabs" pins above
+local impostor, impostorPeer = join(boardHub, "FACE", "PALLET", 2, 1)
+local impostorWelcome = take(impostorPeer, Wire.WELCOME)
+eq(impostorWelcome.ranked, false,
+   "sanity: a second FACE while the first is connected is not scored")
+
+boardHub:update(Config.CHAT_GATE * 2)
+ownerPeer.outbox, impostorPeer.outbox = {}, {}
+boardHub:receive(impostor, { type = Wire.SPRITE, sprite = "SPRITE_YOUNGSTER" })
+check(take(impostorPeer, Wire.SPRITE) ~= nil,
+      "sanity: an unranked client's own change still reaches the wire -- "
+      .. "everyone still sees them wearing it")
+eq(impostor.sprite, "SPRITE_YOUNGSTER",
+   "sanity: the hub still stores what the impostor is wearing, for their "
+   .. "own avatar")
+eq(boardHub.board:get("FACE").sprite, "SPRITE_BLUE",
+   "an impostor cannot repaint a ranked row's face")
+
+end)()
+
+-- ------- the announcement is not behind anything that can fail
+--
+-- The failure this pins is specific and it is permanent, which is what makes
+-- it worth a case of its own. The store at the top of the handler is what
+-- arms its own no-op guard: once client.sprite has moved, every later
+-- mmo.sprite carrying the same id returns at `sprite == client.sprite`. So a
+-- throw *between* the store and the broadcast does not cost one message -- it
+-- costs the whole session. The client's reconcile loop re-sends the same id
+-- every SPRITE_RETRY for as long as the player stays connected, the hub eats
+-- each one as a no-op, and nobody else in the game is ever told, with nothing
+-- anywhere to say why.
+--
+-- The board is the call that could do it: it is the one thing this handler
+-- touches that it does not own. So the order is the invariant -- announce,
+-- then reseed -- and this drives it with a board that throws, which is the
+-- only way to state "the announcement does not depend on that call" without
+-- waiting for a real bug in Rank. server/sprite.test.js runs the same case.
+
+;(function()
+
+local orderHub = Hub.new({ maxPlayers = 8 })
+local one, onePeer = join(orderHub, "ORDER1", "PALLET", 1, 1)
+local two, twoPeer = join(orderHub, "ORDER2", "PALLET", 2, 1)
+eq(one.ranked, true, "sanity: the sender owns its name, so the board is in play")
+onePeer.outbox, twoPeer.outbox = {}, {}
+
+orderHub.board.seen = function()
+  error("the board could not take that name", 0)
+end
+
+local ok = pcall(orderHub.receive, orderHub, one,
+                 { type = Wire.SPRITE, sprite = "SPRITE_BLUE" })
+eq(ok, false, "sanity: the board really did throw")
+check(take(twoPeer, Wire.SPRITE) ~= nil,
+      "a board that fails does not cost everyone else the announcement")
+check(take(onePeer, Wire.SPRITE) ~= nil, "nor the sender their acknowledgement")
+eq(one.sprite, "SPRITE_BLUE",
+   "and what the hub is holding is exactly what it announced -- never a "
+   .. "value stored but never said, which the no-op guard would then eat "
+   .. "every retry of")
+
+end)()
+
+-- ------------------------------------------------------------------
 -- 4. The host joins its own game over loopback
 -- ------------------------------------------------------------------
 --
@@ -2549,6 +2751,24 @@ local third = hosted.hub:accept(thirdPeer)
 hosted.hub:receive(third, { type = Wire.HELLO, proto = Config.PROTOCOL,
                             name = "THIRD" })
 check(take(thirdPeer, Wire.ERROR) ~= nil, "a second friend does not")
+
+-- ------- the host's own peer cannot take the fan-out down with it
+--
+-- Hub:broadcast walks every client in table order and hands each one's peer
+-- the message. The socket peers guard their encoder (HostServer's Peer:send
+-- says why); this handle is the odd one out, and it is odd in the direction
+-- that matters -- a throw here happens *inside* somebody else's broadcast,
+-- abandoning the loop, so the host's own copy of a message could cost every
+-- other player theirs, and leave the hub holding state it had committed and
+-- never finished announcing. What reaches this peer is Hub's own payloads,
+-- so nothing ordinary can fail; the point is that nothing extraordinary can
+-- either.
+local hostOwn = hosted.localClient
+check(hostOwn ~= nil, "hosting keeps a handle on the host's own client")
+check(pcall(function()
+  hostOwn.peer:send({ type = "mmo.unencodable", nope = print })
+end), "a message the encoder cannot take does not throw out of the host's "
+   .. "own peer, so the broadcast carrying it still reaches everyone else")
 
 -- the friend is still on; only the host's own seat is given back
 localNet:close()
@@ -2650,6 +2870,81 @@ eq(fakeNpc.stepFrames, Config.FAST_STEP_FRAMES,
    "and a cyclist is paced by the same one flag a sprinter is")
 
 stubMod.world = nil
+
+end)()
+
+-- ------- Avatars:refresh -- a player who changed character while we were
+-- looking at them
+--
+-- The sprite is baked in at spawn and never re-read, so the only way to
+-- redraw somebody wearing a new one is despawn+respawn -- and only for a
+-- player whose avatar is actually up right now. Logged through a fake
+-- world's spawnNpc/removeNpc calls, the same shape the section above uses.
+
+;(function()
+
+stubSprites.SPRITE_RED = { walker = true }
+stubSprites.SPRITE_BLUE = { walker = true }
+
+local calls = {}
+local liveNpc = { cellX = 5, cellY = 5, moving = false, facing = "down" }
+local fakeWorld = {
+  spawnNpc = function(_, mapId, opts)
+    calls[#calls + 1] = { op = "spawn", map = mapId, sprite = opts.sprite }
+    return "npc-refresh"
+  end,
+  removeNpc = function(_, npcId)
+    calls[#calls + 1] = { op = "despawn", npcId = npcId }
+  end,
+  npc = function(_, mapId, npcId) return { npc = liveNpc } end,
+}
+
+local avatars = Avatars.new()
+avatars.mapId = "PALLET"
+
+local row = { id = "a", map = "PALLET", x = 5, y = 5, facing = "down",
+              sprite = "SPRITE_RED" }
+
+-- no world in play at all (a battle, the title screen)
+stubMod.world = nil
+eq(avatars:refresh(row), nil, "refresh with no world in play is a no-op")
+
+stubMod.world = fakeWorld
+
+-- nobody has an avatar up for this player yet
+eq(avatars:refresh(row), nil,
+   "refresh for a player with no avatar up is a no-op -- they spawn as "
+   .. "their new self the next time they come into view")
+eq(#calls, 0, "and nothing was despawned or spawned to get there")
+
+-- spawn one for real, so refresh has something to rebuild
+avatars:spawn(row)
+eq(#calls, 1, "sanity: spawning the first time wrote one call")
+calls = {}
+
+-- the roster has already moved this player to another map: refresh declines
+-- rather than respawning them somewhere that is not the active map
+local elsewhere = { id = "a", map = "VIRIDIAN", x = 1, y = 1, facing = "down",
+                     sprite = "SPRITE_BLUE" }
+eq(avatars:refresh(elsewhere), nil,
+   "refresh for a map-mismatched roster entry is a no-op -- they will spawn "
+   .. "wearing the new character on the way in")
+eq(#calls, 0, "no despawn happened to get there")
+
+-- same map, spawned: the real path -- despawn the old sheet, spawn the new
+local changed = { id = "a", map = "PALLET", x = 5, y = 5, facing = "down",
+                   sprite = "SPRITE_BLUE" }
+local result = avatars:refresh(changed)
+check(result ~= nil, "refresh rebuilds the avatar")
+eq(#calls, 2, "exactly one despawn and one spawn")
+eq(calls[1].op, "despawn", "the old sheet goes first")
+eq(calls[2].op, "spawn", "and the new one follows")
+eq(calls[2].sprite, "SPRITE_BLUE",
+   "the new spawn carries the character that was just chosen, not the old one")
+
+stubMod.world = nil
+stubSprites.SPRITE_RED = nil
+stubSprites.SPRITE_BLUE = nil
 
 end)()
 
@@ -3841,6 +4136,313 @@ end
 end)()
 
 -- ------------------------------------------------------------------
+-- 9b. mmo.sprite from the client: push, reconcile, and the ack
+-- ------------------------------------------------------------------
+--
+-- A fresh Client (resolver()("Client"), the same idiom the rank-token-file
+-- tests just above use) rather than the one every other section in this
+-- file shares: this needs install() -- the only way to reach the tick that
+-- reconciles spriteAcked -- and running it on the shared instance would
+-- wire its hooks and exports a second time on top of whatever a later
+-- section still expects to find untouched.
+
+;(function()
+
+stubSave, stubOptions = {}, {}
+stubSprites.SPRITE_RED = { walker = true }
+stubSprites.SPRITE_BLUE = { walker = true }
+stubSprites.SPRITE_YOUNGSTER = { walker = true }
+
+local capturedTick
+-- the harness's own events table records emits for the co-op sections that
+-- run after this one, so it is put back afterwards rather than dropped
+local origEvents = stubMod.events
+stubMod.exports = {}
+stubMod.events = { on = function() end }
+stubMod.hooks = {
+  wrap = function(_, name, fn)
+    if name == "input.step" then capturedTick = fn end
+  end,
+}
+stubMod.ui = { push = function() end, insertBefore = function(_, items) return items end }
+stubMod.content.screens = { register = function() end, get = function() end }
+
+local sprClient = resolver()("Client")
+sprClient.install()
+check(capturedTick ~= nil, "sanity: install() wrapped input.step, so there is a tick to drive")
+
+local function fakeNet()
+  local inbox = {}
+  local net = { closed = false, outbox = {} }
+  function net:send(msg) self.outbox[#self.outbox + 1] = msg end
+  function net:update() end
+  function net:poll()
+    local out = inbox
+    inbox = {}
+    return out
+  end
+  function net:close() self.closed = true end
+  function net:deliver(msg) inbox[#inbox + 1] = msg end
+  return net
+end
+
+local function takeSprite(net)
+  for i, msg in ipairs(net.outbox) do
+    if msg.type == Wire.SPRITE then return table.remove(net.outbox, i) end
+  end
+  return nil
+end
+
+local function drive(dt)
+  capturedTick(function() end, {}, dt)
+end
+
+-- ------- pushSprite sends only when the transport is ready
+
+eq(sprClient.pushSprite(), false,
+   "pushSprite before the transport has ever connected sends nothing")
+
+local net = fakeNet()
+sprClient.transport:attach(net)
+eq(sprClient.pushSprite(), false,
+   "and still nothing while attached but not yet welcomed")
+
+sprClient.transport:markReady()
+sprClient.ctx.roster:setSelf("me")
+
+eq(sprClient.pushSprite(), true, "ready, pushSprite sends")
+check(takeSprite(net) ~= nil, "and a message actually went out")
+net.outbox = {}
+
+-- ------- setSpriteChoice while connected sends exactly one message
+
+eq(sprClient.setSpriteChoice("SPRITE_RED"), "SPRITE_RED",
+   "setSpriteChoice while connected succeeds for a character this game can draw")
+eq(#net.outbox, 1, "and sends exactly one message for it")
+eq(net.outbox[1].type, Wire.SPRITE, "of the sprite type")
+eq(net.outbox[1].sprite, sprClient.spriteChoice(),
+   "carrying the resolved choice sent to the hub")
+net.outbox = {}
+
+-- ------- an inbound self echo is the ack
+
+net:deliver({ type = Wire.SPRITE, id = "me", sprite = sprClient.spriteChoice() })
+drive(0.016) -- one ordinary step: reads the echo, does not yet cross the retry window
+net.outbox = {}
+drive(Config.CHAT_GATE * 2 + 0.1) -- well past SPRITE_RETRY
+eq(takeSprite(net), nil,
+   "once the hub's own echo has acked the choice, the reconcile tick past "
+   .. "SPRITE_RETRY sends nothing")
+
+-- ------- a gate-dropped push is re-sent
+
+eq(sprClient.setSpriteChoice("SPRITE_BLUE"), "SPRITE_BLUE",
+   "choosing a different character")
+local first = takeSprite(net)
+check(first ~= nil, "sanity: the immediate push went out")
+eq(first.sprite, "SPRITE_BLUE", "carrying the new choice")
+net.outbox = {}
+
+-- no echo delivered this time -- simulating a push the hub's own gate
+-- (Hub.lua's SPRITE_GATE) refused in silence
+drive(Config.CHAT_GATE * 2 + 0.1)
+local second = takeSprite(net)
+check(second ~= nil,
+      "a push the hub never acked is re-sent once SPRITE_RETRY has passed")
+eq(second.sprite, "SPRITE_BLUE", "the same choice, tried again")
+net.outbox = {}
+
+-- ack it, so the option-driven test below is caused only by the option --
+-- not by BLUE still sitting unacknowledged
+net:deliver({ type = Wire.SPRITE, id = "me", sprite = "SPRITE_BLUE" })
+drive(0.016)
+net.outbox = {}
+drive(Config.CHAT_GATE * 2 + 0.1)
+eq(takeSprite(net), nil, "sanity: BLUE is acked and the reconcile loop is quiet")
+
+-- ------- an option-driven change is carried by the same reconcile loop
+--
+-- Nobody called setSpriteChoice here: the global MY SPRITE row in the mod
+-- manager writes mod.options directly and calls nothing, so this is the
+-- only thing that ever tells the hub about a change made there.
+
+stubSave.sprite = ""
+stubOptions.sprite = "SPRITE_YOUNGSTER"
+drive(Config.CHAT_GATE * 2 + 0.1)
+local optionPush = takeSprite(net)
+check(optionPush ~= nil,
+      "an option-driven change with nobody calling setSpriteChoice is still "
+      .. "pushed, by the reconcile loop")
+eq(optionPush.sprite, "SPRITE_YOUNGSTER", "carrying the option row's value")
+net.outbox = {}
+
+-- ack it too, so disconnect is the only thing that can explain what happens next
+net:deliver({ type = Wire.SPRITE, id = "me", sprite = "SPRITE_YOUNGSTER" })
+drive(0.016)
+net.outbox = {}
+drive(Config.CHAT_GATE * 2 + 0.1)
+eq(takeSprite(net), nil, "sanity: YOUNGSTER acked too, quiet before the disconnect test")
+
+-- ------- disconnect resets the ack state
+--
+-- spriteAcked is private, so this is observed the only way it can be from
+-- out here: with the choice already acked and nothing left to reconcile,
+-- reconnect *without* a hello (which would normally reseed it) and check
+-- whether the loop still trusts the old hub's word or starts over.
+
+sprClient.disconnect()
+check(sprClient.transport:isOpen() == false, "sanity: disconnect closes the transport")
+
+local net2 = fakeNet()
+sprClient.transport:attach(net2)
+sprClient.transport:markReady()
+drive(Config.CHAT_GATE * 2 + 0.1)
+check(takeSprite(net2) ~= nil,
+      "disconnect resets the ack state -- a new session pushes the "
+      .. "standing choice again rather than trusting a hub it already left")
+
+stubMod.exports = nil
+stubMod.events = origEvents
+stubMod.hooks = nil
+stubMod.ui = nil
+stubMod.content.screens = nil
+stubSprites.SPRITE_RED = nil
+stubSprites.SPRITE_BLUE = nil
+stubSprites.SPRITE_YOUNGSTER = nil
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 9c. mmo.sprite end to end, in hosting mode: pick -> hub -> other player
+-- ------------------------------------------------------------------
+--
+-- The gap this closes. Every other case in this file drives one end of the
+-- loop against a stand-in: 3c drives Hub with fake peers and no client, 9b
+-- drives Client with a fake net and no hub. Both were green while the real
+-- thing was not, because the seam neither of them crosses is the one a
+-- hosting player actually uses -- Client's transport is HostServer:localNet,
+-- whose send() runs Hub:receive *synchronously, inside the UI callback that
+-- picked the character*, with the JSON round trip in the middle and no pcall
+-- anywhere on the way. That is where a change made from the CHARACTER row
+-- either reaches the other players or silently does not, and nothing headless
+-- had ever run it.
+--
+-- So this is the whole path, with only the socket taken out: the real Client
+-- in hosting mode, the real HostServer local peer, the real Hub, and a second
+-- player attached to that hub the way section 3 attaches one. The assertion
+-- is the one the end-to-end driver makes from the other side of the wire --
+-- the other player is told, by id, which character this one is now wearing.
+
+;(function()
+
+stubSave, stubOptions = {}, {}
+
+local capturedTick
+-- the harness's own events table records emits for the co-op sections that
+-- run after this one, so it is put back afterwards rather than dropped
+local origEvents = stubMod.events
+stubMod.exports = {}
+stubMod.events = { on = function() end }
+stubMod.hooks = {
+  wrap = function(_, name, fn)
+    if name == "input.step" then capturedTick = fn end
+  end,
+}
+stubMod.ui = { push = function() end, insertBefore = function(_, items) return items end }
+stubMod.content.screens = { register = function() end, get = function() end }
+
+local hostClient = resolver()("Client")
+hostClient.install()
+check(capturedTick ~= nil, "sanity: install() wrapped input.step")
+-- Cast.install() ran inside install() and wrote the mod's own characters into
+-- the stub catalog, so this is the same id the picker offers and the same one
+-- the end-to-end driver picks.
+check(stubSprites.SPRITE_NIRE ~= nil,
+      "sanity: the mod's own characters are in the catalog to be picked")
+stubSprites.SPRITE_RED = { walker = true }
+
+-- Hosting, wired exactly as Client.host() wires it. start() is skipped
+-- because it opens a real port and plain luajit has no luasocket (section 4
+-- says the same); accept/flush are the two members of update() that need one,
+-- so they are stubbed and everything else -- the hub's clock, the local peer,
+-- the reaper -- runs for real.
+local hosted = hostClient.ctx.server
+hosted.hub = Hub.new({ maxPlayers = 4 })
+hosted.running = true
+hosted.accept = function() end
+hosted.flush = function() end
+
+local localNet = hosted:localNet()
+check(localNet ~= nil, "the host gets a local net to join its own game with")
+hostClient.transport:attach(localNet)
+
+-- The other player, on the same hub, holding an outbox instead of a socket
+local friendPeer = fakePeer()
+local friend = hosted.hub:accept(friendPeer)
+hosted.hub:receive(friend, { type = Wire.HELLO, proto = Config.PROTOCOL,
+                             name = "FRIEND", map = "PALLET", x = 1, y = 1,
+                             facing = "down" })
+check(take(friendPeer, Wire.WELCOME) ~= nil, "and is welcomed onto it")
+
+local function drive(dt) capturedTick(function() end, {}, dt or 0.016) end
+
+stubSave.name = "HOSTY"
+hostClient.sendHello({ save = { name = "HOSTY" } })
+drive()
+check(hostClient.transport:isReady(),
+      "the host is welcomed by its own hub and reaches the ready state")
+local hostId = hostClient.ctx.roster.selfId
+check(hostId ~= nil, "and knows the id the hub gave it")
+
+-- past the gate the hello left behind, and with the friend's outbox clean, so
+-- what arrives below can only have been caused by the pick
+hosted.hub:update(Config.CHAT_GATE * 4)
+drive()
+friendPeer.outbox = {}
+
+-- ------- the pick, through the same call the CHARACTER row makes
+
+eq(hostClient.setSpriteChoice("SPRITE_NIRE"), "SPRITE_NIRE",
+   "the host picks a character mid-session, the way the CHARACTER row does")
+eq(hostClient.spriteChoice(), "SPRITE_NIRE", "and is wearing it locally")
+
+local told = take(friendPeer, Wire.SPRITE)
+check(told ~= nil,
+      "picking a character while hosting reaches the other player in the "
+      .. "game -- the whole loop, from the UI call to a peer's outbox")
+eq(told.id, hostId, "naming the host by the id that player already knows them by")
+eq(told.sprite, "SPRITE_NIRE", "and the character just picked")
+eq(hosted.hub.clients[hostId].sprite, "SPRITE_NIRE",
+   "and the hub is holding it, so a player who joins later is told by the "
+   .. "ordinary presence stream")
+
+-- ------- and the host's own echo settles the reconcile loop
+--
+-- The other half of the same round trip: the broadcast has no exception, so
+-- the host hears its own change back, and that copy is the acknowledgement.
+-- Without it the tick would re-push forever against a hub already holding the
+-- answer.
+drive()
+friendPeer.outbox = {}
+drive(Config.CHAT_GATE * 2 + 0.1)
+eq(take(friendPeer, Wire.SPRITE), nil,
+   "the hub's own echo acks it, so the reconcile tick goes quiet rather than "
+   .. "re-pushing a character the hub already has")
+
+localNet:close()
+hosted.running = false
+hosted.hub = nil
+
+stubMod.exports = nil
+stubMod.events = origEvents
+stubMod.hooks = nil
+stubMod.ui = nil
+stubMod.content.screens = nil
+stubSprites.SPRITE_RED = nil
+
+end)()
+
+-- ------------------------------------------------------------------
 -- 10. Trading, and the one invariant that matters
 -- ------------------------------------------------------------------
 --
@@ -4396,19 +4998,23 @@ eq(cal.party.incoming, nil, "and a prompt that was still up")
 end)()
 
 -- ------------------------------------------------------------------
--- 12. Leaving gives the player their own trainer back
+-- 12. A chosen character survives the door it was worn through
 -- ------------------------------------------------------------------
 --
--- Wearing a hub character has to be undone on the way out, or a player who
--- joins once is a Rocket grunt in their own single-player game forever.
+-- The old rule was "leaving hands the trainer back, always." The new one
+-- keeps a character that was actually *chosen*: syncLook wears the
+-- standing choice whenever explicitChoice() answers, and restores vanilla
+-- only when it does not -- so disconnect, a map change with nothing worn
+-- yet, and another save taking over all ask that one question instead of
+-- each assuming its own answer.
 --
--- The trap is that the overworld reuses one player object across map
--- changes -- OverworldController:setMap calls Player.new only when it has
--- none -- while this mod re-wears the look on every map.entered. Re-reading
--- "the original" on each of those reads back the renderer the mod itself
--- installed, so leaving restored the hub character. One door was enough to
--- lose the real one, which is why the entity the original came from is
--- pinned here alongside it.
+-- The trap is unchanged from before: the overworld reuses one player
+-- object across map changes -- OverworldController:setMap calls Player.new
+-- only when it has none -- while this mod re-wears the look on every
+-- map.entered. Re-reading "the original" on each of those reads back the
+-- renderer the mod itself installed, so leaving restored the hub
+-- character. One door was enough to lose the real one, which is why the
+-- entity the original came from is pinned here alongside it.
 --
 -- Wrapped for scope, like section 8.
 
@@ -4426,6 +5032,8 @@ stubSprites.SPRITE_RED = { walker = true }
 stubSprites.SPRITE_ROCKET = { walker = true }
 stubSave.sprite = "SPRITE_ROCKET"
 eq(Client.spriteChoice(), "SPRITE_ROCKET", "the chosen character resolves")
+eq(Client.explicitChoice(), "SPRITE_ROCKET",
+   "and it counts as an explicit choice -- worth wearing outside a session")
 
 local overworld = { player = nil }
 stubMod.world = { overworld = function() return overworld end }
@@ -4451,33 +5059,168 @@ check(Client.refreshLook(), "and again, as a long session would")
 check(red.sprite ~= redSheet, "still wearing it")
 
 Client.restoreLook()
-eq(red.sprite, redSheet, "leaving gives the player their own trainer back")
--- The battle and trainer-card pics hang off this one, so a game left is a
--- game whose pics go back to vanilla in the same breath as the sprite.
-eq(Client.wornLook(), nil, "and leaving is wearing nothing again")
+eq(red.sprite, redSheet, "restoreLook itself still gives the trainer back")
+-- The battle and trainer-card pics hang off this one, so a direct restore
+-- is a game whose pics go back to vanilla in the same breath as the sprite.
+eq(Client.wornLook(), nil, "and restoreLook alone is wearing nothing again")
 
 Client.restoreLook()
-eq(red.sprite, redSheet, "and leaving twice is not a second restore")
+eq(red.sprite, redSheet, "and restoring twice is not a second restore")
 
--- ------- the same, through the client's own teardown
+-- ------- explicitChoice: what counts as "asked to be somebody else"
 --
--- disconnect() is the one path both a deliberate leave and a dropped
--- connection go through, so the restore is pinned on it and not only on
--- restoreLook directly.
+-- spriteChoice always answers -- everybody has to be drawn as somebody --
+-- but syncLook, disconnect and the widened refreshLook all have to tell
+-- "chose a character" apart from "left it to the game", and that is this
+-- predicate's whole job.
 
-check(Client.applyLook(), "wearing it again for the teardown")
+stubSave.sprite, stubOptions.sprite = nil, nil
+eq(Client.explicitChoice(), nil,
+   "neither the save field nor the option is set -- nobody touched this")
+
+stubSave.sprite = "SPRITE_RED"
+eq(Client.explicitChoice(), nil,
+   "picking RED resolves to the engine's own default, which is a restore "
+   .. "wearing it, not a choice")
+
+stubSave.sprite = "SPRITE_ROCKET"
+eq(Client.explicitChoice(), "SPRITE_ROCKET",
+   "a character this game can actually draw comes back as itself")
+
+stubSave.sprite = "SPRITE_FROM_ANOTHER_ROM"
+eq(Client.explicitChoice(), nil,
+   "a save carried over from a different catalog degrades to RED, and "
+   .. "that degrade reads as no choice rather than as RED chosen on purpose")
+
+stubSave.sprite = nil
+stubOptions.sprite = "SPRITE_ROCKET"
+eq(Client.explicitChoice(), "SPRITE_ROCKET",
+   "with no save field, the global option is the standing choice")
+
+stubSave.sprite = "SPRITE_RED"
+stubOptions.sprite = "SPRITE_ROCKET"
+eq(Client.explicitChoice(), nil,
+   "the save field wins over the option even when the save is only RED")
+
+stubOptions.sprite = nil
+
+-- ------- the choice follows you out the door
+--
+-- disconnect() used to be a plain restore; now it runs syncLook(), which
+-- keeps a chosen look on and only undresses a player who never asked for
+-- one. Driven through the client's own teardown, not just restoreLook
+-- directly, because disconnect is the one path a deliberate leave and a
+-- dropped connection both funnel through.
+
+stubSave.sprite = "SPRITE_ROCKET"
+red.sprite = redSheet
+check(Client.applyLook(), "wearing the chosen character again")
 check(red.sprite ~= redSheet, "worn")
 Client.disconnect()
-eq(red.sprite, redSheet, "disconnecting puts the trainer back")
+check(red.sprite ~= redSheet,
+      "disconnecting keeps the chosen look -- it belongs to the player, "
+      .. "not to the session that first wore it")
+eq(Client.wornLook(), "SPRITE_ROCKET", "and it is still what is worn")
 
--- ------- nothing worn, nothing to re-wear
+-- Setting the choice applies it there and then -- the whole point of the
+-- offline picker row is that it does not need a game to be started.
+eq(Client.setSpriteChoice("SPRITE_RED"), "SPRITE_RED",
+   "setSpriteChoice succeeds for a character this game can draw")
+eq(red.sprite, redSheet,
+   "and picking RED wears the engine's own renderer -- which, since red "
+   .. "was already vanilla, means putting it straight back")
+eq(Client.wornLook(), nil,
+   "RED is not a look anybody 'wears': explicitChoice reads it as no "
+   .. "choice, so syncLook routes it through restoreLook")
 
+-- Explicit choice again, this time through setSpriteChoice rather than a
+-- save write behind its back -- the offline row's whole path.
+eq(Client.setSpriteChoice("SPRITE_ROCKET"), "SPRITE_ROCKET",
+   "choosing the grunt again")
+check(red.sprite ~= redSheet,
+      "setSpriteChoice wears the look immediately, offline included -- "
+      .. "there is no game running here, and it still applied")
+eq(Client.wornLook(), "SPRITE_ROCKET", "and that is what is worn")
+
+check(Client.setSpriteChoice("SPRITE_NOT_IN_THIS_CATALOG") == nil,
+      "a character this game cannot draw is refused")
+eq(stubSave.sprite, "SPRITE_ROCKET",
+   "and the refusal does not disturb the choice already standing")
+
+Client.disconnect()
+check(red.sprite ~= redSheet, "the teardown keeps that choice on too")
+
+-- ------- nothing chosen, nothing to keep
+
+stubSave.sprite, stubOptions.sprite = nil, nil
+check(Client.applyLook(),
+      "the game still draws whoever spriteChoice resolves to -- "
+      .. "everybody has to be drawn as somebody")
+Client.disconnect()
+eq(red.sprite, redSheet,
+   "but with no explicit choice standing, disconnecting is exactly the "
+   .. "restore it always was")
+eq(Client.wornLook(), nil, "and nothing is worn once it has")
+
+-- ------- refreshLook's widened gate: an offline save wears its choice too
+--
+-- The old gate was "already wearing one, or in a game" -- which is exactly
+-- why a single-player save with a character picked never showed it until
+-- this widened. The third clause is what a save that was never connected
+-- rides in on.
+
+Client.restoreLook()
+red.sprite = redSheet
 eq(Client.refreshLook(), false,
-   "a map change outside a game does not dress the player up")
+   "a map change with nothing worn, no game, and no choice does not "
+   .. "dress the player up")
 eq(red.sprite, redSheet, "and leaves the trainer alone")
+
+stubSave.sprite = "SPRITE_ROCKET"
+eq(Client.refreshLook(), true,
+   "the same map change, once a choice is standing, wears it -- this is "
+   .. "what dresses an offline save on its first map.entered")
+check(red.sprite ~= redSheet, "and it really is worn")
+eq(Client.wornLook(), "SPRITE_ROCKET", "the chosen character")
+
+Client.restoreLook()
+red.sprite = redSheet
+
+-- ------- a fresh save drops the old stash
+--
+-- M.saveLoaded() is leave(); restoreLook(); syncLook() -- in that order,
+-- because the stash belongs to the world that is going away and the new
+-- save may have chosen somebody else, or nobody. NEW GAME has to run
+-- through here too: the engine reuses one player entity for the life of
+-- the process, so a fresh file that never resynced would inherit whatever
+-- the last save left worn.
+
+stubSave.sprite = "SPRITE_ROCKET"
+check(Client.applyLook(), "the outgoing save's character is worn")
+check(red.sprite ~= redSheet, "worn")
+
+stubSave.sprite = nil
+Client.saveLoaded()
+eq(red.sprite, redSheet,
+   "a save with no choice at all drops the outgoing look -- a NEW GAME "
+   .. "must not inherit the last file's character")
+eq(Client.wornLook(), nil, "and wears nothing until told to")
+
+stubSprites.SPRITE_GENTLEMAN = { walker = true }
+check(Client.applyLook(), "worn again for the next handoff")
+stubSave.sprite = "SPRITE_GENTLEMAN"
+Client.saveLoaded()
+eq(Client.wornLook(), "SPRITE_GENTLEMAN",
+   "a save loaded in on top of it wears its own choice, not the "
+   .. "previous file's")
+check(red.sprite ~= redSheet, "worn")
+Client.restoreLook()
+red.sprite = redSheet
+stubSprites.SPRITE_GENTLEMAN = nil
 
 -- ------- a player the engine really did rebuild
 
+stubSave.sprite = "SPRITE_ROCKET"
 check(Client.applyLook(), "worn, and then the world rebuilds the player")
 local blue = newPlayer("blue")
 local blueSheet = blue.sprite
@@ -11101,6 +11844,232 @@ else
 end
 
 base.release()
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 13. previewRows: which visible rows get a portrait
+-- ------------------------------------------------------------------
+--
+-- The picker's portrait sits in the gutter to the *left* of every visible
+-- row that names a character -- unlike the "came with the mod" mark above,
+-- a portrait is not a distinction between rows, so the row under the
+-- cursor gets one exactly like its neighbours. Pinned here the same way
+-- markedRows is: the rule has to hold while the list scrolls, and this
+-- headless suite has no graphics context to read a frame with.
+
+;(function()
+
+local UiPreview = need("Ui").previewRows
+
+local list = {
+  { label = "  ALPHA", value = "SPRITE_ALPHA" },
+  { label = "  BETA", value = "SPRITE_BETA" },
+  { label = "  GAMMA", value = "SPRITE_GAMMA" },
+}
+
+local function ids(index, scroll, rows)
+  local out = {}
+  for _, preview in ipairs(UiPreview({ items = list, index = index,
+                                       scroll = scroll or 0, rows = rows or 7 })) do
+    out[#out + 1] = list[(scroll or 0) + preview.row].value
+  end
+  return table.concat(out, ",")
+end
+
+eq(ids(1), "SPRITE_ALPHA,SPRITE_BETA,SPRITE_GAMMA",
+   "every visible row previews, cursor row included")
+eq(ids(2), "SPRITE_ALPHA,SPRITE_BETA,SPRITE_GAMMA",
+   "unlike the mark, the row under the cursor is not skipped")
+
+-- The rows are the *visible* ones, so a scrolled list previews what is on
+-- screen rather than the whole catalog.
+eq(ids(1, 1, 7), "SPRITE_BETA,SPRITE_GAMMA",
+   "a scrolled list previews what is on screen")
+eq(ids(1, 0, 2), "SPRITE_ALPHA,SPRITE_BETA",
+   "and a short window stops at its last row")
+
+-- The y it hands back is the widget's own row geometry, same as markedRows.
+local rows = UiPreview({ items = list, index = 1, scroll = 0, rows = 7 })
+eq(rows[1].row, 1, "the first row previews first")
+eq(rows[1].y, 8 + 1 * 16, "at the y that row's label is drawn on")
+eq(rows[1].id, "SPRITE_ALPHA", "the id comes from item.value")
+
+eq(#UiPreview(nil), 0, "no menu previews nothing")
+eq(#UiPreview({}), 0, "and neither does one with no items")
+eq(#UiPreview({ items = { { label = "no value" } } }), 0,
+   "a row with no value -- not a character row -- previews nothing")
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 14. The offline character row, and the picker's two doors
+-- ------------------------------------------------------------------
+--
+-- SCREEN.MAIN's CHARACTER row and SCREEN.CHARPICK's backTo opt are pinned
+-- against a fake client and a stubbed mod.ui rather than the real widgets:
+-- what is under test is Ui.lua's own branching -- which rows exist, and
+-- where a choice sends the player back to -- not Menu/ListMenu's layout,
+-- which needs a graphics context this suite does not have.
+
+;(function()
+
+local Ui = need("Ui")
+local SCREEN = Ui.SCREEN
+
+-- what SCREEN.MAIN and SCREEN.CHARPICK actually read off the client
+local function fakeClient(state)
+  state = state or {}
+  return {
+    isHosting = function() return state.hosting == true end,
+    isConnected = function() return state.connected == true end,
+    spriteChoice = function() return state.choice or "SPRITE_ALPHA" end,
+    setSpriteChoice = function(_, id) state.choice = id return id end,
+  }
+end
+
+local pushed
+local screensStore = {}
+stubMod.ui = {
+  push = function(game, id, opts) pushed = { id = id, opts = opts } end,
+  Menu = { new = function(game, items, opts)
+    return { items = items, opts = opts, clampScroll = function() end }
+  end },
+  ListMenu = { new = function(game, title, items, opts)
+    return { title = title, items = items, opts = opts, index = 1,
+             scroll = 0, close = function() end }
+  end },
+}
+stubMod.hooks = { wrap = function() end }
+stubMod.content.screens = {
+  register = function(_, id, record) screensStore[id] = record end,
+  get = function(_, id) return screensStore[id] end,
+}
+
+local ctx = { client = fakeClient(), chat = { unread = 0 } }
+local ui = Ui.new(ctx)
+ui:install()
+
+-- ------- the row itself
+
+local function mainItems()
+  return screensStore[SCREEN.MAIN].new({}).items
+end
+
+do
+  local items = mainItems()
+  eq(#items, 3, "offline, the menu is HOST GAME / JOIN GAME / CHARACTER")
+  eq(items[1].label, "HOST GAME", "first")
+  eq(items[2].label, "JOIN GAME", "second")
+  eq(items[3].label, "CHARACTER", "and third, the new row")
+
+  pushed = nil
+  items[3].onSelect()
+  eq(pushed and pushed.id, SCREEN.CHARPICK, "CHARACTER opens the picker")
+  eq(pushed and pushed.opts and pushed.opts.backTo, SCREEN.MAIN,
+     "and tells it to come straight back to the MMO menu, not the "
+     .. "host/join setup flow")
+end
+
+ctx.client = fakeClient({ connected = true })
+do
+  local items = mainItems()
+  eq(#items, 8, "connected as a guest: 8 rows now that CHARACTER rides along")
+  local labels = {}
+  for _, item in ipairs(items) do labels[#labels + 1] = item.label end
+  eq(table.concat(labels, "|"),
+     "PLAYERS|CHAT|SAY|PARTY|MY PROFILE|RANK|CHARACTER|LEAVE",
+     "CHARACTER sits after RANK and before LEAVE")
+
+  local charRow
+  for _, item in ipairs(items) do
+    if item.label == "CHARACTER" then charRow = item end
+  end
+  pushed = nil
+  charRow.onSelect()
+  eq(pushed and pushed.id, SCREEN.CHARPICK,
+     "connected, CHARACTER opens the picker too")
+  eq(pushed and pushed.opts and pushed.opts.backTo, SCREEN.MAIN,
+     "and comes straight back to the MMO menu, not the host/join setup flow")
+end
+
+ctx.client = fakeClient({ hosting = true })
+do
+  local items = mainItems()
+  eq(#items, 2,
+     "hosting but not connected: still just ADDRESS and END GAME -- a "
+     .. "listener with nobody on it to show a new face to gets no CHARACTER "
+     .. "row")
+  eq(items[1].label, "ADDRESS", "first")
+  eq(items[2].label, "END GAME", "and second")
+end
+
+ctx.client = fakeClient({ hosting = true, connected = true })
+do
+  local items = mainItems()
+  eq(#items, 9,
+     "hosting and connected to your own hub: 9 rows, the first time this "
+     .. "screen has ever needed to scroll")
+  local labels = {}
+  for _, item in ipairs(items) do labels[#labels + 1] = item.label end
+  eq(table.concat(labels, "|"),
+     "ADDRESS|PLAYERS|CHAT|SAY|PARTY|MY PROFILE|RANK|CHARACTER|END GAME",
+     "ADDRESS leads, CHARACTER still after RANK, END GAME last")
+end
+
+ctx.client = fakeClient()
+
+-- ------- CHARPICK's two doors
+
+stubSprites = {}
+stubSprites.SPRITE_ALPHA = { walker = true }
+stubSprites.SPRITE_MIDDLE_AGED_WOMAN = { walker = true }
+
+do
+  local menu = screensStore[SCREEN.CHARPICK].new({}, { backTo = SCREEN.MAIN })
+  local labels, values = {}, {}
+  for _, item in ipairs(menu.items) do
+    labels[#labels + 1] = item.label
+    values[#values + 1] = item.value
+  end
+  check(table.concat(labels, "|"):find("  MIDDLE AGED WOMA", 1, true) ~= nil,
+        "the label is indented past the gutter and trimmed to 16 glyphs, "
+        .. "dropping the trailing N")
+  check(table.concat(values, "|"):find("SPRITE_MIDDLE_AGED_WOMAN", 1, true)
+        ~= nil,
+        "but item.value stays the bare id, which is what the choice reads")
+
+  pushed = nil
+  menu.opts.onChoose(menu.items[1], menu)
+  eq(pushed.id, SCREEN.MAIN, "choosing with a backTo opt returns straight to it")
+  eq(next(pushed.opts), nil, "with no leftover setup opts to carry back")
+
+  pushed = nil
+  menu.opts.onCancel()
+  eq(pushed.id, SCREEN.MAIN, "and cancelling goes the same way")
+end
+
+do
+  -- no backTo: the older door, still open for the TRAINER flow
+  local setupOpts = { verb = "HOST" }
+  local menu = screensStore[SCREEN.CHARPICK].new({}, { back = setupOpts })
+
+  pushed = nil
+  menu.opts.onChoose(menu.items[1], menu)
+  eq(pushed.id, SCREEN.CHARSET,
+     "with no backTo, choosing still goes back to the setup flow")
+  check(pushed.opts == setupOpts,
+        "carrying the exact setup opts it arrived with")
+
+  pushed = nil
+  menu.opts.onCancel()
+  eq(pushed.id, SCREEN.CHARSET, "cancelling keeps the same door")
+end
+
+stubSprites = {}
+stubMod.ui = nil
+stubMod.hooks = nil
+stubMod.content.screens = nil
 
 end)()
 

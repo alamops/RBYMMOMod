@@ -33,7 +33,15 @@ M.MOD_ID = "rby_mmo"
 -- that both said "5" could still be talking past each other -- exactly the
 -- silence this number exists to turn into a sentence.  6 is the first
 -- number that means both.
-M.PROTOCOL = 6
+--
+-- And then 6 was claimed twice in exactly the same way, before it ever
+-- shipped: once by that union, and once for changing character in the
+-- middle of a game (mmo.sprite -- a hub that has never heard the type
+-- answers it with silence, so the player who picked somebody new would be
+-- the only person in the game who could see it).  7 is the first number
+-- that means all of it.  This number lives here and in
+-- server/lib/relay.js -- bump them together.
+M.PROTOCOL = 7
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
