@@ -574,6 +574,9 @@ return function(game)
               "with the trainer card they sent on joining")
       end
       U.shot(game, SHOT_DIR .. "/join-profile-card.png")
+      H.assertPortraitColors(game, SHOT_DIR .. "/join-profile-card.png",
+        116, 52, 32, 32, check,
+        "the remote trainer card portrait is palette-correct")
       U.tap(game, "b")     -- back to the interact menu
       U.wait(30)
       check(H.classify(H.top(game)) == "menu", "and B returns to the menu")

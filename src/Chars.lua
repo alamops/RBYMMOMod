@@ -106,31 +106,52 @@ end
 -- a party member's city.  Two copies of a cache would mean two copies of the
 -- image, and the second caller is a per-frame draw.
 --
--- Cached per sheet path, including the failures: a missing sheet is
--- remembered as `false` so a broken path is not retried on every frame.
+-- Cached per sprite id, including the failures: a missing sheet is remembered
+-- as `false` so a broken path is not retried on every frame. The key is the
+-- id rather than the sheet path because SpriteRenderer's palette bake depends
+-- on the record (paletteSource, trueColor, ...) and the seed together --
+-- blitting the raw PNG is what turned skin into lime green on the trainer
+-- card and the ranking list.
 local FRONT_FRAME = { 0, 0, 16, 16 }
-local sheets = {}
+local portraits = {}
+
+local function portraitQuad(img)
+  local iw, ih = img:getDimensions()
+  return love.graphics.newQuad(FRONT_FRAME[1], FRONT_FRAME[2],
+                              FRONT_FRAME[3], FRONT_FRAME[4],
+                              iw, ih)
+end
 
 function M.portrait(spriteId)
   local registry = mod.content and mod.content.sprites
   local ok, record = pcall(function() return registry and registry:get(spriteId) end)
-  local path = ok and type(record) == "table" and record.image or nil
-  if type(path) ~= "string" then return nil end
+  if not (ok and type(record) == "table" and type(record.image) == "string") then
+    return nil
+  end
 
-  local entry = sheets[path]
+  local entry = portraits[spriteId]
   if entry == nil then
-    local loaded, img = pcall(love.graphics.newImage, path)
-    if loaded and img then
-      entry = {
-        image = img,
-        quad = love.graphics.newQuad(FRONT_FRAME[1], FRONT_FRAME[2],
-                                     FRONT_FRAME[3], FRONT_FRAME[4],
-                                     img:getDimensions()),
-      }
+    local img
+    local built = pcall(function()
+      local SpriteRenderer = require("src.render.SpriteRenderer")
+      local renderer = SpriteRenderer.new(record, spriteId)
+      if type(renderer.resolveImage) == "function" then
+        img = renderer:resolveImage()
+      else
+        img = renderer.image
+      end
+    end)
+    if not (built and img) then
+      local loaded
+      loaded, img = pcall(love.graphics.newImage, record.image)
+      if not (loaded and img) then img = nil end
+    end
+    if img then
+      entry = { image = img, quad = portraitQuad(img) }
     else
       entry = false
     end
-    sheets[path] = entry
+    portraits[spriteId] = entry
   end
   return entry or nil
 end

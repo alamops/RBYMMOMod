@@ -1369,10 +1369,40 @@ function M.shotRank(game, path, check)
   -- land before the picture is taken
   U.wait(60)
   U.shot(game, path)
+  if check then
+    -- First row's portrait column (src/Ui.lua RANK_ART_X, RANK_FIRST_Y).
+    M.assertPortraitColors(game, path, 26, 24, 16, 16, check,
+      "the ranking list portrait is palette-correct")
+  end
   check(M.top(game) ~= nil, "the RANK screen opened")
   U.tap(game, "b")
   U.wait(25)
   return true
+end
+
+-- Sample a screenshot for the lime-green skin that raw DMG-shade blits show.
+-- Rect is in 160x144 game pixels, matching the mod UI layout.
+local PORTRAIT_PROBE = "mods/rby_mmo/tests/drivers/portrait_color_probe.py"
+
+function M.assertPortraitColors(game, path, x, y, w, h, check, what)
+  local cmd = ('python3 "%s" "%s" %d %d %d %d 2>&1'):format(
+    PORTRAIT_PROBE, path, x, y, w, h)
+  local out = ""
+  -- captureScreenshot lands asynchronously after U.shot returns; spin until
+  -- the probe can read a real PNG or the budget runs out.
+  for _ = 1, 40 do
+    local f = io.popen(cmd)
+    out = f and f:read("*a") or ""
+    if f then f:close() end
+    if out:match("^ok ") then break end
+    if game then U.wait(2) end
+  end
+  local passed = out:match("^ok ") ~= nil
+  if not passed then
+    U.log("portrait probe failed:", (out:gsub("%s+$", "")))
+  end
+  check(passed, what or ("portrait colours look right in " .. path))
+  return passed
 end
 
 -- Dial the same hub again, through the menus a player uses.

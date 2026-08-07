@@ -3257,6 +3257,64 @@ eq(Chars.resolve(nil), Config.DEFAULT_SPRITE, "as does nothing at all")
 eq(Chars.resolve("SPRITE_BOULDER"), Config.DEFAULT_SPRITE,
    "and so does a real sprite that is not a character")
 
+-- ------- portrait colours match the overworld
+--
+-- The trainer card, the ranking list and the character picker all crop frame
+-- 0 through Chars.portrait. Blitting the raw sheet skips SpriteRenderer's
+-- OBP bake and turns DMG shades into the wrong colours (lime-green skin on
+-- a gentleman, for instance). This pins the path through resolveImage.
+
+;(function()
+  local usedResolve = false
+  local mockImg = { getDimensions = function() return 16, 96 end }
+  local savedSR = package.loaded["src.render.SpriteRenderer"]
+  package.loaded["src.render.SpriteRenderer"] = {
+    new = function(record, seed)
+      check(record.image == "sprites/gentleman.png",
+            "portrait passes the sprite record through")
+      eq(seed, "SPRITE_GENTLEMAN",
+         "portrait uses the sprite id as the renderer seed")
+      return {
+        resolveImage = function(self)
+          usedResolve = true
+          return mockImg
+        end,
+      }
+    end,
+  }
+
+  _G.love = _G.love or {}
+  love.graphics = love.graphics or {}
+  local savedNewQuad = love.graphics.newQuad
+  love.graphics.newQuad = function(x, y, w, h, iw, ih)
+    return { x = x, y = y, w = w, h = h, iw = iw, ih = ih }
+  end
+
+  local portraitMod = {
+    content = {
+      sprites = {
+        get = function(_, id)
+          if id == "SPRITE_GENTLEMAN" then
+            return { image = "sprites/gentleman.png", frames = 6, walker = true }
+          end
+        end,
+      },
+    },
+  }
+  local portraitNeed = resolver(portraitMod)
+  local PortraitChars = portraitNeed("Chars")
+
+  local art = PortraitChars.portrait("SPRITE_GENTLEMAN")
+  check(usedResolve,
+        "portrait asks SpriteRenderer for a palette-correct image")
+  check(art ~= nil and art.image == mockImg,
+        "and hands back what resolveImage returned")
+  check(art.quad ~= nil, "with a quad for the front frame")
+
+  package.loaded["src.render.SpriteRenderer"] = savedSR
+  if savedNewQuad then love.graphics.newQuad = savedNewQuad end
+end)()
+
 -- ------- the trainer card fits the box it is drawn in
 --
 -- Wrapped for scope, like the look-bookkeeping section below: this file's
