@@ -4824,6 +4824,15 @@ pump(ann); pump(bob)
 eq(ann.coop:isWaiting(), false, "a yes ends the wait")
 check(ann.coop.lastPlan ~= nil, "and the waiting player reaches the handoff")
 check(bob.coop.lastPlan ~= nil, "as does the one who joined")
+-- The bug this pins: M:onBattle used to build the joiner's plan with no
+-- `engine` field at all, so M:startBattle's unwind never ran for BOB -- his
+-- own trainer battle sat under the co-op screen for the whole fight and came
+-- straight back the moment it popped, dropping him into the same trainer
+-- again, alone. M:joinedEngine is the fix; this is its direct pin, checked by
+-- identity and not merely by non-nil, so a version that handed back the
+-- *wrong* battle would still fail here.
+check(bob.coop.lastPlan.engine == bob.engine,
+      "and BOB's own trainer battle rides along on his plan too")
 eq(ann.coop.lastPlan.kind, "npc", "as a co-op fight against an NPC")
 eq(#ann.coop.lastPlan.allies, 2, "with both of them on the same side")
 
@@ -4966,6 +4975,125 @@ check(not fightsAlone(ann), "the prompt is on top of the battle")
 pressB(ann)
 check(fightsAlone(ann), "B closes the prompt and the engine's battle resumes")
 eq(ann.finished, nil, "with nothing finished off behind its back")
+
+-- ------- BOB's own displaced battle gets its result back too
+--
+-- The block above pins the waiter's half, which already worked before the
+-- fix. This is the half that did not: before M:joinedEngine existed, a
+-- player who *joined* was never handed their own engine battle at all, so
+-- nothing was ever there for onBattleOver to find. Mirrored here to show the
+-- mechanism -- once BOB's own battle is held in engineBattle, onBattleOver
+-- hands it its result exactly as it does for a waiter -- is not itself
+-- role-specific; only getting the battle into that slot in the first place
+-- was ever the problem, and that half is pinned by the identity check on
+-- bob.coop.lastPlan.engine above.
+--
+-- bob.coop.offer is cleared first so this reaches the ordinary WAIT/ALONE
+-- choice rather than a join prompt left over from an earlier scenario in this
+-- same suite -- the fight this test cares about is BOB's own, not ANN's.
+
+bob.coop.running = false
+bob.coop.offer = nil
+engage(bob)
+pick(bob, "WAIT")
+check(bob.coop.encounter ~= nil, "BOB's own encounter is held while he waits too")
+eq(bob.finished, nil, "and his own engine battle has not been told anything yet")
+
+bob.coop.engineBattle = bob.engine
+bob.coop:onBattleOver("win")
+eq(bob.finished, "win",
+   "a finished co-op battle hands its result back to BOB's own battle too")
+eq(bob.coop.encounter, nil, "and BOB's encounter is spent as well")
+
+-- ------- ownership transfer only happens for a genuine match
+--
+-- M:startBattle is where the encounter slot is emptied, and reaching it needs
+-- a running CoopBattle, which needs the real engine's link modules -- out of
+-- reach under plain luajit, same as the abandoned four-slot field above.
+-- What *is* reachable is M:joinedEngine, which decides what that slot is
+-- emptied *of*: a call that adopts nothing must also disturb nothing. An
+-- encounter quietly cleared out from under a fight nobody joined would be the
+-- mirror bug -- release() later unwinding to a battle that is no longer on the
+-- stack, hunting for something that is not there.
+
+local ownership = { battle = FIGHT, engine = bob.engine, game = bob.game }
+bob.coop.encounter = ownership
+eq(bob.coop:joinedEngine(bob.game, { battle = OTHER }, nil), nil,
+   "a mismatched battle key adopts nothing")
+check(bob.coop.encounter == ownership,
+      "...and leaves BOB's own encounter exactly where it was")
+eq(bob.coop:joinedEngine(bob.game, { battle = FIGHT },
+                         { { id = "x", name = "X" } }), nil,
+   "and neither does a party-vs-party message, even naming the right key")
+check(bob.coop.encounter == ownership, "still untouched")
+
+-- ...and an encounter whose battle has already left the stack is not adopted
+-- either, however well its key matches. A join the hub drops leaves exactly
+-- that behind: the player fights the trainer alone, that battle pops itself,
+-- and the reference names nothing. unwindTo would then pop sixteen screens
+-- looking for it.
+local ghost = { name = "a battle that finished itself" }
+bob.coop.encounter = { battle = FIGHT, engine = ghost, game = bob.game }
+eq(bob.coop:joinedEngine(bob.game, { battle = FIGHT }, nil), nil,
+   "and neither does an encounter whose battle is already off the stack")
+eq(bob.coop:unwindTo(bob.game, ghost, true), false,
+   "unwinding to a state that is not on the stack does nothing at all")
+check(#bob.game.stack.states > 0,
+      "...rather than taking sixteen screens down hunting for it")
+bob.coop.encounter = nil
+
+-- ------- negative: a party-vs-party battle never adopts an encounter
+--
+-- foes on the plan means this is PARTY BATTLE, not an NPC fight, and no
+-- encounter is ever the right answer for one -- see M:joinedEngine's own
+-- comment. Exercised with a live encounter deliberately in place, and naming
+-- the very battle the message is about, so a guard that forgot to check
+-- `foes` first would still pass a "no encounter set" test and only fail here.
+
+bob.coop.running = false
+bob.coop.encounter = { battle = FIGHT, engine = bob.engine, game = bob.game }
+bob.coop:onBattle(bob.game, {
+  side = "a",
+  allies = { { id = bob.id, name = "BOB" } },
+  foes = { { id = ann.id, name = "ANN" } },
+  battle = FIGHT,
+})
+check(bob.coop.lastPlan ~= nil, "the party battle still reaches the handoff")
+eq(bob.coop.lastPlan.engine, nil,
+   "but never adopts BOB's own live encounter, even naming its own battle key")
+bob.coop.running, bob.coop.battle, bob.coop.encounter = false, nil, nil
+
+-- ------- negative: a different trainer, or none named at all, adopts nothing
+
+bob.coop.encounter = { battle = FIGHT, engine = bob.engine, game = bob.game }
+bob.coop:onBattle(bob.game, {
+  side = "a",
+  allies = { { id = bob.id, name = "BOB" } },
+  battle = OTHER,
+})
+eq(bob.coop.lastPlan.engine, nil,
+   "a battle naming someone else's trainer does not adopt BOB's encounter")
+bob.coop.running, bob.coop.battle, bob.coop.encounter = false, nil, nil
+
+bob.coop.encounter = { battle = FIGHT, engine = bob.engine, game = bob.game }
+bob.coop:onBattle(bob.game, {
+  side = "a",
+  allies = { { id = bob.id, name = "BOB" } },
+  -- no battle field at all -- the ACTIONS-menu join path, which never named one
+})
+eq(bob.coop.lastPlan.engine, nil,
+   "and a message with no battle key at all adopts nothing either")
+bob.coop.running, bob.coop.battle, bob.coop.encounter = false, nil, nil
+
+bob.coop.encounter = { battle = FIGHT, engine = bob.engine, game = bob.game }
+bob.coop:onBattle(bob.game, {
+  side = "a",
+  allies = { { id = bob.id, name = "BOB" } },
+  battle = "FIX|TOWN; DROP", -- fails Wire.battleKey's own sanitiser
+})
+eq(bob.coop.lastPlan.engine, nil,
+   "nor does a battle field too malformed for Wire.battleKey to accept")
+bob.coop.running, bob.coop.battle, bob.coop.encounter = false, nil, nil
 
 -- ------- a ranked 2-on-2 needs all four to agree
 --

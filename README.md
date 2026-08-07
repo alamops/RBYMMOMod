@@ -962,7 +962,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `0.7.3` and it ships flagged `experimental` on purpose. The full list
+It's `0.7.4` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 
