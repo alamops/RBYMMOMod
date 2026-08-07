@@ -16,6 +16,7 @@ local Roster = need("Roster")
 local Servers = need("Servers")
 local Avatars = need("Avatars")
 local Chat = need("Chat")
+local Toast = need("Toast")
 local Party = need("Party")
 local Coop = need("Coop")
 -- For one flag it owns. Required rather than reached through `coop.state`,
@@ -53,12 +54,19 @@ local server = HostServer.new()
 local servers = Servers.new({ mod = mod })
 local ui = Ui.new(ctx)
 local overlay = Overlay.new(ctx)
+-- The corner of the screen, and the one place in this mod that may speak
+-- without being asked to.  Everything that used to have nowhere to go --
+-- somebody arriving, a whisper from another map, what your partner just
+-- fought -- ends up here, because none of it is worth a modal and none of it
+-- survives being put behind a menu nobody opened.
+local toast = Toast.new(ctx)
 local sessions = Sessions.new(transport, ui)
 local party = Party.new(transport, ui, ctx.chat)
 local coop = Coop.new(transport, ui, party, ctx.roster, ctx.chat)
 
 ctx.client = M
 ctx.ui = ui
+ctx.toast = toast
 ctx.sessions = sessions
 ctx.party = party
 ctx.coop = coop
@@ -895,6 +903,132 @@ function M.reportBattle(state, result)
   return true
 end
 
+-- ------- telling your partner what you just fought
+--
+-- Solo battles produce no peer traffic at all -- a wild encounter is entirely
+-- a fact about one client -- so travelling together used to mean walking
+-- beside somebody whose evening you knew nothing about.  What follows is the
+-- whole of the fix: the engine's own battle events, turned into the five
+-- sentences src/Toast.lua knows how to draw, sent to the hub, and fanned out
+-- to the one person who is travelling with us.
+--
+-- Nothing here toasts locally.  The fighter watched the battle happen; a line
+-- in their own corner saying so would be the game narrating what is already
+-- on screen, and both hubs deliberately leave the sender out of the fan-out
+-- for the same reason.
+
+-- The gate every party event passes.
+--
+-- A party is checked here as well as at the hub, and not out of distrust: an
+-- unpartied player fights most of the battles anybody ever fights, and every
+-- one of them would be a packet built, encoded and sent for a hub to drop on
+-- arrival.  `partner()` as well as `has()`, because the two answer different
+-- questions: a members list that came back holding nobody but us is still a
+-- party, and there is no one in it to tell.
+local function sendPartyEvent(fields)
+  if not transport:isReady() then return false end
+  if not (party:has() and party:partner()) then return false end
+  transport:send(Wire.PARTY_EVENT, fields)
+  return true
+end
+
+-- The species and level on the other side of a battle, as the game spells
+-- them.
+--
+-- `def.name` rather than the battler's own `name`, and the difference is a
+-- capture: a battler is named for its nickname when it has one, and the
+-- nickname prompt runs on the way out of the very battle this is read for --
+-- so a player who renames their new MEWTWO would otherwise tell their partner
+-- they caught somebody called BOB.  The species id is the fallback for a
+-- build whose battler carries no def, which is the same word in capitals for
+-- every vanilla species.
+local function enemyMon(battle)
+  if type(battle) ~= "table" or type(battle.enemy) ~= "table" then
+    return nil, nil
+  end
+  local enemy = battle.enemy
+  local mon = type(enemy.mon) == "table" and enemy.mon or nil
+  local def = type(enemy.def) == "table" and enemy.def or nil
+  local species = (def and def.name) or (mon and mon.species)
+  if type(species) ~= "string" then species = nil end
+  return species, mon and tonumber(mon.level) or nil
+end
+
+-- ...and the name on the other side of a trainer battle.
+--
+-- The record's own name, which is what the intro text says out loud ("%s
+-- wants to fight!"), so the sentence a partner reads names the opponent the
+-- fighter actually saw.  A battle whose trainer record cannot be read still
+-- gets a sentence rather than none: the fight happened either way, and "was
+-- defeated by Trainer" is a true thing to say about it.
+local function trainerName(battle)
+  local trainer = type(battle) == "table" and battle.trainer
+  if type(trainer) == "table" and type(trainer.name) == "string"
+     and trainer.name ~= "" then
+    return trainer.name
+  end
+  return "Trainer"
+end
+
+-- Tell your partner how a fight went.
+--
+-- Which of the four sentences is picked comes entirely off the battle the
+-- engine just finished -- `kind` says wild or trainer, `result` says which way
+-- it went -- rather than off anything this mod was tracking alongside it.
+--
+-- Three endings are deliberately silent.  A run is not a defeat.  A capture
+-- is not one either, and it has already been narrated by pokemon.caught,
+-- which is the event that knows *what* was caught; sending from both would
+-- put one capture on the partner's screen twice.  And a link battle belongs
+-- to Sessions -- M.reportBattle above is what that one is worth -- so it is
+-- ruled out here by name rather than left to fall through the wild branch as
+-- a "wild" fight against another trainer's lead.
+function M.narrateBattle(battle, result)
+  if type(battle) ~= "table" then return false end
+  if battle.kind == "link" then return false end
+  if not (result == "win" or result == "lose") then return false end
+  local won = result == "win"
+
+  if battle.kind == "trainer" then
+    return sendPartyEvent({
+      kind = won and "defeat_trainer" or "defeated_by_trainer",
+      trainer = trainerName(battle),
+    })
+  end
+
+  -- Everything that is not a trainer or a link is fought against a single
+  -- wild mon -- the Safari Zone and the old man's demo are both kind ==
+  -- "wild" in the engine -- so a species and a level is the whole of what
+  -- there is to say. Missing either is silence: the hub refuses a half-filled
+  -- event anyway, and a sentence that stops mid-way is the one failure of
+  -- this feature a player would actually see.
+  local species, level = enemyMon(battle)
+  if not (species and level) then return false end
+  return sendPartyEvent({
+    kind = won and "defeat_wild" or "defeated_by_wild",
+    species = species,
+    level = level,
+  })
+end
+
+-- ...and what you just caught.
+--
+-- Read from the battle first and the payload second, because the two answer
+-- different halves well: the battle knows the name the game shows, while the
+-- event carries the species id and the mon itself and still answers on a
+-- build that hands over one without the other.
+function M.narrateCatch(payload)
+  if type(payload) ~= "table" then return false end
+  local species, level = enemyMon(payload.battle)
+  local mon = type(payload.mon) == "table" and payload.mon or nil
+  if not species and type(payload.species) == "string" then
+    species = payload.species
+  end
+  if not level and mon then level = tonumber(mon.level) end
+  if not (species and level) then return false end
+  return sendPartyEvent({ kind = "capture", species = species, level = level })
+end
+
 -- ------- your own look, in your own game
 --
 -- Choosing a character has to change what *you* see too, not just what
@@ -1146,6 +1280,11 @@ function M.disconnect()
   ctx.avatars:clear()
   ctx.roster:reset()
   ctx.chat:clear()
+  -- With the scrollback, and for the same reason: every toast this session
+  -- put up is news about a hub this copy is no longer on, so leaving one
+  -- floating over a single-player game would be the mod narrating a world
+  -- that is gone.
+  toast:clear()
   transport:close()
   lastSent =
     { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
@@ -1234,12 +1373,19 @@ function M.say(a, b, c, d)
   -- Echoed locally rather than waiting for the hub to reflect it back: the
   -- player should see their own line the instant they send it, and the hub
   -- does not echo (which would double every message).
+  local name = M.playerName(ctx.game)
   ctx.chat:push({
-    name = M.playerName(ctx.game),
+    name = name,
     scope = scope,
     text = clean,
     outgoing = true,
   })
+  -- The same line in the corner, in the same breath and for the same reason:
+  -- the scrollback is behind a menu, so a message that appears nowhere until
+  -- somebody answers it reads as one that was never sent.  Your own name on
+  -- your own toast, rather than a bare line, so that a conversation reads as
+  -- a conversation on the one surface both halves of it appear on.
+  toast:push(Toast.chatLine(name, clean))
   return true
 end
 
@@ -1466,11 +1612,11 @@ handlers[Wire.WELCOME] = function(game, msg)
   -- scrollback above the connection's own status line, so the first thing
   -- read on arrival is what the operator wrote rather than a count.
   --
-  -- Pushed with no `from` on purpose.  A bubble is stored against a player
-  -- id and drawn over that player's head, and the hub stands on no map and
-  -- owns no avatar -- so it gets a line in the log and nothing over the
-  -- world.  A hub with nothing to say, or one too old to have the field at
-  -- all, sends nothing and this does nothing.
+  -- Pushed with no `from` on purpose: the hub is not a player.  It stands on
+  -- no map, owns no avatar and has no roster row, so anything that draws
+  -- against a sender id has nobody to draw it against, and the honest place
+  -- for what it says is the log.  A hub with nothing to say, or one too old
+  -- to have the field at all, sends nothing and this does nothing.
   local motd = Wire.text(msg.motd, Config.MOTD_MAX)
   if motd and motd ~= "" then
     ctx.chat:push({ name = "HUB", scope = "global", text = motd })
@@ -1484,15 +1630,32 @@ handlers[Wire.WELCOME] = function(game, msg)
   mod.log:info("connected -- %d other player(s) on", ctx.roster.count)
 end
 
+-- Somebody arrived.  Announced in the corner as well as recorded, because
+-- "who else is here" is otherwise a menu the player has to think to open --
+-- and the moment a friend walks in is precisely the moment nobody is looking
+-- at a menu.
+--
+-- The roster's own answer decides it rather than a second check of our own:
+-- Roster:put drops our own presence, so a welcome echo of ourselves is not
+-- somebody arriving and is not announced as one.
 handlers[Wire.JOIN] = function(_, msg)
   local presence = Wire.presence(msg.player)
-  if presence then ctx.roster:put(presence) end
+  if not presence then return end
+  if not ctx.roster:put(presence) then return end
+  toast:push(Toast.joinLine(presence.name))
 end
 
 handlers[Wire.PART] = function(_, msg)
   local id = Wire.id(msg.id)
   if not id then return end
-  ctx.roster:remove(id)
+  -- Removed first and read from what came back, because the name only exists
+  -- while the row does: an id on its own is not a sentence anybody can read,
+  -- and asking the roster after the row is gone would answer nil every time.
+  -- A player nobody had a row for -- one who left before their join was
+  -- processed, or our own id, which the roster never stores -- simply is not
+  -- announced, rather than being announced as somebody with no name.
+  local gone = ctx.roster:remove(id)
+  if gone then toast:push(Toast.partLine(gone.name)) end
   ctx.avatars:despawn(id)
   -- An invite in flight to somebody who just left will never be answered,
   -- and a client that kept waiting for that answer could never invite
@@ -1533,7 +1696,12 @@ handlers[Wire.CHAT] = function(_, msg)
   local scope = Wire.SCOPES[msg.scope] and msg.scope or nil
   if not (name and text and scope) then return end
   ctx.chat:push({ from = from, name = name, scope = scope, text = text })
-  if from then ctx.chat:bubble(from, text, scope) end
+  -- ...and in the corner, where it is read without opening anything.  Every
+  -- scope, the whisper included -- which is the one a bubble could never
+  -- carry, because a bubble is drawn over the sender's head in a world other
+  -- people are standing in.  A toast is drawn in this player's own corner and
+  -- nowhere else, so a private line stays private.
+  toast:push(Toast.chatLine(name, text))
 end
 
 handlers[Wire.PARTY_INVITE] = function(game, msg) party:onInvite(game, msg) end
@@ -1546,6 +1714,25 @@ handlers[Wire.PARTY] = function(_, msg) party:onParty(msg) end
 handlers[Wire.PARTY_END] = function(_, msg)
   party:onEnd(msg)
   coop:onPartyEnd()
+end
+
+-- What the person you are travelling with just did in a fight.
+--
+-- Straight to the corner and nowhere else.  It is news about somebody who is
+-- not on this screen -- they are in a battle of their own, which is exactly
+-- why their avatar is not standing anywhere to draw it over -- and it is not
+-- worth a box: a partner who fights ten trainers on a route would otherwise
+-- hand their friend ten modals to dismiss.
+--
+-- The hub already fanned this to the party and left the fighter out, so
+-- arriving at all is the whole of the audience check.  The sanitiser is the
+-- gate on the words: an event whose kind this build has never heard of, or
+-- one missing the field its sentence needs, draws nothing rather than a line
+-- that stops half way.
+handlers[Wire.PARTY_EVENT] = function(_, msg)
+  local event = Wire.partyEvent(msg)
+  if not event then return end
+  toast:push(Toast.partyLine(event))
 end
 
 handlers[Wire.COOP_OFFER] = function(_, msg) coop:onOffer(msg) end
@@ -1720,7 +1907,11 @@ local function tick(game, dt)
 
   if not transport:isReady() then return end
 
-  ctx.chat:update(dt)
+  -- Ageing the corner, where the bubbles used to be aged.  Toasts expire on
+  -- the fixed step rather than on drawn frames, so a line stays up for the
+  -- five seconds Config says and not for however many frames the machine
+  -- managed in them.
+  toast:update(dt)
   sessions:update(game, dt)
   coop:update(dt)
 
@@ -1779,7 +1970,6 @@ function M.install()
       maxLen = Config.CODE_ENTRY_MAX },
     { key = "sprite", label = "MY SPRITE", type = "choice",
       default = Config.DEFAULT_SPRITE, choices = spriteChoices },
-    { key = "bubbles", label = "BUBBLES", type = "toggle", default = true },
     -- Holding B to run.  On by default because it is the reason the feature
     -- exists, and a row at all because B already means "cancel" everywhere
     -- else -- a player who finds their walk unexpectedly fast should have
@@ -1893,11 +2083,21 @@ function M.install()
     return next(speed, moveCtx)
   end)
 
+  -- The two things this mod draws over a finished frame: the nameplates that
+  -- annotate the world, and the toasts that annotate the session.
+  --
+  -- Neither is behind an option any more.  A nameplate only appears when
+  -- another player is standing in front of you, and a toast only when
+  -- something happened -- so the switch that used to gate them was a switch
+  -- for turning off the only evidence that anyone else is in the game.
+  --
+  -- Toasts last, so a line the player is meant to read is never underneath a
+  -- nameplate: they share the top-left corner in the fallback layout, and the
+  -- transient one has to win.
   mod.hooks:wrap("render.hud", function(next, game, viewport)
     local result = next(game, viewport)
-    if mod.options:get("bubbles") ~= false then
-      overlay:draw(game, viewport)
-    end
+    overlay:draw(game, viewport)
+    toast:draw(viewport)
     return result
   end)
 
@@ -1959,10 +2159,30 @@ function M.install()
   -- not what this mod thought was happening. Sessions matches the state
   -- against the one it handed over, so a wild encounter or a cable-club link
   -- fought while connected reports nothing.
+  --
+  -- The same event carries the second half of this, and the two are kept in
+  -- one listener rather than two so that the order is stated rather than left
+  -- to registration: the ranked report claims the battle from Sessions, which
+  -- is what spends it, and the party line below reads the battle without
+  -- claiming anything -- which is why a link battle is ruled out by name in
+  -- there rather than by whether a claim succeeded.
   mod.events:on("battle.ended", function(payload)
     if not (payload and payload.battle) then return end
     if not transport:isReady() then return end
     M.reportBattle(payload.battle, payload.result)
+    M.narrateBattle(payload.battle, payload.result)
+  end)
+
+  -- A capture, told from the catch rather than from the battle that ended.
+  --
+  -- This is the event that knows what was caught; battle.ended's "caught"
+  -- result says only that the battle stopped that way, and by then the
+  -- interesting half is a nickname prompt away from being renamed. One
+  -- capture is one line on a partner's screen, which is why narrateBattle
+  -- answers to nothing but a win and a loss.
+  mod.events:on("pokemon.caught", function(payload)
+    if not transport:isReady() then return end
+    M.narrateCatch(payload)
   end)
 
   -- Leaving to the title screen or loading another save must not leave a
@@ -2075,6 +2295,15 @@ function M.install()
   -- roster alone -- the end-to-end driver reads this to tell the two apart.
   mod.exports.traceAvatars = function(on) Avatars.TRACE = on and true or false end
   mod.exports.overlayState = function() return overlay:state() end
+  -- What is in the corner right now, and what the last draw of it decided.
+  --
+  -- The queue is the only record a toast leaves: it is not a screen anything
+  -- can be pushed onto and it is gone five seconds later, so without this the
+  -- one way to assert that a chat line, an arrival or a partner's battle
+  -- actually reached the player would be reading pixels off a screenshot.
+  -- A copy of the lines, never the queue itself -- a reader that held the
+  -- live list could age or empty it by accident.
+  mod.exports.toasts = function() return ctx.toast:state() end
   -- what this player looks like in their own game, for tests and for a mod
   -- that wants to know
   mod.exports.myLook = function() return M.spriteChoice() end

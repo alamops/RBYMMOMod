@@ -95,6 +95,78 @@ function M:state()
   }
 end
 
+-- ------- the sentences
+--
+-- Every line a toast ever shows is built here, and that is deliberate: the
+-- wire carries *what happened* -- a kind, a species, a level -- and never the
+-- prose for it.  Prose on the wire would have to be written twice, once in
+-- each hub (server/lib/relay.js and src/Hub.lua), and the two would drift;
+-- worse, it would be a stranger's process choosing the words that appear on
+-- this player's screen.  So the hub relays fields and this file decides how
+-- they read.
+--
+-- Every one of these answers nil rather than a half-built sentence, and
+-- push() ignores a nil, so a caller can hand a formatter straight to it
+-- without a branch in between.
+
+-- What somebody said, as it appears in the corner.
+--
+-- No scope tag, unlike the chat screen's own line (Chat:line).  The
+-- scrollback is a log being read deliberately, where "was that whispered or
+-- global" is worth a column of its own; a toast is read in passing, and the
+-- only two questions it has room to answer are who spoke and what they said.
+function M.chatLine(name, text)
+  if type(name) ~= "string" or type(text) ~= "string" then return nil end
+  return ("[%s]: %s"):format(name, text)
+end
+
+-- Arrivals and departures.  Everyone on the hub sees these, which is what
+-- makes "the server" the right word for where somebody went: it is the whole
+-- population being told, not the map.
+function M.joinLine(name)
+  if type(name) ~= "string" then return nil end
+  return ("%s joined the server"):format(name)
+end
+
+function M.partLine(name)
+  if type(name) ~= "string" then return nil end
+  return ("%s left the server"):format(name)
+end
+
+-- One party event as a sentence.
+--
+-- Split the way Wire.PARTY_EVENTS splits it -- a kind either needs a species
+-- and a level or it needs a trainer -- so that the two files disagree loudly
+-- (an unknown kind draws nothing) rather than quietly (a sentence with a nil
+-- in the middle of it).  A kind this build has never heard of has no
+-- sentence to put it in, which is exactly why that set is closed.
+local MON_LINE = {
+  defeat_wild      = "%s defeated %s lv %d",
+  defeated_by_wild = "%s was defeated by %s lv %d",
+  capture          = "%s captured %s lv %d",
+}
+
+local TRAINER_LINE = {
+  defeat_trainer      = "%s defeated %s",
+  defeated_by_trainer = "%s was defeated by %s",
+}
+
+function M.partyLine(event)
+  if type(event) ~= "table" then return nil end
+  local name = event.name
+  if type(name) ~= "string" then return nil end
+
+  local mon = MON_LINE[event.kind]
+  if mon then
+    if not (event.species and event.level) then return nil end
+    return mon:format(name, event.species, event.level)
+  end
+
+  local trainer = TRAINER_LINE[event.kind]
+  if not (trainer and event.trainer) then return nil end
+  return trainer:format(name, event.trainer)
+end
+
 -- ------- drawing
 
 -- One font per size, because the size follows the window: resizing the

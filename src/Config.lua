@@ -315,11 +315,11 @@ M.COOP_STALL_TIMEOUT = 75
 M.CHAT_SCOPES = { "global", "local", "private", "party" }
 M.LOCAL_RADIUS = 12          -- tiles, and same map
 M.CHAT_HISTORY = 64          -- lines kept for the chat screen
-M.BUBBLE_SECONDS = 5         -- how long a bubble floats over a head
 M.MESSAGE_MAX = 60           -- longest message accepted off the wire
 -- What the naming grid will let you type.  Shorter than MESSAGE_MAX on
 -- purpose: the grid shows the line being typed on one 20-tile row, and a
--- bubble that overflows its box is worse than a message you have to split.
+-- line that has to be truncated to be shown is worse than one the player was
+-- asked to split themselves.
 M.COMPOSE_MAX = 16
 -- A hub's message of the day: one line an operator writes once and every
 -- arrival reads, delivered on the welcome and shown in the scrollback as a
