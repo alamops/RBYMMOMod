@@ -246,6 +246,10 @@ check(type(exports.hostAddress) == "function", "exports hostAddress")
 eq(exports.hostAddress(), false, "which is falsy while not hosting")
 check(type(exports.chat) == "function", "exports chat")
 eq(#exports.chat(), 0, "with no messages on a fresh load")
+-- The toast queue is the only record a toast leaves once it expires; a
+-- driver reads it here rather than through a screenshot.
+check(type(exports.toasts) == "function", "exports toasts")
+eq(exports.toasts().count, 0, "with nothing stacked on a fresh load")
 check(type(exports.isConnected) == "function", "exports isConnected")
 check(type(exports.players) == "function", "exports players")
 eq(exports.isConnected(), false, "reports disconnected before connecting")
@@ -381,6 +385,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Roster = need("Roster")
 local Chat = need("Chat")
+local Toast = need("Toast")
 local SessionNet = need("SessionNet")
 local Transport = need("Transport")
 
@@ -630,6 +635,61 @@ for i = 1, Config.PARTY_MAX + 1 do
 end
 eq(Wire.members(overfull), nil,
    "a hub claiming more members than PARTY_MAX is refused, not truncated")
+
+-- ------- Wire.partyEvent: what your partner just did, off the wire
+--
+-- The fighter never sends their own name and the hub stamps it from the
+-- connection -- so a good outbound payload from the fighter's own client
+-- (no name) and a good inbound one the hub has stamped (with a name) are
+-- both exercised, and the sanitiser is the same call either way.
+
+local defeatWild = Wire.partyEvent({
+  kind = "defeat_wild", name = "ANN", species = "PIDGEY", level = 5,
+})
+check(defeatWild ~= nil, "a good wild-win event sanitises")
+eq(defeatWild.name, "ANN", "keeping the name")
+eq(defeatWild.species, "PIDGEY", "and the species")
+eq(defeatWild.level, 5, "and the level")
+
+for _, kind in ipairs({ "defeat_wild", "defeated_by_wild", "capture" }) do
+  local mon = Wire.partyEvent({ kind = kind, name = "ANN", species = "MEW", level = 70 })
+  check(mon ~= nil, "a good mon event of kind " .. kind .. " sanitises")
+  eq(mon.kind, kind, "keeping its kind")
+end
+
+for _, kind in ipairs({ "defeat_trainer", "defeated_by_trainer" }) do
+  local trainer = Wire.partyEvent({ kind = kind, name = "ANN", trainer = "BUG CATCHER" })
+  check(trainer ~= nil, "a good trainer event of kind " .. kind .. " sanitises")
+  eq(trainer.trainer, "BUG CATCHER", "keeping the trainer's name")
+  eq(trainer.species, nil, "and carrying no species -- a trainer event never has one")
+end
+
+eq(Wire.partyEvent({ kind = "picnic", name = "ANN" }), nil,
+   "an unknown kind is refused -- the set is closed the way COOP_REASONS is")
+eq(Wire.partyEvent({ kind = "defeat_wild", species = "PIDGEY", level = 5 }), nil,
+   "a mon event with no name is refused -- there is nobody the sentence is about")
+eq(Wire.partyEvent({ kind = "defeat_wild", name = "ANN", level = 5 }), nil,
+   "a mon event missing its species is refused rather than delivered half-built")
+eq(Wire.partyEvent({ kind = "defeat_wild", name = "ANN", species = "PIDGEY" }), nil,
+   "and so is one missing its level")
+eq(Wire.partyEvent({ kind = "defeat_trainer", name = "ANN" }), nil,
+   "a trainer event missing the trainer is refused the same way")
+eq(Wire.partyEvent({ kind = "defeat_wild", name = "ANN", species = "PIDGEY", level = 0 }), nil,
+   "level 0 is below the floor -- Gen 1 has no level-0 POKeMON")
+eq(Wire.partyEvent({ kind = "defeat_wild", name = "ANN", species = "PIDGEY", level = 101 }), nil,
+   "and level 101 is past LEVEL_MAX, the cap on a number about to be printed "
+   .. "on somebody else's screen")
+eq(Wire.partyEvent({ kind = "defeat_wild", name = "ANN", species = "PIDGEY", level = 100 })
+   .level, 100, "while exactly the cap is a real level and survives")
+eq(Wire.partyEvent("nonsense"), nil, "a non-table event is refused outright")
+eq(Wire.partyEvent(nil), nil, "and so is nothing at all")
+
+-- The fighter's own client never gets to claim the name displayed to their
+-- partner -- the hub is the one that stamps it -- but the sanitiser itself
+-- only ever validates the `name` field it is handed; a bad one is refused
+-- exactly like a bad species or level.
+eq(Wire.partyEvent({ kind = "capture", species = "MEW", level = 5 }), nil,
+   "a capture with no name is refused just like any other kind")
 
 -- ------- ranked fields off the wire
 --
@@ -913,27 +973,17 @@ eq(chat:line({ name = "ANN", scope = "global", text = "hi" }), "[G]ANN: hi",
 eq(chat:line({ name = "ANN", scope = "private", text = "psst" }), "[W]ANN: psst",
    "a whisper is tagged differently")
 
-chat:bubble("a", "over here", "global")
-eq(chat:bubbleFor("a"), "over here", "a global message bubbles")
-chat:bubble("a", "newer", "global")
-eq(chat:bubbleFor("a"), "newer", "a newer bubble replaces the older one")
-
 eq(chat:line({ name = "ANN", scope = "party", text = "this way" }),
    "[P]ANN: this way", "and a party line differently again")
 
-eq(chat:bubble("b", "secret", "private"), nil, "a whisper never bubbles")
-eq(chat:bubbleFor("b"), nil, "so nothing is drawn over their head")
-
--- A party line does bubble, and that is the same rule rather than an
--- exception to it: a bubble is only ever drawn in the game of somebody who
--- received the line, and the hub sends a party line to the party alone.
-chat:bubble("c", "over here", "party")
-eq(chat:bubbleFor("c"), "over here", "a party message bubbles over their head")
-
-chat:update(Config.BUBBLE_SECONDS - 0.1)
-check(chat:bubbleFor("a") ~= nil, "a bubble survives until its time is up")
-chat:update(0.2)
-eq(chat:bubbleFor("a"), nil, "and then expires")
+-- Chat no longer floats a line over anybody's head. chat:bubble,
+-- chat:bubbleFor, chat:update and Config.BUBBLE_SECONDS are gone with it --
+-- a line that used to bubble is now a toast in the corner (src/Toast.lua),
+-- which is pinned in its own section below rather than re-created here.
+check(chat.bubble == nil, "Chat carries no bubble method any more")
+check(chat.bubbleFor == nil, "nor a way to ask what is bubbling")
+check(chat.update == nil, "nor an age-the-bubbles tick -- toasts age themselves")
+check(Config.BUBBLE_SECONDS == nil, "and the config knob that timed them is gone too")
 
 -- ------- MOTD: the exact push shape src/Client.lua's welcome handler uses
 --
@@ -954,8 +1004,97 @@ end)()
 eq(chat.unread, 1,
    "it lights the unread badge -- deliberate, per docs/plans/server-live-ops.md "
    .. "#3: a greeting nobody notices is a greeting nobody reads")
-eq(chat:bubbleFor("HUB"), nil,
-   "and nothing bubbles for it -- the client never calls :bubble for the motd")
+
+-- ------- Toast: the queue behind the corner stack
+--
+-- push/update/clear/list/state is plain arithmetic on a list -- the part of
+-- src/Toast.lua that runs with no love.graphics at all -- so it is pinned
+-- here exactly the way Chat's history above is, and :draw (which does need
+-- love) is left to the manual/e2e check the plan calls out.
+
+local toastQ = Toast.new({})
+eq(#toastQ:list(), 0, "a fresh queue starts empty")
+eq(toastQ:state().count, 0, "and state agrees")
+
+eq(Toast.new({}):push(nil), nil, "pushing nothing queues nothing")
+eq(Toast.new({}):push(""), nil, "and neither does an empty line")
+local entry = toastQ:push("hello")
+check(entry ~= nil, "a real line is queued")
+eq(entry.age, 0, "born at age zero")
+eq(#toastQ:list(), 1, "and the queue now holds it")
+
+toastQ:update(Config.TOAST_SECONDS - 0.1)
+eq(#toastQ:list(), 1, "a line survives right up to its TTL")
+eq(toastQ:list()[1].age, Config.TOAST_SECONDS - 0.1, "ageing by dt accumulates exactly")
+toastQ:update(0.2)
+eq(#toastQ:list(), 0, "and is gone once its age reaches TOAST_SECONDS")
+
+toastQ:clear()
+for i = 1, Config.TOAST_MAX + 3 do toastQ:push("line " .. i) end
+eq(#toastQ:list(), Config.TOAST_MAX, "the stack never grows past TOAST_MAX")
+eq(toastQ:list()[1].text, "line 4",
+   "the oldest lines are the ones dropped, not the newest")
+eq(toastQ:list()[Config.TOAST_MAX].text, "line " .. (Config.TOAST_MAX + 3),
+   "so the most recent line is always still there")
+
+toastQ:clear()
+eq(#toastQ:list(), 0, "clear empties the queue outright")
+eq(toastQ:state().count, 0, "and state reflects the same empty queue")
+
+-- list() hands back a copy, not the live entries -- otherwise a driver
+-- reading it could age or empty the real queue by accident.
+toastQ:push("copy me")
+local snapshot = toastQ:list()
+toastQ:update(1)
+eq(snapshot[1].age, 0, "a list() snapshot does not age just because the queue does")
+
+-- update(dt) tolerates a bad dt rather than throwing, the same way Wire
+-- tolerates a bad field: a caller that hands it nil or NaN gets a no-op tick.
+toastQ:clear()
+toastQ:push("still here")
+toastQ:update(nil)
+eq(#toastQ:list(), 1, "a nil dt ages nothing rather than raising")
+
+-- ------- Toast: the sentences
+--
+-- Every formatter below either returns the exact sentence or nil -- never a
+-- half-built one -- so push() can be handed a formatter's result directly.
+
+eq(Toast.chatLine("ANN", "over here"), "[ANN]: over here",
+   "a chat line names the speaker and nothing else -- no scope tag, unlike Chat:line")
+eq(Toast.chatLine(nil, "text"), nil, "a nameless chat line is refused")
+eq(Toast.chatLine("ANN", nil), nil, "and so is a textless one")
+eq(Toast.chatLine(5, "text"), nil, "a non-string name is refused")
+
+eq(Toast.joinLine("MISTY"), "MISTY joined the server", "an arrival names the server, not the map")
+eq(Toast.joinLine(nil), nil, "a nameless arrival is refused")
+eq(Toast.joinLine(42), nil, "and neither is a numeric one")
+
+eq(Toast.partLine("MISTY"), "MISTY left the server", "a departure reads the same way")
+eq(Toast.partLine(nil), nil, "a nameless departure is refused")
+
+eq(Toast.partyLine({ kind = "defeat_wild", name = "ANN", species = "PIDGEY", level = 5 }),
+   "ANN defeated PIDGEY lv 5", "beating a wild names the species and level")
+eq(Toast.partyLine({ kind = "defeated_by_wild", name = "ANN", species = "PIDGEY", level = 10 }),
+   "ANN was defeated by PIDGEY lv 10", "losing to one reads as the mirror sentence")
+eq(Toast.partyLine({ kind = "capture", name = "ANN", species = "MEWTWO", level = 70 }),
+   "ANN captured MEWTWO lv 70", "a capture is its own sentence, not a win")
+eq(Toast.partyLine({ kind = "defeat_trainer", name = "ANN", trainer = "BUG CATCHER" }),
+   "ANN defeated BUG CATCHER", "beating a trainer names the trainer, not a species")
+eq(Toast.partyLine({ kind = "defeated_by_trainer", name = "ANN", trainer = "BUG CATCHER" }),
+   "ANN was defeated by BUG CATCHER", "and losing to one is the mirror")
+
+eq(Toast.partyLine(nil), nil, "a non-table event has no sentence")
+eq(Toast.partyLine({ kind = "defeat_wild", species = "PIDGEY", level = 5 }), nil,
+   "an event with no name cannot be about anybody")
+eq(Toast.partyLine({ kind = "picnic", name = "ANN" }), nil,
+   "an unknown kind draws nothing -- there is no sentence to put it in")
+eq(Toast.partyLine({ kind = "defeat_wild", name = "ANN", level = 5 }), nil,
+   "a mon event missing its species is refused rather than printed with a hole")
+eq(Toast.partyLine({ kind = "defeat_wild", name = "ANN", species = "PIDGEY" }), nil,
+   "and so is one missing its level")
+eq(Toast.partyLine({ kind = "defeat_trainer", name = "ANN" }), nil,
+   "a trainer event missing the trainer is refused the same way")
 
 -- ------- SessionNet: the shim the engine's link code runs over
 
