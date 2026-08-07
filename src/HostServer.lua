@@ -240,7 +240,24 @@ function M:localNet()
       -- Net.loopbackPair does: the host must see the same normalisation a
       -- remote sees, or a bug that only bites guests hides behind a host
       -- that works.
-      local decoded = Json.decode(Json.encode(msg))
+      --
+      -- Guarded for the same reason Peer:send above is, and for one more
+      -- that only applies here: this handle sits in the middle of Hub's
+      -- broadcast fan-out, which visits clients in table order.  A throw
+      -- here would abandon that loop, so the host's own copy of a message
+      -- could cost every *other* player theirs -- and the hub would be left
+      -- holding state it had already committed but never finished
+      -- announcing.  A message the host cannot read is the host's problem
+      -- alone.
+      local ok, decoded = pcall(function()
+        return Json.decode(Json.encode(msg))
+      end)
+      if not ok then
+        mod.log:warn("could not deliver a message to your own game (%s); "
+          .. "everyone else still got it -- report it if your own screen "
+          .. "stops keeping up", tostring(decoded))
+        return
+      end
       if decoded and not net.closed then
         net.inbox[#net.inbox + 1] = decoded
       end
