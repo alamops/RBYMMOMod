@@ -460,7 +460,9 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
 
   relay.send(host, 'mmo.coop_joined', { id: client.id, name: client.name });
   // `host` names the client that simulates: the player who was already standing
-  // at the fight, since they have the trainer the joiner has never seen.
+  // at the fight, since they are the one guaranteed to have walked into the
+  // trainer -- the joiner usually has too, but a join taken from the ACTIONS
+  // menu never went near them.
   relay.send(client, 'mmo.coop_battle',
     { id: battleId, side: 'a', allies: members, battle, host: host.id });
 };

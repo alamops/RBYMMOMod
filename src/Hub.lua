@@ -1441,8 +1441,9 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
 
   send(host, Wire.COOP_JOINED, { id = client.id, name = client.name })
   -- `host` names the client that simulates. It is the player who was already
-  -- standing at the fight: they have the trainer in front of them, which is the
-  -- one thing the joiner does not have.
+  -- standing at the fight, because they are the one *guaranteed* to have
+  -- walked into the trainer -- the joiner usually has too, but a join taken
+  -- from the ACTIONS menu never went near them.
   send(client, Wire.COOP_BATTLE,
     { id = id, side = "a", allies = members, battle = battle, host = host.id })
 end

@@ -22,6 +22,25 @@ function M.top(game)
   return game.stack and game.stack:top() or nil
 end
 
+-- Is `target` anywhere in the state stack, not only on top?
+--
+-- StateStack:pop only ever removes the entry at the very end of the array, so
+-- a state that got skipped past rather than unwound does not vanish -- it
+-- stays exactly where it was, one slot down, waiting for whatever now sits
+-- above it to clear. M.top alone cannot see that: it reads only the last
+-- element, and a state buried one slot down looks identical to "gone" from up
+-- there. A co-op leg needs the stronger claim -- that the real trainer battle
+-- it displaced is off the stack *entirely*, not merely off the top -- because
+-- the bug it exists to catch is exactly a battle that survived buried, and
+-- every check that only ever asked what was on top would have missed it.
+function M.onStack(game, target)
+  if target == nil then return false end
+  for _, state in ipairs((game.stack and game.stack.states) or {}) do
+    if state == target then return true end
+  end
+  return false
+end
+
 -- Spin until `predicate` is true, or give up. Returns whether it happened,
 -- so a driver can log a real failure instead of walking on and producing a
 -- confusing error three steps later.
