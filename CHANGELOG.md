@@ -4,6 +4,56 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.7.4] - 2026-08-06
+
+### Fixed
+
+- **The player who *joined* a co-op trainer battle no longer has to fight that
+  trainer a second time, alone.** Both players walk into the trainer, so the
+  engine builds a real battle on both machines; the co-op battle stands in for
+  it and hands it the result afterwards. That handoff only ever worked for the
+  player who pressed WAIT. Their battle rides across as `waiting.engine` and
+  `startBattle` takes it off the stack before the 2-on-2 goes on — the comment
+  there says why in one line: *"Left there it would resume the moment the co-op
+  battle popped, and the player would fight the same trainer twice."* The
+  player who pressed yes arrives through a different door (`onBattle`, the
+  message the hub sends the joiner) and that door built its plan with no engine
+  battle in it at all, so the unwind was skipped and their own battle spent the
+  whole fight buried under the co-op screen. It came back the instant that
+  screen popped: the trainer they had just beaten alongside a friend, standing
+  in front of them again, with the friend gone. The reference is client-local
+  and could never have crossed the wire — it was sitting in `self.encounter`
+  the entire time, unread. It is picked up now, keyed on the battle the hub
+  named so that the two ways into a co-op battle that never walked into
+  anything — a party-versus-party fight, and a join from the ACTIONS menu —
+  keep answering nil, which for them is correct.
+- **A joined trainer now shows the joiner their entrance and their parting
+  line.** Three things hang off that same reference: the trainer's picture, the
+  text they say on the way down, and the AI allowance the engine had already
+  computed. The joining player got none of them, which read as a small
+  graphical inconsistency and was really the same missing reference. Both
+  players walked into this trainer; both see them.
+- **A trainer somebody was standing in front of is no longer marked beaten by a
+  battle they were not in.** A player can be at a trainer, prompt up, when a
+  party-versus-party ask arrives and is answered. A party battle displaces
+  nothing, so nothing cleared the encounter that trainer was held in — and when
+  the 2-on-2 ended, the trainer was handed the *party* battle's result: marked
+  beaten by a fight they never took part in, with their prize money paid out
+  for it. Their own battle was still on the stack underneath, so it came back
+  anyway. The encounter slot is emptied when a co-op battle starts whatever is
+  in it now; a trainer this battle did not fight is simply left to be fought.
+- **Unwinding the screen stack no longer goes looking for something that is not
+  there.** `unwindTo` pops by identity, and its only other stopping condition
+  is a guard of sixteen — so a target that had already left the stack did not
+  fail to find it, it took sixteen screens down hunting for it, which mid-battle
+  is the battle and the world underneath. A held reference outliving its state
+  is ordinary (a battle that finishes itself pops itself), so it is checked now
+  rather than assumed, and a stale target does nothing at all. The same check
+  is what stops a co-op battle adopting an encounter whose battle has already
+  ended — reachable when a join is dropped by the hub, the player fights that
+  trainer alone, and a later fight against the same class on the same map with
+  the same lead produces the same key.
+
 ## [0.7.3] - 2026-08-06
 
 ### Fixed
