@@ -1,4 +1,10 @@
--- Nicknames and speech bubbles over remote players' heads.
+-- Nicknames over remote players' heads.
+--
+-- Names and nothing else.  Chat used to float over a head as a speech bubble
+-- and does not any more: what somebody said is a toast in the corner now
+-- (src/Toast.lua), where it is legible at any window size and does not
+-- depend on the speaker being on screen.  What is left here is the one thing
+-- that genuinely belongs in the world -- which of these characters is who.
 --
 -- This draws from the render.hud hook, which runs after the frame is
 -- composited and before touch controls, and receives a window-space
@@ -186,10 +192,7 @@ function M:drawRoster(Font, here)
   local y = 2
   for index, player in ipairs(here) do
     if index > 4 then break end
-    local name = self:nameFor(player)
-    local bubble = self.ctx.chat:bubbleFor(player.id)
-    local text = clipToGlyphs(Font, bubble and (name .. ": " .. bubble) or name,
-                              ROSTER_COLS)
+    local text = clipToGlyphs(Font, self:nameFor(player), ROSTER_COLS)
     local width = Font.width(text)
     love.graphics.setColor(0, 0, 0, 0.65)
     love.graphics.rectangle("fill", 1, y - 1, width + 4, 10)
@@ -506,15 +509,8 @@ function M:draw(game, viewport)
       local screenX = ANCHOR_X + (ax - current.x) * CELL
       local screenY = ANCHOR_Y + (ay - current.y) * CELL
 
-      local name = self:nameFor(player)
-      local bubble = ctx.chat:bubbleFor(player.id)
-      if bubble then
-        -- the bubble takes the slot above the head and pushes the name up
-        self:drawLabel(Font, bubble, screenX + CELL / 2, screenY - 20)
-        self:drawLabel(Font, name, screenX + CELL / 2, screenY - 10)
-      else
-        self:drawLabel(Font, name, screenX + CELL / 2, screenY - 10)
-      end
+      self:drawLabel(Font, self:nameFor(player), screenX + CELL / 2,
+                     screenY - 10)
     end
   end
 
