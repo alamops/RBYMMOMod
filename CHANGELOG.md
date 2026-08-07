@@ -4,6 +4,85 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.10.0] - 2026-08-07
+
+### Added
+
+- **Notifications in the corner, for the things that happen while you are
+  doing something else.** Somebody says something, somebody arrives, your
+  party member wins a fight — none of it is worth taking the screen for, and
+  all of it used to be findable only by opening a menu and going to look. A
+  toast is the whole answer: a low-opacity black plate in the **top-left**,
+  white text, stacked downward, gone on its own after **five seconds** and
+  **five lines at most** with the oldest dropped first — the newest line is
+  the one nobody has read yet, so it is never the one evicted. Drawn from
+  `render.hud` over the finished frame, menus and text boxes included, so a
+  line arriving while you are three levels into the START menu is still read
+  where you already are.
+- **Drawn in window space, in a font that has the letters chat needs.** The
+  plates are laid out against the letterbox rather than the game's 160x144,
+  which is the one way this differs from the nameplates — a nameplate belongs
+  to a character standing on a tile and has to live in that character's
+  coordinates; a toast belongs to nobody on the map. Window space is also
+  what buys **Press Start 2P** (bundled, SIL OFL 1.1, original — no ROM bytes)
+  a real pixel per glyph pixel: it carries the lowercase and the punctuation
+  the ROM font does not, and it is legible only when its 8x8 cells land on
+  whole pixels, so the size is a whole multiple of the letterbox scale and
+  never a fraction of one. A font that fails to load costs the toasts their
+  look and never the message — LÖVE's own face is used, and the warning names
+  the folder to reinstall.
+- **Chat toasts, every scope, your own lines included.** `EVERYONE`,
+  `NEARBY`, `PARTY` and — the one a bubble could never carry — `WHISPER`,
+  because a toast is drawn in the receiving player's own corner rather than
+  over the sender's head in a world other people are standing in. No scope tag
+  on it, unlike the scrollback's own line: a log is read deliberately and a
+  toast is read in passing, where the only two questions it has room for are
+  who spoke and what they said. Your own outbound line toasts too, under your
+  own name, because the scrollback is behind a menu and a message that appears
+  nowhere until somebody answers reads as one that was never sent.
+- **Arrivals and departures, to everybody on the hub.** `<name> joined the
+  server` and `<name> left the server`, off the roster updates that already
+  crossed the wire — no new message for it. The whole population is told
+  rather than the map, which is what makes *server* the right word in the
+  sentence.
+- **What the person you are travelling with just did — `mmo.party_event`.**
+  A solo wild or trainer fight produced no peer traffic at all, so a party was
+  two people who could see where each other were standing and nothing about
+  what either was doing. Five kinds now cross: `defeat_wild`,
+  `defeated_by_wild`, `capture`, `defeat_trainer` and `defeated_by_trainer`,
+  fanned out by the hub to the party and to nobody else. **The wire carries
+  what happened — a kind, a species, a level, a trainer — and never the prose
+  for it**, which is what keeps the sentence out of two hubs that would drift
+  apart writing it twice, and keeps a stranger's process from choosing the
+  words on this player's screen. The required fields are part of the kind
+  rather than a check beside it, so a half-filled event draws nothing instead
+  of stopping a sentence mid-way. **The fighter is not told what they just
+  watched** — both hubs leave the sender out of the fan-out — and a link,
+  ranked or co-op battle sends nothing, since both sides were already there.
+- **`mod.exports.toasts()`** hands a driver the queue as a copy, plus what the
+  last draw decided. A toast is not a screen anything can be pushed onto and
+  it is gone five seconds later, so without this the only way to assert one
+  ever appeared was OCR on a screenshot.
+
+### Changed
+
+- **`PROTOCOL` 7 → 8**, in `src/Config.lua` and `server/lib/relay.js`
+  together, for `mmo.party_event`. The rule that moved every number before it
+  moves this one: a protocol-7 hub has never heard the type and its handler
+  table answers an unknown one with silence, so a player would watch their
+  partner fight all evening and never be told a thing — and neither end could
+  tell that from an ordinary quiet route. A refusal naming both versions is
+  the better sentence. **The mod and its hub have to be updated together.**
+- **Speech bubbles over heads are gone, and the `BUBBLES` option with them.**
+  The toasts replace them and do it better in the two places a bubble was
+  weakest: a whisper could never float over a head without being readable by
+  whoever was standing there, and a bubble drawn in the world is behind
+  whatever menu the player has open at the time. Nameplates stay and are no
+  longer behind an option either — a plate only appears when another player is
+  in front of you and a toast only when something happened, so the switch that
+  used to gate them was a switch for turning off the only evidence that anyone
+  else is in the game.
+
 ## [0.9.0] - 2026-08-07
 
 ### Added

@@ -9,7 +9,9 @@ return {
   differences = {
     changed = {
       "Adds an MMO row to the START menu (above SAVE).",
-      "Draws nicknames and chat bubbles over other players in the overworld.",
+      "Draws nicknames over other players in the overworld, and notifies "
+        .. "chat, arrivals and a party member's fights as toasts in the "
+        .. "corner of the screen.",
       "Spawns runtime NPCs for other players on your current map.",
       "Hooks movement.speed so holding B on foot moves at bike speed; off "
         .. "the moment you are biking or surfing.",
@@ -19,6 +21,19 @@ return {
         .. "install; one player hosts from inside the game and picks the "
         .. "limit (2-64) while doing it.",
       "Global, nearby, party and private chat, composed on the naming grid.",
+      "Toast notifications in the top-left corner for the things that happen "
+        .. "while the player is doing something else: every chat line in "
+        .. "every scope including their own, anybody joining or leaving the "
+        .. "hub, and -- to the party alone -- what the person they are "
+        .. "travelling with just defeated, was defeated by, or captured. A "
+        .. "dark plate and white text in Press Start 2P (bundled, SIL OFL, "
+        .. "original art -- the ROM font has no lowercase and no "
+        .. "punctuation), drawn from render.hud over the finished frame so a "
+        .. "line arriving under a menu is still readable, five seconds each "
+        .. "and five at most with the oldest dropped first. The party events "
+        .. "ride a new mmo.party_event the hub fans out to the party and "
+        .. "nobody else, carrying a kind, a species, a level or a trainer -- "
+        .. "never the prose, which each client writes for itself.",
       "Parties of two: invite a friend from the menu you get by walking up "
         .. "and pressing A, and travel together -- open the TOWN MAP and "
         .. "their character is standing at the city they are in, they are "
@@ -80,8 +95,8 @@ return {
       "A message of the day on the dedicated hub, and the one part of this "
         .. "release a player sees: a host sets `motd` in the config and "
         .. "everybody who connects is greeted with it as a HUB line at the "
-        .. "top of their chat log -- no box to dismiss and no bubble over "
-        .. "anybody's head. One line, 120 characters, the same charset chat "
+        .. "top of their chat log -- no box to dismiss and nothing to press. "
+        .. "One line, 120 characters, the same charset chat "
         .. "uses, re-read on SIGHUP. The name HUB is reserved at hello for "
         .. "the same reason: a hub-originated line carries no sender id, so "
         .. "the name is the only thing distinguishing it, and a player "
@@ -234,11 +249,12 @@ return {
         .. "HOOD in their catalog, so somebody wearing one shows up as RED "
         .. "on their screen -- the same fallback a character their ROM does "
         .. "not carry already gets.",
-      "The mid-game character change moved the protocol from 6 to 7, so a "
-        .. "0.7.x copy and a 0.8.0 one refuse each other at the door and name "
-        .. "both versions rather than connecting and going quiet. The mod and "
-        .. "its hub have to be updated together; there is no degraded mode "
-        .. "that connects without the live change.",
+      "The protocol has moved twice: the mid-game character change took it "
+        .. "from 6 to 7, and the party notifications took it from 7 to 8, so "
+        .. "copies from either side of one of those refuse each other at the "
+        .. "door and name both versions rather than connecting and going "
+        .. "quiet. The mod and its hub have to be updated together; there is "
+        .. "no degraded mode that connects without the newer messages.",
       "A leaderboard already open on somebody's screen keeps the portrait it "
         .. "was drawn with when a player changes character, until it is next "
         .. "refreshed -- the same staleness the points on it already have. "
