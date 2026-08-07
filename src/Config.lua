@@ -330,6 +330,28 @@ M.COMPOSE_MAX = 16
 -- screen, so nothing is owed a refusal.
 M.MOTD_MAX = 120
 
+-- ------- toasts
+--
+-- The transient lines src/Toast.lua stacks in the corner: what somebody
+-- said, who arrived, what your partner just beat.  Five seconds is long
+-- enough to read a sentence while walking and short enough that a busy hub
+-- does not leave a wall of text on screen; five lines is what the stack may
+-- hold before the oldest is dropped, and dropping the oldest is right
+-- because the newest line is the one the player has not read yet.
+M.TOAST_SECONDS = 5
+M.TOAST_MAX = 5
+
+-- Press Start 2P, SIL Open Font License 1.1 (assets/fonts/OFL.txt).
+--
+-- Its own face rather than the game's, and that is the point: the ROM font
+-- is extracted from the player's cartridge and carries no lowercase and
+-- almost no punctuation, so a chat line drawn with it loses characters
+-- silently.  A toast has to be able to show a sentence somebody typed.
+--
+-- The path is relative to the mod root, which is what mod.assets:path
+-- expects -- the same shape as OWN_CHARS' `dir` above.
+M.TOAST_FONT = "assets/fonts/PressStart2P-Regular.ttf"
+
 -- Presence liveness.  The hub drops a client that stops pinging; the client
 -- gives up on a hub that stops answering.
 M.PING_INTERVAL = 10
