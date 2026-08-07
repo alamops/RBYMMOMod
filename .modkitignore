@@ -109,6 +109,7 @@ docs/plans/coop-run-consent-and-blackout.md
 docs/plans/nire-back-sprite-pixel-ratio.md
 docs/plans/non-blocking-avatars.md
 docs/plans/coop-joiner-refights-the-trainer.md
+docs/plans/in-game-notifications.md
 # The upstream RFC behind co-op battles. It is a proposal against the *engine*,
 # not mod content -- a player unpacking this archive has no use for a document
 # arguing about BattleState's battler slots. Listed by name for the same reason
