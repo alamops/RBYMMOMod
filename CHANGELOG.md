@@ -80,6 +80,53 @@ here must match `manifest.version`.
   character is now something you opt into and can undo — picking `RED` puts
   you back — rather than something the end of a session does for you.
 
+## [0.7.3] - 2026-08-06
+
+### Fixed
+
+- **The `CHAT` row no longer looks like it has the cursor on it.** The unread
+  marker on that row has had two lives and neither worked: as a trailing `*`
+  it drew nothing at all (the extracted font has no glyph for it, and
+  `Font.width` advanced 8px anyway, so the row read as `CHAT` plus a blank
+  column), and as a leading `▶` it drew the menu's own cursor glyph — so a
+  row with unread messages looked like a second selection sitting on a row
+  the cursor was not on. The label is plain `CHAT` now. Unread lines are
+  still counted on the chat model; the count simply no longer decorates the
+  menu.
+
+## [0.7.2] - 2026-08-06
+
+### Fixed
+
+- **The distributed archive no longer carries the co-op end-to-end drivers.**
+  `tests/drivers/mmo_quad.lua` and `tests/drivers/run-quad-e2e.sh` arrived with
+  co-op battles and never reached `.modkitignore`, so `pack` duly put both in
+  the v0.7.1 zip — two files that reach engine test infrastructure and mean
+  nothing to somebody who has just unpacked a mod. Nothing mechanical was going
+  to catch it: `lint` has no opinion about a driver script, and the file count
+  only looks wrong to a reader who already knows what it should be. That is the
+  trap `my-profile.png` and `rank.png` each fell into one release apart, and the
+  fix is the same one — name the files. Both drivers are listed now, along with
+  the seven screenshots taken since the block was last touched
+  (`coop-battle.png`, `coop-item.png`, `coop-switch.png`, `party-ask.png`,
+  `party-battle.png`, `party-spectating.png`, `two-parties.png`), so
+  `modkit pack` leaves all nine behind — the release workflow already dropped
+  `docs/` wholesale, so only the two drivers ever reached a published zip.
+  Seven plan files join them on the same footing as every other plan entry —
+  `submit-to-mod-index.md` plus the six that had accumulated without a line
+  (`coop-battle-hp-sequencing.md`, `coop-battle-status-and-timeout.md`,
+  `coop-battle-ux-findings.md`, `coop-run-consent-and-blackout.md`,
+  `nire-back-sprite-pixel-ratio.md`, `non-blocking-avatars.md`): working notes
+  for whoever picks this up next, not mod content.
+
+### Changed
+
+- **Two version numbers in the docs caught up with the mod.** `README.md`'s
+  known-jank section still opened by calling this `0.5.0`, and
+  `server/README.md`'s VPS walkthrough still cloned `--branch v0.2.2` — a tag
+  from before the hub that walkthrough then tells you to build existed at all.
+  Both now name the current release.
+
 ## [0.7.1] - 2026-08-05
 
 ### Fixed
