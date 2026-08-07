@@ -25,12 +25,12 @@ than by inventing a second password.
   itself is.
   **The mark is for operators and for the features that come later.** The
   welcome tells that client about itself (`admin: true`, and only when true),
-  and operator views — `roster()`, and so `status.json` and the admin socket's
-  `who` — carry the flag. **Other players never see it**: it is deliberately
-  absent from the presence record that is broadcast to everybody, so nobody in
-  the world learns who holds power. The flag is derived server-side from the
-  credential that answered the challenge and from nothing else, so no message a
-  client sends can claim it.
+  and operator views — `roster()`, and so `status.json`, `players --json` and
+  the admin socket's `who` — carry the flag. **Other players never see it**:
+  it is deliberately absent from the presence record that is broadcast to
+  everybody, so nobody in the world learns who holds power. The flag is
+  derived server-side from the credential that answered the challenge and from
+  nothing else, so no message a client sends can claim it.
   **No in-game admin feature ships in this release.** There is no operator menu,
   no command, no button — the flag exists so the features that want one have
   something to check when they are built. On a hub with `auth.required` false,
@@ -103,7 +103,13 @@ for any of them.
   and one back per connection: `who` (the live roster), `stats` (the hub's
   counters *including* the wrong-passcode throttle's live numbers, which reach
   no file and were previously visible only in the log), `kick` and
-  `broadcast`. The last two have CLI verbs. **`rby-mmo-hub kick <name>
+  `broadcast`. Three of the four have CLI verbs — `who` is the one that does
+  not, because `players` already answers it off the snapshot.
+  **`rby-mmo-hub stats [--json]`** prints those live counters at a terminal:
+  seats taken, connections open, handshakes in flight, wrong passcodes against
+  the ceiling that trips, whether it is tripped, and how many addresses are
+  backing off. Addresses are counted and never printed, in either form.
+  **`rby-mmo-hub kick <name>
   [--reason TEXT]`** removes a player with a sentence they actually see — the
   game renders it in the same box a refused join lands in — defaulting to *"An
   operator removed you from this hub."* Names are unique only among ranked
@@ -142,9 +148,9 @@ for any of them.
   welcome an older client never reads, a broadcast is an ordinary `mmo.chat`
   with no `from` (a bubble for an unknown id is stored and never drawn, and
   expires), and the watch, history and admin surfaces are the host's terminal
-  and the host's own machine. The bump rule asks whether a
-  *client* can now send something an older *hub* would ignore, and nothing
-  here does. `affects_link` stays `false`.
+  and the host's own machine. The bump rule asks whether a *client* can now
+  send something an older *hub* would ignore, and nothing here does.
+  `affects_link` stays `false`.
 - **The in-game hub gets none of this.** `src/Hub.lua` hosts from inside a
   copy of the game: no config file to hold a MOTD, no data directory to put a
   socket or a ledger in, and no terminal to watch. These are dedicated-hub

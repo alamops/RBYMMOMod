@@ -655,7 +655,7 @@ running they say so plainly rather than reporting a room that emptied hours
 ago. **`rby-mmo-hub watch`** is `players` on a loop for the evenings you'd
 rather leave it up.
 
-Two verbs are the other kind — they talk to the hub while it's up, over a
+Three verbs are the other kind — they talk to the hub while it's up, over a
 socket in the same directory, so filesystem permissions are the whole
 authorisation:
 
@@ -671,18 +671,45 @@ They were shown: Take the evening off
 The kicked player sees the reason on their own screen — and a kick is not a
 ban, so `ban` or `revoke` first if you want it to stick.
 
+**`rby-mmo-hub stats`** is the third, and the only reading no file holds: the
+door as it stands this second — connections open, handshakes in flight, wrong
+passcodes against the ceiling that trips, whether it *is* tripped, and how
+many addresses are backing off. Those counters live in the hub's memory and
+are written nowhere, so `status` can only print what they are configured to
+be. Addresses are counted, never printed, `--json` included.
+
+```console
+$ rby-mmo-hub stats
+The hub
+  address   0.0.0.0:7788
+  uptime    14s
+  protocol  5
+  players   3 of 8
+  pending   1 connection(s) not in the world yet
+
+The door
+  connections  4 open, from 1 address(es)
+  handshakes   1 connection(s) still to be greeted
+  wrong codes  1 of 100 in the last 1m
+  lockdown     no
+  throttled    0 address(es) backing off now
+  tracked      1 address(es) with failures remembered
+```
+
 **The operator surface is the CLI, and there is no web page.** To run it from
 somewhere other than the hub's own machine, SSH to the box and type the same
 verbs (`docker compose exec hub rby-mmo-hub …` once you are on it). Everything
-a page could have shown you is `watch`, `players`, `ranking` and `history` —
-and reached that way it is already encrypted and authenticated, by SSH itself,
+a page could have shown you is `watch`, `players`, `ranking`, `history` and
+`stats` — that last one for the live door counters, which no file holds — and
+reached that way it is already encrypted and authenticated, by SSH itself,
 which is more than a login form on a plaintext port would have managed.
 
 **Admin join codes mark a connection.** `rby-mmo-hub invite --admin` mints
 one: it joins the game exactly like any other code — same six characters, same
 screen — and the hub *marks* the connection it opened. The client is told
-about itself, operator views show it as `ADMIN` (`invite list`'s `KIND`
-column, `players --json`, `status.json`, the admin socket's `who`), and other
+about itself, and operator views carry the mark: `invite list`'s `KIND`
+column reads `ADMIN`, and the JSON rosters — `players --json`, `status.json`,
+the admin socket's `who` — carry an `admin` flag on the connection. Other
 players are never shown it. `revoke <id>` takes one back like any other, and
 it's worth pairing with `--expires`, because an admin code is worth more to a
 thief than a player's one is. It is groundwork: **there is no in-game operator

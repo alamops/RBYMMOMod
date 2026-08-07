@@ -1394,6 +1394,175 @@ async function broadcastHappyScenario() {
   }
 }
 
+// ---------------------------------------------------------------- stats
+//
+// The one *question* on this channel, and the only reading no file holds.
+// The fixture answers in the shape lib/admin.js's handleStats() really
+// sends -- the server's stats() snapshot with the limiter's own counters
+// nested under `limits` -- including the two `perIp` maps, which are the
+// point of half of these checks: they arrive over the socket and must reach
+// neither the table nor `--json`.
+
+// Documentation addresses (RFC 5737), so a grep for either of them in this
+// repo finds only this fixture and the assertions that they never escape it.
+const STATS_ADDRESS_A = '198.51.100.23';
+const STATS_ADDRESS_B = '203.0.113.9';
+
+function statsFixture(overrides) {
+  const perIp = { [STATS_ADDRESS_A]: 2, [STATS_ADDRESS_B]: 2 };
+  return {
+    ok: true,
+    stats: Object.assign({
+      host: '0.0.0.0',
+      port: 7788,
+      protocol: 5,
+      maxPlayers: 8,
+      players: 3,
+      pending: 1,
+      connections: 4,
+      perIp,
+      authRequired: true,
+      startedAt: 1700000000000,
+      uptimeMs: 7265000,
+      limits: {
+        connections: 4,
+        pending: 1,
+        perIp,
+        auth: Object.assign({
+          recentFailures: 12,
+          failureThreshold: 100,
+          windowMs: 60000,
+          lockdown: false,
+          lockdownMs: 0,
+          throttledAddresses: 1,
+          trackedAddresses: 2,
+        }, (overrides || {}).auth),
+      },
+    }, (overrides || {}).stats),
+  };
+}
+
+/** Every `perIp` anywhere in a parsed document, however deep it was nested. */
+function findsPerIp(node) {
+  if (!node || typeof node !== 'object') return false;
+  if (!Array.isArray(node) && Object.prototype.hasOwnProperty.call(node, 'perIp')) return true;
+  return Object.values(node).some((value) => findsPerIp(value));
+}
+
+async function statsScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  let seenRequest = null;
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'), (request) => {
+    seenRequest = request;
+    return statsFixture();
+  });
+
+  try {
+    const result = await withTimeout(
+      runCli(['stats', '--config', file], { cwd: dir }), 5000, 'stats to answer');
+    ok(result.code === cli.OK, 'stats against a hub that answers exits 0');
+    ok(!!seenRequest && seenRequest.cmd === 'stats',
+      'the request sent over the wire is {cmd:"stats"}');
+
+    // --- the hub half
+    ok(/The hub/.test(result.stdout) && /The door/.test(result.stdout),
+      'the table is split into the hub and the door');
+    ok(/0\.0\.0\.0:7788/.test(result.stdout), 'the hub reports where it is bound');
+    ok(/3 of 8/.test(result.stdout), 'and how many of its seats are taken');
+    ok(/2h/.test(result.stdout), 'and its uptime, humanised rather than in milliseconds');
+    ok(/1 connection\(s\) not in the world yet/.test(result.stdout),
+      'and the connections that are not players yet');
+
+    // --- the door half: every counter the page used to draw
+    ok(/4 open/.test(result.stdout), 'the door reports open connections');
+    ok(/from 2 address\(es\)/.test(result.stdout),
+      'and how many addresses they came from -- a count, which is all a count is');
+    ok(/1 connection\(s\) still to be greeted/.test(result.stdout),
+      'and the handshakes the limiter has not seen finish');
+    ok(/12 of 100 in the last 1m/.test(result.stdout),
+      'and the recent wrong passcodes against the ceiling that trips, with its window');
+    ok(/lockdown\s+no/.test(result.stdout), 'and says the ceiling is not tripped');
+    ok(/1 address\(es\) backing off now/.test(result.stdout), 'and how many addresses are throttled');
+    ok(/2 address\(es\) with failures remembered/.test(result.stdout),
+      'and how many are still being remembered');
+
+    // --- the roster discipline: the answer carried two addresses; neither
+    //     may be anywhere in what a host could paste into a bug report
+    for (const address of [STATS_ADDRESS_A, STATS_ADDRESS_B]) {
+      ok(!result.stdout.includes(address) && !result.stderr.includes(address),
+        `no address out of perIp reaches the terminal (${address})`);
+    }
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
+async function statsLockdownScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'),
+    () => statsFixture({ auth: { lockdown: true, lockdownMs: 45000, recentFailures: 140 } }));
+
+  try {
+    const result = await withTimeout(
+      runCli(['stats', '--config', file], { cwd: dir }), 5000, 'stats to answer');
+    ok(result.code === cli.OK, 'a tripped ceiling is a reading, not a failure (exit 0)');
+    ok(/lockdown\s+YES/.test(result.stdout), 'a tripped ceiling is shouted, not spelled "true"');
+    ok(/for another 45s/.test(result.stdout), 'and says how much longer it has to run');
+    ok(/new joins are refused/.test(result.stdout),
+      'with a sentence saying what is actually being refused');
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
+async function statsJsonScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'), () => statsFixture());
+
+  try {
+    const result = await withTimeout(
+      runCli(['stats', '--json', '--config', file], { cwd: dir }), 5000, 'stats --json to answer');
+    ok(result.code === cli.OK, 'stats --json exits 0');
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch (err) { /* asserted on next line */ }
+    ok(!!parsed, 'and prints one JSON document a script can parse');
+    ok(parsed.players === 3 && parsed.connections === 4 && parsed.limits.auth.recentFailures === 12,
+      'carrying the hub\'s own counters through unchanged');
+
+    ok(!findsPerIp(parsed), 'with no perIp key anywhere in it, at any depth');
+    ok(parsed.addresses === 2 && parsed.limits.addresses === 2,
+      'replaced at both levels by the count, which is the operational half of it');
+    for (const address of [STATS_ADDRESS_A, STATS_ADDRESS_B]) {
+      ok(!result.stdout.includes(address) && !result.stderr.includes(address),
+        `and no address survives into the JSON either (${address})`);
+    }
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
+async function statsRefusalScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'),
+    () => ({ ok: false, error: 'This hub could not answer "stats".' }));
+
+  try {
+    const result = await withTimeout(
+      runCli(['stats', '--config', file], { cwd: dir }), 5000, 'the refusal to answer');
+    ok(result.code === cli.ERROR, 'a hub that answers ok:false to stats is a refusal (exit 1)');
+    ok(/could not answer/.test(result.stderr), 'and the reason travels to the terminal');
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
 async function adminRefusalScenario() {
   const dir = adminScratchDir();
   const file = path.join(dir, 'config.json');
@@ -1425,6 +1594,16 @@ async function adminNoSocketScenario() {
   const broadcast = await runCli(['broadcast', 'hello', '--config', file], { cwd: dir });
   ok(broadcast.code === cli.OK, 'and the same is true for broadcast');
   ok(/No admin socket/.test(broadcast.stderr), 'with the same honest sentence');
+
+  // `stats` is a question rather than an instruction, and gets the same
+  // answer for the same reason: a hub that is not there is news, not a fault
+  // of the host who asked.
+  const stats = await runCli(['stats', '--config', file], { cwd: dir });
+  ok(stats.code === cli.OK, 'and for stats, which asks rather than instructs (exit 0)');
+  ok(/No admin socket/.test(stats.stderr), 'with that same honest copy');
+  ok(/rby-mmo-hub stats/.test(stats.stderr),
+    'and the Docker line it prints names the verb that was actually run');
+  ok(stats.stdout === '', 'and nothing is printed on stdout, so a piped reading stays empty');
 }
 
 /**
@@ -1634,7 +1813,9 @@ async function inviteListKindScenario() {
     ok(/\bADMIN\b/.test(result.stdout), `${args.join(' ')} marks the admin row ADMIN`);
     ok(/\bplayer\b/.test(result.stdout), `${args.join(' ')} marks a non-admin row player`);
     ok(/KIND ADMIN: joins the game like any code/.test(result.stdout),
-      `${args.join(' ')} prints the footer note about what an admin code opens`);
+      `${args.join(' ')} prints the footer note about the mark an admin code leaves`);
+    ok(/`admin` flag on the connection/.test(result.stdout),
+      `${args.join(' ')}: and the footer is precise about the rosters carrying a flag, not the word`);
 
     const rows = result.stdout.split('\n').filter((line) => /\b(ADMIN|player)\b/.test(line));
     ok(rows.some((line) => /\bOp\b/.test(line) && /\bADMIN\b/.test(line)),
@@ -2127,6 +2308,10 @@ async function main() {
     await kickReasonScenario();
     await kickNobodyScenario();
     await broadcastHappyScenario();
+    await statsScenario();
+    await statsLockdownScenario();
+    await statsJsonScenario();
+    await statsRefusalScenario();
     await adminRefusalScenario();
     await adminNoSocketScenario();
     await adminStaleSocketScenario();
