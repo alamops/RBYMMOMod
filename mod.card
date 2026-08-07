@@ -84,6 +84,14 @@ return {
         .. "to turn it off. Other players see it too -- presence carries the "
         .. "pace of each step, so a runner *and* a cyclist both step at the "
         .. "doubled clock on their screens as well as yours.",
+      "A SERVERS row on the disconnected menu, once you have connected "
+        .. "anywhere before: every hub you have reached, favorites pinned "
+        .. "above the rest and sorted by address descending otherwise, each "
+        .. "with its own CONNECT / FAVORITE-UNFAVORITE / EDIT HOST / "
+        .. "EDIT CODE / RENAME submenu. Entries default-named by address, "
+        .. "rename up to 16 characters, and persist across quits, CONTINUE "
+        .. "and save-slot switches in rby_mmo_servers.json; the list caps at "
+        .. "16 with the oldest non-favorite evicted first.",
     },
     known = {
       "One player simulates a co-op battle and the other three replay its "

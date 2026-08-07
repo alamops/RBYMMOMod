@@ -13,6 +13,7 @@ local Wire = need("Wire")
 local Sha256 = need("Sha256")
 local Transport = need("Transport")
 local Roster = need("Roster")
+local Servers = need("Servers")
 local Avatars = need("Avatars")
 local Chat = need("Chat")
 local Party = need("Party")
@@ -46,6 +47,10 @@ local ctx = {
 
 local transport = Transport.new()
 local server = HostServer.new()
+-- Handed its own one-field table rather than the ctx above: the store wants
+-- the mod facade and nothing else, which is what lets the suite construct one
+-- against a stub without standing up a client first.
+local servers = Servers.new({ mod = mod })
 local ui = Ui.new(ctx)
 local overlay = Overlay.new(ctx)
 local sessions = Sessions.new(transport, ui)
@@ -58,6 +63,7 @@ ctx.sessions = sessions
 ctx.party = party
 ctx.coop = coop
 ctx.server = server
+ctx.servers = servers
 
 local presenceClock = 0
 local lastSent =
@@ -135,6 +141,20 @@ end
 
 function M.hostLimit()
   return server:limit()
+end
+
+-- The hubs this copy has been welcomed by.
+--
+-- The store itself, not a copy of its rows: its readers both read it and
+-- write to it (rename, favourite, edit), and two lists that could disagree
+-- would be one bug waiting for a player to reopen a menu. The screens reach
+-- it as ctx.servers; this is the same object for anything holding the Client
+-- instead -- the suite, and any caller that has no ctx.
+--
+-- Outside this mod it is the rows and not the store: mod.exports.servers,
+-- below, so nothing else can rename or evict what the player collected.
+function M.servers()
+  return servers
 end
 
 -- Settings that the player can change from inside the game.
@@ -229,6 +249,33 @@ function M.setJoinCode(a, b, c)
   if not (code and key) then return nil end
   mod.save:set(key, code)
   return code
+end
+
+-- Forgets what this copy is holding *for* a hub, when its row is deleted.
+--
+-- Today that is exactly the join code. The code is the hub's secret rather
+-- than the player's: they were read it out, it is filed under the address it
+-- was typed for, and a player who deletes the row has said they are done with
+-- that hub -- so keeping it would be keeping somebody else's passcode for a
+-- server no longer on the list. Cleared with a nil set, the same way
+-- setHostJoinCode drops its code.
+--
+-- The rank claim ticket is deliberately NOT cleared. It is the opposite kind
+-- of thing: the ticket is the player's own earned identity on that hub, and
+-- dropping it would silently destroy their rating the next time they came
+-- back -- the hub would answer the name's rightful owner as an impostor.
+-- Deleting a bookmark must not cost a rating. It also lives in the durable
+-- token file, which outlives every save slot, so clearing the mod.save half
+-- would only half-forget it anyway.
+--
+-- arg1 for the reason the setters above give: reached as
+-- client:forgetHub(address) from the menus, and as M.forgetHub(address) from
+-- the suite.
+function M.forgetHub(a, b)
+  local key = codeKey(arg1(a, b))
+  if not key then return nil end
+  mod.save:set(key, nil)
+  return true
 end
 
 -- Where a hub's claim ticket is kept.
@@ -1324,6 +1371,42 @@ handlers[Wire.WELCOME] = function(game, msg)
   end
   transport:markReady()
   pushPresence(true)
+  -- Remember the hub, now that it has actually let us in.
+  --
+  -- Here and not in M.connect, because a dial is not a connection: recording
+  -- there would fill the SERVERS list with addresses that refused us, timed
+  -- out, or wanted a code we did not have. And after markReady rather than
+  -- before, because until then the welcome could still turn out to be
+  -- malformed and this connection never happened.
+  --
+  -- Only a dialled address: hosting has none -- the local net is in-process --
+  -- and a row that reconnects you to yourself is not a hub anybody wants
+  -- listed.
+  --
+  -- A code goes on the row only when this connection actually answered a
+  -- challenge with one, which is what authSent records. M.joinCode falls back
+  -- to the standing JOIN CODE option when a hub has no code of its own, so
+  -- recording its answer unconditionally would stamp that option onto every
+  -- open hub the player ever joins -- and the row's copy is then pinned under
+  -- the per-hub key, where it outranks the option it came from. A hub that
+  -- never asked for a code gets nil, and the store leaves entry.code alone on
+  -- nil, so a code the player typed themselves still survives.
+  --
+  -- Wrapped, and the whole point of the wrapping is that this is bookkeeping
+  -- on the one path every single connection takes. The store refuses rather
+  -- than raises, so nothing here is expected to throw -- but a save folder
+  -- this copy cannot write must never be the reason a player is not in the
+  -- game they just joined.
+  if dialled then
+    local kept, why = pcall(function()
+      servers:record(dialled, authSent and M.joinCode(dialled) or nil)
+    end)
+    if not kept then
+      mod.log:warn("could not add %s to the server list (%s) -- it will not "
+        .. "appear under START > MMO > SERVERS; rejoin it with JOIN GAME",
+        tostring(dialled), tostring(why))
+    end
+  end
   -- Deliberately not a text box. ui:say pushes a modal that sits over the
   -- world until someone presses A, and a routine status line is not worth
   -- interrupting play for -- the first real run left "Connected." covering
@@ -1837,6 +1920,12 @@ function M.install()
   -- nil unless this copy is hosting; a mod that wants to show the address
   -- somewhere of its own should not have to reach into HostServer for it
   mod.exports.hostAddress = function() return M.isHosting() and server:address() end
+  -- The hubs this copy has been welcomed by, in the order SERVERS draws them.
+  -- The rows and not the store, so nothing outside this mod can rename or
+  -- evict what the player collected -- and so the end-to-end driver can assert
+  -- that connecting actually recorded a hub, which is otherwise only visible
+  -- by opening a menu.
+  mod.exports.servers = function() return servers:list() end
   mod.exports.players = function() return ctx.roster:sorted() end
   -- Who you are travelling with, you included, in the order the hub listed
   -- them -- empty when you are not in a party. The end-to-end driver reads

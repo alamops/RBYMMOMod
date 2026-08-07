@@ -993,6 +993,142 @@ return function(game)
             end
             check(not exports.isConnected(), "and left again cleanly")
             H.closeToOverworld(game)
+
+            -- ------- 9. and back a THIRD time, through SERVERS
+            --
+            -- The row this whole leg exists to prove: the hub this player
+            -- was just welcomed by twice is now on START > MMO > SERVERS,
+            -- named after its own address (src/Servers.lua's default), and
+            -- CONNECT on its submenu is the whole join -- CHARSET to confirm
+            -- who is connecting, then a dial with the address and code
+            -- already filled in from the entry, no grids in between. Same
+            -- assertions H.rejoin's second connection made: a claimed name
+            -- is recognised again, and the rating is still attached to it.
+            --
+            -- The list this leg is about to walk, read off the store first.
+            -- Two welcomes off one address are one row, and that row's
+            -- `address` is the whole dialable string whatever the row is
+            -- *named* -- the name has the standard port left off, which is
+            -- what H.serverLabel reconstructs below. A second row here would
+            -- mean the same hub was filed under two keys.
+            check(type(exports.servers) == "function",
+                  "the mod publishes its server list to other mods")
+            local stored = (type(exports.servers) == "function"
+                            and exports.servers()) or {}
+            check(#stored == 1,
+                  ("two connections to one hub leave exactly one SERVERS row "
+                   .. "(got %d)"):format(#stored))
+
+            -- What this player actually dialled, which is *not* what the host
+            -- published: the host reads its LAN IP out (HostServer:address),
+            -- while this side has been dialling the loopback address the
+            -- wrapper wrote into its options, both times. Only asserted when
+            -- the wrapper is the one running this -- a hand-driven run sets no
+            -- such variable, and the row itself is then the only witness of
+            -- what was dialled.
+            local wrapperDialled = os.getenv("MMO_JOIN_ADDRESS")
+            if wrapperDialled then
+              check(stored[1] and stored[1].address == wrapperDialled,
+                    ("and it holds the address that was dialled -- %s (row "
+                     .. "says %s)"):format(tostring(wrapperDialled),
+                                    tostring(stored[1] and stored[1].address)))
+            end
+            local dialled = wrapperDialled
+              or (stored[1] and stored[1].address) or hostAddress
+            log("SERVERS row", tostring(stored[1] and stored[1].name),
+                "at", tostring(stored[1] and stored[1].address),
+                "dialled", tostring(dialled))
+
+            if H.reconnectViaServers(game, exports, dialled, joinCode,
+                                      check, log, SHOT_DIR) then
+              check(exports.isRanked(),
+                    "reconnecting through SERVERS is recognised as the "
+                    .. "same player too")
+              check(exports.points() == pointsBefore,
+                    ("and the rating comes back with them again (%s)")
+                      :format(tostring(exports.points())))
+              U.shot(game, SHOT_DIR .. "/join-servers-reconnected.png")
+
+              H.closeToOverworld(game)
+              if H.openMmo(game) and H.selectLabel(game, "LEAVE") then
+                H.drivePrompts(game, function()
+                  return not exports.isConnected()
+                end, 60)
+              end
+              check(not exports.isConnected(), "and left a third time cleanly")
+              H.closeToOverworld(game)
+
+              -- ------- 10. DELETE, behind a yes/no confirm
+              --
+              -- The same row the SERVERS leg above just dialled through,
+              -- but this pass is destructive on purpose: reopen it, pick
+              -- the entry, DELETE it, answer CONFIRM's box YES, and check
+              -- both halves of what that promises -- the store side
+              -- (mod.exports.servers() empty) and the menu side (the MMO
+              -- menu drops the SERVERS row once the list behind it is
+              -- empty, the same rule that keeps the row off the menu
+              -- before any hub has ever been recorded).
+              local deleteLabel = H.serverLabel(exports, dialled)
+              if H.openMmo(game) and H.selectLabel(game, "SERVERS")
+                 and H.selectLabel(game, deleteLabel) then
+                U.wait(20)
+                if H.selectLabel(game, "DELETE") then
+                  -- The text prints first and the choice box comes up
+                  -- under it -- CONFIRM's own rhythm (src/Ui.lua's
+                  -- SCREEN.CONFIRM). Wait for the box itself, not just
+                  -- "a screen changed", so the photograph below is the
+                  -- box and not the sentence still printing above it.
+                  local confirmUp = H.waitFor(game, function()
+                    return H.classify(H.top(game)) == "choice"
+                  end, 90, "the DELETE confirm box")
+                  check(confirmUp, "DELETE opens the yes/no confirm")
+                  if confirmUp then
+                    U.shot(game, SHOT_DIR .. "/servers-confirm.png")
+                    -- YES is index 1 -- the same rule drivePrompts walks
+                    -- the cursor to for every other choice box in this
+                    -- suite (see M.drivePrompts above); walked by hand
+                    -- here rather than through drivePrompts so the box
+                    -- can be photographed before it is answered.
+                    local box = H.top(game)
+                    local guard = 0
+                    while (H.top(game) == box) and (box.index or 1) > 1
+                          and guard < 4 do
+                      U.tap(game, "up")
+                      U.wait(3)
+                      guard = guard + 1
+                    end
+                    U.tap(game, "a")
+                    U.wait(20)
+                  end
+
+                  local afterDelete = (type(exports.servers) == "function"
+                                        and exports.servers()) or nil
+                  check(type(afterDelete) == "table" and #afterDelete == 0,
+                        "DELETE, confirmed, empties the SERVERS list "
+                          .. ("(got %d row(s))")
+                            :format(type(afterDelete) == "table"
+                                    and #afterDelete or -1))
+
+                  H.closeToOverworld(game)
+                  if H.openMmo(game) then
+                    local stillThere = false
+                    for _, l in ipairs(H.menuLabels(game)) do
+                      if H.labelMatches(l, "SERVERS") then stillThere = true end
+                    end
+                    check(not stillThere,
+                          "and the MMO menu no longer offers a SERVERS row, "
+                            .. "the list behind it now empty")
+                  end
+                  H.closeToOverworld(game)
+                else
+                  check(false, "DELETE is on the entry's own submenu")
+                end
+              else
+                check(false, "SERVERS still opens, with the entry still on "
+                               .. "it, after the third reconnect, for the "
+                               .. "DELETE leg")
+              end
+            end
           end
         else
           check(false, "no LEAVE row while connected as a guest")

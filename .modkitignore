@@ -87,6 +87,9 @@ docs/plans/in-game-hosting.md
 docs/plans/self-hosting-server-app.md
 docs/plans/fix-taken-nick-on-ranking.md
 docs/plans/running-system.md
+docs/plans/last-connected-servers.md
+docs/plans/new-char-selection.md
+docs/plans/online-char-selection.md
 docs/plans/submit-to-mod-index.md
 # Six more plans had accumulated without entries here -- the same gap this
 # list already documents for my-profile.png and rank.png, just in prose form.
@@ -124,6 +127,9 @@ docs/screenshots/trainer-card.png
 # trainer pic in each is this mod's art, but everything around it -- the box,
 # the font, the badge faces, the ball icons -- is still decoded from the
 # player's ROM, so the rule is the same one.
+docs/screenshots/servers-list.png
+docs/screenshots/servers-submenu.png
+docs/screenshots/servers-confirm.png
 docs/screenshots/nire-battle.png
 docs/screenshots/nire-card.png
 docs/screenshots/nire-hood-card.png

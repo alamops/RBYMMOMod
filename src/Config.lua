@@ -510,4 +510,26 @@ M.RANK_PAIRS_MAX = 512
 -- than that gap and far less than a session.
 M.RANK_REPORT_GRACE = 60
 
+-- ------- the hubs you have played on
+--
+-- src/Servers.lua keeps the list behind START > MMO > SERVERS; the argument
+-- for what it is and where it is written is in that file's header.
+
+-- How long a row's name may be. Sixteen is what the list menu has room for
+-- beside its favourite marker at Game Boy width, and it is COMPOSE_MAX's
+-- number for the same reason -- a label that overflows its row is worse than
+-- one the player has to shorten themselves.
+M.SERVER_NAME_MAX = 16
+-- How many hubs are remembered before the least recently connected
+-- non-favourite is dropped. A ceiling on a convenience list, not on play:
+-- sixteen is twice the menu's visible rows, so a player who scrolls one screen
+-- has not yet reached the end of what is kept, and nobody realistically plays
+-- on more hubs than that without favouriting the ones they mean to keep.
+M.SERVER_LIST_MAX = 16
+-- Where the list is kept, in the LOVE save directory beside the rank tickets
+-- and the engine's own save files. Its own file rather than a corner of
+-- mod.save because a server list is machine-level state: it must survive
+-- CONTINUE, and it belongs to every save slot on this copy at once.
+M.SERVERS_FILE = "rby_mmo_servers.json"
+
 return M

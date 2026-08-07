@@ -624,11 +624,19 @@ local PHASE = {
   -- host waits on the guest leaving and proving the world still works
   -- 60 leave drive + walk test, and then the whole way back in: the menus,
   -- the address screen, six characters of passcode on a d-pad grid, a second
-  -- handshake, and out again. A ceiling, not an expectation -- the host is
-  -- released the moment the guest signals -- so the headroom costs a healthy
-  -- run nothing and stops a slow machine reporting "incomplete" for a leg
-  -- that was about to pass.
-  guest_left_game        = 420,
+  -- handshake, and out again. Then a THIRD round trip, out and back through
+  -- SERVERS instead of JOIN GAME's grids (M.reconnectViaServers) -- no
+  -- passcode to type there, but still a menu walk, a connection to open (up
+  -- to 60s of patience of its own) and a LEAVE to drive. And then a FOURTH
+  -- pass through SERVERS on top of that, this one destructive: reopen the
+  -- entry, DELETE it, wait for CONFIRM's choice box, photograph it, answer
+  -- YES, then reopen the MMO menu a last time to prove the SERVERS row is
+  -- gone with it -- menu walks and a handful of frame-budgeted waits only,
+  -- no connection to open, but signalled after all of it. A ceiling, not an
+  -- expectation -- the host is released the moment the guest signals -- so
+  -- the headroom costs a healthy run nothing and stops a slow machine
+  -- reporting "incomplete" for a leg that was about to pass.
+  guest_left_game        = 690,
 
   -- ------- the dedicated-hub scenario (tests/drivers/run-hub-e2e.sh)
   --
@@ -1448,6 +1456,231 @@ function M.openMmo(game)
   U.tap(game, "start")
   U.wait(15)
   return M.selectLabel(game, "MMO")
+end
+
+-- What the SERVERS list calls the hub at `address`.
+--
+-- A caller holding an address does *not* hold the row's label: a fresh entry
+-- is named after its address with the standard port left off (src/Servers.lua
+-- and the note above its `defaultName`), so a run that dials
+-- 127.0.0.1:<RBY_MMO_PORT> -- which is what run-mmo-e2e.sh binds and what
+-- Config.DEFAULT_PORT then reads back out of the environment -- has a row
+-- reading "127.0.0.1" and a driver looking for the whole string finds
+-- nothing. Handing the address in and deriving the label here is what keeps
+-- that rule in one place.
+--
+-- The store itself is asked first, through mod.exports.servers, because that
+-- answer cannot drift from src/Servers.lua at all -- it *is* the row. The
+-- arithmetic below is the fallback for a build without that export, and is
+-- deliberately the same three steps the mod takes: fill in the default port,
+-- take it back off again when it is the default, cap what is left at the name
+-- limit.
+local SERVER_NAME_MAX = 16
+
+local function defaultPort()
+  local raw = os.getenv and os.getenv("RBY_MMO_PORT")
+  local n = tonumber(raw or "")
+  if n and n == math.floor(n) and n > 0 and n < 65536 then return n end
+  return 7788
+end
+
+local function withDefaultPort(address)
+  if type(address) ~= "string" then return nil end
+  local clean = address:gsub("%s+", "")
+  if clean == "" then return nil end
+  if not clean:match(":%d+$") then
+    clean = ("%s:%d"):format(clean, defaultPort())
+  end
+  return clean
+end
+
+local function defaultServerName(address)
+  local shown = withDefaultPort(address)
+  if not shown then return nil end
+  local suffix = ":" .. tostring(defaultPort())
+  if #shown > #suffix and shown:sub(-#suffix) == suffix then
+    shown = shown:sub(1, #shown - #suffix)
+  end
+  return shown:sub(1, SERVER_NAME_MAX)
+end
+
+function M.serverLabel(exports, address)
+  local want = withDefaultPort(address)
+  if want and type(exports) == "table"
+     and type(exports.servers) == "function" then
+    local ok, rows = pcall(exports.servers)
+    if ok and type(rows) == "table" then
+      for _, entry in ipairs(rows) do
+        if type(entry) == "table" and type(entry.address) == "string"
+           and entry.address:lower() == want:lower()
+           and type(entry.name) == "string" then
+          return entry.name
+        end
+      end
+    end
+  end
+  return defaultServerName(address)
+end
+
+-- Dial the same hub a third way: not JOIN GAME's grids, but the row that
+-- exists precisely so a returning player never has to touch them again.
+--
+-- Mirrors M.rejoin's shape and reuses its "same player, same rating"
+-- assertions -- see the comment there for why the ticket round trip is the
+-- one thing worth checking. What differs is everything between "the MMO menu
+-- is open" and "a connection is either up or it isn't": SERVERS -> the
+-- recorded entry -> CONNECT goes through CHARSET exactly as JOIN GAME does
+-- (src/Ui.lua's SERVERACT registration pushes the same SCREEN.CHARSET with
+-- verb = "JOIN"), but the address and the join code are already on the
+-- entry, so `dial()` calls `client:connect` directly with no address or code
+-- grid in between. `address` is the string this player dialled the first
+-- time; the row to press is derived from it by M.serverLabel above, never
+-- assumed to be the address itself.
+--
+-- `joinCode`, if given, is a fallback only: a hub is not expected to
+-- challenge a connect that is already carrying the code that worked before,
+-- but if one ever does (the code changed hub-side since it was recorded),
+-- this answers it exactly as a fresh join would rather than stalling on a
+-- screen this leg did not expect. Returns whether the connection opened.
+--
+-- `shotDir`, if given, is where the two pictures of this list go.
+function M.reconnectViaServers(game, exports, address, joinCode, check, log,
+                                shotDir)
+  local label = M.serverLabel(exports, address)
+  if not label then
+    check(false, "a dialled address (" .. tostring(address)
+                   .. ") names a row on the SERVERS list")
+    return false
+  end
+  -- Same reason M.rejoin settles first: a step in flight swallows START.
+  M.closeToOverworld(game)
+  U.wait(30)
+
+  local opened = false
+  for _ = 1, 3 do
+    if M.openMmo(game) then
+      opened = true
+      break
+    end
+    M.closeToOverworld(game)
+    U.wait(20)
+  end
+  if not opened then
+    check(false, "the MMO menu opens again after leaving, for the SERVERS leg")
+    return false
+  end
+
+  if not M.selectLabel(game, "SERVERS") then
+    check(false, "SERVERS is on the menu once a hub has been recorded")
+    return false
+  end
+  U.wait(20)
+
+  -- Is the entry's row the one on top right now? The mark lives in the row's
+  -- right-hand column rather than in its label, so this is the same question
+  -- whether or not the hub is a favourite.
+  local function onList()
+    local top = M.top(game)
+    if not (top and type(top.items) == "table") then return false end
+    for _, item in ipairs(top.items) do
+      if labelMatches(item.label, label) then return true end
+    end
+    return false
+  end
+
+  -- The favourite is set before the list is photographed, and that is the
+  -- whole reason for this excursion: the ▶ mark is drawn in the row's
+  -- right-hand column, so a picture taken before anything is marked
+  -- photographs the one layout that column never has to hold -- and the mark
+  -- is exactly what a reader of these shots is checking. One row press, one
+  -- FAVORITE, one B, and the list is back with the mark on it.
+  local marked = false
+  if M.selectLabel(game, label) then
+    U.wait(20)
+    -- Idempotent, because this row is not a switch that says which way it is
+    -- set -- it says what pressing it *does*. A run interrupted before the
+    -- wrapper cleaned its save folder away leaves the hub already pinned, the
+    -- row already reading UNFAVORITE, and a blind press would take the mark
+    -- back off the picture this excursion exists to take.
+    local already = false
+    for _, existing in ipairs(M.menuLabels(game)) do
+      if labelMatches(existing, "UNFAVORITE") then already = true end
+    end
+    if already then
+      marked = true
+    elseif M.selectLabel(game, "FAVORITE") then
+      -- SERVERACT rebuilds itself after the toggle, with the cursor back on
+      -- the row that was just pressed -- so this lands on UNFAVORITE, and B
+      -- from there is the menu's own onCancel putting the list back.
+      U.wait(20)
+      marked = true
+    end
+  end
+  -- Back to the list, however far the excursion above actually got: nothing
+  -- in it is load-bearing for the connection, and a leg that gave up its
+  -- picture must still be standing where CONNECT can be reached.
+  for _ = 1, 3 do
+    if onList() then break end
+    U.tap(game, "b")
+    U.wait(20)
+  end
+
+  if shotDir then U.shot(game, shotDir .. "/servers-list.png") end
+  if marked and log then
+    local top = M.top(game)
+    for _, item in ipairs((top and top.items) or {}) do
+      if labelMatches(item.label, label) then
+        log("SERVERS row", tostring(item.label), "marked",
+            tostring(item.right))
+      end
+    end
+  end
+
+  if not M.selectLabel(game, label) then
+    check(false, "the recorded entry (" .. tostring(label)
+                   .. ") is on the SERVERS list")
+    return false
+  end
+  U.wait(20)
+  if shotDir then U.shot(game, shotDir .. "/servers-submenu.png") end
+
+  if not M.selectLabel(game, "CONNECT") then
+    check(false, "CONNECT is on the entry's own submenu")
+    return false
+  end
+  U.wait(20)
+
+  if not M.selectLabel(game, "JOIN") then
+    check(false, "character creation confirms on the way back in through "
+                   .. "SERVERS")
+    return false
+  end
+  U.wait(40)
+
+  -- No address or code grid is expected here -- dial() applies both off the
+  -- entry -- but a stale code is still answerable if the hub asks anyway,
+  -- the same way an unexpected challenge is handled off the typed path.
+  if joinCode then
+    local askedOrConnected = M.waitFor(game, function()
+      return M.codeGrid(game) ~= nil or exports.isConnected()
+    end, 180, "either a SERVERS connection or an unexpected code challenge")
+    if askedOrConnected and M.codeGrid(game) ~= nil and not exports.isConnected() then
+      if not M.enterJoinCode(game, joinCode) then
+        check(false, "an unexpected code challenge can still be answered")
+        return false
+      end
+      U.wait(60)
+    end
+  end
+
+  local back = M.waitSeconds(game, function() return exports.isConnected() end,
+                             60, "the SERVERS connection to open")
+  check(back, "the same player can reconnect through SERVERS")
+  if not back and log then
+    log("top state after the SERVERS reconnect attempt:",
+        tostring(M.top(game) and (M.top(game).title or "?")))
+  end
+  return back
 end
 
 return M

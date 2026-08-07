@@ -119,6 +119,7 @@ for _, id in ipairs({
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
   "RbyMmoParty", "RbyMmoPartyList", "RbyMmoCharSetup", "RbyMmoCharPick",
   "RbyMmoChoose", "RbyMmoChooseMenu",
+  "RbyMmoServers", "RbyMmoServerActions", "RbyMmoServerEdit",
 }) do
   check(screens:get(id) ~= nil, "screen " .. id .. " is registered")
 end
@@ -251,6 +252,10 @@ eq(exports.isConnected(), false, "reports disconnected before connecting")
 eq(#exports.players(), 0, "the roster starts empty")
 check(type(exports.party) == "function", "exports party")
 eq(#exports.party(), 0, "and nobody is in one before connecting")
+-- The rows and not the store: a hub this copy has played on is a fact another
+-- mod may want to read, and a mutator it may not.
+check(type(exports.servers) == "function", "exports servers")
+eq(#exports.servers(), 0, "with nothing on the list before a hub answers")
 -- The four-way PARTY BATTLE ask, which only a four-client run can exercise
 -- for real -- so the seat it is watched through has to exist here.
 check(type(exports.coopAsk) == "function", "exports coopAsk")
@@ -343,7 +348,13 @@ local stubMod = {
   },
 }
 
-local function resolver()
+-- `modOverride` lets a caller build a module graph against a mod facade of
+-- its own rather than the shared `stubMod` above -- the servers/WELCOME
+-- section below needs a `mod.hooks` that actually records what it is
+-- handed (to reach the per-tick chain), which would be wrong to wire onto
+-- the stub every other section in this file shares.
+local function resolver(modOverride)
+  local useMod = modOverride or stubMod
   local loadstr = loadstring or load
   local cache = {}
   local function need(name)
@@ -353,7 +364,7 @@ local function resolver()
     local body = handle:read("*a")
     handle:close()
     local chunk = assert(loadstr(body, "@" .. name .. ".lua"))
-    cache[name] = chunk(need, stubMod)
+    cache[name] = chunk(need, useMod)
     return cache[name]
   end
   return need
@@ -11848,7 +11859,410 @@ base.release()
 end)()
 
 -- ------------------------------------------------------------------
--- 13. previewRows: which visible rows get a portrait
+-- 13. The hubs you have played on
+-- ------------------------------------------------------------------
+--
+-- src/Servers.lua is the store behind START > MMO > SERVERS -- who this
+-- copy has connected to, a name, a favourite flag, a join code. Driven
+-- here with love removed: the module's own header says a missing love
+-- degrades it to mod.save alone, which is the half worth pinning against a
+-- headless stub -- the dual-write file half already has its own coverage
+-- pattern (the rank-token section above) and repeating it here would only
+-- be testing the same file-store shape a second time.
+
+;(function()
+
+local ambientLove = _G.love
+_G.love = nil
+
+local Servers = need("Servers")
+
+-- ------- record: creation, defaults, and the key an address is filed under
+
+do
+  stubSave = {}
+  local store = Servers.new()
+
+  local entry = store:record("short-host")
+  check(entry ~= nil, "recording a fresh address creates an entry")
+  local expectedAddress = ("short-host:%d"):format(Config.DEFAULT_PORT)
+  eq(entry.address, expectedAddress,
+     "withPort fills in the default port when none was typed")
+  eq(entry.key, expectedAddress:lower(), "the key is the address, lower-cased")
+  -- The label is the address with the port every hub of ours uses left off:
+  -- the sanitiser truncates rather than wraps, and ":7788" is exactly what
+  -- normalize just filled in, so eliding it costs no information and buys the
+  -- five characters that keep a real address from being drawn as a false one.
+  -- Only the label is shortened -- entry.address above still carries the port
+  -- CONNECT dials.
+  eq(entry.name, "short-host",
+     "and the name defaults to the address with the standard port left off")
+  eq(entry.fav, false, "a fresh entry is not a favourite")
+  eq(entry.code, nil, "and has no code until one is given")
+
+  local spaced = store:record("  Mixed.Case.Host  ")
+  check(spaced ~= nil, "whitespace and case do not stop a record")
+  local expectedMixed = "Mixed.Case.Host:" .. tostring(Config.DEFAULT_PORT)
+  eq(spaced.address, expectedMixed,
+     "surrounding whitespace is stripped before the port is filled in")
+  eq(spaced.key, expectedMixed:lower(),
+     "the key is lower-cased and holds no whitespace, however it was typed")
+
+  local ported = store:record("already.has.a.port:9191")
+  eq(ported.address, "already.has.a.port:9191",
+     "an address that already carries a port keeps its own, not the default")
+  -- Only the *standard* port is elided. A port that is not the one every hub
+  -- of ours listens on is the difference between a name that dials and a name
+  -- that does not, so it stays -- and when what is left still will not fit,
+  -- truncation is the last resort rather than the first.
+  eq(ported.name, ("already.has.a.port:9191"):sub(1, Config.SERVER_NAME_MAX),
+     "a name too long even with the port kept is truncated, not re-ported")
+
+  local oddPort = store:record("hub:9191")
+  eq(oddPort.name, "hub:9191",
+     "a non-standard port is part of the name -- it is not the one eliding "
+     .. "assumes, so dropping it would name a hub nothing is listening on")
+
+  local longHost = store:record("a-very-long-hostname.example")
+  eq(#longHost.name, Config.SERVER_NAME_MAX,
+     "a host too long for the row is capped at the name limit")
+  eq(longHost.name, ("a-very-long-hostname.example"):sub(1,
+     Config.SERVER_NAME_MAX),
+     "from the front, and with the elided standard port never counted in")
+  eq(longHost.address, ("a-very-long-hostname.example:%d")
+     :format(Config.DEFAULT_PORT),
+     "while the address CONNECT dials is untouched by any of that")
+end
+
+-- ------- record: refresh keeps the player's own fields, and the code only
+-- moves when a fresh one is actually given
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local VALID_CODE = "A7K3P9"
+
+  local first = store:record("refresh.example", VALID_CODE)
+  local key = first.key
+  eq(first.code, VALID_CODE, "the code given at record time is kept")
+
+  store:rename(key, "My Named Hub")
+  store:setFavorite(key, true)
+
+  local again = store:record("refresh.example", nil)
+  eq(again.key, key, "the same address refreshes the same row, not a new one")
+  eq(again.name, "My Named Hub",
+     "a reconnect does not overwrite the name the player chose")
+  eq(again.fav, true, "nor the favourite flag")
+  eq(again.code, VALID_CODE,
+     "and a reconnect with no code leaves the one already on the row alone")
+
+  local OTHER_CODE = "K3P9A7"
+  local recoded = store:record("refresh.example", OTHER_CODE)
+  eq(recoded.code, OTHER_CODE,
+     "but a reconnect that does carry a code updates it")
+end
+
+-- ------- list: favourites first, and address (key) DESC within each group
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  store:record("b-host")
+  store:record("a-host")
+  store:record("c-host")
+
+  local plain = store:list()
+  eq(#plain, 3, "all three are listed")
+  eq(plain[1].key:sub(1, 1), "c", "descending: c sorts above b and a")
+  eq(plain[2].key:sub(1, 1), "b", "b sits in the middle")
+  eq(plain[3].key:sub(1, 1), "a", "and a is last of the plain group")
+
+  store:setFavorite(plain[3].key, true) -- a-host
+  local withFav = store:list()
+  eq(withFav[1].key:sub(1, 1), "a",
+     "a favourite is pinned above every non-favourite, regardless of address")
+  eq(withFav[2].key:sub(1, 1), "c", "the non-favourite group is still DESC")
+  eq(withFav[3].key:sub(1, 1), "b", "with b last")
+end
+
+-- ------- eviction: the cap, LRU order, favourites, and the row just written
+
+do
+  -- the real cap, so this is the same number a player's copy enforces
+  stubSave = {}
+  local store = Servers.new()
+  for i = 1, Config.SERVER_LIST_MAX do
+    local entry = store:record(("host%02d"):format(i))
+    -- controlled recency: host01 is the oldest, host16 the newest of the
+    -- batch, so which one the cap evicts is never left to os.time()'s
+    -- one-second resolution
+    entry.last = i
+  end
+  eq(#store:list(), Config.SERVER_LIST_MAX,
+     "exactly the cap fits with no eviction yet")
+
+  local newest = store:record("host17")
+  eq(#store:list(), Config.SERVER_LIST_MAX,
+     "recording one more holds the list at the cap, not above it")
+  check(store:get("host01") == nil,
+        "the least recently connected non-favourite is the one dropped")
+  check(store:get("host17") ~= nil, "and the row just recorded is in the list")
+  check(newest ~= nil, "record() still hands back the entry it just wrote")
+end
+
+do
+  -- favourites are never eviction candidates, even once they push the list
+  -- past the cap -- so the cap is shrunk here to reach that state in a
+  -- handful of rows rather than seventeen
+  local savedCap = Config.SERVER_LIST_MAX
+  Config.SERVER_LIST_MAX = 1
+  stubSave = {}
+  local store = Servers.new()
+
+  local fav = store:record("kept-favourite")
+  store:setFavorite(fav.key, true)
+  store:record("second-row")
+
+  eq(#store:list(), 2,
+     "a favourite and the row that pushed the list past the cap both survive "
+     .. "-- there was nothing else eligible to evict")
+  check(store:get(fav.key) ~= nil, "the favourite itself is still there")
+
+  Config.SERVER_LIST_MAX = savedCap
+end
+
+do
+  -- the row record() just wrote can never be its own eviction, even set up
+  -- so that -- by recency alone -- an older row would look newer than it
+  local savedCap = Config.SERVER_LIST_MAX
+  Config.SERVER_LIST_MAX = 1
+  stubSave = {}
+  local store = Servers.new()
+
+  local existing = store:record("already-here")
+  existing.last = os.time() + 1000000 -- made to look far newer than "now"
+
+  local brandNew = store:record("just-recorded")
+  eq(#store:list(), 1, "the cap held at one")
+  check(store:get(brandNew.key) ~= nil,
+        "the row just recorded is never its own eviction, however its own "
+        .. "timestamp compares to what else is on the list")
+  check(store:get(existing.key) == nil,
+        "so the older row gives way instead, even though it was made to "
+        .. "look newer")
+
+  Config.SERVER_LIST_MAX = savedCap
+end
+
+do
+  -- The same protection on every other mutator, not just record().
+  --
+  -- Writing re-reads the file first, because another save slot -- or a second
+  -- copy under the same LOVE identity -- may have recorded a hub since we last
+  -- looked. Folding theirs in can push the list back over the cap, and the
+  -- eviction that follows must not be allowed to throw away the row the caller
+  -- is in the middle of changing and about to be handed back.
+  --
+  -- _read is stood in for rather than a file written, because love is absent
+  -- for this whole section: this is the one behaviour that only exists when
+  -- the read half answers, so the read half is what gets stubbed.
+  local savedCap = Config.SERVER_LIST_MAX
+  Config.SERVER_LIST_MAX = 1
+  stubSave = {}
+  local store = Servers.new()
+
+  local mine = store:record("zzz-host")
+  -- a degraded clock: every row's `last` reads 0, the tie falls to the key,
+  -- and by key alone this row is the one that loses it
+  mine.last = 0
+  store._read = function()
+    return { { address = "aaa-host", last = 0 } }, false
+  end
+
+  local renamed = store:rename(mine.key, "Kept Name")
+  check(renamed ~= nil, "the rename is applied")
+  check(store:get(mine.key) ~= nil,
+        "and the row it was applied to is still listed -- the write's own "
+        .. "eviction is told which row not to take")
+  eq(renamed and renamed.name, "Kept Name",
+     "so what comes back is a row that is really on the list")
+
+  Config.SERVER_LIST_MAX = savedCap
+end
+
+-- ------- rename: sanitised, capped, and a garbage-only name is refused
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("rename.example")
+  local key = entry.key
+
+  local long = ("x"):rep(Config.SERVER_NAME_MAX + 10)
+  local renamed = store:rename(key, long)
+  check(renamed ~= nil, "a long name is truncated, not refused")
+  eq(#renamed.name, Config.SERVER_NAME_MAX,
+     "truncated to exactly the cap, the naming grid's own limit")
+
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+
+  eq(store:rename(key, "\1\2\3"), nil,
+     "a name with nothing the font can draw is refused")
+  eq(store:get(key).name, long:sub(1, Config.SERVER_NAME_MAX),
+     "leaving the row's real name exactly as it was")
+  check(#warns > 0, "and the refusal is logged")
+
+  eq(store:rename("no-such-key:1234", "Anything"), nil,
+     "renaming a key nothing is stored under is refused, not a crash")
+
+  stubMod.log.warn = function() end
+end
+
+-- ------- setCode: only a whole code is accepted, and a refusal never clears
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("code.example")
+  local key = entry.key
+
+  eq(store:setCode(key, "A7K3P9"), entry, "a valid code is accepted")
+  eq(store:get(key).code, "A7K3P9", "and lands on the row")
+
+  eq(store:setCode(key, "too-short"), nil, "a half-code is refused")
+  eq(store:get(key).code, "A7K3P9", "leaving the real code exactly as it was")
+
+  eq(store:setCode(key, nil), nil, "nil is refused the same way")
+  eq(store:get(key).code, "A7K3P9", "and still never clears the row")
+
+  eq(store:setCode("gone:1234", "A7K3P9"), nil,
+     "an unknown key refuses rather than creating a row")
+end
+
+-- ------- setAddress: re-keys in place, and a collision replaces the target
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("old.address:1111")
+  local key = entry.key
+  store:rename(key, "Kept Name")
+  store:setFavorite(key, true)
+  store:setCode(key, "A7K3P9")
+
+  local moved = store:setAddress(key, "new.address:2222")
+  check(moved ~= nil, "the address changes")
+  eq(moved.key, "new.address:2222", "under a new key")
+  check(store:get(key) == nil, "and the old key is gone")
+  eq(moved.name, "Kept Name", "the name travels with the row")
+  eq(moved.fav, true, "so does the favourite flag")
+  eq(moved.code, "A7K3P9", "and the join code")
+
+  -- a collision: a second row is moved onto the address the first row
+  -- already lives at
+  local other = store:record("third.address:3333")
+  local collided = store:setAddress(other.key, "new.address:2222")
+  check(collided ~= nil, "the move still succeeds")
+  eq(#store:list(), 1,
+     "the row already at that address is replaced, not duplicated")
+  eq(store:get("new.address:2222").address, "new.address:2222",
+     "one row lives at the target address afterward")
+
+  eq(store:setAddress("gone:1234", "somewhere:5555"), nil,
+     "an unknown key is refused rather than creating a row")
+end
+
+-- ------- get: a key or a raw, differently-cased address both resolve
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("Case.Example:4444")
+  eq(store:get(entry.key), entry, "the key finds it")
+  eq(store:get("CASE.example:4444"), entry,
+     "so does the raw address, however it is cased")
+  eq(store:get("nothing-stored-here:1"), nil,
+     "and an address nothing was ever recorded under answers nil")
+end
+
+-- ------- persistence: a fresh store over the same mod.save sees the same rows
+
+do
+  stubSave = {}
+  local first = Servers.new()
+  first:record("persisted.example:5555")
+
+  local second = Servers.new()
+  local list = second:list()
+  eq(#list, 1, "a new store instance sees what the old one wrote")
+  eq(list[1].address, "persisted.example:5555",
+     "the same row, over mod.save alone")
+end
+
+-- ------- remove: the entry leaves the list, and a dropped key stays dropped
+-- until the player asks for that hub again on purpose
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local entry = store:record("gone.example:6666")
+  local key = entry.key
+
+  local removed = store:remove(key)
+  eq(removed, entry, "remove hands back the entry it deleted")
+  check(store:get(key) == nil, "and the row is gone from the store")
+  eq(#store:list(), 0, "so the list it was the only row of is empty")
+
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+  eq(store:remove("no-such-key:1234"), nil,
+     "removing a key nothing is stored under refuses rather than crashing")
+  check(#warns > 0, "and the refusal is logged")
+  stubMod.log.warn = function() end
+
+  -- The dropped mark is what stops the file half from resurrecting a row
+  -- this session deleted on purpose: _persist folds in rows it has never
+  -- seen, and without the mark a copy of this key still sitting on disk
+  -- would walk straight back in on the very write meant to remove it. love
+  -- is absent for this whole section (see the header above), so the
+  -- fold-in this guards against is driven directly rather than through a
+  -- real file -- the same way the eviction-protection block above stands
+  -- in for _read.
+  store:_ingest({ { address = entry.address, last = 1 } }, true)
+  check(store:get(key) == nil,
+        "a fold-in of a file row filed under the deleted key does not "
+        .. "resurrect it")
+
+  -- record() is not a fold-in, though -- it is the player asking to connect
+  -- to that hub again, on purpose, and that has to win. A deleted-then-
+  -- rejoined hub reappearing is the intended shape of the guard, not a
+  -- second bug in the same corner: record() clears the drop mark itself
+  -- (src/Servers.lua, right after it fills in address/last/code) before
+  -- this write ever reaches _persist.
+  local rejoined = store:record(entry.address)
+  check(rejoined ~= nil, "recording the same address again succeeds")
+  eq(rejoined.key, key, "under the same key as before")
+  check(store:get(key) ~= nil,
+        "and it is really back in the store, not just handed back once")
+  eq(#store:list(), 1,
+     "deleted-then-rejoined reappears on the list rather than staying "
+     .. "invisible forever")
+end
+
+_G.love = ambientLove
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 14. previewRows: which visible rows get a portrait
 -- ------------------------------------------------------------------
 --
 -- The picker's portrait sits in the gutter to the *left* of every visible
@@ -11903,7 +12317,790 @@ eq(#UiPreview({ items = { { label = "no value" } } }), 0,
 end)()
 
 -- ------------------------------------------------------------------
--- 14. The offline character row, and the picker's two doors
+-- 15. WELCOME writes the hub this copy actually reached to the server list
+-- ------------------------------------------------------------------
+--
+-- src/Client.lua records a hub the moment it welcomes this copy in
+-- (handlers[Wire.WELCOME], gated on the private `dialled` upvalue) -- never
+-- on a dial that only timed out or was refused. `dialled` and the handler
+-- table are both private to that module, reachable only through the real
+-- per-tick pump, so this drives a whole, fresh, isolated Client instance
+-- through it: a fake Net stands in for the socket (the same shape the
+-- Transport section above uses), and `mod.hooks:wrap` is a stub that
+-- actually *records* what it is given -- which is what makes the captured
+-- "input.step" callback callable directly, exactly the way the real engine
+-- calls it once a fixed step.
+--
+-- Built against a mod facade of its own (resolver(miniMod), not the shared
+-- stubMod) so nothing here has to fight the rest of this file over
+-- `mod.hooks` / `mod.exports`, which no other section needs to be anything
+-- but a no-op. love is removed for the same reason section 13 removes it:
+-- the servers store this Client owns would otherwise dual-write through
+-- the ambient love stub's real filesystem, which is a second thing to
+-- reason about that this section does not need.
+
+;(function()
+
+local ambientLove = _G.love
+_G.love = nil
+
+local hookChains = {}
+local miniSave, miniOptions = {}, {}
+local screens = {}
+local miniWarns = {}
+
+local miniMod = {
+  id = "rby_mmo",
+  path = MOD_PATH,
+  log = {
+    info = function() end,
+    warn = function(_, fmt, ...)
+      local ok, line = pcall(string.format, fmt, ...)
+      miniWarns[#miniWarns + 1] = ok and line or tostring(fmt)
+    end,
+    error = function() end,
+  },
+  save = {
+    get = function(_, key, default)
+      local v = miniSave[key]
+      if v == nil then return default end
+      return v
+    end,
+    set = function(_, key, value) miniSave[key] = value end,
+  },
+  options = {
+    define = function() end,
+    get = function(_, key) return miniOptions[key] end,
+  },
+  events = {
+    emit = function() end,
+    on = function() end,
+    once = function() end,
+  },
+  assets = { path = function(_, relative) return MOD_PATH .. "/" .. relative end },
+  content = {
+    sprites = {
+      each = function() return function() return nil end end,
+      get = function() return nil end,
+      register = function() end,
+    },
+    battle_sprite_scales = { get = function() end, register = function() end },
+    render_pipelines = { each = function() return function() return nil end end },
+    screens = {
+      register = function(_, id, def) screens[id] = def end,
+      get = function(_, id) return screens[id] end,
+    },
+  },
+  hooks = {
+    wrap = function(_, name, fn)
+      hookChains[name] = hookChains[name] or {}
+      hookChains[name][#hookChains[name] + 1] = fn
+    end,
+  },
+  ui = {},
+  exports = {},
+}
+
+local Client = resolver(miniMod)("Client")
+check(Client ~= nil, "a Client instance builds against its own mod facade")
+Client.install()
+
+local stepFn = hookChains["input.step"] and hookChains["input.step"][1]
+check(stepFn ~= nil, "install() registers the per-tick pump")
+local passthroughNext = function() end
+
+local function fakeNet()
+  return {
+    closed = false, outbox = {}, inbox = {},
+    send = function(self, msg) self.outbox[#self.outbox + 1] = msg end,
+    update = function() end,
+    poll = function(self) local m = self.inbox; self.inbox = {}; return m end,
+    close = function(self) self.closed = true end,
+  }
+end
+
+-- ------- a dialled connection records, with the code stored for it
+
+local netA = fakeNet()
+local ADDRESS_A = "welcome.example.test:9191"
+Client.setJoinAddress(ADDRESS_A)
+Client.setJoinCode(ADDRESS_A, "A7K3P9")
+-- Client.connect dials through Transport:connect, which really opens a
+-- socket -- unreachable headless. The suite's own seam for this (attach, in
+-- the Transport-framing section far above) skips M.connect entirely and so
+-- never sets `dialled`, the field this section is about -- so :connect
+-- itself is overridden, on the one Transport instance this Client owns, to
+-- land on the fake net the way :attach would.
+Client.transport.connect = function(self)
+  self.net = netA
+  self.state = "connecting"
+  self.error = nil
+  self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+  return true
+end
+
+local connected = Client.connect({})
+check(connected, "connect succeeds against the fake net")
+
+netA.inbox = { { type = Wire.WELCOME, id = "peer-a", players = {} } }
+stepFn(passthroughNext, {}, 0.016)
+
+local recorded = Client.servers():get(ADDRESS_A)
+check(recorded ~= nil, "a WELCOME on a dialled connection records the hub")
+-- No challenge arrived, so nothing was answered with a code and nothing is
+-- written down as one. M.joinCode falls back to the standing JOIN CODE option
+-- when a hub has none of its own, so recording its answer here regardless
+-- would stamp that one option onto every open hub the player ever joins --
+-- pinned under the per-hub key, where it then outranks the option it came
+-- from.
+eq(recorded.code, nil,
+   "but a hub that never challenged us gets no code on its row")
+
+-- ------- a hub that did challenge: the code that answered it is kept
+--
+-- Driven through the real CHALLENGE handler rather than by setting the flag,
+-- because the flag is a private upvalue and the thing being pinned is exactly
+-- that answering is what makes it true.
+
+Client.disconnect()
+local netD = fakeNet()
+local ADDRESS_D = "challenged.example.test:9191"
+Client.setJoinAddress(ADDRESS_D)
+Client.setJoinCode(ADDRESS_D, "A7K3P9")
+Client.transport.connect = function(self)
+  self.net = netD
+  self.state = "connecting"
+  self.error = nil
+  self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+  return true
+end
+check(Client.connect({}), "connect succeeds for the challenged case")
+
+-- a whole nonce, in the shape Wire.hex accepts: lowercase hex, NONCE_HEX long
+local NONCE = ("ab"):rep(Config.NONCE_HEX / 2)
+netD.inbox = { { type = Wire.CHALLENGE, nonce = NONCE } }
+stepFn(passthroughNext, {}, 0.016)
+
+local answer
+for _, msg in ipairs(netD.outbox) do
+  if msg.type == Wire.AUTH then answer = msg end
+end
+check(answer ~= nil, "the challenge is answered from the stored code")
+eq(answer and answer.response, Sha256.hmacHex("A7K3P9", NONCE),
+   "with the HMAC the hub will check")
+
+netD.inbox = { { type = Wire.WELCOME, id = "peer-d", players = {} } }
+stepFn(passthroughNext, {}, 0.016)
+
+local challenged = Client.servers():get(ADDRESS_D)
+check(challenged ~= nil, "the hub is recorded")
+eq(challenged and challenged.code, "A7K3P9",
+   "and this time the row carries the code, because a code is what got us in")
+
+-- ------- no dial, no record -- the self-host shape
+
+Client.disconnect()
+local netB = fakeNet()
+Client.transport:attach(netB)
+netB.inbox = { { type = Wire.WELCOME, id = "peer-b", players = {} } }
+stepFn(passthroughNext, {}, 0.016)
+
+eq(#Client.servers():list(), 2,
+   "a WELCOME with nothing dialled -- hosting's own shape -- adds no row; "
+   .. "the list still holds only the two from the cases above")
+
+-- ------- a servers-store failure cannot break the tick that carries it
+
+Client.disconnect()
+local netC = fakeNet()
+local ADDRESS_C = "breaks.example.test:9191"
+Client.setJoinAddress(ADDRESS_C)
+Client.transport.connect = function(self)
+  self.net = netC
+  self.state = "connecting"
+  self.error = nil
+  self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+  return true
+end
+check(Client.connect({}), "connect succeeds again for the failure case")
+
+local realRecord = Client.servers().record
+Client.servers().record = function() error("boom: a forced store failure") end
+
+netC.inbox = { { type = Wire.WELCOME, id = "peer-c", players = {} } }
+miniWarns = {}
+local ranWithoutThrowing = pcall(stepFn, passthroughNext, {}, 0.016)
+check(ranWithoutThrowing,
+      "a servers-store failure inside WELCOME is pcall-wrapped, so the tick "
+      .. "that carries it never throws")
+check(Client.isConnected(),
+      "and the connection itself survives -- only the bookkeeping failed")
+check(#miniWarns > 0, "the failure is logged")
+check((miniWarns[1] or ""):find(ADDRESS_C, 1, true) ~= nil,
+      "naming the address that could not be added to the list")
+
+Client.servers().record = realRecord
+
+-- ------- forgetHub clears the stored join code, never the rank claim
+-- ticket, for the same hub
+--
+-- The code is the hub's secret, filed under "code:<hub>" (Client.lua's
+-- codeKey) and is what a "Forget this server" row should drop. The claim
+-- ticket is the player's own earned identity on that hub, filed separately
+-- under "rank:<hub>" (tokenKey) -- deleting a bookmark must not cost a
+-- rating, so it is deliberately left standing.
+
+local FORGET_ADDR = "forget.example.test:9191"
+miniSave["code:" .. FORGET_ADDR] = "A7K3P9"
+miniSave["rank:" .. FORGET_ADDR] = "a-claim-ticket"
+
+local forgot = Client.forgetHub(FORGET_ADDR)
+check(forgot == true, "forgetHub reports success")
+eq(miniSave["code:" .. FORGET_ADDR], nil,
+   "the stored join code for that hub is cleared")
+eq(miniSave["rank:" .. FORGET_ADDR], "a-claim-ticket",
+   "but the rank claim ticket for the same hub is left exactly as it was")
+
+_G.love = ambientLove
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 16. The three screens behind SERVERS
+-- ------------------------------------------------------------------
+--
+-- Driven the way the partner-gating section drives ACTIONS, above: through
+-- Ui:install() and the registered screen's own constructor, against a
+-- minimal stub of mod.content.screens / mod.hooks / mod.ui, swapped onto
+-- the shared stubMod for the length of this section and restored
+-- afterward -- never left nil'd on a field the rest of this file relies on.
+-- love is removed too, for section 13's reason: a store built under the
+-- ambient stub would dual-write through its real in-memory filesystem, and
+-- a fresh storeWith() below is supposed to start from nothing every time.
+
+;(function()
+
+local Servers = need("Servers")
+local Ui = need("Ui")
+
+local ambientLove = _G.love
+_G.love = nil
+
+local screenRegistry = {}
+stubMod.content.screens = {
+  register = function(_, id, def) screenRegistry[id] = def end,
+  get = function(_, id) return screenRegistry[id] end,
+}
+stubMod.hooks = { wrap = function() end }
+-- Where a row's onSelect says to go next. Recorded rather than performed:
+-- these screens navigate by pushing, so the push *is* the observable, and a
+-- stub that actually built the next screen would be a second screen's
+-- assertions leaking into this one's.
+local pushes = {}
+stubMod.ui = {
+  push = function(_, id, opts)
+    pushes[#pushes + 1] = { id = id, opts = opts }
+  end,
+  Menu = { new = function(_, items, opts)
+    return { items = items, opts = opts, clampScroll = function() end }
+  end },
+  ListMenu = { new = function(_, title, items, opts)
+    return { title = title, items = items, opts = opts }
+  end },
+  TextBox = { new = function(_, text, onDone)
+    return { text = text, onDone = onDone }
+  end },
+  NamingScreen = { new = function(_, opts)
+    opts = opts or {}
+    return {
+      maxLen = opts.maxLen,
+      title = opts.title,
+      glyphs = {},
+      onDone = opts.onDone,
+      update = function() end,
+      confirm = function(self)
+        if type(self.onDone) == "function" then
+          self.onDone(table.concat(self.glyphs))
+        end
+      end,
+      draw = function(self, ...) end,
+    }
+  end },
+}
+
+local function fakeClient(hosting, connected)
+  return { isHosting = function() return hosting end,
+           isConnected = function() return connected end }
+end
+
+local function storeWith(entries)
+  stubSave = {}
+  local store = Servers.new()
+  for _, addr in ipairs(entries or {}) do store:record(addr) end
+  return store
+end
+
+local ctx = { client = fakeClient(false, false), chat = { unread = 0 },
+              servers = storeWith({}) }
+local ui = Ui.new(ctx)
+check(pcall(function() ui:install() end),
+      "the real SERVERS screens register under this minimal stub")
+
+-- ------- SCREEN.MAIN: the SERVERS row
+
+local mainDef = screenRegistry[Ui.SCREEN.MAIN]
+check(mainDef ~= nil, "SCREEN.MAIN is the one that registered")
+
+local function mainLabels()
+  local out = {}
+  for i, item in ipairs(mainDef.new({}).items) do out[i] = item.label end
+  return out
+end
+local function hasLabel(list, label)
+  for _, l in ipairs(list) do if l == label then return true end end
+  return false
+end
+
+ctx.servers = storeWith({})
+eq(hasLabel(mainLabels(), "SERVERS"), false,
+   "an empty list means no SERVERS row at all")
+
+ctx.servers = storeWith({ "one.example" })
+local rows = mainLabels()
+eq(hasLabel(rows, "SERVERS"), true,
+   "a non-empty list adds the row while disconnected")
+local hostIdx, serversIdx
+for i, label in ipairs(rows) do
+  if label == "HOST GAME" then hostIdx = i end
+  if label == "SERVERS" then serversIdx = i end
+end
+eq(serversIdx, 1, "first on the menu")
+eq(hostIdx, serversIdx + 1, "directly above HOST GAME")
+
+ctx.client = fakeClient(true, false)
+eq(hasLabel(mainLabels(), "SERVERS"), false,
+   "hosting hides the row even with a non-empty list")
+
+ctx.client = fakeClient(false, true)
+eq(hasLabel(mainLabels(), "SERVERS"), false,
+   "and so does already being connected")
+
+ctx.client = fakeClient(false, false)
+
+-- ------- SCREEN.SERVERS: the list itself
+
+local serversDef = screenRegistry[Ui.SCREEN.SERVERS]
+check(serversDef ~= nil, "SCREEN.SERVERS registers")
+
+ctx.servers = storeWith({ "b-host", "a-host" })
+ctx.servers:setFavorite(ctx.servers:list()[2].key, true) -- a-host
+do
+  local expected = ctx.servers:list()
+  local menu = serversDef.new({})
+  eq(#menu.items, #expected, "one row per stored server")
+  for i, entry in ipairs(expected) do
+    eq(menu.items[i].label, entry.name,
+       "row " .. i .. " carries the entry's name")
+    eq(menu.items[i].value, entry.key, "and its key")
+    -- The trailing space is load-bearing, not a typo: the mark is drawn hard
+    -- against the right edge of the row, and the space is what holds it off
+    -- the border.
+    eq(menu.items[i].right, entry.fav and "▶ " or nil,
+       "favourites are marked with ▶ -- never *, which this font cannot draw")
+  end
+end
+
+ctx.servers = storeWith({})
+do
+  local menu = serversDef.new({})
+  -- No placeholder row. ListMenu already draws its own "Nothing here." for an
+  -- empty list, and a fake row would both suppress that answer and park the
+  -- cursor on something whose A press has to be swallowed.
+  eq(#menu.items, 0,
+     "an empty list injects no rows at all -- ListMenu says so itself")
+end
+
+-- ------- SCREEN.SERVERACT: the fixed row order, and the gone-entry case
+
+local actDef = screenRegistry[Ui.SCREEN.SERVERACT]
+check(actDef ~= nil, "SCREEN.SERVERACT registers")
+
+ctx.servers = storeWith({ "act.example" })
+local actKey = ctx.servers:list()[1].key
+do
+  local menu = actDef.new({}, { key = actKey })
+  local order = {}
+  for i, item in ipairs(menu.items) do order[i] = item.label end
+  local expectedOrder = { "CONNECT", "FAVORITE", "EDIT HOST", "EDIT CODE",
+                           "RENAME", "DELETE" }
+  eq(#order, #expectedOrder, "the six rows the plan names, DELETE last")
+  for i, label in ipairs(expectedOrder) do
+    eq(order[i], label, "row " .. i .. " is " .. label)
+  end
+  -- Menu grows the box downwards to fit its rows (th = rows * 2 + 2), so ty
+  -- is what keeps the last row on an 18-tile screen -- pinned here so a
+  -- seventh row added later trips this instead of only failing on-screen.
+  eq(menu.opts and menu.opts.ty, 18 - (#expectedOrder * 2 + 2),
+     "ty is recalculated for six rows, not left at the five-row value")
+
+  ctx.servers:setFavorite(actKey, true)
+  local refreshed = actDef.new({}, { key = actKey })
+  eq(refreshed.items[2].label, "UNFAVORITE",
+     "the second row flips once the entry is a favourite")
+
+  local gone = actDef.new({}, { key = "no-such-key:1234" })
+  check(gone.items == nil,
+        "a missing entry is the TextBox path, not a Menu -- no .items")
+  check(type(gone.text) == "string" and gone.text:find("gone", 1, true) ~= nil,
+        "and it says the server is gone")
+end
+
+-- ------- SCREEN.SERVERACT: where the cursor lands on a reopen
+--
+-- Toggling the favourite mark rebuilds this menu, because Menu pops itself
+-- before running a row -- so the rebuild has to be told where the cursor was
+-- or it parks on CONNECT, and a second press on the row just pressed would
+-- dial a hub nobody asked for.
+
+do
+  eq(actDef.new({}, { key = actKey }).index, 1,
+     "with no row asked for, the cursor starts on CONNECT")
+  eq(actDef.new({}, { key = actKey, row = 3 }).index, 3,
+     "opts.row is where a reopen puts it")
+
+  -- Clamped rather than trusted: an opts table is anybody's to hand in, and a
+  -- Menu with its index off the end draws no arrow at all.
+  local rows = #actDef.new({}, { key = actKey }).items
+  eq(actDef.new({}, { key = actKey, row = 999 }).index, rows,
+     "a row past the end is clamped to the last one")
+  eq(actDef.new({}, { key = actKey, row = 0 }).index, 1,
+     "and a row before the first is clamped up to it")
+  eq(actDef.new({}, { key = actKey, row = "not a number" }).index, 1,
+     "so is something that is not a row number at all")
+
+  -- The favourite row's own reopen: it comes back to itself, not to CONNECT.
+  -- A second press there is far likelier to be "no, put it back" than a
+  -- request to dial.
+  pushes = {}
+  local menu = actDef.new({}, { key = actKey })
+  menu.items[2].onSelect()
+  local last = pushes[#pushes]
+  check(last ~= nil, "toggling the favourite reopens the menu")
+  eq(last.id, Ui.SCREEN.SERVERACT, "on SERVERACT itself")
+  eq(last.opts and last.opts.key, actKey, "for the same entry")
+  eq(last.opts and last.opts.row, 2,
+     "with the cursor back on the row that was just pressed, not on CONNECT")
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE, behind a yes/no CONFIRM
+
+do
+  ctx.servers = storeWith({ "delete.example:7777" })
+  local delKey = ctx.servers:list()[1].key
+  local delEntry = ctx.servers:get(delKey)
+
+  pushes = {}
+  local menu = actDef.new({}, { key = delKey })
+  menu.items[6].onSelect()
+
+  local confirmPush = pushes[#pushes]
+  check(confirmPush ~= nil and confirmPush.id == Ui.SCREEN.CONFIRM,
+        "DELETE asks first, through the same yes/no box every other "
+        .. "destructive row uses")
+  check(confirmPush.opts and confirmPush.opts.text
+        and confirmPush.opts.text:find(delEntry.name, 1, true) ~= nil,
+        "and the question names the entry, so a mis-press is caught before "
+        .. "it costs anything")
+  check(type(confirmPush.opts and confirmPush.opts.onChoose) == "function",
+        "the box is answered through onChoose, not by pressing through it")
+  eq(confirmPush.opts and confirmPush.opts.defaultNo, true,
+     "and it opens on NO -- the one confirm in this mod that does, so "
+     .. "neither a stray A nor a stray B deletes anything")
+
+  -- "no": back to this menu, cursor still on DELETE -- the same landing
+  -- spot the favourite row's reopen uses, and for the same reason: a
+  -- mis-press answered "no" should not leave a second delete one press away.
+  pushes = {}
+  confirmPush.opts.onChoose(false)
+  local declined = pushes[#pushes]
+  check(declined ~= nil and declined.id == Ui.SCREEN.SERVERACT,
+        "declining reopens SERVERACT, not the list")
+  eq(declined.opts and declined.opts.key, delKey, "for the same entry")
+  eq(declined.opts and declined.opts.row, 6, "cursor still on DELETE")
+  check(ctx.servers:get(delKey) ~= nil, "and nothing was actually deleted")
+
+  -- "yes": the row is really gone, and the list is where it lands.
+  pushes = {}
+  confirmPush.opts.onChoose(true)
+  local accepted = pushes[#pushes]
+  check(accepted ~= nil and accepted.id == Ui.SCREEN.SERVERS,
+        "accepting lands on the list, not back on the entry that no longer "
+        .. "exists")
+  check(ctx.servers:get(delKey) == nil, "the entry is gone from the store")
+  eq(#ctx.servers:list(), 0, "and so is the row it was the only one of")
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE's yes-path also asks the client to
+-- forget the hub's stored join code (see Client.forgetHub)
+
+do
+  ctx.servers = storeWith({ "clears.example:7777" })
+  local clearKey = ctx.servers:list()[1].key
+  local clearEntry = ctx.servers:get(clearKey)
+
+  local forgotten = {}
+  local realClient = ctx.client
+  ctx.client = {
+    isHosting = function() return false end,
+    isConnected = function() return false end,
+    forgetHub = function(_, address) forgotten[#forgotten + 1] = address end,
+  }
+
+  pushes = {}
+  local menu = actDef.new({}, { key = clearKey })
+  menu.items[6].onSelect()
+  local confirmPush = pushes[#pushes]
+  pushes = {}
+  confirmPush.opts.onChoose(true)
+
+  eq(#forgotten, 1,
+     "a successful delete calls client:forgetHub exactly once")
+  eq(forgotten[1], clearEntry.address,
+     "with the address the row was for, not the store key")
+  local landed = pushes[#pushes]
+  check(landed ~= nil and landed.id == Ui.SCREEN.SERVERS,
+        "and still lands on the list")
+
+  ctx.client = realClient
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE survives a client with no forgetHub
+--
+-- The older-build shape: deletion has already succeeded by the time
+-- forgetHub would be reached, so the row is gone either way -- this only
+-- warns instead of clearing the code, and must not throw.
+
+do
+  ctx.servers = storeWith({ "noforget.example:7777" })
+  local noForgetKey = ctx.servers:list()[1].key
+
+  local realClient = ctx.client
+  ctx.client = { isHosting = function() return false end,
+                 isConnected = function() return false end }
+  -- no .forgetHub field at all
+
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+
+  pushes = {}
+  local menu = actDef.new({}, { key = noForgetKey })
+  menu.items[6].onSelect()
+  local confirmPush = pushes[#pushes]
+  pushes = {}
+  local ok = pcall(confirmPush.opts.onChoose, true)
+
+  check(ok, "a client with no forgetHub does not throw the delete")
+  check(#warns > 0, "and it is logged instead")
+  local landed = pushes[#pushes]
+  check(landed ~= nil and landed.id == Ui.SCREEN.SERVERS,
+        "deletion already succeeded, so the list is still where it lands")
+  check(ctx.servers:get(noForgetKey) == nil, "and the entry really is gone")
+
+  ctx.client = realClient
+  stubMod.log.warn = function() end
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE against a store with no remove method
+--
+-- Not the same failure as remove refusing a key -- the row is still on the
+-- list and still works, so "That server is gone." would be a lie. This
+-- reopens SERVERACT instead of the gone TextBox.
+
+do
+  local fakeEntry = { key = "immutable:1", name = "immutable:1",
+                       address = "immutable.example:7777", fav = false }
+  local fakeStore = {
+    get = function(_, key)
+      if key ~= fakeEntry.key then return nil end
+      return fakeEntry
+    end,
+    -- deliberately no .remove
+  }
+  local realServers = ctx.servers
+  ctx.servers = fakeStore
+
+  pushes = {}
+  local menu = actDef.new({}, { key = fakeEntry.key })
+  menu.items[6].onSelect()
+  local confirmPush = pushes[#pushes]
+  pushes = {}
+  confirmPush.opts.onChoose(true)
+
+  local reopened = pushes[#pushes]
+  check(reopened ~= nil and reopened.id == Ui.SCREEN.SERVERACT,
+        "a store with no remove reopens SERVERACT, not the gone TextBox")
+  eq(reopened.opts and reopened.opts.key, fakeEntry.key, "for the same entry")
+  eq(reopened.opts and reopened.opts.row, 6, "cursor still on DELETE")
+
+  ctx.servers = realServers
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: DELETE answered on an entry that vanished first
+
+do
+  ctx.servers = storeWith({ "vanish.example:8888" })
+  local vanishKey = ctx.servers:list()[1].key
+
+  pushes = {}
+  local menu = actDef.new({}, { key = vanishKey })
+  menu.items[6].onSelect()
+  local confirmPush = pushes[#pushes]
+  check(confirmPush ~= nil, "DELETE still asks first")
+
+  -- The entry is removed out from under the question -- evicted, or
+  -- re-keyed by EDIT HOST elsewhere -- between the ask and the answer.
+  ctx.servers:remove(vanishKey)
+
+  pushes = {}
+  confirmPush.opts.onChoose(true)
+  local textPush = pushes[#pushes]
+  check(textPush ~= nil and textPush.id == Ui.SCREEN.TEXT,
+        "a yes on a row that is already gone is a TextBox, not a crash")
+  check(textPush.opts and textPush.opts.text
+        and textPush.opts.text:find("gone", 1, true) ~= nil,
+        "and it says so, the same sentence a stale key gets on open")
+  check(type(textPush.opts and textPush.opts.onDone) == "function",
+        "pressed through, rather than left standing")
+
+  pushes = {}
+  textPush.opts.onDone()
+  local afterDone = pushes[#pushes]
+  check(afterDone ~= nil and afterDone.id == Ui.SCREEN.SERVERS,
+        "and pressing through it lands on the list, same as the direct "
+        .. "yes path")
+  pushes = {}
+end
+
+-- ------- M:confirm with no opts at all leaves defaultNo nil
+--
+-- DELETE is the one confirm in this mod that opens on NO (pinned above),
+-- reached through a fourth opts argument. Every other caller -- and this
+-- mod has no other self:confirm site today -- hands in three arguments and
+-- must keep the vanilla YES-first box, so `opts and opts.defaultNo` has to
+-- stay nil rather than being coerced to false.
+
+do
+  pushes = {}
+  ui:confirm({}, "Some question?", function() end)
+  local plain = pushes[#pushes]
+  check(plain ~= nil and plain.id == Ui.SCREEN.CONFIRM,
+        "confirm with no opts still pushes CONFIRM")
+  eq(plain.opts and plain.opts.defaultNo, nil,
+     "and defaultNo is nil, not false -- CONFIRM's own registration is what "
+     .. "normalises it to a boolean")
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVEREDIT: opts.field, and the unknown-field case
+
+local editDef = screenRegistry[Ui.SCREEN.SERVEREDIT]
+check(editDef ~= nil, "SCREEN.SERVEREDIT registers")
+
+ctx.servers = storeWith({ "edit.example:1234" })
+local editKey = ctx.servers:list()[1].key
+do
+  local hostScreen = editDef.new({}, { key = editKey, field = "host" })
+  eq(hostScreen.title, "EDIT HOST", "the host grid carries its own title")
+  eq(table.concat(hostScreen.glyphs), "edit.example:1234",
+     "seeded with the entry's current address")
+
+  local typedScreen = editDef.new({}, { key = editKey, field = "name",
+                                        typed = "Retry" })
+  eq(table.concat(typedScreen.glyphs), "Retry",
+     "a refused attempt coming back through `typed` wins over the stored value")
+
+  -- An unknown field is a TextBox too, but not the *same* TextBox: nothing
+  -- has happened to the server, so saying it is gone would be a lie about the
+  -- entry rather than a complaint about the caller. B lands on the entry's own
+  -- menu, which is where the three fields that do exist are.
+  local unknown = editDef.new({}, { key = editKey, field = "not-a-real-field" })
+  check(unknown.items == nil and unknown.glyphs == nil,
+        "an unknown field is a TextBox, not a naming grid")
+  eq(unknown.text, "There is nothing\nto edit there.",
+     "and it complains about the field, never about the server")
+  check(unknown.text:find("gone", 1, true) == nil,
+        "the entry is still there, so it is not the gone sentence")
+  pushes = {}
+  unknown.onDone()
+  eq(pushes[1] and pushes[1].id, Ui.SCREEN.SERVERACT,
+     "pressing through it lands on the entry's own menu")
+  eq(pushes[1] and pushes[1].opts and pushes[1].opts.key, editKey,
+     "for the entry that was being edited")
+  pushes = {}
+
+  local goneKey = editDef.new({}, { key = "missing:1", field = "host" })
+  check(goneKey.items == nil and goneKey.glyphs == nil,
+        "a missing key is refused the same way, whatever field was asked for")
+end
+
+-- ------- SCREEN.SERVEREDIT: a refusal says how much was typed, never what
+--
+-- A refused join code is a near-miss of a real one, which is the worst kind
+-- to write into a log file somebody will paste into a bug report. The count
+-- is what makes "too short" diagnosable without printing the characters.
+
+do
+  local warns = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+
+  local TYPED = "SECRETX9" -- every character is in the code alphabet; eight
+                           -- of them are not six, so the store refuses it
+  local codeScreen = editDef.new({}, { key = editKey, field = "code" })
+  check(type(codeScreen.glyphs) == "table", "EDIT CODE is a naming grid")
+  for i = 1, #TYPED do codeScreen.glyphs[i] = TYPED:sub(i, i) end
+  pushes = {}
+  codeScreen:confirm()
+
+  check(#warns > 0, "a refused code is logged")
+  local joined = table.concat(warns, "\n")
+  eq(joined:find(TYPED, 1, true), nil,
+     "and what was typed is nowhere in what was logged")
+  eq(joined:find(TYPED:sub(1, Config.CODE_LEN), 1, true), nil,
+     "not even the first six characters of it, which would be the code")
+  check(joined:find("%(%d+ character%(s%)%)") ~= nil,
+        "the length is what stands in for it")
+  check(joined:find(("(%d character(s))"):format(#TYPED), 1, true) ~= nil,
+        "and it is the length actually typed")
+  check(joined:find("code", 1, true) ~= nil, "naming the field that refused")
+
+  eq(ctx.servers:get(editKey).code, nil,
+     "the row keeps the code it had -- a refusal never writes one")
+
+  local last = pushes[#pushes]
+  check(last ~= nil and last.id == Ui.SCREEN.TEXT,
+        "the player is told in a box, not only in the log")
+  pushes = {}
+  stubMod.log.warn = function() end
+end
+
+stubMod.content.screens, stubMod.hooks, stubMod.ui = nil, nil, nil
+_G.love = ambientLove
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 17. The offline character row, and the picker's two doors
 -- ------------------------------------------------------------------
 --
 -- SCREEN.MAIN's CHARACTER row and SCREEN.CHARPICK's backTo opt are pinned

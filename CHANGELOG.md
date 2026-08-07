@@ -8,6 +8,56 @@ here must match `manifest.version`.
 
 ### Added
 
+- **`SERVERS` remembers where you've been.** The disconnected MMO menu grows
+  a `SERVERS` row the first time you've connected anywhere, at the top, above
+  `HOST GAME` — the next hub you visit can be a menu, not a retyped address
+  and passcode. It stays off the menu until there is a first entry to show
+  it, and it disappears again the moment you're hosting or connected, the
+  same rule `ADDRESS` and `PLAYERS` already follow.
+- **Favorites pinned on top, marked `▶`; everyone else by address,
+  descending.** A favorited entry carries a `▶` in the row's right-hand
+  column — the game's own cursor glyph, the same mark the `PLAYERS` and
+  `CHAT` rows already use — and sorts above every plain one no matter when it
+  was last used; within each group, entries sort by their normalised
+  `host:port` string, Z before A. Recency decides nothing about where an
+  entry sits on the list — only whether a non-favorite survives the next
+  eviction.
+- **Picking an entry opens a submenu of its own.** `CONNECT` dials it the
+  same way `JOIN GAME` does — the same CHARSET naming step first, then the
+  same challenge if the stored passcode turns out to be wrong.
+  `FAVORITE` / `UNFAVORITE` flips the pin, the label swapping with the state
+  the way `END GAME` and `LEAVE` already do elsewhere on this menu.
+  `EDIT HOST` and `EDIT CODE` reopen the address and the passcode on the
+  naming grid without touching the entry's name. `RENAME` is the only row
+  that does. `DELETE` is last on purpose — the one row here that can't be
+  undone by pressing it again — and asks first: a yes/no confirm names the
+  entry before anything happens, defaults to "no", and a "yes" drops the
+  row for good and returns you to the list.
+- **A new connection writes its own entry, and only once it's real.** The
+  recording happens at `WELCOME` — not on every dial — so a wrong passcode or
+  a refused connection never litters the list with a hub you never actually
+  reached. The entry is named after the address you dialled, with the
+  standard port left off — `192.168.1.20:7788` lists as `192.168.1.20`, since
+  that port is the one every hub here uses and sixteen characters is all a
+  row has. A hub on any other port keeps it in the name, because there it is
+  the difference between an address that dials and one that doesn't. Either
+  way the entry still holds the whole address, which is what `CONNECT` dials.
+  Hosting your own game records nothing, because there's no address you
+  dialled to remember.
+- **Renamed like anything else typed on this mod's grids: sixteen
+  characters, same sanitiser.** A rename that would leave the name empty is
+  refused rather than accepted blank — the same rule `Wire.text` already
+  enforces everywhere else a name crosses the save or the wire.
+- **The list outlives the save.** Entries are dual-written to
+  `rby_mmo_servers.json`, beside the claim-ticket file, and mirrored into
+  `mod.save` for whichever copy only ever needs to read them back — the file
+  wins on a mismatch, so quitting to the title, pressing `CONTINUE` without
+  having saved, or switching save slots entirely still finds the same list
+  of hubs. The same shape the rank-token file already proved.
+- **Capacity sixteen, oldest non-favorite first.** Past sixteen entries, the
+  one that's gone longest without being reconnected to is the one evicted to
+  make room — favorites don't count against the cap and are never the one
+  removed.
 - **`CHARACTER` on the MMO menu — before a game, and in one.** Until now the
   character list was a step on the way into a game and nowhere else: the only
   door to it was hosting or joining, so a player who simply wanted to look
@@ -176,7 +226,6 @@ here must match `manifest.version`.
   `server/README.md`'s VPS walkthrough still cloned `--branch v0.2.2` — a tag
   from before the hub that walkthrough then tells you to build existed at all.
   Both now name the current release.
-
 ## [0.7.1] - 2026-08-05
 
 ### Fixed

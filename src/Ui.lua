@@ -41,6 +41,9 @@ local SCREEN = {
   HOSTINFO = "RbyMmoHostInfo",
   JOINADDR = "RbyMmoJoinAddress",
   JOINCODE = "RbyMmoJoinCode",
+  SERVERS  = "RbyMmoServers",
+  SERVERACT = "RbyMmoServerActions",
+  SERVEREDIT = "RbyMmoServerEdit",
   CHARSET  = "RbyMmoCharSetup",
   CHARPICK = "RbyMmoCharPick",
   PROFILE  = "RbyMmoProfile",
@@ -708,10 +711,21 @@ function M:say(text, onDone)
   return mod.ui.push(game, SCREEN.TEXT, { text = text, onDone = onDone })
 end
 
-function M:confirm(game, text, onChoose)
+-- opts.defaultNo opens the box with the cursor on NO.
+--
+-- The engine's ChoiceBox starts on YES unless it is told otherwise, which is
+-- right for a question whose yes is what the player just asked for -- a trade,
+-- a team-up -- and wrong for one whose yes cannot be undone. Passed through
+-- rather than decided here, and absent by default, so every existing caller
+-- keeps the box it already had.
+function M:confirm(game, text, onChoose, opts)
   game = game or self.ctx.game
   if not game then return end
-  mod.ui.push(game, SCREEN.CONFIRM, { text = text, onChoose = onChoose })
+  mod.ui.push(game, SCREEN.CONFIRM, {
+    text = text,
+    onChoose = onChoose,
+    defaultNo = opts and opts.defaultNo,
+  })
 end
 
 -- A question with named answers, where **B is an answer and not an escape**.
@@ -804,6 +818,10 @@ function M:install()
       choice = function(yes)
         if opts.onChoose then opts.onChoose(yes and true or false) end
       end,
+      -- Normalised to a boolean rather than forwarded as it came: the
+      -- engine reads this field for truthiness, and a caller who handed in
+      -- a string would be opting into a default they never asked for.
+      defaultNo = opts.defaultNo == true,
     })
   end })
 
@@ -844,6 +862,42 @@ function M:install()
       end,
     })
   end })
+
+  -- ------- the hubs this copy has already been on
+  --
+  -- The list itself lives in src/Servers.lua and is handed over on the ctx.
+  -- Every screen here reaches it through these two rather than through
+  -- ctx.servers directly, so a Client that predates the store -- an older
+  -- build, or a suite that builds a ctx with only the parts it is testing --
+  -- gets a menu with nothing on it instead of a screen that throws on the
+  -- way up. The list comes back already sorted (favourites first, then by
+  -- address); nothing here re-orders it.
+  local function serverStore()
+    local store = ctx.servers
+    if type(store) ~= "table" then return nil end
+    return store
+  end
+
+  local function serverList()
+    local store = serverStore()
+    local list = store and store.list and store:list()
+    return type(list) == "table" and list or {}
+  end
+
+  -- The mark on a favourite row.
+  --
+  -- Not the "*" a list like this would carry anywhere else: the extracted
+  -- font has no glyph for it, and Font.draw silently draws nothing while
+  -- Font.width still advances 8px -- the same trap the CHAT row fell into
+  -- (see its note below). "▶" is on the sheet, right-aligned in the row's
+  -- own second column, so a pinned server actually shows that it is one.
+  --
+  -- The trailing space is load-bearing, not a typo: ListMenu right-aligns
+  -- the second column at 160 - 8 - width, and a name at the 16-glyph cap
+  -- ends exactly where a one-glyph mark starts, so the two touch. The space
+  -- is drawn as nothing and widens the column by one 8px cell, which shifts
+  -- the arrow one cell left and leaves the gap a full-length name needs.
+  local FAV_MARK = "▶ "
 
   -- ------- the main MMO menu
 
@@ -976,6 +1030,24 @@ function M:install()
         end,
       }
     else
+      -- First on the menu, above HOST GAME, because for anyone who has
+      -- played before it is the row they came for: every hub on it answered
+      -- to this copy once, so its address and its code are known and CONNECT
+      -- is the whole flow -- the same errand as JOIN GAME with the typing
+      -- already done.
+      --
+      -- Absent while the list is empty, rather than opening a screen that
+      -- says "nothing yet": a first join has to go through JOIN GAME anyway,
+      -- and the row appears the moment there is something behind it. The
+      -- menu is also 8 rows at most, so a row that could say nothing is a
+      -- row the rows that can say something do not get -- and a first-timer's
+      -- menu still opens on HOST GAME.
+      if #serverList() > 0 then
+        items[#items + 1] = {
+          label = "SERVERS",
+          onSelect = function() mod.ui.push(game, SCREEN.SERVERS) end,
+        }
+      end
       items[#items + 1] = {
         label = "HOST GAME",
         onSelect = function()
@@ -1432,16 +1504,24 @@ function M:install()
     return screen
   end
 
+  -- How long an address may be typed.
+  --
+  -- An address or a hostname: "255.255.255.255:65535" is 21, but
+  -- "mybox.example.com:7788" is 22, and a name is what a host on a LAN is
+  -- likelier to read out. The grid carries the dot, the colon and the dash a
+  -- hostname needs, and the name goes to the socket untouched, so the only
+  -- thing that could refuse one is this number.
+  --
+  -- Named rather than written twice: the EDIT HOST grid is the same question
+  -- asked about a hub already on the list, and a shorter line there would
+  -- refuse an address the join screen accepted.
+  local ADDRESS_MAX = 32
+
   screens:register(SCREEN.JOINADDR, { new = function(game)
     local client = ctx.client
     local screen = namingScreen(game, {
       title = ownTitle("JOIN"),
-      -- An address or a hostname: "255.255.255.255:65535" is 21, but
-      -- "mybox.example.com:7788" is 22, and a name is what a host on a LAN
-      -- is likelier to read out. The grid carries the dot, the colon and
-      -- the dash a hostname needs, and the name goes to the socket
-      -- untouched, so the only thing that could refuse one is this number.
-      maxLen = 32,
+      maxLen = ADDRESS_MAX,
       default = client:joinAddress(),
       onDone = function(address)
         -- the *stored* form, not what was typed: setJoinAddress fills in
@@ -1539,6 +1619,360 @@ function M:install()
     -- because nothing has been dialled yet.
     return escapable(screen, function()
       mod.ui.push(game, opts.host and SCREEN.HOSTCODE or SCREEN.MAIN)
+    end, true)
+  end })
+
+  -- ------- joining again: the hubs that already answered
+
+  -- Every hub this copy actually got a welcome from, kept so the second join
+  -- costs a press instead of the twenty-odd keystrokes the first one did --
+  -- an address and a six-character code, both typed on a page that has to be
+  -- flipped to reach the digits.
+  --
+  -- A ListMenu rather than the command box the MMO menu uses, for the reason
+  -- PLAYERS is one: the length is not fixed and the row carries a second
+  -- column. The order is the store's (favourites first, then by address);
+  -- the rows are rebuilt on every push, so a rename, a re-address or a
+  -- favourite toggle is already in place by the time B lands back here.
+  screens:register(SCREEN.SERVERS, { new = function(game)
+    local items = {}
+    for _, entry in ipairs(serverList()) do
+      items[#items + 1] = {
+        label = entry.name,
+        right = entry.fav and FAV_MARK or nil,
+        value = entry.key,
+      }
+    end
+    -- Nothing is injected when there is nothing to show. The MMO menu hides
+    -- the row that opens this while the list is empty, so an empty list here
+    -- means the screen was re-entered while it was open and the last entry
+    -- went -- and ListMenu already draws "Nothing here." for exactly that.
+    -- A placeholder row would suppress that answer and put the cursor on a
+    -- row whose A press has to be swallowed.
+    return mod.ui.ListMenu.new(game, "SERVERS", items, {
+      pageJump = true,
+      onChoose = function(item, menu)
+        menu:close()
+        mod.ui.push(game, SCREEN.SERVERACT, { key = item.value })
+      end,
+      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+    })
+  end })
+
+  -- ------- what you can do with one of them
+
+  screens:register(SCREEN.SERVERACT, { new = function(game, opts)
+    opts = opts or {}
+    local store = serverStore()
+    local entry = store and store.get and store:get(opts.key)
+    if not entry then
+      -- The key is derived from the address rather than chosen, so EDIT HOST
+      -- moves an entry to a different one -- and a menu still holding the old
+      -- key is asking after something that no longer exists. Eviction is the
+      -- other way it goes. Either way, say so and hand back the list, rather
+      -- than build five rows that would all refuse.
+      return mod.ui.TextBox.new(game, "That server is\ngone.", function()
+        mod.ui.push(game, SCREEN.SERVERS)
+      end)
+    end
+
+    local key = entry.key
+    local items = {
+      -- CONNECT first: it is what the list is for, and every other row is a
+      -- correction to make before pressing it.
+      { label = "CONNECT", connect = true },
+      -- The row says what pressing it does, not what the entry is -- the
+      -- same rule the MMO menu's END GAME / LEAVE row follows.
+      { label = entry.fav and "UNFAVORITE" or "FAVORITE", fav = true },
+      { label = "EDIT HOST", field = "host" },
+      { label = "EDIT CODE", field = "code" },
+      { label = "RENAME", field = "name" },
+      -- Last, and last on purpose: it is the one row that cannot be undone
+      -- by pressing it again, so it comes after the corrections rather than
+      -- among them. Distance is not the guard, though -- Menu wraps, so row
+      -- 6 is a single UP from where the cursor starts, which is why the
+      -- confirm below has to open on NO.
+      { label = "DELETE", remove = true },
+    }
+
+    -- Reopening is what "rebuilt" means here (see the favourite row below),
+    -- and a rebuild that forgets where the cursor was is a rebuild that
+    -- parks it on CONNECT -- so a second press on the row you just pressed
+    -- would dial a hub nobody asked for. `row` is carried back the way the
+    -- MMO menu carries cursor.main, and is clamped on the way in.
+    local reopen = function(row)
+      mod.ui.push(game, SCREEN.SERVERACT, { key = key, row = row })
+    end
+
+    -- What JOIN GAME does, with both grids already answered.
+    --
+    -- The same order and the same calls, deliberately: CHARSET first,
+    -- because who you are online is asked before you go anywhere; then the
+    -- address through the same setJoinAddress the grid writes through; then
+    -- the code, filed under the address connect will dial; then connect.
+    -- Nothing here is a second way to join -- a hub that challenges a stale
+    -- code still comes back through Client.askJoinCode exactly as it does on
+    -- the typed path.
+    local function dial()
+      local client = ctx.client
+      -- the stored form, not the entry's own string: setJoinAddress fills in
+      -- the port, and the code has to be filed under what connect dials
+      local target = client:setJoinAddress(entry.address)
+      if not target then
+        mod.log:warn("could not dial the saved server %s -- open it under "
+          .. "SERVERS and give EDIT HOST an address like 1.2.3.4:7788",
+          tostring(entry.address))
+        return mod.ui.push(game, SCREEN.TEXT, {
+          text = "That address is\nno good. Edit it\nand try again.",
+          -- wrapped rather than passed straight, now that reopen takes a
+          -- row: whatever the box hands its callback is not one, and this
+          -- path came from CONNECT, which is where the cursor starts.
+          onDone = function() reopen() end,
+        })
+      end
+      -- Only when there is one: writing nil would be refused anyway, and a
+      -- hub with no code never asks for one.
+      if entry.code then client:setJoinCode(target, entry.code) end
+      client:connect(game)
+    end
+
+    for row, item in ipairs(items) do
+      local wantsConnect, wantsFav, field = item.connect, item.fav, item.field
+      local wantsRemove = item.remove
+      item.onSelect = function()
+        if wantsConnect then
+          mod.ui.push(game, SCREEN.CHARSET, { verb = "JOIN", onReady = dial })
+        elseif wantsFav then
+          if not (store.setFavorite and store:setFavorite(key, not entry.fav)) then
+            mod.log:warn("could not change the favourite mark on the server "
+              .. "%s -- back out to SERVERS, reopen it and try again",
+              tostring(entry.name))
+          end
+          -- Straight back to this menu, where the row now reads the other
+          -- way round: Menu pops itself before running a row, so reopening
+          -- is what "rebuilt" means here -- the same thing ACTIONS does
+          -- after a command that changes what its rows should say. The list
+          -- behind it re-sorts when B lands on it, because that is a fresh
+          -- push too. The cursor comes back to this row, not to CONNECT: a
+          -- second press is far likelier to be "no, put it back" than a
+          -- request to dial.
+          reopen(row)
+        elseif field then
+          mod.ui.push(game, SCREEN.SERVEREDIT, { key = key, field = field })
+        elseif wantsRemove then
+          -- Asked before it happens, and the question names the row: this
+          -- list is the only copy of an address somebody typed once, and a
+          -- delete that landed on the press would be a delete found out
+          -- about afterwards. Both mis-presses are free here: defaultNo
+          -- opens the box with the cursor already on NO, and CONFIRM's B is
+          -- a no as well -- so neither a stray A nor a stray B deletes
+          -- anything. That is the whole reason the box is this one and not
+          -- a plain TextBox.
+          self:confirm(game, ("Forget the server\n%s?"):format(entry.name),
+            function(yes)
+              -- Back to this menu with the cursor still on DELETE, the way
+              -- the favourite row comes back: "no" is an answer about this
+              -- row, and dropping the cursor onto CONNECT would put a dial
+              -- one press away from someone who just said no to something.
+              if not yes then return reopen(row) end
+              -- A store with no remove at all is not the same failure as a
+              -- store that refused this key, and it must not be told as
+              -- one: the row is still on the list and still works, so
+              -- "That server is gone." would be a sentence the player can
+              -- see is untrue. That is the older-build store the two
+              -- helpers at the top of this section exist for -- say so in
+              -- the log and hand the menu back unchanged.
+              if not store.remove then
+                mod.log:warn("could not delete the server %s -- this build's "
+                  .. "server list cannot remove entries; back out to SERVERS, "
+                  .. "reopen it and try again", tostring(entry.name))
+                return reopen(row)
+              end
+              if not store:remove(key) then
+                -- The entry went between the question and the answer --
+                -- evicted by a hub recorded underneath, or re-keyed. Same
+                -- sentence the menu opens with on a stale key, and the same
+                -- place to land, because the list is where it can be seen
+                -- that the row is already gone.
+                mod.log:warn("could not delete the server %s -- it is no "
+                  .. "longer on the list, so there is nothing left to "
+                  .. "remove; reopen SERVERS to see what is", tostring(entry.name))
+                return mod.ui.push(game, SCREEN.TEXT, {
+                  text = "That server is\ngone.",
+                  onDone = function() mod.ui.push(game, SCREEN.SERVERS) end,
+                })
+              end
+              -- The row said "Forget", so the hub's passcode goes with it:
+              -- the code is filed against the address rather than on the
+              -- entry, and leaving it behind would keep a secret for a hub
+              -- the player just said they were done with. The claim ticket
+              -- stays -- see Client.forgetHub for why. A build whose client
+              -- has no forgetHub only warns: the row is already deleted and
+              -- has to land on the list either way.
+              local client = ctx.client
+              if type(client) == "table" and client.forgetHub then
+                client:forgetHub(entry.address)
+              else
+                mod.log:warn("deleted the server %s but could not clear its "
+                  .. "stored join code -- this build's client has no "
+                  .. "forgetHub; clear it from the JOIN CODE option row if it "
+                  .. "should not be kept", tostring(entry.name))
+              end
+              -- The list, not this menu: the entry this menu is about no
+              -- longer exists, so reopening it would draw the "gone" box
+              -- about a row the player just chose to be rid of. An empty
+              -- list is ListMenu's own "Nothing here.", and the MMO menu
+              -- drops the SERVERS row the next time it opens.
+              mod.ui.push(game, SCREEN.SERVERS)
+            end,
+            -- The one confirm in this mod that opens on NO: see the note
+            -- above the row.
+            { defaultNo = true })
+        end
+      end
+    end
+
+    local menu = mod.ui.Menu.new(game, items, {
+      -- ACTIONS' geometry, and its arithmetic for the same reason: Menu
+      -- grows the box downwards to fit its rows (th = rows * 2 + 2), so ty
+      -- is what keeps the last row on an 18-tile screen.
+      tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
+      onCancel = function() mod.ui.push(game, SCREEN.SERVERS) end,
+    })
+    -- Where a reopen puts the cursor, clamped rather than trusted: the row
+    -- count is fixed today, but an opts table is anybody's to hand in and a
+    -- Menu with its index off the end draws no arrow at all.
+    menu.index = math.min(math.max(tonumber(opts.row) or 1, 1), #items)
+    menu:clampScroll()
+    return menu
+  end })
+
+  -- ------- changing one of them
+
+  -- One grid for all three fields, because they are one question -- what
+  -- should this say instead -- and the only differences are the title, the
+  -- length, and which mutator the answer goes to. Three registrations would
+  -- be three copies of the refusal path.
+  --
+  -- Each title is claimed here rather than at the call site, and eagerly:
+  -- ownedTitles is what gives this mod's grids their digits page, and an
+  -- address and a join code are both mostly digits. `value` is what the line
+  -- opens with, `apply` is the store call, `refusal` is what the player is
+  -- told when the store says no, and `warn` is the remediation that goes to
+  -- the log beside it.
+  local EDIT_FIELDS = {
+    host = {
+      title = ownTitle("EDIT HOST"),
+      maxLen = ADDRESS_MAX,
+      value = function(entry) return entry.address end,
+      apply = function(store, key, text)
+        return store.setAddress and store:setAddress(key, text)
+      end,
+      refusal = "That isn't a hub\naddress. Try\n1.2.3.4:7788.",
+      warn = "an address is a name or an IP, with or without a port",
+    },
+    code = {
+      title = ownTitle("EDIT CODE"),
+      -- the entry cap rather than CODE_LEN, for JOIN CODE's reason: a code
+      -- copied off a chat line arrives with punctuation around its six
+      -- characters, and normalisation is what removes the difference
+      maxLen = Config.CODE_ENTRY_MAX,
+      value = function(entry) return entry.code end,
+      apply = function(store, key, text)
+        return store.setCode and store:setCode(key, text)
+      end,
+      refusal = ("That isn't a join\ncode. It's %d\nletters and digits.")
+        :format(Config.CODE_LEN),
+      warn = ("a join code is %d letters and digits"):format(Config.CODE_LEN),
+    },
+    name = {
+      title = ownTitle("RENAME"),
+      maxLen = Config.SERVER_NAME_MAX,
+      value = function(entry) return entry.name end,
+      apply = function(store, key, text)
+        return store.rename and store:rename(key, text)
+      end,
+      refusal = "A name needs a\nletter or a\ndigit in it.",
+      warn = "a name needs at least one character the game's font carries",
+    },
+  }
+
+  screens:register(SCREEN.SERVEREDIT, { new = function(game, opts)
+    opts = opts or {}
+    local spec = EDIT_FIELDS[opts.field]
+    if not spec then
+      -- Its own sentence, not the entry's: nothing has happened to the
+      -- server, the caller asked for a field this screen does not have. The
+      -- box says what the log says, and B lands on the entry's own menu --
+      -- which is where the three rows that do work are.
+      mod.log:warn("there is no server field called '%s' to edit -- this "
+        .. "screen takes field = host, code or name", tostring(opts.field))
+      return mod.ui.TextBox.new(game, "There is nothing\nto edit there.",
+        function()
+          mod.ui.push(game, SCREEN.SERVERACT, { key = opts.key })
+        end)
+    end
+    local store = serverStore()
+    local entry = store and store.get and store:get(opts.key)
+    if not entry then
+      -- Same sentence SERVERACT gives, and for its two reasons: the entry
+      -- was re-keyed under another address, or it was evicted.
+      return mod.ui.TextBox.new(game, "That server is\ngone.", function()
+        mod.ui.push(game, SCREEN.SERVERS)
+      end)
+    end
+
+    local key = entry.key
+    local screen = namingScreen(game, {
+      title = spec.title,
+      maxLen = spec.maxLen,
+      -- Deliberately no `default`, for JOINCODE's reason: NamingScreen uses
+      -- it as the answer to an empty line, so erasing the whole line would
+      -- silently rewrite the value with itself. Having no answer to give is
+      -- what leaves the empty line free to mean "let me out" -- see the
+      -- escapable() call below, which takes it.
+      onDone = function(text)
+        local updated = spec.apply(store, key, text)
+        if type(updated) ~= "table" then
+          -- Refused, and refused for a reason the player can act on -- the
+          -- empty line is what means "out", and escapable has already taken
+          -- it, so anything arriving here is a typo. Say what shape the
+          -- answer is and come back to the same grid with the same
+          -- characters still on it: one wrong character then costs one press
+          -- to fix rather than a whole address to retype.
+          -- What was typed does not go to the log, only how much of it: the
+          -- code field is a secret (Client's askJoinCode keeps the same
+          -- rule), and a refused code is a near-miss of one, which is the
+          -- worst kind to write down. The count is what makes "too short"
+          -- diagnosable without printing the characters.
+          mod.log:warn("could not save what was typed as this server's %s "
+            .. "(%d character(s)) -- %s",
+            tostring(opts.field), #tostring(text), spec.warn)
+          local again = { key = key, field = opts.field, typed = text }
+          return mod.ui.push(game, SCREEN.TEXT, {
+            text = spec.refusal,
+            onDone = function() mod.ui.push(game, SCREEN.SERVEREDIT, again) end,
+          })
+        end
+        -- The key it has now, not the one it had: EDIT HOST re-keys the
+        -- entry in place, so reopening on `key` would land on the "that
+        -- server is gone" box about the entry that was just edited.
+        mod.ui.push(game, SCREEN.SERVERACT, { key = updated.key or key })
+      end,
+    })
+    -- What is already there, on the line and editable. This is a change to a
+    -- value that exists, so an empty line would mean retyping a whole
+    -- address to correct one character of it -- and unlike a join code being
+    -- typed for the first time, there is no secret here that putting it back
+    -- would invite resubmitting blind. `opts.typed` wins: that is the
+    -- attempt this screen refused a moment ago, coming back.
+    seed(screen, opts.typed or spec.value(entry))
+    -- B on an empty line goes back to the entry's own menu -- one more B
+    -- from the list, two from the MMO menu -- and START on an empty line
+    -- means the same thing, because there is nothing an empty line could
+    -- usefully save.
+    return escapable(screen, function()
+      mod.ui.push(game, SCREEN.SERVERACT, { key = key })
     end, true)
   end })
 
