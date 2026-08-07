@@ -361,6 +361,37 @@ async function main() {
     await ann.expectSilence('mmo.chat');
     ok(true, 'party chat with no party goes nowhere at all');
 
+    // ------- party events
+    //
+    // What just happened to a travelling partner -- a wild POKeMON beaten,
+    // here -- fanned out to the party and stopping there. `name` is the field
+    // a forged client would most want to control, since it is the only
+    // identity on the message and the whole thing is read as a sentence about
+    // a named player, so it is stamped from the connection and never off the
+    // wire: ANN's message below carries a different name and BOB must never
+    // see it.
+
+    ann.send('mmo.party_event',
+      { kind: 'defeat_wild', species: 'RATTATA', level: 3, name: 'NOTANN' });
+    const partyEvent = await bob.expect('mmo.party_event');
+    ok(partyEvent.kind === 'defeat_wild', 'the event kind survives the trip');
+    ok(partyEvent.species === 'RATTATA' && partyEvent.level === 3,
+       'and the mon it names');
+    ok(partyEvent.name === 'ANN', "stamped from ANN's own connection");
+    ok(partyEvent.name !== 'NOTANN',
+       'never the forged name the message carried');
+
+    // the fighter watched their own battle happen and needs no round trip
+    await ann.expectSilence('mmo.party_event');
+    ok(true, 'the sender is not sent a copy of their own event');
+
+    // a player with no party cannot make an event appear on anybody's screen
+    cal.send('mmo.party_event',
+      { kind: 'defeat_wild', species: 'PIDGEY', level: 2 });
+    await bob.expectSilence('mmo.party_event');
+    await ann.expectSilence('mmo.party_event');
+    ok(true, 'party_event with no party goes nowhere at all -- the hub drops it');
+
     // leaving ends it for both, and frees them in everyone else's eyes
     cal.drain('mmo.move');
     ann.send('mmo.party_leave', {});
