@@ -5,7 +5,7 @@
 | Date | 2026-08-07 |
 | Source | /implement: notifications for chat, party combat/capture, join/leave |
 | Config | AGENTS_CONFIG.yml (quality: impl/review/fixes=opus, investigate/tests-creation=sonnet, tests-running=haiku) |
-| Branch | `fix/notifications` (feature framed as 0.8.0); rebased onto `main` |
+| Branch | `fix/notifications` (shipped as **0.10.0**; PROTOCOL **8** — 7 was already taken on main) |
 | Base SHA | `f81c4db7e569a4cd23660394c7f7b97ba79b2089` |
 | Mode | Interactive — grill answers locked 2026-08-07 |
 
