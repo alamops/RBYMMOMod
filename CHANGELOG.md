@@ -4,6 +4,33 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [Unreleased]
+
+### Fixed
+
+- **A JOIN address with no port on it lands on 7788, however it was left
+  off.** A bare `MYBOX.LAN` was already completed, but the check was "does
+  this end in `:<digits>`" — so `MYBOX.LAN:`, typed by anyone who reached for
+  the colon and then remembered they were never told a port, became
+  `MYBOX.LAN::7788` and was dialled at host `MYBOX.LAN:`. That resolves to
+  nothing, and it fails the way a hub that is switched off fails, so the
+  player goes and asks the host to check their end. The port slot after the
+  last colon is now read rather than merely spotted: empty, not a number, or
+  a number no socket can bind, and `Config.DEFAULT_PORT` fills it in. A port
+  that was actually typed is still dialled exactly as typed.
+- **Spaces in a JOIN address are removed, wherever they are.** The naming
+  grid carries a space glyph and no address has any use for one — neither a
+  hostname nor an IP may contain a space — so `MYBOX.LAN ` and `MYBOX . LAN`
+  are both just what the grid made easy to type, and both used to be dialled
+  with the spaces still in the hostname. They also disagreed with the
+  passcode key, which strips whitespace: the code was filed under one string
+  and the connection made to another, so a saved passcode stopped being
+  found. Both now see the same string. It also means a port held off its
+  colon — `MYBOX.LAN: 7788` — keeps the value it plainly means instead of
+  reading as a port that was never given. An address that is only a port
+  (`:7788`) is refused rather than dialled at an empty host, which is the
+  answer an empty address already got.
+
 ## [0.8.0] - 2026-08-06
 
 ### Added
@@ -226,6 +253,7 @@ here must match `manifest.version`.
   `server/README.md`'s VPS walkthrough still cloned `--branch v0.2.2` — a tag
   from before the hub that walkthrough then tells you to build existed at all.
   Both now name the current release.
+
 ## [0.7.1] - 2026-08-05
 
 ### Fixed

@@ -68,7 +68,10 @@ anything is dialled. (**SELECT** flips the keyboard to digits — the vanilla
 one has none.)
 
 An IP or a hostname both work — `192.168.1.125:7788` or
-`MYBOX.EXAMPLE.COM:7788` — and leaving the port off fills in **7788**. Case
+`MYBOX.EXAMPLE.COM:7788` — and leaving the port off fills in **7788**. So does
+typing the colon and stopping there, or typing something behind it that is not
+a port a socket could dial. A port you did type is always the one dialled, and
+spaces are removed wherever they are, so nothing is lost to one. Case
 doesn't matter for a hostname; DNS doesn't care either. Dashes, spaces and
 lower case in a passcode are normalised away, so one copied out of a chat
 message works as typed.

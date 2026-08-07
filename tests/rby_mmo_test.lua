@@ -3854,6 +3854,80 @@ eq(Client.joinAddress(), "192.168.1.7:7788", "which then wins over the option")
 eq(Client.setJoinAddress(Client, ""), nil, "an empty address is refused")
 eq(Client.joinAddress(), "192.168.1.7:7788", "leaving the previous one intact")
 
+-- ------- the port the player did not type
+--
+-- Net's own fallback is 7778 -- the pokeserver relay's -- so an address that
+-- reaches the socket without a port dials a machine nobody is hosting on and
+-- comes back "relay unreachable", which is the one error message that points
+-- the player away from the thing that is actually wrong. Every one of these
+-- is a way of not choosing a port, and every one of them has to end up on
+-- DEFAULT_PORT. Written against the symbol, not the number, because
+-- RBY_MMO_PORT moves it -- that is how two e2e runs host on one machine.
+local PORT = Config.DEFAULT_PORT
+local function ported(host) return ("%s:%d"):format(host, PORT) end
+
+eq(Client.setJoinAddress(Client, "mybox"), ported("mybox"),
+   "a bare hostname is completed with the default port")
+eq(Client.joinAddress(), ported("mybox"), "and reads back that way")
+eq(Client.setJoinAddress(Client, "192.168.1.20"), ported("192.168.1.20"),
+   "so is a bare IP")
+eq(Client.setJoinAddress(Client, "MYBOX.EXAMPLE.COM"), ported("MYBOX.EXAMPLE.COM"),
+   "case is left alone -- the resolver does not care and the player does")
+
+-- A colon with nothing behind it is not a port; it used to become
+-- "mybox::7788", dialled at host "mybox:", which fails like a hub that is
+-- down rather than like the typo it is.
+eq(Client.setJoinAddress(Client, "mybox:"), ported("mybox"),
+   "a colon with no digits behind it means no port was chosen")
+eq(Client.setJoinAddress(Client, "mybox:abc"), ported("mybox"),
+   "and neither is something that is not a number")
+eq(Client.setJoinAddress(Client, "mybox:99999"), ported("mybox"),
+   "nor a number no socket can bind")
+eq(Client.setJoinAddress(Client, "mybox:0"), ported("mybox"), "at the other end too")
+
+-- tonumber says yes to all three of these and Net's ":%d+" says no, so
+-- reading the slot with tonumber alone would call the address complete and
+-- then hand it to a parser that drops the port and dials 7778.
+eq(Client.setJoinAddress(Client, "mybox:0x1E"), ported("mybox"), "hex is not a port")
+eq(Client.setJoinAddress(Client, "mybox:1e3"), ported("mybox"), "nor is exponent notation")
+eq(Client.setJoinAddress(Client, "mybox:+7788"), ported("mybox"), "nor a signed number")
+
+-- Every space goes, wherever it is. The grid has a space glyph and no
+-- address has any use for one, so a space is only ever something that was
+-- easy to type -- and taking them all out is what keeps this string and the
+-- codeKey the passcode is filed under identical.
+eq(Client.setJoinAddress(Client, "  mybox  "), ported("mybox"),
+   "spaces around an address are removed, not carried into the hostname")
+eq(Client.setJoinAddress(Client, "my box . com"), ported("mybox.com"),
+   "and so are spaces in the middle of one")
+
+-- A port held off its colon by a space is still the port the player meant,
+-- so it survives rather than reading as a port that was never given. Spelled
+-- out rather than built from DEFAULT_PORT: the point is that 7788 here came
+-- from what was typed, which is only visible if the two cannot coincide.
+eq(Client.setJoinAddress(Client, "mybox: 7788"), "mybox:7788",
+   "a typed port keeps its value across the space that was in front of it")
+eq(Client.setJoinAddress(Client, " mybox : 1234 "), "mybox:1234",
+   "and the spaces around a full address do not cost it its port either")
+
+eq(Client.setJoinAddress(Client, ported("mybox")), ported("mybox"),
+   "a port that was typed is stored exactly as typed")
+eq(Client.setJoinAddress(Client, "mybox:1"), "mybox:1",
+   "and a deliberately odd one is not second-guessed")
+
+eq(Client.setJoinAddress(Client, ":7788"), nil,
+   "an address with no host is refused -- there is nothing there to dial")
+eq(Client.setJoinAddress(Client, "   "), nil, "and so is whitespace alone")
+eq(Client.joinAddress(), "mybox:1", "neither of which disturbed what was stored")
+
+-- The option row is a text field a player edits in the mod manager, so it
+-- arrives with the same freedoms. Reads complete it too, not just writes.
+stubSave.hub = nil
+stubOptions.hub = "hub.example.com"
+eq(Client.joinAddress(), ported("hub.example.com"),
+   "an option row typed without a port is completed on the way out")
+stubOptions.hub, stubSave.hub = "10.0.0.9:7788", "mybox:1"
+
 eq(Client.isHosting(), false, "a fresh client is not hosting")
 
 -- ------- the claim ticket, as the client keeps it
@@ -11907,6 +11981,21 @@ do
      "surrounding whitespace is stripped before the port is filled in")
   eq(spaced.key, expectedMixed:lower(),
      "the key is lower-cased and holds no whitespace, however it was typed")
+
+  local stoppedAtColon = store:record("colon-host:")
+  eq(stoppedAtColon.address, ("colon-host:%d"):format(Config.DEFAULT_PORT),
+     "a remembered server treats an empty port slot as the default port too")
+
+  local badPort = store:record("bad-port.example:nope")
+  eq(badPort.address, ("bad-port.example:%d"):format(Config.DEFAULT_PORT),
+     "and so does a non-numeric port slot")
+
+  local impossiblePort = store:record("bad-port.example:99999")
+  eq(impossiblePort.address, ("bad-port.example:%d"):format(Config.DEFAULT_PORT),
+     "or a numeric port no socket can dial")
+
+  eq(store:record(":7788"), nil,
+     "but a remembered server still needs a host, not only a port")
 
   local ported = store:record("already.has.a.port:9191")
   eq(ported.address, "already.has.a.port:9191",

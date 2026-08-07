@@ -189,10 +189,43 @@ end
 -- read out would dial a port nothing is listening on and be told the relay
 -- was unreachable. Applied on every read and every write, so the string
 -- that is dialled is also the string a join code is filed under.
+--
+-- The question is not "is there a colon" but "is there a port behind it".
+-- The grid carries a space glyph, a colon and no obligation to use either
+-- well, so a player types "mybox:" as readily as "mybox", and both mean the
+-- same thing: they did not choose a port. Detecting only ":<digits>" turned
+-- the first into "mybox::7788" -- a *different* broken address, dialled at
+-- host "mybox:", which reads to the player as the hub being down. So the
+-- slot after the last colon is checked rather than merely spotted, and
+-- anything that is not a number luasocket can dial -- empty, non-numeric,
+-- or out of range -- means no port was given and 7788 fills it in. An
+-- explicit, dialable port is never touched.
+--
+-- Every space goes, not just the ones on the ends, because codeKey (below)
+-- already strips whitespace and this did not: a space anywhere filed the
+-- passcode under one string and dialled another. No address wants one --
+-- neither a hostname nor an IP may contain a space, so a space is only ever
+-- something the grid made easy to type. Taking them all out is also what
+-- lets "mybox: 7788" keep the port it plainly means, rather than reading as
+-- a port that was never given. An address with no host at all (":7788") is
+-- refused rather than completed, because there is nothing there to dial and
+-- nothing this function could invent -- the same answer "" already gets.
 local function withPort(address)
-  if type(address) ~= "string" or address == "" then return nil end
-  if address:match(":%d+$") then return address end
-  return ("%s:%d"):format(address, Config.DEFAULT_PORT)
+  if type(address) ~= "string" then return nil end
+  local clean = address:gsub("%s+", "")
+  if clean == "" then return nil end
+
+  local host, slot = clean:match("^(.*):([^:]*)$")
+  if not host then return ("%s:%d"):format(clean, Config.DEFAULT_PORT) end
+  if host == "" then return nil end
+
+  -- Digits first, then the number: tonumber alone accepts "0x1E", "1e3" and
+  -- "+7788", none of which Net's own ":%d+" would match on the way back out.
+  -- Reading the slot more liberally than the code downstream of it is how an
+  -- address gets called complete and then dialled on 7778.
+  local port = slot:match("^%d+$") and tonumber(slot)
+  if port and port > 0 and port < 65536 then return clean end
+  return ("%s:%d"):format(host, Config.DEFAULT_PORT)
 end
 
 function M.joinAddress()

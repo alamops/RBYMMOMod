@@ -57,10 +57,14 @@ local function normalize(address)
   if type(address) ~= "string" then return nil end
   local clean = address:gsub("%s+", "")
   if clean == "" then return nil end
-  if not clean:match(":%d+$") then
-    clean = ("%s:%d"):format(clean, Config.DEFAULT_PORT)
-  end
-  return clean
+
+  local host, slot = clean:match("^(.*):([^:]*)$")
+  if not host then return ("%s:%d"):format(clean, Config.DEFAULT_PORT) end
+  if host == "" then return nil end
+
+  local port = slot:match("^%d+$") and tonumber(slot)
+  if port and port > 0 and port < 65536 then return clean end
+  return ("%s:%d"):format(host, Config.DEFAULT_PORT)
 end
 
 local function keyOf(address)
