@@ -44,11 +44,13 @@
  *
  * Exit codes: 0 success, 1 runtime error, 2 usage error.
  *
- * Two verbs -- `kick` and `broadcast` -- are instructions rather than
- * questions, and a file cannot carry an instruction. They dial the running
- * hub's admin socket (lib/admin.js) instead: one JSON line out, one JSON line
- * back, connection closed. That is the only thing here that talks to a live
- * hub; everything else still reads a file and says how old it is.
+ * Three verbs need the hub itself rather than a file. `kick` and `broadcast`
+ * are instructions, and a file cannot carry an instruction; `stats` is a
+ * question, but about counters that live in the hub's memory and reach no
+ * file at all. All three dial the running hub's admin socket (lib/admin.js):
+ * one JSON line out, one JSON line back, connection closed. That is the only
+ * thing here that talks to a live hub; everything else still reads a file and
+ * says how old it is.
  *
  * No dependencies: node:fs, node:net, node:path, node:readline/promises.
  */
@@ -157,9 +159,9 @@ const ADMIN_TIMEOUT_MS = 5000;
 
 /*
  * The ceiling on a reply this reads before giving up on it. `kick` and
- * `broadcast` answer in a few dozen bytes; anything past this is not the hub
- * speaking the protocol, and reading it into memory unbounded would be the
- * one thing a CLI verb has no excuse for.
+ * `broadcast` answer in a few dozen bytes and `stats` in a few hundred;
+ * anything past this is not the hub speaking the protocol, and reading it
+ * into memory unbounded would be the one thing a CLI verb has no excuse for.
  */
 const ADMIN_MAX_RESPONSE_BYTES = 1024 * 1024;
 
@@ -463,13 +465,16 @@ const HELP = {
     '  history [-n N] [--json]     settled ranked battles, newest first',
     '',
     'While the hub is running',
+    '  stats [--json]              its live counters: seats, connections, and',
+    '                              the wrong-passcode throttle as it stands now',
     '  kick <name> [--reason X]    remove somebody who is connected now',
     '  broadcast <text>            say one line to everybody in the world',
     '',
-    '  Both of these are instructions rather than questions, so they need the',
-    '  hub itself: they speak to the admin socket it keeps beside its config',
-    '  file. Run them where the hub runs -- in Docker, that is',
-    `  \`docker compose exec hub ${PROGRAM} ...\`.`,
+    '  All three need the hub itself and not a file: the last two are',
+    '  instructions, and no file can carry one; the counters `stats` prints',
+    '  live in the hub\'s memory and are written nowhere. They speak to the',
+    '  admin socket it keeps beside its config file. Run them where the hub',
+    `  runs -- in Docker, that is \`docker compose exec hub ${PROGRAM} ...\`.`,
     '',
     'Who may join',
     '  invite [options]            mint a new join code and print it once',
@@ -623,6 +628,32 @@ const HELP = {
     'A line the reader cannot parse is skipped rather than fatal: the ledger is',
     'appended to, so a hub that was killed mid-write leaves a torn last line --',
     'in either generation, since a rotation freezes whatever it left behind.',
+  ],
+  stats: [
+    `Usage: ${PROGRAM} stats [--json]`,
+    '',
+    'The counters of the hub that is running right now, asked of the hub',
+    `itself. What \`${PROGRAM} status\` prints about limits is what they are`,
+    '*configured* to be; this is what they *are* -- numbers that live in the',
+    'hub\'s memory, are written to no file, and go when the process does.',
+    '',
+    '  The hub    where it is bound, how long it has been up, the protocol it',
+    '             speaks, how many of its seats are taken, and how many',
+    '             connections are still finding their way into the world.',
+    '  The door   connections open and handshakes not finished yet, how many',
+    '             wrong passcodes have arrived recently against the ceiling',
+    '             that trips, whether that ceiling is tripped this second, and',
+    '             how many addresses are backing off or still remembered.',
+    '',
+    '  --json    the hub\'s own answer, as JSON, for a script.',
+    '',
+    'Addresses are counted here and never printed, in either form -- the same',
+    `discipline the rosters keep. \`${PROGRAM} players\` is who is connected, by`,
+    'name; `ban` and `unban` are what an address is for.',
+    '',
+    `Needs the hub running on this machine (${ADMIN_FILENAME}, beside the config`,
+    'file). In Docker:',
+    `    docker compose exec hub ${PROGRAM} stats`,
   ],
   kick: [
     `Usage: ${PROGRAM} kick <name> [--reason TEXT]`,
@@ -1732,12 +1763,13 @@ function verbInviteList(ctx) {
   ctx.say('');
   if (credentials.some((credential) => auth.isAdminCredential(credential))) {
     ctx.say('KIND ADMIN: joins the game like any code, but the hub marks the');
-    ctx.say('connection for the operator features arriving in game later, and');
-    ctx.say(`shows it as ADMIN here and in the rosters. \`${PROGRAM} revoke <id>\``);
-    ctx.say('takes one back.');
+    ctx.say('connection for the operator features arriving in game later. Here that');
+    ctx.say('mark is the word ADMIN in this column; in the rosters -- status.json,');
+    ctx.say('`players --json`, and the `who` answer on the admin socket -- it is an');
+    ctx.say(`\`admin\` flag on the connection. \`${PROGRAM} revoke <id>\` takes one back.`);
   } else {
     ctx.say(`KIND: none of these is an admin code. \`${PROGRAM} invite --admin\` mints`);
-    ctx.say('one; the hub marks that connection and shows it as ADMIN.');
+    ctx.say('one; the hub marks that connection, and this column reads ADMIN for it.');
   }
   ctx.say('');
   if (reveal) {
@@ -3059,9 +3091,10 @@ function verbHistory(ctx, rest) {
  * The other half of the CLI's relationship with the hub.
  *
  * Everything above reads a file and is honest about its age, which is the
- * right shape for a question and useless for an instruction: no file can
- * remove a player. `kick` and `broadcast` dial the admin socket lib/admin.js
- * binds beside the config file -- one JSON line out, one JSON line back,
+ * right shape for most questions and useless for an instruction: no file can
+ * remove a player, and no file holds a counter the hub keeps only in memory.
+ * `stats`, `kick` and `broadcast` dial the admin socket lib/admin.js binds
+ * beside the config file -- one JSON line out, one JSON line back,
  * connection closed. No auth travels here: the socket lives in the data
  * directory, and anybody who can open it can already read every join code in
  * config.json (plan §8.4).
@@ -3221,6 +3254,154 @@ async function adminExchange(ctx, request, example) {
     return { code: ERROR };
   }
   return { response: parsed };
+}
+
+/**
+ * A label/value block, aligned. Two columns and no header, because these are
+ * not rows of a list -- each line is one counter and its reading, and a
+ * `COUNTER  VALUE` header over six of them would be furniture.
+ */
+function printPairs(ctx, pairs) {
+  const width = Math.max(...pairs.map(([label]) => label.length));
+  for (const [label, value] of pairs) ctx.say(`  ${pad(label, width)}  ${value}`);
+}
+
+/** An object the hub sent, or an empty one. Never an array, never a string. */
+function asObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+/**
+ * How many addresses a `perIp` map counted -- never which ones.
+ */
+function addressCount(node) {
+  const perIp = node && typeof node.perIp === 'object' && node.perIp !== null
+    ? node.perIp : null;
+  return perIp === null ? null : Object.keys(perIp).length;
+}
+
+/**
+ * `3 connection(s) not in the world yet`, or a dash for a hub that did not
+ * say. The noun carries its own plural, because "address(es)" and
+ * "connection(s)" do not take the same one and a counter is not worth a
+ * pluralisation rule.
+ */
+function countOf(value, noun, tail) {
+  const count = finite(value);
+  if (count === null) return '-';
+  return `${count} ${noun} ${tail}`;
+}
+
+/*
+ * The hub's answer, with the addresses taken out of it.
+ *
+ * `perIp` -- at both the levels it appears on, the hub's own and the
+ * limiter's -- is a map keyed by the address each connection came from, and
+ * other people's addresses are not output material here: the rosters do not
+ * carry them, `players` does not print them, and a `stats` a host might paste
+ * into a bug report must not be the one place they leak from. What is
+ * operationally useful about that map is how many keys it has, so a count
+ * takes its place under a name that cannot be mistaken for the map itself.
+ *
+ * Dropped explicitly rather than by projecting an allowlist of fields: a
+ * counter the hub grows later should reach a script through here without
+ * anybody remembering to add it, while this one still does not.
+ */
+function statsWithoutAddresses(stats) {
+  const strip = (node) => {
+    const copy = Object.assign({}, node);
+    const count = addressCount(node);
+    delete copy.perIp;
+    if (count !== null) copy.addresses = count;
+    return copy;
+  };
+
+  const out = strip(stats);
+  if (stats.limits && typeof stats.limits === 'object' && !Array.isArray(stats.limits)) {
+    out.limits = strip(stats.limits);
+  }
+  return out;
+}
+
+/*
+ * The question this channel answers that no file can.
+ *
+ * `status` prints what the limits are configured to be, off the config file,
+ * and is honest that they are configured numbers. The live readings -- open
+ * connections, handshakes in flight, how many wrong passcodes have actually
+ * arrived and whether the hub-wide ceiling is tripped this second -- exist
+ * only in the running process and are written nowhere, so this verb is the
+ * whole of the answer to "what is happening at the door right now".
+ */
+async function verbStats(ctx) {
+  const result = await adminExchange(ctx, { cmd: 'stats' }, 'stats');
+  if (result.code !== undefined) return result.code;
+
+  const stats = asObject(result.response.stats);
+  const door = asObject(stats.limits);
+  const guesses = asObject(door.auth);
+
+  if (ctx.flags.json === true) {
+    ctx.say(JSON.stringify(statsWithoutAddresses(stats), null, 2));
+    return OK;
+  }
+
+  const players = finite(stats.players);
+  const maxPlayers = finite(stats.maxPlayers);
+  const uptimeMs = finite(stats.uptimeMs);
+  const where = stats.host === undefined || stats.port === undefined
+    ? '-' : `${plain(stats.host, 45)}:${plain(stats.port, 5)}`;
+
+  ctx.say('The hub');
+  printPairs(ctx, [
+    ['address', where],
+    ['uptime', uptimeMs === null ? '-' : humanAge(uptimeMs)],
+    ['protocol', plain(stats.protocol, 12) || '-'],
+    ['players', players === null ? '-'
+      : `${players}${maxPlayers === null ? '' : ` of ${maxPlayers}`}`],
+    ['pending', countOf(stats.pending, 'connection(s)', 'not in the world yet')],
+  ]);
+
+  const connections = finite(door.connections);
+  const addresses = addressCount(door);
+  const recent = finite(guesses.recentFailures);
+  const threshold = finite(guesses.failureThreshold);
+  const windowMs = finite(guesses.windowMs);
+  const lockdownMs = finite(guesses.lockdownMs);
+
+  ctx.say('');
+  ctx.say('The door');
+  printPairs(ctx, [
+    ['connections', connections === null ? '-'
+      : `${connections} open` +
+        (addresses === null ? '' : `, from ${addresses} address(es)`)],
+    ['handshakes', countOf(door.pending, 'connection(s)', 'still to be greeted')],
+    ['wrong codes', recent === null ? '-'
+      : `${recent}${threshold === null ? '' : ` of ${threshold}`}` +
+        (windowMs === null ? '' : ` in the last ${humanMs(windowMs)}`)],
+    ['lockdown', guesses.lockdown === true
+      ? `YES -- new joins refused${lockdownMs ? ` for another ${humanAge(lockdownMs)}` : ''}`
+      : 'no'],
+    ['throttled', countOf(guesses.throttledAddresses, 'address(es)', 'backing off now')],
+    ['tracked', countOf(guesses.trackedAddresses, 'address(es)', 'with failures remembered')],
+  ]);
+
+  ctx.say('');
+  ctx.say('Live counters, read from the hub itself: they are kept in its memory,');
+  ctx.say(`written to no file, and gone when it stops. \`${PROGRAM} status\` prints`);
+  ctx.say('what the same limits are *configured* to be, which is the other half of');
+  ctx.say('the reading. Two pendings, because they are counted either side of the');
+  ctx.say('handshake and a connection in flight is briefly in one and not the other.');
+  if (guesses.lockdown === true) {
+    ctx.say('');
+    ctx.say('The hub-wide ceiling is tripped: new joins are refused until it lifts.');
+    ctx.say('Players already in the world are untouched by it, and it lifts on its');
+    ctx.say('own -- `config set limits.authLockoutMs` is how long for.');
+  }
+  ctx.say('');
+  ctx.say('Addresses are counted and never printed. Who is connected, by name, is');
+  ctx.say(`\`${PROGRAM} players\`.`);
+  return OK;
 }
 
 async function verbKick(ctx, rest) {
@@ -3432,6 +3613,7 @@ async function run(argv, io) {
       case 'watch': return await verbWatch(ctx);
       case 'ranking': return verbRanking(ctx);
       case 'history': return verbHistory(ctx, rest);
+      case 'stats': return await verbStats(ctx);
       case 'kick': return await verbKick(ctx, rest);
       case 'broadcast': return await verbBroadcast(ctx, rest);
       case 'config': return verbConfig(ctx, rest);

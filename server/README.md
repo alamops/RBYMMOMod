@@ -158,6 +158,7 @@ container, where it is on `PATH`.
 | `ranking` | the ranked season out of `ranking.json`: place, name, points, and how many battles each player has won and lost. Top ten, best first. | `--json`, `--all` (every player who has scored, not just the top ten) |
 | `watch` | the `players` frame, repainted until Ctrl-C. Clears the screen between frames only when stdout is a terminal. | `--interval <s>` (seconds between frames, default 2, clamped 1–60), `--once` (one frame, then exit), `--json` |
 | `history` | settled ranked battles out of `history.jsonl` and the rotated `history.jsonl.1`, newest first: when, who beat whom, and what it moved. | `-n N` (how many, default 20), `--json` (the same cut as one JSON array, projected records, newest first) |
+| `stats` ‡ | the running hub's **live** counters: where it is bound, how long it has been up, seats taken, and the door — connections, handshakes in flight, wrong passcodes against the ceiling that trips, lockdown, and how many addresses are backing off. Counted from the hub's memory, which is the only place they exist. | `--json` (the hub's own answer, minus the per-address map) |
 | `kick <name>` ‡ | remove a connected player. Matches the name case-insensitively and may hit nobody or several people; says which. | `--reason TEXT` (what the player is shown; defaults to *"An operator removed you from this hub."*) |
 | `broadcast <text>` ‡ | say one line to everybody connected. It arrives in their chat log as `HUB`. | — |
 | `config list` | every setting, its current value, and its clamp range | — |
@@ -178,7 +179,7 @@ container, where it is on `PATH`.
 until you tell it to look.** See
 [Changing things while the hub is running](#changing-things-while-the-hub-is-running).
 
-‡ **These two are the opposite: they talk to the running hub and touch no
+‡ **These three are the opposite: they talk to the running hub and touch no
 file at all.** They dial `admin.sock` beside the config, so they work only
 while the hub is up — see [Talking to a hub that is
 running](#talking-to-a-hub-that-is-running).
@@ -367,10 +368,12 @@ battle, which the hub scores lower than the first.
 ### Talking to a hub that is running
 
 `players`, `watch`, `history` and `ranking` all read files, which is why they
-work on a hub that is switched off. **`kick` and `broadcast` are the other
-kind**: they are instructions, they need the hub to be up, and they reach it
-through a Unix socket the running hub opens beside its config —
-`admin.sock`.
+work on a hub that is switched off. **`stats`, `kick` and `broadcast` are the
+other kind**: they need the hub to be up, and they reach it through a Unix
+socket the running hub opens beside its config — `admin.sock`. `kick` and
+`broadcast` are instructions, and no file can carry one; `stats` is a
+question, but about counters that live in the hub's memory and are written
+nowhere.
 
 ```console
 $ docker compose exec hub rby-mmo-hub broadcast Server restart in 5 minutes.
@@ -412,9 +415,88 @@ or `revoke <id>`, then a reload, is what keeps somebody out.
   is why a player connecting as `HUB`, in any spelling, is refused and asked
   to pick another name.
 
-**When the socket is not there**, both verbs say the two things that can mean,
-and exit `0` — an absent hub is an answer, the same way `players` treats a
-missing snapshot:
+**`rby-mmo-hub stats` is the reading no file holds.** `status` prints what the
+limits are *configured* to be, off `config.json`; the counters below are what
+they *are* right now, and they exist only in the running process:
+
+```console
+$ docker compose exec hub rby-mmo-hub stats
+The hub
+  address   0.0.0.0:7788
+  uptime    14s
+  protocol  5
+  players   3 of 8
+  pending   1 connection(s) not in the world yet
+
+The door
+  connections  4 open, from 1 address(es)
+  handshakes   1 connection(s) still to be greeted
+  wrong codes  1 of 100 in the last 1m
+  lockdown     no
+  throttled    0 address(es) backing off now
+  tracked      1 address(es) with failures remembered
+
+Live counters, read from the hub itself: they are kept in its memory,
+written to no file, and gone when it stops. `rby-mmo-hub status` prints
+what the same limits are *configured* to be, which is the other half of
+the reading. Two pendings, because they are counted either side of the
+handshake and a connection in flight is briefly in one and not the other.
+
+Addresses are counted and never printed. Who is connected, by name, is
+`rby-mmo-hub players`.
+```
+
+- **`wrong codes` is a windowed estimate, not a tally.** The hub-wide counter
+  decays across its window rather than resetting on a boundary, so it is
+  rounded on the way out and reads a little under a burst that is already
+  ageing. The `of 100` beside it is `limits.authGlobalFailures`, so the
+  reading always carries its own scale; `lockdown` says whether that ceiling
+  is tripped this second, and for how much longer.
+- **Two pendings, and they are different counters.** The hub's is connections
+  that have not become players; the door's is connections the limiter has
+  accepted and not yet seen greeted. They are the same event counted either
+  side of the handshake, so a connection in flight is briefly in one and not
+  the other.
+- **No address is ever printed, in either form.** The socket's answer carries
+  a `perIp` map keyed by the address each connection came from; this verb
+  counts its keys and drops the map — `--json` drops it too, replacing it
+  with an `addresses` count at each level it appeared on. Who is connected by
+  name is `players`; an address is `ban`'s business, not a report's.
+
+```console
+$ rby-mmo-hub stats --json
+{
+  "host": "0.0.0.0",
+  "port": 7788,
+  "protocol": 5,
+  "maxPlayers": 8,
+  "players": 3,
+  "pending": 1,
+  "connections": 4,
+  "authRequired": true,
+  "startedAt": 1786061988945,
+  "uptimeMs": 14374,
+  "limits": {
+    "connections": 4,
+    "pending": 1,
+    "auth": {
+      "recentFailures": 1,
+      "failureThreshold": 100,
+      "windowMs": 60000,
+      "lockdown": false,
+      "lockdownMs": 0,
+      "throttledAddresses": 0,
+      "trackedAddresses": 1
+    },
+    "addresses": 1
+  },
+  "addresses": 1
+}
+```
+
+**When the socket is not there**, all three verbs say the two things that can
+mean, and exit `0` — an absent hub is an answer, the same way `players` treats
+a missing snapshot:
 
 ```
 $ rby-mmo-hub broadcast hello
@@ -609,9 +691,10 @@ primary   Primary join code  2026-08-06 17:56  never    0     active  player  **
 32d04096  Me                 2026-08-06 17:56  never    0     active  ADMIN   ******
 
 KIND ADMIN: joins the game like any code, but the hub marks the
-connection for the operator features arriving in game later, and
-shows it as ADMIN here and in the rosters. `rby-mmo-hub revoke <id>`
-takes one back.
+connection for the operator features arriving in game later. Here that
+mark is the word ADMIN in this column; in the rosters -- status.json,
+`players --json`, and the `who` answer on the admin socket -- it is an
+`admin` flag on the connection. `rby-mmo-hub revoke <id>` takes one back.
 
 Codes are masked. --reveal prints them in full.
 ```
@@ -639,8 +722,11 @@ container with `docker compose exec hub rby-mmo-hub …`, or straight against th
 config with `--config` on bare Node. Everything a page could have drawn is
 already a verb: [`watch`](#watching-it-happen) for the live frame,
 [`players`](#who-is-on-it-and-who-is-winning) for one reading of it,
-[`ranking`](#who-is-on-it-and-who-is-winning) for the season and
-[`history`](#what-has-been-played) for the battles behind it. Reached that way
+[`ranking`](#who-is-on-it-and-who-is-winning) for the season,
+[`history`](#what-has-been-played) for the battles behind it, and
+[`stats`](#talking-to-a-hub-that-is-running) for the live door counters —
+connections, handshakes in flight, wrong passcodes and lockdown — which are
+kept in the hub's memory and reach no file at all. Reached that way
 it is **encrypted and authenticated by SSH itself**, with the host's own keys
 and the host's own account — which is a better answer than this program could
 have written for itself, since it carries no TLS anywhere and never will while
@@ -793,10 +879,12 @@ cannot otherwise ask it — who is connected, and where:
   reports on.
 
 And the socket: **`admin.sock`**, opened by the running hub beside its config
-and removed when it stops. It is what [`kick` and
-`broadcast`](#talking-to-a-hub-that-is-running) dial, and it carries two more
-commands nothing ships a verb for yet — `who`, the live roster, and `stats`,
-the hub's counters including the wrong-passcode throttle's live numbers.
+and removed when it stops. It is what [`stats`, `kick` and
+`broadcast`](#talking-to-a-hub-that-is-running) dial. It answers four
+commands: `stats`, `kick` and `broadcast` each have a verb of their own, and
+`who` — the live roster — is the one with no verb yet, because
+[`players`](#who-is-on-it-and-who-is-winning) already answers that question
+off the snapshot without needing the hub to be up.
 
 ```console
 $ printf '{"cmd":"who"}\n' | nc -U /data/admin.sock
@@ -895,9 +983,9 @@ running hub and show up in its log, not in this command):
 Those are the **configured** numbers, not a live reading. How many wrong
 passcodes have actually arrived is known to the running hub, which says so in
 its own log; `status` and `doctor` are short-lived processes that read a file
-and do not ask it. The live counts are reachable one other way —
-`admin.sock`'s `stats` command, which talks to the running process rather
-than to a file. `doctor` also
+and do not ask it. The live counts have their own verb —
+[`rby-mmo-hub stats`](#talking-to-a-hub-that-is-running), which asks the
+running process over `admin.sock` rather than reading a file. `doctor` also
 warns about settings that would bite the host rather than an attacker — a
 `authGlobalFailures` no higher than `maxPlayers`, for instance, means a full
 house mistyping the passcode once each can shut new joins.
@@ -999,7 +1087,8 @@ WARN reload: listen.host, listen.port and maxPlayers were not re-applied -- they
 The rest of the file — `limits.*`, `log.level`, `network.upnp.*` — is not
 re-applied and not remarked on either. Restart for those.
 
-Two things a reload does **not** do, both worth knowing before you rely on it:
+Three things about a reload worth knowing before you rely on it — one it does
+not do, one it does, and one that happens when the file will not read:
 
 - **It does not disconnect anybody.** Bans and the allowlist are checked when a
   connection is *admitted*. Someone already in the world stays there; a
