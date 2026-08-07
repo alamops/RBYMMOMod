@@ -73,6 +73,24 @@ local function keyOf(address)
   return clean:lower()
 end
 
+-- The one row that belongs to the product rather than to the player's
+-- history. A fresh table is returned every time so a caller of the exported
+-- list cannot rename the canonical copy in memory. The key is made by the
+-- same normaliser as every remembered hub, which is what lets ingestion and
+-- presentation recognise an old saved copy as the same server.
+local FEATURED_KEY = keyOf(Config.FEATURED_SERVER_HOST)
+local function featuredEntry()
+  return {
+    key = FEATURED_KEY,
+    address = Config.FEATURED_SERVER_HOST,
+    name = Config.FEATURED_SERVER_NAME,
+    fav = false,
+    code = Wire.code(Config.FEATURED_SERVER_CODE),
+    last = 0,
+    featured = true,
+  }
+end
+
 -- What a hub is called before anybody names it.
 --
 -- Its own address, which is the only thing known about it at record time and
@@ -236,7 +254,10 @@ end
 function M:_ingest(rows, only)
   for _, raw in ipairs(rows or {}) do
     local entry = sanitise(raw)
-    if entry then
+    -- Older builds may already have remembered the official address after a
+    -- successful welcome. It is represented by the synthetic row now, so it
+    -- is neither loaded into the persisted store nor counted by eviction.
+    if entry and entry.key ~= FEATURED_KEY then
       local known = self.entries[entry.key] ~= nil or self.dropped[entry.key]
       if not (only and known) then self.entries[entry.key] = entry end
     end
@@ -302,10 +323,10 @@ function M:_load()
   evict(self)
 end
 
--- Sorted the way the menu draws them, so the array is also what gets written:
--- favourites first, and within each group the address descending. Descending
--- because that is what was asked for; the keys are unique, so there are no
--- ties to break.
+-- The persisted rows in their display order, and the exact array that gets
+-- written: favourites first, and within each group the address descending.
+-- The featured row is deliberately not made here, because this helper also
+-- feeds both persistence mirrors and that row must never consume saved space.
 function M:_rows()
   local out = {}
   for _, entry in pairs(self.entries) do out[#out + 1] = entry end
@@ -374,7 +395,11 @@ function M:_persist(keep)
   return true
 end
 
--- ------- the API the menus and Client use
+-- ------- persisted recents API
+--
+-- Client exposes list() through mod.exports.servers, so these two methods are
+-- deliberately only the player's recorded history. Product-owned rows belong
+-- to the menu projection below and must not leak into that existing API.
 
 function M:list()
   self:_load()
@@ -387,6 +412,31 @@ function M:get(key)
   self:_load()
   local id = keyOf(key)
   if not id then return nil end
+  return self.entries[id]
+end
+
+-- The SERVERS screen has one product-owned row in addition to persisted
+-- recents. Keep that projection separate from list/get so external callers
+-- still see exactly the history they saw before the featured server existed.
+function M:menuList()
+  self:_load()
+  local out = { featuredEntry() }
+  for _, entry in ipairs(self:_rows()) do
+    -- `_ingest` and `record` already keep this key out of entries. Retain the
+    -- guard at the projection boundary too: even a caller that has modified
+    -- the public entries table cannot make the official server appear twice.
+    if entry.key ~= FEATURED_KEY then out[#out + 1] = entry end
+  end
+  return out
+end
+
+-- Resolves keys handed back by menuList(), including its synthetic first row.
+-- Normal get() intentionally does not: it remains the persisted-recents API.
+function M:menuGet(key)
+  self:_load()
+  local id = keyOf(key)
+  if not id then return nil end
+  if id == FEATURED_KEY then return featuredEntry() end
   return self.entries[id]
 end
 
@@ -407,6 +457,13 @@ function M:record(address, code)
   end
 
   local key = clean:lower()
+  -- A welcome from the official hub proves the synthetic row works; it does
+  -- not turn product configuration into player history. In particular this
+  -- skips persistence and eviction, and keeps the configured code canonical.
+  if key == FEATURED_KEY then
+    self.entries[key] = nil
+    return featuredEntry()
+  end
   local entry = self.entries[key]
   if not entry then
     entry = { key = key, address = clean, name = defaultName(clean),
@@ -430,10 +487,18 @@ end
 -- refused when nothing printable survives -- a blank row is a row nobody can
 -- tell from the one above it.
 function M:rename(key, name)
+  if keyOf(key) == FEATURED_KEY then
+    self:_warn("the featured server is built in and cannot be renamed")
+    return nil
+  end
   local entry = self:get(key)
   if not entry then
     self:_warn("no server is stored for %s, so it cannot be renamed -- connect "
       .. "to it once from START > MMO > JOIN GAME", tostring(key))
+    return nil
+  end
+  if entry.featured then
+    self:_warn("the featured server is built in and cannot be renamed")
     return nil
   end
   local clean = Wire.text(name, Config.SERVER_NAME_MAX)
@@ -448,10 +513,18 @@ function M:rename(key, name)
 end
 
 function M:setFavorite(key, fav)
+  if keyOf(key) == FEATURED_KEY then
+    self:_warn("the featured server is already pinned and cannot be changed")
+    return nil
+  end
   local entry = self:get(key)
   if not entry then
     self:_warn("no server is stored for %s, so it cannot be favourited -- "
       .. "connect to it once from START > MMO > JOIN GAME", tostring(key))
+    return nil
+  end
+  if entry.featured then
+    self:_warn("the featured server is already pinned and cannot be changed")
     return nil
   end
   entry.fav = fav and true or false
@@ -468,6 +541,10 @@ end
 -- only answer that leaves one row per hub -- and the alternative, refusing the
 -- edit, would strand the player with two rows and no way to merge them.
 function M:setAddress(key, newAddress)
+  if keyOf(key) == FEATURED_KEY then
+    self:_warn("the featured server's address is built in and cannot be changed")
+    return nil
+  end
   local entry = self:get(key)
   if not entry then
     self:_warn("no server is stored for %s, so its address cannot be changed "
@@ -482,6 +559,10 @@ function M:setAddress(key, newAddress)
   end
 
   local id = clean:lower()
+  if entry.featured or id == FEATURED_KEY then
+    self:_warn("the featured server's address is built in and cannot be changed")
+    return nil
+  end
   if id ~= entry.key then
     self.entries[entry.key] = nil
     self.dropped[entry.key] = true
@@ -503,10 +584,18 @@ end
 -- through to the connect path and fail every challenge silently, which is the
 -- failure this validation exists to turn into a sentence.
 function M:setCode(key, code)
+  if keyOf(key) == FEATURED_KEY then
+    self:_warn("the featured server's join code is built in and cannot be changed")
+    return nil
+  end
   local entry = self:get(key)
   if not entry then
     self:_warn("no server is stored for %s, so its join code cannot be set -- "
       .. "connect to it once from START > MMO > JOIN GAME", tostring(key))
+    return nil
+  end
+  if entry.featured then
+    self:_warn("the featured server's join code is built in and cannot be changed")
     return nil
   end
   local clean = Wire.code(code)
@@ -533,11 +622,19 @@ end
 -- does: this is the one write that wants the list shorter, so the eviction
 -- that follows a fold-in has no row here to protect.
 function M:remove(key)
+  if keyOf(key) == FEATURED_KEY then
+    self:_warn("the featured server is built in and cannot be deleted")
+    return nil
+  end
   local entry = self:get(key)
   if not entry then
     self:_warn("no server is stored for %s, so there is nothing to delete -- "
       .. "open START > MMO > SERVERS and pick a row that is on the list",
       tostring(key))
+    return nil
+  end
+  if entry.featured then
+    self:_warn("the featured server is built in and cannot be deleted")
     return nil
   end
   self.entries[entry.key] = nil

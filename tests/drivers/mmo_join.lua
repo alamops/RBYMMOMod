@@ -1063,11 +1063,11 @@ return function(game)
               -- The same row the SERVERS leg above just dialled through,
               -- but this pass is destructive on purpose: reopen it, pick
               -- the entry, DELETE it, answer CONFIRM's box YES, and check
-              -- both halves of what that promises -- the store side
-              -- (mod.exports.servers() empty) and the menu side (the MMO
-              -- menu drops the SERVERS row once the list behind it is
-              -- empty, the same rule that keeps the row off the menu
-              -- before any hub has ever been recorded).
+              -- both halves of what that promises -- the saved-history side
+              -- (mod.exports.servers() empty) and the menu side (SERVERS
+              -- stays reachable, with only the product-owned official row
+              -- left behind). The featured row is deliberately outside the
+              -- exported recents, so these two answers are meant to differ.
               local deleteLabel = H.serverLabel(exports, dialled)
               if H.openMmo(game) and H.selectLabel(game, "SERVERS")
                  and H.selectLabel(game, deleteLabel) then
@@ -1104,7 +1104,7 @@ return function(game)
                   local afterDelete = (type(exports.servers) == "function"
                                         and exports.servers()) or nil
                   check(type(afterDelete) == "table" and #afterDelete == 0,
-                        "DELETE, confirmed, empties the SERVERS list "
+                        "DELETE, confirmed, empties the saved server list "
                           .. ("(got %d row(s))")
                             :format(type(afterDelete) == "table"
                                     and #afterDelete or -1))
@@ -1115,9 +1115,21 @@ return function(game)
                     for _, l in ipairs(H.menuLabels(game)) do
                       if H.labelMatches(l, "SERVERS") then stillThere = true end
                     end
-                    check(not stillThere,
-                          "and the MMO menu no longer offers a SERVERS row, "
-                            .. "the list behind it now empty")
+                    check(stillThere,
+                          "and the MMO menu still offers SERVERS after the "
+                            .. "last saved server is deleted")
+                    if stillThere then
+                      local reachable = H.selectLabel(game, "SERVERS")
+                      check(reachable,
+                            "and that SERVERS row remains reachable")
+                      if reachable then
+                        local remaining = H.menuLabels(game)
+                        check(#remaining == 1
+                              and H.labelMatches(remaining[1],
+                                                 "RBY MMO OFFICIAL"),
+                              "with only RBY MMO OFFICIAL left at the top")
+                      end
+                    end
                   end
                   H.closeToOverworld(game)
                 else
@@ -1157,7 +1169,8 @@ return function(game)
   --
   -- Everything above proves a chosen character survives a session; this
   -- proves there does not have to be one at all. The CHARACTER row is the
-  -- third one on the offline MMO menu, reachable only while disconnected
+  -- fourth one on the offline MMO menu, after the always-available SERVERS
+  -- row, reachable only while disconnected
   -- (src/Ui.lua's comment on the row explains why: the hub only learns a
   -- sprite at hello, so a mid-game swap would show everyone else the old
   -- one) -- and picking a character through it has to apply immediately,
@@ -1181,9 +1194,9 @@ return function(game)
     U.wait(20)
     local labels = H.menuLabels(game)
     log("offline MMO menu:", table.concat(labels, ","))
-    check(labels[1] == "HOST GAME" and labels[2] == "JOIN GAME"
-          and labels[3] == "CHARACTER",
-          "the offline menu offers HOST GAME, JOIN GAME, then CHARACTER")
+    check(labels[1] == "SERVERS" and labels[2] == "HOST GAME"
+          and labels[3] == "JOIN GAME" and labels[4] == "CHARACTER",
+          "the offline menu offers SERVERS, HOST GAME, JOIN GAME, then CHARACTER")
     U.shot(game, SHOT_DIR .. "/join-mmo-menu-offline.png")
 
     -- Cancelling out of the picker without choosing has to return to this
@@ -1198,7 +1211,7 @@ return function(game)
       U.tap(game, "b")
       U.wait(20)
       local backLabels = H.menuLabels(game)
-      check(backLabels[1] == "HOST GAME",
+      check(backLabels[1] == "SERVERS",
             "cancelling the picker returns to the MMO menu, not TRAINER")
 
       -- Now actually choose one -- NIRE, not the guest's own
@@ -1212,7 +1225,7 @@ return function(game)
         check(picked, "NIRE is a row in the offline picker")
         U.wait(20)
         check(H.classify(H.top(game)) == "menu"
-              and H.menuLabels(game)[1] == "HOST GAME",
+              and H.menuLabels(game)[1] == "SERVERS",
               "choosing a character returns to the MMO menu")
 
         local afterLook = exports.wornLook and exports.wornLook() or nil
