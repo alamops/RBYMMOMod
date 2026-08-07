@@ -92,6 +92,23 @@ function M:setParty(id, party)
   return player
 end
 
+-- The character somebody is wearing, changed mid-session.  The picker is
+-- reachable from the connected menu now, so a face is one more thing that
+-- moves while its player stands still, and the hub rebroadcasts the change
+-- to everybody the way it does a rating.
+--
+-- A field write on the stored table, never `put()`.  Every setter above is
+-- in place for the merge reason; this one has a second: an open trainer
+-- card holds this exact table (Card.new keeps it as `self.player`), so
+-- swapping the entry for a fresh one would leave that card drawing a
+-- player nobody updates again -- the old portrait, on screen, while the
+-- roster below it already knows better.
+function M:setSprite(id, sprite)
+  local player = self.players[id]
+  if player then player.sprite = sprite end
+  return player
+end
+
 function M:remove(id)
   if not self.players[id] then return nil end
   local gone = self.players[id]
