@@ -3,8 +3,8 @@
 ### Kanto, but your friends are in it.
 
 Other trainers walk the same routes you do — real sprites, names over their
-heads, chat bubbles when they talk. Bump into someone outside Viridian and
-trade on the spot. Or throw down, right there on the grass.
+heads, a line in the corner when they talk. Bump into someone outside Viridian
+and trade on the spot. Or throw down, right there on the grass.
 
 A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp).
 
@@ -106,7 +106,7 @@ walks the full configuration of each path, screen by screen.
 Every other player on your map is a **genuine overworld NPC** — right sprite,
 right depth sorting, right palette — walking tile to tile on the engine's own
 16-frame step clock. Not a sprite bolted on top. Nameplates ride over their
-heads; chat bubbles pop when they talk.
+heads; what they say lands in the corner.
 
 Hold **B** on foot and you run — bike speed, no bike, off the moment you're
 biking or surfing — and everyone else sees it too: your avatar steps at that
@@ -167,16 +167,17 @@ is no party left to continue. So does either of you disconnecting.
 ### 💬 TALK TRASH ON A GAME BOY KEYBOARD
 Four scopes, composed on the vanilla naming grid:
 
-| Scope | Who hears it | Floats over your head |
-| --- | --- | --- |
-| `EVERYONE` | the whole hub | ✅ |
-| `NEARBY` | same map, 12 tiles | ✅ |
-| `PARTY` | the friend you teamed up with, anywhere | ✅ |
-| `WHISPER` | one player | ❌ — it's a whisper |
+| Scope | Who hears it |
+| --- | --- |
+| `EVERYONE` | the whole hub |
+| `NEARBY` | same map, 12 tiles |
+| `PARTY` | the friend you teamed up with, anywhere |
+| `WHISPER` | one player |
 
-A party line bubbles and a whisper does not, and that is the same rule rather
-than an exception to it: a bubble is only ever drawn in the game of somebody
-who *received* the line, and the hub sends a party line to the party alone.
+Every one of them pops up in your corner as it arrives — the whisper
+included, because a notification is drawn in *your* game and nowhere else.
+Your own lines do too, under your own name, so a conversation reads as one
+without opening anything.
 
 Unread messages flag the menu with `CHAT*`. And because the vanilla grid has
 **no digits at all**, this mod adds a number page to its own screens —
@@ -190,6 +191,36 @@ it arrives as another `HUB` line. Which is why nobody is allowed to *be*
 `HUB`: a hub's line carries no sender, so the name is the only thing telling
 you the hub said it, and connecting under it is refused with a sentence asking
 you to pick another.
+
+### 🔔 THE CORNER TELLS YOU
+Things happen while you're doing something else. Somebody talks, somebody
+arrives, your party member wins a fight two routes away — none of it is worth
+taking the screen for, and none of it should need a menu to go and find.
+
+So it lands in the **top-left corner** instead: a dark plate, a line of white
+text, gone by itself after **five seconds**, five lines at most and the oldest
+one drops when a sixth arrives. It draws over the finished frame, menus and
+text boxes included, so a line that arrives while you're three levels into
+START is still read where you already are.
+
+What shows up there:
+
+| | Reads as |
+| --- | --- |
+| Anything said to you, in any scope — and your own lines | `[ALPHA]: on my way` |
+| Anyone joining or leaving the hub | `ALPHA joined the server` |
+| Your party member winning, losing, or catching something | `ALPHA captured MEWTWO lv 70` |
+
+That last row is the one a party never used to have. A fight you're not in
+produced nothing anybody else could see, so travelling together meant knowing
+where your friend was standing and nothing about what they were doing. Now
+their wins, their losses and their catches reach **you and nobody else** —
+the hub sends them to the party alone, and the fighter isn't told what they
+just watched happen.
+
+The font is **Press Start 2P**, bundled with the mod under the SIL Open Font
+Licence — the game's own font has no lowercase and no punctuation, which a
+chat line needs both of.
 
 ### 🔁 TRADE — ANYWHERE
 No Cable Club. No Pokémon Center. Walk up, press **A**, pick `TRADE`. It runs
@@ -532,10 +563,12 @@ Same card, same badges, a different trainer on it — `NIRE` on the left,
 
 If someone picks a character your ROM doesn't have, they show up as RED on
 your screen rather than not at all. That covers the artists' characters too,
-for anyone playing with an older copy of the mod — though not one older than
-`0.8.0`, which speaks a protocol the mid-game character change moved: a
-`0.7.x` copy and a `0.8.0` one refuse each other at the door and say which
-version each of them is. **Update the hub and the mod together.**
+for anyone playing with an older copy of the mod — though only one new enough
+to still speak the same protocol. The wire has moved twice since: the mid-game
+character change took it to 7 at `0.8.0`, and the party notifications took it
+to 8 at `0.10.0`. Copies from either side of one of those refuse each other at
+the door and say which version each of them is. **Update the hub and the mod
+together.**
 
 ### 🪪 CHECK THEIR CARD
 Walk up, press **A**, and **PROFILE** sits at the top of the menu — their
@@ -643,7 +676,6 @@ the `PLAYERS` list to start one from.
 | `JOIN` | `127.0.0.1:7788` | where JOIN GAME starts from |
 | `JOIN CODE` | *(empty)* | the passcode used for a hub you haven't typed one for |
 | `MY SPRITE` | RED | who you look like, to everyone including you — the `CHARACTER` row is the in-game way to the same thing, on your own or mid-game, and its choice sticks to your save |
-| `BUBBLES` | on | names and chat over heads |
 | `B TO RUN` | on | hold B on foot to move at bike speed |
 
 These are just the *defaults* — HOST GAME asks the room size every time and
@@ -1166,7 +1198,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `0.9.0` and it ships flagged `experimental` on purpose. The full list
+It's `0.10.0` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 
