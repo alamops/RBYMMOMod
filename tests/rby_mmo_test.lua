@@ -12257,6 +12257,110 @@ do
   eq(withFav[3].key:sub(1, 1), "b", "with b last")
 end
 
+-- ------- featured: a synthetic menu row, never part of persisted recents
+
+do
+  stubSave = {}
+  local store = Servers.new()
+
+  eq(#store:list(), 0,
+     "the persisted-recents list stays empty on a fresh copy")
+  eq(store:get(Config.FEATURED_SERVER_HOST), nil,
+     "and normal get does not expose the product-owned server")
+
+  local menu = store:menuList()
+  eq(#menu, 1, "the menu projection still has the featured server")
+  local featured = menu[1]
+  eq(featured.name, "RBY MMO OFFICIAL", "under its canonical label")
+  eq(featured.address, "play.rbymmo.com:7788",
+     "with the official dial address")
+  eq(featured.code, "QG0251", "and the official join code")
+  eq(featured.key, Config.FEATURED_SERVER_HOST:lower(),
+     "filed under the same normalised key as a recent")
+  eq(featured.featured, true,
+     "marked so the UI can protect product-owned fields")
+
+  local resolved = store:menuGet(featured.key)
+  check(resolved ~= nil, "menuGet resolves the synthetic row")
+  eq(resolved and resolved.address, Config.FEATURED_SERVER_HOST,
+     "to the same official address")
+  eq(resolved and resolved.code, Config.FEATURED_SERVER_CODE,
+     "and the same official code")
+
+  local returned = store:record(Config.FEATURED_SERVER_HOST,
+                                Config.FEATURED_SERVER_CODE)
+  check(returned ~= nil and returned.featured == true,
+        "a welcome from the official hub returns the synthetic entry")
+  eq(#store:list(), 0,
+     "but does not turn the official hub into a persisted recent")
+  eq(store:get(Config.FEATURED_SERVER_HOST), nil,
+     "or make it visible through normal get")
+  eq(stubSave.servers, nil,
+     "and recording only the official hub performs no persistence write")
+end
+
+do
+  -- An older build may already have persisted the official address. Loading
+  -- it must collapse that stale row into the canonical synthetic one, even if
+  -- its user-editable fields disagree. A later ordinary write also cleans it
+  -- out of the mirror instead of writing the legacy copy back.
+  stubSave = { servers = {
+    { address = "PLAY.RBYMMO.COM:7788", name = "Old nickname",
+      fav = true, code = "A7K3P9", last = 99 },
+  } }
+  local store = Servers.new()
+
+  eq(#store:list(), 0,
+     "a saved copy of the official address is not counted as a recent")
+  local menu = store:menuList()
+  eq(#menu, 1, "the saved official address is deduped in the menu")
+  eq(menu[1].name, Config.FEATURED_SERVER_NAME,
+     "and the synthetic row keeps its canonical label")
+  eq(menu[1].code, Config.FEATURED_SERVER_CODE,
+     "rather than a code from the stale saved row")
+
+  store:record("ordinary-after-upgrade.example")
+  eq(#stubSave.servers, 1,
+     "the next persistence write contains only the ordinary recent")
+  eq(stubSave.servers[1].address,
+     ("ordinary-after-upgrade.example:%d"):format(Config.DEFAULT_PORT),
+     "so the legacy official row is not persisted again")
+  local updatedMenu = store:menuList()
+  eq(#updatedMenu, 2, "the menu has the featured row plus that one recent")
+  eq(updatedMenu[1].name, Config.FEATURED_SERVER_NAME,
+     "and the featured server stays above persisted rows")
+end
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local officialKey = Config.FEATURED_SERVER_HOST:lower()
+  local ordinary = store:record("mutable.example")
+
+  eq(store:rename(officialKey, "Renamed"), nil,
+     "the featured row cannot be renamed")
+  eq(store:setFavorite(officialKey, true), nil,
+     "the featured row cannot be favourited")
+  eq(store:setAddress(officialKey, "elsewhere.example:9191"), nil,
+     "the featured row's address cannot be edited")
+  eq(store:setCode(officialKey, "A7K3P9"), nil,
+     "the featured row's code cannot be edited")
+  eq(store:remove(officialKey), nil,
+     "the featured row cannot be deleted")
+  eq(store:setAddress(ordinary.key, Config.FEATURED_SERVER_HOST), nil,
+     "and an ordinary recent cannot be moved onto the featured address")
+
+  local featured = store:menuGet(officialKey)
+  eq(featured and featured.name, Config.FEATURED_SERVER_NAME,
+     "refused mutators leave the official label unchanged")
+  eq(featured and featured.address, Config.FEATURED_SERVER_HOST,
+     "and leave its address unchanged")
+  eq(featured and featured.code, Config.FEATURED_SERVER_CODE,
+     "and leave its code unchanged")
+  eq(#store:list(), 1,
+     "while the ordinary persisted recent remains the only counted row")
+end
+
 -- ------- eviction: the cap, LRU order, favourites, and the row just written
 
 do
@@ -12933,13 +13037,13 @@ local function hasLabel(list, label)
 end
 
 ctx.servers = storeWith({})
-eq(hasLabel(mainLabels(), "SERVERS"), false,
-   "an empty list means no SERVERS row at all")
+eq(hasLabel(mainLabels(), "SERVERS"), true,
+   "a disconnected fresh copy always has the SERVERS row")
 
 ctx.servers = storeWith({ "one.example" })
 local rows = mainLabels()
 eq(hasLabel(rows, "SERVERS"), true,
-   "a non-empty list adds the row while disconnected")
+   "remembered recents keep the row visible while disconnected")
 local hostIdx, serversIdx
 for i, label in ipairs(rows) do
   if label == "HOST GAME" then hostIdx = i end
@@ -12966,9 +13070,10 @@ check(serversDef ~= nil, "SCREEN.SERVERS registers")
 ctx.servers = storeWith({ "b-host", "a-host" })
 ctx.servers:setFavorite(ctx.servers:list()[2].key, true) -- a-host
 do
-  local expected = ctx.servers:list()
+  local expected = ctx.servers:menuList()
   local menu = serversDef.new({})
-  eq(#menu.items, #expected, "one row per stored server")
+  eq(#menu.items, #expected,
+     "one row per menu server, including the synthetic first row")
   for i, entry in ipairs(expected) do
     eq(menu.items[i].label, entry.name,
        "row " .. i .. " carries the entry's name")
@@ -12984,17 +13089,76 @@ end
 ctx.servers = storeWith({})
 do
   local menu = serversDef.new({})
-  -- No placeholder row. ListMenu already draws its own "Nothing here." for an
-  -- empty list, and a fake row would both suppress that answer and park the
-  -- cursor on something whose A press has to be swallowed.
-  eq(#menu.items, 0,
-     "an empty list injects no rows at all -- ListMenu says so itself")
+  eq(#menu.items, 1,
+     "zero recents still leaves one real, selectable featured row")
+  eq(menu.items[1].label, Config.FEATURED_SERVER_NAME,
+     "the featured row is first under its official name")
+  eq(menu.items[1].value, Config.FEATURED_SERVER_HOST:lower(),
+     "and selects the key for the official address")
 end
 
 -- ------- SCREEN.SERVERACT: the fixed row order, and the gone-entry case
 
 local actDef = screenRegistry[Ui.SCREEN.SERVERACT]
 check(actDef ~= nil, "SCREEN.SERVERACT registers")
+
+do
+  ctx.servers = storeWith({})
+  local featured = ctx.servers:menuList()[1]
+  local game = {}
+  local menu = actDef.new(game, { key = featured.key })
+  eq(#menu.items, 1,
+     "the featured server action screen contains only CONNECT")
+  eq(menu.items[1].label, "CONNECT", "and CONNECT is that sole action")
+
+  local calls = {}
+  local realClient = ctx.client
+  ctx.client = {
+    isHosting = function() return false end,
+    isConnected = function() return false end,
+    setJoinAddress = function(_, address)
+      calls[#calls + 1] = { name = "address", value = address }
+      return address
+    end,
+    setJoinCode = function(_, address, code)
+      calls[#calls + 1] = { name = "code", address = address, value = code }
+      return code
+    end,
+    connect = function(_, game)
+      calls[#calls + 1] = { name = "connect", game = game }
+      return true
+    end,
+  }
+
+  pushes = {}
+  menu.items[1].onSelect()
+  local setup = pushes[#pushes]
+  check(setup ~= nil and setup.id == Ui.SCREEN.CHARSET,
+        "featured CONNECT enters the regular character setup path")
+  eq(setup.opts and setup.opts.verb, "JOIN",
+     "using the same JOIN setup as a remembered server")
+  check(type(setup.opts and setup.opts.onReady) == "function",
+        "and waits for character setup before dialing")
+  setup.opts.onReady()
+
+  eq(calls[1] and calls[1].name, "address",
+     "the regular dial path sets the address first")
+  eq(calls[1] and calls[1].value, "play.rbymmo.com:7788",
+     "to the official host")
+  eq(calls[2] and calls[2].name, "code",
+     "then stores the featured join code")
+  eq(calls[2] and calls[2].address, "play.rbymmo.com:7788",
+     "under the address connect will dial")
+  eq(calls[2] and calls[2].value, "QG0251",
+     "with the official code")
+  eq(calls[3] and calls[3].name, "connect",
+     "and finally uses the existing connect call")
+  eq(calls[3] and calls[3].game, game,
+     "for the game that opened the action screen")
+
+  ctx.client = realClient
+  pushes = {}
+end
 
 ctx.servers = storeWith({ "act.example" })
 local actKey = ctx.servers:list()[1].key
@@ -13426,13 +13590,15 @@ end
 
 do
   local items = mainItems()
-  eq(#items, 3, "offline, the menu is HOST GAME / JOIN GAME / CHARACTER")
-  eq(items[1].label, "HOST GAME", "first")
-  eq(items[2].label, "JOIN GAME", "second")
-  eq(items[3].label, "CHARACTER", "and third, the new row")
+  eq(#items, 4,
+     "offline, the menu is SERVERS / HOST GAME / JOIN GAME / CHARACTER")
+  eq(items[1].label, "SERVERS", "the always-available server list is first")
+  eq(items[2].label, "HOST GAME", "HOST GAME is second")
+  eq(items[3].label, "JOIN GAME", "JOIN GAME is third")
+  eq(items[4].label, "CHARACTER", "and CHARACTER is fourth")
 
   pushed = nil
-  items[3].onSelect()
+  items[4].onSelect()
   eq(pushed and pushed.id, SCREEN.CHARPICK, "CHARACTER opens the picker")
   eq(pushed and pushed.opts and pushed.opts.backTo, SCREEN.MAIN,
      "and tells it to come straight back to the MMO menu, not the "

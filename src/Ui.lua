@@ -953,10 +953,25 @@ function M:install()
     return store
   end
 
-  local function serverList()
+  local function serverMenuList()
     local store = serverStore()
-    local list = store and store.list and store:list()
+    local list
+    if store then
+      if store.menuList then
+        list = store:menuList()
+      elseif store.list then
+        list = store:list()
+      end
+    end
     return type(list) == "table" and list or {}
+  end
+
+  local function serverMenuGet(key)
+    local store = serverStore()
+    if not store then return nil end
+    if store.menuGet then return store:menuGet(key) end
+    if store.get then return store:get(key) end
+    return nil
   end
 
   -- The mark on a favourite row.
@@ -1105,24 +1120,15 @@ function M:install()
         end,
       }
     else
-      -- First on the menu, above HOST GAME, because for anyone who has
-      -- played before it is the row they came for: every hub on it answered
-      -- to this copy once, so its address and its code are known and CONNECT
-      -- is the whole flow -- the same errand as JOIN GAME with the typing
-      -- already done.
-      --
-      -- Absent while the list is empty, rather than opening a screen that
-      -- says "nothing yet": a first join has to go through JOIN GAME anyway,
-      -- and the row appears the moment there is something behind it. The
-      -- menu is also 8 rows at most, so a row that could say nothing is a
-      -- row the rows that can say something do not get -- and a first-timer's
-      -- menu still opens on HOST GAME.
-      if #serverList() > 0 then
-        items[#items + 1] = {
-          label = "SERVERS",
-          onSelect = function() mod.ui.push(game, SCREEN.SERVERS) end,
-        }
-      end
+      -- First on the menu, above HOST GAME, because it always has somewhere
+      -- useful to go: the official server is a product-owned first row even
+      -- on a new copy, and remembered hubs follow it with their address and
+      -- code already filled in. Hosting and connected states stay in the
+      -- branch above, where SERVERS is intentionally absent.
+      items[#items + 1] = {
+        label = "SERVERS",
+        onSelect = function() mod.ui.push(game, SCREEN.SERVERS) end,
+      }
       items[#items + 1] = {
         label = "HOST GAME",
         onSelect = function()
@@ -1708,22 +1714,17 @@ function M:install()
   -- PLAYERS is one: the length is not fixed and the row carries a second
   -- column. The order is the store's (favourites first, then by address);
   -- the rows are rebuilt on every push, so a rename, a re-address or a
-  -- favourite toggle is already in place by the time B lands back here.
+  -- favourite toggle is already in place by the time B lands back here. The
+  -- store prepends its synthetic official row before that saved ordering.
   screens:register(SCREEN.SERVERS, { new = function(game)
     local items = {}
-    for _, entry in ipairs(serverList()) do
+    for _, entry in ipairs(serverMenuList()) do
       items[#items + 1] = {
         label = entry.name,
         right = entry.fav and FAV_MARK or nil,
         value = entry.key,
       }
     end
-    -- Nothing is injected when there is nothing to show. The MMO menu hides
-    -- the row that opens this while the list is empty, so an empty list here
-    -- means the screen was re-entered while it was open and the last entry
-    -- went -- and ListMenu already draws "Nothing here." for exactly that.
-    -- A placeholder row would suppress that answer and put the cursor on a
-    -- row whose A press has to be swallowed.
     return mod.ui.ListMenu.new(game, "SERVERS", items, {
       pageJump = true,
       onChoose = function(item, menu)
@@ -1739,7 +1740,7 @@ function M:install()
   screens:register(SCREEN.SERVERACT, { new = function(game, opts)
     opts = opts or {}
     local store = serverStore()
-    local entry = store and store.get and store:get(opts.key)
+    local entry = serverMenuGet(opts.key)
     if not entry then
       -- The key is derived from the address rather than chosen, so EDIT HOST
       -- moves an entry to a different one -- and a menu still holding the old
@@ -1756,19 +1757,26 @@ function M:install()
       -- CONNECT first: it is what the list is for, and every other row is a
       -- correction to make before pressing it.
       { label = "CONNECT", connect = true },
+    }
+    -- The featured row is product-owned: its label, address, code and place
+    -- at the top are not player settings. CONNECT is therefore its complete
+    -- action screen. Remembered rows keep the six actions they had before.
+    if not entry.featured then
       -- The row says what pressing it does, not what the entry is -- the
       -- same rule the MMO menu's END GAME / LEAVE row follows.
-      { label = entry.fav and "UNFAVORITE" or "FAVORITE", fav = true },
-      { label = "EDIT HOST", field = "host" },
-      { label = "EDIT CODE", field = "code" },
-      { label = "RENAME", field = "name" },
+      items[#items + 1] = {
+        label = entry.fav and "UNFAVORITE" or "FAVORITE", fav = true,
+      }
+      items[#items + 1] = { label = "EDIT HOST", field = "host" }
+      items[#items + 1] = { label = "EDIT CODE", field = "code" }
+      items[#items + 1] = { label = "RENAME", field = "name" }
       -- Last, and last on purpose: it is the one row that cannot be undone
       -- by pressing it again, so it comes after the corrections rather than
       -- among them. Distance is not the guard, though -- Menu wraps, so row
       -- 6 is a single UP from where the cursor starts, which is why the
       -- confirm below has to open on NO.
-      { label = "DELETE", remove = true },
-    }
+      items[#items + 1] = { label = "DELETE", remove = true }
+    end
 
     -- Reopening is what "rebuilt" means here (see the favourite row below),
     -- and a rebuild that forgets where the cursor was is a rebuild that

@@ -531,6 +531,14 @@ M.RANK_REPORT_GRACE = 60
 -- src/Servers.lua keeps the list behind START > MMO > SERVERS; the argument
 -- for what it is and where it is written is in that file's header.
 
+-- The product-owned row at the top of that list. Its port is explicit rather
+-- than derived from DEFAULT_PORT: changing the port used by a local host must
+-- not quietly point the official row at a different service. Servers projects
+-- this into the menu without putting it in either persistence mirror.
+M.FEATURED_SERVER_NAME = "RBY MMO OFFICIAL"
+M.FEATURED_SERVER_HOST = "play.rbymmo.com:7788"
+M.FEATURED_SERVER_CODE = "QG0251"
+
 -- How long a row's name may be. Sixteen is what the list menu has room for
 -- beside its favourite marker at Game Boy width, and it is COMPOSE_MAX's
 -- number for the same reason -- a label that overflows its row is worse than
