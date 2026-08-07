@@ -108,6 +108,26 @@ function discount(gain, repeats) {
   return Math.floor(gain / 2 ** n);
 }
 
+/*
+ * What a side of a team battle is worth, as one number.
+ *
+ * The mean, which is what "the strength of the pair you beat" means and the
+ * standard answer wherever team ratings are kept. A strong player carrying a
+ * weak one is worth about the average of the two, and beating them pays
+ * accordingly -- which is the right answer, because that is who was on the
+ * field. Mirrors src/Rank.lua's M.teamPoints.
+ */
+function teamPoints(entries) {
+  let total = 0;
+  let count = 0;
+  for (const entry of entries) {
+    total += entry.points || 0;
+    count += 1;
+  }
+  if (!count) return 0;
+  return Math.floor(total / count + 0.5);
+}
+
 function pairKey(a, b) {
   return a < b ? `${a}${b}` : `${b}${a}`;
 }
@@ -337,6 +357,104 @@ class Board {
   }
 
   /*
+   * Settle a team battle: every winner against the losing side's strength,
+   * and every loser against the winning side's.
+   *
+   * **This replaces pairing by slot index** -- first against first, second
+   * against second -- which reused the 1v1 machinery unchanged and was
+   * arbitrary in the way that matters: nothing about a four-way says who
+   * fought whom. Both players on a side attack both players on the other, a
+   * move redirects across the pair when a target falls, and the side loses
+   * together. Slot one beating slot one is a fact about the order the hub
+   * happened to list them in, and it produced answers nobody could defend:
+   * put your strongest player in the other seat and the ratings move
+   * differently for the same battle, with the same four people and the same
+   * result.
+   *
+   * So the match each player actually played is *them against the other
+   * pair*, and that is what is scored -- one rated result each, the same
+   * curve and the same K as a 1v1.
+   *
+   * The rematch discount is per player and takes the fewest meetings they
+   * have had with anyone they just beat. Four people running the same 2-on-2
+   * all afternoon meet on every cross pair, so it bites exactly as it does in
+   * a 1v1; bringing in somebody genuinely new means at least one opponent
+   * with no history, and that fight is worth its full value.
+   *
+   * Mirrors src/Rank.lua's recordTeam. The two must not drift.
+   */
+  recordTeam(winnerNames, loserNames, now) {
+    const at = Number(now) || 0;
+    const seen = new Set();
+    const gather = (names) => {
+      const out = [];
+      for (const name of names || []) {
+        const entry = this.entry(name);
+        // A name that will not resolve, or one that turns up twice across the
+        // four, means this is not a battle between four different people --
+        // and paying it out would move a rating twice for one result.
+        if (!entry || seen.has(entry.key)) return null;
+        seen.add(entry.key);
+        out.push(entry);
+      }
+      return out.length ? out : null;
+    };
+    const winners = gather(winnerNames);
+    if (!winners) return null;
+    const losers = gather(loserNames);
+    if (!losers) return null;
+
+    const winnerSide = teamPoints(winners);
+    const loserSide = teamPoints(losers);
+    const moved = swing(winnerSide, loserSide);
+
+    // Read before anything moves, so the discount is about the history each
+    // player brought to this battle rather than one it has already written.
+    const repeatsFor = new Map();
+    for (const winner of winners) {
+      let fewest = null;
+      for (const loser of losers) {
+        const met = this.meetingsBetween(winner.key, loser.key, at);
+        if (fewest === null || met < fewest) fewest = met;
+      }
+      repeatsFor.set(winner.key, fewest || 0);
+    }
+
+    const outWinners = [];
+    const outLosers = [];
+    for (const winner of winners) {
+      const before = winner.points;
+      winner.points = clampPoints(
+        winner.points + discount(moved.gain, repeatsFor.get(winner.key)));
+      winner.played += 1;
+      winner.won += 1;
+      outWinners.push({
+        name: winner.name, key: winner.key, points: winner.points,
+        gained: winner.points - before, repeats: repeatsFor.get(winner.key),
+      });
+    }
+    for (const loser of losers) {
+      const before = loser.points;
+      loser.points = clampPoints(loser.points - moved.loss);
+      loser.played += 1;
+      outLosers.push({
+        name: loser.name, key: loser.key, points: loser.points,
+        lost: before - loser.points,
+      });
+    }
+
+    // Every cross pair, because every one of them was a real opponent: a
+    // discount that only remembered one of the two would let four players
+    // farm each other by swapping which of them is "first".
+    for (const winner of winners) {
+      for (const loser of losers) this.noteMeeting(winner.key, loser.key, at);
+    }
+    this.sweep(at);
+
+    return { winners: outWinners, losers: outLosers, winnerSide, loserSide };
+  }
+
+  /*
    * The leaderboard: everybody with something to show, best first.
    *
    * Zero is filtered here rather than at the screen, because only this side
@@ -434,6 +552,7 @@ class Board {
 
 module.exports = {
   Board,
+  teamPoints,
   mintToken,
   keyOf,
   clampPoints,

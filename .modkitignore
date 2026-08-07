@@ -26,6 +26,14 @@ tests/drivers/run-mmo-e2e.sh
 # nothing -- see the note at the top of this file.
 tests/drivers/mmo_guest.lua
 tests/drivers/run-hub-e2e.sh
+# The co-op scenario: four instances driven through a 2-on-2 battle. Same two
+# reasons as every driver above -- they reach tests/drivers/util.lua and mean
+# nothing outside a checkout. Both arrived with co-op battles and missed this
+# list, so `pack` put them in the v0.7.1 archive; it is the same trap
+# my-profile.png and rank.png document further down, and nothing mechanical
+# catches it, which is why each driver is named here one per line.
+tests/drivers/mmo_quad.lua
+tests/drivers/run-quad-e2e.sh
 
 # Working notes for whoever picks this up next; not mod content. The two
 # machine-readable ones describe how coding agents are driven in this
@@ -86,6 +94,26 @@ docs/plans/server-side-listing.md
 docs/plans/server-live-ops.md
 docs/plans/admin-join-code.md
 docs/plans/cli-only-remove-dashboard.md
+docs/plans/last-connected-servers.md
+docs/plans/new-char-selection.md
+docs/plans/online-char-selection.md
+docs/plans/submit-to-mod-index.md
+# Six more plans had accumulated without entries here -- the same gap this
+# list already documents for my-profile.png and rank.png, just in prose form.
+# The release workflow drops docs/ wholesale so no GitHub release ever shipped
+# them, but a locally built `modkit pack` archive did. Listed by name now.
+docs/plans/coop-battle-hp-sequencing.md
+docs/plans/coop-battle-status-and-timeout.md
+docs/plans/coop-battle-ux-findings.md
+docs/plans/coop-run-consent-and-blackout.md
+docs/plans/nire-back-sprite-pixel-ratio.md
+docs/plans/non-blocking-avatars.md
+docs/plans/coop-joiner-refights-the-trainer.md
+# The upstream RFC behind co-op battles. It is a proposal against the *engine*,
+# not mod content -- a player unpacking this archive has no use for a document
+# arguing about BattleState's battler slots. Listed by name for the same reason
+# every entry here is: a bare docs/rfcs/ line would do nothing.
+docs/rfcs/0001-double-battles.md
 
 # Screenshots of a running game are composited from tiles, sprites and font
 # glyphs decoded from the player's own ROM. They illustrate a GitHub page
@@ -106,6 +134,9 @@ docs/screenshots/trainer-card.png
 # trainer pic in each is this mod's art, but everything around it -- the box,
 # the font, the badge faces, the ball icons -- is still decoded from the
 # player's ROM, so the rule is the same one.
+docs/screenshots/servers-list.png
+docs/screenshots/servers-submenu.png
+docs/screenshots/servers-confirm.png
 docs/screenshots/nire-battle.png
 docs/screenshots/nire-card.png
 docs/screenshots/nire-hood-card.png
@@ -136,6 +167,23 @@ docs/screenshots/join-connected.png
 docs/screenshots/party-map.png
 docs/screenshots/party-townmap.png
 docs/screenshots/party-members.png
+# The rest of the party's shots, from the same driver and under the same rule.
+# party-ask.png and party-battle.png are text boxes and a menu over the
+# overworld, party-spectating.png is a battle frame watched from the outside,
+# and two-parties.png is four characters standing on a composited map -- every
+# one of them ROM tiles, ROM font, or both.
+docs/screenshots/party-ask.png
+docs/screenshots/party-battle.png
+docs/screenshots/party-spectating.png
+docs/screenshots/two-parties.png
+#
+# The co-op battle's three, captured by tests/drivers/run-quad-e2e.sh. All
+# three are the battle screen itself -- the box, the font, the four monsters --
+# which is decoded from the player's ROM top to bottom, so they are the
+# clearest case this block has and they are listed like the rest.
+docs/screenshots/coop-battle.png
+docs/screenshots/coop-item.png
+docs/screenshots/coop-switch.png
 #
 # my-profile.png arrived on main without a line here, and `pack` duly put it
 # in the archive -- 45 files instead of 44, with a composited frame inside.
@@ -146,9 +194,11 @@ docs/screenshots/party-members.png
 # follow-up.
 docs/screenshots/my-profile.png
 #
-# rank.png arrived with ranked PVP the same way my-profile.png did, and for
-# the same reason nothing caught it: it is the RANK screen, a list menu drawn
-# over portraits decoded from the player's own ROM, which lint has nothing to
-# say about. Found while packing this branch, listed here rather than left for
-# the next person to trip over.
+# rank.png arrived with ranked PVP and missed this list the same way
+# my-profile.png did one release earlier -- and for the same reason nothing
+# caught it: lint has nothing to say about a whole composited frame, and the
+# file count only looks wrong to somebody who knows what it should be. It is a
+# full-screen list menu like party-members.png, and it is listed for the reason
+# that one is: the rule here is the file's, not the linter's, and a screenshot
+# that is safe today stops being safe the moment somebody recaptures it.
 docs/screenshots/rank.png

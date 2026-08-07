@@ -13,9 +13,15 @@ local Wire = need("Wire")
 local Sha256 = need("Sha256")
 local Transport = need("Transport")
 local Roster = need("Roster")
+local Servers = need("Servers")
 local Avatars = need("Avatars")
 local Chat = need("Chat")
 local Party = need("Party")
+local Coop = need("Coop")
+-- For one flag it owns. Required rather than reached through `coop.state`,
+-- which is an *instance* and is nil between battles -- which is exactly when
+-- a save is loaded.
+local CoopBattle = need("CoopBattle")
 local Ui = need("Ui")
 local Overlay = need("Overlay")
 local Sessions = need("Sessions")
@@ -41,16 +47,23 @@ local ctx = {
 
 local transport = Transport.new()
 local server = HostServer.new()
+-- Handed its own one-field table rather than the ctx above: the store wants
+-- the mod facade and nothing else, which is what lets the suite construct one
+-- against a stub without standing up a client first.
+local servers = Servers.new({ mod = mod })
 local ui = Ui.new(ctx)
 local overlay = Overlay.new(ctx)
 local sessions = Sessions.new(transport, ui)
 local party = Party.new(transport, ui, ctx.chat)
+local coop = Coop.new(transport, ui, party, ctx.roster, ctx.chat)
 
 ctx.client = M
 ctx.ui = ui
 ctx.sessions = sessions
 ctx.party = party
+ctx.coop = coop
 ctx.server = server
+ctx.servers = servers
 
 local presenceClock = 0
 local lastSent =
@@ -143,6 +156,20 @@ function M.hostLimit()
   return server:limit()
 end
 
+-- The hubs this copy has been welcomed by.
+--
+-- The store itself, not a copy of its rows: its readers both read it and
+-- write to it (rename, favourite, edit), and two lists that could disagree
+-- would be one bug waiting for a player to reopen a menu. The screens reach
+-- it as ctx.servers; this is the same object for anything holding the Client
+-- instead -- the suite, and any caller that has no ctx.
+--
+-- Outside this mod it is the rows and not the store: mod.exports.servers,
+-- below, so nothing else can rename or evict what the player collected.
+function M.servers()
+  return servers
+end
+
 -- Settings that the player can change from inside the game.
 --
 -- mod.options is READ-ONLY to a mod -- the loader exposes define and get
@@ -175,10 +202,43 @@ end
 -- read out would dial a port nothing is listening on and be told the relay
 -- was unreachable. Applied on every read and every write, so the string
 -- that is dialled is also the string a join code is filed under.
+--
+-- The question is not "is there a colon" but "is there a port behind it".
+-- The grid carries a space glyph, a colon and no obligation to use either
+-- well, so a player types "mybox:" as readily as "mybox", and both mean the
+-- same thing: they did not choose a port. Detecting only ":<digits>" turned
+-- the first into "mybox::7788" -- a *different* broken address, dialled at
+-- host "mybox:", which reads to the player as the hub being down. So the
+-- slot after the last colon is checked rather than merely spotted, and
+-- anything that is not a number luasocket can dial -- empty, non-numeric,
+-- or out of range -- means no port was given and 7788 fills it in. An
+-- explicit, dialable port is never touched.
+--
+-- Every space goes, not just the ones on the ends, because codeKey (below)
+-- already strips whitespace and this did not: a space anywhere filed the
+-- passcode under one string and dialled another. No address wants one --
+-- neither a hostname nor an IP may contain a space, so a space is only ever
+-- something the grid made easy to type. Taking them all out is also what
+-- lets "mybox: 7788" keep the port it plainly means, rather than reading as
+-- a port that was never given. An address with no host at all (":7788") is
+-- refused rather than completed, because there is nothing there to dial and
+-- nothing this function could invent -- the same answer "" already gets.
 local function withPort(address)
-  if type(address) ~= "string" or address == "" then return nil end
-  if address:match(":%d+$") then return address end
-  return ("%s:%d"):format(address, Config.DEFAULT_PORT)
+  if type(address) ~= "string" then return nil end
+  local clean = address:gsub("%s+", "")
+  if clean == "" then return nil end
+
+  local host, slot = clean:match("^(.*):([^:]*)$")
+  if not host then return ("%s:%d"):format(clean, Config.DEFAULT_PORT) end
+  if host == "" then return nil end
+
+  -- Digits first, then the number: tonumber alone accepts "0x1E", "1e3" and
+  -- "+7788", none of which Net's own ":%d+" would match on the way back out.
+  -- Reading the slot more liberally than the code downstream of it is how an
+  -- address gets called complete and then dialled on 7778.
+  local port = slot:match("^%d+$") and tonumber(slot)
+  if port and port > 0 and port < 65536 then return clean end
+  return ("%s:%d"):format(host, Config.DEFAULT_PORT)
 end
 
 function M.joinAddress()
@@ -235,6 +295,33 @@ function M.setJoinCode(a, b, c)
   if not (code and key) then return nil end
   mod.save:set(key, code)
   return code
+end
+
+-- Forgets what this copy is holding *for* a hub, when its row is deleted.
+--
+-- Today that is exactly the join code. The code is the hub's secret rather
+-- than the player's: they were read it out, it is filed under the address it
+-- was typed for, and a player who deletes the row has said they are done with
+-- that hub -- so keeping it would be keeping somebody else's passcode for a
+-- server no longer on the list. Cleared with a nil set, the same way
+-- setHostJoinCode drops its code.
+--
+-- The rank claim ticket is deliberately NOT cleared. It is the opposite kind
+-- of thing: the ticket is the player's own earned identity on that hub, and
+-- dropping it would silently destroy their rating the next time they came
+-- back -- the hub would answer the name's rightful owner as an impostor.
+-- Deleting a bookmark must not cost a rating. It also lives in the durable
+-- token file, which outlives every save slot, so clearing the mod.save half
+-- would only half-forget it anyway.
+--
+-- arg1 for the reason the setters above give: reached as
+-- client:forgetHub(address) from the menus, and as M.forgetHub(address) from
+-- the suite.
+function M.forgetHub(a, b)
+  local key = codeKey(arg1(a, b))
+  if not key then return nil end
+  mod.save:set(key, nil)
+  return true
 end
 
 -- Where a hub's claim ticket is kept.
@@ -567,10 +654,126 @@ function M.spriteChoice()
   return Chars.resolve(chosen)
 end
 
+-- The same choice, but nil when the player is not asking to be anybody else.
+--
+-- spriteChoice always has an answer, because everybody has to be drawn as
+-- somebody. This one separates "asked for a character" from "left it to the
+-- game", which is what decides whether a look is worn outside a session at
+-- all: a save that says nothing and a global option still sitting on the
+-- default mean this player never touched the character side of the mod, and
+-- their single-player game keeps the renderer the engine built for it.
+-- Installing the mod must not silently swap anybody's trainer.
+--
+-- The rule is that explicitness is a property of what would actually be
+-- *worn*, not of the string as it was typed. Whichever of the two sources
+-- answers is resolved first, and a value that resolves to RED comes back as
+-- nil -- because RED is the trainer the engine already draws, so putting it
+-- on is a restore rather than a wear, and syncLook reads that nil as exactly
+-- the restore it is. That is what makes picking RED in the creator really
+-- hand the engine's own renderer back, which is what the card and the README
+-- promise. Deciding it after the resolve is also what keeps a value carried
+-- over from another ROM honest: an id this catalog cannot draw degrades to
+-- RED, and "leave them alone" is the right reading of it, not "explicitly
+-- RED" -- a choice nobody here ever made.
+--
+-- Resolved like spriteChoice, so what does come back is always a character
+-- this game can actually draw.
+function M.explicitChoice()
+  local chosen = mod.save:get("sprite")
+  if type(chosen) ~= "string" or chosen == "" then
+    chosen = mod.options:get("sprite")
+  end
+  if type(chosen) ~= "string" or chosen == "" then return nil end
+  local id = Chars.resolve(chosen)
+  if id == Config.DEFAULT_SPRITE then return nil end
+  return id
+end
+
+-- ------- telling the hub which character you are
+--
+-- The character the hub has confirmed for us, and how long ago we last said
+-- it.
+--
+-- A push is one message into a gate: both hubs refuse a second character
+-- change from one client inside half a second (src/Hub.lua's SPRITE_GATE and
+-- server/lib/relay.js, both the CHAT_GATE window), and a refused one is
+-- silent. Fire and forget therefore had a permanent failure in it -- the
+-- player wears the new character in their own game while the hub goes on
+-- putting the old one in every mmo.move, for the rest of the session, with
+-- nothing that would ever say it again.
+--
+-- So the character is reconciled rather than announced. `spriteAcked` is what
+-- we know the hub is holding; the tick re-pushes while the choice has moved
+-- away from it and stops the moment the two agree. Only two things write it
+-- -- the hello that seeds it, and the hub's own broadcast of our change --
+-- so it is always the hub's answer and never our own optimism, which is what
+-- keeps the loop from chasing itself.
+--
+-- The same loop is also the only thing that carries a change made from the
+-- global MY SPRITE row in the mod manager: that writes the option and calls
+-- nothing, so without this a player who changed character there told nobody.
+-- Anything else that moves spriteChoice in future is carried for free.
+--
+-- The clock is seconds since the last push, not a running session time: every
+-- push resets it, so a retry can never land inside the window that refused
+-- the last one. It also paces how often the choice is *read* -- resolving one
+-- costs a pcall through the sprite registry (Chars.available), which is not
+-- something to do sixty times a second for an answer that only changes when
+-- the player does something.
+local spriteAcked = nil
+local spriteClock = 0
+-- Twice the gate, so a re-push is always clear of it rather than racing it.
+-- Named off CHAT_GATE because that is the window both hubs actually gate a
+-- character change with (Hub.lua's SPRITE_GATE header says so out loud), and
+-- a retry paced off anything else would drift away from it silently.
+local SPRITE_RETRY = Config.CHAT_GATE * 2
+
+-- Tell the hub which character you are now.
+--
+-- Sent at the moment of the change, and re-sent by the tick for as long as
+-- the hub has not confirmed it. Not presence, though: there is nothing
+-- periodic here, because once the hub has stored a character every later
+-- broadcast carries it anyway -- a player who joins afterwards is told by the
+-- ordinary presence stream, with nothing extra sent from here.
+--
+-- What goes on the wire is always the *resolved choice* (M.spriteChoice()),
+-- never the worn/not-worn distinction M.explicitChoice() draws. Picking RED
+-- mid-session broadcasts SPRITE_RED to everyone else while syncLook hands the
+-- engine's own renderer back locally -- the two are assumed to draw the same
+-- picture, which is the assumption explicitChoice's header states and this is
+-- its echo at the wire boundary. If those two ever stop matching, they stop
+-- matching here first.
+--
+-- Offline is silence, not a failure: picking a character outside a game is
+-- the ordinary case, the choice is saved and worn either way, and there is
+-- simply nobody to tell.
+function M.pushSprite()
+  if not transport:isReady() then return false end
+  -- before the send, so a send that throws still costs the retry its full
+  -- window rather than re-firing on the next tick
+  spriteClock = 0
+  transport:send(Wire.SPRITE, { sprite = M.spriteChoice() })
+  return true
+end
+
+-- Choosing a character wears it there and then, and tells the hub.
+--
+-- The picker is reachable outside a game now, so a screen that changed who
+-- you are without changing what you see would read as broken -- and the
+-- older path, where the look only appeared at connect time, was that same
+-- delay in a place nobody noticed it. The same argument reaches one step
+-- further: the hub used to learn your character once, in your hello, so a
+-- character picked mid-game was one only you could see. Three lines in one
+-- order -- save it, wear it, say it -- so that what goes on the wire is the
+-- choice that was actually kept. The contract callers rely on is unchanged
+-- (the id on success, nil for a character this game does not have), so no
+-- screen has to know a look was applied or a message sent.
 function M.setSpriteChoice(a, b)
   local id = arg1(a, b)
   if not Chars.available(id) then return nil end
   mod.save:set("sprite", id)
+  M.syncLook()
+  M.pushSprite()
   return id
 end
 
@@ -700,8 +903,10 @@ end
 -- The overworld player takes its sheet from field.playerSprites at
 -- Player.new time (src/world/Player.lua), so there is no option to flip
 -- once the player exists -- the renderer has to be swapped on the live
--- object. The original is kept so leaving a game puts your own trainer
--- back, rather than leaving you dressed as a Rocket grunt in single-player.
+-- object. The original is kept because the look is not always on: a player
+-- who never chose a character has theirs put back the moment there is
+-- nothing standing to wear (M.syncLook), rather than being left dressed as a
+-- Rocket grunt in a single-player game they never asked to change.
 --
 -- It is kept *against the entity it was taken from*. The overworld reuses
 -- one player object across map changes -- OverworldController:setMap only
@@ -753,11 +958,18 @@ end
 -- trainer was gone. applyLook re-reads the original only when the entity
 -- really changed, so the re-wear is safe now -- and the suite can say so.
 --
--- The gate is "already wearing one, or in a game and meant to be": the
--- second half keeps a look that failed to apply at connect time retrying on
--- the next map, which is what the transport check here used to do alone.
+-- The gate is "already wearing one, in a game and meant to be, or standing
+-- on a choice". The middle clause keeps a look that failed to apply at
+-- connect time retrying on the next map, which is what the transport check
+-- here used to do alone. The last one is how an offline save gets dressed at
+-- all: nothing is worn yet and no transport will ever open, but the choice
+-- was made long ago and the first map is the first moment there is a player
+-- object to put it on.
 function M.refreshLook()
-  if lookOwner == nil and not transport:isReady() then return false end
+  if lookOwner == nil and not transport:isReady()
+     and not M.explicitChoice() then
+    return false
+  end
   return M.applyLook(ctx.game)
 end
 
@@ -771,13 +983,38 @@ function M.restoreLook()
   originalLook, lookOwner = nil, nil
 end
 
+-- Put the player in whatever their standing choice says they are.
+--
+-- The one place that policy lives, so every path that could change the
+-- answer -- leaving a game, picking a character, another save taking over --
+-- asks the same question instead of each deciding for itself. Named, and
+-- not a line inside the callers, because the rule is the interesting part
+-- and the suite has to be able to state it.
+--
+-- The rule: a choice outlives the session that first wore it. Leaving used
+-- to hand every player their trainer back, which meant a character chosen in
+-- the creator existed only while connected -- you could not see your own
+-- character in your own game. Now only a player with no choice at all is
+-- undressed, and for them this is exactly the restore it replaced.
+--
+-- Answers true when a chosen look is on the player afterwards.
+function M.syncLook()
+  if not M.explicitChoice() then
+    M.restoreLook()
+    return false
+  end
+  return M.applyLook(ctx.game)
+end
+
 -- The character you are wearing right now, or nil.
 --
 -- Not the same question as M.spriteChoice(): the choice is what you picked
 -- and keeps its answer forever, while this is only true between applyLook
--- and restoreLook -- that is, while you are actually in a game. The battle
--- and trainer-card pics below hang off *this* one, so a single-player game
--- you never connected in draws exactly what vanilla draws.
+-- and restoreLook -- that is, whenever a look is actually installed on the
+-- player, which now includes a single-player game nobody ever connected in.
+-- The battle and trainer-card pics below hang off *this* one, so a save
+-- whose player never chose a character still draws exactly what vanilla
+-- draws, and one that did carries the character everywhere the pics go.
 function M.wornLook()
   if lookOwner == nil then return nil end
   return M.spriteChoice()
@@ -867,13 +1104,27 @@ function M.sendHello(game)
   -- it was minted for, so the name claimed and the name the ticket is looked
   -- up by have to be the same string, not two calls that could disagree.
   local name = M.playerName(game)
+  -- Read once and sent once, for the same reason the name above is: this is
+  -- also the value spriteAcked starts at, and seeding it from a second call
+  -- would be seeding it with an answer we did not actually send.
+  --
+  -- The hub stores what hello says and broadcasts nothing back for it, so
+  -- this is the one write to spriteAcked that is not the hub's own word --
+  -- and it is the hub's state all the same, because storing it is all the
+  -- hub does with it. Without the seed the reconcile below would open every
+  -- session by re-pushing a character the hub already has.
+  local sprite = M.spriteChoice()
+  spriteAcked, spriteClock = sprite, 0
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
     name = name,
     -- "this name is mine, and here is the ticket you gave me" -- absent on a
     -- first visit, which is what makes the hub mint one
     rankToken = M.rankToken(dialled, name),
-    sprite = M.spriteChoice(),
+    -- who you are walking in as, and no longer the only chance to say it:
+    -- mmo.sprite moves it mid-game (M.pushSprite), so this is the opening
+    -- value rather than the whole of the answer
+    sprite = sprite,
     profile = M.profile(game),
     map = current and current.mapId,
     x = current and current.x,
@@ -883,15 +1134,28 @@ function M.sendHello(game)
 end
 
 function M.disconnect()
-  M.restoreLook()
+  -- Not a plain restore any more: the character belongs to the player, not
+  -- to the session, so every way out of a game -- walking out, stopping a
+  -- host, or the tick funnelling a dropped transport through here -- leaves
+  -- it on. A player who never chose one still gets their trainer back,
+  -- because for them syncLook *is* the restore.
+  M.syncLook()
   sessions:endSession(nil)
   party:reset()
+  coop:reset()
   ctx.avatars:clear()
   ctx.roster:reset()
   ctx.chat:clear()
   transport:close()
   lastSent =
     { map = nil, x = nil, y = nil, facing = nil, busy = nil, fast = nil }
+  -- Cleared for the same reason lastSent is: what a hub is holding for us is
+  -- a fact about one connection. Carrying it across would have the next
+  -- session's reconcile weigh the choice against a hub that never heard it --
+  -- silent when it should push, if the two happened to agree. The next hello
+  -- seeds it again, so nil is only ever read while offline, where the tick
+  -- that would read it does not run.
+  spriteAcked, spriteClock = nil, 0
   -- Cleared with the rest of it, because "the last step was a fast one" is
   -- only true of a session: a player who sprinted or cycled, left, and
   -- rejoined standing still would otherwise advertise fast=true in their
@@ -917,6 +1181,31 @@ function M.leave()
   if M.isHosting() then return M.stopHosting() end
   M.disconnect()
   return true
+end
+
+-- Another save has taken over the world.
+--
+-- Three steps, and the order is the whole of it. The session belongs to the
+-- world that is going away, so it comes down first. The stashed original
+-- belongs to *that* world's player entity, so it is dropped rather than
+-- carried across -- restoreLook writes back only onto the entity it was
+-- taken from, which makes a torn-down world a no-op and clears the stale
+-- stash either way. Only then does the freshly loaded save get to say who it
+-- is, which may be a different character, or nobody.
+--
+-- applyLook can come up empty here, because the new world often does not
+-- exist yet when the event lands. That is not a failure worth reporting:
+-- refreshLook wears the choice on the first map.entered instead.
+function M.saveLoaded()
+  M.leave()
+  M.restoreLook()
+  M.syncLook()
+  -- "Once per session" for the unranked explanation meant once per
+  -- *process*, so a player who loaded a different save was never told why a
+  -- co-op trainer win paid nothing -- which is precisely the player who has
+  -- not heard it. Reset with the save -- and a fresh file counts: NEW GAME
+  -- routes through here too, and its player has heard nothing at all.
+  CoopBattle.saidUnranked = nil
 end
 
 -- ------- outgoing chat
@@ -1113,6 +1402,7 @@ handlers[Wire.WELCOME] = function(game, msg)
   -- includes us and the roster deliberately does not.
   party:reset()
   party:setSelf(id)
+  coop:reset()
   -- your own rating, which cannot come from the roster: it has no entry for
   -- you, by design
   myPoints = Wire.points(msg.points)
@@ -1136,6 +1426,42 @@ handlers[Wire.WELCOME] = function(game, msg)
   end
   transport:markReady()
   pushPresence(true)
+  -- Remember the hub, now that it has actually let us in.
+  --
+  -- Here and not in M.connect, because a dial is not a connection: recording
+  -- there would fill the SERVERS list with addresses that refused us, timed
+  -- out, or wanted a code we did not have. And after markReady rather than
+  -- before, because until then the welcome could still turn out to be
+  -- malformed and this connection never happened.
+  --
+  -- Only a dialled address: hosting has none -- the local net is in-process --
+  -- and a row that reconnects you to yourself is not a hub anybody wants
+  -- listed.
+  --
+  -- A code goes on the row only when this connection actually answered a
+  -- challenge with one, which is what authSent records. M.joinCode falls back
+  -- to the standing JOIN CODE option when a hub has no code of its own, so
+  -- recording its answer unconditionally would stamp that option onto every
+  -- open hub the player ever joins -- and the row's copy is then pinned under
+  -- the per-hub key, where it outranks the option it came from. A hub that
+  -- never asked for a code gets nil, and the store leaves entry.code alone on
+  -- nil, so a code the player typed themselves still survives.
+  --
+  -- Wrapped, and the whole point of the wrapping is that this is bookkeeping
+  -- on the one path every single connection takes. The store refuses rather
+  -- than raises, so nothing here is expected to throw -- but a save folder
+  -- this copy cannot write must never be the reason a player is not in the
+  -- game they just joined.
+  if dialled then
+    local kept, why = pcall(function()
+      servers:record(dialled, authSent and M.joinCode(dialled) or nil)
+    end)
+    if not kept then
+      mod.log:warn("could not add %s to the server list (%s) -- it will not "
+        .. "appear under START > MMO > SERVERS; rejoin it with JOIN GAME",
+        tostring(dialled), tostring(why))
+    end
+  end
   -- The hub gets the first word: its message of the day goes into the
   -- scrollback above the connection's own status line, so the first thing
   -- read on arrival is what the operator wrote rather than a count.
@@ -1172,6 +1498,9 @@ handlers[Wire.PART] = function(_, msg)
   -- and a client that kept waiting for that answer could never invite
   -- anybody again.
   party:onPeerGone(id)
+  -- Same shape, one feature along: an offer from somebody who is gone can
+  -- never be joined, and a four-way ask is short a player.
+  coop:onPeerGone(id)
 end
 
 handlers[Wire.MOVE] = function(_, msg)
@@ -1210,7 +1539,24 @@ end
 handlers[Wire.PARTY_INVITE] = function(game, msg) party:onInvite(game, msg) end
 handlers[Wire.PARTY_DECLINE] = function(_, msg) party:onDecline(msg) end
 handlers[Wire.PARTY] = function(_, msg) party:onParty(msg) end
-handlers[Wire.PARTY_END] = function(_, msg) party:onEnd(msg) end
+
+-- The party ending takes the co-op state with it, and in that order: an offer
+-- outliving the party it was made inside is an offer with nobody left who
+-- could accept it.
+handlers[Wire.PARTY_END] = function(_, msg)
+  party:onEnd(msg)
+  coop:onPartyEnd()
+end
+
+handlers[Wire.COOP_OFFER] = function(_, msg) coop:onOffer(msg) end
+handlers[Wire.COOP_OFFER_END] = function(_, msg) coop:onOfferEnd(msg) end
+handlers[Wire.COOP_JOINED] = function(game, msg) coop:onJoined(game, msg) end
+handlers[Wire.COOP_ASK] = function(game, msg) coop:onAsk(game, msg) end
+handlers[Wire.COOP_DECLINE] = function(_, msg) coop:onDecline(msg) end
+handlers[Wire.COOP_BATTLE] = function(game, msg) coop:onBattle(game, msg) end
+-- Battle traffic from one of the other three. Coop keeps the party exchange
+-- and hands everything else to the live battle's inbox.
+handlers[Wire.COOP_MSG] = function(game, msg) coop:onMessage(game, msg) end
 
 -- A rating moved -- ours or somebody else's.  One message covers both, so a
 -- battle's two halves land on every screen in the same frame.
@@ -1223,6 +1569,42 @@ handlers[Wire.RANK] = function(_, msg)
   else
     ctx.roster:setPoints(id, points)
   end
+end
+
+-- Somebody changed character in the middle of the game.
+--
+-- Broadcast with no exception, the way a rating is, so the player it is about
+-- hears it too -- and that copy is not a curiosity, it is the acknowledgement.
+-- Nothing else on the wire says "the hub took your change": a push that hit
+-- the half-second gate is refused in silence, so the one thing that tells the
+-- two apart is whether this message came back. The self branch records it and
+-- stops there. There is nothing to draw -- our own copy is already wearing
+-- the new character, because setSpriteChoice puts it on before it tells the
+-- hub -- and nothing to spawn, because our own presence is not in our own
+-- roster.
+--
+-- The refresh is the part that is not optional. An avatar reads its sprite
+-- once, when it is spawned, and neither advance nor sync ever looks again --
+-- so writing the roster alone would move every screen that draws from the
+-- roster and leave the character walking around the overworld as whoever they
+-- used to be. Avatars:refresh is a no-op unless that player's avatar is
+-- actually up, so a player standing on another map costs nothing here and
+-- simply spawns as their new self when they come into view.
+handlers[Wire.SPRITE] = function(_, msg)
+  local id = Wire.id(msg.id)
+  if not id then return end
+  -- an identifier, so the identifier sanitiser -- Wire.text would eat the
+  -- underscore and quietly turn everyone into RED; see Wire.spriteId
+  local sprite = Wire.spriteId(msg.sprite)
+  if not sprite then return end
+  if ctx.roster:isSelf(id) then
+    -- the hub's word on what it is holding for us, which is what the tick
+    -- reconciles the choice against
+    spriteAcked = sprite
+    return
+  end
+  local player = ctx.roster:setSprite(id, sprite)
+  if player then ctx.avatars:refresh(player) end
 end
 
 handlers[Wire.RANKING] = function(_, msg)
@@ -1340,11 +1722,24 @@ local function tick(game, dt)
 
   ctx.chat:update(dt)
   sessions:update(game, dt)
+  coop:update(dt)
 
   presenceClock = presenceClock + dt
   if presenceClock >= Config.PRESENCE_INTERVAL then
     presenceClock = 0
     pushPresence(false)
+  end
+
+  -- The character, reconciled rather than resent. Shaped like the presence
+  -- block above it -- accumulate, cross, reset -- and quiet in exactly the
+  -- same way: the send happens only when the hub's answer and the choice
+  -- actually disagree, which is never, apart from the seconds after a push
+  -- the gate refused or an option row nobody told the hub about. Two numbers
+  -- and a string compare on the ticks in between; no closure, no table.
+  spriteClock = spriteClock + dt
+  if spriteClock >= SPRITE_RETRY then
+    spriteClock = 0
+    if M.spriteChoice() ~= spriteAcked then M.pushSprite() end
   end
 
   ctx.avatars:sync(ctx.roster, World.current())
@@ -1405,6 +1800,62 @@ function M.install()
       pcall(M.leave)
     end
     return next(game, dt)
+  end)
+
+  -- Co-op against an NPC: the wait/alone choice, in front of any trainer.
+  --
+  -- **Watched rather than intercepted, and that is what makes it reach every
+  -- trainer.** An earlier version wrapped `script.command` and yielded the
+  -- script runner's coroutine, which worked -- and only for script-driven
+  -- battles. The other way a trainer starts, walking into one in the
+  -- overworld, goes through `OverworldState:engageTrainer`, which emits an
+  -- event and cannot be cancelled; there is no seam there to hold at.
+  --
+  -- Both paths end in the same place: `game.stack:push(battle)`. So this
+  -- listens for the push instead of trying to prevent it, and puts the prompt
+  -- **on top of** the battle that just arrived. A StateStack only updates its
+  -- top, so the battle underneath is frozen and completely untouched -- which
+  -- is why BATTLE ALONE costs nothing but closing a menu, and why a player who
+  -- is not in a party never notices any of this happened.
+  --
+  -- src/Coop.lua's onTrainerBattle is where the two answers diverge, and its
+  -- header explains what the co-op one does with the battle it took.
+  mod.events:on("screen.pushed", function(payload)
+    local state = payload and payload.state
+    if not (state and state.kind == "trainer") then return end
+    if not transport:isReady() then return end
+    local current = World.current()
+    local ok, err = pcall(function()
+      coop:onTrainerBattle(ctx.game, state, current and current.mapId)
+    end)
+    if not ok then
+      mod.log:warn("the co-op prompt failed (%s); this trainer is fought the "
+        .. "ordinary way -- the battle itself is unaffected", tostring(err))
+    end
+  end)
+
+  -- Palette zones for the 2-on-2 screen.
+  --
+  -- **A state cannot supply its own.** The colourising display modes take their
+  -- zones from the engine, and Game.lua offers exactly one seam to change them
+  -- -- this hook. Without it a co-op battle inherits whatever the current mode
+  -- decided for a surface it knows nothing about, which is why the same battle
+  -- came out in colour on one client and pink monochrome on another: the two
+  -- players simply had different display modes.
+  --
+  -- The answer is the true-colour opt-out WideBattle takes for the same
+  -- reason. Every pixel on this screen is already palette-correct -- the
+  -- pictures come out of the engine's cache with their species palette applied
+  -- and the boxes and glyphs are the engine's own -- so there is nothing left
+  -- to remap, and remapping it anyway is what broke it.
+  mod.hooks:wrap("render.zones", function(next, game, zones)
+    local out = next(game, zones)
+    local top = game and game.stack and game.stack:top()
+    if top and top.sim and top.zones then
+      local ok, mine = pcall(top.zones, top)
+      if ok and mine then return mine end
+    end
+    return out
   end)
 
   -- One committed step's speed.  The engine asks once per step, never per
@@ -1517,19 +1968,92 @@ function M.install()
   -- Leaving to the title screen or loading another save must not leave a
   -- stale roster pointing at a world that is gone -- and if this copy was
   -- hosting, the listener has to come down with it rather than serving a
-  -- world nobody is standing in.
-  mod.events:on("save.loaded", function() M.leave() end)
+  -- world nobody is standing in. The character goes with the save too: the
+  -- one being loaded may have chosen somebody else, or nobody.
+  mod.events:on("save.loaded", function() M.saveLoaded() end)
+
+  -- NEW GAME needs the very same resync, and it does not announce itself the
+  -- same way: starting a fresh file emits save.created, never save.loaded, so
+  -- listening for one alone leaves the other world half torn down. It matters
+  -- here because the overworld keeps *one* player entity for the life of the
+  -- process -- setMap only builds a new one when it has none -- so a stash
+  -- taken before QUIT is still standing after the title screen, and the mod's
+  -- own renderer still on the player. The fresh save has chosen nobody, and
+  -- dropping the stash is what lets that non-choice be honoured instead of
+  -- refreshLook re-wearing the last game's character on the first map.
+  mod.events:on("save.created", function() M.saveLoaded() end)
 
   mod.exports.isConnected = M.isConnected
   mod.exports.isHosting = M.isHosting
   -- nil unless this copy is hosting; a mod that wants to show the address
   -- somewhere of its own should not have to reach into HostServer for it
   mod.exports.hostAddress = function() return M.isHosting() and server:address() end
+  -- The hubs this copy has been welcomed by, in the order SERVERS draws them.
+  -- The rows and not the store, so nothing outside this mod can rename or
+  -- evict what the player collected -- and so the end-to-end driver can assert
+  -- that connecting actually recorded a hub, which is otherwise only visible
+  -- by opening a menu.
+  mod.exports.servers = function() return servers:list() end
   mod.exports.players = function() return ctx.roster:sorted() end
   -- Who you are travelling with, you included, in the order the hub listed
   -- them -- empty when you are not in a party. The end-to-end driver reads
   -- this to tell "the invite was accepted" from "the box appeared".
   mod.exports.party = function() return party:list() end
+  -- Co-op, as the end-to-end driver has to be able to read it: whether this
+  -- client is standing at a fight waiting, what its partner is offering, and
+  -- the plan the last agreement produced. Three separate answers because the
+  -- three failures they catch are separate -- an offer that was never sent, an
+  -- offer that arrived and was never shown, and an agreement that was reached
+  -- and never handed over.
+  mod.exports.coopWaiting = function()
+    local waiting = coop.waiting
+    if not waiting then return nil end
+    return { battle = waiting.battle, label = waiting.label, map = waiting.map }
+  end
+  mod.exports.coopOffer = function()
+    local offer = coop:pendingOffer()
+    if not offer then return nil end
+    return {
+      from = offer.from, name = offer.name,
+      battle = offer.battle, label = offer.label,
+    }
+  end
+  mod.exports.coopPlan = function() return coop.lastPlan end
+  -- The four-way PARTY BATTLE ask, while it is in flight.
+  --
+  -- One player asks and the other three are put a question; the asker is
+  -- never asked. Without this there is no way for a test to tell "the ask
+  -- reached all three" from "the ask reached nobody and the battle started
+  -- for an unrelated reason", nor to see a refusal clear it -- both of which
+  -- are the whole of the four-way handshake.
+  mod.exports.coopAsk = function()
+    local ask = coop.ask
+    if not ask then return nil end
+    return { role = ask.role, name = ask.name, side = ask.side }
+  end
+  -- Whether the 2-on-2 screen ever failed to draw.
+  --
+  -- draw() is guarded so a broken renderer cannot stop the game, and that
+  -- guard is exactly why this export has to exist: without it a layout bug
+  -- degrades to one log line and a blank battle, and an end-to-end run sails
+  -- past it green. That is precisely what happened -- a dangling PANEL_POS
+  -- drew nothing for a whole battle and the run never said so.
+  -- How the last co-op battle held together on the wire: turns missed, and
+  -- turns that arrived but left this copy disagreeing with the host. Both
+  -- should be zero on a healthy connection, and both are silent by design --
+  -- the battle recovers rather than stopping -- so without an export nothing
+  -- could ever assert they did not happen.
+  mod.exports.coopSync = function()
+    local state = coop.state
+    return {
+      gaps = (state and state.gaps) or 0,
+      desyncs = (state and state.desyncs) or 0,
+      resyncs = (state and state.resyncs) or 0,
+    }
+  end
+  mod.exports.coopDrawFailed = function()
+    return coop.state ~= nil and coop.state.drawFailed or false
+  end
   mod.exports.say = function(scope, text, to) return M.say(scope, text, to) end
   -- ranked PVP: this player's points, and the hub's top ten as last asked
   -- for. A mod that wants a leaderboard of its own reads these rather than
@@ -1554,10 +2078,11 @@ function M.install()
   -- what this player looks like in their own game, for tests and for a mod
   -- that wants to know
   mod.exports.myLook = function() return M.spriteChoice() end
-  -- What you are wearing rather than what you picked -- nil in a
-  -- single-player game. The end-to-end driver reads this to tell "the
-  -- character was chosen" from "the character is actually being worn",
-  -- which is the difference the battle and trainer-card pics hang off.
+  -- What you are wearing rather than what you picked -- nil until a look is
+  -- actually on the player, which happens offline too once a character has
+  -- been chosen. The end-to-end driver reads this to tell "the character was
+  -- chosen" from "the character is actually being worn", which is the
+  -- difference the battle and trainer-card pics hang off.
   mod.exports.wornLook = function() return M.wornLook() end
   mod.exports.avatarState = function()
     local out = {}
@@ -1573,6 +2098,16 @@ function M.install()
         -- about the pace of their own last step, which is what the drivers
         -- assert on
         fast = player.fast and true or false,
+        -- Who this avatar is drawn as. The roster's word again, and honest
+        -- about it: the avatar layer bakes the sprite in at spawn and is
+        -- rebuilt whenever this value moves (Avatars:refresh), so for a
+        -- spawned player the two agree by construction -- what the roster
+        -- says is what was last spawned with. The one gap is a sprite this
+        -- game's catalog does not carry, which spriteFor draws as the
+        -- fallback while the roster keeps the id its owner actually chose.
+        -- Read it beside `spawned`: a character change is only on screen
+        -- when both have moved.
+        sprite = player.sprite,
         avatarMap = ctx.avatars.mapId,
       }
     end

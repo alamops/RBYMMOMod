@@ -4,220 +4,990 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [0.9.0] - 2026-08-06
-
-One credential learns to mean something more. Until now every join code was
-the same code: it let somebody into the world, and that was the whole of what
-it said about the person holding it. But the host of a hub is also its
-operator, and the in-game operator features that are coming need to know which
-connection belongs to one. This release answers that by marking a code rather
-than by inventing a second password.
+## [0.9.0] - 2026-08-07
 
 ### Added
 
-- **Admin join codes.** `rby-mmo-hub invite --admin` mints an ordinary join
-  code with one flag set on it. It joins the game exactly like any other code —
-  same six characters, same screen, same handshake, nothing about admission
-  changes — and what the flag buys is that **the hub marks the connection it
-  opened**. It is revoked like any other code (`revoke <id>`), and `invite
-  list` grows a **`KIND`** column reading `ADMIN` or `player`, shown with *and*
-  without `--reveal`, because what a code marks is not a secret; only the code
-  itself is.
-  **The mark is for operators and for the features that come later.** The
-  welcome tells that client about itself (`admin: true`, and only when true),
-  and operator views — `roster()`, and so `status.json`, `players --json` and
-  the admin socket's `who` — carry the flag. **Other players never see it**:
-  it is deliberately absent from the presence record that is broadcast to
-  everybody, so nobody in the world learns who holds power. The flag is
-  derived server-side from the credential that answered the challenge and from
-  nothing else, so no message a client sends can claim it.
-  **No in-game admin feature ships in this release.** There is no operator menu,
-  no command, no button — the flag exists so the features that want one have
-  something to check when they are built. On a hub with `auth.required` false,
-  and on the `node hub.js` shim, nobody is admin at all: the flag rides a
-  credential, and there is no credential.
-  An admin code is worth more to a thief than a player's one is, so
-  `invite --admin --expires 24h` is the shape to prefer for an evening or a
-  guest operator; nothing about one is precious, and minting a fresh one costs
-  a command.
+- **Dedicated-hub operator tools.** `rby-mmo-hub players`, `ranking`,
+  `watch`, `history`, `stats`, `kick` and `broadcast` expose live roster,
+  ranking, history and operator actions without a game client. The hub writes
+  an atomic `status.json`, keeps a bounded battle ledger, and exposes live
+  in-memory counters over `admin.sock`.
+- **Admin join codes.** `rby-mmo-hub invite --admin` marks the connection
+  opened by that code as an operator connection. The flag is derived
+  server-side from the credential, shown only to operator surfaces, and kept
+  out of ordinary presence broadcasts.
+- **Hub message of the day.** A dedicated hub can greet joining players with a
+  `HUB` chat-log line, and the `HUB` name is reserved so players cannot
+  impersonate hub-originated messages.
+- **Server-side location/ranking views.** The in-game `PLAYERS` list and CLI
+  player views show where each trainer is when the hub has a current cell, and
+  ranking views include the persisted season state.
 
-### Notes
+### Changed
 
-- **No wire change.** `PROTOCOL` stays **5**. `admin` is a field on a welcome,
-  travelling hub→client only and present only when true — the same argument the
-  MOTD was shipped under in 0.8.0: an older client reads past a key it does not
-  know, an ordinary player's welcome is byte-identical to the one 0.8.0 sent,
-  and nothing new travels the other way. The bump rule asks whether a *client*
-  can now send something an older *hub* would ignore, and nothing here does.
-  `affects_link` stays `false`.
-- **Old configs need no migration.** The flag is written only when it is true,
-  so a credential minted before this release is the same object it always was
-  and reads as a player's everywhere. The config validator preserves it across
-  the rewrites the hub does when it charges a use count, so an admin is never
-  quietly demoted by the save path.
+- **The web dashboard is removed.** The operator surface is the CLI/admin
+  socket, so tests and docs now exercise that path directly.
 
-## [0.8.0] - 2026-08-05
+## [Unreleased]
 
-Four things the *host* of a dedicated hub has been doing without: a live view,
-a record of what was played, a way to say something or remove somebody while
-the hub is up, and a greeting for people arriving. Nothing on the wire moved
-for any of them.
+### Fixed
+
+- **A JOIN address with no port on it lands on 7788, however it was left
+  off.** A bare `MYBOX.LAN` was already completed, but the check was "does
+  this end in `:<digits>`" — so `MYBOX.LAN:`, typed by anyone who reached for
+  the colon and then remembered they were never told a port, became
+  `MYBOX.LAN::7788` and was dialled at host `MYBOX.LAN:`. That resolves to
+  nothing, and it fails the way a hub that is switched off fails, so the
+  player goes and asks the host to check their end. The port slot after the
+  last colon is now read rather than merely spotted: empty, not a number, or
+  a number no socket can bind, and `Config.DEFAULT_PORT` fills it in. A port
+  that was actually typed is still dialled exactly as typed.
+- **Spaces in a JOIN address are removed, wherever they are.** The naming
+  grid carries a space glyph and no address has any use for one — neither a
+  hostname nor an IP may contain a space — so `MYBOX.LAN ` and `MYBOX . LAN`
+  are both just what the grid made easy to type, and both used to be dialled
+  with the spaces still in the hostname. They also disagreed with the
+  passcode key, which strips whitespace: the code was filed under one string
+  and the connection made to another, so a saved passcode stopped being
+  found. Both now see the same string. It also means a port held off its
+  colon — `MYBOX.LAN: 7788` — keeps the value it plainly means instead of
+  reading as a port that was never given. An address that is only a port
+  (`:7788`) is refused rather than dialled at an empty host, which is the
+  answer an empty address already got.
+
+## [0.8.0] - 2026-08-06
 
 ### Added
 
-- **`rby-mmo-hub watch` — `players`, repainted.** The listing verb answers
-  "who is on it" once and exits, which is the wrong shape for the evening a
-  host actually spends: watching people arrive, team up and start battles.
-  `watch` prints the same frame every two seconds (`--interval <s>`) until
-  Ctrl-C, and `--once` prints exactly one and exits, which is also how the
-  suite drives it. The screen is cleared between frames **only when stdout is
-  a terminal** — piped into a file or a pipeline it is plain frames, one after
-  another, with no escape sequences buried in them. It reads the same
-  `status.json` `players` does and inherits every honest state that file has:
-  a stale heartbeat still says *this hub appears to be down* on every repaint
-  rather than quietly repainting the last roster it saw as though it were now.
-- **Match history, in a ledger beside the season it explains.** `ranking.json`
-  has always held the *result* of every battle and never the battles, so a
-  host could see that somebody was on 1012 points and had no way to see how
-  they got there. Every settled ranked battle is now one JSON line appended to
-  **`history.jsonl`** — when it ended, when it started, both names, both
-  scores after it, what was gained and lost, and how many times that pairing
-  had already met inside the hour. `rby-mmo-hub history` prints them newest
-  first (`-n N`, `--json`), and `ranking` grows **`W` and `L` columns**, which
-  is a projection of the `played`/`won` counts that file was already keeping
-  rather than anything new to record. Only a battle both players reported the
-  same way is history: a draw, a disagreement and a match under an unproven
-  claim all score nothing and are all written nowhere.
-  The ledger is **the one file this hub appends to** rather than rewriting
-  whole, because a history is only ever the old lines plus one more and
-  rewriting it would put every past battle at risk on every new one. The cost
-  is that a hub killed mid-write can leave a torn last line, so the reader
-  skips a line it cannot parse instead of dying on it. And it is **bounded**:
-  at 512 KiB the file is renamed to `history.jsonl.1` — replacing any previous
-  one — and a fresh ledger started, so a hub holds somewhere between three and
-  six thousand battles and never grows past about a megabyte on its own.
-- **An admin channel, so the hub can be told something and not only asked.**
-  `status.json` let a short-lived CLI process *read* a running hub; it can no
-  more carry an instruction than any other file can. There is now a Unix
-  socket, **`admin.sock`, beside `config.json`**, speaking one JSON line in
-  and one back per connection: `who` (the live roster), `stats` (the hub's
-  counters *including* the wrong-passcode throttle's live numbers, which reach
-  no file and were previously visible only in the log), `kick` and
-  `broadcast`. Three of the four have CLI verbs — `who` is the one that does
-  not, because `players` already answers it off the snapshot.
-  **`rby-mmo-hub stats [--json]`** prints those live counters at a terminal:
-  seats taken, connections open, handshakes in flight, wrong passcodes against
-  the ceiling that trips, whether it is tripped, and how many addresses are
-  backing off. Addresses are counted and never printed, in either form.
-  **`rby-mmo-hub kick <name>
-  [--reason TEXT]`** removes a player with a sentence they actually see — the
-  game renders it in the same box a refused join lands in — defaulting to *"An
-  operator removed you from this hub."* Names are unique only among ranked
-  players, so a kick matches case-insensitively, may land on nobody or on
-  several people, and reports which. **`rby-mmo-hub broadcast <text>`** arrives
-  in every connected game as an ordinary chat line named `HUB`.
-  **The trust model is the filesystem and there is deliberately no password
-  on it.** The socket sits in the data directory, which is 0700, beside the
-  `config.json` that holds every join code in plaintext: anything that can
-  open the socket can already read the codes, so a second secret in the same
-  directory as the first would protect nothing. In Docker that is also why it
-  is in `/data` and not `/tmp` — the volume is what `docker compose exec`
-  shares, the container's tmpfs is not.
-- **A message of the day.** `config set motd "Tournament Saturday 8pm"`, then
-  `SIGHUP`, and everybody who connects from then on is greeted with it: the
-  hub sends it on the welcome and the game shows it as a **`HUB` line in the
-  chat log** — no modal to dismiss, no bubble over anybody's head, just the
-  first line of the scrollback. It is one line of the same characters chat
-  allows, capped at **120** rather than chat's 60, because a host writes it
-  once and it is the only sentence the hub gets to say for itself. Empty is
-  the default and means no greeting.
+- **`SERVERS` remembers where you've been.** The disconnected MMO menu grows
+  a `SERVERS` row the first time you've connected anywhere, at the top, above
+  `HOST GAME` — the next hub you visit can be a menu, not a retyped address
+  and passcode. It stays off the menu until there is a first entry to show
+  it, and it disappears again the moment you're hosting or connected, the
+  same rule `ADDRESS` and `PLAYERS` already follow.
+- **Favorites pinned on top, marked `▶`; everyone else by address,
+  descending.** A favorited entry carries a `▶` in the row's right-hand
+  column — the game's own cursor glyph, the same mark the `PLAYERS` and
+  `CHAT` rows already use — and sorts above every plain one no matter when it
+  was last used; within each group, entries sort by their normalised
+  `host:port` string, Z before A. Recency decides nothing about where an
+  entry sits on the list — only whether a non-favorite survives the next
+  eviction.
+- **Picking an entry opens a submenu of its own.** `CONNECT` dials it the
+  same way `JOIN GAME` does — the same CHARSET naming step first, then the
+  same challenge if the stored passcode turns out to be wrong.
+  `FAVORITE` / `UNFAVORITE` flips the pin, the label swapping with the state
+  the way `END GAME` and `LEAVE` already do elsewhere on this menu.
+  `EDIT HOST` and `EDIT CODE` reopen the address and the passcode on the
+  naming grid without touching the entry's name. `RENAME` is the only row
+  that does. `DELETE` is last on purpose — the one row here that can't be
+  undone by pressing it again — and asks first: a yes/no confirm names the
+  entry before anything happens, defaults to "no", and a "yes" drops the
+  row for good and returns you to the list.
+- **A new connection writes its own entry, and only once it's real.** The
+  recording happens at `WELCOME` — not on every dial — so a wrong passcode or
+  a refused connection never litters the list with a hub you never actually
+  reached. The entry is named after the address you dialled, with the
+  standard port left off — `192.168.1.20:7788` lists as `192.168.1.20`, since
+  that port is the one every hub here uses and sixteen characters is all a
+  row has. A hub on any other port keeps it in the name, because there it is
+  the difference between an address that dials and one that doesn't. Either
+  way the entry still holds the whole address, which is what `CONNECT` dials.
+  Hosting your own game records nothing, because there's no address you
+  dialled to remember.
+- **Renamed like anything else typed on this mod's grids: sixteen
+  characters, same sanitiser.** A rename that would leave the name empty is
+  refused rather than accepted blank — the same rule `Wire.text` already
+  enforces everywhere else a name crosses the save or the wire.
+- **The list outlives the save.** Entries are dual-written to
+  `rby_mmo_servers.json`, beside the claim-ticket file, and mirrored into
+  `mod.save` for whichever copy only ever needs to read them back — the file
+  wins on a mismatch, so quitting to the title, pressing `CONTINUE` without
+  having saved, or switching save slots entirely still finds the same list
+  of hubs. The same shape the rank-token file already proved.
+- **Capacity sixteen, oldest non-favorite first.** Past sixteen entries, the
+  one that's gone longest without being reconnected to is the one evicted to
+  make room — favorites don't count against the cap and are never the one
+  removed.
+- **`CHARACTER` on the MMO menu — before a game, and in one.** Until now the
+  character list was a step on the way into a game and nowhere else: the only
+  door to it was hosting or joining, so a player who simply wanted to look
+  like somebody else had to open a connection to do it, and there was no way
+  at all to change your mind between sessions without starting one. There are
+  two doors to it now and they open the same list, the one the character
+  creator opens: under `HOST GAME` and `JOIN GAME` while you are on your own,
+  and under `RANK` — above `LEAVE` and `END GAME` — while you are in a game.
+  Either way the choice applies the moment you make it and hands you back to
+  the menu you came from, and it writes the same save field the creator always
+  wrote, so the character you are wearing is part of the game you save and
+  comes back with it.
+- **Changing character mid-game changes you for everybody, immediately.** The
+  in-game row would have been a lie without this: the hub used to learn which
+  character you were wearing when you said hello and there was no message that
+  changed it afterwards, so swapping mid-session would have re-dressed you on
+  your own screen and nobody else's. Your copy now tells the hub, the hub
+  relearns your face and passes it on to everyone in the game — including you,
+  so there is one path rather than two that have to agree — and each of their
+  copies rebuilds its walking view of you on the spot rather than waiting for
+  you to leave the map and come back. A trainer card of yours that somebody
+  has open at that moment turns over with it, because the change is written
+  into the roster entry the card is holding rather than into a replacement for
+  it. From then on every ordinary movement update carries the new character
+  too, so a player who joined a second later, or missed the message, is
+  corrected without anybody doing anything. The one screen that does not
+  follow live is a leaderboard already open on somebody's screen: it keeps the
+  portrait it was drawn with until it is next asked to refresh — exactly the
+  staleness the points on it already have.
+- **The character list shows you what you are picking.** Every row now
+  carries that character's 16x16 front-facing frame to the left of its name —
+  the same picture the trainer card and the leaderboard already draw, read
+  out of the same walking sheet, so nothing new is decoded and nothing new
+  ships. Thirty-eight names is a lot of names, and `MIDDLE AGED WOMAN` tells
+  you nothing about who that is; scrolling a list of labels to find the one
+  you meant was guesswork against a cast most players have only ever seen in
+  passing. The labels move right by one tile to open the gutter the pictures
+  sit in, and the `▷` that marks the two characters this mod ships is
+  untouched in the cursor's own column, so the row still says which is which.
+  A character with no art to show — nothing has been decoded yet — leaves its
+  gutter empty and lists as before, rather than being an error on a screen
+  whose whole job is to be looked at.
 
-### Notes
+### Changed
 
-- **The name `HUB` is now reserved.** A player who connects under it — in any
-  spelling; the match is the same case-folded rule the ranking uses — is
-  refused with a sentence asking them to pick another trainer name and connect
-  again. The MOTD and a broadcast arrive as chat with no sender id, so the
-  name is the only thing on the receiving side that distinguishes the hub's
-  own voice from a player's, and a player wearing it could put words in the
-  hub's mouth. It is a real, if unlikely, eviction: somebody whose trainer is
-  called HUB has to rename to get back in.
-- **No wire change.** `PROTOCOL` stays **5** and no message type was added, so
-  a 0.7.0 copy and a 0.8.0 copy still play together. Everything new here
-  travels hub→client or does not travel at all: the MOTD is a field on a
-  welcome an older client never reads, a broadcast is an ordinary `mmo.chat`
-  with no `from` (a bubble for an unknown id is stored and never drawn, and
-  expires), and the watch, history and admin surfaces are the host's terminal
-  and the host's own machine. The bump rule asks whether a *client* can now
-  send something an older *hub* would ignore, and nothing here does.
-  `affects_link` stays `false`.
-- **The in-game hub gets none of this.** `src/Hub.lua` hosts from inside a
-  copy of the game: no config file to hold a MOTD, no data directory to put a
-  socket or a ledger in, and no terminal to watch. These are dedicated-hub
-  operator features and are scoped as such.
+- **`PROTOCOL` 6 → 7**, in `src/Config.lua` and `server/lib/relay.js`
+  together, for the one new message a character change sends. Nothing already
+  on the wire changed shape, so an old client still parses everything a new
+  hub sends — the breaking direction is the other one, as it has been every
+  time: a protocol-6 hub has never heard of that message and answers an
+  unknown type with silence, so a player would pick a character on the
+  connected menu, watch themselves change, and be the only person in the game
+  who could see it, forever, with nothing on screen saying why. A refusal
+  naming both versions beats that quietly. So a 0.7.x hub and a 0.8.0 client
+  turn each other away at the door, as do a 0.8.0 hub and a 0.7.x client:
+  **the mod and its hub have to be updated together.** The same call parties,
+  ranked PVP and the running pace each made, one version apart.
+- **Leaving a game no longer takes your character off.** The chosen look was
+  worn between connecting and disconnecting and at no other time, so quitting
+  a game — deliberately, or because the hub hung up, or because you loaded a
+  different save — put the vanilla trainer straight back on, in the overworld,
+  in your battle pics and on your own trainer card. That made sense while
+  choosing a character was something you did *to* join a game. Now that it is
+  a thing you can do on your own, it reads as the game undressing you, so it
+  stopped: once you have picked a character you keep wearing it, offline and
+  online, until you pick a different one. What has not changed is the save
+  that never chose: a player who has never touched the character list, and
+  never moved the `MY SPRITE` option off its default, is rendered by exactly
+  the same code as before and sees exactly what vanilla draws. Wearing a
+  character is now something you opt into and can undo — picking `RED` puts
+  you back — rather than something the end of a session does for you.
+
+## [0.7.4] - 2026-08-06
+
+### Fixed
+
+- **The player who *joined* a co-op trainer battle no longer has to fight that
+  trainer a second time, alone.** Both players walk into the trainer, so the
+  engine builds a real battle on both machines; the co-op battle stands in for
+  it and hands it the result afterwards. That handoff only ever worked for the
+  player who pressed WAIT. Their battle rides across as `waiting.engine` and
+  `startBattle` takes it off the stack before the 2-on-2 goes on — the comment
+  there says why in one line: *"Left there it would resume the moment the co-op
+  battle popped, and the player would fight the same trainer twice."* The
+  player who pressed yes arrives through a different door (`onBattle`, the
+  message the hub sends the joiner) and that door built its plan with no engine
+  battle in it at all, so the unwind was skipped and their own battle spent the
+  whole fight buried under the co-op screen. It came back the instant that
+  screen popped: the trainer they had just beaten alongside a friend, standing
+  in front of them again, with the friend gone. The reference is client-local
+  and could never have crossed the wire — it was sitting in `self.encounter`
+  the entire time, unread. It is picked up now, keyed on the battle the hub
+  named so that the two ways into a co-op battle that never walked into
+  anything — a party-versus-party fight, and a join from the ACTIONS menu —
+  keep answering nil, which for them is correct.
+- **A joined trainer now shows the joiner their entrance and their parting
+  line.** Three things hang off that same reference: the trainer's picture, the
+  text they say on the way down, and the AI allowance the engine had already
+  computed. The joining player got none of them, which read as a small
+  graphical inconsistency and was really the same missing reference. Both
+  players walked into this trainer; both see them.
+- **A trainer somebody was standing in front of is no longer marked beaten by a
+  battle they were not in.** A player can be at a trainer, prompt up, when a
+  party-versus-party ask arrives and is answered. A party battle displaces
+  nothing, so nothing cleared the encounter that trainer was held in — and when
+  the 2-on-2 ended, the trainer was handed the *party* battle's result: marked
+  beaten by a fight they never took part in, with their prize money paid out
+  for it. Their own battle was still on the stack underneath, so it came back
+  anyway. The encounter slot is emptied when a co-op battle starts whatever is
+  in it now; a trainer this battle did not fight is simply left to be fought.
+- **Unwinding the screen stack no longer goes looking for something that is not
+  there.** `unwindTo` pops by identity, and its only other stopping condition
+  is a guard of sixteen — so a target that had already left the stack did not
+  fail to find it, it took sixteen screens down hunting for it, which mid-battle
+  is the battle and the world underneath. A held reference outliving its state
+  is ordinary (a battle that finishes itself pops itself), so it is checked now
+  rather than assumed, and a stale target does nothing at all. The same check
+  is what stops a co-op battle adopting an encounter whose battle has already
+  ended — reachable when a join is dropped by the hub, the player fights that
+  trainer alone, and a later fight against the same class on the same map with
+  the same lead produces the same key.
+
+## [0.7.3] - 2026-08-06
+
+### Fixed
+
+- **The `CHAT` row no longer looks like it has the cursor on it.** The unread
+  marker on that row has had two lives and neither worked: as a trailing `*`
+  it drew nothing at all (the extracted font has no glyph for it, and
+  `Font.width` advanced 8px anyway, so the row read as `CHAT` plus a blank
+  column), and as a leading `▶` it drew the menu's own cursor glyph — so a
+  row with unread messages looked like a second selection sitting on a row
+  the cursor was not on. The label is plain `CHAT` now. Unread lines are
+  still counted on the chat model; the count simply no longer decorates the
+  menu.
+
+## [0.7.2] - 2026-08-06
+
+### Fixed
+
+- **The distributed archive no longer carries the co-op end-to-end drivers.**
+  `tests/drivers/mmo_quad.lua` and `tests/drivers/run-quad-e2e.sh` arrived with
+  co-op battles and never reached `.modkitignore`, so `pack` duly put both in
+  the v0.7.1 zip — two files that reach engine test infrastructure and mean
+  nothing to somebody who has just unpacked a mod. Nothing mechanical was going
+  to catch it: `lint` has no opinion about a driver script, and the file count
+  only looks wrong to a reader who already knows what it should be. That is the
+  trap `my-profile.png` and `rank.png` each fell into one release apart, and the
+  fix is the same one — name the files. Both drivers are listed now, along with
+  the seven screenshots taken since the block was last touched
+  (`coop-battle.png`, `coop-item.png`, `coop-switch.png`, `party-ask.png`,
+  `party-battle.png`, `party-spectating.png`, `two-parties.png`), so
+  `modkit pack` leaves all nine behind — the release workflow already dropped
+  `docs/` wholesale, so only the two drivers ever reached a published zip.
+  Seven plan files join them on the same footing as every other plan entry —
+  `submit-to-mod-index.md` plus the six that had accumulated without a line
+  (`coop-battle-hp-sequencing.md`, `coop-battle-status-and-timeout.md`,
+  `coop-battle-ux-findings.md`, `coop-run-consent-and-blackout.md`,
+  `nire-back-sprite-pixel-ratio.md`, `non-blocking-avatars.md`): working notes
+  for whoever picks this up next, not mod content.
+
+### Changed
+
+- **Two version numbers in the docs caught up with the mod.** `README.md`'s
+  known-jank section still opened by calling this `0.5.0`, and
+  `server/README.md`'s VPS walkthrough still cloned `--branch v0.2.2` — a tag
+  from before the hub that walkthrough then tells you to build existed at all.
+  Both now name the current release.
+
+## [0.7.1] - 2026-08-05
+
+### Fixed
+
+- **NIRE and NIRE HOOD's back pic draws with square pixels again.** The back
+  pics are 48x48, and they were registered at 64/48 so they would take up the
+  same 64 screen pixels vanilla's 32x32 back pics get from their default 2x —
+  which is the right footprint drawn the wrong way. The plain battle view
+  hands that number to the draw call as it stands, onto a nearest-neighbour
+  canvas, so two source pixels out of every three came out one pixel wide and
+  the third came out two: the sprite read as subtly smeared rather than
+  crisply pixelated. The back pic now draws at 1x — 48 pixels, which is
+  exactly what the alternate 3D view has been showing all along, since it
+  rounds every battle scale to a whole number before drawing. The two views
+  finally agree. And a future character that asks for a fractional scale is
+  snapped to the nearest whole number with a warning naming it, so the
+  artifact cannot come back in through a new character sheet.
 
 ## [0.7.0] - 2026-08-05
 
 ### Added
 
-- **The hub can tell you who is on it, from the terminal.**
-  `rby-mmo-hub players` lists every connected trainer with where they are —
-  `PALLET TOWN`, not `PALLET_TOWN` — along with `BUSY`/`PARTY` and their
-  ranked points. Until now the only way to answer "who is in my world right
-  now" was to launch the game and open the `PLAYERS` screen, which is an odd
-  thing to have to do to a machine you are already logged into. A player who
-  is mid-battle or sitting in a menu shows a dash rather than a place, because
-  the hub is genuinely not told a cell while they are there, and the command
-  says so instead of looking broken. `--json` prints the rows as they are
-  held, for anyone piping this into something else.
-- **…and the leaderboard, too.** `rby-mmo-hub ranking` prints the persisted
-  season — place, name, points — top ten by default and `--all` for everybody
-  who has ever scored. It reads `ranking.json`, the file the hub has been
-  keeping all along, so nothing new had to be plumbed for it and a hub that is
-  switched off still answers.
-- **A small `status.json` beside the config, so those two commands have
-  something to read.** The CLI is a short-lived process with no channel into
-  the running hub — that is why `status` has always printed *configured*
-  numbers and said so. Rather than open an admin socket (a port, an auth
-  story, and a thing to get wrong), the hub now writes a snapshot of its
-  roster next to `config.json` and `ranking.json`: written whole and renamed
-  over the old one at mode 0600 like the ranking already was, refreshed
-  whenever somebody joins, leaves, or crosses into another map, and beating
-  every ten seconds even when nothing happens. That heartbeat is what makes the
-  file **honest**: a reader that finds one older than two and a half beats says
-  the hub appears to be down rather than reporting a room full of players who
-  left hours ago, a clean shutdown stamps `stoppedAt` and empties the roster,
-  and a missing file is reported as a hub that has not run rather than an
-  error. It holds names, characters, map cells and points — no join codes, no
-  ticket hashes, no session ids, no player addresses — so it is as safe to
-  `cat` on a shared screen as `invite list` is. (The hub's *own* bound host and
-  port are in there, but those are already in `config.json`.)
-- **The `PLAYERS` list in the game says where everyone is.** The column that
-  read `HERE` now reads the place: `VIRIDIAN FOREST`, `CELADON CITY`,
-  `PALLET TOWN`. That is strictly more than `HERE` was telling you — your own
-  map's name against somebody's row still reads as *here*, and the rows that
-  used to be blank now answer the question `HERE` could not, which is where
-  everybody else went. `PARTY` and `BUSY` keep the column when they apply,
-  because who you can talk to outranks where they are, and a name long enough
-  to crowd the row trims the place rather than itself. The names are real
-  ones, resolved from the town-map data the engine decodes out of **your own**
-  ROM at runtime, with the engine's own `PALLET_TOWN` → `PALLET TOWN` fallback
-  for a map with no entry there — so nothing ROM-derived is shipped to get
-  them. Nothing new goes on the wire either: the map id has ridden along with
-  presence since the first release, and this is the mod finally reading it out
-  loud.
+- **Co-op battles: two of you against one trainer, and two parties against
+  each other.** Walk into a trainer while you are in a party and you are asked
+  first: wait for your friend, or go in alone. Waiting tells them where you
+  are standing; reaching the same fight, or walking up to the person standing
+  at it, offers to join. When both agree, four monsters go on the field.
+- **A no that costs nothing.** Declining to join writes no flag, sends no
+  message and clears no offer. The friend who is waiting goes on waiting and
+  is not even told, and walking back into that same fight asks again — because
+  there is no record of the refusal for anything to consult. A refusal that
+  persisted would need something to expire it, and that something is what
+  would eventually be wrong.
+- **A fight you cannot dodge.** Every exit from every prompt ends in a battle.
+  B on the wait/alone choice is BATTLE ALONE rather than "never mind", and B
+  while waiting reopens that same choice rather than releasing you. The engine
+  has committed to the encounter by the time the mod is asked, so a prompt with
+  a working cancel would be a prompt that skipped a trainer.
+- **A door that shuts.** Nobody joins a battle that has already started, and an
+  offer is taken exactly once — a second join, or one racing the first, finds
+  nothing left to accept.
+- **PARTY BATTLE**, directly under BATTLE on the menu you get by walking up to
+  someone. Two parties, four trainers, and all four have to say yes; one no
+  ends it for everyone. It refuses, by name and before anything reaches the
+  wire, an opponent who is not in a party and a partner of yours who is not on
+  this map — then the hub refuses the same things again, because a client's
+  word is not a rule.
+- **`PROTOCOL` 5 → 6**, in `src/Config.lua` and `server/lib/relay.js`
+  together (and `server/package.json`'s version with them). Two branches
+  that had never met each claimed 5 — one for the `fast` pace flag, one for
+  the co-op vocabulary — so a client and hub could both say "5" and still
+  be talking past each other. 6 is the first number that means both.
 
-### Notes
+### Added — the battle itself
 
-- **No wire change.** `PROTOCOL` stays **5** and no message type was added,
-  so a 0.6.3 copy and a 0.7.0 copy still play together; the two new commands
-  read files, and the location names are resolved on the client from data it
-  already had. `affects_link` stays `false`.
-- `server/README.md`'s protocol section had been left behind at protocol 3
-  and never learned about ranked PVP or the pace flag. It now documents
-  protocol 5, `mmo.result` / `mmo.ranks` / `mmo.ranking` / `mmo.rank`, the
-  party messages that only ever appeared in one direction of the table, and
-  the `fast` field on a presence record.
+- **A real four-monster field.** `src/CoopSim.lua` is the 2-on-2 the engine
+  does not have: four battlers out at once, an ordering over all four (not two
+  independent pairs), a target chosen per action, and a side that loses only
+  when **both** its trainers are out of mons. A speed tie breaks stably on slot
+  index rather than a coin flip, because four clients have to agree and a
+  per-pair roll gives four answers.
+- **A target that falls mid-turn redirects.** Ordinary in a four-way field and
+  near-impossible in a 1v1: if your partner knocks your target over before you
+  swing, your move goes to whoever is still standing instead of fizzling.
+- **The damage is the engine's, not a second copy.** Type effectiveness, STAB,
+  the critical-hit shift chain, badge boosts, burn's attack cut, screens and
+  the 217..255 random factor all come from `src/battle/Damage.lua`, so a mon
+  hits for the same number in a co-op battle as in a wild one. Status,
+  accuracy and turn speed likewise come from the engine's own modules.
+- **Host-authoritative sync.** One client simulates and the other three replay
+  the events it produces, fanned out by a new `mmo.coop_relay`. Four-way
+  lockstep would need all four to consume the same RNG draws in the same order
+  across four resolutions; the trade is stated plainly rather than hidden.
+- **An NPC pair that plays.** A trainer's party is split across two slots, and
+  each picks its strongest available move against whichever opponent is
+  closest to falling.
+- **Every move effect the game has, because none of them are reimplemented.**
+  `src/CoopField.lua` is a `BattleState`-shaped object over the four slots
+  whose `__index` chain ends at the engine's own `BattleState` — so the move
+  that runs *is* `BattleState.performMove`, driving the real `move_effects`
+  registry. Charge moves charge, Substitute absorbs, Hyper Beam recharges,
+  Metronome calls, multi-hit hits, recoil recoils, Bide stores, stat stages
+  move. The discovery that made it possible: `EffectRegistry`, `MoveEffects`
+  and `StatusRegistry` never read `battle.player` or `battle.enemy` — they
+  take `user` and `target` as arguments and ask the battle for the rest
+  through about fourteen methods. Only the bookkeeping is pair-shaped, and
+  only the bookkeeping is replaced.
+- **All four battle commands.** FIGHT, ITEM, SWITCH and RUN, in the original's
+  2×2 box. ITEM goes through the engine's own `ItemEffects.use`, so a potion
+  heals what a potion heals and an item that refuses mid-battle refuses in the
+  engine's words. SWITCH costs the turn, as it does in the original.
+- **Exp, split between both winners, and priced on each player's own machine.**
+  The host resolves the knockout but holds nobody's party except its own, so
+  what crosses the wire is a *description* of the kill — what fell, at what
+  level, and how many shared it — and every client runs the engine's own
+  `Experience.apply` over its own live monster. That is what makes a shared
+  knockout genuinely worth half each rather than full each, and it divides the
+  stat exp the same way. Sending a finished number instead would have skipped
+  all of it. Level-ups are announced like any other.
+- **EXP.ALL works.** Holding one halves what the monster that fought takes and
+  spreads the other half across everyone still standing, exactly as the
+  original's second pass does — including the level-ups, the moves that come
+  with them, and the evolutions they trigger for a party member that never left
+  its ball. A fainted one shares nothing.
+- **The trainer's picture, their music and their parting line.** The picture
+  holds the field through the opening lines and steps aside before the first
+  menu, rather than lingering over the monsters. Their battle theme plays
+  through the engine's own picker, so a gym leader still gets a gym leader's
+  music, and the victory theme answers it. What they say on the way down is
+  said here, because the battle it was written for is the one this displaced
+  and it would otherwise never be heard. Which theme it is comes from the
+  engine's own `computeMusicKind`, not from a guess — so a gym leader keeps the
+  gym leader's music and the rival's last fight keeps its own, off a badge
+  table this mod has no business duplicating. The fanfare starts when the win
+  is *decided*, so the defeat line and the parting line are read over it rather
+  than after it, and it starts once however often the result is reached. The
+  map theme is restored on the way out **win or lose** — a victory theme ends
+  in a `sound_loop 0` and would otherwise follow the players into the overworld
+  and play there forever. The rival's last fight is folded to the gym leader's
+  jingle, because no build ships a `finalWin` song.
+
+  *Unverified by ear:* this checkout ships no `data/generated/audio.lua`, so
+  nothing plays here and the engine's own battles are silent too. What is
+  asserted is the boundary — which song is asked for, and when.
+- **`CoopSim.REPLACE` names the one action that is not a turn action.** A
+  replacement travels down the same wire as a move, with `kind = "replace"`,
+  and nothing in the vocabulary said so -- a bare string in one caller and an
+  implicit default in another, next to a `KINDS` table that read as though it
+  were exhaustive.
+
+  It is named separately rather than added to `KINDS`, and that is the whole
+  of the care needed: `KINDS` is what `resolveTurn` dispatches, so a "replace"
+  reaching it would be handed to `runOther`, which has no branch for it -- the
+  slot would silently do nothing for a turn instead of falling back to a move.
+  Adding it would have been the regression, not the fix. A test pins that, and
+  another pins that everything `KINDS` *does* claim is really dispatched: a
+  kind in the allow-list with nowhere to go is the same bug from the other
+  side.
+
+  Naming it turned up a real one it had been hiding. A **duplicate**
+  replacement -- a retry, or one that raced the first -- arrives for a slot
+  that has already answered. Its kind was not in `KINDS`, so the fallback
+  turned it into a *move* and filed it for that slot, overwriting whatever the
+  player had actually chosen for the turn. It is now recognised and dropped.
+- **Statuses are enforced, not just inflicted.** SING put a monster to sleep
+  with full ceremony -- and it attacked straight through it, because the co-op
+  sim called the engine's `performMove` without the per-turn gauntlet the 1v1
+  wraps around it. The sim now runs the engine's own `statusInterrupt` through
+  the field adapter before every move, and the whole original ritual falls out
+  for free: "is fast asleep!" with the sleep counter ticking to "woke up!",
+  the 63/256 "fully paralyzed!" roll, freeze that holds until a Fire-type hit,
+  confusion's 50% "It hurt itself in its confusion!" with the authentic
+  opponent's-screens glitch, flinch eating a second mover's turn (and
+  surviving the turn-top clear for a recharging battler -- the Hyper Beam
+  glitch), Disable's tick, and full paralysis preserving Fly/Dig
+  invulnerability. Exact wording, Enemy-prefixes and onomatopoeia animations
+  on all four clients, with no new string tables.
+- **Three more real bugs fell out of that work.** Hyper Beam had been firing
+  **every turn, free** -- the engine set `mustRecharge` and nothing read it; a
+  recharge turn now recharges, keeps the flag on sleep/freeze/flinch per the
+  original's asm, and spends no PP. Wrap/Bind/Fire Spin never held their
+  victim -- the gate reads a mirror field the engine refreshes from the
+  trapper just before checking, and the sim never refreshed it. And a
+  Leech-Seeded battler's whole residual tick was being swallowed by a pcall
+  (the seed heal indexed a nil opponent), silently dropping poison/burn
+  damage that had already landed -- a desync vector; seed now drains to a
+  recorded seeder, and the residual is structured so the throw is impossible.
+- **A turn has a deadline, and it is the same honest number on every screen.**
+  One idle player could lock the battle forever ("Waiting for ALPHA..." with
+  nothing enforcing anything) -- and the only clock that existed made the
+  *host* forfeit itself after waiting on somebody else. Now the host enforces
+  one 60-second deadline per turn for every player slot including its own:
+  at expiry every late slot has its first usable move auto-filed at the first
+  living target (the owner's chosen policy -- the battle flows on, nobody is
+  forfeited), everyone is told who "took too long!", and the wait line shows
+  the missing player's name AND a countdown that all four clients start from
+  the same event. The auto-pick is all-or-nothing so a slot with no legal
+  action can never strand a half-filed turn, the clock stops while a turn is
+  narrated or a replacement is being chosen, and the replayers' silence clock
+  was raised above the deadline so a legitimately quiet minute no longer
+  triggers resync noise.
+- **The target picker is a vertical list** -- one opponent per row under
+  "Attack who?", no more names clipped at the box edge -- and the field
+  answers it: the hovered opponent draws on top of its partner, foe sprites
+  draw at 0.85 (keyed to the layout's fixed foe slots, so a party-battle
+  client never sees its own pair shrunk), and the hover cursor and animations
+  share one anchor with the shrink so they still point at the monster.
+- **The readout shows the status.** An enforced sleep used to be invisible
+  between messages -- three lost turns with the only evidence long scrolled
+  away, indistinguishable from a broken battle. The panel now carries the
+  original's three-letter badge (SLP/PAR/BRN/PSN/FRZ) beside the name.
+- **Five paper cuts from the first hands-on session, fixed together.**
+  - **The "You have nothing to use!" flicker was worse than a flicker.** The
+    last line of *every* message batch was wiped by the queue-empty
+    fall-through after exactly one frame, input or none -- a one-line batch
+    was never readable at all. The shown line now outlives the queue, a
+    quarter-second dwell floor stops the same press that opened a menu from
+    eating the message it produced, and the 1.6 s auto-advance is unchanged.
+  - **Self-only moves skip "Attack who?".** The engine's own marker decides:
+    a zero-power primary effect that never rolls accuracy against an enemy is
+    self-targeting by construction, so Swords Dance, Rest, Recover, Light
+    Screen, Reflect, Mist, Substitute and Focus Energy commit straight from
+    the move menu. Growl-class status moves keep the picker (they aim at an
+    enemy), and so do Haze, Conversion and Transform -- proven to read the
+    chosen target even though the simple rule calls them self-only. Out of
+    PP, the picker always opens: the sim substitutes Struggle, which hits.
+  - **"Attack who?" lists both opponents** side by side with a cursor, like
+    every other picker, instead of one name at a time.
+  - **Every battle picker navigates as the grid it is drawn as**, with the
+    engine's own semantics: UP/DOWN move vertically, LEFT/RIGHT horizontally,
+    clamped at the edges, and the move grid holds position when an arrow
+    points past the last move. Down from FIGHT now lands on SWITCH, right on
+    ITEM -- the drivers were updated with it.
+  - **The wait line never freezes at "(0)".** The countdown was the host's
+    forfeit clock displayed on windows where nothing enforces it; when the
+    missing player was the host itself -- deliberately unclocked at its own
+    menu -- the counter died at zero and read as a hang. A countdown now
+    appears only where a clock really enforces one; everywhere else the line
+    names who has not acted yet ("Waiting for ALPHA..."), which was always on
+    the wire -- every client hears every act, only the host used to listen.
+    The host now broadcasts its own choice too, so the other three know it
+    acted; a replacement answer is not counted as a turn action; and an act
+    claimed for a slot its sender does not own marks nothing.
+  - **The wait line no longer flashes between battle lines.** Dismissing a
+    line leaves the box empty for one tick before the next is popped, and the
+    reassurance fallback used to run in that gap -- so with a replacement
+    pause overlapping a playing batch, "X is choosing... (n)" flashed for a
+    single frame between every pair of lines. The box's text is now one
+    testable decision (`boxText`): mid-batch, the gap draws the original's own
+    empty page gap; the wait and spectator lines belong to a finished queue.
+- **The battle now waits for its own effects.** The HP bar used to empty and
+  the beaten monster used to vanish the moment a resolved turn arrived, with
+  the attack animation and its text replaying over an already-dead field. The
+  battle keeps two clocks and only one of them was ever allowed to exist on
+  screen: sim truth (`mon.hp`, `sendOut`) still applies the instant a turn
+  lands — signatures, the desync check and the host's resolution depend on it
+  — but the *display* now advances only through the message queue, the way the
+  engine's own battle does. Concretely:
+  - the engine's HP-drain rows are no longer discarded by the adapter but
+    emitted as `drain` events, in the engine's own order (after the hit's
+    animation, before "It's not very effective...") and one per strike of a
+    multi-hit move with the engine's own pinned stops;
+  - the bar drains at the original's exact rate — `maxHP/96` per frame, one
+    bar pixel every two frames — blocking the queue while it moves, floor/ceil
+    rounding per the engine's own display helper, and deliberately **not**
+    skippable, because the original's isn't;
+  - a beaten monster stays on the field until its faint row plays, then sinks
+    over 30 frames exactly like the original's slide-down, and only then does
+    "X fainted!" print;
+  - a monster replaced *in the same resolved turn* (an NPC KO — the sim sends
+    the replacement out inside `resolveTurn`) still gets its full exit: display
+    rows bind to the battler *object* rather than the slot, and a display
+    shadow shows the outgoing monster until its `swap` row plays;
+  - the last text line stays on screen while effects run, instead of the box
+    going blank mid-exchange;
+  - display and truth are re-aligned at every safe point (entering the command
+    menu, after a resync, at the end), so a lost message can never wedge the
+    screen — and a drain carries a frame budget and clamps its wire-sourced
+    target into `[0, maxHP]`, so a malformed or hostile value cannot freeze
+    the one animation that has no input escape. While closing that, the
+    host-authoritative message kinds (`res`, `state`, `gone`) were gated on
+    actually coming from the host.
+  Old and new clients interoperate: unknown event kinds are ignored, so an
+  unmodified client simply keeps today's instant display.
+- **The assembled field is sanitised like everything else on the wire.** It
+  was the one inbound payload that skipped `Wire`, and the least defensible one
+  to skip it: the sender is another player's client, and that table decides how
+  many monsters are on the field, whose they are, and what is drawn over them.
+  `Wire.coopField` now checks the slot **count** (`buildField` only ever
+  checked it on the sending side, so a modified host could send fifty), the
+  **side** (an arbitrary third value makes "who may I attack" incoherent), the
+  **name** (drawn on screen and put into the events other mods read), and the
+  **party length** (unbounded, every faint is answered by another monster and
+  the battle never ends). The host reads its own field back through the same
+  door, so the shape it plays is provably the shape it sent.
+- **The client no longer gives up on a four-way ask before the hub does.** Both
+  used `COOP_ASK_TIMEOUT` with no margin, and the asker's clock starts when it
+  sends while the hub's starts a round trip later -- so the client expired
+  first, cleared its own ask and said "nobody answered", while the hub still
+  held one. The player could then pick PARTY BATTLE again, have it dropped as a
+  duplicate, and be left pressing a button that did nothing. The client now
+  waits `COOP_ASK_GRACE` longer *and* tells the hub when it does give up.
+- **A stale offer expires on the hub, not only on the client.** The partner's
+  client forgot a received offer after `COOP_OFFER_TIMEOUT`; the hub held the
+  waiting player's until they disconnected, so the two ends disagreed about
+  whether the fight was still joinable and the player who was waiting waited
+  on, told nothing. Both hubs now sweep it.
+- **`CoopField.build` keys its cache on the engine it was built against.** It
+  only asked whether a metatable had been built, so `F5` in dev mode -- which
+  re-requires the engine's modules -- kept handing back one whose `__index`
+  pointed at the previous `BattleState`. A hot reload was silently ignored
+  inside co-op battles while every other path picked it up.
+- **An item paid for on a turn that never resolved is given back.** The bag is
+  debited at commit because only that client owns it, but a battle that ends
+  before the turn resolves -- the host drops, the stall clock fires -- used to
+  take the potion with it, having healed nobody.
+- **"Once per session" for the unranked explanation now means once per save**,
+  reset on `save.loaded`. It was process-scoped, so a player who loaded a
+  different game was never told why a co-op trainer win paid nothing -- which
+  is exactly the player who has not heard it.
+- **The `battle` field in the co-op events is documented read-only**, in the
+  README beside the snippet. It is the running battle rather than a copy, and a
+  listener that writes to it desyncs all four clients.
+- **Five message lines were running off the right edge of the box**, two of
+  them added this release. The box is eighteen characters wide; a trainer name
+  is up to ten, and `"<NAME> is choosing... (30)"` on one line was thirty. That
+  is how a clipped line ships -- it looks fine for every short name anybody
+  tests with. Found by looking at a screenshot from the run above, which caught
+  *"trainer to send on"* with the last letter cut off. All five now fit, the
+  wait line is split across two rows so a full-length name still does, and the
+  suite measures them against the longest name the wire will carry rather than
+  a convenient one.
+- **A wait now says what it is waiting for, and the pause that blocks
+  everything is on a shorter clock.** A player who has not answered a faint
+  stops the whole field -- nothing resolves while any slot is awaiting -- so
+  the other three sat in front of an empty message box for a full minute, which
+  is indistinguishable from a battle that has hung. That ambiguity is exactly
+  how the first wedged co-op battle got reported.
+
+  Two changes. The replacement pause gets `COOP_CHOICE_TIMEOUT`, half the turn
+  clock: a player still picking a move holds up one turn, a player who has not
+  answered a faint holds up everything, and theirs is the easier decision of
+  the two -- a short list and one button. And every client now names the person
+  it is waiting for and counts down: *"CAL is choosing... (12)"*. Nothing is
+  drawn for the first few seconds, because an ordinary turn has all four
+  deciding at once and a clock flashing up every turn would be noise.
+
+  When the clock does run out, the host sends out the next living reserve and
+  the battle moves again -- and now the picker closes and everybody is told it
+  was the clock: *"CAL took too long!"*. Closing it was previously left to the
+  button the player never pressed, so the one who ran out of time was parked in
+  a bench list for a slot that had already been filled, could not take their
+  next turn, and had their eventual pick dropped as a stale duplicate. It
+  closes on the *event* now, which is also what a client watching somebody
+  else's timeout needs.
+
+  **The four-client run now lets the clock actually expire.** DELTA is asked
+  to send one out and simply does not answer; the run then asserts that the
+  other three see the countdown naming DELTA, that DELTA's picker closes on its
+  own, and that DELTA is told it was the clock. It waits for the *event* rather
+  than sleeping a fixed number of seconds, so there is no copy of
+  COOP_CHOICE_TIMEOUT out in the driver to drift. Writing it needed one
+  correction worth recording: driving the stall from inside `drivePrompts`'
+  `onStep` did nothing at all -- the loop answers the prompt regardless of what
+  onStep returns -- so the picker was closed by the driver's own keypress a
+  second later and the clock never ran. The run now asserts the close took at
+  least ten seconds, which is what catches that.
+
+  Making that possible needed the pause to be a fact the *whole table* knows:
+  the `choose` event now marks the awaiting slot on every client rather than
+  only on the host that set it, and sending a monster out clears it everywhere.
+  Before, the three clients who did not resolve the turn had no way to tell a
+  paused field from a running one, and so nothing to put on screen.
+- **The LAN scenario now fights a co-op battle too** (`run-mmo-e2e.sh`). Every
+  2-on-2 ever fought had been relayed by `server/lib/relay.js`; `src/Hub.lua` --
+  the hub that runs *inside* the game when a player hosts -- has co-op handlers
+  with unit tests and had never carried one turn of a real battle between two
+  real clients. The two hubs are written to mirror each other, which is exactly
+  the reason to run both: a mirror is a claim. The leg forms a party (the LAN
+  scenario had never formed one at all), stages the same trainer on both sides,
+  waits, joins, fights to a decision and asserts the field never drifted --
+  `gaps=0 desyncs=0 resyncs=0` over the Lua hub, same as over the Node one.
+
+  Writing it turned up that **the LAN run had been broken for a while**: it was
+  changed to pick the host's port per run so two runs on one machine stop
+  joining each other, and the guest was left dialling the old fixed
+  `127.0.0.1:7788`. Every run failed three assertions that all read like a bad
+  join code and none of which mention an address. The dial address is now
+  derived from the port the host binds, and a pinned `MMO_JOIN_ADDRESS` naming
+  a different port is corrected with a note rather than obeyed -- `.env.example`
+  says so too, since the stale line came from there.
+
+  One race also had to go: the guest comes off the RANK screen, and
+  `closeToOverworld` gets out of a screen by pressing B -- so an invite landing
+  mid-close was answered "no" by the button that was closing something else,
+  and the party never formed with nothing on screen to say why. The host now
+  waits for the guest to say it is standing still.
+- **A co-op battle announces itself, and the announcement is worth hearing.**
+  The engine's own `battle.started` / `battle.ended` never fire for one and
+  cannot be made to: `battle.started` is emitted from `BattleState:enter`, and
+  the trainer battle a co-op one displaces is taken off the stack before it
+  ever enters; `battle.ended` is emitted from that battle's `finish`, which the
+  co-op flow never calls. A mod may only emit `mod.<id>.*` -- that is what
+  stops any mod forging an engine event -- so the pair is the mod's own,
+  `mod.rby_mmo.coop_battle_started` and `…_ended`, and both are now documented
+  in the README.
+
+  The payload was the part that needed fixing. `kind` held the *slot count* --
+  a number, under a name that reads like a category -- so a listener asking
+  "is this a party battle?" got `4` and could only be wrong. It now says
+  `"npc"` or `"party"`, alongside how many of the four are people, which slot
+  this client is sitting in and which side that puts them on, whether this
+  client is the host, the trainer being fought, and whether a win is worth
+  points. Both fire on every client, each with its own seat.
+
+  The four-client run now asserts it by *subscribing*, the way another mod
+  would -- which turned up a second thing: the run had been watching
+  `Runtime.emit` and reporting `started=0 ended=0`, because a mod's own events
+  travel on the loader's bus and not the engine's. The events were firing all
+  along; the test was deaf. The suite had the same hole from the other end --
+  its mod stub had no `events` at all, so every announcement the mod has ever
+  made was thrown inside the pcall that guards it and swallowed in silence.
+- **A 2-on-2 against a trainer pays no ranked points, and now says so.** It
+  never did -- `coopMatches` is only created on the four-human path -- but that
+  was a decision nobody made: it fell out of the code shape, lived as an inline
+  condition in two places, was asserted nowhere, and, worst, was never told to
+  the player. Winning a battle and watching your rating not move reads as a
+  broken leaderboard.
+
+  It stays unranked, deliberately. Elo rates you against an opponent's rating
+  and a trainer has none, so there is nothing for the curve to say. Inventing
+  one from the trainer's party would be worse than silence: NPCs are an
+  infinite, respawning supply, and the rematch discount -- the one thing that
+  stops a rating being farmed -- is keyed on pairs of *players* and would never
+  fire against a trainer. Two friends could grind gym leaders to the top of the
+  board without ever meeting anybody.
+
+  So the rule now lives in one place (`Coop.ranksPoints`), is read by both the
+  code that files a result and the code that decides whether badges count --
+  the same question, asked once -- and the battle **says why** on a win: *"No
+  points for a 2-on-2 vs a trainer. Battle other people to climb the ranks!"*
+  Once per session, because a rule explained is a courtesy and a rule repeated
+  after every fight is a nag. The battle is still worth everything a trainer
+  battle is worth: exp, badges, prize money, the defeated flag.
+- **Badges reach the co-op battle they were earned for.** Gen 1 gives the
+  player x9/8 on a stat per badge, and the engine fills a battler's badge set
+  only when `makeBattler` is handed a save. A co-op battle is built by the
+  host, and the host holds one save out of four -- so every battler was built
+  with `nil` and **nobody's badges counted**: two players beating a trainer
+  together hit weaker than either of them would have done alone, and nothing
+  said so. The same shape as the item, move-learning and exp bugs before it.
+
+  The badge set now travels with the party it belongs to -- read off the badge
+  *rows* rather than a list written down here, so a mod that adds a badge is
+  covered -- is sanitised on the way in like anything else off the wire, and is
+  attached to the slot it came from. Every copy of the field is built from the
+  same description, so all four clients still agree about how hard all four
+  monsters hit.
+
+  **Against another party, nobody gets them, and that is deliberate.**
+  `BattleState.makeBattler` says so in its own comment -- "LinkBattle builds
+  clamped copies with save=nil (no badge boosts)" -- so the engine's own
+  human-versus-human battle gives neither side theirs. Handing them out would
+  make a party battle a different game from a link battle, and would do it
+  *asymmetrically*: the engine gates badges on `isPlayer`, which on a shared
+  four-slot field is a fact about which side you stand on, so side A would get
+  boosts and side B could not. Two parties meet on even terms, as two players
+  already do.
+
+  A critical hit still ignores badge boosts, exactly as it ignores stat stages
+  -- `critIgnoresStages` is the faithful rule and a crit recomputes from
+  unmodified stats. That is asserted too, so the next person to measure a badge
+  through a forced crit and find it worth nothing has something to read.
+- **A ranked 2-on-2 is rated as a team battle, not as two 1v1s paired by slot.**
+  The old scheme matched first against first and second against second. It
+  reused the whole rating machinery unchanged, which is why it was written that
+  way, and it was arbitrary in the way that matters: nothing about a four-way
+  says who fought whom. Both players attack both opponents, a move redirects
+  across the pair when its target falls, and the side loses together. Slot one
+  beating slot one was a fact about the order the hub happened to list them in
+  -- and it produced answers nobody could defend. Listing the same two
+  opponents the other way round, with the same four people, the same battle and
+  the same result, moved three of the four ratings: 43/16/10 became 42/17/11.
+
+  Each player is now rated against the **opposing pair's combined strength**
+  -- the mean, which is what "the strength of the pair you beat" means and the
+  standard answer wherever team ratings are kept. A strong player carrying a
+  weak one is worth about the average of the two, and beating them pays
+  accordingly, because that is who was on the field. One rated result each, the
+  same Elo curve and the same K as a 1v1, so a co-op win is worth about what a
+  win is worth.
+
+  The rematch discount is per player and takes the **fewest** meetings they
+  have had with anyone they just beat, noted on every cross pair. Four people
+  running the same 2-on-2 all afternoon meet on all four pairs, so it bites
+  exactly as it does in a 1v1 -- and two parties taking turns to win is the
+  same meeting, discounted the same way. Bringing in somebody genuinely new
+  means at least one opponent with no history, and that fight is worth its full
+  value to everyone in it.
+
+  Settlement is now unanimous **within** a side before it is read across
+  sides -- two team-mates who cannot agree whether they won have not won
+  anything -- and one unclaimed name anywhere in the four scores the whole
+  battle nothing, because paying out the half that is claimed would rate a team
+  against opponents whose ratings are not moving. All four new numbers are
+  published, not just the winners'.
+- **A player whose last POKeMON falls is a spectator, and the screen says so.**
+  The field already knew: the host stops waiting on a slot that is down and
+  files nothing for it. The *client* did not -- it kept offering the command
+  menu, so that player picked a move, was dropped into a wait, and was asked
+  again next turn, for the rest of a battle they were no longer in. A menu that
+  answers nothing, offered over and over, reads exactly like a battle that has
+  hung, which is how it was reported. Their side is still alive while their
+  partner stands, so the right state is watching, not leaving.
+- **The message box no longer sits blank.** With nothing to show it now says
+  which of the two silences it is -- "waiting for the other trainers" or "you
+  have no POKeMON left". An empty box is indistinguishable from a wedged
+  battle, and that ambiguity cost a real investigation.
+- **The pause after a faint is enforced by the field, not only by its caller.**
+  A slot whose monster fell is empty until its owner says what follows, and
+  `resolveTurn` now refuses to resolve while any slot is awaiting -- so a
+  second caller cannot spend three people's moves on a field that is about to
+  change, or hand the side that is one monster down a free turn.
+- **The whole faint lifecycle is now covered, headless and with four real
+  clients**: a monster that falls with team-mates left stops the battle and its
+  owner is asked at once; nothing else resolves while that question is open;
+  answering it releases the field; a monster that falls with nothing left stops
+  nothing and its trainer simply watches; a side is beaten only when **both**
+  its trainers are; and a fainted POKeMON is never put back on the field --
+  including when the index naming it arrives off the wire, where `replace`
+  substitutes a living one rather than reviving the dead one.
+- **The four-client run gives every slot and every bench a different species.**
+  Each player's second POKeMON used to be their partner's first, so a bench
+  monster coming out after a faint looked exactly like the monster that had
+  just died coming back. That cost an investigation and was never a fault. With
+  eight distinct species the run now watches every slot and fails if a species
+  ever stands again after being seen at zero health.
+- **`mmo.coop_relay` fan-out is tested on the node side** (`server/hub.test.js`,
+  now 98 checks). The whole of a 2-on-2 rides this one message, and the hub
+  never reads a byte of it -- so routing is the entire contract, and every way
+  of getting it wrong is quiet. Forward to too few and one player's screen
+  silently stops matching the battle; to too many and somebody outside the
+  fight is fed turns for a battle they are not in; echo it back to the sender
+  and every client applies its own turn twice. None of those close a socket or
+  log an error. Driven the long way round over real TCP -- two real parties, a
+  real four-way ask, real agreement -- because the group being fanned out to is
+  built by that flow. It asserts that a turn reaches all three others and
+  nobody else, that the payload is forwarded byte for byte, that the fan-out is
+  symmetric in both directions across the party line, that a player in no
+  battle cannot inject a turn into one, that an over-deep payload is dropped
+  without dropping the player, that one goodbye closes the group for all four,
+  and that a two-player NPC pairing routes through the same rule. Verified by
+  sabotage: echoing to the sender, fanning out to the whole hub, skipping the
+  shape check, and never closing the group each fail it.
+- **The replay contract is now asserted, turn by turn.** The most important
+  invariant in a host-authoritative design -- one client resolves, the other
+  three apply what it says happened -- had nothing checking it, which is why
+  every protocol-level fault this feature has had survived so long. The suite
+  now runs a second field beside the host's and puts the host's own events
+  through **`CoopBattle.playEvents` itself**, comparing `signature()` after
+  every single turn. Driving the real replay path matters: a hand-written copy
+  of "what a replayer does" would agree with itself forever while the shipped
+  code drifted out from under it. Covered: four humans trading blows, the same
+  battle seen from a seat on the other side, a switch, a status move that moves
+  no HP at all, a two-turn charge move, Struggle's recoil landing on the
+  attacker, an NPC pair whose moves only the host ever chooses, a faint and the
+  replacement that ends the pause, a forfeit mid-battle, and a battle run all
+  the way to its verdict. The wire either side of it is checked too -- that the
+  host applies a non-host's replacement instead of queueing it, that it refuses
+  one sent for somebody else's slot, and that a re-sent field is addressed to
+  whoever asked. And the harness is checked for teeth: one damage event dropped
+  on the floor must be caught, or every green run above means nothing.
+- **Four real clients now play a party-versus-party battle end to end**
+  (`tests/drivers/run-quad-e2e.sh` + `mmo_quad.lua`): a real Node hub and four
+  real LOVE instances form two parties, refuse a 2-on-2 once, agree to one, and
+  fight it to a scored decision. Everything four-handed had lived only in
+  headless tests, where the four "clients" are four tables in one process. It
+  found three real faults on its first three runs, none of which two clients
+  could reach:
+  - **Replayers never saw damage.** The engine's move pipeline, reached
+    through `CoopField`, writes HP straight onto the monster and drains only
+    text and animations, so a turn announced nothing about what it had done.
+    The other three clients' HP bars only moved when the desync check hauled
+    them into line once a turn -- a repair mechanism doing the protocol's job,
+    which looked right from two clients while every replayer sat a whole turn
+    behind. A turn now announces the HP of every slot it changed, whatever
+    changed it.
+  - **A non-host's replacement deadlocked the battle.** When a monster faints
+    its slot is *awaiting*, and nothing resolves until it has sent the next one
+    out. The choice arrived down the ordinary action wire, so the host queued
+    it as a turn action and asked itself to resolve -- which it refuses to do
+    while anything is awaiting. The pause waited on itself, and every non-host
+    player whose monster fainted froze the battle for all four until a stall
+    timeout picked for them a minute later.
+  - **An empty target picker had no way out.** While a slot is awaiting a
+    replacement it counts as down, so when both opponents faint in the same
+    turn there is a real window with no legal target. FIGHT opened the picker
+    on an empty list, and the early return that guarded it swallowed B as well
+    -- a cursor pointing at nothing that no key escaped. The picker is now
+    refused with a sentence, and backs out on its own if the list empties while
+    it is open.
+  - Plus a **resync storm**: the host's snapshot was fanned out to all four, so
+    one client falling a message behind rewound everybody's sequence, which
+    read as a gap, which made them ask too. The answer is now addressed to
+    whoever asked.
+- **The trainer's id travels with the assembled field.** Only the player who
+  walked into them holds the record; anyone who joined by answering an
+  invitation has never seen it, and was fighting a nameless trainer — the plain
+  trainer theme where the host heard the gym leader's, and an AI with no class
+  to reason from. The field now names the trainer and every client resolves the
+  record against its own data, through the same sanitiser a player id passes:
+  an id that is not id-shaped is refused rather than used as a key, and one
+  this build has no record for leaves the battle faceless rather than guessing.
+- **RUN and a thrown ball are refused — which is the complete behaviour, not a
+  missing one.** A co-op battle is always a trainer battle, and Gen 1 lets you
+  do neither in one. Both are refused in the game's own words, read from its
+  text table. A ball is recognised from the item record's own `ball` field and
+  the `balls` registry rather than a hardcoded list of the five vanilla ones,
+  so a modded ball is blocked too.
+
+### Added — the whole battle, and the whole encounter
+
+- **The prompt now appears in front of *every* trainer.** The mod stopped
+  trying to intercept the battle and started watching for it: both ways a
+  trainer battle begins end in `game.stack:push(battle)`, so the prompt goes
+  **on top of** the battle that just arrived. A `StateStack` only updates its
+  top, so the engine's battle sits underneath completely untouched — which is
+  why BATTLE ALONE costs nothing but closing a menu.
+- **The full post-battle flow, because the engine's own battle runs it.** The
+  co-op path holds the battle object it displaced and hands it the result, so
+  `onFinish` does everything it always did: the defeated-trainer flag, the
+  victory rewards and badges, **the whiteout when your party is wiped**, and
+  the script that has been waiting in front of the trainer. None of it is
+  reimplemented.
+- **Battle animations**, through the engine's own `AnimPlayer`, translated
+  onto the slot that actually acted — the trick `WideBattle` uses to move an
+  animation between anchors it was not authored for.
+- **A readable four-monster field**: pairs pushed to the outside edges, a
+  status strip per battler, a cursor on your own monster, and the target
+  cursor landing on the monster it means rather than only on a name.
+- **`mod.rby_mmo.coop_battle_started` / `coop_battle_ended`**, so other mods
+  can see a co-op battle. Deliberately *not* `battle.started`/`battle.ended`:
+  the loader namespaces `mod.events:emit` to `mod.<id>.*`, and that rule is
+  what stops any installed mod forging an engine event.
+- **Ranked co-op.** A party battle is reported by all four players and scored
+  only when all four agree, as two ordinary matches paired by slot — so the
+  Elo curve, the rematch discount and the claimed-name check all apply
+  unchanged, and every player gets exactly one rated result.
+
+### Added — running away, and coming back from a loss
+
+- **RUN asks your partner first.** In a party-vs-party battle, picking RUN
+  commits nothing: your partner gets a yes/no box in the battle itself. Yes,
+  and the whole party flees — the battle ends for all four, the runners take
+  the loss and the opponents the win, scored like any other result so running
+  at match point buys nothing. No, and you are back at the command menu with
+  the turn still yours. Against an NPC trainer the answer is still Gen 1's:
+  *"No! There's no running from a trainer battle!"*
+- **The box opens on NO, behind a settle floor.** It appears at the exact
+  moment everyone is holding A through the turn's messages, so the first
+  press cannot confirm it and the cursor starts on the harmless row. The one
+  irreversible confirmation in the battle is the one you have to aim at.
+- **An unanswered partner never hangs the battle.** The prompt lives under
+  the same 60-second turn deadline as everything else; when the clock fires,
+  silence counts as a no on every screen at once. A partner who has left the
+  battle is not asked at all — a party of one flees on its own say-so.
+- **Losing blacks you out, the way the game always did.** Every player whose
+  party lost — or who walked out of any co-op battle with nothing left able
+  to fight — gets the whole vanilla ritual: party healed, money halved, and
+  the warp to *their own* last POKéMON CENTER. Against an NPC the engine's
+  own `afterBattle` runs it (the co-op result said `"loss"` where the engine
+  listens for `"lose"`, so the ritual had never once fired — found because a
+  freshly beaten party was still walking around at 0 HP). A party-vs-party
+  battle has no engine battle to hand the result to, so the mod performs the
+  same ritual itself — and holds the warp until the last menu (a move to
+  forget, an evolution) is off the screen, because a POKéMON CENTER arriving
+  under an open question would take the question with it.
+- **A win is still a win, even carried out.** A player whose side won while
+  their own two monsters fell gets the heal and the trip to the CENTER, but
+  the trainer is still marked beaten and the victory script still runs — one
+  player's world was quietly diverging from their partner's otherwise.
+- **A party with nothing able to fight cannot be battled.** The host checks
+  the four parties at the moment it builds the field — the first moment the
+  truth exists on any machine — and calls the battle off for everyone
+  instead of starting it. Only the host's word can do that: an abort (or a
+  field) claimed by anybody else is dropped, because a battle-wide
+  declaration from a peer is a forgery by definition.
+- **You cannot challenge your own partner.** The PARTY BATTLE row is simply
+  not offered on your own teammate — there is nothing to fix, so there is no
+  sentence to read — and the client refuses it besides. Asking used to
+  soft-lock the asker for seventy silent seconds, because the hub dropped
+  the request without answering.
+- **The "Asked … for a 2-on-2 battle." box dies with the ask.** It used to
+  get buried under the battle screen and resurface when the battle ended,
+  announcing an invitation everyone had already answered. It is now taken
+  down the moment the ask resolves — and only ever itself, never a prompt
+  that arrived on top of it.
+- **A lost message no longer freezes a battle at "(0)".** The freeze the
+  countdown work left behind: a client that missed one packet — in either
+  direction — sat in "waiting" forever, its own recovery clock reset by
+  every keypress anyone else made. A stuck client now asks the host for the
+  field once, past a grace the host's own deadline gets first; the answer
+  hands back the menu, returns any ITEM already paid for, and the silence
+  clock listens only to the host it is supposed to be timing.
+
+### Known
+
+- **Prize money and evolution, both of which needed carrying across.** The
+  engine pays a trainer's prize from inside its own battle screen, so a battle
+  it did not run pays nothing — the co-op path pays it on the way out, at the
+  engine's own rate (`baseMoney` × level), for the strongest monster the
+  trainer had. And `afterBattle` offers evolutions to whichever mons *the
+  battle* recorded as having levelled, so the co-op battle's list is handed to
+  the displaced one before its result is.
+- **No move learning on a co-op level-up.** A mon that levels gains the level,
+  the stats and its evolution check, but the "wants to learn" prompt lives
+  inside the engine's own battle screen and a mod-owned battle does not run it.
+  The move is not lost — it can still be learned from an item or by levelling
+  again in an ordinary battle.
+- **No prize text, trainer pic, intro or battle music in a co-op battle.**
+  The screen is the mod's, and it draws the field, the menus and the messages
+  rather than the whole theatrical frame the engine puts around a 1v1.
+- **The host decides.** A modified host could resolve a turn wrongly. That is
+  the same trust the engine's own host-authoritative link branch already
+  takes, one player wider.
+- **Ranked co-op scores a party battle as two matches paired by slot.** Every
+  player gets exactly one rated result, but which opponent you are paired
+  against is decided by slot order — nothing about a four-way says who fought
+  whom. A 2-on-2 against an NPC scores nothing, since there is nobody to rate.
 
 ## [0.6.3] - 2026-08-05
 

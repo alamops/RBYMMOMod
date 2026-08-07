@@ -379,6 +379,120 @@ function Board:record(winnerName, loserName, now)
   }
 end
 
+-- What a side of a team battle is worth, as one number.
+--
+-- The mean, which is what "the strength of the pair you beat" means and the
+-- standard answer wherever team ratings are kept. A strong player carrying a
+-- weak one is worth about the average of the two, and beating them pays
+-- accordingly -- which is the right answer, because that is who was on the
+-- field.
+function M.teamPoints(entries)
+  local total, count = 0, 0
+  for _, entry in ipairs(entries) do
+    total = total + (entry.points or 0)
+    count = count + 1
+  end
+  if count == 0 then return 0 end
+  return round(total / count)
+end
+
+-- Settle a team battle: every winner against the losing side's strength, and
+-- every loser against the winning side's.
+--
+-- **The alternative this replaces was pairing by slot index** -- first against
+-- first, second against second -- which reused the 1v1 machinery unchanged and
+-- was arbitrary in the way that matters: nothing about a four-way says who
+-- fought whom. Both players on a side attack both players on the other, a move
+-- redirects across the pair when a target falls, and the side loses together.
+-- Slot one beating slot one is a fact about the order the hub happened to list
+-- them in, and it produced answers nobody could defend: put your strongest
+-- player in slot two and the ratings move differently for the same battle,
+-- with the same four people, and the same result.
+--
+-- So the match each player actually played is *them against the other pair*,
+-- and that is what is scored. One rated result each, the same curve and the
+-- same K as a 1v1, so a co-op win is worth about what a win is worth.
+--
+-- The rematch discount is per player and takes the **fewest** meetings they
+-- have had with anyone they just beat. Four people running the same 2-on-2 all
+-- afternoon meet on every cross pair, so the discount bites exactly as it does
+-- in a 1v1; bringing in somebody genuinely new means at least one opponent
+-- with no history, and that fight is worth its full value to everyone in it.
+--
+-- Returns nil unless both sides resolve to real, distinct, non-overlapping
+-- players -- the same bar `record` sets, one side wider.
+function Board:recordTeam(winnerNames, loserNames, now)
+  now = tonumber(now) or 0
+  local winners, losers = {}, {}
+  local seen = {}
+  local function gather(names, into)
+    for _, name in ipairs(names or {}) do
+      local entry = self:entry(name)
+      -- A name that will not resolve, or one that turns up twice across the
+      -- four, means this is not a battle between four different people --
+      -- and paying it out would move a rating twice for one result.
+      if not entry or seen[entry.key] then return false end
+      seen[entry.key] = true
+      into[#into + 1] = entry
+    end
+    return #into > 0
+  end
+  if not gather(winnerNames, winners) then return nil end
+  if not gather(loserNames, losers) then return nil end
+
+  local winnerSide, loserSide = M.teamPoints(winners), M.teamPoints(losers)
+  local gain, loss = M.swing(winnerSide, loserSide)
+
+  -- Read before anything moves, so the discount every player gets is about
+  -- the history they brought to this battle rather than one this battle has
+  -- already started writing.
+  local repeatsFor = {}
+  for _, winner in ipairs(winners) do
+    local fewest
+    for _, loser in ipairs(losers) do
+      local met = self:meetingsBetween(winner.key, loser.key, now)
+      if fewest == nil or met < fewest then fewest = met end
+    end
+    repeatsFor[winner.key] = fewest or 0
+  end
+
+  local outWinners, outLosers = {}, {}
+  for _, winner in ipairs(winners) do
+    local before = winner.points
+    winner.points = clampPoints(winner.points
+      + M.discount(gain, repeatsFor[winner.key]))
+    winner.played, winner.won = winner.played + 1, winner.won + 1
+    outWinners[#outWinners + 1] = {
+      name = winner.name, key = winner.key, points = winner.points,
+      gained = winner.points - before, repeats = repeatsFor[winner.key],
+    }
+  end
+  for _, loser in ipairs(losers) do
+    local before = loser.points
+    loser.points = clampPoints(loser.points - loss)
+    loser.played = loser.played + 1
+    outLosers[#outLosers + 1] = {
+      name = loser.name, key = loser.key, points = loser.points,
+      lost = before - loser.points,
+    }
+  end
+
+  -- Every cross pair, because every one of them was a real opponent: a
+  -- discount that only remembered one of the two would let four players farm
+  -- each other by swapping which of them is "first".
+  for _, winner in ipairs(winners) do
+    for _, loser in ipairs(losers) do
+      self:noteMeeting(winner.key, loser.key, now)
+    end
+  end
+  self:sweep(now)
+
+  return {
+    winners = outWinners, losers = outLosers,
+    winnerSide = winnerSide, loserSide = loserSide,
+  }
+end
+
 -- The leaderboard: everybody with something to show, best first.
 --
 -- Zero is filtered out here rather than at the screen, because "unranked"
