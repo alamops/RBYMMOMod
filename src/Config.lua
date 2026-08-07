@@ -33,7 +33,15 @@ M.MOD_ID = "rby_mmo"
 -- that both said "5" could still be talking past each other -- exactly the
 -- silence this number exists to turn into a sentence.  6 is the first
 -- number that means both.
-M.PROTOCOL = 6
+--
+-- And then 6 was claimed twice in exactly the same way, before it ever
+-- shipped: once by that union, and once for changing character in the
+-- middle of a game (mmo.sprite -- a hub that has never heard the type
+-- answers it with silence, so the player who picked somebody new would be
+-- the only person in the game who could see it).  7 is the first number
+-- that means all of it.  This number lives here and in
+-- server/lib/relay.js -- bump them together.
+M.PROTOCOL = 7
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -501,5 +509,27 @@ M.RANK_PAIRS_MAX = 512
 -- end-of-battle messages -- plus a hub round trip. Sixty seconds is far more
 -- than that gap and far less than a session.
 M.RANK_REPORT_GRACE = 60
+
+-- ------- the hubs you have played on
+--
+-- src/Servers.lua keeps the list behind START > MMO > SERVERS; the argument
+-- for what it is and where it is written is in that file's header.
+
+-- How long a row's name may be. Sixteen is what the list menu has room for
+-- beside its favourite marker at Game Boy width, and it is COMPOSE_MAX's
+-- number for the same reason -- a label that overflows its row is worse than
+-- one the player has to shorten themselves.
+M.SERVER_NAME_MAX = 16
+-- How many hubs are remembered before the least recently connected
+-- non-favourite is dropped. A ceiling on a convenience list, not on play:
+-- sixteen is twice the menu's visible rows, so a player who scrolls one screen
+-- has not yet reached the end of what is kept, and nobody realistically plays
+-- on more hubs than that without favouriting the ones they mean to keep.
+M.SERVER_LIST_MAX = 16
+-- Where the list is kept, in the LOVE save directory beside the rank tickets
+-- and the engine's own save files. Its own file rather than a corner of
+-- mod.save because a server list is machine-level state: it must survive
+-- CONTINUE, and it belongs to every save slot on this copy at once.
+M.SERVERS_FILE = "rby_mmo_servers.json"
 
 return M

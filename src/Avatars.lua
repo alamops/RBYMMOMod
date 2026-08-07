@@ -312,6 +312,39 @@ function M:resync(player)
   return self:spawn(player)
 end
 
+-- A player who changed character while we were looking at them.
+--
+-- The sprite is read exactly once, in spawn: the sheet is baked into the
+-- NPC at creation and neither advance nor sync ever consults player.sprite
+-- again, so the only way to re-render an avatar is to build a new one.
+-- resync is already that pair, written for the avatar that fell too far
+-- behind, and it re-reads the roster entry the caller has just updated.
+--
+-- Only for a player who has an avatar up right now.  Somebody on another
+-- map has none to rebuild and needs none: the next sync spawns them from
+-- the same roster entry, wearing the new character on the way in.
+--
+-- sync opens with the world gate and calls itself the one gate for world
+-- touches, but this is the other way in: refresh runs from the inbound
+-- dispatch, in the client's tick, and reaches removeNpc/spawnNpc through
+-- resync without passing sync at all.  So the same gates are repeated here
+-- rather than inherited.  A nil mod.world would otherwise throw where the
+-- tick's pcall turns it into a disconnect -- a cosmetic message costing the
+-- player their session.
+function M:refresh(player)
+  if type(player) ~= "table" or player.id == nil then return nil end
+  if not mod.world then return nil end
+  if not self.spawned[player.id] then return nil end
+  -- The roster entry can already have moved on: a [MOVE-to-another-map,
+  -- SPRITE] batch updates the map before this runs, and respawning here
+  -- would put an avatar on a map that is not the active one for sync to
+  -- clean up on the next tick.  Nothing is lost by declining -- the same
+  -- reasoning as above, they spawn as their new self when they come into
+  -- view.
+  if player.map ~= self.mapId then return nil end
+  return self:resync(player)
+end
+
 -- The next single tile to walk toward a destination, or nil when already
 -- there.  Pure, so the routing is testable without an overworld: one axis
 -- at a time, x first, because the grid has no diagonal step.

@@ -31,6 +31,229 @@ here must match `manifest.version`.
   (`:7788`) is refused rather than dialled at an empty host, which is the
   answer an empty address already got.
 
+## [0.8.0] - 2026-08-06
+
+### Added
+
+- **`SERVERS` remembers where you've been.** The disconnected MMO menu grows
+  a `SERVERS` row the first time you've connected anywhere, at the top, above
+  `HOST GAME` — the next hub you visit can be a menu, not a retyped address
+  and passcode. It stays off the menu until there is a first entry to show
+  it, and it disappears again the moment you're hosting or connected, the
+  same rule `ADDRESS` and `PLAYERS` already follow.
+- **Favorites pinned on top, marked `▶`; everyone else by address,
+  descending.** A favorited entry carries a `▶` in the row's right-hand
+  column — the game's own cursor glyph, the same mark the `PLAYERS` and
+  `CHAT` rows already use — and sorts above every plain one no matter when it
+  was last used; within each group, entries sort by their normalised
+  `host:port` string, Z before A. Recency decides nothing about where an
+  entry sits on the list — only whether a non-favorite survives the next
+  eviction.
+- **Picking an entry opens a submenu of its own.** `CONNECT` dials it the
+  same way `JOIN GAME` does — the same CHARSET naming step first, then the
+  same challenge if the stored passcode turns out to be wrong.
+  `FAVORITE` / `UNFAVORITE` flips the pin, the label swapping with the state
+  the way `END GAME` and `LEAVE` already do elsewhere on this menu.
+  `EDIT HOST` and `EDIT CODE` reopen the address and the passcode on the
+  naming grid without touching the entry's name. `RENAME` is the only row
+  that does. `DELETE` is last on purpose — the one row here that can't be
+  undone by pressing it again — and asks first: a yes/no confirm names the
+  entry before anything happens, defaults to "no", and a "yes" drops the
+  row for good and returns you to the list.
+- **A new connection writes its own entry, and only once it's real.** The
+  recording happens at `WELCOME` — not on every dial — so a wrong passcode or
+  a refused connection never litters the list with a hub you never actually
+  reached. The entry is named after the address you dialled, with the
+  standard port left off — `192.168.1.20:7788` lists as `192.168.1.20`, since
+  that port is the one every hub here uses and sixteen characters is all a
+  row has. A hub on any other port keeps it in the name, because there it is
+  the difference between an address that dials and one that doesn't. Either
+  way the entry still holds the whole address, which is what `CONNECT` dials.
+  Hosting your own game records nothing, because there's no address you
+  dialled to remember.
+- **Renamed like anything else typed on this mod's grids: sixteen
+  characters, same sanitiser.** A rename that would leave the name empty is
+  refused rather than accepted blank — the same rule `Wire.text` already
+  enforces everywhere else a name crosses the save or the wire.
+- **The list outlives the save.** Entries are dual-written to
+  `rby_mmo_servers.json`, beside the claim-ticket file, and mirrored into
+  `mod.save` for whichever copy only ever needs to read them back — the file
+  wins on a mismatch, so quitting to the title, pressing `CONTINUE` without
+  having saved, or switching save slots entirely still finds the same list
+  of hubs. The same shape the rank-token file already proved.
+- **Capacity sixteen, oldest non-favorite first.** Past sixteen entries, the
+  one that's gone longest without being reconnected to is the one evicted to
+  make room — favorites don't count against the cap and are never the one
+  removed.
+- **`CHARACTER` on the MMO menu — before a game, and in one.** Until now the
+  character list was a step on the way into a game and nowhere else: the only
+  door to it was hosting or joining, so a player who simply wanted to look
+  like somebody else had to open a connection to do it, and there was no way
+  at all to change your mind between sessions without starting one. There are
+  two doors to it now and they open the same list, the one the character
+  creator opens: under `HOST GAME` and `JOIN GAME` while you are on your own,
+  and under `RANK` — above `LEAVE` and `END GAME` — while you are in a game.
+  Either way the choice applies the moment you make it and hands you back to
+  the menu you came from, and it writes the same save field the creator always
+  wrote, so the character you are wearing is part of the game you save and
+  comes back with it.
+- **Changing character mid-game changes you for everybody, immediately.** The
+  in-game row would have been a lie without this: the hub used to learn which
+  character you were wearing when you said hello and there was no message that
+  changed it afterwards, so swapping mid-session would have re-dressed you on
+  your own screen and nobody else's. Your copy now tells the hub, the hub
+  relearns your face and passes it on to everyone in the game — including you,
+  so there is one path rather than two that have to agree — and each of their
+  copies rebuilds its walking view of you on the spot rather than waiting for
+  you to leave the map and come back. A trainer card of yours that somebody
+  has open at that moment turns over with it, because the change is written
+  into the roster entry the card is holding rather than into a replacement for
+  it. From then on every ordinary movement update carries the new character
+  too, so a player who joined a second later, or missed the message, is
+  corrected without anybody doing anything. The one screen that does not
+  follow live is a leaderboard already open on somebody's screen: it keeps the
+  portrait it was drawn with until it is next asked to refresh — exactly the
+  staleness the points on it already have.
+- **The character list shows you what you are picking.** Every row now
+  carries that character's 16x16 front-facing frame to the left of its name —
+  the same picture the trainer card and the leaderboard already draw, read
+  out of the same walking sheet, so nothing new is decoded and nothing new
+  ships. Thirty-eight names is a lot of names, and `MIDDLE AGED WOMAN` tells
+  you nothing about who that is; scrolling a list of labels to find the one
+  you meant was guesswork against a cast most players have only ever seen in
+  passing. The labels move right by one tile to open the gutter the pictures
+  sit in, and the `▷` that marks the two characters this mod ships is
+  untouched in the cursor's own column, so the row still says which is which.
+  A character with no art to show — nothing has been decoded yet — leaves its
+  gutter empty and lists as before, rather than being an error on a screen
+  whose whole job is to be looked at.
+
+### Changed
+
+- **`PROTOCOL` 6 → 7**, in `src/Config.lua` and `server/lib/relay.js`
+  together, for the one new message a character change sends. Nothing already
+  on the wire changed shape, so an old client still parses everything a new
+  hub sends — the breaking direction is the other one, as it has been every
+  time: a protocol-6 hub has never heard of that message and answers an
+  unknown type with silence, so a player would pick a character on the
+  connected menu, watch themselves change, and be the only person in the game
+  who could see it, forever, with nothing on screen saying why. A refusal
+  naming both versions beats that quietly. So a 0.7.x hub and a 0.8.0 client
+  turn each other away at the door, as do a 0.8.0 hub and a 0.7.x client:
+  **the mod and its hub have to be updated together.** The same call parties,
+  ranked PVP and the running pace each made, one version apart.
+- **Leaving a game no longer takes your character off.** The chosen look was
+  worn between connecting and disconnecting and at no other time, so quitting
+  a game — deliberately, or because the hub hung up, or because you loaded a
+  different save — put the vanilla trainer straight back on, in the overworld,
+  in your battle pics and on your own trainer card. That made sense while
+  choosing a character was something you did *to* join a game. Now that it is
+  a thing you can do on your own, it reads as the game undressing you, so it
+  stopped: once you have picked a character you keep wearing it, offline and
+  online, until you pick a different one. What has not changed is the save
+  that never chose: a player who has never touched the character list, and
+  never moved the `MY SPRITE` option off its default, is rendered by exactly
+  the same code as before and sees exactly what vanilla draws. Wearing a
+  character is now something you opt into and can undo — picking `RED` puts
+  you back — rather than something the end of a session does for you.
+
+## [0.7.4] - 2026-08-06
+
+### Fixed
+
+- **The player who *joined* a co-op trainer battle no longer has to fight that
+  trainer a second time, alone.** Both players walk into the trainer, so the
+  engine builds a real battle on both machines; the co-op battle stands in for
+  it and hands it the result afterwards. That handoff only ever worked for the
+  player who pressed WAIT. Their battle rides across as `waiting.engine` and
+  `startBattle` takes it off the stack before the 2-on-2 goes on — the comment
+  there says why in one line: *"Left there it would resume the moment the co-op
+  battle popped, and the player would fight the same trainer twice."* The
+  player who pressed yes arrives through a different door (`onBattle`, the
+  message the hub sends the joiner) and that door built its plan with no engine
+  battle in it at all, so the unwind was skipped and their own battle spent the
+  whole fight buried under the co-op screen. It came back the instant that
+  screen popped: the trainer they had just beaten alongside a friend, standing
+  in front of them again, with the friend gone. The reference is client-local
+  and could never have crossed the wire — it was sitting in `self.encounter`
+  the entire time, unread. It is picked up now, keyed on the battle the hub
+  named so that the two ways into a co-op battle that never walked into
+  anything — a party-versus-party fight, and a join from the ACTIONS menu —
+  keep answering nil, which for them is correct.
+- **A joined trainer now shows the joiner their entrance and their parting
+  line.** Three things hang off that same reference: the trainer's picture, the
+  text they say on the way down, and the AI allowance the engine had already
+  computed. The joining player got none of them, which read as a small
+  graphical inconsistency and was really the same missing reference. Both
+  players walked into this trainer; both see them.
+- **A trainer somebody was standing in front of is no longer marked beaten by a
+  battle they were not in.** A player can be at a trainer, prompt up, when a
+  party-versus-party ask arrives and is answered. A party battle displaces
+  nothing, so nothing cleared the encounter that trainer was held in — and when
+  the 2-on-2 ended, the trainer was handed the *party* battle's result: marked
+  beaten by a fight they never took part in, with their prize money paid out
+  for it. Their own battle was still on the stack underneath, so it came back
+  anyway. The encounter slot is emptied when a co-op battle starts whatever is
+  in it now; a trainer this battle did not fight is simply left to be fought.
+- **Unwinding the screen stack no longer goes looking for something that is not
+  there.** `unwindTo` pops by identity, and its only other stopping condition
+  is a guard of sixteen — so a target that had already left the stack did not
+  fail to find it, it took sixteen screens down hunting for it, which mid-battle
+  is the battle and the world underneath. A held reference outliving its state
+  is ordinary (a battle that finishes itself pops itself), so it is checked now
+  rather than assumed, and a stale target does nothing at all. The same check
+  is what stops a co-op battle adopting an encounter whose battle has already
+  ended — reachable when a join is dropped by the hub, the player fights that
+  trainer alone, and a later fight against the same class on the same map with
+  the same lead produces the same key.
+
+## [0.7.3] - 2026-08-06
+
+### Fixed
+
+- **The `CHAT` row no longer looks like it has the cursor on it.** The unread
+  marker on that row has had two lives and neither worked: as a trailing `*`
+  it drew nothing at all (the extracted font has no glyph for it, and
+  `Font.width` advanced 8px anyway, so the row read as `CHAT` plus a blank
+  column), and as a leading `▶` it drew the menu's own cursor glyph — so a
+  row with unread messages looked like a second selection sitting on a row
+  the cursor was not on. The label is plain `CHAT` now. Unread lines are
+  still counted on the chat model; the count simply no longer decorates the
+  menu.
+
+## [0.7.2] - 2026-08-06
+
+### Fixed
+
+- **The distributed archive no longer carries the co-op end-to-end drivers.**
+  `tests/drivers/mmo_quad.lua` and `tests/drivers/run-quad-e2e.sh` arrived with
+  co-op battles and never reached `.modkitignore`, so `pack` duly put both in
+  the v0.7.1 zip — two files that reach engine test infrastructure and mean
+  nothing to somebody who has just unpacked a mod. Nothing mechanical was going
+  to catch it: `lint` has no opinion about a driver script, and the file count
+  only looks wrong to a reader who already knows what it should be. That is the
+  trap `my-profile.png` and `rank.png` each fell into one release apart, and the
+  fix is the same one — name the files. Both drivers are listed now, along with
+  the seven screenshots taken since the block was last touched
+  (`coop-battle.png`, `coop-item.png`, `coop-switch.png`, `party-ask.png`,
+  `party-battle.png`, `party-spectating.png`, `two-parties.png`), so
+  `modkit pack` leaves all nine behind — the release workflow already dropped
+  `docs/` wholesale, so only the two drivers ever reached a published zip.
+  Seven plan files join them on the same footing as every other plan entry —
+  `submit-to-mod-index.md` plus the six that had accumulated without a line
+  (`coop-battle-hp-sequencing.md`, `coop-battle-status-and-timeout.md`,
+  `coop-battle-ux-findings.md`, `coop-run-consent-and-blackout.md`,
+  `nire-back-sprite-pixel-ratio.md`, `non-blocking-avatars.md`): working notes
+  for whoever picks this up next, not mod content.
+
+### Changed
+
+- **Two version numbers in the docs caught up with the mod.** `README.md`'s
+  known-jank section still opened by calling this `0.5.0`, and
+  `server/README.md`'s VPS walkthrough still cloned `--branch v0.2.2` — a tag
+  from before the hub that walkthrough then tells you to build existed at all.
+  Both now name the current release.
+
 ## [0.7.1] - 2026-08-05
 
 ### Fixed
