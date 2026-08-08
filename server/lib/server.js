@@ -1062,6 +1062,13 @@ function start(options = {}) {
     }
     for (const socket of farewells) socket.destroy();
     farewells.clear();
+    // Mediated fights count time in seconds; tick deadlines and reconnect
+    // grace so a stalled choice or a dropped fighter eventually resolves.
+    try {
+      relay.tickBattles();
+    } catch (err) {
+      log.warn(`tickBattles failed: ${err && err.message}`);
+    }
   }, SWEEP_INTERVAL_MS);
   // An unref'd interval never keeps the process alive on its own account,
   // so the hub still exits the moment the listener and its sockets are gone.
