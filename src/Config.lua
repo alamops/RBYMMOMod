@@ -359,23 +359,25 @@ M.COOP_STALL_TIMEOUT = 75
 -- real trust problem, because a modified host was deciding a ranked match
 -- against players it was fighting.
 --
--- `coop_npc` is **off, and for two reasons that are both about the
--- intermediator rather than about this client**:
+-- `coop_npc` is on too, and it took the two things the intermediator was missing
+-- rather than anything in this client:
 --
---   1. *One npc seat, not two.*  `openMediatedBattle` seats side b of a
---      coop_npc as a single synthetic `npc:<id>`, so the trainer's whole team
---      fights from one field slot -- a 2-on-1 where the co-op screen builds a
---      2-on-2.  Widening it is a seat-layout change to src/Hub.lua, its twin in
---      server/lib/relay.js and Turn's per-side cap, in one version.
---   2. *Nothing chooses for the npc.*  src/BattleSim/Turn.lua takes choices from
---      connections, and the npc seat is not one -- so every turn would wait out
---      BATTLE_CHOICE_TIMEOUT before the auto-pick filed a move for it.  A
---      minute a turn is not a battle.
+--   1. *Two npc seats, not one.*  `openMediatedBattle` seats side b of a
+--      coop_npc as two synthetic ids (`n<battle>a`, `n<battle>b`), and the
+--      trainer's party -- uploaded by the host as one list, in send-out order --
+--      is dealt back across them alternately, which is the inverse of the deal
+--      src/Coop.lua made when it built the field.  One seat was a 2-on-1 where
+--      the screen draws a 2-on-2, with the fourth box mapping to nothing.
+--   2. *Something chooses for the npc.*  Both intermediators call the turn
+--      machine's own auto-pick for every npc seat the moment a turn opens, so
+--      the trainer answers in the same breath the field does.  It used to wait
+--      out BATTLE_CHOICE_TIMEOUT and then auto-pick anyway -- a minute a turn,
+--      which is not a battle.
 --
--- The client half is built and tested either way (tests/coop_mediated.lua drives
--- coop_npc with this flipped), so the day an intermediator grows an npc actor
--- and a second seat, this is the line that turns it on.
-M.MEDIATED_COOP = { coop_pvp = true, coop_npc = false }
+-- Both are in src/Hub.lua and its twin in server/lib/relay.js, and they moved
+-- together: a client on this line talking to a hub without them is the 2-on-1
+-- that never resolves, which is what PROTOCOL is for.
+M.MEDIATED_COOP = { coop_pvp = true, coop_npc = true }
 
 -- How long a battle waits for a player who has dropped mid-fight.
 --

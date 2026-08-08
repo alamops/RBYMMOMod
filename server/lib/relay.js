@@ -123,6 +123,12 @@ const RESPONSE_MAX = 128;
 const BATTLE_CHOICE_TIMEOUT = 60;
 const BATTLE_RECONNECT_GRACE = 60;
 
+// How many fighters one side of a co-op field holds, which is Config.COOP_SIDE
+// and is written as PARTY_MAX for that file's reason: two parties meet, so the
+// day a party grows the side grows with it rather than a literal 2 having to be
+// remembered here. It is also how many synthetic seats a coop_npc trainer takes.
+const COOP_SIDE = PARTY_MAX;
+
 // The seed range an authority client may propose, mirrored from sanitize's
 // SEED_MAX so that a seed this hub deals itself is one a client's own
 // sanitiser would have accepted from it.
@@ -664,7 +670,10 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // side of the field is that trainer -- an opponent with a party and no
   // connection. The four-way path below is the only one that makes a
   // `coop_pvp`, because it is the only one where both sides are players.
-  const battleId = String(relay.nextCoopAsk++);
+  // "c", for startSession's reason: sessions and co-op battles share the
+  // `battles` map and are numbered by two counters that know nothing of each
+  // other.
+  const battleId = `c${relay.nextCoopAsk++}`;
   relay.openCoopBattle(battleId, [host.id, client.id],
     { mode: 'coop_npc', hostId: host.id });
 
@@ -751,7 +760,7 @@ handlers['mmo.coop_challenge'] = (relay, client, msg) => {
   const theirs = relay.partyMembers(target.partyId);
   if (mine.length !== PARTY_MAX || theirs.length !== PARTY_MAX) return;
 
-  const id = String(relay.nextCoopAsk++);
+  const id = `c${relay.nextCoopAsk++}`;
   const sideA = mine.map((m) => m.id);
   const sideB = theirs.map((m) => m.id);
   const everyone = sideA.concat(sideB);
@@ -840,8 +849,11 @@ function mediatedOf(relay, client) {
 }
 
 /*
- * The ephemeral ruleset: the type chart this one match runs under, and
- * optionally the seed.
+ * The ephemeral ruleset: the type chart this one match runs under.
+ *
+ * A `seed` still parses, because the field has ridden this message since the
+ * lockstep days, but tryStartSim does not read it -- see the note there for why
+ * the RNG is the intermediator's alone.
  *
  * The host's to upload and nobody else's -- the asker in a 1v1, the player who
  * was already standing at the trainer in a co-op fight. Not because a guest's
@@ -877,9 +889,7 @@ handlers['mmo.battle_party'] = (relay, client, msg) => {
   // sender believes is being used somewhere else.
   if (party.battle !== record.id) return;
 
-  const seat = relay.battleSeat(record, client, party);
-  if (!seat) return;
-  record.parties.set(seat, party);
+  if (!relay.fillBattleParty(record, client, party)) return;
   relay.tryStartSim(record);
 };
 
@@ -1994,7 +2004,18 @@ class Relay {
   }
 
   startSession(a, b, kind) {
-    const id = String(this.nextSession++);
+    /*
+     * Prefixed, because two counters mint into one `battles` map.
+     *
+     * A session and a co-op battle are numbered independently and both open a
+     * mediated record under their own id, so the plain "1" the second of them
+     * minted used to land on the first one's record -- a co-op fight inheriting
+     * a 1v1's parties, or a battle_choice from one filed into the other. The
+     * letter keeps the two id spaces apart, and it is a letter rather than a
+     * colon because these ids cross the wire and cleanId refuses anything
+     * outside [\w-].
+     */
+    const id = `s${this.nextSession++}`;
     this.sessions.set(id, { a: a.id, b: b.id, kind });
     a.sessionId = id;
     b.sessionId = id;
@@ -2052,8 +2073,17 @@ class Relay {
    * Open the hub's record of a fight. The sim is still null: a ruleset and
    * every required party have to arrive before tryStartSim takes it over.
    *
-   * `npcId` is only set for coop_npc -- a synthetic seat the host fills with
-   * the trainer's party. It is never a real connection.
+   * `npcIds` is only set for coop_npc: **two** synthetic seats, because two
+   * players meet two monsters and the co-op screen draws a 2-on-2. One seat was
+   * the first cut of this and it was a 2-on-1 -- the trainer's whole team
+   * fighting from a single field slot, with the fourth box on every client's
+   * screen mapping to nothing.
+   *
+   * They are ids a client could in principle type, and that is safe rather than
+   * sloppy: client ids are minted as decimal counters, these carry a letter and
+   * the battle's own id, and nothing addresses a seat by name anyway -- a choice
+   * is attributed to the connection it arrived on. It has to be spellable,
+   * because tryStartSim advertises them and cleanId refuses a colon.
    */
   openMediatedBattle(id, plan) {
     const p = plan || {};
@@ -2071,14 +2101,20 @@ class Relay {
     }
 
     const hostId = p.hostId || memberIds[0];
-    const npcId = mode === 'coop_npc' ? (`npc:${id}`) : null;
+    let npcIds = null;
+    if (mode === 'coop_npc') {
+      npcIds = [];
+      for (let i = 0; i < COOP_SIDE; i += 1) {
+        npcIds.push(`n${id}${String.fromCharCode(97 + i)}`);
+      }
+    }
 
     let sides = p.sides;
     if (!sides || typeof sides !== 'object') {
       if (mode === '1v1') {
         sides = { a: [memberIds[0]], b: [memberIds[1] || memberIds[0]] };
       } else if (mode === 'coop_npc') {
-        sides = { a: memberIds.slice(), b: [npcId] };
+        sides = { a: memberIds.slice(), b: npcIds.slice() };
       } else {
         const mid = Math.ceil(memberIds.length / 2);
         sides = { a: memberIds.slice(0, mid), b: memberIds.slice(mid) };
@@ -2094,7 +2130,7 @@ class Relay {
         a: (sides.a || []).slice(),
         b: (sides.b || []).slice(),
       },
-      npcId,
+      npcIds,
       ruleset: null,
       parties: new Map(),
       sim: null,
@@ -2108,23 +2144,81 @@ class Relay {
     return record;
   }
 
+  // Is this seat one of the trainer's rather than a player's?
+  isNpcSeat(record, seat) {
+    return !!(record && record.npcIds && record.npcIds.includes(seat));
+  }
+
   /*
    * Which seat a party fills. Normally the sender's own id. For coop_npc the
-   * host may also upload the trainer party under side "b", which lands on the
-   * synthetic npc seat rather than displacing their own team.
+   * host may also upload the trainer party under side "b", which is dealt across
+   * the synthetic npc seats rather than displacing their own team -- so this
+   * answers the *first* of them, and fillBattleParty below does the dealing.
    */
   battleSeat(record, client, party) {
     if (!record.memberIds.includes(client.id)) return null;
     if (record.mode === 'coop_npc' && party.side === 'b'
-        && client.id === record.hostId && record.npcId) {
-      return record.npcId;
+        && client.id === record.hostId && record.npcIds) {
+      return record.npcIds[0];
     }
     return client.id;
   }
 
+  /*
+   * Store an uploaded party against the seat or seats it fills.
+   *
+   * The trainer's team arrives as one list, because that is what it is on the
+   * host's screen -- CoopBattle's `npcMons` re-interleaves the two ownerless
+   * slots back into the order the trainer would send them out. Two seats fight
+   * it, so it is dealt back out here, alternately, which is the inverse of that
+   * interleave: the deal Coop.lua made when it built the field is the deal the
+   * field gets back.
+   *
+   * A trainer with fewer monsters than seats leaves one empty, and an empty seat
+   * is a field Turn.attempt refuses -- so the spare seat is given up instead and
+   * the fight opens as the 2-on-1 the trainer actually brought. Refusing would
+   * mean a lone-monster trainer could not be fought at all.
+   */
+  fillBattleParty(record, client, party) {
+    const seat = this.battleSeat(record, client, party);
+    if (!seat) return false;
+    if (!this.isNpcSeat(record, seat)) {
+      record.parties.set(seat, party);
+      return true;
+    }
+
+    const dealt = record.npcIds.map(() => []);
+    party.mons.forEach((mon, index) => {
+      dealt[index % record.npcIds.length].push(mon);
+    });
+
+    const kept = [];
+    const dropped = new Set();
+    record.npcIds.forEach((npcId, at) => {
+      if (dealt[at].length) {
+        kept.push(npcId);
+        record.parties.set(npcId, {
+          battle: party.battle,
+          side: party.side,
+          badges: party.badges,
+          mons: dealt[at],
+        });
+      } else {
+        dropped.add(npcId);
+        record.parties.delete(npcId);
+      }
+    });
+    record.npcIds = kept;
+    // Filtered rather than replaced: the side is the caller's description of the
+    // field and may hold more than these seats one day, so only the seats
+    // actually given up are taken out of it.
+    record.sides.b = record.sides.b.filter((s) => !dropped.has(s));
+    return true;
+  }
+
   seatsNeeded(record) {
     const seats = record.memberIds.slice();
-    if (record.npcId) seats.push(record.npcId);
+    for (const npcId of record.npcIds || []) seats.push(npcId);
     return seats;
   }
 
@@ -2142,7 +2236,7 @@ class Relay {
       return {
         playerId: seat,
         name: (client && client.name)
-          || (seat === record.npcId ? 'TRAINER' : seat),
+          || (this.isNpcSeat(record, seat) ? 'TRAINER' : seat),
         mons: party.mons,
       };
     };
@@ -2156,8 +2250,23 @@ class Relay {
       return out;
     };
 
-    const seed = record.ruleset.seed
-      || (1 + Math.floor(Math.random() * BATTLE_SEED_MAX));
+    /*
+     * The seed is the intermediator's and nobody else's.
+     *
+     * A client may still *send* one -- the message has carried the field since
+     * the lockstep days and refusing it now would drop the whole ruleset over a
+     * value nothing reads -- but a fight whose seed came off the wire is a fight
+     * the authority can replay offline until it finds a run it likes, and then
+     * ask for that run. Every roll in a mediated battle is drawn from this
+     * stream, so choosing it is the whole of what the intermediator is for.
+     *
+     * `forceBattleSeed` is the one way in, and it is a *relay* field rather than
+     * a message: a suite that needs a reproducible fight sets it on the relay it
+     * constructed, which is not something a connection can reach.
+     */
+    const seed = typeof this.forceBattleSeed === 'number'
+      ? this.forceBattleSeed
+      : (1 + Math.floor(Math.random() * BATTLE_SEED_MAX));
     const created = Turn.attempt({
       id: record.id,
       mode: record.mode,
@@ -2177,17 +2286,26 @@ class Relay {
     }
     record.sim = created.battle;
 
+    /*
+     * The npc seats are advertised under their own ids, not hidden behind the
+     * host's.
+     *
+     * They used to be filtered out and the emptied side announced as the host,
+     * because the seat was not an id a client could address -- and CoopBattle's
+     * `medMap` then had to guess that an advertised id owning no slot on that
+     * side meant the ownerless ones. Two seats is one guess too many: with both
+     * named, the map is a lookup again and the trainer's second box has a field
+     * slot rather than being drawn and never spoken about. Nothing is opened up
+     * by naming them, because a choice is attributed to the connection it
+     * arrived on and no connection is either of these.
+     */
     const ready = {
       battle: record.id,
       mode: record.mode,
-      sides: {
-        a: record.sides.a.filter((id) => id !== record.npcId),
-        b: record.sides.b.filter((id) => id !== record.npcId),
-      },
+      sides: { a: record.sides.a.slice(), b: record.sides.b.slice() },
     };
-    // cleanBattleReady requires 1..2 ids per side; for coop_npc side b may
-    // only be the npc, so advertise the host as the submitter of that side
-    // when no human is listed there.
+    // cleanBattleReady refuses an empty side, so a side that somehow lost every
+    // seat is announced as the host rather than as a message no client reads.
     if (!ready.sides.b.length && record.hostId) {
       ready.sides.b = [record.hostId];
     }
@@ -2207,8 +2325,46 @@ class Relay {
     }
   }
 
+  /*
+   * Answer for the trainer, for as long as it owes an answer.
+   *
+   * The npc seats have no connection to send mmo.battle_choice, so without this
+   * every turn of a coop_npc would sit out BATTLE_CHOICE_TIMEOUT and then be
+   * auto-picked anyway -- a minute a turn, which is not a battle. The pick is the
+   * turn machine's own (first move with PP, at the first living foe), so what
+   * happens here is exactly what used to happen a minute later.
+   *
+   * The loop is what carries the fight forward rather than a retry: filing the
+   * last outstanding choice resolves the turn and opens the next one, where the
+   * trainer owes again. It is bounded because a machine that opened a turn it
+   * cannot close is a hub that stops answering anything, and that is a worse
+   * failure than a fight that pauses.
+   */
+  fillNpcChoices(record) {
+    if (!record || !record.sim || record.settled) return false;
+    const seats = record.npcIds;
+    if (!seats || !seats.length) return false;
+
+    let filed = false;
+    const bound = Turn.MONS_PER_PARTY * COOP_SIDE * 2;
+    for (let pass = 0; pass < bound; pass += 1) {
+      let any = false;
+      for (const seat of seats) {
+        if (record.sim.autoPick(seat)) { any = true; filed = true; }
+      }
+      if (!any) break;
+    }
+    return filed;
+  }
+
   flushBattle(record) {
     if (!record || !record.sim || record.settled) return;
+    // Before the drain rather than after it: the trainer's answer can be the one
+    // that closes the turn, and the events that turn produced have to go out in
+    // this same pass or nothing else would send them until somebody else spoke.
+    // Nothing here calls back into this function, so the two cannot chase each
+    // other.
+    this.fillNpcChoices(record);
     const events = record.sim.drainEvents();
     for (const event of events) {
       this.broadcastBattle(record, 'mmo.battle_event', event);
@@ -2275,13 +2431,21 @@ class Relay {
   settleMediated(record, outcome) {
     if (!record || record.settled) return null;
     record.settled = true;
-    const payload = {
-      battle: record.id,
-      outcome: outcome.outcome,
-      winners: outcome.winners || [],
-      losers: outcome.losers || [],
-      reason: outcome.reason || null,
-    };
+    /*
+     * Present only when there is somebody in them, which is the same rule
+     * abortMediatedBattle follows and for the same reason: cleanBattleOutcome
+     * refuses an empty id list, so a draw carrying two of them is a message no
+     * client reads -- a battle screen with no way out. A null `reason` is
+     * omitted on the same grounds.
+     */
+    const payload = { battle: record.id, outcome: outcome.outcome };
+    if (outcome.winners && outcome.winners.length) {
+      payload.winners = outcome.winners;
+    }
+    if (outcome.losers && outcome.losers.length) {
+      payload.losers = outcome.losers;
+    }
+    if (outcome.reason) payload.reason = outcome.reason;
     this.broadcastBattle(record, 'mmo.battle_outcome', payload);
 
     // Rank from the intermediator alone -- no dual mmo.result vote.

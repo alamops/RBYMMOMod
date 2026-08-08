@@ -16,11 +16,34 @@ here must match `manifest.version`.
   Formula + turn twins live in `src/BattleSim/` and `server/lib/battle/` with
   shared synthetic fixtures (no ROM tables shipped). Solo wild/trainer battles
   stay on the local engine.
-- **Party-vs-NPC mediated path (client ready, hub seat limited).** Uploads and
-  event apply are implemented; `Config.MEDIATED_COOP.coop_npc` defaults **off**
-  until the hub seats a full trainer side without auto-timeout stalls.
+- **Party-vs-NPC mediated battles**, on by default
+  (`Config.MEDIATED_COOP.coop_npc`). Both intermediators seat the trainer twice
+  (`n<battle>a` / `n<battle>b`) rather than once, so a pair of players meets the
+  pair of monsters the co-op screen draws; the host uploads the trainer's team as
+  one list in send-out order and the hub deals it back across the two seats. Both
+  answer for those seats the moment a turn opens, using the turn machine's own
+  auto-pick — the previous seat took a full `BATTLE_CHOICE_TIMEOUT` per turn.
 
 ### Changed
+
+- Session ids and co-op battle ids are namespaced (`s1`, `c1`). They index one
+  `battles` table from two independent counters, so plain integers let a co-op
+  fight land on a 1v1's record.
+- A mediated battle's RNG seed is always the intermediator's. A `seed` in
+  `mmo.battle_ruleset` still parses but is no longer used — an authority that
+  chose it could replay a fight offline until it liked the run.
+- `mmo.battle_ready` advertises the npc seats under their own ids instead of
+  hiding them behind the host's, so `CoopBattle:medMap` maps each trainer box to
+  a field slot by lookup rather than by falling through.
+
+### Fixed
+
+- The Node hub no longer sends empty `winners` / `losers` lists (or a null
+  `reason`) on a draw. `cleanBattleOutcome` refuses an empty id list, so the
+  message was one no client could read — a battle screen with no way out.
+- A `switch` choice is matched against the party position its monster claims
+  rather than counted off the sim's array, so a party that lost a monster to the
+  sanitiser still switches to the one the player picked.
 
 - MMO 1v1 no longer hands off to engine `LinkBattle` / fingerprint `canBattle`
   refuse for mediated fights (Red vs Yellow and honest mod mismatches can fight

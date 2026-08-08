@@ -86,12 +86,9 @@ local Mediated = need("MediatedBattle")
 -- both co-op modes, whatever this build ships
 -- ------------------------------------------------------------------
 --
--- `coop_npc` is off by default, for two reasons that are both about the
--- intermediator and neither about this client -- Config.MEDIATED_COOP spells
--- them out. The *client half* is built either way, and it is what this file
--- tests, so the flag is turned on here: a suite that read the flag to decide
--- what to expect would pass whatever it said, and the day the hub grows an npc
--- actor the flip would be shipping untested code.
+-- Both are on in this build, and both are set here anyway rather than read:
+-- a suite that took the flag as its expectation would pass whatever it said, so
+-- every section below drives a mode it has switched on itself.
 --
 -- The shipped values are read first and pinned in section 8, which is the one
 -- place that asks what this build actually does.
@@ -417,7 +414,9 @@ do
   local record = hub.battles["cb1"]
   check(record ~= nil, "the hub opens a record when the co-op battle is agreed")
   eq(record.mode, "coop_npc", "knowing the shape of it")
-  check(record.npcId ~= nil, "and holding a seat open for the trainer")
+  eq(#(record.npcIds or {}), 2,
+     "and holding two seats open for the trainer, which is how many monsters "
+     .. "this screen draws it standing behind")
   eq(record.sim, nil, "but refereeing nothing until the uploads arrive")
 
   -- The two clients, built over the ids the hub just handed out, so what goes
@@ -448,23 +447,35 @@ do
   end
 
   check(record.sim ~= nil, "with both in, the hub starts refereeing")
-  check(record.parties[record.npcId] ~= nil,
-        "the host's side-b party filled the npc seat")
-  eq(#record.parties[record.npcId].mons, 4, "with all four of the trainer's team")
+  local npcA, npcB = record.npcIds[1], record.npcIds[2]
+  check(record.parties[npcA] ~= nil and record.parties[npcB] ~= nil,
+        "the host's side-b party filled both npc seats")
+  eq(#record.parties[npcA].mons + #record.parties[npcB].mons, 4,
+     "with all four of the trainer's team between them")
+  -- Dealt alternately, which is the inverse of the re-interleave `npcMons` did
+  -- on the way out -- so the field ends up holding the pair src/Coop.lua built.
+  eq(record.parties[npcA].mons[1].stats.spd, 20, "the first seat leads with the "
+     .. "monster the trainer meant to lead with")
+  eq(record.parties[npcB].mons[1].stats.spd, 19,
+     "and the second stands beside it rather than behind it")
   check(record.parties[ann.id] ~= nil, "and did not displace the host's own")
   eq(#record.parties[ann.id].mons, 1, "which is still the one monster it sent")
 
   eq(count(peers[ann.id], Wire.BATTLE_READY), 1, "the host is told it is on")
   eq(count(peers[bob.id], Wire.BATTLE_READY), 1, "and so is the guest")
 
-  -- And the roster it broadcasts is one this screen can read. The npc seat is
-  -- not an id a client may address, so the hub advertises the host in its place
-  -- -- which the map below has to survive without pointing the trainer's field
-  -- slot at the host's own box.
+  -- And the roster it broadcasts is one this screen can read. The npc seats are
+  -- advertised under ids of their own -- nobody is connected to them, so what
+  -- the id buys is a name for the box rather than an address -- and `medMap`
+  -- lands each of them on an ownerless slot rather than on the host's own.
   local ready
   for _, msg in ipairs(peers[ann.id].outbox) do
     if msg.type == Wire.BATTLE_READY then ready = msg end
   end
+  eq(#ready.sides.b, 2, "both trainer seats are named on side b")
+  check(Wire.battleReady(ready) ~= nil,
+        "and the whole roster survives the client's own sanitiser, npc ids "
+        .. "included -- an id with a colon in it would not have")
   eq(hostScreen:onBattleReady(ready), true, "the screen accepts the roster")
   eq(hostScreen.mediated, true, "and the fight is refereed from here")
   eq(hostScreen.medSlots[0], 1, "field slot 0 is the host's own box")
@@ -472,10 +483,31 @@ do
   eq(hostScreen.medSlots[2], 3,
      "and field slot 2 is the trainer's, not the host's -- the advertised id "
      .. "is where a choice for it arrives from, not who stands in it")
+  eq(hostScreen.medSlots[3], 4, "field slot 3 is the trainer's second")
   eq(hostScreen.medFields[3], 2, "and back the other way")
-  eq(hostScreen.medFields[4], nil,
-     "while the fourth box has no field slot at all: the intermediator seats "
-     .. "one npc where this screen draws two")
+  eq(hostScreen.medFields[4], 3,
+     "with the fourth box on a field slot of its own now: the intermediator "
+     .. "seats two npcs where this screen draws two")
+
+  -- And the trainer answers. Nothing below advances the hub's clock, so a turn
+  -- that needed BATTLE_CHOICE_TIMEOUT to close would not close at all -- which
+  -- is the second of the two reasons this mode used to be off, and the one a
+  -- player would have experienced as a minute of nothing every turn.
+  local opened = record.sim.turn
+  for _, seat in ipairs({ ann, bob }) do
+    hub:receive(seat, { type = Wire.BATTLE_CHOICE, battle = "cb1",
+                        action = "fight", move = 0 })
+  end
+  check(record.sim.turn > opened or record.settled,
+        "the turn resolves on the two players' choices alone")
+  eq(hub.clock, 0, "with no time having passed for it to time out in")
+
+  local hurried = false
+  for _, msg in ipairs(peers[bob.id].outbox) do
+    if msg.type == Wire.BATTLE_EVENT and type(msg.text) == "string"
+       and msg.text:find("ran out of time", 1, true) then hurried = true end
+  end
+  check(not hurried, "and nobody was picked for on a deadline")
 end
 
 -- ------------------------------------------------------------------
@@ -913,14 +945,11 @@ do
   eq(SHIPPED.coop_pvp, true, "party-versus-party is refereed in this build")
   eq(CoopBattle.mediates("coop_pvp"), true, "so a coop_pvp screen uploads")
 
-  -- Deliberately off, and the reasons are in src/Config.lua: the intermediator
-  -- seats one npc where the screen draws two, and nothing on it chooses for that
-  -- seat -- so every turn would wait out BATTLE_CHOICE_TIMEOUT. Both are hub
-  -- changes, in a version, with the Node twin moving too.
-  eq(SHIPPED.coop_npc, false,
-     "party-versus-NPC is not, until an intermediator can answer for the "
-     .. "trainer -- everything above proves the client half is ready for it")
-  eq(CoopBattle.mediates("coop_npc"), false, "so a coop_npc screen does not")
+  -- On as of the version that gave the intermediator two npc seats and an
+  -- answer for them; the reasons it was ever off are in src/Config.lua, and
+  -- section 2 above is what proves they are both gone.
+  eq(SHIPPED.coop_npc, true, "and so is party-versus-NPC")
+  eq(CoopBattle.mediates("coop_npc"), true, "so a coop_npc screen uploads too")
 
   eq(CoopBattle.mediates("1v1"), false,
      "a 1v1 is not a co-op battle at all -- src/MediatedBattle.lua owns that one")

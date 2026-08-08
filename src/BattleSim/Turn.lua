@@ -164,7 +164,18 @@ end
 -- redraws, and a sim that damaged it in place would make "run the same fixture
 -- twice" produce two different fights -- which is exactly the property the
 -- determinism suite is built to catch.
-local function copyMon(raw)
+--
+-- `slot` is the *sender's* party position for this monster, zero-based, the way
+-- Wire.battleMon carries it -- and it is kept rather than dropped because a
+-- switch names it.  The two numbers are the same only while every monster the
+-- client uploaded survived the copy and landed in the same order, and neither is
+-- guaranteed: a mon this file cannot describe is skipped, a party past
+-- MONS_PER_PARTY is cut short, and a coop_npc trainer's team is dealt across two
+-- seats before it ever gets here.  In all three the array index has moved and the
+-- position on the player's own screen has not, so the position is what a choice
+-- is matched against.  `fallback` is that index for a sender that stated none,
+-- which keeps an ordinary party numbered exactly as it always was.
+local function copyMon(raw, fallback)
   if type(raw) ~= "table" then return nil end
 
   local stats = type(raw.stats) == "table" and raw.stats or {}
@@ -195,6 +206,7 @@ local function copyMon(raw)
 
   return {
     species     = str(raw.species) or "?",
+    slot        = max(0, int(raw.slot, max(0, int(fallback, 0)))),
     level       = max(1, int(raw.level, 1)),
     hp          = hp,
     maxHp       = maxHp,
@@ -233,6 +245,19 @@ local function activeMon(fighter)
   local mon = fighter.mons[fighter.active]
   if mon and mon.hp > 0 then return mon end
   return nil
+end
+
+-- Which of this party a zero-based wire slot means.
+--
+-- Matched against the position each monster claims rather than counted off the
+-- array, for the reason copyMon gives -- and the array index is the fallback
+-- rather than the rule, so a sender whose party arrived intact is unaffected and
+-- one whose party was cut or dealt still switches to the monster it named.
+local function partyIndexOf(fighter, wireSlot)
+  for i = 1, #fighter.mons do
+    if fighter.mons[i].slot == wireSlot then return i end
+  end
+  return wireSlot + 1
 end
 
 -- opts:
@@ -285,7 +310,7 @@ function M.create(opts)
       if type(entry.mons) == "table" then
         for i = 1, #entry.mons do
           if #mons >= M.MONS_PER_PARTY then break end
-          local mon = copyMon(entry.mons[i])
+          local mon = copyMon(entry.mons[i], #mons)
           if mon then mons[#mons + 1] = mon end
         end
       end
@@ -425,7 +450,7 @@ function Battle:_normaliseChoice(fighter, choice)
   if action == "switch" then
     local slot = int(choice.slot, nil)
     if slot == nil then return nil end
-    local target = slot + 1
+    local target = partyIndexOf(fighter, slot)
     local bench = fighter.mons[target]
     if not bench or bench.hp <= 0 or target == fighter.active then return nil end
     return { action = "switch", slot = target }
@@ -516,6 +541,32 @@ function Battle:_autoChoice(fighter)
   pick = pick or 1
   if not mon.moves[pick] then return nil end
   return { action = "fight", move = pick, target = foe.slot }
+end
+
+-- File that pick for a seat that has nobody to send one.
+--
+-- The npc side of a coop_npc is seated like any other fighter and has no
+-- connection behind it, so without this the referee would wait out the whole
+-- choice deadline every turn and then auto-pick anyway -- a minute a turn, for a
+-- decision nothing was ever going to make.  It is deliberately the *same* pick
+-- the timeout files rather than a second, cleverer one: the trainer plays a turn
+-- rather than playing it well, and both runtimes reproduce it byte for byte.
+--
+-- Answers true when a choice was actually filed, so a caller can loop until the
+-- machine stops owing.  Filing one may resolve the turn and open the next, which
+-- is what makes that loop the thing that carries the fight forward.
+function Battle:autoPick(playerId)
+  if self.phase ~= "choice" then return false end
+  local fighter = self.byId[str(playerId) or ""]
+  if not fighter then return false end
+  if fighter.choice ~= nil then return false end
+  if not activeMon(fighter) then return false end
+
+  local auto = self:_autoChoice(fighter)
+  if not auto then return false end
+  fighter.choice = auto
+  self:_maybeResolve()
+  return true
 end
 
 -- ------------------------------------------------------------------

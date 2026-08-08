@@ -285,6 +285,10 @@ function M.new(opts)
     -- id for a 1v1, a co-op group id for a 2v2 -- rather than by an id of its
     -- own, because every message about a battle already carries one of those
     -- and a second numbering would be a mapping to keep in step for no gain.
+    -- Those two numberings are minted by two counters that know nothing of each
+    -- other, which is why each stamps a letter of its own on what it mints -- one
+    -- table, two id spaces, and no way for the second "1" to land on the first's
+    -- record.
     --
     -- A record exists from the moment the fight is agreed and holds nothing
     -- but a roster until a ruleset and every party arrive; `sim` is what says
@@ -725,7 +729,16 @@ function M:endSession(client, reason)
 end
 
 function M:startSession(a, b, kind)
-  local id = tostring(self.nextSession)
+  -- Prefixed, because two counters mint into one `battles` table.
+  --
+  -- A session and a co-op battle are numbered by two independent counters and
+  -- both open a mediated record under their own id, so the plain "1" the second
+  -- of them minted used to land on the first one's record -- a co-op fight
+  -- inheriting a 1v1's parties, or a battle_choice from one filed into the
+  -- other.  The letter is what keeps the two id spaces apart, and it is a letter
+  -- rather than a colon because these ids cross the wire and Wire.id refuses
+  -- anything outside [%w_-].
+  local id = "s" .. tostring(self.nextSession)
   self.nextSession = self.nextSession + 1
   self.sessions[id] = { a = a.id, b = b.id, kind = kind }
   a.sessionId, b.sessionId = id, id
@@ -1274,9 +1287,17 @@ end
 -- Open the hub's record of a fight.  The sim is still nil: a ruleset and every
 -- required party have to arrive before tryStartSim takes it over.
 --
--- `npcId` is only set for coop_npc -- a synthetic seat the host fills with the
--- trainer's party.  It is never a real connection, which is why it is spelled
--- with a colon: no client id can collide with it.
+-- `npcIds` is only set for coop_npc: **two** synthetic seats, because two
+-- players meet two monsters and the co-op screen draws a 2-on-2.  One seat was
+-- the first cut of this and it was a 2-on-1 -- the trainer's whole team fighting
+-- from a single field slot, with the fourth box on every client's screen mapping
+-- to nothing.
+--
+-- They are ids a client could in principle type, and that is safe rather than
+-- sloppy: client ids are minted as decimal counters, these carry a letter and
+-- the battle's own id, and nothing addresses a seat by name anyway -- a choice
+-- is attributed to the connection it arrived on.  It has to be spellable,
+-- because tryStartSim advertises them and Wire.id refuses a colon.
 function M:openMediatedBattle(id, plan)
   plan = plan or {}
   local memberIds, seen = {}, {}
@@ -1291,14 +1312,20 @@ function M:openMediatedBattle(id, plan)
   local mode = Turn.MODES[plan.mode] and plan.mode
     or ((#memberIds <= 2) and "1v1" or "coop_pvp")
   local hostId = plan.hostId or memberIds[1]
-  local npcId = (mode == "coop_npc") and ("npc:" .. tostring(id)) or nil
+  local npcIds = nil
+  if mode == "coop_npc" then
+    npcIds = {}
+    for i = 1, Config.COOP_SIDE do
+      npcIds[i] = "n" .. tostring(id) .. string.char(96 + i)
+    end
+  end
 
   local sides = type(plan.sides) == "table" and plan.sides or nil
   if not sides then
     if mode == "1v1" then
       sides = { a = { memberIds[1] }, b = { memberIds[2] or memberIds[1] } }
     elseif mode == "coop_npc" then
-      sides = { a = memberIds, b = { npcId } }
+      sides = { a = memberIds, b = npcIds }
     else
       local mid = math.ceil(#memberIds / 2)
       local a, b = {}, {}
@@ -1324,7 +1351,7 @@ function M:openMediatedBattle(id, plan)
     hostId = hostId,
     memberIds = memberIds,
     sides = { a = copy(sides.a), b = copy(sides.b) },
-    npcId = npcId,
+    npcIds = npcIds,
     ruleset = nil,
     parties = {},      -- seat id -> the sanitised party that filled it
     sim = nil,
@@ -1338,9 +1365,19 @@ function M:openMediatedBattle(id, plan)
   return record
 end
 
+-- Is this seat one of the trainer's rather than a player's?
+function M:isNpcSeat(record, seat)
+  for _, npcId in ipairs((record and record.npcIds) or {}) do
+    if npcId == seat then return true end
+  end
+  return false
+end
+
 -- Which seat a party fills.  Normally the sender's own id.  For coop_npc the
--- host may also upload the trainer's party under side "b", which lands on the
--- synthetic npc seat rather than displacing their own team.
+-- host may also upload the trainer's party under side "b", which is dealt across
+-- the synthetic npc seats rather than displacing their own team -- so this
+-- answers the *first* of them, and `fillBattleParty` below is what does the
+-- dealing.
 function M:battleSeat(record, client, party)
   local member = false
   for _, memberId in ipairs(record.memberIds) do
@@ -1348,17 +1385,71 @@ function M:battleSeat(record, client, party)
   end
   if not member then return nil end
   if record.mode == "coop_npc" and party.side == "b"
-     and client.id == record.hostId and record.npcId then
-    return record.npcId
+     and client.id == record.hostId and record.npcIds then
+    return record.npcIds[1]
   end
   return client.id
+end
+
+-- Store an uploaded party against the seat or seats it fills.
+--
+-- The trainer's team arrives as one list, because that is what it is on the
+-- host's screen -- src/CoopBattle.lua's `npcMons` re-interleaves the two
+-- ownerless slots back into the order the trainer would send them out.  Two
+-- seats fight it, so it is dealt back out here, alternately, which is the
+-- inverse of that interleave: the deal src/Coop.lua made when it built the field
+-- is the deal the field gets back.
+--
+-- A trainer with fewer monsters than seats leaves one empty, and an empty seat
+-- is a field Turn.create refuses -- so the spare seat is given up instead and
+-- the fight opens as the 2-on-1 the trainer actually brought.  Refusing would
+-- mean a lone-monster trainer could not be fought at all.
+function M:fillBattleParty(record, client, party)
+  local seat = self:battleSeat(record, client, party)
+  if not seat then return false end
+  if not self:isNpcSeat(record, seat) then
+    record.parties[seat] = party
+    return true
+  end
+
+  local dealt = {}
+  for index, mon in ipairs(party.mons) do
+    local at = ((index - 1) % #record.npcIds) + 1
+    dealt[at] = dealt[at] or {}
+    local hand = dealt[at]
+    hand[#hand + 1] = mon
+  end
+
+  local kept, dropped = {}, {}
+  for at, npcId in ipairs(record.npcIds) do
+    if dealt[at] and #dealt[at] > 0 then
+      kept[#kept + 1] = npcId
+      record.parties[npcId] = {
+        battle = party.battle, side = party.side,
+        badges = party.badges, mons = dealt[at],
+      }
+    else
+      dropped[npcId] = true
+      record.parties[npcId] = nil
+    end
+  end
+  record.npcIds = kept
+  -- Filtered rather than replaced: the side is the caller's description of the
+  -- field and may hold more than these seats one day, so only the seats actually
+  -- given up are taken out of it.
+  local sideB = {}
+  for _, seat in ipairs(record.sides.b) do
+    if not dropped[seat] then sideB[#sideB + 1] = seat end
+  end
+  record.sides.b = sideB
+  return true
 end
 
 -- Every seat that owes a party before the fight can open.
 function M:seatsNeeded(record)
   local seats = {}
   for _, memberId in ipairs(record.memberIds) do seats[#seats + 1] = memberId end
-  if record.npcId then seats[#seats + 1] = record.npcId end
+  for _, npcId in ipairs(record.npcIds or {}) do seats[#seats + 1] = npcId end
   return seats
 end
 
@@ -1380,7 +1471,7 @@ function M:tryStartSim(record)
     return {
       playerId = seat,
       name = (client and client.name)
-        or ((seat == record.npcId) and "TRAINER" or seat),
+        or (self:isNpcSeat(record, seat) and "TRAINER" or seat),
       mons = party.mons,
     }
   end
@@ -1394,10 +1485,24 @@ function M:tryStartSim(record)
     return out
   end
 
+  -- The seed is the intermediator's and nobody else's.
+  --
+  -- A client may still *send* one -- the message has carried the field since the
+  -- lockstep days and refusing it now would drop the whole ruleset over a value
+  -- nothing reads -- but a fight whose seed came off the wire is a fight the
+  -- authority can replay offline until it finds a run it likes, and then ask for
+  -- that run.  Every roll in a mediated battle is drawn from this stream, so
+  -- choosing it is the whole of what the intermediator is for.
+  --
+  -- `forceBattleSeed` is the one way in, and it is a *hub* field rather than a
+  -- message: a suite that needs a reproducible fight sets it on the hub it
+  -- constructed, which is not something a connection can reach.
+  local seed = (type(self.forceBattleSeed) == "number")
+    and self.forceBattleSeed or self:battleSeed()
   local battle, why = Turn.create({
     id = record.id,
     mode = record.mode,
-    seed = record.ruleset.seed or self:battleSeed(),
+    seed = seed,
     chart = record.ruleset.chart,
     choiceTimeout = Config.BATTLE_CHOICE_TIMEOUT,
     reconnectGrace = Config.BATTLE_RECONNECT_GRACE,
@@ -1418,15 +1523,22 @@ function M:tryStartSim(record)
   end
   record.sim = battle
 
-  -- Wire.battleReady wants 1..COOP_SIDE ids per side and the npc seat is not
-  -- one a client may address, so it is filtered out -- and a side left empty
-  -- by that filter is advertised as the host, who is the connection any choice
-  -- for those slots arrives from.
+  -- The npc seats are advertised under their own ids, not hidden behind the
+  -- host's.
+  --
+  -- They used to be filtered out and the emptied side announced as the host,
+  -- because the seat was not an id a client could address -- and src/CoopBattle's
+  -- `medMap` then had to guess that an advertised id owning no slot on that side
+  -- meant the ownerless ones.  Two seats is one guess too many: with both named,
+  -- the map is a lookup again and the trainer's second box has a field slot
+  -- rather than being drawn and never spoken about.  Nothing is opened up by
+  -- naming them, because a choice is attributed to the connection it arrived on
+  -- and no connection is either of these.
   local function advertise(seats)
     local out = {}
-    for _, seat in ipairs(seats) do
-      if seat ~= record.npcId then out[#out + 1] = seat end
-    end
+    for _, seat in ipairs(seats) do out[#out + 1] = seat end
+    -- Wire.battleReady refuses an empty side, so a side that somehow lost every
+    -- seat is announced as the host rather than as a message no client reads.
     if #out == 0 and record.hostId then out[1] = record.hostId end
     return out
   end
@@ -1437,6 +1549,35 @@ function M:tryStartSim(record)
   })
   self:flushBattle(record)
   return true
+end
+
+-- Answer for the trainer, for as long as it owes an answer.
+--
+-- The npc seats have no connection to send mmo.battle_choice, so without this
+-- every turn of a coop_npc would sit out BATTLE_CHOICE_TIMEOUT and then be
+-- auto-picked anyway -- a minute a turn, which is not a battle.  The pick is the
+-- turn machine's own (first move with PP, at the first living foe), so what
+-- happens here is exactly what used to happen a minute later.
+--
+-- The loop is what carries the fight forward rather than a retry: filing the
+-- last outstanding choice resolves the turn and opens the next one, where the
+-- trainer owes again.  It is bounded because a machine that opened a turn it
+-- cannot close is a hub that stops answering anything, and that is a worse
+-- failure than a fight that pauses.
+function M:fillNpcChoices(record)
+  if not record or not record.sim or record.settled then return false end
+  local seats = record.npcIds
+  if not seats or #seats == 0 then return false end
+
+  local filed = false
+  for _ = 1, Config.BATTLE_MON_MAX * Config.COOP_FIGHTERS do
+    local any = false
+    for _, seat in ipairs(seats) do
+      if record.sim:autoPick(seat) then any, filed = true, true end
+    end
+    if not any then break end
+  end
+  return filed
 end
 
 -- Everyone in the fight, and nobody else.  A member who has dropped is skipped
@@ -1453,6 +1594,12 @@ end
 -- sim buffers and nothing else drains it.
 function M:flushBattle(record)
   if not record or not record.sim or record.settled then return end
+  -- Before the drain rather than after it: the trainer's answer can be the one
+  -- that closes the turn, and the events that turn produced have to go out in
+  -- this same pass or nothing else would send them until somebody else spoke.
+  -- Nothing here calls back into this function, so the two cannot chase each
+  -- other.
+  self:fillNpcChoices(record)
   for _, event in ipairs(record.sim:drainEvents()) do
     self:broadcastBattle(record, Wire.BATTLE_EVENT, event)
   end
@@ -2050,7 +2197,10 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   -- other side of the field is that trainer -- an opponent with a party and no
   -- connection.  The four-way path is the only one that makes a `coop_pvp`,
   -- because it is the only one where both sides are players.
-  local id = tostring(self.nextCoopAsk)
+  -- "c", for startSession's reason: sessions and co-op battles share the
+  -- `battles` table and are numbered by two counters that know nothing of each
+  -- other.
+  local id = "c" .. tostring(self.nextCoopAsk)
   self.nextCoopAsk = self.nextCoopAsk + 1
   self:openCoopBattle(id, { host.id, client.id },
     { mode = "coop_npc", hostId = host.id })
@@ -2141,7 +2291,7 @@ handlers[Wire.COOP_CHALLENGE] = function(self, client, msg)
   local theirs = self:partyMembers(target.partyId)
   if #mine ~= Config.PARTY_MAX or #theirs ~= Config.PARTY_MAX then return end
 
-  local id = tostring(self.nextCoopAsk)
+  local id = "c" .. tostring(self.nextCoopAsk)
   self.nextCoopAsk = self.nextCoopAsk + 1
 
   local sideA, sideB, everyone = {}, {}, {}
@@ -2205,8 +2355,11 @@ end
 -- is sent from the methods above rather than from here, because it is the
 -- sim's word rather than an answer to any one message.
 
--- The ephemeral ruleset: the type chart this one match runs under, and
--- optionally the seed.
+-- The ephemeral ruleset: the type chart this one match runs under.
+--
+-- A `seed` still parses, because the field has ridden this message since the
+-- lockstep days, but tryStartSim does not read it -- see the note there for why
+-- the RNG is the intermediator's alone.
 --
 -- The authority's to upload and nobody else's -- the asker in a 1v1, the
 -- player who was already standing at the trainer in a co-op fight.  Not
@@ -2242,9 +2395,7 @@ handlers[Wire.BATTLE_PARTY] = function(self, client, msg)
   -- sender believes it is being used somewhere else.
   if party.battle ~= record.id then return end
 
-  local seat = self:battleSeat(record, client, party)
-  if not seat then return end
-  record.parties[seat] = party
+  if not self:fillBattleParty(record, client, party) then return end
   self:tryStartSim(record)
 end
 

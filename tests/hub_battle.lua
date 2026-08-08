@@ -423,9 +423,17 @@ do
     mode = "coop_npc", hostId = ann.id, memberIds = { ann.id, bob.id },
   })
   ok(record ~= nil, "a co-op record opens from a plan")
-  eq(record.npcId, "npc:npc-1", "with a synthetic seat no connection can be")
-  eq(#hub:seatsNeeded(record), 3, "and three seats owe a party, not two")
-  eq(hub:battleSeat(record, ann, { side = "b" }), record.npcId,
+  eq(#(record.npcIds or {}), 2,
+     "with two synthetic seats -- two players meet two monsters, and one seat "
+     .. "was a 2-on-1 where the screen draws a 2-on-2")
+  eq(record.npcIds[1], "nnpc-1a", "named off the battle they belong to")
+  eq(record.npcIds[2], "nnpc-1b", "and told apart by a letter")
+  eq(Wire.id(record.npcIds[1]), record.npcIds[1],
+     "and spellable on the wire, because battle_ready advertises them")
+  eq(record.sides.b[1], record.npcIds[1], "side b is the trainer's")
+  eq(#record.sides.b, 2, "both seats of it")
+  eq(#hub:seatsNeeded(record), 4, "and four seats owe a party, not three")
+  eq(hub:battleSeat(record, ann, { side = "b" }), record.npcIds[1],
      "the authority's side-b upload is the trainer's team")
   eq(hub:battleSeat(record, ann, { side = "a" }), ann.id,
      "and their side-a upload is still their own")
@@ -441,7 +449,48 @@ do
     { memberIds = { ann.id, bob.id, stranger.id } })
   eq(pvp.mode, "coop_pvp", "three or more is inferred as a four-way")
   eq(#pvp.sides.a + #pvp.sides.b, 3, "with everybody placed on one side or other")
-  eq(pvp.npcId, nil, "and no synthetic seat, because both sides are players")
+  eq(pvp.npcIds, nil, "and no synthetic seats, because both sides are players")
+end
+
+-- ------- the trainer's team is dealt across the two seats
+--
+-- It is uploaded as one list because that is what it is on the host's screen --
+-- src/CoopBattle.lua re-interleaves the two ownerless slots back into send-out
+-- order -- so the deal here is the inverse of the one src/Coop.lua made when it
+-- built the field.
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+
+  local record = hub:openMediatedBattle("npc-2", {
+    mode = "coop_npc", hostId = ann.id, memberIds = { ann.id, bob.id },
+  })
+  local first, second = record.npcIds[1], record.npcIds[2]
+  ok(hub:fillBattleParty(record, ann, { battle = "npc-2", side = "b", mons = {
+    mon({ species = "ONE" }), mon({ species = "TWO" }),
+    mon({ species = "THREE" }), mon({ species = "FOUR" }),
+  } }), "a side-b upload from the authority is taken")
+  eq(#record.parties[first].mons, 2, "half the team fights from the first seat")
+  eq(#record.parties[second].mons, 2, "and half from the second")
+  eq(record.parties[first].mons[1].species, "ONE",
+     "the trainer still leads with the monster it meant to")
+  eq(record.parties[second].mons[1].species, "TWO",
+     "and the next one out stands beside it, not behind it")
+  eq(record.parties[first].mons[2].species, "THREE", "then back to the first")
+  eq(record.parties[second].mons[2].species, "FOUR", "and the last one last")
+
+  -- A trainer with one monster is still a trainer, so the spare seat is given
+  -- up rather than the fight being refused over a party nobody can fill.
+  local lone = hub:openMediatedBattle("npc-3", {
+    mode = "coop_npc", hostId = ann.id, memberIds = { ann.id, bob.id },
+  })
+  hub:fillBattleParty(lone, ann,
+    { battle = "npc-3", side = "b", mons = { mon() } })
+  eq(#lone.npcIds, 1, "one monster seats one npc")
+  eq(#lone.sides.b, 1, "and the empty seat leaves the field with it")
+  eq(#hub:seatsNeeded(lone), 3, "so nothing is left owing a party that never comes")
 end
 
 -- ------------------------------------------------------------------
@@ -476,6 +525,142 @@ do
   eq(ann.relayDrops, 1, "with the refusal charged to the authority")
   eq(hub.battles["bad-1"], record,
      "the record stays: nothing was settled, so nothing is cleared")
+end
+
+-- ------------------------------------------------------------------
+-- 9. one battles table, two id spaces
+-- ------------------------------------------------------------------
+--
+-- Sessions and co-op battles are numbered by two counters that know nothing of
+-- each other, and both open a mediated record under their own id.  Plain
+-- integers meant the second counter's "1" landed on the first's record: a co-op
+-- fight inheriting a 1v1's parties, and a choice from one filed into the other.
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  eq(ann.sessionId, "s1", "a session id carries its own letter")
+  eq(Wire.id(ann.sessionId), ann.sessionId, "and is still an id on the wire")
+
+  local coop = hub:openCoopBattle("c1", { ann.id, bob.id },
+    { mode = "coop_npc", hostId = ann.id })
+  eq(coop, "c1", "a co-op battle carries a different one")
+  ok(hub.battles["s1"] ~= nil and hub.battles["c1"] ~= nil,
+     "so both records exist at once rather than one overwriting the other")
+  eq(hub.battles["s1"].mode, "1v1", "each still knowing which fight it is")
+  eq(hub.battles["c1"].mode, "coop_npc", "and neither wearing the other's shape")
+end
+
+-- ------------------------------------------------------------------
+-- 10. the seed is the intermediator's
+-- ------------------------------------------------------------------
+--
+-- A client may still send one -- the field has ridden mmo.battle_ruleset since
+-- the lockstep days -- but a fight whose seed came off the wire is one the
+-- authority can replay offline until it likes the run, and then ask for it.
+
+do
+  local hub2 = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub2, "ANN")
+  local bob = join(hub2, "BOB")
+  local record = hub2:openMediatedBattle("seed-1", {
+    mode = "1v1", hostId = ann.id, memberIds = { ann.id, bob.id },
+    sides = { a = { ann.id }, b = { bob.id } },
+  })
+  record.ruleset = { chart = CHART, seed = 777 }
+  record.parties[ann.id] = { battle = "seed-1", mons = { mon() } }
+  record.parties[bob.id] = { battle = "seed-1", mons = { mon() } }
+  ok(hub2:tryStartSim(record), "the fight opens")
+  ok(record.sim.seed ~= 777,
+     "on a seed of the hub's own, not the one the authority asked for "
+     .. "(a pool that answered 777 by chance is a one-in-2^30 rerun)")
+
+  -- The one way in is a field on the hub, which is not something a connection
+  -- can reach -- and it is what lets a suite ask for a reproducible fight.
+  local hub3 = Hub.new({ maxPlayers = 4 })
+  hub3.forceBattleSeed = 5
+  local cal = join(hub3, "CAL")
+  local dee = join(hub3, "DEE")
+  local forced = hub3:openMediatedBattle("seed-2", {
+    mode = "1v1", hostId = cal.id, memberIds = { cal.id, dee.id },
+    sides = { a = { cal.id }, b = { dee.id } },
+  })
+  forced.ruleset = { chart = CHART, seed = 777 }
+  forced.parties[cal.id] = { battle = "seed-2", mons = { mon() } }
+  forced.parties[dee.id] = { battle = "seed-2", mons = { mon() } }
+  ok(hub3:tryStartSim(forced), "a forced fight opens too")
+  eq(forced.sim.seed, 5, "and takes the hub's number over the wire's")
+end
+
+-- ------------------------------------------------------------------
+-- 11. a fight against a trainer, which nobody is connected to
+-- ------------------------------------------------------------------
+--
+-- The two things coop_npc was waiting on: two seats for the trainer rather than
+-- one, and something to answer for them.  Without the second, every turn sat out
+-- BATTLE_CHOICE_TIMEOUT and was auto-picked a minute later anyway.
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  hub.forceBattleSeed = 1
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+
+  hub:openCoopBattle("c1", { ann.id, bob.id },
+    { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["c1"]
+
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "c1", chart = CHART })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "c1", side = "a",
+                     mons = { bruiser() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "c1", side = "a",
+                     mons = { bruiser() } })
+  eq(record.sim, nil, "two players are not a field: the trainer owes a team too")
+
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "c1", side = "b",
+                     mons = { glassjaw(), glassjaw() } })
+  ok(record.sim ~= nil, "and the host's second party is what completes the set")
+  eq(#record.parties[record.npcIds[1]].mons, 1, "dealt one to each seat")
+  eq(#record.parties[record.npcIds[2]].mons, 1, "both of them, not one seat's two")
+
+  local ready = take(annPeer, Wire.BATTLE_READY)
+  ok(ready ~= nil, "the field is announced")
+  ok(Wire.battleReady(ready) ~= nil, "in a shape the client's sanitiser accepts")
+  eq(#ready.sides.b, 2, "with both trainer seats named on side b")
+  eq(ready.sides.b[1], record.npcIds[1],
+     "under their own ids rather than behind the host's, so the screen can map "
+     .. "each of them onto a box it is already drawing")
+  ok(take(bobPeer, Wire.BATTLE_READY) ~= nil, "and the partner hears it too")
+
+  -- The turn the trainer is in resolves on the players' choices alone. Nothing
+  -- below advances the hub's clock, so a turn that needed the deadline to close
+  -- would leave this loop going round until it gave up.
+  local annSeat = { client = ann, battle = "c1" }
+  local bobSeat = { client = bob, battle = "c1" }
+  ok(fightItOut(hub, { annSeat, bobSeat }),
+     "the fight runs to an end with nobody waiting on a clock")
+  eq(hub.clock, 0, "and no time passed at all -- the trainer answered at once")
+
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome ~= nil, "both players are told how it ended")
+  eq(outcome.outcome, "win", "stated from the field's point of view")
+  eq(outcome.winners[1], ann.id, "with the two players named as the winners")
+  eq(outcome.losers[1], record.npcIds[1],
+     "and the trainer's seats as the side that lost")
+  eq(hub.battles["c1"], nil, "the record is cleared like any other settlement")
+
+  -- Nobody was ever picked for on the clock: that sentence is the timeout's, and
+  -- a refereed trainer battle must not be reading it every turn.
+  local hurried = false
+  for _, msg in ipairs(bobPeer.outbox) do
+    if msg.type == Wire.BATTLE_EVENT and type(msg.text) == "string"
+       and msg.text:find("ran out of time", 1, true) then hurried = true end
+  end
+  ok(not hurried, "and nothing in the log says anybody ran out of time")
 end
 
 -- ------------------------------------------------------------------

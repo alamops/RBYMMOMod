@@ -32,8 +32,13 @@ function makeClock(start = 1_000_000) {
 }
 
 function makeRelay(clock, opts) {
-  return new Relay(Object.assign(
+  const relay = new Relay(Object.assign(
     { maxPlayers: 8, log: quiet, now: clock.now }, opts || {}));
+  // The seed is the intermediator's, so a suite that wants a reproducible fight
+  // asks the relay rather than sending one in a ruleset -- which is exactly the
+  // thing tryStartSim now refuses to read.
+  relay.forceBattleSeed = 1;
+  return relay;
 }
 
 function dial(relay, name, opts) {
@@ -99,6 +104,8 @@ function openBattle(relay, a, b) {
     'guest shares the same session id');
   ok(relay.battles.has(hostSess.id),
     'a mediated battle record exists for the session');
+  ok(/^s\d+$/.test(hostSess.id),
+    'a session id carries the letter that keeps it out of the co-op id space');
   return hostSess;
 }
 
@@ -107,7 +114,6 @@ function uploadAndReady(relay, a, b, session, opts) {
   relay.handle(a.id, {
     type: 'mmo.battle_ruleset',
     chart: o.chart || [[100]],
-    seed: o.seed === undefined ? 1 : o.seed,
   });
   relay.handle(a.id, {
     type: 'mmo.battle_party',
@@ -207,9 +213,121 @@ function testDisconnectForfeitAfterGrace() {
   clock.advance(40_000);
   relay.tickBattles();
   const outcome = take(a, 'mmo.battle_outcome');
-  ok(outcome && (outcome.outcome === 'forfeit' || outcome.reason === 'disconnect'
-      || (outcome.losers && outcome.losers.includes(b.id))),
+  ok(outcome && outcome.outcome === 'forfeit',
     'past grace the missing side forfeits via intermediator outcome');
+  ok(outcome.reason === 'disconnect', 'and the outcome says why');
+  ok(outcome.winners.length === 1 && outcome.winners[0] === a.id,
+    'naming the player who was still there as the winner');
+  ok(outcome.losers.length === 1 && outcome.losers[0] === b.id,
+    'and the one who left as the loser');
+}
+
+/*
+ * A fight nobody won, and the shape of saying so.
+ *
+ * cleanBattleOutcome refuses an empty id list, so a draw carrying two of them is
+ * a message no client reads -- a battle screen with no way out. The absence is
+ * the statement, which is what the Lua hub has always done and what this one used
+ * to get wrong by sending `winners: []`.
+ */
+function testDrawCarriesNoLists() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'DRAWA');
+  const b = dial(relay, 'DRAWB');
+  const session = openBattle(relay, a, b);
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  uploadAndReady(relay, a, b, session, { aMons: [mon(40)], bMons: [mon(40)] });
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+
+  // Both sides run, which the turn machine reads as a mutual concession.
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: session.id, action: 'run',
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_choice', battle: session.id, action: 'run',
+  });
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && outcome.outcome === 'draw', 'both running is a draw');
+  ok(outcome.winners === undefined && outcome.losers === undefined,
+    'carrying neither list rather than two empty ones');
+  ok(outcome.reason === 'run', 'and still saying why it ended');
+}
+
+/*
+ * Two players against a trainer, refereed.
+ *
+ * The two things coop_npc was waiting on: two seats for the trainer rather than
+ * one, and something to answer for them. Nothing below advances the clock, so a
+ * turn that needed the choice deadline to close would never close at all.
+ */
+function testCoopNpcMediated() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'NPCA');
+  const b = dial(relay, 'NPCB');
+  relay.openCoopBattle('c1', [a.id, b.id],
+    { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get('c1');
+  ok(record && record.npcIds.length === 2,
+    'a coop_npc seats the trainer twice, because the screen draws two of it');
+  ok(record.npcIds[0] === 'nc1a' && record.npcIds[1] === 'nc1b',
+    'under ids named off the battle and legal on the wire');
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'c1', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'c1', side: 'a', mons: [mon(200)],
+  });
+  ok(record.sim === null,
+    'two players are not a field: the trainer owes a team too');
+
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'c1',
+    side: 'b',
+    mons: [mon(10, 1), mon(10, 1)],
+  });
+  ok(record.sim !== null,
+    "the host's second party is what completes the set");
+  ok(record.parties.get('nc1a').mons.length === 1
+    && record.parties.get('nc1b').mons.length === 1,
+    "and the trainer's team is dealt one to each seat");
+
+  const ready = take(a, 'mmo.battle_ready');
+  ok(ready && ready.sides.b.length === 2,
+    'both trainer seats are advertised on side b');
+  ok(ready.sides.b[0] === 'nc1a',
+    'under their own ids rather than behind the host, so the screen can map '
+    + 'each of them onto a box it is already drawing');
+
+  let outcome = null;
+  for (let turn = 0; turn < 30; turn += 1) {
+    takeAll(a, 'mmo.battle_event');
+    takeAll(b, 'mmo.battle_event');
+    if (!relay.battles.has('c1')) break;
+    for (const player of [a, b]) {
+      relay.handle(player.id, {
+        type: 'mmo.battle_choice', battle: 'c1', action: 'fight', move: 0,
+      });
+    }
+    outcome = take(a, 'mmo.battle_outcome') || take(b, 'mmo.battle_outcome');
+    if (outcome) break;
+  }
+  ok(outcome && outcome.outcome === 'win',
+    'the fight runs to an end with nobody waiting on a clock');
+  ok(outcome.winners.includes(a.id) && outcome.winners.includes(b.id),
+    'with the two players named as the winners');
+  ok(outcome.losers.includes('nc1a'),
+    "and the trainer's seats as the side that lost");
+  ok(clock.now() === 1_000_000,
+    'and no time passed at all -- the trainer answered in the same breath');
 }
 
 function testTradeRelayStillWorks() {
@@ -240,6 +358,8 @@ function testTradeRelayStillWorks() {
 testMediatedOneVOneKo();
 testRelayHardCutDuringBattle();
 testDisconnectForfeitAfterGrace();
+testDrawCarriesNoLists();
+testCoopNpcMediated();
 testTradeRelayStillWorks();
 
 console.log(`hub_battle: ${passed} checks passed`);

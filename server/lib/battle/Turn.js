@@ -158,7 +158,18 @@ function copyTypes(raw) {
 // redraws, and a sim that damaged it in place would make "run the same fixture
 // twice" produce two different fights -- which is exactly the property the
 // determinism suite is built to catch.
-function copyMon(raw) {
+//
+// `slot` is the *sender's* party position for this monster, zero-based, the way
+// cleanBattleMon carries it -- and it is kept rather than dropped because a
+// switch names it. The two numbers are the same only while every monster the
+// client uploaded survived the copy and landed in the same order, and neither is
+// guaranteed: a mon this file cannot describe is skipped, a party past
+// MONS_PER_PARTY is cut short, and a coop_npc trainer's team is dealt across two
+// seats before it ever gets here. In all three the array index has moved and the
+// position on the player's own screen has not, so the position is what a choice
+// is matched against. `fallback` is that index for a sender that stated none,
+// which keeps an ordinary party numbered exactly as it always was.
+function copyMon(raw, fallback) {
   if (!isTable(raw)) return null;
 
   const stats = isTable(raw.stats) ? raw.stats : {};
@@ -191,6 +202,7 @@ function copyMon(raw) {
 
   return {
     species: str(raw.species) || '?',
+    slot: Math.max(0, int(raw.slot, Math.max(0, int(fallback, 0)))),
     level: Math.max(1, int(raw.level, 1)),
     hp,
     maxHp,
@@ -234,6 +246,19 @@ function activeMon(fighter) {
   const mon = monAt(fighter, fighter.active);
   if (mon && mon.hp > 0) return mon;
   return null;
+}
+
+// Which of this party a zero-based wire slot means.
+//
+// Matched against the position each monster claims rather than counted off the
+// array, for the reason copyMon gives -- and the array index is the fallback
+// rather than the rule, so a sender whose party arrived intact is unaffected and
+// one whose party was cut or dealt still switches to the monster it named.
+function partyIndexOf(fighter, wireSlot) {
+  for (let i = 1; i <= fighter.mons.length; i += 1) {
+    if (fighter.mons[i - 1].slot === wireSlot) return i;
+  }
+  return wireSlot + 1;
 }
 
 function hasType(mon, typeId) {
@@ -366,7 +391,7 @@ class Battle {
     if (action === 'switch') {
       const slot = int(choice.slot, null);
       if (slot === null) return null;
-      const target = slot + 1;
+      const target = partyIndexOf(fighter, slot);
       const bench = monAt(fighter, target);
       if (!bench || bench.hp <= 0 || target === fighter.active) return null;
       return { action: 'switch', slot: target };
@@ -459,6 +484,35 @@ class Battle {
     if (pick === null) pick = 1;
     if (!mon.moves[pick - 1]) return null;
     return { action: 'fight', move: pick, target: foe.slot };
+  }
+
+  /*
+   * File that pick for a seat that has nobody to send one.
+   *
+   * The npc side of a coop_npc is seated like any other fighter and has no
+   * connection behind it, so without this the referee would wait out the whole
+   * choice deadline every turn and then auto-pick anyway -- a minute a turn, for
+   * a decision nothing was ever going to make. It is deliberately the *same*
+   * pick the timeout files rather than a second, cleverer one: the trainer plays
+   * a turn rather than playing it well, and both runtimes reproduce it byte for
+   * byte.
+   *
+   * Returns true when a choice was actually filed, so a caller can loop until
+   * the machine stops owing. Filing one may resolve the turn and open the next,
+   * which is what makes that loop the thing that carries the fight forward.
+   */
+  autoPick(playerId) {
+    if (this.phase !== 'choice') return false;
+    const fighter = this.byId.get(str(playerId) || '');
+    if (!fighter) return false;
+    if (fighter.choice !== null && fighter.choice !== undefined) return false;
+    if (!activeMon(fighter)) return false;
+
+    const auto = this._autoChoice(fighter);
+    if (!auto) return false;
+    fighter.choice = auto;
+    this._maybeResolve();
+    return true;
   }
 
   // ----------------------------------------------------------------
@@ -1033,7 +1087,7 @@ function attempt(opts) {
       if (Array.isArray(entry.mons)) {
         for (const raw of entry.mons) {
           if (mons.length >= MONS_PER_PARTY) break;
-          const mon = copyMon(raw);
+          const mon = copyMon(raw, mons.length);
           if (mon) mons.push(mon);
         }
       }

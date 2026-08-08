@@ -321,15 +321,15 @@ end
 
 -- The types a species has, as indices into the uploaded chart.
 --
--- **Both sanitisers drop this field today** -- `Wire.battleMon` and its JS twin
--- rebuild a battler from a whitelist that has no `types` on it -- so every
--- defender currently reaches the sim as type 0 and no matchup and no STAB
--- applies to a mediated fight.  It is sent anyway: it is what an honest
--- snapshot of this monster contains, `src/BattleSim/Turn.lua` already reads
--- `raw.types` and is only ever handed a party the sanitiser rebuilt, and the
--- day the two twins carry the field the clients are already speaking it.
--- Closing the gap is a change to Wire and sanitize.js, which is not this
--- file's to make.
+-- Both sanitisers carry the field now -- `Wire.battleMon` and its JS twin keep a
+-- present-and-readable `types` and refuse the battler outright when it is
+-- present and unreadable, on the same rule a half-filled EV block gets -- so a
+-- matchup and STAB apply to a mediated fight the way they do to a local one.
+-- The indices are into *this match's* uploaded chart rather than into anything
+-- shipped here, which is the whole reason they are numbers: the chart came from
+-- the player's own decoded copy and is thrown away with the battle.  A monster
+-- whose species this client cannot describe sends no types at all, and the sim
+-- reads that absence as neutral rather than refusing the party.
 local function typesOf(data, mon, order)
   if not order then return nil end
   local def = type(data) == "table" and type(data.pokemon) == "table"
