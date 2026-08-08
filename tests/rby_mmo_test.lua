@@ -2921,13 +2921,17 @@ local two, twoPeer = join(orderHub, "ORDER2", "PALLET", 2, 1)
 eq(one.ranked, true, "sanity: the sender owns its name, so the board is in play")
 onePeer.outbox, twoPeer.outbox = {}, {}
 
+-- Hub.receive pcall-contains handler throws (mirrors relay.js handle()), so
+-- the board's error no longer escapes receive. Sanity is "was called and
+-- threw", same as server/sprite.test.js -- not "receive re-raised".
+local reached = false
 orderHub.board.seen = function()
+  reached = true
   error("the board could not take that name", 0)
 end
 
-local ok = pcall(orderHub.receive, orderHub, one,
-                 { type = Wire.SPRITE, sprite = "SPRITE_BLUE" })
-eq(ok, false, "sanity: the board really did throw")
+orderHub:receive(one, { type = Wire.SPRITE, sprite = "SPRITE_BLUE" })
+eq(reached, true, "sanity: the board really was called, and really did throw")
 check(take(twoPeer, Wire.SPRITE) ~= nil,
       "a board that fails does not cost everyone else the announcement")
 check(take(onePeer, Wire.SPRITE) ~= nil, "nor the sender their acknowledgement")
