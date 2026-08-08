@@ -619,6 +619,15 @@ local PHASE = {
   guest_battle_requested = 300,  -- 120 trade drive + 60 free
   -- guest waits on the host running a link battle to a decision
   host_battle_done       = 540,  -- 90 start + 240 run + transition
+
+  -- ------- invite-refuse e2e (tests/drivers/run-invite-refuse-e2e.sh)
+  --
+  -- Host stages a real trainer battle, guest asks to battle via PLAYERS.
+  -- The ask must be auto-refused; neither side should sit on a yes/no over
+  -- the fight. Short barriers: both are already connected and on the map.
+  host_in_fight                 = 120,
+  guest_asked_battle_in_fight   = 180,
+  guest_saw_battle_refusal      = 120,
   -- guest waits on the host re-opening the MMO menu
   host_address_checked   = 150,  -- menus only
   -- host waits on the guest leaving and proving the world still works

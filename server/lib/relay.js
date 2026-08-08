@@ -65,10 +65,14 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // fanned out from here to the party and to nobody else -- and a protocol-7 hub
 // has never heard the type, so a player would watch their partner fight all
 // evening and never be told a thing, which neither end can tell apart from an
-// ordinary quiet route. The rule every bump follows is unchanged: bump
-// whenever a client can send something a hub silently ignores. Kept in step
-// with Config.PROTOCOL on the mod side.
-const PROTOCOL = 8;
+// ordinary quiet route. 9 is mmo.request_cancel -- the asker withdrawing a
+// trade/battle request before it is answered -- and a protocol-8 hub would
+// clear the asker's local wait while still holding pendingTo, so the other
+// player could accept into a session the asker thought they had left. The
+// rule every bump follows is unchanged: bump whenever a client can send
+// something a hub silently ignores. Kept in step with Config.PROTOCOL on the
+// mod side.
+const PROTOCOL = 9;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -437,6 +441,22 @@ handlers['mmo.respond'] = (relay, client, msg) => {
     return relay.send(asker, 'mmo.decline', { name: client.name, kind });
   }
   relay.startSession(asker, client, kind);
+};
+
+// The asker takes the request back before it is answered. Only they can:
+// pendingTo lives on their connection, and a forged cancel from somebody
+// else has nothing to clear. The player holding the yes/no box is told, so
+// they are not left answering an ask nobody is waiting on any more.
+handlers['mmo.request_cancel'] = (relay, client) => {
+  if (!client.ready) return;
+  const targetId = client.pendingTo;
+  if (!targetId) return;
+  client.pendingTo = null;
+  const target = relay.clients.get(targetId);
+  if (target && target.ready) {
+    relay.send(target, 'mmo.request_cancel',
+      { from: client.id, name: client.name });
+  }
 };
 
 // The invite, and the two answers to it.

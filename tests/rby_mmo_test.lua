@@ -4958,9 +4958,19 @@ local function tradeSide(hub, name, species)
   }
   side.ui = {
     say = function(_, text) side.said[#side.said + 1] = text end,
-    confirm = function(_, _, text, cb) side.confirmText = text; side.confirmBox = cb end,
+    confirm = function(_, _, text, cb)
+      side.confirmText = text
+      side.confirmBox = cb
+      return { kind = "confirm" }
+    end,
+    choose = function(_, _, text, items)
+      side.chooseText = text
+      side.chosen = items
+      return { kind = "choose" }
+    end,
     pickPartyMon = function(_, _, _, cb) side.pickBox = cb end,
     pushState = function() end,
+    ctx = {},
   }
   side.sessions = Sessions.new(side.transport, side.ui)
   side.game = {
@@ -4982,6 +4992,7 @@ local sessionDispatch = {
   [Wire.SESSION_END] = function(s, m) s.sessions:onSessionEnd(m.reason) end,
   [Wire.REQUEST] = function(s, m) s.sessions:onRequest(s.game, m) end,
   [Wire.DECLINE] = function(s, m) s.sessions:onDecline(m) end,
+  [Wire.REQUEST_CANCEL] = function(s, m) s.sessions:onCancel(m) end,
 }
 
 local function pump(side, dt)
@@ -5231,6 +5242,243 @@ check(claimed ~= nil, "the battle this mod handed over is claimed")
 eq(claimed.id, liveId, "under the session it was fought in")
 eq(ann8.sessions:claimBattle(fought), nil,
    "and only once, so a result cannot be reported twice")
+
+-- ------- battle invite: waiting, refuse, cancel
+--
+-- The ask used to leave a one-line "Asked X to battle." that dismissed on A
+-- while keeping the player busy with nothing on screen.  Waiting holds the
+-- screen, B opens a cancel confirm, a refuse names who said no, and a cancel
+-- tells the other side the invite is gone.
+
+local function said(side, needle)
+  for _, line in ipairs(side.said) do
+    if line:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+local function pressCancel(side)
+  local items = side.chosen
+  check(items ~= nil and items[1] and items[1].onSelect,
+        "the waiting box has a CANCEL row")
+  -- Chosen stays: a No on the confirm drops back onto the same waiting box
+  -- (it is still underneath), so the next B has to find the same row.
+  items[1].onSelect()
+end
+
+local battleHub = Hub.new({ maxPlayers = 4 })
+local asker = tradeSide(battleHub, "ASH", "FIXMON_B")
+local target = tradeSide(battleHub, "GARY", "FIXMON_C")
+
+asker.sessions:request({ id = target.client.id, name = "GARY" }, "battle")
+eq(asker.sessions.outgoing ~= nil, true, "a battle ask is held as outgoing")
+check(asker.chooseText and asker.chooseText:find("GARY", 1, true),
+      "and the asker sees Waiting for GARY...")
+eq(asker.sessions:isBusy(), true, "so they cannot ask anybody else")
+
+pump(target)
+check(target.confirmBox ~= nil, "GARY is asked to battle")
+check(target.confirmText and target.confirmText:find("battle", 1, true),
+      "naming a battle, not a trade")
+
+-- Refuse: waiting comes down, and the sentence names the refusal.
+answerConfirm(target, false)
+pump(asker)
+eq(asker.sessions.outgoing, nil, "a refuse clears the ask")
+eq(asker.sessions:isBusy(), false, "and frees the asker")
+check(said(asker, "refused"), "with 'GARY refused to battle'")
+check(said(asker, "GARY"), "naming who refused")
+
+-- Cancel from the asker's side: GARY's prompt comes down with a sentence.
+asker.said = {}
+target.said = {}
+asker.sessions:request({ id = target.client.id, name = "GARY" }, "battle")
+pump(target)
+check(target.confirmBox ~= nil, "GARY is asked again")
+eq(battleHub.clients[asker.client.id].pendingTo, target.client.id,
+   "the hub holds the outstanding ask")
+
+pressCancel(asker)
+check(asker.confirmBox ~= nil, "B/CANCEL opens a yes/no confirm")
+-- No keeps waiting: confirm callback returns without cancelling.
+asker.confirmBox(false)
+eq(asker.sessions.outgoing ~= nil, true, "answering No leaves the ask outstanding")
+eq(battleHub.clients[asker.client.id].pendingTo, target.client.id,
+   "and the hub still holds it")
+
+pressCancel(asker)
+asker.confirmBox(true)
+pump(target)
+eq(asker.sessions.outgoing, nil, "Yes cancels the ask")
+eq(asker.sessions:isBusy(), false, "and frees the asker")
+eq(battleHub.clients[asker.client.id].pendingTo, nil,
+   "the hub drops pendingTo")
+eq(target.sessions.incoming, nil, "GARY's incoming is cleared")
+check(said(target, "cancelled"), "and GARY is told the invite was cancelled")
+check(said(target, "ASH"), "naming who cancelled")
+
+-- A yes after cancel must not open a session.
+target.confirmBox = nil
+asker.sessions:request({ id = target.client.id, name = "GARY" }, "battle")
+pump(target)
+asker.sessions:cancelRequest()
+pump(target)
+-- stale confirm from before cancel, if the harness still held the cb
+if target.confirmBox then answerConfirm(target, true) end
+pump(asker); pump(target)
+eq(asker.sessions.active, nil, "accepting a cancelled ask starts no session")
+eq(target.sessions.active, nil, "on either side")
+
+-- Peer gone while waiting: same lock Party fixed for invites.
+asker.said = {}
+asker.sessions:request({ id = target.client.id, name = "GARY" }, "battle")
+eq(asker.sessions.outgoing ~= nil, true, "waiting again")
+asker.sessions:onPeerGone(target.client.id)
+eq(asker.sessions.outgoing, nil, "a peer going offline clears the ask")
+check(said(asker, "offline"), "and says so on screen")
+
+-- ------- invites during a live fight are refused, not shown
+--
+-- isBusy only covered trade/PVP sessions. A wild encounter, a trainer
+-- battle, a link battle on the stack, or a co-op screen used to leave the
+-- confirm free to open on top of the fight.
+
+eq(Sessions.isFightState({ kind = "wild" }), true, "a wild battle is a fight")
+eq(Sessions.isFightState({ kind = "trainer" }), true, "a trainer battle is")
+eq(Sessions.isFightState({ kind = "link" }), true, "a link battle is")
+eq(Sessions.isFightState({ sim = {} }), true, "a co-op screen (has sim) is")
+eq(Sessions.isFightState({ kind = "menu" }), false, "a menu is not")
+eq(Sessions.isFightState(nil), false, "and neither is nothing")
+
+local fighting = tradeSide(battleHub, "MISTY", "FIXMON_B")
+local challenger = tradeSide(battleHub, "SURGE", "FIXMON_C")
+fighting.game.stack = {
+  states = { { kind = "overworld" }, { kind = "wild" } },
+  top = function(self) return self.states[#self.states] end,
+}
+eq(Sessions.stackHasFight(fighting.game), true,
+   "a wild battle anywhere on the stack counts")
+eq(fighting.sessions:inFight(fighting.game), true, "so inFight sees it")
+
+challenger.sessions:request({ id = fighting.client.id, name = "MISTY" }, "battle")
+pump(fighting)
+eq(fighting.confirmBox, nil, "no invite prompt opens over the wild battle")
+eq(fighting.sessions.incoming, nil, "and nothing is held as incoming")
+pump(challenger)
+eq(challenger.sessions.outgoing, nil, "the asker is told no")
+check(said(challenger, "refused") or said(challenger, "MISTY"),
+      "with a refusal naming MISTY")
+
+-- Buried under a menu: still a fight.
+fighting.game.stack.states = {
+  { kind = "trainer" }, { kind = "menu" },
+}
+challenger.said = {}
+challenger.sessions:request({ id = fighting.client.id, name = "MISTY" }, "battle")
+pump(fighting); pump(challenger)
+eq(fighting.confirmBox, nil, "a menu over a trainer battle still auto-refuses")
+
+-- Co-op running, no screen yet (handoff): fighting callback.
+fighting.game.stack = { states = {}, top = function() return nil end }
+fighting.sessions.fighting = function() return true end
+challenger.said = {}
+challenger.sessions:request({ id = fighting.client.id, name = "MISTY" }, "battle")
+pump(fighting); pump(challenger)
+eq(fighting.confirmBox, nil, "a co-op handoff without a screen still refuses")
+
+-- ------- battle compat: name the mods, allow vanilla-link mismatches
+--
+-- The engine refuses any fingerprint mismatch.  Over the hub we only refuse
+-- when a side has touched the lockstep surface (linkModified), and the
+-- refusal has to name the mods that differ so players know what to turn off.
+
+local function fakeModDiff(a, b)
+  local function index(mods)
+    local byId = {}
+    for _, mod in ipairs(mods or {}) do byId[tostring(mod.id)] = mod end
+    return byId
+  end
+  local mine, theirs = index(a and a.mods), index(b and b.mods)
+  local onlyMine, onlyTheirs, differing = {}, {}, {}
+  for id, mod in pairs(mine) do
+    local peer = theirs[id]
+    if not peer then onlyMine[#onlyMine + 1] = mod
+    elseif tostring(peer.version) ~= tostring(mod.version) then
+      differing[#differing + 1] = { id = id, mine = mod.version,
+                                    theirs = peer.version }
+    end
+  end
+  for id, mod in pairs(theirs) do
+    if not mine[id] then onlyTheirs[#onlyTheirs + 1] = mod end
+  end
+  return { onlyMine = onlyMine, onlyTheirs = onlyTheirs, differing = differing }
+end
+
+local fakeHandshake = {
+  battleAllowed = function(verdict)
+    return verdict == "full" or verdict == "vanilla_peer" or verdict == nil
+  end,
+  modDiff = fakeModDiff,
+  describe = function(a, b, verdict, mode)
+    local peer = (b and b.name) or "THEY"
+    local diff = fakeModDiff(a, b)
+    local lines = { "Your games differ." }
+    if #diff.onlyTheirs > 0 then
+      lines[#lines + 1] = peer .. " has:"
+      for _, mod in ipairs(diff.onlyTheirs) do
+        lines[#lines + 1] = (" %s %s"):format(tostring(mod.id):upper(),
+                                              tostring(mod.version or "?"))
+      end
+    end
+    if #diff.onlyMine > 0 then
+      lines[#lines + 1] = "You have:"
+      for _, mod in ipairs(diff.onlyMine) do
+        lines[#lines + 1] = (" %s %s"):format(tostring(mod.id):upper(),
+                                              tostring(mod.version or "?"))
+      end
+    end
+    for _, row in ipairs(diff.differing) do
+      lines[#lines + 1] = ("%s %s vs %s"):format(tostring(row.id):upper(),
+                                                 tostring(row.mine),
+                                                 tostring(row.theirs))
+    end
+    if mode == "battle" then
+      lines[#lines + 1] = "Link battle needs"
+      lines[#lines + 1] = "the same mods."
+    end
+    return lines
+  end,
+}
+
+local vanillaA = { name = "ASH", fingerprint = "aaa", linkModified = false,
+                   mods = { { id = "rby_mmo", version = "0.10.0", affectsLink = false } } }
+local vanillaB = { name = "GARY", fingerprint = "bbb", linkModified = false,
+                   mods = { { id = "rby_mmo", version = "0.10.0", affectsLink = false } } }
+eq(Sessions.canBattle("full", vanillaA, vanillaB, fakeHandshake), true,
+   "identical fingerprints still battle")
+eq(Sessions.canBattle("subset", vanillaA, vanillaB, fakeHandshake), true,
+   "Red-vs-Blue style mismatch is allowed when neither side touched link rules")
+eq(Sessions.canBattle("refused", vanillaA, vanillaB, fakeHandshake), false,
+   "an engine mismatch is still refused")
+
+local modded = { name = "GARY", fingerprint = "ccc", linkModified = true,
+                 mods = {
+                   { id = "rby_mmo", version = "0.10.0", affectsLink = false },
+                   { id = "stat_tweaks", version = "1.2.0", affectsLink = true },
+                 } }
+eq(Sessions.canBattle("subset", vanillaA, modded, fakeHandshake), false,
+   "a link-affecting mod on one side still blocks the fight")
+
+local block = Sessions.battleBlockMessage(vanillaA, modded, "subset", fakeHandshake)
+check(block:find("STAT_TWEAKS", 1, true) or block:find("stat_tweaks", 1, true),
+      "the refusal names the mod only they have")
+check(block:find("GARY", 1, true), "and whose game has it")
+
+local stealth = { name = "GARY", fingerprint = "ddd", linkModified = true,
+                  mods = { { id = "rby_mmo", version = "0.10.0", affectsLink = false } } }
+local stealthMsg = Sessions.battleBlockMessage(vanillaA, stealth, "subset", fakeHandshake)
+check(stealthMsg:find("battle rules", 1, true),
+      "same mod list but linkModified still explains the block")
 
 end)()
 

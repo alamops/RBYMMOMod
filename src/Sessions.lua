@@ -79,8 +79,10 @@ function M.new(transport, ui)
     transport = transport,
     ui = ui,
     active = nil,      -- the one live session; two at once is never valid
-    outgoing = nil,    -- { to, kind } while waiting for an answer
+    outgoing = nil,    -- { to, kind, name } while waiting for an answer
     incoming = nil,    -- { from, name, kind } while the prompt is up
+    waitBox = nil,     -- held "Waiting for NAME..." box for a battle ask
+    incomingBox = nil, -- held yes/no box on the asked side
     drops = 0,         -- relays refused since the current session began
   }, M)
 end
@@ -89,17 +91,146 @@ function M:isBusy()
   return self.active ~= nil or self.outgoing ~= nil
 end
 
+-- A state on the engine stack that means "this player is in a fight".
+-- Wild / trainer / link are BattleState.kind; a co-op 2-on-2 carries `.sim`
+-- and has no kind of its own.  Scanned anywhere on the stack, not only the
+-- top: a menu or co-op prompt can sit above a live battle, and an invite
+-- popping over either is the bug this exists to stop.
+function M.isFightState(state)
+  if type(state) ~= "table" then return false end
+  local kind = state.kind
+  if kind == "wild" or kind == "trainer" or kind == "link" then return true end
+  if state.sim ~= nil then return true end
+  return false
+end
+
+function M.stackHasFight(game)
+  local stack = game and game.stack
+  if not stack then return false end
+  local states = stack.states
+  if type(states) == "table" then
+    for i = #states, 1, -1 do
+      if M.isFightState(states[i]) then return true end
+    end
+    return false
+  end
+  local top = stack.top and stack:top()
+  return M.isFightState(top)
+end
+
+-- True while this client is mid-fight: an optional `fighting` callback
+-- (Client wires co-op running/state through it) or a battle still on the
+-- stack.  Trade/PVP sessions are already covered by isBusy.
+function M:inFight(game)
+  if self.fighting and self.fighting(game) then return true end
+  return M.stackHasFight(game)
+end
+
+-- ------- prompt stack helpers
+--
+-- The waiting box and the incoming confirm are screens on the engine's
+-- stack.  An answer that arrives while they are up -- a refuse, a cancel,
+-- a peer going offline, the session actually starting -- has to take them
+-- down rather than leave them buried under whatever comes next.  Same shape
+-- as Coop:closeAskBox / unwindTo: only pop when the held box is still on
+-- the stack, and never hunt blindly.
+
+function M:onStack(game, target)
+  local stack = game and game.stack
+  local states = stack and stack.states
+  if not (states and target) then return nil end
+  for i = #states, 1, -1 do
+    if states[i] == target then return true end
+  end
+  return false
+end
+
+function M:unwindTo(game, target, alsoPop)
+  local stack = game and game.stack
+  if not (stack and target) then return false end
+  if self:onStack(game, target) == false then return false end
+  local guard = 0
+  while stack:top() and stack:top() ~= target and guard < 16 do
+    stack:pop()
+    guard = guard + 1
+  end
+  if alsoPop and stack:top() == target then stack:pop() end
+  return true
+end
+
+function M:closeWaitBox()
+  local held = self.waitBox
+  self.waitBox = nil
+  if not (held and held.box) then return false end
+  return self:unwindTo(held.game, held.box, true)
+end
+
+function M:closeIncomingBox()
+  local held = self.incomingBox
+  self.incomingBox = nil
+  if not (held and held.box) then return false end
+  return self:unwindTo(held.game, held.box, true)
+end
+
 -- ------- requests
+
+-- The box the asker stands behind after a battle request.  B (and the only
+-- row) opens a yes/no confirm rather than cancelling outright: backing out of
+-- an ask that is already on somebody else's screen is worth a second look,
+-- and a no drops straight back onto this waiting line because the confirm
+-- sits on top of it.
+function M:showWaiting()
+  local outgoing = self.outgoing
+  if not (outgoing and outgoing.kind == "battle") then return end
+  local name = outgoing.name or "them"
+  local game = self.ui.ctx and self.ui.ctx.game
+  local box = self.ui:choose(game, ("Waiting for\n%s..."):format(name), {
+    {
+      label = "CANCEL",
+      onSelect = function()
+        if not self.outgoing then return end
+        self.ui:confirm(game, "Cancel the\nrequest?", function(yes)
+          if not yes then return end
+          self:cancelRequest()
+        end, { defaultNo = true })
+      end,
+    },
+  })
+  self.waitBox = { box = box, game = game }
+end
 
 function M:request(peer, kind)
   if self:isBusy() then
     self.ui:say("You're already busy\nwith someone.")
     return false
   end
+  local game = self.ui.ctx and self.ui.ctx.game
+  if self:inFight(game) then
+    self.ui:say("Finish your battle\nfirst.")
+    return false
+  end
   self.outgoing = { to = peer.id, kind = kind, name = peer.name }
   self.transport:send(Wire.REQUEST, { to = peer.id, kind = kind })
-  self.ui:say(("Asked %s to\n%s."):format(peer.name,
-    kind == "trade" and "trade" or "battle"))
+  -- A battle ask holds the screen until it is answered or cancelled: the
+  -- old one-line "Asked X to battle." dismissed itself on A and left the
+  -- player locked as busy with nothing on screen saying why.  Trade keeps
+  -- the short sentence -- there is no waiting box for it yet.
+  if kind == "battle" then
+    self:showWaiting()
+  else
+    self.ui:say(("Asked %s to\ntrade."):format(peer.name))
+  end
+  return true
+end
+
+-- Take our unanswered ask back.  Safe when there is none: every exit that
+-- might race a human press goes through here.
+function M:cancelRequest()
+  local outgoing = self.outgoing
+  if not outgoing then return false end
+  self.outgoing = nil
+  self:closeWaitBox()
+  self.transport:send(Wire.REQUEST_CANCEL, {})
   return true
 end
 
@@ -109,30 +240,72 @@ function M:onRequest(game, msg)
   local kind = Wire.KINDS[msg.kind] and msg.kind or nil
   if not (from and name and kind) then return end
 
-  -- Busy is answered immediately rather than queued: a prompt that appears
-  -- minutes later, over whatever the player is doing by then, is worse than
-  -- a refusal the asker can act on now.
-  if self:isBusy() then
+  -- Busy, already prompted, or mid-fight: answered immediately rather than
+  -- queued.  A yes/no over a wild encounter, a link battle, or a co-op
+  -- screen is worse than a refusal the asker can act on now -- and is how
+  -- invites used to appear in the middle of fights.
+  if self:isBusy() or self.incoming or self:inFight(game) then
     self.transport:send(Wire.RESPOND, { to = from, kind = kind, accept = false })
     return
   end
 
   self.incoming = { from = from, name = name, kind = kind }
-  self.ui:confirm(game,
+  local box = self.ui:confirm(game,
     ("%s wants to\n%s!"):format(name, kind == "trade" and "trade" or "battle"),
     function(yes)
       local pending = self.incoming
       self.incoming = nil
+      self.incomingBox = nil
       if not pending then return end
       self.transport:send(Wire.RESPOND,
         { to = pending.from, kind = pending.kind, accept = yes and true or false })
     end)
+  self.incomingBox = { box = box, game = game }
 end
 
 function M:onDecline(msg)
-  local name = Wire.name(msg.name) or "They"
+  local outgoing = self.outgoing
+  local name = Wire.name(msg.name) or (outgoing and outgoing.name) or "They"
+  local kind = outgoing and outgoing.kind
   self.outgoing = nil
-  self.ui:say(("%s said no."):format(name))
+  self:closeWaitBox()
+  if kind == "battle" then
+    self.ui:say(("%s refused\nto battle."):format(name))
+  else
+    self.ui:say(("%s said no."):format(name))
+  end
+end
+
+-- The asker walked away before we answered.  Their name is stamped by the
+-- hub, so a forged cancel cannot put somebody else's nick on this sentence.
+function M:onCancel(msg)
+  local from = Wire.id(msg.from)
+  local name = Wire.name(msg.name) or "They"
+  local pending = self.incoming
+  if not pending then return end
+  if from and pending.from ~= from then return end
+  self.incoming = nil
+  self:closeIncomingBox()
+  self.ui:say(("%s cancelled\nthe invite."):format(name))
+end
+
+-- A player left the game.  Same duty Party:onPeerGone has for invites: an
+-- unanswered ask pointed at somebody who is gone can never be answered, and
+-- without this the asker stays busy forever with nothing on screen saying
+-- why.  The hub clears its pendingTo in silence; this is the half that
+-- tells the human.
+function M:onPeerGone(id)
+  if not id then return end
+  if self.outgoing and self.outgoing.to == id then
+    local name = self.outgoing.name or "They"
+    self.outgoing = nil
+    self:closeWaitBox()
+    self.ui:say(("%s went\noffline."):format(name))
+  end
+  if self.incoming and self.incoming.from == id then
+    self.incoming = nil
+    self:closeIncomingBox()
+  end
 end
 
 -- ------- session lifecycle
@@ -145,6 +318,12 @@ function M:onSession(game, msg)
   if not (peerId and kind and role) then return end
 
   self.outgoing = nil
+  self.incoming = nil
+  -- The waiting / invite boxes outlive the ask they were about the moment
+  -- the session starts; left up they bury under the trade or battle screen
+  -- and resurface when it pops.
+  self:closeWaitBox()
+  self:closeIncomingBox()
   local modules = link()
   if not modules then return end
 
@@ -219,6 +398,7 @@ end
 function M:onSessionEnd(reason)
   local session = self.active
   self.outgoing = nil
+  self:closeWaitBox()
   if not session then
     self.active = nil
     return
@@ -251,6 +431,50 @@ end
 
 -- ------- the handshake, then the handoff
 
+-- Whether a hello claims the lockstep surface was touched: an affects_link
+-- mod, or a write into a link-surface registry.  Carried on the hello so we
+-- do not have to re-derive it from the peer's mod list alone (a mod can set
+-- affects_link false and still patch pokemon).
+function M.linkSurfaceTouched(hello)
+  return hello ~= nil and hello.linkModified == true
+end
+
+-- Cable-club battleAllowed, plus one MMO exception: fingerprints that differ
+-- only because the imported games differ (Red vs Blue, two ROM dumps) while
+-- neither side has touched the link surface.  Vanilla Gen 1 let those fight;
+-- refusing them here blamed "mods" for a cartridge mismatch.  A side that
+-- has actually changed battle rules still has to match.
+function M.canBattle(verdict, myHello, theirHello, Handshake)
+  if not (Handshake and Handshake.battleAllowed) then return false end
+  if Handshake.battleAllowed(verdict) then return true end
+  if verdict == "subset"
+      and not M.linkSurfaceTouched(myHello)
+      and not M.linkSurfaceTouched(theirHello) then
+    return true
+  end
+  return false
+end
+
+-- Why a battle was refused, naming the mods that differ when we can.
+-- Handshake.describe already diffs the hello mod lists; we keep that and
+-- add a clearer line when the lists match but one side still claims a
+-- modified link surface (registry writes with affects_link left false).
+function M.battleBlockMessage(myHello, theirHello, verdict, Handshake)
+  local fallback = "Link battle needs\nthe same mods on\nboth games."
+  if not (Handshake and Handshake.describe) then return fallback end
+  local lines = Handshake.describe(myHello, theirHello, verdict, "battle")
+  if Handshake.modDiff then
+    local diff = Handshake.modDiff(myHello, theirHello)
+    local named = #(diff.onlyMine or {}) + #(diff.onlyTheirs or {})
+      + #(diff.differing or {})
+    if named == 0 and (M.linkSurfaceTouched(myHello) or M.linkSurfaceTouched(theirHello)) then
+      return "A mod changed\nbattle rules on\none game."
+    end
+  end
+  if lines and #lines > 0 then return table.concat(lines, "\n") end
+  return fallback
+end
+
 function M:beginTrade(game, session, modules)
   if not modules.Handshake.tradeAllowed(session.verdict) then
     return self:endSession("You can't trade\nwith that game.")
@@ -265,8 +489,19 @@ function M:beginTrade(game, session, modules)
 end
 
 function M:beginBattle(game, session, modules)
-  if not modules.Handshake.battleAllowed(session.verdict) then
-    return self:endSession("Link battle needs\nthe same mods on\nboth games.")
+  if not M.canBattle(session.verdict, session.myHello, session.theirHello,
+                     modules.Handshake) then
+    return self:endSession(M.battleBlockMessage(
+      session.myHello, session.theirHello, session.verdict, modules.Handshake))
+  end
+  -- LinkBattle itself also gates on Handshake.battleAllowed(verdict).  A
+  -- subset we chose to allow (neither side link-modified) still has to
+  -- present as battle-legal at the constructor; the real verdict stays on
+  -- the session for strict unpacking.
+  if modules.Handshake.battleAllowed(session.verdict) then
+    session.battleVerdict = session.verdict
+  else
+    session.battleVerdict = "full"
   end
   session.stage = "battleWait"
   session.myParty = modules.Protocol.packParty(game.save.party)
@@ -299,7 +534,7 @@ function M:handleBattleWait(game, session, msg, modules)
     and modules.Battle.newHost or modules.Battle.newGuest
   local state, err = constructor(game, session.net, {
     theirName = session.peerName,
-    verdict = session.verdict,
+    verdict = session.battleVerdict or session.verdict,
     strict = modules.Handshake.strict(session.verdict),
     myParty = session.myParty,
     theirParty = session.theirParty,

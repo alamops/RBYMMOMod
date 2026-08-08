@@ -63,6 +63,12 @@ local toast = Toast.new(ctx)
 local sessions = Sessions.new(transport, ui)
 local party = Party.new(transport, ui, ctx.chat)
 local coop = Coop.new(transport, ui, party, ctx.roster, ctx.chat)
+-- Co-op can be mid-handoff with no screen yet (running/state set, stack
+-- still overworld). Sessions asks this so a 1v1 invite is refused there
+-- the same way a wild battle on the stack is.
+sessions.fighting = function()
+  return coop.running == true or coop.state ~= nil
+end
 
 ctx.client = M
 ctx.ui = ui
@@ -1670,6 +1676,10 @@ handlers[Wire.PART] = function(_, msg)
   -- Same shape, one feature along: an offer from somebody who is gone can
   -- never be joined, and a four-way ask is short a player.
   coop:onPeerGone(id)
+  -- And the same again for a trade/battle ask: without this the asker stays
+  -- busy forever after the person they asked disconnects, because the hub
+  -- clears pendingTo in silence and never sends a decline.
+  sessions:onPeerGone(id)
 end
 
 handlers[Wire.MOVE] = function(_, msg)
@@ -1807,6 +1817,7 @@ end
 
 handlers[Wire.REQUEST] = function(game, msg) sessions:onRequest(game, msg) end
 handlers[Wire.DECLINE] = function(_, msg) sessions:onDecline(msg) end
+handlers[Wire.REQUEST_CANCEL] = function(_, msg) sessions:onCancel(msg) end
 handlers[Wire.SESSION] = function(game, msg) sessions:onSession(game, msg) end
 handlers[Wire.RELAY] = function(_, msg) sessions:onRelay(msg) end
 
@@ -2310,6 +2321,19 @@ function M.install()
   -- A copy of the lines, never the queue itself -- a reader that held the
   -- live list could age or empty it by accident.
   mod.exports.toasts = function() return ctx.toast:state() end
+  -- Whether a trade/battle ask is sitting unanswered on this client, and
+  -- whether a fight is on screen (or a co-op handoff is in flight). The
+  -- invite-refuse e2e reads both: a request that arrived mid-fight must
+  -- leave neither an incoming prompt nor a held ask.
+  mod.exports.hasIncomingRequest = function()
+    return sessions.incoming ~= nil
+  end
+  mod.exports.isFighting = function()
+    return sessions:inFight(ctx.game)
+  end
+  mod.exports.isSessionBusy = function()
+    return sessions:isBusy()
+  end
   -- what this player looks like in their own game, for tests and for a mod
   -- that wants to know
   mod.exports.myLook = function() return M.spriteChoice() end

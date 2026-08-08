@@ -475,6 +475,41 @@ return function(game)
     end, 120, "the guest's chat line")
     check(heardGuest, "the guest's chat reached the host")
 
+    -- ------- invite refuse (focused e2e; see run-invite-refuse-e2e.sh)
+    --
+    -- A battle ask that arrives while this side is mid-trainer fight must
+    -- be answered no immediately -- no confirm over the fight. The guest
+    -- half asserts the refusal text; we assert nothing was held incoming.
+    if os.getenv("MMO_INVITE_REFUSE_E2E") == "1" then
+      local class = H.coopTrainer(game.data)
+      check(class ~= nil, "found a trainer class to stage")
+      local staged = class and H.stageTrainer(game, class)
+      check(staged ~= nil, "staged a trainer battle on the host")
+      local fighting = H.waitSeconds(game, function()
+        return exports.isFighting and exports.isFighting()
+      end, 15, "host to report isFighting")
+      check(fighting, "host isFighting after staging a trainer")
+      H.signal("host_in_fight")
+
+      H.await(game, "guest_asked_battle_in_fight")
+      -- Room for the request to land if auto-refuse ever fails to clear it.
+      U.wait(45)
+      check(not (exports.hasIncomingRequest and exports.hasIncomingRequest()),
+            "no incoming invite held while fighting")
+      local top = H.top(game)
+      local text = (H.textOf(top) or ""):lower()
+      check(not (text:find("wants", 1, true) and text:find("battle", 1, true)),
+            "no battle confirm over the fight")
+      check(exports.isFighting and exports.isFighting(),
+            "host still in the fight after the ask")
+      U.shot(game, SHOT_DIR .. "/host-invite-refused-while-fighting.png")
+
+      H.await(game, "guest_saw_battle_refusal")
+      H.closeToOverworld(game)
+      log("DONE")
+      return
+    end
+
     -- ------- 1. the guest leaves the map, and comes back
     --
     -- A remote player on another map must not be drawn on this one; the

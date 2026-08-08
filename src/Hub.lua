@@ -1374,6 +1374,21 @@ handlers[Wire.RESPOND] = function(self, client, msg)
   self:startSession(asker, client, kind)
 end
 
+-- The asker takes the request back before it is answered.  Only they can:
+-- pendingTo lives on their connection, and a forged cancel from somebody
+-- else has nothing to clear.  The player holding the yes/no box is told,
+-- so they are not left answering an ask nobody is waiting on any more.
+handlers[Wire.REQUEST_CANCEL] = function(self, client)
+  if not client.ready then return end
+  local targetId = client.pendingTo
+  if not targetId then return end
+  client.pendingTo = nil
+  local target = self.clients[targetId]
+  if target and target.ready then
+    send(target, Wire.REQUEST_CANCEL, { from = client.id, name = client.name })
+  end
+end
+
 -- The invite, and the two answers to it.
 --
 -- Deliberately the same shape as the trade/battle request above -- one

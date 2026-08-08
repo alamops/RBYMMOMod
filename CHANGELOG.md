@@ -8,6 +8,15 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Waiting / cancel on a PVP battle request.** Asking somebody to battle
+  holds `Waiting for <name>...` until they answer. **B** (or CANCEL) opens a
+  yes/no confirm; No drops back onto the wait, Yes withdraws the ask and
+  tells them `<name> cancelled the invite.` A refuse comes back as
+  `<name> refused to battle.` rather than leaving the asker busy with
+  nothing on screen. New wire type `mmo.request_cancel`; **`PROTOCOL` 8 → 9**
+  in `src/Config.lua` and `server/lib/relay.js` together — a protocol-8 hub
+  would clear the local wait while still holding `pendingTo`, so a late
+  accept could pull the asker into a session they thought they had left.
 - **Notifications in the corner, for the things that happen while you are
   doing something else.** Somebody says something, somebody arrives, your
   party member wins a fight — none of it is worth taking the screen for, and
@@ -86,6 +95,23 @@ here must match `manifest.version`.
   in front of you and a toast only when something happened, so the switch that
   used to gate them was a switch for turning off the only evidence that anyone
   else is in the game.
+
+### Fixed
+
+- **Battle handshake refusal names the mods that differ**, via the engine's
+  `Handshake.describe` report (and a clear line when the lists match but one
+  side still claims a modified link surface).
+- **MMO battles are only blocked when a side has touched lockstep rules.**
+  A fingerprint mismatch with `linkModified` false on both hellos — Red vs
+  Blue, two ROM dumps, this mod alone — is allowed, the way cable club was.
+  An `affects_link` mod (or a link-registry write) on either side still
+  refuses, and the refusal names the mods. Covered by synthetic hellos in
+  `tests/rby_mmo_test.lua`, and by a real Red/Yellow extract when
+  `SECONDARY_ROM_PATH` is set (`tests/drivers/run-red-yellow-battle-compat.sh`).
+- **Battle invites no longer open over a live fight.** A 1v1 request or a
+  PARTY BATTLE ask that arrives during a wild, trainer, link, or co-op
+  battle is auto-refused instead of putting a yes/no on top of the fight
+  (including when a menu sits above the battle screen).
 
 ## [0.9.0] - 2026-08-07
 

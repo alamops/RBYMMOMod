@@ -402,6 +402,44 @@ return function(game)
   check(wornOk,
         "joining leaves the player genuinely drawn as their chosen character")
 
+  -- ------- invite refuse (focused e2e; see run-invite-refuse-e2e.sh)
+  --
+  -- Host stages a trainer battle first; we ask via PLAYERS > BATTLE. Do
+  -- not drivePrompts across the waiting box -- its only row is CANCEL and
+  -- would take the ask back before the host's auto-refuse can answer.
+  if os.getenv("MMO_INVITE_REFUSE_E2E") == "1" then
+    H.await(game, "host_in_fight")
+    local asked = false
+    if H.openMmo(game) and H.selectLabel(game, "PLAYERS") then
+      if H.selectLabel(game, "HOSTY") then
+        asked = H.selectLabel(game, "BATTLE") and true or false
+        check(asked, "asked HOSTY to battle while they fight")
+      else
+        check(false, "found HOSTY on the PLAYERS list")
+      end
+    else
+      check(false, "opened PLAYERS to ask for a battle")
+    end
+    if asked then
+      H.signal("guest_asked_battle_in_fight")
+      local refused = H.waitSeconds(game, function()
+        local text = (H.textOf(H.top(game)) or ""):lower()
+        return text:find("refused", 1, true) ~= nil
+      end, 60, "HOSTY refused to battle")
+      check(refused, "saw the battle refusal after asking mid-fight")
+      check(not (exports.isSessionBusy and exports.isSessionBusy()),
+            "the outgoing ask is cleared after the refusal")
+      U.shot(game, SHOT_DIR .. "/join-invite-refused.png")
+      H.signal("guest_saw_battle_refusal")
+    else
+      H.signal("guest_asked_battle_in_fight")
+      H.signal("guest_saw_battle_refusal")
+    end
+    H.closeToOverworld(game)
+    log("DONE")
+    return
+  end
+
   -- ------- 1. leave the map and come back
 
   local home = mod_current(game)

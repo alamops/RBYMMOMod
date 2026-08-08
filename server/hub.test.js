@@ -308,11 +308,29 @@ async function main() {
     const declined = await cal.expect('mmo.decline');
     ok(declined.name === 'BOB', 'a busy player auto-declines');
 
-    // ------- teardown
+    // ------- teardown of the live session, then cancel an unanswered ask
+    //
+    // The asker takes a fresh request back before Bob answers. pendingTo
+    // clears on the hub, Bob is told, and a late accept must not open a
+    // session.
 
     ann.send('mmo.session_leave', {});
     const ended = await bob.expect('mmo.session_end');
     ok(ended.reason === 'peer_left', 'leaving ends the session for both');
+
+    ann.send('mmo.request', { to: bobWelcome.id, kind: 'battle' });
+    const battleAsk = await bob.expect('mmo.request');
+    ok(battleAsk.kind === 'battle' && battleAsk.name === 'ANN',
+      'a battle request is forwarded');
+
+    ann.send('mmo.request_cancel', {});
+    const cancelled = await bob.expect('mmo.request_cancel');
+    ok(cancelled.from === annWelcome.id, 'cancel names the asker');
+    ok(cancelled.name === 'ANN', 'by the nick on their connection');
+
+    bob.send('mmo.respond', { to: annWelcome.id, kind: 'battle', accept: true });
+    await ann.expectSilence('mmo.session');
+    ok(true, 'accepting a cancelled ask starts no session');
 
     // ------- parties
     //

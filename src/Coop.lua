@@ -745,6 +745,11 @@ function M:challenge(game, peer, myMap)
   if not (peer and peer.id) then return false end
   if not self.transport:isReady() then return false end
 
+  if self:inFight(game) then
+    self.ui:say("Finish your battle\nfirst.")
+    return false
+  end
+
   if not self.party:has() then
     self.ui:say("You need a party\nfor that.")
     return false
@@ -836,6 +841,38 @@ function M:closeAskBox()
   return self:unwindTo(held.game, held.box, true)
 end
 
+-- True while this client is mid-fight: a co-op battle already handed off,
+-- or a wild / trainer / link / co-op screen still on the stack (including
+-- under a menu).  Mirrored in Sessions:inFight -- same rule, two call
+-- sites, so a PARTY BATTLE ask and a 1v1 request both stay off a live fight.
+function M.isFightState(state)
+  if type(state) ~= "table" then return false end
+  local kind = state.kind
+  if kind == "wild" or kind == "trainer" or kind == "link" then return true end
+  if state.sim ~= nil then return true end
+  return false
+end
+
+function M.stackHasFight(game)
+  local stack = game and game.stack
+  if not stack then return false end
+  local states = stack.states
+  if type(states) == "table" then
+    for i = #states, 1, -1 do
+      if M.isFightState(states[i]) then return true end
+    end
+    return false
+  end
+  local top = stack.top and stack:top()
+  return M.isFightState(top)
+end
+
+function M:inFight(game)
+  if self.running or self.state then return true end
+  if self.fighting and self.fighting(game) then return true end
+  return M.stackHasFight(game)
+end
+
 -- The ask, as it reaches the other three.  All four have to agree, so this is
 -- put to each of them and any one no ends it -- which the hub enforces and
 -- says out loud to everyone still holding a box.
@@ -846,10 +883,10 @@ function M:onAsk(game, msg)
   local side = Wire.side(msg.side)
   if not (id and from and name and side) then return end
 
-  -- Already committed elsewhere.  Answered immediately rather than queued, for
-  -- the same reason a trade request is: a box that surfaces minutes later over
-  -- whatever the player is doing by then is worse than a no they can act on.
-  if self.ask or self.running then
+  -- Already committed elsewhere, or mid-fight.  Answered immediately rather
+  -- than queued: a box over a wild encounter or a live 2-on-2 is worse than
+  -- a no the asker can act on now.
+  if self.ask or self:inFight(game) then
     self.transport:send(Wire.COOP_ANSWER, { id = id, accept = false })
     return
   end

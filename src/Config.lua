@@ -49,7 +49,14 @@ M.MOD_ID = "rby_mmo"
 -- end could tell that from an ordinary quiet route, which is exactly the
 -- silence this number exists to turn into a sentence.  This number lives here
 -- and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 8
+--
+-- 9 is mmo.request_cancel -- the asker withdrawing a trade/battle request
+-- before it is answered.  A protocol-8 hub has never heard the type, so
+-- cancelling would clear the asker's local wait while the hub still held
+-- pendingTo: the other player could still accept and pull them into a
+-- session they thought they had walked away from.  Silence is worse than a
+-- refusal that names both versions, so the number moved.
+M.PROTOCOL = 9
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

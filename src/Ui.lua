@@ -795,8 +795,11 @@ end
 -- keeps the box it already had.
 function M:confirm(game, text, onChoose, opts)
   game = game or self.ctx.game
-  if not game then return end
-  mod.ui.push(game, SCREEN.CONFIRM, {
+  if not game then return nil end
+  -- Returned so a caller can take the box back down -- Sessions holds the
+  -- battle-invite prompt the same way Coop holds its ask box, and cancels
+  -- or a peer going offline have to dismiss it rather than leave it buried.
+  return mod.ui.push(game, SCREEN.CONFIRM, {
     text = text,
     onChoose = onChoose,
     defaultNo = opts and opts.defaultNo,
@@ -827,8 +830,11 @@ end
 
 function M:choose(game, text, items)
   game = game or self.ctx.game
-  if not (game and items and #items > 0) then return end
-  mod.ui.push(game, SCREEN.CHOOSE, { text = text, items = items })
+  if not (game and items and #items > 0) then return nil end
+  -- Returned for the same reason confirm is: a waiting box has to be
+  -- dismissible from outside when the answer arrives (or the ask is
+  -- cancelled) rather than only when the player presses a row.
+  return mod.ui.push(game, SCREEN.CHOOSE, { text = text, items = items })
 end
 
 function M:pushState(game, state)

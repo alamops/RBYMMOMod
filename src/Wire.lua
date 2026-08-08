@@ -26,10 +26,15 @@ local M = {}
 M.HELLO         = "mmo.hello"
 M.MOVE          = "mmo.move"
 M.CHAT          = "mmo.chat"
-M.REQUEST       = "mmo.request"
-M.RESPOND       = "mmo.respond"
-M.RELAY         = "mmo.relay"
-M.SESSION_LEAVE = "mmo.session_leave"
+M.REQUEST        = "mmo.request"
+M.RESPOND        = "mmo.respond"
+-- The asker takes back an unanswered trade/battle request.  One name for
+-- both directions, the way PARTY_INVITE is: outbound it is empty (the hub
+-- already knows who we asked), inbound it carries { from, name } so the
+-- player holding the yes/no box can say who walked away.
+M.REQUEST_CANCEL = "mmo.request_cancel"
+M.RELAY          = "mmo.relay"
+M.SESSION_LEAVE  = "mmo.session_leave"
 M.PING          = "mmo.ping"
 -- Parties.  PARTY_INVITE travels both ways, the way REQUEST does: the field
 -- set says which direction it is going (`to` outbound, `from` inbound), and
