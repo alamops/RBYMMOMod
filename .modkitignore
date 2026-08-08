@@ -168,6 +168,8 @@ docs/screenshots/join-connected.png
 docs/screenshots/party-map.png
 docs/screenshots/party-townmap.png
 docs/screenshots/party-members.png
+# Nickname restyle review captures (same ROM-tile rule as party-map above).
+docs/screenshots/nicknames/
 # The rest of the party's shots, from the same driver and under the same rule.
 # party-ask.png and party-battle.png are text boxes and a menu over the
 # overworld, party-spectating.png is a battle frame watched from the outside,

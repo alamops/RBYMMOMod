@@ -1212,12 +1212,6 @@ you:
   **This does not apply to a dedicated hub**, where nobody is the host: a
   player leaving is just a player leaving, and everyone else carries on. If
   that matters to your group, that alone is a reason to run one.
-- **Nameplates sit about a tile low.** You can see it in the shots above —
-  the plate lands across the character's chest rather than over their head.
-  This was previously written up here as drift at the edge of small maps,
-  where the camera stops scrolling; that explanation doesn't survive a look
-  at the engine's `Camera:follow`, which does no clamping at all. So the
-  offset is real and reproducible, and the cause is still open.
 - **The address field shows only thirteen characters.** You can type up to 32
   and the whole thing is used — but the engine's naming screen draws a fixed
   thirteen cells, so `127.0.0.1:7788` renders as `127.0.0.1:778` with the last

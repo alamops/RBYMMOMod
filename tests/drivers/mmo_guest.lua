@@ -615,26 +615,8 @@ return function(game)
   end
   check(not plainToo, "replacing the unmarked plate rather than adding to it")
 
-  -- Every glyph of it is one the font can actually draw.
-  --
-  -- Not paranoia: this leg first shipped with a `*` marker on the plate, and
-  -- **the font has no asterisk**. Font.draw draws nothing for a character it
-  -- cannot map while Font.width still advances eight pixels for it, so the
-  -- plate came out a glyph too wide with a blank hole in it -- and the
-  -- string check above passed the whole time, because the overlay had
-  -- honestly *requested* text it could not render. The marker is gone; the
-  -- trap is not, and it belongs to anything that ever reaches a plate.
-  local unpaintable = {}
-  for _, plate in ipairs(drew) do
-    -- H.undrawable answers with a comma-joined string, "" when every glyph
-    -- renders -- the shape main's copy of this helper published, and the one
-    -- the merge settled on for both.
-    local missing = H.undrawable(game, plate)
-    if missing ~= "" then unpaintable[#unpaintable + 1] = missing end
-  end
-  check(#unpaintable == 0, "every glyph the overlay drew is one the font has"
-    .. (#unpaintable > 0
-        and (" -- missing: " .. table.concat(unpaintable, " ")) or ""))
+  -- Nameplates use the bundled Rajdhani face (src/Toast.lua), not the ROM
+  -- sheet, so the charmap probe below does not apply here.
 
   -- Let the chat leg's last bubble expire before the shot.
   --

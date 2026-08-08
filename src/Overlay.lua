@@ -8,37 +8,45 @@
 --
 -- This draws from the render.hud hook, which runs after the frame is
 -- composited and before touch controls, and receives a window-space
--- viewport (gameX/gameY/gameWidth/gameHeight/scale).  Pushing that
--- transform puts drawing back into the game's own 160x144 space, so the
--- engine's font renders at its native size instead of one window pixel per
--- glyph pixel.
+-- viewport (gameX/gameY/gameWidth/gameHeight/scale).  Nameplates use the
+-- same Rajdhani face as the corner toasts (src/Toast.lua), drawn in window
+-- pixels so the type stays crisp at any letterbox scale.  Town-map portraits
+-- still composite in the game's 160x144 space; only their labels follow the
+-- toast face.
 --
--- Positioning note, and the one real limitation here.  The mod API exposes
--- where the player and each avatar *are* (World.current(), and the NPC
--- handle's :position()), but not where the camera is.  So a remote player's
--- screen position is derived from its tile offset to the local player,
--- which assumes the player is drawn at the centre of the view.  That holds
--- while the camera is following normally and goes wrong by exactly the
--- camera's clamp when the player walks into a map edge smaller than the
--- screen, where the view stops scrolling but the player keeps moving.  A
--- label can sit a tile or two off in those corners.  Fixing it properly
--- needs a camera-position seam the mod API does not have yet, which is an
--- upstream RFC, not something to paper over with a private require.
+-- Screen position is derived from the same camera rule SpriteRenderer uses:
+-- floor(px - camX), floor(py - camY) - 4, with Camera:follow parking the
+-- local player at (64, 60).  The live overworld player's px/py is read for
+-- the anchor so a label glides with a mid-step avatar instead of snapping
+-- to integer cells.
 
 local need, mod = ...
 local Config = need("Config")
 local World = need("World")
 local Chars = need("Chars")
+local Toast = need("Toast")
 
 local M = {}
 M.__index = M
 
--- Game Boy overworld geometry: a 160x144 view, 16px cells, and a 16px
--- player sprite parked in the middle of it.
+-- Game Boy overworld geometry: 160x144 view, 16px walk cells, sprites
+-- drawn four pixels above their cell (src/render/SpriteRenderer.lua).
 local VIEW_W, VIEW_H = 160, 144
 local CELL = 16
-local ANCHOR_X = (VIEW_W - CELL) / 2
-local ANCHOR_Y = (VIEW_H - CELL) / 2
+local CAM_X = VIEW_W / 2 - 16
+local CAM_Y = VIEW_H / 2 - 8
+local SPRITE_LIFT = 4
+-- Top-left of a co-located 16x16 sprite; exported for tests and drivers.
+local ANCHOR_X, ANCHOR_Y = CAM_X, CAM_Y - SPRITE_LIFT
+
+local LABEL_GAP = 2
+local SHADOW_DX, SHADOW_DY = 1, 1
+-- Rajdhani at toast size: bright enough to read on pale tiles, deep enough
+-- that white shadow still separates it from snow and indoor floors.
+local PARTY_GREEN = { 0.42, 0.94, 0.52 }
+local SELF_YELLOW = { 1.0, 0.92, 0.38 }
+local LABEL_WHITE = { 1, 1, 1 }
+local TAIL = "..."
 
 function M.new(ctx)
   return setmetatable({ ctx = ctx }, M)
@@ -62,8 +70,7 @@ end
 --
 -- `▶` is the game's own cursor glyph (0xED), so it already means *this one*
 -- to anyone who has used a menu, and it costs one glyph where brackets cost
--- two -- 48 pixels of plate against 56 for the same name.  Not a colour: a
--- nameplate has to stay legible over whatever palette the map is drawn in.
+-- two -- 48 pixels of plate against 56 for the same name.
 --
 -- **It is three bytes of UTF-8, and that matters here.**  Every length in
 -- this file that is measured for the screen has to be measured in glyphs,
@@ -84,6 +91,24 @@ function M:nameFor(player)
     return M.PARTY_MARK .. player.name
   end
   return player.name
+end
+
+function M:isPartner(player)
+  local party = self.ctx and self.ctx.party
+  return party and party:isPartner(player.id) or false
+end
+
+function M:labelColor(player)
+  if self:isPartner(player) then return PARTY_GREEN end
+  return LABEL_WHITE
+end
+
+-- The name this client publishes.  The roster deliberately excludes self, so
+-- the local player's plate is drawn from here rather than from onMap().
+function M:selfName(game)
+  local client = self.ctx and self.ctx.client
+  if not (client and client.playerName) then return nil end
+  return client.playerName(game)
 end
 
 -- Is the world still being drawn with the flat 2D projection this overlay
@@ -161,52 +186,104 @@ end
 -- -- the voxel mod draws them as voxel characters -- so what is missing is
 -- only the labelling, and a corner list restores that without inventing
 -- positions it cannot compute.
--- Cut a line to a number of *glyphs*, never bytes.
---
--- The screen is 20 tiles wide, so the cap has always meant glyphs -- but it
--- was written as `#text` and `text:sub()`, which are bytes, and that was
--- indistinguishable from correct for as long as every name was ASCII. The
--- party marker is `▶`, three bytes for one glyph: byte length over-counts a
--- marked name by two, so a line gets trimmed before it needs to be, and a
--- cut can land inside the sequence and hand the renderer a broken glyph.
---
--- Font.split is the renderer's own greedy, multi-byte-aware pass, so cutting
--- on its span boundaries cuts where the font would. The byte path stays as
--- the fallback for a build where split is unavailable; it is wrong in the
--- same small way it always was rather than newly wrong.
-local ROSTER_COLS = 19
 
-local function clipToGlyphs(Font, text, columns)
-  if type(Font.split) ~= "function" then
-    if #text > columns then return text:sub(1, columns) end
-    return text
-  end
-  local ok, spans = pcall(Font.split, text)
-  if not (ok and type(spans) == "table") then return text end
-  if #spans <= columns then return text end
-  local last = spans[columns]
-  return text:sub(1, (last and last.to) or columns)
+-- Screen centre-x and sprite-top-y for an avatar at world pixels (px, py)
+-- relative to the local player at (playerPx, playerPy).  Matches
+-- SpriteRenderer:draw and Camera:follow on a 160x144 view.
+function M.screenOf(avatarPx, avatarPy, playerPx, playerPy)
+  local left = math.floor(avatarPx - playerPx + CAM_X)
+  local top = math.floor(avatarPy - playerPy + CAM_Y) - SPRITE_LIFT
+  return left + CELL / 2, top
 end
 
-function M:drawRoster(Font, here)
-  local y = 2
+local function splitWidth(font, text, maxWidth)
+  local cut, index = 0, 1
+  while index <= #text do
+    local byte = text:byte(index)
+    local size = 1
+    if byte >= 0xF0 then size = 4
+    elseif byte >= 0xE0 then size = 3
+    elseif byte >= 0xC0 then size = 2 end
+    local stop = index + size - 1
+    if font:getWidth(text:sub(1, stop)) > maxWidth then break end
+    cut, index = stop, stop + 1
+  end
+  return text:sub(1, cut), text:sub(cut + 1)
+end
+
+local function fitWidth(font, text, maxWidth)
+  if maxWidth <= 0 then return "" end
+  if font:getWidth(text) <= maxWidth then return text end
+  local budget = maxWidth - font:getWidth(TAIL)
+  if budget <= 0 then return "" end
+  local head = splitWidth(font, text, budget)
+  if head == "" then return "" end
+  return head .. TAIL
+end
+
+local function beginHud()
+  local restore = {
+    shader = love.graphics.getShader(),
+    blend = love.graphics.getBlendMode(),
+    font = love.graphics.getFont(),
+  }
+  love.graphics.setShader()
+  love.graphics.setBlendMode("alpha")
+  return restore
+end
+
+local function endHud(restore)
+  love.graphics.setColor(1, 1, 1, 1)
+  if not restore then return end
+  if restore.font then love.graphics.setFont(restore.font) end
+  love.graphics.setBlendMode(restore.blend)
+  love.graphics.setShader(restore.shader)
+end
+
+local function printLabel(font, text, x, y, color)
+  color = color or LABEL_WHITE
+  love.graphics.setColor(0, 0, 0, 0.85)
+  love.graphics.print(text, x + SHADOW_DX, y + SHADOW_DY)
+  love.graphics.setColor(color[1], color[2], color[3], 1)
+  love.graphics.print(text, x, y)
+end
+
+function M:drawRoster(font, here, scale, gameX, gameY, game)
+  scale = tonumber(scale) or 1
+  gameX, gameY = tonumber(gameX) or 0, tonumber(gameY) or 0
+  local pad = Toast.PAD
+  local rowH = font:getHeight() + pad * 2
+  local step = rowH + Toast.ROW_GAP
+  local x = gameX + 3 * scale
+  local y = gameY + 2 * scale
+  local maxWidth = VIEW_W * scale - 6 * scale
+
+  local mine = self:selfName(game)
+  if mine and mine ~= "" then
+    printLabel(font, mine, x, y + pad, SELF_YELLOW)
+    self:note(mine)
+    y = y + step
+  end
+
   for index, player in ipairs(here) do
     if index > 4 then break end
-    local text = clipToGlyphs(Font, self:nameFor(player), ROSTER_COLS)
-    local width = Font.width(text)
-    love.graphics.setColor(0, 0, 0, 0.65)
-    love.graphics.rectangle("fill", 1, y - 1, width + 4, 10)
-    love.graphics.setColor(1, 1, 1, 1)
-    Font.draw(text, 3, y)
-    self:note(text)
-    y = y + 10
+    local text = fitWidth(font, self:nameFor(player), maxWidth)
+    if text ~= "" then
+      printLabel(font, text, x, y + pad, self:labelColor(player))
+      self:note(text)
+    end
+    y = y + step
   end
 end
 
 -- A label is only drawn when it is fully on screen; a half-clipped name at
 -- the edge of the playfield reads as a rendering bug.
-local function onScreen(x, y, width)
-  return x >= 0 and y >= 0 and (x + width) <= VIEW_W and y + 8 <= VIEW_H
+local function onScreenWindow(x, y, width, height, gameX, gameY, scale)
+  local left = gameX
+  local top = gameY
+  local right = gameX + VIEW_W * scale
+  local bottom = gameY + VIEW_H * scale
+  return x >= left and y >= top and (x + width) <= right and (y + height) <= bottom
 end
 
 -- Record a label this draw actually committed to the screen.
@@ -229,22 +306,31 @@ function M:note(text)
   last.names[#last.names + 1] = text
 end
 
-function M:drawLabel(Font, text, centreX, topY)
-  local width = Font.width(text)
-  local x = math.floor(centreX - width / 2)
-  local y = math.floor(topY)
+function M:drawLabel(font, text, centreX, spriteTopY, scale, gameX, gameY, color)
+  scale = tonumber(scale) or 1
+  gameX, gameY = tonumber(gameX) or 0, tonumber(gameY) or 0
+
+  local width = font:getWidth(text)
+  local height = font:getHeight()
+  local wx = gameX + centreX * scale
+  local wy = gameY + (spriteTopY - LABEL_GAP) * scale - height
+
+  local x = math.floor(wx - width / 2)
+  local y = math.floor(wy)
   -- Noted only when it is actually drawn.  A label clipped at the edge of
   -- the playfield is a label the player cannot read, and a state seam that
   -- reported it anyway would be worse than none.
-  if not onScreen(x, y, width) then return end
+  if not onScreenWindow(x, y, width, height, gameX, gameY, scale) then return end
 
-  -- a one-pixel dark plate behind the glyphs: the font is drawn in the
-  -- text colour and would vanish over a dark tile without it
-  love.graphics.setColor(0, 0, 0, 0.65)
-  love.graphics.rectangle("fill", x - 2, y - 1, width + 4, 10)
-  love.graphics.setColor(1, 1, 1, 1)
-  Font.draw(text, x, y)
+  printLabel(font, text, x, y, color or LABEL_WHITE)
   self:note(text)
+end
+
+function M:drawSelfLabel(font, game, playerPx, playerPy, scale, gameX, gameY)
+  local name = self:selfName(game)
+  if not (name and name ~= "") then return end
+  local centreX, spriteTop = M.screenOf(playerPx, playerPy, playerPx, playerPy)
+  self:drawLabel(font, name, centreX, spriteTop, scale, gameX, gameY, SELF_YELLOW)
 end
 
 -- ------- drawing in the game's own 160x144 space
@@ -388,12 +474,12 @@ function M:townMapMarks(state)
   return out
 end
 
-function M:drawTownMap(Font, state)
+function M:drawTownMapSprites(state)
   local marks = self:townMapMarks(state)
   self.last.drawn = #marks
   if #marks == 0 then
     self.last.reached = "townmap-nobody"
-    return
+    return marks
   end
 
   for _, mark in ipairs(marks) do
@@ -405,12 +491,20 @@ function M:drawTownMap(Font, state)
       love.graphics.setColor(1, 1, 1, 1)
       love.graphics.draw(art.image, art.quad, mark.x - 4, mark.y - 4)
     end
-    -- ...and the nickname over their head, flipping under the sprite when
-    -- the city is high enough that the label would land in the banner. A
-    -- name half-inside the banner reads as a rendering fault.
-    local labelY = mark.y - 14
-    if labelY < BANNER_H then labelY = mark.y + 14 end
-    self:drawLabel(Font, mark.name, mark.x + 4, labelY)
+  end
+  return marks
+end
+
+function M:drawTownMapLabels(font, marks, scale, gameX, gameY)
+  for _, mark in ipairs(marks) do
+    -- Nickname over their head, flipping under the sprite when the city is
+    -- high enough that the label would land in the banner.
+    local spriteTop = mark.y - 4
+    if spriteTop - LABEL_GAP - font:getHeight() / scale < BANNER_H then
+      spriteTop = mark.y + 12
+    end
+    self:drawLabel(font, mark.name, mark.x + 4, spriteTop, scale, gameX, gameY,
+                   PARTY_GREEN)
   end
 end
 
@@ -452,8 +546,8 @@ function M:draw(game, viewport)
   -- only while the world is what the player is actually looking at.
   local top = game and game.stack and game.stack:top()
 
-  local Font = mod.ui.Font
-  if not (Font and Font.draw and Font.width) then
+  local labelFont = Toast.font(Toast.toastSize(scale))
+  if not labelFont then
     last.reached = "no-font"
     return
   end
@@ -465,8 +559,14 @@ function M:draw(game, viewport)
   if townMap then
     last.reached = "townmap"
     local restore = self:beginFrame(scale, gameX, gameY)
-    self:drawTownMap(Font, townMap)
+    local marks = self:drawTownMapSprites(townMap)
     self:endFrame(restore)
+    if marks and #marks > 0 then
+      local hudRestore = beginHud()
+      love.graphics.setFont(labelFont)
+      self:drawTownMapLabels(labelFont, marks, scale, gameX, gameY)
+      endHud(hudRestore)
+    end
     return
   end
 
@@ -488,16 +588,26 @@ function M:draw(game, viewport)
 
   local here = ctx.roster:onMap(current.mapId)
   last.here = #here
-  if #here == 0 then last.reached = "nobody-here" return end
 
-  local restore = self:beginFrame(scale, gameX, gameY)
+  local owPlayer = overworld.player
+  local playerPx = owPlayer and owPlayer.px or (current.x * CELL)
+  local playerPy = owPlayer and owPlayer.py or (current.y * CELL)
+
+  local hudRestore = beginHud()
+  love.graphics.setFont(labelFont)
 
   -- another mod owns the world pass: label from a corner rather than
   -- guessing at positions in a projection this does not know
   if not self:worldIsFlat(game) then
     last.reached = "roster"
-    self:drawRoster(Font, here)
-    self:endFrame(restore)
+    self:drawRoster(labelFont, here, scale, gameX, gameY, game)
+    endHud(hudRestore)
+    return
+  end
+
+  if #here == 0 and not self:selfName(game) then
+    last.reached = "nobody-here"
+    endHud(hudRestore)
     return
   end
 
@@ -506,15 +616,15 @@ function M:draw(game, viewport)
     -- the live avatar cell, which is where the sprite actually is mid-step
     local ax, ay = ctx.avatars:cellOf(player.id)
     if ax and ay then
-      local screenX = ANCHOR_X + (ax - current.x) * CELL
-      local screenY = ANCHOR_Y + (ay - current.y) * CELL
-
-      self:drawLabel(Font, self:nameFor(player), screenX + CELL / 2,
-                     screenY - 10)
+      local centreX, spriteTop = M.screenOf(ax * CELL, ay * CELL,
+                                            playerPx, playerPy)
+      self:drawLabel(labelFont, self:nameFor(player), centreX, spriteTop,
+                     scale, gameX, gameY, self:labelColor(player))
     end
   end
+  self:drawSelfLabel(labelFont, game, playerPx, playerPy, scale, gameX, gameY)
 
-  self:endFrame(restore)
+  endHud(hudRestore)
 end
 
 -- The party marker: the game's own cursor glyph, 0xED, as its three UTF-8
@@ -526,6 +636,9 @@ M.PARTY_MARK = "\226\150\182"   -- U+25B6 BLACK RIGHT-POINTING TRIANGLE
 
 M.VIEW_W, M.VIEW_H, M.CELL = VIEW_W, VIEW_H, CELL
 M.ANCHOR_X, M.ANCHOR_Y = ANCHOR_X, ANCHOR_Y
+M.CAM_X, M.CAM_Y, M.SPRITE_LIFT = CAM_X, CAM_Y, SPRITE_LIFT
+M.PARTY_GREEN = PARTY_GREEN
+M.SELF_YELLOW = SELF_YELLOW
 M.LOCAL_RADIUS = Config.LOCAL_RADIUS
 
 return M

@@ -3926,6 +3926,28 @@ eq(#Overlay.PARTY_MARK, 3, "the marker is three bytes of UTF-8")
 eq(#partied:nameFor({ id = "them", name = "BOB" }), 6,
    "so a marked name is longer in bytes than it is on screen")
 
+-- ------- nameplate screen position
+--
+-- Matches SpriteRenderer and Camera:follow -- the old anchor used the centre
+-- of the view minus half a cell, which sat the plate on the character's
+-- chest instead of above their head.
+
+local cx, top = Overlay.screenOf(80, 80, 80, 80)
+eq(cx, 72, "a co-located avatar is centred at sprite left + 8")
+eq(top, 60, "with its sprite top at screen y=60, not 64")
+
+local cx2, top2 = Overlay.screenOf(96, 80, 80, 80)
+eq(cx2, 88, "one cell to the right shifts the label centre by 16px")
+eq(top2, 60, "and leaves vertical placement unchanged")
+
+local _, top3 = Overlay.screenOf(80, 96, 80, 80)
+eq(top3, 76, "one cell down moves the sprite top by 16px")
+
+-- mid-step: fractional cells follow pixel position, not integer cells
+local cx4, top4 = Overlay.screenOf(88, 80, 80, 80)
+eq(cx4, 80, "half a step east lands halfway between the two columns")
+eq(top4, 60, "without changing the row")
+
 -- ------- your party member on the TOWN MAP
 --
 -- Where in Kanto they are, which is the one question the overworld cannot

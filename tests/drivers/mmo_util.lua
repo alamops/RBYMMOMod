@@ -1291,9 +1291,8 @@ end
 -- the camera, and hand back the sheet it drew from.
 --
 -- Deliberately taken while this side is alone on its map: a remote player
--- brings a nameplate, and this mod's nameplates sit a tile low -- straight
--- across the character's chest and head, which is exactly what a picture of
--- a character must not have over it.
+-- brings a nameplate, and a plate over the character would ruin a portrait
+-- shot of what they are wearing.
 --
 -- The facing is set on the entity rather than walked into, because a tapped
 -- direction moves a tile and the tile it moves to is not always free. Frame
