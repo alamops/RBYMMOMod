@@ -1246,16 +1246,15 @@ return function(game)
   shot("after-trade")
   check(rendezvous("trade"), "both guests finished their half of the trade")
 
-  -- ------- a real link battle, run to a decision
+  -- ------- a mediated 1v1, run to a decision
   --
-  -- The engine's own LinkBattle -- the lockstep simulation a cable link runs
-  -- -- carried between two peers by a relay neither of them is running. b
-  -- asks this time, so the requester (and therefore the session host that
-  -- deals the shared RNG seed) is the other instance from the trade's.
+  -- PROTOCOL 10: the Node hub's intermediator owns the rolls; clients upload
+  -- parties, send choices, and draw the event stream. b asks this time.
   --
-  -- The assertions are on engine events rather than on anything this mod
-  -- reports, and link.desync is the one that matters: two games disagreeing
-  -- mid-battle is exactly what lockstep exists to prevent.
+  -- Engine `battle.started` / `battle.ended` never fire -- MediatedBattle is
+  -- not a BattleState -- and `link.desync` is meaningless here. Wait on the
+  -- `mmoBattle` screen / `isFighting`, and treat event-stream gaps as the
+  -- desync equivalent.
 
   H.closeToOverworld(game)
   if ROLE == "b" then
@@ -1285,33 +1284,34 @@ return function(game)
   end
 
   local started, btrail = H.drivePrompts(game, function()
-    return events["battle.started"] > 0
+    return H.inMediatedFight(game, exports)
   end, 120)
   if not started then
     log("battle never started -- prompts answered:",
         btrail == "" and "(none)" or btrail)
   end
-  check(started, "a link battle started between two guests of a dedicated hub")
+  check(started, "a mediated battle started between two guests of a dedicated hub")
 
-  -- Frames, and this one genuinely is: a battle transition is a fixed number
-  -- of drawn frames on this machine alone. The peer already did its part --
-  -- battle.started has fired -- so nothing here waits on it.
   local inBattle = H.waitFor(game, function()
-    local top = H.top(game)
-    return top ~= nil and top.enemy ~= nil
+    return H.isMediatedBattle(H.top(game))
   end, 60 * 20, "the battle screen to come up")
   if inBattle then
     U.wait(90)
     shot("battle-open")
   end
 
+  local gaps = 0
   local ended = H.drivePrompts(game, function()
-    return events["battle.ended"] > 0
+    local top = H.top(game)
+    if H.isMediatedBattle(top) then
+      gaps = tonumber(top.gaps) or gaps
+      return false
+    end
+    return not H.inMediatedFight(game, exports)
   end, 300)
   check(ended, "and ran to a decision")
-  check(events["link.desync"] == 0, "with no desync reported")
-  log(("battle events: started=%d ended=%d desync=%d"):format(
-    events["battle.started"], events["battle.ended"], events["link.desync"]))
+  check(gaps == 0, "with no gaps in the mediated event stream")
+  log(("mediated battle: gaps=%d"):format(gaps))
   shot("after-battle")
   check(rendezvous("battle"), "both guests came out of the battle")
 

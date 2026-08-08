@@ -894,6 +894,20 @@ end
 
 M.classify = classify
 
+-- PROTOCOL 10 mediated 1v1 screen (src/MediatedBattle.lua). Not a BattleState:
+-- no `.enemy`, no engine `battle.started` / `battle.ended`, no link.desync.
+-- The marker Sessions.isFightState already keys on is what the drivers wait for.
+function M.isMediatedBattle(top)
+  return top ~= nil and top.mmoBattle == true
+end
+
+-- True while a mediated fight is on the stack or the session still holds it.
+function M.inMediatedFight(game, exports)
+  if M.isMediatedBattle(M.top(game)) then return true end
+  if exports and exports.isFighting and exports.isFighting() then return true end
+  return false
+end
+
 -- Budgeted in SECONDS, and it must be: a trade or a battle only finishes
 -- when the other process answers its half, so this is a wait on the peer
 -- wearing the clothes of a work loop. It was the last frame budget left in

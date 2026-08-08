@@ -747,19 +747,24 @@ return function(game)
         log("asked to battle")
         H.signal("guest_battle_requested")
 
+        -- PROTOCOL 10 mediated 1v1: engine battle.* events never fire.
         local started = H.drivePrompts(game, function()
-          return events["battle.started"] > 0
+          return H.inMediatedFight(game, exports)
         end, 90)
-        check(started, "a link battle started on the guest")
+        check(started, "a mediated battle started on the guest")
 
+        local gaps = 0
         local ended = H.drivePrompts(game, function()
-          return events["battle.ended"] > 0
+          local top = H.top(game)
+          if H.isMediatedBattle(top) then
+            gaps = tonumber(top.gaps) or gaps
+            return false
+          end
+          return not H.inMediatedFight(game, exports)
         end, 240)
         check(ended, "and ran to a decision")
-        check(events["link.desync"] == 0, "with no desync reported")
-        log(("battle events: started=%d ended=%d desync=%d"):format(
-          events["battle.started"], events["battle.ended"],
-          events["link.desync"]))
+        check(gaps == 0, "with no gaps in the mediated event stream")
+        log(("mediated battle: gaps=%d"):format(gaps))
         U.shot(game, SHOT_DIR .. "/join-after-battle.png")
         H.await(game, "host_battle_done")
 
