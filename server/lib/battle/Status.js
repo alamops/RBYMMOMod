@@ -27,6 +27,9 @@
  * crit and no random roll (the roll is pinned at maximum). It runs through the
  * same Damage.compute as everything else rather than getting its own
  * arithmetic, so it cannot drift away from the main formula.
+ *
+ * Edge inputs match Lua: paralysisStop(undefined) coerces the roll to 255
+ * (false), and confusionTick forwards atk/def aliases into Damage.compute.
  */
 
 const Damage = require('./Damage.js');
@@ -38,13 +41,20 @@ const CONFUSION_HIT_ROLL = 128; // out of 256
 const CONFUSION_POWER = 40;
 const RESIDUAL_DIVISOR = 16;
 
+function int(value, fallback) {
+  const n = Number(value);
+  if (value === null || value === undefined || Number.isNaN(n)) return fallback;
+  if (typeof value === 'boolean') return fallback;
+  return Math.floor(n);
+}
+
 // ------- before-move gates
 
 // A counter already at zero means "not asleep": the gate passes rather than
 // decrementing into negatives, so a caller that asks the wrong question gets a
 // harmless answer instead of a monster stuck asleep forever.
 function sleepTick(turnsRemaining) {
-  const left = Math.max(0, turnsRemaining || 0);
+  const left = Math.max(0, int(turnsRemaining, 0));
   if (left === 0) return { turnsRemaining: 0, wokeUp: false, canMove: true };
   return { turnsRemaining: left - 1, wokeUp: left - 1 === 0, canMove: false };
 }
@@ -64,8 +74,9 @@ function freezeCanMove(_roll) {
   return false;
 }
 
+// Missing roll → 255, matching Lua int(roll, 255): 255 < 63 is false.
 function paralysisStop(roll) {
-  return (roll === undefined ? 255 : roll) < PARALYSIS_STOP_ROLL;
+  return int(roll, 255) < PARALYSIS_STOP_ROLL;
 }
 
 function paralysisTick(roll) {
@@ -76,14 +87,14 @@ function paralysisTick(roll) {
 // max(1, floor(speed/4)) -- the floor matters at low speed, where a straight
 // quarter would reach zero and the turn order would stop being defined.
 function paralysisSpeed(speed) {
-  return Math.max(1, idiv(Math.max(0, speed === undefined ? 1 : speed), 4));
+  return Math.max(1, idiv(Math.max(0, int(speed, 1)), 4));
 }
 
 function confusionSelfHit(roll) {
-  return (roll === undefined ? 255 : roll) < CONFUSION_HIT_ROLL;
+  return int(roll, 255) < CONFUSION_HIT_ROLL;
 }
 
-// state: { turnsRemaining, level, attack, defense }
+// state: { turnsRemaining, level, attack | atk, defense | def }
 //
 // The self-hit damage is computed here rather than left to the caller because
 // the parameters that make it typeless are part of the *rule*, not the
@@ -91,7 +102,7 @@ function confusionSelfHit(roll) {
 // the two runtimes.
 function confusionTick(state, roll) {
   const s = state || {};
-  let left = Math.max(0, s.turnsRemaining || 0);
+  let left = Math.max(0, int(s.turnsRemaining, 0));
   if (left > 0) left -= 1;
 
   if (left === 0) {
@@ -101,11 +112,15 @@ function confusionTick(state, roll) {
     return { turnsRemaining: left, snappedOut: false, selfHit: false, canMove: true, selfDamage: 0 };
   }
 
+  // Forward atk/def aliases the way Lua does, so Damage.compute's stat() reads
+  // whichever spelling the caller had.
   const hit = Damage.compute({
     level: s.level,
     power: CONFUSION_POWER,
     attack: s.attack,
+    atk: s.atk,
     defense: s.defense,
+    def: s.def,
     crit: false,
     stab: false,
     typeEffect: [100],
@@ -124,7 +139,7 @@ function confusionTick(state, roll) {
 // ------- residuals
 
 function sixteenth(maxHp) {
-  return Math.max(1, idiv(Math.max(0, maxHp || 0), RESIDUAL_DIVISOR));
+  return Math.max(1, idiv(Math.max(0, int(maxHp, 0)), RESIDUAL_DIVISOR));
 }
 
 function residualBurn(maxHp) {
@@ -138,11 +153,11 @@ function residualPoison(maxHp) {
 // Toxic stacks by multiplying the same sixteenth by the badly-poisoned
 // counter, which the turn machine increments once per tick.
 function residualToxic(maxHp, toxicCounter) {
-  return sixteenth(maxHp) * Math.max(1, toxicCounter === undefined ? 1 : toxicCounter);
+  return sixteenth(maxHp) * Math.max(1, int(toxicCounter, 1));
 }
 
 function burnAttack(attack) {
-  return Math.max(1, idiv(Math.max(0, attack === undefined ? 1 : attack), 2));
+  return Math.max(1, idiv(Math.max(0, int(attack, 1)), 2));
 }
 
 // ------- dispatchers
@@ -220,6 +235,7 @@ module.exports = {
   residualPoison,
   residualToxic,
   burnAttack,
+  int,
   PARALYSIS_STOP_ROLL,
   CONFUSION_HIT_ROLL,
   CONFUSION_POWER,

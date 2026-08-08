@@ -115,13 +115,15 @@ const RESPONSE_MAX = 128;
  * battleSeconds() below rather than handing it a millisecond timestamp that
  * would make a sixty-second grace expire in sixty milliseconds.
  *
- * Mirrors Config.BATTLE_CHOICE_TIMEOUT and Config.BATTLE_RECONNECT_GRACE.
+ * Mirrors Config.BATTLE_CHOICE_TIMEOUT, Config.BATTLE_RECONNECT_GRACE and
+ * Config.BATTLE_RESOLVE_TIMEOUT.
  * Named here rather than imported from Turn's own defaults because they are a
  * *hub policy* -- the numbers a host could one day want to tune -- while
  * Turn's are the floor it falls back to when a caller says nothing.
  */
 const BATTLE_CHOICE_TIMEOUT = 60;
 const BATTLE_RECONNECT_GRACE = 60;
+const BATTLE_RESOLVE_TIMEOUT = 30;
 
 // How many fighters one side of a co-op field holds, which is Config.COOP_SIDE
 // and is written as PARTY_MAX for that file's reason: two parties meet, so the
@@ -2274,6 +2276,7 @@ class Relay {
       chart: record.ruleset.chart,
       choiceTimeout: BATTLE_CHOICE_TIMEOUT,
       reconnectGrace: BATTLE_RECONNECT_GRACE,
+      resolveTimeout: BATTLE_RESOLVE_TIMEOUT,
       now: battleSeconds(this.now()),
       sides: {
         a: sideRoster(record.sides.a),

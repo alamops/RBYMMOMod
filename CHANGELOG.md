@@ -38,6 +38,17 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- Mediated battle clients now send `mmo.battle_reconnect` when the hub link
+  returns under a live 1v1 or mediated co-op screen, so a drop inside the grace
+  can resume instead of riding every disconnect to forfeit.
+- The Lua LAN Hub `receive` path pcall-wraps handlers (matching Node), so a
+  Turn/Damage throw logs and continues rather than killing the host.
+- A turn left in `resolving` aborts on `BATTLE_RESOLVE_TIMEOUT` (30s) as a draw
+  with reason `timeout`, on both Turn twins.
+- JS Damage/Accuracy/Crit/Status coerce edge inputs the way the Lua twins do
+  (bare `typeEffect`, `atk`/`def`/`typeEff` aliases, missing level/accuracy/roll,
+  `paralysisStop(undefined)`).
+
 - The Node hub no longer sends empty `winners` / `losers` lists (or a null
   `reason`) on a draw. `cleanBattleOutcome` refuses an empty id list, so the
   message was one no client could read — a battle screen with no way out.

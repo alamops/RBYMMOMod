@@ -74,6 +74,7 @@ const MONS_PER_PARTY = 6; // Config.BATTLE_MON_MAX
 const FIGHTERS_PER_SIDE = 2; // Config.COOP_SIDE
 const CHOICE_TIMEOUT = 60; // Config.BATTLE_CHOICE_TIMEOUT
 const RECONNECT_GRACE = 60; // Config.BATTLE_RECONNECT_GRACE
+const RESOLVE_TIMEOUT = 30; // Config.BATTLE_RESOLVE_TIMEOUT
 
 // Below this the side-a member of a tied group moves first.
 const TIE_BREAK_ROLL = 128;
@@ -278,11 +279,13 @@ class Battle {
     this.chart = isTable(opts.chart) ? opts.chart : null;
     this.choiceTimeout = Math.max(0, int(opts.choiceTimeout, CHOICE_TIMEOUT));
     this.reconnectGrace = Math.max(0, int(opts.reconnectGrace, RECONNECT_GRACE));
+    this.resolveTimeout = Math.max(0, int(opts.resolveTimeout, RESOLVE_TIMEOUT));
     this.now = Math.max(0, int(opts.now, 0));
     this.phase = 'choice';
     this.turn = 1;
     this.seq = 0;
     this.deadline = null;
+    this.resolveDeadline = null;
     this.buffer = [];
     this.fighters = [];
     // A Map, not an object: a playerId is attacker-supplied and "__proto__" is
@@ -521,6 +524,7 @@ class Battle {
 
   _openTurn() {
     this.phase = 'choice';
+    this.resolveDeadline = null;
     for (const fighter of this.fighters) fighter.choice = null;
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
     this._emit('turn', { amount: this.turn });
@@ -564,6 +568,11 @@ class Battle {
 
   _resolveTurn() {
     this.phase = 'resolving';
+    // Armed for the rare case resolution does not leave this phase in the same
+    // call -- a throw mid-resolve used to leave the field wedged forever, and
+    // the hub's handle() contains those throws so the clock has to finish the job.
+    this.resolveDeadline = this.resolveTimeout > 0
+      ? this.now + this.resolveTimeout : null;
 
     if (this._resolveRuns()) return;
     this._resolveSwitches();
@@ -892,6 +901,7 @@ class Battle {
     this.result = result;
     this.phase = 'over';
     this.deadline = null;
+    this.resolveDeadline = null;
     this._emit('over', { text: reason });
     return this.result;
   }
@@ -969,6 +979,16 @@ class Battle {
       return true;
     }
 
+    // A turn left in `resolving` -- typically after a throw the hub contained --
+    // has no player to wait on, so the ceiling is the only way out. `timeout` is
+    // the existing reason: sanitize already phrases it, and a stuck resolve is not
+    // something a screen can usefully distinguish from an unanswered turn.
+    if (this.phase === 'resolving' && this.resolveDeadline !== null
+        && this.now >= this.resolveDeadline) {
+      this._finish('draw', null, null, 'timeout');
+      return true;
+    }
+
     // The choice clock is suspended while anybody is away; the grace above is
     // the only deadline running for them.
     if (this.phase === 'choice' && this.deadline !== null && this.now >= this.deadline
@@ -1036,6 +1056,7 @@ class Battle {
       seq: this.seq,
       now: this.now,
       deadline: this.deadline,
+      resolveDeadline: this.resolveDeadline,
       over: this.result !== null,
       reason: this.result ? this.result.reason : null,
       rngState: this.rng.state(),
@@ -1053,7 +1074,7 @@ class Battle {
  * attempt(opts) -> { battle, reason }
  *
  * opts:
- *   id, mode, seed, chart, choiceTimeout, reconnectGrace, now
+ *   id, mode, seed, chart, choiceTimeout, reconnectGrace, resolveTimeout, now
  *   sides = { a: [ { playerId, name, mons } ], b: [ ... ] }
  *
  * A reason and not a throw: the caller is a session handler that has a client
@@ -1138,6 +1159,7 @@ module.exports = {
   FIGHTERS_PER_SIDE,
   CHOICE_TIMEOUT,
   RECONNECT_GRACE,
+  RESOLVE_TIMEOUT,
   TIE_BREAK_ROLL,
   MODES,
   SIDES,

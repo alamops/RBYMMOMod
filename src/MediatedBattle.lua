@@ -529,6 +529,10 @@ function M.new(opts)
     gaps      = 0,         -- events that arrived out of order
     pendingTurn = false,
     result    = nil,
+    -- Set while the hub link is down under a live fight: the intermediator's
+    -- reconnect grace is running, and onTransportReady is what resumes it.
+    awaitingReconnect = false,
+    reconnectSent = false,
   }, M)
 end
 
@@ -674,6 +678,9 @@ function M:onEvent(msg)
     if msg.text then self:say(("Waiting for\n%s..."):format(msg.text)) end
 
   elseif kind == "reconnect" then
+    -- Their return, or ours after we re-announced: either way the waiting
+    -- caption is done.
+    self.awaitingReconnect = false
     if msg.text then self:say(("%s is back!"):format(msg.text)) end
   end
 end
@@ -797,6 +804,38 @@ function M:finish(result, reason)
 end
 
 -- ------- outbound
+
+-- The hub link came back under a fight that is still open.
+--
+-- Both hubs already run reconnect grace + sim.reconnect(); until PROTOCOL 10's
+-- clients actually sent mmo.battle_reconnect, every drop rode to forfeit. This
+-- is that message. Idempotent per drop cycle: Sessions / Coop call it when
+-- transport:isReady() flips false→true, and the headless suite calls it
+-- directly as notifyReconnect.
+function M:onTransportReady()
+  if self.finished or self.left then return false end
+  if not (self.transport and self.battle) then return false end
+  if self.reconnectSent then return false end
+  self.reconnectSent = true
+  self.awaitingReconnect = false
+  self.transport:send(Wire.BATTLE_RECONNECT, { battle = self.battle })
+  return true
+end
+
+function M:notifyReconnect()
+  return self:onTransportReady()
+end
+
+-- The hub link dropped under a live fight. Narrate and wait: finishing here
+-- would take the screen away before the intermediator's grace (or a reconnect)
+-- can resolve it.
+function M:onTransportLost()
+  if self.finished or self.left then return end
+  if self.awaitingReconnect then return end
+  self.awaitingReconnect = true
+  self.reconnectSent = false
+  self:say("Connection lost.\nWaiting to reconnect...")
+end
 
 -- One turn's intent, through the shared sender so a 1v1 and a 2-on-2 put the
 -- same shape on the wire.  What is left here is this screen's own bookkeeping:

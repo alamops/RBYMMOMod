@@ -277,6 +277,8 @@ function M.new(game, opts)
     medPending = {},   -- rows built from events, played when the turn closes
     medSeq = 0,        -- the highest event sequence applied
     medGaps = 0,       -- events that arrived out of order
+    awaitingReconnect = false,
+    reconnectSent = false,
     phase = "intro",
     moveIndex = 1,
     targetIndex = 1,
@@ -4091,6 +4093,7 @@ function M:onBattleEvent(msg)
   for _, row in ipairs(self:medRows(msg)) do
     self.medPending[#self.medPending + 1] = row
   end
+  if msg.t == "reconnect" then self.awaitingReconnect = false end
   -- The two that close a batch. Everything between them is collected, for the
   -- reason in this section's header: a menu taken away mid-decision is a turn
   -- the player cannot answer.
@@ -4175,6 +4178,30 @@ function M:sendMediatedChoice(action)
                target = self:medFieldOf(action.target) }
   end
   return Mediated.submitChoice(self.transport, self.battleId, fields)
+end
+
+-- The hub link came back under a mediated co-op fight that is still open.
+-- Same message MediatedBattle sends for 1v1: both hubs already honour it.
+function M:onTransportReady()
+  if self.result or not self.mediated then return false end
+  if not (self.transport and self.battleId) then return false end
+  if self.reconnectSent then return false end
+  self.reconnectSent = true
+  self.awaitingReconnect = false
+  self.transport:send(Wire.BATTLE_RECONNECT, { battle = self.battleId })
+  return true
+end
+
+function M:notifyReconnect()
+  return self:onTransportReady()
+end
+
+function M:onTransportLost()
+  if self.result or not self.mediated then return end
+  if self.awaitingReconnect then return end
+  self.awaitingReconnect = true
+  self.reconnectSent = false
+  self:say("Connection lost.\nWaiting to reconnect...")
 end
 
 -- ------- drawing

@@ -262,3 +262,46 @@ test('Rng LCG matches the Lua twin for a known seed stream', () => {
     assert.ok(r >= Rng.DAMAGE_ROLL_MIN && r <= Rng.DAMAGE_ROLL_MAX, `damage roll ${r} in band`);
   }
 });
+
+test('JS formula edge inputs match Lua coercion', () => {
+  // Damage: bare typeEffect, atk/def aliases, missing level → 1 (not NaN).
+  const bare = damage.compute({
+    level: 50, power: 40, atk: 100, def: 100,
+    stab: false, typeEffect: 100, crit: false, roll: 255,
+  });
+  assert.ok(Number.isInteger(bare.damage), 'bare typeEffect percent still deals an integer');
+  assert.strictEqual(bare.immune, false);
+
+  const alias = damage.compute({
+    power: 40, atk: 100, def: 100,
+    stab: false, typeEff: [100], crit: false, roll: 255,
+  });
+  assert.ok(Number.isInteger(alias.levelTerm), 'missing level clamps to 1');
+  assert.ok(Number.isInteger(alias.damage), 'atk/def/typeEff aliases compute');
+  assert.ok(!Number.isNaN(alias.damage), 'and never NaN');
+
+  // Accuracy: missing accuracy → 255; missing roll → 0 → hit.
+  const missAcc = accuracy.hit({ accuracyMod: 100, evasionMod: 100, roll: 0 });
+  assert.strictEqual(missAcc.effectiveAccuracy, 255, 'missing accuracy defaults to 255');
+  assert.strictEqual(missAcc.hit, true, 'roll 0 hits a default accuracy');
+  const missRoll = accuracy.hit({ accuracy: 255, accuracyMod: 100, evasionMod: 100 });
+  assert.strictEqual(missRoll.hit, true, 'missing roll defaults to 0 and hits');
+
+  // Crit: missing roll → 255 → almost never a crit.
+  const noRoll = crit.check({ baseSpeed: 100, roll: undefined });
+  assert.strictEqual(noRoll.isCrit, false, 'missing crit roll defaults to 255');
+
+  // Status: paralysisStop(undefined) → false (255 < 63), not true.
+  assert.strictEqual(status.paralysisStop(undefined), false,
+    'undefined paralysis roll coerces to 255 → not stopped');
+  assert.strictEqual(status.paralysisStop(null), false,
+    'null paralysis roll coerces the same way');
+
+  // confusionTick forwards atk/def aliases into Damage.compute.
+  const selfHit = status.confusionTick(
+    { turnsRemaining: 3, level: 50, atk: 100, def: 100 },
+    0,
+  );
+  assert.strictEqual(selfHit.selfHit, true, 'roll 0 self-hits');
+  assert.ok(selfHit.selfDamage > 0, 'atk/def aliases produce self-hit damage');
+});

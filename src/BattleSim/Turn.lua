@@ -92,6 +92,7 @@ M.MONS_PER_PARTY      = 6     -- Config.BATTLE_MON_MAX
 M.FIGHTERS_PER_SIDE   = 2     -- Config.COOP_SIDE
 M.CHOICE_TIMEOUT      = 60    -- Config.BATTLE_CHOICE_TIMEOUT
 M.RECONNECT_GRACE     = 60    -- Config.BATTLE_RECONNECT_GRACE
+M.RESOLVE_TIMEOUT     = 30    -- Config.BATTLE_RESOLVE_TIMEOUT
 
 -- Below this the side-a member of a tied group moves first.
 M.TIE_BREAK_ROLL = 128
@@ -261,7 +262,7 @@ local function partyIndexOf(fighter, wireSlot)
 end
 
 -- opts:
---   id, mode, seed, chart, choiceTimeout, reconnectGrace, now
+--   id, mode, seed, chart, choiceTimeout, reconnectGrace, resolveTimeout, now
 --   sides = { a = { { playerId, name, mons } }, b = { ... } }
 --
 -- Returns the battle, or nil plus a reason string.  A reason and not a raise:
@@ -280,6 +281,7 @@ function M.create(opts)
     chart          = type(opts.chart) == "table" and opts.chart or nil,
     choiceTimeout  = max(0, int(opts.choiceTimeout, M.CHOICE_TIMEOUT)),
     reconnectGrace = max(0, int(opts.reconnectGrace, M.RECONNECT_GRACE)),
+    resolveTimeout = max(0, int(opts.resolveTimeout, M.RESOLVE_TIMEOUT)),
     now            = max(0, int(opts.now, 0)),
     phase          = "choice",
     turn           = 1,
@@ -289,6 +291,7 @@ function M.create(opts)
     byId           = {},
     bySide         = { a = {}, b = {} },
     result         = nil,
+    resolveDeadline = nil,
   }, Battle)
 
   local sides = type(opts.sides) == "table" and opts.sides or {}
@@ -575,6 +578,7 @@ end
 
 function Battle:_openTurn()
   self.phase = "choice"
+  self.resolveDeadline = nil
   for _, fighter in ipairs(self.fighters) do fighter.choice = nil end
   self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
   self:_emit("turn", { amount = self.turn })
@@ -615,6 +619,11 @@ end
 
 function Battle:_resolveTurn()
   self.phase = "resolving"
+  -- Armed for the rare case resolution does not leave this phase in the same
+  -- call -- a throw mid-resolve used to leave the field wedged forever, and
+  -- Hub.receive now contains those throws so the clock has to finish the job.
+  self.resolveDeadline = (self.resolveTimeout > 0)
+    and (self.now + self.resolveTimeout) or nil
 
   if self:_resolveRuns() then return end
   self:_resolveSwitches()
@@ -929,6 +938,7 @@ function Battle:_finish(outcome, winners, losers, reason)
   }
   self.phase = "over"
   self.deadline = nil
+  self.resolveDeadline = nil
   self:_emit("over", { text = reason })
   return self.result
 end
@@ -1002,6 +1012,16 @@ function Battle:tick(nowSeconds)
     return true
   end
 
+  -- A turn left in `resolving` -- typically after a throw the hub contained --
+  -- has no player to wait on, so the ceiling is the only way out. `timeout` is
+  -- the existing reason: Wire already phrases it, and a stuck resolve is not
+  -- something a screen can usefully distinguish from an unanswered turn.
+  if self.phase == "resolving" and self.resolveDeadline
+     and self.now >= self.resolveDeadline then
+    self:_finish("draw", nil, nil, "timeout")
+    return true
+  end
+
   -- The choice clock is suspended while anybody is away; the grace above is
   -- the only deadline running for them.
   if self.phase == "choice" and self.deadline and self.now >= self.deadline
@@ -1069,6 +1089,7 @@ function Battle:snapshot()
     seq = self.seq,
     now = self.now,
     deadline = self.deadline,
+    resolveDeadline = self.resolveDeadline,
     over = self.result ~= nil,
     reason = self.result and self.result.reason or nil,
     rngState = self.rng:state(),

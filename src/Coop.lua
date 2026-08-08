@@ -1262,6 +1262,15 @@ function M:onBattleOutcome(msg)
   if outcome and self.state then self.state:onBattleOutcome(outcome) end
 end
 
+-- Transport became ready again under a live mediated co-op fight.
+function M:onTransportReady()
+  local state = self.state
+  if state and state.mediated and state.onTransportReady then
+    return state:onTransportReady()
+  end
+  return false
+end
+
 -- Do we have everything the field needs yet?  Only the host asks -- it is the
 -- one that builds the field -- and it answers by counting the humans in the
 -- plan against the parties in hand.

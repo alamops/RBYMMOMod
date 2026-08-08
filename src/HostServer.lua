@@ -179,6 +179,12 @@ function M:start(port, maxPlayers, joinCode)
           tostring(name), tostring(clientId))
       end
     end,
+    onHandlerError = function(msgType, clientId, err)
+      mod.log:warn("hub handler %s failed for player %s (%s); the message was "
+        .. "dropped and the hub kept running -- ask them to reconnect if a "
+        .. "battle stalled, and report it if it repeats",
+        tostring(msgType), tostring(clientId), tostring(err))
+    end,
   })
   self.conns = {}
   self.running = true

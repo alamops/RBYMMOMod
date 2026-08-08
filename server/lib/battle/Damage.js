@@ -30,6 +30,10 @@
  * The one Gen1 behaviour deliberately *not* modelled is the shortcut where a
  * damage of 1 skips the random roll; the fixture says so in its own notes, and
  * the min-1 clamp below is applied unconditionally instead.
+ *
+ * Edge inputs match Lua's Damage.lua: missing level → 1, atk/def/typeEff
+ * aliases, a bare number typeEffect, and nonsensical values coerced rather than
+ * producing NaN.
  */
 
 const ROLL_MIN = 217;
@@ -40,12 +44,43 @@ const STAT_CAP = 255;
 // intermediate is on the order of a few million), so this is exact.
 const idiv = (a, b) => Math.floor(a / b);
 
+// Lua's `int(value, fallback)`: tonumber, reject NaN, floor.
+function int(value, fallback) {
+  const n = Number(value);
+  if (value === null || value === undefined || Number.isNaN(n)) return fallback;
+  if (typeof value === 'boolean') return fallback;
+  return Math.floor(n);
+}
+
+// Reads a stat off either spelling. `attack`/`defense` is what the wire and
+// the fixtures use; `atk`/`def` is what the engine's battler tables use.
+function stat(source, long, short, fallback) {
+  if (!source || typeof source !== 'object') return fallback;
+  let value = source[long];
+  if (value === undefined || value === null) value = source[short];
+  return int(value, fallback);
+}
+
+// Normalises whatever the caller had to hand into a list of percents: a bare
+// number is a single step, a list is taken as written, nil is neutral.
+function percents(effect) {
+  if (effect === undefined || effect === null) return [100];
+  if (typeof effect === 'number') return [Math.floor(effect)];
+  if (!Array.isArray(effect)) return [100];
+  const list = [];
+  for (let i = 0; i < effect.length; i += 1) {
+    list.push(int(effect[i], 100));
+  }
+  if (list.length === 0) return [100];
+  return list;
+}
+
 // Both stats fall together when either overflows -- see the header. Defence
 // floors at 1 either way: it is a divisor, and a zero one would take the whole
 // turn machine down rather than dealing a big number.
 function clampStats(attack, defense) {
-  const a = Math.max(0, attack || 0);
-  const d = Math.max(0, defense === undefined ? 1 : defense);
+  const a = Math.max(0, int(attack, 0));
+  const d = Math.max(0, int(defense, 1));
   if (a > STAT_CAP || d > STAT_CAP) {
     return {
       attack: Math.max(1, idiv(a, 4)),
@@ -56,9 +91,11 @@ function clampStats(attack, defense) {
   return { attack: a, defense: Math.max(1, d), statClamped: false };
 }
 
-// A crit doubles the level here, not the finished damage.
+// A crit doubles the level here, not the finished damage. Missing level → 1,
+// matching Lua's levelTerm(int(level, 1)).
 function levelTerm(level, crit) {
-  const L = crit ? level * 2 : level;
+  let L = Math.max(0, int(level, 1));
+  if (crit) L *= 2;
   return idiv(2 * L, 5) + 2;
 }
 
@@ -73,9 +110,9 @@ function applyStab(d) {
 // Returns null on immunity so the caller can tell "zero because immune" from
 // "zero because the numbers came out that way" -- only the first stops the
 // rest of the chain.
-function applyTypeEffect(d, percents) {
+function applyTypeEffect(d, list) {
   let out = d;
-  for (const pct of percents) {
+  for (const pct of list) {
     if (pct === 0) return null;
     out = idiv(out * pct, 100);
   }
@@ -83,33 +120,35 @@ function applyTypeEffect(d, percents) {
 }
 
 function applyRoll(d, roll) {
-  return Math.max(1, idiv(d * roll, ROLL_MAX));
+  return Math.max(1, idiv(d * int(roll, ROLL_MAX), ROLL_MAX));
 }
 
 /*
- * compute({ level, power, attack, defense, stab, typeEffect, crit, roll })
+ * compute({ level, power, attack|atk, defense|def, stab, typeEffect|typeEff,
+ *           crit, roll })
  *
- * `roll` is 217..255, or null to ask for the band instead of a number: then
- * `damage` is null and `minDamage`/`maxDamage` bound it inclusively.
+ * Flat shape for the fixture / hub call sites; aliases and coercion match
+ * Lua's Damage.compute(attacker, defender, move, opts).
  *
- * `typeEffect` is a list of percents already looked up against the type chart
- * by the caller -- this module owns no chart, and cannot, because the chart is
- * the player's own game data.
- *
- * The intermediates come back too. The parity suites assert on them, and when
- * the two runtimes ever do disagree, the intermediate that first differs is
- * the entire bug report.
+ * `roll` is 217..255, or null/undefined to ask for the band instead of a
+ * number: then `damage` is null and `minDamage`/`maxDamage` bound it.
  */
 function compute(input) {
-  const percents = input.typeEffect || [100];
-  const crit = !!input.crit;
+  const src = input || {};
+  const effect = src.typeEffect !== undefined && src.typeEffect !== null
+    ? src.typeEffect : src.typeEff;
+  const list = percents(effect);
+  const crit = !!src.crit;
 
-  const stats = clampStats(input.attack, input.defense);
-  const term = levelTerm(input.level, crit);
-  const base = baseDamage(term, input.power, stats.attack, stats.defense);
+  const rawAttack = stat(src, 'attack', 'atk', 0);
+  const rawDefense = stat(src, 'defense', 'def', 1);
+  const stats = clampStats(rawAttack, rawDefense);
+  const term = levelTerm(src.level, crit);
+  const power = Math.max(0, int(src.power, 0));
+  const base = baseDamage(term, power, stats.attack, stats.defense);
 
-  let modified = input.stab ? applyStab(base) : base;
-  const typed = applyTypeEffect(modified, percents);
+  let modified = src.stab ? applyStab(base) : base;
+  const typed = applyTypeEffect(modified, list);
   const immune = typed === null;
   modified = immune ? 0 : typed;
 
@@ -121,7 +160,7 @@ function compute(input) {
     defense: stats.defense,
     statClamped: stats.statClamped,
     crit,
-    stab: !!input.stab,
+    stab: !!src.stab,
     immune,
     minDamage: immune ? 0 : applyRoll(modified, ROLL_MIN),
     maxDamage: immune ? 0 : applyRoll(modified, ROLL_MAX),
@@ -130,12 +169,12 @@ function compute(input) {
   if (immune) {
     result.roll = null;
     result.damage = 0;
-  } else if (input.roll === null || input.roll === undefined) {
+  } else if (src.roll === null || src.roll === undefined) {
     result.roll = null;
     result.damage = null;
   } else {
-    result.roll = input.roll;
-    result.damage = applyRoll(modified, input.roll);
+    result.roll = int(src.roll, ROLL_MAX);
+    result.damage = applyRoll(modified, result.roll);
   }
 
   return result;
@@ -162,6 +201,8 @@ module.exports = {
   applyTypeEffect,
   applyRoll,
   idiv,
+  int,
+  percents,
   ROLL_MIN,
   ROLL_MAX,
   STAT_CAP,

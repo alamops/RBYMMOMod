@@ -894,3 +894,26 @@ test('a zero-length grace still expires', () => {
   assert.strictEqual(battle.tick(0), true, 'a graceEndsAt of 0 is a deadline, not an absence');
   assert.strictEqual(battle.outcome().outcome, 'forfeit');
 });
+
+test('a wedged resolve aborts on the wall-clock ceiling', () => {
+  const battle = build({
+    id: 'stuck', mode: '1v1', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    resolveTimeout: 30,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  battle.phase = 'resolving';
+  battle.resolveDeadline = battle.now - 1;
+  assert.strictEqual(battle.tick(battle.now), true, 'a past resolveDeadline is a tick that acted');
+  const out = battle.outcome();
+  assert.ok(out, 'the ceiling ends the fight');
+  assert.strictEqual(out.outcome, 'draw', 'as a draw -- nobody won a stuck resolve');
+  assert.strictEqual(out.reason, 'timeout', 'under the existing timeout reason');
+  assert.strictEqual(battle.snapshot().phase, 'over');
+  assert.strictEqual(battle.snapshot().resolveDeadline, null);
+});

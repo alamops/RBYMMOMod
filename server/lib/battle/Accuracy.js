@@ -16,6 +16,9 @@
  * The modifiers are percents applied one at a time and truncated in between,
  * so an accuracy boost followed by an evasion boost is not commutative with
  * itself at every input. Order here is accuracy first, then evasion.
+ *
+ * Edge inputs match Lua: missing accuracy defaults to 255, missing roll
+ * defaults to 0 (so a missing roll hits whenever effective accuracy > 0).
  */
 
 const MIN = 1;
@@ -25,11 +28,19 @@ const idiv = (a, b) => Math.floor(a / b);
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
+function int(value, fallback) {
+  const n = Number(value);
+  if (value === null || value === undefined || Number.isNaN(n)) return fallback;
+  if (typeof value === 'boolean') return fallback;
+  return Math.floor(n);
+}
+
 // Truncating between the two modifiers is the point -- do not fold them into
-// one multiply.
+// one multiply. Missing accuracy → MAX (255), matching Lua.
 function effective(accuracy, accuracyMod, evasionMod) {
-  const withAcc = idiv(accuracy * (accuracyMod === undefined ? 100 : accuracyMod), 100);
-  const withEva = idiv(withAcc * (evasionMod === undefined ? 100 : evasionMod), 100);
+  const acc = Math.max(0, int(accuracy, MAX));
+  const withAcc = idiv(acc * Math.max(0, int(accuracyMod, 100)), 100);
+  const withEva = idiv(withAcc * Math.max(0, int(evasionMod, 100)), 100);
   return clamp(withEva, MIN, MAX);
 }
 
@@ -39,13 +50,16 @@ function effective(accuracy, accuracyMod, evasionMod) {
  * `alwaysHits` skips the roll entirely and reports a null effective accuracy:
  * a move that cannot miss has no accuracy to report, and returning 255 would
  * invite a caller to roll against it and reintroduce the 1-in-256.
+ *
+ * Missing `roll` defaults to 0 (Lua int(roll, 0)), so an omitted roll hits.
  */
 function hit(input) {
-  if (input.alwaysHits) {
+  const src = input || {};
+  if (src.alwaysHits) {
     return { effectiveAccuracy: null, hit: true };
   }
-  const effectiveAccuracy = effective(input.accuracy, input.accuracyMod, input.evasionMod);
-  return { effectiveAccuracy, hit: input.roll < effectiveAccuracy };
+  const effectiveAccuracy = effective(src.accuracy, src.accuracyMod, src.evasionMod);
+  return { effectiveAccuracy, hit: int(src.roll, 0) < effectiveAccuracy };
 }
 
-module.exports = { hit, effective, MIN, MAX };
+module.exports = { hit, effective, int, MIN, MAX };

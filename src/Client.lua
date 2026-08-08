@@ -1584,6 +1584,10 @@ handlers[Wire.WELCOME] = function(game, msg)
   end
   transport:markReady()
   pushPresence(true)
+  -- A mediated fight that survived a brief drop asks the intermediator to
+  -- resume: both hubs already honour mmo.battle_reconnect inside the grace.
+  sessions:onTransportReady()
+  coop:onTransportReady()
   -- Remember the hub, now that it has actually let us in.
   --
   -- Here and not in M.connect, because a dial is not a connection: recording

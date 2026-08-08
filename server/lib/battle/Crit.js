@@ -18,6 +18,9 @@
  * Order matters: Focus Energy divides first, the high-ratio multiplier
  * applies after, and only the final value is clamped -- so the two stack to
  * 96 rather than saturating at 255 and then being quartered to 63.
+ *
+ * Edge inputs match Lua: missing roll defaults to MAX (255), so an omitted
+ * roll almost never crits.
  */
 
 const MIN = 0;
@@ -28,10 +31,17 @@ const idiv = (a, b) => Math.floor(a / b);
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
+function int(value, fallback) {
+  const n = Number(value);
+  if (value === null || value === undefined || Number.isNaN(n)) return fallback;
+  if (typeof value === 'boolean') return fallback;
+  return Math.floor(n);
+}
+
 // opts: { focusEnergy, highCritMove }
 function threshold(baseSpeed, opts) {
   const o = opts || {};
-  let t = idiv(Math.max(0, baseSpeed || 0), 2);
+  let t = idiv(Math.max(0, int(baseSpeed, 0)), 2);
   if (o.focusEnergy) t = idiv(t, 4);
   if (o.highCritMove) t = t * HIGH_RATIO;
   return clamp(t, MIN, MAX);
@@ -44,8 +54,9 @@ function threshold(baseSpeed, opts) {
  * Gen1 crit rate ignores stat stages and paralysis alike.
  */
 function check(input) {
-  const t = threshold(input.baseSpeed, input);
-  return { threshold: t, isCrit: input.roll < t };
+  const src = input || {};
+  const t = threshold(src.baseSpeed, src);
+  return { threshold: t, isCrit: int(src.roll, MAX) < t };
 }
 
-module.exports = { check, threshold, MIN, MAX, HIGH_RATIO };
+module.exports = { check, threshold, int, MIN, MAX, HIGH_RATIO };

@@ -569,15 +569,37 @@ dropped.sessions:onBattleOutcome({
 })
 eq(dropped.sessions.fight.result, "win", "the grace expiring is a win, from the hub")
 
--- ...but the hub going away underneath the fight is, because no outcome is ever
--- coming and the player would be left on a screen with no way off.
+-- ...but the hub going away underneath the fight only narrates: the
+-- intermediator's reconnect grace is still running, and finishing here would
+-- forfeit a fight the player is about to rejoin.
 local lost = harness("host")
 lost.game.input = fakeInput()
 lost.open()
 lost.dead = true
 lost.sessions:update(lost.game, 0)
-check(lost.sessions.fight.finished, "a dead transport ends the fight")
-eq(lost.sessions.fight.result, "draw", "as a draw, which scores nothing")
+check(not lost.sessions.fight.finished,
+      "a dead transport does not close the battle -- the grace is still running")
+check(lost.sessions.fight.awaitingReconnect == true,
+      "and the screen says it is waiting to reconnect")
+
+-- Coming back sends mmo.battle_reconnect once with the battle id.
+lost.dead = false
+lost.sessions:update(lost.game, 0)
+eq(lost.countSent(Wire.BATTLE_RECONNECT), 1,
+   "the ready flip sends mmo.battle_reconnect")
+eq(lost.firstSent(Wire.BATTLE_RECONNECT).battle, "7",
+   "naming the fight that is still on the stack")
+lost.sessions:update(lost.game, 0)
+eq(lost.countSent(Wire.BATTLE_RECONNECT), 1,
+   "and only once per drop cycle")
+
+-- The same hook is reachable directly for a screen with no Sessions wrapper.
+local solo = harness("host")
+solo.open()
+eq(solo.sessions.fight:notifyReconnect(), true,
+   "notifyReconnect is the testable alias")
+eq(solo.countSent(Wire.BATTLE_RECONNECT), 1, "and it puts the same message on the wire")
+eq(solo.sessions.fight:notifyReconnect(), false, "a second call is refused until another drop")
 
 -- Walking off the hub entirely, which is the path Client.disconnect takes.
 local quit = harness("host")

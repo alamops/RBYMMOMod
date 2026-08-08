@@ -408,6 +408,17 @@ M.BATTLE_RECONNECT_GRACE = 60
 -- be retuned for the screen while this one is retuned for the hub.
 M.BATTLE_CHOICE_TIMEOUT = 60
 
+-- How long a turn may sit in `resolving` before the intermediator aborts.
+--
+-- Resolution is normally a single call with no player wait, so this is a wedge
+-- detector rather than a clock anybody watches: half of BATTLE_CHOICE_TIMEOUT,
+-- long enough that a slow host is not punished, short enough that a throw left
+-- mid-resolve (Hub `receive` is pcall'd) cannot freeze the field forever. The
+-- abort reason is the existing `timeout` token -- Wire already has a sentence
+-- for it, and inventing `stuck` would be a phrasebook change for a case the
+-- player cannot tell apart from "nobody answered".
+M.BATTLE_RESOLVE_TIMEOUT = 30
+
 -- The most POKeMON one combatant may bring, which is Gen 1's party size.
 --
 -- COOP_TEAM_MAX's number and COOP_TEAM_MAX's argument -- a bound on a list

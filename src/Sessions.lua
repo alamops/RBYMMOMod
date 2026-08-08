@@ -749,16 +749,33 @@ function M:linkAlive()
   return transport:isReady() == true
 end
 
+-- Transport became ready again (welcome after a blip, or the suite calling
+-- this directly). Resume a live mediated fight with mmo.battle_reconnect.
+function M:onTransportReady()
+  local fight = self.fight
+  if fight and not fight.finished and fight.onTransportReady then
+    return fight:onTransportReady()
+  end
+  return false
+end
+
 function M:update(game, dt)
   -- The mediated fight is driven by the engine's own state stack -- it is a
   -- screen, and screens get their update from up there -- so there is exactly
-  -- one thing left to watch for it: the hub going away underneath it.  Without
-  -- this the outcome that ends the battle never arrives and the player is left
-  -- on a screen with no way off.
+  -- one thing left to watch for it: the hub going away and coming back.
+  -- Finishing on the drop would forfeit a fight the intermediator is holding
+  -- open on BATTLE_RECONNECT_GRACE; narrating and waiting lets onTransportReady
+  -- send mmo.battle_reconnect when the link returns.
   local fight = self.fight
-  if fight and not fight.finished and not self:linkAlive() then
-    fight:finish("draw", "disconnect")
+  local alive = self:linkAlive()
+  if fight and not fight.finished then
+    if not alive then
+      if fight.onTransportLost then fight:onTransportLost() end
+    elseif self.linkWasDown then
+      self:onTransportReady()
+    end
   end
+  self.linkWasDown = not alive
 
   local session = self.active
   if not session then return end

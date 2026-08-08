@@ -384,6 +384,44 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 5b. a throwing handler does not take the hub down
+-- ------------------------------------------------------------------
+
+do
+  local seen = {}
+  local hub = Hub.new({
+    maxPlayers = 4,
+    onHandlerError = function(msgType, clientId, err)
+      seen[#seen + 1] = { msgType = msgType, clientId = clientId, err = tostring(err) }
+    end,
+  })
+  local fight = openFight(hub)
+  local id = fight.id
+  take(fight.ann.peer, Wire.BATTLE_READY)
+  take(fight.bob.peer, Wire.BATTLE_READY)
+
+  -- Inject a boom into the live sim's choice path: the same class of throw a
+  -- wedged Turn/Damage used to kill the LAN host with.
+  local sim = hub.battles[id].sim
+  local real = sim.submitChoice
+  sim.submitChoice = function()
+    error("injected handler boom", 0)
+  end
+  hub:receive(fight.ann.client, {
+    type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0,
+  })
+  eq(#seen, 1, "the throw was reported rather than rethrown")
+  eq(seen[1].msgType, Wire.BATTLE_CHOICE, "naming the handler")
+  ok(hub.clients[fight.ann.client.id] ~= nil,
+     "and the client was not dropped solely for the throw")
+
+  sim.submitChoice = real
+  hub:receive(fight.ann.client, { type = Wire.PING })
+  ok(take(fight.ann.peer, Wire.PONG) ~= nil,
+     "a later message still lands on the same connection")
+end
+
+-- ------------------------------------------------------------------
 -- 6. a fight that was still being assembled is called off, not refereed
 -- ------------------------------------------------------------------
 

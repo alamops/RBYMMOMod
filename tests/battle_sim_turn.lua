@@ -342,6 +342,28 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 3b. a wedged resolve aborts on the wall-clock ceiling
+-- ------------------------------------------------------------------
+
+do
+  local battle = battleOf({ resolveTimeout = 30 })
+  drain(battle)
+  -- Force the stuck state a throw mid-resolve leaves behind: phase resolving,
+  -- deadline already in the past, nothing else to wait on.
+  battle.phase = "resolving"
+  battle.resolveDeadline = battle.now - 1
+  ok(battle:tick(battle.now) == true, "a past resolveDeadline is a tick that acted")
+  local out = battle:outcome()
+  ok(out ~= nil, "the ceiling ends the fight")
+  if out then
+    eq(out.outcome, "draw", "as a draw -- nobody won a stuck resolve")
+    eq(out.reason, "timeout", "under the existing timeout reason")
+  end
+  eq(battle:snapshot().phase, "over", "and the phase settles on over")
+  eq(battle:snapshot().resolveDeadline, nil, "with the deadline cleared")
+end
+
+-- ------------------------------------------------------------------
 -- 4. reconnect inside the window, and the fight carries on
 -- ------------------------------------------------------------------
 

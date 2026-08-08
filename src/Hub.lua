@@ -320,6 +320,11 @@ function M.new(opts)
     -- own log; without this the Lua host was the only one of the two that
     -- saw a name change hands and said nothing.
     onClaim = opts.onClaim,
+    -- Optional, same shape as onDrop: a handler that threw. Hub stays pure
+    -- logic with no logger of its own, so the seam hands the fact to HostServer
+    -- (or a suite) that can name a remediation. Mirror of relay.js handle()'s
+    -- try/catch -- a Turn throw must not take the LAN host down with it.
+    onHandlerError = opts.onHandlerError,
     clock = 0,
   }, M)
 end
@@ -1506,6 +1511,7 @@ function M:tryStartSim(record)
     chart = record.ruleset.chart,
     choiceTimeout = Config.BATTLE_CHOICE_TIMEOUT,
     reconnectGrace = Config.BATTLE_RECONNECT_GRACE,
+    resolveTimeout = Config.BATTLE_RESOLVE_TIMEOUT,
     now = battleSeconds(self.clock),
     sides = { a = roster(record.sides.a), b = roster(record.sides.b) },
   })
@@ -2528,7 +2534,14 @@ function M:receive(client, msg)
   if not (client and self.clients[client.id]) then return end
   if type(msg) ~= "table" or type(msg.type) ~= "string" then return end
   local handler = handlers[msg.type]
-  if handler then handler(self, client, msg) end
+  if not handler then return end
+  -- Contained, matching server/lib/relay.js handle(): a Turn/Damage throw must
+  -- not take the LAN host down. The next message still lands; the fight's own
+  -- resolveDeadline is what finishes a wedge left mid-resolve.
+  local ok, err = pcall(handler, self, client, msg)
+  if not ok and self.onHandlerError then
+    self.onHandlerError(msg.type, client.id, err)
+  end
 end
 
 function M:update(dt)
