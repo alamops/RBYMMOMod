@@ -26,6 +26,20 @@
 -- the battle a replayer sees is the battle the host ran, not an approximation
 -- of it.
 --
+-- ------- ...and why there is now a third path, which is neither
+--
+-- PROTOCOL 10 moved the arithmetic of a *1v1* onto the intermediator, and the
+-- argument it made applies here word for word and one player wider: the cost
+-- above -- "the host decides, and a modified host could decide wrongly" -- is
+-- being paid on a **ranked** match, by three players, against the one client
+-- that is also a competitor in it. So a co-op battle in a mode listed in
+-- `Config.MEDIATED_COOP` uploads what it is bringing and then draws an ordered
+-- `mmo.battle_event` stream, exactly as src/MediatedBattle.lua does; `CoopSim`
+-- is still constructed, still holds the field the screen is drawn from, and is
+-- no longer asked to *decide* anything. See "the intermediator, when there is
+-- one" near the bottom for the whole of it, and `Config.MEDIATED_COOP` for why
+-- the two co-op modes are not both on.
+--
 -- ------- what this covers
 --
 -- All four battle commands, and the whole move-effect surface.
@@ -58,6 +72,10 @@ local Config = need("Config")
 local Wire = need("Wire")
 local CoopSim = need("CoopSim")
 local CoopField = need("CoopField")
+-- The 1v1 mediated client, for its snapshots and its senders rather than for
+-- its screen: what a party looks like on the wire must not depend on how many
+-- monsters are on the field.
+local Mediated = need("MediatedBattle")
 
 local M = {}
 M.__index = M
@@ -198,6 +216,16 @@ end
 --   host    true if this client runs the simulation
 --   net     { send = fn(payload), poll = fn() -> { payload } } or nil
 --   onDone  called with "win"|"loss"|"draw" once the battle ends
+--
+-- ...and four more for a fight the intermediator may referee. All optional: a
+-- screen built without them is the client-simulated battle this file always was.
+--   transport the mod's hub connection, for the mmo.battle_* types. Not `net`:
+--             those are addressed to the hub itself rather than relayed to the
+--             other three, which is the whole difference between the two paths
+--   battleId  the hub's id for this fight, which every mediated message names
+--   selfId    this client's own hub id, which is how an outcome naming four
+--             players is read as a result for one
+--   mode      "coop_npc" | "coop_pvp", the hub's word for which shape this is
 function M.new(game, opts)
   local eng = loadEngine()
   if not eng then return nil, "2-on-2 battles need the engine's battle modules." end
@@ -232,6 +260,23 @@ function M.new(game, opts)
     ranksPoints = opts.ranksPoints and true or false,
     net = opts.net,
     onDone = opts.onDone,
+    -- ------- the intermediator's half, all of it inert until it answers
+    --
+    -- `mediated` is the flag every cut below is gated on, and it is set by
+    -- mmo.battle_ready and by nothing else -- not by the mode, not by having a
+    -- transport. Until the hub says the field is assembled, this screen is the
+    -- client-simulated battle it always was, which is what makes the two paths
+    -- coexist for exactly as long as it takes one fight to become refereed (the
+    -- same rule src/Hub.lua's COOP_RELAY handler states from the other side).
+    transport = opts.transport,
+    battleId = opts.battleId,
+    selfId = opts.selfId,
+    mode = opts.mode,
+    mediated = false,
+    medUploaded = false,
+    medPending = {},   -- rows built from events, played when the turn closes
+    medSeq = 0,        -- the highest event sequence applied
+    medGaps = 0,       -- events that arrived out of order
     phase = "intro",
     moveIndex = 1,
     targetIndex = 1,
@@ -424,6 +469,11 @@ function M:enter()
   self.phase = "messages"
   self.after = "choose"
   self:announce("coop_battle_started")
+  -- ...and this is where a refereed fight is offered its field. Last, because
+  -- everything above is what the player sees either way: an upload that goes
+  -- nowhere leaves a client-simulated battle rather than a screen that never
+  -- opened.
+  self:uploadMediated()
 end
 
 -- The fanfare, once, when the result is known.
@@ -1369,9 +1419,36 @@ M.RUN_ANSWERS = RUN_ANSWERS
 local RUN_DEFAULT = 2   -- "NO"
 M.RUN_DEFAULT = RUN_DEFAULT
 
+-- ------- and on a refereed fight the partner cannot be asked at all
+--
+-- **This is a real loss, so it is written down rather than worked around.** The
+-- ask and the answer ride `mmo.coop_relay`, and both hubs stop forwarding a
+-- co-op payload the moment they start refereeing the fight (src/Hub.lua's
+-- COOP_RELAY handler) -- so on the mediated path there is no channel left to put
+-- a question on. There is no room in the mmo.battle_* vocabulary for one either:
+-- a choice says what was pressed, and "may I?" is not a choice.
+--
+-- What is kept is the half of the consent flow that was protecting against an
+-- accident rather than against a partner: the picker, and its cursor starting on
+-- NO. See RUN_DEFAULT -- the prompt lands at the exact moment all four players
+-- are holding A through the last turn's narration, and one already-travelling
+-- press must not forfeit a ranked battle. So the player is asked to confirm,
+-- with the safe answer under the cursor, and their partner is not consulted.
+--
+-- Restoring the veto is an additive wire change (a run-consent pair inside the
+-- battle vocabulary, refereed like everything else) and belongs with whoever
+-- teaches the intermediator about it.
+function M:mediatedRunAsk()
+  local partner = self:partnerOf(self:mySlot())
+  self.runAsk = { role = "confirming", name = partner and partner.name,
+                  index = RUN_DEFAULT, clock = 0 }
+  return true
+end
+
 -- Ask the partner. Commits nothing.
 function M:askToRun()
   if not self:partyBattle() then return false end
+  if self.mediated then return self:mediatedRunAsk() end
   local partner = self:partnerOf(self:mySlot())
   self.runAsk = { role = "asking", slot = partner and partner.index,
                   name = partner and partner.name }
@@ -1388,6 +1465,18 @@ end
 function M:answerRun(ok)
   if not self.runAsk then return false end
   ok = ok and true or false
+  -- A refereed fight has one answer to give and one place to give it: the run is
+  -- a choice like any other, and what it costs -- one side leaving loses the
+  -- battle with reason `run` -- is the intermediator's policy rather than this
+  -- screen's. A no is simply the prompt coming down.
+  if self.mediated then
+    self.runAsk = nil
+    if not ok then return true end
+    self.runAsk = { role = "fleeing" }
+    self:markActed(self.mine)
+    self.phase = "wait"
+    return self:sendMediatedChoice({ kind = "run" })
+  end
   -- A yes leaves this player watching for the host's closing events; a no puts
   -- them straight back where they were, because nothing about their own turn
   -- was ever touched.
@@ -1451,6 +1540,12 @@ end
 -- out.
 function M:resolveFlee(index)
   if not (self.host and self.sim) or self.result then return false end
+  -- Not on a refereed fight: this broadcasts a resolved batch, which is the one
+  -- thing a mediated host may not do. Unreachable today -- `askToRun` never
+  -- reaches here and the relay carries no consent -- and guarded anyway, because
+  -- what it would produce is four clients ending a battle the referee is still
+  -- running.
+  if self.mediated then return false end
   local slot = self.sim:slot(index)
   if not (slot and slot.side) then return false end
 
@@ -1487,7 +1582,11 @@ function M:updateRunAsk(input, dt)
   -- behind a batch of messages (see the branch order in `update`).
   ask.clock = (ask.clock or 0) + (dt or 0)
 
-  if ask.role == "deciding" then
+  -- "confirming" is the mediated path's own question (see `mediatedRunAsk`) and
+  -- is driven by exactly the same two answers, the same safe default and the
+  -- same settle floor -- only who is being asked differs, and that is a fact
+  -- about the words on the box rather than about the picker.
+  if ask.role == "deciding" or ask.role == "confirming" then
     ask.index = ask.index or RUN_DEFAULT
     local moved = gridPress(ask.index, #RUN_ANSWERS, input)
     if moved then
@@ -1539,6 +1638,12 @@ function M:drawRunAsk()
   local ask = self.runAsk
   if not ask then return end
   local name = ask.name
+  if ask.role == "confirming" then
+    -- Its own words, because the honest sentence is different: nobody is being
+    -- asked for permission, and a title that named the partner would be
+    -- promising a veto they are not being given.
+    return self:drawList(RUN_ANSWERS, ask.index or RUN_DEFAULT, "RUN AWAY?")
+  end
   if ask.role == "deciding" then
     -- Short on purpose: the title row is one line of the box, and at NAME_MAX
     -- "%s: RUN?" is eighteen columns exactly.
@@ -1563,6 +1668,14 @@ end
 -- else's choices: the turn is already paused waiting for it, and holding it
 -- back would deadlock the pause against itself.
 function M:sendAction(action)
+  -- A refereed fight never asks: src/BattleSim/Turn.lua sends the next living
+  -- monster out in party order the moment one falls, so no slot is ever left
+  -- `awaiting` and this picker is never opened. Answered as a switch anyway, so
+  -- a screen that somehow reached it puts a real choice on the wire rather than
+  -- an `act` the hub drops.
+  if self.mediated then
+    return self:sendMediatedChoice({ kind = "switch", index = action.index })
+  end
   if self.host then return self:applyReplace(action) end
   if self.net then self.net.send({ t = "act", action = action }) end
 end
@@ -1599,6 +1712,14 @@ function M:commit(action)
   -- Your own answer is in, whoever else's is not -- which is what keeps the
   -- wait line from naming the person reading it.
   self:markActed(action.slot)
+  -- ------- and on the mediated path that is the whole of it
+  --
+  -- One choice, addressed to the referee, and nothing fanned out to the other
+  -- three: they will see what this turn did when the intermediator tells them,
+  -- which is the only account any of the four gets. Taken before the `act`
+  -- below rather than beside it -- sending both would put a second, unrefereed
+  -- opinion about this turn on a wire that has already cut it.
+  if self.mediated then return self:sendMediatedChoice(action) end
   -- ...and everybody else is told, **including when this client is the host**.
   --
   -- The host used to file straight into `pending` and return, so its own
@@ -1627,6 +1748,19 @@ end
 -- would be a second opinion about what the same NPC did.
 function M:tryResolve()
   if not self.host then return end
+  -- ------- and the host stops deciding the moment somebody else is
+  --
+  -- The single cut that makes a co-op battle mediated. Everything below rolls
+  -- dice: `npcAction`, `resolveTurn`, and the `res` broadcast that three other
+  -- clients apply as truth. A second set of those beside the intermediator's is
+  -- not a fallback, it is the desync it looks like -- two fields diverging from
+  -- the same turn, and both hubs would refuse the broadcast anyway.
+  --
+  -- Guarded here rather than at every caller because there are five of them
+  -- (`commit`, `applyReplace`, `drainNet`'s `act`, `autoPickLate`, and its own
+  -- recursion) and one of them missed is a host quietly refereeing beside the
+  -- referee.
+  if self.mediated then return end
   -- Nobody takes a turn while a slot is still empty. The player choosing has
   -- nothing on the field to act with, and resolving around them would spend
   -- the other three's moves on a field that is about to change.
@@ -1708,6 +1842,19 @@ function M:tryResolve()
   self:playEvents(events)
 end
 
+-- Is this client applying somebody else's arithmetic rather than its own?
+--
+-- True for the three clients that are not the host, and true for **all four** on
+-- the mediated path -- the host included, because a refereed turn was resolved
+-- somewhere else and its `sim` never touched the numbers the events carry. The
+-- two branches in `playEvents` that ask are exactly the two that write sim truth
+-- (`damage` applies HP, `send` swaps a battler), and a host that skipped them
+-- because it "already did it" would draw a field nobody ever changed: bars that
+-- never move, and a monster that faints on three screens out of four.
+function M:replaying()
+  return (not self.host) or self.mediated
+end
+
 -- Apply a turn's events -- the host to its own screen, everybody else to
 -- theirs. One function for both, which is what makes a replay and a simulation
 -- land on the same screen rather than merely a similar one.
@@ -1769,7 +1916,7 @@ function M:playEvents(events)
       -- dropped or reordered event cannot leave a bar drifting away from the
       -- host's.
       local slot = self.sim:slot(event.slot)
-      if slot and slot.battler and not self.host then
+      if slot and slot.battler and self:replaying() then
         slot.battler.mon.hp = event.hp
       end
       -- The number above is the truth and it lands now. The *bar* is a queued
@@ -1858,7 +2005,7 @@ function M:playEvents(events)
       local leaving = showing(event.slot)
       -- Sim truth, applied *now* rather than in the queue: a replayer's
       -- signature has to match the host's the moment the event is applied.
-      if slot and not self.host then self.sim:sendOut(slot, event.index) end
+      if slot and self:replaying() then self.sim:sendOut(slot, event.index) end
       -- ...and the *display* follows at its own pace. The outgoing monster is
       -- held in the shadow so it keeps being drawn -- and keeps draining and
       -- sinking -- while its rows play, and the new one is queued behind them
@@ -2887,6 +3034,24 @@ local WEDGE_GRACE = Config.COOP_ASK_GRACE
 
 function M:tickStalls(dt)
   if self.result or self.phase == "over" then return end
+  -- ------- and none of these clocks belong to a refereed fight
+  --
+  -- All three of them are about a *client* that has stopped answering, and all
+  -- three act over mmo.coop_relay -- the forced send-out, the resync request,
+  -- the "cut short" draw. On the mediated path the relay is cut at the hub, the
+  -- client that used to decide decides nothing, and the two clocks that matter
+  -- (BATTLE_CHOICE_TIMEOUT and BATTLE_RECONNECT_GRACE) are the
+  -- intermediator's -- which is also the only party that can see whether
+  -- somebody has really gone. What is left here would be a screen declaring a
+  -- battle over that the referee is still running, and then hearing the outcome.
+  --
+  -- The one thing kept is the number on screen: `waitShown` is what the wait
+  -- line counts, and a player waiting on a refereed turn is owed it just as
+  -- much.
+  if self.mediated then
+    self.waitShown = (self.waitShown or 0) + (dt or 0)
+    return
+  end
 
   -- ------- the clock the *screen* reads, and it starts at the handover
   --
@@ -3057,8 +3222,13 @@ end
 -- Host-only. It is the host that enforces it; the number the other three see
 -- is a display of the same budget (see `waitLine`), started from their own
 -- side of the same event.
+--
+-- Never on the mediated path: the deadline it arms is enforced by
+-- `autoPickLate`, which resolves a turn, and the intermediator is already
+-- holding its own BATTLE_CHOICE_TIMEOUT over the same turn. Two deadlines
+-- racing decide the turn on whichever fires first.
 function M:openTurn()
-  if not self.host or self.result then return end
+  if not self.host or self.result or self.mediated then return end
   self.turnOpened = 0
 end
 
@@ -3081,6 +3251,10 @@ end
 function M:autoPickLate()
   if not (self.host and self.sim) then return false end
   if self.result then return false end
+  -- The intermediator's clock, not ours -- see `openTurn`. Belt to that brace:
+  -- `tickStalls` is the only caller and it returns before reaching here, so this
+  -- is for the day something else fires the deadline.
+  if self.mediated then return false end
   -- ------- nobody is late during the narration
   --
   -- The messages phase is not a wait for an answer: it is the turn *before*
@@ -3576,6 +3750,431 @@ function M:drainNet()
       end
     end
   end
+end
+
+-- ------- the intermediator, when there is one
+--
+-- The third path promised in the header, and the shape of it is deliberately the
+-- same three jobs src/MediatedBattle.lua does for a 1v1:
+--
+--   1. upload what we are bringing -- `mmo.battle_party` per seat, and on the
+--      host `mmo.battle_ruleset` -- before the fight opens;
+--   2. put a choice on the wire when a turn opens;
+--   3. apply the ordered `mmo.battle_event` stream to a screen.
+--
+-- What is *not* here is a second renderer. Every event is translated into the
+-- co-op event vocabulary `playEvents` already speaks and handed to it, so a
+-- refereed turn drains through the same queue, the same bar animations, the same
+-- faint slides and the same message dwell as a host-simulated one. That is the
+-- point: a player must not be able to tell which of the two ran their battle,
+-- and the way to guarantee that is for there to be one screen rather than two
+-- that look alike.
+--
+-- The translation is the whole of the risk, so the two readings that are easy to
+-- get backwards are named:
+--
+--   * a **field slot** on the wire is 0..3 (side a takes 0 and 1, side b takes 2
+--     and 3, per src/BattleSim/events.lua) while this screen numbers its slots
+--     1..4 in a1,a2,b1,b2 order. They are not the same number and the map
+--     between them is built from the hub's own roster, not from the arithmetic
+--     that happens to line up today -- see `medMap`.
+--   * a `switch` **choice** names a party index; a `send` **event** names a field
+--     slot. Same word, two numbers.
+--
+-- Batching matters as much as translation. Events arrive one per message, and
+-- `playEvents` closes every open menu -- so applying them one at a time would
+-- take the move list away from a player mid-decision every time the referee said
+-- anything. They are collected instead and played when the referee closes the
+-- batch (`turn`, or `over`), which makes an arriving turn look exactly like the
+-- single `res` the client-simulated path sends.
+
+-- Is this mode refereed at all? See Config.MEDIATED_COOP for why the answer is
+-- not simply yes.
+function M.mediates(mode)
+  return (Config.MEDIATED_COOP or {})[mode] == true
+end
+
+-- ------- 1. what we are bringing
+
+-- The NPC side's team, as one party in the order the trainer would send it out.
+--
+-- Re-interleaved, because that is how it was split: src/Coop.lua's `npcSide`
+-- deals the trainer's party alternately into the two ownerless slots so that a
+-- pair of players meets a pair of monsters. Taking one from each slot in turn
+-- gives back the original order -- and order is the whole of what is at stake
+-- here, because the referee sends the next living monster out in party order and
+-- never asks. Concatenating instead would have a gym leader lead with the
+-- monster it meant to finish on.
+--
+-- One party and not two, because the intermediator seats one npc: see
+-- Config.MEDIATED_COOP's first reason.
+function M:npcMons()
+  if not self.sim then return nil end
+  local parties = {}
+  for _, slot in ipairs(self.sim.slots or {}) do
+    if slot.owner == nil then parties[#parties + 1] = slot.party or {} end
+  end
+  if #parties == 0 then return nil end
+
+  local flat, index = {}, 1
+  while true do
+    local took = false
+    for _, party in ipairs(parties) do
+      local mon = party[index]
+      if mon then
+        flat[#flat + 1] = mon
+        took = true
+      end
+    end
+    if not took then break end
+    index = index + 1
+  end
+  return Mediated.snapshotMons(self.game, flat)
+end
+
+-- Offer this fight to the intermediator.
+--
+-- Idempotent, and silent about every reason it might decline: a mode that is not
+-- refereed, a screen with no hub connection, a battle the hub never named. All
+-- three leave `mediated` false, which is the client-simulated battle this file
+-- always was -- so declining costs nothing and is not worth a line in anybody's
+-- log.
+--
+-- The party uploaded is the slot's, not `game.save.party`. They are the same
+-- table for our own slot (src/Coop.lua hands the live party in, so a co-op
+-- battle marks the save the way any trainer battle does) -- but the slot is what
+-- is actually on the field, and reading it is what lets a screen built with no
+-- save upload at all.
+function M:uploadMediated()
+  if self.medUploaded then return false end
+  if not (self.transport and self.battleId and self.sim) then return false end
+  if not M.mediates(self.mode) then return false end
+
+  local mine = self:mySlot()
+  if not (mine and mine.side) then return false end
+
+  local mons = Mediated.snapshotMons(self.game, mine.party)
+  if #mons == 0 then
+    -- Uploading nothing would leave the hub holding a seat open and the other
+    -- players watching a fight that never assembles. Said out loud, and the
+    -- client-simulated path left standing underneath -- which is a battle, and
+    -- is strictly better than none.
+    mod.log:warn("no POKeMON could be described for a refereed 2-on-2, so this "
+      .. "battle stays on the host-simulated path; check the party from "
+      .. "START > POKeMON and report this if it is not empty")
+    return false
+  end
+
+  self.medUploaded = true
+  if self.host then Mediated.sendRuleset(self.transport, self.game) end
+  Mediated.sendParty(self.transport, self.battleId, mons, mine.side)
+
+  -- ...and the trainer's team, from the host alone. `Hub:battleSeat` maps a
+  -- side-"b" party from the host of a coop_npc onto the synthetic npc seat
+  -- rather than displacing the host's own, which is why this can be a second
+  -- mmo.battle_party on the same connection.
+  if self.host and self.mode == "coop_npc" then
+    local npc = self:npcMons()
+    if npc and #npc > 0 then
+      Mediated.sendParty(self.transport, self.battleId, npc, "b")
+    else
+      mod.log:warn("the trainer's party could not be described for a refereed "
+        .. "2-on-2, so this battle stays on the host-simulated path -- report "
+        .. "which trainer it was")
+    end
+  end
+  return true
+end
+
+-- ------- 2. the field is assembled
+
+-- Which co-op slot each field slot is, and the reverse.
+--
+-- Built from the roster the hub broadcast rather than from `field + 1`, even
+-- though that is what it comes to for a four-player fight: the arithmetic is only
+-- right while both sides list their members in the order this screen's slots were
+-- built in, and neither the hub nor this file promises that -- the ids come from
+-- a party roster on one side and a co-op ask on the other.
+--
+-- **Side b of a coop_npc is deliberately not read off the roster.** The npc seat
+-- is not an id a client may address, so `tryStartSim` filters it out and
+-- advertises the host instead (a side emptied by the filter is announced as the
+-- connection any choice for it would arrive from). Taken literally that would
+-- map the trainer's field slot onto the host's own box. So an advertised id that
+-- does not own a slot *on that side* falls through to the ownerless slots on it,
+-- in field order, which is exactly what the npc seat is.
+function M:medMap(sides)
+  local byField, byIndex = {}, {}
+  if not self.sim then return byField, byIndex end
+  for _, side in ipairs({ "a", "b" }) do
+    local ids = (type(sides) == "table" and sides[side]) or {}
+    -- Config.COOP_SIDE is the same 2 that src/BattleSim/events.lua mirrors as
+    -- SIDE_SLOTS; one side's worth of field slots is what separates the bases.
+    local base = (side == "b") and Config.COOP_SIDE or 0
+    local spare = {}
+    for _, slot in ipairs(self.sim.slots or {}) do
+      if slot.side == side and slot.owner == nil then spare[#spare + 1] = slot.index end
+    end
+    for i = 1, #ids do
+      local field = base + i - 1
+      local owned = self:slotOwnedBy(ids[i])
+      local index = (owned and owned.side == side) and owned.index
+        or table.remove(spare, 1)
+      if index then
+        byField[field] = index
+        byIndex[index] = field
+      end
+    end
+  end
+  return byField, byIndex
+end
+
+-- The hub has the parties and the chart; from here it decides everything.
+--
+-- `mySide` is **not** re-derived from the roster, unlike src/MediatedBattle.lua's
+-- `onReady` -- for the coop_npc reason `medMap` gives, and because it does not
+-- have to be: this screen was built from a field description that already states
+-- which side every slot is on, agreed by all four clients before anybody
+-- uploaded anything.
+function M:onBattleReady(msg)
+  if self.mediated or self.result then return false end
+  if not (self.battleId and msg.battle == self.battleId) then return false end
+  if not (self.sim and M.mediates(self.mode)) then return false end
+
+  self.mediated = true
+  self.medSlots, self.medFields = self:medMap(msg.sides)
+
+  -- Everything the client-simulated path had in flight belongs to a turn that is
+  -- now never going to be resolved here. Dropped rather than left: `pending`
+  -- would be filed into a `resolveTurn` that no longer runs, `turnOpened` arms a
+  -- deadline the referee is already holding, and a consent ask has lost the relay
+  -- it was going to be answered over.
+  self.pending = {}
+  self.acted = nil
+  self.runAsks = nil
+  self.turnOpened = nil
+  self.runAsk = nil
+  return true
+end
+
+-- ------- 3. the event stream
+
+-- The reasons a refereed fight ends that this screen has a sentence for. An
+-- unknown token -- a newer intermediator naming something this build cannot
+-- phrase -- is silent rather than printed raw: the result is the part that
+-- matters and it has already landed.
+local MED_REASONS = {
+  timeout    = "Nobody answered\nin time.",
+  disconnect = "The link was lost.",
+  run        = "Someone ran away!",
+  forfeit    = "Someone gave up.",
+  agree      = "The battle was\ncalled off.",
+}
+
+-- One wire event, as rows `playEvents` understands.
+function M:medRows(msg)
+  local rows = {}
+  local function say(text)
+    if type(text) == "string" and text ~= "" then
+      rows[#rows + 1] = { kind = "msg", text = text }
+    end
+  end
+
+  local index = self:medSlotOf(msg)
+  local slot = index and self.sim:slot(index)
+  local kind = msg.t
+
+  if kind == "msg" then
+    say(msg.text)
+
+  elseif kind == "send" then
+    -- The referee narrates a monster by name and never by party position, so
+    -- the position is ours to find -- and it has to be found, because the row
+    -- `playEvents` wants is what tells `sim:sendOut` which battler to build.
+    -- A name that matches nothing is a send-out this screen cannot draw; the
+    -- line is still printed, so the field being one monster behind at least has
+    -- an explanation on it.
+    local at = slot and self:medPartyIndex(slot, msg.text)
+    say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
+      tostring(msg.text)))
+    if at then rows[#rows + 1] = { kind = "send", slot = index, index = at } end
+
+  elseif kind == "damage" or kind == "drain" then
+    -- The resulting HP and never the amount, which is the rule the co-op
+    -- `damage` row already follows and for the same reason: a dropped or
+    -- reordered event cannot leave a bar drifting away from the referee's. A
+    -- `drain` is HP that moved *onto* a slot, so it is the same row -- the
+    -- number is where that slot now stands either way.
+    if index and msg.hp then
+      rows[#rows + 1] = { kind = "damage", slot = index, hp = msg.hp }
+    end
+
+  elseif kind == "faint" then
+    if index then rows[#rows + 1] = { kind = "faint", slot = index } end
+    -- The referee's `faint` carries the species and no sentence of its own, so
+    -- the sentence is made here -- in the original's order, which prints the
+    -- line over the top of the monster already sliding down.
+    if msg.text then say(("%s fainted!"):format(tostring(msg.text))) end
+
+  elseif kind == "anim" or kind == "switch" then
+    -- Both are already said in a `msg` beside them -- "X used MOVE" for the
+    -- anim, and the `send` that follows every switch -- so printing their `text`
+    -- (a move id, a species) would say the same thing twice in worse words.
+    --
+    -- The animation itself is deliberately not played. Mapping a move id onto
+    -- the engine's own subanimation is doable and belongs with the renderer, and
+    -- until it is done a *wrong* flash is worse than none.
+
+  elseif kind == "turn" or kind == "over" then
+    -- Neither draws anything. `turn` is the signal that the batch collected so
+    -- far is complete, and `over` says the field is done -- the outcome is a
+    -- separate message and is what this screen actually ends on.
+
+  else
+    -- status, stat, item, run, wait, reconnect: the referee's own sentence is
+    -- the whole of what they contribute to a screen today. The state they
+    -- describe rides on the events beside them -- a status that gated a move is
+    -- followed by the `damage` that did or did not happen.
+    say(msg.text)
+  end
+  return rows
+end
+
+function M:medSlotOf(msg)
+  if msg.slot == nil then return nil end
+  return (self.medSlots or {})[msg.slot]
+end
+
+function M:medFieldOf(index)
+  if index == nil then return nil end
+  return (self.medFields or {})[index]
+end
+
+-- Which of this slot's party the referee means by that name.
+--
+-- Matched through `Wire.name`, because that is what the *uploaded* species went
+-- through: comparing a raw nickname against a sanitised one would miss every
+-- monster whose name carries punctuation the sanitiser drops. A party holding two
+-- monsters with the same name matches the first, which is wrong only for a player
+-- who nicknamed two of their team identically -- and the alternative, counting
+-- faints to track send-outs, is wrong more often and more quietly.
+function M:medPartyIndex(slot, species)
+  if not (slot and type(species) == "string") then return nil end
+  local data = self.game and self.game.data
+  for i, mon in ipairs(slot.party or {}) do
+    local def = data and (data.pokemon or {})[mon.species]
+    local name = mon.nickname
+    if type(name) ~= "string" or name == "" then name = def and def.name end
+    if type(name) ~= "string" or name == "" then name = mon.species end
+    if Wire.name(name) == species then return i end
+  end
+  return nil
+end
+
+-- One thing that happened, in order.
+--
+-- `seq` is what makes the stream a stream, and it is read exactly as
+-- src/MediatedBattle.lua reads it: a sequence already passed is a duplicate and
+-- is dropped, and a jump forward is counted rather than refused. Refusing the
+-- jump would leave the screen waiting on a message that is not coming; counting
+-- it makes a lossy hub visible in a log while the fight -- whose state lives on
+-- the referee -- carries on from what did arrive.
+function M:onBattleEvent(msg)
+  if not self.mediated then return false end
+  if msg.battle ~= self.battleId then return false end
+  if msg.seq <= self.medSeq then return false end
+  if msg.seq > self.medSeq + 1 and self.medSeq > 0 then
+    self.medGaps = self.medGaps + 1
+  end
+  self.medSeq = msg.seq
+
+  for _, row in ipairs(self:medRows(msg)) do
+    self.medPending[#self.medPending + 1] = row
+  end
+  -- The two that close a batch. Everything between them is collected, for the
+  -- reason in this section's header: a menu taken away mid-decision is a turn
+  -- the player cannot answer.
+  if msg.t == "turn" or msg.t == "over" then self:medFlush() end
+  return true
+end
+
+function M:medFlush()
+  local rows = self.medPending
+  self.medPending = {}
+  if #rows == 0 then return false end
+  self:playEvents(rows)
+  return true
+end
+
+-- How it ended, from the only party that knows.
+--
+-- **No mmo.result goes out for this fight** -- see the suppression in
+-- src/Coop.lua's `onBattleOver`. The four-client vote existed because no client
+-- in a host-simulated battle could be believed about its own win; the referee did
+-- every roll, and both hubs ignore a client's report about a battle they ran.
+--
+-- Read from this client's own id, because a 2-on-2 outcome names four players and
+-- two of them are allies -- there is no "the other side" to reason from. Turned
+-- back into a *side* so the ordinary `over` row does the rest: the victory
+-- theme, the unranked note, and the trainer's parting line all hang off it, and
+-- none of them should have a second implementation for a refereed fight.
+function M:onBattleOutcome(msg)
+  if not self.mediated then return false end
+  if msg.battle ~= self.battleId then return false end
+  if self.result then return false end
+
+  local mine = self:mySlot()
+  local mySide = mine and mine.side
+  local result = Mediated.resultForSelf(msg, self.selfId)
+  local winner = "draw"
+  if result == "win" then
+    winner = mySide or "draw"
+  elseif result == "loss" then
+    winner = (mySide == "a") and "b" or "a"
+  end
+
+  self.medPending[#self.medPending + 1] = { kind = "over", winner = winner }
+  local why = MED_REASONS[msg.reason]
+  if why then
+    self.medPending[#self.medPending + 1] = { kind = "msg", text = why }
+  end
+  self:medFlush()
+  return true
+end
+
+-- ------- one turn's intent
+
+-- A co-op action, as a mediated choice.
+--
+-- The three indices go from this screen's 1-based numbering to the wire's
+-- zero-based one, and `target` changes meaning as well as base: a co-op action
+-- names a slot 1..4 on this screen and a choice names a *field* slot. An
+-- unmapped target is sent as no target at all rather than as a guess -- the
+-- referee then aims at the first living foe, which is what a 1v1 does and is the
+-- only honest answer for a slot the roster never described.
+--
+-- `move` is an index into the party's own move list, which is the list that was
+-- uploaded: `liveMoves` reads `battler.curMoves`, and the two can only part
+-- company through Transform or Mimic -- neither of which exists on the referee,
+-- because src/BattleSim/Turn.lua has no move-effect layer at all. So the
+-- alignment holds by construction rather than by luck, and the day an effect
+-- layer arrives this is one of the places that has to be looked at.
+function M:sendMediatedChoice(action)
+  if not (self.mediated and self.battleId) then return false end
+  action = action or {}
+  local kind = action.kind or "move"
+  local fields
+  if kind == "switch" or kind == CoopSim.REPLACE then
+    fields = { action = "switch", slot = (action.index or 1) - 1 }
+  elseif kind == "item" then
+    fields = { action = "item", item = action.item }
+  elseif kind == "run" then
+    fields = { action = "run" }
+  else
+    fields = { action = "fight", move = (action.move or 1) - 1,
+               target = self:medFieldOf(action.target) }
+  end
+  return Mediated.submitChoice(self.transport, self.battleId, fields)
 end
 
 -- ------- drawing

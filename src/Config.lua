@@ -344,6 +344,39 @@ M.COOP_STALL_TIMEOUT = 75
 -- upload a team into a battle that never opens.  They move together or not at
 -- all.
 
+-- Which co-op battle modes go through the intermediator rather than being
+-- simulated by the host client.
+--
+-- **A co-op fight becomes mediated the moment its ruleset and every party have
+-- arrived**, and nothing else engages the cut: both hubs keep forwarding
+-- mmo.coop_relay until `record.sim` exists and refuse it from then on (see
+-- src/Hub.lua's COOP_RELAY handler).  So the decision about whether a mode is
+-- refereed is the decision about whether its clients upload, and this is where
+-- that is written down rather than a branch inside the battle screen.
+--
+-- `coop_pvp` is on.  Four players, four seats, four connections that submit
+-- choices -- and it is the mode where the host-authoritative arithmetic was the
+-- real trust problem, because a modified host was deciding a ranked match
+-- against players it was fighting.
+--
+-- `coop_npc` is **off, and for two reasons that are both about the
+-- intermediator rather than about this client**:
+--
+--   1. *One npc seat, not two.*  `openMediatedBattle` seats side b of a
+--      coop_npc as a single synthetic `npc:<id>`, so the trainer's whole team
+--      fights from one field slot -- a 2-on-1 where the co-op screen builds a
+--      2-on-2.  Widening it is a seat-layout change to src/Hub.lua, its twin in
+--      server/lib/relay.js and Turn's per-side cap, in one version.
+--   2. *Nothing chooses for the npc.*  src/BattleSim/Turn.lua takes choices from
+--      connections, and the npc seat is not one -- so every turn would wait out
+--      BATTLE_CHOICE_TIMEOUT before the auto-pick filed a move for it.  A
+--      minute a turn is not a battle.
+--
+-- The client half is built and tested either way (tests/coop_mediated.lua drives
+-- coop_npc with this flipped), so the day an intermediator grows an npc actor
+-- and a second seat, this is the line that turns it on.
+M.MEDIATED_COOP = { coop_pvp = true, coop_npc = false }
+
 -- How long a battle waits for a player who has dropped mid-fight.
 --
 -- The window in which a crash, a dropped wifi or a closed lid is still

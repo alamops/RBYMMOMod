@@ -344,14 +344,20 @@ local function typesOf(data, mon, order)
   return out
 end
 
--- This player's team, as the intermediator will fight it.
+-- Any team, as the intermediator will fight it.
+--
+-- Split out from `snapshotParty` because a co-op fight has more than one team
+-- to describe from one client: src/CoopBattle.lua uploads its own party *and*,
+-- when it is the host of a battle against an NPC, the trainer's -- and neither
+-- of those two is `game.save.party`.  `game` is still handed in whole because
+-- what a monster looks like on the wire is read off the player's own `data`
+-- (the move records, the species names, the type ordering) whoever owns the
+-- monster.
 --
 -- Best-effort throughout: a monster that cannot be described is skipped rather
 -- than taking the party with it, because a party of five is a fight and a party
 -- of none is not.  An empty result is the caller's to refuse -- see M:start.
-function M.snapshotParty(game)
-  local save = game and game.save
-  local party = save and save.party
+function M.snapshotMons(game, party)
   if type(party) ~= "table" then return {} end
 
   local data = game and game.data
@@ -394,6 +400,75 @@ function M.snapshotParty(game)
     end
   end
   return out
+end
+
+-- This player's own team.
+function M.snapshotParty(game)
+  local save = game and game.save
+  return M.snapshotMons(game, save and save.party)
+end
+
+-- ------- what goes out before the fight opens, in one place
+--
+-- Two senders and one validator, shared with src/CoopBattle.lua rather than
+-- copied into it.  The uploads are the only thing a client says that decides
+-- what the fight *is* -- there is no move table and no chart on either
+-- intermediator -- so a second copy of "how a party is put on the wire" is a
+-- second place for a 1v1 and a 2-on-2 to start describing the same monster
+-- differently.
+
+-- The host's chart, and nobody else's.  Not because a guest's would be worse,
+-- but because two charts is a fight with no answer to "which", and both
+-- intermediators refuse a ruleset from anyone but the seat they brokered as
+-- host.
+function M.sendRuleset(transport, game)
+  if not transport then return false end
+  transport:send(Wire.BATTLE_RULESET, M.snapshotRuleset(game))
+  return true
+end
+
+-- One seat's team.  `side` is optional for a 1v1 -- there are two combatants and
+-- the intermediator knows which is which from the session it brokered -- and is
+-- what tells a co-op upload apart: it is how the host of a fight against an NPC
+-- fills the synthetic npc seat (side "b") without displacing its own.
+function M.sendParty(transport, battle, mons, side)
+  if not (transport and battle) then return false end
+  if type(mons) ~= "table" or #mons == 0 then return false end
+  transport:send(Wire.BATTLE_PARTY,
+    { battle = battle, mons = mons, side = side })
+  return true
+end
+
+-- One turn's intent.  A choice and never a result: the fields name what was
+-- pressed, and what it costs is the intermediator's to decide.
+--
+-- Checked before it goes rather than after it is refused: both hubs answer a
+-- malformed choice with silence, and silence at a battle screen is a turn the
+-- player believes they spent.
+function M.submitChoice(transport, battle, fields)
+  if not (transport and battle) then return false end
+  local out = { battle = battle }
+  for key, value in pairs(fields or {}) do out[key] = value end
+  if not Wire.battleChoice(out) then
+    mod.log:warn("a battle choice would not have been understood and was not "
+      .. "sent; press again, or wait for the turn clock")
+    return false
+  end
+  transport:send(Wire.BATTLE_CHOICE, out)
+  return true
+end
+
+-- Is `id` in this list of player ids?
+--
+-- Exported because an outcome is read by asking it twice, and both screens ask:
+-- a 1v1 asks about the peer (the side they are not on is ours) and a 2-on-2
+-- asks about itself (there are four ids and no single "other side").
+function M.holds(list, id)
+  if id == nil then return false end
+  for _, entry in ipairs(list or {}) do
+    if entry == id then return true end
+  end
+  return false
 end
 
 -- ------- the fight
@@ -492,13 +567,9 @@ function M:start(game)
   self.uploaded = true
   self.mine = mons
 
-  -- The host's chart and nobody else's.  Not because a guest's would be worse,
-  -- but because two charts is a fight with no answer to "which", and the hub
-  -- refuses a ruleset from anyone but the seat it brokered as host.
-  if self.role == "host" then
-    self.transport:send(Wire.BATTLE_RULESET, M.snapshotRuleset(self.game))
-  end
-  self.transport:send(Wire.BATTLE_PARTY, { battle = self.battle, mons = mons })
+  if self.role == "host" then M.sendRuleset(self.transport, self.game) end
+  -- No side: a 1v1 has none to name.
+  M.sendParty(self.transport, self.battle, mons)
   return true
 end
 
@@ -676,15 +747,23 @@ end
 -- carries no lists at all (Wire refuses an empty one), which is why the
 -- absence is read as a draw rather than as a missing field.
 function M.resultFor(msg, peerId)
-  local function holds(list, id)
-    for _, entry in ipairs(list or {}) do
-      if entry == id then return true end
-    end
-    return false
-  end
   if peerId then
-    if holds(msg.winners, peerId) then return "loss" end
-    if holds(msg.losers, peerId) then return "win" end
+    if M.holds(msg.winners, peerId) then return "loss" end
+    if M.holds(msg.losers, peerId) then return "win" end
+  end
+  return "draw"
+end
+
+-- The same verdict read the other way round: from this client's *own* id.
+--
+-- A 1v1 can reason from the peer because there is exactly one of them.  A
+-- 2-on-2 cannot -- four ids arrive, two of them allies -- so the only question
+-- with a single answer is "am I named", and it is asked here rather than in the
+-- co-op screen so both readings of one message live side by side.
+function M.resultForSelf(msg, selfId)
+  if selfId then
+    if M.holds(msg.winners, selfId) then return "win" end
+    if M.holds(msg.losers, selfId) then return "loss" end
   end
   return "draw"
 end
@@ -719,22 +798,12 @@ end
 
 -- ------- outbound
 
--- One turn's intent.  A choice and never a result: the fields name what was
--- pressed, and what it costs is the intermediator's to decide.
+-- One turn's intent, through the shared sender so a 1v1 and a 2-on-2 put the
+-- same shape on the wire.  What is left here is this screen's own bookkeeping:
+-- the menu closes on a choice that actually went.
 function M:sendChoice(fields)
-  if not (self.transport and self.battle) then return false end
   if self.finished then return false end
-  local out = { battle = self.battle }
-  for key, value in pairs(fields or {}) do out[key] = value end
-  -- Checked before it goes rather than after it is refused: the hub answers a
-  -- malformed choice with silence, and silence here is a turn the player
-  -- believes they spent.
-  if not Wire.battleChoice(out) then
-    mod.log:warn("a battle choice would not have been understood and was not "
-      .. "sent; press again, or wait for the turn clock")
-    return false
-  end
-  self.transport:send(Wire.BATTLE_CHOICE, out)
+  if not M.submitChoice(self.transport, self.battle, fields) then return false end
   self.phase = "play"
   self.pendingTurn = false
   return true

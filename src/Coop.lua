@@ -1231,6 +1231,37 @@ function M:onMessage(game, msg)
   end
 end
 
+-- ------- the three things an intermediator says during a fight it is running
+--
+-- Carried rather than interpreted, which is this module's whole relationship
+-- with the running battle: the screen owns the mediated exchange, and the id on
+-- every one of these is checked *inside* it against the battle it uploaded to --
+-- so a message about somebody else's match is inert without this file having to
+-- know which match that is.
+--
+-- Sanitised here because that is where every other inbound payload is sanitised,
+-- and these three decide what four screens draw and how the fight ends.
+--
+-- Nil-safe about the screen: the record on the hub is opened when the battle is
+-- *agreed*, and the screen goes up a short exchange later, so a message that
+-- arrives in that window has nowhere to go and is dropped. It cannot be one that
+-- matters -- mmo.battle_ready is not sent until every seat has uploaded a party,
+-- and the uploads come from the screens.
+function M:onBattleReady(msg)
+  local ready = Wire.battleReady(msg)
+  if ready and self.state then self.state:onBattleReady(ready) end
+end
+
+function M:onBattleEvent(msg)
+  local event = Wire.battleEvent(msg)
+  if event and self.state then self.state:onBattleEvent(event) end
+end
+
+function M:onBattleOutcome(msg)
+  local outcome = Wire.battleOutcome(msg)
+  if outcome and self.state then self.state:onBattleOutcome(outcome) end
+end
+
 -- Do we have everything the field needs yet?  Only the host asks -- it is the
 -- one that builds the field -- and it answers by counting the humans in the
 -- plan against the parties in hand.
@@ -1535,6 +1566,25 @@ function M:startBattle(game, field)
     endBattleText = engine and engine.endBattleText,
     host = battle.host,
     hostId = battle.plan and battle.plan.hostId,
+    -- ------- and what it takes for the hub to referee this one instead
+    --
+    -- Handed in rather than reached for, so the screen owns the whole of the
+    -- mediated exchange and this module stays what it is: the thing that agrees
+    -- a battle and carries its messages. `transport` is the hub connection
+    -- itself and not `net` -- the mmo.battle_* types are addressed to the hub
+    -- rather than relayed to the other three, which is the whole difference
+    -- between the two paths.
+    --
+    -- `mode` is derived the same way `kind` on the plan is, and from the same
+    -- fact: a co-op battle with human foes is the hub's `coop_pvp` and one
+    -- without is its `coop_npc`. Derived rather than carried on the wire because
+    -- the hub decided it from this same fact when it opened the record (see
+    -- Hub:openCoopBattle's callers), so a second statement of it is a second
+    -- thing to disagree.
+    transport = self.transport,
+    battleId = battle.plan and battle.plan.id,
+    selfId = self.party and self.party.selfId,
+    mode = M.ranksPoints(battle.plan) and "coop_pvp" or "coop_npc",
     -- Whether a win here is worth points, so the screen can say so once
     -- rather than leave a player wondering why their rating did not move.
     ranksPoints = M.ranksPoints(battle.plan),
@@ -1595,7 +1645,17 @@ function M:onBattleOver(result, game, state, toLearn)
   -- not, and why that is a choice rather than an oversight.
   local battle = self.battle
   local plan = battle and battle.plan
-  if plan and plan.id and M.ranksPoints(plan) then
+  -- ...and not at all for a battle the hub refereed.
+  --
+  -- The vote exists because no client in a host-simulated battle could be
+  -- believed about its own win, so four agreeing claims stood in for a witness.
+  -- A mediated fight *had* a witness -- it did every roll -- and it has already
+  -- settled the ranking from its own verdict; both hubs drop an mmo.result about
+  -- one. Suppressed here rather than left to be dropped, because a message sent
+  -- on the understanding that it will be ignored is a rule somebody has to
+  -- remember, and the screen already knows the answer.
+  local refereed = state ~= nil and state.mediated == true
+  if plan and plan.id and M.ranksPoints(plan) and not refereed then
     local outcome = "draw"
     if result == "win" then outcome = "win"
     elseif result == "loss" then outcome = "loss" end

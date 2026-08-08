@@ -1829,9 +1829,25 @@ end
 -- inbound handler for the ruleset, the party or a choice: those travel the
 -- other way, and a client that received one would be receiving a message the
 -- hub has no reason to send it.
-handlers[Wire.BATTLE_READY] = function(_, msg) sessions:onBattleReady(msg) end
-handlers[Wire.BATTLE_EVENT] = function(_, msg) sessions:onBattleEvent(msg) end
-handlers[Wire.BATTLE_OUTCOME] = function(_, msg) sessions:onBattleOutcome(msg) end
+--
+-- Offered to both, because there are two kinds of refereed fight -- the 1v1 that
+-- Sessions holds and the 2-on-2 that Coop does -- and this message names which
+-- one it is about. Both ends check that name against the battle they uploaded to
+-- and ignore anything else, which is what makes offering it to both correct
+-- rather than merely harmless: the id on the message decides, not the order of
+-- these two lines.
+handlers[Wire.BATTLE_READY] = function(_, msg)
+  sessions:onBattleReady(msg)
+  coop:onBattleReady(msg)
+end
+handlers[Wire.BATTLE_EVENT] = function(_, msg)
+  sessions:onBattleEvent(msg)
+  coop:onBattleEvent(msg)
+end
+handlers[Wire.BATTLE_OUTCOME] = function(_, msg)
+  sessions:onBattleOutcome(msg)
+  coop:onBattleOutcome(msg)
+end
 
 handlers[Wire.ERROR] = function(game, msg)
   local text = Wire.text(msg.message, 120) or "The hub refused the connection."
