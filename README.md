@@ -1009,10 +1009,11 @@ Your friends show up as **voxel characters**, free of charge. That's the
 payoff for spawning real NPCs instead of drawing avatars: whoever owns the
 world pass draws them too.
 
-Nameplates are the one thing that can't follow into 3D — they're positioned
-by tile offset, which only means anything in the flat projection. So when
-another mod owns the world, the overlay names nearby players in a corner list
-instead. You lose the arrows, nothing else.
+Nameplates stay over their characters in Voxel mode too. RBY MMO uses Voxel's
+own companion camera projection, including the terrain height under each
+avatar, so a nickname follows the 3D character rather than a flat tile
+offset. If a different world-rendering mod does not expose a projector, the
+overlay safely falls back to the nearby-player corner list.
 
 It's entirely optional, and that's a *checked* claim — the test suite runs
 both ways and pins which:

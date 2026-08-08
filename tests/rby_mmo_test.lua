@@ -3879,6 +3879,41 @@ eq(overlay:worldIsFlat(gameWith({ voxel = 3, tiltshift = 1 })), false,
 
 stubPipelines = {}
 
+-- Voxel exports its live camera to companion mods.  A nameplate must use
+-- that projection rather than the flat camera's 16px grid, and its returned
+-- coordinates are canvas pixels, not necessarily final-window pixels when
+-- Voxel's anti-aliasing is on.
+;(function()
+local projectedArgs = nil
+local voxelGame = {
+  mods = { exports = { DRAMATIC_SHAPE = { lib = {
+    require = function(name)
+      if name == "Voxel3D" then
+        return {
+          project = function(x, y, z)
+            projectedArgs = { x, y, z }
+            return 150, 75
+          end,
+          size = function() return 300, 150 end,
+        }
+      end
+      if name == "VoxelScene" then
+        return { groundAt = function() return 4 end }
+      end
+    end,
+  } } } },
+}
+local voxelOverworld = { map = {} }
+local vx, vy = overlay:voxelAnchor(voxelGame, voxelOverworld, 32, 48, 600, 450)
+eq(vx, 300, "a Voxel x coordinate is scaled from its canvas to the final window")
+eq(vy, 225, "and the same applies to y when AA enlarged the canvas")
+eq(projectedArgs[1], 40, "the label projects from the avatar cell centre")
+eq(projectedArgs[2], 22, "from two pixels above its 16px head and ground height")
+eq(projectedArgs[3], 56, "using the centre of the avatar's world-depth cell")
+eq(overlay:voxelAnchor({}, voxelOverworld, 0, 0, 600, 450), nil,
+   "a renderer without Voxel's companion API remains a safe fallback")
+end)()
+
 -- Wrapped in a function purely for scope, the way the trade scenario below
 -- is: this chunk sits at Lua's 200-local ceiling for one function body, and
 -- the merge put two branches' worth of new top-level names into it at once.

@@ -391,8 +391,8 @@ return function(game)
 
     -- Say which way the overlay drew, so a run states the rendering path it
     -- exercised instead of leaving it to whatever happened to be installed.
-    -- "labels" is the flat 2D projection; "roster" is the corner list used
-    -- when another mod owns the world pass.
+    -- "labels" is the flat 2D projection; "roster" is the corner list for
+    -- a world renderer that does not expose a compatible camera projection.
     local ov = exports.overlayState and exports.overlayState() or {}
     log(("overlay path: %s (derived-letterbox=%s)"):format(
       tostring(ov.reached), tostring(ov.derived or false)))
@@ -403,10 +403,8 @@ return function(game)
     -- ------- 1b. coexistence with a mod that owns the world pass
     --
     -- Only runs when DramaticShapeVoxelMod is installed alongside. Turning
-    -- its pipeline on is the only way to see what this mod does when the
-    -- overworld is no longer a flat 2D grid -- the nameplates cannot be
-    -- projected, so the overlay should fall back to a corner roster rather
-    -- than float labels at meaningless positions.
+    -- its pipeline on is the only way to prove the plates use the 3D
+    -- camera Voxel exposes to companion mods rather than the flat grid.
     local okPipes, Pipelines = pcall(require, "src.render.Pipelines")
     if okPipes and Pipelines and Pipelines.get and Pipelines.get("voxel") then
       log("voxel pipeline present; switching it on")
@@ -419,7 +417,9 @@ return function(game)
       log(("overlay: reached=%s here=%s gameX=%s scale=%s"):format(
         tostring(st.reached), tostring(st.here), tostring(st.gameX),
         tostring(st.scale)))
-      U.shot(game, SHOT_DIR .. "/host-voxel-roster.png")
+      check(st.reached == "voxel-labels",
+            "Voxel projects the guest nickname above its 3D character")
+      U.shot(game, SHOT_DIR .. "/host-voxel-nameplates.png")
       Pipelines.setLevel("voxel", 0)
       U.wait(60)
     else

@@ -114,11 +114,10 @@ end
 -- Is the world still being drawn with the flat 2D projection this overlay
 -- assumes -- player centred, sixteen pixels to a tile?
 --
--- It is not, whenever another mod owns the world pass. DramaticShapeVoxelMod
--- registers a "voxel" pipeline with drawWorld that replaces the overworld
--- with a 3D diorama; under it a nameplate placed by tile offset would float
--- somewhere unrelated to the character it names, which looks far worse than
--- no nameplate at all.
+-- It is not whenever another mod owns the world pass. DramaticShapeVoxelMod
+-- is the useful exception: it exports the camera projector intended for
+-- companion overlays, so draw() uses that below. Other world pipelines still
+-- fall back to the corner roster rather than guessing at their projection.
 --
 -- The registry says which pipelines replace the world (drawWorld); the
 -- engine says which are switched on.
@@ -180,12 +179,63 @@ function M:worldIsFlat(game)
   return flat
 end
 
+-- DramaticShapeVoxelMod deliberately exposes its module resolver to companion
+-- mods.  Voxel3D.project is the same camera transform it gives the overworld
+-- FX, and VoxelScene.groundAt is the height its character card stands on.
+-- Keep this a soft integration: an older Voxel release, or another 3D world
+-- mod, must leave the MMO usable with the corner roster rather than erroring.
+function M:voxelApi(game)
+  local exports = game and game.mods and game.mods.exports
+  local handle = exports and exports.DRAMATIC_SHAPE
+  local lib = handle and handle.lib
+  if type(lib) ~= "table" or type(lib.require) ~= "function" then return nil end
+
+  local ok3d, voxel3d = pcall(lib.require, "Voxel3D")
+  if not (ok3d and type(voxel3d) == "table"
+          and type(voxel3d.project) == "function"
+          and type(voxel3d.size) == "function") then
+    return nil
+  end
+  local okScene, scene = pcall(lib.require, "VoxelScene")
+  return voxel3d, (okScene and type(scene) == "table") and scene or nil
+end
+
+-- The window-space point just over an avatar's head in Voxel mode.  The
+-- projector answers in its render canvas' pixels; AA can make that canvas
+-- larger than the final window, so translate through both sizes instead of
+-- assuming one canvas pixel is one screen pixel.
+function M:voxelAnchor(game, overworld, worldX, worldY, windowW, windowH)
+  local voxel3d, scene = self:voxelApi(game)
+  if not voxel3d then return nil end
+
+  local ground = 0
+  local map = overworld and overworld.map
+  if scene and type(scene.groundAt) == "function" and map then
+    local ok, height = pcall(scene.groundAt, map,
+                             math.floor(worldX / CELL), math.floor(worldY / CELL))
+    if ok and type(height) == "number" then ground = height end
+  end
+
+  -- Characters are 16 world pixels tall and stand at the centre of a cell.
+  -- Two pixels of air keeps the plate from touching hats and hair.
+  local ok, x, y = pcall(voxel3d.project, worldX + CELL / 2, ground + CELL + LABEL_GAP,
+                         worldY + CELL / 2)
+  if not (ok and type(x) == "number" and type(y) == "number") then return nil end
+
+  local canvasW, canvasH = voxel3d.size()
+  canvasW, canvasH = tonumber(canvasW), tonumber(canvasH)
+  windowW, windowH = tonumber(windowW), tonumber(windowH)
+  if not (canvasW and canvasW > 0 and canvasH and canvasH > 0
+          and windowW and windowW > 0 and windowH and windowH > 0) then
+    return nil
+  end
+  return x * windowW / canvasW, y * windowH / canvasH
+end
+
 -- The fallback for a world this overlay cannot project into: name the
 -- players on this map in a fixed corner list instead of floating a label
--- over each one. Their avatars are still drawn by whatever owns the world
--- -- the voxel mod draws them as voxel characters -- so what is missing is
--- only the labelling, and a corner list restores that without inventing
--- positions it cannot compute.
+-- over each one. Their avatars are still drawn by whatever owns the world,
+-- so the label remains available without inventing a position.
 
 -- Screen centre-x and sprite-top-y for an avatar at world pixels (px, py)
 -- relative to the local player at (playerPx, playerPy).  Matches
@@ -324,6 +374,26 @@ function M:drawLabel(font, text, centreX, spriteTopY, scale, gameX, gameY, color
 
   printLabel(font, text, x, y, color or LABEL_WHITE)
   self:note(text)
+end
+
+-- Voxel's camera fills the real window rather than the Game Boy playfield,
+-- so its projected coordinates cannot go through drawLabel's 160x144 clip
+-- test.  This is the same plate, just bounded by the canvas Voxel presented.
+function M:drawVoxelLabel(font, text, centreX, headY, windowW, windowH, color)
+  local width, height = font:getWidth(text), font:getHeight()
+  local x = math.floor(centreX - width / 2)
+  local y = math.floor(headY - LABEL_GAP - height)
+  if x < 0 or y < 0 or x + width > windowW or y + height > windowH then return false end
+  printLabel(font, text, x, y, color or LABEL_WHITE)
+  self:note(text)
+  return true
+end
+
+function M:drawVoxelNameplate(font, game, overworld, player, worldX, worldY,
+                               windowW, windowH, color)
+  local x, y = self:voxelAnchor(game, overworld, worldX, worldY, windowW, windowH)
+  if not x then return false end
+  return self:drawVoxelLabel(font, player, x, y, windowW, windowH, color)
 end
 
 function M:drawSelfLabel(font, game, playerPx, playerPy, scale, gameX, gameY)
@@ -596,9 +666,32 @@ function M:draw(game, viewport)
   local hudRestore = beginHud()
   love.graphics.setFont(labelFont)
 
-  -- another mod owns the world pass: label from a corner rather than
-  -- guessing at positions in a projection this does not know
+  -- A Voxel world exports its own camera transform, so the plates can stay
+  -- attached to heads. Other renderers still receive the safe corner list.
   if not self:worldIsFlat(game) then
+    local windowW, windowH = love.graphics.getDimensions()
+    local voxel = self:voxelApi(game)
+    if voxel then
+      local drew = false
+      for _, player in ipairs(here) do
+        local ax, ay = ctx.avatars:cellOf(player.id)
+        if ax and ay then
+          drew = self:drawVoxelNameplate(labelFont, game, overworld,
+                                         self:nameFor(player), ax * CELL, ay * CELL,
+                                         windowW, windowH, self:labelColor(player)) or drew
+        end
+      end
+      if self:selfName(game) then
+        drew = self:drawVoxelNameplate(labelFont, game, overworld,
+                                       self:selfName(game), playerPx, playerPy,
+                                       windowW, windowH, SELF_YELLOW) or drew
+      end
+      if drew then
+        last.reached = "voxel-labels"
+        endHud(hudRestore)
+        return
+      end
+    end
     last.reached = "roster"
     self:drawRoster(labelFont, here, scale, gameX, gameY, game)
     endHud(hudRestore)
