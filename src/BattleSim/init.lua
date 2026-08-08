@@ -33,6 +33,13 @@ local M = {
   Accuracy = need("BattleSim/Accuracy"),
   Crit = need("BattleSim/Crit"),
   Status = need("BattleSim/Status"),
+  -- The formulas above answer one question each and remember nothing; these
+  -- two are the machine that asks them in order.  Turn is the only module here
+  -- with state, and events.lua is the vocabulary it speaks -- mirrored from
+  -- Wire rather than imported, so this directory still runs where Config does
+  -- not.  `luajit tests/battle_sim_turn.lua` is their suite.
+  Events = need("BattleSim/events"),
+  Turn = need("BattleSim/Turn"),
 }
 
 return M

@@ -34,6 +34,14 @@ tests/drivers/run-hub-e2e.sh
 # catches it, which is why each driver is named here one per line.
 tests/drivers/mmo_quad.lua
 tests/drivers/run-quad-e2e.sh
+# The turn machine's cross-runtime parity pair. The driver is standalone Lua --
+# it reaches no engine module, so it would pack clean -- but it exists only to
+# be spawned by server/battle_turn.test.js, and its JSON is that spawn's stand-in
+# for a checkout with no luajit. Shipping either to a player puts a file nothing
+# in the archive opens in front of them, which is the same reason
+# tests/fixtures/hmac_vectors.lua is listed above.
+tests/drivers/battle_turn_parity.lua
+tests/fixtures/battle_turn_parity.json
 
 # Working notes for whoever picks this up next; not mod content. The two
 # machine-readable ones describe how coding agents are driven in this
