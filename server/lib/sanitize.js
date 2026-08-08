@@ -828,6 +828,20 @@ function cleanBattleMon(raw) {
   }
   mon.moves = moves;
 
+  // Optional defender types as chart indices. Absent → sim default type 0.
+  if (raw.types !== undefined && raw.types !== null) {
+    if (!Array.isArray(raw.types)) return null;
+    const types = [];
+    for (const entry of raw.types) {
+      if (types.length >= 2) break;
+      const t = cleanInt(entry, 0, BATTLE_TYPE_MAX - 1);
+      if (t === null) return null;
+      types.push(t);
+    }
+    if (!types.length) return null;
+    mon.types = types;
+  }
+
   return mon;
 }
 

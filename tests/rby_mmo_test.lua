@@ -5287,7 +5287,11 @@ local liveId = ann8.sessions.active and ann8.sessions.active.id
 check(liveId ~= nil, "a session carries the hub's id for it")
 eq(liveId, bob8.sessions.active.id, "and both sides file under the same one")
 
--- what beginBattle records when it hands a battle to the engine
+-- The shape a battle handed to the engine leaves behind, set directly because
+-- nothing writes it any more: an MMO battle is mediated from PROTOCOL 10 and
+-- deliberately records nothing here, which is what stops a dual mmo.result
+-- going out beside the intermediator's outcome. The claim-once rule is still
+-- worth pinning -- it is what a cable-club link would rely on.
 local fought = { kind = "link" }
 ann8.sessions.lastBattle =
   { id = liveId, peerId = bob8.client.id, peerName = "BOB", state = fought }

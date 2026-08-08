@@ -1174,6 +1174,22 @@ function M.battleMon(raw)
   if #moves == 0 then return nil end
   out.moves = moves
 
+  -- Optional defender types as chart indices. Absent means the sim treats the
+  -- mon as type 0 (neutral against an empty chart row). Present-but-unreadable
+  -- refuses the mon, for the same reason a half-filled EV block does.
+  if raw.types ~= nil then
+    if type(raw.types) ~= "table" then return nil end
+    local types = {}
+    for _, entry in ipairs(raw.types) do
+      if #types >= 2 then break end
+      local t = M.int(entry, 0, Config.BATTLE_TYPE_MAX - 1)
+      if t == nil then return nil end
+      types[#types + 1] = t
+    end
+    if #types == 0 then return nil end
+    out.types = types
+  end
+
   return out
 end
 

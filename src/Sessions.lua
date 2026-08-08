@@ -1,32 +1,50 @@
 -- Trade and battle between two players, anywhere in the world.
 --
--- Almost nothing about trading or link battling is reimplemented here.  The
--- engine already owns both: Protocol.TradeSession is a symmetric trade
--- state machine (including trade evolutions and the OT bookkeeping that
--- marks a mon as traded), and LinkBattle is a full lockstep battle.  Both
--- are driven over a SessionNet, so what this module actually does is:
+-- **The two kinds part company here, and have since PROTOCOL 10.**
 --
---   * carry a request from one player to another through the hub,
---   * run the engine's own hello/verdict handshake between the two peers,
---   * hand the resulting session to the engine's machinery,
---   * and tear it down when either side leaves.
+-- A *trade* is still the engine's own machinery: Protocol.TradeSession is a
+-- symmetric state machine -- trade evolutions, the OT bookkeeping that marks a
+-- mon as traded, all of it -- driven over a SessionNet whose payloads the hub
+-- forwards unread.  So for a trade this module carries the request, runs the
+-- engine's real hello/verdict handshake, hands the session to TradeSession,
+-- and tears it down when either side leaves.
 --
--- One rule runs through the teardown, and it is the only thing standing
+-- A *battle* no longer touches any of that.  The intermediator -- the Node hub
+-- or a LAN host running src/BattleSim/ -- resolves the fight itself, so both
+-- clients upload what they are bringing and then draw an ordered event stream.
+-- src/MediatedBattle.lua is that client, and the three consequences here are
+-- worth stating plainly:
+--
+--   * **No handshake.** Both hubs hard-cut mmo.relay for a battle session
+--     (relay.js's "this battle is mediated" drop), so a hello sent down that
+--     path would not arrive -- and there is nothing left for it to decide.
+--   * **No canBattle refuse.** The fingerprint gate existed because a lockstep
+--     pair had to agree about their content before they could roll the same
+--     numbers.  The intermediator rolls them now, off an uploaded chart and
+--     uploaded parties, so a Red can fight a Yellow and a data pack can fight
+--     vanilla.  M.canBattle survives below because the pairing rule is still
+--     worth stating and still tested -- it is simply no longer consulted.
+--   * **No mmo.result.** The dual-client vote is replaced by the
+--     intermediator's single mmo.battle_outcome, and the way that is made
+--     structural rather than remembered is that nothing on this path ever
+--     records a `lastBattle` for M:claimBattle to hand out.
+--
+-- One rule runs through the trade teardown, and it is the only thing standing
 -- between a trade and a duplicated Pokemon: **finishing locally is not what
 -- ends a session.** A session ends when both sides have applied, when the
 -- connection genuinely drops, or on a timeout measured in tens of seconds --
 -- never on this process getting there first. Everything in the lifecycle
 -- section below is a consequence of that.
 --
--- Running the real handshake matters.  It is what decides whether two
--- players with different mod sets may battle at all, and it produces the
--- `strict` and `verdict` values the trade and battle code need to refuse a
--- mon the other game would rebuild differently.  Skipping it and hardcoding
--- "full" would silently desync two differently-modded players.
+-- Running the real handshake still matters for the trade half.  It produces
+-- the `strict` and `verdict` values TradeSession needs to refuse a mon the
+-- other game would rebuild differently; hardcoding "full" would silently
+-- desync two differently-modded players.
 
 local need, mod = ...
 local Wire = need("Wire")
 local SessionNet = need("SessionNet")
+local MediatedBattle = need("MediatedBattle")
 
 local M = {}
 M.__index = M
@@ -84,11 +102,16 @@ function M.new(transport, ui)
     waitBox = nil,     -- held "Waiting for NAME..." box for a battle ask
     incomingBox = nil, -- held yes/no box on the asked side
     drops = 0,         -- relays refused since the current session began
+    -- The mediated fight, held apart from `active` rather than inside it.
+    -- They are never both set -- a session is a trade or a battle -- and the
+    -- separation is what keeps every `self.active` branch below about trade
+    -- alone instead of asking which kind it is looking at.
+    fight = nil,
   }, M)
 end
 
 function M:isBusy()
-  return self.active ~= nil or self.outgoing ~= nil
+  return self.active ~= nil or self.outgoing ~= nil or self.fight ~= nil
 end
 
 -- A state on the engine stack that means "this player is in a fight".
@@ -96,11 +119,16 @@ end
 -- and has no kind of its own.  Scanned anywhere on the stack, not only the
 -- top: a menu or co-op prompt can sit above a live battle, and an invite
 -- popping over either is the bug this exists to stop.
+--
+-- A mediated screen is none of those -- it is not a BattleState, and it has no
+-- sim because the sim is on the intermediator -- so it says so with a marker
+-- of its own rather than borrowing a field that means something else.
 function M.isFightState(state)
   if type(state) ~= "table" then return false end
   local kind = state.kind
   if kind == "wild" or kind == "trainer" or kind == "link" then return true end
   if state.sim ~= nil then return true end
+  if state.mmoBattle == true then return true end
   return false
 end
 
@@ -324,16 +352,24 @@ function M:onSession(game, msg)
   -- and resurface when it pops.
   self:closeWaitBox()
   self:closeIncomingBox()
-  local modules = link()
-  if not modules then return end
 
-  -- The hub's id for this pairing.  Carried since the first version of the
-  -- protocol and ignored until now: it is what a battle result is filed
-  -- under, and the hub will not score a report that does not name one.
+  -- The hub's id for this pairing, and for a battle it is also the id of the
+  -- fight: every mediated message names the battle, and both intermediators
+  -- key their record on the session id rather than minting a second one.
   local sessionId = Wire.id(msg.id)
 
   -- one warning per session, so the count starts again with the session
   self.drops = 0
+
+  -- The fork.  Deliberately *before* link(): a mediated battle needs neither
+  -- Protocol nor Handshake nor LinkBattle, so a build whose link stack failed
+  -- to load can still fight -- it just cannot trade.
+  if kind == "battle" then
+    return self:beginMediated(game, sessionId, peerId, peerName, role)
+  end
+
+  local modules = link()
+  if not modules then return end
 
   local net = SessionNet.new(self.transport, peerId, peerName)
   self.active = {
@@ -351,6 +387,79 @@ function M:onSession(game, msg)
   local myHello = modules.Handshake.hello(game, kind)
   self.active.myHello = myHello
   net:send(myHello)
+end
+
+-- ------- the mediated battle
+--
+-- Four short functions, because there is very little left to do on this side:
+-- open the screen, forward the three inbound types to it, and leave the hub's
+-- pairing when it is over.  Everything that used to live between those steps
+-- -- the handshake, the verdict, the seed, the party pack, the lockstep loop --
+-- is either on the intermediator now or does not exist.
+
+-- Put up the fight and upload what we are bringing.
+--
+-- The upload happens *here* rather than only in the screen's `enter`, and the
+-- ordering is load-bearing: it is what lets the fight be driven with no state
+-- stack at all -- the headless suite, and any build whose UI failed to come
+-- up.  MediatedBattle:start is idempotent, so `enter` doing it again is free.
+function M:beginMediated(game, sessionId, peerId, peerName, role)
+  if not sessionId then
+    -- Every mediated message names its battle, so a session with no id is a
+    -- fight nothing could be uploaded to.  Left rather than sat in: the hub
+    -- would hold the pairing open until somebody's grace expired.
+    mod.log:warn("the hub started a battle without naming it, so there is "
+      .. "nothing to upload a party to -- ask again, and report this if it "
+      .. "keeps happening")
+    self.transport:send(Wire.SESSION_LEAVE, {})
+    return false
+  end
+
+  local fight = MediatedBattle.new({
+    transport = self.transport,
+    ui        = self.ui,
+    game      = game,
+    battle    = sessionId,
+    role      = role,
+    peerId    = peerId,
+    peerName  = peerName,
+    autoPick  = self.autoPick == true,
+    onDone    = function() self:endMediated() end,
+  })
+  self.fight = fight
+  fight:start(game)
+  self.ui:pushState(game, fight)
+  return true
+end
+
+-- The fight is off this screen.  Tell the hub, so the pairing does not sit
+-- open until a grace runs out -- the record is already settled by the time an
+-- outcome has been drawn, so this frees it rather than forfeiting anything.
+function M:endMediated()
+  local fight = self.fight
+  self.fight = nil
+  if not fight then return end
+  self.transport:send(Wire.SESSION_LEAVE, {})
+end
+
+-- The three things an intermediator says during a fight.
+--
+-- Routed through the live fight and matched on its battle id, which is what
+-- makes a message about somebody else's match inert: the id is checked inside
+-- MediatedBattle against the one this client uploaded to.
+function M:onBattleReady(msg)
+  local ready = Wire.battleReady(msg)
+  if ready and self.fight then self.fight:onReady(ready) end
+end
+
+function M:onBattleEvent(msg)
+  local event = Wire.battleEvent(msg)
+  if event and self.fight then self.fight:onEvent(event) end
+end
+
+function M:onBattleOutcome(msg)
+  local outcome = Wire.battleOutcome(msg)
+  if outcome and self.fight then self.fight:onOutcome(outcome) end
 end
 
 -- A refused relay is the same silence src/Hub.lua's onDrop was given a voice
@@ -399,6 +508,21 @@ function M:onSessionEnd(reason)
   local session = self.active
   self.outgoing = nil
   self:closeWaitBox()
+
+  -- A mediated fight does not end because the pairing did.  The peer leaving
+  -- the field starts BATTLE_RECONNECT_GRACE on the intermediator, and what
+  -- ends the battle is the outcome it sends when that grace expires -- or the
+  -- reconnect event, if they come back.  So this narrates and waits: closing
+  -- the screen here would take a fight away from a player who is about to be
+  -- told they won it.
+  local fight = self.fight
+  if fight and not fight.finished then
+    if reason == "peer_left" then
+      fight:say(("%s disconnected."):format(fight.peerName))
+    end
+    return
+  end
+
   if not session then
     self.active = nil
     return
@@ -422,14 +546,21 @@ function M:leaveMessage(session)
   return ("%s disconnected."):format(session.peerName)
 end
 
+-- Every way out of a session, including the one Client.disconnect takes on the
+-- way off a hub entirely.  A live fight is finished rather than dropped: the
+-- screen is still on the stack and the player is still looking at it, so it
+-- needs an ending it can be dismissed from.
 function M:endSession(message)
   local session = self.active
   self.active = nil
+  local fight = self.fight
+  self.fight = nil
+  if fight then fight:finish("draw", "disconnect") end
   if session then session.net:close() end
   if message then self.ui:say(message) end
 end
 
--- ------- the handshake, then the handoff
+-- ------- the handshake, then the handoff (trade only)
 
 -- Whether a hello claims the lockstep surface was touched: an affects_link
 -- mod, or a write into a link-surface registry.  Carried on the hello so we
@@ -444,6 +575,14 @@ end
 -- neither side has touched the link surface.  Vanilla Gen 1 let those fight;
 -- refusing them here blamed "mods" for a cartridge mismatch.  A side that
 -- has actually changed battle rules still has to match.
+--
+-- **Nothing in this file calls it any more.**  From PROTOCOL 10 an MMO battle
+-- is resolved by the intermediator off an uploaded chart and uploaded parties,
+-- so there is no shared simulation left for two copies to disagree inside and
+-- no verdict to gate on -- see the fork in M:onSession.  It survives as a
+-- statement of the pairing rule, still asserted by the suite and still driven
+-- against two real ROM extracts by tests/red_yellow_battle_compat.lua, and it
+-- is what a cable-club link would consult if this mod ever brokered one again.
 function M.canBattle(verdict, myHello, theirHello, Handshake)
   if not (Handshake and Handshake.battleAllowed) then return false end
   if Handshake.battleAllowed(verdict) then return true end
@@ -488,84 +627,31 @@ function M:beginTrade(game, session, modules)
   session.net:send(session.trade:opening())
 end
 
-function M:beginBattle(game, session, modules)
-  if not M.canBattle(session.verdict, session.myHello, session.theirHello,
-                     modules.Handshake) then
-    return self:endSession(M.battleBlockMessage(
-      session.myHello, session.theirHello, session.verdict, modules.Handshake))
-  end
-  -- LinkBattle itself also gates on Handshake.battleAllowed(verdict).  A
-  -- subset we chose to allow (neither side link-modified) still has to
-  -- present as battle-legal at the constructor; the real verdict stays on
-  -- the session for strict unpacking.
-  if modules.Handshake.battleAllowed(session.verdict) then
-    session.battleVerdict = session.verdict
-  else
-    session.battleVerdict = "full"
-  end
-  session.stage = "battleWait"
-  session.myParty = modules.Protocol.packParty(game.save.party)
-  -- the host deals the shared seed the lockstep simulation runs on
-  if session.role == "host" and love and love.math then
-    session.seed = love.math.random(1, 2 ^ 30)
-  end
-  session.net:send({ type = "party", mons = session.myParty, seed = session.seed })
-end
-
+-- Only a trade reaches here now, and the hub is what guarantees it: a battle
+-- session forks in M:onSession before a SessionNet is ever built, and both
+-- intermediators refuse mmo.relay for one, so this hello has nowhere else it
+-- could have come from.
 function M:handleHandshake(game, session, msg, modules)
   if msg.type ~= "hello" then return end
   session.theirHello = msg
   local verdict = modules.Handshake.checkCompat(session.myHello, msg)
   session.verdict = verdict
-  if session.kind == "trade" then
-    self:beginTrade(game, session, modules)
-  else
-    self:beginBattle(game, session, modules)
-  end
-end
-
-function M:handleBattleWait(game, session, msg, modules)
-  if msg.type ~= "party" then return end
-  session.theirParty = msg.mons
-  if session.role == "guest" then session.seed = session.seed or msg.seed end
-  if not (session.myParty and session.theirParty and session.seed) then return end
-
-  local constructor = session.role == "host"
-    and modules.Battle.newHost or modules.Battle.newGuest
-  local state, err = constructor(game, session.net, {
-    theirName = session.peerName,
-    verdict = session.battleVerdict or session.verdict,
-    strict = modules.Handshake.strict(session.verdict),
-    myParty = session.myParty,
-    theirParty = session.theirParty,
-    seed = session.seed,
-  })
-  if not state then
-    return self:endSession(err or "That battle can't\nstart.")
-  end
-  session.stage = "battle"
-
-  -- Remembered past the end of the session, because that is when it is
-  -- needed: the battle finishes, the engine emits battle.ended, and by then
-  -- either side may already have torn the session down. The state object
-  -- itself is kept so the result can be matched to *this* battle -- a player
-  -- who steps into a cable-club link or a wild encounter afterwards must not
-  -- have that battle reported as a ranked one.
-  self.lastBattle = {
-    id = session.id,
-    peerId = session.peerId,
-    peerName = session.peerName,
-    state = state,
-  }
-
-  -- the engine owns the battle from here; the mod only watches for the
-  -- connection dying underneath it
-  self.ui:pushState(game, state)
+  self:beginTrade(game, session, modules)
 end
 
 -- The battle this result belongs to, if the state that just ended is the one
 -- this mod handed to the engine.  Answers once: a result is reported to the
 -- hub exactly once, and a second call for the same battle gets nothing.
+--
+-- **Nothing sets `lastBattle` on the mediated path, so this now answers nil
+-- for every MMO fight** -- and that is the mechanism rather than an accident.
+-- src/Client.lua's reportBattle claims before it sends, so a battle with no
+-- claim is a battle with no mmo.result, which is exactly the rule PROTOCOL 10
+-- wants: the intermediator saw the fight and its mmo.battle_outcome is the
+-- whole account of it.  Making that structural is better than remembering not
+-- to send, because there is no second place to forget it in.  The field itself
+-- stays -- a cable-club link handed to the engine would fill it again, and the
+-- suite sets it directly to pin the claim-once rule.
 function M:claimBattle(state)
   local last = self.lastBattle
   if not last then return nil end
@@ -651,7 +737,29 @@ end
 
 -- ------- per-tick
 
+-- Whether the hub is still there to referee.
+--
+-- Asked of the transport rather than of a session, because a mediated fight
+-- has no SessionNet to watch die -- its messages go straight to the hub.
+-- Answers true for a transport that cannot say, so a harness whose stub has no
+-- isReady drives a fight rather than having it cut off at the first tick.
+function M:linkAlive()
+  local transport = self.transport
+  if not (transport and transport.isReady) then return true end
+  return transport:isReady() == true
+end
+
 function M:update(game, dt)
+  -- The mediated fight is driven by the engine's own state stack -- it is a
+  -- screen, and screens get their update from up there -- so there is exactly
+  -- one thing left to watch for it: the hub going away underneath it.  Without
+  -- this the outcome that ends the battle never arrives and the player is left
+  -- on a screen with no way off.
+  local fight = self.fight
+  if fight and not fight.finished and not self:linkAlive() then
+    fight:finish("draw", "disconnect")
+  end
+
   local session = self.active
   if not session then return end
 
@@ -668,11 +776,6 @@ function M:update(game, dt)
   local modules = link()
   if not modules then return end
 
-  -- Once the battle state is up it owns the inbox: LinkBattle polls the
-  -- same SessionNet every frame, and draining it here first would consume
-  -- the action/event messages the lockstep simulation is waiting on.
-  if session.stage == "battle" then return end
-
   for _, msg in ipairs(session.net:poll()) do
     if type(msg) == "table" and type(msg.type) == "string" then
       -- Read before the stage is consulted, because it can arrive in the
@@ -682,8 +785,6 @@ function M:update(game, dt)
         session.peerApplied = true
       elseif session.stage == "handshake" then
         self:handleHandshake(game, session, msg, modules)
-      elseif session.stage == "battleWait" then
-        self:handleBattleWait(game, session, msg, modules)
       elseif session.stage == "trade" then
         self:handleTrade(game, session, msg)
       end

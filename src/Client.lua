@@ -1825,6 +1825,14 @@ handlers[Wire.SESSION_END] = function(_, msg)
   sessions:onSessionEnd(msg and msg.reason)
 end
 
+-- The three things an intermediator says during a mediated fight. There is no
+-- inbound handler for the ruleset, the party or a choice: those travel the
+-- other way, and a client that received one would be receiving a message the
+-- hub has no reason to send it.
+handlers[Wire.BATTLE_READY] = function(_, msg) sessions:onBattleReady(msg) end
+handlers[Wire.BATTLE_EVENT] = function(_, msg) sessions:onBattleEvent(msg) end
+handlers[Wire.BATTLE_OUTCOME] = function(_, msg) sessions:onBattleOutcome(msg) end
+
 handlers[Wire.ERROR] = function(game, msg)
   local text = Wire.text(msg.message, 120) or "The hub refused the connection."
   -- A refusal that lands after we answered a challenge and before we were

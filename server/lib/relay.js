@@ -2261,13 +2261,14 @@ class Relay {
       if (record.settled) return;
     }
     record.settled = true;
-    this.broadcastBattle(record, 'mmo.battle_outcome', {
+    // Omit empty winners/losers: Wire.battleOutcome refuses an empty id list,
+    // and a refused outcome would leave the client with no way out.
+    const abortPayload = {
       battle: record.id,
       outcome: 'draw',
       reason: reason || 'gone',
-      winners: [],
-      losers: [],
-    });
+    };
+    this.broadcastBattle(record, 'mmo.battle_outcome', abortPayload);
     this.clearBattle(record);
   }
 
