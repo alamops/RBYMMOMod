@@ -1,0 +1,956 @@
+{
+  "version": 1,
+  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp: if attack > 255 or defense > 255 then both become max(1, floor(x/4)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = floor(floor(levelTerm * power * attack / defense) / 50) + 2. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = max(1, floor(d * roll / 255)) with roll in 217..255; the min-1 clamp is always applied (this fixture does not model the Gen1 \"skip the roll when damage is 1\" shortcut). Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. effectiveAccuracy = clamp(floor(floor(accuracy * accuracyMod / 100) * evasionMod / 100), 1, 255) and hit = roll < effectiveAccuracy for roll in 0..255. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. threshold = floor(baseSpeed / 2); focusEnergy quarters it (floor(t/4)) reproducing the Gen1 bug rather than raising it; a high-critical-ratio move multiplies by 8; the result is clamped to 0..255. isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense with no STAB, no type effectiveness and no crit, at a fixed roll of 255.",
+  "damage": [
+    {
+      "id": "dmg_neutral_basic",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ]
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 19,
+        "modified": 19,
+        "statClamped": false,
+        "immune": false,
+        "damage": 19
+      }
+    },
+    {
+      "id": "dmg_stab_150",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": true,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 1,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ]
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 19,
+        "modified": 28,
+        "statClamped": false,
+        "immune": false,
+        "damage": 28
+      }
+    },
+    {
+      "id": "dmg_super_effective_200",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": false,
+        "typeEffect": [
+          200
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 2,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          3
+        ]
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 19,
+        "modified": 38,
+        "statClamped": false,
+        "immune": false,
+        "damage": 38
+      }
+    },
+    {
+      "id": "dmg_not_very_effective_50",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": false,
+        "typeEffect": [
+          50
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 2,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          4
+        ]
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 19,
+        "modified": 9,
+        "statClamped": false,
+        "immune": false,
+        "damage": 9
+      }
+    },
+    {
+      "id": "dmg_immune_0",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": false,
+        "typeEffect": [
+          0
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          8
+        ]
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 19,
+        "modified": 0,
+        "statClamped": false,
+        "immune": true,
+        "damage": 0
+      }
+    },
+    {
+      "id": "dmg_dual_type_quad_200_200",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": false,
+        "typeEffect": [
+          200,
+          200
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 2,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          3,
+          5
+        ]
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 19,
+        "modified": 76,
+        "statClamped": false,
+        "immune": false,
+        "damage": 76
+      }
+    },
+    {
+      "id": "dmg_dual_type_cancels_200_50",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": false,
+        "typeEffect": [
+          200,
+          50
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 2,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          3,
+          4
+        ]
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 19,
+        "modified": 19,
+        "statClamped": false,
+        "immune": false,
+        "damage": 19
+      }
+    },
+    {
+      "id": "dmg_stab_and_super_roll_217",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": true,
+        "typeEffect": [
+          200
+        ],
+        "crit": false,
+        "roll": 217,
+        "moveType": 1,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          3
+        ]
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 19,
+        "modified": 56,
+        "statClamped": false,
+        "immune": false,
+        "damage": 47
+      }
+    },
+    {
+      "id": "dmg_crit_doubles_level_term",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": true,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ]
+      },
+      "out": {
+        "levelTerm": 42,
+        "base": 35,
+        "modified": 35,
+        "statClamped": false,
+        "immune": false,
+        "damage": 35
+      }
+    },
+    {
+      "id": "dmg_crit_with_stab",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "stab": true,
+        "typeEffect": [
+          100
+        ],
+        "crit": true,
+        "roll": 255,
+        "moveType": 1,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ]
+      },
+      "out": {
+        "levelTerm": 42,
+        "base": 35,
+        "modified": 52,
+        "statClamped": false,
+        "immune": false,
+        "damage": 52
+      }
+    },
+    {
+      "id": "dmg_low_level_5",
+      "in": {
+        "level": 5,
+        "power": 40,
+        "attack": 20,
+        "defense": 20,
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ]
+      },
+      "out": {
+        "levelTerm": 4,
+        "base": 5,
+        "modified": 5,
+        "statClamped": false,
+        "immune": false,
+        "damage": 5
+      }
+    },
+    {
+      "id": "dmg_high_stats_over_255_clamped",
+      "in": {
+        "level": 100,
+        "power": 150,
+        "attack": 300,
+        "defense": 300,
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ]
+      },
+      "out": {
+        "levelTerm": 42,
+        "base": 128,
+        "modified": 128,
+        "statClamped": true,
+        "immune": false,
+        "damage": 128
+      }
+    },
+    {
+      "id": "dmg_high_attack_only_clamps_both",
+      "in": {
+        "level": 100,
+        "power": 100,
+        "attack": 400,
+        "defense": 200,
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ]
+      },
+      "out": {
+        "levelTerm": 42,
+        "base": 170,
+        "modified": 170,
+        "statClamped": true,
+        "immune": false,
+        "damage": 170
+      }
+    },
+    {
+      "id": "dmg_full_roll_band",
+      "in": {
+        "level": 100,
+        "power": 120,
+        "attack": 200,
+        "defense": 150,
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": null,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ]
+      },
+      "out": {
+        "levelTerm": 42,
+        "base": 136,
+        "modified": 136,
+        "statClamped": false,
+        "immune": false,
+        "damage": null,
+        "minDamage": 115,
+        "maxDamage": 136
+      }
+    },
+    {
+      "id": "dmg_min_one_floor",
+      "in": {
+        "level": 2,
+        "power": 10,
+        "attack": 5,
+        "defense": 200,
+        "stab": false,
+        "typeEffect": [
+          50
+        ],
+        "crit": false,
+        "roll": 217,
+        "moveType": 2,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          4
+        ]
+      },
+      "out": {
+        "levelTerm": 2,
+        "base": 2,
+        "modified": 1,
+        "statClamped": false,
+        "immune": false,
+        "damage": 1
+      }
+    }
+  ],
+  "accuracy": [
+    {
+      "id": "acc_full_255_roll_0_hits",
+      "in": {
+        "accuracy": 255,
+        "accuracyMod": 100,
+        "evasionMod": 100,
+        "alwaysHits": false,
+        "roll": 0
+      },
+      "out": {
+        "effectiveAccuracy": 255,
+        "hit": true
+      }
+    },
+    {
+      "id": "acc_full_255_roll_255_misses",
+      "in": {
+        "accuracy": 255,
+        "accuracyMod": 100,
+        "evasionMod": 100,
+        "alwaysHits": false,
+        "roll": 255
+      },
+      "out": {
+        "effectiveAccuracy": 255,
+        "hit": false
+      }
+    },
+    {
+      "id": "acc_178_roll_177_hits",
+      "in": {
+        "accuracy": 178,
+        "accuracyMod": 100,
+        "evasionMod": 100,
+        "alwaysHits": false,
+        "roll": 177
+      },
+      "out": {
+        "effectiveAccuracy": 178,
+        "hit": true
+      }
+    },
+    {
+      "id": "acc_178_roll_178_misses",
+      "in": {
+        "accuracy": 178,
+        "accuracyMod": 100,
+        "evasionMod": 100,
+        "alwaysHits": false,
+        "roll": 178
+      },
+      "out": {
+        "effectiveAccuracy": 178,
+        "hit": false
+      }
+    },
+    {
+      "id": "acc_boosted_133_hits_at_235",
+      "in": {
+        "accuracy": 178,
+        "accuracyMod": 133,
+        "evasionMod": 100,
+        "alwaysHits": false,
+        "roll": 235
+      },
+      "out": {
+        "effectiveAccuracy": 236,
+        "hit": true
+      }
+    },
+    {
+      "id": "acc_boosted_133_misses_at_236",
+      "in": {
+        "accuracy": 178,
+        "accuracyMod": 133,
+        "evasionMod": 100,
+        "alwaysHits": false,
+        "roll": 236
+      },
+      "out": {
+        "effectiveAccuracy": 236,
+        "hit": false
+      }
+    },
+    {
+      "id": "acc_evasion_66_misses_at_168",
+      "in": {
+        "accuracy": 255,
+        "accuracyMod": 100,
+        "evasionMod": 66,
+        "alwaysHits": false,
+        "roll": 168
+      },
+      "out": {
+        "effectiveAccuracy": 168,
+        "hit": false
+      }
+    },
+    {
+      "id": "acc_clamps_to_min_1",
+      "in": {
+        "accuracy": 10,
+        "accuracyMod": 33,
+        "evasionMod": 33,
+        "alwaysHits": false,
+        "roll": 0
+      },
+      "out": {
+        "effectiveAccuracy": 1,
+        "hit": true
+      }
+    },
+    {
+      "id": "acc_clamps_to_min_1_misses_at_1",
+      "in": {
+        "accuracy": 10,
+        "accuracyMod": 33,
+        "evasionMod": 33,
+        "alwaysHits": false,
+        "roll": 1
+      },
+      "out": {
+        "effectiveAccuracy": 1,
+        "hit": false
+      }
+    },
+    {
+      "id": "acc_clamps_to_max_255",
+      "in": {
+        "accuracy": 255,
+        "accuracyMod": 200,
+        "evasionMod": 100,
+        "alwaysHits": false,
+        "roll": 254
+      },
+      "out": {
+        "effectiveAccuracy": 255,
+        "hit": true
+      }
+    },
+    {
+      "id": "acc_always_hits_bypasses_roll",
+      "in": {
+        "accuracy": 255,
+        "accuracyMod": 100,
+        "evasionMod": 100,
+        "alwaysHits": true,
+        "roll": 255
+      },
+      "out": {
+        "effectiveAccuracy": null,
+        "hit": true
+      }
+    }
+  ],
+  "crit": [
+    {
+      "id": "crit_speed_100_roll_49_is_crit",
+      "in": {
+        "baseSpeed": 100,
+        "focusEnergy": false,
+        "highCritMove": false,
+        "roll": 49
+      },
+      "out": {
+        "threshold": 50,
+        "isCrit": true
+      }
+    },
+    {
+      "id": "crit_speed_100_roll_50_not_crit",
+      "in": {
+        "baseSpeed": 100,
+        "focusEnergy": false,
+        "highCritMove": false,
+        "roll": 50
+      },
+      "out": {
+        "threshold": 50,
+        "isCrit": false
+      }
+    },
+    {
+      "id": "crit_speed_5_roll_1_is_crit",
+      "in": {
+        "baseSpeed": 5,
+        "focusEnergy": false,
+        "highCritMove": false,
+        "roll": 1
+      },
+      "out": {
+        "threshold": 2,
+        "isCrit": true
+      }
+    },
+    {
+      "id": "crit_speed_5_roll_2_not_crit",
+      "in": {
+        "baseSpeed": 5,
+        "focusEnergy": false,
+        "highCritMove": false,
+        "roll": 2
+      },
+      "out": {
+        "threshold": 2,
+        "isCrit": false
+      }
+    },
+    {
+      "id": "crit_focus_energy_quarters_threshold",
+      "in": {
+        "baseSpeed": 100,
+        "focusEnergy": true,
+        "highCritMove": false,
+        "roll": 11
+      },
+      "out": {
+        "threshold": 12,
+        "isCrit": true
+      }
+    },
+    {
+      "id": "crit_focus_energy_misses_at_12",
+      "in": {
+        "baseSpeed": 100,
+        "focusEnergy": true,
+        "highCritMove": false,
+        "roll": 12
+      },
+      "out": {
+        "threshold": 12,
+        "isCrit": false
+      }
+    },
+    {
+      "id": "crit_high_ratio_move_x8_clamped_255",
+      "in": {
+        "baseSpeed": 100,
+        "focusEnergy": false,
+        "highCritMove": true,
+        "roll": 254
+      },
+      "out": {
+        "threshold": 255,
+        "isCrit": true
+      }
+    },
+    {
+      "id": "crit_high_ratio_move_cannot_reach_255",
+      "in": {
+        "baseSpeed": 100,
+        "focusEnergy": false,
+        "highCritMove": true,
+        "roll": 255
+      },
+      "out": {
+        "threshold": 255,
+        "isCrit": false
+      }
+    },
+    {
+      "id": "crit_focus_energy_plus_high_ratio",
+      "in": {
+        "baseSpeed": 100,
+        "focusEnergy": true,
+        "highCritMove": true,
+        "roll": 95
+      },
+      "out": {
+        "threshold": 96,
+        "isCrit": true
+      }
+    },
+    {
+      "id": "crit_speed_1_threshold_zero_never_crits",
+      "in": {
+        "baseSpeed": 1,
+        "focusEnergy": false,
+        "highCritMove": false,
+        "roll": 0
+      },
+      "out": {
+        "threshold": 0,
+        "isCrit": false
+      }
+    }
+  ],
+  "status": [
+    {
+      "id": "status_sleep_counter_decrements",
+      "in": {
+        "status": "sleep",
+        "turnsRemaining": 3
+      },
+      "out": {
+        "turnsRemaining": 2,
+        "wokeUp": false,
+        "canMove": false
+      }
+    },
+    {
+      "id": "status_sleep_wakes_but_loses_turn",
+      "in": {
+        "status": "sleep",
+        "turnsRemaining": 1
+      },
+      "out": {
+        "turnsRemaining": 0,
+        "wokeUp": true,
+        "canMove": false
+      }
+    },
+    {
+      "id": "status_paralysis_full_stop_below_63",
+      "in": {
+        "status": "paralysis",
+        "roll": 62
+      },
+      "out": {
+        "fullyParalyzed": true,
+        "canMove": false
+      }
+    },
+    {
+      "id": "status_paralysis_acts_at_63",
+      "in": {
+        "status": "paralysis",
+        "roll": 63
+      },
+      "out": {
+        "fullyParalyzed": false,
+        "canMove": true
+      }
+    },
+    {
+      "id": "status_paralysis_quarters_speed",
+      "in": {
+        "status": "paralysis",
+        "speed": 200
+      },
+      "out": {
+        "speed": 50
+      }
+    },
+    {
+      "id": "status_paralysis_speed_min_one",
+      "in": {
+        "status": "paralysis",
+        "speed": 3
+      },
+      "out": {
+        "speed": 1
+      }
+    },
+    {
+      "id": "status_freeze_never_self_thaws",
+      "in": {
+        "status": "freeze",
+        "roll": 255
+      },
+      "out": {
+        "thawed": false,
+        "canMove": false
+      }
+    },
+    {
+      "id": "status_freeze_never_self_thaws_low_roll",
+      "in": {
+        "status": "freeze",
+        "roll": 0
+      },
+      "out": {
+        "thawed": false,
+        "canMove": false
+      }
+    },
+    {
+      "id": "status_burn_residual_sixteenth",
+      "in": {
+        "status": "burn",
+        "maxHp": 160
+      },
+      "out": {
+        "residualDamage": 10
+      }
+    },
+    {
+      "id": "status_burn_residual_min_one",
+      "in": {
+        "status": "burn",
+        "maxHp": 10
+      },
+      "out": {
+        "residualDamage": 1
+      }
+    },
+    {
+      "id": "status_burn_halves_attack",
+      "in": {
+        "status": "burn",
+        "attack": 101
+      },
+      "out": {
+        "attack": 50
+      }
+    },
+    {
+      "id": "status_poison_residual_sixteenth",
+      "in": {
+        "status": "poison",
+        "maxHp": 200
+      },
+      "out": {
+        "residualDamage": 12
+      }
+    },
+    {
+      "id": "status_toxic_residual_scales_with_counter",
+      "in": {
+        "status": "toxic",
+        "maxHp": 160,
+        "toxicCounter": 3
+      },
+      "out": {
+        "residualDamage": 30
+      }
+    },
+    {
+      "id": "status_toxic_residual_first_tick",
+      "in": {
+        "status": "toxic",
+        "maxHp": 160,
+        "toxicCounter": 1
+      },
+      "out": {
+        "residualDamage": 10
+      }
+    },
+    {
+      "id": "status_confusion_self_hit_below_128",
+      "in": {
+        "status": "confusion",
+        "turnsRemaining": 3,
+        "roll": 127,
+        "level": 50,
+        "attack": 100,
+        "defense": 100
+      },
+      "out": {
+        "turnsRemaining": 2,
+        "snappedOut": false,
+        "selfHit": true,
+        "canMove": false,
+        "selfDamage": 19
+      }
+    },
+    {
+      "id": "status_confusion_acts_at_128",
+      "in": {
+        "status": "confusion",
+        "turnsRemaining": 3,
+        "roll": 128,
+        "level": 50,
+        "attack": 100,
+        "defense": 100
+      },
+      "out": {
+        "turnsRemaining": 2,
+        "snappedOut": false,
+        "selfHit": false,
+        "canMove": true,
+        "selfDamage": 0
+      }
+    },
+    {
+      "id": "status_confusion_snaps_out_and_acts",
+      "in": {
+        "status": "confusion",
+        "turnsRemaining": 1,
+        "roll": 0,
+        "level": 50,
+        "attack": 100,
+        "defense": 100
+      },
+      "out": {
+        "turnsRemaining": 0,
+        "snappedOut": true,
+        "selfHit": false,
+        "canMove": true,
+        "selfDamage": 0
+      }
+    }
+  ]
+}

@@ -56,7 +56,21 @@ M.MOD_ID = "rby_mmo"
 -- pendingTo: the other player could still accept and pull them into a
 -- session they thought they had walked away from.  Silence is worse than a
 -- refusal that names both versions, so the number moved.
-M.PROTOCOL = 9
+--
+-- 10 is the mediated battle: the seven mmo.battle_* types in src/Wire.lua,
+-- through which an intermediator -- the dedicated hub, or a LAN host -- owns
+-- every roll in an MMO fight instead of one of the players' clients.  A
+-- protocol-9 hub relays and never simulates, so it has never heard any of the
+-- seven and its handler table answers each with silence.  The failure that
+-- silence buys is worse than any of the ones above it: the two players agree
+-- to fight, each uploads a party into nothing, and then both stand in front of
+-- a battle that never starts, waiting on a mmo.battle_ready no process on the
+-- other end is going to send -- and there is no local fallback left to catch
+-- them, because the mediated path is a hard cut and the old lockstep handoff
+-- is gone.  A refusal naming both versions is the only sentence either player
+-- can act on.  This number lives here and in server/lib/relay.js -- bump them
+-- together.
+M.PROTOCOL = 10
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -316,6 +330,81 @@ M.COOP_TURN_TIMEOUT = 60
 -- way, while a quiet turn is ordinary and used to cost a false alarm every time.
 M.COOP_STALL_TIMEOUT = 75
 
+-- ------- mediated battles
+--
+-- The fight an *intermediator* runs: the dedicated hub, or a LAN host, owning
+-- hit, crit, damage, status and the outcome, with both clients reduced to
+-- sending choices and drawing what they are told.  The vocabulary is the seven
+-- mmo.battle_* types in src/Wire.lua and the shapes beside them; these are the
+-- numbers that vocabulary is bounded by.
+--
+-- Every one of them is mirrored in the JS twin under server/lib/, for the same
+-- reason the rank dials are: two intermediators that time out differently are
+-- two different games, and a client that accepts a party the hub refused would
+-- upload a team into a battle that never opens.  They move together or not at
+-- all.
+
+-- How long a battle waits for a player who has dropped mid-fight.
+--
+-- The window in which a crash, a dropped wifi or a closed lid is still
+-- recoverable: the side is marked absent, the turn clock stops, and a
+-- mmo.battle_reconnect inside this many seconds resumes the fight where it
+-- stood.  Past it the side forfeits, which is the whole reason the window is
+-- finite -- the other player cannot be made to sit in front of a frozen field
+-- forever on the chance somebody is rebooting.
+--
+-- Sixty, which is RANK_REPORT_GRACE's number and chosen the same way: long
+-- enough to cover the reconnect a player can actually achieve (the client
+-- redials the hub it already knows and replays one message), short enough that
+-- the opponent reads it as an interruption rather than an abandonment.
+M.BATTLE_RECONNECT_GRACE = 60
+
+-- How long the intermediator waits on a connected player's choice before it
+-- picks for them.
+--
+-- Its own constant rather than COOP_TURN_TIMEOUT, and the two happening to be
+-- 60 is not the reason to merge them.  COOP_TURN_TIMEOUT is a *client* clock:
+-- the host client running CoopSim used it to decide when to auto-pick, and the
+-- replayers used COOP_STALL_TIMEOUT to decide when that host had died.  This
+-- one is the intermediator's, on the far side of the wire, and it is the only
+-- clock in a mediated fight that decides anything -- nothing is waiting on a
+-- player's client to be alive, so there is no stall clock above it and no
+-- grace margin below it.  Keeping them separate is what lets the co-op numbers
+-- be retuned for the screen while this one is retuned for the hub.
+M.BATTLE_CHOICE_TIMEOUT = 60
+
+-- The most POKeMON one combatant may bring, which is Gen 1's party size.
+--
+-- COOP_TEAM_MAX's number and COOP_TEAM_MAX's argument -- a bound on a list
+-- that crossed the wire from a stranger's process, because a party length
+-- nobody checked is a battle that never ends.  Its own name because the thing
+-- it bounds is a different message (mmo.battle_party, not a relayed co-op
+-- field) and the two are read by different code on both ends.
+M.BATTLE_MON_MAX = 6
+
+-- The most moves one of those POKeMON may carry.  Gen 1's four, and a hard
+-- bound rather than a convention: the choice message names a move by index
+-- into this list, so a party that carried more would be a party with slots no
+-- mmo.battle_choice can reach and no screen has a button for.
+M.BATTLE_MOVE_MAX = 4
+
+-- The widest type chart an ephemeral ruleset may upload.
+--
+-- How many *types* a chart may describe, which is not the same number as the
+-- largest value one of its cells may hold (Wire.CHART_MAX) nor the widest type a
+-- *move* may name (bounded separately, and deliberately wider: a party naming a
+-- type the uploaded chart has no row for is still a well-formed party, and the
+-- sim reads that gap as neutral rather than refusing somebody's whole team over
+-- one index).
+--
+-- This caps both axes, so 20 is 400 cells -- comfortably inside
+-- PAYLOAD_MAX_NODES while still being a real
+-- ceiling on a nested table a stranger sends.  Gen 1 has fifteen types, and
+-- the five spare rows are the point: the chart arrives from the *player's own*
+-- decoded ROM rather than shipping here (see the legal posture in CLAUDE.md),
+-- so a data pack that adds a type has to fit, and a cap of exactly fifteen
+-- would refuse the modded ruleset instead of the malformed one.
+M.BATTLE_TYPE_MAX = 20
 
 -- Chat.  "party" is delivered to the other member wherever they are, so it
 -- is the one scope with neither a radius nor a name to type.

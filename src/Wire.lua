@@ -197,12 +197,82 @@ M.COOP_BATTLE    = "mmo.coop_battle"
 -- One player's battle traffic, as it reaches the other three: { from, payload }.
 M.COOP_MSG       = "mmo.coop_msg"
 
+-- ------- mediated battles
+--
+-- Seven types, and they are grouped by feature rather than split across the
+-- two direction headings above, because the whole point of them is the
+-- *round trip*: an intermediator -- the dedicated hub, or a LAN host -- reads
+-- three of these and answers with three others, and reading a choice next to
+-- the event it produces is what makes the exchange legible.  Which way each
+-- one travels is written beside it.
+--
+-- What changes here is not the vocabulary but who is trusted with the dice.
+-- Everything above this block is relayed: both hubs forward a payload they
+-- never read, and the arithmetic of a fight happens on one of the players'
+-- clients (LinkBattle's lockstep for 1v1, the host client's CoopSim for 2v2).
+-- These seven exist so that it does not: the intermediator owns hit, crit,
+-- damage, status and the outcome, and a client sends a choice and draws what
+-- it is told.  A modified client can still lie on the sheet it uploads before
+-- the fight -- that is the accepted v1 surface -- but it can no longer decide
+-- that a move hit, or for how much.
+--
+-- Nothing in here is ROM-derived and nothing may become so.  The numbers the
+-- formulas need arrive from the player's *own* decoded copy, for that match
+-- only: BATTLE_RULESET carries the type chart, and each move carries its own
+-- power and accuracy on BATTLE_PARTY.  That is why there is no move table on
+-- either intermediator, and why there must never be one.
+
+-- The ephemeral rules for one match: { chart, seed }, from whichever client is
+-- the authority for it (a LAN host, or the asker on a dedicated hub).  Sent
+-- once, before any party, and never stored past the battle.
+M.BATTLE_RULESET   = "mmo.battle_ruleset"
+-- One combatant's team, as they claim it: { battle, side, mons, badges }.  Each
+-- combatant sends their own -- and for a co-op fight against an NPC, the player
+-- who walked into the trainer sends the trainer's too, because they are the
+-- only one whose copy of the world has it.
+M.BATTLE_PARTY     = "mmo.battle_party"
+-- The field is assembled and the first turn is open: { battle, mode, sides }.
+-- The one message that starts a mediated fight, and the only one -- a client
+-- that has uploaded a party and not seen this has nothing to draw yet.
+M.BATTLE_READY     = "mmo.battle_ready"
+-- What this player wants to do this turn: { battle, action, slot, move, target,
+-- item }.  A choice, never a result: the fields name an intent off a menu, and
+-- what it costs is the intermediator's to decide.
+M.BATTLE_CHOICE    = "mmo.battle_choice"
+-- One thing to draw, in order: { battle, seq, t, ... }.  `seq` is what makes
+-- the stream a stream -- a client applies events in that order and can tell a
+-- gap from a pause, which is the whole difference between a battle that is
+-- thinking and one that has lost messages.
+M.BATTLE_EVENT     = "mmo.battle_event"
+-- How it ended: { battle, outcome, winners, losers, reason }.
+--
+-- **The sole result, and that is the change.**  A ranked 1v1 used to be scored
+-- only when both clients sent the same mmo.result, because neither could be
+-- believed on its own; here the intermediator is the only party that rolled
+-- anything, so it is the only party that says who won and the dual vote is
+-- retired for these fights.
+M.BATTLE_OUTCOME   = "mmo.battle_outcome"
+-- "I dropped, and I am back": { battle }.  Carries the battle rather than
+-- nothing, unlike COOP_LEAVE, precisely because the sender has been away: the
+-- connection it is arriving on may be a new one, so the intermediator cannot
+-- read which fight this is off a socket it has only just met.
+M.BATTLE_RECONNECT = "mmo.battle_reconnect"
+
 M.FACINGS = { up = true, down = true, left = true, right = true }
 M.KINDS = { trade = true, battle = true }
 -- What a client may claim about a battle it just finished.  "draw" is a real
 -- answer and not a refusal to answer: a dropped link, a mutual run and a
 -- desync all end that way, and all three score nothing.
-M.OUTCOMES = { win = true, loss = true, draw = true }
+--
+-- "forfeit" is the fourth, and it only exists on the mediated path: a side that
+-- dropped and did not come back inside BATTLE_RECONNECT_GRACE.  It is kept
+-- distinct from "loss" rather than folded into it because the two read
+-- differently to both players -- the one who stayed was not beaten on the
+-- field, and the one who left is owed a sentence that says so rather than a
+-- scoreline that implies they were outplayed.  A relayed fight can never
+-- produce it: it is a verdict about *time*, and only the process holding the
+-- clock is in a position to reach it.
+M.OUTCOMES = { win = true, loss = true, draw = true, forfeit = true }
 
 local SCOPES = {}
 for _, scope in ipairs(Config.CHAT_SCOPES) do SCOPES[scope] = true end
@@ -770,6 +840,661 @@ function M.ranking(raw)
     if #out >= Config.RANK_TOP then break end
   end
   return out
+end
+
+-- ------- mediated battles
+--
+-- The shapes the seven mmo.battle_* types carry.  They are sanitised on the
+-- same rule as everything above -- rebuild the table, refuse the half-formed --
+-- but the reason bites harder here, and it is worth saying once: these tables
+-- are the **inputs to arithmetic**, not fields on a screen.
+--
+-- A bad name draws wrong and a bad map id places nothing; a bad `accuracy` is a
+-- comparison against an RNG roll, and a party length nobody counted is a battle
+-- with no last monster in it.  So nothing here is clamped into something
+-- plausible and then used -- an out-of-range number is never rounded into range,
+-- because the alternative is an intermediator resolving a fight from figures it
+-- made up.
+--
+-- A field that is present and unreadable takes its whole message with it almost
+-- everywhere here.  The one exception is BATTLE_EVENT, whose optional fields are
+-- dropped instead, and the argument for that is written where it happens.
+--
+-- Four of these are read by the intermediator (RULESET, PARTY, CHOICE,
+-- RECONNECT) and three by clients (READY, EVENT, OUTCOME), and both ends run
+-- *this* file or its JS twin in server/lib/sanitize.js.  **The twins have to
+-- accept and refuse the same bytes**, which is the tightest constraint in this
+-- section: a party the hub took and the client threw away is a fight one end
+-- thinks is running, and it fails with both processes behaving correctly.  Every
+-- bound below has a named counterpart there -- so a rule added to one, however
+-- prudent on its own, is a divergence until it is added to both.
+
+-- The largest value one type-effectiveness cell may hold, as integer percent.
+--
+-- Percent rather than a float, because this number crosses a JSON boundary into
+-- two languages and is then multiplied into a damage figure: 0.5 and 2 survive
+-- that trip, but a chart that carried 0.1 would round differently on the two
+-- ends and the same attack would do different damage depending on who was
+-- hosting.  Integers multiply and divide identically everywhere.
+M.CHART_MAX = 400
+
+-- The six multipliers a Gen 1 chart is built out of.
+--
+-- **Not a gate.**  chartOf bounds a cell and does not check membership here, and
+-- the reason is the legal posture rather than laziness: the chart arrives from a
+-- player's own decoded data, a pack may legitimately rebalance a matchup to 75,
+-- and refusing it would drop a coherent modded ruleset in the name of catching a
+-- malformed one.  Gen 1's own cells only ever hold 0, 50, 100 or 200 -- the
+-- quarter and the quadruple come out of *composing* two of them against a dual
+-- type, in the sim, not out of the chart.
+--
+-- It is here for the sim and the fixtures to read, which is the same thing the
+-- JS twin exports it for.  A checker that existed on only one of the two ends
+-- would be a chart the hub refuses and a LAN host fights.
+M.EFF_NEUTRAL = 100
+M.EFF_MULTS = {
+  [0] = true, [25] = true, [50] = true,
+  [M.EFF_NEUTRAL] = true, [200] = true, [M.CHART_MAX] = true,
+}
+
+-- The seed the intermediator may be handed to run a match from.
+--
+-- 2^30, which is the width src/link's own shared seeds use, and a positive
+-- lower bound because 0 is the value a missing field arrives as once something
+-- upstream has helpfully defaulted it -- a "seed" every battle shares is the
+-- one seed worth refusing outright.
+M.SEED_MAX = 1073741824
+
+-- What an event's `amount` may say: damage off a bar, or the size of a stat
+-- change.  Unsigned, because which direction a stat moved is the event's kind
+-- and its sentence rather than the sign of this field.
+M.AMOUNT_MAX = 9999
+
+-- How long a reason token this build has never heard of may be.  Refused past it
+-- rather than trimmed -- a cut token matches nothing and is a value nobody sent.
+M.REASON_MAX = 32
+
+-- The three indices in this vocabulary, and the widths that tell them apart.
+--
+--   SLOT_MAX   a *party* index -- which of your six.  What `mon.slot` and
+--              `choice.slot` are bounded by.
+--   FIELD_MAX  a position *on the field* -- four, because a party is a pair and
+--              two parties meet.  What `choice.target` and `event.slot` are
+--              bounded by: an event is about somebody who is out, not about a
+--              bench position.
+--
+-- Written as offsets from Config's own numbers rather than as literals, so the
+-- day PARTY_MAX moves the field moves with it instead of being a number
+-- somebody has to remember.
+--
+-- **All of them are zero-based**, which is the one thing they do share, and it
+-- is worth stating because guessing produces an off-by-one that silently spends
+-- the wrong turn.
+M.SLOT_MAX = Config.BATTLE_MON_MAX - 1
+M.FIELD_MAX = Config.COOP_FIGHTERS - 1
+
+-- The most HP, and the most of any single stat, a submitted battler may claim.
+--
+-- Named rather than written out at each of the four call sites: hp, maxHp and
+-- the `hp` on a damage event are the same quantity seen from two ends of the
+-- wire, and three literals that were meant to be one number are three chances
+-- for the client to refuse what the intermediator sent.
+--
+-- Both are far above anything Gen 1 reaches (a level-100 CHANSEY tops out
+-- around 700 HP), because the job here is bounding a stranger's number before
+-- it enters a formula, not restating the game's own ceilings.
+M.HP_MAX = 999
+M.STAT_MAX = 999
+
+-- Gen 1's status conditions, as three-letter tokens.
+--
+-- A closed set for the reason every closed set in this file is one: the sim
+-- branches on it -- a sleeping battler does not move, a frozen one does not
+-- thaw on its own, a burned one hits for half -- so a token nothing branches on
+-- has no behaviour to give, and inventing one would be inventing a rule.
+--
+-- TOX is here alongside PSN because Gen 1 really does distinguish them (the
+-- doubling toxic counter), even though both read as PSN on the status box.
+M.STATUSES = {
+  SLP = true, PSN = true, BRN = true, FRZ = true, PAR = true, TOX = true,
+}
+
+-- A battler's condition, where "healthy" is a real answer and so is "no".
+--
+-- **Three answers, and callers have to check for all three.**  nil for healthy,
+-- the token itself when it is one, and `false` for a value that is present and
+-- unrecognised.  nil and the empty string both mean healthy, because that is how
+-- a client keeping no status field and one keeping a cleared field each spell it,
+-- and neither is wrong.
+--
+-- The `false` is what earns the extra state.  Waving an unknown token through as
+-- healthy would hand the sim a battler whose owner believes it is asleep and
+-- whose intermediator believes it is fine, and the first turn would visibly
+-- disagree with the box the player is looking at.
+function M.battleStatus(value)
+  if value == nil or value == "" then return nil end
+  if M.STATUSES[value] then return value end
+  return false
+end
+
+-- The type chart for one match: rows of integer-percent cells, rebuilt cell by
+-- cell rather than measured and passed on.
+--
+-- Uniform rows, with both axes bounded by BATTLE_TYPE_MAX.  A ragged chart is the
+-- failure that would not announce itself: the sim would read nothing out of the
+-- short row and treat a super-effective matchup as neutral, in one direction
+-- only.
+--
+-- Squareness is *not* checked, even though a chart is indexed
+-- attacker-by-defender out of one type space.  What a type with no row means is a
+-- question the sim has to answer regardless -- a move may name a type past the
+-- chart's width, and reading that gap as neutral is its call -- so a rectangle of
+-- numbers in range is what this function owes, and it is what makes the table
+-- safe to walk at all.
+local function chartOf(raw)
+  if type(raw) ~= "table" then return nil end
+  local rows, width = {}, nil
+  for _, row in ipairs(raw) do
+    if type(row) ~= "table" then return nil end
+    if #rows >= Config.BATTLE_TYPE_MAX then return nil end
+    local cells = {}
+    for _, cell in ipairs(row) do
+      if #cells >= Config.BATTLE_TYPE_MAX then return nil end
+      local n = M.int(cell, 0, M.CHART_MAX)
+      if not n then return nil end
+      cells[#cells + 1] = n
+    end
+    if #cells == 0 then return nil end
+    if width == nil then
+      width = #cells
+    elseif #cells ~= width then
+      return nil
+    end
+    rows[#rows + 1] = cells
+  end
+  if #rows == 0 then return nil end
+  return rows
+end
+
+-- The rules one mediated fight runs under: { chart, seed }.
+--
+-- Ephemeral, and that word is the legal posture rather than a performance note.
+-- Nothing in this repo ships a type chart; it arrives from the authority
+-- client's own decoded copy for this match and is thrown away with the battle.
+--
+-- The chart is the message; a seed is an offer.
+--
+-- `seed` is optional because the intermediator is the only party that rolls
+-- anything and can perfectly well pick its own -- unlike the old lockstep pair,
+-- there is no agreement about randomness here to get wrong.  But a seed that is
+-- *present and unreadable* takes the message with it rather than being dropped: a
+-- test or a replay sends one precisely because it needs that seed and no other,
+-- so quietly substituting a different one would answer the request with a run
+-- that looks right and reproduces nothing.
+function M.battleRuleset(raw)
+  if type(raw) ~= "table" then return nil end
+  local chart = chartOf(raw.chart)
+  if not chart then return nil end
+  local out = { chart = chart }
+  if raw.seed ~= nil then
+    out.seed = M.int(raw.seed, 1, M.SEED_MAX)
+    if out.seed == nil then return nil end
+  end
+  return out
+end
+
+-- One move, carrying everything needed to resolve it.
+--
+-- **There is no move table on either intermediator, and that is deliberate.**
+-- Power, accuracy, type, effect and effect chance ride with the move rather
+-- than being looked up by id, because a lookup table would be the ROM extract
+-- this repo may not contain -- and because it is what lets a data pack's
+-- rebalanced move resolve correctly on a hub that has never heard of it.  `id`
+-- is along for narration and logs only; nothing branches on it.
+--
+-- Every field is required, and none of them defaults.  A move with no accuracy
+-- is not a move that always hits, it is a move the sim cannot roll -- and the
+-- difference between those two readings is a coin flip decided by whichever
+-- one the twin happened to pick.  So the missing field refuses the move, the
+-- move refuses the battler, and the battler refuses the party: one loud
+-- failure at the boundary instead of a quiet one three formulas in.
+--
+-- `accuracy` is a byte because Gen 1's is: it is compared against a 0-255 roll,
+-- which is the whole mechanism behind the 1-in-256 miss.  `type` is bounded
+-- generously and independently of BATTLE_TYPE_MAX, so a party naming a type the
+-- uploaded chart has no row for is still a well-formed party -- the sim reads
+-- that gap as neutral, which is a far better answer than refusing somebody's
+-- whole team over one mismatched index.
+function M.battleMove(raw)
+  if type(raw) ~= "table" then return nil end
+  local out = {
+    id = M.id(raw.id),
+    pp = M.int(raw.pp, 0, 99),
+    power = M.int(raw.power, 0, 999),
+    accuracy = M.int(raw.accuracy, 0, 255),
+    type = M.int(raw.type, 0, 31),
+    effect = M.int(raw.effect, 0, 255),
+    chance = M.int(raw.chance, 0, 100),
+  }
+  -- 0 is truthy in Lua, so this reads "present" and not "non-zero" -- which is
+  -- the whole point, since 0 power and 0 chance are ordinary answers.
+  if not (out.id and out.pp and out.power and out.accuracy and out.type
+          and out.effect and out.chance) then
+    return nil
+  end
+  return out
+end
+
+-- Gen 1's four battle stats.  SPC is one stat and not two: Special did not
+-- split until Gen 2, so a snapshot carrying spa/spd would be describing a
+-- different game's battler.
+local STAT_KEYS = { "atk", "def", "spd", "spc" }
+
+-- A full set of the four, or nothing.  Partial is refused rather than filled
+-- in: every one of them is a multiplicand in the damage formula, and a
+-- defaulted Defence is a made-up number that reads as a real one.
+local function statsOf(raw, min, max)
+  if type(raw) ~= "table" then return nil end
+  local out = {}
+  for _, key in ipairs(STAT_KEYS) do
+    local n = M.int(raw[key], min, max)
+    if not n then return nil end
+    out[key] = n
+  end
+  return out
+end
+
+-- One battler, as its owner claims it.
+--
+-- The sheet is **trusted for v1** and this is the file that says so plainly: a
+-- modified client can send a level-100 team with 999 in every stat and the
+-- intermediator will fight it.  What sanitising buys is not honesty, it is
+-- coherence -- every number is a number, in a range the formulas survive, and
+-- the fight resolves and ends.  Mid-fight cheating is what the intermediator
+-- removes; the pre-fight sheet is the accepted residual surface.
+--
+-- `hp` above `maxHp` is refused even though both are individually in range,
+-- because it is the one incoherence that reaches arithmetic rather than a screen:
+-- the HP bar and several formulas divide by maxHp, and a battler at 300/100 draws
+-- a bar past its own box and starts the fight already impossible to describe.
+-- `maxHp` therefore starts at 1 while `hp` starts at 0 -- a fainted monster is
+-- ordinary, a monster with no capacity is not.
+--
+-- `slot`, `ivs` and `evs` are optional wholesale but not piecemeal, and an
+-- unreadable one refuses the battler rather than being dropped: a snapshot from a
+-- client that does not track EVs is fine and common, while a snapshot with two of
+-- the four is a bug on the sending side that accepting would silently zero the
+-- rest of.
+function M.battleMon(raw)
+  if type(raw) ~= "table" then return nil end
+
+  local stats = statsOf(raw.stats, 1, M.STAT_MAX)
+  if not stats then return nil end
+
+  local status = M.battleStatus(raw.status)
+  if status == false then return nil end
+
+  local out = {
+    species = M.name(raw.species),
+    level = M.int(raw.level, 1, M.LEVEL_MAX),
+    hp = M.int(raw.hp, 0, M.HP_MAX),
+    maxHp = M.int(raw.maxHp, 1, M.HP_MAX),
+    stats = stats,
+    status = status,
+  }
+  -- hp may be 0 (fainted); only nil means the field failed to sanitise.  In Lua
+  -- 0 is truthy, but spell the check with `== nil` anyway so a reader coming
+  -- from JS does not "fix" a working gate into a gate that refuses fainted mons.
+  if out.species == nil or out.level == nil or out.hp == nil or out.maxHp == nil then
+    return nil
+  end
+  if out.hp > out.maxHp then return nil end
+
+  if raw.slot ~= nil then
+    out.slot = M.int(raw.slot, 0, M.SLOT_MAX)
+    if out.slot == nil then return nil end
+  end
+  if raw.ivs ~= nil then
+    out.ivs = statsOf(raw.ivs, 0, 15)
+    if not out.ivs then return nil end
+  end
+  if raw.evs ~= nil then
+    out.evs = statsOf(raw.evs, 0, 65535)
+    if not out.evs then return nil end
+  end
+
+  if type(raw.moves) ~= "table" then return nil end
+  local moves = {}
+  for _, entry in ipairs(raw.moves) do
+    if #moves >= Config.BATTLE_MOVE_MAX then return nil end
+    local move = M.battleMove(entry)
+    if not move then return nil end
+    moves[#moves + 1] = move
+  end
+  if #moves == 0 then return nil end
+  out.moves = moves
+
+  return out
+end
+
+-- One combatant's team for one battle: { battle, side, mons, badges }.
+--
+-- The list is bounded and refused whole rather than delivered short, which is
+-- M.members' rule for M.members' reason turned up a notch: a team the
+-- intermediator quietly shortened is a fight the owner loses to a monster they
+-- were told they had.
+--
+-- `side` is optional because a 1v1 has none to name -- there are two combatants
+-- and the intermediator knows which is which from the session it brokered.  It is
+-- required in practice for the two co-op modes, and that is the intermediator's
+-- check to make rather than this one's: it is the only party that knows which
+-- mode this battle is.  Present-and-malformed is still refused, because a side
+-- nobody can read is not the same thing as a side nobody stated.
+function M.battleParty(raw)
+  if type(raw) ~= "table" then return nil end
+  local battle = M.id(raw.battle)
+  if not battle then return nil end
+
+  local out = { battle = battle, badges = M.badges(raw.badges) }
+
+  if raw.side ~= nil then
+    out.side = M.side(raw.side)
+    if not out.side then return nil end
+  end
+
+  if type(raw.mons) ~= "table" then return nil end
+  local mons = {}
+  for _, entry in ipairs(raw.mons) do
+    if #mons >= Config.BATTLE_MON_MAX then return nil end
+    local mon = M.battleMon(entry)
+    if not mon then return nil end
+    mons[#mons + 1] = mon
+  end
+  if #mons == 0 then return nil end
+  out.mons = mons
+
+  return out
+end
+
+-- What a player may ask for on their turn, and which field each ask needs in
+-- order to mean anything.  `true` means the action is complete on its own.
+--
+-- Required-field-per-action rather than a check beside it, exactly as
+-- M.PARTY_EVENTS is shaped and for the same reason: the incomplete case is the
+-- one that reaches a player.  A `fight` with no move index is not a defaultable
+-- choice -- picking a move for somebody would be choosing their turn for them,
+-- and doing nothing would stall a clock that forfeits.
+--
+-- `cancel` is a real action rather than the absence of one: a player backing out
+-- of a choice they already submitted is something the turn machine has to be
+-- told about, because it is holding a deadline open on their behalf.
+M.BATTLE_ACTIONS = {
+  fight  = "move",
+  item   = "item",
+  switch = "slot",
+  run    = true,
+  cancel = true,
+}
+
+-- One player's intent for one turn.  A choice and never a result: nothing here
+-- says what happened, only what was pressed.
+--
+-- Note what is absent: there is no "who am I" field.  Which combatant this is
+-- comes from the connection it arrived on, the same way PARTY_EVENT's name does,
+-- because an id in the payload is an id a modified client could set to somebody
+-- else's and spend their turn.
+--
+-- The three indices are all zero-based and all differently bounded -- see the
+-- note at M.SLOT_MAX for which is which.  A present-but-out-of-range one refuses
+-- the choice rather than being dropped, because dropping it would turn a `fight`
+-- into an action with no move and stall a clock that forfeits.
+function M.battleChoice(raw)
+  if type(raw) ~= "table" then return nil end
+  local needs = M.BATTLE_ACTIONS[raw.action]
+  if not needs then return nil end
+  local battle = M.id(raw.battle)
+  if not battle then return nil end
+
+  local out = { battle = battle, action = raw.action }
+
+  if raw.slot ~= nil then
+    out.slot = M.int(raw.slot, 0, M.SLOT_MAX)
+    if out.slot == nil then return nil end
+  end
+  if raw.move ~= nil then
+    out.move = M.int(raw.move, 0, Config.BATTLE_MOVE_MAX - 1)
+    if out.move == nil then return nil end
+  end
+  if raw.target ~= nil then
+    out.target = M.int(raw.target, 0, M.FIELD_MAX)
+    if out.target == nil then return nil end
+  end
+  if raw.item ~= nil then
+    out.item = M.id(raw.item)
+    if not out.item then return nil end
+  end
+
+  if needs ~= true and out[needs] == nil then return nil end
+  return out
+end
+
+-- Everything a mediated fight can tell a client to draw.
+--
+-- A closed set, and the vocabulary is the contract between the intermediator's
+-- turn machine and the screen: an unknown kind has no animation, no sentence
+-- and no state change to apply, so it is refused rather than logged and
+-- ignored -- an event nothing draws is a turn the two players saw differently.
+--
+--   msg        -- a line of text for the box
+--   anim       -- play a move's animation
+--   damage     -- HP came off a slot
+--   drain      -- ...and some of it went onto another one
+--   faint      -- a slot is out
+--   send       -- a slot's next monster is on the field
+--   status     -- a condition was inflicted or cleared
+--   stat       -- a stat stage moved
+--   switch     -- a voluntary swap resolved
+--   item       -- a bag item was used
+--   run        -- somebody fled, or tried
+--   turn       -- a new turn is open; choices are wanted
+--   over       -- the field is done; an OUTCOME is coming
+--   wait       -- the fight is paused on somebody, and who
+--   reconnect  -- a side that had dropped is back
+M.BATTLE_EVENTS = {
+  msg = true, anim = true, damage = true, drain = true, faint = true,
+  send = true, status = true, stat = true, switch = true, item = true,
+  run = true, turn = true, over = true, wait = true, reconnect = true,
+}
+
+-- One thing to draw.
+--
+-- Optional fields here are **dropped rather than fatal**, which is the one place
+-- in this section that bends its own rule -- so here is why.  Every other
+-- sanitised message is a fact some module stores; an event is an instruction in
+-- an ordered stream, and `seq` is what makes the stream readable.  Refusing an
+-- event over a mangled `text` would put a hole in that sequence, and a hole is
+-- exactly what a client is built to read as lost messages: it would ask for a
+-- resync over a cosmetic field.  A blank in a sentence costs one line; a false
+-- gap costs the battle a round trip and a warning about a hub that is fine.
+--
+-- Unknown keys are dropped by construction -- the table is rebuilt from the
+-- whitelist, so a field the intermediator invents next version arrives at a
+-- client that never sees it.  That is deliberate: a whitelist is a vocabulary
+-- both twins can mirror exactly, whereas passing an opaque blob through would
+-- be handing a screen fields nothing had checked.
+--
+-- `text` borrows MESSAGE_MAX: it lands in the same box a chat line does and is
+-- drawn by the same code, even though an intermediator wrote it rather than a
+-- player.
+--
+-- `seq` has a floor and no ceiling.  It is only ever compared, never sized, so an
+-- absurdly large one sorts late and does nothing else -- whereas a cap would be a
+-- battle length nobody chose.
+function M.battleEvent(raw)
+  if type(raw) ~= "table" then return nil end
+  if not M.BATTLE_EVENTS[raw.t] then return nil end
+  local battle = M.id(raw.battle)
+  local seq = M.int(raw.seq, 0)
+  if not (battle and seq) then return nil end
+
+  local out = { battle = battle, seq = seq, t = raw.t }
+  if raw.text ~= nil then out.text = M.text(raw.text, Config.MESSAGE_MAX) end
+  if raw.amount ~= nil then out.amount = M.int(raw.amount, 0, M.AMOUNT_MAX) end
+  -- A field slot here, unlike the party index a choice carries under the same
+  -- name: an event is about somebody who is out, not about a bench position.
+  if raw.slot ~= nil then out.slot = M.int(raw.slot, 0, M.FIELD_MAX) end
+  if raw.hp ~= nil then out.hp = M.int(raw.hp, 0, M.HP_MAX) end
+  if raw.side ~= nil then out.side = M.side(raw.side) end
+  if raw.status ~= nil then
+    -- battleStatus answers `false` for present-but-unknown, which is not a
+    -- status and must not be stored as one.
+    out.status = M.battleStatus(raw.status) or nil
+  end
+  return out
+end
+
+-- The reasons a mediated fight ends that a screen currently has a sentence for.
+--
+--   timeout    -- nobody answered inside BATTLE_CHOICE_TIMEOUT
+--   disconnect -- a side dropped and BATTLE_RECONNECT_GRACE ran out
+--   run        -- somebody fled
+--   ko         -- the ordinary one: a side has nothing left standing
+--   agree      -- both sides called it
+--   forfeit    -- a side gave up on purpose
+--
+M.BATTLE_REASONS = {
+  timeout = true, disconnect = true, run = true,
+  ko = true, agree = true, forfeit = true,
+}
+
+-- The reason, with room for one this build has never heard of.
+--
+-- The closed set first, then a short bare token as a fallback -- and the fallback
+-- is the design, not laziness.  A reason is *narration*: it picks which sentence
+-- the end-of-battle box shows and nothing else.  If a newer intermediator names a
+-- reason this build cannot phrase, refusing the whole outcome would leave the
+-- battle open forever on a screen with no way out, over a field that was only
+-- ever a caption.  So an unknown reason survives as a token the box quietly
+-- declines to print, and the result -- the part that matters -- still lands.
+--
+-- Refused rather than trimmed past 32, on M.spriteId's argument: a cut token
+-- matches nothing and is a value nobody sent.
+function M.battleReason(value)
+  if M.BATTLE_REASONS[value] then return value end
+  if type(value) ~= "string" then return nil end
+  if #value > M.REASON_MAX then return nil end
+  return M.id(value)
+end
+
+-- A short list of player ids: who is on a side, who won, who lost.
+--
+-- Refused whole rather than filtered -- the opposite of how badges are treated,
+-- deliberately.  A badge that fails to clean is inert, because the boost table
+-- walks its own rows and asks the set, so a dropped entry costs one stat
+-- multiplier.  A roster is who receives events and whose rating moves, so a name
+-- that fails to clean or a list longer than a side can hold is a message that
+-- would put a fight on the field with the wrong people in it -- a winners list
+-- missing a name is a fight somebody won and was not told about.  Refusing is
+-- loud, and loud is the failure to prefer.
+local function idList(raw, max)
+  if type(raw) ~= "table" then return nil end
+  if #raw < 1 or #raw > max then return nil end
+  local out = {}
+  for _, entry in ipairs(raw) do
+    local id = M.id(entry)
+    if not id then return nil end
+    out[#out + 1] = id
+  end
+  return out
+end
+
+-- How the fight ended, from the only party that knows.
+--
+-- **This replaces the two-client vote.**  mmo.result exists because neither
+-- peer in a relayed battle could be believed about its own win, so the hub
+-- scored nothing until both said the same thing.  Here the intermediator did
+-- every roll, so it is the only party with an opinion worth having -- and a
+-- client's mmo.result about a mediated fight is ignored rather than weighed.
+--
+-- `winners` and `losers` are optional because a 1v1 does not need them: the
+-- outcome is stated from the recipient's own point of view and there is exactly
+-- one other player.  A 2v2 does need them, since "loss" alone does not say which
+-- pair, and a rank settle has four ids to move.  Present-and-malformed refuses
+-- the message: these are the names a rating moves for.
+function M.battleOutcome(raw)
+  if type(raw) ~= "table" then return nil end
+  local battle = M.id(raw.battle)
+  local outcome = M.outcome(raw.outcome)
+  if not (battle and outcome) then return nil end
+
+  local out = { battle = battle, outcome = outcome }
+  if raw.winners ~= nil then
+    out.winners = idList(raw.winners, Config.COOP_FIGHTERS)
+    if not out.winners then return nil end
+  end
+  if raw.losers ~= nil then
+    out.losers = idList(raw.losers, Config.COOP_FIGHTERS)
+    if not out.losers then return nil end
+  end
+  if raw.reason ~= nil then
+    out.reason = M.battleReason(raw.reason)
+    if not out.reason then return nil end
+  end
+  return out
+end
+
+-- "I dropped, and I am back": { battle }.
+--
+-- It names the fight even though a player is only ever in one -- the opposite
+-- of COOP_LEAVE's argument, and for a reason that only applies to this message.
+-- The sender has been *away*, possibly on a new socket, so the intermediator
+-- cannot read which battle this is off a connection it has only just met.  The
+-- one field is what turns a stranger's reconnect into a resume.
+function M.battleReconnect(raw)
+  if type(raw) ~= "table" then return nil end
+  local battle = M.id(raw.battle)
+  if not battle then return nil end
+  return { battle = battle }
+end
+
+-- The three shapes a mediated fight comes in.
+--
+--   1v1       -- two players, one monster each
+--   coop_npc  -- a party of two against a trainer somebody walked into
+--   coop_pvp  -- two parties against each other
+--
+-- Named on the wire rather than inferred from how many ids arrived, because the
+-- two co-op modes have the same four field slots and differ only in whether one
+-- side has an owner -- and "guess the mode from the roster" is the kind of
+-- inference that is right until an NPC battle happens to have a spectatorless
+-- second slot.
+M.BATTLE_MODES = { ["1v1"] = true, coop_npc = true, coop_pvp = true }
+
+function M.battleMode(value)
+  if M.BATTLE_MODES[value] then return value end
+  return nil
+end
+
+-- The field is assembled and the first turn is open.
+--
+-- The sides are named by the intermediator because it is the only party to the
+-- exchange that knows every combatant uploaded a party and is still connected
+-- at the moment it says so -- M.COOP_BATTLE's argument, now made by a process
+-- that is not also one of the players.
+--
+-- Both sides are required, even in a coop_npc fight where one of them is a
+-- trainer with no player behind it: the ids on that side are whoever submitted
+-- it, which is who a choice for those slots may arrive from.
+function M.battleReady(raw)
+  if type(raw) ~= "table" then return nil end
+  local battle = M.id(raw.battle)
+  local mode = M.battleMode(raw.mode)
+  if not (battle and mode) then return nil end
+  if type(raw.sides) ~= "table" then return nil end
+  local a = idList(raw.sides.a, Config.COOP_SIDE)
+  local b = idList(raw.sides.b, Config.COOP_SIDE)
+  if not (a and b) then return nil end
+  return { battle = battle, mode = mode, sides = { a = a, b = b } }
 end
 
 return M

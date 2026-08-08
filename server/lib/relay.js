@@ -68,11 +68,17 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // ordinary quiet route. 9 is mmo.request_cancel -- the asker withdrawing a
 // trade/battle request before it is answered -- and a protocol-8 hub would
 // clear the asker's local wait while still holding pendingTo, so the other
-// player could accept into a session the asker thought they had left. The
-// rule every bump follows is unchanged: bump whenever a client can send
-// something a hub silently ignores. Kept in step with Config.PROTOCOL on the
-// mod side.
-const PROTOCOL = 9;
+// player could accept into a session the asker thought they had left. 10 is the
+// mediated battle -- mmo.battle_ruleset, _party, _ready, _choice, _event,
+// _outcome and _reconnect, the seven types a fight uses once an intermediator
+// owns the simulation rather than one of the two clients -- and it is the
+// clearest bump of the list: a protocol-9 hub has never heard any of them, so a
+// client would upload its party and its choices into silence and sit at a
+// battle screen that never opens, while the hub it is talking to is still
+// waiting for the two-client mmo.result vote that this path replaces. The rule
+// every bump follows is unchanged: bump whenever a client can send something a
+// hub silently ignores. Kept in step with Config.PROTOCOL on the mod side.
+const PROTOCOL = 10;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
