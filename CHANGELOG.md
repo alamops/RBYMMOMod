@@ -4,6 +4,31 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.11.0] - 2026-08-08
+
+### Added
+
+- **Server-authoritative (mediated) battles.** MMO 1v1 and party-vs-party fights
+  are resolved by the hub — Node dedicated or in-game LAN Host — not by either
+  client's local rolls. Clients upload battler sheets and (from the host) an
+  ephemeral type chart; the intermediator owns hit/crit/damage/status and emits
+  `mmo.battle_event` / a sole `mmo.battle_outcome`. **`PROTOCOL` 9 → 10.**
+  Formula + turn twins live in `src/BattleSim/` and `server/lib/battle/` with
+  shared synthetic fixtures (no ROM tables shipped). Solo wild/trainer battles
+  stay on the local engine.
+- **Party-vs-NPC mediated path (client ready, hub seat limited).** Uploads and
+  event apply are implemented; `Config.MEDIATED_COOP.coop_npc` defaults **off**
+  until the hub seats a full trainer side without auto-timeout stalls.
+
+### Changed
+
+- MMO 1v1 no longer hands off to engine `LinkBattle` / fingerprint `canBattle`
+  refuse for mediated fights (Red vs Yellow and honest mod mismatches can fight
+  under the host's ruleset). Trade is unchanged (still `SessionNet` + engine
+  trade session).
+- Ranked payout for mediated fights trusts the intermediator outcome; dual
+  `mmo.result` votes are ignored once a sim is live.
+
 ## [0.10.0] - 2026-08-07
 
 ### Added

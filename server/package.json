@@ -1,7 +1,7 @@
 {
   "//": "SOURCE OF TRUTH FOR version IS ../manifest.json. Bump both together. The release workflow reads only manifest.json; `rby-mmo-hub --version` reads only this file (lib/cli.js:230-241), so a one-sided bump makes the CLI report a version no release has. config.test.js asserts the two match (testVersionParity), skipping only where manifest.json is absent because the server was installed on its own -- so `npm test` catches a one-sided bump in a checkout.",
   "name": "rby-mmo-hub",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Self-hosted relay for the RBY MMO mod: shared-overworld presence, chat, trades and link battles for a group of friends. Zero dependencies, Node core only.",
   "license": "MIT",
   "private": true,

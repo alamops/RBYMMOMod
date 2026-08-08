@@ -130,14 +130,17 @@ digits at all.
 
 ## What it is, and what it deliberately is not
 
-It is a **relay**. It owns who is connected, where they last said they were,
-and which two players are currently paired. It forwards bytes.
+It is a **relay for presence, chat, parties, and trade** — and, from
+**PROTOCOL 10**, the **referee for MMO-mediated battles**.
 
-It does **not** simulate anything. Trades and battles run inside the two game
-clients on the engine's own link code, with the hub passing opaque payloads
-between them. A hub that refereed battles would be a second, worse
-implementation of Gen 1's rules that could disagree with the clients — so
-`mmo.relay` payloads are never parsed here.
+Trades still run inside the two game clients on the engine's own link code,
+with the hub passing opaque `mmo.relay` payloads between them.
+
+**Battles this hub brokers are different.** Clients upload battler sheets and
+an ephemeral type chart; `lib/battle/Turn.js` owns hit/crit/damage/status and
+emits `mmo.battle_event` / a sole `mmo.battle_outcome`. Opaque battle lockstep
+on `mmo.relay` is hard-cut once a mediated sim is live. No ROM-derived move or
+species tables ship here — only Gen1 formulas over client-supplied numbers.
 
 It is also not a public server, and not an account system. There is no
 identity beyond "holds a working join code"; two friends can be online under
