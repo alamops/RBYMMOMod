@@ -99,7 +99,18 @@ end
 -- stripped by byte rather than matched as a class: "▶" is three UTF-8 bytes,
 -- so a driver asking for "CHAT" against "▶CHAT" was comparing "CHAT" with
 -- the marker's own bytes and never matching.
-local MARKERS = { "\226\150\182" }   -- ▶ (U+25B6)
+---
+--- The second one is not hypothetical and is on a row drivers press: a
+--- friend's nickname on the PLAYERS list carries "▷" in front of it
+--- (src/Ui.lua's FRIEND_MARK). The moment a driver befriends somebody, every
+--- later H.selectLabel(game, "GUESTY") against that list is asking for a
+--- string the row no longer starts with -- one miss that took the party and
+--- co-op legs down with it, all of them reported as "found the guest on the
+--- PLAYERS list". Anything that decorates a label has to be added here.
+local MARKERS = {
+  "\226\150\182",   -- ▶ (U+25B6), the party marker
+  "\226\150\183",   -- ▷ (U+25B7), the friend marker
+}
 
 -- Leading whitespace, on top of the marker: the CHARPICK rows now open a
 -- 16px portrait gutter with a two-space indent (src/Ui.lua's PREVIEW_INDENT),
@@ -604,6 +615,14 @@ local PHASE = {
   -- host waits on the guest walking through the host's own tile first
   -- (non-blocking avatars), then walking up, reading the card and closing it
   guest_interact_done    = 300,  -- 60 walk-through + 60 facing + menu + card
+  -- host waits on the guest pressing ADD FRIEND and dismissing the box it
+  -- puts up -- one menu row and one text box, no round trip yet
+  guest_asked_friend     =  90,  -- floor
+  -- guest waits on the host answering the yes/no box the ask opened
+  host_answered_friend   = 150,  -- 90 drivePrompts + closing back out
+  -- host waits on the guest reading the answer back, then opening FRIENDS
+  -- and PLAYERS and reopening the interact menu
+  guest_friend_checked   = 240,  -- 45 propagate + three screens + shots
   -- guest waits on the host reopening the MMO menu and picking a new
   -- character through it -- no network round trip on this side of the
   -- barrier, just the host's own menu frames

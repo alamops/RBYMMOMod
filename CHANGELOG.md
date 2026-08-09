@@ -4,6 +4,62 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [0.11.0] - 2026-08-08
+
+### Added
+
+- **Friends: the people you keep, per hub, between sessions.** A party is who
+  you are travelling with *right now* and ends with the connection. This is the
+  opposite kind of thing — a standing list that is still there tomorrow, that
+  carries people who are not online, and that both sides had to agree to.
+  - **ADD FRIEND** sits second on the menu you get by walking up to somebody
+    and pressing **A** (or by picking them out of PLAYERS), directly under
+    PROFILE: that row says who this trainer is, this one says who they are to
+    you, and everything below is an activity. It becomes **UNFRIEND** once
+    they are on the list, the way END GAME / LEAVE and FAVORITE / UNFAVORITE
+    already read.
+  - **They have to say yes.** The ask arrives as a yes/no box on their screen
+    — and *never* over a live battle, trade or another prompt: it waits in
+    their client until they are out of it, because the hub is holding the ask
+    and nothing is lost by asking a minute later.
+  - **And it is not lost if they log off first.** The hub keeps an unanswered
+    ask (for a week) and puts it again on their next welcome, however many
+    sessions later that is. The answer waits the same way for an asker who
+    has since gone offline. That is the whole of the new hub state: it never
+    learns who is friends with whom, only who still owes an answer to whom.
+  - **A FRIENDS row on the MMO menu, directly under PLAYERS** — the same
+    question with the half of the answer a roster structurally cannot give.
+    Online friends first (the only rows that lead anywhere), newest friend
+    first inside each group, each saying where they are, or PARTY / BUSY /
+    ONLINE, or **OFFLINE**. Pressing **A** opens the same menu the overworld
+    does; an absent friend still gets UNFRIEND.
+  - **Blue, in the two places it helps.** A friend's nameplate in the world,
+    and the corner line announcing them arriving — the same sentence everyone
+    else's arrival gets, in a colour, because "was that anybody I know" is the
+    one question a stream of names should answer without being read. A party
+    member stays green: the marker you need to pick them out of a crowd is not
+    the one to give up.
+  - **A mark on the PLAYERS list** — a hollow arrow in front of the nickname,
+    because the right-hand column is already spoken for and being somebody's
+    friend is true at the same time as PARTY, BUSY and where they are standing.
+  - **Where it lives.** A friendship is a pair of trainer names on one hub —
+    the same identity the ranking claims — kept in this copy's own
+    `rby_mmo_friends.json` (mirrored into the save), filed under the hub *and*
+    the trainer name you play it as, so two people sharing a machine keep two
+    lists. Client-side and not hub-side on purpose: a hub-side table would work
+    on a dedicated server and lose every friendship on a game hosted from
+    inside somebody's copy, which has no disk to keep one on. Removing a friend
+    takes them off both sides, so the two lists cannot drift apart.
+  - New wire types `mmo.friend_ask`, `mmo.friend_answer` and
+    `mmo.friend_remove`; **`PROTOCOL` 9 → 10** in `src/Config.lua` and
+    `server/lib/relay.js` together. A protocol-9 hub answers all three with
+    silence, and this is the one feature whose answer may legitimately arrive
+    *later*, so "nothing has happened yet" is an ordinary state and a player
+    would have no way at all to tell it from a hub that cannot do this.
+  - The hub only forwards an answer it is holding the matching ask for — a
+    client that could send one to anybody would be a client that adds itself
+    to a stranger's friends list without ever being agreed to.
+
 ## [0.10.0] - 2026-08-07
 
 ### Added

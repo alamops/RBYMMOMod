@@ -269,6 +269,16 @@ function M.new(opts)
     -- reports rather than two, and folding them into one table would mean
     -- every settlement had to ask which shape it was looking at.
     coopMatches = {},
+    -- Friend traffic the hub is holding for somebody who is not here.
+    --
+    -- nameKey -> { { kind, name, accept, at }, ... }, oldest first.  Keyed by
+    -- *name* and not by connection, which is the whole reason this table
+    -- exists: an ask whose target logs out before answering has to be asked
+    -- again when they come back, and there is no connection left to hang it
+    -- on.  See the friend handlers for what each kind is and why an answer is
+    -- the only one the hub checks before passing on.
+    friendHolds = {},
+    friendHeld = 0,
     nextCoopAsk = 1,
     nextNonce = 0,
     -- The process-wide pool unless a caller hands over its own; only the
@@ -501,6 +511,9 @@ function M:accept(peer, trusted)
     -- gated on the chat window too: it is prose on a partner's screen
     lastPartyEvent = -math.huge,
     lastSprite = -math.huge,   -- last mid-session character change
+    -- gated on the same window: a friend ask is a modal on somebody else's
+    -- screen, so it is rationed like the other things that are
+    lastFriendAsk = -math.huge,
     hello = nil,      -- what it said, held until it is admitted
     nonce = nil,      -- the challenge it still owes an answer to
   }
@@ -614,6 +627,12 @@ function M:admit(client)
   })
   client.mintedToken = nil
   self:broadcast(Wire.JOIN, { player = presenceOf(client) }, client.id)
+  -- Last, and after the welcome on purpose: a friend ask the hub has been
+  -- holding is a box in front of this player, and a box needs a client that
+  -- already knows who it is and which list it is answering from.  Also after
+  -- the broadcast, so nothing that could throw sits between the join
+  -- announcement and the rest of the game hearing it.
+  self:flushFriendHolds(client)
   return true
 end
 
@@ -1142,6 +1161,182 @@ function M:settleCoopMatch(id)
   return settled
 end
 
+-- ------- friends
+--
+-- The hub owns exactly one part of this feature: carrying a friend ask to the
+-- player it names, and *keeping* it when that player is not here.  The lists
+-- themselves live in the two clients (src/Friends.lua's header says why they
+-- cannot live here), so nothing below records who is friends with whom -- it
+-- records who still owes an answer to whom.
+--
+-- Everything is keyed by trainer name rather than connection id, because a
+-- friendship outlives the connection that made it and a held ask has, by
+-- definition, no connection left to hang on.  Rank.keyOf is the fold, the same
+-- one the board uses, so "the same name" means one thing on this hub.
+--
+-- Kept in step with server/lib/relay.js, which does all of this over its own
+-- client table: the same client dials a dedicated hub and a game hosted from
+-- inside somebody's copy, so a rule only one of them enforces is a rule that
+-- holds on one of the two hosting paths and not the other.
+
+-- Whoever is connected under this name right now, or nil.
+--
+-- First match wins, and the iteration order of self.clients decides which --
+-- which is fine and is why nothing here is drawn from it: two players wearing
+-- one unclaimed name is a real state, and either of them is an equally correct
+-- answer to "deliver this now rather than holding it".  A wrong guess costs a
+-- misdelivered box, not a friendship: the receiving client answers under its
+-- own name, and the answer is matched back against the hold by name.
+function M:byName(nameKey)
+  if not nameKey then return nil end
+  for _, client in pairs(self.clients) do
+    if client.ready and Rank.keyOf(client.name) == nameKey then return client end
+  end
+  return nil
+end
+
+-- Drop everything this hub has been holding for longer than a week.
+--
+-- Cheap and lazy: run when something is added rather than on the tick, because
+-- the table is empty on nearly every hub and a sweep nobody needs is a sweep
+-- that runs sixty times a second for an answer that has not changed.
+function M:sweepFriendHolds()
+  for key, holds in pairs(self.friendHolds) do
+    local kept = {}
+    for _, hold in ipairs(holds) do
+      if (self.clock - (hold.at or 0)) <= Config.FRIEND_HOLD then
+        kept[#kept + 1] = hold
+      else
+        self.friendHeld = self.friendHeld - 1
+      end
+    end
+    self.friendHolds[key] = #kept > 0 and kept or nil
+  end
+end
+
+-- Hold one notification for a name, replacing whatever it supersedes.
+--
+-- One entry per (kind, sender), because all three kinds are idempotent: asking
+-- twice is one ask, and a second answer to a question already answered is not
+-- a thing that exists.  Without that a client could stack a player's inbox
+-- full of the same box by pressing one button repeatedly -- the caps below
+-- would bound it, but the player would still be answering the same question
+-- eight times.
+--
+-- Refused rather than trimmed at the global cap: dropping somebody else's
+-- held ask to make room for this one would let a flood erase the one
+-- notification that mattered.  Per name it is the oldest that goes, which is
+-- the other way round on purpose -- eight unanswered asks in one inbox is one
+-- player ignoring eight people, and the newest is the one still worth asking.
+function M:holdFriend(nameKey, hold)
+  if not nameKey then return false end
+  self:sweepFriendHolds()
+  local holds = self.friendHolds[nameKey]
+  if not holds then
+    if self.friendHeld >= Config.FRIEND_HOLD_MAX then return false end
+    holds = {}
+    self.friendHolds[nameKey] = holds
+  end
+
+  local fromKey = Rank.keyOf(hold.name)
+  for index, held in ipairs(holds) do
+    if held.kind == hold.kind and Rank.keyOf(held.name) == fromKey then
+      table.remove(holds, index)
+      self.friendHeld = self.friendHeld - 1
+      break
+    end
+  end
+
+  if #holds >= Config.FRIEND_HOLD_PER_NAME then
+    table.remove(holds, 1)
+    self.friendHeld = self.friendHeld - 1
+  end
+  if self.friendHeld >= Config.FRIEND_HOLD_MAX then return false end
+
+  hold.at = self.clock
+  holds[#holds + 1] = hold
+  self.friendHeld = self.friendHeld + 1
+  return true
+end
+
+-- Take one held notification off a name's list, and say whether there was one.
+--
+-- This is the check that makes an answer safe to forward: only the player an
+-- ask was actually addressed to is holding it, so a client that answers a
+-- question nobody asked it finds nothing here and is dropped.  Without it any
+-- client could send "they said yes" about anybody and write itself onto a
+-- stranger's friends list.
+function M:takeFriendHold(nameKey, kind, fromKey)
+  local holds = nameKey and self.friendHolds[nameKey]
+  if not holds then return nil end
+  for index, held in ipairs(holds) do
+    if held.kind == kind and Rank.keyOf(held.name) == fromKey then
+      table.remove(holds, index)
+      self.friendHeld = self.friendHeld - 1
+      if #holds == 0 then self.friendHolds[nameKey] = nil end
+      return held
+    end
+  end
+  return nil
+end
+
+-- Send one notification, or hold it for the next time that name is seen.
+local function deliverFriend(self, nameKey, kind, payloadType, payload, hold)
+  local target = self:byName(nameKey)
+  if target then
+    send(target, payloadType, payload)
+    -- An ask stays held even when it was delivered: the player it reached may
+    -- close the game without answering, and "asked once, into a session that
+    -- ended" is exactly the case this whole table exists for.  Everything else
+    -- is spent on delivery.
+    if kind ~= "ask" then return true end
+  end
+  return self:holdFriend(nameKey, hold)
+end
+
+-- Everything this hub has been keeping for the player who just walked in.
+--
+-- Called from admit, after the welcome and the join broadcast: the client has
+-- to have its own id and its roster before a box can be put in front of it,
+-- and an ask arriving ahead of the welcome would reach a client with no
+-- friends list open to answer from (src/Friends.lua's onAsk refuses one).
+--
+-- Asks are re-delivered and *kept*; answers and removals are spent.  That
+-- asymmetry is the feature: an ask is outstanding until it is answered, so a
+-- player who logs out mid-prompt is asked again next time, whereas an answer
+-- is news that has now been delivered.
+function M:flushFriendHolds(client)
+  local key = Rank.keyOf(client.name)
+  local holds = key and self.friendHolds[key]
+  if not holds then return 0 end
+  self:sweepFriendHolds()
+  holds = self.friendHolds[key]
+  if not holds then return 0 end
+
+  local kept, sent = {}, 0
+  for _, hold in ipairs(holds) do
+    if hold.kind == "ask" then
+      -- No `from` id: the asker may not be here, and inventing one would give
+      -- the receiving client an id to answer to that means somebody else's
+      -- connection.  The name is what the answer travels by anyway.
+      local asker = self:byName(Rank.keyOf(hold.name))
+      send(client, Wire.FRIEND_ASK,
+        { from = asker and asker.id or nil, name = hold.name })
+      kept[#kept + 1] = hold
+    elseif hold.kind == "answer" then
+      send(client, Wire.FRIEND_ANSWER,
+        { name = hold.name, accept = hold.accept == true })
+      self.friendHeld = self.friendHeld - 1
+    else
+      send(client, Wire.FRIEND_REMOVE, { name = hold.name })
+      self.friendHeld = self.friendHeld - 1
+    end
+    sent = sent + 1
+  end
+  self.friendHolds[key] = #kept > 0 and kept or nil
+  return sent
+end
+
 -- ------- handlers
 
 local handlers = {}
@@ -1486,6 +1681,77 @@ handlers[Wire.PARTY_EVENT] = function(self, client, msg)
   for _, member in ipairs(self:partyMembers(client.partyId)) do
     if member.id ~= client.id then send(member, Wire.PARTY_EVENT, payload) end
   end
+end
+
+-- ------- friends
+--
+-- Three handlers, and the asymmetry between them is the security model.  The
+-- ask is forwarded on the sender's say-so, because the worst it can do is put
+-- a yes/no box in front of somebody who says no.  The *answer* is not: a
+-- client that could send one to anybody would be a client that adds itself to
+-- a stranger's list without ever being agreed to, so it is only passed on when
+-- this hub is holding the matching ask.  The removal needs no check at all,
+-- because the hub stamps the sender's own name on it -- the only thing a
+-- forged one achieves is taking its sender off somebody's list, which is what
+-- the message says it does.
+
+handlers[Wire.FRIEND_ASK] = function(self, client, msg)
+  if not client.ready then return end
+  local target = self.clients[Wire.id(msg.to) or ""]
+  if not (target and target.ready) or target.id == client.id then return end
+
+  local mine = Rank.keyOf(client.name)
+  local theirs = Rank.keyOf(target.name)
+  -- Two connections wearing one name on a hub that never claimed it.  There is
+  -- no friendship to form between a name and itself, and the hold table is
+  -- keyed by name, so an ask filed here would be one this player could answer
+  -- on the asker's behalf.
+  if not (mine and theirs) or mine == theirs then return end
+
+  -- Gated on the chat window, for the reason mmo.party_event is: this puts
+  -- prose and a modal on somebody else's screen unasked, and a modified client
+  -- pressing it in a loop is the whole attack.  Honest traffic is one ask per
+  -- friendship, so half a second costs nobody anything.
+  if self.clock - (client.lastFriendAsk or -math.huge) < Config.CHAT_GATE then
+    return
+  end
+  client.lastFriendAsk = self.clock
+
+  deliverFriend(self, theirs, "ask", Wire.FRIEND_ASK,
+    { from = client.id, name = client.name },
+    { kind = "ask", name = client.name })
+end
+
+handlers[Wire.FRIEND_ANSWER] = function(self, client, msg)
+  if not client.ready then return end
+  local mine = Rank.keyOf(client.name)
+  local asker = Wire.nameKey(msg.toName)
+  if not (mine and asker) then return end
+
+  -- The gate: only somebody who is actually holding an ask from this name may
+  -- answer it, and the ask is spent on the first answer.
+  if not self:takeFriendHold(mine, "ask", asker) then return end
+
+  local accept = msg.accept == true
+  deliverFriend(self, asker, "answer", Wire.FRIEND_ANSWER,
+    { name = client.name, accept = accept },
+    { kind = "answer", name = client.name, accept = accept })
+end
+
+handlers[Wire.FRIEND_REMOVE] = function(self, client, msg)
+  if not client.ready then return end
+  local mine = Rank.keyOf(client.name)
+  local theirs = Wire.nameKey(msg.toName)
+  if not (mine and theirs) or mine == theirs then return end
+
+  -- Anything still outstanding between the two of them goes with it, in both
+  -- directions: an ask that outlived the friendship it was about is a box
+  -- somebody would be answering about a decision already made.
+  self:takeFriendHold(mine, "ask", theirs)
+  self:takeFriendHold(theirs, "ask", mine)
+
+  deliverFriend(self, theirs, "remove", Wire.FRIEND_REMOVE,
+    { name = client.name }, { kind = "remove", name = client.name })
 end
 
 -- ------- co-op

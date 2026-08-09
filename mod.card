@@ -2,8 +2,8 @@ return {
   summary = "Play Kanto with friends: see them walk or run, team up, chat, "
     .. "trade and battle.",
   author = "alamo",
-  tags = { "multiplayer", "mmo", "chat", "party", "trade", "pvp", "ranking",
-           "coop", "ui",
+  tags = { "multiplayer", "mmo", "chat", "party", "friends", "trade", "pvp",
+           "ranking", "coop", "ui",
            "experimental" },
 
   differences = {
@@ -157,6 +157,25 @@ return {
         .. "to turn it off. Other players see it too -- presence carries the "
         .. "pace of each step, so a runner *and* a cyclist both step at the "
         .. "doubled clock on their screens as well as yours.",
+      "Friends, per hub and across sessions: ADD FRIEND on the menu you get "
+        .. "by walking up and pressing A, answered with a yes/no box on the "
+        .. "other player's screen -- never over a battle or a trade, where "
+        .. "the ask waits until they are out of it, and never lost if they "
+        .. "log off first, because the hub holds it and puts it again on "
+        .. "their next welcome. A FRIENDS row under PLAYERS lists everybody "
+        .. "you have agreed with, online ones first and newest first inside "
+        .. "each group, saying where each one is or that they are OFFLINE; "
+        .. "pressing A opens the same menu the overworld does, and an absent "
+        .. "friend still offers UNFRIEND. The PLAYERS list marks a friend "
+        .. "with a hollow arrow in front of their nickname, their nameplate "
+        .. "in the world is drawn in blue, and the corner line announcing "
+        .. "them arriving is the same blue -- so a name worth noticing does "
+        .. "not have to be read to be noticed. A friendship is a pair of "
+        .. "trainer names on one hub (the same identity the ranking claims) "
+        .. "and lives in this copy's own rby_mmo_friends.json, so it survives "
+        .. "CONTINUE and save-slot switches and works identically on a "
+        .. "dedicated hub and a game hosted from inside the game. Removing "
+        .. "one takes it off both sides.",
       "A SERVERS row on the disconnected menu, once you have connected "
         .. "anywhere before: every hub you have reached, favorites pinned "
         .. "above the rest and sorted by address descending otherwise, each "
@@ -204,6 +223,13 @@ return {
       "Interacting with another player's avatar logs 'no text for ...' from "
         .. "the engine before the menu opens: the avatar is a real NPC with "
         .. "no dialogue, and the engine warns on that path.",
+      "A friendship is a pair of trainer names on one hub, which is as close "
+        .. "to an identity as a hub without accounts gets. On a hub where a "
+        .. "name has never been claimed, somebody else typing it is somebody "
+        .. "else -- and your list would still say friend. Held friend asks "
+        .. "live in the hub's memory rather than in a file, so a hub restart "
+        .. "drops the ones nobody has answered yet; the lists themselves are "
+        .. "on each player's own disk and are unaffected.",
       "Only one trade or battle at a time, per player.",
       "A party is exactly two players, and either one leaving ends it for "
         .. "both -- there is no party of one and no third seat. An invite "

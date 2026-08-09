@@ -85,7 +85,7 @@ end
 local Sessions = loadSessions()
 
 local mmoMods = {
-  { id = "rby_mmo", version = "0.10.0", affectsLink = false },
+  { id = "rby_mmo", version = "0.11.0", affectsLink = false },
 }
 
 local function hello(name, data)
@@ -150,7 +150,7 @@ local modded = {
   fingerprint = "deadbeefdeadbeef",
   linkModified = true,
   mods = {
-    { id = "rby_mmo", version = "0.10.0", affectsLink = false },
+    { id = "rby_mmo", version = "0.11.0", affectsLink = false },
     { id = "stat_tweaks", version = "1.0.0", affectsLink = true },
   },
 }

@@ -117,7 +117,8 @@ for _, id in ipairs({
   "RbyMmoScope", "RbyMmoCompose", "RbyMmoPick", "RbyMmoText",
   "RbyMmoConfirm", "RbyMmoState", "RbyMmoProfile", "RbyMmoRank",
   "RbyMmoHostSetup", "RbyMmoHostInfo", "RbyMmoJoinAddress",
-  "RbyMmoParty", "RbyMmoPartyList", "RbyMmoCharSetup", "RbyMmoCharPick",
+  "RbyMmoParty", "RbyMmoPartyList", "RbyMmoFriends",
+  "RbyMmoCharSetup", "RbyMmoCharPick",
   "RbyMmoChoose", "RbyMmoChooseMenu",
   "RbyMmoServers", "RbyMmoServerActions", "RbyMmoServerEdit",
 }) do
@@ -1055,6 +1056,17 @@ toastQ:push("still here")
 toastQ:update(nil)
 eq(#toastQ:list(), 1, "a nil dt ages nothing rather than raising")
 
+-- ------- the one line that is not white
+--
+-- A colour is the exception and stays one: it is reserved for a line about
+-- somebody the player chose, so the corner keeps meaning one thing.
+toastQ:clear()
+eq(toastQ:push("plain").color, nil, "an ordinary line names no colour")
+eq(toastQ:list()[1].color, nil, "and the copy handed out says so too")
+local blue = toastQ:push("ANN joined the server", Config.FRIEND_BLUE)
+eq(blue.color, Config.FRIEND_BLUE, "a line may carry one")
+eq(toastQ:list()[2].color, Config.FRIEND_BLUE, "which travels with the copy")
+
 -- ------- Toast: the sentences
 --
 -- Every formatter below either returns the exact sentence or nil -- never a
@@ -1072,6 +1084,13 @@ eq(Toast.joinLine(42), nil, "and neither is a numeric one")
 
 eq(Toast.partLine("MISTY"), "MISTY left the server", "a departure reads the same way")
 eq(Toast.partLine(nil), nil, "a nameless departure is refused")
+
+-- A friend arriving gets the *same sentence* and a different colour.  Two
+-- wordings would read as two different events; the blue is what answers "was
+-- that anybody I know" without being read.
+eq(Toast.joinColor(false), nil, "an ordinary arrival asks for no colour")
+eq(Toast.joinColor(nil), nil, "and neither does one where nothing is known")
+eq(Toast.joinColor(true), Config.FRIEND_BLUE, "a friend's arrival is blue")
 
 eq(Toast.partyLine({ kind = "defeat_wild", name = "ANN", species = "PIDGEY", level = 5 }),
    "ANN defeated PIDGEY lv 5", "beating a wild names the species and level")
@@ -1871,6 +1890,167 @@ check(take(pAnnPeer, Wire.SESSION) ~= nil, "and can still trade with each other"
 eq(pAnn.partyId, together.id, "without the trade ending the party")
 partyHub:receive(pAnn, { type = Wire.SESSION_LEAVE })
 eq(pAnn.partyId, together.id, "or ending it when the trade does")
+
+end)()
+
+-- ------- friends: routing an ask, and holding one for somebody who is away
+--
+-- The hub half only.  It never learns who is friends with whom -- the two
+-- clients keep that (src/Friends.lua) -- so everything below is about who
+-- still owes an answer to whom, which is the one part of the feature that
+-- cannot live in a client.
+--
+-- Wrapped in a function for scope, like the party scenario above.
+
+;(function()
+
+local friendHub = Hub.new({ maxPlayers = 4 })
+local fAnn, fAnnPeer = join(friendHub, "ANN", "PALLET", 5, 5)
+local fBob, fBobPeer = join(friendHub, "BOB", "PALLET", 6, 5)
+local fCal, fCalPeer = join(friendHub, "CAL", "PALLET", 7, 5)
+fAnnPeer.outbox, fBobPeer.outbox, fCalPeer.outbox = {}, {}, {}
+
+-- an ask reaches its target, and nobody else
+friendHub:receive(fAnn, { type = Wire.FRIEND_ASK, to = fBob.id })
+local ask = take(fBobPeer, Wire.FRIEND_ASK)
+check(ask ~= nil, "an ask reaches the player it names")
+eq(ask.name, "ANN", "with the asker's name, which is what an answer travels by")
+eq(ask.from, fAnn.id, "and their id, because they are still here to point at")
+eq(take(fCalPeer, Wire.FRIEND_ASK), nil, "and reaches nobody else")
+
+-- ...and the hub keeps holding it.  This is the difference between a friend
+-- ask and a party invite: an invite is spent on delivery, because a prompt
+-- nobody answered is a prompt that stopped existing when its screen closed.
+eq(friendHub.friendHeld, 1, "a delivered ask is still held")
+
+-- only the player who was actually asked may answer it
+friendHub:receive(fCal, { type = Wire.FRIEND_ANSWER, toName = "ANN",
+                          accept = true })
+eq(take(fAnnPeer, Wire.FRIEND_ANSWER), nil,
+   "a third party cannot accept on somebody else's behalf -- which is the "
+   .. "whole reason the hub holds the ask rather than forwarding any answer "
+   .. "it is handed")
+
+-- ...and an answer to a question nobody asked goes nowhere
+friendHub:receive(fBob, { type = Wire.FRIEND_ANSWER, toName = "CAL",
+                          accept = true })
+eq(take(fCalPeer, Wire.FRIEND_ANSWER), nil,
+   "and neither can a client answer a question that was never put to it")
+
+friendHub:receive(fBob, { type = Wire.FRIEND_ANSWER, toName = "ANN",
+                          accept = true })
+local answer = take(fAnnPeer, Wire.FRIEND_ANSWER)
+check(answer ~= nil, "the player who was asked can answer")
+eq(answer.name, "BOB", "under their own name, stamped from the connection")
+eq(answer.accept, true, "carrying the yes")
+eq(friendHub.friendHeld, 0, "and the ask is spent")
+
+-- the ask is spent: answering twice reaches nobody
+friendHub:receive(fBob, { type = Wire.FRIEND_ANSWER, toName = "ANN",
+                          accept = true })
+eq(take(fAnnPeer, Wire.FRIEND_ANSWER), nil,
+   "the same ask cannot be answered twice")
+
+-- a no is an answer, not silence: "they said no" and "they have not answered
+-- yet" are the two states this feature most needs to keep apart
+friendHub:update(Config.CHAT_GATE * 2)
+friendHub:receive(fAnn, { type = Wire.FRIEND_ASK, to = fCal.id })
+take(fCalPeer, Wire.FRIEND_ASK)
+friendHub:receive(fCal, { type = Wire.FRIEND_ANSWER, toName = "ANN",
+                          accept = false })
+local refused = take(fAnnPeer, Wire.FRIEND_ANSWER)
+check(refused ~= nil, "a refusal comes back too")
+eq(refused.accept, false, "as a no rather than as nothing at all")
+
+-- an ask for somebody who is not connected is held, not dropped
+friendHub:update(Config.CHAT_GATE * 2)
+friendHub:receive(fAnn, { type = Wire.FRIEND_ASK, to = fBob.id })
+friendHub:drop(fBob)
+fBobPeer.outbox = {}
+eq(friendHub.friendHeld, 1, "an unanswered ask survives the connection")
+
+local fBob2, fBob2Peer = join(friendHub, "BOB", "PALLET", 6, 5)
+local again = take(fBob2Peer, Wire.FRIEND_ASK)
+check(again ~= nil, "and is put to them again when they come back")
+eq(again.name, "ANN", "still naming the asker")
+check(fBob2 ~= nil, "on a fresh connection with a new id")
+
+-- ...and it is *still* held, because it is still unanswered
+eq(friendHub.friendHeld, 1, "re-delivering does not spend it")
+
+-- an answer for an asker who has gone offline waits for them the same way
+friendHub:drop(fAnn)
+fAnnPeer.outbox = {}
+friendHub:receive(fBob2, { type = Wire.FRIEND_ANSWER, toName = "ANN",
+                           accept = true })
+eq(friendHub.friendHeld, 1, "the answer is held for the asker who left")
+local fAnn2, fAnn2Peer = join(friendHub, "ANN", "PALLET", 5, 5)
+local late = take(fAnn2Peer, Wire.FRIEND_ANSWER)
+check(late ~= nil, "and reaches them on their next welcome")
+eq(late.accept, true, "with the answer they were waiting for")
+eq(friendHub.friendHeld, 0, "an answer, unlike an ask, is spent on delivery")
+check(fAnn2 ~= nil, "on whatever connection they came back on")
+
+-- asking twice is one ask: a client holding the button down must not stack
+-- boxes on somebody else's screen
+friendHub:update(Config.CHAT_GATE * 2)
+friendHub:receive(fAnn2, { type = Wire.FRIEND_ASK, to = fCal.id })
+friendHub:update(Config.CHAT_GATE * 2)
+friendHub:receive(fAnn2, { type = Wire.FRIEND_ASK, to = fCal.id })
+eq(friendHub.friendHeld, 1, "two asks from one name are one held ask")
+
+-- ...and the gate refuses the second one inside the window outright
+fCalPeer.outbox = {}
+friendHub:receive(fAnn2, { type = Wire.FRIEND_ASK, to = fCal.id })
+eq(take(fCalPeer, Wire.FRIEND_ASK), nil,
+   "a second ask inside the chat window is dropped, the way a party event is")
+
+-- removal travels, so the two lists cannot disagree about whether a
+-- friendship exists
+friendHub:receive(fAnn2, { type = Wire.FRIEND_REMOVE, toName = "CAL" })
+local removed = take(fCalPeer, Wire.FRIEND_REMOVE)
+check(removed ~= nil, "a removal reaches the other side")
+eq(removed.name, "ANN", "naming the sender, stamped from the connection")
+eq(friendHub.friendHeld, 0,
+   "and takes the ask between the two of them with it -- a box about a "
+   .. "decision already made is a box nobody should be answering")
+
+-- ...and is held for somebody who is away, like everything else
+friendHub:drop(fCal)
+friendHub:update(Config.CHAT_GATE * 2)
+friendHub:receive(fAnn2, { type = Wire.FRIEND_REMOVE, toName = "CAL" })
+eq(friendHub.friendHeld, 1, "a removal for an absent player waits for them")
+local _, fCal2Peer = join(friendHub, "CAL", "PALLET", 7, 5)
+check(take(fCal2Peer, Wire.FRIEND_REMOVE) ~= nil,
+      "and lands on their next welcome")
+
+-- a name cannot befriend itself, however many connections are wearing it
+local sameHub = Hub.new({ maxPlayers = 4 })
+local sAnn = join(sameHub, "ANN", "PALLET", 1, 1)
+local sAnn2, sAnn2Peer = join(sameHub, "ANN", "PALLET", 2, 1)
+sAnn2Peer.outbox = {}
+sameHub:receive(sAnn, { type = Wire.FRIEND_ASK, to = sAnn2.id })
+eq(take(sAnn2Peer, Wire.FRIEND_ASK), nil,
+   "two connections wearing one name have no friendship to form -- and a "
+   .. "hold filed under that name would be one either of them could answer")
+eq(sameHub.friendHeld, 0, "so nothing is held for it either")
+
+-- the per-name ceiling, which is what stops one inbox growing without bound
+local capHub = Hub.new({ maxPlayers = 64 })
+local capTarget = join(capHub, "ZED", "PALLET", 1, 1)
+for index = 1, Config.FRIEND_HOLD_PER_NAME + 2 do
+  local asker = join(capHub, ("ASK%d"):format(index), "PALLET", index, 2)
+  capHub:update(Config.CHAT_GATE * 2)
+  capHub:receive(asker, { type = Wire.FRIEND_ASK, to = capTarget.id })
+end
+eq(capHub.friendHeld, Config.FRIEND_HOLD_PER_NAME,
+   "one inbox holds no more than the per-name ceiling")
+
+-- and the week-long expiry, which is what stops a hub that runs for a month
+-- accumulating asks nobody will ever answer
+capHub:update(Config.FRIEND_HOLD + 1)
+capHub:holdFriend("SOMEONE", { kind = "ask", name = "LATE" })
+eq(capHub.friendHeld, 1, "everything older than the hold window is swept")
 
 end)()
 
@@ -3961,6 +4141,48 @@ eq(#Overlay.PARTY_MARK, 3, "the marker is three bytes of UTF-8")
 eq(#partied:nameFor({ id = "them", name = "BOB" }), 6,
    "so a marked name is longer in bytes than it is on screen")
 
+-- ------- what colour a plate is drawn in
+--
+-- Three answers, most specific first.  The interesting case is the overlap: a
+-- friend who is also the person you are travelling with comes out green, and
+-- that is the right way round -- the party is the relationship that changes
+-- what you should do next, being friends is a standing fact that will still
+-- be true when the party ends.
+do
+  local Friends = need("Friends")
+  local mine = Friends.new({ send = function() end, isReady = function() return true end },
+                           { say = function() end },
+                           { mod = { save = { get = function() end,
+                                              set = function() end },
+                                     log = { warn = function() end } } })
+  mine:setHub("colour:7788", "ME")
+  mine:_add("BOB")
+
+  local plain = Overlay.new({ chat = Chat.new(), party = plateParty })
+  eq(plain:labelColor({ id = "other", name = "CAL" }), Overlay.LABEL_WHITE,
+     "somebody you have never met is drawn white")
+
+  local withFriends = Overlay.new({ chat = Chat.new(), party = plateParty,
+                                    friends = mine })
+  eq(withFriends:labelColor({ id = "other", name = "BOB" }),
+     Overlay.FRIEND_BLUE, "a friend is drawn in the smooth blue")
+  eq(Overlay.FRIEND_BLUE, Config.FRIEND_BLUE,
+     "which is the one Config holds, so the plate and the corner toast that "
+     .. "announces them cannot drift apart")
+  eq(withFriends:labelColor({ id = "other", name = "bob" }),
+     Overlay.FRIEND_BLUE, "matched on the name, folded the way the list folds it")
+  eq(withFriends:labelColor({ id = "them", name = "BOB" }),
+     Overlay.PARTY_GREEN,
+     "and a friend who is also your party member stays green -- the marker "
+     .. "you need to pick them out of a crowd is not the one to give up")
+  eq(withFriends:labelColor({ id = "other", name = "CAL" }),
+     Overlay.LABEL_WHITE, "everybody else is still white")
+
+  eq(plain:isFriend({ id = "other", name = "BOB" }), false,
+     "an overlay built without a friends list simply has none, rather than "
+     .. "throwing on a ctx that predates the feature")
+end
+
 -- ------- nameplate screen position
 --
 -- Matches SpriteRenderer and Camera:follow -- the old anchor used the centre
@@ -4190,6 +4412,34 @@ do
 
   eq(Ui.placeRoom(("A"):rep(80)), 0,
      "an absurdly long name leaves nothing for a place -- clamped, not negative")
+
+  -- ...and the friend mark, which is the one thing that ever made this row's
+  -- label longer than the name in it.  The mark is three bytes of UTF-8 and
+  -- one glyph on screen, so a byte count would quietly steal *two* characters
+  -- from the place beside it instead of the one it actually costs.
+  eq(#Ui.FRIEND_MARK, 3, "the mark is a multi-byte glyph")
+  eq(Ui.FRIEND_MARK, "\226\150\183",
+     "and it is the hollow arrow, spelled the way the e2e driver spells it "
+     .. "when it asks the real charmap whether the font can draw it")
+  eq(Ui.rosterLabel("ANN", false), "ANN", "an ordinary row is just the name")
+  eq(Ui.rosterLabel("ANN", true), Ui.FRIEND_MARK .. "ANN",
+     "and a friend's row carries the mark in front of it")
+  eq(Ui.placeRoom(Ui.rosterLabel("ANN", true)), Ui.placeRoom("AANN"),
+     "which costs the place name exactly one glyph, not three")
+
+  -- The cost, stated rather than left to be discovered from a screenshot:
+  -- the mark moves the trimming boundary by one name-length, and does not
+  -- introduce trimming the row was not already doing.
+  eq(Ui.placeRoom("HOSTY"), 11, "PALLET TOWN fits whole beside a 5-glyph name")
+  eq(Ui.placeRoom("HOSTYY"), 10,
+     "and is already one glyph short beside a 6-glyph one, with no mark in "
+     .. "sight -- so a marked 5-glyph name is the row behaving as it always has")
+  eq(Ui.placeRoom(Ui.rosterLabel("HOSTY", true)), Ui.placeRoom("HOSTYY"),
+     "which is exactly what the mark costs: one name-length, no more")
+  eq(Ui.placeRoom(Ui.rosterLabel(("A"):rep(Config.NAME_MAX), true)), 5,
+     "and even the longest name plus a mark still leaves a readable place")
+  check(Ui.placeRoom(Ui.rosterLabel(("A"):rep(Config.NAME_MAX), true)) >= L.min,
+        "above the floor below which a place name is not worth showing")
 end
 
 -- ------- Places.name: what the player's own town map calls a map id
@@ -5508,9 +5758,9 @@ local fakeHandshake = {
 }
 
 local vanillaA = { name = "ASH", fingerprint = "aaa", linkModified = false,
-                   mods = { { id = "rby_mmo", version = "0.10.0", affectsLink = false } } }
+                   mods = { { id = "rby_mmo", version = "0.11.0", affectsLink = false } } }
 local vanillaB = { name = "GARY", fingerprint = "bbb", linkModified = false,
-                   mods = { { id = "rby_mmo", version = "0.10.0", affectsLink = false } } }
+                   mods = { { id = "rby_mmo", version = "0.11.0", affectsLink = false } } }
 eq(Sessions.canBattle("full", vanillaA, vanillaB, fakeHandshake), true,
    "identical fingerprints still battle")
 eq(Sessions.canBattle("subset", vanillaA, vanillaB, fakeHandshake), true,
@@ -5520,7 +5770,7 @@ eq(Sessions.canBattle("refused", vanillaA, vanillaB, fakeHandshake), false,
 
 local modded = { name = "GARY", fingerprint = "ccc", linkModified = true,
                  mods = {
-                   { id = "rby_mmo", version = "0.10.0", affectsLink = false },
+                   { id = "rby_mmo", version = "0.11.0", affectsLink = false },
                    { id = "stat_tweaks", version = "1.2.0", affectsLink = true },
                  } }
 eq(Sessions.canBattle("subset", vanillaA, modded, fakeHandshake), false,
@@ -5532,7 +5782,7 @@ check(block:find("STAT_TWEAKS", 1, true) or block:find("stat_tweaks", 1, true),
 check(block:find("GARY", 1, true), "and whose game has it")
 
 local stealth = { name = "GARY", fingerprint = "ddd", linkModified = true,
-                  mods = { { id = "rby_mmo", version = "0.10.0", affectsLink = false } } }
+                  mods = { { id = "rby_mmo", version = "0.11.0", affectsLink = false } } }
 local stealthMsg = Sessions.battleBlockMessage(vanillaA, stealth, "subset", fakeHandshake)
 check(stealthMsg:find("battle rules", 1, true),
       "same mod list but linkModified still explains the block")
@@ -5763,6 +6013,579 @@ cal.party.incoming = { from = "y", name = "Y" }
 cal.party:reset()
 eq(cal.party.outgoing, nil, "a disconnect drops an unanswered invite")
 eq(cal.party.incoming, nil, "and a prompt that was still up")
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 11b. Friends, both sides of the ask
+-- ------------------------------------------------------------------
+--
+-- Driven the way the party scenario above is: two real Friends instances with
+-- the real Hub between them, and a pump() shaped like src/Client.lua's tick.
+-- Most of what this feature has to get right is about the two sides agreeing
+-- across time -- an ask answered after the asker logged out, a friendship one
+-- side ended while the other was away -- and a single instance asserted
+-- against a fake hub cannot see any of it.
+--
+-- love is absent under this interpreter, so the file half of the store is a
+-- no-op here and mod.save is the whole persistence.  That is the right half to
+-- pin anyway: the file is a mirror of exactly these rows, and what a suite can
+-- check is that the rows written are the rows read back.
+
+;(function()
+
+local Friends = need("Friends")
+
+-- One mod facade per *machine*, not per side: two players sharing a save
+-- folder is exactly what the bucket key exists to keep apart, and the only way
+-- to assert that is to hand both of them the same store.
+local function fakeSave()
+  local kept = {}
+  return {
+    save = {
+      get = function(_, key) return kept[key] end,
+      set = function(_, key, value) kept[key] = value end,
+    },
+    log = { warn = function() end, error = function() end,
+            info = function() end },
+    kept = kept,
+  }
+end
+
+local function friendSide(hub, name, facade)
+  local side = { name = name, said = {} }
+  side.peer = fakePeer()
+  side.client = hub:accept(side.peer)
+  side.transport = {
+    send = function(_, msgType, payload)
+      local msg = {}
+      if type(payload) == "table" then
+        for k, v in pairs(payload) do msg[k] = v end
+      end
+      msg.type = msgType
+      hub:receive(side.client, msg)
+      return true
+    end,
+    isReady = function() return true end,
+  }
+  side.ui = {
+    say = function(_, text) side.said[#side.said + 1] = text end,
+    confirm = function(_, _, text, cb) side.confirmText = text; side.confirmBox = cb end,
+  }
+  side.friends = Friends.new(side.transport, side.ui, { mod = facade })
+  hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+                             name = name, map = "FIX_TOWN", x = 1, y = 1 })
+  take(side.peer, Wire.WELCOME)
+  side.friends:setHub("hub.example:7788", name)
+  return side
+end
+
+local friendDispatch = {
+  [Wire.FRIEND_ASK] = function(s, m) s.friends:onAsk({}, m) end,
+  [Wire.FRIEND_ANSWER] = function(s, m) s.friends:onAnswer(m) end,
+  [Wire.FRIEND_REMOVE] = function(s, m) s.friends:onRemoved(m) end,
+}
+
+local function pumpFriends(side)
+  local batch = side.peer.outbox
+  side.peer.outbox = {}
+  for _, msg in ipairs(batch) do
+    local handler = friendDispatch[msg.type]
+    if handler then handler(side, msg) end
+  end
+end
+
+local function answerFriend(side, yes)
+  local box = side.confirmBox
+  side.confirmBox, side.confirmText = nil, nil
+  box(yes)
+end
+
+local function friendNames(side)
+  local out = {}
+  for _, entry in ipairs(side.friends:list()) do out[#out + 1] = entry.name end
+  return table.concat(out, ",")
+end
+
+local function toldFriend(side, needle)
+  for _, line in ipairs(side.said) do
+    if line:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+local fhub = Hub.new({ maxPlayers = 8 })
+local annBox = fakeSave()
+local bobBox = fakeSave()
+local ann = friendSide(fhub, "ANN", annBox)
+local bob = friendSide(fhub, "BOB", bobBox)
+
+eq(ann.friends:count(), 0, "nobody starts with friends")
+eq(ann.friends:isFriend("BOB"), false, "and nobody is one")
+
+-- ------- the ask, accepted
+
+ann.friends:ask({ id = bob.client.id, name = "BOB" })
+check(toldFriend(ann, "Asked BOB"), "the asker is told the ask went out")
+pumpFriends(bob)
+check(bob.confirmBox ~= nil, "and the other player is asked")
+check(bob.confirmText:find("ANN"), "by name")
+
+answerFriend(bob, true)
+eq(bob.friends:isFriend("ANN"), true,
+   "saying yes writes the friendship on the side that consented, there and "
+   .. "then -- not when an acknowledgement comes back")
+pumpFriends(ann)
+eq(ann.friends:isFriend("BOB"), true, "and on the asker when the answer lands")
+check(toldFriend(ann, "BOB is now your"), "who is told out loud")
+
+-- ------- a name is a name, however it was typed
+
+eq(ann.friends:isFriend("bob"), true, "the list folds case, like the board")
+eq(ann.friends:isFriend("BOBBY"), false, "without folding two names into one")
+
+-- ------- what the store keeps, and where
+
+do
+  local reopened = Friends.new(ann.transport, ann.ui, { mod = annBox })
+  reopened:setHub("hub.example:7788", "ANN")
+  eq(reopened:isFriend("BOB"), true,
+     "a fresh copy of the store reads the same hub's list back")
+
+  reopened:setHub("hub.example:7788", "CAL")
+  eq(reopened:isFriend("BOB"), false,
+     "another trainer on the same machine and the same hub has their own list")
+
+  reopened:setHub("elsewhere:7788", "ANN")
+  eq(reopened:isFriend("BOB"), false,
+     "and so does the same trainer on another hub -- ANN there is not ANN "
+     .. "here, which is the whole reason the list is filed per hub")
+
+  reopened:setHub("HUB.EXAMPLE:7788 ", "ann")
+  eq(reopened:isFriend("BOB"), true,
+     "one hub typed two ways, and one name typed two ways, are one bucket")
+end
+
+-- ------- a no is an answer
+
+fhub:update(Config.CHAT_GATE * 2)
+local cal = friendSide(fhub, "CAL", fakeSave())
+ann.said = {}
+ann.friends:ask({ id = cal.client.id, name = "CAL" })
+pumpFriends(cal)
+answerFriend(cal, false)
+pumpFriends(ann)
+eq(ann.friends:isFriend("CAL"), false, "a no writes nothing")
+check(toldFriend(ann, "CAL said no"), "and says so, which silence could not")
+
+-- asking again is allowed, because a no is not a ban: the outgoing guard is
+-- cleared by the answer
+fhub:update(Config.CHAT_GATE * 2)
+ann.said = {}
+ann.friends:ask({ id = cal.client.id, name = "CAL" })
+check(toldFriend(ann, "Asked CAL"), "so they can be asked again later")
+
+-- ...but not twice while one is still unanswered
+ann.said = {}
+ann.friends:ask({ id = cal.client.id, name = "CAL" })
+check(toldFriend(ann, "already asked"), "one outstanding ask per person")
+
+-- and never against somebody already on the list
+ann.said = {}
+ann.friends:ask({ id = bob.client.id, name = "BOB" })
+check(toldFriend(ann, "already"), "nor against a friend you already have")
+
+-- ------- an ask that arrives mid-fight waits rather than taking the screen
+
+-- ANN's second ask is still sitting on CAL's socket unread.  Dropped rather
+-- than pumped, so the box that opens below is unambiguously the one this block
+-- is about: the queue is deliberately first-in-first-out, and a stray ask
+-- ahead of it would be answered instead.
+cal.peer.outbox = {}
+cal.confirmBox = nil
+cal.busy = true
+cal.friends.busy = function() return cal.busy end
+fhub:update(Config.CHAT_GATE * 2)
+bob.friends:ask({ id = cal.client.id, name = "CAL" })
+pumpFriends(cal)
+eq(cal.confirmBox, nil,
+   "a yes/no box does not open over a battle -- the hub is holding the ask, "
+   .. "so nothing is lost by waiting")
+cal.friends:update({}, 0.1)
+eq(cal.confirmBox, nil, "and it keeps waiting while the fight is on")
+
+cal.busy = false
+cal.friends:update({}, 0.1)
+check(cal.confirmBox ~= nil, "and opens the moment the fight is over")
+check(cal.confirmText:find("BOB"), "asking what it was always going to ask")
+answerFriend(cal, true)
+pumpFriends(bob)
+eq(bob.friends:isFriend("CAL"), true, "and the answer lands as usual")
+
+-- ------- an ask that outlives the connection it was made on
+
+fhub:update(Config.CHAT_GATE * 2)
+local dan = friendSide(fhub, "DAN", fakeSave())
+ann.friends:ask({ id = dan.client.id, name = "DAN" })
+-- DAN closes the game before answering: the box was on screen and nobody
+-- pressed anything
+dan.peer.outbox = {}
+fhub:drop(dan.client)
+
+local danBack = friendSide(fhub, "DAN", fakeSave())
+pumpFriends(danBack)
+check(danBack.confirmBox ~= nil,
+      "the hub puts the ask again the next time they log in, which is the "
+      .. "whole reason it keeps holding a delivered one")
+answerFriend(danBack, true)
+pumpFriends(ann)
+eq(ann.friends:isFriend("DAN"), true, "and the friendship forms a session late")
+
+-- ------- an answer that outlives the *asker's* connection
+
+fhub:update(Config.CHAT_GATE * 2)
+local eve = friendSide(fhub, "EVE", fakeSave())
+local fay = friendSide(fhub, "FAY", fakeSave())
+eve.friends:ask({ id = fay.client.id, name = "FAY" })
+pumpFriends(fay)
+eve.peer.outbox = {}
+fhub:drop(eve.client)
+answerFriend(fay, true)
+
+local eveBack = friendSide(fhub, "EVE", fakeSave())
+pumpFriends(eveBack)
+eq(eveBack.friends:isFriend("FAY"), true,
+   "an answer given while the asker was away reaches them on their next "
+   .. "welcome, so the two lists still agree")
+
+-- ------- the two lists cannot drift apart
+
+-- Somebody whose answer was lost asks again: the side that already agreed
+-- says yes without troubling anybody, because consent was given once.
+fhub:update(Config.CHAT_GATE * 2)
+bob.confirmBox = nil
+ann.friends:remove("BOB")
+pumpFriends(bob)
+eq(bob.friends:isFriend("ANN"), false,
+   "a removal takes the friendship off both sides -- one that only came off "
+   .. "one would leave the other asking for consent that was already given")
+eq(ann.friends:isFriend("BOB"), false, "and off the side that pressed it")
+eq(bob.confirmBox, nil, "silently, because there is nothing to do about it")
+
+fhub:update(Config.CHAT_GATE * 2)
+ann.friends:ask({ id = bob.client.id, name = "BOB" })
+pumpFriends(bob)
+check(bob.confirmBox ~= nil, "so being asked again does ask")
+answerFriend(bob, true)
+pumpFriends(ann)
+
+bob.confirmBox = nil
+ann.said = {}
+-- ...and now the drift case: ANN's copy lost the answer somehow, so she asks
+-- a friendship BOB already has.
+ann.friends:_drop("BOB")
+fhub:update(Config.CHAT_GATE * 2)
+ann.friends:ask({ id = bob.client.id, name = "BOB" })
+pumpFriends(bob)
+eq(bob.confirmBox, nil,
+   "somebody who already has you on their list is not asked to agree twice")
+pumpFriends(ann)
+eq(ann.friends:isFriend("BOB"), true, "the lists heal instead")
+
+-- ------- the order the screen draws them in
+
+do
+  local sorter = Friends.new(ann.transport, ann.ui, { mod = fakeSave() })
+  sorter:setHub("sort:7788", "ANN")
+  -- written directly so the timestamps are the test's rather than the clock's
+  sorter.entries = {
+    OLD = { name = "OLD", key = "OLD", added = 10 },
+    MID = { name = "MID", key = "MID", added = 20 },
+    NEW = { name = "NEW", key = "NEW", added = 30 },
+  }
+  local roster = Roster.new()
+  roster:setSelf("me")
+  roster:put(Wire.presence({ id = "1", name = "OLD", map = "FIX_TOWN",
+                             x = 1, y = 1 }))
+
+  local rows = sorter:sorted(roster)
+  local order = {}
+  for _, row in ipairs(rows) do
+    order[#order + 1] = row.name .. (row.player and "+" or "-")
+  end
+  eq(table.concat(order, ","), "OLD+,NEW-,MID-",
+     "online first -- the only rows that lead anywhere -- then newest friend "
+     .. "first inside each group")
+
+  eq(#sorter:sorted(nil), 3,
+     "and with no roster at all every row is simply offline, rather than the "
+     .. "screen refusing to draw")
+end
+
+-- ------- the ceiling on a list
+
+do
+  local full = Friends.new(ann.transport, ann.ui, { mod = fakeSave() })
+  full:setHub("full:7788", "ANN")
+  for index = 1, Config.FRIENDS_MAX do
+    full:_add(("F%d"):format(index))
+  end
+  eq(full:count(), Config.FRIENDS_MAX, "the list fills to its ceiling")
+  eq(full:_add("ONEMORE"), nil,
+     "and refuses the next one rather than dropping somebody -- deciding who "
+     .. "a player has stopped being friends with is not this mod's call")
+  eq(full:isFriend("F1"), true, "so the oldest friend is still there")
+end
+
+-- ------- and a disconnect closes the list without losing it
+
+ann.friends:reset()
+eq(ann.friends:isOpen(), false, "leaving closes the open list")
+eq(ann.friends:count(), 0, "so nothing is drawn for a hub we are not on")
+eq(ann.friends:isFriend("BOB"), false, "and nothing answers about one")
+ann.friends:setHub("hub.example:7788", "ANN")
+eq(ann.friends:isFriend("BOB"), true, "reconnecting reads it straight back")
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 11c. The three screens a friendship shows up on
+-- ------------------------------------------------------------------
+--
+-- FRIENDS (the list itself), ACTIONS (the row that makes and unmakes one, in
+-- both of its shapes) and PLAYERS (the mark).  Built through Ui:install and
+-- the registered constructors rather than a copy of the conditionals written
+-- here, which is the whole reason this is worth asserting: what these screens
+-- offer is decided by three tables agreeing (the roster, the party, the
+-- friends list), and only the real constructor consults all three.
+
+;(function()
+
+local Ui = need("Ui")
+local Friends = need("Friends")
+
+-- Saved and put back, never nil'd: stubMod is shared with every section after
+-- this one, and a field left nil is a field the next section finds missing
+-- rather than as it was.
+local keptScreens, keptHooks, keptUi = stubMod.content.screens, stubMod.hooks,
+                                       stubMod.ui
+
+local registry, pushes = {}, {}
+stubMod.content.screens = {
+  register = function(_, id, def) registry[id] = def end,
+  get = function(_, id) return registry[id] end,
+}
+stubMod.hooks = { wrap = function() end }
+stubMod.ui = {
+  push = function(_, id, opts) pushes[#pushes + 1] = { id = id, opts = opts } end,
+  Menu = { new = function(_, items, opts)
+    return { kind = "menu", items = items, opts = opts }
+  end },
+  ListMenu = { new = function(_, title, items, opts)
+    return { kind = "list", title = title, items = items, opts = opts,
+             index = 1, scroll = 0, close = function() end }
+  end },
+  TextBox = { new = function(_, text, onDone)
+    return { kind = "text", text = text, onDone = onDone }
+  end },
+}
+
+local roster = Roster.new()
+roster:setSelf("me")
+roster:put(Wire.presence({ id = "bob", name = "BOB", map = "PALLET_TOWN",
+                           x = 1, y = 1 }))
+roster:put(Wire.presence({ id = "cal", name = "CAL", map = "PALLET_TOWN",
+                           x = 2, y = 1 }))
+
+local party = need("Party").new({ send = function() end }, { say = function() end })
+party:setSelf("me")
+
+local said = {}
+local friends = Friends.new(
+  { send = function() end, isReady = function() return true end },
+  { say = function(_, text) said[#said + 1] = text end,
+    confirm = function() end },
+  { mod = { save = { get = function() end, set = function() end },
+            log = { warn = function() end } } })
+friends:setHub("screens:7788", "ME")
+
+local screenCtx = { roster = roster, party = party, friends = friends,
+                    coop = { pendingOffer = function() return nil end },
+                    client = { playerName = function() return "ME" end } }
+local screenUi = Ui.new(screenCtx)
+check(pcall(function() screenUi:install() end),
+      "the friends screens register under a minimal stub")
+check(registry[Ui.SCREEN.FRIENDS] ~= nil, "including FRIENDS itself")
+
+local function rowsOf(screen)
+  local out = {}
+  for _, item in ipairs(screen.items or {}) do
+    out[#out + 1] = tostring(item.label) .. "/" .. tostring(item.right)
+  end
+  return table.concat(out, ",")
+end
+
+local function labelsOf(screen)
+  local out = {}
+  for _, item in ipairs(screen.items or {}) do out[#out + 1] = item.label end
+  return table.concat(out, ",")
+end
+
+-- ------- an empty list leads somewhere
+
+do
+  local screen = registry[Ui.SCREEN.FRIENDS].new({})
+  eq(screen.kind, "text",
+     "with nobody on it, FRIENDS is a sentence rather than an empty list")
+  check(screen.text:find("No friends"), "saying so")
+  pushes = {}
+  screen.onDone()
+  eq(pushes[1] and pushes[1].id, Ui.SCREEN.ROSTER,
+     "and handing over the list a friendship is started from, the way the "
+     .. "empty PARTY screen does")
+end
+
+-- ------- the rows, and the order they are in
+
+friends.entries = {
+  BOB = { name = "BOB", key = "BOB", added = 10 },
+  CAL = { name = "CAL", key = "CAL", added = 20 },
+  DEE = { name = "DEE", key = "DEE", added = 30 },
+}
+
+do
+  local screen = registry[Ui.SCREEN.FRIENDS].new({})
+  eq(screen.kind, "list", "with friends on it, FRIENDS is a list")
+  eq(screen.title, "FRIENDS", "titled for what it is")
+  eq(rowsOf(screen), "CAL/PALLET TOWN,BOB/PALLET TOWN,DEE/OFFLINE",
+     "online first -- newest of them first -- then the ones who are not here, "
+     .. "each row saying where they are or that they are away")
+
+  -- the other three things the column can say
+  roster:setBusy("bob", true)
+  eq(rowsOf(registry[Ui.SCREEN.FRIENDS].new({})),
+     "CAL/PALLET TOWN,BOB/BUSY,DEE/OFFLINE",
+     "a friend mid-trade says BUSY, as they do on PLAYERS")
+  roster:setBusy("bob", false)
+
+  roster:move("bob", nil, nil, nil, "down")
+  eq(rowsOf(registry[Ui.SCREEN.FRIENDS].new({})),
+     "CAL/PALLET TOWN,BOB/ONLINE,DEE/OFFLINE",
+     "a friend with no cell -- in a battle or a menu -- says ONLINE, where "
+     .. "PLAYERS leaves the column blank: blank next to a row saying OFFLINE "
+     .. "would read as a third state nobody can name")
+  roster:move("bob", "PALLET_TOWN", 1, 1, "down")
+
+  party:onParty({ id = "1", members = { { id = "me", name = "ME" },
+                                        { id = "cal", name = "CAL" } } })
+  eq(rowsOf(registry[Ui.SCREEN.FRIENDS].new({})),
+     "CAL/PARTY,BOB/PALLET TOWN,DEE/OFFLINE",
+     "and the person you are travelling with says PARTY, which outranks "
+     .. "where they are standing")
+  party:reset()
+  party:setSelf("me")
+end
+
+-- ------- pressing A on a row
+
+do
+  local screen = registry[Ui.SCREEN.FRIENDS].new({})
+  pushes = {}
+  screen.opts.onChoose(screen.items[1], screen)
+  local opened = pushes[1]
+  eq(opened and opened.id, Ui.SCREEN.ACTIONS,
+     "an online friend opens the same menu walking up to them does")
+  eq(opened.opts.playerId, "cal", "pointed at the connection they are on")
+
+  pushes = {}
+  screen.opts.onChoose(screen.items[3], screen)
+  opened = pushes[1]
+  eq(opened and opened.id, Ui.SCREEN.ACTIONS, "and so does one who is away")
+  eq(opened.opts.playerId, nil,
+     "with no connection to point at, because there is not one")
+  eq(opened.opts.friendName, "DEE", "so they are named instead")
+end
+
+-- ------- the row that makes and unmakes a friendship
+
+do
+  local menu = registry[Ui.SCREEN.ACTIONS].new({}, { playerId = "bob" })
+  check(labelsOf(menu):find("UNFRIEND"),
+        "somebody already on the list is offered UNFRIEND")
+  check(not labelsOf(menu):find("ADD FRIEND"), "and not both at once")
+
+  friends:_drop("BOB")
+  menu = registry[Ui.SCREEN.ACTIONS].new({}, { playerId = "bob" })
+  check(labelsOf(menu):find("ADD FRIEND"),
+        "and somebody who is not is offered ADD FRIEND -- the row is always "
+        .. "there in one state or the other, because whether they will say "
+        .. "yes is a fact about a human and not one the menu can see")
+  eq(menu.items[1].label, "PROFILE", "PROFILE still leads")
+  eq(menu.items[2].label, "ADD FRIEND",
+     "and the friend row is second, above everything you might *do* with "
+     .. "them: it is the other question about who they are")
+
+  -- the box has to stay clear of the two characters it is about, which is
+  -- what decided the label (UNFRIEND, not REMOVE FRIEND)
+  local widest = 0
+  for _, item in ipairs(menu.items) do
+    if #item.label > widest then widest = #item.label end
+  end
+  eq(widest, #"PARTY BATTLE",
+     "no friend row is wider than PARTY BATTLE, so the menu is exactly as "
+     .. "wide as it has always been")
+  friends:_add("BOB")
+end
+
+-- ------- ...and the same row for somebody who is not here
+
+do
+  local menu = registry[Ui.SCREEN.ACTIONS].new({}, { friendName = "DEE" })
+  eq(menu.kind, "menu", "an absent friend still gets a menu, not a refusal")
+  eq(labelsOf(menu), "UNFRIEND",
+     "with the one command that still means anything -- there is nobody there "
+     .. "to trade, battle or whisper")
+
+  local stranger = registry[Ui.SCREEN.ACTIONS].new({}, { friendName = "ZED" })
+  eq(stranger.kind, "text",
+     "somebody who is neither online nor on the list is the old sentence")
+  check(stranger.text:find("offline"), "which is about bad luck, not choice")
+end
+
+-- ------- the mark on the PLAYERS list
+
+do
+  friends:_drop("CAL")
+  local list = registry[Ui.SCREEN.ROSTER].new({})
+  eq(rowsOf(list), Ui.FRIEND_MARK .. "BOB/PALLET TOWN,CAL/PALLET TOWN",
+     "a friend's row carries the mark in front of the nickname -- and at a "
+     .. "three-glyph name the place beside it still fits whole, because the "
+     .. "one glyph the mark costs is one the row had spare")
+
+  friends:_add("CAL")
+  eq(labelsOf(registry[Ui.SCREEN.ROSTER].new({})),
+     Ui.FRIEND_MARK .. "BOB," .. Ui.FRIEND_MARK .. "CAL",
+     "and the mark follows the list rather than the roster, so befriending "
+     .. "somebody marks the row they were already on")
+
+  -- The mark is on *every* friend's row, cursor or not. That is the whole
+  -- reason it is not in the cursor column: PLAYERS on a two-player hub has
+  -- one row, the cursor opens on it, and a mark that yielded there would
+  -- never be drawn at all.
+  local one = Roster.new()
+  one:setSelf("me")
+  one:put(Wire.presence({ id = "bob", name = "BOB", map = "PALLET_TOWN",
+                          x = 1, y = 1 }))
+  local kept = screenCtx.roster
+  screenCtx.roster = one
+  local solo = registry[Ui.SCREEN.ROSTER].new({})
+  eq(labelsOf(solo), Ui.FRIEND_MARK .. "BOB",
+     "the only row on the list is marked, even though the cursor is on it")
+  screenCtx.roster = kept
+end
+
+stubMod.content.screens, stubMod.hooks, stubMod.ui = keptScreens, keptHooks,
+                                                     keptUi
 
 end)()
 
@@ -14110,12 +14933,22 @@ end
 ctx.client = fakeClient({ connected = true })
 do
   local items = mainItems()
-  eq(#items, 8, "connected as a guest: 8 rows now that CHARACTER rides along")
+  eq(#items, 9, "connected as a guest: 9 rows now that FRIENDS rides along")
   local labels = {}
   for _, item in ipairs(items) do labels[#labels + 1] = item.label end
   eq(table.concat(labels, "|"),
-     "PLAYERS|CHAT|SAY|PARTY|MY PROFILE|RANK|CHARACTER|LEAVE",
-     "CHARACTER sits after RANK and before LEAVE")
+     "PLAYERS|FRIENDS|CHAT|SAY|PARTY|MY PROFILE|RANK|CHARACTER|LEAVE",
+     "FRIENDS sits directly under PLAYERS -- the same question with the half "
+     .. "of the answer a roster structurally cannot give -- and CHARACTER is "
+     .. "still after RANK and before LEAVE")
+
+  local friendRow
+  for _, item in ipairs(items) do
+    if item.label == "FRIENDS" then friendRow = item end
+  end
+  pushed = nil
+  friendRow.onSelect()
+  eq(pushed and pushed.id, SCREEN.FRIENDS, "FRIENDS opens the friends list")
 
   local charRow
   for _, item in ipairs(items) do
@@ -14143,14 +14976,15 @@ end
 ctx.client = fakeClient({ hosting = true, connected = true })
 do
   local items = mainItems()
-  eq(#items, 9,
-     "hosting and connected to your own hub: 9 rows, the first time this "
-     .. "screen has ever needed to scroll")
+  eq(#items, 10,
+     "hosting and connected to your own hub: 10 rows, two past the eight "
+     .. "this screen shows at once")
   local labels = {}
   for _, item in ipairs(items) do labels[#labels + 1] = item.label end
   eq(table.concat(labels, "|"),
-     "ADDRESS|PLAYERS|CHAT|SAY|PARTY|MY PROFILE|RANK|CHARACTER|END GAME",
-     "ADDRESS leads, CHARACTER still after RANK, END GAME last")
+     "ADDRESS|PLAYERS|FRIENDS|CHAT|SAY|PARTY|MY PROFILE|RANK|CHARACTER|END GAME",
+     "ADDRESS leads, FRIENDS follows PLAYERS, CHARACTER still after RANK, "
+     .. "END GAME last")
 end
 
 ctx.client = fakeClient()

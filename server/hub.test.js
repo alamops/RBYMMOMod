@@ -420,6 +420,99 @@ async function main() {
     const freed = await cal.expect('mmo.move');
     ok(freed.party === false, 'everyone sees them free to be asked again');
 
+    // ------- friends
+    //
+    // The same behaviours src/Hub.lua's own friend section pins on the Lua
+    // side, over real sockets. The hub never learns who is friends with whom
+    // -- the two clients keep that -- so everything here is about who still
+    // owes an answer to whom, which is the one part that cannot live in a
+    // client.
+    //
+    // Asks from one connection are rationed on the chat interval (a friend ask
+    // is a modal on somebody else's screen), so the waits below are the gate
+    // and not a race.
+
+    ann.send('mmo.friend_ask', { to: bobWelcome.id });
+    const friendAsk = await bob.expect('mmo.friend_ask');
+    ok(friendAsk.name === 'ANN', 'an ask is forwarded with the asker on it');
+    ok(friendAsk.from === annWelcome.id,
+       'and their id, because they are still here to point at');
+    await cal.expectSilence('mmo.friend_ask');
+    ok(true, 'and reaches nobody else');
+
+    // The gate that makes an answer safe to forward at all: without it, any
+    // client could send "they said yes" about anybody and write itself onto a
+    // stranger's list.
+    cal.send('mmo.friend_answer', { toName: 'ANN', accept: true });
+    await ann.expectSilence('mmo.friend_answer');
+    ok(true, 'a third party cannot accept on somebody else\'s behalf');
+
+    bob.send('mmo.friend_answer', { toName: 'CAL', accept: true });
+    await cal.expectSilence('mmo.friend_answer');
+    ok(true, 'and nobody can answer a question that was never put to them');
+
+    bob.send('mmo.friend_answer', { toName: 'ANN', accept: true });
+    const friendYes = await ann.expect('mmo.friend_answer');
+    ok(friendYes.name === 'BOB', 'the answer names the answerer');
+    ok(friendYes.accept === true, 'and carries the yes');
+
+    bob.send('mmo.friend_answer', { toName: 'ANN', accept: true });
+    await ann.expectSilence('mmo.friend_answer');
+    ok(true, 'the ask is spent: the same one cannot be answered twice');
+
+    // An ask outlives the connection it was made on. This is the whole reason
+    // the hub keeps holding one it has already delivered: a player who closes
+    // the game with the box still on screen has not said no.
+    await sleep(600);
+    const dee = new Client(PORT);
+    await dee.ready();
+    dee.send('mmo.hello', {
+      proto: PROTOCOL, name: 'DEE', sprite: 'SPRITE_RED',
+      map: 'PALLET', x: 9, y: 9, facing: 'down',
+    });
+    const deeWelcome = await dee.expect('mmo.welcome');
+    ann.send('mmo.friend_ask', { to: deeWelcome.id });
+    await dee.expect('mmo.friend_ask');
+    dee.socket.destroy();
+    await sleep(100);
+
+    const deeBack = new Client(PORT);
+    await deeBack.ready();
+    deeBack.send('mmo.hello', {
+      proto: PROTOCOL, name: 'DEE', sprite: 'SPRITE_RED',
+      map: 'PALLET', x: 9, y: 9, facing: 'down',
+    });
+    await deeBack.expect('mmo.welcome');
+    const asked = await deeBack.expect('mmo.friend_ask');
+    ok(asked.name === 'ANN',
+       'an unanswered ask is put again on the next welcome, keyed by name -- '
+       + 'the connection it was made against is long gone');
+
+    // ...and an answer waits for an asker who is not there either.
+    ann.drain('mmo.friend_answer');
+    deeBack.send('mmo.friend_answer', { toName: 'ANN', accept: true });
+    const deeYes = await ann.expect('mmo.friend_answer');
+    ok(deeYes.accept === true, 'and answering it finally reaches the asker');
+
+    // Removal travels, so the two lists cannot end up disagreeing about
+    // whether a friendship exists.
+    ann.send('mmo.friend_remove', { toName: 'BOB' });
+    const unfriended = await bob.expect('mmo.friend_remove');
+    ok(unfriended.name === 'ANN',
+       'a removal names its sender, stamped from the connection -- the only '
+       + 'thing a forged one could do is take its sender off somebody\'s list');
+
+    deeBack.socket.destroy();
+    await sleep(100);
+    // DEE arrived twice and left twice while the three above were connected,
+    // and the scenarios below read mmo.join / mmo.part positionally -- the
+    // party teardown, for one, asserts that the next mmo.part is CAL's.
+    for (const client of [ann, bob, cal]) {
+      client.drain('mmo.join');
+      client.drain('mmo.part');
+      client.drain('mmo.move');
+    }
+
     // ------- co-op battles
     //
     // The rules here are the same ones src/Hub.lua's suite asserts, driven

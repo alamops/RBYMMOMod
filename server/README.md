@@ -1729,6 +1729,9 @@ on a relay connection.
 | `mmo.party_invite` | `to` — outbound; the same type arrives carrying `from` |
 | `mmo.party_respond` | `to, accept` |
 | `mmo.party_leave` | — |
+| `mmo.friend_ask` | `to` — the id of the player being asked. The same type arrives carrying `from` (their id, absent when the hub is delivering an ask it held while this player was away) and `name`. Rate-gated like chat |
+| `mmo.friend_answer` | `toName, accept` — addressed by **name**, not id, because the asker may have gone offline since. Only forwarded when this hub is holding the matching ask; the same type arrives carrying `name, accept` |
+| `mmo.friend_remove` | `toName` — the same type arrives carrying `name`, stamped from the sender's own connection |
 | `mmo.result` | `session, outcome` (`win` \| `loss` \| `draw`) — how the sender saw a link battle end. One on its own scores nothing: the hub waits for both sides to say the same thing |
 | `mmo.ranks` | — "send me the leaderboard". Rate-gated like chat |
 | `mmo.ping` | — |
@@ -1750,6 +1753,9 @@ on a relay connection.
 | `mmo.party` | `id, members[]` — the whole membership, never a delta |
 | `mmo.party_decline` | `name, reason` — `no`, or `in_party` |
 | `mmo.party_end` | `reason` — `left` to the member who left, `peer_left` to the other |
+| `mmo.friend_ask` | `from, name` — inbound; outbound it carries `to`. Delivered when the ask is made if that player is connected, **and again on their next `mmo.welcome`** for as long as it goes unanswered (a week). `from` is absent when nobody is connected under the asker's name |
+| `mmo.friend_answer` | `name, accept` — inbound; outbound it carries `toName`. Held for an asker who has since gone offline and delivered on their next welcome, then spent |
+| `mmo.friend_remove` | `name` — inbound; outbound it carries `toName`. Held the same way |
 | `mmo.rank` | `id, points` — one player's rating moved. Broadcast to everybody including the player it is about, so a roster row, a trainer card and their own menu all change at the same moment |
 | `mmo.ranking` | `entries[]` of `name, sprite, points` — the answer to `mmo.ranks`, already sorted and already cut to the top ten by the hub |
 | `mmo.error` | `message` — always fatal to the connection |
@@ -1820,10 +1826,10 @@ On the one path where no passcode is required — the `node hub.js` shim — the
 exchange is byte-identical to what it has always been: `hello`, then
 `welcome`.
 
-**`PROTOCOL` is 5**, and it lives in **`lib/relay.js`** (not `hub.js` any
+**`PROTOCOL` is 10**, and it lives in **`lib/relay.js`** (not `hub.js` any
 more) and in **`src/Config.lua`**. Bump both together on any incompatible
 change. The hub refuses a mismatched client by name and version — *"This hub
-speaks protocol 5; your mod speaks 4."* — rather than letting two dialects
+speaks protocol 10; your mod speaks 9."* — rather than letting two dialects
 talk past each other, and the game renders that sentence.
 
 Every bump so far has been *additive*, and it is worth saying why an additive
@@ -1839,6 +1845,11 @@ ignore.**
 | **3** | parties | `INVITE` pressed, nothing happens, forever |
 | **4** | ranked PVP | every battle result and every leaderboard request reported into silence |
 | **5** | pace | the `fast` flag dropped from every rebroadcast, so two players who both installed running would watch each other walk for the whole session |
+| **6** | co-op battles | `WAIT FOR <friend>` pressed in front of a trainer, and the partner never told |
+| **7** | mid-game character change | you pick somebody new and you are the only person in the game who can see it |
+| **8** | party events | your partner fights all evening and you are never told a thing — indistinguishable from a quiet route |
+| **9** | withdrawing a trade/battle ask | the asker's wait clears locally while the hub still holds it, so a late accept pulls them into a session they thought they had left |
+| **10** | friends | `ADD FRIEND` pressed and nothing happens, forever — and this is the one feature whose answer may legitimately arrive *later*, so "nothing yet" is an ordinary state and no player could tell the two apart |
 
 **Update the hub and the mod together.**
 

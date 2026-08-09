@@ -130,6 +130,45 @@ M.COOP_RUN_ANSWER = "run_answer"
 -- walked away.
 M.COOP_LEAVE     = "mmo.coop_leave"
 
+-- ------- friends
+--
+-- Three types, all three travelling in both directions the way PARTY_INVITE
+-- does -- the field set says which way it is going.
+--
+-- **They are addressed by *name*, not by connection id, everywhere except the
+-- ask itself.**  A friendship outlives the connection that made it: the whole
+-- feature is a list that still has somebody on it tomorrow, and an id is
+-- minted per connection, so a name is the only handle that means the same
+-- thing twice.  The ask is the exception because it can only ever be made
+-- against somebody standing in front of you, so it names the id it is offered
+-- to and the hub answers by name from there on.
+--
+--   FRIEND_ASK    -- outbound { to }, the id of the player being asked.
+--                    Inbound { from, name } -- `from` is their id when they
+--                    are still connected and absent when the hub is
+--                    delivering an ask it held while this player was away,
+--                    which is exactly the case the name exists for.
+--   FRIEND_ANSWER -- outbound { toName, accept }, inbound { name, accept }.
+--                    A yes from the asked side; a no is the same message with
+--                    accept false, because "they said no" and "they have not
+--                    answered yet" are the two things a player most needs
+--                    told apart.
+--   FRIEND_REMOVE -- outbound { toName }, inbound { name }.  Friendship is
+--                    mutual or it is nothing: a removal that only took one
+--                    side off would leave the other holding a row whose
+--                    owner would be asked for consent all over again.
+--
+-- **Only the answer is checked by the hub, and it has to be.**  A client that
+-- could send an answer to anybody could put itself on a stranger's friends
+-- list without ever being agreed to, so the hub only passes one on when it is
+-- holding a matching ask (see its friend handlers).  The removal needs no such
+-- check: the hub stamps the sender's own name on it, so the worst a forged one
+-- achieves is taking the sender off somebody's list, which is what the message
+-- says on the tin.
+M.FRIEND_ASK    = "mmo.friend_ask"
+M.FRIEND_ANSWER = "mmo.friend_answer"
+M.FRIEND_REMOVE = "mmo.friend_remove"
+
 -- The character you are wearing, changed mid-session.  One name for both
 -- directions, the way CHAT is: outbound it carries { sprite }, and the hub
 -- answers everybody -- the sender included, the way RANK does -- with
@@ -224,6 +263,26 @@ end
 
 function M.name(value)
   return M.text(value, Config.NAME_MAX)
+end
+
+-- The same name, as the one string that decides whether two of them are the
+-- same person.
+--
+-- Friendship and the rank board are both keyed on a trainer name rather than
+-- on a connection id, because both have to mean the same thing on the next
+-- visit -- and a name is typed, so "ANN" and "ann" are one player who shifted
+-- on the shift key.  This is Rank.keyOf and server/lib/rank.js's keyOf spelled
+-- once more at the wire boundary, and the three have to agree byte for byte:
+-- a hub that folds case where a client does not is a hub that holds an ask
+-- nobody can answer.
+--
+-- Sanitised first and folded second, never the other way round: upper-casing a
+-- string the font cannot draw would produce a key for a name no screen could
+-- ever show.
+function M.nameKey(value)
+  local name = M.name(value)
+  if not name then return nil end
+  return name:upper()
 end
 
 -- A sprite id is an engine identifier (SPRITE_RED), not prose.

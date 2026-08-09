@@ -70,9 +70,14 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // clear the asker's local wait while still holding pendingTo, so the other
 // player could accept into a session the asker thought they had left. The
 // rule every bump follows is unchanged: bump whenever a client can send
-// something a hub silently ignores. Kept in step with Config.PROTOCOL on the
-// mod side.
-const PROTOCOL = 9;
+// something a hub silently ignores. 10 is friends -- mmo.friend_ask,
+// mmo.friend_answer and mmo.friend_remove -- and it is the sharpest case yet:
+// a protocol-9 hub answers all three with silence, and this is the one feature
+// whose answer may legitimately arrive later (the hub holds an ask for a
+// player who is offline), so "nothing has happened yet" is an ordinary state
+// and a player would have no way at all to tell it from a hub that cannot do
+// this. Kept in step with Config.PROTOCOL on the mod side.
+const PROTOCOL = 10;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -101,6 +106,18 @@ const RESPONSE_MAX = 128;
 // at exactly the same moment for the same bytes -- one number moving would
 // leave the two hosting paths gating differently.
 const SPRITE_GATE_MS = 500;
+
+// ------- friends
+//
+// Mirrors Config.FRIEND_HOLD and its two caps, and has to: the same client
+// dials this hub and a game hosted from inside somebody's copy, so an ask that
+// survives a week on one and an hour on the other is one feature behaving two
+// ways. A week is longer than any "they'll be on later" and shorter than a
+// season; the caps are ceilings on what a stranger can make a hub remember,
+// not on how many friends anybody may have.
+const FRIEND_HOLD_MS = 7 * 24 * 3600 * 1000;
+const FRIEND_HOLD_PER_NAME = 8;
+const FRIEND_HOLD_MAX = 1024;
 
 // The name the hub itself speaks under. A message of the day and an
 // operator's broadcast both arrive as ordinary chat with this name on them
@@ -555,6 +572,91 @@ handlers['mmo.party_event'] = (relay, client, msg) => {
   }
 };
 
+/*
+ * ------- friends
+ *
+ * The hub owns exactly one part of this feature: carrying a friend ask to the
+ * player it names, and *keeping* it when that player is not here. The lists
+ * themselves live in the two clients (src/Friends.lua's header says why they
+ * cannot live here), so nothing below records who is friends with whom -- it
+ * records who still owes an answer to whom.
+ *
+ * Everything is keyed by trainer name rather than connection id, because a
+ * friendship outlives the connection that made it and a held ask has, by
+ * definition, no connection left to hang on. keyOf is the fold, the same one
+ * the rank board uses, so "the same name" means one thing on this hub.
+ *
+ * Three handlers, and the asymmetry between them is the security model. The
+ * ask is forwarded on the sender's say-so, because the worst it can do is put
+ * a yes/no box in front of somebody who says no. The *answer* is not: a client
+ * that could send one to anybody would be a client that adds itself to a
+ * stranger's list without ever being agreed to, so it is only passed on when
+ * this hub is holding the matching ask. The removal needs no check at all,
+ * because the hub stamps the sender's own name on it -- the only thing a
+ * forged one achieves is taking its sender off somebody's list, which is what
+ * the message says it does.
+ *
+ * The Node half of src/Hub.lua's friend section, and it has to stay in step
+ * with it for the reason the co-op section below gives.
+ */
+
+handlers['mmo.friend_ask'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  const target = relay.clients.get(cleanId(msg.to));
+  if (!target || !target.ready || target.id === client.id) return;
+
+  const mine = keyOf(client.name);
+  const theirs = keyOf(target.name);
+  // Two connections wearing one name on a hub that never claimed it. There is
+  // no friendship to form between a name and itself, and the hold table is
+  // keyed by name -- so an ask filed here would be one this player could
+  // answer on the asker's behalf.
+  if (!mine || !theirs || mine === theirs) return;
+
+  // Gated on the chat interval, for the reason mmo.party_event is: this puts
+  // prose and a modal on somebody else's screen unasked, and a modified client
+  // pressing it in a loop is the whole attack. Honest traffic is one ask per
+  // friendship, so half a second costs nobody anything.
+  const now = relay.now();
+  if (now - client.lastFriendAsk < relay.chatIntervalMs) return;
+  client.lastFriendAsk = now;
+
+  relay.deliverFriend(theirs, 'ask', 'mmo.friend_ask',
+    { from: client.id, name: client.name }, { kind: 'ask', name: client.name });
+};
+
+handlers['mmo.friend_answer'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  const mine = keyOf(client.name);
+  const asker = keyOf(cleanText(msg.toName, NAME_MAX));
+  if (!mine || !asker) return;
+
+  // The gate: only somebody actually holding an ask from this name may answer
+  // it, and the ask is spent on the first answer.
+  if (!relay.takeFriendHold(mine, 'ask', asker)) return;
+
+  const accept = msg.accept === true;
+  relay.deliverFriend(asker, 'answer', 'mmo.friend_answer',
+    { name: client.name, accept },
+    { kind: 'answer', name: client.name, accept });
+};
+
+handlers['mmo.friend_remove'] = (relay, client, msg) => {
+  if (!client.ready) return;
+  const mine = keyOf(client.name);
+  const theirs = keyOf(cleanText(msg.toName, NAME_MAX));
+  if (!mine || !theirs || mine === theirs) return;
+
+  // Anything still outstanding between the two of them goes with it, in both
+  // directions: an ask that outlived the friendship it was about is a box
+  // somebody would be answering about a decision already made.
+  relay.takeFriendHold(mine, 'ask', theirs);
+  relay.takeFriendHold(theirs, 'ask', mine);
+
+  relay.deliverFriend(theirs, 'remove', 'mmo.friend_remove',
+    { name: client.name }, { kind: 'remove', name: client.name });
+};
+
 // ------- co-op battles
 //
 // The Node half of src/Hub.lua's co-op section, and it has to stay the Node
@@ -885,8 +987,184 @@ class Relay {
     // Paperwork for a party-vs-party co-op battle: four reports rather than
     // two, so it is kept apart from `matches` instead of folded in.
     this.coopMatches = new Map();
+    /*
+     * Friend traffic this hub is holding for somebody who is not here:
+     * nameKey -> [{ kind, name, accept, at }], oldest first.
+     *
+     * Keyed by *name* and not by connection, which is the whole reason it
+     * exists: an ask whose target logs out before answering has to be asked
+     * again when they come back, and there is no connection left to hang it
+     * on. Mirrors src/Hub.lua's friendHolds.
+     */
+    this.friendHolds = new Map();
+    this.friendHeld = 0;
     this.nextCoopAsk = 1;
     this.players = 0;
+  }
+
+  // ------- friends
+  //
+  // What the handlers above call. See their header for the security model and
+  // for why the lists themselves are not here.
+
+  /*
+   * Whoever is connected under this name right now, or null.
+   *
+   * First match wins, and the client table's iteration order decides which --
+   * which is fine, and is why nothing is *drawn* from it: two players wearing
+   * one unclaimed name is a real state, and either is an equally correct
+   * answer to "deliver this now rather than holding it". A wrong guess costs a
+   * misdelivered box, never a friendship: the receiving client answers under
+   * its own name, and the answer is matched back against the hold by name.
+   */
+  byName(nameKey) {
+    if (!nameKey) return null;
+    for (const client of this.clients.values()) {
+      if (client.ready && keyOf(client.name) === nameKey) return client;
+    }
+    return null;
+  }
+
+  /*
+   * Drop everything held longer than FRIEND_HOLD_MS.
+   *
+   * Lazy, run when something is added rather than on a timer: the table is
+   * empty on nearly every hub, and a sweep nobody needs is work done for an
+   * answer that has not changed.
+   */
+  sweepFriendHolds() {
+    const now = this.now();
+    for (const [key, holds] of this.friendHolds) {
+      const kept = holds.filter((hold) => now - hold.at <= FRIEND_HOLD_MS);
+      this.friendHeld -= holds.length - kept.length;
+      if (kept.length) this.friendHolds.set(key, kept);
+      else this.friendHolds.delete(key);
+    }
+  }
+
+  /*
+   * Hold one notification for a name, replacing whatever it supersedes.
+   *
+   * One entry per (kind, sender), because all three kinds are idempotent:
+   * asking twice is one ask, and a second answer to a question already
+   * answered is not a thing that exists. Without that, one button held down
+   * would stack a player's inbox with the same box -- the caps would bound it,
+   * but they would still be answering one question eight times.
+   *
+   * Refused rather than trimmed at the global cap: dropping somebody else's
+   * held ask to make room for this one would let a flood erase the one
+   * notification that mattered. Per name it is the oldest that goes, which is
+   * the other way round on purpose -- eight unanswered asks in one inbox is
+   * one player ignoring eight people, and the newest is the one still worth
+   * asking.
+   */
+  holdFriend(nameKey, hold) {
+    if (!nameKey) return false;
+    this.sweepFriendHolds();
+    let holds = this.friendHolds.get(nameKey);
+    if (!holds) {
+      if (this.friendHeld >= FRIEND_HOLD_MAX) return false;
+      holds = [];
+      this.friendHolds.set(nameKey, holds);
+    }
+
+    const fromKey = keyOf(hold.name);
+    const already = holds.findIndex(
+      (held) => held.kind === hold.kind && keyOf(held.name) === fromKey);
+    if (already >= 0) {
+      holds.splice(already, 1);
+      this.friendHeld -= 1;
+    }
+    if (holds.length >= FRIEND_HOLD_PER_NAME) {
+      holds.shift();
+      this.friendHeld -= 1;
+    }
+    if (this.friendHeld >= FRIEND_HOLD_MAX) {
+      if (!holds.length) this.friendHolds.delete(nameKey);
+      return false;
+    }
+
+    holds.push(Object.assign({}, hold, { at: this.now() }));
+    this.friendHeld += 1;
+    return true;
+  }
+
+  /*
+   * Take one held notification off a name's list, and say whether there was
+   * one.
+   *
+   * This is the check that makes an answer safe to forward: only the player an
+   * ask was actually addressed to is holding it, so a client answering a
+   * question nobody asked it finds nothing here and is dropped.
+   */
+  takeFriendHold(nameKey, kind, fromKey) {
+    const holds = nameKey ? this.friendHolds.get(nameKey) : null;
+    if (!holds) return null;
+    const index = holds.findIndex(
+      (held) => held.kind === kind && keyOf(held.name) === fromKey);
+    if (index < 0) return null;
+    const [held] = holds.splice(index, 1);
+    this.friendHeld -= 1;
+    if (!holds.length) this.friendHolds.delete(nameKey);
+    return held;
+  }
+
+  /** Send one notification now, or hold it until that name is next seen. */
+  deliverFriend(nameKey, kind, type, payload, hold) {
+    const target = this.byName(nameKey);
+    if (target) {
+      this.send(target, type, payload);
+      // An ask stays held even when it was delivered: the player it reached
+      // may close the game without answering, and "asked once, into a session
+      // that ended" is exactly the case this table exists for. Everything else
+      // is spent on delivery.
+      if (kind !== 'ask') return true;
+    }
+    return this.holdFriend(nameKey, hold);
+  }
+
+  /*
+   * Everything this hub has been keeping for the player who just walked in.
+   *
+   * Called from admit(), after the welcome and the join broadcast: a box needs
+   * a client that already knows who it is and which list it is answering from,
+   * and an ask arriving ahead of the welcome would reach one with no friends
+   * list open (src/Friends.lua's onAsk refuses it).
+   *
+   * Asks are re-delivered and *kept*; answers and removals are spent. That
+   * asymmetry is the feature: an ask is outstanding until it is answered, so a
+   * player who logs out mid-prompt is asked again next time, whereas an answer
+   * is news that has now been delivered.
+   */
+  flushFriendHolds(client) {
+    const key = keyOf(client.name);
+    if (!key || !this.friendHolds.has(key)) return 0;
+    this.sweepFriendHolds();
+    const holds = this.friendHolds.get(key);
+    if (!holds) return 0;
+
+    const kept = [];
+    for (const hold of holds) {
+      if (hold.kind === 'ask') {
+        // No `from` id: the asker may not be here, and inventing one would
+        // give the receiving client an id to answer to that means somebody
+        // else's connection. The name is what an answer travels by anyway.
+        const asker = this.byName(keyOf(hold.name));
+        this.send(client, 'mmo.friend_ask',
+          { from: asker ? asker.id : undefined, name: hold.name });
+        kept.push(hold);
+      } else if (hold.kind === 'answer') {
+        this.send(client, 'mmo.friend_answer',
+          { name: hold.name, accept: hold.accept === true });
+        this.friendHeld -= 1;
+      } else {
+        this.send(client, 'mmo.friend_remove', { name: hold.name });
+        this.friendHeld -= 1;
+      }
+    }
+    if (kept.length) this.friendHolds.set(key, kept);
+    else this.friendHolds.delete(key);
+    return holds.length;
   }
 
   // ------- roster
@@ -1020,6 +1298,9 @@ class Relay {
       lastRanks: -Infinity,
       // last mid-session character change
       lastSprite: -Infinity,
+      // gated on the chat interval too: a friend ask is a modal on somebody
+      // else's screen, so it is rationed like the other things that are
+      lastFriendAsk: -Infinity,
       points: RANK_START,
       // until a hello says otherwise, nobody is scored: `ranked` is decided
       // in admit(), where the name is claimed
@@ -1170,6 +1451,12 @@ class Relay {
     this.broadcast('mmo.join', { player: presenceOf(client) }, client.id);
     this.log.info(`+ ${safe(client.name)} (${client.id}) -- ` +
       `${this.players} online`);
+    // Anything this hub has been holding for the name they walked in under: a
+    // friend ask nobody was here to answer, an answer to one of theirs, a
+    // friendship somebody ended while they were away. After the welcome,
+    // because a box needs a client that knows who it is; after the broadcast,
+    // so nothing sits between the arrival and the rest of the game hearing it.
+    this.flushFriendHolds(client);
     this.noteRosterChange();
   }
 
@@ -1977,4 +2264,7 @@ class Relay {
 // PROTOCOL is exported so the suites speak the current dialect by naming it
 // rather than by carrying a hardcoded number that has to be found and edited
 // in six places every time it moves.
-module.exports = { Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE };
+module.exports = {
+  Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE,
+  FRIEND_HOLD_MS, FRIEND_HOLD_PER_NAME, FRIEND_HOLD_MAX,
+};

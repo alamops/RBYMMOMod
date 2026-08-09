@@ -36,6 +36,11 @@ local PAD = 3                       -- plate margin around the text
 local INSET = 6                     -- gap between the plate and the corner
 local ROW_GAP = 2                   -- air between stacked rows
 
+-- What a line is drawn in when it did not ask for anything else.  A table
+-- rather than three arguments so the "did this entry name a colour" test below
+-- is one field read on the hot path.
+local WHITE = { 1, 1, 1 }
+
 function M.new(ctx)
   return setmetatable({ ctx = ctx, queue = {} }, M)
 end
@@ -45,9 +50,16 @@ end
 -- Oldest first, which is the order they are drawn and the order they
 -- expire.  An overflowing stack drops from the front: the line the player
 -- has not read yet is the newest one, so it is the oldest that can go.
-function M:push(text)
+--
+-- `color` is optional and almost always absent.  White is what a notification
+-- is; a colour is reserved for the one class of line that is *about somebody
+-- the player chose* -- a friend arriving, drawn in the same blue their
+-- nameplate is (Config.FRIEND_BLUE) -- so the corner keeps meaning one thing
+-- and the exception keeps meaning something.  A caller passing nothing gets
+-- exactly the toast it always got.
+function M:push(text, color)
   if type(text) ~= "string" or text == "" then return nil end
-  local entry = { text = text, age = 0 }
+  local entry = { text = text, age = 0, color = color }
   self.queue[#self.queue + 1] = entry
   while #self.queue > Config.TOAST_MAX do table.remove(self.queue, 1) end
   return entry
@@ -74,7 +86,7 @@ function M:clear() self.queue = {} end
 function M:list()
   local out = {}
   for index, entry in ipairs(self.queue) do
-    out[index] = { text = entry.text, age = entry.age }
+    out[index] = { text = entry.text, age = entry.age, color = entry.color }
   end
   return out
 end
@@ -126,6 +138,22 @@ end
 function M.partLine(name)
   if type(name) ~= "string" then return nil end
   return ("%s left the server"):format(name)
+end
+
+-- The colour an arrival is drawn in.
+--
+-- The same sentence either way -- a friend arriving is still somebody joining
+-- the server, and rewording it would make the two look like different events
+-- -- and the only difference is the blue.  That is the whole design: on a busy
+-- hub the corner is a stream of names, and the one thing a player wants out of
+-- it at a glance is "was that anybody I know".  A second sentence would have
+-- to be read; a colour does not.
+--
+-- nil for everybody else, which push() reads as "the ordinary white", so the
+-- caller needs no branch of its own.
+function M.joinColor(isFriend)
+  if isFriend then return Config.FRIEND_BLUE end
+  return nil
 end
 
 -- One party event as a sentence.
@@ -424,11 +452,15 @@ function M:draw(viewport)
   -- than as one plate with a ragged line in it.
   local y = gameY + INSET
   for _, entry in ipairs(self.queue) do
+    -- White unless the line said otherwise, and every row of a wrapped entry
+    -- takes the same colour: a sentence that changed shade half way through
+    -- would read as two notifications.
+    local tint = type(entry.color) == "table" and entry.color or WHITE
     for _, row in ipairs(wrap(font, entry.text, maxWidth)) do
       love.graphics.setColor(0, 0, 0, 0.65)
       love.graphics.rectangle("fill", x, y,
         font:getWidth(row) + PAD * 2, rowH)
-      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.setColor(tint[1] or 1, tint[2] or 1, tint[3] or 1, 1)
       love.graphics.print(row, x + PAD, y + PAD)
       last.drawn = last.drawn + 1
       last.lines = last.lines or {}

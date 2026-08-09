@@ -164,6 +164,58 @@ of you already in one — because a button whose usual answer is *no* is worse
 than no button. Either of you leaving ends it for both; at two people there
 is no party left to continue. So does either of you disconnecting.
 
+### 🫱 FRIENDS — THE PEOPLE WHO ARE STILL THERE TOMORROW
+A party is who you're travelling with **right now**, and it ends with the
+connection. Friends are the other thing: a list that's still there next week,
+that carries people who **aren't online**, and that both of you agreed to.
+
+Walk up, press **A**, and `ADD FRIEND` sits second on the menu — under
+`PROFILE`, because that row says who this trainer *is* and this one says who
+they are **to you**. Everything below it is something you'd *do* with them.
+
+<p align="center">
+  <img src="docs/screenshots/friends-list.png" width="300" alt="The FRIENDS list: HOSTY, PALLET TOWN">
+  <img src="docs/screenshots/players-friend-mark.png" width="300" alt="The PLAYERS list with a hollow arrow in front of a friend's nickname">
+</p>
+
+They have to say yes. A yes/no box opens on their screen — but **never over a
+battle or a trade**. It waits in their game until they're out of it, because
+the hub is holding the ask and nothing is lost by asking a minute later.
+
+**And it survives them logging off.** If they quit with the box still up, the
+hub keeps the ask and puts it in front of them the *next time they connect* —
+tomorrow, next week. The answer waits the same way if you've gone offline by
+the time they press YES. Nothing is dropped just because you weren't both
+online at the same moment.
+
+Then a `FRIENDS` row appears on the MMO menu, directly under `PLAYERS` — the
+same question with the half of the answer a roster structurally can't give:
+
+- **everyone you've agreed with**, whether or not they're on;
+- **online first** — those are the only rows that lead anywhere — and the
+  **newest friend first** inside each group, so the person you just added is
+  the row you land on;
+- their location, or `PARTY` / `BUSY` / `ONLINE`, or plainly **`OFFLINE`**;
+- press **A** and you get the same menu walking up to them opens. An absent
+  friend still offers `UNFRIEND`.
+
+Two things you don't have to open a menu for. A friend's **nameplate in the
+world is blue**, and the corner line when they **arrive** is the same blue —
+same sentence everybody else's arrival gets, because on a busy hub "was that
+anybody I know" is the one question a stream of names should answer without
+being read. Your party member stays green: the marker you need to pick them
+out of a crowd isn't the one to give up. And the `PLAYERS` list puts a `▷` in
+front of a friend's nickname, because being somebody's friend is true at the
+same time as `PARTY`, `BUSY` and wherever they're standing.
+
+A friendship is **a pair of trainer names on one hub** — the same identity the
+ranking claims — kept in your own copy's `rby_mmo_friends.json`, filed under
+the hub *and* the name you play it as, so two people sharing a machine keep two
+lists. It's client-side on purpose: a friends table on the hub would work on a
+dedicated server and lose everything on a game hosted from inside somebody's
+copy, which has no disk to keep one on. `UNFRIEND` takes it off **both** sides,
+so the two lists can't quietly disagree.
+
 ### 💬 TALK TRASH ON A GAME BOY KEYBOARD
 Four scopes, composed on the vanilla naming grid:
 
@@ -564,11 +616,11 @@ Same card, same badges, a different trainer on it — `NIRE` on the left,
 If someone picks a character your ROM doesn't have, they show up as RED on
 your screen rather than not at all. That covers the artists' characters too,
 for anyone playing with an older copy of the mod — though only one new enough
-to still speak the same protocol. The wire has moved twice since: the mid-game
-character change took it to 7 at `0.8.0`, and the party notifications took it
-to 8 at `0.10.0`. Copies from either side of one of those refuse each other at
-the door and say which version each of them is. **Update the hub and the mod
-together.**
+to still speak the same protocol. The wire has moved a few times since: the
+mid-game character change took it to 7 at `0.8.0`, the party notifications took
+it to 8 at `0.10.0`, and friends took it to 10 at `0.11.0`. Copies from either
+side of one of those refuse each other at the door and say which version each
+of them is. **Update the hub and the mod together.**
 
 ### 🪪 CHECK THEIR CARD
 Walk up, press **A**, and **PROFILE** sits at the top of the menu — their
@@ -629,6 +681,7 @@ behind it.
 | `CHARACTER` | not in a game, or connected | change who you look like, right now — in a game it sits under `RANK` and everyone sees it |
 | `ADDRESS` | hosting | your address again — for when someone asks *again* |
 | `PLAYERS` | connected | who's on and **where** — `n/limit` if you're hosting |
+| `FRIENDS` | connected | everyone you've agreed with on **this** hub, online ones first, the rest marked `OFFLINE` |
 | `CHAT` / `SAY` | connected | the log and sending |
 | `PARTY` | connected | your party: members, party chat, and leaving it |
 | `MY PROFILE` | connected | your own trainer card, as everyone else sees it |
@@ -649,9 +702,12 @@ Leaving isn't quitting. Your save, your world, your party: untouched. The
 game just carries on without the other people in it.
 
 Pressing **A** at another trainer opens a second, smaller box —
-`PROFILE` / `INVITE` / `TRADE` / `BATTLE` / `WHISPER` — about that player.
-`INVITE` is there only while a party could be formed: it disappears once
-either of you is in one, and comes back when that party ends.
+`PROFILE` / `ADD FRIEND` / `INVITE` / `TRADE` / `BATTLE` / `WHISPER` — about
+that player. `INVITE` is there only while a party could be formed: it
+disappears once either of you is in one, and comes back when that party ends.
+`ADD FRIEND` is always there in one state or the other — it reads `UNFRIEND`
+once they're on your list — because whether somebody will *say yes* is a fact
+about a human, and not one a menu can look up.
 
 `PARTY` leads to a menu of its own once you're in one:
 
@@ -1199,7 +1255,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `0.10.0` and it ships flagged `experimental` on purpose. The full list
+It's `0.11.0` and it ships flagged `experimental` on purpose. The full list
 lives in `mod.card` under `differences.known`. The ones that'll actually bite
 you:
 

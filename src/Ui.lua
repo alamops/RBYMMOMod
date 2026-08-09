@@ -33,6 +33,7 @@ local SCREEN = {
   CHATLOG  = "RbyMmoChatLog",
   PARTY    = "RbyMmoParty",
   MEMBERS  = "RbyMmoPartyList",
+  FRIENDS  = "RbyMmoFriends",
   SCOPE    = "RbyMmoScope",
   COMPOSE  = "RbyMmoCompose",
   PICK     = "RbyMmoPick",
@@ -720,11 +721,28 @@ M.ROSTER_LAYOUT = {
   gap = ROSTER_GAP, min = ROSTER_PLACE_MIN,
 }
 
+-- How many glyphs a string draws as.
+--
+-- Bytes and glyphs were the same thing on this row until a friend's nickname
+-- started carrying a three-byte mark in front of it (M.FRIEND_MARK): `#label`
+-- then over-counts it by two and steals two characters from the place name
+-- beside it.  Continuation bytes are 10xxxxxx and nothing else is, so counting
+-- the bytes that are *not* one counts whole sequences -- and for the ASCII a
+-- Wire-sanitised name is made of, it is exactly `#name` as before.
+local function glyphCount(text)
+  local n = 0
+  for index = 1, #text do
+    local byte = text:byte(index)
+    if byte < 0x80 or byte >= 0xC0 then n = n + 1 end
+  end
+  return n
+end
+
 -- How much of a place name fits beside a name, in glyphs.  Pure, for the
 -- same reason M.nameRoom is: a headless suite has no frame to read the
 -- answer off.
 function M.placeRoom(name)
-  local width = 8 * #tostring(name or "")
+  local width = 8 * glyphCount(tostring(name or ""))
   return math.max(math.floor(
     (ROSTER_RIGHT - ROSTER_LABEL_X - width - ROSTER_GAP) / 8), 0)
 end
@@ -759,12 +777,66 @@ end
 
 -- The right-hand column for a player who is neither in your party nor busy:
 -- where they are, trimmed to the room their name left.
-local function placeColumn(game, player)
+--
+-- Measured against the *label as drawn*, not against the bare name: a friend's
+-- row carries a mark in front of their nickname (see M.FRIEND_MARK), and a
+-- place sized to the name alone would be one glyph too wide and run into it.
+local function placeColumn(game, player, label)
   local place = Places.name(game, player.map)
   if not place then return nil end
-  local room = M.placeRoom(player.name)
+  local room = M.placeRoom(label or player.name)
   if room < ROSTER_PLACE_MIN then return nil end
   return clipPlace(place, room)
+end
+
+-- ------- the mark that says "you two agreed to this"
+--
+-- A friend's row on the PLAYERS list needs to say so, and the right-hand
+-- column is already spoken for -- PARTY, BUSY, or where they are -- while
+-- being somebody's friend is true at the same time as all three.
+--
+-- **In front of the nickname, and not in the cursor's own column.**  The
+-- cursor column is where markOwnCharacters puts the CHARACTER list's mark,
+-- and it is free -- it costs the row no width at all -- so it was tried here
+-- first.  It is wrong for *this* list, for a reason that only shows up on a
+-- small hub: a mark sharing that cell has to yield on the row the cursor is
+-- on, because two triangles in one 8px cell read as a rubbed-out cursor.  The
+-- CHARACTER list has 38 rows, so something is always marked.  PLAYERS on a
+-- two-player game has **one** row, the cursor opens on it, and the indicator
+-- is then never drawn at all -- an indicator that disappears exactly when you
+-- look at the row is not one.
+--
+-- So it goes in the label, and the place name pays a glyph for it.  That is
+-- the trade this row already makes: the place spends whatever the nickname
+-- leaves (M.placeRoom), and a name one character longer costs it the same
+-- glyph today -- PALLET TOWN already draws as PALLET TOW beside any
+-- six-character trainer name.  The mark moves that boundary by one; it does
+-- not introduce a kind of trimming the row was not already doing.
+--
+-- `▷` and not `▶`, and not `*`.  The font is extracted from the ROM and has no
+-- asterisk at all: Font.draw silently draws nothing for a character it cannot
+-- map while Font.width still advances eight pixels, which is a blank column
+-- that reads as a layout bug (src/Overlay.lua's party marker has the whole
+-- story).  Of the arrows the charmap does carry, the filled one already means
+-- "the person I am travelling with" over a head in the world, so the hollow
+-- one -- the same shape, one step less emphatic -- is what the weaker standing
+-- relationship gets.  On the selected row the two sit side by side as `▶▷`,
+-- and that is legible precisely because they differ in fill: what took an
+-- unread marker off the CHAT row was a *second filled* cursor, not a hollow
+-- mark beside one.  The engine uses this same glyph as its own non-cursor
+-- marker (Theme.cursorHollow).
+--
+-- **Three bytes of UTF-8**, like the party marker, so anything measuring it
+-- for the screen has to count glyphs and not bytes -- which is why placeRoom
+-- above is handed the label rather than the name.
+M.FRIEND_MARK = "\226\150\183"   -- U+25B7 WHITE RIGHT-POINTING TRIANGLE
+
+-- What a roster row is titled: their nickname, with the mark when they are on
+-- this hub's friends list.  Pure, and exported, so the suite can assert the
+-- mark without building a screen -- the same reason M.placeRoom is.
+function M.rosterLabel(name, isFriend)
+  if isFriend then return M.FRIEND_MARK .. tostring(name) end
+  return tostring(name)
 end
 
 function M.new(ctx)
@@ -1036,6 +1108,20 @@ function M:install()
         -- like a second cursor sitting on a row the cursor was not on.
         -- The label is plain now; unread is still counted on Chat for
         -- anything that wants it, it just no longer decorates this row.
+        -- Directly under PLAYERS, because it is the same question with the
+        -- other half of the answer: that row is everybody who happens to be
+        -- on right now, this one is everybody you chose -- including the ones
+        -- who are not here, which is the part PLAYERS structurally cannot
+        -- show.
+        --
+        -- Inside `connected` and not beside CHARACTER, because a friends list
+        -- is a fact about one hub: offline there is no hub to have one on, and
+        -- a row that opened an empty screen would be a row that lied about
+        -- having lost them.
+        items[#items + 1] = {
+          label = "FRIENDS",
+          onSelect = function() mod.ui.push(game, SCREEN.FRIENDS) end,
+        }
         items[#items + 1] = {
           label = "CHAT",
           onSelect = function() mod.ui.push(game, SCREEN.CHATLOG) end,
@@ -2166,6 +2252,81 @@ function M:install()
     })
   end })
 
+  -- ------- your friends on this hub
+
+  -- The other half of PLAYERS.  That screen answers "who is on right now" and
+  -- structurally cannot answer the question people actually have about the
+  -- people they know -- which is whether they are on at all -- because a
+  -- roster is built from connections and an absent friend has none.
+  --
+  -- So this list comes off disk (src/Friends.lua), carries everybody, and says
+  -- OFFLINE against the ones who are not here.  Two orderings, and both earn
+  -- their place: online first, because a friend who is here is the only row
+  -- that leads anywhere -- pressing A on them opens the same menu walking up
+  -- to them does -- and newest first inside each group, because the friend you
+  -- just made is the row you should land on rather than scroll to.  The rule
+  -- itself lives in Friends:sorted, where the suite can state it without a
+  -- screen.
+  screens:register(SCREEN.FRIENDS, { new = function(game)
+    local friends = ctx.friends
+    local rows = friends and friends:sorted(ctx.roster) or {}
+    if #rows == 0 then
+      -- Not a dead end, the way the empty PARTY screen is not one: the
+      -- sentence says how a friendship starts and then hands over the list to
+      -- start one from.
+      return mod.ui.TextBox.new(game,
+        "No friends yet.\nPick a player to\nadd one.", function()
+          mod.ui.push(game, SCREEN.ROSTER)
+        end)
+    end
+
+    local items = {}
+    for _, row in ipairs(rows) do
+      local player = row.player
+      local right
+      if not player then
+        -- The one column value that is about the row rather than about where
+        -- somebody is standing, and the reason the screen exists.
+        right = "OFFLINE"
+      elseif ctx.party:isPartner(player.id) then
+        right = "PARTY"
+      elseif player.busy then
+        right = "BUSY"
+      else
+        -- Where they are, exactly as the PLAYERS row says it -- and ONLINE
+        -- when there is no cell to name, which is a player sitting in a menu
+        -- or a battle.  PLAYERS leaves that blank; here it must not, because a
+        -- blank column on a list whose other rows say OFFLINE reads as a third
+        -- state nobody can name.
+        right = placeColumn(game, player, row.name) or "ONLINE"
+      end
+      items[#items + 1] = {
+        label = row.name,
+        right = right,
+        value = row.name,
+        playerId = player and player.id or nil,
+      }
+    end
+
+    return mod.ui.ListMenu.new(game, "FRIENDS", items, {
+      pageJump = true,
+      onChoose = function(item, menu)
+        menu:close()
+        -- The same menu the overworld and PLAYERS open, which is the whole
+        -- point of the row: what you can do with somebody does not depend on
+        -- which list you found them in.  Offline they are named rather than
+        -- pointed at -- there is no connection to address -- and ACTIONS
+        -- offers the one command that still means something.
+        mod.ui.push(game, SCREEN.ACTIONS, {
+          playerId = item.playerId,
+          friendName = item.value,
+          onCancel = function() mod.ui.push(game, SCREEN.FRIENDS) end,
+        })
+      end,
+      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+    })
+  end })
+
   -- ------- who is online
 
   screens:register(SCREEN.ROSTER, { new = function(game)
@@ -2183,16 +2344,24 @@ function M:install()
       -- the question HERE could not, which is where the rest of them went.
       -- A player with no map at all is in a battle or a menu; the column
       -- stays blank for them, exactly as it did before.
+      --
+      -- Being a friend is orthogonal to all three -- it is true while they
+      -- are in your party, while they are busy and while they are three maps
+      -- away -- so it goes in front of the nickname instead of competing for
+      -- the column.  M.FRIEND_MARK's note is the argument for the glyph, and
+      -- for why it is not in the cursor column where it would be free.
+      local label = M.rosterLabel(player.name,
+                                  ctx.friends and ctx.friends:isFriend(player.name))
       local right
       if ctx.party:isPartner(player.id) then
         right = "PARTY"
       elseif player.busy then
         right = "BUSY"
       else
-        right = placeColumn(game, player)
+        right = placeColumn(game, player, label)
       end
       items[#items + 1] = {
-        label = player.name,
+        label = label,
         right = right,
         value = player.id,
       }
@@ -2216,11 +2385,81 @@ function M:install()
     })
   end })
 
+  -- ------- the two friend rows, shared by both shapes of the ACTIONS menu
+
+  -- ADD FRIEND / UNFRIEND, and not ADD FRIEND / REMOVE FRIEND.
+  --
+  -- Menu sizes its box to the widest label it is given (src/ui/Menu.lua) and
+  -- nudges it left to keep it on a 20-tile screen, so a thirteen-glyph row
+  -- would grow this box from fifteen tiles to sixteen and slide it four tiles
+  -- from the right edge -- over the two characters the menu is about, which is
+  -- exactly what its geometry note says not to do.  At eight glyphs UNFRIEND
+  -- is shorter than PARTY BATTLE, so the box the player sees is the box they
+  -- have always seen.  It is also the pair the SERVERS menu already uses
+  -- (FAVORITE / UNFAVORITE), so the shape of "this row undoes itself" is one
+  -- shape in this mod rather than two.
+  local ADD_FRIEND = "ADD FRIEND"
+  local UNFRIEND = "UNFRIEND"
+
+  -- Asked before it happens, and the question names them.
+  --
+  -- Unlike every other row here, this one cannot be undone by pressing it
+  -- again: getting back on somebody's list means asking them, and waiting for
+  -- a human to answer.  So both mis-presses are made free the way DELETE on a
+  -- server row is -- defaultNo puts the cursor on NO and CONFIRM's B is a no
+  -- as well -- and a no lands back where the player was rather than on a menu
+  -- they did not ask for.
+  local function unfriend(game, name, reopen)
+    self:confirm(game, ("Remove %s from\nyour friends?"):format(name),
+      function(yes)
+        if not yes then return reopen() end
+        if ctx.friends then ctx.friends:remove(name) end
+        mod.ui.push(game, SCREEN.TEXT, {
+          text = ("%s is no longer\nyour friend."):format(name),
+          onDone = reopen,
+        })
+      end, { defaultNo = true })
+  end
+
+  -- The whole menu for a friend who is not on this hub right now.
+  --
+  -- One row, because one row is all that means anything: there is no card to
+  -- open (their profile arrives with their presence and they have none), and
+  -- nobody to trade, battle or whisper.  Offered rather than refused, though
+  -- -- FRIENDS lists absent people on purpose, so pressing A on one of them
+  -- has to arrive somewhere, and "tidy up a list" is a thing a player does
+  -- precisely when the person is not around to be asked again.
+  local function offlineFriendMenu(game, name, onCancel)
+    local function reopen()
+      mod.ui.push(game, SCREEN.ACTIONS,
+        { friendName = name, onCancel = onCancel })
+    end
+    local items = {
+      { label = UNFRIEND, onSelect = function() unfriend(game, name, reopen) end },
+    }
+    return mod.ui.Menu.new(game, items, {
+      tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
+      onCancel = onCancel,
+    })
+  end
+
   -- ------- what you can do with one of them
 
   screens:register(SCREEN.ACTIONS, { new = function(game, opts)
-    local player = ctx.roster:get(opts and opts.playerId)
+    opts = opts or {}
+    local friends = ctx.friends
+    local player = ctx.roster:get(opts.playerId)
     if not player then
+      -- A friend who is simply not here is not the same failure as somebody
+      -- who went offline between two frames, and must not be told as one:
+      -- FRIENDS lists people who are away *on purpose*, so pressing A on one
+      -- of them has to land somewhere rather than on a sentence about bad
+      -- luck.  The one command that still means anything is offered, and the
+      -- rest are absent because there is nobody there to trade with.
+      local away = opts.friendName
+      if away and friends and friends:isFriend(away) then
+        return offlineFriendMenu(game, away, opts.onCancel)
+      end
       return mod.ui.TextBox.new(game, "They just went\noffline.")
     end
 
@@ -2231,6 +2470,24 @@ function M:install()
     -- PROFILE first: knowing who you are looking at should come before
     -- deciding to trade with them
     local items = { { label = "PROFILE", profile = true } }
+
+    -- ...and the friend row second, above everything you might *do* with
+    -- them, because it is the other question about who they are: PROFILE says
+    -- who this trainer is, this says who they are to you.  Everything below is
+    -- an activity.
+    --
+    -- Always offered, in one state or the other, which is deliberately unlike
+    -- INVITE.  INVITE vanishes when a party could not be formed because the
+    -- menu can *see* that from the presence; there is no equivalent here --
+    -- whether they will say yes is a fact about a human -- so the row that
+    -- would have to disappear is one that never could.  The label says which
+    -- way it goes, the way END GAME / LEAVE and FAVORITE / UNFAVORITE do.
+    local isFriend = friends and friends:isFriend(player.name) or false
+    items[#items + 1] = {
+      label = isFriend and UNFRIEND or ADD_FRIEND,
+      friend = true,
+      unfriend = isFriend,
+    }
 
     -- INVITE appears only when a party could actually be formed -- neither
     -- of you already in one. Offered-then-refused is the failure this
@@ -2274,16 +2531,29 @@ function M:install()
     items[#items + 1] = { label = "WHISPER" }
 
     local reopen = function()
-      mod.ui.push(game, SCREEN.ACTIONS,
-        { playerId = player.id, onCancel = opts and opts.onCancel })
+      mod.ui.push(game, SCREEN.ACTIONS, {
+        playerId = player.id, friendName = opts.friendName,
+        onCancel = opts.onCancel,
+      })
     end
     for _, item in ipairs(items) do
       local kind, wantsProfile, wantsInvite = item.kind, item.profile, item.invite
       local wantsJoin, wantsParty = item.join, item.party
+      local wantsFriend, wantsUnfriend = item.friend, item.unfriend
       item.onSelect = function()
         if wantsProfile then
           mod.ui.push(game, SCREEN.PROFILE,
             { playerId = player.id, onCancel = reopen })
+        elseif wantsFriend then
+          -- Reopened either way, so the row the player just pressed reads the
+          -- other way round when they get back -- the same thing FAVORITE
+          -- does, and the reason the ask says its piece in a box rather than
+          -- silently.
+          if wantsUnfriend then
+            unfriend(game, player.name, reopen)
+          elseif friends then
+            friends:ask(player)
+          end
         elseif wantsInvite then
           ctx.party:invite(player)
         elseif wantsJoin then

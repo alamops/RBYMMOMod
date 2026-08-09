@@ -622,6 +622,121 @@ return function(game)
       check(false, "could not open PROFILE")
     end
 
+    -- ------- 4a. ADD FRIEND, from the same menu walking up opens
+    --
+    -- The half of the friends feature no headless suite can reach: the real
+    -- menu, the real yes/no box on the other machine, and the real list
+    -- screen afterwards. The protocol is pinned with fake peers in
+    -- tests/rby_mmo_test.lua; what this proves is that the rows exist, that
+    -- pressing them reaches a human on the other side, and that the answer
+    -- comes back into a list the player can open.
+    check(has("ADD FRIEND"), "the interact menu offers ADD FRIEND")
+    check(not has("UNFRIEND"), "and not both halves of the same row")
+    if H.selectLabel(game, "ADD FRIEND") then
+      -- Menu pops itself before running a row, so what is on screen now is
+      -- the "Asked HOSTY to be friends." box rather than the menu.
+      --
+      -- Closed with closeToOverworld rather than one tap: a single A on a box
+      -- still printing advances the text instead of dismissing it, and the
+      -- box that stays up then swallows the START press below -- which is
+      -- exactly how the first run of this leg lost its MMO menu.
+      U.wait(30)
+      H.closeToOverworld(game)
+      H.signal("guest_asked_friend")
+      H.await(game, "host_answered_friend")
+
+      local landed = H.waitSeconds(game, function()
+        local rows = exports.friends and exports.friends() or {}
+        return #rows == 1 and rows[1].name == "HOSTY"
+      end, 45, "the answer to reach this side")
+      check(landed, "agreeing on the other machine writes the friendship here")
+
+      -- ...and the two screens it shows up on.
+      H.closeToOverworld(game)
+      if H.openMmo(game) then
+        U.wait(20)
+        local mmoLabels = H.menuLabels(game)
+        local sawFriends = false
+        for _, label in ipairs(mmoLabels) do
+          if label == "FRIENDS" then sawFriends = true end
+        end
+        log("connected MMO menu:", table.concat(mmoLabels, ","))
+        check(sawFriends, "the connected MMO menu carries a FRIENDS row")
+
+        if sawFriends and H.selectLabel(game, "FRIENDS") then
+          U.wait(30)
+          local list = H.top(game)
+          local row = list and list.items and list.items[1]
+          check(row ~= nil and tostring(row.label) == "HOSTY",
+                "and it lists the friend just made")
+          check(row ~= nil and tostring(row.right) ~= "OFFLINE",
+                "shown as somebody who is here rather than away")
+          log("friends row:", tostring(row and row.label),
+              tostring(row and row.right))
+          U.shot(game, SHOT_DIR .. "/join-friends-list.png")
+          U.tap(game, "b")
+          U.wait(25)
+        else
+          check(false, "could not open the FRIENDS list")
+        end
+
+        -- The mark on the PLAYERS row.
+        --
+        -- Read off the label, and then the glyph checked against the real
+        -- charmap -- which is the half that only a real run can answer, and
+        -- the half the party marker's own bug was made of. Font.draw draws
+        -- nothing for a character it cannot map while Font.width still
+        -- advances eight pixels, so an unmappable mark is invisible in game
+        -- *and* invisible to every assertion that reads the string.
+        if H.selectLabel(game, "PLAYERS") then
+          U.wait(30)
+          local players = H.top(game)
+          local first = players and players.items and players.items[1]
+          local label = tostring(first and first.label)
+          log("players row:", label)
+          check(label:find("HOSTY", 1, true) ~= nil,
+                "the PLAYERS list still names the host")
+          check(label ~= "HOSTY",
+                "and marks the row now that they are a friend")
+          local missing = H.undrawable(game, label)
+          check(missing == "",
+                ("every glyph in the marked row %q is on the font sheet%s")
+                  :format(label, missing == "" and ""
+                                 or " -- missing " .. missing))
+          U.shot(game, SHOT_DIR .. "/join-players-friend-mark.png")
+        else
+          check(false, "could not open the PLAYERS list")
+        end
+      else
+        check(false, "could not open the MMO menu to check the friends list")
+      end
+
+      H.closeToOverworld(game)
+      -- Back to the interact menu, which now reads the other way round. The
+      -- player has not moved -- menus do not walk anybody -- so the same A
+      -- press that opened it the first time opens it again.
+      U.tap(game, "a")
+      U.wait(45)
+      local reopened = H.top(game)
+      local nowLabels = {}
+      for _, item in ipairs((reopened and reopened.items) or {}) do
+        nowLabels[#nowLabels + 1] = tostring(item.label)
+      end
+      log("interact menu after befriending:", table.concat(nowLabels, ","))
+      local nowUnfriend = false
+      for _, label in ipairs(nowLabels) do
+        if label == "UNFRIEND" then nowUnfriend = true end
+      end
+      check(nowUnfriend,
+            "and the row that made the friendship now offers to undo it")
+      U.shot(game, SHOT_DIR .. "/join-interact-menu-friend.png")
+      H.signal("guest_friend_checked")
+    else
+      check(false, "could not press ADD FRIEND")
+      H.signal("guest_asked_friend")
+      H.signal("guest_friend_checked")
+    end
+
     -- ------- 4b. the host changes character mid-session; watch it land here
     --
     -- The mirror of mmo_host.lua's own leg of the same name: it waits on

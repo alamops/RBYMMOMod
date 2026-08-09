@@ -618,25 +618,39 @@ return function(game)
   -- Nameplates use the bundled Rajdhani face (src/Toast.lua), not the ROM
   -- sheet, so the charmap probe below does not apply here.
 
-  -- Let the chat leg's last bubble expire before the shot.
+  -- Let the frame settle to exactly the plates that belong on it.
   --
-  -- Two things at once. The screenshot is a README image, and a bubble left
-  -- over from a previous leg floating above the nameplate makes it look like
-  -- the name is something the player said. And waiting for it is an
-  -- assertion in its own right: Config.BUBBLE_SECONDS is 5, so a plate that
-  -- has not settled to the name alone well past that is a bubble that never
-  -- expired -- which would be a leak nothing else here would notice.
+  -- This used to wait for the *one* marked name, on the reasoning that a
+  -- speech bubble left over from the chat leg would otherwise float above it
+  -- and make the nickname look like something the player said. Both halves of
+  -- that are now wrong. Bubbles are gone -- chat is a corner toast, and the
+  -- mod's own suite asserts Config.BUBBLE_SECONDS no longer exists -- and the
+  -- overlay draws this player's own plate too (drawSelfLabel), so "one name"
+  -- has been unreachable ever since. It failed on every run, and said "old
+  -- bubbles expire" about a feature that had been deleted.
+  --
+  -- What is worth waiting for is the frame being *exactly* the two plates it
+  -- should be: your party member, marked, and yourself. That is still an
+  -- assertion and not merely a pause -- a third name, or the unmarked partner
+  -- drawn beside the marked one, is a plate that should not be there.
+  local WANT = { [MARKED] = true, [ME.name] = true }
   local settled, lastSeen = false, drew
   local settleDeadline = os.time() + 20
   while os.time() < settleDeadline and not settled do
     local ov = exports.overlayState and exports.overlayState() or {}
     lastSeen = ov.names or {}
-    settled = #lastSeen == 1 and lastSeen[1] == MARKED
+    local seen = {}
+    for _, name in ipairs(lastSeen) do seen[name] = true end
+    settled = #lastSeen == 2 and seen[MARKED] and seen[ME.name]
     if not settled then U.wait(12) end
   end
-  check(settled, "the plate settles to the marked name alone -- old bubbles "
-    .. "expire (saw: "
+  check(settled, "the frame settles to exactly the two plates that belong on "
+    .. "it -- your marked party member, and yourself (saw: "
     .. (#lastSeen == 0 and "(none)" or table.concat(lastSeen, ",")) .. ")")
+  for _, name in ipairs(lastSeen) do
+    check(WANT[name] ~= nil,
+          ("no plate is drawn that should not be: %q"):format(name))
+  end
   shot("party-map")
 
   -- ------- your party member on the TOWN MAP

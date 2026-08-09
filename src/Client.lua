@@ -18,6 +18,7 @@ local Avatars = need("Avatars")
 local Chat = need("Chat")
 local Toast = need("Toast")
 local Party = need("Party")
+local Friends = need("Friends")
 local Coop = need("Coop")
 -- For one flag it owns. Required rather than reached through `coop.state`,
 -- which is an *instance* and is nil between battles -- which is exactly when
@@ -62,6 +63,21 @@ local overlay = Overlay.new(ctx)
 local toast = Toast.new(ctx)
 local sessions = Sessions.new(transport, ui)
 local party = Party.new(transport, ui, ctx.chat)
+-- The people this copy keeps between sessions, for the hub it is on. Handed
+-- the mod facade because it owns a file (and the mod.save mirror behind it),
+-- which is the one thing Party does not need.
+local friends = Friends.new(transport, ui, { mod = mod })
+-- When a friend ask has to wait. A yes/no box over a live battle, a trade or
+-- another prompt is the failure Sessions already refuses invites to avoid --
+-- and unlike an invite, a friend ask can afford to wait: the hub is holding
+-- it, so nothing is lost by asking a minute later. Wired here rather than
+-- inside Friends because "busy" is a fact about the session and the stack,
+-- which is exactly what Sessions is for and what Friends deliberately has no
+-- engine dependency to see.
+friends.busy = function(game)
+  return sessions:isBusy() or sessions.incoming ~= nil
+    or sessions:inFight(game or ctx.game)
+end
 local coop = Coop.new(transport, ui, party, ctx.roster, ctx.chat)
 -- Co-op can be mid-handoff with no screen yet (running/state set, stack
 -- still overworld). Sessions asks this so a 1v1 invite is refused there
@@ -75,6 +91,7 @@ ctx.ui = ui
 ctx.toast = toast
 ctx.sessions = sessions
 ctx.party = party
+ctx.friends = friends
 ctx.coop = coop
 ctx.server = server
 ctx.servers = servers
@@ -182,6 +199,18 @@ end
 -- below, so nothing else can rename or evict what the player collected.
 function M.servers()
   return servers
+end
+
+-- The friends store for the hub this copy is on.
+--
+-- The store itself and not a copy of its rows, for the reason M.servers hands
+-- back the store: its readers both read it and write to it (ask, remove), and
+-- two lists that could disagree would be one bug waiting for a player to
+-- reopen a menu. The screens reach it as ctx.friends; this is the same object
+-- for anything holding the Client instead -- the suite, and any caller with no
+-- ctx. Outside the mod it is the rows and not the store (mod.exports.friends).
+function M.friends()
+  return friends
 end
 
 -- Settings that the player can change from inside the game.
@@ -1288,6 +1317,12 @@ function M.disconnect()
   M.syncLook()
   sessions:endSession(nil)
   party:reset()
+  -- The list itself is on disk and stays there; what goes is the *open*
+  -- bucket, because which list is open is a fact about one connection. Leaving
+  -- it open offline would let a stale prompt answer to a hub that is no longer
+  -- listening, and would leave FRIENDS drawing one hub's people while the
+  -- player is on their way to another.
+  friends:reset()
   coop:reset()
   ctx.avatars:clear()
   ctx.roster:reset()
@@ -1561,6 +1596,19 @@ handlers[Wire.WELCOME] = function(game, msg)
   party:reset()
   party:setSelf(id)
   coop:reset()
+  -- Which friends list this session is about. It is filed under the hub and
+  -- the trainer name we joined as -- the same two halves the rank ticket is,
+  -- and for the same reason: a name is what a friendship is keyed on, and one
+  -- hub's ANN is not another's. Opened here rather than at connect because
+  -- until the welcome lands there is no proof this hub let us in at all, and a
+  -- list opened against a hub that refused us is a list nothing would ever
+  -- write to.
+  --
+  -- Before the hub's own held friend traffic can arrive, which it does
+  -- immediately after this welcome: Friends.onAsk refuses an ask with no list
+  -- open, so opening it late would silently drop the very asks that were held
+  -- for this player while they were away.
+  friends:setHub(dialled, M.playerName(game))
   -- your own rating, which cannot come from the roster: it has no entry for
   -- you, by design
   myPoints = Wire.points(msg.points)
@@ -1654,7 +1702,11 @@ handlers[Wire.JOIN] = function(_, msg)
   local presence = Wire.presence(msg.player)
   if not presence then return end
   if not ctx.roster:put(presence) then return end
-  toast:push(Toast.joinLine(presence.name))
+  -- Same sentence for everybody, and the blue is the whole difference: on a
+  -- busy hub the corner is a stream of names, and "was that anybody I know" is
+  -- the one question worth answering there without being read.
+  toast:push(Toast.joinLine(presence.name),
+             Toast.joinColor(friends:isFriend(presence.name)))
 end
 
 handlers[Wire.PART] = function(_, msg)
@@ -1750,6 +1802,14 @@ handlers[Wire.PARTY_EVENT] = function(_, msg)
   if not event then return end
   toast:push(Toast.partyLine(event))
 end
+
+-- Friends.  Three types, and the client half of each is one line, because the
+-- interesting parts are elsewhere: the hub decides whether an ask may be
+-- carried and holds it for somebody who is offline, and Friends decides
+-- whether this is a moment to ask a human anything.
+handlers[Wire.FRIEND_ASK] = function(game, msg) friends:onAsk(game, msg) end
+handlers[Wire.FRIEND_ANSWER] = function(_, msg) friends:onAnswer(msg) end
+handlers[Wire.FRIEND_REMOVE] = function(_, msg) friends:onRemoved(msg) end
 
 handlers[Wire.COOP_OFFER] = function(_, msg) coop:onOffer(msg) end
 handlers[Wire.COOP_OFFER_END] = function(_, msg) coop:onOfferEnd(msg) end
@@ -1931,6 +1991,10 @@ local function tick(game, dt)
   toast:update(dt)
   sessions:update(game, dt)
   coop:update(dt)
+  -- A friend ask that arrived mid-battle, put on screen now that the battle is
+  -- over. Two field reads on every other tick: the queue is empty on all but a
+  -- handful of them, and _drain answers on the first one.
+  friends:update(game, dt)
 
   presenceClock = presenceClock + dt
   if presenceClock >= Config.PRESENCE_INTERVAL then
@@ -2232,6 +2296,12 @@ function M.install()
   -- by opening a menu.
   mod.exports.servers = function() return servers:list() end
   mod.exports.players = function() return ctx.roster:sorted() end
+  -- The people this copy keeps on the hub it is on, newest friend first --
+  -- rows, never the store, so nothing outside this mod can add to or empty
+  -- what the player agreed to. Empty offline, because a friends list is a fact
+  -- about one hub and there is no hub to have one on. The end-to-end driver
+  -- reads it to tell "the ask was accepted" from "the box appeared".
+  mod.exports.friends = function() return friends:list() end
   -- Who you are travelling with, you included, in the order the hub listed
   -- them -- empty when you are not in a party. The end-to-end driver reads
   -- this to tell "the invite was accepted" from "the box appeared".
