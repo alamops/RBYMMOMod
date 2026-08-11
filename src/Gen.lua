@@ -52,11 +52,16 @@ function M.generation(game)
 end
 
 -- Gen 2 always writes player.money (even at 0); Gen 1 keeps save.money.
-local function moneyHost(save)
+-- `create` is only true from money.set — get must never allocate save.player.
+local function moneyHost(save, create)
   if type(save) ~= "table" then return nil end
   if save.generation == 2 then
-    save.player = save.player or {}
-    return save.player
+    if type(save.player) == "table" then return save.player end
+    if create then
+      save.player = {}
+      return save.player
+    end
+    return nil
   end
   local player = save.player
   if type(player) == "table" and player.money ~= nil then return player end
@@ -66,13 +71,13 @@ end
 M.money = {}
 
 function M.money.get(save)
-  local host = moneyHost(save)
+  local host = moneyHost(save, false)
   if not host then return 0 end
   return math.floor(tonumber(host.money) or 0)
 end
 
 function M.money.set(save, n)
-  local host = moneyHost(save)
+  local host = moneyHost(save, true)
   if not host then return end
   host.money = math.floor(tonumber(n) or 0)
 end
@@ -107,13 +112,27 @@ function M.badgeCount(game, save)
   return count
 end
 
+-- Gen 2 World exposes acceptsMenuInput; Gen 1 OverworldState does not.
+-- Used when Handshake has no game yet but an overworld is already up.
+local function bootIsGen2(game)
+  if M.generation(game) == 2 then return true end
+  local world = mod.world
+  -- Guard: headless stubs often set mod.world to a fake without :overworld.
+  local ow = world and type(world.overworld) == "function" and world:overworld() or nil
+  return ow ~= nil and type(ow.acceptsMenuInput) == "function"
+end
+
 -- True when the player is looking at the world: Gen 1's overworld-on-top,
 -- or Gen 2's empty stack with a live map (pipelineGate's free-roam case).
+-- Empty-stack free-roam is Gen 2 only — Gen 1 still requires top == overworld.
 function M.freeRoam(game, top)
   local world = mod.world
   local overworld = world and type(world.overworld) == "function" and world:overworld() or nil
   if top and overworld and top == overworld then return true end
-  if not top and overworld and overworld.map then return true end
+  if not top and overworld and overworld.map
+      and (M.generation(game) == 2 or bootIsGen2(game)) then
+    return true
+  end
   return false
 end
 
@@ -126,16 +145,6 @@ end
 
 function M.avatarName(playerId)
   return "mmo_" .. tostring(playerId)
-end
-
--- Gen 2 World exposes acceptsMenuInput; Gen 1 OverworldState does not.
--- Used when Handshake has no game yet but an overworld is already up.
-local function bootIsGen2(game)
-  if M.generation(game) == 2 then return true end
-  local world = mod.world
-  -- Guard: headless stubs often set mod.world to a fake without :overworld.
-  local ow = world and type(world.overworld) == "function" and world:overworld() or nil
-  return ow ~= nil and type(ow.acceptsMenuInput) == "function"
 end
 
 function M.spawnObjDef(player, sprite, game)

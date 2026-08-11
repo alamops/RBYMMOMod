@@ -229,7 +229,7 @@ function M:spawn(player)
   -- Gen.spawnObjDef picks STAY+range (Gen 1) or numeric STANDING_* (Gen 2);
   -- the network is still the authority either way -- never wander.
   local name = Gen.avatarName(player.id)
-  local npcId = mod.world:spawnNpc(player.map, Gen.spawnObjDef(player, sprite))
+  local npcId = mod.world:spawnNpc(player.map, Gen.spawnObjDef(player, sprite, mod.game))
   if not npcId then return nil end
 
   self.spawned[player.id] = {

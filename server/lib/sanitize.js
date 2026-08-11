@@ -997,7 +997,7 @@ function cleanBattleBag(raw, generation) {
   return out;
 }
 
-function cleanBattleParty(raw, generation) {
+function cleanBattleParty(raw, hubGeneration) {
   if (raw === null || typeof raw !== 'object') return null;
   const battle = cleanId(raw.battle);
   if (!battle) return null;
@@ -1006,14 +1006,29 @@ function cleanBattleParty(raw, generation) {
   const badges = cleanBadgeSet(raw.badges);
   if (badges) party.badges = badges;
 
-  // Optional party-level generation: stamped onto each mon when the mon itself
-  // omitted one (mirrors Wire.battleParty). Present-but-unreadable refuses.
+  // Hub generation (second arg) is authoritative when provided: stamp
+  // party.generation from it, and refuse when an explicit party/mon
+  // generation disagrees (mirrors Wire.battleParty).
+  const hubGen = hubGeneration !== undefined && hubGeneration !== null
+    ? cleanInt(hubGeneration, 1, 2)
+    : null;
+  if (hubGeneration !== undefined && hubGeneration !== null && hubGen === null) {
+    return null;
+  }
+
   let partyGen = cleanInt(raw.generation, 1, 2);
   if (raw.generation !== undefined && raw.generation !== null && partyGen === null) {
     return null;
   }
-  if (partyGen === null) partyGen = cleanInt(generation, 1, 2);
-  if (partyGen !== null) party.generation = partyGen;
+  if (hubGen !== null && partyGen !== null && partyGen !== hubGen) {
+    return null;
+  }
+  if (hubGen !== null) {
+    party.generation = hubGen;
+    partyGen = hubGen;
+  } else if (partyGen !== null) {
+    party.generation = partyGen;
+  }
 
   if (raw.side !== undefined && raw.side !== null) {
     const side = cleanSide(raw.side);
@@ -1025,6 +1040,12 @@ function cleanBattleParty(raw, generation) {
   if (raw.mons.length < 1 || raw.mons.length > BATTLE_MON_MAX) return null;
   const mons = [];
   for (const entry of raw.mons) {
+    if (entry !== null && typeof entry === 'object'
+        && entry.generation !== undefined && entry.generation !== null) {
+      const monGen = cleanInt(entry.generation, 1, 2);
+      if (monGen === null) return null;
+      if (hubGen !== null && monGen !== hubGen) return null;
+    }
     let sheet = entry;
     if (partyGen !== null && entry !== null && typeof entry === 'object'
         && (entry.generation === undefined || entry.generation === null)) {
@@ -1036,7 +1057,7 @@ function cleanBattleParty(raw, generation) {
   }
   party.mons = mons;
 
-  const bag = cleanBattleBag(raw.bag, partyGen !== null ? partyGen : generation);
+  const bag = cleanBattleBag(raw.bag, partyGen !== null ? partyGen : hubGen);
   if (!bag) return null;
   party.bag = bag;
 

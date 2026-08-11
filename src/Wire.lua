@@ -19,9 +19,21 @@
 
 local need = ...
 local Config = need("Config")
-local Effects = need("BattleSim/Effects")
 
 local M = {}
+
+-- Effects for bag proofs: Gen1 default, Gen2 when hub generation is 2.
+-- Lazy so a Gen1-only load never pulls BattleSim2.
+local effectsByGen = {}
+local function effectsFor(generation)
+  local key = (generation == 2) and 2 or 1
+  local cached = effectsByGen[key]
+  if cached then return cached end
+  local path = key == 2 and "BattleSim2/Effects" or "BattleSim/Effects"
+  local Effects = need(path)
+  effectsByGen[key] = Effects
+  return Effects
+end
 
 -- client -> hub
 M.HELLO         = "mmo.hello"
@@ -1383,10 +1395,14 @@ end
 -- `bag` is optional: absent means an empty sheet (PROTOCOL 15). Present-but
 -- unreadable refuses the party — a half-parsed bag would let the hub prove the
 -- wrong inventory.
-function M.battleBag(raw)
+--
+-- Optional `generation` (1|2) selects BattleSim vs BattleSim2 Effects for
+-- itemEffect; omitted → Gen 1 (compat).
+function M.battleBag(raw, generation)
   if raw == nil then return {} end
   if type(raw) ~= "table" then return nil end
 
+  local Effects = effectsFor(generation)
   local out, seen = {}, {}
   -- Array form: [{id, count}, ...]. Map form (id -> count) is also accepted so
   -- a client that already holds inventory as a dict does not have to rebuild.
@@ -1422,20 +1438,32 @@ function M.battleBag(raw)
   return out
 end
 
-function M.battleParty(raw)
+function M.battleParty(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
   if not battle then return nil end
 
   local out = { battle = battle, badges = M.badges(raw.badges) }
 
-  -- Optional party-level generation: stamped onto each mon when the mon itself
-  -- omitted one, so a Gen 2 host can tag the whole upload without repeating the
-  -- field six times. Present-but-unreadable refuses (same as side).
+  -- Hub generation (second arg) is authoritative when provided: stamp
+  -- party.generation from it, and refuse a mon/party whose explicit
+  -- generation disagrees.
+  local hubGen = nil
+  if generation ~= nil then
+    hubGen = M.int(generation, 1, 2)
+    if not hubGen then return nil end
+  end
+
   local partyGen = nil
   if raw.generation ~= nil then
     partyGen = M.int(raw.generation, 1, 2)
     if not partyGen then return nil end
+    if hubGen and partyGen ~= hubGen then return nil end
+  end
+  if hubGen then
+    out.generation = hubGen
+    partyGen = hubGen
+  elseif partyGen then
     out.generation = partyGen
   end
 
@@ -1448,6 +1476,11 @@ function M.battleParty(raw)
   local mons = {}
   for _, entry in ipairs(raw.mons) do
     if #mons >= Config.BATTLE_MON_MAX then return nil end
+    local hadExplicit = type(entry) == "table" and entry.generation ~= nil
+    if hubGen and hadExplicit then
+      local monGen = M.int(entry.generation, 1, 2)
+      if not monGen or monGen ~= hubGen then return nil end
+    end
     local sheet = entry
     if partyGen and type(entry) == "table" and entry.generation == nil then
       sheet = {}
@@ -1456,12 +1489,13 @@ function M.battleParty(raw)
     end
     local mon = M.battleMon(sheet)
     if not mon then return nil end
+    if hubGen and hadExplicit and mon.generation ~= hubGen then return nil end
     mons[#mons + 1] = mon
   end
   if #mons == 0 then return nil end
   out.mons = mons
 
-  local bag = M.battleBag(raw.bag)
+  local bag = M.battleBag(raw.bag, partyGen or hubGen)
   if not bag then return nil end
   out.bag = bag
 

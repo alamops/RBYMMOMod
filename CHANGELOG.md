@@ -6,6 +6,15 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Code-review must-fixes (gen2-compatibility).** Trade2 keeps `theirMail`
+  aligned with `theirParty` when a non-strict unpack skips a mon; Hub↔relay
+  `battleParty`/`cleanBattleParty` take hub generation (Effects twin, refuse
+  explicit generation mismatch, stamp party.generation); `Gen.freeRoam`
+  empty-stack only on Gen 2; `money.get` no longer creates `save.player`;
+  Gen2 vitamin writeback uses BattleSim2/Effects only.
+
 ### Added
 
 - **Wave 4 polish + dual-gen headless load.** `Places.name` resolves Gen 2

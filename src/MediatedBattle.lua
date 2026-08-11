@@ -697,14 +697,18 @@ end
 -- Fight-local sheet mutation is the hub's job; permanence is the client's.
 -- Only call after an `item` event with amount=1 (vitamin applied).
 function M.writebackVitamin(game, partyIndex, itemId)
-  local effect = Effects.itemEffect(itemId)
-  -- Gen 2 boot may resolve vitamins via BattleSim2 Effects (spa/spe tokens).
-  if not (effect and effect.vitaminStat) and Gen.generation(game) == 2 then
+  -- Gen 2 resolves vitamins via BattleSim2/Effects only (spa/spe tokens);
+  -- Gen 1 stays on BattleSim/Effects. Never try Gen1 Effects first on Gen2.
+  local EffectsMod = Effects
+  if Gen.generation(game) == 2 then
     local ok2, Effects2 = pcall(function() return need("BattleSim2/Effects") end)
     if ok2 and Effects2 and Effects2.itemEffect then
-      effect = Effects2.itemEffect(itemId)
+      EffectsMod = Effects2
+    else
+      return false
     end
   end
+  local effect = EffectsMod.itemEffect(itemId)
   local wireStat = effect and effect.vitaminStat
   local saveKey = wireStat and VITAMIN_SAVE_KEY[wireStat]
   if not saveKey then return false end
@@ -713,8 +717,8 @@ function M.writebackVitamin(game, partyIndex, itemId)
   if type(mon) ~= "table" then return false end
   mon.statExp = mon.statExp or {}
   local before = math.max(0, math.floor(tonumber(mon.statExp[saveKey]) or 0))
-  if before >= Effects.VITAMIN_FAIL_AT then return false end
-  local after = math.min(65535, before + Effects.VITAMIN_GAIN)
+  if before >= EffectsMod.VITAMIN_FAIL_AT then return false end
+  local after = math.min(65535, before + EffectsMod.VITAMIN_GAIN)
   mon.statExp[saveKey] = after
 
   local generation = Gen.generation(game)

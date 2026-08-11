@@ -679,20 +679,41 @@ function M.musicKind(self)
     return "wild"
   end
   local kind = self.trainer and "trainer" or "link"
-  local eng = engine
-  if eng and eng.BattleState and self.trainer then
-    -- computeMusicKind keys victories off oppClass (+ partyIndex), not the
-    -- trainer record alone — a probe without oppClass always answers "trainer".
+  if self.trainer then
+    -- Prefer the engine's computeMusicKind when the real BattleState class is
+    -- on hand. After a generation=2 headless load, Gen2Compat may have
+    -- shimmed require("src.battle.BattleState") to a facade that lacks a
+    -- working computeMusicKind — so fall back to the same victories /
+    -- rival / Lance rules BattleState uses (audio/play_battle_music.asm).
     local trainer = self.trainer
     local oppClass = trainer.oppClass or trainer.id or trainer.class
-    local probe = setmetatable({
-      kind = "trainer",
-      trainer = trainer,
-      oppClass = oppClass,
-      partyIndex = trainer.partyIndex or self.partyIndex or 1,
-    }, { __index = eng.BattleState })
-    local ok, decided = pcall(probe.computeMusicKind, probe)
-    if ok and type(decided) == "string" then kind = decided end
+    local partyIndex = trainer.partyIndex or self.partyIndex or 1
+    local eng = engine
+    local decided
+    if eng and eng.BattleState and type(eng.BattleState.computeMusicKind) == "function" then
+      local probe = setmetatable({
+        kind = "trainer",
+        trainer = trainer,
+        oppClass = oppClass,
+        partyIndex = partyIndex,
+      }, { __index = eng.BattleState })
+      local ok, result = pcall(eng.BattleState.computeMusicKind, probe)
+      if ok and type(result) == "string" then decided = result end
+    end
+    if not decided then
+      if trainer.id == "OPP_RIVAL3" then
+        decided = "final"
+      else
+        local okV, victories = pcall(require, "data.scripts.victories")
+        local reward = okV and victories
+          and oppClass
+          and victories[oppClass .. "#" .. tostring(partyIndex)]
+        if (reward and reward.badge) or trainer.id == "OPP_LANCE" then
+          decided = "gym"
+        end
+      end
+    end
+    if decided then kind = decided end
   end
   self.cachedMusicKind = kind
   return kind

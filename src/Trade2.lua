@@ -275,12 +275,18 @@ function TradeSession:handle(msg)
     self.stage = "waitParty"
     return self:partyMessage()
   elseif msg.type == "party" then
+    -- Keep theirParty and theirMail the same length: unpack mail in the same
+    -- loop as mons so a non-strict skip drops that mail index too (aligned
+    -- indices, never a silent slide of later mail onto earlier mons).
     self.theirParty = {}
-    self.theirMail = M.unpackMailList(msg.mail)
-    for _, packed in ipairs(msg.mons or {}) do
+    self.theirMail = {}
+    local mailList = M.unpackMailList(msg.mail)
+    for i, packed in ipairs(msg.mons or {}) do
       local mon, why = P.unpackMon2(self.data, packed, { strict = self.strict })
       if mon then
-        self.theirParty[#self.theirParty + 1] = mon
+        local n = #self.theirParty + 1
+        self.theirParty[n] = mon
+        self.theirMail[n] = mailList[i]
       elseif self.strict then
         self.stage = "cancelled"
         self.error = why or "the other game sent an unknown POKéMON"

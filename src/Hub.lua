@@ -2762,7 +2762,7 @@ handlers[Wire.BATTLE_PARTY] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or record.sim then return end
 
-  local party = Wire.battleParty(msg)
+  local party = Wire.battleParty(msg, self.generation)
   if not party then
     return noteDrop(self, client, "the party is not a shape we can fight with")
   end
