@@ -8,6 +8,23 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Gen2 co-op strategy split (Wave 3 T3a).** Hub-mediated co-op
+  (`coop_pvp` / `coop_npc` / `coop_wild`) opens on Gen 2 without hard-failing
+  on missing Gen1 `BattleState`/`Damage`: `CoopBattle.loadEngine` soft-loads,
+  `CoopField` / Gen1 host-sim `CoopSim` resolve are refused with a remediation
+  pointing at a Gen 2 hub (BattleSim2), and the screen replays mediated events
+  with slot fallback battlers. Party pack/unpack uses `packMon2`/`unpackMon2`.
+  `Coop.badgesOf` delegates to the MK403-safe MediatedBattle path; MoveLearnMenu
+  is capability-tested / skipped on Gen 2 (no Gen2MoveLearnMenu). Gen1 host-sim
+  CoopField path unchanged. Deferred: full Gen2 CoopField rewrite, Gen2
+  MoveLearnMenu, host-sim Damage on Gold.
+
+- **Gen2 trade over SessionNet (Wave 3 T3b).** When `Gen.generation(game)==2`,
+  `Sessions` opens `Trade2.TradeSession` (packMon2/unpackMon2, parallel party
+  `mail` array, apply into party + `pokedex.caught` + held item). Gen1 still
+  uses engine `Protocol.TradeSession`. Soft-fails with remediation if the
+  engine lacks packMon2 or Mail.
+
 - **Gen2 battle sheets on the wire + MediatedBattle upload (Wave 2 T2c).**
   `Wire.battleMon` / `server/lib/sanitize.js` accept Gen 1 `atk/def/spd/spc`
   and Gen 2 `atk/def/spe/spa/spd` (+ optional `heldItem`), preferring an

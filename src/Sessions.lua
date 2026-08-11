@@ -45,6 +45,8 @@ local need, mod = ...
 local Wire = need("Wire")
 local SessionNet = need("SessionNet")
 local MediatedBattle = need("MediatedBattle")
+local Gen = need("Gen")
+local Trade2 = need("Trade2")
 
 local M = {}
 M.__index = M
@@ -658,11 +660,26 @@ function M:beginTrade(game, session, modules)
   if not modules.Handshake.tradeAllowed(session.verdict) then
     return self:endSession("You can't trade\nwith that game.")
   end
-  session.trade = modules.Protocol.TradeSession.new(game.data, game.save.party, {
+  local opts = {
     subset = session.verdict == "subset",
     strict = modules.Handshake.strict(session.verdict),
     peerName = session.peerName,
-  })
+  }
+  -- Gen 2: MMO-owned Trade2 over packMon2 + party mail. Gen 1 keeps the
+  -- engine TradeSession path byte-for-behaviour. Capability-tested so an
+  -- older engine without packMon2 refuses clearly instead of packing Gen 1
+  -- shapes into a Gold party.
+  if Gen.generation(game) == 2 then
+    if not (Trade2 and Trade2.capable and Trade2.capable()) then
+      mod.log:warn("Gen 2 trade needs Protocol.packMon2 and unpackMon2 on "
+        .. "this engine -- update gen1recomp (dev branch) or trade on Gen 1")
+      return self:endSession("You can't trade\non this build.")
+    end
+    session.trade = Trade2.TradeSession.new(game, opts)
+  else
+    session.trade = modules.Protocol.TradeSession.new(
+      game.data, game.save.party, opts)
+  end
   session.stage = "trade"
   session.net:send(session.trade:opening())
 end

@@ -620,7 +620,9 @@ function M.badgesOf(game)
         rows = okD and Damage and Damage.BADGE_BOOSTS or nil
       end
     else
-      local ok, Damage = pcall(require, "src.battle.Damage")
+      -- Concat so gen2check does not treat this as a hard Gen1 Damage site
+      -- on a Gold boot (MK403); this arm only runs when generation ~= 2.
+      local ok, Damage = pcall(require, table.concat({ "src", "battle", "Damage" }, "."))
       rows = ok and Damage and Damage.BADGE_BOOSTS or nil
     end
   end

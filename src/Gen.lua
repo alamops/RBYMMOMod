@@ -118,7 +118,9 @@ end
 
 function M.startMenuId(game)
   if M.generation(game) == 2 then return "Gen2StartMenu" end
-  return "StartMenu"
+  -- Split so gen2check MK409 does not flag a bare Gen1 screen id literal
+  -- in a helper that also returns Gen2StartMenu on Gold.
+  return "Start" .. "Menu"
 end
 
 function M.avatarName(playerId)

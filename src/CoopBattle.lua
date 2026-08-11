@@ -61,6 +61,7 @@
 local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
+local Gen = need("Gen")
 local CoopSim = need("CoopSim")
 local CoopField = need("CoopField")
 -- The 1v1 mediated client, for its snapshots and its senders rather than for
@@ -77,17 +78,27 @@ M.__index = M
 -- stack lazily: a player who never fights a co-op battle should not drag the
 -- battle renderer in, and `modkit validate` -- which loads this file headlessly
 -- with no love and no data -- must not meet a require that throws.
-local engine, engineTried
+--
+-- **Gen 2:** Gen1 `BattleState` / `Damage` are not required. Hub-mediated co-op
+-- (Config.MEDIATED_COOP) is refereed by BattleSim2 on a Gen 2 hub; this screen
+-- only holds slots and replays `mmo.battle_event`. The Gen1 host-sim CoopField
+-- path is refused on Gen 2 rather than hard-failing the whole load (MK403).
+local engine, engineTried, gen2HostSimWarned
 
-local function loadEngine()
+local function loadEngine(game)
   if engineTried then return engine end
   engineTried = true
-  local parts, ok = {}, true
+  local parts = {}
   local function grab(key, path)
     local good, value = pcall(require, path)
-    if good then parts[key] = value else ok = false end
-    return good
+    if good then
+      parts[key] = value
+      return true
+    end
+    return false
   end
+  -- Soft-grab everything. Gen 1 `M.new` still requires the host-sim set;
+  -- Gen 2 only needs Protocol (+ Font for drawing) for mediated replay.
   grab("BattleState", "src.battle.BattleState")
   grab("Damage", "src.battle.Damage")
   grab("TurnOrder", "src.battle.TurnOrder")
@@ -103,8 +114,7 @@ local function loadEngine()
   -- back to afterwards.
   grab("Music", "src.core.Music")
   -- The move-effect pipeline and the item table. These are what turn a co-op
-  -- battle from a damage calculator into a battle, so a failure to load them
-  -- is worth the same error as a missing renderer.
+  -- battle from a damage calculator into a battle on the Gen1 host-sim path.
   grab("EffectRegistry", "src.battle.EffectRegistry")
   grab("ItemEffects", "src.inventory.ItemEffects")
   grab("Experience", "src.battle.Experience")
@@ -114,12 +124,25 @@ local function loadEngine()
   -- flash. Grabbed like the rest so a missing one is one warning, not a crash
   -- in the middle of somebody's turn.
   grab("AnimPlayer", "src.battle.AnimPlayer")
-  if not ok then
-    mod.log:error("the engine's battle modules are unavailable, so 2-on-2 "
-      .. "battles cannot be drawn; everything else about co-op still works -- "
+
+  local generation = Gen.generation(game)
+  if not parts.Protocol then
+    mod.log:error("the engine's link modules are unavailable, so 2-on-2 "
+      .. "battles cannot open; everything else about co-op still works -- "
       .. "report this with the game version")
     engine = false
     return engine
+  end
+  -- Completeness for Gen1 host-sim is enforced in M.new, not here: the first
+  -- loadEngine call may happen without a game (generation defaults to 1) on a
+  -- Gen 2 boot, and must not cache a hard failure over missing BattleState.
+  if generation == 2 and not (parts.BattleState and parts.Damage)
+      and not gen2HostSimWarned then
+    gen2HostSimWarned = true
+    mod.log:warn("Gen 2 co-op uses hub-mediated BattleSim2 (no Gen1 "
+      .. "BattleState/Damage host-sim); connect to a Gen 2 hub so mediated "
+      .. "coop_pvp / coop_npc / coop_wild can be refereed -- local CoopField "
+      .. "resolve is disabled on this boot")
   end
   -- Optional SFX (Ball_Poof, entrance cries). Missing Sound must not fail the
   -- whole load — headless / no-audio builds still fight without it.
@@ -142,19 +165,36 @@ M.loadEngine = loadEngine
 -- every client is looking at the same numbers; using the live save on the local
 -- side and a rebuilt copy on the remote one would give the host slightly
 -- different stats from everyone else's replay.
-function M.packParty(party)
-  local eng = loadEngine()
+--
+-- Gen 2 uses packMon2 / unpackMon2 (held item, SpA/SpD shape); Gen 1 keeps
+-- Protocol.packParty / unpackMon.
+function M.packParty(party, game)
+  local eng = loadEngine(game)
   if not (eng and eng.Protocol) then return nil end
+  if Gen.generation(game) == 2 and type(eng.Protocol.packMon2) == "function" then
+    local out = {}
+    for _, mon in ipairs(party or {}) do
+      local ok, packed = pcall(eng.Protocol.packMon2, mon)
+      if not (ok and packed) then return nil end
+      out[#out + 1] = packed
+    end
+    if #out == 0 then return nil end
+    return out
+  end
   local ok, packed = pcall(eng.Protocol.packParty, party)
   return ok and packed or nil
 end
 
 function M.unpackParty(game, packed)
-  local eng = loadEngine()
+  local eng = loadEngine(game)
   if not (eng and eng.Protocol) then return nil end
   local out = {}
+  local unpack = eng.Protocol.unpackMon
+  if Gen.generation(game) == 2 and type(eng.Protocol.unpackMon2) == "function" then
+    unpack = eng.Protocol.unpackMon2
+  end
   for _, entry in ipairs(packed or {}) do
-    local ok, mon = pcall(eng.Protocol.unpackMon, game.data, entry, {})
+    local ok, mon = pcall(unpack, game.data, entry, {})
     if not (ok and mon) then return nil end
     out[#out + 1] = mon
   end
@@ -173,7 +213,7 @@ end
 -- Fixed DVs and the same stat recompute, so a co-op battle against a trainer
 -- meets exactly the monsters a solo battle against them would.
 function M.trainerParty(game, oppClass, partyIndex)
-  local eng = loadEngine()
+  local eng = loadEngine(game)
   if not (eng and eng.Pokemon and eng.Stats) then return nil end
   local record = (game.data.trainers or {})[oppClass]
   local specs = record and record.parties and record.parties[partyIndex or 1]
@@ -237,7 +277,7 @@ end
 -- species cannot be resolved or Pokemon.new fails.
 function M.monFromCaughtSheet(game, sheet)
   if type(sheet) ~= "table" then return nil end
-  local eng = loadEngine()
+  local eng = loadEngine(game)
   if not (eng and eng.Pokemon and eng.Stats) then return nil end
   local species = speciesKeyFromSheet(game, sheet)
   if not species then return nil end
@@ -349,8 +389,33 @@ end
 --   wildParty     optional prebuilt battleMon sheets for the host's side-"b"
 --                 upload; else snapshotMons of wildCatchMon
 function M.new(game, opts)
-  local eng = loadEngine()
+  local eng = loadEngine(game)
   if not eng then return nil, "2-on-2 battles need the engine's battle modules." end
+
+  local generation = Gen.generation(game)
+  -- Gen 2: never attach Gen1 CoopField / Damage host-sim. Hub-mediated modes
+  -- replay BattleSim2 events; CoopSim holds slots with fallback battlers.
+  local gen2Mediated = generation == 2
+  if not gen2Mediated then
+    local need = {
+      "BattleState", "Damage", "TurnOrder", "Status", "TypeChart",
+      "Font", "HudTiles", "TrainerAI", "Music", "EffectRegistry",
+      "ItemEffects", "Experience", "Pokemon", "Stats",
+    }
+    for _, key in ipairs(need) do
+      if not eng[key] then
+        return nil, "2-on-2 battles need the engine's battle modules."
+      end
+    end
+  elseif not eng.Protocol then
+    return nil, "2-on-2 battles need the engine's link modules."
+  elseif not (eng.BattleState and eng.Damage) and not gen2HostSimWarned then
+    gen2HostSimWarned = true
+    mod.log:warn("Gen 2 co-op uses hub-mediated BattleSim2 (no Gen1 "
+      .. "BattleState/Damage host-sim); connect to a Gen 2 hub so mediated "
+      .. "coop_pvp / coop_npc / coop_wild can be refereed -- local CoopField "
+      .. "resolve is disabled on this boot")
+  end
 
   local ruleset
   do
@@ -358,6 +423,7 @@ function M.new(game, opts)
     local selected = game.save and game.save.options and game.save.options.ruleset
     ruleset = (rulesets and selected and rulesets[selected])
       or (rulesets and rulesets.gen1_faithful)
+      or (rulesets and rulesets.gen2_faithful)
       or {}
   end
 
@@ -410,6 +476,8 @@ function M.new(game, opts)
     medGaps = 0,       -- events that arrived out of order
     awaitingReconnect = false,
     reconnectSent = false,
+    -- Gen 2: shell is replay-only; host-sim resolve must not run.
+    gen2Mediated = gen2Mediated or nil,
     phase = "intro",
     moveIndex = 1,
     targetIndex = 1,
@@ -437,13 +505,6 @@ function M.new(game, opts)
     return a
   end
 
-  -- The adapter first, because the sim resolves moves through it. It reads the
-  -- sim's slot list live rather than a copy, so a send-out the sim does is
-  -- visible to the next move the engine resolves.
-  local slots = {}
-  local field = CoopField.new(
-    { BattleState = eng.BattleState, rng = rng }, game, slots, ruleset)
-
   -- Back sprites for the local seat's side (bottom after viewPos), front for
   -- the far side. Must be known before CoopSim.new runs sendOut, or the first
   -- field would face the wrong way until a switch rebuilt it.
@@ -453,19 +514,35 @@ function M.new(game, opts)
     if mineSpec and mineSpec.side == "b" then facingSide = "b" end
   end
 
+  local field
+  if not gen2Mediated then
+    -- The adapter first, because the sim resolves moves through it. It reads the
+    -- sim's slot list live rather than a copy, so a send-out the sim does is
+    -- visible to the next move the engine resolves.
+    local slots = {}
+    field = CoopField.new(
+      { BattleState = eng.BattleState, rng = rng, game = game },
+      game, slots, ruleset)
+    if not field then
+      return nil, "2-on-2 battles need Gen1 BattleState for host-sim."
+    end
+  end
+
   self.sim = CoopSim.new({
     data = game.data,
     ruleset = ruleset,
-    damage = eng.Damage,
+    game = game,
+    damage = (not gen2Mediated) and eng.Damage or nil,
     status = eng.Status,
     turnOrder = eng.TurnOrder,
-    makeBattler = eng.BattleState.makeBattler,
+    makeBattler = (not gen2Mediated) and eng.BattleState
+      and eng.BattleState.makeBattler or nil,
     field = field,
-    drain = CoopField.drain,
-    itemUse = eng.ItemEffects and eng.ItemEffects.use,
+    drain = field and CoopField.drain or nil,
+    itemUse = (not gen2Mediated) and eng.ItemEffects and eng.ItemEffects.use or nil,
     experience = eng.Experience,
     movesAt = eng.Experience and eng.Experience.movesLearnedAt,
-    trainerAI = eng.TrainerAI,
+    trainerAI = (not gen2Mediated) and eng.TrainerAI or nil,
     -- The trainer the NPC side came from, and how many class actions it may
     -- spend. wAICount in the original; without it every gym leader would
     -- potion on every turn it was allowed to.
@@ -480,9 +557,13 @@ function M.new(game, opts)
     rng = rng,
   }, opts.slots)
 
+  if not self.sim then
+    return nil, "2-on-2 battles could not build the field."
+  end
+
   -- The field was built before the sim had slots; point it at the real list
   -- now that there is one.
-  field.slots = self.sim.slots
+  if field then field.slots = self.sim.slots end
 
   if eng.TypeChart and eng.TypeChart.load then
     pcall(eng.TypeChart.load, game.data)

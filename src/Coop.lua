@@ -53,6 +53,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Gen = need("Gen")
 local CoopBattle = need("CoopBattle")
+local Mediated = need("MediatedBattle")
 
 local M = {}
 M.__index = M
@@ -1453,7 +1454,7 @@ function M:begin(game, plan)
     ready = false,
   }
 
-  local packed = CoopBattle.packParty(game and game.save and game.save.party)
+  local packed = CoopBattle.packParty(game and game.save and game.save.party, game)
   if not packed then
     -- The engine's link modules are what pack a party, and without them there
     -- is no battle to have. Said out loud, and the trainer handed back, rather
@@ -1502,25 +1503,10 @@ end
 
 -- The badges this player has earned, as a list for the wire.
 --
--- Read off the badge *rows* rather than off a list written down here, so a mod
--- that adds a badge -- or retunes which ones boost what -- is covered without
--- this file knowing about it. Only the rows can matter: `makeBattler` walks
--- them and asks the bag, so a badge nothing boosts is a badge nothing reads.
+-- Same dual-gen path as MediatedBattle.badgesOf (MK403): never hard-require
+-- Gen 1 `src.battle.Damage` on Gold.
 function M.badgesOf(game)
-  local data = game and game.data
-  local inventory = game and game.save and game.save.inventory
-  if not (data and inventory) then return nil end
-  local rows = data.constants and data.constants.badgeBoosts
-  if not rows then
-    local ok, Damage = pcall(require, "src.battle.Damage")
-    rows = ok and Damage and Damage.BADGE_BOOSTS or nil
-  end
-  local out = {}
-  for _, row in ipairs(rows or {}) do
-    if row.badge and inventory[row.badge] then out[#out + 1] = row.badge end
-  end
-  if #out == 0 then return nil end
-  return out
+  return Mediated.badgesOf(game)
 end
 
 -- Give up on a battle that cannot be assembled, without breaking rule 2: the
@@ -1827,10 +1813,10 @@ function M:npcSide(game, plan)
   -- the shape it was bounded for.
   local out = {}
   out[#out + 1] = { side = "b", owner = nil, name = label,
-                    party = CoopBattle.packParty(left) }
+                    party = CoopBattle.packParty(left, game) }
   if #right > 0 then
     out[#out + 1] = { side = "b", owner = nil, name = label,
-                      party = CoopBattle.packParty(right) }
+                      party = CoopBattle.packParty(right, game) }
   end
   for _, entry in ipairs(out) do
     if not entry.party then return nil end
@@ -2143,9 +2129,24 @@ end
 --
 -- The engine's own MoveLearnMenu is pushed rather than a copy of it: it is the
 -- screen that already knows how to show four moves and their PP, and how to
--- refuse politely.
+-- refuse politely. Gen 2 has no MoveLearnMenu twin yet -- skip with a warn
+-- rather than pushing a Gen1-only screen id.
 function M:offerForgets(game, toLearn)
   if not (game and toLearn and #toLearn > 0) then return false end
+  if Gen.generation(game) == 2 then
+    local screens = mod.content and mod.content.screens
+    local has = false
+    if screens and screens.get then
+      local ok, record = pcall(function() return screens:get("MoveLearnMenu") end)
+      has = ok and record ~= nil
+    end
+    if not has then
+      mod.log:warn("Gen 2 has no MoveLearnMenu for co-op level-ups (no "
+        .. "Gen2MoveLearnMenu); moves from this battle were not offered -- "
+        .. "learn them by levelling again outside co-op")
+      return false
+    end
+  end
   local pending = {}
   for i, entry in ipairs(toLearn) do pending[i] = entry end
 
