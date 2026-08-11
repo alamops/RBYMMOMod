@@ -1,0 +1,354 @@
+{
+  "version": 1,
+  "generation": 2,
+  "notes": "Synthetic Gen2 mechanic vectors for Lua/JS BattleSim2 parity. No ROM data: no species, move, ability or item names — only integer ids and type indices. All arithmetic is integer. DAMAGE (engine src/battle/gen2/Damage.lua): no 255-stat clamp. levelTerm = floor(2L/5)+2 (crit does NOT double L). base = floor(floor(levelTerm*power*attack/defense)/50). Then optional item boost, crit x2, then min(d,997)+2. STAB floor(d*15/10). Type effectiveness is a list of percents applied one at a time as floor(d*pct/100) with a non-immune floor of 1. Variation last: when modified>=2, damage=max(1,min(999,floor(d*roll/100))) for roll in 85..100. Physical reads attack/atk; special (physical:false) reads spa (legacy spc) vs spd (legacy spc). CRIT: ladder 1-in-{15,8,4,3,2,2,2} by critical level 0..6; isCrit when roll==0 for roll in 0..chance-1. Level += focusEnergy(+1), highCritMove(+2), scopeLens(+1), speciesItemBonus(+2), capped at 6. ACCURACY: percent domain; accuracy 0 or alwaysHits never misses; else value=stage-scaled accuracy clamped 1..100, hit = roll < value for roll in 0..99 (no Gen1 1/256 miss). STATUS: freeze thaws when roll%5==0 (1/5); burn/poison residual max(1,floor(maxHp/8)); burn halves physical attack; toxic max(1,floor(maxHp*counter/16)); paralysis stops when roll%4==0 (1/4); sleep wakes and can move when the counter hits 0.",
+  "damage": [
+    {
+      "id": "dmg_physical_basic",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": false,
+        "roll": 100
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 17,
+        "modified": 19,
+        "physical": true,
+        "statClamped": false,
+        "immune": false,
+        "damage": 19
+      }
+    },
+    {
+      "id": "dmg_special_spa_vs_spd",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "spa": 120,
+        "spd": 80,
+        "physical": false,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": false,
+        "roll": 100
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 26,
+        "modified": 28,
+        "attack": 120,
+        "defense": 80,
+        "physical": false,
+        "immune": false,
+        "damage": 28
+      }
+    },
+    {
+      "id": "dmg_special_legacy_spc",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "spc": 100,
+        "physical": false,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": false,
+        "roll": 100
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 17,
+        "modified": 19,
+        "attack": 100,
+        "defense": 100,
+        "physical": false,
+        "immune": false,
+        "damage": 19
+      }
+    },
+    {
+      "id": "dmg_stab_150",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": true,
+        "typeEffect": [100],
+        "crit": false,
+        "roll": 100
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 17,
+        "modified": 28,
+        "immune": false,
+        "damage": 28
+      }
+    },
+    {
+      "id": "dmg_super_effective_200",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [200],
+        "crit": false,
+        "roll": 100
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 17,
+        "modified": 38,
+        "immune": false,
+        "damage": 38
+      }
+    },
+    {
+      "id": "dmg_not_very_effective_50",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [50],
+        "crit": false,
+        "roll": 100
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 17,
+        "modified": 9,
+        "immune": false,
+        "damage": 9
+      }
+    },
+    {
+      "id": "dmg_crit_x2",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": true,
+        "roll": 100
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 17,
+        "modified": 36,
+        "crit": true,
+        "immune": false,
+        "damage": 36
+      }
+    },
+    {
+      "id": "dmg_variation_85",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": false,
+        "roll": 85
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 17,
+        "modified": 19,
+        "minDamage": 16,
+        "maxDamage": 19,
+        "damage": 16
+      }
+    },
+    {
+      "id": "dmg_variation_band",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": false,
+        "roll": null
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 17,
+        "modified": 19,
+        "minDamage": 16,
+        "maxDamage": 19,
+        "damage": null
+      }
+    },
+    {
+      "id": "dmg_cap_999",
+      "in": {
+        "level": 100,
+        "power": 250,
+        "attack": 255,
+        "defense": 1,
+        "physical": true,
+        "stab": true,
+        "typeEffect": [200],
+        "crit": true,
+        "roll": 100
+      },
+      "out": {
+        "levelTerm": 42,
+        "base": 53550,
+        "immune": false,
+        "damage": 999,
+        "maxDamage": 999
+      }
+    },
+    {
+      "id": "dmg_immune_0",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [0],
+        "crit": false,
+        "roll": 100
+      },
+      "out": {
+        "modified": 0,
+        "immune": true,
+        "damage": 0,
+        "minDamage": 0,
+        "maxDamage": 0
+      }
+    }
+  ],
+  "accuracy": [
+    {
+      "id": "acc_100_hits",
+      "in": { "accuracy": 100, "roll": 99, "accuracyStage": 0, "evasionStage": 0 },
+      "out": { "hit": true, "effectiveAccuracy": 100 }
+    },
+    {
+      "id": "acc_100_no_gen1_quirk",
+      "in": { "accuracy": 100, "roll": 0, "accuracyStage": 0, "evasionStage": 0 },
+      "out": { "hit": true, "effectiveAccuracy": 100 }
+    },
+    {
+      "id": "acc_miss",
+      "in": { "accuracy": 50, "roll": 50, "accuracyStage": 0, "evasionStage": 0 },
+      "out": { "hit": false, "effectiveAccuracy": 50 }
+    },
+    {
+      "id": "acc_always_hits",
+      "in": { "accuracy": 100, "roll": 99, "alwaysHits": true },
+      "out": { "hit": true, "effectiveAccuracy": null }
+    },
+    {
+      "id": "acc_zero_never_misses",
+      "in": { "accuracy": 0, "roll": 99 },
+      "out": { "hit": true, "effectiveAccuracy": null }
+    }
+  ],
+  "crit": [
+    {
+      "id": "crit_level0_hit",
+      "in": { "criticalLevel": 0, "roll": 0 },
+      "out": { "isCrit": true, "chance": 15, "level": 0 }
+    },
+    {
+      "id": "crit_level0_miss",
+      "in": { "criticalLevel": 0, "roll": 1 },
+      "out": { "isCrit": false, "chance": 15, "level": 0 }
+    },
+    {
+      "id": "crit_focus_energy_level1",
+      "in": { "criticalLevel": 0, "roll": 0, "focusEnergy": true },
+      "out": { "isCrit": true, "chance": 8, "level": 1 }
+    },
+    {
+      "id": "crit_high_crit_move_level2",
+      "in": { "criticalLevel": 0, "roll": 0, "highCritMove": true },
+      "out": { "isCrit": true, "chance": 4, "level": 2 }
+    },
+    {
+      "id": "crit_ladder_level3",
+      "in": { "criticalLevel": 3, "roll": 2 },
+      "out": { "isCrit": false, "chance": 3, "level": 3 }
+    }
+  ],
+  "status": [
+    {
+      "id": "status_freeze_thaw",
+      "in": { "status": "freeze", "roll": 0 },
+      "out": { "thawed": true, "canMove": true }
+    },
+    {
+      "id": "status_freeze_solid",
+      "in": { "status": "freeze", "roll": 1 },
+      "out": { "thawed": false, "canMove": false }
+    },
+    {
+      "id": "status_freeze_thaw_roll5",
+      "in": { "status": "freeze", "roll": 5 },
+      "out": { "thawed": true, "canMove": true }
+    },
+    {
+      "id": "status_poison_eighth",
+      "in": { "status": "poison", "maxHp": 80 },
+      "out": { "residualDamage": 10 }
+    },
+    {
+      "id": "status_burn_eighth",
+      "in": { "status": "burn", "maxHp": 80 },
+      "out": { "residualDamage": 10 }
+    },
+    {
+      "id": "status_burn_halves_atk",
+      "in": { "status": "burn", "attack": 100 },
+      "out": { "attack": 50 }
+    },
+    {
+      "id": "status_paralysis_stop",
+      "in": { "status": "paralysis", "roll": 0 },
+      "out": { "fullyParalyzed": true, "canMove": false }
+    },
+    {
+      "id": "status_paralysis_act",
+      "in": { "status": "paralysis", "roll": 1 },
+      "out": { "fullyParalyzed": false, "canMove": true }
+    },
+    {
+      "id": "status_sleep_wakes_and_acts",
+      "in": { "status": "sleep", "turnsRemaining": 1 },
+      "out": { "turnsRemaining": 0, "wokeUp": true, "canMove": true }
+    },
+    {
+      "id": "status_toxic_ramp",
+      "in": { "status": "toxic", "maxHp": 80, "toxicCounter": 3 },
+      "out": { "residualDamage": 15 }
+    }
+  ]
+}

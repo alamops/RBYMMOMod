@@ -8,6 +8,13 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Gen2 BattleSim2 formulas + Turn scaffold (Wave 2 T2a).** New pure
+  `src/BattleSim2/` sibling (SpA/SpD damage, crit ladder, 85–100% variance,
+  damage cap 999, freeze 1/5 thaw, burn/poison /8) with
+  `tests/fixtures/battle_sim2_vectors.json` and
+  `tests/battle_sim2_vectors.lua`. Gen1 `src/BattleSim/` untouched. Wire /
+  MediatedBattle / Node twin are follow-up (T2b–T2d).
+
 - **Hub `--generation` / config `generation` (Wave 1 T1b).** CLI and config
   lock a hub to Gen 1 or Gen 2 (`--generation 1|2`, `generation:` in
   `config.json`, `RBY_MMO_GENERATION`). Compat default is 1 when omitted, with
