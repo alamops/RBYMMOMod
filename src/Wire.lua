@@ -75,13 +75,16 @@ M.RANKS         = "mmo.ranks"
 -- same one PARTY_INVITE has: the hub is what turns "I am waiting" into "your
 -- friend is waiting", because only the hub knows who is in the party.
 --
--- COOP_WAIT carries { battle, label, map [, mode] } -- the fight this player is
--- standing in front of.  Optional `mode` is only `"coop_wild"` (Party vs Wild
--- auto-join); absent means the trainer WAIT/JOIN invite path.  COOP_CANCEL
--- withdraws it with an optional reason (`alone` / `left` / `timeout` from the
--- waiter; `no` from the partner who declined the invite). Naming which offer
--- is unnecessary: there is only ever one per player.  COOP_JOIN answers
--- somebody else's offer with { to, battle }.
+-- COOP_WAIT carries { battle, label, map [, mode] [, npcId] [, event] } -- the
+-- fight this player is standing in front of.  Optional `mode` is only
+-- `"coop_wild"` (Party vs Wild auto-join); absent means the trainer WAIT/JOIN
+-- invite path.  Optional `npcId` / `event` (PROTOCOL 19) are the waiter's
+-- overworld NPC id and event-flag id from engine `checkpointOrigin`, so an
+-- invite joiner with no local BattleState can still mark the trainer beaten.
+-- COOP_CANCEL withdraws it with an optional reason (`alone` / `left` /
+-- `timeout` from the waiter; `no` from the partner who declined the invite).
+-- Naming which offer is unnecessary: there is only ever one per player.
+-- COOP_JOIN answers somebody else's offer with { to, battle }.
 --
 -- A partner decline (`COOP_CANCEL` reason `no`) is forwarded to the waiter as
 -- `COOP_DECLINE`, so they can leave the wait and fight the trainer alone.
@@ -511,6 +514,20 @@ function M.mapId(value)
   return value:sub(1, 64)
 end
 
+-- Overworld NPC id (`ROUTE_3_obj_2`) or an event-flag id from a trainer
+-- header. Same shape as M.id (opaque engine key), and the same 40-cap: map
+-- object ids and EVENT_* names fit, and borrowing mapId's 64 would let a
+-- peer send a key longer than defeatedTrainers ever uses.
+function M.npcId(value)
+  return M.id(value)
+end
+
+-- Event-flag id off a trainer header / checkpointOrigin.event. Same sanitiser
+-- as npcId on purpose -- both are save.flags / defeatedTrainers keys.
+function M.eventFlag(value)
+  return M.id(value)
+end
+
 -- Is this relay payload a shape we are willing to pass on?
 --
 -- The hub never reads a relay payload -- it is the engine's link vocabulary
@@ -825,7 +842,9 @@ end
 -- trainer -- so it degrades to nil and the screen says "a battle" instead of
 -- refusing the whole offer over a cosmetic field.  Optional `mode` is only
 -- `coop_wild` (auto-join Party vs Wild); unknown values are dropped, not a
--- refuse of the whole offer.
+-- refuse of the whole offer.  Optional `npcId` / `event` (PROTOCOL 19) name the
+-- waiter's overworld trainer so a menu joiner can finish the fight off without
+-- a local BattleState; absent on older hubs and on coop_wild.
 function M.coopOffer(raw)
   if type(raw) ~= "table" then return nil end
   local from = M.id(raw.from)
@@ -839,6 +858,8 @@ function M.coopOffer(raw)
     label = M.label(raw.label),
     map = M.mapId(raw.map),
     mode = M.coopOfferMode(raw.mode),
+    npcId = M.npcId(raw.npcId),
+    event = M.eventFlag(raw.event),
   }
 end
 

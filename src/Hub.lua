@@ -2460,11 +2460,17 @@ handlers[Wire.COOP_WAIT] = function(self, client, msg)
   -- Optional mode: only coop_wild is stored (Party vs Wild auto-join). Absent
   -- keeps the trainer WAIT/JOIN invite path.
   local mode = Wire.coopOfferMode(msg.mode)
+  -- Optional overworld npcId / event (PROTOCOL 19): invite joiners need the
+  -- waiter's concrete trainer to mark beaten. Dropped when absent or wild.
+  local npcId = (not mode) and Wire.npcId(msg.npcId) or nil
+  local event = (not mode) and Wire.eventFlag(msg.event) or nil
   client.coopOffer = {
     battle = battle,
     label = Wire.label(msg.label),
     map = Wire.mapId(msg.map),
     mode = mode,
+    npcId = npcId,
+    event = event,
     -- Stamped so the sweep can expire it on the same clock the partner's
     -- client already uses; without one the two ends disagreed about whether
     -- the fight was still joinable.
@@ -2478,6 +2484,8 @@ handlers[Wire.COOP_WAIT] = function(self, client, msg)
     map = client.coopOffer.map,
   }
   if mode then offer.mode = mode end
+  if npcId then offer.npcId = npcId end
+  if event then offer.event = event end
   send(partner, Wire.COOP_OFFER, offer)
 end
 
@@ -2564,9 +2572,15 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   -- walked into the encounter -- the joiner usually has too, but a join taken
   -- from the ACTIONS menu never went near them. `mode` rides so the joiner's
   -- CoopBattle opens as coop_wild without re-deriving from a cleared offer.
-  send(client, Wire.COOP_BATTLE,
-    { id = id, side = "a", allies = members, battle = battle, host = host.id,
-      mode = mode })
+  -- `npcId` / `event` (PROTOCOL 19) ride so a menu joiner can finish the
+  -- trainer off without a local BattleState -- never fuzzy-matched by class.
+  local battleMsg = {
+    id = id, side = "a", allies = members, battle = battle, host = host.id,
+    mode = mode,
+  }
+  if offer.npcId then battleMsg.npcId = offer.npcId end
+  if offer.event then battleMsg.event = offer.event end
+  send(client, Wire.COOP_BATTLE, battleMsg)
 end
 
 -- Battle traffic, fanned out to everyone else in the same battle.

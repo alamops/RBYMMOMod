@@ -110,8 +110,15 @@ M.MOD_ID = "rby_mmo"
 -- field -- either way the partner never joins the grass fight, or both clients
 -- grant (or neither does) because ownership was never named. Refusal that
 -- names both versions is the only sentence either player can act on.
+--
+-- 19 is co-op invite-joiner rematch cleanup: optional overworld `npcId` and
+-- event-flag id on `mmo.coop_wait` / `mmo.coop_offer` / `mmo.coop_battle`,
+-- taken from the waiter's engine `checkpointOrigin`. A protocol-18 hub drops
+-- those fields, so an ACTIONS-menu joiner (no local BattleState) never learns
+-- which trainer to mark beaten or which flag to set. Refusal that names both
+-- versions is the only sentence either player can act on.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 18
+M.PROTOCOL = 19
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

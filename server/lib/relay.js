@@ -108,10 +108,14 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // protocol-17 hub's closed BATTLE_MODES set drops `coop_wild` opens, and its
 // outcome cleaner strips an unknown `catcher` -- either way the partner never
 // joins the grass fight, or both clients grant (or neither) because ownership
-// was never named. The rule every bump follows is unchanged: bump whenever a
-// client can send something a hub silently ignores. Kept in step with
+// was never named. 19 is co-op invite-joiner rematch cleanup: optional
+// overworld `npcId` and event-flag id on mmo.coop_wait / mmo.coop_offer /
+// mmo.coop_battle (from the waiter's checkpointOrigin). A protocol-18 hub
+// drops those fields, so a menu joiner never learns which trainer to mark
+// beaten. The rule every bump follows is unchanged: bump whenever a client
+// can send something a hub silently ignores. Kept in step with
 // Config.PROTOCOL on the mod side.
-const PROTOCOL = 18;
+const PROTOCOL = 19;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -756,11 +760,17 @@ handlers['mmo.coop_wait'] = (relay, client, msg) => {
   // Optional mode: only coop_wild is stored (Party vs Wild auto-join). Absent
   // keeps the trainer WAIT/JOIN invite path.
   const mode = cleanCoopOfferMode(msg.mode);
+  // Optional overworld npcId / event (PROTOCOL 19): invite joiners need the
+  // waiter's concrete trainer to mark beaten. Dropped when absent or wild.
+  const npcId = !mode ? cleanId(msg.npcId) : null;
+  const event = !mode ? cleanId(msg.event) : null;
   // startedAt so the sweep can expire it on the same clock the partner's
   // client already uses. Mirrors src/Hub.lua.
-  client.coopOffer = { battle, label, map, mode, startedAt: relay.now() };
+  client.coopOffer = { battle, label, map, mode, npcId, event, startedAt: relay.now() };
   const offer = { from: client.id, name: client.name, battle, label, map };
   if (mode) offer.mode = mode;
+  if (npcId) offer.npcId = npcId;
+  if (event) offer.event = event;
   relay.send(partner, 'mmo.coop_offer', offer);
 };
 
@@ -843,8 +853,14 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // encounter -- the joiner usually has too, but a join taken from the ACTIONS
   // menu never went near them. `mode` rides so the joiner's CoopBattle opens
   // as coop_wild without re-deriving from an offer that is already cleared.
-  relay.send(client, 'mmo.coop_battle',
-    { id: battleId, side: 'a', allies: members, battle, host: host.id, mode });
+  // `npcId` / `event` (PROTOCOL 19) ride so a menu joiner can finish the
+  // trainer off without a local BattleState -- never fuzzy-matched by class.
+  const battleMsg = {
+    id: battleId, side: 'a', allies: members, battle, host: host.id, mode,
+  };
+  if (offer.npcId) battleMsg.npcId = offer.npcId;
+  if (offer.event) battleMsg.event = offer.event;
+  relay.send(client, 'mmo.coop_battle', battleMsg);
 };
 
 // Battle traffic, fanned out to everyone else in the same battle. The payload

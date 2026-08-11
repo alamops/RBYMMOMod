@@ -122,6 +122,38 @@ function M.battleKey(mapId, ...)
   return key:sub(1, Config.COOP_KEY_MAX)
 end
 
+-- Overworld NPC id and event-flag id from the engine battle the waiter (or a
+-- walk-in joiner) is standing in front of.
+--
+-- Taken from `checkpointOrigin` rather than rebuilt from class+lead: Route 3
+-- has multiple Bug Catchers, and fuzzy-matching by class would mark the wrong
+-- one beaten. Nil is a real answer for wild fights and for fixtures that never
+-- stamped an origin.
+function M.originOf(engine)
+  local origin = engine and engine.checkpointOrigin
+  if type(origin) ~= "table" then return nil, nil end
+  local npcId = Wire.npcId(origin.npcId)
+  local event = Wire.eventFlag(origin.event)
+  return npcId, event
+end
+
+-- The live overworld under (or beneath) whatever screen is up, for synthetic
+-- post-battle work when there is no buried BattleState to hand an onFinish to.
+function M.overworldOf(game)
+  local world = mod.world
+  if world and type(world.overworld) == "function" then
+    local ok, ow = pcall(world.overworld, world)
+    if ok and ow then return ow end
+  end
+  local states = game and game.stack and game.stack.states
+  if type(states) ~= "table" then return nil end
+  for i = #states, 1, -1 do
+    local s = states[i]
+    if s and type(s.afterBattle) == "function" then return s end
+  end
+  return nil
+end
+
 -- ------- state
 
 function M:reset()
@@ -533,6 +565,10 @@ function M:onTrainerBattle(game, state, mapId)
   local lead = state.enemyParty and state.enemyParty[1]
   local key = M.battleKey(mapId, state.oppClass,
     lead and lead.species, lead and lead.level)
+  -- Concrete overworld id (and event flag) from the engine's checkpoint --
+  -- what an invite joiner needs on the wire so they never fuzzy-match a Bug
+  -- Catcher by class. See M.originOf / PROTOCOL 19.
+  local npcId, event = M.originOf(state)
 
   self.encounter = {
     battle = key,
@@ -541,6 +577,8 @@ function M:onTrainerBattle(game, state, mapId)
     -- The engine's own battle, held so the co-op path can hand it its result.
     engine = state,
     game = game,
+    npcId = npcId,
+    event = event,
   }
 
   if self:offerMatches(key) then
@@ -768,13 +806,20 @@ function M:beginWait()
     -- its result to.
     engine = encounter.engine,
     game = encounter.game,
+    npcId = encounter.npcId,
+    event = encounter.event,
     clock = 0,
   }
-  self.transport:send(Wire.COOP_WAIT, {
+  local payload = {
     battle = encounter.battle,
     label = encounter.label,
     map = encounter.map,
-  })
+  }
+  -- PROTOCOL 19: concrete overworld id for invite joiners. Only on the
+  -- trainer path -- wild waits have no defeatedTrainers key to set.
+  if encounter.npcId then payload.npcId = encounter.npcId end
+  if encounter.event then payload.event = encounter.event end
+  self.transport:send(Wire.COOP_WAIT, payload)
   local name = self.party:partnerName() or "your friend"
   if self:partnerOnMap(encounter.map) then
     self:note(("Waiting for %s at %s."):format(name, fightName(encounter.label)))
@@ -1315,6 +1360,8 @@ function M:onJoined(game, msg)
     engine = waiting.engine,
     trainer = waiting.trainer,
     wildCatchMon = waiting.wildCatchMon or M.wildMonOf(waiting.engine),
+    npcId = waiting.npcId,
+    event = waiting.event,
     allies = self.party:list(),
     -- The player who was waiting is the one standing at the encounter, so they
     -- are the one that simulates.
@@ -1365,6 +1412,45 @@ function M:joinedEngine(game, msg, foes)
   return encounter.engine
 end
 
+-- A buried trainer BattleState this client still owes a result to, when
+-- `joinedEngine` did not already name one.
+--
+-- Walk-in joiners normally adopt via the encounter key in onBattle. Under
+-- mediation the stack can still be carrying that fight when startBattle
+-- finally runs, and clearing the encounter without unwinding it is exactly
+-- the "immediate FIGHT UI" rematch. Keyed on the waiter's concrete `npcId`
+-- from the wire (PROTOCOL 19) -- never by trainer class alone (Route 3 Bug
+-- Catchers). Returns nil for party fights, wild, and menu joiners who never
+-- walked into anything.
+function M:claimBuriedEngine(game, plan)
+  if not plan or plan.foes then return nil end
+  if plan.kind == "wild" or plan.mode == "coop_wild" then return nil end
+  -- Same rules as joinedEngine, re-asked at startBattle: the encounter may
+  -- still name a live stack state even when onBattle ran before it settled.
+  local encounter = self.encounter
+  if encounter and encounter.engine then
+    local key = plan.battle
+    if key and encounter.battle == key
+        and self:onStack(game, encounter.engine) ~= false then
+      return encounter.engine
+    end
+  end
+  local npcId = plan.npcId
+  if not npcId then return nil end
+  local states = game and game.stack and game.stack.states
+  if type(states) ~= "table" then return nil end
+  for i = #states, 1, -1 do
+    local state = states[i]
+    if state and state.kind == "trainer" then
+      local origin = state.checkpointOrigin
+      if type(origin) == "table" and origin.npcId == npcId then
+        return state
+      end
+    end
+  end
+  return nil
+end
+
 -- We joined theirs, or all four agreed.  One entry point for both, because
 -- from here on they are the same thing: a set of fighters the hub has just
 -- confirmed are all still connected.
@@ -1383,6 +1469,16 @@ function M:onBattle(game, msg)
   local mode = Wire.coopOfferMode(msg and msg.mode)
   local wild = mode == "coop_wild"
   local engine = self:joinedEngine(game, msg, foes)
+  -- Prefer the hub-carried origin (waiter's checkpoint); fall back to a
+  -- walk-in joiner's own engine so a protocol-18 hub still leaves them a path.
+  local npcId = Wire.npcId(msg and msg.npcId)
+  local event = Wire.eventFlag(msg and msg.event)
+  if not npcId and engine then
+    npcId, event = M.originOf(engine)
+  elseif not event and engine then
+    local _, engineEvent = M.originOf(engine)
+    event = engineEvent
+  end
   self:begin(game, {
     kind = foes and "party" or (wild and "wild" or "npc"),
     mode = mode,
@@ -1395,6 +1491,9 @@ function M:onBattle(game, msg)
     -- never standing in front of anything -- see M:joinedEngine.
     engine = engine,
     wildCatchMon = wild and M.wildMonOf(engine) or nil,
+    npcId = npcId,
+    event = event,
+    battle = Wire.battleKey(msg and msg.battle),
     -- Derived from the id the hub named rather than assumed, so exactly one of
     -- the four believes it is the host.
     host = hostId ~= nil and self.party:isSelf(hostId),
@@ -1842,6 +1941,105 @@ function M.trainerFor(game, field, engine)
   return (game.data.trainers or {})[id]
 end
 
+-- Trainer record + strongest party level for the invite-joiner prize, looked
+-- up from the waiter's concrete npcId against this client's own map data.
+-- Never by class alone -- two Bug Catchers on Route 3 must not share a purse.
+function M.trainerPrizeInfo(game, npcId)
+  if not (npcId and game and game.data) then return nil, 0, nil, nil end
+  local ow = M.overworldOf(game)
+  local npc = ow and ow.npcPool and ow.npcPool[npcId]
+  local def = npc and npc.def
+  if not def then return nil, 0, nil, nil end
+  local class = def.trainerClass
+  local partyIndex = def.trainerParty or 1
+  local trainer = class and (game.data.trainers or {})[class] or nil
+  if not trainer then return nil, 0, class, partyIndex end
+  local partyDef = trainer.parties and trainer.parties[partyIndex]
+  local best = 0
+  if type(partyDef) == "table" then
+    for _, slot in ipairs(partyDef) do
+      best = math.max(best, tonumber(slot and slot.level) or 0)
+    end
+  end
+  return trainer, best, class, partyIndex
+end
+
+-- Finish a co-op NPC win for a joiner who never held a local BattleState
+-- (ACTIONS-menu / invite path): defeat flag, event flag, prize, victory
+-- rewards, and afterBattle -- the same contract consume → onFinish pays a
+-- walk-in, without inventing a fake battle on the stack.
+--
+-- Gated by the caller on engineBattle / consume having already run: calling
+-- this when a buried engine exists would double-pay and double-onFinish.
+function M:syntheticFinish(game, plan, coopState)
+  local npcId = plan and plan.npcId
+  if not npcId then return false end
+  local save = game and game.save
+  if not save then return false end
+
+  save.defeatedTrainers = save.defeatedTrainers or {}
+  save.defeatedTrainers[npcId] = true
+
+  local event = plan.event
+  if not event then
+    -- Local header as a fallback when an older hub stripped the field: still
+    -- keyed by the concrete npcId, never by class.
+    local ow = M.overworldOf(game)
+    local npc = ow and ow.npcPool and ow.npcPool[npcId]
+    local index = npc and npc.def and npc.def.index
+    local label = ow and ow.map and ow.map.def and ow.map.def.label
+    local header = (index and label and game.data
+      and type(game.data.trainerHeader) == "function")
+      and game.data:trainerHeader(label, index) or nil
+    event = header and Wire.eventFlag(header.event) or nil
+  end
+  if event then
+    save.flags = save.flags or {}
+    save.flags[event] = true
+  end
+
+  local trainer, best, class, partyIndex = M.trainerPrizeInfo(game, npcId)
+  local prize = (tonumber(trainer and trainer.baseMoney) or 0) * best
+  if prize > 0 then
+    save.money = math.min(999999, (tonumber(save.money) or 0) + prize)
+  end
+
+  local ow = M.overworldOf(game)
+  if ow then
+    if class and type(ow.checkVictoryRewards) == "function" then
+      local ok, err = pcall(ow.checkVictoryRewards, ow, class, partyIndex)
+      if not ok then
+        mod.log:warn("co-op victory rewards could not run for %s (%s); badges "
+          .. "or items for this fight may need a reload from your last save",
+          tostring(class), tostring(err))
+      end
+    end
+    -- Stub battle for afterBattle: evolutions read leveledUp; kind/oppClass
+    -- keep the Oak's Lab rival blackout exception honest if it ever lands here.
+    local stub = {
+      kind = "trainer",
+      oppClass = class,
+      partyIndex = partyIndex,
+      leveledUp = coopState and coopState.leveledUp or nil,
+    }
+    if type(ow.afterBattle) == "function" then
+      local ok, err = pcall(ow.afterBattle, ow, "win", stub)
+      if not ok then
+        mod.log:warn("co-op afterBattle could not run (%s); evolutions from "
+          .. "this fight may need a reload from your last save", tostring(err))
+      end
+    end
+    ow.engaging = false
+    local npc = ow.npcPool and ow.npcPool[npcId]
+    if npc then npc.frozen = false end
+  else
+    mod.log:warn("no overworld to finish the co-op trainer against; the "
+      .. "defeat flag and prize were still written -- reload if the world "
+      .. "seems stuck")
+  end
+  return true
+end
+
 function M:startBattle(game, field)
   local battle = self.battle
   if not (battle and not battle.ready) then return false end
@@ -1868,6 +2066,15 @@ function M:startBattle(game, field)
   -- built with a nil trainer -- the AI silently falling back to a heuristic
   -- with nothing to say so.
   local engine = battle.plan and battle.plan.engine
+  -- Walk-in harden (mediated coop_npc): if onBattle never adopted the buried
+  -- engine fight, claim it now by encounter key or waiter's npcId before the
+  -- co-op screen goes up. Left under CoopBattle it resurfaces as an immediate
+  -- FIGHT UI the moment the 2-on-2 pops -- historical #20, still the rematch
+  -- failure mode when the key/stack race loses under mediation.
+  if not engine and battle.plan then
+    engine = self:claimBuriedEngine(game, battle.plan)
+    if engine then battle.plan.engine = engine end
+  end
   -- The trainer, resolved the same way on every client: off the id the field
   -- named, against this build's own data. Whoever walked into them already
   -- holds the record and keeps it; everyone else looks it up. An id that
@@ -2097,10 +2304,11 @@ function M:onBattleOver(result, game, state, toLearn)
   --
   -- Two answers come back, and between them they say who owes the ritual:
   --
-  --   * false -- there was no engine battle behind this one at all, which is
-  --     what a party-versus-party battle always is. Nobody walked into a
-  --     trainer, so there is no onFinish to hand a result to and nothing
-  --     anywhere that will black anybody out. Ours.
+  --   * false -- there was no engine battle behind this one at all: a
+  --     party-versus-party fight, or an invite joiner who never walked into
+  --     the trainer. Nobody (here) has an onFinish to hand a result to.
+  --     Party fights leave blackout to us; invite NPC wins take
+  --     M:syntheticFinish below when the waiter's npcId is on the plan.
   --   * true plus engineRitual -- we handed the engine "lose" and its own
   --     afterBattle did the whole vanilla thing. Not ours; running a second
   --     one would halve the money twice.
@@ -2114,6 +2322,13 @@ function M:onBattleOver(result, game, state, toLearn)
   -- immediately; its warp waits for whatever the two lines above may have put
   -- on screen (see M:pumpBlackout).
   local handled, engineRitual = self:consume(result, blackout)
+  -- Invite / menu joiner: no buried BattleState, so consume is a no-op. On a
+  -- win, finish the trainer off synthetically from the waiter's npcId --
+  -- defeat flag, prize, afterBattle -- without pushing a fake battle. Never
+  -- when consume already ran (walk-in engineBattle): that would double-pay.
+  if not handled and result == "win" and plan and plan.npcId then
+    handled = self:syntheticFinish(game, plan, state)
+  end
   if blackout and not (handled and engineRitual) then self:blackout(game) end
 end
 
