@@ -7,11 +7,12 @@
 -- engine's own link code, and its `mmo.relay` payloads pass through unread.
 --
 -- **Battle does not.** From PROTOCOL 10 a battle this hub brokers is
--- resolved *here*, by src/BattleSim/Turn.lua, and the clients receive an
--- ordered stream of events they draw rather than rolling their own. The
--- mediated-battles section below is that plumbing, and server/lib/relay.js
--- runs the same one over the same message types -- a client cannot tell
--- which of the two hosting paths refereed its fight.
+-- resolved *here*, by BattleSim/Turn (Gen1) or BattleSim2/Turn (Gen2) per
+-- `opts.generation`, and the clients receive an ordered stream of events
+-- they draw rather than rolling their own. The mediated-battles section
+-- below is that plumbing, and server/lib/relay.js runs the same one over
+-- the same message types -- a client cannot tell which of the two hosting
+-- paths refereed its fight.
 --
 -- **No sockets appear anywhere below.** Everything talks to *peer handles*
 -- -- any table answering `:send(msg)` and `:close()`. `HostServer` supplies
@@ -43,12 +44,15 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Sha256 = need("Sha256")
 local Rank = need("Rank")
--- The turn machine, and the one thing in this file that is not pure routing.
--- A battle this hub brokers is *resolved* here from PROTOCOL 10 onwards, so
--- the header's "it does not simulate anything" now holds for trade alone --
--- see the mediated-battles section below for what changed and why.
-local Turn = need("BattleSim/Turn")
-local Effects = need("BattleSim/Effects")
+
+-- Wave 2 T2d: pick the mediated-battle twin at Hub.new from hub generation.
+-- Gen1 (default) keeps BattleSim; Gen2 never loads Gen1 Turn for refereeing.
+local function battleSimFor(generation)
+  if generation == 2 then
+    return need("BattleSim2/Turn"), need("BattleSim2/Effects")
+  end
+  return need("BattleSim/Turn"), need("BattleSim/Effects")
+end
 
 local M = {}
 M.__index = M
@@ -243,6 +247,11 @@ M.Entropy = Entropy
 
 function M.new(opts)
   opts = opts or {}
+  -- PROTOCOL 19 generation lock. Default 1 when omitted so existing Gen1
+  -- fixtures and deploys keep working; Gen2 hubs MUST pass generation:2
+  -- (HostServer / CLI -- twin of server/lib/relay.js opts.generation).
+  local generation = Wire.generation(opts.generation)
+  local Turn, Effects = battleSimFor(generation)
   return setmetatable({
     limit = Config.clampPlayers(opts.maxPlayers),
     -- Absent is nil, never "": a hub with no code admits anyone who says
@@ -251,10 +260,10 @@ function M.new(opts)
     -- normalisation is a code no player could type; Wire.code is
     -- idempotent, so a caller that already normalised loses nothing by it.
     joinCode = Wire.code(opts.joinCode),
-    -- PROTOCOL 19 generation lock. Default 1 when omitted so existing Gen1
-    -- fixtures and deploys keep working; Gen2 hubs MUST pass generation:2
-    -- (HostServer / CLI -- twin of server/lib/relay.js opts.generation).
-    generation = Wire.generation(opts.generation),
+    generation = generation,
+    -- Mediated-battle twin selected above; every open/turn path uses these.
+    Turn = Turn,
+    Effects = Effects,
     clients = {},     -- id -> client (greeted or not)
     count = 0,        -- connections
     players = 0,      -- of those, the ones that have been admitted
@@ -1276,7 +1285,7 @@ function M:openMediatedBattle(id, plan)
   if #memberIds == 0 then return nil end
 
   -- Accept coop_wild explicitly so seating works before Turn.MODES gains it (T3).
-  local mode = (Turn.MODES[plan.mode] or plan.mode == "coop_wild") and plan.mode
+  local mode = (self.Turn.MODES[plan.mode] or plan.mode == "coop_wild") and plan.mode
     or ((#memberIds <= 2) and "1v1" or "coop_pvp")
   -- coop_wild is a 2v1 contract (exactly two humans vs one wild seat).
   if mode == "coop_wild" and #memberIds ~= 2 then return nil end
@@ -1464,7 +1473,7 @@ end
 
 function M:spendBag(record, clientId, itemId)
   if not self:canSpendBag(record, clientId, itemId) then return false end
-  local effect = Effects.itemEffect(itemId)
+  local effect = self.Effects.itemEffect(itemId)
   if effect and effect.noConsume then return true end
   local bag = record.bags[clientId]
   bag[itemId] = bag[itemId] - 1
@@ -1530,7 +1539,7 @@ function M:tryStartSim(record)
     -- Seed NPC seats with a gym-style kit when the host uploaded no bag.
     record.bags = record.bags or {}
     if not record.bags[seat] and self:isNpcSeat(record, seat) then
-      record.bags[seat] = self:cloneBagMap(Turn.DEFAULT_NPC_BAG)
+      record.bags[seat] = self:cloneBagMap(self.Turn.DEFAULT_NPC_BAG)
     end
     local bag = record.bags[seat]
     return {
@@ -1566,7 +1575,7 @@ function M:tryStartSim(record)
   -- constructed, which is not something a connection can reach.
   local seed = (type(self.forceBattleSeed) == "number")
     and self.forceBattleSeed or self:battleSeed()
-  local battle, why = Turn.create({
+  local battle, why = self.Turn.create({
     id = record.id,
     mode = record.mode,
     seed = seed,

@@ -41,6 +41,7 @@ local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
 local Effects = need("BattleSim/Effects")
+local Gen = need("Gen")
 
 local M = {}
 M.__index = M
@@ -348,11 +349,12 @@ moveOf = function(data, slot, order)
   }
 end
 
--- The four stats Gen 1 fights with, from the five the engine stores.
+-- Battle stats for the wire sheet.
 --
--- SPC is one stat and not two: Special did not split until Gen 2, so a
--- snapshot carrying spa/spd would be describing a different game's battler.
--- HP is absent because it rides as `maxHp`.
+-- Gen 1: atk/def/spd/spc (engine attack/defense/speed/special). SPC is one
+-- stat — Special did not split until Gen 2.
+-- Gen 2: atk/def/spe/spa/spd from specialAttack/specialDefense (or spa/spd
+-- aliases) with Speed as `spe`.
 --
 -- Clamped rather than refused, which is the opposite of what Wire does with the
 -- same numbers and is right on this side of the boundary: Wire is judging a
@@ -361,9 +363,20 @@ end
 -- to trimming it is uploading a party the far end throws away whole -- a
 -- player losing a fight they never got to start, over a stat nothing can fight
 -- with anyway.
-local function statsOf(mon)
+local function statsOf(mon, generation)
   local stats = type(mon.stats) == "table" and mon.stats or nil
   if not stats then return nil end
+  if generation == 2 then
+    local spa = stats.specialAttack or stats.spa or stats.special
+    local spDef = stats.specialDefense or stats.spd or stats.special
+    return {
+      atk = clamp(intOr(stats.attack, 1), 1, Wire.STAT_MAX),
+      def = clamp(intOr(stats.defense, 1), 1, Wire.STAT_MAX),
+      spe = clamp(intOr(stats.speed, 1), 1, Wire.STAT_MAX),
+      spa = clamp(intOr(spa, 1), 1, Wire.STAT_MAX),
+      spd = clamp(intOr(spDef, 1), 1, Wire.STAT_MAX),
+    }
+  end
   return {
     atk = clamp(intOr(stats.attack, 1), 1, Wire.STAT_MAX),
     def = clamp(intOr(stats.defense, 1), 1, Wire.STAT_MAX),
@@ -372,18 +385,39 @@ local function statsOf(mon)
   }
 end
 
--- A full set of the four or nothing at all, on Wire's own rule: a snapshot
--- from a client that does not track DVs is ordinary, while one carrying two of
--- the four is a bug on this side that the far end would silently zero the rest
--- of.
-local function fourOf(raw, low, high)
+-- A full set of the dialect's keys or nothing at all, on Wire's own rule: a
+-- snapshot from a client that does not track DVs is ordinary, while one
+-- carrying two of the required keys is a bug on this side that the far end
+-- would silently zero the rest of.
+--
+-- Gen 2 DVs / Stat Exp still use one `special` word (engine gen2 Mon); both
+-- spa and spd on the wire are fed from that single engine field.
+local function sheetOf(raw, low, high, generation)
   if type(raw) ~= "table" then return nil end
   local out = {}
-  local keys = { atk = "attack", def = "defense", spd = "speed", spc = "special" }
-  for wireKey, engineKey in pairs(keys) do
-    local n = tonumber(raw[engineKey])
-    if not n or n ~= n then return nil end
-    out[wireKey] = clamp(floor(n), low, high)
+  if generation == 2 then
+    local keys = {
+      atk = "attack", def = "defense", spe = "speed",
+      spa = "special", spd = "special",
+    }
+    for wireKey, engineKey in pairs(keys) do
+      local n = tonumber(raw[engineKey])
+      if wireKey == "spa" and (not n or n ~= n) then
+        n = tonumber(raw.specialAttack)
+      end
+      if wireKey == "spd" and (not n or n ~= n) then
+        n = tonumber(raw.specialDefense or raw.special)
+      end
+      if not n or n ~= n then return nil end
+      out[wireKey] = clamp(floor(n), low, high)
+    end
+  else
+    local keys = { atk = "attack", def = "defense", spd = "speed", spc = "special" }
+    for wireKey, engineKey in pairs(keys) do
+      local n = tonumber(raw[engineKey])
+      if not n or n ~= n then return nil end
+      out[wireKey] = clamp(floor(n), low, high)
+    end
   end
   -- Optional HP Stat Exp for HP_UP (engine key `hp`).
   local hp = tonumber(raw.hp)
@@ -451,13 +485,14 @@ function M.snapshotMons(game, party)
 
   local data = game and game.data
   local order = typeOrder(data)
+  local generation = Gen.generation(game)
 
   local out = {}
   for index = 1, #party do
     if #out >= Config.BATTLE_MON_MAX then break end
     local mon = party[index]
     if type(mon) == "table" then
-      local stats = statsOf(mon)
+      local stats = statsOf(mon, generation)
       local species = speciesName(data, mon)
       if stats and species then
         local maxHp = clamp(intOr(mon.stats and mon.stats.hp, 1), 1, Wire.HP_MAX)
@@ -468,7 +503,7 @@ function M.snapshotMons(game, party)
           if move then moves[#moves + 1] = move end
         end
         if #moves > 0 then
-          out[#out + 1] = {
+          local sheet = {
             species = species,
             -- Registry id for battle art (local only; the wire keeps `species`
             -- as the display / nickname token the sim narrates under).
@@ -477,16 +512,23 @@ function M.snapshotMons(game, party)
             hp      = clamp(intOr(mon.hp, maxHp), 0, maxHp),
             maxHp   = maxHp,
             stats   = stats,
+            generation = generation,
             -- The engine spells a condition with the same three-letter token
             -- the wire does ("SLP", "PSN", ...), so this passes through rather
             -- than being translated.  nil is healthy and is a real answer.
             status  = Wire.battleStatus(mon.status) or nil,
             slot    = clamp(index - 1, 0, Wire.SLOT_MAX),
-            ivs     = fourOf(mon.dvs, 0, 15),
-            evs     = fourOf(mon.statExp, 0, 65535),
+            ivs     = sheetOf(mon.dvs, 0, 15, generation),
+            evs     = sheetOf(mon.statExp, 0, 65535, generation),
             types   = typesOf(data, mon, order),
             moves   = moves,
           }
+          -- Gen 2 held item (engine field `item`). Optional; Wire.id cleans it.
+          if generation == 2 and type(mon.item) == "string" and mon.item ~= "" then
+            local held = Wire.id(mon.item)
+            if held then sheet.heldItem = held end
+          end
+          out[#out + 1] = sheet
           local def = type(data) == "table" and type(data.pokemon) == "table"
             and data.pokemon[mon.species] or nil
           local rate = def and tonumber(def.catchRate)
@@ -537,6 +579,15 @@ function M.sendParty(transport, battle, mons, side, bag, badges)
   if type(mons) ~= "table" or #mons == 0 then return false end
   local msg = { battle = battle, mons = mons, side = side, bag = bag }
   if badges then msg.badges = badges end
+  -- Party-level generation when every mon agrees (Wire prefers this, then shape).
+  local gen = mons[1] and mons[1].generation
+  if gen == 1 or gen == 2 then
+    local same = true
+    for i = 2, #mons do
+      if mons[i].generation ~= gen then same = false; break end
+    end
+    if same then msg.generation = gen end
+  end
   transport:send(Wire.BATTLE_PARTY, msg)
   return true
 end
@@ -546,18 +597,50 @@ end
 -- Read off the badge *rows* rather than off a list written down here, so a mod
 -- that adds a badge -- or retunes which ones boost what -- is covered without
 -- this file knowing about it.
+--
+-- MK403: never hard-require Gen 1 `src.battle.Damage` on Gold. Prefer
+-- `data.constants.badgeBoosts`, then a soft Gen 2 Damage/Battle module, then
+-- Gen 1 Damage only on a Gen 1 boot; missing rows soft-degrade to no badges.
 function M.badgesOf(game)
   local data = game and game.data
-  local inventory = game and game.save and game.save.inventory
-  if not (data and inventory) then return nil end
+  local save = game and game.save
+  if not (data and save) then return nil end
+
   local rows = data.constants and data.constants.badgeBoosts
   if not rows then
-    local ok, Damage = pcall(require, "src.battle.Damage")
-    rows = ok and Damage and Damage.BADGE_BOOSTS or nil
+    local generation = Gen.generation(game)
+    if generation == 2 then
+      -- Gen 2 Damage has no BADGE_BOOSTS twin; Battle.BADGE_TYPE_BOOSTS names
+      -- every Johto/Kanto badge for ownership checks.
+      local ok, Battle = pcall(require, "src.battle.gen2.Battle")
+      if ok and Battle and type(Battle.BADGE_TYPE_BOOSTS) == "table" then
+        rows = Battle.BADGE_TYPE_BOOSTS
+      else
+        local okD, Damage = pcall(require, "src.battle.gen2.Damage")
+        rows = okD and Damage and Damage.BADGE_BOOSTS or nil
+      end
+    else
+      local ok, Damage = pcall(require, "src.battle.Damage")
+      rows = ok and Damage and Damage.BADGE_BOOSTS or nil
+    end
   end
-  local out = {}
-  for _, row in ipairs(rows or {}) do
-    if row.badge and inventory[row.badge] then out[#out + 1] = row.badge end
+  if not rows then return nil end
+
+  local inventory = save.inventory or {}
+  local playerBadges = save.player and save.player.badges
+  local out, seen = {}, {}
+  for _, row in ipairs(rows) do
+    local id = row.badge
+    if id and not seen[id] then
+      local has = inventory[id]
+      if not has and type(playerBadges) == "table" then
+        has = playerBadges[id]
+      end
+      if has then
+        seen[id] = true
+        out[#out + 1] = id
+      end
+    end
   end
   if #out == 0 then return nil end
   return out
@@ -578,15 +661,48 @@ function M.itemIsBattleUsable(id, game)
 end
 
 -- Engine save.statExp keys for BattleSim vitaminStat tokens.
+-- Gen 1 wire: spd/spc. Gen 2 wire: spe/spa (BattleSim2). Engine gen2 Mon still
+-- stores one Special Stat Exp word (`special`) that feeds both SpA and SpD.
 local VITAMIN_SAVE_KEY = {
-  hp = "hp", atk = "attack", def = "defense", spd = "speed", spc = "special",
+  hp = "hp", atk = "attack", def = "defense",
+  spd = "speed", spc = "special",
+  spe = "speed", spa = "special",
 }
 
--- Write Gen1 vitamin Stat Exp onto save.party[partyIndex] (1-based).
+-- Live mon.stats field updated after a vitamin, by generation.
+-- Gen 2 has no single `special` battle stat — write specialAttack (Calcium)
+-- or the matching physical/speed field; SpD shares Special Stat Exp so both
+-- specials are refreshed when spa is applied via Mon.stats when available.
+local function vitaminLiveKeys(wireStat, generation)
+  if wireStat == "hp" then return { "hp" } end
+  if generation == 2 then
+    if wireStat == "atk" then return { "attack" } end
+    if wireStat == "def" then return { "defense" } end
+    if wireStat == "spe" then return { "speed" } end
+    -- spa (Calcium) / legacy spc: one Special Stat Exp word feeds both SpA/SpD.
+    if wireStat == "spa" or wireStat == "spc" or wireStat == "spd" then
+      return { "specialAttack", "specialDefense" }
+    end
+  end
+  if wireStat == "atk" then return { "attack" } end
+  if wireStat == "def" then return { "defense" } end
+  if wireStat == "spd" or wireStat == "spe" then return { "speed" } end
+  if wireStat == "spc" or wireStat == "spa" then return { "special" } end
+  return nil
+end
+
+-- Write vitamin Stat Exp onto save.party[partyIndex] (1-based).
 -- Fight-local sheet mutation is the hub's job; permanence is the client's.
 -- Only call after an `item` event with amount=1 (vitamin applied).
 function M.writebackVitamin(game, partyIndex, itemId)
   local effect = Effects.itemEffect(itemId)
+  -- Gen 2 boot may resolve vitamins via BattleSim2 Effects (spa/spe tokens).
+  if not (effect and effect.vitaminStat) and Gen.generation(game) == 2 then
+    local ok2, Effects2 = pcall(function() return need("BattleSim2/Effects") end)
+    if ok2 and Effects2 and Effects2.itemEffect then
+      effect = Effects2.itemEffect(itemId)
+    end
+  end
   local wireStat = effect and effect.vitaminStat
   local saveKey = wireStat and VITAMIN_SAVE_KEY[wireStat]
   if not saveKey then return false end
@@ -599,27 +715,46 @@ function M.writebackVitamin(game, partyIndex, itemId)
   local after = math.min(65535, before + Effects.VITAMIN_GAIN)
   mon.statExp[saveKey] = after
 
+  local generation = Gen.generation(game)
   -- Recalc live battle stats / max HP so the party screen does not lag.
-  -- Prefer engine Stats.calc when the species def is reachable; otherwise apply
-  -- the same Gen1 √EV contribution delta BattleSim uses (no ROM / no require).
   local oldMax = tonumber(mon.stats and mon.stats.hp) or tonumber(mon.hp) or 0
   local level = math.max(1, math.floor(tonumber(mon.level) or 1))
   local applied = false
   local def = game.data and game.data.pokemon and game.data.pokemon[mon.species]
-  local okStats, Stats = pcall(require, "src.pokemon.Stats")
-  if okStats and Stats and type(Stats.calc) == "function"
-     and type(def) == "table" and type(def.baseStats) == "table" then
-    local ok, stats = pcall(Stats.calc, def, level, mon.dvs or {}, mon.statExp)
-    if ok and type(stats) == "table" then
-      mon.stats = stats
-      local newMax = tonumber(stats.hp) or oldMax
-      local cur = tonumber(mon.hp) or oldMax
-      if wireStat == "hp" and newMax > oldMax then
-        mon.hp = math.min(newMax, cur + (newMax - oldMax))
-      else
-        mon.hp = math.max(0, math.min(cur, newMax))
+  if generation == 2 then
+    local okMon, Mon2 = pcall(require, "src.battle.gen2.Mon")
+    if okMon and Mon2 and type(Mon2.stats) == "function"
+       and type(def) == "table" and type(def.baseStats) == "table" then
+      local ok, stats = pcall(Mon2.stats, def.baseStats, mon.dvs or {}, level,
+        mon.statExp)
+      if ok and type(stats) == "table" then
+        mon.stats = stats
+        local newMax = tonumber(stats.hp) or oldMax
+        local cur = tonumber(mon.hp) or oldMax
+        if wireStat == "hp" and newMax > oldMax then
+          mon.hp = math.min(newMax, cur + (newMax - oldMax))
+        else
+          mon.hp = math.max(0, math.min(cur, newMax))
+        end
+        applied = true
       end
-      applied = true
+    end
+  else
+    local okStats, Stats = pcall(require, "src.pokemon.Stats")
+    if okStats and Stats and type(Stats.calc) == "function"
+       and type(def) == "table" and type(def.baseStats) == "table" then
+      local ok, stats = pcall(Stats.calc, def, level, mon.dvs or {}, mon.statExp)
+      if ok and type(stats) == "table" then
+        mon.stats = stats
+        local newMax = tonumber(stats.hp) or oldMax
+        local cur = tonumber(mon.hp) or oldMax
+        if wireStat == "hp" and newMax > oldMax then
+          mon.hp = math.min(newMax, cur + (newMax - oldMax))
+        else
+          mon.hp = math.max(0, math.min(cur, newMax))
+        end
+        applied = true
+      end
     end
   end
   if not applied then
@@ -634,8 +769,11 @@ function M.writebackVitamin(game, partyIndex, itemId)
       local cur = tonumber(mon.hp) or oldMax
       mon.hp = math.min(newMax, cur + math.max(0, delta))
     else
-      local curStat = math.max(1, math.floor(tonumber(mon.stats[saveKey]) or 1))
-      mon.stats[saveKey] = math.max(1, curStat + delta)
+      local liveKeys = vitaminLiveKeys(wireStat, generation) or { saveKey }
+      for _, liveKey in ipairs(liveKeys) do
+        local curStat = math.max(1, math.floor(tonumber(mon.stats[liveKey]) or 1))
+        mon.stats[liveKey] = math.max(1, curStat + delta)
+      end
       local cur = tonumber(mon.hp) or oldMax
       local maxHp = tonumber(mon.stats.hp) or oldMax
       if maxHp > 0 then mon.hp = math.max(0, math.min(cur, maxHp)) end

@@ -13,9 +13,10 @@
  * this hub brokered is resolved here -- see the "mediated battles" section
  * below -- because a battle decided by one of the two players is a battle
  * decided by whichever of them modified their copy first. Every roll, the
- * turn order and the sole win/loss verdict live in lib/battle/Turn.js; this
- * file owns the plumbing around it: who is in which fight, whose party is
- * still missing, and where the events go.
+ * turn order and the sole win/loss verdict live in lib/battle/Turn.js (Gen1)
+ * or lib/battle2/Turn.js (Gen2), selected at construction from
+ * `opts.generation`; this file owns the plumbing around it: who is in which
+ * fight, whose party is still missing, and where the events go.
  *
  * **No sockets appear anywhere below.** Everything talks to *peer handles*
  * -- any object answering send(msg), close() and carrying a remoteAddress
@@ -42,8 +43,6 @@ const {
   cleanBattleRuleset, cleanBattleParty, cleanBattleChoice, cleanBattleReconnect,
   BATTLE_MOVE_MAX,
 } = require('./sanitize');
-const { Turn } = require('./battle');
-const Effects = require('./battle/Effects');
 const {
   Board, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
   RANK_QUERY_GATE_MS,
@@ -1051,7 +1050,7 @@ handlers['mmo.battle_party'] = (relay, client, msg) => {
   const record = mediatedOf(relay, client);
   if (!record || record.sim) return;
 
-  const party = cleanBattleParty(msg);
+  const party = cleanBattleParty(msg, relay.generation);
   if (!party) {
     return noteDrop(relay, client, 'the party is not a shape we can fight with');
   }
@@ -1227,6 +1226,15 @@ class Relay {
     {
       const gen = cleanInt(opts.generation, 1, 2);
       this.generation = gen == null ? 1 : gen;
+    }
+    // Wave 2 T2d: mediated-battle twin at construction. Gen1 keeps lib/battle;
+    // Gen2 never instantiates Gen1 Turn for refereeing.
+    {
+      const battle = this.generation === 2
+        ? require('./battle2')
+        : require('./battle');
+      this.Turn = battle.Turn;
+      this.Effects = battle.Effects;
     }
     this.auth = opts.auth || null;
     /*
@@ -2633,7 +2641,7 @@ class Relay {
 
   spendBag(record, clientId, itemId) {
     if (!this.canSpendBag(record, clientId, itemId)) return false;
-    const effect = Effects.itemEffect(itemId);
+    const effect = this.Effects.itemEffect(itemId);
     if (effect && effect.noConsume) return true;
     const bag = record.bags.get(clientId);
     bag[itemId] -= 1;
@@ -2692,7 +2700,7 @@ class Relay {
       // Seed NPC seats with a gym-style kit when the host uploaded no bag.
       if (!record.bags) record.bags = new Map();
       if (!record.bags.has(seat) && this.isNpcSeat(record, seat)) {
-        record.bags.set(seat, this.cloneBagMap(Turn.DEFAULT_NPC_BAG));
+        record.bags.set(seat, this.cloneBagMap(this.Turn.DEFAULT_NPC_BAG));
       }
       const bag = record.bags.get(seat);
       const bagCopy = this.cloneBagMap(bag);
@@ -2732,7 +2740,7 @@ class Relay {
     const seed = typeof this.forceBattleSeed === 'number'
       ? this.forceBattleSeed
       : (1 + Math.floor(Math.random() * BATTLE_SEED_MAX));
-    const created = Turn.attempt({
+    const created = this.Turn.attempt({
       id: record.id,
       mode: record.mode,
       seed,
@@ -2814,7 +2822,7 @@ class Relay {
     if (!seats || !seats.length) return false;
 
     let filed = false;
-    const bound = Turn.MONS_PER_PARTY * COOP_SIDE * 2;
+    const bound = this.Turn.MONS_PER_PARTY * COOP_SIDE * 2;
     for (let pass = 0; pass < bound; pass += 1) {
       let any = false;
       for (const seat of seats) {

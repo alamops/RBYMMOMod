@@ -566,4 +566,20 @@ testCoopWildCatchCatcher();
 testTradeRelayStillWorks();
 testBagProofs();
 
+// Wave 2 T2d: hub generation selects battle vs battle2 at construction.
+{
+  const battle1 = require('./lib/battle');
+  const battle2 = require('./lib/battle2');
+  ok(battle2.GENERATION === 2, 'battle2 index GENERATION===2');
+  const gen1 = new Relay({ maxPlayers: 8, log: quiet });
+  ok(gen1.generation === 1, 'omitted generation defaults to 1');
+  ok(gen1.Turn === battle1.Turn, 'generation 1 loads lib/battle Turn');
+  ok(gen1.Effects === battle1.Effects, 'generation 1 loads lib/battle Effects');
+  const gen2 = new Relay({ generation: 2, maxPlayers: 8, log: quiet });
+  ok(gen2.generation === 2, 'generation:2 is stored');
+  ok(gen2.Turn === battle2.Turn, 'generation 2 loads lib/battle2 Turn');
+  ok(gen2.Effects === battle2.Effects, 'generation 2 loads lib/battle2 Effects');
+  ok(gen2.Turn !== battle1.Turn, 'Gen2 hub never holds Gen1 Turn');
+}
+
 console.log(`hub_battle: ${passed} checks passed`);

@@ -8,12 +8,26 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Gen2 battle sheets on the wire + MediatedBattle upload (Wave 2 T2c).**
+  `Wire.battleMon` / `server/lib/sanitize.js` accept Gen 1 `atk/def/spd/spc`
+  and Gen 2 `atk/def/spe/spa/spd` (+ optional `heldItem`), preferring an
+  explicit `generation` then shape-sniff. MediatedBattle uploads the Gen 2
+  dialect when `Gen.generation(game)==2`, fixes MK403 `badgesOf` (no Gen 1
+  `src.battle.Damage` on Gold), and writes Gen 2 vitamin Stat Exp via the
+  engine's `special` word + `specialAttack`/`specialDefense` live stats.
+
+- **Hub/LAN host selects Gen1 vs Gen2 battle sim by generation (Wave 2 T2d).**
+  `Hub.new` / `Relay` constructor load `BattleSim`+`Effects` when
+  `generation` is 1 (default) and `BattleSim2` / `lib/battle2` when it is 2;
+  every mediated open/turn path uses the instance twin. Node bag sanitise
+  picks Effects by the same generation. Gen1 hubs behave as before; Gen2
+  hubs never instantiate Gen1 Turn.
+
 - **Gen2 BattleSim2 formulas + Turn scaffold (Wave 2 T2a).** New pure
   `src/BattleSim2/` sibling (SpA/SpD damage, crit ladder, 85–100% variance,
   damage cap 999, freeze 1/5 thaw, burn/poison /8) with
   `tests/fixtures/battle_sim2_vectors.json` and
-  `tests/battle_sim2_vectors.lua`. Gen1 `src/BattleSim/` untouched. Wire /
-  MediatedBattle / Node twin are follow-up (T2b–T2d).
+  `tests/battle_sim2_vectors.lua`. Gen1 `src/BattleSim/` untouched.
 
 - **Node Gen2 battle twin (Wave 2 T2b).** `server/lib/battle2/` mirrors
   `src/BattleSim2/` (Damage / Crit / Accuracy / Status / Rng / Effects / Turn /
