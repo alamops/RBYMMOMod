@@ -10480,6 +10480,14 @@ end)()
   eq(CoopBattle.SLIDE_PX, 48, "focus slides clear a full pic width")
   eq(CoopBattle.LEVEL_COLS, 3,
      "level row reserves three tiles left of the HP numbers")
+  eq(CoopBattle.STATUS_BAR_GAP, 2,
+     "status tag sits two pixels past a shortened HP bar")
+  eq(CoopBattle.hpBarWidth(48, 0), 48,
+     "no status keeps the full bar width")
+  eq(CoopBattle.hpBarWidth(48, 12), 34,
+     "a 12px status tag shortens the bar by tag + gap")
+  eq(CoopBattle.hpBarWidth(10, 20), 8,
+     "a long tag still leaves an 8px bar floor")
   -- 56px Gen1 back in the 56px strip–HUD lane (tx=9 → hudLeft 72) is 1x.
   do
     local stub = {

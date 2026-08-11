@@ -2660,9 +2660,13 @@ local FIELD_FLOOR = 96
 -- sits a scaled pad above the lip and reads as mid-field.
 local ALLY_FOOT_INSET = 4
 
--- Columns reserved on the level row for Lxx / status (left of the HP
--- numbers). "L100" / "PSN" at the ROM 8px face; the 5px HUD sheet fits in less.
+-- Columns reserved on the level row for Lxx (left of the HP numbers).
+-- "L100" at the ROM 8px face; the 4px meta sheet fits in less. Status no
+-- longer shares this row -- it sits on the right of the HP bar (see
+-- hpBarWidth) so Lxx and PSN/SLP/… can both be on screen.
 local LEVEL_COLS = 3
+-- Pixel gap between a shortened HP bar and a status tag on its right.
+local STATUS_BAR_GAP = 2
 
 -- Published for the suite, which cannot reach a file-local and has no graphics
 -- device to measure a drawn pixel with.
@@ -2671,6 +2675,7 @@ M.ALLY_SCALE = ALLY_SCALE
 M.FIELD_FLOOR = FIELD_FLOOR
 M.ALLY_FOOT_INSET = ALLY_FOOT_INSET
 M.LEVEL_COLS = LEVEL_COLS
+M.STATUS_BAR_GAP = STATUS_BAR_GAP
 M.BOX_COLS = BOX_COLS
 M.wrapBoxLines = wrapBoxLines
 M.pageBoxText = pageBoxText
@@ -2705,6 +2710,16 @@ M.CMD_CUR1_X = 104
 -- the name keeps the full inner width (level + HP share the meta row).
 M.nameBudget = function(tw, mine, status)
   return (tw or 0) - 2
+end
+
+-- HP bar width inside an `innerW`-wide content lane when a status tag of
+-- `statusW` pixels sits on its right. Floor at 8 so a long tag cannot erase
+-- the bar entirely; no status → full width.
+function M.hpBarWidth(innerW, statusW)
+  innerW = math.max(0, math.floor(tonumber(innerW) or 0))
+  statusW = math.max(0, math.floor(tonumber(statusW) or 0))
+  if statusW <= 0 then return innerW end
+  return math.max(8, innerW - statusW - STATUS_BAR_GAP)
 end
 
 -- Truncate a label to a pixel budget via `widthOf`, or to `maxCols` glyphs
@@ -3034,10 +3049,13 @@ local function drawSinking(sprite, x, y, framesLeft, scale)
   love.graphics.draw(sprite, quad, x, y + offset, 0, scale, scale)
 end
 
--- ------- the status abbreviation, on the name row
+-- ------- the status abbreviation (group / co-op HUD only)
 --
--- SLP, PAR, BRN, PSN, FRZ -- the three-letter forms the engine's own HUD prints,
--- through the ordinary font, which is why `Font.draw` is all this needs.
+-- SLP, PAR, BRN, PSN, FRZ -- the three-letter forms the engine's own HUD prints.
+-- On a 1v1 mediated screen those still replace Lxx (engine BattleState /
+-- MediatedBattle). Here the panel is tight and four monsters make a lost
+-- status line easy to miss, so the tag parks on the bar's right and shortens
+-- the fill (hpBarWidth) — Lxx stays on the meta row.
 --
 -- **This is the original bug report.** A monster put to sleep loses its turn in
 -- silence between two batches of messages: the line that said so scrolled past
@@ -3049,7 +3067,7 @@ end
 --
 -- Read straight off `mon.status`, which is the id: a build that adds a status
 -- gets its own id shown rather than a blank, cut to three so a long one cannot
--- push the bar off the panel.
+-- erase the bar.
 local function statusTag(battler)
   local mon = battler and battler.mon
   local status = mon and mon.status
@@ -3104,18 +3122,14 @@ local function drawReadout(self, battler, panel, row, mine)
   local ty = panel.ty + row
   local ox, oy = tx * 8, ty * 8
   love.graphics.setColor(0, 0, 0, 1)
-  -- Name, level + cur/max, then slim HP bar. Bar is flush to the bottom
-  -- content edge (no empty band under it); pads open air between the lines.
+  -- Name, level + cur/max, then slim HP bar. Status (when any) sits on the
+  -- bar's right and shortens the fill so Lxx stays on the meta row. Bar is
+  -- flush to the bottom content edge; pads open air between the lines.
   -- displayHP tracks shownHP through drains/heals the way classic BattleState does.
   local status = statusTag(battler)
-  local level
-  if status then
-    level = status
-  else
-    local lv = battler.mon.level
-    level = "L" .. tostring(lv ~= nil and lv or "?")
-  end
-  level = M.hudSanitize(level)
+  local lv = battler.mon.level
+  local level = M.hudSanitize("L" .. tostring(lv ~= nil and lv or "?"))
+  if status then status = M.hudSanitize(status) end
   local nameRaw = M.hudSanitize(battler.name or "?")
   local hp = displayHP(battler)
   local maxHp = (battler.mon.stats and battler.mon.stats.hp) or 0
@@ -3163,8 +3177,10 @@ local function drawReadout(self, battler, panel, row, mine)
       local numsX = math.max(ox + levelW + 2, borderR - hpW)
       g.print(hpNums, numsX, metaY)
 
+      local statusW = 0
+      if status then statusW = face:getWidth(status) end
       local barX = ox
-      local barW = inner
+      local barW = M.hpBarWidth(inner, statusW)
       local barH = BAR_H
       local minBarY = metaY + faceH + BAR_GAP
       if barY < minBarY then barY = minBarY end
@@ -3194,6 +3210,12 @@ local function drawReadout(self, battler, panel, row, mine)
         end
         g.setColor(0, 0, 0, 1)
       end
+      if status and statusW > 0 then
+        -- Sit on the bar row, right of the shortened fill. Vertically nudge
+        -- so a 5px meta face shares the 3px bar's vertical centre.
+        local statusY = barY + math.floor((barH - faceH) / 2)
+        g.print(status, barX + barW + STATUS_BAR_GAP, statusY)
+      end
     end)
     if prev then pcall(g.setFont, g, prev) end
     if not ok then
@@ -3213,12 +3235,17 @@ local function drawReadout(self, battler, panel, row, mine)
     end
     if rightW <= 0 then rightW = #nums * 8 end
     Font.draw(nums, math.max(ox + LEVEL_COLS * 8, borderR - rightW), oy + 8)
-    local segments = math.max(1, panel.tw - 2 - 3)
+    local statusCols = status and 3 or 0
+    local segments = math.max(1, panel.tw - 2 - 3 - statusCols)
     local barOk = pcall(HudTiles.drawHPBar, self.game.data, tx, ty + 2,
       { hp = hp, stats = battler.mon.stats },
       nil, false, segments)
     if not barOk then
       Font.draw(("%d/%d"):format(hp, maxHp), ox, oy + 16)
+    end
+    if status then
+      -- Cap sits at tx+2+segments; status starts one tile past that.
+      Font.draw(status, (tx + 2 + segments + 1) * 8, (ty + 2) * 8)
     end
   end
 end

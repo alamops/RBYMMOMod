@@ -1946,6 +1946,8 @@ function M:drawEnemyHUD(Font, HudTiles)
   local name = tostring(slot.species):sub(1, 10)
   love.graphics.setColor(0, 0, 0, 1)
   Font.draw(name, nameX(Font, 1, name), 0)
+  -- Classic Gen 1 / engine BattleState: status replaces Lxx. Group battles
+  -- put status on the HP bar instead (CoopBattle.drawReadout).
   if slot.status then
     Font.draw(tostring(slot.status):sub(1, 3), 40, 8)
   elseif slot.level then
