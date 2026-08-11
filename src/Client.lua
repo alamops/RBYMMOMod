@@ -2003,19 +2003,33 @@ function M.install()
   -- is why BATTLE ALONE costs nothing but closing a menu, and why a player who
   -- is not in a party never notices any of this happened.
   --
-  -- src/Coop.lua's onTrainerBattle is where the two answers diverge, and its
-  -- header explains what the co-op one does with the battle it took.
+  -- src/Coop.lua's onTrainerBattle / onWildEncounter is where the answers
+  -- diverge, and their headers explain what the co-op path does with the
+  -- battle it took. Wild divert has no WAIT/ALONE prompt -- only same-map
+  -- auto-join into coop_wild, else the engine wild is left alone.
   mod.events:on("screen.pushed", function(payload)
     local state = payload and payload.state
-    if not (state and state.kind == "trainer") then return end
+    if not state then return end
     if not transport:isReady() then return end
     local current = World.current()
-    local ok, err = pcall(function()
-      coop:onTrainerBattle(ctx.game, state, current and current.mapId)
-    end)
-    if not ok then
-      mod.log:warn("the co-op prompt failed (%s); this trainer is fought the "
-        .. "ordinary way -- the battle itself is unaffected", tostring(err))
+    local mapId = current and current.mapId
+    if state.kind == "trainer" then
+      local ok, err = pcall(function()
+        coop:onTrainerBattle(ctx.game, state, mapId)
+      end)
+      if not ok then
+        mod.log:warn("the co-op prompt failed (%s); this trainer is fought the "
+          .. "ordinary way -- the battle itself is unaffected", tostring(err))
+      end
+    elseif state.kind == "wild" then
+      local ok, err = pcall(function()
+        coop:onWildEncounter(ctx.game, state, mapId)
+      end)
+      if not ok then
+        mod.log:warn("the party wild divert failed (%s); this encounter is "
+          .. "fought the ordinary way -- the battle itself is unaffected",
+          tostring(err))
+      end
     end
   end)
 

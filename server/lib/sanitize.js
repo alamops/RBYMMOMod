@@ -212,6 +212,13 @@ function cleanBattleKey(value) {
   return /^[\w.\-:|]+$/.test(value) ? value : null;
 }
 
+// Optional wait/offer mode. Only coop_wild is meaningful; anything else
+// (including absent) is null so the trainer invite path stays the default.
+// Mirrors Wire.coopOfferMode.
+function cleanCoopOfferMode(value) {
+  return value === 'coop_wild' ? 'coop_wild' : null;
+}
+
 // Which side of a co-op battle somebody is on, and why an offer or an ask
 // ended. Both are closed sets rather than free text: each value picks a
 // different sentence on the client, and an unknown one has to degrade to the
@@ -1195,6 +1202,7 @@ module.exports = {
   cleanId,
   cleanMember,
   cleanBattleKey,
+  cleanCoopOfferMode,
   cleanLabel,
   cleanSide,
   cleanCoopReason,

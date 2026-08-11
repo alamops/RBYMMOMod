@@ -38,7 +38,7 @@ const {
   cleanText, cleanId, cleanSpriteId, cleanMapId, cleanInt, cleanHex,
   cleanProfile, cleanOutcome, cleanPoints, cleanPlayerId, payloadOk, FACINGS,
   KINDS, SCOPES, NAME_MAX, MESSAGE_MAX, MOTD_MAX, LOCAL_RADIUS,
-  cleanBattleKey, cleanCoopReason, cleanLabel, cleanPartyEvent, PARTY_MAX,
+  cleanBattleKey, cleanCoopReason, cleanCoopOfferMode, cleanLabel, cleanPartyEvent, PARTY_MAX,
   cleanBattleRuleset, cleanBattleParty, cleanBattleChoice, cleanBattleReconnect,
   BATTLE_MOVE_MAX,
 } = require('./sanitize');
@@ -753,12 +753,15 @@ handlers['mmo.coop_wait'] = (relay, client, msg) => {
 
   const label = cleanLabel(msg.label);
   const map = cleanMapId(msg.map);
+  // Optional mode: only coop_wild is stored (Party vs Wild auto-join). Absent
+  // keeps the trainer WAIT/JOIN invite path.
+  const mode = cleanCoopOfferMode(msg.mode);
   // startedAt so the sweep can expire it on the same clock the partner's
   // client already uses. Mirrors src/Hub.lua.
-  client.coopOffer = { battle, label, map, startedAt: relay.now() };
-  relay.send(partner, 'mmo.coop_offer', {
-    from: client.id, name: client.name, battle, label, map,
-  });
+  client.coopOffer = { battle, label, map, mode, startedAt: relay.now() };
+  const offer = { from: client.id, name: client.name, battle, label, map };
+  if (mode) offer.mode = mode;
+  relay.send(partner, 'mmo.coop_offer', offer);
 };
 
 handlers['mmo.coop_cancel'] = (relay, client, msg) => {
@@ -817,17 +820,17 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // The pair get a fan-out group of their own, on the same footing as a
   // four-player one: from here on the battle traffic does not care which of the
   // two ways it was agreed.
-  // `coop_npc`, and it is the flow that decides it rather than a count: this
-  // pair agreed by one of them standing in front of a trainer, so the other
-  // side of the field is that trainer -- an opponent with a party and no
-  // connection. The four-way path below is the only one that makes a
-  // `coop_pvp`, because it is the only one where both sides are players.
+  // The mode is taken from the offer when the waiter named one: coop_wild for
+  // Party vs Wild (auto-join grass), otherwise coop_npc for the trainer path.
+  // The four-way path below is the only one that makes a coop_pvp, because it
+  // is the only one where both sides are players.
   // "c", for startSession's reason: sessions and co-op battles share the
   // `battles` map and are numbered by two counters that know nothing of each
   // other.
   const battleId = `c${relay.nextCoopAsk++}`;
+  const mode = offer.mode === 'coop_wild' ? 'coop_wild' : 'coop_npc';
   relay.openCoopBattle(battleId, [host.id, client.id],
-    { mode: 'coop_npc', hostId: host.id });
+    { mode, hostId: host.id });
 
   // `plan` is the hub's mediated battle id (`c*`). Without it the waiting
   // host's CoopBattle has no battleId, uploadMediated is a no-op, and the
@@ -837,10 +840,11 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
     { id: client.id, name: client.name, plan: battleId });
   // `host` names the client that simulates: the player who was already standing
   // at the fight, since they are the one guaranteed to have walked into the
-  // trainer -- the joiner usually has too, but a join taken from the ACTIONS
-  // menu never went near them.
+  // encounter -- the joiner usually has too, but a join taken from the ACTIONS
+  // menu never went near them. `mode` rides so the joiner's CoopBattle opens
+  // as coop_wild without re-deriving from an offer that is already cleared.
   relay.send(client, 'mmo.coop_battle',
-    { id: battleId, side: 'a', allies: members, battle, host: host.id });
+    { id: battleId, side: 'a', allies: members, battle, host: host.id, mode });
 };
 
 // Battle traffic, fanned out to everyone else in the same battle. The payload
