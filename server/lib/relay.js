@@ -2415,10 +2415,12 @@ class Relay {
    * Open the hub's record of a fight. The sim is still null: a ruleset and
    * every required party have to arrive before tryStartSim takes it over.
    *
-   * `npcIds` is set for coop_npc (two synthetic seats) and wild (one seat).
-   * Coop_npc: two players meet two monsters. Wild: one player meets one wild
-   * mon on a hub NPC seat (protocol-only — no overworld divert). The host
-   * uploads the NPC team as side "b".
+   * `npcIds` is set for coop_npc (two synthetic seats) and for wild /
+   * coop_wild (one seat). Coop_npc: two players meet two monsters. Wild: one
+   * player meets one wild mon on a hub NPC seat (protocol-only — no overworld
+   * divert). Coop_wild: two humans on side a, one wild seat on side b
+   * (overworld divert is client-side). The host uploads the NPC / wild team
+   * as side "b".
    *
    * They are ids a client could in principle type, and that is safe rather than
    * sloppy: client ids are minted as decimal counters, these carry a letter and
@@ -2438,7 +2440,7 @@ class Relay {
 
     let mode = p.mode;
     if (mode !== '1v1' && mode !== 'coop_npc' && mode !== 'coop_pvp'
-        && mode !== 'wild') {
+        && mode !== 'wild' && mode !== 'coop_wild') {
       mode = memberIds.length <= 2 ? '1v1' : 'coop_pvp';
     }
 
@@ -2449,9 +2451,10 @@ class Relay {
       for (let i = 0; i < COOP_SIDE; i += 1) {
         npcIds.push(`n${id}${String.fromCharCode(97 + i)}`);
       }
-    } else if (mode === 'wild') {
-      // One human, one synthetic wild seat. Protocol-only: nothing here
-      // diverts an overworld encounter onto this path.
+    } else if (mode === 'wild' || mode === 'coop_wild') {
+      // One synthetic wild seat. Wild: one human. Coop_wild: two humans (party
+      // size is client-gated; hub opens with whatever members arrived).
+      // Protocol-only here — overworld divert for coop_wild is client-side.
       npcIds = [`n${id}a`];
     }
 
@@ -2459,7 +2462,7 @@ class Relay {
     if (!sides || typeof sides !== 'object') {
       if (mode === '1v1') {
         sides = { a: [memberIds[0]], b: [memberIds[1] || memberIds[0]] };
-      } else if (mode === 'coop_npc' || mode === 'wild') {
+      } else if (mode === 'coop_npc' || mode === 'wild' || mode === 'coop_wild') {
         sides = { a: memberIds.slice(), b: npcIds.slice() };
       } else {
         const mid = Math.ceil(memberIds.length / 2);
@@ -2509,7 +2512,7 @@ class Relay {
         && client.id === record.hostId && record.npcIds) {
       return record.npcIds[0];
     }
-    if (record.mode === 'wild' && party.side === 'b'
+    if ((record.mode === 'wild' || record.mode === 'coop_wild') && party.side === 'b'
         && client.id === record.hostId && record.npcIds) {
       return record.npcIds[0];
     }

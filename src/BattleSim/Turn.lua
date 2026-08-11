@@ -110,8 +110,20 @@ M.RESOLVE_TIMEOUT     = 30    -- Config.BATTLE_RESOLVE_TIMEOUT
 -- Below this the side-a member of a tied group moves first.
 M.TIE_BREAK_ROLL = 128
 
-M.MODES = { ["1v1"] = true, coop_npc = true, coop_pvp = true, wild = true }
+M.MODES = {
+  ["1v1"] = true, coop_npc = true, coop_pvp = true, wild = true, coop_wild = true,
+}
 M.SIDES = { "a", "b" }
+
+-- Roster cap per side. coop_wild is 2v1 (humans on a, wild on b); other modes
+-- keep a single per-side ceiling (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
+local function maxFighters(mode, side)
+  if mode == "coop_wild" then
+    return (side == "a") and M.FIGHTERS_PER_SIDE or 1
+  end
+  if mode == "1v1" or mode == "wild" then return 1 end
+  return M.FIGHTERS_PER_SIDE
+end
 
 -- Wire spells a condition as a three-letter token and Status.lua spells it as
 -- a word.  Both are accepted on the way in and the token is what goes back out
@@ -435,7 +447,6 @@ function M.create(opts)
   if type(opts) ~= "table" then return nil, "battle needs an options table" end
 
   local mode = M.MODES[opts.mode] and opts.mode or "1v1"
-  local perSide = (mode == "1v1" or mode == "wild") and 1 or M.FIGHTERS_PER_SIDE
 
   local self = setmetatable({
     id             = str(opts.id) or "battle",
@@ -480,7 +491,8 @@ function M.create(opts)
   for _, side in ipairs(M.SIDES) do
     local roster = type(sides[side]) == "table" and sides[side] or {}
     if #roster == 0 then return nil, "side " .. side .. " has nobody on it" end
-    if #roster > perSide then
+    local sideMax = maxFighters(mode, side)
+    if #roster > sideMax then
       return nil, "side " .. side .. " has more fighters than " .. mode .. " allows"
     end
     for index = 1, #roster do
@@ -1408,270 +1420,46 @@ function Battle:_clearTrapsFrom(slot)
 end
 
 function Battle:_resolveItems()
+  -- Non-ball items keep Gen1 array order (heals, dolls, vitamins, …). Balls
+  -- resolve in a second pass ordered by active-mon speed (fight tie policy),
+  -- so the faster thrower spends first and a successful catch aborts the rest.
   for _, fighter in ipairs(self.fighters) do
     if self.result then return end
     local choice = fighter.choice
     if choice and choice.action == "item" then
       local effect = Effects.itemEffect(choice.item)
-      -- Vitamins apply before the `item` event so `amount=1` can mean "Stat Exp
-      -- writeback is owed"; a failed vitamin still spends the bag stack (Gen1)
-      -- but must not bump save.statExp on the client.
-      local vitaminApplied, vitaminMon, vitaminResult = false, nil, nil
-      if effect and effect.vitamin then
-        local partyIdx = choice.slot or fighter.active
-        local mon = fighter.mons[partyIdx]
-        if mon and mon.hp > 0 then
-          local result = Effects.applyVitamin(mon, choice.item)
-          if result then
-            vitaminApplied, vitaminMon, vitaminResult = true, mon, result
-          end
-        end
-      end
-      local itemEv = { slot = fighter.slot, side = fighter.side, text = choice.item }
-      if vitaminApplied then itemEv.amount = 1 end
-      self:_emit("item", itemEv)
-      self:_say(fighter.name .. " used an item")
-      -- Spend after the announce, win or fail (Gen1 bag stack). noConsume
-      -- (Poké Flute) and seats with no bag sheet are left alone.
-      if not (effect and effect.noConsume) then
-        self:_spendBag(fighter, choice.item)
-      end
-      if not effect then
-        self:_say("But it failed")
-      elseif effect.ball then
-        if not Effects.isWildMode(self.mode) then
-          self:_say("But it failed")
-        else
-          local foe = self:_firstLivingFoe(fighter)
-          local target = foe and activeMon(foe)
-          if not target then
-            self:_say("But it failed")
-          else
-            local caught, shakes = Effects.catchAttempt(choice.item, target, self.rng)
-            if shakes and shakes > 0 and not caught then
-              self:_say("The ball shook")
-            end
-            if caught then
-              self:_say("Gotcha")
-              local finish = self:_finish("win", self:_sidePlayers(fighter.side),
-                self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch")
-              local sheet = Effects.caughtSheet(target)
-              if finish and sheet then finish.caught = sheet end
-            else
-              self:_say("It broke free")
-            end
-          end
-        end
-      elseif effect.pokeDoll then
-        if Effects.isWildMode(self.mode) then
-          self:_say("The wild pokemon ran away")
-          self:_finish("win", self:_sidePlayers(fighter.side),
-            self:_sidePlayers(fighter.side == "a" and "b" or "a"), "run")
-        else
-          self:_say("But it failed")
-        end
-      elseif effect.vitamin then
-        if not vitaminApplied then
-          self:_say("But it failed")
-        else
-          local mon, result = vitaminMon, vitaminResult
-          local label = ({
-            hp = "HEALTH POINTS", atk = "ATTACK", def = "DEFENSE",
-            spd = "SPEED", spc = "SPECIAL",
-          })[result.stat] or "STAT"
-          if result.stat == "hp" and result.delta > 0 then
-            self:_emit("drain", {
-              slot = fighter.slot, side = fighter.side,
-              amount = result.delta, hp = mon.hp,
-            })
-          elseif result.delta > 0 then
-            self:_emit("stat", {
-              slot = fighter.slot, side = fighter.side,
-              amount = mon.stats[result.stat],
-              text = mon.species .. "'s " .. label .. " rose",
-            })
-          end
-          self:_say(mon.species .. "'s " .. label .. " rose")
-        end
-      elseif effect.pokeFlute then
-        local woke = false
-        for _, seat in ipairs(self.fighters) do
-          for i = 1, #(seat.mons or {}) do
-            local mon = seat.mons[i]
-            if mon and mon.status == "sleep" then
-              mon.status, mon.statusTurns = nil, 0
-              woke = true
-              self:_emit("status", {
-                slot = seat.slot, side = seat.side,
-                text = mon.species .. " woke up",
-              })
-            end
-          end
-        end
-        if woke then
-          self:_say("All sleeping POKeMON woke up")
-        else
-          self:_say("Now, that's a catchy tune")
-        end
-      else
-        local partyIdx = choice.slot or fighter.active
-        local mon = fighter.mons[partyIdx]
-        if not mon then
-          self:_say("But it failed")
-        elseif effect.activeOnly and partyIdx ~= fighter.active then
-          self:_say("But it failed")
-        elseif effect.faintedOnly and mon.hp > 0 then
-          self:_say("But it failed")
-        elseif not effect.faintedOnly and mon.hp <= 0
-           and (effect.heal or effect.healFull or effect.clearStatuses
-                or effect.clearAllStatus or effect.ppRestore
-                or effect.ppRestoreAll) then
-          self:_say("But it failed")
-        else
-          local applied = false
-          if effect.xAccuracy then
-            mon.xAccuracy = true
-            self:_say(mon.species .. "'s hits will never miss")
-            applied = true
-          end
-          if effect.focusEnergy then
-            mon.focusEnergy = true
-            self:_say(mon.species .. " is getting pumped")
-            applied = true
-          end
-          if effect.mist then
-            mon.mist = true
-            self:_say(mon.species .. " is protected against stat changes")
-            applied = true
-          end
-          if effect.stage then
-            local stat = effect.stage.stat
-            local before = Effects.clampStage(mon.stages[stat])
-            if before >= Effects.STAGE_MAX then
-              self:_say("Nothing happened")
-            else
-              local after = Effects.clampStage(before + int(effect.stage.delta, 1))
-              mon.stages[stat] = after
-              local label = ({
-                atk = "ATTACK", def = "DEFENSE", spd = "SPEED",
-                spc = "SPECIAL", acc = "ACCURACY", eva = "EVASION",
-              })[stat] or "STAT"
-              self:_say(mon.species .. "'s " .. label .. " rose")
-              self:_emit("stat", {
-                slot = fighter.slot, side = fighter.side,
-                amount = after, text = mon.species .. "'s " .. label .. " rose",
-              })
-            end
-            applied = true
-          end
-          if effect.revive then
-            local amount = effect.revive
-            local hp = amount == 1 and mon.maxHp or max(1, floor(mon.maxHp * amount))
-            mon.hp = hp
-            mon.status, mon.statusTurns = nil, 0
-            self:_emit("drain", {
-              slot = fighter.slot, side = fighter.side,
-              amount = hp, hp = mon.hp,
-            })
-            self:_say(mon.species .. " was revived")
-            applied = true
-          end
-          if effect.ppRestore then
-            local move = mon.moves[choice.move]
-            if not move then
-              self:_say("But it failed")
-            else
-              local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
-              local before = move.pp
-              if effect.ppRestore == true then
-                move.pp = maxPp
-              else
-                move.pp = min(maxPp, move.pp + int(effect.ppRestore, 0))
-              end
-              if move.pp > before then
-                self:_say(mon.species .. "'s PP was restored")
-                applied = true
-              else
-                self:_say("But it failed")
-              end
-            end
-          end
-          if effect.ppRestoreAll then
-            local any = false
-            for i = 1, #(mon.moves or {}) do
-              local move = mon.moves[i]
-              if move then
-                local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
-                local before = move.pp
-                if effect.ppRestoreAll == true then
-                  move.pp = maxPp
-                else
-                  move.pp = min(maxPp, move.pp + int(effect.ppRestoreAll, 0))
-                end
-                if move.pp > before then any = true end
-              end
-            end
-            if any then
-              self:_say(mon.species .. "'s PP was restored")
-              applied = true
-            else
-              self:_say("But it failed")
-            end
-          end
-          local healed = false
-          if effect.healFull then
-            local before = mon.hp
-            mon.hp = mon.maxHp
-            if mon.hp > before then
-              self:_emit("drain", {
-                slot = fighter.slot, side = fighter.side,
-                amount = mon.hp - before, hp = mon.hp,
-              })
-              healed = true
-            end
-          elseif effect.heal and effect.heal > 0 and mon.hp < mon.maxHp then
-            self:_heal(fighter, mon, effect.heal)
-            healed = true
-          end
-          local cleared = false
-          if effect.clearAllStatus and mon.status then
-            mon.status, mon.statusTurns = nil, 0
-            cleared = true
-          elseif effect.clearStatuses and mon.status
-             and effect.clearStatuses[mon.status] then
-            mon.status, mon.statusTurns = nil, 0
-            cleared = true
-          end
-          if cleared then
-            self:_emit("status", {
-              slot = fighter.slot, side = fighter.side,
-              text = mon.species .. " recovered",
-            })
-          end
-          if not applied and not healed and not cleared then
-            self:_say("But it failed")
-          end
-        end
+      if not (effect and effect.ball) then
+        self:_resolveOneItem(fighter)
       end
     end
+  end
+
+  local balls = {}
+  for _, fighter in ipairs(self.fighters) do
+    local choice = fighter.choice
+    if choice and choice.action == "item" then
+      local effect = Effects.itemEffect(choice.item)
+      if effect and effect.ball then
+        local mon = activeMon(fighter)
+        balls[#balls + 1] = {
+          fighter = fighter,
+          speed = mon and self:_speedOf(fighter, mon) or 0,
+          order = #balls + 1,
+        }
+      end
+    end
+  end
+  self:_sortActorsBySpeed(balls)
+  for _, actor in ipairs(balls) do
+    if self.result then return end
+    self:_resolveOneItem(actor.fighter)
   end
 end
 
-function Battle:_resolveFights()
-  local actors = {}
-  for _, fighter in ipairs(self.fighters) do
-    local choice = fighter.choice
-    local mon = activeMon(fighter)
-    if choice and choice.action == "fight" and mon then
-      actors[#actors + 1] = {
-        fighter = fighter,
-        mon = mon,                      -- pinned: see the skip in the loop
-        speed = self:_speedOf(fighter, mon),
-        order = #actors + 1,
-      }
-    end
-  end
-  if #actors == 0 then return end
+-- Sort actors by active-mon speed (desc), then field order; tied groups flip on
+-- one RNG byte >= TIE_BREAK_ROLL. Shared by fights and ball throws.
+function Battle:_sortActorsBySpeed(actors)
+  if #actors <= 1 then return end
 
   table.sort(actors, function(x, y)
     if x.speed ~= y.speed then return x.speed > y.speed end
@@ -1693,6 +1481,273 @@ function Battle:_resolveFights()
     end
     i = j + 1
   end
+end
+
+function Battle:_resolveOneItem(fighter)
+  local choice = fighter.choice
+  if not (choice and choice.action == "item") then return end
+
+  local effect = Effects.itemEffect(choice.item)
+  -- Vitamins apply before the `item` event so `amount=1` can mean "Stat Exp
+  -- writeback is owed"; a failed vitamin still spends the bag stack (Gen1)
+  -- but must not bump save.statExp on the client.
+  local vitaminApplied, vitaminMon, vitaminResult = false, nil, nil
+  if effect and effect.vitamin then
+    local partyIdx = choice.slot or fighter.active
+    local mon = fighter.mons[partyIdx]
+    if mon and mon.hp > 0 then
+      local result = Effects.applyVitamin(mon, choice.item)
+      if result then
+        vitaminApplied, vitaminMon, vitaminResult = true, mon, result
+      end
+    end
+  end
+  local itemEv = { slot = fighter.slot, side = fighter.side, text = choice.item }
+  if vitaminApplied then itemEv.amount = 1 end
+  self:_emit("item", itemEv)
+  self:_say(fighter.name .. " used an item")
+  -- Spend after the announce, win or fail (Gen1 bag stack). noConsume
+  -- (Poké Flute) and seats with no bag sheet are left alone.
+  if not (effect and effect.noConsume) then
+    self:_spendBag(fighter, choice.item)
+  end
+  if not effect then
+    self:_say("But it failed")
+  elseif effect.ball then
+    if not Effects.isWildMode(self.mode) then
+      self:_say("But it failed")
+    else
+      local foe = self:_firstLivingFoe(fighter)
+      local target = foe and activeMon(foe)
+      if not target then
+        self:_say("But it failed")
+      else
+        local caught, shakes = Effects.catchAttempt(choice.item, target, self.rng)
+        if shakes and shakes > 0 and not caught then
+          self:_say("The ball shook")
+        end
+        if caught then
+          self:_say("Gotcha")
+          local finish = self:_finish("win", self:_sidePlayers(fighter.side),
+            self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch")
+          local sheet = Effects.caughtSheet(target)
+          if finish and sheet then finish.caught = sheet end
+          if finish then finish.catcher = fighter.playerId end
+        else
+          self:_say("It broke free")
+        end
+      end
+    end
+  elseif effect.pokeDoll then
+    if Effects.isWildMode(self.mode) then
+      self:_say("The wild pokemon ran away")
+      self:_finish("win", self:_sidePlayers(fighter.side),
+        self:_sidePlayers(fighter.side == "a" and "b" or "a"), "run")
+    else
+      self:_say("But it failed")
+    end
+  elseif effect.vitamin then
+    if not vitaminApplied then
+      self:_say("But it failed")
+    else
+      local mon, result = vitaminMon, vitaminResult
+      local label = ({
+        hp = "HEALTH POINTS", atk = "ATTACK", def = "DEFENSE",
+        spd = "SPEED", spc = "SPECIAL",
+      })[result.stat] or "STAT"
+      if result.stat == "hp" and result.delta > 0 then
+        self:_emit("drain", {
+          slot = fighter.slot, side = fighter.side,
+          amount = result.delta, hp = mon.hp,
+        })
+      elseif result.delta > 0 then
+        self:_emit("stat", {
+          slot = fighter.slot, side = fighter.side,
+          amount = mon.stats[result.stat],
+          text = mon.species .. "'s " .. label .. " rose",
+        })
+      end
+      self:_say(mon.species .. "'s " .. label .. " rose")
+    end
+  elseif effect.pokeFlute then
+    local woke = false
+    for _, seat in ipairs(self.fighters) do
+      for i = 1, #(seat.mons or {}) do
+        local mon = seat.mons[i]
+        if mon and mon.status == "sleep" then
+          mon.status, mon.statusTurns = nil, 0
+          woke = true
+          self:_emit("status", {
+            slot = seat.slot, side = seat.side,
+            text = mon.species .. " woke up",
+          })
+        end
+      end
+    end
+    if woke then
+      self:_say("All sleeping POKeMON woke up")
+    else
+      self:_say("Now, that's a catchy tune")
+    end
+  else
+    local partyIdx = choice.slot or fighter.active
+    local mon = fighter.mons[partyIdx]
+    if not mon then
+      self:_say("But it failed")
+    elseif effect.activeOnly and partyIdx ~= fighter.active then
+      self:_say("But it failed")
+    elseif effect.faintedOnly and mon.hp > 0 then
+      self:_say("But it failed")
+    elseif not effect.faintedOnly and mon.hp <= 0
+       and (effect.heal or effect.healFull or effect.clearStatuses
+            or effect.clearAllStatus or effect.ppRestore
+            or effect.ppRestoreAll) then
+      self:_say("But it failed")
+    else
+      local applied = false
+      if effect.xAccuracy then
+        mon.xAccuracy = true
+        self:_say(mon.species .. "'s hits will never miss")
+        applied = true
+      end
+      if effect.focusEnergy then
+        mon.focusEnergy = true
+        self:_say(mon.species .. " is getting pumped")
+        applied = true
+      end
+      if effect.mist then
+        mon.mist = true
+        self:_say(mon.species .. " is protected against stat changes")
+        applied = true
+      end
+      if effect.stage then
+        local stat = effect.stage.stat
+        local before = Effects.clampStage(mon.stages[stat])
+        if before >= Effects.STAGE_MAX then
+          self:_say("Nothing happened")
+        else
+          local after = Effects.clampStage(before + int(effect.stage.delta, 1))
+          mon.stages[stat] = after
+          local label = ({
+            atk = "ATTACK", def = "DEFENSE", spd = "SPEED",
+            spc = "SPECIAL", acc = "ACCURACY", eva = "EVASION",
+          })[stat] or "STAT"
+          self:_say(mon.species .. "'s " .. label .. " rose")
+          self:_emit("stat", {
+            slot = fighter.slot, side = fighter.side,
+            amount = after, text = mon.species .. "'s " .. label .. " rose",
+          })
+        end
+        applied = true
+      end
+      if effect.revive then
+        local amount = effect.revive
+        local hp = amount == 1 and mon.maxHp or max(1, floor(mon.maxHp * amount))
+        mon.hp = hp
+        mon.status, mon.statusTurns = nil, 0
+        self:_emit("drain", {
+          slot = fighter.slot, side = fighter.side,
+          amount = hp, hp = mon.hp,
+        })
+        self:_say(mon.species .. " was revived")
+        applied = true
+      end
+      if effect.ppRestore then
+        local move = mon.moves[choice.move]
+        if not move then
+          self:_say("But it failed")
+        else
+          local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
+          local before = move.pp
+          if effect.ppRestore == true then
+            move.pp = maxPp
+          else
+            move.pp = min(maxPp, move.pp + int(effect.ppRestore, 0))
+          end
+          if move.pp > before then
+            self:_say(mon.species .. "'s PP was restored")
+            applied = true
+          else
+            self:_say("But it failed")
+          end
+        end
+      end
+      if effect.ppRestoreAll then
+        local any = false
+        for i = 1, #(mon.moves or {}) do
+          local move = mon.moves[i]
+          if move then
+            local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
+            local before = move.pp
+            if effect.ppRestoreAll == true then
+              move.pp = maxPp
+            else
+              move.pp = min(maxPp, move.pp + int(effect.ppRestoreAll, 0))
+            end
+            if move.pp > before then any = true end
+          end
+        end
+        if any then
+          self:_say(mon.species .. "'s PP was restored")
+          applied = true
+        else
+          self:_say("But it failed")
+        end
+      end
+      local healed = false
+      if effect.healFull then
+        local before = mon.hp
+        mon.hp = mon.maxHp
+        if mon.hp > before then
+          self:_emit("drain", {
+            slot = fighter.slot, side = fighter.side,
+            amount = mon.hp - before, hp = mon.hp,
+          })
+          healed = true
+        end
+      elseif effect.heal and effect.heal > 0 and mon.hp < mon.maxHp then
+        self:_heal(fighter, mon, effect.heal)
+        healed = true
+      end
+      local cleared = false
+      if effect.clearAllStatus and mon.status then
+        mon.status, mon.statusTurns = nil, 0
+        cleared = true
+      elseif effect.clearStatuses and mon.status
+         and effect.clearStatuses[mon.status] then
+        mon.status, mon.statusTurns = nil, 0
+        cleared = true
+      end
+      if cleared then
+        self:_emit("status", {
+          slot = fighter.slot, side = fighter.side,
+          text = mon.species .. " recovered",
+        })
+      end
+      if not applied and not healed and not cleared then
+        self:_say("But it failed")
+      end
+    end
+  end
+end
+
+function Battle:_resolveFights()
+  local actors = {}
+  for _, fighter in ipairs(self.fighters) do
+    local choice = fighter.choice
+    local mon = activeMon(fighter)
+    if choice and choice.action == "fight" and mon then
+      actors[#actors + 1] = {
+        fighter = fighter,
+        mon = mon,                      -- pinned: see the skip in the loop
+        speed = self:_speedOf(fighter, mon),
+        order = #actors + 1,
+      }
+    end
+  end
+  if #actors == 0 then return end
+
+  self:_sortActorsBySpeed(actors)
 
   for _, actor in ipairs(actors) do
     if self.result then break end

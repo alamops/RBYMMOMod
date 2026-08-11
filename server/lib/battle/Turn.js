@@ -87,8 +87,20 @@ const RESOLVE_TIMEOUT = 30; // Config.BATTLE_RESOLVE_TIMEOUT
 // Below this the side-a member of a tied group moves first.
 const TIE_BREAK_ROLL = 128;
 
-const MODES = { '1v1': true, coop_npc: true, coop_pvp: true, wild: true };
+const MODES = {
+  '1v1': true, coop_npc: true, coop_pvp: true, wild: true, coop_wild: true,
+};
 const SIDES = ['a', 'b'];
+
+// Roster cap per side. coop_wild is 2v1 (humans on a, wild on b); other modes
+// keep a single per-side ceiling (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
+function maxFighters(mode, side) {
+  if (mode === 'coop_wild') {
+    return side === 'a' ? FIGHTERS_PER_SIDE : 1;
+  }
+  if (mode === '1v1' || mode === 'wild') return 1;
+  return FIGHTERS_PER_SIDE;
+}
 
 // Auto-pick priorities (twin of Turn.lua AUTO_* tables).
 const AUTO_STATUS_PRI = {
@@ -1353,276 +1365,46 @@ class Battle {
   }
 
   _resolveItems() {
+    // Non-ball items keep Gen1 array order (heals, dolls, vitamins, …). Balls
+    // resolve in a second pass ordered by active-mon speed (fight tie policy),
+    // so the faster thrower spends first and a successful catch aborts the rest.
     for (const fighter of this.fighters) {
       if (this.result) return;
       const choice = fighter.choice;
       if (choice && choice.action === 'item') {
         const effect = Effects.itemEffect(choice.item);
-        // Vitamins apply before the `item` event so `amount=1` can mean
-        // "Stat Exp writeback is owed"; a failed vitamin still spends the bag
-        // stack (Gen1) but must not bump save.statExp on the client.
-        let vitaminApplied = false;
-        let vitaminMon = null;
-        let vitaminResult = null;
-        if (effect && effect.vitamin) {
-          const partyIdx = choice.slot != null ? choice.slot : fighter.active;
-          const mon = monAt(fighter, partyIdx);
-          if (mon && mon.hp > 0) {
-            const result = Effects.applyVitamin(mon, choice.item);
-            if (result) {
-              vitaminApplied = true;
-              vitaminMon = mon;
-              vitaminResult = result;
-            }
-          }
-        }
-        const itemEv = {
-          slot: fighter.slot, side: fighter.side, text: choice.item,
-        };
-        if (vitaminApplied) itemEv.amount = 1;
-        this._emit('item', itemEv);
-        this._say(`${fighter.name} used an item`);
-        // Spend after the announce, win or fail (Gen1 bag stack). noConsume
-        // (Poké Flute) and seats with no bag sheet are left alone.
-        if (!(effect && effect.noConsume)) {
-          this._spendBag(fighter, choice.item);
-        }
-        if (!effect) {
-          this._say('But it failed');
-        } else if (effect.ball) {
-          if (!Effects.isWildMode(this.mode)) {
-            this._say('But it failed');
-          } else {
-            const foe = this._firstLivingFoe(fighter);
-            const target = foe && activeMon(foe);
-            if (!target) {
-              this._say('But it failed');
-            } else {
-              const result = Effects.catchAttempt(choice.item, target, this.rng);
-              if (result.shakes > 0 && !result.caught) this._say('The ball shook');
-              if (result.caught) {
-                this._say('Gotcha');
-                const finish = this._finish(
-                  'win',
-                  this._sidePlayers(fighter.side),
-                  this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'),
-                  'catch',
-                );
-                const sheet = Effects.caughtSheet(target);
-                if (finish && sheet) finish.caught = sheet;
-              } else {
-                this._say('It broke free');
-              }
-            }
-          }
-        } else if (effect.pokeDoll) {
-          if (Effects.isWildMode(this.mode)) {
-            this._say('The wild pokemon ran away');
-            this._finish(
-              'win',
-              this._sidePlayers(fighter.side),
-              this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'),
-              'run',
-            );
-          } else {
-            this._say('But it failed');
-          }
-        } else if (effect.vitamin) {
-          if (!vitaminApplied) {
-            this._say('But it failed');
-          } else {
-            const mon = vitaminMon;
-            const result = vitaminResult;
-            const label = ({
-              hp: 'HEALTH POINTS', atk: 'ATTACK', def: 'DEFENSE',
-              spd: 'SPEED', spc: 'SPECIAL',
-            })[result.stat] || 'STAT';
-            if (result.stat === 'hp' && result.delta > 0) {
-              this._emit('drain', {
-                slot: fighter.slot, side: fighter.side,
-                amount: result.delta, hp: mon.hp,
-              });
-            } else if (result.delta > 0) {
-              this._emit('stat', {
-                slot: fighter.slot, side: fighter.side,
-                amount: mon.stats[result.stat],
-                text: `${mon.species}'s ${label} rose`,
-              });
-            }
-            this._say(`${mon.species}'s ${label} rose`);
-          }
-        } else if (effect.pokeFlute) {
-          let woke = false;
-          for (const seat of this.fighters) {
-            for (const mon of seat.mons || []) {
-              if (mon && mon.status === 'sleep') {
-                mon.status = null;
-                mon.statusTurns = 0;
-                woke = true;
-                this._emit('status', {
-                  slot: seat.slot, side: seat.side,
-                  text: `${mon.species} woke up`,
-                });
-              }
-            }
-          }
-          if (woke) this._say('All sleeping POKeMON woke up');
-          else this._say("Now, that's a catchy tune");
-        } else {
-          const partyIdx = choice.slot != null ? choice.slot : fighter.active;
-          const mon = monAt(fighter, partyIdx);
-          if (!mon) {
-            this._say('But it failed');
-          } else if (effect.activeOnly && partyIdx !== fighter.active) {
-            this._say('But it failed');
-          } else if (effect.faintedOnly && mon.hp > 0) {
-            this._say('But it failed');
-          } else if (!effect.faintedOnly && mon.hp <= 0
-                     && (effect.heal || effect.healFull || effect.clearStatuses
-                         || effect.clearAllStatus || effect.ppRestore
-                         || effect.ppRestoreAll)) {
-            this._say('But it failed');
-          } else {
-            let applied = false;
-            if (effect.xAccuracy) {
-              mon.xAccuracy = true;
-              this._say(`${mon.species}'s hits will never miss`);
-              applied = true;
-            }
-            if (effect.focusEnergy) {
-              mon.focusEnergy = true;
-              this._say(`${mon.species} is getting pumped`);
-              applied = true;
-            }
-            if (effect.mist) {
-              mon.mist = true;
-              this._say(`${mon.species} is protected against stat changes`);
-              applied = true;
-            }
-            if (effect.stage) {
-              const stat = effect.stage.stat;
-              const before = Effects.clampStage(mon.stages[stat]);
-              if (before >= Effects.STAGE_MAX) {
-                this._say('Nothing happened');
-              } else {
-                const after = Effects.clampStage(before + int(effect.stage.delta, 1));
-                mon.stages[stat] = after;
-                const label = ({
-                  atk: 'ATTACK', def: 'DEFENSE', spd: 'SPEED',
-                  spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVASION',
-                })[stat] || 'STAT';
-                this._say(`${mon.species}'s ${label} rose`);
-                this._emit('stat', {
-                  slot: fighter.slot, side: fighter.side,
-                  amount: after, text: `${mon.species}'s ${label} rose`,
-                });
-              }
-              applied = true;
-            }
-            if (effect.revive) {
-              const amount = effect.revive;
-              const hp = amount === 1 ? mon.maxHp
-                : Math.max(1, Math.floor(mon.maxHp * amount));
-              mon.hp = hp;
-              mon.status = null;
-              mon.statusTurns = 0;
-              this._emit('drain', {
-                slot: fighter.slot, side: fighter.side,
-                amount: hp, hp: mon.hp,
-              });
-              this._say(`${mon.species} was revived`);
-              applied = true;
-            }
-            if (effect.ppRestore) {
-              const move = mon.moves[choice.move - 1];
-              if (!move) {
-                this._say('But it failed');
-              } else {
-                const maxPp = Math.max(int(move.maxPp, move.pp), move.pp);
-                const before = move.pp;
-                if (effect.ppRestore === true) move.pp = maxPp;
-                else move.pp = Math.min(maxPp, move.pp + int(effect.ppRestore, 0));
-                if (move.pp > before) {
-                  this._say(`${mon.species}'s PP was restored`);
-                  applied = true;
-                } else {
-                  this._say('But it failed');
-                }
-              }
-            }
-            if (effect.ppRestoreAll) {
-              let any = false;
-              for (const move of mon.moves || []) {
-                if (!move) continue;
-                const maxPp = Math.max(int(move.maxPp, move.pp), move.pp);
-                const before = move.pp;
-                if (effect.ppRestoreAll === true) move.pp = maxPp;
-                else move.pp = Math.min(maxPp, move.pp + int(effect.ppRestoreAll, 0));
-                if (move.pp > before) any = true;
-              }
-              if (any) {
-                this._say(`${mon.species}'s PP was restored`);
-                applied = true;
-              } else {
-                this._say('But it failed');
-              }
-            }
-            let healed = false;
-            if (effect.healFull) {
-              const before = mon.hp;
-              mon.hp = mon.maxHp;
-              if (mon.hp > before) {
-                this._emit('drain', {
-                  slot: fighter.slot, side: fighter.side,
-                  amount: mon.hp - before, hp: mon.hp,
-                });
-                healed = true;
-              }
-            } else if (effect.heal && effect.heal > 0 && mon.hp < mon.maxHp) {
-              this._heal(fighter, mon, effect.heal);
-              healed = true;
-            }
-            let cleared = false;
-            if (effect.clearAllStatus && mon.status) {
-              mon.status = null;
-              mon.statusTurns = 0;
-              cleared = true;
-            } else if (effect.clearStatuses && mon.status
-                       && effect.clearStatuses[mon.status]) {
-              mon.status = null;
-              mon.statusTurns = 0;
-              cleared = true;
-            }
-            if (cleared) {
-              this._emit('status', {
-                slot: fighter.slot, side: fighter.side,
-                text: `${mon.species} recovered`,
-              });
-            }
-            if (!applied && !healed && !cleared) {
-              this._say('But it failed');
-            }
-          }
+        if (!(effect && effect.ball)) {
+          this._resolveOneItem(fighter);
         }
       }
+    }
+
+    const balls = [];
+    for (const fighter of this.fighters) {
+      const choice = fighter.choice;
+      if (choice && choice.action === 'item') {
+        const effect = Effects.itemEffect(choice.item);
+        if (effect && effect.ball) {
+          const mon = activeMon(fighter);
+          balls.push({
+            fighter,
+            speed: mon ? this._speedOf(fighter, mon) : 0,
+            order: balls.length + 1,
+          });
+        }
+      }
+    }
+    this._sortActorsBySpeed(balls);
+    for (const actor of balls) {
+      if (this.result) return;
+      this._resolveOneItem(actor.fighter);
     }
   }
 
-  _resolveFights() {
-    const actors = [];
-    for (const fighter of this.fighters) {
-      const choice = fighter.choice;
-      const mon = activeMon(fighter);
-      if (choice && choice.action === 'fight' && mon) {
-        actors.push({
-          fighter,
-          mon, // pinned: see the skip in the loop
-          speed: this._speedOf(fighter, mon),
-          order: actors.length + 1,
-        });
-      }
-    }
-    if (actors.length === 0) return;
+  // Sort actors by active-mon speed (desc), then field order; tied groups flip
+  // on one RNG byte >= TIE_BREAK_ROLL. Shared by fights and ball throws.
+  _sortActorsBySpeed(actors) {
+    if (actors.length <= 1) return;
 
     actors.sort((x, y) => {
       if (x.speed !== y.speed) return y.speed - x.speed;
@@ -1645,6 +1427,279 @@ class Battle {
       }
       i = j + 1;
     }
+  }
+
+  _resolveOneItem(fighter) {
+    const choice = fighter.choice;
+    if (!(choice && choice.action === 'item')) return;
+
+    const effect = Effects.itemEffect(choice.item);
+    // Vitamins apply before the `item` event so `amount=1` can mean
+    // "Stat Exp writeback is owed"; a failed vitamin still spends the bag
+    // stack (Gen1) but must not bump save.statExp on the client.
+    let vitaminApplied = false;
+    let vitaminMon = null;
+    let vitaminResult = null;
+    if (effect && effect.vitamin) {
+      const partyIdx = choice.slot != null ? choice.slot : fighter.active;
+      const mon = monAt(fighter, partyIdx);
+      if (mon && mon.hp > 0) {
+        const result = Effects.applyVitamin(mon, choice.item);
+        if (result) {
+          vitaminApplied = true;
+          vitaminMon = mon;
+          vitaminResult = result;
+        }
+      }
+    }
+    const itemEv = {
+      slot: fighter.slot, side: fighter.side, text: choice.item,
+    };
+    if (vitaminApplied) itemEv.amount = 1;
+    this._emit('item', itemEv);
+    this._say(`${fighter.name} used an item`);
+    // Spend after the announce, win or fail (Gen1 bag stack). noConsume
+    // (Poké Flute) and seats with no bag sheet are left alone.
+    if (!(effect && effect.noConsume)) {
+      this._spendBag(fighter, choice.item);
+    }
+    if (!effect) {
+      this._say('But it failed');
+    } else if (effect.ball) {
+      if (!Effects.isWildMode(this.mode)) {
+        this._say('But it failed');
+      } else {
+        const foe = this._firstLivingFoe(fighter);
+        const target = foe && activeMon(foe);
+        if (!target) {
+          this._say('But it failed');
+        } else {
+          const result = Effects.catchAttempt(choice.item, target, this.rng);
+          if (result.shakes > 0 && !result.caught) this._say('The ball shook');
+          if (result.caught) {
+            this._say('Gotcha');
+            const finish = this._finish(
+              'win',
+              this._sidePlayers(fighter.side),
+              this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'),
+              'catch',
+            );
+            const sheet = Effects.caughtSheet(target);
+            if (finish && sheet) finish.caught = sheet;
+            if (finish) finish.catcher = fighter.playerId;
+          } else {
+            this._say('It broke free');
+          }
+        }
+      }
+    } else if (effect.pokeDoll) {
+      if (Effects.isWildMode(this.mode)) {
+        this._say('The wild pokemon ran away');
+        this._finish(
+          'win',
+          this._sidePlayers(fighter.side),
+          this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'),
+          'run',
+        );
+      } else {
+        this._say('But it failed');
+      }
+    } else if (effect.vitamin) {
+      if (!vitaminApplied) {
+        this._say('But it failed');
+      } else {
+        const mon = vitaminMon;
+        const result = vitaminResult;
+        const label = ({
+          hp: 'HEALTH POINTS', atk: 'ATTACK', def: 'DEFENSE',
+          spd: 'SPEED', spc: 'SPECIAL',
+        })[result.stat] || 'STAT';
+        if (result.stat === 'hp' && result.delta > 0) {
+          this._emit('drain', {
+            slot: fighter.slot, side: fighter.side,
+            amount: result.delta, hp: mon.hp,
+          });
+        } else if (result.delta > 0) {
+          this._emit('stat', {
+            slot: fighter.slot, side: fighter.side,
+            amount: mon.stats[result.stat],
+            text: `${mon.species}'s ${label} rose`,
+          });
+        }
+        this._say(`${mon.species}'s ${label} rose`);
+      }
+    } else if (effect.pokeFlute) {
+      let woke = false;
+      for (const seat of this.fighters) {
+        for (const mon of seat.mons || []) {
+          if (mon && mon.status === 'sleep') {
+            mon.status = null;
+            mon.statusTurns = 0;
+            woke = true;
+            this._emit('status', {
+              slot: seat.slot, side: seat.side,
+              text: `${mon.species} woke up`,
+            });
+          }
+        }
+      }
+      if (woke) this._say('All sleeping POKeMON woke up');
+      else this._say("Now, that's a catchy tune");
+    } else {
+      const partyIdx = choice.slot != null ? choice.slot : fighter.active;
+      const mon = monAt(fighter, partyIdx);
+      if (!mon) {
+        this._say('But it failed');
+      } else if (effect.activeOnly && partyIdx !== fighter.active) {
+        this._say('But it failed');
+      } else if (effect.faintedOnly && mon.hp > 0) {
+        this._say('But it failed');
+      } else if (!effect.faintedOnly && mon.hp <= 0
+                 && (effect.heal || effect.healFull || effect.clearStatuses
+                     || effect.clearAllStatus || effect.ppRestore
+                     || effect.ppRestoreAll)) {
+        this._say('But it failed');
+      } else {
+        let applied = false;
+        if (effect.xAccuracy) {
+          mon.xAccuracy = true;
+          this._say(`${mon.species}'s hits will never miss`);
+          applied = true;
+        }
+        if (effect.focusEnergy) {
+          mon.focusEnergy = true;
+          this._say(`${mon.species} is getting pumped`);
+          applied = true;
+        }
+        if (effect.mist) {
+          mon.mist = true;
+          this._say(`${mon.species} is protected against stat changes`);
+          applied = true;
+        }
+        if (effect.stage) {
+          const stat = effect.stage.stat;
+          const before = Effects.clampStage(mon.stages[stat]);
+          if (before >= Effects.STAGE_MAX) {
+            this._say('Nothing happened');
+          } else {
+            const after = Effects.clampStage(before + int(effect.stage.delta, 1));
+            mon.stages[stat] = after;
+            const label = ({
+              atk: 'ATTACK', def: 'DEFENSE', spd: 'SPEED',
+              spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVASION',
+            })[stat] || 'STAT';
+            this._say(`${mon.species}'s ${label} rose`);
+            this._emit('stat', {
+              slot: fighter.slot, side: fighter.side,
+              amount: after, text: `${mon.species}'s ${label} rose`,
+            });
+          }
+          applied = true;
+        }
+        if (effect.revive) {
+          const amount = effect.revive;
+          const hp = amount === 1 ? mon.maxHp
+            : Math.max(1, Math.floor(mon.maxHp * amount));
+          mon.hp = hp;
+          mon.status = null;
+          mon.statusTurns = 0;
+          this._emit('drain', {
+            slot: fighter.slot, side: fighter.side,
+            amount: hp, hp: mon.hp,
+          });
+          this._say(`${mon.species} was revived`);
+          applied = true;
+        }
+        if (effect.ppRestore) {
+          const move = mon.moves[choice.move - 1];
+          if (!move) {
+            this._say('But it failed');
+          } else {
+            const maxPp = Math.max(int(move.maxPp, move.pp), move.pp);
+            const before = move.pp;
+            if (effect.ppRestore === true) move.pp = maxPp;
+            else move.pp = Math.min(maxPp, move.pp + int(effect.ppRestore, 0));
+            if (move.pp > before) {
+              this._say(`${mon.species}'s PP was restored`);
+              applied = true;
+            } else {
+              this._say('But it failed');
+            }
+          }
+        }
+        if (effect.ppRestoreAll) {
+          let any = false;
+          for (const move of mon.moves || []) {
+            if (!move) continue;
+            const maxPp = Math.max(int(move.maxPp, move.pp), move.pp);
+            const before = move.pp;
+            if (effect.ppRestoreAll === true) move.pp = maxPp;
+            else move.pp = Math.min(maxPp, move.pp + int(effect.ppRestoreAll, 0));
+            if (move.pp > before) any = true;
+          }
+          if (any) {
+            this._say(`${mon.species}'s PP was restored`);
+            applied = true;
+          } else {
+            this._say('But it failed');
+          }
+        }
+        let healed = false;
+        if (effect.healFull) {
+          const before = mon.hp;
+          mon.hp = mon.maxHp;
+          if (mon.hp > before) {
+            this._emit('drain', {
+              slot: fighter.slot, side: fighter.side,
+              amount: mon.hp - before, hp: mon.hp,
+            });
+            healed = true;
+          }
+        } else if (effect.heal && effect.heal > 0 && mon.hp < mon.maxHp) {
+          this._heal(fighter, mon, effect.heal);
+          healed = true;
+        }
+        let cleared = false;
+        if (effect.clearAllStatus && mon.status) {
+          mon.status = null;
+          mon.statusTurns = 0;
+          cleared = true;
+        } else if (effect.clearStatuses && mon.status
+                   && effect.clearStatuses[mon.status]) {
+          mon.status = null;
+          mon.statusTurns = 0;
+          cleared = true;
+        }
+        if (cleared) {
+          this._emit('status', {
+            slot: fighter.slot, side: fighter.side,
+            text: `${mon.species} recovered`,
+          });
+        }
+        if (!applied && !healed && !cleared) {
+          this._say('But it failed');
+        }
+      }
+    }
+  }
+
+  _resolveFights() {
+    const actors = [];
+    for (const fighter of this.fighters) {
+      const choice = fighter.choice;
+      const mon = activeMon(fighter);
+      if (choice && choice.action === 'fight' && mon) {
+        actors.push({
+          fighter,
+          mon, // pinned: see the skip in the loop
+          speed: this._speedOf(fighter, mon),
+          order: actors.length + 1,
+        });
+      }
+    }
+    if (actors.length === 0) return;
+
+    this._sortActorsBySpeed(actors);
 
     for (const actor of actors) {
       if (this.result) break;
@@ -2554,13 +2609,13 @@ function attempt(opts) {
   if (!isTable(opts)) return refuse('battle needs an options table');
 
   const self = new Battle(opts);
-  const perSide = (self.mode === '1v1' || self.mode === 'wild') ? 1 : FIGHTERS_PER_SIDE;
 
   const sides = isTable(opts.sides) ? opts.sides : {};
   for (const side of SIDES) {
     const roster = Array.isArray(sides[side]) ? sides[side] : [];
     if (roster.length === 0) return refuse(`side ${side} has nobody on it`);
-    if (roster.length > perSide) {
+    const sideMax = maxFighters(self.mode, side);
+    if (roster.length > sideMax) {
       return refuse(`side ${side} has more fighters than ${self.mode} allows`);
     }
     for (let index = 1; index <= roster.length; index += 1) {

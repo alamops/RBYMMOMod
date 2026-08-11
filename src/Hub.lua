@@ -1249,10 +1249,11 @@ end
 -- Open the hub's record of a fight.  The sim is still nil: a ruleset and every
 -- required party have to arrive before tryStartSim takes it over.
 --
--- `npcIds` is set for coop_npc (**two** synthetic seats) and wild (**one**
--- seat). Coop_npc: two players meet two monsters. Wild: one player meets one
--- wild mon on a hub NPC seat (protocol-only — no overworld divert). The host
--- uploads the NPC team as side "b".
+-- `npcIds` is set for coop_npc (**two** synthetic seats) and for wild /
+-- coop_wild (**one** seat). Coop_npc: two players meet two monsters. Wild: one
+-- player meets one wild mon on a hub NPC seat (protocol-only — no overworld
+-- divert). Coop_wild: two humans on side a, one wild seat on side b (overworld
+-- divert is client-side). The host uploads the NPC / wild team as side "b".
 --
 -- They are ids a client could in principle type, and that is safe rather than
 -- sloppy: client ids are minted as decimal counters, these carry a letter and
@@ -1270,7 +1271,8 @@ function M:openMediatedBattle(id, plan)
   end
   if #memberIds == 0 then return nil end
 
-  local mode = Turn.MODES[plan.mode] and plan.mode
+  -- Accept coop_wild explicitly so seating works before Turn.MODES gains it (T3).
+  local mode = (Turn.MODES[plan.mode] or plan.mode == "coop_wild") and plan.mode
     or ((#memberIds <= 2) and "1v1" or "coop_pvp")
   local hostId = plan.hostId or memberIds[1]
   local npcIds = nil
@@ -1279,9 +1281,10 @@ function M:openMediatedBattle(id, plan)
     for i = 1, Config.COOP_SIDE do
       npcIds[i] = "n" .. tostring(id) .. string.char(96 + i)
     end
-  elseif mode == "wild" then
-    -- One human, one synthetic wild seat. Protocol-only: nothing here diverts
-    -- an overworld encounter onto this path.
+  elseif mode == "wild" or mode == "coop_wild" then
+    -- One synthetic wild seat. Wild: one human. Coop_wild: two humans (party
+    -- size is client-gated; hub opens with whatever members arrived).
+    -- Protocol-only here — overworld divert for coop_wild is client-side.
     npcIds = { "n" .. tostring(id) .. "a" }
   end
 
@@ -1289,7 +1292,7 @@ function M:openMediatedBattle(id, plan)
   if not sides then
     if mode == "1v1" then
       sides = { a = { memberIds[1] }, b = { memberIds[2] or memberIds[1] } }
-    elseif mode == "coop_npc" or mode == "wild" then
+    elseif mode == "coop_npc" or mode == "wild" or mode == "coop_wild" then
       sides = { a = memberIds, b = npcIds }
     else
       local mid = math.ceil(#memberIds / 2)
@@ -1355,7 +1358,7 @@ function M:battleSeat(record, client, party)
      and client.id == record.hostId and record.npcIds then
     return record.npcIds[1]
   end
-  if record.mode == "wild" and party.side == "b"
+  if (record.mode == "wild" or record.mode == "coop_wild") and party.side == "b"
      and client.id == record.hostId and record.npcIds then
     return record.npcIds[1]
   end
