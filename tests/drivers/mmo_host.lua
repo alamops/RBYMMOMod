@@ -510,6 +510,108 @@ return function(game)
       return
     end
 
+    -- ------- party wild (focused e2e; see run-party-wild-e2e.sh)
+    --
+    -- Form a party, stage a wild on the host, assert coop_wild divert and
+    -- hub-refereed 2v1, then end with a short driven fight. Skips trade,
+    -- link battle, and the coop_npc trainer leg.
+    if os.getenv("MMO_PARTY_WILD_E2E") == "1" then
+      local announced = H.listenForModEvents(game, {
+        "mod.rby_mmo.coop_battle_started",
+        "mod.rby_mmo.coop_battle_ended",
+      })
+
+      H.await(game, "guest_ready_for_party")
+      if H.openMmo(game) and H.selectLabel(game, "PLAYERS") then
+        U.wait(25)
+        if H.selectLabel(game, "GUESTY") then
+          U.wait(30)
+          check(H.selectLabel(game, "INVITE"), "asked the guest to team up")
+        else
+          check(false, "found the guest on the PLAYERS list")
+        end
+      else
+        check(false, "opened the PLAYERS list to invite from")
+      end
+      H.signal("host_party_asked")
+
+      local paired = H.drivePrompts(game, function()
+        return #exports.party() == 2
+      end, 120)
+      check(paired, "the party formed over the in-game hub")
+      H.await(game, "guest_party_joined")
+      H.closeToOverworld(game)
+
+      local wildFinished = nil
+      local staged = H.stageWild(game, "PIDGEY", 5, function(result)
+        wildFinished = result
+      end)
+      check(staged ~= nil, "staged a wild battle on the host")
+
+      local waiting = H.waitSeconds(game, function()
+        return exports.coopWaiting() ~= nil
+      end, 60, "coop_wild wait after the wild divert")
+      check(waiting, "the host diverted into coop_wild wait")
+      local aloneRow = H.menuRow(game, "ALONE")
+      check(aloneRow ~= nil, "the wild wait box offers ALONE only (no WAIT)")
+      U.shot(game, SHOT_DIR .. "/host-party-wild-wait.png")
+      H.signal("host_wild_waiting")
+
+      H.await(game, "guest_wild_joined")
+      local onField = H.waitSeconds(game, function()
+        local top = H.top(game)
+        return top ~= nil and top.sim ~= nil and #top.sim.slots == 3
+      end, 120, "the Party-vs-Wild field to come up")
+      check(onField, "a three-slot coop_wild battle is on screen")
+      local refereed = H.awaitMediatedCoop(game, 60, "coop_wild")
+      check(refereed,
+            "the LAN Party-vs-Wild fight is hub-refereed (coop_wild)")
+      do
+        local top = H.top(game)
+        log(("mediated coop_wild: id=%s mode=%s medGaps=%s"):format(
+          tostring(top and top.battleId), tostring(top and top.mode),
+          tostring(top and top.medGaps)))
+      end
+      check(announced["mod.rby_mmo.coop_battle_started"] >= 1,
+            "coop_battle_started fired for Party vs Wild")
+
+      if onField then
+        check(H.awaitCommandMenu(game, "the command menu for the wild shot"),
+              "the coop_wild command grid opens")
+        U.wait(30)
+        U.shot(game, SHOT_DIR .. "/host-party-wild-battle.png")
+        check(exports.coopDrawFailed() == false, "and it drew without error")
+      end
+
+      local medGaps = 0
+      local over = H.drivePrompts(game, function()
+        local top = H.top(game)
+        return top == nil or top.sim == nil
+      end, 240, function()
+        local top = H.top(game)
+        if H.isMediatedCoop(top) then
+          medGaps = tonumber(top.medGaps) or medGaps
+        end
+        U.tap(game, "a")
+      end)
+      check(over, "the coop_wild fight runs to an end")
+      local sync = exports.coopSync()
+      log(("coop_wild sync: gaps=%d desyncs=%d resyncs=%d medGaps=%d"):format(
+        sync.gaps, sync.desyncs, sync.resyncs, medGaps))
+      check(sync.gaps == 0, "with no turn lost by the Lua hub")
+      check(sync.desyncs == 0, "and no drift between the two copies")
+      check(medGaps == 0, "and no gaps in the mediated event stream")
+      check(announced["mod.rby_mmo.coop_battle_ended"] >= 1,
+            "coop_battle_ended fired after Party vs Wild")
+      log("engine wild result:", tostring(wildFinished))
+      U.shot(game, SHOT_DIR .. "/host-party-wild-after.png")
+      H.signal("host_wild_done")
+      H.await(game, "guest_wild_done")
+      H.closeToOverworld(game)
+      log("DONE")
+      return
+    end
+
     -- ------- 1. the guest leaves the map, and comes back
     --
     -- A remote player on another map must not be drawn on this one; the
@@ -943,6 +1045,7 @@ return function(game)
   -- failure over here.
   for _, tag in ipairs({ "host_party_asked", "host_coop_waiting",
                          "host_coop_done", "host_coop_left",
+                         "host_wild_waiting", "host_wild_done",
                          "host_address_checked" }) do
     H.signal(tag)
   end

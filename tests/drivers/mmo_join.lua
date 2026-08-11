@@ -440,6 +440,79 @@ return function(game)
     return
   end
 
+  -- ------- party wild (focused e2e; see run-party-wild-e2e.sh)
+  if os.getenv("MMO_PARTY_WILD_E2E") == "1" then
+    local announced = H.listenForModEvents(game, {
+      "mod.rby_mmo.coop_battle_started",
+      "mod.rby_mmo.coop_battle_ended",
+    })
+
+    H.closeToOverworld(game)
+    H.signal("guest_ready_for_party")
+    H.await(game, "host_party_asked")
+    local paired = H.drivePrompts(game, function()
+      return #exports.party() == 2
+    end, 120)
+    check(paired, "the party formed on the guest over the in-game hub")
+    H.signal("guest_party_joined")
+
+    H.await(game, "host_wild_waiting")
+    local joined = H.waitSeconds(game, function()
+      local top = H.top(game)
+      if top ~= nil and top.sim ~= nil and #top.sim.slots == 3 then
+        return true
+      end
+      if H.classify(top) == "choice" then
+        local text = (H.textOf(top) or ""):lower()
+        if text:find("join", 1, true) and text:find("against", 1, true) then
+          return false
+        end
+      end
+      return false
+    end, 120, "auto-join into the Party-vs-Wild fight")
+    check(joined, "the partner auto-joined coop_wild without a prompt")
+    local refereed = H.awaitMediatedCoop(game, 60, "coop_wild")
+    check(refereed,
+          "the LAN Party-vs-Wild fight is hub-refereed (coop_wild)")
+    do
+      local top = H.top(game)
+      log(("mediated coop_wild: id=%s mode=%s medGaps=%s"):format(
+        tostring(top and top.battleId), tostring(top and top.mode),
+        tostring(top and top.medGaps)))
+    end
+    check(announced["mod.rby_mmo.coop_battle_started"] >= 1,
+          "coop_battle_started fired for Party vs Wild")
+    U.shot(game, SHOT_DIR .. "/join-party-wild-battle.png")
+    check(exports.coopDrawFailed() == false, "and it drew without error")
+    H.signal("guest_wild_joined")
+
+    local medGaps = 0
+    local over = H.drivePrompts(game, function()
+      local top = H.top(game)
+      return top == nil or top.sim == nil
+    end, 240, function()
+      local top = H.top(game)
+      if H.isMediatedCoop(top) then
+        medGaps = tonumber(top.medGaps) or medGaps
+      end
+      U.tap(game, "a")
+    end)
+    check(over, "the coop_wild fight runs to an end on the guest")
+    local sync = exports.coopSync()
+    log(("coop_wild sync: gaps=%d desyncs=%d resyncs=%d medGaps=%d"):format(
+      sync.gaps, sync.desyncs, sync.resyncs, medGaps))
+    check(sync.desyncs == 0, "with no drift on the guest")
+    check(medGaps == 0, "and no gaps in the mediated event stream")
+    check(announced["mod.rby_mmo.coop_battle_ended"] >= 1,
+          "coop_battle_ended fired after Party vs Wild")
+    U.shot(game, SHOT_DIR .. "/join-party-wild-after.png")
+    H.signal("guest_wild_done")
+    H.await(game, "host_wild_done")
+    H.closeToOverworld(game)
+    log("DONE")
+    return
+  end
+
   -- ------- 1. leave the map and come back
 
   local home = mod_current(game)
@@ -1400,8 +1473,9 @@ return function(game)
   -- unconditional rather than guarded by whether the leg ran.
   for _, tag in ipairs({ "guest_saw_char_change",
                          "guest_ready_for_party", "guest_party_joined",
-                         "guest_coop_joined",
-                         "guest_coop_done", "guest_left_game" }) do
+                         "guest_coop_joined", "guest_wild_joined",
+                         "guest_wild_done", "guest_coop_done",
+                         "guest_left_game" }) do
     H.signal(tag)
   end
 

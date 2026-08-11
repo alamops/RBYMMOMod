@@ -339,5 +339,15 @@ if [ "$host_fail" -ne 0 ] || [ "$guest_fail" -ne 0 ]; then
   dump_logs
   exit 1
 fi
+if [ "${MMO_PARTY_WILD_E2E:-}" = "1" ]; then
+  host_wild=$(count 'mediated coop_wild:' "$HOST_LOG"); host_wild=${host_wild:-0}
+  guest_wild=$(count 'mediated coop_wild:' "$GUEST_LOG"); guest_wild=${guest_wild:-0}
+  echo "  coop_wild mediated lines: host=$host_wild guest=$guest_wild"
+  if [ "$host_wild" -lt 1 ] || [ "$guest_wild" -lt 1 ]; then
+    echo "  !! Party-vs-Wild did not log hub-refereed coop_wild on both sides"
+    dump_logs
+    exit 1
+  fi
+fi
 echo "  RESULT: end-to-end passed. Screenshots in $SHOT_DIR"
 rm -f "$HOST_LOG" "$GUEST_LOG"

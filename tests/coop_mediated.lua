@@ -1063,8 +1063,9 @@ do
 
   rot.waitShown = math.max(Config.COOP_WAIT_HINT, rotate)
   line = rot:waitLine()
-  check(line ~= nil and line:find("+1", 1, true),
-        "and the '+1' tail names the other missing seat when there is room")
+  -- Production waitLine uses "&N" (CoopBattle:waitLine), not "+N".
+  check(line ~= nil and line:find("&1", 1, true),
+        "and the '&1' tail names the other missing seat when there is room")
 end
 
 do
