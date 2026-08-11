@@ -666,6 +666,53 @@ function M:clearIntroFlags()
   self.introBalls = nil
   self.introHide = nil
   self.growIn = nil
+  self.showEnemyTrainer = nil
+end
+
+-- Display name for trainer appear / "sent out" lines (BattleState introText).
+function M:trainerIntroName()
+  local t = self.trainer
+  if type(t) == "table" and type(t.name) == "string" and t.name ~= "" then
+    return Wire.name(t.name) or t.name
+  end
+  if self.sim then
+    for _, slot in ipairs(self.sim.slots or {}) do
+      if slot.owner == nil and self:foeSide(slot.index) then
+        local raw = slot.name
+        if type(raw) == "string" and raw ~= "" then
+          return Wire.name(raw) or raw
+        end
+      end
+    end
+  end
+  return "Trainer"
+end
+
+-- Live foe party list for intro ball chrome (one row; shared tables once).
+function M:foeIntroParty()
+  if not self.sim then return nil end
+  local seen, flat = {}, {}
+  for _, slot in ipairs(self.sim.slots or {}) do
+    if slot.owner == nil and self:foeSide(slot.index) and slot.party then
+      if not seen[slot.party] then
+        seen[slot.party] = true
+        for _, mon in ipairs(slot.party) do
+          flat[#flat + 1] = mon
+        end
+      end
+    end
+  end
+  if #flat == 0 then return nil end
+  return flat
+end
+
+-- Trainer theatrical intro: appear uses trainer face + foe ball row; foes are
+-- hidden until their send-out (mirrors BattleState EnemySendOutFirstMon without
+-- introSlide / trainer-back walk-off). Wild and party-vs-party never arm this.
+function M:usesTrainerIntro()
+  if not self.trainer then return false end
+  if self.mode == "coop_wild" or self.mode == "coop_pvp" then return false end
+  return true
 end
 
 -- Entrance cry via optional Sound (same clips BattleState:playEntranceCry).
@@ -687,9 +734,56 @@ function M:growInScale(index)
   return f < 3 and 0 or f < 7 and 3 / 7 or 5 / 7
 end
 
+-- After the trainer appear line: drop chrome / face, then sequential foe
+-- send-outs (POOF + grow + cry) before the ally Go! gap.
+function M:queueFoeIntroSendOut()
+  self.messages[#self.messages + 1] = {
+    act = function(battle)
+      battle.introBalls = nil
+      battle.showEnemyTrainer = nil
+    end,
+  }
+  local name = self:trainerIntroName()
+  local foes = {}
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if self:foeSide(slot.index) then
+      foes[#foes + 1] = slot
+    end
+  end
+  if #foes == 0 then
+    if self.introHide then
+      for idx, _ in pairs(self.introHide) do
+        local slot = self.sim and self.sim:slot(idx)
+        if slot and slot.owner == nil then self.introHide[idx] = nil end
+      end
+    end
+    return
+  end
+  for _, slot in ipairs(foes) do
+    local idx = slot.index
+    self:say(("%s sent\nout %s!"):format(name, seatMonName(slot)))
+    self.messages[#self.messages + 1] = {
+      anim = "POOF_ANIM", from = idx, attackerIsPlayer = false,
+    }
+    self.messages[#self.messages + 1] = {
+      act = function(battle)
+        if battle.introHide then battle.introHide[idx] = nil end
+        local s = battle.sim and battle.sim:slot(idx)
+        local battler = s and s.battler
+        if battler then
+          battle.growIn = { slot = idx, frame = 0 }
+          battle:playEntranceCry(battler)
+        end
+      end,
+    }
+    self.messages[#self.messages + 1] = { wait = 12 }
+  end
+end
+
 -- After the opening appear line: wait, then sequential viewer-centric
 -- send-outs (my Go! → POOF/grow/cry, then partner sent out). Ball chrome is
--- cleared when the appear page advances (see messages dismiss), not here.
+-- cleared when the appear page advances (see messages dismiss / foe intro
+-- clear act), not here.
 function M:queueIntroSendOut()
   local sendWait = 40
   do
@@ -760,17 +854,29 @@ function M:enter()
       self.trainer and self.trainer.id or nil)
   end
   -- Intro ball chrome + hide ally humans until their Go!/sent-out step.
-  -- Foes (wild / NPC) stay visible; no introSlide / trainer-back this pass.
+  -- Trainer theatrical: also hide foes and hold the trainer face through the
+  -- appear line (no introSlide / trainer-back). Wild / party-vs-party leave
+  -- foes visible and never arm a trainer face.
   self.introBalls = true
   self.introHide = {}
+  local theatrical = self:usesTrainerIntro()
   for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
     if slot.owner ~= nil and not self:foeSide(slot.index) then
       self.introHide[slot.index] = true
+    elseif theatrical and self:foeSide(slot.index) then
+      self.introHide[slot.index] = true
     end
   end
-  -- Party vs Wild is a grass encounter shared with a partner, not a 2-on-2:
-  -- open with the same sentence solo wild uses (BattleState introText).
-  if self.mode == "coop_wild" then
+  if theatrical then
+    self.showEnemyTrainer = self.trainerPic ~= nil
+    local Sound = eng and eng.Sound
+    if Sound and Sound.play then
+      pcall(Sound.play, self.game.data, "Trainer_Appeared")
+    end
+    self:say(("%s wants\nto fight!"):format(self:trainerIntroName()))
+    self:queueFoeIntroSendOut()
+  elseif self.mode == "coop_wild" then
+    -- Party vs Wild: same sentence solo wild uses (BattleState introText).
     self:say(("Wild %s\nappeared!"):format(self:wildIntroName()))
   else
     self:say("2 on 2 battle!")
@@ -1056,6 +1162,7 @@ function M:update(dt)
           -- fall through to dwell
         elseif head.wait then
           if self.introBalls then self.introBalls = nil end
+          if self.showEnemyTrainer then self.showEnemyTrainer = nil end
           head._t = (head._t or 0) + 1
           if head._t >= (tonumber(head.wait) or 0) then
             table.remove(self.messages, 1)
@@ -3650,16 +3757,15 @@ end
 
 -- Whether the trainer is still standing where their monsters will be.
 --
--- Classic Gen 1 scrolls the picture off before the first menu. Co-op NPC
--- fights already seat both foe mons before the opening line, so keeping the
--- pic up through `phase == "messages"` hid WEEDLE/CATERPIE while their HP
--- bars were already drawn -- the entrance read as a stuck trainer. Show the
--- picture only while the foe quarter is still empty (and only before anyone
--- has chosen).
+-- Theatrical intro arms `showEnemyTrainer` while the appear line is up (foes
+-- stay in introHide). Outside that window, only an empty foe quarter keeps the
+-- pic — co-op seats both foe mons before open, so a bare turnCount/messages
+-- rule used to leave the Bug Catcher stuck over WEEDLE/CATERPIE.
 function M:showingTrainer()
   if not self.trainerPic then return false end
   if (self.turnCount or 0) ~= 0 then return false end
   if self.phase ~= "messages" then return false end
+  if self.showEnemyTrainer then return true end
   if self.sim then
     for _, slot in ipairs(self.sim.slots or {}) do
       if self:foeSide(slot.index) then
@@ -3987,6 +4093,7 @@ function M:drawField()
 end
 
 -- Party ball chrome under the opening appear line (both humans' parties).
+-- Trainer theatrical also draws the foe party row (classic top-left).
 -- Positions approximate classic player row + a second row for the partner.
 function M:drawIntroBalls()
   if not self.introBalls then return end
@@ -3995,6 +4102,12 @@ function M:drawIntroBalls()
   local mySlot = self:mySlot()
   local partner = self:partnerOf(mySlot)
   love.graphics.setColor(1, 1, 1, 1)
+  if self:usesTrainerIntro() then
+    local foeParty = self:foeIntroParty()
+    if foeParty then
+      pcall(BS.drawBallRow, BS, foeParty, 64, 16, -8)
+    end
+  end
   if mySlot and mySlot.party then
     pcall(BS.drawBallRow, BS, mySlot.party, 88, 80, 8)
   end
