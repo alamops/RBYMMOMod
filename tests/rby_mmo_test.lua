@@ -6500,6 +6500,36 @@ local function engage(side, oppClass)
   return side.coop:onTrainerBattle(side.game, battle, "FIX_TOWN"), battle
 end
 
+-- Engine pushing a wild encounter -- the Party vs Wild divert watches this.
+local function wildEngage(side, species, level, mapId)
+  species = species or "FIXMON_A"
+  level = level or 5
+  mapId = mapId or "FIX_TOWN"
+  local battle = {
+    kind = "wild",
+    enemy = { mon = { species = species, level = level } },
+    onFinish = function(result) side.finished = result end,
+  }
+  side.engine = battle
+  side.finished = nil
+  side.stack:push(battle)
+  return side.coop:onWildEncounter(side.game, battle, mapId), battle
+end
+
+local function resetCoopWild(side)
+  while side.stack:top() do side.stack:pop() end
+  side.engine = nil
+  side.finished = nil
+  side.chosen = nil
+  side.confirmBox = nil
+  side.coop.encounter = nil
+  side.coop.waiting = nil
+  side.coop.offer = nil
+  side.coop.running = false
+  side.coop.joinAsk = nil
+  if side.client then side.client.coopOffer = nil end
+end
+
 -- BATTLE ALONE leaves the engine's own battle on top, untouched.
 local function fightsAlone(side)
   return side.stack:top() == side.engine
@@ -6985,6 +7015,144 @@ bob.coop:onBattle(bob.game, {
 eq(bob.coop.lastPlan.engine, nil,
    "nor does a battle field too malformed for Wire.battleKey to accept")
 bob.coop.running, bob.coop.battle, bob.coop.encounter = false, nil, nil
+
+-- ------- Party vs Wild: coop_wild divert and auto-join (TT3)
+--
+-- Overworld predicates and the COOP_WAIT the host posts. Hub seating for
+-- coop_wild is pinned in hub_battle (TT2); full stack handoff into
+-- CoopBattle + mediated wild resolution needs LOVE (TT4 e2e).
+--
+-- Driven on a fresh hub pair so join handoffs do not disturb the four-way
+-- party-battle state the sections below still assert against.
+
+local WILD_KEY = Coop.battleKey("FIX_TOWN", "FIXMON_A", 5)
+local wildHub = Hub.new({ maxPlayers = 8 })
+local wAnn = coopSide(wildHub, "WANN")
+local wBob = coopSide(wildHub, "WBOB")
+pump(wAnn); pump(wBob)
+wAnn.party:invite({ id = wBob.client.id, name = "WBOB" })
+pump(wBob)
+answerConfirm(wBob, true)
+pump(wAnn); pump(wBob)
+eq(wAnn.party:has(), true, "wild harness is a party of two")
+
+do
+  local loneHub = Hub.new({ maxPlayers = 8 })
+  local lone = coopSide(loneHub, "LONE")
+  pump(lone)
+  eq(wildEngage(lone), false,
+     "a player with no party does not divert a wild encounter")
+  eq(lone.coop:isWaiting(), false, "and posts no coop wait")
+end
+
+wildHub:receive(wBob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
+wBob.mapId = "FIX_ROUTE"
+pump(wAnn)
+eq(wildEngage(wAnn), false,
+   "a partied player whose partner is off-map does not divert")
+eq(wAnn.coop:isWaiting(), false, "and does not post COOP_WAIT")
+resetCoopWild(wAnn)
+
+wildHub:receive(wBob.client, { type = Wire.MOVE, map = "FIX_TOWN", x = 1, y = 1 })
+wBob.mapId = "FIX_TOWN"
+pump(wAnn)
+wAnn.roster:setBusy(wBob.id, true)
+eq(wildEngage(wAnn), false, "nor when the partner is session-busy")
+wAnn.roster:setBusy(wBob.id, false)
+
+-- A standing trainer wait is not coop_wild -- local wild stays engine-owned.
+engage(wAnn)
+pick(wAnn, "WAIT")
+pump(wBob)
+check(wBob.coop:pendingOffer() ~= nil, "trainer wait offer is up for the partner")
+eq(wBob.coop:pendingOffer().mode, nil, "without a coop_wild mode token")
+eq(wildEngage(wBob), false,
+   "a wild under a trainer offer does not divert or auto-join")
+resetCoopWild(wAnn); resetCoopWild(wBob)
+pump(wAnn); pump(wBob)
+
+local coopWaits = {}
+local origSend = wAnn.transport.send
+wAnn.transport.send = function(transport, msgType, payload)
+  if msgType == Wire.COOP_WAIT then coopWaits[#coopWaits + 1] = payload end
+  return origSend(transport, msgType, payload)
+end
+wBob.coop.running = true
+eq(wildEngage(wAnn), true, "on-map party diverts grass into Party vs Wild")
+wAnn.transport.send = origSend
+eq(#coopWaits, 1, "beginWildCoop posts exactly one COOP_WAIT")
+eq(coopWaits[1].mode, "coop_wild", "with mode=coop_wild on the wire")
+eq(coopWaits[1].battle, WILD_KEY, "and the derived wild battle key")
+eq(wAnn.coop:isWaiting(), true, "the host is waiting")
+eq(wAnn.coop.waiting.mode, "coop_wild", "in coop_wild mode")
+eq(wAnn.coop.waiting.kind, "wild", "holding the engine wild for handoff")
+eq(#(wAnn.chosen or {}), 1, "the wild wait box has one row")
+eq(wAnn.chosen[1].label, "ALONE", "ALONE only -- no BACK on this path")
+eq(wAnn.client.coopOffer.mode, "coop_wild",
+   "the hub stored the mode on the host's standing offer")
+
+pump(wBob)
+local wildOffer = wBob.coop:pendingOffer()
+check(wildOffer ~= nil, "the partner receives the coop_wild offer")
+eq(wildOffer.mode, "coop_wild", "with the mode intact")
+eq(wBob.confirmBox, nil, "coop_wild never raises a join confirm")
+
+wBob.coop.running = false
+wBob.peer.outbox = {}
+wBob.coop:considerOffer(wBob.game, wBob.mapId)
+check(take(wAnn.peer, Wire.COOP_JOINED) ~= nil,
+      "a free on-map partner auto-joins without a confirm box")
+
+resetCoopWild(wAnn); resetCoopWild(wBob)
+pump(wAnn); pump(wBob)
+
+-- Mutual coop_wild waits: lexicographically smaller playerId's wait wins.
+local winner, loser
+if wAnn.id < wBob.id then winner, loser = wAnn, wBob
+else winner, loser = wBob, wAnn end
+
+eq(wildEngage(winner), true, "the first waiter posts coop_wild")
+eq(wildEngage(loser), true, "the second waiter also posts locally")
+pump(loser)
+eq(loser.coop:isWaiting(), false,
+   "the larger-id client withdraws and joins the smaller-id wait")
+eq(winner.coop:isWaiting(), true, "while the smaller-id wait stays up")
+eq(loser.coop:pendingOffer(), nil,
+   "the larger-id client no longer holds a standing offer")
+pump(winner)
+eq(winner.coop:isWaiting(), false,
+   "the smaller-id waiter is told their partner joined")
+
+resetCoopWild(wAnn); resetCoopWild(wBob)
+pump(wAnn); pump(wBob)
+
+-- Partner already waiting on coop_wild: a second local wild joins instead of
+-- opening another wait.
+eq(wildEngage(wAnn), true, "the host posts the first coop_wild wait")
+wBob.coop.running = true
+pump(wBob)
+eq(wBob.coop:pendingOffer().mode, "coop_wild", "the partner holds the offer")
+wBob.coop.running = false
+local joinWild = {
+  kind = "wild",
+  enemy = { mon = { species = "FIXMON_B", level = 7 } },
+  onFinish = function() end,
+}
+wBob.game.stack:push(joinWild)
+eq(wBob.coop:onWildEncounter(wBob.game, joinWild, "FIX_TOWN"), true,
+   "a second wild while coop_wild is standing auto-joins the partner")
+check(wBob.game.stack:top() ~= joinWild,
+      "and pops the just-pushed wild so keys cannot fight under the co-op screen")
+pump(wAnn)
+eq(wAnn.coop:isWaiting(), false,
+   "the standing waiter is joined from the second wild")
+
+resetCoopWild(wAnn); resetCoopWild(wBob)
+eq(wBob.coop:joinFromMenu(wBob.game), false,
+   "joinFromMenu with no offer is a no-op")
+wBob.coop.offer = { from = wAnn.id, battle = WILD_KEY, mode = "coop_wild" }
+eq(wBob.coop:joinFromMenu(wBob.game), true,
+   "joinFromMenu on coop_wild auto-joins like considerOffer")
 
 -- ------- a ranked 2-on-2 needs all four to agree
 --

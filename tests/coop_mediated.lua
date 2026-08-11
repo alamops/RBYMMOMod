@@ -1112,6 +1112,40 @@ do
   eq(CoopBattle.mediates("1v1"), false,
      "a 1v1 is not a co-op battle at all -- src/MediatedBattle.lua owns that one")
   eq(CoopBattle.mediates(nil), false, "and a battle with no mode is not refereed")
+
+  eq(CoopBattle.mediates("coop_wild"), true,
+     "party-versus-wild is refereed in this build too")
+end
+
+-- ------------------------------------------------------------------
+-- 9. Party vs Wild wire vocabulary (TT3 — headless predicates)
+-- ------------------------------------------------------------------
+--
+-- Hub seating for coop_wild lives in hub_battle / TT2; here we only pin the
+-- client-side mode token the divert path posts on COOP_WAIT and the sanitiser
+-- that drops anything else.
+
+do
+  eq(Wire.coopOfferMode("coop_wild"), "coop_wild",
+     "only coop_wild is a recognised offer mode")
+  eq(Wire.coopOfferMode(nil), nil, "absent mode stays absent")
+  eq(Wire.coopOfferMode("coop_npc"), nil, "trainer-shaped tokens are rejected")
+  eq(Wire.coopOfferMode("garbage"), nil, "and so is garbage")
+
+  local key = "FIX_TOWN|FIXMON_A|5"
+  check(Wire.battleKey(key) == key, "fixture battle key is wire-clean")
+  local pid = testPlayerId("coop_wild_wire")
+  local wild = Wire.coopOffer({
+    from = pid, name = "ANN", battle = key, map = "FIX_TOWN", mode = "coop_wild",
+  })
+  check(wild ~= nil, "a coop_wild offer survives Wire.coopOffer")
+  eq(wild.mode, "coop_wild", "and keeps the mode")
+
+  local trainer = Wire.coopOffer({
+    from = pid, name = "ANN", battle = key, map = "FIX_TOWN", mode = "coop_npc",
+  })
+  check(trainer ~= nil, "an unknown mode does not refuse the whole offer")
+  eq(trainer.mode, nil, "it is dropped instead")
 end
 
 T.finish("coop_mediated")

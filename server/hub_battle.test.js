@@ -363,6 +363,114 @@ function testTradeRelayStillWorks() {
     'trade mmo.relay still forwards unread');
 }
 
+function testCoopWildSeating() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'CWILDA');
+  const b = dial(relay, 'CWILDB');
+
+  const record = relay.openMediatedBattle('cw-1', {
+    mode: 'coop_wild',
+    hostId: a.id,
+    memberIds: [a.id, b.id],
+  });
+  ok(record && record.npcIds.length === 1,
+    'coop_wild opens with one synthetic wild seat');
+  ok(record.sides.a.length === 2 && record.sides.b.length === 1,
+    'side a is two humans and side b is the wild seat');
+  ok(record.sides.b[0] === record.npcIds[0],
+    'side b names the wild seat');
+  ok(relay.battleSeat(record, relay.get(a.id), { side: 'b' }) === record.npcIds[0],
+    "the host's side-b upload fills the wild seat");
+
+  const solo = relay.openMediatedBattle('cw-2', {
+    mode: 'coop_wild',
+    hostId: a.id,
+    memberIds: [a.id],
+  });
+  ok(solo === null, 'coop_wild refuses without exactly two humans');
+
+  const c = dial(relay, 'CWILDC');
+  const crowd = relay.openMediatedBattle('cw-3', {
+    mode: 'coop_wild',
+    hostId: a.id,
+    memberIds: [a.id, b.id, c.id],
+  });
+  ok(crowd === null, 'coop_wild refuses with three humans');
+}
+
+function testCoopWildCatchCatcher() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'CATCHA');
+  const b = dial(relay, 'CATCHB');
+  relay.openCoopBattle('cw-catch', [a.id, b.id],
+    { mode: 'coop_wild', hostId: a.id });
+  const record = relay.battles.get('cw-catch');
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'cw-catch',
+    side: 'a',
+    mons: [mon(90)],
+    bag: [{ id: 'MASTER_BALL', count: 1 }],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party',
+    battle: 'cw-catch',
+    side: 'a',
+    mons: [mon(90)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'cw-catch',
+    side: 'b',
+    mons: [{
+      species: 'PIDGEY',
+      level: 50,
+      hp: 100,
+      maxHp: 100,
+      catchRate: 255,
+      stats: { atk: 40, def: 40, spd: 40, spc: 40 },
+      moves: [{
+        id: 'm1', pp: 15, power: 0, accuracy: 255, type: 0, effect: 0, chance: 0,
+      }],
+    }],
+  });
+  ok(record && record.sim, 'coop_wild sim starts with two humans and a wild party');
+  take(a, 'mmo.battle_ready');
+  take(b, 'mmo.battle_ready');
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+
+  let outcome = null;
+  for (let turn = 0; turn < 20; turn += 1) {
+    takeAll(a, 'mmo.battle_event');
+    takeAll(b, 'mmo.battle_event');
+    if (!relay.battles.has('cw-catch')) break;
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: 'cw-catch',
+      action: 'item', item: 'MASTER_BALL',
+    });
+    relay.handle(b.id, {
+      type: 'mmo.battle_choice', battle: 'cw-catch',
+      action: 'fight', move: 0,
+    });
+    outcome = take(a, 'mmo.battle_outcome') || take(b, 'mmo.battle_outcome');
+    if (outcome) break;
+  }
+  ok(outcome && outcome.reason === 'catch',
+    'catch success reasons the outcome as catch');
+  ok(outcome.catcher === a.id, 'catcher names the thrower');
+  ok(take(a, 'mmo.battle_outcome') || take(b, 'mmo.battle_outcome'),
+    'both players hear the outcome');
+  ok(!relay.battles.has('cw-catch'),
+    'the record is cleared like any other settlement');
+}
+
 function testBagProofs() {
   const clock = makeClock();
   const relay = makeRelay(clock);
@@ -453,6 +561,8 @@ testRelayHardCutDuringBattle();
 testDisconnectForfeitAfterGrace();
 testDrawCarriesNoLists();
 testCoopNpcMediated();
+testCoopWildSeating();
+testCoopWildCatchCatcher();
 testTradeRelayStillWorks();
 testBagProofs();
 

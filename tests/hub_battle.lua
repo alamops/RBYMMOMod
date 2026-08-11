@@ -739,6 +739,93 @@ do
   ok(record.sim ~= nil, "and the intermediator is running")
 end
 
+-- ------- coop_wild: two humans, one wild seat; 2-human gate; catcher on catch
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+
+  local record = hub:openMediatedBattle("cw-1", {
+    mode = "coop_wild", hostId = ann.id, memberIds = { ann.id, bob.id },
+  })
+  ok(record ~= nil, "a coop_wild record opens with two members")
+  eq(#(record.npcIds or {}), 1, "with one synthetic wild seat")
+  eq(#record.sides.a, 2, "side a is two humans")
+  eq(#record.sides.b, 1, "side b is the wild seat")
+  eq(record.sides.b[1], record.npcIds[1], "side b names the wild seat")
+  eq(hub:battleSeat(record, ann, { side = "b" }), record.npcIds[1],
+     "the host's side-b upload fills the wild seat")
+  eq(#hub:seatsNeeded(record), 3, "three seats owe a party")
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+
+  local record = hub:openMediatedBattle("cw-2", {
+    mode = "coop_wild", hostId = ann.id, memberIds = { ann.id },
+  })
+  eq(record, nil, "coop_wild refuses without exactly two humans")
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  local cal = join(hub, "CAL")
+
+  local record = hub:openMediatedBattle("cw-3", {
+    mode = "coop_wild", hostId = ann.id,
+    memberIds = { ann.id, bob.id, cal.id },
+  })
+  eq(record, nil, "coop_wild refuses with three humans")
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  hub.forceBattleSeed = 1
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+
+  hub:openCoopBattle("cw-catch", { ann.id, bob.id },
+    { mode = "coop_wild", hostId = ann.id })
+  local record = hub.battles["cw-catch"]
+
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "cw-catch", chart = CHART })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "cw-catch", side = "a",
+    mons = { mon() },
+    bag = { { id = "MASTER_BALL", count = 1 } } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "cw-catch", side = "a",
+    mons = { mon({ species = "PARTNER" }) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "cw-catch", side = "b",
+    mons = { mon({ species = "PIDGEY", catchRate = 255 }) } })
+  ok(record.sim ~= nil, "coop_wild sim starts with two humans and a wild party")
+  take(annPeer, Wire.BATTLE_READY)
+  take(bobPeer, Wire.BATTLE_READY)
+
+  local outcome = nil
+  for _ = 1, 20 do
+    hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = "cw-catch",
+      action = "item", item = "MASTER_BALL" })
+    hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = "cw-catch",
+      action = "fight", move = 0 })
+    outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+      or take(bobPeer, Wire.BATTLE_OUTCOME)
+    if outcome or not hub.battles["cw-catch"] then break end
+  end
+
+  ok(outcome ~= nil, "catch ends with a battle_outcome broadcast")
+  ok(Wire.battleOutcome(outcome) ~= nil,
+     "in a shape the client's sanitiser accepts")
+  eq(outcome.reason, "catch", "catch success reasons the outcome as catch")
+  eq(outcome.catcher, ann.id, "catcher names the thrower")
+  ok(take(annPeer, Wire.BATTLE_OUTCOME) ~= nil
+     or take(bobPeer, Wire.BATTLE_OUTCOME) ~= nil,
+     "both players hear the outcome")
+  eq(hub.battles["cw-catch"], nil, "the record is cleared like any other settlement")
+end
+
 -- ------- PROTOCOL 15: hub bag proofs hold until resolve; cancel drops hold
 
 do
