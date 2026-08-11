@@ -15,6 +15,7 @@
 | Config | `AGENTS_CONFIG.yml` (quality preset, host cursor) |
 | Branch | `feature/gen2-compatibility` |
 | Base SHA | `e8a5d08a712bb5221fb4bb4d3a1dff783e573dc2` |
+| Status | Waves 0–4 landed; review must-fixes landed; `gen2check` **will load**; suite **2933/2933**. Live Gold e2e pending ROM/cache (`tests/drivers/run-mmo-e2e-gen2.sh`). |
 | Gates | Interactive; owner answers locked below |
 
 ## 1. Objective & success criteria
