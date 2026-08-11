@@ -11,9 +11,16 @@
 -- player's screen, not just look odd.
 
 local need, mod = ...
-local Config = need("Config")
+local Gen = need("Gen")
 
 local M = {}
+
+-- Catalog-aware default (SPRITE_RED on Gen 1, SPRITE_CHRIS when that is what
+-- the boot actually carries).  Same helper Client / Avatars already use.
+local function fallbackSprite(game)
+  return Gen.defaultSprite(game, mod.content and mod.content.sprites)
+end
+
 
 -- Things in the sprite catalog that are not a person.
 local NOT_PEOPLE = {
@@ -50,11 +57,12 @@ function M.label(id)
   return (tostring(id):gsub("^SPRITE_", ""):gsub("_", " "))
 end
 
--- Every wearable character, sorted, with RED first because it is the
--- fallback everyone is guaranteed to have.
-function M.list()
+-- Every wearable character, sorted, with the gen-aware default first because
+-- it is the fallback everyone on this boot is guaranteed to have.
+function M.list(game)
   local registry = mod.content and mod.content.sprites
-  if not registry then return { Config.DEFAULT_SPRITE } end
+  local fallback = fallbackSprite(game)
+  if not registry then return { fallback } end
 
   local out = {}
   local ok = pcall(function()
@@ -65,11 +73,11 @@ function M.list()
       end
     end
   end)
-  if not ok or #out == 0 then return { Config.DEFAULT_SPRITE } end
+  if not ok or #out == 0 then return { fallback } end
 
   table.sort(out, function(a, b)
-    if a == Config.DEFAULT_SPRITE then return true end
-    if b == Config.DEFAULT_SPRITE then return false end
+    if a == fallback then return true end
+    if b == fallback then return false end
     return a < b
   end)
   return out
@@ -78,9 +86,8 @@ end
 -- Is this character present in *this* game's catalog?
 --
 -- The answer can differ between players: a modded catalog, or a different
--- ROM, may not carry what someone else picked. Everyone falls back to RED
--- rather than failing to draw, which is why RED is the one id this mod
--- treats as always-present.
+-- ROM, may not carry what someone else picked. Everyone falls back to the
+-- gen-aware default rather than failing to draw.
 function M.available(id)
   local registry = mod.content and mod.content.sprites
   if not (registry and type(id) == "string") then return false end
@@ -88,10 +95,11 @@ function M.available(id)
   return ok and walks(record) and not excluded(id)
 end
 
-function M.resolve(id)
+function M.resolve(id, game)
   if M.available(id) then return id end
-  return Config.DEFAULT_SPRITE
+  return fallbackSprite(game)
 end
+
 
 -- ------- the character's front-facing pose, as a drawable
 --

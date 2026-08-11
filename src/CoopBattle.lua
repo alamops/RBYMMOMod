@@ -681,8 +681,16 @@ function M.musicKind(self)
   local kind = self.trainer and "trainer" or "link"
   local eng = engine
   if eng and eng.BattleState and self.trainer then
-    local probe = setmetatable({ kind = "trainer", trainer = self.trainer },
-      { __index = eng.BattleState })
+    -- computeMusicKind keys victories off oppClass (+ partyIndex), not the
+    -- trainer record alone — a probe without oppClass always answers "trainer".
+    local trainer = self.trainer
+    local oppClass = trainer.oppClass or trainer.id or trainer.class
+    local probe = setmetatable({
+      kind = "trainer",
+      trainer = trainer,
+      oppClass = oppClass,
+      partyIndex = trainer.partyIndex or self.partyIndex or 1,
+    }, { __index = eng.BattleState })
     local ok, decided = pcall(probe.computeMusicKind, probe)
     if ok and type(decided) == "string" then kind = decided end
   end

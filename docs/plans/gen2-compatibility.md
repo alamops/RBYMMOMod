@@ -1,5 +1,13 @@
 # Plan — Gen 1 + Gen 2 dual compatibility
 
+> **Status (2026-08-11):** Waves **0–3 landed** on `feature/gen2-compatibility`
+> (dual-gen helpers + manifest claim, PROTOCOL 19 gen-locked hubs, BattleSim2
+> + Node twin + wire sheets, Gen2 trade + co-op strategy split). **Wave 4** is
+> polish (Places / Pokegear soft degrade / Chars default sprite + dual-gen
+> headless load). **Live Gen 2 e2e** (`tests/drivers/run-mmo-e2e-gen2.sh`) is
+> stubbed and skips cleanly without a Gold ROM/cache — full Gold smoke still
+> pending ROM.
+
 | Field | Value |
 | --- | --- |
 | Date | 2026-08-11 |

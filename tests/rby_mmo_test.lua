@@ -21,6 +21,26 @@ local T = require("tests.modkit")
 local check, eq = T.check, T.eq
 
 local MOD_PATH = "mods/rby_mmo"
+-- Agetor / out-of-tree checkouts may leave mods/rby_mmo pointed at another
+-- tree; fall back to this suite's mod root so dual-gen (and the rest) still
+-- exercise the checkout under test. Same pattern as tests/trade2.lua.
+if not io.open(MOD_PATH .. "/src/Gen.lua", "rb") then
+  local src = debug.getinfo(1, "S").source
+  if type(src) == "string" and src:sub(1, 1) == "@" then
+    local dir = src:sub(2):match("(.+)[/\\]")
+    if dir then
+      local fallback = dir:gsub("[/\\]tests$", "")
+      if io.open(fallback .. "/src/Gen.lua", "rb") then
+        MOD_PATH = fallback
+      end
+    end
+  end
+end
+
+-- Remap mods/rby_mmo -> absolute MOD_PATH when the symlink is stale.
+-- Helper lives in its own chunk so this suite stays under LuaJIT's 200-local
+-- main-chunk limit.
+local makeRemapFs = dofile(MOD_PATH .. "/tests/mod_remap_fs.lua")
 
 -- ------------------------------------------------------------------
 -- 1. the real load
@@ -63,46 +83,26 @@ check(#vanillaSurface > 0, "the baseline snapshot is not vacuously empty")
 -- From 1.0.0 the mod is not experimental: a missing options.mods entry means
 -- enabled (ordinary mod default). Installing still does not open a socket —
 -- that only happens when the player hosts or joins.
-local byDefault = T.sdk.loadMod(MOD_PATH)
-eq(#byDefault.errors, 0, "loads clean by default")
-eq(byDefault.mod.state, "loaded",
-   "non-experimental means on when present in mods/")
-check(byDefault.loader.content.screens:get("RbyMmoMain") ~= nil,
-   "and a default-enabled mod installs its screens")
-byDefault.release()
+do
+  local opts = {}
+  if MOD_PATH ~= "mods/rby_mmo" then opts.fs = makeRemapFs(T, MOD_PATH) end
+  local byDefault = T.sdk.loadMod("mods/rby_mmo", opts)
+  eq(#byDefault.errors, 0, "loads clean by default")
+  eq(byDefault.mod.state, "loaded",
+     "non-experimental means on when present in mods/")
+  check(byDefault.loader.content.screens:get("RbyMmoMain") ~= nil,
+     "and a default-enabled mod installs its screens")
+  byDefault.release()
+end
 
 -- Everything past here is the opted-in mod, reached by handing the loader a
 -- filesystem whose options.lua already has it enabled -- the same file the
 -- mod manager writes when the player flips the switch.
 local function enabledFs()
-  local inner = T.fs.new(".")
-  local OPTIONS = "options.lua"
-  local body = "return { mods = { rby_mmo = true } }"
-  local loadstr = loadstring or load
-  local fs = { root = inner.root }
-
-  function fs.read(path)
-    if path == OPTIONS then return body end
-    return inner.read(path)
-  end
-  function fs.load(path)
-    if path == OPTIONS then return loadstr(body, OPTIONS) end
-    return inner.load(path)
-  end
-  function fs.getInfo(path)
-    if path == OPTIONS then return { type = "file" } end
-    return inner.getInfo(path)
-  end
-  -- narrowed to this mod alone: the checkout also carries the gallery and
-  -- nuzlocke, and a suite that loaded those too would be testing them
-  function fs.getDirectoryItems(path)
-    if path == "mods" then return { "rby_mmo" } end
-    return inner.getDirectoryItems(path)
-  end
-  return fs
+  return makeRemapFs(T, MOD_PATH, { pinEnabled = true })
 end
 
-local run = T.sdk.loadMod(MOD_PATH, { fs = enabledFs() })
+local run = T.sdk.loadMod("mods/rby_mmo", { fs = enabledFs() })
 
 eq(#run.errors, 0, "loads clean through the headless loader")
 check(run.mod ~= nil, "the loader found the mod")
@@ -143,6 +143,26 @@ for _, name in ipairs({ "save.loaded", "save.created" }) do
   check(listeners ~= nil and #listeners > 0,
         "subscribes to " .. name .. ", so a fresh save is resynced exactly "
         .. "like a loaded one")
+end
+
+-- ------- Dual-gen headless load (TT0)
+--
+-- Wave 0 claimed games:["gen1","gen2"]. Both boots must reach loaded with
+-- an empty error list through the real loader (generation opt selects the
+-- Gen2Compat facade without a Gold ROM).
+do
+  for _, gen in ipairs({ 1, 2 }) do
+    local dual = T.sdk.loadMod("mods/rby_mmo", {
+      fs = enabledFs(),
+      generation = gen,
+    })
+    eq(#dual.errors, 0,
+       "generation=" .. gen .. " loads with no errors")
+    check(dual.mod ~= nil, "generation=" .. gen .. " finds the mod")
+    eq(dual.mod.state, "loaded",
+       "generation=" .. gen .. " reaches loaded")
+    dual.release()
+  end
 end
 
 -- ------- movement.speed: holding B on foot halves the step
@@ -212,7 +232,8 @@ for _, id in ipairs({ "SPRITE_NIRE", "SPRITE_NIRE_HOOD" }) do
     eq(record.walker, true, id .. " walks, so it can be worn")
     eq(record.frames, 6, id .. " carries a full six-frame sheet")
     check(type(record.image) == "string"
-          and record.image:find(MOD_PATH, 1, true) == 1,
+          and (record.image:find(MOD_PATH, 1, true) == 1
+               or record.image:find("mods/rby_mmo", 1, true) == 1),
           id .. "'s art comes out of the mod folder")
   end
   -- and the game's own view of the catalog sees it, which is what the
@@ -231,7 +252,8 @@ for _, id in ipairs({ "rby_mmo_nire_back", "rby_mmo_nire_hood_back" }) do
   if scale then
     eq(scale.scale, 1, id .. " draws at exactly 1x")
     check(type(scale.path) == "string"
-          and scale.path:find(MOD_PATH, 1, true) == 1,
+          and (scale.path:find(MOD_PATH, 1, true) == 1
+               or scale.path:find("mods/rby_mmo", 1, true) == 1),
           id .. " points at the mod's own art")
   end
 end
@@ -4018,6 +4040,21 @@ eq(#townOverlay:townMapMarks({ mode = "grid" }), 0,
    "a town map with no index places nobody")
 eq(#townOverlay:townMapMarks(nil), 0, "and neither does no screen at all")
 
+-- Gen 2 POKeGEAR: soft degrade. Recognise the screen; do not invent marks.
+do
+  local okGear, Pokegear = pcall(require, "src.ui.gen2.Pokegear")
+  if okGear and type(Pokegear) == "table" then
+    local gear = setmetatable({}, Pokegear)
+    check(townOverlay:pokegearState(gear) ~= nil,
+          "pokegearState recognises a Gen 2 POKeGEAR top")
+    eq(townOverlay:townMapState(gear), nil,
+       "and does not treat it as a Gen 1 TownMap")
+  else
+    eq(townOverlay:pokegearState({ landmarks = {} }), nil,
+       "without the Pokegear module, pokegearState soft-fails to nil")
+  end
+end
+
 end)()
 
 -- ------------------------------------------------------------------
@@ -4239,6 +4276,34 @@ do
      "no map id, no place -- nil, not a placeholder string")
   eq(Places.name(flatGame, ""), nil,
      "and an empty one is treated the same as none at all")
+
+  -- Gen 2: no data.field; names come from gen2Landmarks via the map's
+  -- landmark byte / LANDMARK_* id. Must not raise when field is absent.
+  local gen2Game = { data = {
+    maps = {
+      NEW_BARK_TOWN = { landmark = "LANDMARK_NEW_BARK_TOWN" },
+      ROUTE_29 = { landmark = 2 },
+    },
+    gen2Landmarks = {
+      landmarks = {
+        LANDMARK_NEW_BARK_TOWN = {
+          name = "NEW BARK\nTOWN", index = 1,
+        },
+        LANDMARK_ROUTE_29 = {
+          name = "ROUTE 29", index = 2,
+        },
+      },
+      order = { "LANDMARK_NEW_BARK_TOWN", "LANDMARK_ROUTE_29" },
+    },
+  } }
+  eq(Places.name(gen2Game, "NEW_BARK_TOWN"), "NEW BARK TOWN",
+     "Gen 2 landmark names resolve without data.field")
+  eq(Places.name(gen2Game, "ROUTE_29"), "ROUTE 29",
+     "and a numeric landmark byte resolves through the index")
+  local okNoField, noField = pcall(Places.name,
+    { data = { maps = { X = {} } } }, "X")
+  check(okNoField, "Places.name does not raise when data.field is nil")
+  eq(noField, "X", "and falls back to the id transform")
 
   -- Nothing here may raise: this runs once per roster row from inside a
   -- mod callback, and the doc comment on Places.lua is explicit that an

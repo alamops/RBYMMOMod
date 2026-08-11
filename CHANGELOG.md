@@ -8,6 +8,14 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Wave 4 polish + dual-gen headless load.** `Places.name` resolves Gen 2
+  landmarks via `data.gen2Landmarks` (no `data.field` crash); Overlay soft-
+  skips Gen 2 POKeGEAR MAP (`pokegear-skip`) instead of treating it as TownMap;
+  `Chars.list` / `resolve` fall back through `Gen.defaultSprite`. Suite loads
+  with `{ generation = 1 }` and `{ generation = 2 }` (both `loaded`, no
+  errors); `tests/drivers/run-mmo-e2e-gen2.sh` documents Gen 2 hub
+  (`--generation 2`) + Gold boot and exits 0 when the Gold cache is absent.
+
 - **Gen2 co-op strategy split (Wave 3 T3a).** Hub-mediated co-op
   (`coop_pvp` / `coop_npc` / `coop_wild`) opens on Gen 2 without hard-failing
   on missing Gen1 `BattleState`/`Damage`: `CoopBattle.loadEngine` soft-loads,

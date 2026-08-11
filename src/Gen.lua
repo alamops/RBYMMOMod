@@ -110,7 +110,8 @@ end
 -- True when the player is looking at the world: Gen 1's overworld-on-top,
 -- or Gen 2's empty stack with a live map (pipelineGate's free-roam case).
 function M.freeRoam(game, top)
-  local overworld = mod.world and mod.world:overworld()
+  local world = mod.world
+  local overworld = world and type(world.overworld) == "function" and world:overworld() or nil
   if top and overworld and top == overworld then return true end
   if not top and overworld and overworld.map then return true end
   return false
@@ -131,7 +132,9 @@ end
 -- Used when Handshake has no game yet but an overworld is already up.
 local function bootIsGen2(game)
   if M.generation(game) == 2 then return true end
-  local ow = mod.world and mod.world:overworld()
+  local world = mod.world
+  -- Guard: headless stubs often set mod.world to a fake without :overworld.
+  local ow = world and type(world.overworld) == "function" and world:overworld() or nil
   return ow ~= nil and type(ow.acceptsMenuInput) == "function"
 end
 

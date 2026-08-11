@@ -974,7 +974,7 @@ local lookOwner = nil
 
 local function playerEntity()
   local world = mod.world
-  local ow = world and world:overworld()
+  local ow = world and type(world.overworld) == "function" and world:overworld() or nil
   return ow and ow.player or nil
 end
 

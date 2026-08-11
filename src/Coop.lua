@@ -278,7 +278,8 @@ end
 -- Nil is a real answer for a build with no field data at all, and the
 -- caller declines to warp rather than guessing a map name.
 function M.healPoint(game)
-  local ow = mod.world and mod.world:overworld()
+  local world = mod.world
+  local ow = world and type(world.overworld) == "function" and world:overworld() or nil
   if ow and type(ow.healPoint) == "function" then
     local ok, target = pcall(function() return ow:healPoint() end)
     if ok and type(target) == "table" and target.map then return target end
