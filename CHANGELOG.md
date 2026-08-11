@@ -15,6 +15,12 @@ here must match `manifest.version`.
   `tests/battle_sim2_vectors.lua`. Gen1 `src/BattleSim/` untouched. Wire /
   MediatedBattle / Node twin are follow-up (T2b–T2d).
 
+- **Node Gen2 battle twin (Wave 2 T2b).** `server/lib/battle2/` mirrors
+  `src/BattleSim2/` (Damage / Crit / Accuracy / Status / Rng / Effects / Turn /
+  events). `server/battle2_vectors.test.js` pins
+  `tests/fixtures/battle_sim2_vectors.json` integer-identical to Lua. Hub
+  generation selection is T2d.
+
 - **Hub `--generation` / config `generation` (Wave 1 T1b).** CLI and config
   lock a hub to Gen 1 or Gen 2 (`--generation 1|2`, `generation:` in
   `config.json`, `RBY_MMO_GENERATION`). Compat default is 1 when omitted, with
