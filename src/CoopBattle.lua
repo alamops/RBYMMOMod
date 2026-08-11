@@ -990,12 +990,18 @@ function M:update(dt)
       if self.animPlayer and self.animPlayer.update then
         pcall(self.animPlayer.update, self.animPlayer)
       end
+      -- Same contract as BattleState: poll SE_* / sound rows after each tick.
+      self:pollAnimEffects()
       local done = true
       if self.animPlayer and self.animPlayer.isDone then
         local ok, finished = pcall(self.animPlayer.isDone, self.animPlayer)
         done = (not ok) or finished
       end
-      if done or input:wasPressed("b") then self.anim = nil end
+      if done or input:wasPressed("b") then
+        -- Hit thud after the flash (PlayApplyingAttackSound timing).
+        self:applyPendingHitFx()
+        self.anim = nil
+      end
       return
     end
     -- A falling bar holds the queue exactly as an animation does, and -- like
@@ -2520,7 +2526,7 @@ function M:playEvents(events)
       -- drain row at all, and a row that asks a bar for where it already is
       -- costs a frame and does nothing.
       local shownAt = showing(event.slot)
-      if shownAt then
+      if shownAt and not self:skipHealShapedDrain(shownAt, event.hp) then
         self.messages[#self.messages + 1] =
           { drain = shownAt, slot = event.slot, to = event.hp }
       end
@@ -2534,7 +2540,7 @@ function M:playEvents(events)
       -- No HP is applied here. Sim truth arrives only on `damage`, so a drain
       -- row that went missing costs an animation and never a number.
       local shownAt = showing(event.slot)
-      if shownAt then
+      if shownAt and not self:skipHealShapedDrain(shownAt, event.to) then
         self.messages[#self.messages + 1] =
           { drain = shownAt, slot = event.slot, to = event.to }
       end
@@ -2548,13 +2554,11 @@ function M:playEvents(events)
       -- falling, and only on the host, so the four clients disagreed about
       -- what they had just watched.
       --
-      -- So the flag is the display's from here on: cleared on the battler the
-      -- row is queued against, and set again when that row comes up. Cleared
-      -- *here* rather than in a pass over the whole batch beforehand, because
-      -- the slot's own battler is no help -- on the host it may already be the
-      -- replacement -- and `showing` is what knows which monster this faint is
-      -- about. Nothing about the *rules* changes: `sim:isDown` is still what
-      -- every rule reads, and it is untouched.
+      -- Display hide uses `displayFainted` (set only when the faint row runs),
+      -- not CoopField's early `fainted` -- that adapter flag stays for the
+      -- effect registry's "do not faint twice" guard. Cleared here so a stale
+      -- display flag cannot survive a re-queue. Nothing about the *rules*
+      -- changes: `sim:isDown` is still what every rule reads.
       --
       -- The sink is queued rather than played: the monster stands on the field
       -- until the row that fells it comes up, and the "fainted!" line is
@@ -2562,7 +2566,7 @@ function M:playEvents(events)
       -- slide and the cry before the text (BattleState:enemyMonFainted).
       local shownAt = showing(event.slot)
       if shownAt then
-        shownAt.fainted = nil
+        shownAt.displayFainted = nil
         self.messages[#self.messages + 1] =
           { faintfx = shownAt, slot = event.slot }
       end
@@ -2619,12 +2623,13 @@ function M:playEvents(events)
       end
     elseif event.kind == "over" then
       self.result = self:resultFor(event.winner)
-      -- The victory theme starts the moment the win is decided, not as the
-      -- screen closes: it is what the defeat line and the trainer's parting
-      -- line are read over, exactly as the engine queues it ahead of its own
-      -- _TrainerDefeatedText. Playing it on the way out would sound the fanfare
-      -- to an empty screen.
-      self:playVictoryMusic()
+      -- Fanfare rides the message queue as an `act`, the way BattleState
+      -- actNext(playVictoryMusic) does -- after this batch's drains and faint
+      -- sinks already appended above, and ahead of the parting text below.
+      -- Inline play here started the jingle under Gust's still-living bar.
+      self.messages[#self.messages + 1] = {
+        act = function(battle) battle:playVictoryMusic() end,
+      }
       -- Why the rating did not move, said once.
       --
       -- Winning a 2-on-2 against a trainer pays everything a trainer battle
@@ -2752,6 +2757,9 @@ function M:startDrain(row)
     return false
   end
   if battler.shownHP == to then return false end
+  -- Faint already queued / display-fainted: never animate a heal-shaped climb
+  -- (multi-attacker KO race left a drain with to > shownHP).
+  if self:skipHealShapedDrain(battler, to) then return false end
   -- The budget is the second half of the same guard, and it covers what a
   -- clamp cannot: the bar moves by a *rate*, so a step small enough to lose
   -- its last fraction to floating point would never reach `to` exactly. 96
@@ -2761,6 +2769,22 @@ function M:startDrain(row)
   self.hitSlot = row.slot
   self.draining = { battler = battler, slot = row.slot, to = to, frames = 120 }
   return true
+end
+
+-- A drain that would climb the bar after this mon is already owed a faint.
+-- Truth HP stays instant; only the display climb is refused.
+function M:skipHealShapedDrain(battler, to)
+  if type(battler) ~= "table" then return true end
+  local shown = battler.shownHP
+  to = tonumber(to)
+  if shown == nil or to == nil or to ~= to then return false end
+  if to <= shown then return false end
+  if battler.displayFainted then return true end
+  if self.faintFx and self.faintFx.battler == battler then return true end
+  for _, row in ipairs(self.messages or {}) do
+    if type(row) == "table" and row.faintfx == battler then return true end
+  end
+  return false
 end
 
 -- One frame of it. `maxHP / 96` per frame is the engine's rate, and it is a
@@ -2801,7 +2825,9 @@ end
 function M:startFaint(row)
   local battler = row.faintfx
   if type(battler) ~= "table" then return false end
-  battler.fainted = true
+  -- Display-only: CoopField may already have set adapter `fainted` during
+  -- resolveTurn. Hiding the pic waits for this row so the sink still plays.
+  battler.displayFainted = true
   self.hitSlot = row.slot
   self.faintFx = { battler = battler, slot = row.slot, frames = FAINT_FRAMES }
   return true
@@ -2938,7 +2964,7 @@ function M:snapDisplay()
     local battler = slot.battler
     if battler and battler.mon then
       battler.shownHP = battler.mon.hp
-      battler.fainted = self.sim:isDown(slot) or nil
+      battler.displayFainted = self.sim:isDown(slot) or nil
     end
   end
 end
@@ -3222,7 +3248,9 @@ end
 -- while a departed monster is still being shown out (M:shownBattlerAt).
 local function hidden(slot, battler)
   if not slot or slot.gone then return true end
-  return battler == nil or battler.fainted == true
+  -- Display faint only -- CoopField's early `fainted` must not hide the pic
+  -- before the queued sink runs.
+  return battler == nil or battler.displayFainted == true
 end
 
 -- Living field seats on one side, in sim slot order (for the side strips).
@@ -3236,6 +3264,9 @@ function M:stripShows(slot)
   if self:sinkingAt(slot.index) then return true end
   local battler = self:shownBattlerAt(slot.index)
   if hidden(slot, battler) then return false end
+  -- Truth may already be down from resolveTurn while the center pic still
+  -- shows this mon: keep the strip icon until display faint / sink done.
+  if battler and not battler.displayFainted then return true end
   if self.sim and self.sim:isDown(slot) and not self.sim:hasReserve(slot) then
     return false
   end
@@ -4001,8 +4032,141 @@ end
 local CLASSIC_PLAYER = { x = STAGE_ALLY.x, y = 40 }
 local CLASSIC_ENEMY = { x = STAGE_FOE.x, y = STAGE_FOE.y }
 
+-- ------- move / catch SFX (AnimPlayer pollEffects + hit thuds)
+--
+-- Mirrors BattleState's anim hold: update → pollEffects → playAnimSound /
+-- SFX_TINK; on completion, PlayApplyingAttackSound-style effectiveness thud.
+-- Derived client-side from the following effectiveness line (no PROTOCOL).
+
+local function hitSfxFromText(text)
+  if type(text) ~= "string" then return nil end
+  -- Engine / BattleSim lines may break mid-phrase ("It's super\neffective!").
+  local lower = text:lower():gsub("%s+", " ")
+  if lower:find("super effective", 1, true) then
+    return { sound = "Super_Effective", pitch = 0xe0 }
+  end
+  if lower:find("not very effective", 1, true) then
+    return { sound = "Not_Very_Effective", pitch = 0x50 }
+  end
+  return nil
+end
+
+-- Peek the message queue for the effectiveness line (or a following drain,
+-- which means a damaging hit with neutral matchup → Damage thud).
+function M:peekHitSfx()
+  local sawDrain = false
+  for _, row in ipairs(self.messages or {}) do
+    if type(row) == "table" then
+      if row.anim then break end
+      if row.text then
+        local sfx = hitSfxFromText(row.text)
+        if sfx then return sfx end
+      end
+      if row.drain then sawDrain = true end
+      if row.faintfx then sawDrain = true end
+    elseif type(row) == "string" then
+      local sfx = hitSfxFromText(row)
+      if sfx then return sfx end
+    end
+  end
+  if sawDrain then return { sound = "Damage", pitch = 0x20 } end
+  return nil
+end
+
+function M:playAnimSound(soundMove)
+  local Sound = engine and engine.Sound
+  if not Sound then return end
+  local data = self.game and self.game.data
+  if not data then return end
+  local animName = self.anim and self.anim.anim
+  local mdef = data.moves and data.moves[soundMove]
+  if animName == "GROWL" or animName == "ROAR" then
+    local from = self.anim and self.anim.from
+    local battler = from and self:shownBattlerAt(from)
+    local species = battler and battler.mon and battler.mon.species
+    if species and Sound.playMoveCry then
+      pcall(Sound.playMoveCry, data, species,
+        mdef and mdef.anim and mdef.anim.tempo)
+    end
+    return
+  end
+  if mdef and mdef.anim then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, mdef.anim)
+    elseif mdef.anim.sound and Sound.play then
+      pcall(Sound.play, data, mdef.anim.sound)
+    end
+  end
+end
+
+-- Soft-fail Sound for one AnimPlayer event (move sound or catch SFX_TINK).
+function M:applyAnimEffect(ev)
+  if type(ev) ~= "table" then return end
+  if ev.sound then self:playAnimSound(ev.sound) end
+  if ev.effect == "SFX_TINK" then
+    local Sound = engine and engine.Sound
+    local data = self.game and self.game.data
+    if Sound and Sound.play and data then
+      pcall(Sound.play, data, "Tink")
+    end
+  end
+end
+
+function M:pollAnimEffects()
+  local player = self.animPlayer
+  if not (player and player.pollEffects) then return end
+  local ok, events = pcall(player.pollEffects, player)
+  if not ok or type(events) ~= "table" then return end
+  for _, ev in ipairs(events) do
+    self:applyAnimEffect(ev)
+  end
+end
+
+-- Effectiveness thud after the flash (BattleState:applyHitFx sfx half).
+function M:applyPendingHitFx()
+  local hit = self.pendingHit
+  self.pendingHit = nil
+  if not hit or not hit.sfx then return end
+  local Sound = engine and engine.Sound
+  local data = self.game and self.game.data
+  if not (Sound and data) then return end
+  if type(hit.sfx) == "table" then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, hit.sfx)
+    elseif hit.sfx.sound and Sound.play then
+      pcall(Sound.play, data, hit.sfx.sound)
+    end
+  elseif Sound.play then
+    pcall(Sound.play, data, hit.sfx)
+  end
+end
+
+-- Solo's no-AnimPlayer branch: play the move's sound table entry once.
+function M:playMoveAnimFallback(row)
+  local data = self.game and self.game.data
+  local Sound = engine and engine.Sound
+  if not (data and Sound and row and row.anim) then return end
+  local mdef = data.moves and data.moves[row.anim]
+  local anim = mdef and mdef.anim
+  if row.anim == "GROWL" or row.anim == "ROAR" then
+    local from = row.from
+    local battler = from and self:shownBattlerAt(from)
+    local species = battler and battler.mon and battler.mon.species
+    if species and Sound.playMoveCry then
+      pcall(Sound.playMoveCry, data, species, anim and anim.tempo)
+    end
+  elseif anim and anim.sound then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, anim)
+    elseif Sound.play then
+      pcall(Sound.play, data, anim.sound)
+    end
+  end
+end
+
 function M:startAnim(row)
   self.anim = row
+  self.pendingHit = nil
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
   if row.anim == "HIDEPIC_ANIM" then
     self.foePicHidden = true
@@ -4015,9 +4179,13 @@ function M:startAnim(row)
       pcall(Sound.play, self.game.data, "Ball_Poof")
     end
   end
+  local hitSfx = self:peekHitSfx()
+  if hitSfx then self.pendingHit = { sfx = hitSfx } end
   if not (self.animPlayer and self.animPlayer.start) then
-    -- No animation data in this build: the flash is skipped and the messages
-    -- carry on, which is the degrade the header promises.
+    -- No animation data in this build: play the move SFX once (solo's
+    -- no-player branch) and the hit thud, then let the messages carry on.
+    self:playMoveAnimFallback(row)
+    self:applyPendingHitFx()
     self.anim = nil
     return false
   end
@@ -4040,8 +4208,15 @@ function M:startAnim(row)
     ballFlicker = ball == "MASTER_BALL" or ball == "ULTRA_BALL" or nil,
   }
   local ok = pcall(self.animPlayer.start, self.animPlayer, row.anim, isPlayer, opts)
-  if not ok then self.anim = nil end
-  return ok
+  if not ok then
+    self:playMoveAnimFallback(row)
+    self:applyPendingHitFx()
+    self.anim = nil
+    return false
+  end
+  -- Frame-0 sound/effect rows fire immediately (BattleState after start).
+  self:pollAnimEffects()
+  return true
 end
 
 -- How far to shift this animation so it lands on the slot that acted.

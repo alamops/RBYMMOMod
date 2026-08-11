@@ -80,6 +80,12 @@ local function loadEngine()
     BattleState = grab("BattleState", "src.battle.BattleState"),
     Sprites = grab("Sprites", "src.pokemon.Sprites"),
   }
+  -- Optional SFX (move whoosh, hit thud, catch Tink). Missing Sound must not
+  -- fail the whole load — headless / no-audio builds still fight without it.
+  do
+    local good, value = pcall(require, "src.core.Sound")
+    if good then engine.Sound = value end
+  end
   return engine
 end
 
@@ -1717,10 +1723,10 @@ function M:tickMessages(dt, input)
   -- Move flash holds the queue the way CoopBattle does: AnimPlayer when the
   -- build has battle_anims, otherwise a short dwell so the stream still paces.
   if self.anim then
-    local eng = loadEngine()
     if self.animPlayer and self.animPlayer.update then
       pcall(self.animPlayer.update, self.animPlayer)
     end
+    self:pollAnimEffects()
     local done = true
     if self.animPlayer and self.animPlayer.isDone then
       local ok, finished = pcall(self.animPlayer.isDone, self.animPlayer)
@@ -1732,6 +1738,7 @@ function M:tickMessages(dt, input)
             and self.dwell >= MSG_MIN_DWELL)
     end
     if done or (input and input:wasPressed("b") and self.dwell >= MSG_MIN_DWELL) then
+      self:applyPendingHitFx()
       self.anim = nil
       self.dwell = 0
     end
@@ -1781,16 +1788,156 @@ function M:ensureAnimPlayer()
   return self.animPlayer or nil
 end
 
+-- ------- move / catch SFX (same contract as CoopBattle / BattleState)
+
+local function hitSfxFromText(text)
+  if type(text) ~= "string" then return nil end
+  -- Engine / BattleSim lines may break mid-phrase ("It's super\neffective!").
+  local lower = text:lower():gsub("%s+", " ")
+  if lower:find("super effective", 1, true) then
+    return { sound = "Super_Effective", pitch = 0xe0 }
+  end
+  if lower:find("not very effective", 1, true) then
+    return { sound = "Not_Very_Effective", pitch = 0x50 }
+  end
+  return nil
+end
+
+function M:peekHitSfx()
+  local sawDamage = false
+  for _, row in ipairs(self.lines or {}) do
+    if type(row) == "table" then
+      if row.anim then break end
+      if row.clearPic ~= nil then sawDamage = true end
+    elseif type(row) == "string" then
+      local sfx = hitSfxFromText(row)
+      if sfx then return sfx end
+      local lower = row:lower()
+      if lower:find("fainted", 1, true) then sawDamage = true end
+    end
+  end
+  -- Damaging anim with no effectiveness line → neutral Damage thud. Ball /
+  -- status flashes leave sawDamage false and stay silent on completion.
+  if sawDamage then return { sound = "Damage", pitch = 0x20 } end
+  -- Also: a following HP change is not in `lines`, but the used-move line is.
+  -- Default Damage for ordinary move-id anims (not ball/HIDEPIC chain).
+  local anim = self.anim and self.anim.anim
+  if type(anim) == "string" and not anim:find("_ANIM", 1, true)
+     and anim ~= "POOF_ANIM" and anim ~= "SHAKE_ANIM"
+     and anim ~= "TOSS_ANIM" and anim ~= "BLOCKBALL_ANIM" then
+    return { sound = "Damage", pitch = 0x20 }
+  end
+  return nil
+end
+
+function M:playAnimSound(soundMove)
+  local eng = loadEngine()
+  local Sound = eng and eng.Sound
+  if not Sound then return end
+  local data = self.game and self.game.data
+  if not data then return end
+  local animName = self.anim and self.anim.anim
+  local mdef = data.moves and data.moves[soundMove]
+  if animName == "GROWL" or animName == "ROAR" then
+    local slot = self.anim and self.slots and self.slots[self.anim.slot]
+    local species = slot and self:speciesKeyFor(slot.species, true)
+    if not species and slot then species = slot.species end
+    if species and Sound.playMoveCry then
+      pcall(Sound.playMoveCry, data, species,
+        mdef and mdef.anim and mdef.anim.tempo)
+    end
+    return
+  end
+  if mdef and mdef.anim then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, mdef.anim)
+    elseif mdef.anim.sound and Sound.play then
+      pcall(Sound.play, data, mdef.anim.sound)
+    end
+  end
+end
+
+function M:applyAnimEffect(ev)
+  if type(ev) ~= "table" then return end
+  if ev.sound then self:playAnimSound(ev.sound) end
+  if ev.effect == "SFX_TINK" then
+    local eng = loadEngine()
+    local Sound = eng and eng.Sound
+    local data = self.game and self.game.data
+    if Sound and Sound.play and data then
+      pcall(Sound.play, data, "Tink")
+    end
+  end
+end
+
+function M:pollAnimEffects()
+  local player = self.animPlayer
+  if not (player and player.pollEffects) then return end
+  local ok, events = pcall(player.pollEffects, player)
+  if not ok or type(events) ~= "table" then return end
+  for _, ev in ipairs(events) do
+    self:applyAnimEffect(ev)
+  end
+end
+
+function M:applyPendingHitFx()
+  local hit = self.pendingHit
+  self.pendingHit = nil
+  if not hit or not hit.sfx then return end
+  local eng = loadEngine()
+  local Sound = eng and eng.Sound
+  local data = self.game and self.game.data
+  if not (Sound and data) then return end
+  if type(hit.sfx) == "table" then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, hit.sfx)
+    elseif hit.sfx.sound and Sound.play then
+      pcall(Sound.play, data, hit.sfx.sound)
+    end
+  elseif Sound.play then
+    pcall(Sound.play, data, hit.sfx)
+  end
+end
+
+function M:playMoveAnimFallback(row)
+  local eng = loadEngine()
+  local Sound = eng and eng.Sound
+  local data = self.game and self.game.data
+  if not (data and Sound and row and row.anim) then return end
+  local mdef = data.moves and data.moves[row.anim]
+  local anim = mdef and mdef.anim
+  if row.anim == "GROWL" or row.anim == "ROAR" then
+    local slot = row.slot and self.slots and self.slots[row.slot]
+    local species = slot and self:speciesKeyFor(slot.species, true)
+    if not species and slot then species = slot.species end
+    if species and Sound.playMoveCry then
+      pcall(Sound.playMoveCry, data, species, anim and anim.tempo)
+    end
+  elseif anim and anim.sound then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, anim)
+    elseif Sound.play then
+      pcall(Sound.play, data, anim.sound)
+    end
+  end
+end
+
 function M:startAnim(row)
   self.anim = row
+  self.pendingHit = nil
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
   if row.anim == "HIDEPIC_ANIM" then
     self.foePicHidden = true
   elseif row.anim == "SHOWPIC_ANIM" then
     self.foePicHidden = nil
   end
+  local hitSfx = self:peekHitSfx()
+  if hitSfx then self.pendingHit = { sfx = hitSfx } end
   local player = self:ensureAnimPlayer()
   if not (player and player.start) then
+    self:playMoveAnimFallback(row)
+    self:applyPendingHitFx()
+    -- Still hold briefly via dwell path when there is no player.
     return
   end
   -- Field slot on the wire; fall back to side so a missing slot still faces
@@ -1804,7 +1951,13 @@ function M:startAnim(row)
     ballFlicker = ball == "MASTER_BALL" or ball == "ULTRA_BALL" or nil,
   }
   local ok = pcall(player.start, player, row.anim, mine, opts)
-  if not ok then self.anim = row end -- still hold briefly via dwell path
+  if not ok then
+    self:playMoveAnimFallback(row)
+    self:applyPendingHitFx()
+    -- still hold briefly via dwell path
+    return
+  end
+  self:pollAnimEffects()
 end
 
 -- Drop a KO'd pic after its faint line (and any anim queued ahead of it).
