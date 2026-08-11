@@ -586,6 +586,11 @@ end
 -- leader's theme with the wrong jingle.
 function M.musicKind(self)
   if self.cachedMusicKind then return self.cachedMusicKind end
+  -- Party vs Wild is wildlife, not a trainer fight or a PvP link cue.
+  if self.mode == "coop_wild" then
+    self.cachedMusicKind = "wild"
+    return "wild"
+  end
   local kind = self.trainer and "trainer" or "link"
   local eng = engine
   if eng and eng.BattleState and self.trainer then
@@ -598,17 +603,56 @@ function M.musicKind(self)
   return kind
 end
 
+-- Display name for the opening "Wild X appeared!" line (Gen 1 BattleState).
+-- Prefer the stashed encounter mon; else the first ownerless field party lead.
+function M:wildIntroName()
+  local mon = self.wildCatchMon
+  if mon then
+    local name = mon.nickname or mon.species
+    if type(name) == "string" and name ~= "" then
+      return Wire.name(name) or name
+    end
+  end
+  if self.wildParty and self.wildParty[1] then
+    local sheet = self.wildParty[1]
+    local name = sheet.species or sheet.speciesId
+    if type(name) == "string" and name ~= "" then
+      return Wire.name(name) or name
+    end
+  end
+  if self.sim then
+    for _, slot in ipairs(self.sim.slots or {}) do
+      if slot.owner == nil then
+        local lead = slot.party and slot.party[1]
+        if lead then
+          local name = lead.nickname or lead.species
+          if type(name) == "string" and name ~= "" then
+            return Wire.name(name) or name
+          end
+        end
+      end
+    end
+  end
+  return "POKeMON"
+end
+
 function M:enter()
   -- The trainer theme, through the engine's own picker so a gym leader still
   -- gets a gym leader's music. `kind` is the battle's, not this screen's: a
   -- co-op fight against a trainer is a trainer battle to everything except the
-  -- turn loop.
+  -- turn loop. coop_wild uses the wild cue (see musicKind).
   local eng = engine
   if eng and eng.Music then
     pcall(eng.Music.playBattle, self.game.data, self:musicKind(),
       self.trainer and self.trainer.id or nil)
   end
-  self:say("2 on 2 battle!")
+  -- Party vs Wild is a grass encounter shared with a partner, not a 2-on-2:
+  -- open with the same sentence solo wild uses (BattleState introText).
+  if self.mode == "coop_wild" then
+    self:say(("Wild %s\nappeared!"):format(self:wildIntroName()))
+  else
+    self:say("2 on 2 battle!")
+  end
   self.phase = "messages"
   self.after = "choose"
   self:announce("coop_battle_started")
