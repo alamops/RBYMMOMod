@@ -2447,6 +2447,8 @@ class Relay {
         && mode !== 'wild' && mode !== 'coop_wild') {
       mode = memberIds.length <= 2 ? '1v1' : 'coop_pvp';
     }
+    // coop_wild is a 2v1 contract (exactly two humans vs one wild seat).
+    if (mode === 'coop_wild' && memberIds.length !== 2) return null;
 
     const hostId = p.hostId || memberIds[0];
     let npcIds = null;
@@ -2456,8 +2458,7 @@ class Relay {
         npcIds.push(`n${id}${String.fromCharCode(97 + i)}`);
       }
     } else if (mode === 'wild' || mode === 'coop_wild') {
-      // One synthetic wild seat. Wild: one human. Coop_wild: two humans (party
-      // size is client-gated; hub opens with whatever members arrived).
+      // One synthetic wild seat. Wild: one human. Coop_wild: two humans.
       // Protocol-only here — overworld divert for coop_wild is client-side.
       npcIds = [`n${id}a`];
     }
@@ -2903,6 +2904,7 @@ class Relay {
     }
     if (outcome.reason) payload.reason = outcome.reason;
     if (outcome.caught) payload.caught = outcome.caught;
+    if (outcome.catcher) payload.catcher = outcome.catcher;
     this.broadcastBattle(record, 'mmo.battle_outcome', payload);
 
     // Rank from the intermediator alone -- no dual mmo.result vote.

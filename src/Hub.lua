@@ -1274,6 +1274,8 @@ function M:openMediatedBattle(id, plan)
   -- Accept coop_wild explicitly so seating works before Turn.MODES gains it (T3).
   local mode = (Turn.MODES[plan.mode] or plan.mode == "coop_wild") and plan.mode
     or ((#memberIds <= 2) and "1v1" or "coop_pvp")
+  -- coop_wild is a 2v1 contract (exactly two humans vs one wild seat).
+  if mode == "coop_wild" and #memberIds ~= 2 then return nil end
   local hostId = plan.hostId or memberIds[1]
   local npcIds = nil
   if mode == "coop_npc" then
@@ -1282,8 +1284,7 @@ function M:openMediatedBattle(id, plan)
       npcIds[i] = "n" .. tostring(id) .. string.char(96 + i)
     end
   elseif mode == "wild" or mode == "coop_wild" then
-    -- One synthetic wild seat. Wild: one human. Coop_wild: two humans (party
-    -- size is client-gated; hub opens with whatever members arrived).
+    -- One synthetic wild seat. Wild: one human. Coop_wild: two humans.
     -- Protocol-only here — overworld divert for coop_wild is client-side.
     npcIds = { "n" .. tostring(id) .. "a" }
   end
@@ -1761,6 +1762,7 @@ function M:settleMediated(record, outcome)
   end
   if outcome.reason then payload.reason = outcome.reason end
   if outcome.caught then payload.caught = outcome.caught end
+  if outcome.catcher then payload.catcher = outcome.catcher end
   self:broadcastBattle(record, Wire.BATTLE_OUTCOME, payload)
 
   local match = self.matches[record.id]

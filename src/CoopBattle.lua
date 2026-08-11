@@ -199,6 +199,126 @@ function M.trainerParty(game, oppClass, partyIndex)
   return out
 end
 
+-- Map a battleMon / caught-sheet species token to a pokedex registry id.
+-- Sheets narrate under Wire.name(display); Pokemon.new needs the registry key.
+-- Prefer speciesId when present (upload-time snapshots); else the species
+-- field as an id; else a display-name scan — same idea as MediatedBattle's
+-- speciesKeyFor, without needing a live party.
+local function speciesKeyFromSheet(game, sheet)
+  if type(sheet) ~= "table" then return nil end
+  local data = game and game.data
+  local pokedex = data and data.pokemon
+  if type(pokedex) ~= "table" then return nil end
+  local id = sheet.speciesId
+  if type(id) == "string" and id ~= "" and pokedex[id] then return id end
+  local label = sheet.species
+  if type(label) ~= "string" or label == "" then return nil end
+  if pokedex[label] then return label end
+  for key, def in pairs(pokedex) do
+    if type(def) == "table" then
+      local name = Wire.name(def.name or key)
+      if name == label then return key end
+    end
+  end
+  return nil
+end
+
+-- Rebuild a depositable engine mon from a catch-outcome battleMon sheet.
+-- Used when this client never held the encounter (joiner / partner catcher):
+-- wildCatchMon is nil, but the outcome still carries Effects.caughtSheet.
+-- Best-effort: DVs/EVs from ivs/evs when present, else combat stats from the
+-- sheet; moves and current HP always prefer the sheet. Returns nil when the
+-- species cannot be resolved or Pokemon.new fails.
+function M.monFromCaughtSheet(game, sheet)
+  if type(sheet) ~= "table" then return nil end
+  local eng = loadEngine()
+  if not (eng and eng.Pokemon and eng.Stats) then return nil end
+  local species = speciesKeyFromSheet(game, sheet)
+  if not species then return nil end
+  local level = tonumber(sheet.level) or 1
+  if level < 1 then level = 1 end
+  local ok, mon = pcall(eng.Pokemon.new, game.data, species, level)
+  if not (ok and mon) then return nil end
+
+  local wireToEngine = { atk = "attack", def = "defense", spd = "speed", spc = "special" }
+
+  if type(sheet.ivs) == "table" then
+    local dvs = {}
+    for wireKey, engineKey in pairs(wireToEngine) do
+      local n = tonumber(sheet.ivs[wireKey])
+      if not n then dvs = nil break end
+      dvs[engineKey] = math.max(0, math.min(15, math.floor(n)))
+    end
+    if dvs then
+      dvs.hp = (dvs.attack % 2) * 8 + (dvs.defense % 2) * 4
+        + (dvs.speed % 2) * 2 + (dvs.special % 2)
+      mon.dvs = dvs
+    end
+  end
+
+  if type(sheet.evs) == "table" then
+    local statExp = mon.statExp or {
+      hp = 0, attack = 0, defense = 0, speed = 0, special = 0,
+    }
+    for wireKey, engineKey in pairs(wireToEngine) do
+      local n = tonumber(sheet.evs[wireKey])
+      if n then
+        statExp[engineKey] = math.max(0, math.min(65535, math.floor(n)))
+      end
+    end
+    if sheet.evs.hp ~= nil then
+      local n = tonumber(sheet.evs.hp)
+      if n then statExp.hp = math.max(0, math.min(65535, math.floor(n))) end
+    end
+    mon.statExp = statExp
+  end
+
+  if mon.dvs then
+    local def = game.data.pokemon[species]
+    local statsOk, stats = pcall(eng.Stats.calc, def, level, mon.dvs, mon.statExp)
+    if statsOk and stats then mon.stats = stats end
+  elseif type(sheet.stats) == "table" then
+    mon.stats = mon.stats or {}
+    for wireKey, engineKey in pairs(wireToEngine) do
+      local n = tonumber(sheet.stats[wireKey])
+      if n then mon.stats[engineKey] = math.max(1, math.floor(n)) end
+    end
+    local maxHp = tonumber(sheet.maxHp)
+    if maxHp then mon.stats.hp = math.max(1, math.floor(maxHp)) end
+  elseif sheet.maxHp ~= nil then
+    mon.stats = mon.stats or {}
+    local maxHp = tonumber(sheet.maxHp)
+    if maxHp then mon.stats.hp = math.max(1, math.floor(maxHp)) end
+  end
+
+  if type(sheet.moves) == "table" and #sheet.moves > 0 then
+    local moves = {}
+    for _, slot in ipairs(sheet.moves) do
+      if type(slot) == "table" and type(slot.id) == "string" and slot.id ~= "" then
+        local mdef = game.data.moves and game.data.moves[slot.id]
+        local pp = tonumber(slot.pp)
+        if not pp then pp = mdef and mdef.pp or 0 end
+        moves[#moves + 1] = { id = slot.id, pp = math.max(0, math.floor(pp)) }
+      end
+    end
+    if #moves > 0 then mon.moves = moves end
+  end
+
+  local hp = tonumber(sheet.hp)
+  if hp then
+    local maxHp = (mon.stats and mon.stats.hp) or tonumber(sheet.maxHp) or 1
+    mon.hp = math.max(0, math.min(math.floor(hp), maxHp))
+  end
+
+  if sheet.catchRate ~= nil then
+    local rate = tonumber(sheet.catchRate)
+    if rate then mon.catchRate = math.max(0, math.min(255, math.floor(rate))) end
+  end
+  if sheet.status ~= nil then mon.status = sheet.status end
+
+  return mon
+end
+
 -- ------- construction
 --
 -- opts:
@@ -5222,12 +5342,18 @@ end
 -- Put the caught wild into this client's party (or PC). Mirrors
 -- MediatedBattle:grantCatch — duplicated so CoopBattle owns the coop_wild
 -- path without sharing a module with the 1v1 screen.
+--
+-- Host usually has wildCatchMon from the engine encounter. Partner / joiner
+-- often does not; rebuild from msg.caught (Effects.caughtSheet) so a catcher
+-- who never held the wild can still Party.add / Boxes.deposit.
 function M:grantCatch(msg)
   local mon = self.wildCatchMon
   if not mon and msg and msg.caught then
-    -- Sheet-only path: cannot rebuild a full engine mon without ROM data.
-    self:say("Caught, but could not\nadd to the party.")
-    return
+    mon = M.monFromCaughtSheet(self.game, msg.caught)
+    if not mon then
+      self:say("Caught, but could not\nadd to the party.")
+      return
+    end
   end
   if not mon then return end
   local game = self.game
