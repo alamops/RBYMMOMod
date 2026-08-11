@@ -140,6 +140,13 @@ function M.partLine(name)
   return ("%s left the server"):format(name)
 end
 
+-- Self-connect status.  Constant because the player already knows who they
+-- are; unlike joinLine there is no name to fill in, only the fact of being
+-- on the hub.
+function M.connectedLine()
+  return "You're connected"
+end
+
 -- The colour an arrival is drawn in.
 --
 -- The same sentence either way -- a friend arriving is still somebody joining

@@ -998,6 +998,25 @@ eq(chat.unread, 1,
    "it lights the unread badge -- deliberate, per docs/plans/server-live-ops.md "
    .. "#3: a greeting nobody notices is a greeting nobody reads")
 
+-- ------- Connected: the exact push shape after MOTD in Client WELCOME
+--
+-- After the optional MOTD line, `ctx.chat:push({ name = "HUB", scope = "global",
+-- text = Toast.connectedLine() })` -- same HUB name, no `from`, exact copy.
+-- Pinned at the Chat seam because the suite has no cheap way to drive the
+-- real welcome handler live (same reason as MOTD above).
+
+chat:clear()
+;(function()
+  local line = Toast.connectedLine()
+  local hubEntry = chat:push({ name = "HUB", scope = "global", text = line })
+  check(hubEntry ~= nil, "the connected line is accepted with no `from`")
+  eq(chat.history[#chat.history].name, "HUB", "it lands in the scrollback under the HUB name")
+  eq(chat:line(hubEntry), "[G]HUB: You're connected",
+     "and renders like any other global line -- Chat:line never reads `from`")
+end)()
+eq(chat.unread, 1,
+   "it lights the unread badge -- deliberate, same signal as the MOTD greeting")
+
 -- ------- Toast: the queue behind the corner stack
 --
 -- push/update/clear/list/state is plain arithmetic on a list -- the part of
@@ -1076,6 +1095,9 @@ eq(Toast.joinLine(42), nil, "and neither is a numeric one")
 
 eq(Toast.partLine("MISTY"), "MISTY left the server", "a departure reads the same way")
 eq(Toast.partLine(nil), nil, "a nameless departure is refused")
+
+eq(Toast.connectedLine(), "You're connected",
+   "self-connect names no player -- only that the hub link is live")
 
 -- A friend arriving gets the *same sentence* and a different colour.  Two
 -- wordings would read as two different events; the blue is what answers "was

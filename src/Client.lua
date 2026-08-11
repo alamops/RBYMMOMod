@@ -157,6 +157,9 @@ local myAdmin = false
 -- address, so the host's own copy answers with the option row's code.
 local dialled = nil
 local authSent = false
+-- Survives drop teardown (disconnect) so a rejoin after a lost transport
+-- stays silent; cleared only on intentional leave / stopHosting.
+local connectedAnnounced = false
 
 -- ------- helpers
 
@@ -1151,6 +1154,7 @@ function M.stopHosting()
   -- tear the local client down first, so the host leaves its own roster
   -- cleanly before the hub tells everyone else the game is over
   M.disconnect()
+  connectedAnnounced = false
   server:stop("The host ended the game.")
   return true
 end
@@ -1247,6 +1251,7 @@ end
 function M.leave()
   if M.isHosting() then return M.stopHosting() end
   M.disconnect()
+  connectedAnnounced = false
   return true
 end
 
@@ -1563,9 +1568,15 @@ handlers[Wire.WELCOME] = function(game, msg)
   -- Deliberately not a text box. ui:say pushes a modal that sits over the
   -- world until someone presses A, and a routine status line is not worth
   -- interrupting play for -- the first real run left "Connected." covering
-  -- the bottom third of the screen for the whole session. The player count
-  -- is already on the MMO menu's PLAYERS row, which is where someone who
-  -- cares will look. Errors still get a box; this does not.
+  -- the bottom third of the screen for the whole session. Toast + HUB
+  -- scrollback below are the replacement; the player count is already on
+  -- the MMO menu's PLAYERS row. Errors still get a box; this does not.
+  if not connectedAnnounced then
+    local line = Toast.connectedLine()
+    toast:push(line)
+    ctx.chat:push({ name = "HUB", scope = "global", text = line })
+    connectedAnnounced = true
+  end
   mod.log:info("connected -- %d other player(s) on", ctx.roster.count)
 end
 
