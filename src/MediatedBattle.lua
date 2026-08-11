@@ -89,6 +89,8 @@ local function loadEngine()
   return engine
 end
 
+M.loadEngine = loadEngine
+
 -- Classic 1v1 anchors (AnimPlayer / BattleState pic windows).
 -- Ally back pics draw at 2x on the GB (BattleState.BATTLE_SCALE_DEFAULT.back);
 -- front pics stay 1x. MediatedBattle used to draw both at 1x, which left the

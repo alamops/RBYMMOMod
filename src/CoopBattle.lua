@@ -1105,7 +1105,7 @@ function M:update(dt)
         local ok, finished = pcall(self.animPlayer.isDone, self.animPlayer)
         done = (not ok) or finished
       end
-      if done or input:wasPressed("b") then
+      if done or (input and input:wasPressed("b")) then
         -- Hit thud after the flash (PlayApplyingAttackSound timing).
         self:applyPendingHitFx()
         self.anim = nil
@@ -1226,6 +1226,7 @@ function M:update(dt)
       -- the line actually being *up*, not of wall time under a flash.
       local advance = false
       if self.msgClock >= MSG_MIN_DWELL
+         and input
          and (input:wasPressed("a") or input:wasPressed("b")) then
         advance = true
       elseif self.msgClock > MSG_AUTO_ADVANCE then
