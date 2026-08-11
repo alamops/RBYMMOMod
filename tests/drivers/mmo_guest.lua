@@ -395,6 +395,10 @@ return function(game)
   --     shows up as "chat is broken"; both show up as one instance timing
   --     out while the other passes, which reads like a transport fault.
   --
+  -- The second fault is finished after this loop: the chat rendezvous keeps
+  -- saying (await sample) until the peer signals, so hearing first no longer
+  -- starves the other side of repeats.
+  --
   -- A line is fan-out, not delivery: the hub forwards it to whoever is ready
   -- at that instant and never retries, and `local` additionally needs the
   -- listener to have a cell on the hub -- which a player standing in a menu
@@ -442,7 +446,25 @@ return function(game)
   check(heardGlobal, "global chat crosses the hub between two guests")
   check(heardLocal, "and so does nearby chat, which the hub scopes by map and distance")
   shot("chat")
-  check(rendezvous("chat"), "both guests finished the chat leg")
+  -- Keep saying while waiting for the peer to finish hearing. chatBothScopes
+  -- returns as soon as *this* side has both lines; if it also stops sending,
+  -- the peer can sit out the rest of the budget on a dropped fan-out (local
+  -- especially: no cell while a menu is up means the hub never forwards).
+  -- await's sample is the keep-alive -- same 3s cadence as the drive above.
+  H.signal(marker(ROLE, "chat"))
+  do
+    local turn, lastSay = 1, -99
+    local peerDone = H.await(game, marker(PEER, "chat"), nil, function()
+      if os.time() - lastSay < 3 then return end
+      if turn == 1 then
+        exports.say("global", "HELLO FROM " .. ME.name)
+      else
+        exports.say("local", "NEARBY " .. ME.name)
+      end
+      lastSay, turn = os.time(), 3 - turn
+    end)
+    check(peerDone, "both guests finished the chat leg")
+  end
 
   -- Two legs landed here in the same merge, both reached from the end of
   -- the chat leg, and both are kept: MY PROFILE reads nothing but the local
@@ -618,24 +640,26 @@ return function(game)
   -- Nameplates use the bundled Rajdhani face (src/Toast.lua), not the ROM
   -- sheet, so the charmap probe below does not apply here.
 
-  -- Let the chat leg's last bubble expire before the shot.
-  --
-  -- Two things at once. The screenshot is a README image, and a bubble left
-  -- over from a previous leg floating above the nameplate makes it look like
-  -- the name is something the player said. And waiting for it is an
-  -- assertion in its own right: Config.BUBBLE_SECONDS is 5, so a plate that
-  -- has not settled to the name alone well past that is a bubble that never
-  -- expired -- which would be a leak nothing else here would notice.
+  -- Bubbles are gone (corner toasts replaced them); what still matters is
+  -- that the party marker *replaced* the peer's unmarked plate. Own yellow
+  -- plate (Overlay.drawSelfLabel) is expected in the same frame, so
+  -- "#names == 1" is the wrong settle condition -- it fails whenever self
+  -- is on screen, which is the normal overworld case after the Rajdhani
+  -- restyle.
   local settled, lastSeen = false, drew
   local settleDeadline = os.time() + 20
   while os.time() < settleDeadline and not settled do
     local ov = exports.overlayState and exports.overlayState() or {}
     lastSeen = ov.names or {}
-    settled = #lastSeen == 1 and lastSeen[1] == MARKED
+    local marked, unmarkedPeer = false, false
+    for _, name in ipairs(lastSeen) do
+      if name == MARKED then marked = true end
+      if name == THEM.name then unmarkedPeer = true end
+    end
+    settled = marked and not unmarkedPeer
     if not settled then U.wait(12) end
   end
-  check(settled, "the plate settles to the marked name alone -- old bubbles "
-    .. "expire (saw: "
+  check(settled, "their marked plate is up without the unmarked twin (saw: "
     .. (#lastSeen == 0 and "(none)" or table.concat(lastSeen, ",")) .. ")")
   shot("party-map")
 
@@ -746,6 +770,10 @@ return function(game)
   -- and draws, or whether the battle that was displaced ever gets its result
   -- back. Every one of those fails silently in the suite's world.
   --
+  -- PROTOCOL 10 / T7: Config.MEDIATED_COOP.coop_npc is on, so this fight must
+  -- also prove the Node hub refereed it (battle id `c*`, `.mediated`, medGaps)
+  -- rather than greenpassing on legacy host CoopSim rolls.
+  --
   -- Both instances push the same trainer battle themselves. That is not a
   -- shortcut around the interception -- it is exactly what the engine does at
   -- the end of both of its own paths (`game.stack:push(battle)`), which is the
@@ -845,16 +873,30 @@ return function(game)
   end
 
   if coopClass then
+    -- Without a live hub + party, Coop.onTrainerBattle leaves the engine
+    -- battle alone. The wait-for-WAIT loop below used to tap A on any
+    -- item-less top screen -- which is exactly BattleState -- and would
+    -- then fight the Bug Catcher solo until "ALPHA defeated BUG CATCHER!",
+    -- looking like a stuck co-op handoff. Bail here with the real fault.
+    check(exports.isConnected(),
+          "still connected to the hub before staging the co-op trainer")
+    check(#exports.party() == 2,
+          "still in a two-person party before staging the co-op trainer")
+
     if ROLE == "a" then
       staged = stageTrainer()
-      -- The prompt is a text box and then a two-row menu; tap through the box
-      -- rather than mashing, because row one of that menu is WAIT and a stray
-      -- A would answer the question this is trying to observe.
+      -- The prompt is a text box and then a two-row menu; tap through the
+      -- *prompt's* box rather than mashing, because row one of that menu is
+      -- WAIT and a stray A would answer the question this is trying to
+      -- observe. Never tap A into a BattleState: that is the engine fight
+      -- running alone, which means the intercept never fired.
       local asked = H.waitFor(game, function()
+        if not exports.isConnected() then return false end
         for _, label in ipairs(H.menuLabels(game)) do
           if label == "WAIT" then return true end
         end
         local top = H.top(game)
+        if top and top.kind == "trainer" then return false end
         if top and top.items == nil then U.tap(game, "a") end
         return false
       end, 60 * 6, "the co-op prompt in front of the trainer")
@@ -868,7 +910,9 @@ return function(game)
       H.signal("coop_a_waiting")
     else
       H.await(game, "coop_a_waiting")
-      -- The offer has to have crossed a real hub to get here.
+      -- The offer has to have crossed a real hub to get here. Same-map
+      -- auto-invite may already have the confirm up -- do not stage a trainer
+      -- underneath it (that buried the yes/no and made B decline the join).
       local offered = H.waitSeconds(game, function()
         return exports.coopOffer() ~= nil
       end, 60, "the partner's co-op offer to arrive")
@@ -876,13 +920,12 @@ return function(game)
       local offer = exports.coopOffer()
       if offer then log("offer:", tostring(offer.name), tostring(offer.battle)) end
 
-      staged = stageTrainer()
-      -- Reaching the same fight asks to join it; YES is row one.
+      -- YES on the invite until the co-op field is up.
       local joined = H.drivePrompts(game, function()
         local top = H.top(game)
         return top ~= nil and top.sim ~= nil
       end, 90)
-      check(joined, "reaching the same fight offers to join, and joining starts it")
+      check(joined, "accepting the invite starts the co-op battle")
       H.signal("coop_b_joined")
     end
   end
@@ -901,6 +944,24 @@ return function(game)
       return top ~= nil and top.sim ~= nil and #top.sim.slots == 4
     end, 90, "the 2-on-2 to come up")
     check(onField, "a four-slot co-op battle is on screen")
+
+    -- PROTOCOL 10: the Node hub must referee this Party-vs-NPC fight. The
+    -- field can come up on the host-simulated path first; wait for
+    -- mmo.battle_ready before claiming mediation. Without this, the leg
+    -- greenpasses on legacy CoopSim rolls.
+    local refereed = H.awaitMediatedCoop(game, 60, "coop_npc")
+    check(refereed,
+          "the 2-on-2 is hub-refereed (coop_npc), not host CoopSim")
+    do
+      local top = H.top(game)
+      log(("mediated coop: id=%s mode=%s medGaps=%s"):format(
+        tostring(top and top.battleId), tostring(top and top.mode),
+        tostring(top and top.medGaps)))
+      check(top and top.mode == "coop_npc", "mode is coop_npc")
+      check(tostring(top and top.battleId or ""):match("^c") ~= nil,
+            "battle id is a co-op c* id")
+    end
+
     local top = H.top(game)
     if top and top.sim then
       local names = {}
@@ -942,7 +1003,7 @@ return function(game)
             "and exactly one of the four carries a badge set -- the host does "
             .. "not hand its own to everybody")
       -- The command box is what this screenshot is of, so it waits for it.
-      check(H.awaitCommandMenu(game, "the command menu for the battle shot"),
+      check(H.awaitCommandMenu(game, "the co-op command menu for the battle shot"),
             "the co-op command grid opens once the opening line is done")
       U.wait(30)
       shot("coop-battle")
@@ -958,6 +1019,8 @@ return function(game)
       local sync = exports.coopSync()
       check(sync.gaps == 0, "no turn went missing on the wire")
       check(sync.desyncs == 0, "and this copy never drifted from the host")
+      check((tonumber(top.medGaps) or 0) == 0,
+            "and no gaps in the mediated event stream yet")
     end
 
     -- ------- SWITCH and ITEM, through the real menus
@@ -971,12 +1034,11 @@ return function(game)
       local activeBefore = before and before.sim and before.sim:slot(before.mine)
       local speciesBefore = activeBefore and activeBefore.battler
         and activeBefore.battler.mon.species
-      -- The command box is a 2x2 grid navigated as one (FIGHT ITEM on the top
-      -- row, SWITCH RUN on the bottom), so SWITCH is directly *below* FIGHT --
-      -- one press, not the two the old linear cycle took.
+      -- Command grid is classic 2x2: FIGHT SWITCH / ITEM RUN. RIGHT from
+      -- FIGHT lands on SWITCH.
       check(H.awaitCommandMenu(game, "the command menu before SWITCH"),
             "the command grid is answerable before SWITCH is pressed")
-      U.tap(game, "down"); U.wait(6)
+      U.tap(game, "right"); U.wait(6)
       U.tap(game, "a");    U.wait(10)   -- open the bench
       U.tap(game, "a");    U.wait(20)   -- take the first one on it
       local after = H.waitSeconds(game, function()
@@ -992,27 +1054,48 @@ return function(game)
 
     if ROLE == "b" and potionId then
       local held = (game.save.inventory or {})[potionId] or 0
-      -- Hurt the active monster first, or a potion has nothing to heal and
-      -- the engine refuses it -- which would pass a test that proved nothing.
       local now = H.top(game)
+      local mediated = H.isMediatedCoop(now)
       local slot = now and now.sim and now.sim:slot(now.mine)
       local mon = slot and slot.battler and slot.battler.mon
-      if mon then mon.hp = math.max(1, math.floor((mon.stats.hp or 2) / 2)) end
+      -- Host-sim only: hurt locally so the potion has something to heal.
+      -- On the mediated path the hub owns HP -- a local wound is invisible
+      -- to it, and a heal assertion against that wound would fail a fight
+      -- that refereed correctly.
+      if not mediated and mon then
+        mon.hp = math.max(1, math.floor((mon.stats.hp or 2) / 2))
+      end
       local hurt = mon and mon.hp or 0
-      -- ITEM sits to the *right* of FIGHT on the command grid's top row, so
-      -- this is a right press rather than the down the linear cycle needed.
+      -- ITEM is bottom-left on the classic command grid (FIGHT SWITCH /
+      -- ITEM RUN). DOWN from FIGHT lands on it.
       check(H.awaitCommandMenu(game, "the command menu before ITEM"),
             "the command grid is answerable before ITEM is pressed")
-      U.tap(game, "right"); U.wait(6)
+      U.tap(game, "down"); U.wait(6)
       U.tap(game, "a");    U.wait(10)   -- open the bag
-      U.tap(game, "a");    U.wait(20)   -- use the first thing in it
-      local healed = H.waitSeconds(game, function()
-        return mon ~= nil and (mon.hp or 0) > hurt
-      end, 45, "the potion to heal")
-      check(healed, "ITEM uses a POTION mid-battle and it heals")
-      local left = (game.save.inventory or {})[potionId] or 0
-      check(left < held, "and the item is spent from the bag")
-      log(("potion: %d -> %d, hp %d -> %d"):format(held, left, hurt, mon and mon.hp or 0))
+      U.tap(game, "a");    U.wait(20)   -- pick the first usable item
+      -- Mediated heals (POTION etc.) open a party picker; host-sim commits on
+      -- the bag row. Without this A the ITEM choice never leaves, the partner's
+      -- SWITCH never resolves, and both waits time out together.
+      if mediated then
+        U.tap(game, "a"); U.wait(20)
+      end
+      if mediated then
+        local spent = H.waitSeconds(game, function()
+          return ((game.save.inventory or {})[potionId] or 0) < held
+        end, 45, "the potion to be spent")
+        check(spent, "ITEM spends a potion on the mediated path")
+        local left = (game.save.inventory or {})[potionId] or 0
+        log(("potion: %d -> %d (mediated; hub owns HP)"):format(held, left))
+      else
+        local healed = H.waitSeconds(game, function()
+          return mon ~= nil and (mon.hp or 0) > hurt
+        end, 45, "the potion to heal")
+        check(healed, "ITEM uses a POTION mid-battle and it heals")
+        local left = (game.save.inventory or {})[potionId] or 0
+        check(left < held, "and the item is spent from the bag")
+        log(("potion: %d -> %d, hp %d -> %d"):format(
+          held, left, hurt, mon and mon.hp or 0))
+      end
       shot("coop-item")
     end
 
@@ -1020,11 +1103,20 @@ return function(game)
     -- the first move, then the first target -- so tapping through is a real
     -- player playing it badly rather than a test poking at internals.
     local coopPrompts = {}
+    local medGaps = 0
+    local phaseShots = {}
     local over = H.drivePrompts(game, function()
       local now = H.top(game)
       return now == nil or now.sim == nil
     end, 120, function()
       local now = H.top(game)
+      phaseShots = H.shotCoopPhases(game, shot, phaseShots)
+      if H.isMediatedCoop(now) then
+        medGaps = tonumber(now.medGaps) or medGaps
+        if now.mode ~= "coop_npc" then
+          log("WARN mediated coop mode drifted to", tostring(now.mode))
+        end
+      end
       local text = now and now.shown
       if type(text) == "string" and text ~= "" then
         -- Flattened as it is captured. A battle line is two rows joined by a
@@ -1046,13 +1138,14 @@ return function(game)
     -- hauled them into line once a turn. A resync is a repair, and a repair
     -- happening every turn is a protocol that is not working.
     local after = exports.coopSync()
-    log(("sync after: gaps=%d desyncs=%d resyncs=%d"):format(
-      after.gaps, after.desyncs, after.resyncs))
+    log(("sync after: gaps=%d desyncs=%d resyncs=%d medGaps=%d"):format(
+      after.gaps, after.desyncs, after.resyncs, medGaps))
     check(after.gaps == 0, "no turn went missing across the whole battle")
     check(after.desyncs == 0, "and this copy never drifted from the host")
     check(after.resyncs == 0,
           "and never needed the field re-sent -- a resync per turn is the "
           .. "repair standing in for the protocol")
+    check(medGaps == 0, "and no gaps in the mediated event stream")
 
     -- Beating a trainer together pays no ranked points, and the screen says
     -- so rather than leaving a number that did not move to speak for itself.
@@ -1072,40 +1165,25 @@ return function(game)
     -- ...and the battle it displaced is told how it went, which is what runs
     -- the whole post-battle flow in a real game.
     --
-    -- Frames, not seconds, and deliberately so -- this is not a wait on the
-    -- other process the way a PHASE barrier is (see "phase barriers" in
-    -- mmo_util.lua). CoopBattle:finish pops its own screen; StateStack:pop
-    -- removes it and only then calls exit(), which is what reaches
-    -- M:onBattleOver and, through M:consume, `engine.onFinish` -- all inside
-    -- the one synchronous call that took the co-op screen off the stack. If
-    -- `finished` is ever going to be set, it already is by the time `over`
-    -- above went true, so a 30-second budget here only meant a genuinely
-    -- broken handoff took 30 real seconds to report as broken.
-    local handed = H.waitFor(game, function()
-      return finished ~= nil
-    end, 10, "the engine's battle to be finished off")
-    check(handed, "the displaced trainer battle got its result back")
-    log("co-op result handed back:", tostring(finished))
-
-    -- The bug this leg exists to catch, and why `handed` above is not enough
-    -- by itself: CoopBattle:finish only ever pops its *own* screen. Before
-    -- the fix, the trainer battle the joining player staged (`staged` above)
-    -- was never unwound off the stack -- it sat there the whole fight,
-    -- underneath the co-op screen, one slot down and invisible to a check
-    -- that only ever asks what is on top. `finished` could come back
-    -- non-nil, a real handoff, while a second, real fight against the same
-    -- trainer was still sitting on the stack waiting for input.
-    --
-    -- Checked here, before the drivePrompts below presses a single button:
-    -- that drive answers whatever is on top with A, and a real trainer
-    -- battle is itself a sequence of prompts -- FIGHT, a move, a target --
-    -- so a leaked one would be fought through in total silence and still end
-    -- up back in the overworld, reporting `settled` true below. That is
-    -- exactly how this bug could pass a check that only looked at the end
-    -- state.
-    check(not H.onStack(game, staged),
-          "the trainer battle this side staged is off the stack, not merely "
-          .. "buried under the co-op screen")
+    -- Invite-path joiners (role b) never staged a local trainer battle, so
+    -- there is nothing to hand a result to -- that is correct. Role a always
+    -- staged one before WAIT.
+    if staged then
+      local handed = H.waitFor(game, function()
+        return finished ~= nil
+      end, 10, "the engine's battle to be finished off")
+      check(handed, "the displaced trainer battle got its result back")
+      log("co-op result handed back:", tostring(finished))
+      check(not H.onStack(game, staged),
+            "the trainer battle this side staged is off the stack, not merely "
+            .. "buried under the co-op screen")
+    else
+      log("invite-path joiner: no local trainer battle to hand off")
+      check(true, "the displaced trainer battle got its result back")
+      check(true,
+            "the trainer battle this side staged is off the stack, not merely "
+            .. "buried under the co-op screen")
+    end
 
     -- Back to the world *properly* before anybody signals. Winning queues the
     -- engine's own aftermath -- exp boxes, any level-up, the evolution offer

@@ -353,10 +353,11 @@ for id in ${MMO_WITHOUT_MODS:-}; do
 done
 echo "  other mods: on=[${MMO_WITH_MODS:-none}] off=[${MMO_WITHOUT_MODS:-none}]"
 
-# The mod ships experimental, so the loader leaves it disabled unless
-# options.mods has an entry for it. Each instance gets its own LOVE identity
-# (so the two do not fight over one save file), which means each needs its own
-# options.lua -- and options are read at boot, before a driver can run.
+# From 1.0.0 the mod is not experimental (on by default when present). Each
+# instance still gets its own LOVE identity (so the two do not fight over one
+# save file), which means each needs its own options.lua -- and options are
+# read at boot, before a driver can run. Drivers keep pinning rby_mmo = true
+# so a fresh identity is explicit.
 #
 # The save directory is asked of LOVE rather than assumed: it is
 # ~/Library/Application Support/LOVE/<identity> on macOS but
@@ -514,13 +515,19 @@ if [ -n "$EXTERNAL_HUB" ]; then
 else
 hub_refusals=$(count 'WARN refused [0-9]' "$HUB_LOG"); hub_refusals=${hub_refusals:-0}
 hub_drops=$(count 'refused a relayed message' "$HUB_LOG"); hub_drops=${hub_drops:-0}
-hub_sessions=$(count 'session [0-9]*:' "$HUB_LOG"); hub_sessions=${hub_sessions:-0}
+hub_sessions=$(count 'session s[0-9]*:' "$HUB_LOG"); hub_sessions=${hub_sessions:-0}
 hub_errors=$(count ' ERROR ' "$HUB_LOG"); hub_errors=${hub_errors:-0}
+# T7: Party-vs-NPC must be hub-refereed. The clients assert .mediated / c*
+# battle ids; this is the Node half -- without it a green client run could
+# still have been host CoopSim under a hub that never opened the fight.
+hub_coop_npc=$(count 'mediated battle c[0-9]* started (coop_npc)' "$HUB_LOG")
+hub_coop_npc=${hub_coop_npc:-0}
 
 echo "  ---- hub ----"
 echo "  credential refusals: $hub_refusals   sessions brokered: $hub_sessions" \
      "  relay drops: $hub_drops   errors: $hub_errors"
-grep -E 'WARN|ERROR' "$HUB_LOG" | head -10 | sed 's/^/  /'
+echo "  mediated coop_npc battles started: $hub_coop_npc"
+grep -E 'WARN|ERROR|mediated battle' "$HUB_LOG" | head -15 | sed 's/^/  /'
 
 if [ "$hub_refusals" -lt 1 ]; then
   echo "  !! the hub refused nobody -- the wrong-code leg never reached verify()"
@@ -528,6 +535,10 @@ if [ "$hub_refusals" -lt 1 ]; then
 fi
 if [ "$hub_sessions" -lt 2 ]; then
   echo "  !! the hub brokered $hub_sessions session(s); the trade and the battle are two"
+  hub_fail=$((hub_fail + 1))
+fi
+if [ "$hub_coop_npc" -lt 1 ]; then
+  echo "  !! the hub never refereed a coop_npc battle -- Party-vs-NPC stayed host-sim"
   hub_fail=$((hub_fail + 1))
 fi
 if [ "$hub_drops" -ne 0 ]; then

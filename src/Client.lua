@@ -320,13 +320,9 @@ end
 -- server no longer on the list. Cleared with a nil set, the same way
 -- setHostJoinCode drops its code.
 --
--- The rank claim ticket is deliberately NOT cleared. It is the opposite kind
--- of thing: the ticket is the player's own earned identity on that hub, and
--- dropping it would silently destroy their rating the next time they came
--- back -- the hub would answer the name's rightful owner as an impostor.
--- Deleting a bookmark must not cost a rating. It also lives in the durable
--- token file, which outlives every save slot, so clearing the mod.save half
--- would only half-forget it anyway.
+-- The rank claim ticket is deliberately NOT cleared — PROTOCOL 16 identity
+-- is the persistent playerId (PLAYER_ID_FILE / mod.save), not a per-hub
+-- ticket. Deleting a bookmark must not cost a rating.
 --
 -- arg1 for the reason the setters above give: reached as
 -- client:forgetHub(address) from the menus, and as M.forgetHub(address) from
@@ -338,53 +334,6 @@ function M.forgetHub(a, b)
   return true
 end
 
--- Where a hub's claim ticket is kept.
---
--- One key per hub, like the join code and for the same reason: the ticket
--- only means anything to the hub that minted it, and a player who plays on
--- two of them holds two. Keyed off the address that was dialled, so the
--- ticket presented is the one the hub in question issued.
---
--- Hosting has no address -- the local net is in-process -- so it falls back
--- to a fixed key. That copy's board is rebuilt every time it starts hosting
--- anyway, so what the ticket buys there is one session's worth of "this name
--- is mine" against the friends who joined, which is exactly the case it is
--- for.
---
--- The address half of both keys below, and "self" when there is no address:
--- lower-cased and stripped of spaces, so one hub typed twice is one key.
-local function tokenAddr(address)
-  if type(address) ~= "string" or address == "" then return "self" end
-  local clean = address:lower():gsub("%s+", "")
-  if clean == "" then return "self" end
-  return clean
-end
-
-local function tokenKey(address)
-  return "rank:" .. tokenAddr(address)
-end
-
--- ...and the same ticket, kept where a save file cannot lose it.
---
--- mod.save alone is not durable enough to hold a claim. It is RAM until the
--- engine writes a save, nothing in connecting or disconnecting writes one,
--- and CONTINUE replaces the table wholesale -- so a ticket minted this
--- session and never saved is gone by the next connect, and the hub answers
--- the name's rightful owner as an impostor. The ticket is therefore written
--- twice: to mod.save, still, because that is where every ticket already
--- issued lives, and to one file of this mod's own that a reload cannot take
--- away. Reads prefer the file and fall back to mod.save.
---
--- That file outlives any one save slot and is shared by all of them -- and by
--- any two copies of the game running under one LOVE identity, which is the
--- shape the e2e rig would have if its two sides were not given identities of
--- their own -- so its entries are keyed by hub *and* trainer name,
--- "<hub>|<NAME>", where mod.save can key by hub alone.
---
--- love is absent under the headless test interpreter and every path here
--- answers "no file" when it is, leaving the mod.save behaviour above as the
--- whole behaviour there.
-local tokenStore = { loaded = false, entries = {}, unreadable = false }
 local jsonModule, jsonTried = nil, false
 
 local function filesystem()
@@ -403,153 +352,88 @@ local function json()
   return jsonModule
 end
 
--- Upper-cased because the engine's own trainer names are, and because the
--- read and the write have to agree on one spelling or the ticket is filed
--- where nothing looks for it.
-local function tokenFileKey(address, name)
-  local who = Wire.name(name) or M.playerName()
-  return tokenAddr(address) .. "|" .. who:upper()
-end
+-- ------- persistent playerId (PROTOCOL 16)
+--
+-- One UUID-shaped hex string per LOVE save folder. Survives CONTINUE
+-- (durable JSON + mod.save mirror). The hub seats you under this id; ranking
+-- keys on it; a second live connection with the same id is refused.
 
--- Read once a session; hello runs this on every connect and the file does not
--- change under us between them.
---
--- Answers the entries and, second, whether the file is *there and unreadable*
--- -- which love.filesystem.read cannot say on its own, because a missing file
--- and a failed read are the same nil. The two want opposite things from the
--- writer below (overwrite freely / do not touch it), so getInfo is asked
--- which one this is.
---
--- A file that will not *decode* is a third case and keeps its old answer:
--- reported once and treated as empty, so the next ticket minted rewrites it
--- whole and repairs it. Refusing to store anything until the player deletes a
--- file nobody told them about is the lockout this exists to end.
-local function loadTokens()
-  if tokenStore.loaded then return tokenStore.entries, tokenStore.unreadable end
-  tokenStore.loaded, tokenStore.unreadable = true, false
+local playerIdStore = { loaded = false, id = nil, unreadable = false }
+
+local function loadPlayerIdFile()
+  if playerIdStore.loaded then
+    return playerIdStore.id, playerIdStore.unreadable
+  end
+  playerIdStore.loaded = true
   local fs, Json = filesystem(), json()
-  if not (fs and Json) then return tokenStore.entries, false end
-  local ok, body = pcall(fs.read, Config.RANK_TOKEN_FILE)
-  if not ok or type(body) ~= "string" then
-    -- Nothing came back. If the file exists, this copy just failed to read a
-    -- file it must not then overwrite.
-    local exists = false
-    if type(fs.getInfo) == "function" then
-      local asked, info = pcall(fs.getInfo, Config.RANK_TOKEN_FILE)
-      exists = asked and type(info) == "table"
-    end
-    tokenStore.unreadable = exists
-    return tokenStore.entries, exists
+  if not (fs and Json) then return nil, false end
+  local ok, body = pcall(fs.read, Config.PLAYER_ID_FILE)
+  if not ok then
+    playerIdStore.unreadable = true
+    mod.log:warn("%s could not be read -- this copy will mint a player id "
+      .. "into mod.save only until the file is readable again; delete it "
+      .. "from the game's save folder to reset identity", Config.PLAYER_ID_FILE)
+    return nil, true
   end
-  -- An empty file is readable and says nothing, which is the same as no file:
-  -- there is nothing in it to lose by writing over it.
-  if body == "" then return tokenStore.entries, false end
-  local decoded = Json.decode(body)
-  if type(decoded) ~= "table" then
-    mod.log:warn("%s is not readable as JSON -- delete it from the game's "
-      .. "save folder to reset this copy's hub name claims",
-      Config.RANK_TOKEN_FILE)
-    return tokenStore.entries
+  if type(body) ~= "string" or body == "" then return nil, false end
+  local decoded
+  local dok, result = pcall(Json.decode, body)
+  if dok and type(result) == "table" then decoded = result end
+  if not decoded then
+    playerIdStore.unreadable = true
+    return nil, true
   end
-  for key, value in pairs(decoded) do
-    local token = Wire.token(value)
-    if type(key) == "string" and token then tokenStore.entries[key] = token end
-  end
-  return tokenStore.entries
+  local id = Wire.playerId(decoded.id)
+  playerIdStore.id = id
+  return id, false
 end
 
--- Load, modify, write the whole table -- and re-read first, because another
--- save slot, or a second copy running under the same LOVE identity, may have
--- added a key since we last looked, and writing our cached copy back would
--- drop it. This runs once per welcome, so the extra read is not on any path
--- worth counting.
---
--- **The one thing this must never do is turn a read failure into a wipe.**
--- The write below is the whole table, so a re-read that came back empty
--- because the file could not be opened -- rather than because there is no
--- file -- would hand back a file holding one key and throw away every other
--- hub's ticket. loadTokens says which of the two happened, and the unreadable
--- one writes nothing at all.
---
--- Every failure path drops this key from the in-session cache before it
--- returns. The cache may be holding an *older* ticket for it, read off the
--- file; leaving that there would let it shadow the newer token M.setRankToken
--- has just put in mod.save, and after a real save and relaunch the stale one
--- would be the answer.
-local function storeToken(address, name, token)
+local function storePlayerIdFile(id)
   local fs, Json = filesystem(), json()
   if not (fs and Json) then return false end
-  local key = tokenFileKey(address, name)
-
-  local kept = tokenStore.entries
-  tokenStore.loaded, tokenStore.entries = false, {}
-  local entries, unreadable = loadTokens()
-  if unreadable then
-    -- The file is there and would not open. This session keeps what it had,
-    -- minus this key, and the ticket lives in mod.save until the file reads
-    -- again.
-    tokenStore.loaded, tokenStore.entries = true, kept
-    kept[key] = nil
-    mod.log:warn("%s could not be read, so this hub's claim ticket was not "
-      .. "added to it -- nothing was overwritten (the other hubs' tickets are "
-      .. "still in there); save the game while connected, and delete the file "
-      .. "from the game's save folder if this repeats", Config.RANK_TOKEN_FILE)
-    return false
-  end
-  entries[key] = token
-
+  if playerIdStore.unreadable then return false end
   local encoded
-  local ok, result = pcall(Json.encode, entries)
+  local ok, result = pcall(Json.encode, { id = id })
   if ok and type(result) == "string" then encoded = result end
-  if not encoded then
-    entries[key] = nil
-    mod.log:warn("could not encode %s (%s) -- delete it from the game's save "
-      .. "folder if this repeats", Config.RANK_TOKEN_FILE, tostring(result))
-    return false
-  end
-
-  local called, wrote, why = pcall(fs.write, Config.RANK_TOKEN_FILE, encoded)
-  if not (called and wrote) then
-    entries[key] = nil
-    mod.log:warn("could not write %s (%s) -- this hub will stop scoring you "
-      .. "under this name after a reload unless the game is saved while "
-      .. "connected", Config.RANK_TOKEN_FILE, tostring(called and why or wrote))
-    return false
-  end
+  if not encoded then return false end
+  local called, wrote = pcall(fs.write, Config.PLAYER_ID_FILE, encoded)
+  if not (called and wrote) then return false end
+  playerIdStore.loaded, playerIdStore.id = true, id
   return true
 end
 
--- The file wins over mod.save: a save reload is exactly the case where
--- mod.save has the older answer.
---
--- The two can disagree, and this is which way it is settled when they do. A
--- welcome writes both, so ordinarily they say the same thing; a welcome whose
--- file write failed wrote only mod.save, and storeToken drops that key from
--- the cache on its way out precisely so this read falls through to the newer
--- answer instead of finding a stale one in front of it.
-function M.rankToken(a, b, c)
-  local address, name
-  if a == M then address, name = b, c else address, name = a, b end
-  local kept = loadTokens()[tokenFileKey(address, name)]
-  if kept then return kept end
-  return Wire.token(mod.save:get(tokenKey(address)))
-end
+local playerIdSeq = 0
 
--- Stored only if it is the shape a hub mints. A half-token would fail every
--- claim from then on, and silently: the player would simply stop being
--- ranked, with nothing on screen to connect it to.
---
--- The file write is best-effort and never gates the mod.save one: a copy that
--- cannot write to its save folder is no worse off than it was before this
--- file existed.
-function M.setRankToken(a, b, c, d)
-  local address, value, name
-  if a == M then address, value, name = b, c, d else address, value, name = a, b, c end
-  local token = Wire.token(value)
-  if not token then return nil end
-  mod.save:set(tokenKey(address), token)
-  storeToken(address, name, token)
-  return token
+-- Mint or recall the persistent player id. Never raises.
+function M.playerId()
+  local fromSave = Wire.playerId(mod.save:get("playerId"))
+  if fromSave then return fromSave end
+  local fromFile = loadPlayerIdFile()
+  if fromFile then
+    mod.save:set("playerId", fromFile)
+    return fromFile
+  end
+  playerIdSeq = playerIdSeq + 1
+  local raw = Hub.Entropy.shared:bytes(16)
+  local digest
+  if type(raw) == "string" then
+    digest = Sha256.hex(raw .. "|playerid|" .. tostring(playerIdSeq)
+      .. "|" .. tostring(os.time()) .. "|" .. tostring(os.clock()))
+  end
+  if type(digest) ~= "string" then
+    digest = Sha256.hex("playerid|fallback|" .. tostring(playerIdSeq)
+      .. "|" .. tostring(os.clock()))
+  end
+  local id = type(digest) == "string" and digest:sub(1, Config.PLAYER_ID_HEX) or nil
+  id = Wire.playerId(id)
+  if not id then
+    mod.log:warn("could not mint a player id -- reconnecting may fail until "
+      .. "the entropy pool has more state; keep playing a moment and retry")
+    return nil
+  end
+  mod.save:set("playerId", id)
+  storePlayerIdFile(id)
+  return id
 end
 
 -- The code this copy asks for when it hosts.
@@ -1264,12 +1148,9 @@ function M.sendHello(game)
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
     name = name,
-    -- "this name is mine, and here is the ticket you gave me" -- absent on a
-    -- first visit, which is what makes the hub mint one
-    rankToken = M.rankToken(dialled, name),
-    -- who you are walking in as, and no longer the only chance to say it:
-    -- mmo.sprite moves it mid-game (M.pushSprite), so this is the opening
-    -- value rather than the whole of the answer
+    -- Persistent identity (PROTOCOL 16). Hub uses this as client.id and the
+    -- rank-board key. Minted once per install; survives CONTINUE via file.
+    playerId = M.playerId(),
     sprite = sprite,
     profile = M.profile(game),
     map = current and current.mapId,
@@ -1565,15 +1446,9 @@ handlers[Wire.WELCOME] = function(game, msg)
   -- you, by design
   myPoints = Wire.points(msg.points)
   ranking, rankingAsked, rankingSeen = {}, false, false
-  -- A hub that just claimed this name for us sends the ticket once and never
-  -- again, so this is the only chance to keep it. Stored against the address
-  -- we dialled and the name we claimed -- the same two halves the next hello
-  -- reads it back by.
-  local granted = Wire.token(msg.rankToken)
-  if granted then M.setRankToken(dialled, granted, M.playerName(game)) end
   -- Absent means an older hub that does not score at all, which is not the
   -- same as being refused a name; treat silence as ranked and let the empty
-  -- leaderboard speak for itself.
+  -- leaderboard speak for itself. PROTOCOL 16 hubs always send ranked=true.
   rankedHere = msg.ranked ~= false
   -- Kept exactly as sent and compared rather than coerced: only a literal
   -- true is an operator. Absent -- an older hub, or a plain player code --
@@ -1755,7 +1630,10 @@ handlers[Wire.PARTY_EVENT] = function(_, msg)
   toast:push(Toast.partyLine(event))
 end
 
-handlers[Wire.COOP_OFFER] = function(_, msg) coop:onOffer(msg) end
+handlers[Wire.COOP_OFFER] = function(game, msg)
+  local current = World.current()
+  coop:onOffer(game, msg, current and current.mapId)
+end
 handlers[Wire.COOP_OFFER_END] = function(_, msg) coop:onOfferEnd(msg) end
 handlers[Wire.COOP_JOINED] = function(game, msg) coop:onJoined(game, msg) end
 handlers[Wire.COOP_ASK] = function(game, msg) coop:onAsk(game, msg) end
@@ -1945,6 +1823,14 @@ local function tick(game, dt)
     -- restored look, so there is now one teardown and no second list to
     -- keep in step with it.
     local reason = transport.error
+    -- Logged so a headless / e2e run can see *why* the socket went away --
+    -- hub hang-up, idle timeout, write error -- rather than only noticing
+    -- later that a co-op prompt never appeared over a solo trainer fight.
+    if reason then
+      mod.log:warn("hub connection lost: %s", tostring(reason))
+    else
+      mod.log:warn("hub connection lost (no reason from the transport)")
+    end
     M.disconnect()
     if reason then ui:say(tostring(reason)) end
     return
@@ -2069,24 +1955,21 @@ function M.install()
     end
   end)
 
-  -- Palette zones for the 2-on-2 screen.
+  -- Palette zones for mediated battle screens (1v1 and 2-on-2).
   --
-  -- **A state cannot supply its own.** The colourising display modes take their
-  -- zones from the engine, and Game.lua offers exactly one seam to change them
-  -- -- this hook. Without it a co-op battle inherits whatever the current mode
-  -- decided for a surface it knows nothing about, which is why the same battle
-  -- came out in colour on one client and pink monochrome on another: the two
-  -- players simply had different display modes.
+  -- Game.lua prefers a top state's sgbPalettes when present (MediatedBattle
+  -- supplies that). This hook still covers CoopBattle, which only exposes
+  -- zones(), and backs 1v1 if a build ever relies on the hook alone.
   --
-  -- The answer is the true-colour opt-out WideBattle takes for the same
-  -- reason. Every pixel on this screen is already palette-correct -- the
-  -- pictures come out of the engine's cache with their species palette applied
-  -- and the boxes and glyphs are the engine's own -- so there is nothing left
-  -- to remap, and remapping it anyway is what broke it.
+  -- Without the opt-out, OG / CLASSIC invent a GRAYS whole-screen remap over
+  -- already-paletted pics -- pink paper and black outlines on one client while
+  -- another (different COLORS mode) looked fine. WideBattle takes the same
+  -- `colors = false` escape for the same reason.
   mod.hooks:wrap("render.zones", function(next, game, zones)
     local out = next(game, zones)
     local top = game and game.stack and game.stack:top()
-    if top and top.sim and top.zones then
+    -- CoopBattle has .sim; MediatedBattle has .refreshSlotSprite.
+    if top and top.zones and (top.sim or top.refreshSlotSprite) then
       local ok, mine = pcall(top.zones, top)
       if ok and mine then return mine end
     end
@@ -2178,6 +2061,12 @@ function M.install()
   mod.events:on("map.entered", function()
     pushPresence(true)
     M.refreshLook()
+    -- A partner's NPC invite that arrived while we were off-map (or that we
+    -- walked onto) becomes the same confirm a same-map offer raises on sight.
+    local current = World.current()
+    if current and ctx.game then
+      coop:considerOffer(ctx.game, current.mapId)
+    end
   end)
 
   -- Facing a remote player and pressing A opens the same menu the roster

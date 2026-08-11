@@ -256,9 +256,9 @@ function M.exports(game)
   return loader and loader.exports and loader.exports.rby_mmo or nil
 end
 
--- The mod ships experimental, so a run where the wrapper forgot to enable
--- it would otherwise fail deep inside a menu that never appears. Say so up
--- front instead.
+-- The mod must be loaded for the driver to reach its menus. Say so up front
+-- if discovery or enablement failed (options.lua / symlink / experimental
+-- override).
 function M.requireMod(game, tag)
   local loader = game.mods
   local mod = loader and loader.mods and loader.mods.rby_mmo
@@ -267,8 +267,8 @@ function M.requireMod(game, tag)
     return nil
   end
   if mod.state ~= "loaded" then
-    U.log(tag, ("FAIL rby_mmo is %s, not loaded -- it ships experimental, so "
-      .. "options.lua must enable it"):format(tostring(mod.state)))
+    U.log(tag, ("FAIL rby_mmo is %s, not loaded -- enable it in options.lua "
+      .. "or the F10 mod manager"):format(tostring(mod.state)))
     return nil
   end
   local exports = M.exports(game)
@@ -908,6 +908,28 @@ function M.inMediatedFight(game, exports)
   return false
 end
 
+-- PROTOCOL 10 mediated 2-on-2 (src/CoopBattle.lua once mmo.battle_ready lands).
+--
+-- The screen still has `.sim` for drawing -- that is not the host running
+-- CoopSim rolls. The referee flag is `.mediated`, set only by battle_ready,
+-- and co-op battle ids on both hubs are `c` + n. Without this check a
+-- Party-vs-NPC e2e can green while every roll still happened on the host.
+function M.isMediatedCoop(top)
+  if not (top and top.sim and top.mediated == true) then return false end
+  local id = tostring(top.battleId or "")
+  return id:match("^c") ~= nil
+end
+
+-- Wait until the hub has refereed the co-op field (optional mode pin).
+function M.awaitMediatedCoop(game, seconds, wantMode)
+  return M.waitSeconds(game, function()
+    local top = M.top(game)
+    if not M.isMediatedCoop(top) then return false end
+    if wantMode and top.mode ~= wantMode then return false end
+    return true
+  end, seconds or 60, "the hub to referee the 2-on-2")
+end
+
 -- Budgeted in SECONDS, and it must be: a trade or a battle only finishes
 -- when the other process answers its half, so this is a wait on the peer
 -- wearing the clothes of a work loop. It was the last frame budget left in
@@ -1064,12 +1086,13 @@ end
 
 -- The trainer a co-op leg fights, chosen the same way on every instance.
 --
--- The weakest one with two POKeMON, with the id as the tiebreak so two
--- processes reading the same dataset land on the same trainer without talking
--- to each other. Weakest because a co-op leg is a test of the machinery around
--- a battle rather than of the battle: the strongest was picked once by
--- accident (alphabetically) and its exp cascaded level-ups into the leg after
--- it.
+-- The weakest trainer with at least two POKeMON, with the id as the tiebreak
+-- so two processes reading the same dataset land on the same trainer without
+-- talking to each other. Weakest because a co-op leg is a test of the
+-- machinery around a battle rather than of the battle. One-monster trainers
+-- are a valid product path (three-seat field) and are covered in the Lua
+-- suite; e2e keeps the full 2v2 so SWITCH/ITEM and four-slot asserts stay
+-- meaningful.
 function M.coopTrainer(data)
   local best
   for id, record in pairs(data.trainers or {}) do
@@ -1231,6 +1254,29 @@ end
 function M.shotPrinted(game, path, frames)
   M.awaitPrinted(game, frames)
   return U.shot(game, path)
+end
+
+-- One screenshot per co-op battle phase the first time it is seen.
+--
+-- `shotFn(name)` is the driver's own `shot` so hub/quad filenames stay
+-- namespaced per seat. `seen` is a table the caller keeps across ticks.
+-- Settles two frames before capturing so the menu paint of that phase is up
+-- (otherwise a phase transition shot lands on the previous box for a tick).
+function M.shotCoopPhases(game, shotFn, seen)
+  seen = seen or {}
+  local now = M.top(game)
+  if not (now and now.sim and type(now.phase) == "string") then return seen end
+  local phase = now.phase
+  if phase ~= "choose" and phase ~= "move" and phase ~= "target"
+      and phase ~= "messages" and phase ~= "wait" and phase ~= "switch"
+      and phase ~= "item" and phase ~= "replace" then
+    return seen
+  end
+  if seen[phase] then return seen end
+  seen[phase] = true
+  U.wait(2)
+  shotFn("phase-" .. phase)
+  return seen
 end
 
 -- Erase a naming grid back to an empty line, one B at a time.
@@ -1417,7 +1463,19 @@ function M.assertPortraitColors(game, path, x, y, w, h, check, what)
     out = f and f:read("*a") or ""
     if f then f:close() end
     if out:match("^ok ") then break end
+    -- Missing Pillow is a harness gap, not a palette bug -- fail the probe
+    -- once and move on rather than spinning 40× on ModuleNotFoundError.
+    if out:find("No module named 'PIL'", 1, true)
+       or out:find("No module named \"PIL\"", 1, true) then
+      break
+    end
     if game then U.wait(2) end
+  end
+  if out:find("No module named 'PIL'", 1, true)
+     or out:find("No module named \"PIL\"", 1, true) then
+    U.log("portrait probe skipped: Pillow not installed "
+      .. "(python3 -m pip install Pillow)")
+    return true
   end
   local passed = out:match("^ok ") ~= nil
   if not passed then

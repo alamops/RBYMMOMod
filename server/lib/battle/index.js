@@ -24,5 +24,6 @@ const status = require('./Status.js');
 const Rng = require('./Rng.js');
 const Turn = require('./Turn.js');
 const events = require('./events.js');
+const Effects = require('./Effects.js');
 
-module.exports = { damage, accuracy, crit, status, Rng, Turn, events };
+module.exports = { damage, accuracy, crit, status, Rng, Turn, events, Effects };

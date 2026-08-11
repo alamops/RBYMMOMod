@@ -18,9 +18,10 @@
  *   1. a speed tie-break byte, one per group of equally fast actors;
  *   2. one gate byte per actor whose monster has a gating status;
  *   3. one gate byte per actor whose monster is confused;
- *   4. per move that is actually used: accuracy byte, crit byte, damage roll,
- *      in that order, and none of them drawn when an earlier step ended the
- *      move (a missed move draws no crit byte).
+ *   4. per move that is actually used: accuracy byte, multihit-count byte
+ *      (TWO_TO_FIVE only), crit byte, damage roll, side-chance byte
+ *      (damaging hits only), in that order, and none of them drawn when an
+ *      earlier step ended the move (a missed move draws no crit byte).
  *
  * The damage roll is drawn even when the hit turns out to be an immunity,
  * because in the Lua the roll is an argument to `Damage.compute` and arguments
@@ -38,12 +39,18 @@
  *     side-a member first and otherwise reversing the group.
  *   * *Running* is a concession: one side loses with reason `run`, both is a
  *     draw.
- *   * *Items* announce themselves and spend the turn; the bag is not modelled.
- *   * *Status moves* (power 0) narrate and do nothing.
- *   * *Physical and special are not split* -- Wire's move carries no category.
+ *   * *Items* apply a hand-authored Gen1 heal/status table (not engine
+ *     ItemEffects); unknown ids say "But it failed" and still spend the turn.
+ *     Bags are client claims (sheet trust locked). Forced lock-in injects on
+ *     openTurn (trapper continue anim + residual; no menu); forced-only turns
+ *     defer to the next tick.
+ *   * *Metronome* picks from host-uploaded metronomePool on the ruleset.
+ *   * *Physical / Special* via host-uploaded specialTypes (Gen1 type categories).
  *   * A *faint sends the next living monster in party order*, immediately.
  *   * *Residuals* run in field order (side a, then side b), not speed order.
- *   * A *timeout* auto-picks the first move with PP left and the fight goes on.
+ *   * A *timeout* / NPC auto-picks with bag cures & heals (≤50% HP), X-items,
+ *     SE damage, status / setup reading, and SE bench switches (deterministic
+ *     heuristics — not a full TrainerAI port) -- and the fight goes on.
  *   * The choice clock is *suspended while anybody is disconnected*.
  *
  * Two shape differences from the Lua, both forced by the language:
@@ -63,6 +70,7 @@ const Damage = require('./Damage.js');
 const Accuracy = require('./Accuracy.js');
 const Crit = require('./Crit.js');
 const Status = require('./Status.js');
+const Effects = require('./Effects.js');
 const Rng = require('./Rng.js');
 const Events = require('./events.js');
 
@@ -79,8 +87,50 @@ const RESOLVE_TIMEOUT = 30; // Config.BATTLE_RESOLVE_TIMEOUT
 // Below this the side-a member of a tied group moves first.
 const TIE_BREAK_ROLL = 128;
 
-const MODES = { '1v1': true, coop_npc: true, coop_pvp: true };
+const MODES = { '1v1': true, coop_npc: true, coop_pvp: true, wild: true };
 const SIDES = ['a', 'b'];
+
+// Auto-pick priorities (twin of Turn.lua AUTO_* tables).
+const AUTO_STATUS_PRI = {
+  32: 4, // SLEEP_EFFECT
+  67: 3, // PARALYZE_EFFECT
+  66: 2, // POISON_EFFECT
+  49: 1, // CONFUSION_EFFECT
+  84: 1, // LEECH_SEED_EFFECT
+};
+const AUTO_SETUP = {
+  10: 'atk', 11: 'def', 12: 'spd', 13: 'spc',
+  50: 'atk', 51: 'def', 52: 'spd', 53: 'spc',
+  47: true, // FOCUS_ENERGY
+  64: true, // LIGHT_SCREEN
+  65: true, // REFLECT
+  79: true, // SUBSTITUTE
+};
+const AUTO_HEAL_PREF = [
+  'FULL_RESTORE', 'MAX_POTION', 'HYPER_POTION', 'SUPER_POTION',
+  'LEMONADE', 'SODA_POP', 'FRESH_WATER', 'POTION',
+];
+const AUTO_STATUS_CURE = {
+  poison: ['FULL_RESTORE', 'FULL_HEAL', 'ANTIDOTE'],
+  toxic: ['FULL_RESTORE', 'FULL_HEAL', 'ANTIDOTE'],
+  burn: ['FULL_RESTORE', 'FULL_HEAL', 'BURN_HEAL'],
+  freeze: ['FULL_RESTORE', 'FULL_HEAL', 'ICE_HEAL'],
+  sleep: ['FULL_RESTORE', 'FULL_HEAL', 'AWAKENING'],
+  paralysis: ['FULL_RESTORE', 'FULL_HEAL', 'PARLYZ_HEAL'],
+};
+const AUTO_X_ITEM = [
+  { id: 'X_ATTACK', stat: 'atk' },
+  { id: 'X_DEFEND', stat: 'def' },
+  { id: 'X_SPEED', stat: 'spd' },
+  { id: 'X_SPECIAL', stat: 'spc' },
+  { id: 'DIRE_HIT', flag: 'focusEnergy' },
+  { id: 'GUARD_SPEC', flag: 'mist' },
+];
+
+// Default kit for coop_npc trainer seats with no uploaded bag (Gen1 gym-style).
+const DEFAULT_NPC_BAG = {
+  POTION: 2, SUPER_POTION: 1, FULL_HEAL: 1, X_ATTACK: 1,
+};
 
 // Wire spells a condition as a three-letter token and Status.js spells it as a
 // word. Both are accepted on the way in and the token is what goes back out on
@@ -101,6 +151,12 @@ const GATING = { sleep: true, freeze: true, paralysis: true };
 
 const ACTIONS = {
   fight: true, item: true, switch: true, run: true, cancel: true,
+};
+
+// Synthetic move used when every slot is out of PP. Not in any move table.
+const STRUGGLE = {
+  id: 'STRUGGLE', power: 50, accuracy: 255,
+  type: 0, effect: 0, chance: 0,
 };
 
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -132,9 +188,12 @@ const isTable = (value) => typeof value === 'object' && value !== null;
 
 function copyMove(raw) {
   if (!isTable(raw)) return null;
+  const pp = Math.max(0, int(raw.pp, 0));
+  const maxPp = Math.max(pp, int(raw.maxPp, pp));
   return {
     id: str(raw.id) || 'move',
-    pp: Math.max(0, int(raw.pp, 0)),
+    pp,
+    maxPp,
     power: Math.max(0, int(raw.power, 0)),
     accuracy: Math.max(0, int(raw.accuracy, 255)),
     type: Math.max(0, int(raw.type, 0)),
@@ -170,6 +229,18 @@ function copyTypes(raw) {
 // position on the player's own screen has not, so the position is what a choice
 // is matched against. `fallback` is that index for a sender that stated none,
 // which keeps an ordinary party numbered exactly as it always was.
+function copyStages(raw) {
+  const src = isTable(raw) ? raw : {};
+  return {
+    atk: Effects.clampStage(src.atk),
+    def: Effects.clampStage(src.def),
+    spd: Effects.clampStage(src.spd),
+    spc: Effects.clampStage(src.spc),
+    acc: Effects.clampStage(src.acc),
+    eva: Effects.clampStage(src.eva),
+  };
+}
+
 function copyMon(raw, fallback) {
   if (!isTable(raw)) return null;
 
@@ -201,7 +272,60 @@ function copyMon(raw, fallback) {
   let turns = Math.max(0, int(raw.statusTurns, 0));
   if (status === 'sleep' && turns === 0) turns = 1;
 
-  return {
+  const stages = copyStages(raw.stages);
+
+  let disable = null;
+  if (isTable(raw.disable)) {
+    disable = {
+      moveIndex: Math.max(0, int(raw.disable.moveIndex, 0)),
+      turns: Math.max(0, int(raw.disable.turns, 0)),
+    };
+  }
+
+  let charging = null;
+  if (isTable(raw.charging)) {
+    charging = {
+      moveIndex: Math.max(1, int(raw.charging.moveIndex, 1)),
+      effect: Math.max(0, int(raw.charging.effect, 0)),
+      targetSlot: int(raw.charging.targetSlot, null),
+    };
+  }
+
+  let trapped = null;
+  if (isTable(raw.trapped)) {
+    trapped = {
+      turns: Math.max(0, int(raw.trapped.turns, 0)),
+      damage: Math.max(0, int(raw.trapped.damage, 0)),
+      fromSlot: int(raw.trapped.fromSlot, null),
+    };
+  }
+
+  let thrashing = null;
+  if (isTable(raw.thrashing)) {
+    thrashing = {
+      turns: Math.max(0, int(raw.thrashing.turns, 0)),
+      moveIndex: Math.max(1, int(raw.thrashing.moveIndex, 1)),
+    };
+  }
+
+  let bide = null;
+  if (isTable(raw.bide)) {
+    bide = {
+      turns: Math.max(0, int(raw.bide.turns, 0)),
+      stored: Math.max(0, int(raw.bide.stored, 0)),
+      moveIndex: Math.max(1, int(raw.bide.moveIndex, 1)),
+      targetSlot: int(raw.bide.targetSlot, null),
+    };
+  }
+
+  let leechSeed = null;
+  if (raw.leechSeed === true) {
+    leechSeed = { fromSlot: null };
+  } else if (isTable(raw.leechSeed)) {
+    leechSeed = { fromSlot: int(raw.leechSeed.fromSlot, null) };
+  }
+
+  const out = {
     species: str(raw.species) || '?',
     slot: Math.max(0, int(raw.slot, Math.max(0, int(fallback, 0)))),
     level: Math.max(1, int(raw.level, 1)),
@@ -219,7 +343,41 @@ function copyMon(raw, fallback) {
     },
     types: copyTypes(raw.types),
     moves,
+    stages,
+    leechSeed,
+    disable,
+    flinch: raw.flinch === true,
+    charging,
+    invulnerable: raw.invulnerable === true,
+    mustRecharge: raw.mustRecharge === true,
+    trapped,
+    trapping: null,
+    thrashing,
+    raging: raw.raging === true,
+    rageMove: Math.max(0, int(raw.rageMove, 0)),
+    bide,
+    lastMoveIndex: Math.max(0, int(raw.lastMoveIndex, 0)),
+    substitute: Math.max(0, int(raw.substitute, 0)),
+    lightScreen: raw.lightScreen === true,
+    reflect: raw.reflect === true,
+    mist: raw.mist === true,
+    focusEnergy: raw.focusEnergy === true,
+    transformed: raw.transformed === true,
+    xAccuracy: raw.xAccuracy === true,
+    catchRate: Math.max(0, Math.min(255, int(raw.catchRate, 255))),
   };
+
+  // Optional Stat Exp sheet (atk/def/spd/spc, optional hp).
+  if (isTable(raw.evs)) {
+    const evs = {};
+    for (const key of ['hp', 'atk', 'def', 'spd', 'spc']) {
+      if (raw.evs[key] !== undefined && raw.evs[key] !== null) {
+        evs[key] = Math.max(0, Math.min(65535, int(raw.evs[key], 0)));
+      }
+    }
+    out.evs = evs;
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------
@@ -266,6 +424,52 @@ function hasType(mon, typeId) {
   return mon.types.includes(typeId);
 }
 
+function allPpEmpty(mon) {
+  if (mon.moves.length === 0) return true;
+  for (const m of mon.moves) {
+    if (m.pp > 0) return false;
+  }
+  return true;
+}
+
+function copyBadges(raw) {
+  if (!isTable(raw)) return null;
+  const out = Object.create(null);
+  let any = false;
+  for (const id of Object.keys(raw)) {
+    if (raw[id]) {
+      out[id] = true;
+      any = true;
+    }
+  }
+  if (!any) return null;
+  return out;
+}
+
+// Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
+// shapes Wire.bag does: a list of {id,count} or a map.
+function copyBag(raw) {
+  if (!isTable(raw)) return null;
+  const out = Object.create(null);
+  let any = false;
+  const put = (id, count) => {
+    if (typeof id !== 'string' || id === '') return;
+    const n = int(count, 0);
+    if (!n || n < 1) return;
+    out[id] = (out[id] || 0) + n;
+    any = true;
+  };
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (isTable(entry)) put(entry.id, entry.count);
+    }
+  } else {
+    for (const id of Object.keys(raw)) put(id, raw[id]);
+  }
+  if (!any) return null;
+  return out;
+}
+
 // ------------------------------------------------------------------
 // the battle
 // ------------------------------------------------------------------
@@ -277,6 +481,21 @@ class Battle {
     this.seed = int(opts.seed, 0);
     this.rng = Rng.create(int(opts.seed, 0));
     this.chart = isTable(opts.chart) ? opts.chart : null;
+    this.specialTypes = null;
+    if (Array.isArray(opts.specialTypes)) {
+      const set = Object.create(null);
+      for (const t of opts.specialTypes) set[Math.max(0, int(t, 0))] = true;
+      this.specialTypes = set;
+    }
+    this.metronomePool = null;
+    if (Array.isArray(opts.metronomePool)) {
+      const pool = [];
+      for (const entry of opts.metronomePool) {
+        const move = copyMove(entry);
+        if (move) pool.push(move);
+      }
+      if (pool.length > 0) this.metronomePool = pool;
+    }
     this.choiceTimeout = Math.max(0, int(opts.choiceTimeout, CHOICE_TIMEOUT));
     this.reconnectGrace = Math.max(0, int(opts.reconnectGrace, RECONNECT_GRACE));
     this.resolveTimeout = Math.max(0, int(opts.resolveTimeout, RESOLVE_TIMEOUT));
@@ -307,6 +526,21 @@ class Battle {
     event.seq = this.seq;
     this.buffer.push(event);
     return event;
+  }
+
+  _emitMoves(fighter, mon) {
+    const moves = mon.moves.map((m) => ({
+      id: m.id || 'move',
+      pp: Math.max(0, int(m.pp, 0)),
+      power: Math.max(0, int(m.power, 0)),
+      accuracy: Math.max(0, int(m.accuracy, 255)),
+      type: Math.max(0, int(m.type, 0)),
+      effect: Math.max(0, int(m.effect, 0)),
+      chance: Math.max(0, int(m.chance, 0)),
+    }));
+    return this._emit('moves', {
+      slot: fighter.slot, side: fighter.side, moves,
+    });
   }
 
   _say(text) {
@@ -358,11 +592,133 @@ class Battle {
     return this.bySide[side].map((fighter) => fighter.playerId);
   }
 
-  // A fighter owes a choice when it has something standing. A player whose last
-  // monster fainted in a 2v2 is a spectator for the rest of the fight, and
-  // waiting on them would hang the turn.
+  // A fighter owes a choice when it has something standing, or when it must pick
+  // a replacement after a faint. A player whose last monster fainted in a 2v2 is
+  // a spectator for the rest of the fight, and waiting on them would hang the
+  // turn. Multi-turn volatiles auto-fill before the player is asked.
   _owes(fighter) {
-    return activeMon(fighter) !== null && fighter.choice === null;
+    if (fighter.choice !== null && fighter.choice !== undefined) return false;
+    if (fighter.mustReplace) {
+      return firstLiving(fighter.mons) !== null;
+    }
+    if (activeMon(fighter) === null) return false;
+    return true;
+  }
+
+  // Inject forced choices for charge release, recharge skip, thrash/rage repeat,
+  // and trap lock-in. Gen1 trapping: victim can't move; user stays locked (no
+  // menu) while residual damage (first-hit store) ticks — not a re-rolled fight.
+  _fillForcedChoices() {
+    for (const fighter of this.fighters) {
+      if (fighter.choice !== null && fighter.choice !== undefined) continue;
+      const mon = activeMon(fighter);
+      if (!mon) continue;
+
+      if (mon.mustRecharge) {
+        mon.mustRecharge = false;
+        this._say(`${mon.species} must recharge`);
+        fighter.choice = { action: 'skip' };
+        this._emit('chose', {
+          slot: fighter.slot, side: fighter.side, text: fighter.name,
+        });
+        continue;
+      }
+
+      if (mon.bide) {
+        if (mon.bide.turns > 0) {
+          this._say(`${mon.species} is storing energy`);
+          fighter.choice = { action: 'skip' };
+          this._emit('chose', {
+            slot: fighter.slot, side: fighter.side, text: fighter.name,
+          });
+        } else {
+          const foe = this._firstLivingFoe(fighter);
+          if (foe) {
+            this._say(`${mon.species} unleashed energy`);
+            fighter.choice = {
+              action: 'fight',
+              move: mon.bide.moveIndex,
+              target: mon.bide.targetSlot || foe.slot,
+              bideRelease: true,
+            };
+            this._emit('chose', {
+              slot: fighter.slot, side: fighter.side, text: fighter.name,
+            });
+          }
+        }
+        continue;
+      }
+
+      if (mon.trapped && mon.trapped.turns > 0) {
+        this._say(`${mon.species} can't move`);
+        fighter.choice = { action: 'skip' };
+        this._emit('chose', {
+          slot: fighter.slot, side: fighter.side, text: fighter.name,
+        });
+        continue;
+      }
+
+      if (mon.trapping && mon.trapping.turns > 0) {
+        // Cartridge lock-in: no menu, residual still deals stored damage. Emit
+        // continue narration + anim so the screen shows the trap going on —
+        // do not re-enter _useMove (that would re-roll damage).
+        const move = mon.moves[mon.trapping.moveIndex - 1];
+        const moveId = (move && move.id) || 'attack';
+        this._say(`${mon.species}'s ${moveId} continues`);
+        this._emit('anim', {
+          slot: fighter.slot, side: fighter.side, text: moveId,
+        });
+        fighter.choice = { action: 'skip' };
+        this._emit('chose', {
+          slot: fighter.slot, side: fighter.side, text: fighter.name,
+        });
+        continue;
+      }
+
+      if (mon.charging) {
+        const c = mon.charging;
+        fighter.choice = {
+          action: 'fight',
+          move: c.moveIndex,
+          target: c.targetSlot,
+        };
+        this._emit('chose', {
+          slot: fighter.slot, side: fighter.side, text: fighter.name,
+        });
+        continue;
+      }
+
+      if (mon.thrashing && mon.thrashing.turns > 0) {
+        const foe = this._firstLivingFoe(fighter);
+        if (foe) {
+          this._say(`${mon.species} thrashing about`);
+          fighter.choice = {
+            action: 'fight',
+            move: mon.thrashing.moveIndex,
+            target: foe.slot,
+          };
+          this._emit('chose', {
+            slot: fighter.slot, side: fighter.side, text: fighter.name,
+          });
+        }
+        continue;
+      }
+
+      if (mon.raging && mon.rageMove && mon.rageMove > 0) {
+        const foe = this._firstLivingFoe(fighter);
+        if (foe) {
+          this._say(`${mon.species}'s RAGE is building`);
+          fighter.choice = {
+            action: 'fight',
+            move: mon.rageMove,
+            target: foe.slot,
+          };
+          this._emit('chose', {
+            slot: fighter.slot, side: fighter.side, text: fighter.name,
+          });
+        }
+      }
+    }
   }
 
   _anyDisconnected() {
@@ -380,6 +736,19 @@ class Battle {
 
   _normaliseChoice(fighter, choice) {
     const action = choice.action;
+
+    // Forced replacement: only a living bench switch is accepted. Fight / item /
+    // run would spend a turn the seat does not have a mon for.
+    if (fighter.mustReplace) {
+      if (action !== 'switch') return null;
+      const slot = int(choice.slot, null);
+      if (slot === null) return null;
+      const target = partyIndexOf(fighter, slot);
+      const bench = monAt(fighter, target);
+      if (!bench || bench.hp <= 0) return null;
+      return { action: 'switch', slot: target };
+    }
+
     const mon = activeMon(fighter);
     if (!mon) return null;
 
@@ -388,7 +757,26 @@ class Battle {
     if (action === 'item') {
       const item = str(choice.item);
       if (!item) return null;
-      return { action: 'item', item };
+      // A fighter with a bag sheet must actually hold the stack (hub/NPC auto).
+      // Seats with no bag stay permissive so headless fixtures can still item.
+      if (fighter.bag && !this._bagHas(fighter, item)) return null;
+      const effect = Effects.itemEffect(item);
+      const out = { action: 'item', item };
+      if (choice.slot !== undefined && choice.slot !== null) {
+        const slot = int(choice.slot, null);
+        if (slot === null) return null;
+        const target = partyIndexOf(fighter, slot);
+        if (!monAt(fighter, target)) return null;
+        out.slot = target;
+      }
+      if (choice.move !== undefined && choice.move !== null) {
+        const move = int(choice.move, null);
+        if (move === null) return null;
+        out.move = move + 1;
+      } else if (effect && effect.needsMove) {
+        return null;
+      }
+      return out;
     }
 
     if (action === 'switch') {
@@ -404,20 +792,33 @@ class Battle {
       const index = int(choice.move, null);
       if (index === null) return null;
       const move = mon.moves[index];
-      if (!move || move.pp <= 0) return null;
+      if (!move) return null;
+      // One empty slot is refused; every slot empty means Struggle on any index.
+      if (move.pp <= 0 && !allPpEmpty(mon)) return null;
+      if (mon.disable && mon.disable.turns > 0
+          && mon.disable.moveIndex === index + 1) {
+        return null;
+      }
 
       let targetFighter;
       if (choice.target !== undefined && choice.target !== null) {
         targetFighter = this._fighterAtSlot(int(choice.target, -1));
-        // A named target that is empty or on the chooser's own side is refused
-        // rather than redirected: redirecting would spend somebody's turn on a
-        // monster they did not pick, and the client can ask again.
-        if (!targetFighter || targetFighter.side === fighter.side
-            || !activeMon(targetFighter)) {
+        // A named target on the chooser's own side is refused. A seat mid-replace
+        // (mustReplace, no active yet) is still a legal aim: switches resolve
+        // before fights, so the mon will be out when the move lands.
+        if (!targetFighter || targetFighter.side === fighter.side) {
+          return null;
+        }
+        if (!activeMon(targetFighter) && !targetFighter.mustReplace) {
           return null;
         }
       } else {
         targetFighter = this._firstLivingFoe(fighter);
+        if (!targetFighter) {
+          for (const foe of this._foes(fighter)) {
+            if (foe.mustReplace) { targetFighter = foe; break; }
+          }
+        }
         if (!targetFighter) return null;
       }
       return { action: 'fight', move: index + 1, target: targetFighter.slot };
@@ -443,17 +844,29 @@ class Battle {
 
     if (choice.action === 'cancel') {
       if (fighter.choice === null) return false;
+      this._emit('unchose', {
+        slot: fighter.slot, side: fighter.side, text: fighter.name,
+      });
       fighter.choice = null;
       return true;
     }
 
     if (fighter.choice !== null) return false; // one answer per turn
-    if (!activeMon(fighter)) return false;
+    if (fighter.mustReplace) {
+      if (choice.action !== 'switch') return false;
+    } else if (!activeMon(fighter)) {
+      return false;
+    }
 
     const normalised = this._normaliseChoice(fighter, choice);
     if (!normalised) return false;
 
     fighter.choice = normalised;
+    // Peers need this for the wait line: without it, only the chooser's own
+    // client knows they answered (there is no `act` fan-out on the mediated path).
+    this._emit('chose', {
+      slot: fighter.slot, side: fighter.side, text: fighter.name,
+    });
     this._maybeResolve();
     return true;
   }
@@ -467,23 +880,287 @@ class Battle {
     return true;
   }
 
-  // The first move with PP left, at the first living foe. Used when a deadline
-  // passes: doing nothing would stall a clock that nothing else stops, and
-  // picking the *best* move would be the sim playing somebody's turn well
-  // rather than merely playing it.
+  // timeout/NPC pick: bag cures/heals/X-items when present, else SE / status /
+  // setup / switch. Deterministic twin of src/BattleSim/Turn.lua — richer than
+  // a strongest-move heuristic, still not a full TrainerAI port.
+  _effectivenessProduct(moveType, defender) {
+    const percents = this._typePercents(moveType, defender);
+    let eff = 1;
+    for (const pct of percents) eff = (eff * pct) / 100;
+    return eff;
+  }
+
+  _bagHas(fighter, itemId) {
+    return !!(fighter.bag && (fighter.bag[itemId] || 0) > 0);
+  }
+
+  _spendBag(fighter, itemId) {
+    if (!fighter.bag) return;
+    const n = fighter.bag[itemId];
+    if (!n) return;
+    if (n <= 1) delete fighter.bag[itemId];
+    else fighter.bag[itemId] = n - 1;
+  }
+
+  _bestSeBench(fighter, defender) {
+    if (!defender) return null;
+    let best = null;
+    let bestEff = 1;
+    for (let i = 1; i <= fighter.mons.length; i += 1) {
+      if (i !== fighter.active) {
+        const bench = fighter.mons[i - 1];
+        if (bench && bench.hp > 0) {
+          let maxEff = 1;
+          for (let j = 0; j < bench.moves.length; j += 1) {
+            const m = bench.moves[j];
+            if (m.pp > 0 && m.power > 0) {
+              const eff = this._effectivenessProduct(m.type, defender);
+              if (eff > maxEff) maxEff = eff;
+            }
+          }
+          if (maxEff > 1) {
+            if (!best || maxEff > bestEff || (maxEff === bestEff && i < best)) {
+              best = i;
+              bestEff = maxEff;
+            }
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  // Bag item for the active mon: cure → heal ≤50% → X-item while stages flat.
+  _autoItemChoice(fighter, mon) {
+    if (!fighter.bag) return null;
+
+    if (mon.status) {
+      const list = AUTO_STATUS_CURE[mon.status];
+      if (list) {
+        for (const id of list) {
+          if (this._bagHas(fighter, id)) {
+            return { action: 'item', item: id, slot: fighter.active };
+          }
+        }
+      }
+    }
+
+    if (mon.hp < mon.maxHp && mon.hp * 2 <= mon.maxHp) {
+      for (const id of AUTO_HEAL_PREF) {
+        if (this._bagHas(fighter, id)) {
+          const effect = Effects.itemEffect(id);
+          if (effect && (effect.heal || effect.healFull || effect.clearAllStatus)) {
+            return { action: 'item', item: id, slot: fighter.active };
+          }
+        }
+      }
+    }
+
+    const stagesFlat = mon.stages.atk <= 0 && mon.stages.def <= 0
+      && mon.stages.spd <= 0 && mon.stages.spc <= 0;
+    if (stagesFlat && !mon.focusEnergy && !mon.mist) {
+      for (const row of AUTO_X_ITEM) {
+        if (this._bagHas(fighter, row.id)) {
+          if (row.flag === 'focusEnergy' && !mon.focusEnergy) {
+            return { action: 'item', item: row.id };
+          }
+          if (row.flag === 'mist' && !mon.mist) {
+            return { action: 'item', item: row.id };
+          }
+          if (row.stat && (mon.stages[row.stat] || 0) <= 0) {
+            return { action: 'item', item: row.id };
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
   _autoChoice(fighter) {
+    if (fighter.mustReplace) {
+      const foe = this._firstLivingFoe(fighter);
+      const defender = foe && activeMon(foe);
+      const se = this._bestSeBench(fighter, defender);
+      if (se) return { action: 'switch', slot: se };
+      const next = firstLiving(fighter.mons);
+      if (next) return { action: 'switch', slot: next };
+      return null;
+    }
+
     const mon = activeMon(fighter);
     if (!mon) return null;
-    const foe = this._firstLivingFoe(fighter);
+
+    if (mon.charging) {
+      const c = mon.charging;
+      return { action: 'fight', move: c.moveIndex, target: c.targetSlot };
+    }
+    if (mon.mustRecharge) {
+      return { action: 'skip' };
+    }
+    if (mon.bide) {
+      if (mon.bide.turns > 0) {
+        return { action: 'skip' };
+      }
+      const foe = this._firstLivingFoe(fighter);
+      if (foe) {
+        return {
+          action: 'fight',
+          move: mon.bide.moveIndex,
+          target: mon.bide.targetSlot || foe.slot,
+          bideRelease: true,
+        };
+      }
+    }
+    if (mon.trapped && mon.trapped.turns > 0) {
+      return { action: 'skip' };
+    }
+    if (mon.trapping && mon.trapping.turns > 0) {
+      return { action: 'skip' };
+    }
+    if (mon.thrashing && mon.thrashing.turns > 0) {
+      const foe = this._firstLivingFoe(fighter);
+      if (foe) {
+        return {
+          action: 'fight',
+          move: mon.thrashing.moveIndex,
+          target: foe.slot,
+        };
+      }
+    }
+    if (mon.raging && mon.rageMove && mon.rageMove > 0) {
+      const foe = this._firstLivingFoe(fighter);
+      if (foe) {
+        return { action: 'fight', move: mon.rageMove, target: foe.slot };
+      }
+    }
+
+    let foe = this._firstLivingFoe(fighter);
+    if (!foe) {
+      for (const f of this._foes(fighter)) {
+        if (f.mustReplace) { foe = f; break; }
+      }
+    }
     if (!foe) return null;
+    const defender = activeMon(foe);
+    if (!defender) {
+      let pick = 1;
+      for (let i = 1; i <= mon.moves.length; i += 1) {
+        if (mon.moves[i - 1].pp > 0) { pick = i; break; }
+      }
+      return { action: 'fight', move: pick, target: foe.slot };
+    }
+
+    const itemPick = this._autoItemChoice(fighter, mon);
+    if (itemPick) return itemPick;
+
+    const foeBoosted = (defender.stages.atk || 0) >= 2
+      || (defender.stages.def || 0) >= 2
+      || (defender.stages.spd || 0) >= 2
+      || (defender.stages.spc || 0) >= 2
+      || defender.focusEnergy;
+    const foeSub = (defender.substitute || 0) > 0;
+    const weSlower = this._speedOf(fighter, mon) < this._speedOf(foe, defender);
+
+    // Critical HP: SE retreat (heal already tried via bag).
+    if (mon.hp * 4 <= mon.maxHp) {
+      const se = this._bestSeBench(fighter, defender);
+      if (se) return { action: 'switch', slot: se };
+    }
+
+    // Behind a boosted / subbed foe at mid-low HP: prefer an SE bench mon.
+    if ((foeBoosted || foeSub) && mon.hp * 2 <= mon.maxHp) {
+      const se = this._bestSeBench(fighter, defender);
+      if (se) return { action: 'switch', slot: se };
+    }
+
+    const disabled = (i) => mon.disable && mon.disable.turns > 0
+      && mon.disable.moveIndex === i;
 
     let pick = null;
+    let pickEff = -1;
+    let pickPow = -1;
     for (let i = 1; i <= mon.moves.length; i += 1) {
-      if (mon.moves[i - 1].pp > 0) { pick = i; break; }
+      const m = mon.moves[i - 1];
+      if (m.pp > 0 && m.power > 0 && !disabled(i)) {
+        const eff = this._effectivenessProduct(m.type, defender);
+        if (!pick || eff > pickEff
+            || (eff === pickEff && m.power > pickPow)
+            || (eff === pickEff && m.power === pickPow && i < pick)) {
+          pick = i;
+          pickEff = eff;
+          pickPow = m.power;
+        }
+      }
     }
-    // Out of PP everywhere is still a turn that has to resolve, so the first
-    // move goes out on empty PP rather than the fight hanging. Gen 1 would send
-    // Struggle here; there is no move table to send it from.
+
+    if (!pick || pickEff === 0) {
+      const se = this._bestSeBench(fighter, defender);
+      if (se) return { action: 'switch', slot: se };
+    }
+
+    if (pick && pickEff > 1) {
+      return { action: 'fight', move: pick, target: foe.slot };
+    }
+
+    // Status fails against a Substitute; skip it and trade damage instead.
+    if (!defender.status && !foeSub) {
+      let statusPick = null;
+      let statusPri = -1;
+      for (let i = 1; i <= mon.moves.length; i += 1) {
+        const m = mon.moves[i - 1];
+        if (m.pp > 0 && !disabled(i) && m.power === 0) {
+          const pri = AUTO_STATUS_PRI[m.effect];
+          if (pri !== undefined && (pri > statusPri
+              || (pri === statusPri && (statusPick === null || i < statusPick)))) {
+            statusPick = i;
+            statusPri = pri;
+          }
+        }
+      }
+      if (statusPick !== null
+          && (weSlower || foeBoosted || !pick || pickEff <= 1)) {
+        return { action: 'fight', move: statusPick, target: foe.slot };
+      }
+    }
+
+    const stagesFlat = mon.stages.atk <= 0 && mon.stages.def <= 0
+      && mon.stages.spd <= 0 && mon.stages.spc <= 0;
+    // Do not set up into a boosted foe, behind a substitute, or while slower
+    // at mid-low HP — hit or switch instead.
+    if (stagesFlat && !mon.focusEnergy && !foeBoosted && !foeSub
+        && !(weSlower && mon.hp * 2 <= mon.maxHp)) {
+      let setupPick = null;
+      for (let i = 1; i <= mon.moves.length; i += 1) {
+        const m = mon.moves[i - 1];
+        if (m.pp > 0 && !disabled(i) && m.power === 0) {
+          const kind = AUTO_SETUP[m.effect];
+          if (kind === true
+              || (typeof kind === 'string' && (mon.stages[kind] || 0) <= 0)) {
+            if (setupPick === null || i < setupPick) setupPick = i;
+          }
+        }
+      }
+      if (setupPick !== null) {
+        return { action: 'fight', move: setupPick, target: foe.slot };
+      }
+    }
+
+    if (!(pick && pickEff > 0)) {
+      pick = null;
+      pickPow = -1;
+      for (let i = 1; i <= mon.moves.length; i += 1) {
+        const m = mon.moves[i - 1];
+        if (m.pp > 0 && !disabled(i)) {
+          if (!pick || m.power > pickPow
+              || (m.power === pickPow && i < pick)) {
+            pick = i;
+            pickPow = m.power;
+          }
+        }
+      }
+    }
+
     if (pick === null) pick = 1;
     if (!mon.moves[pick - 1]) return null;
     return { action: 'fight', move: pick, target: foe.slot };
@@ -496,9 +1173,9 @@ class Battle {
    * connection behind it, so without this the referee would wait out the whole
    * choice deadline every turn and then auto-pick anyway -- a minute a turn, for
    * a decision nothing was ever going to make. It is deliberately the *same*
-   * pick the timeout files rather than a second, cleverer one: the trainer plays
-   * a turn rather than playing it well, and both runtimes reproduce it byte for
-   * byte.
+   * pick the timeout files rather than a second, cleverer one: both runtimes
+   * reproduce it byte for byte (bag / SE / status / setup / switch heuristics
+   * above).
    *
    * Returns true when a choice was actually filed, so a caller can loop until
    * the machine stops owing. Filing one may resolve the turn and open the next,
@@ -509,11 +1186,14 @@ class Battle {
     const fighter = this.byId.get(str(playerId) || '');
     if (!fighter) return false;
     if (fighter.choice !== null && fighter.choice !== undefined) return false;
-    if (!activeMon(fighter)) return false;
+    if (!fighter.mustReplace && !activeMon(fighter)) return false;
 
     const auto = this._autoChoice(fighter);
     if (!auto) return false;
     fighter.choice = auto;
+    this._emit('chose', {
+      slot: fighter.slot, side: fighter.side, text: fighter.name,
+    });
     this._maybeResolve();
     return true;
   }
@@ -522,17 +1202,34 @@ class Battle {
   // resolution
   // ----------------------------------------------------------------
 
+  _anyoneOwes() {
+    for (const fighter of this.fighters) {
+      if (this._owes(fighter)) return true;
+    }
+    return false;
+  }
+
   _openTurn() {
     this.phase = 'choice';
     this.resolveDeadline = null;
+    this.forcedPending = false;
     for (const fighter of this.fighters) fighter.choice = null;
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
     this._emit('turn', { amount: this.turn });
+    this._fillForcedChoices();
+    // When every living seat is forced, defer resolve to the next tick so
+    // clients see a turn boundary before the chain continues.
+    if (!this._anyoneOwes()) {
+      this.forcedPending = true;
+      this.deadline = null;
+    }
   }
 
-  _speedOf(mon) {
-    if (mon.status === 'paralysis') return Status.paralysisSpeed(mon.stats.spd);
-    return mon.stats.spd;
+  _speedOf(fighter, mon) {
+    let spd = Effects.badgeBoost(mon.stats.spd, 'spd', fighter.badges);
+    spd = Effects.applyStage(spd, mon.stages.spd);
+    if (mon.status === 'paralysis') spd = Status.paralysisSpeed(spd);
+    return spd;
   }
 
   /*
@@ -617,6 +1314,25 @@ class Battle {
         const mon = monAt(fighter, choice.slot);
         if (mon && mon.hp > 0) {
           fighter.active = choice.slot;
+          fighter.mustReplace = null;
+          mon.charging = null;
+          mon.invulnerable = false;
+          mon.thrashing = null;
+          mon.raging = false;
+          mon.rageMove = 0;
+          mon.trapped = null;
+          mon.trapping = null;
+          mon.bide = null;
+          mon.substitute = 0;
+          mon.lightScreen = false;
+          mon.reflect = false;
+          mon.mist = false;
+          mon.focusEnergy = false;
+          mon.transformed = false;
+          mon.xAccuracy = false;
+          mon.leechSeed = null;
+          mon.disable = null;
+          this._clearTrapsFrom(fighter.slot);
           this._emit('switch', {
             slot: fighter.slot, side: fighter.side, text: mon.species,
           });
@@ -628,14 +1344,266 @@ class Battle {
     }
   }
 
+  _clearTrapsFrom(slot) {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      if (mon && mon.trapped && mon.trapped.fromSlot === slot) mon.trapped = null;
+      if (mon && mon.trapping && mon.trapping.targetSlot === slot) mon.trapping = null;
+    }
+  }
+
   _resolveItems() {
     for (const fighter of this.fighters) {
+      if (this.result) return;
       const choice = fighter.choice;
       if (choice && choice.action === 'item') {
-        this._emit('item', {
+        const effect = Effects.itemEffect(choice.item);
+        // Vitamins apply before the `item` event so `amount=1` can mean
+        // "Stat Exp writeback is owed"; a failed vitamin still spends the bag
+        // stack (Gen1) but must not bump save.statExp on the client.
+        let vitaminApplied = false;
+        let vitaminMon = null;
+        let vitaminResult = null;
+        if (effect && effect.vitamin) {
+          const partyIdx = choice.slot != null ? choice.slot : fighter.active;
+          const mon = monAt(fighter, partyIdx);
+          if (mon && mon.hp > 0) {
+            const result = Effects.applyVitamin(mon, choice.item);
+            if (result) {
+              vitaminApplied = true;
+              vitaminMon = mon;
+              vitaminResult = result;
+            }
+          }
+        }
+        const itemEv = {
           slot: fighter.slot, side: fighter.side, text: choice.item,
-        });
+        };
+        if (vitaminApplied) itemEv.amount = 1;
+        this._emit('item', itemEv);
         this._say(`${fighter.name} used an item`);
+        // Spend after the announce, win or fail (Gen1 bag stack). noConsume
+        // (Poké Flute) and seats with no bag sheet are left alone.
+        if (!(effect && effect.noConsume)) {
+          this._spendBag(fighter, choice.item);
+        }
+        if (!effect) {
+          this._say('But it failed');
+        } else if (effect.ball) {
+          if (!Effects.isWildMode(this.mode)) {
+            this._say('But it failed');
+          } else {
+            const foe = this._firstLivingFoe(fighter);
+            const target = foe && activeMon(foe);
+            if (!target) {
+              this._say('But it failed');
+            } else {
+              const result = Effects.catchAttempt(choice.item, target, this.rng);
+              if (result.shakes > 0 && !result.caught) this._say('The ball shook');
+              if (result.caught) {
+                this._say('Gotcha');
+                const finish = this._finish(
+                  'win',
+                  this._sidePlayers(fighter.side),
+                  this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'),
+                  'catch',
+                );
+                const sheet = Effects.caughtSheet(target);
+                if (finish && sheet) finish.caught = sheet;
+              } else {
+                this._say('It broke free');
+              }
+            }
+          }
+        } else if (effect.pokeDoll) {
+          if (Effects.isWildMode(this.mode)) {
+            this._say('The wild pokemon ran away');
+            this._finish(
+              'win',
+              this._sidePlayers(fighter.side),
+              this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'),
+              'run',
+            );
+          } else {
+            this._say('But it failed');
+          }
+        } else if (effect.vitamin) {
+          if (!vitaminApplied) {
+            this._say('But it failed');
+          } else {
+            const mon = vitaminMon;
+            const result = vitaminResult;
+            const label = ({
+              hp: 'HEALTH POINTS', atk: 'ATTACK', def: 'DEFENSE',
+              spd: 'SPEED', spc: 'SPECIAL',
+            })[result.stat] || 'STAT';
+            if (result.stat === 'hp' && result.delta > 0) {
+              this._emit('drain', {
+                slot: fighter.slot, side: fighter.side,
+                amount: result.delta, hp: mon.hp,
+              });
+            } else if (result.delta > 0) {
+              this._emit('stat', {
+                slot: fighter.slot, side: fighter.side,
+                amount: mon.stats[result.stat],
+                text: `${mon.species}'s ${label} rose`,
+              });
+            }
+            this._say(`${mon.species}'s ${label} rose`);
+          }
+        } else if (effect.pokeFlute) {
+          let woke = false;
+          for (const seat of this.fighters) {
+            for (const mon of seat.mons || []) {
+              if (mon && mon.status === 'sleep') {
+                mon.status = null;
+                mon.statusTurns = 0;
+                woke = true;
+                this._emit('status', {
+                  slot: seat.slot, side: seat.side,
+                  text: `${mon.species} woke up`,
+                });
+              }
+            }
+          }
+          if (woke) this._say('All sleeping POKeMON woke up');
+          else this._say("Now, that's a catchy tune");
+        } else {
+          const partyIdx = choice.slot != null ? choice.slot : fighter.active;
+          const mon = monAt(fighter, partyIdx);
+          if (!mon) {
+            this._say('But it failed');
+          } else if (effect.activeOnly && partyIdx !== fighter.active) {
+            this._say('But it failed');
+          } else if (effect.faintedOnly && mon.hp > 0) {
+            this._say('But it failed');
+          } else if (!effect.faintedOnly && mon.hp <= 0
+                     && (effect.heal || effect.healFull || effect.clearStatuses
+                         || effect.clearAllStatus || effect.ppRestore
+                         || effect.ppRestoreAll)) {
+            this._say('But it failed');
+          } else {
+            let applied = false;
+            if (effect.xAccuracy) {
+              mon.xAccuracy = true;
+              this._say(`${mon.species}'s hits will never miss`);
+              applied = true;
+            }
+            if (effect.focusEnergy) {
+              mon.focusEnergy = true;
+              this._say(`${mon.species} is getting pumped`);
+              applied = true;
+            }
+            if (effect.mist) {
+              mon.mist = true;
+              this._say(`${mon.species} is protected against stat changes`);
+              applied = true;
+            }
+            if (effect.stage) {
+              const stat = effect.stage.stat;
+              const before = Effects.clampStage(mon.stages[stat]);
+              if (before >= Effects.STAGE_MAX) {
+                this._say('Nothing happened');
+              } else {
+                const after = Effects.clampStage(before + int(effect.stage.delta, 1));
+                mon.stages[stat] = after;
+                const label = ({
+                  atk: 'ATTACK', def: 'DEFENSE', spd: 'SPEED',
+                  spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVASION',
+                })[stat] || 'STAT';
+                this._say(`${mon.species}'s ${label} rose`);
+                this._emit('stat', {
+                  slot: fighter.slot, side: fighter.side,
+                  amount: after, text: `${mon.species}'s ${label} rose`,
+                });
+              }
+              applied = true;
+            }
+            if (effect.revive) {
+              const amount = effect.revive;
+              const hp = amount === 1 ? mon.maxHp
+                : Math.max(1, Math.floor(mon.maxHp * amount));
+              mon.hp = hp;
+              mon.status = null;
+              mon.statusTurns = 0;
+              this._emit('drain', {
+                slot: fighter.slot, side: fighter.side,
+                amount: hp, hp: mon.hp,
+              });
+              this._say(`${mon.species} was revived`);
+              applied = true;
+            }
+            if (effect.ppRestore) {
+              const move = mon.moves[choice.move - 1];
+              if (!move) {
+                this._say('But it failed');
+              } else {
+                const maxPp = Math.max(int(move.maxPp, move.pp), move.pp);
+                const before = move.pp;
+                if (effect.ppRestore === true) move.pp = maxPp;
+                else move.pp = Math.min(maxPp, move.pp + int(effect.ppRestore, 0));
+                if (move.pp > before) {
+                  this._say(`${mon.species}'s PP was restored`);
+                  applied = true;
+                } else {
+                  this._say('But it failed');
+                }
+              }
+            }
+            if (effect.ppRestoreAll) {
+              let any = false;
+              for (const move of mon.moves || []) {
+                if (!move) continue;
+                const maxPp = Math.max(int(move.maxPp, move.pp), move.pp);
+                const before = move.pp;
+                if (effect.ppRestoreAll === true) move.pp = maxPp;
+                else move.pp = Math.min(maxPp, move.pp + int(effect.ppRestoreAll, 0));
+                if (move.pp > before) any = true;
+              }
+              if (any) {
+                this._say(`${mon.species}'s PP was restored`);
+                applied = true;
+              } else {
+                this._say('But it failed');
+              }
+            }
+            let healed = false;
+            if (effect.healFull) {
+              const before = mon.hp;
+              mon.hp = mon.maxHp;
+              if (mon.hp > before) {
+                this._emit('drain', {
+                  slot: fighter.slot, side: fighter.side,
+                  amount: mon.hp - before, hp: mon.hp,
+                });
+                healed = true;
+              }
+            } else if (effect.heal && effect.heal > 0 && mon.hp < mon.maxHp) {
+              this._heal(fighter, mon, effect.heal);
+              healed = true;
+            }
+            let cleared = false;
+            if (effect.clearAllStatus && mon.status) {
+              mon.status = null;
+              mon.statusTurns = 0;
+              cleared = true;
+            } else if (effect.clearStatuses && mon.status
+                       && effect.clearStatuses[mon.status]) {
+              mon.status = null;
+              mon.statusTurns = 0;
+              cleared = true;
+            }
+            if (cleared) {
+              this._emit('status', {
+                slot: fighter.slot, side: fighter.side,
+                text: `${mon.species} recovered`,
+              });
+            }
+            if (!applied && !healed && !cleared) {
+              this._say('But it failed');
+            }
+          }
+        }
       }
     }
   }
@@ -649,7 +1617,7 @@ class Battle {
         actors.push({
           fighter,
           mon, // pinned: see the skip in the loop
-          speed: this._speedOf(mon),
+          speed: this._speedOf(fighter, mon),
           order: actors.length + 1,
         });
       }
@@ -686,11 +1654,21 @@ class Battle {
       if (activeMon(actor.fighter) === actor.mon) {
         this._useMove(actor.fighter, actor.mon);
       }
+      // Finalize after each action (not inside `_faint`) so KO + recoil / explode
+      // on the same move can still mutual-faint into a draw, while an empty-bench
+      // KO still stops the slower seat from acting.
+      if (!this.result) this._checkOver();
     }
   }
 
   // Returns false when a gate stopped the move.
   _runGates(fighter, mon) {
+    if (mon.flinch) {
+      mon.flinch = false;
+      this._say(`${mon.species} flinched`);
+      return false;
+    }
+
     if (has(GATING, mon.status)) {
       const gate = Status.beforeMove(
         { status: mon.status, turnsRemaining: mon.statusTurns }, this.rng.byte(),
@@ -737,83 +1715,468 @@ class Battle {
     return true;
   }
 
-  _useMove(fighter, mon) {
+  _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId) {
+    const result = Effects.applyPrimary({
+      effectId,
+      rng: this.rng,
+      userMon: mon,
+      targetMon,
+      userFighter: fighter,
+      targetFighter,
+      moveIndex,
+      statusToWire: STATUS_TO_WIRE,
+    });
+    if (result.nothing) this._say('But nothing happened');
+    for (const text of result.messages || []) this._say(text);
+    for (const entry of result.events || []) {
+      this._emit(entry.kind, entry.fields);
+    }
+    for (const heal of result.heals || []) {
+      this._heal(fighter, mon, heal.amount);
+    }
+    for (const cost of result.costs || []) {
+      this._damage(fighter, mon, cost.amount, null);
+    }
+    for (const hit of result.directDamage || []) {
+      this._emit('damage', {
+        slot: fighter.slot,
+        side: fighter.side,
+        amount: hit.amount,
+        hp: mon.hp,
+      });
+    }
+    if (result.movesChanged) this._emitMoves(fighter, mon);
+  }
+
+  _applySide(fighter, mon, targetFighter, targetMon, effectId, chance) {
+    const result = Effects.applySide({
+      effectId,
+      chance,
+      rng: this.rng,
+      userMon: mon,
+      targetMon,
+      userFighter: fighter,
+      targetFighter,
+      statusToWire: STATUS_TO_WIRE,
+    });
+    for (const text of result.messages || []) this._say(text);
+    for (const entry of result.events || []) {
+      this._emit(entry.kind, entry.fields);
+    }
+  }
+
+  _markLastMove(mon, moveIndex) {
+    if (moveIndex && moveIndex >= 1) mon.lastMoveIndex = moveIndex;
+  }
+
+  _faintUser(fighter, mon) {
+    if (mon.hp > 0) this._damage(fighter, mon, mon.hp, null);
+  }
+
+  _concedeRun(fighter) {
+    this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
+    if (fighter.side === 'a') {
+      this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'run');
+    } else {
+      this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'run');
+    }
+  }
+
+  _useMove(fighter, mon, opts = {}) {
     const choice = fighter.choice;
-    const move = mon.moves[choice.move - 1];
-    if (!move) return;
+    if (!mon.moves[choice.move - 1]) return;
 
     if (!this._runGates(fighter, mon)) return;
+
+    const struggling = allPpEmpty(mon) || choice.struggle;
+    if (!struggling && mon.disable && mon.disable.turns > 0
+        && mon.disable.moveIndex === choice.move) {
+      const blocked = mon.moves[choice.move - 1];
+      const moveId = blocked && blocked.id ? blocked.id : 'move';
+      this._say(`${moveId} is disabled`);
+      return;
+    }
 
     const target = this._fighterAtSlot(choice.target);
     const defender = target && activeMon(target);
     if (!defender) {
-      // The chosen target went down before this actor moved. Redirecting would
-      // be choosing a different opponent on somebody's behalf, so the move
-      // fizzles and the turn is spent -- the same thing the original does when
-      // its target is gone.
       this._say(`${mon.species} has no target`);
       return;
     }
 
-    if (move.pp > 0) move.pp -= 1;
+    const move = opts.moveOverride || (struggling ? STRUGGLE : mon.moves[choice.move - 1]);
+    const effectId = int(move.effect, 0);
+    const releasing = mon.charging !== null && mon.charging !== undefined
+      && Effects.isCharge(mon.charging.effect);
+    const mirrorCopy = opts.mirrorCopy === true;
+
+    if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) move.pp -= 1;
     this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
     this._say(`${mon.species} used ${move.id}`);
 
-    const shot = Accuracy.hit({ accuracy: move.accuracy, roll: this.rng.byte() });
+    if (choice.bideRelease && mon.bide) {
+      const stored = mon.bide.stored;
+      mon.bide = null;
+      if (stored <= 0) {
+        this._say('But it failed');
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      this._damage(target, defender, 2 * stored, null);
+      this._markLastMove(mon, choice.move);
+      return;
+    }
+
+    // Charge / Fly: first turn sets state and ends; second turn releases.
+    if (Effects.isCharge(effectId) && !mon.charging) {
+      mon.charging = {
+        moveIndex: choice.move,
+        effect: effectId,
+        targetSlot: choice.target,
+      };
+      if (Effects.isFly(effectId)) mon.invulnerable = true;
+      this._say(Effects.chargeMessage(mon, effectId));
+      this._markLastMove(mon, choice.move);
+      return;
+    }
+
+    if (mon.charging && Effects.isCharge(mon.charging.effect)) {
+      mon.charging = null;
+      mon.invulnerable = false;
+    }
+
+    if (defender.invulnerable) {
+      this._say('But it failed');
+      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+      if (Effects.isJumpKick(effectId)) {
+        this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+      }
+      this._markLastMove(mon, choice.move);
+      return;
+    }
+
+    if (Effects.isMirrorMove(effectId) && !mirrorCopy) {
+      const lastIdx = int(defender.lastMoveIndex, 0);
+      if (lastIdx < 1 || !defender.moves[lastIdx - 1]) {
+        this._say('But it failed');
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      this._markLastMove(mon, choice.move);
+      this._useMove(fighter, mon, {
+        moveOverride: copyMove(defender.moves[lastIdx - 1]),
+        mirrorCopy: true,
+      });
+      return;
+    }
+
+    const metronomeCall = opts.metronomeCall === true;
+    if (Effects.isMetronome(effectId) && !metronomeCall) {
+      const pool = this.metronomePool;
+      if (!pool || pool.length === 0) {
+        this._say('But nothing happened');
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      const pick = this.rng.byte() % pool.length;
+      this._markLastMove(mon, choice.move);
+      this._useMove(fighter, mon, {
+        moveOverride: copyMove(pool[pick]),
+        metronomeCall: true,
+      });
+      return;
+    }
+
+    const alwaysHits = effectId === Effects.idOf('SWIFT_EFFECT')
+      || mon.xAccuracy === true;
+
+    const shot = Accuracy.hit({
+      accuracy: move.accuracy,
+      accuracyMod: Effects.stageMult(mon.stages.acc),
+      evasionMod: Effects.stageMult(defender.stages.eva),
+      roll: this.rng.byte(),
+      alwaysHits,
+    });
     if (!shot.hit) {
       this._say(`${mon.species} missed`);
+      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+      if (Effects.isJumpKick(effectId)) {
+        this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+      }
+      this._markLastMove(mon, choice.move);
       return;
     }
 
-    if (move.power <= 0) {
-      // The status-move stub: narrated, and nothing more. See the header.
-      this._say('But nothing happened');
+    const isFixed = Effects.isFixedDamage(effectId);
+    if (effectId === 8 && defender.status !== 'sleep') {
+      this._say('But it failed');
+      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+      this._markLastMove(mon, choice.move);
       return;
     }
 
-    const isCrit = Crit.check({ baseSpeed: mon.stats.spd, roll: this.rng.byte() }).isCrit;
+    if (move.power <= 0 && !isFixed) {
+      if (Effects.isBide(effectId) && !mon.bide) {
+        mon.bide = {
+          turns: Effects.bideTurns(this.rng),
+          stored: 0,
+          moveIndex: choice.move,
+          targetSlot: choice.target,
+        };
+        this._say(`${mon.species} began storing energy`);
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      if (Effects.isSwitchAndTeleport(effectId)) {
+        if (Effects.teleportRunAllowed(this.mode)) {
+          this._concedeRun(fighter);
+        } else {
+          this._say('But it failed');
+        }
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      if (Effects.isNoOp(effectId)) {
+        this._say('But nothing happened');
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      if (Effects.handlesPrimary(effectId)) {
+        this._applyPrimary(fighter, mon, target, defender, choice.move, effectId);
+      } else {
+        this._say('But nothing happened');
+      }
+      this._markLastMove(mon, choice.move);
+      return;
+    }
+
+    if (effectId === 38) {
+      if (this._speedOf(fighter, mon) <= this._speedOf(target, defender)) {
+        this._say('But it failed');
+        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+    }
+
+    const hits = Effects.hitCount(effectId, this.rng);
+    const critSpd = Effects.badgeBoost(mon.stats.spd, 'spd', fighter.badges);
+    const isCrit = Crit.check({
+      baseSpeed: critSpd,
+      roll: this.rng.byte(),
+      focusEnergy: mon.focusEnergy,
+    }).isCrit;
     const percents = this._typePercents(move.type, defender);
 
-    let attack = mon.stats.atk;
-    if (mon.status === 'burn') attack = Status.burnAttack(attack);
-
-    // Drawn before the call, and unconditionally: the Lua passes this as an
-    // argument, so the draw happens even on the immunity that returns below.
-    const roll = this.rng.damageRoll();
-    const result = Damage.compute({
-      level: mon.level,
-      attack,
-      defense: defender.stats.def,
-      power: move.power,
-      crit: isCrit,
-      stab: hasType(mon, move.type),
-      typeEffect: percents,
-      roll,
-    });
-
-    if (result.immune) {
-      this._say(`It doesn't affect ${defender.species}`);
-      return;
+    let immune = false;
+    for (const pct of percents) {
+      if (pct <= 0) { immune = true; break; }
     }
+
+    let damage = 0;
+    if (isFixed) {
+      if (immune) {
+        this.rng.damageRoll();
+        this._say(`It doesn't affect ${defender.species}`);
+        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isJumpKick(effectId)) {
+          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+        }
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      const fixed = Effects.fixedDamage({
+        effectId,
+        userMon: mon,
+        targetMon: defender,
+        power: move.power,
+        userSpeed: this._speedOf(fighter, mon),
+        foeSpeed: this._speedOf(target, defender),
+      });
+      if (fixed === null) {
+        this.rng.damageRoll();
+        this._say('But it failed');
+        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      this.rng.damageRoll();
+      damage = fixed;
+    } else {
+      const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
+      const atkKey = isSpecial ? 'spc' : 'atk';
+      const defKey = isSpecial ? 'spc' : 'def';
+      const atkStat = Effects.badgeBoost(
+        isSpecial ? mon.stats.spc : mon.stats.atk, atkKey, fighter.badges);
+      const atkStage = isSpecial ? mon.stages.spc : mon.stages.atk;
+      const defStat = Effects.badgeBoost(
+        isSpecial ? defender.stats.spc : defender.stats.def, defKey, target.badges);
+      const defStage = isSpecial ? defender.stages.spc : defender.stages.def;
+
+      let attack = Effects.applyStage(atkStat, atkStage);
+      if (!isSpecial && mon.status === 'burn') attack = Status.burnAttack(attack);
+
+      let defense = Effects.applyStage(defStat, defStage);
+      if (Effects.isExplode(effectId)) {
+        defense = Math.max(1, Math.floor(defense / 2));
+      }
+
+      const roll = this.rng.damageRoll();
+      const result = Damage.compute({
+        level: mon.level,
+        attack,
+        defense,
+        power: move.power,
+        crit: isCrit,
+        stab: hasType(mon, move.type),
+        typeEffect: percents,
+        roll,
+      });
+
+      if (result.immune) {
+        this._say(`It doesn't affect ${defender.species}`);
+        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isJumpKick(effectId)) {
+          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+        }
+        this._markLastMove(mon, choice.move);
+        return;
+      }
+      damage = result.damage === null || result.damage === undefined
+        ? 0 : result.damage;
+    }
+
+    const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
+    damage = Effects.screenDamage(damage, defender, isSpecial);
 
     let effectiveness = 1;
     for (const pct of percents) effectiveness = (effectiveness * pct) / 100;
-    if (isCrit) this._say('A critical hit');
+    if (isCrit && !isFixed) this._say('A critical hit');
     if (effectiveness > 1) {
       this._say("It's super effective");
     } else if (effectiveness < 1) {
       this._say("It's not very effective");
     }
 
-    this._damage(target, defender, result.damage === null || result.damage === undefined
-      ? 0 : result.damage, null);
+    let totalDealt = 0;
+    for (let h = 0; h < hits; h += 1) {
+      if (defender.hp <= 0) break;
+      const hpBefore = defender.hp;
+      this._damage(target, defender, damage, null);
+      totalDealt += hpBefore - defender.hp;
+    }
+
+    if (totalDealt > 0) {
+      this._applySide(fighter, mon, target, defender, effectId, move.chance);
+
+      if (Effects.isDrain(effectId)) {
+        const heal = Effects.drainAmount(totalDealt);
+        if (heal > 0) this._heal(fighter, mon, heal);
+      }
+
+      if (Effects.isPayDay(effectId)) {
+        this._say('Coins scattered');
+      }
+    }
+
+    if ((struggling || Effects.isRecoil(effectId)) && totalDealt >= 1) {
+      const recoil = Effects.recoilAmount(totalDealt);
+      this._say(`${mon.species} is hit with recoil`);
+      this._damage(fighter, mon, recoil, null);
+    }
+
+    if (Effects.handlesPrimary(effectId)) {
+      this._applyPrimary(fighter, mon, target, defender, choice.move, effectId);
+    }
+
+    if (Effects.isThrash(effectId) && !mon.thrashing) {
+      mon.thrashing = {
+        turns: Effects.thrashTurns(this.rng),
+        moveIndex: choice.move,
+      };
+    }
+
+    if (Effects.isRage(effectId)) {
+      mon.raging = true;
+      mon.rageMove = choice.move;
+    }
+
+    if (Effects.isTrapping(effectId) && totalDealt > 0) {
+      const turns = Effects.trapTurns(this.rng);
+      defender.trapped = {
+        turns,
+        damage: totalDealt,
+        fromSlot: fighter.slot,
+      };
+      mon.trapping = {
+        turns,
+        moveIndex: choice.move,
+        targetSlot: target.slot,
+      };
+    }
+
+    if (Effects.isHyperBeam(effectId) && totalDealt > 0 && defender.hp > 0) {
+      mon.mustRecharge = true;
+    }
+
+    if (Effects.isExplode(effectId)) {
+      this._faintUser(fighter, mon);
+    }
+
+    this._markLastMove(mon, choice.move);
+
+    if (mon.thrashing) {
+      mon.thrashing.turns -= 1;
+      if (mon.thrashing.turns <= 0) {
+        mon.thrashing = null;
+        const turns = this.rng.byte() % 4 + 2;
+        mon.confusion = turns;
+        this._say(`${mon.species} became confused`);
+      }
+    }
   }
 
   // One place where HP comes off, so the faint that follows can never be
   // forgotten at one of the call sites.
   _damage(fighter, mon, rawAmount, status) {
     let amount = Math.max(0, int(rawAmount, 0));
+
+    if (amount > 0 && mon.bide && mon.bide.turns > 0) {
+      mon.bide.stored += amount;
+    }
+
+    if (amount > 0 && mon.substitute && mon.substitute > 0) {
+      if (amount >= mon.substitute) {
+        mon.substitute = 0;
+        this._say(`${mon.species}'s substitute broke`);
+      } else {
+        mon.substitute -= amount;
+      }
+      this._emit('damage', {
+        slot: fighter.slot,
+        side: fighter.side,
+        amount,
+        hp: mon.hp,
+        status: status && has(STATUS_TO_WIRE, status) ? STATUS_TO_WIRE[status] : undefined,
+      });
+      return;
+    }
+
     if (amount > mon.hp) amount = mon.hp;
+
+    if (amount > 0 && mon.raging) {
+      const before = Effects.clampStage(mon.stages.atk);
+      const after = Effects.clampStage(before + 1);
+      if (after !== before) {
+        mon.stages.atk = after;
+        this._say(`${mon.species}'s ATTACK rose`);
+        this._emit('stat', {
+          slot: fighter.slot, side: fighter.side,
+          amount: after, text: `${mon.species}'s ATTACK rose`,
+        });
+      }
+    }
+
     mon.hp -= amount;
 
     this._emit('damage', {
@@ -827,28 +2190,69 @@ class Battle {
     if (mon.hp <= 0) this._faint(fighter, mon);
   }
 
-  _faint(fighter, mon) {
-    this._emit('faint', { slot: fighter.slot, side: fighter.side, text: mon.species });
+  _heal(fighter, mon, amount) {
+    let gained = Math.max(0, int(amount, 0));
+    if (gained <= 0) return;
+    const before = mon.hp;
+    mon.hp = Math.min(mon.maxHp, mon.hp + gained);
+    gained = mon.hp - before;
+    if (gained <= 0) return;
+    this._emit('drain', {
+      slot: fighter.slot,
+      side: fighter.side,
+      amount: gained,
+      hp: mon.hp,
+    });
+  }
 
+  _faint(fighter, mon) {
+    mon.charging = null;
+    mon.invulnerable = false;
+    mon.mustRecharge = false;
+    mon.thrashing = null;
+    mon.raging = false;
+    mon.rageMove = 0;
+    mon.trapped = null;
+    mon.trapping = null;
+    mon.bide = null;
+    mon.substitute = 0;
+    mon.lightScreen = false;
+    mon.reflect = false;
+    mon.mist = false;
+    mon.focusEnergy = false;
+    mon.transformed = false;
+    mon.xAccuracy = false;
+    mon.leechSeed = null;
+    mon.disable = null;
+    this._clearTrapsFrom(fighter.slot);
+
+    // Living bench? Computed before clearing active; fainted mon already has hp 0.
     const next = firstLiving(fighter.mons);
+    const faintEv = { slot: fighter.slot, side: fighter.side, text: mon.species };
+    // amount=1 is the authoritative mustReplace signal (living bench). Clients
+    // open the replace picker from this rather than guessing from local HP.
+    if (next) faintEv.amount = 1;
+    this._emit('faint', faintEv);
+
+    fighter.active = null;
     if (next) {
-      fighter.active = next;
-      const incoming = monAt(fighter, next);
-      this._emit('send', {
-        slot: fighter.slot, side: fighter.side,
-        hp: incoming.hp, text: incoming.species,
-      });
+      // Ask the seat for a switch on the next choice window; timeout / autoPick
+      // still lands firstLiving (preferring an SE bench).
+      fighter.mustReplace = true;
     } else {
-      fighter.active = null;
+      fighter.mustReplace = null;
     }
 
-    this._checkOver();
+    // While resolving, defer `_checkOver` to the caller (after the current move /
+    // residual batch) so the same action can still faint the user (recoil,
+    // explode) and land a draw. Outside resolve, end immediately.
+    if (this.phase !== 'resolving') this._checkOver();
   }
 
   _resolveResiduals() {
     for (const fighter of this.fighters) {
       if (this.result) return;
-      const mon = activeMon(fighter);
+      let mon = activeMon(fighter);
       if (mon && mon.status) {
         const amount = Status.residual({
           status: mon.status, maxHp: mon.maxHp, toxicCounter: mon.toxicCounter,
@@ -857,6 +2261,55 @@ class Battle {
           if (mon.status === 'toxic') mon.toxicCounter += 1;
           this._say(`${mon.species} is hurt by its ${mon.status}`);
           this._damage(fighter, mon, amount, mon.status);
+        }
+      }
+      if (this.result) return;
+      mon = activeMon(fighter);
+      if (mon && mon.trapped && mon.trapped.turns > 0) {
+        const trap = mon.trapped;
+        this._say(`${mon.species} is hurt by the trap`);
+        this._damage(fighter, mon, trap.damage, null);
+        trap.turns -= 1;
+        if (trap.turns <= 0) {
+          mon.trapped = null;
+          const trapper = trap.fromSlot !== null && trap.fromSlot !== undefined
+            ? this._fighterAtSlot(trap.fromSlot) : null;
+          const tMon = trapper && activeMon(trapper);
+          if (tMon) tMon.trapping = null;
+        } else {
+          const trapper = trap.fromSlot !== null && trap.fromSlot !== undefined
+            ? this._fighterAtSlot(trap.fromSlot) : null;
+          const tMon = trapper && activeMon(trapper);
+          if (tMon && tMon.trapping) tMon.trapping.turns = trap.turns;
+        }
+      }
+      mon = activeMon(fighter);
+      if (mon && mon.bide && mon.bide.turns > 0) {
+        mon.bide.turns -= 1;
+      }
+      if (this.result) return;
+      mon = activeMon(fighter);
+      if (mon && mon.leechSeed) {
+        const amount = Math.max(1, Math.floor(mon.maxHp / 16));
+        this._say(`${mon.species} is seeded`);
+        this._damage(fighter, mon, amount, null);
+        const from = mon.leechSeed.fromSlot;
+        const seeder = from !== null && from !== undefined
+          ? this._fighterAtSlot(from) : null;
+        const sMon = seeder && activeMon(seeder);
+        if (sMon && sMon.hp > 0) this._heal(seeder, sMon, amount);
+      }
+      if (this.result) return;
+      mon = activeMon(fighter);
+      if (mon && mon.disable && mon.disable.turns > 0) {
+        mon.disable.turns -= 1;
+        if (mon.disable.turns <= 0) {
+          const idx = mon.disable.moveIndex;
+          const cleared = mon.moves[idx - 1];
+          mon.disable = null;
+          if (cleared && cleared.id) {
+            this._say(`${cleared.id} is no longer disabled`);
+          }
         }
       }
     }
@@ -959,6 +2412,16 @@ class Battle {
     if (now > this.now) this.now = now;
     if (this.result) return false;
 
+    // Forced-only turns opened by the previous resolve wait here so one drain
+    // does not swallow a whole trap / recharge / thrash chain.
+    if (this.forcedPending && this.phase === 'choice') {
+      this.forcedPending = false;
+      if (!this._anyoneOwes()) {
+        this._maybeResolve();
+        return true;
+      }
+    }
+
     let expiredA = false;
     let expiredB = false;
     for (const fighter of this.fighters) {
@@ -998,6 +2461,9 @@ class Battle {
           const auto = this._autoChoice(fighter);
           if (auto) {
             fighter.choice = auto;
+            this._emit('chose', {
+              slot: fighter.slot, side: fighter.side, text: fighter.name,
+            });
             this._say(`${fighter.name} ran out of time`);
           }
         }
@@ -1038,6 +2504,7 @@ class Battle {
         connected: fighter.connected,
         graceEndsAt: fighter.graceEndsAt,
         chose: fighter.choice ? fighter.choice.action : null,
+        mustReplace: fighter.mustReplace === true,
         species: mon ? mon.species : null,
         hp: mon ? mon.hp : 0,
         maxHp: mon ? mon.maxHp : 0,
@@ -1087,7 +2554,7 @@ function attempt(opts) {
   if (!isTable(opts)) return refuse('battle needs an options table');
 
   const self = new Battle(opts);
-  const perSide = self.mode === '1v1' ? 1 : FIGHTERS_PER_SIDE;
+  const perSide = (self.mode === '1v1' || self.mode === 'wild') ? 1 : FIGHTERS_PER_SIDE;
 
   const sides = isTable(opts.sides) ? opts.sides : {};
   for (const side of SIDES) {
@@ -1121,6 +2588,8 @@ function attempt(opts) {
         index,
         slot: Events.fieldSlot(side, index),
         mons,
+        badges: copyBadges(entry.badges),
+        bag: copyBag(entry.bag),
         active: firstLiving(mons),
         connected: true,
         graceEndsAt: null,
@@ -1161,6 +2630,7 @@ module.exports = {
   RECONNECT_GRACE,
   RESOLVE_TIMEOUT,
   TIE_BREAK_ROLL,
+  DEFAULT_NPC_BAG,
   MODES,
   SIDES,
   STATUS_FROM_WIRE,

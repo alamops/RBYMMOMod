@@ -75,6 +75,12 @@ function M.new(deps, slots)
     aiUses = deps.aiUses or 0,
     save = deps.save,
     onError = deps.onError,
+    -- Which side draws as the Gen 1 "player" half: back sprites, no "Enemy"
+    -- name prefix, player-side move anims. Defaults to "a" (host / absolute
+    -- layout). CoopBattle sets this to the local seat's side so a side-b
+    -- viewer still sees their pair facing up after viewPos remaps them to
+    -- the bottom of the screen.
+    facingSide = deps.facingSide == "b" and "b" or "a",
     slots = {},
     -- Battlers knocked down inside one action, acted on once it finishes: the
     -- engine's pipeline can faint two at a time (Explosion, recoil, a
@@ -139,17 +145,22 @@ function M:sendOut(slot, index)
   -- that, the three clients watching cannot tell a paused field from a
   -- running one, and so cannot say who everyone is waiting for.
   slot.awaiting = nil
+  -- Viewer-relative facing: the local seat's side gets back sprites (looking
+  -- up the field); the far side gets front sprites (looking down). Tied to
+  -- `facingSide` rather than absolute "a", or a side-b client would keep
+  -- drawing foes as backs after layout remaps its own pair to the bottom.
+  local facePlayer = slot.side == self.facingSide
   if self.makeBattler then
     -- A save-shaped stand-in carrying nothing but the badges, because that is
     -- the only field `makeBattler` reads off it. Passing the real save would
     -- work for exactly one of the four slots and be wrong for the other three.
     local save = slot.badges and { inventory = slot.badges } or nil
-    slot.battler = self.makeBattler(self.data, mon, slot.side == "a", save)
+    slot.battler = self.makeBattler(self.data, mon, facePlayer, save)
   else
     local def = (self.data.pokemon or {})[mon.species] or { types = {}, baseStats = {} }
     slot.battler = {
       mon = mon, def = def, name = mon.nickname or def.name or mon.species,
-      isPlayer = slot.side == "a", stages = {},
+      isPlayer = facePlayer, stages = {},
       -- The HP the bar is currently showing, which trails `mon.hp` while a
       -- drain plays. `makeBattler` sets it and this table did not, so anything
       -- reading a battler's displayed HP got nil from the fallback and
@@ -160,7 +171,7 @@ function M:sendOut(slot, index)
       -- Carried here too, and gated the same way the engine gates it, so a
       -- build with no BattleState to ask does not quietly fight a different
       -- battle from one that has it.
-      badges = (slot.side == "a") and slot.badges or nil,
+      badges = facePlayer and slot.badges or nil,
       badgeBoosts = self.data.constants and self.data.constants.badgeBoosts,
     }
   end
@@ -297,9 +308,27 @@ end
 -- a rule rather than extending one; a player who wants to hit their friend can
 -- do it the way the games have always allowed, by using a move that spreads.
 -- There are none of those in Gen 1 either, which is the point.
+--
+-- When every foe seat is empty but still has party left (mediated mustReplace
+-- window: their send-out and your fight are the *same* choice phase), those
+-- seats stay aimable. The hub accepts a fight aimed at a mustReplace seat;
+-- returning nothing here made FIGHT print "Wait for the other trainer!" and
+-- never submit, while the referee kept waiting on that choice -- a hard stall.
 function M:targetsFor(slot)
   local foe = slot.side == "a" and "b" or "a"
-  return self:living(foe)
+  local out = self:living(foe)
+  if #out > 0 then return out end
+  for _, s in ipairs(self.slots) do
+    if s.side == foe and not s.gone then
+      for _, mon in ipairs(s.party or {}) do
+        if (mon.hp or 0) > 0 then
+          out[#out + 1] = s
+          break
+        end
+      end
+    end
+  end
+  return out
 end
 
 -- ------- the turn

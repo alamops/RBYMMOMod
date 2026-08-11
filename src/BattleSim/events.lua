@@ -57,10 +57,14 @@ local floor = math.floor
 --   over       -- the field is done; an OUTCOME is coming
 --   wait       -- the fight is paused on somebody, and who
 --   reconnect  -- a side that had dropped is back
+--   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
+--   unchose    -- cancel cleared a filed answer
+--   moves      -- mid-fight move-list sync after Transform/Mimic
 M.KINDS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
+  chose = true, unchose = true, moves = true,
 }
 
 -- Every key an event may carry, and the type it carries.  `battle` and `seq`
@@ -106,18 +110,23 @@ M.SHAPES = {
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
   drain     = { slot = true, side = true, amount = true, hp = true },
-  faint     = { slot = true, side = true, text = true },
+  faint     = { slot = true, side = true, text = true,
+                amount = "1 when the seat still has a living bench (mustReplace)" },
   send      = { slot = true, side = true, hp = true, text = "the species" },
   status    = { slot = true, side = true, status = "absent means cleared",
                 text = true },
   stat      = { slot = true, side = true, amount = true, text = true },
   switch    = { slot = true, side = true, text = "the species coming in" },
-  item      = { slot = true, side = true, text = "the item id" },
+  item      = { slot = true, side = true, text = "the item id",
+                amount = "1 when a vitamin applied (client save writeback)" },
   run       = { slot = true, side = true, text = true },
   turn      = { amount = "the 1-based turn number" },
   over      = { text = "the reason token" },
   wait      = { side = true, text = "who is being waited on" },
   reconnect = { side = true, text = true },
+  chose     = { slot = true, side = true, text = "who answered" },
+  unchose   = { slot = true, side = true, text = "who answered" },
+  moves     = { slot = true, side = true, moves = "sanitised move list" },
 }
 
 -- ------------------------------------------------------------------
@@ -138,11 +147,32 @@ function M.fieldSlot(side, index)
   return base + math.max(0, floor(n) - 1)
 end
 
+local MOVE_FIELDS = { id = "string", pp = "number", power = "number",
+                      accuracy = "number", type = "number", effect = "number",
+                      chance = "number" }
+
+local function checkMove(move)
+  if type(move) ~= "table" then return false end
+  for key, want in pairs(MOVE_FIELDS) do
+    if type(move[key]) ~= want then return false end
+  end
+  return true
+end
+
+local function checkMoves(value)
+  if type(value) ~= "table" then return false end
+  for _, move in ipairs(value) do
+    if not checkMove(move) then return false end
+  end
+  return #value > 0
+end
+
 -- ------------------------------------------------------------------
 -- construction
 -- ------------------------------------------------------------------
 
 local function coerce(key, value)
+  if key == "moves" then return nil end
   local want = M.FIELDS[key]
   if want == nil then return nil end                  -- not in the whitelist
   if want == "number" then
@@ -166,7 +196,9 @@ function M.build(kind, fields)
   local out = { t = kind }
   if type(fields) == "table" then
     for key, value in pairs(fields) do
-      if key ~= "t" and key ~= "battle" and key ~= "seq" then
+      if key == "moves" and type(value) == "table" then
+        out.moves = value
+      elseif key ~= "t" and key ~= "battle" and key ~= "seq" then
         local clean = coerce(key, value)
         if clean ~= nil then out[key] = clean end
       end
@@ -186,9 +218,13 @@ function M.check(event)
   end
   if type(event.seq) ~= "number" or event.seq < 0 then return false, "no seq" end
   for key, value in pairs(event) do
-    local want = M.FIELDS[key]
-    if want == nil then return false, "field not in the whitelist: " .. tostring(key) end
-    if type(value) ~= want then return false, "wrong type for " .. tostring(key) end
+    if key == "moves" then
+      if not checkMoves(value) then return false, "bad moves list" end
+    else
+      local want = M.FIELDS[key]
+      if want == nil then return false, "field not in the whitelist: " .. tostring(key) end
+      if type(value) ~= want then return false, "wrong type for " .. tostring(key) end
+    end
   end
   return true
 end

@@ -12,6 +12,7 @@
  */
 
 const TEXT_OK = /[^A-Za-z0-9 .,!?'\-:;()/]/g;
+const Effects = require('./battle/Effects');
 
 function cleanText(value, limit) {
   if (typeof value !== 'string') return null;
@@ -150,14 +151,13 @@ function cleanOutcome(value) {
  * zero on every card that drew it.
  */
 const RANK_MAX = 9999;
-// A claim token: 16 bytes as lowercase hex, exactly. Held to the length the
-// hub mints, because a short "token" is a truncated one -- it would fail
-// every claim from then on, silently.
-const RANK_TOKEN_HEX = 32;
+// Persistent player identity (PROTOCOL 16): 16 random bytes as lowercase hex.
+// Mirrors Config.PLAYER_ID_HEX and Wire.playerId on the Lua side.
+const PLAYER_ID_HEX = 32;
 
-function cleanToken(value) {
-  const hex = cleanHex(value, RANK_TOKEN_HEX);
-  return hex && hex.length === RANK_TOKEN_HEX ? hex : null;
+function cleanPlayerId(value) {
+  const hex = cleanHex(value, PLAYER_ID_HEX);
+  return hex && hex.length === PLAYER_ID_HEX ? hex : null;
 }
 
 function cleanPoints(value) {
@@ -376,6 +376,8 @@ const EFF_MULTS = new Set([0, 25, 50, EFF_NEUTRAL, 200, CHART_MAX]);
 // data pack that adds some, since a cap of exactly fifteen would refuse the
 // modded ruleset rather than the malformed one. Mirrors Config.BATTLE_TYPE_MAX.
 const BATTLE_TYPE_MAX = 20;
+// Cap on ephemeral Metronome pools (mirrors Config.BATTLE_METRONOME_POOL_MAX).
+const METRONOME_POOL_MAX = 200;
 
 // The type a *move* may name, bounded generously and independently of the
 // chart's width on purpose: a party naming a type the uploaded chart has no row
@@ -407,9 +409,11 @@ const IV_MAX = 15;
 const EV_MAX = 65535;
 
 // The party a combatant may submit, and the moves one of them may carry.
-// Mirrors Config.BATTLE_MON_MAX and Config.BATTLE_MOVE_MAX.
+// Mirrors Config.BATTLE_MON_MAX, BATTLE_MOVE_MAX, and battle-bag caps.
 const BATTLE_MON_MAX = 6;
 const BATTLE_MOVE_MAX = 4;
+const BATTLE_BAG_MAX = 40;
+const BATTLE_BAG_COUNT_MAX = 99;
 // Mirrors Config.COOP_BADGES_MAX.
 const COOP_BADGES_MAX = 32;
 
@@ -524,6 +528,7 @@ const BATTLE_ACTIONS = new Map([
 const BATTLE_EVENT_TYPES = new Set([
   'msg', 'anim', 'damage', 'drain', 'faint', 'send', 'status', 'stat',
   'switch', 'item', 'run', 'turn', 'over', 'wait', 'reconnect',
+  'chose', 'unchose', 'moves',
 ]);
 
 // The reasons a mediated fight ends that a screen currently has a sentence for:
@@ -536,7 +541,7 @@ const BATTLE_EVENT_TYPES = new Set([
 // id-shaped, for the reason written above it. Adding an entry adds a sentence;
 // it does not widen what arrives.
 const BATTLE_REASONS = new Set([
-  'timeout', 'disconnect', 'run', 'ko', 'agree', 'forfeit',
+  'timeout', 'disconnect', 'run', 'ko', 'agree', 'forfeit', 'catch',
 ]);
 
 // The three shapes a mediated fight comes in: two players with one monster
@@ -544,7 +549,7 @@ const BATTLE_REASONS = new Set([
 // each other. Named on the wire rather than inferred from how many ids arrived,
 // because the two co-op modes have the same four field slots and differ only in
 // whether one side has an owner.
-const BATTLE_MODES = new Set(['1v1', 'coop_npc', 'coop_pvp']);
+const BATTLE_MODES = new Set(['1v1', 'coop_npc', 'coop_pvp', 'wild']);
 
 /*
  * A roster: who is on a side, who won, who lost.
@@ -716,6 +721,27 @@ function cleanBattleRuleset(raw) {
     if (seed === null) return null;
     ruleset.seed = seed;
   }
+  if (raw.specialTypes !== undefined && raw.specialTypes !== null) {
+    if (!Array.isArray(raw.specialTypes)) return null;
+    const special = [];
+    for (const entry of raw.specialTypes) {
+      const t = cleanInt(entry, 0, BATTLE_TYPE_MAX - 1);
+      if (t === null) return null;
+      special.push(t);
+    }
+    ruleset.specialTypes = special;
+  }
+  if (raw.metronomePool !== undefined && raw.metronomePool !== null) {
+    if (!Array.isArray(raw.metronomePool)) return null;
+    const pool = [];
+    for (const entry of raw.metronomePool) {
+      if (pool.length >= METRONOME_POOL_MAX) break;
+      const move = cleanBattleMove(entry);
+      if (!move) return null;
+      pool.push(move);
+    }
+    ruleset.metronomePool = pool;
+  }
   return ruleset;
 }
 
@@ -749,18 +775,33 @@ function cleanBattleMove(raw) {
       || type === null || effect === null || chance === null) {
     return null;
   }
-  return { id, pp, power, accuracy, type, effect, chance };
+  const move = { id, pp, power, accuracy, type, effect, chance };
+  if (raw.maxPp !== undefined && raw.maxPp !== null) {
+    const maxPp = cleanInt(raw.maxPp, 0, PP_MAX);
+    if (maxPp === null) return null;
+    move.maxPp = maxPp;
+  }
+  return move;
 }
 
 /*
  * One battler, as its owner claims it.
  *
- * The sheet is **trusted for v1** and this is the file that says so plainly: a
- * modified client can send a level-100 team with 999 in every stat and the
- * intermediator will fight it. What sanitising buys is not honesty, it is
- * coherence -- every number is a number, in a range the formulas survive, and
- * the fight resolves and ends. Mid-fight cheating is what the intermediator
- * removes; the pre-fight sheet is the accepted residual surface.
+ * **Sheet trust is a locked decision**, not a v1 TODO. A modified client can
+ * send a level-100 team with 999 in every stat and the intermediator will
+ * fight it. What sanitising buys is not honesty, it is coherence -- every
+ * number is a number, in a range the formulas survive, and the fight resolves
+ * and ends. Mid-fight cheating is what the intermediator removes; the
+ * pre-fight sheet stays a client claim because the hub holds no ROM species
+ * table and never will (legal floor / no ROM bytes).
+ *
+ * **Bags (PROTOCOL 15).** Optional `bag` on the party message. The hub holds a
+ * stack on `item` choice accept and decrements only when the turn resolves, so
+ * cancel/unchose never needs a refund. Entries must be BattleSim-known
+ * (`itemEffect`), including vitamins (fight-local Stat Exp; client writebacks
+ * save.statExp). Counts and battler sheets remain a claim (inventing 99
+ * POTION or a god team on upload is the accepted bound). Absent `bag`
+ * means empty.
  *
  * `species` is prose rather than an id, and gets NAME_MAX like
  * Wire.partyEvent's, because what it is for is the name in "PIKACHU used ...",
@@ -815,6 +856,11 @@ function cleanBattleMon(raw) {
   if (raw.evs !== undefined && raw.evs !== null) {
     const evs = cleanStatBlock(raw.evs, 0, EV_MAX);
     if (!evs) return null;
+    if (raw.evs.hp !== undefined && raw.evs.hp !== null) {
+      const hp = cleanInt(raw.evs.hp, 0, EV_MAX);
+      if (hp === null) return null;
+      evs.hp = hp;
+    }
     mon.evs = evs;
   }
 
@@ -842,6 +888,12 @@ function cleanBattleMon(raw) {
     mon.types = types;
   }
 
+  if (raw.catchRate !== undefined && raw.catchRate !== null) {
+    const catchRate = cleanInt(raw.catchRate, 0, 255);
+    if (catchRate === null) return null;
+    mon.catchRate = catchRate;
+  }
+
   return mon;
 }
 
@@ -857,6 +909,46 @@ function cleanBattleMon(raw) {
 // check to make rather than this one's, because it is the only party that knows
 // which mode this battle is. Present-and-malformed is still refused, because a
 // side nobody can read is not the same thing as a side nobody stated.
+/*
+ * Optional battle bag on mmo.battle_party. Absent means empty. Array of
+ * `{id, count}` or a map of id → count; duplicates and oversize refuse.
+ */
+function cleanBattleBag(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (typeof raw !== 'object') return null;
+
+  const out = [];
+  const seen = new Set();
+  const push = (id, count) => {
+    if (seen.has(id) || out.length >= BATTLE_BAG_MAX) return false;
+    const effect = Effects.itemEffect(id);
+    if (!effect) return false;
+    seen.add(id);
+    out.push({ id, count });
+    return true;
+  };
+
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (entry === null || typeof entry !== 'object') return null;
+      const id = cleanId(entry.id);
+      const count = cleanInt(entry.count, 1, BATTLE_BAG_COUNT_MAX);
+      if (!id || count === null) return null;
+      if (!push(id, count)) return null;
+    }
+  } else {
+    for (const [key, value] of Object.entries(raw)) {
+      const id = cleanId(key);
+      const count = cleanInt(value, 1, BATTLE_BAG_COUNT_MAX);
+      if (!id || count === null) return null;
+      if (!push(id, count)) return null;
+    }
+  }
+
+  out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return out;
+}
+
 function cleanBattleParty(raw) {
   if (raw === null || typeof raw !== 'object') return null;
   const battle = cleanId(raw.battle);
@@ -881,6 +973,10 @@ function cleanBattleParty(raw) {
     mons.push(mon);
   }
   party.mons = mons;
+
+  const bag = cleanBattleBag(raw.bag);
+  if (!bag) return null;
+  party.bag = bag;
 
   return party;
 }
@@ -984,7 +1080,10 @@ function cleanBattleEvent(raw) {
 
   const event = { battle, seq, t: raw.t };
   if (raw.text !== undefined && raw.text !== null) {
-    const text = cleanText(raw.text, MESSAGE_MAX);
+    // Item events carry an id in `text`, not prose -- cleanText strips `_`.
+    const text = raw.t === 'item'
+      ? cleanId(raw.text)
+      : cleanText(raw.text, MESSAGE_MAX);
     if (text) event.text = text;
   }
   if (raw.amount !== undefined && raw.amount !== null) {
@@ -1010,6 +1109,17 @@ function cleanBattleEvent(raw) {
     // status and must not be stored as one.
     const status = cleanBattleStatus(raw.status);
     if (status) event.status = status;
+  }
+  if (raw.moves !== undefined && raw.moves !== null) {
+    if (Array.isArray(raw.moves)) {
+      const moves = [];
+      for (const entry of raw.moves) {
+        if (moves.length >= BATTLE_MOVE_MAX) break;
+        const move = cleanBattleMove(entry);
+        if (move) moves.push(move);
+      }
+      if (moves.length > 0) event.moves = moves;
+    }
   }
   return event;
 }
@@ -1051,6 +1161,11 @@ function cleanBattleOutcome(raw) {
     if (!reason) return null;
     result.reason = reason;
   }
+  if (raw.caught !== undefined && raw.caught !== null) {
+    const caught = cleanBattleMon(raw.caught);
+    if (!caught) return null;
+    result.caught = caught;
+  }
   return result;
 }
 
@@ -1081,7 +1196,7 @@ module.exports = {
   cleanProfile,
   cleanOutcome,
   cleanPoints,
-  cleanToken,
+  cleanPlayerId,
   cleanIdList,
   cleanBadgeSet,
   cleanStatBlock,
@@ -1092,6 +1207,7 @@ module.exports = {
   cleanBattleRuleset,
   cleanBattleMove,
   cleanBattleMon,
+  cleanBattleBag,
   cleanBattleParty,
   cleanBattleReady,
   cleanBattleChoice,
@@ -1105,7 +1221,7 @@ module.exports = {
   PARTY_MAX,
   OUTCOMES,
   RANK_MAX,
-  RANK_TOKEN_HEX,
+  PLAYER_ID_HEX,
   NAME_MAX,
   MESSAGE_MAX,
   MOTD_MAX,
@@ -1148,6 +1264,8 @@ module.exports = {
   EV_MAX,
   BATTLE_MON_MAX,
   BATTLE_MOVE_MAX,
+  BATTLE_BAG_MAX,
+  BATTLE_BAG_COUNT_MAX,
   COOP_BADGES_MAX,
   COOP_SIDE,
   COOP_FIGHTERS,

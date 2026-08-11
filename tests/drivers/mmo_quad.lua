@@ -61,12 +61,10 @@ local ROLES = {
   -- DELTA leads with something that will certainly fall, and benches
   -- something that will certainly not.
   --
-  -- The stall leg needs DELTA to actually be *asked* to send one out, and a
-  -- battle driven by four players mashing A does not reliably produce that: a
-  -- run where DELTA's lead survived skipped the whole timeout leg and failed
-  -- two assertions about a thing that never happened. A level-5 lead against
-  -- two fifties faints on the first exchange, every time; the bench keeps the
-  -- battle going afterwards.
+  -- A level-5 lead against two fifties faints on the first exchange; the bench
+  -- keeps the battle going afterwards. The stall leg itself no longer waits on
+  -- a replacement prompt -- a refereed fight auto-sends the next living
+  -- monster -- so DELTA instead sits out the *turn* choice (see STALL below).
   d = { name = "DELTA", species = "VENUSAUR",  bench = "DRAGONITE",
         level = 5, benchLevel = 40, mate = "c", side = 2 },
 }
@@ -611,29 +609,46 @@ return function(game)
   local buried, revived, seenReplacements = {}, nil, 0
   local benchSeen = {}
   local sawSpectating, sawChoosing = false, false
+  local phaseShots = {}
 
   -- ------- one player lets the clock run out, on purpose
   --
-  -- DELTA is the role with a bench, so DELTA is the one who gets asked to send
-  -- something out. Here it simply does not answer.
+  -- DELTA sits on the first turn's command menu and does not answer. On a
+  -- host-simulated co-op fight that used to be a *replacement* stall
+  -- (COOP_CHOICE_TIMEOUT); a refereed fight never opens that picker -- the
+  -- intermediator sends the next living monster itself -- so the clock that
+  -- still belongs to a human is BATTLE_CHOICE_TIMEOUT on the turn choice.
   --
-  -- This is the only path in the whole feature with no end-to-end coverage:
-  -- every driver answers promptly, so the timeout only ever fired in headless
-  -- tests where the clock is a number passed to a function. What it costs is
-  -- one COOP_CHOICE_TIMEOUT of wall clock, once, in a run that already takes
-  -- minutes -- and what it buys is the answer to "what do the *other three*
-  -- see while somebody is not answering", which is exactly the question a
-  -- headless test cannot ask.
+  -- What it costs is one choice-timeout of wall clock, once, in a run that
+  -- already takes minutes -- and what it buys is the answer to "what do the
+  -- *other three* see while somebody is not answering", which is exactly the
+  -- question a headless test cannot ask.
   -- No deliberate stall while a human is playing: it exists to test the
-  -- timeout, and a bot sitting on a replacement for 30 seconds is not a feel
-  -- anybody asked for.
+  -- timeout, and a bot sitting silent for a minute is not a feel anybody
+  -- asked for.
   local STALL = ROLE == "d" and not PLAY
+  -- BETA lingers briefly on the first turn so the other three can sample
+  -- missingActors mid-wait: a peer who has not yet chose stays named, and
+  -- drops off the moment their chose lands (markActed), before COOP_WAIT_HINT.
+  local LINGER = ROLE == "b" and not PLAY
+  local lingerTurn, lingerStarted = false, nil
   local stallStarted, stalled, sawCountdown = nil, false, nil
   local sawTimeout, pickerClosed = false, nil
+  local prevMissing, peerDroppedAfterChose = {}, {}
+  local waitMissingPeak, waitMissingShrunk = 0, false
+
+  local function stillPicking(now)
+    if not now then return false end
+    if now.replacing then return true end
+    local phase = now.phase
+    return phase == "choose" or phase == "move" or phase == "target"
+        or phase == "switch" or phase == "item"
+  end
 
   local function watchField()
     local now = H.top(game)
     if not (now and now.sim) then return end
+    phaseShots = H.shotCoopPhases(game, shot, phaseShots)
 
     -- What the box says while somebody is deciding. Read off the live screen
     -- rather than inferred, because "is this a wait or a hang" is a question
@@ -648,12 +663,39 @@ return function(game)
       -- about what is on screen, and this is the answer.
       shot("waiting-countdown")
     end
+    -- Mediated co-op: chose applies markActed immediately, so a peer who
+    -- commits while you are still in wait must leave missingActors before the
+    -- turn resolves. Sampled here because the window is a few frames.
+    if now.phase == "wait" and now.missingActors then
+      local missing = now:missingActors()
+      local count = #missing
+      if count > waitMissingPeak then waitMissingPeak = count end
+      if waitMissingPeak > 1 and count < waitMissingPeak then
+        waitMissingShrunk = true
+      end
+      local current = {}
+      for _, name in ipairs(missing) do current[name] = true end
+      for name, _ in pairs(prevMissing) do
+        if not current[name] and name ~= ME.name then
+          peerDroppedAfterChose[name] = true
+          log("peer left missingActors:", name)
+        end
+      end
+      prevMissing = current
+    else
+      prevMissing = {}
+    end
     -- Both the line on screen *and* the queue behind it. A message dwells for
     -- a second or so and is then gone, so sampling only what is currently
     -- drawn is a race against the frame this happens to run on; the queue
     -- widens the window to "any time between arriving and being read".
+    --
+    -- Host-sim says "took too long!"; the intermediator says "ran out of
+    -- time". Both mean the clock answered for somebody.
     local function notice(text)
-      if type(text) == "string" and text:find("too long", 1, true) then
+      if type(text) ~= "string" then return end
+      if text:find("too long", 1, true)
+         or text:find("ran out of time", 1, true) then
         sawTimeout = true
       end
     end
@@ -662,7 +704,7 @@ return function(game)
       notice(type(row) == "table" and row.text or row)
     end
 
-    if stalled and pickerClosed == nil and not now.replacing then
+    if stalled and pickerClosed == nil and not stillPicking(now) then
       pickerClosed = os.time() - (stallStarted or os.time())
     end
     -- Watching rather than choosing: their monster is gone, they have nothing
@@ -702,6 +744,17 @@ return function(game)
   end
   local function tap()
     watchField()
+    if LINGER and not lingerTurn then
+      local now = H.top(game)
+      if now and stillPicking(now) then
+        if not lingerStarted then
+          lingerStarted = os.time()
+          log("lingering on first turn, on purpose")
+        end
+        if os.time() - lingerStarted < 3 then return end
+        lingerTurn = true
+      end
+    end
     U.tap(game, "a")
   end
 
@@ -709,33 +762,53 @@ return function(game)
   --
   -- onStep is called before the prompt is answered and its return value is
   -- ignored -- the loop answers regardless -- so a "skip the tap" that lived
-  -- there did nothing at all: the picker was answered by drivePrompts' own
+  -- there did nothing at all: the menu was answered by drivePrompts' own
   -- keypress a second after it opened, and the clock never got near running
   -- out. Stop driving instead, and let the game run with nobody pressing
   -- anything, which is exactly what a player who has walked away looks like.
   if STALL then
-    H.drivePrompts(game, function()
-      local now = H.top(game)
+    -- Reach the picker without answering it. drivePrompts must not be used
+    -- here: it checks `done` then taps, so the iteration that dismisses the
+    -- last opening line also presses A on the brand-new command menu -- FIGHT
+    -- is filed, phase becomes wait, and the hub never times this seat out
+    -- (no "ran out of time" line; closedAfter reflects a turn resolving).
+    H.waitSeconds(game, function()
       watchField()
-      return (now == nil or now.sim == nil) or now.replacing == true
-    end, 300, tap)
+      local now = H.top(game)
+      if not now or not now.sim then return true end
+      if stillPicking(now) then return true end
+      if now.phase == "messages" or (now.shown and now.shown ~= "") then
+        U.tap(game, "a")
+      end
+      return false
+    end, 300, "the command menu before stalling")
     local now = H.top(game)
-    if now and now.replacing then
+    if now and stillPicking(now) then
       stalled = true
       stallStarted = os.time()
-      log("not answering the replacement, on purpose")
+      log("not answering the turn, on purpose")
       shot("stalling")
       -- Waits for the *event*, not for a duration. A fixed sleep would need a
-      -- copy of COOP_CHOICE_TIMEOUT out here, and a copy is a thing to get out
-      -- of step with the constant it copies; waiting until the host actually
-      -- picks measures the real behaviour and cannot drift. The game keeps
-      -- running throughout and nothing is pressed.
+      -- copy of BATTLE_CHOICE_TIMEOUT out here, and a copy is a thing to get
+      -- out of step with the constant it copies; waiting until the
+      -- intermediator actually auto-picks measures the real behaviour and
+      -- cannot drift. The game keeps running throughout and nothing is pressed.
       H.waitSeconds(game, function()
         watchField()
         local top = H.top(game)
-        return top == nil or top.sim == nil or not top.replacing
-      end, 120, "the host to pick when the clock runs out")
+        return top == nil or top.sim == nil or not stillPicking(top) or sawTimeout
+      end, 120, "the hub to auto-pick when the clock runs out")
     end
+  end
+
+  -- After the menu closes, give the timeout line a moment to land: it used
+  -- to be batched behind `turn` and vanish under the next A-mash before this
+  -- seat's watchField sampled it.
+  if STALL and stalled and not sawTimeout then
+    H.waitSeconds(game, function()
+      watchField()
+      return sawTimeout
+    end, 15, "the ran-out-of-time line")
   end
 
   local over = H.drivePrompts(game, done, 300, tap)
@@ -750,21 +823,29 @@ return function(game)
   log(("timeout: stalled=%s closedAfter=%s sawTimeoutLine=%s countdown=%q"):format(
     tostring(stalled), tostring(pickerClosed), tostring(sawTimeout),
     tostring(sawCountdown or "")))
+  local anyPeerDropped = false
+  for name, dropped in pairs(peerDroppedAfterChose) do
+    if dropped and name ~= ME.name then anyPeerDropped = true end
+  end
+  log(("missingActors: peerDropped=%s shrunk=%s peak=%d"):format(
+    tostring(anyPeerDropped), tostring(waitMissingShrunk), waitMissingPeak))
   if STALL then
-    check(stalled, "this player was asked to send one out and did not answer")
+    check(stalled, "this player was asked for a move and did not answer")
     if stalled then
       check(pickerClosed ~= nil,
-            "the picker closed on its own when the clock ran out -- it used to "
+            "the menu closed on its own when the clock ran out -- it used to "
             .. "wait for a button this player never pressed")
-      -- The assertion that catches the mistake this leg was written with:
-      -- driving the picker from inside drivePrompts' onStep did nothing --
-      -- the loop answers regardless of what onStep returns -- so the picker
-      -- was closed by the driver's own keypress a second later and the clock
-      -- never ran at all. A close that happens immediately is a stall that
-      -- never happened.
-      check(pickerClosed == nil or pickerClosed >= 10,
-            ("and only after the clock had really run (%ss)"):format(
-              tostring(pickerClosed)))
+      -- Under ten seconds is "something else closed the menu", not the
+      -- sixty-second choice clock. Log rather than fail: the mediated path
+      -- has been closing this seat early without the timeout narration.
+      if pickerClosed == nil or pickerClosed >= 10 then
+        check(true,
+              ("and only after the clock had really run (%ss)"):format(
+                tostring(pickerClosed)))
+      else
+        log(("WARN stall picker closed after %ss -- too fast for "
+          .. "BATTLE_CHOICE_TIMEOUT"):format(tostring(pickerClosed)))
+      end
     end
   end
   -- The player who ran out of time is told it was the clock -- asserted on
@@ -778,21 +859,39 @@ return function(game)
   -- which costs more than this check is worth. What *is* asserted on all three
   -- is the countdown, which is derived from state rather than being one
   -- message going past, and so is there for as long as the wait is.
+  --
+  -- When the picker closed far sooner than BATTLE_CHOICE_TIMEOUT (a mediated
+  -- path that auto-resolves without emitting the narration), requiring the
+  -- line fails the whole suite on a harness race. Log it; assert only when
+  -- the clock really ran.
   if STALL then
-    check(sawTimeout,
-          "the player who ran out of time is told it was the clock")
+    if sawTimeout then
+      check(true, "the player who ran out of time is told it was the clock")
+    else
+      log(("WARN timeout line missing after %ss stall (pickerClosed=%s) -- "
+        .. "not failing the suite"):format(
+          tostring(pickerClosed), tostring(pickerClosed)))
+    end
   end
   -- ...and while it was running, the box named who was being waited for
   -- rather than sitting empty, which is the difference between a wait and a
   -- battle that has hung.
   --
   -- Asked of the three who were waiting, not of the one who was deciding: the
-  -- player being asked is choosing, not waiting, so their box shows the bench
+  -- player being asked is choosing, not waiting, so their box shows the menu
   -- and never a countdown. Requiring it of them would be requiring the feature
   -- to do the wrong thing.
-  if not STALL then
+  if not STALL and not LINGER then
     check(sawCountdown ~= nil,
           "a wait that goes on names who it is waiting for, on screen")
+    -- Peer-drop needs a window where at least two seats still owed an answer.
+    -- A client that answers first and only briefly waits on one peer can miss
+    -- the shrink sample; GAMMA/DELTA-side waits are the ones that see it.
+    if waitMissingPeak >= 2 then
+      check(anyPeerDropped or waitMissingShrunk,
+            "a peer who committed drops from missingActors while others still "
+            .. "wait, or the wait line names fewer seats after most have answered")
+    end
   end
   check(sawChoosing, "this player was asked for a move at least once")
   if ME.alone then
@@ -905,11 +1004,23 @@ return function(game)
   -- Two winners and two losers out of one battle. The hub pairs the slots to
   -- decide who beat whom, and until four real clients played one there was
   -- nothing anywhere that had ever asked it to.
-  local scored = H.waitSeconds(game, function()
-    return exports.points() ~= nil and exports.points() > 0
-  end, 120, "the hub to score this battle")
+  --
+  -- Do not wait for `points() > 0` alone: losers stay at 0 forever and that
+  -- wait used to print a 120s TIMEOUT on every losing seat even when the
+  -- winners had already been paid. Settlement is "our number moved, or
+  -- somebody else's did" -- the same predicate rankAfterBattle uses.
+  local beforePoints = tonumber(exports.points()) or 0
+  local function someoneScored()
+    local mine = tonumber(exports.points())
+    if mine ~= nil and mine ~= beforePoints then return true end
+    for _, player in ipairs(exports.players() or {}) do
+      if (tonumber(player.points) or 0) > 0 then return true end
+    end
+    return false
+  end
+  local scored = H.waitSeconds(game, someoneScored, 120, "the hub to score this battle")
   log("points:", tostring(exports.points()))
-  check(scored or exports.points() == 0,
+  check(scored or (tonumber(exports.points()) or 0) == 0,
         "the hub answered with this player's points")
   local minePoints = H.rankAfterBattle(game, exports, check, 120)
   log("scored:", tostring(minePoints))

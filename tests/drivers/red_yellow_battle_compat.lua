@@ -1,8 +1,10 @@
 -- Red vs Yellow link-battle compatibility, against real ROM extracts.
 --
--- Driven by tests/drivers/run-red-yellow-battle-compat.sh, which builds the
--- link-surface slice of each ROM into a temp dir and passes the paths here.
--- Needs the engine checkout on package.path (run from its root).
+-- Driven by run-red-yellow-battle-compat.sh in this directory, which builds
+-- the link-surface slice of each ROM into a temp dir and passes the paths
+-- here. Lives under drivers/ so T4's mods/*/tests flat glob does not treat
+-- it as a headless suite (needs real ROM extracts). Needs the engine
+-- checkout on package.path (run from its root).
 --
 -- What it pins:
 --   * Sessions.canBattle allows the pairing when neither hello is
@@ -20,7 +22,7 @@ local yelDir = arg[2] or os.getenv("YELLOW_DATA_DIR")
 local modRoot = arg[3] or os.getenv("RBY_MMO_ROOT") or "mods/rby_mmo"
 
 if not (redDir and yelDir) then
-  io.stderr:write("usage: luajit tests/red_yellow_battle_compat.lua "
+  io.stderr:write("usage: luajit tests/drivers/red_yellow_battle_compat.lua "
     .. "<red-data-dir> <yellow-data-dir> [mod-root]\n")
   os.exit(2)
 end

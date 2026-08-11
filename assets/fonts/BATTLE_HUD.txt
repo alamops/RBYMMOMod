@@ -1,0 +1,13 @@
+battle_hud.png / battle_hud_meta.png — co-op status faces
+=======================================================
+
+Original matrix glyphs (A–Z, 0–9, and a few marks) drawn for this mod so
+status readouts can use solid 1-bit ink inside the 160×144 canvas.
+Not derived from any Pokémon ROM font sheet.
+
+  battle_hud.png       5×7  name row
+  battle_hud_meta.png  4×5  level + HP numbers (drawn 1:1 — do not scale)
+
+Packed as LÖVE ImageFont strips (magenta separators). Regenerate with:
+
+  python3 tools/gen_battle_hud_font.py

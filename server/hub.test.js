@@ -111,6 +111,11 @@ async function startHub(port, env) {
 // racing the limit: it briefly holds five sockets (three players plus two
 // that are refused and dropped), and a reaped socket is not guaranteed to
 // be out of the table before the next one dials in.
+function testPlayerId(seed) {
+  const crypto = require('node:crypto');
+  return crypto.createHash('sha256').update(String(seed)).digest('hex').slice(0, 32);
+}
+
 async function main() {
   const hub = await startHub(PORT, { RBY_MMO_MAX: '8' });
 
@@ -120,25 +125,38 @@ async function main() {
     const ann = new Client(PORT);
     await ann.ready();
     ann.send('mmo.hello', {
-      proto: PROTOCOL, name: 'ANN', sprite: 'SPRITE_RED',
+      proto: PROTOCOL, playerId: testPlayerId('ANN'), name: 'ANN', sprite: 'SPRITE_RED',
       map: 'PALLET', x: 5, y: 5, facing: 'down',
     });
     const annWelcome = await ann.expect('mmo.welcome');
-    ok(typeof annWelcome.id === 'string', 'welcome carries an id');
+    ok(annWelcome.id === testPlayerId('ANN'), 'welcome id is the persistent playerId');
+    ok(annWelcome.ranked === true, 'a valid playerId is ranked');
     ok(annWelcome.players.length === 0, 'first player sees an empty roster');
 
     const bob = new Client(PORT);
     await bob.ready();
     bob.send('mmo.hello', {
-      proto: PROTOCOL, name: 'BOB', sprite: 'SPRITE_BLUE',
+      proto: PROTOCOL, playerId: testPlayerId('BOB'), name: 'BOB', sprite: 'SPRITE_BLUE',
       map: 'PALLET', x: 6, y: 5, facing: 'up',
     });
     const bobWelcome = await bob.expect('mmo.welcome');
+    ok(bobWelcome.id === testPlayerId('BOB'), 'welcome id is the persistent playerId');
     ok(bobWelcome.players.length === 1, 'second player sees the first');
     ok(bobWelcome.players[0].name === 'ANN', 'and by name');
 
     const joined = await ann.expect('mmo.join');
     ok(joined.player.name === 'BOB', 'the first player is told about the second');
+
+    const dupe = new Client(PORT);
+    await dupe.ready();
+    dupe.send('mmo.hello', {
+      proto: PROTOCOL, playerId: testPlayerId('ANN'), name: 'ANN2', sprite: 'SPRITE_RED',
+      map: 'PALLET', x: 1, y: 1,
+    });
+    const dupeRefused = await dupe.expect('mmo.error');
+    ok(/already connected/i.test(dupeRefused.message),
+      'a second live connection with the same playerId is refused');
+    dupe.close();
 
     // ------- protocol gate
 
@@ -152,7 +170,7 @@ async function main() {
     // a name that sanitises to nothing cannot be used to join
     const nameless = new Client(PORT);
     await nameless.ready();
-    nameless.send('mmo.hello', { proto: PROTOCOL, name: '\0\0' });
+    nameless.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('\0\0'), name: '\0\0' });
     await nameless.expect('mmo.error');
     ok(true, 'an unusable name is refused');
     nameless.close();
@@ -208,7 +226,7 @@ async function main() {
     // broadcast, so a player already crossing the map fast should show it
     const dan = new Client(PORT);
     await dan.ready();
-    dan.send('mmo.hello', { proto: PROTOCOL, name: 'DAN', map: 'PALLET', x: 1, y: 1 });
+    dan.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('DAN'), name: 'DAN', map: 'PALLET', x: 1, y: 1 });
     const danWelcome = await dan.expect('mmo.welcome');
     const bobRow = danWelcome.players.find((p) => p.name === 'BOB');
     ok(!!bobRow, 'the roster snapshot includes the fast-moving player');
@@ -273,7 +291,7 @@ async function main() {
     // a third party must not be able to answer on Bob's behalf
     const cal = new Client(PORT);
     await cal.ready();
-    cal.send('mmo.hello', { proto: PROTOCOL, name: 'CAL', map: 'PALLET', x: 1, y: 1 });
+    cal.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('CAL'), name: 'CAL', map: 'PALLET', x: 1, y: 1 });
     const calWelcome = await cal.expect('mmo.welcome');
     cal.send('mmo.respond', { to: annWelcome.id, kind: 'trade', accept: true });
     await ann.expectSilence('mmo.session');
@@ -465,6 +483,10 @@ async function main() {
     ok(joinerPlan.allies.length === 2, 'the joiner is handed both allies');
     const told = await ann.expect('mmo.coop_joined');
     ok(told.id === bobWelcome.id, 'and the waiting player learns who joined');
+    ok(typeof told.plan === 'string' && /^c\d+$/.test(told.plan),
+       'and the hub battle id for mediation (c*)');
+    ok(told.plan === joinerPlan.id,
+       'matching the id the joiner was handed on coop_battle');
 
     // the offer is spent: a second join finds nothing left to take
     bob.send('mmo.coop_join', { to: annWelcome.id, battle: FIGHT });
@@ -538,7 +560,7 @@ async function clampTest() {
     for (let i = 0; i < 2; i++) {
       const player = new Client(port);
       await player.ready();
-      player.send('mmo.hello', { proto: PROTOCOL, name: 'C' + i });
+      player.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('C' + i), name: 'C' + i });
       await player.expect('mmo.welcome');
       joined.push(player);
     }
@@ -565,7 +587,7 @@ async function capTest() {
       const player = new Client(PORT + 1);
       await player.ready();
       player.send('mmo.hello', {
-        proto: PROTOCOL, name: 'P' + i, map: 'PALLET', x: i, y: 1, facing: 'down',
+        proto: PROTOCOL, playerId: testPlayerId('P' + i), name: 'P' + i, map: 'PALLET', x: i, y: 1, facing: 'down',
       });
       await player.expect('mmo.welcome');
       joined.push(player);
@@ -593,7 +615,7 @@ async function capTest() {
     await sleep(200);
     const late = new Client(PORT + 1);
     await late.ready();
-    late.send('mmo.hello', { proto: PROTOCOL, name: 'LATE', map: 'PALLET', x: 9, y: 9 });
+    late.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('LATE'), name: 'LATE', map: 'PALLET', x: 9, y: 9 });
     await late.expect('mmo.welcome');
     ok(true, 'a freed seat lets the next player in');
     late.close();
@@ -634,7 +656,7 @@ async function coopRelayTest() {
     const client = new Client(port);
     await client.ready();
     client.send('mmo.hello', {
-      proto: PROTOCOL, name, sprite: 'SPRITE_RED',
+      proto: PROTOCOL, playerId: testPlayerId(name), name, sprite: 'SPRITE_RED',
       map: 'PALLET', x: 5, y: 5, facing: 'down',
     });
     client.id = (await client.expect('mmo.welcome')).id;
@@ -835,7 +857,7 @@ async function coopRankTest() {
     const client = new Client(port);
     await client.ready();
     client.send('mmo.hello', {
-      proto: PROTOCOL, name, sprite: 'SPRITE_RED',
+      proto: PROTOCOL, playerId: testPlayerId(name), name, sprite: 'SPRITE_RED',
       map: 'PALLET', x: 5, y: 5, facing: 'down',
     });
     client.id = (await client.expect('mmo.welcome')).id;
@@ -919,6 +941,7 @@ async function coopRankTest() {
 
 function coopRankMathTest() {
   const { Board, teamPoints } = require('./lib/rank');
+  const pid = (name) => testPlayerId(name);
 
   // The two opponents must be *differently* rated and only one side's order
   // may change, or slot pairing would happen to match the same people up
@@ -927,11 +950,11 @@ function coopRankMathTest() {
   const NAMES = ['STRONG', 'WEAK', 'RIVAL', 'ROOKIE'];
   const played = (winners, losers) => {
     const board = new Board();
-    for (let i = 0; i < 6; i += 1) board.record('STRONG', 'PADDING', 0);
-    for (let i = 0; i < 3; i += 1) board.record('RIVAL', 'PADDING2', 0);
-    board.recordTeam(winners, losers, 500);
+    for (let i = 0; i < 6; i += 1) board.record(pid('STRONG'), pid('PADDING'), 0);
+    for (let i = 0; i < 3; i += 1) board.record(pid('RIVAL'), pid('PADDING2'), 0);
+    board.recordTeam(winners.map(pid), losers.map(pid), 500);
     const out = {};
-    for (const name of NAMES) out[name] = board.points(name);
+    for (const name of NAMES) out[name] = board.points(pid(name));
     return out;
   };
   assert.deepStrictEqual(
@@ -942,9 +965,11 @@ function coopRankMathTest() {
 
   // The side's strength is the pair's, not one member's.
   const carried = new Board();
-  for (let i = 0; i < 4; i += 1) carried.record('CARRY', 'FODDER', 0);
-  const beatCarried = carried.recordTeam(['R1', 'R2'], ['CARRY', 'FODDER'], 100);
-  const beatUnknowns = new Board().recordTeam(['R1', 'R2'], ['P1', 'P2'], 100);
+  for (let i = 0; i < 4; i += 1) carried.record(pid('CARRY'), pid('FODDER'), 0);
+  const beatCarried = carried.recordTeam(
+    [pid('R1'), pid('R2')], [pid('CARRY'), pid('FODDER')], 100);
+  const beatUnknowns = new Board().recordTeam(
+    [pid('R1'), pid('R2')], [pid('P1'), pid('P2')], 100);
   ok(beatCarried.loserSide > beatUnknowns.loserSide,
      'a pair carrying a rated player is worth more than a pair of unknowns');
   ok(beatCarried.winners[0].gained > beatUnknowns.winners[0].gained,
@@ -954,25 +979,27 @@ function coopRankMathTest() {
   const afternoon = new Board();
   const paid = [];
   for (let i = 1; i <= 5; i += 1) {
-    paid.push(afternoon.recordTeam(['P1', 'P2'], ['P3', 'P4'], 10 * i)
-      .winners[0].gained);
+    paid.push(afternoon.recordTeam(
+      [pid('P1'), pid('P2')], [pid('P3'), pid('P4')], 10 * i).winners[0].gained);
   }
   ok(paid[0] > 0 && paid[1] < paid[0] && paid[4] === 0,
      'running the same party battle all afternoon stops paying');
 
   // ...and one new face makes it worth playing again.
   const fresh = new Board();
-  for (let i = 0; i < 3; i += 1) fresh.recordTeam(['R1', 'R2'], ['R3', 'R4'], 0);
-  const stale = fresh.recordTeam(['R1', 'R2'], ['R3', 'R4'], 1);
-  const newcomer = fresh.recordTeam(['R1', 'R2'], ['R3', 'NEWBIE'], 2);
+  for (let i = 0; i < 3; i += 1) {
+    fresh.recordTeam([pid('R1'), pid('R2')], [pid('R3'), pid('R4')], 0);
+  }
+  const stale = fresh.recordTeam([pid('R1'), pid('R2')], [pid('R3'), pid('R4')], 1);
+  const newcomer = fresh.recordTeam([pid('R1'), pid('R2')], [pid('R3'), pid('NEWBIE')], 2);
   ok(newcomer.winners[0].gained > stale.winners[0].gained,
      'a new opponent on the other side is not somebody you have been farming');
 
-  ok(new Board().recordTeam(['X', 'Y'], ['Y', 'Z'], 0) === null,
+  ok(new Board().recordTeam([pid('X'), pid('Y')], [pid('Y'), pid('Z')], 0) === null,
      'a player on both sides is not a battle between four people');
-  ok(new Board().recordTeam(['X', 'X'], ['Y', 'Z'], 0) === null,
+  ok(new Board().recordTeam([pid('X'), pid('X')], [pid('Y'), pid('Z')], 0) === null,
      'and neither is the same name twice on one side');
-  ok(new Board().recordTeam([], ['Y', 'Z'], 0) === null, 'an empty side is not a side');
+  ok(new Board().recordTeam([], [pid('Y'), pid('Z')], 0) === null, 'an empty side is not a side');
   ok(teamPoints([{ points: 100 }, { points: 200 }]) === 150,
      'a side is worth the average of its members');
   ok(teamPoints([]) === 0, 'and an empty one is worth nothing');

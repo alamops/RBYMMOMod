@@ -1,24 +1,22 @@
 -- A 2-on-2 refereed by the intermediator, driven with no hub and no display.
 --
--- src/CoopBattle.lua carries two resolution sources now: the client-simulated
--- field it always had (src/CoopSim.lua, rolled on the host) and a refereed one
--- where every roll happens on the intermediator and this screen only draws.
--- Which of the two is running is decided by one flag, set by one message, so
--- what this suite pins is mostly about that seam:
+-- src/CoopBattle.lua is hub-refereed for coop_pvp / coop_npc (always). CoopSim
+-- still holds the field the screen draws from; the intermediator decides.
+-- What this suite pins is mostly about that seam:
 --
 --   * the uploads a co-op battle owes before it can be refereed, including the
 --     trainer's party the host sends for the npc seat -- and that a *real* hub
 --     accepts them and answers mmo.battle_ready;
 --   * that the host stops rolling the moment it does. This is the assertion
 --     worth having: two fields resolving the same turn is not a fallback, it is
---     a desync, and it would be invisible in play until the two disagreed.
+--     a desync, and it would be invisible in play until the two disagreed;
 --   * that a choice goes out as mmo.battle_choice and no `act` goes out beside
 --     it, because a second unrefereed opinion about a turn is the same bug seen
 --     on the wire;
 --   * that the event stream reaches the same screen the client-simulated path
 --     draws on -- HP, faints, send-outs and the result -- rather than a second
 --     renderer built beside it;
---   * and that a mode which is *not* refereed is left exactly as it was.
+--   * and that Config.MEDIATED_COOP is not a runtime off-switch.
 --
 -- Run: luajit mods/rby_mmo/tests/coop_mediated.lua
 --      (from the engine checkout root -- a co-op field is built out of the
@@ -81,6 +79,16 @@ local CoopSim = need("CoopSim")
 local CoopField = need("CoopField")
 local CoopBattle = need("CoopBattle")
 local Mediated = need("MediatedBattle")
+
+local function testPlayerId(seed)
+  local s = tostring(seed or "")
+  local out = {}
+  for i = 1, 32 do
+    local c = s:byte((i - 1) % #s + 1) or 97
+    out[i] = string.format("%x", (c + i) % 16)
+  end
+  return table.concat(out)
+end
 
 -- ------------------------------------------------------------------
 -- both co-op modes, whatever this build ships
@@ -333,17 +341,9 @@ do
   -- battle, which is why none of them says anything in a log.
   local before = #warns
 
-  local unmediated = screen({ slots = pvpSlots(), mine = 1, host = true,
-                              mode = "coop_pvp" })
-  local restore = Config.MEDIATED_COOP
-  Config.MEDIATED_COOP = { coop_pvp = false, coop_npc = false }
-  eq(unmediated:uploadMediated(), false,
-     "a mode the build does not referee uploads nothing")
-  Config.MEDIATED_COOP = restore
-
   local nameless = screen({ slots = pvpSlots(), mine = 1, host = true,
                             mode = nil })
-  eq(nameless:uploadMediated(), false, "nor does a battle with no mode at all")
+  eq(nameless:uploadMediated(), false, "a battle with no mode at all uploads nothing")
 
   local offline = screen({ slots = pvpSlots(), mine = 1, host = true,
                            mode = "coop_pvp" })
@@ -355,7 +355,7 @@ do
   unnamed.battleId = nil
   eq(unnamed:uploadMediated(), false, "nor one the hub never named")
 
-  eq(#warns, before, "and none of the four is worth a word in anybody's log")
+  eq(#warns, before, "and none of the three is worth a word in anybody's log")
 end
 
 do
@@ -371,8 +371,9 @@ do
   eq(broken:uploadMediated(), false, "an indescribable party does not upload")
   eq(broken.countSent(Wire.BATTLE_PARTY), 0, "and nothing goes out")
   check(#warns > before, "and this one is said out loud, with somewhere to look")
-  check(broken.mediated == false,
-        "leaving the client-simulated battle standing underneath")
+  check(broken.medFailed == true,
+        "mediation failed rather than falling back to host-sim")
+  check(broken.mediated == false, "and the fight is not marked refereed")
 end
 
 -- ------------------------------------------------------------------
@@ -394,6 +395,7 @@ do
     function peer:close() end
     local client = hub:accept(peer)
     hub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId(name),
       name = name, map = "PALLET", x = 5, y = 5, facing = "down" })
     peers[client.id] = peer
     return client
@@ -524,19 +526,18 @@ do
                         mode = "coop_npc", selfId = "ann" })
   host:uploadMediated()
 
-  -- First, that it *would* have. A guard that never had anything to stop is a
-  -- guard that proves nothing.
+  -- Before battle_ready, a refereed mode must not host-sim (BattleSim vs
+  -- ItemEffects diverge). Choices sit until the hub assembles the field.
   local before = watchSim(host)
   host.pending = {}
   host:commit({ slot = 1, kind = "move", move = 1, target = 3 })
   host:commit({ slot = 2, kind = "move", move = 1, target = 3 })
-  check(before.resolveTurn > 0,
-        "the client-simulated host does resolve a full turn")
-  check(before.npcAction > 0, "and does choose for the trainer")
-  eq(host.countSent(Wire.BATTLE_CHOICE), 0, "with no choice on the wire")
-  check(#host.relayed > 0, "and the other three told over the relay")
+  eq(before.resolveTurn, 0,
+     "before battle_ready, a refereed mode does not host-sim a turn")
+  eq(before.npcAction, 0, "and does not choose for the trainer locally")
+  eq(host.mediated, false, "ready has not arrived yet")
 
-  -- ...and then that it stops.
+  -- ...and once ready, the host still resolves nothing locally.
   local mediated = screen({ slots = npcSlots(), mine = 1, host = true,
                             mode = "coop_npc", selfId = "ann" })
   mediated:uploadMediated()
@@ -731,6 +732,37 @@ do
                        text = SPECIES_NAME })
   host:onBattleEvent({ battle = "cb1", seq = 5, t = "turn" })
   check(said(host, "fainted"), "a faint is narrated")
+  check(not host.replacing, "foe/NPC faint does not arm our replace picker")
+
+  -- Own seat faint with amount=1 (living bench): arm replace after the batch.
+  -- Pacing: messages phase first; replacing outranks choose once msgs drain.
+  do
+    local slots = npcSlots()
+    slots[1].party = { mon(60, 40), mon(60, 35) }
+    local replacer = screen({ slots = slots, mine = 1, host = true,
+                              mode = "coop_npc", selfId = "ann" })
+    replacer:onBattleReady({ battle = "cb1", mode = "coop_npc",
+      sides = { a = { "ann", "bob" }, b = { "ann" } } })
+    replacer.phase = "choose"
+    eq(replacer:onBattleEvent({ battle = "cb1", seq = 1, t = "faint",
+                                slot = 0, text = "FIXMON", amount = 1 }), true,
+       "own faint with amount=1 is accepted")
+    check(replacer.medMustReplace, "amount=1 sets medMustReplace")
+    check(not replacer.replacing, "picker waits until the turn closes the batch")
+    replacer:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
+    check(replacer.replacing, "turn arms the uncancellable replace picker")
+    check(said(replacer, "fainted"), "after faint narration is queued")
+    -- Empty-bench: amount omitted → no picker.
+    local last = screen({ slots = npcSlots(), mine = 1, host = true,
+                          mode = "coop_npc", selfId = "ann" })
+    last:onBattleReady({ battle = "cb1", mode = "coop_npc",
+      sides = { a = { "ann", "bob" }, b = { "ann" } } })
+    last.phase = "choose"
+    last:onBattleEvent({ battle = "cb1", seq = 1, t = "faint",
+                         slot = 0, text = "FIXMON" })
+    last:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
+    check(not last.replacing, "empty-bench faint (no amount) never opens replace")
+  end
 
   -- A send-out names a species and never a party position, so the position has
   -- to be found -- and it has to be found for the field to move at all. The
@@ -801,6 +833,29 @@ do
   eq(early:onBattleEvent({ battle = "cb1", seq = 1, t = "msg", text = "early" }),
      false, "an event that beats mmo.battle_ready is dropped")
   eq(#early.messages, 0, "and draws nothing")
+end
+
+-- ------------------------------------------------------------------
+-- 5b. mediated move animations
+-- ------------------------------------------------------------------
+
+do
+  local animScreen = screen({ slots = npcSlots(), mine = 1, host = true,
+                              mode = "coop_npc", selfId = "ann" })
+  animScreen:uploadMediated()
+  animScreen:onBattleReady({ battle = "cb1", mode = "coop_npc",
+    sides = { a = { "ann", "bob" }, b = { "ann" } } })
+
+  local rows = animScreen:medRows({ t = "anim", slot = 0, text = "FIX_TACKLE" })
+  eq(#rows, 1, "an anim event yields one row")
+  eq(rows[1].kind, "anim", "and it is an anim row for playEvents")
+  eq(rows[1].anim, "FIX_TACKLE", "carrying the move id")
+  eq(rows[1].from, 1, "with from mapped through medSlots")
+
+  eq(#animScreen:medRows({ t = "switch", slot = 0, text = SPECIES_NAME }), 0,
+     "switch is a narration no-op -- send follows")
+  eq(#animScreen:medRows({ t = "anim", text = "FIX_TACKLE" }), 0,
+     "anim without a mapped slot yields nothing")
 end
 
 -- ------------------------------------------------------------------
@@ -889,46 +944,149 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 7. and the client-simulated path is still there
+-- 7. waiting for the referee is not host-sim
 -- ------------------------------------------------------------------
 --
--- src/CoopSim.lua is not deleted and not bypassed: a mode this build does not
--- referee, and every fight on a hub too old to referee one, still runs the way
--- it always did. This is the regression that would be easiest to ship
--- unnoticed, because it only shows up where the new path is off.
+-- coop_pvp / coop_npc are always hub-refereed. Before battle_ready the host
+-- must not resolve locally (that was the fidelity fork). CoopSim remains for
+-- field layout and for suites that drive it directly.
 
 do
-  -- A hub too old to referee anything: the uploads went out and nothing came
-  -- back. This is the case that decides whether the cut is safe to ship, because
-  -- it is what every player on an unupgraded server gets.
   local host = screen({ slots = npcSlots(), mine = 1, host = true,
                         mode = "coop_npc", selfId = "ann" })
   host:uploadMediated()
   local calls = watchSim(host)
   host:commit({ slot = 1, kind = "move", move = 1, target = 3 })
   host:commit({ slot = 2, kind = "move", move = 1, target = 3 })
-  eq(host.mediated, false, "with nothing refereeing, the fight is not refereed")
-  check(calls.resolveTurn > 0, "and the host resolves the turn itself")
-  check(calls.npcAction > 0, "choosing for the trainer as it always did")
-  check(#host.relayed > 0, "telling the other three over the relay")
-  eq(host.countSent(Wire.BATTLE_CHOICE), 0, "with nothing sent to a referee")
+  eq(host.mediated, false, "with nothing refereeing yet, not marked ready")
+  eq(calls.resolveTurn, 0, "and the host does not resolve locally")
+  eq(calls.npcAction, 0, "or choose for the trainer")
+  eq(host.countSent(Wire.BATTLE_CHOICE), 0,
+     "choices are not on the battle wire until ready")
 
   host:openTurn()
-  check(host.turnOpened ~= nil, "the client-simulated deadline is still armed")
+  eq(host.turnOpened, nil, "no client-sim deadline while mediation is owed")
 
-  -- ...and a mode this build does not referee never uploads in the first place.
+  eq(CoopBattle.mediates("coop_pvp"), true, "coop_pvp is always refereed")
+  eq(CoopBattle.mediates("coop_npc"), true, "coop_npc is always refereed")
+  eq(CoopBattle.mediates("1v1"), false, "1v1 uses MediatedBattle, not this gate")
+  -- Mutating the docs table must not reopen host-sim for shipped modes.
   local restore = Config.MEDIATED_COOP
   Config.MEDIATED_COOP = { coop_pvp = false, coop_npc = false }
-  local legacy = screen({ slots = pvpSlots(), mine = 1, host = true,
-                          mode = "coop_pvp", selfId = "ann" })
-  eq(legacy:uploadMediated(), false, "a mode with its flag off uploads nothing")
-  local legacyCalls = watchSim(legacy)
-  legacy:commit({ slot = 1, kind = "move", move = 1, target = 3 })
-  legacy:commit({ slot = 2, kind = "move", move = 1, target = 3 })
-  legacy:commit({ slot = 3, kind = "move", move = 1, target = 1 })
-  legacy:commit({ slot = 4, kind = "move", move = 1, target = 1 })
-  check(legacyCalls.resolveTurn > 0, "and its host resolves the turn")
+  eq(CoopBattle.mediates("coop_pvp"), true,
+     "Config.MEDIATED_COOP is not a runtime off-switch")
   Config.MEDIATED_COOP = restore
+end
+
+-- ------------------------------------------------------------------
+-- 7b. wait line names who still owes a choice (chose events)
+-- ------------------------------------------------------------------
+--
+-- Mediated co-op has no `act` fan-out. The referee emits `chose` when a seat
+-- answers; the screen must apply it immediately so missingActors drops them.
+
+do
+  local watcher = screen({ slots = pvpSlots(), mine = 1, host = false,
+                           mode = "coop_pvp", selfId = "ann" })
+  watcher:uploadMediated()
+  watcher:onBattleReady({ battle = "cb1", mode = "coop_pvp",
+    sides = { a = { "ann", "bob" }, b = { "cal", "dee" } } })
+  watcher.phase = "wait"
+  watcher.waitShown = Config.COOP_WAIT_HINT + 1
+  watcher.acted = nil
+
+  local before = watcher:missingActors()
+  check(#before >= 1, "before any chose, somebody is still owed")
+
+  -- Peer Bob (field slot 1 -> screen index via medSlots) answered.
+  local bobField = watcher.medFields and watcher.medFields[2]
+  check(bobField ~= nil or (watcher.medSlots and watcher.medSlots[1] ~= nil),
+        "medMap placed Bob on a field slot")
+  local bobSlot = watcher.medSlots[1]
+  eq(watcher:onBattleEvent({
+    battle = "cb1", seq = 1, t = "chose",
+    slot = 1, side = "a", text = "BOB",
+  }), true, "chose is accepted")
+  eq(watcher.acted[bobSlot], true, "and marks that seat acted immediately")
+
+  local after = watcher:missingActors()
+  local stillBob = false
+  for _, name in ipairs(after) do
+    if name == "BOB" then stillBob = true end
+  end
+  eq(stillBob, false, "wait line no longer names the seat that chose")
+
+  local line = watcher:waitLine()
+  check(line ~= nil and not line:find("BOB", 1, true),
+        "the on-screen countdown omits who already answered")
+
+  eq(watcher:onBattleEvent({
+    battle = "cb1", seq = 2, t = "unchose",
+    slot = 1, side = "a", text = "BOB",
+  }), true, "unchose is accepted")
+  eq(watcher.acted[bobSlot], false, "and clears the acted mark")
+
+  local again = watcher:missingActors()
+  local bobBack = false
+  for _, name in ipairs(again) do
+    if name == "BOB" then bobBack = true end
+  end
+  eq(bobBack, true, "the seat is owed again after unchose")
+
+  watcher.acted = { [3] = true, [4] = true }
+  line = watcher:waitLine()
+  check(line ~= nil and line:find("BOB", 1, true),
+        "the wait line can name BOB again")
+end
+
+-- ------------------------------------------------------------------
+-- 7c. wait-line rotation and medFlush on empty batches
+-- ------------------------------------------------------------------
+
+do
+  local rot = screen({ slots = pvpSlots(), mine = 1, host = false,
+                       mode = "coop_pvp", selfId = "ann" })
+  rot:uploadMediated()
+  rot:onBattleReady({ battle = "cb1", mode = "coop_pvp",
+    sides = { a = { "ann", "bob" }, b = { "cal", "dee" } } })
+  rot.phase = "wait"
+  rot.acted = { [4] = true }
+  rot.waitShown = Config.COOP_WAIT_HINT + 1
+
+  local missing = rot:missingActors()
+  eq(#missing, 2, "two seats still owed for rotation")
+  local rotate = Config.COOP_WAIT_ROTATE or 3
+
+  local line = rot:waitLine()
+  check(line ~= nil and line:find(missing[1], 1, true),
+        "the wait line names the first missing seat")
+
+  rot.waitShown = math.max(Config.COOP_WAIT_HINT, rotate)
+  line = rot:waitLine()
+  check(line ~= nil and line:find("+1", 1, true),
+        "and the '+1' tail names the other missing seat when there is room")
+end
+
+do
+  local flush = screen({ slots = pvpSlots(), mine = 1, host = false,
+                          mode = "coop_pvp", selfId = "ann" })
+  flush:uploadMediated()
+  flush:onBattleReady({ battle = "cb1", mode = "coop_pvp",
+    sides = { a = { "ann", "bob" }, b = { "cal", "dee" } } })
+  flush:markActed(2)
+  flush.waitShown = Config.COOP_WAIT_HINT + 3
+  flush.medPending = {}
+
+  eq(flush:medFlush(), false, "an empty flush still returns false")
+  eq(flush.acted, nil, "but clears acted")
+  eq(flush.waitShown, 0, "and resets the wait countdown")
+
+  flush:markActed(2)
+  flush.waitShown = Config.COOP_WAIT_HINT + 3
+  flush.medSeq = 1
+  flush:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
+  eq(flush.acted, nil, "a turn with nothing pending clears acted too")
+  eq(flush.waitShown, 0, "and resets the wait countdown")
 end
 
 -- ------------------------------------------------------------------

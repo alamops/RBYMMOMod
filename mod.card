@@ -3,8 +3,7 @@ return {
     .. "trade and battle.",
   author = "alamo",
   tags = { "multiplayer", "mmo", "chat", "party", "trade", "pvp", "ranking",
-           "coop", "ui",
-           "experimental" },
+           "coop", "ui" },
 
   differences = {
     changed = {
@@ -143,12 +142,9 @@ return {
         .. "other, with all four having to agree. The battle itself is a real "
         .. "four-monster field -- one turn order over all four, a target per "
         .. "attack, and a side that loses only when both its trainers are out "
-        .. "-- with the engine's own damage, types, crits, status AND move "
-        .. "effects underneath it: the move that runs is the engine's own "
-        .. "performMove, so charge moves charge, SUBSTITUTE absorbs, recoil "
-        .. "recoils and stat stages move. All four commands are there -- "
-        .. "FIGHT, ITEM, SWITCH and RUN -- with items going through the "
-        .. "engine's own item effects. Against an NPC, RUN and a thrown ball "
+        .. "-- refereed by the hub's BattleSim (mirrored Lua/JS), not by a "
+        .. "host client's rolls. All four commands are there -- "
+        .. "FIGHT, ITEM, SWITCH and RUN. Against an NPC, RUN and a thrown ball "
         .. "are refused the way any trainer battle refuses them; against "
         .. "another party, RUN asks your partner first, and a consented flee "
         .. "ends the battle as the runners' loss.",
@@ -167,10 +163,11 @@ return {
         .. "16 with the oldest non-favorite evicted first.",
     },
     known = {
-      "One player simulates a co-op battle and the other three replay its "
-        .. "events, so a modified host could resolve a turn wrongly -- the "
-        .. "same trust the engine's own link host already takes, one player "
-        .. "wider.",
+      "MMO 1v1 and co-op fights are hub-refereed (BattleSim): clients upload "
+        .. "party and bag sheets, and a modified client can invent a "
+        .. "plausible team or item counts on upload. Bag proofs only stop "
+        .. "mid-fight free heals without a matching stack. Solo wild/trainer "
+        .. "fights stay on the local engine.",
       "A ranked 2-on-2 is scored as two matches paired by slot order, so "
         .. "every player gets one rated result but which opponent they are "
         .. "paired with is arbitrary. A co-op battle against an NPC scores "
@@ -190,13 +187,16 @@ return {
       "The player limit is 2-64, host included, and is clamped in three "
         .. "places so it cannot be set out of range by editing a file.",
       "Hosting opens a port with no authentication: anyone who can reach "
-        .. "it can join under any name, and positions are self-reported, so "
+        .. "it can join under any name. Positions are self-reported, so "
         .. "NEARBY chat is not an enforceable boundary. Host for people you "
-        .. "know. Idle connections, payload shape and chat rate are bounded; "
-        .. "identity is not.",
+        .. "know. Idle connections, payload shape and chat rate are bounded. "
+        .. "Identity is a file-backed playerId (see below), not a login -- "
+        .. "anyone who can read that file can steal the rating.",
       "Two implementations of one protocol -- Hub.lua in-game and hub.js "
-        .. "for a dedicated server -- can drift. Both are pinned by suites "
-        .. "asserting the same behaviours, but it is a real upkeep cost.",
+        .. "for a dedicated server -- can drift. Behaviour and constants are "
+        .. "pinned by twin suites (hub_protocol_parity, twin_parity, "
+        .. "battle_turn_parity); see docs/plans/hub-twin-parity.md. Still a "
+        .. "real upkeep cost on every protocol bump.",
       "Nameplates are positioned from the tile offset to your own player, "
         .. "because the mod API exposes no camera position. At a map edge "
         .. "smaller than the screen, where the camera stops scrolling but "
@@ -209,25 +209,15 @@ return {
         .. "both -- there is no party of one and no third seat. An invite "
         .. "that is never answered stays outstanding until one of them "
         .. "disconnects; nothing expires it.",
-      "A ranked result needs both players to report the same outcome, so a "
-        .. "player who quits mid-battle is scored as a draw for the side "
-        .. "still standing -- rage-quitting avoids the loss. Believing one "
-        .. "side alone is the larger hole: anyone could then mint wins "
-        .. "against a player who never connected.",
-      "A rating belongs to a trainer name on a hub, held by a claim ticket "
-        .. "the hub mints on the first visit and the player's copy carries "
-        .. "back. It is a ticket and not an account: it lives in the save "
-        .. "file and in rby_mmo_rank_tokens.json in the game's save folder, "
-        .. "and it crosses the same unencrypted link the join code does, so "
-        .. "anyone who can read either can take the name.",
-      "A claim is provisional until it is proved. Until a name has been "
-        .. "presented with its ticket, or has scored a ranked battle, the "
-        .. "claim follows whoever is connecting -- a minted ticket only says "
-        .. "one was posted, and a lost welcome used to lock a player out of "
-        .. "their own name forever. A name somebody is connected and ranked "
-        .. "under right now is not transferable, and neither is one that has "
-        .. "scored: from then on, somebody typing it without the ticket plays "
-        .. "normally and scores nothing.",
+      "Ranked fights are hub-refereed. Leaving mid-battle after reconnect "
+        .. "grace is a forfeit loss for the missing seat (not a dual-report "
+        .. "draw). Display names are cosmetic; the board keys on the "
+        .. "persistent player id PROTOCOL 16 mints once.",
+      "That player id lives in the save and in rby_mmo_player_id.json in the "
+        .. "game's save folder, and it crosses the same unencrypted link the "
+        .. "join code does -- anyone who can read either can steal the "
+        .. "rating. It is closer to an account than the old claim tickets, "
+        .. "and still not a real login.",
       "The locations `rby-mmo-hub players` prints are map ids with their "
         .. "underscores taken out (PALLET_TOWN reads as PALLET TOWN), not the "
         .. "names Kanto itself uses. The real ones live in the ROM, which a "
@@ -249,12 +239,11 @@ return {
         .. "HOOD in their catalog, so somebody wearing one shows up as RED "
         .. "on their screen -- the same fallback a character their ROM does "
         .. "not carry already gets.",
-      "The protocol has moved twice: the mid-game character change took it "
-        .. "from 6 to 7, and the party notifications took it from 7 to 8, so "
-        .. "copies from either side of one of those refuse each other at the "
-        .. "door and name both versions rather than connecting and going "
-        .. "quiet. The mod and its hub have to be updated together; there is "
-        .. "no degraded mode that connects without the newer messages.",
+      "The protocol is exact-match: this release speaks PROTOCOL 16. An older "
+        .. "mod or hub is refused at the door with a sentence that names both "
+        .. "versions rather than connecting and going quiet. The mod and its "
+        .. "hub have to be updated together; there is no degraded mode that "
+        .. "connects without the newer messages.",
       "A leaderboard already open on somebody's screen keeps the portrait it "
         .. "was drawn with when a player changes character, until it is next "
         .. "refreshed -- the same staleness the points on it already have. "

@@ -141,23 +141,19 @@ rm -f "$ADDR_FILE" "$ADDR_FILE.tmp" "$HOST_LOG" "$GUEST_LOG"
 rm -rf "$SYNC_DIR"
 mkdir -p "$SHOT_DIR" "$SYNC_DIR"
 
-# The mod ships experimental, so the loader leaves it disabled unless
-# options.mods has an entry for it. Each instance gets its own LOVE identity
-# (so the two do not fight over one save file), which means each needs its
-# own options.lua -- and options are read at boot, before a driver can run.
+# From 1.0.0 the mod is not experimental (on by default when present). Each
+# instance still gets its own LOVE identity (so the two do not fight over one
+# save file), which means each needs its own options.lua -- and options are
+# read at boot, before a driver can run. Drivers keep pinning rby_mmo = true
+# so a fresh identity is explicit regardless of loader defaults.
 #
-# The save directory is asked of LOVE rather than assumed. It is
-# ~/Library/Application Support/LOVE/<identity> on macOS but
-# ~/.local/share/love/<identity> on Linux, and guessing it wrong fails in
-# the most confusing way available: the game boots fine, the mod is simply
-# absent, and every later assertion blames the wrong thing.
 # Pin which other mods are on for this run, as space-separated ids:
 #
 #   MMO_WITH_MODS="DRAMATIC_SHAPE"     bash .../run-mmo-e2e.sh
 #   MMO_WITHOUT_MODS="DRAMATIC_SHAPE"  bash .../run-mmo-e2e.sh
 #
-# Both are needed, and for different reasons. An *experimental* mod is off
-# unless something enables it, so coexistence needs MMO_WITH_MODS. An
+# Both are needed, and for different reasons. An *experimental* foreign mod is
+# off unless something enables it, so coexistence needs MMO_WITH_MODS. An
 # ordinary one is on merely by being in mods/ -- a missing options entry
 # means enabled -- so proving this mod still works on the vanilla renderer
 # needs MMO_WITHOUT_MODS. Relying on what happens to be installed is how a

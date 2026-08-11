@@ -763,6 +763,16 @@ return function(game)
       return top ~= nil and top.sim ~= nil and #top.sim.slots == 4
     end, 120, "the 2-on-2 to come up")
     check(onField, "a four-slot co-op battle is on screen, over the LAN hub")
+    -- PROTOCOL 10: LAN Host intermediator must referee Party-vs-NPC too.
+    local refereed = H.awaitMediatedCoop(game, 60, "coop_npc")
+    check(refereed,
+          "the LAN 2-on-2 is hub-refereed (coop_npc), not host CoopSim")
+    do
+      local top = H.top(game)
+      log(("mediated coop: id=%s mode=%s medGaps=%s"):format(
+        tostring(top and top.battleId), tostring(top and top.mode),
+        tostring(top and top.medGaps)))
+    end
     if onField then
       -- The command grid, not the opening line. This shot is the shipped
       -- evidence of the 2x2 layout, and a fixed wait was photographing "2 on
@@ -774,17 +784,25 @@ return function(game)
       check(exports.coopDrawFailed() == false, "and it drew without error")
     end
 
+    local medGaps = 0
     local over = H.drivePrompts(game, function()
       local top = H.top(game)
       return top == nil or top.sim == nil
-    end, 300, function() U.tap(game, "a") end)
+    end, 300, function()
+      local top = H.top(game)
+      if H.isMediatedCoop(top) then
+        medGaps = tonumber(top.medGaps) or medGaps
+      end
+      U.tap(game, "a")
+    end)
     check(over, "the 2-on-2 runs to an end over the in-game hub")
     local sync = exports.coopSync()
-    log(("coop sync: gaps=%d desyncs=%d resyncs=%d"):format(
-      sync.gaps, sync.desyncs, sync.resyncs))
+    log(("coop sync: gaps=%d desyncs=%d resyncs=%d medGaps=%d"):format(
+      sync.gaps, sync.desyncs, sync.resyncs, medGaps))
     check(sync.gaps == 0, "with no turn lost by the Lua hub")
     check(sync.desyncs == 0, "and no drift between the two copies")
     check(sync.resyncs == 0, "and never needing the field re-sent")
+    check(medGaps == 0, "and no gaps in the mediated event stream")
 
     -- Frames, not seconds, and deliberately so -- this is not a wait on the
     -- guest the way a PHASE barrier is (see "phase barriers" in

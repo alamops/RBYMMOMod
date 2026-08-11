@@ -58,10 +58,14 @@ function toNumber(value) {
 //   over       -- the field is done; an OUTCOME is coming
 //   wait       -- the fight is paused on somebody, and who
 //   reconnect  -- a side that had dropped is back
+//   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
+//   unchose    -- cancel cleared a filed answer
+//   moves      -- mid-fight move-list sync after Transform/Mimic
 const KINDS = {
   msg: true, anim: true, damage: true, drain: true, faint: true,
   send: true, status: true, stat: true, switch: true, item: true,
   run: true, turn: true, over: true, wait: true, reconnect: true,
+  chose: true, unchose: true, moves: true,
 };
 
 // Every key an event may carry, and the type it carries. `battle` and `seq` are
@@ -100,17 +104,22 @@ const SHAPES = {
     status: 'set when a residual dealt it',
   },
   drain: { slot: true, side: true, amount: true, hp: true },
-  faint: { slot: true, side: true, text: true },
+  faint: { slot: true, side: true, text: true,
+    amount: '1 when the seat still has a living bench (mustReplace)' },
   send: { slot: true, side: true, hp: true, text: 'the species' },
   status: { slot: true, side: true, status: 'absent means cleared', text: true },
   stat: { slot: true, side: true, amount: true, text: true },
   switch: { slot: true, side: true, text: 'the species coming in' },
-  item: { slot: true, side: true, text: 'the item id' },
+  item: { slot: true, side: true, text: 'the item id',
+    amount: '1 when a vitamin applied (client save writeback)' },
   run: { slot: true, side: true, text: true },
   turn: { amount: 'the 1-based turn number' },
   over: { text: 'the reason token' },
   wait: { side: true, text: 'who is being waited on' },
   reconnect: { side: true, text: true },
+  chose: { slot: true, side: true, text: 'who answered' },
+  unchose: { slot: true, side: true, text: 'who answered' },
+  moves: { slot: true, side: true, moves: 'sanitised move list' },
 };
 
 // ------------------------------------------------------------------
@@ -129,6 +138,27 @@ function fieldSlot(side, index) {
   return base + Math.max(0, Math.floor(n) - 1);
 }
 
+const MOVE_FIELDS = {
+  id: 'string', pp: 'number', power: 'number', accuracy: 'number',
+  type: 'number', effect: 'number', chance: 'number',
+};
+
+function checkMove(move) {
+  if (!move || typeof move !== 'object') return false;
+  for (const key of Object.keys(MOVE_FIELDS)) {
+    if (typeof move[key] !== MOVE_FIELDS[key]) return false;
+  }
+  return true;
+}
+
+function checkMoves(value) {
+  if (!Array.isArray(value) || value.length < 1) return false;
+  for (const move of value) {
+    if (!checkMove(move)) return false;
+  }
+  return true;
+}
+
 // ------------------------------------------------------------------
 // construction
 // ------------------------------------------------------------------
@@ -136,6 +166,7 @@ function fieldSlot(side, index) {
 // undefined means "drop it": not whitelisted, or not a usable value for the
 // type this key carries.
 function coerce(key, value) {
+  if (key === 'moves') return undefined;
   if (!own(FIELDS, key)) return undefined;
   if (FIELDS[key] === 'number') {
     const n = toNumber(value);
@@ -158,9 +189,14 @@ function build(kind, fields) {
   const out = { t: kind };
   if (fields && typeof fields === 'object') {
     for (const key of Object.keys(fields)) {
-      if (key === 't' || key === 'battle' || key === 'seq') continue;
-      const clean = coerce(key, fields[key]);
-      if (clean !== undefined) out[key] = clean;
+      if (key === 'moves' && Array.isArray(fields.moves)) {
+        out.moves = fields.moves;
+      } else if (key === 't' || key === 'battle' || key === 'seq') {
+        // stamped by the turn machine
+      } else {
+        const clean = coerce(key, fields[key]);
+        if (clean !== undefined) out[key] = clean;
+      }
     }
   }
   return out;
@@ -179,8 +215,13 @@ function check(event) {
   }
   if (typeof event.seq !== 'number' || event.seq < 0) return [false, 'no seq'];
   for (const key of Object.keys(event)) {
-    if (!own(FIELDS, key)) return [false, `field not in the whitelist: ${key}`];
-    if (typeof event[key] !== FIELDS[key]) return [false, `wrong type for ${key}`];
+    if (key === 'moves') {
+      if (!checkMoves(event.moves)) return [false, 'bad moves list'];
+    } else if (!own(FIELDS, key)) {
+      return [false, `field not in the whitelist: ${key}`];
+    } else if (typeof event[key] !== FIELDS[key]) {
+      return [false, `wrong type for ${key}`];
+    }
   }
   return [true, null];
 }

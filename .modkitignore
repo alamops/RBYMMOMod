@@ -89,6 +89,8 @@ skills-lock.json
 # .env is machine-specific -- neither belongs in a distributed archive.
 tools/env.sh
 tools/play.sh
+# Regenerates assets/fonts/battle_hud.png; players need the PNG, not Pillow.
+tools/gen_battle_hud_font.py
 .env
 .env.example
 

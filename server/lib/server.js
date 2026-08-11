@@ -1037,13 +1037,25 @@ function start(options = {}) {
     // Both fire for a socket that errors, which is the normal case rather
     // than the exotic one; both sides of this are idempotent for exactly
     // that reason.
-    const done = () => {
+    const done = (why) => {
+      if (!sockets.has(socket)) return;
       sockets.delete(socket);
       limits.release(socket);
+      // Named so a mass drop in LOVE e2e shows up as "peer closed" vs an
+      // error vs a sweep destroy, rather than only as `- "NAME"` with no cause.
+      const who = (() => {
+        try {
+          const client = relay.get(id);
+          return (client && client.name) || id;
+        } catch (_) {
+          return id;
+        }
+      })();
+      log.info(`socket done for ${safe(who)}: ${why || 'close'}`);
       relay.drop(id);
     };
-    socket.on('error', done);
-    socket.on('close', done);
+    socket.on('error', (err) => done(`error:${(err && err.message) || err}`));
+    socket.on('close', (hadError) => done(hadError ? 'close_after_error' : 'peer_or_end'));
   }
 
   const server = net.createServer(onConnection);
@@ -1057,7 +1069,7 @@ function start(options = {}) {
 
   const sweeper = setInterval(() => {
     for (const doomed of limits.sweep()) {
-      log.debug(`closing a connection: ${doomed.reason}`);
+      log.info(`closing a connection: ${doomed.reason}`);
       doomed.key.destroy();
     }
     for (const socket of farewells) socket.destroy();

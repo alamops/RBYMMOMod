@@ -12,9 +12,9 @@
 #     clicking Import ROM. Setting POKEPORT_IMPORT_ROM makes the engine
 #     import and boot straight in -- that env var is the engine's own
 #     supported route, not a trick.
-#   * Enabling the mod. It ships experimental, so the loader leaves it off
-#     until something says otherwise; that would be a trip through the mod
-#     manager on every fresh save identity.
+#   * Enabling the mod when options pin it off. From 1.0.0 it is not
+#     experimental (on by default when present); drivers and this script still
+#     write options.lua so a fresh LOVE identity is explicit.
 #
 # ROM_PATH and ROM_VERSION come from mods/rby_mmo/.env -- see .env.example.
 

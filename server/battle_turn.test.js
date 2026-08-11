@@ -26,6 +26,9 @@
  *
  *   luajit tests/drivers/battle_turn_parity.lua . > tests/fixtures/battle_turn_parity.json
  *
+ * Regenerate whenever RNG draw sites move — item use / catch rolls are the
+ * usual suspects after BattleSim item work.
+ *
  * ROM-free by construction: every species, move and item named here is
  * invented, and the type charts are two-by-two integers.
  *
@@ -53,7 +56,7 @@ function mv(id, power, accuracy, type, pp) {
 }
 
 function mn(o) {
-  return {
+  const out = {
     species: o.species,
     level: o.level === undefined ? 20 : o.level,
     hp: o.hp,
@@ -71,6 +74,9 @@ function mn(o) {
     },
     moves: o.moves,
   };
+  if (o.catchRate !== undefined) out.catchRate = o.catchRate;
+  if (o.evs) out.evs = o.evs;
+  return out;
 }
 
 function build(opts) {
@@ -95,6 +101,26 @@ function drainInto(battle, into) {
 const SCENARIOS = [];
 const scenario = (name, run) => SCENARIOS.push({ name, run });
 
+const fightOrReplace = (battle, playerId) => {
+  const snap = battle.snapshot();
+  for (const f of snap.field || []) {
+    if (f.playerId === playerId) {
+      if (f.mustReplace) {
+        let slot = null;
+        for (let i = 0; i < (f.party || []).length; i += 1) {
+          if ((f.party[i] || 0) > 0) { slot = i; break; }
+        }
+        if (slot !== null) {
+          return battle.submitChoice(playerId, { action: 'switch', slot });
+        }
+        return false;
+      }
+      break;
+    }
+  }
+  return battle.submitChoice(playerId, { action: 'fight', move: 0 });
+};
+
 // 1. a deterministic KO fight between two equally fast sides, so the speed
 //    tie-break byte is spent on every turn and faint replacement runs.
 scenario('ko', (events) => {
@@ -115,8 +141,8 @@ scenario('ko', (events) => {
   drainInto(battle, events);
   for (let i = 0; i < 40; i += 1) {
     if (battle.outcome()) break;
-    battle.submitChoice('p1', { action: 'fight', move: 0 });
-    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    fightOrReplace(battle, 'p1');
+    fightOrReplace(battle, 'p2');
     drainInto(battle, events);
   }
   return battle;
@@ -458,6 +484,73 @@ scenario('coop', (events) => {
   return battle;
 });
 
+// 13. wild catch: MASTER_BALL ends without catch rolls; still a new mode and
+//     outcome.reason / caught digest the prior fixtures never touched.
+scenario('wild_master', (events) => {
+  const battle = build({
+    id: 'wm', mode: 'wild', seed: 51, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, spd: 80,
+          moves: [mv('splash', 0, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 40, hp: 10, spd: 10, catchRate: 255,
+          moves: [mv('splash', 0, 255, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'item', item: 'MASTER_BALL' });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// 14. wild POKE_BALL: catchAttempt draws from the RNG. Regenerate the fixture
+//     whenever catch/item draw sites move.
+scenario('wild_ball', (events) => {
+  const battle = build({
+    id: 'wb', mode: 'wild', seed: 88, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, spd: 80,
+          moves: [mv('splash', 0, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 100, hp: 25, spd: 10, catchRate: 45,
+          moves: [mv('splash', 0, 255, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'item', item: 'POKE_BALL' });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  if (!battle.outcome()) {
+    battle.submitChoice('p1', { action: 'item', item: 'MASTER_BALL' });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// 15. vitamins: fight-local Stat Exp on the sheet (+2560); Gen1 stat delta.
+scenario('vitamin', (events) => {
+  const battle = build({
+    id: 'vt', mode: '1v1', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', level: 100, maxHp: 200, spd: 80, atk: 40,
+          moves: [mv('splash', 0, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, spd: 10,
+          moves: [mv('splash', 0, 255, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'item', item: 'PROTEIN' });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -484,6 +577,26 @@ function snapshotDigest(battle) {
 // way they do on the Lua side, where both are simply nil.
 const canonical = (value) => JSON.parse(JSON.stringify(value));
 
+function slimOutcome(out) {
+  if (!out) return null;
+  const slim = {
+    battle: out.battle,
+    outcome: out.outcome,
+    reason: out.reason,
+  };
+  if (out.winners) slim.winners = out.winners;
+  if (out.losers) slim.losers = out.losers;
+  if (out.caught) {
+    slim.caught = {
+      species: out.caught.species,
+      level: out.caught.level,
+      hp: out.caught.hp,
+      maxHp: out.caught.maxHp,
+    };
+  }
+  return slim;
+}
+
 function runJs() {
   return SCENARIOS.map(({ name, run }) => {
     const events = [];
@@ -493,7 +606,7 @@ function runJs() {
       name,
       events,
       batches,
-      outcome: battle.outcome(),
+      outcome: slimOutcome(battle.outcome()),
       snapshot: snapshotDigest(battle),
     });
   });
@@ -657,8 +770,9 @@ test('a switch resolves before an item, and neither spends a roll', () => {
   const run = byName(jsRuns).get('switch_item');
   assert.deepStrictEqual(
     run.events.map((event) => event.t),
-    ['send', 'send', 'turn', 'switch', 'send', 'item', 'msg', 'turn'],
+    ['send', 'send', 'turn', 'chose', 'chose', 'switch', 'send', 'item', 'msg', 'msg', 'turn'],
   );
+  // 'restore' is an unknown id: announce + "But it failed", still no RNG draw.
   assert.strictEqual(run.snapshot.rngState, 13, 'the seed is untouched');
 });
 
@@ -675,14 +789,15 @@ test('sleep with no counter costs exactly the turn it wakes on', () => {
   );
 });
 
-test('a spent move is spent, and an empty one still resolves the turn', () => {
+test('a spent move is spent, and an empty one Struggles', () => {
   const used = byName(jsRuns).get('pp').events
     .filter((event) => event.t === 'anim')
     .map((event) => `${event.side}:${event.text}`);
   assert.deepStrictEqual(
     used,
-    ['a:last', 'b:empty', 'a:spare', 'b:empty', 'a:spare', 'b:empty'],
-    'the last PP is spent once, then the deadline picks the move that has some',
+    ['a:last', 'b:STRUGGLE', 'a:spare', 'b:STRUGGLE',
+     'a:spare', 'b:STRUGGLE', 'a:spare', 'b:STRUGGLE'],
+    'the last PP is spent once; an empty movepool Struggles thereafter',
   );
 });
 

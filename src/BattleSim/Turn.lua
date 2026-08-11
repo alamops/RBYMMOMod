@@ -17,9 +17,10 @@
 --   1. a speed tie-break byte, one per group of equally fast actors;
 --   2. one gate byte per actor whose monster has a gating status;
 --   3. one gate byte per actor whose monster is confused;
---   4. per move that is actually used: accuracy byte, crit byte, damage roll,
---      in that order, and none of them drawn when an earlier step ended the
---      move (a missed move draws no crit byte).
+--   4. per move that is actually used: accuracy byte, multihit-count byte
+--      (TWO_TO_FIVE only), crit byte, damage roll, side-chance byte
+--      (damaging hits only), in that order, and none of them drawn when an
+--      earlier step ended the move (a missed move draws no crit byte).
 --
 -- Nothing else rolls.  Residuals, switches, items and the clock are all
 -- deterministic, so a battle replays from its seed plus the choice log.
@@ -37,16 +38,23 @@
 --     reason `run`, and both sides running is a draw.  Mirrored: the policy
 --     reads the same from either seat, which is what stops "I fled" and "they
 --     fled" being two different stories.
---   * *Items* are a v1 stub.  The bag is not modelled, so an `item` choice
---     announces itself and spends the turn -- the honest shape of "you may
---     press it, it does nothing yet" -- rather than being silently refused,
---     which would strand a client whose menu offers the button.
---   * *Status moves* (power 0) narrate and do nothing.  There is no move
---     effect table on either runtime -- by design, since one would be the ROM
---     extract this repo may not contain -- so `effect` and `chance` ride along
---     unread until a data-driven effect layer exists.
---   * *Physical and special are not split*, because Wire's move has no
---     category field to split on: every damaging move uses atk against def.
+--   * *Items* apply a hand-authored Gen1 heal/status table by id (Potion,
+--     Full Restore, Revive, Ether, …) — locked twin of public amounts, not a
+--     port of engine ItemEffects. Unknown ids announce "But it failed" and
+--     still spend the turn. Bags are client claims (sheet trust locked; hub
+--     has no ROM inventory truth); PROTOCOL 15 holds/spends mid-fight only.
+--   * *Forced lock-in* (recharge, trap, thrash, …) fills choices on `_openTurn`
+--     so the mediated path never opens a menu the cartridge would withhold; a
+--     turn where *nobody* still owes waits for the next `tick` before resolving
+--     so clients see a turn boundary for wait-lines / anim pacing. Trap residual
+--     uses the first-hit damage store; the trapper emits continue narration +
+--     anim without re-rolling `_useMove`.
+--   * *Status moves* run through Effects.lua. Metronome picks from host-uploaded
+--     `metronomePool` on the ruleset (from MediatedBattle.snapshotRuleset);
+--     without a pool it says "But nothing happened".
+--   * *Physical / Special* follow Gen1 type categories via host-uploaded
+--     `specialTypes` on the ruleset (indices into the uploaded chart). Absent
+--     specialTypes keeps every damaging move on atk/def.
 --   * A *faint sends the next living monster in party order*, immediately and
 --     without asking.  The original stops and asks; asking here would mean a
 --     second kind of choice phase with its own deadline and its own forfeit
@@ -56,9 +64,13 @@
 --     order the moves used.  Only the order two burns tick in is at stake, and
 --     field order is the one both runtimes can reproduce without carrying the
 --     turn's sort into the end-of-turn step.
---   * A *timeout* auto-picks the first move with PP left, aimed at the first
---     living foe, and the fight continues.  It does not end the battle -- the
---     player who went to make a sandwich loses a turn, not the match.
+--   * A *timeout* / NPC auto-picks with bag cures & heals (≤50% HP), X-items,
+--     SE damage, status / setup reading, and SE bench switches (deterministic
+--     heuristics — not a full TrainerAI port) -- and the fight continues.  It
+--     does not end the battle -- the player who went to make a sandwich loses
+--     a turn, not the match.
+--   * *Struggle* when every move is out of PP: synthetic STRUGGLE (power 50,
+--     type normal), no PP spent, recoil floor(damage/4) minimum 1 after a hit.
 --   * The choice clock is *suspended while anybody is disconnected*, because
 --     the grace timer is already counting for that player and two deadlines
 --     racing would decide the match on whichever fired first.
@@ -77,12 +89,13 @@ local Damage   = need("BattleSim/Damage")
 local Accuracy = need("BattleSim/Accuracy")
 local Crit     = need("BattleSim/Crit")
 local Status   = need("BattleSim/Status")
+local Effects  = need("BattleSim/Effects")
 local Rng      = need("BattleSim/Rng")
 local Events   = need("BattleSim/events")
 
 local M = {}
 
-local floor, max = math.floor, math.max
+local floor, max, min = math.floor, math.max, math.min
 
 M.VERSION = 1
 
@@ -97,7 +110,7 @@ M.RESOLVE_TIMEOUT     = 30    -- Config.BATTLE_RESOLVE_TIMEOUT
 -- Below this the side-a member of a tied group moves first.
 M.TIE_BREAK_ROLL = 128
 
-M.MODES = { ["1v1"] = true, coop_npc = true, coop_pvp = true }
+M.MODES = { ["1v1"] = true, coop_npc = true, coop_pvp = true, wild = true }
 M.SIDES = { "a", "b" }
 
 -- Wire spells a condition as a three-letter token and Status.lua spells it as
@@ -121,6 +134,12 @@ local ACTIONS = {
   fight = true, item = true, switch = true, run = true, cancel = true,
 }
 
+-- Synthetic move used when every slot is out of PP.  Not in any move table.
+local STRUGGLE = {
+  id = "STRUGGLE", power = 50, accuracy = 255,
+  type = 0, effect = 0, chance = 0,
+}
+
 -- ------------------------------------------------------------------
 -- coercion
 -- ------------------------------------------------------------------
@@ -138,9 +157,12 @@ end
 
 local function copyMove(raw)
   if type(raw) ~= "table" then return nil end
+  local pp = max(0, int(raw.pp, 0))
+  local maxPp = max(pp, int(raw.maxPp, pp))
   return {
     id       = str(raw.id) or "move",
-    pp       = max(0, int(raw.pp, 0)),
+    pp       = pp,
+    maxPp    = maxPp,
     power    = max(0, int(raw.power, 0)),
     accuracy = max(0, int(raw.accuracy, 255)),
     type     = max(0, int(raw.type, 0)),
@@ -205,7 +227,68 @@ local function copyMon(raw, fallback)
   local turns = max(0, int(raw.statusTurns, 0))
   if status == "sleep" and turns == 0 then turns = 1 end
 
-  return {
+  local stagesRaw = type(raw.stages) == "table" and raw.stages or {}
+  local stages = {
+    atk = Effects.clampStage(stagesRaw.atk),
+    def = Effects.clampStage(stagesRaw.def),
+    spd = Effects.clampStage(stagesRaw.spd),
+    spc = Effects.clampStage(stagesRaw.spc),
+    acc = Effects.clampStage(stagesRaw.acc),
+    eva = Effects.clampStage(stagesRaw.eva),
+  }
+
+  local disable = nil
+  if type(raw.disable) == "table" then
+    disable = {
+      moveIndex = max(0, int(raw.disable.moveIndex, 0)),
+      turns = max(0, int(raw.disable.turns, 0)),
+    }
+  end
+
+  local charging = nil
+  if type(raw.charging) == "table" then
+    charging = {
+      moveIndex = max(1, int(raw.charging.moveIndex, 1)),
+      effect = max(0, int(raw.charging.effect, 0)),
+      targetSlot = int(raw.charging.targetSlot, nil),
+    }
+  end
+
+  local trapped = nil
+  if type(raw.trapped) == "table" then
+    trapped = {
+      turns = max(0, int(raw.trapped.turns, 0)),
+      damage = max(0, int(raw.trapped.damage, 0)),
+      fromSlot = int(raw.trapped.fromSlot, nil),
+    }
+  end
+
+  local thrashing = nil
+  if type(raw.thrashing) == "table" then
+    thrashing = {
+      turns = max(0, int(raw.thrashing.turns, 0)),
+      moveIndex = max(1, int(raw.thrashing.moveIndex, 1)),
+    }
+  end
+
+  local bide = nil
+  if type(raw.bide) == "table" then
+    bide = {
+      turns = max(0, int(raw.bide.turns, 0)),
+      stored = max(0, int(raw.bide.stored, 0)),
+      moveIndex = max(1, int(raw.bide.moveIndex, 1)),
+      targetSlot = int(raw.bide.targetSlot, nil),
+    }
+  end
+
+  local leechSeed = nil
+  if raw.leechSeed == true then
+    leechSeed = { fromSlot = nil }
+  elseif type(raw.leechSeed) == "table" then
+    leechSeed = { fromSlot = int(raw.leechSeed.fromSlot, nil) }
+  end
+
+  local out = {
     species     = str(raw.species) or "?",
     slot        = max(0, int(raw.slot, max(0, int(fallback, 0)))),
     level       = max(1, int(raw.level, 1)),
@@ -223,8 +306,81 @@ local function copyMon(raw, fallback)
     },
     types = copyTypes(raw.types),
     moves = moves,
+    stages = stages,
+    leechSeed = leechSeed,
+    disable = disable,
+    flinch = raw.flinch == true,
+    charging = charging,
+    invulnerable = raw.invulnerable == true,
+    mustRecharge = raw.mustRecharge == true,
+    trapped = trapped,
+    trapping = nil,
+    thrashing = thrashing,
+    raging = raw.raging == true,
+    rageMove = max(0, int(raw.rageMove, 0)),
+    bide = bide,
+    lastMoveIndex = max(0, int(raw.lastMoveIndex, 0)),
+    substitute = max(0, int(raw.substitute, 0)),
+    lightScreen = raw.lightScreen == true,
+    reflect = raw.reflect == true,
+    mist = raw.mist == true,
+    focusEnergy = raw.focusEnergy == true,
+    transformed = raw.transformed == true,
+    xAccuracy = raw.xAccuracy == true,
+    catchRate = max(0, min(255, int(raw.catchRate, 255))),
   }
+
+  -- Optional Stat Exp sheet (atk/def/spd/spc, optional hp). Absent keys stay 0
+  -- at vitamin time; present values are what HP_UP / PROTEIN / … mutate.
+  if type(raw.evs) == "table" then
+    local evs = {}
+    for _, key in ipairs({ "hp", "atk", "def", "spd", "spc" }) do
+      if raw.evs[key] ~= nil then
+        evs[key] = max(0, min(65535, int(raw.evs[key], 0)))
+      end
+    end
+    out.evs = evs
+  end
+  return out
 end
+
+local function copyBadges(raw)
+  if type(raw) ~= "table" then return nil end
+  local out, any = {}, false
+  for id, held in pairs(raw) do
+    if held and type(id) == "string" then out[id] = true; any = true end
+  end
+  if not any then return nil end
+  return out
+end
+
+-- Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
+-- shapes Wire.bag does: a list of {id,count} or a map.
+local function copyBag(raw)
+  if type(raw) ~= "table" then return nil end
+  local out, any = {}, false
+  local function put(id, count)
+    if type(id) ~= "string" or id == "" then return end
+    local n = int(count, 0)
+    if not n or n < 1 then return end
+    out[id] = (out[id] or 0) + n
+    any = true
+  end
+  if #raw > 0 or raw[1] ~= nil then
+    for _, entry in ipairs(raw) do
+      if type(entry) == "table" then put(entry.id, entry.count) end
+    end
+  else
+    for id, count in pairs(raw) do put(id, count) end
+  end
+  if not any then return nil end
+  return out
+end
+
+-- Default kit for coop_npc trainer seats with no uploaded bag (Gen1 gym-style).
+M.DEFAULT_NPC_BAG = {
+  POTION = 2, SUPER_POTION = 1, FULL_HEAL = 1, X_ATTACK = 1,
+}
 
 -- ------------------------------------------------------------------
 -- the battle
@@ -239,6 +395,14 @@ local function firstLiving(mons, skip)
     if mons[i].hp > 0 and i ~= skip then return i end
   end
   return nil
+end
+
+local function allPpEmpty(mon)
+  if #mon.moves == 0 then return true end
+  for i = 1, #mon.moves do
+    if mon.moves[i].pp > 0 then return false end
+  end
+  return true
 end
 
 local function activeMon(fighter)
@@ -271,7 +435,7 @@ function M.create(opts)
   if type(opts) ~= "table" then return nil, "battle needs an options table" end
 
   local mode = M.MODES[opts.mode] and opts.mode or "1v1"
-  local perSide = (mode == "1v1") and 1 or M.FIGHTERS_PER_SIDE
+  local perSide = (mode == "1v1" or mode == "wild") and 1 or M.FIGHTERS_PER_SIDE
 
   local self = setmetatable({
     id             = str(opts.id) or "battle",
@@ -279,6 +443,8 @@ function M.create(opts)
     seed           = int(opts.seed, 0),
     rng            = Rng.new(int(opts.seed, 0)),
     chart          = type(opts.chart) == "table" and opts.chart or nil,
+    specialTypes   = nil,
+    metronomePool  = nil,
     choiceTimeout  = max(0, int(opts.choiceTimeout, M.CHOICE_TIMEOUT)),
     reconnectGrace = max(0, int(opts.reconnectGrace, M.RECONNECT_GRACE)),
     resolveTimeout = max(0, int(opts.resolveTimeout, M.RESOLVE_TIMEOUT)),
@@ -293,6 +459,22 @@ function M.create(opts)
     result         = nil,
     resolveDeadline = nil,
   }, Battle)
+
+  if type(opts.specialTypes) == "table" then
+    local set = {}
+    for i = 1, #opts.specialTypes do
+      set[max(0, int(opts.specialTypes[i], 0))] = true
+    end
+    self.specialTypes = set
+  end
+  if type(opts.metronomePool) == "table" then
+    local pool = {}
+    for i = 1, #opts.metronomePool do
+      local move = copyMove(opts.metronomePool[i])
+      if move then pool[#pool + 1] = move end
+    end
+    if #pool > 0 then self.metronomePool = pool end
+  end
 
   local sides = type(opts.sides) == "table" and opts.sides or {}
   for _, side in ipairs(M.SIDES) do
@@ -326,6 +508,8 @@ function M.create(opts)
         index     = index,
         slot      = Events.fieldSlot(side, index),
         mons      = mons,
+        badges    = copyBadges(entry.badges),
+        bag       = copyBag(entry.bag),
         active    = firstLiving(mons),
         connected = true,
         graceEndsAt = nil,
@@ -362,6 +546,25 @@ function Battle:_emit(kind, fields)
   event.seq = self.seq
   self.buffer[#self.buffer + 1] = event
   return event
+end
+
+function Battle:_emitMoves(fighter, mon)
+  local moves = {}
+  for i = 1, #mon.moves do
+    local m = mon.moves[i]
+    moves[#moves + 1] = {
+      id = m.id or "move",
+      pp = max(0, int(m.pp, 0)),
+      power = max(0, int(m.power, 0)),
+      accuracy = max(0, int(m.accuracy, 255)),
+      type = max(0, int(m.type, 0)),
+      effect = max(0, int(m.effect, 0)),
+      chance = max(0, int(m.chance, 0)),
+    }
+  end
+  return self:_emit("moves", {
+    slot = fighter.slot, side = fighter.side, moves = moves,
+  })
 end
 
 function Battle:_say(text)
@@ -414,11 +617,135 @@ function Battle:_sidePlayers(side)
   return out
 end
 
--- A fighter owes a choice when it has something standing.  A player whose last
--- monster fainted in a 2v2 is a spectator for the rest of the fight, and
--- waiting on them would hang the turn.
+-- A fighter owes a choice when it has something standing, or when it must pick
+-- a replacement after a faint.  A player whose last monster fainted in a 2v2 is
+-- a spectator for the rest of the fight, and waiting on them would hang the
+-- turn.  Multi-turn volatiles auto-fill before the player is asked.
 function Battle:_owes(fighter)
-  return activeMon(fighter) ~= nil and fighter.choice == nil
+  if fighter.choice ~= nil then return false end
+  if fighter.mustReplace then
+    return firstLiving(fighter.mons) ~= nil
+  end
+  if activeMon(fighter) == nil then return false end
+  return true
+end
+
+-- Inject forced choices for charge release, recharge skip, thrash/rage repeat,
+-- and trap lock-in. Gen1 trapping: victim can't move; user stays locked (no
+-- menu) while residual damage (first-hit store) ticks — not a re-rolled fight.
+function Battle:_fillForcedChoices()
+  for _, fighter in ipairs(self.fighters) do
+    if fighter.choice ~= nil then goto continue end
+    local mon = activeMon(fighter)
+    if not mon then goto continue end
+
+    if mon.mustRecharge then
+      mon.mustRecharge = false
+      self:_say(mon.species .. " must recharge")
+      fighter.choice = { action = "skip" }
+      self:_emit("chose", {
+        slot = fighter.slot, side = fighter.side, text = fighter.name,
+      })
+      goto continue
+    end
+
+    if mon.bide then
+      if mon.bide.turns > 0 then
+        self:_say(mon.species .. " is storing energy")
+        fighter.choice = { action = "skip" }
+        self:_emit("chose", {
+          slot = fighter.slot, side = fighter.side, text = fighter.name,
+        })
+      else
+        local foe = self:_firstLivingFoe(fighter)
+        if foe then
+          self:_say(mon.species .. " unleashed energy")
+          fighter.choice = {
+            action = "fight",
+            move = mon.bide.moveIndex,
+            target = mon.bide.targetSlot or foe.slot,
+            bideRelease = true,
+          }
+          self:_emit("chose", {
+            slot = fighter.slot, side = fighter.side, text = fighter.name,
+          })
+        end
+      end
+      goto continue
+    end
+
+    if mon.trapped and mon.trapped.turns > 0 then
+      self:_say(mon.species .. " can't move")
+      fighter.choice = { action = "skip" }
+      self:_emit("chose", {
+        slot = fighter.slot, side = fighter.side, text = fighter.name,
+      })
+      goto continue
+    end
+
+    if mon.trapping and mon.trapping.turns > 0 then
+      -- Cartridge lock-in: no menu, residual still deals stored damage. Emit
+      -- continue narration + anim so the screen shows the trap going on —
+      -- do not re-enter _useMove (that would re-roll damage).
+      local move = mon.moves[mon.trapping.moveIndex]
+      local moveId = move and move.id or "attack"
+      self:_say(mon.species .. "'s " .. moveId .. " continues")
+      self:_emit("anim", {
+        slot = fighter.slot, side = fighter.side, text = moveId,
+      })
+      fighter.choice = { action = "skip" }
+      self:_emit("chose", {
+        slot = fighter.slot, side = fighter.side, text = fighter.name,
+      })
+      goto continue
+    end
+
+    if mon.charging then
+      local c = mon.charging
+      fighter.choice = {
+        action = "fight",
+        move = c.moveIndex,
+        target = c.targetSlot,
+      }
+      self:_emit("chose", {
+        slot = fighter.slot, side = fighter.side, text = fighter.name,
+      })
+      goto continue
+    end
+
+    if mon.thrashing and mon.thrashing.turns > 0 then
+      local foe = self:_firstLivingFoe(fighter)
+      if foe then
+        self:_say(mon.species .. " thrashing about")
+        fighter.choice = {
+          action = "fight",
+          move = mon.thrashing.moveIndex,
+          target = foe.slot,
+        }
+        self:_emit("chose", {
+          slot = fighter.slot, side = fighter.side, text = fighter.name,
+        })
+      end
+      goto continue
+    end
+
+    if mon.raging and mon.rageMove and mon.rageMove > 0 then
+      local foe = self:_firstLivingFoe(fighter)
+      if foe then
+        self:_say(mon.species .. "'s RAGE is building")
+        fighter.choice = {
+          action = "fight",
+          move = mon.rageMove,
+          target = foe.slot,
+        }
+        self:_emit("chose", {
+          slot = fighter.slot, side = fighter.side, text = fighter.name,
+        })
+      end
+    end
+
+    ::continue::
+  end
 end
 
 function Battle:_anyDisconnected()
@@ -439,6 +766,19 @@ end
 
 function Battle:_normaliseChoice(fighter, choice)
   local action = choice.action
+
+  -- Forced replacement: only a living bench switch is accepted.  Fight / item /
+  -- run would spend a turn the seat does not have a mon for.
+  if fighter.mustReplace then
+    if action ~= "switch" then return nil end
+    local slot = int(choice.slot, nil)
+    if slot == nil then return nil end
+    local target = partyIndexOf(fighter, slot)
+    local bench = fighter.mons[target]
+    if not bench or bench.hp <= 0 then return nil end
+    return { action = "switch", slot = target }
+  end
+
   local mon = activeMon(fighter)
   if not mon then return nil end
 
@@ -447,7 +787,26 @@ function Battle:_normaliseChoice(fighter, choice)
   if action == "item" then
     local item = str(choice.item)
     if not item then return nil end
-    return { action = "item", item = item }
+    -- A fighter with a bag sheet must actually hold the stack (hub/NPC auto).
+    -- Seats with no bag stay permissive so headless fixtures can still item.
+    if fighter.bag and not self:_bagHas(fighter, item) then return nil end
+    local effect = Effects.itemEffect(item)
+    local out = { action = "item", item = item }
+    if choice.slot ~= nil then
+      local slot = int(choice.slot, nil)
+      if slot == nil then return nil end
+      local target = partyIndexOf(fighter, slot)
+      if not fighter.mons[target] then return nil end
+      out.slot = target
+    end
+    if choice.move ~= nil then
+      local move = int(choice.move, nil)
+      if move == nil then return nil end
+      out.move = move + 1
+    elseif effect and effect.needsMove then
+      return nil
+    end
+    return out
   end
 
   if action == "switch" then
@@ -463,7 +822,13 @@ function Battle:_normaliseChoice(fighter, choice)
     local index = int(choice.move, nil)
     if index == nil then return nil end
     local move = mon.moves[index + 1]
-    if not move or move.pp <= 0 then return nil end
+    if not move then return nil end
+    -- One empty slot is refused; every slot empty means Struggle on any index.
+    if move.pp <= 0 and not allPpEmpty(mon) then return nil end
+    if mon.disable and mon.disable.turns > 0
+       and mon.disable.moveIndex == index + 1 then
+      return nil
+    end
 
     local targetFighter
     if choice.target ~= nil then
@@ -471,12 +836,22 @@ function Battle:_normaliseChoice(fighter, choice)
       -- A named target that is empty or on the chooser's own side is refused
       -- rather than redirected: redirecting would spend somebody's turn on a
       -- monster they did not pick, and the client can ask again.
-      if not targetFighter or targetFighter.side == fighter.side
-         or not activeMon(targetFighter) then
+      -- A seat mid-replace (mustReplace, no active yet) is still a legal aim:
+      -- switches resolve before fights, so the mon will be out when the move
+      -- lands.
+      if not targetFighter or targetFighter.side == fighter.side then
+        return nil
+      end
+      if not activeMon(targetFighter) and not targetFighter.mustReplace then
         return nil
       end
     else
       targetFighter = self:_firstLivingFoe(fighter)
+      if not targetFighter then
+        for _, foe in ipairs(self:_foes(fighter)) do
+          if foe.mustReplace then targetFighter = foe; break end
+        end
+      end
       if not targetFighter then return nil end
     end
     return { action = "fight", move = index + 1, target = targetFighter.slot }
@@ -500,19 +875,38 @@ function Battle:submitChoice(playerId, choice)
 
   if choice.action == "cancel" then
     if fighter.choice == nil then return false end
+    self:_emit("unchose", {
+      slot = fighter.slot, side = fighter.side, text = fighter.name,
+    })
     fighter.choice = nil
     return true
   end
 
   if fighter.choice ~= nil then return false end   -- one answer per turn
-  if not activeMon(fighter) then return false end
+  if fighter.mustReplace then
+    if choice.action ~= "switch" then return false end
+  elseif not activeMon(fighter) then
+    return false
+  end
 
   local normalised = self:_normaliseChoice(fighter, choice)
   if not normalised then return false end
 
   fighter.choice = normalised
+  -- Peers need this for the wait line: without it, only the chooser's own
+  -- client knows they answered (there is no `act` fan-out on the mediated path).
+  self:_emit("chose", {
+    slot = fighter.slot, side = fighter.side, text = fighter.name,
+  })
   self:_maybeResolve()
   return true
+end
+
+function Battle:_anyoneOwes()
+  for _, fighter in ipairs(self.fighters) do
+    if self:_owes(fighter) then return true end
+  end
+  return false
 end
 
 function Battle:_maybeResolve()
@@ -524,23 +918,311 @@ function Battle:_maybeResolve()
   return true
 end
 
--- The first move with PP left, at the first living foe.  Used when a deadline
--- passes: doing nothing would stall a clock that nothing else stops, and
--- picking the *best* move would be the sim playing somebody's turn well rather
--- than merely playing it.
+-- timeout/NPC pick: bag cures/heals/X-items when present, else SE / status /
+-- setup / switch. Deterministic twin of server/lib/battle/Turn.js — richer
+-- than a strongest-move heuristic, still not a full TrainerAI port.
+local AUTO_STATUS_PRI = {
+  [32] = 4, -- SLEEP_EFFECT
+  [67] = 3, -- PARALYZE_EFFECT
+  [66] = 2, -- POISON_EFFECT
+  [49] = 1, -- CONFUSION_EFFECT
+  [84] = 1, -- LEECH_SEED_EFFECT
+}
+-- Self-boost / screen / substitute. Values are stage keys, or true for flags.
+local AUTO_SETUP = {
+  [10] = "atk", [11] = "def", [12] = "spd", [13] = "spc",
+  [50] = "atk", [51] = "def", [52] = "spd", [53] = "spc",
+  [47] = true, -- FOCUS_ENERGY
+  [64] = true, -- LIGHT_SCREEN
+  [65] = true, -- REFLECT
+  [79] = true, -- SUBSTITUTE
+}
+-- Prefer stronger heals first (gym-AI style).
+local AUTO_HEAL_PREF = {
+  "FULL_RESTORE", "MAX_POTION", "HYPER_POTION", "SUPER_POTION",
+  "LEMONADE", "SODA_POP", "FRESH_WATER", "POTION",
+}
+local AUTO_STATUS_CURE = {
+  poison = { "FULL_RESTORE", "FULL_HEAL", "ANTIDOTE" },
+  toxic = { "FULL_RESTORE", "FULL_HEAL", "ANTIDOTE" },
+  burn = { "FULL_RESTORE", "FULL_HEAL", "BURN_HEAL" },
+  freeze = { "FULL_RESTORE", "FULL_HEAL", "ICE_HEAL" },
+  sleep = { "FULL_RESTORE", "FULL_HEAL", "AWAKENING" },
+  paralysis = { "FULL_RESTORE", "FULL_HEAL", "PARLYZ_HEAL" },
+}
+local AUTO_X_ITEM = {
+  { id = "X_ATTACK", stat = "atk" },
+  { id = "X_DEFEND", stat = "def" },
+  { id = "X_SPEED", stat = "spd" },
+  { id = "X_SPECIAL", stat = "spc" },
+  { id = "DIRE_HIT", flag = "focusEnergy" },
+  { id = "GUARD_SPEC", flag = "mist" },
+}
+
+function Battle:_effectivenessProduct(moveType, defender)
+  local percents = self:_typePercents(moveType, defender)
+  local eff = 1
+  for _, pct in ipairs(percents) do eff = eff * pct / 100 end
+  return eff
+end
+
+function Battle:_bagHas(fighter, itemId)
+  return fighter.bag and (fighter.bag[itemId] or 0) > 0
+end
+
+function Battle:_spendBag(fighter, itemId)
+  if not fighter.bag then return end
+  local n = fighter.bag[itemId]
+  if not n then return end
+  if n <= 1 then fighter.bag[itemId] = nil else fighter.bag[itemId] = n - 1 end
+end
+
+function Battle:_bestSeBench(fighter, defender)
+  if not defender then return nil end
+  local best, bestEff = nil, 1
+  for i = 1, #fighter.mons do
+    if i ~= fighter.active then
+      local bench = fighter.mons[i]
+      if bench and bench.hp > 0 then
+        local maxEff = 1
+        for j = 1, #bench.moves do
+          local m = bench.moves[j]
+          if m.pp > 0 and m.power > 0 then
+            local eff = self:_effectivenessProduct(m.type, defender)
+            if eff > maxEff then maxEff = eff end
+          end
+        end
+        if maxEff > 1 then
+          if not best or maxEff > bestEff or (maxEff == bestEff and i < best) then
+            best, bestEff = i, maxEff
+          end
+        end
+      end
+    end
+  end
+  return best
+end
+
+-- Bag item for the active mon: cure → heal ≤50% → X-item while stages flat.
+function Battle:_autoItemChoice(fighter, mon)
+  if not fighter.bag then return nil end
+
+  if mon.status then
+    local list = AUTO_STATUS_CURE[mon.status]
+    if list then
+      for _, id in ipairs(list) do
+        if self:_bagHas(fighter, id) then
+          return { action = "item", item = id, slot = fighter.active }
+        end
+      end
+    end
+  end
+
+  if mon.hp < mon.maxHp and mon.hp * 2 <= mon.maxHp then
+    for _, id in ipairs(AUTO_HEAL_PREF) do
+      if self:_bagHas(fighter, id) then
+        local effect = Effects.itemEffect(id)
+        if effect and (effect.heal or effect.healFull or effect.clearAllStatus) then
+          return { action = "item", item = id, slot = fighter.active }
+        end
+      end
+    end
+  end
+
+  local stagesFlat = mon.stages.atk <= 0 and mon.stages.def <= 0
+    and mon.stages.spd <= 0 and mon.stages.spc <= 0
+  if stagesFlat and not mon.focusEnergy and not mon.mist then
+    for _, row in ipairs(AUTO_X_ITEM) do
+      if self:_bagHas(fighter, row.id) then
+        if row.flag == "focusEnergy" and not mon.focusEnergy then
+          return { action = "item", item = row.id }
+        elseif row.flag == "mist" and not mon.mist then
+          return { action = "item", item = row.id }
+        elseif row.stat and (mon.stages[row.stat] or 0) <= 0 then
+          return { action = "item", item = row.id }
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
 function Battle:_autoChoice(fighter)
+  if fighter.mustReplace then
+    local foe = self:_firstLivingFoe(fighter)
+    local defender = foe and activeMon(foe)
+    local se = self:_bestSeBench(fighter, defender)
+    if se then return { action = "switch", slot = se } end
+    local next_ = firstLiving(fighter.mons)
+    if next_ then return { action = "switch", slot = next_ } end
+    return nil
+  end
+
   local mon = activeMon(fighter)
   if not mon then return nil end
-  local foe = self:_firstLivingFoe(fighter)
-  if not foe then return nil end
 
-  local pick
-  for i = 1, #mon.moves do
-    if mon.moves[i].pp > 0 then pick = i break end
+  if mon.charging then
+    local c = mon.charging
+    return { action = "fight", move = c.moveIndex, target = c.targetSlot }
   end
-  -- Out of PP everywhere is still a turn that has to resolve, so the first
-  -- move goes out on empty PP rather than the fight hanging.  Gen 1 would send
-  -- Struggle here; there is no move table to send it from.
+  if mon.mustRecharge then
+    return { action = "skip" }
+  end
+  if mon.bide then
+    if mon.bide.turns > 0 then
+      return { action = "skip" }
+    end
+    local foe = self:_firstLivingFoe(fighter)
+    if foe then
+      return {
+        action = "fight",
+        move = mon.bide.moveIndex,
+        target = mon.bide.targetSlot or foe.slot,
+        bideRelease = true,
+      }
+    end
+  end
+  if mon.trapped and mon.trapped.turns > 0 then
+    return { action = "skip" }
+  end
+  if mon.trapping and mon.trapping.turns > 0 then
+    return { action = "skip" }
+  end
+  if mon.thrashing and mon.thrashing.turns > 0 then
+    local foe = self:_firstLivingFoe(fighter)
+    if foe then
+      return {
+        action = "fight",
+        move = mon.thrashing.moveIndex,
+        target = foe.slot,
+      }
+    end
+  end
+  if mon.raging and mon.rageMove and mon.rageMove > 0 then
+    local foe = self:_firstLivingFoe(fighter)
+    if foe then
+      return { action = "fight", move = mon.rageMove, target = foe.slot }
+    end
+  end
+
+  local foe = self:_firstLivingFoe(fighter)
+  if not foe then
+    for _, f in ipairs(self:_foes(fighter)) do
+      if f.mustReplace then foe = f; break end
+    end
+  end
+  if not foe then return nil end
+  local defender = activeMon(foe)
+  if not defender then
+    local pick = 1
+    for i = 1, #mon.moves do
+      if mon.moves[i].pp > 0 then pick = i; break end
+    end
+    return { action = "fight", move = pick, target = foe.slot }
+  end
+
+  local itemPick = self:_autoItemChoice(fighter, mon)
+  if itemPick then return itemPick end
+
+  local foeBoosted = (defender.stages.atk or 0) >= 2
+    or (defender.stages.def or 0) >= 2
+    or (defender.stages.spd or 0) >= 2
+    or (defender.stages.spc or 0) >= 2
+    or defender.focusEnergy
+  local foeSub = (defender.substitute or 0) > 0
+  local weSlower = self:_speedOf(fighter, mon) < self:_speedOf(foe, defender)
+
+  -- Critical HP: SE retreat (heal already tried via bag).
+  if mon.hp * 4 <= mon.maxHp then
+    local se = self:_bestSeBench(fighter, defender)
+    if se then return { action = "switch", slot = se } end
+  end
+
+  -- Behind a boosted / subbed foe at mid-low HP: prefer an SE bench mon.
+  if (foeBoosted or foeSub) and mon.hp * 2 <= mon.maxHp then
+    local se = self:_bestSeBench(fighter, defender)
+    if se then return { action = "switch", slot = se } end
+  end
+
+  local function disabled(i)
+    return mon.disable and mon.disable.turns > 0 and mon.disable.moveIndex == i
+  end
+
+  local pick, pickEff, pickPow = nil, -1, -1
+  for i = 1, #mon.moves do
+    local m = mon.moves[i]
+    if m.pp > 0 and m.power > 0 and not disabled(i) then
+      local eff = self:_effectivenessProduct(m.type, defender)
+      if not pick or eff > pickEff
+         or (eff == pickEff and m.power > pickPow)
+         or (eff == pickEff and m.power == pickPow and i < pick) then
+        pick, pickEff, pickPow = i, eff, m.power
+      end
+    end
+  end
+
+  if (not pick) or pickEff == 0 then
+    local se = self:_bestSeBench(fighter, defender)
+    if se then return { action = "switch", slot = se } end
+  end
+
+  if pick and pickEff > 1 then
+    return { action = "fight", move = pick, target = foe.slot }
+  end
+
+  -- Status fails against a Substitute; skip it and trade damage instead.
+  if not defender.status and not foeSub then
+    local statusPick, statusPri = nil, -1
+    for i = 1, #mon.moves do
+      local m = mon.moves[i]
+      if m.pp > 0 and not disabled(i) and m.power == 0 then
+        local pri = AUTO_STATUS_PRI[m.effect]
+        if pri and (pri > statusPri
+                    or (pri == statusPri and (not statusPick or i < statusPick))) then
+          statusPick, statusPri = i, pri
+        end
+      end
+    end
+    if statusPick and (weSlower or foeBoosted or not pick or pickEff <= 1) then
+      return { action = "fight", move = statusPick, target = foe.slot }
+    end
+  end
+
+  local stagesFlat = mon.stages.atk <= 0 and mon.stages.def <= 0
+    and mon.stages.spd <= 0 and mon.stages.spc <= 0
+  -- Do not set up into a boosted foe, behind a substitute, or while slower
+  -- at mid-low HP — hit or switch instead.
+  if stagesFlat and not mon.focusEnergy and not foeBoosted and not foeSub
+     and not (weSlower and mon.hp * 2 <= mon.maxHp) then
+    local setupPick = nil
+    for i = 1, #mon.moves do
+      local m = mon.moves[i]
+      if m.pp > 0 and not disabled(i) and m.power == 0 then
+        local kind = AUTO_SETUP[m.effect]
+        if kind == true or (type(kind) == "string" and (mon.stages[kind] or 0) <= 0) then
+          if not setupPick or i < setupPick then setupPick = i end
+        end
+      end
+    end
+    if setupPick then
+      return { action = "fight", move = setupPick, target = foe.slot }
+    end
+  end
+
+  if not (pick and pickEff > 0) then
+    pick, pickPow = nil, -1
+    for i = 1, #mon.moves do
+      local m = mon.moves[i]
+      if m.pp > 0 and not disabled(i) then
+        if not pick or m.power > pickPow
+           or (m.power == pickPow and i < pick) then
+          pick, pickPow = i, m.power
+        end
+      end
+    end
+  end
+
   pick = pick or 1
   if not mon.moves[pick] then return nil end
   return { action = "fight", move = pick, target = foe.slot }
@@ -552,8 +1234,8 @@ end
 -- connection behind it, so without this the referee would wait out the whole
 -- choice deadline every turn and then auto-pick anyway -- a minute a turn, for a
 -- decision nothing was ever going to make.  It is deliberately the *same* pick
--- the timeout files rather than a second, cleverer one: the trainer plays a turn
--- rather than playing it well, and both runtimes reproduce it byte for byte.
+-- the timeout files rather than a second, cleverer one: both runtimes reproduce
+-- it byte for byte (bag / SE / status / setup / switch heuristics above).
 --
 -- Answers true when a choice was actually filed, so a caller can loop until the
 -- machine stops owing.  Filing one may resolve the turn and open the next, which
@@ -563,11 +1245,14 @@ function Battle:autoPick(playerId)
   local fighter = self.byId[str(playerId) or ""]
   if not fighter then return false end
   if fighter.choice ~= nil then return false end
-  if not activeMon(fighter) then return false end
+  if not fighter.mustReplace and not activeMon(fighter) then return false end
 
   local auto = self:_autoChoice(fighter)
   if not auto then return false end
   fighter.choice = auto
+  self:_emit("chose", {
+    slot = fighter.slot, side = fighter.side, text = fighter.name,
+  })
   self:_maybeResolve()
   return true
 end
@@ -579,14 +1264,25 @@ end
 function Battle:_openTurn()
   self.phase = "choice"
   self.resolveDeadline = nil
+  self.forcedPending = false
   for _, fighter in ipairs(self.fighters) do fighter.choice = nil end
   self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
   self:_emit("turn", { amount = self.turn })
+  self:_fillForcedChoices()
+  -- When every living seat is forced, do not resolve in this same call: the
+  -- turn event has to reach clients before the next resolve dumps more events
+  -- (wait lines and anim pacing). tick() advances the chain one step.
+  if not self:_anyoneOwes() then
+    self.forcedPending = true
+    self.deadline = nil
+  end
 end
 
-function Battle:_speedOf(mon)
-  if mon.status == "paralysis" then return Status.paralysisSpeed(mon.stats.spd) end
-  return mon.stats.spd
+function Battle:_speedOf(fighter, mon)
+  local spd = Effects.badgeBoost(mon.stats.spd, "spd", fighter.badges)
+  spd = Effects.applyStage(spd, mon.stages.spd)
+  if mon.status == "paralysis" then return Status.paralysisSpeed(spd) end
+  return spd
 end
 
 -- chart[atkType + 1][defType + 1], one percent per defender type, because
@@ -671,6 +1367,25 @@ function Battle:_resolveSwitches()
       local mon = fighter.mons[choice.slot]
       if mon and mon.hp > 0 then
         fighter.active = choice.slot
+        fighter.mustReplace = nil
+        mon.charging = nil
+        mon.invulnerable = false
+        mon.thrashing = nil
+        mon.raging = false
+        mon.rageMove = 0
+        mon.trapped = nil
+        mon.trapping = nil
+        mon.bide = nil
+        mon.substitute = 0
+        mon.lightScreen = false
+        mon.reflect = false
+        mon.mist = false
+        mon.focusEnergy = false
+        mon.transformed = false
+        mon.xAccuracy = false
+        mon.leechSeed = nil
+        mon.disable = nil
+        self:_clearTrapsFrom(fighter.slot)
         self:_emit("switch", { slot = fighter.slot, side = fighter.side,
                                text = mon.species })
         self:_emit("send", { slot = fighter.slot, side = fighter.side,
@@ -680,13 +1395,264 @@ function Battle:_resolveSwitches()
   end
 end
 
+function Battle:_clearTrapsFrom(slot)
+  for _, fighter in ipairs(self.fighters) do
+    local mon = activeMon(fighter)
+    if mon and mon.trapped and mon.trapped.fromSlot == slot then
+      mon.trapped = nil
+    end
+    if mon and mon.trapping and mon.trapping.targetSlot == slot then
+      mon.trapping = nil
+    end
+  end
+end
+
 function Battle:_resolveItems()
   for _, fighter in ipairs(self.fighters) do
+    if self.result then return end
     local choice = fighter.choice
     if choice and choice.action == "item" then
-      self:_emit("item", { slot = fighter.slot, side = fighter.side,
-                           text = choice.item })
+      local effect = Effects.itemEffect(choice.item)
+      -- Vitamins apply before the `item` event so `amount=1` can mean "Stat Exp
+      -- writeback is owed"; a failed vitamin still spends the bag stack (Gen1)
+      -- but must not bump save.statExp on the client.
+      local vitaminApplied, vitaminMon, vitaminResult = false, nil, nil
+      if effect and effect.vitamin then
+        local partyIdx = choice.slot or fighter.active
+        local mon = fighter.mons[partyIdx]
+        if mon and mon.hp > 0 then
+          local result = Effects.applyVitamin(mon, choice.item)
+          if result then
+            vitaminApplied, vitaminMon, vitaminResult = true, mon, result
+          end
+        end
+      end
+      local itemEv = { slot = fighter.slot, side = fighter.side, text = choice.item }
+      if vitaminApplied then itemEv.amount = 1 end
+      self:_emit("item", itemEv)
       self:_say(fighter.name .. " used an item")
+      -- Spend after the announce, win or fail (Gen1 bag stack). noConsume
+      -- (Poké Flute) and seats with no bag sheet are left alone.
+      if not (effect and effect.noConsume) then
+        self:_spendBag(fighter, choice.item)
+      end
+      if not effect then
+        self:_say("But it failed")
+      elseif effect.ball then
+        if not Effects.isWildMode(self.mode) then
+          self:_say("But it failed")
+        else
+          local foe = self:_firstLivingFoe(fighter)
+          local target = foe and activeMon(foe)
+          if not target then
+            self:_say("But it failed")
+          else
+            local caught, shakes = Effects.catchAttempt(choice.item, target, self.rng)
+            if shakes and shakes > 0 and not caught then
+              self:_say("The ball shook")
+            end
+            if caught then
+              self:_say("Gotcha")
+              local finish = self:_finish("win", self:_sidePlayers(fighter.side),
+                self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch")
+              local sheet = Effects.caughtSheet(target)
+              if finish and sheet then finish.caught = sheet end
+            else
+              self:_say("It broke free")
+            end
+          end
+        end
+      elseif effect.pokeDoll then
+        if Effects.isWildMode(self.mode) then
+          self:_say("The wild pokemon ran away")
+          self:_finish("win", self:_sidePlayers(fighter.side),
+            self:_sidePlayers(fighter.side == "a" and "b" or "a"), "run")
+        else
+          self:_say("But it failed")
+        end
+      elseif effect.vitamin then
+        if not vitaminApplied then
+          self:_say("But it failed")
+        else
+          local mon, result = vitaminMon, vitaminResult
+          local label = ({
+            hp = "HEALTH POINTS", atk = "ATTACK", def = "DEFENSE",
+            spd = "SPEED", spc = "SPECIAL",
+          })[result.stat] or "STAT"
+          if result.stat == "hp" and result.delta > 0 then
+            self:_emit("drain", {
+              slot = fighter.slot, side = fighter.side,
+              amount = result.delta, hp = mon.hp,
+            })
+          elseif result.delta > 0 then
+            self:_emit("stat", {
+              slot = fighter.slot, side = fighter.side,
+              amount = mon.stats[result.stat],
+              text = mon.species .. "'s " .. label .. " rose",
+            })
+          end
+          self:_say(mon.species .. "'s " .. label .. " rose")
+        end
+      elseif effect.pokeFlute then
+        local woke = false
+        for _, seat in ipairs(self.fighters) do
+          for i = 1, #(seat.mons or {}) do
+            local mon = seat.mons[i]
+            if mon and mon.status == "sleep" then
+              mon.status, mon.statusTurns = nil, 0
+              woke = true
+              self:_emit("status", {
+                slot = seat.slot, side = seat.side,
+                text = mon.species .. " woke up",
+              })
+            end
+          end
+        end
+        if woke then
+          self:_say("All sleeping POKeMON woke up")
+        else
+          self:_say("Now, that's a catchy tune")
+        end
+      else
+        local partyIdx = choice.slot or fighter.active
+        local mon = fighter.mons[partyIdx]
+        if not mon then
+          self:_say("But it failed")
+        elseif effect.activeOnly and partyIdx ~= fighter.active then
+          self:_say("But it failed")
+        elseif effect.faintedOnly and mon.hp > 0 then
+          self:_say("But it failed")
+        elseif not effect.faintedOnly and mon.hp <= 0
+           and (effect.heal or effect.healFull or effect.clearStatuses
+                or effect.clearAllStatus or effect.ppRestore
+                or effect.ppRestoreAll) then
+          self:_say("But it failed")
+        else
+          local applied = false
+          if effect.xAccuracy then
+            mon.xAccuracy = true
+            self:_say(mon.species .. "'s hits will never miss")
+            applied = true
+          end
+          if effect.focusEnergy then
+            mon.focusEnergy = true
+            self:_say(mon.species .. " is getting pumped")
+            applied = true
+          end
+          if effect.mist then
+            mon.mist = true
+            self:_say(mon.species .. " is protected against stat changes")
+            applied = true
+          end
+          if effect.stage then
+            local stat = effect.stage.stat
+            local before = Effects.clampStage(mon.stages[stat])
+            if before >= Effects.STAGE_MAX then
+              self:_say("Nothing happened")
+            else
+              local after = Effects.clampStage(before + int(effect.stage.delta, 1))
+              mon.stages[stat] = after
+              local label = ({
+                atk = "ATTACK", def = "DEFENSE", spd = "SPEED",
+                spc = "SPECIAL", acc = "ACCURACY", eva = "EVASION",
+              })[stat] or "STAT"
+              self:_say(mon.species .. "'s " .. label .. " rose")
+              self:_emit("stat", {
+                slot = fighter.slot, side = fighter.side,
+                amount = after, text = mon.species .. "'s " .. label .. " rose",
+              })
+            end
+            applied = true
+          end
+          if effect.revive then
+            local amount = effect.revive
+            local hp = amount == 1 and mon.maxHp or max(1, floor(mon.maxHp * amount))
+            mon.hp = hp
+            mon.status, mon.statusTurns = nil, 0
+            self:_emit("drain", {
+              slot = fighter.slot, side = fighter.side,
+              amount = hp, hp = mon.hp,
+            })
+            self:_say(mon.species .. " was revived")
+            applied = true
+          end
+          if effect.ppRestore then
+            local move = mon.moves[choice.move]
+            if not move then
+              self:_say("But it failed")
+            else
+              local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
+              local before = move.pp
+              if effect.ppRestore == true then
+                move.pp = maxPp
+              else
+                move.pp = min(maxPp, move.pp + int(effect.ppRestore, 0))
+              end
+              if move.pp > before then
+                self:_say(mon.species .. "'s PP was restored")
+                applied = true
+              else
+                self:_say("But it failed")
+              end
+            end
+          end
+          if effect.ppRestoreAll then
+            local any = false
+            for i = 1, #(mon.moves or {}) do
+              local move = mon.moves[i]
+              if move then
+                local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
+                local before = move.pp
+                if effect.ppRestoreAll == true then
+                  move.pp = maxPp
+                else
+                  move.pp = min(maxPp, move.pp + int(effect.ppRestoreAll, 0))
+                end
+                if move.pp > before then any = true end
+              end
+            end
+            if any then
+              self:_say(mon.species .. "'s PP was restored")
+              applied = true
+            else
+              self:_say("But it failed")
+            end
+          end
+          local healed = false
+          if effect.healFull then
+            local before = mon.hp
+            mon.hp = mon.maxHp
+            if mon.hp > before then
+              self:_emit("drain", {
+                slot = fighter.slot, side = fighter.side,
+                amount = mon.hp - before, hp = mon.hp,
+              })
+              healed = true
+            end
+          elseif effect.heal and effect.heal > 0 and mon.hp < mon.maxHp then
+            self:_heal(fighter, mon, effect.heal)
+            healed = true
+          end
+          local cleared = false
+          if effect.clearAllStatus and mon.status then
+            mon.status, mon.statusTurns = nil, 0
+            cleared = true
+          elseif effect.clearStatuses and mon.status
+             and effect.clearStatuses[mon.status] then
+            mon.status, mon.statusTurns = nil, 0
+            cleared = true
+          end
+          if cleared then
+            self:_emit("status", {
+              slot = fighter.slot, side = fighter.side,
+              text = mon.species .. " recovered",
+            })
+          end
+          if not applied and not healed and not cleared then
+            self:_say("But it failed")
+          end
+        end
+      end
     end
   end
 end
@@ -700,7 +1666,7 @@ function Battle:_resolveFights()
       actors[#actors + 1] = {
         fighter = fighter,
         mon = mon,                      -- pinned: see the skip in the loop
-        speed = self:_speedOf(mon),
+        speed = self:_speedOf(fighter, mon),
         order = #actors + 1,
       }
     end
@@ -736,11 +1702,21 @@ function Battle:_resolveFights()
     if activeMon(actor.fighter) == actor.mon then
       self:_useMove(actor.fighter, actor.mon)
     end
+    -- Finalize after each action (not inside `_faint`) so KO + recoil / explode
+    -- on the same move can still mutual-faint into a draw, while an empty-bench
+    -- KO still stops the slower seat from acting.
+    if not self.result then self:_checkOver() end
   end
 end
 
 -- Returns false when a gate stopped the move.
 function Battle:_runGates(fighter, mon)
+  if mon.flinch then
+    mon.flinch = false
+    self:_say(mon.species .. " flinched")
+    return false
+  end
+
   if GATING[mon.status] then
     local gate = Status.beforeMove(
       { status = mon.status, turnsRemaining = mon.statusTurns }, self.rng:byte())
@@ -783,79 +1759,459 @@ function Battle:_runGates(fighter, mon)
   return true
 end
 
-function Battle:_useMove(fighter, mon)
+function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId)
+  local result = Effects.applyPrimary({
+    effectId = effectId,
+    rng = self.rng,
+    userMon = mon,
+    targetMon = targetMon,
+    userFighter = fighter,
+    targetFighter = targetFighter,
+    moveIndex = moveIndex,
+    statusToWire = M.STATUS_TO_WIRE,
+  })
+  if result.nothing then self:_say("But nothing happened") end
+  for _, text in ipairs(result.messages or {}) do self:_say(text) end
+  for _, entry in ipairs(result.events or {}) do
+    self:_emit(entry.kind, entry.fields)
+  end
+  for _, heal in ipairs(result.heals or {}) do
+    self:_heal(fighter, mon, heal.amount)
+  end
+  for _, cost in ipairs(result.costs or {}) do
+    self:_damage(fighter, mon, cost.amount, nil)
+  end
+  for _, hit in ipairs(result.directDamage or {}) do
+    self:_emit("damage", {
+      slot = fighter.slot, side = fighter.side,
+      amount = hit.amount, hp = mon.hp,
+    })
+  end
+  if result.movesChanged then self:_emitMoves(fighter, mon) end
+end
+
+function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, chance)
+  local result = Effects.applySide({
+    effectId = effectId,
+    chance = chance,
+    rng = self.rng,
+    userMon = mon,
+    targetMon = targetMon,
+    userFighter = fighter,
+    targetFighter = targetFighter,
+    statusToWire = M.STATUS_TO_WIRE,
+  })
+  for _, text in ipairs(result.messages or {}) do self:_say(text) end
+  for _, entry in ipairs(result.events or {}) do
+    self:_emit(entry.kind, entry.fields)
+  end
+end
+
+function Battle:_markLastMove(mon, moveIndex)
+  if moveIndex and moveIndex >= 1 then mon.lastMoveIndex = moveIndex end
+end
+
+function Battle:_faintUser(fighter, mon)
+  if mon.hp > 0 then self:_damage(fighter, mon, mon.hp, nil) end
+end
+
+function Battle:_concedeRun(fighter)
+  self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
+  if fighter.side == "a" then
+    self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "run")
+  else
+    self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "run")
+  end
+end
+
+function Battle:_useMove(fighter, mon, opts)
+  opts = opts or {}
   local choice = fighter.choice
-  local move = mon.moves[choice.move]
-  if not move then return end
+  if not mon.moves[choice.move] then return end
 
   if not self:_runGates(fighter, mon) then return end
+
+  local struggling = allPpEmpty(mon) or choice.struggle
+  if not struggling and mon.disable and mon.disable.turns > 0
+     and mon.disable.moveIndex == choice.move then
+    local blocked = mon.moves[choice.move]
+    local moveId = blocked and blocked.id or "move"
+    self:_say(moveId .. " is disabled")
+    return
+  end
 
   local target = self:_fighterAtSlot(choice.target)
   local defender = target and activeMon(target)
   if not defender then
-    -- The chosen target went down before this actor moved.  Redirecting would
-    -- be choosing a different opponent on somebody's behalf, so the move
-    -- fizzles and the turn is spent -- the same thing the original does when
-    -- its target is gone.
     self:_say(mon.species .. " has no target")
     return
   end
 
-  if move.pp > 0 then move.pp = move.pp - 1 end
+  local move = opts.moveOverride or (struggling and STRUGGLE or mon.moves[choice.move])
+  local effectId = int(move.effect, 0)
+  local releasing = mon.charging ~= nil and Effects.isCharge(mon.charging.effect)
+  local mirrorCopy = opts.mirrorCopy == true
+
+  if not struggling and move.pp > 0 and not releasing and not choice.bideRelease then
+    move.pp = move.pp - 1
+  end
   self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = move.id })
   self:_say(mon.species .. " used " .. move.id)
 
-  local hit = Accuracy.hit(move.accuracy, self.rng:byte())
+  if choice.bideRelease and mon.bide then
+    local stored = mon.bide.stored
+    mon.bide = nil
+    if stored <= 0 then
+      self:_say("But it failed")
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    self:_damage(target, defender, 2 * stored, nil)
+    self:_markLastMove(mon, choice.move)
+    return
+  end
+
+  if Effects.isCharge(effectId) and not mon.charging then
+    mon.charging = {
+      moveIndex = choice.move,
+      effect = effectId,
+      targetSlot = choice.target,
+    }
+    if Effects.isFly(effectId) then mon.invulnerable = true end
+    self:_say(Effects.chargeMessage(mon, effectId))
+    self:_markLastMove(mon, choice.move)
+    return
+  end
+
+  if mon.charging and Effects.isCharge(mon.charging.effect) then
+    mon.charging = nil
+    mon.invulnerable = false
+  end
+
+  if defender.invulnerable then
+    self:_say("But it failed")
+    if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+    if Effects.isJumpKick(effectId) then
+      self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
+    end
+    self:_markLastMove(mon, choice.move)
+    return
+  end
+
+  if Effects.isMirrorMove(effectId) and not mirrorCopy then
+    local lastIdx = int(defender.lastMoveIndex, 0)
+    if lastIdx < 1 or not defender.moves[lastIdx] then
+      self:_say("But it failed")
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    self:_markLastMove(mon, choice.move)
+    self:_useMove(fighter, mon, {
+      moveOverride = copyMove(defender.moves[lastIdx]),
+      mirrorCopy = true,
+    })
+    return
+  end
+
+  local metronomeCall = opts.metronomeCall == true
+  if Effects.isMetronome(effectId) and not metronomeCall then
+    local pool = self.metronomePool
+    if not pool or #pool == 0 then
+      self:_say("But nothing happened")
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    local pick = (self.rng:byte() % #pool) + 1
+    self:_markLastMove(mon, choice.move)
+    self:_useMove(fighter, mon, {
+      moveOverride = copyMove(pool[pick]),
+      metronomeCall = true,
+    })
+    return
+  end
+
+  local alwaysHits = effectId == Effects.idOf("SWIFT_EFFECT")
+    or mon.xAccuracy == true
+
+  local hit = Accuracy.hit(move.accuracy, self.rng:byte(), {
+    accuracyMod = Effects.stageMult(mon.stages.acc),
+    evasionMod = Effects.stageMult(defender.stages.eva),
+    alwaysHits = alwaysHits,
+  })
   if not hit then
     self:_say(mon.species .. " missed")
+    if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+    if Effects.isJumpKick(effectId) then
+      self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
+    end
+    self:_markLastMove(mon, choice.move)
     return
   end
 
-  if move.power <= 0 then
-    -- The status-move stub: narrated, and nothing more.  See the header.
-    self:_say("But nothing happened")
+  local isFixed = Effects.isFixedDamage(effectId)
+  if effectId == 8 and defender.status ~= "sleep" then
+    self:_say("But it failed")
+    if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+    self:_markLastMove(mon, choice.move)
     return
   end
 
-  local isCrit = Crit.check(mon.stats.spd, self.rng:byte())
+  if move.power <= 0 and not isFixed then
+    if Effects.isBide(effectId) and not mon.bide then
+      mon.bide = {
+        turns = Effects.bideTurns(self.rng),
+        stored = 0,
+        moveIndex = choice.move,
+        targetSlot = choice.target,
+      }
+      self:_say(mon.species .. " began storing energy")
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    if Effects.isSwitchAndTeleport(effectId) then
+      if Effects.teleportRunAllowed(self.mode) then
+        self:_concedeRun(fighter)
+      else
+        self:_say("But it failed")
+      end
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    if Effects.isNoOp(effectId) then
+      self:_say("But nothing happened")
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    if Effects.handlesPrimary(effectId) then
+      self:_applyPrimary(fighter, mon, target, defender, choice.move, effectId)
+    else
+      self:_say("But nothing happened")
+    end
+    self:_markLastMove(mon, choice.move)
+    return
+  end
+
+  if effectId == 38 then
+    if self:_speedOf(fighter, mon) <= self:_speedOf(target, defender) then
+      self:_say("But it failed")
+      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+  end
+
+  local hits = Effects.hitCount(effectId, self.rng)
+  local critSpd = Effects.badgeBoost(mon.stats.spd, "spd", fighter.badges)
+  local isCrit = Crit.check(critSpd, self.rng:byte(), { focusEnergy = mon.focusEnergy })
   local percents = self:_typePercents(move.type, defender)
 
-  local attack = mon.stats.atk
-  if mon.status == "burn" then attack = Status.burnAttack(attack) end
-
-  local result = Damage.compute(
-    { level = mon.level, attack = attack },
-    { defense = defender.stats.def },
-    { power = move.power },
-    {
-      crit = isCrit,
-      stab = hasType(mon, move.type),
-      typeEffect = percents,
-      roll = self.rng:damageRoll(),
-    })
-
-  if result.immune then
-    self:_say("It doesn't affect " .. defender.species)
-    return
+  local immune = false
+  for _, pct in ipairs(percents) do
+    if pct <= 0 then immune = true; break end
   end
+
+  local damage = 0
+  if isFixed then
+    if immune then
+      self.rng:damageRoll()
+      self:_say("It doesn't affect " .. defender.species)
+      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isJumpKick(effectId) then
+        self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
+      end
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    local fixed = Effects.fixedDamage({
+      effectId = effectId,
+      userMon = mon,
+      targetMon = defender,
+      power = move.power,
+      userSpeed = self:_speedOf(fighter, mon),
+      foeSpeed = self:_speedOf(target, defender),
+    })
+    if fixed == nil then
+      self.rng:damageRoll()
+      self:_say("But it failed")
+      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    self.rng:damageRoll()
+    damage = fixed
+  else
+    local isSpecial = Effects.isSpecialType(move.type, self.specialTypes)
+    local atkKey = isSpecial and "spc" or "atk"
+    local defKey = isSpecial and "spc" or "def"
+    local atkStat = Effects.badgeBoost(
+      isSpecial and mon.stats.spc or mon.stats.atk, atkKey, fighter.badges)
+    local atkStage = isSpecial and mon.stages.spc or mon.stages.atk
+    local defStat = Effects.badgeBoost(
+      isSpecial and defender.stats.spc or defender.stats.def, defKey, target.badges)
+    local defStage = isSpecial and defender.stages.spc or defender.stages.def
+
+    local attack = Effects.applyStage(atkStat, atkStage)
+    if (not isSpecial) and mon.status == "burn" then
+      attack = Status.burnAttack(attack)
+    end
+
+    local defense = Effects.applyStage(defStat, defStage)
+    if Effects.isExplode(effectId) then
+      defense = max(1, floor(defense / 2))
+    end
+
+    local result = Damage.compute(
+      { level = mon.level, attack = attack },
+      { defense = defense },
+      { power = move.power },
+      {
+        crit = isCrit,
+        stab = hasType(mon, move.type),
+        typeEffect = percents,
+        roll = self.rng:damageRoll(),
+      })
+
+    if result.immune then
+      self:_say("It doesn't affect " .. defender.species)
+      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isJumpKick(effectId) then
+        self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
+      end
+      self:_markLastMove(mon, choice.move)
+      return
+    end
+    damage = result.damage or 0
+  end
+
+  local isSpecial = Effects.isSpecialType(move.type, self.specialTypes)
+  damage = Effects.screenDamage(damage, defender, isSpecial)
 
   local effectiveness = 1
   for _, pct in ipairs(percents) do effectiveness = effectiveness * pct / 100 end
-  if isCrit then self:_say("A critical hit") end
+  if isCrit and not isFixed then self:_say("A critical hit") end
   if effectiveness > 1 then
     self:_say("It's super effective")
   elseif effectiveness < 1 then
     self:_say("It's not very effective")
   end
 
-  self:_damage(target, defender, result.damage or 0, nil)
+  local totalDealt = 0
+  for _ = 1, hits do
+    if defender.hp <= 0 then break end
+    local hpBefore = defender.hp
+    self:_damage(target, defender, damage, nil)
+    totalDealt = totalDealt + (hpBefore - defender.hp)
+  end
+
+  if totalDealt > 0 then
+    self:_applySide(fighter, mon, target, defender, effectId, move.chance)
+
+    if Effects.isDrain(effectId) then
+      local heal = Effects.drainAmount(totalDealt)
+      if heal > 0 then self:_heal(fighter, mon, heal) end
+    end
+
+    if Effects.isPayDay(effectId) then
+      self:_say("Coins scattered")
+    end
+  end
+
+  if (struggling or Effects.isRecoil(effectId)) and totalDealt >= 1 then
+    local recoil = Effects.recoilAmount(totalDealt)
+    self:_say(mon.species .. " is hit with recoil")
+    self:_damage(fighter, mon, recoil, nil)
+  end
+
+  if Effects.handlesPrimary(effectId) then
+    self:_applyPrimary(fighter, mon, target, defender, choice.move, effectId)
+  end
+
+  if Effects.isThrash(effectId) and not mon.thrashing then
+    mon.thrashing = {
+      turns = Effects.thrashTurns(self.rng),
+      moveIndex = choice.move,
+    }
+  end
+
+  if Effects.isRage(effectId) then
+    mon.raging = true
+    mon.rageMove = choice.move
+  end
+
+  if Effects.isTrapping(effectId) and totalDealt > 0 then
+    local turns = Effects.trapTurns(self.rng)
+    defender.trapped = {
+      turns = turns,
+      damage = totalDealt,
+      fromSlot = fighter.slot,
+    }
+    mon.trapping = {
+      turns = turns,
+      moveIndex = choice.move,
+      targetSlot = target.slot,
+    }
+  end
+
+  if Effects.isHyperBeam(effectId) and totalDealt > 0 and defender.hp > 0 then
+    mon.mustRecharge = true
+  end
+
+  if Effects.isExplode(effectId) then
+    self:_faintUser(fighter, mon)
+  end
+
+  self:_markLastMove(mon, choice.move)
+
+  if mon.thrashing then
+    mon.thrashing.turns = mon.thrashing.turns - 1
+    if mon.thrashing.turns <= 0 then
+      mon.thrashing = nil
+      local turns = self.rng:byte() % 4 + 2
+      mon.confusion = turns
+      self:_say(mon.species .. " became confused")
+    end
+  end
 end
 
 -- One place where HP comes off, so the faint that follows can never be
 -- forgotten at one of the call sites.
 function Battle:_damage(fighter, mon, amount, status)
   amount = max(0, int(amount, 0))
+
+  if amount > 0 and mon.bide and mon.bide.turns > 0 then
+    mon.bide.stored = mon.bide.stored + amount
+  end
+
+  if amount > 0 and mon.substitute and mon.substitute > 0 then
+    if amount >= mon.substitute then
+      mon.substitute = 0
+      self:_say(mon.species .. "'s substitute broke")
+    else
+      mon.substitute = mon.substitute - amount
+    end
+    self:_emit("damage", {
+      slot = fighter.slot, side = fighter.side,
+      amount = amount, hp = mon.hp,
+      status = status and M.STATUS_TO_WIRE[status] or nil,
+    })
+    return
+  end
+
   if amount > mon.hp then amount = mon.hp end
+
+  if amount > 0 and mon.raging then
+    local before = Effects.clampStage(mon.stages.atk)
+    local after = Effects.clampStage(before + 1)
+    if after ~= before then
+      mon.stages.atk = after
+      self:_say(mon.species .. "'s ATTACK rose")
+      self:_emit("stat", {
+        slot = fighter.slot, side = fighter.side,
+        amount = after, text = mon.species .. "'s ATTACK rose",
+      })
+    end
+  end
+
   mon.hp = mon.hp - amount
 
   self:_emit("damage", {
@@ -867,20 +2223,64 @@ function Battle:_damage(fighter, mon, amount, status)
   if mon.hp <= 0 then self:_faint(fighter, mon) end
 end
 
-function Battle:_faint(fighter, mon)
-  self:_emit("faint", { slot = fighter.slot, side = fighter.side, text = mon.species })
+function Battle:_heal(fighter, mon, amount)
+  amount = max(0, int(amount, 0))
+  if amount <= 0 then return end
+  local before = mon.hp
+  mon.hp = min(mon.maxHp, mon.hp + amount)
+  local gained = mon.hp - before
+  if gained <= 0 then return end
+  self:_emit("drain", {
+    slot = fighter.slot, side = fighter.side,
+    amount = gained, hp = mon.hp,
+  })
+end
 
+function Battle:_faint(fighter, mon)
+  mon.charging = nil
+  mon.invulnerable = false
+  mon.mustRecharge = false
+  mon.thrashing = nil
+  mon.raging = false
+  mon.rageMove = 0
+  mon.trapped = nil
+  mon.trapping = nil
+  mon.bide = nil
+  mon.substitute = 0
+  mon.lightScreen = false
+  mon.reflect = false
+  mon.mist = false
+  mon.focusEnergy = false
+  mon.transformed = false
+  mon.xAccuracy = false
+  mon.leechSeed = nil
+  mon.disable = nil
+  self:_clearTrapsFrom(fighter.slot)
+
+  -- Living bench? Computed before clearing active; fainted mon already has hp 0.
   local next_ = firstLiving(fighter.mons)
+  self:_emit("faint", {
+    slot = fighter.slot, side = fighter.side, text = mon.species,
+    -- amount=1 is the authoritative mustReplace signal (living bench). Clients
+    -- open the replace picker from this rather than guessing from local HP.
+    -- Omitted when the seat is out of mons so empty-bench never arms a picker.
+    amount = next_ and 1 or nil,
+  })
+
+  fighter.active = nil
   if next_ then
-    fighter.active = next_
-    local incoming = fighter.mons[next_]
-    self:_emit("send", { slot = fighter.slot, side = fighter.side,
-                         hp = incoming.hp, text = incoming.species })
+    -- Ask the seat for a switch on the next choice window; timeout / autoPick
+    -- still lands firstLiving (preferring an SE bench). No PROTOCOL bump —
+    -- same `switch` + `turn`/`chose` vocabulary; amount rides an existing field.
+    fighter.mustReplace = true
   else
-    fighter.active = nil
+    fighter.mustReplace = nil
   end
 
-  self:_checkOver()
+  -- While resolving, defer `_checkOver` to the caller (after the current move /
+  -- residual batch) so the same action can still faint the user (recoil,
+  -- explode) and land a draw. Outside resolve, end immediately.
+  if self.phase ~= "resolving" then self:_checkOver() end
 end
 
 function Battle:_resolveResiduals()
@@ -895,6 +2295,52 @@ function Battle:_resolveResiduals()
         if mon.status == "toxic" then mon.toxicCounter = mon.toxicCounter + 1 end
         self:_say(mon.species .. " is hurt by its " .. mon.status)
         self:_damage(fighter, mon, amount, mon.status)
+      end
+    end
+    if self.result then return end
+    mon = activeMon(fighter)
+    if mon and mon.trapped and mon.trapped.turns > 0 then
+      local trap = mon.trapped
+      self:_say(mon.species .. " is hurt by the trap")
+      self:_damage(fighter, mon, trap.damage, nil)
+      trap.turns = trap.turns - 1
+      if trap.turns <= 0 then
+        mon.trapped = nil
+        local trapper = trap.fromSlot and self:_fighterAtSlot(trap.fromSlot)
+        local tMon = trapper and activeMon(trapper)
+        if tMon then tMon.trapping = nil end
+      else
+        local trapper = trap.fromSlot and self:_fighterAtSlot(trap.fromSlot)
+        local tMon = trapper and activeMon(trapper)
+        if tMon and tMon.trapping then tMon.trapping.turns = trap.turns end
+      end
+    end
+    mon = activeMon(fighter)
+    if mon and mon.bide and mon.bide.turns > 0 then
+      mon.bide.turns = mon.bide.turns - 1
+    end
+    if self.result then return end
+    mon = activeMon(fighter)
+    if mon and mon.leechSeed then
+      local amount = max(1, floor(mon.maxHp / 16))
+      self:_say(mon.species .. " is seeded")
+      self:_damage(fighter, mon, amount, nil)
+      local from = mon.leechSeed.fromSlot
+      local seeder = from and self:_fighterAtSlot(from)
+      local sMon = seeder and activeMon(seeder)
+      if sMon and sMon.hp > 0 then self:_heal(seeder, sMon, amount) end
+    end
+    if self.result then return end
+    mon = activeMon(fighter)
+    if mon and mon.disable and mon.disable.turns > 0 then
+      mon.disable.turns = mon.disable.turns - 1
+      if mon.disable.turns <= 0 then
+        local idx = mon.disable.moveIndex
+        local cleared = mon.moves[idx]
+        mon.disable = nil
+        if cleared and cleared.id then
+          self:_say(cleared.id .. " is no longer disabled")
+        end
       end
     end
   end
@@ -994,6 +2440,16 @@ function Battle:tick(nowSeconds)
   if now > self.now then self.now = now end
   if self.result then return false end
 
+  -- Forced-only turns opened by the previous resolve wait here so one drain
+  -- does not swallow a whole trap / recharge / thrash chain.
+  if self.forcedPending and self.phase == "choice" then
+    self.forcedPending = false
+    if not self:_anyoneOwes() then
+      self:_maybeResolve()
+      return true
+    end
+  end
+
   local expiredA, expiredB = false, false
   for _, fighter in ipairs(self.fighters) do
     if not fighter.connected and fighter.graceEndsAt and self.now >= fighter.graceEndsAt then
@@ -1031,6 +2487,9 @@ function Battle:tick(nowSeconds)
         local auto = self:_autoChoice(fighter)
         if auto then
           fighter.choice = auto
+          self:_emit("chose", {
+            slot = fighter.slot, side = fighter.side, text = fighter.name,
+          })
           self:_say(fighter.name .. " ran out of time")
         end
       end
@@ -1072,6 +2531,7 @@ function Battle:snapshot()
       connected = fighter.connected,
       graceEndsAt = fighter.graceEndsAt,
       chose = fighter.choice ~= nil and fighter.choice.action or nil,
+      mustReplace = fighter.mustReplace == true,
       species = mon and mon.species or nil,
       hp = mon and mon.hp or 0,
       maxHp = mon and mon.maxHp or 0,

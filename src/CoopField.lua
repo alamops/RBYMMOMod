@@ -277,7 +277,13 @@ function M.drain(field)
           tostring(err))
       end
     elseif row.anim then
-      events[#events + 1] = { kind = "anim", anim = tostring(row.anim) }
+      events[#events + 1] = {
+        kind = "anim",
+        anim = tostring(row.anim),
+        -- Kept so a screen that plays the flash can face it the way the
+        -- engine queued it (player vs enemy transform), not only by slot.
+        attackerIsPlayer = row.attackerIsPlayer,
+      }
     elseif row.drain then
       -- The bar's next resting place, named by slot so a client can animate
       -- somebody else's monster down to it. `to` is an absolute HP, not a

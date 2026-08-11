@@ -108,12 +108,23 @@ local function count(peer, msgType)
   return n
 end
 
+local function testPlayerId(seed)
+  local s = tostring(seed or "")
+  local out = {}
+  for i = 1, 32 do
+    local c = s:byte((i - 1) % #s + 1) or 97
+    out[i] = string.format("%x", (c + i) % 16)
+  end
+  return table.concat(out)
+end
+
 local function join(hub, name)
   local peer = fakePeer()
   local client = hub:accept(peer)
   if client then
     hub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
-      name = name, map = "PALLET", x = 5, y = 5, facing = "down" })
+      name = name, map = "PALLET", x = 5, y = 5, facing = "down",
+      playerId = testPlayerId(name) })
   end
   return client, peer
 end
@@ -337,7 +348,7 @@ do
 
   -- The rating moved on the intermediator's word alone, with no second report
   -- from anybody.
-  ok(hub.board:points("ANN") > hub.board:points("BOB"),
+  ok(hub.board:points(fight.ann.client.id) > hub.board:points(fight.bob.client.id),
      "the winner is worth more than the loser afterwards")
   local rank = take(fight.ann.peer, Wire.RANK)
   ok(rank ~= nil, "and the new number is published")
@@ -699,6 +710,102 @@ do
        and msg.text:find("ran out of time", 1, true) then hurried = true end
   end
   ok(not hurried, "and nothing in the log says anybody ran out of time")
+end
+
+-- ------- protocol-only wild: one human, one NPC seat, catch sheet on outcome
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local record = hub:openMediatedBattle("wild-1", {
+    mode = "wild", hostId = ann.id, memberIds = { ann.id },
+  })
+  ok(record ~= nil, "a wild record opens from a plan")
+  eq(#(record.npcIds or {}), 1, "with one synthetic wild seat")
+  eq(record.sides.b[1], record.npcIds[1], "side b is the wild seat")
+  eq(hub:battleSeat(record, ann, { side = "b" }), record.npcIds[1],
+     "the host's side-b upload fills the wild seat")
+  eq(#hub:seatsNeeded(record), 2, "two seats owe a party")
+
+  ok(hub:fillBattleParty(record, ann, {
+    battle = "wild-1", side = "a", mons = { mon() },
+  }), "player party uploaded")
+  ok(hub:fillBattleParty(record, ann, {
+    battle = "wild-1", side = "b",
+    mons = { mon({ species = "PIDGEY", catchRate = 255 }) },
+  }), "wild party uploaded")
+  record.ruleset = { chart = CHART, seed = 1 }
+  ok(hub:tryStartSim(record), "wild sim starts")
+  ok(record.sim ~= nil, "and the intermediator is running")
+end
+
+-- ------- PROTOCOL 15: hub bag proofs hold until resolve; cancel drops hold
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local id = ann.sessionId
+
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART, seed = 7 })
+  -- Unknown bag ids refuse the whole party sheet.
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id,
+    mons = { mon({ hp = 40, maxHp = 100 }) },
+    bag = { { id = "NOT_A_REAL_ITEM", count = 1 } } })
+  eq(hub.battles[id].parties[ann.id], nil, "unknown bag id refuses the party")
+  -- Vitamins are BattleSim-known: accepted on the bag sheet.
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id,
+    mons = { mon({ hp = 40, maxHp = 100 }) },
+    bag = { { id = "PROTEIN", count = 1 }, { id = "POTION", count = 1 },
+            { id = "POKE_FLUTE", count = 1 } } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id,
+    mons = { mon({ hp = 100 }) } })
+  local record = hub.battles[id]
+  ok(record.sim ~= nil, "a fight opens with bag sheets")
+  eq(record.bags[ann.id].PROTEIN, 1, "ann's uploaded bag holds one protein")
+  eq(record.bags[ann.id].POTION, 1, "ann's uploaded bag holds one potion")
+  eq(record.bags[bob.id].POTION, nil, "bob uploaded no bag: empty")
+
+  hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = id,
+    action = "item", item = "POTION" })
+  eq(record.sim.byId[bob.id].choice, nil,
+     "an item with no matching bag stack is refused silently")
+
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id,
+    action = "item", item = "POTION" })
+  ok(record.sim.byId[ann.id].choice ~= nil, "a proved potion is accepted")
+  eq(record.bags[ann.id].POTION, 1, "stack is held, not spent, until resolve")
+  eq(record.bagHold[ann.id], "POTION", "hold names the pending item")
+
+  -- Cancel before the foe answers: hold drops, stack stays.
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "cancel" })
+  eq(record.sim.byId[ann.id].choice, nil, "cancel clears the filed choice")
+  eq(record.bagHold[ann.id], nil, "and drops the bag hold")
+  eq(record.bags[ann.id].POTION, 1, "without decrementing the bag")
+
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id,
+    action = "item", item = "POTION" })
+  ok(record.sim.byId[ann.id].choice ~= nil, "potion can be filed again")
+  hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = id,
+    action = "fight", move = 0 })
+  take(annPeer, Wire.BATTLE_EVENT)
+  eq(record.bags[ann.id].POTION, nil, "resolve commits the hold and spends")
+
+  -- Overdrawn: potion already spent.
+  if record.sim and record.sim.phase == "choice" then
+    hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id,
+      action = "item", item = "POTION" })
+    eq(record.sim.byId[ann.id].choice, nil,
+       "a second potion after the stack is gone is refused")
+
+    hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id,
+      action = "item", item = "POKE_FLUTE" })
+    ok(record.sim.byId[ann.id].choice ~= nil, "Poké Flute is proved present")
+    eq(record.bags[ann.id].POKE_FLUTE, 1,
+       "but never decremented (key item / noConsume)")
+  end
 end
 
 -- ------------------------------------------------------------------

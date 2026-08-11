@@ -1,3 +1,7 @@
+> **Historical plan.** Written against an older PROTOCOL / version than today.
+> Not the live contract — see `Config.PROTOCOL`, `CHANGELOG.md`, and
+> [`docs/plans/README.md`](README.md). Kept for design history.
+
 # Plan — Sequenced HP drains & faints in co-op battles
 
 | Field | Value |

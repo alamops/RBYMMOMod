@@ -1,7 +1,7 @@
 {
   "id": "rby_mmo",
   "name": "RBY MMO",
-  "version": "0.11.0",
+  "version": "1.0.0",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -14,7 +14,7 @@
     "engine_internals"
   ],
   "affects_link": false,
-  "experimental": true,
+  "experimental": false,
   "dependencies": [],
   "optional_dependencies": [],
   "conflicts": [],

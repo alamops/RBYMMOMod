@@ -33,6 +33,7 @@ local M = {
   Accuracy = need("BattleSim/Accuracy"),
   Crit = need("BattleSim/Crit"),
   Status = need("BattleSim/Status"),
+  Effects = need("BattleSim/Effects"),
   -- The formulas above answer one question each and remember nothing; these
   -- two are the machine that asks them in order.  Turn is the only module here
   -- with state, and events.lua is the vocabulary it speaks -- mirrored from

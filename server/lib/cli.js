@@ -2766,17 +2766,24 @@ function verbRanking(ctx) {
    * Board.top does (rank.js) and what every player already sees in game. Two
    * lists of the same board that disagree about who is third would be worse
    * than one list that is a second out of date.
+   *
+   * Display names are cosmetic under PROTOCOL 16; `id` is the board key. When
+   * two rows share a name the printed NAME column appends `#` + first four
+   * hex of the playerId so operators can tell them apart.
    */
   const ranked = stored
     .filter((row) => row && typeof row === 'object' && (finite(row.points) || 0) > 0)
     .map((row) => ({
+      id: typeof row.id === 'string' ? plain(row.id, 32) : null,
       name: plain(row.name) || '-',
       sprite: typeof row.sprite === 'string' ? plain(row.sprite, 32) : null,
       points: finite(row.points) || 0,
       played: Math.max(0, Math.floor(finite(row.played) || 0)),
       won: Math.max(0, Math.floor(finite(row.won) || 0)),
     }))
-    .sort((a, b) => (b.points - a.points) || (a.name < b.name ? -1 : 1));
+    .sort((a, b) => (b.points - a.points)
+      || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+      || ((a.id || '') < (b.id || '') ? -1 : (a.id || '') > (b.id || '') ? 1 : 0));
 
   if (!ranked.length) {
     if (wantsJson) ctx.say('[]');
@@ -2789,12 +2796,28 @@ function verbRanking(ctx) {
   }
 
   const shown = wantsAll ? ranked : ranked.slice(0, rank.RANK_TOP);
+  const nameCounts = new Map();
+  for (const row of ranked) {
+    nameCounts.set(row.name, (nameCounts.get(row.name) || 0) + 1);
+  }
+  const labelOf = (row) => {
+    const tag = row.id && /^[0-9a-f]{4}/i.test(row.id) ? row.id.slice(0, 4).toLowerCase() : null;
+    if (tag && (nameCounts.get(row.name) || 0) > 1) return `${row.name} #${tag}`;
+    return row.name;
+  };
 
   if (wantsJson) {
-    // Deliberately not the stored rows: ranking.json also carries the token
-    // digest that proves who owns a name, and that is the hub's business
-    // alone -- rank.js keeps it off the wire for the same reason.
-    ctx.say(JSON.stringify(shown.map((row, index) => Object.assign({ place: index + 1 }, row)), null, 2));
+    // Deliberately not the stored rows: ranking.json may carry digests the
+    // hub alone holds. id is public (wire presence / RANK) and goes out.
+    ctx.say(JSON.stringify(shown.map((row, index) => ({
+      place: index + 1,
+      id: row.id || undefined,
+      name: row.name,
+      sprite: row.sprite,
+      points: row.points,
+      played: row.played,
+      won: row.won,
+    })), null, 2));
     return OK;
   }
 
@@ -2806,7 +2829,7 @@ function verbRanking(ctx) {
    * a host can edit, and "-3 losses" would be a worse answer than 0.
    */
   printTable(ctx, ['PLACE', 'NAME', 'POINTS', 'W', 'L'], shown.map((row, index) => [
-    String(index + 1), row.name, String(row.points),
+    String(index + 1), labelOf(row), String(row.points),
     String(row.won), String(Math.max(0, row.played - row.won)),
   ]));
 
@@ -2916,8 +2939,15 @@ function historyRecord(raw) {
     const entry = value && typeof value === 'object' ? value : {};
     const points = finite(entry.points);
     const moved = finite(entry[gainKey]);
+    const id = typeof entry.id === 'string' ? plain(entry.id, 32) : null;
+    const name = plain(entry.name) || '-';
+    const tag = id && /^[0-9a-f]{4}/i.test(id) ? id.slice(0, 4).toLowerCase() : null;
     return {
-      name: plain(entry.name) || '-',
+      id: id || undefined,
+      name,
+      // Operator-facing label: always tag when an id is present so two ASH
+      // lines on the ledger are not ambiguous.
+      label: tag ? `${name} #${tag}` : name,
       points: points === null ? 0 : points,
       [gainKey]: moved === null ? 0 : moved,
     };
@@ -3053,8 +3083,8 @@ function verbHistory(ctx, rest) {
   const rows = shown.map((record) => {
     const row = [
       record.at === null ? '-' : humanAge(Math.max(0, now - record.at)),
-      record.winner.name,
-      record.loser.name,
+      record.winner.label || record.winner.name,
+      record.loser.label || record.loser.name,
       `+${record.winner.gained}/-${record.loser.lost}`,
     ];
     // repeats counts the pair's prior meetings inside the hub's discount

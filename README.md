@@ -11,7 +11,7 @@ A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp).
 ![LÖVE 11.x](https://img.shields.io/badge/L%C3%96VE-11.x-e64998?style=for-the-badge)
 ![Players 2–64](https://img.shields.io/badge/players-2--64-3aa757?style=for-the-badge)
 ![No server needed](https://img.shields.io/badge/dedicated%20server-optional-4c8fd6?style=for-the-badge)
-![Experimental](https://img.shields.io/badge/status-experimental-d9822b?style=for-the-badge)
+![v1.0.0](https://img.shields.io/badge/version-1.0.0-3aa757?style=for-the-badge)
 ![MIT](https://img.shields.io/badge/licence-MIT-666?style=for-the-badge)
 
 **No server to rent. No accounts. No signup.** One of you hosts from inside
@@ -30,9 +30,9 @@ also unzips into your `mods/` folder by hand if you'd rather.
 Every release ships a `sha256sums.txt` beside the zip if you want to check
 what you downloaded.
 
-**2. Turn it on.** Launch the game, press **F10**, enable **RBY MMO**, and
-let it restart when it asks. It ships flagged `experimental`, so it stays off
-until you say otherwise — installing it is never what opens a socket.
+**2. Confirm it’s on.** Launch the game and press **F10** if you need the mod
+manager — from 1.0.0 it is enabled by default when installed (no longer
+flagged `experimental`). Disable it there if you want it off.
 
 **3. One of you hosts.** `START → MMO → HOST GAME`.
 
@@ -239,15 +239,16 @@ end-to-end suite.
 
 ### 🤜 CO-OP — WAIT FOR YOUR FRIEND
 Walk into a trainer while you're in a party and the game asks you first:
-**wait for your friend, or go in alone.** Waiting tells them exactly where
-you're standing. When they reach the same fight — or just walk up to you —
-they're offered the chance to join.
+**wait for your friend, or go in alone.** Waiting invites them on the spot if
+they're on the same map, or holds until they arrive if they're elsewhere —
+they do not have to walk into that trainer. Accept and you fight it together;
+decline (or a late yes after you went alone) and the waiter is told,
+encouraged, and sent into a solo fight. From wait mode, **B is ALONE**.
 
 Four rules make it feel solid rather than fiddly:
 
-- **No costs nothing.** Turn down a join and *nothing* is remembered. Your
-  friend keeps waiting and isn't even told, and walking back into that fight
-  asks you again. There's no record of the refusal for anything to consult.
+- **A decline ends the wait.** Turn down a join and your friend hears it,
+  then goes in alone. You are not pulled into a fight you never walked into.
 - **You can't dodge the fight.** The engine has already committed to the
   encounter by the time the mod gets asked, so every way out of every prompt
   ends in a battle. **B is BATTLE ALONE**, not "never mind" — and B while
@@ -275,6 +276,16 @@ four slots whose lookup chain ends at the engine's own `BattleState` — so the
 move that runs *is* `BattleState.performMove`, driving the real `move_effects`
 registry. Charge moves charge, SUBSTITUTE absorbs, HYPER BEAM recharges,
 METRONOME calls, multi-hit hits, recoil recoils, BIDE stores.
+
+Hub-mediated 1v1 and party fights use the mod's `BattleSim` intermediator
+instead: clients upload each move's `effect` and `chance`, and the hub runs the
+same 68 Gen1 effect ids in mirrored Lua/JS handlers. That is a **deliberate**
+hand-authored twin — not a byte-identical copy of the engine `move_effects` /
+`ItemEffects` registries (shipping those would be ROM-adjacent and is out of
+bounds; see Locked decisions in `docs/plans/battle-sim-move-effects.md`).
+Party/bag sheets are client claims; bag proofs only stop mid-fight free heals.
+Forced multi-turn states inject `skip` rather than rehosting the engine UI.
+Metronome picks from a host-uploaded ephemeral move pool.
 
 <p align="center">
   <img src="docs/screenshots/coop-battle.png" width="300" alt="Four monsters on one field: WEEDLE and CATERPIE reading out top-left, CHARIZARD and PIKACHU bottom-right, FIGHT / ITEM / SWITCH / RUN below">
@@ -416,12 +427,13 @@ the ticket plays normally — walks, chats, trades, battles — and simply doesn
 score, which the `RANK` screen tells them in as many words. Nobody is thrown
 out for it: a friend who lost their save shouldn't lose the hub.
 
-Be clear about what that is worth. It's a **claim ticket, not an account**: it
-lives in your save file *and* in `rby_mmo_rank_tokens.json` in the game's save
-folder — the file is what carries it through a CONTINUE you never saved — and
-it crosses the same unencrypted link the join code does, so anyone who can
-read either can take the name. What it buys is that *typing* someone's
-nickname is no longer enough — which, until it existed, was the whole story.
+Be clear about what that is worth. PROTOCOL 16 seats you under a **persistent
+player id** the mod mints once (`rby_mmo_player_id.json`) — that id is the
+rank-board key and the wire presence id. Display names can collide; ids
+cannot, and a second live connection with the same id is refused. Mid-ranked
+battle drops still forfeit after reconnect grace (intermediator), not a
+no-score draw. It is closer to an account than the old per-hub claim ticket,
+but it is still a local file on an unencrypted link — not a logged-in account.
 
 ### 🏠 YOU ARE THE SERVER
 `HOST GAME`, pick a room size (**2–64**), done. You're a normal player who
@@ -1082,8 +1094,8 @@ hosts, one joins, and both sides assert:
   winner is on the leaderboard when `RANK` is opened
 - ✅ a guest LEAVEs and keeps playing
 - 🎫 **and can come back as themselves** — the guest rejoins through the real
-  menus, is recognised by the claim ticket its save kept, and finds its
-  rating where it left it
+  menus under the same persistent player id (`rby_mmo_player_id.json`), and
+  finds its rating where it left it
 
 The dedicated-hub run — `run-hub-e2e.sh`, two guests and a real Node hub, no
 in-game host anywhere — adds the party leg on top of all of that:
@@ -1199,9 +1211,9 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `0.10.0` and it ships flagged `experimental` on purpose. The full list
-lives in `mod.card` under `differences.known`. The ones that'll actually bite
-you:
+It's `1.0.0` (`experimental: false` — on by default when installed). The full
+list lives in `mod.card` under `differences.known`. The ones that'll actually
+bite you:
 
 - **No NAT traversal.** Hosting from the game means your friends have to
   reach *you*. LAN is effortless; over the internet somebody forwards 7788,

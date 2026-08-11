@@ -12,7 +12,8 @@
 -- hit, crit, damage, status and the outcome, so this side is reduced to three
 -- jobs:
 --
---   1. upload what we are bringing -- `mmo.battle_party`, and on the host
+--   1. upload what we are bringing -- `mmo.battle_party` (mons + optional
+--      battle `bag` for PROTOCOL 15 proofs), and on the host
 --      `mmo.battle_ruleset` -- before the fight opens;
 --   2. put a choice on the wire when a turn opens;
 --   3. apply the ordered `mmo.battle_event` stream to a screen.
@@ -32,15 +33,14 @@
 -- modified client can lie on the sheet it sends, which is the accepted v1
 -- surface written down in src/Wire.lua's mediated-battle section.
 --
--- The screen is deliberately small.  It draws two status boxes and a message
--- box, and its only menu is the move list -- no items, no switching, no run
--- consent.  A fuller field belongs with the co-op renderer (I3c); what this
--- owes today is that a fight can be started, played and finished without the
--- engine's link stack being loaded at all.
+-- The screen draws a classic Gen1 1v1 field: foe front pic + top-left HUD,
+-- ally back pic + bottom HUD, message box, optional AnimPlayer. Co-op still
+-- owns the four-slot renderer.
 
 local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
+local Effects = need("BattleSim/Effects")
 
 local M = {}
 M.__index = M
@@ -68,13 +68,31 @@ local function loadEngine()
     engine = false
     return engine
   end
-  -- Optional, and separately: the HP bar is the game's own tiles, but a build
-  -- that cannot draw one still has a number to print.  A missing bar costs a
-  -- nicer readout; a missing font costs the screen.
-  local okTiles, HudTiles = pcall(require, "src.render.HudTiles")
-  engine = { Font = Font, HudTiles = okTiles and HudTiles or nil }
+  local function grab(key, path)
+    local good, value = pcall(require, path)
+    if good then return value end
+    return nil
+  end
+  engine = {
+    Font = Font,
+    HudTiles = grab("HudTiles", "src.render.HudTiles"),
+    AnimPlayer = grab("AnimPlayer", "src.battle.AnimPlayer"),
+    BattleState = grab("BattleState", "src.battle.BattleState"),
+    Sprites = grab("Sprites", "src.pokemon.Sprites"),
+  }
   return engine
 end
+
+-- Classic 1v1 anchors (AnimPlayer / BattleState pic windows).
+-- Ally back pics draw at 2x on the GB (BattleState.BATTLE_SCALE_DEFAULT.back);
+-- front pics stay 1x. MediatedBattle used to draw both at 1x, which left the
+-- player mon looking like a postage stamp next to the foe.
+local CLASSIC_PLAYER = { x = 8, y = 40 }
+local CLASSIC_ENEMY = { x = 88, y = 0 }
+local PLAYER_PIC_SCALE = 2
+M.PLAYER_PIC_SCALE = PLAYER_PIC_SCALE
+M.CLASSIC_PLAYER = CLASSIC_PLAYER
+M.CLASSIC_ENEMY = CLASSIC_ENEMY
 
 -- ------- snapshots
 --
@@ -167,6 +185,8 @@ end
 
 M.typeOrder = typeOrder
 
+local moveOf
+
 -- The ephemeral rules for one match: the type chart, as integer percent.
 --
 -- The engine's table holds x10 multipliers (5 is half, 20 is double, 0 is
@@ -201,10 +221,63 @@ function M.snapshotRuleset(game)
     end
   end
 
+  -- Gen1 Special category is type-based.  Indices match the chart axes above
+  -- so the intermediator never needs type *names*.
+  local SPECIAL = {
+    FIRE = true, WATER = true, GRASS = true, ELECTRIC = true,
+    ICE = true, PSYCHIC = true, DRAGON = true,
+  }
+  local specialTypes = {}
+  if order then
+    for i, id in ipairs(order.ids) do
+      if SPECIAL[id] then specialTypes[#specialTypes + 1] = i - 1 end
+    end
+    -- A chart with types but zero Special matches means Light Screen / Spc
+    -- damage will never fire. Name the remediation rather than silently
+    -- degrading to "everything is Physical".
+    if #order.ids > 0 and #specialTypes == 0 then
+      mod.log:warn("type chart has %d types but none match Gen1 Special "
+        .. "(FIRE/WATER/GRASS/ELECTRIC/ICE/PSYCHIC/DRAGON); Light Screen and "
+        .. "Special damage will treat every move as Physical. Check that "
+        .. "type ids use those names (or upload specialTypes yourself)",
+        #order.ids)
+    end
+  end
+
+  -- Ephemeral Metronome pool from the host's own move table.  Sorted for a
+  -- stable wire order; Metronome itself is excluded so a call cannot recurse.
+  local metronomePool = {}
+  local moveCount = 0
+  if type(data) == "table" and type(data.moves) == "table" then
+    local ids = {}
+    for id in pairs(data.moves) do
+      moveCount = moveCount + 1
+      ids[#ids + 1] = id
+    end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+      if #metronomePool >= Config.BATTLE_METRONOME_POOL_MAX then break end
+      local sheet = moveOf(data, { id = id, pp = 5 }, order)
+      if sheet and sheet.effect ~= Effects.idOf("METRONOME_EFFECT")
+         and id ~= "STRUGGLE" and id ~= "struggle" then
+        metronomePool[#metronomePool + 1] = sheet
+      end
+    end
+    if moveCount > 0 and #metronomePool == 0 then
+      mod.log:warn("move table has %d entries but Metronome pool is empty; "
+        .. "METRONOME will say \"But nothing happened\". Check move sheets "
+        .. "decode (power/type/effect) from START > POKeMON",
+        moveCount)
+    end
+  end
+
   -- No seed: the intermediator is the only party that rolls anything and can
   -- perfectly well pick its own.  Offering one would be claiming a say in the
   -- randomness that this side deliberately no longer has.
-  return { chart = chart }
+  local out = { chart = chart }
+  if #specialTypes > 0 then out.specialTypes = specialTypes end
+  if #metronomePool > 0 then out.metronomePool = metronomePool end
+  return out
 end
 
 local function intOr(value, fallback)
@@ -226,18 +299,17 @@ end
 -- conversion the engine's own `Damage.accuracyRoll` does, so a mediated fight
 -- misses exactly as often as the same fight played offline.
 --
--- `effect` and `chance` go out as 0, and that is honest rather than lazy: the
--- engine names an effect with a string id ("NO_ADDITIONAL_EFFECT") while the
--- wire carries a number, there is no shared numbering for the two to agree on,
--- and `src/BattleSim/Turn.lua` branches on neither today.  Inventing a mapping
--- here would be inventing a rule the far end cannot read.
+-- `effect` and `chance` ride on the wire as integers.  The engine names an
+-- effect with a string id ("SLEEP_EFFECT"); `Effects.idOf` is the shared
+-- numbering both runtimes agree on.  Turn.lua does not branch on them until
+-- Phase 1+ handlers land.
 --
 -- The defaults are what a client with no record for a move sends -- a modded
 -- move whose definition did not survive, most likely.  40 power at full
 -- accuracy on type 0 is a plain hit: weaker than assuming the best and far
 -- better than refusing the move, which would refuse the monster and then the
 -- whole party.
-local function moveOf(data, slot, order)
+moveOf = function(data, slot, order)
   if type(slot) ~= "table" then return nil end
   local id = Wire.id(slot.id)
   if not id then return nil end
@@ -253,14 +325,26 @@ local function moveOf(data, slot, order)
   local typeId = 0
   if order and def and order.index[def.type] then typeId = order.index[def.type] end
 
+  local effect = 0
+  local chance = 0
+  if def then
+    if def.effect then
+      effect = Effects.idOf(def.effect) or 0
+    end
+    chance = clamp(intOr(def.chance, 0), 0, 100)
+  end
+
+  local pp = clamp(intOr(slot.pp, 0), 0, 99)
+  local maxPp = clamp(intOr(slot.maxPp or slot.pp, pp), pp, 99)
   return {
     id       = id,
-    pp       = clamp(intOr(slot.pp, 0), 0, 99),
+    pp       = pp,
+    maxPp    = maxPp,
     power    = clamp(intOr(def and def.power, 40), 0, 999),
     accuracy = accuracy,
     type     = typeId,
-    effect   = 0,
-    chance   = 0,
+    effect   = effect,
+    chance   = chance,
   }
 end
 
@@ -300,6 +384,11 @@ local function fourOf(raw, low, high)
     local n = tonumber(raw[engineKey])
     if not n or n ~= n then return nil end
     out[wireKey] = clamp(floor(n), low, high)
+  end
+  -- Optional HP Stat Exp for HP_UP (engine key `hp`).
+  local hp = tonumber(raw.hp)
+  if hp and hp == hp then
+    out.hp = clamp(floor(hp), low, high)
   end
   return out
 end
@@ -381,6 +470,9 @@ function M.snapshotMons(game, party)
         if #moves > 0 then
           out[#out + 1] = {
             species = species,
+            -- Registry id for battle art (local only; the wire keeps `species`
+            -- as the display / nickname token the sim narrates under).
+            speciesId = mon.species,
             level   = clamp(intOr(mon.level, 1), 1, Wire.LEVEL_MAX),
             hp      = clamp(intOr(mon.hp, maxHp), 0, maxHp),
             maxHp   = maxHp,
@@ -395,6 +487,12 @@ function M.snapshotMons(game, party)
             types   = typesOf(data, mon, order),
             moves   = moves,
           }
+          local def = type(data) == "table" and type(data.pokemon) == "table"
+            and data.pokemon[mon.species] or nil
+          local rate = def and tonumber(def.catchRate)
+          if rate then
+            out[#out].catchRate = clamp(floor(rate), 0, 255)
+          end
         end
       end
     end
@@ -431,12 +529,166 @@ end
 -- the intermediator knows which is which from the session it brokered -- and is
 -- what tells a co-op upload apart: it is how the host of a fight against an NPC
 -- fills the synthetic npc seat (side "b") without displacing its own.
-function M.sendParty(transport, battle, mons, side)
+-- `bag` is the optional inventory claim for this fight (PROTOCOL 15); omit or
+-- pass nil for an empty sheet.
+-- `badges` is optional: a list of earned badge ids for human seats (not NPC).
+function M.sendParty(transport, battle, mons, side, bag, badges)
   if not (transport and battle) then return false end
   if type(mons) ~= "table" or #mons == 0 then return false end
-  transport:send(Wire.BATTLE_PARTY,
-    { battle = battle, mons = mons, side = side })
+  local msg = { battle = battle, mons = mons, side = side, bag = bag }
+  if badges then msg.badges = badges end
+  transport:send(Wire.BATTLE_PARTY, msg)
   return true
+end
+
+-- The badges this player has earned, as a list for the wire.
+--
+-- Read off the badge *rows* rather than off a list written down here, so a mod
+-- that adds a badge -- or retunes which ones boost what -- is covered without
+-- this file knowing about it.
+function M.badgesOf(game)
+  local data = game and game.data
+  local inventory = game and game.save and game.save.inventory
+  if not (data and inventory) then return nil end
+  local rows = data.constants and data.constants.badgeBoosts
+  if not rows then
+    local ok, Damage = pcall(require, "src.battle.Damage")
+    rows = ok and Damage and Damage.BADGE_BOOSTS or nil
+  end
+  local out = {}
+  for _, row in ipairs(rows or {}) do
+    if row.badge and inventory[row.badge] then out[#out + 1] = row.badge end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
+-- Battle-usable stacks from the local save, for the hub bag proof.
+-- Only ids BattleSim knows (`itemEffect`); vitamins included (fight-local EV).
+-- Truncated to BATTLE_BAG_MAX so the menu and the upload stay the same set.
+function M.itemIsBattleUsable(id, game)
+  if type(id) ~= "string" or id == "" then return nil end
+  local effect = Effects.itemEffect(id)
+  if not effect then return nil end
+  local items = (game and game.data and game.data.items) or {}
+  local def = items[id]
+  if effect.pokeFlute or effect.noConsume then return effect end
+  if def and (def.key or def.machine) then return nil end
+  return effect
+end
+
+-- Engine save.statExp keys for BattleSim vitaminStat tokens.
+local VITAMIN_SAVE_KEY = {
+  hp = "hp", atk = "attack", def = "defense", spd = "speed", spc = "special",
+}
+
+-- Write Gen1 vitamin Stat Exp onto save.party[partyIndex] (1-based).
+-- Fight-local sheet mutation is the hub's job; permanence is the client's.
+-- Only call after an `item` event with amount=1 (vitamin applied).
+function M.writebackVitamin(game, partyIndex, itemId)
+  local effect = Effects.itemEffect(itemId)
+  local wireStat = effect and effect.vitaminStat
+  local saveKey = wireStat and VITAMIN_SAVE_KEY[wireStat]
+  if not saveKey then return false end
+  local party = game and game.save and game.save.party
+  local mon = party and party[partyIndex]
+  if type(mon) ~= "table" then return false end
+  mon.statExp = mon.statExp or {}
+  local before = math.max(0, math.floor(tonumber(mon.statExp[saveKey]) or 0))
+  if before >= Effects.VITAMIN_FAIL_AT then return false end
+  local after = math.min(65535, before + Effects.VITAMIN_GAIN)
+  mon.statExp[saveKey] = after
+
+  -- Recalc live battle stats / max HP so the party screen does not lag.
+  -- Prefer engine Stats.calc when the species def is reachable; otherwise apply
+  -- the same Gen1 √EV contribution delta BattleSim uses (no ROM / no require).
+  local oldMax = tonumber(mon.stats and mon.stats.hp) or tonumber(mon.hp) or 0
+  local level = math.max(1, math.floor(tonumber(mon.level) or 1))
+  local applied = false
+  local def = game.data and game.data.pokemon and game.data.pokemon[mon.species]
+  local okStats, Stats = pcall(require, "src.pokemon.Stats")
+  if okStats and Stats and type(Stats.calc) == "function"
+     and type(def) == "table" and type(def.baseStats) == "table" then
+    local ok, stats = pcall(Stats.calc, def, level, mon.dvs or {}, mon.statExp)
+    if ok and type(stats) == "table" then
+      mon.stats = stats
+      local newMax = tonumber(stats.hp) or oldMax
+      local cur = tonumber(mon.hp) or oldMax
+      if wireStat == "hp" and newMax > oldMax then
+        mon.hp = math.min(newMax, cur + (newMax - oldMax))
+      else
+        mon.hp = math.max(0, math.min(cur, newMax))
+      end
+      applied = true
+    end
+  end
+  if not applied then
+    local function contrib(ev)
+      return math.floor(math.sqrt(math.max(0, ev)) / 4)
+    end
+    local delta = math.floor((contrib(after) - contrib(before)) * level / 100)
+    mon.stats = mon.stats or {}
+    if wireStat == "hp" then
+      local newMax = math.max(1, oldMax + delta)
+      mon.stats.hp = newMax
+      local cur = tonumber(mon.hp) or oldMax
+      mon.hp = math.min(newMax, cur + math.max(0, delta))
+    else
+      local curStat = math.max(1, math.floor(tonumber(mon.stats[saveKey]) or 1))
+      mon.stats[saveKey] = math.max(1, curStat + delta)
+      local cur = tonumber(mon.hp) or oldMax
+      local maxHp = tonumber(mon.stats.hp) or oldMax
+      if maxHp > 0 then mon.hp = math.max(0, math.min(cur, maxHp)) end
+    end
+  end
+  return true
+end
+
+-- Resolve which save.party index a co-op seat mon is.
+-- `seatPartyIndex` (optional) names seat.party[i] after an ITEM party pick;
+-- default is the seat's active. Prefers identity match against save.party,
+-- then the seat index as a last resort.
+function M.vitaminPartyIndex(game, seat, seatPartyIndex)
+  if type(seat) ~= "table" then return 1 end
+  local idx = seatPartyIndex or seat.active or 1
+  local fieldMon = seat.party and seat.party[idx]
+  if not fieldMon and seat.battler then fieldMon = seat.battler.mon end
+  local saveParty = game and game.save and game.save.party
+  if fieldMon and type(saveParty) == "table" then
+    for i, mon in ipairs(saveParty) do
+      if mon == fieldMon then return i end
+    end
+  end
+  if type(idx) == "number" and idx >= 1 then return idx end
+  return 1
+end
+
+function M.bagCounts(list)
+  local map = {}
+  for _, entry in ipairs(list or {}) do
+    if type(entry) == "table" and type(entry.id) == "string"
+       and type(entry.count) == "number" and entry.count > 0 then
+      map[entry.id] = entry.count
+    end
+  end
+  return map
+end
+
+function M.snapshotBag(game)
+  local out = {}
+  local inventory = (game and game.save and game.save.inventory) or {}
+  for id, count in pairs(inventory) do
+    if (count or 0) > 0 and M.itemIsBattleUsable(id, game) then
+      local n = count
+      if n > Config.BATTLE_BAG_COUNT_MAX then n = Config.BATTLE_BAG_COUNT_MAX end
+      out[#out + 1] = { id = id, count = n }
+    end
+  end
+  table.sort(out, function(a, b) return a.id < b.id end)
+  while #out > Config.BATTLE_BAG_MAX do
+    out[#out] = nil
+  end
+  return out
 end
 
 -- One turn's intent.  A choice and never a result: the fields name what was
@@ -508,12 +760,25 @@ function M.new(opts)
     -- thinking about.
     autoPick  = opts.autoPick == true,
 
+    -- Protocol-only wild: mode "wild", optional wildParty sheets + engine mon
+    -- kept for Party.add / Boxes.deposit on a catch outcome.
+    mode         = opts.mode or "1v1",
+    wildParty    = opts.wildParty,
+    wildCatchMon = opts.wildCatchMon,
+
     -- What src/Sessions.lua's isFightState looks for.  A mediated battle is
     -- not a BattleState and carries none of the engine's markers, so without
     -- this an invite could pop over a live fight.
     mmoBattle = true,
 
-    phase     = "setup",   -- setup | play | choose | over
+    -- Same contract as engine BattleState / CoopBattle: without isOpaque the
+    -- stack keeps drawing the overworld underneath and beginFrame clears the
+    -- UI canvas transparent. Letterbox voids stay the engine default (black)
+    -- -- letterboxWhite would paint SGB paper pink against this screen's
+    -- colors=false white fill.
+    isOpaque = true,
+
+    phase     = "setup",   -- setup | play | choose | move | item | item_party | item_move | switch | over
     uploaded  = false,
     finished  = false,
     left      = false,
@@ -525,14 +790,28 @@ function M.new(opts)
     shown     = nil,
     dwell     = 0,
     cursor    = 1,
+    commandIndex = 1,
+    itemIndex = 1,
+    switchIndex = 1,
+    itemPick = nil,        -- { id, effect } while picking party/move
+    itemList = nil,
+    bagSheet = nil,        -- id → count matching the uploaded PROTOCOL 15 bag
+    pendingItem = nil,     -- choice sent; debit only after hub `item` event
+    pendingItemSlot = nil, -- 1-based party index for vitamin writeback
     seq       = 0,         -- the highest event sequence applied
     gaps      = 0,         -- events that arrived out of order
     pendingTurn = false,
+    answeredTurn = false, -- own seat already answered (forced skip or filed choice)
+    mustReplace = false,  -- faint with bench: next turn opens the switch picker
+    replaceOnly = false,  -- B cannot cancel out of a forced replacement
+    anim = nil,           -- { anim = id, slot = n } while AnimPlayer runs
+    animPlayer = nil,
     result    = nil,
     -- Set while the hub link is down under a live fight: the intermediator's
     -- reconnect grace is running, and onTransportReady is what resumes it.
     awaitingReconnect = false,
     reconnectSent = false,
+    liveMoves   = nil,     -- referee-published list after Transform/Mimic
   }, M)
 end
 
@@ -571,9 +850,16 @@ function M:start(game)
   self.uploaded = true
   self.mine = mons
 
-  if self.role == "host" then M.sendRuleset(self.transport, self.game) end
-  -- No side: a 1v1 has none to name.
-  M.sendParty(self.transport, self.battle, mons)
+  if self.role == "host" or self.mode == "wild" then
+    M.sendRuleset(self.transport, self.game)
+  end
+  -- No side: a 1v1 has none to name. Wild uploads the encounter as side "b".
+  local bag = M.snapshotBag(self.game)
+  self.bagSheet = M.bagCounts(bag)
+  M.sendParty(self.transport, self.battle, mons, nil, bag, M.badgesOf(self.game))
+  if self.mode == "wild" and type(self.wildParty) == "table" and #self.wildParty > 0 then
+    M.sendParty(self.transport, self.battle, self.wildParty, "b")
+  end
   return true
 end
 
@@ -604,11 +890,22 @@ function M:onReady(msg)
     elseif holds(sides.a, self.peerId) then
       self.mySide = "b"
     end
+  elseif self.mode == "wild" then
+    -- Solo wild: we sit on side a; the synthetic seat is the peer for resultFor.
+    self.mySide = "a"
+    self.peerId = sides.b and sides.b[1] or self.peerId
+    self.selfId = sides.a and sides.a[1] or self.selfId
   end
+
+  if msg.mode then self.mode = msg.mode end
 
   if self.phase == "setup" then
     self.phase = "play"
-    self:say(("%s wants to\nfight!"):format(self.peerName))
+    if self.mode == "wild" then
+      self:say("A wild pokemon\nappeared!")
+    else
+      self:say(("%s wants to\nfight!"):format(self.peerName))
+    end
   end
 end
 
@@ -635,6 +932,14 @@ function M:onEvent(msg)
   if kind == "msg" then
     self:say(msg.text)
 
+  elseif kind == "anim" then
+    -- Queued with the message stream so the flash lands in referee order.
+    if msg.text then
+      self.lines[#self.lines + 1] = {
+        anim = msg.text, slot = msg.slot, side = msg.side,
+      }
+    end
+
   elseif kind == "send" or kind == "switch" then
     -- The first HP we are told about is a full bar: the sim sends this the
     -- moment a monster comes out, so the number is that monster's maximum
@@ -642,37 +947,92 @@ function M:onEvent(msg)
     -- maximum there is -- an event carries current HP and nothing else -- so
     -- the largest value ever seen is what the bar is drawn against.
     self:noteSlot(msg)
+    -- New mon on our seat drops any Transform/Mimic overlay until the
+    -- referee publishes another `moves` list for it.
+    if msg.slot == self:mySlot() then
+      self.liveMoves = nil
+      self.mustReplace = false
+      if self.replaceOnly then
+        self.replaceOnly = false
+        if self.phase == "switch" then self.phase = "play" end
+      end
+    end
     if msg.text then
       if msg.slot ~= self:mySlot() then
         self:say(("%s sent out\n%s!"):format(self.peerName, msg.text))
+        self:refreshSlotSprite(msg.slot, false)
       else
         self:say(("Go! %s!"):format(msg.text))
         self:trackActive(msg.text)
+        local mon = self.mine and self.mine[self.active]
+        local slot = self.slots[msg.slot]
+        if slot and mon and mon.level then slot.level = mon.level end
+        self:refreshSlotSprite(msg.slot, true)
       end
     end
 
   elseif kind == "damage" or kind == "drain" then
     self:noteSlot(msg)
+    self:syncMineHp(msg)
 
   elseif kind == "faint" then
     local slot = self:noteSlot(msg)
     if slot then slot.hp = 0 end
+    if msg.slot == self:mySlot() then
+      local mon = self.mine and self.mine[self.active]
+      if mon then mon.hp = 0 end
+      -- Authoritative: hub/sim sets amount=1 when a living bench remains.
+      -- Absent amount (older stream) falls back to local party HP.
+      if msg.amount == 1 then
+        self.mustReplace = true
+      elseif msg.amount ~= nil then
+        self.mustReplace = false
+      else
+        local hasBench = false
+        for _, m in ipairs(self.mine or {}) do
+          if (m.hp or 0) > 0 then hasBench = true; break end
+        end
+        self.mustReplace = hasBench
+      end
+    end
     if msg.text then self:say(("%s fainted!"):format(msg.text)) end
+    -- After the faint line has been read (and any anim still ahead of it in
+    -- `lines` has played), drop the pic. Queued behind the say so the KO stays
+    -- on screen through the flash + "X fainted!".
+    self.lines[#self.lines + 1] = { clearPic = msg.slot }
 
   elseif kind == "status" then
     self:noteSlot(msg)
+
+  elseif kind == "item" then
+    -- Debit only once the hub has accepted and resolved the item choice.
+    -- Spending on send left a soft-lock when the bag proof refused: phase
+    -- "play", item gone, no `chose`.
+    if msg.slot == self:mySlot() then
+      self:confirmPendingItem(msg.text, msg.amount)
+    end
 
   elseif kind == "turn" then
     -- Held rather than acted on: the lines this turn's events produced are
     -- still being read, and opening the menu over them would take the box the
     -- player is reading out from under them.  update() opens it once the
-    -- queue is empty.
+    -- queue is empty — unless the hub already filed our choice (forced skip /
+    -- recharge / trap), in which case answeredTurn keeps the menu closed.
     self.pendingTurn = true
+    self.answeredTurn = false
+    -- Hub refused the item (never debited) or spend already landed via `item`.
+    self.pendingItem = nil
+    self.pendingItemSlot = nil
 
   elseif kind == "over" then
     -- The field is done; the outcome is a separate message and is what this
     -- screen actually ends on.
     self.pendingTurn = false
+    self.answeredTurn = false
+    self.mustReplace = false
+    self.replaceOnly = false
+    self.pendingItem = nil
+    self.pendingItemSlot = nil
 
   elseif kind == "wait" then
     if msg.text then self:say(("Waiting for\n%s..."):format(msg.text)) end
@@ -682,6 +1042,43 @@ function M:onEvent(msg)
     -- caption is done.
     self.awaitingReconnect = false
     if msg.text then self:say(("%s is back!"):format(msg.text)) end
+
+  elseif kind == "chose" or kind == "unchose" then
+    if msg.slot == self:mySlot() then
+      if kind == "chose" then
+        -- Forced skip / our filed answer: do not open (or keep) the command
+        -- menu for a turn the hub has already spent.
+        self.answeredTurn = true
+        self.pendingTurn = false
+        if self.phase == "choose" or self.phase == "move"
+           or self.phase == "item" or self.phase == "item_party"
+           or self.phase == "item_move" or self.phase == "switch" then
+          self.phase = "play"
+        end
+      else
+        self.answeredTurn = false
+        self.pendingItem = nil
+        self.pendingItemSlot = nil
+      end
+    end
+
+  elseif kind == "moves" then
+    if msg.slot == self:mySlot() and type(msg.moves) == "table" then
+      self.liveMoves = msg.moves
+    end
+  end
+end
+
+-- Keep `mine[].hp` in step with field damage so partyRows / mustReplace see
+-- the same numbers the referee just applied.
+function M:syncMineHp(msg)
+  if msg.slot ~= self:mySlot() then return end
+  local mon = self.mine and self.mine[self.active]
+  if not mon then return end
+  if msg.hp ~= nil then
+    mon.hp = msg.hp
+  elseif msg.amount ~= nil and msg.t == "damage" then
+    mon.hp = max(0, (mon.hp or 0) - msg.amount)
   end
 end
 
@@ -698,6 +1095,8 @@ function M:noteSlot(msg)
   end
   if msg.text and (msg.t == "send" or msg.t == "switch") then
     slot.species = msg.text
+    slot.sprite = nil
+    slot.koHold = nil
   end
   if msg.hp ~= nil then
     slot.hp = msg.hp
@@ -706,6 +1105,13 @@ function M:noteSlot(msg)
     slot.hp = max(0, slot.hp - msg.amount)
   end
   if msg.status ~= nil then slot.status = msg.status end
+  -- Do not clear the pic here. Faint often arrives in the same batch as the
+  -- move's `anim`, which is only played later from `lines` -- nil'ing the
+  -- sprite the moment HP hits 0 made the mon vanish under the still-queued
+  -- flash. `clearPic` (queued after the faint line) releases it.
+  if msg.t == "faint" then
+    slot.koHold = true
+  end
   return slot
 end
 
@@ -718,15 +1124,90 @@ end
 -- often and more quietly.
 function M:trackActive(species)
   for index, mon in ipairs(self.mine or {}) do
-    if mon.species == species then
+    if mon.species == species or mon.speciesId == species then
       self.active = index
       return
     end
   end
 end
 
+-- Map a narrated name back to a pokemon registry id for battle art.
+function M:speciesKeyFor(label, preferMine)
+  if type(label) ~= "string" or label == "" then return nil end
+  if preferMine then
+    for _, mon in ipairs(self.mine or {}) do
+      if mon.species == label and mon.speciesId then return mon.speciesId end
+    end
+    local active = self.mine and self.mine[self.active]
+    if active and active.species == label and active.speciesId then
+      return active.speciesId
+    end
+  end
+  local data = self.game and self.game.data
+  local pokedex = data and data.pokemon
+  if type(pokedex) ~= "table" then return nil end
+  if pokedex[label] then return label end
+  for id, def in pairs(pokedex) do
+    if type(def) == "table" then
+      local name = Wire.name(def.name or id)
+      if name == label then return id end
+    end
+  end
+  return nil
+end
+
+function M:refreshSlotSprite(index, isPlayer)
+  local slot = self.slots[index]
+  if not slot or not slot.species or (slot.hp or 0) <= 0 then
+    if slot then slot.sprite = nil end
+    return
+  end
+  local eng = loadEngine()
+  local data = self.game and self.game.data
+  if not (eng and eng.BattleState and eng.BattleState.makeBattler and data) then
+    slot.sprite = nil
+    return
+  end
+  local key = self:speciesKeyFor(slot.species, isPlayer)
+  if not key or not data.pokemon[key] then
+    slot.sprite = nil
+    return
+  end
+  local monHint = nil
+  if isPlayer then
+    monHint = self.mine and self.mine[self.active]
+  end
+  local stub = {
+    species = key,
+    nickname = slot.species,
+    level = (monHint and monHint.level) or slot.level or 1,
+    hp = slot.hp or 1,
+    stats = {
+      hp = slot.maxHp or 1,
+      attack = 1, defense = 1, speed = 1, special = 1,
+    },
+    moves = (monHint and monHint.moves) or { { id = "TACKLE", pp = 1 } },
+    status = slot.status,
+  }
+  local save = isPlayer and self.game and self.game.save or nil
+  local ok, battler = pcall(eng.BattleState.makeBattler, data, stub, isPlayer, save)
+  if ok and battler and battler.sprite then
+    slot.sprite = battler.sprite
+    slot.level = stub.level
+  else
+    slot.sprite = nil
+  end
+end
+
 function M:activeMon()
-  return self.mine and self.mine[self.active] or nil
+  local mon = self.mine and self.mine[self.active] or nil
+  if mon and self.liveMoves then
+    local copy = {}
+    for k, v in pairs(mon) do copy[k] = v end
+    copy.moves = self.liveMoves
+    return copy
+  end
+  return mon
 end
 
 -- How it ended, from the only party that knows.
@@ -741,7 +1222,7 @@ function M:onOutcome(msg)
   if self.finished then return end
   if msg.battle ~= self.battle then return end
   self.pendingTurn = false
-  self:finish(M.resultFor(msg, self.peerId), msg.reason)
+  self:finish(M.resultFor(msg, self.peerId), msg.reason, msg)
 end
 
 -- This player's result, worked out from who is named rather than from the
@@ -790,17 +1271,49 @@ local REASONS = {
   disconnect = "The link was lost.",
   run        = "Someone ran away!",
   forfeit    = "Someone gave up.",
+  catch      = "Gotcha!",
 }
 
-function M:finish(result, reason)
+function M:grantCatch(msg)
+  local mon = self.wildCatchMon
+  if not mon and msg and msg.caught then
+    -- Sheet-only path: cannot rebuild a full engine mon without ROM data.
+    self:say("Caught, but could not\nadd to the party.")
+    return
+  end
+  if not mon then return end
+  local game = self.game
+  local save = game and game.save
+  if not save then return end
+  local okParty, Party = pcall(require, "src.pokemon.Party")
+  if okParty and Party.add(save.party, mon) then
+    self:say((mon.nickname or mon.species or "It") .. " was\nadded to the party!")
+    return
+  end
+  local okBoxes, Boxes = pcall(require, "src.pokemon.Boxes")
+  if okBoxes and Boxes.deposit(save, mon) then
+    self:say((mon.nickname or mon.species or "It") .. " was\nsent to the PC!")
+    return
+  end
+  self:say("But every BOX\nis full!")
+end
+
+function M:finish(result, reason, msg)
   if self.finished then return end
   self.finished = true
+  self.pendingItem = nil
+  self.pendingItemSlot = nil
   self.result = result or "draw"
   self.phase = "over"
   self.cursor = 1
-  self:say(ENDINGS[self.result] or ENDINGS.draw)
-  local why = REASONS[reason]
-  if why then self:say(why) end
+  if reason == "catch" and result == "win" then
+    self:say("Gotcha!")
+    self:grantCatch(msg)
+  else
+    self:say(ENDINGS[self.result] or ENDINGS.draw)
+    local why = REASONS[reason]
+    if why then self:say(why) end
+  end
 end
 
 -- ------- outbound
@@ -845,6 +1358,7 @@ function M:sendChoice(fields)
   if not M.submitChoice(self.transport, self.battle, fields) then return false end
   self.phase = "play"
   self.pendingTurn = false
+  self.answeredTurn = true
   return true
 end
 
@@ -857,6 +1371,311 @@ function M:pickMove(index)
   local moves = mon and mon.moves
   if not (moves and moves[index]) then return false end
   return self:sendChoice({ action = "fight", move = index - 1 })
+end
+
+-- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
+M.COMMANDS = { "FIGHT", "SWITCH", "ITEM", "RUN" }
+
+local function gridStep(index, count, direction)
+  local row = math.floor((index - 1) / 2)
+  local col = (index - 1) % 2
+  if direction == "left" then col = math.max(0, col - 1)
+  elseif direction == "right" then col = math.min(1, col + 1)
+  elseif direction == "up" then row = math.max(0, row - 1)
+  elseif direction == "down" then row = math.min(1, row + 1)
+  else return index end
+  local moved = row * 2 + col + 1
+  if moved > count then return index end
+  return moved
+end
+
+local GRID_KEYS = { "left", "right", "up", "down" }
+
+local function gridPress(index, count, input)
+  for _, key in ipairs(GRID_KEYS) do
+    if input:wasPressed(key) then return gridStep(index, count, key) end
+  end
+  return nil
+end
+
+function M:usableItems()
+  if self.itemList then return self.itemList end
+  local out = {}
+  local inventory = (self.game and self.game.save and self.game.save.inventory) or {}
+  local items = (self.game and self.game.data and self.game.data.items) or {}
+  -- Menu follows the uploaded bag sheet so players cannot pick stacks the hub
+  -- never received (truncation / unknown ids).
+  local bag = self.bagSheet
+  if type(bag) ~= "table" then bag = {} end
+  for id, bagCount in pairs(bag) do
+    local effect = M.itemIsBattleUsable(id, self.game)
+    if effect and (bagCount or 0) > 0 then
+      local inv = inventory[id] or 0
+      local count
+      if effect.noConsume then
+        count = (inv >= 1 or bagCount >= 1) and 1 or 0
+      else
+        count = math.min(bagCount, inv)
+      end
+      if count > 0 then
+        local def = items[id]
+        out[#out + 1] = {
+          id = id,
+          name = (def and def.name) or id,
+          count = count,
+          effect = effect,
+        }
+      end
+    end
+  end
+  table.sort(out, function(a, b) return a.name < b.name end)
+  self.itemList = out
+  return out
+end
+
+-- Hub resolved our pending item choice (`item` event on our seat).
+-- No `owed`: the hub already decremented; abandon must not refund a spent stack.
+-- `amount == 1` on a vitamin means the hub applied Stat Exp (writeback owed);
+-- a failed vitamin still debits the bag but must not touch save.statExp.
+function M:confirmPendingItem(itemId, amount)
+  local id = self.pendingItem
+  if not id then return false end
+  if itemId and itemId ~= id then return false end
+  local partyIndex = self.pendingItemSlot or self.active
+  self.pendingItem = nil
+  self.pendingItemSlot = nil
+  local effect = Effects.itemEffect(id)
+  if effect and effect.vitamin and amount == 1 then
+    M.writebackVitamin(self.game, partyIndex, id)
+  end
+  if effect and effect.noConsume then
+    self.itemList = nil
+    return true
+  end
+  local inventory = self.game and self.game.save and self.game.save.inventory
+  if not (inventory and (inventory[id] or 0) > 0) then return false end
+  inventory[id] = inventory[id] - 1
+  if inventory[id] <= 0 then inventory[id] = nil end
+  if self.bagSheet and self.bagSheet[id] then
+    self.bagSheet[id] = self.bagSheet[id] - 1
+    if self.bagSheet[id] <= 0 then self.bagSheet[id] = nil end
+  end
+  self.itemList = nil
+  return true
+end
+
+function M:partyRows()
+  local out = {}
+  for i, mon in ipairs(self.mine or {}) do
+    out[#out + 1] = {
+      index = i,
+      label = tostring(mon.species or ("#" .. i)),
+      fainted = (mon.hp or 0) <= 0,
+      active = i == self.active,
+    }
+  end
+  return out
+end
+
+function M:commitItem(partyIndex, moveIndex)
+  local pick = self.itemPick
+  if not pick then return false end
+  local effect = pick.effect or Effects.itemEffect(pick.id)
+  if not effect then
+    self:say("But it failed")
+    self.phase = "choose"
+    self.itemPick = nil
+    return false
+  end
+  local bagCount = self.bagSheet and self.bagSheet[pick.id] or 0
+  if bagCount < 1 then
+    self:say("You have nothing\nto use!")
+    self.phase = "choose"
+    self.itemPick = nil
+    return false
+  end
+  if not effect.noConsume then
+    local inventory = self.game and self.game.save and self.game.save.inventory
+    if not (inventory and (inventory[pick.id] or 0) > 0) then
+      self:say("You have nothing\nto use!")
+      self.phase = "choose"
+      self.itemPick = nil
+      return false
+    end
+  end
+  -- Do not debit yet: wait for the hub `item` event (or clear on turn/unchose).
+  self.pendingItem = pick.id
+  self.pendingItemSlot = partyIndex or self.active
+  local fields = { action = "item", item = pick.id }
+  if partyIndex then fields.slot = partyIndex - 1 end
+  if moveIndex then fields.move = moveIndex - 1 end
+  self.itemPick = nil
+  if not self:sendChoice(fields) then
+    self.pendingItem = nil
+    self.pendingItemSlot = nil
+    return false
+  end
+  return true
+end
+
+function M:updateCommand(input)
+  self.commandIndex = self.commandIndex or 1
+  local moved = gridPress(self.commandIndex, #M.COMMANDS, input)
+  if moved then
+    self.commandIndex = moved
+  elseif input:wasPressed("a") then
+    local command = M.COMMANDS[self.commandIndex]
+    if command == "FIGHT" then
+      self.cursor = 1
+      self.phase = "move"
+    elseif command == "SWITCH" then
+      self.switchIndex = 1
+      self.phase = "switch"
+    elseif command == "ITEM" then
+      self.itemIndex = 1
+      self.itemList = nil
+      self.phase = "item"
+    elseif command == "RUN" then
+      if self.mode == "wild" then
+        self:sendChoice({ action = "run" })
+      else
+        self:say("No! There's no\nrunning from a\ntrainer battle!")
+        -- Still spend the turn the way Gen 1 does against trainers.
+        self:sendChoice({ action = "run" })
+      end
+    end
+  end
+end
+
+function M:updateMoveMenu(input)
+  local mon = self:activeMon()
+  local moves = (mon and mon.moves) or {}
+  if #moves == 0 then
+    self.phase = "choose"
+    return
+  end
+  if input:wasPressed("up") then
+    self.cursor = self.cursor > 1 and self.cursor - 1 or #moves
+  elseif input:wasPressed("down") then
+    self.cursor = self.cursor < #moves and self.cursor + 1 or 1
+  elseif input:wasPressed("b") then
+    self.phase = "choose"
+  elseif input:wasPressed("a") then
+    self:pickMove(self.cursor)
+  end
+end
+
+function M:updateItemMenu(input)
+  local items = self:usableItems()
+  if #items == 0 then
+    self:say("You have nothing\nto use!")
+    self.phase = "choose"
+    return
+  end
+  if input:wasPressed("up") then
+    self.itemIndex = self.itemIndex > 1 and self.itemIndex - 1 or #items
+  elseif input:wasPressed("down") then
+    self.itemIndex = self.itemIndex < #items and self.itemIndex + 1 or 1
+  elseif input:wasPressed("b") then
+    self.phase = "choose"
+  elseif input:wasPressed("a") then
+    local pick = items[self.itemIndex]
+    local effect = pick.effect
+    self.itemPick = pick
+    if not effect then
+      -- Unknown bag id: still spend it and let the sim announce failure.
+      self:commitItem(self.active, nil)
+    elseif effect.ball or effect.pokeDoll or effect.pokeFlute then
+      self:commitItem(nil, nil)
+    elseif effect.activeOnly then
+      self:commitItem(self.active, nil)
+    elseif effect.needsMove then
+      self.cursor = 1
+      self.phase = "item_party"
+    elseif effect.needsParty or effect.faintedOnly then
+      self.switchIndex = 1
+      self.phase = "item_party"
+    else
+      self:commitItem(self.active, nil)
+    end
+  end
+end
+
+function M:updateItemParty(input)
+  local rows = self:partyRows()
+  if #rows == 0 then
+    self.phase = "item"
+    return
+  end
+  if input:wasPressed("up") then
+    self.switchIndex = self.switchIndex > 1 and self.switchIndex - 1 or #rows
+  elseif input:wasPressed("down") then
+    self.switchIndex = self.switchIndex < #rows and self.switchIndex + 1 or 1
+  elseif input:wasPressed("b") then
+    self.itemPick = nil
+    self.phase = "item"
+  elseif input:wasPressed("a") then
+    local row = rows[self.switchIndex]
+    local effect = self.itemPick and self.itemPick.effect
+    if effect and effect.faintedOnly and not row.fainted then
+      self:say("It won't have\nany effect.")
+      return
+    end
+    if effect and effect.needsMove then
+      self.cursor = 1
+      self.itemPartyIndex = row.index
+      self.phase = "item_move"
+      return
+    end
+    self:commitItem(row.index, nil)
+  end
+end
+
+function M:updateItemMove(input)
+  local mon = (self.mine or {})[self.itemPartyIndex or self.active]
+  local moves = (mon and mon.moves) or {}
+  if #moves == 0 then
+    self.phase = "item_party"
+    return
+  end
+  if input:wasPressed("up") then
+    self.cursor = self.cursor > 1 and self.cursor - 1 or #moves
+  elseif input:wasPressed("down") then
+    self.cursor = self.cursor < #moves and self.cursor + 1 or 1
+  elseif input:wasPressed("b") then
+    self.phase = "item_party"
+  elseif input:wasPressed("a") then
+    self:commitItem(self.itemPartyIndex or self.active, self.cursor)
+  end
+end
+
+function M:updateSwitch(input)
+  local rows = self:partyRows()
+  local choices = {}
+  for _, row in ipairs(rows) do
+    -- Forced replace: active is fainted / empty, so every living mon is legal.
+    if not row.fainted and (self.replaceOnly or not row.active) then
+      choices[#choices + 1] = row
+    end
+  end
+  if #choices == 0 then
+    self:say("There's no one\nto switch to!")
+    if not self.replaceOnly then self.phase = "choose" end
+    return
+  end
+  if self.switchIndex > #choices then self.switchIndex = #choices end
+  if input:wasPressed("up") then
+    self.switchIndex = self.switchIndex > 1 and self.switchIndex - 1 or #choices
+  elseif input:wasPressed("down") then
+    self.switchIndex = self.switchIndex < #choices and self.switchIndex + 1 or 1
+  elseif input:wasPressed("b") then
+    if not self.replaceOnly then self.phase = "choose" end
+  elseif input:wasPressed("a") then
+    local row = choices[self.switchIndex]
+    if row then
+      self:sendChoice({ action = "switch", slot = row.index - 1 })
+    end
+  end
 end
 
 -- ------- the screen
@@ -872,6 +1691,10 @@ end
 function M:exit()
   if self.left then return end
   self.left = true
+  -- Pending choice was never accepted: inventory untouched. Confirmed spends
+  -- already match the hub and must not be refunded.
+  self.pendingItem = nil
+  self.pendingItemSlot = nil
   if self.onDone then self.onDone(self.result or "draw") end
 end
 
@@ -884,11 +1707,47 @@ end
 -- Advance the message queue.  Returns true while a line is still being read,
 -- which is what holds the menu closed.
 function M:tickMessages(dt, input)
+  -- Move flash holds the queue the way CoopBattle does: AnimPlayer when the
+  -- build has battle_anims, otherwise a short dwell so the stream still paces.
+  if self.anim then
+    local eng = loadEngine()
+    if self.animPlayer and self.animPlayer.update then
+      pcall(self.animPlayer.update, self.animPlayer)
+    end
+    local done = true
+    if self.animPlayer and self.animPlayer.isDone then
+      local ok, finished = pcall(self.animPlayer.isDone, self.animPlayer)
+      done = (not ok) or finished
+    else
+      self.dwell = self.dwell + (dt or 0)
+      done = self.dwell >= 0.35
+        or (input and (input:wasPressed("a") or input:wasPressed("b"))
+            and self.dwell >= MSG_MIN_DWELL)
+    end
+    if done or (input and input:wasPressed("b") and self.dwell >= MSG_MIN_DWELL) then
+      self.anim = nil
+      self.dwell = 0
+    end
+    return true
+  end
+
   self.dwell = self.dwell + (dt or 0)
 
   if self.shown == nil then
     if #self.lines == 0 then return false end
-    self.shown = table.remove(self.lines, 1)
+    local next = table.remove(self.lines, 1)
+    if type(next) == "table" and next.anim then
+      self:startAnim(next)
+      self.dwell = 0
+      return true
+    end
+    if type(next) == "table" and next.clearPic ~= nil then
+      self:releasePic(next.clearPic)
+      -- No dwell: the faint line ahead already held the screen. Keep ticking
+      -- if more of the queue remains.
+      return true
+    end
+    self.shown = next
     self.dwell = 0
     return true
   end
@@ -902,76 +1761,256 @@ function M:tickMessages(dt, input)
   return true
 end
 
+function M:ensureAnimPlayer()
+  if self.animPlayer ~= nil then return self.animPlayer end
+  local eng = loadEngine()
+  local data = self.game and self.game.data
+  if not (eng and eng.AnimPlayer and data and data.battle_anims) then
+    self.animPlayer = false
+    return nil
+  end
+  local ok, player = pcall(eng.AnimPlayer.new, data.battle_anims)
+  self.animPlayer = (ok and player) or false
+  return self.animPlayer or nil
+end
+
+function M:startAnim(row)
+  self.anim = row
+  local player = self:ensureAnimPlayer()
+  if not (player and player.start) then
+    return
+  end
+  -- Field slot on the wire; fall back to side so a missing slot still faces
+  -- the flash the right way rather than always as the foe.
+  local mine = row.slot == self:mySlot()
+    or (row.side ~= nil and row.side == self.mySide)
+  local ok = pcall(player.start, player, row.anim, mine)
+  if not ok then self.anim = row end -- still hold briefly via dwell path
+end
+
+-- Drop a KO'd pic after its faint line (and any anim queued ahead of it).
+function M:releasePic(index)
+  local slot = self.slots[index]
+  if not slot then return end
+  slot.sprite = nil
+  slot.koHold = nil
+end
+
 function M:update(dt)
   local input = self.game and self.game.input
 
   if self:tickMessages(dt, input) then return end
 
   if self.phase == "over" then
-    -- Nothing left to read and the fight is done: A takes the screen down, and
-    -- exit() is what tells the session to leave the hub's pairing.
     if input and input:wasPressed("a") then self:leave() end
     return
   end
 
-  if self.pendingTurn and self.phase ~= "choose" then
-    self.pendingTurn = false
-    self.phase = "choose"
-    self.cursor = 1
-    if self.autoPick then
-      self:pickMove(1)
-      return
+  if self.pendingTurn and not self.answeredTurn then
+    if self.mustReplace then
+      -- Outranks an open command menu: the seat has no active mon.
+      self.pendingTurn = false
+      self.replaceOnly = true
+      self.switchIndex = 1
+      self.phase = "switch"
+      if self.autoPick then
+        local rows = self:partyRows()
+        for _, row in ipairs(rows) do
+          if not row.fainted then
+            self:sendChoice({ action = "switch", slot = row.index - 1 })
+            return
+          end
+        end
+      end
+    elseif self.phase ~= "choose" and self.phase ~= "move"
+       and self.phase ~= "item" and self.phase ~= "item_party"
+       and self.phase ~= "item_move" and self.phase ~= "switch" then
+      self.pendingTurn = false
+      self.replaceOnly = false
+      self.phase = "choose"
+      self.commandIndex = 1
+      self.cursor = 1
+      if self.autoPick then
+        self:pickMove(1)
+        return
+      end
     end
+  elseif self.pendingTurn and self.answeredTurn then
+    self.pendingTurn = false
   end
 
-  if self.phase ~= "choose" or not input then return end
-
-  local mon = self:activeMon()
-  local moves = (mon and mon.moves) or {}
-  if #moves == 0 then return end
-
-  if input:wasPressed("up") then
-    self.cursor = self.cursor > 1 and self.cursor - 1 or #moves
-  elseif input:wasPressed("down") then
-    self.cursor = self.cursor < #moves and self.cursor + 1 or 1
-  elseif input:wasPressed("a") then
-    self:pickMove(self.cursor)
-  end
+  if not input then return end
+  if self.phase == "choose" then return self:updateCommand(input) end
+  if self.phase == "move" then return self:updateMoveMenu(input) end
+  if self.phase == "item" then return self:updateItemMenu(input) end
+  if self.phase == "item_party" then return self:updateItemParty(input) end
+  if self.phase == "item_move" then return self:updateItemMove(input) end
+  if self.phase == "switch" then return self:updateSwitch(input) end
 end
 
 -- ------- drawing
 --
--- Two status boxes and a message box, in the engine's own font and its own box
--- glyphs.  No field, no pictures and no animation: a wrong animation is worse
--- than none, and the co-op renderer is where a real field belongs.
+-- Classic Gen1 1v1: foe front pic (top-right) + HUD (top-left); ally back pic
+-- (bottom-left) + HUD (lower-right); message / menus in the bottom box.
+-- Coordinates mirror BattleState:drawHUDs / drawPicsLayer.
 
--- One side's box: who is out, their condition, and the game's own HP bar.
---
--- The bar is HudTiles.drawHPBar and not an approximation of it, so a mediated
--- fight reads like every other fight in the game -- same tiles, same colour
--- thresholds.  It is called behind a pcall with a printed fallback, exactly as
--- CoopBattle calls it: it reaches into palettes and a build that cannot resolve
--- one should lose the bar and not the screen.
-function M:drawSlot(Font, HudTiles, index, tileY, label)
-  local slot = self.slots[index]
-  Font.drawBox(0, tileY, 20, 4)
-  love.graphics.setColor(0, 0, 0, 1)
-  local top = (tileY + 1) * 8
-  if not (slot and slot.species) then
-    Font.draw(label, 16, top)
-    return
+local function nameX(Font, tx, name)
+  local n = 8
+  if Font and Font.split then
+    local ok, parts = pcall(Font.split, name)
+    if ok and type(parts) == "table" then n = #parts end
+  else
+    n = #tostring(name or "")
   end
+  return tx * 8 + (n <= 2 and 16 or n <= 4 and 8 or 0)
+end
 
-  Font.draw(slot.species:sub(1, 10), 16, top)
-  if slot.status then Font.draw(slot.status, 16 + 11 * 8, top) end
+function M:enemyPicXY(sprite)
+  if not sprite then return CLASSIC_ENEMY.x, CLASSIC_ENEMY.y end
+  local ok, w, h = pcall(sprite.getDimensions, sprite)
+  if not ok then return CLASSIC_ENEMY.x, CLASSIC_ENEMY.y end
+  local tw = floor(w / 8)
+  local th = floor(h / 8)
+  if tw < 1 then tw = 1 elseif tw > 7 then tw = 7 end
+  if th < 1 then th = 1 elseif th > 7 then th = 7 end
+  local hPad = floor((8 - tw) / 2)
+  local vPad = 7 - th
+  return 96 + 8 * hPad, 8 * vPad
+end
 
-  local shown = { hp = slot.hp, stats = { hp = slot.maxHp } }
+function M:playerPicXY(sprite)
+  local scale = PLAYER_PIC_SCALE
+  if not sprite then return CLASSIC_PLAYER.x, CLASSIC_PLAYER.y, scale end
+  local ok, w, h = pcall(sprite.getDimensions, sprite)
+  if not ok then return CLASSIC_PLAYER.x, CLASSIC_PLAYER.y, scale end
+  -- Same contract as BattleState.backPlacement: feet flush on y=96 at `scale`.
+  local BS = engine and engine.BattleState
+  if BS and BS.backPlacement then
+    local x, y, s = BS.backPlacement(w, h, 0, 0, scale)
+    return x, y, s
+  end
+  return 8, 96 - h * scale, scale
+end
+
+-- This screen resolves its own colours (same contract as CoopBattle / WideBattle).
+--
+-- Pics come out of BattleState.makeBattler already species-paletted, and the
+-- HUD/boxes are the engine's own tiles. Without an opt-out, OG / OG INV /
+-- CLASSIC invent a whole-screen GRAYS remap (PaletteFX.ensureZones) and treat
+-- those coloured pixels as DMG shades -- pink paper, black outlines, solid
+-- black HP bars. Game.lua reads sgbPalettes; zones() is the hook twin.
+function M:sgbPalettes()
+  return self:zones()
+end
+
+function M:zones()
+  return { { colors = false, x = 0, y = 0, w = 160, h = 144 } }
+end
+
+function M:drawFieldPics()
+  local foe = self.slots[self:foeSlot()]
+  local mine = self.slots[self:mySlot()]
+  love.graphics.setColor(1, 1, 1, 1)
+  -- Draw while the sprite is held -- including at 0 HP through the move flash
+  -- and "X fainted!". `releasePic` (after that line) is what takes it down.
+  if foe and foe.sprite then
+    local x, y = self:enemyPicXY(foe.sprite)
+    pcall(love.graphics.draw, foe.sprite, x, y)
+  end
+  if mine and mine.sprite then
+    -- Move / item menus replace the lower pic rows on the GB tilemap.
+    local clipMenus = self.phase == "move" or self.phase == "item"
+      or self.phase == "item_party" or self.phase == "item_move"
+      or self.phase == "switch" or self.phase == "choose"
+    local scx, scy, scw, sch
+    if clipMenus and love.graphics.getScissor then
+      scx, scy, scw, sch = love.graphics.getScissor()
+      love.graphics.setScissor(0, 0, 160, 96)
+    end
+    local x, y, scale = self:playerPicXY(mine.sprite)
+    scale = scale or PLAYER_PIC_SCALE
+    pcall(love.graphics.draw, mine.sprite, x, y, 0, scale, scale)
+    if clipMenus and love.graphics.setScissor then
+      if scx then love.graphics.setScissor(scx, scy, scw, sch)
+      else love.graphics.setScissor() end
+    end
+  end
+end
+
+function M:drawEnemyHUD(Font, HudTiles)
+  local slot = self.slots[self:foeSlot()]
+  -- Keep chrome up at 0 HP while the pic is still held (same rule as the
+  -- player HUD): classic clears after the faint line, not on the damage tick.
+  if not (slot and slot.species) then return end
+  if (slot.hp or 0) <= 0 and not slot.sprite and not slot.koHold then return end
+  local name = tostring(slot.species):sub(1, 10)
+  love.graphics.setColor(0, 0, 0, 1)
+  Font.draw(name, nameX(Font, 1, name), 0)
+  if slot.status then
+    Font.draw(tostring(slot.status):sub(1, 3), 40, 8)
+  elseif slot.level then
+    if HudTiles and HudTiles.tile then
+      pcall(HudTiles.tile, 0x6E, 32, 8) -- <LV>
+    end
+    Font.draw(tostring(slot.level), 40, 8)
+  end
+  if HudTiles and HudTiles.tile then
+    pcall(HudTiles.tile, 0x73, 8, 16)
+    pcall(HudTiles.tile, 0x74, 8, 24)
+    for i = 2, 9 do pcall(HudTiles.tile, 0x76, i * 8, 24) end
+    pcall(HudTiles.tile, 0x78, 80, 24)
+  end
+  local shown = { hp = slot.hp, stats = { hp = slot.maxHp or 1 } }
   local drew = HudTiles and pcall(HudTiles.drawHPBar, self.game and self.game.data,
-    2, tileY + 2, shown, nil, false, 6)
+    2, 2, shown, nil, false)
   if not drew then
     love.graphics.setColor(0, 0, 0, 1)
-    Font.draw(("%d/%d"):format(slot.hp, slot.maxHp), 16, top + 16)
+    Font.draw(("%d/%d"):format(slot.hp, slot.maxHp or 0), 16, 16)
   end
+end
+
+function M:drawPlayerHUD(Font, HudTiles)
+  local slot = self.slots[self:mySlot()]
+  if not (slot and slot.species) then return end
+  -- Keep the chrome up at 0 HP until the faint line finishes (classic clears
+  -- after the slide); still draw name/bar at 0 so the KO is visible.
+  local name = tostring(slot.species):sub(1, 10)
+  love.graphics.setColor(0, 0, 0, 1)
+  Font.draw(name, nameX(Font, 10, name), 56)
+  if slot.status then
+    Font.draw(tostring(slot.status):sub(1, 3), 120, 64)
+  else
+    local level = slot.level
+      or (self.mine and self.mine[self.active] and self.mine[self.active].level)
+    if level then
+      if HudTiles and HudTiles.tile then
+        pcall(HudTiles.tile, 0x6E, 112, 64)
+      end
+      Font.draw(tostring(level), 120, 64)
+    end
+  end
+  local shown = { hp = slot.hp or 0, stats = { hp = slot.maxHp or 1 } }
+  local drew = HudTiles and pcall(HudTiles.drawHPBar, self.game and self.game.data,
+    10, 9, shown, 1, false)
+  if not drew then
+    love.graphics.setColor(0, 0, 0, 1)
+    Font.draw(("%d/%d"):format(slot.hp or 0, slot.maxHp or 0), 88, 72)
+  else
+    love.graphics.setColor(0, 0, 0, 1)
+    Font.draw(("%3d/%3d"):format(slot.hp or 0, slot.maxHp or 0), 88, 80)
+  end
+  if HudTiles and HudTiles.tile then
+    pcall(HudTiles.tile, 0x73, 144, 80)
+    pcall(HudTiles.tile, 0x77, 144, 88)
+    for i = 10, 17 do pcall(HudTiles.tile, 0x76, i * 8, 88) end
+    pcall(HudTiles.tile, 0x6F, 72, 88)
+  end
+end
+
+function M:drawAnim()
+  local row = self.anim
+  if not (row and self.animPlayer and self.animPlayer.draw) then return end
+  pcall(self.animPlayer.draw, self.animPlayer)
 end
 
 function M:drawBox(Font, text)
@@ -984,37 +2023,104 @@ function M:drawBox(Font, text)
   end
 end
 
-function M:drawMoves(Font)
-  local mon = self:activeMon()
-  local moves = (mon and mon.moves) or {}
+function M:drawList(Font, rows, cursor)
   Font.drawBox(0, 12, 20, 6)
   love.graphics.setColor(0, 0, 0, 1)
-  local shown = min(#moves, 3)
+  local shown = min(#rows, 3)
   local first = 1
-  if self.cursor > 3 then first = self.cursor - 2 end
+  if cursor > 3 then first = cursor - 2 end
   for i = 0, shown - 1 do
-    local move = moves[first + i]
-    if move then Font.draw(tostring(move.id):sub(1, 16), 16, 112 + i * 16) end
+    local row = rows[first + i]
+    if row then
+      local label = type(row) == "table" and (row.label or row.name or row.id) or tostring(row)
+      Font.draw(tostring(label):sub(1, 16), 16, 112 + i * 16)
+    end
   end
-  Font.drawCode(0xED, 8, 112 + (self.cursor - first) * 16)
+  Font.drawCode(0xED, 8, 112 + (cursor - first) * 16)
+end
+
+function M:drawCommands(Font)
+  -- Full-width 2x2. SWITCH shows as the two-tile PKMN mark so it does not
+  -- overlap FIGHT (same columns as CoopBattle).
+  Font.drawBox(0, 12, 20, 6)
+  love.graphics.setColor(0, 0, 0, 1)
+  for i, command in ipairs(M.COMMANDS) do
+    local row = math.floor((i - 1) / 2)
+    local col = (i - 1) % 2
+    local x = col == 0 and 24 or 112
+    local y = 112 + row * 16
+    if command == "SWITCH" then
+      Font.drawCode(0xE1, x, y)
+      Font.drawCode(0xE2, x + 8, y)
+    else
+      Font.draw(command, x, y)
+    end
+  end
+  local i = self.commandIndex or 1
+  local row = math.floor((i - 1) / 2)
+  local col = (i - 1) % 2
+  Font.drawCode(0xED, col == 0 and 16 or 104, 112 + row * 16)
+end
+
+function M:drawMoves(Font)
+  local mon = self:activeMon()
+  if self.phase == "item_move" then
+    mon = (self.mine or {})[self.itemPartyIndex or self.active]
+  end
+  local moves = (mon and mon.moves) or {}
+  local rows = {}
+  for _, move in ipairs(moves) do
+    rows[#rows + 1] = tostring(move.id)
+  end
+  self:drawList(Font, rows, self.cursor)
 end
 
 function M:drawSafe()
-  local eng = loadEngine()
-  if not (eng and eng.Font) then return end
-  local Font = eng.Font
-
+  -- Fill first so a missing Font still covers the frame; without isOpaque the
+  -- stack would otherwise leave the overworld visible at the top of the view.
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", 0, 0, 160, 144)
 
-  self:drawSlot(Font, eng.HudTiles, self:foeSlot(), 0, self.peerName:sub(1, 8))
-  self:drawSlot(Font, eng.HudTiles, self:mySlot(), 5, "YOU")
+  local eng = loadEngine()
+  if not (eng and eng.Font) then return end
+  local Font = eng.Font
+  local HudTiles = eng.HudTiles
+
+  self:drawFieldPics()
+  self:drawEnemyHUD(Font, HudTiles)
+  self:drawPlayerHUD(Font, HudTiles)
+  self:drawAnim()
 
   if self.shown then
     return self:drawBox(Font, self.shown)
   end
+  if self.anim then
+    return self:drawBox(Font, "")
+  end
   if self.phase == "choose" then
+    return self:drawCommands(Font)
+  end
+  if self.phase == "move" or self.phase == "item_move" then
     return self:drawMoves(Font)
+  end
+  if self.phase == "item" then
+    return self:drawList(Font, self:usableItems(), self.itemIndex or 1)
+  end
+  if self.phase == "item_party" then
+    local rows = {}
+    for _, row in ipairs(self:partyRows()) do
+      rows[#rows + 1] = row.label .. (row.fainted and " *" or "")
+    end
+    return self:drawList(Font, rows, self.switchIndex or 1)
+  end
+  if self.phase == "switch" then
+    local rows = {}
+    for _, row in ipairs(self:partyRows()) do
+      if not row.fainted and (self.replaceOnly or not row.active) then
+        rows[#rows + 1] = row.label
+      end
+    end
+    return self:drawList(Font, rows, self.switchIndex or 1)
   end
   if self.phase == "setup" then
     return self:drawBox(Font, "Getting ready...")
@@ -1022,11 +2128,6 @@ function M:drawSafe()
   self:drawBox(Font, ("Waiting for\n%s..."):format(self.peerName))
 end
 
--- StateStack calls draw() directly, so a throw in there is not a missing frame
--- -- it is the game stopping, mid-fight, for two people.  The mod's rule is
--- that a broken renderer costs a display and never the game, so the real
--- drawing happens in drawSafe and this is the guard around it.  Warned once:
--- a failure that repeats every frame would otherwise become the log.
 function M:draw()
   local ok, err = pcall(self.drawSafe, self)
   if ok then return end

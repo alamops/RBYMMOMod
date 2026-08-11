@@ -16,7 +16,7 @@ engine" heading is the contract this mod is written against, gathered from `brya
 ### Layout
 
 ```
-manifest.json        api 2, permissions:["network"], affects_link:false, experimental:true
+manifest.json        api 2, permissions:["network"], affects_link:false, experimental:false
 main.lua             entry chunk: a mod:read-based resolver, then Client.install()
 src/Config.lua       constants (PROTOCOL, intervals, radii, sprite list)
 src/Wire.lua         message-type vocabulary + the sanitiser every inbound field passes
@@ -37,6 +37,12 @@ server/hub.js        the hub (node, no deps, newline-JSON over TCP)
 server/lib/battle/   Node half of the battle intermediator (mirrors BattleSim)
 tests/               the mod's suite (excluded from the packed archive)
 ```
+
+`src/Hub.lua` and `server/lib/relay.js` are twins of one protocol. Behaviour
+parity lives in `tests/fixtures/hub_protocol_parity.json` (Lua driver +
+`server/hub_protocol_parity.test.js`); constant/vocabulary parity in
+`server/twin_parity.test.js`. Process + Node-only live-ops carve-out:
+`docs/plans/hub-twin-parity.md`. Do not codegen Lua↔JS.
 
 ### Three decisions worth not re-litigating
 
@@ -75,10 +81,11 @@ imported first (`scripts/setup.sh --rom "…"`), then:
 bash mods/rby_mmo/tests/drivers/run-mmo-e2e.sh
 ```
 
-**`modkit validate` passing is weaker than it looks here.** `experimental: true` means the loader
-leaves the mod disabled, and a disabled mod's entry chunk never runs — so validate can go green
-without executing a line of `src/`. The Lua suite is what actually exercises it: it loads the mod
-through a filesystem whose `options.lua` enables it, then asserts the screens, hooks and exports
+**`modkit validate` passing is weaker than it looks here.** A disabled mod's
+entry chunk never runs — so validate can go green without executing a line of
+`src/` if the mod is off in options. The Lua suite is what actually exercises
+it: it loads the mod (from 1.0.0 non-experimental by default, or via an
+`options.lua` that enables it), then asserts the screens, hooks and exports
 are really installed.
 
 ## Upstream engine (the thing being modded)

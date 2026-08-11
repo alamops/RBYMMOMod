@@ -432,6 +432,46 @@ function M:beginMediated(game, sessionId, peerId, peerName, role)
   return true
 end
 
+-- Protocol-only wild mediated fight: the caller (or a test) already opened a
+-- hub battle with mode "wild". This screen uploads the player's party and the
+-- wild sheets as side "b", and keeps `wildCatchMon` for a catch grant.
+-- Does **not** divert overworld encounters — solo wild stays on the engine.
+function M:beginWildMediated(game, battleId, opts)
+  opts = opts or {}
+  if not battleId then
+    mod.log:warn("beginWildMediated needs a battle id from the hub")
+    return false
+  end
+  local wildParty = opts.wildParty
+  if type(wildParty) ~= "table" or #wildParty == 0 then
+    if opts.mon then
+      wildParty = MediatedBattle.snapshotMons(game, { opts.mon })
+    end
+  end
+  if type(wildParty) ~= "table" or #wildParty == 0 then
+    mod.log:warn("beginWildMediated needs a wild party sheet")
+    return false
+  end
+
+  local fight = MediatedBattle.new({
+    transport    = self.transport,
+    ui           = self.ui,
+    game         = game,
+    battle       = battleId,
+    role         = "host",
+    peerName     = opts.peerName or "WILD",
+    mode         = "wild",
+    wildParty    = wildParty,
+    wildCatchMon = opts.wildCatchMon or opts.mon,
+    autoPick     = self.autoPick == true,
+    onDone       = function() self:endMediated() end,
+  })
+  self.fight = fight
+  fight:start(game)
+  self.ui:pushState(game, fight)
+  return true
+end
+
 -- The fight is off this screen.  Tell the hub, so the pairing does not sit
 -- open until a grace runs out -- the record is already settled by the time an
 -- outcome has been drawn, so this frees it rather than forfeiting anything.
@@ -581,7 +621,7 @@ end
 -- so there is no shared simulation left for two copies to disagree inside and
 -- no verdict to gate on -- see the fork in M:onSession.  It survives as a
 -- statement of the pairing rule, still asserted by the suite and still driven
--- against two real ROM extracts by tests/red_yellow_battle_compat.lua, and it
+-- against two real ROM extracts by tests/drivers/red_yellow_battle_compat.lua, and it
 -- is what a cable-club link would consult if this mod ever brokered one again.
 function M.canBattle(verdict, myHello, theirHello, Handshake)
   if not (Handshake and Handshake.battleAllowed) then return false end

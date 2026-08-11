@@ -160,25 +160,6 @@ function M:start(port, maxPlayers, joinCode)
         .. "reconnect, and report it if it repeats",
         tostring(clientId), tostring(reason))
     end,
-    -- The other half of the same seam: a name changing hands, or a result
-    -- refused because one did. server/lib/relay.js writes these to its own
-    -- log, and a host running the game version could not see them at all.
-    onClaim = function(what, name, clientId)
-      if what == "taken" then
-        mod.log:info("%s (player %s) took over an unconfirmed claim on that "
-          .. "name -- nothing had scored under it, so a fresh ticket went out "
-          .. "with the welcome", tostring(name), tostring(clientId))
-      elseif what == "unscored" then
-        mod.log:info("%s (player %s) joined without the claim token for that "
-          .. "name, so their battles will not be scored -- if that is really "
-          .. "them, ask them to pick another name for now",
-          tostring(name), tostring(clientId))
-      elseif what == "mid_battle" then
-        mod.log:warn("a claim changed hands mid-battle (%s, player %s), so "
-          .. "that result was not scored -- ask both sides to rematch",
-          tostring(name), tostring(clientId))
-      end
-    end,
     onHandlerError = function(msgType, clientId, err)
       mod.log:warn("hub handler %s failed for player %s (%s); the message was "
         .. "dropped and the hub kept running -- ask them to reconnect if a "
@@ -398,8 +379,32 @@ end
 function M:update(dt)
   if not self.running then return end
 
+  -- Hub battle deadlines are wall seconds (same contract as Node's Date.now).
+  -- This update is pumped from FixedStep, which GameSpeed multiplies -- so at
+  -- 10X a logic dt of 1/60 fired ten times per display frame and burned a
+  -- sixty-second choice clock in six real seconds. Measure the gap between
+  -- pumps instead.
+  local hubDt = dt or 0
+  local timer = rawget(_G, "love")
+  timer = timer and timer.timer
+  local getTime = timer and timer.getTime
+  if type(getTime) == "function" then
+    local ok, now = pcall(getTime)
+    if ok and type(now) == "number" then
+      local prev = self._hubWall
+      self._hubWall = now
+      if prev ~= nil then
+        hubDt = now - prev
+        if hubDt < 0 then hubDt = 0 end
+        if hubDt > 0.25 then hubDt = 0.25 end
+      else
+        hubDt = 0
+      end
+    end
+  end
+
   local ok, err = pcall(function()
-    self.hub:update(dt)
+    self.hub:update(hubDt)
     self:accept()
     for _, conn in ipairs(self.conns) do
       if not conn.dead then self:read(conn) end

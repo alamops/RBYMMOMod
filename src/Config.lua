@@ -70,7 +70,31 @@ M.MOD_ID = "rby_mmo"
 -- is gone.  A refusal naming both versions is the only sentence either player
 -- can act on.  This number lives here and in server/lib/relay.js -- bump them
 -- together.
-M.PROTOCOL = 10
+--
+-- 11 is the mediated battle event `chose` -- a seat filed this turn's answer,
+-- so peers can keep the wait line accurate without an `act` fan-out -- and
+-- `unchose`, which clears that mark when a player cancels a choice they already
+-- submitted.  From PROTOCOL 12, `moves` syncs the live move list after Transform
+-- or Mimic.  A protocol-10 intermediator never emits either kind, so a newer
+-- client's wait line would name players who have already answered, or keep
+-- naming players who walked their answer back, and neither failure looks like
+-- lag -- both read as "still choosing".  A refusal naming both versions is the
+-- only sentence either player can act on.  This number lives here and in
+-- server/lib/relay.js -- bump them together.
+--
+-- 13 extends `mmo.battle_ruleset` with optional `specialTypes` (Gen1 phys/spec
+-- by type index) and `metronomePool` (ephemeral move sheets for Metronome).
+-- A protocol-12 intermediator strips both, so Special damage stays atk/def and
+-- Metronome keeps saying "But nothing happened".  Refusal naming both versions
+-- is the only sentence either player can act on.
+--
+-- 14 is the mediated FIGHT/ITEM/SWITCH/RUN surface, item targeting, `mode=wild`,
+-- and catch outcomes. 15 adds an optional battle `bag` on `mmo.battle_party`
+-- so the hub can refuse / debit item choices against the uploaded sheet.
+-- Absent bag means empty: a protocol-14 client that never uploads one cannot
+-- spend items on a 15 hub. Refusal naming both versions is the only sentence
+-- either player can act on.
+M.PROTOCOL = 16
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -201,9 +225,10 @@ M.PARTY_MAX = 2
 -- badge boosts, the status records -- so a mon hits for the same number here as
 -- it does in a wild battle.
 --
--- Four fighters, because two parties of PARTY_MAX meet.  It is written as a
--- product rather than as the literal 4 so that the day PARTY_MAX moves, the
--- side that has to move with it is not a number somebody has to remember.
+-- Cap on fighters: two parties of PARTY_MAX. Written as a product rather than
+-- the literal 4 so that the day PARTY_MAX moves, the side that has to move
+-- with it is not a number somebody has to remember. NPC co-op may use fewer
+-- (a one-monster trainer fills only one foe seat).
 M.COOP_SIDE = M.PARTY_MAX
 M.COOP_FIGHTERS = M.PARTY_MAX * 2
 
@@ -304,6 +329,9 @@ M.COOP_CHOICE_TIMEOUT = 30
 -- between "somebody is thinking" and "this has hung" is the whole of what a
 -- player cannot tell from an empty screen.
 M.COOP_WAIT_HINT = 5
+-- Seconds between rotating which name the mediated/host-sim wait line shows
+-- while several players are still choosing.
+M.COOP_WAIT_ROTATE = 3
 
 M.COOP_TURN_TIMEOUT = 60
 
@@ -377,6 +405,11 @@ M.COOP_STALL_TIMEOUT = 75
 -- Both are in src/Hub.lua and its twin in server/lib/relay.js, and they moved
 -- together: a client on this line talking to a hub without them is the 2-on-1
 -- that never resolves, which is what PROTOCOL is for.
+--
+-- **Not a host toggle.** coop_pvp / coop_npc are always hub-refereed. The
+-- host-sim CoopSim path for those modes was removed so BattleSim and engine
+-- ItemEffects cannot diverge mid-match. `CoopBattle.mediates` hard-codes the
+-- same two modes; this table stays as the documented surface for e2e / docs.
 M.MEDIATED_COOP = { coop_pvp = true, coop_npc = true }
 
 -- How long a battle waits for a player who has dropped mid-fight.
@@ -428,6 +461,16 @@ M.BATTLE_RESOLVE_TIMEOUT = 30
 -- field) and the two are read by different code on both ends.
 M.BATTLE_MON_MAX = 6
 
+-- The most distinct item stacks a combatant may claim on `mmo.battle_party`.
+-- Cap is about payload size, not Gen 1 bag length: the sheet is ephemeral and
+-- thrown away with the fight. Count per stack is bounded separately.
+M.BATTLE_BAG_MAX = 40
+
+-- Cap on one stack's count in an uploaded battle bag. Gen 1 bags stop at 99;
+-- the hub refuses anything past this rather than truncating (truncation would
+-- let a client claim 200 and keep 99 silently).
+M.BATTLE_BAG_COUNT_MAX = 99
+
 -- The most moves one of those POKeMON may carry.  Gen 1's four, and a hard
 -- bound rather than a convention: the choice message names a move by index
 -- into this list, so a party that carried more would be a party with slots no
@@ -451,6 +494,12 @@ M.BATTLE_MOVE_MAX = 4
 -- so a data pack that adds a type has to fit, and a cap of exactly fifteen
 -- would refuse the modded ruleset instead of the malformed one.
 M.BATTLE_TYPE_MAX = 20
+
+-- Cap on the ephemeral Metronome pick list uploaded with a ruleset.  Gen 1 has
+-- 165 moves; the spare is for data packs.  The pool is ROM-derived at runtime
+-- from the host's own decode and is thrown away with the battle -- it does not
+-- ship in this repo.
+M.BATTLE_METRONOME_POOL_MAX = 200
 
 -- Chat.  "party" is delivered to the other member wherever they are, so it
 -- is the one scope with neither a radius nor a name to type.
@@ -504,6 +553,20 @@ M.TOAST_MAX = 5
 -- `dir` above.
 M.TOAST_FONT = "assets/fonts/Rajdhani-Regular.ttf"
 M.TOAST_SIZE = 12
+
+-- Co-op status name/level: 1-bit ImageFont sheets (assets/fonts/battle_hud*.png).
+-- Solid ink on the GB canvas (no FreeType AA washout). Glyph string must match
+-- the strips packed by tools/gen_battle_hud_font.py.
+--
+-- Two faces on purpose: scaling a bitmap sheet by 0.75 turns into mush on the
+-- 160×144 canvas, so level / HP numbers use a separate 4×5 sheet drawn 1:1.
+M.BATTLE_HUD_FONT = "assets/fonts/battle_hud.png"
+M.BATTLE_HUD_META_FONT = "assets/fonts/battle_hud_meta.png"
+-- Includes `/` so cur/max HP prints as 100/100 (unknown glyphs used to become '.').
+M.BATTLE_HUD_GLYPHS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./-'?!"
+M.BATTLE_HUD_ADVANCE = 5
+M.BATTLE_HUD_META_ADVANCE = 4
+M.BATTLE_HUD_META_HEIGHT = 5
 
 -- Presence liveness.  The hub drops a client that stops pinging; the client
 -- gives up on a hub that stops answering.
@@ -596,6 +659,11 @@ M.DEFAULT_SPRITE = "SPRITE_RED"
 -- walk.png (16x96, six 16x16 frames), front.png (56x56, the trainer-card and
 -- intro pic) and back.png (48x48, the battle back pic).
 --
+-- walk.png is original-ish silhouette work: modkit MK302 rejects perceptual
+-- near-duplicates of the player's ROM-derived cache (blue.png / fisher.png
+-- were Hamming ≤ 4 against earlier sheets). If you redraw these, re-run
+-- `python3 tools/modkit.py lint mods/rby_mmo` before packing.
+--
 -- backScale is what a 48x48 back pic has to draw at, and it has to be a whole
 -- number.  The plain battle view hands the registered scale to the draw call
 -- verbatim, onto a nearest-neighbour canvas: at a fractional scale a source
@@ -665,23 +733,12 @@ M.RANK_START = 0
 M.RANK_MAX = 9999
 -- How many rows the RANK screen asks for, and the brief's number.
 M.RANK_TOP = 10
--- A claim token, lowercase hex on the wire: 16 bytes, the same shape and the
--- same source as a challenge nonce. It says "this name is mine" and nothing
--- else -- see src/Rank.lua's header for what that is worth, and what it is
--- not. The hub keeps only its SHA-256.
-M.RANK_TOKEN_HEX = 32
--- Where claim tickets are kept, in the LOVE save directory, next to the
--- engine's own save files.
---
--- They are written to mod.save as well, but mod.save is RAM the engine
--- happens to flush with the rest of a save: nothing in connecting or
--- disconnecting reaches disk, and CONTINUE replaces the whole table with
--- whatever was last written. A ticket minted this session and never saved is
--- gone by the next connect -- and the hub, which has not forgotten, then
--- answers the name's rightful owner as an impostor. This file is what a save
--- reload cannot take away. One flat JSON object; the key format and why it
--- carries the trainer name are in src/Client.lua.
-M.RANK_TOKEN_FILE = "rby_mmo_rank_tokens.json"
+-- Persistent player identity (PROTOCOL 16): 16 random bytes as lowercase hex.
+-- One per LOVE install / save folder — closer to an account than a per-hub
+-- claim ticket. Sent on every hello; the hub uses it as client.id and as the
+-- rank-board key. Duplicate live connections with the same id are refused.
+M.PLAYER_ID_HEX = 32
+M.PLAYER_ID_FILE = "rby_mmo_player_id.json"
 -- How long a pairing stays "recently played" for the rematch discount, and
 -- how many meetings inside it take a win to nothing (halving each time, so
 -- the sixth rematch in the window is already worth zero).

@@ -19,6 +19,7 @@
 
 local need = ...
 local Config = need("Config")
+local Effects = need("BattleSim/Effects")
 
 local M = {}
 
@@ -75,16 +76,13 @@ M.RANKS         = "mmo.ranks"
 -- friend is waiting", because only the hub knows who is in the party.
 --
 -- COOP_WAIT carries { battle, label, map } -- the fight this player is
--- standing in front of.  COOP_CANCEL withdraws it and takes no fields: there
--- is only ever one offer per player, so naming which would be a second way to
--- be wrong.  COOP_JOIN answers somebody else's offer with { to, battle }.
+-- standing in front of.  COOP_CANCEL withdraws it with an optional reason
+-- (`alone` / `left` / `timeout` from the waiter; `no` from the partner who
+-- declined the invite). Naming which offer is unnecessary: there is only ever
+-- one per player.  COOP_JOIN answers somebody else's offer with { to, battle }.
 --
--- **There is no "decline" going this way, and that is the design.**  A player
--- who says no to joining sends nothing at all, which is exactly what makes no
--- non-binding: no state is written anywhere, so the next time they walk into
--- the same fight the ask is simply made again.  A refusal that left a trace
--- would have to be cleared by something, and whatever cleared it would be the
--- thing that eventually got it wrong.
+-- A partner decline (`COOP_CANCEL` reason `no`) is forwarded to the waiter as
+-- `COOP_DECLINE`, so they can leave the wait and fight the trainer alone.
 M.COOP_WAIT      = "mmo.coop_wait"
 M.COOP_CANCEL    = "mmo.coop_cancel"
 M.COOP_JOIN      = "mmo.coop_join"
@@ -415,12 +413,12 @@ function M.flag(value)
   return value == true
 end
 
--- The secret that says a trainer name is yours on this hub.  Hex like a
--- nonce, and held to exactly the length the hub mints: a short "token" is a
--- truncated one, which would fail every check with nothing to read.
-function M.token(value)
-  local hex = M.hex(value, Config.RANK_TOKEN_HEX)
-  if hex and #hex == Config.RANK_TOKEN_HEX then return hex end
+-- Persistent player identity (PROTOCOL 16): exactly PLAYER_ID_HEX lowercase
+-- hex. Not an opaque id — wrong length must not round-trip through M.id's
+-- 40-cap and look valid.
+function M.playerId(value)
+  local hex = M.hex(value, Config.PLAYER_ID_HEX)
+  if hex and #hex == Config.PLAYER_ID_HEX then return hex end
   return nil
 end
 
@@ -686,9 +684,10 @@ end
 --
 -- Four things are checked, and each was reachable:
 --
---   * the slot **count**, because `buildField` only ever checked it on the
---     sending side -- so a modified host could send fifty and every client
---     would build fifty;
+--   * the slot **count** (3‥COOP_FIGHTERS), because `buildField` only ever
+--     checked it on the sending side -- so a modified host could send fifty
+--     and every client would build fifty. Three is a real shape: two players
+--     against a one-monster trainer;
 --   * the **side**, because `targetsFor` reads it as one of two values and an
 --     arbitrary third makes "who may I attack" incoherent;
 --   * the **name**, because it is drawn on screen and interpolated into
@@ -701,10 +700,14 @@ end
 -- the fields named here, in the shapes named here.
 function M.coopField(raw)
   if type(raw) ~= "table" or type(raw.slots) ~= "table" then return nil end
-  if #raw.slots ~= Config.COOP_FIGHTERS then return nil end
+  local n = #raw.slots
+  -- Floor is three: a co-op party needs two humans, and an NPC fight needs at
+  -- least one foe seat. Cap is the full four-fighter field (two parties, or a
+  -- trainer with enough monsters to fill both foe seats).
+  if n < 3 or n > Config.COOP_FIGHTERS then return nil end
 
   local slots = {}
-  for i = 1, Config.COOP_FIGHTERS do
+  for i = 1, n do
     local slot = raw.slots[i]
     if type(slot) ~= "table" then return nil end
     local side = M.side(slot.side)
@@ -830,11 +833,15 @@ function M.ranking(raw)
     if type(row) == "table" then
       local name = M.name(row.name)
       if name then
-        out[#out + 1] = {
+        local entry = {
           name = name,
           sprite = M.spriteId(row.sprite) or Config.DEFAULT_SPRITE,
           points = M.points(row.points),
         }
+        -- Optional: older hubs omit id; PROTOCOL 16 boards always send it.
+        local id = M.playerId(row.id)
+        if id then entry.id = id end
+        out[#out + 1] = entry
       end
     end
     if #out >= Config.RANK_TOP then break end
@@ -1040,6 +1047,31 @@ function M.battleRuleset(raw)
     out.seed = M.int(raw.seed, 1, M.SEED_MAX)
     if out.seed == nil then return nil end
   end
+  -- Optional Gen1 Special-type indices (0-based chart axis). Absent = all
+  -- Physical. Present-but-unreadable refuses the ruleset rather than silently
+  -- falling back to atk/def for a host that meant to upload the split.
+  if raw.specialTypes ~= nil then
+    if type(raw.specialTypes) ~= "table" then return nil end
+    local special = {}
+    for _, entry in ipairs(raw.specialTypes) do
+      local t = M.int(entry, 0, Config.BATTLE_TYPE_MAX - 1)
+      if t == nil then return nil end
+      special[#special + 1] = t
+    end
+    out.specialTypes = special
+  end
+  -- Optional Metronome pick pool: full move sheets from the host's decode.
+  if raw.metronomePool ~= nil then
+    if type(raw.metronomePool) ~= "table" then return nil end
+    local pool = {}
+    for _, entry in ipairs(raw.metronomePool) do
+      if #pool >= Config.BATTLE_METRONOME_POOL_MAX then break end
+      local move = M.battleMove(entry)
+      if not move then return nil end
+      pool[#pool + 1] = move
+    end
+    out.metronomePool = pool
+  end
   return out
 end
 
@@ -1082,6 +1114,10 @@ function M.battleMove(raw)
           and out.effect and out.chance) then
     return nil
   end
+  if raw.maxPp ~= nil then
+    out.maxPp = M.int(raw.maxPp, 0, 99)
+    if out.maxPp == nil then return nil end
+  end
   return out
 end
 
@@ -1106,12 +1142,23 @@ end
 
 -- One battler, as its owner claims it.
 --
--- The sheet is **trusted for v1** and this is the file that says so plainly: a
--- modified client can send a level-100 team with 999 in every stat and the
--- intermediator will fight it.  What sanitising buys is not honesty, it is
--- coherence -- every number is a number, in a range the formulas survive, and
--- the fight resolves and ends.  Mid-fight cheating is what the intermediator
--- removes; the pre-fight sheet is the accepted residual surface.
+-- **Sheet trust is a locked decision**, not a v1 TODO. A modified client can
+-- send a level-100 team with 999 in every stat and the intermediator will
+-- fight it.  What sanitising buys is not honesty, it is coherence -- every
+-- number is a number, in a range the formulas survive, and the fight resolves
+-- and ends.  Mid-fight cheating is what the intermediator removes; the
+-- pre-fight sheet stays a client claim because the hub holds no ROM species
+-- table and never will (legal floor / no ROM bytes).
+--
+-- **Bags (PROTOCOL 15).** The party message may carry an optional `bag` — a
+-- list of `{id, count}` stacks. The hub stores it under the connection, holds
+-- a stack when an `item` choice is accepted, and decrements only when the turn
+-- resolves (so `cancel`/`unchose` never needs a refund). Entries must be ids
+-- BattleSim knows (`itemEffect`), including vitamins (fight-local Stat Exp;
+-- client writebacks `save.statExp` on confirm). Counts and battler sheets
+-- remain a **claim**: a modified client can still invent 99 POTION or a god
+-- team on upload. That is the accepted bound — mid-fight free heals without a
+-- matching stack are what the bag removes. Absent `bag` means empty.
 --
 -- `hp` above `maxHp` is refused even though both are individually in range,
 -- because it is the one incoherence that reaches arithmetic rather than a screen:
@@ -1161,6 +1208,11 @@ function M.battleMon(raw)
   if raw.evs ~= nil then
     out.evs = statsOf(raw.evs, 0, 65535)
     if not out.evs then return nil end
+    -- Optional HP Stat Exp for HP_UP (fourOf-style battle stats stay required).
+    if raw.evs.hp ~= nil then
+      out.evs.hp = M.int(raw.evs.hp, 0, 65535)
+      if out.evs.hp == nil then return nil end
+    end
   end
 
   if type(raw.moves) ~= "table" then return nil end
@@ -1190,6 +1242,12 @@ function M.battleMon(raw)
     out.types = types
   end
 
+  -- Optional species catch rate for wild mediated balls (0-255).
+  if raw.catchRate ~= nil then
+    out.catchRate = M.int(raw.catchRate, 0, 255)
+    if out.catchRate == nil then return nil end
+  end
+
   return out
 end
 
@@ -1206,6 +1264,49 @@ end
 -- check to make rather than this one's: it is the only party that knows which
 -- mode this battle is.  Present-and-malformed is still refused, because a side
 -- nobody can read is not the same thing as a side nobody stated.
+--
+-- `bag` is optional: absent means an empty sheet (PROTOCOL 15). Present-but
+-- unreadable refuses the party — a half-parsed bag would let the hub prove the
+-- wrong inventory.
+function M.battleBag(raw)
+  if raw == nil then return {} end
+  if type(raw) ~= "table" then return nil end
+
+  local out, seen = {}, {}
+  -- Array form: [{id, count}, ...]. Map form (id -> count) is also accepted so
+  -- a client that already holds inventory as a dict does not have to rebuild.
+  local function push(id, count)
+    if seen[id] then return false end
+    if #out >= Config.BATTLE_BAG_MAX then return false end
+    -- Only BattleSim-known battle items (vitamins included — fight-local EV).
+    local effect = Effects.itemEffect(id)
+    if not effect then return false end
+    seen[id] = true
+    out[#out + 1] = { id = id, count = count }
+    return true
+  end
+
+  if #raw > 0 or raw[1] ~= nil then
+    for _, entry in ipairs(raw) do
+      if type(entry) ~= "table" then return nil end
+      local id = M.id(entry.id)
+      local count = M.int(entry.count, 1, Config.BATTLE_BAG_COUNT_MAX)
+      if not id or count == nil then return nil end
+      if not push(id, count) then return nil end
+    end
+  else
+    for key, value in pairs(raw) do
+      local id = M.id(key)
+      local count = M.int(value, 1, Config.BATTLE_BAG_COUNT_MAX)
+      if not id or count == nil then return nil end
+      if not push(id, count) then return nil end
+    end
+  end
+
+  table.sort(out, function(a, b) return a.id < b.id end)
+  return out
+end
+
 function M.battleParty(raw)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
@@ -1228,6 +1329,10 @@ function M.battleParty(raw)
   end
   if #mons == 0 then return nil end
   out.mons = mons
+
+  local bag = M.battleBag(raw.bag)
+  if not bag then return nil end
+  out.bag = bag
 
   return out
 end
@@ -1316,10 +1421,14 @@ end
 --   over       -- the field is done; an OUTCOME is coming
 --   wait       -- the fight is paused on somebody, and who
 --   reconnect  -- a side that had dropped is back
+--   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
+--   unchose    -- cancel cleared a filed answer
+--   moves      -- mid-fight move-list sync after Transform/Mimic
 M.BATTLE_EVENTS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
+  chose = true, unchose = true, moves = true,
 }
 
 -- One thing to draw.
@@ -1354,7 +1463,14 @@ function M.battleEvent(raw)
   if not (battle and seq) then return nil end
 
   local out = { battle = battle, seq = seq, t = raw.t }
-  if raw.text ~= nil then out.text = M.text(raw.text, Config.MESSAGE_MAX) end
+  -- Item events carry an id in `text`, not prose -- M.text would strip `_`.
+  if raw.text ~= nil then
+    if raw.t == "item" then
+      out.text = M.id(raw.text)
+    else
+      out.text = M.text(raw.text, Config.MESSAGE_MAX)
+    end
+  end
   if raw.amount ~= nil then out.amount = M.int(raw.amount, 0, M.AMOUNT_MAX) end
   -- A field slot here, unlike the party index a choice carries under the same
   -- name: an event is about somebody who is out, not about a bench position.
@@ -1365,6 +1481,15 @@ function M.battleEvent(raw)
     -- battleStatus answers `false` for present-but-unknown, which is not a
     -- status and must not be stored as one.
     out.status = M.battleStatus(raw.status) or nil
+  end
+  if type(raw.moves) == "table" then
+    local moves = {}
+    for _, entry in ipairs(raw.moves) do
+      if #moves >= Config.BATTLE_MOVE_MAX then break end
+      local move = M.battleMove(entry)
+      if move then moves[#moves + 1] = move end
+    end
+    if #moves > 0 then out.moves = moves end
   end
   return out
 end
@@ -1380,7 +1505,7 @@ end
 --
 M.BATTLE_REASONS = {
   timeout = true, disconnect = true, run = true,
-  ko = true, agree = true, forfeit = true,
+  ko = true, agree = true, forfeit = true, catch = true,
 }
 
 -- The reason, with room for one this build has never heard of.
@@ -1456,6 +1581,12 @@ function M.battleOutcome(raw)
     out.reason = M.battleReason(raw.reason)
     if not out.reason then return nil end
   end
+  -- Optional catch sheet: battleMon-shaped snapshot for clients that did not
+  -- keep the wild mon locally. Absent is fine; present-and-bad refuses.
+  if raw.caught ~= nil then
+    out.caught = M.battleMon(raw.caught)
+    if not out.caught then return nil end
+  end
   return out
 end
 
@@ -1473,18 +1604,20 @@ function M.battleReconnect(raw)
   return { battle = battle }
 end
 
--- The three shapes a mediated fight comes in.
+-- The shapes a mediated fight comes in.
 --
 --   1v1       -- two players, one monster each
 --   coop_npc  -- a party of two against a trainer somebody walked into
 --   coop_pvp  -- two parties against each other
+--   wild      -- one player against one hub NPC seat (catch/run legal)
 --
 -- Named on the wire rather than inferred from how many ids arrived, because the
 -- two co-op modes have the same four field slots and differ only in whether one
 -- side has an owner -- and "guess the mode from the roster" is the kind of
 -- inference that is right until an NPC battle happens to have a spectatorless
 -- second slot.
-M.BATTLE_MODES = { ["1v1"] = true, coop_npc = true, coop_pvp = true }
+--   wild      -- one player against a hub NPC seat (protocol-only; no overworld divert)
+M.BATTLE_MODES = { ["1v1"] = true, coop_npc = true, coop_pvp = true, wild = true }
 
 function M.battleMode(value)
   if M.BATTLE_MODES[value] then return value end

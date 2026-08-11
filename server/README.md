@@ -13,7 +13,9 @@ back.
 
 It is the same protocol and the same 2–64 player bounds as the in-game host
 (`src/Hub.lua`); the two are interchangeable and a joining client cannot tell
-them apart.
+them apart. Behaviour and constant twins are pinned by
+`hub_protocol_parity` / `twin_parity` — see `docs/plans/hub-twin-parity.md`.
+Admin socket, bans, allowlist, and UPnP stay Node-only on purpose.
 
 Node 22+, no dependencies. Everything below is Node core.
 
@@ -163,9 +165,9 @@ container, where it is on `PATH`.
 | `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
 | `status` | every effective setting, its value, and where that value came from (`flag` / `env` / `file` / `default`). Codes masked. | — |
 | `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (one object per player, the ten contract fields only — the nine the table is drawn from plus `admin`, which it does not draw) |
-| `ranking` | the ranked season out of `ranking.json`: place, name, points, and how many battles each player has won and lost. Top ten, best first. | `--json`, `--all` (every player who has scored, not just the top ten) |
+| `ranking` | the ranked season out of `ranking.json`: place, name (with `#aaaa` id tag when names collide), points, and how many battles each player has won and lost. Top ten, best first. Keyed by player id. | `--json`, `--all` (every player who has scored, not just the top ten) |
 | `watch` | the `players` frame, repainted until Ctrl-C. Clears the screen between frames only when stdout is a terminal. | `--interval <s>` (seconds between frames, default 2, clamped 1–60), `--once` (one frame, then exit), `--json` |
-| `history` | settled ranked battles out of `history.jsonl` and the rotated `history.jsonl.1`, newest first: when, who beat whom, and what it moved. | `-n N` (how many, default 20), `--json` (the same cut as one JSON array, projected records, newest first) |
+| `history` | settled ranked battles out of `history.jsonl` and the rotated `history.jsonl.1`, newest first: when, who beat whom (name + short player id), and what it moved. | `-n N` (how many, default 20), `--json` (the same cut as one JSON array, projected records, newest first) |
 | `stats` ‡ | the running hub's **live** counters: where it is bound, how long it has been up, seats taken, and the door — connections, handshakes in flight, wrong passcodes against the ceiling that trips, lockdown, and how many addresses are backing off. Counted from the hub's memory, which is the only place they exist. | `--json` (the hub's own answer, minus the per-address map) |
 | `kick <name>` ‡ | remove a connected player. Matches the name case-insensitively and may hit nobody or several people; says which. | `--reason TEXT` (what the player is shown; defaults to *"An operator removed you from this hub."*) |
 | `broadcast <text>` ‡ | say one line to everybody connected. It arrives in their chat log as `HUB`. | — |
@@ -758,28 +760,30 @@ None of them is a setting and none of them is yours to edit; each can be
 deleted without consequence beyond what it holds.
 
 The first is **`ranking.json`**, the
-ranked-PVP season. It holds a line per trainer name — points, character, and
-how many battles they have played and won — and it is written (debounced)
-whenever a battle moves somebody's rating. Nothing reads it but this hub, no
-setting points at it, and deleting it starts a fresh season and changes
-nothing else. It is deliberately *not* a section of `config.json`: that file
-is yours to edit and the CLI rewrites it whole, and a hub writing scores into
-it would race your own edits.
+ranked-PVP season. It holds a line per **persistent player id** (32 hex,
+PROTOCOL 16) — display name, character, points, and how many battles they
+have played and won — and it is written (debounced) whenever a battle moves
+somebody's rating. Nothing reads it but this hub, no setting points at it,
+and deleting it starts a fresh season and changes nothing else. It is
+deliberately *not* a section of `config.json`: that file is yours to edit and
+the CLI rewrites it whole, and a hub writing scores into it would race your
+own edits.
 
 If the file is corrupt the hub says so and starts from an empty ranking
 rather than refusing to run — a leaderboard is not a reason to take a hub off
 the air.
 
-Ratings are keyed by **trainer name**, and a name is *claimed* by whoever
-first used it here. The hub mints a 16-byte token on that first visit
-(`crypto.randomBytes`), sends it once in the welcome, and stores only its
-SHA-256 — so this file lists who is ranked, which is public anyway, and gives
-nobody a way to be them. A player returning with the token is that player; a
-player typing the same name without it is admitted, plays normally and scores
-nothing, and their battles cannot move the real holder's rating. It is a
-claim ticket, not an account: it sits in a save file and crosses the same
-unencrypted link the passcode does, with the same consequence if either is
-captured. Deleting `ranking.json` releases every name along with every score.
+Ratings are keyed by **player id**, not trainer name. The mod mints the id
+once (`rby_mmo_player_id.json` + save) and sends it on every hello; the hub
+seats you under that id and scores under it. Display names are cosmetic —
+two players can both type `ASH` and both score. `rby-mmo-hub ranking` and
+the in-game RANK screen append `#` + the first four hex of the id when a
+name collides so you can tell them apart. Duplicate *live* connections with
+the same id are refused ("You're already connected."). It is closer to an
+account than the old claim-ticket scheme and still not a real login: the id
+lives in the save folder and crosses the same unencrypted link the passcode
+does. Deleting `ranking.json` clears the season. Legacy name-only rows
+without an `id` are skipped on load (season reset).
 
 The second is **`history.jsonl`**, the match ledger
 [`history`](#what-has-been-played) reads: one JSON object per line, appended
@@ -787,18 +791,22 @@ as each ranked battle settles, oldest line first.
 
 ```json
 { "at": 1754300012345, "startedAt": 1754300000000, "repeats": 0,
-  "winner": { "name": "RED", "points": 27, "gained": 16 },
-  "loser":  { "name": "BLUE", "points": 3, "lost": 16 } }
+  "winner": { "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "name": "RED", "points": 27, "gained": 16 },
+  "loser":  { "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "name": "BLUE", "points": 3, "lost": 16 } }
 ```
 
 - `at` and `startedAt` are when the battle settled and when it began;
   `points` on each side is the rating **after** the match, and
-  `gained`/`lost` is what moved. `repeats` is how many times that pairing had
-  already met inside the rematch window, which is why the swing on the third
-  meeting of an evening is smaller than the first.
-- **Only settled ranked battles are here.** A draw, two players who reported
-  different outcomes, and a match under a claim the hub would not honour all
-  score nothing, and what scores nothing is not written.
+  `gained`/`lost` is what moved. `id` is the persistent player id.
+  `repeats` is how many times that pairing had already met inside the rematch
+  window, which is why the swing on the third meeting of an evening is smaller
+  than the first.
+- **Only settled ranked battles are here.** A draw and a match the intermediator
+  did not score all score nothing, and what scores nothing is not written.
+  Mid-battle disconnect after reconnect grace is a forfeit loss and *is*
+  written when it settles.
 - **This is the one file the hub appends to** rather than writing whole and
   renaming over, and deliberately: a history is only ever the old lines plus
   one more, so rewriting it to add a line would mean reading back every battle
@@ -820,8 +828,8 @@ as each ranked battle settles, oldest line first.
   hide half the ledger from the verb that exists to print it. The `.1` is a
   plain file of the same lines in the same format — `cat` it, feed it to
   anything that reads the current one, or move it somewhere else to keep it.
-- **It holds no secrets** — trainer names and numbers, the same things
-  `ranking.json` already holds in public. Safe to `cat`, safe to hand to
+- **It holds no secrets** — player ids, trainer names and numbers, the same
+  things `ranking.json` already holds in public. Safe to `cat`, safe to hand to
   somebody writing a stats page.
 - Deleting it loses the record and nothing else: the ratings live in
   `ranking.json` and are not recomputed from here.
@@ -1721,7 +1729,7 @@ on a relay connection.
 
 | Type | Payload |
 | --- | --- |
-| `mmo.hello` | `proto, name, sprite, profile, map, x, y, facing, rankToken` — the ticket is absent on a first visit and on a copy that lost it |
+| `mmo.hello` | `proto, name, sprite, profile, map, x, y, facing, playerId` — `playerId` is 32 lowercase hex; the hub seats you under it and refuses a second live connection with the same id |
 | `mmo.auth` | `response` — 64 lowercase hex chars, `HMAC-SHA256(joinCode, nonce)` |
 | `mmo.move` | `map, x, y, facing, fast` — an absent cell means "not in the world"; `fast` is `true` only when literally `true`, and means the step covered a tile at the doubled clock (a sprint or a bike, and the hub is not told which) |
 | `mmo.chat` | `scope, to, text` |
@@ -1741,7 +1749,7 @@ on a relay connection.
 | Type | Payload |
 | --- | --- |
 | `mmo.challenge` | `nonce` — 32 lowercase hex chars, per-connection, single-use. Sent by every hub that requires a passcode, which is every hub but the `node hub.js` shim |
-| `mmo.welcome` | `id, players[], points, ranked` — plus `rankToken` on the one visit that claimed the name, and only that visit; `motd` when this hub has one configured (absent when it does not); and `admin: true` when the join code this connection answered with is an [admin code](#admin-codes), absent otherwise. All three optional fields ride hub→client on a message that already existed, which is why none of them moved the protocol number. `admin` is derived from the credential server-side and told to that client about itself only — it is deliberately not in the presence record other players receive |
+| `mmo.welcome` | `id, players[], points, ranked` — `id` echoes the admitted `playerId`; `ranked` is always true under PROTOCOL 16; plus `motd` when this hub has one configured (absent when it does not); and `admin: true` when the join code this connection answered with is an [admin code](#admin-codes), absent otherwise. Optional fields ride hub→client on a message that already existed. `admin` is derived from the credential server-side and told to that client about itself only — it is deliberately not in the presence record other players receive |
 | `mmo.join` / `mmo.part` | `player` / `id` |
 | `mmo.move` | a presence record |
 | `mmo.chat` | `from, name, scope, text` — **or, when the hub itself is speaking, `name: "HUB"`, `scope: "global"` and no `from` at all**: an operator's `broadcast`. A line with no sender is a line no player sent |
@@ -1805,10 +1813,10 @@ and expires. Nothing new travels client→hub at all.
 The handshake, in full:
 
 ```
-client → hub    mmo.hello      { proto: 5, name, sprite, profile, map, x, y, facing, rankToken? }
+client → hub    mmo.hello      { proto: 16, name, sprite, profile, map, x, y, facing, playerId }
 hub    → client mmo.challenge  { nonce }        ← only when a passcode is required
 client → hub    mmo.auth       { response }     ← HMAC-SHA256(passcode, nonce), 64 hex
-hub    → client mmo.welcome    { id, players[], points, ranked, rankToken?, motd? }
+hub    → client mmo.welcome    { id, players[], points, ranked, motd?, admin? }
                                                 ← or mmo.error, which the game shows
 ```
 

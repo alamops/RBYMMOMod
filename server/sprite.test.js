@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
+const crypto = require('node:crypto');
+function testPlayerId(seed) {
+  return crypto.createHash('sha256').update(String(seed)).digest('hex').slice(0, 32);
+}
+
 /*
  * Unit tests for `mmo.sprite` on the node hub: the character a player is
  * wearing, changed mid-session, stored by `lib/relay.js` and broadcast the
@@ -57,20 +62,21 @@ function dial(relay, name, opts) {
   const peer = { outbox: [], remoteAddress: '127.0.0.1' };
   peer.send = (msg) => peer.outbox.push(msg);
   peer.close = () => {};
-  const id = relay.accept(peer);
-  relay.handle(id, {
+  const ephemeralId = relay.accept(peer);
+  const playerId = o.playerId || testPlayerId(o.name || name || 'x');
+  relay.handle(ephemeralId, {
     type: 'mmo.hello',
     proto: PROTOCOL,
     name,
     sprite: o.sprite || DEFAULT_SPRITE,
-    rankToken: o.token,
+    playerId,
     map: o.map === undefined ? 'PALLET' : o.map,
     x: o.x === undefined ? 1 : o.x,
     y: o.y === undefined ? 1 : o.y,
     facing: 'down',
   });
   const welcome = peer.outbox.find((m) => m.type === 'mmo.welcome');
-  return { id, peer, name, welcome };
+  return { id: playerId, peer, name, welcome, ephemeralId };
 }
 
 // A connection that has connected but never said hello: accepted, never
@@ -195,23 +201,28 @@ function testChangeAfterTheGateOpensGoesThrough() {
 
 // ------------------------------------------------------------------ ranking
 
-function testImpostorCannotRepaintBoard() {
+function testDuplicatePlayerIdIsRefused() {
   const clock = makeClock();
   const relay = makeRelay(clock);
   const owner = dial(relay, 'ELEVEN', { sprite: 'SPRITE_RED' });
-  ok(owner.welcome.ranked === true, 'sanity: a first hello under a free name is ranked');
-  ok(relay.board.get('ELEVEN').sprite === 'SPRITE_RED',
+  ok(owner.welcome.ranked === true, 'sanity: a valid playerId is ranked');
+  ok(relay.board.get(owner.id).sprite === 'SPRITE_RED',
     'sanity: the board learned the owner\'s hello sprite');
 
-  const impostor = dial(relay, 'ELEVEN', { sprite: 'SPRITE_RED' });
-  ok(impostor.welcome.ranked === false,
-    'sanity: a second hello under a name that is live and ranked is an impostor');
-
-  relay.handle(impostor.id, { type: 'mmo.sprite', sprite: 'SPRITE_GREEN' });
-  ok(relay.get(impostor.id).sprite === 'SPRITE_GREEN',
-    'sanity: the impostor\'s own presence still repaints -- only the board is guarded');
-  ok(relay.board.get('ELEVEN').sprite === 'SPRITE_RED',
-    'an impostor cannot repaint a ranked row\'s face');
+  const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => {};
+  const ephemeral = relay.accept(peer);
+  relay.handle(ephemeral, {
+    type: 'mmo.hello', proto: PROTOCOL, name: 'ELEVEN',
+    playerId: owner.id, sprite: 'SPRITE_GREEN',
+    map: 'PALLET', x: 1, y: 1, facing: 'down',
+  });
+  const err = take({ peer }, 'mmo.error');
+  ok(err && /already connected/i.test(err.message),
+    'a second live connection with the same playerId is refused');
+  ok(relay.board.get(owner.id).sprite === 'SPRITE_RED',
+    'and the boarded face is unchanged');
 }
 
 function testRankedOwnerReseedsTheBoard() {
@@ -219,11 +230,11 @@ function testRankedOwnerReseedsTheBoard() {
   const relay = makeRelay(clock);
   const owner = dial(relay, 'TWELVE', { sprite: 'SPRITE_RED' });
   ok(owner.welcome.ranked === true, 'sanity: a first hello under a free name is ranked');
-  ok(relay.board.get('TWELVE').sprite === 'SPRITE_RED',
+  ok(relay.board.get(owner.id).sprite === 'SPRITE_RED',
     'sanity: the board learned the hello sprite');
 
   relay.handle(owner.id, { type: 'mmo.sprite', sprite: 'SPRITE_GREEN' });
-  ok(relay.board.get('TWELVE').sprite === 'SPRITE_GREEN',
+  ok(relay.board.get(owner.id).sprite === 'SPRITE_GREEN',
     'a ranked owner\'s change re-seeds the board\'s face');
 }
 
@@ -352,7 +363,7 @@ function main() {
   testUnchangedSpriteIsNotRebroadcast();
   testGateKeepsOnlyTheFirstChange();
   testChangeAfterTheGateOpensGoesThrough();
-  testImpostorCannotRepaintBoard();
+  testDuplicatePlayerIdIsRefused();
   testRankedOwnerReseedsTheBoard();
   testABrokenBoardCannotSwallowTheAnnouncement();
   testUngreetedClientCannotChangeSprite();

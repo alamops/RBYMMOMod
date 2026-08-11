@@ -23,6 +23,48 @@ local Places = need("Places")
 local M = {}
 M.__index = M
 
+-- True-white paper over the bottom message / menu strip (tiles y=12..17).
+--
+-- Game.lua lets the topmost `sgbPalettes` owner color the frame; TextBox and
+-- Menu have none, so a prompt stacked on BattleState inherits the battle
+-- message-box zone. That zone's color 0 is SGB off-white pink (255,239,255),
+-- so Font.drawBox's (1,1,1) fill becomes pink while a menu drawn the same
+-- way can read as a white island -- the WAIT/ALONE screen. Claiming this
+-- strip as `colors = false` keeps the fill true white; the battle field
+-- above still uses the engine's palettes from beneath.
+local UI_PAPER = { colors = false, x = 0, y = 96, w = 160, h = 48 }
+M.UI_PAPER = UI_PAPER
+
+local function withUiPaper(screen)
+  if type(screen) ~= "table" then return screen end
+  screen.sgbPalettes = function(self, game)
+    local zones
+    local stack = game and game.stack and game.stack.states
+    if type(stack) == "table" then
+      for i = #stack, 1, -1 do
+        if stack[i] == self then
+          for j = i - 1, 1, -1 do
+            local s = stack[j]
+            if s and s.sgbPalettes then
+              local ok, z = pcall(s.sgbPalettes, s, game)
+              if ok then zones = z end
+              break
+            end
+          end
+          break
+        end
+      end
+    end
+    local out = {}
+    if type(zones) == "table" then
+      for i = 1, #zones do out[i] = zones[i] end
+    end
+    out[#out + 1] = UI_PAPER
+    return out
+  end
+  return screen
+end
+
 local SCREEN = {
   TEXT     = "RbyMmoText",
   CONFIRM  = "RbyMmoConfirm",
@@ -588,6 +630,43 @@ function M.nameRoom(points)
     (RANK_RIGHT - width - RANK_GAP - RANK_NAME_X) / 8), 1)
 end
 
+-- First four hex of a PROTOCOL 16 playerId, for duplicate display names.
+function M.rankTag(id)
+  if type(id) ~= "string" or not id:match("^[0-9a-fA-F]+$") or #id < 4 then
+    return nil
+  end
+  return "#" .. id:sub(1, 4):lower()
+end
+
+-- Names that appear more than once on the board (display names are cosmetic).
+function M.nameCollisions(rows)
+  local counts = {}
+  for _, row in ipairs(rows or {}) do
+    local name = row and row.name
+    if type(name) == "string" and name ~= "" then
+      counts[name] = (counts[name] or 0) + 1
+    end
+  end
+  local collide = {}
+  for name, n in pairs(counts) do
+    if n > 1 then collide[name] = true end
+  end
+  return collide
+end
+
+-- Name column for RANK: truncate to fit the score, and when another row
+-- shares the display name append ` #aaaa` from the playerId.
+function M.rankLabel(name, id, collide, points)
+  name = tostring(name or "")
+  local tag = collide and M.rankTag(id) or nil
+  local room = M.nameRoom(points)
+  if tag then
+    room = math.max(room - (#tag + 1), 1)
+    return name:sub(1, room) .. " " .. tag
+  end
+  return name:sub(1, room)
+end
+
 function Ranks.new(game, client, onCancel)
   -- Asked for on the way in rather than pushed by the hub: the board moves
   -- on every battle anybody fights, and nobody is looking at it most of the
@@ -639,15 +718,6 @@ function Ranks:draw()
     if not asked then
       Font.draw("NOT IN A GAME.", 16, 48)
       Font.draw("JOIN ONE FIRST.", 16, 64)
-    elseif not self.client:isRanked() then
-      -- The name this player joined under belongs to somebody else's copy on
-      -- this hub, so their battles will not score. Said here, with the whole
-      -- page to say it in, and with the thing to do about it -- a zero on a
-      -- card cannot explain itself.
-      Font.draw("THAT NAME IS TAKEN", 16, 48)
-      Font.draw("ON THIS HUB, SO NO", 16, 64)
-      Font.draw("BATTLES WILL SCORE.", 16, 80)
-      Font.draw("PICK ANOTHER NAME.", 16, 96)
     elseif not seen then
       Font.draw("ASKING THE HUB...", 16, 48)
     else
@@ -658,6 +728,7 @@ function Ranks:draw()
   end
 
   local last = math.min(self.offset + RANK_ROWS, #rows)
+  local collide = M.nameCollisions(rows)
   for slot = 1, last - self.offset do
     local place = self.offset + slot
     local row = rows[place]
@@ -674,7 +745,7 @@ function Ranks:draw()
     end
 
     local points = tostring(row.points or 0)
-    local name = tostring(row.name):sub(1, M.nameRoom(points))
+    local name = M.rankLabel(row.name, row.id, collide[row.name], points)
     Font.draw(name, RANK_NAME_X, y + RANK_TEXT_DY)
     Font.draw(points, RANK_RIGHT - 8 * #points, y + RANK_TEXT_DY)
   end
@@ -683,11 +754,7 @@ function Ranks:draw()
   -- list is on screen rather than only that there is more: an arrow alone
   -- does not tell a player whether they are looking at the top ten or the
   -- bottom of it.
-  -- One footer row, and being unranked wins it: which slice of the list is on
-  -- screen is a nicety, and "nothing you do here counts" is not.
-  if not self.client:isRanked() then
-    Font.draw("NOT RANKED HERE.", 16, RANK_FOOT_Y)
-  elseif #rows > RANK_ROWS then
+  if #rows > RANK_ROWS then
     Font.draw(("%d-%d OF %d"):format(self.offset + 1, last, #rows),
               16, RANK_FOOT_Y)
   end
@@ -887,7 +954,7 @@ function M:install()
 
   screens:register(SCREEN.TEXT, { new = function(game, opts)
     opts = opts or {}
-    return mod.ui.TextBox.new(game, opts.text or "", opts.onDone)
+    return withUiPaper(mod.ui.TextBox.new(game, opts.text or "", opts.onDone))
   end })
 
   screens:register(SCREEN.CONFIRM, { new = function(game, opts)
@@ -895,7 +962,7 @@ function M:install()
     -- TextBox pushes the yes/no box itself once the text finishes printing
     -- and calls opts.choice with the answer, which is the vanilla prompt
     -- rhythm rather than two boxes appearing at once
-    return mod.ui.TextBox.new(game, opts.text or "", nil, {
+    return withUiPaper(mod.ui.TextBox.new(game, opts.text or "", nil, {
       choice = function(yes)
         if opts.onChoose then opts.onChoose(yes and true or false) end
       end,
@@ -903,7 +970,7 @@ function M:install()
       -- engine reads this field for truthiness, and a caller who handed in
       -- a string would be opting into a default they never asked for.
       defaultNo = opts.defaultNo == true,
-    })
+    }))
   end })
 
   screens:register(SCREEN.STATE, { new = function(_, opts)
@@ -920,10 +987,10 @@ function M:install()
   screens:register(SCREEN.CHOOSE, { new = function(game, opts)
     opts = opts or {}
     local items = opts.items or {}
-    return mod.ui.TextBox.new(game, opts.text or "", function()
+    return withUiPaper(mod.ui.TextBox.new(game, opts.text or "", function()
       mod.ui.push(game, SCREEN.MENU_CHOOSE,
         { items = items, last = M.cancelRow(items) })
-    end)
+    end))
   end })
 
   -- The box itself, split out so CHOOSE can print its line before opening it.
@@ -933,7 +1000,7 @@ function M:install()
     opts = opts or {}
     local items = opts.items or {}
     local last = opts.last
-    return mod.ui.Menu.new(game, items, {
+    return withUiPaper(mod.ui.Menu.new(game, items, {
       tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
       -- B is the last row, run as though it had been selected. Not nil, and
       -- not a close: a co-op prompt with a working cancel is a trainer the
@@ -941,7 +1008,7 @@ function M:install()
       onCancel = function()
         if last and last.onSelect then last.onSelect() end
       end,
-    })
+    }))
   end })
 
   -- ------- the hubs this copy has already been on
@@ -2243,11 +2310,8 @@ function M:install()
     end
 
     -- JOIN, and only against the partner who is actually standing at a fight
-    -- waiting for us. This is the third way into the co-op yes/no in the
-    -- brief -- walking up to the person who is waiting and pressing A -- and
-    -- it is offered rather than always present for the same reason INVITE is:
-    -- a row whose usual answer is "there is nothing to join" is a row the
-    -- useful commands do not get.
+    -- waiting for us. The invite also lands as a confirm when you share their
+    -- map; this row is the third door for when that box was dismissed.
     local offer = ctx.coop:pendingOffer()
     if offer and offer.from == player.id then
       items[#items + 1] = { label = "JOIN", join = true }

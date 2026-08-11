@@ -114,6 +114,16 @@ local function encOutcome(out)
   if out.losers then
     parts[#parts + 1] = '"losers":' .. encList(out.losers, encString)
   end
+  -- Catch sheet digest only: full move lists would bloat the fixture without
+  -- proving anything the rngState / event stream do not already pin.
+  if out.caught then
+    parts[#parts + 1] = '"caught":{'
+      .. '"species":' .. encString(out.caught.species) .. ","
+      .. '"level":' .. encNumber(out.caught.level) .. ","
+      .. '"hp":' .. encNumber(out.caught.hp) .. ","
+      .. '"maxHp":' .. encNumber(out.caught.maxHp)
+      .. "}"
+  end
   return "{" .. table.concat(parts, ",") .. "}"
 end
 
@@ -150,7 +160,7 @@ local function mv(id, power, accuracy, ty, pp)
 end
 
 local function mn(o)
-  return {
+  local out = {
     species = o.species, level = o.level or 20, hp = o.hp,
     maxHp = o.maxHp or 100, status = o.status, statusTurns = o.statusTurns,
     confusion = o.confusion, toxicCounter = o.toxicCounter, types = o.types,
@@ -158,6 +168,9 @@ local function mn(o)
               spd = o.spd or 40, spc = o.spc or 40 },
     moves = o.moves,
   }
+  if o.catchRate ~= nil then out.catchRate = o.catchRate end
+  if o.evs then out.evs = o.evs end
+  return out
 end
 
 local function build(opts)
@@ -189,6 +202,27 @@ local function drainInto(battle, events)
   batches[#batches + 1] = #list
 end
 
+-- After a faint with bench left the seat owes a switch, not a fight.
+local function fightOrReplace(battle, playerId)
+  local snap = battle:snapshot()
+  for _, f in ipairs(snap.field or {}) do
+    if f.playerId == playerId then
+      if f.mustReplace then
+        local slot = nil
+        for i, hp in ipairs(f.party or {}) do
+          if (hp or 0) > 0 then slot = i - 1; break end
+        end
+        if slot ~= nil then
+          return battle:submitChoice(playerId, { action = "switch", slot = slot })
+        end
+        return false
+      end
+      break
+    end
+  end
+  return battle:submitChoice(playerId, { action = "fight", move = 0 })
+end
+
 -- 1. a deterministic KO fight between two equally fast sides, so the speed
 --    tie-break byte is spent on every turn and faint replacement runs.
 scenario("ko", function(events)
@@ -209,8 +243,8 @@ scenario("ko", function(events)
   drainInto(battle, events)
   for _ = 1, 40 do
     if battle:outcome() then break end
-    battle:submitChoice("p1", { action = "fight", move = 0 })
-    battle:submitChoice("p2", { action = "fight", move = 0 })
+    fightOrReplace(battle, "p1")
+    fightOrReplace(battle, "p2")
     drainInto(battle, events)
   end
   return battle
@@ -551,6 +585,74 @@ scenario("coop", function(events)
   end
   battle:disconnect("b1")
   battle:tick(1000)
+  drainInto(battle, events)
+  return battle
+end)
+
+-- 13. wild catch: MASTER_BALL ends without catch rolls; still a new mode and
+--     outcome.reason / caught digest the prior fixtures never touched.
+scenario("wild_master", function(events)
+  local battle = build({
+    id = "wm", mode = "wild", seed = 51, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 200, spd = 80,
+             moves = { mv("splash", 0, 255, 0) } }) } } },
+      b = { { playerId = "p2", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 40, hp = 10, spd = 10, catchRate = 255,
+             moves = { mv("splash", 0, 255, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "item", item = "MASTER_BALL" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- 14. wild POKE_BALL: catchAttempt draws from the RNG (rate roll, then HP
+--     roll when the rate check passes). Seed chosen so the stream is stable;
+--     regenerate the fixture whenever catch/item draw sites move.
+scenario("wild_ball", function(events)
+  local battle = build({
+    id = "wb", mode = "wild", seed = 88, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 200, spd = 80,
+             moves = { mv("splash", 0, 255, 0) } }) } } },
+      b = { { playerId = "p2", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 100, hp = 25, spd = 10, catchRate = 45,
+             moves = { mv("splash", 0, 255, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "item", item = "POKE_BALL" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  if not battle:outcome() then
+    battle:submitChoice("p1", { action = "item", item = "MASTER_BALL" })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- 15. vitamins: fight-local Stat Exp on the sheet (+2560); Gen1 stat delta.
+scenario("vitamin", function(events)
+  local battle = build({
+    id = "vt", mode = "1v1", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", level = 100, maxHp = 200, spd = 80, atk = 40,
+             moves = { mv("splash", 0, 255, 0) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 200, spd = 10,
+             moves = { mv("splash", 0, 255, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "item", item = "PROTEIN" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
   drainInto(battle, events)
   return battle
 end)

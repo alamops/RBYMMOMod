@@ -147,7 +147,9 @@ local mons = Mediated.snapshotParty(gameWith({
 
 eq(#mons, 2, "every party member that can be described is snapshotted")
 eq(mons[1].species, "CHARMANDER", "a mon with no nickname is its species")
+eq(mons[1].speciesId, "CHARMANDER", "and keeps the registry id for battle art")
 eq(mons[2].species, "SHELLY", "...and one with a nickname is the nickname")
+eq(mons[2].speciesId, "SQUIRTLE", "...while speciesId stays the pokedex key")
 eq(mons[1].level, 12, "the level rides along")
 eq(mons[1].hp, 30, "current HP")
 eq(mons[1].maxHp, 30, "and the maximum, from the stat block")
@@ -246,6 +248,22 @@ eq(ruleset.chart[2][2], Wire.EFF_NEUTRAL, "and an unstated one is too -- the "
 eq(ruleset.seed, nil, "no seed is offered: the intermediator does every roll "
   .. "and can pick its own")
 check(Wire.battleRuleset(ruleset) ~= nil, "the ruleset survives its sanitiser")
+-- FIRE is Special in Gen1; sorted fixture order is FIRE,NORMAL,WATER → 0 and 2.
+eq(ruleset.specialTypes and #ruleset.specialTypes, 2,
+   "Special types are uploaded with the chart")
+local specialSet = {}
+for _, idx in ipairs(ruleset.specialTypes or {}) do specialSet[idx] = true end
+check(specialSet[0] and specialSet[2], "FIRE and WATER indices are Special")
+check(not specialSet[1], "NORMAL is Physical")
+check(ruleset.metronomePool and #ruleset.metronomePool >= 1,
+      "Metronome pool is uploaded from the host move table")
+local metroHasMetronome = false
+for _, sheet in ipairs(ruleset.metronomePool or {}) do
+  if sheet.id == "METRONOME" or sheet.id == "metronome" then
+    metroHasMetronome = true
+  end
+end
+check(not metroHasMetronome, "Metronome excludes itself from the pool")
 
 -- A build with no chart to read has no matchups to state, and a chart of
 -- nothing but neutral cells says exactly that.
@@ -327,6 +345,7 @@ local party = host.firstSent(Wire.BATTLE_PARTY)
 check(party ~= nil, "opening a battle session uploads a party")
 eq(party.battle, "7", "named for the session, which is also the battle id")
 check(#party.mons == 2, "with the whole party in it")
+check(type(party.bag) == "table", "and a battle bag sheet (PROTOCOL 15)")
 check(Wire.battleParty(party) ~= nil, "and it is a party the far end accepts")
 
 local rules = host.firstSent(Wire.BATTLE_RULESET)
@@ -396,7 +415,7 @@ gated.open()
 eq(canBattleCalls, 0, "opening a mediated battle never asks canBattle")
 
 -- ...and the rule it states is unchanged, because a cable-club link would still
--- consult it and tests/red_yellow_battle_compat.lua still drives it.
+-- consult it and tests/drivers/red_yellow_battle_compat.lua still drives it.
 local fakeHandshake = {
   battleAllowed = function(verdict) return verdict == "full" end,
 }
@@ -453,6 +472,40 @@ eq(fight.slots[2].species, "PIDGEY", "a send puts a name on the foe's box")
 eq(fight.slots[2].maxHp, 24, "and the first HP seen is taken as the maximum")
 eq(fight.active, 2, "our own send-out is matched back to the party we uploaded")
 
+-- Classic field helpers stay callable without a graphics device.
+check(type(fight.drawEnemyHUD) == "function", "classic foe HUD is wired")
+check(type(fight.drawPlayerHUD) == "function", "classic ally HUD is wired")
+check(type(fight.enemyPicXY) == "function", "foe pic placement is wired")
+check(type(fight.playerPicXY) == "function", "ally pic placement is wired")
+check(fight.isOpaque == true, "1v1 battle is opaque so overworld does not draw under it")
+check(fight.letterboxWhite ~= true,
+  "1v1 skips letterboxWhite so voids stay black (not SGB paper pink)")
+local ex, ey = fight:enemyPicXY(nil)
+eq(ex, 88, "fallback foe pic x matches classic anchor")
+eq(ey, 0, "fallback foe pic y matches classic anchor")
+local px, py, ps = fight:playerPicXY(nil)
+eq(px, 8, "fallback ally pic x matches classic anchor")
+eq(py, 40, "fallback ally pic y matches classic anchor")
+eq(ps, 2, "ally back pic draws at 2x like the GB / BattleState default")
+eq(fight.PLAYER_PIC_SCALE, 2, "PLAYER_PIC_SCALE is published for the suite")
+-- A 56px-tall back sheet at 2x sits with feet on y=96 (top at y=-16).
+local fake = { getDimensions = function() return 56, 56 end }
+local sx, sy, ss = fight:playerPicXY(fake)
+eq(ss, 2, "measured ally pic keeps the 2x scale")
+eq(sx, 8, "measured ally pic keeps the classic left edge")
+eq(sy, 96 - 56 * 2, "feet stay on the text-box top at 2x")
+-- Already-paletted pics must not take an OG/CLASSIC GRAYS remap.
+check(type(fight.sgbPalettes) == "function", "sgbPalettes opt-out is wired")
+check(type(fight.zones) == "function", "zones opt-out is wired")
+local pals = fight:sgbPalettes()
+eq(type(pals), "table", "sgbPalettes returns a zone list")
+eq(pals[1] and pals[1].colors, false, "sgbPalettes opts out of shade remap")
+eq(pals[1] and pals[1].w, 160, "sgbPalettes covers the classic canvas")
+local z = fight:zones()
+eq(z[1] and z[1].colors, false, "zones matches the sgbPalettes opt-out")
+eq(fight:speciesKeyFor("SQUIRTLE", true), "SQUIRTLE",
+   "speciesKeyFor resolves an uploaded registry id")
+
 event({ seq = 3, t = "damage", slot = 2, hp = 9, amount = 15 })
 eq(fight.slots[2].hp, 9, "damage is applied from the event's own HP")
 eq(fight.slots[2].maxHp, 24, "and the bar still knows what it is out of")
@@ -477,15 +530,182 @@ while fight.phase ~= "choose" and guard < 40 do
 end
 eq(fight.phase, "choose", "once the queue drains, the menu opens")
 
+-- Forced skip: hub chose for our seat before the menu would open — stay in play.
+event({ seq = 9, t = "turn" })
+event({ seq = 10, t = "msg", text = "SQUIRTLE must recharge" })
+event({ seq = 11, t = "chose", slot = 0, text = "me" })
+check(fight.answeredTurn, "own chose marks the turn answered")
+check(not fight.pendingTurn, "and clears the pending menu open")
+guard = 0
+while fight.shown ~= nil or #fight.lines > 0 do
+  fight:update(2.0)
+  guard = guard + 1
+  if guard > 40 then break end
+end
+fight:update(0)
+eq(fight.phase, "play", "forced chose never opens the command menu")
+
+-- A fresh turn without a chose still opens the menu as before.
+event({ seq = 12, t = "turn" })
+guard = 0
+while fight.phase ~= "choose" and guard < 40 do
+  fight:update(2.0)
+  guard = guard + 1
+end
+eq(fight.phase, "choose", "an unanswered turn still opens the menu")
+
+-- Cursor / multi-move send while Squirtle (2 moves) is still out.
+do
+  local active = fight:activeMon()
+  eq(#(active and active.moves or {}), 2, "Squirtle still offers both moves")
+  play.game.input.press("a")
+  fight:update(0)
+  eq(fight.phase, "move", "A on FIGHT opens the move list before faint")
+  play.game.input.press("down")
+  fight:update(0)
+  eq(fight.cursor, 2, "the cursor moves")
+  -- B cancels back; the real send is asserted after replace below.
+  play.game.input.press("b")
+  fight:update(0)
+  eq(fight.phase, "choose", "B returns to the command box")
+end
+
+-- Faint with bench: next turn opens the replace picker (B cannot cancel).
+-- Pacing: faint line must drain before the picker opens.
+do
+  local activeIdx = fight.active
+  fight.mine[activeIdx].hp = 0
+  for i, m in ipairs(fight.mine) do
+    if i ~= activeIdx and (m.hp or 0) <= 0 then m.hp = 10 end
+  end
+end
+event({ seq = 13, t = "faint", slot = 0, text = "SQUIRTLE", amount = 1 })
+check(fight.mustReplace, "own faint with amount=1 arms mustReplace")
+check(fight.shown ~= nil or #fight.lines > 0, "faint line is queued before picker")
+event({ seq = 14, t = "turn" })
+-- While the faint line is still showing, the switch picker must not open.
+check(fight.phase ~= "switch", "picker waits for faint narration")
+guard = 0
+while (fight.shown ~= nil or #fight.lines > 0) and guard < 40 do
+  fight:update(2.0)
+  guard = guard + 1
+end
+guard = 0
+while fight.phase ~= "switch" and guard < 40 do
+  fight:update(2.0)
+  guard = guard + 1
+end
+eq(fight.phase, "switch", "mustReplace opens the switch picker after msg")
+check(fight.replaceOnly, "and marks the picker uncancellable")
+event({ seq = 15, t = "send", slot = 0, text = "CHARMANDER", hp = 40 })
+check(not fight.mustReplace, "send clears mustReplace")
+
+-- Drain the send line, then a fresh turn reopens the command menu.
+guard = 0
+while (fight.shown ~= nil or #fight.lines > 0) and guard < 40 do
+  fight:update(2.0)
+  guard = guard + 1
+end
+event({ seq = 16, t = "turn" })
+guard = 0
+while fight.phase ~= "choose" and guard < 40 do
+  fight:update(2.0)
+  guard = guard + 1
+end
+eq(fight.phase, "choose", "after replace, a new turn opens the menu")
+
+-- Empty-bench faint on a dedicated screen: no amount → never arms replace.
+do
+  local alone = harness("host")
+  alone.game.input = fakeInput()
+  alone.open("empty-bench")
+  local f = alone.sessions.fight
+  alone.sessions:onBattleReady({
+    battle = "empty-bench", mode = "1v1",
+    sides = { a = { "me" }, b = { "peer1" } },
+  })
+  alone.sessions:onBattleEvent({
+    battle = "empty-bench", seq = 1, t = "send", slot = 0,
+    text = "SQUIRTLE", hp = 1,
+  })
+  for _, m in ipairs(f.mine or {}) do m.hp = 0 end
+  alone.sessions:onBattleEvent({
+    battle = "empty-bench", seq = 2, t = "faint", slot = 0,
+    text = "SQUIRTLE",
+  })
+  check(not f.mustReplace, "empty-bench faint (no amount) does not arm replace")
+  -- Drain narration so the screen can settle.
+  local guard = 0
+  while (f.shown ~= nil or #f.lines > 0 or f.anim) and guard < 40 do
+    f:update(2.0)
+    guard = guard + 1
+  end
+  alone.sessions:onBattleEvent({ battle = "empty-bench", seq = 3, t = "turn" })
+  alone.sessions:onBattleEvent({ battle = "empty-bench", seq = 4, t = "over" })
+  check(f.phase ~= "switch", "no replace picker after empty-bench faint")
+end
+
+-- KO pic stays on screen through a queued move flash + "fainted!" line.
+-- Clearing the sprite in noteSlot(faint) used to drop it under a still-queued
+-- anim the moment HP hit 0.
+do
+  local alone = harness("host")
+  alone.game.input = fakeInput()
+  alone.open("pic-hold")
+  local f = alone.sessions.fight
+  alone.sessions:onBattleReady({
+    battle = "pic-hold", mode = "1v1",
+    sides = { a = { "me" }, b = { "peer1" } },
+  })
+  local function ev(fields)
+    fields.battle = "pic-hold"
+    alone.sessions:onBattleEvent(fields)
+  end
+  ev({ seq = 1, t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
+  ev({ seq = 2, t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  local foe = f.slots[2]
+  foe.sprite = { id = "foe-pic" }
+  -- Anim first (still in lines), then damage to 0, then faint — the old bug
+  -- nil'd the sprite on faint while the anim row had not played yet.
+  ev({ seq = 3, t = "anim", slot = 0, text = "TACKLE", side = "a" })
+  ev({ seq = 4, t = "damage", slot = 2, hp = 0 })
+  ev({ seq = 5, t = "faint", slot = 2, text = "PIDGEY" })
+  check(foe.sprite ~= nil, "faint event does not clear the pic immediately")
+  check(foe.koHold, "and marks the pic as held through the KO presentation")
+  -- Drain until the anim row would have been taken (AnimPlayer may be absent
+  -- headless — startAnim still sets f.anim and tickMessages dwells it).
+  local guard = 0
+  while f.anim == nil and #f.lines > 0 and guard < 20 do
+    -- Pull until anim starts or faint line shows; do not skip the whole queue.
+    if f.shown then
+      alone.game.input.press("a")
+    end
+    f:update(0.05)
+    guard = guard + 1
+  end
+  check(foe.sprite ~= nil,
+        "pic still held while the move flash / faint line is in flight")
+  guard = 0
+  while (f.shown ~= nil or #f.lines > 0 or f.anim) and guard < 80 do
+    alone.game.input.press("a")
+    f:update(2.0)
+    guard = guard + 1
+  end
+  check(foe.sprite == nil, "clearPic releases the foe after the faint line")
+  check(not foe.koHold, "and clears the hold flag")
+end
+
 -- The move list is our own uploaded sheet, which is the only copy of it this
 -- side has -- the intermediator narrates by name and never sends it back.
 local active = fight:activeMon()
 check(active ~= nil, "the menu knows which of ours is out")
-eq(#active.moves, 2, "and offers exactly its moves")
+eq(active.species, "CHARMANDER", "post-replace active matches the send")
+eq(#active.moves, 1, "and offers exactly its moves")
 
-play.game.input.press("down")
+-- Command box first (FIGHT is the default), then the move list.
+play.game.input.press("a")
 fight:update(0)
-eq(fight.cursor, 2, "the cursor moves")
+eq(fight.phase, "move", "A on FIGHT opens the move list")
 play.game.input.press("a")
 fight:update(0)
 
@@ -493,7 +713,7 @@ local choice = play.firstSent(Wire.BATTLE_CHOICE)
 check(choice ~= nil, "A on a move sends a choice")
 eq(choice.battle, "7", "naming the battle it is for")
 eq(choice.action, "fight", "as a fight")
-eq(choice.move, 1, "with the move index, zero-based on the wire")
+eq(choice.move, 0, "with the move index, zero-based on the wire")
 eq(choice.target, nil, "and no target: a 1v1 has exactly one thing to hit")
 check(Wire.battleChoice(choice) ~= nil, "and it is a choice the hub accepts")
 eq(fight.phase, "play", "the menu closes behind it")
@@ -681,7 +901,53 @@ if ok and type(Data) == "table" then
     local realRules = Mediated.snapshotRuleset({ data = Data })
     check(Wire.battleRuleset(realRules) ~= nil,
           "as does a ruleset built from the real type chart")
+    -- Fixture Data may be a subset of Gen1; assert the upload derives Special
+    -- indices from the same ordered id list snapshotRuleset uses.
+    local SPECIAL = {
+      FIRE = true, WATER = true, GRASS = true, ELECTRIC = true,
+      ICE = true, PSYCHIC = true, DRAGON = true,
+    }
+    local order = Mediated.typeOrder(Data)
+    local expectSpecial = 0
+    if order then
+      for _, id in ipairs(order.ids) do
+        if SPECIAL[id] then expectSpecial = expectSpecial + 1 end
+      end
+    end
+    eq(realRules.specialTypes and #realRules.specialTypes, expectSpecial,
+       "specialTypes covers every Gen1 Special name in the type order")
+    local moveN = 0
+    if type(Data.moves) == "table" then
+      for id in pairs(Data.moves) do
+        if id ~= "STRUGGLE" and id ~= "struggle" then moveN = moveN + 1 end
+      end
+    end
+    local poolN = realRules.metronomePool and #realRules.metronomePool or 0
+    if moveN > 0 then
+      check(poolN >= 1 and poolN <= Config.BATTLE_METRONOME_POOL_MAX,
+            "Metronome pool is non-empty from fixture moves ("
+              .. tostring(poolN) .. ")")
+    end
   end
+end
+
+-- ------------------------------------------------------------------
+-- 10. vitamin writeback: Stat Exp + live stats without engine Stats
+-- ------------------------------------------------------------------
+
+do
+  local mon = {
+    species = "TESTMON", level = 100,
+    hp = 40, stats = { hp = 40, attack = 40, defense = 40, speed = 40, special = 40 },
+    statExp = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+    dvs = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+  }
+  local game = { save = { party = { mon } }, data = { pokemon = {} } }
+  check(Mediated.writebackVitamin(game, 1, "PROTEIN") == true,
+        "PROTEIN writeback succeeds without a species def")
+  eq(mon.statExp.attack, 2560, "Stat Exp gains 2560")
+  -- Gen1 √EV delta at L100: floor((floor(sqrt(2560)/4) - 0) * 100 / 100) = 12
+  eq(mon.stats.attack, 52, "attack rises by the √EV contribution without Stats.calc")
 end
 
 T.finish("mediated_battle_client")

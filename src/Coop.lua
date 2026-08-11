@@ -4,8 +4,11 @@
 -- Two flows live here, and they are less alike than they look.
 --
 --   * **Against an NPC.**  One partner walks into a trainer, is asked whether
---     to wait or to go in alone, and -- if they wait -- their offer stands
---     until the other partner reaches the same fight and says yes.
+--     to wait or to go in alone. Waiting is allowed even when the partner is
+--     on another map: the invite is stored for them and the join confirm pops
+--     automatically when they arrive. They can leave wait mode and take the
+--     trainer alone at any time. Accept → both fight it together. Decline →
+--     the waiter is told, encouraged, and released into a solo 1v1.
 --   * **Against another party.**  PARTY BATTLE on the ACTIONS menu, and all
 --     four have to agree before anything starts.
 --
@@ -19,13 +22,11 @@
 -- Three rules are worth naming up front, because every awkward-looking branch
 -- below is one of them being obeyed rather than an oversight.
 --
--- 1. **No is free, and leaves nothing behind.**  A partner who declines to
---    join sends no message, writes no flag and clears no offer.  The player
---    who is waiting goes on waiting, and the next time the decliner reaches
---    that same fight they are asked again -- because there is no record of the
---    refusal for anything to consult.  A "no" that persisted would need
---    something to expire it, and that something is what would eventually be
---    wrong.
+-- 1. **A decline ends the wait.**  Saying no to an NPC invite tells the
+--    waiter (via the hub), clears the offer, and sends them into the solo
+--    fight the engine already built under their prompt. The decliner is not
+--    dragged into anything -- if they never walked into the trainer, "no" is
+--    simply no.
 -- 2. **The fight cannot be dodged.**  Once a trainer has been triggered, every
 --    exit from every prompt this module raises ends in a battle.  B on the
 --    wait/alone choice is BATTLE ALONE, not "never mind"; B while waiting
@@ -61,6 +62,12 @@ function M.new(transport, ui, party, roster, chat)
     offer = nil,
     -- the four-way PARTY BATTLE ask, ours or theirs
     ask = nil,
+    -- Battle key of an NPC join confirm already on screen, so onOffer and
+    -- walking into the same trainer do not stack a second box.
+    joinAsk = nil,
+    -- Dedupes the "was brave / went 1-on-1" sentence when an offer ends and
+    -- a late yes would otherwise say it twice.
+    aloneAnnounced = false,
     -- The encounter this player is standing in, while a prompt of ours is up:
     -- { battle, label, map, start }.  `start` is the one continuation that
     -- lets the trainer be fought, and it is held here rather than passed
@@ -117,6 +124,8 @@ function M:reset()
   self:release()
   self:closeAskBox()
   self.waiting, self.offer, self.ask = nil, nil, nil
+  self.joinAsk, self.joinBox = nil, nil
+  self.aloneAnnounced = false
   -- Dropped, not fired. The heal and the money are already written to the
   -- save; a warp left armed across a dropped connection would go off in
   -- whatever the player is doing next.
@@ -500,7 +509,9 @@ function M:onTrainerBattle(game, state, mapId)
   if not (state and state.kind == "trainer") then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running then return false end
-  -- Their party has to be here to fight in it.
+  -- Partner has to be online (in the roster). Same map is *not* required: the
+  -- waiter may hold the encounter until they arrive, and the invite pops for
+  -- them on map.entered. Offline / no partner means this is a solo fight.
   local partner = self.party:partner()
   local here = partner and self.roster:get(partner.id)
   if not here then return false end
@@ -580,6 +591,18 @@ function M:unwindTo(game, target, alsoPop)
   return true
 end
 
+-- Whether the partner is currently standing on `mapId`.
+--
+-- Absence (offline, no roster row) is not "elsewhere" -- it is nobody to wait
+-- for, and onTrainerBattle already refused that case. A real row on another
+-- map is the wait-for-arrival path.
+function M:partnerOnMap(mapId)
+  if not mapId then return false end
+  local partner = self.party:partner()
+  local row = partner and self.roster:get(partner.id)
+  return row ~= nil and row.map == mapId
+end
+
 -- The choice that cannot be escaped.
 --
 -- Two rows and no cancel: Ui:choose maps B onto the *last* row, and the last
@@ -589,8 +612,12 @@ end
 -- encounter the engine has already begun.
 function M:askWaitOrAlone(game)
   local name = self.party:partnerName() or "your friend"
+  local mapId = self.encounter and self.encounter.map
+  local prompt = self:partnerOnMap(mapId)
+    and ("Battle with %s?"):format(name)
+    or ("Wait for %s\nto arrive?"):format(name)
 
-  self.ui:choose(game, ("Battle with %s?"):format(name), {
+  self.ui:choose(game, prompt, {
     { label = "WAIT", onSelect = function() self:beginWait() end },
     {
       label = "ALONE",
@@ -613,6 +640,10 @@ end
 -- what leaves the player standing in front of the trainer instead of fighting
 -- it.  Everything that ends the wait -- joining, giving up, the party
 -- dissolving, the connection dropping -- releases it.
+--
+-- The offer is sent immediately even when the partner is on another map: their
+-- client stores it and only raises the join confirm once they share this map
+-- (see M:considerOffer / map.entered).
 function M:beginWait()
   local encounter = self.encounter
   if not encounter then return false end
@@ -633,33 +664,43 @@ function M:beginWait()
     map = encounter.map,
   })
   local name = self.party:partnerName() or "your friend"
-  self:note(("Waiting for %s at %s."):format(name, fightName(encounter.label)))
+  if self:partnerOnMap(encounter.map) then
+    self:note(("Waiting for %s at %s."):format(name, fightName(encounter.label)))
+  else
+    self:note(("Waiting for %s to\narrive at %s."):format(
+      name, fightName(encounter.label)))
+  end
   self:showWaiting()
   return true
 end
 
 -- The box the waiting player stands behind.
 --
--- One row, and B falls onto it, because there is only one thing to do from
--- here that is not "keep waiting": go back to the choice.  It reopens rather
--- than releasing -- rule 2 again -- so the way out of waiting is the way into
--- battling, and never the way out of the fight.
+-- Two rows: BACK reopens wait/alone; ALONE is last so B leaves wait and fights
+-- solo -- rule 2 still holds from wait mode. The partner's invite stays up
+-- until ALONE (or timeout), so a BACK that later picks WAIT again does not
+-- flicker their confirm away.
 function M:showWaiting()
   local waiting = self.waiting
   if not waiting then return end
   local name = self.party:partnerName() or "your friend"
+  local prompt = self:partnerOnMap(waiting.map)
+    and ("Waiting for %s..."):format(name)
+    or ("Waiting for %s\nto arrive..."):format(name)
   -- nil game, like every other prompt this module raises: Ui falls back to the
   -- context's current game, which is the only one there is.
-  self.ui:choose(nil, ("Waiting for %s..."):format(name), {
+  self.ui:choose(nil, prompt, {
       {
-        label = "STOP",
+        label = "BACK",
         onSelect = function()
-          -- Withdrawn before the choice is reopened, so the prompt that comes
-          -- back is the first-arrival one and not a second waiting box stacked
-          -- on the first -- and so the partner is not still being shown an
-          -- offer this player has stopped standing behind.
-          if not self:withdraw("left") then return end
           self:askWaitOrAlone(nil)
+        end,
+      },
+      {
+        label = "ALONE",
+        onSelect = function()
+          self:withdraw("alone")
+          self:release()
         end,
       },
     })
@@ -675,50 +716,97 @@ function M:withdraw(reason)
   return true
 end
 
--- ------- against an NPC: the player who arrives second
+-- Take the join confirm down, if it is still up.
+--
+-- Same rule as closeAskBox: only when the held box is what the player is
+-- looking at. An offer ending under a menu leaves the confirm alone rather
+-- than popping sixteen states hunting for it.
+function M:closeJoinBox()
+  local held = self.joinBox
+  self.joinBox = nil
+  self.joinAsk = nil
+  if not held then return false end
+  local stack = held.game and held.game.stack
+  local states = stack and stack.states
+  if not (states and held.box) then return false end
+  if states[#states] ~= held.box then return false end
+  return self:unwindTo(held.game, held.box, true)
+end
+
+-- One sentence for "they went in alone", shared by the offer ending under the
+-- confirm and by a yes that arrives after the wait is already over -- so a
+-- race cannot print it twice.
+function M:announceAlone(name, onDone)
+  if self.aloneAnnounced then
+    if onDone then onDone() end
+    return false
+  end
+  self.aloneAnnounced = true
+  local who = name or self.party:partnerName() or "Your friend"
+  self.ui:say(("%s was brave\nand went 1-on-1!"):format(who), onDone)
+  return true
+end
+
+-- ------- against an NPC: the partner's invite
+
+-- Push the join confirm when an offer is live and we are free to answer it.
+--
+-- Same-map only: an invite for a fight three screens away is stored (chat
+-- note + JOIN row) but not shoved in the player's face. Mid-fight and mid-
+-- wait are also quiet -- a box over a wild encounter is worse than a note.
+function M:considerOffer(game, myMap)
+  local offer = self.offer
+  if not offer then return false end
+  if self.joinAsk or self.ask or self.waiting or self.running then return false end
+  if self:inFight(game) then return false end
+  if not (offer.map and myMap and offer.map == myMap) then return false end
+  return self:askToJoin(game, offer)
+end
 
 -- The yes/no that ends somebody else's wait.
 --
--- No is answered by doing nothing at all on the wire -- rule 1 -- and by
--- fighting the trainer alone, which is what triggering it asked for.  The
--- partner goes on waiting, and walking back into this fight asks again,
--- because nothing anywhere remembers that this was declined.
+-- No tells the waiter (rule 1) and clears the offer. The decliner is not
+-- pulled into a fight they never walked into -- release is a no-op unless
+-- they also triggered the trainer themselves.
 function M:askToJoin(game, offer)
   if not offer then return false end
-  self.ui:confirm(game,
+  if self.joinAsk then return true end
+  self.joinAsk = offer.battle
+  local box = self.ui:confirm(game,
     ("Join %s against\n%s?"):format(offer.name, fightName(offer.label)),
     function(yes)
+      self.joinBox = nil
+      self.joinAsk = nil
       if not yes then
-        -- Rule 1, and the whole of it: nothing is sent, nothing is written,
-        -- and the partner goes on waiting. All that happens is that this
-        -- player fights the trainer they walked into -- which, on the menu
-        -- path, is no trainer at all and so is simply nothing.
+        -- Tell the waiter, then step out of the way. Hub clears their offer
+        -- and delivers COOP_DECLINE; they go in alone.
+        if self:offerMatches(offer.battle) then
+          self.offer = nil
+          self.transport:send(Wire.COOP_CANCEL, { reason = "no" })
+        end
         self:release()
         return
       end
       -- Re-checked at the moment of answering rather than only when the box
       -- went up: the partner may have given up and gone in alone while this
-      -- sat on screen waiting for a human, and joining a fight that is already
-      -- running is the one thing rule 3 refuses.
-      -- One sentence for four causes -- they went in alone, they walked away,
-      -- they dropped, the offer aged out -- because from here they are
-      -- genuinely indistinguishable, and guessing between them out loud would
-      -- be the screen inventing a detail it does not have.
+      -- sat on screen waiting for a human. Same sentence as onOfferEnd -- a
+      -- yes that is simply late is not a different story from the box being
+      -- taken down under them.
       if not self:offerMatches(offer.battle) then
-        self.ui:say("They're not waiting\nany more.",
-          function() self:release() end)
+        self:announceAlone(offer.name, function() self:release() end)
         return
       end
       self.transport:send(Wire.COOP_JOIN,
         { to = offer.from, battle = offer.battle })
     end)
+  self.joinBox = box and { box = box, game = game } or nil
   return true
 end
 
 -- Walking up to the partner and pressing A, or picking them off the roster,
--- reaches the same yes/no -- which is the third way in the brief.  It answers
--- nil when there is nothing standing, and the ACTIONS menu uses that to decide
--- whether to offer the row at all.
+-- reaches the same yes/no -- which is the third way in. It answers false when
+-- there is nothing standing, and the ACTIONS menu uses that to decide whether
+-- to offer the row at all.
 function M:joinFromMenu(game)
   local offer = self.offer
   if not offer then return false end
@@ -905,6 +993,20 @@ end
 function M:onDecline(msg)
   local name = Wire.name(msg and msg.name)
   local reason = Wire.coopReason(msg and msg.reason)
+
+  -- NPC invite declined while we wait: the fight still has to happen (rule 2),
+  -- so after the two sentences we release into the solo battle under the prompt.
+  if self.waiting then
+    self.waiting = nil
+    local who = name or self.party:partnerName() or "Your friend"
+    self.ui:say(("%s decided\nnot to join."):format(who), function()
+      self.ui:say("You can take\nthem alone!", function()
+        self:release()
+      end)
+    end)
+    return
+  end
+
   self.ask = nil
   -- The old box first, then the new one: two sentences about the same ask,
   -- one of them stale, is what a player would otherwise be left pressing A
@@ -921,7 +1023,7 @@ end
 
 -- ------- inbound: the NPC flow
 
-function M:onOffer(msg)
+function M:onOffer(game, msg, myMap)
   local offer = Wire.coopOffer(msg)
   if not offer then return end
   -- Only from the person we are actually travelling with.  The hub only ever
@@ -931,20 +1033,28 @@ function M:onOffer(msg)
   if not self.party:isPartner(offer.from) then return end
   offer.clock = 0
   self.offer = offer
+  self.aloneAnnounced = false
   self:note(("%s is waiting at %s."):format(offer.name, fightName(offer.label)))
+  -- Invite like a 2-on-2 ask: same map, and free to answer. Off-map stays a
+  -- note + JOIN row until considerOffer runs on map.entered.
+  self:considerOffer(game, myMap)
 end
 
 function M:onOfferEnd(msg)
   local offer = self.offer
-  if not offer then return end
-  self.offer = nil
   local reason = Wire.coopReason(msg and msg.reason)
+  local name = offer and offer.name
+  self.offer = nil
+  -- Yes/no first: an invite that ended under the confirm must not leave a
+  -- box that can only be answered into a late-yes path.
+  self:closeJoinBox()
   -- "They went in without you" and "they walked away" look identical from
   -- here and read very differently to somebody who was on their way over, so
-  -- the two are told apart and the vague third case says nothing at all.
+  -- the two are told apart. A late JOIN that finds no offer also lands here
+  -- as `alone` (hub twin), even when `self.offer` was already cleared.
   if reason == "alone" then
-    self:note(("%s went in alone."):format(offer.name))
-  elseif reason == "left" then
+    self:announceAlone(name)
+  elseif offer and reason == "left" then
     self:note(("%s left %s."):format(offer.name, fightName(offer.label)))
   end
 end
@@ -956,10 +1066,15 @@ function M:onJoined(game, msg)
   if not waiting then return end
   local name = Wire.name(msg and msg.name) or self.party:partnerName()
     or "your friend"
+  -- The hub's mediated battle id (`c*`), carried as `plan` so it does not
+  -- collide with `id` (the joiner). Without this, uploadMediated has nothing
+  -- to name and the fight stays on host CoopSim under PROTOCOL 10.
+  local planId = Wire.id(msg and msg.plan)
   self.waiting = nil
   self:note(("%s joined the fight."):format(name))
   self:begin(game, {
     kind = "npc",
+    id = planId,
     battle = waiting.battle,
     label = waiting.label,
     engine = waiting.engine,
@@ -1365,8 +1480,11 @@ function M:buildField(game, battle, humans)
     for _, entry in ipairs(npc) do slots[#slots + 1] = entry end
   end
 
-  if #slots ~= Config.COOP_FIGHTERS then
-    return nil, "That battle needs\nfour trainers."
+  -- Three is a full fight when the trainer only brought one monster (two
+  -- players + one NPC seat); four is the usual 2v2. Anything else is a plan
+  -- that did not assemble into a co-op field.
+  if #slots < 3 or #slots > Config.COOP_FIGHTERS then
+    return nil, "That battle can't\nbe started."
   end
 
   -- Nobody fights with a fainted team.
@@ -1414,14 +1532,13 @@ function M:buildField(game, battle, humans)
   return { slots = slots, host = plan.hostId, trainer = trainer and trainer.id }
 end
 
--- The NPC pair.
+-- The NPC side, taken from the battle the engine already built.
 --
--- The trainer's own party is split across two slots so the fight is genuinely
--- 2-on-2 rather than two players taking turns on one monster. A trainer with
--- only one mon is given a second slot holding the rest of its party, which is
--- empty -- so it is out from the first turn and the fight is honest about
--- being two against one.
--- The NPC pair, taken from the battle the engine already built.
+-- The trainer's own party is split across up to two slots so a multi-mon
+-- trainer is a genuine 2-on-2 rather than two players taking turns on one
+-- monster. A trainer with only one mon gets a single foe seat -- the hub's
+-- mediated path drops empty NPC seats the same way -- so parties can fight
+-- any trainer, not only those with two or more POKéMON.
 --
 -- `enemyParty` is a list of real monsters with fixed trainer DVs and computed
 -- stats -- the engine made them a moment ago when it constructed the battle
@@ -1782,6 +1899,7 @@ end
 function M:onPartyEnd()
   local hadWait = self.waiting ~= nil
   self.waiting, self.offer = nil, nil
+  self:closeJoinBox()
   if self.ask then
     self.ask = nil
     self:closeAskBox()
@@ -1798,7 +1916,10 @@ end
 function M:onPeerGone(id)
   if not id then return end
   local offer = self.offer
-  if offer and offer.from == id then self.offer = nil end
+  if offer and offer.from == id then
+    self.offer = nil
+    self:closeJoinBox()
+  end
   if self.ask and self.ask.peer == id then
     self.ask = nil
     self:closeAskBox()

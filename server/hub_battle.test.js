@@ -41,12 +41,18 @@ function makeRelay(clock, opts) {
   return relay;
 }
 
+function testPlayerId(seed) {
+  const crypto = require('node:crypto');
+  return crypto.createHash('sha256').update(String(seed)).digest('hex').slice(0, 32);
+}
+
 function dial(relay, name, opts) {
   const o = opts || {};
   const peer = { outbox: [], remoteAddress: '127.0.0.1' };
   peer.send = (msg) => peer.outbox.push(msg);
   peer.close = () => {};
   const id = relay.accept(peer);
+  const playerId = o.playerId || testPlayerId(name);
   relay.handle(id, {
     type: 'mmo.hello',
     proto: PROTOCOL,
@@ -56,8 +62,10 @@ function dial(relay, name, opts) {
     x: o.x === undefined ? 1 : o.x,
     y: o.y === undefined ? 1 : o.y,
     facing: 'down',
+    playerId,
   });
-  return { id, peer, name };
+  // Wire id is the persistent playerId; ephemeral accept id still routes handle().
+  return { id: playerId, peer, name, ephemeralId: id };
 }
 
 function take(player, type) {
@@ -355,11 +363,97 @@ function testTradeRelayStillWorks() {
     'trade mmo.relay still forwards unread');
 }
 
+function testBagProofs() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'BAGA');
+  const b = dial(relay, 'BAGB');
+  const session = openBattle(relay, a, b);
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', chart: [[100]],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: session.id,
+    mons: [mon(40)],
+    bag: [{ id: 'NOT_A_REAL_ITEM', count: 1 }],
+  });
+  ok(!relay.battles.get(session.id).parties.has(a.id),
+    'unknown bag id refuses the party');
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: session.id,
+    mons: [mon(40)],
+    bag: [{ id: 'POTION', count: 1 }, { id: 'POKE_FLUTE', count: 1 }],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party',
+    battle: session.id,
+    mons: [mon(100)],
+  });
+  const record = relay.battles.get(session.id);
+  ok(record && record.sim, 'fight opens with bag sheets');
+  ok(record.bags.get(a.id).POTION === 1, "host's bag holds one potion");
+  ok(!record.bags.get(b.id).POTION, 'guest empty bag has no potion');
+
+  relay.handle(b.id, {
+    type: 'mmo.battle_choice', battle: session.id,
+    action: 'item', item: 'POTION',
+  });
+  ok(record.sim.byId.get(b.id).choice == null,
+    'item without a bag stack is refused');
+
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: session.id,
+    action: 'item', item: 'POTION',
+  });
+  ok(record.sim.byId.get(a.id).choice != null, 'proved potion accepted');
+  ok(record.bags.get(a.id).POTION === 1, 'stack held until resolve');
+  ok(record.bagHold[a.id] === 'POTION', 'hold names the pending item');
+
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: session.id, action: 'cancel',
+  });
+  ok(record.sim.byId.get(a.id).choice == null, 'cancel clears the choice');
+  ok(record.bagHold[a.id] === undefined, 'and drops the bag hold');
+  ok(record.bags.get(a.id).POTION === 1, 'without decrementing');
+
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: session.id,
+    action: 'item', item: 'POTION',
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_choice', battle: session.id,
+    action: 'fight', move: 0,
+  });
+  ok(record.bags.get(a.id).POTION === undefined, 'resolve spends the hold');
+
+  if (record.sim && record.sim.phase === 'choice') {
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: session.id,
+      action: 'item', item: 'POTION',
+    });
+    ok(record.sim.byId.get(a.id).choice == null,
+      'overdrawn potion refused');
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: session.id,
+      action: 'item', item: 'POKE_FLUTE',
+    });
+    ok(record.sim.byId.get(a.id).choice != null, 'Poké Flute proved');
+    ok(record.bags.get(a.id).POKE_FLUTE === 1,
+      'Poké Flute not decremented');
+  }
+}
+
 testMediatedOneVOneKo();
 testRelayHardCutDuringBattle();
 testDisconnectForfeitAfterGrace();
 testDrawCarriesNoLists();
 testCoopNpcMediated();
 testTradeRelayStillWorks();
+testBagProofs();
 
 console.log(`hub_battle: ${passed} checks passed`);

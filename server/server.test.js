@@ -56,6 +56,10 @@ const ok = (cond, label) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function testPlayerId(seed) {
+  return crypto.createHash('sha256').update(String(seed)).digest('hex').slice(0, 32);
+}
+
 async function waitFor(predicate, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -325,7 +329,7 @@ async function authHandshakeTest() {
     // ---- happy path
     const good = new Client(port);
     await good.ready();
-    good.send('mmo.hello', { proto: PROTOCOL, name: 'GOOD' });
+    good.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('GOOD'), name: 'GOOD' });
     const challenge = await good.expect('mmo.challenge');
     ok(/^[0-9a-f]{32}$/.test(challenge.nonce),
       'the nonce is 32 lowercase hex characters');
@@ -337,7 +341,7 @@ async function authHandshakeTest() {
     // ---- wrong code
     const wrong = new Client(port);
     await wrong.ready();
-    wrong.send('mmo.hello', { proto: PROTOCOL, name: 'WRONG' });
+    wrong.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('WRONG'), name: 'WRONG' });
     const wrongChallenge = await wrong.expect('mmo.challenge');
     wrong.send('mmo.auth', {
       response: hmacHex(WRONG_CODE, wrongChallenge.nonce),
@@ -348,7 +352,7 @@ async function authHandshakeTest() {
     // ---- a valid-but-expired code
     const expired = new Client(port);
     await expired.ready();
-    expired.send('mmo.hello', { proto: PROTOCOL, name: 'EXPIRED' });
+    expired.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('EXPIRED'), name: 'EXPIRED' });
     const expiredChallenge = await expired.expect('mmo.challenge');
     expired.send('mmo.auth', {
       response: hmacHex(EXPIRED_CODE, expiredChallenge.nonce),
@@ -359,7 +363,7 @@ async function authHandshakeTest() {
     // ---- a valid-but-revoked code
     const revoked = new Client(port);
     await revoked.ready();
-    revoked.send('mmo.hello', { proto: PROTOCOL, name: 'REVOKED' });
+    revoked.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('REVOKED'), name: 'REVOKED' });
     const revokedChallenge = await revoked.expect('mmo.challenge');
     revoked.send('mmo.auth', {
       response: hmacHex(REVOKED_CODE, revokedChallenge.nonce),
@@ -377,14 +381,14 @@ async function authHandshakeTest() {
     // ---- replay: a captured (nonce, response) pair is worthless elsewhere
     const capture = new Client(port);
     await capture.ready();
-    capture.send('mmo.hello', { proto: PROTOCOL, name: 'CAPTURE' });
+    capture.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('CAPTURE'), name: 'CAPTURE' });
     const capturedChallenge = await capture.expect('mmo.challenge');
     const capturedResponse = hmacHex(PRIMARY_CODE, capturedChallenge.nonce);
     capture.close(); // never finishes its own handshake
 
     const replay = new Client(port);
     await replay.ready();
-    replay.send('mmo.hello', { proto: PROTOCOL, name: 'REPLAY' });
+    replay.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('REPLAY'), name: 'REPLAY' });
     const replayChallenge = await replay.expect('mmo.challenge');
     ok(replayChallenge.nonce !== capturedChallenge.nonce,
       'each connection is issued its own nonce');
@@ -396,7 +400,7 @@ async function authHandshakeTest() {
     // ---- a second mmo.auth on the same connection, after one was consumed
     const twice = new Client(port);
     await twice.ready();
-    twice.send('mmo.hello', { proto: PROTOCOL, name: 'TWICE' });
+    twice.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('TWICE'), name: 'TWICE' });
     const twiceChallenge = await twice.expect('mmo.challenge');
     const twiceResponse = hmacHex(PRIMARY_CODE, twiceChallenge.nonce);
     twice.send('mmo.auth', { response: twiceResponse });
@@ -416,7 +420,7 @@ async function authHandshakeTest() {
     await unsolicited.expectSilence('mmo.error', 300);
     await unsolicited.expectSilence('mmo.welcome', 50);
     // and the connection is still usable afterwards -- ignored, not spent
-    unsolicited.send('mmo.hello', { proto: PROTOCOL, name: 'LATER' });
+    unsolicited.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('LATER'), name: 'LATER' });
     const laterChallenge = await unsolicited.expect('mmo.challenge');
     unsolicited.send('mmo.auth', {
       response: hmacHex(PRIMARY_CODE, laterChallenge.nonce),
@@ -436,7 +440,7 @@ async function authOffTest() {
   try {
     const client = new Client(handle.port);
     await client.ready();
-    client.send('mmo.hello', { proto: PROTOCOL, name: 'OPEN' });
+    client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('OPEN'), name: 'OPEN' });
     const welcome = await client.expect('mmo.welcome');
     ok(typeof welcome.id === 'string', 'auth off: hello leads straight to welcome');
     ok(Array.isArray(welcome.players), 'the welcome still carries a roster');
@@ -469,7 +473,7 @@ async function silentSocketsDoNotLockOutTest() {
 
     const late = new Client(port);
     await late.ready();
-    late.send('mmo.hello', { proto: PROTOCOL, name: 'LATE' });
+    late.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('LATE'), name: 'LATE' });
     const welcome = await late.expect('mmo.welcome', 3000);
     ok(typeof welcome.id === 'string',
       'a real player still gets in with the cap full of silent sockets');
@@ -495,7 +499,7 @@ async function capFilledByGreetedPlayersTest() {
     for (let i = 0; i < 4; i++) {
       const client = new Client(port);
       await client.ready();
-      client.send('mmo.hello', { proto: PROTOCOL, name: 'P' + i });
+      client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('P' + i), name: 'P' + i });
       await client.expect('mmo.welcome');
       players.push(client);
     }
@@ -555,7 +559,7 @@ async function capHoldsWhenEveryoneGreetsBeforeAnswering() {
       const client = new Client(port);
       await client.ready();
       clients.push(client);
-      client.send('mmo.hello', { proto: PROTOCOL, name: 'RUSH' + i });
+      client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('RUSH' + i), name: 'RUSH' + i });
       challenges.push(await client.expect('mmo.challenge'));
     }
     ok(challenges.length === 6,
@@ -619,7 +623,7 @@ async function banTest() {
     // admitted before the ban exists
     const before = new Client(port);
     await before.ready();
-    before.send('mmo.hello', { proto: PROTOCOL, name: 'BEFORE' });
+    before.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('BEFORE'), name: 'BEFORE' });
     await before.expect('mmo.welcome');
 
     // setBans affects new admissions only -- ban after this one is already in
@@ -627,7 +631,7 @@ async function banTest() {
 
     const after = new Client(port);
     await after.ready();
-    after.send('mmo.hello', { proto: PROTOCOL, name: 'AFTER' });
+    after.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('AFTER'), name: 'AFTER' });
     await after.expectSilence('mmo.welcome', 500);
     ok(true, 'a newly-banned address cannot join');
 
@@ -661,6 +665,36 @@ async function handshakeTimeoutTest() {
   }
 }
 
+// PROTOCOL 16 rekeys the client id from the ephemeral accept-id to the
+// persistent playerId. limits.markGreeted is keyed off relay.greeted(acceptId),
+// so greeted() must resolve through byEphemeral -- looking only in clients
+// left every admitted player looking ungreeted and the sweep killed them
+// with handshake_timeout ~10s later (the Node-hub LOVE mass-drop).
+async function greetedSurvivesRekeyTest() {
+  const handle = await startServer({ limits: { handshakeTimeoutMs: 1000 } });
+  const port = handle.port;
+  const client = new Client(port);
+  try {
+    await client.ready();
+    client.send('mmo.hello', {
+      proto: PROTOCOL, playerId: testPlayerId('REKEY'), name: 'REKEY',
+    });
+    await client.expect('mmo.welcome');
+    const closed = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 2500);
+      client.socket.once('close', () => { clearTimeout(timer); resolve(true); });
+    });
+    ok(!closed,
+      'an admitted player whose id was rekeyed survives past handshakeTimeoutMs');
+    client.send('mmo.ping', {});
+    await client.expect('mmo.pong');
+    ok(true, 'and still answers a ping after the handshake budget has passed');
+  } finally {
+    client.close();
+    await handle.close();
+  }
+}
+
 // ------- invite --uses: admits exactly maxUses clients, persists the count
 
 async function inviteUsesPersistTest() {
@@ -684,14 +718,14 @@ async function inviteUsesPersistTest() {
     try {
       const first = new Client(port);
       await first.ready();
-      first.send('mmo.hello', { proto: PROTOCOL, name: 'FIRST' });
+      first.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('FIRST'), name: 'FIRST' });
       const firstChallenge = await first.expect('mmo.challenge');
       first.send('mmo.auth', { response: hmacHex(code, firstChallenge.nonce) });
       await first.expect('mmo.welcome');
 
       const second = new Client(port);
       await second.ready();
-      second.send('mmo.hello', { proto: PROTOCOL, name: 'SECOND' });
+      second.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('SECOND'), name: 'SECOND' });
       const secondChallenge = await second.expect('mmo.challenge');
       second.send('mmo.auth', { response: hmacHex(code, secondChallenge.nonce) });
       await second.expect('mmo.error');
@@ -735,9 +769,9 @@ async function inviteUsesNoWriteWithoutConfigPathTest() {
   // fs.writeFileSync for the duration to prove nothing tries to persist.
   const originalWrite = fs.writeFileSync;
   let writeCalls = 0;
-  fs.writeFileSync = function spy(...args) {
-    writeCalls += 1;
-    return originalWrite.apply(fs, args);
+  fs.writeFileSync = function spy(file, ...args) {
+    if (typeof file === 'string' && /config\.json$/.test(file)) writeCalls += 1;
+    return originalWrite.apply(fs, [file, ...args]);
   };
 
   try {
@@ -745,7 +779,7 @@ async function inviteUsesNoWriteWithoutConfigPathTest() {
     try {
       const client = new Client(handle.port);
       await client.ready();
-      client.send('mmo.hello', { proto: PROTOCOL, name: 'EPHEMERAL' });
+      client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('EPHEMERAL'), name: 'EPHEMERAL' });
       const challenge = await client.expect('mmo.challenge');
       client.send('mmo.auth', { response: hmacHex(code, challenge.nonce) });
       await client.expect('mmo.welcome');
@@ -797,7 +831,7 @@ async function sighupReloadTest() {
   const join = async (name, key) => {
     const client = new Client(port);
     await client.ready();
-    client.send('mmo.hello', { proto: PROTOCOL, name });
+    client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId(name), name });
     const challenge = await client.expect('mmo.challenge');
     client.send('mmo.auth', { response: hmacHex(key, challenge.nonce) });
     const verdict = await client.expectEither('mmo.welcome', 'mmo.error');
@@ -861,7 +895,7 @@ async function sighupReloadTest() {
 
     const banned = new Client(port);
     await banned.ready();
-    banned.send('mmo.hello', { proto: PROTOCOL, name: 'BANNED' });
+    banned.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('BANNED'), name: 'BANNED' });
     await banned.expectSilence('mmo.challenge', 500);
     ok(true, 'a ban added to the file takes effect on the next connection');
     banned.close();
@@ -879,7 +913,7 @@ async function sighupReloadTest() {
 
     const stillBanned = new Client(port);
     await stillBanned.ready();
-    stillBanned.send('mmo.hello', { proto: PROTOCOL, name: 'STILLBANNED' });
+    stillBanned.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('STILLBANNED'), name: 'STILLBANNED' });
     await stillBanned.expectSilence('mmo.challenge', 500);
     ok(true, 'and the ban list already in force survives the failed reload');
     stillBanned.close();
@@ -948,7 +982,7 @@ async function gracefulShutdownInProcessTest() {
   const client = new Client(handle.port);
   try {
     await client.ready();
-    client.send('mmo.hello', { proto: PROTOCOL, name: 'LEAVER' });
+    client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('LEAVER'), name: 'LEAVER' });
     await client.expect('mmo.welcome');
 
     const closing = handle.close();
@@ -1036,7 +1070,7 @@ async function gracefulShutdownSigtermTest() {
 
     const client = new Client(CHILD_PORT);
     await client.ready();
-    client.send('mmo.hello', { proto: PROTOCOL, name: 'SIGTERMEE' });
+    client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('SIGTERMEE'), name: 'SIGTERMEE' });
     await client.expect('mmo.welcome');
 
     const exitPromise = new Promise((resolve) => child.once('exit', resolve));
@@ -1115,7 +1149,7 @@ function startThrottleServer(overrides = {}) {
 async function joinAttempt(port, name, code, host) {
   const client = new Client(port, host);
   await client.ready();
-  client.send('mmo.hello', { proto: PROTOCOL, name });
+  client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId(name), name });
   const first = await client.expectEither('mmo.challenge', 'mmo.error');
   if (first.type !== 'mmo.challenge') {
     return { client, verdict: first, challenged: false };
@@ -1491,7 +1525,7 @@ async function statusUpdatesAfterJoinAndLeaveTest() {
   try {
     const client = new Client(port);
     await client.ready();
-    client.send('mmo.hello', { proto: PROTOCOL, name: 'JOINER' });
+    client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('JOINER'), name: 'JOINER' });
     await client.expect('mmo.welcome');
 
     // Bounded by the exported heartbeat, not a copied number: whatever the
@@ -1534,7 +1568,7 @@ async function statusStoppedAtOnCloseTest() {
   try {
     const client = new Client(port);
     await client.ready();
-    client.send('mmo.hello', { proto: PROTOCOL, name: 'LEAVER' });
+    client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('LEAVER'), name: 'LEAVER' });
     await client.expect('mmo.welcome');
 
     await handle.close();
@@ -1562,7 +1596,7 @@ async function statusSnapshotCarriesNothingSensitiveTest() {
   try {
     const client = new Client(port);
     await client.ready();
-    client.send('mmo.hello', { proto: PROTOCOL, name: 'SECRET' });
+    client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('SECRET'), name: 'SECRET' });
     const challenge = await client.expect('mmo.challenge');
     client.send('mmo.auth', { response: hmacHex(code, challenge.nonce) });
     await client.expect('mmo.welcome');
@@ -1619,7 +1653,7 @@ async function authAdminWelcomeAndStatusTest() {
   try {
     const admin = new Client(port);
     await admin.ready();
-    admin.send('mmo.hello', { proto: PROTOCOL, name: 'OPADMIN' });
+    admin.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('OPADMIN'), name: 'OPADMIN' });
     const adminChallenge = await admin.expect('mmo.challenge');
     admin.send('mmo.auth', { response: hmacHex(ADMIN_CODE, adminChallenge.nonce) });
     const adminWelcome = await admin.expect('mmo.welcome');
@@ -1627,7 +1661,7 @@ async function authAdminWelcomeAndStatusTest() {
 
     const player = new Client(port);
     await player.ready();
-    player.send('mmo.hello', { proto: PROTOCOL, name: 'OPPLAYER' });
+    player.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('OPPLAYER'), name: 'OPPLAYER' });
     const playerChallenge = await player.expect('mmo.challenge');
     player.send('mmo.auth', { response: hmacHex(PLAYER_CODE, playerChallenge.nonce) });
     const playerWelcome = await player.expect('mmo.welcome');
@@ -1684,8 +1718,8 @@ async function playRankedBattle(port, winnerName, loserName) {
   const loser = new Client(port);
   await winner.ready();
   await loser.ready();
-  winner.send('mmo.hello', { proto: PROTOCOL, name: winnerName });
-  loser.send('mmo.hello', { proto: PROTOCOL, name: loserName });
+  winner.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId(winnerName), name: winnerName });
+  loser.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId(loserName), name: loserName });
   const winnerWelcome = await winner.expect('mmo.welcome');
   const loserWelcome = await loser.expect('mmo.welcome');
 
@@ -1842,7 +1876,7 @@ async function adminSocketTest(handle, battle) {
   // ---- kick: a connected player is told, then actually disconnected
   const target = new Client(handle.port);
   await target.ready();
-  target.send('mmo.hello', { proto: PROTOCOL, name: 'KICKME' });
+  target.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('KICKME'), name: 'KICKME' });
   await target.expect('mmo.welcome');
   const closed = new Promise((resolve) => target.socket.once('close', () => resolve(true)));
 
@@ -2010,7 +2044,7 @@ async function operatorFeaturesTest() {
     const before = new Client(handle.port);
     opened.push(before);
     await before.ready();
-    before.send('mmo.hello', { proto: PROTOCOL, name: 'FIRSTIN' });
+    before.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('FIRSTIN'), name: 'FIRSTIN' });
     const beforeWelcome = await before.expect('mmo.welcome');
     ok(!('motd' in beforeWelcome), 'a hub started with no MOTD sends no motd field at all');
 
@@ -2034,7 +2068,7 @@ async function operatorFeaturesTest() {
     const after = new Client(handle.port);
     opened.push(after);
     await after.ready();
-    after.send('mmo.hello', { proto: PROTOCOL, name: 'SECONDIN' });
+    after.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId('SECONDIN'), name: 'SECONDIN' });
     const afterWelcome = await after.expect('mmo.welcome');
     ok(afterWelcome.motd === 'Welcome trainers! Read the rules.',
       'a client that joins after the reload gets the new MOTD, cleaned and verbatim');
@@ -2064,6 +2098,7 @@ async function main() {
   await perIpCapTest();
   await banTest();
   await handshakeTimeoutTest();
+  await greetedSurvivesRekeyTest();
   await inviteUsesPersistTest();
   await inviteUsesNoWriteWithoutConfigPathTest();
   await authBackoffPerAddressTest();

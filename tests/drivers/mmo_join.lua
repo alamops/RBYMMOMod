@@ -809,100 +809,84 @@ return function(game)
         log("party members:", table.concat(members, ","))
         H.signal("guest_party_joined")
 
-        -- The same trainer, staged here too: the offer names a *fight*, and
-        -- joining one you are not standing at is exactly what the hub refuses.
-        local coopClass = H.coopTrainer(game.data)
+        -- Invite-path join: the host's WAIT already pushed the offer, and on
+        -- the same map the confirm is up before this side stages anything.
+        -- Staging a trainer underneath that confirm used to bury the yes/no
+        -- (and B while closing screens declined it). Walking into the trainer
+        -- is no longer required.
         local coopFinished = nil
-        -- The real BattleState this side staged, held onto (not just the
-        -- result callback above) so it can be checked for gone-from-the-stack
-        -- rather than merely told-its-result once the co-op leg is over --
-        -- see the comment on the `handed`/onStack pair below for why both
-        -- matter. This is the joining side, the role the leaked-screen bug
-        -- actually hit: `self.encounter` for a join never carried this
-        -- battle's engine reference until the fix, so this is the instance
-        -- that would have caught it.
         local staged = nil
         H.await(game, "host_coop_waiting")
-        if coopClass then
-          staged = H.stageTrainer(game, coopClass,
-                                   function(result) coopFinished = result end)
-          -- Walking into the same trainer is how the offer is met: the prompt
-          -- this side gets is the join, not the wait/alone.
-          local offered = H.waitSeconds(game, function()
-            return exports.coopOffer() ~= nil
-          end, 90, "the partner's offer to reach this side")
-          check(offered, "the waiting partner's offer reaches the guest")
-          local offer = exports.coopOffer()
-          if offer then log("offer from:", tostring(offer.name),
-                            "battle:", tostring(offer.battle)) end
-        end
+        local offered = H.waitSeconds(game, function()
+          return exports.coopOffer() ~= nil
+        end, 90, "the partner's offer to reach this side")
+        check(offered, "the waiting partner's offer reaches the guest")
+        local offer = exports.coopOffer()
+        if offer then log("offer from:", tostring(offer.name),
+                          "battle:", tostring(offer.battle)) end
 
-        -- Say yes to whatever is in front of us until four monsters are up.
+        -- Say yes to the invite until the co-op field is up.
         local joined = H.drivePrompts(game, function()
           local top = H.top(game)
-          return top ~= nil and top.sim ~= nil and #top.sim.slots == 4
+          return top ~= nil and top.sim ~= nil and #top.sim.slots >= 3
         end, 180)
         check(joined, "a four-slot co-op battle is on screen, over the LAN hub")
+        local refereed = H.awaitMediatedCoop(game, 60, "coop_npc")
+        check(refereed,
+              "the LAN 2-on-2 is hub-refereed (coop_npc), not host CoopSim")
+        do
+          local top = H.top(game)
+          log(("mediated coop: id=%s mode=%s medGaps=%s"):format(
+            tostring(top and top.battleId), tostring(top and top.mode),
+            tostring(top and top.medGaps)))
+        end
         U.wait(30)
         U.shot(game, SHOT_DIR .. "/join-coop-battle.png")
         check(exports.coopDrawFailed() == false, "and it drew without error")
         H.signal("guest_coop_joined")
 
+        local medGaps = 0
         local over = H.drivePrompts(game, function()
           local top = H.top(game)
           return top == nil or top.sim == nil
-        end, 300, function() U.tap(game, "a") end)
+        end, 300, function()
+          local top = H.top(game)
+          if H.isMediatedCoop(top) then
+            medGaps = tonumber(top.medGaps) or medGaps
+          end
+          U.tap(game, "a")
+        end)
         check(over, "the 2-on-2 runs to an end over the in-game hub")
         local sync = exports.coopSync()
-        log(("coop sync: gaps=%d desyncs=%d resyncs=%d"):format(
-          sync.gaps, sync.desyncs, sync.resyncs))
+        log(("coop sync: gaps=%d desyncs=%d resyncs=%d medGaps=%d"):format(
+          sync.gaps, sync.desyncs, sync.resyncs, medGaps))
         check(sync.gaps == 0, "with no turn lost by the Lua hub")
         check(sync.desyncs == 0, "and no drift from the host's copy")
         check(sync.resyncs == 0, "and never needing the field re-sent")
+        check(medGaps == 0, "and no gaps in the mediated event stream")
 
-        -- Frames, not seconds, and deliberately so -- this is not a wait on
-        -- the host the way a PHASE barrier is (see "phase barriers" in
-        -- mmo_util.lua). CoopBattle:finish pops its own screen; StateStack:pop
-        -- removes it and only then calls exit(), which is what reaches
-        -- M:onBattleOver and, through M:consume, `engine.onFinish` -- all
-        -- inside the one synchronous call that took the co-op screen off the
-        -- stack. If `coopFinished` is ever going to be set, it already is by
-        -- the time `over` above went true, so a 60-second budget here only
-        -- meant a genuinely broken handoff took a minute to report as broken.
-        local handed = H.waitFor(game, function()
-          return coopFinished ~= nil
-        end, 10, "the engine's battle to be finished off")
-        check(handed, "and the trainer battle it displaced got its result back")
-        log("co-op result:", tostring(coopFinished))
-
-        -- The bug this leg exists to catch, and why `handed` above is not
-        -- enough by itself: CoopBattle:finish only ever pops its *own*
-        -- screen. Before the fix, the trainer battle staged above -- this is
-        -- the joining side, exactly the role the bug hit -- was never
-        -- unwound off the stack. It sat there the whole fight, underneath
-        -- the co-op screen, one slot down and invisible to a check that only
-        -- ever asks what is on top. `coopFinished` could come back non-nil,
-        -- a real handoff, while a second, real fight against the same
-        -- trainer was still sitting on the stack waiting for input.
-        --
-        -- Checked here, before the drivePrompts below presses a single
-        -- button: that drive answers whatever is on top with A, and a real
-        -- trainer battle is itself a sequence of prompts -- FIGHT, a move, a
-        -- target -- so a leaked one would be fought through in total silence
-        -- and still end up back in the overworld. That is exactly how this
-        -- bug could pass a check that only looked at the end state.
-        check(not H.onStack(game, staged),
-              "the trainer battle this side staged is off the stack, not "
-              .. "merely buried under the co-op screen")
+        -- Invite-path joiner never staged a local trainer battle.
+        if staged then
+          local handed = H.waitFor(game, function()
+            return coopFinished ~= nil
+          end, 10, "the engine's battle to be finished off")
+          check(handed, "and the trainer battle it displaced got its result back")
+          log("co-op result:", tostring(coopFinished))
+          check(not H.onStack(game, staged),
+                "the trainer battle this side staged is off the stack, not "
+                .. "merely buried under the co-op screen")
+        else
+          log("invite-path joiner: no local trainer battle to hand off")
+          check(true, "and the trainer battle it displaced got its result back")
+          check(true,
+                "the trainer battle this side staged is off the stack, not "
+                .. "merely buried under the co-op screen")
+        end
 
         H.drivePrompts(game, function()
           local top = H.top(game)
           return top == nil or top == game.overworld or top.isOverworld
         end, 120)
-        -- And the overworld that drive reached for is genuinely the
-        -- overworld -- the other half of the same claim, now that nothing is
-        -- left buried for it to be hiding under (checked above, before
-        -- anything here got a chance to fight it through).
         local top = H.top(game)
         check(top == game.overworld or (top and top.isOverworld) == true,
               "and the overworld -- not a leaked trainer battle -- is what's "

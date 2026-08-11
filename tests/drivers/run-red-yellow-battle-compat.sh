@@ -80,5 +80,5 @@ build_slice "$RED_VER" "$RED_ROM" "$RED_OUT"
 build_slice "$YEL_VER" "$YEL_ROM" "$YEL_OUT"
 
 cd "$REPO"
-luajit "$MOD_DIR/tests/red_yellow_battle_compat.lua" \
+luajit "$MOD_DIR/tests/drivers/red_yellow_battle_compat.lua" \
   "$RED_OUT" "$YEL_OUT" "$MOD_DIR"

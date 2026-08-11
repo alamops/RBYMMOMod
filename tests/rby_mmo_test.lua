@@ -60,18 +60,16 @@ local vanillaSurface = linkSurface(baseline.data)
 baseline.release()
 check(#vanillaSurface > 0, "the baseline snapshot is not vacuously empty")
 
--- The manifest sets experimental=true, so the loader leaves the mod off
--- until the player turns it on in the mod manager.  That is the intended
--- behaviour for a mod that opens a network connection -- installing it must
--- not be what starts talking to a server -- so it is asserted, not worked
--- around.
-local offByDefault = T.sdk.loadMod(MOD_PATH)
-eq(#offByDefault.errors, 0, "an experimental mod still discovers cleanly")
-eq(offByDefault.mod.state, "disabled",
-   "experimental means off until the player opts in")
-eq(offByDefault.loader.content.screens:get("RbyMmoMain"), nil,
-   "and a disabled mod installs nothing")
-offByDefault.release()
+-- From 1.0.0 the mod is not experimental: a missing options.mods entry means
+-- enabled (ordinary mod default). Installing still does not open a socket —
+-- that only happens when the player hosts or joins.
+local byDefault = T.sdk.loadMod(MOD_PATH)
+eq(#byDefault.errors, 0, "loads clean by default")
+eq(byDefault.mod.state, "loaded",
+   "non-experimental means on when present in mods/")
+check(byDefault.loader.content.screens:get("RbyMmoMain") ~= nil,
+   "and a default-enabled mod installs its screens")
+byDefault.release()
 
 -- Everything past here is the opted-in mod, reached by handing the loader a
 -- filesystem whose options.lua already has it enabled -- the same file the
@@ -704,16 +702,6 @@ eq(Wire.outcome("WIN"), nil, "the vocabulary is exact, not case-folded")
 eq(Wire.outcome("victory"), nil, "an invented outcome is refused")
 eq(Wire.outcome(1), nil, "and so is a number")
 
-local TOKEN = string.rep("ab", 16)
-eq(Wire.token(TOKEN), TOKEN, "a claim token is 32 lowercase hex characters")
-eq(Wire.token(string.rep("ab", 8)), nil,
-   "a short one is refused rather than kept: it would fail every claim, "
-   .. "silently, from then on")
-eq(Wire.token(string.rep("ab", 40)), nil, "and a long one too")
-eq(Wire.token(TOKEN:upper()), nil, "upper case is a different string, not the same token")
-eq(Wire.token("zz" .. TOKEN:sub(3)), nil, "and a non-hex character is not a token")
-eq(Wire.token(nil), nil, "nothing is not a token")
-
 eq(Wire.points(120), 120, "a rating in range survives")
 eq(Wire.points(0), 0, "zero is a rating, not a missing one")
 eq(Wire.points(-5), 0, "below the floor reads as zero rather than negative")
@@ -732,12 +720,16 @@ eq(Wire.presence({ id = "p9", name = "GARY" }).points, 0,
 -- section further down lives inside a function of its own
 do
 local board = Wire.ranking({
-  { name = "ALPHA", sprite = "SPRITE_RED", points = 300 },
+  { name = "ALPHA", sprite = "SPRITE_RED", points = 300,
+    id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
   { name = "BRAVO", sprite = "SPRITE_LASS", points = 100 },
 })
 eq(#board, 2, "a leaderboard survives the trip")
 eq(board[1].name, "ALPHA", "in the hub's order, which is the ranking")
+eq(board[1].id, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "and carries the persistent player id when present")
 eq(board[2].points, 100, "with the points intact")
+eq(board[2].id, nil, "an older hub row without id still sanitises")
 eq(Wire.ranking({ { name = "   ", points = 5 }, { name = "CAL", points = 4 } })[1]
    .name, "CAL", "a nameless row is dropped rather than repaired")
 eq(Wire.ranking({ { name = "DEL" } })[1].sprite, Config.DEFAULT_SPRITE,
@@ -1232,15 +1224,26 @@ local function saw(peer, msgType)
   return take(peer, msgType) ~= nil
 end
 
--- `token` is the claim ticket a returning player presents; a first visit
--- has none, which is what makes the hub mint one.
-local function join(hub, name, map, x, y, token)
+
+local function testPlayerId(seed)
+  -- 32 lowercase hex from a stable seed string (suite has Sha256 via Hub path).
+  local s = tostring(seed or "")
+  local out = {}
+  for i = 1, 32 do
+    local c = s:byte((i - 1) % #s + 1) or 97
+    out[i] = string.format("%x", (c + i) % 16)
+  end
+  return table.concat(out)
+end
+
+-- optional `playerId` must be unique per live connection under PROTOCOL 16.
+local function join(hub, name, map, x, y, _token, playerId)
   local peer = fakePeer()
   local client = hub:accept(peer)
   if client then
     hub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
       name = name, map = map, x = x, y = y, facing = "down",
-      rankToken = token })
+      playerId = playerId or testPlayerId(name) })
   end
   return client, peer
 end
@@ -1359,6 +1362,7 @@ end
 local codedPeer = fakePeer()
 local codedClient = codedHub:accept(codedPeer)
 codedHub:receive(codedClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("ASH"),
   name = "ASH", map = "PALLET", x = 1, y = 1, facing = "down" })
 
 eq(codedHub.players, 0, "hello alone does not seat a player on a coded hub")
@@ -1383,7 +1387,8 @@ eq(#codedPeer.outbox, 0, "auth after admission is a no-op, not a re-welcome")
 -- a wrong response is refused and the connection dropped
 local wrongPeer = fakePeer()
 local wrongClient = codedHub:accept(wrongPeer)
-codedHub:receive(wrongClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "MISTY" })
+codedHub:receive(wrongClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("MISTY"), name = "MISTY" })
 local wrongChallenge = take(wrongPeer, Wire.CHALLENGE)
 check(wrongChallenge ~= nil, "a second connection is challenged independently")
 
@@ -1406,12 +1411,14 @@ eq(#wrongPeer.outbox, 0, "a message from a client the hub already forgot goes no
 -- the HMAC is bound to the nonce it answers, not just to the join code
 local nonceOwnerPeer = fakePeer()
 local nonceOwnerClient = codedHub:accept(nonceOwnerPeer)
-codedHub:receive(nonceOwnerClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "OWNER" })
+codedHub:receive(nonceOwnerClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("OWNER"), name = "OWNER" })
 local ownerNonce = take(nonceOwnerPeer, Wire.CHALLENGE).nonce
 
 local replayPeer = fakePeer()
 local replayClient = codedHub:accept(replayPeer)
-codedHub:receive(replayClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "REPLAY" })
+codedHub:receive(replayClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("REPLAY"), name = "REPLAY" })
 local replayNonce = take(replayPeer, Wire.CHALLENGE).nonce
 check(ownerNonce ~= replayNonce, "two connections are challenged with different nonces")
 
@@ -1425,7 +1432,8 @@ check(take(replayPeer, Wire.ERROR) ~= nil, "and is refused just like a wrong cod
 -- the display form the host was given
 local messyPeer = fakePeer()
 local messyClient = codedHub:accept(messyPeer)
-codedHub:receive(messyClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "MESSY" })
+codedHub:receive(messyClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("MESSY"), name = "MESSY" })
 local messyNonce = take(messyPeer, Wire.CHALLENGE).nonce
 codedHub:receive(messyClient,
   { type = Wire.AUTH, response = answer("  a7k 3p9!! ", messyNonce) })
@@ -1441,7 +1449,8 @@ check(take(messyPeer, Wire.WELCOME) ~= nil,
 -- for the identical exchange.
 local ghostPeer = fakePeer()
 local ghostClient = codedHub:accept(ghostPeer)
-codedHub:receive(ghostClient, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "GHOST" })
+codedHub:receive(ghostClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("GHOST"), name = "GHOST" })
 check(take(ghostPeer, Wire.CHALLENGE) ~= nil, "the ghost connection is challenged")
 
 codedHub:update(Config.HANDSHAKE_TIMEOUT - 1)
@@ -1498,6 +1507,7 @@ for i = 1, 6 do
   local peer = fakePeer()
   local client = capHub:accept(peer)
   capHub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("RUSH" .. i),
     name = "RUSH" .. i, map = "PALLET", x = i, y = 1, facing = "down" })
   local challenge = take(peer, Wire.CHALLENGE)
   rush[i] = { peer = peer, client = client, nonce = challenge and challenge.nonce }
@@ -1643,7 +1653,8 @@ local brokenHub = Hub.new({ maxPlayers = 2, joinCode = JOIN_CODE,
 local brokenPeer = fakePeer()
 local brokenClient = brokenHub:accept(brokenPeer)
 brokenHub:receive(brokenClient,
-  { type = Wire.HELLO, proto = Config.PROTOCOL, name = "NONONCE" })
+  { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("NONONCE"), name = "NONONCE" })
 eq(take(brokenPeer, Wire.CHALLENGE), nil, "a hub that cannot draw a nonce does not challenge")
 check(take(brokenPeer, Wire.ERROR) ~= nil, "it refuses, with something to read")
 eq(brokenHub.players, 0, "and never seats a peer it could not challenge")
@@ -1890,6 +1901,7 @@ local hub2 = Hub.new({ maxPlayers = 4 })
 local oldPeer = fakePeer()
 local oldClient = hub2:accept(oldPeer)
 hub2:receive(oldClient, { type = Wire.HELLO, proto = Config.PROTOCOL + 1,
+      playerId = testPlayerId("OLD"),
                           name = "OLD" })
 local mismatch = take(oldPeer, Wire.ERROR)
 check(mismatch ~= nil, "a protocol mismatch is refused")
@@ -1898,6 +1910,7 @@ check(mismatch.message:find("protocol"), "and says so")
 local namelessPeer = fakePeer()
 local namelessClient = hub2:accept(namelessPeer)
 hub2:receive(namelessClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("   "),
                                name = "   " })
 check(take(namelessPeer, Wire.ERROR) ~= nil, "an unusable name is refused")
 
@@ -1972,38 +1985,41 @@ eq(Rank.discount(16, 9999), 0,
 
 -- ------- the board
 
+local ash = testPlayerId("ASH")
+local gary = testPlayerId("GARY")
 local season = Rank.newBoard()
-eq(season:points("ASH"), Config.RANK_START, "everybody starts unranked")
+eq(season:points(ash), Config.RANK_START, "everybody starts unranked")
 
-local first = season:record("ASH", "GARY", 0)
+local first = season:record(ash, gary, 0)
 check(first ~= nil, "a match between two players settles")
 eq(first.winner.points, 16, "the winner is on the board")
 eq(first.loser.points, 0, "and the loser cannot go below zero")
-eq(season:points("ASH"), 16, "which is what the board now says")
+eq(season:points(ash), 16, "which is what the board now says")
 
--- Names are the identity, and they are the *same* identity in any case.
-eq(season:points("ash"), 16, "a name is matched case-insensitively")
-eq(season:record("ASH", "ash", 0), nil, "and nobody can beat themselves")
-eq(season:record("ASH", nil, 0), nil, "a nameless opponent is not a match")
+eq(season:points(ash:upper()), 16, "the same playerId matches case-insensitively")
+eq(season:record(ash, ash, 0), nil, "and nobody can beat themselves")
+eq(season:record(ash, nil, 0), nil, "a nameless opponent is not a match")
 
 -- Farming: the same two players, over and over, inside the window.
 local farm = Rank.newBoard()
+local alpha = testPlayerId("ALPHA")
+local bravo = testPlayerId("BRAVO")
 local earned = {}
 for i = 1, 6 do
-  local settled = farm:record("ALPHA", "BRAVO", 10 * i)
+  local settled = farm:record(alpha, bravo, 10 * i)
   earned[i] = settled.winner.gained
 end
 check(earned[1] > 0, "the first win pays")
 check(earned[2] < earned[1], "the rematch pays less")
 check(earned[3] < earned[2], "and so on down")
 eq(earned[6], 0, "until a rematch inside the window is worth nothing")
-check(farm:points("BRAVO") == 0, "and the loser bottoms out at zero")
+check(farm:points(bravo) == 0, "and the loser bottoms out at zero")
 
 -- ...and the discount does not care which way round the wins go, so two
 -- friends cannot take turns.
 local swapped = Rank.newBoard()
-local there = swapped:record("ALPHA", "BRAVO", 0).winner.gained
-local back = swapped:record("BRAVO", "ALPHA", 1).winner.gained
+local there = swapped:record(alpha, bravo, 0).winner.gained
+local back = swapped:record(bravo, alpha, 1).winner.gained
 check(back < there, "alternating wins is the same pairing, and is discounted")
 
 -- ------- a team battle is rated as a team battle
@@ -2016,70 +2032,67 @@ check(back < there, "alternating wins is the same pairing, and is discounted")
 -- other pair*, and that is now what is scored.
 
 ;(function()
+  local ann, bob = testPlayerId("ANN"), testPlayerId("BOB")
+  local cal, dee = testPlayerId("CAL"), testPlayerId("DEE")
   local board = Rank.newBoard()
-  local settled = board:recordTeam({ "ANN", "BOB" }, { "CAL", "DEE" }, 0)
+  local settled = board:recordTeam({ ann, bob }, { cal, dee }, 0)
   check(settled ~= nil, "a two-a-side battle settles")
   eq(#settled.winners, 2, "both winners are rated")
   eq(#settled.losers, 2, "and both losers are")
   check(settled.winners[1].gained > 0, "the winners gained")
   check(settled.losers[1].lost >= 0, "and the losers paid")
-  eq(board:points("ANN"), board:points("BOB"),
+  eq(board:points(ann), board:points(bob),
      "team-mates who went in level come out level")
 
-  -- Everyone played one battle, not two, and not none.
-  for _, name in ipairs({ "ANN", "BOB", "CAL", "DEE" }) do
-    eq(board:entry(name).played, 1, name .. " has exactly one rated result")
+  for _, id in ipairs({ ann, bob, cal, dee }) do
+    eq(board:entry(id).played, 1, id .. " has exactly one rated result")
   end
 
-  -- ------- and the order they are listed in changes nothing
-  --
-  -- This is the whole of what was wrong before. Under slot pairing, the same
-  -- four players with the same ratings and the same result were rated
-  -- *differently* depending on which of them the hub happened to list first --
-  -- so putting your stronger player in the other seat moved everybody's
-  -- points. The rating is now about the two sides, and a side is a set.
-  -- The two opponents have to be *differently* rated, and only one side's
-  -- order may change. Swap both sides symmetrically and slot pairing happens
-  -- to match the same people up anyway, so the test would pass under the very
-  -- design it exists to reject. Under slot pairing this exact swap moved three
-  -- of the four ratings: 43/16/10 became 42/17/11 for the same four people,
-  -- the same battle and the same result.
-  local SEATS = { "STRONG", "WEAK", "RIVAL", "ROOKIE" }
+  local STRONG = testPlayerId("STRONG")
+  local WEAK = testPlayerId("WEAK")
+  local RIVAL = testPlayerId("RIVAL")
+  local ROOKIE = testPlayerId("ROOKIE")
+  local PADDING = testPlayerId("PADDING")
+  local PADDING2 = testPlayerId("PADDING2")
+  local SEATS = { STRONG, WEAK, RIVAL, ROOKIE }
   local function play(winners, losers)
     local seat = Rank.newBoard()
-    for _ = 1, 6 do seat:record("STRONG", "PADDING", 0) end
-    for _ = 1, 3 do seat:record("RIVAL", "PADDING2", 0) end
+    for _ = 1, 6 do seat:record(STRONG, PADDING, 0) end
+    for _ = 1, 3 do seat:record(RIVAL, PADDING2, 0) end
     seat:recordTeam(winners, losers, 500)
     local after = {}
-    for _, name in ipairs(SEATS) do after[name] = seat:points(name) end
+    for _, id in ipairs(SEATS) do after[id] = seat:points(id) end
     return after
   end
 
-  local straight = play({ "STRONG", "WEAK" }, { "RIVAL", "ROOKIE" })
-  local reseated = play({ "STRONG", "WEAK" }, { "ROOKIE", "RIVAL" })
-  for _, name in ipairs(SEATS) do
-    eq(reseated[name], straight[name],
-       name .. " is rated the same whichever seat they were listed in")
+  local straight = play({ STRONG, WEAK }, { RIVAL, ROOKIE })
+  local reseated = play({ STRONG, WEAK }, { ROOKIE, RIVAL })
+  for _, id in ipairs(SEATS) do
+    eq(reseated[id], straight[id],
+       id .. " is rated the same whichever seat they were listed in")
   end
 
-  -- ...and the strength that decides it is the pair's, not one member's.
+  local CARRY, FODDER = testPlayerId("CARRY"), testPlayerId("FODDER")
+  local ROOKIE1, ROOKIE2 = testPlayerId("ROOKIE1"), testPlayerId("ROOKIE2")
+  local PLAIN1, PLAIN2 = testPlayerId("PLAIN1"), testPlayerId("PLAIN2")
   local carried = Rank.newBoard()
-  for _ = 1, 4 do carried:record("CARRY", "FODDER", 0) end
-  local strongPair = carried:recordTeam({ "ROOKIE1", "ROOKIE2" },
-                                        { "CARRY", "FODDER" }, 100)
-  local evenPair = Rank.newBoard():recordTeam({ "ROOKIE1", "ROOKIE2" },
-                                              { "PLAIN1", "PLAIN2" }, 100)
+  for _ = 1, 4 do carried:record(CARRY, FODDER, 0) end
+  local strongPair = carried:recordTeam({ ROOKIE1, ROOKIE2 },
+                                        { CARRY, FODDER }, 100)
+  local evenPair = Rank.newBoard():recordTeam({ ROOKIE1, ROOKIE2 },
+                                              { PLAIN1, PLAIN2 }, 100)
   check(strongPair.loserSide > evenPair.loserSide,
         "a pair carrying a rated player is worth more than a pair of unknowns")
   check(strongPair.winners[1].gained > evenPair.winners[1].gained,
         "and beating them pays more -- the side's strength is what is rated, "
         .. "not whoever happened to be listed first")
 
-  -- ------- farming a 2-on-2 is discounted like farming a 1v1
+  local P1, P2 = testPlayerId("P1"), testPlayerId("P2")
+  local P3, P4 = testPlayerId("P3"), testPlayerId("P4")
   local afternoon = Rank.newBoard()
   local paid = {}
   for i = 1, 5 do
-    local round = afternoon:recordTeam({ "P1", "P2" }, { "P3", "P4" }, 10 * i)
+    local round = afternoon:recordTeam({ P1, P2 }, { P3, P4 }, 10 * i)
     paid[i] = round.winners[1].gained
   end
   check(paid[1] > 0, "the first party battle pays")
@@ -2087,36 +2100,33 @@ check(back < there, "alternating wins is the same pairing, and is discounted")
   check(paid[3] < paid[2], "and less again")
   eq(paid[5], 0, "until the same four are worth nothing to each other")
 
-  -- ...whichever side wins, because it is the same four people arranging
-  -- results between themselves.
+  local Q1, Q2 = testPlayerId("Q1"), testPlayerId("Q2")
+  local Q3, Q4 = testPlayerId("Q3"), testPlayerId("Q4")
   local taking = Rank.newBoard()
-  local wentOut = taking:recordTeam({ "Q1", "Q2" }, { "Q3", "Q4" }, 0)
-  local cameBack = taking:recordTeam({ "Q3", "Q4" }, { "Q1", "Q2" }, 1)
+  local wentOut = taking:recordTeam({ Q1, Q2 }, { Q3, Q4 }, 0)
+  local cameBack = taking:recordTeam({ Q3, Q4 }, { Q1, Q2 }, 1)
   check(cameBack.winners[1].gained < wentOut.winners[1].gained,
         "two parties taking turns to win is the same meeting, and discounted")
 
-  -- ...and bringing in somebody genuinely new is worth its full value, because
-  -- a fight nobody has had before is not a fight anyone can be farming.
+  local R1, R2 = testPlayerId("R1"), testPlayerId("R2")
+  local R3, R4 = testPlayerId("R3"), testPlayerId("R4")
+  local NEWBIE = testPlayerId("NEWBIE")
   local fresh = Rank.newBoard()
-  for _ = 1, 3 do fresh:recordTeam({ "R1", "R2" }, { "R3", "R4" }, 0) end
-  local stale = fresh:recordTeam({ "R1", "R2" }, { "R3", "R4" }, 1)
-  local newcomer = fresh:recordTeam({ "R1", "R2" }, { "R3", "NEWBIE" }, 2)
+  for _ = 1, 3 do fresh:recordTeam({ R1, R2 }, { R3, R4 }, 0) end
+  local stale = fresh:recordTeam({ R1, R2 }, { R3, R4 }, 1)
+  local newcomer = fresh:recordTeam({ R1, R2 }, { R3, NEWBIE }, 2)
   check(newcomer.winners[1].gained > stale.winners[1].gained,
         "a new opponent on the other side makes the battle worth playing again")
 
-  -- ------- and what is not a match
-  eq(Rank.newBoard():recordTeam({ "X", "Y" }, { "Y", "Z" }, 0), nil,
+  local x, y, z = testPlayerId("X"), testPlayerId("Y"), testPlayerId("Z")
+  eq(Rank.newBoard():recordTeam({ x, y }, { y, z }, 0), nil,
      "a player on both sides is not a battle between four people")
-  eq(Rank.newBoard():recordTeam({ "X", "X" }, { "Y", "Z" }, 0), nil,
-     "and neither is the same name twice on one side")
-  eq(Rank.newBoard():recordTeam({}, { "Y", "Z" }, 0), nil, "an empty side is not a side")
-  -- A name that will not resolve takes the whole battle down with it, rather
-  -- than quietly rating the three players who did have one against a side
-  -- that is short a member.
-  eq(Rank.newBoard():recordTeam({ "X", "   " }, { "Y", "Z" }, 0), nil,
-     "nor is one carrying a name that resolves to nobody")
+  eq(Rank.newBoard():recordTeam({ x, x }, { y, z }, 0), nil,
+     "and neither is the same id twice on one side")
+  eq(Rank.newBoard():recordTeam({}, { y, z }, 0), nil, "an empty side is not a side")
+  eq(Rank.newBoard():recordTeam({ x, "   " }, { y, z }, 0), nil,
+     "nor is one carrying an id that resolves to nobody")
 
-  -- The mean is what a side is worth, and it is stated rather than implied.
   eq(Rank.teamPoints({ { points = 100 }, { points = 200 } }), 150,
      "a side is worth the average of its members")
   eq(Rank.teamPoints({}), 0, "and an empty one is worth nothing")
@@ -2126,309 +2136,88 @@ end)()
 -- identically up to the rematch, so the ratings are the same at that point
 -- and the only thing that differs is how long the players waited.
 local soon, later = Rank.newBoard(), Rank.newBoard()
-soon:record("ALPHA", "BRAVO", 0)
-later:record("ALPHA", "BRAVO", 0)
-local sooner = soon:record("ALPHA", "BRAVO", 1).winner.gained
-local waited = later:record("ALPHA", "BRAVO",
+soon:record(alpha, bravo, 0)
+later:record(alpha, bravo, 0)
+local sooner = soon:record(alpha, bravo, 1).winner.gained
+local waited = later:record(alpha, bravo,
                             Config.RANK_REPEAT_WINDOW + 1).winner.gained
 check(waited > sooner, "a rematch after the window is worth full price again")
 
--- ------- claiming a name
+-- ------- persistence keyed by playerId (PROTOCOL 16)
 --
--- A rating is keyed by trainer name, so without this anybody who knows your
--- nickname can put your rating on and spend it. The ticket is what turns
--- "types the same name" into "is the same player".
+-- Ranking is keyed by persistent playerId; display name is cosmetic and can
+-- collide. Claim tickets no longer gate scoring -- the id is the account.
 
-local claims = Rank.newBoard()
-local TICKET = string.rep("a1", 16)
-local OTHER = string.rep("b2", 16)
+eq(Rank.keyOf(ash), ash, "a playerId is the board key")
+eq(Rank.keyOf(" ash "), nil, "a trainer name is not a playerId")
 
-eq(claims:claimed("ASH"), false, "a name nobody has used is unclaimed")
-eq(claims:claim("ASH", nil, TICKET), "claimed", "the first player to use it claims it")
-eq(claims:claimed("ASH"), true, "and it is claimed from then on")
-eq(claims:claim("ASH", TICKET, OTHER), "owner",
-   "the holder of the ticket is the owner, and does not re-claim it")
-eq(claims:claim("ash", TICKET, OTHER), "owner", "whatever case they type it in")
-eq(claims:claim("ASH", nil, OTHER), "impostor",
-   "somebody typing the name with no ticket is not the owner")
-eq(claims:claim("ASH", OTHER, nil), "impostor", "nor is a wrong ticket")
-eq(claims:claimed("ASH"), true, "and neither attempt took the name over")
+local persist = Rank.newBoard()
+eq(persist:get(ash), nil, "sanity: neither id is on the board yet")
+persist:seen(ash, "ASH", "SPRITE_RED")
+persist:seen(gary, "GARY", "SPRITE_BLUE")
+persist:record(ash, gary, 0)
+eq(persist:points(ash), 16, "a win is scored by playerId")
+eq(persist:points(gary), 0, "and the loser floors at zero by playerId")
 
--- The ticket itself is never kept -- only its digest -- so a leaked board
--- file lists who is ranked and gives nobody a way to be them.
-local stored = claims:get("ASH")
-check(stored.tokenHash ~= nil, "a claimed name carries a digest")
-check(stored.tokenHash ~= TICKET, "which is not the ticket")
-check(not tostring(stored.tokenHash):find(TICKET, 1, true),
-      "and does not contain it")
+local exported = persist:export()
+for _, row in ipairs(exported) do
+  check(row.id and #row.id == 32, "exported rows carry a 32-hex playerId")
+  eq(row.tokenHash, nil, "and no legacy claim digests")
+end
 
--- A hub that cannot mint (its entropy pool refused) leaves the name open
--- rather than locking it: everybody scores as they did before tickets.
-local unmintable = Rank.newBoard()
-eq(unmintable:claim("NOBODY", nil, nil), "open", "no ticket to give means no claim")
-eq(unmintable:claimed("NOBODY"), false, "and the name stays free for the next one")
-eq(unmintable:claim("NOBODY", nil, TICKET), "claimed", "who can still claim it")
+local reloaded = Rank.newBoard():import(exported)
+eq(reloaded:points(ash), 16,
+   "a rating survives a round trip through the file keyed by id")
+eq(reloaded:get(ash).name, "ASH",
+   "along with the display name that was seen at hello")
 
--- Claims survive the file, because a season that forgot them would hand
--- every name back to whoever typed it first after a restart.
-local reloaded = Rank.newBoard():import(claims:export())
-eq(reloaded:claim("ASH", TICKET, OTHER), "owner", "a ticket still works after a reload")
-eq(reloaded:claim("ASH", OTHER, nil), "impostor", "and a wrong one still does not")
-local corrupt = Rank.newBoard():import({
-  { name = "ASH", points = 10, tokenHash = "not a digest" },
+local skipped = Rank.newBoard():import({
+  { name = "LEGACY", points = 40, played = 3, won = 2 },
 })
-eq(corrupt:claimed("ASH"), false,
-   "a hash that is not a hash is dropped -- a name nobody can claim would be "
-   .. "worse than one anybody can")
+eq(skipped:points(testPlayerId("LEGACY")), 0,
+   "name-only legacy rows without an id are not imported")
 
--- Nothing that leaves the hub carries the digest.
-claims:record("ASH", "GARY", 0)
-for _, row in ipairs(claims:top(Config.RANK_TOP)) do
+for _, row in ipairs(persist:top(Config.RANK_TOP)) do
   eq(row.tokenHash, nil, "the leaderboard sent to clients carries no digests")
+  check(row.id and #row.id == 32, "and every ranked row carries a playerId")
 end
 
--- ------- a claim is provisional until it is proved
---
--- Board:claim's own header explains the rule; what follows pins it case by
--- case, mirroring server/rank.test.js's claim scenarios one for one so the
--- two Board twins stay honest about the same thing.
-
-local mintTokenCounter = 0
-local function mintToken()
-  mintTokenCounter = mintTokenCounter + 1
-  return Sha256.hex("rby_mmo_test/board_twin_token|" .. mintTokenCounter)
-             :sub(1, Config.RANK_TOKEN_HEX)
-end
-
--- A fresh claim starts life unproved.
+-- What the file is allowed to grow: only rows worth surviving a restart.
 do
-  local board = Rank.newBoard()
-  local token = mintToken()
-  eq(board:claim("ASH", nil, token), "claimed", "the name is free, so it is claimed")
-  eq(board:get("ASH").confirmed, false,
-     "but a mint only says a ticket was posted, not that anyone proved holding it")
-  -- ...and it is not written down. A row nobody has proved, played or scored
-  -- under is one Board:claim will hand to the next player who asks, so
-  -- persisting it buys nothing -- and a hub anybody can dial would otherwise
-  -- grow (and rewrite) a row per passing hello.
-  local exported
-  for _, row in ipairs(board:export()) do
-    if row.name == "ASH" then exported = row end
-  end
-  eq(exported, nil,
-     "and an unproved, unplayed, unrated claim is not written to the file at all")
-end
+  local drift = Rank.newBoard()
+  local drifter = testPlayerId("DRIFTER")
+  drift:seen(drifter, "DRIFTER", "SPRITE_RED")
+  local watcher = testPlayerId("WATCHER")
+  drift:seen(watcher, "WATCHER", "SPRITE_RED")
+  eq(#drift:export(), 0,
+     "a board of passers-by with nothing scored writes no rows at all")
 
--- The claim moves for a name nobody is *using*. A holder who is connected and
--- ranked under it right now is the one thing board state cannot see, and
--- without it the leniency above is a theft: the second player takes the
--- claim, and the first player's next win lands on it.
-do
-  local board = Rank.newBoard()
-  local held = mintToken()
-  eq(board:claim("ASH", nil, held), "claimed", "first visit mints a claim")
-
-  eq(board:claim("ASH", nil, mintToken(), true), "impostor",
-     "a tokenless hello while the holder is connected and ranked is an impostor")
-  eq(board:claim("ASH", mintToken(), mintToken(), true), "impostor",
-     "and so is a wrong ticket")
-  eq(board:claim("ASH", held, mintToken(), true), "owner",
-     "the holder themselves is still the owner, live or not")
-
-  -- The lockout this whole branch exists to fix has the owner *gone*, so it
-  -- is untouched: same board, nobody connected, same tokenless hello.
-  local gone = Rank.newBoard()
-  gone:claim("ASH", nil, mintToken())
-  local fresh = mintToken()
-  eq(gone:claim("ASH", nil, fresh, false), "claimed",
-     "with the holder disconnected the reclaim still works")
-  eq(gone:claim("ASH", fresh, mintToken()), "owner",
-     "and the ticket it minted is the one that answers")
-end
-
--- A row with a rating but no games behind it is not reclaimable either.
--- `played` is the rule; this is the belt on top of it, for a hand-edited
--- ranking.json where the two disagree.
-do
-  local edited = Rank.newBoard():import({
-    { name = "EDITED", points = 500, played = 0, won = 0, confirmed = false,
-      tokenHash = ("a"):rep(64) },
-  })
-  eq(edited:get("EDITED").points, 500, "sanity: the imported row has a rating")
-  eq(edited:get("EDITED").played, 0, "and no games behind it")
-  eq(edited:claim("EDITED", nil, mintToken()), "impostor",
-     "points above the starting value block a reclaim on their own")
-end
-
--- The ticket holder returning confirms the claim, and from then on nothing
--- reclaims it -- not even a hello with no ticket at all.
-do
-  local board = Rank.newBoard()
-  local token = mintToken()
-  eq(board:claim("ASH", nil, token), "claimed", "first visit mints a claim")
-  eq(board:get("ASH").confirmed, false, "not proved yet")
-
-  eq(board:claim("ASH", token, mintToken()), "owner",
-     "the ticket holder returns and is recognised")
-  eq(board:get("ASH").confirmed, true,
-     "a proved ticket confirms the claim, even though nothing has scored")
-
-  eq(board:claim("ASH", nil, mintToken()), "impostor",
-     "and a confirmed claim is never reclaimed, even at zero games played")
-end
-
--- Unconfirmed and unscored: any hello for the name moves the claim, right
--- ticket, wrong ticket or none at all -- until somebody proves it.
-do
-  local board = Rank.newBoard()
-  local oldToken = mintToken()
-  eq(board:claim("ASH", nil, oldToken), "claimed", "first visit mints a claim")
-  eq(board:get("ASH").confirmed, false, "nobody has proved it yet")
-
-  local newToken = mintToken()
-  eq(board:claim("ASH", nil, newToken), "claimed",
-     "a second tokenless hello for an unconfirmed, unscored name re-mints "
-     .. "rather than locking the name shut")
-
-  -- The claim is still unproved, so even a *wrong* ticket moves it again
-  -- instead of being told apart from a missing one -- "unconfirmed and
-  -- unscored" is the whole test, not which ticket was presented.
-  local staleToken = mintToken()
-  eq(board:claim("ASH", oldToken, staleToken), "claimed",
-     "a wrong ticket on a still-unconfirmed, unscored name reclaims once "
-     .. "more rather than answering impostor")
-
-  eq(board:claim("ASH", staleToken, mintToken()), "owner",
-     "the latest ticket is the one that answers now")
-  eq(board:get("ASH").confirmed, true, "and proving it confirms the claim")
-
-  eq(board:claim("ASH", newToken, mintToken()), "impostor",
-     "now that it is proved, an earlier ticket is worthless")
-end
-
--- A name that has settled a battle is never up for grabs, ticket or not --
--- even a legacy row that reached disk unconfirmed.
-do
-  local board = Rank.newBoard()
-  local token = mintToken()
-  board:claim("ASH", nil, token)
-  board:record("ASH", "GARY", 0)
-  local row
-  for _, r in ipairs(board:export()) do if r.name == "ASH" then row = r end end
-  eq(row.played, 1, "sanity: this name has scored")
-  eq(row.confirmed, true, "and settling confirmed it too")
-
-  row.confirmed = false
-  local reloaded = Rank.newBoard():import({ row })
-  eq(reloaded:get("ASH").confirmed, false,
-     "the imported state: unconfirmed on file, but already scored")
-  eq(reloaded:get("ASH").played, 1, "and scored")
-  eq(reloaded:claim("ASH", nil, mintToken()), "impostor",
-     "played > 0 blocks reclaim on its own, independent of confirmed")
-end
-
--- Settling a match confirms both names in the same breath, ticket or not.
-do
-  local board = Rank.newBoard()
-  eq(board:get("ALPHA"), nil, "sanity: neither name is on the board yet")
-  board:record("ALPHA", "BRAVO", 0)
-  eq(board:get("ALPHA").confirmed, true,
-     "the winner is confirmed by having played, ticket or not")
-  eq(board:get("BRAVO").confirmed, true,
-     "and so is the loser -- a settled battle proves both names at once")
-end
-
--- confirmed round-trips through export/import, both ways.
-do
-  -- The unconfirmed side of the trip has to be a row the file actually keeps,
-  -- and export drops the throwaway ones -- so this is an unproved claim on a
-  -- name that has played, which is what a legacy file looks like.
-  local board = Rank.newBoard():import({
-    { name = "PROVISIONAL", points = 12, played = 1, won = 1, confirmed = false,
-      tokenHash = ("b"):rep(64) },
-  })
-  eq(board:get("PROVISIONAL").confirmed, false, "sanity: unconfirmed")
-
-  local provenToken = mintToken()
-  board:claim("PROVEN", nil, provenToken)
-  board:claim("PROVEN", provenToken, mintToken())
-  eq(board:get("PROVEN").confirmed, true, "sanity: confirmed by its owner")
-
-  local reloaded = Rank.newBoard():import(board:export())
-  eq(reloaded:get("PROVISIONAL").confirmed, false,
-     "an unconfirmed claim comes back unconfirmed")
-  eq(reloaded:get("PROVEN").confirmed, true,
-     "and a confirmed one comes back confirmed -- both directions of the trip")
-end
-
--- What the file is allowed to grow. Every first hello under a new name claims
--- it, so a hub anybody can dial would otherwise write a row per connection --
--- and rewrite the whole file each time. Only claims worth surviving a restart
--- are written: proved, played, or carrying a rating.
-do
-  local board = Rank.newBoard()
-  board:claim("DRIFTER", nil, mintToken())
-  board:seen("WATCHER", "SPRITE_RED")
-  eq(#board:export(), 0,
-     "a board of nothing but fresh claims and passers-by writes no rows at all")
-
-  local proved = mintToken()
-  board:claim("PROVER", nil, proved)
-  board:claim("PROVER", proved, mintToken())
-  board:record("WINNER", "LOSER", 0)
+  local winId = testPlayerId("WINNER")
+  local loseId = testPlayerId("LOSER")
+  drift:seen(winId, "WINNER", "SPRITE_RED")
+  drift:seen(loseId, "LOSER", "SPRITE_RED")
+  drift:record(winId, loseId, 0)
   local names = {}
-  for _, row in ipairs(board:export()) do names[#names + 1] = row.name end
+  for _, row in ipairs(drift:export()) do names[#names + 1] = row.name end
   table.sort(names)
-  eq(table.concat(names, ","), "LOSER,PROVER,WINNER",
-     "and a proved claim, a win and a loss are all kept -- those are what a "
-     .. "restart has to survive")
-end
-
--- A legacy row with no `confirmed` field is judged by its results: played is
--- proof, and nothing played is exactly the leniency a fresh claim gets.
-do
-  local hashOf = function(char) return char:rep(64) end
-  local legacy = Rank.newBoard():import({
-    { name = "VETERAN", points = 40, played = 3, won = 2, tokenHash = hashOf("a") },
-    { name = "ROOKIE", points = 0, played = 0, won = 0, tokenHash = hashOf("b") },
-  })
-  eq(legacy:get("VETERAN").confirmed, true,
-     "a legacy row with no confirmed field, but with results, is read as confirmed")
-  eq(legacy:get("ROOKIE").confirmed, false,
-     "and one with no results yet is read as provisional -- the same leniency "
-     .. "a fresh claim gets")
-  eq(legacy:claim("VETERAN", nil, mintToken()), "impostor",
-     "so the veteran cannot be reclaimed")
-  eq(legacy:claim("ROOKIE", nil, mintToken()), "claimed",
-     "but the rookie can be -- nothing has scored under that name yet")
-end
-
--- The twin drift: import's tokenHash shape tightens to exactly what
--- server/lib/rank.js has always required, /^[0-9a-f]{64}$/ (D4 in the plan).
-do
-  local hash64 = ("a1"):rep(32)
-  eq(#hash64, 64, "sanity: the fixture hash is 64 characters")
-  local board = Rank.newBoard():import({
-    { name = "SHORT", points = 5, tokenHash = hash64:sub(1, 63) },
-    { name = "LONG", points = 5, tokenHash = hash64 .. "a" },
-    { name = "SHOUTY", points = 5, tokenHash = hash64:upper() },
-    { name = "EXACT", points = 5, tokenHash = hash64 },
-  })
-  eq(board:claimed("SHORT"), false, "63 hex characters is rejected")
-  eq(board:claimed("LONG"), false, "65 hex characters is rejected")
-  eq(board:claimed("SHOUTY"), false, "uppercase hex is rejected")
-  eq(board:claimed("EXACT"), true, "exactly 64 lowercase hex characters is accepted")
+  eq(table.concat(names, ","), "LOSER,WINNER",
+     "a win and a loss are kept -- that is what a restart has to survive")
 end
 
 -- ------- the leaderboard
 
 local ladder = Rank.newBoard()
+local winnerIds = {}
 for i = 1, 14 do
-  ladder:seen("WINNER" .. i, "SPRITE_RED")
-  -- everybody beats the same punchbag once, so every winner is on the board
-  ladder:record("WINNER" .. i, "PUNCHBAG" .. i, i)
+  local wid = testPlayerId("WINNER" .. i)
+  local pid = testPlayerId("PUNCHBAG" .. i)
+  winnerIds[#winnerIds + 1] = wid
+  ladder:seen(wid, "WINNER" .. i, "SPRITE_RED")
+  ladder:seen(pid, "PUNCHBAG" .. i, "SPRITE_RED")
+  ladder:record(wid, pid, i)
 end
-ladder:seen("LURKER", "SPRITE_LASS")
+local lurkerId = testPlayerId("LURKER")
+ladder:seen(lurkerId, "LURKER", "SPRITE_LASS")
 
 local top = ladder:top(Config.RANK_TOP)
 eq(#top, Config.RANK_TOP, "the board is cut to the top ten")
@@ -2443,17 +2232,24 @@ end
 local saved = ladder:export()
 check(#saved > #top, "everything is exported, not only the visible ten")
 local restored = Rank.newBoard():import(saved)
-eq(restored:points(top[1].name), top[1].points, "a rating survives a round trip")
+local topId = nil
+for _, row in ipairs(saved) do
+  if row.name == top[1].name then topId = row.id end
+end
+eq(restored:points(topId), top[1].points, "a rating survives a round trip")
 eq(#restored:top(Config.RANK_TOP), #top, "and so does the board it makes")
-local mangled = Rank.newBoard():import({ "not a row", { name = "OK", points = 40 },
+local okId = testPlayerId("OK")
+local mangled = Rank.newBoard():import({ "not a row", { id = okId, name = "OK", points = 40 },
                                          { points = 9 } })
-eq(mangled:points("OK"), 40, "a corrupt row costs its own rating, not the file's")
+eq(mangled:points(okId), 40, "a corrupt row costs its own rating, not the file's")
 
 end
 
 do
 
 -- ------- the hub half: two reports, one result
+
+do
 
 local ranked = Hub.new({ maxPlayers = 4 })
 local one, onePeer = join(ranked, "ONE", "PALLET", 1, 1)
@@ -2485,18 +2281,18 @@ check(matchId ~= nil, "a battle session has an id to file a result under")
 
 -- One side alone proves nothing.
 ranked:receive(one, { type = Wire.RESULT, session = matchId, outcome = "win" })
-eq(ranked.board:points("ONE"), 0, "one report on its own scores nothing")
+eq(ranked.board:points(one.id), 0, "one report on its own scores nothing")
 eq(take(onePeer, Wire.RANK), nil, "and moves nobody")
 
 -- A bystander cannot vote on somebody else's battle.
 local three = join(ranked, "THREE", "PALLET", 9, 9)
 ranked:receive(three, { type = Wire.RESULT, session = matchId, outcome = "loss" })
-eq(ranked.board:points("ONE"), 0, "a player who was not in the battle is ignored")
+eq(ranked.board:points(one.id), 0, "a player who was not in the battle is ignored")
 
 -- The loser agreeing is what settles it.
 ranked:receive(two, { type = Wire.RESULT, session = matchId, outcome = "loss" })
-eq(ranked.board:points("ONE"), 16, "two agreeing reports settle the match")
-eq(ranked.board:points("TWO"), 0, "and the loser floors at zero")
+eq(ranked.board:points(one.id), 16, "two agreeing reports settle the match")
+eq(ranked.board:points(two.id), 0, "and the loser floors at zero")
 local rankMsg = take(onePeer, Wire.RANK)
 check(rankMsg ~= nil, "the winner is told their new rating")
 eq(rankMsg.points, 16, "with the number")
@@ -2505,29 +2301,29 @@ check(saw(twoPeer, Wire.RANK), "and so is the loser -- both, in the same breath"
 -- Re-reporting a settled match pays nothing a second time.
 ranked:receive(one, { type = Wire.RESULT, session = matchId, outcome = "win" })
 ranked:receive(two, { type = Wire.RESULT, session = matchId, outcome = "loss" })
-eq(ranked.board:points("ONE"), 16, "a settled match cannot be settled twice")
+eq(ranked.board:points(one.id), 16, "a settled match cannot be settled twice")
 
 -- Disagreement scores nothing at all: this is the lie, and it does not pay.
 local liarId = fight(ranked, one, onePeer, two, twoPeer)
 ranked:receive(one, { type = Wire.RESULT, session = liarId, outcome = "win" })
 ranked:receive(two, { type = Wire.RESULT, session = liarId, outcome = "win" })
-eq(ranked.board:points("ONE"), 16, "two players both claiming the win score nothing")
-eq(ranked.board:points("TWO"), 0, "neither of them")
+eq(ranked.board:points(one.id), 16, "two players both claiming the win score nothing")
+eq(ranked.board:points(two.id), 0, "neither of them")
 
 -- A player cannot revise their answer until it matches.
 local revisedId = fight(ranked, one, onePeer, two, twoPeer)
 ranked:receive(one, { type = Wire.RESULT, session = revisedId, outcome = "loss" })
 ranked:receive(one, { type = Wire.RESULT, session = revisedId, outcome = "win" })
 ranked:receive(two, { type = Wire.RESULT, session = revisedId, outcome = "loss" })
-eq(ranked.board:points("TWO"), 0,
+eq(ranked.board:points(two.id), 0,
    "the first answer stands, so a retraction cannot manufacture agreement")
-eq(ranked.board:points("ONE"), 16, "and nothing was paid out")
+eq(ranked.board:points(one.id), 16, "and nothing was paid out")
 
 -- An agreed draw is a real answer, and it is worth nothing.
 local drawId = fight(ranked, one, onePeer, two, twoPeer)
 ranked:receive(one, { type = Wire.RESULT, session = drawId, outcome = "draw" })
 ranked:receive(two, { type = Wire.RESULT, session = drawId, outcome = "draw" })
-eq(ranked.board:points("ONE"), 16, "a draw moves nobody")
+eq(ranked.board:points(one.id), 16, "a draw moves nobody")
 
 -- A trade is not a battle, so there is nothing to report on one.
 ranked:receive(one, { type = Wire.SESSION_LEAVE })
@@ -2542,7 +2338,7 @@ local tradeId = tradeSession and tradeSession.id
 take(twoPeer, Wire.SESSION)
 ranked:receive(one, { type = Wire.RESULT, session = tradeId, outcome = "win" })
 ranked:receive(two, { type = Wire.RESULT, session = tradeId, outcome = "loss" })
-eq(ranked.board:points("ONE"), 16, "a trade cannot be reported as a won battle")
+eq(ranked.board:points(one.id), 16, "a trade cannot be reported as a won battle")
 ranked:receive(one, { type = Wire.SESSION_LEAVE })
 
 -- ------- the report window
@@ -2555,16 +2351,16 @@ ranked:receive(one, { type = Wire.RESULT, session = lateId, outcome = "win" })
 ranked:receive(one, { type = Wire.SESSION_LEAVE })
 ranked:update(1)
 ranked:receive(two, { type = Wire.RESULT, session = lateId, outcome = "loss" })
-check(ranked.board:points("ONE") > 16,
+check(ranked.board:points(one.id) > 16,
    "a report that lands after the session ended still counts")
 
 local staleId = fight(ranked, one, onePeer, two, twoPeer)
-local carried = ranked.board:points("ONE")
+local carried = ranked.board:points(one.id)
 ranked:receive(one, { type = Wire.RESULT, session = staleId, outcome = "win" })
 ranked:receive(one, { type = Wire.SESSION_LEAVE })
 ranked:update(Config.RANK_REPORT_GRACE + 1)
 ranked:receive(two, { type = Wire.RESULT, session = staleId, outcome = "loss" })
-eq(ranked.board:points("ONE"), carried,
+eq(ranked.board:points(one.id), carried,
    "but a report long after the grace period has nothing left to settle")
 eq(next(ranked.matches), nil, "and the paperwork is not kept forever")
 
@@ -2588,14 +2384,38 @@ ranked:update(Config.RANK_QUERY_GATE + 0.1)
 ranked:receive(one, { type = Wire.RANKS })
 check(take(onePeer, Wire.RANKING) ~= nil, "and answered again once the gate opens")
 
--- ------- a rating belongs to the name, not the connection
+end
+
+-- ------- duplicate playerId refused (PROTOCOL 16)
+
+;(function()
+
+local dupeHub = Hub.new({ maxPlayers = 8 })
+local dupeOwner, dupeOwnerPeer = join(dupeHub, "DUPE")
+local dupeWelcome = take(dupeOwnerPeer, Wire.WELCOME)
+eq(dupeWelcome.ranked, true, "sanity: a valid playerId is ranked")
+eq(dupeWelcome.rankToken, nil,
+   "and no claim ticket rides the welcome under PROTOCOL 16")
+
+local dupePeer = fakePeer()
+local dupeClient = dupeHub:accept(dupePeer)
+dupeHub:receive(dupeClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+  name = "DUPE", map = "PALLET", x = 1, y = 1, facing = "down",
+  playerId = dupeOwner.id, sprite = "SPRITE_GREEN" })
+local dupeErr = take(dupePeer, Wire.ERROR)
+check(dupeErr ~= nil and dupeErr.message:lower():find("already connected"),
+      "a second live connection with the same playerId is refused")
+check(dupePeer.closed, "and the duplicate connection is closed")
+eq(dupeHub.board:points(dupeOwner.id), 0,
+   "the refused duplicate cannot touch the owner's rating")
+
+-- ------- a rating belongs to the playerId, not the display name
 
 local returning = Hub.new({ maxPlayers = 4 })
-local rejoinA, rejoinAPeer = join(returning, "COMEBACK")
+local comebackId = testPlayerId("COMEBACK")
+local rejoinA, rejoinAPeer = join(returning, "COMEBACK", "PALLET", 1, 1, nil, comebackId)
 local rejoinB = join(returning, "VICTIM")
--- the ticket the hub minted for this name, handed over exactly once
-local ticket = take(rejoinAPeer, Wire.WELCOME).rankToken
-check(Wire.token(ticket) ~= nil, "a first visit is handed a claim ticket")
+take(rejoinAPeer, Wire.WELCOME)
 local rejoinId = nil
 returning:receive(rejoinA, { type = Wire.REQUEST, to = rejoinB.id, kind = "battle" })
 returning:receive(rejoinB, { type = Wire.RESPOND, to = rejoinA.id,
@@ -2605,142 +2425,42 @@ for _, client in pairs(returning.clients) do
 end
 returning:receive(rejoinA, { type = Wire.RESULT, session = rejoinId, outcome = "win" })
 returning:receive(rejoinB, { type = Wire.RESULT, session = rejoinId, outcome = "loss" })
-local won = returning.board:points("COMEBACK")
+local won = returning.board:points(comebackId)
 check(won > 0, "the winner has a rating")
 returning:drop(rejoinA)
 
--- Back with the ticket: the same player, and their rating with them.
-local backAgain, backPeer = join(returning, "COMEBACK", nil, nil, nil, ticket)
+local backAgain, backPeer = join(returning, "COMEBACK", "PALLET", 1, 1, nil, comebackId)
 eq(backAgain.points, won, "which is still theirs when they reconnect")
 local backWelcome = take(backPeer, Wire.WELCOME)
 eq(backWelcome.points, won, "and the welcome says so")
-eq(backWelcome.ranked, true, "they are scored, as themselves")
-eq(backWelcome.rankToken, nil,
-   "and the ticket is not re-sent: a hub that handed it to whoever asked "
-   .. "would not be checking anything")
+eq(backWelcome.ranked, true, "they remain ranked")
+eq(backWelcome.rankToken, nil, "with no claim ticket on the wire")
 returning:drop(backAgain)
 
--- Somebody else typing the same name: admitted, and worth nothing.
-local faker, fakerPeer = join(returning, "COMEBACK")
+local fakerId = testPlayerId("COMEBACK_STRANGER")
+local faker, fakerPeer = join(returning, "COMEBACK", "PALLET", 2, 1, nil, fakerId)
 local fakeWelcome = take(fakerPeer, Wire.WELCOME)
-eq(fakeWelcome.ranked, false, "a stranger typing a claimed name is told they are not scored")
+eq(fakeWelcome.ranked, true,
+   "a stranger with the same display name is still ranked under their own id")
 eq(fakeWelcome.points, 0,
-   "and wears none of that name's rating -- the ticket would buy nothing otherwise")
-eq(fakeWelcome.rankToken, nil, "no ticket is handed out for a name already claimed")
+   "and wears none of the real player's rating")
+eq(fakeWelcome.rankToken, nil, "with no claim ticket on the wire")
 
--- ...and their battles do not move the real player's rating.
-local victim = join(returning, "VICTIM2")
-returning:receive(faker, { type = Wire.REQUEST, to = victim.id, kind = "battle" })
-returning:receive(victim, { type = Wire.RESPOND, to = faker.id,
+local victim2 = join(returning, "VICTIM2")
+returning:receive(faker, { type = Wire.REQUEST, to = victim2.id, kind = "battle" })
+returning:receive(victim2, { type = Wire.RESPOND, to = faker.id,
                             kind = "battle", accept = true })
 local fakeId = faker.sessionId
 returning:receive(faker, { type = Wire.RESULT, session = fakeId, outcome = "win" })
-returning:receive(victim, { type = Wire.RESULT, session = fakeId, outcome = "loss" })
-eq(returning.board:points("COMEBACK"), won,
-   "an unranked player cannot add to the rating of the name they borrowed")
-eq(returning.board:points("VICTIM2"), 0,
+returning:receive(victim2, { type = Wire.RESULT, session = fakeId, outcome = "loss" })
+eq(returning.board:points(comebackId), won,
+   "battles won by a name-borrower do not move the real player's rating")
+eq(returning.board:points(victim2.id), 0,
    "and their opponent loses nothing to a match that was never scored")
 
--- ------- reclaim, over the wire -- the same rule server/lib/relay.js runs
---
--- Mirrors testReclaimOverTheWire in server/rank.test.js: welcome.ranked and
--- welcome.rankToken are what a client actually reads, so the twin is pinned
--- there and not only against Board:claim's return value.
-
--- Wrapped in a function purely for scope, like section 8/10 below: this
--- do-block is already close to Lua's 200-local ceiling.
-;(function()
-
-local reclaimHub = Hub.new({ maxPlayers = 8 })
-
-local delta1, delta1Peer = join(reclaimHub, "DELTA")
-local oldTicket = take(delta1Peer, Wire.WELCOME).rankToken
-check(Wire.token(oldTicket) ~= nil, "a first visit mints a claim ticket")
-reclaimHub:drop(delta1)
-
--- Back without the ticket -- a save that never carried it -- before ever
--- proving it or playing a scored battle.
-local delta2, delta2Peer = join(reclaimHub, "DELTA")
-local delta2Welcome = take(delta2Peer, Wire.WELCOME)
-eq(delta2Welcome.ranked, true,
-   "an unconfirmed, unscored name follows the player who is here now")
-local newTicket = delta2Welcome.rankToken
-check(Wire.token(newTicket) ~= nil, "a fresh ticket goes out with the reclaim")
-check(newTicket ~= oldTicket, "and it is not the one that got lost")
-reclaimHub:drop(delta2)
-
--- Prove the fresh ticket, which is the moment the claim stops moving.
-local delta3, delta3Peer = join(reclaimHub, "DELTA", nil, nil, nil, newTicket)
-eq(take(delta3Peer, Wire.WELCOME).ranked, true, "the new ticket is recognised")
-reclaimHub:drop(delta3)
-
-local delta4, delta4Peer = join(reclaimHub, "DELTA", nil, nil, nil, oldTicket)
-local delta4Welcome = take(delta4Peer, Wire.WELCOME)
-eq(delta4Welcome.ranked, false,
-   "the ticket that got lost is worthless once the claim has moved on and "
-   .. "been proved")
-eq(delta4Welcome.rankToken, nil,
-   "no ticket is handed to somebody presenting a stale one")
-reclaimHub:drop(delta4)
-
-local delta5, delta5Peer = join(reclaimHub, "DELTA", nil, nil, nil, newTicket)
-local delta5Welcome = take(delta5Peer, Wire.WELCOME)
-eq(delta5Welcome.ranked, true, "the proven ticket is the one that answers now")
-eq(delta5Welcome.rankToken, nil,
-   "and a confirmed owner is not re-sent a ticket they already hold")
-
 end)()
 
--- ------- a name somebody is standing in is not up for grabs
---
--- The impostor gate the board cannot see for itself, through the hub that
--- computes it: a second player typing a name somebody is connected and ranked
--- under does not take the claim. Reachable by accident -- two copies that
--- never changed the default trainer name -- and permanent if it went through,
--- because the first player's next settled win would confirm the taker's
--- claim. Mirrors testLiveHolderOverTheWire in server/rank.test.js.
-
-;(function()
-
-local liveHub = Hub.new({ maxPlayers = 8 })
-local claimed = {}
-liveHub.onClaim = function(what, name) claimed[#claimed + 1] = what .. ":" .. name end
-
-local holder, holderPeer = join(liveHub, "ECHO")
-eq(take(holderPeer, Wire.WELCOME).ranked, true, "the first ECHO is ranked")
-local held = liveHub:claimHash("ECHO")
-check(held ~= nil, "and holds an unproved claim on the name")
-
-local second, secondPeer = join(liveHub, "ECHO")
-local secondWelcome = take(secondPeer, Wire.WELCOME)
-eq(secondWelcome.ranked, false,
-   "a second ECHO arriving while the first is still here is not scored")
-eq(secondWelcome.rankToken, nil, "and is handed no ticket")
-eq(liveHub:claimHash("ECHO"), held, "the claim did not move")
-eq(holder.ranked, true, "and the holder is still ranked")
-eq(claimed[1], "unscored:ECHO",
-   "the host is told, which is the seam server/lib/relay.js logs on")
-liveHub:drop(second)
-
--- The lockout this branch exists to fix is the *disconnected* owner, and it
--- still works: same tokenless hello, once the holder is gone.
-liveHub:drop(holder)
-local later, laterPeer = join(liveHub, "ECHO")
-local laterWelcome = take(laterPeer, Wire.WELCOME)
-eq(laterWelcome.ranked, true,
-   "with the holder gone, an unproved, unscored claim follows whoever is here")
-check(Wire.token(laterWelcome.rankToken) ~= nil, "and a fresh ticket goes out")
-check(liveHub:claimHash("ECHO") ~= held, "the claim moved this time")
-eq(claimed[2], "taken:ECHO", "and the host is told about that too")
-liveHub:drop(later)
-
-end)()
-
--- ------- a battle is scored into the claims it started against, or not at all
---
--- A claim that moved between the first turn and the last report belongs to
--- somebody else now, and Board:record would confirm it into permanence on the
--- way past. Mirrors testClaimMovedMidMatch in server/rank.test.js.
+-- ------- settlement is keyed to the playerIds who fought
 
 ;(function()
 
@@ -2753,35 +2473,29 @@ local function battle(a, b)
   return a.sessionId
 end
 
--- The control: the same battle, nobody's claim touched, settles normally.
 local control = join(midHub, "CONTROL")
 local sparring = join(midHub, "SPARRING")
 local firstId = battle(control, sparring)
 midHub:receive(control, { type = Wire.RESULT, session = firstId, outcome = "win" })
 midHub:receive(sparring, { type = Wire.RESULT, session = firstId, outcome = "loss" })
-eq(midHub.board:points("CONTROL"), 16, "sanity: an untouched match scores")
+eq(midHub.board:points(control.id), 16, "sanity: an untouched match scores")
 
-local nova = join(midHub, "NOVA")
+local novaId = testPlayerId("NOVA")
+local nova = join(midHub, "NOVA", "PALLET", 1, 1, nil, novaId)
 local vega = join(midHub, "VEGA")
 local matchId = battle(nova, vega)
-local startedWith = midHub:claimHash("NOVA")
 
--- NOVA reports and leaves -- the paperwork outlives the session by design --
--- and with nobody connected under the name, its unproved claim is up for
--- grabs again.
 midHub:receive(nova, { type = Wire.RESULT, session = matchId, outcome = "win" })
 midHub:drop(nova)
-local taker = join(midHub, "NOVA")
-check(midHub:claimHash("NOVA") ~= startedWith, "sanity: the claim moved")
+local twinId = testPlayerId("NOVA_TWIN")
+local twin = join(midHub, "NOVA", "PALLET", 2, 1, nil, twinId)
 
 midHub:receive(vega, { type = Wire.RESULT, session = matchId, outcome = "loss" })
-eq(midHub.board:points("NOVA"), 0,
-   "the settlement is dropped: those points would have landed on a claim the "
-   .. "winner does not hold")
-eq(midHub.board:points("VEGA"), 0, "and the loser pays nothing for it")
-eq(midHub.board:get("NOVA").confirmed, false,
-   "nor is the new claim confirmed by somebody else's battle")
-eq(taker.ranked, true, "sanity: the taker is a normal player")
+eq(midHub.board:points(novaId), 16,
+   "settlement lands on the playerId who fought, even after they disconnect")
+eq(midHub.board:points(twin.id), 0,
+   "not on a bystander wearing the same display name")
+eq(midHub.board:points(vega.id), 0, "and the loser pays for the real fight")
 
 end)()
 
@@ -2856,42 +2570,39 @@ eq(take(pendingPeer, Wire.SPRITE), nil, "and nothing is broadcast about it")
 
 end)()
 
--- ------- the board learns a new face only from the name's real owner
+-- ------- the board learns a new face from the playerId's owner
 
 ;(function()
 
 local boardHub = Hub.new({ maxPlayers = 8 })
-local owner, ownerPeer = join(boardHub, "FACE", "PALLET", 1, 1)
+local ownerId = testPlayerId("FACE_OWNER")
+local owner, ownerPeer = join(boardHub, "FACE", "PALLET", 1, 1, nil, ownerId)
 take(ownerPeer, Wire.WELCOME)
-eq(owner.ranked, true, "sanity: the first FACE claims the name and is ranked")
-eq(boardHub.board:get("FACE").sprite, Config.DEFAULT_SPRITE,
-   "sanity: admit already seeded the board with the hello's sprite")
+eq(owner.ranked, true, "sanity: a first hello under a free name is ranked")
+eq(boardHub.board:get(ownerId).sprite, Config.DEFAULT_SPRITE,
+   "sanity: the board learned the hello sprite")
 
 ownerPeer.outbox = {}
 boardHub:receive(owner, { type = Wire.SPRITE, sprite = "SPRITE_BLUE" })
 check(take(ownerPeer, Wire.SPRITE) ~= nil, "sanity: the owner's own change went out")
-eq(boardHub.board:get("FACE").sprite, "SPRITE_BLUE",
+eq(boardHub.board:get(ownerId).sprite, "SPRITE_BLUE",
    "a ranked owner's change re-seeds the board's face")
 
--- a second FACE while the first is still connected and ranked is an
--- impostor, the same rule "a name somebody is standing in is not up for
--- grabs" pins above
-local impostor, impostorPeer = join(boardHub, "FACE", "PALLET", 2, 1)
-local impostorWelcome = take(impostorPeer, Wire.WELCOME)
-eq(impostorWelcome.ranked, false,
-   "sanity: a second FACE while the first is connected is not scored")
+local twinId = testPlayerId("FACE_TWIN")
+local twin, twinPeer = join(boardHub, "FACE", "PALLET", 2, 1, nil, twinId)
+local twinWelcome = take(twinPeer, Wire.WELCOME)
+eq(twinWelcome.ranked, true,
+   "sanity: a different playerId with the same display name is ranked too")
 
 boardHub:update(Config.CHAT_GATE * 2)
-ownerPeer.outbox, impostorPeer.outbox = {}, {}
-boardHub:receive(impostor, { type = Wire.SPRITE, sprite = "SPRITE_YOUNGSTER" })
-check(take(impostorPeer, Wire.SPRITE) ~= nil,
-      "sanity: an unranked client's own change still reaches the wire -- "
-      .. "everyone still sees them wearing it")
-eq(impostor.sprite, "SPRITE_YOUNGSTER",
-   "sanity: the hub still stores what the impostor is wearing, for their "
-   .. "own avatar")
-eq(boardHub.board:get("FACE").sprite, "SPRITE_BLUE",
-   "an impostor cannot repaint a ranked row's face")
+ownerPeer.outbox, twinPeer.outbox = {}, {}
+boardHub:receive(twin, { type = Wire.SPRITE, sprite = "SPRITE_YOUNGSTER" })
+check(take(twinPeer, Wire.SPRITE) ~= nil,
+      "sanity: a twin's own change still reaches the wire")
+eq(twin.sprite, "SPRITE_YOUNGSTER",
+   "sanity: the hub stores what the twin is wearing, for their own avatar")
+eq(boardHub.board:get(ownerId).sprite, "SPRITE_BLUE",
+   "a twin cannot repaint the owner's boarded face")
 
 end)()
 
@@ -2967,7 +2678,8 @@ local hostTransport = Transport.new()
 hostTransport:attach(localNet)
 check(hostTransport:isOpen(), "Transport accepts it unchanged")
 
-hostTransport:send(Wire.HELLO, { proto = Config.PROTOCOL, name = "HOST",
+hostTransport:send(Wire.HELLO, { proto = Config.PROTOCOL,
+      playerId = testPlayerId("HOST"), name = "HOST",
                                  map = "PALLET", x = 3, y = 4, facing = "down" })
 local hostMsgs = hostTransport:update(0.016)
 eq(#hostMsgs, 1, "the host hears back from its own hub")
@@ -2978,11 +2690,13 @@ check(hostMsgs[1].id ~= nil, "carrying an id")
 local guestPeer = fakePeer()
 local guestClient = hosted.hub:accept(guestPeer)
 hosted.hub:receive(guestClient, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("FRIEND"),
                                   name = "FRIEND" })
 check(take(guestPeer, Wire.WELCOME) ~= nil, "one friend fits alongside the host")
 local thirdPeer = fakePeer()
 local third = hosted.hub:accept(thirdPeer)
 hosted.hub:receive(third, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("THIRD"),
                             name = "THIRD" })
 check(take(thirdPeer, Wire.ERROR) ~= nil, "a second friend does not")
 
@@ -4156,6 +3870,21 @@ do
   eq(Ui.nameRoom(0) >= Config.NAME_MAX, true, "and an unranked zero")
   check(Ui.nameRoom(Config.RANK_MAX) < Config.NAME_MAX,
         "only a four-figure rating trims a full-length name, by one glyph")
+
+  eq(Ui.rankTag("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "#aaaa",
+     "a playerId shortens to four hex for RANK disambiguation")
+  eq(Ui.rankTag("nope"), nil, "and junk is not tagged")
+  local collide = Ui.nameCollisions({
+    { name = "ASH", id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    { name = "ASH", id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+    { name = "RED", id = "cccccccccccccccccccccccccccccccc" },
+  })
+  eq(collide.ASH == true, true, "duplicate display names are flagged")
+  eq(collide.RED, nil, "unique names are not")
+  eq(Ui.rankLabel("ASH", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", true, 16),
+     "ASH #bbbb", "colliding names carry the short id tag")
+  eq(Ui.rankLabel("ASH", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false, 16),
+     "ASH", "unique names stay plain")
 end
 
 -- ------- and the roster row, where the trade runs the other way
@@ -4370,306 +4099,15 @@ stubOptions.hub, stubSave.hub = "10.0.0.9:7788", "mybox:1"
 
 eq(Client.isHosting(), false, "a fresh client is not hosting")
 
--- ------- the claim ticket, as the client keeps it
---
--- The hub's half of this is tested above; this is the client's, and it is
--- the half that has to survive the save file. A ticket filed under the wrong
--- key, or stored half-formed, does not fail loudly -- the player simply
--- stops being ranked one day, with nothing on screen to connect it to.
-
-local TICKET_A = string.rep("c3", 16)
-local TICKET_B = string.rep("d4", 16)
-
-eq(Client.rankToken(Client, "hub.example.com:7788"), nil,
-   "a hub never played on has no ticket")
-eq(Client.setRankToken(Client, "hub.example.com:7788", TICKET_A), TICKET_A,
-   "one the hub minted is stored")
-eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
-   "and comes back for that hub")
-eq(Client.rankToken(Client, "HUB.EXAMPLE.COM:7788"), TICKET_A,
-   "however the address was capitalised -- one hub, one key")
-eq(Client.rankToken(Client, "other.example.com:7788"), nil,
-   "and never for a different one: a ticket is only worth anything to the "
-   .. "hub that minted it")
-
-eq(Client.setRankToken(Client, "other.example.com:7788", TICKET_B), TICKET_B,
-   "a player on two hubs holds two")
-eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
-   "and neither overwrites the other")
-
-eq(Client.setRankToken(Client, "hub.example.com:7788", "not a token"), nil,
-   "something that is not a ticket is refused")
-eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
-   "leaving the real one where it was")
-eq(Client.setRankToken(Client, "hub.example.com:7788", TICKET_A:sub(1, 8)), nil,
-   "and so is a truncated one, which would fail every claim from then on")
-
--- Hosting has no address to file under, and still has a name to hold.
-eq(Client.setRankToken(Client, nil, TICKET_B), TICKET_B,
-   "a hosting copy stores its own ticket")
-eq(Client.rankToken(Client, nil), TICKET_B, "under a key of its own")
-eq(Client.rankToken(Client, "hub.example.com:7788"), TICKET_A,
-   "which is not the one any dialled hub uses")
-
--- ------- the claim ticket's file store: love.filesystem, stubbed
---
--- D1 adds a file of the mod's own, in the LOVE save directory, that a save
--- reload cannot take away -- the section above is mod.save alone, which is
--- exactly what a headless suite already had. This is the other half.
---
--- Wrapped in a function purely for scope, like section 10 below: the chunk
--- above it is already close to Lua's 200-local ceiling for one function
--- body.
---
--- tests.modkit (required at the very top of this file) already installs a
--- global `love` stub with its own in-memory love.filesystem, shared by the
--- whole suite -- everything from here on assumes it is there. Each case
--- below swaps in a *private* filesystem of its own, isolated from that
--- shared one and from every other case, and always restores the ambient
--- stub afterward rather than nulling it out -- leaving `love` absent would
--- break every other section that follows (Stats.randomDVs reaches for
--- love.math.random with no guard, the way real game code does).
---
--- Client.lua's tokenStore and json() results are module-level caches loaded
--- once per chunk, so each case below asks resolver() for a fresh Client --
--- and `love` is swapped in *before* that require runs, per the same
--- instruction, though src/Client.lua's own filesystem() reads it lazily at
--- call time and would work either order.
-
-;(function()
-
-local ambientLove = _G.love
-
-local function loveFilesystem(seed)
-  local files = {}
-  if type(seed) == "table" then
-    for path, body in pairs(seed) do files[path] = body end
-  end
-  local fs = { files = files }
-  -- Called as fs.read(path) / fs.write(path, data) -- plain functions, not
-  -- methods, because that is how src/Client.lua's filesystem() calls them.
-  function fs.read(path)
-    local body = files[path]
-    if body == nil then return nil, "could not open " .. tostring(path) end
-    return body
-  end
-  function fs.write(path, data)
-    files[path] = data
-    return true
-  end
-  -- The real love.filesystem has one, and src/Client.lua uses it to tell "no
-  -- file" from "a file that would not open" -- which read() alone answers
-  -- with the same nil either way.
-  function fs.getInfo(path)
-    if files[path] == nil then return nil end
-    return { type = "file", size = #files[path] }
-  end
-  return fs
-end
-
--- The same encoder Client.lua reaches for (src.link.Json) -- a file of our
--- own here would be a second thing to keep in step with it.
-local RealJson = require("src.link.Json")
-
--- A welcome's grant is written to the file, keyed by the address dialled and
--- the upper-cased trainer name -- not mod.save's key, which is address alone.
-do
-  stubSave = {}
-  local fs = loveFilesystem()
-  _G.love = { filesystem = fs }
-  local fileClient = resolver()("Client")
-  local granted = string.rep("e5", 16)
-  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
-     granted, "the grant is stored")
-  local body = fs.files[Config.RANK_TOKEN_FILE]
-  check(type(body) == "string", "and the file was written")
-  local decoded = RealJson.decode(body)
-  eq(decoded["hub.example.com:7788|ASH"], granted,
-     "under the address and the upper-cased name, however it was typed")
-  _G.love = ambientLove
-end
-
--- A ticket the file holds survives mod.save being wiped wholesale -- the
--- shape of a CONTINUE, which replaces the whole save table (Game.lua's
--- restoreSave), not just the one key this mod happened to write.
-do
-  stubSave = {}
-  local fs = loveFilesystem()
-  _G.love = { filesystem = fs }
-  local fileClient = resolver()("Client")
-  local granted = string.rep("f6", 16)
-  fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash")
-  stubSave = {}
-  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
-     "the file still answers, though mod.save was just wiped")
-  _G.love = ambientLove
-end
-
--- A different name on the same hub has no ticket of its own -- the file
--- keys by hub *and* name, where mod.save (checked below) keys by hub alone.
-do
-  stubSave = {}
-  local fs = loveFilesystem({
-    [Config.RANK_TOKEN_FILE] = RealJson.encode({
-      ["hub.example.com:7788|ASH"] = string.rep("07", 16),
-    }),
-  })
-  _G.love = { filesystem = fs }
-  local fileClient = resolver()("Client")
-  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "gary"), nil,
-     "a different name on the same hub has no ticket of its own")
-  _G.love = ambientLove
-end
-
--- Neither does the same name on a different hub.
-do
-  stubSave = {}
-  local fs = loveFilesystem({
-    [Config.RANK_TOKEN_FILE] = RealJson.encode({
-      ["hub.example.com:7788|ASH"] = string.rep("07", 16),
-    }),
-  })
-  _G.love = { filesystem = fs }
-  local fileClient = resolver()("Client")
-  eq(fileClient.rankToken(fileClient, "other.example.com:7788", "ash"), nil,
-     "and neither does the same name on a different hub")
-  _G.love = ambientLove
-end
-
--- A file that will not decode is warned about once and treated as empty --
--- never a lockout -- and the next grant overwrites it whole, repairing it.
-do
-  stubSave = {}
-  local fs = loveFilesystem({ [Config.RANK_TOKEN_FILE] = "not json at all {" })
-  _G.love = { filesystem = fs }
-  local warns = {}
-  stubMod.log.warn = function(_, fmt, ...)
-    local ok, line = pcall(string.format, fmt, ...)
-    warns[#warns + 1] = ok and line or tostring(fmt)
-  end
-  local fileClient = resolver()("Client")
-  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), nil,
-     "a file that will not decode is treated as empty")
-  check(#warns > 0, "and the corruption is warned about")
-  check(warns[1]:find(Config.RANK_TOKEN_FILE, 1, true) ~= nil,
-     "naming the file, so a player who reads the log knows what to delete")
-
-  local granted = string.rep("18", 16)
-  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
-     granted, "the next grant still stores")
-  local decoded = RealJson.decode(fs.files[Config.RANK_TOKEN_FILE])
-  eq(decoded["hub.example.com:7788|ASH"], granted,
-     "overwriting the file whole, which repairs it")
-
-  stubMod.log.warn = function() end
-  _G.love = ambientLove
-end
-
--- A read that *fails* is not a file that is absent, and only one of the two
--- may be overwritten. Rewriting the whole table after a failed read would
--- hand back a file holding one key and throw away every other hub's ticket --
--- so nothing is written at all, and the file on disk is left exactly as it
--- was.
-do
-  stubSave = {}
-  local other = string.rep("4b", 16)
-  local seeded = RealJson.encode({ ["other.example.com:7788|GARY"] = other })
-  local fs = loveFilesystem({ [Config.RANK_TOKEN_FILE] = seeded })
-  -- The file is there -- getInfo still says so -- and will not open.
-  fs.read = function() return nil, "permission denied" end
-  _G.love = { filesystem = fs }
-  local warns = {}
-  stubMod.log.warn = function(_, fmt, ...)
-    local ok, line = pcall(string.format, fmt, ...)
-    warns[#warns + 1] = ok and line or tostring(fmt)
-  end
-  local fileClient = resolver()("Client")
-  local granted = string.rep("5c", 16)
-  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
-     granted, "the grant is still stored -- in mod.save, which never failed")
-  eq(fs.files[Config.RANK_TOKEN_FILE], seeded,
-     "and the file is untouched: the other hub's ticket is still in it")
-  check(#warns > 0, "the failure is warned about")
-  check(warns[1]:find(Config.RANK_TOKEN_FILE, 1, true) ~= nil,
-        "naming the file, so a player who reads the log knows which one")
-  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
-     "and this session still answers with the ticket it was just handed")
-
-  stubMod.log.warn = function() end
-  _G.love = ambientLove
-end
-
--- A write that fails leaves mod.save holding the newer ticket, so the older
--- one the file still has must not shadow it: a real SAVE and relaunch would
--- otherwise present the stale one and be told it is an impostor.
-do
-  stubSave = {}
-  local stale = string.rep("6d", 16)
-  local fs = loveFilesystem({
-    [Config.RANK_TOKEN_FILE] = RealJson.encode({
-      ["hub.example.com:7788|ASH"] = stale,
-    }),
-  })
-  _G.love = { filesystem = fs }
-  local fileClient = resolver()("Client")
-  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), stale,
-     "sanity: the file answers first while it is the only answer")
-
-  fs.write = function() return false, "disk full" end
-  stubMod.log.warn = function() end
-  local granted = string.rep("7e", 16)
-  eq(fileClient.setRankToken(fileClient, "hub.example.com:7788", granted, "ash"),
-     granted, "the grant is stored in mod.save even though the file refused it")
-  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), granted,
-     "and it is what answers: a key the write did not land is dropped from "
-     .. "this session rather than left in front of the newer one")
-  _G.love = ambientLove
-end
-
--- A ticket that predates the file store, living only in mod.save, is still
--- found -- back-compat with every ticket already issued before this fix.
-do
-  stubSave = {}
-  local fs = loveFilesystem()
-  _G.love = { filesystem = fs }
-  local fileClient = resolver()("Client")
-  local legacy = string.rep("29", 16)
-  stubSave["rank:hub.example.com:7788"] = legacy
-  eq(fileClient.rankToken(fileClient, "hub.example.com:7788", "ash"), legacy,
-     "a ticket that predates the file store is still found, in mod.save")
-  _G.love = ambientLove
-end
-
--- With no love global at all -- any copy running outside LOVE -- behaviour
--- is identical to before this fix: mod.save only. (The suite itself always
--- has the ambient stub, per the header above; this case removes it on
--- purpose, for the one case that needs it gone, and puts it straight back.)
-do
-  stubSave = {}
-  _G.love = nil
-  local headlessClient = resolver()("Client")
-  local token = string.rep("3a", 16)
-  eq(headlessClient.setRankToken(headlessClient, "hub.example.com:7788", token, "ash"),
-     token, "setRankToken still stores to mod.save with no love global")
-  eq(headlessClient.rankToken(headlessClient, "hub.example.com:7788", "ash"), token,
-     "and rankToken still reads it back -- exactly the old, save-only behaviour")
-  eq(stubSave["rank:hub.example.com:7788"], token,
-     "written to mod.save, and nowhere else to check")
-  _G.love = ambientLove
-end
-
-end)()
-
 -- ------------------------------------------------------------------
 -- 9b. mmo.sprite from the client: push, reconcile, and the ack
 -- ------------------------------------------------------------------
 --
--- A fresh Client (resolver()("Client"), the same idiom the rank-token-file
--- tests just above use) rather than the one every other section in this
--- file shares: this needs install() -- the only way to reach the tick that
--- reconciles spriteAcked -- and running it on the shared instance would
--- wire its hooks and exports a second time on top of whatever a later
--- section still expects to find untouched.
+-- A fresh Client (resolver()("Client")) rather than the one every other
+-- section in this file shares: this needs install() -- the only way to reach
+-- the tick that reconciles spriteAcked -- and running it on the shared
+-- instance would wire its hooks and exports a second time on top of whatever
+-- a later section still expects to find untouched.
 
 ;(function()
 
@@ -4905,6 +4343,7 @@ hostClient.transport:attach(localNet)
 local friendPeer = fakePeer()
 local friend = hosted.hub:accept(friendPeer)
 hosted.hub:receive(friend, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("FRIEND"),
                              name = "FRIEND", map = "PALLET", x = 1, y = 1,
                              facing = "down" })
 check(take(friendPeer, Wire.WELCOME) ~= nil, "and is welcomed onto it")
@@ -5043,6 +4482,7 @@ local function tradeSide(hub, name, species)
     },
   }
   hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("anon14_" .. name),
                              name = name, map = "FIX_TOWN", x = 1, y = 1 })
   return side
 end
@@ -5584,6 +5024,7 @@ local function partySide(hub, name)
   }
   side.party = Party.new(side.transport, side.ui, side.chat)
   hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("anon15_" .. name),
                              name = name, map = "FIX_TOWN", x = 1, y = 1 })
   local welcome = take(side.peer, Wire.WELCOME)
   side.party:setSelf(welcome and welcome.id)
@@ -6053,7 +5494,8 @@ local Ui = need("Ui")
 -- keeps the rows and offers both "pick by label" and "press B" as separate
 -- moves, which is the only way to tell the two apart.
 local function coopSide(hub, name, mapId)
-  local side = { name = name, said = {}, chat = Chat.new() }
+  local side = { name = name, said = {}, chat = Chat.new(),
+                 mapId = mapId or "FIX_TOWN" }
   -- A stand-in for the engine's StateStack. The co-op prompt goes on top of
   -- the trainer battle rather than replacing it, so "did BATTLE ALONE work"
   -- is the question "is the engine's battle back on top", and that needs a
@@ -6088,9 +5530,12 @@ local function coopSide(hub, name, mapId)
       side.said[#side.said + 1] = text
       side.sayDone = onDone
     end,
-    confirm = function(_, _, text, cb)
+    confirm = function(_, game, text, cb)
+      local box = { prompt = "confirm" }
       side.confirmText = text; side.confirmBox = cb
-      side.stack:push({ prompt = "confirm" })
+      side.confirmGame = game
+      side.stack:push(box)
+      return box
     end,
     choose = function(_, _, text, items)
       side.chooseText = text; side.chosen = items
@@ -6102,6 +5547,7 @@ local function coopSide(hub, name, mapId)
   side.coop = Coop.new(side.transport, side.ui, side.party, side.roster,
                        side.chat)
   hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId("anon16_" .. name),
                              name = name, map = mapId or "FIX_TOWN",
                              x = 1, y = 1 })
   local welcome = take(side.peer, Wire.WELCOME)
@@ -6121,7 +5567,9 @@ local coopDispatch = {
   [Wire.PARTY_INVITE] = function(s, m) s.party:onInvite({}, m) end,
   [Wire.PARTY] = function(s, m) s.party:onParty(m) end,
   [Wire.PARTY_END] = function(s, m) s.party:onEnd(m); s.coop:onPartyEnd() end,
-  [Wire.COOP_OFFER] = function(s, m) s.coop:onOffer(m) end,
+  [Wire.COOP_OFFER] = function(s, m)
+    s.coop:onOffer(s.game, m, s.mapId or "FIX_TOWN")
+  end,
   [Wire.COOP_OFFER_END] = function(s, m) s.coop:onOfferEnd(m) end,
   [Wire.COOP_JOINED] = function(s, m) s.coop:onJoined({}, m) end,
   [Wire.COOP_ASK] = function(s, m) s.coop:onAsk({}, m) end,
@@ -6182,6 +5630,13 @@ end
 eq(Ui.cancelRow({ { label = "WAIT" }, { label = "ALONE" } }).label, "ALONE",
    "B selects the last row of a choice")
 eq(Ui.cancelRow({}), nil, "and an empty choice has no row to select")
+
+-- UI paper strip: WAIT/ALONE (and other prompts) claim true-white over the
+-- battle message zone so Font.drawBox is not remapped to SGB pink.
+eq(type(Ui.UI_PAPER), "table", "UI paper rect is published")
+eq(Ui.UI_PAPER.colors, false, "and opts out of palette remapping")
+eq(Ui.UI_PAPER.y, 96, "covering the message / menu strip")
+eq(Ui.UI_PAPER.h, 48, "six tiles tall")
 
 -- Run whatever a ui:say was given as its continuation.
 --
@@ -6288,83 +5743,175 @@ check(offer ~= nil, "the partner is told about the fight")
 eq(offer.battle, FIGHT, "by key")
 eq(offer.name, "ANN", "and by who is standing there")
 eq(offer.label, "BUG CATCHER", "with something to call the trainer")
+check(bob.confirmBox ~= nil,
+      "and is invited immediately -- no need to walk into the same trainer")
+check(bob.confirmText:find("ANN"), "naming who is waiting")
+eq(bob.chosen, nil, "and is not asked to wait for anybody")
 
--- ------- rule 2 again: backing out of waiting reopens the choice
+-- ------- rule 2 again: from wait mode, BACK keeps the invite; B is ALONE
 
 ann.said = {}
-pressB(ann)
-eq(ann.coop:isWaiting(), false, "B on the waiting box stops waiting")
+eq(#(ann.chosen or {}), 2, "the waiting box has two rows")
+eq(ann.chosen[1].label, "BACK", "BACK first -- reopen wait/alone")
+eq(ann.chosen[2].label, "ALONE", "ALONE last -- which is what B selects")
+pick(ann, "BACK")
+eq(ann.coop:isWaiting(), true,
+   "BACK reopens the choice without ending the wait")
 check(not fightsAlone(ann), "without handing the battle back yet")
 eq(#(ann.chosen or {}), 2, "and reopens the wait/alone choice")
 eq(ann.chosen[2].label, "ALONE", "still with ALONE as the B answer")
 pump(bob)
-eq(bob.coop:pendingOffer(), nil, "the partner's offer is taken down with it")
+check(bob.coop:pendingOffer() ~= nil,
+      "the partner's invite stays up until ALONE is chosen")
+check(bob.confirmBox ~= nil, "and their yes/no is still on screen")
 
--- ...and from there the player is still cornered
+-- Going alone from wait mode while they still have the invite.
+pick(ann, "WAIT")
+bob.said = {}
 pressB(ann)
-check(fightsAlone(ann), "so the way out of waiting is still into a battle")
+check(fightsAlone(ann), "B on the waiting box fights the trainer alone")
+pump(bob)
+eq(bob.coop:pendingOffer(), nil, "the invite is taken down with ALONE")
+eq(bob.coop.joinAsk, nil, "the yes/no is cleared")
+check(said(bob, "brave") or said(bob, "1-on-1"),
+      "and they hear that the partner was brave and went 1-on-1")
 
--- ------- rule 1: a no leaves nothing behind
+-- Late yes: the confirm raced the alone path and the offer is already gone.
+engage(ann)
+pick(ann, "WAIT")
+pump(bob)
+check(bob.confirmBox ~= nil, "invite is up again")
+pressB(ann) -- ALONE from the waiting box
+check(fightsAlone(ann), "ANN went in alone before BOB answered")
+-- Offer cleared locally without pumping yet; a yes still sitting on the box
+-- must say the same brave line (and must not try to join).
+bob.said = {}
+bob.coop.offer = nil
+bob.coop.aloneAnnounced = false
+answerConfirm(bob, true)
+check(said(bob, "brave") or said(bob, "1-on-1"),
+      "a yes that arrives too late gets the same brave 1-on-1 line")
+eq(bob.coop.lastPlan, nil, "and starts no co-op handoff")
+settle(bob)
+
+-- ------- rule 1: a no ends the wait and sends the waiter in alone
 
 engage(ann)
 pick(ann, "WAIT")
 pump(bob)
 check(bob.coop:pendingOffer() ~= nil, "ANN is waiting again")
+check(bob.confirmBox ~= nil, "and BOB is invited without engaging the trainer")
 
-eq(engage(bob), true,
-   "the second player reaching the same fight is asked to join")
-check(bob.confirmText:find("ANN"), "naming who is waiting")
-eq(bob.chosen, nil, "and is not asked to wait for anybody")
-
+ann.said = {}
 answerConfirm(bob, false)
-check(fightsAlone(bob), "saying no fights that trainer alone")
+eq(bob.coop:pendingOffer(), nil, "saying no clears the invite")
+check(not fightsAlone(bob),
+      "and does not drop BOB into a fight they never walked into")
 pump(ann)
-eq(ann.coop:isWaiting(), true,
-   "but does NOT decide anything for the player who is waiting")
-check(not said(ann, "alone"), "who is not even told")
+eq(ann.coop:isWaiting(), false, "the waiter is told the invite is off")
+check(said(ann, "not to join") or said(ann, "decided"),
+      "with a sentence that the partner will not join")
+settle(ann)
+check(said(ann, "alone") or said(ann, "alone!"),
+      "and an encourage line before the solo fight")
+settle(ann)
+check(fightsAlone(ann), "then the waiter enters the trainer alone")
 
--- ...and the ask is made again, because nothing recorded the refusal
-eq(engage(bob), true,
-   "walking back into the same fight asks again")
-check(bob.confirmBox ~= nil, "with the same yes/no")
+-- Off-map partner: wait is allowed; invite auto-raises when they arrive;
+-- waiter can still leave and fight alone.
+hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
+bob.mapId = "FIX_ROUTE"
+pump(ann)
+eq(ann.coop:partnerOnMap("FIX_TOWN"), false,
+   "roster sees the partner on another map")
+engage(ann)
+check(ann.chooseText:find("arrive"),
+      "off-map partner gets the wait-to-arrive prompt")
+pick(ann, "WAIT")
+eq(ann.coop:isWaiting(), true, "WAIT is allowed while they are elsewhere")
+check(ann.chooseText:find("arrive"),
+      "and the waiting box says they are still arriving")
+pump(bob)
+check(bob.coop:pendingOffer() ~= nil, "the offer is stored for the off-map partner")
+eq(bob.confirmBox, nil, "but is not prompted until they share the map")
 
--- a different trainer is not that fight, and is not offered as one
+-- Leave wait and fight alone before they arrive.
+bob.said = {}
+pressB(ann)
+check(fightsAlone(ann), "B from wait-for-arrival still fights alone")
+pump(bob)
+check(said(bob, "brave") or said(bob, "1-on-1"),
+      "and the arriving partner is told about the 1-on-1")
+
+-- Wait again; arriving on the map raises the invite automatically.
+hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
+bob.mapId = "FIX_ROUTE"
+pump(ann)
+engage(ann)
+pick(ann, "WAIT")
+pump(bob)
+eq(bob.confirmBox, nil, "still off-map, so no confirm yet")
+bob.mapId = "FIX_TOWN"
+bob.coop:considerOffer(bob.game, bob.mapId)
+check(bob.confirmBox ~= nil, "arriving on the map raises the invite")
 answerConfirm(bob, false)
+pump(ann)
+settle(ann); settle(ann)
+
+-- A different trainer on the same map is not that fight.
+hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_TOWN", x = 1, y = 1 })
+bob.mapId = "FIX_TOWN"
+pump(ann)
 engage(bob, "OPP_LASS")
 eq(bob.confirmBox, nil, "another trainer on the same map is not the same fight")
 check(bob.chosen ~= nil, "so BOB gets the wait/alone choice for it instead")
 pick(bob, "ALONE")
+-- The solo battle is over for the harness; leave the stack clear so the next
+-- invite is not suppressed by inFight.
+while bob.stack:top() do bob.stack:pop() end
+bob.engine = nil
+bob.coop.encounter = nil
 
--- ------- yes: both sides reach the handoff
+-- ------- yes: invite-path handoff (joiner never walked into the trainer)
 
-engage(bob)
+engage(ann)
+pick(ann, "WAIT")
+pump(bob)
+check(bob.confirmBox ~= nil, "same-map invite is up for the yes path")
 answerConfirm(bob, true)
 pump(ann); pump(bob)
 
 eq(ann.coop:isWaiting(), false, "a yes ends the wait")
 check(ann.coop.lastPlan ~= nil, "and the waiting player reaches the handoff")
 check(bob.coop.lastPlan ~= nil, "as does the one who joined")
--- The bug this pins: M:onBattle used to build the joiner's plan with no
--- `engine` field at all, so M:startBattle's unwind never ran for BOB -- his
--- own trainer battle sat under the co-op screen for the whole fight and came
--- straight back the moment it popped, dropping him into the same trainer
--- again, alone. M:joinedEngine is the fix; this is its direct pin, checked by
--- identity and not merely by non-nil, so a version that handed back the
--- *wrong* battle would still fail here.
-check(bob.coop.lastPlan.engine == bob.engine,
-      "and BOB's own trainer battle rides along on his plan too")
+eq(bob.coop.lastPlan.engine, nil,
+   "the invite-path joiner carries no local trainer battle to unwind")
 eq(ann.coop.lastPlan.kind, "npc", "as a co-op fight against an NPC")
 eq(#ann.coop.lastPlan.allies, 2, "with both of them on the same side")
-
--- Both sides now put their party on the wire, which is the first step of
--- assembling a real four-slot field. Neither has an engine to build one with
--- under luajit, so both abandon with a sentence rather than half-starting --
--- and rule 2 still holds: the trainer each of them walked into is handed back.
---
--- Two releases, and that is right rather than a double count: each walked into
--- that trainer and each has a script suspended in front of it.
 settle(ann); settle(bob)
 eq(ann.coop.running, false, "neither is left marked as mid-battle")
+
+-- Joiner who also walked into the trainer still carries it for unwind
+-- (the ACTIONS / same-trainer door into the same yes/no).
+hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
+bob.mapId = "FIX_ROUTE"
+while ann.stack:top() do ann.stack:pop() end
+ann.engine = nil
+ann.coop.encounter = nil
+engage(ann)
+pick(ann, "WAIT")
+pump(bob)
+eq(bob.confirmBox, nil, "still off-map, so no auto-invite yet")
+bob.mapId = "FIX_TOWN"
+eq(engage(bob), true,
+   "walking into the same fight while an offer stands asks to join")
+check(bob.confirmText:find("ANN"), "naming who is waiting")
+answerConfirm(bob, true)
+pump(ann); pump(bob)
+check(bob.coop.lastPlan ~= nil, "joiner reaches the handoff")
+check(bob.coop.lastPlan.engine == bob.engine,
+      "and BOB's own trainer battle rides along on his plan too")
+settle(ann); settle(bob)
 
 -- ------- rule 3: nobody joins once it has started
 
@@ -8349,10 +7896,22 @@ end)()
   eq(#clean.slots, Config.COOP_FIGHTERS, "with its four slots")
   eq(clean.slots[1].name, "ANN", "and the names it carried")
 
-  -- the count, which buildField only ever checked on the sending side
-  local three = four()
-  table.remove(three.slots)
-  eq(Wire.coopField(three), nil, "a field with the wrong number of slots is refused")
+  -- Three slots is a real shape: two players against a one-monster trainer.
+  -- Two is below the co-op floor; five is above the fighter cap.
+  local threeOk = fieldOf({
+    slot(),
+    slot({ owner = "bob", name = "BOB" }),
+    slot({ side = "b", owner = nil, name = "BUG CATCHER" }),
+  })
+  local cleaned3 = Wire.coopField(threeOk)
+  check(cleaned3 ~= nil, "a 2v1 NPC field with three slots is accepted")
+  eq(#cleaned3.slots, 3, "and keeps its three slots")
+
+  local two = fieldOf({
+    slot(),
+    slot({ side = "b", owner = nil, name = "BUG CATCHER" }),
+  })
+  eq(Wire.coopField(two), nil, "fewer than three slots is refused")
   local five = four()
   five.slots[5] = slot()
   eq(Wire.coopField(five), nil, "and so is one with too many")
@@ -8892,6 +8451,7 @@ end)()
   -- ANN's client: not the one being asked, so the one that has to be told.
   local client = setmetatable({
     sim = sim, host = false, mine = 1, messages = {}, phase = "wait",
+    acted = { [1] = true },
     game = { data = data, save = { inventory = {}, party = {} } },
   }, { __index = CoopBattle })
 
@@ -8933,6 +8493,36 @@ end)()
   check(hostLine ~= nil and hostLine:find("(", 1, true) ~= nil,
         "but the host's own general wait still counts down -- its forfeit "
         .. "clock really is running")
+
+  -- ------- wall clock, not GameSpeed-scaled logic steps
+  --
+  -- FixedStep always hands dt=1/60; GameSpeed only runs more steps per real
+  -- second. With love.timer present, sixty logic steps spanning one wall
+  -- second must advance the countdown by one (not by sixty). Scripted
+  -- multi-second jumps (dt > 2/60) still use the explicit dt.
+  do
+    local savedLove = _G.love
+    local t = 1000
+    _G.love = { timer = { getTime = function() return t end } }
+    local wall = setmetatable({
+      mediated = true, phase = "wait", waitShown = 0,
+    }, { __index = CoopBattle })
+    CoopBattle.tickStalls(wall, 1 / 60)
+    eq(wall.waitShown, 0, "arming the wall sample adds no time yet")
+    -- Sixty logic steps across one wall second -- what 1X looks like, and
+    -- the per-step shape 10X still has (just more of them).
+    for _ = 1, 60 do
+      t = t + (1 / 60)
+      CoopBattle.tickStalls(wall, 1 / 60)
+    end
+    check(wall.waitShown >= 0.99 and wall.waitShown <= 1.01,
+          "one wall second advances the countdown by one across sixty steps")
+    local before = wall.waitShown
+    CoopBattle.tickStalls(wall, Config.COOP_WAIT_HINT + 1)
+    eq(wall.waitShown, before + Config.COOP_WAIT_HINT + 1,
+       "a scripted multi-second jump still uses the explicit dt")
+    _G.love = savedLove
+  end
 
   -- CAL's monster falls, and CAL is asked. Every client is told the field is
   -- paused, not only CAL's -- which is what lets ANN's name the person.
@@ -9200,8 +8790,8 @@ end)()
   -- nothing left for " +2". The name is never truncated and the number is
   -- kept -- it is the half the deadline makes true -- so the tail that goes
   -- is " +N", the least load-bearing of the three.
-  check(line:find("+2", 1, true) == nil,
-        "and drops the '+N' tail rather than the name or the number -- there "
+  check(line:find("&2", 1, true) == nil,
+        "and drops the ' &N' tail rather than the name or the number -- there "
         .. "is no room for all three at NAME_MAX")
   check(line:find("(", 1, true) ~= nil,
         "the countdown survives the same squeeze -- it is the half that "
@@ -9211,7 +8801,7 @@ end)()
           widest(line), tostring(line)))
 
   -- A short name leaves room for all three: the full name, the countdown,
-  -- and the "+N" tail that says how many others are also still deciding.
+  -- and the " &N" tail that says how many others are also still deciding.
   local shortNamed = fieldSim({
     { side = "a", owner = "ann", name = "ANN",
       party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
@@ -9230,8 +8820,8 @@ end)()
   local shortLine = CoopBattle.waitLine(shortWaiter)
   check(shortLine ~= nil and shortLine:find("BOB", 1, true) ~= nil,
         "a short name still names the first trainer")
-  check(shortLine:find("+2", 1, true) ~= nil,
-        "and this time all three fit -- the '+N' tail is not dropped when "
+  check(shortLine:find("&2", 1, true) ~= nil,
+        "and this time all three fit -- the ' &N' tail is not dropped when "
         .. "there is room for it")
   check(shortLine:find("(", 1, true) ~= nil, "alongside the countdown")
   check(widest(shortLine) <= 18,
@@ -9957,6 +9547,49 @@ end)()
      .. "with nothing on it")
 end)()
 
+-- ------- mid-replace foes stay aimable (mediated choice-window deadlock)
+--
+-- Host-sim pauses for a send-out before the next turn. Mediated asks for the
+-- replacement and everybody else's fight in the *same* choice window. With
+-- both foe seats empty, the old targetsFor returned {} and FIGHT only said
+-- "Wait for the other trainer!" -- never submitting -- while the hub still
+-- waited on that choice. Soft lock after faints.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(1, 30, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(60, 28, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(1, 20, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(60, 18, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  sim:slot(3).battler.mon.hp = 0
+  sim:slot(4).battler.mon.hp = 0
+  eq(#sim:living("b"), 0, "both foe seats look empty on the field")
+  eq(#sim:targetsFor(sim:slot(1)), 2,
+     "but each still has a living reserve, so FIGHT can name those seats")
+
+  local committed = {}
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "move",
+    moveIndex = 1, mediated = true,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    commit = function(_, action) committed[#committed + 1] = action end,
+  }, { __index = CoopBattle })
+  CoopBattle.updateMove(client,
+    { wasPressed = function(_, k) return k == "a" end })
+  eq(#committed, 1,
+     "FIGHT commits at a mid-replace seat instead of looping the wait line")
+  eq(committed[1].target, 3, "aimed at the first empty foe seat")
+  eq(client.phase, "move", "and never opened Attack who? on invisible foes")
+end)()
+
 -- ------- vertical target list: real navigation, not a coincidental clamp
 --
 -- The picker test above starts each direction already at the edge it is
@@ -9994,39 +9627,100 @@ end)()
   CoopBattle.updateTarget(client, press("down"))
   eq(client.targetIndex, 2, "and clamps at the bottom")
 
-  -- ------- foe scale, keyed off the layout, not off who is watching
-  eq(CoopBattle.FOE_SCALE, 0.85,
-     "the far pair draws fifteen percent smaller -- published for the suite "
-     .. "since there is no graphics device here to measure a drawn pixel")
-  eq(CoopBattle.scaleFor(client, 1), 1, "slots 1 and 2 draw at plain scale...")
-  eq(CoopBattle.scaleFor(client, 2), 1, "...regardless of who is watching")
-  eq(CoopBattle.scaleFor(client, 3), CoopBattle.FOE_SCALE,
-     "slots 3 and 4 draw smaller...")
-  eq(CoopBattle.scaleFor(client, 4), CoopBattle.FOE_SCALE,
-     "...because that is where SLOT_POS puts them on every client")
+  -- ------- field scale: both pairs at 1x, panels narrowed instead
+  eq(CoopBattle.FOE_SCALE, 1,
+     "foe pair stays 1x in the top-right quarter")
+  eq(CoopBattle.ALLY_SCALE, 1.5,
+     "ally back targets 1.5x; picOriginFor clamps to the strip–HUD lane")
+  eq(CoopBattle.FIELD_FLOOR, 96,
+     "ally feet sit on the message-box top")
+  eq(CoopBattle.ALLY_FOOT_INSET, 4,
+     "transparent pad under Gen1 backs is subtracted from the foot line")
+  eq(CoopBattle.FOE_PANEL_TW, 8, "foe status panel is eight tiles wide")
+  eq(CoopBattle.ALLY_PANEL_TW, 8, "ally status panel matches")
+  eq(CoopBattle.FOE_HUD_TH, 5,
+     "foe HUD is five tiles: spaced name / meta / bar, bar on the bottom lip")
+  eq(CoopBattle.ALLY_HUD_TH, 5, "ally HUD matches")
+  eq(CoopBattle.FOE_HUD_TX, 3,
+     "foe HUD is inset so the left strip keeps three tiles")
+  eq(CoopBattle.ALLY_HUD_TX, 9,
+     "ally HUD ends at x=136 so the right strip + arrow stay clear")
+  eq(CoopBattle.ALLY_HUD_TY, 7,
+     "ally HUD rests on the message-box lip (ty+th == 12)")
+  eq(CoopBattle.STRIP_W, 16, "side-strip icons are 16px wide")
+  eq(CoopBattle.SLIDE_FRAMES, 10, "focus changes slide over ten frames")
+  eq(CoopBattle.STAGE_ALLY.x, 16,
+     "ally stage floor is past the left strip")
+  eq(CoopBattle.STAGE_FOE.x, 88,
+     "foe pic sits just past the foe HUD, not under it")
+  eq(CoopBattle.SLIDE_PX, 48, "focus slides clear a full pic width")
+  eq(CoopBattle.LEVEL_COLS, 3,
+     "level row reserves three tiles left of the HP numbers")
+  -- 56px Gen1 back in the 56px strip–HUD lane (tx=9 → hudLeft 72) is 1x.
+  do
+    local stub = {
+      onStage = function() return true end,
+      foeSide = function() return false end,
+    }
+    local x, _, s = CoopBattle.picOriginFor(stub, 1,
+      { getDimensions = function() return 56, 56 end })
+    eq(s, 1,
+       "a 56px back fills the narrower strip–HUD lane at 1x")
+    eq(x, 16, "and right-aligns so its left edge clears the strip")
+  end
+  local Config = need("Config")
+  eq(Config.BATTLE_HUD_ADVANCE, 5,
+     "status names use a 5px ImageFont advance so CHARIZARD fits the name row")
+  eq(Config.BATTLE_HUD_FONT, "assets/fonts/battle_hud.png",
+     "the 5x7 sheet ships with the mod")
+  eq(Config.BATTLE_HUD_META_FONT, "assets/fonts/battle_hud_meta.png",
+     "level/HP nums use a separate 4x5 sheet (no fractional scale)")
+  eq(Config.BATTLE_HUD_META_ADVANCE, 4,
+     "meta glyphs advance four pixels")
+  eq(Config.BATTLE_HUD_META_HEIGHT, 5,
+     "meta face is five pixels tall")
+  eq(CoopBattle.hudSanitize("charizard"), "CHARIZARD",
+     "HUD labels are uppercased onto the sheet")
+  eq(CoopBattle.hudSanitize("Mr. Mime"), "MR. MIME",
+     "dots and spaces survive sanitising")
+  eq(CoopBattle.hudSanitize("100/100"), "100/100",
+     "HP cur/max keeps the slash (not a period)")
+  eq(Config.BATTLE_HUD_GLYPHS:find("/", 1, true) ~= nil, true,
+     "the HUD sheet includes a slash glyph")
+  eq(CoopBattle.fitHudName("CHARIZARD", 45, function(s) return #s * 5 end),
+     "CHARIZARD",
+     "a name that fits the pixel budget is left alone")
+  eq(CoopBattle.fitHudName("CHARIZARD", 30, function(s) return #s * 5 end),
+     "CHA...",
+     "a name that overruns truncates with an ellipsis")
+  eq(CoopBattle.CMD_BOX_TX, 0, "command box starts at the left edge")
+  eq(CoopBattle.CMD_BOX_TW, 20, "command box is full width")
+  eq(CoopBattle.CMD_COL0_X, 24, "FIGHT/ITEM sit in the left half")
+  eq(CoopBattle.CMD_COL1_X, 112, "PKMN/RUN sit in the right half")
+  eq(CoopBattle.scaleFor(client, 1), 1.5, "from seat 1, own pair targets ALLY_SCALE")
+  eq(CoopBattle.scaleFor(client, 2), 1.5, "partner too")
+  eq(CoopBattle.scaleFor(client, 3), 1,
+     "opponents stay 1x in the top-right quarter")
+  eq(CoopBattle.scaleFor(client, 4), 1,
+     "both of their slots")
 
-  -- And that holds from every seat, not just this one -- `scaleFor` used to
-  -- ask the viewer-relative `foeSide`, which shrank whichever pair the
-  -- reader was *not* in: for the two players actually sitting in slots 3 and
-  -- 4, that was their own pair drawn small in the corner with room to spare,
-  -- while the opposition stood full size where the shrink exists to
-  -- declutter. A slot-3 client must see its own pair exactly as small as
-  -- everyone else does.
+  -- Side-b seats remapped via viewPos: own pair lands on the Gen 1 player half
+  -- (full size), opposition on the far half. Index-fixed layout used to leave
+  -- seat 3 watching Venusaur moves while Charizard sat "below" them.
   local fromSlot3 = setmetatable({
     sim = sim, host = false, mine = 3, messages = {},
     game = { data = data, save = { inventory = {}, party = {} } },
   }, { __index = CoopBattle })
-  eq(CoopBattle.scaleFor(fromSlot3, 3), CoopBattle.FOE_SCALE,
-     "slot 3's own pair still draws small from slot 3's own seat")
+  eq(CoopBattle.viewPos(fromSlot3, 3), 1,
+     "from seat 3, own slot draws in visual lane 1 (bottom-left)")
+  eq(CoopBattle.viewPos(fromSlot3, 1), 3,
+     "and the opposition occupies the far lanes")
+  eq(CoopBattle.scaleFor(fromSlot3, 3), 1.5,
+     "own pair targets ALLY_SCALE from seat 3 too")
   eq(CoopBattle.scaleFor(fromSlot3, 1), 1,
-     "and slot 1's pair -- the opposition, from here -- still draws at plain "
-     .. "scale")
+     "opposition stays 1x -- panels, not foe scale, buy their room")
 
-  -- ------- foeSide: viewer-relative, and only ever a label
-  --
-  -- Unlike `scaleFor`, this one is genuinely about who is watching -- it
-  -- answers "is this the side that is not mine", which is what a label
-  -- should answer to and not what the layout is keyed off.
+  -- ------- foeSide: viewer-relative side test
   check(not CoopBattle.foeSide(client, 1), "my own slot is not a foe")
   check(not CoopBattle.foeSide(client, 2), "neither is my partner's")
   check(CoopBattle.foeSide(client, 3), "the other side is")
@@ -10034,29 +9728,157 @@ end)()
   check(CoopBattle.foeSide(fromSlot3, 1), "from CAL's seat, ANN's slot is the foe")
   check(not CoopBattle.foeSide(fromSlot3, 3), "and CAL's own is not")
 
-  -- ------- picOriginFor: one shared anchor for the pic, the cursor, the anim
+  -- ------- facingSide: bottom = back (isPlayer), top = front
+  --
+  -- Layout remaps seats; sprites must follow the *viewer*, or a side-b client
+  -- keeps absolute side-a backs on the top row and fronts on its own pair.
+  local faced = fieldSim({
+    { side = "a", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  eq(faced.facingSide, "a", "fieldSim defaults facing to absolute side a")
+  check(faced.slots[1].battler.isPlayer,
+        "default facing: side a draws as the player (back) half")
+  check(not faced.slots[3].battler.isPlayer,
+        "default facing: side b draws as the foe (front) half")
+  faced.facingSide = "b"
+  faced:sendOut(faced.slots[1], 1)
+  faced:sendOut(faced.slots[3], 1)
+  check(not faced.slots[1].battler.isPlayer,
+        "from seat 3, opposition rebuilds as front (looking down)")
+  check(faced.slots[3].battler.isPlayer,
+        "from seat 3, own pair rebuilds as back (looking up)")
+
+  -- ------- picOriginFor: center stage only -- partner is off-stage while choosing
+  client.phase = "target"
+  client.targetIndex = 1
   local fakeSprite = { getDimensions = function() return 56, 56 end }
   local rawX, rawY, rawScale = CoopBattle.picOriginFor(client, 3)
-  check(rawX ~= nil and rawScale == 1,
-        "with no sprite to measure, the offset falls back to plain scale and "
-        .. "the raw position -- the same fallback drawField has always used")
+  eq(rawX, CoopBattle.STAGE_FOE.x,
+     "the focused foe anchors on the classic front position")
+  check(rawScale == 1,
+        "with no sprite to measure, a foe origin is still 1x")
   local adjX, adjY, adjScale = CoopBattle.picOriginFor(client, 3, fakeSprite)
-  eq(adjScale, CoopBattle.FOE_SCALE, "measured, a foe slot reports the shrink")
-  check(adjX > rawX and adjY > rawY,
-        "and is pushed down and in to keep the sprite's feet and centreline "
-        .. "where a full-size one had them")
+  eq(adjScale, 1, "foe slots stay at 1x even when a sprite is measured")
+  eq(adjX, rawX, "so a measured foe pic does not get a shrink nudge")
+  eq(adjY, rawY, "same for the y")
 
-  local allyRawX, allyRawY = CoopBattle.picOriginFor(client, 1)
+  local allyRawX, allyRawY, allyRawScale = CoopBattle.picOriginFor(client, 1)
   local allyX, allyY, allyScale = CoopBattle.picOriginFor(client, 1, fakeSprite)
-  eq(allyScale, 1, "an ally slot never shrinks, sprite or not")
-  eq(allyX, allyRawX, "so its position never moves for a sprite, either")
-  eq(allyY, allyRawY, "same for the y")
+  local laneScale = 56 / 56
+  eq(allyScale, laneScale,
+     "ally slots clamp to the strip–HUD lane (not the raw 1.5 target)")
+  eq(allyRawScale, laneScale, "fallback assumes 56px and clamps the same way")
+  eq(allyX, allyRawX, "left edge stays put when the sprite is known")
+  eq(allyRawX, 16, "right-aligned back clears the left strip")
+  eq(allyY, allyRawY,
+     "feet-anchor fallback assumes 56px, matching the fixture sprite")
+  eq(allyY, CoopBattle.FIELD_FLOOR
+       - (56 - CoopBattle.ALLY_FOOT_INSET) * laneScale,
+     "ally top-left is FIELD_FLOOR minus clamped scaled height")
+
+  client.phase = "choose"
+  eq(CoopBattle.picOriginFor(client, 2), nil,
+     "partner is off the center stage while you are choosing")
+
+  local ownFrom3X = CoopBattle.picOriginFor(fromSlot3, 3)
+  local foeFrom3X = CoopBattle.picOriginFor(fromSlot3, 1)
+  check(ownFrom3X ~= nil and foeFrom3X ~= nil and ownFrom3X < foeFrom3X,
+        "from seat 3, own pic is on the left/bottom half and the foe on the right")
 
   eq(CoopBattle.picOriginFor(client, 99), nil,
      "a slot with no position answers nil")
 
-  -- ------- paint order: the hovered target comes forward while picking
+  -- ------- stripSeats and focus helpers
+  client.phase = "target"
+  local stripAlly = CoopBattle.stripSeats(client, false)
+  local stripFoe = CoopBattle.stripSeats(client, true)
+  eq(#stripAlly, 2, "2v2 shows two living ally strip icons")
+  eq(#stripFoe, 2, "2v2 shows two living foe strip icons")
+
+  local uneven = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "BUG",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local unevenClient = setmetatable({
+    sim = uneven, host = false, mine = 1, messages = {},
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  eq(#CoopBattle.stripSeats(unevenClient, false), 2,
+     "party vs NPC still shows both ally strip icons")
+  eq(#CoopBattle.stripSeats(unevenClient, true), 1,
+     "party vs NPC shows one foe strip icon when only one is out")
+
+  -- Eliminated seat (fainted, empty bench) drops off the strip once the fall
+  -- is done; a seat that still has a reserve stays on the strip.
+  do
+    local wiped = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(1, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+    wiped:slot(2).battler.mon.hp = 0
+    wiped:slot(2).battler.fainted = true
+    local c = setmetatable({
+      sim = wiped, host = false, mine = 1, messages = {},
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+    check(wiped:isDown(wiped:slot(2)), "BOB's seat is down")
+    check(not wiped:hasReserve(wiped:slot(2)), "and has no reserve to send")
+    eq(#CoopBattle.stripSeats(c, false), 1,
+       "ally strip drops the wiped seat when no replacement remains")
+    eq(CoopBattle.stripSeats(c, false)[1], 1,
+       "the living ally seat is the one that remains")
+    eq(#CoopBattle.stripSeats(c, true), 2,
+       "foe strip is unchanged")
+  end
+
+  client.phase = "choose"
+  client.acting = 2
+  eq(CoopBattle.desiredAllyFocus(client), client.mine,
+     "choose phase keeps your mon in the ally spotlight even after a partner acted")
+  client.phase = "target"
+  client.targetIndex = 2
+  eq(CoopBattle.desiredFoeFocus(client), 4,
+     "target phase follows the hovered foe in the strip")
+
+  -- ------- animOffset: FX track the drawn pic, not a fixed classic tile
+  client.phase = "target"
+  client.targetIndex = 1
+  local allyOriginX = CoopBattle.picOriginFor(client, 1,
+    client.sim:slot(1).battler and client.sim:slot(1).battler.sprite)
+  local allyDx, allyDy = CoopBattle.animOffset(client, { from = 1 })
+  eq(allyDx, (allyOriginX or CoopBattle.STAGE_ALLY.x) - CoopBattle.STAGE_ALLY.x,
+     "ally attack FX track the drawn back (right-aligned in the strip–HUD lane)")
+  eq(allyDy, 0,
+     "ally attack FX keep classic Y -- a Y shift buried them under the "
+     .. "message box")
+  local partnerDx, partnerDy = CoopBattle.animOffset(client, { from = 2 })
+  eq(partnerDx, 0, "off-stage partner attacks do not shift the flash")
+  eq(partnerDy, 0, "partner attacks keep classic Y for the same reason")
+  local foeDx, foeDy = CoopBattle.animOffset(client, { from = 3 })
+  eq(foeDx, 0, "foe attack FX sit on the classic front anchor")
+  eq(foeDy, 0, "foe Y matches the classic front anchor too")
+
+  -- ------- paint order: only on-stage slots; focus paints last
+  client.targetIndex = 2
   local order = CoopBattle.paintOrder(client)
+  eq(#order, 2, "center stage draws one ally and one foe at a time")
   eq(order[#order], 4,
      "with the cursor on DEE (targetIndex 2), DEE paints last -- in front of "
      .. "everything else on the field")
@@ -10078,22 +9900,55 @@ end)()
      "and whoever is being narrated takes it once a turn is playing out")
 end)()
 
--- ------- the command box, against the engine's own 2x2 truth table
+-- ------- trainer entrance: only while the foe quarter is empty
 --
--- Finding 4, first half. FIGHT/ITEM top row, SWITCH/RUN bottom row --
--- BattleState.lua:1544-1557's own col/row decomposition and clamp, index
--- row-major, transferred directly rather than approximated. All sixteen
--- combinations, because a grid that is right on the ones anybody tries by
--- hand and wrong on the rest is how this shipped broken the first time.
+-- Co-op NPC fights seat both foe mons before "2 on 2 battle!", so the old
+-- turnCount==0 + messages rule kept the Bug Catcher up on top of WEEDLE.
 
 ;(function()
   local CoopBattle = need("CoopBattle")
-  local NAMES = { "FIGHT", "ITEM", "SWITCH", "RUN" }
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "BUG",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "BUG",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {},
+    trainerPic = { fake = true }, turnCount = 0, phase = "messages",
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  check(not CoopBattle.showingTrainer(client),
+        "opening line with foe mons already out does not keep the trainer pic")
+  sim.slots[3].battler, sim.slots[4].battler = nil, nil
+  check(CoopBattle.showingTrainer(client),
+        "trainer pic shows while the foe quarter is still empty")
+  client.phase = "choose"
+  check(not CoopBattle.showingTrainer(client),
+        "and never once the command menu is up")
+end)()
+
+-- ------- the command box, as a classic 2x2 grid
+--
+-- FIGHT SWITCH / ITEM RUN. Each arrow moves on its own axis and clamps at
+-- the edge (same rule as BattleState's DisplayBattleMenu).
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local NAMES = { "FIGHT", "SWITCH", "ITEM", "RUN" }
+  eq(CoopBattle.COMMANDS[1], "FIGHT", "command grid starts on FIGHT")
+  eq(CoopBattle.COMMANDS[2], "SWITCH", "top-right is SWITCH (classic PKMN slot)")
+  eq(CoopBattle.COMMANDS[3], "ITEM", "bottom-left is ITEM")
+  eq(CoopBattle.COMMANDS[4], "RUN", "bottom-right is RUN")
   local truth = {
-    { 1, "left", 1 }, { 1, "right", 2 }, { 1, "up", 1 }, { 1, "down", 3 },
-    { 2, "left", 1 }, { 2, "right", 2 }, { 2, "up", 2 }, { 2, "down", 4 },
-    { 3, "left", 3 }, { 3, "right", 4 }, { 3, "up", 1 }, { 3, "down", 3 },
-    { 4, "left", 3 }, { 4, "right", 4 }, { 4, "up", 2 }, { 4, "down", 4 },
+    { 1, "up", 1 }, { 1, "down", 3 }, { 1, "left", 1 }, { 1, "right", 2 },
+    { 2, "up", 2 }, { 2, "down", 4 }, { 2, "left", 1 }, { 2, "right", 2 },
+    { 3, "up", 1 }, { 3, "down", 3 }, { 3, "left", 3 }, { 3, "right", 4 },
+    { 4, "up", 2 }, { 4, "down", 4 }, { 4, "left", 3 }, { 4, "right", 4 },
   }
   for _, row in ipairs(truth) do
     local from, direction, expect = row[1], row[2], row[3]
@@ -10106,13 +9961,52 @@ end)()
   end
 end)()
 
--- ------- the move grid, and the hold rule a short list needs
+-- ------- box text fits the eighteen-column bottom box
+;(function()
+  local CoopBattle = need("CoopBattle")
+  eq(CoopBattle.BOX_COLS, 18, "bottom box inner width is published")
+  local pages = CoopBattle.pageBoxText(
+    "PIKACHU used a very long move name that would paint past the border")
+  check(#pages >= 2, "a long single line is split across pages")
+  for _, page in ipairs(pages) do
+    for line in page:gmatch("[^\n]+") do
+      check(#line <= 18, ("every page line fits (%d): %q"):format(#line, line))
+    end
+  end
+  local short = CoopBattle.pageBoxText("PIKACHU used\nSWIFT")
+  eq(#short, 1, "an already-fitting two-line page stays one page")
+
+  -- Vertical lists must stay inside the 6-tile message box (tiles 12..17,
+  -- bottom border at y=136). 10px rows from 108 put a fourth line at 138.
+  eq(CoopBattle.LIST_LINE, 8, "list rows follow the 8px tile grid")
+  eq(CoopBattle.LIST_TOP, 104, "untitled lists start on the first inner row")
+  eq(CoopBattle.LIST_TOP + 3 * CoopBattle.LIST_LINE + 8, 136,
+     "a fourth command/move row ends on the bottom border, not past it")
+  eq(CoopBattle.MOVE_NAME_Y(4), 128,
+     "classic move menu: fourth name at y=128, clear of the border")
+  eq(CoopBattle.MOVE_NAME_MAX_W, 80,
+     "move names keep ten tiles before the TYPE pane")
+  eq(CoopBattle.MOVE_NAME_X + CoopBattle.MOVE_NAME_MAX_W, 96,
+     "a full-width name ends on the shared border, not in TYPE/")
+  eq(CoopBattle.MOVE_PP_Y, 128,
+     "PP sits on the last inner row, not on the bottom border")
+  eq(CoopBattle.MOVE_PP_Y + 8, 136,
+     "PP glyphs end on the bottom border, not past it")
+  eq(CoopBattle.nameBudget(8, false, false), 6,
+     "eight-tile panel: name keeps the full inner width (borders only)")
+  eq(CoopBattle.nameBudget(8, true, false), 6,
+     "own mon no longer reserves a cursor column on the name row")
+  eq(CoopBattle.nameBudget(8, false, true), 6,
+     "status lives on the HP row, not the name budget")
+  eq(CoopBattle.CMD_BOX_TX, 0, "command box starts at the left edge")
+  eq(CoopBattle.CMD_BOX_TW, 20, "command box is full width")
+end)()
+
+-- ------- the move list: one column, clamp at both ends
 --
--- Finding 4, second half. Drawn 2x2 like the command box, so it takes the
--- same rule -- except a move list can be shorter than four, and a direction
--- pointing at a slot nothing occupies has to hold rather than land on a row
--- that is not drawn (WideBattle.lua:351-377's own rule for the same shape
--- of grid).
+-- Drawn vertically (full-width names) like classic Gen 1, not the old 2x2
+-- grid that clipped longer move names. UP/DOWN step; LEFT/RIGHT are aliases;
+-- past either end holds.
 
 ;(function()
   local CoopBattle = need("CoopBattle")
@@ -10138,16 +10032,23 @@ end)()
 
   eq(#CoopBattle.liveMoves(client), 3, "three moves on the list")
   CoopBattle.updateMove(client, press("down"))
-  eq(client.moveIndex, 2,
-     "DOWN from the second move would be a fourth slot nothing draws -- it holds")
-
-  client.moveIndex = 1
-  CoopBattle.updateMove(client, press("down"))
-  eq(client.moveIndex, 3, "DOWN from the first lands on the third -- that slot exists")
+  eq(client.moveIndex, 3, "DOWN from the second lands on the third")
 
   client.moveIndex = 3
+  CoopBattle.updateMove(client, press("down"))
+  eq(client.moveIndex, 3, "DOWN on the last move holds")
+
+  client.moveIndex = 1
+  CoopBattle.updateMove(client, press("up"))
+  eq(client.moveIndex, 1, "UP on the first holds")
+
+  client.moveIndex = 1
   CoopBattle.updateMove(client, press("right"))
-  eq(client.moveIndex, 3, "RIGHT from the third would be a fourth slot too -- it holds as well")
+  eq(client.moveIndex, 2, "RIGHT aliases DOWN on the column")
+
+  client.moveIndex = 2
+  CoopBattle.updateMove(client, press("left"))
+  eq(client.moveIndex, 1, "LEFT aliases UP")
 
   -- With one move, every arrow holds -- there is nowhere else to go.
   local lone = fieldSim({
@@ -12101,16 +12002,17 @@ check((struggler.hp or 0) < (struggler.stats.hp or 0),
   eq(sent[1].slot, 1, "for this player's own slot")
   eq(sent[1].index, 2, "naming the monster they picked")
 
-  -- With two on the bench the cursor moves, and wraps.
+  -- With two on the bench the cursor moves, and clamps (same as moves/target).
   picker:slot(1).party[3].hp = 60
   client.replacing, client.switchIndex, sent = true, 1, {}
   eq(#CoopBattle.benchOf(client, picker:slot(1)), 2, "two reserves, two rows")
   CoopBattle.updateReplace(client, press("down"))
   eq(client.switchIndex, 2, "down moves the cursor")
   CoopBattle.updateReplace(client, press("down"))
-  eq(client.switchIndex, 1, "and wraps at the end of a short list")
+  eq(client.switchIndex, 2, "and clamps at the end of a short list")
   CoopBattle.updateReplace(client, press("up"))
-  eq(client.switchIndex, 2, "as does up, the other way")
+  eq(client.switchIndex, 1, "up moves back")
+  CoopBattle.updateReplace(client, press("down"))
   CoopBattle.updateReplace(client, press("a"))
   eq(sent[1] and sent[1].index, 3, "and A files whichever row it landed on")
 
@@ -12425,7 +12327,34 @@ if trainerId then
   check(built ~= nil, "an NPC co-op field assembles")
   if built then
     eq(built.trainer, trainerId, "and names the trainer it was built against")
-    eq(#built.slots, 4, "with four slots on it")
+    local expected = (#enemy >= 2) and 4 or 3
+    eq(#built.slots, expected,
+       "with a foe seat per dealt half (one for a lone mon, two otherwise)")
+  end
+
+  -- A one-monster trainer used to die at buildField ("needs four trainers")
+  -- because npcSide only emitted one seat and the assembler demanded four.
+  -- The hub already drops empty NPC seats; the client field must match.
+  do
+    local loneEnemy = { enemy[1] }
+    local loneBattle = {
+      parties = {
+        ["ann"] = CoopBattle.packParty(enemy),
+        ["bob"] = CoopBattle.packParty(enemy),
+      },
+      plan = {
+        hostId = "ann", label = "TRAINER",
+        allies = { { id = "ann", name = "ANN" }, { id = "bob", name = "BOB" } },
+        engine = { enemyParty = loneEnemy, trainer = { id = trainerId } },
+      },
+    }
+    local lone = assembler:buildField({ data = data }, loneBattle,
+      loneBattle.plan.allies)
+    check(lone ~= nil, "a one-monster trainer still assembles a co-op field")
+    eq(#(lone and lone.slots or {}), 3,
+       "as three seats: two players and one NPC")
+    local wired = Wire.coopField(lone)
+    check(wired ~= nil, "and that three-seat field survives the wire sanitiser")
   end
 
   -- ...and the joiner reads it back. This is the client the whole id exists
