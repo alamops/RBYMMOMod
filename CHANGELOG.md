@@ -8,6 +8,17 @@ here must match `manifest.version`.
 
 ### Added
 
+- **PROTOCOL 19 — co-op invite joiner trainer finish.** `Config.PROTOCOL` /
+  `relay.js` bump **18 → 19**. Optional `npcId` / `event` on `mmo.coop_wait`
+  → offer → battle carry the waiter's overworld trainer so a menu/invite
+  joiner (no buried `BattleState`) can mark that NPC beaten, take prize
+  money, and run `afterBattle` after a co-op win — without a solo rematch.
+- **Co-op / mediated attack SFX.** CoopBattle and MediatedBattle poll
+  `AnimPlayer` effects like solo `BattleState` (move whoosh / cry /
+  `SFX_TINK`) and play effectiveness hit thuds after the flash.
+- **Trainer foe theatrical intro on co-op NPC battles.** Appear line,
+  trainer face, foe ball row, and sequential foe send-outs before ally
+  `Go!` (wild / PvP unchanged).
 - **PROTOCOL 18 — Party vs Wild (`coop_wild`).** `Config.PROTOCOL` / `relay.js`
   bump **17 → 18**. New mediated mode: two partied humans vs one wild NPC
   seat. When partners share a map, a grass encounter auto-opens the fight
@@ -49,7 +60,17 @@ here must match `manifest.version`.
 - **Plan docs indexed.** `docs/plans/README.md` marks living vs historical;
   stale plans carry a historical banner (old PROTOCOL citations are archive).
 
-## [1.0.0] - 2026-08-09
+### Fixed
+
+- **Co-op win music before HP drains.** Victory fanfare is queued as a message
+  `act` after that batch's drains and faint sinks, so a multi-attacker final
+  KO no longer plays the jingle while Gust still animates a living bar.
+- **Heal-shaped HP revive illusion.** Drains that would climb `shownHP` after
+  a faint is queued / display-fainted are skipped; strip icons follow display
+  faint rather than premature sim `isDown`.
+- **Joiner immediate rematch after co-op NPC win.** Walk-in harden via
+  `claimBuriedEngine`; invite joiners finish via PROTOCOL 19 synthetic
+  defeat (see Added).
 
 First stable release line. Hub-mediated battles (0.11.x) are the supported
 path for MMO 1v1 / co-op; BattleSim locked decisions and the UX/fidelity

@@ -1804,11 +1804,14 @@ local function hitSfxFromText(text)
 end
 
 function M:peekHitSfx()
+  -- Mirror CoopBattle / solo: thud only when a following effectiveness line,
+  -- faint line, or real HP-drain cue exists. Status flashes (GROWL etc.) and
+  -- bare move-id anims stay silent — no default Damage fallthrough.
   local sawDamage = false
   for _, row in ipairs(self.lines or {}) do
     if type(row) == "table" then
       if row.anim then break end
-      if row.clearPic ~= nil then sawDamage = true end
+      if row.drain or row.faintfx then sawDamage = true end
     elseif type(row) == "string" then
       local sfx = hitSfxFromText(row)
       if sfx then return sfx end
@@ -1816,17 +1819,7 @@ function M:peekHitSfx()
       if lower:find("fainted", 1, true) then sawDamage = true end
     end
   end
-  -- Damaging anim with no effectiveness line → neutral Damage thud. Ball /
-  -- status flashes leave sawDamage false and stay silent on completion.
   if sawDamage then return { sound = "Damage", pitch = 0x20 } end
-  -- Also: a following HP change is not in `lines`, but the used-move line is.
-  -- Default Damage for ordinary move-id anims (not ball/HIDEPIC chain).
-  local anim = self.anim and self.anim.anim
-  if type(anim) == "string" and not anim:find("_ANIM", 1, true)
-     and anim ~= "POOF_ANIM" and anim ~= "SHAKE_ANIM"
-     and anim ~= "TOSS_ANIM" and anim ~= "BLOCKBALL_ANIM" then
-    return { sound = "Damage", pitch = 0x20 }
-  end
   return nil
 end
 

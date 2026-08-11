@@ -709,8 +709,10 @@ end
 -- Trainer theatrical intro: appear uses trainer face + foe ball row; foes are
 -- hidden until their send-out (mirrors BattleState EnemySendOutFirstMon without
 -- introSlide / trainer-back walk-off). Wild and party-vs-party never arm this.
+-- Invite joiners often have a trainer record but nil trainerPic -- do not hide
+-- foes behind an empty face; keep the old visible-foes / "2 on 2" open.
 function M:usesTrainerIntro()
-  if not self.trainer then return false end
+  if not self.trainer or not self.trainerPic then return false end
   if self.mode == "coop_wild" or self.mode == "coop_pvp" then return false end
   return true
 end

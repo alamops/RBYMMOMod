@@ -1435,7 +1435,7 @@ function M:claimBuriedEngine(game, plan)
       return encounter.engine
     end
   end
-  local npcId = plan.npcId
+  local npcId = Wire.npcId(plan.npcId)
   if not npcId then return nil end
   local states = game and game.stack and game.stack.states
   if type(states) ~= "table" then return nil end
@@ -1443,7 +1443,8 @@ function M:claimBuriedEngine(game, plan)
     local state = states[i]
     if state and state.kind == "trainer" then
       local origin = state.checkpointOrigin
-      if type(origin) == "table" and origin.npcId == npcId then
+      if type(origin) == "table"
+          and Wire.npcId(origin.npcId) == npcId then
         return state
       end
     end
@@ -1971,11 +1972,39 @@ end
 --
 -- Gated by the caller on engineBattle / consume having already run: calling
 -- this when a buried engine exists would double-pay and double-onFinish.
+--
+-- Client bind: npcId must resolve in this client's npcPool, and when the
+-- co-op fight names a trainer class (field / engine / screen), that class
+-- must match the NPC. Hub cannot verify map data; without the bind a forged
+-- wire npcId could mark a random object beaten.
 function M:syntheticFinish(game, plan, coopState)
-  local npcId = plan and plan.npcId
+  local npcId = Wire.npcId(plan and plan.npcId)
   if not npcId then return false end
   local save = game and game.save
   if not save then return false end
+
+  local ow = M.overworldOf(game)
+  local npc = ow and ow.npcPool and ow.npcPool[npcId]
+  if not npc then
+    mod.log:warn("co-op win could not finish trainer %s -- that id is not on "
+      .. "this map's npcPool; stand near the fight or rejoin from the overworld "
+      .. "so the defeat flag is not written against a stranger",
+      tostring(npcId))
+    return false
+  end
+
+  local expected = Wire.id(coopState and coopState.trainer and coopState.trainer.id)
+    or Wire.id(plan.engine and plan.engine.trainer and plan.engine.trainer.id)
+  if expected then
+    local class = npc.def and npc.def.trainerClass
+    if Wire.id(class) ~= expected then
+      mod.log:warn("co-op win skipped synthetic finish for %s -- npc class %s "
+        .. "does not match the fight's trainer %s; reload near the trainer if "
+        .. "the defeat flag looks wrong",
+        tostring(npcId), tostring(class), tostring(expected))
+      return false
+    end
+  end
 
   save.defeatedTrainers = save.defeatedTrainers or {}
   save.defeatedTrainers[npcId] = true
@@ -1984,9 +2013,7 @@ function M:syntheticFinish(game, plan, coopState)
   if not event then
     -- Local header as a fallback when an older hub stripped the field: still
     -- keyed by the concrete npcId, never by class.
-    local ow = M.overworldOf(game)
-    local npc = ow and ow.npcPool and ow.npcPool[npcId]
-    local index = npc and npc.def and npc.def.index
+    local index = npc.def and npc.def.index
     local label = ow and ow.map and ow.map.def and ow.map.def.label
     local header = (index and label and game.data
       and type(game.data.trainerHeader) == "function")
@@ -2004,7 +2031,6 @@ function M:syntheticFinish(game, plan, coopState)
     save.money = math.min(999999, (tonumber(save.money) or 0) + prize)
   end
 
-  local ow = M.overworldOf(game)
   if ow then
     if class and type(ow.checkVictoryRewards) == "function" then
       local ok, err = pcall(ow.checkVictoryRewards, ow, class, partyIndex)
@@ -2030,8 +2056,7 @@ function M:syntheticFinish(game, plan, coopState)
       end
     end
     ow.engaging = false
-    local npc = ow.npcPool and ow.npcPool[npcId]
-    if npc then npc.frozen = false end
+    npc.frozen = false
   else
     mod.log:warn("no overworld to finish the co-op trainer against; the "
       .. "defeat flag and prize were still written -- reload if the world "

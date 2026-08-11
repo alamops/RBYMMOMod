@@ -7903,6 +7903,114 @@ if ann.sayDone then ann.sayDone() end
 check(fightsAlone(ann),
       "and hands the trainer back rather than leaving ANN standing there")
 
+-- ------- TT3 — joiner rematch / synthetic finish (fix-battle-system-v2)
+--
+-- Walk-in: joinedEngine + claimBuriedEngine only adopt a live stack battle;
+-- consume hands the buried engine its result. Invite: syntheticFinish from
+-- plan.npcId pays once; never when consume already ran.
+
+;(function()
+  local function bareStack(states)
+    return {
+      states = states,
+      top = function(self) return self.states[#self.states] end,
+      pop = function(self) return table.remove(self.states) end,
+      push = function(self, st) self.states[#self.states + 1] = st end,
+    }
+  end
+
+  local buried = {
+    kind = "trainer",
+    checkpointOrigin = { npcId = "route3_bug_a", event = "E_ROUTE3_BUG_A" },
+    trainer = { baseMoney = 10 },
+    enemyParty = { { level = 12 } },
+    onFinish = function() end,
+  }
+  local game = { stack = bareStack({ {}, buried }), save = { money = 0 } }
+  local coop = setmetatable({ encounter = {
+    battle = FIGHT, engine = buried, game = game,
+  } }, { __index = Coop })
+
+  eq(coop:joinedEngine(game, { battle = FIGHT }, nil), buried,
+     "a walk-in join adopts the buried engine when the battle key matches")
+  eq(coop:claimBuriedEngine(game, { battle = FIGHT, kind = "npc" }), buried,
+     "startBattle can still claim that engine from the encounter slot")
+  check(coop:onStack(game, buried), "the buried trainer fight is still on stack")
+
+  local finished
+  buried.onFinish = function(r) finished = r end
+  coop.encounter = { engine = buried, game = game }
+  local handled = coop:consume("win", false)
+  eq(handled, true, "consume finishes the buried engine battle")
+  eq(finished, "win", "and hands it a win result for the post-battle flow")
+  eq(coop.encounter, nil, "the encounter slot is spent afterwards")
+
+  -- Invite / menu joiner with no engine battle: syntheticFinish from npcId.
+  local tt3Data = {
+    trainers = {
+      OPP_BUG_CATCHER = {
+        baseMoney = 10,
+        parties = { { { level = 12 }, { level = 8 } } },
+      },
+    },
+  }
+  local afterBattleSeen, rewardsSeen = false, false
+  local ow = {
+    engaging = true,
+    map = { def = { label = "FIX_TOWN" } },
+    npcPool = {
+      route3_bug_a = {
+        frozen = true,
+        def = { trainerClass = "OPP_BUG_CATCHER", trainerParty = 1, index = 1 },
+      },
+    },
+    checkVictoryRewards = function() rewardsSeen = true end,
+    afterBattle = function(_, result) afterBattleSeen = result end,
+  }
+  game = {
+    save = { money = 100, defeatedTrainers = {}, flags = {} },
+    data = tt3Data,
+    stack = bareStack({ ow }),
+  }
+  local invite = setmetatable({}, { __index = Coop })
+  local savedWorld = stubMod.world
+  stubMod.world = { overworld = function() return ow end }
+  local okSynth = invite:syntheticFinish(game, {
+    npcId = "route3_bug_a",
+    event = "E_ROUTE3_BUG_A",
+  }, { leveledUp = nil })
+  stubMod.world = savedWorld
+  check(okSynth, "syntheticFinish runs for an invite joiner with plan.npcId")
+  eq(game.save.defeatedTrainers.route3_bug_a, true,
+     "and marks the concrete npc beaten")
+  eq(game.save.flags.E_ROUTE3_BUG_A, true, "and sets the event flag")
+  eq(game.save.money, 220,
+     "prize is baseMoney * best level (10 * 12), same formula as consume")
+  check(afterBattleSeen == "win", "afterBattle runs like a solo win")
+  check(rewardsSeen, "victory rewards run too")
+  eq(ow.engaging, false, "and the overworld is no longer mid-engage")
+  eq(ow.npcPool.route3_bug_a.frozen, false, "the npc is unfrozen")
+
+  -- Walk-in path already consumed: syntheticFinish must not double-pay.
+  finished = nil
+  local walkIn = setmetatable({
+    running = false,
+    engineBattle = buried,
+    battle = { plan = { npcId = "route3_bug_a", event = "E_ROUTE3_BUG_A" } },
+    transport = { send = function() end },
+    ui = { say = function() end },
+  }, { __index = Coop })
+  buried.onFinish = function(r) finished = r end
+  game.save.money = 100
+  game.save.defeatedTrainers = {}
+  walkIn:onBattleOver("win", game, nil, {})
+  eq(finished, "win", "walk-in onBattleOver still consumes the buried engine")
+  eq(game.save.money, 220,
+     "prize is paid once through consume, not again through syntheticFinish")
+  eq(game.save.defeatedTrainers.route3_bug_a, nil,
+     "syntheticFinish did not run on top of consume")
+end)()
+
 end)()
 
 -- ------- the host port is overridable, and the default address follows it
@@ -11432,6 +11540,66 @@ end)()
     check(countAnim(anims, "POOF_ANIM") >= 1,
           "at least one POOF_ANIM started during coop_npc intro")
   end
+
+  -- ------- TT4 — theatrical trainer chrome (fix-battle-system-v2)
+  --
+  -- Trainer coop_npc: wants-to-fight appear, foe ball row, trainer face through
+  -- the appear line, foes in introHide until send-out, all cleared before Go!.
+  do
+    local function advanceUntil(client, pred, cap)
+      cap = cap or 400
+      for _ = 1, cap do
+        CoopBattle.update(client, 1 / 60)
+        if pred(client) then return true end
+      end
+      return false
+    end
+
+    local client = introClient({
+      sim = npcField(),
+      mode = "coop_npc",
+      trainer = { id = "OPP_BUG_CATCHER", name = "BUG CATCHER" },
+      trainerPic = { w = 7, h = 7 },
+    })
+    CoopBattle.enter(client)
+    check(client:usesTrainerIntro(),
+          "coop_npc with a trainer record uses the theatrical intro path")
+    check(client.showEnemyTrainer == true,
+          "the trainer face is armed through the appear line")
+    check(client.introBalls == true, "foe ball-row chrome is armed too")
+    for _, idx in ipairs({ 3, 4 }) do
+      check(client.introHide and client.introHide[idx],
+            "foe slot " .. idx .. " stays hidden until its send-out")
+    end
+    check(advanceUntil(client, function(c)
+      return c.shown and tostring(c.shown):find("wants", 1, true)
+    end), "the wants-to-fight appear line is shown")
+    check(client.showEnemyTrainer == true,
+          "the trainer face stays up while the appear line is on screen")
+    check(advanceUntil(client, function(c)
+      return c.shown and tostring(c.shown):find("Go!", 1, true)
+    end), "Go! follows the theatrical appear/send-out sequence")
+    check(client.showEnemyTrainer == nil,
+          "the trainer face is cleared before Go! -- not stuck over the mons")
+    check(not (client.introHide and client.introHide[3]),
+          "the first foe is out of introHide before ally Go!")
+  end
+
+  do
+    local wild = introClient({ sim = wildField(), mode = "coop_wild" })
+    CoopBattle.enter(wild)
+    check(wild.showEnemyTrainer == nil,
+          "coop_wild never arms a trainer face")
+    check(not wild:usesTrainerIntro(), "wild skips theatrical intro")
+  end
+
+  do
+    local pvp = introClient({ sim = npcField(), mode = "coop_pvp" })
+    CoopBattle.enter(pvp)
+    check(pvp.showEnemyTrainer == nil,
+          "party-vs-party never arms a trainer face")
+    check(not pvp:usesTrainerIntro(), "pvp skips theatrical intro")
+  end
 end)()
 
 -- ------- what a co-op battle is worth, and what it is not
@@ -13764,6 +13932,206 @@ if eng and eng.Experience then
 else
   check(true, "(engine battle modules unavailable here)")
 end
+
+-- ------- TT1 — battle SFX via AnimPlayer pollEffects (fix-battle-system-v2)
+--
+-- CoopBattle and MediatedBattle mirror BattleState: update → pollEffects →
+-- Sound.playMove / play / cry; catch shake emits SFX_TINK; missing Sound is
+-- a no-op.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+
+  local function patchSound()
+    local calls = { playMove = 0, play = 0, playMoveCry = 0, names = {} }
+    local eng = CoopBattle.loadEngine()
+    local restore
+    if eng then
+      local orig = eng.Sound
+      eng.Sound = {
+        playMove = function() calls.playMove = calls.playMove + 1 end,
+        play = function(_, name)
+          calls.play = calls.play + 1
+          calls.names[#calls.names + 1] = name
+        end,
+        playMoveCry = function() calls.playMoveCry = calls.playMoveCry + 1 end,
+      }
+      restore = function() eng.Sound = orig end
+    else
+      restore = function() end
+    end
+    return calls, restore
+  end
+
+  local function tickingAnimPlayer(effects)
+    local polled = false
+    return {
+      start = function() polled = false end,
+      update = function() end,
+      isDone = function() return polled end,
+      pollEffects = function()
+        if polled then return {} end
+        polled = true
+        return effects
+      end,
+    }
+  end
+
+  if data.moves.FIX_TACKLE and not data.moves.FIX_TACKLE.anim then
+    data.moves.FIX_TACKLE.anim = { sound = "Slash" }
+  end
+
+  do
+    local calls, restore = patchSound()
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(96, 50, { tackle() }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(96, 40, { tackle() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(96, 30, { tackle() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(96, 20, { tackle() }) } },
+    })
+    local client = replayer(sim, 1)
+    client.phase, client.frame = "messages", 0
+    client.game.input = { wasPressed = function() return false end }
+    client.animPlayer = tickingAnimPlayer({ { sound = "FIX_TACKLE" } })
+    client.messages = { { anim = "FIX_TACKLE", from = 1 } }
+    CoopBattle.update(client, 1 / 60)
+    check(calls.playMove >= 1,
+          "CoopBattle pollEffects plays move SFX when the anim ticks")
+    local okMissing = pcall(function()
+      local eng = CoopBattle.loadEngine()
+      if eng then eng.Sound = nil end
+      client:pollAnimEffects()
+      client:applyAnimEffect({ sound = "FIX_TACKLE" })
+      client:applyAnimEffect({ effect = "SFX_TINK" })
+    end)
+    check(okMissing, "missing Sound does not throw through CoopBattle SFX paths")
+    restore()
+  end
+
+  do
+    local calls, restore = patchSound()
+    local client = setmetatable({
+      game = { data = data },
+      lines = {},
+      animPlayer = tickingAnimPlayer({ { sound = "FIX_TACKLE" } }),
+    }, { __index = MediatedBattle })
+    client:startAnim({ anim = "FIX_TACKLE", from = 1, slot = 2 })
+    check(client.anim ~= nil, "MediatedBattle holds the anim row")
+    MediatedBattle.update(client, 1 / 60)
+    check(calls.playMove >= 1,
+          "MediatedBattle pollEffects plays move SFX when the anim ticks")
+    local okTink = pcall(function()
+      client:applyAnimEffect({ effect = "SFX_TINK" })
+    end)
+    check(okTink, "catch-shake SFX_TINK path is soft-fail safe")
+    eq(calls.names[#calls.names], "Tink",
+       "SFX_TINK maps to the Tink clip when Sound is loaded")
+    restore()
+  end
+end)()
+
+-- ------- TT2 — victory music order + HP display guards (fix-battle-system-v2)
+--
+-- Multi-attacker final KO queues fanfare as an `act` after drains/faint sink;
+-- skipHealShapedDrain refuses drain-up after faint is queued; stripShows keeps
+-- the icon while truth is down but display faint has not run.
+
+;(function()
+  local musicFrame = nil
+  local origVictory = CoopBattle.playVictoryMusic
+  CoopBattle.playVictoryMusic = function(self)
+    musicFrame = self.frame
+    return origVictory(self)
+  end
+
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(96, 20, { tackle() }) } },
+  })
+  local client = replayer(sim, 1)
+  client.phase, client.frame = "messages", 0
+  client.game.input = { wasPressed = function() return false end }
+
+  local battler = sim:slot(3).battler
+  local preHP = battler.mon.hp
+  CoopBattle.playEvents(client, {
+    { kind = "damage", slot = 3, hp = math.max(1, preHP - 5) },
+    { kind = "damage", slot = 3, hp = 0 },
+    { kind = "faint", slot = 3 },
+    { kind = "over", winner = "a" },
+  })
+  eq(battler.mon.hp, 0, "truth HP is already zero after the batch lands")
+  check(musicFrame == nil,
+        "victory music has not run inline at the end of playEvents")
+
+  local firstDrainIdx, faintIdx, actIdx
+  for i, row in ipairs(client.messages) do
+    if row.drain and not firstDrainIdx then firstDrainIdx = i end
+    if row.faintfx then faintIdx = i end
+    if row.act then actIdx = i end
+  end
+  check(firstDrainIdx ~= nil, "the batch queues at least one HP drain")
+  check(faintIdx ~= nil, "and a faint sink row")
+  check(actIdx ~= nil, "and a deferred victory-music act")
+  if faintIdx and actIdx then
+    check(faintIdx < actIdx,
+          "fanfare is queued after the faint sink, not before drains play")
+  end
+
+  local steps = 0
+  while client.phase == "messages" and musicFrame == nil and steps < 500 do
+    CoopBattle.update(client, 1 / 60)
+    steps = steps + 1
+  end
+  check(musicFrame ~= nil, "victory music runs only once the queue reaches it")
+  check(client.draining == nil and client.faintFx == nil,
+        "by then the drains and faint sink have finished")
+
+  battler.shownHP = 5
+  battler.mon.hp = 0
+  battler.displayFainted = nil
+  client.messages = { { faintfx = battler, slot = 3 } }
+  eq(CoopBattle.skipHealShapedDrain(client, battler, 8), true,
+     "skipHealShapedDrain refuses a heal-shaped climb once faint is queued")
+  eq(CoopBattle.startDrain(client, { drain = battler, slot = 3, to = 8 }), false,
+     "startDrain honors the same clamp")
+
+  battler.displayFainted = true
+  eq(CoopBattle.skipHealShapedDrain(client, battler, 8), true,
+     "and refuses drain-up once displayFainted is set")
+
+  local stripSim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(96, 20, { tackle() }) } },
+  })
+  local stripClient = replayer(stripSim, 1)
+  local foe = stripSim:slot(3)
+  foe.battler.mon.hp = 0
+  foe.battler.displayFainted = nil
+  eq(CoopBattle.stripShows(stripClient, foe), true,
+     "stripShows keeps the icon while truth is down but display faint has not")
+  foe.battler.displayFainted = true
+  eq(CoopBattle.stripShows(stripClient, foe), false,
+     "and drops it once display faint is set")
+
+  CoopBattle.playVictoryMusic = origVictory
+end)()
 
 base.release()
 
