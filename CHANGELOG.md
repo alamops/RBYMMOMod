@@ -8,6 +8,17 @@ here must match `manifest.version`.
 
 ### Added
 
+- **PROTOCOL 18 — Party vs Wild vocabulary.** `Config.PROTOCOL` / `relay.js`
+  bump **17 → 18** so a protocol-17 hub cannot silently drop a `coop_wild`
+  open or strip an unknown `catcher` on `mmo.battle_outcome`. Mode token and
+  optional outcome field landed; overworld divert / seating / catch grant
+  follow in later waves.
+- **`coop_wild` battle mode** on the wire (`Wire.BATTLE_MODES` /
+  sanitize twin) and in `Config.MEDIATED_COOP`: two humans vs one wild NPC
+  seat (catch/run legal).
+- **Optional `catcher` on `mmo.battle_outcome`.** Present-and-bad refuses the
+  whole outcome (same posture as winners/losers); absent stays fine for
+  solo wild / KO paths.
 - **Friends hold keys use `Wire.nameKey` / relay `nameKey`, not `Rank.keyOf`.** PROTOCOL 16 made `Rank.keyOf` playerId-only; friendships stay trainer-name pairs, so the merge wires friend routing through the name fold.
 - **Friends (from main) under PROTOCOL 17.** Parallel main shipped friends as PROTOCOL 10 while this line claimed 10–16 for mediated battles + playerId; the merge keeps both feature sets and bumps `Config.PROTOCOL` / `relay.js` to **17** so a protocol-16 hub cannot silently ignore `mmo.friend_*`. Lists stay client-side (`src/Friends.lua`); the hub only holds offline asks.
 

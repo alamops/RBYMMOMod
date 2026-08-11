@@ -544,12 +544,14 @@ const BATTLE_REASONS = new Set([
   'timeout', 'disconnect', 'run', 'ko', 'agree', 'forfeit', 'catch',
 ]);
 
-// The three shapes a mediated fight comes in: two players with one monster
-// each, a pair against a trainer somebody walked into, or two pairs against
-// each other. Named on the wire rather than inferred from how many ids arrived,
-// because the two co-op modes have the same four field slots and differ only in
-// whether one side has an owner.
-const BATTLE_MODES = new Set(['1v1', 'coop_npc', 'coop_pvp', 'wild']);
+// The shapes a mediated fight comes in: two players with one monster each, a
+// pair against a trainer somebody walked into, two pairs against each other,
+// one player against a wild NPC seat, or two humans against one wild NPC seat
+// (coop_wild). Named on the wire rather than inferred from how many ids
+// arrived, because the co-op modes share field-slot shapes and differ in who
+// owns a side -- and "guess the mode from the roster" is right until an NPC
+// battle happens to have a spectatorless second slot.
+const BATTLE_MODES = new Set(['1v1', 'coop_npc', 'coop_pvp', 'wild', 'coop_wild']);
 
 /*
  * A roster: who is on a side, who won, who lost.
@@ -1165,6 +1167,15 @@ function cleanBattleOutcome(raw) {
     const caught = cleanBattleMon(raw.caught);
     if (!caught) return null;
     result.caught = caught;
+  }
+  // Optional catcher: who keeps the mon on a coop_wild catch. Absent is fine
+  // (solo wild / KO outcomes need no thrower); present-and-bad refuses the
+  // whole outcome -- same posture as winners/losers, since this is the name
+  // a grant moves for.
+  if (raw.catcher !== undefined && raw.catcher !== null) {
+    const catcher = cleanId(raw.catcher);
+    if (!catcher) return null;
+    result.catcher = catcher;
   }
   return result;
 }

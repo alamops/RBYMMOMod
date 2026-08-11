@@ -102,10 +102,16 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // this is the one feature whose answer may legitimately arrive later (the hub
 // holds an ask for a player who is offline), so "nothing has happened yet" is
 // an ordinary state and a player would have no way at all to tell it from a
-// hub that cannot do this. The rule every bump follows is unchanged: bump
-// whenever a client can send something a hub silently ignores. Kept in step
-// with Config.PROTOCOL on the mod side.
-const PROTOCOL = 17;
+// hub that cannot do this. 18 is Party vs Wild: mode token `coop_wild` (two
+// humans vs one wild NPC seat) and an optional `catcher` player id on
+// mmo.battle_outcome so a successful ball names who keeps the mon. A
+// protocol-17 hub's closed BATTLE_MODES set drops `coop_wild` opens, and its
+// outcome cleaner strips an unknown `catcher` -- either way the partner never
+// joins the grass fight, or both clients grant (or neither) because ownership
+// was never named. The rule every bump follows is unchanged: bump whenever a
+// client can send something a hub silently ignores. Kept in step with
+// Config.PROTOCOL on the mod side.
+const PROTOCOL = 18;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right

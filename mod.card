@@ -265,7 +265,7 @@ return {
         .. "HOOD in their catalog, so somebody wearing one shows up as RED "
         .. "on their screen -- the same fallback a character their ROM does "
         .. "not carry already gets.",
-      "The protocol is exact-match: this release speaks PROTOCOL 16. An older "
+      "The protocol is exact-match: this release speaks PROTOCOL 18. An older "
         .. "mod or hub is refused at the door with a sentence that names both "
         .. "versions rather than connecting and going quiet. The mod and its "
         .. "hub have to be updated together; there is no degraded mode that "

@@ -1646,6 +1646,14 @@ function M.battleOutcome(raw)
     out.caught = M.battleMon(raw.caught)
     if not out.caught then return nil end
   end
+  -- Optional catcher: who keeps the mon on a coop_wild catch. Absent is fine
+  -- (solo wild / KO outcomes need no thrower); present-and-bad refuses the
+  -- whole outcome -- same posture as winners/losers, since this is the name
+  -- a grant moves for.
+  if raw.catcher ~= nil then
+    out.catcher = M.id(raw.catcher)
+    if not out.catcher then return nil end
+  end
   return out
 end
 
@@ -1668,15 +1676,19 @@ end
 --   1v1       -- two players, one monster each
 --   coop_npc  -- a party of two against a trainer somebody walked into
 --   coop_pvp  -- two parties against each other
---   wild      -- one player against one hub NPC seat (catch/run legal)
+--   wild      -- one player against one hub NPC seat (catch/run legal;
+--               protocol-only; no overworld divert)
+--   coop_wild -- two humans vs one wild NPC seat (catch/run legal; overworld
+--               divert when partied + same map — seating lands in a later wave)
 --
 -- Named on the wire rather than inferred from how many ids arrived, because the
 -- two co-op modes have the same four field slots and differ only in whether one
 -- side has an owner -- and "guess the mode from the roster" is the kind of
 -- inference that is right until an NPC battle happens to have a spectatorless
 -- second slot.
---   wild      -- one player against a hub NPC seat (protocol-only; no overworld divert)
-M.BATTLE_MODES = { ["1v1"] = true, coop_npc = true, coop_pvp = true, wild = true }
+M.BATTLE_MODES = {
+  ["1v1"] = true, coop_npc = true, coop_pvp = true, wild = true, coop_wild = true,
+}
 
 function M.battleMode(value)
   if M.BATTLE_MODES[value] then return value end

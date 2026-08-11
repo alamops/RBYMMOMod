@@ -102,8 +102,16 @@ M.MOD_ID = "rby_mmo"
 -- whose answer may legitimately arrive *later* -- the hub holds an ask for a
 -- player who is offline -- so "nothing yet" is an ordinary state, and a player
 -- would have no way at all to tell it apart from a hub that cannot do this.
+--
+-- 18 is Party vs Wild: mode token `coop_wild` (two humans vs one wild NPC seat)
+-- and an optional `catcher` player id on `mmo.battle_outcome` so a successful
+-- ball names who keeps the mon. A protocol-17 hub's closed BATTLE_MODES set
+-- drops `coop_wild` opens, and its outcome cleaner strips an unknown `catcher`
+-- field -- either way the partner never joins the grass fight, or both clients
+-- grant (or neither does) because ownership was never named. Refusal that
+-- names both versions is the only sentence either player can act on.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 17
+M.PROTOCOL = 18
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -415,11 +423,11 @@ M.COOP_STALL_TIMEOUT = 75
 -- together: a client on this line talking to a hub without them is the 2-on-1
 -- that never resolves, which is what PROTOCOL is for.
 --
--- **Not a host toggle.** coop_pvp / coop_npc are always hub-refereed. The
--- host-sim CoopSim path for those modes was removed so BattleSim and engine
+-- **Not a host toggle.** coop_pvp / coop_npc / coop_wild are always hub-refereed.
+-- The host-sim CoopSim path for those modes was removed so BattleSim and engine
 -- ItemEffects cannot diverge mid-match. `CoopBattle.mediates` hard-codes the
--- same two modes; this table stays as the documented surface for e2e / docs.
-M.MEDIATED_COOP = { coop_pvp = true, coop_npc = true }
+-- mediated modes; this table stays as the documented surface for e2e / docs.
+M.MEDIATED_COOP = { coop_pvp = true, coop_npc = true, coop_wild = true }
 
 -- How long a battle waits for a player who has dropped mid-fight.
 --
