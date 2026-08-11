@@ -539,6 +539,27 @@ return function(game)
     -- has to be somewhere known and stay there.
 
     H.signal("host_ready_for_interact")
+
+    -- ------- 4a. ...and answer the friend request that arrives while holding
+    --
+    -- The other half of the guest's ADD FRIEND leg. This side is standing
+    -- still with nothing else on screen, which is exactly the state a friend
+    -- ask is meant to be answerable in -- the client holds one until the
+    -- player is out of a battle or a trade, and there is neither here.
+    H.await(game, "guest_asked_friend")
+    local befriended = H.drivePrompts(game, function()
+      return #(exports.friends and exports.friends() or {}) == 1
+    end, 90)
+    check(befriended,
+          "the ask arrives as a yes/no box, and agreeing writes the friendship")
+    local made = (exports.friends and exports.friends() or {})[1]
+    check(made ~= nil and made.name == "GUESTY", "under the asker's own name")
+    log("friend made:", tostring(made and made.name))
+    U.shot(game, SHOT_DIR .. "/host-friend-made.png")
+    H.closeToOverworld(game)
+    H.signal("host_answered_friend")
+    H.await(game, "guest_friend_checked")
+
     H.await(game, "guest_interact_done")
     U.shot(game, SHOT_DIR .. "/host-after-interact.png")
 
@@ -552,19 +573,18 @@ return function(game)
     -- nothing else is mid-flow -- the same reason "hold still" sits where
     -- it does.
     --
-    -- The hosting menu also just grew a ninth row -- ADDRESS, PLAYERS,
-    -- CHAT, SAY, PARTY, MY PROFILE, RANK, CHARACTER, END GAME -- one past
-    -- Menu's maxVisible of 8, so this is the first time this screen has
-    -- ever had to scroll. H.menuRow reads `items`, which the widget keeps
-    -- whole regardless of the scroll offset, so finding END GAME there is
-    -- what "still reachable past the scroll" means for a row this driver
-    -- deliberately never presses A on -- doing that would open the END
-    -- GAME confirm and tear the session down mid-run.
+    -- The hosting menu carries ten rows now -- ADDRESS, PLAYERS, FRIENDS,
+    -- CHAT, SAY, PARTY, MY PROFILE, RANK, CHARACTER, END GAME -- two past
+    -- Menu's maxVisible of 8, so it scrolls. H.menuRow reads `items`, which
+    -- the widget keeps whole regardless of the scroll offset, so finding END
+    -- GAME there is what "still reachable past the scroll" means for a row
+    -- this driver deliberately never presses A on -- doing that would open
+    -- the END GAME confirm and tear the session down mid-run.
     check(H.openMmo(game), "the MMO menu reopens to change character")
     U.wait(20)
     local hostingLabels = H.menuLabels(game)
     log("hosting menu (connected):", table.concat(hostingLabels, ","))
-    check(#hostingLabels == 9, "the hosting menu now carries all nine rows")
+    check(#hostingLabels == 10, "the hosting menu now carries all ten rows")
     local rankAt, charAt
     for i, label in ipairs(hostingLabels) do
       if label == "RANK" then rankAt = i end
@@ -574,7 +594,7 @@ return function(game)
           "CHARACTER sits right after RANK on the hosting menu")
     check(H.menuRow(game, "END GAME") ~= nil,
           "END GAME is still reachable past the first-ever scroll on this menu")
-    U.shot(game, SHOT_DIR .. "/host-menu-9rows.png")
+    U.shot(game, SHOT_DIR .. "/host-menu-10rows.png")
 
     -- NIRE, the same catalog entry mmo_join.lua's offline leg already proves
     -- is selectable, and guaranteed different from MMO_HOST_SPRITE's default

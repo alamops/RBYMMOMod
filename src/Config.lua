@@ -94,7 +94,16 @@ M.MOD_ID = "rby_mmo"
 -- Absent bag means empty: a protocol-14 client that never uploads one cannot
 -- spend items on a 15 hub. Refusal naming both versions is the only sentence
 -- either player can act on.
-M.PROTOCOL = 16
+--
+-- 17 is friends -- mmo.friend_ask, mmo.friend_answer and mmo.friend_remove.
+-- Those types landed as PROTOCOL 10 on the parallel main line while this
+-- branch claimed 10–16 for mediation and persistent playerId; a protocol-16
+-- intermediator answers all three with silence, and this is the one feature
+-- whose answer may legitimately arrive *later* -- the hub holds an ask for a
+-- player who is offline -- so "nothing yet" is an ordinary state, and a player
+-- would have no way at all to tell it apart from a hub that cannot do this.
+-- This number lives here and in server/lib/relay.js -- bump them together.
+M.PROTOCOL = 17
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -528,6 +537,55 @@ M.COMPOSE_MAX = 16
 -- is exactly as connected as before.  Nothing goes unexplained on any
 -- screen, so nothing is owed a refusal.
 M.MOTD_MAX = 120
+
+-- ------- friends
+--
+-- The standing list of people you have agreed to keep, per hub.  src/Friends.lua
+-- is the store and the handshake; the argument for what a friendship *is* here
+-- -- a pair of trainer names on one hub, agreed by both -- lives in that file's
+-- header rather than being restated.
+
+-- How many friends one list may hold.
+--
+-- A bound on a file this copy writes and a menu it scrolls, not a rule about
+-- how many people anyone may like.  Sixty-four is the biggest hub this mod
+-- will open (MAX_PLAYERS), so a player who befriended a full server twice over
+-- still fits, and the list stays something a d-pad can reach the end of.
+M.FRIENDS_MAX = 64
+
+-- How long a hub holds a friend ask (or an answer to one) for a player who is
+-- not connected, in seconds.
+--
+-- The whole point of the ask surviving a disconnect is that it is answered
+-- when they next log in, which may be tomorrow -- so this is long.  It exists
+-- at all because a hub that ran for a month would otherwise accumulate one
+-- unanswerable ask per player who was asked once and never came back.  A week
+-- is longer than any "they'll be on later" and shorter than a season.
+M.FRIEND_HOLD = 7 * 24 * 3600
+-- How many held notifications one name may accumulate before the oldest is
+-- dropped, and how many the hub keeps across every name.  Both are ceilings on
+-- what a stranger can make a hub remember, not on play: a player with eight
+-- unanswered asks waiting has not been ignoring one friend, they have been
+-- ignoring eight.
+M.FRIEND_HOLD_PER_NAME = 8
+M.FRIEND_HOLD_MAX = 1024
+
+-- Where the list is kept, in the LOVE save directory beside the server list
+-- and the rank tickets.  Its own file rather than a corner of mod.save for the
+-- reason SERVERS_FILE is: friendship is machine-level state that has to
+-- survive CONTINUE and belongs to every save slot on this copy at once.
+M.FRIENDS_FILE = "rby_mmo_friends.json"
+
+-- What a friend is drawn in: the nameplate over their head and the line in the
+-- corner when they arrive.
+--
+-- Here rather than in either of the two files that draw it, which is this
+-- file's whole rule -- src/Overlay.lua paints the plate and src/Toast.lua
+-- paints the notification, and two copies of "smooth blue" would drift apart
+-- on the first tweak.  Pitched beside the party green: bright enough to read
+-- over pale tiles, soft enough that it reads as a friendly mark rather than as
+-- an alert.
+M.FRIEND_BLUE = { 0.48, 0.76, 1.0 }
 
 -- ------- toasts
 --

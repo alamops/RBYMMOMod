@@ -1,17 +1,15 @@
 # AGENTS_CONFIG.yml — per-phase model routing for /implement
 #
-# Preset: quality (v3). Re-run `/implement --config` to change models;
-# `/implement --update` to bring the schema forward without re-routing.
+# Preset: quality (v2). Re-run `/implement --config` to change it.
 #
 # Role → model mapping across harnesses:
 #   Claude opus/fable  → Codex gpt-5.6-sol   → Cursor cursor-grok-4.5-high
 #   Claude sonnet      → Codex gpt-5.6-terra → Cursor composer-2.5
-#     (exception: scout/investigate on Cursor → cursor-grok-4.5-high)
 #   Claude haiku       → Codex gpt-5.6-luna  → Cursor composer-2.5
 #
-# See the implement skill's references/agents-config.md and harnesses.md.
+# See the implement skill's references/agents-config.md for the full schema.
 
-version: 3
+version: 2
 
 # Which harness /implement is running IN (not which model it calls).
 # `auto` detects it. When driving from Cursor IDE / cursor-agent, pin
@@ -26,44 +24,63 @@ defaults:
 
 
 # ── Roles ──────────────────────────────────────────────────────────────────
-# Claude on `any:` (portable). `codex:` / `cursor:` override on those hosts.
-# External types take only `model:` — /implement builds the command and
-# derives permissions from the phase (plan/read-only vs force/write).
+# Claude bindings sit under `any:` (portable: Agent tool on Claude Code,
+# `claude -p` elsewhere). `codex:` and `cursor:` override on those hosts.
 
 models:
 
   orchestrator:
     any: { type: self }
 
-  # Read-only investigation (sonnet-tier; Cursor uses Grok 4.5).
+  # Read-only investigation (sonnet-tier).
   scout:
     any:    { type: claude, model: sonnet, subagent_type: Explore }
     codex:  { type: codex,  model: gpt-5.6-terra }
-    cursor: { type: cursor, model: cursor-grok-4.5-high }
+    cursor:
+      type: shell
+      model: composer-2.5
+      command: "agent -p --model composer-2.5 --workspace {CWD} --trust --mode plan --output-format text {PROMPT}"
+      unavailable_fallback: scout
 
   # Writes production code + test fixes (opus-tier).
   builder:
     any:    { type: claude, model: opus }
     codex:  { type: codex,  model: gpt-5.6-sol }
-    cursor: { type: cursor, model: cursor-grok-4.5-high }
+    cursor:
+      type: shell
+      model: cursor-grok-4.5-high
+      command: "agent -p --model cursor-grok-4.5-high --workspace {CWD} --trust --force --output-format text {PROMPT}"
+      unavailable_fallback: builder
 
   # Reviews the diff (opus-tier).
   reviewer:
     any:    { type: claude, model: opus }
     codex:  { type: codex,  model: gpt-5.6-sol }
-    cursor: { type: cursor, model: cursor-grok-4.5-high }
+    cursor:
+      type: shell
+      model: cursor-grok-4.5-high
+      command: "agent -p --model cursor-grok-4.5-high --workspace {CWD} --trust --mode plan --output-format text {PROMPT}"
+      unavailable_fallback: reviewer
 
   # Authors tests (sonnet-tier).
   test_author:
     any:    { type: claude, model: sonnet }
     codex:  { type: codex,  model: gpt-5.6-terra }
-    cursor: { type: cursor, model: composer-2.5 }
+    cursor:
+      type: shell
+      model: composer-2.5
+      command: "agent -p --model composer-2.5 --workspace {CWD} --trust --force --output-format text {PROMPT}"
+      unavailable_fallback: test_author
 
   # Runs suites / owns e2e lifecycle (haiku-tier).
   test_runner:
     any:    { type: claude, model: haiku }
     codex:  { type: codex,  model: gpt-5.6-luna }
-    cursor: { type: cursor, model: composer-2.5 }
+    cursor:
+      type: shell
+      model: composer-2.5
+      command: "agent -p --model composer-2.5 --workspace {CWD} --trust --force --output-format text {PROMPT}"
+      unavailable_fallback: test_runner
 
 
 # ── Phases ─────────────────────────────────────────────────────────────────

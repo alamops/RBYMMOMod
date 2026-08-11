@@ -640,27 +640,39 @@ return function(game)
   -- Nameplates use the bundled Rajdhani face (src/Toast.lua), not the ROM
   -- sheet, so the charmap probe below does not apply here.
 
-  -- Bubbles are gone (corner toasts replaced them); what still matters is
-  -- that the party marker *replaced* the peer's unmarked plate. Own yellow
-  -- plate (Overlay.drawSelfLabel) is expected in the same frame, so
-  -- "#names == 1" is the wrong settle condition -- it fails whenever self
-  -- is on screen, which is the normal overworld case after the Rajdhani
-  -- restyle.
+  -- Let the frame settle to exactly the plates that belong on it.
+  --
+  -- This used to wait for the *one* marked name, on the reasoning that a
+  -- speech bubble left over from the chat leg would otherwise float above it
+  -- and make the nickname look like something the player said. Both halves of
+  -- that are now wrong. Bubbles are gone -- chat is a corner toast, and the
+  -- mod's own suite asserts Config.BUBBLE_SECONDS no longer exists -- and the
+  -- overlay draws this player's own plate too (drawSelfLabel), so "one name"
+  -- has been unreachable ever since. It failed on every run, and said "old
+  -- bubbles expire" about a feature that had been deleted.
+  --
+  -- What is worth waiting for is the frame being *exactly* the two plates it
+  -- should be: your party member, marked, and yourself. That is still an
+  -- assertion and not merely a pause -- a third name, or the unmarked partner
+  -- drawn beside the marked one, is a plate that should not be there.
+  local WANT = { [MARKED] = true, [ME.name] = true }
   local settled, lastSeen = false, drew
   local settleDeadline = os.time() + 20
   while os.time() < settleDeadline and not settled do
     local ov = exports.overlayState and exports.overlayState() or {}
     lastSeen = ov.names or {}
-    local marked, unmarkedPeer = false, false
-    for _, name in ipairs(lastSeen) do
-      if name == MARKED then marked = true end
-      if name == THEM.name then unmarkedPeer = true end
-    end
-    settled = marked and not unmarkedPeer
+    local seen = {}
+    for _, name in ipairs(lastSeen) do seen[name] = true end
+    settled = #lastSeen == 2 and seen[MARKED] and seen[ME.name]
     if not settled then U.wait(12) end
   end
-  check(settled, "their marked plate is up without the unmarked twin (saw: "
+  check(settled, "the frame settles to exactly the two plates that belong on "
+    .. "it -- your marked party member, and yourself (saw: "
     .. (#lastSeen == 0 and "(none)" or table.concat(lastSeen, ",")) .. ")")
+  for _, name in ipairs(lastSeen) do
+    check(WANT[name] ~= nil,
+          ("no plate is drawn that should not be: %q"):format(name))
+  end
   shot("party-map")
 
   -- ------- your party member on the TOWN MAP

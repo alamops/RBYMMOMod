@@ -45,6 +45,11 @@ local SHADOW_DX, SHADOW_DY = 1, 1
 -- that white shadow still separates it from snow and indoor floors.
 local PARTY_GREEN = { 0.42, 0.94, 0.52 }
 local SELF_YELLOW = { 1.0, 0.92, 0.38 }
+-- The same blue the corner draws a friend arriving in, taken from Config
+-- rather than written out again: two copies of "smooth blue" would drift on
+-- the first tweak, and the whole point of the colour is that the plate over
+-- their head and the line announcing them are recognisably one thing.
+local FRIEND_BLUE = Config.FRIEND_BLUE
 local LABEL_WHITE = { 1, 1, 1 }
 local TAIL = "..."
 
@@ -98,8 +103,28 @@ function M:isPartner(player)
   return party and party:isPartner(player.id) or false
 end
 
+-- Is this one of the people on your list for this hub?
+--
+-- By name, because that is what a friendship is keyed on (src/Friends.lua) --
+-- the connection id over their head is minted for this session and means
+-- nothing to a list that outlives it.
+function M:isFriend(player)
+  local friends = self.ctx and self.ctx.friends
+  if not (friends and friends.isFriend) then return false end
+  return friends:isFriend(player.name) and true or false
+end
+
+-- Which of the three a plate is drawn in, most specific first.
+--
+-- A party partner who is also a friend comes out green, and that is the right
+-- way round: the party is the relationship that is true *right now* and the
+-- one that changes what the player should do next, while being friends is a
+-- standing fact that will still be there when the party ends.  Colouring it
+-- the other way would take the marker off the person you are travelling with
+-- exactly when you most need to pick them out of a crowd.
 function M:labelColor(player)
   if self:isPartner(player) then return PARTY_GREEN end
+  if self:isFriend(player) then return FRIEND_BLUE end
   return LABEL_WHITE
 end
 
@@ -732,6 +757,11 @@ M.ANCHOR_X, M.ANCHOR_Y = ANCHOR_X, ANCHOR_Y
 M.CAM_X, M.CAM_Y, M.SPRITE_LIFT = CAM_X, CAM_Y, SPRITE_LIFT
 M.PARTY_GREEN = PARTY_GREEN
 M.SELF_YELLOW = SELF_YELLOW
+M.FRIEND_BLUE = FRIEND_BLUE
+-- Exported with the other two so the suite can name the *default* as well as
+-- the exceptions: "everybody else is white" is the half of labelColor that
+-- would otherwise only be assertable as "not one of the colours we know".
+M.LABEL_WHITE = LABEL_WHITE
 M.LOCAL_RADIUS = Config.LOCAL_RADIUS
 
 return M
