@@ -8,6 +8,21 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Hub `--generation` / config `generation` (Wave 1 T1b).** CLI and config
+  lock a hub to Gen 1 or Gen 2 (`--generation 1|2`, `generation:` in
+  `config.json`, `RBY_MMO_GENERATION`). Compat default is 1 when omitted, with
+  a startup warning that Gen 2 hubs must pass `--generation 2`. In-game HOST
+  binds the boot's generation via `Gen.generation()`. Equal-peer Gen 1 / Gen 2
+  run recipes are in `server/README.md`. (Server-list gen chip deferred —
+  no row field carries generation yet.)
+
+- **PROTOCOL 19 — hub generation lock.** `Config.PROTOCOL` / `relay.js` bump
+  **18 → 19**. Client `mmo.hello` carries `generation` (1|2); Hub.lua and the
+  Node relay refuse a mismatch after the protocol check (`This hub is for
+  generation N; yours is generation M.`). Missing `generation` defaults to 1;
+  hub `opts.generation` defaults to 1 (Gen2 hubs must set `generation: 2`).
+  Gen1 behaviour unchanged when the hub stays on generation 1.
+
 - **Gen 1 + Gen 2 dual claim (Wave 0).** `manifest.games` is
   `["gen1","gen2"]`. New `src/Gen.lua` helpers cover money (`save.money` vs
   `save.player.money`), dex (`owned` vs `caught`), badges, free-roam

@@ -251,6 +251,10 @@ function M.new(opts)
     -- normalisation is a code no player could type; Wire.code is
     -- idempotent, so a caller that already normalised loses nothing by it.
     joinCode = Wire.code(opts.joinCode),
+    -- PROTOCOL 19 generation lock. Default 1 when omitted so existing Gen1
+    -- fixtures and deploys keep working; Gen2 hubs MUST pass generation:2
+    -- (HostServer / CLI -- twin of server/lib/relay.js opts.generation).
+    generation = Wire.generation(opts.generation),
     clients = {},     -- id -> client (greeted or not)
     count = 0,        -- connections
     players = 0,      -- of those, the ones that have been admitted
@@ -2035,6 +2039,13 @@ handlers[Wire.HELLO] = function(self, client, msg)
     return self:refuseClient(client, ("This game speaks protocol %d; yours "
       .. "speaks %s."):format(Config.PROTOCOL, tostring(msg.proto)))
   end
+  -- PROTOCOL 19: missing generation defaults to 1 (Wire.generation). Same
+  -- sentence as server/lib/relay.js so a client cannot tell which path refused.
+  local generation = Wire.generation(msg.generation)
+  if generation ~= self.generation then
+    return self:refuseClient(client, ("This hub is for generation %d; yours "
+      .. "is generation %d."):format(self.generation, generation))
+  end
   local name = Wire.name(msg.name)
   if not name then
     return self:refuseClient(client, "That trainer name can't be used here.")
@@ -2055,6 +2066,7 @@ handlers[Wire.HELLO] = function(self, client, msg)
   client.hello = {
     name = name,
     playerId = playerId,
+    generation = generation,
     sprite = Wire.spriteId(msg.sprite) or Config.DEFAULT_SPRITE,
     profile = Wire.profile(msg.profile),
     map = Wire.mapId(msg.map),

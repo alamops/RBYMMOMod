@@ -1171,6 +1171,8 @@ function M.sendHello(game)
   spriteAcked, spriteClock = sprite, 0
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
+    -- Hub generation lock (PROTOCOL 19). 1 = Red/Blue/Yellow, 2 = Gold.
+    generation = Gen.generation(game),
     name = name,
     -- Persistent identity (PROTOCOL 16). Hub uses this as client.id and the
     -- rank-board key. Minted once per install; survives CONTINUE via file.

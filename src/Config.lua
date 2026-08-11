@@ -110,8 +110,15 @@ M.MOD_ID = "rby_mmo"
 -- field -- either way the partner never joins the grass fight, or both clients
 -- grant (or neither does) because ownership was never named. Refusal that
 -- names both versions is the only sentence either player can act on.
+--
+-- 19 is the generation lock on `mmo.hello`: clients carry `generation` (1|2)
+-- and the hub refuses a mismatch (Gen1 hub ↔ Gen1 clients only; Gen2 hub ↔
+-- Gen2 only). A protocol-18 hub never checks the field, so a Gold client
+-- could join a Red room and every later surface (battle sheets, trade codec,
+-- co-op) would talk past the other generation. Refusal that names both
+-- generations is the only sentence either player can act on.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 18
+M.PROTOCOL = 19
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

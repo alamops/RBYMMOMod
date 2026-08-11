@@ -15,6 +15,7 @@ local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
 local Hub = need("Hub")
+local Gen = need("Gen")
 
 local M = {}
 M.__index = M
@@ -154,6 +155,9 @@ function M:start(port, maxPlayers, joinCode)
   self.hub = Hub.new({
     maxPlayers = maxPlayers,
     joinCode = code,
+    -- Bind the hub to this boot's generation (Gold → 2, RBY → 1). T1a refuses
+    -- mismatched client hello; until then the opt is ignored if Hub lacks it.
+    generation = Gen.generation(),
     onDrop = function(reason, clientId)
       mod.log:warn("refused a relayed message from player %s (%s); "
         .. "if a trade or battle stalled, this is why -- ask them to "

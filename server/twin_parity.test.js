@@ -109,6 +109,8 @@ test('shared hello refuse strings stay twin-worded', () => {
     "That player id can't be used here.",
     "That trainer name can't be used here.",
     'This game speaks protocol',
+    // PROTOCOL 19 generation lock — same template on both hubs.
+    'This hub is for generation',
   ];
   for (const needle of needles) {
     assert.ok(hub.includes(needle), `Hub.lua must contain: ${needle}`);

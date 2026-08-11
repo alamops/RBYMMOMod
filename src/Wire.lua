@@ -457,6 +457,13 @@ function M.int(value, min, max)
   return n
 end
 
+-- Boot generation claimed on mmo.hello (PROTOCOL 19). Exactly 1 or 2; missing
+-- or out of range defaults to 1 so a PROTOCOL-19 client that omits the field
+-- still joins a Gen1 hub (legacy-shaped hello after the bump).
+function M.generation(value)
+  return M.int(value, 1, 2) or 1
+end
+
 function M.facing(value)
   if M.FACINGS[value] then return value end
   return nil

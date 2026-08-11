@@ -509,7 +509,8 @@ const HELP = {
     'Exit codes: 0 success, 1 error, 2 wrong usage.',
   ],
   init: [
-    `Usage: ${PROGRAM} init [--force] [--yes] [--port N] [--max N] [--code CODE]`,
+    `Usage: ${PROGRAM} init [--force] [--yes] [--port N] [--max N] [--generation 1|2]`,
+    '                       [--code CODE]',
     '                       [--log-level debug|info|warn|error|silent]',
     '',
     'Asks four questions, writes the config file with mode 0600, and prints the',
@@ -518,6 +519,9 @@ const HELP = {
     '  --yes         do not ask; take the flags and the defaults. This is the',
     '                path a Dockerfile or a test suite uses.',
     '  --force       replace an existing config file.',
+    '  --generation 1|2  lock this hub to Gen 1 (RBY) or Gen 2 (Gold). Written',
+    '                into the config. Default 1 when omitted (compat); Gen 2',
+    '                hubs must pass 2.',
     '  --code CODE   use this passcode instead of a generated one.',
     `                ${auth.CODE_LEN} characters from ${auth.ALPHABET}`,
     '                -- no I, L, O or U. Dashes, spaces and lower case are',
@@ -528,12 +532,17 @@ const HELP = {
     'There is no --no-auth. A passcode is required, here and in game.',
   ],
   start: [
-    `Usage: ${PROGRAM} start [--port N] [--host ADDR] [--max N] [...]`,
+    `Usage: ${PROGRAM} start [--port N] [--host ADDR] [--max N] [--generation 1|2] [...]`,
     '                        [--insecure-config]',
     '',
     'Loads the configuration, prints who can reach this machine, and runs the',
     'hub until it is stopped. Any config path may be overridden for this run',
     'with a flag -- `--limits.maxPending 12` works as well as `--max 8`.',
+    '',
+    '  --generation 1|2  lock this hub to Gen 1 or Gen 2 for this run. Beats',
+    '                    RBY_MMO_GENERATION and config generation. Default 1',
+    '                    when omitted (compat warning at startup); Gen 2 hubs',
+    '                    must pass 2.',
     '',
     'Two things stop it before it binds anything:',
     '',
@@ -1252,6 +1261,7 @@ async function verbInit(ctx) {
   ctx.say('');
   ctx.say(`  listening on   ${final.listen.host}:${final.listen.port}`);
   ctx.say(`  players        up to ${final.maxPlayers}`);
+  ctx.say(`  generation     ${final.generation === 2 ? '2 (Gen 2 / Gold)' : '1 (Gen 1 / RBY)'}`);
   ctx.say('  join code      required (always -- there is no open-hub setting)');
   ctx.say(`  log level      ${final.log.level}`);
 

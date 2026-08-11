@@ -108,10 +108,13 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // protocol-17 hub's closed BATTLE_MODES set drops `coop_wild` opens, and its
 // outcome cleaner strips an unknown `catcher` -- either way the partner never
 // joins the grass fight, or both clients grant (or neither) because ownership
-// was never named. The rule every bump follows is unchanged: bump whenever a
-// client can send something a hub silently ignores. Kept in step with
-// Config.PROTOCOL on the mod side.
-const PROTOCOL = 18;
+// was never named. 19 is the generation lock on mmo.hello: clients carry
+// `generation` (1|2) and the hub refuses a mismatch. A protocol-18 hub never
+// checks the field, so a Gold client could join a Red room and every later
+// surface would talk past the other generation. The rule every bump follows
+// is unchanged: bump whenever a client can send something a hub silently
+// ignores. Kept in step with Config.PROTOCOL on the mod side.
+const PROTOCOL = 19;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -285,6 +288,12 @@ handlers['mmo.hello'] = (relay, client, msg) => {
     return relay.refuse(client, `This game speaks protocol ${relay.protocol}; yours `
       + `speaks ${shortValue(msg.proto)}.`);
   }
+  // PROTOCOL 19: missing generation defaults to 1. Same sentence as Hub.lua.
+  const generation = cleanInt(msg.generation, 1, 2) ?? 1;
+  if (generation !== relay.generation) {
+    return relay.refuse(client, `This hub is for generation ${relay.generation}; yours `
+      + `is generation ${generation}.`);
+  }
   const name = cleanText(msg.name, NAME_MAX);
   if (!name) return relay.refuse(client, "That trainer name can't be used here.");
   const playerId = cleanPlayerId(msg.playerId);
@@ -313,6 +322,7 @@ handlers['mmo.hello'] = (relay, client, msg) => {
   client.hello = {
     name,
     playerId,
+    generation,
     sprite: cleanSpriteId(msg.sprite) || DEFAULT_SPRITE,
     profile: cleanProfile(msg.profile),
     map: cleanMapId(msg.map),
@@ -1211,6 +1221,13 @@ class Relay {
       ? Number(opts.chatIntervalMs) : 500;
     this.protocol = Number.isFinite(Number(opts.protocol))
       ? Number(opts.protocol) : PROTOCOL;
+    // PROTOCOL 19 generation lock. Default 1 when omitted so existing Gen1
+    // deploys keep working; Gen2 hubs MUST set generation:2 (CLI / config —
+    // twin of src/Hub.lua opts.generation).
+    {
+      const gen = cleanInt(opts.generation, 1, 2);
+      this.generation = gen == null ? 1 : gen;
+    }
     this.auth = opts.auth || null;
     /*
      * The hub's message of the day, as the operator typed it. Held raw and
