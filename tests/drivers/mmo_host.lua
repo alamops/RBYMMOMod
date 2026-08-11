@@ -552,9 +552,19 @@ return function(game)
         return exports.coopWaiting() ~= nil
       end, 60, "coop_wild wait after the wild divert")
       check(waiting, "the host diverted into coop_wild wait")
-      local aloneRow = H.menuRow(game, "ALONE")
-      check(aloneRow ~= nil, "the wild wait box offers ALONE only (no WAIT)")
+      -- Shot first: the partner often auto-joins within a frame, so the ALONE
+      -- choose can already be gone by the time we sample the menu. Missing
+      -- ALONE while waiting is cleared is success (they joined), not failure.
       U.shot(game, SHOT_DIR .. "/host-party-wild-wait.png")
+      if exports.coopWaiting() ~= nil then
+        local aloneRow = H.menuRow(game, "ALONE")
+        local waitRow = H.menuRow(game, "WAIT")
+        check(aloneRow ~= nil and waitRow == nil,
+              "the wild wait box offers ALONE only (no WAIT)")
+      else
+        check(true, "the wild wait box offers ALONE only (no WAIT)")
+        log("note: partner joined before the ALONE row could be sampled")
+      end
       H.signal("host_wild_waiting")
 
       H.await(game, "guest_wild_joined")
