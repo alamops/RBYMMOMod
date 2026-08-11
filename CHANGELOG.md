@@ -8,6 +8,15 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Gen 1 + Gen 2 dual claim (Wave 0).** `manifest.games` is
+  `["gen1","gen2"]`. New `src/Gen.lua` helpers cover money (`save.money` vs
+  `save.player.money`), dex (`owned` vs `caught`), badges, free-roam
+  (overworld-on-top vs empty Gen 2 stack), StartMenu / Gen2StartMenu cancel,
+  and avatar spawn (STAY+range vs numeric STANDING_* + name lookup). Presence,
+  chat, party UI, and save-side money/heal paths are generation-aware.
+  Hub-locked Gen 2 BattleSim / trade / co-op land in later waves — see
+  `docs/plans/gen2-compatibility.md`.
+
 - **PROTOCOL 18 — Party vs Wild (`coop_wild`).** `Config.PROTOCOL` / `relay.js`
   bump **17 → 18**. New mediated mode: two partied humans vs one wild NPC
   seat. When partners share a map, a grass encounter auto-opens the fight

@@ -28,6 +28,7 @@ local Ui = need("Ui")
 local Overlay = need("Overlay")
 local Sessions = need("Sessions")
 local World = need("World")
+local Gen = need("Gen")
 local HostServer = need("HostServer")
 local Chars = need("Chars")
 local Cast = need("Cast")
@@ -615,7 +616,8 @@ function M.explicitChoice()
   end
   if type(chosen) ~= "string" or chosen == "" then return nil end
   local id = Chars.resolve(chosen)
-  if id == Config.DEFAULT_SPRITE then return nil end
+  local fallback = Gen.defaultSprite(ctx.game, mod.content and mod.content.sprites)
+  if id == fallback or id == Config.DEFAULT_SPRITE then return nil end
   return id
 end
 
@@ -713,19 +715,8 @@ function M.profile(a, b)
   local game = arg1(a, b) or ctx.game
   local save = game and game.save
   if not save then return nil end
-  local dex = save.pokedex or {}
-  local seen, owned = 0, 0
-  for _ in pairs(dex.seen or {}) do seen = seen + 1 end
-  for _ in pairs(dex.owned or {}) do owned = owned + 1 end
-
-  -- Badges are counted through the engine's own list rather than assumed to
-  -- be the eight Kanto ones, so a mod that adds a badge is counted too.
-  local badges = 0
-  local ok = pcall(function()
-    local Badges = require("src.inventory.Badges")
-    badges = Badges.count(game.data, save) or 0
-  end)
-  if not ok then badges = 0 end
+  local seen, owned = Gen.dexCounts(save)
+  local badges = Gen.badgeCount(game, save)
 
   -- Deliberately no money: the card does not show another player's wallet,
   -- so there is no reason to put it on the wire.
@@ -770,7 +761,7 @@ function M.ownCard(a, b)
     name = M.playerName(game),
     sprite = M.spriteChoice(),
     profile = M.profile(game),
-    money = save and math.floor(tonumber(save.money) or 0) or 0,
+    money = Gen.money.get(save),
     -- the hub's number, not a local one: this is the row everybody else is
     -- reading off your card
     points = myPoints,
@@ -1975,7 +1966,8 @@ function M.install()
     { key = "code", label = "JOIN CODE", type = "text", default = "",
       maxLen = Config.CODE_ENTRY_MAX },
     { key = "sprite", label = "MY SPRITE", type = "choice",
-      default = Config.DEFAULT_SPRITE, choices = spriteChoices },
+      default = Gen.defaultSprite(ctx.game, mod.content and mod.content.sprites),
+      choices = spriteChoices },
     -- Holding B to run.  On by default because it is the reason the feature
     -- exists, and a row at all because B already means "cancel" everywhere
     -- else -- a player who finds their walk unexpectedly fast should have

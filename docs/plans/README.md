@@ -9,6 +9,7 @@ Working notes for features that were (or are being) implemented in this repo.
 
 | Plan | Notes |
 | --- | --- |
+| [`gen2-compatibility.md`](gen2-compatibility.md) | Dual Gen1+Gen2 hubs, BattleSim2, trade, co-op, e2e — awaiting approval |
 | [`party-wild-encounter.md`](party-wild-encounter.md) | Party vs Wild (`coop_wild`) — in progress |
 | [`coop-battle-intro-anims.md`](coop-battle-intro-anims.md) | CoopBattle intro balls + sequential Go!/POOF — implemented |
 | [`guild-focus-battle-ui.md`](guild-focus-battle-ui.md) | CoopBattle focus stage + side strips |

@@ -23,6 +23,7 @@
 local need, mod = ...
 local Config = need("Config")
 local World = need("World")
+local Gen = need("Gen")
 local Chars = need("Chars")
 local Toast = need("Toast")
 
@@ -669,8 +670,14 @@ function M:draw(game, viewport)
   -- included -- so a nameplate drawn unconditionally lands on top of
   -- whatever UI is open. These labels annotate the world, so they are drawn
   -- only while the world is what the player is actually looking at.
+  -- Gen 2 free-roam is an empty stack (top nil) with a live world.map; Gen 1
+  -- still requires the overworld state itself to be on top.
   local overworld = mod.world and mod.world:overworld()
-  if not (top and overworld and top == overworld) then
+  if not Gen.freeRoam(game, top) then
+    last.reached = "not-overworld"
+    return
+  end
+  if not overworld then
     last.reached = "not-overworld"
     return
   end

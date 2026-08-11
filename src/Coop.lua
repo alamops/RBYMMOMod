@@ -51,6 +51,7 @@
 local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
+local Gen = need("Gen")
 local CoopBattle = need("CoopBattle")
 
 local M = {}
@@ -216,7 +217,7 @@ function M:consume(result, blackout)
     local prize = (tonumber(engine.trainer.baseMoney) or 0) * best
     local save = encounter.game and encounter.game.save
     if prize > 0 and save then
-      save.money = math.min(999999, (tonumber(save.money) or 0) + prize)
+      Gen.money.set(save, math.min(999999, Gen.money.get(save) + prize))
     end
   end
 
@@ -269,17 +270,33 @@ function M.blacksOut(result, game)
   return true
 end
 
--- Where a blackout returns to, resolved the way OverworldState:healPoint
--- resolves it: the Center this player last slept in, then the world's own
--- declared boot heal point, then the spawn cell.
+-- Where a blackout returns to. Prefer the live overworld's own healPoint
+-- (Gen 1 OverworldState and Gen 2 World both expose it), then Gen 2's
+-- save.spawn / landmarks table, then the Gen 1 lastHeal / boot path.
 --
--- Read rather than asked for, because there is no facade call for it -- and
--- read in the engine's order rather than a simpler one, so a modded world that
--- moved its starting town sends co-op losers to the same place a solo loss
--- would. Nil is a real answer for a build with no field data at all, and the
+-- Nil is a real answer for a build with no field data at all, and the
 -- caller declines to warp rather than guessing a map name.
 function M.healPoint(game)
+  local ow = mod.world and mod.world:overworld()
+  if ow and type(ow.healPoint) == "function" then
+    local ok, target = pcall(function() return ow:healPoint() end)
+    if ok and type(target) == "table" and target.map then return target end
+    if not ok then
+      mod.log:warn("overworld healPoint failed (%s); falling back to save "
+        .. "spawn / lastHeal", tostring(target))
+    end
+  end
+
   local save = game and game.save
+  if save and save.spawn then
+    local landmarks = (ow and ow.landmarks)
+      or (game and game.data and game.data.landmarks)
+    local row = landmarks and landmarks.spawns and landmarks.spawns[save.spawn]
+    if type(row) == "table" and row.map then
+      return { map = row.map, x = row.x, y = row.y, spawn = save.spawn }
+    end
+  end
+
   local last = save and save.lastHeal
   if last and last.map then return last end
   local data = game and game.data
@@ -370,7 +387,7 @@ function M:blackout(game)
   local world = game.data and game.data.constants and game.data.constants.world
   local divisor = tonumber(world and world.blackoutMoneyDivisor) or 2
   if divisor > 0 then
-    save.money = math.floor((tonumber(save.money) or 0) / divisor)
+    Gen.money.set(save, math.floor(Gen.money.get(save) / divisor))
   end
   -- DisplayPlayerBlackedOutText clears BIT_ALWAYS_ON_BIKE; a player who blacks
   -- out on a forced-bike route wakes up on foot, not pedalling indoors.

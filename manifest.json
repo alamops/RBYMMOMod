@@ -6,6 +6,7 @@
   "entry": "main.lua",
   "profile": "content",
   "category": "MECHANIC",
+  "games": ["gen1", "gen2"],
   "game_version": ">=0.0.0-0 <2.0.0",
   "priority": 50,
   "permissions": [

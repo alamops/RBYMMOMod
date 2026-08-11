@@ -16,6 +16,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Chat = need("Chat")
 local World = need("World")
+local Gen = need("Gen")
 local Chars = need("Chars")
 local Cast = need("Cast")
 local Places = need("Places")
@@ -1346,7 +1347,7 @@ function M:install()
       -- the same ceiling the START menu uses: (18 rows - 2 border) / 2
       maxVisible = 8,
       -- B goes back where it came from, like every vanilla submenu
-      onCancel = function() mod.ui.push(game, "StartMenu") end,
+      onCancel = function() mod.ui.push(game, Gen.startMenuId(game)) end,
     })
     -- the cursor survives closing the menu, as the original's does
     menu.index = math.min(cursor.main or 1, math.max(1, #items))
