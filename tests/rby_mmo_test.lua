@@ -11221,6 +11221,189 @@ end)()
   stubEvents = {}
 end)()
 
+-- ------- CoopBattle intro: appear line, sequential Go! / POOF / partner sent out
+--
+-- Headless drain of enter()'s local cinematic before the first choose menu.
+-- Pins message order and that POOF_ANIM (and Ball_Poof when Sound loads) fire.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local MSG_MIN_DWELL = 0.25
+
+  local function fakeAnimPlayer()
+    return {
+      start = function() end,
+      update = function() end,
+      isDone = function() return true end,
+    }
+  end
+
+  local function spyStartAnim()
+    local started = {}
+    local orig = CoopBattle.startAnim
+    CoopBattle.startAnim = function(self, row)
+      if row and row.anim then started[#started + 1] = row.anim end
+      return orig(self, row)
+    end
+    return started, function() CoopBattle.startAnim = orig end
+  end
+
+  local function spySoundPlay()
+    local played = {}
+    local eng = CoopBattle.loadEngine()
+    if not (eng and eng.Sound and eng.Sound.play) then
+      return played, function() end
+    end
+    local orig = eng.Sound.play
+    eng.Sound.play = function(data, name, ...)
+      played[#played + 1] = name
+      return orig(data, name, ...)
+    end
+    return played, function() eng.Sound.play = orig end
+  end
+
+  local function introClient(opts)
+    return setmetatable({
+      sim = opts.sim,
+      host = opts.host ~= false,
+      mine = opts.mine or 1,
+      mode = opts.mode,
+      messages = {},
+      phase = "intro",
+      frame = 0,
+      animPlayer = fakeAnimPlayer(),
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+  end
+
+  -- Advance messages with A/B after the dwell floor; stop at choose or cap.
+  local function drainIntro(client, cap)
+    cap = cap or 600
+    local history, lastShown = {}, nil
+    local function record()
+      if client.shown and client.shown ~= lastShown then
+        history[#history + 1] = client.shown
+        lastShown = client.shown
+      end
+    end
+    local input = {
+      wasPressed = function(_, k)
+        if k ~= "a" and k ~= "b" then return false end
+        return (client.msgClock or 0) >= MSG_MIN_DWELL
+      end,
+    }
+    client.game.input = input
+    for _ = 1, cap do
+      record()
+      CoopBattle.update(client, 1 / 60)
+      if client.phase == "choose" then
+        record()
+        break
+      end
+    end
+    return history
+  end
+
+  local function lineIndex(history, needle)
+    for i, line in ipairs(history) do
+      if tostring(line):find(needle, 1, true) then return i end
+    end
+    return nil
+  end
+
+  local function wildField()
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "WILD",
+        party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+
+  local function npcField()
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "TRAINER",
+        party = { mon(50, 20, { { id = "FIX_TACKLE", pp = 20 } }),
+                  mon(50, 18, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "TRAINER",
+        party = { mon(50, 19, { { id = "FIX_TACKLE", pp = 20 } }),
+                  mon(50, 17, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+
+  local function countAnim(started, name)
+    local n = 0
+    for _, anim in ipairs(started) do
+      if anim == name then n = n + 1 end
+    end
+    return n
+  end
+
+  local function heardSound(played, name)
+    for _, clip in ipairs(played) do
+      if clip == name then return true end
+    end
+    return false
+  end
+
+  do
+    local anims, restoreAnim = spyStartAnim()
+    local sounds, restoreSound = spySoundPlay()
+    local client = introClient({ sim = wildField(), mode = "coop_wild" })
+    CoopBattle.enter(client)
+    check(client.introBalls == true,
+          "coop_wild enter arms intro ball chrome before the appear line")
+    local history = drainIntro(client)
+    restoreAnim()
+    restoreSound()
+    eq(client.phase, "choose",
+       "coop_wild intro drains to the command menu headlessly")
+    local appear = lineIndex(history, "appeared!")
+    local go = lineIndex(history, "Go!")
+    local partner = lineIndex(history, "sent out")
+    check(appear ~= nil, "the Wild appeared line is shown")
+    check(go ~= nil, "Go! is shown after the appear line")
+    check(partner ~= nil, "the partner sent-out line is shown")
+    if appear and go and partner then
+      check(appear < go, "appear precedes Go!")
+      check(go < partner, "Go! precedes the partner sent-out line")
+    end
+    check(countAnim(anims, "POOF_ANIM") >= 1,
+          "at least one POOF_ANIM started during coop_wild intro")
+    if CoopBattle.loadEngine() and CoopBattle.loadEngine().Sound then
+      check(heardSound(sounds, "Ball_Poof"),
+            "Ball_Poof plays when POOF_ANIM starts and Sound is loaded")
+    end
+  end
+
+  do
+    local anims, restoreAnim = spyStartAnim()
+    local client = introClient({ sim = npcField(), mode = "coop_npc" })
+    CoopBattle.enter(client)
+    local history = drainIntro(client)
+    restoreAnim()
+    eq(client.phase, "choose",
+       "coop_npc intro drains to the command menu headlessly")
+    local battle = lineIndex(history, "2 on 2 battle!")
+    local go = lineIndex(history, "Go!")
+    local partner = lineIndex(history, "sent out")
+    check(battle ~= nil, "the 2 on 2 battle! line is shown")
+    check(go ~= nil, "Go! follows the non-wild appear line")
+    if battle and go then
+      check(battle < go, "2 on 2 battle! precedes Go!")
+    end
+    check(partner ~= nil, "the partner sent-out line still plays in coop_npc")
+    check(countAnim(anims, "POOF_ANIM") >= 1,
+          "at least one POOF_ANIM started during coop_npc intro")
+  end
+end)()
+
 -- ------- what a co-op battle is worth, and what it is not
 --
 -- **An NPC co-op battle pays no ranked points, deliberately.** Elo rates you
@@ -13432,8 +13615,19 @@ if eng and eng.BattleState then
   }
 
   local function battle(trainer)
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
     return setmetatable({
-      game = { data = data }, trainer = trainer, messages = {},
+      game = { data = data, save = { inventory = {}, party = {} } },
+      trainer = trainer, messages = {}, mine = 1, sim = sim,
       announce = function() end, say = function() end,
     }, { __index = CoopBattle })
   end

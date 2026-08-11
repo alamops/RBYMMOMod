@@ -121,6 +121,12 @@ local function loadEngine()
     engine = false
     return engine
   end
+  -- Optional SFX (Ball_Poof, entrance cries). Missing Sound must not fail the
+  -- whole load — headless / no-audio builds still fight without it.
+  do
+    local good, value = pcall(require, "src.core.Sound")
+    if good then parts.Sound = value end
+  end
   engine = parts
   return engine
 end
@@ -636,6 +642,113 @@ function M:wildIntroName()
   return "POKeMON"
 end
 
+-- Display name for an on-field battler (Go! / sent out lines).
+local function seatMonName(slot)
+  local battler = slot and slot.battler
+  if not battler then return "?" end
+  return battler.name
+    or (battler.mon and (battler.mon.nickname or battler.mon.species))
+    or "?"
+end
+
+-- Wire-safe trainer/player label for "Name sent out Y!".
+local function seatOwnerName(slot)
+  if not slot then return "Someone" end
+  local raw = slot.name
+  if type(raw) == "string" and raw ~= "" then
+    return Wire.name(raw) or raw
+  end
+  return "Someone"
+end
+
+-- Clear intro presentation flags (exit, forfeit, or battle over).
+function M:clearIntroFlags()
+  self.introBalls = nil
+  self.introHide = nil
+  self.growIn = nil
+end
+
+-- Entrance cry via optional Sound (same clips BattleState:playEntranceCry).
+function M:playEntranceCry(battler)
+  local mon = battler and battler.mon
+  if not mon then return end
+  local Sound = engine and engine.Sound
+  if not (Sound and Sound.playCry) then return end
+  pcall(Sound.playCry, self.game.data, mon.species,
+    mon.status == "SLP" and 37 or 11)
+end
+
+-- Grow-in scale for a slot this frame (nil when not growing). Stages match
+-- BattleState:growInScale: 0 / 3/7 / 5/7 over ~12 frames, then full.
+function M:growInScale(index)
+  local grow = self.growIn
+  if not grow or grow.slot ~= index then return nil end
+  local f = grow.frame or 0
+  return f < 3 and 0 or f < 7 and 3 / 7 or 5 / 7
+end
+
+-- After the opening appear line: wait, then sequential viewer-centric
+-- send-outs (my Go! → POOF/grow/cry, then partner sent out). Ball chrome is
+-- cleared when the appear page advances (see messages dismiss), not here.
+function M:queueIntroSendOut()
+  local sendWait = 40
+  do
+    local ok, Timing = pcall(require, "src.core.Timing")
+    if ok and Timing and Timing.BATTLE_START_SENDOUT then
+      sendWait = Timing.BATTLE_START_SENDOUT
+    end
+  end
+  self.messages[#self.messages + 1] = { wait = sendWait }
+
+  local mine = self.mine
+  local mySlot = self:mySlot()
+  self:say(("Go! %s!"):format(seatMonName(mySlot)))
+  self.messages[#self.messages + 1] = {
+    anim = "POOF_ANIM", from = mine, attackerIsPlayer = true,
+  }
+  self.messages[#self.messages + 1] = {
+    act = function(battle)
+      if battle.introHide then battle.introHide[mine] = nil end
+      local slot = battle.sim and battle.sim:slot(mine)
+      local battler = slot and slot.battler
+      if battler then
+        battle.growIn = { slot = mine, frame = 0 }
+        battle:playEntranceCry(battler)
+      end
+    end,
+  }
+  self.messages[#self.messages + 1] = { wait = 12 }
+
+  local partner = self:partnerOf(mySlot)
+  if not partner then
+    -- Seats we hid in enter() but will not animate must not stay blank.
+    if self.introHide then
+      for idx, _ in pairs(self.introHide) do
+        if idx ~= mine then self.introHide[idx] = nil end
+      end
+    end
+    return
+  end
+  local pIndex = partner.index
+  self:say(("%s sent out\n%s!"):format(
+    seatOwnerName(partner), seatMonName(partner)))
+  self.messages[#self.messages + 1] = {
+    anim = "POOF_ANIM", from = pIndex, attackerIsPlayer = true,
+  }
+  self.messages[#self.messages + 1] = {
+    act = function(battle)
+      if battle.introHide then battle.introHide[pIndex] = nil end
+      local slot = battle.sim and battle.sim:slot(pIndex)
+      local battler = slot and slot.battler
+      if battler then
+        battle.growIn = { slot = pIndex, frame = 0 }
+        battle:playEntranceCry(battler)
+      end
+    end,
+  }
+  self.messages[#self.messages + 1] = { wait = 12 }
+end
+
 function M:enter()
   -- The trainer theme, through the engine's own picker so a gym leader still
   -- gets a gym leader's music. `kind` is the battle's, not this screen's: a
@@ -646,6 +759,15 @@ function M:enter()
     pcall(eng.Music.playBattle, self.game.data, self:musicKind(),
       self.trainer and self.trainer.id or nil)
   end
+  -- Intro ball chrome + hide ally humans until their Go!/sent-out step.
+  -- Foes (wild / NPC) stay visible; no introSlide / trainer-back this pass.
+  self.introBalls = true
+  self.introHide = {}
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if slot.owner ~= nil and not self:foeSide(slot.index) then
+      self.introHide[slot.index] = true
+    end
+  end
   -- Party vs Wild is a grass encounter shared with a partner, not a 2-on-2:
   -- open with the same sentence solo wild uses (BattleState introText).
   if self.mode == "coop_wild" then
@@ -653,6 +775,7 @@ function M:enter()
   else
     self:say("2 on 2 battle!")
   end
+  self:queueIntroSendOut()
   self.phase = "messages"
   self.after = "choose"
   self:announce("coop_battle_started")
@@ -707,6 +830,7 @@ end
 
 function M:exit()
   self:refundUnspent()
+  self:clearIntroFlags()
 
   -- The world gets its music back on the way out, win or lose. The victory
   -- theme loops until something stops it -- each Defeated* song ends in a
@@ -840,6 +964,11 @@ local MSG_AUTO_ADVANCE = 1.6
 
 function M:update(dt)
   self.frame = self.frame + 1
+  -- Grow-in advances on the same fixed step as the engine's AnimateSendingOutMon.
+  if self.growIn then
+    self.growIn.frame = (self.growIn.frame or 0) + 1
+    if self.growIn.frame >= 12 then self.growIn = nil end
+  end
   if self.sim and not self.result then
     self:stepFocusSlides()
   end
@@ -911,17 +1040,35 @@ function M:update(dt)
       -- in the middle of the thing it is describing.
       local head = self.messages[1]
       if type(head) == "table"
-         and (head.anim or head.drain or head.faintfx) then
-        table.remove(self.messages, 1)
-        if head.anim then
-          self.acting = head.from or self.acting
-          self:startAnim(head)
-        elseif head.drain then
-          self:startDrain(head)
+         and (head.anim or head.drain or head.faintfx
+              or head.wait or head.act) then
+        -- Hold wait/act/anim behind opening appear line(s). Drop ball chrome
+        -- when the post-appear wait starts (not on every page advance), so a
+        -- multi-page appear does not begin the gap early.
+        if (head.wait or head.act or head.anim)
+           and self.shown ~= nil and self.introBalls then
+          -- fall through to dwell
+        elseif head.wait then
+          if self.introBalls then self.introBalls = nil end
+          head._t = (head._t or 0) + 1
+          if head._t >= (tonumber(head.wait) or 0) then
+            table.remove(self.messages, 1)
+          end
+          return
         else
-          self:startFaint(head)
+          table.remove(self.messages, 1)
+          if head.act then
+            if type(head.act) == "function" then pcall(head.act, self) end
+          elseif head.anim then
+            self.acting = head.from or self.acting
+            self:startAnim(head)
+          elseif head.drain then
+            self:startDrain(head)
+          else
+            self:startFaint(head)
+          end
+          return
         end
-        return
       end
       if self.shown == nil then
         local next = table.remove(self.messages, 1)
@@ -962,10 +1109,14 @@ function M:update(dt)
       -- on screen long enough to be read (see MSG_MIN_DWELL). The clock is not
       -- ticked while an effect runs, so the floor is a quarter of a second of
       -- the line actually being *up*, not of wall time under a flash.
+      local advance = false
       if self.msgClock >= MSG_MIN_DWELL
          and (input:wasPressed("a") or input:wasPressed("b")) then
-        self.shown = nil
+        advance = true
       elseif self.msgClock > MSG_AUTO_ADVANCE then
+        advance = true
+      end
+      if advance then
         self.shown = nil
       end
       return
@@ -2345,7 +2496,7 @@ function M:playEvents(events)
       -- the order the turn produced it rather than all at once at the end.
       self.messages[#self.messages + 1] =
         { anim = event.anim, from = event.from, to = event.to,
-          attackerIsPlayer = event.attackerIsPlayer }
+          attackerIsPlayer = event.attackerIsPlayer, amount = event.amount }
     elseif event.kind == "damage" then
       -- The replayers are told the resulting HP rather than the amount, so a
       -- dropped or reordered event cannot leave a bar drifting away from the
@@ -2795,6 +2946,7 @@ end
 function M:finish()
   if self.finished then return end
   self.finished = true
+  self:clearIntroFlags()
   self:snapDisplay()
   self.game.stack:pop()
 end
@@ -3698,6 +3850,7 @@ end
 
 function M:drawField()
   local hideFoes = self:showingTrainer()
+  local introHide = self.introHide
 
   for _, index in ipairs(self:paintOrder()) do
     local slot = self.sim:slot(index)
@@ -3707,13 +3860,38 @@ function M:drawField()
     local sprite = (sinking and sinking.battler and sinking.battler.sprite)
       or (battler and battler.sprite)
     local x, y, scale = self:picOriginFor(index, sprite)
-    if sprite and x and not (hideFoes and theirs) then
+    local hideIntro = introHide and introHide[index]
+    if sprite and x and not (hideFoes and theirs)
+       and not (theirs and self.foePicHidden)
+       and not hideIntro then
       if sinking then
         love.graphics.setColor(1, 1, 1, 1)
         pcall(drawSinking, sprite, x, y, sinking.frames, scale)
       elseif not hidden(slot, battler) then
-        love.graphics.setColor(1, 1, 1, 1)
-        love.graphics.draw(sprite, x, y, 0, scale, scale)
+        local gs = self:growInScale(index)
+        if gs == 0 then
+          -- Ball beat: blank until the first grow stage.
+        else
+          local drawScale = scale
+          local dx, dy = x, y
+          if gs then
+            drawScale = scale * gs
+            local sw, sh = 56, 56
+            local ok, w, h = pcall(sprite.getDimensions, sprite)
+            if ok and type(w) == "number" then sw, sh = w, h end
+            -- Feet + horizontal centre pinned (BattleState AnimateSendingOutMon).
+            dx = x + sw * scale * (1 - gs) / 2
+            if not theirs then
+              local inset = ALLY_FOOT_INSET
+              if inset > sh - 8 then inset = 0 end
+              dy = FIELD_FLOOR - (sh - inset) * drawScale
+            else
+              dy = y + sh * scale * (1 - gs)
+            end
+          end
+          love.graphics.setColor(1, 1, 1, 1)
+          love.graphics.draw(sprite, dx, dy, 0, drawScale, drawScale)
+        end
       end
     end
   end
@@ -3731,7 +3909,8 @@ function M:drawField()
   if foe then
     local battler = self:shownBattlerAt(foe)
     local slot = self.sim:slot(foe)
-    if battler and not hidden(slot, battler) then
+    if battler and not hidden(slot, battler)
+       and not (introHide and introHide[foe]) then
       Font.drawBox(FOE_HUD.tx, FOE_HUD.ty, FOE_HUD.tw, FOE_HUD.th)
       drawReadout(self, battler, FOE_HUD, 1, foe == self.mine)
     end
@@ -3740,10 +3919,29 @@ function M:drawField()
   if ally then
     local battler = self:shownBattlerAt(ally)
     local slot = self.sim:slot(ally)
-    if battler and not hidden(slot, battler) then
+    if battler and not hidden(slot, battler)
+       and not (introHide and introHide[ally]) then
       Font.drawBox(ALLY_HUD.tx, ALLY_HUD.ty, ALLY_HUD.tw, ALLY_HUD.th)
       drawReadout(self, battler, ALLY_HUD, 1, ally == self.mine)
     end
+  end
+  self:drawIntroBalls()
+end
+
+-- Party ball chrome under the opening appear line (both humans' parties).
+-- Positions approximate classic player row + a second row for the partner.
+function M:drawIntroBalls()
+  if not self.introBalls then return end
+  local BS = engine and engine.BattleState
+  if not (BS and BS.drawBallRow and love and love.graphics) then return end
+  local mySlot = self:mySlot()
+  local partner = self:partnerOf(mySlot)
+  love.graphics.setColor(1, 1, 1, 1)
+  if mySlot and mySlot.party then
+    pcall(BS.drawBallRow, BS, mySlot.party, 88, 80, 8)
+  end
+  if partner and partner.party then
+    pcall(BS.drawBallRow, BS, partner.party, 88, 64, 8)
   end
 end
 
@@ -3778,6 +3976,18 @@ local CLASSIC_ENEMY = { x = STAGE_FOE.x, y = STAGE_FOE.y }
 
 function M:startAnim(row)
   self.anim = row
+  -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
+  if row.anim == "HIDEPIC_ANIM" then
+    self.foePicHidden = true
+  elseif row.anim == "SHOWPIC_ANIM" then
+    self.foePicHidden = nil
+  elseif row.anim == "POOF_ANIM" then
+    -- Intro send-out and catch ball chain both play SFX_BALL_POOF.
+    local Sound = engine and engine.Sound
+    if Sound and Sound.play then
+      pcall(Sound.play, self.game.data, "Ball_Poof")
+    end
+  end
   if not (self.animPlayer and self.animPlayer.start) then
     -- No animation data in this build: the flash is skipped and the messages
     -- carry on, which is the degrade the header promises.
@@ -3796,7 +4006,13 @@ function M:startAnim(row)
   else
     isPlayer = true
   end
-  local ok = pcall(self.animPlayer.start, self.animPlayer, row.anim, isPlayer)
+  local ball = self.medBall
+  local opts = {
+    shakes = row.amount,
+    ball = ball,
+    ballFlicker = ball == "MASTER_BALL" or ball == "ULTRA_BALL" or nil,
+  }
+  local ok = pcall(self.animPlayer.start, self.animPlayer, row.anim, isPlayer, opts)
   if not ok then self.anim = nil end
   return ok
 end
@@ -5129,13 +5345,22 @@ function M:medRows(msg)
   elseif kind == "anim" then
     -- Play via the existing AnimPlayer path; if mapping fails `startAnim`
     -- no-ops safely. The "X used MOVE" line rides in the `msg` beside this.
+    -- `amount` is shake count on SHAKE_ANIM; ball id is stashed from `item`.
     if index then
       rows[#rows + 1] = {
         kind = "anim", anim = msg.text, from = index,
+        amount = msg.amount,
         -- Viewer-relative: this client's ally side faces as the player.
         attackerIsPlayer = not self:foeSide(index),
       }
     end
+
+  elseif kind == "item" then
+    -- Ball id for AnimPlayer opts on the following toss/shake chain.
+    local Effects = need("BattleSim/Effects")
+    local effect = msg.text and Effects.itemEffect(msg.text)
+    if effect and effect.ball then self.medBall = msg.text end
+    say(msg.text)
 
   elseif kind == "switch" then
     -- Already said in the `msg` beside it, and the `send` that follows every
@@ -5153,7 +5378,7 @@ function M:medRows(msg)
     -- trainer's name as a battle line.
 
   else
-    -- status, stat, item, run, wait, reconnect: the referee's own sentence is
+    -- status, stat, run, wait, reconnect: the referee's own sentence is
     -- the whole of what they contribute to a screen today. The state they
     -- describe rides on the events beside them -- a status that gated a move is
     -- followed by the `damage` that did or did not happen.
@@ -5282,6 +5507,10 @@ function M:onBattleEvent(msg)
   elseif msg.t == "over" then
     self.medMustReplace = nil
     self.replacing = nil
+    -- Ball opts / foe hide outlive the turn event: anims still drain from the
+    -- message queue after medFlush. Cleared when the fight ends.
+    self.medBall = nil
+    self.foePicHidden = nil
     self:medFlush()
   end
   return true

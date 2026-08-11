@@ -348,6 +348,14 @@ if [ "${MMO_PARTY_WILD_E2E:-}" = "1" ]; then
     dump_logs
     exit 1
   fi
+  host_catch=$(count 'catch grant:' "$HOST_LOG"); host_catch=${host_catch:-0}
+  guest_no=$(count 'no catch grant on guest:' "$GUEST_LOG"); guest_no=${guest_no:-0}
+  echo "  catch grant lines: host=$host_catch guest_no_grant=$guest_no"
+  if [ "$host_catch" -lt 1 ] || [ "$guest_no" -lt 1 ]; then
+    echo "  !! Party-vs-Wild MASTER_BALL catch grant was not logged on both sides"
+    dump_logs
+    exit 1
+  fi
 fi
 echo "  RESULT: end-to-end passed. Screenshots in $SHOT_DIR"
 rm -f "$HOST_LOG" "$GUEST_LOG"

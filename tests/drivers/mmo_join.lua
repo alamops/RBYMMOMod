@@ -441,7 +441,10 @@ return function(game)
   end
 
   -- ------- party wild (focused e2e; see run-party-wild-e2e.sh)
+  -- Partner auto-joins, files FIGHT while the host throws MASTER_BALL, and
+  -- must *not* receive the catch grant (catcher = thrower only).
   if os.getenv("MMO_PARTY_WILD_E2E") == "1" then
+    local WILD_SPECIES = "PIDGEY"
     local announced = H.listenForModEvents(game, {
       "mod.rby_mmo.coop_battle_started",
       "mod.rby_mmo.coop_battle_ended",
@@ -455,6 +458,9 @@ return function(game)
     end, 120)
     check(paired, "the party formed on the guest over the in-game hub")
     H.signal("guest_party_joined")
+
+    local partyBefore = H.partySpeciesCount(game)
+    local speciesBefore = H.partySpeciesCount(game, WILD_SPECIES)
 
     H.await(game, "host_wild_waiting")
     local joined = H.waitSeconds(game, function()
@@ -505,6 +511,15 @@ return function(game)
     check(medGaps == 0, "and no gaps in the mediated event stream")
     check(announced["mod.rby_mmo.coop_battle_ended"] >= 1,
           "coop_battle_ended fired after Party vs Wild")
+
+    local partyAfter = H.partySpeciesCount(game)
+    local speciesAfter = H.partySpeciesCount(game, WILD_SPECIES)
+    check(partyAfter == partyBefore,
+          "non-catcher party size unchanged after the host's catch")
+    check(speciesAfter == speciesBefore,
+          ("non-catcher did not receive the caught %s"):format(WILD_SPECIES))
+    log(("no catch grant on guest: party %d, %s %d"):format(
+      partyAfter, WILD_SPECIES, speciesAfter))
     U.shot(game, SHOT_DIR .. "/join-party-wild-after.png")
     H.signal("guest_wild_done")
     H.await(game, "host_wild_done")

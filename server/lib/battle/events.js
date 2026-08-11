@@ -98,7 +98,8 @@ const FIELDS = {
 //     `text` carries the sentence either way.
 const SHAPES = {
   msg: { text: true },
-  anim: { slot: true, side: true, text: "the move's id" },
+  anim: { slot: true, side: true, text: 'move or ball-anim id',
+    amount: 'shake count on SHAKE_ANIM (0-3)' },
   damage: {
     slot: true, side: true, amount: true, hp: 'hp left',
     status: 'set when a residual dealt it',

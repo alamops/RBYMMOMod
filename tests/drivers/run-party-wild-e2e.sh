@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Focused end-to-end: two partied players on the same map, host steps a wild
-# encounter, both auto-join into hub-refereed coop_wild, then RUN or a short
-# fight ends it.
+# encounter, both auto-join into hub-refereed coop_wild, host throws a
+# MASTER_BALL, and the catcher grant lands in the host party.
 #
 # Reuses mmo_host.lua / mmo_join.lua. Both early-exit after party formation
 # and the wild divert once MMO_PARTY_WILD_E2E=1 (see the "party wild" blocks

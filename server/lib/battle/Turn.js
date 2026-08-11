@@ -1475,6 +1475,8 @@ class Battle {
           this._say('But it failed');
         } else {
           const result = Effects.catchAttempt(choice.item, target, this.rng);
+          // Gen1 TossBallAnimation chain before the catch text (engine ballChain).
+          this._emitBallChain(fighter, choice.item, result.caught, result.shakes);
           if (result.shakes > 0 && !result.caught) this._say('The ball shook');
           if (result.caught) {
             this._say('Gotcha');
@@ -1680,6 +1682,30 @@ class Battle {
           this._say('But it failed');
         }
       }
+    }
+  }
+
+  // Gen1 TossBallAnimation event stream (mirror BattleState:ballChain / tossAnimFor).
+  // Clients pair AnimPlayer opts.ball from the preceding `item` event's text.
+  _emitBallChain(fighter, ballId, caught, shakes) {
+    const slot = fighter.slot;
+    const side = fighter.side;
+    const toss = ballId === 'POKE_BALL' ? 'TOSS_ANIM'
+      : ballId === 'GREAT_BALL' ? 'GREATTOSS_ANIM'
+      : 'ULTRATOSS_ANIM';
+    const anim = (text, amount) => {
+      const fields = { slot, side, text };
+      if (amount !== undefined) fields.amount = amount;
+      this._emit('anim', fields);
+    };
+    anim(toss);
+    anim('POOF_ANIM');
+    if (!caught && !(shakes > 0)) return;
+    anim('HIDEPIC_ANIM');
+    anim('SHAKE_ANIM', shakes || 0);
+    if (!caught) {
+      anim('POOF_ANIM');
+      anim('SHOWPIC_ANIM');
     }
   }
 

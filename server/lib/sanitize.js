@@ -1089,8 +1089,8 @@ function cleanBattleEvent(raw) {
 
   const event = { battle, seq, t: raw.t };
   if (raw.text !== undefined && raw.text !== null) {
-    // Item events carry an id in `text`, not prose -- cleanText strips `_`.
-    const text = raw.t === 'item'
+    // Item / anim `text` is an id (POKE_BALL, TOSS_ANIM, move id) — cleanText strips `_`.
+    const text = (raw.t === 'item' || raw.t === 'anim')
       ? cleanId(raw.text)
       : cleanText(raw.text, MESSAGE_MAX);
     if (text) event.text = text;

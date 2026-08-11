@@ -934,9 +934,10 @@ function M:onEvent(msg)
 
   elseif kind == "anim" then
     -- Queued with the message stream so the flash lands in referee order.
+    -- `amount` is shake count on SHAKE_ANIM; ball id is stashed from `item`.
     if msg.text then
       self.lines[#self.lines + 1] = {
-        anim = msg.text, slot = msg.slot, side = msg.side,
+        anim = msg.text, slot = msg.slot, side = msg.side, amount = msg.amount,
       }
     end
 
@@ -1011,6 +1012,9 @@ function M:onEvent(msg)
     if msg.slot == self:mySlot() then
       self:confirmPendingItem(msg.text, msg.amount)
     end
+    -- Ball id for AnimPlayer opts on the following toss/shake chain.
+    local effect = msg.text and Effects.itemEffect(msg.text)
+    if effect and effect.ball then self.medBall = msg.text end
 
   elseif kind == "turn" then
     -- Held rather than acted on: the lines this turn's events produced are
@@ -1023,6 +1027,7 @@ function M:onEvent(msg)
     -- Hub refused the item (never debited) or spend already landed via `item`.
     self.pendingItem = nil
     self.pendingItemSlot = nil
+    -- Keep medBall through the queued toss/shake anims (they drain after turn).
 
   elseif kind == "over" then
     -- The field is done; the outcome is a separate message and is what this
@@ -1033,6 +1038,8 @@ function M:onEvent(msg)
     self.replaceOnly = false
     self.pendingItem = nil
     self.pendingItemSlot = nil
+    self.medBall = nil
+    self.foePicHidden = nil
 
   elseif kind == "wait" then
     if msg.text then self:say(("Waiting for\n%s..."):format(msg.text)) end
@@ -1776,6 +1783,12 @@ end
 
 function M:startAnim(row)
   self.anim = row
+  -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
+  if row.anim == "HIDEPIC_ANIM" then
+    self.foePicHidden = true
+  elseif row.anim == "SHOWPIC_ANIM" then
+    self.foePicHidden = nil
+  end
   local player = self:ensureAnimPlayer()
   if not (player and player.start) then
     return
@@ -1784,7 +1797,13 @@ function M:startAnim(row)
   -- the flash the right way rather than always as the foe.
   local mine = row.slot == self:mySlot()
     or (row.side ~= nil and row.side == self.mySide)
-  local ok = pcall(player.start, player, row.anim, mine)
+  local ball = self.medBall
+  local opts = {
+    shakes = row.amount,
+    ball = ball,
+    ballFlicker = ball == "MASTER_BALL" or ball == "ULTRA_BALL" or nil,
+  }
+  local ok = pcall(player.start, player, row.anim, mine, opts)
   if not ok then self.anim = row end -- still hold briefly via dwell path
 end
 
@@ -1913,7 +1932,7 @@ function M:drawFieldPics()
   love.graphics.setColor(1, 1, 1, 1)
   -- Draw while the sprite is held -- including at 0 HP through the move flash
   -- and "X fainted!". `releasePic` (after that line) is what takes it down.
-  if foe and foe.sprite then
+  if foe and foe.sprite and not self.foePicHidden then
     local x, y = self:enemyPicXY(foe.sprite)
     pcall(love.graphics.draw, foe.sprite, x, y)
   end

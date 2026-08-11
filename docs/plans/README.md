@@ -10,6 +10,7 @@ Working notes for features that were (or are being) implemented in this repo.
 | Plan | Notes |
 | --- | --- |
 | [`party-wild-encounter.md`](party-wild-encounter.md) | Party vs Wild (`coop_wild`) — in progress |
+| [`coop-battle-intro-anims.md`](coop-battle-intro-anims.md) | CoopBattle intro balls + sequential Go!/POOF — implemented |
 | [`guild-focus-battle-ui.md`](guild-focus-battle-ui.md) | CoopBattle focus stage + side strips |
 | [`hub-twin-parity.md`](hub-twin-parity.md) | Hub.lua ↔ relay.js drift process + carve-outs |
 | [`battle-sim-move-effects.md`](battle-sim-move-effects.md) | Complete; locked BattleSim decisions |

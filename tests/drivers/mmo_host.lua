@@ -513,9 +513,10 @@ return function(game)
     -- ------- party wild (focused e2e; see run-party-wild-e2e.sh)
     --
     -- Form a party, stage a wild on the host, assert coop_wild divert and
-    -- hub-refereed 2v1, then end with a short driven fight. Skips trade,
+    -- hub-refereed 2v1, throw MASTER_BALL, assert catcher grant. Skips trade,
     -- link battle, and the coop_npc trainer leg.
     if os.getenv("MMO_PARTY_WILD_E2E") == "1" then
+      local WILD_SPECIES = "PIDGEY"
       local announced = H.listenForModEvents(game, {
         "mod.rby_mmo.coop_battle_started",
         "mod.rby_mmo.coop_battle_ended",
@@ -542,8 +543,14 @@ return function(game)
       H.await(game, "guest_party_joined")
       H.closeToOverworld(game)
 
+      -- Bag sheet is uploaded when the mediated fight starts; seed before divert.
+      check(H.giveItem(game, "MASTER_BALL", 1), "seeded a MASTER_BALL for the catch")
+      local partyBefore = H.partySpeciesCount(game)
+      local speciesBefore = H.partySpeciesCount(game, WILD_SPECIES)
+      local ballsBefore = (game.save.inventory and game.save.inventory.MASTER_BALL) or 0
+
       local wildFinished = nil
-      local staged = H.stageWild(game, "PIDGEY", 5, function(result)
+      local staged = H.stageWild(game, WILD_SPECIES, 5, function(result)
         wildFinished = result
       end)
       check(staged ~= nil, "staged a wild battle on the host")
@@ -585,13 +592,14 @@ return function(game)
       check(announced["mod.rby_mmo.coop_battle_started"] >= 1,
             "coop_battle_started fired for Party vs Wild")
 
-      if onField then
-        check(H.awaitCommandMenu(game, "the command menu for the wild shot"),
-              "the coop_wild command grid opens")
-        U.wait(30)
-        U.shot(game, SHOT_DIR .. "/host-party-wild-battle.png")
-        check(exports.coopDrawFailed() == false, "and it drew without error")
-      end
+      check(H.awaitCommandMenu(game, "the command menu before MASTER_BALL"),
+            "the coop_wild command grid opens")
+      U.wait(30)
+      U.shot(game, SHOT_DIR .. "/host-party-wild-battle.png")
+      check(exports.coopDrawFailed() == false, "and it drew without error")
+      check(H.throwBattleItem(game, "MASTER_BALL"),
+            "filed MASTER_BALL from the ITEM menu")
+      log("threw MASTER_BALL")
 
       local medGaps = 0
       local over = H.drivePrompts(game, function()
@@ -613,6 +621,18 @@ return function(game)
       check(medGaps == 0, "and no gaps in the mediated event stream")
       check(announced["mod.rby_mmo.coop_battle_ended"] >= 1,
             "coop_battle_ended fired after Party vs Wild")
+
+      local ballsAfter = (game.save.inventory and game.save.inventory.MASTER_BALL) or 0
+      check(ballsAfter < ballsBefore, "MASTER_BALL was spent on the catch")
+      local partyAfter = H.partySpeciesCount(game)
+      local speciesAfter = H.partySpeciesCount(game, WILD_SPECIES)
+      check(partyAfter > partyBefore,
+            "catcher party grew after the MASTER_BALL catch")
+      check(speciesAfter > speciesBefore,
+            ("caught %s was granted to the host party"):format(WILD_SPECIES))
+      log(("catch grant: party %d -> %d, %s %d -> %d, balls %d -> %d"):format(
+        partyBefore, partyAfter, WILD_SPECIES, speciesBefore, speciesAfter,
+        ballsBefore, ballsAfter))
       log("engine wild result:", tostring(wildFinished))
       U.shot(game, SHOT_DIR .. "/host-party-wild-after.png")
       H.signal("host_wild_done")

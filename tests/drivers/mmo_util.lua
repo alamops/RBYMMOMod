@@ -736,11 +736,11 @@ local PHASE = {
   -- ------- party-wild e2e (tests/drivers/run-party-wild-e2e.sh)
   --
   -- Party on the same map, host stages a wild via stageWild, partner
-  -- auto-joins into mediated coop_wild, both sides RUN or fight it out.
+  -- auto-joins into mediated coop_wild, host throws MASTER_BALL to catch.
   host_wild_waiting      = 180,  -- stageWild + coop_wild wait box
   guest_wild_joined      = 240,  -- auto-join + three-slot field up
-  host_wild_done         = 300,  -- drivePrompts to a decision
-  guest_wild_done        = 300,  -- the same
+  host_wild_done         = 360,  -- ITEM throw + drain to Gotcha / grant
+  guest_wild_done        = 360,  -- partner FIGHTs while host catches
 
   -- ------- the four-client scenario (tests/drivers/run-quad-e2e.sh)
   --
@@ -1181,6 +1181,53 @@ function M.stageWild(game, species, level, onFinish)
   battle.onFinish = onFinish
   game.stack:push(battle)
   return battle
+end
+
+-- Put a battle-usable item in the live bag (and clear the battle item cache).
+-- Call before the mediated bag sheet is uploaded so the hub sees the count.
+function M.giveItem(game, itemId, count)
+  if not (game and game.save and type(itemId) == "string") then return false end
+  game.save.inventory = game.save.inventory or {}
+  game.save.inventory[itemId] = (game.save.inventory[itemId] or 0)
+    + (count or 1)
+  local top = M.top(game)
+  if top and top.itemList ~= nil then top.itemList = nil end
+  return true
+end
+
+-- Count party mons matching a species id (or total party size when species is nil).
+function M.partySpeciesCount(game, species)
+  local party = game and game.save and game.save.party or {}
+  if species == nil then return #party end
+  local n = 0
+  for _, mon in ipairs(party) do
+    if mon and mon.species == species then n = n + 1 end
+  end
+  return n
+end
+
+-- Classic command grid: FIGHT SWITCH / ITEM RUN. From FIGHT, DOWN then A opens
+-- the bag; another A commits the highlighted row. Balls need no party pick.
+-- Prefer an empty-ish bag so the first row is the item under test.
+function M.throwBattleItem(game, itemId)
+  local top = M.top(game)
+  if not (top and top.sim and top.phase == "choose") then return false end
+  local U = M.U
+  U.tap(game, "down"); U.wait(6)
+  U.tap(game, "a");    U.wait(10)
+  if top.phase ~= "item" then
+    top = M.top(game)
+    if not (top and top.phase == "item") then return false end
+  end
+  -- Walk the bag list to the requested id when present; otherwise take row 1.
+  local items = top.usableItems and top:usableItems() or {}
+  local want = 1
+  for i, row in ipairs(items) do
+    if row.id == itemId then want = i break end
+  end
+  top.itemIndex = want
+  U.tap(game, "a"); U.wait(20)
+  return true
 end
 
 -- Wait until the co-op command grid is really the thing on screen.

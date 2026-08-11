@@ -1535,9 +1535,9 @@ function M.battleEvent(raw)
   if not (battle and seq) then return nil end
 
   local out = { battle = battle, seq = seq, t = raw.t }
-  -- Item events carry an id in `text`, not prose -- M.text would strip `_`.
+  -- Item / anim `text` is an id (POKE_BALL, TOSS_ANIM, move id) — M.text strips `_`.
   if raw.text ~= nil then
-    if raw.t == "item" then
+    if raw.t == "item" or raw.t == "anim" then
       out.text = M.id(raw.text)
     else
       out.text = M.text(raw.text, Config.MESSAGE_MAX)

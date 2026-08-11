@@ -106,7 +106,8 @@ M.FIELDS = {
 -- field it has and is compared rather than sized, so a long fight is fine.
 M.SHAPES = {
   msg       = { text = true },
-  anim      = { slot = true, side = true, text = "the move's id" },
+  anim      = { slot = true, side = true, text = "move or ball-anim id",
+                amount = "shake count on SHAKE_ANIM (0-3)" },
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
   drain     = { slot = true, side = true, amount = true, hp = true },

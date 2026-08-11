@@ -1523,6 +1523,8 @@ function Battle:_resolveOneItem(fighter)
         self:_say("But it failed")
       else
         local caught, shakes = Effects.catchAttempt(choice.item, target, self.rng)
+        -- Gen1 TossBallAnimation chain before the catch text (engine ballChain).
+        self:_emitBallChain(fighter, choice.item, caught, shakes)
         if shakes and shakes > 0 and not caught then
           self:_say("The ball shook")
         end
@@ -1728,6 +1730,29 @@ function Battle:_resolveOneItem(fighter)
         self:_say("But it failed")
       end
     end
+  end
+end
+
+-- Gen1 TossBallAnimation event stream (mirror BattleState:ballChain / tossAnimFor).
+-- Clients pair AnimPlayer opts.ball from the preceding `item` event's text.
+function Battle:_emitBallChain(fighter, ballId, caught, shakes)
+  local slot, side = fighter.slot, fighter.side
+  local toss = ballId == "POKE_BALL" and "TOSS_ANIM"
+    or ballId == "GREAT_BALL" and "GREATTOSS_ANIM"
+    or "ULTRATOSS_ANIM"
+  local function anim(text, amount)
+    local fields = { slot = slot, side = side, text = text }
+    if amount ~= nil then fields.amount = amount end
+    self:_emit("anim", fields)
+  end
+  anim(toss)
+  anim("POOF_ANIM")
+  if not caught and (not shakes or shakes == 0) then return end
+  anim("HIDEPIC_ANIM")
+  anim("SHAKE_ANIM", shakes or 0)
+  if not caught then
+    anim("POOF_ANIM")
+    anim("SHOWPIC_ANIM")
   end
 end
 
