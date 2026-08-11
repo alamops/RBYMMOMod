@@ -21,12 +21,12 @@
 -- own host-authoritative branch already takes for `action`/`event` in a link
 -- battle, one player wider.
 --
--- The upshot for this file: for **hub-refereed** coop modes (always
--- `coop_pvp` / `coop_npc`), the intermediator decides and this screen draws
--- an ordered `mmo.battle_event` stream — same as MediatedBattle. `CoopSim`
--- is still constructed to hold the field the screen is drawn from, and is
--- not asked to *decide* anything. See "the intermediator, when there is one"
--- near the bottom.
+-- The upshot for this file: for **hub-refereed** coop modes (always the three
+-- in Config.MEDIATED_COOP — `coop_pvp` / `coop_npc` / `coop_wild`), the
+-- intermediator decides and this screen draws an ordered `mmo.battle_event`
+-- stream — same as MediatedBattle. `CoopSim` is still constructed to hold the
+-- field the screen is drawn from, and is not asked to *decide* anything. See
+-- "the intermediator, when there is one" near the bottom.
 --
 -- ------- what this covers
 --
@@ -43,17 +43,20 @@
 -- a potion heals and an item that refuses mid-battle refuses in the engine's
 -- words. SWITCH costs the turn, as it does in the original.
 --
--- A thrown ball is **refused**, and that is the complete behaviour rather than
--- a missing one: every monster on the far side belongs to a trainer, and Gen 1
--- does not let you catch somebody else's. It is refused in the original's own
--- words, taken from the game's text table.
+-- A thrown ball is **refused** against a trainer (`coop_npc` / host-sim), and
+-- that is the complete behaviour rather than a missing one: every monster on
+-- the far side belongs to somebody, and Gen 1 does not let you catch somebody
+-- else's. It is refused in the original's own words, taken from the game's
+-- text table. Against **`coop_wild`** the far side is wildlife, so balls are
+-- legal — the referee resolves them (speed-ordered among ball choices).
 --
--- RUN is two questions wearing one label, and they are answered separately.
+-- RUN is three questions wearing one label, and they are answered separately.
 -- Against an **NPC trainer** it is the original's question and keeps the
 -- original's refusal, word for word. Against **two other players** it is a
 -- question Gen 1 never had to ask -- and the answer is yes, with the consent of
--- the partner who shares the loss. See "RUN, in a battle where the other side
--- is people" below for the whole of it.
+-- the partner who shares the loss. Against a **partied wild** (`coop_wild`) it
+-- is solo-wild semantics: either player flees unilaterally, no consent ask.
+-- See "RUN, in a battle where the other side is people" below for the PvP half.
 
 local need, mod = ...
 local Config = need("Config")
@@ -213,7 +216,12 @@ end
 --   battleId  the hub's id for this fight, which every mediated message names
 --   selfId    this client's own hub id, which is how an outcome naming four
 --             players is read as a result for one
---   mode      "coop_npc" | "coop_pvp", the hub's word for which shape this is
+--   mode      "coop_npc" | "coop_pvp" | "coop_wild", the hub's word for which
+--             shape this is (Config.MEDIATED_COOP)
+--   wildCatchMon  engine mon kept for Party.add / Boxes.deposit on a catch
+--                 (coop_wild; host and preferably partner both stash one)
+--   wildParty     optional prebuilt battleMon sheets for the host's side-"b"
+--                 upload; else snapshotMons of wildCatchMon
 function M.new(game, opts)
   local eng = loadEngine()
   if not eng then return nil, "2-on-2 battles need the engine's battle modules." end
@@ -259,6 +267,10 @@ function M.new(game, opts)
     battleId = opts.battleId,
     selfId = opts.selfId,
     mode = opts.mode,
+    -- coop_wild grant material: engine mon for Party.add, optional sheets for
+    -- the host's side-b upload (else snapshot of wildCatchMon at upload time).
+    wildCatchMon = opts.wildCatchMon,
+    wildParty = opts.wildParty,
     mediated = false,
     medUploaded = false,
     medFailed = false, -- upload refused; do not fall back to host-sim
@@ -1102,8 +1114,11 @@ function M:updateCommand(input)
       self.itemIndex = 1
       self.phase = "item"
     elseif command == "RUN" then
-      -- Two different questions behind one command, told apart by who is on
-      -- the other side of the field (M:partyBattle).
+      -- Three different questions behind one command.
+      --
+      -- Against a **partied wild** (`coop_wild`) it is solo-wild semantics:
+      -- either player flees unilaterally. No COOP_RUN_ASK / partner consent —
+      -- the choice goes straight to the referee (or host-sim commit).
       --
       -- Against a **trainer** it is the original's question, and the original's
       -- answer: you cannot run from a trainer battle. Filed as an action rather
@@ -1115,7 +1130,9 @@ function M:updateCommand(input)
       -- ends the battle for four people and books the pair who left a ranked
       -- loss, so the other half of that pair is asked first (M:askToRun).
       -- Nothing is committed until they answer -- see the state machine there.
-      if self:partyBattle() then
+      if self.mode == "coop_wild" then
+        self:commit({ slot = self.mine, kind = "run" })
+      elseif self:partyBattle() then
         self:askToRun()
       else
         self:commit({ slot = self.mine, kind = "run" })
@@ -1678,8 +1695,12 @@ function M:mediatedRunAsk()
   return true
 end
 
--- Ask the partner. Commits nothing.
+-- Ask the partner. Commits nothing — except `coop_wild`, which never asks:
+-- flee is unilateral (solo-wild), so this routes to a run choice instead.
 function M:askToRun()
+  if self.mode == "coop_wild" then
+    return self:commit({ slot = self.mine, kind = "run" })
+  end
   if not self:partyBattle() then return false end
   if self.mediated then return self:mediatedRunAsk() end
   local partner = self:partnerOf(self:mySlot())
@@ -4648,11 +4669,12 @@ end
 -- batch (`turn`, or `over`), which makes an arriving turn look exactly like the
 -- single `res` the client-simulated path sends.
 
--- Is this mode hub-refereed? Always for shipped coop_pvp / coop_npc — not a
--- Config toggle. Host-sim for those modes was removed (BattleSim vs engine
+-- Is this mode hub-refereed? Always for Config.MEDIATED_COOP
+-- (`coop_pvp` / `coop_npc` / `coop_wild`) — not a Config toggle beyond that
+-- table. Host-sim for those modes was removed (BattleSim vs engine
 -- ItemEffects must not diverge). CoopSim remains for field layout / tests.
 function M.mediates(mode)
-  return mode == "coop_pvp" or mode == "coop_npc"
+  return mode == "coop_pvp" or mode == "coop_npc" or mode == "coop_wild"
 end
 
 -- ------- 1. what we are bringing
@@ -4669,6 +4691,9 @@ end
 --
 -- One party and not two, because the intermediator seats one npc: see
 -- Config.MEDIATED_COOP's first reason.
+--
+-- **Not used for `coop_wild`.** Wild is one mon on side b; interleave would
+-- invent a second trainer slot. See `uploadMediated`'s coop_wild branch.
 function M:npcMons()
   if not self.sim then return nil end
   local parties = {}
@@ -4691,6 +4716,19 @@ function M:npcMons()
     index = index + 1
   end
   return Mediated.snapshotMons(self.game, flat)
+end
+
+-- Sheets for the wild seat (coop_wild side b): prebuilt `wildParty`, else a
+-- snapshot of the stashed `wildCatchMon`. Never npcMons interleave — that
+-- assumes two ownerless trainer slots.
+function M:wildMons()
+  if type(self.wildParty) == "table" and #self.wildParty > 0 then
+    return self.wildParty
+  end
+  if self.wildCatchMon then
+    return Mediated.snapshotMons(self.game, { self.wildCatchMon })
+  end
+  return nil
 end
 
 -- Offer this fight to the intermediator.
@@ -4743,6 +4781,17 @@ function M:uploadMediated()
     else
       mod.log:warn("the trainer's party could not be described for a refereed "
         .. "2-on-2 -- report which trainer it was")
+      self.medFailed = true
+    end
+  elseif self.host and self.mode == "coop_wild" then
+    -- One wild mon on side b (not npcMons — that re-interleaves two trainer
+    -- slots). Sheets from wildParty or a snapshot of wildCatchMon.
+    local wild = self:wildMons()
+    if wild and #wild > 0 then
+      Mediated.sendParty(self.transport, self.battleId, wild, "b")
+    else
+      mod.log:warn("the wild POKeMON could not be described for a refereed "
+        .. "party encounter -- report this with the map and the encounter")
       self.medFailed = true
     end
   end
@@ -4843,6 +4892,7 @@ local MED_REASONS = {
   run        = "Someone ran away!",
   forfeit    = "Someone gave up.",
   agree      = "The battle was\ncalled off.",
+  catch      = "Gotcha!",
 }
 
 -- One wire event, as rows `playEvents` understands.
@@ -5158,7 +5208,42 @@ function M:onBattleOutcome(msg)
     self.medPending[#self.medPending + 1] = { kind = "msg", text = why }
   end
   self:medFlush()
+  -- Catcher-only grant: everyone sees Gotcha; only msg.catcher adds the mon.
+  if msg.reason == "catch" then
+    local catcher = msg.catcher
+    if catcher ~= nil and (catcher == self.selfId
+        or tostring(catcher) == tostring(self.selfId)) then
+      self:grantCatch(msg)
+    end
+  end
   return true
+end
+
+-- Put the caught wild into this client's party (or PC). Mirrors
+-- MediatedBattle:grantCatch — duplicated so CoopBattle owns the coop_wild
+-- path without sharing a module with the 1v1 screen.
+function M:grantCatch(msg)
+  local mon = self.wildCatchMon
+  if not mon and msg and msg.caught then
+    -- Sheet-only path: cannot rebuild a full engine mon without ROM data.
+    self:say("Caught, but could not\nadd to the party.")
+    return
+  end
+  if not mon then return end
+  local game = self.game
+  local save = game and game.save
+  if not save then return end
+  local okParty, Party = pcall(require, "src.pokemon.Party")
+  if okParty and Party.add(save.party, mon) then
+    self:say((mon.nickname or mon.species or "It") .. " was\nadded to the party!")
+    return
+  end
+  local okBoxes, Boxes = pcall(require, "src.pokemon.Boxes")
+  if okBoxes and Boxes.deposit(save, mon) then
+    self:say((mon.nickname or mon.species or "It") .. " was\nsent to the PC!")
+    return
+  end
+  self:say("But every BOX\nis full!")
 end
 
 -- ------- one turn's intent
