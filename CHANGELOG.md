@@ -6,7 +6,33 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Added
+
+- **Battlefield HUD plates.** The Gen1 arena now shows a persistent plate per
+  fielded mon — name, level, thresholded HP bar, status; exact `hp/maxHp`
+  numbers on your own side — stacked per side (co-op 2v2 gets all four), fed
+  by the display clock so bars drain instead of snapping. The floating target
+  card only appears when a pick is between multiple targets.
+- **Battle fx on the arena.** Attackers lunge, defenders flash, damaging
+  hits nudge the field (clamped), fainting mons sink and fade before their
+  line prints, and sent-out mons pop in — all queue-sequenced so nothing on
+  screen jumps ahead of the text that explains it. MediatedBattle gains the
+  engine-rate two-clock HP drain (`max(1, maxHp/96)` per frame); victory
+  music keeps waiting for drains and faints to finish.
+
 ### Fixed
+
+- **Ally mons on the arena face their opponent.** Left-seat battle fronts
+  are mirrored (right-edge-anchored flip) instead of staring at the camera;
+  foe seats keep the vanilla front pose.
+- **Trainer figures on the arena render in color.** Walk sheets are baked
+  through the engine's per-sprite OBJ palettes (`PaletteFX.spriteObp`) at
+  resolve time — the battle canvas opts out of the zone shader that would
+  otherwise colorize them, which left both trainers DMG-gray. Bake cache is
+  keyed by color mode and cleared on fight entry.
+- **A replacement batched behind a KO no longer inherits the faint.** Drain,
+  sink and pic-release rows are stamped with the mon they were filed for and
+  refused when the seat changes hands mid-queue.
 
 - **Gen 2 co-op / mediated battle theatre.** Quarkst battle music, victory
   jingles, map restore, and hit/catch SFX now resolve through Gen 2
