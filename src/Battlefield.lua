@@ -33,23 +33,32 @@ M.MIDLINE = math.floor(M.WIDTH / 2)
 -- reads as a close-up rather than a field (R2 owner review).
 M.MON_DRAW = 60
 -- Two mons on one side: seat centres at these fractions of WIDTH, measured
--- from that side's outer edge (mirrored for the foe half). 0.18 clears the
--- arena border the near seat used to hang off; 0.34 keeps the far seat a full
--- box away from the midline (R3 item 3).
-local MON_PAIR_NEAR = 0.18
-local MON_PAIR_FAR = 0.34
--- Vertical stagger, as a fraction of rowSpread: how far a paired seat leaves
--- the field's centre line, and how far a 3+ seat zigzags off it.
-local MON_PAIR_STAGGER = 0.25
+-- from that side's outer edge (mirrored for the foe half). 0.14 clears the
+-- arena border the near seat used to hang off; 0.30 keeps the far seat clear
+-- of the arena's centre circle (R3 follow-up: 0.34 crowded it).
+M.MON_PAIR_NEAR = 0.14
+M.MON_PAIR_FAR = 0.30
+-- The arena art's centre circle (not drawn here -- it is painted into the
+-- arena PNG): centred on MIDLINE with this radius. The pair fractions above
+-- are chosen so a seat's box plus shadow never touches its stroke.
+M.CENTER_CIRCLE_R = 46
+-- Ranks, like the games' double battles: every seat of a multi-mon side shares
+-- one y, and that rank leaves the field's centre line AWAY from the side's own
+-- plate stack (ally plates bottom-left, foe plates top-right), as a fraction
+-- of the clamped vertical band. A lone mon still stands on the centre line.
+M.MON_RANK_OFFSET = 0.30
+-- 3+ seats keep a zigzag so they do not sit on one line -- but now around the
+-- ranked centre line rather than the field's, so a triple clears its plates
+-- too. A fraction of rowSpread.
 local MON_ZIGZAG = 0.35
 -- How far a drawn mon reaches past its seat centre, as fractions of the box:
 -- up, because front pics are feet-anchored (monDrawParams uses 0.85); down,
 -- because the contact shadow sits at 0.28 with a 0.14 radius (drawMonShadow).
 -- Placement clamps against these so no box or shadow leaves the field.
-local MON_TOP_REACH = 0.85
-local MON_BOTTOM_REACH = 0.42
+M.MON_TOP_REACH = 0.85
+M.MON_BOTTOM_REACH = 0.42
 -- Peak amplitude of iconBob (2 idle + 4 acting), added to both reaches.
-local MON_BOB_MARGIN = 6
+M.MON_BOB_MARGIN = 6
 -- Horizontal breathing room between a mon box and the canvas edge.
 local MON_EDGE_PAD = 6
 -- Legacy alias kept for older layout asserts / callers.
@@ -616,11 +625,12 @@ local function placeMons(seats, side, out)
   -- Seat centres for the pair case, as fractions of WIDTH measured from the
   -- side's own outer edge (mirrored on the foe half). R3 item 3: the old even
   -- split between `left` and `right` put seat 1 half off the arena border and
-  -- seat 2 hard against the midline.
+  -- seat 2 hard against the midline. R3 follow-up pulled both inward again --
+  -- 0.34 still left the far seat sitting on the arena's centre circle.
   local xs = {}
   if count == 2 then
-    local near = math.floor(M.WIDTH * MON_PAIR_NEAR)
-    local far = math.floor(M.WIDTH * MON_PAIR_FAR)
+    local near = math.floor(M.WIDTH * M.MON_PAIR_NEAR)
+    local far = math.floor(M.WIDTH * M.MON_PAIR_FAR)
     if side == "ally" then
       xs[1], xs[2] = near, far
     else
@@ -645,8 +655,20 @@ local function placeMons(seats, side, out)
   else
     xMin = math.max(xMin, M.MIDLINE + halfBox)
   end
-  local yMin = M.FIELD_TOP + math.ceil(M.MON_DRAW * MON_TOP_REACH) + MON_BOB_MARGIN
-  local yMax = M.FIELD_BOTTOM - math.ceil(M.MON_DRAW * MON_BOTTOM_REACH) - MON_BOB_MARGIN
+  local yMin = M.FIELD_TOP + math.ceil(M.MON_DRAW * M.MON_TOP_REACH) + M.MON_BOB_MARGIN
+  local yMax = M.FIELD_BOTTOM - math.ceil(M.MON_DRAW * M.MON_BOTTOM_REACH) - M.MON_BOB_MARGIN
+
+  -- The rank. A side with more than one mon puts every seat on ONE y, so the
+  -- two halves of a 2v2 rhyme instead of reading as four loose sprites; that
+  -- rank leaves the centre line away from the side's own plate stack (ally
+  -- plates climb from the field floor, foe plates descend from the top), which
+  -- is what keeps a mon's head out from under its own HUD. A lone mon keeps
+  -- the field's centre line exactly -- the 1-count layout is unchanged.
+  local rankY = midY
+  if count >= 2 then
+    local away = (side == "foe") and 1 or -1
+    rankY = midY + away * math.floor((yMax - yMin) * M.MON_RANK_OFFSET)
+  end
 
   for i, seat in ipairs(seats) do
     local x = clamp(xs[i] or math.floor((left + right) / 2), xMin, xMax)
@@ -654,16 +676,8 @@ local function placeMons(seats, side, out)
     if count >= 3 then
       -- Zigzag slightly so 3–4 seats do not sit on one line.
       yOff = ((i % 2 == 0) and 1 or -1) * math.floor(rowSpread * MON_ZIGZAG)
-    elseif count == 2 then
-      -- The stagger runs AWAY from the side's plate stack: ally plates sit
-      -- bottom-left, so the near-edge ally seat lifts; foe plates sit
-      -- top-right, so the near-edge foe seat drops -- otherwise the far foe
-      -- mon tucks its head under the stacked plates.
-      local lift = (i == 1) and -1 or 1
-      if side == "foe" then lift = -lift end
-      yOff = lift * math.floor(rowSpread * MON_PAIR_STAGGER)
     end
-    local y = clamp(midY + yOff, yMin, yMax)
+    local y = clamp(rankY + yOff, yMin, yMax)
     local facing = seat and seat.facing
     if type(facing) ~= "string" then
       facing = side == "ally" and "right" or "left"

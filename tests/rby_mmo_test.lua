@@ -11872,6 +11872,12 @@ end)()
 -- format lost "used" for a shouted two-line callout ("PIKACHU!" over
 -- "THUNDERBOLT!"), factored out as `M.bubbleLines` so it is assertable with
 -- no love/scale/t machinery in the way.
+--
+-- Follow-up on (2), same playtest, live 2v2 frame: the ±stagger left the two
+-- sides' front mons at different heights (no visual rhyme), and the far seat
+-- sat on the arena's centre circle. Multi-mon sides now form a RANK -- one
+-- shared y per side, offset off the field's centre line away from that side's
+-- own plate stack -- and the pair fractions moved to 0.14/0.30.
 
 ;(function()
   if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
@@ -11919,25 +11925,42 @@ end)()
     end
   end
 
-  -- ------- placeMons: the 2-count pair spread, and the untouched 1/3-count lerp
+  -- ------- placeMons: the pair RANK, and the untouched 1-count centre
   do
-    local function monsLayout(n)
+    local function monsLayout(n, withHp)
       local seats = {}
-      for i = 1, n do seats[i] = { index = i, name = "M" .. i } end
+      for i = 1, n do
+        seats[i] = { index = i, name = "M" .. i }
+        if withHp then seats[i].hp, seats[i].maxHp = 20, 20 end
+      end
       return Battlefield.layout({ mode = "coop_npc", allySeats = seats, foeSeats = seats })
     end
+    local function bySide(layout)
+      local ally, foe = {}, {}
+      for _, m in ipairs(layout.mons) do
+        if m.side == "ally" then ally[m.index] = m else foe[m.index] = m end
+      end
+      return ally, foe
+    end
 
-    -- MON_PAIR_NEAR/FAR are 0.18/0.34 of WIDTH off each side's own outer edge,
-    -- mirrored for the foe half (src/Battlefield.lua placeMons).
-    local near = math.floor(Battlefield.WIDTH * 0.18)
-    local far = math.floor(Battlefield.WIDTH * 0.34)
+    -- The layout numbers the geometry constants resolve to on the 640x360
+    -- canvas -- recomputed here rather than hardcoded, so tuning a constant
+    -- retunes the expectations instead of reddening the suite.
+    local halfBox = Battlefield.MON_DRAW / 2
+    local midY = Battlefield.FIELD_TOP
+      + math.floor(Battlefield.FIELD_HEIGHT * 0.50)
+    local yMin = Battlefield.FIELD_TOP
+      + math.ceil(Battlefield.MON_DRAW * Battlefield.MON_TOP_REACH)
+      + Battlefield.MON_BOB_MARGIN
+    local yMax = Battlefield.FIELD_BOTTOM
+      - math.ceil(Battlefield.MON_DRAW * Battlefield.MON_BOTTOM_REACH)
+      - Battlefield.MON_BOB_MARGIN
+    local rankOff = math.floor((yMax - yMin) * Battlefield.MON_RANK_OFFSET)
+    local near = math.floor(Battlefield.WIDTH * Battlefield.MON_PAIR_NEAR)
+    local far = math.floor(Battlefield.WIDTH * Battlefield.MON_PAIR_FAR)
 
     local two = monsLayout(2)
-    local allyMons, foeMons = {}, {}
-    for _, m in ipairs(two.mons) do
-      if m.side == "ally" then allyMons[m.index] = m
-      else foeMons[m.index] = m end
-    end
+    local allyMons, foeMons = bySide(two)
     eq(allyMons[1].x, near, "ally seat 1 sits MON_PAIR_NEAR off the left edge")
     eq(allyMons[2].x, far, "ally seat 2 sits MON_PAIR_FAR off the left edge")
     eq(foeMons[1].x, Battlefield.WIDTH - near,
@@ -11945,7 +11968,21 @@ end)()
     eq(foeMons[2].x, Battlefield.WIDTH - far,
        "foe seat 2 mirrors MON_PAIR_FAR off the right edge")
 
-    local halfBox = Battlefield.MON_DRAW / 2
+    -- The rank: one shared y per side. This is the whole point of the
+    -- follow-up -- the live 2v2 read as four loose sprites because each seat
+    -- carried its own ±stagger.
+    eq(allyMons[1].y, allyMons[2].y, "both ally seats share one y -- a rank")
+    eq(foeMons[1].y, foeMons[2].y, "both foe seats share one y too")
+    eq(allyMons[1].y, midY - rankOff,
+       "the ally rank sits MON_RANK_OFFSET above the field's centre line")
+    eq(foeMons[1].y, midY + rankOff,
+       "...and the foe rank the same distance below it")
+    check(allyMons[1].y < midY and foeMons[1].y > midY,
+      "ally above the middle, foe below -- the two ranks mirror each other",
+      ("ally=%d mid=%d foe=%d"):format(allyMons[1].y, midY, foeMons[1].y))
+    eq(midY - allyMons[1].y, foeMons[1].y - midY,
+       "and they are the same distance out, so the sides visually rhyme")
+
     for _, m in ipairs(two.mons) do
       check(m.x - halfBox >= 0 and m.x + halfBox <= Battlefield.WIDTH,
         "2-spread: " .. m.side .. " seat " .. m.index .. " box stays on-canvas",
@@ -11953,7 +11990,7 @@ end)()
       -- monDrawParams anchors near the feet (front pic reaches up) and the
       -- contact shadow reaches down; placeMons clamps against both reaches
       -- plus the idle-bob margin, so seat+shadow never leaves the field.
-      check(m.y >= Battlefield.FIELD_TOP and m.y <= Battlefield.FIELD_BOTTOM,
+      check(m.y >= yMin and m.y <= yMax,
         "2-spread: " .. m.side .. " seat " .. m.index .. " centre stays inside the field",
         "y=" .. tostring(m.y))
       if m.side == "ally" then
@@ -11961,25 +11998,61 @@ end)()
       else
         check(m.x > two.midline, "foe seat " .. m.index .. " stays on its own side")
       end
+      -- The far seat used to sit on the arena's centre circle. Its box plus
+      -- shadow must clear the stroke, not merely stay on its own half.
+      check(math.abs(m.x - two.midline) > Battlefield.CENTER_CIRCLE_R + halfBox,
+        "2-spread: " .. m.side .. " seat " .. m.index .. " clears the centre circle",
+        ("|x-mid|=%d needs >%d"):format(
+          math.abs(m.x - two.midline), Battlefield.CENTER_CIRCLE_R + halfBox))
     end
 
-    -- 1-count and 3-count are untouched by the R3 spread change -- still the
-    -- old even lerp across [left, right]. Pin one 3-count case byte-for-byte.
+    -- ...and off its own plate stack. A 2v2 with hp figures plates all four
+    -- seats; ally plates climb from the field floor, foe plates descend from
+    -- the top, and both overlap their side's seat columns horizontally -- so
+    -- only the rank offset keeps a mon's head out from under its own HUD.
+    local plated = monsLayout(2, true)
+    eq(#plated.plates, 4, "a 2v2 with hp figures plates all four seats")
+    for _, m in ipairs(plated.mons) do
+      local top = m.y
+        - math.ceil(Battlefield.MON_DRAW * Battlefield.MON_TOP_REACH)
+        - Battlefield.MON_BOB_MARGIN
+      local bottom = m.y
+        + math.ceil(Battlefield.MON_DRAW * Battlefield.MON_BOTTOM_REACH)
+        + Battlefield.MON_BOB_MARGIN
+      for _, p in ipairs(plated.plates) do
+        if p.side == m.side then
+          local overlapsX = (m.x + halfBox) > p.x and (m.x - halfBox) < (p.x + p.w)
+          local overlapsY = bottom > p.y and top < (p.y + p.h)
+          check(not (overlapsX and overlapsY),
+            "rank: " .. m.side .. " seat " .. m.index .. " never sits under its own plate stack",
+            ("mon y=%d..%d plate y=%d..%d"):format(top, bottom, p.y, p.y + p.h))
+        end
+      end
+    end
+
+    -- 1-count is byte-identical to before the rank change: the old even lerp
+    -- across [left, right], on the field's own centre line.
     local one = monsLayout(1)
     eq(one.mons[1].x, 184, "one ally mon still centres on the old lerp (t=0.5)")
     eq(one.mons[1].y, 140, "...on the field's vertical centre")
+    eq(one.mons[1].y, midY, "...which is exactly midY -- a lone mon takes no rank offset")
 
+    -- 3+ keeps the zigzag, but the zigzag now rides the ranked centre line, so
+    -- a triple clears its plates the same way a pair does. x is the untouched
+    -- lerp; y is the old zigzag plus the rank offset.
     local three = monsLayout(3)
-    local allyThree = {}
-    for _, m in ipairs(three.mons) do
-      if m.side == "ally" then allyThree[m.index] = m end
-    end
+    local allyThree, foeThree = bySide(three)
+    local zig = math.floor(math.min(56, math.floor(Battlefield.FIELD_HEIGHT * 0.20)) * 0.35)
     eq(allyThree[1].x, 108, "3-count seat 1 x is the untouched lerp")
     eq(allyThree[2].x, 184, "3-count seat 2 x is the untouched lerp")
     eq(allyThree[3].x, 260, "3-count seat 3 x is the untouched lerp")
-    eq(allyThree[1].y, 121, "3-count seat 1 y is the untouched zigzag")
-    eq(allyThree[2].y, 159, "3-count seat 2 y is the untouched zigzag")
-    eq(allyThree[3].y, 121, "3-count seat 3 y is the untouched zigzag")
+    eq(allyThree[1].y, midY - rankOff - zig, "3-count seat 1 zigzags off the ALLY rank")
+    eq(allyThree[2].y, midY - rankOff + zig, "3-count seat 2 zigzags the other way")
+    eq(allyThree[3].y, midY - rankOff - zig, "3-count seat 3 rejoins seat 1")
+    eq(foeThree[1].y, midY + rankOff - zig, "3-count foe zigzags off the FOE rank")
+    check(allyThree[2].y < midY and foeThree[1].y > midY,
+      "even a triple keeps its whole zigzag on its own side of the centre line",
+      ("ally low=%d foe high=%d mid=%d"):format(allyThree[2].y, foeThree[1].y, midY))
   end
 
   -- ------- M.bubbleLines: the shout format
