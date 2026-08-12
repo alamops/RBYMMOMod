@@ -25,8 +25,22 @@ here must match `manifest.version`.
   strip crawls; on a level-up it fills, resets, and the level pill ticks —
   then the "grew to level" text follows, then the HP climb (which also
   fixes the bar's value-vs-denominator desync on multi-award turns and
-  under EXP.ALL). Partner and foe plates carry no strip; mediated battles
-  have no exp and are unchanged.
+  under EXP.ALL). Partner and foe plates carry no strip; mediated wild,
+  co-op wild and co-op NPC fights now award exp too (see PROTOCOL 21
+  below) — PvP (1v1 and coop_pvp) still awards none.
+- **PROTOCOL 21 — exp in mediated battles.** `Config.PROTOCOL` / `relay.js`
+  bump **20 → 21**. The hub holds no ROM species table (locked legal
+  floor), so the referee can never compute an exp amount — after a faint
+  it emits a facts-only `exp` event per standing owner-slot winner
+  (`slot`, `species`, `level`, `participants`; not an amount, not
+  `winners`), and each client runs its own `Experience` formula over its
+  own `save.party` mon and applies the result locally. Paying modes are
+  `wild`, `coop_wild` and `coop_npc` — the modes vanilla itself awards
+  exp for; 1v1 and `coop_pvp` never emit, so there is no PvP farming
+  loop. Gen1 twins only (`src/BattleSim/Turn.lua` +
+  `server/lib/battle/Turn.js`); Gen2 (`BattleSim2` / `lib/battle2`)
+  stays exp-free. `exp` joins `Wire.BATTLE_EVENTS` and
+  `server/lib/sanitize.js`'s event whitelist in lockstep.
 - **Canonical attack chronology.** Every attack now plays its beats in
   strict order on the arena: the trainer's callout stands alone, then the
   attacker lunges, then the hit flashes with the bar frozen, then the HP

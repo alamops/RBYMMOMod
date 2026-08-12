@@ -61,17 +61,27 @@ function toNumber(value) {
 //   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 //   unchose    -- cancel cleared a filed answer
 //   moves      -- mid-fight move-list sync after Transform/Mimic
+//   exp        -- a faint's spoils, as facts: who fell (species, level) and how
+//                 many shares split it. Never an amount: the intermediator
+//                 holds no species table, so each client runs its own formula
+//                 over its own party.
 const KINDS = {
   msg: true, anim: true, damage: true, drain: true, faint: true,
   send: true, status: true, stat: true, switch: true, item: true,
   run: true, turn: true, over: true, wait: true, reconnect: true,
-  chose: true, unchose: true, moves: true,
+  chose: true, unchose: true, moves: true, exp: true,
 };
 
 // Every key an event may carry, and the type it carries. `battle` and `seq` are
 // stamped by the turn machine rather than passed to `build`, because a caller
 // that could choose its own sequence number could put a hole in the stream, and
 // a hole is what a client reads as lost messages.
+//
+// `species`, `level` and `participants` are the `exp` event's three facts. They
+// are separate keys rather than a reuse of `text` / `amount` because they
+// travel together into a formula: a client that read a species out of `text`
+// would be reading the same field a faint uses for a sentence, and the first
+// build to change one of those sentences would silently change an award.
 const FIELDS = {
   battle: 'string',
   seq: 'number',
@@ -82,6 +92,9 @@ const FIELDS = {
   hp: 'number',
   side: 'string',
   status: 'string',
+  species: 'string',
+  level: 'number',
+  participants: 'number',
 };
 
 // ------------------------------------------------------------------
@@ -121,6 +134,8 @@ const SHAPES = {
   chose: { slot: true, side: true, text: 'who answered' },
   unchose: { slot: true, side: true, text: 'who answered' },
   moves: { slot: true, side: true, moves: 'sanitised move list' },
+  exp: { slot: 'the winner being paid', species: 'the monster that fell',
+    level: 'its level', participants: 'how many shares split it' },
 };
 
 // ------------------------------------------------------------------

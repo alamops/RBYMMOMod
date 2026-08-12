@@ -344,3 +344,48 @@ Pinned design:
 
 Wave R4-1: Battlefield.lua ∥ CoopBattle.lua (disjoint). Wave R4-2: tests. Then
 review → fixes → suite + driver + full e2e.
+
+---
+
+# Round 5 — exp in mediated battles ("apply to all cases", 2026-08-12, autonomous)
+
+Owner: extend the EXP bar/progression to mediated battles. Scout-verified ground:
+the hub holds NO ROM species table (Wire.lua:1277-1284, locked legal floor) — the
+referee can never compute exp amounts. Design (mirrors coop + the vitamin/catch
+trust precedents): the referee emits FACTS after a faint — {kind="exp", slot,
+species, level, participants} one event per standing owner-slot winner — and each
+client computes its own share (Experience.gainFor) and applies it to its own
+game.save.party mon (Experience.apply), mid-battle at event receipt (finish isn't
+guaranteed on disconnect/timeout paths; vitamin writeback precedent :732-825).
+
+Pinned decisions / assumptions:
+- R5-A1: exp-awarding modes = wild, coop_npc, coop_wild — the modes where vanilla
+  awards exp. 1v1 and coop_pvp NEVER emit (mode-gated in the referee, mirroring
+  CoopSim's owner-guard) — vanilla link parity + no PvP farming loop.
+- R5-A2: Gen1 twins only (BattleSim/Turn.lua + server/lib/battle/Turn.js). The
+  Gen2 twins (BattleSim2/battle2) are untouched — Gen2 mediated stays exp-free;
+  doubling the twin surface for a classic-rendered path is a separate decision.
+- R5-A3: wire field named `participants` (count), NOT `winners` — battleOutcome's
+  `winners` is an id-list; same-name-different-shape invites sanitiser bugs.
+- R5-A4: the level-up cascade (grew-text, move learning via coop's teach pattern)
+  is inherited scope, client-side, mirroring CoopBattle exactly. Evolution stays
+  out (coop's own behavior is the ceiling).
+- R5-A5: the expfill display machinery ports into MediatedBattle WITH the H-wave
+  fixes baked in (row-start targets, live-clock precedence, own-slot-only
+  seeding). Battlefield renderer needs zero changes (plate is generic over
+  seat.expFrac/shownLevel). Classic-Gen1 mediated still awards+persists exp with
+  text only (no strip — classic has no plates).
+- Twin obligations: `exp` added to Wire.BATTLE_EVENTS + sanitize.js
+  BATTLE_EVENT_TYPES in lockstep (twin_parity.test.js); battleEvent sanitiser
+  gains species (M.name), level (int 1..LEVEL_MAX), participants (bounded int);
+  battle_turn_parity.json regenerated (event stream changes); hub_protocol_parity
+  fixtures checked (open Q: do mediated_ko_settle snapshots carry raw streams).
+  Old-hub/old-client tolerance verified: unknown kinds must drop gracefully both
+  directions; report whether PROTOCOL must bump.
+- Latent-drift note: mine[] index ↔ save.party 1:1 assumption (snapshotMons skip
+  case) — document at the exp writeback site, consistent with vitamin's.
+
+Waves: R5-W1a Wire.lua + server/lib/sanitize.js ∥ R5-W1b src/BattleSim/Turn.lua +
+server/lib/battle/Turn.js ∥ R5-W1c src/MediatedBattle.lua (event shape pinned
+above; all file-disjoint). R5-W2 tests (unit + parity fixture regen + node
+suites). Review → fixes → full verify.

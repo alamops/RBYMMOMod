@@ -1030,6 +1030,16 @@ M.SEED_MAX = 1073741824
 -- and its sentence rather than the sign of this field.
 M.AMOUNT_MAX = 9999
 
+-- How many shares an `exp` event may say a faint was split between.
+--
+-- A ceiling on a *divisor* a stranger sent, which is why it has a floor of one
+-- as well: zero shares is not a smaller award, it is a division by zero inside
+-- the client's own Experience formula.  Eight rather than BATTLE_MON_MAX
+-- because a co-op faint is split across two parties, and one number that
+-- covers both shapes beats two that have to be kept in step -- it bounds a
+-- foreign value before it enters a formula, it does not restate a game rule.
+M.PARTICIPANTS_MAX = 8
+
 -- How long a reason token this build has never heard of may be.  Refused past it
 -- rather than trimmed -- a cut token matches nothing and is a value nobody sent.
 M.REASON_MAX = 32
@@ -1611,11 +1621,16 @@ end
 --   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 --   unchose    -- cancel cleared a filed answer
 --   moves      -- mid-fight move-list sync after Transform/Mimic
+--   exp        -- a faint's spoils, as facts: who fell (species, level) and
+--                 how many shares split it.  Not an amount: the hub holds no
+--                 species table and can never compute one, so the referee
+--                 states the facts and each client runs its own Experience
+--                 formula over its own party.
 M.BATTLE_EVENTS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
-  chose = true, unchose = true, moves = true,
+  chose = true, unchose = true, moves = true, exp = true,
 }
 
 -- One thing to draw.
@@ -1663,6 +1678,18 @@ function M.battleEvent(raw)
   -- name: an event is about somebody who is out, not about a bench position.
   if raw.slot ~= nil then out.slot = M.int(raw.slot, 0, M.FIELD_MAX) end
   if raw.hp ~= nil then out.hp = M.int(raw.hp, 0, M.HP_MAX) end
+  -- `exp` carries the facts a client needs to run its own award: which monster
+  -- fell and how many shares split it.  Same sanitisers a battler's own fields
+  -- get (M.name / M.int over LEVEL_MAX), because they are the same quantities
+  -- read off the same monster -- an event is not a second dialect for them.
+  if raw.species ~= nil then out.species = M.name(raw.species) end
+  if raw.level ~= nil then out.level = M.int(raw.level, 1, M.LEVEL_MAX) end
+  if raw.participants ~= nil then
+    -- Deliberately not `winners`: an OUTCOME's winners is a list of player ids,
+    -- and one name over two shapes is the sanitiser bug that reads a count as a
+    -- roster.  This one is a count, and it divides.
+    out.participants = M.int(raw.participants, 1, M.PARTICIPANTS_MAX)
+  end
   if raw.side ~= nil then out.side = M.side(raw.side) end
   if raw.status ~= nil then
     -- battleStatus answers `false` for present-but-unknown, which is not a

@@ -92,6 +92,13 @@ const MODES = {
 };
 const SIDES = ['a', 'b'];
 
+// The modes a faint pays experience in -- the ones vanilla awards it in. 1v1
+// and coop_pvp never do; see `_awardExp` for why the gate is the mode rather
+// than an owner flag. Side a is where the owners sit in all three; side b is
+// the synthetic wild / trainer seat.
+const EXP_MODES = { wild: true, coop_wild: true, coop_npc: true };
+const EXP_OWNER_SIDE = 'a';
+
 // Roster cap per side. coop_wild is 2v1 (humans on a, wild on b); other modes
 // keep a single per-side ceiling (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
 function maxFighters(mode, side) {
@@ -2286,6 +2293,53 @@ class Battle {
     });
   }
 
+  /**
+   * What a faint pays, and to whom.
+   *
+   * **Facts, never an amount.** This referee holds no species table -- it never
+   * has and, by the legal floor this whole server is built under, never will --
+   * so it cannot compute a single point of experience. What it *can* do is
+   * state the three things the formula needs and nothing else knows: which
+   * monster fell, what level it was, and how many shares split it. Each client
+   * then runs its own Experience over its own party, which is also the only
+   * place the result can persist. Same shape as the vitamin writeback and the
+   * catch grant: the authority announces, the owner applies.
+   *
+   * The mode gate is not a shortcut for the owner check, it is the rule. A
+   * seated fighter here carries a playerId whether a connection is behind it or
+   * a synthetic wild / trainer seat is, so "does this seat have an owner" is
+   * not a question the turn machine can ask -- but the *mode* answers it,
+   * because the hub only ever seats a synthetic opponent in these three, and
+   * always on side b (`maxFighters` says the same thing about coop_wild's 2v1).
+   * 1v1 and coop_pvp are left out deliberately rather than incidentally: paying
+   * a player for beating another player is a farming loop, and it is not what
+   * vanilla does with a link battle either.
+   *
+   * One event per standing winner, in field-slot order -- the Lua twin emits
+   * the same list in the same order, and a stream that differs by a permutation
+   * is a parity failure with no symptom anyone could read. "Standing" means
+   * what CoopSim's owner-guard means by it: something of theirs is out and
+   * above zero HP, so a seat still owing a replacement after its own faint is
+   * neither paid nor counted in the divisor. No roll is drawn in here: the
+   * parity digest's rngState must not move because a faint paid out.
+   */
+  _awardExp(fallen, mon) {
+    if (!has(EXP_MODES, this.mode)) return;
+    if (fallen.side === EXP_OWNER_SIDE) return;
+
+    const winners = this.bySide[EXP_OWNER_SIDE].filter((f) => activeMon(f));
+    if (winners.length === 0) return;
+
+    for (const fighter of winners) {
+      this._emit('exp', {
+        slot: fighter.slot,
+        species: mon.species,
+        level: mon.level,
+        participants: winners.length,
+      });
+    }
+  }
+
   _faint(fighter, mon) {
     mon.charging = null;
     mon.invulnerable = false;
@@ -2314,6 +2368,13 @@ class Battle {
     // open the replace picker from this rather than guessing from local HP.
     if (next) faintEv.amount = 1;
     this._emit('faint', faintEv);
+
+    // Paid before the replacement is asked for, so the monster that was
+    // actually standing there when this one fell is the one that gets it -- and
+    // while the fallen sheet is still in hand. Ordered the way CoopSim orders
+    // it: the faint, then its spoils, and only then anything about what comes
+    // next.
+    this._awardExp(fighter, mon);
 
     fighter.active = null;
     if (next) {

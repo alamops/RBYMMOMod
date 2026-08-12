@@ -121,7 +121,10 @@ function defaultSpriteFor(generation) {
 // The rule every bump follows is unchanged: bump whenever a client can send
 // something a hub silently ignores. Kept in step with Config.PROTOCOL on
 // the mod side.
-const PROTOCOL = 20;
+// 21: referee-emitted `exp` battle events (facts only) after faints in
+// wild / coop_wild / coop_npc -- a 20-vocabulary client would drop them
+// and silently never level from a fight its partner levelled from.
+const PROTOCOL = 21;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right

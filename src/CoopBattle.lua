@@ -6417,6 +6417,15 @@ end
 -- the engine's own Experience.apply -- which is also what divides the stat
 -- exp, raises the stats and decides whether a level was crossed. Applying a
 -- host-computed number instead would skip all three.
+
+-- The refereed modes whose losing side is a *trainer's*, and so the only ones
+-- that pay the x1.5. A positive list rather than a "not wild" test, so a mode
+-- added later pays the wild rate until somebody decides otherwise: paying too
+-- little is a number a player never notices, paying too much is inflation that
+-- cannot be taken back. Mirrors src/MediatedBattle.lua's reading of the same
+-- rule from the other side of the same event.
+local EXP_TRAINER_MODES = { coop_npc = true }
+
 function M:gainExp(event)
   if event.slot ~= self.mine then return end
   local slot = self.sim:slot(self.mine)
@@ -6438,7 +6447,30 @@ function M:gainExp(event)
   -- engine divides a solo battle between its own participants -- so a co-op
   -- knockout is worth half each, not full each. Holding an EXP.ALL doubles
   -- the divisor: that is how the original expresses "half now, half spread".
-  local winners = math.max(1, tonumber(event.winners) or 1)
+  --
+  -- Two spellings for one number, because two referees send it. CoopSim (the
+  -- host-simulated path) has always called it `winners`; the intermediator
+  -- calls it `participants` (src/BattleSim/events.lua, and the JS twin beside
+  -- it). `participants` is preferred where both are present, and the fallback
+  -- is *not* a default of 1: a share count that arrived under the newer name
+  -- and was read under the older one would divide by one and pay every winner
+  -- the whole knockout -- double exp for a 2-on-2, silently.
+  local winners = math.max(1,
+    tonumber(event.participants) or tonumber(event.winners) or 1)
+
+  -- Wild or trainer, decided from the mode the screen already knows.
+  --
+  -- The trainer x1.5 is a real rule of the formula (experience.asm), so it is
+  -- paid on a positive list rather than unconditionally: `coop_wild` is the
+  -- party encounter, and paying it 1.5x would make the same monster worth more
+  -- beaten in the MMO than beaten alone. The host-simulated path carries no
+  -- mode at all (an invite-driven 2-on-2), and there the trainer record is the
+  -- fact that decides it -- the same test `battlefieldFoeHumans` uses to tell
+  -- an NPC fight from a player one. `coop_pvp` pays nothing either way: the
+  -- intermediator awards no exp in it (BattleSim's EXP_MODES).
+  local isTrainer = EXP_TRAINER_MODES[self.mode]
+    or (self.mode == nil and self.trainer ~= nil)
+    or false
 
   mon.statExp = mon.statExp or {}
   mon.exp = mon.exp or 0
@@ -6466,7 +6498,7 @@ function M:gainExp(event)
   end
 
   local ok, levels, gained = pcall(eng.Experience.apply, self.game.data, mon,
-    def, event.level or 1, true, winners * (expAll and 2 or 1), false)
+    def, event.level or 1, isTrainer, winners * (expAll and 2 or 1), false)
   if not ok then return end
 
   local name = mon.nickname or (battler and battler.name) or "?"
@@ -6524,7 +6556,7 @@ function M:gainExp(event)
         member.statExp = member.statExp or {}
         member.exp = member.exp or 0
         local gotOk, gotLevels = pcall(eng.Experience.apply, self.game.data,
-          member, def, event.level or 1, true,
+          member, def, event.level or 1, isTrainer,
           winners * 2 * math.max(1, #party), false)
         if gotOk then self:levelled(member, nil, gotLevels) end
       end
@@ -6541,12 +6573,26 @@ function M:levelled(mon, fallbackName, levels)
   local eng = engine
   local def = (self.game.data.pokemon or {})[mon.species]
   local name = mon.nickname or fallbackName or (def and def.name) or "?"
+  -- Guarded on `def` as well as on the module: `movesLearnedAt` is asked what a
+  -- *species* learns, and a mon whose species this build cannot name has no
+  -- answer to give. Called with nil it threw into the pcall below, which was
+  -- survivable but bought nothing.
+  local learnedAt = def and eng and eng.Experience and eng.Experience.movesLearnedAt
   for _, newLevel in ipairs(levels) do
     self:say(name .. " grew to\nlevel " .. tostring(newLevel) .. "!")
     -- Levelled here, so the moves it learns are decided here too -- the host
     -- cannot know, because it is not the copy that gained the level.
-    local moves = eng and eng.Experience and eng.Experience.movesLearnedAt
-      and select(2, pcall(eng.Experience.movesLearnedAt, def, newLevel))
+    --
+    -- `pcall`'s two returns are read as a pair rather than through
+    -- `select(2, ...)`: on failure the second return is the *error string*, and
+    -- walking a string with `ipairs` throws for real -- out of the level loop,
+    -- out of the award, and out of the event that carried it. So the level-up
+    -- line that had already printed would have been followed by nothing at all.
+    local moves
+    if learnedAt then
+      local okMoves, got = pcall(learnedAt, def, newLevel)
+      if okMoves and type(got) == "table" then moves = got end
+    end
     for _, moveId in ipairs(moves or {}) do
       self:teach(mon, name, moveId)
     end
@@ -7736,6 +7782,51 @@ function M:medRows(msg)
           end
         end
         self.medMustReplace = hasBench or nil
+      end
+    end
+
+  elseif kind == "exp" then
+    -- The spoils of the faint above, as a *row* rather than an award made
+    -- here.
+    --
+    -- Queued instead of applied for the reason every other display-mutating
+    -- kind in this function is queued (`faint`, `damage`, `drain`): `medRows`
+    -- runs when the event *arrives* and `playEvents` runs when the batch
+    -- *closes*, and `gainExp` writes into `self.messages` -- the queue
+    -- `playEvents` is filling. Paying at parse time would have put "gained N
+    -- EXP. Points!" ahead of the bar that emptied and the monster that sank,
+    -- on a screen whose whole chronology is that they come first. Routed
+    -- through the ordinary `exp` row, the mediated award lands in
+    -- `playEvents`' walk at exactly the point the host-simulated one does, and
+    -- there is one exp implementation rather than two.
+    --
+    -- `slot` is translated the way every other row's is (`medSlotOf`): the
+    -- referee counts field slots 0..3 and this screen counts CoopSim indices,
+    -- and `gainExp`'s own-slot gate compares against `self.mine`, which is an
+    -- index. The referee sends one of these per standing winner, so all four
+    -- clients see both halves of a 2-on-2 knockout and each pays only its own.
+    --
+    -- `species` is translated too, and it has to be: the referee narrates
+    -- under the *uploaded* token (`Wire.name` of a display name), while
+    -- `gainExp` -- written for CoopSim, which emits registry keys -- looks the
+    -- species straight up in `data.pokemon`. Handing the label through
+    -- unchanged would miss every time and pay nothing, silently.
+    if index then
+      local key = speciesKeyFromSheet(self.game, { species = msg.species })
+      if key then
+        rows[#rows + 1] = {
+          kind = "exp", slot = index, species = key,
+          level = msg.level, participants = msg.participants,
+        }
+      elseif index == self.mine and not self.medExpSpeciesWarned then
+        -- Only our own share is ours to pay, so only our own miss is worth a
+        -- line -- and only the first, because a battle that cannot name one
+        -- species usually cannot name the next either.
+        self.medExpSpeciesWarned = true
+        mod.log:warn("the referee named a defeated POKeMON (%s) this build "
+          .. "could not match, so no EXP was awarded for it; report this with "
+          .. "the species if it is a standard one",
+          tostring(msg.species))
       end
     end
 

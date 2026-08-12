@@ -330,9 +330,9 @@ end
 -- them; M.cardModel does not):
 --   `expFrac`    0..1 progress toward the next level. nil means "this caller
 --                has no exp data" -- the deliberate no-data state, and the
---                plate then draws no strip at all (mediated battles award no
---                exp and carry no wire field for it, so their plates stay
---                pixel-for-pixel as they were: the strip is fitted into the
+--                plate then draws no strip at all (peer and foe seats: their
+--                own client drives their bar; a plate with no clock stays
+--                pixel-for-pixel as it was -- the strip is fitted into the
 --                plate's bottom inset, so it costs the rest of the plate
 --                nothing). A number is clamped into 0..1.
 --   `shownLevel` the level the pill displays. The engine's exp award mutates

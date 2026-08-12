@@ -432,7 +432,10 @@ function M:beginMediated(game, sessionId, peerId, peerName, role)
     peerId    = peerId,
     peerName  = peerName,
     autoPick  = self.autoPick == true,
-    onDone    = function() self:endMediated() end,
+    -- The second argument is the list of moves this fight levelled into with
+    -- no slot free -- see M:offerForgets, which is where they are put to the
+    -- player once the screen is off the stack.
+    onDone    = function(_, toLearn) self:endMediated(game, toLearn) end,
   })
   self.fight = fight
   fight:start(game)
@@ -472,7 +475,10 @@ function M:beginWildMediated(game, battleId, opts)
     wildParty    = wildParty,
     wildCatchMon = opts.wildCatchMon or opts.mon,
     autoPick     = self.autoPick == true,
-    onDone       = function() self:endMediated() end,
+    -- Same on the wild path, and it is the one that reaches this most often:
+    -- a wild fight is where a mediated party earns its levels today, and a
+    -- catch landing in the same ending does not change what was learned.
+    onDone       = function(_, toLearn) self:endMediated(game, toLearn) end,
   })
   self.fight = fight
   fight:start(game)
@@ -483,11 +489,97 @@ end
 -- The fight is off this screen.  Tell the hub, so the pairing does not sit
 -- open until a grace runs out -- the record is already settled by the time an
 -- outcome has been drawn, so this frees it rather than forfeiting anything.
-function M:endMediated()
+--
+-- `toLearn` is whatever the fight banked but could not fit (MediatedBattle's
+-- `teach`).  The hub hears first and the player second: the leave is a fact
+-- about a fight that is already over, and the prompt below can sit on screen
+-- for as long as somebody takes to answer it.
+function M:endMediated(game, toLearn)
   local fight = self.fight
   self.fight = nil
-  if not fight then return end
-  self.transport:send(Wire.SESSION_LEAVE, {})
+  if fight then self.transport:send(Wire.SESSION_LEAVE, {}) end
+  self:offerForgets(game or (fight and fight.game), toLearn)
+end
+
+-- Moves a monster levelled into during a mediated fight but had no room for.
+--
+-- **Coop:offerForgets' twin, and deliberately a twin rather than a call into
+-- it.** The two live on different paths -- a 1v1 or a wild mediated fight is
+-- not a co-op battle and has no co-op state -- and reaching across for the
+-- method would make this module depend on the whole of Coop for a screen
+-- push, on the same module graph whose resolver refuses a cycle. The shape
+-- of the list is the contract they share (`{ mon = <save party mon>, move =
+-- <move id> }`), and it is the same shape because both fights build it the
+-- same way.
+--
+-- The mon in each entry is the **save party** monster `Experience.apply`
+-- already levelled, not the uploaded sheet -- so the moveset the menu edits
+-- is the one the save keeps, and a catch landing in the same ending (which
+-- appends to that same party) cannot move it: the entry holds the table
+-- itself, never an index into the party.
+--
+-- Put to the player *after* the battle, one screen at a time. The engine's
+-- own MoveLearnMenu is pushed rather than a copy of it, and it is handed a
+-- completion callback -- the fourth argument Evolution.lua passes -- which
+-- fires on both answers: after "learned" and after "did not learn". That is
+-- what sequences two pending learns without stacking two menus, and what
+-- makes declining cost nothing but the next prompt.
+function M:offerForgets(game, toLearn)
+  game = game or (self.ui and self.ui.ctx and self.ui.ctx.game)
+  if not (game and type(toLearn) == "table" and #toLearn > 0) then return false end
+
+  -- Copied, because the list belongs to a screen that is being torn down.
+  local pending = {}
+  for i = 1, #toLearn do pending[i] = toLearn[i] end
+
+  local nextOne
+  nextOne = function()
+    local entry = table.remove(pending, 1)
+    while entry ~= nil and not (type(entry) == "table"
+      and type(entry.mon) == "table" and entry.move ~= nil) do
+      -- A malformed entry is skipped rather than opening a menu with nothing
+      -- in it; the rest of the list is still owed to the player.
+      entry = table.remove(pending, 1)
+    end
+    if entry == nil then return end
+
+    local pushed
+    local ok = pcall(function()
+      pushed = mod.ui.push(game, "MoveLearnMenu", entry.mon, entry.move,
+        function() nextOne() end)
+    end)
+    -- A screen went up: it owns the rest of the queue now, through the
+    -- callback above. A pcall that *succeeds* but hands back nothing
+    -- table-shaped (an unregistered screen id resolves to nil) is just as
+    -- screen-less as a throw, so both take the remediation branch below.
+    if ok and type(pushed) == "table" then return end
+
+    do
+      -- Auto-fill a free slot when the forget UI is missing; otherwise warn,
+      -- because the level is banked either way and the move can still be had
+      -- by levelling again outside the MMO.
+      local mon = entry.mon
+      local moved = false
+      if type(mon.moves) == "table" and #mon.moves < 4 then
+        local mdef = game.data and game.data.moves and game.data.moves[entry.move]
+        mon.moves[#mon.moves + 1] = { id = entry.move, pp = (mdef and mdef.pp) or 5 }
+        moved = true
+        self.ui:say((mon.nickname or mon.species or "POKéMON")
+          .. " learned\n" .. tostring(entry.move) .. "!")
+      end
+      if not moved then
+        mod.log:warn("could not open the move-learning screen for %s; it can "
+          .. "still be learned by levelling again", tostring(entry.move))
+      end
+    end
+    -- Nothing is on screen to call back -- a build with no UI at all, or a
+    -- push that threw -- so the queue is carried on here rather than being
+    -- stranded one entry in.
+    nextOne()
+  end
+
+  nextOne()
+  return true
 end
 
 -- The three things an intermediator says during a fight.

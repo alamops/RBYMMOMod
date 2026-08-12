@@ -5446,6 +5446,97 @@ local stealthMsg = Sessions.battleBlockMessage(vanillaA, stealth, "subset", fake
 check(stealthMsg:find("battle rules", 1, true),
       "same mod list but linkModified still explains the block")
 
+-- ------- offerForgets: a push that returns nil takes the same remediation
+-- as a push that throws
+--
+-- Sessions.lua's own gate is `ok and type(pushed) == "table"` -- a pcall that
+-- *succeeds* but hands back nothing table-shaped (an unregistered screen id
+-- resolving to nil) is exactly as screen-less as a throw, and both have to
+-- fall into the same remediation: auto-fill a free move slot and say so, or
+-- warn when the moveset is already full. Driven twice, mode for mode, so a
+-- regression that only closed one of the two branches would show up here.
+do
+  local realUi = stubMod.ui
+  -- Re-armed: an earlier block in this section silenced stubMod.log.warn
+  -- (and never restored it) once its own warnings stopped being read.
+  local realWarn = stubMod.log.warn
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warns[#warns + 1] = ok and line or tostring(fmt)
+  end
+
+  local function forgetsSide()
+    local side = { said = {} }
+    side.transport = { send = function() end, isReady = function() return true end }
+    side.ui = {
+      say = function(_, text) side.said[#side.said + 1] = text end,
+      confirm = function() return {} end, choose = function() return {} end,
+      pickPartyMon = function() end, pushState = function() end, ctx = {},
+    }
+    side.sessions = Sessions.new(side.transport, side.ui)
+    side.game = { data = Data, save = { player = { name = "ANN" }, inventory = {} } }
+    return side
+  end
+
+  local function monWith(moveIds)
+    local moves = {}
+    for _, id in ipairs(moveIds) do
+      moves[#moves + 1] = { id = id, pp = Data.moves[id].pp }
+    end
+    return { species = "FIXMON_A", nickname = "FIGHTER", level = 12, moves = moves }
+  end
+
+  for _, mode in ipairs({ "throws", "returns nil" }) do
+    stubMod.ui = { push = (mode == "throws")
+      and function() error("no such screen", 0) end
+      or function() return nil end }
+
+    -- A free slot: the move auto-fills, and the player is told through say().
+    do
+      local side = forgetsSide()
+      local mon = monWith({ "FIX_TACKLE" })   -- one move, three slots free
+      local wbefore = #warns
+      local ok = side.sessions:offerForgets(side.game,
+        { { mon = mon, move = "FIX_SCRATCH" } })
+      check(ok, "offerForgets (" .. mode .. "): a real entry still returns true")
+      eq(#mon.moves, 2, "offerForgets (" .. mode .. "): a free slot auto-fills")
+      eq(mon.moves[2].id, "FIX_SCRATCH", "...with the earned move")
+      eq(mon.moves[2].pp, Data.moves.FIX_SCRATCH.pp, "...at its own max PP")
+      check(#side.said > 0 and side.said[1]:find("FIX_SCRATCH", 1, true) ~= nil,
+            "offerForgets (" .. mode .. "): and the player is told, through say()")
+      eq(#warns, wbefore,
+         "offerForgets (" .. mode .. "): a free-slot autofill is not a warning")
+    end
+
+    -- A full moveset: nothing is auto-filled, and the miss is warned instead.
+    do
+      local side = forgetsSide()
+      local mon = monWith({ "FIX_TACKLE", "FIX_SCRATCH", "FIX_EMBERISH", "FIX_CUT" })
+      local before4 = {}
+      for i, mv in ipairs(mon.moves) do before4[i] = mv.id end
+      local wbefore = #warns
+      local ok = side.sessions:offerForgets(side.game,
+        { { mon = mon, move = "FIX_TACKLE" } })
+      check(ok, "offerForgets (" .. mode
+            .. "): a real entry still returns true, full moveset or not")
+      eq(#mon.moves, 4,
+         "offerForgets (" .. mode .. "): a full moveset is not auto-filled")
+      for i, id in ipairs(before4) do
+        eq(mon.moves[i].id, id,
+           "offerForgets (" .. mode .. "): move slot #" .. i .. " unchanged")
+      end
+      eq(#warns, wbefore + 1,
+         "offerForgets (" .. mode .. "): a full moveset is warned instead")
+      check(warns[#warns] ~= nil
+            and warns[#warns]:find("could not open the move-learning screen", 1, true) ~= nil,
+            "...naming the remediation: " .. tostring(warns[#warns]))
+    end
+  end
+
+  stubMod.ui = realUi
+  stubMod.log.warn = realWarn
+end
+
 end)()
 
 -- ------------------------------------------------------------------
@@ -17965,6 +18056,483 @@ if eng and eng.Growth and eng.Experience then
 else
   check(true, "(engine Growth/Experience modules unavailable here)")
 end
+
+-- ------- round 5: the mediated exp client (MediatedBattle:gainExp)
+--
+-- CoopBattle's own-party exp above proves the formula and the display clock.
+-- This section proves the mediated wrapper around them: the referee states
+-- facts on the wire (`exp`: slot, species, level, participants) rather than
+-- an amount, `onEvent` pays only this client's own seat, and `gainExp` prices
+-- the facts with the engine's own Experience.apply over `game.save.party` --
+-- never over `self.mine`, the wire sheet that travels with the fight and is
+-- thrown away with it.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local CoopBattle = need("CoopBattle")
+  local eng = CoopBattle.loadEngine()
+  if not (eng and eng.Growth and eng.Experience and eng.Pokemon) then
+    check(true, "(engine Growth/Experience/Pokemon unavailable for the mediated exp suite)")
+    return
+  end
+
+  local expSpecies, foeSpecies = "FIXMON_A", "FIXMON_B"
+  local rate = data.pokemon[expSpecies].growthRate
+
+  -- Reached off MediatedBattle's own upvalues, the same technique the R4
+  -- CoopBattle block above uses -- this is the live function the screen
+  -- actually calls, not a copy of its curve.
+  local function findUpvalue(fn, name)
+    local i = 1
+    while true do
+      local uname, value = debug.getupvalue(fn, i)
+      if not uname then return nil end
+      if uname == name then return value end
+      i = i + 1
+    end
+  end
+  local expFraction = findUpvalue(MediatedBattle.seedExpClock, "expFraction")
+    or findUpvalue(MediatedBattle.gainExp, "expFraction")
+  check(type(expFraction) == "function",
+        "expFraction is reachable off MediatedBattle's own upvalues")
+
+  local function monAt(level)
+    local built = eng.Pokemon.new(data, expSpecies, level)
+    built.statExp = built.statExp or {}
+    return built
+  end
+  local function expAt(level, frac)
+    local a = eng.Growth.expForLevel(rate, level, data.growth_rates)
+    local b = eng.Growth.expForLevel(rate, level + 1, data.growth_rates)
+    return a + math.floor((b - a) * frac)
+  end
+
+  local seq = 0
+  local function newScreen(o)
+    o = o or {}
+    seq = 0
+    return MediatedBattle.new({
+      game = {
+        data = data,
+        save = { party = o.party, inventory = o.inventory or {},
+                 player = { name = "RED" } },
+        stack = { pop = function() end },
+      },
+      battle = o.battle or "b-mexp",
+      role = o.role or "host",
+      mode = o.mode or "wild",
+      peerName = "WILD",
+    })
+  end
+  local function send(screen, battleId, fields)
+    seq = seq + 1
+    fields.battle = battleId
+    fields.seq = seq
+    screen:onEvent(fields)
+  end
+  local function pump(screen, guard)
+    local input = { wasPressed = function() return false end }
+    local n = 0
+    while (#screen.lines > 0 or screen.shown ~= nil or screen.expFilling
+           or screen.draining or screen.faintFx) and n < (guard or 4000) do
+      screen:update(1 / 60)
+      n = n + 1
+    end
+    return n
+  end
+  local function isText(row)
+    return type(row) == "string" or (type(row) == "table" and row.text ~= nil)
+  end
+
+  -- ------- own-slot gate: an exp event naming somebody else's seat is
+  -- dropped -- the referee holds no save file for anyone, so a share aimed
+  -- at another slot is theirs to apply on their own copy, never this one's.
+  do
+    local mine = monAt(12)
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-gate1" })
+    local before = mine.exp
+    send(screen, "b-gate1", { t = "exp", slot = 2, species = foeSpecies, level = 20, participants = 1 })
+    eq(mine.exp, before, "an exp event naming the foe's slot is ignored -- own-slot gate")
+  end
+  do
+    local mine, partner = monAt(12), monAt(12)
+    local screen = newScreen({ party = { mine, partner }, mode = "coop_wild",
+      role = "host", battle = "b-gate2" })
+    local before = mine.exp
+    -- slot 1 is a2 -- a fellow human's own seat under coop_wild, not a foe's.
+    send(screen, "b-gate2", { t = "exp", slot = 1, species = foeSpecies, level = 20, participants = 2 })
+    eq(mine.exp, before, "...and one naming a teammate's own seat is ignored the same way")
+  end
+
+  -- ------- save-mon mutation vs. the referee sheet, and the row order the
+  -- award queues on the battlefield path (text -> expfill -> grew/learned)
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-order" })
+    check(screen:usesBattlefield(), "the fixture game stays on the battlefield gate")
+    screen.slots[0] = { species = expSpecies, hp = mine.hp, maxHp = mine.stats.hp }
+    local refereeHpBefore = screen.slots[0].hp
+    local levelBefore = mine.level
+
+    screen:gainExp({ slot = 0, species = foeSpecies, level = 60, participants = 1 })
+
+    check(mine.level > levelBefore, "the award crosses at least one level boundary")
+    eq(screen.slots[0].hp, refereeHpBefore,
+       "the referee's own field-slot hp is untouched by the level-up -- it is a "
+       .. "different table than the save mon")
+
+    local textIdx, fillIdx, growIdx = nil, nil, nil
+    for i, row in ipairs(screen.lines) do
+      if type(row) == "table" and row.expfill and not fillIdx then fillIdx = i
+      elseif isText(row) then
+        if not textIdx then textIdx = i
+        elseif not growIdx then growIdx = i end
+      end
+    end
+    check(textIdx ~= nil and fillIdx ~= nil and growIdx ~= nil,
+          "the batch queued a gained-text row, an expfill row and a grow-text row")
+    check(textIdx < fillIdx, "the gained-EXP text is queued ahead of the fill")
+    check(fillIdx < growIdx, "...and the fill is queued ahead of the first grow-text")
+
+    -- Moves move too, when the level crossed teaches one: the same learnset
+    -- probe the classic "levelling up offers the move" test above uses, so
+    -- this stays honest about whether the fixture has anything to learn.
+    local learnLevel
+    for level = levelBefore + 1, mine.level do
+      local ok, moves = pcall(eng.Experience.movesLearnedAt, data.pokemon[expSpecies], level)
+      if ok and moves and moves[1] then learnLevel = level break end
+    end
+    if learnLevel then
+      local sawLearn = false
+      for _, row in ipairs(screen.lines) do
+        if isText(row) then
+          local text = type(row) == "string" and row or row.text
+          if text and text:find("learned", 1, true) then sawLearn = true end
+        end
+      end
+      check(sawLearn, "the crossed level taught a move, so a 'learned' row was queued")
+      pump(screen)
+      check(#mine.moves > 0 and mine.moves[#mine.moves].id ~= nil,
+            "...and the move actually landed on the save mon's own moveset")
+    else
+      check(true, "(the fixture species has no level-up learnset in the crossed range)")
+    end
+  end
+
+  -- ------- fill monotonic across back-to-back events, and both clocks land
+  -- on the monster's true final level/fraction once the queue drains
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-mono" })
+    screen.slots[0] = { species = expSpecies, hp = mine.hp, maxHp = mine.stats.hp }
+
+    screen:gainExp({ slot = 0, species = foeSpecies, level = 5, participants = 1 })
+    screen:gainExp({ slot = 0, species = foeSpecies, level = 5, participants = 1 })
+    local fills = 0
+    for _, row in ipairs(screen.lines) do
+      if type(row) == "table" and row.expfill then fills = fills + 1 end
+    end
+    eq(fills, 2, "both awards queued a fill row")
+
+    local function progress()
+      local s = screen.slots[0]
+      return (tonumber(s.shownLevel) or 0) + (tonumber(s.shownExpFrac) or 0)
+    end
+    local worst, last, guard = 0, progress(), 0
+    while (#screen.lines > 0 or screen.shown ~= nil or screen.expFilling
+           or screen.draining) and guard < 8000 do
+      screen:update(1 / 60)
+      guard = guard + 1
+      local now = progress()
+      if now < last - 1e-9 then worst = math.max(worst, last - now) end
+      last = now
+    end
+    check(guard < 8000, "both awards resolve in a bounded number of frames")
+    check(worst < 1e-9,
+          "the strip's progress (shownLevel + shownExpFrac) never moves "
+          .. "backwards across the whole drive")
+
+    local truth = expFraction(data, mine)
+    eq(screen.slots[0].shownLevel, mine.level,
+       "the pill lands on the monster's true final level")
+    check(truth ~= nil and math.abs(screen.slots[0].shownExpFrac - truth) < 1e-6,
+          "...and the strip lands on the true final fraction")
+  end
+
+  -- ------- lenient / old-hub tolerance: missing facts warn once, award
+  -- nothing, and never throw -- the fight has to keep playing
+  do
+    local mine = monAt(12)
+    local before = { level = mine.level, exp = mine.exp }
+    local warnings = {}
+    stubMod.log.warn = function(_, fmt, ...)
+      local ok, line = pcall(string.format, fmt, ...)
+      warnings[#warnings + 1] = ok and line or tostring(fmt)
+    end
+
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-lenient" })
+    local ok1 = pcall(function()
+      send(screen, "b-lenient", { t = "exp", slot = 0 })
+    end)
+    local ok2 = pcall(function()
+      send(screen, "b-lenient", { t = "exp", slot = 0, species = foeSpecies })
+    end)
+    check(ok1 and ok2, "an exp event missing species/level/participants never throws")
+    eq(mine.level, before.level, "...and no award landed -- no honest default for a missing fact")
+    eq(mine.exp, before.exp, "...exp is untouched too")
+    check(#warnings >= 1, "...and it warned at least once")
+    check(warnings[1] ~= nil and warnings[1]:find("no experience could be awarded", 1, true) ~= nil,
+          "...naming the fight-still-plays-out remediation")
+
+    stubMod.log.warn = function() end
+  end
+
+  -- ------- classic path (no battlefield): text + save mutation only, no
+  -- rows or clocks -- exactly as it behaved before the strip existed
+  do
+    local mine = monAt(12)
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-classic" })
+    screen.slots[0] = { species = expSpecies, hp = mine.hp, maxHp = mine.stats.hp }
+    screen.usesBattlefield = function() return false end
+
+    local before = mine.exp
+    screen:gainExp({ slot = 0, species = foeSpecies, level = 60, participants = 1 })
+    check(mine.exp > before, "classic path: the award still lands and persists")
+
+    for _, row in ipairs(screen.lines) do
+      check(not (type(row) == "table" and row.expfill),
+            "classic path: no expfill row is ever queued")
+    end
+    local sawGained = false
+    for _, row in ipairs(screen.lines) do
+      if isText(row) then
+        local text = type(row) == "string" and row or row.text
+        if text and text:find("gained", 1, true) then sawGained = true end
+      end
+    end
+    check(sawGained, "classic path: the gained-EXP text is still queued")
+    eq(screen.slots[0].shownExpFrac, nil, "classic path: shownExpFrac is never seeded")
+    eq(screen.slots[0].shownLevel, nil, "...nor shownLevel")
+  end
+
+  -- ------- battlefieldSeat: the clocks ride only this client's own seat
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-seat" })
+    screen.slots[0] = { species = expSpecies, hp = mine.hp, maxHp = mine.stats.hp }
+    screen.slots[2] = { species = foeSpecies, hp = 1, maxHp = 40 }
+
+    screen:gainExp({ slot = 0, species = foeSpecies, level = 15, participants = 1 })
+
+    local ownSeat = screen:battlefieldSeat(0, true)
+    check(ownSeat ~= nil and ownSeat.expFrac ~= nil and ownSeat.expFrac >= 0,
+          "the own seat (isPlayer, mySlot) carries an expFrac after the award")
+    eq(ownSeat.shownLevel, mine.level, "...and a shownLevel matching the save mon")
+
+    local foeSeat = screen:battlefieldSeat(2, false)
+    check(foeSeat ~= nil, "the foe seat still renders")
+    eq(foeSeat.expFrac, nil, "...but carries no expFrac -- exp is an ally-only readout")
+    eq(foeSeat.shownLevel, nil, "...nor a shownLevel")
+
+    -- Even asking for slot 2 as if it were a player seat draws nothing: the
+    -- gate is slotIndex == self:mySlot(), not merely the isPlayer flag.
+    local notMySlot = screen:battlefieldSeat(2, true)
+    check(notMySlot ~= nil, "the seat still renders")
+    eq(notMySlot.expFrac, nil, "...but a slot that is not mySlot() never seeds a clock")
+  end
+
+  -- ------- a switch landing mid-queue clears the clocks but keeps the paid
+  -- save -- the award already happened on the mon that fought; the display
+  -- was only ever describing where it had gotten to reading it back
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-switch" })
+    screen.slots[0] = { species = expSpecies, hp = mine.hp, maxHp = mine.stats.hp }
+
+    screen:gainExp({ slot = 0, species = foeSpecies, level = 15, participants = 1 })
+    check(screen:hasPendingHpFx(),
+          "a queued (not yet playing) expfill holds the fanfare -- hasPendingHpFx counts it")
+    local levelAfterAward, expAfterAward = mine.level, mine.exp
+
+    send(screen, "b-switch", { t = "send", slot = 0, side = "a", text = "PIDGEOTTISH", hp = 40 })
+    eq(screen.slots[0].shownExpFrac, nil,
+       "the switch clears the strip on the spot -- a departed monster's "
+       .. "progress must not sit under the newcomer's name")
+    eq(screen.slots[0].shownLevel, nil, "...and the pill too")
+    eq(mine.level, levelAfterAward, "...but the save mon keeps whatever it was already paid")
+    eq(mine.exp, expAfterAward, "...exp included")
+
+    pump(screen)
+    check(not screen:hasPendingHpFx(),
+          "once the queue drains, nothing is still pending -- the dropped row "
+          .. "resolved on the spot rather than wedging the queue")
+  end
+
+  -- ------- isTrainer divergence: a mediated wild fight pays isTrainer=false
+  -- (x1), not the trainer x1.5 -- pinned directly against Experience.gainFor
+  -- so a regression that flipped the flag shows as a wrong number, not just a
+  -- vibe
+  do
+    local level, participants = 40, 1
+    local expectedWild = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], level, false, participants, nil, data.constants)
+
+    local mine = monAt(30)
+    local before = mine.exp
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-trainer1" })
+    screen:gainExp({ slot = 0, species = foeSpecies, level = level, participants = participants })
+    eq(mine.exp - before, expectedWild,
+       "wild mode pays isTrainer=false -- the gain matches "
+       .. "Experience.gainFor(def, level, false, participants) exactly")
+
+    -- ...and a trainer-shaped mediated mode really does pay more for the
+    -- identical inputs, so the pin above is not comparing against a no-op.
+    local expectedTrainer = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], level, true, participants, nil, data.constants)
+    local mine2 = monAt(30)
+    local before2 = mine2.exp
+    local screen2 = newScreen({ party = { mine2 }, mode = "coop_npc", role = "host", battle = "b-trainer2" })
+    screen2:gainExp({ slot = 0, species = foeSpecies, level = level, participants = participants })
+    eq(mine2.exp - before2, expectedTrainer, "coop_npc pays the trainer amount")
+    check(expectedTrainer > expectedWild,
+          "...which is strictly larger than the wild amount for identical inputs")
+  end
+
+  -- ------- TRAINER_MODES is a positive list (only coop_npc), not a "wild"
+  -- special case -- pinning coop_wild and a nil mode explicitly beside "wild"
+  -- above closes the gap either one would miss if the list ever inverted.
+  do
+    local level, participants = 40, 1
+    local expectedWild = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], level, false, participants, nil, data.constants)
+
+    local coopWildMine = monAt(30)
+    local coopWildBefore = coopWildMine.exp
+    local coopWildScreen = newScreen({ party = { coopWildMine }, mode = "coop_wild",
+      role = "host", battle = "b-trainer3" })
+    coopWildScreen:gainExp({ slot = 0, species = foeSpecies, level = level, participants = participants })
+    eq(coopWildMine.exp - coopWildBefore, expectedWild,
+       "coop_wild pays the wild rate too -- it is the referee's own word for a "
+       .. "party encounter, not a trainer fight")
+
+    -- Built directly rather than through `newScreen` (which defaults an
+    -- omitted mode to "wild"), so this really drives `self.mode == nil`.
+    local nilModeMine = monAt(30)
+    local nilModeBefore = nilModeMine.exp
+    local nilModeScreen = MediatedBattle.new({
+      game = { data = data, save = { party = { nilModeMine }, inventory = {},
+                                      player = { name = "RED" } },
+               stack = { pop = function() end } },
+      battle = "b-trainer4", role = "host", mode = nil, peerName = "WILD",
+    })
+    nilModeScreen:gainExp({ slot = 0, species = foeSpecies, level = level, participants = participants })
+    eq(nilModeMine.exp - nilModeBefore, expectedWild,
+       "and a screen whose mode never arrived reads as NOT a trainer, never the bonus")
+  end
+
+  -- ------- exp is gated on an actually-narrated foe faint, and bounded to
+  -- EXP_PER_FAINT (2) awards per knockout observed -- the referee's own
+  -- contract (a faint always precedes the exp it pays for), enforced here so
+  -- a hostile or merely buggy hub cannot level a party off an unbounded
+  -- stream of `exp` events.
+  do
+    local warnings = {}
+    stubMod.log.warn = function(_, fmt, ...)
+      local ok, line = pcall(string.format, fmt, ...)
+      warnings[#warnings + 1] = ok and line or tostring(fmt)
+    end
+
+    local mine = monAt(30)
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host",
+      battle = "b-faintgate" })
+    local before = mine.exp
+    local perAward = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], 40, false, 1, nil, data.constants)
+
+    -- No faint narrated yet: refused, warned, never thrown, and a whole loop
+    -- of them still pays nothing.
+    for _ = 1, 10 do
+      local noThrow = pcall(send, screen, "b-faintgate",
+        { t = "exp", slot = 0, species = foeSpecies, level = 40, participants = 1 })
+      check(noThrow, "the refused event never throws")
+    end
+    eq(mine.exp, before, "no award landed with no knockout ahead of it")
+    check(warnings[1] ~= nil and warnings[1]:find("no knockout ahead of it", 1, true) ~= nil,
+          "...and it warned through warnNoExp: " .. tostring(warnings[1]))
+
+    -- The referee narrates the knockout it is about to pay for.
+    send(screen, "b-faintgate", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "b-faintgate", { t = "exp", slot = 0, species = foeSpecies,
+      level = 40, participants = 1 })
+    eq(mine.exp - before, perAward, "faint -> exp pays exactly once, at the wild rate")
+
+    -- The same faint funds one more award, and no more than that.
+    local afterOne = mine.exp
+    for _ = 1, 6 do
+      send(screen, "b-faintgate", { t = "exp", slot = 0, species = foeSpecies,
+        level = 40, participants = 1 })
+    end
+    eq(mine.exp - afterOne, perAward,
+       "one faint funds at most EXP_PER_FAINT (2) awards, not six more")
+
+    -- A faint on our own side banks no credit at all.
+    local afterTwo = mine.exp
+    send(screen, "b-faintgate", { t = "faint", slot = 0, text = "MINE" })
+    send(screen, "b-faintgate", { t = "exp", slot = 0, species = foeSpecies,
+      level = 40, participants = 1 })
+    eq(mine.exp, afterTwo, "a faint on our own side banks no credit")
+
+    stubMod.log.warn = function() end
+  end
+
+  -- ------- savePartyIndex drift: snapshotMons skipping a party member it
+  -- cannot describe must not shift the exp award -- or a vitamin's Stat Exp
+  -- writeback -- onto whichever save mon happened to inherit the sheet index.
+  do
+    local skipped, real = monAt(20), monAt(20)
+    skipped.moves = {}   -- undescribable: snapshotMons drops it, real stays
+    local game = {
+      data = data,
+      save = { party = { skipped, real }, inventory = {}, player = { name = "RED" } },
+      stack = { pop = function() end },
+    }
+    local mons = MediatedBattle.snapshotParty(game)
+    eq(#mons, 1, "snapshotMons dropped the undescribable member")
+    eq(mons[1].slot, 1, "the surviving sheet carries its 0-based party position")
+
+    local drift = MediatedBattle.new({ game = game, battle = "b-drift",
+      role = "host", mode = "wild" })
+    drift.mine = mons
+    drift.active = 1
+    eq(drift:savePartyIndex(1), 2, "savePartyIndex(1) resolves to save.party[2]")
+    check(drift:saveMon() == real, "saveMon() returns the monster that actually fought")
+
+    local wrongBefore, rightBefore = skipped.exp, real.exp
+    drift:gainExp({ slot = 0, species = foeSpecies, level = 40, participants = 1 })
+    eq(skipped.exp, wrongBefore, "the skipped member was not paid")
+    eq(real.exp - rightBefore,
+       eng.Experience.gainFor(data.pokemon[foeSpecies], 40, false, 1, nil, data.constants),
+       "the fighter was")
+
+    -- Vitamin twin: the wire slot is the sheet index, the writeback resolves
+    -- through the same savePartyIndex -- the identical drift, on the item path.
+    skipped.statExp = skipped.statExp or {}
+    real.statExp = real.statExp or {}
+    local wrongEv, rightEv = skipped.statExp.attack or 0, real.statExp.attack or 0
+    game.save.inventory.PROTEIN = 1
+    drift.pendingItem = "PROTEIN"
+    drift.pendingItemSlot = 1   -- sheet index 1 == save.party[2]
+    drift:confirmPendingItem("PROTEIN", 1)
+    eq(skipped.statExp.attack or 0, wrongEv,
+       "the vitamin's Stat Exp did not land on the skipped member")
+    check((real.statExp.attack or 0) > rightEv,
+          "...it landed on the monster the sheet actually describes")
+  end
+end)()
 
 -- ------- TT1 — battle SFX via AnimPlayer pollEffects (fix-battle-system-v2)
 --

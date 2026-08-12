@@ -1149,4 +1149,239 @@ do
   eq(trainer.mode, nil, "it is dropped instead")
 end
 
+-- ------------------------------------------------------------------
+-- 10. Party vs Wild mediated exp (CoopBattle:gainExp via medRows/medFlush)
+-- ------------------------------------------------------------------
+--
+-- coop_wild's referee narrates a knockout the same way coop_npc's does: a
+-- `faint` on the loser's slot, then one `exp` per standing winner (species,
+-- level, participants -- never an amount). Round 4 above (main suite) proves
+-- the formula and the display clock against the host-simulated path
+-- (CoopSim); this proves the same machinery reached through the wire path
+-- instead -- onBattleEvent -> medRows -> medFlush -> playEvents -- on a
+-- coop_wild-shaped screen holding the live save party, the same one
+-- src/Coop.lua's buildField hands a party-vs-wild encounter.
+
+do
+  local Experience = require("src.battle.Experience")
+
+  -- Prime CoopBattle's private `engine` cache the only way the module
+  -- exposes: monFromCaughtSheet calls loadEngine(game) before anything else.
+  -- Without this, a screen built by hand (as `screen()` above does, rather
+  -- than through M.new) never triggers it, and gainExp's own `eng.Experience`
+  -- read is silently nil -- an award that never lands and never warns either,
+  -- because gainExp returns before reaching anything worth logging.
+  CoopBattle.monFromCaughtSheet({ data = data }, { species = "NOT A SPECIES" })
+
+  -- ANN's seat holds `game.save.party` *by reference*, exactly as the real
+  -- field is built, so a level-up lands on the very table the save keeps.
+  local function wildSlots(game)
+    return {
+      { side = "a", owner = "ann", name = "ANN", party = game.save.party },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 30) } },
+      { side = "b", owner = nil, name = "WILD", party = { mon(50, 20) } },
+    }
+  end
+
+  -- Parked one point short of level 6 so a 50-level knockout's award crosses
+  -- level 7, where the fixture species (FIXMON_A) learns FIX_EMBERISH -- the
+  -- "grew to" row is part of what the order assertion below proves.
+  local function wildGame()
+    local g = newGame()
+    g.save.party = { { species = SPECIES, level = 5, hp = 20, exp = 179,
+      stats = { hp = 20, attack = 30, defense = 30, special = 30, speed = 40 },
+      dvs = { hp = 8, attack = 8, defense = 8, speed = 8, special = 8 },
+      statExp = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+      moves = { { id = "FIX_TACKLE", pp = 20 } },
+    } }
+    return g
+  end
+
+  local function wildScreen(opts)
+    opts = opts or {}
+    local game = opts.game or wildGame()
+    local built = screen({
+      game = game, slots = wildSlots(game), mine = 1, host = true,
+      battleId = "cb-wild", selfId = "ann",
+      mode = (opts.mode ~= "none") and (opts.mode or "coop_wild") or nil,
+    })
+    built.trainer = opts.trainer
+    return built, game
+  end
+
+  -- Row classification the way drive_coop_exp.lua's rowsOf() reads the same
+  -- queue: what src/CoopBattle.lua actually stamps a row with, not a copy.
+  -- `M:say` (the "gained"/"grew"/"learned" lines `gainExp`/`levelled` queue)
+  -- pushes plain strings; the `msg` kind `medRows`/`playEvents` translate the
+  -- referee's own sentences through (the "fainted!" line) pushes a `{ text =
+  -- ... }` table instead -- both are a text page as far as this is concerned.
+  local function rowText(row)
+    if type(row) == "string" then return row end
+    if type(row) == "table" and type(row.text) == "string" then return row.text end
+    return nil
+  end
+  local function rowKind(row)
+    if type(row) == "table" then
+      if row.faintfx then return "faintfx" end
+      if row.expfill then return "expfill" end
+      if row.drain then return "drain" end
+    end
+    local text = rowText(row)
+    if text then
+      if text:find("fainted", 1, true) then return "fainted-text" end
+      if text:find("gained", 1, true) then return "gained-text" end
+      if text:find("grew to", 1, true) then return "grew-text" end
+      if text:find("learned", 1, true) then return "learned-text" end
+      return "text"
+    end
+    return nil
+  end
+  local function firstIndex(self, kind)
+    for i, row in ipairs(self.messages) do
+      if rowKind(row) == kind then return i end
+    end
+    return nil
+  end
+
+  -- ------- own share paid (participants honored), partner's share ignored,
+  -- and the row order the batch queues.
+  do
+    local host, game = wildScreen()
+    check(host:onBattleReady({ battle = "cb-wild",
+      sides = { a = { "ann", "bob" }, b = { "wild" } } }),
+      "coop_wild battle_ready accepted, mediation on")
+
+    local winner = game.save.party[1]
+    local before = winner.exp
+
+    host:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+      slot = Config.COOP_SIDE, text = SPECIES_NAME })
+    host:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp",
+      slot = 0, species = SPECIES_NAME, level = 50, participants = 2 })
+    host:onBattleEvent({ battle = "cb-wild", seq = 3, t = "exp",
+      slot = 1, species = SPECIES_NAME, level = 50, participants = 2 })
+    eq(#host.messages, 0, "nothing is paid or printed before the turn closes the batch")
+    host:onBattleEvent({ battle = "cb-wild", seq = 4, t = "turn" })
+
+    local expected = Experience.gainFor(data.pokemon[SPECIES], 50, false, 2, false)
+    eq(winner.exp - before, expected,
+       "the save mon was paid the HALVED share -- participants honored, "
+       .. "matching Experience.gainFor(def, level, false, 2, false) exactly")
+    check(winner.exp - before
+          ~= Experience.gainFor(data.pokemon[SPECIES], 50, false, 1, false),
+          "...and not the whole knockout (the winners/participants spelling bug)")
+    check(game.save.party[1] == winner and winner.level > 5,
+          "it is the save party entry that leveled")
+
+    local partner = host.sim:slot(2).battler.mon
+    eq(partner.exp, nil,
+       "the partner's own share was not paid by this client -- never even touched")
+
+    local iFaintFx = firstIndex(host, "faintfx")
+    local iFainted = firstIndex(host, "fainted-text")
+    local iGained = firstIndex(host, "gained-text")
+    local iFill = firstIndex(host, "expfill")
+    local iGrew = firstIndex(host, "grew-text")
+    local iClimb = firstIndex(host, "drain")
+    check(iFaintFx and iFainted and iGained and iFill and iGrew and iClimb,
+          "faintfx, fainted-text, gained-text, expfill, grew-text and the HP "
+          .. "climb are all queued")
+    check(iFaintFx < iFainted and iFainted < iGained and iGained < iFill
+          and iFill < iGrew and iGrew < iClimb,
+          "in order: faintfx -> fainted-text -> gained-text -> expfill -> "
+          .. "grew -> HP climb")
+  end
+
+  -- ------- an unmatchable species token warns once and pays nothing
+  do
+    local before = #warns
+    local host, game = wildScreen()
+    host:onBattleReady({ battle = "cb-wild",
+      sides = { a = { "ann", "bob" }, b = { "wild" } } })
+    local winner = game.save.party[1]
+    local expBefore = winner.exp
+
+    host:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+      slot = Config.COOP_SIDE, text = "NOT A SPECIES" })
+    host:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp",
+      slot = 0, species = "NOT A SPECIES", level = 50, participants = 2 })
+    host:onBattleEvent({ battle = "cb-wild", seq = 3, t = "turn" })
+
+    eq(winner.exp, expBefore, "an unmatchable species pays nothing")
+    eq(#warns, before + 1, "...and is warned about exactly once")
+    check(warns[#warns] ~= nil and warns[#warns]:find("could not match", 1, true) ~= nil,
+          "naming the miss: " .. tostring(warns[#warns]))
+
+    -- A second unmatchable event in the same fight stays silent -- the first
+    -- line already said this build cannot describe this referee's species.
+    host:onBattleEvent({ battle = "cb-wild", seq = 4, t = "faint",
+      slot = Config.COOP_SIDE, text = "NOT A SPECIES" })
+    host:onBattleEvent({ battle = "cb-wild", seq = 5, t = "exp",
+      slot = 0, species = "NOT A SPECIES", level = 50, participants = 2 })
+    host:onBattleEvent({ battle = "cb-wild", seq = 6, t = "turn" })
+    eq(#warns, before + 1, "and a second miss in the same fight is not said again")
+  end
+
+  -- ------- coop_wild pays the wild rate, coop_npc pays x1.5, for identical
+  -- inputs -- pinned against Experience.gainFor so a mode/isTrainer
+  -- regression shows up as a wrong number rather than a vibe
+  do
+    local wild = wildScreen()
+    wild:onBattleReady({ battle = "cb-wild",
+      sides = { a = { "ann", "bob" }, b = { "wild" } } })
+    local wMon = wild.sim:slot(1).battler.mon
+    wMon.level, wMon.exp = 50, 1000000   -- no level-up, so the number is readable
+    local wBefore = wMon.exp
+    wild:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+      slot = Config.COOP_SIDE, text = SPECIES_NAME })
+    wild:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp",
+      slot = 0, species = SPECIES_NAME, level = 50, participants = 2 })
+    wild:onBattleEvent({ battle = "cb-wild", seq = 3, t = "turn" })
+    local wildGain = wMon.exp - wBefore
+
+    local npc = wildScreen({ mode = "coop_npc" })
+    npc:onBattleReady({ battle = "cb-wild",
+      sides = { a = { "ann", "bob" }, b = { "wild" } } })
+    local nMon = npc.sim:slot(1).battler.mon
+    nMon.level, nMon.exp = 50, 1000000
+    local nBefore = nMon.exp
+    npc:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+      slot = Config.COOP_SIDE, text = SPECIES_NAME })
+    npc:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp",
+      slot = 0, species = SPECIES_NAME, level = 50, participants = 2 })
+    npc:onBattleEvent({ battle = "cb-wild", seq = 3, t = "turn" })
+    local npcGain = nMon.exp - nBefore
+
+    eq(wildGain, Experience.gainFor(data.pokemon[SPECIES], 50, false, 2, false),
+       "coop_wild pays isTrainer=false")
+    eq(npcGain, Experience.gainFor(data.pokemon[SPECIES], 50, true, 2, false),
+       "coop_npc pays isTrainer=true (x1.5)")
+    check(npcGain > wildGain, "...visibly larger for identical inputs")
+  end
+
+  -- ------- the host-sim path (no mode, CoopSim's own `winners` spelling) is
+  -- unchanged: still divides, and a trainer record still pays x1.5
+  do
+    local hostSim = wildScreen({ mode = "none", trainer = { id = "FIX_TRAINER" } })
+    local mon1 = hostSim.sim:slot(1).battler.mon
+    mon1.level, mon1.exp = 50, 1000000
+    local before = mon1.exp
+    hostSim:playEvents({ { kind = "exp", slot = 1, species = SPECIES, level = 50,
+                           winners = 2, amount = 999 } })
+    eq(mon1.exp - before,
+       Experience.gainFor(data.pokemon[SPECIES], 50, true, 2, false),
+       "`winners` still divides, and a host-sim trainer fight still pays x1.5")
+
+    local hostPvp = wildScreen({ mode = "none" })
+    local mon2 = hostPvp.sim:slot(1).battler.mon
+    mon2.level, mon2.exp = 50, 1000000
+    local before2 = mon2.exp
+    hostPvp:playEvents({ { kind = "exp", slot = 1, species = SPECIES, level = 50,
+                          winners = 2 } })
+    eq(mon2.exp - before2,
+       Experience.gainFor(data.pokemon[SPECIES], 50, false, 2, false),
+       "and a host-sim fight with no trainer record pays the wild rate")
+  end
+end
+
 T.finish("coop_mediated")

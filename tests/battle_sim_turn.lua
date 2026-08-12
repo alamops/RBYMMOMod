@@ -2891,6 +2891,212 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12h. round 5: `exp` event emission gates (`_awardExp`)
+-- ------------------------------------------------------------------
+--
+-- The referee holds no species table and can never price a faint (the legal
+-- floor, restated in `_awardExp`'s own comment); what it states is which mode
+-- a faint happened in, who was still standing on the owner side, and how many
+-- of them there were to split across. This section pins the gate itself --
+-- which modes pay at all -- and the one edge case inside a paying mode where
+-- a winner is excluded: a seat still owing a replacement after its own faint.
+
+local thumpMove = function() return move({ id = "thump", power = 40, accuracy = 255 }) end
+
+local function expEvents(events)
+  local out = {}
+  for _, event in ipairs(events) do
+    if event.t == "exp" then out[#out + 1] = event end
+  end
+  return out
+end
+
+-- 1v1: a farming loop the mode gate refuses outright, deliberately rather
+-- than incidentally -- vanilla link battles do not pay either.
+do
+  local battle = battleOf({
+    mode = "1v1",
+    seed = 90101,
+    aMons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) },
+    bMons = { mon({ species = "Beta", maxHp = 30, spd = 10, moves = { thumpMove() } }) },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  ok(#expEvents(events) == 0, "1v1: no exp event, however the fight ends")
+  local sawFaint = false
+  for _, e in ipairs(events) do if e.t == "faint" then sawFaint = true end end
+  ok(sawFaint, "...and a faint really did happen, so the gate is what refused it")
+end
+
+-- coop_pvp: the other PvP shape, same refusal -- paying a player for beating
+-- another player is the farming loop, not a co-op detail.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 90102,
+    sides = {
+      a = { { playerId = "a1", name = "Ann",
+              mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) } } },
+      b = { { playerId = "b1", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 30, spd = 10, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("b1", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  ok(#expEvents(events) == 0, "coop_pvp: no exp event either")
+  local sawFaint = false
+  for _, e in ipairs(events) do if e.t == "faint" then sawFaint = true end end
+  ok(sawFaint, "...and again a faint really happened")
+end
+
+-- wild: the one owner-slot winner is paid, once, naming the fallen wild mon.
+do
+  local battle = battleOf({
+    mode = "wild",
+    seed = 90103,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) } } },
+      b = { { playerId = "wild", name = "Wild",
+              mons = { mon({ species = "Beta", maxHp = 60, spd = 10, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 1, "wild: exactly one exp event")
+  eq(exps[1] and exps[1].slot, 0, "...paid to the sole owner seat, slot 0")
+  eq(exps[1] and exps[1].species, "Beta", "...naming the wild mon that fell")
+  eq(exps[1] and exps[1].participants, 1, "...split one way")
+end
+
+-- coop_wild: both owner seats stand at the KO, so both are paid, in
+-- field-slot order.
+do
+  local battle = battleOf({
+    mode = "coop_wild",
+    seed = 90104,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) } },
+        { playerId = "a2", name = "Abe",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 90, spd = 70, moves = { thumpMove() } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild",
+              mons = { mon({ species = "Beta", maxHp = 200, spd = 10, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("a2", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 2, "coop_wild: one exp event per standing owner-slot winner")
+  eq(exps[1] and exps[1].slot, 0, "...a1 (slot 0) first")
+  eq(exps[2] and exps[2].slot, 1, "...then a2 (slot 1)")
+  eq(exps[1] and exps[1].participants, 2, "...both counted in the split")
+  eq(exps[2] and exps[2].participants, 2, "...on both events")
+end
+
+-- coop_npc: the trainer-shaped exp-awarding mode, same shape as coop_wild
+-- but a 2v2 npc side rather than a single wild seat.
+do
+  local battle = battleOf({
+    mode = "coop_npc",
+    seed = 90105,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) } },
+        { playerId = "a2", name = "Abe",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 90, spd = 70, moves = { thumpMove() } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob",
+          mons = { mon({ species = "Beta", maxHp = 60, spd = 60, moves = { thumpMove() } }) } },
+        { playerId = "b2", name = "Bea",
+          mons = { mon({ species = "Delta", maxHp = 60, spd = 50, moves = { thumpMove() } }) } },
+      },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 12 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("b1", { action = "fight", move = 0 })
+    battle:submitChoice("b2", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  ok(#expEvents(events) > 0, "coop_npc: at least one exp event over a KO")
+end
+
+-- A seat still owing a replacement after its own faint: neither paid nor
+-- counted in the divisor. a1 has no bench, so once its lone mon goes down it
+-- is permanently `activeMon() == nil` -- exactly what CoopSim's owner-guard
+-- reads as "not standing" -- while a2 finishes the wild mon off alone.
+do
+  local battle = battleOf({
+    mode = "coop_wild",
+    seed = 90106,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 1, spd = 5, moves = { thumpMove() } }) } },
+        { playerId = "a2", name = "Abe",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 100, spd = 60, moves = { thumpMove() } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild",
+              mons = { mon({ species = "Beta", maxHp = 30, spd = 100, atk = 20, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 15 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("a2", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local sawA1Faint = false
+  for _, e in ipairs(events) do
+    if e.t == "faint" and e.slot == 0 then sawA1Faint = true end
+  end
+  ok(sawA1Faint, "the fixture really did down a1 before the wild mon fell")
+  local exps = expEvents(events)
+  eq(#exps, 1, "the seat still owing a replacement is not paid a second event")
+  eq(exps[1] and exps[1].slot, 1, "...only a2 (slot 1), the seat actually standing")
+  eq(exps[1] and exps[1].participants, 1,
+     "...and the divisor is 1 -- the down seat is not counted in the split either")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

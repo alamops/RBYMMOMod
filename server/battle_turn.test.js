@@ -551,6 +551,62 @@ scenario('vitamin', (events) => {
   return battle;
 });
 
+// 16. round 5: wild-mode KO. The faint on the synthetic side b is the one
+//     `_awardExp` pays for -- one `exp` event for the sole owner-slot winner
+//     (slot 0), split one way (participants = 1). Looped like `ko` rather
+//     than aimed at an exact turn count, so the fixture survives a damage
+//     formula tweak without a hand-tuned HP number going stale.
+scenario('wild_ko', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'wk', mode: 'wild', seed: 5001, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80, moves: [thump()] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 60, spd: 10, moves: [thump()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 10; i += 1) {
+    if (battle.outcome()) break;
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// 17. round 5: coop_wild 2v1 KO. Both owner slots are standing when the
+//     wild mon falls, so `_awardExp` walks bySide.a twice -- slot 0 (a1)
+//     then slot 1 (a2), field-slot order -- and each event names
+//     participants = 2, the share count the split is over.
+scenario('coop_wild_ko', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'cwk', mode: 'coop_wild', seed: 5002, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80, moves: [thump()] })] },
+        { playerId: 'a2', name: 'Abe', mons: [
+          mn({ species: 'Gamma', maxHp: 200, atk: 90, spd: 70, moves: [thump()] })] },
+      ],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 200, spd: 10, moves: [thump()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 10; i += 1) {
+    if (battle.outcome()) break;
+    battle.submitChoice('a1', { action: 'fight', move: 0 });
+    battle.submitChoice('a2', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -629,7 +685,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.ok(jsRuns.length >= 14, 'the JS half built every scenario');
+  assert.ok(jsRuns.length >= 17, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle_turn_parity.json is available -- '
@@ -725,6 +781,45 @@ test('the KO fight ends, and names who won', () => {
     run.events.filter((event) => event.t === 'over').length, 1,
     'and exactly one over',
   );
+});
+
+test('a wild-mode faint pays exactly one exp event, after the faint and before over', () => {
+  const run = byName(jsRuns).get('wild_ko');
+  const kinds = run.events.map((event) => event.t);
+  const expIdx = kinds.indexOf('exp');
+  assert.ok(expIdx > -1, 'the fight paid an exp event');
+  assert.strictEqual(kinds.filter((t) => t === 'exp').length, 1, 'exactly one -- one owner-slot winner');
+  assert.ok(kinds.indexOf('faint') > -1 && kinds.indexOf('faint') < expIdx,
+    'the faint precedes the exp event -- the sheet is still in hand when it is paid');
+  assert.ok(kinds.indexOf('over') > expIdx, 'and the exp event precedes over');
+  const exp = run.events.find((event) => event.t === 'exp');
+  assert.strictEqual(exp.slot, 0, 'paid to the sole owner seat, field slot 0');
+  assert.strictEqual(exp.species, 'Beta', 'naming the wild mon that fell');
+  assert.strictEqual(exp.level, 20, 'and its level');
+  assert.strictEqual(exp.participants, 1, 'split one way -- one standing winner');
+});
+
+test('a coop_wild 2v1 faint pays both owner seats, slot 0 then slot 1', () => {
+  const run = byName(jsRuns).get('coop_wild_ko');
+  const exps = run.events.filter((event) => event.t === 'exp');
+  assert.strictEqual(exps.length, 2, 'one event per standing owner-slot winner');
+  assert.deepStrictEqual(exps.map((event) => event.slot), [0, 1],
+    'field-slot order -- a1 (slot 0) before a2 (slot 1)');
+  for (const exp of exps) {
+    assert.strictEqual(exp.species, 'Beta');
+    assert.strictEqual(exp.level, 20);
+    assert.strictEqual(exp.participants, 2, 'both winners were standing, so the split is two ways');
+  }
+});
+
+test('1v1 and coop_pvp never emit exp -- the farming-loop gate', () => {
+  const ko = byName(jsRuns).get('ko');
+  assert.ok(ko.events.some((event) => event.t === 'faint'), 'ko: a faint really happened');
+  for (const name of ['ko', 'coop']) {
+    const run = byName(jsRuns).get(name);
+    assert.ok(!run.events.some((event) => event.t === 'exp'),
+      `${name}: a PvP-shaped mode must never pay exp -- that is a farming loop`);
+  }
 });
 
 test('a side that drops past its grace forfeits, and rolls nothing doing it', () => {

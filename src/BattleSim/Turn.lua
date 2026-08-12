@@ -2316,6 +2316,63 @@ function Battle:_heal(fighter, mon, amount)
   })
 end
 
+-- What a faint pays, and to whom.
+--
+-- **Facts, never an amount.**  This referee holds no species table -- it never
+-- has and, by the legal floor this whole server is built under, never will --
+-- so it cannot compute a single point of experience.  What it *can* do is state
+-- the three things the formula needs and nothing else knows: which monster
+-- fell, what level it was, and how many shares split it.  Each client then runs
+-- its own Experience over its own party, which is also the only place the
+-- result can persist.  This is the same shape as the vitamin writeback and the
+-- catch grant: the authority announces, the owner applies.
+--
+-- The mode gate is not a shortcut for the owner check, it is the rule.  A
+-- seated fighter here carries a playerId whether a connection is behind it or a
+-- synthetic wild / trainer seat is, so "does this seat have an owner" is not a
+-- question the turn machine can ask -- but the *mode* answers it, because the
+-- hub only ever seats a synthetic opponent in these three, and always on side
+-- b (`maxFighters` above says the same thing about coop_wild's 2v1).  1v1 and
+-- coop_pvp are left out deliberately rather than incidentally: paying a player
+-- for beating another player is a farming loop, and it is not what vanilla
+-- does with a link battle either.
+local EXP_MODES = { wild = true, coop_wild = true, coop_npc = true }
+-- The side the owners sit on in those modes; side b is the synthetic seat.
+local EXP_OWNER_SIDE = "a"
+
+-- One event per standing winner, in field-slot order.
+--
+-- Order is load-bearing twice over: the JS twin emits the same list in the same
+-- order, and a stream that differs by a permutation is a parity failure with no
+-- symptom anyone could read.  `bySide` is built in roster index order and
+-- `fieldSlot` is monotonic in that index, so walking it is walking slots.
+--
+-- "Standing" means the same thing CoopSim's owner-guard means by it: something
+-- of theirs is out and above zero HP.  A seat still owing a replacement after
+-- its own faint is not standing, and so is neither paid nor counted in the
+-- divisor -- which is the Gen 1 reading, where the split is over who was
+-- actually in the fight when it fell.  No roll is drawn anywhere in here: the
+-- parity digest's rngState must not move because a faint paid out.
+function Battle:_awardExp(fallen, mon)
+  if not EXP_MODES[self.mode] then return end
+  if fallen.side == EXP_OWNER_SIDE then return end
+
+  local winners = {}
+  for _, fighter in ipairs(self.bySide[EXP_OWNER_SIDE]) do
+    if activeMon(fighter) then winners[#winners + 1] = fighter end
+  end
+  if #winners == 0 then return end
+
+  for _, fighter in ipairs(winners) do
+    self:_emit("exp", {
+      slot = fighter.slot,
+      species = mon.species,
+      level = mon.level,
+      participants = #winners,
+    })
+  end
+end
+
 function Battle:_faint(fighter, mon)
   mon.charging = nil
   mon.invulnerable = false
@@ -2346,6 +2403,12 @@ function Battle:_faint(fighter, mon)
     -- Omitted when the seat is out of mons so empty-bench never arms a picker.
     amount = next_ and 1 or nil,
   })
+
+  -- Paid before the replacement is asked for, so the monster that was actually
+  -- standing there when this one fell is the one that gets it -- and while the
+  -- fallen sheet is still in hand.  Ordered the way CoopSim orders it: the
+  -- faint, then its spoils, and only then anything about what comes next.
+  self:_awardExp(fighter, mon)
 
   fighter.active = nil
   if next_ then

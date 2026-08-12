@@ -39,9 +39,13 @@ local floor = math.floor
 -- the closed set
 -- ------------------------------------------------------------------
 --
--- Mirrors Wire.BATTLE_EVENTS exactly.  Adding a kind is a wire change: the
--- Node twin, Wire's whitelist and the screen all have to learn it in the same
--- version, so the set is written out longhand rather than derived.
+-- A subset of Wire.BATTLE_EVENTS, not a mirror of it exactly: `exp` is
+-- Gen1-only (see docs/plans/better-battle-ui.md R5-A2 — Gen2 mediated stays
+-- exp-free, and only the Gen1 side carries a mirror-assertion test), so
+-- adding a kind to Wire does NOT automatically belong here. Adding a kind
+-- that *does* belong here is still a wire change: the Node twin, Wire's
+-- whitelist and the screen all have to learn it in the same version, so the
+-- set is written out longhand rather than derived.
 --
 --   msg        -- a line of text for the box
 --   anim       -- play a move's animation

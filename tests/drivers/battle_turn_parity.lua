@@ -657,6 +657,62 @@ scenario("vitamin", function(events)
   return battle
 end)
 
+-- 16. round 5: wild-mode KO. The faint on the synthetic side b is the one
+--     `_awardExp` pays for -- one `exp` event for the sole owner-slot winner
+--     (slot 0), split one way (participants = 1). Looped like `ko` rather
+--     than aimed at an exact turn count, so the fixture survives a damage
+--     formula tweak without a hand-tuned HP number going stale.
+scenario("wild_ko", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local battle = build({
+    id = "wk", mode = "wild", seed = 5001, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thump() } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 60, spd = 10, moves = { thump() } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- 17. round 5: coop_wild 2v1 KO. Both owner slots are standing when the
+--     wild mon falls, so `_awardExp` walks bySide.a twice -- slot 0 (a1)
+--     then slot 1 (a2), field-slot order -- and each event names
+--     participants = 2, the share count the split is over.
+scenario("coop_wild_ko", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local battle = build({
+    id = "cwk", mode = "coop_wild", seed = 5002, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thump() } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mn({ species = "Gamma", maxHp = 200, atk = 90, spd = 70, moves = { thump() } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 200, spd = 10, moves = { thump() } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("a2", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
 -- ------------------------------------------------------------------
 
 local out = {}

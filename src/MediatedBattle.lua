@@ -100,6 +100,18 @@ local function loadEngine()
     AnimPlayer = grab("AnimPlayer", "src.battle.AnimPlayer"),
     BattleState = grab("BattleState", "src.battle.BattleState"),
     Sprites = grab("Sprites", "src.pokemon.Sprites"),
+    -- Exp is the *client's* arithmetic and can only ever be. The referee holds
+    -- no species table (the legal floor -- no ROM bytes on a hub), so it can
+    -- never price a faint: it states what fell and how many shared it, and
+    -- this runs the engine's own formula over the player's own save (see
+    -- `gainExp`). Grabbed rather than required so a build that cannot load it
+    -- fights on, exp-less, instead of failing to open a battle at all.
+    Experience = grab("Experience", "src.battle.Experience"),
+    -- The curve behind the exp strip, soft beside Experience because it is a
+    -- *display* dependency: a build without it still awards exp and still
+    -- levels, the plate simply draws no strip (see `expFraction`). Twin of
+    -- CoopBattle's own grab, and for the same reason.
+    Growth = grab("Growth", "src.pokemon.Growth"),
   }
   -- Optional SFX / music. Missing Sound or Music must not fail the whole
   -- load — headless / no-audio builds still fight without them.
@@ -115,6 +127,51 @@ local function loadEngine()
 end
 
 M.loadEngine = loadEngine
+
+-- ------- how far along its level a monster is
+--
+-- Verbatim twin of CoopBattle's helper of the same name (which is itself the
+-- Gen 2 HUD's `HpBar.expFraction` ported to Gen 1 spellings): the exp a mon
+-- carries is `mon.exp`, and the curve comes off the species def's
+-- `growthRate` through `Growth.expForLevel` -- the same call `Experience.apply`
+-- levels by, so the strip and the level can never disagree about where a level
+-- ends. Kept a copy rather than shared because the two screens load their
+-- engines separately and neither requires the other.
+--
+-- **nil is a real answer and means "draw no strip".** No species def, no
+-- Growth module, no `mon.exp`: three states where any number this could return
+-- would be invented, and an invented exp bar on somebody's plate is worse than
+-- no bar at all -- Battlefield's `plateModel` treats a nil `expFrac` as exactly
+-- that no-data state. Everything is pcall-guarded because it runs inside the
+-- draw path.
+--
+-- The mon here is the **save** mon, never the wire sheet: a `Wire.battleMon`
+-- carries level and HP and no exp at all, so a fraction worked off one would
+-- be a fraction of nothing.
+local function expFraction(data, mon)
+  if type(data) ~= "table" or type(mon) ~= "table" then return nil end
+  if mon.exp == nil then return nil end
+  local eng = loadEngine()
+  local Growth = eng and eng.Growth
+  if not (Growth and Growth.expForLevel) then return nil end
+  local def = mon.species and (data.pokemon or {})[mon.species]
+  if not def then return nil end
+  local level = tonumber(mon.level) or 1
+  local ok, base = pcall(Growth.expForLevel, def.growthRate, level,
+    data.growth_rates)
+  if not ok then return nil end
+  local okNext, after = pcall(Growth.expForLevel, def.growthRate, level + 1,
+    data.growth_rates)
+  if not okNext then return nil end
+  base, after = tonumber(base), tonumber(after)
+  if not (base and after) or after <= base then return nil end
+  local into = (tonumber(mon.exp) or base) - base
+  local frac = into / (after - base)
+  -- NaN compares false against every bound there is, so it is refused rather
+  -- than clamped -- the same rule `startDrain` applies to a wire `to`.
+  if frac ~= frac then return nil end
+  return math.max(0, math.min(1, frac))
+end
 
 -- Classic 1v1 anchors (AnimPlayer / BattleState pic windows).
 -- Ally back pics draw at 2x on Gen 1 (32×32); Gen 2 backs are 48×48 at 1x.
@@ -1018,6 +1075,16 @@ local BALL_SHAKE_MAX = 8
 local DRAIN_FRAMES = 96
 local DRAIN_BUDGET = 120
 
+-- The exp strip's rate, and CoopBattle's numbers verbatim: a whole bar in
+-- about 1.2 seconds, counted in 60Hz frames like the drain above. Linear
+-- rather than the cart's accelerating three-frames-a-pixel crawl
+-- (AnimateExpBar) because the strip here is a fraction rather than 64 discrete
+-- pixels -- there are no pixel steps to lengthen, and a constant rate reads as
+-- the same deliberate crawl. The two screens must not drift on a rhythm the
+-- player reads as the game's.
+local EXP_FILL_FRAMES = 72
+local EXP_FILL_STEP = 1 / EXP_FILL_FRAMES
+
 -- How many 60Hz frames one update covers.  In game this is always 1 (the
 -- engine's step is fixed at 1/60); the headless suite drives whole seconds at
 -- a time and has to land on the far end of a drain rather than wedge on it.
@@ -1034,6 +1101,28 @@ end
 -- slots empty so that "which box is this" does not change meaning with the
 -- mode.
 local function slotOfSide(side) return side == "b" and 2 or 0 end
+
+-- ...and back the other way. Side a holds slots 0-1, side b holds 2-3, so the
+-- read is a halving rather than an equality -- a co-op seat sits on the odd
+-- slot of its side and is no less that side's for it. A slot this build cannot
+-- read as a number is nobody's, and answers "a" so that the one caller (the
+-- exp credit below) treats it as *not* a foe -- the conservative half.
+local function sideOfSlot(index)
+  local n = tonumber(index)
+  if not n then return "a" end
+  return (math.floor(n) >= 2) and "b" or "a"
+end
+
+-- How many `exp` events one observed foe knockout may pay for.
+--
+-- The referee sends one `exp` per standing winner slot and a side holds at
+-- most two fighters, so two is the whole of what an honest hub can owe for a
+-- single faint -- and the own-slot gate in `onEvent` means this client applies
+-- at most one of them anyway. Deliberately the generous bound: the guard that
+-- spends this exists to cap a hostile hub, never to argue with a well-behaved
+-- one. Declared up here rather than beside `gainExp` because `onEvent` is the
+-- one that banks it, and a local is only in scope after its own line.
+local EXP_PER_FAINT = 2
 
 function M.new(opts)
   opts = opts or {}
@@ -1093,7 +1182,12 @@ function M.new(opts)
     itemList = nil,
     bagSheet = nil,        -- id → count matching the uploaded PROTOCOL 15 bag
     pendingItem = nil,     -- choice sent; debit only after hub `item` event
-    pendingItemSlot = nil, -- 1-based party index for vitamin writeback
+    -- 1-based index into `mine` (the uploaded sheets), which is what the wire
+    -- is stated in. `savePartyIndex` is what turns it into a save.party slot.
+    pendingItemSlot = nil,
+    -- Awards this client may still honour, banked by the foe knockouts it has
+    -- actually seen narrated. See EXP_PER_FAINT and the `exp` event branch.
+    expCredit = 0,
     seq       = 0,         -- the highest event sequence applied
     gaps      = 0,         -- events that arrived out of order
     pendingTurn = false,
@@ -1112,12 +1206,22 @@ function M.new(opts)
     -- Battlefield.enabled is false.
     frame = 0,
     -- Display clock, arena only. `fx` is the list Battlefield renders from;
-    -- `draining` / `faintFx` are the two states that hold the message queue
-    -- while the bar falls and the monster after it. All three stay nil until
-    -- something is actually playing.
+    -- `draining` / `faintFx` / `expFilling` are the three states that hold the
+    -- message queue while the bar falls, the monster after it, and the exp
+    -- strip that answers the award. All of them stay nil until something is
+    -- actually playing.
     fx = nil,
     draining = nil,
     faintFx = nil,
+    -- The exp strip mid-crawl: { slot, mon, toLevel, toFrac, frames }. The two
+    -- clocks it drives (`shownExpFrac` / `shownLevel`) live on the seat's own
+    -- `slots` entry beside `shownHp`, not here -- this is only what is moving
+    -- them. Own seat only: the peer's client draws the peer's own strip, the
+    -- same ownership rule the whole exp path runs on.
+    expFilling = nil,
+    -- Moves a level-up produced for a monster that already knows four, handed
+    -- to `onDone` on the way out (CoopBattle's `toLearn`, same shape).
+    toLearn = nil,
     -- #36: the fanfare finish() parked because the arena still owed one of those.
     victoryMusicHeld = nil,
     battlefieldLoaded = false,
@@ -1305,11 +1409,32 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     }
   end
   local front = self:seatFront(key, frontMon, slot) or slot.sprite
+  -- The exp strip's two clocks, and only ever on this client's own seat.
+  --
+  -- Ownership is the whole rule: the fraction is read off *this* save file, and
+  -- nothing on the wire carries one, so the peer's plate is drawn by the peer's
+  -- own client from their own party and this one leaves theirs nil -- which is
+  -- Battlefield's no-data state and draws no strip at all. Seeded here, at
+  -- first sight, because a `slots` entry is built from a wire event and the
+  -- wire knows nothing about exp; `seedExpClock` only ever fills a nil, so a
+  -- clock mid-fill is never yanked back to truth by a draw.
+  local expFrac, shownLevel
+  if isPlayer and slotIndex == self:mySlot() then
+    self:seedExpClock(slot)
+    expFrac = slot.shownExpFrac
+    shownLevel = slot.shownLevel
+  end
   return {
     index = slotIndex,
     name = slot.species,
     level = slot.level or (monHint and monHint.level) or 1,
     hp = slot.hp or 0,
+    -- Display clocks, plate-only (see Battlefield's seat HP contract). nil
+    -- keeps meaning "no exp data" all the way down to drawPlate; the pill
+    -- prefers `shownLevel` so it ticks over as the strip tops out rather than
+    -- a message later.
+    expFrac = expFrac,
+    shownLevel = shownLevel,
     -- Display clock. Battlefield falls back to `hp` when this is absent, so a
     -- seat that never drained reads exactly as it did before.
     shownHp = self:shownHpOf(slot),
@@ -1675,6 +1800,25 @@ function M:onEvent(msg)
         self.replaceOnly = false
         if self.phase == "switch" then self.phase = "play" end
       end
+      -- ...and the exp clocks go with it. They describe the monster that was
+      -- standing here, and a fraction left behind would be the departing
+      -- monster's progress drawn under the newcomer's name until the next
+      -- award. Cleared rather than recomputed: nil is what `seedExpClock`
+      -- reads as "ask again", and the answer it wants comes off `self.active`,
+      -- which `trackActive` has not updated yet this far up the branch.
+      local slot = self.slots[msg.slot]
+      if slot then
+        slot.shownExpFrac = nil
+        slot.shownLevel = nil
+      end
+      -- A crawl already running on this seat goes too. Events arrive off the
+      -- wire while the queue is held, so a send *can* land mid-fill, and a
+      -- fill that kept stepping would write the departed monster's target
+      -- straight back over the clocks just cleared. The queued-row case is
+      -- caught by `startExpFill`'s occupant check; this is the live one.
+      if self.expFilling and self.expFilling.slot == msg.slot then
+        self.expFilling = nil
+      end
     end
     if msg.text then
       if msg.slot ~= self:mySlot() then
@@ -1735,6 +1879,53 @@ function M:onEvent(msg)
     -- for the same reason the drain row is: an auto-replacement batched behind
     -- the KO would otherwise have this row take the newcomer's pic down.
     self.lines[#self.lines + 1] = { clearPic = msg.slot, species = slot and slot.species }
+    -- A knockout on the *other* side is the only thing that can owe this
+    -- client experience, so this is where the credit for one is banked. See
+    -- the `exp` branch below for what spends it.
+    if sideOfSlot(msg.slot) ~= (self.mySide or "a") then
+      self.expCredit = (self.expCredit or 0) + EXP_PER_FAINT
+    end
+
+  elseif kind == "exp" then
+    -- The spoils of the faint just above, and they arrive *after* it for the
+    -- same reason the engine awards after `enemyMonFainted`: the bar falls,
+    -- the monster sinks, "X fainted!" prints, and only then is anybody paid.
+    -- Nothing here reorders that -- the lines this queues go on the back of a
+    -- queue those rows are already sitting in.
+    --
+    -- One event per standing winner slot, so a 2-on-2 knockout puts two of
+    -- these on the wire and every client sees both. Only ours is ours to pay:
+    -- the referee holds no save file and this client holds exactly one, so a
+    -- share aimed at somebody else's seat is theirs to apply on their own
+    -- copy. Same own-slot rule the `item` debit and the faint's bench check
+    -- run on, a few lines up.
+    --
+    -- **Bounded by the knockouts actually seen.** `exp` is the one event on
+    -- this wire that writes the save file, and nothing else in the stream
+    -- limits how many of them a hub may send -- an unbounded loop of them is a
+    -- party levelled to 100 by a server the player merely connected to. The
+    -- bound is the referee's own contract rather than a rate limit: a faint
+    -- comes before the exp it pays for (`_awardExp` runs off the knockout, in
+    -- both halves of the intermediator), so each observed foe knockout banks
+    -- credit for the handful of awards it can honestly owe and every award
+    -- spends one. A well-behaved hub is never refused; a hostile one gets at
+    -- most what the fights it actually narrated were worth. Refused, warned
+    -- through the same one-line `warnNoExp`, and never thrown -- an event
+    -- handler that throws takes the whole stream with it.
+    --
+    -- The one honest cost: a hub that genuinely *lost* the faint message (a
+    -- counted `gaps` jump above) loses the award with it. That is the same
+    -- trade the rest of this handler makes for a dropped event, and it is the
+    -- right way round -- a missing knockout should cost one payout, not open
+    -- the save file to a stream nobody can account for.
+    if msg.slot == self:mySlot() then
+      if (self.expCredit or 0) <= 0 then
+        self:warnNoExp("the referee paid experience with no knockout ahead of "
+          .. "it, which is not a payout this client can account for")
+      elseif self:gainExp(msg) then
+        self.expCredit = self.expCredit - 1
+      end
+    end
 
   elseif kind == "status" then
     self:noteSlot(msg)
@@ -1822,6 +2013,336 @@ function M:syncMineHp(msg)
   elseif msg.amount ~= nil and msg.t == "damage" then
     mon.hp = max(0, (mon.hp or 0) - msg.amount)
   end
+end
+
+-- ------- exp
+--
+-- **Two monsters, and telling them apart is the whole of this section.**
+-- `self.mine[self.active]` is a *wire sheet* -- what the referee is fighting
+-- with, carrying level, HP and moves and no exp at all -- and it is thrown
+-- away with the battle. The monster that keeps what it earns is the one in
+-- `game.save.party`, and that is the only one written to here.
+--
+-- The referee sends no amount, and cannot: the hub holds no species table (no
+-- ROM bytes on a hub, the legal floor), so `baseExp` is a number it has never
+-- seen. It states facts -- who fell, at what level, split how many ways -- and
+-- each client prices them with the engine's own `Experience.apply`, which is
+-- also what divides the stat exp, recomputes the stats and decides whether a
+-- level was crossed. A hub-computed number would skip all three, and would be
+-- a hub deciding how strong somebody's party gets.
+--
+-- Applied here, at event receipt, rather than at `finish`: a mediated battle
+-- has several ends that never reach finish (a dropped hub, a referee timeout,
+-- the player closing the game), and exp banked only at the end would be exp
+-- lost on every one of them. Same precedent as the vitamin writeback above --
+-- fight-local sheet mutation is the referee's job, permanence is the client's.
+
+-- Where the monster behind a fight sheet actually lives in the save file.
+--
+-- **The drift this closes, stated where it was assumed:** `mine[i]` is *not*
+-- `save.party[i]`. `snapshotMons` skips a monster it cannot describe (no
+-- stats, no species, no moves; see the comment on it), and one skip shifts
+-- every index after it -- which would be exp paid to the wrong party member,
+-- and Stat Exp written onto the wrong one at the vitamin writeback below.
+-- The snapshot already stamps the party position it cut each sheet from
+-- (`slot`, 0-based, `M.snapshotMons`), so both sites resolve through here
+-- rather than through the array index. A sheet with no `slot` -- an older
+-- upload, or a hand-built one in a test -- falls back to the array index,
+-- which is exactly the behaviour this replaces.
+function M:savePartyIndex(sheetIndex)
+  local index = sheetIndex or self.active or 1
+  local sheet = self.mine and self.mine[index]
+  local slot = sheet and tonumber(sheet.slot)
+  if not slot then return index end
+  slot = math.floor(slot) + 1
+  if slot < 1 then return index end
+  return slot
+end
+
+-- The save-file monster behind a fight sheet index.
+function M:saveMon(index)
+  local party = self.game and self.game.save and self.game.save.party
+  local mon = party and party[self:savePartyIndex(index)]
+  if type(mon) ~= "table" then return nil end
+  return mon
+end
+
+-- The exp-awarding modes that have a *trainer* on the other side.
+--
+-- The referee's own gate is `EXP_MODES` = wild / coop_wild / coop_npc
+-- (server/lib/battle/Turn.js, src/BattleSim/Turn.lua). Two of those three are
+-- wildlife; only `coop_npc` fields a trainer, so the x1.5 belongs to it alone
+-- and every other token -- including a mode this screen never learned -- pays
+-- the plain wild rate.
+local TRAINER_MODES = { coop_npc = true }
+
+-- Warn once per screen rather than once per faint: a build with no Experience
+-- module loses exp on every knockout, and forty identical lines in the log
+-- describe the same single fact.
+function M:warnNoExp(why)
+  if self.expWarned then return false end
+  self.expWarned = true
+  mod.log:warn("no experience could be awarded in this battle (%s), so the "
+    .. "fight still plays out but nothing levels up -- report this with the "
+    .. "game version; levelling still works in ordinary battles", why)
+  return true
+end
+
+-- Pay this client's own monster for a faint the referee just narrated.
+function M:gainExp(msg)
+  local data = self.game and self.game.data
+  local mon = self:saveMon()
+  if not (type(data) == "table" and mon) then
+    self:warnNoExp("this client holds no save party to pay")
+    return false
+  end
+
+  -- **Wire tolerance.** An older or more lenient hub can send this event with
+  -- any of the three facts missing, and every one of them is load-bearing: no
+  -- species is no `baseExp` and no stat exp, no level is no formula, no
+  -- participant count is a division by an unknown. There is no honest default
+  -- for any of them -- inventing one pays a number nobody refereed -- so the
+  -- award is skipped and said so, and the fight carries on. Never thrown: an
+  -- event handler that throws takes the whole stream with it.
+  local label = msg.species
+  local key = (type(label) == "string" and label ~= "") and self:speciesKeyFor(label) or nil
+  local def = key and type(data.pokemon) == "table" and data.pokemon[key] or nil
+  local level = tonumber(msg.level)
+  local participants = tonumber(msg.participants)
+  if not (def and level and participants and participants >= 1) then
+    self:warnNoExp("the referee's exp event named no species, level or share "
+      .. "count this build could read")
+    return false
+  end
+  level = math.max(1, math.floor(level))
+  participants = math.max(1, math.floor(participants))
+
+  local eng = loadEngine()
+  if not (eng and eng.Experience and eng.Experience.apply) then
+    self:warnNoExp("the engine's Experience module is unavailable")
+    return false
+  end
+
+  -- Wild or trainer, decided from the mode this screen already knows.
+  --
+  -- **Deliberately not CoopBattle's unconditional `true`.** The trainer x1.5
+  -- is a real rule of the formula (experience.asm), and paying it for a
+  -- *wild* mediated kill would make the same PIDGEY worth more fought in the
+  -- MMO than fought alone -- the kind of divergence a player finds in an
+  -- afternoon.
+  --
+  -- Named as a positive set rather than "anything that is not `wild`", for
+  -- two reasons the negative test got wrong: `coop_wild` is a wild fight too
+  -- (the referee's own `EXP_MODES` is `wild` / `coop_wild` / `coop_npc`, and
+  -- only the last of those has a trainer on the other side), and a screen
+  -- whose `mode` never arrived reads as nil -- which under `~= "wild"` paid
+  -- the bonus off a fact nobody stated. Unknown now means the smaller,
+  -- unearned-nothing payout.
+  local isTrainer = TRAINER_MODES[self.mode] or false
+
+  local save = self.game.save
+  local inventory = save and save.inventory
+  -- EXP.ALL, the way the original splits it: the monster that fought takes
+  -- half, and the other half is divided again across the whole living party.
+  -- The engine expresses that as a *divisor* rather than a fraction (the base
+  -- values are halved in place and the second pass inherits the participant
+  -- division), so holding one doubles the divisor on the first pass and the
+  -- second pass divides by the party size on top. Verbatim from
+  -- BattleState:awardExp's own `vanillaExpAward`, so a mediated wild fight and
+  -- a local one pay the same party the same numbers.
+  local expAll = inventory and (tonumber(inventory.EXP_ALL) or 0) > 0
+  local party = (save and save.party) or {}
+
+  -- The three fields `Experience.apply` writes through without checking, and
+  -- the one it reads. Filled rather than trusted because `apply` adds the exp
+  -- *before* it recomputes the stats: a missing `dvs` or `stats` would throw
+  -- half way and leave a monster holding exp it never levelled for -- and the
+  -- pcall below would swallow the reason, so the damage would be silent. A
+  -- save mon that has no stat block at all is not a save mon this fight
+  -- uploaded (see the drift note on `savePartyIndex`), so it is refused rather
+  -- than invented.
+  local pokedex = (type(data.pokemon) == "table") and data.pokemon or {}
+  mon.statExp = mon.statExp or {}
+  mon.dvs = mon.dvs or {}
+  mon.exp = mon.exp or 0
+  if type(mon.stats) ~= "table" then
+    self:warnNoExp("the party monster this fight is holding has no stat block")
+    return false
+  end
+  -- The fourth thing `apply` reads, and the one this used to look up *after*
+  -- the award: recomputing the stats needs the receiving monster's own species
+  -- record, so a species this build cannot name is the same half-way throw.
+  -- Hoisted above the first `apply` and refused there.
+  local myDef = pokedex[mon.species]
+  if type(myDef) ~= "table" then
+    self:warnNoExp("this build has no species record for the party monster "
+      .. "being paid")
+    return false
+  end
+
+  -- Where the strip is *now*, read before the award lands.
+  --
+  -- `Experience.apply` mutates `mon.exp` and `mon.level` in place, so once it
+  -- has run there is nothing left to work the starting fraction back out of.
+  -- That is the whole job of this capture, and its only one: `startExpFill`
+  -- starts from the *live* display clock and reaches for `from*` only when
+  -- that clock is still nil, precisely so a second award in the same batch
+  -- (both foes down in one 2-on-2 turn) begins where the first fill stopped
+  -- rather than rewinding under it.
+  --
+  -- Battlefield only. The classic 160x144 readout has no exp strip: nothing
+  -- below is computed, nothing is queued, and its exp text flow is the plain
+  -- engine one -- the award still lands and still persists.
+  local wide = self:usesBattlefield()
+  local index = self:mySlot()
+  local slot = self.slots[index]
+  local fromFrac, fromLevel
+  if wide and slot then
+    self:seedExpClock(slot, mon)
+    fromFrac = slot.shownExpFrac
+    fromLevel = slot.shownLevel or mon.level or 1
+  end
+
+  local ok, levels, gained = pcall(eng.Experience.apply, data, mon, def,
+    level, isTrainer, participants * (expAll and 2 or 1), mon.traded)
+  if not ok then
+    self:warnNoExp("the engine refused the award for this monster")
+    return false
+  end
+
+  -- The name the box has been calling it all fight: the referee narrates under
+  -- the sheet's `species` (a nickname when there is one), so the exp line must
+  -- not suddenly switch to the species def and read as a different monster.
+  local sheet = self.mine and self.mine[self.active]
+  local name = (sheet and sheet.species) or mon.nickname or myDef.name or "?"
+
+  self:say(name .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
+
+  -- ...and *then* the strip crawls, which is the cart's chronology: the line
+  -- is read, and the bar answers it. Queued ahead of the level lines
+  -- deliberately -- the pill ticks over as the strip tops out (`stepExpFill`),
+  -- so "grew to level N!" prints after the plate already says N rather than a
+  -- beat before it.
+  --
+  -- No target rides on the row: it is read off the mon when the row comes up,
+  -- because the mon is *still being written to* after this point (the EXP.ALL
+  -- pass below walks `save.party`, and this fighter is in it). A target frozen
+  -- here would be the first half of the award and would leave the pill short
+  -- of the "grew to level N!" lines printed beside it.
+  if wide and slot then
+    self.lines[#self.lines + 1] = {
+      expfill = index,
+      mon = mon,
+      name = name,
+      fromFrac = fromFrac,
+      fromLevel = fromLevel,
+      -- Stamped with its occupant like every other display row here: a switch
+      -- landing between queue and play would otherwise crawl this monster's
+      -- award across the newcomer's plate.
+      species = slot.species,
+    }
+  end
+
+  self:levelled(mon, name, levels)
+
+  -- **No HP-climb row, and that is a decision rather than an omission.**
+  -- CoopBattle queues one because there the levelling mon *is* the battler on
+  -- the field, so its max HP moves under a bar mid-fight. Here the field is the
+  -- referee's: `slot.hp` / `slot.maxHp` are its numbers, the save mon is a
+  -- different table, and this fight goes on being fought with the sheet that
+  -- was uploaded. Climbing the arena bar to a save-file HP would put a number
+  -- on screen no referee holds -- one the very next `damage` event would
+  -- contradict, and one `startDrain` would clamp against the old maximum
+  -- anyway. The stat gain is real and is already banked; it shows in the party
+  -- screen, and in the next battle's upload.
+
+  -- ...and the other half, spread over everyone still standing -- including
+  -- the monster that fought, exactly as the original's second pass does.
+  -- Fainted party members are skipped, and no "gained EXP" line is printed for
+  -- any of them: the original prints only what a level-up produces.
+  --
+  -- Every member is held to the same four checks the fighter above is, and for
+  -- the same reason: `apply` banks the exp before it recomputes the stats, so
+  -- a member with no `dvs`, no stat block or a species this build cannot name
+  -- throws *after* the level has already moved, and the `pcall` here would
+  -- report a skip while leaving the monster holding a level its stats never
+  -- caught up with. A member that fails them is passed over whole.
+  if expAll then
+    for _, member in ipairs(party) do
+      local memberDef = type(member) == "table" and pokedex[member.species] or nil
+      if type(memberDef) == "table" and (tonumber(member.hp) or 0) > 0
+         and type(member.stats) == "table" then
+        member.statExp = member.statExp or {}
+        member.dvs = member.dvs or {}
+        member.exp = member.exp or 0
+        local gotOk, gotLevels = pcall(eng.Experience.apply, data, member, def,
+          level, isTrainer, participants * 2 * math.max(1, #party),
+          member.traded)
+        if gotOk then self:levelled(member, nil, gotLevels) end
+      end
+    end
+  end
+  return true
+end
+
+-- What a level-up costs, wherever it happened: a line, and whatever moves come
+-- with the level. CoopBattle's twin, minus its evolution note -- a mediated
+-- battle has no `afterBattle` of its own to run the check in, so evolution
+-- stays where the round pinned it: out.
+function M:levelled(mon, fallbackName, levels)
+  if not (levels and #levels > 0) then return false end
+  local data = self.game and self.game.data
+  local def = type(data) == "table" and (data.pokemon or {})[mon.species] or nil
+  local name = mon.nickname or fallbackName or (def and def.name) or "?"
+  local eng = loadEngine()
+  for _, newLevel in ipairs(levels) do
+    self:say(name .. " grew to\nlevel " .. tostring(newLevel) .. "!")
+    -- Levelled here, so the moves it learns are decided here too -- the
+    -- referee cannot know, because it never held the copy that gained them.
+    --
+    -- Unpacked in full rather than through `select(2, pcall(...))`: on a
+    -- failure that second value is the error *string*, and `ipairs` over a
+    -- string throws -- out of a function whose whole contract is that a
+    -- level-up never takes the event stream down with it.
+    local moves
+    if def and eng and eng.Experience
+       and type(eng.Experience.movesLearnedAt) == "function" then
+      local ok, got = pcall(eng.Experience.movesLearnedAt, def, newLevel)
+      if ok and type(got) == "table" then moves = got end
+    end
+    for _, moveId in ipairs(moves or {}) do
+      self:teach(mon, name, moveId)
+    end
+  end
+  return true
+end
+
+-- ------- learning a move
+--
+-- CoopBattle's twin. A monster with a free slot simply learns it; a full
+-- moveset is a choice only its owner can make, so it is set aside and handed
+-- to `onDone` -- the session that pushed this screen is where a forget prompt
+-- belongs, not over a battle that is still finishing its own lines. Until one
+-- is wired there the move is announced and kept in the list rather than
+-- silently dropped: `toLearn` is the record that it was earned.
+function M:teach(mon, name, moveId)
+  local data = self.game and self.game.data
+  local def = type(data) == "table" and (data.moves or {})[moveId] or nil
+  if not def then return false end
+  mon.moves = mon.moves or {}
+  for _, known in ipairs(mon.moves) do
+    if known.id == moveId then return false end
+  end
+  name = name or "?"
+  if #mon.moves < 4 then
+    mon.moves[#mon.moves + 1] = { id = moveId, pp = def.pp }
+    self:say(name .. " learned\n" .. (def.name or moveId) .. "!")
+    return true
+  end
+  self.toLearn = self.toLearn or {}
+  self.toLearn[#self.toLearn + 1] = { mon = mon, move = moveId }
+  self:say(name .. " is trying to\nlearn " .. (def.name or moveId) .. "!")
+  return true
 end
 
 -- Record whatever an event said about a field slot.  Every event that names one
@@ -2262,12 +2783,18 @@ function M:confirmPendingItem(itemId, amount)
   local id = self.pendingItem
   if not id then return false end
   if itemId and itemId ~= id then return false end
-  local partyIndex = self.pendingItemSlot or self.active
+  local sheetIndex = self.pendingItemSlot or self.active
   self.pendingItem = nil
   self.pendingItemSlot = nil
   local effect = effectsFor(self.game).itemEffect(id)
   if effect and effect.vitamin and amount == 1 then
-    M.writebackVitamin(self.game, partyIndex, id)
+    -- The sheet index is what the wire is stated in (the hub indexes the
+    -- `mons` array it was uploaded), and it is *not* the save.party position:
+    -- `snapshotMons` skips a monster it cannot describe and one skip shifts
+    -- every later index. The drift is closed through the party position the
+    -- snapshot stamps on each sheet -- see `savePartyIndex`, which the exp
+    -- writeback resolves through too.
+    M.writebackVitamin(self.game, self:savePartyIndex(sheetIndex), id)
   end
   if effect and effect.noConsume then
     self.itemList = nil
@@ -2582,7 +3109,13 @@ function M:exit()
   if eng and eng.Music and self.game then
     Gen.restoreMapMusic(self.game, { Music = eng.Music })
   end
-  if self.onDone then self.onDone(self.result or "draw") end
+  -- `toLearn` rides out with the result, exactly as CoopBattle's does: a
+  -- monster that levelled into a fifth move needs a forget prompt, and that
+  -- belongs to whoever pushed this screen (Coop hands its list to
+  -- `offerForgets`), not over a battle still reading its own last lines. A
+  -- session that ignores the second argument is no worse off than before --
+  -- the move is announced and the level is banked either way.
+  if self.onDone then self.onDone(self.result or "draw", self.toLearn) end
 end
 
 function M:leave()
@@ -2648,6 +3181,14 @@ function M:tickMessages(dt, input)
     self.dwell = 0
     return true
   end
+  -- ...and a filling exp strip holds the queue the same way, for the same
+  -- reason: it is a bar crawling on the cart's own unskippable loop, not a text
+  -- page with a button to answer it.
+  if self.expFilling then
+    self:stepExpFill(dt)
+    self.dwell = 0
+    return true
+  end
   if self.faintFx then
     -- Retired by stepFx once its `t` reaches 1.
     self.dwell = 0
@@ -2676,6 +3217,12 @@ function M:tickMessages(dt, input)
     if type(next) == "table" and next.drain ~= nil then
       -- A bar already where it was going costs nothing but the row.
       self:startDrain(next)
+      return true
+    end
+    if type(next) == "table" and next.expfill ~= nil then
+      -- A strip already where it was going costs nothing but the row:
+      -- `startExpFill` answers false and the queue moves on this same tick.
+      self:startExpFill(next)
       return true
     end
     if type(next) == "table" and next.faintfx ~= nil then
@@ -3374,6 +3921,171 @@ function M:startFaintFx(row)
   return true
 end
 
+-- ------- the exp strip filling, which is the arena's third display clock
+--
+-- Same shape as the drain above and for the same reason: `Experience.apply`
+-- runs the instant the `exp` event is received and moves `mon.exp` and
+-- `mon.level` in one step, so the number the plate is drawn from has to be a
+-- separate clock that trails it. `slot.shownExpFrac` is the strip's fill (0..1,
+-- or nil for "no strip") and `slot.shownLevel` is the number the level pill
+-- prints; the gap between those two and the save mon's own truth *is* the
+-- animation, exactly as `shownHp` is for the bar.
+--
+-- Own seat only. The peer's plate is driven by the peer's own client off their
+-- own save file -- there is no wire field for a fraction and there must not be
+-- one -- so no other seat is ever seeded and no other seat draws a strip.
+--
+-- Battlefield-only. The classic 160x144 readout has no strip and never reads
+-- either clock, so nothing here is ever queued on that path (see `gainExp`).
+
+-- Seed the two display clocks off the save monster's own truth.
+--
+-- Lazy rather than at build time, because a `slots` entry is built from a wire
+-- event and the wire knows nothing about exp. Idempotent: it only ever fills a
+-- nil, so a clock mid-fill is never yanked back to truth by a draw.
+--
+-- A seeded-nil `shownExpFrac` is not a failure to seed -- it is the honest
+-- "this monster has no fraction to show" (no Growth module, no save mon, a
+-- species this build cannot describe) -- and it is re-asked every call
+-- precisely so a monster that gains one later picks it up.
+function M:seedExpClock(slot, mon)
+  if type(slot) ~= "table" then return false end
+  mon = mon or self:saveMon()
+  if type(mon) ~= "table" then return false end
+  if slot.shownLevel == nil then
+    slot.shownLevel = tonumber(mon.level) or tonumber(slot.level) or 1
+  end
+  if slot.shownExpFrac == nil then
+    slot.shownExpFrac = expFraction(self.game and self.game.data, mon)
+  end
+  return true
+end
+
+-- A queued exp-fill row comes up. Answered on the spot (returning false) when
+-- there is nothing to crawl, so the queue never stalls on one.
+--
+-- The row carries the *save* mon it was queued for as well as the seat, and
+-- both are checked: the award belongs to that monster wherever it now is, and
+-- the clocks belong to the seat, so a switch that landed between queue and
+-- play means the strip on that plate is describing somebody else. Dropped in
+-- that case, with the clocks cleared so the newcomer reseeds from its own
+-- truth rather than inheriting a fraction that was never theirs.
+--
+-- **Both ends are read here, not at queue time, and each for its own reason.**
+--
+-- The *target* comes off the mon now because the mon is still being written to
+-- after the row is queued: with an EXP.ALL held, `gainExp` runs a second
+-- `Experience.apply` pass over the whole party -- and the fighter is in that
+-- party, so a target frozen before that pass is short by whatever the second
+-- half added. Reading it at row-start means every pass has landed, so the
+-- strip and the pill agree with the "grew to level N!" lines beside them.
+--
+-- The *start* is the live display clock, because that is where the strip
+-- visibly is. Two awards in one batch (both foes down in one 2-on-2 turn) both
+-- capture their `from*` before either has played, so honouring the second
+-- row's capture would drag the strip back down to where the first one started.
+-- `row.from*` remains the fallback for a clock that is still nil -- the
+-- capture `gainExp` takes before `Experience.apply` mutates the mon, which is
+-- the one thing that genuinely cannot be worked back out later.
+function M:startExpFill(row)
+  local index = row and row.expfill
+  local slot = self.slots[index]
+  local mon = row and row.mon
+  if not (type(slot) == "table" and type(mon) == "table") then return false end
+  if row.species ~= nil and slot.species ~= row.species then
+    slot.shownExpFrac = nil
+    slot.shownLevel = nil
+    return false
+  end
+  local function level(value, fallback)
+    local got = tonumber(value)
+    if not got or got ~= got then return fallback end
+    return max(1, floor(got))
+  end
+  local function frac(value)
+    local got = tonumber(value)
+    -- NaN refused rather than clamped: `stepExpFill` stops on a comparison
+    -- against a target, and a NaN target is a stop condition that never comes
+    -- true -- the same rule `startDrain` applies to a wire `to`.
+    if not got or got ~= got then return nil end
+    return max(0, min(1, got))
+  end
+  local data = self.game and self.game.data
+  local toLevel = level(mon.level, 1)
+  local toFrac = frac(expFraction(data, mon)) or 0
+  local from = frac(slot.shownExpFrac)
+  if from == nil then from = frac(row.fromFrac) end
+  -- No fraction to start from means this monster draws no strip at all, so
+  -- there is nothing to fill. The pill is still put where the level is: it is
+  -- printed from `shownLevel` and would otherwise sit a level behind forever.
+  if from == nil then
+    slot.shownLevel = toLevel
+    return false
+  end
+  local fromLevel = min(level(slot.shownLevel, level(row.fromLevel, toLevel)),
+    toLevel)
+  slot.shownExpFrac = from
+  slot.shownLevel = fromLevel
+  -- Nothing crossed and nothing added (a rounding-sized gain, or an award that
+  -- priced to zero): put the strip where it belongs and let the queue move on
+  -- rather than holding it for a crawl nobody can see.
+  if fromLevel == toLevel and toFrac <= from then
+    slot.shownExpFrac = toFrac
+    return false
+  end
+  -- The budget, and it is the same guarantee the drain's is: a fill is
+  -- deliberately unskippable, so the only other end to a target it somehow
+  -- cannot reach is a message queue that never moves again. One whole bar per
+  -- level to cross plus two bars of slack, after which it is snapped home.
+  self.expFilling = {
+    slot = index,
+    mon = mon,
+    toLevel = toLevel,
+    toFrac = toFrac,
+    frames = EXP_FILL_FRAMES * (2 + (toLevel - fromLevel)),
+  }
+  return true
+end
+
+-- One frame of it -- or however many this update covers, the way `stepDrain`
+-- counts them, so the headless suite can drive whole seconds at a time.
+--
+-- A level crossing is the cart's own (AnimateExpBar, engine/battle/core.asm):
+-- the segment fills to full, the level the HUD prints ticks up, and the strip
+-- restarts at empty -- which is why the pill changes as the bar tops out and
+-- not a message later. Two levels in one award is that twice.
+function M:stepExpFill(dt)
+  local at = self.expFilling
+  if not at then return end
+  local slot = self.slots[at.slot]
+  if not (type(slot) == "table" and type(at.mon) == "table") then
+    self.expFilling = nil
+    return
+  end
+  local frames = frameCount(dt)
+  at.frames = (tonumber(at.frames) or 0) - frames
+  if at.frames <= 0 then
+    slot.shownExpFrac = at.toFrac
+    slot.shownLevel = at.toLevel
+    self.expFilling = nil
+    return
+  end
+  local shownLevel = tonumber(slot.shownLevel) or at.toLevel
+  -- Every level still to cross fills the whole strip; the last one stops
+  -- wherever the award actually left the monster.
+  local target = (shownLevel < at.toLevel) and 1 or at.toFrac
+  local shown = min(target, (tonumber(slot.shownExpFrac) or 0)
+    + EXP_FILL_STEP * frames)
+  slot.shownExpFrac = shown
+  if shown < target then return end
+  if shownLevel < at.toLevel then
+    slot.shownLevel = shownLevel + 1
+    slot.shownExpFrac = 0
+    return
+  end
+  self.expFilling = nil
+end
+
 -- Is a bar still falling, or a monster still on its way down?
 --
 -- The fanfare waits on this (#36): a win announced while the loser's bar is
@@ -3394,11 +4106,19 @@ function M:hasPendingHpFx()
   -- strike landing and the bar that answers it. (The re-queued drain row in
   -- `lines` already answers true below; this says it directly, so the hold
   -- still holds if that row is ever dropped rather than re-queued.)
-  if self.draining or self.faintFx or self.hitHold then return true end
+  -- A filling exp strip counts as well, live or still queued, and for the
+  -- plainest reading of the same rule: the award is the last thing a knockout
+  -- owes, so a jingle over a bar still crawling is a fight congratulating
+  -- itself before it has finished paying out.
+  if self.draining or self.faintFx or self.hitHold or self.expFilling then
+    return true
+  end
   if type(self.anim) == "table" and BALL_FX[self.anim.anim] then return true end
   for _, row in ipairs(self.lines or {}) do
     if type(row) == "table" then
-      if row.drain ~= nil or row.faintfx ~= nil then return true end
+      if row.drain ~= nil or row.faintfx ~= nil or row.expfill ~= nil then
+        return true
+      end
       if row.anim ~= nil and BALL_FX[row.anim] then return true end
     end
   end
@@ -3426,10 +4146,33 @@ function M:snapDisplay()
   self.hitHold = nil
   self.draining = nil
   self.faintFx = nil
+  self.expFilling = nil
   -- And the two clocks back in step: a descent abandoned half way is a bar
   -- that would otherwise sit at a number nobody holds until the next drain.
   for _, slot in pairs(self.slots or {}) do
     if type(slot) == "table" then slot.shownHp = slot.hp or 0 end
+  end
+  -- The exp clocks are welded the same way, and only on the one seat that owns
+  -- them: a battle that ends mid-fill would otherwise leave a strip frozen
+  -- part-way and a pill a level behind the monster it names. Welding wider than
+  -- the own seat would invent clocks on plates that read none -- and spend a
+  -- Growth walk per slot on the classic path, which is documented as untouched
+  -- by any of this. nil stays nil: a monster with no fraction still shows none.
+  --
+  -- Queued `expfill` rows are deliberately *not* dropped here (this screen
+  -- drops no queued rows -- see the drain rows, which stay too): a row that
+  -- comes up after a weld finds its target already reached and answers false
+  -- without crawling, which is the same outcome one fewer branch.
+  if self:usesBattlefield() then
+    -- `or {}` for the same reason the loop above has one: `exit` calls this on
+    -- any object holding the screen's methods, and the suite's stubs do not
+    -- carry a field table.
+    local slot = (self.slots or {})[self:mySlot()]
+    local mon = self:saveMon()
+    if type(slot) == "table" and type(mon) == "table" then
+      slot.shownExpFrac = expFraction(self.game and self.game.data, mon)
+      slot.shownLevel = tonumber(mon.level) or slot.shownLevel
+    end
   end
 end
 

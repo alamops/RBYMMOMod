@@ -2424,6 +2424,13 @@ end
 -- refuse politely. Gen 2 has no Gen2MoveLearnMenu twin, but the Gen 1 screen
 -- still resolves from the registry and works on Gold for the forget prompt —
 -- try it rather than silently dropping earned moves.
+--
+-- Sessions:offerForgets is this function's twin on the mediated 1v1 / wild
+-- path, over the same `{ mon, move }` entries: a fight that is not a co-op
+-- battle has no co-op state to hand this one, so it states the flow itself.
+-- The two differ in how they sequence -- that one hands MoveLearnMenu its own
+-- completion callback, this one paces with a "..." box -- and if this ever
+-- needs revisiting, that is the version to copy.
 function M:offerForgets(game, toLearn)
   if not (game and toLearn and #toLearn > 0) then return false end
   local pending = {}
