@@ -835,13 +835,95 @@ function M.await(game, name, seconds, sample)
   return ok
 end
 
+-- Live overworld controller: Gen 1 keeps it on the stack (and as
+-- game.overworld); Gen 2 free-roam is an empty stack with game.world only.
+function M.overworld(game)
+  if not game then return nil end
+  local stack = game.stack and game.stack.states
+  if type(stack) == "table" then
+    for i = #stack, 1, -1 do
+      if stack[i] and stack[i].isOverworld then return stack[i] end
+    end
+  end
+  return game.overworld or game.world
+end
+
+-- True when the player can open START / walk: Gen 1 overworld-on-top, or
+-- Gen 2 empty stack with a loaded map (POKEPORT_DRIVER skips Gold cinema).
+function M.inPlay(game)
+  if not game then return false end
+  local ow = M.overworld(game)
+  if not (ow and ow.map and ow.player) then return false end
+  local top = M.top(game)
+  if top == nil then return true end
+  if top == ow or top.isOverworld then return true end
+  return false
+end
+
+function M.generation(game)
+  local ok, Handshake = pcall(require, "src.link.Handshake")
+  if ok and Handshake and type(Handshake.generation) == "function" then
+    return tonumber(Handshake.generation(game)) or 1
+  end
+  local data = game and game.data
+  if data and data.gen2Statuses then return 2 end
+  if data and data.type_chart and tonumber(data.type_chart.generation) == 2 then
+    return 2
+  end
+  return 1
+end
+
+-- Reach a playable overworld without thrashing an open Start menu.
+--
+-- Gen 2 + POKEPORT_DRIVER already lands in free-roam (empty stack). Gen 1
+-- still needs U.newGame. Never mash A while StartMenu.list is up -- that is
+-- how PACK flash-loops happen in a LOVE window.
+function M.bootToPlay(game)
+  U.wait(20)
+  if M.inPlay(game) then return true end
+  if M.generation(game) == 2 then
+    for _ = 1, 600 do
+      if M.inPlay(game) then
+        U.wait(10)
+        return true
+      end
+      local top = M.top(game)
+      if top and top.list ~= nil and type(top.onClose) == "function" then
+        U.tap(game, "b")
+        U.wait(4)
+      else
+        U.tap(game, "a")
+        U.wait(2)
+      end
+    end
+    return M.inPlay(game)
+  end
+  U.newGame(game)
+  return M.inPlay(game)
+end
+
+-- Seed a one-mon party the e2e can trade / fight with. Gen 2 uses Mon.new
+-- (spa/spd sheets); Gen 1 keeps Pokemon.new.
+function M.seedParty(game, species, level)
+  if not (game and game.save and game.data) then return nil end
+  level = level or 50
+  if M.generation(game) == 2 then
+    local ok, Mon = pcall(require, "src.battle.gen2.Mon")
+    if not (ok and Mon and type(Mon.new) == "function") then return nil end
+    local mon = Mon.new(game.data, species, level)
+    if not mon then return nil end
+    game.save.party = { mon }
+    return mon
+  end
+  local Pokemon = require("src.pokemon.Pokemon")
+  local mon = Pokemon.new(game.data, species, level)
+  game.save.party = { mon }
+  return mon
+end
+
 -- this game's own player cell
 function M.playerCell(game)
-  local ow
-  for i = #game.stack.states, 1, -1 do
-    if game.stack.states[i].isOverworld then ow = game.stack.states[i] break end
-  end
-  ow = ow or game.overworld
+  local ow = M.overworld(game)
   if not (ow and ow.map and ow.player) then return nil end
   return { mapId = ow.map.id, x = ow.player.cellX, y = ow.player.cellY }
 end
@@ -855,11 +937,7 @@ end
 -- connecting is how "leaving gives you your own trainer back" is checkable
 -- at all.
 function M.playerSheet(game)
-  local ow
-  for i = #game.stack.states, 1, -1 do
-    if game.stack.states[i].isOverworld then ow = game.stack.states[i] break end
-  end
-  ow = ow or game.overworld
+  local ow = M.overworld(game)
   return ow and ow.player and ow.player.sprite or nil
 end
 
@@ -1121,7 +1199,33 @@ end
 -- are a valid product path (three-seat field) and are covered in the Lua
 -- suite; e2e keeps the full 2v2 so SWITCH/ITEM and four-slot asserts stay
 -- meaningful.
+--
+-- Gen 2 trainers live under data.trainers.classes[*].trainers[*].party (see
+-- engine src/world/gen2/Trainers.lua). Return the class id string so
+-- stageTrainer can look the class up and pick its weakest 2+ party member.
 function M.coopTrainer(data)
+  local classes = data and data.trainers and data.trainers.classes
+  if type(classes) == "table" then
+    local best
+    for classId, class in pairs(classes) do
+      if type(class) == "table" and type(class.trainers) == "table" then
+        for _, row in ipairs(class.trainers) do
+          local party = row and row.party
+          if party and #party >= 2 then
+            local total = 0
+            for _, spec in ipairs(party) do
+              total = total + (spec.level or 0)
+            end
+            if best == nil or total < best.total
+               or (total == best.total and tostring(classId) < best.id) then
+              best = { id = tostring(classId), total = total }
+            end
+          end
+        end
+      end
+    end
+    return best and best.id, best and best.total
+  end
   local best
   for id, record in pairs(data.trainers or {}) do
     local party = record.parties and record.parties[1]
@@ -1137,6 +1241,42 @@ function M.coopTrainer(data)
   return best and best.id, best and best.total
 end
 
+local function softenPartyHp(party)
+  for _, mon in ipairs(party or {}) do
+    local max = (mon.stats and mon.stats.hp) or mon.maxHp or 4
+    mon.hp = math.max(1, math.floor(max / 4))
+  end
+end
+
+local function isGen2Staging(game)
+  if M.generation(game) == 2 then return true end
+  local data = game and game.data
+  if data and data.type_chart and tonumber(data.type_chart.generation) == 2 then
+    return true
+  end
+  local ok = pcall(require, "src.ui.gen2.BattleState")
+  if ok and data and data.trainers and data.trainers.classes then
+    return true
+  end
+  return false
+end
+
+-- Pick the weakest Gen 2 class member with #party >= 2 (fallback: member 1).
+local function gen2TrainerMember(classRec)
+  local bestIdx, bestTotal
+  for i, row in ipairs((classRec and classRec.trainers) or {}) do
+    local party = row and row.party
+    if party and #party >= 2 then
+      local total = 0
+      for _, spec in ipairs(party) do total = total + (spec.level or 0) end
+      if bestIdx == nil or total < bestTotal then
+        bestIdx, bestTotal = i, total
+      end
+    end
+  end
+  return bestIdx or 1
+end
+
 -- Put a real trainer battle on the stack, the way the overworld does.
 --
 -- Softened, not gutted: the engine's trainers are built for a full playthrough
@@ -1150,13 +1290,70 @@ end
 -- normally attach it -- the overworld hangs the defeated flag and the rewards
 -- on it -- and it is what lets a co-op leg assert the battle it displaced was
 -- told how it went.
+--
+-- Gen 2: build via battle.gen2.Battle + Screens.push Gen2BattleState (onDone),
+-- then stamp Gen1-shaped kind/oppClass/enemyParty/onFinish so Client/Coop
+-- divert predicates see the same surface they do on Red.
 function M.stageTrainer(game, class, onFinish)
+  if isGen2Staging(game) then
+    local okB, Battle = pcall(require, "src.battle.gen2.Battle")
+    local okT, Trainers = pcall(require, "src.world.gen2.Trainers")
+    local okS, Screens = pcall(require, "src.ui.Screens")
+    if not (okB and Battle and okT and Trainers and okS and Screens) then
+      return nil
+    end
+    local data = game.data or {}
+    local classes = data.trainers and data.trainers.classes
+    local classRec = classes and classes[class]
+    if not classRec and type(class) == "number" then
+      classRec = Trainers.classIndex(data.trainers)[class]
+    end
+    if not classRec then return nil end
+    local member = gen2TrainerMember(classRec)
+    local entry = Trainers.lookup(data.trainers, classRec.index, member)
+    if not entry then return nil end
+    local party = Trainers.party(data, entry)
+    if not (party and #party > 0) then return nil end
+    softenPartyHp(party)
+    local trainer = {
+      class = entry.class,
+      classId = entry.classId,
+      memberId = entry.id,
+      name = entry.name,
+      className = entry.className,
+      party = party,
+      baseMoney = entry.baseMoney,
+      attributes = entry.attributes,
+      items = entry.items,
+    }
+    local battle = Battle.new({
+      data = data,
+      party = (game.save and game.save.party) or {},
+      trainer = trainer,
+      save = game.save,
+    })
+    local onDone = onFinish and function(outcome)
+      onFinish(outcome)
+    end or nil
+    local state = Screens.push(game, "Gen2BattleState", {
+      battle = battle,
+      save = game.save,
+      onDone = onDone,
+    })
+    state = state or (game.stack and game.stack:top())
+    if not state then return nil end
+    state.kind = "trainer"
+    state.oppClass = trainer.classId or trainer.class
+    state.enemyParty = battle.enemyParty or party
+    state.trainer = trainer
+    state.onDone = state.onDone or onDone
+    state.onFinish = state.onFinish or onFinish or state.onDone
+    return state
+  end
   local BattleState = require("src.battle.BattleState")
   local ok, battle = pcall(BattleState.newTrainer, game, class, 1)
   if not (ok and battle) then return nil end
-  for _, mon in ipairs(battle.enemyParty or {}) do
-    mon.hp = math.max(1, math.floor((mon.stats and mon.stats.hp or 4) / 4))
-  end
+  softenPartyHp(battle.enemyParty)
   battle.onFinish = onFinish
   game.stack:push(battle)
   return battle
@@ -1169,9 +1366,42 @@ end
 -- no headless force-grass seam in the engine, so e2e stages the encounter
 -- directly rather than walking Route 1 until RNG cooperates.
 function M.stageWild(game, species, level, onFinish)
-  local BattleState = require("src.battle.BattleState")
   species = species or "PIDGEY"
   level = level or 5
+  if isGen2Staging(game) then
+    local okB, Battle = pcall(require, "src.battle.gen2.Battle")
+    local okM, Mon = pcall(require, "src.battle.gen2.Mon")
+    local okS, Screens = pcall(require, "src.ui.Screens")
+    if not (okB and Battle and okM and Mon and okS and Screens) then
+      return nil
+    end
+    local data = game.data or {}
+    local wild = Mon.new(data, species, level)
+    if not wild then return nil end
+    softenPartyHp({ wild })
+    local battle = Battle.new({
+      data = data,
+      party = (game.save and game.save.party) or {},
+      wild = wild,
+      save = game.save,
+    })
+    local onDone = onFinish and function(outcome)
+      onFinish(outcome)
+    end or nil
+    local state = Screens.push(game, "Gen2BattleState", {
+      battle = battle,
+      save = game.save,
+      onDone = onDone,
+    })
+    state = state or (game.stack and game.stack:top())
+    if not state then return nil end
+    state.kind = "wild"
+    state.enemyParty = battle.enemyParty or { wild }
+    state.onDone = state.onDone or onDone
+    state.onFinish = state.onFinish or onFinish or state.onDone
+    return state
+  end
+  local BattleState = require("src.battle.BattleState")
   local ok, battle = pcall(BattleState.newWild, game, species, level)
   if not (ok and battle and not battle.dead) then return nil end
   local mon = battle.enemy and battle.enemy.mon
@@ -1181,6 +1411,43 @@ function M.stageWild(game, species, level, onFinish)
   battle.onFinish = onFinish
   game.stack:push(battle)
   return battle
+end
+
+-- Drop the player onto a map. Gen 1 still uses U.teleport (pushes
+-- OverworldController). Gen 2 must not -- Gold's World hangs off game.world
+-- and is not a stack state; pushing the Gen 1 controller breaks free-roam.
+function M.teleport(game, mapId, x, y, facing)
+  facing = facing or "down"
+  if M.generation(game) ~= 2 then
+    U.teleport(game, mapId, x, y, facing)
+    return true
+  end
+  local okApi, WorldAPI = pcall(require, "src.world.gen2.WorldAPI")
+  if okApi and WorldAPI and WorldAPI.new then
+    local api = WorldAPI.new(game, "rby_mmo")
+    local ok = api:warpTo(mapId, x, y, facing)
+    if ok then
+      U.wait(5)
+      return true
+    end
+  end
+  local ow = M.overworld(game)
+  if ow and type(ow.setMap) == "function" then
+    local ok = pcall(ow.setMap, ow, mapId, x, y, facing)
+    if ok then
+      U.wait(5)
+      return true
+    end
+  end
+  if ow and ow.player then
+    if ow.map and ow.map.id == mapId then
+      ow.player.cellX, ow.player.cellY = x, y
+      ow.player.facing = facing
+      U.wait(5)
+      return true
+    end
+  end
+  return false
 end
 
 -- Put a battle-usable item in the live bag (and clear the battle item cache).

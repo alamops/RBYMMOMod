@@ -1,12 +1,11 @@
 # Plan — Gen 1 + Gen 2 dual compatibility
 
-> **Status (2026-08-11):** Waves **0–3 landed** on `feature/gen2-compatibility`
-> (dual-gen helpers + manifest claim, PROTOCOL 19 gen-locked hubs, BattleSim2
-> + Node twin + wire sheets, Gen2 trade + co-op strategy split). **Wave 4** is
-> polish (Places / Pokegear soft degrade / Chars default sprite + dual-gen
-> headless load). **Live Gen 2 e2e** (`tests/drivers/run-mmo-e2e-gen2.sh`) is
-> stubbed and skips cleanly without a Gold ROM/cache — full Gold smoke still
-> pending ROM.
+> **Status (2026-08-11):** Waves **0–4 landed** on `feature/gen2-compatibility`.
+> **Live Gold LOVE e2e green** via `tests/drivers/run-mmo-e2e-gen2.sh`: presence,
+> chat, interact, trade, mediated 1v1, party, `coop_wild`, `coop_npc` (in-game
+> HostServer). Skips cleanly without a Gold ROM/cache. Gen2 Start→MMO rows can
+> stay unscannable after long fight stacks — drivers fall back to
+> `exports.leaveParty` / `exports.leave` for teardown only.
 
 | Field | Value |
 | --- | --- |
@@ -15,7 +14,7 @@
 | Config | `AGENTS_CONFIG.yml` (quality preset, host cursor) |
 | Branch | `feature/gen2-compatibility` |
 | Base SHA | `e8a5d08a712bb5221fb4bb4d3a1dff783e573dc2` |
-| Status | Waves 0–4 landed; review must-fixes landed; `gen2check` **will load**; suite **2933/2933**. Live Gold e2e pending ROM/cache (`tests/drivers/run-mmo-e2e-gen2.sh`). |
+| Status | Waves 0–4 landed; `gen2check` **will load**; Live Gold LOVE e2e **passed** full product legs (`run-mmo-e2e-gen2.sh`). ROM/cache still required to run. |
 | Gates | Interactive; owner answers locked below |
 
 ## 1. Objective & success criteria

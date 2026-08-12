@@ -25,6 +25,11 @@ local STANDING = {
 
 local function gameOf(game)
   if type(game) == "table" then return game end
+  -- Prefer the loader facade: under Gold, mod.game is the Game2 instance
+  -- while _G.Game (when present) is still the Gen 1 singleton and would
+  -- make Handshake/Fingerprint answer generation 1 on a live Gold boot.
+  local ok, live = pcall(function() return mod.game end)
+  if ok and type(live) == "table" then return live end
   local g = rawget(_G, "Game")
   if type(g) == "table" then return g end
   return nil
@@ -173,19 +178,33 @@ local function spritePresent(spritesRegistry, id)
 end
 
 -- First Config.SPRITES id the catalog carries, then Chris / Red.
+-- OWN_CHARS (NIRE, …) are never a boot default — on Gen 2 they are not
+-- wearable yet, and even on Gen 1 the fallback should be an engine sprite.
 function M.defaultSprite(game, spritesRegistry)
   spritesRegistry = spritesRegistry or (mod.content and mod.content.sprites)
+  local gen = M.generation(game)
   for _, row in ipairs(Config.SPRITES or {}) do
     local id = row[2]
-    if spritePresent(spritesRegistry, id) then return id end
+    local own = Config.ownCharId(id)
+    if own and not Config.ownCharAllowed(own, gen) then
+      -- gen-gated cast member
+    elseif own then
+      -- opt-in character, never the anonymous default
+    elseif spritePresent(spritesRegistry, id) then
+      return id
+    end
   end
   if spritePresent(spritesRegistry, "SPRITE_CHRIS") then return "SPRITE_CHRIS" end
   if spritePresent(spritesRegistry, "SPRITE_RED") then return "SPRITE_RED" end
-  return Config.DEFAULT_SPRITE
+  return Config.defaultSpriteFor(gen)
 end
 
 function M.resolveSprite(game, requested, spritesRegistry)
   spritesRegistry = spritesRegistry or (mod.content and mod.content.sprites)
+  local own = Config.ownCharId(requested)
+  if own and not Config.ownCharAllowed(own, M.generation(game)) then
+    return M.defaultSprite(game, spritesRegistry)
+  end
   if spritePresent(spritesRegistry, requested) then return requested end
   return M.defaultSprite(game, spritesRegistry)
 end

@@ -790,6 +790,7 @@ function isSpecialType(typeId, specialTypes) {
 const ITEM_HEAL = {
   POTION: 20, SUPER_POTION: 50, HYPER_POTION: 200,
   FRESH_WATER: 50, SODA_POP: 60, LEMONADE: 80,
+  BERRY: 10, BERRY_JUICE: 20,
 };
 const ITEM_STATUS = {
   ANTIDOTE: { poison: true, toxic: true },
@@ -798,6 +799,15 @@ const ITEM_STATUS = {
   AWAKENING: { sleep: true },
   PARLYZ_HEAL: { paralysis: true },
   FULL_HEAL: {
+    poison: true, toxic: true, burn: true,
+    freeze: true, sleep: true, paralysis: true,
+  },
+  PSNCUREBERRY: { poison: true, toxic: true },
+  PRZCUREBERRY: { paralysis: true },
+  BURNT_BERRY: { freeze: true },
+  ICE_BERRY: { burn: true },
+  MINT_BERRY: { sleep: true },
+  MIRACLEBERRY: {
     poison: true, toxic: true, burn: true,
     freeze: true, sleep: true, paralysis: true,
   },
@@ -813,6 +823,8 @@ const VITAMIN_FAIL_AT = 25600;
 const ITEM_BALL = {
   POKE_BALL: true, GREAT_BALL: true, ULTRA_BALL: true,
   MASTER_BALL: true, SAFARI_BALL: true,
+  LEVEL_BALL: true, LURE_BALL: true, MOON_BALL: true, FRIEND_BALL: true,
+  FAST_BALL: true, HEAVY_BALL: true, LOVE_BALL: true, PARK_BALL: true,
 };
 
 // Deliberately absent from itemEffect (unknown → "But it failed", still spend

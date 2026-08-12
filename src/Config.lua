@@ -718,7 +718,16 @@ M.SPRITES = {
   { "LASS", "SPRITE_LITTLE_GIRL" },
   { "COOLTRAINER", "SPRITE_COOLTRAINER_M" },
 }
+-- Gen 1 hub / Wire fallback when a hello omits sprite. Gen 2 hubs use
+-- DEFAULT_SPRITE_GEN2 (Chris) via defaultSpriteFor — never stamp Red into a
+-- Gold-locked room.
 M.DEFAULT_SPRITE = "SPRITE_RED"
+M.DEFAULT_SPRITE_GEN2 = "SPRITE_CHRIS"
+
+function M.defaultSpriteFor(generation)
+  if tonumber(generation) == 2 then return M.DEFAULT_SPRITE_GEN2 end
+  return M.DEFAULT_SPRITE
+end
 
 -- ------- the characters this mod brings of its own
 --
@@ -727,6 +736,10 @@ M.DEFAULT_SPRITE = "SPRITE_RED"
 -- engine's catalog does *not* already carry -- Cast registers them, which is
 -- why they can be offered in the options row above alongside ids the ROM
 -- guarantees.
+--
+-- `gens` lists which boots may wear them. Omit it to allow every generation.
+-- Gen 2 art / palettes / battle pics are not ready yet, so both NIREs stay
+-- Gen 1-only until that work lands (Chars / Gen / Cast all honour this).
 --
 -- `dir` holds three files, all original art shaped like the engine's own:
 -- walk.png (16x96, six 16x16 frames), front.png (56x56, the trainer-card and
@@ -757,15 +770,37 @@ M.DEFAULT_SPRITE = "SPRITE_RED"
 -- at 1x all along.  Both views now draw the same pic at the same size.
 M.OWN_CHARS = {
   { id = "SPRITE_NIRE", label = "NIRE",
-    dir = "assets/chars/nire", backScale = 1 },
+    dir = "assets/chars/nire", backScale = 1, gens = { 1 } },
   { id = "SPRITE_NIRE_HOOD", label = "NIRE HOOD",
-    dir = "assets/chars/nire_hood", backScale = 1 },
+    dir = "assets/chars/nire_hood", backScale = 1, gens = { 1 } },
 }
+
+-- True when this OWN_CHARS row may be offered / worn on `generation`.
+function M.ownCharAllowed(char, generation)
+  if type(char) ~= "table" then return false end
+  local gens = char.gens
+  if type(gens) ~= "table" or #gens == 0 then return true end
+  local g = tonumber(generation) or 1
+  for i = 1, #gens do
+    if gens[i] == g then return true end
+  end
+  return false
+end
+
+function M.ownCharId(id)
+  if type(id) ~= "string" then return nil end
+  for _, char in ipairs(M.OWN_CHARS) do
+    if char.id == id then return char end
+  end
+  return nil
+end
 
 -- Offered in the options row like any other character.  Built from the table
 -- above rather than written out twice: a character added there and forgotten
 -- here would be wearable from the CHARACTER screen and invisible in options,
 -- which is the kind of split nobody notices until a player reports it.
+-- Gen gating happens at wear time (Chars / Gen), not here — the static list
+-- still names them so Gen 1 options and the suite keep a stable vocabulary.
 for _, char in ipairs(M.OWN_CHARS) do
   M.SPRITES[#M.SPRITES + 1] = { char.label, char.id }
 end
@@ -840,9 +875,24 @@ M.RANK_REPORT_GRACE = 60
 -- than derived from DEFAULT_PORT: changing the port used by a local host must
 -- not quietly point the official row at a different service. Servers projects
 -- this into the menu without putting it in either persistence mirror.
+--
+-- `FEATURED_SERVER_GENS` is which boots may see / dial it. The public hub at
+-- play.rbymmo.com is Gen 1-locked for now; Gold players host locally (or join
+-- a Gen 2 LAN hub) until an official Gen 2 deploy exists.
 M.FEATURED_SERVER_NAME = "RBY MMO OFFICIAL"
 M.FEATURED_SERVER_HOST = "play.rbymmo.com:7788"
 M.FEATURED_SERVER_CODE = "QG0251"
+M.FEATURED_SERVER_GENS = { 1 }
+
+function M.featuredServerAllowed(generation)
+  local gens = M.FEATURED_SERVER_GENS
+  if type(gens) ~= "table" or #gens == 0 then return true end
+  local g = tonumber(generation) or 1
+  for i = 1, #gens do
+    if gens[i] == g then return true end
+  end
+  return false
+end
 
 -- How long a row's name may be. Sixteen is what the list menu has room for
 -- beside its favourite marker at Game Boy width, and it is COMPOSE_MAX's

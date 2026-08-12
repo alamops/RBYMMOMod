@@ -22,7 +22,7 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
 const {
-  PROTOCOL, DEFAULT_SPRITE, SPRITE_GATE_MS,
+  PROTOCOL, DEFAULT_SPRITE, DEFAULT_SPRITE_GEN2, defaultSpriteFor, SPRITE_GATE_MS,
 } = require('./lib/relay.js');
 const { PLAYER_ID_HEX } = require('./lib/sanitize.js');
 
@@ -74,6 +74,16 @@ test('DEFAULT_SPRITE matches', () => {
     luaAssignString(config, 'DEFAULT_SPRITE'), DEFAULT_SPRITE,
     'DEFAULT_SPRITE must match on both hubs',
   );
+});
+
+test('DEFAULT_SPRITE_GEN2 matches', () => {
+  const config = read('src/Config.lua');
+  assert.strictEqual(
+    luaAssignString(config, 'DEFAULT_SPRITE_GEN2'), DEFAULT_SPRITE_GEN2,
+    'DEFAULT_SPRITE_GEN2 must match on both hubs',
+  );
+  assert.strictEqual(defaultSpriteFor(2), DEFAULT_SPRITE_GEN2);
+  assert.strictEqual(defaultSpriteFor(1), DEFAULT_SPRITE);
 });
 
 test('battle reconnect grace and choice timeout match', () => {

@@ -2,8 +2,10 @@
 #
 # Launch the game with this mod on, and no manual step.
 #
-#   bash mods/rby_mmo/tools/play.sh            # normal play
-#   bash mods/rby_mmo/tools/play.sh guest      # a second, separate save
+#   bash mods/rby_mmo/tools/play.sh            # Gen 1 (ROM_PATH)
+#   bash mods/rby_mmo/tools/play.sh gold       # Gen 2 Gold (GOLD_ROM_PATH)
+#   bash mods/rby_mmo/tools/play.sh guest      # a second Gen 1 save identity
+#   bash mods/rby_mmo/tools/play.sh gold-guest # a second Gold save identity
 #
 # What this exists to skip:
 #
@@ -16,7 +18,11 @@
 #     experimental (on by default when present); drivers and this script still
 #     write options.lua so a fresh LOVE identity is explicit.
 #
-# ROM_PATH and ROM_VERSION come from mods/rby_mmo/.env -- see .env.example.
+# Gen 1: ROM_PATH + ROM_VERSION from mods/rby_mmo/.env
+# Gen 2: GOLD_ROM_PATH (+ GOLD_ROM_VERSION=gold) — see .env.example.
+#
+# Gold is imported by the engine (RomExtractorGen2), not tools/build_data.py.
+# The first Gold boot writes gold/data/generated/ under the LOVE identity.
 
 set -uo pipefail
 
@@ -33,10 +39,39 @@ fail() { echo "  !! $*" >&2; exit 2; }
 command -v love >/dev/null 2>&1 || fail "love is not on PATH (brew install --cask love)"
 
 load_env "$MOD_DIR/.env"
-check_rom_config || exit 2
 
-IDENTITY="${1:-${POKEPORT_IDENTITY:-rby-mmo}}"
-VERSION="${ROM_VERSION:-red}"
+MODE="${1:-}"
+case "$MODE" in
+  gold|gold-guest)
+    check_gold_rom_config || exit 2
+    VERSION=gold
+    ROM_FILE="${GOLD_ROM_PATH:-}"
+    if [ "$MODE" = gold-guest ]; then
+      IDENTITY="${POKEPORT_IDENTITY:-rby-mmo-gold-guest}"
+    else
+      IDENTITY="${POKEPORT_IDENTITY:-rby-mmo-gold}"
+    fi
+    ;;
+  guest)
+    check_rom_config || exit 2
+    VERSION="${ROM_VERSION:-red}"
+    ROM_FILE="${ROM_PATH:-}"
+    IDENTITY="${POKEPORT_IDENTITY:-rby-mmo-guest}"
+    ;;
+  ""|host)
+    check_rom_config || exit 2
+    VERSION="${ROM_VERSION:-red}"
+    ROM_FILE="${ROM_PATH:-}"
+    IDENTITY="${POKEPORT_IDENTITY:-rby-mmo}"
+    ;;
+  *)
+    # Treat an unknown first arg as a custom LOVE identity (legacy).
+    check_rom_config || exit 2
+    VERSION="${ROM_VERSION:-red}"
+    ROM_FILE="${ROM_PATH:-}"
+    IDENTITY="$MODE"
+    ;;
+esac
 
 # Enable the mod for this identity. options.lua is the same file the mod
 # manager writes, so this is the switch the player would flip by hand.
@@ -70,11 +105,15 @@ else
 fi
 
 echo "  identity: $IDENTITY   version: $VERSION"
-if [ -n "${ROM_PATH:-}" ] && [ -f "$ROM_PATH" ]; then
-  echo "  importing/booting with $(basename "$ROM_PATH") -- no launcher"
+if [ -n "$ROM_FILE" ] && [ -f "$ROM_FILE" ]; then
+  echo "  importing/booting with $(basename "$ROM_FILE") -- no launcher"
   exec env POKEPORT_IDENTITY="$IDENTITY" POKEPORT_VERSION="$VERSION" \
-    POKEPORT_IMPORT_ROM="$ROM_PATH" love .
+    POKEPORT_IMPORT_ROM="$ROM_FILE" love .
 fi
 
-echo "  no usable ROM_PATH; the launcher will ask for a ROM"
+if [ "$VERSION" = gold ]; then
+  echo "  no usable GOLD_ROM_PATH; the launcher will ask for a Gold ROM"
+else
+  echo "  no usable ROM_PATH; the launcher will ask for a ROM"
+fi
 exec env POKEPORT_IDENTITY="$IDENTITY" POKEPORT_VERSION="$VERSION" love .

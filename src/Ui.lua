@@ -24,6 +24,34 @@ local Places = need("Places")
 local M = {}
 M.__index = M
 
+-- Re-open the boot's START menu after leaving an MMO screen.
+--
+-- Gen 1's StartMenu is a Menu that pops itself on B. Gen 2's Gen2StartMenu
+-- only leaves the stack when opts.onClose pops it (Game2:openStartMenu). A
+-- bare `push(Gen2StartMenu)` made B/START call close() with a nil onClose --
+-- the menu stayed on the stack forever. Mirror the engine's openStartMenu
+-- opts whenever we reopen Gold's menu.
+function M.reopenStartMenu(game)
+  local id = Gen.startMenuId(game)
+  if id == "Gen2StartMenu" then
+    mod.ui.push(game, id, {
+      save = game and game.save,
+      onClose = function()
+        if game and game.stack and type(game.stack.pop) == "function" then
+          game.stack:pop()
+        end
+      end,
+      onChoose = function(itemId)
+        if game and type(game.openStartMenuItem) == "function" then
+          game:openStartMenuItem(itemId)
+        end
+      end,
+    })
+  else
+    mod.ui.push(game, id)
+  end
+end
+
 -- True-white paper over the bottom message / menu strip (tiles y=12..17).
 --
 -- Game.lua lets the topmost `sgbPalettes` owner color the frame; TextBox and
@@ -1099,12 +1127,12 @@ function M:install()
     return store
   end
 
-  local function serverMenuList()
+  local function serverMenuList(game)
     local store = serverStore()
     local list
     if store then
       if store.menuList then
-        list = store:menuList()
+        list = store:menuList(game)
       elseif store.list then
         list = store:list()
       end
@@ -1112,10 +1140,10 @@ function M:install()
     return type(list) == "table" and list or {}
   end
 
-  local function serverMenuGet(key)
+  local function serverMenuGet(key, game)
     local store = serverStore()
     if not store then return nil end
-    if store.menuGet then return store:menuGet(key) end
+    if store.menuGet then return store:menuGet(key, game) end
     if store.get then return store:get(key) end
     return nil
   end
@@ -1346,8 +1374,9 @@ function M:install()
       tx = 9, ty = 0, tw = 11,
       -- the same ceiling the START menu uses: (18 rows - 2 border) / 2
       maxVisible = 8,
-      -- B goes back where it came from, like every vanilla submenu
-      onCancel = function() mod.ui.push(game, Gen.startMenuId(game)) end,
+      -- B goes back where it came from, like every vanilla submenu.
+      -- Gen 2 must reopen StartMenu with onClose (see M.reopenStartMenu).
+      onCancel = function() M.reopenStartMenu(game) end,
     })
     -- the cursor survives closing the menu, as the original's does
     menu.index = math.min(cursor.main or 1, math.max(1, #items))
@@ -1878,7 +1907,7 @@ function M:install()
   -- store prepends its synthetic official row before that saved ordering.
   screens:register(SCREEN.SERVERS, { new = function(game)
     local items = {}
-    for _, entry in ipairs(serverMenuList()) do
+    for _, entry in ipairs(serverMenuList(game)) do
       items[#items + 1] = {
         label = entry.name,
         right = entry.fav and FAV_MARK or nil,
@@ -1900,7 +1929,7 @@ function M:install()
   screens:register(SCREEN.SERVERACT, { new = function(game, opts)
     opts = opts or {}
     local store = serverStore()
-    local entry = serverMenuGet(opts.key)
+    local entry = serverMenuGet(opts.key, game)
     if not entry then
       -- The key is derived from the address rather than chosen, so EDIT HOST
       -- moves an entry to a different one -- and a menu still holding the old

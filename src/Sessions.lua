@@ -131,6 +131,12 @@ function M.isFightState(state)
   if kind == "wild" or kind == "trainer" or kind == "link" then return true end
   if state.sim ~= nil then return true end
   if state.mmoBattle == true then return true end
+  -- Gen 2 ui/gen2/BattleState: no kind; wild/trainer live on state.battle.
+  -- Mirrored in Coop.isFightState -- same rule, two call sites.
+  local battle = state.battle
+  if type(battle) == "table" and (battle.wild or battle.trainer) then
+    return true
+  end
   return false
 end
 

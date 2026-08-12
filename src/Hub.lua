@@ -535,7 +535,7 @@ function M:accept(peer, trusted)
     trusted = trusted and true or false,
     ready = false,
     name = nil,
-    sprite = Config.DEFAULT_SPRITE,
+    sprite = Config.defaultSpriteFor(self.generation),
     map = nil, x = nil, y = nil, facing = "down",
     fast = false,     -- nobody arrives mid-stride; the first move says otherwise
     sessionId = nil,
@@ -596,7 +596,7 @@ function M:admit(client)
   end
 
   client.name = hello.name
-  client.sprite = hello.sprite or Config.DEFAULT_SPRITE
+  client.sprite = hello.sprite or Config.defaultSpriteFor(self.generation)
   client.profile = hello.profile
   client.map, client.x, client.y = hello.map, hello.x, hello.y
   client.facing = hello.facing or "down"
@@ -2076,7 +2076,7 @@ handlers[Wire.HELLO] = function(self, client, msg)
     name = name,
     playerId = playerId,
     generation = generation,
-    sprite = Wire.spriteId(msg.sprite) or Config.DEFAULT_SPRITE,
+    sprite = Wire.spriteId(msg.sprite) or Config.defaultSpriteFor(self.generation),
     profile = Wire.profile(msg.profile),
     map = Wire.mapId(msg.map),
     x = Wire.int(msg.x, 0, 4096),

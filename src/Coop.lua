@@ -203,19 +203,26 @@ function M:consume(result, blackout)
   self.encounter = nil
   if not encounter then return false end
   local engine = encounter.engine
-  if not (engine and engine.onFinish) then return false end
+  -- Gen 1 BattleState uses onFinish; Gen 2's ui/gen2/BattleState uses onDone
+  -- (Client stamps onFinish from onDone when present, but accept either).
+  local finish = engine and (engine.onFinish or engine.onDone)
+  if not finish then return false end
 
   -- Prize money, which the engine pays from inside its own battle screen and
   -- so never gets to pay for one it did not run. Its formula, at the level of
   -- the strongest monster the trainer had -- a 2-on-2 has two last opponents,
   -- and paying for the better of them is the reading that cannot be gamed by
   -- ordering the party.
-  if result == "win" and engine.trainer then
+  local trainer = engine.trainer
+    or (engine.battle and engine.battle.trainer)
+  local enemyParty = engine.enemyParty
+    or (engine.battle and engine.battle.enemyParty)
+  if result == "win" and trainer then
     local best = 0
-    for _, mon in ipairs(engine.enemyParty or {}) do
+    for _, mon in ipairs(enemyParty or {}) do
       best = math.max(best, tonumber(mon.level) or 0)
     end
-    local prize = (tonumber(engine.trainer.baseMoney) or 0) * best
+    local prize = (tonumber(trainer.baseMoney) or 0) * best
     local save = encounter.game and encounter.game.save
     if prize > 0 and save then
       Gen.money.set(save, math.min(999999, Gen.money.get(save) + prize))
@@ -232,7 +239,7 @@ function M:consume(result, blackout)
     engineRitual = true
   end
 
-  local ok, err = pcall(engine.onFinish, outcome)
+  local ok, err = pcall(finish, outcome)
   if not ok then
     mod.log:warn("the trainer battle could not be finished off (%s); if the "
       .. "world seems stuck, reload from your last save", tostring(err))
@@ -532,7 +539,11 @@ end
 -- Returns true when a prompt is up. False means the encounter is none of this
 -- module's business, and the engine's battle is left completely alone.
 function M:onTrainerBattle(game, state, mapId)
-  if not (state and state.kind == "trainer") then return false end
+  if not state then return false end
+  -- Gen 2 BattleState has no `.kind`; the trainer record sits on state.battle.
+  local kind = state.kind
+  if not kind and state.battle and state.battle.trainer then kind = "trainer" end
+  if kind ~= "trainer" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running then return false end
   -- Partner has to be online (in the roster). Same map is *not* required: the
@@ -542,15 +553,20 @@ function M:onTrainerBattle(game, state, mapId)
   local here = partner and self.roster:get(partner.id)
   if not here then return false end
 
-  local label = Wire.label(tostring(state.oppClass or ""):gsub("^OPP_", "")
+  local trainer = state.battle and state.battle.trainer
+  local oppClass = state.oppClass
+    or (trainer and (trainer.classId or trainer.class))
+  local enemyParty = state.enemyParty
+    or (state.battle and state.battle.enemyParty)
+  local label = Wire.label(tostring(oppClass or ""):gsub("^OPP_", "")
     :gsub("_", " "))
   -- The trainer class alone is not quite specific enough: one map can hold two
   -- of the same class with different parties. The lead monster's species and
   -- level tell those apart, and both partners derive them from the battle their
   -- own engine just built -- so they agree by both looking at the same trainer
   -- rather than by trusting a value one of them sent.
-  local lead = state.enemyParty and state.enemyParty[1]
-  local key = M.battleKey(mapId, state.oppClass,
+  local lead = enemyParty and enemyParty[1]
+  local key = M.battleKey(mapId, oppClass,
     lead and lead.species, lead and lead.level)
 
   self.encounter = {
@@ -573,14 +589,23 @@ end
 -- The wild mon the engine just built, for a grant and for the battle key.
 --
 -- Wild BattleState keeps the mon on `enemy.mon` (newWild never fills
--- enemyParty). Trainer battles put it in enemyParty[1]. Both shapes are
--- accepted so a headless fixture that only stubs enemyParty still works.
+-- enemyParty). Trainer battles put it in enemyParty[1]. Gen 2's screen holds
+-- the Battle on `state.battle`, where the foe is `battle.enemy` (a Mon) or
+-- `battle.enemyParty[1]`. All shapes are accepted so a headless fixture that
+-- only stubs enemyParty still works.
 function M.wildMonOf(state)
   if type(state) ~= "table" then return nil end
   local mon = state.enemyParty and state.enemyParty[1]
   if mon then return mon end
   local enemy = state.enemy
-  return enemy and enemy.mon or nil
+  if enemy and enemy.mon then return enemy.mon end
+  local battle = state.battle
+  if type(battle) == "table" then
+    mon = battle.enemyParty and battle.enemyParty[1]
+    if mon then return mon end
+    if battle.enemy then return battle.enemy end
+  end
+  return nil
 end
 
 -- Called when the engine has just pushed a wild encounter.
@@ -599,7 +624,11 @@ end
 -- beginWildCoop posts COOP_WAIT and covers the engine wild with a wait box so
 -- the host cannot fight solo while the partner auto-joins (see considerOffer).
 function M:onWildEncounter(game, state, mapId)
-  if not (state and state.kind == "wild") then return false end
+  if not state then return false end
+  -- Gen 2 BattleState has no `.kind`; a wild fight carries state.battle.wild.
+  local kind = state.kind
+  if not kind and state.battle and state.battle.wild then kind = "wild" end
+  if kind ~= "wild" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running or self.waiting or self.ask then return false end
   if self.joinAsk then return false end
@@ -1155,6 +1184,11 @@ function M.isFightState(state)
   local kind = state.kind
   if kind == "wild" or kind == "trainer" or kind == "link" then return true end
   if state.sim ~= nil then return true end
+  -- Gen 2 ui/gen2/BattleState: no kind; wild/trainer live on state.battle.
+  local battle = state.battle
+  if type(battle) == "table" and (battle.wild or battle.trainer) then
+    return true
+  end
   return false
 end
 
@@ -2130,24 +2164,11 @@ end
 --
 -- The engine's own MoveLearnMenu is pushed rather than a copy of it: it is the
 -- screen that already knows how to show four moves and their PP, and how to
--- refuse politely. Gen 2 has no MoveLearnMenu twin yet -- skip with a warn
--- rather than pushing a Gen1-only screen id.
+-- refuse politely. Gen 2 has no Gen2MoveLearnMenu twin, but the Gen 1 screen
+-- still resolves from the registry and works on Gold for the forget prompt —
+-- try it rather than silently dropping earned moves.
 function M:offerForgets(game, toLearn)
   if not (game and toLearn and #toLearn > 0) then return false end
-  if Gen.generation(game) == 2 then
-    local screens = mod.content and mod.content.screens
-    local has = false
-    if screens and screens.get then
-      local ok, record = pcall(function() return screens:get("MoveLearnMenu") end)
-      has = ok and record ~= nil
-    end
-    if not has then
-      mod.log:warn("Gen 2 has no MoveLearnMenu for co-op level-ups (no "
-        .. "Gen2MoveLearnMenu); moves from this battle were not offered -- "
-        .. "learn them by levelling again outside co-op")
-      return false
-    end
-  end
   local pending = {}
   for i, entry in ipairs(toLearn) do pending[i] = entry end
 
@@ -2158,10 +2179,24 @@ function M:offerForgets(game, toLearn)
       mod.ui.push(game, "MoveLearnMenu", entry.mon, entry.move)
     end)
     if not ok then
-      -- The screen is the engine's; if a build has not got it, say so and
-      -- move on rather than swallowing a level-up the player earned.
-      mod.log:warn("could not open the move-learning screen for %s; it can "
-        .. "still be learned by levelling again", tostring(entry.move))
+      -- Auto-fill an empty move slot when the forget UI is missing; otherwise
+      -- warn so the player can re-level outside co-op.
+      local mon = entry.mon
+      local moved = false
+      if type(mon) == "table" and type(mon.moves) == "table" and #mon.moves < 4 then
+        local mdef = game.data and game.data.moves and game.data.moves[entry.move]
+        mon.moves[#mon.moves + 1] = {
+          id = entry.move,
+          pp = (mdef and mdef.pp) or 5,
+        }
+        moved = true
+        self.ui:say((mon.nickname or mon.species or "POKéMON")
+          .. " learned\n" .. tostring(entry.move) .. "!")
+      end
+      if not moved then
+        mod.log:warn("could not open the move-learning screen for %s; it can "
+          .. "still be learned by levelling again", tostring(entry.move))
+      end
     end
     -- One at a time, so two level-ups do not stack two menus.
     if #pending > 0 then self.ui:say("...", nextOne) end

@@ -45,6 +45,8 @@ rom_version_of() {
     ea9bcae617fdf159b045185467ae58b2e4a48b9a) echo red ;;
     d7037c83e1ae5b39bde3c30787637ba1d4c48ce2) echo blue ;;
     cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1) echo yellow ;;
+    # Canonical US Pokemon Gold (GameVersion.lua / docs/gold-phase1.md).
+    d8b8a3600a465308c9953dfa04f0081c05bdcb94) echo gold ;;
     *) echo unknown ;;
   esac
 }
@@ -65,6 +67,9 @@ check_rom_config() {
     unknown)
       echo "  note: ROM_PATH is not a canonical US Red/Blue/Yellow ROM"
       return 0 ;;
+    gold)
+      echo "  !! ROM_PATH points at Gold -- put that in GOLD_ROM_PATH instead" >&2
+      return 1 ;;
   esac
   if [ "$actual" != "${ROM_VERSION:-red}" ]; then
     echo "  !! ROM_VERSION says ${ROM_VERSION:-red} but that file is $actual" >&2
@@ -72,4 +77,51 @@ check_rom_config() {
   fi
   echo "  rom: $actual (verified)"
   return 0
+}
+
+# Parallel check for GOLD_ROM_PATH / GOLD_ROM_VERSION.
+check_gold_rom_config() {
+  [ -n "${GOLD_ROM_PATH:-}" ] || return 0
+  if [ ! -f "$GOLD_ROM_PATH" ]; then
+    echo "  note: GOLD_ROM_PATH does not exist ($GOLD_ROM_PATH)"
+    return 0
+  fi
+  local actual
+  actual="$(rom_version_of "$GOLD_ROM_PATH")"
+  case "$actual" in
+    '') return 0 ;;
+    unknown)
+      echo "  note: GOLD_ROM_PATH is not the canonical US Gold ROM"
+      echo "        (expected SHA-1 d8b8a3600a465308c9953dfa04f0081c05bdcb94)"
+      return 0 ;;
+    gold) ;;
+    *)
+      echo "  !! GOLD_ROM_PATH is $actual, not gold" >&2
+      return 1 ;;
+  esac
+  local expect="${GOLD_ROM_VERSION:-gold}"
+  if [ "$actual" != "$expect" ]; then
+    echo "  !! GOLD_ROM_VERSION says $expect but that file is $actual" >&2
+    return 1
+  fi
+  echo "  gold rom: verified"
+  return 0
+}
+
+# True when the Gold extract cache is present (landmarks.lua is Gen2-only).
+have_gold_cache() {
+  local root="${1:-.}"
+  [ -f "$root/gold/data/generated/landmarks.lua" ] \
+    || [ -f "$root/data/generated/gold/landmarks.lua" ] \
+    && return 0
+  # LOVE save identities (play.sh gold / import) often hold the cache.
+  local love_home="${HOME}/Library/Application Support/LOVE"
+  if [ -d "$love_home" ]; then
+    local f
+    for f in "$love_home"/rby-mmo-gold*/gold/data/generated/landmarks.lua \
+             "$love_home"/rby-mmo-gold/gold/data/generated/landmarks.lua; do
+      [ -f "$f" ] && return 0
+    done
+  fi
+  return 1
 }

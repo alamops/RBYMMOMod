@@ -865,10 +865,6 @@ end
 -- Unknown ids return nil; Turn announces "But it failed" and still spends the
 -- turn (no silent soft-stall on junk ids). Hub bag proofs (PROTOCOL 15) refuse
 -- / debit against the uploaded sheet; clients still debit save.inventory.
-local ITEM_HEAL = {
-  POTION = 20, SUPER_POTION = 50, HYPER_POTION = 200,
-  FRESH_WATER = 50, SODA_POP = 60, LEMONADE = 80,
-}
 local ITEM_STATUS = {
   ANTIDOTE = { poison = true, toxic = true },
   BURN_HEAL = { burn = true },
@@ -876,6 +872,16 @@ local ITEM_STATUS = {
   AWAKENING = { sleep = true },
   PARLYZ_HEAL = { paralysis = true },
   FULL_HEAL = {
+    poison = true, toxic = true, burn = true,
+    freeze = true, sleep = true, paralysis = true,
+  },
+  -- Gen 2 berries (same clear sets as the Gen1 cures they replaced).
+  PSNCUREBERRY = { poison = true, toxic = true },
+  PRZCUREBERRY = { paralysis = true },
+  BURNT_BERRY = { freeze = true },
+  ICE_BERRY = { burn = true },
+  MINT_BERRY = { sleep = true },
+  MIRACLEBERRY = {
     poison = true, toxic = true, burn = true,
     freeze = true, sleep = true, paralysis = true,
   },
@@ -895,6 +901,15 @@ M.VITAMIN_FAIL_AT = 25600
 local ITEM_BALL = {
   POKE_BALL = true, GREAT_BALL = true, ULTRA_BALL = true,
   MASTER_BALL = true, SAFARI_BALL = true,
+  -- Gen 2 Kurt / Park balls (hub treats as ball=true; catch math stays local).
+  LEVEL_BALL = true, LURE_BALL = true, MOON_BALL = true, FRIEND_BALL = true,
+  FAST_BALL = true, HEAVY_BALL = true, LOVE_BALL = true, PARK_BALL = true,
+}
+
+local ITEM_HEAL = {
+  POTION = 20, SUPER_POTION = 50, HYPER_POTION = 200,
+  FRESH_WATER = 50, SODA_POP = 60, LEMONADE = 80,
+  BERRY = 10, BERRY_JUICE = 20,
 }
 
 -- Deliberately absent from itemEffect (unknown → "But it failed", still spend

@@ -864,7 +864,8 @@ end
 -- Presence as it appears in a welcome roster, a join, or a move.  Position
 -- is optional so a player sitting in a menu or a battle can still be listed
 -- without claiming a cell in the world.
-function M.presence(raw)
+-- Optional `generation` (1|2) picks the missing-sprite fallback (Red vs Chris).
+function M.presence(raw, generation)
   if type(raw) ~= "table" then return nil end
   local id = M.id(raw.id)
   local name = M.name(raw.name)
@@ -872,7 +873,7 @@ function M.presence(raw)
   local out = {
     id = id,
     name = name,
-    sprite = M.spriteId(raw.sprite) or Config.DEFAULT_SPRITE,
+    sprite = M.spriteId(raw.sprite) or Config.defaultSpriteFor(generation),
     map = M.mapId(raw.map),
     x = M.int(raw.x, 0, 4096),
     y = M.int(raw.y, 0, 4096),
@@ -926,7 +927,7 @@ function M.ranking(raw)
       if name then
         local entry = {
           name = name,
-          sprite = M.spriteId(row.sprite) or Config.DEFAULT_SPRITE,
+          sprite = M.spriteId(row.sprite) or Config.defaultSpriteFor(nil),
           points = M.points(row.points),
         }
         -- Optional: older hubs omit id; PROTOCOL 16 boards always send it.

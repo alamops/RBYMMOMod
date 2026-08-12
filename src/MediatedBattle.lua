@@ -40,13 +40,30 @@
 local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
-local Effects = need("BattleSim/Effects")
+local Effects1 = need("BattleSim/Effects")
 local Gen = need("Gen")
 
 local M = {}
 M.__index = M
 
 local floor, max, min = math.floor, math.max, math.min
+
+-- BattleSim vs BattleSim2 item tables — vitamins already gen-switched;
+-- bag upload / ball hints must match the hub sim generation too.
+local Effects2
+local function effectsFor(game)
+  if Gen.generation(game) == 2 then
+    if not Effects2 then Effects2 = need("BattleSim2/Effects") end
+    return Effects2
+  end
+  return Effects1
+end
+-- Back-compat alias for any leftover Effects.* call sites in this file.
+local Effects = setmetatable({}, {
+  __index = function(_, k)
+    return Effects1[k]
+  end,
+})
 
 -- ------- the engine, loaded once and never at file scope
 --
@@ -85,15 +102,19 @@ local function loadEngine()
 end
 
 -- Classic 1v1 anchors (AnimPlayer / BattleState pic windows).
--- Ally back pics draw at 2x on the GB (BattleState.BATTLE_SCALE_DEFAULT.back);
--- front pics stay 1x. MediatedBattle used to draw both at 1x, which left the
--- player mon looking like a postage stamp next to the foe.
+-- Ally back pics draw at 2x on Gen 1 (32×32); Gen 2 backs are 48×48 at 1x.
 local CLASSIC_PLAYER = { x = 8, y = 40 }
 local CLASSIC_ENEMY = { x = 88, y = 0 }
-local PLAYER_PIC_SCALE = 2
-M.PLAYER_PIC_SCALE = PLAYER_PIC_SCALE
+local PLAYER_PIC_SCALE_GEN1 = 2
+local PLAYER_PIC_SCALE_GEN2 = 1
+M.PLAYER_PIC_SCALE = PLAYER_PIC_SCALE_GEN1
 M.CLASSIC_PLAYER = CLASSIC_PLAYER
 M.CLASSIC_ENEMY = CLASSIC_ENEMY
+
+local function playerPicScale(game)
+  if Gen.generation(game) == 2 then return PLAYER_PIC_SCALE_GEN2 end
+  return PLAYER_PIC_SCALE_GEN1
+end
 
 -- ------- snapshots
 --
@@ -653,7 +674,7 @@ end
 -- Truncated to BATTLE_BAG_MAX so the menu and the upload stay the same set.
 function M.itemIsBattleUsable(id, game)
   if type(id) ~= "string" or id == "" then return nil end
-  local effect = Effects.itemEffect(id)
+  local effect = effectsFor(game).itemEffect(id)
   if not effect then return nil end
   local items = (game and game.data and game.data.items) or {}
   local def = items[id]
@@ -1157,7 +1178,7 @@ function M:onEvent(msg)
       self:confirmPendingItem(msg.text, msg.amount)
     end
     -- Ball id for AnimPlayer opts on the following toss/shake chain.
-    local effect = msg.text and Effects.itemEffect(msg.text)
+    local effect = msg.text and effectsFor(self.game).itemEffect(msg.text)
     if effect and effect.ball then self.medBall = msg.text end
 
   elseif kind == "turn" then
@@ -1313,20 +1334,49 @@ function M:refreshSlotSprite(index, isPlayer)
     if slot then slot.sprite = nil end
     return
   end
-  local eng = loadEngine()
   local data = self.game and self.game.data
-  if not (eng and eng.BattleState and eng.BattleState.makeBattler and data) then
+  if not data then
     slot.sprite = nil
     return
   end
   local key = self:speciesKeyFor(slot.species, isPlayer)
-  if not key or not data.pokemon[key] then
+  if not key or not data.pokemon or not data.pokemon[key] then
     slot.sprite = nil
     return
   end
   local monHint = nil
   if isPlayer then
     monHint = self.mine and self.mine[self.active]
+  end
+
+  -- Gen 2: Gen2Compat's BattleState has no makeBattler. Load spriteFront /
+  -- spriteBack the way ui/gen2/BattleState:pic does.
+  if Gen.generation(self.game) == 2 then
+    local def = data.pokemon[key]
+    local path = isPlayer and def.spriteBack or def.spriteFront
+    if type(path) ~= "string" or path == "" then
+      slot.sprite = nil
+      return
+    end
+    local okImg, Assets = pcall(require, "src.render.Assets")
+    if not (okImg and Assets and type(Assets.image) == "function") then
+      slot.sprite = nil
+      return
+    end
+    local ok, image = pcall(Assets.image, path)
+    if ok and image then
+      slot.sprite = image
+      slot.level = (monHint and monHint.level) or slot.level or 1
+    else
+      slot.sprite = nil
+    end
+    return
+  end
+
+  local eng = loadEngine()
+  if not (eng and eng.BattleState and eng.BattleState.makeBattler) then
+    slot.sprite = nil
+    return
   end
   local stub = {
     species = key,
@@ -1595,7 +1645,7 @@ function M:confirmPendingItem(itemId, amount)
   local partyIndex = self.pendingItemSlot or self.active
   self.pendingItem = nil
   self.pendingItemSlot = nil
-  local effect = Effects.itemEffect(id)
+  local effect = effectsFor(self.game).itemEffect(id)
   if effect and effect.vitamin and amount == 1 then
     M.writebackVitamin(self.game, partyIndex, id)
   end
@@ -1631,7 +1681,7 @@ end
 function M:commitItem(partyIndex, moveIndex)
   local pick = self.itemPick
   if not pick then return false end
-  local effect = pick.effect or Effects.itemEffect(pick.id)
+  local effect = pick.effect or effectsFor(self.game).itemEffect(pick.id)
   if not effect then
     self:say("But it failed")
     self.phase = "choose"
@@ -2042,11 +2092,15 @@ function M:enemyPicXY(sprite)
 end
 
 function M:playerPicXY(sprite)
-  local scale = PLAYER_PIC_SCALE
+  local scale = playerPicScale(self.game)
   if not sprite then return CLASSIC_PLAYER.x, CLASSIC_PLAYER.y, scale end
   local ok, w, h = pcall(sprite.getDimensions, sprite)
   if not ok then return CLASSIC_PLAYER.x, CLASSIC_PLAYER.y, scale end
-  -- Same contract as BattleState.backPlacement: feet flush on y=96 at `scale`.
+  -- Gen 2: feet in the 6x6 box at (16, 48) — same as BattleState.PLAYER_PIC_*.
+  if Gen.generation(self.game) == 2 then
+    return 16, 48 + (48 - h), scale
+  end
+  -- Gen 1: Same contract as BattleState.backPlacement: feet flush on y=96.
   local BS = engine and engine.BattleState
   if BS and BS.backPlacement then
     local x, y, s = BS.backPlacement(w, h, 0, 0, scale)
@@ -2091,7 +2145,7 @@ function M:drawFieldPics()
       love.graphics.setScissor(0, 0, 160, 96)
     end
     local x, y, scale = self:playerPicXY(mine.sprite)
-    scale = scale or PLAYER_PIC_SCALE
+    scale = scale or playerPicScale(self.game)
     pcall(love.graphics.draw, mine.sprite, x, y, 0, scale, scale)
     if clipMenus and love.graphics.setScissor then
       if scx then love.graphics.setScissor(scx, scy, scw, sch)

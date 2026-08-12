@@ -51,6 +51,11 @@ const { createLog, safe } = require('./log');
 
 const DEFAULT_PLAYERS = 4;
 const DEFAULT_SPRITE = 'SPRITE_RED';
+const DEFAULT_SPRITE_GEN2 = 'SPRITE_CHRIS';
+
+function defaultSpriteFor(generation) {
+  return Number(generation) === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+}
 // The wire dialect this hub speaks, and the one number both suites greet
 // with. 3 is where parties landed: nothing was removed, but an invite or a
 // party chat line sent to a protocol-2 hub would meet a handler table that
@@ -322,7 +327,7 @@ handlers['mmo.hello'] = (relay, client, msg) => {
     name,
     playerId,
     generation,
-    sprite: cleanSpriteId(msg.sprite) || DEFAULT_SPRITE,
+    sprite: cleanSpriteId(msg.sprite) || defaultSpriteFor(generation),
     profile: cleanProfile(msg.profile),
     map: cleanMapId(msg.map),
     x: cleanInt(msg.x, 0, 4096),
@@ -1676,7 +1681,7 @@ class Relay {
       address: (peer && peer.remoteAddress) || 'unknown',
       ready: false,
       name: null,
-      sprite: DEFAULT_SPRITE,
+      sprite: defaultSpriteFor(this.generation),
       profile: null,
       map: null, x: null, y: null, facing: 'down',
       // nobody arrives mid-stride: the first mmo.move says otherwise or it
@@ -1744,7 +1749,7 @@ class Relay {
     }
 
     client.name = hello.name;
-    client.sprite = hello.sprite || DEFAULT_SPRITE;
+    client.sprite = hello.sprite || defaultSpriteFor(this.generation);
     client.profile = hello.profile || null;
     client.map = hello.map === undefined ? null : hello.map;
     client.x = hello.x === undefined ? null : hello.x;
@@ -3165,7 +3170,7 @@ class Relay {
     return this.board.top(RANK_TOP).map((row) => {
       const out = {
         name: row.name,
-        sprite: cleanSpriteId(row.sprite) || DEFAULT_SPRITE,
+        sprite: cleanSpriteId(row.sprite) || defaultSpriteFor(this.generation),
         points: cleanPoints(row.points),
       };
       const id = cleanPlayerId(row.id);
@@ -3196,5 +3201,6 @@ class Relay {
 // in six places every time it moves.
 module.exports = {
   Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE,
+  DEFAULT_SPRITE_GEN2, defaultSpriteFor,
   FRIEND_HOLD_MS, FRIEND_HOLD_PER_NAME, FRIEND_HOLD_MAX,
 };

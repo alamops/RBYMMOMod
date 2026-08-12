@@ -276,6 +276,7 @@ check(type(exports.players) == "function", "exports players")
 eq(exports.isConnected(), false, "reports disconnected before connecting")
 eq(#exports.players(), 0, "the roster starts empty")
 check(type(exports.party) == "function", "exports party")
+check(type(exports.leaveParty) == "function", "exports leaveParty")
 eq(#exports.party(), 0, "and nobody is in one before connecting")
 -- Whether the hub this copy is on treats it as an operator's connection
 -- (docs/plans/admin-join-code.md #4/D). Derived only from a credential a
@@ -3344,6 +3345,8 @@ eq(Chars.resolve("SPRITE_BOULDER"), Config.DEFAULT_SPRITE,
 -- 0 through Chars.portrait. Blitting the raw sheet skips SpriteRenderer's
 -- OBP bake and turns DMG shades into the wrong colours (lime-green skin on
 -- a gentleman, for instance). This pins the path through resolveImage.
+-- Gen 2 also needs setObjPalette (PAL_OW_* x daytime) or Gold menus stay
+-- black-and-white while the overworld is coloured.
 
 ;(function()
   local usedResolve = false
@@ -3394,6 +3397,105 @@ eq(Chars.resolve("SPRITE_BOULDER"), Config.DEFAULT_SPRITE,
 
   package.loaded["src.render.SpriteRenderer"] = savedSR
   if savedNewQuad then love.graphics.newQuad = savedNewQuad end
+end)()
+
+-- Gen 2: same path must setObjPalette from gen2Palettes before resolveImage,
+-- or Chris in the character picker stays DMG greyscale on a Gold boot.
+;(function()
+  local usedResolve, usedSetObj = false, false
+  local mockImg = { getDimensions = function() return 16, 96 end }
+  local savedSR = package.loaded["src.render.SpriteRenderer"]
+  local savedPal = package.loaded["src.world.gen2.Palettes"]
+  package.loaded["src.render.SpriteRenderer"] = {
+    new = function(record, seed)
+      eq(seed, "SPRITE_CHRIS", "Gen2 portrait seeds with the sprite id")
+      return {
+        setObjPalette = function(self, colors, group)
+          usedSetObj = true
+          check(type(colors) == "table" and #colors >= 4,
+                "Gen2 portrait receives a 4-colour OBP")
+          check(type(group) == "string" and group:find("gen2:DAY", 1, true) == 1,
+                "and a DAY bake group (menus are lit like day)")
+        end,
+        resolveImage = function(self)
+          usedResolve = true
+          check(usedSetObj, "setObjPalette runs before resolveImage on Gold")
+          return mockImg
+        end,
+      }
+    end,
+  }
+  package.loaded["src.world.gen2.Palettes"] = {
+    spritePalette = function(data, daytime, spriteDef)
+      eq(daytime, "DAY", "menu portraits bake against DAY")
+      check(data and data.objects, "and see gen2Palettes")
+      eq(spriteDef.palette, "PAL_OW_RED", "with the sheet's PAL_OW_*")
+      return {
+        { 1, 1, 1 }, { 0.9, 0.3, 0.2 }, { 0.4, 0.1, 0.1 }, { 0, 0, 0 },
+      }
+    end,
+  }
+
+  _G.love = _G.love or {}
+  love.graphics = love.graphics or {}
+  local savedNewQuad = love.graphics.newQuad
+  love.graphics.newQuad = function(x, y, w, h, iw, ih)
+    return { x = x, y = y, w = w, h = h, iw = iw, ih = ih }
+  end
+
+  local portraitMod = {
+    game = { data = { gen2Palettes = { objects = { DAY = { {} } } } } },
+    content = {
+      sprites = {
+        get = function(_, id)
+          if id == "SPRITE_CHRIS" then
+            return {
+              image = "sprites/chris.png", frames = 6, walker = true,
+              palette = "PAL_OW_RED", paletteId = 0,
+            }
+          end
+        end,
+      },
+    },
+  }
+  local PortraitChars = resolver(portraitMod)("Chars")
+  local art = PortraitChars.portrait("SPRITE_CHRIS")
+  check(usedSetObj, "Gold portrait calls setObjPalette (PAL_OW bake)")
+  check(usedResolve, "and still resolves through SpriteRenderer")
+  check(art ~= nil and art.image == mockImg, "returning the baked image")
+
+  package.loaded["src.render.SpriteRenderer"] = savedSR
+  package.loaded["src.world.gen2.Palettes"] = savedPal
+  if savedNewQuad then love.graphics.newQuad = savedNewQuad end
+end)()
+
+-- ------- in-game host hub locks to the boot generation
+--
+-- HostServer:start hands Gen.generation(game) to Hub.new. A Gold-shaped game
+-- must lock generation 2 so the host's own hello is not refused.
+
+;(function()
+  local Gen = need("Gen")
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  eq(Gen.generation(goldGame), 2, "a Gold-shaped game is generation 2")
+  local locked = Hub.new({
+    maxPlayers = 2,
+    generation = Gen.generation(goldGame),
+  })
+  eq(locked.generation, 2, "HostServer-shaped Hub.new locks to generation 2")
+
+  -- Explicit game wins over a Gen1-shaped _G.Game (the Gold boot hazard).
+  local savedGame = rawget(_G, "Game")
+  rawset(_G, "Game", { data = {} })
+  eq(Gen.generation(goldGame), 2,
+     "explicit Gold game wins over a Gen1 _G.Game singleton")
+  if savedGame ~= nil then
+    rawset(_G, "Game", savedGame)
+  else
+    rawset(_G, "Game", nil)
+  end
 end)()
 
 -- ------- the trainer card fits the box it is drawn in
@@ -3538,6 +3640,7 @@ end)()
 ;(function()
 
 local Cast = need("Cast")
+local Gen = need("Gen")
 
 stubSprites = {}
 stubScales = {}
@@ -3571,6 +3674,27 @@ for _, row in ipairs(Config.SPRITES) do
 end
 eq(offered.SPRITE_NIRE, "listed", "NIRE is offered in the options row too")
 eq(offered.SPRITE_NIRE_HOOD, "listed", "and so is NIRE HOOD")
+
+-- Gen 2 is not ready for OWN_CHARS yet: both NIREs stay out of the picker
+-- and resolve to the Gold default even though Cast still registered them.
+do
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  eq(Gen.generation(goldGame), 2, "Gold-shaped stub is generation 2")
+  local goldOffered = {}
+  for _, id in ipairs(Chars.list(goldGame)) do goldOffered[id] = true end
+  eq(goldOffered.SPRITE_NIRE, nil, "NIRE is not offered on Gen 2")
+  eq(goldOffered.SPRITE_NIRE_HOOD, nil, "nor is NIRE HOOD")
+  eq(Chars.available("SPRITE_NIRE", goldGame), false,
+     "and cannot be worn on Gen 2")
+  eq(Chars.resolve("SPRITE_NIRE", goldGame),
+     Gen.defaultSprite(goldGame),
+     "a saved NIRE choice falls back on Gold")
+  eq(Gen.resolveSprite(goldGame, "SPRITE_NIRE"),
+     Gen.defaultSprite(goldGame),
+     "and a peer wearing NIRE draws as the Gold default")
+end
 
 -- ------- the pics the catalog does not cover
 --
@@ -14000,6 +14124,24 @@ do
   eq(featured.featured, true,
      "marked so the UI can protect product-owned fields")
 
+  eq(Config.featuredServerAllowed(1), true,
+     "the official hub is offered on Gen 1")
+  eq(Config.featuredServerAllowed(2), false,
+     "and not on Gen 2 until a Gold deploy exists")
+  eq(Servers.isFeaturedAddress(Config.FEATURED_SERVER_HOST), true,
+     "isFeaturedAddress recognises the official host")
+  eq(Servers.isFeaturedAddress("play.rbymmo.com"), true,
+     "including the form without an explicit port")
+
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  local goldMenu = store:menuList(goldGame)
+  eq(#goldMenu, 0,
+     "Gen 2 hides the official row on a fresh SERVERS list")
+  eq(store:menuGet(Config.FEATURED_SERVER_HOST, goldGame), nil,
+     "and menuGet refuses the official key on Gold")
+
   local resolved = store:menuGet(featured.key)
   check(resolved ~= nil, "menuGet resolves the synthetic row")
   eq(resolved and resolved.address, Config.FEATURED_SERVER_HOST,
@@ -15429,6 +15571,38 @@ do
   pushed = nil
   menu.opts.onCancel()
   eq(pushed.id, SCREEN.CHARSET, "cancelling keeps the same door")
+end
+
+-- ------- MAIN cancel reopens StartMenu (Gen 2 needs onClose)
+--
+-- Gold's Gen2StartMenu only pops when opts.onClose does; a bare push left
+-- B/START calling close() with nothing to pop -- stuck menu after MMO.
+
+do
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+    save = {},
+    stack = { popped = 0 },
+  }
+  goldGame.stack.pop = function(self) self.popped = self.popped + 1 end
+  goldGame.openStartMenuItem = function() end
+
+  local menu = screensStore[SCREEN.MAIN].new(goldGame)
+  pushed = nil
+  menu.opts.onCancel()
+  eq(pushed and pushed.id, "Gen2StartMenu",
+     "on Gold, B from MMO reopens Gen2StartMenu")
+  check(type(pushed.opts) == "table" and type(pushed.opts.onClose) == "function",
+        "with onClose so B/START can leave the stack")
+  pushed.opts.onClose()
+  eq(goldGame.stack.popped, 1, "and that onClose pops the start menu")
+
+  local redGame = { data = {}, save = {} }
+  local redMenu = screensStore[SCREEN.MAIN].new(redGame)
+  pushed = nil
+  redMenu.opts.onCancel()
+  eq(pushed and pushed.id, "StartMenu",
+     "on Gen 1, B from MMO still reopens StartMenu")
 end
 
 stubSprites = {}
