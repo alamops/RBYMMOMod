@@ -11351,6 +11351,194 @@ end)()
         "CoopBattle does not fill-scale on Gen2")
 end)()
 
+-- ------- Gen1 Battlefield wave 1: monDrawParams flip + right-edge anchoring
+--
+-- placeMons already stamped `facing` ("right" for ally, "left" for foe); this
+-- pins the draw-geometry helper that turns that into a mirrored blit. Both
+-- the front-pic path (plain iw/ih) and the 16x16 icon-quad fallback
+-- (opts.iconFrame) share the same flip math, so both are asserted here.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- monDrawParams tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+
+  local allyMon = { x = 200, y = 150, facing = "right" }
+  local foeMon = { x = 200, y = 150, facing = "left" }
+
+  local ally = Battlefield.monDrawParams(allyMon, 48, 64)
+  local foe = Battlefield.monDrawParams(foeMon, 48, 64)
+  eq(ally.flip, true, "an ally seat (facing right) flips")
+  eq(foe.flip, false, "a foe seat (facing left) does not flip")
+  check(ally.sx < 0, "a flipped seat draws with a negative x-scale")
+  check(foe.sx > 0, "an unflipped seat keeps a positive x-scale")
+  eq(ally.sy, foe.sy, "both sides share the same y-scale")
+  eq(ally.scale, foe.scale, "...and the same overall scale")
+  eq(ally.y, foe.y, "...and the same y placement -- the flip is horizontal only")
+  eq(ally.w, foe.w, "drawn width is identical on both sides")
+  eq(ally.x, foe.x + foe.w,
+     "right-edge anchoring: the flipped draw's left edge lands exactly where "
+     .. "the unflipped draw's left edge plus its own width would put it")
+
+  -- The 16x16 bag-icon fallback (opts.iconFrame) shares the same flip math.
+  local allyIcon = Battlefield.monDrawParams(allyMon, 48, 64, { iconFrame = true })
+  local foeIcon = Battlefield.monDrawParams(foeMon, 48, 64, { iconFrame = true })
+  eq(allyIcon.flip, true, "icon path: ally still flips")
+  eq(foeIcon.flip, false, "icon path: foe does not")
+  check(allyIcon.sx < 0, "icon path: a flipped icon uses a negative x-scale")
+  eq(allyIcon.sy, foeIcon.sy, "icon path: same y-scale both sides")
+  eq(allyIcon.y, foeIcon.y, "icon path: same y placement both sides")
+  eq(allyIcon.x, foeIcon.x + foeIcon.w,
+     "icon path: the same right-edge anchoring as the front-pic path")
+end)()
+
+-- ------- Gen1 Battlefield wave 1: plateModel (the persistent arena HUD)
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- plateModel tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+
+  -- Truncation: a 10-char cap (tighter than the card's own 12), "." suffix.
+  local long = Battlefield.plateModel({ name = "PIKACHUUUUU", hp = 10, maxHp = 10 })
+  eq(long.name, "PIKACHUUU.", "plateModel truncates a long name to 10 chars")
+
+  -- shownHp falls back to hp (clamped into [0, maxHp]) with no display clock.
+  local noClock = Battlefield.plateModel({ name = "RATT", hp = 24, maxHp = 30 })
+  eq(noClock.shownHp, 24, "no shownHp on the seat -- the plate reads truth hp")
+  eq(noClock.hp, 24, "and hp itself is unchanged")
+
+  -- frac clamps to [0, 1] even when shownHp overshoots either bound.
+  local under = Battlefield.plateModel({ hp = 10, maxHp = 50, shownHp = -20 })
+  eq(under.shownHp, 0, "shownHp below zero clamps to zero")
+  eq(under.frac, 0, "and the bar fraction floors at 0")
+  local over = Battlefield.plateModel({ hp = 10, maxHp = 50, shownHp = 9000 })
+  eq(over.shownHp, 50, "shownHp past maxHp clamps to maxHp")
+  eq(over.frac, 1, "and the bar fraction caps at 1")
+
+  -- status and side ride straight through cardModel / the seat.
+  local statused = Battlefield.plateModel(
+    { hp = 5, maxHp = 5, status = "paralysis", side = "foe" })
+  eq(statused.status, "par", "plateModel keeps cardModel's 3-letter status truncation")
+  eq(statused.side, "foe", "and carries the foe side through")
+  local allySide = Battlefield.plateModel({ hp = 5, maxHp = 5 })
+  eq(allySide.side, "ally", "an unnamed side defaults to ally")
+end)()
+
+-- ------- Gen1 Battlefield wave 1: fx math (pure functions of t)
+--
+-- Every renderer in Battlefield.lua is a pure function of a 0..1 progress the
+-- battle owns; this pins the boundary values (t == 0 / 0.5 / 1) the plan's
+-- contract calls out, plus the seat/field folding helpers built on top of
+-- them. `sin`/`cos` at their exact boundaries can leave a few ULPs of
+-- floating error, so boundary checks use a tolerance rather than `eq`.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- fx math tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+  local EPS = 1e-9
+  local function approx(got, want, msg)
+    check(math.abs(got - want) < EPS,
+      msg .. (" (got %s, want %s)"):format(tostring(got), tostring(want)))
+  end
+
+  approx(Battlefield.fxLunge(0), 0, "fxLunge starts at rest")
+  approx(Battlefield.fxLunge(0.5), 1, "fxLunge peaks at the midpoint")
+  approx(Battlefield.fxLunge(1), 0, "fxLunge is back at rest by t == 1")
+
+  approx(Battlefield.fxFlash(0), 0, "fxFlash starts dark")
+  approx(Battlefield.fxFlash(1), 0, "fxFlash is dark again by t == 1")
+  check(Battlefield.fxFlash(0.5) > 0, "fxFlash pulses somewhere mid-effect")
+
+  approx(Battlefield.fxShake(0), 0, "fxShake starts still")
+  approx(Battlefield.fxShake(1), 0, "fxShake's decay envelope zeroes it at t == 1")
+
+  local drop0, alpha0 = Battlefield.fxFaint(0)
+  eq(drop0, 0, "fxFaint has not sunk at t == 0")
+  eq(alpha0, 1, "...and is fully opaque at t == 0")
+  local dropHalf, alphaHalf = Battlefield.fxFaint(0.5)
+  approx(dropHalf, 0.25, "fxFaint's sink is t^2, so 0.25 at the midpoint")
+  eq(alphaHalf, 0.5, "...and alpha falls linearly, so 0.5 at the midpoint")
+  local drop1, alpha1 = Battlefield.fxFaint(1)
+  eq(drop1, 1, "fxFaint has fully sunk at t == 1")
+  eq(alpha1, 0, "...and is fully transparent at t == 1")
+
+  approx(Battlefield.fxSpawn(0), 0, "fxSpawn starts from nothing")
+  approx(Battlefield.fxSpawn(1), 1, "fxSpawn lands exactly on 1 at t == 1")
+
+  -- fxSeat: nil fx is the neutral record (a caller that passes none, like
+  -- CoopBattle, draws unchanged).
+  local neutral = Battlefield.fxSeat(nil, "ally", 1)
+  eq(neutral.dx, 0, "no fx list -- neutral dx")
+  eq(neutral.dy, 0, "no fx list -- neutral dy")
+  eq(neutral.alpha, 1, "no fx list -- fully opaque")
+  eq(neutral.scale, 1, "no fx list -- unscaled")
+  eq(neutral.flash, 0, "no fx list -- no flash")
+
+  -- Lunge signs toward the midline: ally charges right, foe charges left.
+  local allyLunge = Battlefield.fxSeat(
+    { { kind = "lunge", side = "ally", t = 0.5 } }, "ally", 1)
+  local foeLunge = Battlefield.fxSeat(
+    { { kind = "lunge", side = "foe", t = 0.5 } }, "foe", 1)
+  check(allyLunge.dx > 0, "an ally lunge nudges toward the midline (+dx)")
+  check(foeLunge.dx < 0, "a foe lunge nudges toward the midline (-dx)")
+  eq(allyLunge.dx, -foeLunge.dx, "the two lunges are mirror-image offsets")
+
+  -- An entry with no seatIndex is side-wide; one that names a seatIndex is not.
+  local wide = Battlefield.fxSeat(
+    { { kind = "flash", side = "ally", t = 0.25 } }, "ally", 3)
+  check(wide.flash > 0, "a side-wide fx entry (no seatIndex) reaches every seat")
+  local scoped = Battlefield.fxSeat(
+    { { kind = "flash", side = "ally", seatIndex = 1, t = 0.25 } }, "ally", 2)
+  eq(scoped.flash, 0, "a seat-scoped fx entry does not reach a different seat")
+
+  -- fxFieldShake: whole-field jolt, side/seatIndex-agnostic.
+  local zx, zy = Battlefield.fxFieldShake(nil)
+  eq(zx, 0, "no fx list -- no field shake on x")
+  eq(zy, 0, "no fx list -- no field shake on y")
+  local ex, ey = Battlefield.fxFieldShake({ { kind = "shake", t = 1 } })
+  eq(ex, 0, "a shake fully decayed by t == 1 contributes nothing on x")
+  eq(ey, 0, "...nor on y -- both terms carry the same (1 - t) decay factor")
+end)()
+
+-- ------- Gen1 Battlefield wave 1: layout plates + ctx.fx passthrough
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- layout plate/fx tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+
+  -- A seat with HP figures gets a plate; one with none is skipped rather
+  -- than publishing a 0/1 gauge.
+  local withHp = Battlefield.layout({
+    mode = "coop_npc",
+    allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24 } },
+    foeSeats = { { index = 3, name = "RATT" } }, -- no hp/maxHp at all
+  })
+  eq(#withHp.plates, 1, "only the seat carrying hp figures gets a plate")
+  eq(withHp.plates[1].side, "ally", "...and it is the ally plate")
+
+  -- ctx.fx absent or empty: layout.fx is always a table (never nil), which is
+  -- what lets CoopBattle (which never passes fx) call the same renderers.
+  local noFx = Battlefield.layout({ mode = "coop_npc" })
+  eq(type(noFx.fx), "table", "layout.fx is a table even when ctx.fx is absent")
+  eq(#noFx.fx, 0, "...and empty when the caller passes no fx")
+
+  local withFx = Battlefield.layout({
+    mode = "coop_npc", fx = { { kind = "shake", t = 0.5 } },
+  })
+  eq(#withFx.fx, 1, "layout.fx carries through whatever ctx.fx the caller passed")
+end)()
+
 -- ------- trainer entrance: only while the foe quarter is empty
 --
 -- Co-op NPC fights seat both foe mons before "2 on 2 battle!", so the old
@@ -14310,6 +14498,274 @@ do
     check(true, "(MediatedBattle engine unavailable -- music theatre skipped)")
   end
 end
+
+-- ------- MediatedBattle wave 1: the two-clock display drain (arena only)
+--
+-- battlefieldSeat's `shownHp` trails `hp` while a bar falls; the gap closes
+-- through a queued row at the engine's own maxHp/96-a-frame rate -- exactly
+-- the contract CoopBattle's own two-clock model already pins (~line 12750).
+-- Driven the same way tests/mediated_battle_client.lua drives the client:
+-- onEvent with an incrementing seq, then update() to play the queue.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+
+  local function driverFor(battle, role)
+    local fight = MediatedBattle.new({
+      game = gen1Game, battle = battle, role = role or "host",
+    })
+    local seq = 0
+    local function send(fields)
+      seq = seq + 1
+      fields.battle = battle
+      fields.seq = seq
+      fight:onEvent(fields)
+    end
+    return fight, send
+  end
+
+  -- 1. The rate and the landing. A `send` with no text seeds the seat with
+  -- nothing to drain from (and queues no "sent out" line to get in the way);
+  -- the follow-up `damage` moves truth hp on the spot and leaves the display
+  -- clock exactly where it was.
+  local f, send = driverFor("b-drain")
+  send({ t = "send", slot = 2, side = "b", hp = 24 })
+  eq(f.slots[2].hp, 24, "send seeds truth hp at the first (full) figure seen")
+  eq(f.slots[2].maxHp, 24, "...and the same figure as the seen maximum")
+  eq(f.slots[2].shownHp, 24, "a freshly sent-out seat has nothing to drain from")
+
+  send({ t = "damage", slot = 2, side = "b", hp = 15 })
+  eq(f.slots[2].hp, 15, "damage moves truth hp the instant the event lands")
+  eq(f.slots[2].shownHp, 24,
+     "and leaves the display clock exactly where it was -- the fall is a "
+     .. "queued row, not an instant jump")
+
+  f:update(1 / 60)
+  check(f.draining ~= nil, "one frame reaches the queued drain row and starts it")
+  eq(f.slots[2].shownHp, 24, "starting the drain does not itself move the bar")
+
+  local steps = 0
+  while f.draining and steps < 200 do
+    f:update(1 / 60)
+    steps = steps + 1
+  end
+  eq(steps, 36,
+     "a 24 maxHp bar falling 9 HP takes exactly maxHp/96 steps to land "
+     .. "(9 / (24 / 96) == 36, T2's own verified number)")
+  eq(f.slots[2].shownHp, 15, "...and it lands exactly on the target, not past it")
+
+  -- 2. The row blocks the queue. A line queued behind the drain does not
+  -- show until the bar has fully landed -- the same assertion this file
+  -- makes for CoopBattle's own two-clock model above.
+  local f2, send2 = driverFor("b-block")
+  send2({ t = "send", slot = 2, side = "b", hp = 24 })
+  send2({ t = "damage", slot = 2, side = "b", hp = 15 })
+  send2({ t = "msg", text = "next line" })
+  eq(#f2.lines, 2, "the drain row and the text both wait in the queue")
+
+  f2:update(1 / 60)
+  check(f2.draining ~= nil, "the drain row is reached and started first")
+  eq(f2.shown, nil, "the queued text has not been promoted yet")
+
+  local guard = 0
+  while f2.draining and guard < 200 do
+    f2:update(1 / 60)
+    guard = guard + 1
+  end
+  eq(f2.shown, nil,
+     "landing the bar does not itself show the line -- one more tick pops it")
+  f2:update(1 / 60)
+  eq(f2.shown, "next line",
+     "only once the drain has fully landed does the queued text show")
+end)()
+
+-- ------- MediatedBattle wave 1: faint sequencing (drain -> faintfx -> text)
+--
+-- A faint queues four rows in the engine's own order: the bar finishes
+-- falling, the monster sinks, "X fainted!" prints, and only then is the
+-- sprite released -- so a client reading one frame slower never sees a
+-- monster vanish before anything on screen explained why.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-faint", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-faint"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  send({ t = "faint", slot = 2, side = "b", text = "RATT" })
+
+  eq(#f.lines, 4,
+     "a faint queues four rows: the bar's fall, the sink, the text, and the "
+     .. "sprite release")
+  eq(f.lines[1].drain, 2, "row 1 is the bar finishing its fall")
+  eq(f.lines[2].faintfx, 2, "row 2 is the monster sinking")
+  eq(f.lines[3], "RATT fainted!", "row 3 is the text, only after the sink")
+  eq(f.lines[4].clearPic, 2, "row 4 releases the sprite, behind the text")
+
+  local sawTextEarly = false
+  local guard = 0
+  while f.shown ~= "RATT fainted!" and guard < 400 do
+    f:update(1 / 60)
+    guard = guard + 1
+    if f.shown == "RATT fainted!" and (f.draining or f.faintFx) then
+      sawTextEarly = true
+    end
+  end
+  check(guard < 400, "the faint sequence resolves in a bounded number of frames")
+  eq(f.shown, "RATT fainted!", "...and it ends on the fainted! text")
+  check(not sawTextEarly,
+        "the text never shows while the bar or the sink is still playing")
+  eq(f.slots[2].shownHp, 0, "by the time the text shows, the bar has fully landed")
+end)()
+
+-- ------- MediatedBattle wave 1: fx emission (lunge / flash+shake / spawn)
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+
+  local function driverFor(battle)
+    local fight = MediatedBattle.new({ game = gen1Game, battle = battle, role = "host" })
+    local seq = 0
+    local function send(fields)
+      seq = seq + 1
+      fields.battle = battle
+      fields.seq = seq
+      fight:onEvent(fields)
+    end
+    return fight, send
+  end
+
+  -- spawn: unconditional on send/switch, and plays over the send line
+  -- itself rather than queuing a row of its own.
+  local f, send = driverFor("b-fx")
+  send({ t = "send", slot = 2, side = "b", hp = 30 })
+  eq(#f.fx, 1, "a send emits exactly one fx entry")
+  eq(f.fx[1].kind, "spawn", "...and it is a spawn")
+  eq(f.fx[1].side, "foe", "...on the side the mon actually sent out on")
+  eq(#f.lines, 0, "spawn plays over the send line -- no queue row of its own")
+
+  -- flash + shake ride only a real HP drop.
+  f.fx = nil
+  send({ t = "damage", slot = 2, side = "b", hp = 20 })
+  local kinds = {}
+  for _, e in ipairs(f.fx or {}) do kinds[e.kind] = true end
+  check(kinds.flash, "a damaging hit emits a flash on the defender")
+  check(kinds.shake, "...and a field-wide shake")
+
+  -- A rise in hp (a heal / drain-move restore) still queues a drain row for
+  -- the bar, but earns no flash or shake -- nothing was hit.
+  f.fx = nil
+  send({ t = "damage", slot = 2, side = "b", hp = 30 })
+  eq(f.fx, nil, "a heal (hp did not drop) emits neither flash nor shake")
+
+  -- lunge: on the attacker's move-anim row actually playing, not on the
+  -- anim event merely arriving (queued first, like everything else).
+  local f2, send2 = driverFor("b-lunge")
+  send2({ t = "send", slot = 0, side = "a", hp = 20 })
+  f2.fx = nil -- clear the send's own spawn entry; this block is about lunge
+  send2({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
+  eq(f2.fx, nil,
+     "the anim event itself emits no fx -- only playing the queued row does")
+  f2:update(1 / 60) -- pops the anim row -> startAnim -> lunge
+  local sawLunge = false
+  for _, e in ipairs(f2.fx or {}) do
+    if e.kind == "lunge" then sawLunge = true end
+  end
+  check(sawLunge, "playing a battlefield anim row lunges the attacker")
+end)()
+
+-- ------- MediatedBattle wave 1: victory music held until the arena settles
+--
+-- #36: a fanfare over a KO that still looked alive. finish() on the arena
+-- holds the jingle while hasPendingHpFx() is true (a queued-but-unstarted
+-- drain counts); the release is checked at the top of the *next* frame, so
+-- the flag is still up the instant the bar lands and only clears one tick
+-- later. The classic path never holds at all.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-fanfare", role = "host" })
+  check(f:usesBattlefield(), "Gen1-shaped game stays on the battlefield gate")
+
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-fanfare"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  send({ t = "damage", slot = 2, side = "b", hp = 5 }) -- queues a drain row
+  check(f:hasPendingHpFx(), "a queued-but-unstarted drain counts as pending")
+
+  f.result = "win"
+  f:finish("win", "sweep")
+  check(f.victoryMusicHeld == true,
+        "the fanfare is held while the loser's bar is still owed a fall")
+  check(not f.victoryMusicPlayed, "...and it has not actually played yet")
+
+  local guard = 0
+  while f:hasPendingHpFx() and guard < 400 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 400, "the drain resolves in a bounded number of frames")
+  check(f.victoryMusicHeld == true,
+        "...and the flag is still up the instant the bar lands -- the "
+        .. "release is checked at the top of the next frame, not mid-frame")
+
+  f:update(1 / 60)
+  check(not f.victoryMusicHeld, "one more tick and the held flag clears")
+  check(f.victoryMusicPlayed, "...and the fanfare has now actually played")
+
+  -- Classic (Gen2) never holds: finish() plays straight through, and the
+  -- display clock is welded to truth rather than queuing anything at all.
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  local classic = MediatedBattle.new({
+    game = goldGame, battle = "b-classic", role = "host",
+  })
+  check(not classic:usesBattlefield(), "Gen2 stays off the battlefield gate")
+  local cseq = 0
+  local function csend(fields)
+    cseq = cseq + 1
+    fields.battle = "b-classic"
+    fields.seq = cseq
+    classic:onEvent(fields)
+  end
+  csend({ t = "send", slot = 2, side = "b", hp = 30 })
+  eq(classic.slots[2].shownHp, 30,
+     "classic path welds the display clock to truth on send")
+  csend({ t = "damage", slot = 2, side = "b", hp = 18 })
+  eq(classic.slots[2].hp, 18, "classic damage still lands on truth hp")
+  eq(classic.slots[2].shownHp, 18,
+     "...and the display clock is welded to it instantly -- no separate drain")
+
+  local hasQueuedFx = false
+  for _, row in ipairs(classic.lines) do
+    if type(row) == "table" and (row.drain ~= nil or row.faintfx ~= nil) then
+      hasQueuedFx = true
+    end
+  end
+  check(not hasQueuedFx, "classic path queues no drain/faintfx rows at all")
+  eq(classic.fx, nil, "and emits no fx entries -- emitFx is a no-op off the gate")
+
+  classic.result = "win"
+  classic:finish("win", "sweep")
+  check(not classic.victoryMusicHeld,
+        "classic path never holds the fanfare -- timing is unchanged")
+end)()
 
 -- ------- Gen 2 battle theatre (Quarkst fixes on Gold)
 --

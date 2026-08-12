@@ -500,9 +500,27 @@ check(type(fight.zones) == "function", "zones opt-out is wired")
 local pals = fight:sgbPalettes()
 eq(type(pals), "table", "sgbPalettes returns a zone list")
 eq(pals[1] and pals[1].colors, false, "sgbPalettes opts out of shade remap")
-eq(pals[1] and pals[1].w, 160, "sgbPalettes covers the classic canvas")
+-- `fight.game` is Gen1-shaped (DATA carries no type_chart.generation), so the
+-- 640x360 battlefield hard-cut (commit 201ca00) is live and the opt-out zone
+-- legitimately covers the arena canvas, not the pre-Battlefield 160x144 one.
+eq(pals[1] and pals[1].w, 640,
+   "sgbPalettes covers the battlefield arena canvas once Gen1 + Battlefield "
+   .. "hard-cuts the wide layout")
 local z = fight:zones()
 eq(z[1] and z[1].colors, false, "zones matches the sgbPalettes opt-out")
+eq(z[1] and z[1].w, 640, "...and the same 640-wide arena canvas")
+
+-- Force the classic path the way the gate itself is read (usesBattlefield ->
+-- Battlefield.enabled -> Gen.generation): a Gen2-shaped game, which is the
+-- one real-world case this build still takes the classic 160x144 zone.
+local classicFight = setmetatable({
+  game = { data = { type_chart = { generation = 2 } } },
+}, { __index = Mediated })
+check(not classicFight:usesBattlefield(),
+      "a Gen2-shaped game forces the classic path off the battlefield gate")
+local cz = classicFight:zones()
+eq(cz[1] and cz[1].w, 160,
+   "...and zones covers the classic 160x144 canvas there")
 eq(fight:speciesKeyFor("SQUIRTLE", true), "SQUIRTLE",
    "speciesKeyFor resolves an uploaded registry id")
 
