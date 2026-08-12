@@ -10832,14 +10832,15 @@ end)()
   CoopBattle.updateTarget(client, press("right"))
   eq(client.targetIndex, 2, "RIGHT moves onto the second")
   CoopBattle.updateTarget(client, press("right"))
-  eq(client.targetIndex, 2, "and clamps there -- it does not wrap back to the first")
+  eq(client.targetIndex, 1,
+     "and wraps to the first on the Gen1 field cursor (Battlefield.nextTarget)")
   CoopBattle.updateTarget(client, press("left"))
-  eq(client.targetIndex, 1, "LEFT returns")
+  eq(client.targetIndex, 2, "LEFT wraps back to the second")
   CoopBattle.updateTarget(client, press("up"))
-  eq(client.targetIndex, 1, "UP holds -- there is no second row in a pair")
+  eq(client.targetIndex, 1, "UP steps the same wrap ring")
   client.targetIndex = 2
   CoopBattle.updateTarget(client, press("down"))
-  eq(client.targetIndex, 2, "and so does DOWN")
+  eq(client.targetIndex, 1, "DOWN wraps from the last seat")
 
   -- One foe faints: the picker clamps to the one still standing rather than
   -- pointing at a name that is no longer on the list.
@@ -10932,11 +10933,12 @@ end)()
   CoopBattle.updateTarget(client, press("up"))
   eq(client.targetIndex, 1, "UP genuinely moves the cursor up the column")
   CoopBattle.updateTarget(client, press("up"))
-  eq(client.targetIndex, 1, "and clamps at the top rather than wrapping")
+  eq(client.targetIndex, 2,
+     "and wraps from the top on the Gen1 field cursor")
   CoopBattle.updateTarget(client, press("down"))
-  eq(client.targetIndex, 2, "DOWN moves it back down")
+  eq(client.targetIndex, 1, "DOWN steps forward on the wrap ring")
   CoopBattle.updateTarget(client, press("down"))
-  eq(client.targetIndex, 2, "and clamps at the bottom")
+  eq(client.targetIndex, 2, "and wraps again at the bottom")
 
   -- ------- field scale: both pairs at 1x, panels narrowed instead
   eq(CoopBattle.FOE_SCALE, 1,
@@ -14180,6 +14182,149 @@ do
     check(true, "(MediatedBattle engine unavailable -- music theatre skipped)")
   end
 end
+
+-- ------- Gen 2 battle theatre (Quarkst fixes on Gold)
+--
+-- Gen 1 Music.playBattle(kind) reads data.audio.battle[kind], which Gold does
+-- not ship. Assert Gen routes to BattleMusic song labels + Gen2 SFX names so
+-- co-op / mediated fights are not silent on overworld music.
+
+;(function()
+  local Gen = need("Gen")
+  local goldGame = {
+    data = {
+      type_chart = { generation = 2 },
+      gen2Statuses = {},
+      audio = { songs = {} },
+    },
+  }
+  eq(Gen.generation(goldGame), 2, "Gold-shaped stub is generation 2")
+  eq(Gen.sfx(goldGame, "Super_Effective"), "Sfx_SuperEffective",
+     "Gen2 remaps hit Super_Effective")
+  eq(Gen.sfx(goldGame, "Not_Very_Effective"), "Sfx_NotVeryEffective",
+     "Gen2 remaps Not_Very_Effective")
+  eq(Gen.sfx(goldGame, "Damage"), "Sfx_Damage", "Gen2 remaps Damage")
+  eq(Gen.sfx(goldGame, "Tink"), "Sfx_BallWobble",
+     "Gen2 catch shake uses Sfx_BallWobble")
+  eq(Gen.sfx(goldGame, "Ball_Poof"), "Sfx_BallPoof", "Gen2 remaps Ball_Poof")
+  eq(Gen.sfx({ data = {} }, "Tink"), "Tink",
+     "Gen1 keeps the RBY Tink clip name")
+
+  local okBm, BattleMusic = pcall(require, "src.battle.gen2.BattleMusic")
+  if not (okBm and BattleMusic) then
+    check(true, "(BattleMusic unavailable -- Gen2 song theatre skipped)")
+    return
+  end
+
+  eq(Gen.gen2BattleSong(goldGame, { mode = "coop_wild" }),
+     "Music_JohtoWildBattle",
+     "Gen2 coop wild picks the Johto wild theme")
+  eq(Gen.gen2BattleSong(goldGame, {
+       mode = "coop_npc", trainer = { classId = "FALKNER" },
+     }), "Music_JohtoGymBattle",
+     "Gen2 Falkner coop picks the Johto gym battle theme")
+  eq(Gen.gen2BattleSong(goldGame, {
+       mode = "coop_npc", trainer = { id = "OPP_BROCK" },
+     }), "Music_KantoGymBattle",
+     "Gen2 strips OPP_ so Brock still resolves as a Kanto gym fight")
+  eq(Gen.gen2BattleSong(goldGame, { mode = "coop_pvp" }),
+     "Music_JohtoTrainerBattle",
+     "Gen2 PvP uses the regional trainer theme (no dedicated link song)")
+  eq(Gen.gen2VictorySong(goldGame, { trainer = { classId = "FALKNER" } }),
+     "Music_GymLeaderVictory",
+     "Gen2 gym win jingle")
+  eq(Gen.gen2VictorySong(goldGame, { mode = "coop_pvp" }),
+     "Music_TrainerVictory",
+     "Gen2 PvP win jingle")
+  eq(Gen.gen2VictorySong(goldGame, { mode = "coop_wild" }),
+     "Music_WildPokemonVictory",
+     "Gen2 wild win jingle")
+
+  local CoopBattle = need("CoopBattle")
+  local eng = CoopBattle.loadEngine and CoopBattle.loadEngine()
+  if eng and eng.Music then
+    local realMusic = eng.Music
+    local asked = {}
+    eng.Music = {
+      play = function(_, song)
+        asked[#asked + 1] = "play:" .. tostring(song)
+      end,
+      playBattle = function()
+        asked[#asked + 1] = "playBattle"
+      end,
+      playVictory = function()
+        asked[#asked + 1] = "playVictory"
+      end,
+      restoreMap = function() asked[#asked + 1] = "restore" end,
+    }
+    local fight = setmetatable({
+      game = goldGame,
+      trainer = { classId = "FALKNER", id = "FALKNER" },
+      oppClass = "FALKNER",
+      mode = "coop_npc",
+      messages = {},
+      mine = 1,
+      sim = { slots = {} },
+      announce = function() end,
+      say = function() end,
+      uploadMediated = function() end,
+      queueIntroSendOut = function() end,
+      queueFoeIntroSendOut = function() end,
+    }, { __index = CoopBattle })
+    fight:enter()
+    eq(asked[1], "play:Music_JohtoGymBattle",
+       "Gen2 CoopBattle enter plays via Music.play, not playBattle(kind)")
+    asked = {}
+    fight.result = "win"
+    fight:playVictoryMusic()
+    fight:playVictoryMusic()
+    eq(#asked, 1, "Gen2 coop fanfare starts once")
+    eq(asked[1], "play:Music_GymLeaderVictory",
+       "Gen2 coop Falkner win plays GymLeaderVictory")
+    fight:exit()
+    eq(asked[2], "restore", "Gen2 coop restores map music on exit")
+    eng.Music = realMusic
+  end
+
+  local MediatedBattle = need("MediatedBattle")
+  local meng = MediatedBattle.loadEngine and MediatedBattle.loadEngine()
+  if meng and meng.Music then
+    local realMusic = meng.Music
+    local asked = {}
+    meng.Music = {
+      play = function(_, song)
+        asked[#asked + 1] = "play:" .. tostring(song)
+      end,
+      playBattle = function() asked[#asked + 1] = "playBattle" end,
+      playVictory = function() asked[#asked + 1] = "playVictory" end,
+      restoreMap = function() asked[#asked + 1] = "restore" end,
+    }
+    local one = setmetatable({
+      game = goldGame,
+      mode = "1v1",
+      transport = { send = function() end },
+      battle = "b1",
+      role = "host",
+      peerId = "peer",
+      peerName = "PEER",
+      uploaded = true,
+      say = function() end,
+      grantCatch = function() end,
+      start = function() end,
+    }, { __index = MediatedBattle })
+    one:enter()
+    eq(asked[1], "play:Music_JohtoTrainerBattle",
+       "Gen2 mediated 1v1 enter plays regional trainer battle song")
+    asked = {}
+    one.result = "win"
+    one:playVictoryMusic()
+    eq(asked[1], "play:Music_TrainerVictory",
+       "Gen2 mediated 1v1 win plays TrainerVictory")
+    one:exit()
+    eq(asked[2], "restore", "Gen2 mediated restores map music on exit")
+    meng.Music = realMusic
+  end
+end)()
 
 -- ------- exp is priced on the client, not handed down
 --

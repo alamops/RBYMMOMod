@@ -8,6 +8,13 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **Gen 2 co-op / mediated battle theatre.** Quarkst battle music, victory
+  jingles, map restore, and hit/catch SFX now resolve through Gen 2
+  `BattleMusic` song labels and Gold SFX names (`Sfx_SuperEffective`,
+  `Sfx_BallWobble`, …) instead of Gen 1 `Music.playBattle(kind)` /
+  `data.audio.battle[kind]` (absent on Gold). Gen 2 trainer faces use
+  `enemyTrainerImage` as `trainerPic` for the theatrical intro. Gen 1 path
+  unchanged.
 - **Code-review must-fixes (gen2-compatibility).** Trade2 keeps `theirMail`
   aligned with `theirParty` when a non-strict unpack skips a mon; Hub↔relay
   `battleParty`/`cleanBattleParty` take hub generation (Effects twin, refuse
@@ -17,6 +24,14 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Gen1 top-down battlefield theatre (CoopBattle + MediatedBattle 1v1).**
+  Hard-cut Gen1 presentation onto a 640×360 fill-scale arena
+  (`assets/battle/outdoor_grass_arena.png`) via `src/Battlefield.lua`:
+  humans on the sides (OW walk sheets, facing inward), active mons as bag
+  icons on the grass, field-cursor targeting with arrow + floating status
+  card (name / Lxx / HP / status / front sprite), Pokémon icon bob, and
+  trainer-head callout bubbles when a human’s mon acts (not wild). Gen2
+  keeps the classic guild-focus / 160×144 path until a later pass.
 - **PROTOCOL 20 — gen lock + co-op invite joiner finish.** `Config.PROTOCOL` /
   `relay.js` bump **18 → 20** (both parallel branches had claimed 19). Client
   `mmo.hello` carries `generation` (1|2); Hub.lua and the Node relay refuse a

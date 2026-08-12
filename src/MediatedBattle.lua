@@ -33,8 +33,10 @@
 -- modified client can lie on the sheet it sends, which is the accepted v1
 -- surface written down in src/Wire.lua's mediated-battle section.
 --
--- The screen draws a classic Gen1 1v1 field: foe front pic + top-left HUD,
--- ally back pic + bottom HUD, message box, optional AnimPlayer. Co-op still
+-- The screen draws a classic Gen1 1v1 field on Gen2 / when Battlefield is
+-- off: foe front pic + top-left HUD, ally back pic + bottom HUD, message box,
+-- optional AnimPlayer. On Gen1 with Battlefield.enabled, presentation is the
+-- top-down arena theatre (640×360 fill) from src/Battlefield.lua. Co-op still
 -- owns the four-slot renderer.
 
 local need, mod = ...
@@ -42,6 +44,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Effects1 = need("BattleSim/Effects")
 local Gen = need("Gen")
+local Battlefield = need("Battlefield")
 
 local M = {}
 M.__index = M
@@ -955,7 +958,7 @@ function M.new(opts)
     -- colors=false white fill.
     isOpaque = true,
 
-    phase     = "setup",   -- setup | play | choose | move | item | item_party | item_move | switch | over
+    phase     = "setup",   -- setup | play | choose | move | target | item | item_party | item_move | switch | over
     uploaded  = false,
     finished  = false,
     left      = false,
@@ -989,7 +992,296 @@ function M.new(opts)
     awaitingReconnect = false,
     reconnectSent = false,
     liveMoves   = nil,     -- referee-published list after Transform/Mimic
+    -- Gen1 Battlefield theatre (top-down arena). Unused on Gen2 / when
+    -- Battlefield.enabled is false.
+    frame = 0,
+    battlefieldLoaded = false,
+    battlefieldBubbles = nil, -- { { side, humanIndex, text, born }, ... }
+    targetIndex = 1,          -- field cursor when a target list exists
   }, M)
+end
+
+-- ------- Gen1 Battlefield theatre gate
+--
+-- Hard-cut on Gen1 when Battlefield.enabled(game): wide fill canvas + arena
+-- draw. Gen2 (and any generation that fails the gate) keeps the classic
+-- 160×144 side-view path below untouched.
+
+local BUBBLE_LIFE = 90
+
+function M:usesBattlefield()
+  return Battlefield.enabled(self.game)
+end
+
+function M:isWideBattleLayout()
+  return self:usesBattlefield()
+end
+
+function M:uiSize()
+  if self:usesBattlefield() then
+    return Battlefield.WIDTH, Battlefield.HEIGHT
+  end
+  return 160, 144
+end
+
+function M:wantsFillScale()
+  return self:usesBattlefield()
+end
+
+function M:ensureBattlefield()
+  if self.battlefieldLoaded then return end
+  self.battlefieldLoaded = true
+  pcall(Battlefield.load, mod)
+end
+
+-- Soft: local OW sprite id from mod save/options (same sources Client uses).
+local function selfSpriteId()
+  local ok, id = pcall(function()
+    local chosen = mod.save and mod.save:get("sprite")
+    if type(chosen) ~= "string" or chosen == "" then
+      chosen = mod.options and mod.options:get("sprite")
+    end
+    if type(chosen) ~= "string" or chosen == "" then return nil end
+    local Chars = need("Chars")
+    if Chars and Chars.resolve then return Chars.resolve(chosen) end
+    return chosen
+  end)
+  if ok and type(id) == "string" and id ~= "" then return id end
+  return nil
+end
+
+-- Soft: peer OW sprite from the live roster export, if any.
+local function peerSpriteId(peerId)
+  if peerId == nil then return nil end
+  local ok, players = pcall(function()
+    return mod.exports and mod.exports.players and mod.exports.players()
+  end)
+  if not (ok and type(players) == "table") then return nil end
+  for _, row in ipairs(players) do
+    if type(row) == "table" and row.id == peerId
+        and type(row.sprite) == "string" and row.sprite ~= "" then
+      return row.sprite
+    end
+  end
+  return nil
+end
+
+local function playerName(game)
+  local name = game and game.save and game.save.player and game.save.player.name
+  if type(name) == "string" and name ~= "" then return name end
+  return "YOU"
+end
+
+-- Bag icon for a field seat. Soft-fail to nil; Battlefield draws a stand-in.
+function M:seatIcon(speciesKey, monHint)
+  if type(speciesKey) ~= "string" or speciesKey == "" then return nil end
+  local data = self.game and self.game.data
+  if not data then return nil end
+  local eng = loadEngine()
+  local Sprites = eng and eng.Sprites
+  local icons = data.icons
+  local def = data.pokemon and data.pokemon[speciesKey]
+  local mon = monHint or { species = speciesKey }
+  local path, name
+  pcall(function()
+    local entry = (icons and icons.bySpecies and icons.bySpecies[speciesKey])
+      or (def and def.icon)
+    if type(entry) == "string" then
+      name = entry
+      path = icons and icons.icons and icons.icons[entry]
+    elseif type(entry) == "table" then
+      path = entry.image
+    end
+    if not path and def and def.dex and icons and icons.byDex then
+      name = icons.byDex[def.dex]
+      path = name and icons.icons and icons.icons[name]
+    end
+    if Sprites and Sprites.iconPath then
+      path = Sprites.iconPath(data, mon, path, { name = name })
+    end
+  end)
+  if type(path) ~= "string" or path == "" then return nil end
+  local ok, img = pcall(function()
+    local Assets = require("src.render.Assets")
+    if Assets and Assets.image then return Assets.image(path) end
+    return love.graphics.newImage(path)
+  end)
+  if ok then return img end
+  return nil
+end
+
+-- One Battlefield seat from a live field slot (player or foe active).
+function M:battlefieldSeat(slotIndex, isPlayer)
+  local slot = self.slots[slotIndex]
+  if not slot or not slot.species then return nil end
+  -- Keep KO'd seats until releasePic clears the sprite, matching classic hold.
+  if (slot.hp or 0) <= 0 and not slot.sprite and not slot.koHold then
+    return nil
+  end
+  local monHint = nil
+  if isPlayer then monHint = self.mine and self.mine[self.active] end
+  local key = self:speciesKeyFor(slot.species, isPlayer) or slot.species
+  local acting = false
+  if self.anim and self.anim.slot == slotIndex then acting = true end
+  local icon = slot.icon
+  if icon == nil then
+    icon = self:seatIcon(key, monHint and {
+      species = monHint.speciesId or key,
+      hp = slot.hp,
+    } or { species = key })
+    slot.icon = icon or false
+  elseif icon == false then
+    icon = nil
+  end
+  return {
+    index = slotIndex,
+    name = slot.species,
+    level = slot.level or (monHint and monHint.level) or 1,
+    hp = slot.hp or 0,
+    maxHp = slot.maxHp or 1,
+    status = slot.status,
+    species = key,
+    icon = icon,
+    front = slot.sprite,
+    acting = acting,
+  }
+end
+
+function M:pruneBattlefieldBubbles()
+  local list = self.battlefieldBubbles
+  if type(list) ~= "table" then return end
+  local frame = self.frame or 0
+  local kept = {}
+  for _, b in ipairs(list) do
+    if type(b) == "table" then
+      local born = tonumber(b.born) or 0
+      local age = frame - born
+      if age < BUBBLE_LIFE then
+        local t = 1 - (age / BUBBLE_LIFE)
+        kept[#kept + 1] = {
+          side = b.side,
+          humanIndex = b.humanIndex or 1,
+          text = b.text,
+          t = t,
+          born = born,
+        }
+      end
+    end
+  end
+  self.battlefieldBubbles = (#kept > 0) and kept or nil
+end
+
+-- Trainer callout when a human-owned mon acts. Never for the wild foe.
+function M:noteBattlefieldBubble(row)
+  if not self:usesBattlefield() then return end
+  if type(row) ~= "table" then return end
+  local anim = row.anim
+  if type(anim) ~= "string" or anim == "" then return end
+  -- Engine ball / hide / shake markers are not move callouts.
+  if anim:find("_ANIM", 1, true) then return end
+
+  local mine = row.slot == self:mySlot()
+    or (row.side ~= nil and row.side == self.mySide)
+  if not mine then
+    if self.mode == "wild" then return end
+    self.battlefieldBubbles = {{
+      side = "foe",
+      humanIndex = 1,
+      text = anim,
+      born = self.frame or 0,
+    }}
+    return
+  end
+  self.battlefieldBubbles = {{
+    side = "ally",
+    humanIndex = 1,
+    text = anim,
+    born = self.frame or 0,
+  }}
+end
+
+-- Living foe seats for a field cursor (1v1 has exactly one).
+function M:battlefieldTargets()
+  local foe = self:battlefieldSeat(self:foeSlot(), false)
+  if not foe then return {} end
+  if (foe.hp or 0) <= 0 and not foe.front then return {} end
+  return { foe }
+end
+
+function M:battlefieldCtx()
+  local mode = (self.mode == "wild") and "wild" or "1v1"
+  local allyHumans = {{
+    id = "self",
+    name = playerName(self.game),
+    spriteId = selfSpriteId(),
+  }}
+  local foeHumans = {}
+  if mode == "1v1" then
+    foeHumans[1] = {
+      id = self.peerId,
+      name = self.peerName or "FRIEND",
+      spriteId = peerSpriteId(self.peerId),
+    }
+  end
+
+  local ally = self:battlefieldSeat(self:mySlot(), true)
+  local foe = self:battlefieldSeat(self:foeSlot(), false)
+  local allySeats = ally and { ally } or {}
+  local foeSeats = foe and { foe } or {}
+
+  -- Target card: show while picking FIGHT / moves. 1v1 has no multi-target
+  -- picker, but the card still lands on the lone foe.
+  local targets, targetIndex = nil, nil
+  local showTarget = false
+  if self.phase == "move" then
+    showTarget = true
+  elseif self.phase == "choose" and M.COMMANDS[self.commandIndex or 1] == "FIGHT" then
+    showTarget = true
+  elseif self.phase == "target" then
+    showTarget = true
+  end
+  if showTarget then
+    targets = self:battlefieldTargets()
+    if #targets > 0 then
+      targetIndex = self.targetIndex or 1
+      if targetIndex < 1 or targetIndex > #targets then targetIndex = 1 end
+      self.targetIndex = targetIndex
+    end
+  end
+
+  local frame = self.frame
+  if not frame or frame == 0 then
+    local ok, t = pcall(function()
+      return love and love.timer and love.timer.getTime() * 60
+    end)
+    frame = (ok and t) or 0
+  end
+
+  self:pruneBattlefieldBubbles()
+
+  return {
+    mode = mode,
+    allyHumans = allyHumans,
+    foeHumans = foeHumans,
+    allySeats = allySeats,
+    foeSeats = foeSeats,
+    targets = targets,
+    targetIndex = targetIndex,
+    frame = frame,
+    bubbles = self.battlefieldBubbles,
+  }
+end
+
+-- Classic 160×144 chrome drawn into Battlefield.MENU_BAND at the bottom.
+function M:withMenuBand(drawFn)
+  local band = Battlefield.MENU_BAND
+  local classicBox = 48 -- Font.drawBox(0, 12, 20, 6) occupies y=96..144
+  love.graphics.push()
+  love.graphics.translate(0, Battlefield.HEIGHT - band)
+  love.graphics.scale(Battlefield.WIDTH / 160, band / classicBox)
+  love.graphics.translate(0, -96)
+  pcall(drawFn)
+  love.graphics.pop()
 end
 
 function M:say(text)
@@ -1235,6 +1527,7 @@ function M:onEvent(msg)
         self.answeredTurn = true
         self.pendingTurn = false
         if self.phase == "choose" or self.phase == "move"
+           or self.phase == "target"
            or self.phase == "item" or self.phase == "item_party"
            or self.phase == "item_move" or self.phase == "switch" then
           self.phase = "play"
@@ -1280,6 +1573,7 @@ function M:noteSlot(msg)
   if msg.text and (msg.t == "send" or msg.t == "switch") then
     slot.species = msg.text
     slot.sprite = nil
+    slot.icon = nil
     slot.koHold = nil
   end
   if msg.hp ~= nil then
@@ -1913,11 +2207,12 @@ function M:playVictoryMusic()
   self.victoryMusicPlayed = true
   local eng = loadEngine()
   if not (eng and eng.Music and self.game) then return end
-  local kind = self:musicKind()
-  -- Rival-final fold kept for parity with CoopBattle / BattleState even
-  -- though 1v1 never names a trainer -- a "finalWin" song does not ship.
-  if kind == "final" then kind = "gym" end
-  pcall(eng.Music.playVictory, self.game.data, kind, nil)
+  -- Gen 1: kind .. "Win" (final→gym). Gen 2: BattleMusic victory label.
+  Gen.playVictoryMusic(self.game, {
+    Music = eng.Music,
+    kind = self:musicKind(),
+    mode = self.mode,
+  })
 end
 
 -- ------- the screen
@@ -1927,9 +2222,14 @@ end
 
 function M:enter()
   loadEngine()
+  if self:usesBattlefield() then self:ensureBattlefield() end
   local eng = engine
   if eng and eng.Music and self.game then
-    pcall(eng.Music.playBattle, self.game.data, self:musicKind(), nil)
+    Gen.playBattleMusic(self.game, {
+      Music = eng.Music,
+      kind = self:musicKind(),
+      mode = self.mode,
+    })
   end
   self:start(self.game)
 end
@@ -1945,7 +2245,7 @@ function M:exit()
   -- stops them (same reason the engine's BattleState:finish restores).
   local eng = loadEngine()
   if eng and eng.Music and self.game then
-    pcall(eng.Music.restoreMap, self.game.data)
+    Gen.restoreMapMusic(self.game, { Music = eng.Music })
   end
   if self.onDone then self.onDone(self.result or "draw") end
 end
@@ -2047,18 +2347,27 @@ function M:peekHitSfx()
   -- faint line, or real HP-drain cue exists. Status flashes (GROWL etc.) and
   -- bare move-id anims stay silent — no default Damage fallthrough.
   local sawDamage = false
+  local function remap(sfx)
+    if not sfx then return nil end
+    return {
+      sound = Gen.sfx(self.game, sfx.sound),
+      pitch = sfx.pitch,
+    }
+  end
   for _, row in ipairs(self.lines or {}) do
     if type(row) == "table" then
       if row.anim then break end
       if row.drain or row.faintfx then sawDamage = true end
     elseif type(row) == "string" then
-      local sfx = hitSfxFromText(row)
+      local sfx = remap(hitSfxFromText(row))
       if sfx then return sfx end
       local lower = row:lower()
       if lower:find("fainted", 1, true) then sawDamage = true end
     end
   end
-  if sawDamage then return { sound = "Damage", pitch = 0x20 } end
+  if sawDamage then
+    return { sound = Gen.sfx(self.game, "Damage"), pitch = 0x20 }
+  end
   return nil
 end
 
@@ -2097,7 +2406,7 @@ function M:applyAnimEffect(ev)
     local Sound = eng and eng.Sound
     local data = self.game and self.game.data
     if Sound and Sound.play and data then
-      pcall(Sound.play, data, "Tink")
+      pcall(Sound.play, data, Gen.sfx(self.game, "Tink"))
     end
   end
 end
@@ -2157,6 +2466,7 @@ end
 function M:startAnim(row)
   self.anim = row
   self.pendingHit = nil
+  self:noteBattlefieldBubble(row)
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
   if row.anim == "HIDEPIC_ANIM" then
     self.foePicHidden = true
@@ -2165,6 +2475,13 @@ function M:startAnim(row)
   end
   local hitSfx = self:peekHitSfx()
   if hitSfx then self.pendingHit = { sfx = hitSfx } end
+  -- Top-down theatre: skip classic AnimPlayer stage flashes (coords are
+  -- 160×144); message/SFX timing still runs via the dwell path below.
+  if self:usesBattlefield() then
+    self:playMoveAnimFallback(row)
+    self:applyPendingHitFx()
+    return
+  end
   local player = self:ensureAnimPlayer()
   if not (player and player.start) then
     self:playMoveAnimFallback(row)
@@ -2197,10 +2514,14 @@ function M:releasePic(index)
   local slot = self.slots[index]
   if not slot then return end
   slot.sprite = nil
+  slot.icon = nil
   slot.koHold = nil
 end
 
 function M:update(dt)
+  self.frame = (self.frame or 0) + 1
+  self:pruneBattlefieldBubbles()
+
   local input = self.game and self.game.input
 
   if self:tickMessages(dt, input) then return end
@@ -2228,7 +2549,8 @@ function M:update(dt)
       end
     elseif self.phase ~= "choose" and self.phase ~= "move"
        and self.phase ~= "item" and self.phase ~= "item_party"
-       and self.phase ~= "item_move" and self.phase ~= "switch" then
+       and self.phase ~= "item_move" and self.phase ~= "switch"
+       and self.phase ~= "target" then
       self.pendingTurn = false
       self.replaceOnly = false
       self.phase = "choose"
@@ -2246,10 +2568,33 @@ function M:update(dt)
   if not input then return end
   if self.phase == "choose" then return self:updateCommand(input) end
   if self.phase == "move" then return self:updateMoveMenu(input) end
+  if self.phase == "target" then return self:updateTarget(input) end
   if self.phase == "item" then return self:updateItemMenu(input) end
   if self.phase == "item_party" then return self:updateItemParty(input) end
   if self.phase == "item_move" then return self:updateItemMove(input) end
   if self.phase == "switch" then return self:updateSwitch(input) end
+end
+
+-- Field cursor among living foe seats. 1v1 has a single target, so this is
+-- mostly dormant; kept so a future multi-target mediated mode shares the API.
+function M:updateTarget(input)
+  local targets = self:battlefieldTargets()
+  if #targets == 0 then
+    self.phase = "move"
+    return
+  end
+  if self.targetIndex > #targets then self.targetIndex = #targets end
+  if input:wasPressed("left") or input:wasPressed("up") then
+    self.targetIndex = Battlefield.nextTarget(targets, self.targetIndex, -1) or 1
+  elseif input:wasPressed("right") or input:wasPressed("down") then
+    self.targetIndex = Battlefield.nextTarget(targets, self.targetIndex, 1) or 1
+  elseif input:wasPressed("b") then
+    self.phase = "move"
+  elseif input:wasPressed("a") then
+    -- Mediated 1v1 still omits an explicit target on the wire (sim picks the
+    -- first living foe); the cursor is presentation-only.
+    self:pickMove(self.cursor)
+  end
 end
 
 -- ------- drawing
@@ -2312,7 +2657,11 @@ function M:sgbPalettes()
 end
 
 function M:zones()
-  return { { colors = false, x = 0, y = 0, w = 160, h = 144 } }
+  local w, h = 160, 144
+  if self:usesBattlefield() then
+    w, h = Battlefield.WIDTH, Battlefield.HEIGHT
+  end
+  return { { colors = false, x = 0, y = 0, w = w, h = h } }
 end
 
 function M:drawFieldPics()
@@ -2485,7 +2834,85 @@ function M:drawMoves(Font)
   self:drawList(Font, rows, self.cursor)
 end
 
+function M:drawBattlefieldMenus(Font)
+  local function chrome()
+    if self.shown then
+      return self:drawBox(Font, self.shown)
+    end
+    if self.anim then
+      return self:drawBox(Font, "")
+    end
+    if self.phase == "choose" then
+      return self:drawCommands(Font)
+    end
+    if self.phase == "move" or self.phase == "item_move" then
+      return self:drawMoves(Font)
+    end
+    if self.phase == "target" then
+      local targets = self:battlefieldTargets()
+      local rows = {}
+      for _, seat in ipairs(targets) do
+        rows[#rows + 1] = tostring(seat.name or "?")
+      end
+      return self:drawList(Font, rows, self.targetIndex or 1)
+    end
+    if self.phase == "item" then
+      return self:drawList(Font, self:usableItems(), self.itemIndex or 1)
+    end
+    if self.phase == "item_party" then
+      local rows = {}
+      for _, row in ipairs(self:partyRows()) do
+        rows[#rows + 1] = row.label .. (row.fainted and " *" or "")
+      end
+      return self:drawList(Font, rows, self.switchIndex or 1)
+    end
+    if self.phase == "switch" then
+      local rows = {}
+      for _, row in ipairs(self:partyRows()) do
+        if not row.fainted and (self.replaceOnly or not row.active) then
+          rows[#rows + 1] = row.label
+        end
+      end
+      return self:drawList(Font, rows, self.switchIndex or 1)
+    end
+    if self.phase == "setup" then
+      return self:drawBox(Font, "Getting ready...")
+    end
+    if self.phase == "over" then
+      return self:drawBox(Font, self.shown or "")
+    end
+    self:drawBox(Font, ("Waiting for\n%s..."):format(self.peerName))
+  end
+  self:withMenuBand(chrome)
+end
+
+function M:drawBattlefieldSafe()
+  self:ensureBattlefield()
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.rectangle("fill", 0, 0, Battlefield.WIDTH, Battlefield.HEIGHT)
+
+  local eng = loadEngine()
+  local engBag = {
+    Font = eng and eng.Font,
+    Sprites = eng and eng.Sprites,
+    sprites = self.game and self.game.data and self.game.data.sprites,
+    game = self.game,
+  }
+  do
+    local ok, SR = pcall(require, "src.render.SpriteRenderer")
+    if ok then engBag.SpriteRenderer = SR end
+  end
+  pcall(Battlefield.draw, self, self:battlefieldCtx(), engBag)
+
+  if not (eng and eng.Font) then return end
+  self:drawBattlefieldMenus(eng.Font)
+end
+
 function M:drawSafe()
+  if self:usesBattlefield() then
+    return self:drawBattlefieldSafe()
+  end
+
   -- Fill first so a missing Font still covers the frame; without isOpaque the
   -- stack would otherwise leave the overworld visible at the top of the view.
   love.graphics.setColor(1, 1, 1, 1)
