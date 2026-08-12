@@ -11859,25 +11859,54 @@ end)()
   end
 end)()
 
--- ------- Gen1 Battlefield round 3: placeHumans centering, placeMons 2-count
--- spread, M.bubbleLines shout format
+-- ------- Gen1 Battlefield round 3: placeHumans centering, the T-P formation,
+-- M.bubbleLines shout format
 --
 -- Owner playtest, three findings: (1) the second ally human of a coop side
 -- rendered *above* the arena -- placeHumans' old band ran FIELD_TOP+28 ..
 -- FIELD_BOTTOM-36, so two-up's first seat sat at y=28, deep in the top
 -- letterbox once the modern chrome shrank the usable field. Humans now stack
 -- symmetrically about the field's own vertical centre. (2) 2-mon sides hugged
--- the edges -- seat 1 half off the arena border, seat 2 crowding the midline
--- -- pulled into MON_PAIR_NEAR/FAR fractions of WIDTH instead. (3) the bubble
--- format lost "used" for a shouted two-line callout ("PIKACHU!" over
--- "THUNDERBOLT!"), factored out as `M.bubbleLines` so it is assertable with
--- no love/scale/t machinery in the way.
+-- the edges -- seat 1 half off the arena border, seat 2 crowding the midline.
+-- (3) the bubble format lost "used" for a shouted two-line callout ("PIKACHU!"
+-- over "THUNDERBOLT!"), factored out as `M.bubbleLines` so it is assertable
+-- with no love/scale/t machinery in the way.
 --
--- Follow-up on (2), same playtest, live 2v2 frame: the ±stagger left the two
--- sides' front mons at different heights (no visual rhyme), and the far seat
--- sat on the arena's centre circle. Multi-mon sides now form a RANK -- one
--- shared y per side, offset off the field's centre line away from that side's
--- own plate stack -- and the pair fractions moved to 0.14/0.30.
+-- Round 3 tried to fix (2) with RANKS -- every mon of a side on one shared y,
+-- pulled to 0.14/0.30 fractions of WIDTH -- and the owner rejected it with a
+-- diagram instead:
+--
+--     T        P            P        T
+--
+--     T        P            P        T
+--
+-- and, for sides that field different numbers,
+--
+--     T        P
+--                             P        T
+--     T        P
+--
+-- Three things in that: a trainer and THEIR mon share a row (a rank put two
+-- mons on one y and neither of them beside a trainer); the mons stand INSIDE
+-- the pitch painted into the arena art (the 0.14 seat's box ran 59..195, and
+-- the pitch's left line is at x=121 -- the mon was entirely off the marked
+-- grass); and the trainers stay out in the margin where they already were.
+-- Where the two sides field different counts, the shorter stack simply centres
+-- and interleaves -- nobody is forced onto a row to match.
+--
+-- So: PITCH_LEFT/RIGHT/TOP/BOTTOM (measured off the PNG, see Battlefield.lua),
+-- one mon COLUMN per side just inside the side line, and one shared row-stack
+-- helper feeding both the trainers and the mons of a side. The only thing that
+-- still bends a side off the field's centre line is its own plate stack, and
+-- when it bends, the trainers bend with it -- T and P never come apart.
+--
+-- The bend is computed PER COLUMN, because a row's two occupants do not stand
+-- in the same place or reach the same distance: the mon column is inboard (at
+-- the shipped inset, clear of the HUD in x) and reaches a feet-anchored pic
+-- upward, while the trainer column is out in the margin the HUD is drawn in and
+-- reaches half a sprite each way. Asking only "does the MON column overlap the
+-- plates?" is how the paired trainer walked back into the plates the first time
+-- the mons were moved inboard; the blocks below pin both halves of that.
 
 ;(function()
   if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
@@ -11925,134 +11954,452 @@ end)()
     end
   end
 
-  -- ------- placeMons: the pair RANK, and the untouched 1-count centre
+  -- ------- the T-P formation: shared rows, mon columns inside the pitch
   do
-    local function monsLayout(n, withHp)
+    local function seatsOf(n, withHp)
       local seats = {}
       for i = 1, n do
         seats[i] = { index = i, name = "M" .. i }
         if withHp then seats[i].hp, seats[i].maxHp = 20, 20 end
       end
-      return Battlefield.layout({ mode = "coop_npc", allySeats = seats, foeSeats = seats })
+      return seats
     end
-    local function bySide(layout)
+    local function humansOf(n)
+      local t = {}
+      for i = 1, n do t[i] = { id = "h" .. i, name = "H" .. i } end
+      return t
+    end
+    -- One trainer per mon on both sides unless told otherwise: that is the
+    -- paired case the diagram is about.
+    local function field(allyMons, foeMons, opts)
+      opts = opts or {}
+      return Battlefield.layout({
+        mode = "coop_npc",
+        allyHumans = humansOf(opts.allyHumans or allyMons),
+        foeHumans = humansOf(opts.foeHumans or foeMons),
+        allySeats = seatsOf(allyMons, opts.hp),
+        foeSeats = seatsOf(foeMons, opts.hp),
+      })
+    end
+    local function bySide(list, key)
       local ally, foe = {}, {}
-      for _, m in ipairs(layout.mons) do
-        if m.side == "ally" then ally[m.index] = m else foe[m.index] = m end
+      for _, e in ipairs(list) do
+        local bucket = (e.side == "foe") and foe or ally
+        bucket[#bucket + 1] = e
       end
+      local function byY(a, b) return a[key] < b[key] end
+      table.sort(ally, byY)
+      table.sort(foe, byY)
       return ally, foe
     end
 
-    -- The layout numbers the geometry constants resolve to on the 640x360
-    -- canvas -- recomputed here rather than hardcoded, so tuning a constant
-    -- retunes the expectations instead of reddening the suite.
-    local halfBox = Battlefield.MON_DRAW / 2
-    local midY = Battlefield.FIELD_TOP
-      + math.floor(Battlefield.FIELD_HEIGHT * 0.50)
-    local yMin = Battlefield.FIELD_TOP
-      + math.ceil(Battlefield.MON_DRAW * Battlefield.MON_TOP_REACH)
-      + Battlefield.MON_BOB_MARGIN
-    local yMax = Battlefield.FIELD_BOTTOM
-      - math.ceil(Battlefield.MON_DRAW * Battlefield.MON_BOTTOM_REACH)
-      - Battlefield.MON_BOB_MARGIN
-    local rankOff = math.floor((yMax - yMin) * Battlefield.MON_RANK_OFFSET)
-    local near = math.floor(Battlefield.WIDTH * Battlefield.MON_PAIR_NEAR)
-    local far = math.floor(Battlefield.WIDTH * Battlefield.MON_PAIR_FAR)
-
-    local two = monsLayout(2)
-    local allyMons, foeMons = bySide(two)
-    eq(allyMons[1].x, near, "ally seat 1 sits MON_PAIR_NEAR off the left edge")
-    eq(allyMons[2].x, far, "ally seat 2 sits MON_PAIR_FAR off the left edge")
-    eq(foeMons[1].x, Battlefield.WIDTH - near,
-       "foe seat 1 mirrors MON_PAIR_NEAR off the right edge")
-    eq(foeMons[2].x, Battlefield.WIDTH - far,
-       "foe seat 2 mirrors MON_PAIR_FAR off the right edge")
-
-    -- The rank: one shared y per side. This is the whole point of the
-    -- follow-up -- the live 2v2 read as four loose sprites because each seat
-    -- carried its own ±stagger.
-    eq(allyMons[1].y, allyMons[2].y, "both ally seats share one y -- a rank")
-    eq(foeMons[1].y, foeMons[2].y, "both foe seats share one y too")
-    eq(allyMons[1].y, midY - rankOff,
-       "the ally rank sits MON_RANK_OFFSET above the field's centre line")
-    eq(foeMons[1].y, midY + rankOff,
-       "...and the foe rank the same distance below it")
-    check(allyMons[1].y < midY and foeMons[1].y > midY,
-      "ally above the middle, foe below -- the two ranks mirror each other",
-      ("ally=%d mid=%d foe=%d"):format(allyMons[1].y, midY, foeMons[1].y))
-    eq(midY - allyMons[1].y, foeMons[1].y - midY,
-       "and they are the same distance out, so the sides visually rhyme")
-
-    for _, m in ipairs(two.mons) do
-      check(m.x - halfBox >= 0 and m.x + halfBox <= Battlefield.WIDTH,
-        "2-spread: " .. m.side .. " seat " .. m.index .. " box stays on-canvas",
-        "x=" .. tostring(m.x))
-      -- monDrawParams anchors near the feet (front pic reaches up) and the
-      -- contact shadow reaches down; placeMons clamps against both reaches
-      -- plus the idle-bob margin, so seat+shadow never leaves the field.
-      check(m.y >= yMin and m.y <= yMax,
-        "2-spread: " .. m.side .. " seat " .. m.index .. " centre stays inside the field",
-        "y=" .. tostring(m.y))
-      if m.side == "ally" then
-        check(m.x < two.midline, "ally seat " .. m.index .. " stays on its own side")
-      else
-        check(m.x > two.midline, "foe seat " .. m.index .. " stays on its own side")
-      end
-      -- The far seat used to sit on the arena's centre circle. Its box plus
-      -- shadow must clear the stroke, not merely stay on its own half.
-      check(math.abs(m.x - two.midline) > Battlefield.CENTER_CIRCLE_R + halfBox,
-        "2-spread: " .. m.side .. " seat " .. m.index .. " clears the centre circle",
-        ("|x-mid|=%d needs >%d"):format(
-          math.abs(m.x - two.midline), Battlefield.CENTER_CIRCLE_R + halfBox))
+    -- Every number below is recomputed from the exported constants rather than
+    -- hardcoded, so tuning a constant retunes the expectations instead of
+    -- reddening the suite.
+    local B = Battlefield
+    local halfBox = B.MON_DRAW / 2
+    local midY = B.FIELD_TOP + math.floor(B.FIELD_HEIGHT / 2)
+    local bob = B.MON_BOB_MARGIN
+    -- What a placed mon actually covers, around its seat y.
+    local function monTop(y) return y - B.MON_ART_RISE - bob end
+    local function monBottom(y) return y + B.MON_SHADOW_DROP + bob end
+    local function monFeet(y) return y + B.MON_FEET_DROP - bob end
+    -- The plate stacks, as M.layout builds them.
+    local function allyPlateTop(n)
+      return B.FIELD_BOTTOM - B.PLATE_PAD - n * B.PLATE_H - (n - 1) * B.PLATE_GAP
+    end
+    local function foePlateBottom(n)
+      return B.PLATE_PAD + n * B.PLATE_H + (n - 1) * B.PLATE_GAP
     end
 
-    -- ...and off its own plate stack. A 2v2 with hp figures plates all four
-    -- seats; ally plates climb from the field floor, foe plates descend from
-    -- the top, and both overlap their side's seat columns horizontally -- so
-    -- only the rank offset keeps a mon's head out from under its own HUD.
-    local plated = monsLayout(2, true)
-    eq(#plated.plates, 4, "a 2v2 with hp figures plates all four seats")
-    for _, m in ipairs(plated.mons) do
-      local top = m.y
-        - math.ceil(Battlefield.MON_DRAW * Battlefield.MON_TOP_REACH)
-        - Battlefield.MON_BOB_MARGIN
-      local bottom = m.y
-        + math.ceil(Battlefield.MON_DRAW * Battlefield.MON_BOTTOM_REACH)
-        + Battlefield.MON_BOB_MARGIN
-      for _, p in ipairs(plated.plates) do
-        if p.side == m.side then
-          local overlapsX = (m.x + halfBox) > p.x and (m.x - halfBox) < (p.x + p.w)
-          local overlapsY = bottom > p.y and top < (p.y + p.h)
-          check(not (overlapsX and overlapsY),
-            "rank: " .. m.side .. " seat " .. m.index .. " never sits under its own plate stack",
-            ("mon y=%d..%d plate y=%d..%d"):format(top, bottom, p.y, p.y + p.h))
+    -- ------- the measured pitch, and the columns derived off it
+    check(B.PITCH_LEFT > 0 and B.PITCH_RIGHT < B.WIDTH
+      and B.PITCH_TOP > B.FIELD_TOP and B.PITCH_BOTTOM <= B.FIELD_BOTTOM,
+      "the measured pitch rect sits inside the field, not on its edges",
+      ("x %d..%d y %d..%d of a %dx%d field"):format(B.PITCH_LEFT, B.PITCH_RIGHT,
+        B.PITCH_TOP, B.PITCH_BOTTOM, B.WIDTH, B.FIELD_BOTTOM))
+    check(B.PITCH_LEFT < B.MIDLINE and B.PITCH_RIGHT > B.MIDLINE,
+      "...and straddles the midline, a half per side")
+    eq(B.MON_COLUMN_ALLY, B.PITCH_LEFT + halfBox + B.MON_PITCH_INSET,
+       "the ally mon column is one box-half plus the inset inside the left line")
+    eq(B.MON_COLUMN_FOE, B.PITCH_RIGHT - halfBox - B.MON_PITCH_INSET,
+       "...and the foe column mirrors it off the right line")
+    eq(B.MON_COLUMN_ALLY - B.PITCH_LEFT, B.PITCH_RIGHT - B.MON_COLUMN_FOE,
+       "the two columns stand the same distance in from their own side line")
+    -- The rejection in one assert: the old MON_PAIR_NEAR seat centred at
+    -- 0.14 * WIDTH == 89, a box running 59..119, with the pitch's left line at
+    -- PITCH_LEFT. Every part of it was off the marked grass.
+    check(math.floor(B.WIDTH * 0.14) + halfBox < B.PITCH_LEFT,
+      "the rejected 0.14-of-WIDTH seat was entirely OUTSIDE the pitch",
+      ("old box right edge %d vs pitch left %d"):format(
+        math.floor(B.WIDTH * 0.14) + halfBox, B.PITCH_LEFT))
+
+    -- ------- 1v1: pinned, and unchanged from the layout the owner likes
+    do
+      local one = field(1, 1, { hp = true })
+      local allyMons, foeMons = bySide(one.mons, "y")
+      local allyT, foeT = bySide(one.humans, "y")
+      eq(#allyMons, 1, "1v1 places one ally mon")
+      eq(#foeMons, 1, "...and one foe mon")
+      eq(allyMons[1].y, midY, "the lone ally mon keeps the field's centre line")
+      eq(foeMons[1].y, midY, "...and so does the lone foe mon")
+      eq(allyMons[1].y, 140, "which on the 640x360 canvas is y=140, as before")
+      eq(allyMons[1].x, B.MON_COLUMN_ALLY, "1v1 uses the same ally column")
+      eq(foeMons[1].x, B.MON_COLUMN_FOE, "...and the same foe column")
+      eq(allyT[1].y, allyMons[1].y,
+         "1v1: the ally trainer stands on their mon's row -- T beside P")
+      eq(foeT[1].y, foeMons[1].y, "...and the foe trainer on theirs")
+      check(allyT[1].x < allyMons[1].x and foeT[1].x > foeMons[1].x,
+        "the trainers stay outboard of their mons, in the margins",
+        ("T %d/%d vs P %d/%d"):format(allyT[1].x, foeT[1].x,
+          allyMons[1].x, foeMons[1].x))
+    end
+
+    -- ------- 2v2: one trainer per mon, so every trainer shares a row with theirs
+    for _, hp in ipairs({ false, true }) do
+      local label = hp and "2v2 (plated)" or "2v2 (unplated)"
+      local two = field(2, 2, { hp = hp })
+      local allyMons, foeMons = bySide(two.mons, "y")
+      local allyT, foeT = bySide(two.humans, "y")
+      eq(#allyMons, 2, label .. ": two ally mons")
+      eq(#allyT, 2, label .. ": two ally trainers")
+      for i = 1, 2 do
+        eq(allyT[i].y, allyMons[i].y,
+           label .. ": ally row " .. i .. " -- T and P share one y")
+        eq(foeT[i].y, foeMons[i].y,
+           label .. ": foe row " .. i .. " -- T and P share one y")
+      end
+      eq(allyMons[2].y - allyMons[1].y, B.MON_ROW_GAP,
+         label .. ": the two ally rows sit MON_ROW_GAP apart")
+      eq(foeMons[2].y - foeMons[1].y, B.MON_ROW_GAP,
+         label .. ": ...and so do the two foe rows -- the sides rhyme")
+      eq(allyMons[1].x, allyMons[2].x,
+         label .. ": both ally seats share one column")
+      eq(foeMons[1].x, foeMons[2].x,
+         label .. ": both foe seats share one column")
+    end
+
+    -- ------- unplated, the two sides agree on their rows exactly
+    do
+      local two = field(2, 2)
+      local allyMons, foeMons = bySide(two.mons, "y")
+      eq(#two.plates, 0, "seats with no hp figures raise no plates")
+      for i = 1, 2 do
+        eq(allyMons[i].y, foeMons[i].y,
+           "with no HUD in the way, row " .. i .. " is the same height both sides")
+      end
+      eq(allyMons[1].y + allyMons[2].y, midY * 2,
+         "and the pair is centred on the field's own centre line")
+    end
+
+    -- ------- the plate dodge: per column, per occupant reach
+    --
+    -- A row is not a point. It carries up to two OCCUPANTS -- a mon in the
+    -- inboard column and (when paired) a trainer out in the margin -- and they
+    -- do not share a constraint: only a column that overlaps its own plate
+    -- stack in x has anything to dodge, and how far it must be pushed depends
+    -- on how far THAT column reaches vertically. At the shipped
+    -- MON_PITCH_INSET the mon columns clear the HUD horizontally and contribute
+    -- nothing; the trainer columns always overlap, because the HUD is drawn in
+    -- the very margin they stand in. Keying the dodge on the mon column alone
+    -- is the regression this block pins: with the mons inboard nothing dodged,
+    -- and the paired trainer rode its mon's row straight back into the plates.
+    local function plateLeftOf(side)
+      return (side == "foe") and (B.WIDTH - B.PLATE_W - B.PLATE_PAD) or B.PLATE_PAD
+    end
+    local function overPlates(side, cx, half)
+      local left = plateLeftOf(side)
+      return (cx + half) > left and (cx - half) < (left + B.PLATE_W)
+    end
+    local halfHuman = B.HUMAN_DRAW / 2
+    -- The two occupant kinds, rebuilt here from the exported constants. The
+    -- trainer column's x is not a constant (HUMAN_PAD is private), so callers
+    -- fill it in from a placed trainer.
+    local function occupantsOf(side)
+      return {
+        { what = "mon",
+          x = (side == "foe") and B.MON_COLUMN_FOE or B.MON_COLUMN_ALLY,
+          half = halfBox,
+          up = B.MON_ART_RISE + bob, down = B.MON_SHADOW_DROP + bob },
+        { what = "trainer",
+          half = halfHuman, up = halfHuman, down = halfHuman },
+      }
+    end
+    do
+      local two = field(2, 2, { hp = true })
+      eq(#two.plates, 4, "a 2v2 with hp figures plates all four seats")
+      local allyMons, foeMons = bySide(two.mons, "y")
+      local allyT, foeT = bySide(two.humans, "y")
+      -- The two columns really do differ on the x test -- otherwise the
+      -- per-column dodge would be indistinguishable from the old one.
+      check(overPlates("ally", allyT[1].x, allyT[1].drawW / 2),
+        "the ally trainer column stands over its own plate stack in x",
+        ("trainer x %d±%d vs plates %d..%d"):format(allyT[1].x,
+          allyT[1].drawW / 2, B.PLATE_PAD, B.PLATE_PAD + B.PLATE_W))
+      check(overPlates("foe", foeT[1].x, foeT[1].drawW / 2),
+        "...and the foe trainer column over the foe stack")
+      check(not overPlates("ally", B.MON_COLUMN_ALLY, halfBox),
+        "while the shipped inset puts the ALLY MON column clear of the HUD in x",
+        ("mon x %d±%d vs plates %d..%d"):format(B.MON_COLUMN_ALLY, halfBox,
+          B.PLATE_PAD, B.PLATE_PAD + B.PLATE_W))
+      check(not overPlates("foe", B.MON_COLUMN_FOE, halfBox),
+        "...and the foe mon column too -- so only the trainers force a dodge")
+
+      -- The offset is a whole-side move, not a mons-only one: that is what
+      -- keeps the pairing intact while the side dodges its HUD.
+      eq(allyT[1].y - allyMons[1].y, 0, "the ally trainers ride the ally rows")
+      eq(foeT[2].y - foeMons[2].y, 0, "the foe trainers ride the foe rows")
+
+      -- The band cap / floor is the TIGHTEST constraint over every overlapping
+      -- column, each measured with its own reach.
+      local allyCap, foeFloor = nil, nil
+      for _, occ in ipairs(occupantsOf("ally")) do
+        local x = occ.what == "trainer" and allyT[1].x or occ.x
+        if overPlates("ally", x, occ.half) then
+          local cap = allyPlateTop(2) - occ.down - B.MON_PLATE_CLEAR
+          if allyCap == nil or cap < allyCap then allyCap = cap end
+        end
+      end
+      for _, occ in ipairs(occupantsOf("foe")) do
+        local x = occ.what == "trainer" and foeT[1].x or occ.x
+        if overPlates("foe", x, occ.half) then
+          local floorY = foePlateBottom(2) + occ.up + B.MON_PLATE_CLEAR
+          if foeFloor == nil or floorY > foeFloor then foeFloor = floorY end
+        end
+      end
+      if allyCap then
+        -- The whole stack slid up, so it is its CENTRE that left the field's
+        -- centre line -- the lower row is still allowed to be below it, just
+        -- not far enough below to reach the plates.
+        check((allyMons[1].y + allyMons[2].y) / 2 < midY,
+          "the ally pair lifts clear of its own bottom-left plate stack",
+          ("ally rows %d/%d, centre %.1f vs mid %d"):format(allyMons[1].y,
+            allyMons[2].y, (allyMons[1].y + allyMons[2].y) / 2, midY))
+        -- Minimal, too: the lift is exactly what the tightest column demands.
+        eq(allyMons[2].y, allyCap,
+           "the lowest ally row sits exactly on the cap its tightest "
+             .. "plate-overlapping column sets -- no further")
+      else
+        eq(allyMons[1].y + allyMons[2].y, midY * 2,
+           "an ally side with no plate-overlapping column needs no lift")
+      end
+      if foeFloor then
+        check((foeMons[1].y + foeMons[2].y) / 2 > midY,
+          "the foe pair drops clear of its own top-right plate stack",
+          ("foe rows %d/%d, centre %.1f vs mid %d"):format(foeMons[1].y,
+            foeMons[2].y, (foeMons[1].y + foeMons[2].y) / 2, midY))
+        eq(foeMons[1].y, foeFloor,
+           "...and the highest foe row exactly on its own floor")
+      else
+        eq(foeMons[1].y + foeMons[2].y, midY * 2,
+           "a foe side with no plate-overlapping column needs no drop either")
+      end
+    end
+
+    -- ------- unmatched counts: the shorter side centres and interleaves
+    do
+      local lop = field(2, 1)
+      local allyMons, foeMons = bySide(lop.mons, "y")
+      eq(#allyMons, 2, "two ally mons")
+      eq(#foeMons, 1, "against one foe mon")
+      eq(foeMons[1].y, midY, "the lone foe mon takes the field's centre line")
+      check(foeMons[1].y > allyMons[1].y and foeMons[1].y < allyMons[2].y,
+        "which lands it BETWEEN the two ally rows, not forced onto one of them",
+        ("ally %d / %d, foe %d"):format(allyMons[1].y, allyMons[2].y, foeMons[1].y))
+      eq(foeMons[1].y - allyMons[1].y, allyMons[2].y - foeMons[1].y,
+         "...exactly between them -- the owner's second diagram")
+
+      -- A side whose trainer count does not match its mon count has no pairing
+      -- to honour, so its trainers keep their own centred stack.
+      local npc = field(2, 2, { foeHumans = 1 })
+      local _, foeT = bySide(npc.humans, "y")
+      eq(#foeT, 1, "one NPC trainer behind two foe mons")
+      eq(foeT[1].y, midY,
+         "an unpaired trainer stack stays on the field's centre line")
+
+      -- Wild: no foe trainers at all, and the ally pairing is untouched by it.
+      local wild = Battlefield.layout({
+        mode = "coop_wild",
+        allyHumans = humansOf(1), foeHumans = humansOf(1),
+        allySeats = seatsOf(1, true), foeSeats = seatsOf(1, true),
+      })
+      local allyT, foeTw = bySide(wild.humans, "y")
+      eq(#foeTw, 0, "a wild side fields no trainer")
+      local allyW = bySide(wild.mons, "y")
+      eq(allyT[1].y, allyW[1].y,
+         "and the ally trainer still stands on their own mon's row")
+    end
+
+    -- ------- an UNPAIRED trainer stack dodges the plates on its own terms
+    --
+    -- The fallback stack used to be a plain centred one, which is fine while
+    -- nothing is plated and wrong the moment something is: the trainer column
+    -- is over the HUD whether or not it has a mon to stand beside. Three
+    -- trainers behind two plated mons is the case that exposes it -- centred at
+    -- HUMAN_STACK_GAP the bottom sprite lands inside the ally plate stack.
+    do
+      local lop = field(2, 2, { hp = true, allyHumans = 3, foeHumans = 1 })
+      local allyT, foeT = bySide(lop.humans, "y")
+      local allyMons, foeMons = bySide(lop.mons, "y")
+      eq(#allyT, 3, "three ally trainers behind two plated ally mons")
+      eq(#foeT, 1, "and one NPC trainer behind two plated foe mons")
+      -- No pairing to honour on either side, so the mons keep the centre line
+      -- and only the mons' own constraints -- the trainers no longer drag them.
+      eq(allyMons[1].y + allyMons[2].y, midY * 2,
+         "an unpaired ally pair keeps the field's own centre line")
+      eq(foeMons[1].y + foeMons[2].y, midY * 2, "...and so does the foe pair")
+      for _, h in ipairs(lop.humans) do
+        local top, bottom = h.y - h.drawH / 2, h.y + h.drawH / 2
+        for _, p in ipairs(lop.plates) do
+          if p.side == h.side then
+            local overlapsX = (h.x + h.drawW / 2) > p.x
+              and (h.x - h.drawW / 2) < (p.x + p.w)
+            local overlapsY = bottom > p.y and top < (p.y + p.h)
+            check(not (overlapsX and overlapsY),
+              "unpaired " .. h.side .. " trainer " .. h.index
+                .. " still never stands inside its own plate",
+              ("trainer y=%.0f..%.0f plate y=%d..%d"):format(top, bottom,
+                p.y, p.y + p.h))
+          end
+        end
+      end
+      -- ...and the dodge is minimal there too: the bottom ally trainer sits
+      -- exactly MON_PLATE_CLEAR above the stack it is dodging.
+      eq(allyT[#allyT].y + halfHuman, allyPlateTop(2) - B.MON_PLATE_CLEAR,
+         "the lowest unpaired ally trainer sits exactly on the plate cap")
+    end
+
+    -- ------- containment: on the pitch, on your own half, off the HUD
+    for _, spec in ipairs({
+      { n = 1, hp = false }, { n = 1, hp = true },
+      { n = 2, hp = false }, { n = 2, hp = true },
+      { n = 3, hp = false }, { n = 3, hp = true },
+    }) do
+      local label = spec.n .. "v" .. spec.n .. (spec.hp and " plated" or " bare")
+      local layout = field(spec.n, spec.n, { hp = spec.hp })
+      for _, m in ipairs(layout.mons) do
+        local who = label .. " " .. m.side .. " seat " .. m.seatIndex
+        -- The whole 60px box is on the marked grass, horizontally.
+        check(m.x - halfBox >= B.PITCH_LEFT and m.x + halfBox <= B.PITCH_RIGHT,
+          who .. ": the whole box stays inside the pitch's side lines",
+          ("box %d..%d vs pitch %d..%d"):format(m.x - halfBox, m.x + halfBox,
+            B.PITCH_LEFT, B.PITCH_RIGHT))
+        -- Vertically it is the ground contact that must stay on the pitch --
+        -- a standing figure's head is allowed past the top line.
+        check(monFeet(m.y) >= B.PITCH_TOP and monBottom(m.y) <= B.PITCH_BOTTOM,
+          who .. ": feet and contact shadow stay on the pitch",
+          ("feet %d shadow %d vs pitch %d..%d"):format(monFeet(m.y),
+            monBottom(m.y), B.PITCH_TOP, B.PITCH_BOTTOM))
+        -- ...and nothing drawn leaves the field, top or bottom.
+        check(monTop(m.y) >= B.FIELD_TOP and monBottom(m.y) <= B.FIELD_BOTTOM,
+          who .. ": nothing drawn leaves the field",
+          ("draw %d..%d field %d..%d"):format(monTop(m.y), monBottom(m.y),
+            B.FIELD_TOP, B.FIELD_BOTTOM))
+        if m.side == "ally" then
+          check(m.x < layout.midline, who .. ": stays on its own half")
+        else
+          check(m.x > layout.midline, who .. ": stays on its own half")
+        end
+        -- The arena art's centre circle: the columns clear its stroke by a
+        -- wide margin, which is what the old far seat did not.
+        check(math.abs(m.x - layout.midline) > B.CENTER_CIRCLE_R + halfBox,
+          who .. ": clears the arena's centre circle",
+          ("|x-mid|=%d needs >%d"):format(math.abs(m.x - layout.midline),
+            B.CENTER_CIRCLE_R + halfBox))
+      end
+      for _, h in ipairs(layout.humans) do
+        local top, bottom = h.y - h.drawH / 2, h.y + h.drawH / 2
+        check(top >= B.FIELD_TOP and bottom <= B.FIELD_BOTTOM,
+          label .. " " .. h.side .. " trainer " .. h.index
+            .. ": sprite box stays fully inside the field",
+          ("top=%.1f bottom=%.1f"):format(top, bottom))
+      end
+      -- Two mons in one column must never interpenetrate: consecutive rows
+      -- stay a full MON_ROW_GAP apart, and that gap is at least a whole box.
+      local colAlly, colFoe = bySide(layout.mons, "y")
+      for _, column in ipairs({ colAlly, colFoe }) do
+        for i = 2, #column do
+          check(column[i].y - column[i - 1].y >= B.MON_ROW_GAP,
+            label .. " " .. column[i].side .. ": rows " .. (i - 1) .. " and "
+              .. i .. " keep the full row pitch -- the boxes cannot overlap",
+            ("Δy=%d needs >=%d (box %d)"):format(
+              column[i].y - column[i - 1].y, B.MON_ROW_GAP, B.MON_DRAW))
         end
       end
     end
+    check(B.MON_ROW_GAP >= B.MON_DRAW,
+      "MON_ROW_GAP is at least a whole mon box, so a full-pitch column of "
+        .. "mons touches at worst and never interpenetrates",
+      ("gap %d vs box %d"):format(B.MON_ROW_GAP, B.MON_DRAW))
 
-    -- 1-count is byte-identical to before the rank change: the old even lerp
-    -- across [left, right], on the field's own centre line.
-    local one = monsLayout(1)
-    eq(one.mons[1].x, 184, "one ally mon still centres on the old lerp (t=0.5)")
-    eq(one.mons[1].y, 140, "...on the field's vertical centre")
-    eq(one.mons[1].y, midY, "...which is exactly midY -- a lone mon takes no rank offset")
+    -- ------- the plated frames, every plate up: nothing under the HUD
+    --
+    -- Both shipped sizes, because they exercise different plate stacks (one
+    -- plate a side vs two) and so different caps -- and because the paired
+    -- trainer's clearance has to hold for a 1v1 as much as for a 2v2.
+    for _, n in ipairs({ 1, 2 }) do
+      local frame = n .. "v" .. n .. " plated"
+      local plated = field(n, n, { hp = true })
+      eq(#plated.plates, n * 2, frame .. ": every seat plated")
+      for _, m in ipairs(plated.mons) do
+        local top, bottom = monTop(m.y), monBottom(m.y)
+        for _, p in ipairs(plated.plates) do
+          if p.side == m.side then
+            local overlapsX = (m.x + halfBox) > p.x and (m.x - halfBox) < (p.x + p.w)
+            local overlapsY = bottom > p.y and top < (p.y + p.h)
+            check(not (overlapsX and overlapsY),
+              frame .. ": " .. m.side .. " seat " .. m.seatIndex
+                .. " never sits under its own plate",
+              ("mon y=%d..%d plate y=%d..%d"):format(top, bottom, p.y, p.y + p.h))
+          end
+        end
+      end
+      -- The trainers clear the HUD too -- the second ally trainer used to
+      -- stand with its feet in the top plate. UNCONDITIONAL: the trainer
+      -- columns sit in the outer margin, directly over their own plate stack,
+      -- so no tuning of the mon inset can excuse a trainer from this. Gating
+      -- it on "did the MON column dodge?" is exactly how the regression this
+      -- suite now pins slipped through -- the mons moved inboard, the gate went
+      -- false, and the assertion stopped looking at the trainers at all.
+      for _, h in ipairs(plated.humans) do
+        local top, bottom = h.y - h.drawH / 2, h.y + h.drawH / 2
+        for _, p in ipairs(plated.plates) do
+          if p.side == h.side then
+            local overlapsX = (h.x + h.drawW / 2) > p.x
+              and (h.x - h.drawW / 2) < (p.x + p.w)
+            local overlapsY = bottom > p.y and top < (p.y + p.h)
+            check(not (overlapsX and overlapsY),
+              frame .. ": " .. h.side .. " trainer " .. h.index
+                .. " never stands under its own plate",
+              ("trainer y=%.0f..%.0f plate y=%d..%d"):format(top, bottom,
+                p.y, p.y + p.h))
+          end
+        end
+      end
 
-    -- 3+ keeps the zigzag, but the zigzag now rides the ranked centre line, so
-    -- a triple clears its plates the same way a pair does. x is the untouched
-    -- lerp; y is the old zigzag plus the rank offset.
-    local three = monsLayout(3)
-    local allyThree, foeThree = bySide(three)
-    local zig = math.floor(math.min(56, math.floor(Battlefield.FIELD_HEIGHT * 0.20)) * 0.35)
-    eq(allyThree[1].x, 108, "3-count seat 1 x is the untouched lerp")
-    eq(allyThree[2].x, 184, "3-count seat 2 x is the untouched lerp")
-    eq(allyThree[3].x, 260, "3-count seat 3 x is the untouched lerp")
-    eq(allyThree[1].y, midY - rankOff - zig, "3-count seat 1 zigzags off the ALLY rank")
-    eq(allyThree[2].y, midY - rankOff + zig, "3-count seat 2 zigzags the other way")
-    eq(allyThree[3].y, midY - rankOff - zig, "3-count seat 3 rejoins seat 1")
-    eq(foeThree[1].y, midY + rankOff - zig, "3-count foe zigzags off the FOE rank")
-    check(allyThree[2].y < midY and foeThree[1].y > midY,
-      "even a triple keeps its whole zigzag on its own side of the centre line",
-      ("ally low=%d foe high=%d mid=%d"):format(allyThree[2].y, foeThree[1].y, midY))
+      -- Ball arcs start at a trainer's column and land on a seat. The rows
+      -- moved, so re-check that the parabola's peak stays on canvas from every
+      -- origin the shifted stacks can produce -- the plated 2v2's ally rows are
+      -- the highest a trainer ever stands, and the arc lifts FX_BALL_LIFT above
+      -- the launch shoulder.
+      for _, h in ipairs(plated.humans) do
+        for _, m in ipairs(plated.mons) do
+          local x0, y0 = h.x, h.y - h.drawH / 2
+          local peak, sank, offX = nil, nil, false
+          for step = 0, 40 do
+            local x, y = Battlefield.fxBallPoint(x0, y0, m.x, m.y, step / 40)
+            if peak == nil or y < peak then peak = y end
+            if sank == nil or y > sank then sank = y end
+            if x < 0 or x > B.WIDTH then offX = true end
+          end
+          check(peak >= 0 and sank <= B.HEIGHT and not offX,
+            frame .. ": ball arc " .. h.side .. h.index .. " -> "
+              .. m.side .. m.seatIndex .. " stays on canvas the whole flight",
+            ("peak y=%.1f sink y=%.1f lift=%d offX=%s"):format(
+              peak, sank, B.FX_BALL_LIFT, tostring(offX)))
+        end
+      end
+    end
   end
 
   -- ------- M.bubbleLines: the shout format

@@ -32,25 +32,60 @@ M.MIDLINE = math.floor(M.WIDTH / 2)
 -- 60, not 72: at 72 the four seats of a 2v2 crowd the plates and the arena
 -- reads as a close-up rather than a field (R2 owner review).
 M.MON_DRAW = 60
--- Two mons on one side: seat centres at these fractions of WIDTH, measured
--- from that side's outer edge (mirrored for the foe half). 0.14 clears the
--- arena border the near seat used to hang off; 0.30 keeps the far seat clear
--- of the arena's centre circle (R3 follow-up: 0.34 crowded it).
-M.MON_PAIR_NEAR = 0.14
-M.MON_PAIR_FAR = 0.30
--- The arena art's centre circle (not drawn here -- it is painted into the
--- arena PNG): centred on MIDLINE with this radius. The pair fractions above
--- are chosen so a seat's box plus shadow never touches its stroke.
+-- The PITCH: the white boundary rectangle painted into the arena PNG. Mons
+-- stand on the marked field; trainers stay out in the margins beside it.
+--
+-- Measured, not guessed. assets/battle/outdoor_grass_arena.png is 640x360 and
+-- drawArena stretches it over the whole canvas (with a K = FX_SHAKE + 2 px
+-- overscan on every edge), so an image pixel maps to
+--   canvas = -K + image * (SIZE + 2K) / SIZE.
+-- Scanning the PNG for low-saturation bright pixels (lum >= 140, sat <= 0.28 --
+-- there is no pure white in the art; the brightest line pixel is ~193) finds
+-- the endlines at image y = 92 and y = 271 and a double side line per half.
+-- The INNER stroke of each pair is the playing edge: it runs image x 124 -> 116
+-- down the left and 515 -> 523 down the right (the art has a slight
+-- perspective flare, plus corner arcs above y = 115). Taking the most
+-- restrictive x of each side and folding in the overscan gives the
+-- axis-aligned canvas rect below -- inside it on every row, at rest.
+M.PITCH_LEFT = 121
+M.PITCH_RIGHT = 517
+M.PITCH_TOP = 90
+M.PITCH_BOTTOM = 273
+-- Breathing room between a mon's 60px box and the pitch's side line. The two
+-- mon columns are PITCH_LEFT/RIGHT +- (half a box + this), so the whole box --
+-- feet, shadow and all -- sits on the marked grass rather than astride the
+-- line, which is what the 0.14-of-WIDTH seats used to do (box 59..119 against
+-- a left line at 121: entirely OUTSIDE the pitch).
+-- 69 puts the mon columns at x 220/418: past the plate stacks' x-ranges
+-- (ally plates end at 188, foe start at 452), so the MON column contributes
+-- nothing to the plate dodge and MON_ROW_GAP can stay a full mon box wide.
+-- (The TRAINER column still overlaps the plates -- it lives in the outer
+-- margin, right on top of them -- so a paired side is still dodged; see
+-- dodgePlates.) At 14 the columns hugged the side lines, the dodge compressed
+-- the rows to 44px and 60px mons overlapped inside their column
+-- (owner-rejected).
+M.MON_PITCH_INSET = 69
+-- The arena art's centre circle (also painted into the PNG): centred on
+-- MIDLINE with this radius. The columns clear its stroke by a wide margin.
 M.CENTER_CIRCLE_R = 46
--- Ranks, like the games' double battles: every seat of a multi-mon side shares
--- one y, and that rank leaves the field's centre line AWAY from the side's own
--- plate stack (ally plates bottom-left, foe plates top-right), as a fraction
--- of the clamped vertical band. A lone mon still stands on the centre line.
-M.MON_RANK_OFFSET = 0.30
--- 3+ seats keep a zigzag so they do not sit on one line -- but now around the
--- ranked centre line rather than the field's, so a triple clears its plates
--- too. A fraction of rowSpread.
-local MON_ZIGZAG = 0.35
+-- Row pitch for a side's stack, centre to centre. Both the trainers and the
+-- mons of a side use one row list, so trainer i and mon i share a y -- the
+-- owner's "T P ... P T" diagram. Must be at least MON_DRAW or two mons in one
+-- column interpenetrate; at exactly MON_DRAW the two 60px boxes touch and no
+-- more, which is the widest pitch the plated ally band can actually hold.
+--
+-- 60, not 66, and the arithmetic is worth writing down: the ally band runs from
+-- 87 (the pitch-top feet rule) to 148 (ally plate top 166, minus half a trainer
+-- sprite, minus MON_PLATE_CLEAR), and a two-row stack at gap g needs a centre c
+-- with 87 + g/2 <= c <= 148 - g/2. At g = 66 that is 120 <= c <= 115 -- empty.
+-- 60 fits with a pixel to spare and lands the ally rows at 88 / 148.
+M.MON_ROW_GAP = 60
+-- Extra px a mon keeps between its drawn extent and its own side's plate
+-- stack. The stack is nudged off the field's centre line by exactly as much as
+-- the plates demand and no more -- ally rows up (its plates climb from the
+-- field floor), foe rows down (its plates descend from the top edge) -- and
+-- the trainers ride the same nudge, so T and P never come apart.
+M.MON_PLATE_CLEAR = 2
 -- How far a drawn mon reaches past its seat centre, as fractions of the box:
 -- up, because front pics are feet-anchored (monDrawParams uses 0.85); down,
 -- because the contact shadow sits at 0.28 with a 0.14 radius (drawMonShadow).
@@ -65,6 +100,18 @@ local MON_EDGE_PAD = 6
 M.ICON_SRC = 16
 M.ICON_SCALE = 2
 M.ICON_DRAW = M.MON_DRAW
+
+-- Derived once, exported so nothing re-derives them by hand.
+-- ART_RISE / FEET_DROP split the drawn front pic around the seat centre
+-- (monDrawParams anchors the pic at cy - h * MON_TOP_REACH), SHADOW_DROP is how
+-- far the contact ellipse reaches below it.
+M.MON_ART_RISE = math.ceil(M.MON_DRAW * M.MON_TOP_REACH)
+M.MON_FEET_DROP = M.MON_DRAW - M.MON_ART_RISE
+M.MON_SHADOW_DROP = math.ceil(M.MON_DRAW * M.MON_BOTTOM_REACH)
+-- The two mon columns: every seat of a side shares one x, just inside the
+-- pitch's own side line and mirrored across the midline.
+M.MON_COLUMN_ALLY = M.PITCH_LEFT + math.floor(M.MON_DRAW / 2) + M.MON_PITCH_INSET
+M.MON_COLUMN_FOE = M.PITCH_RIGHT - math.floor(M.MON_DRAW / 2) - M.MON_PITCH_INSET
 
 -- Floating target card: name + Lv pill row, centred front pic, status chip,
 -- HP bar. The pic is 48 rather than 56 so the 120px card keeps real padding
@@ -558,19 +605,207 @@ local function humanFacing(side)
   return "right"
 end
 
-local function placeHumans(humans, side, out)
+-- ------- the one row stack
+--
+-- Every vertical stack on this field -- a side's trainers, a side's mons --
+-- comes out of this. Count evenly spaced rows, centred on `centerY`, kept
+-- inside minY..maxY: the whole stack slides to fit before any single row is
+-- clamped, so the spacing stays even and the order never collapses. If even
+-- the tightest slide will not fit, the gap tightens instead (a floor of 1 keeps
+-- the order stable). Two calls with the same count / gap / centre / bounds
+-- return the same ys, which is what makes a trainer and the mon it sent out
+-- share a row.
+local function rowStack(count, gap, centerY, minY, maxY)
+  local ys = {}
+  count = math.floor(num(count, 0))
+  if count < 1 then return ys end
+  if maxY < minY then maxY = minY end
+  if count > 1 then
+    gap = math.max(1, math.min(gap, math.floor((maxY - minY) / (count - 1))))
+  end
+  local span = (count - 1) * gap
+  local top = centerY - span / 2
+  if top + span > maxY then top = maxY - span end
+  if top < minY then top = minY end
+  for i = 1, count do
+    ys[i] = clamp(math.floor(top + (i - 1) * gap + 0.5), minY, maxY)
+  end
+  return ys
+end
+
+-- The plate stacks, as pure functions of how many plates a side shows. These
+-- mirror the stacking M.layout does below; placement has to know where the HUD
+-- will land before the HUD is built.
+local function allyPlateTop(n)
+  if n < 1 then return M.FIELD_BOTTOM end
+  return M.FIELD_BOTTOM - M.PLATE_PAD - n * M.PLATE_H - (n - 1) * M.PLATE_GAP
+end
+
+local function foePlateBottom(n)
+  if n < 1 then return M.FIELD_TOP end
+  return M.PLATE_PAD + n * M.PLATE_H + (n - 1) * M.PLATE_GAP
+end
+
+-- A seat only earns a plate if it carries HP figures (M.layout skips the rest
+-- rather than publish a 0/1 bar), so that -- not the seat count -- is what the
+-- rows have to dodge.
+local function platedCount(seats)
+  local n = 0
+  for _, seat in ipairs(seats) do
+    if type(seat) == "table" and (tonumber(seat.maxHp) or tonumber(seat.hp)) then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+-- ------- the plate dodge, per occupant column
+--
+-- A row is not a point: it is one or two OCCUPANTS, each a column of its own
+-- width standing at its own x with its own vertical reach around the row's y.
+-- A column only has a plate stack to dodge if it overlaps that stack in x, and
+-- how far it must be pushed depends on how far IT reaches, not on how far some
+-- other occupant of the same row reaches. Both facts matter here, because the
+-- two columns differ on both counts: the mon column sits inboard (at the
+-- shipped MON_PITCH_INSET it clears the HUD entirely) and reaches a whole
+-- feet-anchored pic upward, while the trainer column sits in the outer margin
+-- directly over the plates and reaches half a sprite each way.
+--
+-- Keying the dodge on the mon column alone -- what the first row-paired build
+-- did -- silently regressed the bug it was written to fix: with the mons
+-- inboard nothing dodged, and the paired trainer riding the mon's row walked
+-- straight back into the plates.
+local function occupantMon(side)
+  local bob = M.MON_BOB_MARGIN
+  return {
+    x = (side == "foe") and M.MON_COLUMN_FOE or M.MON_COLUMN_ALLY,
+    half = math.floor(M.MON_DRAW / 2),
+    -- Feet-anchored art plus the contact shadow, both widened by the bob.
+    up = M.MON_ART_RISE + bob,
+    down = M.MON_SHADOW_DROP + bob,
+  }
+end
+
+local function occupantHuman(side)
+  local half = math.floor(M.HUMAN_DRAW / 2)
+  return {
+    x = (side == "ally") and (HUMAN_PAD + half)
+      or (M.WIDTH - HUMAN_PAD - half),
+    half = half,
+    up = half,
+    down = half,
+  }
+end
+
+-- Narrow minY..maxY so that no occupant standing over `side`'s own plate stack
+-- overlaps it. Ally plates climb from the field floor, so an ally band loses
+-- its bottom; foe plates descend from the top edge, so a foe band loses its
+-- top. That asymmetry is the whole reason the two sides sit at different
+-- heights in a plated 2v2 -- the diagrams pair a trainer with THEIR mon, they
+-- never ask the two sides to share rows.
+local function dodgePlates(side, plates, minY, maxY, occupants)
+  if plates < 1 then return minY, maxY end
+  local left = (side == "foe")
+    and (M.WIDTH - M.PLATE_W - M.PLATE_PAD) or M.PLATE_PAD
+  for _, occ in ipairs(occupants) do
+    local overPlates = (occ.x + occ.half) > left
+      and (occ.x - occ.half) < (left + M.PLATE_W)
+    if overPlates then
+      if side == "foe" then
+        minY = math.max(minY,
+          foePlateBottom(plates) + occ.up + M.MON_PLATE_CLEAR)
+      else
+        maxY = math.min(maxY,
+          allyPlateTop(plates) - occ.down - M.MON_PLATE_CLEAR)
+      end
+    end
+  end
+  return minY, maxY
+end
+
+-- Dodging the HUD is worth it only while the rows can still be told apart.
+-- A tall enough plate stack (3+ a side, which no shipped mode fields) eats the
+-- band outright, and putting every seat on one pixel is a worse picture than a
+-- sprite behind a translucent panel -- so past this floor the caller drops the
+-- narrowing, or (better, when it has the option) drops the T-P pairing and lets
+-- each stack dodge on its own terms.
+local function bandHolds(count, gap, minY, maxY)
+  return (maxY - minY) >= (count - 1) * math.ceil(gap / 2)
+end
+
+-- The row ys for one side's mons -- and, when that side fields as many
+-- trainers as mons, for its trainers too. Returns the rows and whether the
+-- trainers may share them.
+--
+-- Vertical band, in order of who wins:
+--   * the drawn pic may not leave the field at the top (it rises ART_RISE
+--     above the seat centre, plus the bob);
+--   * feet and contact shadow must stay ON the painted pitch -- the head is
+--     allowed to rise past the top line, exactly as a standing figure does in
+--     the art's perspective, but the ground contact is not;
+--   * nothing sharing these rows may end up under the side's OWN plate stack.
+-- The stack is then centred on the field's own centre line and slid only as far
+-- as the band forces, so a 1v1 keeps the y=140 the owner already likes.
+local function sideRows(side, seats, humanCount)
+  local count = #seats
+  if count == 0 then return {}, false end
+  local bob = M.MON_BOB_MARGIN
+  local baseMin = math.max(
+    M.FIELD_TOP + M.MON_ART_RISE + bob,
+    M.PITCH_TOP - M.MON_FEET_DROP + bob)
+  local baseMax = M.PITCH_BOTTOM - M.MON_SHADOW_DROP - bob
+  local plates = platedCount(seats)
+  local mon = occupantMon(side)
+
+  -- What the mons alone need. At the shipped inset this is the base band --
+  -- the mon column clears the HUD horizontally -- but the arithmetic stays
+  -- honest if the inset is retuned outboard again.
+  local monMin, monMax = dodgePlates(side, plates, baseMin, baseMax, { mon })
+  if not bandHolds(count, M.MON_ROW_GAP, monMin, monMax) then
+    monMin, monMax = baseMin, baseMax
+  end
+
+  -- Paired: the trainers take these very rows, so the trainer column's
+  -- clearance constrains them too. If the joint band cannot hold the stack,
+  -- the PAIRING is what gives -- the mons keep a legible pitch and the
+  -- trainers get their own dodged stack in placeHumans. Compressing the rows
+  -- instead would stack the mons on top of each other, and abandoning the
+  -- dodge instead would put the trainers back in the HUD; giving up the
+  -- shared row costs the least of the three.
+  local paired = count > 0 and humanCount == count
+  local minY, maxY = monMin, monMax
+  if paired then
+    local pairMin, pairMax = dodgePlates(side, plates, baseMin, baseMax,
+      { mon, occupantHuman(side) })
+    if bandHolds(count, M.MON_ROW_GAP, pairMin, pairMax) then
+      minY, maxY = pairMin, pairMax
+    else
+      paired = false
+    end
+  end
+
+  local centerY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT / 2)
+  return rowStack(count, M.MON_ROW_GAP, centerY, minY, maxY), paired
+end
+
+-- `rows` is that side's mon row list, and `paired` is sideRows' verdict on
+-- whether the trainers may stand on it. A trainer stands BESIDE their own mon
+-- -- same row, same y -- whenever the side fields one trainer per mon and the
+-- joint band had room for the stack. When the counts disagree (a wild side has
+-- no trainers at all; an NPC fields one trainer behind two mons; a spectator
+-- adds a trainer with no mon of their own), or the pairing had to be given up,
+-- the trainers fall back to their own centred stack and the two stacks simply
+-- interleave -- which is the owner's second diagram, a lone mon sitting between
+-- the other side's two rows.
+local function placeHumans(humans, side, rows, paired, plates, out)
   humans = listOf(humans)
+  rows = type(rows) == "table" and rows or {}
   local count = #humans
   if count == 0 then return end
 
   local facing = humanFacing(side)
-  local pad = HUMAN_PAD
-  local x
-  if side == "ally" then
-    x = pad + math.floor(M.HUMAN_DRAW / 2)
-  else
-    x = M.WIDTH - pad - math.floor(M.HUMAN_DRAW / 2)
-  end
+  local occ = occupantHuman(side)
+  local x = occ.x
 
   -- Trainers sit on the FIELD's vertical centre, not the canvas': the bottom
   -- MENU_BAND belongs to the message / command menus, so a canvas-centred
@@ -578,18 +813,28 @@ local function placeHumans(humans, side, out)
   -- that centre, and the whole stack is clamped so every sprite stays fully
   -- inside FIELD_TOP..FIELD_BOTTOM (never in the letterbox above the arena).
   local centerY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT / 2)
-  local half = math.floor(M.HUMAN_DRAW / 2)
+  local half = occ.half
   local minY = M.FIELD_TOP + half + HUMAN_EDGE_PAD
   local maxY = M.FIELD_BOTTOM - half - HUMAN_EDGE_PAD
-  local gap = HUMAN_STACK_GAP
-  if count > 1 then
-    -- More trainers than the comfortable spacing fits: tighten the gap rather
-    -- than let the ends escape the field. A floor of 1 keeps the order stable.
-    gap = math.max(1, math.min(gap, math.floor((maxY - minY) / (count - 1))))
+  local ys
+  if paired and #rows == count then
+    -- Paired: take the mons' own rows verbatim. sideRows already folded this
+    -- column's plate clearance into the band they came out of, so re-clamping
+    -- here could only break an alignment it can never be needed to fix.
+    ys = rows
+  else
+    -- Unpaired, but not unconstrained: an own stack dodges the plates on
+    -- exactly the terms the paired band would have. A trainer with no mon of
+    -- their own has no more business standing inside the HUD than one with.
+    local dodgeMin, dodgeMax =
+      dodgePlates(side, num(plates, 0), minY, maxY, { occ })
+    if bandHolds(count, HUMAN_STACK_GAP, dodgeMin, dodgeMax) then
+      minY, maxY = dodgeMin, dodgeMax
+    end
+    ys = rowStack(count, HUMAN_STACK_GAP, centerY, minY, maxY)
   end
   for i, human in ipairs(humans) do
-    local offset = (i - 1 - (count - 1) / 2) * gap
-    local y = clamp(math.floor(centerY + offset + 0.5), minY, maxY)
+    local y = clamp(math.floor(num(ys[i], centerY)), minY, maxY)
     out[#out + 1] = {
       side = side,
       index = i,
@@ -605,79 +850,35 @@ local function placeHumans(humans, side, out)
   end
 end
 
-local function placeMons(seats, side, out)
+-- Mons form a COLUMN on their side of the pitch: one shared x just inside the
+-- painted side line, one row per seat out of `rows` -- so seat i stands beside
+-- trainer i when the side fields a trainer per mon.
+local function placeMons(seats, side, rows, out)
   seats = listOf(seats)
+  rows = type(rows) == "table" and rows or {}
   local count = #seats
   if count == 0 then return end
 
-  local halfPad = 52
-  local left, right
-  if side == "ally" then
-    left = halfPad + 56
-    right = M.MIDLINE - halfPad - 8
-  else
-    left = M.MIDLINE + halfPad + 8
-    right = M.WIDTH - halfPad - 56
-  end
-  local midY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.50)
-  local rowSpread = math.min(56, math.floor(M.FIELD_HEIGHT * 0.20))
+  local column = (side == "foe") and M.MON_COLUMN_FOE or M.MON_COLUMN_ALLY
 
-  -- Seat centres for the pair case, as fractions of WIDTH measured from the
-  -- side's own outer edge (mirrored on the foe half). R3 item 3: the old even
-  -- split between `left` and `right` put seat 1 half off the arena border and
-  -- seat 2 hard against the midline. R3 follow-up pulled both inward again --
-  -- 0.34 still left the far seat sitting on the arena's centre circle.
-  local xs = {}
-  if count == 2 then
-    local near = math.floor(M.WIDTH * M.MON_PAIR_NEAR)
-    local far = math.floor(M.WIDTH * M.MON_PAIR_FAR)
-    if side == "ally" then
-      xs[1], xs[2] = near, far
-    else
-      xs[1], xs[2] = M.WIDTH - near, M.WIDTH - far
-    end
-  else
-    for i = 1, count do
-      local t = count == 1 and 0.5 or ((i - 1) / (count - 1))
-      xs[i] = math.floor(left + t * (right - left))
-    end
-  end
-
-  -- Nothing may hang off the field: a front pic rises MON_TOP_REACH * box above
-  -- the seat centre (monDrawParams anchors near the feet) and the contact
-  -- shadow reaches MON_BOTTOM_REACH * box below it (drawMonShadow), with the
-  -- idle bob riding on top of both.
+  -- Containment. Horizontally the whole 60px box stays on the pitch and on its
+  -- own half of the field; vertically monRows already sized the band, and the
+  -- clamp here is only a floor under a hand-built `rows`.
   local halfBox = math.floor(M.MON_DRAW / 2)
-  local xMin = halfBox + MON_EDGE_PAD
-  local xMax = M.WIDTH - halfBox - MON_EDGE_PAD
+  local xMin = math.max(halfBox + MON_EDGE_PAD, M.PITCH_LEFT + halfBox)
+  local xMax = math.min(M.WIDTH - halfBox - MON_EDGE_PAD, M.PITCH_RIGHT - halfBox)
   if side == "ally" then
     xMax = math.min(xMax, M.MIDLINE - halfBox)
   else
     xMin = math.max(xMin, M.MIDLINE + halfBox)
   end
-  local yMin = M.FIELD_TOP + math.ceil(M.MON_DRAW * M.MON_TOP_REACH) + M.MON_BOB_MARGIN
-  local yMax = M.FIELD_BOTTOM - math.ceil(M.MON_DRAW * M.MON_BOTTOM_REACH) - M.MON_BOB_MARGIN
-
-  -- The rank. A side with more than one mon puts every seat on ONE y, so the
-  -- two halves of a 2v2 rhyme instead of reading as four loose sprites; that
-  -- rank leaves the centre line away from the side's own plate stack (ally
-  -- plates climb from the field floor, foe plates descend from the top), which
-  -- is what keeps a mon's head out from under its own HUD. A lone mon keeps
-  -- the field's centre line exactly -- the 1-count layout is unchanged.
-  local rankY = midY
-  if count >= 2 then
-    local away = (side == "foe") and 1 or -1
-    rankY = midY + away * math.floor((yMax - yMin) * M.MON_RANK_OFFSET)
-  end
+  local yMin = M.FIELD_TOP + M.MON_ART_RISE + M.MON_BOB_MARGIN
+  local yMax = M.FIELD_BOTTOM - M.MON_SHADOW_DROP - M.MON_BOB_MARGIN
+  local centerY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT / 2)
 
   for i, seat in ipairs(seats) do
-    local x = clamp(xs[i] or math.floor((left + right) / 2), xMin, xMax)
-    local yOff = 0
-    if count >= 3 then
-      -- Zigzag slightly so 3–4 seats do not sit on one line.
-      yOff = ((i % 2 == 0) and 1 or -1) * math.floor(rowSpread * MON_ZIGZAG)
-    end
-    local y = clamp(rankY + yOff, yMin, yMax)
+    local x = clamp(column, xMin, xMax)
+    local y = clamp(math.floor(num(rows[i], centerY)), yMin, yMax)
     local facing = seat and seat.facing
     if type(facing) ~= "string" then
       facing = side == "ally" and "right" or "left"
@@ -749,11 +950,20 @@ function M.layout(ctx)
     foeHumans = {}
   end
 
+  -- One row list per side, built from the mons and then handed to BOTH
+  -- placers: that shared list is the T-P pairing.
+  local allySeats = listOf(ctx.allySeats)
+  local foeSeats = listOf(ctx.foeSeats)
+  local allyRows, allyPaired = sideRows("ally", allySeats, #allyHumans)
+  local foeRows, foePaired = sideRows("foe", foeSeats, #foeHumans)
+  local allyPlates = platedCount(allySeats)
+  local foePlates = platedCount(foeSeats)
+
   local humans, mons = {}, {}
-  placeHumans(allyHumans, "ally", humans)
-  placeHumans(foeHumans, "foe", humans)
-  placeMons(ctx.allySeats, "ally", mons)
-  placeMons(ctx.foeSeats, "foe", mons)
+  placeHumans(allyHumans, "ally", allyRows, allyPaired, allyPlates, humans)
+  placeHumans(foeHumans, "foe", foeRows, foePaired, foePlates, humans)
+  placeMons(allySeats, "ally", allyRows, mons)
+  placeMons(foeSeats, "foe", foeRows, mons)
 
   local showTarget = ctx.showTarget == true
   if not showTarget then
