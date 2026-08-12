@@ -6,8 +6,13 @@
 #   2. Runs the battlefield-related Lua suite headlessly
 #   3. Launches one real LOVE instance, drives tests/drivers/battlefield_shot.lua
 #      (a committed, pixel-asserting screenshot driver — see that file for
-#      what it captures and checks: trainer color, ally-mon flip, HUD
-#      plates, fx) and gates the script on its verdict
+#      what it captures and checks) and gates the script on its verdict.
+#      Round 2: six frames -- idle/action (dark-slate plates + modern
+#      FIGHT/PKMN/ITEM/RUN band chrome, trainer color, ally-mon flip), move
+#      (the drawListPanel MOVES list), ball (a throw mid-arc, target seat
+#      hidden via Battlefield.fxSeat), bubble (a rounded callout with
+#      moveName), and nire (SELF switched to SPRITE_NIRE via a real
+#      Cast.install(), pinning the walk-sheet requantize fix).
 #   4. Optionally forwards to run-hub-e2e.sh when --play is passed
 #
 # From the Gen1Recomp checkout root (mods/rby_mmo → this repo):

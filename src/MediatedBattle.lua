@@ -2943,6 +2943,11 @@ function M:startBallFx(row)
   local hidden = (flow ~= nil) and flow.hidden == true
 
   if kind == "poof" then
+    -- A POOF with no throw open is a send-out marker rather than part of a
+    -- chain, and the arrival pop is already the `spawnfx` row queued by the
+    -- send (see tickMessages) -- bursting again here would double it over a
+    -- monster that has only just walked on.
+    if flow == nil then return nil end
     -- POOF is both halves of a throw: the ball bursting open on the way in,
     -- and the monster coming back out of it when it breaks free. Which one it
     -- is is which side of HIDEPIC the row landed on. A failure ends
@@ -2950,10 +2955,15 @@ function M:startBallFx(row)
     -- second would be a burst over a monster already standing there.
     if row.anim == "SHOWPIC_ANIM" and not hidden then return nil end
     self:emitFx("poof", index)
-    if hidden then
-      self:clearBallFlow()
-      self:emitFx("spawn", index)
-    end
+    -- Either way the ball is open, so the hold that hid the seat for the arc
+    -- ends here: a throw the referee gave no shakes at all is TOSS + POOF and
+    -- nothing else (`_emitBallChain` returns early), and leaving the flow
+    -- standing kept the seat inside a ball that had already burst for the rest
+    -- of the fight. The recall behind a real attempt opens a fresh flow of its
+    -- own -- HIDEPIC is the next row.
+    self:clearBallFlow()
+    -- ...and if it *was* hidden, this POOF is the monster coming back out.
+    if hidden then self:emitFx("spawn", index) end
     self.animHold = FX_SPAN.poof
     return kind
   end

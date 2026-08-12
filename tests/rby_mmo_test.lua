@@ -11626,6 +11626,135 @@ end)()
   eq(#withFx.fx, 1, "layout.fx carries through whatever ctx.fx the caller passed")
 end)()
 
+-- ------- Gen1 Battlefield wave 2 (round 2): scale, ball-flow fx math, status
+-- colours, band widgets
+--
+-- R2 shrank the mon box (72 -> 60) and added the ball-flow fx kinds (ball /
+-- wobble / poof / recall) plus the band widgets that replace the stretched GB
+-- chrome on the battlefield path. This pins the pieces wave 1 did not cover:
+-- the new scale constant, the four new fx shapes at their t == 0/0.5/1
+-- boundaries, the status-chip palette, and that the band widgets are as
+-- headless-safe as everything else in this file.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- wave 2 tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+  local EPS = 1e-9
+  local function approx(got, want, msg)
+    check(math.abs(got - want) < EPS,
+      msg .. (" (got %s, want %s)"):format(tostring(got), tostring(want)))
+  end
+
+  -- The R2 owner review: 72 crowded a 2v2's plates, so mons draw at 60.
+  eq(Battlefield.MON_DRAW, 60, "MON_DRAW is 60, not the old 72")
+  eq(Battlefield.ICON_DRAW, Battlefield.MON_DRAW,
+     "the icon-fallback box tracks the same constant")
+
+  -- fxBall: travel fraction, arc lift (peaks at t == 0.5), and spin angle.
+  local u0, lift0, spin0 = Battlefield.fxBall(0)
+  eq(u0, 0, "fxBall has not travelled at t == 0")
+  eq(lift0, 0, "...and sits on the ground (no lift) at t == 0")
+  eq(spin0, 0, "...with no spin yet either")
+  local uHalf, liftHalf, spinHalf = Battlefield.fxBall(0.5)
+  eq(uHalf, 0.5, "fxBall is halfway travelled at t == 0.5")
+  approx(liftHalf, 1, "...and the arc lift peaks (4*0.5*0.5 == 1) at the midpoint")
+  approx(spinHalf, Battlefield.FX_BALL_SPIN * 0.5,
+    "...with half the total spin behind it")
+  local u1, lift1, spin1 = Battlefield.fxBall(1)
+  eq(u1, 1, "fxBall has fully landed at t == 1")
+  eq(lift1, 0, "...back on the ground -- no lift left")
+  approx(spin1, Battlefield.FX_BALL_SPIN, "...and the full spin has played")
+
+  -- fxWobble: three half-swings, at rest at both ends so consecutive SHAKE
+  -- rows join without a snap.
+  approx(Battlefield.fxWobble(0), 0, "fxWobble starts at rest")
+  approx(Battlefield.fxWobble(1), 0, "fxWobble is back at rest by t == 1")
+  check(math.abs(Battlefield.fxWobble(0.5)) > 0,
+        "...and actually rocks somewhere in between")
+
+  -- fxPoof: expansion (ease-out) and remaining alpha.
+  local e0, a0 = Battlefield.fxPoof(0)
+  eq(e0, 0, "fxPoof has not expanded at t == 0")
+  eq(a0, 1, "...and is fully opaque at t == 0")
+  local eHalf, aHalf = Battlefield.fxPoof(0.5)
+  approx(eHalf, 0.75, "fxPoof's ease-out is 1 - (1-t)^2, so 0.75 at the midpoint")
+  eq(aHalf, 0.5, "...alpha falls linearly, so 0.5 at the midpoint")
+  local e1, a1 = Battlefield.fxPoof(1)
+  eq(e1, 1, "fxPoof has fully expanded at t == 1")
+  eq(a1, 0, "...and is fully transparent at t == 1")
+
+  -- fxRecall: shrink factor and remaining alpha, both 1 - t.
+  local s0, ra0 = Battlefield.fxRecall(0)
+  eq(s0, 1, "fxRecall has not shrunk at t == 0")
+  eq(ra0, 1, "...and is fully opaque at t == 0")
+  local sHalf, raHalf = Battlefield.fxRecall(0.5)
+  eq(sHalf, 0.5, "fxRecall is half-shrunk at the midpoint")
+  eq(raHalf, 0.5, "...and half-faded")
+  local s1, ra1 = Battlefield.fxRecall(1)
+  eq(s1, 0, "fxRecall has fully collapsed at t == 1")
+  eq(ra1, 0, "...and is fully transparent -- gone into the ball")
+
+  -- fxSeat: ball/wobble hide the seat outright (not even the shadow draws);
+  -- recall never sets the flag -- it shrinks/fades the mon in place instead,
+  -- reaching the same invisible result (scale 0, alpha 0) by t == 1.
+  local ball = Battlefield.fxSeat(
+    { { kind = "ball", side = "foe", t = 0.5 } }, "foe", 1)
+  eq(ball.hidden, true, "a ball fx hides the seat")
+  local wobble = Battlefield.fxSeat(
+    { { kind = "wobble", side = "foe", t = 0.2 } }, "foe", 1)
+  eq(wobble.hidden, true, "...and so does a wobble")
+  local recallMid = Battlefield.fxSeat(
+    { { kind = "recall", side = "foe", t = 0.5 } }, "foe", 1)
+  eq(recallMid.hidden, false,
+     "a recall does not set the hidden flag -- it is a shrink, not a cut")
+  local recallDone = Battlefield.fxSeat(
+    { { kind = "recall", side = "foe", t = 1 } }, "foe", 1)
+  eq(recallDone.hidden, false, "...never, even fully collapsed")
+  eq(recallDone.scale, 0, "...but scale reaches 0 at t == 1")
+  eq(recallDone.alpha, 0, "...and so does alpha -- invisible all the same")
+
+  -- Status colours: one entry per status this build actually inflicts.
+  for _, key in ipairs({ "psn", "brn", "slp", "par", "frz" }) do
+    local color = Battlefield.STATUS_COLORS[key]
+    check(type(color) == "table" and type(color[1]) == "number"
+          and type(color[2]) == "number" and type(color[3]) == "number",
+          "STATUS_COLORS has an RGB entry for " .. key)
+  end
+
+  -- Band widgets: the battlefield's bottom-band replacements for the
+  -- stretched GB chrome. Headless (no love) is every mod suite's actual
+  -- environment, and every one of these already no-ops without a graphics
+  -- context -- pinned here so a future draw call added ahead of that guard
+  -- cannot throw through the message queue.
+  local okMessage = pcall(Battlefield.drawMessagePanel, "hello")
+  check(okMessage, "drawMessagePanel does not throw headless")
+  local okGrid = pcall(Battlefield.drawCommandGrid,
+    { "FIGHT", "PKMN", "ITEM", "RUN" }, 1)
+  check(okGrid, "drawCommandGrid does not throw headless")
+  local okList = pcall(Battlefield.drawListPanel,
+    { { label = "TACKLE", right = "20/20" } }, 1, { title = "MOVES" })
+  check(okList, "drawListPanel does not throw headless")
+
+  -- Edge-shaped inputs: empty rows, an oversized list (overflow), and no
+  -- title -- all still headless-safe.
+  local okEmpty = pcall(Battlefield.drawListPanel, {}, 1, {})
+  check(okEmpty, "drawListPanel does not throw on an empty row list")
+  local okNoTitle = pcall(Battlefield.drawListPanel,
+    { { label = "STRUGGLE" } }, 1, nil)
+  check(okNoTitle, "drawListPanel does not throw with no opts / no title")
+  local manyRows = {}
+  for i = 1, 40 do manyRows[i] = { label = "MOVE " .. i, right = "1/1" } end
+  local okOverflow = pcall(Battlefield.drawListPanel, manyRows, 37, {})
+  check(okOverflow, "drawListPanel does not throw on an overflowing row list")
+  local okGridEmpty = pcall(Battlefield.drawCommandGrid, {}, 1)
+  check(okGridEmpty, "drawCommandGrid does not throw on an empty item list")
+  local okMessageNil = pcall(Battlefield.drawMessagePanel, nil)
+  check(okMessageNil, "drawMessagePanel does not throw on nil text")
+end)()
+
 -- ------- trainer entrance: only while the foe quarter is empty
 --
 -- Co-op NPC fights seat both foe mons before "2 on 2 battle!", so the old
@@ -14981,7 +15110,8 @@ end)()
 
   -- ...but only for a real move. `TOSS_ANIM` / `HIDEPIC_ANIM` and the rest of
   -- the engine's ball markers ride the same field, and a thrown ball must not
-  -- make the thrower lurch.
+  -- make the thrower lurch -- it emits the ball-flow fx instead (R2; see the
+  -- ball-flow chain wave below for the full sequence).
   local f3, send3 = driverFor("b-ball")
   send3({ t = "send", slot = 0, side = "a", hp = 20 })
   f3:update(1 / 60) -- the arrival pop
@@ -14989,7 +15119,15 @@ end)()
   send3({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
   f3:update(1 / 60)
   eq(f3.anim and f3.anim.anim, "TOSS_ANIM", "the ball row does play")
-  eq(f3.fx, nil, "...and a ball / marker anim row emits no lunge")
+  local sawLunge, ballFx = false, nil
+  for _, e in ipairs(f3.fx or {}) do
+    if e.kind == "lunge" then sawLunge = true end
+    if e.kind == "ball" then ballFx = e end
+  end
+  check(not sawLunge, "...and a ball / marker anim row emits no lunge")
+  check(ballFx ~= nil, "...it emits the ball arc instead")
+  eq(ballFx and ballFx.side, "foe",
+     "...landing on the foe seat the toss targets, not the thrower's own")
 
   -- None of this exists on the classic path: Gen2 keeps the guild-focus
   -- screen, so there is no arena for a pop to play on and no row for it.
@@ -15008,6 +15146,278 @@ end)()
   end
   check(not classicRow, "the classic path queues no spawn row at all")
   eq(classic.fx, nil, "...and emits no fx either")
+end)()
+
+-- ------- MediatedBattle wave 2 (round 2): the ball-flow fx chain
+--
+-- Wire order per throw (R2 findings): item(ball) -> HIDEPIC -> TOSS ->
+-- SHAKE x N -> [SHOWPIC | over(reason=catch)] is the referee's order, but
+-- `startBallFx`'s own comment on the `poof` branch says which half of a POOF
+-- row is which: the first burst is "the ball opening on the way in" (it can
+-- land ahead of HIDEPIC, on the toss itself) and the second is "the monster
+-- coming back out of it". This drives the full chain a caught-then-escaped
+-- throw plays -- TOSS -> POOF -> HIDEPIC -> SHAKE x3 -> POOF -> SHOWPIC --
+-- and checks the seat stays covered with no gap from the recall through the
+-- last wobble, that the second POOF is what pops the spawn and clears the
+-- flow, and that SHOWPIC plays inert behind it.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local Battlefield = need("Battlefield")
+  local gen1Game = { data = data }
+
+  local function driverFor(battle)
+    local fight = MediatedBattle.new({ game = gen1Game, battle = battle, role = "host" })
+    local seq = 0
+    local function send(fields)
+      seq = seq + 1
+      fields.battle = battle
+      fields.seq = seq
+      fight:onEvent(fields)
+    end
+    return fight, send
+  end
+
+  -- Drives frames until a *different*, non-nil anim row takes over from
+  -- whatever was playing (or starts the first one, from a blank slate). A
+  -- finished row clears `self.anim` for a frame or two before the next is
+  -- promoted -- this rides straight through that gap rather than stopping in
+  -- the middle of it, which is what a single fixed-size `update` cannot do
+  -- without hard-coding every row's own dwell.
+  local function playThrough(fight, guard)
+    guard = guard or 200
+    local was = fight.anim
+    local n = 0
+    while n < guard do
+      fight:update(1 / 60)
+      n = n + 1
+      if fight.anim ~= nil and fight.anim ~= was then break end
+    end
+    return fight.anim
+  end
+
+  -- Whether a hide-kind fx (ball / recall / wobble) is live or held for
+  -- `side` right now -- the bookkeeping `BALL_HIDE_FX` exists for, so the
+  -- seat is never uncovered between two rows of the same throw.
+  local function hasHideFx(fight, side)
+    for _, e in ipairs(fight.fx or {}) do
+      if (e.kind == "ball" or e.kind == "recall" or e.kind == "wobble")
+         and e.side == side then
+        return true
+      end
+    end
+    return false
+  end
+
+  -- Every row below is stamped with the *thrower's* slot/side (slot 0, side
+  -- "a" -- the ally); the chain lands on the opposite seat, the foe, and
+  -- stays there throughout.
+  local f, send = driverFor("b-ballchain")
+  send({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "POOF_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "HIDEPIC_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "SHAKE_ANIM", amount = 3 })
+  send({ t = "anim", slot = 0, side = "a", text = "POOF_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "SHOWPIC_ANIM" })
+
+  playThrough(f) -- TOSS starts
+  eq(f.anim.anim, "TOSS_ANIM", "the arc plays first")
+  check(Battlefield.fxSeat(f.fx, "foe", 1).hidden,
+        "the foe seat is hidden the instant the ball is in the air")
+
+  playThrough(f) -- first POOF starts
+  eq(f.anim.anim, "POOF_ANIM", "the ball opens next")
+  eq(f.ballFlow, nil,
+     "the opening burst plays and clears the toss's flow in the same tick "
+     .. "-- nothing is left open until HIDEPIC opens one of its own")
+
+  playThrough(f) -- HIDEPIC starts
+  eq(f.anim.anim, "HIDEPIC_ANIM", "the monster is pulled in next")
+  check(f.ballFlow ~= nil and f.ballFlow.hidden == true,
+        "the recall opens a hidden throw")
+  check(hasHideFx(f, "foe"), "...and the seat is covered by a live hide-fx")
+
+  playThrough(f) -- first SHAKE (amount=3) starts
+  eq(f.anim.anim, "SHAKE_ANIM", "the shakes start")
+  eq(f.anim.amount, 3, "...carrying the full count off the wire")
+  check(hasHideFx(f, "foe"),
+        "wobble #1: the seat stays covered -- no gap between the recall and it")
+
+  playThrough(f) -- second SHAKE (amount=2), re-queued by the first, starts
+  eq(f.anim.anim, "SHAKE_ANIM", "wobble #2 is the re-queued row")
+  eq(f.anim.amount, 2, "...one fewer than the last")
+  check(hasHideFx(f, "foe"), "wobble #2: still no gap")
+
+  playThrough(f) -- third SHAKE (amount=1) starts
+  eq(f.anim.amount, 1, "wobble #3 is the last of the three the referee counted")
+  check(hasHideFx(f, "foe"), "wobble #3: still no gap")
+
+  playThrough(f) -- second POOF starts
+  eq(f.anim.anim, "POOF_ANIM", "the ball bursts open a second time")
+  eq(f.ballFlow, nil, "...and that is what finally clears the throw")
+  local sawSpawn = false
+  for _, e in ipairs(f.fx or {}) do
+    if e.kind == "spawn" then sawSpawn = true end
+  end
+  check(sawSpawn, "the second POOF pops the spawn -- the monster breaking free")
+
+  playThrough(f) -- SHOWPIC starts
+  eq(f.anim.anim, "SHOWPIC_ANIM", "SHOWPIC plays last")
+  eq(f.ballFlow, nil,
+     "...inert: startBallFx's own \"no throw open\" guard refuses to reopen "
+     .. "one, so the row plays out on the plain move dwell with no fx of its own")
+end)()
+
+-- ------- MediatedBattle wave 2 (round 2): the 0-shake ball-fx regression
+--
+-- The C1 fix: a throw the referee gave no shakes at all is TOSS + POOF and
+-- nothing else. Before the fix, the first POOF only cleared the flow when it
+-- was *itself* hidden (the "breaks free" half); an opening POOF with no
+-- shakes behind it left `ballFlow` standing and the seat hidden for the rest
+-- of the fight. Also covers the sibling guard: a POOF with no throw open at
+-- all (the intro's own send-out marker on this path) is inert.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local Battlefield = need("Battlefield")
+  local gen1Game = { data = data }
+
+  local function driverFor(battle)
+    local fight = MediatedBattle.new({ game = gen1Game, battle = battle, role = "host" })
+    local seq = 0
+    local function send(fields)
+      seq = seq + 1
+      fields.battle = battle
+      fields.seq = seq
+      fight:onEvent(fields)
+    end
+    return fight, send
+  end
+
+  local f, send = driverFor("b-ball0shake")
+  send({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "POOF_ANIM" })
+
+  f:update(1 / 60) -- TOSS starts
+  eq(f.anim.anim, "TOSS_ANIM", "the toss starts")
+  check(Battlefield.fxSeat(f.fx, "foe", 1).hidden, "...hiding the seat")
+
+  local function animName(fight) return fight.anim and fight.anim.anim end
+
+  local guard = 0
+  while animName(f) ~= "POOF_ANIM" and guard < 60 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 60, "the toss finishes and the POOF row is reached in bounded frames")
+  eq(f.ballFlow, nil,
+     "a throw with nothing behind the opening POOF ends the flow right there "
+     .. "-- the C1 regression")
+
+  -- The poof burst itself is not a held kind (only ball / recall / wobble
+  -- are), so once its own short dwell finishes it ages out of the fx list on
+  -- its own, same as any other unheld effect.
+  guard = 0
+  while (f.fx ~= nil or f.anim ~= nil) and guard < 60 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 60, "the burst and the row both settle in bounded frames")
+  eq(f.fx, nil, "...and the field is left with nothing playing")
+  check(not Battlefield.fxSeat(f.fx or {}, "foe", 1).hidden,
+        "...the seat is visible again -- not stuck inside a burst ball forever")
+
+  -- A lone POOF with no throw open at all (no prior TOSS/HIDEPIC): inert.
+  local f2, send2 = driverFor("b-ballnoflow")
+  send2({ t = "anim", slot = 0, side = "a", text = "POOF_ANIM" })
+  f2:update(1 / 60)
+  eq(f2.anim.anim, "POOF_ANIM", "the row still plays, for its text/timing")
+  eq(f2.ballFlow, nil, "...but opens no flow")
+  eq(f2.fx, nil, "...and emits no fx of its own -- startBallFx's guard refuses it")
+end)()
+
+-- ------- MediatedBattle wave 2 (round 2): SHAKE amount fan-out clamps at 8
+--
+-- A SHAKE row carries the whole shake count on one row and re-queues the
+-- remainder one at a time as each wobble plays. The count comes off the wire,
+-- so a hub claiming more than Gen 1's own ceiling is clamped rather than
+-- queuing a wobble marathon the player cannot skip past.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-shakemax", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-shakemax"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "anim", slot = 0, side = "a", text = "HIDEPIC_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "SHAKE_ANIM", amount = 999 })
+
+  local function animName(fight) return fight.anim and fight.anim.anim end
+
+  f:update(1 / 60) -- HIDEPIC starts
+  local guard = 0
+  while animName(f) ~= "SHAKE_ANIM" and guard < 60 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 60, "the shake row is reached in bounded frames")
+  eq(f.anim.amount, 999, "the row still carries the wire's own claimed count")
+  eq(f.lines[1] and f.lines[1].amount, 7,
+     "...but the re-queued remainder is clamped to 8 total (left - 1 == 7), "
+     .. "not 998")
+end)()
+
+-- ------- MediatedBattle wave 2 (round 2): the fanfare holds for ball rows too
+--
+-- #36's fix (hasPendingHpFx) already covered drains and faints; a throw is
+-- one step further on again -- a catch is decided the moment the last shake
+-- lands, but the ball on the arena is still wobbling, so the jingle must wait
+-- for the queued/playing ball rows exactly the way it waits for a draining
+-- bar.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-ballfanfare", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-ballfanfare"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "POOF_ANIM" })
+  f:update(1 / 60) -- TOSS starts
+  check(f:hasPendingHpFx(),
+        "a playing ball row counts as pending, same as a drain or a sink")
+
+  f.result = "win"
+  f:finish("win", "catch")
+  check(f.victoryMusicHeld == true,
+        "the fanfare is held while the ball rows are still owed a play")
+  check(not f.victoryMusicPlayed, "...and has not actually played yet")
+
+  local guard = 0
+  while f:hasPendingHpFx() and guard < 400 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 400, "the ball chain resolves in a bounded number of frames")
+  check(f.victoryMusicHeld == true,
+        "...and the flag is still up the instant the last row lands -- the "
+        .. "release is checked at the top of the next frame, not mid-frame")
+
+  f:update(1 / 60)
+  check(not f.victoryMusicHeld, "one more tick releases it")
+  check(f.victoryMusicPlayed, "...and the fanfare has now actually played")
 end)()
 
 -- ------- MediatedBattle wave 1: victory music held until the arena settles
@@ -15529,6 +15939,255 @@ end)()
      "and drops it once display faint is set")
 
   CoopBattle.playVictoryMusic = origVictory
+end)()
+
+-- ------- CoopBattle wave 2 (round 2): the arena's own ball-flow fx, the
+-- modern band, and the seat-contract fix
+--
+-- Round 2 gave CoopBattle the same fx block MediatedBattle already had
+-- (lunge/flash/shake/faint/spawn plus the ball-flow chain) and the band
+-- widgets that replace the stretched GB menus on the battlefield path. This
+-- covers what is new to this screen specifically: the slot->seat projection
+-- `battlefieldFxCtx` does for `Battlefield.fxSeat`, the band row builders,
+-- the letterbox flag flip, the TOSS/SHAKE bubble filter, the 0-shake POOF
+-- clear (CoopBattle's own copy of the MediatedBattle C1 fix), and the
+-- `battlefieldSeats` maxHp bug: a battler built the engine's own way keeps
+-- its maximum in `mon.stats.hp`, not `mon.maxHp` (Gen 1's `BattleState`
+-- never sets that field), and the plate was reading the *current* HP as
+-- the maximum until this was fixed.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local Battlefield = need("Battlefield")
+  local function move() return { id = "FIX_TACKLE", pp = 20 } end
+
+  -- ------- battlefieldSeats: the seat HP contract, and the maxHp fix
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(30, 50, { move() }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 40, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 20, { move() }) } },
+    })
+    local client = setmetatable({
+      sim = sim, mine = 1, messages = {},
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+
+    -- Damage the truth number directly (as other sections here already do)
+    -- without touching `shownHP`, so the built battler is left in exactly
+    -- the shape a coop mon actually arrives in: a maximum that lives only in
+    -- `stats.hp`, a current `hp` that has moved, and a display clock that
+    -- has not caught up yet.
+    local battler = sim:slot(1).battler
+    eq(battler.mon.maxHp, nil,
+       "a Gen 1 engine battler never gets a maxHp field -- stats.hp is the "
+       .. "only maximum it has")
+    battler.mon.hp = 12
+
+    local allySeats = client:battlefieldSeats(false)
+    local seat
+    for _, s in ipairs(allySeats) do
+      if s.index == 1 then seat = s end
+    end
+    check(seat ~= nil, "the damaged seat is still placed")
+    eq(seat.hp, 12, "seat.hp is the sim's truth")
+    eq(seat.shownHp, 30,
+       "seat.shownHp is the display clock -- untouched here, so still full")
+    eq(seat.maxHp, 30,
+       "seat.maxHp comes from mon.stats.hp -- the fixed bug: a damaged mon "
+       .. "with no mon.maxHp field must not report its current HP as its max")
+  end
+
+  -- ------- battlefieldFxCtx: slot -> seat projection
+  do
+    local client = setmetatable({
+      fx = {
+        { kind = "lunge", slot = 1, side = "ally", t = 0.4 },
+        { kind = "flash", slot = 99, side = "foe", t = 0.5 }, -- off-arena slot
+        { kind = "shake", side = "ally", t = 0.2 }, -- field-wide, no slot
+      },
+    }, { __index = CoopBattle })
+    local allySeats = { { index = 1 }, { index = 2 } }
+    local foeSeats = { { index = 3 } }
+    local out = client:battlefieldFxCtx(allySeats, foeSeats)
+    check(out ~= nil, "the projection produces a list")
+
+    local lunge, flash, shake
+    for _, e in ipairs(out) do
+      if e.kind == "lunge" then lunge = e end
+      if e.kind == "flash" then flash = e end
+      if e.kind == "shake" then shake = e end
+    end
+    check(lunge ~= nil and lunge.seatIndex == 1,
+          "slot 1 projects onto ally seat list position 1")
+    check(flash == nil,
+          "an fx for a slot not in the drawn seat lists (99) is dropped -- "
+          .. "not published with no seatIndex, which would flash every seat "
+          .. "on its side")
+    check(shake ~= nil and shake.seatIndex == nil,
+          "shake passes through untouched: side-wide, no seatIndex")
+    eq(shake.side, "ally", "...carrying its side")
+  end
+
+  -- ------- refreshLetterbox
+  do
+    local gen1Client = setmetatable({ game = { data = data } },
+      { __index = CoopBattle })
+    gen1Client:refreshLetterbox()
+    eq(gen1Client.letterboxWhite, false,
+       "battlefield on: the instance shadows the class default with false "
+       .. "-- the arena is its own dark chrome, not a white GB canvas")
+
+    local goldGame = {
+      data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+    }
+    local goldClient = setmetatable({ game = goldGame }, { __index = CoopBattle })
+    goldClient:refreshLetterbox()
+    eq(goldClient.letterboxWhite, true,
+       "classic Gen2 stays on the class default, true -- explicitly re-set, "
+       .. "not merely inherited, so a hot reload can't leave it stale")
+    eq(goldClient.letterboxWhite, CoopBattle.letterboxWhite,
+       "...matching the class default it preserves")
+  end
+
+  -- ------- the modern band: row builders
+  do
+    local moveClient = setmetatable({
+      medMoveList = {
+        { id = "FIX_BOOST", pp = 0, ppUps = 0 },
+        { id = "FIX_BOOST", pp = 18, ppUps = 1 },
+      },
+      game = { data = data },
+    }, { __index = CoopBattle })
+    local rows = moveClient:bandMoveRows()
+    eq(#rows, 2, "one row per live move")
+    eq(rows[1].label, "FIX BOOST", "the label is the move's display name")
+    eq(rows[1].right, "0/20", "PP is its own right column, current/max")
+    check(rows[1].dim == true, "a move at 0 PP is dimmed")
+    eq(rows[2].right, "18/24",
+       "PP Ups add a fifth of base pp each -- floor(20/5)*1 == 4 -> 24")
+    check(not rows[2].dim, "a move with PP left is not dimmed")
+
+    local items = CoopBattle.bandCommandItems({})
+    eq(items[1].label, "FIGHT", "the grid keeps the classic FIGHT/SWITCH/ITEM/RUN order")
+    eq(items[2].label, "PKMN",
+       "SWITCH renders under the label the player actually knows it by")
+    eq(items[3].label, "ITEM", "...ITEM unchanged")
+    eq(items[4].label, "RUN", "...RUN unchanged")
+  end
+
+  -- ------- bubbles: TOSS/SHAKE excluded, a real move carries moveName
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 40, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 20, { move() }) } },
+    })
+    local client = setmetatable({
+      sim = sim, mine = 1, frame = 0,
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+
+    client:noteBattlefieldBubble(1, "TOSS_ANIM")
+    eq(client.battlefieldBubbles, nil,
+       "a TOSS marker produces no bubble -- 'used TOSS_ANIM!' never prints")
+    client:noteBattlefieldBubble(1, "SHAKE_ANIM")
+    eq(client.battlefieldBubbles, nil, "...nor does a SHAKE marker")
+
+    client:noteBattlefieldBubble(1, "used\nFIX BOOST!", "FIX BOOST")
+    check(client.battlefieldBubbles ~= nil, "a real move does produce a bubble")
+    eq(client.battlefieldBubbles[1].moveName, "FIX BOOST",
+       "...carrying the name the renderer gives its own emphasised line")
+    eq(client.battlefieldBubbles[1].side, "ally", "...hosted on the side that acted")
+  end
+
+  -- ------- the 0-shake POOF clear (CoopBattle's own copy of the C1 fix)
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 40, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 20, { move() }) } },
+    })
+    local client = setmetatable({
+      sim = sim, mine = 1,
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+
+    client:startBallFx({ anim = "TOSS_ANIM", from = 1 })
+    check(client.ballFlow ~= nil, "the toss opens a flow")
+    local sawBall = false
+    for _, e in ipairs(client.fx or {}) do
+      if e.kind == "ball" then sawBall = true end
+    end
+    check(sawBall, "...and hides the target seat")
+
+    client:startBallFx({ anim = "POOF_ANIM", from = 1 })
+    eq(client.ballFlow, nil,
+       "a POOF with no shakes behind it ends the flow right there -- the "
+       .. "same regression MediatedBattle's C1 fix covers")
+
+    local guard = 0
+    while client.fx ~= nil and guard < 60 do
+      client:stepFx(1 / 60)
+      guard = guard + 1
+    end
+    check(guard < 60, "the burst ages out in bounded frames")
+    eq(client.fx, nil, "...leaving nothing playing")
+  end
+
+  -- ------- startDrain: flash + shake only when the shown bar falls
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 40, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 20, { move() }) } },
+    })
+    local client = setmetatable({
+      sim = sim, mine = 1, messages = {},
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+    local battler = sim:slot(1).battler
+
+    client:startDrain({ drain = battler, slot = 1, to = 40 })
+    local sawFlash, sawShake = false, false
+    for _, e in ipairs(client.fx or {}) do
+      if e.kind == "flash" then sawFlash = true end
+      if e.kind == "shake" then sawShake = true end
+    end
+    check(sawFlash and sawShake,
+          "a falling bar flashes the defender and nudges the field")
+
+    client.fx = nil
+    battler.shownHP = 40 -- settle where the fall above was heading
+    client:startDrain({ drain = battler, slot = 1, to = 55 })
+    local sawFlash2, sawShake2 = false, false
+    for _, e in ipairs(client.fx or {}) do
+      if e.kind == "flash" then sawFlash2 = true end
+      if e.kind == "shake" then sawShake2 = true end
+    end
+    check(not sawFlash2 and not sawShake2,
+          "a heal-shaped climb emits neither -- nothing was struck")
+  end
 end)()
 
 base.release()

@@ -1,31 +1,42 @@
 -- Committed e2e screenshot driver for the top-down battlefield arena
--- (src/Battlefield.lua) — wave-1 checks: colored trainers, ally mon flipped
--- to face right, persistent HUD plates, fx. Captures PNGs to SHOT_DIR and
--- pixel-asserts the wave-1 features rather than only eyeballing them.
+-- (src/Battlefield.lua) -- round 2: dark-slate plates/card, the modern band
+-- widgets (drawMessagePanel/drawCommandGrid/drawListPanel) replacing the
+-- stretched GB chrome, smaller mons (MON_DRAW 60), rounded-callout bubbles
+-- with moveName emphasis, ball/wobble/poof/recall fx with a per-seat hidden
+-- flag, and the nire/nire_hood walk-sheet requantize that stopped custom
+-- chars rendering near-black. Captures PNGs to SHOT_DIR and pixel-asserts
+-- these features rather than only eyeballing them.
 --
 --   SHOT_DIR=/path/to/inspect \
 --   POKEPORT_IDENTITY=bfe2e POKEPORT_TOUCH=0 \
 --   POKEPORT_DRIVER=mods/rby_mmo/tests/drivers/battlefield_shot.lua \
 --   love .
 --
--- From the Gen1Recomp checkout root, with mods/rby_mmo → RBYMMOMod. See
+-- From the Gen1Recomp checkout root, with mods/rby_mmo -> RBYMMOMod. See
 -- tests/drivers/run-battlefield-e2e.sh for the wrapped, gated invocation.
 --
 -- Unlike the throwaway spike this replaces, the mod stub below wires real
 -- save/options/exports so MediatedBattle's selfSpriteId()/peerSpriteId()
 -- resolve to real overworld sprite ids through their own production code
--- path — no monkey-patching battlefieldCtx. Self reaches SPRITE_RED via
+-- path -- no monkey-patching battlefieldCtx. Self reaches SPRITE_RED via
 -- mod.save:get("sprite") -> Chars.resolve -> Gen.defaultSprite (Gen1
--- default when no sprite registry is stubbed); the peer reaches SPRITE_BLUE
--- directly through mod.exports.players(), which MediatedBattle reads
--- verbatim with no registry involved.
+-- default when no sprite matches the stubbed registry) or, once switched to
+-- SPRITE_NIRE for the third human-check frame, resolves for real through a
+-- minimal mod.content.sprites registry populated by the mod's own
+-- src/Cast.lua install() -- the exact path a94464f's requantize fix runs
+-- through. The peer reaches SPRITE_BLUE directly through mod.exports.
+-- players(), which MediatedBattle reads verbatim with no registry involved.
+--
+-- Captures, in order: idle (choose, RED/BLUE) -> action (choose, damage fx)
+-- -> move (moves list) -> ball (throw fx, target seat hidden) -> bubble
+-- (rounded callout) -> nire (self as SPRITE_NIRE, saturation pin).
 --
 -- Coordinate approach (point 4 in the TT2 brief): the battlefield draws into
 -- a 640x360 canvas that Renderer fill-scales to the window, aspect
 -- preserved, letterboxed on whichever axis has slack
--- (src/render/Renderer.lua:700-728, `self.uiFill` branch — Up = min(ph/uih,
+-- (src/render/Renderer.lua:700-728, `self.uiFill` branch -- Up = min(ph/uih,
 -- pw/uiw)). Rather than hook render.hud (whose reported viewport is the
--- *non-fill* letterbox math and would be wrong here — see Renderer.lua:1076-
+-- *non-fill* letterbox math and would be wrong here -- see Renderer.lua:1076-
 -- 1082 vs the uiFill Up/uox/uoy a few lines above it), this driver
 -- recomputes the same fill-scale transform directly from the screenshot's
 -- own pixel dimensions: those stand in exactly for the physical pw/ph the
@@ -55,9 +66,28 @@ return function(game)
 
   local PEER_ID = "bf-e2e-peer"
 
-  -- Proper mod facade stub: save/options/exports are real (if minimal)
-  -- implementations rather than absent, so the production sprite-resolution
-  -- code in MediatedBattle runs unmodified.
+  -- Minimal mod.content.sprites registry, in the exact shape src/Cast.lua's
+  -- own M.install() registers (image/frames/walker/paletteSource) -- see
+  -- that file's header for why those four fields are the whole contract.
+  -- Without this, Chars.resolve("SPRITE_NIRE", ...) can never succeed (its
+  -- M.available check needs mod.content.sprites:get to answer something),
+  -- so switching saveData.sprite alone would silently keep drawing RED --
+  -- Cast.install() below is what actually wires SPRITE_NIRE up for real.
+  local spriteRows = {}
+  local spriteRegistry = {
+    register = function(_, id, record) spriteRows[id] = record end,
+    get = function(_, id) return spriteRows[id] end,
+    each = function(_)
+      return function(_, k)
+        local nk, nv = next(spriteRows, k)
+        if nk then return nk, nv end
+      end, spriteRows, nil
+    end,
+  }
+
+  -- Proper mod facade stub: save/options/exports/content are real (if
+  -- minimal) implementations rather than absent, so the production
+  -- sprite-resolution code in MediatedBattle / Chars / Cast runs unmodified.
   local saveData = { sprite = "SPRITE_RED" }
   local stub = {
     id = "rby_mmo",
@@ -89,6 +119,13 @@ return function(game)
         return { { id = PEER_ID, name = "BLUE", sprite = "SPRITE_BLUE" } }
       end,
     },
+    content = {
+      sprites = spriteRegistry,
+      -- Cast.installScales soft-fails without this (a warning, not an
+      -- error) -- the top-down theatre draws humans from walk.png via
+      -- resolveHumanSheet, never the battle back-pic scale, so it is not
+      -- needed for anything this driver checks.
+    },
   }
   local cache = {}
   local function resolve(name)
@@ -99,8 +136,11 @@ return function(game)
   end
   local Mediated = resolve("MediatedBattle")
   local Battlefield = resolve("Battlefield")
+  local Cast = resolve("Cast")
 
   log("Battlefield.enabled(game) =", tostring(Battlefield.enabled(game)))
+  local castOk = Cast.install()
+  log("Cast.install() =", tostring(castOk), "ids=" .. table.concat(Cast.ids(), ","))
 
   local screen = Mediated.new({
     game = game,
@@ -115,7 +155,12 @@ return function(game)
   screen.mine = {
     { species = "PIKACHU", level = 25, nickname = "SPARKY",
       hp = 40, stats = { hp = 55 },
-      moves = { { id = "THUNDERBOLT", pp = 15, ppMax = 15 } } },
+      -- `maxPp`, not `ppMax`: M:bandMoveRows() (src/MediatedBattle.lua:3565)
+      -- reads `move.maxPp` for the PP column the new moves-list frame
+      -- exercises -- get this wrong and drawModernBand's pcall just
+      -- swallows the mismatch and the frame silently falls back to the
+      -- classic GB list instead of the widget under test.
+      moves = { { id = "THUNDERBOLT", pp = 15, maxPp = 15 } } },
   }
   screen.active = 1
   screen.slots[screen:foeSlot()] = {
@@ -184,6 +229,12 @@ return function(game)
     return best, x1 - x0 + 1, y1 - y0 + 1
   end
 
+  local function isNearWhite(r, g, b)
+    local lo = math.min(r, g, b)
+    local hi = math.max(r, g, b)
+    return lo > 0.82 and (hi - lo) < 0.06
+  end
+
   -- Fraction of near-white pixels over a canvas-space rect, inset a few
   -- pixels off the rounded-corner border.
   local function nearWhiteFraction(data, imgW, imgH, toScreen, rect, insetPx)
@@ -197,13 +248,70 @@ return function(game)
       for x = x0, x1 do
         local r, g, b = data:getPixel(x, y)
         total = total + 1
-        local lo = math.min(r, g, b)
-        local hi = math.max(r, g, b)
-        if lo > 0.82 and (hi - lo) < 0.06 then hit = hit + 1 end
+        if isNearWhite(r, g, b) then hit = hit + 1 end
       end
     end
     if total == 0 then return 0 end
     return hit / total
+  end
+
+  -- Dark-panel test: PANEL_BG is rgb (0.078, 0.094, 0.125) at ~0.85 alpha
+  -- (src/Battlefield.lua:78-83) composited over whatever the arena paints
+  -- behind it, so a blended pixel stays dark and -- unlike the grass beneath
+  -- it -- is never green-dominant: grass greens run g-highest, while the
+  -- slate fill's own highest channel, if any, is blue. Both conditions must
+  -- hold, so a bright saturated grass pixel reads as "not the panel" even if
+  -- one test alone would have let it through.
+  local function isSlateDark(r, g, b)
+    local mx = math.max(r, g, b)
+    if mx > 0.42 then return false end
+    if g > r + 0.03 and g > b + 0.03 then return false end
+    return true
+  end
+
+  local function darkPanelFraction(data, imgW, imgH, toScreen, rect, insetPx)
+    insetPx = insetPx or 4
+    local x0, y0 = toScreen(rect.x + insetPx, rect.y + insetPx)
+    local x1, y1 = toScreen(rect.x + rect.w - insetPx, rect.y + rect.h - insetPx)
+    x0, y0 = clampInt(x0, 0, imgW - 1), clampInt(y0, 0, imgH - 1)
+    x1, y1 = clampInt(x1, 0, imgW - 1), clampInt(y1, 0, imgH - 1)
+    local total, hit = 0, 0
+    for y = y0, y1 do
+      for x = x0, x1 do
+        local r, g, b = data:getPixel(x, y)
+        total = total + 1
+        if isSlateDark(r, g, b) then hit = hit + 1 end
+      end
+    end
+    if total == 0 then return 0 end
+    return hit / total
+  end
+
+  -- Max, over the rows of a canvas-space rect, of that row's near-white
+  -- pixel fraction. A solid dark panel reads ~0 on every row; the one row a
+  -- white name/label prints on spikes -- so "does some row carry text"
+  -- reads as a max rather than a whole-rect average, which the bars/pills/
+  -- chips elsewhere on the same plate would dilute into looking empty.
+  local function maxRowWhiteFraction(data, imgW, imgH, toScreen, rect, insetPx)
+    insetPx = insetPx or 4
+    local x0, y0 = toScreen(rect.x + insetPx, rect.y + insetPx)
+    local x1, y1 = toScreen(rect.x + rect.w - insetPx, rect.y + rect.h - insetPx)
+    x0, y0 = clampInt(x0, 0, imgW - 1), clampInt(y0, 0, imgH - 1)
+    x1, y1 = clampInt(x1, 0, imgW - 1), clampInt(y1, 0, imgH - 1)
+    local best = 0
+    for y = y0, y1 do
+      local hit, total = 0, 0
+      for x = x0, x1 do
+        local r, g, b = data:getPixel(x, y)
+        total = total + 1
+        if isNearWhite(r, g, b) then hit = hit + 1 end
+      end
+      if total > 0 then
+        local frac = hit / total
+        if frac > best then best = frac end
+      end
+    end
+    return best
   end
 
   local function humanRect(h)
@@ -241,7 +349,7 @@ return function(game)
     local ctx = screen:battlefieldCtx()
     local layout = Battlefield.layout(ctx)
 
-    -- (a) trainer regions carry saturated (non-gray) color — both seats.
+    -- (a) trainer regions carry saturated (non-gray) color -- both seats.
     for _, h in ipairs(layout.humans) do
       local rect = humanRect(h)
       local sat = maxSaturation(data, imgW, imgH, toScreen, rect)
@@ -249,15 +357,21 @@ return function(game)
         ("max sat=%.3f rect=%d,%d %dx%d"):format(sat, rect.x, rect.y, rect.w, rect.h))
     end
 
-    -- (b) ally plate panel reads as a near-white HUD card.
+    -- (b) ally plate panel is now a dark slate card (round 2 restyle), not
+    -- the old near-white GB tile: assert it carries slate-dark panel fill
+    -- (and is not secretly grass green showing through the translucent
+    -- fill) AND still carries its white name-text row somewhere inside.
     local allyPlate = nil
     for _, p in ipairs(layout.plates) do
       if p.side == "ally" then allyPlate = p end
     end
     if allyPlate then
-      local frac = nearWhiteFraction(data, imgW, imgH, toScreen, allyPlate)
-      check(frac > 0.5, label .. ": ally plate near-white",
-        ("near-white fraction=%.2f"):format(frac))
+      local darkFrac = darkPanelFraction(data, imgW, imgH, toScreen, allyPlate)
+      check(darkFrac > 0.25, label .. ": ally plate carries dark-panel fill",
+        ("dark fraction=%.2f"):format(darkFrac))
+      local textFrac = maxRowWhiteFraction(data, imgW, imgH, toScreen, allyPlate)
+      check(textFrac > 0.03, label .. ": ally plate has a white name-text row",
+        ("best row white fraction=%.3f"):format(textFrac))
     else
       check(false, label .. ": ally plate present")
     end
@@ -275,6 +389,21 @@ return function(game)
         check(params.flip == false, label .. ": foe mon flip==false",
           "facing=" .. tostring(mon.facing))
       end
+    end
+
+    -- (d) the bottom band is modern dark-panel chrome, not the old GB
+    -- white-tile chrome stretched 4x horizontally -- only meaningful while a
+    -- band widget is actually up (phase == "choose" draws the FIGHT/PKMN/
+    -- ITEM/RUN grid here; other phases are asserted where they're driven).
+    if screen.phase == "choose" then
+      local band = layout.menuBand
+      local darkFrac = darkPanelFraction(data, imgW, imgH, toScreen, band, 6)
+      check(darkFrac > 0.30, label .. ": menu band carries dark-panel fill",
+        ("dark fraction=%.2f"):format(darkFrac))
+      local whiteFrac = nearWhiteFraction(data, imgW, imgH, toScreen, band, 6)
+      check(whiteFrac < 0.30,
+        label .. ": menu band white fraction dropped (no GB chrome)",
+        ("near-white fraction=%.2f"):format(whiteFrac))
     end
   end
 
@@ -307,14 +436,116 @@ return function(game)
   local path2 = SHOT_DIR .. "/battlefield-action.png"
   if U.shot(game, path2) then
     log("captured", path2)
-    -- The idle-frame checks (a/b/c) still hold on the action frame -- fx and
-    -- a lower HP must not break trainer color, plate panel, or ally flip.
+    -- The idle-frame checks (a/b/c/d) still hold on the action frame -- fx
+    -- and a lower HP must not break trainer color, plate panel, ally flip,
+    -- or the band chrome.
     assertShots(path2, "action")
     local model = Battlefield.plateModel({ hp = 10, maxHp = 45, shownHp = 20 })
     check(model.frac < 0.5, "action: plate model reflects lower HP",
       ("frac=%.2f"):format(model.frac))
   else
     log("warn", "action frame did not reach disk -- idle-only run", path2)
+  end
+
+  -- ---- (b) moves-list frame: phase == "move", drawListPanel's MOVES list ----
+  screen.phase = "move"
+  screen.cursor = 1
+  U.wait(6)
+  local path3 = SHOT_DIR .. "/battlefield-move.png"
+  if U.shot(game, path3) then
+    log("captured", path3)
+    -- Same baseline as idle/action (a/b/c); the band check inside skips
+    -- itself here since screen.phase ~= "choose" -- the list panel's own
+    -- shape is not asserted pixel-by-pixel, only that switching to it does
+    -- not disturb the trainer/plate/flip contract.
+    assertShots(path3, "move")
+  else
+    log("warn", "move frame did not reach disk", path3)
+  end
+
+  -- ---- (c) ball frame: a throw in flight, target seat hidden ----
+  -- Real chain is TOSS_ANIM -> POOF_ANIM -> ... (BattleSim/Turn.lua's
+  -- _emitBallChain, mirrored in server/lib/battle); one queued row is enough
+  -- here. `ballTargetSlot` defaults the thrower to mySlot() when the row
+  -- names neither slot nor side, so this throw lands on the foe seat.
+  -- BALL_HIDE_FX kinds ("ball", "recall", "wobble") are held by stepFx at
+  -- t==1 while self.ballFlow.side still matches
+  -- (src/MediatedBattle.lua:2986-3037), so `hidden` reads true for the whole
+  -- throw regardless of exactly how many frames land inside FX_SPAN.ball's
+  -- 0.60s hold -- no exact-timing assumption needed for the assertion, only
+  -- for landing the screenshot roughly mid-arc rather than after the hold
+  -- has already released.
+  screen.phase = "choose"
+  screen.lines[#screen.lines + 1] = { anim = "TOSS_ANIM" }
+  U.wait(14) -- ~0.23s @60Hz, inside the 0.60s ball hold -- lands mid-arc
+  local ballFx = Battlefield.fxSeat(screen.fx, "foe", 1)
+  check(ballFx.hidden == true, "ball: target (foe) seat hidden mid-throw",
+    "fxCount=" .. tostring(screen.fx and #screen.fx or 0))
+  local throwerFx = Battlefield.fxSeat(screen.fx, "ally", 1)
+  check(throwerFx.hidden == false, "ball: thrower (ally) seat stays visible")
+  local path4 = SHOT_DIR .. "/battlefield-ball.png"
+  if U.shot(game, path4) then
+    log("captured", path4)
+  else
+    log("warn", "ball frame did not reach disk", path4)
+  end
+
+  -- ---- (d) bubble frame: rounded callout, moveName emphasised ----
+  screen:noteBattlefieldBubble({ anim = "THUNDERBOLT", slot = screen:mySlot() })
+  U.wait(3)
+  local bubbleCtx = screen:battlefieldCtx()
+  local bubbleLayout = Battlefield.layout(bubbleCtx)
+  check(#bubbleLayout.bubbles >= 1, "bubble: at least one bubble placed",
+    "count=" .. tostring(#bubbleLayout.bubbles))
+  if bubbleLayout.bubbles[1] then
+    check(bubbleLayout.bubbles[1].moveName ~= nil,
+      "bubble: carries a moveName for the renderer to emphasise",
+      "moveName=" .. tostring(bubbleLayout.bubbles[1].moveName))
+  end
+  local path5 = SHOT_DIR .. "/battlefield-bubble.png"
+  if U.shot(game, path5) then
+    log("captured", path5)
+  else
+    log("warn", "bubble frame did not reach disk", path5)
+  end
+
+  -- ---- third human check: SELF as SPRITE_NIRE (requantize pin) ----
+  -- RED and BLUE stayed the trainers for every frame above, so the (a)
+  -- saturation checks there are directly comparable to wave-1's. This frame
+  -- alone switches SELF to the mod's own custom character, which a94464f
+  -- requantized (walk.png export residue pulled up to the exact 4 DMG
+  -- shades) after it was found rendering near-black on the arena.
+  screen.phase = "choose"
+  saveData.sprite = "SPRITE_NIRE"
+  U.wait(6)
+  local path6 = SHOT_DIR .. "/battlefield-nire.png"
+  if U.shot(game, path6) then
+    log("captured", path6)
+    local ok6, data6 = loadShot(path6)
+    if ok6 and data6 then
+      local imgW6, imgH6 = data6:getDimensions()
+      local toScreen6 = fillTransform(imgW6, imgH6)
+      local nireCtx = screen:battlefieldCtx()
+      local nireLayout = Battlefield.layout(nireCtx)
+      local ally = nil
+      for _, h in ipairs(nireLayout.humans) do
+        if h.side == "ally" then ally = h end
+      end
+      if ally then
+        check(ally.spriteId == "SPRITE_NIRE",
+          "nire: self resolved to SPRITE_NIRE (Cast.install + Chars.resolve)",
+          "spriteId=" .. tostring(ally.spriteId))
+        local sat = maxSaturation(data6, imgW6, imgH6, toScreen6, humanRect(ally))
+        check(sat > 0.12, "nire: ally trainer saturated (requantize fix)",
+          ("max sat=%.3f"):format(sat))
+      else
+        check(false, "nire: ally human placed")
+      end
+    else
+      check(false, "nire: load screenshot", tostring(data6))
+    end
+  else
+    log("warn", "nire frame did not reach disk", path6)
   end
 
   log("GAPS:" .. tostring(fail))

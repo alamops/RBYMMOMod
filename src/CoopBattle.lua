@@ -590,6 +590,9 @@ function M.new(game, opts)
     local ok, player = pcall(eng.AnimPlayer.new, game.data.battle_anims)
     if ok then self.animPlayer = player end
   end
+  -- Which surround the presenter paints, decided before the first frame rather
+  -- than on the first update (see `refreshLetterbox`).
+  self:refreshLetterbox()
   return self
 end
 
@@ -903,6 +906,9 @@ function M:queueFoeIntroSendOut()
         local battler = s and s.battler
         if battler then
           battle.growIn = { slot = idx, frame = 0 }
+          -- The arena's own send-out beat, at the same moment (see
+          -- noteBattlefieldSpawn); growIn is the classic stage's.
+          battle:noteBattlefieldSpawn(idx)
           battle:playEntranceCry(battler)
         end
       end,
@@ -938,6 +944,9 @@ function M:queueIntroSendOut()
       local battler = slot and slot.battler
       if battler then
         battle.growIn = { slot = mine, frame = 0 }
+        -- The arena's own send-out beat, at the same moment (see
+        -- noteBattlefieldSpawn); growIn is the classic stage's.
+        battle:noteBattlefieldSpawn(mine)
         battle:playEntranceCry(battler)
       end
     end,
@@ -967,6 +976,9 @@ function M:queueIntroSendOut()
       local battler = slot and slot.battler
       if battler then
         battle.growIn = { slot = pIndex, frame = 0 }
+        -- The arena's own send-out beat, at the same moment (see
+        -- noteBattlefieldSpawn); growIn is the classic stage's.
+        battle:noteBattlefieldSpawn(pIndex)
         battle:playEntranceCry(battler)
       end
     end,
@@ -1214,6 +1226,13 @@ local MSG_AUTO_ADVANCE = 1.6
 
 function M:update(dt)
   self.frame = self.frame + 1
+  -- The surround the presenter paints round this screen depends on which stage
+  -- is up, and it reads the answer off this object every frame (see
+  -- `refreshLetterbox`).
+  self:refreshLetterbox()
+  -- Arena effects advance on wall time whatever the phase: a lunge or a sink
+  -- started under one phase must not freeze because a menu opened over it.
+  self:stepFx(dt)
   -- Grow-in advances on the same fixed step as the engine's AnimateSendingOutMon.
   if self.growIn then
     self.growIn.frame = (self.growIn.frame or 0) + 1
@@ -1247,10 +1266,22 @@ function M:update(dt)
         local ok, finished = pcall(self.animPlayer.isDone, self.animPlayer)
         done = (not ok) or finished
       end
+      -- ...and a row that started an arena effect is held for as long as that
+      -- effect plays, on top of whatever the engine's player wanted. The row
+      -- *is* the throw: one that ended first would cut the arc off mid-air and
+      -- let the next line print over a ball still in flight. Only ever set on
+      -- the battlefield path (`startBallFx`), so classic and Gen 2 keep the
+      -- player's own timing exactly.
+      if self.animHold then
+        self.animDwell = (self.animDwell or 0) + (dt or 0)
+        if self.animDwell < self.animHold then done = false end
+      end
       if done or (input and input:wasPressed("b")) then
         -- Hit thud after the flash (PlayApplyingAttackSound timing).
         self:applyPendingHitFx()
         self.anim = nil
+        self.animHold = nil
+        self.animDwell = nil
       end
       return
     end
@@ -3023,6 +3054,15 @@ function M:startDrain(row)
   -- where it was going rather than left holding the queue.
   self.hitSlot = row.slot
   self.draining = { battler = battler, slot = row.slot, to = to, frames = 120 }
+  -- Now, with the bar about to move, is when the hit reads on the arena: the
+  -- defender flashes white and the field takes a nudge. Emitted here rather
+  -- than when the `damage` event arrived because a resolved turn arrives as one
+  -- batch -- all four seats would jolt in the same frame, ahead of any text. A
+  -- climb (a heal, a drain move's restore) gets neither: nothing was struck.
+  if battler.shownHP > to then
+    self:emitFx("flash", row.slot)
+    self:emitFx("shake", row.slot)
+  end
   return true
 end
 
@@ -3085,6 +3125,12 @@ function M:startFaint(row)
   battler.displayFainted = true
   self.hitSlot = row.slot
   self.faintFx = { battler = battler, slot = row.slot, frames = FAINT_FRAMES }
+  -- The arena's half of the same fall. `faintFx` above stays the sequencer --
+  -- it is what holds the message queue for its thirty frames -- and this is
+  -- what the seat is actually drawn through while it does (`Battlefield.fxSeat`
+  -- sinks and fades it). Held past its own clock by `stepFx` for as long as the
+  -- sequencer runs, so the two cannot end at different times.
+  self:emitFx("faint", row.slot)
   return true
 end
 
@@ -3159,6 +3205,11 @@ end
 -- screen may finally show what the field has shown since the `send` landed.
 function M:applySwap(row)
   self:displayShadow()[row.swap] = row.battler
+  -- The screen has just caught up with a send-out, so this is the frame the new
+  -- monster appears on the arena. Same beat the intro gets (and the same beat
+  -- the classic stage spends on `growIn`); a monster that blinked into
+  -- existence at full size was the one arrival with no animation at all.
+  if row.battler ~= nil then self:noteBattlefieldSpawn(row.swap) end
 end
 
 -- Hold what is on screen now, before the sim is asked to move.
@@ -3188,6 +3239,14 @@ end
 function M:snapDisplay()
   self.draining = nil
   self.faintFx = nil
+  -- The arena's effects go with them, and a throw's hold goes first: an entry
+  -- retained at t == 1 outlives its own clock on purpose (a held sink, a
+  -- monster inside a ball), so dropping the list without ending the flow that
+  -- justifies the hold would leave a seat hidden for the rest of the fight.
+  self.ballFlow = nil
+  self.fx = nil
+  self.animHold = nil
+  self.animDwell = nil
   -- The shadow goes with them. Nothing is owed an exit any more, so every slot
   -- draws the monster the field says is standing in it -- which is the safety
   -- net for a swap row that never arrived, and the reason a resync puts the
@@ -4306,8 +4365,38 @@ function M:wantsFillScale()
 end
 
 -- White letterbox voids so arena edges match the surround (same habit as
--- engine BattleState). Harmless on the classic Gen2 path.
+-- engine BattleState) -- on the **classic** stage, which is a white 160×144
+-- canvas the paper shade matches exactly. Harmless on the classic Gen2 path.
+--
+-- How the flag is read, because it decides how it can be answered: the
+-- presenter walks the whole state stack top-down once a frame looking for any
+-- state whose `letterboxWhite` is truthy, and fills the voids with
+-- `PaletteFX.paperShade` when it finds one (engine
+-- src/render/Renderer.lua:809-830). It is a plain field read and never a
+-- call -- so a screen that wants a different answer per display mode has to
+-- shadow the class default on the instance, which is what `refreshLetterbox`
+-- below does.
+--
+-- The arena is not a white canvas. It is edge-to-edge art with its own dark
+-- chrome, and in SGB mode the paper shade is an off-white pink -- so the
+-- surround read as the overworld's paper bleeding into the theatre, which is
+-- the leak this fixes. MediatedBattle simply never sets the flag (see the
+-- `isOpaque` comment in its state table) and gets the engine default, black;
+-- this screen cannot, because Gen 2 still runs the classic stage through the
+-- same object.
 M.letterboxWhite = true
+
+-- Put the flag where the display mode says it belongs. One generation lookup,
+-- idempotent, so it can run on the way in and on every update -- the mode can
+-- move under a hot reload, and the presenter would keep reading a stale answer
+-- off the instance forever otherwise.
+function M:refreshLetterbox()
+  local ok, wide = pcall(self.usesBattlefield, self)
+  if not ok then return end
+  -- `false` rather than nil: nil falls back through `__index` to the class
+  -- default above and paints paper round the arena again.
+  self.letterboxWhite = not wide
+end
 
 -- ------- Battlefield theatre helpers (Gen1 only)
 
@@ -4492,6 +4581,14 @@ function M:ensureBattlefieldLoaded()
 end
 
 -- Living active field seats for one side (viewer-relative), for Battlefield.
+--
+-- A seat that is *sinking* is still a seat. `startFaint` raises
+-- `displayFainted` before the fall so the classic stage can hand the pic to
+-- `drawSinking`, which means `hidden` answers yes for the whole of a sink --
+-- and on the arena, where the fall is an fx entry against the seat rather than
+-- a separate draw call, that took the monster off the field a beat before it
+-- fell. The two paths never both draw it: `drawField` is the classic stage and
+-- `Battlefield.draw` is this one, so there is no sink offset applied twice.
 function M:battlefieldSeats(theirs)
   local out = {}
   if not self.sim then return out end
@@ -4499,15 +4596,30 @@ function M:battlefieldSeats(theirs)
   for _, slot in ipairs(self.sim.slots or {}) do
     if self:foeSide(slot.index) == (theirs and true or false) then
       local battler = self:shownBattlerAt(slot.index)
-      if not hidden(slot, battler)
+      local sinking = self:sinkingAt(slot.index)
+      local falling = sinking ~= nil and battler ~= nil and not slot.gone
+        and sinking.battler == battler
+      if (falling or not hidden(slot, battler))
          and not (introHide and introHide[slot.index]) then
         local mon = battler.mon or {}
         out[#out + 1] = {
           index = slot.index,
           name = battler.name or mon.nickname or mon.species or "?",
           level = mon.level or 1,
-          hp = displayHP(battler),
-          maxHp = mon.maxHp or mon.hp or 1,
+          -- The seat HP contract (see Battlefield.cardModel): `hp` is the sim's
+          -- truth and `shownHp` is the display clock the bar is drawn from. The
+          -- gap between them *is* the drain, and passing the clock as both left
+          -- the arena unable to tell a bar mid-fall from a monster that really
+          -- had that much left.
+          hp = mon.hp or 0,
+          shownHp = displayHP(battler),
+          -- `stats.hp` is where a co-op mon keeps its maximum (`startDrain`
+          -- reads the same field); `maxHp` is the mediated sheet's spelling and
+          -- is honoured first for a battler built from one. Falling through to
+          -- `mon.hp` last -- the current number -- is a full bar whatever has
+          -- happened, which is why the plates never moved before the display
+          -- clock was split out.
+          maxHp = mon.maxHp or (mon.stats and mon.stats.hp) or mon.hp or 1,
           status = mon.status,
           species = mon.species,
           icon = seatIconFor(self, slot, battler),
@@ -4603,10 +4715,17 @@ function M:battlefieldHumanIndex(slotIndex)
   return nil, nil
 end
 
-function M:noteBattlefieldBubble(slotIndex, text)
+function M:noteBattlefieldBubble(slotIndex, text, moveName)
   if not self:usesBattlefield() then return end
   local move = moveNameFromBattleText(text)
+  if type(moveName) == "string" and moveName ~= "" then move = moveName end
   if not move then return end
+  -- The engine's ball / hide / shake markers are not move callouts, and one of
+  -- them reaching here is a bubble that says "used TOSS_ANIM!" over the
+  -- trainer's head. The call sites filter them, and so does this: the message
+  -- path below parses the name out of arbitrary battle text, so a referee
+  -- sentence carrying a marker would otherwise arrive by the back door.
+  if move:find("_ANIM", 1, true) then return end
   -- Humans + coop_npc foe seats (owner nil → foe human 1). coop_wild foes
   -- have no foeHumans, so battlefieldHumanIndex returns nil.
   local side, humanIndex = self:battlefieldHumanIndex(slotIndex)
@@ -4615,7 +4734,9 @@ function M:noteBattlefieldBubble(slotIndex, text)
     {
       side = side,
       humanIndex = humanIndex,
-      text = move,
+      -- The lead-in, small; the move is the line the renderer emphasises.
+      text = "used",
+      moveName = move,
       born = battlefieldFrame(self),
     },
   }
@@ -4635,6 +4756,9 @@ function M:battlefieldBubbleCtx()
         side = b.side,
         humanIndex = b.humanIndex,
         text = b.text,
+        -- Optional, and only on a move callout: the renderer gives it its own
+        -- larger line under the lead-in.
+        moveName = b.moveName,
         t = 1 - (age / BATTLEFIELD_BUBBLE_LIFE),
       }
     end
@@ -4643,16 +4767,336 @@ function M:battlefieldBubbleCtx()
   return out
 end
 
+-- ------- arena effects (Gen1 battlefield only)
+--
+-- The screen owns the clock; Battlefield owns the shape. Every entry is
+-- `{ kind, side, seatIndex, t }` by the time it reaches the renderer, and each
+-- shape there is a pure function of `t` -- so a frame is reproducible and the
+-- suite can assert one without a graphics context.
+--
+-- None of this exists on the classic 160×144 stage or on Gen 2: those draw
+-- through `drawField`, which has its own sink (`drawSinking`) and no renderer
+-- for anything else, so every emitter below is gated on `usesBattlefield()`.
+--
+-- Entries are held internally against the **sim slot** rather than against a
+-- seat position: the arena seat index is the slot's place in the *drawn* list,
+-- which is filtered (a fainted seat leaves it), so it can only honestly be
+-- decided at ctx time. `battlefieldFxCtx` does that projection.
+
+-- Effect lifetimes in seconds. Shared with MediatedBattle's twin table --
+-- these two screens draw the same arena, and a throw that took longer on one
+-- of them would be the same animation at two speeds.
+local FX_SPAN = {
+  lunge = 0.35,
+  flash = 0.30,
+  shake = 0.25,
+  faint = 0.60,
+  spawn = 0.40,
+  -- The ball flow. One constant per kind, and each one is also the dwell the
+  -- queued row that emits it is held for -- the row *is* the effect, so a
+  -- throw that outlives its row would be cut off by the next line and a row
+  -- that outlives its throw would stall the fight on a finished animation.
+  recall = 0.35, -- HIDEPIC: the monster shrinks into the ball
+  ball   = 0.60, -- TOSS / GREATTOSS / ULTRATOSS: the arc
+  wobble = 0.70, -- SHAKE: one rock, one per shake the referee counted
+  poof   = 0.45, -- POOF / SHOWPIC: the burst, and what comes out of it
+}
+
+-- The engine's ball markers, and what each one is on the arena. Ball ids vary
+-- with the ball (`_emitBallChain` in BattleSim/Turn.lua picks the toss by
+-- item), so the toss is listed three times rather than pattern-matched.
+local BALL_FX = {
+  TOSS_ANIM      = "ball",
+  GREATTOSS_ANIM = "ball",
+  ULTRATOSS_ANIM = "ball",
+  HIDEPIC_ANIM   = "recall",
+  SHAKE_ANIM     = "wobble",
+  POOF_ANIM      = "poof",
+  SHOWPIC_ANIM   = "poof",
+}
+
+-- The kinds that mean "this seat is inside the ball". Held at t == 1 the way a
+-- faint sink is (see `stepFx`): the queue leaves a frame or two between one row
+-- ending and the next starting, and a monster that flickered back into view in
+-- that gap would be out of the ball and in it again twice a throw.
+local BALL_HIDE_FX = { ball = true, recall = true, wobble = true }
+
+-- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
+-- number came off the wire, and a hub claiming a thousand would otherwise
+-- queue a thousand rows the player cannot skip past.
+local BALL_SHAKE_MAX = 8
+
+-- Which arena side a field slot sits on, viewer-relative.
+function M:fxSideFor(index)
+  if index ~= nil and self:foeSide(index) then return "foe" end
+  return "ally"
+end
+
+-- Start one effect. Returns the record so a caller that needs to wait on it can
+-- hold the reference rather than search the list.
+function M:emitFx(kind, index)
+  if not self:usesBattlefield() then return nil end
+  local span = FX_SPAN[kind]
+  if not span then return nil end
+  local fx = {
+    kind = kind,
+    slot = index,
+    side = self:fxSideFor(index),
+    t = 0,
+    elapsed = 0,
+    duration = span,
+  }
+  local list = self.fx
+  if type(list) ~= "table" then
+    list = {}
+    self.fx = list
+  end
+  list[#list + 1] = fx
+  return fx
+end
+
+-- ------- the ball flow
+--
+-- Up to six queued rows describe one throw -- toss, burst, recall, the shakes,
+-- and the pair that ends a failure -- and each one is played here as it reaches
+-- the head of the message queue, never when the packet carrying it arrived.
+-- `_emitBallChain` (src/BattleSim/Turn.lua:1737, mirrored in
+-- server/lib/battle) is the order they come in.
+
+-- The seat a ball row is really about.
+--
+-- Every row in the chain is stamped with the *thrower's* slot, and the engine's
+-- own chain hides the enemy pic whoever threw -- so the arc, the recall and the
+-- wobbles all belong to a seat on the side opposite the thrower. A host-sim row
+-- carries no slot at all (CoopField queues `attackerIsPlayer` and nothing
+-- else), so that is the fallback, and viewer-relative either way.
+function M:ballTargetSlot(row)
+  local threwAlly = true
+  if type(row) == "table" then
+    if row.from ~= nil then
+      threwAlly = not self:foeSide(row.from)
+    elseif row.attackerIsPlayer ~= nil then
+      threwAlly = row.attackerIsPlayer and true or false
+    end
+  end
+  -- The first seat on the far side that is still on the field. A catch is a
+  -- wild fight, where there is exactly one; a 2-on-2 that somehow produced a
+  -- throw still lands it on somebody rather than nobody.
+  local wantFoe = threwAlly
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if not slot.gone and self:foeSide(slot.index) == wantFoe then
+      return slot.index
+    end
+  end
+  return nil
+end
+
+-- Retire the hiding effects on one side. Paired with the emit that replaces
+-- them, so the seat is never uncovered between two rows of the same throw.
+function M:dropBallFx(side)
+  local list = self.fx
+  if type(list) ~= "table" then return end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    local hiding = type(fx) == "table" and BALL_HIDE_FX[fx.kind] and fx.side == side
+    if not hiding then kept[#kept + 1] = fx end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+-- The monster is out of the ball (or the seat it was on is gone): drop the hold
+-- that kept it hidden.
+function M:clearBallFlow()
+  local flow = self.ballFlow
+  if not flow then return end
+  self.ballFlow = nil
+  self:dropBallFx(flow.side)
+end
+
+-- A ball marker reaches the head of the queue. Returns the effect kind it
+-- played, or nil for a row with nothing left to show.
+--
+-- Only ever called from the battlefield branch of `startAnim`: the classic
+-- 160×144 path and Gen 2 run the engine's AnimPlayer over these same rows and
+-- have no arena for any of this.
+function M:startBallFx(row)
+  if not self:usesBattlefield() then return nil end
+  if type(row) ~= "table" then return nil end
+  local kind = BALL_FX[row.anim]
+  if not kind then return nil end
+
+  local index = self:ballTargetSlot(row)
+  if index == nil then return nil end
+  local side = self:fxSideFor(index)
+  local flow = self.ballFlow
+  if flow and flow.side ~= side then
+    -- A throw at the other seat: the old one is over whatever it was waiting
+    -- for, and leaving it held would keep a monster in a ball nobody threw.
+    self:clearBallFlow()
+    flow = nil
+  end
+  local hiddenNow = (flow ~= nil) and flow.hidden == true
+
+  if kind == "poof" then
+    -- A POOF outside a throw is the intro's own send-out marker: `queueIntroSendOut`
+    -- stamps it with the seat **coming out** rather than with a thrower, and
+    -- that seat is still under `introHide` while this row plays. Its burst is
+    -- emitted at the reveal instead (`noteBattlefieldSpawn`), where there is a
+    -- monster on the arena for it to happen over.
+    if flow == nil then return nil end
+    -- POOF is both halves of a throw: the ball bursting open on the way in, and
+    -- the monster coming back out of it when it breaks free. Which one it is is
+    -- which side of HIDEPIC the row landed on. A failure ends POOF + SHOWPIC
+    -- and only the first of those is the reappearance -- the second would be a
+    -- burst over a monster already standing there.
+    if row.anim == "SHOWPIC_ANIM" and not hiddenNow then return nil end
+    self:emitFx("poof", index)
+    -- Either way the ball is open, so the hold that hid the seat for the arc
+    -- ends here: a throw the referee gave no shakes at all ends on this row,
+    -- and leaving the flow standing would keep the monster inside a ball that
+    -- had already burst. The recall behind a real catch attempt opens a fresh
+    -- flow of its own (HIDEPIC is the next row).
+    self:clearBallFlow()
+    -- ...and if it *was* hidden, this POOF is the monster coming back out.
+    if hiddenNow then self:emitFx("spawn", index) end
+    self.animHold = FX_SPAN.poof
+    return kind
+  end
+
+  -- SHAKE carries the whole count on a single row (`anim("SHAKE_ANIM", shakes)`
+  -- in both twins -- src/BattleSim/Turn.lua:1752), and the contract is one
+  -- wobble per effect, so the row plays the first rock and puts the remainder
+  -- back at the head of the queue. Still queue-ordered, and still one thing at
+  -- a time: nothing behind it can start until the last wobble has been here.
+  if kind == "wobble" then
+    local left = math.floor(tonumber(row.amount) or 1)
+    if left > BALL_SHAKE_MAX then left = BALL_SHAKE_MAX end
+    if left > 1 and type(self.messages) == "table" then
+      table.insert(self.messages, 1, {
+        anim = row.anim, from = row.from, to = row.to,
+        attackerIsPlayer = row.attackerIsPlayer, amount = left - 1,
+      })
+    end
+  end
+
+  -- The hiding kinds. The previous one is dropped in the same call the next is
+  -- emitted in, and `stepFx` holds a finished one at its last frame, so the
+  -- seat stays covered from the recall to the burst that undoes it.
+  self:dropBallFx(side)
+  self.ballFlow = { side = side, slot = index, hidden = hiddenNow or kind == "recall" }
+  self:emitFx(kind, index)
+  self.animHold = FX_SPAN[kind]
+  return kind
+end
+
+-- A monster is revealed on its seat: burst, then scale in.
+--
+-- Called at the moment the pic actually becomes drawable rather than when the
+-- POOF row played -- the intro holds the seat under `introHide` until the `act`
+-- row behind the marker clears it, so a burst emitted with the marker would
+-- have finished before there was anything on the arena to burst over. Paired
+-- with the classic stage's `growIn`, which is the same beat on the other path.
+function M:noteBattlefieldSpawn(index)
+  if index == nil then return end
+  if not self:usesBattlefield() then return end
+  self:emitFx("poof", index)
+  self:emitFx("spawn", index)
+end
+
+-- Advance every live effect and retire the finished ones. Scaled by dt so the
+-- fixed 60Hz step reads as one frame and a headless second still completes.
+function M:stepFx(dt)
+  local list = self.fx
+  if type(list) ~= "table" or #list == 0 then return end
+  local step = tonumber(dt) or 0
+  if step <= 0 then step = 1 / 60 end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    if type(fx) == "table" then
+      local span = tonumber(fx.duration) or FX_SPAN[fx.kind] or 0.3
+      if span <= 0 then span = 0.3 end
+      fx.elapsed = (tonumber(fx.elapsed) or 0) + step
+      local t = fx.elapsed / span
+      if t >= 1 then
+        fx.t = 1
+        -- A finished sink is *held* rather than retired, and the sequencer says
+        -- for how long: `faintFx` / `sinkingAt` is what the message queue is
+        -- actually blocked on (thirty frames of `stepFaint`), and the end state
+        -- of the effect is a monster face down and invisible. Retiring it the
+        -- moment its own clock ran out popped the KO back to full opacity for
+        -- the rest of the fall.
+        if fx.kind == "faint" and self:sinkingAt(fx.slot) then
+          kept[#kept + 1] = fx
+        elseif BALL_HIDE_FX[fx.kind] and self.ballFlow
+            and self.ballFlow.side == fx.side then
+          -- Same hold, same reason, for a monster inside a ball: its end state
+          -- is a seat with nothing standing on it, and the row that undoes that
+          -- is still to come. `startBallFx` replaces it as each row plays and
+          -- `clearBallFlow` drops it when the monster comes back out.
+          kept[#kept + 1] = fx
+        end
+      else
+        fx.t = t
+        kept[#kept + 1] = fx
+      end
+    end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+-- Every effect, projected onto the seats actually being drawn.
+--
+-- `seatIndex` is the 1-based position within the side's seat list, which is the
+-- only thing `Battlefield.fxSeat` / `seatOf` can match on -- and that list is
+-- filtered, so the answer moves as monsters leave the field. An effect whose
+-- seat is not on the arena is dropped rather than published with no seat index:
+-- an entry carrying none applies to *every* seat on its side, which in a
+-- 2-on-2 would flash the partner too. The field-wide jolt is the exception --
+-- `fxFieldShake` ignores side and seat by design.
+function M:battlefieldFxCtx(allySeats, foeSeats)
+  local list = self.fx
+  if type(list) ~= "table" or #list == 0 then return nil end
+  local seatIndexOf = {}
+  for i, seat in ipairs(allySeats or {}) do
+    if seat.index ~= nil then seatIndexOf[seat.index] = i end
+  end
+  for i, seat in ipairs(foeSeats or {}) do
+    if seat.index ~= nil then seatIndexOf[seat.index] = i end
+  end
+  local out = {}
+  for _, fx in ipairs(list) do
+    if type(fx) == "table" then
+      if fx.kind == "shake" then
+        out[#out + 1] = { kind = "shake", side = fx.side, t = fx.t }
+      else
+        local seatIndex = fx.slot ~= nil and seatIndexOf[fx.slot] or nil
+        if seatIndex then
+          out[#out + 1] = {
+            kind = fx.kind, side = fx.side, seatIndex = seatIndex, t = fx.t,
+          }
+        end
+      end
+    end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
 function M:battlefieldCtx()
   local frame = battlefieldFrame(self)
+  local allySeats = self:battlefieldSeats(false)
+  local foeSeats = self:battlefieldSeats(true)
   local ctx = {
     mode = self.mode,
     frame = frame,
     allyHumans = self:battlefieldAllyHumans(),
     foeHumans = self:battlefieldFoeHumans(),
-    allySeats = self:battlefieldSeats(false),
-    foeSeats = self:battlefieldSeats(true),
+    allySeats = allySeats,
+    foeSeats = foeSeats,
     bubbles = self:battlefieldBubbleCtx(),
+    -- One direction only: this screen advances `t`, Battlefield draws whatever
+    -- `t` says. Absent when nothing is playing -- the renderer tolerates that.
+    fx = self:battlefieldFxCtx(allySeats, foeSeats),
     -- Arrow/card only during target pick; Battlefield honors this flag.
     showTarget = (self.phase == "target"),
   }
@@ -4665,7 +5109,237 @@ function M:battlefieldCtx()
   return ctx
 end
 
+-- ------- the modern band (battlefield path only)
+--
+-- The same phases the GB chrome below draws, drawn instead as Battlefield's
+-- panel widgets. **Draw-only**: every row source and every cursor is the one
+-- the input handlers already read, so what a press does is untouched -- a list
+-- drawn from a different set than `updateSwitch` filters would put the cursor
+-- on the monster above the one the player is looking at.
+--
+-- Classic 160×144 and Gen 2 never reach here: `drawSafe` sends them straight to
+-- `drawMenusClassic`, which is byte-identical to what it always was.
+
+-- Right-hand column for a party row: the numbers the plates publish anyway.
+local function hpRight(mon)
+  if type(mon) ~= "table" then return nil end
+  local hp = tonumber(mon.hp)
+  local max = tonumber(mon.maxHp)
+    or (type(mon.stats) == "table" and tonumber(mon.stats.hp))
+  if not (hp and max) then return nil end
+  return ("%d/%d"):format(hp, max)
+end
+
+-- The commands, with SWITCH under the name the player knows it by -- which is
+-- the two-tile PKMN mark on the classic path and cannot be one here. The order
+-- and the index are `M.COMMANDS`' own: `updateCommand` steps that grid.
+function M:bandCommandItems()
+  local items = {}
+  for i, command in ipairs(M.COMMANDS) do
+    items[i] = { label = (command == "SWITCH") and "PKMN" or command }
+  end
+  return items
+end
+
+-- The move list, and the strip that used to sit beside it. PP is the row's own
+-- right column now; TYPE rides the title, where it belongs to the highlighted
+-- move rather than to the list.
+function M:bandMoveRows()
+  local moves = self:liveMoves()
+  local data = self.game and self.game.data
+  local rows = {}
+  for _, moveInst in ipairs(moves) do
+    local def = (data and data.moves or {})[moveInst.id]
+    local row = { label = (def and def.name) or moveInst.id or "-" }
+    local pp = tonumber(moveInst.pp)
+    if def and tonumber(def.pp) then
+      -- The classic strip's own arithmetic: PP Ups add a fifth of the base
+      -- each, rounded down, exactly as `drawMoves` computes it.
+      local base = tonumber(def.pp) or 0
+      local maxPP = base + (tonumber(moveInst.ppUps) or 0) * math.floor(base / 5)
+      row.right = ("%d/%d"):format(pp or 0, maxPP)
+    elseif pp then
+      row.right = tostring(math.floor(pp))
+    end
+    if pp and pp <= 0 then row.dim = true end
+    rows[#rows + 1] = row
+  end
+  return rows
+end
+
+function M:bandMoveTitle()
+  local moves = self:liveMoves()
+  local pick = moves[self.moveIndex or 1]
+  local def = pick and (self.game and self.game.data and self.game.data.moves
+    or {})[pick.id]
+  if not (def and def.type) then return "MOVES" end
+  local TypeChart = engine and engine.TypeChart
+  local typeName = def.type
+  if TypeChart and TypeChart.displayName then
+    typeName = TypeChart.displayName(def.type) or def.type
+  end
+  return ("MOVES   TYPE/%s"):format(tostring(typeName))
+end
+
+-- The bench, as `benchOf` filters it -- alive, and not the one already out.
+-- Same list `updateSwitch` / `updateReplace` index into.
+function M:bandBenchRows(bench)
+  local pokemon = (self.game and self.game.data and self.game.data.pokemon) or {}
+  local rows = {}
+  for _, entry in ipairs(bench or {}) do
+    local mon = entry.mon or {}
+    local def = pokemon[mon.species]
+    rows[#rows + 1] = {
+      label = tostring(mon.nickname or (def and def.name) or mon.species or "?"),
+      right = hpRight(mon),
+    }
+  end
+  return rows
+end
+
+function M:drawModernBand()
+  local message = Battlefield.drawMessagePanel
+  local grid = Battlefield.drawCommandGrid
+  local list = Battlefield.drawListPanel
+  -- An arena without the band widgets (an older Battlefield beside a newer
+  -- screen) still gets the GB chrome rather than an empty band. Nothing to
+  -- remediate: the caller falls back on a false return.
+  if type(message) ~= "function" or type(grid) ~= "function"
+     or type(list) ~= "function" then
+    return false
+  end
+  if type(Battlefield.drawBandBackdrop) == "function" then
+    -- Once, here, and never inside a widget: two scrims would double-darken
+    -- the band.
+    Battlefield.drawBandBackdrop()
+  end
+
+  if self.replacing then
+    local seat = self.sim and self.sim:slot(self.mine)
+    local bench = seat and self:benchOf(seat) or {}
+    if #bench == 0 then
+      message("No one left!")
+    else
+      list(self:bandBenchRows(bench), self.switchIndex or 1,
+        { title = "WHO'S NEXT?" })
+    end
+    return true
+  end
+  if self.runAsk and self.phase ~= "messages" then
+    local ask = self.runAsk
+    local name = ask.name
+    if ask.role == "confirming" then
+      list(RUN_ANSWERS, ask.index or RUN_DEFAULT, { title = "RUN AWAY?" })
+    elseif ask.role == "deciding" then
+      list(RUN_ANSWERS, ask.index or RUN_DEFAULT,
+        { title = ((name or "They") .. ": RUN?") })
+    elseif ask.role == "refused" then
+      message((name or "They") .. " says NO!")
+    elseif ask.role == "fleeing" or not name then
+      message("Getting away...")
+    else
+      message("Asking " .. name .. " to RUN...")
+    end
+    return true
+  end
+  if self.phase == "choose" then
+    grid(self:bandCommandItems(), self.commandIndex or 1)
+    return true
+  end
+  if self.phase == "move" then
+    -- Every move empty: Gen 1 substitutes Struggle whatever was picked, so the
+    -- band says so rather than listing four moves that cannot be used.
+    if not self:hasLivePP() then
+      list({ { label = "STRUGGLE" } }, 1, { title = "NO MOVES LEFT!" })
+    else
+      list(self:bandMoveRows(), self.moveIndex or 1,
+        { title = self:bandMoveTitle() })
+    end
+    return true
+  end
+  if self.phase == "target" then
+    local rows = {}
+    local mine = self:mySlot()
+    for _, entry in ipairs((mine and self.sim:targetsFor(mine)) or {}) do
+      local battler = entry.battler
+      local mon = battler and battler.mon
+      rows[#rows + 1] = {
+        label = (battler and battler.name) or "?",
+        right = hpRight(mon),
+        dim = (mon and (mon.hp or 0) <= 0) or nil,
+      }
+    end
+    list(rows, self.targetIndex or 1, { title = "ATTACK WHO?" })
+    return true
+  end
+  if self.phase == "switch" then
+    local mine = self:mySlot()
+    local bench = mine and self:benchOf(mine) or {}
+    if #bench == 0 then
+      message("There's no one else to send out!")
+    else
+      list(self:bandBenchRows(bench), self.switchIndex or 1, { title = "POKeMON" })
+    end
+    return true
+  end
+  if self.phase == "item" then
+    local items = self:usableItems()
+    if #items == 0 then
+      message("You have nothing to use.")
+      return true
+    end
+    local rows = {}
+    for _, entry in ipairs(items) do
+      rows[#rows + 1] = {
+        label = tostring(entry.name or entry.id),
+        right = entry.count and ("x%d"):format(entry.count) or nil,
+      }
+    end
+    list(rows, self.itemIndex or 1, { title = "ITEMS" })
+    return true
+  end
+  if self.phase == "item_party" then
+    local seat = self:mySlot()
+    local party = (seat and seat.party) or {}
+    local rows = {}
+    for _, row in ipairs(self:itemPartyRows()) do
+      rows[#rows + 1] = {
+        label = row.label,
+        right = hpRight(party[row.index]),
+        -- Shown, not filtered: a Revive wants the fainted one, and
+        -- `updateItemParty` indexes the whole party.
+        dim = row.fainted or nil,
+      }
+    end
+    list(rows, self.switchIndex or 1, { title = "POKeMON" })
+    return true
+  end
+  if self.phase == "item_move" then
+    local seat = self:mySlot()
+    local party = (seat and seat.party) or {}
+    local mon = party[self.itemPartyIndex or (seat and seat.active) or 1]
+    local data = self.game and self.game.data
+    local rows = {}
+    for _, move in ipairs((mon and mon.moves) or {}) do
+      local def = (data and data.moves or {})[move.id]
+      rows[#rows + 1] = {
+        label = tostring((def and def.name) or move.id or "-"),
+        right = tonumber(move.pp) and tostring(math.floor(move.pp)) or nil,
+      }
+    end
+    list(rows, self.moveIndex or 1, { title = "MOVES" })
+    return true
+  end
+  message(self:boxText())
+  return true
+end
+
 function M:drawMenuBand()
+  -- The modern band first; the GB re-projection below is the fallback for a
+  -- build whose Battlefield has no widgets, and for anything that throws on the
+  -- way through them -- a battle must never lose its menu to a panel.
+  local ok, drew = pcall(self.drawModernBand, self)
+  if ok and drew then return end
   local g = love and love.graphics
   if not (g and g.push) then
     self:drawMenusClassic()
@@ -4722,6 +5396,13 @@ end
 
 function M:drawBattlefieldSafe()
   self:ensureBattlefieldLoaded()
+  -- Fill first, exactly as the classic path does before `drawField`: this
+  -- screen declares itself opaque, so the stack stops drawing the overworld
+  -- and clears the UI canvas transparent -- and every pixel the arena does not
+  -- cover (a frame where the arena image failed to load, the seams a shake
+  -- translate opens) would otherwise show whatever was in the canvas last.
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.rectangle("fill", 0, 0, Battlefield.WIDTH, Battlefield.HEIGHT)
   local eng = {
     Font = engine and engine.Font,
     Sprites = engine and engine.Sprites,
@@ -4894,18 +5575,40 @@ end
 
 function M:startAnim(row)
   self.anim = row
+  self.animHold = nil
+  self.animDwell = nil
   self.pendingHit = nil
+  -- Is this a real move, or one of the engine's ball markers? Every marker ends
+  -- in `_ANIM` (`TOSS_ANIM`, `SHAKE_ANIM`, `HIDEPIC_ANIM`, …), and the old
+  -- filter named three of the seven by hand -- so a ball throw printed "used
+  -- TOSS_ANIM!" over the thrower's head and made the thrower lurch at it.
+  local moveAnim = type(row.anim) == "string" and row.anim ~= ""
+    and not row.anim:find("_ANIM", 1, true)
   -- Trainer callout over the human who ordered this attack (Gen1 battlefield).
-  if row and row.from and type(row.anim) == "string"
-     and row.anim ~= "HIDEPIC_ANIM" and row.anim ~= "SHOWPIC_ANIM"
-     and row.anim ~= "POOF_ANIM" then
+  if row and row.from and moveAnim then
     local moveName = row.anim
     local def = self.game and self.game.data and self.game.data.moves
       and self.game.data.moves[row.anim]
     if def and type(def.name) == "string" and def.name ~= "" then
       moveName = def.name
     end
-    self:noteBattlefieldBubble(row.from, "used\n" .. tostring(moveName) .. "!")
+    self:noteBattlefieldBubble(row.from, "used\n" .. tostring(moveName) .. "!",
+      tostring(moveName))
+  end
+  -- The arena's half of the same row. The attacker leans in for a real move;
+  -- the markers are the throw itself -- the arc, the recall, each wobble and
+  -- the burst -- one per queued row, each held for as long as it plays.
+  --
+  -- Draw-only and battlefield-only: the classic 160×144 stage and Gen 2 run the
+  -- engine's AnimPlayer over these same rows below, unchanged.
+  if self:usesBattlefield() then
+    if moveAnim then
+      -- The defender's flash and the field's nudge ride the drain row behind
+      -- this one, so a move that misses only lunges.
+      self:emitFx("lunge", row.from)
+    else
+      self:startBallFx(row)
+    end
   end
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
   if row.anim == "HIDEPIC_ANIM" then
@@ -4926,6 +5629,10 @@ function M:startAnim(row)
     -- no-player branch) and the hit thud, then let the messages carry on.
     self:playMoveAnimFallback(row)
     self:applyPendingHitFx()
+    -- ...unless the arena took the row over. There is no engine animation to
+    -- wait on, but there is a throw in the air, and the dwell in `update` is
+    -- what holds the queue for it.
+    if self.animHold then return true end
     self.anim = nil
     return false
   end
@@ -4951,6 +5658,9 @@ function M:startAnim(row)
   if not ok then
     self:playMoveAnimFallback(row)
     self:applyPendingHitFx()
+    -- Same as above: the arena's effect outlives the player that refused to
+    -- start, and the dwell holds the row for it.
+    if self.animHold then return true end
     self.anim = nil
     return false
   end
