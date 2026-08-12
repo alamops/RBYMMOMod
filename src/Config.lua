@@ -645,6 +645,13 @@ M.BATTLE_HUD_ADVANCE = 5
 M.BATTLE_HUD_META_ADVANCE = 4
 M.BATTLE_HUD_META_HEIGHT = 5
 
+-- Top-down battlefield theatre (Gen1 CoopBattle / MediatedBattle).
+-- Arena art is an original asset under assets/battle/; canvas is 16:9 within
+-- Renderer uiSize caps so fill-scale can stretch it to the window.
+M.BATTLEFIELD_ARENA = "assets/battle/outdoor_grass_arena.png"
+M.BATTLEFIELD_WIDTH = 640
+M.BATTLEFIELD_HEIGHT = 360
+
 -- Presence liveness.  The hub drops a client that stops pinging; the client
 -- gives up on a hub that stops answering.
 M.PING_INTERVAL = 10
