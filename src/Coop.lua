@@ -2167,7 +2167,8 @@ function M:startBattle(game, field)
   -- It is nil only for somebody who walked into nothing: a party-versus-party
   -- fight, and a join taken from the ACTIONS menu. Those open straight on the
   -- monsters rather than on a picture that is subtly wrong.
-  local trainerPic = engine and engine.trainerPic
+  -- Gen 2 BattleState keeps the face on enemyTrainerImage (no trainerPic).
+  local trainerPic = engine and (engine.trainerPic or engine.enemyTrainerImage)
   for i, slot in ipairs(field.slots or {}) do
     local built = {
       side = slot.side, owner = slot.owner, name = slot.name, bag = slot.bag,

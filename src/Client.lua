@@ -2081,6 +2081,10 @@ function M.install()
     if state.enemyParty == nil and battle.enemyParty then
       state.enemyParty = battle.enemyParty
     end
+    -- Gen 2 keeps the face on enemyTrainerImage; CoopBattle reads trainerPic.
+    if state.trainerPic == nil and state.enemyTrainerImage then
+      state.trainerPic = state.enemyTrainerImage
+    end
     -- Gen 2 finishes via onDone; Coop.consume calls onFinish.  Alias, keep both.
     if state.onFinish == nil and type(state.onDone) == "function" then
       state.onFinish = state.onDone

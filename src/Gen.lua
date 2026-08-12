@@ -209,4 +209,170 @@ function M.resolveSprite(game, requested, spritesRegistry)
   return M.defaultSprite(game, spritesRegistry)
 end
 
+-- Gen 1 clip labels → Gold/Silver/Crystal names (rom_manifest_gold.json).
+-- Unmapped names stay as-is and soft-fail through Sound.play when absent.
+local GEN2_SFX = {
+  Super_Effective = "Sfx_SuperEffective",
+  Not_Very_Effective = "Sfx_NotVeryEffective",
+  Damage = "Sfx_Damage",
+  Tink = "Sfx_BallWobble",
+  Ball_Poof = "Sfx_BallPoof",
+}
+
+-- Battle / catch SFX id for the live generation. Gen 1 keeps the RBY label.
+function M.sfx(game, name)
+  if type(name) ~= "string" then return name end
+  if M.generation(game) ~= 2 then return name end
+  return GEN2_SFX[name] or name
+end
+
+-- Gen 2 trainer class id for BattleMusic (FALKNER), stripping Gen 1 OPP_.
+local function gen2TrainerClass(opts)
+  opts = opts or {}
+  local t = opts.trainer
+  local class = opts.class
+    or opts.oppClass
+    or (t and (t.classId or t.class or t.id))
+  if type(class) ~= "string" then return nil end
+  if class:sub(1, 4) == "OPP_" then class = class:sub(5) end
+  return class
+end
+
+local function gen2MusicEnv(game)
+  local landmark, daytime, members
+  local ow = game and (game.overworld or game.world)
+  if type(ow) == "table" then
+    landmark = ow.map and ow.map.def and ow.map.def.landmark
+    daytime = ow.daytime
+    members = ow.constants and ow.constants.trainerClassMembers
+  end
+  return landmark, daytime, members
+end
+
+local function isWildMode(opts)
+  local mode, kind = opts.mode, opts.kind
+  return mode == "coop_wild" or mode == "wild" or kind == "wild"
+end
+
+local function isLinkMode(opts, class)
+  local mode, kind = opts.mode, opts.kind
+  if mode == "coop_pvp" or kind == "link" then return true end
+  -- No trainer class and not wild → party-vs-party / 1v1 link cue.
+  return not isWildMode(opts) and not class
+end
+
+-- Song label Gen 2 PlayBattleMusic would pick for this fight (or nil).
+function M.gen2BattleSong(game, opts)
+  opts = opts or {}
+  local ok, BattleMusic = pcall(require, "src.battle.gen2.BattleMusic")
+  if not (ok and BattleMusic and BattleMusic.battleSong) then return nil end
+  local landmark, daytime, membersTbl = gen2MusicEnv(game)
+  local class = gen2TrainerClass(opts)
+  if isLinkMode(opts, class) then
+    -- Gen 2 has no dedicated link theme; regional trainer battle matches
+    -- "two parties" better than a wild cue.
+    return BattleMusic.isKanto(landmark)
+      and "Music_KantoTrainerBattle" or "Music_JohtoTrainerBattle"
+  end
+  if isWildMode(opts) then
+    return BattleMusic.battleSong({ landmark = landmark, daytime = daytime })
+  end
+  local member = opts.member
+    or (opts.trainer and (opts.trainer.memberId or opts.trainer.member))
+  local members = class and membersTbl and membersTbl[class] or nil
+  return BattleMusic.battleSong({
+    class = class,
+    member = member,
+    members = members,
+    landmark = landmark,
+    daytime = daytime,
+  })
+end
+
+function M.gen2VictorySong(game, opts)
+  opts = opts or {}
+  local ok, BattleMusic = pcall(require, "src.battle.gen2.BattleMusic")
+  if not (ok and BattleMusic and BattleMusic.victorySong) then return nil end
+  local class = gen2TrainerClass(opts)
+  if isLinkMode(opts, class) then
+    return "Music_TrainerVictory"
+  end
+  if isWildMode(opts) then
+    return BattleMusic.victorySong({
+      participantsFainted = opts.participantsFainted,
+    })
+  end
+  return BattleMusic.victorySong({ class = class })
+end
+
+-- Theatre: battle theme / win jingle / map restore.
+-- Pass opts.Music (engine.Music) so headless suites can stub the boundary.
+-- Gen 1 uses playBattle(kind) / playVictory(kind); Gen 2 plays song labels
+-- from BattleMusic (data.audio.battle[kind] does not exist on Gold).
+
+function M.playBattleMusic(game, opts)
+  opts = opts or {}
+  local Music = opts.Music
+  if not Music then
+    local ok, m = pcall(require, "src.core.Music")
+    if not ok then return end
+    Music = m
+  end
+  local data = game and game.data
+  if not data then return end
+  if M.generation(game) == 2 then
+    local song = M.gen2BattleSong(game, opts)
+    if song and Music.play then
+      pcall(Music.play, data, song, true, { reason = "battle" })
+    end
+    return song
+  end
+  local kind = opts.kind or "trainer"
+  local trainerId = opts.trainerId
+    or (opts.trainer and opts.trainer.id)
+  if Music.playBattle then
+    pcall(Music.playBattle, data, kind, trainerId)
+  end
+end
+
+function M.playVictoryMusic(game, opts)
+  opts = opts or {}
+  local Music = opts.Music
+  if not Music then
+    local ok, m = pcall(require, "src.core.Music")
+    if not ok then return end
+    Music = m
+  end
+  local data = game and game.data
+  if not data then return end
+  if M.generation(game) == 2 then
+    local song = M.gen2VictorySong(game, opts)
+    if song and Music.play then
+      pcall(Music.play, data, song, true, { reason = "victory" })
+    end
+    return song
+  end
+  local kind = opts.kind or "trainer"
+  if kind == "final" then kind = "gym" end
+  local trainerId = opts.trainerId
+    or (opts.trainer and opts.trainer.id)
+  if Music.playVictory then
+    pcall(Music.playVictory, data, kind, trainerId)
+  end
+end
+
+function M.restoreMapMusic(game, opts)
+  opts = opts or {}
+  local Music = opts.Music
+  if not Music then
+    local ok, m = pcall(require, "src.core.Music")
+    if not ok then return end
+    Music = m
+  end
+  local data = game and game.data
+  if Music.restoreMap and data then
+    pcall(Music.restoreMap, data)
+  end
+end
+
 return M
