@@ -12446,6 +12446,139 @@ end)()
   end
 end)()
 
+-- ------- Gen1 Battlefield round 4: the EXP strip (plateModel expFrac /
+-- shownLevel, the strip's own metrics, and the headless draw path)
+--
+-- CoopBattle is the only caller that ever sets `expFrac` / `shownLevel` on a
+-- seat (mediated battles award no exp and carry no wire field for it), but
+-- the contract lives here: nil is the deliberate no-data state ("draw no
+-- strip"), a number is clamped into 0..1, and the level pill prefers
+-- `shownLevel` over `level` so a mid-fill bump shows before the "grew to
+-- level N!" page does.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- EXP strip tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+
+  -- ------- plateModel: expFrac
+  --
+  -- nil is not the same as "no data coerced to zero" -- a mediated plate
+  -- (never carrying expFrac) has to render no strip at all, so a caller that
+  -- passes nothing must get nil back, not 0.
+  local noExp = Battlefield.plateModel({ hp = 5, maxHp = 10 })
+  eq(noExp.expFrac, nil,
+     "plateModel: no expFrac on the seat stays nil -- NOT coerced to 0")
+
+  local over = Battlefield.plateModel({ hp = 5, maxHp = 10, expFrac = 1.5 })
+  eq(over.expFrac, 1, "plateModel: expFrac above 1 clamps to 1")
+  local under = Battlefield.plateModel({ hp = 5, maxHp = 10, expFrac = -0.2 })
+  eq(under.expFrac, 0, "plateModel: expFrac below 0 clamps to 0")
+  local mid = Battlefield.plateModel({ hp = 5, maxHp = 10, expFrac = 0.42 })
+  eq(mid.expFrac, 0.42, "plateModel: an in-range expFrac rides through untouched")
+
+  -- ------- plateModel: NaN refusal (R4 fix-wave pin (e))
+  --
+  -- A CoopBattle producer can hand plateModel a NaN (e.g. expFraction's own
+  -- 0/0 divide-by-zero guard, or a caller computing one the same way).
+  -- `tonumber` passes a NaN through untouched and `expFrac ~= expFrac` is the
+  -- only test that catches it (every ordinary comparison against NaN is
+  -- false, so `clamp` would return it unchanged) -- refused to nil rather
+  -- than clamped, the same rule the CoopBattle producers apply before they
+  -- ever put a number on these fields.
+  local nanExp = Battlefield.plateModel({ hp = 5, maxHp = 10, expFrac = 0 / 0 })
+  eq(nanExp.expFrac, nil, "plateModel: a NaN expFrac refuses to nil, not a clamped number")
+  local nanLevel = Battlefield.plateModel({ hp = 5, maxHp = 10, shownLevel = 0 / 0 })
+  eq(nanLevel.shownLevel, nil, "plateModel: a NaN shownLevel refuses to nil the same way")
+
+  -- ------- plateModel: shownLevel
+  --
+  -- Same floor-and-minimum-1 rule `cardModel`/`plateModel` already apply to
+  -- `level`, so a fractional or non-positive display clock can never print a
+  -- pill that reads "Lv 0" or "Lv 3.7".
+  eq(Battlefield.plateModel({ hp = 5, maxHp = 10, shownLevel = 3.7 }).shownLevel, 3,
+     "plateModel: shownLevel floors down")
+  eq(Battlefield.plateModel({ hp = 5, maxHp = 10, shownLevel = 0 }).shownLevel, 1,
+     "plateModel: shownLevel 0 clamps up to the same floor as level")
+  eq(Battlefield.plateModel({ hp = 5, maxHp = 10, shownLevel = -5 }).shownLevel, 1,
+     "...and so does a negative one")
+  eq(Battlefield.plateModel({ hp = 5, maxHp = 10 }).shownLevel, nil,
+     "plateModel: no shownLevel on the seat stays nil, not the level")
+
+  -- The pill preference itself lives in `drawPlate` (`model.shownLevel or
+  -- model.level`) rather than in the model, but the model publishes exactly
+  -- the two fields that expression reads, and it publishes `level` even when
+  -- `shownLevel` is also present -- so a caller (or drawPlate) can always
+  -- fall back.
+  local withClock = Battlefield.plateModel(
+    { level = 12, hp = 5, maxHp = 10, shownLevel = 13 })
+  eq(withClock.level, 12, "plateModel keeps truth level even with a display clock set")
+  eq(withClock.shownLevel, 13, "...beside the display clock")
+  eq(withClock.shownLevel or withClock.level, 13,
+     "drawPlate's own preference (shownLevel or level) prints the clock")
+  local withoutClock = Battlefield.plateModel({ level = 12, hp = 5, maxHp = 10 })
+  eq(withoutClock.shownLevel or withoutClock.level, 12,
+     "...and falls back to truth level once the clock clears (shownLevel nil)")
+
+  -- ------- placed-seat passthrough: layout carries expFrac/shownLevel to plates
+  --
+  -- `placeMons` carries both fields verbatim onto the placed mon, and
+  -- `M.layout` builds each plate's `.model` off that same placed mon via
+  -- `M.plateModel`, so a seat's exp clocks reach the plate exactly the way
+  -- `shownHp` already does.
+  local withExp = Battlefield.layout({
+    mode = "coop_npc",
+    allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24,
+                    expFrac = 0.6, shownLevel = 9 } },
+    foeSeats = { { index = 3, name = "RATT", hp = 9, maxHp = 12 } },
+  })
+  local allyPlate, foePlate
+  for _, plate in ipairs(withExp.plates) do
+    if plate.side == "foe" then foePlate = plate else allyPlate = plate end
+  end
+  check(allyPlate ~= nil and foePlate ~= nil, "both seats plated")
+  eq(allyPlate.model.expFrac, 0.6,
+     "layout: the ally plate's model carries the seat's expFrac through")
+  eq(allyPlate.model.shownLevel, 9,
+     "...and its shownLevel")
+  eq(foePlate.model.expFrac, nil,
+     "layout: a foe seat with no expFrac plates with none either")
+
+  -- ------- PLATE_H and the strip's own metrics
+  --
+  -- PLATE_H stayed 48 -- the strip is fitted into the existing bottom inset
+  -- rather than grown onto a taller plate (a 54px plate compressed a plated
+  -- 2v2's paired ally rows below their required pitch). The strip's own
+  -- geometry is exported the same way every other plate metric is.
+  eq(Battlefield.PLATE_H, 48, "PLATE_H is still 48 -- the strip did not grow the plate")
+  eq(Battlefield.PLATE_EXP_H, 3, "PLATE_EXP_H is the 3px strip height")
+  eq(Battlefield.PLATE_EXP_GAP, 2, "PLATE_EXP_GAP is the HP-bar-to-strip gap")
+  eq(Battlefield.PLATE_EXP_XINSET, 2, "PLATE_EXP_XINSET pulls the strip in from the HP bar's own width")
+  eq(Battlefield.PLATE_INSET, 7, "PLATE_INSET is the panel-edge-to-HP-bar inset the strip now shares")
+  eq(Battlefield.PLATE_HP_H, 7, "PLATE_HP_H is the HP bar's own height, unchanged")
+
+  -- ------- headless drawPlate: a model carrying expFrac must not throw
+  --
+  -- `drawPlate` is reached only through `M.draw` (it is a local), and `g()`
+  -- returns nil with no love -- exactly this suite's environment -- so the
+  -- strip branch never actually executes here. What this pins is that a
+  -- plate carrying expFrac all the way from `ctx` through `layout` and into
+  -- `draw` cannot throw on the no-graphics path, which is every headless
+  -- test's actual environment.
+  local okDraw = pcall(Battlefield.draw,
+    { game = { data = {} } },
+    {
+      mode = "coop_npc",
+      allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24,
+                      expFrac = 0.6, shownLevel = 9 } },
+      foeSeats = { { index = 3, name = "RATT", hp = 9, maxHp = 12 } },
+    },
+    nil)
+  check(okDraw, "Battlefield.draw does not throw headless with expFrac on a seat")
+end)()
+
 -- ------- the command band, four across (battlefield)
 --
 -- The modern band lays the same four commands out in one row whenever it has
@@ -17260,6 +17393,579 @@ else
   check(true, "(engine battle modules unavailable here)")
 end
 
+-- ------- round 4: the EXP strip's own display clock (battlefield only)
+--
+-- `expFraction` is the Gen2 HpBar.expFraction port; `startExpFill` /
+-- `stepExpFill` are the strip's own drain-shaped clock, seeded by
+-- `seedExpClock` and welded by `snapDisplay` exactly the way `shownHP` is.
+-- Driven the way the R4-B scratchpad harness drove it: a real CoopSim over
+-- the fixture dataset (FIXMON_A/FIXMON_B both carry a real MEDIUM_SLOW
+-- growthRate), a real `eng.Pokemon.new` battler, and `playEvents`/`update`
+-- run to completion rather than the numbers hand-computed here.
+
+if eng and eng.Growth and eng.Experience then
+  local expSpecies, foeSpecies = "FIXMON_A", "FIXMON_B"
+  local rate = data.pokemon[expSpecies].growthRate
+
+  local function findUpvalue(fn, name)
+    local i = 1
+    while true do
+      local uname, value = debug.getupvalue(fn, i)
+      if not uname then return nil end
+      if uname == name then return value end
+      i = i + 1
+    end
+  end
+  -- Reached off `seedExpClock`'s own upvalues, the same technique the
+  -- CHRONOLOGY PIN / BEAT_SPAN block elsewhere in this file uses -- so this
+  -- is the live function CoopBattle actually calls, not a copy of its
+  -- formula. `gainExp` no longer closes over `expFraction` directly: the
+  -- fill's target is read at row-start inside `startExpFill` (so a second
+  -- EXP.ALL apply pass landing after the row is queued is not missed), and
+  -- `gainExp` itself only calls `seedExpClock`, which is the one that still
+  -- closes over `expFraction`. The `gainExp` lookup stays as a fallback.
+  local expFraction = findUpvalue(CoopBattle.seedExpClock, "expFraction")
+    or findUpvalue(CoopBattle.gainExp, "expFraction")
+  check(type(expFraction) == "function",
+        "expFraction is reachable off seedExpClock's own upvalues")
+
+  local function monAt(level)
+    local built = eng.Pokemon.new(data, expSpecies, level)
+    built.statExp = built.statExp or {}
+    return built
+  end
+  local function expAt(level, frac)
+    local a = eng.Growth.expForLevel(rate, level, data.growth_rates)
+    local b = eng.Growth.expForLevel(rate, level + 1, data.growth_rates)
+    return a + math.floor((b - a) * frac)
+  end
+
+  -- ------- expFraction: the pure function
+  do
+    local known = monAt(12)
+    known.exp = expAt(12, 0.25)
+    local expected = (known.exp - eng.Growth.expForLevel(rate, 12, data.growth_rates))
+      / (eng.Growth.expForLevel(rate, 13, data.growth_rates)
+         - eng.Growth.expForLevel(rate, 12, data.growth_rates))
+    check(math.abs(expFraction(data, known) - expected) < 1e-9,
+          "expFraction: a known curve matches Growth.expForLevel computed by hand")
+
+    eq(expFraction(data, { species = expSpecies, level = 12, exp = nil }), nil,
+       "expFraction: no mon.exp at all answers nil, not a fabricated 0")
+    eq(expFraction(data, { species = "NOT_A_SPECIES", level = 12, exp = 500 }), nil,
+       "expFraction: an unknown species def answers nil")
+    eq(expFraction(nil, known), nil, "expFraction: no data table answers nil")
+    eq(expFraction(data, nil), nil, "expFraction: no mon answers nil")
+  end
+
+  local function newFight(slots, gameParty)
+    local sim = CoopSim.new({
+      data = data, ruleset = {}, rng = function(a) return a end,
+      makeBattler = BattleState.makeBattler,
+    }, slots)
+    return setmetatable({
+      sim = sim, mine = 1, host = false, messages = {}, frame = 0,
+      phase = "messages", after = "choose",
+      game = {
+        data = data, save = { inventory = {}, party = gameParty or {} },
+        input = { wasPressed = function() return false end },
+        stack = { pop = function() end },
+      },
+      selfId = "ann", mode = "coop_npc",
+    }, { __index = CoopBattle })
+  end
+  -- What counts as a "text" row: `say()` queues a plain string, but the
+  -- `msg` event kind (playEvents) queues `{ text = ..., from = ... }` --
+  -- both are a text page as far as chronology is concerned.
+  local function isText(row)
+    return type(row) == "string" or (type(row) == "table" and row.text ~= nil)
+  end
+
+  -- ------- the full flow: seed, order, fill (with a crossing), completion
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local partner = monAt(12)
+    local foe = eng.Pokemon.new(data, foeSpecies, 12)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "a", owner = "bob", name = "BOB", party = { partner } },
+      { side = "b", owner = nil, name = "FOE", party = { foe } },
+    }, { mine, partner })
+    check(fight:usesBattlefield(),
+          "a Gen1-shaped fixture game stays on the battlefield gate")
+
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 60, winners = 1 })
+    check(mine.level > 12, "the award crosses at least one level boundary")
+
+    -- Row order: gained-text -> expfill -> grew-text(s) -> drain. Nothing
+    -- else (a "learn" row, if any) breaks that relative order either.
+    local textIdx, fillIdx, drainIdx, growIdx = nil, nil, nil, nil
+    for i, row in ipairs(fight.messages) do
+      if type(row) == "table" and row.expfill and not fillIdx then fillIdx = i
+      elseif type(row) == "table" and row.drain and not drainIdx then drainIdx = i
+      elseif isText(row) then
+        if not textIdx then textIdx = i
+        elseif not growIdx then growIdx = i end
+      end
+    end
+    check(textIdx ~= nil and fillIdx ~= nil and drainIdx ~= nil and growIdx ~= nil,
+          "the batch queued a gained-text, an expfill, a grow-text and a drain row")
+    check(textIdx < fillIdx, "the gained-EXP text is queued ahead of the fill")
+    check(fillIdx < growIdx, "...and the fill is queued ahead of the first grow-text")
+    check(growIdx < drainIdx, "...and the level text is queued ahead of the HP climb")
+
+    -- Seeded state, before a single frame has run: fromFrac is on the seat
+    -- already (seedExpClock ran inside gainExp itself), the level pill has
+    -- not moved yet, and the bench partner -- who earned nothing -- was
+    -- seeded too, just at its own true fraction.
+    local function seatOf(index, theirs)
+      for _, s in ipairs(fight:battlefieldSeats(theirs or false)) do
+        if s.index == index then return s end
+      end
+    end
+    local mineSeat = seatOf(1)
+    check(mineSeat.expFrac ~= nil and mineSeat.expFrac > 0 and mineSeat.expFrac < 1,
+          "the fighter's strip is seeded from its pre-award fraction")
+    eq(mineSeat.shownLevel, 12,
+       "...and the pill has not bumped yet -- the fill has not run a frame")
+    local benchSeat = seatOf(2)
+    eq(benchSeat.expFrac, nil,
+       "the bench ally carries no expFrac at all -- battlefieldSeats only "
+       .. "ever seeds the seat whose slot.index == self.mine, so a partner's "
+       .. "plate draws no strip instead of one frozen at whatever it read on "
+       .. "first sight")
+    eq(benchSeat.shownLevel, nil,
+       "...nor a shownLevel; the seat's plain `level` field still carries "
+       .. "the live mon.level, which is what the pill falls back to")
+    eq(benchSeat.level, 12, "...and that plain level field is the true one")
+
+    -- Foe seats never carry the clocks -- exp is an ally-only readout.
+    local foeSeat = seatOf(3, true)
+    eq(foeSeat.expFrac, nil, "a foe seat carries no expFrac")
+    eq(foeSeat.shownLevel, nil, "...nor a shownLevel")
+
+    -- Drive to completion, watching the fill hold the queue and the strip
+    -- reset to 0 on every level it crosses.
+    local sawLevelTextWhileFilling = false
+    local sawFillStartedUnderGainedText = false
+    local sawDrainWhileFilling = false
+    local crossings = 0
+    local lastShownLevel = mineSeat.shownLevel
+    local guard = 0
+    while (#fight.messages > 0 or fight.shown ~= nil or fight.expFilling
+           or fight.draining) and guard < 3000 do
+      fight:update(1 / 60)
+      guard = guard + 1
+      if fight.expFilling then
+        if fight.draining then sawDrainWhileFilling = true end
+        if type(fight.shown) == "string" and fight.shown:find("gained", 1, true) then
+          sawFillStartedUnderGainedText = true
+        end
+        if type(fight.shown) == "string" and fight.shown:find("grew to", 1, true) then
+          sawLevelTextWhileFilling = true
+        end
+        local seat = seatOf(1)
+        if seat and seat.shownLevel ~= lastShownLevel then
+          crossings = crossings + 1
+          eq(seat.expFrac, 0,
+             "a level crossing resets the strip to 0 on the same tick it bumps the pill")
+          lastShownLevel = seat.shownLevel
+        end
+      end
+    end
+    check(guard < 3000, "the whole award resolves in a bounded number of frames")
+    check(sawFillStartedUnderGainedText,
+          "queue blocked while expFilling: the gained-EXP text is still up when the "
+          .. "fill starts crawling")
+    check(not sawLevelTextWhileFilling,
+          "...and the grow-text stays behind the fill -- it never shows mid-crawl")
+    check(not sawDrainWhileFilling,
+          "the fill holds the queue like a drain does -- the two never run at once")
+    check(crossings >= 1, "at least one level crossing actually happened during the drive")
+
+    local finalSeat = seatOf(1)
+    eq(finalSeat.shownLevel, mine.level,
+       "once the queue drains, the pill has landed on the monster's true level")
+    local finalTruth = expFraction(data, mine)
+    check(finalTruth ~= nil
+          and math.abs(finalSeat.expFrac - finalTruth) < 1e-6,
+          "...and the strip has landed on the true final fraction")
+
+    -- ------- a second, 0-level award: pure partial fill, no pill change
+    fight.phase = "messages"
+    local levelBefore = mine.level
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 2, winners = 4 })
+    local row2
+    for _, row in ipairs(fight.messages) do
+      if type(row) == "table" and row.expfill then row2 = row break end
+    end
+    check(row2 ~= nil, "the second award still queues a fill row")
+    if row2 then
+      eq(row2.toLevel, nil,
+         "the fill row carries no frozen toLevel -- startExpFill reads the "
+         .. "target off the mon at row-start, not at queue time, so a "
+         .. "second EXP.ALL apply pass landing in between is never missed")
+      eq(row2.toFrac, nil, "...nor a frozen toFrac, for the same reason")
+    end
+    guard = 0
+    while (#fight.messages > 0 or fight.shown ~= nil or fight.expFilling
+           or fight.draining) and guard < 1000 do
+      fight:update(1 / 60)
+      guard = guard + 1
+    end
+    eq(mine.level, levelBefore, "a 0-level award never moves the monster's real level")
+    eq(seatOf(1).shownLevel, levelBefore,
+       "...and the pill never moves either -- pure partial fill")
+  end
+
+  -- ------- mid-fill snapDisplay: welds both clocks, clears expFilling, and
+  -- purges every expfill row still waiting (not only the one running)
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { eng.Pokemon.new(data, foeSpecies, 12) } },
+    }, { mine })
+
+    -- Two awards queued back-to-back, before a single frame runs: the
+    -- second's fill row is still sitting in the queue, unstarted, when the
+    -- snap below lands -- which is exactly the row `snapDisplay`'s purge
+    -- has to catch, not only the one already running.
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 5, winners = 1 })
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 5, winners = 1 })
+    local queuedFills = 0
+    for _, row in ipairs(fight.messages) do
+      if type(row) == "table" and row.expfill then queuedFills = queuedFills + 1 end
+    end
+    eq(queuedFills, 2, "both awards queued a fill row, neither has run yet")
+
+    local steps = 0
+    while not fight.expFilling and steps < 200 do
+      fight:update(1 / 60)
+      steps = steps + 1
+    end
+    check(fight.expFilling ~= nil, "the first fill is running by the time the snap lands")
+
+    fight:snapDisplay()
+    check(fight.expFilling == nil, "snapDisplay clears the fill in progress")
+    local leftoverFills = 0
+    for _, row in ipairs(fight.messages) do
+      if type(row) == "table" and row.expfill then leftoverFills = leftoverFills + 1 end
+    end
+    eq(leftoverFills, 0,
+       "...and purges every expfill row, including the second one that never started")
+
+    local battler = fight.sim:slot(1).battler
+    local truth = expFraction(data, mine)
+    check(truth ~= nil and math.abs(battler.shownExpFrac - truth) < 1e-9,
+          "the strip is welded to the monster's true fraction, not left mid-crawl")
+    eq(battler.shownLevel, mine.level,
+       "...and the pill is welded to the monster's true level")
+  end
+
+  -- ------- fanfare stays behind the fill (and everything else queued for it)
+  --
+  -- The same `over`-queues-an-act-row mechanism TT2 pins for drain/faintfx:
+  -- the fanfare rides the queue as an `act`, so it can never fire ahead of a
+  -- fill any more than it can fire ahead of a drain.
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { eng.Pokemon.new(data, foeSpecies, 12) } },
+    }, { mine })
+
+    CoopBattle.playEvents(fight, {
+      { kind = "msg", text = "Foe FIXMON B\nfainted!" },
+      { kind = "exp", slot = 1, species = foeSpecies, level = 60, winners = 1 },
+      { kind = "over", winner = "a" },
+    })
+
+    local fillIdx, actIdx, drainIdx, lastTextBeforeAct
+    for i, row in ipairs(fight.messages) do
+      if type(row) == "table" and row.expfill and not fillIdx then fillIdx = i
+      elseif type(row) == "table" and row.act and not actIdx then actIdx = i
+      elseif type(row) == "table" and row.drain and not drainIdx then drainIdx = i
+      end
+    end
+    check(fillIdx ~= nil, "the batch queued a fill row")
+    check(actIdx ~= nil, "...and a deferred fanfare act row")
+    check(fillIdx < actIdx, "the fill is queued ahead of the fanfare")
+    if drainIdx then
+      check(drainIdx < actIdx,
+            "...and so is the HP climb the award's drain queues -- both land "
+            .. "before the fanfare, never after")
+    end
+  end
+
+  -- ------- classic path (usesBattlefield false): byte-identical to before R4
+  do
+    local mine = monAt(12)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { eng.Pokemon.new(data, foeSpecies, 12) } },
+    }, { mine })
+    fight.usesBattlefield = function() return false end
+
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 60, winners = 1 })
+    for _, row in ipairs(fight.messages) do
+      check(not (type(row) == "table" and row.expfill),
+            "classic path: no expfill row is ever queued")
+    end
+    local sawGained, sawGrew = false, false
+    for _, row in ipairs(fight.messages) do
+      if isText(row) then
+        local text = type(row) == "string" and row or row.text
+        if text and text:find("gained", 1, true) then sawGained = true end
+        if text and text:find("grew to", 1, true) then sawGrew = true end
+      end
+    end
+    check(sawGained, "classic path: the gained-EXP text is still queued")
+    check(sawGrew, "...and the grow-text is too -- the classic flow is unchanged")
+
+    local battler = fight.sim:slot(1).battler
+    eq(battler.shownExpFrac, nil, "classic path: shownExpFrac is never seeded")
+    eq(battler.shownLevel, nil, "...nor is shownLevel")
+  end
+
+  -- ------- R4 fix-wave pin (a): EXP.ALL lands the pill + strip on the truth
+  -- left behind by *both* Experience.apply passes, not the first
+  --
+  -- With EXP_ALL held, `gainExp` runs Experience.apply a second time over the
+  -- whole party -- including the fighter itself. Before this wave the fill's
+  -- target was frozen when the row was queued, ahead of that second pass, so
+  -- a fighter that levelled again during the EXP.ALL half filled to a stale
+  -- target. `startExpFill` now reads mon.level/mon.exp at row-start (see the
+  -- "0-level award row" pin above), so the strip and pill land on the truth
+  -- both passes leave behind, and the last "grew to level N!" line agrees.
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local bench = monAt(12)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { eng.Pokemon.new(data, foeSpecies, 12) } },
+    }, { mine, bench })
+    fight.game.save.inventory = { EXP_ALL = 1 }
+
+    local levelBefore = mine.level
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 60, winners = 1 })
+    check(mine.level > levelBefore,
+          "the EXP.ALL award crosses at least one level boundary")
+
+    local topText
+    for _, row in ipairs(fight.messages) do
+      local text = type(row) == "string" and row or (type(row) == "table" and row.text)
+      if text and text:find("grew to", 1, true) then topText = text end
+    end
+    local textLevel = topText and tonumber(topText:match("level%s*(%d+)"))
+
+    local guard = 0
+    while (#fight.messages > 0 or fight.shown ~= nil or fight.expFilling
+           or fight.draining) and guard < 5000 do
+      fight:update(1 / 60)
+      guard = guard + 1
+    end
+    check(guard < 5000, "the EXP.ALL award resolves in a bounded number of frames")
+
+    local function seatOf(index, theirs)
+      for _, s in ipairs(fight:battlefieldSeats(theirs or false)) do
+        if s.index == index then return s end
+      end
+    end
+    local seat = seatOf(1)
+    local truth = expFraction(data, mine)
+    eq(seat.shownLevel, mine.level,
+       "EXP.ALL: the pill lands on the monster's true final level, after "
+       .. "both Experience.apply passes")
+    check(textLevel == nil or textLevel == mine.level,
+          "...which is the level the last 'grew to' text names too")
+    check(truth ~= nil and math.abs(seat.expFrac - truth) < 1e-6,
+          "...and the strip lands on the true final fraction")
+  end
+
+  -- ------- R4 fix-wave pin (b): two awards in one batch never rewind the
+  -- strip -- the second row starts from the live clock, not its own stale
+  -- `fromFrac`
+  --
+  -- Both awards capture `fromFrac` in `gainExp` before either has played, so
+  -- honouring the second row's own capture would drag the strip back down to
+  -- where the first fill started once it starts crawling. `startExpFill`
+  -- prefers the live `shownExpFrac`/`shownLevel` and only falls back to
+  -- `row.from*` when the clock is still nil, which is what this pins.
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { eng.Pokemon.new(data, foeSpecies, 12) } },
+    }, { mine })
+
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 5, winners = 1 })
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 5, winners = 1 })
+    local fills = 0
+    for _, row in ipairs(fight.messages) do
+      if type(row) == "table" and row.expfill then fills = fills + 1 end
+    end
+    eq(fills, 2, "both awards queued a fill row")
+
+    -- Wrap startExpFill to see what each row is handed and what it decides,
+    -- so the second row's stale `row.fromFrac` (below the live clock by the
+    -- time it comes up) can be told apart from what actually gets honoured.
+    local battler = fight.sim:slot(1).battler
+    local seen = {}
+    local realStart = CoopBattle.startExpFill
+    fight.startExpFill = function(self, row)
+      local before = tonumber(self.sim:slot(1).battler.shownExpFrac)
+      local held = realStart(self, row)
+      seen[#seen + 1] = {
+        liveBefore = before, rowFrom = tonumber(row.fromFrac), held = held,
+      }
+      return held
+    end
+
+    local function progress()
+      return (tonumber(battler.shownLevel) or 0)
+        + (tonumber(battler.shownExpFrac) or 0)
+    end
+    local worst, last, guard = 0, progress(), 0
+    while (#fight.messages > 0 or fight.shown ~= nil or fight.expFilling
+           or fight.draining) and guard < 5000 do
+      fight:update(1 / 60)
+      guard = guard + 1
+      local now = progress()
+      if now < last - 1e-9 then worst = math.max(worst, last - now) end
+      last = now
+    end
+    check(guard < 5000, "both awards resolve in a bounded number of frames")
+    eq(#seen, 2, "both fill rows came up")
+    check(seen[2] ~= nil and seen[2].liveBefore ~= nil and seen[2].rowFrom ~= nil
+          and seen[2].liveBefore > seen[2].rowFrom + 1e-6,
+          "the second row's stale row.fromFrac sits below the live clock -- "
+          .. "honouring it is the rewind this pins against")
+    check(seen[2] ~= nil and seen[2].held == false,
+          "the second row resolves on the spot instead: the live clock "
+          .. "already sat at (or past) its target")
+    check(worst < 1e-9,
+          "the strip's progress (shownLevel + shownExpFrac) never moves "
+          .. "backwards across the whole drive")
+
+    local truth = expFraction(data, mine)
+    check(battler.shownLevel == mine.level
+          and truth ~= nil and math.abs(battler.shownExpFrac - truth) < 1e-6,
+          "both clocks land on the monster's true final level/fraction")
+  end
+
+  -- ------- R4 fix-wave pin (c): a second award landing mid-crawl still
+  -- never rewinds the strip
+  --
+  -- Same monotonicity guarantee as (b), but the second `gainExp` call lands
+  -- while the first fill is actively crawling rather than both being queued
+  -- up front -- the shape a real double-KO-then-another-KO batch produces.
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { eng.Pokemon.new(data, foeSpecies, 12) } },
+    }, { mine })
+    local battler = fight.sim:slot(1).battler
+    local function progress()
+      return (tonumber(battler.shownLevel) or 0)
+        + (tonumber(battler.shownExpFrac) or 0)
+    end
+
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 20, winners = 1 })
+    local steps = 0
+    while not fight.expFilling and steps < 400 do
+      fight:update(1 / 60)
+      steps = steps + 1
+    end
+    check(fight.expFilling ~= nil, "the first fill is running")
+    for _ = 1, 20 do fight:update(1 / 60) end
+    fight:gainExp({ slot = 1, species = foeSpecies, level = 20, winners = 1 })
+
+    local worst, last, guard = 0, progress(), 0
+    while (#fight.messages > 0 or fight.shown ~= nil or fight.expFilling
+           or fight.draining) and guard < 8000 do
+      fight:update(1 / 60)
+      guard = guard + 1
+      local now = progress()
+      if now < last - 1e-9 then worst = math.max(worst, last - now) end
+      last = now
+    end
+    check(guard < 8000, "it resolves in a bounded number of frames")
+    check(worst < 1e-9,
+          "no rewind when the second award lands mid-crawl either")
+    local truth = expFraction(data, mine)
+    check(battler.shownLevel == mine.level
+          and truth ~= nil and math.abs(battler.shownExpFrac - truth) < 1e-6,
+          "and both clocks still land on truth")
+  end
+
+  -- ------- R4 fix-wave pin (d): snapDisplay's exp-clock gate
+  --
+  -- Classic path: `usesBattlefield() == false` means no plate ever reads an
+  -- exp clock, so `snapDisplay` must not seed or weld one -- both clocks
+  -- stay nil forever -- while `shownHP` (which every readout uses) still
+  -- welds exactly as it always has.
+  do
+    local mine = monAt(12)
+    local partner = monAt(12)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "a", owner = "bob", name = "BOB", party = { partner } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { eng.Pokemon.new(data, foeSpecies, 12) } },
+    }, { mine, partner })
+    fight.usesBattlefield = function() return false end
+    fight:snapDisplay()
+    local b1 = fight.sim:slot(1).battler
+    eq(b1.shownExpFrac, nil, "classic snapDisplay: the own battler's exp clock stays nil")
+    eq(b1.shownLevel, nil, "...and its shownLevel too")
+    check(b1.shownHP ~= nil, "...while shownHP is still welded, unchanged")
+  end
+
+  -- Battlefield path: snapDisplay welds only the seat this client owns
+  -- (`self.mine`) -- a partner's battler is never seeded and never welded,
+  -- which is the same rule `battlefieldSeats` draws by (pin (2) above).
+  do
+    local mine = monAt(12)
+    mine.exp = expAt(12, 0.4)
+    local partner = monAt(12)
+    local fight = newFight({
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "a", owner = "bob", name = "BOB", party = { partner } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { eng.Pokemon.new(data, foeSpecies, 12) } },
+    }, { mine, partner })
+    check(fight:usesBattlefield(), "the fixture game stays on the battlefield gate")
+    fight:snapDisplay()
+    local w1 = fight.sim:slot(1).battler
+    local w2 = fight.sim:slot(2).battler
+    local w3 = fight.sim:slot(3).battler
+    local truth = expFraction(data, mine)
+    check(truth ~= nil and math.abs(w1.shownExpFrac - truth) < 1e-9
+          and w1.shownLevel == mine.level,
+          "battlefield snapDisplay: the owned battler is welded to truth")
+    eq(w2.shownExpFrac, nil, "...the partner battler's expFrac stays nil")
+    eq(w2.shownLevel, nil, "...and its shownLevel too")
+    eq(w3.shownExpFrac, nil, "...the foe battler carries neither either")
+    eq(w3.shownLevel, nil, "...")
+  end
+else
+  check(true, "(engine Growth/Experience modules unavailable here)")
+end
+
 -- ------- TT1 — battle SFX via AnimPlayer pollEffects (fix-battle-system-v2)
 --
 -- CoopBattle and MediatedBattle mirror BattleState: update → pollEffects →
@@ -17494,6 +18200,89 @@ end)()
   foe.battler.displayFainted = true
   eq(CoopBattle.stripShows(stripClient, foe), false,
      "and drops it once display faint is set")
+
+  -- ------- round 4: the exp beats slot in right after the fainted beat
+  --
+  -- Same batch shape as the very first check above (damage -> damage ->
+  -- faint -> over), plus an `exp` event for the winner: the fainted beat
+  -- (drain, then the faint sink) is unchanged, and behind it the exp beats
+  -- land in the engine's own chronology -- gained-text, then the fill, then
+  -- the level text, then the HP climb the award itself queues -- all of it
+  -- still ahead of the fanfare, exactly like the faint sink already was.
+  if eng and eng.Growth and eng.Experience then
+    local expSpecies, expFoeSpecies = "FIXMON_A", "FIXMON_B"
+    local rate = data.pokemon[expSpecies].growthRate
+    local function expAt(level, frac)
+      local a = eng.Growth.expForLevel(rate, level, data.growth_rates)
+      local b = eng.Growth.expForLevel(rate, level + 1, data.growth_rates)
+      return a + math.floor((b - a) * frac)
+    end
+    local mine = eng.Pokemon.new(data, expSpecies, 12)
+    mine.statExp = {}
+    mine.exp = expAt(12, 0.4)
+    local foeMon = eng.Pokemon.new(data, expFoeSpecies, 12)
+    local expSim = CoopSim.new({
+      data = data, ruleset = {}, rng = function(a) return a end,
+      makeBattler = BattleState.makeBattler,
+    }, {
+      { side = "a", owner = "ann", name = "ANN", party = { mine } },
+      { side = "b", owner = nil, name = "FOE", party = { foeMon } },
+    })
+    local expClient = clientOf(expSim, 1)
+    expClient.phase, expClient.frame = "messages", 0
+    expClient.game.input = { wasPressed = function() return false end }
+
+    local expBattler = expSim:slot(2).battler
+    local expPreHP = expBattler.mon.hp
+    CoopBattle.playEvents(expClient, {
+      { kind = "damage", slot = 2, hp = math.max(1, expPreHP - 3) },
+      { kind = "damage", slot = 2, hp = 0 },
+      { kind = "faint", slot = 2 },
+      { kind = "exp", slot = 1, species = expFoeSpecies, level = 60, winners = 1 },
+      { kind = "over", winner = "a" },
+    })
+
+    local expFaintIdx, expTextIdx, expFillIdx, expLevelTextIdx, expDrainAfterFillIdx,
+      expActIdx
+    local sawFaint = false
+    for i, row in ipairs(expClient.messages) do
+      if type(row) == "table" and row.faintfx and not expFaintIdx then
+        expFaintIdx = i
+        sawFaint = true
+      elseif type(row) == "table" and row.expfill and not expFillIdx then
+        expFillIdx = i
+      elseif type(row) == "table" and row.act and not expActIdx then
+        expActIdx = i
+      elseif sawFaint and type(row) == "table" and row.drain
+             and not expDrainAfterFillIdx and expFillIdx then
+        expDrainAfterFillIdx = i
+      elseif sawFaint and (type(row) == "string" or
+             (type(row) == "table" and row.text ~= nil)) then
+        if not expTextIdx then expTextIdx = i
+        elseif not expLevelTextIdx then expLevelTextIdx = i end
+      end
+    end
+    check(expFaintIdx ~= nil, "the fainted beat still queues its faint sink")
+    check(expTextIdx ~= nil, "...and behind it, the gained-EXP text")
+    check(expFillIdx ~= nil, "...then the fill row")
+    check(expLevelTextIdx ~= nil, "...then the grew-to-level text")
+    check(expDrainAfterFillIdx ~= nil, "...then the award's own HP-climb drain")
+    check(expActIdx ~= nil, "...and the fanfare act, still last of all")
+    if expFaintIdx and expTextIdx and expFillIdx and expLevelTextIdx
+       and expDrainAfterFillIdx and expActIdx then
+      check(expFaintIdx < expTextIdx,
+            "exp text -> fill -> level text -> HP climb slots in right after "
+            .. "the fainted beat")
+      check(expTextIdx < expFillIdx, "...exp text before the fill")
+      check(expFillIdx < expLevelTextIdx, "...fill before the level text")
+      check(expLevelTextIdx < expDrainAfterFillIdx,
+            "...level text before the HP climb")
+      check(expDrainAfterFillIdx < expActIdx,
+            "...and all four of them ahead of the fanfare")
+    end
+  else
+    check(true, "(engine Growth/Experience modules unavailable here)")
+  end
 
   CoopBattle.playVictoryMusic = origVictory
 end)()

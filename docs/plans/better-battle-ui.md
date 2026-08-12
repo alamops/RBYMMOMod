@@ -307,3 +307,40 @@ Live-play findings from the owner, with root causes established:
 Wave E: E1 Battlefield (2+3+5 renderer), E2 CoopBattle (4 + name emission), E3
 MediatedBattle (name emission) — disjoint; then E4 tests/driver; verify suite + driver
 + full e2e (display available).
+
+---
+
+# Round 4 — EXP bar on the ally plates (2026-08-12, autonomous)
+
+Owner ask: an EXP bar as part of the player pokémon card, animating after the
+"gained N EXP" message (which follows an opponent faint).
+
+Scout-verified ground truth: exp is COOP-ONLY (mediated has no exp award, no wire
+field — Wire.battleMon carries none; assumption R4-A1: plates without expFrac render
+no strip, no tri-state). CoopSim emits {kind="exp", slot, species, level, winners};
+clients recompute via eng.Experience.apply (mutates mon.exp/level/stats INSTANTLY —
+the same value-vs-denominator hazard the HP climb fix at CoopBattle:6194-6205
+documents, so the bar reads display clocks only). Fraction math ports the engine's
+Gen2 HpBar.expFraction over Growth.expForLevel (grab("Growth","src.pokemon.Growth")
+mirroring the existing Experience grab) with data.pokemon[species].growthRate.
+
+Pinned design:
+- Battlefield: PLATE_H stays 48 — a taller plate compresses the paired 2v2 ally
+  rows below the 60px mon pitch (see Battlefield.lua's constants comment), so the
+  3px blue EXP strip (no thresholds) is absorbed into the plate's bottom inset
+  under the HP bar. Ally (numbers) plates only — and only the seat whose client
+  drives the clock (own mon; partner/foe plates carry no strip). plateModel gains
+  optional expFrac + shownLevel (level pill prefers shownLevel).
+- CoopBattle chronology (engine-reference order, R4-A2: fills first then text):
+  say("gained N EXP") → queued {expfill} row: startExpFill/stepExpFill twin of the
+  drain machinery drives battler.shownExpFrac from the pre-award progress through
+  each level (fill to 1 → reset to 0 → bump battler.shownLevel → continue) to the
+  final fraction → then the existing "grew to level N!"/teach pages → then the HP
+  climb drain row. expfill blocks the queue like draining; rows stay ahead of the
+  act/fanfare row. Seats carry expFrac/shownLevel from the display clocks, seeded
+  at first sight from mon.exp.
+- R4-A3: no MediatedBattle changes (static level pill stays; wire/server exp
+  pipeline out of scope).
+
+Wave R4-1: Battlefield.lua ∥ CoopBattle.lua (disjoint). Wave R4-2: tests. Then
+review → fixes → suite + driver + full e2e.

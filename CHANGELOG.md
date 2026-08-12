@@ -19,6 +19,14 @@ here must match `manifest.version`.
   referee shake reads as one wobble, and the break-free or catch resolves in
   wire order — the fanfare waits for the last wobble. A caught mon stays in
   its ball; an interrupted chain cleans up instead of hiding the seat.
+- **EXP bar on your own battle plate (co-op).** A thin blue strip under the
+  HP bar shows progress to the next level, driven by a display clock like
+  the HP bar. After a foe faints and the "gained N EXP" line shows, the
+  strip crawls; on a level-up it fills, resets, and the level pill ticks —
+  then the "grew to level" text follows, then the HP climb (which also
+  fixes the bar's value-vs-denominator desync on multi-award turns and
+  under EXP.ALL). Partner and foe plates carry no strip; mediated battles
+  have no exp and are unchanged.
 - **Canonical attack chronology.** Every attack now plays its beats in
   strict order on the arena: the trainer's callout stands alone, then the
   attacker lunges, then the hit flashes with the bar frozen, then the HP

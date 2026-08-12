@@ -128,6 +128,25 @@ M.PLATE_H = 48
 M.PLATE_PAD = 12
 -- Gap between two stacked plates on the same side.
 M.PLATE_GAP = 6
+-- Inner plate metrics. The EXP strip lives INSIDE the bottom inset rather
+-- than on 6px of new plate: PLATE_H is what every placement reads
+-- (allyPlateTop / foePlateBottom, the stack step in M.layout, dodgePlates),
+-- and a taller plate eats the ally band a plated 2v2 needs to keep its two
+-- rows a full MON_ROW_GAP apart. At 54 the paired ally rows compressed to a
+-- 49px pitch -- two 60px mon boxes overlapping -- and the T-P pairing is
+-- spec, so the plate does not grow. The inset absorbs the strip instead:
+-- HP bar at INSET+HP_H off the floor, then EXP_GAP, the strip, and the 2px
+-- that remain to the plate edge.
+M.PLATE_INSET = 7 -- panel edge to the HP bar, left / right / bottom
+M.PLATE_HP_H = 7
+M.PLATE_EXP_H = 3
+M.PLATE_EXP_GAP = 2 -- HP bar bottom to EXP strip top
+-- The strip is narrower than the HP bar at both ends, and this is a reading
+-- rule rather than a clearance one: the corner arc intrudes well under a pixel
+-- at that row, and the HP bar has sat closer to it for longer. Two bars of the
+-- same width read as a pair of equals; pulling the secondary one in at both
+-- ends makes it read as subordinate to the HP bar it hangs under.
+M.PLATE_EXP_XINSET = 2
 
 M.HUMAN_SCALE = 2
 M.HUMAN_SRC = 16
@@ -172,6 +191,10 @@ local BAR_TROUGH = { 0, 0, 0, 0.55 }
 local HP_GREEN = { 0.36, 0.83, 0.42 }
 local HP_YELLOW = { 0.95, 0.78, 0.25 }
 local HP_RED = { 0.93, 0.32, 0.28 }
+-- EXP is one flat blue at every fraction (the series never thresholds it), and
+-- blue is the one hue the HP ramp never lands on, so the two strips can never
+-- be misread for one another.
+local EXP_BLUE = { 0.35, 0.55, 0.95 }
 -- Muted enough to sit under white text on a dark plate, saturated enough to
 -- be told apart at 10px. Keyed by cardModel's 3-letter status, lowercased.
 M.STATUS_COLORS = {
@@ -302,6 +325,22 @@ end
 --   only `hp`. So `shownHp`, when present, is authoritative for anything drawn
 --   and every renderer must compare / draw via (shownHp or hp) -- never `hp`
 --   alone, or the card and the plate disagree mid-drain.
+--
+-- Two further display clocks are OPTIONAL and plate-only (M.plateModel reads
+-- them; M.cardModel does not):
+--   `expFrac`    0..1 progress toward the next level. nil means "this caller
+--                has no exp data" -- the deliberate no-data state, and the
+--                plate then draws no strip at all (mediated battles award no
+--                exp and carry no wire field for it, so their plates stay
+--                pixel-for-pixel as they were: the strip is fitted into the
+--                plate's bottom inset, so it costs the rest of the plate
+--                nothing). A number is clamped into 0..1.
+--   `shownLevel` the level the pill displays. The engine's exp award mutates
+--                mon.level instantly, so a filling bar would otherwise sit
+--                under a level that already ticked; the caller bumps this at
+--                the moment the fill wraps, leaving `level` as truth. nil
+--                means "no separate clock" and the pill shows `level`.
+-- Both are display-only: nothing in this file decides gameplay from them.
 function M.cardModel(seat)
   seat = type(seat) == "table" and seat or {}
   local name = seat.name
@@ -397,6 +436,21 @@ function M.plateModel(seat)
   local frac = 0
   if base.maxHp > 0 then frac = clamp(shown / base.maxHp, 0, 1) end
   local side = seat.side == "foe" and "foe" or "ally"
+  -- Optional display clocks (see the seat HP contract above M.cardModel).
+  -- Absent stays absent: nil expFrac is the no-data state the plate renders as
+  -- "no strip", so a non-number must not become 0 here or a mediated plate
+  -- would grow an empty bar it can never fill.
+  -- NaN is refused, not clamped: it compares false against every bound, so
+  -- `clamp` returns it unchanged and `math.floor` propagates it -- a plate
+  -- that would draw a NaN-wide bar or print "Lv nan", and under drawPlate's
+  -- pcall a throw there blanks the whole plate. Same self-comparison rule the
+  -- CoopBattle producers apply before they ever put a number on these fields.
+  local expFrac = tonumber(seat.expFrac)
+  if expFrac ~= expFrac then expFrac = nil end
+  if expFrac then expFrac = clamp(expFrac, 0, 1) end
+  local shownLevel = tonumber(seat.shownLevel)
+  if shownLevel ~= shownLevel then shownLevel = nil end
+  if shownLevel then shownLevel = math.max(1, math.floor(shownLevel)) end
   return {
     name = truncate(base.name, 10),
     level = base.level,
@@ -406,6 +460,8 @@ function M.plateModel(seat)
     frac = frac,
     status = base.status,
     side = side,
+    expFrac = expFrac,
+    shownLevel = shownLevel,
   }
 end
 
@@ -892,6 +948,10 @@ local function placeMons(seats, side, rows, out)
       hp = seat and seat.hp,
       -- Display clock; nil until a caller animates drains (see plateModel).
       shownHp = seat and seat.shownHp,
+      -- The plate's other two clocks, carried verbatim so nil keeps meaning
+      -- "no exp data" all the way to drawPlate.
+      expFrac = seat and seat.expFrac,
+      shownLevel = seat and seat.shownLevel,
       maxHp = seat and seat.maxHp,
       status = seat and seat.status,
       species = seat and seat.species,
@@ -1227,22 +1287,35 @@ local function hpColor(frac)
   return HP_RED
 end
 
--- Rounded-cap HP bar over a darker trough. Thresholds unchanged from v1.
-local function drawHpBar(gfx, x, y, w, h, frac)
+-- Rounded-cap bar over a darker trough. HP thresholds unchanged from v1;
+-- passing `color` opts out of them for a bar that is not HP -- the EXP strip
+-- is one flat blue at every fraction, so a threshold ramp there would read as
+-- danger where the series reads progress.
+--
+-- Trim (sheen + outline) is dropped below BAR_TRIM_MIN: on the 3px strip a
+-- 1px highlight and a 1px border would leave a single row of actual fill, so
+-- the framing would swallow the thing it frames.
+local BAR_TRIM_MIN = 5
+local function drawBar(gfx, x, y, w, h, frac, color)
   frac = clamp(num(frac, 0), 0, 1)
   local r = h / 2
+  local trim = h >= BAR_TRIM_MIN
   setColor(gfx, BAR_TROUGH)
   gfx.rectangle("fill", x, y, w, h, r, r)
   if frac > 0 then
     local fw = math.max(h, w * frac)
-    setColor(gfx, hpColor(frac))
+    setColor(gfx, color or hpColor(frac))
     gfx.rectangle("fill", x, y, fw, h, r, r)
-    -- Top-edge sheen: one flat highlight, no gradient (no mesh on this path).
-    gfx.setColor(1, 1, 1, 0.18)
-    gfx.rectangle("fill", x + r * 0.6, y + 1, math.max(1, fw - r * 1.2), 1)
+    if trim then
+      -- Top-edge sheen: one flat highlight, no gradient (no mesh on this path).
+      gfx.setColor(1, 1, 1, 0.18)
+      gfx.rectangle("fill", x + r * 0.6, y + 1, math.max(1, fw - r * 1.2), 1)
+    end
   end
-  setColor(gfx, PANEL_LINE)
-  gfx.rectangle("line", x + 0.5, y + 0.5, w - 1, h - 1, r, r)
+  if trim then
+    setColor(gfx, PANEL_LINE)
+    gfx.rectangle("line", x + 0.5, y + 0.5, w - 1, h - 1, r, r)
+  end
 end
 
 -- "Lv 25" in a faint capsule. Returns its width so a caller can reserve it.
@@ -1697,7 +1770,7 @@ local function drawCard(card, eng)
     local frac = 0
     if model.maxHp > 0 then frac = clamp(shown / model.maxHp, 0, 1) end
     local barY = y + h - pad - 7
-    drawHpBar(gfx, x + pad, barY, w - pad * 2, 7, frac)
+    drawBar(gfx, x + pad, barY, w - pad * 2, 7, frac)
 
     withFont(gfx, M.FONT_MICRO, function(micro)
       local pillW = pillWidth(micro, model.level)
@@ -1716,8 +1789,16 @@ local function drawCard(card, eng)
 end
 
 -- Persistent seat plate: name + Lv pill, status chip and (ally only) exact
--- hp/maxHp, over a thresholded bar. The bar reads the display clock, so a
--- caller that drains `shownHp` animates here for free.
+-- hp/maxHp, over a thresholded bar, with the EXP strip flush beneath it. Both
+-- bars read display clocks, so a caller that drains `shownHp` or fills
+-- `expFrac` animates here for free.
+--
+-- The strip is drawn only when the model carries a numeric expFrac. That is
+-- not a fallback, it is the contract: exp is a coop-only concept, and a
+-- mediated plate showing an empty blue trough would promise a bar that never
+-- moves. Nothing else on the plate moves for it -- the HP bar keeps the y it
+-- has always had, and the strip is fitted into the inset below it -- so a
+-- plate with exp and a plate without are the same picture plus a strip.
 local function drawPlate(plate)
   local gfx = g()
   if not (gfx and plate) then return end
@@ -1726,13 +1807,24 @@ local function drawPlate(plate)
     local x, y, w, h = plate.x, plate.y, plate.w, plate.h
     panel(gfx, x, y, w, h)
 
-    local pad = 7
-    local barY = y + h - pad - 7
-    drawHpBar(gfx, x + pad, barY, w - pad * 2, 7, num(model.frac, 0))
+    local pad = M.PLATE_INSET
+    local innerW = w - pad * 2
+    local barY = y + h - pad - M.PLATE_HP_H
+    drawBar(gfx, x + pad, barY, innerW, M.PLATE_HP_H, num(model.frac, 0))
+    if model.expFrac ~= nil then
+      -- Into the bottom inset, pulled in at both ends so the strip reads as
+      -- subordinate to the HP bar rather than as its equal (PLATE_EXP_XINSET).
+      local ex = M.PLATE_EXP_XINSET
+      drawBar(gfx, x + pad + ex, barY + M.PLATE_HP_H + M.PLATE_EXP_GAP,
+        innerW - ex * 2, M.PLATE_EXP_H, num(model.expFrac, 0), EXP_BLUE)
+    end
 
     withFont(gfx, M.FONT_MICRO, function(micro)
-      local pillW = pillWidth(micro, model.level)
-      drawLevelPill(gfx, micro, model.level, x + w - pad - pillW, y + 4, 13)
+      -- The pill follows the display clock, so a mid-fill bump shows before
+      -- the "grew to level N!" page (see the seat HP contract).
+      local level = model.shownLevel or model.level
+      local pillW = pillWidth(micro, level)
+      drawLevelPill(gfx, micro, level, x + w - pad - pillW, y + 4, 13)
       local chipRight = x + w - pad
       if model.status then
         drawStatusChip(gfx, micro, model.status, x + pad, y + 20, 12)

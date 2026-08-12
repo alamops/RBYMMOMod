@@ -119,6 +119,11 @@ local function loadEngine(game)
   grab("EffectRegistry", "src.battle.EffectRegistry")
   grab("ItemEffects", "src.inventory.ItemEffects")
   grab("Experience", "src.battle.Experience")
+  -- The curves behind the exp strip on the ally plates. Soft-grabbed beside
+  -- Experience because it is a *display* dependency: a build without it still
+  -- awards exp and still levels, the plate simply draws no strip (see
+  -- `expFraction`).
+  grab("Growth", "src.pokemon.Growth")
   grab("Pokemon", "src.pokemon.Pokemon")
   grab("Stats", "src.pokemon.Stats")
   -- Optional: a build with no battle_anims still fights, it just does not
@@ -159,6 +164,47 @@ local function loadEngine(game)
 end
 
 M.loadEngine = loadEngine
+
+
+-- ------- how far along its level a monster is
+--
+-- The Gen 2 HUD's own `HpBar.expFraction` (engine src/battle/gen2/HpBar.lua),
+-- ported over Gen 1's spellings: the exp a mon carries is `mon.exp` here
+-- (Gen 2 calls it `experience`), and the curve comes off the species def's
+-- `growthRate` through `Growth.expForLevel` -- the same call
+-- `Experience.apply` levels by, so the strip and the level can never disagree
+-- about where a level ends.
+--
+-- **nil is a real answer and means "draw no strip".** No species def, no
+-- Growth module, no `mon.exp`: three states where any number this could return
+-- would be invented, and an invented exp bar on somebody's plate is worse than
+-- no bar at all. Battlefield's `plateModel` treats a nil `expFrac` as the
+-- no-data state for exactly this. Everything is pcall-guarded because it runs
+-- inside the draw path.
+local function expFraction(data, mon)
+  if type(data) ~= "table" or type(mon) ~= "table" then return nil end
+  if mon.exp == nil then return nil end
+  local eng = engine
+  local Growth = eng and eng.Growth
+  if not (Growth and Growth.expForLevel) then return nil end
+  local def = mon.species and (data.pokemon or {})[mon.species]
+  if not def then return nil end
+  local level = tonumber(mon.level) or 1
+  local ok, base = pcall(Growth.expForLevel, def.growthRate, level,
+    data.growth_rates)
+  if not ok then return nil end
+  local okNext, after = pcall(Growth.expForLevel, def.growthRate, level + 1,
+    data.growth_rates)
+  if not okNext then return nil end
+  base, after = tonumber(base), tonumber(after)
+  if not (base and after) or after <= base then return nil end
+  local into = (tonumber(mon.exp) or base) - base
+  local frac = into / (after - base)
+  -- NaN compares false against every bound there is, so it is refused rather
+  -- than clamped -- the same rule `startDrain` applies to a wire `to`.
+  if frac ~= frac then return nil end
+  return math.max(0, math.min(1, frac))
+end
 
 
 -- ------- packing a party for the wire
@@ -1344,6 +1390,13 @@ function M:update(dt)
       self:stepDrain()
       return
     end
+    -- ...and a filling exp strip holds it the same way, for the same reason:
+    -- it is a bar crawling on the cart's own unskippable loop, not a text page
+    -- with a button to answer it.
+    if self.expFilling then
+      self:stepExpFill()
+      return
+    end
     if self.faintFx then
       self:stepFaint()
       return
@@ -1376,7 +1429,7 @@ function M:update(dt)
       -- in the middle of the thing it is describing.
       local head = self.messages[1]
       if type(head) == "table"
-         and (head.anim or head.drain or head.faintfx
+         and (head.anim or head.drain or head.faintfx or head.expfill
               or head.wait or head.act) then
         -- Hold wait/act/anim behind opening appear line(s). Drop ball chrome
         -- when the post-appear wait starts (not on every page advance), so a
@@ -1401,6 +1454,8 @@ function M:update(dt)
             self:startAnim(head)
           elseif head.drain then
             self:startDrain(head)
+          elseif head.expfill then
+            self:startExpFill(head)
           else
             self:startFaint(head)
           end
@@ -3194,6 +3249,166 @@ function M:stepDrain()
   if shown == at.to then self.draining = nil end
 end
 
+-- ------- the exp strip filling, which is the third display clock
+--
+-- Same shape as the drain above and for the same reason: `Experience.apply`
+-- runs the instant the `exp` event is received and moves `mon.exp` and
+-- `mon.level` in one step, so the number the plate is drawn from has to be a
+-- separate clock that trails it. `battler.shownExpFrac` is the strip's fill
+-- (0..1, or nil for "no strip") and `battler.shownLevel` is the number the
+-- level pill prints; the gap between those two and the mon's own truth *is*
+-- the animation, exactly as `shownHP` is for the bar.
+--
+-- Battlefield-only. The classic 160x144 readout has no exp strip and never
+-- reads either clock, so nothing here is ever queued on that path (see
+-- `gainExp`) and the classic exp text flow is byte-identical to what it was.
+
+-- A whole bar in about 1.2 seconds, counted in frames because this screen's
+-- update runs on the engine's fixed 60Hz step (the drain counts the same way).
+-- Linear rather than the cart's accelerating three-frames-a-pixel crawl
+-- (AnimateExpBar): the strip here is a fraction rather than 64 discrete
+-- pixels, so there are no pixel steps to lengthen, and a constant rate reads
+-- as the same deliberate crawl.
+local EXP_FILL_FRAMES = 72
+local EXP_FILL_STEP = 1 / EXP_FILL_FRAMES
+
+-- Seed the two display clocks off the monster's own truth.
+--
+-- Lazy rather than at build time, because the battlers are built in CoopSim
+-- (and, on a real boot, by the engine's `BattleState.makeBattler`) and neither
+-- knows this screen has plates. Idempotent: it only ever fills a nil, so a
+-- clock mid-fill is never yanked back to truth by a draw.
+--
+-- A seeded-nil `shownExpFrac` is not a failure to seed -- it is the honest
+-- "this monster has no fraction to show" (a partner's packed mon carries no
+-- exp), and it is re-asked every call precisely so a monster that gains one
+-- later picks it up.
+function M:seedExpClock(battler)
+  if type(battler) ~= "table" or type(battler.mon) ~= "table" then return end
+  if battler.shownLevel == nil then
+    battler.shownLevel = tonumber(battler.mon.level) or 1
+  end
+  if battler.shownExpFrac == nil then
+    battler.shownExpFrac = expFraction(self.game and self.game.data,
+      battler.mon)
+  end
+end
+
+-- A queued exp-fill row comes up. Answered on the spot (returning false) when
+-- there is nothing to crawl, so the queue never stalls on one.
+--
+-- The row carries the battler rather than a slot, like the drain row does, so
+-- a fill still lands on the monster it was queued for even if the field has
+-- moved on.
+--
+-- **Both ends are read here, not at queue time, and each for its own reason.**
+--
+-- The *target* comes off `battler.mon` now because the mon is still being
+-- written to after the row is queued: with an EXP.ALL held, `gainExp` runs a
+-- second `Experience.apply` pass over the whole party -- and the fighter is in
+-- that party, so a target frozen before that pass is short by whatever the
+-- second half added (two levels' worth, in the case that found this). Reading
+-- it at row-start means every apply pass has already landed, so the strip and
+-- the pill agree with the "grew to level N!" lines printed beside them.
+--
+-- The *start* is the live display clock (`shownExpFrac`/`shownLevel`), because
+-- that is where the strip visibly is. Two awards in one batch both capture
+-- their `from*` before either has played, so honouring the second row's
+-- capture would drag the strip back down to where the first one started.
+-- `row.from*` remains as the fallback for a clock that is still nil -- the
+-- capture `gainExp` takes before `Experience.apply` mutates the mon, which is
+-- the one thing that genuinely cannot be worked back out later.
+function M:startExpFill(row)
+  local battler = row.expfill
+  if type(battler) ~= "table" or type(battler.mon) ~= "table" then
+    return false
+  end
+  local function level(value, fallback)
+    local got = tonumber(value)
+    if not got or got ~= got then return fallback end
+    return math.max(1, math.floor(got))
+  end
+  local function frac(value)
+    local got = tonumber(value)
+    -- NaN refused rather than clamped: `stepExpFill` stops on `>=` against a
+    -- target, and a NaN target is a stop condition that never comes true.
+    if not got or got ~= got then return nil end
+    return math.max(0, math.min(1, got))
+  end
+  local toLevel = level(battler.mon.level, 1)
+  local toFrac = frac(expFraction(self.game and self.game.data,
+    battler.mon)) or 0
+  local from = frac(battler.shownExpFrac)
+  if from == nil then from = frac(row.fromFrac) end
+  -- No fraction to start from means this monster draws no strip at all, so
+  -- there is nothing to fill. The pill is still put where the level is: it is
+  -- printed from `shownLevel` and would otherwise sit a level behind forever.
+  if from == nil then
+    battler.shownLevel = toLevel
+    return false
+  end
+  local fromLevel = math.min(
+    level(battler.shownLevel, level(row.fromLevel, toLevel)), toLevel)
+  battler.shownExpFrac = from
+  battler.shownLevel = fromLevel
+  -- Nothing crossed and nothing added (a rounding-sized gain, or an award
+  -- that priced to zero): put the strip where it belongs and let the queue
+  -- move on rather than holding it for a crawl nobody can see.
+  if fromLevel == toLevel and toFrac <= from then
+    battler.shownExpFrac = toFrac
+    return false
+  end
+  -- The budget, and it is the same guarantee the drain's is: a fill is
+  -- deliberately unskippable, so the only other end to a target it somehow
+  -- cannot reach is a message queue that never moves again. One whole bar per
+  -- level to cross plus two bars of slack, after which it is snapped to where
+  -- it was going.
+  self.expFilling = {
+    battler = battler,
+    slot = row.slot,
+    toLevel = toLevel,
+    toFrac = toFrac,
+    frames = EXP_FILL_FRAMES * (2 + (toLevel - fromLevel)),
+  }
+  return true
+end
+
+-- One frame of it.
+--
+-- A level crossing is the cart's own (AnimateExpBar, engine/battle/core.asm):
+-- the segment fills to full, the level the HUD prints ticks up, and the strip
+-- restarts at empty -- which is why the pill changes as the bar tops out and
+-- not a message later. Two levels in one award is that twice.
+function M:stepExpFill()
+  local at = self.expFilling
+  local battler = at.battler
+  if not (battler and battler.mon) then
+    self.expFilling = nil
+    return
+  end
+  at.frames = (at.frames or 0) - 1
+  if at.frames <= 0 then
+    battler.shownExpFrac = at.toFrac
+    battler.shownLevel = at.toLevel
+    self.expFilling = nil
+    return
+  end
+  local shownLevel = tonumber(battler.shownLevel) or at.toLevel
+  -- Every level still to cross fills the whole strip; the last one stops
+  -- wherever the award actually left the monster.
+  local target = (shownLevel < at.toLevel) and 1 or at.toFrac
+  local shown = math.min(target, (tonumber(battler.shownExpFrac) or 0)
+    + EXP_FILL_STEP)
+  battler.shownExpFrac = shown
+  if shown < target then return end
+  if shownLevel < at.toLevel then
+    battler.shownLevel = shownLevel + 1
+    battler.shownExpFrac = 0
+    return
+  end
+  self.expFilling = nil
+end
+
 -- The fall. The flag goes up *before* the text, which is the engine's order
 -- (BattleState:enemyMonFainted queues the slide and the cry, then says the
 -- line): the sprite is sliding out of its box while the box says why.
@@ -3318,6 +3533,7 @@ end
 -- whole point.
 function M:snapDisplay()
   self.draining = nil
+  self.expFilling = nil
   self.faintFx = nil
   -- The arena's effects go with them, and a throw's hold goes first: an entry
   -- retained at t == 1 outlives its own clock on purpose (a held sink, a
@@ -3358,16 +3574,33 @@ function M:snapDisplay()
   local kept = {}
   for _, row in ipairs(self.messages or {}) do
     if not (type(row) == "table"
-            and (row.swap or row.drain or row.faintfx)) then
+            and (row.swap or row.drain or row.faintfx or row.expfill)) then
       kept[#kept + 1] = row
     end
   end
   self.messages = kept
   if not self.sim then return end
+  local data = self.game and self.game.data
+  -- Only the seat that owns a strip owns clocks to weld, and the rule is the
+  -- one `battlefieldSeats` draws by: this screen's own slot on the arena, and
+  -- nobody at all on the classic readout. Welding wider than that both invents
+  -- clocks on battlers no plate reads them off -- foes, the partner -- and
+  -- spends a `Growth` walk per battler per queue drain on the classic path,
+  -- which is documented as untouched by any of this.
+  local owns = self:usesBattlefield() and self.mine or nil
   for _, slot in ipairs(self.sim.slots or {}) do
     local battler = slot.battler
     if battler and battler.mon then
       battler.shownHP = battler.mon.hp
+      -- The exp clocks are welded the same way the bar is, and they have to
+      -- be: a battle that ends mid-fill (or a resync that rebuilt the party
+      -- underneath one) would otherwise leave a strip frozen part-way and a
+      -- pill a level behind the monster it names. nil stays nil -- a monster
+      -- with no fraction to show still shows none.
+      if owns and slot.index == owns then
+        battler.shownExpFrac = expFraction(data, battler.mon)
+        battler.shownLevel = tonumber(battler.mon.level) or battler.shownLevel
+      end
       battler.displayFainted = self.sim:isDown(slot) or nil
     end
   end
@@ -4779,6 +5012,30 @@ function M:battlefieldSeats(theirs)
       if (falling or not hidden(slot, battler))
          and not (introHide and introHide[slot.index]) then
         local mon = battler.mon or {}
+        -- The exp strip belongs to *this client's own seat* and no other, for
+        -- the plainest reason: `gainExp` returns early on any slot but
+        -- `self.mine`, so it is the only seat whose clocks are ever moved. A
+        -- foe never earns exp at all; a partner earns it on their own client,
+        -- where it is their own seat. Seeding the partner's plate here bought
+        -- a strip that then sat frozen for the whole battle -- an empty trough
+        -- over a monster that had just levelled, which reads as a bug rather
+        -- than as the absence of information it actually is.
+        --
+        -- Both other seats pass neither field, which is `plateModel`'s
+        -- documented no-data state: no strip, and a level pill printed from
+        -- the real level -- which for a partner is the *live* level, so their
+        -- pill is right the moment their mon levels instead of trailing a
+        -- clock nothing on this client advances.
+        --
+        -- Seeded here, on first sight, because this is where a battler is
+        -- first *noted* by the display: `seedExpClock` only ever fills a nil,
+        -- so a strip mid-fill is never disturbed by a draw.
+        local expFrac, shownLevel
+        if not theirs and slot.index == self.mine then
+          self:seedExpClock(battler)
+          expFrac = battler.shownExpFrac
+          shownLevel = battler.shownLevel
+        end
         out[#out + 1] = {
           index = slot.index,
           name = battler.name or mon.nickname or mon.species or "?",
@@ -4799,6 +5056,11 @@ function M:battlefieldSeats(theirs)
           maxHp = mon.maxHp or (mon.stats and mon.stats.hp) or mon.hp or 1,
           status = mon.status,
           species = mon.species,
+          -- Display clocks, not truth: the strip trails `mon.exp` and the
+          -- pill trails `mon.level` for exactly as long as a queued fill
+          -- takes to play (see `startExpFill`).
+          expFrac = expFrac,
+          shownLevel = shownLevel,
           icon = seatIconFor(self, slot, battler),
           front = seatFrontFor(self, slot, battler),
           acting = (self.acting == slot.index)
@@ -6180,13 +6442,61 @@ function M:gainExp(event)
 
   mon.statExp = mon.statExp or {}
   mon.exp = mon.exp or 0
+
+  -- Where the strip is *now*, read before the award lands.
+  --
+  -- `Experience.apply` mutates `mon.exp` and `mon.level` in place, so once it
+  -- has run there is nothing left to work the starting fraction back out of --
+  -- the same hazard the HP climb below documents, one field over. That is the
+  -- whole job of this capture, and its only one: `startExpFill` starts from
+  -- the *live* display clock and reaches for `from*` only when that clock is
+  -- still nil, precisely so a second award in the same batch begins where the
+  -- first fill stopped rather than rewinding to a fraction captured before it.
+  --
+  -- Battlefield only. The classic 160x144 readout has no exp strip: nothing
+  -- below is computed, nothing is queued, and its exp text flow is exactly
+  -- what it always was.
+  local wide = self:usesBattlefield()
+  local battler = slot.battler
+  local fromFrac, fromLevel
+  if wide and battler then
+    self:seedExpClock(battler)
+    fromFrac = battler.shownExpFrac
+    fromLevel = battler.shownLevel or mon.level or 1
+  end
+
   local ok, levels, gained = pcall(eng.Experience.apply, self.game.data, mon,
     def, event.level or 1, true, winners * (expAll and 2 or 1), false)
   if not ok then return end
 
-  self:say((mon.nickname or slot.battler.name or "?")
-    .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
-  self:levelled(mon, slot.battler.name, levels)
+  local name = mon.nickname or (battler and battler.name) or "?"
+  self:say(name .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
+
+  -- ...and *then* the strip crawls, which is the cart's chronology: the line
+  -- is read, and the bar answers it. Queued ahead of `levelled` deliberately
+  -- -- the pill ticks over as the strip tops out (`stepExpFill`), so "grew to
+  -- level N!" is printed after the plate already says N rather than a beat
+  -- before it. Guarded on the queue because every other line here goes out
+  -- through `say`, and a caller that stubs `say` has neither a queue nor a
+  -- battler.
+  --
+  -- No target rides on the row. It is read off the mon when the row comes up,
+  -- because the mon is *still being written to* after this point: the EXP.ALL
+  -- pass below walks `save.party`, which is the same table this fighter lives
+  -- in, so a target captured here would be the first half of the award rather
+  -- than the whole of it -- a pill two levels short of the "grew to level N!"
+  -- lines printed right beside it.
+  if wide and battler and self.messages then
+    self.messages[#self.messages + 1] = {
+      expfill = battler,
+      slot = event.slot,
+      name = name,
+      fromFrac = fromFrac,
+      fromLevel = fromLevel,
+    }
+  end
+
+  self:levelled(mon, battler and battler.name, levels)
 
   -- A level raises both HP numbers, and the bar has to be told.
   --
