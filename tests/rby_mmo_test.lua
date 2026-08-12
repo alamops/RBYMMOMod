@@ -11223,6 +11223,134 @@ end)()
      "and whoever is being narrated takes it once a turn is playing out")
 end)()
 
+-- ------- Gen1 Battlefield: layout helpers + wide-ui surface APIs
+--
+-- Pure Battlefield.layout / nextTarget / cardModel, then CoopBattle and
+-- MediatedBattle uiSize-shaped entry points for Gen1 vs Gen2 gate.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- layout tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+  local Config = need("Config")
+  local Gen = need("Gen")
+
+  check(Config.BATTLEFIELD_ARENA:match("outdoor_grass_arena%.png$") ~= nil,
+        "arena art path ends with outdoor_grass_arena.png")
+  eq(Config.BATTLEFIELD_WIDTH, 640, "battlefield canvas width is 640")
+  eq(Config.BATTLEFIELD_HEIGHT, 360, "battlefield canvas height is 360")
+  eq(Battlefield.WIDTH, 640, "Battlefield.WIDTH mirrors Config")
+  eq(Battlefield.HEIGHT, 360, "Battlefield.HEIGHT mirrors Config")
+
+  check(Battlefield.enabled({ data = {} }),
+        "an empty Gen1-shaped game enables the battlefield theatre")
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  eq(Gen.generation(goldGame), 2, "Gold-shaped stub is generation 2")
+  check(not Battlefield.enabled(goldGame),
+        "Gen2 keeps the classic guild-focus path")
+
+  for _, mode in ipairs({ "coop_wild", "wild" }) do
+    local wild = Battlefield.layout({
+      mode = mode,
+      allyHumans = { { id = "ann", name = "ANN" } },
+      foeHumans = { { id = "bug", name = "BUG" } },
+      allySeats = { { index = 1, name = "PIKA" } },
+      foeSeats = { { index = 3, name = "RATT" } },
+    })
+    local foeHumans = 0
+    for _, h in ipairs(wild.humans) do
+      if h.side == "foe" then foeHumans = foeHumans + 1 end
+    end
+    eq(foeHumans, 0,
+       mode .. " omits right-side trainers even when a stale foe list is present")
+  end
+
+  local npc = Battlefield.layout({
+    mode = "coop_npc",
+    allyHumans = { { id = "ann", name = "ANN", spriteId = "player_red" } },
+    foeHumans = { { id = "bug", name = "BUG", spriteId = "bug_catcher" } },
+    allySeats = { { index = 1, name = "PIKA", acting = true } },
+    foeSeats = { { index = 3, name = "WEED", acting = true } },
+  })
+  local allyHuman, foeHuman
+  for _, h in ipairs(npc.humans) do
+    if h.side == "ally" then allyHuman = h
+    elseif h.side == "foe" then foeHuman = h end
+  end
+  check(allyHuman ~= nil and foeHuman ~= nil,
+        "coop_npc places humans on both halves")
+  eq(allyHuman.facing, "right", "ally trainers face right")
+  eq(foeHuman.facing, "left", "foe trainers face left")
+  check(allyHuman.x < npc.midline,
+        "ally humans sit left of the midline")
+  check(foeHuman.x > npc.midline,
+        "foe humans sit right of the midline")
+
+  eq(#npc.mons, 2, "layout only places mons for the active seats passed in")
+  for _, mon in ipairs(npc.mons) do
+    if mon.side == "ally" then
+      check(mon.x < npc.midline,
+            "ally mon icons sit left of the midline")
+    else
+      check(mon.x > npc.midline,
+            "foe mon icons sit right of the midline")
+    end
+  end
+
+  local targets = { { index = 1 }, { index = 2 } }
+  eq(Battlefield.nextTarget(targets, 2, 1), 1,
+     "nextTarget wraps forward from the last seat to the first")
+  eq(Battlefield.nextTarget(targets, 1, -1), 2,
+     "nextTarget wraps backward from the first seat to the last")
+
+  local card = Battlefield.cardModel({
+    species = "pikachu",
+    level = 0,
+    hp = 120,
+    maxHp = 100,
+    status = "paralysis",
+  })
+  eq(card.name, "pikachu", "cardModel falls back to species for the name")
+  eq(card.level, 1, "cardModel floors level to at least 1")
+  eq(card.hp, 100, "cardModel clamps hp to maxHp")
+  eq(card.maxHp, 100, "cardModel keeps maxHp")
+  eq(card.status, "par", "cardModel truncates status to three letters")
+
+  local gen1Game = { data = data }
+  local CoopBattle = need("CoopBattle")
+  local coop = setmetatable({ game = gen1Game }, { __index = CoopBattle })
+  local uw, uh = coop:uiSize()
+  eq(uw, 640, "CoopBattle uiSize width on Gen1")
+  eq(uh, 360, "CoopBattle uiSize height on Gen1")
+  check(coop:isWideBattleLayout(),
+        "CoopBattle isWideBattleLayout on Gen1")
+  check(coop:wantsFillScale(),
+        "CoopBattle wantsFillScale on Gen1")
+
+  local MediatedBattle = need("MediatedBattle")
+  local mediated = setmetatable({ game = gen1Game }, { __index = MediatedBattle })
+  local mw, mh = mediated:uiSize()
+  eq(mw, 640, "MediatedBattle uiSize width on Gen1")
+  eq(mh, 360, "MediatedBattle uiSize height on Gen1")
+  check(mediated:isWideBattleLayout(),
+        "MediatedBattle isWideBattleLayout on Gen1")
+  check(mediated:wantsFillScale(),
+        "MediatedBattle wantsFillScale on Gen1")
+
+  local goldCoop = setmetatable({ game = goldGame }, { __index = CoopBattle })
+  local gw, gh = goldCoop:uiSize()
+  eq(gw, 160, "CoopBattle stays classic width on Gen2")
+  eq(gh, 144, "CoopBattle stays classic height on Gen2")
+  check(not goldCoop:isWideBattleLayout(),
+        "CoopBattle is not wide on Gen2")
+  check(not goldCoop:wantsFillScale(),
+        "CoopBattle does not fill-scale on Gen2")
+end)()
+
 -- ------- trainer entrance: only while the foe quarter is empty
 --
 -- Co-op NPC fights seat both foe mons before "2 on 2 battle!", so the old

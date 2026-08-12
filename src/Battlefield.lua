@@ -40,6 +40,7 @@ M.HUMAN_DRAW = M.HUMAN_SRC * M.HUMAN_SCALE
 local arenaImage = nil
 local arenaTried = false
 local humanCache = {} -- spriteId -> { image, quads } | false
+local iconCache = {} -- path string -> Image | false
 
 local function clamp(v, lo, hi)
   if v < lo then return lo end
@@ -62,7 +63,7 @@ end
 
 function M.enabled(game)
   local ok, gen = pcall(Gen.generation, game)
-  if not ok then return true end
+  if not ok then return false end
   return (tonumber(gen) or 1) == 1
 end
 
@@ -71,8 +72,6 @@ end
 function M.load(modFacade)
   modFacade = modFacade or mod
   if arenaTried then return arenaImage end
-  arenaTried = true
-  arenaImage = nil
 
   local path = Config.BATTLEFIELD_ARENA
   if type(path) ~= "string" or path == "" then return nil end
@@ -96,6 +95,7 @@ function M.load(modFacade)
       if img.setFilter then img:setFilter("nearest", "nearest") end
     end)
     arenaImage = img
+    arenaTried = true
     return arenaImage
   end
 
@@ -314,33 +314,44 @@ function M.layout(ctx)
   placeMons(ctx.allySeats, "ally", mons)
   placeMons(ctx.foeSeats, "foe", mons)
 
-  local targetMon = findTargetMon(mons, ctx)
+  local showTarget = ctx.showTarget == true
+  if not showTarget then
+    local targets = ctx.targets
+    if type(targets) == "table" and #targets > 0 and ctx.targetIndex then
+      showTarget = true
+    end
+  end
+
+  local targetMon = nil
   local arrow = nil
   local card = nil
-  if targetMon then
-    local bob = math.sin(num(ctx.frame, 0) * 0.2) * 3
-    arrow = {
-      x = targetMon.x,
-      y = targetMon.y - math.floor(targetMon.drawH / 2) - 10 + bob,
-      tipY = targetMon.y - math.floor(targetMon.drawH / 2) - 4 + bob,
-    }
-    local model = M.cardModel(targetMon)
-    local cx = targetMon.x + 28
-    local cy = targetMon.y - M.CARD_H - 8
-    cx = clamp(cx, 4, M.WIDTH - M.CARD_W - 4)
-    cy = clamp(cy, 4, M.FIELD_BOTTOM - M.CARD_H - 4)
-    -- Prefer parking the card toward canvas center if near an edge.
-    if targetMon.x > M.MIDLINE then
-      cx = clamp(targetMon.x - M.CARD_W - 20, 4, M.WIDTH - M.CARD_W - 4)
+  if showTarget then
+    targetMon = findTargetMon(mons, ctx)
+    if targetMon then
+      local bob = math.sin(num(ctx.frame, 0) * 0.2) * 3
+      arrow = {
+        x = targetMon.x,
+        y = targetMon.y - math.floor(targetMon.drawH / 2) - 10 + bob,
+        tipY = targetMon.y - math.floor(targetMon.drawH / 2) - 4 + bob,
+      }
+      local model = M.cardModel(targetMon)
+      local cx = targetMon.x + 28
+      local cy = targetMon.y - M.CARD_H - 8
+      cx = clamp(cx, 4, M.WIDTH - M.CARD_W - 4)
+      cy = clamp(cy, 4, M.FIELD_BOTTOM - M.CARD_H - 4)
+      -- Prefer parking the card toward canvas center if near an edge.
+      if targetMon.x > M.MIDLINE then
+        cx = clamp(targetMon.x - M.CARD_W - 20, 4, M.WIDTH - M.CARD_W - 4)
+      end
+      card = {
+        x = cx,
+        y = cy,
+        w = M.CARD_W,
+        h = M.CARD_H,
+        model = model,
+        mon = targetMon,
+      }
     end
-    card = {
-      x = cx,
-      y = cy,
-      w = M.CARD_W,
-      h = M.CARD_H,
-      model = model,
-      mon = targetMon,
-    }
   end
 
   local bubbles = {}
@@ -558,9 +569,14 @@ local function drawMonIcon(mon, frame)
         drawDrawableIcon(gfx, icon, x, y, w)
         drawn = true
       elseif type(icon) == "string" and love.graphics.newImage then
-        local ok, img = pcall(love.graphics.newImage, icon)
-        if ok and img then
-          drawDrawableIcon(gfx, img, x, y, w)
+        local hit = iconCache[icon]
+        if hit == nil then
+          local ok, img = pcall(love.graphics.newImage, icon)
+          hit = (ok and img) and img or false
+          iconCache[icon] = hit
+        end
+        if hit then
+          drawDrawableIcon(gfx, hit, x, y, w)
           drawn = true
         end
       end

@@ -26,12 +26,13 @@ here must match `manifest.version`.
 
 - **Gen1 top-down battlefield theatre (CoopBattle + MediatedBattle 1v1).**
   Hard-cut Gen1 presentation onto a 640×360 fill-scale arena
-  (`assets/battle/outdoor_grass_arena.png`) via `src/Battlefield.lua`:
-  humans on the sides (OW walk sheets, facing inward), active mons as bag
-  icons on the grass, field-cursor targeting with arrow + floating status
-  card (name / Lxx / HP / status / front sprite), Pokémon icon bob, and
-  trainer-head callout bubbles when a human’s mon acts (not wild). Gen2
-  keeps the classic guild-focus / 160×144 path until a later pass.
+  (`assets/battle/outdoor_grass_arena.png` — original authored field art,
+  not ROM-derived) via `src/Battlefield.lua`: humans on the sides (OW walk
+  sheets, facing inward), active mons as bag icons on the grass, field-cursor
+  targeting with arrow + floating status card (name / Lxx / HP / status /
+  front sprite), Pokémon icon bob, and trainer-head callout bubbles when a
+  human’s mon acts (not wild). Gen2 keeps the classic guild-focus / 160×144
+  path until a later pass.
 - **PROTOCOL 20 — gen lock + co-op invite joiner finish.** `Config.PROTOCOL` /
   `relay.js` bump **18 → 20** (both parallel branches had claimed 19). Client
   `mmo.hello` carries `generation` (1|2); Hub.lua and the Node relay refuse a

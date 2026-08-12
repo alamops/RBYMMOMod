@@ -4404,9 +4404,18 @@ local function trainerWalkSpriteId(trainer, game)
   return nil
 end
 
-local function seatIconFor(self, battler)
+-- Resolve a party bag icon to a cached Image on the sim slot (once per
+-- species). Paths every frame would re-hit newImage in Battlefield; store
+-- userdata here so layout can draw without reloading.
+local function seatIconFor(self, slot, battler)
   if not battler then return nil end
   local mon = battler.mon
+  local species = mon and mon.species
+  if slot and slot._bfIcon ~= nil and slot._bfIconSpecies == species then
+    local cached = slot._bfIcon
+    return (cached ~= false) and cached or nil
+  end
+  local resolved = nil
   local eng = engine
   local Sprites = eng and eng.Sprites
   local data = self.game and self.game.data
@@ -4430,9 +4439,22 @@ local function seatIconFor(self, battler)
       end
       path = Sprites.iconPath(data, mon, path, { name = name })
     end)
-    if type(path) == "string" and path ~= "" then return path end
+    if type(path) == "string" and path ~= "" then
+      local ok, img = pcall(function()
+        if love and love.graphics and love.graphics.newImage then
+          return love.graphics.newImage(path)
+        end
+        return nil
+      end)
+      if ok and img then resolved = img end
+    end
   end
-  return battler.sprite
+  if not resolved then resolved = battler.sprite end
+  if slot then
+    slot._bfIcon = resolved or false
+    slot._bfIconSpecies = species
+  end
+  return resolved
 end
 
 function M:ensureBattlefieldLoaded()
@@ -4460,7 +4482,7 @@ function M:battlefieldSeats(theirs)
           maxHp = mon.maxHp or mon.hp or 1,
           status = mon.status,
           species = mon.species,
-          icon = seatIconFor(self, battler),
+          icon = seatIconFor(self, slot, battler),
           front = battler.sprite,
           acting = (self.acting == slot.index)
             or (self.anim and self.anim.from == slot.index) or false,
@@ -4528,16 +4550,21 @@ function M:battlefieldFoeHumans()
   return humans
 end
 
--- 1-based index into allyHumans / foeHumans for a human-owned field seat.
+-- 1-based index into allyHumans / foeHumans for a field seat's bubble host.
+-- Human-owned seats match by owner id. coop_npc foe seats (owner nil) map to
+-- foe human 1 when a trainer human is shown. coop_wild has no foe humans, so
+-- ownerless foes stay unmapped.
 function M:battlefieldHumanIndex(slotIndex)
   local slot = self.sim and self.sim:slot(slotIndex)
-  if not (slot and slot.owner) then return nil, nil end
+  if not slot then return nil, nil end
   local theirs = self:foeSide(slotIndex)
   local humans = theirs and self:battlefieldFoeHumans()
     or self:battlefieldAllyHumans()
-  for i, h in ipairs(humans) do
-    if h.id == slot.owner then
-      return theirs and "foe" or "ally", i
+  if slot.owner then
+    for i, h in ipairs(humans) do
+      if h.id == slot.owner then
+        return theirs and "foe" or "ally", i
+      end
     end
   end
   -- NPC trainer bubble host: any foe seat without a matching owner maps to
@@ -4552,9 +4579,8 @@ function M:noteBattlefieldBubble(slotIndex, text)
   if not self:usesBattlefield() then return end
   local move = moveNameFromBattleText(text)
   if not move then return end
-  local slot = self.sim and self.sim:slot(slotIndex)
-  -- Human-owned mons only — wild / NPC seats never get trainer callouts.
-  if not (slot and slot.owner) then return end
+  -- Humans + coop_npc foe seats (owner nil → foe human 1). coop_wild foes
+  -- have no foeHumans, so battlefieldHumanIndex returns nil.
   local side, humanIndex = self:battlefieldHumanIndex(slotIndex)
   if not side then return end
   self.battlefieldBubbles = {
@@ -4599,6 +4625,8 @@ function M:battlefieldCtx()
     allySeats = self:battlefieldSeats(false),
     foeSeats = self:battlefieldSeats(true),
     bubbles = self:battlefieldBubbleCtx(),
+    -- Arrow/card only during target pick; Battlefield honors this flag.
+    showTarget = (self.phase == "target"),
   }
   if self.phase == "target" and self.sim then
     local mine = self:mySlot()

@@ -1267,21 +1267,40 @@ function M:battlefieldCtx()
     foeSeats = foeSeats,
     targets = targets,
     targetIndex = targetIndex,
+    showTarget = showTarget,
     frame = frame,
     bubbles = self.battlefieldBubbles,
   }
 end
 
 -- Classic 160×144 chrome drawn into Battlefield.MENU_BAND at the bottom.
+-- Scissor matches CoopBattle.drawMenuBand: clip chrome to the menu band only.
 function M:withMenuBand(drawFn)
+  local g = love and love.graphics
+  if not (g and g.push) then
+    pcall(drawFn)
+    return
+  end
+  local bandY = Battlefield.FIELD_BOTTOM
   local band = Battlefield.MENU_BAND
   local classicBox = 48 -- Font.drawBox(0, 12, 20, 6) occupies y=96..144
-  love.graphics.push()
-  love.graphics.translate(0, Battlefield.HEIGHT - band)
-  love.graphics.scale(Battlefield.WIDTH / 160, band / classicBox)
-  love.graphics.translate(0, -96)
-  pcall(drawFn)
-  love.graphics.pop()
+  g.push()
+  g.translate(0, bandY)
+  g.scale(Battlefield.WIDTH / 160, band / classicBox)
+  g.translate(0, -96)
+  if g.setScissor then
+    local prev = { g.getScissor() }
+    g.setScissor(0, bandY, Battlefield.WIDTH, band)
+    pcall(drawFn)
+    if prev[1] then
+      g.setScissor(prev[1], prev[2], prev[3], prev[4])
+    else
+      g.setScissor()
+    end
+  else
+    pcall(drawFn)
+  end
+  g.pop()
 end
 
 function M:say(text)
