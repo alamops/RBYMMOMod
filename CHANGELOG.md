@@ -31,10 +31,18 @@ here must match `manifest.version`.
 - **PROTOCOL 21 — exp in mediated battles.** `Config.PROTOCOL` / `relay.js`
   bump **20 → 21**. The hub holds no ROM species table (locked legal
   floor), so the referee can never compute an exp amount — after a faint
-  it emits a facts-only `exp` event per standing owner-slot winner
-  (`slot`, `species`, `level`, `participants`; not an amount, not
-  `winners`), and each client runs its own `Experience` formula over its
-  own `save.party` mon and applies the result locally. Paying modes are
+  it emits a facts-only `exp` event per **participant** (`slot`, `mon` —
+  the party index of the paid monster — `species`, `level`,
+  `participants`; not an amount, not `winners`), and each client runs
+  its own `Experience` formula over its own `save.party` mon and applies
+  the result locally. Sharing is vanilla: every mon that was fielded
+  against the fallen foe and still stands splits the award, benched
+  included; fainted participants neither pay out nor dilute; the
+  participation set resets when the foe's monster changes — mirrored
+  from the engine's own solo award logic and pinned byte-identical
+  across the Lua and Node referees. The on-field EXP bar animates only
+  for the active mon; a benched share arrives as text (level-ups and
+  move learning included). Paying modes are
   `wild`, `coop_wild` and `coop_npc` — the modes vanilla itself awards
   exp for; 1v1 and `coop_pvp` never emit, so there is no PvP farming
   loop. Gen1 twins only (`src/BattleSim/Turn.lua` +

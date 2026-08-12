@@ -2985,6 +2985,23 @@ function M:playEvents(events)
       -- until the row that fells it comes up, and the "fainted!" line is
       -- printed over the top of it -- the engine's own order, which emits the
       -- slide and the cry before the text (BattleState:enemyMonFainted).
+      --
+      -- A knockout is also what an EXP.ALL's *second* pass belongs to, rather
+      -- than the awards that follow it: the referee sends one `exp` per paid
+      -- participant now, and the engine spreads the other half once per faint
+      -- (BattleState:3877-3890, outside its participant loop). Armed here and
+      -- spent by the first award that follows -- see `gainExp`.
+      --
+      -- **A knockout on the other side only.** Nothing owes this client exp
+      -- for its own monster going down, and arming on one would let the next
+      -- award -- a partner's foe knockout two turns later, or the same turn's
+      -- trade -- spend a credit no foe faint created, banking the EXP.ALL half
+      -- a second time for a single knockout. src/MediatedBattle.lua gates its
+      -- twin of this flag the same way (`sideOfSlot(msg.slot) ~= mySide`);
+      -- `foeSide` is this screen's spelling of that test, and it answers false
+      -- when the sides cannot be read, which leaves the flag at whatever it
+      -- was -- `nil` (unmetered) for a harness that narrates no faint at all.
+      if self:foeSide(event.slot) then self.expAllCredit = true end
       local shownAt = showing(event.slot)
       if shownAt then
         shownAt.displayFainted = nil
@@ -6426,13 +6443,58 @@ end
 -- rule from the other side of the same event.
 local EXP_TRAINER_MODES = { coop_npc = true }
 
+-- Warn once per screen rather than once per award, on the same reasoning
+-- src/MediatedBattle.lua's `warnNoExp` gives: a fight that cannot resolve one
+-- award usually cannot resolve the next either, and forty identical lines in
+-- the log describe one fact.
+function M:warnNoExp(why)
+  if self.expWarned then return false end
+  self.expWarned = true
+  mod.log:warn("no EXP could be awarded for a knockout in this battle (%s), so "
+    .. "the fight still plays out but nothing levels up -- report this with "
+    .. "the game version; levelling still works in ordinary battles",
+    tostring(why))
+  return true
+end
+
+-- Where the monster behind an *uploaded fight sheet* sits in the party.
+--
+-- **The two referees count in different spaces, and this is the translation.**
+-- The intermediator only ever saw `Mediated.snapshotMons(game, mine.party)`, so
+-- its `mon` is an index into that -- and `snapshotMons` skips any monster it
+-- cannot describe (no stats, no species, no moves), which shifts every index
+-- after the skip. The sheets stamp the party position they were cut from
+-- (`slot`, 0-based), so the position is read back off the sheet rather than
+-- assumed to be the array index.
+--
+-- **The discriminator is the row, not the screen**: `medRows` stamps `med` on
+-- every `exp` row it builds and CoopSim's own events carry none, so a queued
+-- batch stays readable however it was assembled -- rather than depending on
+-- `self.mediated`/`self.medMine` still holding whatever they held when the
+-- event arrived, several seconds of message queue earlier.
+--
+-- No uploaded party (a harness driving the screen directly, or an event that
+-- somehow arrives before the upload) leaves the index alone: that is exactly
+-- the behaviour this replaces. A sheet index the upload has nothing at is a
+-- referee talking about a monster this client never sent it -- `nil`, refused
+-- by the caller, rather than resolved through a fallback that would quietly
+-- pay whoever happened to sit at that number.
+function M:medPartySlot(sheetIndex)
+  local mine = self.medMine
+  if type(mine) ~= "table" or #mine == 0 then return sheetIndex end
+  local sheet = mine[sheetIndex]
+  if type(sheet) ~= "table" then return nil end
+  local slot = tonumber(sheet.slot)
+  if not slot then return sheetIndex end
+  slot = math.floor(slot) + 1
+  if slot < 1 then return sheetIndex end
+  return slot
+end
+
 function M:gainExp(event)
   if event.slot ~= self.mine then return end
   local slot = self.sim:slot(self.mine)
-  local mon = slot and slot.battler and slot.battler.mon
-  local eng = engine
-  local def = mon and event.species and (self.game.data.pokemon or {})[event.species]
-  if not (mon and def and eng and eng.Experience) then return end
+  local battler = slot and slot.battler
 
   -- EXP.ALL, the way the original splits it: the monster that fought takes
   -- half, and the other half is divided again across the whole living party.
@@ -6442,6 +6504,69 @@ function M:gainExp(event)
   local save = self.game.save
   local expAll = save and save.inventory and (save.inventory.EXP_ALL or 0) > 0
   local party = (save and save.party) or {}
+
+  -- **Which monster is being paid**, and it is no longer "the one standing
+  -- there".
+  --
+  -- Vanilla pays every party member that was ever in against the fallen foe
+  -- and is still alive (BattleState:3795-3801 walks `save.party` for its
+  -- participant flags, not the field), so a knockout can owe a monster that
+  -- has been sitting in its ball since the second turn. The referee names it:
+  -- `slot` is still the seat, and gates the award to its owner; `mon` is a
+  -- 0-based index into that seat's party. One event per paid participant --
+  -- so this runs once per owed monster, and nothing here collapses two of
+  -- them into one line.
+  --
+  -- The seat's party is the same table `save.party` is for our own seat
+  -- (src/Coop.lua hands the live party in), and it is the one read here
+  -- because the seat is what the index counts. Falling back to `save.party`
+  -- costs nothing and lets a screen assembled without a sim slot still pay.
+  --
+  -- No `mon` at all falls back to the active monster: a PROTOCOL 21 referee
+  -- that predates the field pays whoever was standing, and so does CoopSim's
+  -- own divisor-0 fallback (src/CoopSim.lua:1310-1324, mirroring
+  -- BattleState:3802-3804). An index that names nothing pays nobody rather
+  -- than paying the active by accident -- the guard below returns.
+  --
+  -- **And the two referees do not count in the same space.** CoopSim emits
+  -- `mon` as a position in the *seat's* party (src/CoopSim.lua:1351,
+  -- `row.index - 1`), which is the roster read below. The intermediator counts
+  -- in the party this client *uploaded* -- `Mediated.snapshotMons` skips a
+  -- monster it cannot describe, so one skip shifts every index after it, and
+  -- reading a hub index straight off the roster pays the wrong party member
+  -- (and writes its Stat Exp, its level and its new moves onto them too). The
+  -- mediated rows are translated sheet -> `sheet.slot` -> party position by
+  -- `medPartySlot`, the same two-step src/MediatedBattle.lua's
+  -- `paidSheetIndex` + `savePartyIndex` take. See `medPartySlot` for the
+  -- discriminator.
+  local index = tonumber(event.mon)
+  local mon
+  if index then
+    local roster = (slot and slot.party) or party
+    local at = math.floor(index) + 1
+    if event.med then at = self:medPartySlot(at) end
+    mon = at and roster[at]
+    -- An index that resolves to nobody pays nobody -- but it says so. Silence
+    -- here read in play as "this knockout was worth nothing", which is the one
+    -- reading it is never allowed to have: it is a referee naming a monster
+    -- this client does not hold, and the player is owed exp nobody paid.
+    if not mon then
+      self:warnNoExp(event.med
+        and "the referee paid a party member this client never uploaded"
+        or "the referee named a party member this screen does not hold")
+      return
+    end
+  else
+    mon = battler and battler.mon
+  end
+
+  local eng = engine
+  local def = mon and event.species and (self.game.data.pokemon or {})[event.species]
+  if not (mon and def and eng and eng.Experience) then return end
+
+  -- Is the paid monster the one on the plate? Everything the *display* does
+  -- below hangs on this and nothing else does: a benched award is text only.
+  local active = (battler ~= nil) and (battler.mon == mon)
 
   -- Everyone still standing on the winning side shares it, exactly as the
   -- engine divides a solo battle between its own participants -- so a co-op
@@ -6488,10 +6613,15 @@ function M:gainExp(event)
   -- Battlefield only. The classic 160x144 readout has no exp strip: nothing
   -- below is computed, nothing is queued, and its exp text flow is exactly
   -- what it always was.
+  --
+  -- **Active only**, for the same reason: the strip on screen belongs to the
+  -- monster standing there, and a benched award has no bar of its own to
+  -- crawl. Seeding or capturing off the active battler for somebody else's
+  -- award would move a clock that nothing is about to fill -- and a queued
+  -- fill row would drag the active's strip to the *bench's* fraction.
   local wide = self:usesBattlefield()
-  local battler = slot.battler
   local fromFrac, fromLevel
-  if wide and battler then
+  if wide and active then
     self:seedExpClock(battler)
     fromFrac = battler.shownExpFrac
     fromLevel = battler.shownLevel or mon.level or 1
@@ -6501,7 +6631,14 @@ function M:gainExp(event)
     def, event.level or 1, isTrainer, winners * (expAll and 2 or 1), false)
   if not ok then return end
 
-  local name = mon.nickname or (battler and battler.name) or "?"
+  -- The plate's name is the *active's* name, so it is only a fallback for the
+  -- active: a nickname-less benched monster is named by its own species, the
+  -- way `levelled` names one -- and by ITS species, not `def`, which is the
+  -- monster that was beaten. Reading `def.name` here printed "FOE gained 342
+  -- EXP. Points!" for every benched award.
+  local ownDef = (self.game.data.pokemon or {})[mon.species]
+  local name = mon.nickname or (active and battler.name)
+    or (ownDef and ownDef.name) or "?"
   self:say(name .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
 
   -- ...and *then* the strip crawls, which is the cart's chronology: the line
@@ -6518,7 +6655,11 @@ function M:gainExp(event)
   -- in, so a target captured here would be the first half of the award rather
   -- than the whole of it -- a pill two levels short of the "grew to level N!"
   -- lines printed right beside it.
-  if wide and battler and self.messages then
+  --
+  -- Queued for the active monster and no other: `active` is the same test the
+  -- capture above made, so a benched award queues no fill row at all and the
+  -- strip on screen is not perturbed by one landing mid-queue.
+  if wide and active and self.messages then
     self.messages[#self.messages + 1] = {
       expfill = battler,
       slot = event.slot,
@@ -6528,7 +6669,7 @@ function M:gainExp(event)
     }
   end
 
-  self:levelled(mon, battler and battler.name, levels)
+  self:levelled(mon, active and battler.name or nil, levels)
 
   -- A level raises both HP numbers, and the bar has to be told.
   --
@@ -6541,16 +6682,37 @@ function M:gainExp(event)
   -- Queued after the level lines above, so it plays under them. Guarded on
   -- the battler and on the queue itself, because every other line here goes
   -- out through `say` and a caller that stubs `say` has neither.
-  if slot.battler and self.messages then
+  --
+  -- Active only, and the engine gates its own the same way -- `if mon ==
+  -- self.player.mon then self:drainNext() end` (BattleState:3855): a benched
+  -- monster has no bar, and draining the *active's* bar to a bench-mate's HP
+  -- is a number that was never about it.
+  if active and self.messages then
     self.messages[#self.messages + 1] =
-      { drain = slot.battler, slot = event.slot, to = mon.hp }
+      { drain = battler, slot = event.slot, to = mon.hp }
   end
 
   -- ...and the other half, spread over everyone still standing -- including
   -- the monster that fought, exactly as the original's second pass does.
   -- Fainted party members are skipped, and no "gained EXP" line is printed for
   -- any of them: the original prints only what a level-up produces.
-  if expAll then
+  --
+  -- **Once per knockout, not once per award.** The engine's second pass sits
+  -- outside its participant loop -- `vanillaExpAward` pays every alive
+  -- participant and *then* walks the party once (BattleState:3873-3890) -- so
+  -- one faint spreads one half however many monsters fought it. Here the
+  -- participant loop lives on the referee and arrives as one event each, so
+  -- without this a party that beat a foe with three of its own would bank the
+  -- EXP.ALL half three times over.
+  --
+  -- The credit is armed by the faint itself in `playEvents` and spent by the
+  -- first award that follows it, which is the same shape (and the same
+  -- three-valued flag) src/MediatedBattle.lua uses. `nil` -- no knockout ever
+  -- narrated on this screen -- runs the pass the way it always did: that is
+  -- the direct-call path a harness drives, and metering an award nothing
+  -- announced would silently stop paying it.
+  if expAll and self.expAllCredit ~= false then
+    if self.expAllCredit then self.expAllCredit = false end
     for _, member in ipairs(party) do
       if (member.hp or 0) > 0 then
         member.statExp = member.statExp or {}
@@ -7587,6 +7749,12 @@ function M:uploadMediated()
   end
 
   self.medUploaded = true
+  -- Kept, because the referee will count in *this* list and not in the party
+  -- it was cut from. `snapshotMons` skips what it cannot describe, so the two
+  -- are the same array only until the first skip -- and every party-addressed
+  -- field the hub sends back (`exp`'s `mon`, today) has to come back through
+  -- these sheets to find the save monster it means. See `medPartySlot`.
+  self.medMine = mons
   local bag = Mediated.snapshotBag(self.game)
   self.bagSheet = Mediated.bagCounts(bag)
   if self.host then Mediated.sendRuleset(self.transport, self.game) end
@@ -7803,8 +7971,10 @@ function M:medRows(msg)
     -- `slot` is translated the way every other row's is (`medSlotOf`): the
     -- referee counts field slots 0..3 and this screen counts CoopSim indices,
     -- and `gainExp`'s own-slot gate compares against `self.mine`, which is an
-    -- index. The referee sends one of these per standing winner, so all four
-    -- clients see both halves of a 2-on-2 knockout and each pays only its own.
+    -- index. The referee sends one of these per *paid participant* -- every
+    -- monster that was in against the fallen foe and lived, benched included
+    -- -- so all four clients see every share of a knockout and each pays only
+    -- the ones on its own seat.
     --
     -- `species` is translated too, and it has to be: the referee narrates
     -- under the *uploaded* token (`Wire.name` of a display name), while
@@ -7817,6 +7987,17 @@ function M:medRows(msg)
         rows[#rows + 1] = {
           kind = "exp", slot = index, species = key,
           level = msg.level, participants = msg.participants,
+          -- Which of that seat's six banks it. Carried through untouched --
+          -- it is a party index and needs none of the field-slot translation
+          -- `slot` gets above -- but it is *not* in the same space CoopSim's
+          -- is, so the row is stamped as the referee's below and `gainExp`
+          -- resolves it through the uploaded sheets. Absent from an older
+          -- referee's event, and absent is meaningful -- `gainExp` pays the
+          -- active on a nil.
+          mon = msg.mon,
+          -- The referee wrote this row, so `mon` counts in the party this
+          -- client uploaded rather than in the seat's. See `medPartySlot`.
+          med = true,
         }
       elseif index == self.mine and not self.medExpSpeciesWarned then
         -- Only our own share is ours to pay, so only our own miss is worth a

@@ -99,6 +99,46 @@ const SIDES = ['a', 'b'];
 const EXP_MODES = { wild: true, coop_wild: true, coop_npc: true };
 const EXP_OWNER_SIDE = 'a';
 
+// Participation: who fought the monster that fell.
+//
+// Vanilla does not pay whoever happened to be standing when the foe dropped --
+// it pays every monster of yours that was ever in against *that* foe and is
+// still alive, benched included. The engine keeps it as one bitfield per party
+// (`wPartyGainExpFlags`), and gen1recomp's port of it is the reference the
+// twins mirror line for line:
+//
+//   * set on send-out. `BattleState:markParticipant`
+//     (src/battle/BattleState.lua:2332-2337) flags the player mon that is out;
+//     called at battle start (:1681), on a voluntary switch (:2424), on a
+//     post-faint replacement (:4214) and again when the enemy sends its next
+//     one out (:3980) -- the standing mon re-joins the new foe's set.
+//   * cleared when the foe changes. `awardExp` ends with
+//     `self.participants = {}` (:3899), so the set is per enemy MONSTER, not
+//     per battle; the SHIFT arm zeroes it explicitly at the moment the enemy is
+//     replaced (:4020, quoting core.asm:1436-1443). Gen 1 has no voluntary
+//     enemy switch to cite, and the shift arm is the one place the cart states
+//     what a foe swap does to the flags -- so a foe seat changing its monster
+//     resets that seat's set here and re-marks the standing opposition,
+//     exactly as :4020-4021 does.
+//   * dropped on its own faint. `onFaint` does
+//     `self.participants[battler.mon] = nil` (:3721-3723,
+//     RemoveFaintedPlayerMon), so a participant that died before the KO is
+//     neither paid NOR counted in the divisor.
+//   * ...and the send-out's own mark (:3980) lands a turn late here, because a
+//     seat is *asked* for its replacement rather than just sending one. It is
+//     taken at the faint, against the field the faint happened on, and held in
+//     `fighter.pendingFought` until `_refield` fields the successor. See
+//     `_faint`; `_unfield` reaches the held copy too.
+//
+// The set lives per seat because a mediated fight has up to two foe seats, each
+// with its own current monster; `fighter.fought` holds the opposing
+// (field slot, party index) pairs that have been in against *this* seat's
+// current one. Keys are strings so the two runtimes agree on membership without
+// agreeing on iteration order -- nothing walks this table, it is only asked.
+function foughtKey(slot, index) {
+  return `${slot}:${index}`;
+}
+
 // Roster cap per side. coop_wild is 2v1 (humans on a, wild on b); other modes
 // keep a single per-side ceiling (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
 function maxFighters(mode, side) {
@@ -530,6 +570,10 @@ class Battle {
     // a perfectly legal string.
     this.byId = new Map();
     this.bySide = { a: [], b: [] };
+    // What the current action has knocked down and not paid for yet; see
+    // `_drainExp`. A list, so the order faints happened in is the order their
+    // spoils are announced in.
+    this.pendingExp = [];
     this.result = null;
   }
 
@@ -1295,6 +1339,10 @@ class Battle {
     this._resolveItems();
     this._resolveFights();
     if (!this.result) this._resolveResiduals();
+    // The residual batch settles the same way an action's does: every flag is
+    // off before the first share is counted. Unconditional, because a queue
+    // nobody drains is exp that silently never happened.
+    this._drainExp();
     if (!this.result) this._checkOver();
 
     if (!this.result) {
@@ -1334,6 +1382,10 @@ class Battle {
         if (mon && mon.hp > 0) {
           fighter.active = choice.slot;
           fighter.mustReplace = null;
+          // The seat's monster changed: its own participation set resets and
+          // the standing opposition re-marks into it, while the incoming
+          // monster joins the sets of the foes it is now in against.
+          this._refield(fighter);
           mon.charging = null;
           mon.invulnerable = false;
           mon.thrashing = null;
@@ -1744,7 +1796,10 @@ class Battle {
       }
       // Finalize after each action (not inside `_faint`) so KO + recoil / explode
       // on the same move can still mutual-faint into a draw, while an empty-bench
-      // KO still stops the slower seat from acting.
+      // KO still stops the slower seat from acting. The action's faint batch is
+      // complete here, and that is the earliest moment its spoils can be counted
+      // without paying a monster the same action was still killing (`_drainExp`).
+      this._drainExp();
       if (!this.result) this._checkOver();
     }
   }
@@ -2294,6 +2349,79 @@ class Battle {
   }
 
   /**
+   * This seat's monster just changed (battle start, switch, replacement).
+   *
+   * Its own set resets, then the currently standing opposition marks into it --
+   * and the incoming monster marks into each of THEIR sets, which is the other
+   * direction of BattleState.lua:2424: a switch-in joins the standing foe's
+   * participants. A foe mid-replacement (nothing out) is neither read nor
+   * written, the same way the engine has no enemy to mark against.
+   */
+  _refield(fighter) {
+    fighter.fought = Object.create(null);
+    const mine = activeMon(fighter) ? fighter.active : null;
+    const foes = this.bySide[fighter.side === 'a' ? 'b' : 'a'];
+    for (const foe of foes) {
+      if (activeMon(foe)) {
+        fighter.fought[foughtKey(foe.slot, foe.active)] = true;
+        if (mine !== null) {
+          if (!foe.fought) foe.fought = Object.create(null);
+          foe.fought[foughtKey(fighter.slot, mine)] = true;
+        }
+      }
+    }
+
+    // ...and the mark the deferred send-out still owes (`_faint` explains why it
+    // is held rather than taken here): whoever was standing when the monster
+    // this one replaces went down was in against this one too, which is :3980
+    // read for a seat that is asked for its replacement instead of just sending
+    // it. Only this direction is owed -- the seat opposite re-derives its own
+    // set the next time it refields, exactly as the engine keeps flags on one
+    // side only. Consumed once: a seat that refields again later starts clean.
+    const pending = fighter.pendingFought;
+    fighter.pendingFought = null;
+    if (pending) {
+      for (const key of pending) fighter.fought[key] = true;
+    }
+  }
+
+  /**
+   * Who is standing opposite this seat right now, as participation keys, in
+   * field order. A list rather than a set because it is walked: two runtimes
+   * agreeing about a set they only ever ask is cheap, agreeing about one they
+   * iterate is not.
+   */
+  _standingOpposition(fighter) {
+    const keys = [];
+    const foes = this.bySide[fighter.side === 'a' ? 'b' : 'a'];
+    for (const foe of foes) {
+      if (activeMon(foe)) keys.push(foughtKey(foe.slot, foe.active));
+    }
+    return keys;
+  }
+
+  /**
+   * RemoveFaintedPlayerMon: a monster that faints stops being a participant
+   * anywhere, so it neither collects nor counts.
+   */
+  _unfield(fighter, index) {
+    const key = foughtKey(fighter.slot, index);
+    for (const other of this.fighters) {
+      if (other.fought) delete other.fought[key];
+      // The held mark is reached too. A monster that fell while the seat
+      // opposite was still choosing its replacement was never in against that
+      // replacement, so it must not be sitting in the set the successor
+      // inherits -- the same rule, one send-out earlier.
+      const pending = other.pendingFought;
+      if (pending) {
+        for (let i = pending.length - 1; i >= 0; i -= 1) {
+          if (pending[i] === key) pending.splice(i, 1);
+        }
+      }
+    }
+  }
+
+  /**
    * What a faint pays, and to whom.
    *
    * **Facts, never an amount.** This referee holds no species table -- it never
@@ -2315,32 +2443,99 @@ class Battle {
    * a player for beating another player is a farming loop, and it is not what
    * vanilla does with a link battle either.
    *
-   * One event per standing winner, in field-slot order -- the Lua twin emits
-   * the same list in the same order, and a stream that differs by a permutation
-   * is a parity failure with no symptom anyone could read. "Standing" means
-   * what CoopSim's owner-guard means by it: something of theirs is out and
-   * above zero HP, so a seat still owing a replacement after its own faint is
-   * neither paid nor counted in the divisor. No roll is drawn in here: the
-   * parity digest's rngState must not move because a faint paid out.
+   * One event per PAID monster, in seat order and then party order -- the Lua
+   * twin emits the same list in the same order, and a stream that differs by a
+   * permutation is a parity failure with no symptom anyone could read. `bySide`
+   * is built in roster index order and `fieldSlot` is monotonic in that index,
+   * so the outer walk is a walk of slots; the inner one is the party array,
+   * which is the order the engine's own party walk uses
+   * (src/battle/BattleState.lua:3796).
+   *
+   * `slot` stays the owning FIGHTER's field slot -- that is the ownership gate,
+   * and it is what a client checks before writing to its own save. `mon` says
+   * which of that party banks the share, 0-based, because a benched participant
+   * has no field slot to be named by.
+   *
+   * The divisor is the engine's: `participants` counts every member of the set,
+   * `alive` is the subset still above zero HP, and only `alive` is paid
+   * (BattleState.lua:3795-3801). The two agree in practice because a faint
+   * already left the set (`_unfield`) -- mirrored rather than collapsed so the
+   * shape stays comparable. The empty-set fallback is :3802-3804: with nothing
+   * flagged, whoever is out gets it, which is also exactly what round 5 paid.
+   *
+   * No roll is drawn in here: the parity digest's rngState must not move
+   * because a faint paid out.
    */
   _awardExp(fallen, mon) {
     if (!has(EXP_MODES, this.mode)) return;
     if (fallen.side === EXP_OWNER_SIDE) return;
 
-    const winners = this.bySide[EXP_OWNER_SIDE].filter((f) => activeMon(f));
-    if (winners.length === 0) return;
+    const fought = fallen.fought || Object.create(null);
+    let participants = 0;
+    const alive = [];
+    for (const fighter of this.bySide[EXP_OWNER_SIDE]) {
+      for (let index = 1; index <= fighter.mons.length; index += 1) {
+        if (fought[foughtKey(fighter.slot, index)]) {
+          participants += 1;
+          if (fighter.mons[index - 1].hp > 0) alive.push({ fighter, index });
+        }
+      }
+    }
 
-    for (const fighter of winners) {
+    if (participants === 0) {
+      for (const fighter of this.bySide[EXP_OWNER_SIDE]) {
+        if (activeMon(fighter)) {
+          participants += 1;
+          alive.push({ fighter, index: fighter.active });
+        }
+      }
+    }
+    if (alive.length === 0) return;
+
+    for (const winner of alive) {
       this._emit('exp', {
-        slot: fighter.slot,
+        slot: winner.fighter.slot,
         species: mon.species,
         level: mon.level,
-        participants: winners.length,
+        participants,
+        mon: winner.index - 1,
       });
     }
   }
 
+  /**
+   * Pay for everything the action just felled, in the order it fell.
+   *
+   * Split from `_faint` because the engine splits it: `onFaint` knocks a
+   * monster *down* and clears its flag (BattleState.lua:3721-3723), and the
+   * payout is queued behind that in `enemyMonFainted` -- so by the time anybody
+   * is counted, every monster the action killed has already left the set.
+   * Paying inside `_faint` instead put a self-KO'er in its own victim's payout:
+   * an Explosion or a recoil that kills its user runs `_faintUser` *after* the
+   * target's faint, so the user was still standing, still flagged, and still in
+   * the divisor. CoopSim's `reapFaints` drops the whole batch before announcing
+   * any of it for exactly this reason; this is that same batch, at the boundary
+   * the turn machine already had.
+   *
+   * Draws nothing: the parity digest's rngState must not move because a faint
+   * paid out, whenever it pays.
+   */
+  _drainExp() {
+    const queue = this.pendingExp;
+    if (queue.length === 0) return;
+    this.pendingExp = [];
+    for (const owed of queue) this._awardExp(owed.fallen, owed.mon);
+  }
+
   _faint(fighter, mon) {
+    // RemoveFaintedPlayerMon first (BattleState.lua:3721-3723 runs at the top
+    // of onFaint): this one is out of every participation set before anything
+    // below can pay anybody, so a mon that died on the way to the KO is not in
+    // the divisor. Keyed off the seat's own party position rather than
+    // `active`, which the recoil path has not cleared yet.
+    for (let index = 1; index <= fighter.mons.length; index += 1) {
+      if (fighter.mons[index - 1] === mon) { this._unfield(fighter, index); break; }
+    }
     mon.charging = null;
     mon.invulnerable = false;
     mon.mustRecharge = false;
@@ -2369,26 +2564,46 @@ class Battle {
     if (next) faintEv.amount = 1;
     this._emit('faint', faintEv);
 
-    // Paid before the replacement is asked for, so the monster that was
-    // actually standing there when this one fell is the one that gets it -- and
-    // while the fallen sheet is still in hand. Ordered the way CoopSim orders
-    // it: the faint, then its spoils, and only then anything about what comes
-    // next.
-    this._awardExp(fighter, mon);
+    // Owed here, paid at the end of the action (`_drainExp`), with the fallen
+    // sheet held in the queue so the payout still names the monster that fell
+    // and the level it was. For an ordinary KO nothing moves: the faint, then
+    // its spoils, and only then anything about what comes next -- the order
+    // CoopSim announces in. What changes is the action that fells two: every
+    // one of them is out of the sets before the first share is counted.
+    this.pendingExp.push({ fallen: fighter, mon });
 
     fighter.active = null;
     if (next) {
       // Ask the seat for a switch on the next choice window; timeout / autoPick
       // still lands firstLiving (preferring an SE bench).
       fighter.mustReplace = true;
+      // The successor's mark, taken now because the send-out is not now.
+      //
+      // Vanilla marks whoever is standing at the enemy's send-out
+      // (BattleState.lua:3980), and the engine sends out inside the faint
+      // itself, while the monster that landed the KO is still on the field --
+      // which is also where CoopSim does it (`announceFaint` calls `sendOut`
+      // for an NPC inside `reapFaints`). This referee cannot: it asks the seat,
+      // and the answer arrives on the next choice window, by which time side
+      // a's own switches have already resolved (`_resolveSwitches` walks side a
+      // first). A player who swaps on that turn would hand the incoming foe a
+      // set that never heard of the monster that beat the last one. So the
+      // send-out's mark is taken here, against the field the faint actually
+      // happened on, and held until `_refield` puts the successor out.
+      fighter.pendingFought = this._standingOpposition(fighter);
     } else {
       fighter.mustReplace = null;
+      fighter.pendingFought = null;
     }
 
     // While resolving, defer `_checkOver` to the caller (after the current move /
     // residual batch) so the same action can still faint the user (recoil,
-    // explode) and land a draw. Outside resolve, end immediately.
-    if (this.phase !== 'resolving') this._checkOver();
+    // explode) and land a draw. Outside resolve, end immediately -- and pay
+    // first, because there is no action boundary out here to pay at.
+    if (this.phase !== 'resolving') {
+      this._drainExp();
+      this._checkOver();
+    }
   }
 
   _resolveResiduals() {
@@ -2736,12 +2951,20 @@ function attempt(opts) {
         connected: true,
         graceEndsAt: null,
         choice: null,
+        // Who has been in against THIS seat's current monster; see `_refield`.
+        fought: Object.create(null),
       };
       self.fighters.push(fighter);
       self.byId.set(playerId, fighter);
       self.bySide[side].push(fighter);
     }
   }
+
+  // Everybody is fielded at once, so the opening participation sets are the
+  // opening field. `_refield` re-adds the standing opposition every time it
+  // runs, so walking the roster once is enough: a later seat's reset cannot
+  // lose an earlier seat's entry, it re-derives it.
+  for (const fighter of self.fighters) self._refield(fighter);
 
   for (const fighter of self.fighters) {
     const mon = activeMon(fighter);

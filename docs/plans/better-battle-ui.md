@@ -389,3 +389,45 @@ Waves: R5-W1a Wire.lua + server/lib/sanitize.js ∥ R5-W1b src/BattleSim/Turn.lu
 server/lib/battle/Turn.js ∥ R5-W1c src/MediatedBattle.lua (event shape pinned
 above; all file-disjoint). R5-W2 tests (unit + parity fixture regen + node
 suites). Review → fixes → full verify.
+
+---
+
+# Round 6 — vanilla exp participation (2026-08-12, owner-directed)
+
+Owner: exp sharing must equal vanilla — any of your mons that was ever in
+against the fainted foe and is still alive splits the award, benched included.
+Round 5 paid only mons standing at the faint (inherited from CoopSim).
+
+Ground rule for every agent: **the engine's own solo-battle award logic is the
+vanilla reference** (src/battle/BattleState + Experience in gen1recomp — its
+participation flags, their reset-on-foe-switch semantics, the alive-at-faint
+rule, and how the divisor counts). Mirror IT; do not trust recalled RBY lore.
+Verify each semantic against that code and cite lines.
+
+Pinned design:
+- Referee twins track, per foe seat, the SET of opposing (side, partyIndex)
+  pairs fielded against its current mon; the set resets when that seat's mon
+  changes (foe switch/replacement mirrors the engine's flag reset). On faint:
+  participants = set members whose mon is still alive (referee-authoritative
+  hp); emit one exp event PER alive participant — new wire field `mon` =
+  0-based party index of the paid mon on the winner's side; `slot` stays the
+  owning fighter's seat (ownership gate). `participants` = alive-set size per
+  the engine's divisor rule (verify: does vanilla count fainted participants
+  in the divisor? mirror exactly).
+- Wire: battleEvent gains `mon` (int 0..5); PARTICIPANTS_MAX rises 8→12 (two
+  6-mon parties can share in coop). Sanitize twin in lockstep. Same `exp`
+  kind — vocabulary unchanged, no PROTOCOL bump needed beyond 21 (R6-A1: the
+  addition is a field on an event only 21+ hubs emit; 21 clients without the
+  field-aware build drop the unknown field harmlessly via the sanitiser —
+  agents verify and flag if wrong).
+- CoopSim host-sim adopts the same participation semantics (consistency).
+- Clients: pay the event-designated party mon (benched included) via the
+  sheet.slot/party-index machinery; the EXP BAR/fill only animates when the
+  paid mon IS the active one — a benched award shows text only (its bar is
+  not on screen; its level-up text + forget prompt still run). Faint ledger
+  capacity per faint rises to one full party (6).
+- R6-A2: Gen2 twins still untouched (R5-A2 stands).
+
+Waves: R6-W1 referee twins + fixtures (opus) ∥ R6-W2 CoopSim.lua (opus) ∥
+R6-W3 Wire+sanitize `mon` field (opus). Then R6-W4 MediatedBattle ∥ R6-W5
+CoopBattle. Then tests → review → fixes → battery.

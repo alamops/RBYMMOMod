@@ -713,6 +713,121 @@ scenario("coop_wild_ko", function(events)
   return battle
 end)
 
+-- 18. round 6: participation KO. Mon A fights, switches out alive, and its
+--     replacement (mon B) lands the KO. Vanilla still owes mon A a share --
+--     it was in against this foe (`Battle:_refield` / `Battle:_awardExp`) --
+--     so the referee pays both, on the one seat that owns them, each event
+--     naming which party index (`mon`, 0-based) is banking it: 0 for Alpha,
+--     1 for Gamma, both against a divisor of 2.
+scenario("participation_ko", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local tap = function() return mv("tap", 5, 255, 0) end
+  local battle = build({
+    id = "pko", mode = "wild", seed = 101, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thump() } }),
+        mn({ species = "Gamma", maxHp = 200, atk = 90, spd = 80, moves = { thump() } }),
+      } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 90, spd = 10, moves = { tap() } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- 19. an Explosion-style double-KO in coop_wild: a1's move fells the wild mon
+--     AND a1 itself in the same action. `_faint`/`_unfield` take the
+--     self-KO'er out of every participation set before `_drainExp` counts
+--     anyone (`Battle:_faint`'s own comment: "the user was still standing,
+--     still flagged, and still in the divisor" is exactly the bug this
+--     ordering pins shut) -- so a1 is neither paid nor counted, and the
+--     wild mon's one exp event names only a2, participants = 1.
+scenario("explode_double_ko", function(events)
+  -- This file's own `mv` always writes effect=0 (its pp default lives in that
+  -- slot instead) -- every other scenario here is fine with that, but EXPLODE
+  -- is effect 7 (src/BattleSim/Effects.lua's EXPLODE_EFFECT), so `boom` is
+  -- built by hand rather than through the shared helper.
+  local boom = function()
+    return { id = "boom", pp = 60, power = 250, accuracy = 255, type = 0,
+             effect = 7, chance = 0 }
+  end
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local battle = build({
+    id = "xa", mode = "coop_wild", seed = 4242, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 200, atk = 200, spd = 90, moves = { boom() } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mn({ species = "Gamma", maxHp = 200, atk = 40, spd = 80, moves = { thump() } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 60, spd = 10, moves = { thump() } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("a1", { action = "fight", move = 0 })
+  battle:submitChoice("a2", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- 20. the replacement mark: a1 KOs b1, then on the very next turn a switches
+--     to a2 (still alive, a1 was never fainted) the same turn b fields b2.
+--     Vanilla still marks a1 -- it was standing when b1 fell -- and the
+--     send-out's own mark lands on a2 too (`Battle:_refield`'s "pendingFought"
+--     comment), so when a2 finishes off b2 both a1 and a2 are paid, on the
+--     one seat, divisor 2.
+scenario("replacement_mark", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local tap = function() return mv("tap", 5, 255, 0) end
+  local battle = build({
+    id = "xd", mode = "coop_npc", seed = 101, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 300, atk = 200, spd = 80, moves = { thump() } }),
+        mn({ species = "Gamma", maxHp = 300, atk = 200, spd = 80, moves = { thump() } }),
+      } } },
+      b = { { playerId = "npc", name = "Rival", mons = {
+        mn({ species = "Beta", maxHp = 40, spd = 10, moves = { tap() } }),
+        mn({ species = "Delta", maxHp = 40, spd = 10, moves = { tap() } }),
+      } } },
+    },
+  })
+  drainInto(battle, events)
+  -- turn 1: a1 KOs b1
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("npc", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  -- turn 2: a switches to a2 (side a resolves first), b fields b2
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  battle:submitChoice("npc", { action = "switch", slot = 1 })
+  drainInto(battle, events)
+  -- turn 3+: a2 KOs b2
+  for _ = 1, 6 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("npc", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
 -- ------------------------------------------------------------------
 
 local out = {}

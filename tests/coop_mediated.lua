@@ -1382,6 +1382,388 @@ do
        Experience.gainFor(data.pokemon[SPECIES], 50, false, 2, false),
        "and a host-sim fight with no trainer record pays the wild rate")
   end
+
+  -- ------- round 6: participation-based exp -- benched awards, on both the
+  -- host-sim path (CoopSim's own `winners` spelling) and the mediated path
+  -- (`participants`, reached through medRows/medFlush).
+  --
+  -- Vanilla pays every party member that fought the fallen foe and is still
+  -- alive, benched included (src/CoopSim.lua's `markFielded`/
+  -- `participantsFor`), and both wires now say WHICH of a seat's party is
+  -- owed a share with the referee's `mon` field (0-based). Everything above
+  -- this block is the single-mon, always-active case, where `mon` never
+  -- needed to matter; this is the general one.
+  do
+    local FOE = "FIXMON_B"
+    local FOE_NAME = Wire.name(data.pokemon[FOE].name)
+
+    local function partyMon()
+      return { species = SPECIES, level = 10, hp = 20, exp = 0,
+        stats = { hp = 20, attack = 30, defense = 30, special = 30, speed = 40 },
+        dvs = { hp = 8, attack = 8, defense = 8, speed = 8, special = 8 },
+        statExp = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+        moves = { { id = "FIX_TACKLE", pp = 20 } },
+      }
+    end
+    local function benchGame(n)
+      local g = newGame()
+      g.save.party = {}
+      for i = 1, (n or 3) do g.save.party[i] = partyMon() end
+      return g
+    end
+    local function countKind(self, kind)
+      local n = 0
+      for _, row in ipairs(self.messages) do
+        if rowKind(row) == kind then n = n + 1 end
+      end
+      return n
+    end
+
+    -- ------- (a) host-sim path: the active AND the bench are paid, each on
+    -- its own party index, and only the active's strip fills.
+    do
+      local game = benchGame(3)
+      local active, bench, bystander =
+        game.save.party[1], game.save.party[2], game.save.party[3]
+      local host = wildScreen({ game = game, mode = "coop_npc" })
+      local a0, b0, c0 = active.exp, bench.exp, bystander.exp
+
+      host:playEvents({
+        { kind = "faint", slot = 3 },
+        -- one event per paid participant, same slot, contiguous
+        { kind = "exp", slot = 1, mon = 0, species = FOE, level = 50, winners = 2 },
+        { kind = "exp", slot = 1, mon = 1, species = FOE, level = 50, winners = 2 },
+      })
+
+      check(active.exp > a0, "the active (mon=0) was paid on its party index")
+      check(bench.exp > b0, "the BENCHED participant (mon=1) was paid too")
+      eq(bystander.exp, c0, "a party member the referee did not name gained nothing")
+      local share = Experience.gainFor(data.pokemon[FOE], 50, true, 2, false)
+      eq(active.exp - a0, share, "the active's gain is the engine's own halved share")
+      eq(bench.exp - b0, share, "...and the bench's is the same share, not a fraction")
+
+      eq(countKind(host, "gained-text"), 2, "two gained-texts -- nothing collapsed the two awards")
+      eq(countKind(host, "expfill"), 1, "exactly ONE fill row: only the active animates")
+      eq(countKind(host, "drain"), 1, "...and one HP climb, likewise active-only")
+    end
+
+    -- ------- (a2) a benched-only award never touches the active's strip, and
+    -- its gained-text names the BENCH's species, not the beaten foe's (the
+    -- `def` mix-up round 6 fixed).
+    do
+      local game = benchGame(2)
+      local active, bench = game.save.party[1], game.save.party[2]
+      local host = wildScreen({ game = game, mode = "coop_npc" })
+      local battler = host.sim:slot(1).battler
+      host:seedExpClock(battler)
+      local seededFrac, seededLevel = battler.shownExpFrac, battler.shownLevel
+      local a0 = active.exp
+
+      host:playEvents({
+        { kind = "faint", slot = 3 },
+        { kind = "exp", slot = 1, mon = 1, species = FOE, level = 60, winners = 1 },
+      })
+
+      check(bench.exp > 0, "the benched mon banked the award")
+      eq(active.exp, a0, "the active gained nothing from it")
+      eq(battler.shownExpFrac, seededFrac, "the active's shown fraction never moved")
+      eq(battler.shownLevel, seededLevel, "...nor its level pill")
+      eq(countKind(host, "expfill"), 0, "no fill row was queued for a bench award")
+      eq(countKind(host, "drain"), 0, "...and no HP climb either")
+      eq(countKind(host, "gained-text"), 1, "the gained-text still printed")
+      check(countKind(host, "grew-text") > 0, "and the bench's level-up text ran")
+
+      local gainedLine
+      for _, row in ipairs(host.messages) do
+        if rowKind(row) == "gained-text" then gainedLine = rowText(row) break end
+      end
+      check(gainedLine ~= nil and gainedLine:find(data.pokemon[SPECIES].name, 1, true) ~= nil,
+            "the bench's gained-text names the bench's own species")
+      check(gainedLine ~= nil and gainedLine:find(data.pokemon[FOE].name, 1, true) == nil,
+            "...and never the beaten monster's")
+    end
+
+    -- ------- (b) the mediated path: medRows carries `mon` through untouched,
+    -- and onBattleEvent -> medFlush pays the bench the same way the host-sim
+    -- path does.
+    do
+      local game = benchGame(3)
+      local active, bench, bystander =
+        game.save.party[1], game.save.party[2], game.save.party[3]
+      local fight = wildScreen({ game = game, mode = "coop_npc" })
+      check(fight:onBattleReady({ battle = "cb-wild",
+        sides = { a = { "ann", "bob" }, b = { "npc" } } }),
+        "battle_ready accepted, mediation on")
+
+      local rows = fight:medRows({ t = "exp", slot = 0, species = FOE_NAME,
+                                   level = 50, participants = 2, mon = 1 })
+      eq(#rows, 1, "one exp row out of the builder")
+      eq(rows[1].kind, "exp", "...of kind exp")
+      eq(rows[1].mon, 1, "`mon` is carried through the row builder untouched")
+      eq(rows[1].participants, 2, "...beside `participants`")
+      eq(rows[1].species, FOE, "the wire token still resolves to the registry key")
+      eq(rows[1].slot, 1, "...and the field slot still translates to our seat index")
+
+      local a0, b0, c0 = active.exp, bench.exp, bystander.exp
+      fight:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+        slot = Config.COOP_SIDE, text = FOE_NAME })
+      fight:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp", slot = 0,
+        species = FOE_NAME, level = 50, participants = 2, mon = 0 })
+      fight:onBattleEvent({ battle = "cb-wild", seq = 3, t = "exp", slot = 0,
+        species = FOE_NAME, level = 50, participants = 2, mon = 1 })
+      eq(#fight.messages, 0, "nothing lands before the batch closes")
+      fight:onBattleEvent({ battle = "cb-wild", seq = 4, t = "turn" })
+
+      local share = Experience.gainFor(data.pokemon[FOE], 50, true, 2, false)
+      eq(active.exp - a0, share, "the active was paid its share over the wire")
+      eq(bench.exp - b0, share, "the benched participant was paid its own")
+      eq(bystander.exp, c0, "the unnamed party member gained nothing")
+      eq(countKind(fight, "gained-text"), 2, "two gained-texts through the mediated queue")
+      eq(countKind(fight, "expfill"), 1, "one fill row -- active only")
+      eq(countKind(fight, "drain"), 1, "one HP climb -- active only")
+    end
+
+    -- ------- (c) `mon` absent (a PROTOCOL 21 referee) -- both paths fall
+    -- back to paying the active, exactly as round 5 did.
+    do
+      local game = benchGame(2)
+      local active, bench = game.save.party[1], game.save.party[2]
+      local host = wildScreen({ game = game, mode = "coop_npc" })
+      local a0, b0 = active.exp, bench.exp
+      host:playEvents({
+        { kind = "faint", slot = 3 },
+        { kind = "exp", slot = 1, species = FOE, level = 50, winners = 1 },
+      })
+      check(active.exp > a0, "host-sim, no mon: the active was paid")
+      eq(bench.exp, b0, "...and the bench was not")
+      eq(countKind(host, "expfill"), 1, "...and the strip still fills for it")
+    end
+    do
+      local game = benchGame(2)
+      local active, bench = game.save.party[1], game.save.party[2]
+      local fight = wildScreen({ game = game, mode = "coop_npc" })
+      fight:onBattleReady({ battle = "cb-wild",
+        sides = { a = { "ann", "bob" }, b = { "npc" } } })
+      local a0, b0 = active.exp, bench.exp
+      fight:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+        slot = Config.COOP_SIDE, text = FOE_NAME })
+      fight:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp", slot = 0,
+        species = FOE_NAME, level = 50, participants = 1 })
+      fight:onBattleEvent({ battle = "cb-wild", seq = 3, t = "turn" })
+      check(active.exp > a0, "mediated, no mon: the active was paid")
+      eq(bench.exp, b0, "...and the bench was not")
+      eq(countKind(fight, "expfill"), 1, "...and the strip still fills for it")
+    end
+
+    -- ------- (d) EXP.ALL's second pass runs once per knockout, not once per
+    -- award: a bystander in neither award still banks the spread only once.
+    do
+      local function run(paidMons)
+        local game = benchGame(3)
+        game.save.inventory.EXP_ALL = 1
+        local active, bench, bystander =
+          game.save.party[1], game.save.party[2], game.save.party[3]
+        local fight = wildScreen({ game = game, mode = "coop_npc" })
+        local events = { { kind = "faint", slot = 3 } }
+        for _, index in ipairs(paidMons) do
+          events[#events + 1] = { kind = "exp", slot = 1, mon = index,
+                                  species = FOE, level = 50, winners = 2 }
+        end
+        fight:playEvents(events)
+        return bystander.exp, active.exp, bench.exp
+      end
+      local oneAward = run({ 0 })
+      local twoAwards = run({ 0, 1 })
+      eq(twoAwards, oneAward,
+         "a bystander banks the EXP.ALL half ONCE however many of ours were paid")
+      check(oneAward > 0, "...and it really is being spread (non-zero)")
+
+      -- Two knockouts in one batch still spread twice.
+      local game = benchGame(3)
+      game.save.inventory.EXP_ALL = 1
+      local bystander = game.save.party[3]
+      local fight = wildScreen({ game = game, mode = "coop_npc" })
+      local before = bystander.exp
+      fight:playEvents({
+        { kind = "faint", slot = 3 },
+        { kind = "exp", slot = 1, mon = 0, species = FOE, level = 50, winners = 2 },
+        { kind = "faint", slot = 3 },
+        { kind = "exp", slot = 1, mon = 0, species = FOE, level = 50, winners = 2 },
+      })
+      check(bystander.exp - before > oneAward,
+            "two knockouts in one batch still spread twice, not once")
+
+      -- The direct-call path (no faint ever narrated) is unmetered, as
+      -- before: `mon = 0` pays only the first party member directly, so the
+      -- second's gain can only be the EXP.ALL spread.
+      local directGame = benchGame(2)
+      directGame.save.inventory.EXP_ALL = 1
+      local directOther = directGame.save.party[2]
+      local direct = wildScreen({ game = directGame, mode = "coop_npc" })
+      local directBefore = directOther.exp
+      direct:gainExp({ slot = 1, mon = 0, species = FOE, level = 50, winners = 1 })
+      check(directOther.exp > directBefore, "a harness-driven award still spreads its half")
+    end
+  end
+
+  -- ------- round 6 follow-up (J2): the mediated `mon` field counts in the
+  -- space the uploaded SHEETS were cut from, not the save-party array
+  -- position -- and the row that carries it, not the screen it arrived on,
+  -- is what decides whether that translation runs at all.
+  --
+  -- `Mediated.snapshotMons` skips any party member it cannot describe, which
+  -- shifts the sheet index of everyone after the skip; `medPartySlot` reads
+  -- that shift back off each sheet's own `slot` stamp
+  -- (src/CoopBattle.lua:6482). `medRows` is the only place that stamps a row
+  -- `med = true`; CoopSim's own `playEvents` rows never do, so a host-sim
+  -- event resolves `mon` straight off the seat's party array even when this
+  -- screen happens to be holding an unrelated `medMine` -- the discriminator
+  -- is the row, not `self.mediated`/`self.medMine`.
+  local function expMon(opts)
+    opts = opts or {}
+    local m = {
+      species = SPECIES, level = opts.level or 10, hp = opts.hp or 20,
+      exp = opts.exp or 0,
+      stats = { hp = 20, attack = 30, defense = 30, special = 30, speed = 40 },
+      dvs = { hp = 8, attack = 8, defense = 8, speed = 8, special = 8 },
+      statExp = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+      moves = { { id = "FIX_TACKLE", pp = 20 } },
+    }
+    if opts.indescribable then m.moves = {} end
+    return m
+  end
+
+  -- (a) a skipped member shifts the mediated index -- the referee's `mon`
+  -- still lands on the save monster the sheet actually describes.
+  do
+    local game = newGame()
+    game.save.party = { expMon({ indescribable = true }), expMon(), expMon() }
+    local host = wildScreen({ game = game })
+    -- A real coop_wild screen is built with the wild seat's sheets already in
+    -- hand (src/CoopBattle.lua's constructor takes `wildParty`); this harness
+    -- builds the screen by hand, so it stands in the same shape rather than
+    -- exercising the unrelated "no wild sheets at all" refusal.
+    host.wildParty = Mediated.snapshotMons(game, { mon(50, 20) })
+    eq(host:uploadMediated(), true, "the party uploads despite the skipped member")
+
+    local mine = Mediated.snapshotMons(game, game.save.party)
+    eq(type(host.medMine), "table", "the uploaded sheets are stashed on the screen")
+    eq(#mine, 2, "snapshotMons skipped the indescribable member")
+    eq(mine[1].slot, 1, "sheet 1 stamps party position 1 (0-based)")
+    eq(mine[2].slot, 2, "sheet 2 stamps party position 2 (0-based) -- the shift")
+
+    check(host:onBattleReady({ battle = "cb-wild",
+      sides = { a = { "ann", "bob" }, b = { "wild" } } }), "mediation on")
+
+    local wrong, right = game.save.party[2], game.save.party[3]
+    local wrongBefore, rightBefore = wrong.exp, right.exp
+
+    host:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+      slot = Config.COOP_SIDE, text = SPECIES_NAME })
+    host:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp", slot = 0,
+      species = SPECIES_NAME, level = 50, participants = 1, mon = 1 })
+    host:onBattleEvent({ battle = "cb-wild", seq = 3, t = "turn" })
+
+    local expected = Experience.gainFor(data.pokemon[SPECIES], 50, false, 1, false)
+    eq(right.exp - rightBefore, expected,
+       "sheet mon=1 resolved through sheet[2].slot=2 and paid save.party[3]")
+    eq(wrong.exp, wrongBefore,
+       "...and save.party[2] -- the pre-fix victim -- was untouched")
+  end
+
+  -- (b) the discriminator is the row: a host-sim event carries no `med`
+  -- flag, so it takes the seat-party path even with an unrelated, shifted
+  -- `medMine` stashed on the screen.
+  do
+    local game = newGame()
+    game.save.party = { expMon({ indescribable = true }), expMon(), expMon() }
+    local host = wildScreen({ game = game, mode = "none" })
+    local stash = Mediated.snapshotMons(game, game.save.party)
+    host.medMine = stash
+    eq(#stash, 2, "the stash really is shifted")
+
+    local seatPaid = game.save.party[2]
+    local before = seatPaid.exp
+    host:playEvents({ { kind = "exp", slot = 1, mon = 1, species = SPECIES,
+                        level = 50, winners = 1 } })
+    eq(seatPaid.exp - before,
+       Experience.gainFor(data.pokemon[SPECIES], 50, false, 1, false),
+       "CoopSim's mon=1 still means the seat's second party member")
+    eq(game.save.party[3].exp, 0, "...and not the sheet-translated third")
+  end
+
+  -- (c) an own-side faint does not re-arm the EXP.ALL credit -- only a foe
+  -- knockout does, and the flag is set rather than accumulated, so an
+  -- own-side faint between two foe knockouts costs nothing.
+  do
+    local game = newGame()
+    game.save.party = { expMon(), expMon() }
+    game.save.inventory.EXP_ALL = 1
+    local host = wildScreen({ game = game, mode = "none" })
+    local bystander = game.save.party[2]
+
+    host:playEvents({ { kind = "faint", slot = 3 } })      -- the wild seat
+    eq(host.expAllCredit, true, "a foe knockout arms the credit")
+    host:playEvents({ { kind = "exp", slot = 1, mon = 0, species = SPECIES,
+                        level = 50, winners = 1 } })
+    eq(host.expAllCredit, false, "the first award spends it")
+    local afterOne = bystander.exp
+    check(afterOne > 0, "...and the half really was spread")
+
+    host:playEvents({ { kind = "faint", slot = 1 } })      -- ann's own monster
+    eq(host.expAllCredit, false, "our own knockout does not re-arm it")
+    host:playEvents({ { kind = "exp", slot = 1, mon = 0, species = SPECIES,
+                        level = 50, winners = 1 } })
+    eq(bystander.exp, afterOne,
+       "so a second award after an own-side faint spreads no second half")
+
+    host:playEvents({ { kind = "faint", slot = 3 } })
+    eq(host.expAllCredit, true, "the next foe knockout re-arms")
+    host:playEvents({ { kind = "exp", slot = 1, mon = 0, species = SPECIES,
+                        level = 50, winners = 1 } })
+    check(bystander.exp > afterOne, "and that one does spread again")
+  end
+
+  -- (d) an unresolvable `mon` pays nobody and warns exactly once, on both
+  -- the mediated path (`event.med`, "never uploaded") and the host-sim one
+  -- ("does not hold") -- and a second miss in the same fight stays silent.
+  do
+    local game = newGame()
+    game.save.party = { expMon(), expMon() }
+    local host = wildScreen({ game = game })
+    host:uploadMediated()
+    host:onBattleReady({ battle = "cb-wild",
+      sides = { a = { "ann", "bob" }, b = { "wild" } } })
+
+    local before = #warns
+    host:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+      slot = Config.COOP_SIDE, text = SPECIES_NAME })
+    host:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp", slot = 0,
+      species = SPECIES_NAME, level = 50, participants = 1, mon = 5 })
+    host:onBattleEvent({ battle = "cb-wild", seq = 3, t = "turn" })
+    eq(game.save.party[1].exp, 0, "a mon the upload has no sheet for pays nobody")
+    eq(game.save.party[2].exp, 0, "...nobody at all")
+    eq(#warns, before + 1, "and it is warned about exactly once")
+    check(warns[#warns] ~= nil and warns[#warns]:find("never uploaded", 1, true) ~= nil,
+          "naming the miss: " .. tostring(warns[#warns]))
+
+    host:onBattleEvent({ battle = "cb-wild", seq = 4, t = "exp", slot = 0,
+      species = SPECIES_NAME, level = 50, participants = 1, mon = 6 })
+    host:onBattleEvent({ battle = "cb-wild", seq = 5, t = "turn" })
+    eq(#warns, before + 1, "a second miss in the same fight is not said again")
+
+    -- The host-sim spelling of the same miss, on a fresh screen.
+    local game2 = newGame()
+    game2.save.party = { expMon() }
+    local sim2 = wildScreen({ game = game2, mode = "none" })
+    local before2 = #warns
+    sim2:playEvents({ { kind = "exp", slot = 1, mon = 4, species = SPECIES,
+                        level = 50, winners = 1 } })
+    eq(game2.save.party[1].exp, 0, "a seat index off the end pays nobody")
+    eq(#warns, before2 + 1, "...and warns once")
+    check(warns[#warns] ~= nil and warns[#warns]:find("does not hold", 1, true) ~= nil,
+          "with the host-sim wording: " .. tostring(warns[#warns]))
+  end
 end
 
 T.finish("coop_mediated")

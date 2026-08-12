@@ -212,7 +212,139 @@ function M:sendOut(slot, index)
       badgeBoosts = self.data.constants and self.data.constants.badgeBoosts,
     }
   end
+  -- Exp participation, both directions, on the one choke point every send-out
+  -- goes through (construction, a chosen switch, a replacement after a faint,
+  -- and a replayer's `restore`). See `markFielded` for the vanilla rule.
+  self:markFielded(slot, index)
   return slot.battler
+end
+
+-- ------- exp participation (vanilla wPartyGainExpFlags, generalised)
+--
+-- Gen 1 pays *everyone who was in against the monster that fell*, benched
+-- included, and the engine's own solo battle is the reference for every part
+-- of that rule -- not recalled lore. From `src/battle/BattleState.lua`:
+--
+--   * `markParticipant` (2332-2338) FLAG_SETs the player's currently-out mon.
+--     It runs at the opening send-out (1681), at a chosen switch (2424), at
+--     the post-faint enemy send-out (3980), at the SHIFT switch-in (4021) and
+--     at the post-faint replacement (4214).
+--   * the whole set is ZEROED after an award (3899) and again when the SHIFT
+--     offer is taken (4020, quoting core.asm:1436-1443), each time followed by
+--     re-flagging only the mon then standing.  Between the two, that IS
+--     "reset when the foe changes": the foe cannot change without one of them.
+--   * `onFaint` (3721-3722) clears the flag of the mon that just fell
+--     (RemoveFaintedPlayerMon) -- so a fainted participant leaves the divisor
+--     as well as the payout, which is what `awardExp`'s own comment
+--     (3792-3794) says out loud.
+--   * `awardExp` (3795-3805) then counts the flagged mons for the divisor and
+--     pays the flagged ones with HP left; with no flags at all it falls back
+--     to the single standing active.
+--
+-- Generalised to four seats the flags cannot be one global set, because there
+-- are two monsters to be in against: each seat carries the set of opposing
+-- *owned* (seat, party index) pairs that have been fielded against the monster
+-- it has out now. Only owned pairs: an NPC's party is thrown away when the
+-- battle ends, so paying it is bookkeeping nobody reads -- and counting it
+-- would silently halve what the real players are owed.
+local function markPair(seat, slotIndex, partyIndex)
+  seat.participants = seat.participants or {}
+  for _, p in ipairs(seat.participants) do
+    if p.slot == slotIndex and p.mon == partyIndex then return end
+  end
+  seat.participants[#seat.participants + 1] = { slot = slotIndex, mon = partyIndex }
+end
+
+local function unmarkPair(seat, slotIndex, partyIndex)
+  local list = seat.participants
+  if not list then return end
+  for i = #list, 1, -1 do
+    if list[i].slot == slotIndex and list[i].mon == partyIndex then
+      table.remove(list, i)
+    end
+  end
+end
+
+-- A monster has just come out at `slot`.  Two things follow, and they are the
+-- same two the engine does around a send-out:
+--
+--   * whoever is standing opposite is in against *this* monster from now on,
+--     and nobody who fought the one before it is -- the seat's own set is
+--     rebuilt from scratch, which is BattleState's zero-then-flag pair
+--     (3899/4020 + 3980/4021) read for a seat rather than for the one enemy;
+--   * this monster is now in against everything standing opposite, so it joins
+--     each of their sets -- the mirror image, and the half a 1-on-1 never has
+--     to write down because the enemy side keeps no flags at all.
+--
+-- **Both directions are gated on the same standing seat**, which is what the
+-- referee's `_refield` does (server/lib/battle/Turn.js: everything lives inside
+-- `if (activeMon(foe))`, and "a foe mid-replacement is neither read nor
+-- written"). A seat with nothing out was written into here until round 6: the
+-- mark was harmless -- that seat rebuilds its set from scratch the moment its
+-- replacement arrives, and if it never arrives it has already been paid -- but
+-- "harmless" is a claim that has to be re-checked every time this file grows a
+-- reader, and the twins disagreeing about what a set contains is not a thing
+-- either side of the parity fixtures can see.
+function M:markFielded(slot, index)
+  slot.participants = {}
+  for _, other in ipairs(self.slots) do
+    if other.side ~= slot.side and not other.gone then
+      local mon = other.battler and other.battler.mon
+      -- Standing only. A seat that is empty or down is not "in against" the
+      -- monster arriving now, and the monster arriving now is not in against
+      -- it; it will mark itself when its replacement comes out, through this
+      -- same call.
+      if mon and (mon.hp or 0) > 0 then
+        if other.owner then markPair(slot, other.index, other.active) end
+        if slot.owner then markPair(other, slot.index, index) end
+      end
+    end
+  end
+end
+
+-- RemoveFaintedPlayerMon (BattleState:3721-3722): the monster that just fell
+-- loses its flag, so it is out of the next award's divisor as well as its
+-- payout. Here that means dropping it from every opposing seat's set.
+function M:dropFallen(slot)
+  for _, other in ipairs(self.slots) do
+    if other.side ~= slot.side then
+      unmarkPair(other, slot.index, slot.active)
+    end
+  end
+end
+
+-- The pairs flagged against this seat's current monster, in slot-then-party
+-- order rather than the order they happened to be marked in: four clients
+-- replay these events and two of them must not disagree about which "gained"
+-- line comes first.
+--
+-- **A seat whose player left is still in here.** Participation already
+-- happened: those monsters fought this one, and a disconnect two turns later
+-- does not rewrite that -- so they stay in the divisor and the survivors are
+-- paid a share, not a bonus. Filtering them out was also a LAN-only rule: the
+-- referee has no `gone` at all (`_awardExp` walks every fighter on the owning
+-- side), so a hub battle and a LAN battle paid different numbers for the same
+-- knockout. `announceFaint`'s drop pass excludes gone seats for the same
+-- reason -- see the note there.
+--
+-- The `exp` events aimed at a gone seat still go out, and are still harmless:
+-- the client that would apply them is the one that left. Emitting is cheaper
+-- than a second rule, and it keeps this list identical to the referee's.
+function M:participantsFor(slot)
+  local flagged, out = slot.participants or {}, {}
+  for _, seat in ipairs(self.slots) do
+    if seat.owner then
+      for i = 1, #seat.party do
+        for _, p in ipairs(flagged) do
+          if p.slot == seat.index and p.mon == i then
+            out[#out + 1] = { seat = seat, index = i, mon = seat.party[i] }
+            break
+          end
+        end
+      end
+    end
+  end
+  return out
 end
 
 -- ------- what the field looks like, in one string
@@ -1147,6 +1279,31 @@ end
 function M:reapFaints(emit)
   local pending = self.pendingFaints
   self.pendingFaints = {}
+  -- Exp flags first, for every monster that is down, before a single award is
+  -- made. RemoveFaintedPlayerMon runs in the engine's `onFaint`
+  -- (BattleState:3721-3722), which is where a monster is knocked *down*; the
+  -- award happens later, in the queued `enemyMonFainted`. One Explosion that
+  -- takes a monster from each side must not pay differently depending on which
+  -- of the two this loop happens to announce first.
+  --
+  -- **The one place the invariant lives.** It used to be three -- this batch,
+  -- a second pass over the un-announced, and `announceFaint` itself -- for one
+  -- rule, held together by `dropFallen` being idempotent. The batch is the one
+  -- that is double-KO-correct (it runs ahead of *every* announce, so neither of
+  -- two simultaneous knockouts is in the other's divisor), so it is the one
+  -- that stayed. It walks the slots rather than `pending` because `pending`
+  -- only holds what the effect pipeline booked: the simple path and a residual
+  -- knock monsters down without ever touching it, and both are announced from
+  -- this same call a few lines below.
+  --
+  -- Gone seats are the deliberate exception, and the same one `participantsFor`
+  -- makes: `isDown` counts a disconnect as down, but a player leaving does not
+  -- un-fight the fights their monsters already had, and the referee -- which
+  -- has no notion of `gone` -- keeps them flagged too. The old pass reached the
+  -- same answer only by accident, through the `announced` flag `forfeit` sets.
+  for _, slot in ipairs(self.slots) do
+    if self:isDown(slot) and not slot.gone then self:dropFallen(slot) end
+  end
   for _, slot in ipairs(pending) do
     self:announceFaint(slot, emit)
   end
@@ -1159,13 +1316,18 @@ function M:reapFaints(emit)
   end
 end
 
--- Exp for a beaten monster, shared by the side that beat it.
+-- Exp for a beaten monster, shared by everyone who was in against it.
 --
--- Gen 1 divides a defeat between everyone who *took part*; here that is read
--- as both trainers on the winning side, because in a 2-on-2 both of them were
--- in the fight whether or not they landed the last hit. The engine's own
--- Experience.apply does the arithmetic and the level-ups, so a co-op battle
--- pays exactly what the same trainer pays in a single one -- split two ways.
+-- Gen 1 divides a defeat between the mons that *fought it*, benched ones
+-- included, and drops the ones that fell to it -- see the participation block
+-- above for the engine lines that say so. Until round 6 this paid the two
+-- monsters left standing instead, which is neither: it under-paid a monster
+-- that took the fight and then switched out, and over-paid a fresh one that
+-- came in after the work was done.
+--
+-- The engine's own Experience arithmetic still does the pricing, so a share
+-- here is the same number the same trainer would be paid alone, divided the
+-- same way.
 --
 -- Only a real player's mon gains: an NPC's party is thrown away when the
 -- battle ends, and levelling it would be bookkeeping nobody ever reads.
@@ -1175,42 +1337,59 @@ function M:awardExp(beaten, emit)
   local level = beaten.battler and beaten.battler.mon and beaten.battler.mon.level
   if not (def and def.baseExp and level) then return end
 
-  -- Everyone still standing on the other side, and only real players: an
-  -- NPC's party is discarded when the battle ends, so paying it is bookkeeping
-  -- nobody reads.
-  local winners = {}
-  for _, slot in ipairs(self.slots) do
-    if slot.side ~= beaten.side and slot.owner and not self:isDown(slot) then
-      winners[#winners + 1] = slot
-    end
+  -- The flagged pairs, exactly as BattleState:3795-3801 reads its own: the
+  -- divisor counts them all, the payout skips the ones with no HP. The two
+  -- only differ if something fell without going through `announceFaint` --
+  -- vanilla has the same gap and treats it the same way, counting the mon and
+  -- paying it nothing.
+  local roll = self:participantsFor(beaten)
+  local paid = {}
+  for _, row in ipairs(roll) do
+    if (row.mon.hp or 0) > 0 then paid[#paid + 1] = row end
   end
-  if #winners == 0 then return end
+  local divisor = #roll
 
-  for _, slot in ipairs(winners) do
-    local mon = slot.battler and slot.battler.mon
-    if mon then
-      -- **Announced, not applied here.**
-      --
-      -- This runs on the host, which holds the *real* party only for its own
-      -- slot -- everyone else's is an unpacked copy that is thrown away when
-      -- the battle ends. Applying exp here paid the host and nobody else,
-      -- while still printing "gained 136 EXP. Points!" on all four screens.
-      --
-      -- The same trap took items (spent on a bag the host does not have) and
-      -- move learning (written to a copy). The answer is the same one, and it
-      -- belongs here most of all: the host computes the share, the event
-      -- carries it, and each client applies it to the party its own save
-      -- keeps. The host's own slot stops being a special case.
-      --
-      -- The *share* is still the host's to compute, because only the host
-      -- knows how many winners there were -- which is what Gen 1 divides by.
-      local share = self:expShare(def, level, #winners)
-      if share > 0 then
-        emit({ kind = "exp", slot = slot.index, amount = share,
-               species = beaten.battler.mon.species, level = level,
-               winners = #winners })
+  if divisor == 0 then
+    -- BattleState:3802-3804: with no flags at all, the monster standing there
+    -- is the participant. Reached by a replayer that was restored mid-battle
+    -- (its sets were never built) and by anything that put a monster on the
+    -- field behind `sendOut`'s back -- a fallback, not the normal path.
+    for _, slot in ipairs(self.slots) do
+      if slot.side ~= beaten.side and slot.owner and not self:isDown(slot) then
+        paid[#paid + 1] = { seat = slot, index = slot.active,
+                            mon = slot.battler.mon }
       end
     end
+    divisor = #paid
+  end
+  if divisor == 0 or #paid == 0 then return end
+
+  -- **Announced, not applied here.**
+  --
+  -- This runs on the host, which holds the *real* party only for its own
+  -- slot -- everyone else's is an unpacked copy that is thrown away when the
+  -- battle ends. Applying exp here paid the host and nobody else, while still
+  -- printing "gained 136 EXP. Points!" on all four screens.
+  --
+  -- The same trap took items (spent on a bag the host does not have) and move
+  -- learning (written to a copy). The answer is the same one, and it belongs
+  -- here most of all: the host computes the share, the event carries it, and
+  -- each client applies it to the party its own save keeps. The host's own
+  -- slot stops being a special case.
+  --
+  -- The *share* is still the host's to compute, because only the host knows
+  -- how many took part -- which is what Gen 1 divides by.
+  local share = self:expShare(def, level, divisor)
+  if share <= 0 then return end
+  for _, row in ipairs(paid) do
+    -- `slot` is the seat, and stays the ownership gate a client reads to know
+    -- whether the award is its own. `mon` is which of that trainer's party is
+    -- owed it, 0-based -- it has to be said, because with the bench paid the
+    -- seat no longer identifies the monster: the one being paid may be sitting
+    -- behind the one standing there.
+    emit({ kind = "exp", slot = row.seat.index, mon = row.index - 1,
+           amount = share, species = beaten.battler.mon.species,
+           level = level, winners = divisor })
   end
 end
 
@@ -1251,6 +1430,12 @@ end
 function M:announceFaint(slot, emit)
   if slot.announced or not self:isDown(slot) then return false end
   slot.announced = true
+  -- RemoveFaintedPlayerMon (BattleState:3721-3722, in `onFaint` and ahead of
+  -- `enemyMonFainted`'s `awardExp`) is not run here: `reapFaints` does it for
+  -- the whole batch before any of it is announced, which is the only order a
+  -- double knockout comes out of right. Dropping this slot again here would be
+  -- a no-op that reads like the rule lives in two places.
+  --
   -- The faint before its own message, which is the order the original prints
   -- it in: the sprite sinks off the bottom of the box and *then* the text
   -- appears. Emitted the other way round, a client that pauses on the message

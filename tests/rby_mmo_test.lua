@@ -15463,6 +15463,72 @@ local pair = sim:expShare(sim:slot(3).battler.def, 30, 2)
 check(solo > 0, "one winner is owed something")
 check(pair < solo, "and two winners each get less than one would")
 
+-- ------- round 6: a switched-out-alive participant is still paid, on its
+-- own party index -- the standing-only 2-seat shape above is the special
+-- case where nobody ever switches; this pins the general one.
+--
+-- ANN's Fighter is fielded against FOE1 the instant the battle constructs
+-- (CoopSim.new's own initial sendOut loop), switches to her bench mon while
+-- still alive, and BOB alone lands the kill later. Vanilla still owes the
+-- Fighter a share -- it was in against this foe -- so the knockout pays
+-- three: ANN's Fighter (mon 0), ANN's bench mon (mon 1), and BOB's own mon
+-- (mon 0 on his seat), all split three ways.
+do
+  local benchSim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = nil, name = "FOE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local fighterExpBefore = benchSim:slot(1).party[1].exp
+  local benchExpBefore = benchSim:slot(1).party[2].exp
+  local bobExpBefore = benchSim:slot(2).battler.mon.exp
+
+  benchSim:resolveTurn({ { slot = 1, kind = "switch", index = 2 } })
+  eq(benchSim:slot(1).active, 2, "ann switched to her bench mon, still alive")
+
+  benchSim:slot(3).battler.mon.hp = 1
+  local benchEvents = benchSim:resolveTurn({ { slot = 2, move = 1, target = 3 } })
+  check(benchSim:isDown(benchSim:slot(3)), "FOE1 goes down to bob's hit")
+
+  local benchExp = {}
+  for _, event in ipairs(benchEvents) do
+    if event.kind == "exp" then benchExp[#benchExp + 1] = event end
+  end
+  eq(#benchExp, 3,
+     "three participants share the kill: ann's fighter, her bench, and bob")
+
+  local bySlot = {}
+  for _, event in ipairs(benchExp) do
+    bySlot[event.slot] = bySlot[event.slot] or {}
+    bySlot[event.slot][#bySlot[event.slot] + 1] = event
+  end
+  eq(#(bySlot[1] or {}), 2,
+     "ann is paid twice -- her switched-out fighter and her still-benched mon")
+  eq(#(bySlot[2] or {}), 1, "bob is paid once, for his own sole mon")
+  eq(bySlot[1] and bySlot[1][1] and bySlot[1][1].mon, 0,
+     "ann's first event names her fighter -- party index 0")
+  eq(bySlot[1] and bySlot[1][2] and bySlot[1][2].mon, 1,
+     "...and the second names her bench mon -- party index 1")
+  eq(bySlot[2] and bySlot[2][1] and bySlot[2][1].mon, 0,
+     "bob's event names his own sole mon -- party index 0")
+  for _, event in ipairs(benchExp) do
+    eq(event.winners, 3, "the divisor is 3 on every one of the three events")
+    eq(event.species, "FIXMON_A", "all three name the same fallen foe")
+  end
+
+  -- Still announced, not applied -- the host divides and states; each client
+  -- pays its own party from its own save.
+  eq(benchSim:slot(1).party[1].exp, fighterExpBefore, "the host applies nothing to the fighter")
+  eq(benchSim:slot(1).party[2].exp, benchExpBefore, "...nor to the bench")
+  eq(benchSim:slot(2).battler.mon.exp, bobExpBefore, "...nor to bob's mon")
+end
+
 -- ------- a fainted monster's replacement is its owner's choice
 --
 -- Auto-sending the next one is the easy implementation and it quietly removes
@@ -15532,6 +15598,97 @@ eq(sim:sideBeaten("b"), false, "their side fights on while their partner is up")
 sim:forfeit("dee")
 eq(sim:sideBeaten("b"), true, "both of them gone beats the side")
 eq(sim:forfeit("cal"), nil, "a player cannot leave twice")
+
+-- ------- J3: a forfeited partner's flagged mons still dilute the divisor
+--
+-- The referee has no `gone` at all -- Turn.js's `_awardExp` walks every
+-- fighter on the owning side -- so a hub battle already paid this way; the
+-- LAN/host-sim path (CoopSim) was the odd one out, and used to pay a
+-- disconnect's survivors a bonus nobody else's client would agree with.
+do
+  local function build()
+    return fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(30, 72, { { id = "FIX_TACKLE", pp = 20 } }),
+                  mon(30, 70, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(30, 15, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(30, 56, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(30, 56, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+  end
+  local function expEvts(events)
+    local out = {}
+    for _, e in ipairs(events) do if e.kind == "exp" then out[#out + 1] = e end end
+    return out
+  end
+
+  -- baseline: nobody leaves. Both seats were fielded at construction, so
+  -- both are flagged against FOE1 and both are paid, split two ways.
+  do
+    local sim = build()
+    sim:slot(3).battler.mon.hp = 1
+    local paid = expEvts(sim:resolveTurn({ { slot = 1, move = 1, target = 3 } }))
+    eq(#paid, 2, "both partners are paid for the knockout")
+    eq(paid[1] and paid[1].winners, 2, "and the divisor is 2")
+  end
+
+  -- bob's player closes the game between the flag and the knockout.
+  do
+    local sim = build()
+    check(sim:forfeit("bob") ~= nil, "bob forfeits")
+    check(sim:slot(2).gone, "his seat is gone")
+
+    sim:slot(3).battler.mon.hp = 1
+    local events = sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+    local paid = expEvts(events)
+    eq(paid[1] and paid[1].winners, 2,
+       "the divisor is STILL 2 -- bob's mon fought this foe and leaving did not undo it")
+
+    -- Emitting for the gone seat is the referee's shape and costs nothing:
+    -- the client that would apply it is the one that left.
+    local seats = {}
+    for _, e in ipairs(paid) do seats[e.slot] = (seats[e.slot] or 0) + 1 end
+    eq(seats[1], 1, "ann is paid once")
+    eq(seats[2], 1, "...and the gone seat's event still goes out, harmlessly")
+    eq(#paid, 2, "two events, one per flagged participant")
+    eq(paid[1].winners, paid[2].winners, "both name the same divisor")
+  end
+
+  -- the gone seat keeps its flags through `reapFaints`, which is the other
+  -- half of the same rule: the batch drop pass skips a seat that is only
+  -- `gone`, so the SECOND knockout of the fight is divided two ways too.
+  do
+    local sim = build()
+    sim:forfeit("bob")
+    sim:slot(3).battler.mon.hp = 1
+    sim:resolveTurn({ { slot = 1, move = 1, target = 3 } })
+    -- Both partners were fielded against FOE2 at construction too, and one
+    -- of them leaving (plus a whole knockout's worth of reaping) did not
+    -- unflag it.
+    local still = sim:participantsFor(sim:slot(4))
+    eq(#still, 2, "FOE2's set survived the reap with both partners in it")
+    sim:slot(4).battler.mon.hp = 1
+    local second = expEvts(sim:resolveTurn({ { slot = 1, move = 1, target = 4 } }))
+    eq(second[1] and second[1].winners, 2, "so its knockout divides by 2 as well")
+  end
+
+  -- a mon that actually fainted is still out of the divisor -- the rule that
+  -- moved is about disconnection, not about death.
+  do
+    local sim = build()
+    eq(#sim:participantsFor(sim:slot(3)), 2, "FOE1 starts with both partners on it")
+    -- ann's fighter falls to FOE1's counter...
+    sim:slot(1).battler.mon.hp = 1
+    sim:resolveTurn({ { slot = 3, move = 1, target = 1 } })
+    check(sim:isDown(sim:slot(1)), "ann's fighter is down")
+    local left = sim:participantsFor(sim:slot(3))
+    eq(#left, 1, "RemoveFaintedPlayerMon took it out of FOE1's set")
+    eq(left[1] and left[1].seat.index, 2, "...leaving bob, who is still standing")
+  end
+end
 
 -- the timeouts are ordered the way the design says -- but the other way round
 -- from a first guess. The turn deadline is a *guarantee*: a turn opens, and
@@ -18435,10 +18592,14 @@ end
   end
 
   -- ------- exp is gated on an actually-narrated foe faint, and bounded to
-  -- EXP_PER_FAINT (2) awards per knockout observed -- the referee's own
+  -- EXP_PER_FAINT (6) awards per knockout observed -- the referee's own
   -- contract (a faint always precedes the exp it pays for), enforced here so
   -- a hostile or merely buggy hub cannot level a party off an unbounded
-  -- stream of `exp` events.
+  -- stream of `exp` events. Six rather than two since round 6: vanilla
+  -- participation can pay a whole party -- up to six of a seat's own
+  -- monsters -- for a single knockout (src/MediatedBattle.lua's own
+  -- EXP_PER_FAINT comment), so the bound widened from "at most two winners on
+  -- a side" to "at most a party's worth."
   do
     local warnings = {}
     stubMod.log.warn = function(_, fmt, ...)
@@ -18464,27 +18625,29 @@ end
     check(warnings[1] ~= nil and warnings[1]:find("no knockout ahead of it", 1, true) ~= nil,
           "...and it warned through warnNoExp: " .. tostring(warnings[1]))
 
-    -- The referee narrates the knockout it is about to pay for.
+    -- The referee narrates the knockout it is about to pay for. One faint
+    -- funds up to EXP_PER_FAINT (6) awards -- a whole party's worth of
+    -- participants -- and refuses a 7th.
     send(screen, "b-faintgate", { t = "faint", slot = 2, text = foeSpecies })
-    send(screen, "b-faintgate", { t = "exp", slot = 0, species = foeSpecies,
-      level = 40, participants = 1 })
-    eq(mine.exp - before, perAward, "faint -> exp pays exactly once, at the wild rate")
-
-    -- The same faint funds one more award, and no more than that.
-    local afterOne = mine.exp
+    local beforeSix = mine.exp
     for _ = 1, 6 do
       send(screen, "b-faintgate", { t = "exp", slot = 0, species = foeSpecies,
         level = 40, participants = 1 })
     end
-    eq(mine.exp - afterOne, perAward,
-       "one faint funds at most EXP_PER_FAINT (2) awards, not six more")
+    eq(mine.exp - beforeSix, perAward * 6,
+       "one faint funds up to EXP_PER_FAINT (6) awards, all six landing")
+
+    local afterSix = mine.exp
+    send(screen, "b-faintgate", { t = "exp", slot = 0, species = foeSpecies,
+      level = 40, participants = 1 })
+    eq(mine.exp, afterSix, "...and a 7th is refused, not six more")
 
     -- A faint on our own side banks no credit at all.
-    local afterTwo = mine.exp
+    local afterSeven = mine.exp
     send(screen, "b-faintgate", { t = "faint", slot = 0, text = "MINE" })
     send(screen, "b-faintgate", { t = "exp", slot = 0, species = foeSpecies,
       level = 40, participants = 1 })
-    eq(mine.exp, afterTwo, "a faint on our own side banks no credit")
+    eq(mine.exp, afterSeven, "a faint on our own side banks no credit")
 
     stubMod.log.warn = function() end
   end
@@ -18531,6 +18694,265 @@ end
        "the vitamin's Stat Exp did not land on the skipped member")
     check((real.statExp.attack or 0) > rightEv,
           "...it landed on the monster the sheet actually describes")
+  end
+
+  -- ------- round 6: participation-based exp on the mediated client
+  --
+  -- Vanilla pays every party member that was ever in against the fallen foe
+  -- and is still alive, benched included (src/BattleSim/Turn.lua's
+  -- `_awardExp`, mirrored on the Node hub). The referee now says WHICH of a
+  -- seat's six is owed a share with the `mon` field (0-based, into the
+  -- uploaded `mine` sheets); `gainExp` resolves that sheet to a save-party
+  -- index through `savePartyIndex` exactly like every other party-addressed
+  -- field on this wire. A screen built the way `newScreen` above does has no
+  -- uploaded sheets at all, so these scenarios layer `mine`/`active`/`slots`
+  -- on top of it the way a live fight actually arrives with -- because every
+  -- scenario below turns on a monster that is NOT `self.active`.
+  local function sheetsFor(party)
+    local out = {}
+    for i, m in ipairs(party) do
+      out[i] = { species = m.nickname or m.species, speciesId = m.species,
+                 level = m.level, hp = m.hp, slot = i - 1 }
+    end
+    return out
+  end
+  local function newParticipationScreen(o)
+    local screen = newScreen(o)
+    screen.mine = o.mine or sheetsFor(o.party)
+    screen.active = o.active or 1
+    screen.slots[0] = { species = screen.mine[screen.active].species,
+                        hp = o.party[screen.active].hp,
+                        maxHp = o.party[screen.active].stats.hp }
+    screen.slots[2] = { species = foeSpecies, hp = 0, maxHp = 40 }
+    return screen
+  end
+  local function fillRows(screen)
+    local n = 0
+    for _, row in ipairs(screen.lines) do
+      if type(row) == "table" and row.expfill ~= nil then n = n + 1 end
+    end
+    return n
+  end
+  local function textsOf(screen)
+    local out = {}
+    for _, row in ipairs(screen.lines) do
+      if isText(row) then out[#out + 1] = type(row) == "string" and row or row.text end
+    end
+    return out
+  end
+
+  -- benched award: pays the right save mon, text-only -- no fill row, and
+  -- the active's own strip/pill are never perturbed by it.
+  do
+    local fighter, bench = monAt(12), monAt(12)
+    fighter.nickname, bench.nickname = "FIGHTER", "BENCHIE"
+    fighter.exp, bench.exp = expAt(12, 0.4), expAt(12, 0.4)
+    local screen = newParticipationScreen({ party = { fighter, bench }, battle = "d1" })
+    local fBefore, bBefore = fighter.exp, bench.exp
+    local perAward = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], 40, false, 2, nil, data.constants)
+
+    send(screen, "d1", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "d1", { t = "exp", slot = 0, mon = 0, species = foeSpecies,
+                         level = 40, participants = 2 })
+    eq(fighter.exp - fBefore, perAward, "active save mon paid its share")
+    eq(bench.exp, bBefore, "the bench is untouched by the active's event")
+    eq(fillRows(screen), 1, "the active award queued exactly one expfill row")
+    local afterActiveFills = fillRows(screen)
+
+    send(screen, "d1", { t = "exp", slot = 0, mon = 1, species = foeSpecies,
+                         level = 40, participants = 2 })
+    eq(bench.exp - bBefore, perAward, "benched save mon paid its share too")
+    eq(fillRows(screen), afterActiveFills, "the bench award queued NO expfill row")
+    local sawBench = false
+    for _, text in ipairs(textsOf(screen)) do
+      if text:find("BENCHIE", 1, true) and text:find("gained", 1, true) then sawBench = true end
+    end
+    check(sawBench, "...but it did queue its own gained-text, under the bench's name")
+
+    local drained = pump(screen)
+    check(drained < 8000, "the queue drains in a bounded number of frames (no wedge)")
+    eq(screen.slots[0].shownLevel, fighter.level, "the pill lands on the FIGHTER's level")
+  end
+
+  -- a `mon`-absent event (round-5 referee) pays the active mon, the same
+  -- fallback CoopSim's own empty-set divisor takes.
+  do
+    local fighter, bench = monAt(12), monAt(12)
+    local screen = newParticipationScreen({ party = { fighter, bench }, battle = "d3", active = 2 })
+    local fBefore, bBefore = fighter.exp, bench.exp
+    local perAward = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], 40, false, 1, nil, data.constants)
+    send(screen, "d3", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "d3", { t = "exp", slot = 0, species = foeSpecies,
+                         level = 40, participants = 1 })
+    eq(fighter.exp, fBefore, "the non-active party member is not paid")
+    eq(bench.exp - bBefore, perAward,
+       "the ACTIVE sheet (index 2 here) is paid -- old-referee fallback")
+    eq(fillRows(screen), 1, "and it fills, because the active mon is on the field")
+  end
+
+  -- skipped-snapshot party: mon indices route through sheet.slot, not the
+  -- array index, and an out-of-range `mon` pays nobody.
+  do
+    local skipped, fighter, bench = monAt(20), monAt(20), monAt(20)
+    skipped.moves = {}            -- undescribable: snapshotMons drops it
+    skipped.nickname = "GHOST"
+    fighter.nickname, bench.nickname = "FIGHTER", "BENCHIE"
+    local game = {
+      data = data,
+      save = { party = { skipped, fighter, bench }, inventory = {}, player = { name = "RED" } },
+      stack = { pop = function() end },
+    }
+    local mons = MediatedBattle.snapshotParty(game)
+    eq(#mons, 2, "snapshotMons dropped the undescribable member")
+    eq(mons[1].slot, 1, "the first surviving sheet carries party position 1 (0-based)")
+    eq(mons[2].slot, 2, "...and the second, 2")
+
+    local screen = MediatedBattle.new({ game = game, battle = "d4", role = "host",
+                                        mode = "wild", peerName = "WILD" })
+    screen.mine = mons
+    screen.active = 1
+    screen.slots[0] = { species = mons[1].species, hp = fighter.hp, maxHp = fighter.stats.hp }
+    local gBefore, fBefore, bBefore = skipped.exp, fighter.exp, bench.exp
+    local perAward = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], 40, false, 2, nil, data.constants)
+
+    send(screen, "d4", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "d4", { t = "exp", slot = 0, mon = 0, species = foeSpecies,
+                         level = 40, participants = 2 })
+    send(screen, "d4", { t = "exp", slot = 0, mon = 1, species = foeSpecies,
+                         level = 40, participants = 2 })
+    eq(skipped.exp, gBefore, "the member the snapshot skipped was never paid")
+    eq(fighter.exp - fBefore, perAward, "sheet mon=0 paid save.party[2] (the fighter)")
+    eq(bench.exp - bBefore, perAward, "sheet mon=1 paid save.party[3] (the bench)")
+    eq(fillRows(screen), 1, "one fill only -- the fighter's")
+
+    local before = { skipped.exp, fighter.exp, bench.exp }
+    send(screen, "d4", { t = "exp", slot = 0, mon = 4, species = foeSpecies,
+                         level = 40, participants = 2 })
+    check(skipped.exp == before[1] and fighter.exp == before[2] and bench.exp == before[3],
+          "an out-of-range `mon` paid nobody")
+  end
+
+  -- six awards for one faint fit inside the widened ledger; a seventh does not.
+  do
+    local party, mine = {}, {}
+    for i = 1, 6 do
+      party[i] = monAt(12)
+      party[i].nickname = "M" .. i
+      mine[i] = { species = "M" .. i, speciesId = expSpecies, level = 12,
+                  hp = party[i].hp, slot = i - 1 }
+    end
+    local screen = newParticipationScreen({ party = party, mine = mine, battle = "d5" })
+    local before = {}
+    for i = 1, 6 do before[i] = party[i].exp end
+    send(screen, "d5", { t = "faint", slot = 2, text = foeSpecies })
+    for i = 1, 6 do
+      send(screen, "d5", { t = "exp", slot = 0, mon = i - 1, species = foeSpecies,
+                           level = 40, participants = 6 })
+    end
+    local paid = 0
+    for i = 1, 6 do if party[i].exp > before[i] then paid = paid + 1 end end
+    eq(paid, 6, "all six participants of one faint were paid")
+
+    local seventhBefore = party[1].exp
+    send(screen, "d5", { t = "exp", slot = 0, mon = 0, species = foeSpecies,
+                         level = 40, participants = 6 })
+    eq(party[1].exp, seventhBefore, "a seventh award for the same faint is refused")
+    eq(fillRows(screen), 1, "only the active mon's award queued a fill")
+  end
+
+  -- EXP.ALL's second pass runs once per faint, not once per participant
+  -- event -- the same widened-ledger correction, on the item's own arithmetic.
+  do
+    local party, mine = {}, {}
+    for i = 1, 3 do
+      party[i] = monAt(12)
+      party[i].nickname = "M" .. i
+      mine[i] = { species = "M" .. i, speciesId = expSpecies, level = 12,
+                  hp = party[i].hp, slot = i - 1 }
+    end
+    local screen = newParticipationScreen({ party = party, mine = mine, battle = "d6",
+                                            inventory = { EXP_ALL = 1 } })
+    local before = {}
+    for i = 1, 3 do before[i] = party[i].exp end
+    send(screen, "d6", { t = "faint", slot = 2, text = foeSpecies })
+    for i = 1, 3 do
+      send(screen, "d6", { t = "exp", slot = 0, mon = i - 1, species = foeSpecies,
+                           level = 40, participants = 3 })
+    end
+    local share = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], 40, false, 3 * 2, nil, data.constants)
+    local allShare = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], 40, false, 3 * 2 * 3, nil, data.constants)
+    for i = 1, 3 do
+      eq(party[i].exp - before[i], share + allShare,
+         "M" .. i .. " got its participant share plus exactly ONE EXP.ALL share")
+    end
+  end
+
+  -- ------- J3: mediated EXP.ALL credit is a flag, not a tally
+  --
+  -- Faint #1 pays this client NOTHING (every `exp` event it puts on the wire
+  -- names seat a2, a fellow player's own seat rather than ours -- the
+  -- own-slot gate drops all of them here), then faint #2 pays two awards.
+  -- With the old accumulating integer the second award would find a bank of
+  -- 2 (armed twice, never spent) and run the EXP.ALL party pass twice.
+  do
+    local m1, m2, m3 = monAt(12), monAt(12), monAt(12)
+    m1.nickname, m2.nickname, m3.nickname = "M1", "M2", "M3"
+    local party = { m1, m2, m3 }
+    local mine = {}
+    for i, m in ipairs(party) do
+      mine[i] = { species = m.nickname, speciesId = expSpecies, level = 12,
+                  hp = m.hp, slot = i - 1 }
+    end
+    local screen = newParticipationScreen({ party = party, mine = mine,
+                                            active = 3, battle = "j3a",
+                                            inventory = { EXP_ALL = 1 } })
+
+    -- faint #1: arms the credit, and pays this client nothing.
+    send(screen, "j3a", { t = "faint", slot = 2, text = foeSpecies })
+    eq(screen.expAllCredit, true, "a foe faint ARMS the credit (true, not a count)")
+
+    local before = {}
+    for i = 1, 3 do before[i] = party[i].exp end
+    send(screen, "j3a", { t = "exp", slot = 1, mon = 0, species = foeSpecies,
+                          level = 40, participants = 2 })
+    send(screen, "j3a", { t = "exp", slot = 1, mon = 1, species = foeSpecies,
+                          level = 40, participants = 2 })
+    for i = 1, 3 do
+      eq(party[i].exp, before[i], "M" .. i .. " was paid nothing by the first knockout")
+    end
+    eq(screen.expAllCredit, true, "...and the unspent credit is still just armed, not stacked")
+
+    -- faint #2, and the two awards it pays this client.
+    send(screen, "j3a", { t = "faint", slot = 2, text = foeSpecies })
+    eq(screen.expAllCredit, true, "the second knockout re-arms rather than banking a second")
+
+    local start = {}
+    for i = 1, 3 do start[i] = party[i].exp end
+    send(screen, "j3a", { t = "exp", slot = 0, mon = 0, species = foeSpecies,
+                          level = 40, participants = 2 })
+    eq(screen.expAllCredit, false, "the first award spends the credit")
+    send(screen, "j3a", { t = "exp", slot = 0, mon = 1, species = foeSpecies,
+                          level = 40, participants = 2 })
+    eq(screen.expAllCredit, false, "the second award finds it spent")
+
+    local share = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], 40, false, 2 * 2, nil, data.constants)
+    local allShare = eng.Experience.gainFor(
+      data.pokemon[foeSpecies], 40, false, 2 * 2 * 3, nil, data.constants)
+    -- M3 fought nothing of its own -- every point it holds came from EXP.ALL
+    -- passes, so it counts them directly.
+    eq(party[3].exp - start[3], allShare,
+       "M3 banked EXACTLY ONE EXP.ALL share for the knockout")
+    check(party[3].exp - start[3] ~= allShare * 2,
+          "...not the two passes the accumulating tally would have run")
+    eq(party[1].exp - start[1], share + allShare,
+       "M1 got its participant share plus one EXP.ALL share")
+    eq(party[2].exp - start[2], share + allShare, "M2 the same")
   end
 end)()
 

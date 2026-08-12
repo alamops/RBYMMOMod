@@ -1115,14 +1115,21 @@ end
 
 -- How many `exp` events one observed foe knockout may pay for.
 --
--- The referee sends one `exp` per standing winner slot and a side holds at
--- most two fighters, so two is the whole of what an honest hub can owe for a
--- single faint -- and the own-slot gate in `onEvent` means this client applies
--- at most one of them anyway. Deliberately the generous bound: the guard that
--- spends this exists to cap a hostile hub, never to argue with a well-behaved
--- one. Declared up here rather than beside `gainExp` because `onEvent` is the
--- one that banks it, and a local is only in scope after its own line.
-local EXP_PER_FAINT = 2
+-- **Six, because vanilla participation is a whole party wide.** The referee
+-- pays every monster of yours that was ever in against the fallen foe and is
+-- still alive (round 6; `src/BattleSim/Turn.lua` and its Node twin), one `exp`
+-- event each, and the own-slot gate lets *all* of yours through -- they differ
+-- by the new `mon` field, not by `slot`. A player who cycled all six of their
+-- team through one long foe is owed six awards for that single knockout, so
+-- the old bound of two would have silently eaten four of them.
+--
+-- Still a bound, and still the same one in spirit: a party is six monsters and
+-- cannot be paid seven times for one faint. The guard that spends this exists
+-- to cap a hostile hub streaming awards nobody refereed, never to argue with a
+-- well-behaved one. Declared up here rather than beside `gainExp` because
+-- `onEvent` is the one that banks it, and a local is only in scope after its
+-- own line.
+local EXP_PER_FAINT = 6
 
 function M.new(opts)
   opts = opts or {}
@@ -1188,6 +1195,14 @@ function M.new(opts)
     -- Awards this client may still honour, banked by the foe knockouts it has
     -- actually seen narrated. See EXP_PER_FAINT and the `exp` event branch.
     expCredit = 0,
+    -- EXP.ALL's *second* pass, which belongs to the knockout rather than to
+    -- the award. Three-valued, like CoopBattle's: nil / true (armed by a foe
+    -- faint) / false (spent by the award after it). Deliberately left nil
+    -- rather than false here: nil means "no faint has ever been armed on this
+    -- screen", which is the direct-call path (`gainExp` driven straight from a
+    -- harness) and runs the pass the way it always did. See `gainExp`'s
+    -- EXP.ALL block for the whole argument.
+    expAllCredit = nil,
     seq       = 0,         -- the highest event sequence applied
     gaps      = 0,         -- events that arrived out of order
     pendingTurn = false,
@@ -1884,6 +1899,21 @@ function M:onEvent(msg)
     -- the `exp` branch below for what spends it.
     if sideOfSlot(msg.slot) ~= (self.mySide or "a") then
       self.expCredit = (self.expCredit or 0) + EXP_PER_FAINT
+      -- ...and exactly one EXP.ALL party pass, however many participants this
+      -- knockout ends up paying. The engine runs its second pass once per
+      -- `awardExp` call -- once per faint -- not once per participant
+      -- (BattleState's `vanillaExpAward`), and from round 6 a single faint can
+      -- put six `exp` events on this wire.
+      --
+      -- A flag, not a counter, and the same three-valued one CoopBattle keeps
+      -- (`nil` unmetered / `true` armed / `false` spent): armed by each foe
+      -- knockout, spent by the first award that follows it, re-armed by the
+      -- next knockout. A tally would have to be *spent* to come back down, and
+      -- a knockout that pays this client nothing -- every one of its
+      -- participants already fainted, or every share aimed at another seat --
+      -- leaves the count standing, so the award after the *following* faint
+      -- would run the party pass twice.
+      self.expAllCredit = true
     end
 
   elseif kind == "exp" then
@@ -1893,12 +1923,17 @@ function M:onEvent(msg)
     -- Nothing here reorders that -- the lines this queues go on the back of a
     -- queue those rows are already sitting in.
     --
-    -- One event per standing winner slot, so a 2-on-2 knockout puts two of
-    -- these on the wire and every client sees both. Only ours is ours to pay:
-    -- the referee holds no save file and this client holds exactly one, so a
-    -- share aimed at somebody else's seat is theirs to apply on their own
-    -- copy. Same own-slot rule the `item` debit and the faint's bench check
-    -- run on, a few lines up.
+    -- One event per *alive participant*, so a knockout the whole team took
+    -- turns on puts one of these on the wire per monster and every client sees
+    -- all of them. Only ours is ours to pay: the referee holds no save file
+    -- and this client holds exactly one, so a share aimed at somebody else's
+    -- seat is theirs to apply on their own copy. Same own-slot rule the `item`
+    -- debit and the faint's bench check run on, a few lines up.
+    --
+    -- `slot` is still the owning *seat* -- the gate below is unchanged -- and
+    -- the new `mon` field says which of that seat's six banks this particular
+    -- share. Several events therefore pass the gate for one faint now, where
+    -- round 5 let through at most one; see EXP_PER_FAINT.
     --
     -- **Bounded by the knockouts actually seen.** `exp` is the one event on
     -- this wire that writes the save file, and nothing else in the stream
@@ -2067,6 +2102,28 @@ function M:saveMon(index)
   return mon
 end
 
+-- Which uploaded sheet an `exp` event names, as an index into `mine`.
+--
+-- **The referee counts in the party it was given.** `mon` is 0-based over the
+-- monsters this client actually uploaded (`snapshotParty` order, which is what
+-- the hub holds and the only party it has ever seen), so +1 lands on the sheet
+-- and `savePartyIndex` turns that into the save slot -- the same two-step every
+-- other party-addressed field on this wire takes (`pendingItemSlot`, the
+-- vitamin writeback). Doing it in one step would pay `save.party[mon+1]`, which
+-- is a different monster the moment `snapshotMons` skipped one.
+--
+-- **Absent is the round-5 referee**, which paid whoever was standing at the
+-- faint and had no field to say so with. Falling back to the active sheet is
+-- exactly what this did before `mon` existed, so a PROTOCOL 21 hub that never
+-- learned the field keeps paying the same monster it always did.
+function M:paidSheetIndex(msg)
+  local raw = msg and tonumber(msg.mon)
+  if not raw or raw ~= raw then return self.active or 1 end
+  local index = floor(raw) + 1
+  if index < 1 then return self.active or 1 end
+  return index
+end
+
 -- The exp-awarding modes that have a *trainer* on the other side.
 --
 -- The referee's own gate is `EXP_MODES` = wild / coop_wild / coop_npc
@@ -2088,10 +2145,30 @@ function M:warnNoExp(why)
   return true
 end
 
--- Pay this client's own monster for a faint the referee just narrated.
+-- Pay the monster of this client's the referee just named, for a faint it just
+-- narrated.
+--
+-- **Not necessarily the one on the field.** Vanilla pays every monster that was
+-- ever in against the fallen foe and is still alive, benched included, and from
+-- round 6 the referee says which by name (`mon`). So this resolves a *target*
+-- first and asks afterwards whether that target happens to be the one standing
+-- -- because only the standing one has a bar on screen to fill.
 function M:gainExp(msg)
   local data = self.game and self.game.data
-  local mon = self:saveMon()
+  local paidIndex = self:paidSheetIndex(msg)
+  -- A `mon` the uploaded party has no sheet for is a referee talking about a
+  -- monster this client never sent it. Refused rather than resolved through
+  -- the array-index fallback, which would quietly pay whichever save member
+  -- happened to sit at that number. Only checked when there *is* an uploaded
+  -- party: a screen driven straight from a harness has none, and its indices
+  -- are save indices by definition.
+  local mine = self.mine
+  if msg and msg.mon ~= nil and type(mine) == "table" and #mine > 0
+     and mine[paidIndex] == nil then
+    self:warnNoExp("the referee paid a party member this client never uploaded")
+    return false
+  end
+  local mon = self:saveMon(paidIndex)
   if not (type(data) == "table" and mon) then
     self:warnNoExp("this client holds no save party to pay")
     return false
@@ -2193,7 +2270,22 @@ function M:gainExp(msg)
   -- Battlefield only. The classic 160x144 readout has no exp strip: nothing
   -- below is computed, nothing is queued, and its exp text flow is the plain
   -- engine one -- the award still lands and still persists.
-  local wide = self:usesBattlefield()
+  --
+  -- **And on-field only, which is the round-6 half of the same gate.** The
+  -- strip on this seat's plate is the *standing* monster's -- one bar, one
+  -- occupant -- so a benched participant's award has nowhere to draw itself.
+  -- Crawling it there anyway would run somebody else's exp across the fighter's
+  -- plate and leave the pill on a level the fighter never reached; freezing the
+  -- fighter's own clocks to make room would be worse. A bench award is
+  -- therefore text and save-file only: the "gained EXP" line, the "grew to
+  -- level N!" lines, and the moves that come with them (`toLearn` and its
+  -- forget prompt included) all still run, because those are the monster's,
+  -- not the plate's. Nothing below writes `shownExpFrac` / `shownLevel` for a
+  -- benched award -- not even the `seedExpClock` that would look harmless,
+  -- since seeding the *seat* off a *bench* monster is exactly the mix-up this
+  -- gate exists to prevent.
+  local onField = paidIndex == (self.active or 1)
+  local wide = self:usesBattlefield() and onField
   local index = self:mySlot()
   local slot = self.slots[index]
   local fromFrac, fromLevel
@@ -2213,7 +2305,10 @@ function M:gainExp(msg)
   -- The name the box has been calling it all fight: the referee narrates under
   -- the sheet's `species` (a nickname when there is one), so the exp line must
   -- not suddenly switch to the species def and read as a different monster.
-  local sheet = self.mine and self.mine[self.active]
+  -- Read off the sheet being *paid* rather than the one on the field -- a bench
+  -- award announced under the fighter's name is a player watching the wrong
+  -- monster level up.
+  local sheet = mine and mine[paidIndex]
   local name = (sheet and sheet.species) or mon.nickname or myDef.name or "?"
 
   self:say(name .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
@@ -2267,7 +2362,30 @@ function M:gainExp(msg)
   -- throws *after* the level has already moved, and the `pcall` here would
   -- report a skip while leaving the monster holding a level its stats never
   -- caught up with. A member that fails them is passed over whole.
-  if expAll then
+  --
+  -- **Once per knockout, not once per award** -- the round-6 correction. The
+  -- engine's second pass is inside `vanillaExpAward`, which runs once per
+  -- `awardExp`, i.e. once per faint, *after* the loop over participants
+  -- (BattleState). Round 5 got that for free: the own-slot gate let exactly one
+  -- `exp` event through per faint, so one award meant one pass. Now a faint can
+  -- pay up to six of this client's monsters, and running the party pass on each
+  -- of them would hand an EXP.ALL holder six second-halves for one kill -- the
+  -- item quietly becoming several times better in the MMO than in the cart.
+  --
+  -- So the pass spends its own credit, armed by the foe knockout the same way
+  -- the awards' is. Three-valued, exactly as CoopBattle's is: `nil` means no
+  -- faint was ever narrated to this screen (`gainExp` driven straight from a
+  -- harness) and runs unmetered -- the wire path always arms, so nil is never a
+  -- hub the meter was meant to catch, and `expCredit` has already refused a hub
+  -- that pays with no knockout at all. `true` is armed, `false` is spent, and
+  -- the next knockout re-arms. A running tally instead would strand a credit
+  -- whenever a knockout pays this client nothing at all.
+  --
+  -- Only the second pass is metered. The first one's divisor still doubles for
+  -- everyone holding the item (`participants * 2` above), because that halving
+  -- is the item's cost and is charged per participant in the cart too.
+  if expAll and self.expAllCredit ~= false then
+    if self.expAllCredit then self.expAllCredit = false end
     for _, member in ipairs(party) do
       local memberDef = type(member) == "table" and pokedex[member.species] or nil
       if type(memberDef) == "table" and (tonumber(member.hp) or 0) > 0

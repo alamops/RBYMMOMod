@@ -60,10 +60,11 @@ local floor = math.floor
 --   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 --   unchose    -- cancel cleared a filed answer
 --   moves      -- mid-fight move-list sync after Transform/Mimic
---   exp        -- a faint's spoils, as facts: who fell (species, level) and how
---                 many shares split it.  Never an amount: the intermediator
---                 holds no species table, so each client runs its own formula
---                 over its own party.
+--   exp        -- a faint's spoils, as facts: who fell (species, level), how
+--                 many shares split it, and which of the paid side's six banks
+--                 this share (`mon`).  Never an amount: the intermediator holds
+--                 no species table, so each client runs its own formula over
+--                 its own party.
 M.KINDS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
@@ -76,11 +77,16 @@ M.KINDS = {
 -- caller that could choose its own sequence number could put a hole in the
 -- stream, and a hole is what a client reads as lost messages.
 --
--- `species`, `level` and `participants` are the `exp` event's three facts.
+-- `species`, `level`, `participants` and `mon` are the `exp` event's facts.
 -- They are separate keys rather than a reuse of `text` / `amount` because they
 -- travel together into a formula: a client that read a species out of `text`
 -- would be reading the same field a faint uses for a sentence, and the first
 -- build to change one of those sentences would silently change an award.
+--
+-- `mon` is the one key here that is a **party** index (0..5) rather than a
+-- field slot: vanilla pays every mon that fought the fallen foe and lived,
+-- benched included, and a benched one has no field slot to name.  It rides
+-- alongside `slot`, which stays the owning fighter's seat.
 M.FIELDS = {
   battle       = "string",
   seq          = "number",
@@ -94,6 +100,7 @@ M.FIELDS = {
   species      = "string",
   level        = "number",
   participants = "number",
+  mon          = "number",
 }
 
 -- ------------------------------------------------------------------
@@ -142,7 +149,8 @@ M.SHAPES = {
   unchose   = { slot = true, side = true, text = "who answered" },
   moves     = { slot = true, side = true, moves = "sanitised move list" },
   exp       = { slot = "the winner being paid", species = "the monster that fell",
-                level = "its level", participants = "how many shares split it" },
+                level = "its level", participants = "how many shares split it",
+                mon = "party index (0-5) of the mon banking this share; absent means the active one" },
 }
 
 -- ------------------------------------------------------------------

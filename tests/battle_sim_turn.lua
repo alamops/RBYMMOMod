@@ -3097,6 +3097,386 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12i. round 6: participation -- who fought the monster that fell
+-- ------------------------------------------------------------------
+--
+-- Section 12h pinned the emission GATE (which modes pay, and the one
+-- exclusion the old "standing winners" rule needed). Round 6 replaced
+-- "standing winners" itself with vanilla's real rule: every mon of yours
+-- that was ever in against the fallen foe and is still alive, benched
+-- included (`Battle:_refield` / `Battle:_awardExp`, `src/BattleSim/Turn.lua`).
+-- These four scenarios are the adversarial drive that pinned the Lua/JS twins
+-- against each other (byte-identical event streams, same rng) before this
+-- suite existed to check them on its own; each one is restated here in this
+-- file's own fixture idiom.
+
+-- (a) a mon fights, switches out alive, and its replacement lands the KO:
+-- both are paid, on their own party index, at the one seat that owns them.
+do
+  local battle = battleOf({
+    mode = "wild",
+    seed = 101,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }),
+        mon({ species = "Gamma", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 90, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }) } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  local events = drain(battle)
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 2, "switch-out-alive: both the fighter and its replacement are paid")
+  eq(exps[1] and exps[1].slot, 0, "...both events on the one seat that owns them")
+  eq(exps[2] and exps[2].slot, 0, "...")
+  eq(exps[1] and exps[1].mon, 0, "...Alpha, party index 0, first")
+  eq(exps[2] and exps[2].mon, 1, "...then Gamma, party index 1, the replacement")
+  eq(exps[1] and exps[1].participants, 2, "...divisor 2 on both")
+  eq(exps[2] and exps[2].participants, 2, "...")
+end
+
+-- (b) a participant faints before the KO lands: RemoveFaintedPlayerMon drops
+-- it from the set, so it is neither paid nor counted in the divisor.
+do
+  local battle = battleOf({
+    mode = "wild",
+    seed = 202,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 20, atk = 5, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }),
+        mon({ species = "Gamma", maxHp = 300, atk = 90, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 120, atk = 90, spd = 50, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 14 do
+    if battle:outcome() then break end
+    local snap, replaced = battle:snapshot(), false
+    for _, f in ipairs(snap.field) do
+      if f.playerId == "p1" and f.mustReplace then
+        battle:submitChoice("p1", { action = "switch", slot = 1 })
+        replaced = true
+      end
+    end
+    if not replaced then battle:submitChoice("p1", { action = "fight", move = 0 }) end
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local sawA1Faint = false
+  for _, e in ipairs(events) do
+    if e.t == "faint" and e.slot == 0 then sawA1Faint = true end
+  end
+  ok(sawA1Faint, "the fixture really did faint Alpha before the wild mon fell")
+  local exps = expEvents(events)
+  eq(#exps, 1, "the fainted participant funds no event of its own")
+  eq(exps[1] and exps[1].mon, 1, "...only Gamma, party index 1, is paid")
+  eq(exps[1] and exps[1].participants, 1,
+     "...and the divisor is 1 -- Alpha is dropped from the count too")
+end
+
+-- (c) the foe swaps its monster out and back: each swap resets that seat's
+-- own participation set, so only who is in against the CURRENT foe is paid.
+do
+  local battle = battleOf({
+    mode = "wild",
+    seed = 303,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 300, atk = 5, spd = 80,
+              moves = { move({ id = "tap", power = 5 }) } }),
+        mon({ species = "Gamma", maxHp = 300, atk = 90, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 90, atk = 5, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }),
+        mon({ species = "Delta", maxHp = 300, atk = 5, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }),
+      } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  -- Alpha is in against Beta.
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- Alpha out, Gamma in: Beta's set is now {Alpha, Gamma}.
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- Beta out, Delta in: Delta's set resets to whoever is standing -- {Gamma}.
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "switch", slot = 1 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- Delta out, Beta back: Beta's set resets again to {Gamma} -- Alpha is gone.
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "switch", slot = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 1, "the foe-switch reset leaves only one participant")
+  eq(exps[1] and exps[1].mon, 1, "...Gamma, party index 1 -- Alpha's earlier turn was reset away")
+  eq(exps[1] and exps[1].participants, 1, "...divisor 1")
+end
+
+-- (d) coop_wild: the partner's monster fought and then switched to its
+-- bench; it is still paid, on its own party index, at its own seat.
+do
+  local battle = battleOf({
+    mode = "coop_wild",
+    seed = 404,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mon({ species = "Alpha", maxHp = 300, atk = 90, spd = 80, moves = { thumpMove() } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mon({ species = "Gamma", maxHp = 300, atk = 5, spd = 70,
+                moves = { move({ id = "tap", power = 5 }) } }),
+          mon({ species = "Zeta", maxHp = 300, atk = 5, spd = 70,
+                moves = { move({ id = "tap", power = 5 }) } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 150, atk = 5, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  battle:submitChoice("a1", { action = "fight", move = 0 })
+  battle:submitChoice("a2", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  battle:submitChoice("a1", { action = "fight", move = 0 })
+  battle:submitChoice("a2", { action = "switch", slot = 1 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("a2", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 3, "three participants: a1's Alpha, a2's benched Gamma, a2's active Zeta")
+  eq(exps[1] and exps[1].slot, 0, "a1 (slot 0) first")
+  eq(exps[1] and exps[1].mon, 0, "...Alpha, party index 0")
+  eq(exps[2] and exps[2].slot, 1, "then a2 (slot 1)'s bench")
+  eq(exps[2] and exps[2].mon, 0, "...Gamma, party index 0, though it is not on the field")
+  eq(exps[3] and exps[3].slot, 1, "then a2 (slot 1) again")
+  eq(exps[3] and exps[3].mon, 1, "...Zeta, party index 1, the one actually standing")
+  eq(exps[1] and exps[1].participants, 3, "the divisor is 3 on every one of them")
+  eq(exps[2] and exps[2].participants, 3, "...")
+  eq(exps[3] and exps[3].participants, 3, "...")
+end
+
+-- ------------------------------------------------------------------
+-- 12j. round 6 follow-up: the two adversarial orderings, and the
+-- counterfactual that pins the mechanism rather than the outcome
+-- ------------------------------------------------------------------
+--
+-- 12i pinned "who fought the monster that fell" as a standing question. These
+-- three restate the adversarial drive that actually shook that rule out:
+-- (a) a participant that dies in the SAME action as the KO it helped land
+-- must not be paid or counted -- `Battle:_faint`'s own comment calls out the
+-- bug this guards ("the user was still standing, still flagged, and still in
+-- the divisor"); (b) the deferred send-out mark (`fighter.pendingFought`,
+-- held from a faint to the choice window that answers it) survives a foe
+-- swap on the very turn it is consumed; (c) that same held mark is not
+-- inherited by a successor whose OWN owner faults before it ever fields --
+-- the counterfactual that proves (b) is really about a monster still
+-- standing, not about time alone.
+
+-- (a) an Explosion-style double-KO in coop_wild: a1's move fells the wild
+-- mon AND a1 itself. The self-KO'er is dropped from the set before anybody
+-- is counted, so the one exp event this knockout funds names only a2, and
+-- the divisor is 1 -- not 2, which is what "unpaid but still counted" would
+-- have left behind.
+do
+  local boom = move({ id = "boom", power = 250, accuracy = 255, effect = 7 })
+  local battle = battleOf({
+    mode = "coop_wild",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90, moves = { boom } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mon({ species = "Gamma", maxHp = 200, atk = 40, spd = 80, moves = { thumpMove() } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 60, spd = 10, moves = { thumpMove() } }) } } },
+    },
+  })
+  local events = drain(battle)
+  battle:submitChoice("a1", { action = "fight", move = 0 })
+  battle:submitChoice("a2", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+
+  local faints = 0
+  for _, e in ipairs(events) do if e.t == "faint" then faints = faints + 1 end end
+  eq(faints, 2, "both the wild mon and the self-KO'er faint in this action")
+  local exps = expEvents(events)
+  eq(#exps, 1, "exactly one exp event -- the exploder funds nothing of its own")
+  eq(exps[1] and exps[1].slot, 1, "paid to a2's seat, not a1's")
+  eq(exps[1] and exps[1].mon, 0, "a2's own party index")
+  eq(exps[1] and exps[1].participants, 1,
+     "divisor 1 -- a1 is dropped from the set, not merely left unpaid")
+end
+
+-- (b) the replacement mark: a1 KOs b1; on the next turn a switches to a2
+-- (still alive -- a1 was never fainted) the same turn b fields b2. Vanilla
+-- still marks a1 -- it was standing when b1 fell -- and the send-out's own
+-- mark lands on a2 too, so when a2 finishes off b2 both are paid, divisor 2.
+do
+  local tap = move({ id = "tap", power = 5, accuracy = 255 })
+  local battle = battleOf({
+    mode = "coop_npc",
+    seed = 101,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 300, atk = 200, spd = 80, moves = { thumpMove() } }),
+        mon({ species = "Gamma", maxHp = 300, atk = 200, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "npc", name = "Rival", mons = {
+        mon({ species = "Beta", maxHp = 40, spd = 10, moves = { tap } }),
+        mon({ species = "Delta", maxHp = 40, spd = 10, moves = { tap } }),
+      } } },
+    },
+  })
+  local events = drain(battle)
+  -- turn 1: a1 KOs b1
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("npc", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- turn 2: a switches to a2 (side a resolves first), b fields b2
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  battle:submitChoice("npc", { action = "switch", slot = 1 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- turn 3+: a2 KOs b2
+  for _ = 1, 6 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("npc", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+
+  local allExp = expEvents(events)
+  eq(#allExp, 3, "one event for b1's knockout, two for b2's")
+  eq(allExp[1] and allExp[1].participants, 1, "b1's knockout: a1 alone, divisor 1")
+  local exps = { allExp[2], allExp[3] }
+  eq(exps[1] and exps[1].slot, 0, "both of b2's events sit on the one seat that owns them")
+  eq(exps[2] and exps[2].slot, 0, "...")
+  eq(exps[1] and exps[1].mon, 0, "party index 0 (Alpha, standing at the first KO)...")
+  eq(exps[2] and exps[2].mon, 1, "...then 1 (Gamma, the send-out)")
+  eq(exps[1] and exps[1].participants, 2,
+     "the deferred mark carried onto the SECOND foe -- divisor 2, not 1")
+  eq(exps[2] and exps[2].participants, 2, "...")
+end
+
+-- (c) the counterfactual: the held mark's owner faints before its successor
+-- ever fields. `_unfield` (RemoveFaintedPlayerMon) reaches `pendingFought`
+-- too, so the fallen mon's mark does not survive to inflate the NEXT
+-- knockout's divisor -- the successor inherits nothing, because there was
+-- no live monster left to have been "standing" when b1 fell.
+do
+  local slam = move({ id = "slam", power = 250, accuracy = 255, effect = 48 })
+  local tap = move({ id = "tap", power = 5, accuracy = 255 })
+  local battle = battleOf({
+    mode = "coop_npc",
+    seed = 77,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 300, hp = 5, atk = 200, spd = 80, moves = { slam } }),
+        mon({ species = "Gamma", maxHp = 300, atk = 200, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "npc", name = "Rival", mons = {
+        mon({ species = "Beta", maxHp = 40, spd = 10, moves = { tap } }),
+        mon({ species = "Delta", maxHp = 40, spd = 10, moves = { tap } }),
+      } } },
+    },
+  })
+  local events = {}
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- a1 (5 HP) KOs b1 with a 250-power recoil move and its own recoil finishes
+  -- it off in the same action -- exactly 12i(a)'s shape, but here the seat
+  -- still has a bench, so it owes a replacement rather than ending the fight.
+  for _ = 1, 8 do
+    if battle:outcome() then break end
+    local snap, replaced = battle:snapshot(), false
+    for _, f in ipairs(snap.field) do
+      if f.mustReplace then
+        local slot = nil
+        for i, hp in ipairs(f.party or {}) do
+          if (hp or 0) > 0 then slot = i - 1; break end
+        end
+        if slot then
+          battle:submitChoice(f.playerId, { action = "switch", slot = slot })
+          replaced = true
+        end
+      end
+    end
+    if not replaced then
+      battle:submitChoice("p1", { action = "fight", move = 0 })
+      battle:submitChoice("npc", { action = "fight", move = 0 })
+    end
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+
+  local faintedA1 = false
+  for _, e in ipairs(events) do
+    if e.t == "faint" and e.slot == 0 and e.text == "Alpha" then faintedA1 = true end
+  end
+  ok(faintedA1, "the fixture really did self-KO Alpha alongside b1")
+  local allExp = expEvents(events)
+  -- The first knockout (b1) paid nobody at all: Alpha was the only
+  -- participant and it fell in the same action, so no exp event exists for
+  -- it -- restated as a positive count rather than an index lookup.
+  local firstKoCount = 0
+  for _, e in ipairs(allExp) do
+    if e.species == "Beta" then firstKoCount = firstKoCount + 1 end
+  end
+  eq(firstKoCount, 0, "b1's knockout funded no event -- its sole participant self-KO'd")
+
+  -- b2's knockout (Delta) is what the counterfactual is about: Gamma, the
+  -- successor Ann fields after Alpha's fall, must NOT inherit a mark from a
+  -- monster that never lived to see it sent out.
+  local secondKo = {}
+  for _, e in ipairs(allExp) do
+    if e.species == "Delta" then secondKo[#secondKo + 1] = e end
+  end
+  eq(#secondKo, 1, "Delta's knockout paid exactly one event -- Gamma alone")
+  eq(secondKo[1] and secondKo[1].mon, 1,
+     "Gamma, party index 1 -- Alpha's fallen index 0 is not reused or renumbered")
+  eq(secondKo[1] and secondKo[1].participants, 1,
+     "divisor 1 -- Alpha's held mark did not carry over to Gamma")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

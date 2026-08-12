@@ -1034,11 +1034,13 @@ M.AMOUNT_MAX = 9999
 --
 -- A ceiling on a *divisor* a stranger sent, which is why it has a floor of one
 -- as well: zero shares is not a smaller award, it is a division by zero inside
--- the client's own Experience formula.  Eight rather than BATTLE_MON_MAX
--- because a co-op faint is split across two parties, and one number that
--- covers both shapes beats two that have to be kept in step -- it bounds a
+-- the client's own Experience formula.  Twelve rather than BATTLE_MON_MAX
+-- because vanilla pays every mon that was ever in against the fallen foe and is
+-- still alive, benched included -- so a co-op faint can be split across two
+-- full parties: BATTLE_MON_MAX (6) * COOP_SIDE (2) = 12.  One number that
+-- covers both shapes beats two that have to be kept in step; it bounds a
 -- foreign value before it enters a formula, it does not restate a game rule.
-M.PARTICIPANTS_MAX = 8
+M.PARTICIPANTS_MAX = 12
 
 -- How long a reason token this build has never heard of may be.  Refused past it
 -- rather than trimmed -- a cut token matches nothing and is a value nobody sent.
@@ -1621,11 +1623,12 @@ end
 --   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 --   unchose    -- cancel cleared a filed answer
 --   moves      -- mid-fight move-list sync after Transform/Mimic
---   exp        -- a faint's spoils, as facts: who fell (species, level) and
---                 how many shares split it.  Not an amount: the hub holds no
---                 species table and can never compute one, so the referee
---                 states the facts and each client runs its own Experience
---                 formula over its own party.
+--   exp        -- a faint's spoils, as facts: who fell (species, level), how
+--                 many shares split it, and which of the paid side's six is
+--                 banking this share (`mon`, optional).  Not an amount: the hub
+--                 holds no species table and can never compute one, so the
+--                 referee states the facts and each client runs its own
+--                 Experience formula over its own party.
 M.BATTLE_EVENTS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
@@ -1690,6 +1693,17 @@ function M.battleEvent(raw)
     -- roster.  This one is a count, and it divides.
     out.participants = M.int(raw.participants, 1, M.PARTICIPANTS_MAX)
   end
+  -- Which of the winner's six the award is *for* -- a **party** index, bounded
+  -- by SLOT_MAX, and so the one field on an event that is not about the field.
+  -- It has to be: vanilla pays every mon that fought the fallen foe and lived,
+  -- and a benched one has no field slot to name.  `slot` above still carries
+  -- the owning fighter's seat, which is what gates the award to a player;
+  -- `mon` says which of that player's monsters banks it.
+  --
+  -- Optional, and its absence is meaningful rather than a defect: a PROTOCOL 21
+  -- referee that predates this field pays the mon that was standing at the
+  -- faint, so a client that gets no `mon` falls back to the active one.
+  if raw.mon ~= nil then out.mon = M.int(raw.mon, 0, M.SLOT_MAX) end
   if raw.side ~= nil then out.side = M.side(raw.side) end
   if raw.status ~= nil then
     -- battleStatus answers `false` for present-but-unknown, which is not a
