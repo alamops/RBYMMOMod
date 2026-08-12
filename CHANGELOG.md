@@ -19,6 +19,13 @@ here must match `manifest.version`.
   referee shake reads as one wobble, and the break-free or catch resolves in
   wire order — the fanfare waits for the last wobble. A caught mon stays in
   its ball; an interrupted chain cleans up instead of hiding the seat.
+- **Canonical attack chronology.** Every attack now plays its beats in
+  strict order on the arena: the trainer's callout stands alone, then the
+  attacker lunges, then the hit flashes with the bar frozen, then the HP
+  drains — followed by the already-ordered sink, fainted line, switch
+  choice and send-out. Multi-hit moves call out once and land one hit beat
+  per strike; heals skip both beats; classic and Gen2 screens are
+  untouched. The order is pinned by per-twin regression tests.
 - **Trainer speech bubbles v2.** Rounded callouts with the move name
   emphasized on its own line, sized from real font metrics.
 - **Battlefield HUD plates.** The Gen1 arena now shows a persistent plate per

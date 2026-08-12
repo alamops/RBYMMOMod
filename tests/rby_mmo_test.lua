@@ -13925,9 +13925,24 @@ end)()
      "and the display has not moved at all -- it is still queued behind the "
      .. "drain row playEvents built for it")
 
+  -- The strike reads before the bar answers it now: this frame reaches the
+  -- queued drain row and flashes the hit (BEAT_SPAN.hit, splitHitBeat), but
+  -- the row goes straight back to the head of the queue behind the beat --
+  -- the drain itself has not started yet.
   CoopBattle.update(client, 1 / 60)
+  check(client.draining == nil,
+        "the hit beat holds the row before the drain starts -- flash first")
+  eq(battler.shownHP, preHP, "the flash does not itself move the bar")
+  eq(#client.messages, 2,
+     "the drain row is re-queued behind the beat, with the text still behind it")
+
+  local beatSteps = 0
+  while client.draining == nil and beatSteps < 60 do
+    CoopBattle.update(client, 1 / 60)
+    beatSteps = beatSteps + 1
+  end
   check(client.draining ~= nil,
-        "one frame reaches the queued drain row and starts it")
+        "and once the hit beat (BEAT_SPAN.hit) clears, the row starts the drain")
   eq(battler.shownHP, preHP, "starting the drain does not itself move the bar")
   eq(#client.messages, 1, "and the text queued behind it is still waiting")
 
@@ -14246,10 +14261,19 @@ end)()
   local battler = sim:slot(1).battler
   client.messages[#client.messages + 1] =
     { drain = battler, slot = 1, to = battler.mon.hp - 20 }
-  CoopBattle.update(client, 1 / 60) -- pops the drain row, starts it
+  CoopBattle.update(client, 1 / 60) -- pops the drain row, flashes the hit
   eq(client.shown, "Line A",
      "an effect reaching the head of the queue does not clear the line above it")
-  check(client.draining ~= nil, "and the drain really did start")
+
+  local beatSteps = 0
+  while client.draining == nil and beatSteps < 60 do
+    CoopBattle.update(client, 1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(client.draining ~= nil,
+        "and the drain really did start, once the hit beat cleared")
+  eq(client.shown, "Line A",
+     "...the same line is still up once it has")
 
   for _ = 1, 30 do
     if not client.draining then break end
@@ -14324,7 +14348,11 @@ end)()
   -- the ordinary trigger, a lost message, without reproducing the exact turn.
   CoopBattle.playEvents(guest,
     { { kind = "damage", slot = 1, hp = guestSim:slot(1).battler.mon.hp - 10 } })
-  CoopBattle.update(guest, 1 / 60)
+  local beatSteps = 0
+  while guest.draining == nil and beatSteps < 60 do
+    CoopBattle.update(guest, 1 / 60)
+    beatSteps = beatSteps + 1
+  end
   check(guest.draining ~= nil, "the guest is mid-drain when the resync lands")
   check(guestSim:slot(1).battler.shownHP ~= guestSim:slot(1).battler.mon.hp,
         "-- display and truth genuinely disagree at this instant")
@@ -14349,6 +14377,192 @@ end)()
   check(not sawSwapGhost,
         "and no queued swap row survives to put a monster the field no longer "
         .. "holds back on screen seconds later")
+end)()
+
+-- ------- CHRONOLOGY PIN: the split-beat order, regression-proof
+--
+-- `splitCalloutBeat` and `splitHitBeat` turned two fused ticks into four:
+-- 1 callout bubble (BEAT_SPAN.callout, held) -> 2 lunge -> 3 flash+shake
+-- (BEAT_SPAN.hit, held, bar frozen) -> 4 drain -> 5 sink -> 6 fainted text.
+-- Everything above this line pins pieces of that order incidentally, as a
+-- side effect of fixing display-drain timing; this block pins the whole
+-- order in one place and by name, so a future re-fusion of any beat fails
+-- here first rather than only shaving ticks off some other driver.
+
+;(function()
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(20, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+  })
+  local client = replayer(sim, 1)
+  client.phase, client.frame = "messages", 0
+  client.game.input = { wasPressed = function() return false end }
+  local target = sim:slot(3).battler
+
+  CoopBattle.playEvents(client, {
+    { kind = "anim", anim = "FIX_TACKLE", from = 1 },
+    { kind = "damage", slot = 3, hp = 0 },
+    { kind = "faint", slot = 3 },
+    { kind = "msg", text = "CAL's RATT fainted!" },
+  })
+
+  local function sawFx(kind)
+    for _, fx in ipairs(client.fx or {}) do
+      if fx.kind == kind then return true end
+    end
+    return false
+  end
+
+  -- 1. Callout: the first tick raises the bubble and holds the anim row --
+  -- no lunge fx yet.
+  CoopBattle.update(client, 1 / 60)
+  check(client.battlefieldBubbles ~= nil,
+        "1: the callout bubble is up on the very first tick")
+  check(not sawFx("lunge"), "...but the lunge has not played yet")
+
+  -- 2. Lunge: only once the callout beat clears.
+  local beatSteps = 0
+  while not sawFx("lunge") and beatSteps < 60 do
+    CoopBattle.update(client, 1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(sawFx("lunge"), "2: the lunge plays once the callout beat clears")
+  check(client.draining == nil,
+        "...and the target's bar has not started falling yet")
+
+  -- 3. Flash + shake, bar still frozen through the hit beat.
+  local hpBeforeHit = target.shownHP
+  beatSteps = 0
+  while not sawFx("flash") and beatSteps < 60 do
+    CoopBattle.update(client, 1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(sawFx("flash"), "3: the hit flashes the defender")
+  check(sawFx("shake"), "...and nudges the field with it")
+  check(client.draining == nil,
+        "...with the bar still frozen -- the hit beat has not cleared yet")
+  eq(target.shownHP, hpBeforeHit, "...shownHP has not moved at all yet")
+
+  -- 4. Drain: only once the hit beat clears.
+  beatSteps = 0
+  while client.draining == nil and beatSteps < 60 do
+    CoopBattle.update(client, 1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(client.draining ~= nil, "4: the drain starts once the hit beat clears")
+
+  -- 5-6. Sink, then the fainted line -- the same drive-to-completion pattern
+  -- the faint-sequencing blocks elsewhere in this file use. 7-8 (the switch
+  -- choice and the replacement's spawn) are covered by the koswap/choice
+  -- blocks above; this just confirms the queue is not left stuck behind them.
+  local function shownFainted()
+    return type(client.shown) == "string"
+      and client.shown:find("fainted!", 1, true) ~= nil
+  end
+  local guard = 0
+  while not shownFainted() and guard < 400 do
+    CoopBattle.update(client, 1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 400,
+        "5-6: the sink and the fainted line resolve in a bounded number of frames")
+  check(shownFainted(), "...and the fainted line is what shows")
+  eq(target.shownHP, 0, "...with the bar fully landed by the time it does")
+end)()
+
+-- ------- CHRONOLOGY PIN: multi-hit dedupes the callout, heal skips both beats
+--
+-- Multi-hit is one announcement/anim row and one drain row per strike
+-- (`splitCalloutBeat`'s "once per attack, not once per strike" contract,
+-- gated by `calloutSpent`); a heal earns neither beat at all.
+
+;(function()
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+  })
+  local client = replayer(sim, 1)
+  client.phase, client.frame = "messages", 0
+  client.game.input = { wasPressed = function() return false end }
+  local target = sim:slot(3).battler
+
+  -- One anim row (the strike shares it), two drain rows behind it -- the
+  -- multi-hit shape `startDrain`'s own header describes.
+  CoopBattle.playEvents(client, {
+    { kind = "anim", anim = "FIX_TACKLE", from = 1 },
+    { kind = "damage", slot = 3, hp = target.mon.hp - 10 },
+    { kind = "anim", anim = "FIX_TACKLE", from = 1 },
+    { kind = "damage", slot = 3, hp = target.mon.hp - 20 },
+  })
+
+  local function sawFx(kind)
+    for _, fx in ipairs(client.fx or {}) do
+      if fx.kind == kind then return true end
+    end
+    return false
+  end
+
+  CoopBattle.update(client, 1 / 60)
+  check(client.battlefieldBubbles ~= nil, "the first strike raises the bubble")
+  check(not sawFx("lunge"), "...and holds the lunge behind the callout beat")
+
+  local beatSteps = 0
+  while not sawFx("lunge") and beatSteps < 60 do
+    CoopBattle.update(client, 1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(sawFx("lunge"), "the first strike's lunge plays once its beat clears")
+
+  -- Drain past the first strike, then straight into the second anim row --
+  -- calloutSpent must gate the shout, but the hit beat still runs per strike.
+  beatSteps = 0
+  while client.draining == nil and beatSteps < 60 do
+    CoopBattle.update(client, 1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(client.draining ~= nil, "the first strike's own hit beat still runs")
+  local settle = 0
+  while client.draining and settle < 200 do
+    CoopBattle.update(client, 1 / 60)
+    settle = settle + 1
+  end
+
+  -- calloutSpent gates the *beat*, not the bubble refresh -- a repeat strike
+  -- still re-notes the bubble (so its on-screen life extends), but spends no
+  -- second hold in front of it: the second anim row's lunge plays on the very
+  -- first tick that reaches it, with no callout beat pumped first.
+  client.fx = {}
+  CoopBattle.update(client, 1 / 60)
+  check(sawFx("lunge"),
+        "the second strike's lunge plays on the first tick it is reached -- "
+        .. "calloutSpent gates the shout, not the strike itself")
+
+  -- Heal: a rising bar gets no beat and no fx at all.
+  local healSim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+  })
+  local healClient = replayer(healSim, 1)
+  healClient.phase, healClient.frame = "messages", 0
+  healClient.game.input = { wasPressed = function() return false end }
+  local healTarget = healSim:slot(1).battler
+  healTarget.mon.hp = healTarget.mon.stats.hp - 20
+  healTarget.shownHP = healTarget.mon.hp
+
+  CoopBattle.playEvents(healClient, {
+    { kind = "damage", slot = 1, hp = healTarget.mon.hp + 15 },
+  })
+  CoopBattle.update(healClient, 1 / 60)
+  check(healClient.draining ~= nil,
+        "a climb starts on the very same tick -- nothing was struck, so it "
+        .. "owes no beat")
+  check(not healClient.fx, "...and emits no flash or shake either")
 end)()
 
 -- ------- what a faint does to the four people watching it
@@ -15505,8 +15719,19 @@ end
   eq(f.draining, nil,
      "the first frame is spent on the spawn pop sitting ahead of the drain")
   f:update(1 / 60)
+  eq(f.draining, nil,
+     "the second frame reaches the queued drain row and flashes the hit -- "
+     .. "the fall itself waits behind BEAT_SPAN.hit")
+  eq(f.slots[2].shownHp, 24, "the flash does not itself move the bar")
+  check(f.hitHold ~= nil, "...and the hit beat is what is holding it")
+
+  local beatSteps = 0
+  while f.draining == nil and beatSteps < 60 do
+    f:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
   check(f.draining ~= nil,
-        "the second frame reaches the queued drain row and starts it")
+        "and once the hit beat clears, the drain actually starts")
   eq(f.slots[2].shownHp, 24, "starting the drain does not itself move the bar")
 
   local steps = 0
@@ -15524,12 +15749,22 @@ end
   local fBig, sendBig = driverFor("b-drain-big")
   sendBig({ t = "send", slot = 2, side = "b", hp = 384 })
   sendBig({ t = "damage", slot = 2, side = "b", hp = 344 })
+  -- The row is reached (and the hit flashed) the same second frame
+  -- regardless of the bar's size -- that is queue position, not fall rate.
   local reached = 0
-  while not fBig.draining and reached < 10 do
+  while not fBig.hitHold and reached < 10 do
     fBig:update(1 / 60)
     reached = reached + 1
   end
-  eq(reached, 2, "the big bar's drain row is reached on the same second frame")
+  eq(reached, 2,
+     "the big bar's drain row is reached (and the hit flashed) on the same "
+     .. "second frame")
+  beatSteps = 0
+  while fBig.draining == nil and beatSteps < 60 do
+    fBig:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(fBig.draining ~= nil, "and the hit beat clears the same as any other")
   steps = 0
   while fBig.draining and steps < 400 do
     fBig:update(1 / 60)
@@ -15549,9 +15784,20 @@ end
   eq(#f2.lines, 3, "the spawn pop, the drain row and the text all wait in the queue")
 
   f2:update(1 / 60) -- the pop, which blocks nothing
-  f2:update(1 / 60)
-  check(f2.draining ~= nil, "the drain row is reached and started before the text")
+  f2:update(1 / 60) -- reaches the drain row and flashes the hit
+  eq(f2.draining, nil,
+     "the flash holds the bar behind the hit beat before the drain starts")
   eq(f2.shown, nil, "the queued text has not been promoted yet")
+
+  beatSteps = 0
+  while f2.draining == nil and beatSteps < 60 do
+    f2:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(f2.draining ~= nil,
+        "and once the hit beat clears, the drain row is reached and started "
+        .. "before the text")
+  eq(f2.shown, nil, "the queued text still has not been promoted")
 
   local guard = 0
   while f2.draining and guard < 200 do
@@ -15811,20 +16057,25 @@ end)()
   f.fx = nil
   send({ t = "damage", slot = 2, side = "b", hp = 20 })
   eq(f.fx, nil, "the damage event itself emits no fx")
-  f:update(1 / 60) -- pops the drain row -> startDrain
-  check(f.draining ~= nil, "one tick reaches the drain row and starts the fall")
+  f:update(1 / 60) -- pops the drain row -> startDrain: flashes, holds the beat
+  eq(f.draining, nil,
+     "the hit beat holds the fall frozen while the flash reads")
   local kinds = {}
   for _, e in ipairs(f.fx or {}) do kinds[e.kind] = true end
   check(kinds.flash, "a damaging hit flashes the defender as the bar starts")
   check(kinds.shake, "...and nudges the whole field with it")
 
   -- A rise in hp (a heal / drain-move restore) still queues a drain row for
-  -- the bar, but earns no flash or shake -- nothing was hit.
+  -- the bar, but earns no flash or shake -- nothing was hit. The settle loop
+  -- has to pump the hit beat as well as the fall itself, or it exits before
+  -- the earlier bar has actually landed.
   local settle = 0
-  while f.draining and settle < 200 do
+  while (f.draining or f.hitHold) and settle < 200 do
     f:update(1 / 60)
     settle = settle + 1
   end
+  check(f.draining == nil and f.hitHold == nil,
+        "the hit beat clears and the fall lands before the heal begins")
   f.fx = nil
   send({ t = "damage", slot = 2, side = "b", hp = 30 })
   f:update(1 / 60)
@@ -15840,12 +16091,21 @@ end)()
      "the anim event itself emits no fx -- only playing the queued row does")
   f2:update(1 / 60) -- the arrival pop is queued ahead of the anim row
   f2.fx = nil -- clear the send's own spawn entry; this block is about lunge
-  f2:update(1 / 60) -- pops the anim row -> startAnim -> lunge
+  f2:update(1 / 60) -- pops the anim row -> startAnim: raises the bubble first
+  eq(f2.fx, nil,
+     "the callout beat raises the bubble alone -- no lunge until it clears")
   local sawLunge = false
-  for _, e in ipairs(f2.fx or {}) do
-    if e.kind == "lunge" then sawLunge = true end
+  local beatSteps = 0
+  while not sawLunge and beatSteps < 60 do
+    f2:update(1 / 60)
+    beatSteps = beatSteps + 1
+    for _, e in ipairs(f2.fx or {}) do
+      if e.kind == "lunge" then sawLunge = true end
+    end
   end
-  check(sawLunge, "playing a battlefield anim row lunges the attacker")
+  check(sawLunge,
+        "and once the callout beat (BEAT_SPAN.callout) clears, playing the "
+        .. "battlefield anim row lunges the attacker")
 
   -- ...but only for a real move. `TOSS_ANIM` / `HIDEPIC_ANIM` and the rest of
   -- the engine's ball markers ride the same field, and a thrown ball must not
@@ -15885,6 +16145,381 @@ end)()
   end
   check(not classicRow, "the classic path queues no spawn row at all")
   eq(classic.fx, nil, "...and emits no fx either")
+end)()
+
+-- ------- CHRONOLOGY PIN: the split-beat order, regression-proof
+--
+-- `startAnim`'s callout split and `startDrain`'s hit split turned two fused
+-- ticks into four: 1 callout bubble (BEAT_SPAN.callout, held) -> 2 lunge ->
+-- 3 flash+shake (BEAT_SPAN.hit, held, bar frozen) -> 4 drain -> 5 sink ->
+-- 6 fainted text -> 7 choice -> 8 spawn. Everything above this line pins
+-- pieces of that order incidentally, as a side effect of fixing display-drain
+-- timing; this block pins the whole order in one place and by name, so a
+-- future re-fusion of any beat fails here first.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+
+  local function driverFor(battle, role)
+    local fight = MediatedBattle.new({
+      game = gen1Game, battle = battle, role = role or "host",
+    })
+    local seq = 0
+    local function send(fields)
+      seq = seq + 1
+      fields.battle = battle
+      fields.seq = seq
+      fight:onEvent(fields)
+    end
+    return fight, send
+  end
+
+  local function sawFxOn(fight, kind)
+    for _, e in ipairs(fight.fx or {}) do
+      if e.kind == kind then return true end
+    end
+    return false
+  end
+
+  -- No `text` on either send: exactly like the drain/fx-emission blocks
+  -- above, that is what keeps a "sent out" narration line from queueing
+  -- ahead of the rows this block actually wants to pump ticks over.
+  local f, send = driverFor("b-chrono")
+  send({ t = "send", slot = 0, side = "a", hp = 20 })
+  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  f:update(1 / 60) -- pops the mine spawn pop
+  f:update(1 / 60) -- pops the foe spawn pop
+
+  send({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
+  send({ t = "faint", slot = 2, side = "b", text = "RATT" })
+
+  -- 1. Callout: the first tick raises the bubble and holds the anim row --
+  -- no lunge fx yet.
+  f.fx = nil
+  f:update(1 / 60)
+  check(f.battlefieldBubbles ~= nil, "1: the callout bubble is up on the very first tick")
+  check(not sawFxOn(f, "lunge"), "...but the lunge has not played yet")
+
+  -- 2. Lunge: only once the callout beat clears.
+  local beatSteps = 0
+  while not sawFxOn(f, "lunge") and beatSteps < 60 do
+    f:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(sawFxOn(f, "lunge"), "2: the lunge plays once the callout beat clears")
+  check(f.draining == nil,
+        "...and the target's bar has not started falling yet")
+
+  -- 3. Flash + shake, bar still frozen through the hit beat.
+  local hpBeforeHit = f.slots[2].shownHp
+  beatSteps = 0
+  while not sawFxOn(f, "flash") and beatSteps < 80 do
+    f:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(sawFxOn(f, "flash"), "3: the hit flashes the defender")
+  check(sawFxOn(f, "shake"), "...and nudges the field with it")
+  check(f.draining == nil,
+        "...with the bar still frozen -- the hit beat has not cleared yet")
+  eq(f.slots[2].shownHp, hpBeforeHit, "...shownHp has not moved at all yet")
+
+  -- 4. Drain: only once the hit beat clears.
+  beatSteps = 0
+  while f.draining == nil and beatSteps < 60 do
+    f:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(f.draining ~= nil, "4: the drain starts once the hit beat clears")
+
+  -- 5-6. Sink, then the fainted line.
+  local function shownFainted()
+    return type(f.shown) == "string" and f.shown:find("fainted!", 1, true) ~= nil
+  end
+  local guard = 0
+  while not shownFainted() and guard < 400 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 400,
+        "5-6: the sink and the fainted line resolve in a bounded number of frames")
+  check(shownFainted(), "...and the fainted line is what shows")
+  eq(f.slots[2].shownHp, 0, "...with the bar fully landed by the time it does")
+
+  -- 7-8. The choice is off-screen (a party menu, not this queue) -- what this
+  -- queue owes is the replacement's arrival once the release has cleared.
+  f.fx = nil
+  send({ t = "send", slot = 2, side = "b", hp = 30, text = "PIDGEY" })
+  -- The fainted line itself sits on the queue until MSG_AUTO_ADVANCE (1.6s,
+  -- 96 ticks) times it out, ahead of the release and the replacement's pop.
+  local guard2 = 0
+  while not sawFxOn(f, "spawn") and guard2 < 200 do
+    f:update(1 / 60)
+    guard2 = guard2 + 1
+  end
+  check(sawFxOn(f, "spawn"),
+        "7-8: the replacement still spawns onto the field once the fainted "
+        .. "line and the release behind it have played")
+end)()
+
+-- ------- CHRONOLOGY PIN: multi-hit gets one callout, a hit beat per strike
+--
+-- One anim row, one damage event per strike (`startDrain`'s own header): the
+-- callout and the lunge play once for the whole flurry, but each strike's
+-- drain row still earns its own flash + hit beat.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-multihit", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-multihit"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+  local function sawFx(kind)
+    for _, e in ipairs(f.fx or {}) do
+      if e.kind == kind then return true end
+    end
+    return false
+  end
+
+  send({ t = "send", slot = 0, side = "a", hp = 20 })
+  send({ t = "send", slot = 2, side = "b", hp = 60 })
+  f:update(1 / 60)
+  f:update(1 / 60)
+
+  send({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
+  send({ t = "damage", slot = 2, side = "b", hp = 50 })
+  send({ t = "damage", slot = 2, side = "b", hp = 40 })
+
+  local drainRows = 0
+  for _, row in ipairs(f.lines) do
+    if type(row) == "table" and row.drain then drainRows = drainRows + 1 end
+  end
+  eq(drainRows, 2,
+     "one anim row queues two drain rows behind it -- one per strike")
+
+  f.fx = nil
+  f:update(1 / 60)
+  check(f.battlefieldBubbles ~= nil, "the callout bubble is up for the flurry")
+  check(not sawFx("lunge"), "...lunge held behind the beat")
+  local beatSteps = 0
+  while not sawFx("lunge") and beatSteps < 60 do
+    f:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(sawFx("lunge"), "the lunge plays once, for the whole flurry")
+
+  beatSteps = 0
+  while f.draining == nil and beatSteps < 60 do
+    f:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(f.draining ~= nil, "the first strike's own hit beat runs")
+  local settle = 0
+  while f.draining and settle < 200 do
+    f:update(1 / 60)
+    settle = settle + 1
+  end
+
+  f.fx = nil
+  beatSteps = 0
+  while not sawFx("flash") and beatSteps < 60 do
+    f:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  check(sawFx("flash"),
+        "the second strike's drain row earns its own flash + hit beat too")
+end)()
+
+-- ------- CHRONOLOGY PIN: a heal skips both beats entirely
+--
+-- No hit was landed, so there is nothing to flash and nothing to hold --
+-- `startDrain` starts the climb on the same tick it is reached.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-heal-pin", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-heal-pin"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "send", slot = 2, side = "b", hp = 50 })
+  f:update(1 / 60) -- spawn pop
+  send({ t = "damage", slot = 2, side = "b", hp = 30 })
+  local beatSteps = 0
+  while f.draining == nil and beatSteps < 60 do
+    f:update(1 / 60)
+    beatSteps = beatSteps + 1
+  end
+  local settle = 0
+  while f.draining and settle < 200 do
+    f:update(1 / 60)
+    settle = settle + 1
+  end
+
+  f.fx = nil
+  send({ t = "damage", slot = 2, side = "b", hp = 45 })
+  f:update(1 / 60)
+  check(f.draining ~= nil, "a climb starts on the very same tick it is reached")
+  eq(f.fx, nil, "...and emits no flash or shake at all -- nothing was struck")
+end)()
+
+-- ------- CHRONOLOGY PIN: a wild foe's move raises no bubble, so no callout beat
+--
+-- `noteBattlefieldBubble` refuses a foe seat in wild mode outright (no human
+-- to hang a bubble on), so `startAnim`'s `spoke` gate never fires and the
+-- lunge has no beat in front of it to wait on.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({
+    game = gen1Game, battle = "b-wild-pin", role = "host", mode = "wild",
+  })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-wild-pin"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "send", slot = 0, side = "a", hp = 20 })
+  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  f:update(1 / 60)
+  f:update(1 / 60)
+
+  send({ t = "anim", slot = 2, side = "b", text = "SOMEANIM" })
+  f.fx = nil
+  f:update(1 / 60)
+  check(f.battlefieldBubbles == nil or #f.battlefieldBubbles == 0,
+        "a wild foe's move raises no bubble")
+  local sawLunge = false
+  for _, e in ipairs(f.fx or {}) do
+    if e.kind == "lunge" then sawLunge = true end
+  end
+  check(sawLunge,
+        "...so there is no callout beat to spend -- the lunge plays on the "
+        .. "very first tick")
+end)()
+
+-- ------- CHRONOLOGY PIN: the classic (Gen2) path has no beats at all
+--
+-- `noteBattlefieldBubble` refuses outright when `usesBattlefield()` is
+-- false, so `startAnim`'s `spoke` gate never fires there either -- a row is
+-- reached and played in one tick, exactly as it always was.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local goldGame = { data = { type_chart = { generation = 2 }, gen2Statuses = {} } }
+  local f = MediatedBattle.new({ game = goldGame, battle = "b-classic-pin", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-classic-pin"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
+  f:update(1 / 60)
+  check(f.battlefieldBubbles == nil, "the classic path raises no bubble to owe a beat")
+  check(f.anim ~= nil,
+        "...so the anim row is reached and playing on the very first tick")
+end)()
+
+-- ------- CHRONOLOGY PIN: the victory fanfare holds through a hit beat too
+--
+-- #36's fix (`hasPendingHpFx`) already covers a draining bar and a playing
+-- ball row; the hit beat sits *in front of* the drain it introduces, so it
+-- has to count as pending too, or a KO's outcome could announce itself
+-- before the strike that caused it has even flashed.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-hitfanfare", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-hitfanfare"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  f:update(1 / 60) -- pops the arrival pop
+  send({ t = "damage", slot = 2, side = "b", hp = 10 })
+  f:update(1 / 60) -- reaches the drain row -> flashes the hit, sets hitHold
+  check(f.hitHold ~= nil, "the hit beat is live")
+  check(f:hasPendingHpFx(),
+        "and the hit beat itself counts as pending -- the same guard the "
+        .. "drain and the ball rows use")
+
+  f.result = "win"
+  f:finish("win", "over")
+  check(f.victoryMusicHeld == true,
+        "the fanfare is held while the hit beat is still running, ahead of "
+        .. "any bar even starting")
+  check(not f.victoryMusicPlayed, "...and has not actually played yet")
+
+  local guard = 0
+  while f:hasPendingHpFx() and guard < 400 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 400,
+        "the beat and the fall both resolve in a bounded number of frames")
+  f:update(1 / 60)
+  check(f.victoryMusicPlayed,
+        "and the fanfare finally plays once nothing is owed any more")
+end)()
+
+-- ------- CHRONOLOGY PIN: BEAT_SPAN parity between the two twins
+--
+-- CoopBattle and MediatedBattle draw the same arena at the same tempo, the
+-- same reason `FX_SPAN` is shared prose in both files' own comments -- so
+-- their beat spans have to agree exactly, or one screen would run the same
+-- attack at a different speed than the other. Reached off a live method's
+-- upvalues (the same technique the `displayHP` block above this file uses),
+-- rather than a hand-copied pair of numbers this suite would have to
+-- remember to keep in step with the source.
+
+;(function()
+  local function findUpvalue(fn, name)
+    local i = 1
+    while true do
+      local uname, value = debug.getupvalue(fn, i)
+      if not uname then return nil end
+      if uname == name then return value end
+      i = i + 1
+    end
+  end
+
+  local coopBeat = need("CoopBattle")
+  local mediatedBeat = need("MediatedBattle")
+  local coopSpan = findUpvalue(coopBeat.splitHitBeat, "BEAT_SPAN")
+  local medSpan = findUpvalue(mediatedBeat.startDrain, "BEAT_SPAN")
+  check(type(coopSpan) == "table",
+        "CoopBattle's BEAT_SPAN is reachable off a live method's upvalues")
+  check(type(medSpan) == "table",
+        "MediatedBattle's BEAT_SPAN is reachable off a live method's upvalues")
+  if type(coopSpan) == "table" and type(medSpan) == "table" then
+    eq(coopSpan.callout, 0.55, "CoopBattle's callout beat is 0.55s")
+    eq(coopSpan.hit, 0.30, "CoopBattle's hit beat is 0.30s")
+    eq(medSpan.callout, coopSpan.callout,
+       "the two twins' callout beats agree exactly")
+    eq(medSpan.hit, coopSpan.hit, "...and so do their hit beats")
+  end
 end)()
 
 -- ------- MediatedBattle: battlefield speech bubbles, "used" + moveName
@@ -16697,7 +17332,14 @@ end
     client.game.input = { wasPressed = function() return false end }
     client.animPlayer = tickingAnimPlayer({ { sound = "FIX_TACKLE" } })
     client.messages = { { anim = "FIX_TACKLE", from = 1 } }
-    CoopBattle.update(client, 1 / 60)
+    -- The row carries a `from`, so it owes a callout beat first (the bubble
+    -- goes up, the row is re-queued, and nothing here starts until the beat
+    -- clears) -- pump past it rather than assuming the first tick plays.
+    local beatSteps = 0
+    while calls.playMove < 1 and beatSteps < 60 do
+      CoopBattle.update(client, 1 / 60)
+      beatSteps = beatSteps + 1
+    end
     check(calls.playMove >= 1,
           "CoopBattle pollEffects plays move SFX when the anim ticks")
     local okMissing = pcall(function()

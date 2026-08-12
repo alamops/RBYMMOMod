@@ -943,6 +943,37 @@ local FX_SPAN = {
   poof   = 0.45, -- POOF / SHOWPIC: the burst, and what comes out of it
 }
 
+-- The per-attack chronology's two deliberate gaps. One attack is four beats on
+-- the arena, in this order and never two of them in the same tick:
+--
+--   1. the trainer's callout bubble, alone          (BEAT_SPAN.callout)
+--   2. the attacker's lunge                         (FX_SPAN.lunge)
+--   3. the defender's flash and the field's nudge   (BEAT_SPAN.hit)
+--   4. the bar falling                              (the drain, DRAIN_BUDGET)
+--
+-- Beats 2 and 4 are effects and a descent with lifetimes of their own; 1 and 3
+-- are *holds* the queue takes with nothing else running, so they are their own
+-- table rather than more `FX_SPAN` entries -- no `emitFx` call ever names
+-- either. Shared verbatim with CoopBattle's twin, which plays the same
+-- chronology over its own queue: the two screens must not drift on the timing
+-- a player reads as the game's rhythm.
+local BEAT_SPAN = {
+  -- 1 -> 2. The shout is a moment of its own: the bubble goes up over the
+  -- trainer, and only then does the monster lean in. Comfortably inside the
+  -- bubble's own life (BUBBLE_LIFE, 90 frames) with the lunge's 0.35s on top
+  -- -- 33 + 21 of 90 -- so the shout is still on screen for the whole of the
+  -- lunge it introduces, which is the point of saying it first, and it is
+  -- never re-noted for the second beat (that would restart its fade).
+  callout = 0.55,
+  -- 3 -> 4. The strike reads before the bar answers it: the defender flashes
+  -- and the field takes its nudge with the bar held exactly where it was, and
+  -- only once that has been seen does the drain start. Exactly the flash it
+  -- opens (FX_SPAN.flash, and `stepFx` keeps running through the hold), so the
+  -- white is on the defender for the whole beat and gone as the bar begins to
+  -- move -- the two are one hit, not two.
+  hit = 0.30,
+}
+
 -- The engine's ball markers, and what each one is on the arena. Ball ids vary
 -- with the ball (`_emitBallChain` in BattleSim/Turn.lua picks the toss by item),
 -- so the toss is listed three times rather than pattern-matched.
@@ -1321,6 +1352,11 @@ function M:pruneBattlefieldBubbles()
 end
 
 -- Trainer callout when a human-owned mon acts. Never for the wild foe.
+--
+-- Returns true when a bubble was actually put up, which is what `startAnim`
+-- reads to decide whether the row has a callout beat to hold for: a move with
+-- nobody to shout it (the wild foe) must not stall the arena on a bubble that
+-- was never drawn.
 function M:noteBattlefieldBubble(row)
   if not self:usesBattlefield() then return end
   if type(row) ~= "table" then return end
@@ -1350,7 +1386,7 @@ function M:noteBattlefieldBubble(row)
       name = self:battlefieldSeatName(row.slot or self:foeSlot()),
       born = self.frame or 0,
     }}
-    return
+    return true
   end
   self.battlefieldBubbles = {{
     side = "ally",
@@ -1360,6 +1396,7 @@ function M:noteBattlefieldBubble(row)
     name = self:battlefieldSeatName(row.slot or self:mySlot()),
     born = self.frame or 0,
   }}
+  return true
 end
 
 -- The acting mon's display name for a field slot: exactly the string the seat
@@ -2587,10 +2624,25 @@ function M:tickMessages(dt, input)
     return true
   end
 
-  -- Two more blocking states, both display-only and both unskippable: the bar
-  -- falling and the monster after it. There is deliberately no input here to
-  -- find -- the queue itself is what holds them, the way the engine reads a
-  -- button only for a text page that has finished printing.
+  -- Three more blocking states, all display-only and all unskippable: the hit
+  -- landing, the bar falling, and the monster after it. There is deliberately
+  -- no input here to find -- the queue itself is what holds them, the way the
+  -- engine reads a button only for a text page that has finished printing.
+  --
+  -- The hit beat is `startDrain`'s half of the same split the callout does:
+  -- the flash and the nudge have already been emitted and the drain row is
+  -- back at the head of the queue, frozen behind this hold. Falling *through*
+  -- on the tick it expires rather than returning is what keeps the bar's first
+  -- frame in the same tick as the last frame of the flash -- returning here
+  -- left one frame with no beat running at all, and the band drew the gap.
+  if self.hitHold then
+    self.hitHold = self.hitHold - (dt or 0)
+    if self.hitHold > 0 then
+      self.dwell = 0
+      return true
+    end
+    self.hitHold = nil
+  end
   if self.draining then
     self:stepDrain(dt)
     self.dwell = 0
@@ -2809,13 +2861,45 @@ function M:startAnim(row)
   self.anim = row
   self.animHold = nil
   self.pendingHit = nil
-  self:noteBattlefieldBubble(row)
+  -- Only on the first pass: a move row reaches here twice (the callout beat
+  -- below puts it straight back at the head of the queue), and re-noting the
+  -- bubble for the lunge would restart a fade the lunge is meant to be read
+  -- under. The bubble outlives both beats on its own -- see BEAT_SPAN.callout.
+  local spoke = (not row.calledOut) and self:noteBattlefieldBubble(row)
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
   if row.anim == "HIDEPIC_ANIM" then
     self.foePicHidden = true
   elseif row.anim == "SHOWPIC_ANIM" then
     self.foePicHidden = nil
   end
+
+  -- ------- beat 1: the callout, on its own.
+  --
+  -- The shout and the lean used to land in the same tick, which read as one
+  -- indistinct event -- the bubble appeared over a monster already mid-lunge.
+  -- They are two beats now, and the split is the queue's own: this pass puts
+  -- the bubble up, holds for BEAT_SPAN.callout and pushes the *same row* back at
+  -- the head of the queue (the SHAKE fan-out in `startBallFx` does exactly
+  -- this), so the next pass through here plays the lunge with nothing else on
+  -- screen to compete with it. Same row and not a copy, so `self.anim` is the
+  -- identical table across both beats and everything that reads it -- the
+  -- acting-seat mark, `playAnimSound`, `hasPendingHpFx` -- cannot tell one
+  -- beat from the other.
+  --
+  -- Gated on a bubble actually having gone up, which is also the gate on
+  -- everything this beat is for: no bubble on the classic 160x144 path, none
+  -- on Gen2, none for a ball marker, and none for the wild foe -- and each of
+  -- those plays exactly as it did before, in one beat.
+  if spoke then
+    row.calledOut = true
+    table.insert(self.lines, 1, row)
+    self.animHold = BEAT_SPAN.callout
+    -- Deliberately before `peekHitSfx`: the thud belongs to the lunge, and
+    -- arming it here would sound it at the end of the callout *and* again on
+    -- the beat that follows.
+    return
+  end
+
   local hitSfx = self:peekHitSfx()
   if hitSfx then self.pendingHit = { sfx = hitSfx } end
   -- Top-down theatre: skip classic AnimPlayer stage flashes (coords are
@@ -2828,8 +2912,9 @@ function M:startAnim(row)
     local moveAnim = type(row.anim) == "string" and row.anim ~= ""
       and not row.anim:find("_ANIM", 1, true)
     if moveAnim then
+      -- Beat 2, with the callout above already spent and its bubble still up.
       -- The defender's flash and the field's nudge ride the drain row behind
-      -- this one, so a move that misses only lunges.
+      -- this one -- their own beat again -- so a move that misses only lunges.
       self:emitFx("lunge", row.slot, row.side)
     else
       -- ...and the markers it excludes are the throw itself: the arc, the
@@ -3199,16 +3284,38 @@ function M:startDrain(row)
     return false
   end
   if slot.shownHp == to then return false end
-  self.draining = { slot = row.drain, to = to, frames = DRAIN_BUDGET }
+
+  -- ------- beat 3: the hit, with the bar still frozen.
+  --
   -- Now, with the bar about to move, is when the hit reads: the defender
   -- flashes white and the field takes a nudge. Emitted here rather than when
   -- the `damage` event arrived because a resolved turn arrives as one batch --
-  -- both seats would jolt in the same frame, ahead of any text. A climb (a
-  -- heal, a drain move's restore) gets neither: nothing was struck.
-  if slot.shownHp > to then
+  -- both seats would jolt in the same frame, ahead of any text.
+  --
+  -- And *before* the fall rather than under it, the callout's split again: a
+  -- flash over a bar already sliding is one indistinct event, so the strike
+  -- gets BEAT_SPAN.hit of its own with the bar held exactly where it was, and
+  -- the row goes back at the head of the queue to start the drain when the
+  -- hold expires. Re-validated on the way back through, which is the point of
+  -- re-queueing the row instead of remembering it: a switch landing between
+  -- the two beats drops the fall the same way it always did.
+  --
+  -- A climb (a heal, a drain move's restore) gets no beat and no effects at
+  -- all: nothing was struck, so the bar starts moving on this very tick, as
+  -- before. Multi-hit is one anim row and one damage event per strike
+  -- (`BattleSim/Turn.lua` loops `_damage` under a single `_emit("anim")`), so
+  -- the callout and the lunge play once and each strike gets its own beat here.
+  if slot.shownHp > to and not row.hit then
+    row.hit = true
+    table.insert(self.lines, 1, row)
     self:emitFx("flash", row.drain)
     self:emitFx("shake", row.drain)
+    self.hitHold = BEAT_SPAN.hit
+    return true
   end
+
+  -- ------- beat 4: the fall.
+  self.draining = { slot = row.drain, to = to, frames = DRAIN_BUDGET }
   return true
 end
 
@@ -3282,7 +3389,12 @@ end
 -- the hold ends with the last wobble rather than with the throw's result: a
 -- caught monster stays in its ball and the fanfare still plays.
 function M:hasPendingHpFx()
-  if self.draining or self.faintFx then return true end
+  -- `hitHold` counts for the same reason `draining` does, and is the beat
+  -- immediately before it: the fanfare must not start in the gap between a
+  -- strike landing and the bar that answers it. (The re-queued drain row in
+  -- `lines` already answers true below; this says it directly, so the hold
+  -- still holds if that row is ever dropped rather than re-queued.)
+  if self.draining or self.faintFx or self.hitHold then return true end
   if type(self.anim) == "table" and BALL_FX[self.anim.anim] then return true end
   for _, row in ipairs(self.lines or {}) do
     if type(row) == "table" then
@@ -3311,6 +3423,7 @@ function M:snapDisplay()
   self.ballFlow = nil
   self.fx = nil
   self.animHold = nil
+  self.hitHold = nil
   self.draining = nil
   self.faintFx = nil
   -- And the two clocks back in step: a descent abandoned half way is a bar

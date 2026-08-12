@@ -510,6 +510,13 @@ function M.new(game, opts)
     -- mon acts. Nil until the first human-owned move text / anim lands.
     battlefieldBubbles = nil,
     battlefieldLoaded = nil,
+    -- The per-attack chronology's two deliberate gaps (`BEAT_SPAN`): how long
+    -- the queue is held for, how much of that has been spent, and which
+    -- attacker + move already had its shout so a multi-hit move does not get
+    -- one per strike. All nil outside a beat.
+    beatHold = nil,
+    beatDwell = nil,
+    calloutSpent = nil,
   }, M)
 
   local rng = function(a, b)
@@ -1300,6 +1307,33 @@ function M:update(dt)
       end
       return
     end
+    -- ------- a display beat: the gap that makes two things two things
+    --
+    -- Some of the chronology is a *pause* rather than a thing being drawn. The
+    -- trainer's shout has to be on screen before the monster leans in, and the
+    -- defender has to flash before its bar starts falling -- otherwise the two
+    -- halves land in the same tick and read as one event with decoration on it.
+    --
+    -- Held here, and queue-pure: the row that was about to start goes back at
+    -- the head of the queue (`splitCalloutBeat`, `splitHitBeat`) and this is
+    -- the gap in front of it. Exactly what `startBallFx` does to give a SHAKE
+    -- row's extra wobbles a row each -- still one thing at a time, and the
+    -- queue is still the only sequencer.
+    --
+    -- Held like an animation is, and for the same reasons: the line already on
+    -- screen stays up (nothing here touches `shown`), the dwell clock below is
+    -- not ticked while it runs, and B skips it. The tick the beat *ends* on
+    -- falls straight through to the row waiting behind it rather than spending
+    -- a frame doing nothing.
+    if self.beatHold then
+      self.beatDwell = (self.beatDwell or 0) + (dt or 0)
+      if self.beatDwell < self.beatHold
+         and not (input and input:wasPressed("b")) then
+        return
+      end
+      self.beatHold = nil
+      self.beatDwell = nil
+    end
     -- A falling bar holds the queue exactly as an animation does, and -- like
     -- the engine's -- it cannot be hurried. `UpdateHPBar` is not a text page:
     -- the engine reads the button only for a page that has finished printing,
@@ -1392,7 +1426,17 @@ function M:update(dt)
           -- Bubble when a human-owned mon's "used MOVE" line lands (Gen1
           -- theatre). fromSlot is preferred; mediated msg rows often omit it
           -- and leave the actor on self.acting from the prior row.
+          local hadBubble = self.battlefieldBubbles
           self:noteBattlefieldBubble(fromSlot or self.acting, next)
+          -- ...and a shout raised by an announcement line is a **new attack**,
+          -- so the callout beat is owed again. This is what keeps a multi-hit
+          -- move to one shout: the coop queue announces once and then puts an
+          -- anim row in front of every strike, all of them stamped with the
+          -- same actor, so `splitCalloutBeat` needs something other than the
+          -- row itself to tell "the move started" from "it landed again".
+          -- `noteBattlefieldBubble` only ever raises one for a "used X" line,
+          -- so a replaced bubble table *is* that signal.
+          if self.battlefieldBubbles ~= hadBubble then self.calloutSpent = nil end
         end
         self.shown = next
         self.msgClock = 0
@@ -3088,17 +3132,17 @@ function M:startDrain(row)
   -- frames is the whole descent (see the rate below); the slack is there so an
   -- ordinary drain never meets this at all, and one that does is snapped to
   -- where it was going rather than left holding the queue.
+  --
+  -- The hit reads on the arena before the bar answers it: the defender flashes
+  -- white, the field takes a nudge, and the drain starts a beat later with
+  -- this same row (`splitHitBeat` puts it back at the head of the queue).
+  -- Emitted from the row rather than when the `damage` event arrived because a
+  -- resolved turn arrives as one batch -- all four seats would jolt in the
+  -- same frame, ahead of any text. A climb (a heal, a drain move's restore)
+  -- gets neither the fx nor the beat: nothing was struck.
+  if battler.shownHP > to and self:splitHitBeat(row) then return false end
   self.hitSlot = row.slot
   self.draining = { battler = battler, slot = row.slot, to = to, frames = 120 }
-  -- Now, with the bar about to move, is when the hit reads on the arena: the
-  -- defender flashes white and the field takes a nudge. Emitted here rather
-  -- than when the `damage` event arrived because a resolved turn arrives as one
-  -- batch -- all four seats would jolt in the same frame, ahead of any text. A
-  -- climb (a heal, a drain move's restore) gets neither: nothing was struck.
-  if battler.shownHP > to then
-    self:emitFx("flash", row.slot)
-    self:emitFx("shake", row.slot)
-  end
   return true
 end
 
@@ -3283,6 +3327,16 @@ function M:snapDisplay()
   self.fx = nil
   self.animHold = nil
   self.animDwell = nil
+  -- ...and so does a display beat, for the sharper version of the same reason:
+  -- a beat is a deliberate gap held in front of a row that the purge below may
+  -- be about to delete, so leaving it standing would be the queue waiting on
+  -- something that is no longer in it. `calloutSpent` goes with it -- the next
+  -- attack after a snap has said nothing yet, and this is also the reset that
+  -- covers the ordinary end of a queue (`update` snaps on the way back to the
+  -- menu), so no attack ever inherits the previous turn's shout.
+  self.beatHold = nil
+  self.beatDwell = nil
+  self.calloutSpent = nil
   -- The shadow goes with them. Nothing is owed an exit any more, so every slot
   -- draws the monster the field says is standing in it -- which is the safety
   -- net for a swap row that never arrived, and the reason a resync puts the
@@ -4954,6 +5008,134 @@ local FX_SPAN = {
   poof   = 0.45, -- POOF / SHOWPIC: the burst, and what comes out of it
 }
 
+-- The beats between the effects, in seconds. Not effects themselves -- nothing
+-- is drawn for one, and `emitFx` must never be able to take a key from here --
+-- so they are their own table rather than more `FX_SPAN` entries. Shared with
+-- MediatedBattle's twin for the same reason `FX_SPAN` is: the two screens play
+-- the same per-attack chronology and one of them running it at a different
+-- tempo would be the same fight at two speeds.
+--
+-- The chronology these two split apart, in order: the trainer's callout, the
+-- attacker's lunge, the defender's flash + the field's nudge, the HP bar, the
+-- faint sink, the "fainted!" line, the switch choice, and the replacement
+-- arriving on the field. The last four were already strictly ordered -- each
+-- one holds the message queue by itself. The first four were two pairs, each
+-- landing in a single tick, which is what these spans undo.
+local BEAT_SPAN = {
+  -- 1 -> 2. The shout is a moment of its own: the bubble goes up over the
+  -- trainer, and only then does the monster lean in. Comfortably inside the
+  -- bubble's own life (BATTLEFIELD_BUBBLE_LIFE, 90 frames) with the lunge's
+  -- 0.35s on top -- 33 + 21 of 90 -- so the shout is still on screen for the
+  -- whole of the lunge it introduces, which is the point of saying it first.
+  callout = 0.55,
+  -- 3 -> 4. The strike reads before the bar answers it: the defender flashes
+  -- and the field takes its nudge with the bar held exactly where it was, and
+  -- only once that has been seen does the drain start. Deliberately shorter
+  -- than the flash it opens (FX_SPAN.flash is 0.30 too, and `stepFx` keeps
+  -- running through the hold) so the white is still fading off the defender as
+  -- the bar begins to move -- the two are one hit, not two.
+  hit = 0.30,
+}
+
+-- Put `row` back at the head of the queue and hold everything for `span`.
+--
+-- The one primitive both splits below are made of, and the same one
+-- `startBallFx` re-queues a SHAKE row with: the row is not consumed, it is
+-- *deferred*, so the sequencer stays the message queue and nothing anywhere
+-- has to keep a second clock. `update`'s beat branch is the other half.
+--
+-- Answers false when there is no queue to put the row back into, which is the
+-- only way this can fail -- and the caller then does the unsplit thing rather
+-- than dropping the row on the floor.
+function M:holdBeat(row, span)
+  if type(self.messages) ~= "table" then return false end
+  span = tonumber(span)
+  if not span or span <= 0 then return false end
+  table.insert(self.messages, 1, row)
+  self.beatHold = span
+  self.beatDwell = nil
+  return true
+end
+
+-- Beats 1 -> 2: the trainer shouts, and *then* the monster leans in.
+--
+-- These used to land in the same tick -- `startAnim` noted the bubble and
+-- emitted the lunge one line apart -- so the callout was never a beat, only
+-- decoration on the lunge. Now the bubble goes up alone, the anim row goes
+-- back at the head of the queue, and the lunge plays `BEAT_SPAN.callout`
+-- later with its own hold untouched.
+--
+-- **Once per attack, not once per strike.** A multi-hit move on the coop queue
+-- is one announcement and one "used X!" line followed by an anim row per
+-- strike: the engine reuses the announcement's row for hit 1 and inserts a
+-- fresh `{ anim = move.id }` for every hit after it, each with that strike's
+-- own drain row behind it (src/battle/EffectRegistry.lua, the `for h = 1, hits`
+-- loop). Every one of those rows carries the same `from`, because CoopSim's
+-- `drainInto` stamps the actor onto every event an action produced -- so the
+-- row alone cannot tell "the move started" from "it landed again", and a
+-- naive split shouted five times through one Fury Attack. The announcement
+-- line is what owes the beat (`update`'s text branch clears `calloutSpent`
+-- when it raises a shout) and the first anim row behind it spends it.
+--
+-- Returns true when it took the row: the caller must start nothing else this
+-- tick. Returning false still means the bubble was raised -- a repeat strike
+-- refreshes the shout it is part of, exactly as it did before.
+function M:splitCalloutBeat(row)
+  if not self:usesBattlefield() then return false end
+  if type(row) ~= "table" or row.from == nil then return false end
+
+  local moveName = row.anim
+  local def = self.game and self.game.data and self.game.data.moves
+    and self.game.data.moves[row.anim]
+  if def and type(def.name) == "string" and def.name ~= "" then
+    moveName = def.name
+  end
+  -- Raised first, and whether it was raised at all is the gate: a seat with no
+  -- human to hang a bubble on (a coop_wild foe) gets no shout, and a beat
+  -- spent waiting for one nobody can see is a fight that pauses for nothing.
+  -- `noteBattlefieldBubble` replaces the table wholesale when it raises one,
+  -- so identity is the honest test.
+  local before = self.battlefieldBubbles
+  self:noteBattlefieldBubble(row.from, "used\n" .. tostring(moveName) .. "!",
+    tostring(moveName))
+  if self.battlefieldBubbles == before then return false end
+
+  local spent = self.calloutSpent
+  if spent and spent.from == row.from and spent.anim == row.anim then
+    return false
+  end
+  if not self:holdBeat(row, BEAT_SPAN.callout) then return false end
+  self.calloutSpent = { from = row.from, anim = row.anim }
+  return true
+end
+
+-- Beats 3 -> 4: the defender takes the hit, and *then* the bar answers it.
+--
+-- `startDrain` used to flash the defender, nudge the field and start the bar
+-- falling in one call, so the strike and its consequence were a single frame
+-- and the flash simply happened to be visible over a moving bar. Now the hit
+-- reads on its own with the bar frozen exactly where it was, and the drain
+-- starts `BEAT_SPAN.hit` later.
+--
+-- Once per drain row rather than once per attack -- the opposite of the
+-- callout, and deliberately: each strike of a multi-hit move gets its own
+-- drain row with its own stop (`drainNext(target, stopAt)`), and each of those
+-- is a separate blow that has to read as one.
+--
+-- Only a *fall*. The caller has already decided this row moves the bar
+-- downwards; a heal, a drain move's restore, a Recover keeps no fx and so
+-- needs no beat in front of one.
+function M:splitHitBeat(row)
+  if not self:usesBattlefield() then return false end
+  if type(row) ~= "table" or row.beat then return false end
+  -- Marked before the hold rather than after, so a row that somehow came back
+  -- round a second time cannot flash twice for one blow.
+  row.beat = true
+  self:emitFx("flash", row.slot)
+  self:emitFx("shake", row.slot)
+  return self:holdBeat(row, BEAT_SPAN.hit)
+end
+
 -- The engine's ball markers, and what each one is on the arena. Ball ids vary
 -- with the ball (`_emitBallChain` in BattleSim/Turn.lua picks the toss by
 -- item), so the toss is listed three times rather than pattern-matched.
@@ -5815,27 +5997,25 @@ function M:playMoveAnimFallback(row)
 end
 
 function M:startAnim(row)
-  self.anim = row
-  self.animHold = nil
-  self.animDwell = nil
-  self.pendingHit = nil
   -- Is this a real move, or one of the engine's ball markers? Every marker ends
   -- in `_ANIM` (`TOSS_ANIM`, `SHAKE_ANIM`, `HIDEPIC_ANIM`, …), and the old
   -- filter named three of the seven by hand -- so a ball throw printed "used
   -- TOSS_ANIM!" over the thrower's head and made the thrower lurch at it.
   local moveAnim = type(row.anim) == "string" and row.anim ~= ""
     and not row.anim:find("_ANIM", 1, true)
-  -- Trainer callout over the human who ordered this attack (Gen1 battlefield).
-  if row and row.from and moveAnim then
-    local moveName = row.anim
-    local def = self.game and self.game.data and self.game.data.moves
-      and self.game.data.moves[row.anim]
-    if def and type(def.name) == "string" and def.name ~= "" then
-      moveName = def.name
-    end
-    self:noteBattlefieldBubble(row.from, "used\n" .. tostring(moveName) .. "!",
-      tostring(moveName))
-  end
+  -- Trainer callout over the human who ordered this attack (Gen1 battlefield),
+  -- and the beat behind it. `splitCalloutBeat` raises the bubble either way;
+  -- when it answers true it has also put this row back at the head of the
+  -- queue, so the shout gets the next half-second to itself and everything
+  -- below -- the lunge, the AnimPlayer, the hit sfx -- runs when the row comes
+  -- round again. Nothing here is started in the meantime: an animation held
+  -- open across a beat would be drawn over a field the beat exists to leave
+  -- still.
+  if moveAnim and self:splitCalloutBeat(row) then return true end
+  self.anim = row
+  self.animHold = nil
+  self.animDwell = nil
+  self.pendingHit = nil
   -- The arena's half of the same row. The attacker leans in for a real move;
   -- the markers are the throw itself -- the arc, the recall, each wobble and
   -- the burst -- one per queued row, each held for as long as it plays.
