@@ -138,11 +138,15 @@ Requires ROM import (`scripts/setup.sh --rom …`). Agent owns start → readine
 
 **Live playtest checklist (owner):**
 
-- [ ] Coop NPC: arena full window; self (+partner) left; trainer right; 2v2 icons on grass
-- [ ] Target: d-pad moves cursor on field; arrow + card (name/L/HP/status/front)
+- [ ] Coop NPC: arena fills the window; self (+partner) left; trainer right; 2v2 bag icons on grass; icon bob
+- [ ] Target: d-pad moves field cursor (wraps); arrow + card only while picking; card shows name/L/HP/status/front
+- [ ] Trainer callout bubble above the human when their mon acts (NPC + PvP); **no** foe bubbles in wild
 - [ ] Wild coop: no right human; wild icons on right half
-- [ ] PvP / 1v1: humans both sides as applicable; fight/menu still usable
-- [ ] Win/loss restore / music still OK (no theatre regression)
+- [ ] Mediated 1v1: humans both sides; fight/menu usable in bottom band
+- [ ] Win/loss music restore still OK
+- [ ] Drop screenshots in `tmp/e2e-battlefield/` (or `bash tests/drivers/run-battlefield-e2e.sh --play`)
+
+**Known limitation (review should-fix, deferred):** classic 160×144 party/bag overlays opened mid-fight sit at the top of the 360-tall canvas rather than the menu band — keyboard still works; polish in a follow-up.
 
 **E2e N/A?** No.
 
