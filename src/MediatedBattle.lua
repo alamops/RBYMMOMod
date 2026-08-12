@@ -935,12 +935,14 @@ local FX_SPAN = {
   spawn = 0.40,
 }
 
--- The bar's *rate*, not its duration: `maxHp / 96` a frame is what the engine
--- uses (BattleState's HP drain), so a 20 HP monster and a 300 HP one empty in
--- the same second and a half.  The budget is the second half of that: a step
--- that loses its last fraction to floating point would never land on `to`
--- exactly, and a drain is deliberately unskippable -- so one that overruns a
--- whole descent is snapped home rather than left holding the queue forever.
+-- The bar's *rate*, not its duration: `max(1, maxHp / 96)` a frame is what the
+-- engine uses (BattleState's HP drain) and what CoopBattle's twin uses, so a
+-- big monster empties over about a second and a half and a small one -- whose
+-- 96th of a bar is under a point -- falls at the engine's one-HP-a-frame floor
+-- instead of crawling.  The budget is the second half of that: a step that
+-- loses its last fraction to floating point would never land on `to` exactly,
+-- and a drain is deliberately unskippable -- so one that overruns a whole
+-- descent is snapped home rather than left holding the queue forever.
 local DRAIN_FRAMES = 96
 local DRAIN_BUDGET = 120
 
@@ -1044,6 +1046,8 @@ function M.new(opts)
     fx = nil,
     draining = nil,
     faintFx = nil,
+    -- #36: the fanfare finish() parked because the arena still owed one of those.
+    victoryMusicHeld = nil,
     battlefieldLoaded = false,
     battlefieldBubbles = nil, -- { { side, humanIndex, text, born }, ... }
     targetIndex = 1,          -- field cursor when a target list exists
@@ -1538,9 +1542,10 @@ function M:onEvent(msg)
     -- maximum there is -- an event carries current HP and nothing else -- so
     -- the largest value ever seen is what the bar is drawn against.
     self:noteSlot(msg)
-    -- A monster arriving pops onto the field rather than blinking into it.
-    -- No queue row: the send line behind it is what the player is reading.
-    self:emitFx("spawn", msg.slot, msg.side)
+    -- A monster arriving pops onto the field rather than blinking into it --
+    -- queued, like every other effect, so the pop plays with the send line
+    -- rather than the instant the packet was parsed.
+    self:queueSpawnFx(msg.slot, msg.side)
     -- New mon on our seat drops any Transform/Mimic overlay until the
     -- referee publishes another `moves` list for it.
     if msg.slot == self:mySlot() then
@@ -1569,16 +1574,13 @@ function M:onEvent(msg)
     -- Truth first, then the bar. `syncMineHp` keeps the party sheet on the
     -- referee's number -- partyRows / mustReplace read it and must never see
     -- a display clock.
-    local before = self.slots[msg.slot]
-    before = before and before.hp
-    local slot = self:noteSlot(msg)
+    self:noteSlot(msg)
     self:syncMineHp(msg)
+    -- The flash and the field's nudge are not emitted here: a resolved turn
+    -- arrives as one batch, so both seats would jolt in the same frame, ahead
+    -- of the text that explains either. `startDrain` fires them when the bar
+    -- this row queued actually starts falling.
     self:queueDrain(msg.slot)
-    if slot and before and (slot.hp or 0) < before then
-      -- The defender takes the flash; a damaging hit nudges the whole field.
-      self:emitFx("flash", msg.slot, msg.side)
-      self:emitFx("shake", msg.slot, msg.side)
-    end
 
   elseif kind == "faint" then
     local slot = self:noteSlot(msg)
@@ -1609,8 +1611,10 @@ function M:onEvent(msg)
     if msg.text then self:say(("%s fainted!"):format(msg.text)) end
     -- After the faint line has been read (and any anim still ahead of it in
     -- `lines` has played), drop the pic. Queued behind the say so the KO stays
-    -- on screen through the flash + "X fainted!".
-    self.lines[#self.lines + 1] = { clearPic = msg.slot }
+    -- on screen through the flash + "X fainted!". Stamped with its occupant
+    -- for the same reason the drain row is: an auto-replacement batched behind
+    -- the KO would otherwise have this row take the newcomer's pic down.
+    self.lines[#self.lines + 1] = { clearPic = msg.slot, species = slot and slot.species }
 
   elseif kind == "status" then
     self:noteSlot(msg)
@@ -2481,8 +2485,14 @@ function M:tickMessages(dt, input)
       self:startFaintFx(next)
       return true
     end
+    if type(next) == "table" and next.spawnfx ~= nil then
+      -- Nothing waits on the pop: it plays under the send line, which is the
+      -- next row up. No dwell, exactly like `clearPic`.
+      self:emitFx("spawn", next.spawnfx, next.side)
+      return true
+    end
     if type(next) == "table" and next.clearPic ~= nil then
-      self:releasePic(next.clearPic)
+      self:releasePic(next.clearPic, next)
       -- No dwell: the faint line ahead already held the screen. Keep ticking
       -- if more of the queue remains.
       return true
@@ -2665,9 +2675,17 @@ function M:startAnim(row)
   -- Top-down theatre: skip classic AnimPlayer stage flashes (coords are
   -- 160×144); message/SFX timing still runs via the dwell path below.
   if self:usesBattlefield() then
-    -- The attacker leans in. The defender's flash and the field's nudge ride
-    -- the damage event behind this row, so a move that misses only lunges.
-    self:emitFx("lunge", row.slot, row.side)
+    -- The attacker leans in -- but only for a real move. `HIDEPIC_ANIM`,
+    -- `SHOWPIC_ANIM`, `TOSS_ANIM` and `SHAKE_ANIM` are the engine's ball
+    -- markers, and a thrown ball must not make the thrower lurch. Same filter
+    -- noteBattlefieldBubble uses on the same field.
+    local moveAnim = type(row.anim) == "string" and row.anim ~= ""
+      and not row.anim:find("_ANIM", 1, true)
+    if moveAnim then
+      -- The defender's flash and the field's nudge ride the drain row behind
+      -- this one, so a move that misses only lunges.
+      self:emitFx("lunge", row.slot, row.side)
+    end
     self:playMoveAnimFallback(row)
     self:applyPendingHitFx()
     return
@@ -2700,15 +2718,50 @@ function M:startAnim(row)
 end
 
 -- Drop a KO'd pic after its faint line (and any anim queued ahead of it).
-function M:releasePic(index)
+--
+-- `row` is the queued row, which names the occupant the release was filed for.
+-- Same refusal as `startDrain`: a send batched behind the KO means the seat has
+-- already changed hands, and the pic standing on it is the newcomer's -- taking
+-- it down here left the arrival invisible until something else refreshed it.
+-- The held sink still goes, though: it belongs to the monster that left, and
+-- there is no pic of theirs for it to apply to any more.
+function M:releasePic(index, row)
   local slot = self.slots[index]
   if not slot then return end
+  if row ~= nil and slot.species ~= row.species then
+    self:dropFaintFx(index)
+    return
+  end
   slot.sprite = nil
   slot.icon = nil
   slot.koHold = nil
   -- Nothing is drawn from this seat any more; put the two clocks back in step
   -- so a later send into the same slot cannot inherit a stale descent.
   slot.shownHp = slot.hp or 0
+  -- And drop the held sink (stepFx keeps a finished one so the KO stays down
+  -- while its line is read) -- there is no pic left for it to apply to, and a
+  -- fresh monster on this seat must not walk on already face down.
+  self:dropFaintFx(index)
+end
+
+-- Retire any faint effect on the seat a released pic sat on.
+--
+-- Matched by seat and not by side alone: `emitFx` stamps `seatIndex`, and in a
+-- future multi-seat mode one seat's release would otherwise drop a
+-- co-occupant's sink. An entry carrying no stamp still matches on side, so
+-- nothing filed before this survives a release that used to clear it.
+function M:dropFaintFx(index, seatIndex)
+  local list = self.fx
+  if type(list) ~= "table" then return end
+  local side = self:fxSideFor(index)
+  local seat = seatIndex or 1
+  local kept = {}
+  for _, fx in ipairs(list) do
+    local mine = type(fx) == "table" and fx.kind == "faint" and fx.side == side
+      and (fx.seatIndex == nil or fx.seatIndex == seat)
+    if not mine then kept[#kept + 1] = fx end
+  end
+  self.fx = (#kept > 0) and kept or nil
 end
 
 -- ------- the bar falling, and the monster after it
@@ -2770,6 +2823,12 @@ function M:stepFx(dt)
         -- The faint row waits on this one; releasing it is what lets the
         -- "X fainted!" line behind it print.
         if self.faintFx == fx then self.faintFx = nil end
+        -- A finished sink is *held* rather than retired: its end state is the
+        -- monster face down and invisible, and the pic is still on the seat
+        -- for another second and a half behind the "X fainted!" line. Retiring
+        -- it here popped the KO back to full opacity for exactly that long.
+        -- `releasePic` drops it when the seat is genuinely cleared.
+        if fx.kind == "faint" then kept[#kept + 1] = fx end
       else
         fx.t = t
         kept[#kept + 1] = fx
@@ -2794,11 +2853,29 @@ function M:shownHpOf(slot)
   return floor(shown)
 end
 
+-- The pop a monster arrives with, queued rather than played on arrival.
+--
+-- It is the one queued effect that holds nothing: the row is consumed, the
+-- pop starts, and the send line behind it prints on the next tick over the
+-- top of it. Deliberately not in `hasPendingHpFx` either -- a spawn is not a
+-- bar or a body, and a fanfare has no reason to wait on one.
+function M:queueSpawnFx(index, side)
+  if index == nil then return false end
+  if not self:usesBattlefield() then return false end
+  self.lines[#self.lines + 1] = { spawnfx = index, side = side }
+  return true
+end
+
 -- Queue the fall for a slot whose truth HP has already moved.
 --
 -- Draining to an absolute target is idempotent, which is why a `damage` event
 -- and the `faint` behind it can both queue one for the same seat without the
 -- bar moving twice: the second finds the first has already landed.
+--
+-- The row carries the occupant it was queued for, not just the seat: a switch
+-- can land between queue and play, and a fall meant for the monster that left
+-- would otherwise be run against the one that replaced it. CoopBattle's twin
+-- names the battler for the same reason.
 function M:queueDrain(index)
   if index == nil then return false end
   if not self:usesBattlefield() then return false end
@@ -2810,7 +2887,7 @@ function M:queueDrain(index)
     return false
   end
   if slot.shownHp == to then return false end
-  self.lines[#self.lines + 1] = { drain = index, to = to }
+  self.lines[#self.lines + 1] = { drain = index, to = to, species = slot.species }
   return true
 end
 
@@ -2825,6 +2902,10 @@ function M:startDrain(row)
   local to = tonumber(row and row.to)
   if not (slot and to) then return false end
   if to ~= to then return false end
+  -- Somebody else is standing here now: the row belongs to the monster that
+  -- was recalled, and running it would drain the newcomer's bar to a number
+  -- that was never theirs. Dropped, not deferred.
+  if slot.species ~= row.species then return false end
   local maxHp = tonumber(slot.maxHp) or 0
   to = max(0, min(maxHp, to))
   if slot.shownHp == nil then
@@ -2833,6 +2914,15 @@ function M:startDrain(row)
   end
   if slot.shownHp == to then return false end
   self.draining = { slot = row.drain, to = to, frames = DRAIN_BUDGET }
+  -- Now, with the bar about to move, is when the hit reads: the defender
+  -- flashes white and the field takes a nudge. Emitted here rather than when
+  -- the `damage` event arrived because a resolved turn arrives as one batch --
+  -- both seats would jolt in the same frame, ahead of any text. A climb (a
+  -- heal, a drain move's restore) gets neither: nothing was struck.
+  if slot.shownHp > to then
+    self:emitFx("flash", row.drain)
+    self:emitFx("shake", row.drain)
+  end
   return true
 end
 
@@ -2846,7 +2936,7 @@ function M:stepDrain(dt)
   end
   local frames = frameCount(dt)
   at.frames = (tonumber(at.frames) or DRAIN_BUDGET) - frames
-  local step = max(1, tonumber(slot.maxHp) or 1) / DRAIN_FRAMES * frames
+  local step = max(1, (tonumber(slot.maxHp) or 1) / DRAIN_FRAMES) * frames
   local shown = tonumber(slot.shownHp) or at.to
   if shown > at.to then
     shown = max(at.to, shown - step)
@@ -2866,15 +2956,26 @@ end
 -- The fall of the monster itself, queued as its own row so the sink finishes
 -- before "X fainted!" prints -- the engine's order, and the reason the pic is
 -- not released until the line behind it has been read.
+--
+-- Stamped with its occupant, exactly like the drain row: the referee can batch
+-- an auto-replacement behind the KO, and a sink meant for the monster that left
+-- would otherwise play against the one standing there now.
 function M:queueFaintFx(index)
   if index == nil then return false end
   if not self:usesBattlefield() then return false end
-  self.lines[#self.lines + 1] = { faintfx = index }
+  local slot = self.slots[index]
+  self.lines[#self.lines + 1] = { faintfx = index, species = slot and slot.species }
   return true
 end
 
 function M:startFaintFx(row)
-  local fx = self:emitFx("faint", row and row.faintfx)
+  local index = row and row.faintfx
+  local slot = self.slots[index]
+  -- Somebody else is standing here now: the sink belongs to the monster that
+  -- was recalled, and playing it would drop the newcomer through the floor
+  -- under a "X fainted!" that never named them. Dropped, not deferred.
+  if slot and row ~= nil and slot.species ~= row.species then return false end
+  local fx = self:emitFx("faint", index)
   if not fx then return false end
   self.faintFx = fx
   return true

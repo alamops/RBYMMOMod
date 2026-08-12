@@ -11427,6 +11427,19 @@ end)()
   eq(statused.side, "foe", "and carries the foe side through")
   local allySide = Battlefield.plateModel({ hp = 5, maxHp = 5 })
   eq(allySide.side, "ally", "an unnamed side defaults to ally")
+
+  -- The seat HP contract: cardModel resolves the same display clock the plate
+  -- does, so the target card and the plate under it can never disagree
+  -- mid-drain (the card used to draw truth hp and jump a bar the plate was
+  -- still lowering).
+  local midDrain = { name = "RATT", hp = 5, maxHp = 30, shownHp = 21 }
+  local card = Battlefield.cardModel(midDrain)
+  eq(card.hp, 5, "cardModel keeps truth hp where the caller put it")
+  eq(card.shownHp, 21, "...and publishes the display clock beside it")
+  eq(card.shownHp, Battlefield.plateModel(midDrain).shownHp,
+     "the card and the plate resolve the same clock off one seat")
+  eq(Battlefield.cardModel({ hp = 12, maxHp = 30 }).shownHp, 12,
+     "a seat with no clock reads truth hp on the card too")
 end)()
 
 -- ------- Gen1 Battlefield wave 1: fx math (pure functions of t)
@@ -11499,6 +11512,14 @@ end)()
     { { kind = "flash", side = "ally", seatIndex = 1, t = 0.25 } }, "ally", 2)
   eq(scoped.flash, 0, "a seat-scoped fx entry does not reach a different seat")
 
+  -- Nothing matched: the neutral answer is one shared record, so a caller that
+  -- wrote into what fxSeat handed back would move every unaffected seat on the
+  -- field. Read-only is the contract; this pins the sharing that makes it one.
+  eq(neutral, scoped,
+     "a no-match fold returns the one shared neutral record, not a fresh table")
+  eq(Battlefield.fxSeat({}, "foe", 1), neutral,
+     "...and an empty list folds to the same record")
+
   -- fxFieldShake: whole-field jolt, side/seatIndex-agnostic.
   local zx, zy = Battlefield.fxFieldShake(nil)
   eq(zx, 0, "no fx list -- no field shake on x")
@@ -11506,6 +11527,20 @@ end)()
   local ex, ey = Battlefield.fxFieldShake({ { kind = "shake", t = 1 } })
   eq(ex, 0, "a shake fully decayed by t == 1 contributes nothing on x")
   eq(ey, 0, "...nor on y -- both terms carry the same (1 - t) decay factor")
+
+  -- The fold is clamped: a multi-hit move stacks several live shakes, and
+  -- their unclamped sum would walk the field past the outset drawArena
+  -- reserves and uncover the canvas edge.
+  local stack = {}
+  for _ = 1, 6 do stack[#stack + 1] = { kind = "shake", t = 0.1 } end
+  local sx, sy = Battlefield.fxFieldShake(stack)
+  local one = Battlefield.fxFieldShake({ { kind = "shake", t = 0.1 } })
+  check(math.abs(sx) > math.abs(one),
+        "six live shakes do stack past a single one")
+  check(math.abs(sx) <= Battlefield.FX_SHAKE,
+        "...but the sum never exceeds FX_SHAKE on x")
+  check(math.abs(sy) <= Battlefield.FX_SHAKE,
+        "...nor on y, which is what keeps the outset covering the edge")
 end)()
 
 -- ------- Gen1 Battlefield wave 1: layout plates + ctx.fx passthrough
@@ -11526,6 +11561,58 @@ end)()
   })
   eq(#withHp.plates, 1, "only the seat carrying hp figures gets a plate")
   eq(withHp.plates[1].side, "ally", "...and it is the ally plate")
+
+  -- One plate per placed seat, stacked away from its own edge: a 2v2 keeps a
+  -- HUD for every seat rather than only the primary one, and two plates on a
+  -- side never sit on top of each other.
+  local twoUp = Battlefield.layout({
+    mode = "coop_npc",
+    allySeats = {
+      { index = 1, name = "PIKA", hp = 20, maxHp = 24 },
+      { index = 2, name = "BULBA", hp = 18, maxHp = 30 },
+    },
+    foeSeats = { { index = 3, name = "RATT", hp = 9, maxHp = 12 } },
+  })
+  local allyPlates = {}
+  for _, plate in ipairs(twoUp.plates) do
+    if plate.side ~= "foe" then allyPlates[#allyPlates + 1] = plate end
+  end
+  eq(#twoUp.plates, 3, "a 2-on-1 plates all three seats")
+  eq(#allyPlates, 2, "...two of them on the two-seat side")
+  eq(math.abs(allyPlates[1].y - allyPlates[2].y),
+     Battlefield.PLATE_H + Battlefield.PLATE_GAP,
+     "the two ally plates stack exactly PLATE_H + PLATE_GAP apart")
+  check(math.abs(allyPlates[1].y - allyPlates[2].y) >= Battlefield.PLATE_H,
+        "...so neither overlaps the other")
+  eq(allyPlates[1].x, allyPlates[2].x,
+     "a stack shares one column -- plates climb, they do not drift sideways")
+
+  -- The target card only earns its space when the pick is genuinely
+  -- ambiguous. With one candidate the plates already publish that seat's
+  -- name / level / HP, so the card would duplicate a plate and cover the
+  -- sprite the arrow is already pointing at.
+  local oneTarget = Battlefield.layout({
+    mode = "coop_npc",
+    allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24 } },
+    foeSeats = { { index = 3, name = "RATT", hp = 9, maxHp = 12 } },
+    targets = { { index = 3 } },
+    targetIndex = 1,
+  })
+  eq(oneTarget.card, nil, "a single candidate builds no target card")
+  check(oneTarget.arrow ~= nil, "...but the arrow still points at it")
+
+  local twoTargets = Battlefield.layout({
+    mode = "coop_npc",
+    allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24 } },
+    foeSeats = {
+      { index = 3, name = "RATT", hp = 9, maxHp = 12 },
+      { index = 4, name = "WEED", hp = 7, maxHp = 14 },
+    },
+    targets = { { index = 3 }, { index = 4 } },
+    targetIndex = 1,
+  })
+  check(twoTargets.card ~= nil, "two candidates do build the card")
+  check(twoTargets.arrow ~= nil, "...with the arrow alongside it")
 
   -- ctx.fx absent or empty: layout.fx is always a table (never nil), which is
   -- what lets CoopBattle (which never passes fx) call the same renderers.
@@ -14502,8 +14589,10 @@ end
 -- ------- MediatedBattle wave 1: the two-clock display drain (arena only)
 --
 -- battlefieldSeat's `shownHp` trails `hp` while a bar falls; the gap closes
--- through a queued row at the engine's own maxHp/96-a-frame rate -- exactly
--- the contract CoopBattle's own two-clock model already pins (~line 12750).
+-- through a queued row at the engine's own max(1, maxHp/96)-a-frame rate --
+-- exactly the contract CoopBattle's own two-clock model already pins
+-- (~line 12750), floor included, so a small bar sheds a point a frame rather
+-- than crawling a quarter of one.
 -- Driven the same way tests/mediated_battle_client.lua drives the client:
 -- onEvent with an incrementing seq, then update() to play the queue.
 
@@ -14526,23 +14615,30 @@ end
   end
 
   -- 1. The rate and the landing. A `send` with no text seeds the seat with
-  -- nothing to drain from (and queues no "sent out" line to get in the way);
-  -- the follow-up `damage` moves truth hp on the spot and leaves the display
-  -- clock exactly where it was.
+  -- nothing to drain from (and queues no "sent out" line to get in the way,
+  -- only the arrival pop, which holds nothing); the follow-up `damage` moves
+  -- truth hp on the spot and leaves the display clock exactly where it was.
   local f, send = driverFor("b-drain")
   send({ t = "send", slot = 2, side = "b", hp = 24 })
   eq(f.slots[2].hp, 24, "send seeds truth hp at the first (full) figure seen")
   eq(f.slots[2].maxHp, 24, "...and the same figure as the seen maximum")
   eq(f.slots[2].shownHp, 24, "a freshly sent-out seat has nothing to drain from")
+  eq(#f.lines, 1, "the arrival itself queues one row -- the spawn pop")
+  eq(f.lines[1].spawnfx, 2, "...naming the seat that just filled")
 
   send({ t = "damage", slot = 2, side = "b", hp = 15 })
   eq(f.slots[2].hp, 15, "damage moves truth hp the instant the event lands")
   eq(f.slots[2].shownHp, 24,
      "and leaves the display clock exactly where it was -- the fall is a "
      .. "queued row, not an instant jump")
+  eq(#f.lines, 2, "the drain row queues behind the spawn pop")
 
   f:update(1 / 60)
-  check(f.draining ~= nil, "one frame reaches the queued drain row and starts it")
+  eq(f.draining, nil,
+     "the first frame is spent on the spawn pop sitting ahead of the drain")
+  f:update(1 / 60)
+  check(f.draining ~= nil,
+        "the second frame reaches the queued drain row and starts it")
   eq(f.slots[2].shownHp, 24, "starting the drain does not itself move the bar")
 
   local steps = 0
@@ -14550,10 +14646,30 @@ end
     f:update(1 / 60)
     steps = steps + 1
   end
-  eq(steps, 36,
-     "a 24 maxHp bar falling 9 HP takes exactly maxHp/96 steps to land "
-     .. "(9 / (24 / 96) == 36, T2's own verified number)")
+  eq(steps, 9,
+     "a 24 maxHp bar falling 9 HP lands in 9 frames -- max(1, maxHp/96) a "
+     .. "frame is the engine's rate, and a small bar falls at the 1 HP floor")
   eq(f.slots[2].shownHp, 15, "...and it lands exactly on the target, not past it")
+
+  -- The floor is a floor, not the rate: a bar big enough for maxHp/96 to
+  -- clear one point empties at that instead, so 384 HP sheds four a frame.
+  local fBig, sendBig = driverFor("b-drain-big")
+  sendBig({ t = "send", slot = 2, side = "b", hp = 384 })
+  sendBig({ t = "damage", slot = 2, side = "b", hp = 344 })
+  local reached = 0
+  while not fBig.draining and reached < 10 do
+    fBig:update(1 / 60)
+    reached = reached + 1
+  end
+  eq(reached, 2, "the big bar's drain row is reached on the same second frame")
+  steps = 0
+  while fBig.draining and steps < 400 do
+    fBig:update(1 / 60)
+    steps = steps + 1
+  end
+  eq(steps, 10,
+     "a 384 maxHp bar sheds 384/96 == 4 HP a frame, so 40 HP takes 10 frames")
+  eq(fBig.slots[2].shownHp, 344, "...landing exactly on the target too")
 
   -- 2. The row blocks the queue. A line queued behind the drain does not
   -- show until the bar has fully landed -- the same assertion this file
@@ -14562,10 +14678,11 @@ end
   send2({ t = "send", slot = 2, side = "b", hp = 24 })
   send2({ t = "damage", slot = 2, side = "b", hp = 15 })
   send2({ t = "msg", text = "next line" })
-  eq(#f2.lines, 2, "the drain row and the text both wait in the queue")
+  eq(#f2.lines, 3, "the spawn pop, the drain row and the text all wait in the queue")
 
+  f2:update(1 / 60) -- the pop, which blocks nothing
   f2:update(1 / 60)
-  check(f2.draining ~= nil, "the drain row is reached and started first")
+  check(f2.draining ~= nil, "the drain row is reached and started before the text")
   eq(f2.shown, nil, "the queued text has not been promoted yet")
 
   local guard = 0
@@ -14578,14 +14695,32 @@ end
   f2:update(1 / 60)
   eq(f2.shown, "next line",
      "only once the drain has fully landed does the queued text show")
+
+  -- 3. A drain row names its occupant, not just its seat. A switch landing
+  -- between queue and play would otherwise run the departed monster's fall
+  -- against the newcomer's bar.
+  local f3, send3 = driverFor("b-stale")
+  send3({ t = "send", slot = 2, side = "b", hp = 30, text = "RATT" })
+  send3({ t = "damage", slot = 2, side = "b", hp = 5 })
+  send3({ t = "switch", slot = 2, side = "b", hp = 40, text = "PIDGEY" })
+  guard = 0
+  while #f3.lines > 0 and guard < 900 do
+    f3:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 900, "the queue drains to empty in a bounded number of frames")
+  eq(f3.slots[2].shownHp, 40,
+     "the stale row is dropped, not deferred -- the newcomer's bar is never "
+     .. "drained to the number the monster that left was heading for")
 end)()
 
 -- ------- MediatedBattle wave 1: faint sequencing (drain -> faintfx -> text)
 --
--- A faint queues four rows in the engine's own order: the bar finishes
--- falling, the monster sinks, "X fainted!" prints, and only then is the
--- sprite released -- so a client reading one frame slower never sees a
--- monster vanish before anything on screen explained why.
+-- A faint queues four rows of its own in the engine's own order: the bar
+-- finishes falling, the monster sinks, "X fainted!" prints, and only then is
+-- the sprite released -- so a client reading one frame slower never sees a
+-- monster vanish before anything on screen explained why. The sink is *held*
+-- at its end state through the line, and dropped by the release behind it.
 
 ;(function()
   local MediatedBattle = need("MediatedBattle")
@@ -14602,13 +14737,14 @@ end)()
   send({ t = "send", slot = 2, side = "b", hp = 20 })
   send({ t = "faint", slot = 2, side = "b", text = "RATT" })
 
-  eq(#f.lines, 4,
-     "a faint queues four rows: the bar's fall, the sink, the text, and the "
-     .. "sprite release")
-  eq(f.lines[1].drain, 2, "row 1 is the bar finishing its fall")
-  eq(f.lines[2].faintfx, 2, "row 2 is the monster sinking")
-  eq(f.lines[3], "RATT fainted!", "row 3 is the text, only after the sink")
-  eq(f.lines[4].clearPic, 2, "row 4 releases the sprite, behind the text")
+  eq(#f.lines, 5,
+     "five rows are stacked up: the arrival pop the send left behind, then "
+     .. "the bar's fall, the sink, the text, and the sprite release")
+  eq(f.lines[1].spawnfx, 2, "row 1 is the arrival pop still ahead of the faint")
+  eq(f.lines[2].drain, 2, "row 2 is the bar finishing its fall")
+  eq(f.lines[3].faintfx, 2, "row 3 is the monster sinking")
+  eq(f.lines[4], "RATT fainted!", "row 4 is the text, only after the sink")
+  eq(f.lines[5].clearPic, 2, "row 5 releases the sprite, behind the text")
 
   local sawTextEarly = false
   local guard = 0
@@ -14624,6 +14760,145 @@ end)()
   check(not sawTextEarly,
         "the text never shows while the bar or the sink is still playing")
   eq(f.slots[2].shownHp, 0, "by the time the text shows, the bar has fully landed")
+
+  -- The sink's end state *is* a monster face down and invisible, so a
+  -- finished one is retained rather than retired: retiring it popped the KO
+  -- back to full opacity for as long as its line stayed up.
+  local heldFaint = false
+  for _, e in ipairs(f.fx or {}) do
+    if e.kind == "faint" and e.t == 1 then heldFaint = true end
+  end
+  check(heldFaint,
+        "the finished sink is held at t == 1 while the fainted! line is read")
+
+  guard = 0
+  while #f.lines > 0 and guard < 900 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 900, "the release row is reached in a bounded number of frames")
+  local stillFaint = false
+  for _, e in ipairs(f.fx or {}) do
+    if e.kind == "faint" then stillFaint = true end
+  end
+  check(not stillFaint,
+        "and releasing the pic is what finally drops the held sink -- a fresh "
+        .. "monster on the seat must not walk on already face down")
+end)()
+
+-- ------- MediatedBattle: the whole faint sequence names its occupant
+--
+-- The drain row's species stamp only covered a quarter of the sequence. A
+-- referee that batches an auto-replacement behind the KO lands the send while
+-- the sink, the line and the release are all still queued -- so the sink played
+-- against the seat the newcomer now holds, and the release behind it took the
+-- newcomer's pic down. Every row that names a seat now names its occupant too.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-koswap", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-koswap"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "send", slot = 2, side = "b", hp = 20, text = "RATT" })
+  send({ t = "faint", slot = 2, side = "b", text = "RATT" })
+  local sinkRow, releaseRow
+  for _, row in ipairs(f.lines) do
+    if type(row) == "table" and row.faintfx ~= nil then sinkRow = row end
+    if type(row) == "table" and row.clearPic ~= nil then releaseRow = row end
+  end
+  eq(sinkRow and sinkRow.species, "RATT",
+     "the sink row carries the mon it was filed for, not just the seat")
+  eq(releaseRow and releaseRow.species, "RATT",
+     "...and so does the release queued behind its line")
+
+  -- The replacement, batched behind the KO exactly as the referee sends it.
+  send({ t = "send", slot = 2, side = "b", hp = 44, text = "PIDGEY" })
+  eq(f.slots[2].species, "PIDGEY", "the seat has already changed hands")
+  -- Stand a pic on the seat: headless there is no art to load, and the sprite
+  -- field is precisely what a stale release would nil out.
+  f.slots[2].sprite = "PIDGEY-PIC"
+  f.slots[2].icon = "PIDGEY-ICON"
+
+  local sawFaintFx = false
+  local guard = 0
+  while #f.lines > 0 and guard < 900 do
+    f:update(1 / 60)
+    guard = guard + 1
+    for _, e in ipairs(f.fx or {}) do
+      if e.kind == "faint" then sawFaintFx = true end
+    end
+  end
+  check(guard < 900, "the batched queue still drains to empty in bounded frames")
+  check(not sawFaintFx,
+        "the stale sink never plays: the newcomer is never dropped through the "
+        .. "floor under a line that named the monster it replaced")
+  eq(f.slots[2].sprite, "PIDGEY-PIC",
+     "and the stale release is refused too -- the arrival's pic survives the "
+     .. "row filed against the mon that left")
+  eq(f.slots[2].icon, "PIDGEY-ICON", "...icon included")
+  eq(f.slots[2].shownHp, 44,
+     "the bar is left welded to the newcomer's truth, never drained to the 0 "
+     .. "the KO was heading for")
+  eq(f.slots[2].hp, 44, "...which is the number the referee actually sent")
+  local spawns = 0
+  for _, e in ipairs(f.fx or {}) do
+    if e.kind == "spawn" then spawns = spawns + 1 end
+  end
+  eq(spawns, 1, "one live arrival pop is what the seat is left showing")
+
+  -- The release that *does* apply is unchanged: it clears the pic and puts the
+  -- two clocks back in step, so a later send cannot inherit a stale descent.
+  local g = MediatedBattle.new({ game = gen1Game, battle = "b-koclean", role = "host" })
+  local gseq = 0
+  local function gsend(fields)
+    gseq = gseq + 1
+    fields.battle = "b-koclean"
+    fields.seq = gseq
+    g:onEvent(fields)
+  end
+  gsend({ t = "send", slot = 2, side = "b", hp = 20, text = "RATT" })
+  gsend({ t = "faint", slot = 2, side = "b", text = "RATT" })
+  g.slots[2].sprite = "RATT-PIC"
+  guard = 0
+  while #g.lines > 0 and guard < 900 do
+    g:update(1 / 60)
+    guard = guard + 1
+  end
+  eq(g.slots[2].sprite, nil,
+     "with the same mon still on the seat the release goes through as before")
+  eq(g.slots[2].shownHp, 0, "...and re-welds the display clock to truth")
+
+  -- dropFaintFx retires the sink for one seat, not for a whole side. Nothing
+  -- emits a second seat today; the stamp is what keeps a multi-seat mode from
+  -- having one release take a co-occupant's sink with it.
+  g.fx = {
+    { kind = "faint", side = "foe", seatIndex = 1, t = 1 },
+    { kind = "faint", side = "foe", seatIndex = 2, t = 1 },
+    { kind = "faint", side = "ally", seatIndex = 1, t = 1 },
+    { kind = "spawn", side = "foe", seatIndex = 1, t = 0.5 },
+  }
+  g:dropFaintFx(2)
+  local left = {}
+  for _, e in ipairs(g.fx or {}) do
+    left[#left + 1] = e.kind .. ":" .. tostring(e.side) .. ":" .. tostring(e.seatIndex)
+  end
+  eq(#left, 3, "releasing one seat retires exactly one sink")
+  eq(left[1], "faint:foe:2", "the co-occupant's sink on the same side is spared")
+  eq(left[2], "faint:ally:1", "so is the seat facing it")
+  eq(left[3], "spawn:foe:1", "and nothing but a faint is ever touched")
+
+  -- An entry filed before the stamp existed still matches on side alone,
+  -- rather than being stranded on the seat forever.
+  g.fx = { { kind = "faint", side = "foe", t = 1 } }
+  g:dropFaintFx(2)
+  eq(g.fx, nil, "an unstamped sink still falls to the side fallback")
 end)()
 
 -- ------- MediatedBattle wave 1: fx emission (lunge / flash+shake / spawn)
@@ -14644,43 +14919,95 @@ end)()
     return fight, send
   end
 
-  -- spawn: unconditional on send/switch, and plays over the send line
-  -- itself rather than queuing a row of its own.
+  -- spawn: unconditional on send/switch, and queued like every other effect
+  -- -- the row *is* the mechanism, so the pop plays with the send line rather
+  -- than the instant the packet was parsed.
   local f, send = driverFor("b-fx")
   send({ t = "send", slot = 2, side = "b", hp = 30 })
-  eq(#f.fx, 1, "a send emits exactly one fx entry")
+  eq(f.fx, nil, "a send emits nothing at parse time")
+  eq(#f.lines, 1, "it queues a row of its own instead -- that row is the pop")
+  eq(f.lines[1].spawnfx, 2, "...naming the seat that just filled")
+
+  f:update(1 / 60)
+  eq(#f.fx, 1, "one tick pops the row and emits exactly one fx entry")
   eq(f.fx[1].kind, "spawn", "...and it is a spawn")
   eq(f.fx[1].side, "foe", "...on the side the mon actually sent out on")
-  eq(#f.lines, 0, "spawn plays over the send line -- no queue row of its own")
+  eq(#f.lines, 0,
+     "and the pop holds nothing: the row is consumed, never blocking the "
+     .. "send line behind it")
 
-  -- flash + shake ride only a real HP drop.
+  -- flash + shake ride only a real HP drop, and only once the bar they belong
+  -- to actually starts falling: a resolved turn arrives as one batch, so
+  -- emitting on arrival jolted both seats in the same frame, ahead of the
+  -- text that explains either.
   f.fx = nil
   send({ t = "damage", slot = 2, side = "b", hp = 20 })
+  eq(f.fx, nil, "the damage event itself emits no fx")
+  f:update(1 / 60) -- pops the drain row -> startDrain
+  check(f.draining ~= nil, "one tick reaches the drain row and starts the fall")
   local kinds = {}
   for _, e in ipairs(f.fx or {}) do kinds[e.kind] = true end
-  check(kinds.flash, "a damaging hit emits a flash on the defender")
-  check(kinds.shake, "...and a field-wide shake")
+  check(kinds.flash, "a damaging hit flashes the defender as the bar starts")
+  check(kinds.shake, "...and nudges the whole field with it")
 
   -- A rise in hp (a heal / drain-move restore) still queues a drain row for
   -- the bar, but earns no flash or shake -- nothing was hit.
+  local settle = 0
+  while f.draining and settle < 200 do
+    f:update(1 / 60)
+    settle = settle + 1
+  end
   f.fx = nil
   send({ t = "damage", slot = 2, side = "b", hp = 30 })
+  f:update(1 / 60)
+  check(f.draining ~= nil, "a climb still starts a drain row of its own")
   eq(f.fx, nil, "a heal (hp did not drop) emits neither flash nor shake")
 
   -- lunge: on the attacker's move-anim row actually playing, not on the
   -- anim event merely arriving (queued first, like everything else).
   local f2, send2 = driverFor("b-lunge")
   send2({ t = "send", slot = 0, side = "a", hp = 20 })
-  f2.fx = nil -- clear the send's own spawn entry; this block is about lunge
   send2({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
   eq(f2.fx, nil,
      "the anim event itself emits no fx -- only playing the queued row does")
+  f2:update(1 / 60) -- the arrival pop is queued ahead of the anim row
+  f2.fx = nil -- clear the send's own spawn entry; this block is about lunge
   f2:update(1 / 60) -- pops the anim row -> startAnim -> lunge
   local sawLunge = false
   for _, e in ipairs(f2.fx or {}) do
     if e.kind == "lunge" then sawLunge = true end
   end
   check(sawLunge, "playing a battlefield anim row lunges the attacker")
+
+  -- ...but only for a real move. `TOSS_ANIM` / `HIDEPIC_ANIM` and the rest of
+  -- the engine's ball markers ride the same field, and a thrown ball must not
+  -- make the thrower lurch.
+  local f3, send3 = driverFor("b-ball")
+  send3({ t = "send", slot = 0, side = "a", hp = 20 })
+  f3:update(1 / 60) -- the arrival pop
+  f3.fx = nil
+  send3({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
+  f3:update(1 / 60)
+  eq(f3.anim and f3.anim.anim, "TOSS_ANIM", "the ball row does play")
+  eq(f3.fx, nil, "...and a ball / marker anim row emits no lunge")
+
+  -- None of this exists on the classic path: Gen2 keeps the guild-focus
+  -- screen, so there is no arena for a pop to play on and no row for it.
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  local classic = MediatedBattle.new({
+    game = goldGame, battle = "b-fx-gold", role = "host",
+  })
+  classic:onEvent({
+    battle = "b-fx-gold", seq = 1, t = "send", slot = 2, side = "b", hp = 30,
+  })
+  local classicRow = false
+  for _, row in ipairs(classic.lines) do
+    if type(row) == "table" and row.spawnfx ~= nil then classicRow = true end
+  end
+  check(not classicRow, "the classic path queues no spawn row at all")
+  eq(classic.fx, nil, "...and emits no fx either")
 end)()
 
 -- ------- MediatedBattle wave 1: victory music held until the arena settles

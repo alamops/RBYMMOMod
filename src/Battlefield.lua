@@ -37,11 +37,14 @@ M.CARD_W = 120
 M.CARD_H = 100
 M.CARD_SPRITE = 56
 
--- Persistent seat plates (the arena HUD): one per side, always up. Ally sits
--- bottom-left of the field so it clears MENU_BAND; foe sits top-right.
+-- Persistent seat plates (the arena HUD): one per placed seat, always up.
+-- Ally plates stack upward from the field floor so they clear MENU_BAND; foe
+-- plates stack downward from the top edge. A 2v2 shows four.
 M.PLATE_W = 176
 M.PLATE_H = 48
 M.PLATE_PAD = 12
+-- Gap between two stacked plates on the same side.
+M.PLATE_GAP = 6
 
 M.HUMAN_SCALE = 2
 M.HUMAN_SRC = 16
@@ -54,9 +57,16 @@ local iconCache = {} -- path string -> Image | false
 local quadCache = {} -- image -> 16x16 frame-0 quad
 
 -- Force a fresh arena load (e.g. after replacing outdoor_grass_arena.png).
+-- Also drops the derived sprite caches: fight entry is the one moment both the
+-- arena art and the colour mode may have moved under them, and a baked trainer
+-- sheet or icon image is only valid for the mode it was baked in.
 function M.reloadArena()
   arenaImage = nil
   arenaTried = false
+  humanCache = {}
+  iconCache = {}
+  -- Keyed by image, so it would otherwise pin the images just dropped above.
+  quadCache = {}
 end
 
 local function clamp(v, lo, hi)
@@ -139,6 +149,12 @@ end
 
 -- ------- pure helpers
 
+-- Seat HP contract, shared by M.cardModel and M.plateModel:
+--   `hp` MAY already be a display clock. MediatedBattle puts sim truth in `hp`
+--   and the display clock in `shownHp`; CoopBattle drains in place and passes
+--   only `hp`. So `shownHp`, when present, is authoritative for anything drawn
+--   and every renderer must compare / draw via (shownHp or hp) -- never `hp`
+--   alone, or the card and the plate disagree mid-drain.
 function M.cardModel(seat)
   seat = type(seat) == "table" and seat or {}
   local name = seat.name
@@ -157,10 +173,12 @@ function M.cardModel(seat)
   end
   local species = seat.species
   if type(species) ~= "string" then species = nil end
+  local shown = clamp(math.floor(num(seat.shownHp, hp) + 0.5), 0, maxHp)
   return {
     name = name,
     level = level,
     hp = hp,
+    shownHp = shown,
     maxHp = maxHp,
     status = status,
     species = species,
@@ -222,14 +240,13 @@ function M.monDrawParams(mon, iw, ih, opts)
   }
 end
 
--- Persistent seat-plate model. Pure. `shownHp` is the display clock the battle
--- drains toward `hp`; a seat without one falls back to `hp`, so a caller that
--- never animates (CoopBattle) reads the same as before.
+-- Persistent seat-plate model. Pure. Reads the same display clock the card
+-- does (see the seat HP contract above M.cardModel), so the two can never
+-- disagree; a caller that never animates (CoopBattle) reads `hp` as before.
 function M.plateModel(seat)
   seat = type(seat) == "table" and seat or {}
   local base = M.cardModel(seat)
-  local shown = clamp(math.floor(num(seat.shownHp, base.hp) + 0.5),
-    0, base.maxHp)
+  local shown = base.shownHp
   local frac = 0
   if base.maxHp > 0 then frac = clamp(shown / base.maxHp, 0, 1) end
   local side = seat.side == "foe" and "foe" or "ally"
@@ -292,13 +309,15 @@ function M.fxSpawn(t)
 end
 
 -- Fold the ctx fx list into one seat's draw modifiers. An absent or empty list
--- yields the neutral record, so a caller that passes no fx draws unchanged.
+-- yields the shared neutral record NO_FX, so a caller that passes no fx draws
+-- unchanged; what fxSeat returns is read-only to callers, never mutated.
 -- An entry with no seatIndex applies to every seat on its side.
 function M.fxSeat(fx, side, seatIndex)
-  local out = { dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0 }
+  local out = nil
   for _, e in ipairs(listOf(fx)) do
     if type(e) == "table" and e.side == side
        and (e.seatIndex == nil or e.seatIndex == seatIndex) then
+      out = out or { dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0 }
       if e.kind == "lunge" then
         -- Toward the midline: allies charge right, foes left.
         local dir = side == "foe" and -1 or 1
@@ -315,11 +334,15 @@ function M.fxSeat(fx, side, seatIndex)
       end
     end
   end
+  if not out then return NO_FX end
   if out.scale < 0 then out.scale = 0 end
   return out
 end
 
 -- Whole-field jolt. `shake` is field-wide, so side / seatIndex are ignored.
+-- The fold is clamped: a multi-hit move stacks three to five live shakes, and
+-- their unclamped sum would walk the field past the outset drawArena reserves
+-- and uncover the canvas edge.
 function M.fxFieldShake(fx)
   local dx, dy = 0, 0
   for _, e in ipairs(listOf(fx)) do
@@ -329,7 +352,7 @@ function M.fxFieldShake(fx)
       dy = dy + M.FX_SHAKE * 0.6 * math.cos(t * math.pi * 5) * (1 - t)
     end
   end
-  return dx, dy
+  return clamp(dx, -M.FX_SHAKE, M.FX_SHAKE), clamp(dy, -M.FX_SHAKE, M.FX_SHAKE)
 end
 
 -- dir -1 / +1; wraps. `current` is 1-based index into `targets`, or a seat
@@ -524,40 +547,55 @@ function M.layout(ctx)
         y = targetMon.y - math.floor(targetMon.drawH / 2) - 10 + bob,
         tipY = targetMon.y - math.floor(targetMon.drawH / 2) - 4 + bob,
       }
-      local model = M.cardModel(targetMon)
-      local cx = targetMon.x + 28
-      local cy = targetMon.y - M.CARD_H - 8
-      cx = clamp(cx, 4, M.WIDTH - M.CARD_W - 4)
-      cy = clamp(cy, 4, M.FIELD_BOTTOM - M.CARD_H - 4)
-      -- Prefer parking the card toward canvas center if near an edge.
-      if targetMon.x > M.MIDLINE then
-        cx = clamp(targetMon.x - M.CARD_W - 20, 4, M.WIDTH - M.CARD_W - 4)
+      -- The card only earns its space when the pick is genuinely ambiguous
+      -- (CoopBattle's multi-target selection). With a single candidate the
+      -- plates already publish that seat's name / level / HP, so the card
+      -- would only duplicate a plate and cover the sprite it points at.
+      if #listOf(ctx.targets) > 1 then
+        local model = M.cardModel(targetMon)
+        local cx = targetMon.x + 28
+        local cy = targetMon.y - M.CARD_H - 8
+        cx = clamp(cx, 4, M.WIDTH - M.CARD_W - 4)
+        cy = clamp(cy, 4, M.FIELD_BOTTOM - M.CARD_H - 4)
+        -- Prefer parking the card toward canvas center if near an edge.
+        if targetMon.x > M.MIDLINE then
+          cx = clamp(targetMon.x - M.CARD_W - 20, 4, M.WIDTH - M.CARD_W - 4)
+        end
+        card = {
+          x = cx,
+          y = cy,
+          w = M.CARD_W,
+          h = M.CARD_H,
+          model = model,
+          mon = targetMon,
+        }
       end
-      card = {
-        x = cx,
-        y = cy,
-        w = M.CARD_W,
-        h = M.CARD_H,
-        model = model,
-        mon = targetMon,
-      }
     end
   end
 
-  -- One persistent plate per side, on its primary (first placed) seat. A seat
-  -- carrying no HP figures at all has nothing to plate — skip it rather than
-  -- publish a 0/1 bar.
+  -- One persistent plate per placed seat, stacked away from its own edge so a
+  -- 2v2 (CoopBattle) keeps a HUD for every seat rather than only the primary
+  -- one. A seat carrying no HP figures at all has nothing to plate — skip it
+  -- rather than publish a 0/1 bar.
   local plates = {}
-  local plated = {}
+  local stackedAlly, stackedFoe = 0, 0
   for _, mon in ipairs(mons) do
-    if not plated[mon.side]
-       and (tonumber(mon.maxHp) or tonumber(mon.hp)) then
-      plated[mon.side] = true
+    if tonumber(mon.maxHp) or tonumber(mon.hp) then
       local ally = mon.side ~= "foe"
+      local step
+      if ally then
+        step = stackedAlly * (M.PLATE_H + M.PLATE_GAP)
+        stackedAlly = stackedAlly + 1
+      else
+        step = stackedFoe * (M.PLATE_H + M.PLATE_GAP)
+        stackedFoe = stackedFoe + 1
+      end
       plates[#plates + 1] = {
         side = mon.side,
         x = ally and M.PLATE_PAD or (M.WIDTH - M.PLATE_W - M.PLATE_PAD),
-        y = ally and (M.FIELD_BOTTOM - M.PLATE_H - M.PLATE_PAD) or M.PLATE_PAD,
+        -- Allies climb from the field floor, foes descend from the top.
+        y = ally and (M.FIELD_BOTTOM - M.PLATE_H - M.PLATE_PAD - step)
+          or (M.PLATE_PAD + step),
         w = M.PLATE_W,
         h = M.PLATE_H,
         -- Exact hp/maxHp on your own side only, per series convention.
@@ -678,6 +716,20 @@ end
 --   3. whatever the engine returned — today's DMG look, never a hard failure.
 -- Requiring engine render modules through pcall is the pattern this file
 -- already uses; a drift upstream costs colour, never the screen.
+local function paletteFX()
+  local ok, loaded = pcall(require, "src.render.PaletteFX")
+  if ok and type(loaded) == "table" then return loaded end
+  return nil
+end
+
+-- The bake is colour-mode dependent and the mode can change between battles
+-- (the options screen writes PaletteFX.mode live), so the mode is part of the
+-- cache key — a sheet baked under the previous mode must not be handed back.
+local function humanCacheKey(spriteId)
+  local PF = paletteFX()
+  return spriteId .. "|" .. tostring((PF and PF.mode) or "?")
+end
+
 local function bakeSheetColor(record, spriteId)
   if type(record) ~= "table" or record.trueColor then return nil end
   if type(record.image) ~= "string" or record.image == "" then return nil end
@@ -685,11 +737,7 @@ local function bakeSheetColor(record, spriteId)
           and love.graphics and love.graphics.newImage) then
     return nil
   end
-  local PF = nil
-  do
-    local ok, loaded = pcall(require, "src.render.PaletteFX")
-    if ok then PF = loaded end
-  end
+  local PF = paletteFX()
   if type(PF) ~= "table" or not PF.spriteObp then return nil end
 
   local engineColored = false
@@ -731,7 +779,8 @@ end
 
 local function resolveHumanSheet(spriteId, eng)
   if type(spriteId) ~= "string" or spriteId == "" then return nil end
-  local hit = humanCache[spriteId]
+  local key = humanCacheKey(spriteId)
+  local hit = humanCache[key]
   if hit ~= nil then return hit or nil end
 
   local entry = false
@@ -779,7 +828,7 @@ local function resolveHumanSheet(spriteId, eng)
     entry = { image = img, quads = quads, fw = fw, fh = fh }
   end)
 
-  humanCache[spriteId] = entry
+  humanCache[key] = entry
   return entry or nil
 end
 
@@ -922,7 +971,9 @@ local function drawMonIcon(mon, frame, fx)
       gfx.setColor(1, 1, 1, alpha)
       blit()
       -- White pulse on a defender: one additive re-blit of the same geometry
-      -- (no shader — this canvas has none of its own).
+      -- (no shader — this canvas has none of its own). The re-blit gets its
+      -- own pcall so the restore below always runs: a throw here unwinds past
+      -- the enclosing pcall and would leave the whole screen in "add".
       local flash = clamp(num(fx.flash, 0), 0, 1)
       if flash > 0 and gfx.setBlendMode then
         local mode, alphaMode
@@ -930,9 +981,9 @@ local function drawMonIcon(mon, frame, fx)
         gfx.setBlendMode("add")
         local f = flash * alpha
         gfx.setColor(f, f, f, 1)
-        blit()
-        if mode then gfx.setBlendMode(mode, alphaMode)
-        else gfx.setBlendMode("alpha") end
+        pcall(blit)
+        pcall(gfx.setBlendMode, mode or "alpha", alphaMode)
+        pcall(gfx.setColor, 1, 1, 1, alpha)
       end
       gfx.setColor(1, 1, 1, 1)
       drawn = true
@@ -1007,8 +1058,11 @@ local function drawCard(card, eng)
     local barY = y + h - pad - 10
     local barW = w - pad * 2 - (sprite and (sp + 4) or 0)
     if barW < 40 then barW = w - pad * 2 end
+    -- Display clock, not truth hp (see the seat HP contract on M.cardModel):
+    -- the card and the plates must show the same bar mid-drain.
+    local shown = num(model.shownHp, model.hp)
     local frac = 0
-    if model.maxHp > 0 then frac = clamp(model.hp / model.maxHp, 0, 1) end
+    if model.maxHp > 0 then frac = clamp(shown / model.maxHp, 0, 1) end
     gfx.setColor(0.2, 0.2, 0.25, 1)
     gfx.rectangle("fill", barX, barY, barW, 6)
     if frac > 0.5 then
@@ -1113,14 +1167,18 @@ local function drawBubble(b)
   end)
 end
 
--- outset: px of ground drawn beyond every canvas edge. Non-zero only while a
--- shake translates the field layer, so the jolt never uncovers the canvas.
-local function drawArena(outset)
+-- The ground is drawn K px beyond every canvas edge so a shake translate never
+-- uncovers it. Unconditional, every frame: outsetting only while shaking would
+-- rescale the arena image at the first and last frame of every jolt, which
+-- reads as a zoom-pop. Everything painted on the ground (the soft grass plate)
+-- rides the same transform, or it slides against it.
+local function drawArena()
   local gfx = g()
   if not gfx then return end
-  outset = num(outset, 0)
-  local ox, oy = -outset, -outset
-  local ow, oh = M.WIDTH + outset * 2, M.HEIGHT + outset * 2
+  local K = M.FX_SHAKE + 2
+  local ox, oy = -K, -K
+  local ow, oh = M.WIDTH + K * 2, M.HEIGHT + K * 2
+  local zx, zy = ow / M.WIDTH, oh / M.HEIGHT
   local img = arenaImage or M.load(mod)
   if img then
     pcall(function()
@@ -1132,11 +1190,11 @@ local function drawArena(outset)
     end)
     -- Soft grass plate so battle fronts read on the colorful arena.
     pcall(function()
-      local gfx = love and love.graphics
-      if not gfx then return end
       gfx.setColor(0.12, 0.22, 0.1, 0.22)
-      gfx.ellipse("fill", M.MIDLINE, M.FIELD_TOP + M.FIELD_HEIGHT * 0.55,
-        M.WIDTH * 0.38, M.FIELD_HEIGHT * 0.28)
+      gfx.ellipse("fill",
+        ox + M.MIDLINE * zx,
+        oy + (M.FIELD_TOP + M.FIELD_HEIGHT * 0.55) * zy,
+        M.WIDTH * 0.38 * zx, M.FIELD_HEIGHT * 0.28 * zy)
       gfx.setColor(1, 1, 1, 1)
     end)
     return
@@ -1144,9 +1202,9 @@ local function drawArena(outset)
   -- Flat stand-in so layout still reads without the PNG.
   pcall(function()
     gfx.setColor(0.45, 0.7, 0.35, 1)
-    gfx.rectangle("fill", ox, oy, ow, M.FIELD_BOTTOM + outset)
+    gfx.rectangle("fill", ox, oy, ow, M.FIELD_BOTTOM + K)
     gfx.setColor(0.2, 0.25, 0.3, 1)
-    gfx.rectangle("fill", ox, M.FIELD_BOTTOM, ow, M.MENU_BAND + outset)
+    gfx.rectangle("fill", ox, M.FIELD_BOTTOM, ow, M.MENU_BAND + K)
     gfx.setColor(1, 1, 1, 0.15)
     gfx.line(M.MIDLINE, 0, M.MIDLINE, M.FIELD_BOTTOM)
     gfx.setColor(1, 1, 1, 1)
@@ -1179,7 +1237,7 @@ function M.draw(battle, ctx, eng)
     -- One pcall around the field layer so the pop below always runs: a leaked
     -- translate would drag the menu band the battle screen draws next.
     pcall(function()
-      drawArena(shaking and (M.FX_SHAKE + 2) or 0)
+      drawArena()
 
       for _, h in ipairs(layout.humans) do
         pcall(drawHuman, h, layout.frame, eng)
