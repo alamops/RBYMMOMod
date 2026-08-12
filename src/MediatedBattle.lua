@@ -80,11 +80,15 @@ local function loadEngine()
     BattleState = grab("BattleState", "src.battle.BattleState"),
     Sprites = grab("Sprites", "src.pokemon.Sprites"),
   }
-  -- Optional SFX (move whoosh, hit thud, catch Tink). Missing Sound must not
-  -- fail the whole load — headless / no-audio builds still fight without it.
+  -- Optional SFX / music. Missing Sound or Music must not fail the whole
+  -- load — headless / no-audio builds still fight without them.
   do
     local good, value = pcall(require, "src.core.Sound")
     if good then engine.Sound = value end
+  end
+  do
+    local good, value = pcall(require, "src.core.Music")
+    if good then engine.Music = value end
   end
   return engine
 end
@@ -1321,6 +1325,10 @@ function M:finish(result, reason, msg)
   self.result = result or "draw"
   self.phase = "over"
   self.cursor = 1
+  -- Fanfare once the outcome is known (drains / faint lines already ran
+  -- through the event stream). Same guard CoopBattle uses so a second
+  -- finish path cannot restart the jingle.
+  if self.result == "win" then self:playVictoryMusic() end
   if reason == "catch" and result == "win" then
     self:say("Gotcha!")
     self:grantCatch(msg)
@@ -1693,6 +1701,31 @@ function M:updateSwitch(input)
   end
 end
 
+-- ------- theatre (battle / victory / map music)
+--
+-- Same contract as CoopBattle: play the fight theme on enter, the fanfare
+-- once on a win, and restore the map theme on the way out win or lose -- a
+-- Defeated* song ends in `sound_loop 0` and would otherwise follow the player
+-- into the overworld. 1v1 is the link cue; protocol-only wild is the wild cue.
+
+function M:musicKind()
+  if self.cachedMusicKind then return self.cachedMusicKind end
+  self.cachedMusicKind = (self.mode == "wild") and "wild" or "link"
+  return self.cachedMusicKind
+end
+
+function M:playVictoryMusic()
+  if self.result ~= "win" or self.victoryMusicPlayed then return end
+  self.victoryMusicPlayed = true
+  local eng = loadEngine()
+  if not (eng and eng.Music and self.game) then return end
+  local kind = self:musicKind()
+  -- Rival-final fold kept for parity with CoopBattle / BattleState even
+  -- though 1v1 never names a trainer -- a "finalWin" song does not ship.
+  if kind == "final" then kind = "gym" end
+  pcall(eng.Music.playVictory, self.game.data, kind, nil)
+end
+
 -- ------- the screen
 --
 -- enter/exit/update/draw is the whole of the engine's state interface, and
@@ -1700,6 +1733,10 @@ end
 
 function M:enter()
   loadEngine()
+  local eng = engine
+  if eng and eng.Music and self.game then
+    pcall(eng.Music.playBattle, self.game.data, self:musicKind(), nil)
+  end
   self:start(self.game)
 end
 
@@ -1710,6 +1747,12 @@ function M:exit()
   -- already match the hub and must not be refunded.
   self.pendingItem = nil
   self.pendingItemSlot = nil
+  -- Map theme back unconditionally: victory jingles loop until something
+  -- stops them (same reason the engine's BattleState:finish restores).
+  local eng = loadEngine()
+  if eng and eng.Music and self.game then
+    pcall(eng.Music.restoreMap, self.game.data)
+  end
   if self.onDone then self.onDone(self.result or "draw") end
 end
 

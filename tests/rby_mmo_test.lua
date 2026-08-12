@@ -13773,44 +13773,56 @@ end
 -- ------- and the id is what picks the theme
 --
 -- The point of carrying it: a gym leader has their own battle music, and the
--- rule that decides so reads a badge table off the trainer's id. A client that
--- resolved no trainer plays the ordinary theme -- so before the id travelled,
--- the host heard the gym leader's music and everyone else heard a stranger's.
+-- rule that decides so reads a badge table off oppClass#partyIndex (and
+-- trainer.id for Lance / Rival3). A client that resolved no trainer plays the
+-- ordinary theme -- so before the id travelled, the host heard the gym
+-- leader's music and everyone else heard a stranger's.
 
 local eng = CoopBattle.loadEngine()
 if eng and eng.BattleState then
-  local function kindFor(trainer)
-    return CoopBattle.musicKind({ trainer = trainer })
+  local function kindFor(trainer, oppClass, partyIndex)
+    return CoopBattle.musicKind({
+      trainer = trainer,
+      oppClass = oppClass,
+      partyIndex = partyIndex,
+    })
   end
 
   -- The subject comes from the badge table the rule itself reads, rather than
   -- from a name written down here: a leader renamed upstream would otherwise
-  -- quietly turn this into a test of nothing. Only the id is needed -- the rule
-  -- never looks at the rest of the record.
+  -- quietly turn this into a test of nothing.
   local okBadges, victories = pcall(require, "data.scripts.victories")
-  local leader
+  local leaderClass, leaderParty
   if okBadges and type(victories) == "table" then
     for key, reward in pairs(victories) do
-      if reward.badge and key:find("#", 1, true) then
-        leader = key:sub(1, key:find("#", 1, true) - 1)
-        break
+      if reward.badge and type(key) == "string" then
+        local hash = key:find("#", 1, true)
+        if hash then
+          leaderClass = key:sub(1, hash - 1)
+          leaderParty = tonumber(key:sub(hash + 1)) or 1
+          break
+        end
       end
     end
   end
 
-  if leader then
-    local gymKind = kindFor({ id = leader })
-    if gymKind == "gym" then
-      eq(gymKind, "gym",
-         "a gym leader's co-op battle plays the gym leader's theme")
-      check(kindFor({ id = "OPP_NOT_A_LEADER" }) ~= "gym",
-            "and an ordinary trainer's does not -- the id really is deciding it")
-    else
-      -- Engine BattleState.computeMusicKind may return "trainer" when badge
-      -- tables / audio data are incomplete in this checkout -- soft skip.
-      check(true, "(this build's computeMusicKind does not mark "
-        .. tostring(leader) .. " as gym -- got " .. tostring(gymKind) .. ")")
+  if leaderClass then
+    eq(kindFor({ id = leaderClass }, leaderClass, leaderParty), "gym",
+       "a gym leader's co-op battle plays the gym leader's theme "
+       .. "(oppClass#partyIndex)")
+    -- Trainer.id alone used to soft-miss badge gyms; with the probe defaulting
+    -- oppClass from trainer.id and partyIndex to 1, Brock#1 still resolves.
+    -- Giovanni's gym is #3 -- assert the party index really matters when the
+    -- badge table has a non-#1 gym fight.
+    if victories["OPP_GIOVANNI#3"] and victories["OPP_GIOVANNI#3"].badge
+        and not (victories["OPP_GIOVANNI#2"] and victories["OPP_GIOVANNI#2"].badge) then
+      eq(kindFor({ id = "OPP_GIOVANNI" }, "OPP_GIOVANNI", 3), "gym",
+         "Giovanni's badge fight (#3) is gym music")
+      check(kindFor({ id = "OPP_GIOVANNI" }, "OPP_GIOVANNI", 2) ~= "gym",
+            "and his non-badge party (#2) is not")
     end
+    check(kindFor({ id = "OPP_NOT_A_LEADER" }, "OPP_NOT_A_LEADER", 1) ~= "gym",
+          "and an ordinary trainer's does not -- the id really is deciding it")
   else
     check(true, "(this build ships no badge table to read leaders from)")
   end
@@ -13834,7 +13846,7 @@ if eng and eng.BattleState then
     restoreMap = function() asked[#asked + 1] = "restore" end,
   }
 
-  local function battle(trainer)
+  local function battle(trainer, oppClass, partyIndex)
     local sim = fieldSim({
       { side = "a", owner = "ann", name = "ANN",
         party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
@@ -13847,14 +13859,17 @@ if eng and eng.BattleState then
     })
     return setmetatable({
       game = { data = data, save = { inventory = {}, party = {} } },
-      trainer = trainer, messages = {}, mine = 1, sim = sim,
+      trainer = trainer, oppClass = oppClass, partyIndex = partyIndex,
+      messages = {}, mine = 1, sim = sim,
       announce = function() end, say = function() end,
     }, { __index = CoopBattle })
   end
 
   local expectOpen = "trainer"
-  if leader and kindFor({ id = leader }) == "gym" then expectOpen = "gym" end
-  local fight = battle(leader and { id = leader } or { id = "OPP_ANY" })
+  if leaderClass then expectOpen = "gym" end
+  local fight = battle(
+    leaderClass and { id = leaderClass } or { id = "OPP_ANY" },
+    leaderClass, leaderParty)
   fight:enter()
   eq(asked[1], "battle:" .. expectOpen,
      "opening the battle asks for the battle theme")
@@ -13871,7 +13886,7 @@ if eng and eng.BattleState then
 
   -- a loss restores too, and never sounds a fanfare
   asked = {}
-  local lost = battle({ id = "OPP_ANY" })
+  local lost = battle({ id = "OPP_ANY" }, "OPP_ANY", 1)
   lost.result = "loss"
   lost:playVictoryMusic()
   lost:exit()
@@ -13880,7 +13895,7 @@ if eng and eng.BattleState then
 
   -- the rival's last fight: its own battle theme, the gym leader's jingle
   asked = {}
-  local final = battle({ id = "OPP_RIVAL3" })
+  local final = battle({ id = "OPP_RIVAL3" }, "OPP_RIVAL3", 1)
   if final:musicKind() == "final" then
     final.result = "win"
     final:playVictoryMusic()
@@ -13892,6 +13907,89 @@ if eng and eng.BattleState then
   end
 
   eng.Music = realMusic
+end
+
+-- ------- MediatedBattle 1v1 / wild music (same theatre contract as CoopBattle)
+--
+-- Until this existed, a hub-refereed 1v1 stayed on overworld music for the
+-- whole fight. Assert the boundary the way the CoopBattle block above does:
+-- which song is asked for, and when -- not that audio data is present.
+
+do
+  local MediatedBattle = need("MediatedBattle")
+  local meng = MediatedBattle.loadEngine and MediatedBattle.loadEngine()
+  if meng then
+    local realMusic = meng.Music
+    local asked = {}
+    meng.Music = {
+      playBattle = function(_, kind)
+        asked[#asked + 1] = "battle:" .. tostring(kind)
+      end,
+      playVictory = function(_, kind)
+        asked[#asked + 1] = "win:" .. tostring(kind)
+      end,
+      restoreMap = function() asked[#asked + 1] = "restore" end,
+    }
+
+    local function fight(mode)
+      return setmetatable({
+        game = { data = data, save = { inventory = {}, party = {} } },
+        mode = mode or "1v1",
+        transport = { send = function() end },
+        battle = "b1",
+        role = "host",
+        peerId = "peer",
+        peerName = "PEER",
+        uploaded = true, -- skip start()'s party upload in enter
+        say = function() end,
+        grantCatch = function() end,
+      }, { __index = MediatedBattle })
+    end
+
+    asked = {}
+    local one = fight("1v1")
+    one:enter()
+    eq(asked[1], "battle:link",
+       "a mediated 1v1 asks for the link battle theme on enter")
+
+    asked = {}
+    one.result = "win"
+    one:playVictoryMusic()
+    one:playVictoryMusic()
+    eq(#asked, 1, "the mediated fanfare starts once")
+    eq(asked[1], "win:link", "and it is the link victory jingle")
+    one:exit()
+    eq(asked[2], "restore",
+       "and the map theme comes back on the way out of a mediated win")
+
+    asked = {}
+    local lost = fight("1v1")
+    lost.uploaded = true
+    lost.result = "loss"
+    lost:playVictoryMusic()
+    lost:exit()
+    eq(#asked, 1, "a mediated loss asks for exactly one thing")
+    eq(asked[1], "restore", "and that thing is the map, not a fanfare")
+
+    asked = {}
+    local wild = fight("wild")
+    wild.uploaded = true
+    wild:enter()
+    eq(asked[1], "battle:wild",
+       "a mediated wild fight asks for the wild battle theme")
+    asked = {}
+    wild.result = "win"
+    wild:finish("win", "catch", {})
+    eq(asked[1], "win:wild",
+       "and finish on a catch win starts the wild victory jingle")
+    wild:exit()
+    eq(asked[2], "restore",
+       "and restores the map after a mediated wild win too")
+
+    meng.Music = realMusic
+  else
+    check(true, "(MediatedBattle engine unavailable -- music theatre skipped)")
+  end
 end
 
 -- ------- exp is priced on the client, not handed down

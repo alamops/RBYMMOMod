@@ -371,8 +371,12 @@ function M.new(game, opts)
     -- continues three ways).
     hostId = opts.hostId,
     -- The trainer this battle stood in for: their picture, their music, and
-    -- the line they say when they lose.
+    -- the line they say when they lose. oppClass + partyIndex travel with the
+    -- id so computeMusicKind can tell a badge gym fight from the same class's
+    -- non-badge parties (Giovanni #3 vs #2).
     trainer = opts.trainer,
+    oppClass = opts.oppClass,
+    partyIndex = opts.partyIndex,
     trainerPic = opts.trainerPic,
     endBattleText = opts.endBattleText,
     -- Whether winning this one moves anybody's rating. Handed in rather than
@@ -582,10 +586,11 @@ end
 -- "trainer" is not good enough: a gym leader has their own theme, the rival's
 -- last fight has another, and the rule that separates them reads a badge table
 -- this mod has no business duplicating. So the engine's `computeMusicKind` is
--- run against a stand-in carrying only the two fields it reads -- which is why
--- the trainer's id travels with the assembled field. A client that joined by
--- invitation and never met this trainer would otherwise hear the ordinary
--- trainer theme while the host heard the gym leader's.
+-- run against a stand-in carrying the fields it reads -- trainer id (Lance /
+-- Rival3), plus `oppClass` + `partyIndex` (badge gym leaders; Giovanni's gym
+-- is #3, not #1). A client that joined by invitation and never met this
+-- trainer would otherwise hear the ordinary trainer theme while the host
+-- heard the gym leader's.
 --
 -- Answered once. The victory theme is `kind .. "Win"`, so a kind that moved
 -- between the start of the battle and the end of it would answer the gym
@@ -600,8 +605,18 @@ function M.musicKind(self)
   local kind = self.trainer and "trainer" or "link"
   local eng = engine
   if eng and eng.BattleState and self.trainer then
-    local probe = setmetatable({ kind = "trainer", trainer = self.trainer },
-      { __index = eng.BattleState })
+    -- Badge gym leaders key victories as oppClass#partyIndex. Trainer.id alone
+    -- is enough for Lance / Rival3; without oppClass Brock stays "trainer".
+    local oppClass = self.oppClass
+      or self.trainer.id
+      or self.trainer.class
+    local partyIndex = tonumber(self.partyIndex) or 1
+    local probe = setmetatable({
+      kind = "trainer",
+      trainer = self.trainer,
+      oppClass = oppClass,
+      partyIndex = partyIndex,
+    }, { __index = eng.BattleState })
     local ok, decided = pcall(probe.computeMusicKind, probe)
     if ok and type(decided) == "string" then kind = decided end
   end

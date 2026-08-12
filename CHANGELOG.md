@@ -8,6 +8,14 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Co-op gym battle music via oppClass#partyIndex.** `CoopBattle.musicKind`
+  probes `computeMusicKind` with `oppClass` + `partyIndex` (from the buried
+  engine or PROTOCOL 19 npcId), so badge gym leaders (Brock, Misty, Giovanni
+  #3, …) get gym music — not only Lance / Rival3 via `trainer.id`.
+- **MediatedBattle battle / victory / map music.** 1v1 link fights and
+  protocol-only wild now call `Music.playBattle` on enter, `playVictory` once
+  on a win (including catch), and `restoreMap` on exit — same theatre
+  contract as CoopBattle (was silent on overworld music for the whole fight).
 - **PROTOCOL 19 — co-op invite joiner trainer finish.** `Config.PROTOCOL` /
   `relay.js` bump **18 → 19**. Optional `npcId` / `event` on `mmo.coop_wait`
   → offer → battle carry the waiter's overworld trainer so a menu/invite

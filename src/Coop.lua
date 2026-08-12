@@ -2106,6 +2106,20 @@ function M:startBattle(game, field)
   -- matches nothing simply leaves the pair nil, and the battle runs without a
   -- face -- which is what a wild-style co-op battle looks like anyway.
   local trainer = M.trainerFor(game, field, engine)
+  -- Music / badge identity for computeMusicKind: prefer the buried engine's
+  -- oppClass + partyIndex; invite joiners recover them from the waiter's
+  -- npcId (PROTOCOL 19) so Giovanni's gym (#3) is not confused with #2.
+  local oppClass = engine and engine.oppClass or nil
+  local partyIndex = engine and engine.partyIndex or nil
+  if (not oppClass or not partyIndex) and battle.plan and battle.plan.npcId then
+    local _, _, class, pidx = M.trainerPrizeInfo(game, battle.plan.npcId)
+    oppClass = oppClass or class
+    partyIndex = partyIndex or pidx
+  end
+  if not oppClass and trainer then
+    oppClass = trainer.id
+  end
+  partyIndex = tonumber(partyIndex) or 1
   -- The picture, unlike the record, is not re-derived. The engine loads a pic
   -- through its own cache, with the trainer's palette and the padding the
   -- draw offsets assume; loading the file directly would give a differently
@@ -2165,6 +2179,8 @@ function M:startBattle(game, field)
     -- what the AI reads a class off, and its aiUses is the allowance the
     -- engine had already computed for it.
     trainer = trainer,
+    oppClass = oppClass,
+    partyIndex = partyIndex,
     aiUses = engine and engine.aiUses,
     trainerPic = trainerPic,
     -- Substituted by whoever started the battle, and lost with it unless it is
