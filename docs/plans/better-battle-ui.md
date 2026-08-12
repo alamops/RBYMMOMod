@@ -203,3 +203,78 @@ session owns it — background runs inside a finished subagent get reaped).
   logged as a follow-up.
 - **A8:** 640×360 canvas stays (its own open question in coop-battlefield-layout.md, separate
   thread).
+
+---
+
+# Round 2 — "I want it perfect" (2026-08-12, autonomous)
+
+Owner review of the live UI: shrink the mons a bit; improve the plate/card UI; replace the
+stretched GB message box + bottom menus with a modern HUD; make the pokéball animation work
+and keep every animation chronological; make sure all trainers face correctly; redesign the
+trainer speech bubble. **Overturns round-1 assumption A2** (GB band kept) — the band goes
+modern on the battlefield path; classic 160×144 and Gen2 keep GB chrome untouched.
+
+## R2 findings (scout-verified)
+
+- The band is a duplicated twin: MediatedBattle `withMenuBand`/`drawBattlefieldMenus`
+  (src/MediatedBattle.lua:1384-1410, :3323-3373) and CoopBattle `drawMenuBand`/
+  `drawMenusClassic` (src/CoopBattle.lua:4668-4721) both re-project the classic 20×6 tile
+  box — the visible "stretch" (160→640 is 4× horizontal vs ~1.67× vertical).
+- Ball throws render NOTHING on the arena in both flows: mediated's `playMoveAnimFallback`
+  finds no move for `TOSS_ANIM`/`SHAKE_ANIM` rows; coop starts AnimPlayer with
+  ball/shake opts (src/CoopBattle.lua:4944-4950) but `drawBattlefieldSafe` never calls
+  `drawAnim`. Wire order per throw: item(ball) → HIDEPIC → TOSS → SHAKE×N(amount) →
+  [SHOWPIC + "broke free" | over(reason=catch) + "Gotcha!"] — already queue-ordered.
+- Latent coop bubble bug: TOSS/SHAKE anim rows aren't excluded from `noteBattlefieldBubble`
+  (src/CoopBattle.lua:4899-4901) — would print "used TOSS_ANIM!".
+- CoopBattle has no ctx.fx wiring at all (no flash/shake/lunge/spawn on the arena); its
+  queue architecture was ordered from day one, so wiring fx at startDrain/startAnim is safe.
+- Letterbox leak (coop only): `letterboxWhite = true` (src/CoopBattle.lua:4310) vs
+  mediated's deliberate black, plus coop's missing full-canvas fill before Battlefield.draw.
+- Trainer facing/darkness: frame conventions and palette plumbing are CORRECT (verified by
+  pixel extraction — frame 2 is stand-left in nire sheets too; spriteObp resolves group 0).
+  The defect is the assets: assets/chars/nire*/walk.png carry ~9 gray tones instead of the
+  exact 4 DMG shades, so >50% of opaque pixels bin darkest and NIRE renders near-black
+  (which also *reads* as facing wrong). Fix: re-quantize the sheets to exactly
+  (0,0,0)/(85,85,85)/(170,170,170)/(255,255,255); audit front.png/back.png the same way.
+- Fonts: adopt the established `Toast.font(size)` pattern (Rajdhani TTF, per-size cache,
+  linear filter, graceful fallback) for all Battlefield text; today plates/bubbles inherit
+  whatever font is coincidentally active.
+
+## R2 contract (pinned)
+
+- `M.MON_DRAW` 72 → 60.
+- fx kinds extended: `ball` (arc, thrower side → target seat), `wobble` (rock at target;
+  one fx per SHAKE row), `poof` (materialize/burst), `recall` (shrink+fade on HIDEPIC).
+  Same `{kind, side, seatIndex, t}` shape; battle advances t; renderers pure. The pokéball
+  is drawn as ORIGINAL vector art (circles/band/button) — no ROM pixels.
+- Band widget API in Battlefield (both battles consume it on the battlefield path only):
+  `M.drawMessagePanel(text)`, `M.drawCommandGrid(items, cursor)` (items:
+  `{label, disabled?}`), `M.drawListPanel(rows, cursor, opts)` (rows:
+  `{label, right?, dim?}`, opts: `{title?}`). All render inside MENU_BAND, pcall-safe,
+  headless-safe, Toast-font with default-font fallback.
+- Bubble ctx entries gain optional `{moveName}`; renderer emphasizes the move line.
+- Visual language: dark translucent slate panels (~rgba 20,24,32,0.85), 1px light border,
+  rounded corners, drop shadow; white primary text, muted secondary; HP bars keep
+  green/yellow/red thresholds with rounded caps; colored status chips (PSN/BRN/SLP/PAR/FRZ).
+  Plates, target card, band widgets and bubbles share it. (Assumption R2-A1: dark modern
+  HUD; the old plates were plain white.)
+
+## R2 waves
+
+- **A1** src/Battlefield.lua — scale, font adoption, plates/card v2, bubble v2, ball/wobble/
+  poof/recall renderers, band widgets.
+- **A2** src/MediatedBattle.lua — switch battlefield menus to band widgets (moves list gains
+  PP), emit ball-flow fx from the queued anim rows (hold each row for its fx), bubble
+  moveName, keep classic path byte-identical.
+- **A3** assets/chars/nire*/ — re-quantize walk sheets (+front/back if dirty) to exact DMG
+  shades. (Routed to a sonnet runner — mechanical; orchestrator override per config.)
+- **B1** src/CoopBattle.lua (after A) — adopt band widgets; letterbox fix (white → black on
+  the battlefield path + full-canvas fill); wire ctx.fx (flash/shake at startDrain, lunge on
+  move anims, spawn on POOF, ball flow from its anim rows); exclude TOSS/SHAKE from bubbles;
+  pass shownHp explicitly.
+- **C** tests + screenshot driver update (drive NIRE, capture band/bubble/ball frames).
+- Review → fixes → full e2e.
+
+Assumptions: R2-A1 dark HUD (above); R2-A2 mon box 60px ("a bit" smaller); R2-A3 no version
+bump this branch; R2-A4 recall visual added for chronology completeness (HIDEPIC row).

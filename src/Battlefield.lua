@@ -11,6 +11,9 @@
 local need, mod = ...
 local Config = need("Config")
 local Gen = need("Gen")
+-- Type only: Toast owns the mod's one per-size font cache (Rajdhani, linear
+-- filter, engine-default fallback). Nothing else is borrowed from it.
+local Toast = need("Toast")
 
 local M = {}
 
@@ -26,16 +29,20 @@ M.MIDLINE = math.floor(M.WIDTH / 2)
 -- Field mons use battle FRONT pics (aspect-preserved inside this box).
 -- Bag-icon sheets are 16×N and look smashed if forced into a square — do not
 -- use them as the primary field art.
-M.MON_DRAW = 72
+-- 60, not 72: at 72 the four seats of a 2v2 crowd the plates and the arena
+-- reads as a close-up rather than a field (R2 owner review).
+M.MON_DRAW = 60
 -- Legacy alias kept for older layout asserts / callers.
 M.ICON_SRC = 16
 M.ICON_SCALE = 2
 M.ICON_DRAW = M.MON_DRAW
 
--- Floating target card: room for name, Lxx, HP, status, ~56px front pic.
+-- Floating target card: name + Lv pill row, centred front pic, status chip,
+-- HP bar. The pic is 48 rather than 56 so the 120px card keeps real padding
+-- around a proportional face at the new type sizes.
 M.CARD_W = 120
 M.CARD_H = 100
-M.CARD_SPRITE = 56
+M.CARD_SPRITE = 48
 
 -- Persistent seat plates (the arena HUD): one per placed seat, always up.
 -- Ally plates stack upward from the field floor so they clear MENU_BAND; foe
@@ -49,6 +56,49 @@ M.PLATE_GAP = 6
 M.HUMAN_SCALE = 2
 M.HUMAN_SRC = 16
 M.HUMAN_DRAW = M.HUMAN_SRC * M.HUMAN_SCALE
+-- Distance from the canvas edge to a trainer's column. Shared with the ball
+-- arc, which starts at the thrower's column.
+local HUMAN_PAD = 20
+
+-- Type sizes, in canvas pixels (the canvas is 640×360 and fill-scaled, so a
+-- size here is a size on screen at 1×). Named so they stay tunable in one
+-- place: primary = names / buttons / the move callout, message = the band
+-- line, secondary = HP numbers and list rows, micro = pills, chips, titles.
+M.FONT_MESSAGE = 14
+M.FONT_PRIMARY = 13
+M.FONT_SECONDARY = 11
+M.FONT_MICRO = 10
+
+-- ------- visual language (shared by plates, card, bubbles, band widgets)
+--
+-- Dark translucent slate over the arena: the field art is bright and busy, and
+-- a white panel on it flattened both. One palette, one radius, one shadow --
+-- every panel in this file goes through the helpers below rather than picking
+-- its own colours.
+local PANEL_BG = { 0.078, 0.094, 0.125, 0.85 }
+local PANEL_BG_HOT = { 0.16, 0.19, 0.25, 0.92 }
+local PANEL_LINE = { 1, 1, 1, 0.18 }
+local PANEL_LINE_HOT = { 1, 0.85, 0.42, 0.9 }
+local PANEL_SHADOW = { 0, 0, 0, 0.35 }
+local PANEL_R = 4
+local TEXT_ON = { 1, 1, 1, 1 }
+local TEXT_MUTED = { 1, 1, 1, 0.7 }
+local TEXT_DIM = { 1, 1, 1, 0.35 }
+local PILL_BG = { 1, 1, 1, 0.12 }
+local BAR_TROUGH = { 0, 0, 0, 0.55 }
+local HP_GREEN = { 0.36, 0.83, 0.42 }
+local HP_YELLOW = { 0.95, 0.78, 0.25 }
+local HP_RED = { 0.93, 0.32, 0.28 }
+-- Muted enough to sit under white text on a dark plate, saturated enough to
+-- be told apart at 10px. Keyed by cardModel's 3-letter status, lowercased.
+M.STATUS_COLORS = {
+  psn = { 0.60, 0.36, 0.85 },
+  brn = { 0.92, 0.38, 0.22 },
+  slp = { 0.48, 0.53, 0.61 },
+  par = { 0.93, 0.75, 0.22 },
+  frz = { 0.40, 0.78, 0.94 },
+}
+local STATUS_FALLBACK = { 0.55, 0.58, 0.65 }
 
 local arenaImage = nil
 local arenaTried = false
@@ -271,8 +321,17 @@ end
 M.FX_LUNGE = 14 -- peak px toward the midline, reached at t == 0.5
 M.FX_SHAKE = 3 -- peak whole-field jolt, px
 M.FX_FAINT_DROP = 0.5 -- fraction of the mon box a fainting seat sinks
+M.FX_BALL_R = 5 -- pokéball radius (a ~10px ball on a 60px mon)
+M.FX_BALL_LIFT = 46 -- peak px the arc rises above the straight line
+M.FX_BALL_SPIN = math.pi * 2.5 -- radians of spin across the whole throw
+M.FX_WOBBLE_ANGLE = 0.35 -- ≈20° peak rock, three rocks per SHAKE row
+M.FX_POOF_R = 30 -- outer ring radius at the end of a poof
 
-local NO_FX = { dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0 }
+local NO_FX = {
+  dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0,
+  -- The seat's mon is inside a ball (ball / wobble): draw nothing for it.
+  hidden = false,
+}
 
 local function fxT(v)
   return clamp(num(v, 0), 0, 1)
@@ -308,6 +367,51 @@ function M.fxSpawn(t)
   return 1 + (c1 + 1) * u * u * u + c1 * u * u
 end
 
+-- ------- ball-flow fx (throw → wobble → poof / recall)
+--
+-- Same rule as everything above: pure functions of t, so the arc, the rock and
+-- the burst are reproducible frame by frame and assertable headlessly. The
+-- ball itself is original vector art (see drawPokeball) -- no ROM pixels.
+
+-- Travel fraction, arc lift (0..1, peaking at t == 0.5) and spin angle.
+function M.fxBall(t)
+  t = fxT(t)
+  return t, 4 * t * (1 - t), t * M.FX_BALL_SPIN
+end
+
+-- The ball's position on a parabolic arc from (x0,y0) to (x1,y1), plus its
+-- spin. Straight-line interpolation with the lift subtracted, so the landing
+-- point is exact at t == 1 whatever the lift.
+function M.fxBallPoint(x0, y0, x1, y1, t)
+  x0, y0 = num(x0, 0), num(y0, 0)
+  x1, y1 = num(x1, 0), num(y1, 0)
+  local u, lift, spin = M.fxBall(t)
+  return x0 + (x1 - x0) * u,
+    y0 + (y1 - y0) * u - M.FX_BALL_LIFT * lift,
+    spin
+end
+
+-- Rock angle, radians. Three half-swings with alternating sign, at rest at
+-- both ends so consecutive SHAKE rows join without a snap.
+function M.fxWobble(t)
+  return math.sin(fxT(t) * math.pi * 3) * M.FX_WOBBLE_ANGLE
+end
+
+-- Expansion fraction (ease-out) and remaining alpha.
+function M.fxPoof(t)
+  t = fxT(t)
+  local u = 1 - t
+  return 1 - u * u, u
+end
+
+-- Shrink factor and remaining alpha for a mon being pulled into its ball.
+-- No offset is needed: field pics are feet-anchored (monDrawParams), so a
+-- shrinking sprite already collapses onto the spot the ball sits on.
+function M.fxRecall(t)
+  t = fxT(t)
+  return 1 - t, 1 - t
+end
+
 -- Fold the ctx fx list into one seat's draw modifiers. An absent or empty list
 -- yields the shared neutral record NO_FX, so a caller that passes no fx draws
 -- unchanged; what fxSeat returns is read-only to callers, never mutated.
@@ -317,7 +421,9 @@ function M.fxSeat(fx, side, seatIndex)
   for _, e in ipairs(listOf(fx)) do
     if type(e) == "table" and e.side == side
        and (e.seatIndex == nil or e.seatIndex == seatIndex) then
-      out = out or { dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0 }
+      out = out or {
+        dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0, hidden = false,
+      }
       if e.kind == "lunge" then
         -- Toward the midline: allies charge right, foes left.
         local dir = side == "foe" and -1 or 1
@@ -331,6 +437,14 @@ function M.fxSeat(fx, side, seatIndex)
         if alpha < out.alpha then out.alpha = alpha end
       elseif e.kind == "spawn" then
         out.scale = out.scale * M.fxSpawn(e.t)
+      elseif e.kind == "recall" then
+        local s, alpha = M.fxRecall(e.t)
+        out.scale = out.scale * s
+        if alpha < out.alpha then out.alpha = alpha end
+      elseif e.kind == "ball" or e.kind == "wobble" then
+        -- The mon is inside the ball for the whole throw: the seat draws
+        -- nothing (not even its shadow) until a SHOWPIC / poof brings it out.
+        out.hidden = true
       end
     end
   end
@@ -394,7 +508,7 @@ local function placeHumans(humans, side, out)
   if count == 0 then return end
 
   local facing = humanFacing(side)
-  local pad = 20
+  local pad = HUMAN_PAD
   local x
   if side == "ally" then
     x = pad + math.floor(M.HUMAN_DRAW / 2)
@@ -622,6 +736,10 @@ function M.layout(ctx)
           side = b.side,
           humanIndex = hi,
           text = type(b.text) == "string" and b.text or "",
+          -- Optional emphasis line (the move that was used); the renderer
+          -- gives it its own, larger line under the plain text.
+          moveName = (type(b.moveName) == "string" and b.moveName ~= "")
+            and b.moveName or nil,
           t = clamp(num(b.t, 1), 0, 1),
           x = host.x,
           y = host.y - math.floor(host.drawH / 2) - 6,
@@ -691,6 +809,178 @@ end
 
 local function g()
   return love and love.graphics
+end
+
+-- ------- type
+--
+-- Toast owns the mod's font cache (one face per size, linear filter, engine
+-- default when the bundled TTF is missing). Borrowing it keeps a single cache
+-- and gives this file the same look as the rest of the mod's chrome. Headless
+-- -- no love, or a Toast that could not build a font -- returns nil and every
+-- caller below falls back to whatever font is already set.
+local function uiFont(size)
+  if not (Toast and Toast.font) then return nil end
+  local ok, font = pcall(Toast.font, size)
+  if ok and font then return font end
+  return nil
+end
+
+local function widthWith(font, text)
+  text = tostring(text or "")
+  if font and font.getWidth then
+    local ok, w = pcall(font.getWidth, font, text)
+    if ok and type(w) == "number" then return w end
+  end
+  return #text * 6
+end
+
+local function heightWith(font)
+  if font and font.getHeight then
+    local ok, h = pcall(font.getHeight, font)
+    if ok and type(h) == "number" then return h end
+  end
+  return 12
+end
+
+-- Every text block runs inside this: the face is set, the block draws, and the
+-- caller's face goes back — always. The battle screen paints its own chrome
+-- right after Battlefield.draw returns and must not inherit ours.
+-- `fn` receives the font actually in effect, for measuring.
+local function withFont(gfx, size, fn)
+  local font = uiFont(size)
+  local prev = nil
+  if gfx.getFont then
+    local ok, got = pcall(gfx.getFont)
+    if ok then prev = got end
+  end
+  if font and gfx.setFont then pcall(gfx.setFont, font) end
+  local ok = pcall(fn, font or prev)
+  if prev and gfx.setFont then pcall(gfx.setFont, prev) end
+  return ok
+end
+
+-- ------- panel primitives
+
+local function setColor(gfx, c, alpha)
+  local a = (c[4] or 1) * (alpha == nil and 1 or alpha)
+  gfx.setColor(c[1], c[2], c[3], a)
+end
+
+-- The one panel shape: soft drop shadow, dark translucent slate, 1px light
+-- border. `hot` lifts the fill and warms the border (a cursor); `alpha` scales
+-- the whole thing (bubbles fade).
+local function panel(gfx, x, y, w, h, hot, alpha)
+  setColor(gfx, PANEL_SHADOW, alpha)
+  gfx.rectangle("fill", x + 1, y + 2, w, h, PANEL_R, PANEL_R)
+  setColor(gfx, hot and PANEL_BG_HOT or PANEL_BG, alpha)
+  gfx.rectangle("fill", x, y, w, h, PANEL_R, PANEL_R)
+  setColor(gfx, hot and PANEL_LINE_HOT or PANEL_LINE, alpha)
+  gfx.rectangle("line", x + 0.5, y + 0.5, w - 1, h - 1, PANEL_R, PANEL_R)
+end
+
+local function hpColor(frac)
+  if frac > 0.5 then return HP_GREEN end
+  if frac > 0.2 then return HP_YELLOW end
+  return HP_RED
+end
+
+-- Rounded-cap HP bar over a darker trough. Thresholds unchanged from v1.
+local function drawHpBar(gfx, x, y, w, h, frac)
+  frac = clamp(num(frac, 0), 0, 1)
+  local r = h / 2
+  setColor(gfx, BAR_TROUGH)
+  gfx.rectangle("fill", x, y, w, h, r, r)
+  if frac > 0 then
+    local fw = math.max(h, w * frac)
+    setColor(gfx, hpColor(frac))
+    gfx.rectangle("fill", x, y, fw, h, r, r)
+    -- Top-edge sheen: one flat highlight, no gradient (no mesh on this path).
+    gfx.setColor(1, 1, 1, 0.18)
+    gfx.rectangle("fill", x + r * 0.6, y + 1, math.max(1, fw - r * 1.2), 1)
+  end
+  setColor(gfx, PANEL_LINE)
+  gfx.rectangle("line", x + 0.5, y + 0.5, w - 1, h - 1, r, r)
+end
+
+-- "Lv 25" in a faint capsule. Returns its width so a caller can reserve it.
+local function pillWidth(font, level)
+  return widthWith(font, "Lv " .. tostring(level)) + 10
+end
+
+local function drawLevelPill(gfx, font, level, x, y, h)
+  local text = "Lv " .. tostring(level)
+  local w = widthWith(font, text) + 10
+  setColor(gfx, PILL_BG)
+  gfx.rectangle("fill", x, y, w, h, h / 2, h / 2)
+  setColor(gfx, TEXT_MUTED)
+  gfx.print(text, x + 5, y + math.floor((h - heightWith(font)) / 2))
+  return w
+end
+
+-- Status chip: filled in the status colour with near-black text, which is the
+-- only pairing that stays readable across violet and amber alike.
+local function drawStatusChip(gfx, font, status, x, y, h)
+  local text = tostring(status):upper()
+  local color = M.STATUS_COLORS[tostring(status):lower()] or STATUS_FALLBACK
+  local w = widthWith(font, text) + 8
+  gfx.setColor(color[1], color[2], color[3], 0.9)
+  gfx.rectangle("fill", x, y, w, h, 2, 2)
+  gfx.setColor(0.06, 0.07, 0.10, 1)
+  gfx.print(text, x + 4, y + math.floor((h - heightWith(font)) / 2))
+  return w
+end
+
+-- A small filled triangle, in place of a glyph: the bundled face has no
+-- geometric arrows and the engine default cannot be relied on for them.
+local function drawTriangle(gfx, x, y, size, dir, color, alpha)
+  setColor(gfx, color or TEXT_MUTED, alpha)
+  if dir == "up" then
+    gfx.polygon("fill", x, y, x + size * 2, y, x + size, y - size)
+  else
+    gfx.polygon("fill", x, y, x + size * 2, y, x + size, y + size)
+  end
+end
+
+-- Longest prefix of `text` that fits maxW, ellipsised when it had to cut.
+local function fitLine(font, text, maxW)
+  text = tostring(text or "")
+  if widthWith(font, text) <= maxW then return text, false end
+  local cut = #text
+  while cut > 1 and widthWith(font, text:sub(1, cut) .. "...") > maxW do
+    cut = cut - 1
+  end
+  return text:sub(1, cut) .. "...", true
+end
+
+-- Word wrap by measured width, honouring embedded newlines (battle text is
+-- written with them). Returns at most `maxLines` lines plus whether anything
+-- had to be dropped; the last kept line is ellipsised when so.
+local function wrapLines(font, text, maxW, maxLines)
+  local out = {}
+  local overflow = false
+  for chunk in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local line = nil
+    for word in chunk:gmatch("%S+") do
+      local candidate = line and (line .. " " .. word) or word
+      if line and widthWith(font, candidate) > maxW then
+        out[#out + 1] = line
+        line = word
+      else
+        line = candidate
+      end
+    end
+    if line then out[#out + 1] = line end
+  end
+  while #out > maxLines do
+    table.remove(out)
+    overflow = true
+  end
+  if #out > 0 then
+    local last, cut = fitLine(font, out[#out], maxW)
+    out[#out] = last
+    overflow = overflow or cut
+  end
+  return out, overflow
 end
 
 local function iconBob(frame, acting)
@@ -932,6 +1222,8 @@ local function drawMonIcon(mon, frame, fx)
   local gfx = g()
   if not gfx then return end
   fx = type(fx) == "table" and fx or NO_FX
+  -- Inside a ball: not even the shadow, or the seat reads as still occupied.
+  if fx.hidden then return end
   local alpha = clamp(num(fx.alpha, 1), 0, 1)
   if alpha <= 0 then return end
   local bob = iconBob(frame, mon.acting)
@@ -1014,157 +1306,285 @@ local function drawArrow(arrow)
   end)
 end
 
+-- Target card: the plate language in a portrait box — name + Lv pill, the
+-- front pic centred under them, status chip and HP bar on the floor.
 local function drawCard(card, eng)
   local gfx = g()
   if not (gfx and card) then return end
   local model = card.model or M.cardModel(card.mon)
   pcall(function()
     local x, y, w, h = card.x, card.y, card.w, card.h
-    gfx.setColor(1, 1, 1, 0.95)
-    gfx.rectangle("fill", x, y, w, h, 4, 4)
-    gfx.setColor(0.1, 0.1, 0.15, 1)
-    gfx.rectangle("line", x, y, w, h, 4, 4)
+    panel(gfx, x, y, w, h)
 
-    local pad = 6
-    local sprite = model.front
+    local pad = 7
     local sp = M.CARD_SPRITE
-    local sx = x + w - pad - sp
-    local sy = y + pad
+    local spriteY = y + 20
+    local sprite = model.front
     if sprite then
       pcall(function()
         gfx.setColor(1, 1, 1, 1)
         local iw, ih = sp, sp
         if sprite.getDimensions then iw, ih = sprite:getDimensions() end
         local sc = math.min(sp / math.max(iw, 1), sp / math.max(ih, 1))
-        gfx.draw(sprite, sx, sy, 0, sc, sc)
+        gfx.draw(sprite, x + (w - iw * sc) / 2, spriteY + (sp - ih * sc) / 2,
+          0, sc, sc)
       end)
     else
-      gfx.setColor(0.85, 0.85, 0.9, 1)
-      gfx.rectangle("fill", sx, sy, sp, sp)
+      gfx.setColor(1, 1, 1, 0.08)
+      gfx.rectangle("fill", x + (w - sp) / 2, spriteY, sp, sp, 3, 3)
     end
 
-    gfx.setColor(0.05, 0.05, 0.1, 1)
-    local name = truncate(model.name, 10)
-    local line1 = name
-    local line2 = ("L%d"):format(model.level)
-    if model.status then line2 = line2 .. " " .. model.status end
-    if gfx.print then
-      gfx.print(line1, x + pad, y + pad)
-      gfx.print(line2, x + pad, y + pad + 12)
-    end
-
-    -- HP bar
-    local barX = x + pad
-    local barY = y + h - pad - 10
-    local barW = w - pad * 2 - (sprite and (sp + 4) or 0)
-    if barW < 40 then barW = w - pad * 2 end
     -- Display clock, not truth hp (see the seat HP contract on M.cardModel):
     -- the card and the plates must show the same bar mid-drain.
     local shown = num(model.shownHp, model.hp)
     local frac = 0
     if model.maxHp > 0 then frac = clamp(shown / model.maxHp, 0, 1) end
-    gfx.setColor(0.2, 0.2, 0.25, 1)
-    gfx.rectangle("fill", barX, barY, barW, 6)
-    if frac > 0.5 then
-      gfx.setColor(0.3, 0.75, 0.35, 1)
-    elseif frac > 0.2 then
-      gfx.setColor(0.85, 0.7, 0.2, 1)
-    else
-      gfx.setColor(0.85, 0.25, 0.2, 1)
-    end
-    gfx.rectangle("fill", barX, barY, math.floor(barW * frac), 6)
+    local barY = y + h - pad - 7
+    drawHpBar(gfx, x + pad, barY, w - pad * 2, 7, frac)
+
+    withFont(gfx, M.FONT_MICRO, function(micro)
+      local pillW = pillWidth(micro, model.level)
+      drawLevelPill(gfx, micro, model.level, x + w - pad - pillW, y + 5, 13)
+      if model.status then
+        drawStatusChip(gfx, micro, model.status, x + pad, barY - 15, 12)
+      end
+      withFont(gfx, M.FONT_PRIMARY, function(primary)
+        setColor(gfx, TEXT_ON)
+        local name = fitLine(primary, model.name, w - pad * 2 - pillW - 4)
+        gfx.print(name, x + pad, y + 4)
+      end)
+    end)
     gfx.setColor(1, 1, 1, 1)
   end)
 end
 
--- Persistent seat plate, in drawCard's visual language (rounded white panel,
--- thresholded bar). The bar reads the display clock, so a caller that drains
--- `shownHp` animates here for free.
+-- Persistent seat plate: name + Lv pill, status chip and (ally only) exact
+-- hp/maxHp, over a thresholded bar. The bar reads the display clock, so a
+-- caller that drains `shownHp` animates here for free.
 local function drawPlate(plate)
   local gfx = g()
   if not (gfx and plate) then return end
   local model = plate.model or M.plateModel(plate.mon)
   pcall(function()
     local x, y, w, h = plate.x, plate.y, plate.w, plate.h
-    local font = gfx.getFont and gfx.getFont() or nil
-    local function widthOf(text)
-      if font and font.getWidth then return font:getWidth(text) end
-      return #text * 6
-    end
+    panel(gfx, x, y, w, h)
 
-    gfx.setColor(0.06, 0.07, 0.11, 0.4)
-    gfx.rectangle("fill", x + 2, y + 3, w, h, 6, 6)
-    gfx.setColor(1, 1, 1, 0.94)
-    gfx.rectangle("fill", x, y, w, h, 6, 6)
-    gfx.setColor(0.1, 0.1, 0.15, 1)
-    gfx.rectangle("line", x, y, w, h, 6, 6)
+    local pad = 7
+    local barY = y + h - pad - 7
+    drawHpBar(gfx, x + pad, barY, w - pad * 2, 7, num(model.frac, 0))
 
-    local pad = 8
-    local barW = w - pad * 2
-    local barY = y + h - pad - 8
-    gfx.setColor(0.05, 0.05, 0.1, 1)
-    if gfx.print then
-      gfx.print(model.name, x + pad, y + 4)
-      local right = ("L%d"):format(model.level)
-      if model.status then right = model.status:upper() .. " " .. right end
-      gfx.print(right, x + w - pad - widthOf(right), y + 4)
-      if plate.numbers then
-        local hpText = ("%d/%d"):format(model.shownHp, model.maxHp)
-        gfx.print(hpText, x + w - pad - widthOf(hpText), barY - 14)
+    withFont(gfx, M.FONT_MICRO, function(micro)
+      local pillW = pillWidth(micro, model.level)
+      drawLevelPill(gfx, micro, model.level, x + w - pad - pillW, y + 4, 13)
+      local chipRight = x + w - pad
+      if model.status then
+        drawStatusChip(gfx, micro, model.status, x + pad, y + 20, 12)
       end
-    end
-
-    gfx.setColor(0.2, 0.2, 0.25, 1)
-    gfx.rectangle("fill", x + pad, barY, barW, 8, 2, 2)
-    local frac = clamp(num(model.frac, 0), 0, 1)
-    if frac > 0.5 then
-      gfx.setColor(0.3, 0.75, 0.35, 1)
-    elseif frac > 0.2 then
-      gfx.setColor(0.85, 0.7, 0.2, 1)
-    else
-      gfx.setColor(0.85, 0.25, 0.2, 1)
-    end
-    if frac > 0 then
-      gfx.rectangle("fill", x + pad, barY, math.max(1, math.floor(barW * frac)),
-        8, 2, 2)
-    end
+      if plate.numbers then
+        -- Exact figures on your own side only, per series convention.
+        withFont(gfx, M.FONT_SECONDARY, function(secondary)
+          local hpText = ("%d/%d"):format(model.shownHp, model.maxHp)
+          setColor(gfx, TEXT_MUTED)
+          gfx.print(hpText, chipRight - widthWith(secondary, hpText), y + 19)
+        end)
+      end
+      withFont(gfx, M.FONT_PRIMARY, function(primary)
+        setColor(gfx, TEXT_ON)
+        local name = fitLine(primary, model.name, w - pad * 2 - pillW - 4)
+        gfx.print(name, x + pad, y + 3)
+      end)
+    end)
     gfx.setColor(1, 1, 1, 1)
   end)
 end
+
+-- Trainer callout: a rounded near-white card with a tail toward the speaker.
+-- Two lines at most — the plain text, then the move name emphasised under it.
+-- Pure in t: scale-in, float and fade all read from the caller's clock (t
+-- counts down from 1, so the callout settles in and drifts up as it expires).
+local BUBBLE_MAX_W = 180
+local BUBBLE_MAX_CHARS = 24
+local BUBBLE_TAIL = 7
 
 local function drawBubble(b)
   local gfx = g()
   if not gfx then return end
   local t = clamp(num(b.t, 1), 0, 1)
   if t <= 0 then return end
-  local text = truncate(b.text, 14)
-  if text == "" then return end
+  -- One line each: callers write battle text with newlines in it, and a
+  -- second line inside the plain text would print straight through the box.
+  local line = truncate((tostring(b.text or ""):gsub("%s+", " ")),
+    BUBBLE_MAX_CHARS)
+  local move = nil
+  if type(b.moveName) == "string" and b.moveName ~= "" then
+    move = truncate(b.moveName, BUBBLE_MAX_CHARS)
+  end
+  if line == "" and not move then return end
+
+  local scale = 0.55 + 0.45 * math.min(1, t * 1.6)
+  local alpha = math.min(1, t * 3)
+  local ax, ay = b.x, b.y + (1 - t) * -6
+
+  -- The scale-in is a transform around the tail tip, so the callout grows out
+  -- of the speaker's head. Pushed outside the body's pcall: a throw inside
+  -- must never leave the transform on the stack for the next layer.
+  local pushed = false
+  if scale < 0.999 and gfx.push and gfx.translate and gfx.scale then
+    pushed = pcall(gfx.push)
+    if pushed then
+      pcall(gfx.translate, ax, ay)
+      pcall(gfx.scale, scale, scale)
+      pcall(gfx.translate, -ax, -ay)
+    end
+  end
 
   pcall(function()
-    local scale = 0.55 + 0.45 * math.min(1, t * 1.6)
-    local float = (1 - t) * -6
-    local font = gfx.getFont and gfx.getFont() or nil
-    local tw = font and font:getWidth(text) or (#text * 6)
-    local th = font and font:getHeight() or 8
-    local bw = math.max(28, tw + 12) * scale
-    local bh = math.max(14, th + 8) * scale
-    local x = b.x - bw / 2
-    local y = b.y - bh - 4 + float
+    withFont(gfx, M.FONT_SECONDARY, function(small)
+      local moveFont = uiFont(M.FONT_PRIMARY)
+      local w1 = line ~= "" and widthWith(small, line) or 0
+      local w2 = move and widthWith(moveFont or small, move) or 0
+      local h1 = line ~= "" and heightWith(small) or 0
+      local h2 = move and heightWith(moveFont or small) or 0
+      local bw = clamp(math.max(w1, w2) + 16, 34, BUBBLE_MAX_W)
+      local bh = h1 + h2 + 10
+      local x = ax - bw / 2
+      local y = ay - BUBBLE_TAIL - bh
 
-    gfx.setColor(1, 1, 1, 0.92)
-    gfx.ellipse("fill", b.x, y + bh / 2, bw / 2, bh / 2)
-    -- Tail
-    gfx.polygon("fill",
-      b.x - 4, y + bh - 2,
-      b.x + 4, y + bh - 2,
-      b.x, y + bh + 6)
-    gfx.setColor(0.1, 0.1, 0.15, 1)
-    gfx.ellipse("line", b.x, y + bh / 2, bw / 2, bh / 2)
-    if gfx.print then
-      gfx.print(text, b.x - tw / 2, y + (bh - th) / 2)
-    end
+      gfx.setColor(0, 0, 0, 0.3 * alpha)
+      gfx.rectangle("fill", x + 1, y + 2, bw, bh, PANEL_R, PANEL_R)
+      gfx.setColor(0.97, 0.97, 0.98, 0.96 * alpha)
+      gfx.rectangle("fill", x, y, bw, bh, PANEL_R, PANEL_R)
+      gfx.polygon("fill",
+        ax - 5, y + bh - 1,
+        ax + 5, y + bh - 1,
+        ax, y + bh + BUBBLE_TAIL)
+      gfx.setColor(0.09, 0.10, 0.14, 0.85 * alpha)
+      gfx.rectangle("line", x + 0.5, y + 0.5, bw - 1, bh - 1, PANEL_R, PANEL_R)
+
+      local ty = y + 5
+      if line ~= "" then
+        gfx.setColor(0.20, 0.22, 0.28, alpha)
+        gfx.print(fitLine(small, line, bw - 12), x + 6, ty)
+        ty = ty + h1
+      end
+      if move then
+        if moveFont and gfx.setFont then pcall(gfx.setFont, moveFont) end
+        gfx.setColor(0.06, 0.07, 0.11, alpha)
+        gfx.print(fitLine(moveFont or small, move, bw - 12), x + 6, ty)
+      end
+    end)
     gfx.setColor(1, 1, 1, 1)
   end)
+  if pushed and gfx.pop then pcall(gfx.pop) end
+end
+
+-- ------- ball flow
+--
+-- ORIGINAL vector art: two hemispheres, an equator band and a button, built
+-- from primitives. Nothing here is derived from ROM pixels, and nothing may
+-- ever be. `angle` spins / rocks the ball; the band and button ride it.
+local function drawPokeball(gfx, x, y, r, angle, alpha)
+  alpha = clamp(num(alpha, 1), 0, 1)
+  angle = num(angle, 0)
+  local ca, sa = math.cos(angle), math.sin(angle)
+  local function point(lx, ly)
+    return x + lx * ca - ly * sa, y + lx * sa + ly * ca
+  end
+
+  -- No contact shadow here: the ball spends most of a throw in the air, and a
+  -- shadow riding along under it kills the height the arc is drawing.
+  -- Lower (white) hemisphere is the whole disc; the red cap covers the top.
+  gfx.setColor(0.95, 0.95, 0.96, alpha)
+  gfx.circle("fill", x, y, r)
+  gfx.setColor(0.86, 0.22, 0.20, alpha)
+  gfx.arc("fill", "pie", x, y, r, math.pi + angle, math.pi * 2 + angle)
+  -- Equator band: a rotated strip, not a line, so it keeps its width spinning.
+  local bx1, by1 = point(-r, -r * 0.22)
+  local bx2, by2 = point(r, -r * 0.22)
+  local bx3, by3 = point(r, r * 0.22)
+  local bx4, by4 = point(-r, r * 0.22)
+  gfx.setColor(0.10, 0.10, 0.13, alpha)
+  gfx.polygon("fill", bx1, by1, bx2, by2, bx3, by3, bx4, by4)
+  gfx.circle("fill", x, y, r * 0.34)
+  gfx.setColor(0.97, 0.97, 0.98, alpha)
+  gfx.circle("fill", x, y, r * 0.2)
+  gfx.setColor(0.10, 0.10, 0.13, alpha)
+  gfx.circle("line", x, y, r)
+  gfx.setColor(1, 1, 1, 1)
+end
+
+-- Expanding ring plus a few motes: a materialise, never a burst of debris.
+local function drawPoof(gfx, x, y, t)
+  local e, alpha = M.fxPoof(t)
+  if alpha <= 0 then return end
+  local lw = gfx.getLineWidth and gfx.getLineWidth() or 1
+  if gfx.setLineWidth then pcall(gfx.setLineWidth, 2) end
+  gfx.setColor(1, 1, 1, 0.5 * alpha)
+  gfx.circle("line", x, y, math.max(1, M.FX_POOF_R * e))
+  for i = 1, 4 do
+    local ang = (i / 4) * math.pi * 2 + e * 1.2
+    local d = M.FX_POOF_R * e * 0.75
+    gfx.setColor(1, 0.97, 0.86, 0.7 * alpha)
+    gfx.circle("fill", x + math.cos(ang) * d, y + math.sin(ang) * d,
+      math.max(1, 4 * (1 - e) + 1))
+  end
+  if gfx.setLineWidth then pcall(gfx.setLineWidth, lw) end
+  gfx.setColor(1, 1, 1, 1)
+end
+
+local function seatOf(layout, side, seatIndex)
+  for _, mon in ipairs(layout.mons) do
+    if mon.side == side and (seatIndex == nil or mon.seatIndex == seatIndex) then
+      return mon
+    end
+  end
+  return nil
+end
+
+-- The thrower stands on the side opposite the seat the ball is aimed at, so
+-- the arc starts at that side's trainer column, at mid-field height.
+local function ballOrigin(layout, targetSide)
+  local side = targetSide == "foe" and "ally" or "foe"
+  for _, h in ipairs(layout.humans) do
+    if h.side == side then
+      return h.x, h.y - math.floor(h.drawH / 2)
+    end
+  end
+  local edge = HUMAN_PAD + math.floor(M.HUMAN_DRAW / 2)
+  return side == "ally" and edge or (M.WIDTH - edge),
+    M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.5)
+end
+
+-- Field-level fx that are not seat modifiers: the ball in flight, the ball
+-- rocking on the ground, and the poof a mon materialises out of.
+local function drawFieldFx(layout)
+  local gfx = g()
+  if not gfx then return end
+  for _, e in ipairs(layout.fx) do
+    if type(e) == "table" then
+      local seat = nil
+      if e.kind == "ball" or e.kind == "wobble" or e.kind == "poof" then
+        seat = seatOf(layout, e.side, e.seatIndex)
+      end
+      if seat and e.kind == "ball" then
+        local x0, y0 = ballOrigin(layout, e.side)
+        local x, y, spin = M.fxBallPoint(x0, y0, seat.x, seat.y, e.t)
+        pcall(drawPokeball, gfx, x, y, M.FX_BALL_R, spin, 1)
+      elseif seat and e.kind == "wobble" then
+        -- On the ground now, so it gets the contact shadow the arc refuses.
+        pcall(function()
+          gfx.setColor(0, 0, 0, 0.3)
+          gfx.ellipse("fill", seat.x, seat.y + M.FX_BALL_R * 1.3,
+            M.FX_BALL_R * 1.1, M.FX_BALL_R * 0.4)
+          gfx.setColor(1, 1, 1, 1)
+        end)
+        pcall(drawPokeball, gfx, seat.x, seat.y, M.FX_BALL_R,
+          M.fxWobble(e.t), 1)
+      elseif seat and e.kind == "poof" then
+        pcall(drawPoof, gfx, seat.x, seat.y, e.t)
+      end
+    end
+  end
 end
 
 -- The ground is drawn K px beyond every canvas edge so a shake translate never
@@ -1211,6 +1631,218 @@ local function drawArena()
   end)
 end
 
+-- ------- menu band widgets
+--
+-- The battlefield's bottom band. These replace the classic 20×6 GB box, which
+-- both battles used to re-project into 640×80 (4× horizontally against 1.67×
+-- vertically — the stretch the owner review called out). The classic 160×144
+-- and Gen2 paths keep their GB chrome; only the battlefield path calls these.
+--
+-- Every widget draws inside MENU_BAND and nowhere else, is pcall-safe, and
+-- no-ops without love.graphics. `opts.x/y/w/h` box a widget into part of the
+-- band (a caller showing a message and a command grid at once), and default
+-- to the whole band inset by the margins below.
+
+M.BAND_MARGIN_X = 10
+M.BAND_MARGIN_Y = 4
+-- Row height is derived, not fixed: the band is 80px and a title eats 12 of
+-- them, so pinning a height would cost the fifth row on a bare list or the
+-- fourth on a titled one. Floor 12 / ceiling 15 around FONT_SECONDARY.
+local LIST_ROW_MIN = 12
+local LIST_ROW_MAX = 15
+local LIST_TITLE_H = 12
+local LIST_PAD_X = 8
+local LIST_PAD_Y = 4
+
+-- The rect a band widget draws into, clamped to MENU_BAND so an opts override
+-- can never paint over the field.
+function M.bandRect(opts)
+  opts = type(opts) == "table" and opts or {}
+  local x = num(opts.x, M.BAND_MARGIN_X)
+  local y = num(opts.y, M.FIELD_BOTTOM + M.BAND_MARGIN_Y)
+  local w = num(opts.w, M.WIDTH - M.BAND_MARGIN_X * 2)
+  local h = num(opts.h, M.MENU_BAND - M.BAND_MARGIN_Y * 2)
+  y = clamp(y, M.FIELD_BOTTOM, M.HEIGHT)
+  h = clamp(h, 1, M.HEIGHT - y)
+  x = clamp(x, 0, M.WIDTH)
+  w = clamp(w, 1, M.WIDTH - x)
+  return x, y, w, h
+end
+
+-- Optional: one scrim over the whole band before the widgets go down. The
+-- arena art runs edge to edge, so a caller that wants the band to read as
+-- chrome rather than as panels floating on grass calls this once — once,
+-- because two widgets each painting their own scrim would double-darken it.
+function M.drawBandBackdrop()
+  local gfx = g()
+  if not gfx then return end
+  pcall(function()
+    gfx.setColor(0.03, 0.04, 0.06, 0.55)
+    gfx.rectangle("fill", 0, M.FIELD_BOTTOM, M.WIDTH, M.MENU_BAND)
+    setColor(gfx, PANEL_LINE)
+    gfx.rectangle("fill", 0, M.FIELD_BOTTOM, M.WIDTH, 1)
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
+-- The battle line. Two lines at most; a third would not fit the band, and the
+-- caller's message queue is what splits long text anyway.
+-- opts.hint == false drops the continue triangle (a line nothing waits on).
+function M.drawMessagePanel(text, opts)
+  local gfx = g()
+  if not gfx then return end
+  local x, y, w, h = M.bandRect(opts)
+  opts = type(opts) == "table" and opts or {}
+  pcall(function()
+    panel(gfx, x, y, w, h)
+    withFont(gfx, M.FONT_MESSAGE, function(font)
+      local pad = 12
+      local lines = wrapLines(font, text, w - pad * 2, 2)
+      local lh = heightWith(font)
+      local total = math.max(1, #lines) * lh + (#lines > 1 and 2 or 0)
+      local ty = y + math.floor((h - total) / 2)
+      setColor(gfx, TEXT_ON)
+      for i, line in ipairs(lines) do
+        gfx.print(line, x + pad, ty + (i - 1) * (lh + 2))
+      end
+      if opts.hint ~= false and #lines > 0 then
+        drawTriangle(gfx, x + w - 16, y + h - 12, 4, "down", TEXT_MUTED)
+      end
+    end)
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
+-- FIGHT / PKMN / ITEM / RUN. Four across while the band is full width: 2×2
+-- over the 620×72 band makes 307×33 slabs that read as list rows, not buttons,
+-- where 150×72 is a button shape. A caller that boxes the grid into a narrower
+-- slot falls back to two columns, where 4-across would be too tight to label.
+-- `cursor` is the 1-based highlighted item; items are { label, disabled? }.
+function M.drawCommandGrid(items, cursor, opts)
+  local gfx = g()
+  if not gfx then return end
+  items = listOf(items)
+  local n = #items
+  if n == 0 then return end
+  local x, y, w, h = M.bandRect(opts)
+  cursor = math.floor(num(cursor, 0))
+  local cols = (w >= 420 and n <= 4) and n or 2
+  local rows = math.ceil(n / cols)
+  local gap = 6
+  local bw = math.floor((w - gap * (cols - 1)) / cols)
+  local bh = math.floor((h - gap * (rows - 1)) / rows)
+  if bw < 8 or bh < 8 then return end
+  pcall(function()
+    withFont(gfx, M.FONT_PRIMARY, function(font)
+      for i, item in ipairs(items) do
+        local col = (i - 1) % cols
+        local row = math.floor((i - 1) / cols)
+        local bx = x + col * (bw + gap)
+        local by = y + row * (bh + gap)
+        local label = item
+        local dim = false
+        if type(item) == "table" then
+          label = item.label
+          dim = item.disabled and true or false
+        end
+        label = fitLine(font, tostring(label or ""), bw - 10)
+        -- A disabled item still shows the cursor when it is on it: the caller
+        -- decides what a press does, and a vanished cursor reads as a freeze.
+        local hot = (i == cursor)
+        panel(gfx, bx, by, bw, bh, hot)
+        setColor(gfx, dim and TEXT_DIM or TEXT_ON)
+        gfx.print(label,
+          bx + math.floor((bw - widthWith(font, label)) / 2),
+          by + math.floor((bh - heightWith(font)) / 2))
+      end
+    end)
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
+-- Moves / items / party: a scrolling list of { label, right?, dim? }. `right`
+-- is right-aligned in the secondary colour (PP "12/15", a type name);
+-- opts.title prints a small header, opts.visible overrides the row count.
+function M.drawListPanel(rows, cursor, opts)
+  local gfx = g()
+  if not gfx then return end
+  rows = listOf(rows)
+  opts = type(opts) == "table" and opts or {}
+  local x, y, w, h = M.bandRect(opts)
+  local pad = LIST_PAD_X
+  local title = nil
+  if type(opts.title) == "string" and opts.title ~= "" then title = opts.title end
+  local top = y + LIST_PAD_Y + (title and LIST_TITLE_H or 0)
+  local avail = h - LIST_PAD_Y * 2 - (title and LIST_TITLE_H or 0)
+  local visible = clamp(math.floor(avail / LIST_ROW_MIN), 1, 5)
+  if opts.visible then
+    visible = clamp(math.floor(num(opts.visible, visible)), 1, visible)
+  end
+  local rowH = clamp(math.floor(avail / visible), LIST_ROW_MIN, LIST_ROW_MAX)
+  local count = #rows
+  cursor = clamp(math.floor(num(cursor, 1)), 1, math.max(1, count))
+  local first = 1
+  if cursor > visible then first = cursor - visible + 1 end
+  first = math.min(first, math.max(1, count - visible + 1))
+
+  pcall(function()
+    panel(gfx, x, y, w, h)
+    if title then
+      withFont(gfx, M.FONT_MICRO, function(micro)
+        setColor(gfx, TEXT_MUTED)
+        gfx.print(tostring(title):upper(), x + pad + 2, y + LIST_PAD_Y - 1)
+      end)
+    end
+    withFont(gfx, M.FONT_SECONDARY, function(font)
+      local th = heightWith(font)
+      for slot = 0, visible - 1 do
+        local row = rows[first + slot]
+        if row then
+          local ry = top + slot * rowH
+          local label = row
+          local right, dim = nil, false
+          if type(row) == "table" then
+            label = row.label
+            right = row.right
+            dim = row.dim and true or false
+          end
+          local hot = (first + slot) == cursor
+          if hot then
+            gfx.setColor(1, 1, 1, 0.10)
+            gfx.rectangle("fill", x + pad - 2, ry - 1, w - pad * 2 + 4,
+              rowH, 2, 2)
+            setColor(gfx, PANEL_LINE_HOT)
+            gfx.rectangle("fill", x + pad - 2, ry, 2, rowH - 2)
+          end
+          local ty = ry + math.floor((rowH - th) / 2)
+          local rightW = 0
+          if right ~= nil and tostring(right) ~= "" then
+            right = tostring(right)
+            rightW = widthWith(font, right) + 8
+            setColor(gfx, dim and TEXT_DIM or TEXT_MUTED)
+            gfx.print(right, x + w - pad - rightW + 8, ty)
+          end
+          setColor(gfx, dim and TEXT_DIM or (hot and TEXT_ON or TEXT_MUTED))
+          gfx.print(fitLine(font, tostring(label or ""),
+            w - pad * 2 - rightW - 6), x + pad + 4, ty)
+        end
+      end
+      -- Scroll thumb, only when there is something off-panel.
+      if count > visible then
+        local trackH = visible * rowH
+        local thumbH = math.max(6, trackH * visible / count)
+        local span = trackH - thumbH
+        local at = (count > visible) and ((first - 1) / (count - visible)) or 0
+        gfx.setColor(1, 1, 1, 0.10)
+        gfx.rectangle("fill", x + w - pad + 1, top, 2, trackH, 1, 1)
+        gfx.setColor(1, 1, 1, 0.45)
+        gfx.rectangle("fill", x + w - pad + 1, top + span * at, 2, thumbH, 1, 1)
+      end
+    end)
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
 -- battle: screen state (unused for pure layout; reserved for callers).
 -- ctx: layout context (see plan).
 -- eng: optional engine bag (Font, Sprites, SpriteRenderer, …).
@@ -1246,6 +1878,9 @@ function M.draw(battle, ctx, eng)
         pcall(drawMonIcon, mon, layout.frame,
           hasFx and M.fxSeat(layout.fx, mon.side, mon.seatIndex) or nil)
       end
+      -- Balls / poofs sit above the mons (a ball occludes the seat it lands
+      -- on) but under the HUD, which never yields the field.
+      if hasFx then pcall(drawFieldFx, layout) end
       for _, plate in ipairs(layout.plates) do
         pcall(drawPlate, plate)
       end
