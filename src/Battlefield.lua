@@ -1481,8 +1481,11 @@ local function drawBubble(b)
       local h2 = move and heightWith(moveFont or small) or 0
       local bw = clamp(math.max(w1, w2) + 16, 34, BUBBLE_MAX_W)
       local bh = h1 + h2 + 10
-      local x = ax - bw / 2
-      local y = ay - BUBBLE_TAIL - bh
+      -- The body is clamped to the canvas while the tail stays on the
+      -- speaker: edge seats (the humans sit ~36px from the border) would
+      -- otherwise hang half the callout off-screen.
+      local x = clamp(ax - bw / 2, 4, M.WIDTH - bw - 4)
+      local y = math.max(4, ay - BUBBLE_TAIL - bh)
 
       gfx.setColor(0, 0, 0, 0.3 * alpha)
       gfx.rectangle("fill", x + 1, y + 2, bw, bh, PANEL_R, PANEL_R)

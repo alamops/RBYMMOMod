@@ -239,6 +239,17 @@ return function(game)
     return lo > 0.82 and (hi - lo) < 0.06
   end
 
+  -- Antialiased 13px glyphs blend into the slate panel, so a strict
+  -- near-white test sees almost nothing even when the name renders
+  -- perfectly. Text detection wants "bright and neutral against a dark
+  -- panel", not "paper white" -- keep isNearWhite strict for the GB-chrome
+  -- check, where strictness is the point.
+  local function isBrightText(r, g, b)
+    local lo = math.min(r, g, b)
+    local hi = math.max(r, g, b)
+    return lo > 0.55 and (hi - lo) < 0.12
+  end
+
   -- Fraction of near-white pixels over a canvas-space rect, inset a few
   -- pixels off the rounded-corner border.
   local function nearWhiteFraction(data, imgW, imgH, toScreen, rect, insetPx)
@@ -308,7 +319,7 @@ return function(game)
       for x = x0, x1 do
         local r, g, b = data:getPixel(x, y)
         total = total + 1
-        if isNearWhite(r, g, b) then hit = hit + 1 end
+        if isBrightText(r, g, b) then hit = hit + 1 end
       end
       if total > 0 then
         local frac = hit / total
