@@ -1228,6 +1228,15 @@ function M.new(opts)
     fx = nil,
     draining = nil,
     faintFx = nil,
+    -- Seats holding an arrival that has not had its spawn beat yet: slot index
+    -- -> true, raised by `queueSpawnFx` for an *empty* seat and dropped by the
+    -- `spawnfx` row that pops. `battlefieldSeat` draws nothing while one is
+    -- held, so a monster materialises with its pop rather than standing on the
+    -- arena from the moment the packet was parsed. CoopBattle's `introHide`
+    -- (src/CoopBattle.lua:1067, dropped by the intro `act` row at :957/:995/
+    -- :1027) is the twin. A seat that still has somebody on it is covered by
+    -- `slot.pending` instead -- see `noteSlot`.
+    spawnHide = nil,
     -- The exp strip mid-crawl: { slot, mon, toLevel, toFrac, frames }. The two
     -- clocks it drives (`shownExpFrac` / `shownLevel`) live on the seat's own
     -- `slots` entry beside `shownHp`, not here -- this is only what is moving
@@ -1385,6 +1394,13 @@ end
 function M:battlefieldSeat(slotIndex, isPlayer)
   local slot = self.slots[slotIndex]
   if not slot or not slot.species then return nil end
+  -- An arrival that has not had its spawn beat yet is not on the arena. The
+  -- seat record is already filled -- the referee's field moved the moment the
+  -- packet was parsed and the rules read it from here -- but nothing is drawn
+  -- until the queued `spawnfx` row plays and `applySwap` drops the hold.
+  -- Same shape as the ball flow's hold below (`BALL_HIDE_FX`) and as
+  -- CoopBattle's `introHide` (src/CoopBattle.lua:5030).
+  if self.spawnHide and self.spawnHide[slotIndex] then return nil end
   -- Keep KO'd seats until releasePic clears the sprite, matching classic hold.
   -- A seat whose display clock has not caught up is still falling: dropping it
   -- here would take the bar off the arena in the middle of its own drain.
@@ -1393,7 +1409,17 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     return nil
   end
   local monHint = nil
-  if isPlayer then monHint = self.mine and self.mine[self.active] end
+  if isPlayer then
+    monHint = self.mine and self.mine[self.active]
+    -- ...but only while it still describes who is standing here. `self.active`
+    -- moves at parse, because the referee is already asking this client about
+    -- the monster it just sent; the seat moves at the swap. In the window
+    -- between, the hint is the *arrival's* sheet, and the pic and level pill it
+    -- would furnish belong to a monster that is not on the arena yet.
+    if monHint and slot.pending ~= nil and monHint.species ~= slot.species then
+      monHint = nil
+    end
+  end
   local key = self:speciesKeyFor(slot.species, isPlayer) or slot.species
   local acting = false
   if self.anim and self.anim.slot == slotIndex then acting = true end
@@ -1806,6 +1832,13 @@ function M:onEvent(msg)
     -- queued, like every other effect, so the pop plays with the send line
     -- rather than the instant the packet was parsed.
     self:queueSpawnFx(msg.slot, msg.side)
+    -- Parked behind somebody still finishing their exit (`noteSlot`): the seat
+    -- below is still *theirs*, so everything that describes what is drawn on it
+    -- -- the level pill, the pic, the exp clocks -- is deferred to the swap
+    -- (`arriveOnSeat`, called from `applySwap`). Everything that describes the
+    -- *rules* -- which sheet is out, whether a replacement is still owed --
+    -- stays here, at parse, because the referee is already asking about it.
+    local parked = (self.slots[msg.slot] or {}).pending ~= nil
     -- New mon on our seat drops any Transform/Mimic overlay until the
     -- referee publishes another `moves` list for it.
     if msg.slot == self:mySlot() then
@@ -1822,7 +1855,7 @@ function M:onEvent(msg)
       -- reads as "ask again", and the answer it wants comes off `self.active`,
       -- which `trackActive` has not updated yet this far up the branch.
       local slot = self.slots[msg.slot]
-      if slot then
+      if slot and not parked then
         slot.shownExpFrac = nil
         slot.shownLevel = nil
       end
@@ -1831,21 +1864,22 @@ function M:onEvent(msg)
       -- fill that kept stepping would write the departed monster's target
       -- straight back over the clocks just cleared. The queued-row case is
       -- caught by `startExpFill`'s occupant check; this is the live one.
-      if self.expFilling and self.expFilling.slot == msg.slot then
+      --
+      -- Not while an arrival is parked: the monster the strip is filling for is
+      -- still the one on the seat, and the fill is one of the rows the swap is
+      -- waiting behind. `arriveOnSeat` clears the clocks when it lands.
+      if not parked and self.expFilling and self.expFilling.slot == msg.slot then
         self.expFilling = nil
       end
     end
     if msg.text then
       if msg.slot ~= self:mySlot() then
         self:say(("%s sent out\n%s!"):format(self.peerName, msg.text))
-        self:refreshSlotSprite(msg.slot, false)
+        if not parked then self:refreshSlotSprite(msg.slot, false) end
       else
         self:say(("Go! %s!"):format(msg.text))
-        self:trackActive(msg.text)
-        local mon = self.mine and self.mine[self.active]
-        local slot = self.slots[msg.slot]
-        if slot and mon and mon.level then slot.level = mon.level end
-        self:refreshSlotSprite(msg.slot, true)
+        self:trackActive(msg.text, msg)
+        if not parked then self:arriveOnSeat(msg.slot, true) end
       end
     end
 
@@ -2466,6 +2500,25 @@ end
 -- Record whatever an event said about a field slot.  Every event that names one
 -- carries the HP that slot is now on, so one place reads it and the screen
 -- never has to guess.
+--
+-- **A seat's occupant changes when the queued row says so, never when the
+-- packet is parsed.** That is the invariant this screen and CoopBattle share,
+-- and it is the whole of bug "the sent-out animation plays with the monster
+-- already drawn". A `send` batched behind the knockout it replaces used to
+-- relabel the seat here, at parse: the newcomer stood on the arena for the
+-- two and a half seconds its own pop was still queued behind, and -- worse --
+-- every one of the departing monster's exit rows then refused itself on its
+-- own occupant stamp (`startDrain`, `startFaintFx`, `releasePic` all check
+-- `slot.species ~= row.species`), so the monster that just fainted neither
+-- drained nor sank. It was simply overwritten.
+--
+-- So an arrival into a seat that still has somebody on it is *parked* as
+-- `slot.pending` and installed by `applySwap` where the queued `spawnfx` row
+-- pops. This is CoopBattle's display shadow (`shownBattler` /
+-- `src/CoopBattle.lua:3500-3525`), whose `applySwap` does exactly this for the
+-- same reason and against the same failure. An arrival into an *empty* seat
+-- lands immediately and is covered by `spawnHide` instead (`queueSpawnFx`);
+-- both windows end at the same row.
 function M:noteSlot(msg)
   local index = msg.slot
   if index == nil then return nil end
@@ -2474,8 +2527,47 @@ function M:noteSlot(msg)
     slot = { species = nil, hp = 0, maxHp = 1 }
     self.slots[index] = slot
   end
+  -- While an arrival is parked, the referee is talking about *it*: it is the
+  -- monster the field holds, and the one still drawn is only finishing its
+  -- exit. So a `damage` / `faint` / `status` that lands in the window is
+  -- written to the parked record and never to the seat -- the departing
+  -- monster's numbers are what its own queued rows are still animating
+  -- against. (Only a forced-choice turn resolving while this queue is busy can
+  -- produce one; the bar simply arrives already low, rather than the wrong
+  -- monster's bar falling.)
+  local parked = slot.pending
+  if parked and not (msg.text and (msg.t == "send" or msg.t == "switch")) then
+    if msg.hp ~= nil then
+      parked.hp = msg.hp
+    elseif msg.amount ~= nil and msg.t == "damage" then
+      parked.hp = max(0, (parked.hp or 0) - msg.amount)
+    end
+    if msg.status ~= nil then parked.status = msg.status end
+    if msg.t == "faint" then parked.hp = 0 end
+    return slot
+  end
   local fresh = false
   if msg.text and (msg.t == "send" or msg.t == "switch") then
+    -- Battlefield only. The classic 160x144 path queues no `spawnfx` row
+    -- (`queueSpawnFx` answers false off the arena), so there would be nothing
+    -- to install a parked arrival -- that path relabels at parse exactly as it
+    -- always has.
+    if slot.species ~= nil and self:usesBattlefield() then
+      -- Somebody is still on this seat -- draining, sinking, or merely waiting
+      -- for the `clearPic` behind their faint line. Park the newcomer whole:
+      -- everything the seat is rebuilt from at the swap, and nothing of it
+      -- written here. Deliberately not gated on the two names differing: a
+      -- trainer fielding two of the same species is the case where a relabel
+      -- is *least* visible and most wrong, and the sink it cancels is the same
+      -- sink either way.
+      slot.pending = {
+        species = msg.text,
+        hp = msg.hp,
+        status = msg.status,
+        level = nil,   -- filled by `arriveOnSeat` at the swap, own seat only
+      }
+      return slot
+    end
     slot.species = msg.text
     slot.sprite = nil
     slot.icon = nil
@@ -2505,20 +2597,49 @@ function M:noteSlot(msg)
   return slot
 end
 
--- Which of ours is out, matched by the name the sim narrates it under.
+-- Which of ours is out.
 --
--- Only the *name* crosses back, so a party holding two monsters with the same
--- one is matched to the first -- which is wrong only for the move list, and
--- only for a player who nicknamed two of their team identically.  The
--- alternative is tracking send-outs by counting faints, which is wrong more
--- often and more quietly.
-function M:trackActive(species)
-  for index, mon in ipairs(self.mine or {}) do
-    if mon.species == species or mon.speciesId == species then
+-- **The referee says so where it can.** From round 6 a `send` / `switch` on
+-- this client's own seat carries `mon` -- the 0-based index into the party
+-- this client uploaded, the same space `exp` states its payee in -- so it goes
+-- through the same two-step every other party-addressed field on this wire
+-- takes (`paidSheetIndex`, then `savePartyIndex` wherever a save slot is
+-- wanted). A `mon` the uploaded party has no sheet for is refused rather than
+-- resolved, exactly as `gainExp` refuses one: the alternative is silently
+-- pointing the move list at whichever sheet happens to sit at that number.
+--
+-- **Otherwise the name, preferring a living sheet.** Only the name crosses on
+-- an older stream, and a party holding two monsters under one name would
+-- always match the first -- including a first that is already face down, which
+-- is precisely the monster the referee cannot have sent. Preferring a living
+-- entry mirrors the referee's own `firstLiving` (src/BattleSim/Turn.lua:405),
+-- so both ends land on the same sheet in every case a duplicate name can
+-- produce; the dead-or-alive first match stays as the fallback so a stream
+-- this client cannot reconcile behaves exactly as it did before.
+--
+-- This is `self.active`, which drives the move list, the party rows, the level
+-- pill and the exp strip -- so a mis-point is visible, not merely academic.
+function M:trackActive(species, msg)
+  local mine = self.mine or {}
+  local raw = msg and tonumber(msg.mon)
+  if raw and raw == raw then
+    local index = floor(raw) + 1
+    if index >= 1 and (mine[index] ~= nil or #mine == 0) then
       self.active = index
       return
     end
   end
+  local fallback = nil
+  for index, mon in ipairs(mine) do
+    if mon.species == species or mon.speciesId == species then
+      if (tonumber(mon.hp) or 1) > 0 then
+        self.active = index
+        return
+      end
+      if fallback == nil then fallback = index end
+    end
+  end
+  if fallback ~= nil then self.active = fallback end
 end
 
 -- Map a narrated name back to a pokemon registry id for battle art.
@@ -2616,6 +2737,31 @@ function M:refreshSlotSprite(index, isPlayer)
   else
     slot.sprite = nil
   end
+end
+
+-- The display side of a monster walking onto a seat: the pic, the level the
+-- pill prints, and the two exp clocks the strip is drawn from.
+--
+-- Split out because it happens at one of two moments and never at both. A seat
+-- that was empty is furnished at parse (the `send` branch); a seat somebody was
+-- still standing on is furnished by `applySwap`, at the swap, because until
+-- then every one of these describes the monster that is still being shown out.
+-- Nothing here touches the rules -- `self.active`, `mustReplace`, `liveMoves`
+-- all move at parse, where the referee is already asking about them.
+function M:arriveOnSeat(index, isPlayer)
+  local slot = self.slots[index]
+  if not slot then return false end
+  if isPlayer then
+    -- Cleared rather than recomputed: nil is what `seedExpClock` reads as "ask
+    -- again", and the answer it wants comes off `self.active`, which is already
+    -- pointing at the arrival by the time this runs.
+    slot.shownExpFrac = nil
+    slot.shownLevel = nil
+    local mon = self.mine and self.mine[self.active]
+    if mon and mon.level then slot.level = mon.level end
+  end
+  self:refreshSlotSprite(index, isPlayer)
+  return true
 end
 
 function M:activeMon()
@@ -3350,6 +3496,12 @@ function M:tickMessages(dt, input)
     if type(next) == "table" and next.spawnfx ~= nil then
       -- Nothing waits on the pop: it plays under the send line, which is the
       -- next row up. No dwell, exactly like `clearPic`.
+      --
+      -- The swap goes first: this row is where the seat changes hands, so the
+      -- arrival is installed (or its hold dropped) and *then* the pop is
+      -- emitted over it. Every frame before this one showed the seat as it was
+      -- -- empty, or somebody else's -- which is the point.
+      self:applySwap(next)
       self:emitFx("spawn", next.spawnfx, next.side)
       return true
     end
@@ -3895,10 +4047,88 @@ end
 -- pop starts, and the send line behind it prints on the next tick over the
 -- top of it. Deliberately not in `hasPendingHpFx` either -- a spawn is not a
 -- bar or a body, and a fanfare has no reason to wait on one.
+--
+-- **It is also where the arrival window opens**, for the seat nobody is
+-- standing on.
+--
+-- A seat that already has an occupant is covered by `slot.pending`: the
+-- newcomer is not on the seat record at all yet, so there is nothing to hide
+-- and the monster still being shown out keeps its bar, its pic and its sink.
+-- An *empty* seat -- the intro, and any replacement whose predecessor has
+-- already been released -- has no such cover, because `noteSlot` filled it at
+-- parse: the arrival is on the record and `battlefieldSeat` would draw it.
+-- So that case raises a hold instead, and both windows end at the same row.
+--
+-- The gate matters. Hiding unconditionally is the fix's failure mode: it takes
+-- a KO'd monster off the arena in the middle of its own sink, which is a worse
+-- bug than the one being fixed.
+--
+-- This is the ball flow's `BALL_HIDE_FX` hold (see `startBallFx`) with one
+-- difference worth stating: a ball hold is *held at t == 1* by `stepFx`,
+-- because the row that undoes it may be several rows away. A spawn hold is
+-- dropped by the very row that emits the effect, so it needs no retention at
+-- all -- there is no window in which the hold outlives its own row.
+--
+-- The row names the arrival it was queued for, the same way the drain, the
+-- sink and the release name their occupant: two sends can reach this queue
+-- before either row plays, and a row that installed whatever happened to be
+-- parked would then hand the seat to the *second* newcomer at the *first*
+-- one's pop -- collapsing the exit sequence the park exists to protect.
+-- `hide` is the same stamp for the other window: the row that raised the hold
+-- is the row that drops it.
 function M:queueSpawnFx(index, side)
   if index == nil then return false end
   if not self:usesBattlefield() then return false end
-  self.lines[#self.lines + 1] = { spawnfx = index, side = side }
+  local slot = self.slots[index]
+  local arrive = slot and slot.pending or nil
+  local hide = nil
+  if not arrive then
+    self.spawnHide = self.spawnHide or {}
+    self.spawnHide[index] = true
+    hide = true
+  end
+  self.lines[#self.lines + 1] = {
+    spawnfx = index, side = side, arrive = arrive, hide = hide,
+  }
+  return true
+end
+
+-- The queued `spawnfx` row comes up: this is the frame the arrival is on the
+-- arena, and the only frame on which the seat's occupant is allowed to change.
+--
+-- CoopBattle's `applySwap` (src/CoopBattle.lua:3518), same beat and same
+-- argument -- there the shadow is dropped and `noteBattlefieldSpawn` fires;
+-- here the parked record is installed and the pop is emitted. Both windows the
+-- send opened close here: the hold on an empty seat, and the park on an
+-- occupied one.
+function M:applySwap(row)
+  if type(row) ~= "table" then return false end
+  local index = row.spawnfx
+  local slot = self.slots[index]
+  -- The hold this row raised, dropped by this row. A later row's hold is not
+  -- this row's to release.
+  if row.hide and self.spawnHide then self.spawnHide[index] = nil end
+  local arrival = row.arrive
+  -- Superseded: a second send landed on this seat before either row played, so
+  -- the park no longer describes this row's newcomer. The row behind is the one
+  -- that installs; the seat keeps who it is showing until then.
+  if not (arrival and slot and slot.pending == arrival) then return false end
+  slot.pending = nil
+  slot.species = arrival.species
+  slot.sprite = nil
+  slot.icon = nil
+  slot.koHold = nil
+  -- Same reading of a first HP as `noteSlot`'s: what the referee says a monster
+  -- is on the moment it walks out is the biggest bar this seat has ever been
+  -- told about, unless it walked in already hurt.
+  slot.hp = arrival.hp or 0
+  if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
+  -- A monster that just walked on has nothing to animate down from, so its bar
+  -- starts where the referee says it is -- and the predecessor's descent, which
+  -- ended on this same record, must not be inherited.
+  slot.shownHp = slot.hp
+  slot.status = arrival.status
+  self:arriveOnSeat(index, index == self:mySlot())
   return true
 end
 
@@ -4265,6 +4495,34 @@ function M:snapDisplay()
   self.draining = nil
   self.faintFx = nil
   self.expFilling = nil
+  -- The arrival window closes here too, and it closes *forwards*: this is
+  -- "put the arena where the referee says the field is", and the referee says
+  -- the newcomer is out. A parked arrival is therefore installed rather than
+  -- dropped -- discarding it would leave the seat showing a monster the field
+  -- no longer holds -- and any hold on an empty seat is released, so a battle
+  -- that ends (or is re-synced) mid-window can never strand a seat invisible.
+  -- Same shape as the ball flow above, for the same reason.
+  self.spawnHide = nil
+  for index, slot in pairs(self.slots or {}) do
+    if type(slot) == "table" and slot.pending then
+      local arrival = slot.pending
+      slot.pending = nil
+      slot.species = arrival.species
+      slot.sprite = nil
+      slot.icon = nil
+      slot.koHold = nil
+      slot.hp = arrival.hp or 0
+      if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
+      slot.status = arrival.status
+      -- No `arriveOnSeat` here: `exit` calls this on stubs that carry neither a
+      -- game nor a party, and the pic is refreshed by the next draw anyway
+      -- (`battlefieldSeat` resolves a nil sprite through `seatFront`). The
+      -- clocks below are welded by the loop that follows.
+      slot.shownExpFrac = nil
+      slot.shownLevel = nil
+      if index ~= nil then self:refreshSlotSprite(index, index == self:mySlot()) end
+    end
+  end
   -- And the two clocks back in step: a descent abandoned half way is a bar
   -- that would otherwise sit at a number nobody holds until the next drain.
   for _, slot in pairs(self.slots or {}) do

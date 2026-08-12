@@ -1956,7 +1956,23 @@ end
 --
 -- ORIGINAL vector art: two hemispheres, an equator band and a button, built
 -- from primitives. Nothing here is derived from ROM pixels, and nothing may
--- ever be. `angle` spins / rocks the ball; the band and button ride it.
+-- ever be. `angle` spins / rocks the ball; the band and button are painted on
+-- the shell, so they ride it. The rim shade and the specular highlight are
+-- light falling on the ball, not paint -- they stay put in world space while
+-- the shell spins underneath. Every knob below is a named local so a frame
+-- pulled from a live run can be tuned without hunting through the body.
+local BALL_SHADE_DY = 0.12    -- lower-rim shade offset, fraction of r (down)
+local BALL_SHADE_COLOR = { 0.62, 0.63, 0.67 } -- shade tone (cool grey, not black)
+local BALL_HL_DX = -0.32      -- highlight offset, fraction of r (world-left)
+local BALL_HL_DY = -0.32      -- highlight offset, fraction of r (world-up)
+local BALL_HL_R = 0.30        -- highlight radius, fraction of r
+local BALL_HL_ALPHA = 0.5     -- highlight opacity multiplier
+local BALL_BAND_HALF = 0.22   -- equator band half-height, fraction of r
+local BALL_BAND_LINE_ALPHA = 0.35 -- lighter seam line on the band, opacity mult
+local BALL_BUTTON_R = 0.34       -- button outer (dark border) radius, fraction of r
+local BALL_BUTTON_INNER_R = 0.20 -- button white face radius, fraction of r
+local BALL_BUTTON_DOT_R = 0.09   -- tiny center dot radius, fraction of r
+local BALL_OUTLINE_COLOR = { 0.06, 0.06, 0.08 } -- outline, a touch darker than before
 local function drawPokeball(gfx, x, y, r, angle, alpha)
   alpha = clamp(num(alpha, 1), 0, 1)
   angle = num(angle, 0)
@@ -1964,25 +1980,50 @@ local function drawPokeball(gfx, x, y, r, angle, alpha)
   local function point(lx, ly)
     return x + lx * ca - ly * sa, y + lx * sa + ly * ca
   end
+  -- Saved/restored around the seam line below, same idiom as drawPoof: a
+  -- throw mid-body must never leave line width at 1 for whatever draws next.
+  local lw = gfx.getLineWidth and gfx.getLineWidth() or 1
 
   -- No contact shadow here: the ball spends most of a throw in the air, and a
   -- shadow riding along under it kills the height the arc is drawing.
+  -- Lower-rim shade first, offset down and covered by the white disc except
+  -- for a thin crescent at the bottom -- cheap volume cue via two circles,
+  -- no clipping required. World-space: it does not take `angle`.
+  gfx.setColor(BALL_SHADE_COLOR[1], BALL_SHADE_COLOR[2], BALL_SHADE_COLOR[3], alpha)
+  gfx.circle("fill", x, y + r * BALL_SHADE_DY, r)
   -- Lower (white) hemisphere is the whole disc; the red cap covers the top.
   gfx.setColor(0.95, 0.95, 0.96, alpha)
   gfx.circle("fill", x, y, r)
   gfx.setColor(0.86, 0.22, 0.20, alpha)
   gfx.arc("fill", "pie", x, y, r, math.pi + angle, math.pi * 2 + angle)
   -- Equator band: a rotated strip, not a line, so it keeps its width spinning.
-  local bx1, by1 = point(-r, -r * 0.22)
-  local bx2, by2 = point(r, -r * 0.22)
-  local bx3, by3 = point(r, r * 0.22)
-  local bx4, by4 = point(-r, r * 0.22)
+  local bx1, by1 = point(-r, -r * BALL_BAND_HALF)
+  local bx2, by2 = point(r, -r * BALL_BAND_HALF)
+  local bx3, by3 = point(r, r * BALL_BAND_HALF)
+  local bx4, by4 = point(-r, r * BALL_BAND_HALF)
   gfx.setColor(0.10, 0.10, 0.13, alpha)
   gfx.polygon("fill", bx1, by1, bx2, by2, bx3, by3, bx4, by4)
-  gfx.circle("fill", x, y, r * 0.34)
-  gfx.setColor(0.97, 0.97, 0.98, alpha)
-  gfx.circle("fill", x, y, r * 0.2)
+  -- A 1px lighter seam down the middle of the band, riding the same spin, so
+  -- the band reads as a raised part catching light rather than a flat block.
+  if gfx.setLineWidth then pcall(gfx.setLineWidth, 1) end
+  gfx.setColor(0.45, 0.45, 0.50, alpha * BALL_BAND_LINE_ALPHA)
+  local lx1, ly1 = point(-r, 0)
+  local lx2, ly2 = point(r, 0)
+  gfx.line(lx1, ly1, lx2, ly2)
+  if gfx.setLineWidth then pcall(gfx.setLineWidth, lw) end
+  -- Button: dark border ring, white face, tiny dark center dot. Painted on
+  -- the shell, so it rides the spin like the band.
   gfx.setColor(0.10, 0.10, 0.13, alpha)
+  gfx.circle("fill", x, y, r * BALL_BUTTON_R)
+  gfx.setColor(0.97, 0.97, 0.98, alpha)
+  gfx.circle("fill", x, y, r * BALL_BUTTON_INNER_R)
+  gfx.setColor(0.10, 0.10, 0.13, alpha)
+  gfx.circle("fill", x, y, r * BALL_BUTTON_DOT_R)
+  -- Specular highlight: fixed world-up-left, never takes `angle` -- it is the
+  -- light source's reflection, not part of the shell's rotating pattern.
+  gfx.setColor(1, 1, 1, alpha * BALL_HL_ALPHA)
+  gfx.circle("fill", x + r * BALL_HL_DX, y + r * BALL_HL_DY, r * BALL_HL_R)
+  gfx.setColor(BALL_OUTLINE_COLOR[1], BALL_OUTLINE_COLOR[2], BALL_OUTLINE_COLOR[3], alpha)
   gfx.circle("line", x, y, r)
   gfx.setColor(1, 1, 1, 1)
 end

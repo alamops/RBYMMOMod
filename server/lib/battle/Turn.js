@@ -1404,11 +1404,19 @@ class Battle {
           mon.leechSeed = null;
           mon.disable = null;
           this._clearTrapsFrom(fighter.slot);
+          // `mon` is the index the referee just fielded -- `choice.slot`,
+          // already normalised to a party position by `_normaliseChoice`. This
+          // is the one that matters most: a forced post-faint replacement lands
+          // here too, so without it a seat holding two of a species re-fields
+          // the fallen copy on the client while the referee holds the living
+          // one.
           this._emit('switch', {
             slot: fighter.slot, side: fighter.side, text: mon.species,
+            mon: choice.slot - 1,
           });
           this._emit('send', {
             slot: fighter.slot, side: fighter.side, hp: mon.hp, text: mon.species,
+            mon: choice.slot - 1,
           });
         }
       }
@@ -2966,11 +2974,17 @@ function attempt(opts) {
   // lose an earlier seat's entry, it re-derives it.
   for (const fighter of self.fighters) self._refield(fighter);
 
+  // `mon` is the party index the referee itself fielded (here: `firstLiving`),
+  // zero-based like the `exp` event's. A client cannot re-derive it from `text`:
+  // a party may hold the same species twice, and resolving the name against the
+  // party then picks whichever copy comes first -- which is how a fainted
+  // duplicate came back onto the field. The index is unambiguous.
   for (const fighter of self.fighters) {
     const mon = activeMon(fighter);
     if (mon) {
       self._emit('send', {
         slot: fighter.slot, side: fighter.side, hp: mon.hp, text: mon.species,
+        mon: fighter.active - 1,
       });
     }
   }

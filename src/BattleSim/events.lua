@@ -87,6 +87,12 @@ M.KINDS = {
 -- field slot: vanilla pays every mon that fought the fallen foe and lived,
 -- benched included, and a benched one has no field slot to name.  It rides
 -- alongside `slot`, which stays the owning fighter's seat.
+--
+-- `send` and `switch` carry it for a different reason: they used to name the
+-- monster coming in by species alone, and a party holding two of a species has
+-- no way to say which.  A client resolving the name picked the first match,
+-- which is how a fainted duplicate walked back onto the field.  The referee
+-- already knows the index it chose, so it says it.
 M.FIELDS = {
   battle       = "string",
   seq          = "number",
@@ -133,11 +139,13 @@ M.SHAPES = {
   drain     = { slot = true, side = true, amount = true, hp = true },
   faint     = { slot = true, side = true, text = true,
                 amount = "1 when the seat still has a living bench (mustReplace)" },
-  send      = { slot = true, side = true, hp = true, text = "the species" },
+  send      = { slot = true, side = true, hp = true, text = "the species",
+                mon = "party index (0-5) of the mon the referee fielded" },
   status    = { slot = true, side = true, status = "absent means cleared",
                 text = true },
   stat      = { slot = true, side = true, amount = true, text = true },
-  switch    = { slot = true, side = true, text = "the species coming in" },
+  switch    = { slot = true, side = true, text = "the species coming in",
+                mon = "party index (0-5) of the mon coming in" },
   item      = { slot = true, side = true, text = "the item id",
                 amount = "1 when a vitamin applied (client save writeback)" },
   run       = { slot = true, side = true, text = true },

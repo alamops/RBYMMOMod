@@ -16314,12 +16314,24 @@ end)()
      "...and so does the release queued behind its line")
 
   -- The replacement, batched behind the KO exactly as the referee sends it.
+  --
+  -- The seat does *not* change hands here any more. A send into an occupied
+  -- seat parks the arrival (`slot.pending`) and the queued `spawnfx` row
+  -- installs it -- so the monster that just fainted keeps the seat, and its
+  -- drain, sink and release all still name the occupant that is standing on
+  -- it. Relabelling at parse was what cancelled all three of them (every one
+  -- refuses on `slot.species ~= row.species`), which is why a KO under a
+  -- batched replacement neither drained nor sank and the newcomer stood on the
+  -- arena for the two and a half seconds its own pop was still queued behind.
   send({ t = "send", slot = 2, side = "b", hp = 44, text = "PIDGEY" })
-  eq(f.slots[2].species, "PIDGEY", "the seat has already changed hands")
+  eq(f.slots[2].species, "RATT",
+     "the seat is still the fallen monster's until the row that hands it over")
+  eq(f.slots[2].pending and f.slots[2].pending.species, "PIDGEY",
+     "...with the arrival parked on it, whole, waiting for its spawn row")
   -- Stand a pic on the seat: headless there is no art to load, and the sprite
-  -- field is precisely what a stale release would nil out.
-  f.slots[2].sprite = "PIDGEY-PIC"
-  f.slots[2].icon = "PIDGEY-ICON"
+  -- field is precisely what the release takes down.
+  f.slots[2].sprite = "RATT-PIC"
+  f.slots[2].icon = "RATT-ICON"
 
   local sawFaintFx = false
   local guard = 0
@@ -16331,13 +16343,17 @@ end)()
     end
   end
   check(guard < 900, "the batched queue still drains to empty in bounded frames")
-  check(not sawFaintFx,
-        "the stale sink never plays: the newcomer is never dropped through the "
-        .. "floor under a line that named the monster it replaced")
-  eq(f.slots[2].sprite, "PIDGEY-PIC",
-     "and the stale release is refused too -- the arrival's pic survives the "
-     .. "row filed against the mon that left")
-  eq(f.slots[2].icon, "PIDGEY-ICON", "...icon included")
+  check(sawFaintFx,
+        "the sink plays: it belongs to the monster that fainted, which is still "
+        .. "the one on the seat when the row comes up")
+  eq(f.slots[2].species, "PIDGEY",
+     "and the swap lands at the spawn row -- the seat changes hands exactly "
+     .. "once, on the frame the arrival pops onto the arena")
+  eq(f.slots[2].pending, nil, "...with nothing left parked behind it")
+  eq(f.slots[2].sprite, nil,
+     "the release took the fallen monster's pic down, and the arrival's is "
+     .. "re-resolved from its own species (nil headless, where there is no art)")
+  eq(f.slots[2].icon, nil, "...icon included")
   eq(f.slots[2].shownHp, 44,
      "the bar is left welded to the newcomer's truth, never drained to the 0 "
      .. "the KO was heading for")
@@ -18516,14 +18532,25 @@ end
     local levelAfterAward, expAfterAward = mine.level, mine.exp
 
     send(screen, "b-switch", { t = "send", slot = 0, side = "a", text = "PIDGEOTTISH", hp = 40 })
-    eq(screen.slots[0].shownExpFrac, nil,
-       "the switch clears the strip on the spot -- a departed monster's "
-       .. "progress must not sit under the newcomer's name")
-    eq(screen.slots[0].shownLevel, nil, "...and the pill too")
+    -- The clocks are *not* cleared at parse any more, and for the same reason
+    -- the seat is not relabelled at parse: the monster the strip describes is
+    -- still the one standing on it, and the fill it is waiting on is one of the
+    -- rows the arrival is queued behind. The arrival is parked instead, and
+    -- `arriveOnSeat` clears both clocks at the swap.
+    eq(screen.slots[0].pending and screen.slots[0].pending.species, "PIDGEOTTISH",
+       "the switch parks the arrival rather than relabelling the seat")
+    check(screen.slots[0].shownExpFrac ~= nil,
+       "...so the departing monster's strip is still its own until the swap")
     eq(mine.level, levelAfterAward, "...but the save mon keeps whatever it was already paid")
     eq(mine.exp, expAfterAward, "...exp included")
 
     pump(screen)
+    eq(screen.slots[0].species, "PIDGEOTTISH",
+       "the swap lands with the queue -- the seat is the newcomer's afterwards")
+    eq(screen.slots[0].shownExpFrac, nil,
+       "and the strip is cleared there -- a departed monster's progress must "
+       .. "not sit under the newcomer's name")
+    eq(screen.slots[0].shownLevel, nil, "...and the pill too")
     check(not screen:hasPendingHpFx(),
           "once the queue drains, nothing is still pending -- the dropped row "
           .. "resolved on the spot rather than wedging the queue")

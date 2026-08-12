@@ -49,6 +49,17 @@ here must match `manifest.version`.
   `server/lib/battle/Turn.js`); Gen2 (`BattleSim2` / `lib/battle2`)
   stays exp-free. `exp` joins `Wire.BATTLE_EVENTS` and
   `server/lib/sanitize.js`'s event whitelist in lockstep.
+- **Send-outs materialize during their spawn beat.** A sent-out mon no
+  longer stands on the field before its animation: the arrival is parked
+  until its queued spawn row plays (empty seats stay hidden until the
+  pop), which also restores the departing mon's drain, sink and release
+  in refereed replacements — the parse-time relabel had been silently
+  cancelling all three. Referee send/switch events now carry the party
+  index of the fielded mon, so duplicate-species NPC teams can no longer
+  resurrect a fainted mon on the arena (the client also prefers living
+  namesakes, and both sims refuse to field a monster at 0 HP). The
+  vector pokeball got volume shading, a fixed specular over the spinning
+  shell, and a crisper band and button — still 100% programmatic art.
 - **Canonical attack chronology.** Every attack now plays its beats in
   strict order on the arena: the trainer's callout stands alone, then the
   attacker lunges, then the hit flashes with the bar frozen, then the HP

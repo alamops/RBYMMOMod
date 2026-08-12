@@ -3033,7 +3033,28 @@ function M:playEvents(events)
       local leaving = showing(event.slot)
       -- Sim truth, applied *now* rather than in the queue: a replayer's
       -- signature has to match the host's the moment the event is applied.
-      if slot and self:replaying() then self.sim:sendOut(slot, event.index) end
+      --
+      -- ...unless the row names a monster this screen has at 0 HP. No referee
+      -- fields a fainted monster, so such a row is a resolution that went wrong
+      -- upstream (a name that matched two of one species, a `mon` stamp counted
+      -- in a shifted party) -- and fielding it anyway is what put a knocked-out
+      -- POKeMON back on the field standing. The seat is left empty instead: one
+      -- monster missing until the next send is a smaller lie than a dead one
+      -- fighting, and the signature it protects is already broken by the time
+      -- this can fire. CoopSim.sendOut refuses the same thing from the inside;
+      -- this is the outer layer, and it is the one that can still name the row.
+      local coming = slot and event.index and (slot.party or {})[event.index]
+      if slot and self:replaying() then
+        if coming and (coming.hp or 0) <= 0 then
+          mod.log:warn("a refereed send-out named a fainted POKeMON (seat %s, "
+            .. "party slot %s), so the seat was left empty rather than putting "
+            .. "it back on the field; report this with the trainer fought if "
+            .. "the field stays a POKeMON short",
+            tostring(event.slot), tostring(event.index))
+        else
+          self.sim:sendOut(slot, event.index)
+        end
+      end
       -- ...and the *display* follows at its own pace. The outgoing monster is
       -- held in the shadow so it keeps being drawn -- and keeps draining and
       -- sinking -- while its rows play, and the new one is queued behind them
@@ -7903,13 +7924,20 @@ function M:medRows(msg)
     say(msg.text)
 
   elseif kind == "send" then
-    -- The referee narrates a monster by name and never by party position, so
-    -- the position is ours to find -- and it has to be found, because the row
-    -- `playEvents` wants is what tells `sim:sendOut` which battler to build.
-    -- A name that matches nothing is a send-out this screen cannot draw; the
-    -- line is still printed, so the field being one monster behind at least has
-    -- an explanation on it.
-    local at = slot and self:medPartyIndex(slot, msg.text)
+    -- Which of that seat's party is coming out, because the row `playEvents`
+    -- wants is what tells `sim:sendOut` which battler to build.
+    --
+    -- The referee stamps the position on the event (`mon`) and also narrates the
+    -- monster by name, and `medSendIndex` reads them in that order: the stamp is
+    -- the referee's own answer, the name is this screen's reconstruction of it,
+    -- and a stamp that does not fit this party falls back to the name rather than
+    -- fielding a number. An older referee sends no stamp at all and the name is
+    -- the whole of it, which is what this did before.
+    --
+    -- Neither matching is a send-out this screen cannot draw; the line is still
+    -- printed, so the field being one monster behind at least has an explanation
+    -- on it.
+    local at = slot and self:medSendIndex(index, slot, msg)
     say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
       tostring(msg.text)))
     if at then rows[#rows + 1] = { kind = "send", slot = index, index = at } end
@@ -8034,7 +8062,9 @@ function M:medRows(msg)
   elseif kind == "switch" then
     -- Already said in the `msg` beside it, and the `send` that follows every
     -- switch -- printing `text` (a species) would say the same thing twice in
-    -- worse words.
+    -- worse words. Its `mon` stamp is not read here either: the referee emits
+    -- the pair together and carries the same stamp on both, so the `send` above
+    -- is the one place a seat's occupant changes.
 
   elseif kind == "turn" or kind == "over" then
     -- Neither draws anything. `turn` is the signal that the batch collected so
@@ -8070,21 +8100,93 @@ end
 --
 -- Matched through `Wire.name`, because that is what the *uploaded* species went
 -- through: comparing a raw nickname against a sanitised one would miss every
--- monster whose name carries punctuation the sanitiser drops. A party holding two
--- monsters with the same name matches the first, which is wrong only for a player
--- who nicknamed two of their team identically -- and the alternative, counting
--- faints to track send-outs, is wrong more often and more quietly.
+-- monster whose name carries punctuation the sanitiser drops.
+--
+-- **A name can name two monsters, and in a coop_npc it usually does.** The
+-- earlier reading of this -- "wrong only for a player who nicknamed two of their
+-- team identically" -- was wrong about who hits it: an NPC trainer carrying two
+-- of the same species is ordinary, and src/Coop.lua:1938 deals a trainer's team
+-- alternately into the two ownerless seats, so both copies land in *one* seat and
+-- every replacement send for it collides. Matching the first entry then fielded
+-- the corpse the referee had just knocked down -- a monster standing up again one
+-- KO later, with `slot.active` left disagreeing with the referee for the rest of
+-- the fight.
+--
+-- So a living match wins and a fainted one is only the fallback. That is the
+-- client-side mirror of the rule the referee picks by (`firstLiving`,
+-- src/BattleSim/Turn.lua:405-411, and the bench search `_bestSeBench` builds on
+-- it): the referee never fields a monster at 0 HP, so a living namesake is always
+-- the better reading of the same word. The fallback is kept rather than returning
+-- nil so a client whose HP has drifted from the referee's still draws *something*
+-- for the send -- and `playEvents` refuses to field it, see the guard there.
+--
+-- Counting faints to track send-outs is still wrong more often and more quietly;
+-- the actual cure for the residual (two *living* namesakes in one seat) is the
+-- referee's own `mon` stamp, resolved ahead of this by `medSendIndex`.
 function M:medPartyIndex(slot, species)
   if not (slot and type(species) == "string") then return nil end
   local data = self.game and self.game.data
+  local fallback = nil
   for i, mon in ipairs(slot.party or {}) do
     local def = data and (data.pokemon or {})[mon.species]
     local name = mon.nickname
     if type(name) ~= "string" or name == "" then name = def and def.name end
     if type(name) ~= "string" or name == "" then name = mon.species end
-    if Wire.name(name) == species then return i end
+    if Wire.name(name) == species then
+      if (mon.hp or 0) > 0 then return i end
+      if fallback == nil then fallback = i end
+    end
   end
-  return nil
+  return fallback
+end
+
+-- Which party position the referee *said* it fielded, when it said one.
+--
+-- `send` / `switch` carry `mon`: the 0-based position of the monster the referee
+-- put on the field. It is the same field a mediated `exp` row already carries
+-- (src/BattleSim/Turn.lua:2538, `winner.index - 1`) and it rides the wire on the
+-- same sanitiser -- `Wire.battleEvent` bounds `mon` for every kind, not for `exp`
+-- alone (src/Wire.lua:1706) -- so nothing on the transport had to change for it.
+--
+-- It is preferred over the name because it is the referee's own answer rather
+-- than this screen's reconstruction of it, which closes the one case
+-- `medPartyIndex` cannot read at all: two *living* monsters with the same name in
+-- one seat, where the referee picked the second. A referee that predates the
+-- stamp sends none, and the name is then the whole of the answer -- which is what
+-- this screen did before, unchanged.
+--
+-- Two things it is not:
+--
+--   * **Not the same counting space for our own seat.** The referee counts in the
+--     sheets this client uploaded, and `Mediated.snapshotMons` skips a monster it
+--     cannot describe, so one skip shifts every index after it. Our own seat is
+--     therefore translated sheet -> `sheet.slot` -> party position by
+--     `medPartySlot`, exactly as `gainExp` translates the `mon` on a mediated
+--     `exp` row. An NPC seat has no sheets on this client to translate through
+--     (`npcMons` interleaves both ownerless seats into one list and the hub deals
+--     it back out, src/Hub.lua:1384-1392), so its index is read straight -- and
+--     the checks below are what stands in for the translation.
+--   * **Not trusted blind.** Out of range, or naming a monster this screen has at
+--     0 HP, means the two sides are counting differently -- an older referee, a
+--     skipped sheet, a lossy stream. Either way the name is the better reading,
+--     so `nil` here falls back to it rather than fielding whatever the number
+--     happened to land on.
+function M:medStampIndex(index, slot, mon)
+  local at = tonumber(mon)
+  if not (slot and at) then return nil end
+  at = math.floor(at) + 1
+  if at < 1 then return nil end
+  if index == self.mine then at = self:medPartySlot(at) end
+  local pick = at and (slot.party or {})[at]
+  if not pick then return nil end
+  if (pick.hp or 0) <= 0 then return nil end
+  return at
+end
+
+-- The referee's stamp first, its word second.
+function M:medSendIndex(index, slot, msg)
+  return self:medStampIndex(index, slot, msg and msg.mon)
+      or self:medPartyIndex(slot, msg and msg.text)
 end
 
 -- One thing that happened, in order.

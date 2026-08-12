@@ -968,4 +968,111 @@ do
   eq(mon.stats.attack, 52, "attack rises by the √EV contribution without Stats.calc")
 end
 
+-- ------------------------------------------------------------------
+-- 11. the arrival window: a monster is on the arena when its row says so
+-- ------------------------------------------------------------------
+--
+-- The seat record moves with the referee -- it is what the rules are read from
+-- -- but nothing is *drawn* on the arena until the queued `spawnfx` row plays.
+-- Two mechanisms, one for each state a seat can be in when a send lands, and
+-- both close on that same row: `spawnHide` for an empty seat (the intro), and
+-- `slot.pending` for a seat somebody is still standing on (a switch, or a
+-- replacement batched behind the KO it replaces). CoopBattle's `introHide` and
+-- its display shadow / `applySwap` are the twins.
+
+do
+  local arena = harness("host")
+  arena.game.input = fakeInput()
+  arena.open()
+  local a = arena.sessions.fight
+  arena.sessions:onBattleReady({
+    battle = "7", mode = "1v1", sides = { a = { "me" }, b = { "peer1" } },
+  })
+  check(a:usesBattlefield(), "the arena path is the one under test")
+  local n = 0
+  local function ev(fields)
+    n = n + 1
+    fields.battle = "7"; fields.seq = n
+    arena.sessions:onBattleEvent(fields)
+  end
+  local function drain(limit)
+    local guard = 0
+    while #a.lines > 0 and guard < (limit or 900) do
+      a:update(1 / 60); guard = guard + 1
+    end
+    return guard
+  end
+
+  -- The intro. Both seats are filled at parse and neither is drawn.
+  ev({ t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  eq(a.slots[2].species, "PIDGEY", "the seat record follows the referee at parse")
+  eq(a:battlefieldSeat(2, false), nil,
+     "...but nothing is on the arena until the spawn row: an empty seat is held")
+  eq(a:battlefieldSeat(0, true), nil, "...on our own side too")
+  check(drain() < 900, "the intro queue drains in bounded frames")
+  check(a:battlefieldSeat(2, false) ~= nil,
+        "once the spawn rows have played, both seats draw")
+  check(a:battlefieldSeat(0, true) ~= nil, "...ally included")
+  check(a.spawnHide == nil or next(a.spawnHide) == nil,
+        "and no hold is left standing behind them")
+
+  -- A replacement batched behind the KO: the seat is the fallen monster's
+  -- until the swap, which is what lets its drain and sink play at all.
+  ev({ t = "damage", slot = 2, hp = 0, amount = 24 })
+  ev({ t = "faint", slot = 2, text = "PIDGEY" })
+  ev({ t = "send", slot = 2, text = "RATTATA", hp = 21 })
+  eq(a.slots[2].species, "PIDGEY",
+     "a send into an occupied seat does not relabel it")
+  eq(a.slots[2].pending and a.slots[2].pending.species, "RATTATA",
+     "...the arrival is parked instead")
+  eq(a.slots[2].hp, 0, "...and the fallen monster's own numbers are left alone")
+  local seat = a:battlefieldSeat(2, false)
+  eq(seat and seat.name, "PIDGEY", "so the arena still shows who is falling")
+  local sawSink, drawnBeforeSwap = false, nil
+  local guard = 0
+  while #a.lines > 0 and guard < 900 do
+    a:update(1 / 60); guard = guard + 1
+    for _, e in ipairs(a.fx or {}) do
+      if e.kind == "faint" then sawSink = true end
+    end
+    local live = a:battlefieldSeat(2, false)
+    if live and live.name == "RATTATA" and drawnBeforeSwap == nil then
+      drawnBeforeSwap = sawSink
+    end
+  end
+  check(guard < 900, "the batched queue drains in bounded frames")
+  check(sawSink, "the KO sinks -- its rows still name the occupant they were filed for")
+  eq(drawnBeforeSwap, true,
+     "and the newcomer is first drawn only after that sink, at its own spawn row")
+  eq(a.slots[2].species, "RATTATA", "the seat changes hands exactly once, there")
+  eq(a.slots[2].pending, nil, "...leaving nothing parked")
+  eq(a.slots[2].shownHp, 21, "...and the bar starts where the referee put it")
+
+  -- Teardown: a battle ending mid-window strands neither a hold nor a park.
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  check(a.slots[2].pending ~= nil, "a fresh arrival is parked")
+  a:snapDisplay()
+  eq(a.slots[2].species, "PIDGEY",
+     "snapDisplay closes the window forwards -- the field is where the referee "
+     .. "says it is, not where the queue had gotten to")
+  eq(a.slots[2].pending, nil, "...with nothing parked behind it")
+  eq(a.spawnHide, nil, "...and no seat left hidden")
+end
+
+-- The classic 160x144 path queues no spawn row, so it must not park anything:
+-- there would be nothing to install it.
+do
+  local classic = setmetatable({
+    game = { data = { type_chart = { generation = 2 } } },
+    slots = { [2] = { species = "PIDGEY", hp = 24, maxHp = 24, shownHp = 24 } },
+    lines = {},
+  }, { __index = Mediated })
+  check(not classic:usesBattlefield(), "the Gen2-shaped screen is off the arena")
+  classic:noteSlot({ t = "send", slot = 2, text = "RATTATA", hp = 21 })
+  eq(classic.slots[2].species, "RATTATA",
+     "off the arena a send relabels at parse exactly as it always did")
+  eq(classic.slots[2].pending, nil, "...and parks nothing that could never land")
+end
+
 T.finish("mediated_battle_client")

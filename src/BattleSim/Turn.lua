@@ -546,11 +546,17 @@ function M.create(opts)
   -- lose an earlier seat's entry, it re-derives it.
   for _, fighter in ipairs(self.fighters) do self:_refield(fighter) end
 
+  -- `mon` is the party index the referee itself fielded (here: `firstLiving`),
+  -- zero-based like the `exp` event's.  A client cannot re-derive it from
+  -- `text`: a party may hold the same species twice, and resolving the name
+  -- against the party then picks whichever copy comes first -- which is how a
+  -- fainted duplicate came back onto the field.  The index is unambiguous.
   for _, fighter in ipairs(self.fighters) do
     local mon = activeMon(fighter)
     if mon then
       self:_emit("send", { slot = fighter.slot, side = fighter.side,
-                           hp = mon.hp, text = mon.species })
+                           hp = mon.hp, text = mon.species,
+                           mon = fighter.active - 1 })
     end
   end
 
@@ -1418,10 +1424,16 @@ function Battle:_resolveSwitches()
         mon.leechSeed = nil
         mon.disable = nil
         self:_clearTrapsFrom(fighter.slot)
+        -- `mon` is the index the referee just fielded -- `choice.slot`, already
+        -- normalised to a party position by `_normaliseChoice`.  This is the
+        -- one that matters most: a forced post-faint replacement lands here
+        -- too, so without it a seat holding two of a species re-fields the
+        -- fallen copy on the client while the referee holds the living one.
         self:_emit("switch", { slot = fighter.slot, side = fighter.side,
-                               text = mon.species })
+                               text = mon.species, mon = choice.slot - 1 })
         self:_emit("send", { slot = fighter.slot, side = fighter.side,
-                             hp = mon.hp, text = mon.species })
+                             hp = mon.hp, text = mon.species,
+                             mon = choice.slot - 1 })
       end
     end
   end

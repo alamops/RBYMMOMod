@@ -162,10 +162,40 @@ end
 -- the battle sprite -- the three things `Damage.compute` and the renderer read
 -- and neither of which this file should be inventing. The fallback exists for
 -- the suite, which has no engine to ask.
-function M:sendOut(slot, index)
+-- `trusted` is the one opt-out, and only `restore` passes it: see below.
+function M:sendOut(slot, index, trusted)
   local mon = slot.party[index]
   if not mon then
     slot.battler = nil
+    return nil
+  end
+  -- A fainted monster is never fielded.
+  --
+  -- Every caller that decides *which* monster comes next already screens for a
+  -- living one -- `hasReserve` skips hp 0, and `runSwitch` / `replace` refuse
+  -- the pick outright -- so nothing legitimate is turned away here. This is the
+  -- floor under all of them: a resurrection is not a drawing glitch, it is a
+  -- monster acting, taking a turn and being targeted after it has fallen, and
+  -- the seat is better left showing the monster it already had than showing a
+  -- corpse the rest of the field will happily trade moves with.
+  --
+  -- Refused rather than corrected: picking a substitute here would put a second
+  -- "who comes next" rule in the file that already has one, and a host and a
+  -- replayer that each guessed would diverge.  The seat stays as it was and the
+  -- caller's own screening is what has to be fixed.
+  --
+  -- `restore` is exempt, and it is the only path that is: it runs on a replayer
+  -- that has *already* disagreed with the host about this field, so local HP is
+  -- exactly the fact under suspicion -- a host mid-faint legitimately still has
+  -- the fallen monster out, and the snapshot's own `hp` is applied to whatever
+  -- this call fields, immediately after it. Refusing there would leave the
+  -- previous battler standing and then write the incoming monster's HP onto it.
+  if not trusted and (mon.hp or 0) <= 0 then
+    if mod and mod.log then
+      mod.log:warn(("CoopSim: refused to field a fainted monster -- seat %s (%s) party index %s, %s at 0 HP; the seat keeps the monster it had. The caller picked a fallen reserve; screen the pick (hasReserve) before sending out."):
+        format(tostring(slot.index), tostring(slot.name),
+               tostring(index), tostring(mon.species or "?")))
+    end
     return nil
   end
   slot.active = index
@@ -397,8 +427,9 @@ function M:restore(snapshot)
       -- `sendOut` drops the pointer for us. One that is still the same monster
       -- keeps it: a snapshot carries HP and who is out, not volatiles, so the
       -- seed pointer this copy already holds is the better answer than nil.
+      -- `trusted`: the host's word beats this copy's HP. See `sendOut`.
       if row.active and row.active ~= slot.active then
-        self:sendOut(slot, row.active)
+        self:sendOut(slot, row.active, true)
       end
       local mon = slot.battler and slot.battler.mon
       if mon and tonumber(row.hp) then mon.hp = math.max(0, math.floor(row.hp)) end
