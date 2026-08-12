@@ -960,7 +960,16 @@ local BALL_FX = {
 -- faint sink is (see stepFx): the queue leaves a frame or two between one row
 -- ending and the next starting, and a monster that flickered back into view in
 -- that gap would be out of the ball and in it again twice a throw.
-local BALL_HIDE_FX = { ball = true, recall = true, wobble = true }
+--
+-- `ball` is deliberately not one of them. The arc is a ball still in the air,
+-- and the monster is standing on the seat it is flying at -- HIDEPIC is the row
+-- that puts it inside, and it arrives *after* the toss (`_emitBallChain`:
+-- TOSS, POOF, HIDEPIC, SHAKE...). Hiding on the throw put the monster in the
+-- ball before the ball reached it, and Battlefield's own renderer already
+-- refuses to hide for a `ball` effect for exactly that reason -- so listing it
+-- here only kept a finished arc alive at t == 1 and dropped it again on a
+-- side-wide clear that has nothing to do with it.
+local BALL_HIDE_FX = { recall = true, wobble = true }
 
 -- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
 -- number came off the wire, and a hub claiming a thousand would otherwise
@@ -1317,10 +1326,13 @@ function M:noteBattlefieldBubble(row)
   -- Engine ball / hide / shake markers are not move callouts.
   if anim:find("_ANIM", 1, true) then return end
 
-  -- The label a player would read in "X used Y!". The raw id stays the bubble's
-  -- text so nothing that reads it changes meaning; `moveName` is the part the
-  -- renderer is allowed to emphasise, and is the id again when the build has no
-  -- record for the move (a modded move whose definition did not survive).
+  -- The bubble is one sentence in two parts, CoopBattle's twin exactly: "used"
+  -- is the small lead-in and `moveName` is the line the renderer emphasises.
+  -- The raw id used to be the text as well, on the theory that nothing reading
+  -- the bubble should change meaning -- but the renderer draws both parts, so
+  -- a bubble said the move twice ("FIX_BOOST" over "FIX BOOST"). `moveName` is
+  -- the registry name, or the wire id again when the build has no record for
+  -- the move (a modded move whose definition did not survive).
   local moveName = self:moveLabel(anim)
 
   local mine = row.slot == self:mySlot()
@@ -1330,7 +1342,7 @@ function M:noteBattlefieldBubble(row)
     self.battlefieldBubbles = {{
       side = "foe",
       humanIndex = 1,
-      text = anim,
+      text = "used",
       moveName = moveName,
       born = self.frame or 0,
     }}
@@ -1339,7 +1351,7 @@ function M:noteBattlefieldBubble(row)
   self.battlefieldBubbles = {{
     side = "ally",
     humanIndex = 1,
-    text = anim,
+    text = "used",
     moveName = moveName,
     born = self.frame or 0,
   }}
@@ -2034,6 +2046,18 @@ function M:finish(result, reason, msg)
       self:playVictoryMusic()
     end
   end
+  -- Anything the arena is still holding with nothing left to release it is
+  -- dropped here too -- but only when the arena owes nothing, which is the
+  -- same question the fanfare above just asked. It has to be gated on that:
+  -- the outcome lands while the rows that show it are still queued, and on a
+  -- catch those rows *are* the throw. Snapping here would stand the caught
+  -- monster back up on its seat one line before "Gotcha!" printed, and on an
+  -- ordinary win it would cut the last KO short. When the answer is "something
+  -- is still owed", the rows themselves finish the job: a KO's `clearPic` takes
+  -- the sink down with the pic, a failed throw's closing burst clears the flow,
+  -- a catch keeps it (nothing undoes a ball that was never opened), and `exit`
+  -- clears whatever is left on the way out.
+  if not self:hasPendingHpFx() then self:snapDisplay() end
   if reason == "catch" and result == "win" then
     self:say("Gotcha!")
     self:grantCatch(msg)
@@ -2104,24 +2128,38 @@ end
 -- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
 M.COMMANDS = { "FIGHT", "SWITCH", "ITEM", "RUN" }
 
-local function gridStep(index, count, direction)
-  local row = math.floor((index - 1) / 2)
-  local col = (index - 1) % 2
+-- One step around a `cols`-wide grid of `count` items, clamped at every edge
+-- (Gen 1 never wraps the command menu).
+--
+-- `cols` defaults to 2, which is the classic 160x144 chrome and Gen2: at two
+-- columns and four commands this is byte-identical to the 2x2 stepping it
+-- replaces. The battlefield band lays the same four commands out four across
+-- when it has the width for it, and a cursor that still stepped 2x2 under a
+-- 1x4 paint was the bug: RIGHT from the second slab did nothing (there is no
+-- column 2 to move into) and UP / DOWN jumped two slabs sideways.
+local function gridStep(index, count, direction, cols)
+  cols = math.floor(tonumber(cols) or 2)
+  if cols < 1 then cols = 2 end
+  local lastRow = math.max(0, math.ceil(count / cols) - 1)
+  local row = math.floor((index - 1) / cols)
+  local col = (index - 1) % cols
   if direction == "left" then col = math.max(0, col - 1)
-  elseif direction == "right" then col = math.min(1, col + 1)
+  elseif direction == "right" then col = math.min(cols - 1, col + 1)
   elseif direction == "up" then row = math.max(0, row - 1)
-  elseif direction == "down" then row = math.min(1, row + 1)
+  elseif direction == "down" then row = math.min(lastRow, row + 1)
   else return index end
-  local moved = row * 2 + col + 1
+  local moved = row * cols + col + 1
+  -- A ragged last row has holes in it; a press into one stays put rather than
+  -- selecting a command that is not on screen.
   if moved > count then return index end
   return moved
 end
 
 local GRID_KEYS = { "left", "right", "up", "down" }
 
-local function gridPress(index, count, input)
+local function gridPress(index, count, input, cols)
   for _, key in ipairs(GRID_KEYS) do
-    if input:wasPressed(key) then return gridStep(index, count, key) end
+    if input:wasPressed(key) then return gridStep(index, count, key, cols) end
   end
   return nil
 end
@@ -2246,9 +2284,26 @@ function M:commitItem(partyIndex, moveIndex)
   return true
 end
 
+-- How many columns the command menu is *drawn* in, which is what the cursor
+-- has to step in. The band widget owns that rule (`Battlefield.bandGridCols`,
+-- which `drawCommandGrid` reads too), so it is asked rather than restated --
+-- the two drifting apart is a highlight that walks onto a slab the player is
+-- not looking at. Classic 160x144 chrome and Gen2 are always 2x2, and so is
+-- an arena too old to answer: nothing to remediate, the fallback is the layout
+-- those paths draw anyway.
+function M:commandCols()
+  if not self:usesBattlefield() then return 2 end
+  local cols = Battlefield and Battlefield.bandGridCols
+  if type(cols) ~= "function" then return 2 end
+  local ok, got = pcall(cols, #M.COMMANDS)
+  got = ok and tonumber(got) or nil
+  if not got or got < 1 then return 2 end
+  return math.floor(got)
+end
+
 function M:updateCommand(input)
   self.commandIndex = self.commandIndex or 1
-  local moved = gridPress(self.commandIndex, #M.COMMANDS, input)
+  local moved = gridPress(self.commandIndex, #M.COMMANDS, input, self:commandCols())
   if moved then
     self.commandIndex = moved
   elseif input:wasPressed("a") then
@@ -2461,6 +2516,11 @@ function M:exit()
   -- A fanfare still waiting on a drain is dropped rather than started over
   -- the map theme this is about to restore.
   self.victoryMusicHeld = nil
+  -- And the arena stops animating. Nothing draws this screen after here, so
+  -- this is hygiene rather than a fix -- but it is the one place every path
+  -- off the screen passes through, and a held effect is a hold on an object
+  -- the session may still be holding a reference to.
+  self:snapDisplay()
   -- Map theme back unconditionally: victory jingles loop until something
   -- stops them (same reason the engine's BattleState:finish restores).
   local eng = loadEngine()
@@ -2527,7 +2587,16 @@ function M:tickMessages(dt, input)
   self.dwell = self.dwell + (dt or 0)
 
   if self.shown == nil then
-    if #self.lines == 0 then return false end
+    if #self.lines == 0 then
+      -- The queue is spent and nothing is playing, so a throw still standing
+      -- here has nothing left to end it: the rows that would have -- the burst,
+      -- the SHOWPIC -- are never coming. That is a hub drop mid-chain, and
+      -- without this the seat stays inside a ball for the rest of the fight.
+      -- Only while the fight is live: a finished one is *meant* to end holding
+      -- a caught monster in its ball (see `snapDisplay`).
+      if self.ballFlow and not self.finished then self:snapDisplay() end
+      return false
+    end
     local next = table.remove(self.lines, 1)
     if type(next) == "table" and next.anim then
       self:startAnim(next)
@@ -3206,6 +3275,33 @@ function M:hasPendingHpFx()
   return false
 end
 
+-- Put the arena back where the referee says the field is, and stop animating.
+--
+-- CoopBattle's `snapDisplay`, and the same argument. Two of the arena's
+-- effects deliberately outlive their own clock -- a sink that keeps a KO face
+-- down, and a throw that keeps a monster inside its ball -- and the only thing
+-- that ever ends either one is the row that was going to undo it. A chain that
+-- never finishes (a hub drop between HIDEPIC and the burst that opens the ball
+-- again) therefore left a seat invisible for the rest of the fight. This is
+-- the way out: the flow goes first and the effects it justified go with it, so
+-- nothing is left held by a hold that no longer exists.
+--
+-- Never called while the fight is over. The last frame of a finished battle is
+-- part of the outcome -- a monster face down, a caught monster inside its ball
+-- -- and snapping it would stand both of them back up under the ending line.
+function M:snapDisplay()
+  self.ballFlow = nil
+  self.fx = nil
+  self.animHold = nil
+  self.draining = nil
+  self.faintFx = nil
+  -- And the two clocks back in step: a descent abandoned half way is a bar
+  -- that would otherwise sit at a number nobody holds until the next drain.
+  for _, slot in pairs(self.slots or {}) do
+    if type(slot) == "table" then slot.shownHp = slot.hp or 0 end
+  end
+end
+
 function M:update(dt)
   self.frame = (self.frame or 0) + 1
   self:pruneBattlefieldBubbles()
@@ -3591,33 +3687,46 @@ function M:bandPartyRows(all)
   return rows
 end
 
+-- A widget's verdict. The band widgets report `false` when they could not
+-- draw; an older Battlefield returns nothing at all, and that has always meant
+-- "drawn" -- so only an explicit `false` sends the frame to the GB chrome.
+local function bandDrew(ok)
+  return ok ~= false
+end
+
 function M:drawModernBand()
   local message = Battlefield.drawMessagePanel
   local grid = Battlefield.drawCommandGrid
   local list = Battlefield.drawListPanel
   -- An arena without the band widgets (an older Battlefield) still gets the
-  -- GB chrome rather than an empty band. Nothing to remediate: the caller
-  -- falls back on a false return.
+  -- GB chrome rather than an empty band. Nothing to remediate, and nothing to
+  -- warn about either -- the second return says so, and the caller falls back
+  -- quietly.
   if type(message) ~= "function" or type(grid) ~= "function"
      or type(list) ~= "function" then
-    return false
+    return false, "unavailable"
+  end
+  if type(Battlefield.drawBandBackdrop) == "function" then
+    -- Once, here, and never inside a widget: two scrims would double-darken
+    -- the band. Without it the panels float on grass with no ground of their
+    -- own, which is what the arena art runs edge to edge into.
+    Battlefield.drawBandBackdrop()
   end
 
+  -- From here every branch reports what the widget reported: a widget that
+  -- could not draw leaves the band empty over a live fight, and the GB chrome
+  -- is a worse-looking menu rather than no menu at all.
   if self.shown then
-    message(tostring(self.shown))
-    return true
+    return bandDrew(message(tostring(self.shown)))
   end
   if self.anim then
-    message("")
-    return true
+    return bandDrew(message(""))
   end
   if self.phase == "choose" then
-    grid(self:bandCommandItems(), self.commandIndex or 1)
-    return true
+    return bandDrew(grid(self:bandCommandItems(), self.commandIndex or 1))
   end
   if self.phase == "move" or self.phase == "item_move" then
-    list(self:bandMoveRows(), self.cursor, { title = "MOVES" })
-    return true
+    return bandDrew(list(self:bandMoveRows(), self.cursor, { title = "MOVES" }))
   end
   if self.phase == "target" then
     local rows = {}
@@ -3629,8 +3738,7 @@ function M:drawModernBand()
       if (seat.hp or 0) <= 0 then entry.dim = true end
       rows[#rows + 1] = entry
     end
-    list(rows, self.targetIndex or 1, { title = "TARGET" })
-    return true
+    return bandDrew(list(rows, self.targetIndex or 1, { title = "TARGET" }))
   end
   if self.phase == "item" then
     local rows = {}
@@ -3640,32 +3748,40 @@ function M:drawModernBand()
         right = item.count and ("x%d"):format(item.count) or nil,
       }
     end
-    list(rows, self.itemIndex or 1, { title = "ITEMS" })
-    return true
+    return bandDrew(list(rows, self.itemIndex or 1, { title = "ITEMS" }))
   end
   if self.phase == "item_party" then
-    list(self:bandPartyRows(true), self.switchIndex or 1, { title = "POKeMON" })
-    return true
+    return bandDrew(list(self:bandPartyRows(true), self.switchIndex or 1,
+      { title = "POKeMON" }))
   end
   if self.phase == "switch" then
-    list(self:bandPartyRows(false), self.switchIndex or 1, { title = "POKeMON" })
-    return true
+    return bandDrew(list(self:bandPartyRows(false), self.switchIndex or 1,
+      { title = "POKeMON" }))
   end
   if self.phase == "setup" then
-    message("Getting ready...")
-    return true
+    return bandDrew(message("Getting ready..."))
   end
   if self.phase == "over" then
-    message(self.shown or "")
-    return true
+    return bandDrew(message(self.shown or ""))
   end
-  message(("Waiting for\n%s..."):format(self.peerName))
-  return true
+  return bandDrew(message(("Waiting for\n%s..."):format(self.peerName)))
 end
 
 function M:drawBattlefieldMenus(Font)
-  local ok, drew = pcall(self.drawModernBand, self)
+  local ok, drew, why = pcall(self.drawModernBand, self)
   if ok and drew then return end
+  -- The band failing is a visible downgrade in the middle of a fight, and the
+  -- GB chrome hides it well enough that nobody would report it -- so it is
+  -- said once, with what went wrong. `why == "unavailable"` is the one
+  -- expected way down here (an arena with no band widgets at all), and is not
+  -- worth a line.
+  if not self.bandWarned and not (ok and why == "unavailable") then
+    self.bandWarned = true
+    mod.log:warn("the battle band could not draw (%s); this fight falls back "
+      .. "to the classic menu chrome inside the band and stays playable -- "
+      .. "report this with the message above so the arena widgets can be fixed",
+      ok and "a band widget reported failure" or tostring(drew))
+  end
 
   local function chrome()
     if self.shown then

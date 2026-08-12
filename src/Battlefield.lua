@@ -441,9 +441,15 @@ function M.fxSeat(fx, side, seatIndex)
         local s, alpha = M.fxRecall(e.t)
         out.scale = out.scale * s
         if alpha < out.alpha then out.alpha = alpha end
-      elseif e.kind == "ball" or e.kind == "wobble" then
-        -- The mon is inside the ball for the whole throw: the seat draws
-        -- nothing (not even its shadow) until a SHOWPIC / poof brings it out.
+      elseif e.kind == "wobble" then
+        -- The mon is inside the ball while it rocks on the ground: the seat
+        -- draws nothing (not even its shadow) until a poof breaks it out.
+        -- `ball` deliberately does NOT hide: the arc is still in the air, and
+        -- the occupant only goes in when the recall (HIDEPIC) plays. Hiding on
+        -- the throw put the mon inside the ball before the ball arrived, which
+        -- is the chronology the flows in MediatedBattle / CoopBattle fixed. A
+        -- ball aimed at an empty seat has nothing to hide either way, and a
+        -- `recall` held at t == 1 still reads invisible through scale/alpha 0.
         out.hidden = true
       end
     end
@@ -853,9 +859,23 @@ local function withFont(gfx, size, fn)
     local ok, got = pcall(gfx.getFont)
     if ok then prev = got end
   end
-  if font and gfx.setFont then pcall(gfx.setFont, font) end
+  -- "We set a face" is tracked apart from "we read the old one": gating the
+  -- restore on `prev` alone leaked our face into the caller's chrome whenever
+  -- getFont was missing (or returned nothing) but setFont worked.
+  local didSet = false
+  if font and gfx.setFont then didSet = pcall(gfx.setFont, font) and true or false end
   local ok = pcall(fn, font or prev)
-  if prev and gfx.setFont then pcall(gfx.setFont, prev) end
+  if gfx.setFont and (prev or didSet) then
+    if prev then
+      pcall(gfx.setFont, prev)
+    else
+      -- Residual limit: with no readable previous face there is nothing exact
+      -- to put back, so the best available reset is the argument-less setFont
+      -- (LOVE's default face). If even that is refused the face stays ours —
+      -- unavoidable on a context that can set a font but not report one.
+      pcall(gfx.setFont)
+    end
+  end
   return ok
 end
 
@@ -942,12 +962,26 @@ local function drawTriangle(gfx, x, y, size, dir, color, alpha)
 end
 
 -- Longest prefix of `text` that fits maxW, ellipsised when it had to cut.
+-- The cut is binary-searched, not walked down one character at a time: a
+-- 40-char label used to cost up to 40 measurements per frame per row, and a
+-- list panel draws five of them. The candidate measured is still the whole
+-- `prefix .. "..."` rather than a prefix against a pre-subtracted budget,
+-- because Font:getWidth kerns — prefix width plus ellipsis width is not the
+-- same number, and the output here has to be byte-identical to the walk.
+-- Width is non-decreasing in the cut, which is what makes the search legal.
 local function fitLine(font, text, maxW)
   text = tostring(text or "")
   if widthWith(font, text) <= maxW then return text, false end
-  local cut = #text
-  while cut > 1 and widthWith(font, text:sub(1, cut) .. "...") > maxW do
-    cut = cut - 1
+  -- Floor of 1, as the walk had: something ellipsised beats an empty row.
+  local lo, hi, cut = 1, #text, 1
+  while lo <= hi do
+    local mid = math.floor((lo + hi) / 2)
+    if widthWith(font, text:sub(1, mid) .. "...") <= maxW then
+      cut = mid
+      lo = mid + 1
+    else
+      hi = mid - 1
+    end
   end
   return text:sub(1, cut) .. "...", true
 end
@@ -1519,17 +1553,23 @@ local function drawPoof(gfx, x, y, t)
   if alpha <= 0 then return end
   local lw = gfx.getLineWidth and gfx.getLineWidth() or 1
   if gfx.setLineWidth then pcall(gfx.setLineWidth, 2) end
-  gfx.setColor(1, 1, 1, 0.5 * alpha)
-  gfx.circle("line", x, y, math.max(1, M.FX_POOF_R * e))
-  for i = 1, 4 do
-    local ang = (i / 4) * math.pi * 2 + e * 1.2
-    local d = M.FX_POOF_R * e * 0.75
-    gfx.setColor(1, 0.97, 0.86, 0.7 * alpha)
-    gfx.circle("fill", x + math.cos(ang) * d, y + math.sin(ang) * d,
-      math.max(1, 4 * (1 - e) + 1))
-  end
+  -- The body gets its own pcall so the restore below always runs: a throw
+  -- mid-body would unwind past drawFieldFx's pcall and leave every later
+  -- outline on the frame at width 2 (same guard shape as drawMonIcon's
+  -- blend-mode re-blit).
+  pcall(function()
+    gfx.setColor(1, 1, 1, 0.5 * alpha)
+    gfx.circle("line", x, y, math.max(1, M.FX_POOF_R * e))
+    for i = 1, 4 do
+      local ang = (i / 4) * math.pi * 2 + e * 1.2
+      local d = M.FX_POOF_R * e * 0.75
+      gfx.setColor(1, 0.97, 0.86, 0.7 * alpha)
+      gfx.circle("fill", x + math.cos(ang) * d, y + math.sin(ang) * d,
+        math.max(1, 4 * (1 - e) + 1))
+    end
+  end)
   if gfx.setLineWidth then pcall(gfx.setLineWidth, lw) end
-  gfx.setColor(1, 1, 1, 1)
+  pcall(gfx.setColor, 1, 1, 1, 1)
 end
 
 local function seatOf(layout, side, seatIndex)
@@ -1642,6 +1682,12 @@ end
 -- no-ops without love.graphics. `opts.x/y/w/h` box a widget into part of the
 -- band (a caller showing a message and a command grid at once), and default
 -- to the whole band inset by the margins below.
+--
+-- Each widget returns true only when it actually painted, and false when it
+-- bailed (no love.graphics, nothing to draw, a box too small) or when its
+-- internal pcall caught a throw. Callers gate their GB-chrome fallback on
+-- that: without a signal a widget that failed mid-body left an empty band
+-- with the fallback never firing, which reads as the battle having frozen.
 
 M.BAND_MARGIN_X = 10
 M.BAND_MARGIN_Y = 4
@@ -1690,10 +1736,12 @@ end
 -- opts.hint == false drops the continue triangle (a line nothing waits on).
 function M.drawMessagePanel(text, opts)
   local gfx = g()
-  if not gfx then return end
+  if not gfx then return false end
   local x, y, w, h = M.bandRect(opts)
   opts = type(opts) == "table" and opts or {}
-  pcall(function()
+  -- `ok` only, never pcall's error string as a second return: a caller
+  -- forwarding this into another call must not get a stray extra argument.
+  local ok = pcall(function()
     panel(gfx, x, y, w, h)
     withFont(gfx, M.FONT_MESSAGE, function(font)
       local pad = 12
@@ -1711,6 +1759,21 @@ function M.drawMessagePanel(text, opts)
     end)
     gfx.setColor(1, 1, 1, 1)
   end)
+  return ok
+end
+
+-- How many columns drawCommandGrid lays `n` items out in, for the same rect
+-- `opts` describes. Exported because the cursor has to agree with the paint:
+-- a left/right press that assumes four across while the band actually drew
+-- 2×2 walks the highlight onto a slab that is not next to the one it left.
+-- drawCommandGrid calls this too, so the two can never drift apart — one
+-- definition, and every caller reads it rather than restating the rule.
+-- Zero items means zero columns (nothing is laid out); the widget bails there.
+function M.bandGridCols(n, opts)
+  n = math.floor(num(n, 0))
+  if n <= 0 then return 0 end
+  local _, _, w = M.bandRect(opts)
+  return (w >= 420 and n <= 4) and n or 2
 end
 
 -- FIGHT / PKMN / ITEM / RUN. Four across while the band is full width: 2×2
@@ -1720,19 +1783,21 @@ end
 -- `cursor` is the 1-based highlighted item; items are { label, disabled? }.
 function M.drawCommandGrid(items, cursor, opts)
   local gfx = g()
-  if not gfx then return end
+  if not gfx then return false end
   items = listOf(items)
   local n = #items
-  if n == 0 then return end
+  if n == 0 then return false end
   local x, y, w, h = M.bandRect(opts)
   cursor = math.floor(num(cursor, 0))
-  local cols = (w >= 420 and n <= 4) and n or 2
+  -- Same opts, same rect, same rule as any caller's navigation asks for.
+  local cols = M.bandGridCols(n, opts)
+  if cols < 1 then return false end
   local rows = math.ceil(n / cols)
   local gap = 6
   local bw = math.floor((w - gap * (cols - 1)) / cols)
   local bh = math.floor((h - gap * (rows - 1)) / rows)
-  if bw < 8 or bh < 8 then return end
-  pcall(function()
+  if bw < 8 or bh < 8 then return false end
+  local ok = pcall(function()
     withFont(gfx, M.FONT_PRIMARY, function(font)
       for i, item in ipairs(items) do
         local col = (i - 1) % cols
@@ -1758,6 +1823,7 @@ function M.drawCommandGrid(items, cursor, opts)
     end)
     gfx.setColor(1, 1, 1, 1)
   end)
+  return ok
 end
 
 -- Moves / items / party: a scrolling list of { label, right?, dim? }. `right`
@@ -1765,7 +1831,7 @@ end
 -- opts.title prints a small header, opts.visible overrides the row count.
 function M.drawListPanel(rows, cursor, opts)
   local gfx = g()
-  if not gfx then return end
+  if not gfx then return false end
   rows = listOf(rows)
   opts = type(opts) == "table" and opts or {}
   local x, y, w, h = M.bandRect(opts)
@@ -1785,7 +1851,9 @@ function M.drawListPanel(rows, cursor, opts)
   if cursor > visible then first = cursor - visible + 1 end
   first = math.min(first, math.max(1, count - visible + 1))
 
-  pcall(function()
+  -- An empty row list is still a success: the panel and its title are what a
+  -- "no moves left" list is supposed to show, so it must not trip a fallback.
+  local ok = pcall(function()
     panel(gfx, x, y, w, h)
     if title then
       withFont(gfx, M.FONT_MICRO, function(micro)
@@ -1841,6 +1909,7 @@ function M.drawListPanel(rows, cursor, opts)
     end)
     gfx.setColor(1, 1, 1, 1)
   end)
+  return ok
 end
 
 -- battle: screen state (unused for pure layout; reserved for callers).

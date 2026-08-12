@@ -11349,6 +11349,27 @@ end)()
         "CoopBattle is not wide on Gen2")
   check(not goldCoop:wantsFillScale(),
         "CoopBattle does not fill-scale on Gen2")
+
+  -- MediatedBattle's own commandCols: four across on the battlefield, two
+  -- off it -- the same rule CoopBattle asks Battlefield.bandGridCols for.
+  eq(mediated:commandCols(), 4,
+     "MediatedBattle asks the renderer on Gen1 and gets four across")
+  local goldMediated = setmetatable({ game = goldGame }, { __index = MediatedBattle })
+  eq(goldMediated:commandCols(), 2,
+     "...but stays two columns off the battlefield (classic Gen2 stage)")
+
+  -- D2's verified walk: from FIGHT, four RIGHTs in a row on the four-across
+  -- band land 1 -> 2 -> 3 -> 4 -> 4 -- one row, clamped at the last slab.
+  local walker = setmetatable({ game = gen1Game, commandIndex = 1 },
+    { __index = MediatedBattle })
+  local walked = { walker.commandIndex }
+  for _ = 1, 4 do
+    MediatedBattle.updateCommand(walker,
+      { wasPressed = function(_, k) return k == "right" end })
+    walked[#walked + 1] = walker.commandIndex
+  end
+  eq(table.concat(walked, " "), "1 2 3 4 4",
+     "four RIGHTs from FIGHT on the battlefield: 1 2 3 4 4")
 end)()
 
 -- ------- Gen1 Battlefield wave 1: monDrawParams flip + right-edge anchoring
@@ -11697,15 +11718,19 @@ end)()
   eq(s1, 0, "fxRecall has fully collapsed at t == 1")
   eq(ra1, 0, "...and is fully transparent -- gone into the ball")
 
-  -- fxSeat: ball/wobble hide the seat outright (not even the shadow draws);
-  -- recall never sets the flag -- it shrinks/fades the mon in place instead,
-  -- reaching the same invisible result (scale 0, alpha 0) by t == 1.
+  -- fxSeat: a ball in the air does NOT hide the seat -- the mon is still
+  -- standing where the arc is aimed, and only HIDEPIC (the `recall`) pulls
+  -- it into the ball. Only `wobble` hides the seat outright (not even the
+  -- shadow draws); recall never sets the flag -- it shrinks/fades the mon
+  -- in place instead, reaching the same invisible result (scale 0, alpha 0)
+  -- by t == 1.
   local ball = Battlefield.fxSeat(
     { { kind = "ball", side = "foe", t = 0.5 } }, "foe", 1)
-  eq(ball.hidden, true, "a ball fx hides the seat")
+  eq(ball.hidden, false,
+     "a ball fx does NOT hide the seat -- the arc is still in the air")
   local wobble = Battlefield.fxSeat(
     { { kind = "wobble", side = "foe", t = 0.2 } }, "foe", 1)
-  eq(wobble.hidden, true, "...and so does a wobble")
+  eq(wobble.hidden, true, "...but a wobble does")
   local recallMid = Battlefield.fxSeat(
     { { kind = "recall", side = "foe", t = 0.5 } }, "foe", 1)
   eq(recallMid.hidden, false,
@@ -11715,6 +11740,17 @@ end)()
   eq(recallDone.hidden, false, "...never, even fully collapsed")
   eq(recallDone.scale, 0, "...but scale reaches 0 at t == 1")
   eq(recallDone.alpha, 0, "...and so does alpha -- invisible all the same")
+
+  -- bandGridCols: the rule drawCommandGrid and every command-cursor caller
+  -- share, at its own boundaries -- the full-width band lays four commands
+  -- out across in one row, a boxed-in band too narrow for that falls back to
+  -- two columns, and zero items is zero columns (nothing to lay out).
+  eq(Battlefield.bandGridCols(4), 4,
+     "the full-width band lays four commands out across")
+  eq(Battlefield.bandGridCols(4, { w = 300 }), 2,
+     "a band boxed under 420px falls back to two columns")
+  eq(Battlefield.bandGridCols(0), 0, "zero items is zero columns")
+  eq(Battlefield.bandGridCols(-1), 0, "...and so is a negative count")
 
   -- Status colours: one entry per status this build actually inflicts.
   for _, key in ipairs({ "psn", "brn", "slp", "par", "frz" }) do
@@ -11787,10 +11823,14 @@ end)()
         "and never once the command menu is up")
 end)()
 
--- ------- the command box, as a classic 2x2 grid
+-- ------- the command box, as a classic 2x2 grid (Gen2 / classic stage)
 --
 -- FIGHT SWITCH / ITEM RUN. Each arrow moves on its own axis and clamps at
--- the edge (same rule as BattleState's DisplayBattleMenu).
+-- the edge (same rule as BattleState's DisplayBattleMenu). This is the
+-- byte-identical truth table for a client that does NOT draw on the
+-- battlefield -- a Gen2-shaped game keeps the classic guild-focus stage, so
+-- `commandCols()` answers two and `gridStep` degenerates to the original
+-- 2x2 it always was.
 
 ;(function()
   local CoopBattle = need("CoopBattle")
@@ -11799,6 +11839,7 @@ end)()
   eq(CoopBattle.COMMANDS[2], "SWITCH", "top-right is SWITCH (classic PKMN slot)")
   eq(CoopBattle.COMMANDS[3], "ITEM", "bottom-left is ITEM")
   eq(CoopBattle.COMMANDS[4], "RUN", "bottom-right is RUN")
+  local goldGame = { data = { type_chart = { generation = 2 }, gen2Statuses = {} } }
   local truth = {
     { 1, "up", 1 }, { 1, "down", 3 }, { 1, "left", 1 }, { 1, "right", 2 },
     { 2, "up", 2 }, { 2, "down", 4 }, { 2, "left", 1 }, { 2, "right", 2 },
@@ -11807,13 +11848,124 @@ end)()
   }
   for _, row in ipairs(truth) do
     local from, direction, expect = row[1], row[2], row[3]
-    local client = setmetatable({ commandIndex = from }, { __index = CoopBattle })
+    local client = setmetatable({ commandIndex = from, game = goldGame },
+      { __index = CoopBattle })
+    eq(client:commandCols(), 2, "Gen2 keeps two columns")
     CoopBattle.updateCommand(client,
       { wasPressed = function(_, k) return k == direction end })
     eq(client.commandIndex, expect,
-       ("%s %s from %s lands on %s"):format(
+       ("classic %s %s from %s lands on %s"):format(
          NAMES[from], direction, NAMES[from], NAMES[expect]))
   end
+end)()
+
+-- ------- the command band, four across (battlefield)
+--
+-- The modern band lays the same four commands out in one row whenever it has
+-- the width for it (`Battlefield.bandGridCols`), and `gridStep` has to step a
+-- single row rather than the classic 2x2: LEFT/RIGHT walk the row, UP/DOWN
+-- hold in place (there is only one row to move between). A client with no
+-- `game` at all defaults to Gen1-shaped (`Gen.generation`'s own fallback),
+-- which is the battlefield path -- no explicit game override needed here.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local Battlefield = need("Battlefield")
+  local NAMES = { "FIGHT", "SWITCH", "ITEM", "RUN" }
+  eq(Battlefield.bandGridCols(4), 4, "bandGridCols(4) over the full band")
+  local wide = {
+    { 1, "up", 1 }, { 1, "down", 1 }, { 1, "left", 1 }, { 1, "right", 2 },
+    { 2, "up", 2 }, { 2, "down", 2 }, { 2, "left", 1 }, { 2, "right", 3 },
+    { 3, "up", 3 }, { 3, "down", 3 }, { 3, "left", 2 }, { 3, "right", 4 },
+    { 4, "up", 4 }, { 4, "down", 4 }, { 4, "left", 3 }, { 4, "right", 4 },
+  }
+  for _, row in ipairs(wide) do
+    local from, direction, expect = row[1], row[2], row[3]
+    local client = setmetatable({ commandIndex = from }, { __index = CoopBattle })
+    eq(client:commandCols(), 4, "battlefield asks the renderer and gets four")
+    CoopBattle.updateCommand(client,
+      { wasPressed = function(_, k) return k == direction end })
+    eq(client.commandIndex, expect,
+       ("band %s %s from %s lands on %s"):format(
+         NAMES[from], direction, NAMES[from], NAMES[expect]))
+  end
+
+  -- A missing/throwing/nonsense `Battlefield.bandGridCols` export falls back
+  -- to two, pcall-guarded: an older Battlefield beside this screen has no
+  -- such export, and the GB fallback the caller draws in that case is a 2x2.
+  local saved = Battlefield.bandGridCols
+  Battlefield.bandGridCols = nil
+  eq(setmetatable({}, { __index = CoopBattle }):commandCols(), 2, "no export -> 2")
+  Battlefield.bandGridCols = function() error("boom") end
+  eq(setmetatable({}, { __index = CoopBattle }):commandCols(), 2,
+     "throwing export -> 2")
+  Battlefield.bandGridCols = function() return 0 end
+  eq(setmetatable({}, { __index = CoopBattle }):commandCols(), 2,
+     "nonsense export -> 2")
+  Battlefield.bandGridCols = saved
+end)()
+
+-- ------- the modern band falls back to the GB chrome, warned once
+--
+-- `drawModernBand` reads its own widgets' verdicts (drawMessagePanel /
+-- drawCommandGrid / drawListPanel): every widget painting something keeps
+-- the band up, and any one of them reporting an explicit `false` (painted
+-- nothing -- too small, no love.graphics, its own pcall caught a throw) sends
+-- the frame to the GB chrome instead. That downgrade is worth one line in
+-- the log, and only one: the same battle painting every frame for the rest
+-- of the fight must not spam it sixty times a second.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local Battlefield = need("Battlefield")
+  local saveMessage, saveGrid, saveList =
+    Battlefield.drawMessagePanel, Battlefield.drawCommandGrid, Battlefield.drawListPanel
+  local saveBackdrop = Battlefield.drawBandBackdrop
+  Battlefield.drawBandBackdrop = function() end
+
+  local warnings = {}
+  stubMod.log.warn = function(_, fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    warnings[#warnings + 1] = ok and line or tostring(fmt)
+  end
+
+  local client = setmetatable({ phase = "choose", commandIndex = 1 },
+    { __index = CoopBattle })
+  Battlefield.drawCommandGrid = function() return true end
+  Battlefield.drawMessagePanel = function() return true end
+  Battlefield.drawListPanel = function() return true end
+  eq(client:drawModernBand(), true, "every widget painted -- the band stands")
+  eq(client.bandFallbackWarned, nil, "...and nothing is warned")
+
+  Battlefield.drawCommandGrid = function() return false end
+  eq(client:drawModernBand(), false, "a widget that painted nothing -> GB fallback")
+  eq(client.bandFallbackWarned, true, "...warned once")
+  eq(#warnings, 1, "...one warn line")
+  check(warnings[1] ~= nil and warnings[1]:find("fall back", 1, true) ~= nil
+        and warnings[1]:find("report this", 1, true) ~= nil,
+        "...naming the fallback and a remediation")
+  eq(client:drawModernBand(), false, "...and again falls back")
+  eq(client.bandFallbackWarned, true, "...but the warn does not repeat")
+  eq(#warnings, 1, "...still one warn line")
+
+  -- nil (an older Battlefield with no verdict) is tolerated, not a failure.
+  local client2 = setmetatable({ phase = "choose", commandIndex = 1 },
+    { __index = CoopBattle })
+  Battlefield.drawCommandGrid = function() return nil end
+  eq(client2:drawModernBand(), true, "a widget with no verdict at all is tolerated")
+  eq(client2.bandFallbackWarned, nil, "...and warns nothing")
+
+  -- A widget missing entirely: declined before any of this.
+  local client3 = setmetatable({ phase = "choose", commandIndex = 1 },
+    { __index = CoopBattle })
+  Battlefield.drawCommandGrid = nil
+  eq(client3:drawModernBand(), false, "no widget at all -> fallback")
+  eq(client3.bandFallbackWarned, nil, "...quietly: that build never had a band")
+
+  Battlefield.drawMessagePanel, Battlefield.drawCommandGrid, Battlefield.drawListPanel =
+    saveMessage, saveGrid, saveList
+  Battlefield.drawBandBackdrop = saveBackdrop
+  stubMod.log.warn = function() end
 end)()
 
 -- ------- box text fits the eighteen-column bottom box
@@ -15148,6 +15300,33 @@ end)()
   eq(classic.fx, nil, "...and emits no fx either")
 end)()
 
+-- ------- MediatedBattle: battlefield speech bubbles, "used" + moveName
+--
+-- The bubble is one sentence in two parts (CoopBattle's own twin exactly):
+-- `text` is the short "used" lead-in and `moveName` is the line the renderer
+-- emphasises -- not a single doubled string, which drew the move name twice.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-bubble", role = "host" })
+
+  f:noteBattlefieldBubble({ anim = "TOSS_ANIM", side = "a" })
+  eq(f.battlefieldBubbles, nil,
+     "a TOSS marker produces no bubble on the mediated path either")
+
+  f:noteBattlefieldBubble({ anim = "FIX_BOOST", side = "a" })
+  check(f.battlefieldBubbles ~= nil, "a real move does produce a bubble")
+  eq(f.battlefieldBubbles[1].text, "used", "...the short lead-in")
+  eq(f.battlefieldBubbles[1].moveName, "FIX BOOST",
+     "...carrying the registry name for the renderer's emphasised line")
+  eq(f.battlefieldBubbles[1].side, "ally", "...hosted on the side that acted")
+
+  f:noteBattlefieldBubble({ anim = "FIX_BOOST", side = "b" })
+  eq(f.battlefieldBubbles[1].side, "foe", "...and on the foe side when the foe acted")
+  eq(f.battlefieldBubbles[1].text, "used", "...still the short lead-in")
+end)()
+
 -- ------- MediatedBattle wave 2 (round 2): the ball-flow fx chain
 --
 -- Wire order per throw (R2 findings): item(ball) -> HIDEPIC -> TOSS ->
@@ -15196,12 +15375,13 @@ end)()
     return fight.anim
   end
 
-  -- Whether a hide-kind fx (ball / recall / wobble) is live or held for
-  -- `side` right now -- the bookkeeping `BALL_HIDE_FX` exists for, so the
-  -- seat is never uncovered between two rows of the same throw.
+  -- Whether a hide-kind fx (recall / wobble -- `ball` is deliberately not
+  -- one of these; the arc is still in the air) is live or held for `side`
+  -- right now -- the bookkeeping `BALL_HIDE_FX` exists for, so the seat is
+  -- never uncovered between two rows of the same throw once it is covered.
   local function hasHideFx(fight, side)
     for _, e in ipairs(fight.fx or {}) do
-      if (e.kind == "ball" or e.kind == "recall" or e.kind == "wobble")
+      if (e.kind == "recall" or e.kind == "wobble")
          and e.side == side then
         return true
       end
@@ -15222,8 +15402,10 @@ end)()
 
   playThrough(f) -- TOSS starts
   eq(f.anim.anim, "TOSS_ANIM", "the arc plays first")
-  check(Battlefield.fxSeat(f.fx, "foe", 1).hidden,
-        "the foe seat is hidden the instant the ball is in the air")
+  check(not Battlefield.fxSeat(f.fx, "foe", 1).hidden,
+        "the foe seat stays visible while the ball is still in the air")
+  check(f.ballFlow ~= nil and f.ballFlow.hidden == false,
+        "...the flow is open but not yet hidden")
 
   playThrough(f) -- first POOF starts
   eq(f.anim.anim, "POOF_ANIM", "the ball opens next")
@@ -15300,7 +15482,8 @@ end)()
 
   f:update(1 / 60) -- TOSS starts
   eq(f.anim.anim, "TOSS_ANIM", "the toss starts")
-  check(Battlefield.fxSeat(f.fx, "foe", 1).hidden, "...hiding the seat")
+  check(not Battlefield.fxSeat(f.fx, "foe", 1).hidden,
+        "...the mon stays visible while the ball is in the air")
 
   local function animName(fight) return fight.anim and fight.anim.anim end
 
@@ -15314,9 +15497,9 @@ end)()
      "a throw with nothing behind the opening POOF ends the flow right there "
      .. "-- the C1 regression")
 
-  -- The poof burst itself is not a held kind (only ball / recall / wobble
-  -- are), so once its own short dwell finishes it ages out of the fx list on
-  -- its own, same as any other unheld effect.
+  -- The poof burst itself is not a held kind (only recall / wobble are --
+  -- `ball` ages out unheld too, same as poof), so once its own short dwell
+  -- finishes it ages out of the fx list on its own.
   guard = 0
   while (f.fx ~= nil or f.anim ~= nil) and guard < 60 do
     f:update(1 / 60)
@@ -15418,6 +15601,121 @@ end)()
   f:update(1 / 60)
   check(not f.victoryMusicHeld, "one more tick releases it")
   check(f.victoryMusicPlayed, "...and the fanfare has now actually played")
+end)()
+
+-- ------- MediatedBattle wave 2 (round 2): snapDisplay drops an orphaned flow
+--
+-- A hub drop between HIDEPIC and the burst that would have opened the ball
+-- again used to leave the seat inside a ball for the rest of the fight --
+-- nothing left in the queue was ever going to undo it. `tickMessages` catches
+-- this: once the queue is spent, nothing is playing, and the fight is still
+-- live, a standing `ballFlow` is dropped (`snapDisplay`) rather than held
+-- forever. Only while live -- a finished fight is covered separately below.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local Battlefield = need("Battlefield")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-orphanflow", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-orphanflow"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  -- The hub drops after HIDEPIC: no SHAKE, no closing POOF ever arrives.
+  send({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "POOF_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "HIDEPIC_ANIM" })
+
+  local function animName(fight) return fight.anim and fight.anim.anim end
+  local guard = 0
+  while animName(f) ~= "HIDEPIC_ANIM" and guard < 120 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 120, "the recall row is reached in bounded frames")
+  check(f.ballFlow ~= nil and f.ballFlow.hidden == true,
+        "the recall opens a hidden throw")
+
+  -- Drive on: HIDEPIC's own dwell finishes, the queue is now empty behind
+  -- it, and nothing is coming to release the flow.
+  guard = 0
+  while f.ballFlow ~= nil and guard < 200 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 200, "the orphaned flow is dropped in bounded frames")
+  eq(f.ballFlow, nil,
+     "queue-spent while live drops the orphaned flow -- the hub-drop-mid-chain fix")
+  eq(f.fx, nil, "...and clears the fx that were holding the seat")
+  check(not Battlefield.fxSeat(f.fx or {}, "foe", 1).hidden,
+        "...the seat reads visible again")
+end)()
+
+-- ------- MediatedBattle wave 2 (round 2): a finished catch keeps the mon
+-- hidden until exit()
+--
+-- The mirror image of the orphaned-flow fix above: while the fight is
+-- *finished* (a caught monster's ball never reopens -- there is no closing
+-- POOF on a catch), `snapDisplay` must NOT run just because the queue and
+-- `hasPendingHpFx()` have both gone quiet. `finish()`'s own snap is gated
+-- on `hasPendingHpFx()`, and the queue-spent guard in `tickMessages` is
+-- gated on `not self.finished` -- so a caught mon stays in its ball through
+-- the whole "over" screen, and only `exit()` (every path off the screen)
+-- finally lets it go.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local Battlefield = need("Battlefield")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-caughthidden", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-caughthidden"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "POOF_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "HIDEPIC_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "SHAKE_ANIM", amount = 1 })
+
+  local function animName(fight) return fight.anim and fight.anim.anim end
+  local guard = 0
+  while animName(f) ~= "SHAKE_ANIM" and guard < 150 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 150, "the last shake is reached in bounded frames")
+  check(Battlefield.fxSeat(f.fx, "foe", 1).hidden,
+        "the wobble covers the seat while the catch is decided")
+
+  -- The referee decides the catch the instant that shake lands -- while it
+  -- is still playing, before anything downstream of it (a closing POOF)
+  -- could ever arrive.
+  f.result = "win"
+  f:finish("win", "catch")
+  check(f.finished == true, "the fight is over")
+  check(f.ballFlow ~= nil and f.ballFlow.hidden == true,
+        "finish() does not snap the flow -- the wobble row is still owed a play")
+  check(Battlefield.fxSeat(f.fx, "foe", 1).hidden,
+        "...so the seat stays hidden right after finish()")
+
+  -- More ticks on the "over" screen change nothing: nothing left in the
+  -- queue is going to touch the flow, and the finished-guard refuses to.
+  for _ = 1, 30 do f:update(1 / 60) end
+  check(f.ballFlow ~= nil, "...and stays held through the whole outcome screen")
+  check(Battlefield.fxSeat(f.fx or {}, "foe", 1).hidden,
+        "...the caught mon is still hidden")
+
+  f:exit()
+  eq(f.ballFlow, nil, "exit() finally releases the caught mon's hold")
+  eq(f.fx, nil, "...and clears the fx that were holding the seat")
 end)()
 
 -- ------- MediatedBattle wave 1: victory music held until the arena settles
@@ -16134,7 +16432,7 @@ end)()
     for _, e in ipairs(client.fx or {}) do
       if e.kind == "ball" then sawBall = true end
     end
-    check(sawBall, "...and hides the target seat")
+    check(sawBall, "...and the ball arc is in flight")
 
     client:startBallFx({ anim = "POOF_ANIM", from = 1 })
     eq(client.ballFlow, nil,
@@ -16148,6 +16446,97 @@ end)()
     end
     check(guard < 60, "the burst ages out in bounded frames")
     eq(client.fx, nil, "...leaving nothing playing")
+  end
+
+  -- ------- SHAKE fan-out: one wobble per row, row.amount knocked to 1
+  --
+  -- CoopBattle's own copy of MediatedBattle's F3 fix: a SHAKE row carries the
+  -- whole shake count on one row, and the contract is one wobble per effect,
+  -- so the played row's `amount` is rewritten to 1 in place (not just the
+  -- re-queued remainder) -- a three-shake catch plays three single-pass
+  -- AnimPlayer rows, not 3+2+1=6.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 50, { move() }) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 40, { move() }) } },
+      { side = "b", owner = nil, name = "FOE", party = { mon(60, 30, { move() }) } },
+      { side = "b", owner = nil, name = "FOE", party = { mon(60, 20, { move() }) } },
+    })
+    local client = setmetatable({
+      sim = sim, mine = 1, messages = {},
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+
+    local shakeRow = { anim = "SHAKE_ANIM", from = 1, amount = 3 }
+    local kind = client:startBallFx(shakeRow)
+    eq(kind, "wobble", "SHAKE plays as a wobble")
+    eq(shakeRow.amount, 1,
+       "the played row is knocked down to ONE pass -- one AnimPlayer shake "
+       .. "per wobble row")
+    eq(#client.messages, 1, "...with the remainder re-queued")
+    eq(client.messages[1].amount, 2, "...carrying 2")
+
+    local row2 = table.remove(client.messages, 1)
+    client:startBallFx(row2)
+    eq(row2.amount, 1, "the re-queued row is also played down to one pass")
+    eq(client.messages[1].amount, 1, "...remainder 1")
+
+    local row3 = table.remove(client.messages, 1)
+    client:startBallFx(row3)
+    eq(row3.amount, 1, "the third row is the last, already one")
+    eq(#client.messages, 0, "...and re-queues nothing")
+  end
+
+  -- ------- host-sim lunge: attackerIsPlayer resolves the seat when `from`
+  -- is absent
+  --
+  -- `coop_wild` / `coop_npc` rows (queued by CoopField) carry `attackerIsPlayer`
+  -- and no `from` at all -- `actorIsFoe` falls back to that flag so those
+  -- modes still lunge, `from` still wins when both are present, and a row
+  -- naming nobody emits no lunge at all rather than a slotless dead record.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 50, { move() }) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 40, { move() }) } },
+      { side = "b", owner = nil, name = "FOE", party = { mon(60, 30, { move() }) } },
+      { side = "b", owner = nil, name = "FOE", party = { mon(60, 20, { move() }) } },
+    })
+    local function lungeOf(c)
+      for _, e in ipairs(c.fx or {}) do
+        if e.kind == "lunge" then return e end
+      end
+      return nil
+    end
+    local function clientOf()
+      return setmetatable({
+        sim = sim, mine = 1,
+        game = { data = data, save = { inventory = {}, party = {} } },
+      }, { __index = CoopBattle })
+    end
+
+    local allyClient = clientOf()
+    allyClient:startAnim({ anim = "FIX_TACKLE", attackerIsPlayer = true })
+    local allyLunge = lungeOf(allyClient)
+    check(allyLunge ~= nil, "attackerIsPlayer=true lunges an ally seat")
+    eq(allyLunge and allyLunge.side, "ally", "...on the ally side")
+
+    local foeClient = clientOf()
+    foeClient:startAnim({ anim = "FIX_TACKLE", attackerIsPlayer = false })
+    local foeLunge = lungeOf(foeClient)
+    check(foeLunge ~= nil, "attackerIsPlayer=false lunges a foe seat")
+    eq(foeLunge and foeLunge.side, "foe", "...on the foe side")
+
+    local fromClient = clientOf()
+    fromClient:startAnim({ anim = "FIX_TACKLE", from = 3, attackerIsPlayer = true })
+    local fromLunge = lungeOf(fromClient)
+    check(fromLunge ~= nil and fromLunge.slot == 3,
+      "an explicit `from` wins over the attackerIsPlayer flag")
+    eq(fromLunge and fromLunge.side, "foe", "...landing on whichever side `from` names")
+
+    local nobodyClient = clientOf()
+    nobodyClient:startAnim({ anim = "FIX_TACKLE" })
+    eq(lungeOf(nobodyClient), nil,
+      "a row naming nobody (no `from`, no attackerIsPlayer) emits no lunge")
   end
 
   -- ------- startDrain: flash + shake only when the shown bar falls

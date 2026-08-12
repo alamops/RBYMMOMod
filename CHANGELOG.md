@@ -8,6 +8,19 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Modern battle band.** The stretched GB message box and menus at the bottom
+  of the arena are replaced by native widescreen panels (message, command
+  grid, scrolling lists with PP/HP columns) in the plate visual language,
+  shared by CoopBattle and MediatedBattle; the classic 160×144 and Gen2
+  screens keep their GB chrome. The command grid lays out 4-across and the
+  cursor walks it that way.
+- **Pokéball throws animate on the arena.** An original vector pokéball arcs
+  to the target, the mon recalls into it at the engine's HIDEPIC beat, each
+  referee shake reads as one wobble, and the break-free or catch resolves in
+  wire order — the fanfare waits for the last wobble. A caught mon stays in
+  its ball; an interrupted chain cleans up instead of hiding the seat.
+- **Trainer speech bubbles v2.** Rounded callouts with the move name
+  emphasized on its own line, sized from real font metrics.
 - **Battlefield HUD plates.** The Gen1 arena now shows a persistent plate per
   fielded mon — name, level, thresholded HP bar, status; exact `hp/maxHp`
   numbers on your own side — stacked per side (co-op 2v2 gets all four), fed
@@ -22,6 +35,16 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **Custom characters render legibly on the arena.** The mod's own walk
+  sheets carried export residue outside the 4 DMG shades, collapsing most
+  pixels into the darkest palette bin — NIRE read as a black blob. Sheets are
+  requantized to the canonical shades; battle-canvas trainer color also keys
+  its bake cache by color mode.
+- **Co-op arena polish.** Letterbox no longer leaks the overworld around the
+  arena (the white-paper vote is withdrawn on the battlefield path and the
+  canvas is filled); plates read real max HP instead of always drawing full;
+  host-sim fights lunge their attacker; multi-shake throws no longer double-
+  drive the engine's shake audio.
 - **Ally mons on the arena face their opponent.** Left-seat battle fronts
   are mirrored (right-edge-anchored flip) instead of staring at the camera;
   foe seats keep the vanilla front pose.

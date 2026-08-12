@@ -1167,26 +1167,41 @@ local function listPress(index, count, input)
   return math.max(1, math.min(count, (index or 1) + step))
 end
 
--- Classic Gen 1 battle-command grid: two columns, two rows. Each arrow moves
--- on its own axis and clamps at the edge (BattleState / WideBattle).
-local function gridStep(index, count, direction)
-  local row = math.floor((index - 1) / 2)
-  local col = (index - 1) % 2
+-- The battle-command grid. Each arrow moves on its own axis and clamps at the
+-- edge (BattleState / WideBattle).
+--
+-- `cols` is how many columns the menu is *actually drawn in*, and it has to be
+-- passed rather than assumed: the classic 160×144 chrome and Gen 2 draw the
+-- four commands 2×2, but the modern band lays them out four across whenever it
+-- has the width for it (`Battlefield.bandGridCols`). Stepping a 2×2 grid under
+-- a 1×4 paint sent LEFT/RIGHT nowhere from FIGHT and made UP/DOWN jump two
+-- slabs -- the highlight landed on a button that is not next to the one it
+-- left. Defaults to 2, which is byte-identical to what this did before: for
+-- cols == 2 and count == 4 the row clamp below is the same 1 it was hard-coded
+-- to, and for any smaller count the out-of-range guard already refused the
+-- move.
+local function gridStep(index, count, direction, cols)
+  cols = math.floor(tonumber(cols) or 2)
+  if cols < 1 then cols = 2 end
+  local lastCol = cols - 1
+  local lastRow = math.max(0, math.ceil(count / cols) - 1)
+  local row = math.floor((index - 1) / cols)
+  local col = (index - 1) % cols
   if direction == "left" then col = math.max(0, col - 1)
-  elseif direction == "right" then col = math.min(1, col + 1)
+  elseif direction == "right" then col = math.min(lastCol, col + 1)
   elseif direction == "up" then row = math.max(0, row - 1)
-  elseif direction == "down" then row = math.min(1, row + 1)
+  elseif direction == "down" then row = math.min(lastRow, row + 1)
   else return index end
-  local moved = row * 2 + col + 1
+  local moved = row * cols + col + 1
   if moved > count then return index end
   return moved
 end
 
 local GRID_KEYS = { "left", "right", "up", "down" }
 
-local function gridPress(index, count, input)
+local function gridPress(index, count, input, cols)
   for _, key in ipairs(GRID_KEYS) do
-    if input:wasPressed(key) then return gridStep(index, count, key) end
+    if input:wasPressed(key) then return gridStep(index, count, key, cols) end
   end
   return nil
 end
@@ -1707,9 +1722,30 @@ end
 -- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
 M.COMMANDS = { "FIGHT", "SWITCH", "ITEM", "RUN" }
 
+-- How many columns the command menu the player is looking at is laid out in.
+--
+-- Asked of the renderer rather than restated here, so the cursor and the paint
+-- cannot drift: `Battlefield.bandGridCols` is the same rule `drawCommandGrid`
+-- itself uses to place the slabs. Only the battlefield path asks -- the classic
+-- 160×144 chrome and Gen 2 draw `drawCommand`'s own 2×2 and always get 2.
+--
+-- pcall-guarded with the classic answer as the fallback: an older Battlefield
+-- beside this screen has no such export, and a band that has to guess is better
+-- off guessing the layout the GB fallback would draw. Nothing to remediate --
+-- `drawModernBand` already declines the widgets in that build.
+function M:commandCols()
+  if not self:usesBattlefield() then return 2 end
+  local cols = Battlefield and Battlefield.bandGridCols
+  if type(cols) ~= "function" then return 2 end
+  local ok, got = pcall(cols, #M.COMMANDS)
+  got = ok and math.floor(tonumber(got) or 0) or 0
+  if got < 1 then return 2 end
+  return got
+end
+
 function M:updateCommand(input)
   self.commandIndex = self.commandIndex or 1
-  local moved = gridPress(self.commandIndex, #M.COMMANDS, input)
+  local moved = gridPress(self.commandIndex, #M.COMMANDS, input, self:commandCols())
   if moved then
     self.commandIndex = moved
   elseif input:wasPressed("a") then
@@ -4819,7 +4855,17 @@ local BALL_FX = {
 -- faint sink is (see `stepFx`): the queue leaves a frame or two between one row
 -- ending and the next starting, and a monster that flickered back into view in
 -- that gap would be out of the ball and in it again twice a throw.
-local BALL_HIDE_FX = { ball = true, recall = true, wobble = true }
+--
+-- **`ball` is not one of them**, and that is chronology rather than an
+-- oversight. The arc is a ball travelling towards a monster that is still
+-- standing there -- the occupant only goes in when HIDEPIC (`recall`) plays,
+-- which is the row after. Listing the arc here did two wrong things at once:
+-- it claimed the seat was occupied before the ball had arrived, and -- because
+-- a held kind is never retired while the flow is open -- it parked a finished
+-- pokeball on top of the seat (`drawFieldFx` draws `ball` at `fxBallPoint`,
+-- which at t == 1 is the seat itself) for the gap between the arc and whatever
+-- came next. `Battlefield.fxSeat` makes the same call on its side of the wire.
+local BALL_HIDE_FX = { recall = true, wobble = true }
 
 -- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
 -- number came off the wire, and a hub claiming a thousand would otherwise
@@ -4870,25 +4916,53 @@ end
 -- wobbles all belong to a seat on the side opposite the thrower. A host-sim row
 -- carries no slot at all (CoopField queues `attackerIsPlayer` and nothing
 -- else), so that is the fallback, and viewer-relative either way.
-function M:ballTargetSlot(row)
-  local threwAlly = true
-  if type(row) == "table" then
-    if row.from ~= nil then
-      threwAlly = not self:foeSide(row.from)
-    elseif row.attackerIsPlayer ~= nil then
-      threwAlly = row.attackerIsPlayer and true or false
-    end
-  end
-  -- The first seat on the far side that is still on the field. A catch is a
-  -- wild fight, where there is exactly one; a 2-on-2 that somehow produced a
-  -- throw still lands it on somebody rather than nobody.
-  local wantFoe = threwAlly
+-- The first seat on one side of the arena worth pointing an effect at.
+--
+-- "Worth" is doing work: `gone` is the seat having left the field entirely, but
+-- a seat can also still be there with a monster that is down and waiting to be
+-- replaced -- and a ball arcing at a corpse (or a lunge from one) is the wrong
+-- seat when the side has another that is standing. So a live seat wins, and
+-- the first non-`gone` one is the fallback when the whole side is down: an
+-- effect on the wrong seat still beats an effect on nobody, which is what the
+-- caller gets for a nil (`battlefieldFxCtx` drops a slotless entry).
+function M:seatOnSide(wantFoe)
+  local down = nil
   for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
     if not slot.gone and self:foeSide(slot.index) == wantFoe then
-      return slot.index
+      local isDown = false
+      if self.sim and self.sim.isDown then
+        local ok, res = pcall(self.sim.isDown, self.sim, slot)
+        isDown = (ok and res) and true or false
+      end
+      if not isDown then return slot.index end
+      if down == nil then down = slot.index end
     end
   end
+  return down
+end
+
+-- Which arena side a row's actor is on, viewer-relative, as a `wantFoe` flag
+-- for `seatOnSide`.
+--
+-- `from` is the honest answer and is always viewer-true. A host-sim row has
+-- none -- `CoopField` queues `attackerIsPlayer` and nothing else -- so that is
+-- the fallback, and it is why this exists as its own function: every consumer
+-- of an anim row's actor has to fall back the same way or it silently does
+-- nothing on the host-sim modes.
+function M:actorIsFoe(row)
+  if type(row) ~= "table" then return nil end
+  if row.from ~= nil then return self:foeSide(row.from) and true or false end
+  if row.attackerIsPlayer ~= nil then return not row.attackerIsPlayer end
   return nil
+end
+
+function M:ballTargetSlot(row)
+  local threwFoe = self:actorIsFoe(row)
+  if threwFoe == nil then threwFoe = false end
+  -- The far side from the thrower. A catch is a wild fight, where there is
+  -- exactly one seat over there; a 2-on-2 that somehow produced a throw still
+  -- lands it on somebody rather than nobody.
+  return self:seatOnSide(not threwFoe)
 end
 
 -- Retire the hiding effects on one side. Paired with the emit that replaces
@@ -4976,6 +5050,16 @@ function M:startBallFx(row)
         anim = row.anim, from = row.from, to = row.to,
         attackerIsPlayer = row.attackerIsPlayer, amount = left - 1,
       })
+      -- ...and this row is now worth exactly one wobble, so say so.
+      --
+      -- `startAnim` hands `row.amount` straight to the engine AnimPlayer as
+      -- `opts.shakes`, and the player draws that many passes of SHAKE_ANIM by
+      -- itself. Splitting the row for the arena while leaving the count alone
+      -- ran both fan-outs at once: a three-shake catch played 3 + 2 + 1 = six
+      -- AnimPlayer passes across the three rows -- six tinks and roughly twice
+      -- the dead time -- under three arena wobbles. One pass per row is the
+      -- contract the split was made for.
+      row.amount = 1
     end
   end
 
@@ -5197,16 +5281,35 @@ function M:bandBenchRows(bench)
   return rows
 end
 
-function M:drawModernBand()
-  local message = Battlefield.drawMessagePanel
-  local grid = Battlefield.drawCommandGrid
-  local list = Battlefield.drawListPanel
+-- Draw the band, and answer whether the band is now on the screen.
+--
+-- Wrapped by `M:drawModernBand` below, which is what callers use: the wrappers
+-- here turn each widget's own verdict into one flag, and the caller reads that
+-- flag alongside this function's return. A widget answers `false` when it
+-- painted nothing -- no love.graphics, a box too small to label, or its own
+-- internal pcall caught a throw -- and a `false` anywhere means part of the
+-- band is missing, which is the case the GB chrome exists for. `nil` is not a
+-- failure: an older Battlefield beside this screen returns nothing at all, and
+-- those builds are the ones the type checks below already vet.
+function M:drawBandWidgets()
+  local drawMessage = Battlefield.drawMessagePanel
+  local drawGrid = Battlefield.drawCommandGrid
+  local drawList = Battlefield.drawListPanel
   -- An arena without the band widgets (an older Battlefield beside a newer
   -- screen) still gets the GB chrome rather than an empty band. Nothing to
   -- remediate: the caller falls back on a false return.
-  if type(message) ~= "function" or type(grid) ~= "function"
-     or type(list) ~= "function" then
+  if type(drawMessage) ~= "function" or type(drawGrid) ~= "function"
+     or type(drawList) ~= "function" then
     return false
+  end
+  local function message(text, opts)
+    if drawMessage(text, opts) == false then self.bandFailed = true end
+  end
+  local function grid(items, cursor, opts)
+    if drawGrid(items, cursor, opts) == false then self.bandFailed = true end
+  end
+  local function list(rows, cursor, opts)
+    if drawList(rows, cursor, opts) == false then self.bandFailed = true end
   end
   if type(Battlefield.drawBandBackdrop) == "function" then
     -- Once, here, and never inside a widget: two scrims would double-darken
@@ -5331,6 +5434,28 @@ function M:drawModernBand()
     return true
   end
   message(self:boxText())
+  return true
+end
+
+function M:drawModernBand()
+  self.bandFailed = nil
+  local drew = self:drawBandWidgets()
+  if not drew then return false end
+  if self.bandFailed then
+    -- Warned once per battle, then quietly: this runs every frame, and a band
+    -- that cannot paint cannot paint sixty times a second into the log either.
+    -- The battle is not interrupted -- the caller redraws the GB chrome over
+    -- the same band on this very frame.
+    if not self.bandFallbackWarned then
+      self.bandFallbackWarned = true
+      if mod and mod.log then
+        mod.log:warn("the 2-on-2 battle band could not be drawn, so the menus "
+          .. "fall back to the Game Boy chrome; the fight is unaffected, but "
+          .. "report this with your window size and whether it repeats")
+      end
+    end
+    return false
+  end
   return true
 end
 
@@ -5605,7 +5730,21 @@ function M:startAnim(row)
     if moveAnim then
       -- The defender's flash and the field's nudge ride the drain row behind
       -- this one, so a move that misses only lunges.
-      self:emitFx("lunge", row.from)
+      --
+      -- Resolved rather than read straight off `row.from`, for the same reason
+      -- `ballTargetSlot` resolves: a host-sim row (`coop_wild` / `coop_npc`,
+      -- queued by CoopField) carries `attackerIsPlayer` and no `from` at all.
+      -- `emitFx("lunge", nil)` produced a slotless record that
+      -- `battlefieldFxCtx` then dropped -- so those two modes never lunged
+      -- once, and paid for a dead fx record on every move to not do it.
+      local lunger = row.from
+      if lunger == nil then
+        local isFoe = self:actorIsFoe(row)
+        if isFoe ~= nil then lunger = self:seatOnSide(isFoe) end
+      end
+      -- Still nobody: emit nothing. A lunge that cannot name a seat is a
+      -- record the ctx projection throws away one frame later.
+      if lunger ~= nil then self:emitFx("lunge", lunger) end
     else
       self:startBallFx(row)
     end

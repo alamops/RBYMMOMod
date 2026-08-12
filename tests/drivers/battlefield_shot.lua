@@ -28,8 +28,8 @@
 -- players(), which MediatedBattle reads verbatim with no registry involved.
 --
 -- Captures, in order: idle (choose, RED/BLUE) -> action (choose, damage fx)
--- -> move (moves list) -> ball (throw fx, target seat hidden) -> bubble
--- (rounded callout) -> nire (self as SPRITE_NIRE, saturation pin).
+-- -> move (moves list) -> ball (throw fx, target seat hidden from HIDEPIC on)
+-- -> bubble (rounded callout) -> nire (self as SPRITE_NIRE, saturation pin).
 --
 -- Coordinate approach (point 4 in the TT2 brief): the battlefield draws into
 -- a 640x360 canvas that Renderer fill-scales to the window, aspect
@@ -49,6 +49,10 @@ end
 
 return function(game)
   local U = require("tests.drivers.util")
+  -- H.waitFor: spin-until-predicate, budgeted in frames -- used below to
+  -- drive the ball-flow queue on to HIDEPIC/wobble without pinning an exact
+  -- frame count to each row's own dwell.
+  local H = dofile("mods/rby_mmo/tests/drivers/mmo_util.lua")
   local TAG = "BF_SHOT:"
   local function log(...)
     local parts = { TAG }
@@ -463,26 +467,44 @@ return function(game)
     log("warn", "move frame did not reach disk", path3)
   end
 
-  -- ---- (c) ball frame: a throw in flight, target seat hidden ----
-  -- Real chain is TOSS_ANIM -> POOF_ANIM -> ... (BattleSim/Turn.lua's
-  -- _emitBallChain, mirrored in server/lib/battle); one queued row is enough
-  -- here. `ballTargetSlot` defaults the thrower to mySlot() when the row
-  -- names neither slot nor side, so this throw lands on the foe seat.
-  -- BALL_HIDE_FX kinds ("ball", "recall", "wobble") are held by stepFx at
-  -- t==1 while self.ballFlow.side still matches
-  -- (src/MediatedBattle.lua:2986-3037), so `hidden` reads true for the whole
-  -- throw regardless of exactly how many frames land inside FX_SPAN.ball's
-  -- 0.60s hold -- no exact-timing assumption needed for the assertion, only
-  -- for landing the screenshot roughly mid-arc rather than after the hold
-  -- has already released.
+  -- ---- (c) ball frame: TOSS visible in flight, hidden from HIDEPIC on ----
+  -- Real chain is TOSS_ANIM -> POOF_ANIM -> HIDEPIC_ANIM -> SHAKE_ANIM x N ->
+  -- ... (BattleSim/Turn.lua's _emitBallChain, mirrored in server/lib/battle).
+  -- `ballTargetSlot` defaults the thrower to mySlot() when the row names
+  -- neither slot nor side, so this throw lands on the foe seat.
+  --
+  -- The D-wave review fix retired the old "hidden the instant the ball is in
+  -- the air" chronology: `hidden` is now carried by `wobble` alone
+  -- (src/Battlefield.lua's fxSeat, the `wobble` branch comment) -- the arc is
+  -- still a ball in the air with the mon standing where it is aimed, so TOSS
+  -- reads visible; HIDEPIC's `recall` shrinks the mon into the ball through
+  -- scale/alpha rather than the `hidden` flag, and only the SHAKE row that
+  -- follows sets it. This drives the queue on to that row the way the unit
+  -- tests do (tests/rby_mmo_test.lua's MediatedBattle wave-2 ball-flow-chain
+  -- block) rather than pinning the retired chronology.
   screen.phase = "choose"
   screen.lines[#screen.lines + 1] = { anim = "TOSS_ANIM" }
   U.wait(14) -- ~0.23s @60Hz, inside the 0.60s ball hold -- lands mid-arc
-  local ballFx = Battlefield.fxSeat(screen.fx, "foe", 1)
-  check(ballFx.hidden == true, "ball: target (foe) seat hidden mid-throw",
+  local tossFx = Battlefield.fxSeat(screen.fx, "foe", 1)
+  check(tossFx.hidden == false,
+    "ball: target (foe) seat stays visible while the ball is still in the air",
     "fxCount=" .. tostring(screen.fx and #screen.fx or 0))
   local throwerFx = Battlefield.fxSeat(screen.fx, "ally", 1)
   check(throwerFx.hidden == false, "ball: thrower (ally) seat stays visible")
+
+  -- Drive the queue on: the ball opens (POOF), the mon is pulled into it
+  -- (HIDEPIC), then the first wobble -- only that last row sets `hidden`.
+  screen.lines[#screen.lines + 1] = { anim = "POOF_ANIM" }
+  screen.lines[#screen.lines + 1] = { anim = "HIDEPIC_ANIM" }
+  screen.lines[#screen.lines + 1] = { anim = "SHAKE_ANIM", amount = 1 }
+  local reachedWobble = H.waitFor(game, function()
+    return Battlefield.fxSeat(screen.fx, "foe", 1).hidden == true
+  end, 200, "the SHAKE row's wobble to hide the foe seat")
+  check(reachedWobble, "ball: the queue reaches the wobble row in bounded frames")
+  local wobbleFx = Battlefield.fxSeat(screen.fx, "foe", 1)
+  check(wobbleFx.hidden == true,
+    "ball: the wobble that follows HIDEPIC hides the foe seat",
+    "fxCount=" .. tostring(screen.fx and #screen.fx or 0))
   local path4 = SHOT_DIR .. "/battlefield-ball.png"
   if U.shot(game, path4) then
     log("captured", path4)
