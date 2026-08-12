@@ -7,11 +7,12 @@
 -- engine's own link code, and its `mmo.relay` payloads pass through unread.
 --
 -- **Battle does not.** From PROTOCOL 10 a battle this hub brokers is
--- resolved *here*, by src/BattleSim/Turn.lua, and the clients receive an
--- ordered stream of events they draw rather than rolling their own. The
--- mediated-battles section below is that plumbing, and server/lib/relay.js
--- runs the same one over the same message types -- a client cannot tell
--- which of the two hosting paths refereed its fight.
+-- resolved *here*, by BattleSim/Turn (Gen1) or BattleSim2/Turn (Gen2) per
+-- `opts.generation`, and the clients receive an ordered stream of events
+-- they draw rather than rolling their own. The mediated-battles section
+-- below is that plumbing, and server/lib/relay.js runs the same one over
+-- the same message types -- a client cannot tell which of the two hosting
+-- paths refereed its fight.
 --
 -- **No sockets appear anywhere below.** Everything talks to *peer handles*
 -- -- any table answering `:send(msg)` and `:close()`. `HostServer` supplies
@@ -43,12 +44,15 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Sha256 = need("Sha256")
 local Rank = need("Rank")
--- The turn machine, and the one thing in this file that is not pure routing.
--- A battle this hub brokers is *resolved* here from PROTOCOL 10 onwards, so
--- the header's "it does not simulate anything" now holds for trade alone --
--- see the mediated-battles section below for what changed and why.
-local Turn = need("BattleSim/Turn")
-local Effects = need("BattleSim/Effects")
+
+-- Wave 2 T2d: pick the mediated-battle twin at Hub.new from hub generation.
+-- Gen1 (default) keeps BattleSim; Gen2 never loads Gen1 Turn for refereeing.
+local function battleSimFor(generation)
+  if generation == 2 then
+    return need("BattleSim2/Turn"), need("BattleSim2/Effects")
+  end
+  return need("BattleSim/Turn"), need("BattleSim/Effects")
+end
 
 local M = {}
 M.__index = M
@@ -243,6 +247,11 @@ M.Entropy = Entropy
 
 function M.new(opts)
   opts = opts or {}
+  -- PROTOCOL 20 generation lock. Default 1 when omitted so existing Gen1
+  -- fixtures and deploys keep working; Gen2 hubs MUST pass generation:2
+  -- (HostServer / CLI -- twin of server/lib/relay.js opts.generation).
+  local generation = Wire.generation(opts.generation)
+  local Turn, Effects = battleSimFor(generation)
   return setmetatable({
     limit = Config.clampPlayers(opts.maxPlayers),
     -- Absent is nil, never "": a hub with no code admits anyone who says
@@ -251,6 +260,10 @@ function M.new(opts)
     -- normalisation is a code no player could type; Wire.code is
     -- idempotent, so a caller that already normalised loses nothing by it.
     joinCode = Wire.code(opts.joinCode),
+    generation = generation,
+    -- Mediated-battle twin selected above; every open/turn path uses these.
+    Turn = Turn,
+    Effects = Effects,
     clients = {},     -- id -> client (greeted or not)
     count = 0,        -- connections
     players = 0,      -- of those, the ones that have been admitted
@@ -522,7 +535,7 @@ function M:accept(peer, trusted)
     trusted = trusted and true or false,
     ready = false,
     name = nil,
-    sprite = Config.DEFAULT_SPRITE,
+    sprite = Config.defaultSpriteFor(self.generation),
     map = nil, x = nil, y = nil, facing = "down",
     fast = false,     -- nobody arrives mid-stride; the first move says otherwise
     sessionId = nil,
@@ -583,7 +596,7 @@ function M:admit(client)
   end
 
   client.name = hello.name
-  client.sprite = hello.sprite or Config.DEFAULT_SPRITE
+  client.sprite = hello.sprite or Config.defaultSpriteFor(self.generation)
   client.profile = hello.profile
   client.map, client.x, client.y = hello.map, hello.x, hello.y
   client.facing = hello.facing or "down"
@@ -1272,7 +1285,7 @@ function M:openMediatedBattle(id, plan)
   if #memberIds == 0 then return nil end
 
   -- Accept coop_wild explicitly so seating works before Turn.MODES gains it (T3).
-  local mode = (Turn.MODES[plan.mode] or plan.mode == "coop_wild") and plan.mode
+  local mode = (self.Turn.MODES[plan.mode] or plan.mode == "coop_wild") and plan.mode
     or ((#memberIds <= 2) and "1v1" or "coop_pvp")
   -- coop_wild is a 2v1 contract (exactly two humans vs one wild seat).
   if mode == "coop_wild" and #memberIds ~= 2 then return nil end
@@ -1460,7 +1473,7 @@ end
 
 function M:spendBag(record, clientId, itemId)
   if not self:canSpendBag(record, clientId, itemId) then return false end
-  local effect = Effects.itemEffect(itemId)
+  local effect = self.Effects.itemEffect(itemId)
   if effect and effect.noConsume then return true end
   local bag = record.bags[clientId]
   bag[itemId] = bag[itemId] - 1
@@ -1526,7 +1539,7 @@ function M:tryStartSim(record)
     -- Seed NPC seats with a gym-style kit when the host uploaded no bag.
     record.bags = record.bags or {}
     if not record.bags[seat] and self:isNpcSeat(record, seat) then
-      record.bags[seat] = self:cloneBagMap(Turn.DEFAULT_NPC_BAG)
+      record.bags[seat] = self:cloneBagMap(self.Turn.DEFAULT_NPC_BAG)
     end
     local bag = record.bags[seat]
     return {
@@ -1562,7 +1575,7 @@ function M:tryStartSim(record)
   -- constructed, which is not something a connection can reach.
   local seed = (type(self.forceBattleSeed) == "number")
     and self.forceBattleSeed or self:battleSeed()
-  local battle, why = Turn.create({
+  local battle, why = self.Turn.create({
     id = record.id,
     mode = record.mode,
     seed = seed,
@@ -2035,6 +2048,13 @@ handlers[Wire.HELLO] = function(self, client, msg)
     return self:refuseClient(client, ("This game speaks protocol %d; yours "
       .. "speaks %s."):format(Config.PROTOCOL, tostring(msg.proto)))
   end
+  -- PROTOCOL 20: missing generation defaults to 1 (Wire.generation). Same
+  -- sentence as server/lib/relay.js so a client cannot tell which path refused.
+  local generation = Wire.generation(msg.generation)
+  if generation ~= self.generation then
+    return self:refuseClient(client, ("This hub is for generation %d; yours "
+      .. "is generation %d."):format(self.generation, generation))
+  end
   local name = Wire.name(msg.name)
   if not name then
     return self:refuseClient(client, "That trainer name can't be used here.")
@@ -2055,7 +2075,8 @@ handlers[Wire.HELLO] = function(self, client, msg)
   client.hello = {
     name = name,
     playerId = playerId,
-    sprite = Wire.spriteId(msg.sprite) or Config.DEFAULT_SPRITE,
+    generation = generation,
+    sprite = Wire.spriteId(msg.sprite) or Config.defaultSpriteFor(self.generation),
     profile = Wire.profile(msg.profile),
     map = Wire.mapId(msg.map),
     x = Wire.int(msg.x, 0, 4096),
@@ -2460,7 +2481,7 @@ handlers[Wire.COOP_WAIT] = function(self, client, msg)
   -- Optional mode: only coop_wild is stored (Party vs Wild auto-join). Absent
   -- keeps the trainer WAIT/JOIN invite path.
   local mode = Wire.coopOfferMode(msg.mode)
-  -- Optional overworld npcId / event (PROTOCOL 19): invite joiners need the
+  -- Optional overworld npcId / event (PROTOCOL 20): invite joiners need the
   -- waiter's concrete trainer to mark beaten. Dropped when absent or wild.
   local npcId = (not mode) and Wire.npcId(msg.npcId) or nil
   local event = (not mode) and Wire.eventFlag(msg.event) or nil
@@ -2572,7 +2593,7 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   -- walked into the encounter -- the joiner usually has too, but a join taken
   -- from the ACTIONS menu never went near them. `mode` rides so the joiner's
   -- CoopBattle opens as coop_wild without re-deriving from a cleared offer.
-  -- `npcId` / `event` (PROTOCOL 19) ride so a menu joiner can finish the
+  -- `npcId` / `event` (PROTOCOL 20) ride so a menu joiner can finish the
   -- trainer off without a local BattleState -- never fuzzy-matched by class.
   local battleMsg = {
     id = id, side = "a", allies = members, battle = battle, host = host.id,
@@ -2755,7 +2776,7 @@ handlers[Wire.BATTLE_PARTY] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or record.sim then return end
 
-  local party = Wire.battleParty(msg)
+  local party = Wire.battleParty(msg, self.generation)
   if not party then
     return noteDrop(self, client, "the party is not a shape we can fight with")
   end

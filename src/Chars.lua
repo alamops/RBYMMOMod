@@ -12,8 +12,16 @@
 
 local need, mod = ...
 local Config = need("Config")
+local Gen = need("Gen")
 
 local M = {}
+
+-- Catalog-aware default (SPRITE_RED on Gen 1, SPRITE_CHRIS when that is what
+-- the boot actually carries).  Same helper Client / Avatars already use.
+local function fallbackSprite(game)
+  return Gen.defaultSprite(game, mod.content and mod.content.sprites)
+end
+
 
 -- Things in the sprite catalog that are not a person.
 local NOT_PEOPLE = {
@@ -25,10 +33,16 @@ local NOT_PEOPLE = {
 
 -- Poses that are a person but not a usable avatar: the UNUSED_ entries are
 -- leftovers the game never places, and an asleep sprite has no walk cycle.
-local function excluded(id)
+-- OWN_CHARS with a `gens` allow-list (NIRE today) are also out when this
+-- boot's generation is not on that list.
+local function excluded(id, game)
   if NOT_PEOPLE[id] then return true end
   if id:match("^SPRITE_UNUSED_") then return true end
   if id:match("_ASLEEP$") then return true end
+  local own = Config.ownCharId(id)
+  if own and not Config.ownCharAllowed(own, Gen.generation(game)) then
+    return true
+  end
   return false
 end
 
@@ -50,26 +64,27 @@ function M.label(id)
   return (tostring(id):gsub("^SPRITE_", ""):gsub("_", " "))
 end
 
--- Every wearable character, sorted, with RED first because it is the
--- fallback everyone is guaranteed to have.
-function M.list()
+-- Every wearable character, sorted, with the gen-aware default first because
+-- it is the fallback everyone on this boot is guaranteed to have.
+function M.list(game)
   local registry = mod.content and mod.content.sprites
-  if not registry then return { Config.DEFAULT_SPRITE } end
+  local fallback = fallbackSprite(game)
+  if not registry then return { fallback } end
 
   local out = {}
   local ok = pcall(function()
     for id, record in registry:each() do
       if type(id) == "string" and id:match("^SPRITE_")
-         and not excluded(id) and walks(record) then
+         and not excluded(id, game) and walks(record) then
         out[#out + 1] = id
       end
     end
   end)
-  if not ok or #out == 0 then return { Config.DEFAULT_SPRITE } end
+  if not ok or #out == 0 then return { fallback } end
 
   table.sort(out, function(a, b)
-    if a == Config.DEFAULT_SPRITE then return true end
-    if b == Config.DEFAULT_SPRITE then return false end
+    if a == fallback then return true end
+    if b == fallback then return false end
     return a < b
   end)
   return out
@@ -78,20 +93,22 @@ end
 -- Is this character present in *this* game's catalog?
 --
 -- The answer can differ between players: a modded catalog, or a different
--- ROM, may not carry what someone else picked. Everyone falls back to RED
--- rather than failing to draw, which is why RED is the one id this mod
--- treats as always-present.
-function M.available(id)
+-- ROM, may not carry what someone else picked. Everyone falls back to the
+-- gen-aware default rather than failing to draw. `game` is optional; when
+-- omitted, Gen.generation reads the live boot (so Gold hides Gen1-only OWN
+-- chars without every caller threading a game handle).
+function M.available(id, game)
   local registry = mod.content and mod.content.sprites
   if not (registry and type(id) == "string") then return false end
   local ok, record = pcall(function() return registry:get(id) end)
-  return ok and walks(record) and not excluded(id)
+  return ok and walks(record) and not excluded(id, game)
 end
 
-function M.resolve(id)
-  if M.available(id) then return id end
-  return Config.DEFAULT_SPRITE
+function M.resolve(id, game)
+  if M.available(id, game) then return id end
+  return fallbackSprite(game)
 end
+
 
 -- ------- the character's front-facing pose, as a drawable
 --
@@ -135,6 +152,24 @@ function M.portrait(spriteId)
     local built = pcall(function()
       local SpriteRenderer = require("src.render.SpriteRenderer")
       local renderer = SpriteRenderer.new(record, spriteId)
+      -- Gen 2 sheets are grayscale + PAL_OW_*; the overworld calls
+      -- setObjPalette before draw. Menus (character picker, trainer card,
+      -- town-map marks) only go through resolveImage — without the same
+      -- bake they stay DMG black-and-white on Gold.
+      if type(renderer.setObjPalette) == "function"
+          and (record.palette ~= nil or record.paletteId ~= nil) then
+        local game = nil
+        local gotGame = pcall(function() game = mod.game end)
+        local pals = gotGame and game and game.data and game.data.gen2Palettes
+        if type(pals) == "table" then
+          local Palettes = require("src.world.gen2.Palettes")
+          local colors = Palettes.spritePalette(pals, "DAY", record)
+          if colors then
+            local id = tonumber(record.paletteId) or 0
+            renderer:setObjPalette(colors, ("gen2:DAY:%d"):format(id))
+          end
+        end
+      end
       if type(renderer.resolveImage) == "function" then
         img = renderer:resolveImage()
       else

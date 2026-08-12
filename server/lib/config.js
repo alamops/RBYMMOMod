@@ -54,6 +54,10 @@ const DEFAULTS = {
   version: SCHEMA_VERSION,
   listen: { host: '0.0.0.0', port: 7788 },
   maxPlayers: 4,
+  // Hub generation lock (PROTOCOL 20+): 1 = Gen 1 (RBY), 2 = Gen 2 (Gold).
+  // Compat default is 1 when omitted -- see GENERATION_DEFAULT_WARNING. Gen 2
+  // hubs must set this explicitly (--generation 2 / generation: 2).
+  generation: 1,
   // The one line the hub hands every player on arrival -- it rides on the
   // welcome and lands in their chat log as a HUB line. Empty means the hub
   // says nothing, which is the right default: a greeting the host never wrote
@@ -111,6 +115,15 @@ const MOTD_MAX = 120;
 const MOTD_ALLOWED = /[^A-Za-z0-9 .,!?'\-:;()/]/g;
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'silent'];
+
+/*
+ * Said once when generation is left to the built-in default. Gen 1 and Gen 2
+ * hubs are equal peers; omitting the flag is a one-release compat path for
+ * existing Gen 1 deploys, not how Gen 2 is supposed to be brought up.
+ */
+const GENERATION_DEFAULT_WARNING =
+  'generation defaulted to 1; Gen 2 hubs must pass --generation 2 ' +
+  '(or set generation: 2 in config)';
 
 /*
  * Clamp bounds. Each range is chosen so that both ends still describe a hub
@@ -206,6 +219,7 @@ const ENV_MAP = {
   RBY_MMO_HOST: 'listen.host',
   RBY_MMO_PORT: 'listen.port',
   RBY_MMO_MAX: 'maxPlayers',
+  RBY_MMO_GENERATION: 'generation',
   RBY_MMO_AUTH_REQUIRED: 'auth.required',
   RBY_MMO_PER_IP: 'limits.perIpConnections',
   RBY_MMO_CONNECT_BURST: 'limits.connectBurst',
@@ -240,6 +254,7 @@ const FLAG_MAP = {
   port: 'listen.port',
   max: 'maxPlayers',
   maxPlayers: 'maxPlayers',
+  generation: 'generation',
   auth: 'auth.required',
   perIp: 'limits.perIpConnections',
   connectBurst: 'limits.connectBurst',
@@ -427,6 +442,27 @@ function validateMotd(config) {
   setPath(config, 'motd', clean.slice(0, MOTD_MAX));
 }
 
+/*
+ * Hub generation is a closed set: 1 or 2. Absent means the compat default of
+ * Gen 1, with GENERATION_DEFAULT_WARNING so a Gen 2 host cannot miss that
+ * they must set it explicitly. Anything else is pulled to 1 and named.
+ */
+function validateGeneration(config, warnings) {
+  const raw = getPath(config, 'generation');
+  if (raw === undefined || raw === null || raw === '') {
+    setPath(config, 'generation', 1);
+    warnings.push(GENERATION_DEFAULT_WARNING);
+    return;
+  }
+  const n = asInteger(raw);
+  if (n !== 1 && n !== 2) {
+    warnings.push(`generation: "${raw}" is not 1 or 2, using 1`);
+    setPath(config, 'generation', 1);
+    return;
+  }
+  setPath(config, 'generation', n);
+}
+
 function validateStringList(config, dotted, warnings) {
   const raw = getPath(config, dotted);
   if (raw === undefined || raw === null) {
@@ -568,6 +604,7 @@ function validate(config) {
 
   for (const dotted of Object.keys(BOUNDS)) clampNumber(working, dotted, warnings);
 
+  validateGeneration(working, warnings);
   validateBoolean(working, 'auth.required', warnings);
   validateBoolean(working, 'network.upnp.enabled', warnings);
   validateMotd(working);
@@ -782,6 +819,15 @@ function load(options = {}) {
   const checked = validate(merged);
   warnings.push(...checked.warnings);
 
+  // load() seeds from DEFAULTS before merging, so validate() always sees a
+  // concrete generation and cannot tell "omitted" from "explicit 1 in
+  // DEFAULTS". sources still can: warn once when nothing but the built-in
+  // default supplied it.
+  if (sources.generation === 'default' &&
+      !warnings.includes(GENERATION_DEFAULT_WARNING)) {
+    warnings.push(GENERATION_DEFAULT_WARNING);
+  }
+
   if (read.exists) {
     const permission = checkPermissions(file);
     if (permission) warnings.push(permission);
@@ -968,6 +1014,7 @@ module.exports = {
   FLAG_MAP,
   LOG_LEVELS,
   LEAF_PATHS,
+  GENERATION_DEFAULT_WARNING,
   resolvePath,
   load,
   validate,

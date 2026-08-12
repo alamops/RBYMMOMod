@@ -19,9 +19,21 @@
 
 local need = ...
 local Config = need("Config")
-local Effects = need("BattleSim/Effects")
 
 local M = {}
+
+-- Effects for bag proofs: Gen1 default, Gen2 when hub generation is 2.
+-- Lazy so a Gen1-only load never pulls BattleSim2.
+local effectsByGen = {}
+local function effectsFor(generation)
+  local key = (generation == 2) and 2 or 1
+  local cached = effectsByGen[key]
+  if cached then return cached end
+  local path = key == 2 and "BattleSim2/Effects" or "BattleSim/Effects"
+  local Effects = need(path)
+  effectsByGen[key] = Effects
+  return Effects
+end
 
 -- client -> hub
 M.HELLO         = "mmo.hello"
@@ -78,7 +90,7 @@ M.RANKS         = "mmo.ranks"
 -- COOP_WAIT carries { battle, label, map [, mode] [, npcId] [, event] } -- the
 -- fight this player is standing in front of.  Optional `mode` is only
 -- `"coop_wild"` (Party vs Wild auto-join); absent means the trainer WAIT/JOIN
--- invite path.  Optional `npcId` / `event` (PROTOCOL 19) are the waiter's
+-- invite path.  Optional `npcId` / `event` (PROTOCOL 20) are the waiter's
 -- overworld NPC id and event-flag id from engine `checkpointOrigin`, so an
 -- invite joiner with no local BattleState can still mark the trainer beaten.
 -- COOP_CANCEL withdraws it with an optional reason (`alone` / `left` /
@@ -458,6 +470,13 @@ function M.int(value, min, max)
   if min and n < min then return nil end
   if max and n > max then return nil end
   return n
+end
+
+-- Boot generation claimed on mmo.hello (PROTOCOL 20). Exactly 1 or 2; missing
+-- or out of range defaults to 1 so a PROTOCOL-20 client that omits the field
+-- still joins a Gen1 hub (legacy-shaped hello after the bump).
+function M.generation(value)
+  return M.int(value, 1, 2) or 1
 end
 
 function M.facing(value)
@@ -842,7 +861,7 @@ end
 -- trainer -- so it degrades to nil and the screen says "a battle" instead of
 -- refusing the whole offer over a cosmetic field.  Optional `mode` is only
 -- `coop_wild` (auto-join Party vs Wild); unknown values are dropped, not a
--- refuse of the whole offer.  Optional `npcId` / `event` (PROTOCOL 19) name the
+-- refuse of the whole offer.  Optional `npcId` / `event` (PROTOCOL 20) name the
 -- waiter's overworld trainer so a menu joiner can finish the fight off without
 -- a local BattleState; absent on older hubs and on coop_wild.
 function M.coopOffer(raw)
@@ -866,7 +885,8 @@ end
 -- Presence as it appears in a welcome roster, a join, or a move.  Position
 -- is optional so a player sitting in a menu or a battle can still be listed
 -- without claiming a cell in the world.
-function M.presence(raw)
+-- Optional `generation` (1|2) picks the missing-sprite fallback (Red vs Chris).
+function M.presence(raw, generation)
   if type(raw) ~= "table" then return nil end
   local id = M.id(raw.id)
   local name = M.name(raw.name)
@@ -874,7 +894,7 @@ function M.presence(raw)
   local out = {
     id = id,
     name = name,
-    sprite = M.spriteId(raw.sprite) or Config.DEFAULT_SPRITE,
+    sprite = M.spriteId(raw.sprite) or Config.defaultSpriteFor(generation),
     map = M.mapId(raw.map),
     x = M.int(raw.x, 0, 4096),
     y = M.int(raw.y, 0, 4096),
@@ -928,7 +948,7 @@ function M.ranking(raw)
       if name then
         local entry = {
           name = name,
-          sprite = M.spriteId(row.sprite) or Config.DEFAULT_SPRITE,
+          sprite = M.spriteId(row.sprite) or Config.defaultSpriteFor(nil),
           points = M.points(row.points),
         }
         -- Optional: older hubs omit id; PROTOCOL 16 boards always send it.
@@ -1214,18 +1234,37 @@ function M.battleMove(raw)
   return out
 end
 
--- Gen 1's four battle stats.  SPC is one stat and not two: Special did not
--- split until Gen 2, so a snapshot carrying spa/spd would be describing a
--- different game's battler.
-local STAT_KEYS = { "atk", "def", "spd", "spc" }
+-- Battle-stat keys on the sheet.  Gen 1 keeps one Special (`spc`) with Speed
+-- as `spd`.  Gen 2 splits Special into Sp.Atk / Sp.Def (`spa` / `spd`) and
+-- renames Speed to `spe` — so `spd` means different things in each dialect.
+-- Both shapes are first-class; a classic four-key Gen 1 table must still
+-- sanitise, and a Gen 2 spa/spd sheet must not be refused as "wrong game".
+local STAT_KEYS_GEN1 = { "atk", "def", "spd", "spc" }
+local STAT_KEYS_GEN2 = { "atk", "def", "spe", "spa", "spd" }
 
--- A full set of the four, or nothing.  Partial is refused rather than filled
--- in: every one of them is a multiplicand in the damage formula, and a
+-- Which dialect a stats / ivs / evs block is in.
+--
+-- Prefer an explicit `generation` (1|2) on the mon (or stamped from the party
+-- message).  Else sniff: `spa` or `spe` marks Gen 2; everything else — including
+-- a classic atk/def/spd/spc table — is Gen 1.  Gen 1's `spd` (Speed) alone is
+-- never enough to claim Gen 2, because that key is the Gen 1 name for Speed.
+local function statsGeneration(raw, hint)
+  local gen = M.int(hint, 1, 2)
+  if gen then return gen end
+  if type(raw) ~= "table" then return 1 end
+  if raw.spa ~= nil or raw.spe ~= nil then return 2 end
+  return 1
+end
+
+-- A full set for the dialect, or nothing.  Partial is refused rather than
+-- filled in: every key is a multiplicand in the damage formula, and a
 -- defaulted Defence is a made-up number that reads as a real one.
-local function statsOf(raw, min, max)
+local function statsOf(raw, min, max, generation)
   if type(raw) ~= "table" then return nil end
+  local keys = statsGeneration(raw, generation) == 2 and STAT_KEYS_GEN2
+    or STAT_KEYS_GEN1
   local out = {}
-  for _, key in ipairs(STAT_KEYS) do
+  for _, key in ipairs(keys) do
     local n = M.int(raw[key], min, max)
     if not n then return nil end
     out[key] = n
@@ -1263,13 +1302,22 @@ end
 -- `slot`, `ivs` and `evs` are optional wholesale but not piecemeal, and an
 -- unreadable one refuses the battler rather than being dropped: a snapshot from a
 -- client that does not track EVs is fine and common, while a snapshot with two of
--- the four is a bug on the sending side that accepting would silently zero the
--- rest of.
+-- the four (or five) is a bug on the sending side that accepting would silently
+-- zero the rest of.
+--
+-- Optional `generation` (1|2) selects the stats dialect; absent falls back to
+-- shape sniff on `stats` (see statsGeneration). Optional `heldItem` is a Gen 2
+-- item id string — cleaned like any other id, dropped when absent.
 function M.battleMon(raw)
   if type(raw) ~= "table" then return nil end
 
-  local stats = statsOf(raw.stats, 1, M.STAT_MAX)
+  local generation = M.int(raw.generation, 1, 2)
+  local stats = statsOf(raw.stats, 1, M.STAT_MAX, generation)
   if not stats then return nil end
+  -- Dialect actually used (explicit or sniffed) — stamp so downstream sees it.
+  if not generation then
+    generation = stats.spa ~= nil and 2 or 1
+  end
 
   local status = M.battleStatus(raw.status)
   if status == false then return nil end
@@ -1281,6 +1329,7 @@ function M.battleMon(raw)
     maxHp = M.int(raw.maxHp, 1, M.HP_MAX),
     stats = stats,
     status = status,
+    generation = generation,
   }
   -- hp may be 0 (fainted); only nil means the field failed to sanitise.  In Lua
   -- 0 is truthy, but spell the check with `== nil` anyway so a reader coming
@@ -1295,13 +1344,13 @@ function M.battleMon(raw)
     if out.slot == nil then return nil end
   end
   if raw.ivs ~= nil then
-    out.ivs = statsOf(raw.ivs, 0, 15)
+    out.ivs = statsOf(raw.ivs, 0, 15, generation)
     if not out.ivs then return nil end
   end
   if raw.evs ~= nil then
-    out.evs = statsOf(raw.evs, 0, 65535)
+    out.evs = statsOf(raw.evs, 0, 65535, generation)
     if not out.evs then return nil end
-    -- Optional HP Stat Exp for HP_UP (fourOf-style battle stats stay required).
+    -- Optional HP Stat Exp for HP_UP (battle-stat keys stay required).
     if raw.evs.hp ~= nil then
       out.evs.hp = M.int(raw.evs.hp, 0, 65535)
       if out.evs.hp == nil then return nil end
@@ -1341,6 +1390,13 @@ function M.battleMon(raw)
     if out.catchRate == nil then return nil end
   end
 
+  -- Optional Gen 2 held item id. Absent is fine; present-but-unreadable
+  -- refuses, same posture as a mangled types list.
+  if raw.heldItem ~= nil then
+    out.heldItem = M.id(raw.heldItem)
+    if not out.heldItem then return nil end
+  end
+
   return out
 end
 
@@ -1361,10 +1417,14 @@ end
 -- `bag` is optional: absent means an empty sheet (PROTOCOL 15). Present-but
 -- unreadable refuses the party — a half-parsed bag would let the hub prove the
 -- wrong inventory.
-function M.battleBag(raw)
+--
+-- Optional `generation` (1|2) selects BattleSim vs BattleSim2 Effects for
+-- itemEffect; omitted → Gen 1 (compat).
+function M.battleBag(raw, generation)
   if raw == nil then return {} end
   if type(raw) ~= "table" then return nil end
 
+  local Effects = effectsFor(generation)
   local out, seen = {}, {}
   -- Array form: [{id, count}, ...]. Map form (id -> count) is also accepted so
   -- a client that already holds inventory as a dict does not have to rebuild.
@@ -1400,12 +1460,34 @@ function M.battleBag(raw)
   return out
 end
 
-function M.battleParty(raw)
+function M.battleParty(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
   if not battle then return nil end
 
   local out = { battle = battle, badges = M.badges(raw.badges) }
+
+  -- Hub generation (second arg) is authoritative when provided: stamp
+  -- party.generation from it, and refuse a mon/party whose explicit
+  -- generation disagrees.
+  local hubGen = nil
+  if generation ~= nil then
+    hubGen = M.int(generation, 1, 2)
+    if not hubGen then return nil end
+  end
+
+  local partyGen = nil
+  if raw.generation ~= nil then
+    partyGen = M.int(raw.generation, 1, 2)
+    if not partyGen then return nil end
+    if hubGen and partyGen ~= hubGen then return nil end
+  end
+  if hubGen then
+    out.generation = hubGen
+    partyGen = hubGen
+  elseif partyGen then
+    out.generation = partyGen
+  end
 
   if raw.side ~= nil then
     out.side = M.side(raw.side)
@@ -1416,14 +1498,26 @@ function M.battleParty(raw)
   local mons = {}
   for _, entry in ipairs(raw.mons) do
     if #mons >= Config.BATTLE_MON_MAX then return nil end
-    local mon = M.battleMon(entry)
+    local hadExplicit = type(entry) == "table" and entry.generation ~= nil
+    if hubGen and hadExplicit then
+      local monGen = M.int(entry.generation, 1, 2)
+      if not monGen or monGen ~= hubGen then return nil end
+    end
+    local sheet = entry
+    if partyGen and type(entry) == "table" and entry.generation == nil then
+      sheet = {}
+      for k, v in pairs(entry) do sheet[k] = v end
+      sheet.generation = partyGen
+    end
+    local mon = M.battleMon(sheet)
     if not mon then return nil end
+    if hubGen and hadExplicit and mon.generation ~= hubGen then return nil end
     mons[#mons + 1] = mon
   end
   if #mons == 0 then return nil end
   out.mons = mons
 
-  local bag = M.battleBag(raw.bag)
+  local bag = M.battleBag(raw.bag, partyGen or hubGen)
   if not bag then return nil end
   out.bag = bag
 

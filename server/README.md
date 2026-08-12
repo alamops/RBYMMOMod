@@ -62,8 +62,44 @@ docker compose exec hub cat /data/join-code.txt
 cd server/
 node bin/rby-mmo-hub.js init      # four questions; --yes takes the defaults
 node bin/rby-mmo-hub.js doctor    # what would stop friends connecting
-node bin/rby-mmo-hub.js start     # run it
+node bin/rby-mmo-hub.js start     # run it (Gen 1 hub unless you set generation)
 ```
+
+Hubs are **gen-locked**: a Gen 1 hub only admits Gen 1 (RBY) clients; a Gen 2
+hub only admits Gen 2 (Gold). Both are first-class run targets — pick one
+explicitly rather than treating Gen 2 as an afterthought.
+
+#### Gen 1 hub
+
+```sh
+# CLI (preferred — join code + limits)
+node bin/rby-mmo-hub.js init --yes --generation 1
+node bin/rby-mmo-hub.js start --generation 1
+
+# Or pin it in config.json:  "generation": 1
+# Env: RBY_MMO_GENERATION=1
+
+# LAN shim (unauthenticated; same gen lock)
+node hub.js --generation 1
+node hub.js 9000 --generation 1
+```
+
+#### Gen 2 hub
+
+```sh
+node bin/rby-mmo-hub.js init --yes --generation 2
+node bin/rby-mmo-hub.js start --generation 2
+
+# config.json:  "generation": 2
+# Env: RBY_MMO_GENERATION=2
+
+node hub.js --generation 2
+```
+
+If `--generation` / `generation` / `RBY_MMO_GENERATION` is omitted, the hub
+defaults to **1** and prints a startup warning that Gen 2 hubs must pass
+`--generation 2`. In-game HOST always binds the boot's generation (Gold → 2,
+Red/Blue/Yellow → 1) and never relies on that omit path.
 
 `init` writes `config.json` (mode 0600) and prints the passcode once:
 
@@ -161,8 +197,8 @@ container, where it is on `PATH`.
 
 | Command | What it does | Its own options |
 | --- | --- | --- |
-| `init` | first-run wizard: writes `config.json` at mode 0600 and prints a passcode once. Refuses to overwrite an existing file. | `--yes` (ask nothing, take flags and defaults), `--force` (replace an existing config), `--code CODE` (use this passcode instead of a generated one), plus any config flag below |
-| `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
+| `init` | first-run wizard: writes `config.json` at mode 0600 and prints a passcode once. Refuses to overwrite an existing file. | `--yes` (ask nothing, take flags and defaults), `--force` (replace an existing config), `--generation 1\|2` (hub gen lock, written into the file), `--code CODE` (use this passcode instead of a generated one), plus any config flag below |
+| `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--generation 1\|2`; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
 | `status` | every effective setting, its value, and where that value came from (`flag` / `env` / `file` / `default`). Codes masked. | — |
 | `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (one object per player, the ten contract fields only — the nine the table is drawn from plus `admin`, which it does not draw) |
 | `ranking` | the ranked season out of `ranking.json`: place, name (with `#aaaa` id tag when names collide), points, and how many battles each player has won and lost. Top ten, best first. Keyed by player id. | `--json`, `--all` (every player who has scored, not just the top ten) |
@@ -591,14 +627,14 @@ exception: `history -n <count>`, which is the spelling every other tool that
 prints the last N of something already uses.
 
 Short spellings for the settings a host actually types: `--host`, `--port`,
-`--max` (or `--max-players`), `--auth`, `--per-ip`, `--connect-burst`,
-`--connect-per-minute`, `--handshake-timeout`, `--idle-timeout`,
-`--partial-line-timeout`, `--max-pending`, `--max-write-buffer`,
-`--chat-interval`, `--auth-failure-grace`, `--auth-failure-window`,
-`--auth-backoff-base`, `--auth-backoff-max`, `--auth-global-failures`,
-`--auth-global-window`, `--auth-lockout`, `--upnp`, `--upnp-lease`,
-`--log-level`. Any dotted config path is also accepted verbatim, so nothing
-needs a hand-written flag.
+`--max` (or `--max-players`), `--generation`, `--auth`, `--per-ip`,
+`--connect-burst`, `--connect-per-minute`, `--handshake-timeout`,
+`--idle-timeout`, `--partial-line-timeout`, `--max-pending`,
+`--max-write-buffer`, `--chat-interval`, `--auth-failure-grace`,
+`--auth-failure-window`, `--auth-backoff-base`, `--auth-backoff-max`,
+`--auth-global-failures`, `--auth-global-window`, `--auth-lockout`, `--upnp`,
+`--upnp-lease`, `--log-level`. Any dotted config path is also accepted
+verbatim, so nothing needs a hand-written flag.
 
 **Exit codes:** `0` success, `1` runtime error, `2` wrong usage. `doctor`
 returns `1` when something would stop players connecting, `0` when only
@@ -1690,15 +1726,19 @@ number is the one on this machine and the one friends type.
 ## `node hub.js` — the old front door, still open
 
 ```sh
-node hub.js              # port 7788, 4 players
-node hub.js 9000         # or pick a port
-RBY_MMO_MAX=8 node hub.js
+node hub.js                         # port 7788, 4 players, generation 1 (compat)
+node hub.js 9000                    # or pick a port
+node hub.js --generation 2          # Gen 2 LAN hub
+node hub.js 9000 --generation 1     # port + gen lock
+RBY_MMO_MAX=8 node hub.js --generation 1
+RBY_MMO_GENERATION=2 node hub.js
 ```
 
-Unchanged, on purpose: no config file, no join code, no arguments but a port,
-and the same three environment variables (`RBY_MMO_PORT`, `RBY_MMO_HOST`,
-`RBY_MMO_MAX`, the last clamped to 2–64). Every command that ever worked here
-still works.
+Unchanged for the LAN case: no config file, no join code, and the same three
+environment variables (`RBY_MMO_PORT`, `RBY_MMO_HOST`, `RBY_MMO_MAX`, the last
+clamped to 2–64), plus optional `--generation 1|2` / `RBY_MMO_GENERATION`.
+Every command that ever worked here still works; omitting generation keeps
+the Gen 1 compat default and logs the Gen 2 reminder once.
 
 **This is the one exception to "a passcode is required", and it is a
 deliberate one.** There is no config file here to keep a passcode in, so this

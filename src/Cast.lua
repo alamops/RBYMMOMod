@@ -27,6 +27,7 @@
 
 local need, mod = ...
 local Config = need("Config")
+local Gen = need("Gen")
 
 local M = {}
 
@@ -177,6 +178,9 @@ end
 function M.pic(id, side)
   local char = registered[id]
   if not char then return nil end
+  -- Gen 2 is not ready for OWN_CHARS battle / card pics yet — leave the
+  -- engine on Chris (or whoever the boot already chose).
+  if not Config.ownCharAllowed(char, Gen.generation()) then return nil end
   return assetPath(char, side == "back" and "back.png" or "front.png")
 end
 

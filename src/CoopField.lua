@@ -49,6 +49,7 @@
 -- drift from the first one the day either changed.
 
 local need, mod = ...
+local Gen = need("Gen")
 
 local M = {}
 
@@ -60,6 +61,13 @@ local Field, engine
 -- deps: { BattleState, Strings } -- handed in by CoopBattle, which is the only
 -- caller that has an engine to hand.
 function M.build(deps)
+  -- Gen 2: never inherit Gen1 BattleState. Hub-mediated co-op replays
+  -- BattleSim2 events; host-sim CoopField would silent-corrupt via MK403.
+  if Gen.generation(deps and deps.game) == 2 then
+    mod.log:warn("CoopField (Gen1 BattleState host-sim) is disabled on Gen 2; "
+      .. "use hub-mediated co-op on a Gen 2 hub (BattleSim2) instead")
+    return nil
+  end
   -- Keyed on the engine it was built against, not merely on "has one been
   -- built". `F5` in dev mode re-requires the engine's modules, and a cache
   -- that only asked whether it was populated kept handing back a metatable
@@ -70,6 +78,11 @@ function M.build(deps)
   end
   engine = deps
   local BattleState = deps.BattleState
+  if type(BattleState) ~= "table" then
+    mod.log:warn("CoopField needs Gen1 BattleState; refusing construction -- "
+      .. "report this with the game version")
+    return nil
+  end
 
   Field = setmetatable({}, { __index = BattleState })
   Field.__index = Field
@@ -217,7 +230,15 @@ end
 -- slots is CoopSim's own list; the field reads them live rather than copying,
 -- so a send-out done by the sim is visible to the next move resolved here.
 function M.new(deps, game, slots, ruleset)
+  deps = deps or {}
+  if deps.game == nil then deps.game = game end
+  if Gen.generation(game or deps.game) == 2 then
+    mod.log:warn("CoopField (Gen1 BattleState host-sim) is disabled on Gen 2; "
+      .. "use hub-mediated co-op on a Gen 2 hub (BattleSim2) instead")
+    return nil
+  end
   local Cls = M.build(deps)
+  if not Cls then return nil end
   local self = setmetatable({
     game = game,
     data = game.data,

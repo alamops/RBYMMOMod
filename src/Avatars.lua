@@ -55,6 +55,7 @@
 
 local need, mod = ...
 local Config = need("Config")
+local Gen = need("Gen")
 
 local M = {}
 M.__index = M
@@ -67,10 +68,6 @@ local DELTA = {
   down  = { 0, 1 },
   left  = { -1, 0 },
   right = { 1, 0 },
-}
-
-local RANGE_OF = {
-  up = "UP", down = "DOWN", left = "LEFT", right = "RIGHT",
 }
 
 function M.new()
@@ -87,22 +84,37 @@ end
 -- documented fallback instead of a crash attributed to the overworld.
 function M:spriteFor(requested)
   local sprites = mod.content.sprites
-  if sprites and requested and sprites:get(requested) then return requested end
-  if requested and not self.spriteWarned[requested] then
+  local resolved = Gen.resolveSprite(nil, requested, sprites)
+  if requested and resolved and requested ~= resolved
+     and not self.spriteWarned[requested] then
     self.spriteWarned[requested] = true
     mod.log:warn("sprite %s is not in this game's catalog; drawing that "
-      .. "player as %s instead", tostring(requested), Config.DEFAULT_SPRITE)
+      .. "player as %s instead", tostring(requested), tostring(resolved))
   end
-  if sprites and sprites:get(Config.DEFAULT_SPRITE) then
-    return Config.DEFAULT_SPRITE
-  end
+  if resolved and sprites and sprites:get(resolved) then return resolved end
   return nil
 end
 
+-- Gen 2 WorldAPI:npc matches def.name / def.index only (not npc.id). Prefer
+-- the spawn name, then the returned npcId, then the _obj_N index parsed out
+-- of that id so a rebuilt pool still resolves.
 function M:handle(av)
-  if not (av and av.npcId and self.mapId) then return nil end
-  local handle = mod.world:npc(self.mapId, av.npcId)
-  return handle
+  if not (av and self.mapId and mod.world) then return nil end
+  local name = av.name or (av.id and Gen.avatarName(av.id))
+  if name then
+    local handle = mod.world:npc(self.mapId, name)
+    if handle then return handle end
+  end
+  if av.npcId then
+    local handle = mod.world:npc(self.mapId, av.npcId)
+    if handle then return handle end
+    local index = tostring(av.npcId):match("_obj_(%d+)$")
+    if index then
+      handle = mod.world:npc(self.mapId, tonumber(index))
+      if handle then return handle end
+    end
+  end
+  return nil
 end
 
 -- Applies the depth nudge below and then hands back whatever the wrapped
@@ -214,18 +226,16 @@ function M:spawn(player)
     return nil
   end
 
-  local npcId = mod.world:spawnNpc(player.map, {
-    sprite = sprite,
-    x = player.x,
-    y = player.y,
-    movement = "STAY",           -- never wander; the network is the authority
-    range = RANGE_OF[player.facing] or "DOWN",
-    name = "mmo_" .. player.id,
-  })
+  -- Gen.spawnObjDef picks STAY+range (Gen 1) or numeric STANDING_* (Gen 2);
+  -- the network is still the authority either way -- never wander.
+  local name = Gen.avatarName(player.id)
+  local npcId = mod.world:spawnNpc(player.map, Gen.spawnObjDef(player, sprite, mod.game))
   if not npcId then return nil end
 
   self.spawned[player.id] = {
     npcId = npcId,
+    name = name,
+    id = player.id,
     x = player.x,
     y = player.y,
     facing = player.facing,

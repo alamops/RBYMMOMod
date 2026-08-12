@@ -31,6 +31,7 @@
 
 local need, chunkMod = ...
 local Config = need("Config")
+local Gen = need("Gen")
 local Wire = need("Wire")
 
 local M = {}
@@ -89,6 +90,18 @@ local function featuredEntry()
     last = 0,
     featured = true,
   }
+end
+
+local function featuredVisible(game)
+  return Config.featuredServerAllowed(Gen.generation(game))
+end
+
+-- True when `address` is the product-owned official hub (any typing shape
+-- that normalises to the same key). Used by Client to refuse a Gen 2 dial
+-- that skipped the SERVERS menu.
+function M.isFeaturedAddress(address)
+  local id = keyOf(address)
+  return id ~= nil and id == FEATURED_KEY
 end
 
 -- What a hub is called before anybody names it.
@@ -418,9 +431,14 @@ end
 -- The SERVERS screen has one product-owned row in addition to persisted
 -- recents. Keep that projection separate from list/get so external callers
 -- still see exactly the history they saw before the featured server existed.
-function M:menuList()
+-- `game` (optional) gates the official row by boot generation — Gen 2 hides
+-- it while the public hub stays Gen 1-only.
+function M:menuList(game)
   self:_load()
-  local out = { featuredEntry() }
+  local out = {}
+  if featuredVisible(game) then
+    out[#out + 1] = featuredEntry()
+  end
   for _, entry in ipairs(self:_rows()) do
     -- `_ingest` and `record` already keep this key out of entries. Retain the
     -- guard at the projection boundary too: even a caller that has modified
@@ -432,11 +450,16 @@ end
 
 -- Resolves keys handed back by menuList(), including its synthetic first row.
 -- Normal get() intentionally does not: it remains the persisted-recents API.
-function M:menuGet(key)
+-- When the official row is generation-gated off, menuGet returns nil for its
+-- key the same way a deleted recent would.
+function M:menuGet(key, game)
   self:_load()
   local id = keyOf(key)
   if not id then return nil end
-  if id == FEATURED_KEY then return featuredEntry() end
+  if id == FEATURED_KEY then
+    if not featuredVisible(game) then return nil end
+    return featuredEntry()
+  end
   return self.entries[id]
 end
 

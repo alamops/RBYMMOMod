@@ -295,6 +295,12 @@ return {
   },
 
   compat_notes = {
+    "Runs on Gen 1 (Red/Blue/Yellow) and Gen 2 (Gold). Use a Gen 1 hub "
+      .. "with a Gen 1 boot and a Gen 2 hub with a Gen 2 boot — hubs refuse "
+      .. "cross-generation joins. Mediated Gen 2 battle / trade / co-op "
+      .. "land with the Gen 2 hub work in progress (see "
+      .. "docs/plans/gen2-compatibility.md); presence and chat follow "
+      .. "the dual-gen WorldAPI.",
     "Runs alongside DramaticShapeVoxelMod: both load clean and everything "
       .. "works with the diorama on. Remote players render as voxel "
       .. "characters, since this mod spawns real NPCs rather than drawing "

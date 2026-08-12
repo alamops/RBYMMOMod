@@ -895,6 +895,19 @@ do
   end
 end
 
+-- Wave 2 T2d: hub generation selects BattleSim vs BattleSim2 at Hub.new.
+do
+  local Turn1 = need("BattleSim/Turn")
+  local Turn2 = need("BattleSim2/Turn")
+  local gen1 = Hub.new({ maxPlayers = 4 })
+  eq(gen1.generation, 1, "omitted generation defaults to 1")
+  ok(gen1.Turn == Turn1, "generation 1 loads BattleSim/Turn")
+  local gen2 = Hub.new({ maxPlayers = 4, generation = 2 })
+  eq(gen2.generation, 2, "generation:2 is stored")
+  ok(gen2.Turn == Turn2, "generation 2 loads BattleSim2/Turn")
+  ok(gen2.Turn ~= Turn1, "Gen2 hub never holds Gen1 Turn")
+end
+
 -- ------------------------------------------------------------------
 
 io.write(string.format("hub_battle: %d passed, %d failed\n", passed, failed))

@@ -21,6 +21,26 @@ local T = require("tests.modkit")
 local check, eq = T.check, T.eq
 
 local MOD_PATH = "mods/rby_mmo"
+-- Agetor / out-of-tree checkouts may leave mods/rby_mmo pointed at another
+-- tree; fall back to this suite's mod root so dual-gen (and the rest) still
+-- exercise the checkout under test. Same pattern as tests/trade2.lua.
+if not io.open(MOD_PATH .. "/src/Gen.lua", "rb") then
+  local src = debug.getinfo(1, "S").source
+  if type(src) == "string" and src:sub(1, 1) == "@" then
+    local dir = src:sub(2):match("(.+)[/\\]")
+    if dir then
+      local fallback = dir:gsub("[/\\]tests$", "")
+      if io.open(fallback .. "/src/Gen.lua", "rb") then
+        MOD_PATH = fallback
+      end
+    end
+  end
+end
+
+-- Remap mods/rby_mmo -> absolute MOD_PATH when the symlink is stale.
+-- Helper lives in its own chunk so this suite stays under LuaJIT's 200-local
+-- main-chunk limit.
+local makeRemapFs = dofile(MOD_PATH .. "/tests/mod_remap_fs.lua")
 
 -- ------------------------------------------------------------------
 -- 1. the real load
@@ -63,46 +83,26 @@ check(#vanillaSurface > 0, "the baseline snapshot is not vacuously empty")
 -- From 1.0.0 the mod is not experimental: a missing options.mods entry means
 -- enabled (ordinary mod default). Installing still does not open a socket —
 -- that only happens when the player hosts or joins.
-local byDefault = T.sdk.loadMod(MOD_PATH)
-eq(#byDefault.errors, 0, "loads clean by default")
-eq(byDefault.mod.state, "loaded",
-   "non-experimental means on when present in mods/")
-check(byDefault.loader.content.screens:get("RbyMmoMain") ~= nil,
-   "and a default-enabled mod installs its screens")
-byDefault.release()
+do
+  local opts = {}
+  if MOD_PATH ~= "mods/rby_mmo" then opts.fs = makeRemapFs(T, MOD_PATH) end
+  local byDefault = T.sdk.loadMod("mods/rby_mmo", opts)
+  eq(#byDefault.errors, 0, "loads clean by default")
+  eq(byDefault.mod.state, "loaded",
+     "non-experimental means on when present in mods/")
+  check(byDefault.loader.content.screens:get("RbyMmoMain") ~= nil,
+     "and a default-enabled mod installs its screens")
+  byDefault.release()
+end
 
 -- Everything past here is the opted-in mod, reached by handing the loader a
 -- filesystem whose options.lua already has it enabled -- the same file the
 -- mod manager writes when the player flips the switch.
 local function enabledFs()
-  local inner = T.fs.new(".")
-  local OPTIONS = "options.lua"
-  local body = "return { mods = { rby_mmo = true } }"
-  local loadstr = loadstring or load
-  local fs = { root = inner.root }
-
-  function fs.read(path)
-    if path == OPTIONS then return body end
-    return inner.read(path)
-  end
-  function fs.load(path)
-    if path == OPTIONS then return loadstr(body, OPTIONS) end
-    return inner.load(path)
-  end
-  function fs.getInfo(path)
-    if path == OPTIONS then return { type = "file" } end
-    return inner.getInfo(path)
-  end
-  -- narrowed to this mod alone: the checkout also carries the gallery and
-  -- nuzlocke, and a suite that loaded those too would be testing them
-  function fs.getDirectoryItems(path)
-    if path == "mods" then return { "rby_mmo" } end
-    return inner.getDirectoryItems(path)
-  end
-  return fs
+  return makeRemapFs(T, MOD_PATH, { pinEnabled = true })
 end
 
-local run = T.sdk.loadMod(MOD_PATH, { fs = enabledFs() })
+local run = T.sdk.loadMod("mods/rby_mmo", { fs = enabledFs() })
 
 eq(#run.errors, 0, "loads clean through the headless loader")
 check(run.mod ~= nil, "the loader found the mod")
@@ -143,6 +143,26 @@ for _, name in ipairs({ "save.loaded", "save.created" }) do
   check(listeners ~= nil and #listeners > 0,
         "subscribes to " .. name .. ", so a fresh save is resynced exactly "
         .. "like a loaded one")
+end
+
+-- ------- Dual-gen headless load (TT0)
+--
+-- Wave 0 claimed games:["gen1","gen2"]. Both boots must reach loaded with
+-- an empty error list through the real loader (generation opt selects the
+-- Gen2Compat facade without a Gold ROM).
+do
+  for _, gen in ipairs({ 1, 2 }) do
+    local dual = T.sdk.loadMod("mods/rby_mmo", {
+      fs = enabledFs(),
+      generation = gen,
+    })
+    eq(#dual.errors, 0,
+       "generation=" .. gen .. " loads with no errors")
+    check(dual.mod ~= nil, "generation=" .. gen .. " finds the mod")
+    eq(dual.mod.state, "loaded",
+       "generation=" .. gen .. " reaches loaded")
+    dual.release()
+  end
 end
 
 -- ------- movement.speed: holding B on foot halves the step
@@ -212,7 +232,8 @@ for _, id in ipairs({ "SPRITE_NIRE", "SPRITE_NIRE_HOOD" }) do
     eq(record.walker, true, id .. " walks, so it can be worn")
     eq(record.frames, 6, id .. " carries a full six-frame sheet")
     check(type(record.image) == "string"
-          and record.image:find(MOD_PATH, 1, true) == 1,
+          and (record.image:find(MOD_PATH, 1, true) == 1
+               or record.image:find("mods/rby_mmo", 1, true) == 1),
           id .. "'s art comes out of the mod folder")
   end
   -- and the game's own view of the catalog sees it, which is what the
@@ -231,7 +252,8 @@ for _, id in ipairs({ "rby_mmo_nire_back", "rby_mmo_nire_hood_back" }) do
   if scale then
     eq(scale.scale, 1, id .. " draws at exactly 1x")
     check(type(scale.path) == "string"
-          and scale.path:find(MOD_PATH, 1, true) == 1,
+          and (scale.path:find(MOD_PATH, 1, true) == 1
+               or scale.path:find("mods/rby_mmo", 1, true) == 1),
           id .. " points at the mod's own art")
   end
 end
@@ -254,6 +276,7 @@ check(type(exports.players) == "function", "exports players")
 eq(exports.isConnected(), false, "reports disconnected before connecting")
 eq(#exports.players(), 0, "the roster starts empty")
 check(type(exports.party) == "function", "exports party")
+check(type(exports.leaveParty) == "function", "exports leaveParty")
 eq(#exports.party(), 0, "and nobody is in one before connecting")
 -- Whether the hub this copy is on treats it as an operator's connection
 -- (docs/plans/admin-join-code.md #4/D). Derived only from a credential a
@@ -3322,6 +3345,8 @@ eq(Chars.resolve("SPRITE_BOULDER"), Config.DEFAULT_SPRITE,
 -- 0 through Chars.portrait. Blitting the raw sheet skips SpriteRenderer's
 -- OBP bake and turns DMG shades into the wrong colours (lime-green skin on
 -- a gentleman, for instance). This pins the path through resolveImage.
+-- Gen 2 also needs setObjPalette (PAL_OW_* x daytime) or Gold menus stay
+-- black-and-white while the overworld is coloured.
 
 ;(function()
   local usedResolve = false
@@ -3372,6 +3397,105 @@ eq(Chars.resolve("SPRITE_BOULDER"), Config.DEFAULT_SPRITE,
 
   package.loaded["src.render.SpriteRenderer"] = savedSR
   if savedNewQuad then love.graphics.newQuad = savedNewQuad end
+end)()
+
+-- Gen 2: same path must setObjPalette from gen2Palettes before resolveImage,
+-- or Chris in the character picker stays DMG greyscale on a Gold boot.
+;(function()
+  local usedResolve, usedSetObj = false, false
+  local mockImg = { getDimensions = function() return 16, 96 end }
+  local savedSR = package.loaded["src.render.SpriteRenderer"]
+  local savedPal = package.loaded["src.world.gen2.Palettes"]
+  package.loaded["src.render.SpriteRenderer"] = {
+    new = function(record, seed)
+      eq(seed, "SPRITE_CHRIS", "Gen2 portrait seeds with the sprite id")
+      return {
+        setObjPalette = function(self, colors, group)
+          usedSetObj = true
+          check(type(colors) == "table" and #colors >= 4,
+                "Gen2 portrait receives a 4-colour OBP")
+          check(type(group) == "string" and group:find("gen2:DAY", 1, true) == 1,
+                "and a DAY bake group (menus are lit like day)")
+        end,
+        resolveImage = function(self)
+          usedResolve = true
+          check(usedSetObj, "setObjPalette runs before resolveImage on Gold")
+          return mockImg
+        end,
+      }
+    end,
+  }
+  package.loaded["src.world.gen2.Palettes"] = {
+    spritePalette = function(data, daytime, spriteDef)
+      eq(daytime, "DAY", "menu portraits bake against DAY")
+      check(data and data.objects, "and see gen2Palettes")
+      eq(spriteDef.palette, "PAL_OW_RED", "with the sheet's PAL_OW_*")
+      return {
+        { 1, 1, 1 }, { 0.9, 0.3, 0.2 }, { 0.4, 0.1, 0.1 }, { 0, 0, 0 },
+      }
+    end,
+  }
+
+  _G.love = _G.love or {}
+  love.graphics = love.graphics or {}
+  local savedNewQuad = love.graphics.newQuad
+  love.graphics.newQuad = function(x, y, w, h, iw, ih)
+    return { x = x, y = y, w = w, h = h, iw = iw, ih = ih }
+  end
+
+  local portraitMod = {
+    game = { data = { gen2Palettes = { objects = { DAY = { {} } } } } },
+    content = {
+      sprites = {
+        get = function(_, id)
+          if id == "SPRITE_CHRIS" then
+            return {
+              image = "sprites/chris.png", frames = 6, walker = true,
+              palette = "PAL_OW_RED", paletteId = 0,
+            }
+          end
+        end,
+      },
+    },
+  }
+  local PortraitChars = resolver(portraitMod)("Chars")
+  local art = PortraitChars.portrait("SPRITE_CHRIS")
+  check(usedSetObj, "Gold portrait calls setObjPalette (PAL_OW bake)")
+  check(usedResolve, "and still resolves through SpriteRenderer")
+  check(art ~= nil and art.image == mockImg, "returning the baked image")
+
+  package.loaded["src.render.SpriteRenderer"] = savedSR
+  package.loaded["src.world.gen2.Palettes"] = savedPal
+  if savedNewQuad then love.graphics.newQuad = savedNewQuad end
+end)()
+
+-- ------- in-game host hub locks to the boot generation
+--
+-- HostServer:start hands Gen.generation(game) to Hub.new. A Gold-shaped game
+-- must lock generation 2 so the host's own hello is not refused.
+
+;(function()
+  local Gen = need("Gen")
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  eq(Gen.generation(goldGame), 2, "a Gold-shaped game is generation 2")
+  local locked = Hub.new({
+    maxPlayers = 2,
+    generation = Gen.generation(goldGame),
+  })
+  eq(locked.generation, 2, "HostServer-shaped Hub.new locks to generation 2")
+
+  -- Explicit game wins over a Gen1-shaped _G.Game (the Gold boot hazard).
+  local savedGame = rawget(_G, "Game")
+  rawset(_G, "Game", { data = {} })
+  eq(Gen.generation(goldGame), 2,
+     "explicit Gold game wins over a Gen1 _G.Game singleton")
+  if savedGame ~= nil then
+    rawset(_G, "Game", savedGame)
+  else
+    rawset(_G, "Game", nil)
+  end
 end)()
 
 -- ------- the trainer card fits the box it is drawn in
@@ -3516,6 +3640,7 @@ end)()
 ;(function()
 
 local Cast = need("Cast")
+local Gen = need("Gen")
 
 stubSprites = {}
 stubScales = {}
@@ -3549,6 +3674,27 @@ for _, row in ipairs(Config.SPRITES) do
 end
 eq(offered.SPRITE_NIRE, "listed", "NIRE is offered in the options row too")
 eq(offered.SPRITE_NIRE_HOOD, "listed", "and so is NIRE HOOD")
+
+-- Gen 2 is not ready for OWN_CHARS yet: both NIREs stay out of the picker
+-- and resolve to the Gold default even though Cast still registered them.
+do
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  eq(Gen.generation(goldGame), 2, "Gold-shaped stub is generation 2")
+  local goldOffered = {}
+  for _, id in ipairs(Chars.list(goldGame)) do goldOffered[id] = true end
+  eq(goldOffered.SPRITE_NIRE, nil, "NIRE is not offered on Gen 2")
+  eq(goldOffered.SPRITE_NIRE_HOOD, nil, "nor is NIRE HOOD")
+  eq(Chars.available("SPRITE_NIRE", goldGame), false,
+     "and cannot be worn on Gen 2")
+  eq(Chars.resolve("SPRITE_NIRE", goldGame),
+     Gen.defaultSprite(goldGame),
+     "a saved NIRE choice falls back on Gold")
+  eq(Gen.resolveSprite(goldGame, "SPRITE_NIRE"),
+     Gen.defaultSprite(goldGame),
+     "and a peer wearing NIRE draws as the Gold default")
+end
 
 -- ------- the pics the catalog does not cover
 --
@@ -4018,6 +4164,21 @@ eq(#townOverlay:townMapMarks({ mode = "grid" }), 0,
    "a town map with no index places nobody")
 eq(#townOverlay:townMapMarks(nil), 0, "and neither does no screen at all")
 
+-- Gen 2 POKeGEAR: soft degrade. Recognise the screen; do not invent marks.
+do
+  local okGear, Pokegear = pcall(require, "src.ui.gen2.Pokegear")
+  if okGear and type(Pokegear) == "table" then
+    local gear = setmetatable({}, Pokegear)
+    check(townOverlay:pokegearState(gear) ~= nil,
+          "pokegearState recognises a Gen 2 POKeGEAR top")
+    eq(townOverlay:townMapState(gear), nil,
+       "and does not treat it as a Gen 1 TownMap")
+  else
+    eq(townOverlay:pokegearState({ landmarks = {} }), nil,
+       "without the Pokegear module, pokegearState soft-fails to nil")
+  end
+end
+
 end)()
 
 -- ------------------------------------------------------------------
@@ -4239,6 +4400,34 @@ do
      "no map id, no place -- nil, not a placeholder string")
   eq(Places.name(flatGame, ""), nil,
      "and an empty one is treated the same as none at all")
+
+  -- Gen 2: no data.field; names come from gen2Landmarks via the map's
+  -- landmark byte / LANDMARK_* id. Must not raise when field is absent.
+  local gen2Game = { data = {
+    maps = {
+      NEW_BARK_TOWN = { landmark = "LANDMARK_NEW_BARK_TOWN" },
+      ROUTE_29 = { landmark = 2 },
+    },
+    gen2Landmarks = {
+      landmarks = {
+        LANDMARK_NEW_BARK_TOWN = {
+          name = "NEW BARK\nTOWN", index = 1,
+        },
+        LANDMARK_ROUTE_29 = {
+          name = "ROUTE 29", index = 2,
+        },
+      },
+      order = { "LANDMARK_NEW_BARK_TOWN", "LANDMARK_ROUTE_29" },
+    },
+  } }
+  eq(Places.name(gen2Game, "NEW_BARK_TOWN"), "NEW BARK TOWN",
+     "Gen 2 landmark names resolve without data.field")
+  eq(Places.name(gen2Game, "ROUTE_29"), "ROUTE 29",
+     "and a numeric landmark byte resolves through the index")
+  local okNoField, noField = pcall(Places.name,
+    { data = { maps = { X = {} } } }, "X")
+  check(okNoField, "Places.name does not raise when data.field is nil")
+  eq(noField, "X", "and falls back to the id transform")
 
   -- Nothing here may raise: this runs once per roster row from inside a
   -- mod callback, and the doc comment on Places.lua is explicit that an
@@ -14456,6 +14645,24 @@ do
   eq(featured.featured, true,
      "marked so the UI can protect product-owned fields")
 
+  eq(Config.featuredServerAllowed(1), true,
+     "the official hub is offered on Gen 1")
+  eq(Config.featuredServerAllowed(2), false,
+     "and not on Gen 2 until a Gold deploy exists")
+  eq(Servers.isFeaturedAddress(Config.FEATURED_SERVER_HOST), true,
+     "isFeaturedAddress recognises the official host")
+  eq(Servers.isFeaturedAddress("play.rbymmo.com"), true,
+     "including the form without an explicit port")
+
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  local goldMenu = store:menuList(goldGame)
+  eq(#goldMenu, 0,
+     "Gen 2 hides the official row on a fresh SERVERS list")
+  eq(store:menuGet(Config.FEATURED_SERVER_HOST, goldGame), nil,
+     "and menuGet refuses the official key on Gold")
+
   local resolved = store:menuGet(featured.key)
   check(resolved ~= nil, "menuGet resolves the synthetic row")
   eq(resolved and resolved.address, Config.FEATURED_SERVER_HOST,
@@ -15885,6 +16092,38 @@ do
   pushed = nil
   menu.opts.onCancel()
   eq(pushed.id, SCREEN.CHARSET, "cancelling keeps the same door")
+end
+
+-- ------- MAIN cancel reopens StartMenu (Gen 2 needs onClose)
+--
+-- Gold's Gen2StartMenu only pops when opts.onClose does; a bare push left
+-- B/START calling close() with nothing to pop -- stuck menu after MMO.
+
+do
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+    save = {},
+    stack = { popped = 0 },
+  }
+  goldGame.stack.pop = function(self) self.popped = self.popped + 1 end
+  goldGame.openStartMenuItem = function() end
+
+  local menu = screensStore[SCREEN.MAIN].new(goldGame)
+  pushed = nil
+  menu.opts.onCancel()
+  eq(pushed and pushed.id, "Gen2StartMenu",
+     "on Gold, B from MMO reopens Gen2StartMenu")
+  check(type(pushed.opts) == "table" and type(pushed.opts.onClose) == "function",
+        "with onClose so B/START can leave the stack")
+  pushed.opts.onClose()
+  eq(goldGame.stack.popped, 1, "and that onClose pops the start menu")
+
+  local redGame = { data = {}, save = {} }
+  local redMenu = screensStore[SCREEN.MAIN].new(redGame)
+  pushed = nil
+  redMenu.opts.onCancel()
+  eq(pushed and pushed.id, "StartMenu",
+     "on Gen 1, B from MMO still reopens StartMenu")
 end
 
 stubSprites = {}

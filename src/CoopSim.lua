@@ -28,15 +28,16 @@
 -- a replayed battle and a simulated one have to look identical -- which they
 -- do, because the events are the only thing either of them draws from.
 
-local need = ...
+local need, mod = ...
 local Config = need("Config")
+local Gen = need("Gen")
 
 local M = {}
 M.__index = M
 
 -- ------- construction
 
--- deps: { data, ruleset, damage, status, turnOrder, rng }
+-- deps: { data, ruleset, damage, status, turnOrder, rng, game? }
 --
 -- `damage` is src/battle/Damage.lua, `turnOrder` is src/battle/TurnOrder.lua
 -- and `status` is src/battle/Status.lua -- handed in rather than required so
@@ -45,7 +46,41 @@ M.__index = M
 -- slots: four, in the order a1, a2, b1, b2.  Each is
 --   { side = "a"|"b", owner = <player id or nil for an NPC>, name = "ANN",
 --     party = { mon, ... }, index = 1 }
+--
+-- **Gen 2:** Gen1 Damage / CoopField host-sim is refused. Construction still
+-- succeeds as a slot shell for hub-mediated BattleSim2 event replay; resolve
+-- paths that need Damage/field no-op with a clear warn.
 function M.new(deps, slots)
+  deps = deps or {}
+  local generation = Gen.generation(deps.game)
+  local hostSimStripped = false
+  if generation == 2 and (deps.damage or deps.field) then
+    hostSimStripped = true
+    mod.log:warn("CoopSim Gen1 host-sim (Damage/CoopField) is disabled on "
+      .. "Gen 2; use hub-mediated co-op on a Gen 2 hub (BattleSim2) instead")
+    deps = {
+      data = deps.data,
+      ruleset = deps.ruleset,
+      game = deps.game,
+      damage = nil,
+      status = deps.status,
+      turnOrder = deps.turnOrder,
+      rng = deps.rng,
+      makeBattler = nil,
+      field = nil,
+      drain = nil,
+      itemUse = nil,
+      experience = deps.experience,
+      movesAt = deps.movesAt,
+      trainerAI = nil,
+      trainer = deps.trainer,
+      aiUses = deps.aiUses,
+      save = deps.save,
+      facingSide = deps.facingSide,
+      onError = deps.onError,
+    }
+  end
+
   local self = setmetatable({
     data = deps.data,
     ruleset = deps.ruleset or {},
@@ -81,6 +116,8 @@ function M.new(deps, slots)
     -- viewer still sees their pair facing up after viewPos remaps them to
     -- the bottom of the screen.
     facingSide = deps.facingSide == "b" and "b" or "a",
+    -- Gen 2 replay shell: resolveTurn must not invent Gen1 Damage rolls.
+    gen2NoHostSim = generation == 2 or hostSimStripped or nil,
     slots = {},
     -- Battlers knocked down inside one action, acted on once it finishes: the
     -- engine's pipeline can faint two at a time (Explosion, recoil, a
@@ -542,6 +579,10 @@ local function announceHp(self, before, emit)
 end
 
 function M:resolveTurn(actions)
+  if self.gen2NoHostSim then
+    -- Hub BattleSim2 owns rolls on Gen 2; never invent Gen1 Damage here.
+    return {}
+  end
   local events = {}
   if self.over then return events end
   -- Paused, and the pause belongs here rather than only in whatever is asking.

@@ -12,7 +12,15 @@
  */
 
 const TEXT_OK = /[^A-Za-z0-9 .,!?'\-:;()/]/g;
-const Effects = require('./battle/Effects');
+// Bag proofs use the hub's generation twin. Gen1 Effects remains the default
+// when generation is omitted (compat). Gen2 item tables are selected when
+// cleanBattleBag/Party run with generation:2 (relay passes relay.generation).
+const EffectsGen1 = require('./battle/Effects');
+const EffectsGen2 = require('./battle2/Effects');
+
+function effectsFor(generation) {
+  return generation === 2 ? EffectsGen2 : EffectsGen1;
+}
 
 function cleanText(value, limit) {
   if (typeof value !== 'string') return null;
@@ -468,12 +476,14 @@ const AMOUNT_MAX = 9999;
 // rather than trimmed -- a cut token matches nothing and is a value nobody sent.
 const REASON_MAX = 32;
 
-// Gen 1's four battle stats, in Gen 1's order rather than alphabetical. SPC is
-// one stat and not two: Special did not split until Gen 2, so a snapshot
-// carrying spa/spd would be describing a different game's battler. The list is
-// the schema -- ivs and evs are these same four keys at their own widths, and
-// no other key survives.
-const BATTLE_STATS = ['atk', 'def', 'spd', 'spc'];
+// Battle-stat keys. Gen 1: atk/def/spd/spc (spd = Speed, spc = Special).
+// Gen 2: atk/def/spe/spa/spd (spe = Speed, spa/spd = Sp.Atk/Sp.Def). Both
+// dialects are first-class — a classic four-key Gen 1 table must still clean,
+// and a Gen 2 spa/spd sheet must not be refused as the wrong game.
+const BATTLE_STATS_GEN1 = ['atk', 'def', 'spd', 'spc'];
+const BATTLE_STATS_GEN2 = ['atk', 'def', 'spe', 'spa', 'spd'];
+// Back-compat export alias (Gen 1 keys) for callers that still read BATTLE_STATS.
+const BATTLE_STATS = BATTLE_STATS_GEN1;
 
 // Gen 1's status conditions as three-letter tokens. TOX is here alongside PSN
 // because Gen 1 really does distinguish them (the doubling toxic counter) even
@@ -607,14 +617,27 @@ function cleanBadgeSet(value) {
   return Object.fromEntries(out);
 }
 
-// One stat block -- the four keys of BATTLE_STATS at the caller's width, and
-// nothing else. Refused whole when any of the four is missing: a battler
-// fighting with three of its stats is a battler whose damage formula divides
-// by an absent number.
-function cleanStatBlock(value, min, max) {
+// Prefer explicit generation (1|2); else sniff spa/spe → Gen 2, else Gen 1.
+// Gen 1's spd (Speed) alone never claims Gen 2.
+function statsGeneration(block, hint) {
+  const gen = cleanInt(hint, 1, 2);
+  if (gen !== null) return gen;
+  if (block === null || typeof block !== 'object') return 1;
+  if (block.spa !== undefined && block.spa !== null) return 2;
+  if (block.spe !== undefined && block.spe !== null) return 2;
+  return 1;
+}
+
+// One stat block — all keys of the dialect at the caller's width, and nothing
+// else. Refused whole when any required key is missing: a battler fighting
+// with three of its stats is a battler whose damage formula divides by an
+// absent number.
+function cleanStatBlock(value, min, max, generation) {
   if (value === null || typeof value !== 'object') return null;
+  const keys = statsGeneration(value, generation) === 2
+    ? BATTLE_STATS_GEN2 : BATTLE_STATS_GEN1;
   const out = {};
-  for (const key of BATTLE_STATS) {
+  for (const key of keys) {
     const n = cleanInt(value[key], min, max);
     if (n === null) return null;
     out[key] = n;
@@ -827,14 +850,22 @@ function cleanBattleMove(raw) {
  *
  * `status`, `ivs`, `evs` and `slot` are optional wholesale but not piecemeal, and
  * a present-but-unreadable one refuses the battler: a snapshot from a client that
- * tracks no IVs is fine and common, while a snapshot with two of the four is a bug
- * on the sending side that accepting would silently zero the rest of.
+ * tracks no IVs is fine and common, while a snapshot with two of the required
+ * keys is a bug on the sending side that accepting would silently zero the rest
+ * of.
+ *
+ * Optional `generation` (1|2) selects the stats dialect; absent falls back to
+ * shape sniff on `stats`. Optional `heldItem` is a Gen 2 item id.
  */
 function cleanBattleMon(raw) {
   if (raw === null || typeof raw !== 'object') return null;
 
-  const stats = cleanStatBlock(raw.stats, 1, STAT_MAX);
+  const generationHint = cleanInt(raw.generation, 1, 2);
+  const stats = cleanStatBlock(raw.stats, 1, STAT_MAX, generationHint);
   if (!stats) return null;
+  const generation = generationHint !== null
+    ? generationHint
+    : (stats.spa !== undefined ? 2 : 1);
 
   const status = cleanBattleStatus(raw.status);
   if (status === false) return null;
@@ -846,7 +877,7 @@ function cleanBattleMon(raw) {
   if (!species || level === null || hp === null || maxHp === null) return null;
   if (hp > maxHp) return null;
 
-  const mon = { species, level, hp, maxHp, stats };
+  const mon = { species, level, hp, maxHp, stats, generation };
   // Written only when there is one, so that a healthy battler carries no status
   // field at all -- which is how Wire.lua spells it, and the shape a Lua decoder
   // reads back without a null sentinel to interpret.
@@ -858,17 +889,17 @@ function cleanBattleMon(raw) {
     mon.slot = slot;
   }
   if (raw.ivs !== undefined && raw.ivs !== null) {
-    const ivs = cleanStatBlock(raw.ivs, 0, IV_MAX);
+    const ivs = cleanStatBlock(raw.ivs, 0, IV_MAX, generation);
     if (!ivs) return null;
     mon.ivs = ivs;
   }
   if (raw.evs !== undefined && raw.evs !== null) {
-    const evs = cleanStatBlock(raw.evs, 0, EV_MAX);
+    const evs = cleanStatBlock(raw.evs, 0, EV_MAX, generation);
     if (!evs) return null;
     if (raw.evs.hp !== undefined && raw.evs.hp !== null) {
-      const hp = cleanInt(raw.evs.hp, 0, EV_MAX);
-      if (hp === null) return null;
-      evs.hp = hp;
+      const hpEv = cleanInt(raw.evs.hp, 0, EV_MAX);
+      if (hpEv === null) return null;
+      evs.hp = hpEv;
     }
     mon.evs = evs;
   }
@@ -903,6 +934,12 @@ function cleanBattleMon(raw) {
     mon.catchRate = catchRate;
   }
 
+  if (raw.heldItem !== undefined && raw.heldItem !== null) {
+    const heldItem = cleanId(raw.heldItem);
+    if (!heldItem) return null;
+    mon.heldItem = heldItem;
+  }
+
   return mon;
 }
 
@@ -921,11 +958,13 @@ function cleanBattleMon(raw) {
 /*
  * Optional battle bag on mmo.battle_party. Absent means empty. Array of
  * `{id, count}` or a map of id → count; duplicates and oversize refuse.
+ * `generation` selects Effects.itemEffect (1 = Gen1, 2 = Gen2); omitted → 1.
  */
-function cleanBattleBag(raw) {
+function cleanBattleBag(raw, generation) {
   if (raw === undefined || raw === null) return [];
   if (typeof raw !== 'object') return null;
 
+  const Effects = effectsFor(generation);
   const out = [];
   const seen = new Set();
   const push = (id, count) => {
@@ -958,7 +997,7 @@ function cleanBattleBag(raw) {
   return out;
 }
 
-function cleanBattleParty(raw) {
+function cleanBattleParty(raw, hubGeneration) {
   if (raw === null || typeof raw !== 'object') return null;
   const battle = cleanId(raw.battle);
   if (!battle) return null;
@@ -966,6 +1005,30 @@ function cleanBattleParty(raw) {
   const party = { battle };
   const badges = cleanBadgeSet(raw.badges);
   if (badges) party.badges = badges;
+
+  // Hub generation (second arg) is authoritative when provided: stamp
+  // party.generation from it, and refuse when an explicit party/mon
+  // generation disagrees (mirrors Wire.battleParty).
+  const hubGen = hubGeneration !== undefined && hubGeneration !== null
+    ? cleanInt(hubGeneration, 1, 2)
+    : null;
+  if (hubGeneration !== undefined && hubGeneration !== null && hubGen === null) {
+    return null;
+  }
+
+  let partyGen = cleanInt(raw.generation, 1, 2);
+  if (raw.generation !== undefined && raw.generation !== null && partyGen === null) {
+    return null;
+  }
+  if (hubGen !== null && partyGen !== null && partyGen !== hubGen) {
+    return null;
+  }
+  if (hubGen !== null) {
+    party.generation = hubGen;
+    partyGen = hubGen;
+  } else if (partyGen !== null) {
+    party.generation = partyGen;
+  }
 
   if (raw.side !== undefined && raw.side !== null) {
     const side = cleanSide(raw.side);
@@ -977,13 +1040,24 @@ function cleanBattleParty(raw) {
   if (raw.mons.length < 1 || raw.mons.length > BATTLE_MON_MAX) return null;
   const mons = [];
   for (const entry of raw.mons) {
-    const mon = cleanBattleMon(entry);
+    if (entry !== null && typeof entry === 'object'
+        && entry.generation !== undefined && entry.generation !== null) {
+      const monGen = cleanInt(entry.generation, 1, 2);
+      if (monGen === null) return null;
+      if (hubGen !== null && monGen !== hubGen) return null;
+    }
+    let sheet = entry;
+    if (partyGen !== null && entry !== null && typeof entry === 'object'
+        && (entry.generation === undefined || entry.generation === null)) {
+      sheet = { ...entry, generation: partyGen };
+    }
+    const mon = cleanBattleMon(sheet);
     if (!mon) return null;
     mons.push(mon);
   }
   party.mons = mons;
 
-  const bag = cleanBattleBag(raw.bag);
+  const bag = cleanBattleBag(raw.bag, partyGen !== null ? partyGen : hubGen);
   if (!bag) return null;
   party.bag = bag;
 
@@ -1266,6 +1340,8 @@ module.exports = {
   BATTLE_REASONS,
   BATTLE_MODES,
   BATTLE_STATS,
+  BATTLE_STATS_GEN1,
+  BATTLE_STATS_GEN2,
   EFF_MULTS,
   EFF_NEUTRAL,
   CHART_MAX,

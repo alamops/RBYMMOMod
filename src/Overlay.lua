@@ -23,6 +23,7 @@
 local need, mod = ...
 local Config = need("Config")
 local World = need("World")
+local Gen = need("Gen")
 local Chars = need("Chars")
 local Toast = need("Toast")
 
@@ -465,7 +466,7 @@ function M:endFrame(restore)
   love.graphics.setShader(restore.shader)
 end
 
--- ------- the TOWN MAP
+-- ------- the TOWN MAP (Gen 1) / POKeGEAR MAP (Gen 2)
 --
 -- Where in Kanto your friend actually is.
 --
@@ -480,12 +481,18 @@ end
 -- would bury the map under characters, and the map is 20x18 tiles with a
 -- 16x16 character on it. At PARTY_MAX = 2 there is exactly one to draw.
 --
--- Identifying the screen needs `engine_internals`, which this mod already
+-- Gen 2's MAP card is src.ui.gen2.Pokegear, not TownMap: different
+-- coordinates (landmark index, Johto/Kanto regions) and no `byMap`. Soft
+-- degrade -- recognise the screen and skip party portraits rather than
+-- guessing cells or crashing on a missing Gen 1 TownMap module.
+--
+-- Identifying either screen needs `engine_internals`, which this mod already
 -- declares: the mod API has no "what state is this" seam, and duck-typing on
 -- field names would silently start drawing over some other mod's screen that
 -- happened to have a `byMap`. The require is read-only and the failure is
--- soft -- no TownMap module means the layer simply never draws.
+-- soft -- no TownMap / Pokegear module means the layer simply never draws.
 local townMapModule, townMapTried
+local pokegearModule, pokegearTried
 
 local function engineTownMap()
   if townMapTried then return townMapModule end
@@ -493,6 +500,24 @@ local function engineTownMap()
   local ok, module = pcall(require, "src.ui.TownMap")
   if ok and type(module) == "table" then townMapModule = module end
   return townMapModule
+end
+
+local function enginePokegear()
+  if pokegearTried then return pokegearModule end
+  pokegearTried = true
+  local ok, module = pcall(require, "src.ui.gen2.Pokegear")
+  if ok and type(module) == "table" then pokegearModule = module end
+  return pokegearModule
+end
+
+-- The live Gen 2 POKeGEAR (or Fly map) state, or nil. Soft-degrade only:
+-- party marks are not drawn on this screen yet.
+function M:pokegearState(top)
+  if type(top) ~= "table" then return nil end
+  local Pokegear = enginePokegear()
+  if not Pokegear then return nil end
+  if getmetatable(top) ~= Pokegear then return nil end
+  return top
 end
 
 -- The live TOWN MAP state, or nil if that is not what is on top.
@@ -514,6 +539,7 @@ function M:townMapState(top)
   if top.nestSpecies ~= nil then return nil end
   return top
 end
+
 
 -- TownMapCoordsToOAMCoords: the 16x16 nybble grid sits two tiles in and one
 -- tile down on the 20x18 screen. Kept in step with TownMap's own markerXY --
@@ -647,9 +673,16 @@ function M:draw(game, viewport)
     return
   end
 
-  -- The TOWN MAP is the one screen other than the world this overlay draws
-  -- on, and for the opposite reason: there it says who is standing next to
-  -- you, here it says where your friend is in Kanto.
+  -- Gen 2 POKeGEAR MAP: soft degrade. Landmark coordinates are not the Gen 1
+  -- byMap grid; leave the gear unobstructed rather than guessing.
+  if self:pokegearState(top) then
+    last.reached = "pokegear-skip"
+    return
+  end
+
+  -- The TOWN MAP is the one Gen 1 screen other than the world this overlay
+  -- draws on, and for the opposite reason: there it says who is standing
+  -- next to you, here it says where your friend is in Kanto.
   local townMap = self:townMapState(top)
   if townMap then
     last.reached = "townmap"
@@ -665,12 +698,20 @@ function M:draw(game, viewport)
     return
   end
 
+
   -- render.hud composites over the *finished* frame -- menus and text boxes
   -- included -- so a nameplate drawn unconditionally lands on top of
   -- whatever UI is open. These labels annotate the world, so they are drawn
   -- only while the world is what the player is actually looking at.
-  local overworld = mod.world and mod.world:overworld()
-  if not (top and overworld and top == overworld) then
+  -- Gen 2 free-roam is an empty stack (top nil) with a live world.map; Gen 1
+  -- still requires the overworld state itself to be on top.
+  local world = mod.world
+  local overworld = world and type(world.overworld) == "function" and world:overworld() or nil
+  if not Gen.freeRoam(game, top) then
+    last.reached = "not-overworld"
+    return
+  end
+  if not overworld then
     last.reached = "not-overworld"
     return
   end

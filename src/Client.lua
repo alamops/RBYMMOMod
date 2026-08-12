@@ -28,6 +28,7 @@ local Ui = need("Ui")
 local Overlay = need("Overlay")
 local Sessions = need("Sessions")
 local World = need("World")
+local Gen = need("Gen")
 local HostServer = need("HostServer")
 local Chars = need("Chars")
 local Cast = need("Cast")
@@ -615,7 +616,8 @@ function M.explicitChoice()
   end
   if type(chosen) ~= "string" or chosen == "" then return nil end
   local id = Chars.resolve(chosen)
-  if id == Config.DEFAULT_SPRITE then return nil end
+  local fallback = Gen.defaultSprite(ctx.game, mod.content and mod.content.sprites)
+  if id == fallback or id == Config.DEFAULT_SPRITE then return nil end
   return id
 end
 
@@ -713,19 +715,8 @@ function M.profile(a, b)
   local game = arg1(a, b) or ctx.game
   local save = game and game.save
   if not save then return nil end
-  local dex = save.pokedex or {}
-  local seen, owned = 0, 0
-  for _ in pairs(dex.seen or {}) do seen = seen + 1 end
-  for _ in pairs(dex.owned or {}) do owned = owned + 1 end
-
-  -- Badges are counted through the engine's own list rather than assumed to
-  -- be the eight Kanto ones, so a mod that adds a badge is counted too.
-  local badges = 0
-  local ok = pcall(function()
-    local Badges = require("src.inventory.Badges")
-    badges = Badges.count(game.data, save) or 0
-  end)
-  if not ok then badges = 0 end
+  local seen, owned = Gen.dexCounts(save)
+  local badges = Gen.badgeCount(game, save)
 
   -- Deliberately no money: the card does not show another player's wallet,
   -- so there is no reason to put it on the wire.
@@ -770,7 +761,7 @@ function M.ownCard(a, b)
     name = M.playerName(game),
     sprite = M.spriteChoice(),
     profile = M.profile(game),
-    money = save and math.floor(tonumber(save.money) or 0) or 0,
+    money = Gen.money.get(save),
     -- the hub's number, not a local one: this is the row everybody else is
     -- reading off your card
     points = myPoints,
@@ -983,7 +974,7 @@ local lookOwner = nil
 
 local function playerEntity()
   local world = mod.world
-  local ow = world and world:overworld()
+  local ow = world and type(world.overworld) == "function" and world:overworld() or nil
   return ow and ow.player or nil
 end
 
@@ -1007,6 +998,30 @@ function M.applyLook(game)
     lookOwner = player
   end
   player.sprite = renderer
+  -- Gen 2 World:applySpritePalette reads spriteDef; without it the worn
+  -- sheet stays DMG greyscale (same class of bug as Chars.portrait).
+  player.spriteDef = record
+  if Gen.generation(game) == 2 and type(renderer.setObjPalette) == "function" then
+    local ow = mod.world and type(mod.world.overworld) == "function"
+      and mod.world:overworld() or nil
+    local pals = game and game.data and game.data.gen2Palettes
+    if type(pals) == "table" then
+      local okPal, Palettes = pcall(require, "src.world.gen2.Palettes")
+      if okPal and Palettes and type(Palettes.spritePalette) == "function" then
+        local daytime = "DAY"
+        if ow and type(ow.daytime) == "string" then daytime = ow.daytime end
+        local colors = Palettes.spritePalette(pals, daytime, record)
+        if colors then
+          local pid = tonumber(record.paletteId) or 0
+          renderer:setObjPalette(colors,
+            ("gen2:%s:%d"):format(tostring(daytime), pid))
+        end
+      end
+    end
+    if ow and type(ow.applySpritePalette) == "function" then
+      pcall(function() ow:applySpritePalette(player) end)
+    end
+  end
   return true
 end
 
@@ -1093,6 +1108,16 @@ function M.connect(a, b)
   end
 
   local address = M.joinAddress()
+  -- Official public hub is Gen 1-only until a Gen 2 deploy exists. Refuse
+  -- here (not only by hiding the SERVERS row) so a typed / options JOIN to
+  -- play.rbymmo.com on Gold gets a clear sentence instead of a generation
+  -- mismatch from the hub.
+  if Servers.isFeaturedAddress(address)
+      and not Config.featuredServerAllowed(Gen.generation(game)) then
+    ui:say("Official server is\nGen 1 only for now.\nHost a Gold game\ninstead.")
+    return false
+  end
+
   local ok, err = transport:connect(address)
   if not ok then
     ui:say(tostring(err or "Couldn't connect."))
@@ -1129,7 +1154,10 @@ function M.host(a, b)
   -- screen like any other refusal rather than failing silently. The host
   -- screen mints a code before START is reachable, so a player only meets
   -- that sentence when the entropy pool could not produce one.
-  local ok, err = server:start(Config.DEFAULT_PORT, limit, M.hostJoinCode())
+  -- HostServer locks the hub from Gen.generation(game); pass the live boot
+  -- so Gold cannot bind a Gen 1 hub and refuse its own hello.
+  ctx.game = game
+  local ok, err = server:start(Config.DEFAULT_PORT, limit, M.hostJoinCode(), game)
   if not ok then
     ui:say(tostring(err or "Couldn't start hosting."))
     return false
@@ -1180,6 +1208,8 @@ function M.sendHello(game)
   spriteAcked, spriteClock = sprite, 0
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
+    -- Hub generation lock (PROTOCOL 20). 1 = Red/Blue/Yellow, 2 = Gold.
+    generation = Gen.generation(game),
     name = name,
     -- Persistent identity (PROTOCOL 16). Hub uses this as client.id and the
     -- rank-board key. Minted once per install; survives CONTINUE via file.
@@ -1950,9 +1980,16 @@ function M.install()
   -- the CHARACTER screen lists whatever the catalog holds when it opens.
   Cast.install()
 
+  -- Prefer the live catalog (Gold walkers + Cast chars) over the Gen1-only
+  -- Config.SPRITES list — CHARACTER already uses Chars.list; options must match.
   local spriteChoices = {}
-  for _, row in ipairs(Config.SPRITES) do
-    spriteChoices[#spriteChoices + 1] = { row[1], row[2] }
+  for _, id in ipairs(Chars.list(ctx.game)) do
+    spriteChoices[#spriteChoices + 1] = { Chars.label(id), id }
+  end
+  if #spriteChoices == 0 then
+    for _, row in ipairs(Config.SPRITES) do
+      spriteChoices[#spriteChoices + 1] = { row[1], row[2] }
+    end
   end
 
   mod.options:define({
@@ -1975,7 +2012,8 @@ function M.install()
     { key = "code", label = "JOIN CODE", type = "text", default = "",
       maxLen = Config.CODE_ENTRY_MAX },
     { key = "sprite", label = "MY SPRITE", type = "choice",
-      default = Config.DEFAULT_SPRITE, choices = spriteChoices },
+      default = Gen.defaultSprite(ctx.game, mod.content and mod.content.sprites),
+      choices = spriteChoices },
     -- Holding B to run.  On by default because it is the reason the feature
     -- exists, and a row at all because B already means "cancel" everywhere
     -- else -- a player who finds their walk unexpectedly fast should have
@@ -2018,10 +2056,42 @@ function M.install()
   -- diverge, and their headers explain what the co-op path does with the
   -- battle it took. Wild divert has no WAIT/ALONE prompt -- only same-map
   -- auto-join into coop_wild, else the engine wild is left alone.
+  -- Gen 2's ui/gen2/BattleState has no `.kind` (Gen 1 BattleState does).  The
+  -- fight shape lives on `state.battle` instead: `.wild` / `.trainer`.  Stamp
+  -- Gen1-shaped aliases so Coop's onTrainerBattle / onWildEncounter and
+  -- consume()'s onFinish path keep working without a Gen2 fork at every gate.
+  local function stampGen2FightAliases(state)
+    local battle = state.battle
+    if type(battle) ~= "table" then return end
+    if state.kind == nil then
+      if battle.wild then
+        state.kind = "wild"
+      elseif battle.trainer then
+        state.kind = "trainer"
+      end
+    end
+    if state.kind == "trainer" and battle.trainer then
+      if state.oppClass == nil then
+        state.oppClass = battle.trainer.classId or battle.trainer.class
+      end
+      if state.trainer == nil then
+        state.trainer = battle.trainer
+      end
+    end
+    if state.enemyParty == nil and battle.enemyParty then
+      state.enemyParty = battle.enemyParty
+    end
+    -- Gen 2 finishes via onDone; Coop.consume calls onFinish.  Alias, keep both.
+    if state.onFinish == nil and type(state.onDone) == "function" then
+      state.onFinish = state.onDone
+    end
+  end
+
   mod.events:on("screen.pushed", function(payload)
     local state = payload and payload.state
     if not state then return end
     if not transport:isReady() then return end
+    stampGen2FightAliases(state)
     local current = World.current()
     local mapId = current and current.mapId
     if state.kind == "trainer" then
@@ -2139,7 +2209,24 @@ function M.install()
     if type(out) ~= "table" then return out end
     return mod.ui.insertBefore(out, "SAVE", {
       label = "MMO",
-      onSelect = function() mod.ui.push(game, Ui.SCREEN.MAIN) end,
+      -- Gen 2 Menu Account draws desc for the highlighted row; without it the
+      -- previous entry's box stays on screen when the cursor lands on MMO.
+      desc = { "Play with", "friends" },
+      onSelect = function()
+        -- Gen 1's StartMenu pops itself before onSelect; Gen 2's leaves the
+        -- menu under the mod row. Pop it first so MAIN's cancel reopens one
+        -- StartMenu with a real onClose, instead of stacking a second
+        -- Gen2StartMenu that cannot leave the stack (Ui.reopenStartMenu).
+        if Gen.generation(game) == 2 and game and game.stack
+            and type(game.stack.top) == "function" then
+          local top = game.stack:top()
+          if top and type(top.close) == "function"
+              and type(top.onClose) == "function" and top.list ~= nil then
+            pcall(function() top:close() end)
+          end
+        end
+        mod.ui.push(game, Ui.SCREEN.MAIN)
+      end,
     })
   end)
 
@@ -2162,12 +2249,18 @@ function M.install()
   -- does.  The engine's talkTo has already run by this point and found
   -- nothing to say (these NPCs carry no text), so this adds the interaction
   -- rather than replacing one.
+  --
+  -- Gen 2 nuance: World:interactBody only emits kind="npc" when the object
+  -- has a scriptKey. Avatar NPCs are scriptless, so Gold falls through to
+  -- kind="none" after freezing them -- still the face-cell coords. Accept
+  -- both; roster:at decides whether a remote player is there.
   mod.events:on("world.interacted", function(payload)
     -- An A-press is a human deciding to press A, which is the least
     -- predictable timing this process ever sees; it goes into the pool
     -- before anything else here can return early.
     stirEntropy(0)
-    if not (payload and payload.kind == "npc") then return end
+    if not payload then return end
+    if payload.kind ~= "npc" and payload.kind ~= "none" then return end
     if not transport:isReady() then return end
     local player = ctx.roster:at(payload.mapId, payload.x, payload.y)
     if player and ctx.game then
@@ -2228,6 +2321,9 @@ function M.install()
 
   mod.exports.isConnected = M.isConnected
   mod.exports.isHosting = M.isHosting
+  -- Drivers (and any peer mod) leave the same way the LEAVE row does —
+  -- intentional teardown, not a dropped transport.
+  mod.exports.leave = function() return M.leave() end
   -- nil unless this copy is hosting; a mod that wants to show the address
   -- somewhere of its own should not have to reach into HostServer for it
   mod.exports.hostAddress = function() return M.isHosting() and server:address() end
@@ -2248,6 +2344,10 @@ function M.install()
   -- them -- empty when you are not in a party. The end-to-end driver reads
   -- this to tell "the invite was accepted" from "the box appeared".
   mod.exports.party = function() return party:list() end
+  -- Leave the standing party the same way the PARTY > LEAVE row does. The
+  -- Gen2 e2e falls back here when Start → MMO → PARTY is unscannable after a
+  -- long fight stack (same role as exports.leave when LEAVE misses).
+  mod.exports.leaveParty = function() return party:leave() end
   -- Co-op, as the end-to-end driver has to be able to read it: whether this
   -- client is standing at a fight waiting, what its partner is offering, and
   -- the plan the last agreement produced. Three separate answers because the

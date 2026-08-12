@@ -567,6 +567,9 @@ function start(options = {}) {
     // schema deliberately does not know about, so it is read from the object
     // as given rather than from the validated copy validate() pruned it out of.
     protocol: given.protocol,
+    // Gen lock (1|2). T1a teaches Relay to refuse mismatched hello; until
+    // then the opt is harmlessly ignored if absent from the constructor.
+    generation: config.generation,
     auth: authPort(config, noteCredentialUse, authThrottle),
     log,
   });
@@ -1472,8 +1475,9 @@ function start(options = {}) {
       boundPort = address && address.port ? address.port : port;
 
       attach();
+      const genLabel = config.generation === 2 ? 'gen 2' : 'gen 1';
       log.info(`RBY MMO hub listening on ${boundHost}:${boundPort} ` +
-        `(protocol ${relay.protocol})`);
+        `(protocol ${relay.protocol}, ${genLabel})`);
 
       // The snapshot starts the moment there is something to describe: an
       // empty hub that is definitely up, so a reader that arrives before the

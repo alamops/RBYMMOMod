@@ -13,9 +13,10 @@
  * this hub brokered is resolved here -- see the "mediated battles" section
  * below -- because a battle decided by one of the two players is a battle
  * decided by whichever of them modified their copy first. Every roll, the
- * turn order and the sole win/loss verdict live in lib/battle/Turn.js; this
- * file owns the plumbing around it: who is in which fight, whose party is
- * still missing, and where the events go.
+ * turn order and the sole win/loss verdict live in lib/battle/Turn.js (Gen1)
+ * or lib/battle2/Turn.js (Gen2), selected at construction from
+ * `opts.generation`; this file owns the plumbing around it: who is in which
+ * fight, whose party is still missing, and where the events go.
  *
  * **No sockets appear anywhere below.** Everything talks to *peer handles*
  * -- any object answering send(msg), close() and carrying a remoteAddress
@@ -42,8 +43,6 @@ const {
   cleanBattleRuleset, cleanBattleParty, cleanBattleChoice, cleanBattleReconnect,
   BATTLE_MOVE_MAX,
 } = require('./sanitize');
-const { Turn } = require('./battle');
-const Effects = require('./battle/Effects');
 const {
   Board, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
   RANK_QUERY_GATE_MS,
@@ -52,6 +51,11 @@ const { createLog, safe } = require('./log');
 
 const DEFAULT_PLAYERS = 4;
 const DEFAULT_SPRITE = 'SPRITE_RED';
+const DEFAULT_SPRITE_GEN2 = 'SPRITE_CHRIS';
+
+function defaultSpriteFor(generation) {
+  return Number(generation) === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+}
 // The wire dialect this hub speaks, and the one number both suites greet
 // with. 3 is where parties landed: nothing was removed, but an invite or a
 // party chat line sent to a protocol-2 hub would meet a handler table that
@@ -108,14 +112,16 @@ const DEFAULT_SPRITE = 'SPRITE_RED';
 // protocol-17 hub's closed BATTLE_MODES set drops `coop_wild` opens, and its
 // outcome cleaner strips an unknown `catcher` -- either way the partner never
 // joins the grass fight, or both clients grant (or neither) because ownership
-// was never named. 19 is co-op invite-joiner rematch cleanup: optional
+// was never named. 20 carries two features that both claimed 19 on parallel
+// branches: (a) the generation lock on mmo.hello (`generation` 1|2; hub
+// refuses a mismatch); (b) co-op invite-joiner rematch cleanup — optional
 // overworld `npcId` and event-flag id on mmo.coop_wait / mmo.coop_offer /
-// mmo.coop_battle (from the waiter's checkpointOrigin). A protocol-18 hub
-// drops those fields, so a menu joiner never learns which trainer to mark
-// beaten. The rule every bump follows is unchanged: bump whenever a client
-// can send something a hub silently ignores. Kept in step with
-// Config.PROTOCOL on the mod side.
-const PROTOCOL = 19;
+// mmo.coop_battle (from the waiter's checkpointOrigin). A protocol-19 (or
+// 18) hub that lacks either silently drops fields or skips the gen check.
+// The rule every bump follows is unchanged: bump whenever a client can send
+// something a hub silently ignores. Kept in step with Config.PROTOCOL on
+// the mod side.
+const PROTOCOL = 20;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -289,6 +295,12 @@ handlers['mmo.hello'] = (relay, client, msg) => {
     return relay.refuse(client, `This game speaks protocol ${relay.protocol}; yours `
       + `speaks ${shortValue(msg.proto)}.`);
   }
+  // PROTOCOL 20: missing generation defaults to 1. Same sentence as Hub.lua.
+  const generation = cleanInt(msg.generation, 1, 2) ?? 1;
+  if (generation !== relay.generation) {
+    return relay.refuse(client, `This hub is for generation ${relay.generation}; yours `
+      + `is generation ${generation}.`);
+  }
   const name = cleanText(msg.name, NAME_MAX);
   if (!name) return relay.refuse(client, "That trainer name can't be used here.");
   const playerId = cleanPlayerId(msg.playerId);
@@ -317,7 +329,8 @@ handlers['mmo.hello'] = (relay, client, msg) => {
   client.hello = {
     name,
     playerId,
-    sprite: cleanSpriteId(msg.sprite) || DEFAULT_SPRITE,
+    generation,
+    sprite: cleanSpriteId(msg.sprite) || defaultSpriteFor(generation),
     profile: cleanProfile(msg.profile),
     map: cleanMapId(msg.map),
     x: cleanInt(msg.x, 0, 4096),
@@ -760,7 +773,7 @@ handlers['mmo.coop_wait'] = (relay, client, msg) => {
   // Optional mode: only coop_wild is stored (Party vs Wild auto-join). Absent
   // keeps the trainer WAIT/JOIN invite path.
   const mode = cleanCoopOfferMode(msg.mode);
-  // Optional overworld npcId / event (PROTOCOL 19): invite joiners need the
+  // Optional overworld npcId / event (PROTOCOL 20): invite joiners need the
   // waiter's concrete trainer to mark beaten. Dropped when absent or wild.
   const npcId = !mode ? cleanId(msg.npcId) : null;
   const event = !mode ? cleanId(msg.event) : null;
@@ -853,7 +866,7 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // encounter -- the joiner usually has too, but a join taken from the ACTIONS
   // menu never went near them. `mode` rides so the joiner's CoopBattle opens
   // as coop_wild without re-deriving from an offer that is already cleared.
-  // `npcId` / `event` (PROTOCOL 19) ride so a menu joiner can finish the
+  // `npcId` / `event` (PROTOCOL 20) ride so a menu joiner can finish the
   // trainer off without a local BattleState -- never fuzzy-matched by class.
   const battleMsg = {
     id: battleId, side: 'a', allies: members, battle, host: host.id, mode,
@@ -1057,7 +1070,7 @@ handlers['mmo.battle_party'] = (relay, client, msg) => {
   const record = mediatedOf(relay, client);
   if (!record || record.sim) return;
 
-  const party = cleanBattleParty(msg);
+  const party = cleanBattleParty(msg, relay.generation);
   if (!party) {
     return noteDrop(relay, client, 'the party is not a shape we can fight with');
   }
@@ -1227,6 +1240,22 @@ class Relay {
       ? Number(opts.chatIntervalMs) : 500;
     this.protocol = Number.isFinite(Number(opts.protocol))
       ? Number(opts.protocol) : PROTOCOL;
+    // PROTOCOL 20 generation lock. Default 1 when omitted so existing Gen1
+    // deploys keep working; Gen2 hubs MUST set generation:2 (CLI / config —
+    // twin of src/Hub.lua opts.generation).
+    {
+      const gen = cleanInt(opts.generation, 1, 2);
+      this.generation = gen == null ? 1 : gen;
+    }
+    // Wave 2 T2d: mediated-battle twin at construction. Gen1 keeps lib/battle;
+    // Gen2 never instantiates Gen1 Turn for refereeing.
+    {
+      const battle = this.generation === 2
+        ? require('./battle2')
+        : require('./battle');
+      this.Turn = battle.Turn;
+      this.Effects = battle.Effects;
+    }
     this.auth = opts.auth || null;
     /*
      * The hub's message of the day, as the operator typed it. Held raw and
@@ -1667,7 +1696,7 @@ class Relay {
       address: (peer && peer.remoteAddress) || 'unknown',
       ready: false,
       name: null,
-      sprite: DEFAULT_SPRITE,
+      sprite: defaultSpriteFor(this.generation),
       profile: null,
       map: null, x: null, y: null, facing: 'down',
       // nobody arrives mid-stride: the first mmo.move says otherwise or it
@@ -1735,7 +1764,7 @@ class Relay {
     }
 
     client.name = hello.name;
-    client.sprite = hello.sprite || DEFAULT_SPRITE;
+    client.sprite = hello.sprite || defaultSpriteFor(this.generation);
     client.profile = hello.profile || null;
     client.map = hello.map === undefined ? null : hello.map;
     client.x = hello.x === undefined ? null : hello.x;
@@ -2632,7 +2661,7 @@ class Relay {
 
   spendBag(record, clientId, itemId) {
     if (!this.canSpendBag(record, clientId, itemId)) return false;
-    const effect = Effects.itemEffect(itemId);
+    const effect = this.Effects.itemEffect(itemId);
     if (effect && effect.noConsume) return true;
     const bag = record.bags.get(clientId);
     bag[itemId] -= 1;
@@ -2691,7 +2720,7 @@ class Relay {
       // Seed NPC seats with a gym-style kit when the host uploaded no bag.
       if (!record.bags) record.bags = new Map();
       if (!record.bags.has(seat) && this.isNpcSeat(record, seat)) {
-        record.bags.set(seat, this.cloneBagMap(Turn.DEFAULT_NPC_BAG));
+        record.bags.set(seat, this.cloneBagMap(this.Turn.DEFAULT_NPC_BAG));
       }
       const bag = record.bags.get(seat);
       const bagCopy = this.cloneBagMap(bag);
@@ -2731,7 +2760,7 @@ class Relay {
     const seed = typeof this.forceBattleSeed === 'number'
       ? this.forceBattleSeed
       : (1 + Math.floor(Math.random() * BATTLE_SEED_MAX));
-    const created = Turn.attempt({
+    const created = this.Turn.attempt({
       id: record.id,
       mode: record.mode,
       seed,
@@ -2813,7 +2842,7 @@ class Relay {
     if (!seats || !seats.length) return false;
 
     let filed = false;
-    const bound = Turn.MONS_PER_PARTY * COOP_SIDE * 2;
+    const bound = this.Turn.MONS_PER_PARTY * COOP_SIDE * 2;
     for (let pass = 0; pass < bound; pass += 1) {
       let any = false;
       for (const seat of seats) {
@@ -3156,7 +3185,7 @@ class Relay {
     return this.board.top(RANK_TOP).map((row) => {
       const out = {
         name: row.name,
-        sprite: cleanSpriteId(row.sprite) || DEFAULT_SPRITE,
+        sprite: cleanSpriteId(row.sprite) || defaultSpriteFor(this.generation),
         points: cleanPoints(row.points),
       };
       const id = cleanPlayerId(row.id);
@@ -3187,5 +3216,6 @@ class Relay {
 // in six places every time it moves.
 module.exports = {
   Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE,
+  DEFAULT_SPRITE_GEN2, defaultSpriteFor,
   FRIEND_HOLD_MS, FRIEND_HOLD_PER_NAME, FRIEND_HOLD_MAX,
 };

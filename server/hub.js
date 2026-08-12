@@ -19,15 +19,15 @@
  * relay backend already speaks, so the client reuses the engine's framing
  * instead of shipping its own.
  *
- * No dependencies: node hub.js [port]
+ * No dependencies: node hub.js [port] [--generation 1|2]
  *
  * ----------------------------------------------------------------------
  *
  * The hub itself now lives in lib/ -- relay.js, limits.js, auth.js,
  * config.js, server.js -- and this file is the front door it has always
- * had: no config file, no join code, no arguments but a port. It is here so
- * that every command in server/README.md and every existing deployment keeps
- * working unchanged.
+ * had: no config file, no join code, and only a port plus an optional
+ * generation lock. It is here so that every command in server/README.md
+ * and every existing deployment keeps working unchanged.
  *
  * **For anything configurable, use `node server/bin/rby-mmo-hub.js`.** That
  * is where join codes, bans, allowlists, per-IP caps and UPnP live. This
@@ -39,14 +39,47 @@ const { validate } = require('./lib/config.js');
 const { createLog } = require('./lib/log.js');
 const { start } = require('./lib/server.js');
 
+/*
+ * Positional port (argv[2] historically) plus optional `--generation N`.
+ * Kept local so this shim stays free of the full CLI parser.
+ */
+function parseShimArgv(argv) {
+  let port;
+  let generation;
+  for (let i = 2; i < argv.length; i += 1) {
+    const arg = String(argv[i]);
+    if (arg === '--generation' || arg === '--generation=') {
+      const next = argv[i + 1];
+      if (next !== undefined && !String(next).startsWith('--')) {
+        generation = next;
+        i += 1;
+      } else {
+        generation = '';
+      }
+      continue;
+    }
+    if (arg.startsWith('--generation=')) {
+      generation = arg.slice('--generation='.length);
+      continue;
+    }
+    if (port === undefined && !arg.startsWith('--')) {
+      port = arg;
+    }
+  }
+  return { port, generation };
+}
+
+const shim = parseShimArgv(process.argv);
+
 // The same three environment variables, read in the same order: an argv port
 // beats RBY_MMO_PORT, and the player cap is still clamped to 2..64 rather
 // than obeyed -- via config.js, which owns those bounds now, so there is one
-// definition of them instead of two that can drift.
-const { config, warnings } = validate({
+// definition of them instead of two that can drift. Generation follows the
+// same precedence: argv --generation > RBY_MMO_GENERATION > default 1.
+const given = {
   listen: {
     host: process.env.RBY_MMO_HOST || '0.0.0.0',
-    port: process.argv[2] || process.env.RBY_MMO_PORT || 7788,
+    port: shim.port || process.env.RBY_MMO_PORT || 7788,
   },
   maxPlayers: process.env.RBY_MMO_MAX || undefined,
   // No join code, because there is no file to keep one in. A hub reachable
@@ -62,7 +95,15 @@ const { config, warnings } = validate({
     connectPerMinute: 6000,
     maxPending: 256,
   },
-});
+};
+
+if (shim.generation !== undefined) {
+  given.generation = shim.generation;
+} else if (process.env.RBY_MMO_GENERATION) {
+  given.generation = process.env.RBY_MMO_GENERATION;
+}
+
+const { config, warnings } = validate(given);
 
 const log = createLog({ level: config.log.level });
 for (const warning of warnings) log.warn(warning);

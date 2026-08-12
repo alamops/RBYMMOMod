@@ -15,6 +15,7 @@ local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
 local Hub = need("Hub")
+local Gen = need("Gen")
 
 local M = {}
 M.__index = M
@@ -113,7 +114,11 @@ end
 -- the sentence on.  The code itself never reaches self.error and never
 -- reaches mod.log: an error string is read out on screen, and a log line
 -- outlives the game that wrote it.
-function M:start(port, maxPlayers, joinCode)
+--
+-- `game` (optional 4th) is the boot Client.host already holds: on Gold the
+-- loader's mod.game is the right answer, but pinning the caller's game keeps
+-- the hub generation lock honest even if that facade is briefly nil.
+function M:start(port, maxPlayers, joinCode, game)
   if self.running then return false, "already hosting" end
 
   if type(joinCode) ~= "string" or joinCode == "" then
@@ -154,6 +159,10 @@ function M:start(port, maxPlayers, joinCode)
   self.hub = Hub.new({
     maxPlayers = maxPlayers,
     joinCode = code,
+    -- Bind the hub to this boot's generation (Gold → 2, RBY → 1). Must see
+    -- the live Gold game: a bare Gen.generation() used to answer 1 and the
+    -- host refused its own hello ("hub is for generation 1; yours is 2").
+    generation = Gen.generation(game or mod.game),
     onDrop = function(reason, clientId)
       mod.log:warn("refused a relayed message from player %s (%s); "
         .. "if a trade or battle stalled, this is why -- ask them to "

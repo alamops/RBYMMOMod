@@ -6,27 +6,112 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Code-review must-fixes (gen2-compatibility).** Trade2 keeps `theirMail`
+  aligned with `theirParty` when a non-strict unpack skips a mon; Hub↔relay
+  `battleParty`/`cleanBattleParty` take hub generation (Effects twin, refuse
+  explicit generation mismatch, stamp party.generation); `Gen.freeRoam`
+  empty-stack only on Gen 2; `money.get` no longer creates `save.player`;
+  Gen2 vitamin writeback uses BattleSim2/Effects only.
+
 ### Added
 
+- **PROTOCOL 20 — gen lock + co-op invite joiner finish.** `Config.PROTOCOL` /
+  `relay.js` bump **18 → 20** (both parallel branches had claimed 19). Client
+  `mmo.hello` carries `generation` (1|2); Hub.lua and the Node relay refuse a
+  mismatch after the protocol check (`This hub is for generation N; yours is
+  generation M.`). Optional `npcId` / `event` on `mmo.coop_wait` → offer →
+  battle carry the waiter's overworld trainer so a menu/invite joiner (no
+  buried `BattleState`) can mark that NPC beaten, take prize money, and run
+  `afterBattle` after a co-op win — without a solo rematch. Missing
+  `generation` defaults to 1; hub `opts.generation` defaults to 1 (Gen2 hubs
+  must set `generation: 2`). Gen1 behaviour unchanged when the hub stays on
+  generation 1.
 - **Co-op gym battle music via oppClass#partyIndex.** `CoopBattle.musicKind`
   probes `computeMusicKind` with `oppClass` + `partyIndex` (from the buried
-  engine or PROTOCOL 19 npcId), so badge gym leaders (Brock, Misty, Giovanni
+  engine or PROTOCOL 20 npcId), so badge gym leaders (Brock, Misty, Giovanni
   #3, …) get gym music — not only Lance / Rival3 via `trainer.id`.
 - **MediatedBattle battle / victory / map music.** 1v1 link fights and
   protocol-only wild now call `Music.playBattle` on enter, `playVictory` once
   on a win (including catch), and `restoreMap` on exit — same theatre
   contract as CoopBattle (was silent on overworld music for the whole fight).
-- **PROTOCOL 19 — co-op invite joiner trainer finish.** `Config.PROTOCOL` /
-  `relay.js` bump **18 → 19**. Optional `npcId` / `event` on `mmo.coop_wait`
-  → offer → battle carry the waiter's overworld trainer so a menu/invite
-  joiner (no buried `BattleState`) can mark that NPC beaten, take prize
-  money, and run `afterBattle` after a co-op win — without a solo rematch.
 - **Co-op / mediated attack SFX.** CoopBattle and MediatedBattle poll
   `AnimPlayer` effects like solo `BattleState` (move whoosh / cry /
   `SFX_TINK`) and play effectiveness hit thuds after the flash.
 - **Trainer foe theatrical intro on co-op NPC battles.** Appear line,
   trainer face, foe ball row, and sequential foe send-outs before ally
   `Go!` (wild / PvP unchanged).
+
+- **Wave 4 polish + dual-gen headless load.** `Places.name` resolves Gen 2
+  landmarks via `data.gen2Landmarks` (no `data.field` crash); Overlay soft-
+  skips Gen 2 POKeGEAR MAP (`pokegear-skip`) instead of treating it as TownMap;
+  `Chars.list` / `resolve` fall back through `Gen.defaultSprite`. Suite loads
+  with `{ generation = 1 }` and `{ generation = 2 }` (both `loaded`, no
+  errors); `tests/drivers/run-mmo-e2e-gen2.sh` documents Gen 2 hub
+  (`--generation 2`) + Gold boot and exits 0 when the Gold cache is absent.
+
+- **Gen2 co-op strategy split (Wave 3 T3a).** Hub-mediated co-op
+  (`coop_pvp` / `coop_npc` / `coop_wild`) opens on Gen 2 without hard-failing
+  on missing Gen1 `BattleState`/`Damage`: `CoopBattle.loadEngine` soft-loads,
+  `CoopField` / Gen1 host-sim `CoopSim` resolve are refused with a remediation
+  pointing at a Gen 2 hub (BattleSim2), and the screen replays mediated events
+  with slot fallback battlers. Party pack/unpack uses `packMon2`/`unpackMon2`.
+  `Coop.badgesOf` delegates to the MK403-safe MediatedBattle path; MoveLearnMenu
+  is capability-tested / skipped on Gen 2 (no Gen2MoveLearnMenu). Gen1 host-sim
+  CoopField path unchanged. Deferred: full Gen2 CoopField rewrite, Gen2
+  MoveLearnMenu, host-sim Damage on Gold.
+
+- **Gen2 trade over SessionNet (Wave 3 T3b).** When `Gen.generation(game)==2`,
+  `Sessions` opens `Trade2.TradeSession` (packMon2/unpackMon2, parallel party
+  `mail` array, apply into party + `pokedex.caught` + held item). Gen1 still
+  uses engine `Protocol.TradeSession`. Soft-fails with remediation if the
+  engine lacks packMon2 or Mail.
+
+- **Gen2 battle sheets on the wire + MediatedBattle upload (Wave 2 T2c).**
+  `Wire.battleMon` / `server/lib/sanitize.js` accept Gen 1 `atk/def/spd/spc`
+  and Gen 2 `atk/def/spe/spa/spd` (+ optional `heldItem`), preferring an
+  explicit `generation` then shape-sniff. MediatedBattle uploads the Gen 2
+  dialect when `Gen.generation(game)==2`, fixes MK403 `badgesOf` (no Gen 1
+  `src.battle.Damage` on Gold), and writes Gen 2 vitamin Stat Exp via the
+  engine's `special` word + `specialAttack`/`specialDefense` live stats.
+
+- **Hub/LAN host selects Gen1 vs Gen2 battle sim by generation (Wave 2 T2d).**
+  `Hub.new` / `Relay` constructor load `BattleSim`+`Effects` when
+  `generation` is 1 (default) and `BattleSim2` / `lib/battle2` when it is 2;
+  every mediated open/turn path uses the instance twin. Node bag sanitise
+  picks Effects by the same generation. Gen1 hubs behave as before; Gen2
+  hubs never instantiate Gen1 Turn.
+
+- **Gen2 BattleSim2 formulas + Turn scaffold (Wave 2 T2a).** New pure
+  `src/BattleSim2/` sibling (SpA/SpD damage, crit ladder, 85–100% variance,
+  damage cap 999, freeze 1/5 thaw, burn/poison /8) with
+  `tests/fixtures/battle_sim2_vectors.json` and
+  `tests/battle_sim2_vectors.lua`. Gen1 `src/BattleSim/` untouched.
+
+- **Node Gen2 battle twin (Wave 2 T2b).** `server/lib/battle2/` mirrors
+  `src/BattleSim2/` (Damage / Crit / Accuracy / Status / Rng / Effects / Turn /
+  events). `server/battle2_vectors.test.js` pins
+  `tests/fixtures/battle_sim2_vectors.json` integer-identical to Lua. Hub
+  generation selection is T2d.
+
+- **Hub `--generation` / config `generation` (Wave 1 T1b).** CLI and config
+  lock a hub to Gen 1 or Gen 2 (`--generation 1|2`, `generation:` in
+  `config.json`, `RBY_MMO_GENERATION`). Compat default is 1 when omitted, with
+  a startup warning that Gen 2 hubs must pass `--generation 2`. In-game HOST
+  binds the boot's generation via `Gen.generation()`. Equal-peer Gen 1 / Gen 2
+  run recipes are in `server/README.md`. (Server-list gen chip deferred —
+  no row field carries generation yet.)
+
+- **Gen 1 + Gen 2 dual claim (Wave 0).** `manifest.games` is
+  `["gen1","gen2"]`. New `src/Gen.lua` helpers cover money (`save.money` vs
+  `save.player.money`), dex (`owned` vs `caught`), badges, free-roam
+  (overworld-on-top vs empty Gen 2 stack), StartMenu / Gen2StartMenu cancel,
+  and avatar spawn (STAY+range vs numeric STANDING_* + name lookup). Presence,
+  chat, party UI, and save-side money/heal paths are generation-aware.
+  Hub-locked Gen 2 BattleSim / trade / co-op land in later waves — see
+  `docs/plans/gen2-compatibility.md`.
+
 - **PROTOCOL 18 — Party vs Wild (`coop_wild`).** `Config.PROTOCOL` / `relay.js`
   bump **17 → 18**. New mediated mode: two partied humans vs one wild NPC
   seat. When partners share a map, a grass encounter auto-opens the fight
@@ -77,7 +162,7 @@ here must match `manifest.version`.
   a faint is queued / display-fainted are skipped; strip icons follow display
   faint rather than premature sim `isDown`.
 - **Joiner immediate rematch after co-op NPC win.** Walk-in harden via
-  `claimBuriedEngine`; invite joiners finish via PROTOCOL 19 synthetic
+  `claimBuriedEngine`; invite joiners finish via PROTOCOL 20 synthetic
   defeat (see Added).
 
 First stable release line. Hub-mediated battles (0.11.x) are the supported

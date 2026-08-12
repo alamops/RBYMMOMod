@@ -51,7 +51,9 @@
 local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
+local Gen = need("Gen")
 local CoopBattle = need("CoopBattle")
+local Mediated = need("MediatedBattle")
 
 local M = {}
 M.__index = M
@@ -233,22 +235,29 @@ function M:consume(result, blackout)
   self.encounter = nil
   if not encounter then return false end
   local engine = encounter.engine
-  if not (engine and engine.onFinish) then return false end
+  -- Gen 1 BattleState uses onFinish; Gen 2's ui/gen2/BattleState uses onDone
+  -- (Client stamps onFinish from onDone when present, but accept either).
+  local finish = engine and (engine.onFinish or engine.onDone)
+  if not finish then return false end
 
   -- Prize money, which the engine pays from inside its own battle screen and
   -- so never gets to pay for one it did not run. Its formula, at the level of
   -- the strongest monster the trainer had -- a 2-on-2 has two last opponents,
   -- and paying for the better of them is the reading that cannot be gamed by
   -- ordering the party.
-  if result == "win" and engine.trainer then
+  local trainer = engine.trainer
+    or (engine.battle and engine.battle.trainer)
+  local enemyParty = engine.enemyParty
+    or (engine.battle and engine.battle.enemyParty)
+  if result == "win" and trainer then
     local best = 0
-    for _, mon in ipairs(engine.enemyParty or {}) do
+    for _, mon in ipairs(enemyParty or {}) do
       best = math.max(best, tonumber(mon.level) or 0)
     end
-    local prize = (tonumber(engine.trainer.baseMoney) or 0) * best
+    local prize = (tonumber(trainer.baseMoney) or 0) * best
     local save = encounter.game and encounter.game.save
     if prize > 0 and save then
-      save.money = math.min(999999, (tonumber(save.money) or 0) + prize)
+      Gen.money.set(save, math.min(999999, Gen.money.get(save) + prize))
     end
   end
 
@@ -262,7 +271,7 @@ function M:consume(result, blackout)
     engineRitual = true
   end
 
-  local ok, err = pcall(engine.onFinish, outcome)
+  local ok, err = pcall(finish, outcome)
   if not ok then
     mod.log:warn("the trainer battle could not be finished off (%s); if the "
       .. "world seems stuck, reload from your last save", tostring(err))
@@ -301,17 +310,34 @@ function M.blacksOut(result, game)
   return true
 end
 
--- Where a blackout returns to, resolved the way OverworldState:healPoint
--- resolves it: the Center this player last slept in, then the world's own
--- declared boot heal point, then the spawn cell.
+-- Where a blackout returns to. Prefer the live overworld's own healPoint
+-- (Gen 1 OverworldState and Gen 2 World both expose it), then Gen 2's
+-- save.spawn / landmarks table, then the Gen 1 lastHeal / boot path.
 --
--- Read rather than asked for, because there is no facade call for it -- and
--- read in the engine's order rather than a simpler one, so a modded world that
--- moved its starting town sends co-op losers to the same place a solo loss
--- would. Nil is a real answer for a build with no field data at all, and the
+-- Nil is a real answer for a build with no field data at all, and the
 -- caller declines to warp rather than guessing a map name.
 function M.healPoint(game)
+  local world = mod.world
+  local ow = world and type(world.overworld) == "function" and world:overworld() or nil
+  if ow and type(ow.healPoint) == "function" then
+    local ok, target = pcall(function() return ow:healPoint() end)
+    if ok and type(target) == "table" and target.map then return target end
+    if not ok then
+      mod.log:warn("overworld healPoint failed (%s); falling back to save "
+        .. "spawn / lastHeal", tostring(target))
+    end
+  end
+
   local save = game and game.save
+  if save and save.spawn then
+    local landmarks = (ow and ow.landmarks)
+      or (game and game.data and game.data.landmarks)
+    local row = landmarks and landmarks.spawns and landmarks.spawns[save.spawn]
+    if type(row) == "table" and row.map then
+      return { map = row.map, x = row.x, y = row.y, spawn = save.spawn }
+    end
+  end
+
   local last = save and save.lastHeal
   if last and last.map then return last end
   local data = game and game.data
@@ -402,7 +428,7 @@ function M:blackout(game)
   local world = game.data and game.data.constants and game.data.constants.world
   local divisor = tonumber(world and world.blackoutMoneyDivisor) or 2
   if divisor > 0 then
-    save.money = math.floor((tonumber(save.money) or 0) / divisor)
+    Gen.money.set(save, math.floor(Gen.money.get(save) / divisor))
   end
   -- DisplayPlayerBlackedOutText clears BIT_ALWAYS_ON_BIKE; a player who blacks
   -- out on a forced-bike route wakes up on foot, not pedalling indoors.
@@ -545,7 +571,11 @@ end
 -- Returns true when a prompt is up. False means the encounter is none of this
 -- module's business, and the engine's battle is left completely alone.
 function M:onTrainerBattle(game, state, mapId)
-  if not (state and state.kind == "trainer") then return false end
+  if not state then return false end
+  -- Gen 2 BattleState has no `.kind`; the trainer record sits on state.battle.
+  local kind = state.kind
+  if not kind and state.battle and state.battle.trainer then kind = "trainer" end
+  if kind ~= "trainer" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running then return false end
   -- Partner has to be online (in the roster). Same map is *not* required: the
@@ -555,19 +585,24 @@ function M:onTrainerBattle(game, state, mapId)
   local here = partner and self.roster:get(partner.id)
   if not here then return false end
 
-  local label = Wire.label(tostring(state.oppClass or ""):gsub("^OPP_", "")
+  local trainer = state.battle and state.battle.trainer
+  local oppClass = state.oppClass
+    or (trainer and (trainer.classId or trainer.class))
+  local enemyParty = state.enemyParty
+    or (state.battle and state.battle.enemyParty)
+  local label = Wire.label(tostring(oppClass or ""):gsub("^OPP_", "")
     :gsub("_", " "))
   -- The trainer class alone is not quite specific enough: one map can hold two
   -- of the same class with different parties. The lead monster's species and
   -- level tell those apart, and both partners derive them from the battle their
   -- own engine just built -- so they agree by both looking at the same trainer
   -- rather than by trusting a value one of them sent.
-  local lead = state.enemyParty and state.enemyParty[1]
-  local key = M.battleKey(mapId, state.oppClass,
+  local lead = enemyParty and enemyParty[1]
+  local key = M.battleKey(mapId, oppClass,
     lead and lead.species, lead and lead.level)
   -- Concrete overworld id (and event flag) from the engine's checkpoint --
   -- what an invite joiner needs on the wire so they never fuzzy-match a Bug
-  -- Catcher by class. See M.originOf / PROTOCOL 19.
+  -- Catcher by class. See M.originOf / PROTOCOL 20.
   local npcId, event = M.originOf(state)
 
   self.encounter = {
@@ -592,14 +627,23 @@ end
 -- The wild mon the engine just built, for a grant and for the battle key.
 --
 -- Wild BattleState keeps the mon on `enemy.mon` (newWild never fills
--- enemyParty). Trainer battles put it in enemyParty[1]. Both shapes are
--- accepted so a headless fixture that only stubs enemyParty still works.
+-- enemyParty). Trainer battles put it in enemyParty[1]. Gen 2's screen holds
+-- the Battle on `state.battle`, where the foe is `battle.enemy` (a Mon) or
+-- `battle.enemyParty[1]`. All shapes are accepted so a headless fixture that
+-- only stubs enemyParty still works.
 function M.wildMonOf(state)
   if type(state) ~= "table" then return nil end
   local mon = state.enemyParty and state.enemyParty[1]
   if mon then return mon end
   local enemy = state.enemy
-  return enemy and enemy.mon or nil
+  if enemy and enemy.mon then return enemy.mon end
+  local battle = state.battle
+  if type(battle) == "table" then
+    mon = battle.enemyParty and battle.enemyParty[1]
+    if mon then return mon end
+    if battle.enemy then return battle.enemy end
+  end
+  return nil
 end
 
 -- Called when the engine has just pushed a wild encounter.
@@ -618,7 +662,11 @@ end
 -- beginWildCoop posts COOP_WAIT and covers the engine wild with a wait box so
 -- the host cannot fight solo while the partner auto-joins (see considerOffer).
 function M:onWildEncounter(game, state, mapId)
-  if not (state and state.kind == "wild") then return false end
+  if not state then return false end
+  -- Gen 2 BattleState has no `.kind`; a wild fight carries state.battle.wild.
+  local kind = state.kind
+  if not kind and state.battle and state.battle.wild then kind = "wild" end
+  if kind ~= "wild" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running or self.waiting or self.ask then return false end
   if self.joinAsk then return false end
@@ -815,7 +863,7 @@ function M:beginWait()
     label = encounter.label,
     map = encounter.map,
   }
-  -- PROTOCOL 19: concrete overworld id for invite joiners. Only on the
+  -- PROTOCOL 20: concrete overworld id for invite joiners. Only on the
   -- trainer path -- wild waits have no defeatedTrainers key to set.
   if encounter.npcId then payload.npcId = encounter.npcId end
   if encounter.event then payload.event = encounter.event end
@@ -1181,6 +1229,11 @@ function M.isFightState(state)
   local kind = state.kind
   if kind == "wild" or kind == "trainer" or kind == "link" then return true end
   if state.sim ~= nil then return true end
+  -- Gen 2 ui/gen2/BattleState: no kind; wild/trainer live on state.battle.
+  local battle = state.battle
+  if type(battle) == "table" and (battle.wild or battle.trainer) then
+    return true
+  end
   return false
 end
 
@@ -1419,7 +1472,7 @@ end
 -- mediation the stack can still be carrying that fight when startBattle
 -- finally runs, and clearing the encounter without unwinding it is exactly
 -- the "immediate FIGHT UI" rematch. Keyed on the waiter's concrete `npcId`
--- from the wire (PROTOCOL 19) -- never by trainer class alone (Route 3 Bug
+-- from the wire (PROTOCOL 20) -- never by trainer class alone (Route 3 Bug
 -- Catchers). Returns nil for party fights, wild, and menu joiners who never
 -- walked into anything.
 function M:claimBuriedEngine(game, plan)
@@ -1536,7 +1589,7 @@ function M:begin(game, plan)
     ready = false,
   }
 
-  local packed = CoopBattle.packParty(game and game.save and game.save.party)
+  local packed = CoopBattle.packParty(game and game.save and game.save.party, game)
   if not packed then
     -- The engine's link modules are what pack a party, and without them there
     -- is no battle to have. Said out loud, and the trainer handed back, rather
@@ -1585,25 +1638,10 @@ end
 
 -- The badges this player has earned, as a list for the wire.
 --
--- Read off the badge *rows* rather than off a list written down here, so a mod
--- that adds a badge -- or retunes which ones boost what -- is covered without
--- this file knowing about it. Only the rows can matter: `makeBattler` walks
--- them and asks the bag, so a badge nothing boosts is a badge nothing reads.
+-- Same dual-gen path as MediatedBattle.badgesOf (MK403): never hard-require
+-- Gen 1 `src.battle.Damage` on Gold.
 function M.badgesOf(game)
-  local data = game and game.data
-  local inventory = game and game.save and game.save.inventory
-  if not (data and inventory) then return nil end
-  local rows = data.constants and data.constants.badgeBoosts
-  if not rows then
-    local ok, Damage = pcall(require, "src.battle.Damage")
-    rows = ok and Damage and Damage.BADGE_BOOSTS or nil
-  end
-  local out = {}
-  for _, row in ipairs(rows or {}) do
-    if row.badge and inventory[row.badge] then out[#out + 1] = row.badge end
-  end
-  if #out == 0 then return nil end
-  return out
+  return Mediated.badgesOf(game)
 end
 
 -- Give up on a battle that cannot be assembled, without breaking rule 2: the
@@ -1910,10 +1948,10 @@ function M:npcSide(game, plan)
   -- the shape it was bounded for.
   local out = {}
   out[#out + 1] = { side = "b", owner = nil, name = label,
-                    party = CoopBattle.packParty(left) }
+                    party = CoopBattle.packParty(left, game) }
   if #right > 0 then
     out[#out + 1] = { side = "b", owner = nil, name = label,
-                      party = CoopBattle.packParty(right) }
+                      party = CoopBattle.packParty(right, game) }
   end
   for _, entry in ipairs(out) do
     if not entry.party then return nil end
@@ -2108,7 +2146,7 @@ function M:startBattle(game, field)
   local trainer = M.trainerFor(game, field, engine)
   -- Music / badge identity for computeMusicKind: prefer the buried engine's
   -- oppClass + partyIndex; invite joiners recover them from the waiter's
-  -- npcId (PROTOCOL 19) so Giovanni's gym (#3) is not confused with #2.
+  -- npcId (PROTOCOL 20) so Giovanni's gym (#3) is not confused with #2.
   local oppClass = engine and engine.oppClass or nil
   local partyIndex = engine and engine.partyIndex or nil
   if (not oppClass or not partyIndex) and battle.plan and battle.plan.npcId then
@@ -2382,7 +2420,9 @@ end
 --
 -- The engine's own MoveLearnMenu is pushed rather than a copy of it: it is the
 -- screen that already knows how to show four moves and their PP, and how to
--- refuse politely.
+-- refuse politely. Gen 2 has no Gen2MoveLearnMenu twin, but the Gen 1 screen
+-- still resolves from the registry and works on Gold for the forget prompt —
+-- try it rather than silently dropping earned moves.
 function M:offerForgets(game, toLearn)
   if not (game and toLearn and #toLearn > 0) then return false end
   local pending = {}
@@ -2395,10 +2435,24 @@ function M:offerForgets(game, toLearn)
       mod.ui.push(game, "MoveLearnMenu", entry.mon, entry.move)
     end)
     if not ok then
-      -- The screen is the engine's; if a build has not got it, say so and
-      -- move on rather than swallowing a level-up the player earned.
-      mod.log:warn("could not open the move-learning screen for %s; it can "
-        .. "still be learned by levelling again", tostring(entry.move))
+      -- Auto-fill an empty move slot when the forget UI is missing; otherwise
+      -- warn so the player can re-level outside co-op.
+      local mon = entry.mon
+      local moved = false
+      if type(mon) == "table" and type(mon.moves) == "table" and #mon.moves < 4 then
+        local mdef = game.data and game.data.moves and game.data.moves[entry.move]
+        mon.moves[#mon.moves + 1] = {
+          id = entry.move,
+          pp = (mdef and mdef.pp) or 5,
+        }
+        moved = true
+        self.ui:say((mon.nickname or mon.species or "POKéMON")
+          .. " learned\n" .. tostring(entry.move) .. "!")
+      end
+      if not moved then
+        mod.log:warn("could not open the move-learning screen for %s; it can "
+          .. "still be learned by levelling again", tostring(entry.move))
+      end
     end
     -- One at a time, so two level-ups do not stack two menus.
     if #pending > 0 then self.ui:say("...", nextOne) end
