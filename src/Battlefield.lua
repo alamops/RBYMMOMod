@@ -32,6 +32,26 @@ M.MIDLINE = math.floor(M.WIDTH / 2)
 -- 60, not 72: at 72 the four seats of a 2v2 crowd the plates and the arena
 -- reads as a close-up rather than a field (R2 owner review).
 M.MON_DRAW = 60
+-- Two mons on one side: seat centres at these fractions of WIDTH, measured
+-- from that side's outer edge (mirrored for the foe half). 0.18 clears the
+-- arena border the near seat used to hang off; 0.34 keeps the far seat a full
+-- box away from the midline (R3 item 3).
+local MON_PAIR_NEAR = 0.18
+local MON_PAIR_FAR = 0.34
+-- Vertical stagger, as a fraction of rowSpread: how far a paired seat leaves
+-- the field's centre line, and how far a 3+ seat zigzags off it.
+local MON_PAIR_STAGGER = 0.25
+local MON_ZIGZAG = 0.35
+-- How far a drawn mon reaches past its seat centre, as fractions of the box:
+-- up, because front pics are feet-anchored (monDrawParams uses 0.85); down,
+-- because the contact shadow sits at 0.28 with a 0.14 radius (drawMonShadow).
+-- Placement clamps against these so no box or shadow leaves the field.
+local MON_TOP_REACH = 0.85
+local MON_BOTTOM_REACH = 0.42
+-- Peak amplitude of iconBob (2 idle + 4 acting), added to both reaches.
+local MON_BOB_MARGIN = 6
+-- Horizontal breathing room between a mon box and the canvas edge.
+local MON_EDGE_PAD = 6
 -- Legacy alias kept for older layout asserts / callers.
 M.ICON_SRC = 16
 M.ICON_SCALE = 2
@@ -59,6 +79,13 @@ M.HUMAN_DRAW = M.HUMAN_SRC * M.HUMAN_SCALE
 -- Distance from the canvas edge to a trainer's column. Shared with the ball
 -- arc, which starts at the thrower's column.
 local HUMAN_PAD = 20
+-- Vertical spacing between two stacked trainers on the same side (centre to
+-- centre). One draw height plus a gutter, so two sprites never touch.
+local HUMAN_STACK_GAP = M.HUMAN_DRAW + 12
+-- Keeps a trainer sprite off the field's own top / bottom edge. The stack is
+-- clamped into FIELD_TOP..FIELD_BOTTOM minus this: R3 item 2 was seat 2 of a
+-- coop side rendering *above* the arena, in the letterbox.
+local HUMAN_EDGE_PAD = 6
 
 -- Type sizes, in canvas pixels (the canvas is 640×360 and fill-scaled, so a
 -- size here is a size on screen at 1×). Named so they stay tunable in one
@@ -143,6 +170,20 @@ local function truncate(text, maxChars)
   maxChars = maxChars or 12
   if #text <= maxChars then return text end
   return text:sub(1, math.max(1, maxChars - 1)) .. "."
+end
+
+-- Callout voice: "pikachu" -> "PIKACHU!". Collapses whitespace, upper-cases,
+-- and appends exactly one exclamation mark — an author's own terminal ! or ?
+-- is left alone, so "WHAT?" never becomes "WHAT?!". The renderer owns this
+-- punctuation; emitters pass plain names and move names (R3 item 5).
+local function shout(text)
+  if type(text) ~= "string" then return "" end
+  text = text:gsub("%s+", " "):gsub("^ +", ""):gsub(" +$", "")
+  if text == "" then return "" end
+  text = text:upper()
+  local last = text:sub(-1)
+  if last ~= "!" and last ~= "?" then text = text .. "!" end
+  return text
 end
 
 -- ------- Gen1 gate
@@ -522,12 +563,24 @@ local function placeHumans(humans, side, out)
     x = M.WIDTH - pad - math.floor(M.HUMAN_DRAW / 2)
   end
 
-  local bandTop = M.FIELD_TOP + 28
-  local bandBot = M.FIELD_BOTTOM - 36
-  local span = math.max(1, bandBot - bandTop)
+  -- Trainers sit on the FIELD's vertical centre, not the canvas': the bottom
+  -- MENU_BAND belongs to the message / command menus, so a canvas-centred
+  -- sprite would stand under them. A side's trainers stack symmetrically about
+  -- that centre, and the whole stack is clamped so every sprite stays fully
+  -- inside FIELD_TOP..FIELD_BOTTOM (never in the letterbox above the arena).
+  local centerY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT / 2)
+  local half = math.floor(M.HUMAN_DRAW / 2)
+  local minY = M.FIELD_TOP + half + HUMAN_EDGE_PAD
+  local maxY = M.FIELD_BOTTOM - half - HUMAN_EDGE_PAD
+  local gap = HUMAN_STACK_GAP
+  if count > 1 then
+    -- More trainers than the comfortable spacing fits: tighten the gap rather
+    -- than let the ends escape the field. A floor of 1 keeps the order stable.
+    gap = math.max(1, math.min(gap, math.floor((maxY - minY) / (count - 1))))
+  end
   for i, human in ipairs(humans) do
-    local t = count == 1 and 0.5 or ((i - 1) / (count - 1))
-    local y = math.floor(bandTop + t * span)
+    local offset = (i - 1 - (count - 1) / 2) * gap
+    local y = clamp(math.floor(centerY + offset + 0.5), minY, maxY)
     out[#out + 1] = {
       side = side,
       index = i,
@@ -560,16 +613,57 @@ local function placeMons(seats, side, out)
   local midY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.50)
   local rowSpread = math.min(56, math.floor(M.FIELD_HEIGHT * 0.20))
 
+  -- Seat centres for the pair case, as fractions of WIDTH measured from the
+  -- side's own outer edge (mirrored on the foe half). R3 item 3: the old even
+  -- split between `left` and `right` put seat 1 half off the arena border and
+  -- seat 2 hard against the midline.
+  local xs = {}
+  if count == 2 then
+    local near = math.floor(M.WIDTH * MON_PAIR_NEAR)
+    local far = math.floor(M.WIDTH * MON_PAIR_FAR)
+    if side == "ally" then
+      xs[1], xs[2] = near, far
+    else
+      xs[1], xs[2] = M.WIDTH - near, M.WIDTH - far
+    end
+  else
+    for i = 1, count do
+      local t = count == 1 and 0.5 or ((i - 1) / (count - 1))
+      xs[i] = math.floor(left + t * (right - left))
+    end
+  end
+
+  -- Nothing may hang off the field: a front pic rises MON_TOP_REACH * box above
+  -- the seat centre (monDrawParams anchors near the feet) and the contact
+  -- shadow reaches MON_BOTTOM_REACH * box below it (drawMonShadow), with the
+  -- idle bob riding on top of both.
+  local halfBox = math.floor(M.MON_DRAW / 2)
+  local xMin = halfBox + MON_EDGE_PAD
+  local xMax = M.WIDTH - halfBox - MON_EDGE_PAD
+  if side == "ally" then
+    xMax = math.min(xMax, M.MIDLINE - halfBox)
+  else
+    xMin = math.max(xMin, M.MIDLINE + halfBox)
+  end
+  local yMin = M.FIELD_TOP + math.ceil(M.MON_DRAW * MON_TOP_REACH) + MON_BOB_MARGIN
+  local yMax = M.FIELD_BOTTOM - math.ceil(M.MON_DRAW * MON_BOTTOM_REACH) - MON_BOB_MARGIN
+
   for i, seat in ipairs(seats) do
-    local t = count == 1 and 0.5 or ((i - 1) / (count - 1))
-    local x = math.floor(left + t * (right - left))
+    local x = clamp(xs[i] or math.floor((left + right) / 2), xMin, xMax)
     local yOff = 0
     if count >= 3 then
       -- Zigzag slightly so 3–4 seats do not sit on one line.
-      yOff = ((i % 2 == 0) and 1 or -1) * math.floor(rowSpread * 0.35)
+      yOff = ((i % 2 == 0) and 1 or -1) * math.floor(rowSpread * MON_ZIGZAG)
     elseif count == 2 then
-      yOff = (i == 1) and -math.floor(rowSpread * 0.25) or math.floor(rowSpread * 0.25)
+      -- The stagger runs AWAY from the side's plate stack: ally plates sit
+      -- bottom-left, so the near-edge ally seat lifts; foe plates sit
+      -- top-right, so the near-edge foe seat drops -- otherwise the far foe
+      -- mon tucks its head under the stacked plates.
+      local lift = (i == 1) and -1 or 1
+      if side == "foe" then lift = -lift end
+      yOff = lift * math.floor(rowSpread * MON_PAIR_STAGGER)
     end
+    local y = clamp(midY + yOff, yMin, yMax)
     local facing = seat and seat.facing
     if type(facing) ~= "string" then
       facing = side == "ally" and "right" or "left"
@@ -590,7 +684,7 @@ local function placeMons(seats, side, out)
       front = seat and (seat.front or seat.frontImage or seat.sprite),
       acting = seat and seat.acting and true or false,
       x = x,
-      y = midY + yOff,
+      y = y,
       facing = facing,
       drawW = M.MON_DRAW,
       drawH = M.MON_DRAW,
@@ -742,6 +836,11 @@ function M.layout(ctx)
           side = b.side,
           humanIndex = hi,
           text = type(b.text) == "string" and b.text or "",
+          -- Optional acting-mon display name. When present it REPLACES the
+          -- plain text line ("PIKACHU!" over "THUNDERBOLT!"); when absent the
+          -- text line prints as-is, so legacy / third-party callers keep the
+          -- old two-part sentence.
+          name = (type(b.name) == "string" and b.name ~= "") and b.name or nil,
           -- Optional emphasis line (the move that was used); the renderer
           -- gives it its own, larger line under the plain text.
           moveName = (type(b.moveName) == "string" and b.moveName ~= "")
@@ -1433,26 +1532,48 @@ local function drawPlate(plate)
 end
 
 -- Trainer callout: a rounded near-white card with a tail toward the speaker.
--- Two lines at most — the plain text, then the move name emphasised under it.
+-- Two lines at most — the acting mon, then the move emphasised under it.
 -- Pure in t: scale-in, float and fade all read from the caller's clock (t
 -- counts down from 1, so the callout settles in and drifts up as it expires).
 local BUBBLE_MAX_W = 180
 local BUBBLE_MAX_CHARS = 24
 local BUBBLE_TAIL = 7
 
+-- The two strings a callout prints, already truncated to the box: the small
+-- top line and the emphasised line under it (nil when there is no move).
+-- Pure and love-free, so the format is assertable headless.
+--
+--   { name = "Pikachu", moveName = "Thunderbolt" } -> "PIKACHU!", "THUNDERBOLT!"
+--   { text = "ANN used", moveName = "TACKLE" }     -> "ANN used", "TACKLE!"
+--
+-- `name` is the R3 format and replaces the text line; without it the caller's
+-- own text line prints as-is, which is what keeps legacy emitters working.
+-- Shouting is applied before truncation so a clipped line does not end up with
+-- its "!" chopped off — the truncated form keeps the "." marker instead.
+function M.bubbleLines(b)
+  b = type(b) == "table" and b or {}
+  local line
+  if type(b.name) == "string" and b.name ~= "" then
+    line = truncate(shout(b.name), BUBBLE_MAX_CHARS)
+  else
+    -- One line only: callers write battle text with newlines in it, and a
+    -- second line inside the plain text would print straight through the box.
+    line = truncate((tostring(b.text or ""):gsub("%s+", " ")), BUBBLE_MAX_CHARS)
+  end
+  local move = nil
+  if type(b.moveName) == "string" and b.moveName ~= "" then
+    move = truncate(shout(b.moveName), BUBBLE_MAX_CHARS)
+    if move == "" then move = nil end
+  end
+  return line, move
+end
+
 local function drawBubble(b)
   local gfx = g()
   if not gfx then return end
   local t = clamp(num(b.t, 1), 0, 1)
   if t <= 0 then return end
-  -- One line each: callers write battle text with newlines in it, and a
-  -- second line inside the plain text would print straight through the box.
-  local line = truncate((tostring(b.text or ""):gsub("%s+", " ")),
-    BUBBLE_MAX_CHARS)
-  local move = nil
-  if type(b.moveName) == "string" and b.moveName ~= "" then
-    move = truncate(b.moveName, BUBBLE_MAX_CHARS)
-  end
+  local line, move = M.bubbleLines(b)
   if line == "" and not move then return end
 
   local scale = 0.55 + 0.45 * math.min(1, t * 1.6)

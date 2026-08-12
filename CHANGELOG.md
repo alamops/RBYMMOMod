@@ -35,6 +35,20 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **NIRE faced the wrong way everywhere.** The custom walk sheets were
+  authored mirrored against the engine convention (the stand-left frame held
+  a right-facing pose); the left-facing frames are flipped, fixing the arena
+  and the overworld in one stroke.
+- **Trainer placement.** Humans now stand at the vertical center of the
+  field and stack inside it — a two-player side used to render its second
+  trainer above the arena into the letterbox. Two-mon sides pull in off the
+  arena edges (no more half-clipped seat 1), with everything clamped inside
+  the field.
+- **NPC co-op fights show their trainer.** Classes without a literal walk
+  sprite (BUG CATCHER, LASS, …) resolve through the class→sprite pairing the
+  engine's own map objects establish, with a generic fallback — the foe edge
+  is never empty. Battle callouts now shout "PIKACHU!" / "THUNDERBOLT!"
+  instead of a flat "used" line.
 - **Custom characters render legibly on the arena.** The mod's own walk
   sheets carried export residue outside the 4 DMG shades, collapsing most
   pixels into the darkest palette bin — NIRE read as a black blob. Sheets are

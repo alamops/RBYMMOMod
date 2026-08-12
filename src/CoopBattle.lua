@@ -4508,7 +4508,83 @@ local function ownerLookId(ownerId, selfId)
   return nil
 end
 
--- OPP_YOUNGSTER → SPRITE_YOUNGSTER when the catalog has a walk sheet.
+-- ------- trainer class → overworld walk sheet
+--
+-- There is no class→sprite field anywhere in engine data. A trainer record
+-- (`data.trainers`) carries the battle front pic, the parties and the prize
+-- money, and says nothing about the overworld; the walk sheet is chosen per
+-- **map object**, where `data.maps[*].objects[*]` pairs a `sprite` with the
+-- `trainerClass` that object fights as. That is still a real mapping, just an
+-- indirect one -- so it is read out of the data rather than hand-written here:
+-- every object naming a class votes for the sheet it is drawn with, and the
+-- class takes the sheet with the most votes.
+--
+-- Which is what the name transform below cannot do on its own. Red has no
+-- SPRITE_LASS and no SPRITE_BUG_CATCHER -- those classes walk around as
+-- SPRITE_COOLTRAINER_F and SPRITE_YOUNGSTER -- so `OPP_BUG_CATCHER` resolved to
+-- nothing, `battlefieldFoeHumans` returned an empty list, and a coop_npc fight
+-- announced "BUG CATCHER wants to fight!" over an empty right-hand edge.
+--
+-- Ties break on id order so two clients never disagree about a class, and the
+-- whole walk is memoised against the maps table it was built from: one pass
+-- over ~250 maps per boot, and none at all once a battle is running.
+local trainerSpriteVotes = nil
+local trainerSpriteVotesFrom = nil
+
+local function trainerSpritesByClass(data)
+  local maps = type(data) == "table" and data.maps or nil
+  if type(maps) ~= "table" then return nil end
+  if trainerSpriteVotesFrom == maps then return trainerSpriteVotes end
+
+  local votes = {}
+  local ok = pcall(function()
+    for _, map in pairs(maps) do
+      if type(map) == "table" and type(map.objects) == "table" then
+        for _, obj in pairs(map.objects) do
+          if type(obj) == "table" then
+            local class, sprite = obj.trainerClass, obj.sprite
+            if type(class) == "string" and class ~= ""
+               and type(sprite) == "string" and sprite ~= "" then
+              local bucket = votes[class]
+              if not bucket then
+                bucket = {}
+                votes[class] = bucket
+              end
+              bucket[sprite] = (bucket[sprite] or 0) + 1
+            end
+          end
+        end
+      end
+    end
+  end)
+  if not ok then return nil end
+
+  local out = {}
+  for class, bucket in pairs(votes) do
+    local best, bestN = nil, -1
+    for sprite, n in pairs(bucket) do
+      if n > bestN or (n == bestN and (best == nil or sprite < best)) then
+        best, bestN = sprite, n
+      end
+    end
+    out[class] = best
+  end
+  trainerSpriteVotes = out
+  trainerSpriteVotesFrom = maps
+  return out
+end
+
+-- Last resort, best first: a class nobody walks around as on any map (the
+-- unused ones, and anything a mod adds without an overworld object) still gets
+-- a body on the field rather than an empty foe edge. Probed against the
+-- catalog, so a build without one of these falls to the next.
+local GENERIC_TRAINER_SPRITES = {
+  "SPRITE_COOLTRAINER_M", "SPRITE_YOUNGSTER", "SPRITE_GENTLEMAN",
+}
+
+-- OPP_YOUNGSTER → SPRITE_YOUNGSTER when the catalog has a walk sheet; the
+-- overworld's own answer for the classes it does not (OPP_LASS,
+-- OPP_BUG_CATCHER, …); a generic trainer after that.
 local function trainerWalkSpriteId(trainer, game)
   if type(trainer) ~= "table" then return nil end
   local id = trainer.id or trainer.sprite or trainer.spriteId
@@ -4519,13 +4595,24 @@ local function trainerWalkSpriteId(trainer, game)
   elseif not spriteId:match("^SPRITE_") then
     spriteId = "SPRITE_" .. spriteId
   end
-  local sprites = game and game.data and game.data.sprites
+  local data = game and game.data
+  local sprites = data and data.sprites
   if type(sprites) == "table" and type(sprites[spriteId]) == "table" then
     return spriteId
   end
   -- Soft: accept the id even if we cannot prove the sheet exists here;
   -- Battlefield.resolveHumanSheet will silhouette if load fails.
   if sprites == nil then return spriteId end
+  if type(sprites) ~= "table" then return nil end
+
+  local byClass = trainerSpritesByClass(data)
+  local mapped = byClass and byClass[id] or nil
+  if type(mapped) == "string" and type(sprites[mapped]) == "table" then
+    return mapped
+  end
+  for _, generic in ipairs(GENERIC_TRAINER_SPRITES) do
+    if type(sprites[generic]) == "table" then return generic end
+  end
   return nil
 end
 
@@ -4700,13 +4787,20 @@ function M:battlefieldFoeHumans()
   local npcShape = mode == "coop_npc"
     or (mode == nil and self.trainer and not self:partyBattle())
   if npcShape then
-    local spriteId = trainerWalkSpriteId(self.trainer, self.game)
-    if not spriteId then return {} end
+    -- The trainer is on the field whether or not we can name their walk sheet,
+    -- so the entry is unconditional now: this used to bail on a nil spriteId,
+    -- which is exactly what emptied the foe edge of every BUG CATCHER / LASS
+    -- fight. `trainerWalkSpriteId` almost always answers (name transform →
+    -- overworld vote → generic); on the rare nil, Battlefield draws the
+    -- silhouette, which is still a trainer standing there.
+    --
+    -- One entry, and never a player's: this branch is the NPC shape, so the
+    -- foe seats are ownerless by construction and no seat walk runs here.
     return {
       {
         id = self.trainer and self.trainer.id,
         name = (self.trainer and self.trainer.name) or self:trainerIntroName(),
-        spriteId = spriteId,
+        spriteId = trainerWalkSpriteId(self.trainer, self.game),
       },
     }
   end
@@ -4751,6 +4845,20 @@ function M:battlefieldHumanIndex(slotIndex)
   return nil, nil
 end
 
+-- The acting monster's display name, spelled exactly as the plates spell it
+-- (`battlefieldSeats` uses the same fallback chain) so the callout and the seat
+-- under it never disagree. Soft: a stale slot index is a bubble without a name
+-- line, never a throw out of a message pump.
+local function actingMonName(self, slotIndex)
+  if type(slotIndex) ~= "number" then return nil end
+  local ok, battler = pcall(self.shownBattlerAt, self, slotIndex)
+  if not ok or not battler then return nil end
+  local mon = battler.mon or {}
+  local name = battler.name or mon.nickname or mon.species
+  if type(name) == "string" and name ~= "" then return name end
+  return nil
+end
+
 function M:noteBattlefieldBubble(slotIndex, text, moveName)
   if not self:usesBattlefield() then return end
   local move = moveNameFromBattleText(text)
@@ -4770,7 +4878,12 @@ function M:noteBattlefieldBubble(slotIndex, text, moveName)
     {
       side = side,
       humanIndex = humanIndex,
-      -- The lead-in, small; the move is the line the renderer emphasises.
+      -- R3 item 5: line one is the monster, line two the move -- "PIKACHU!"
+      -- over "THUNDERBOLT!". The emitter supplies the two words and the
+      -- renderer owns the shouting; `text` stays as the lead-in it always was
+      -- for the case where the actor cannot be named, which is the only way
+      -- the old sentence still prints.
+      name = actingMonName(self, slotIndex),
       text = "used",
       moveName = move,
       born = battlefieldFrame(self),
@@ -4792,6 +4905,9 @@ function M:battlefieldBubbleCtx()
         side = b.side,
         humanIndex = b.humanIndex,
         text = b.text,
+        -- Optional acting-mon name: when present it takes the top line and the
+        -- lead-in text is not printed at all (Battlefield.bubbleLines).
+        name = b.name,
         -- Optional, and only on a move callout: the renderer gives it its own
         -- larger line under the lead-in.
         moveName = b.moveName,

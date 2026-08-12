@@ -11859,6 +11859,173 @@ end)()
   end
 end)()
 
+-- ------- Gen1 Battlefield round 3: placeHumans centering, placeMons 2-count
+-- spread, M.bubbleLines shout format
+--
+-- Owner playtest, three findings: (1) the second ally human of a coop side
+-- rendered *above* the arena -- placeHumans' old band ran FIELD_TOP+28 ..
+-- FIELD_BOTTOM-36, so two-up's first seat sat at y=28, deep in the top
+-- letterbox once the modern chrome shrank the usable field. Humans now stack
+-- symmetrically about the field's own vertical centre. (2) 2-mon sides hugged
+-- the edges -- seat 1 half off the arena border, seat 2 crowding the midline
+-- -- pulled into MON_PAIR_NEAR/FAR fractions of WIDTH instead. (3) the bubble
+-- format lost "used" for a shouted two-line callout ("PIKACHU!" over
+-- "THUNDERBOLT!"), factored out as `M.bubbleLines` so it is assertable with
+-- no love/scale/t machinery in the way.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- round 3 layout tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+
+  -- ------- placeHumans: vertical centering, and the old above-arena bug pinned
+  do
+    local function humansLayout(n)
+      local humans = {}
+      for i = 1, n do humans[i] = { id = "h" .. i, name = "H" .. i } end
+      return Battlefield.layout({ mode = "coop_npc", allyHumans = humans, foeHumans = {} })
+    end
+
+    local one = humansLayout(1)
+    eq(#one.humans, 1, "one human placed")
+    eq(one.humans[1].y, 140, "a lone trainer sits on the field's own vertical centre")
+
+    local two = humansLayout(2)
+    eq(#two.humans, 2, "two humans placed")
+    local ys = { two.humans[1].y, two.humans[2].y }
+    table.sort(ys)
+    eq(ys[1], 118, "two-up stack: the higher seat centres at 118")
+    eq(ys[2], 162, "...the lower seat centres at 162")
+    -- The old band put two-up's first seat at y=28 -- the recurring
+    -- "letterbox sprite" complaint. Pin that the fix left that value far
+    -- behind, not merely nudged off it.
+    check(ys[1] > 28 + 50,
+      "two-up's minimum seat y-centre clears the old bug's y=28 by a wide margin",
+      "new min y-center=" .. tostring(ys[1]))
+
+    for _, n in ipairs({ 2, 3, 4, 5 }) do
+      local layout = humansLayout(n)
+      eq(#layout.humans, n, n .. " humans placed")
+      for _, h in ipairs(layout.humans) do
+        local top = h.y - h.drawH / 2
+        local bottom = h.y + h.drawH / 2
+        check(top >= Battlefield.FIELD_TOP and bottom <= Battlefield.FIELD_BOTTOM,
+          n .. "-up: seat " .. h.index .. "'s sprite box stays fully inside the field",
+          ("top=%.1f bottom=%.1f field=%d..%d"):format(
+            top, bottom, Battlefield.FIELD_TOP, Battlefield.FIELD_BOTTOM))
+      end
+    end
+  end
+
+  -- ------- placeMons: the 2-count pair spread, and the untouched 1/3-count lerp
+  do
+    local function monsLayout(n)
+      local seats = {}
+      for i = 1, n do seats[i] = { index = i, name = "M" .. i } end
+      return Battlefield.layout({ mode = "coop_npc", allySeats = seats, foeSeats = seats })
+    end
+
+    -- MON_PAIR_NEAR/FAR are 0.18/0.34 of WIDTH off each side's own outer edge,
+    -- mirrored for the foe half (src/Battlefield.lua placeMons).
+    local near = math.floor(Battlefield.WIDTH * 0.18)
+    local far = math.floor(Battlefield.WIDTH * 0.34)
+
+    local two = monsLayout(2)
+    local allyMons, foeMons = {}, {}
+    for _, m in ipairs(two.mons) do
+      if m.side == "ally" then allyMons[m.index] = m
+      else foeMons[m.index] = m end
+    end
+    eq(allyMons[1].x, near, "ally seat 1 sits MON_PAIR_NEAR off the left edge")
+    eq(allyMons[2].x, far, "ally seat 2 sits MON_PAIR_FAR off the left edge")
+    eq(foeMons[1].x, Battlefield.WIDTH - near,
+       "foe seat 1 mirrors MON_PAIR_NEAR off the right edge")
+    eq(foeMons[2].x, Battlefield.WIDTH - far,
+       "foe seat 2 mirrors MON_PAIR_FAR off the right edge")
+
+    local halfBox = Battlefield.MON_DRAW / 2
+    for _, m in ipairs(two.mons) do
+      check(m.x - halfBox >= 0 and m.x + halfBox <= Battlefield.WIDTH,
+        "2-spread: " .. m.side .. " seat " .. m.index .. " box stays on-canvas",
+        "x=" .. tostring(m.x))
+      -- monDrawParams anchors near the feet (front pic reaches up) and the
+      -- contact shadow reaches down; placeMons clamps against both reaches
+      -- plus the idle-bob margin, so seat+shadow never leaves the field.
+      check(m.y >= Battlefield.FIELD_TOP and m.y <= Battlefield.FIELD_BOTTOM,
+        "2-spread: " .. m.side .. " seat " .. m.index .. " centre stays inside the field",
+        "y=" .. tostring(m.y))
+      if m.side == "ally" then
+        check(m.x < two.midline, "ally seat " .. m.index .. " stays on its own side")
+      else
+        check(m.x > two.midline, "foe seat " .. m.index .. " stays on its own side")
+      end
+    end
+
+    -- 1-count and 3-count are untouched by the R3 spread change -- still the
+    -- old even lerp across [left, right]. Pin one 3-count case byte-for-byte.
+    local one = monsLayout(1)
+    eq(one.mons[1].x, 184, "one ally mon still centres on the old lerp (t=0.5)")
+    eq(one.mons[1].y, 140, "...on the field's vertical centre")
+
+    local three = monsLayout(3)
+    local allyThree = {}
+    for _, m in ipairs(three.mons) do
+      if m.side == "ally" then allyThree[m.index] = m end
+    end
+    eq(allyThree[1].x, 108, "3-count seat 1 x is the untouched lerp")
+    eq(allyThree[2].x, 184, "3-count seat 2 x is the untouched lerp")
+    eq(allyThree[3].x, 260, "3-count seat 3 x is the untouched lerp")
+    eq(allyThree[1].y, 121, "3-count seat 1 y is the untouched zigzag")
+    eq(allyThree[2].y, 159, "3-count seat 2 y is the untouched zigzag")
+    eq(allyThree[3].y, 121, "3-count seat 3 y is the untouched zigzag")
+  end
+
+  -- ------- M.bubbleLines: the shout format
+  do
+    local line, move = Battlefield.bubbleLines({ name = "Pikachu", moveName = "Thunderbolt" })
+    eq(line, "PIKACHU!", "the acting mon's name is shouted, all caps + bang")
+    eq(move, "THUNDERBOLT!", "...and so is the move")
+
+    local already, noMove = Battlefield.bubbleLines({ name = "Who?" })
+    eq(already, "WHO?", "an already-punctuated name is upper-cased in place")
+    check(not already:find("?!", 1, true) and not already:find("!?", 1, true),
+      "...and never doubles the punctuation")
+    eq(noMove, nil, "no moveName means no second line")
+
+    local legacyLine, legacyMove =
+      Battlefield.bubbleLines({ text = "ANN used", moveName = "TACKLE" })
+    eq(legacyLine, "ANN used",
+       "a legacy caller's own text line renders verbatim when there is no name field")
+    eq(legacyMove, "TACKLE!", "...but the move line is still shouted")
+
+    local emptyLine, emptyMove = Battlefield.bubbleLines({})
+    eq(emptyLine, "", "an empty bubble table renders an empty line")
+    eq(emptyMove, nil, "...and no move line")
+  end
+
+  -- ------- layout() carries `name` through bubbles
+  do
+    local ally = { { id = "ann", name = "ANN" } }
+    local withName = Battlefield.layout({
+      mode = "coop_npc",
+      allyHumans = ally,
+      bubbles = {{ side = "ally", text = "used", name = "PIKACHU", moveName = "THUNDERBOLT" }},
+    })
+    eq(withName.bubbles[1].name, "PIKACHU",
+       "layout carries the bubble's name field through untouched")
+
+    local withoutName = Battlefield.layout({
+      mode = "coop_npc",
+      allyHumans = ally,
+      bubbles = {{ side = "ally", text = "ANN used", moveName = "TACKLE" }},
+    })
+    eq(withoutName.bubbles[1].name, nil,
+       "...and stays nil for a legacy bubble that never set one")
+  end
+end)()
+
 -- ------- the command band, four across (battlefield)
 --
 -- The modern band lays the same four commands out in one row whenever it has
@@ -15327,6 +15494,36 @@ end)()
   eq(f.battlefieldBubbles[1].text, "used", "...still the short lead-in")
 end)()
 
+-- ------- MediatedBattle round 3: the bubble carries the acting mon's name
+--
+-- `noteBattlefieldBubble` now reads `battlefieldSeatName` off the acting
+-- slot -- exactly the field the seat plate shows, so a bubble and the plate
+-- under it never disagree about which mon acted. Slots are keyed the same
+-- way `slotOfSide` keys them: 0 for side "a", 2 for side "b".
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-bubble-name", role = "host" })
+  f.slots = { [0] = { species = "PIKACHU" }, [2] = { species = "EEVEE" } }
+
+  f:noteBattlefieldBubble({ anim = "FIX_BOOST", side = "a" })
+  eq(f.battlefieldBubbles[1].name, "PIKACHU",
+     "an ally move bubble names the acting mon off the ally slot")
+
+  f:noteBattlefieldBubble({ anim = "FIX_BOOST", side = "b" })
+  eq(f.battlefieldBubbles[1].name, "EEVEE",
+     "...and a foe move bubble names the foe slot")
+
+  -- pruneBattlefieldBubbles rebuilds the list every frame (it is what ages
+  -- bubbles out); the name must survive that rebuild, not just the first
+  -- write.
+  f.frame = 1
+  f:pruneBattlefieldBubbles()
+  check(f.battlefieldBubbles ~= nil, "the bubble is still alive one frame later")
+  eq(f.battlefieldBubbles[1].name, "EEVEE", "...and prune/rebuild kept its name")
+end)()
+
 -- ------- MediatedBattle wave 2 (round 2): the ball-flow fx chain
 --
 -- Wire order per throw (R2 findings): item(ball) -> HIDEPIC -> TOSS ->
@@ -16576,6 +16773,111 @@ end)()
     end
     check(not sawFlash2 and not sawShake2,
           "a heal-shaped climb emits neither -- nothing was struck")
+  end
+end)()
+
+-- ------- CoopBattle round 3: the foe-side NPC human, and the bubble name
+--
+-- Item 4 of the owner playtest: `battlefieldFoeHumans` used to bail on a nil
+-- spriteId, which is exactly what happened for every trainer class with no
+-- direct SPRITE_ transform (OPP_LASS, OPP_BUG_CATCHER, ...) -- the coop_npc
+-- fight announced the trainer and then drew nobody on the right. The entry
+-- is unconditional now: `trainerWalkSpriteId` resolves through the
+-- class->sprite vote read off `data.maps[*].objects[*]`, falling back to a
+-- generic trainer sprite probed against the catalog when no map object votes
+-- for the class. This suite's fixtures carry no `data.maps`, so the vote
+-- table is always empty here -- every coop_npc case below exercises the
+-- generic-fallback leg (data-dependent map voting is out of reach without a
+-- real map set, so it is not pinned to a specific id).
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local function move() return { id = "FIX_TACKLE", pp = 20 } end
+  local genericSprites = {
+    SPRITE_COOLTRAINER_M = {}, SPRITE_YOUNGSTER = {}, SPRITE_GENTLEMAN = {},
+  }
+
+  -- coop_npc: exactly one foe human, and its spriteId is never nil -- it
+  -- names a sheet the catalog actually carries (the generic-fallback path,
+  -- since these fixtures have no data.maps to vote a class sheet).
+  do
+    local client = setmetatable({
+      mode = "coop_npc",
+      trainer = { id = "OPP_BUG_CATCHER", name = "BUG CATCHER" },
+      game = { data = { sprites = genericSprites } },
+    }, { __index = CoopBattle })
+    local foes = client:battlefieldFoeHumans()
+    eq(#foes, 1, "coop_npc places exactly one foe human")
+    check(foes[1].spriteId ~= nil,
+      "the foe human's spriteId is never nil -- the fix for the empty foe edge")
+    check(genericSprites[foes[1].spriteId] ~= nil,
+      "...and it names a sheet the catalog actually carries (generic-fallback, "
+      .. "catalog-probed rather than hardcoded)",
+      "spriteId=" .. tostring(foes[1].spriteId))
+  end
+
+  -- coop_wild: the wild mon has no trainer, so no foe humans at all.
+  do
+    local client = setmetatable({
+      mode = "coop_wild",
+      trainer = { id = "OPP_BUG_CATCHER", name = "BUG CATCHER" },
+      game = { data = { sprites = genericSprites } },
+    }, { __index = CoopBattle })
+    eq(#client:battlefieldFoeHumans(), 0, "coop_wild never places a foe human")
+  end
+
+  -- coop_pvp: foe humans come from owned foe-side seats, never the NPC
+  -- branch -- with nobody owning the foe seat here, zero.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { move() }) } },
+    })
+    local client = setmetatable({
+      mode = "coop_pvp", sim = sim, mine = 1,
+      game = { data = { sprites = genericSprites } },
+    }, { __index = CoopBattle })
+    eq(#client:battlefieldFoeHumans(), 0,
+       "coop_pvp draws foe humans from owned seats -- none owned here, so zero")
+  end
+
+  -- The coop move bubble's `name` agrees with the plate's own name source:
+  -- both `actingMonName` and `battlefieldSeats` read
+  -- `battler.name or mon.nickname or mon.species` off the same
+  -- shownBattlerAt(slot) battler, so a callout and the seat under it can
+  -- never disagree about which mon acted.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { move() }) } },
+    })
+    local client = setmetatable({
+      sim = sim, mine = 1, frame = 0,
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+    local allySeats = client:battlefieldSeats(false)
+    local plateName
+    for _, s in ipairs(allySeats) do
+      if s.index == 1 then plateName = s.name end
+    end
+    check(plateName ~= nil, "the ally plate carries a name for slot 1")
+
+    -- TOSS_ANIM stays excluded on this path too -- round 3 did not touch it.
+    -- Checked first, on a client with no bubble yet: the marker's early
+    -- return leaves `battlefieldBubbles` exactly as it found it, so this
+    -- would false-pass against a bubble a prior call had already set.
+    client:noteBattlefieldBubble(1, "TOSS_ANIM")
+    eq(client.battlefieldBubbles, nil,
+       "TOSS_ANIM is still excluded from the bubble path")
+
+    client:noteBattlefieldBubble(1, "used\nFIX BOOST!", "FIX BOOST")
+    check(client.battlefieldBubbles ~= nil, "a real move produces a bubble")
+    eq(client.battlefieldBubbles[1].name, plateName,
+       "the bubble names the acting mon the same way the plate under it does")
   end
 end)()
 

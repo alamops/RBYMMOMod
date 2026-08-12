@@ -278,3 +278,32 @@ modern on the battlefield path; classic 160×144 and Gen2 keep GB chrome untouch
 
 Assumptions: R2-A1 dark HUD (above); R2-A2 mon box 60px ("a bit" smaller); R2-A3 no version
 bump this branch; R2-A4 recall visual added for chronology completeness (HIDEPIC row).
+
+---
+
+# Round 3 — owner playtest feedback (2026-08-12)
+
+Live-play findings from the owner, with root causes established:
+
+1. **NIRE faces the wrong way (owner-diagnosed, pixel-confirmed).** The nire/nire_hood
+   walk sheets were authored MIRRORED vs engine convention: the stand-left slot (frame 2)
+   contained a right-facing pose (RED's faces left). Fixed at the asset level — frames 2
+   (stand-left) and 5 (walk-left) flipped horizontally in both sheets; overworld facing
+   fixed too. Round-1 scout's "visually confirmed left-facing" was wrong.
+2. **Second ally human renders above the arena** — the recurring "letterbox sprite" in
+   every coop shot was placeHumans' multi-human band placing seat 2 outside the field.
+   Fix: humans vertically centered on the field, stacked seats inside it (owner also
+   asked for trainers "more on vertical center" generally).
+3. **2-mon sides hug the edges** — seat 1 sits half-clipped at the arena border while
+   seat 2 crowds the midline. Fix: pull the pair into their half (roughly 0.18/0.34
+   width fractions, mirrored), keep the y stagger, everything fully inside the field.
+4. **coop_npc shows no foe trainer** — the NPC fight renders an empty right side.
+   Fix in CoopBattle: place a foe-side human for the NPC trainer (sprite resolved from
+   trainer class where a mapping exists; generic trainer sprite fallback).
+5. **Bubble format** — owner wants "PIKACHU!" / "THUNDERBOLT!": line 1 is the acting
+   mon's display name, line 2 the emphasized move, both with exclamation marks; "used"
+   dropped. Emitters pass `name`; renderer owns punctuation.
+
+Wave E: E1 Battlefield (2+3+5 renderer), E2 CoopBattle (4 + name emission), E3
+MediatedBattle (name emission) — disjoint; then E4 tests/driver; verify suite + driver
++ full e2e (display available).

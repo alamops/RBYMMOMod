@@ -1308,6 +1308,9 @@ function M:pruneBattlefieldBubbles()
           text = b.text,
           -- Optional, and only on a move callout: the renderer emphasises it.
           moveName = b.moveName,
+          -- The acting mon's display name, carried like `moveName` so a
+          -- rebuilt bubble keeps the line the renderer draws above the move.
+          name = b.name,
           t = t,
           born = born,
         }
@@ -1344,6 +1347,7 @@ function M:noteBattlefieldBubble(row)
       humanIndex = 1,
       text = "used",
       moveName = moveName,
+      name = self:battlefieldSeatName(row.slot or self:foeSlot()),
       born = self.frame or 0,
     }}
     return
@@ -1353,8 +1357,22 @@ function M:noteBattlefieldBubble(row)
     humanIndex = 1,
     text = "used",
     moveName = moveName,
+    name = self:battlefieldSeatName(row.slot or self:mySlot()),
     born = self.frame or 0,
   }}
+end
+
+-- The acting mon's display name for a field slot: exactly the string the seat
+-- plate shows, because it is the same field `battlefieldSeat` puts in `name`
+-- (the slot's wire species label, which plateModel then truncates). Reading
+-- the slot rather than re-deriving it is what keeps a bubble and the plate
+-- under it from ever naming two different mons. nil when the slot is gone, and
+-- a bubble with no `name` renders as it always did.
+function M:battlefieldSeatName(slotIndex)
+  local slot = slotIndex and self.slots and self.slots[slotIndex]
+  local name = slot and slot.species
+  if type(name) == "string" and name ~= "" then return name end
+  return nil
 end
 
 -- A move's display name, CoopBattle's lookup: the registry name when the build

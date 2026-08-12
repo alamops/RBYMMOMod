@@ -534,6 +534,12 @@ return function(game)
     check(bubbleLayout.bubbles[1].moveName ~= nil,
       "bubble: carries a moveName for the renderer to emphasise",
       "moveName=" .. tostring(bubbleLayout.bubbles[1].moveName))
+    -- R3: the top line is the acting mon's own name ("PIKACHU!"), read off
+    -- the slot noteBattlefieldBubble was told acted (screen.slots[mySlot()]
+    -- is seeded PIKACHU above) -- not just the "used"/moveName pair.
+    check(bubbleLayout.bubbles[1].name ~= nil,
+      "bubble: carries the acting mon's name for the renderer's top line",
+      "name=" .. tostring(bubbleLayout.bubbles[1].name))
   end
   local path5 = SHOT_DIR .. "/battlefield-bubble.png"
   if U.shot(game, path5) then
