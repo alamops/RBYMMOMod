@@ -23,10 +23,14 @@ M.FIELD_BOTTOM = M.HEIGHT - M.MENU_BAND
 M.FIELD_HEIGHT = M.FIELD_BOTTOM - M.FIELD_TOP
 M.MIDLINE = math.floor(M.WIDTH / 2)
 
--- Bag icons are 16×16; draw at 2× on the wide canvas.
+-- Field mons use battle FRONT pics (aspect-preserved inside this box).
+-- Bag-icon sheets are 16×N and look smashed if forced into a square — do not
+-- use them as the primary field art.
+M.MON_DRAW = 72
+-- Legacy alias kept for older layout asserts / callers.
 M.ICON_SRC = 16
 M.ICON_SCALE = 2
-M.ICON_DRAW = M.ICON_SRC * M.ICON_SCALE
+M.ICON_DRAW = M.MON_DRAW
 
 -- Floating target card: room for name, Lxx, HP, status, ~56px front pic.
 M.CARD_W = 120
@@ -41,6 +45,13 @@ local arenaImage = nil
 local arenaTried = false
 local humanCache = {} -- spriteId -> { image, quads } | false
 local iconCache = {} -- path string -> Image | false
+local quadCache = {} -- image -> 16x16 frame-0 quad
+
+-- Force a fresh arena load (e.g. after replacing outdoor_grass_arena.png).
+function M.reloadArena()
+  arenaImage = nil
+  arenaTried = false
+end
 
 local function clamp(v, lo, hi)
   if v < lo then return lo end
@@ -217,17 +228,17 @@ local function placeMons(seats, side, out)
   local count = #seats
   if count == 0 then return end
 
-  local halfPad = 36
+  local halfPad = 52
   local left, right
   if side == "ally" then
-    left = halfPad + 48
-    right = M.MIDLINE - halfPad
+    left = halfPad + 56
+    right = M.MIDLINE - halfPad - 8
   else
-    left = M.MIDLINE + halfPad
-    right = M.WIDTH - halfPad - 48
+    left = M.MIDLINE + halfPad + 8
+    right = M.WIDTH - halfPad - 56
   end
-  local midY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.52)
-  local rowSpread = math.min(48, math.floor(M.FIELD_HEIGHT * 0.18))
+  local midY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.50)
+  local rowSpread = math.min(56, math.floor(M.FIELD_HEIGHT * 0.20))
 
   for i, seat in ipairs(seats) do
     local t = count == 1 and 0.5 or ((i - 1) / (count - 1))
@@ -259,8 +270,8 @@ local function placeMons(seats, side, out)
       x = x,
       y = midY + yOff,
       facing = facing,
-      drawW = M.ICON_DRAW,
-      drawH = M.ICON_DRAW,
+      drawW = M.MON_DRAW,
+      drawH = M.MON_DRAW,
     }
   end
 end
@@ -546,9 +557,57 @@ local function drawDrawableIcon(gfx, icon, x, y, dest)
   if icon.getDimensions then
     iw, ih = icon:getDimensions()
   end
-  local sx = dest / math.max(iw, 1)
-  local sy = dest / math.max(ih, 1)
-  gfx.draw(icon, x - dest / 2, y - dest / 2, 0, sx, sy)
+  -- Uniform scale — never stretch non-square sheets into a square.
+  local sc = math.min(dest / math.max(iw, 1), dest / math.max(ih, 1))
+  local dw, dh = iw * sc, ih * sc
+  gfx.draw(icon, x - dw / 2, y - dh / 2, 0, sc, sc)
+end
+
+-- Party-menu icon sheets are often 16×32 (two frames). Crop frame 0.
+local function iconFrameQuad(img)
+  if not (img and img.getDimensions and love and love.graphics and love.graphics.newQuad) then
+    return nil
+  end
+  local hit = quadCache[img]
+  if hit ~= nil then return hit or nil end
+  local iw, ih = img:getDimensions()
+  local quad = nil
+  if ih > 16 and iw >= 16 then
+    local ok, q = pcall(love.graphics.newQuad, 0, 0, 16, 16, iw, ih)
+    if ok then quad = q end
+  end
+  quadCache[img] = quad or false
+  return quad
+end
+
+local function resolveDrawable(sprite)
+  if sprite == nil then return nil, nil end
+  if type(sprite) == "userdata" or (type(sprite) == "table" and sprite.typeOf) then
+    return sprite, nil
+  end
+  if type(sprite) == "string" and love and love.graphics and love.graphics.newImage then
+    local hit = iconCache[sprite]
+    if hit == nil then
+      local ok, img = pcall(love.graphics.newImage, sprite)
+      hit = (ok and img) and img or false
+      if hit and hit.setFilter then
+        pcall(function() hit:setFilter("nearest", "nearest") end)
+      end
+      iconCache[sprite] = hit
+    end
+    return hit or nil, nil
+  end
+  return nil, nil
+end
+
+local function drawMonShadow(gfx, x, y, w)
+  pcall(function()
+    local rw = math.max(14, w * 0.42)
+    local rh = math.max(5, w * 0.14)
+    gfx.setColor(0, 0, 0, 0.35)
+    gfx.ellipse("fill", x, y + 2, rw, rh)
+    gfx.setColor(1, 1, 1, 1)
+  end)
 end
 
 local function drawMonIcon(mon, frame)
@@ -557,28 +616,43 @@ local function drawMonIcon(mon, frame)
   local bob = iconBob(frame, mon.acting)
   local x = mon.x
   local y = mon.y + bob
-  local w = mon.drawW or M.ICON_DRAW
-  local h = mon.drawH or M.ICON_DRAW
-  local icon = mon.icon
+  local box = mon.drawW or M.MON_DRAW
+
+  -- Prefer battle FRONT art; bag icons are a last resort (and must be cropped).
+  local img = resolveDrawable(mon.front)
+  local fromIcon = false
+  if not img then
+    img = resolveDrawable(mon.icon)
+    fromIcon = img ~= nil
+  end
+
+  drawMonShadow(gfx, x, y + box * 0.28, box)
 
   local drawn = false
-  if icon ~= nil then
+  if img then
     pcall(function()
       gfx.setColor(1, 1, 1, 1)
-      if type(icon) == "userdata" or (type(icon) == "table" and icon.typeOf) then
-        drawDrawableIcon(gfx, icon, x, y, w)
+      if img.setFilter then pcall(function() img:setFilter("nearest", "nearest") end) end
+      local iw, ih = img:getDimensions()
+      local quad = fromIcon and iconFrameQuad(img) or nil
+      if quad then
+        -- 16×16 menu frame, integer scale for crisp pixels.
+        local sc = math.max(2, math.floor(box / 16))
+        local dw = 16 * sc
+        gfx.draw(img, quad, x - dw / 2, y - dw / 2, 0, sc, sc)
         drawn = true
-      elseif type(icon) == "string" and love.graphics.newImage then
-        local hit = iconCache[icon]
-        if hit == nil then
-          local ok, img = pcall(love.graphics.newImage, icon)
-          hit = (ok and img) and img or false
-          iconCache[icon] = hit
+      else
+        -- Aspect-correct fit inside the mon box (no smash / stretch).
+        local sc = math.min(box / math.max(iw, 1), box / math.max(ih, 1))
+        -- Prefer integer-ish scale when close, for GB sprite crispness.
+        if sc >= 1 then
+          local rounded = math.floor(sc + 0.15)
+          if rounded >= 1 and math.abs(sc - rounded) < 0.2 then sc = rounded end
         end
-        if hit then
-          drawDrawableIcon(gfx, hit, x, y, w)
-          drawn = true
-        end
+        local dw, dh = iw * sc, ih * sc
+        -- Anchor near feet so bob reads as a hop on the grass.
+        gfx.draw(img, x - dw / 2, y - dh * 0.85, 0, sc, sc)
+        drawn = true
       end
     end)
   end
@@ -586,9 +660,9 @@ local function drawMonIcon(mon, frame)
 
   pcall(function()
     gfx.setColor(0.95, 0.85, 0.2, 0.9)
-    gfx.rectangle("fill", x - w / 2, y - h / 2, w, h, 2, 2)
+    gfx.rectangle("fill", x - box / 2, y - box / 2, box, box, 2, 2)
     gfx.setColor(0.2, 0.15, 0.05, 1)
-    gfx.rectangle("line", x - w / 2, y - h / 2, w, h, 2, 2)
+    gfx.rectangle("line", x - box / 2, y - box / 2, box, box, 2, 2)
     gfx.setColor(1, 1, 1, 1)
   end)
 end
@@ -713,6 +787,15 @@ local function drawArena()
       local sx = M.WIDTH / math.max(iw, 1)
       local sy = M.HEIGHT / math.max(ih, 1)
       gfx.draw(img, 0, 0, 0, sx, sy)
+    end)
+    -- Soft grass plate so battle fronts read on the colorful arena.
+    pcall(function()
+      local gfx = love and love.graphics
+      if not gfx then return end
+      gfx.setColor(0.12, 0.22, 0.1, 0.22)
+      gfx.ellipse("fill", M.MIDLINE, M.FIELD_TOP + M.FIELD_HEIGHT * 0.55,
+        M.WIDTH * 0.38, M.FIELD_HEIGHT * 0.28)
+      gfx.setColor(1, 1, 1, 1)
     end)
     return
   end

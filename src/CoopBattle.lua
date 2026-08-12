@@ -4404,9 +4404,37 @@ local function trainerWalkSpriteId(trainer, game)
   return nil
 end
 
+-- Resolve a battle FRONT pic for the field (not the bag-icon sheet — those
+-- are 16×N and smash when stretched). Ally battlers hold backs in classic
+-- co-op; the arena wants the front for both sides. Cached on the sim slot.
+local function seatFrontFor(self, slot, battler)
+  if not battler then return nil end
+  local mon = battler.mon
+  local species = mon and mon.species
+  if slot and slot._bfFront ~= nil and slot._bfFrontSpecies == species then
+    local cached = slot._bfFront
+    return (cached ~= false) and cached or nil
+  end
+  local resolved = nil
+  local eng = engine
+  local data = self.game and self.game.data
+  local save = self.game and self.game.save
+  -- makeBattler(..., isPlayer=false) loads the species front with palette.
+  if eng and eng.BattleState and eng.BattleState.makeBattler and mon and data then
+    local ok, probe = pcall(eng.BattleState.makeBattler, data, mon, false, save)
+    if ok and probe and probe.sprite then resolved = probe.sprite end
+  end
+  -- Fall back to whatever the live battler already holds (may be a back).
+  if not resolved then resolved = battler.sprite end
+  if slot then
+    slot._bfFront = resolved or false
+    slot._bfFrontSpecies = species
+  end
+  return resolved
+end
+
 -- Resolve a party bag icon to a cached Image on the sim slot (once per
--- species). Paths every frame would re-hit newImage in Battlefield; store
--- userdata here so layout can draw without reloading.
+-- species). Only used as a last-resort field fallback / strip helper.
 local function seatIconFor(self, slot, battler)
   if not battler then return nil end
   local mon = battler.mon
@@ -4449,7 +4477,6 @@ local function seatIconFor(self, slot, battler)
       if ok and img then resolved = img end
     end
   end
-  if not resolved then resolved = battler.sprite end
   if slot then
     slot._bfIcon = resolved or false
     slot._bfIconSpecies = species
@@ -4460,6 +4487,7 @@ end
 function M:ensureBattlefieldLoaded()
   if self.battlefieldLoaded then return end
   self.battlefieldLoaded = true
+  pcall(Battlefield.reloadArena)
   pcall(Battlefield.load, mod)
 end
 
@@ -4483,7 +4511,7 @@ function M:battlefieldSeats(theirs)
           status = mon.status,
           species = mon.species,
           icon = seatIconFor(self, slot, battler),
-          front = battler.sprite,
+          front = seatFrontFor(self, slot, battler),
           acting = (self.acting == slot.index)
             or (self.anim and self.anim.from == slot.index) or false,
         }

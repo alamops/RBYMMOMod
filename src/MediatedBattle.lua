@@ -1031,6 +1031,7 @@ end
 function M:ensureBattlefield()
   if self.battlefieldLoaded then return end
   self.battlefieldLoaded = true
+  pcall(Battlefield.reloadArena)
   pcall(Battlefield.load, mod)
 end
 
@@ -1110,6 +1111,32 @@ function M:seatIcon(speciesKey, monHint)
   return nil
 end
 
+-- Battle FRONT pic for the arena (player slots hold backs in classic 1v1).
+function M:seatFront(speciesKey, monHint, slot)
+  if type(speciesKey) ~= "string" or speciesKey == "" then return nil end
+  if slot and slot._bfFront ~= nil and slot._bfFrontSpecies == speciesKey then
+    local cached = slot._bfFront
+    return (cached ~= false) and cached or nil
+  end
+  local resolved = nil
+  local eng = loadEngine()
+  local data = self.game and self.game.data
+  local save = self.game and self.game.save
+  local mon = monHint
+  if (not mon or not mon.species) and data then
+    mon = { species = speciesKey, level = (monHint and monHint.level) or 5 }
+  end
+  if eng and eng.BattleState and eng.BattleState.makeBattler and mon and data then
+    local ok, probe = pcall(eng.BattleState.makeBattler, data, mon, false, save)
+    if ok and probe and probe.sprite then resolved = probe.sprite end
+  end
+  if slot then
+    slot._bfFront = resolved or false
+    slot._bfFrontSpecies = speciesKey
+  end
+  return resolved
+end
+
 -- One Battlefield seat from a live field slot (player or foe active).
 function M:battlefieldSeat(slotIndex, isPlayer)
   local slot = self.slots[slotIndex]
@@ -1133,6 +1160,23 @@ function M:battlefieldSeat(slotIndex, isPlayer)
   elseif icon == false then
     icon = nil
   end
+  local frontMon = monHint
+  if not frontMon then
+    frontMon = {
+      species = key,
+      level = slot.level or 5,
+      hp = slot.hp,
+      maxHp = slot.maxHp,
+    }
+  elseif not frontMon.species then
+    frontMon = {
+      species = frontMon.speciesId or key,
+      level = frontMon.level or slot.level or 5,
+      hp = slot.hp,
+      maxHp = slot.maxHp,
+    }
+  end
+  local front = self:seatFront(key, frontMon, slot) or slot.sprite
   return {
     index = slotIndex,
     name = slot.species,
@@ -1142,7 +1186,7 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     status = slot.status,
     species = key,
     icon = icon,
-    front = slot.sprite,
+    front = front,
     acting = acting,
   }
 end
