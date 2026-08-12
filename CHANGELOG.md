@@ -8,6 +8,13 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **Gen 2 co-op / mediated battle theatre.** Quarkst battle music, victory
+  jingles, map restore, and hit/catch SFX now resolve through Gen 2
+  `BattleMusic` song labels and Gold SFX names (`Sfx_SuperEffective`,
+  `Sfx_BallWobble`, …) instead of Gen 1 `Music.playBattle(kind)` /
+  `data.audio.battle[kind]` (absent on Gold). Gen 2 trainer faces use
+  `enemyTrainerImage` as `trainerPic` for the theatrical intro. Gen 1 path
+  unchanged.
 - **Code-review must-fixes (gen2-compatibility).** Trade2 keeps `theirMail`
   aligned with `theirParty` when a non-strict unpack skips a mon; Hub↔relay
   `battleParty`/`cleanBattleParty` take hub generation (Effects twin, refuse
@@ -16,6 +23,42 @@ here must match `manifest.version`.
   Gen2 vitamin writeback uses BattleSim2/Effects only.
 
 ### Added
+
+- **Gen1 top-down battlefield theatre (CoopBattle + MediatedBattle 1v1).**
+  Hard-cut Gen1 presentation onto a 640×360 fill-scale arena
+  (`assets/battle/outdoor_grass_arena.png` — original authored field art,
+  not ROM-derived) via `src/Battlefield.lua`: humans on the sides (OW walk
+  sheets, facing inward), active mons as **battle front sprites** (aspect-
+  preserved; bag-icon sheets were stretching/smashing), field-cursor
+  targeting with arrow + floating status card (name / Lxx / HP / status /
+  front sprite), Pokémon bob + ground shadow, and trainer-head callout
+  bubbles when a human’s mon acts (not wild). Gen2 keeps the classic
+  guild-focus / 160×144 path until a later pass.
+- **PROTOCOL 20 — gen lock + co-op invite joiner finish.** `Config.PROTOCOL` /
+  `relay.js` bump **18 → 20** (both parallel branches had claimed 19). Client
+  `mmo.hello` carries `generation` (1|2); Hub.lua and the Node relay refuse a
+  mismatch after the protocol check (`This hub is for generation N; yours is
+  generation M.`). Optional `npcId` / `event` on `mmo.coop_wait` → offer →
+  battle carry the waiter's overworld trainer so a menu/invite joiner (no
+  buried `BattleState`) can mark that NPC beaten, take prize money, and run
+  `afterBattle` after a co-op win — without a solo rematch. Missing
+  `generation` defaults to 1; hub `opts.generation` defaults to 1 (Gen2 hubs
+  must set `generation: 2`). Gen1 behaviour unchanged when the hub stays on
+  generation 1.
+- **Co-op gym battle music via oppClass#partyIndex.** `CoopBattle.musicKind`
+  probes `computeMusicKind` with `oppClass` + `partyIndex` (from the buried
+  engine or PROTOCOL 20 npcId), so badge gym leaders (Brock, Misty, Giovanni
+  #3, …) get gym music — not only Lance / Rival3 via `trainer.id`.
+- **MediatedBattle battle / victory / map music.** 1v1 link fights and
+  protocol-only wild now call `Music.playBattle` on enter, `playVictory` once
+  on a win (including catch), and `restoreMap` on exit — same theatre
+  contract as CoopBattle (was silent on overworld music for the whole fight).
+- **Co-op / mediated attack SFX.** CoopBattle and MediatedBattle poll
+  `AnimPlayer` effects like solo `BattleState` (move whoosh / cry /
+  `SFX_TINK`) and play effectiveness hit thuds after the flash.
+- **Trainer foe theatrical intro on co-op NPC battles.** Appear line,
+  trainer face, foe ball row, and sequential foe send-outs before ally
+  `Go!` (wild / PvP unchanged).
 
 - **Wave 4 polish + dual-gen headless load.** `Places.name` resolves Gen 2
   landmarks via `data.gen2Landmarks` (no `data.field` crash); Overlay soft-
@@ -77,13 +120,6 @@ here must match `manifest.version`.
   run recipes are in `server/README.md`. (Server-list gen chip deferred —
   no row field carries generation yet.)
 
-- **PROTOCOL 19 — hub generation lock.** `Config.PROTOCOL` / `relay.js` bump
-  **18 → 19**. Client `mmo.hello` carries `generation` (1|2); Hub.lua and the
-  Node relay refuse a mismatch after the protocol check (`This hub is for
-  generation N; yours is generation M.`). Missing `generation` defaults to 1;
-  hub `opts.generation` defaults to 1 (Gen2 hubs must set `generation: 2`).
-  Gen1 behaviour unchanged when the hub stays on generation 1.
-
 - **Gen 1 + Gen 2 dual claim (Wave 0).** `manifest.games` is
   `["gen1","gen2"]`. New `src/Gen.lua` helpers cover money (`save.money` vs
   `save.player.money`), dex (`owned` vs `caught`), badges, free-roam
@@ -134,7 +170,17 @@ here must match `manifest.version`.
 - **Plan docs indexed.** `docs/plans/README.md` marks living vs historical;
   stale plans carry a historical banner (old PROTOCOL citations are archive).
 
-## [1.0.0] - 2026-08-09
+### Fixed
+
+- **Co-op win music before HP drains.** Victory fanfare is queued as a message
+  `act` after that batch's drains and faint sinks, so a multi-attacker final
+  KO no longer plays the jingle while Gust still animates a living bar.
+- **Heal-shaped HP revive illusion.** Drains that would climb `shownHP` after
+  a faint is queued / display-fainted are skipped; strip icons follow display
+  faint rather than premature sim `isDown`.
+- **Joiner immediate rematch after co-op NPC win.** Walk-in harden via
+  `claimBuriedEngine`; invite joiners finish via PROTOCOL 20 synthetic
+  defeat (see Added).
 
 First stable release line. Hub-mediated battles (0.11.x) are the supported
 path for MMO 1v1 / co-op; BattleSim locked decisions and the UX/fidelity

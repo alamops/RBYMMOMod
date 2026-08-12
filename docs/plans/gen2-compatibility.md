@@ -64,7 +64,9 @@ Make **every** shipped surface of `rby_mmo` work on Gen 1 (Red/Blue/Yellow) **an
 
 ### Hub generation lock (PROTOCOL bump)
 
-Bump `Config.PROTOCOL` / `server/lib/relay.js` `PROTOCOL` (currently **18** → **19**).
+Bump `Config.PROTOCOL` / `server/lib/relay.js` `PROTOCOL` (currently **18** → **20**;
+19 was also claimed on a parallel branch for co-op invite `npcId`/`event`, so the
+combined release carries both).
 
 - Client `mmo.hello` carries `generation` (1|2) from `Handshake.generation(game)` / `Fingerprint.generationOf(game.data)`.
 - Hub **requires** an explicit generation (`--generation 1|2` or config `generation:`). No silent “assume Gen 1” for new deploys — README shows **two** run recipes (Gen 1 hub and Gen 2 hub) as equal peers. Migration note: existing Gen 1 deployments must set `--generation 1` (or we accept a one-release compat default of 1 **only** when the flag is omitted, with a startup warning that names Gen 2 as the other first-class mode).
@@ -141,7 +143,7 @@ flowchart TB
 
 | ID | Goal | Owns | Acceptance |
 | --- | --- | --- | --- |
-| **T1a** | PROTOCOL 19 + hello `generation` + refuse | `src/Config.lua`, `src/Wire.lua`, `src/Transport.lua` / `src/Client.lua` (hello build), `src/Hub.lua`, `server/lib/relay.js`, `server/twin_parity.test.js` | Mismatched gen refused; matching admitted; twin_parity PROTOCOL sync |
+| **T1a** | PROTOCOL 20 + hello `generation` + refuse | `src/Config.lua`, `src/Wire.lua`, `src/Transport.lua` / `src/Client.lua` (hello build), `src/Hub.lua`, `server/lib/relay.js`, `server/twin_parity.test.js` | Mismatched gen refused; matching admitted; twin_parity PROTOCOL sync |
 | **T1b** | Hub CLI / host config `--generation` | `server/hub.js` (and argv/config path in use), `src/HostServer.lua`, `server/README.md` section | `node server/hub.js --generation 2` locks gen 2; in-game host inherits boot gen |
 
 ### Wave 2 — Gen2 BattleSim twin (parallel modules, then wire)
@@ -209,7 +211,7 @@ Checkpoint commit after each wave. File ownership within a wave is disjoint as l
 
 | Risk | Mitigation |
 | --- | --- |
-| PROTOCOL 19 breaks old clients | Exact-match refuse (existing pattern); Gen1 hubs stay on 19 with `generation=1`; document upgrade |
+| PROTOCOL 20 breaks old clients | Exact-match refuse (existing pattern); Gen1 hubs stay on 20 with `generation=1`; document upgrade |
 | Gen2 BattleSim drift vs engine | Vectors from engine formulas; twin_parity; no codegen Lua↔JS (repo rule) |
 | Upstream TradeSession Gen2 missing | MMO-owned `Trade2` apply over `packMon2`; do not block on Cable Club UI |
 | Co-op Gen2 size (~8k LOC) | Strategy split; ship mediated 1v1 gate before co-op wave if schedule slips — **owner required co-op in this delivery**, so plan keeps T3a in-scope; call out schedule risk |

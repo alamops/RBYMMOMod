@@ -54,7 +54,7 @@ const DEFAULTS = {
   version: SCHEMA_VERSION,
   listen: { host: '0.0.0.0', port: 7788 },
   maxPlayers: 4,
-  // Hub generation lock (PROTOCOL 19+): 1 = Gen 1 (RBY), 2 = Gen 2 (Gold).
+  // Hub generation lock (PROTOCOL 20+): 1 = Gen 1 (RBY), 2 = Gen 2 (Gold).
   // Compat default is 1 when omitted -- see GENERATION_DEFAULT_WARNING. Gen 2
   // hubs must set this explicitly (--generation 2 / generation: 2).
   generation: 1,

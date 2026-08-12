@@ -1208,7 +1208,7 @@ function M.sendHello(game)
   spriteAcked, spriteClock = sprite, 0
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
-    -- Hub generation lock (PROTOCOL 19). 1 = Red/Blue/Yellow, 2 = Gold.
+    -- Hub generation lock (PROTOCOL 20). 1 = Red/Blue/Yellow, 2 = Gold.
     generation = Gen.generation(game),
     name = name,
     -- Persistent identity (PROTOCOL 16). Hub uses this as client.id and the
@@ -2080,6 +2080,10 @@ function M.install()
     end
     if state.enemyParty == nil and battle.enemyParty then
       state.enemyParty = battle.enemyParty
+    end
+    -- Gen 2 keeps the face on enemyTrainerImage; CoopBattle reads trainerPic.
+    if state.trainerPic == nil and state.enemyTrainerImage then
+      state.trainerPic = state.enemyTrainerImage
     end
     -- Gen 2 finishes via onDone; Coop.consume calls onFinish.  Alias, keep both.
     if state.onFinish == nil and type(state.onDone) == "function" then

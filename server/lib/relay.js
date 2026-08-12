@@ -112,13 +112,16 @@ function defaultSpriteFor(generation) {
 // protocol-17 hub's closed BATTLE_MODES set drops `coop_wild` opens, and its
 // outcome cleaner strips an unknown `catcher` -- either way the partner never
 // joins the grass fight, or both clients grant (or neither) because ownership
-// was never named. 19 is the generation lock on mmo.hello: clients carry
-// `generation` (1|2) and the hub refuses a mismatch. A protocol-18 hub never
-// checks the field, so a Gold client could join a Red room and every later
-// surface would talk past the other generation. The rule every bump follows
-// is unchanged: bump whenever a client can send something a hub silently
-// ignores. Kept in step with Config.PROTOCOL on the mod side.
-const PROTOCOL = 19;
+// was never named. 20 carries two features that both claimed 19 on parallel
+// branches: (a) the generation lock on mmo.hello (`generation` 1|2; hub
+// refuses a mismatch); (b) co-op invite-joiner rematch cleanup — optional
+// overworld `npcId` and event-flag id on mmo.coop_wait / mmo.coop_offer /
+// mmo.coop_battle (from the waiter's checkpointOrigin). A protocol-19 (or
+// 18) hub that lacks either silently drops fields or skips the gen check.
+// The rule every bump follows is unchanged: bump whenever a client can send
+// something a hub silently ignores. Kept in step with Config.PROTOCOL on
+// the mod side.
+const PROTOCOL = 20;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -292,7 +295,7 @@ handlers['mmo.hello'] = (relay, client, msg) => {
     return relay.refuse(client, `This game speaks protocol ${relay.protocol}; yours `
       + `speaks ${shortValue(msg.proto)}.`);
   }
-  // PROTOCOL 19: missing generation defaults to 1. Same sentence as Hub.lua.
+  // PROTOCOL 20: missing generation defaults to 1. Same sentence as Hub.lua.
   const generation = cleanInt(msg.generation, 1, 2) ?? 1;
   if (generation !== relay.generation) {
     return relay.refuse(client, `This hub is for generation ${relay.generation}; yours `
@@ -770,11 +773,17 @@ handlers['mmo.coop_wait'] = (relay, client, msg) => {
   // Optional mode: only coop_wild is stored (Party vs Wild auto-join). Absent
   // keeps the trainer WAIT/JOIN invite path.
   const mode = cleanCoopOfferMode(msg.mode);
+  // Optional overworld npcId / event (PROTOCOL 20): invite joiners need the
+  // waiter's concrete trainer to mark beaten. Dropped when absent or wild.
+  const npcId = !mode ? cleanId(msg.npcId) : null;
+  const event = !mode ? cleanId(msg.event) : null;
   // startedAt so the sweep can expire it on the same clock the partner's
   // client already uses. Mirrors src/Hub.lua.
-  client.coopOffer = { battle, label, map, mode, startedAt: relay.now() };
+  client.coopOffer = { battle, label, map, mode, npcId, event, startedAt: relay.now() };
   const offer = { from: client.id, name: client.name, battle, label, map };
   if (mode) offer.mode = mode;
+  if (npcId) offer.npcId = npcId;
+  if (event) offer.event = event;
   relay.send(partner, 'mmo.coop_offer', offer);
 };
 
@@ -857,8 +866,14 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // encounter -- the joiner usually has too, but a join taken from the ACTIONS
   // menu never went near them. `mode` rides so the joiner's CoopBattle opens
   // as coop_wild without re-deriving from an offer that is already cleared.
-  relay.send(client, 'mmo.coop_battle',
-    { id: battleId, side: 'a', allies: members, battle, host: host.id, mode });
+  // `npcId` / `event` (PROTOCOL 20) ride so a menu joiner can finish the
+  // trainer off without a local BattleState -- never fuzzy-matched by class.
+  const battleMsg = {
+    id: battleId, side: 'a', allies: members, battle, host: host.id, mode,
+  };
+  if (offer.npcId) battleMsg.npcId = offer.npcId;
+  if (offer.event) battleMsg.event = offer.event;
+  relay.send(client, 'mmo.coop_battle', battleMsg);
 };
 
 // Battle traffic, fanned out to everyone else in the same battle. The payload
@@ -1225,7 +1240,7 @@ class Relay {
       ? Number(opts.chatIntervalMs) : 500;
     this.protocol = Number.isFinite(Number(opts.protocol))
       ? Number(opts.protocol) : PROTOCOL;
-    // PROTOCOL 19 generation lock. Default 1 when omitted so existing Gen1
+    // PROTOCOL 20 generation lock. Default 1 when omitted so existing Gen1
     // deploys keep working; Gen2 hubs MUST set generation:2 (CLI / config —
     // twin of src/Hub.lua opts.generation).
     {

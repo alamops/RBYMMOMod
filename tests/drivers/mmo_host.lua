@@ -848,9 +848,6 @@ return function(game)
     -- claim is running both.
 
     H.closeToOverworld(game)
-    local coopClass, coopLevel = H.coopTrainer(game.data)
-    check(coopClass ~= nil, "the dataset has a trainer with two POKeMON")
-    log("co-op trainer:", tostring(coopClass), "total level", tostring(coopLevel))
 
     -- A party first: a co-op battle is something a party does, and the LAN
     -- scenario had never formed one at all.
@@ -881,31 +878,63 @@ return function(game)
     H.await(game, "guest_party_joined")
     H.closeToOverworld(game)
 
-    -- Walk into the trainer, and wait rather than fight alone.
+    -- Sight-trainer walk-in (not stageTrainer): warp onto Route 3's first
+    -- Bug Catcher line, show the "!", then WAIT. Invite-path syntheticFinish
+    -- stays covered by the Lua suite; this leg proves the overworld rematch
+    -- Quarkst hit after a real engageTrainer.
+    local SIGHT_MAP = "ROUTE_3"
+    local sightObj = H.sightTrainerOn(game.data, SIGHT_MAP)
+    check(sightObj ~= nil, "Route 3 has a sighted trainer with two POKeMON")
+    local sightNpcId = H.sightNpcId(SIGHT_MAP, sightObj)
+    log("sight trainer:", tostring(sightObj and sightObj.name),
+        "npcId", tostring(sightNpcId),
+        "class", tostring(sightObj and sightObj.trainerClass))
+    H.signal("host_ready_for_sight")
+    check(H.warpToSightLine(game, SIGHT_MAP, sightObj, {
+          dist = 2, behind = 0, side = 1 }) ~= nil,
+          "warped host beside the trainer sight line")
+    check(H.awaitOnMap(game, SIGHT_MAP, 90), "host arrived on Route 3")
+    H.await(game, "guest_on_sight_map")
+
     local coopFinished = nil
-    -- The real BattleState this side staged, held onto (not just the result
-    -- callback above) so it can be checked for gone-from-the-stack rather
-    -- than merely told-its-result once the co-op leg is over -- see the
+    -- The real BattleState engageTrainer pushed, held so it can be checked
+    -- for gone-from-the-stack rather than merely told-its-result -- see the
     -- comment on the `handed`/onStack pair below for why both matter.
     local staged = nil
-    if coopClass then
-      staged = H.stageTrainer(game, coopClass, function(result) coopFinished = result end)
-      local asked = H.waitFor(game, function()
-        for _, label in ipairs(H.menuLabels(game)) do
-          if label == "WAIT" then return true end
-        end
-        local top = H.top(game)
-        if top and top.items == nil then U.tap(game, "a") end
-        return false
-      end, 60 * 6, "the co-op prompt in front of the trainer")
-      check(asked, "the co-op prompt appears in front of a real trainer battle")
-      U.shot(game, SHOT_DIR .. "/host-coop-prompt.png")
-      check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
-      local waiting = H.waitSeconds(game, function()
-        return exports.coopWaiting() ~= nil
-      end, 60, "this side to be standing at the fight")
-      check(waiting, "and this side is standing at the fight, waiting")
+    check(H.walkIntoTrainerSight(game, sightObj, { dist = 2 }),
+          "host walked into trainer sight")
+    check(H.awaitTrainerBang(game, 20), "host saw the trainer ! bubble")
+    -- Prefer a frame while the bubble is still up.
+    do
+      local deadline = os.time() + 3
+      while os.time() < deadline do
+        local ow = game.overworld
+        if ow and ow.emote and ow.emote.npc then break end
+        U.wait(2)
+      end
     end
+    U.shot(game, SHOT_DIR .. "/host-trainer-sight.png")
+    local asked = H.waitFor(game, function()
+      H.softenTopTrainer(game)
+      for _, label in ipairs(H.menuLabels(game)) do
+        if label == "WAIT" then return true end
+      end
+      local top = H.top(game)
+      if top and top.items == nil then U.tap(game, "a") end
+      return false
+    end, 60 * 12, "the co-op prompt in front of the trainer")
+    check(asked, "the co-op prompt appears in front of a real trainer battle")
+    staged = H.captureStagedTrainer(game)
+    if staged then
+      H.wrapBattleFinish(staged, function(result) coopFinished = result end)
+    end
+    H.softenTopTrainer(game)
+    U.shot(game, SHOT_DIR .. "/host-coop-prompt.png")
+    check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
+    local waiting = H.waitSeconds(game, function()
+      return exports.coopWaiting() ~= nil
+    end, 60, "this side to be standing at the fight")
+    check(waiting, "and this side is standing at the fight, waiting")
     H.signal("host_coop_waiting")
 
     -- The guest joins, and four monsters come up on both screens.
@@ -1003,6 +1032,10 @@ return function(game)
           "and the overworld -- not a leaked trainer battle -- is what's "
           .. "actually on top, over the in-game hub too")
     H.closeToOverworld(game)
+    H.assertNoRematch(game, sightNpcId, 120, check)
+    log("defeatedTrainers[" .. tostring(sightNpcId) .. "]="
+        .. tostring(game.save.defeatedTrainers
+                    and game.save.defeatedTrainers[sightNpcId]))
     U.shot(game, SHOT_DIR .. "/host-coop-after.png")
     H.signal("host_coop_done")
     H.await(game, "guest_coop_done")
@@ -1073,8 +1106,8 @@ return function(game)
   -- instance sitting on the barriers after it for their full budget, and what
   -- gets reported is a wall of timeouts over there rather than the one real
   -- failure over here.
-  for _, tag in ipairs({ "host_party_asked", "host_coop_waiting",
-                         "host_coop_done", "host_coop_left",
+  for _, tag in ipairs({ "host_party_asked", "host_ready_for_sight",
+                         "host_coop_waiting", "host_coop_done", "host_coop_left",
                          "host_wild_waiting", "host_wild_done",
                          "host_address_checked" }) do
     H.signal(tag)

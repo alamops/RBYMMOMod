@@ -111,14 +111,18 @@ M.MOD_ID = "rby_mmo"
 -- grant (or neither does) because ownership was never named. Refusal that
 -- names both versions is the only sentence either player can act on.
 --
--- 19 is the generation lock on `mmo.hello`: clients carry `generation` (1|2)
+-- 20 carries two features that both claimed 19 on parallel branches:
+-- (a) the generation lock on `mmo.hello` -- clients carry `generation` (1|2)
 -- and the hub refuses a mismatch (Gen1 hub ↔ Gen1 clients only; Gen2 hub ↔
--- Gen2 only). A protocol-18 hub never checks the field, so a Gold client
--- could join a Red room and every later surface (battle sheets, trade codec,
--- co-op) would talk past the other generation. Refusal that names both
--- generations is the only sentence either player can act on.
+-- Gen2 only); (b) co-op invite-joiner rematch cleanup -- optional overworld
+-- `npcId` and event-flag id on `mmo.coop_wait` / `mmo.coop_offer` /
+-- `mmo.coop_battle`, taken from the waiter's engine `checkpointOrigin`. A
+-- protocol-19 (or 18) hub that lacks either silently drops fields or skips
+-- the gen check, so a Gold client could join a Red room, or a menu joiner
+-- never learns which trainer to mark beaten. Refusal that names both
+-- versions is the only sentence either player can act on.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 19
+M.PROTOCOL = 20
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -640,6 +644,13 @@ M.BATTLE_HUD_GLYPHS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./-'?!"
 M.BATTLE_HUD_ADVANCE = 5
 M.BATTLE_HUD_META_ADVANCE = 4
 M.BATTLE_HUD_META_HEIGHT = 5
+
+-- Top-down battlefield theatre (Gen1 CoopBattle / MediatedBattle).
+-- Arena art is an original asset under assets/battle/; canvas is 16:9 within
+-- Renderer uiSize caps so fill-scale can stretch it to the window.
+M.BATTLEFIELD_ARENA = "assets/battle/outdoor_grass_arena.png"
+M.BATTLEFIELD_WIDTH = 640
+M.BATTLEFIELD_HEIGHT = 360
 
 -- Presence liveness.  The hub drops a client that stops pinging; the client
 -- gives up on a hub that stops answering.

@@ -1012,11 +1012,24 @@ return function(game)
         log("party members:", table.concat(members, ","))
         H.signal("guest_party_joined")
 
-        -- Invite-path join: the host's WAIT already pushed the offer, and on
-        -- the same map the confirm is up before this side stages anything.
-        -- Staging a trainer underneath that confirm used to bury the yes/no
-        -- (and B while closing screens declined it). Walking into the trainer
-        -- is no longer required.
+        -- Walk-in join on the same sighted trainer the host is waiting at.
+        -- Same-map considerOffer can raise the invite confirm before "!" --
+        -- dismiss that box without COOP_CANCEL, then walk in so onTrainerBattle
+        -- adopts a buried engine (the Quarkst rematch path).
+        local SIGHT_MAP = "ROUTE_3"
+        local sightObj = H.sightTrainerOn(game.data, SIGHT_MAP)
+        check(sightObj ~= nil, "Route 3 has a sighted trainer with two POKeMON")
+        local sightNpcId = H.sightNpcId(SIGHT_MAP, sightObj)
+        log("sight trainer:", tostring(sightObj and sightObj.name),
+            "npcId", tostring(sightNpcId))
+
+        H.await(game, "host_ready_for_sight")
+        check(H.warpToSightLine(game, SIGHT_MAP, sightObj, {
+              dist = 2, behind = 0, side = 2 }) ~= nil,
+              "warped guest beside the trainer sight line")
+        check(H.awaitOnMap(game, SIGHT_MAP, 90), "guest arrived on Route 3")
+        H.signal("guest_on_sight_map")
+
         local coopFinished = nil
         local staged = nil
         H.await(game, "host_coop_waiting")
@@ -1027,8 +1040,63 @@ return function(game)
         local offer = exports.coopOffer()
         if offer then log("offer from:", tostring(offer.name),
                           "battle:", tostring(offer.battle)) end
+        check(offer and tostring(offer.battle or ""):find("BUG_CATCHER", 1, true),
+              "offer is the Route 3 Bug Catcher, not a neighbouring Youngster")
 
-        -- Say yes to the invite until the co-op field is up.
+        -- Invite confirm may already be up (considerOffer). Drop it without
+        -- declining so the walk-in can still hold a local BattleState.
+        if H.dismissInviteForWalkIn(game) then
+          log("dismissed same-map invite confirm for walk-in")
+          U.wait(10)
+        end
+        -- Do not closeToOverworld here: B on a still-live confirm is "no" and
+        -- would send the host into ALONE.
+        local topNow = H.top(game)
+        if not (topNow == game.overworld or (topNow and topNow.isOverworld)) then
+          log("WARN not on overworld before walk-in; top=",
+              tostring(topNow and (topNow.title or topNow.kind or "?")))
+        end
+        check(H.walkIntoTrainerSight(game, sightObj, { dist = 2 }),
+              "guest walked into trainer sight")
+        check(H.awaitTrainerBang(game, 20), "guest saw the trainer ! bubble")
+        do
+          local deadline = os.time() + 3
+          while os.time() < deadline do
+            local ow = game.overworld
+            if ow and ow.emote and ow.emote.npc then break end
+            U.wait(2)
+          end
+        end
+        U.shot(game, SHOT_DIR .. "/join-trainer-sight.png")
+
+        local joinPrompt = H.waitFor(game, function()
+          H.softenTopTrainer(game)
+          staged = staged or H.captureStagedTrainer(game)
+          -- BattleState under a TextBox / confirm is enough: menuLabels only
+          -- sees choose-rows, not every confirm chrome.
+          if staged then return true end
+          if exports.coopOffer() and H.coopInstance(game)
+              and H.coopInstance(game).joinAsk then
+            return true
+          end
+          for _, label in ipairs(H.menuLabels(game)) do
+            if label == "YES" or label == "WAIT" or label == "NO" then
+              return true
+            end
+          end
+          local top = H.top(game)
+          if top and top.items == nil then U.tap(game, "a") end
+          return false
+        end, 60 * 12, "the walk-in join / wait prompt")
+        check(joinPrompt, "walk-in raised a join or wait prompt")
+        staged = staged or H.captureStagedTrainer(game)
+        check(staged ~= nil, "walk-in held a local trainer BattleState")
+        if staged then
+          H.wrapBattleFinish(staged, function(result) coopFinished = result end)
+        end
+        H.softenTopTrainer(game)
+
+        -- Say yes to the join (or WAIT then join via offer) until the field is up.
         local joined = H.drivePrompts(game, function()
           local top = H.top(game)
           return top ~= nil and top.sim ~= nil and #top.sim.slots >= 3
@@ -1068,23 +1136,14 @@ return function(game)
         check(sync.resyncs == 0, "and never needing the field re-sent")
         check(medGaps == 0, "and no gaps in the mediated event stream")
 
-        -- Invite-path joiner never staged a local trainer battle.
-        if staged then
-          local handed = H.waitFor(game, function()
-            return coopFinished ~= nil
-          end, 10, "the engine's battle to be finished off")
-          check(handed, "and the trainer battle it displaced got its result back")
-          log("co-op result:", tostring(coopFinished))
-          check(not H.onStack(game, staged),
-                "the trainer battle this side staged is off the stack, not "
-                .. "merely buried under the co-op screen")
-        else
-          log("invite-path joiner: no local trainer battle to hand off")
-          check(true, "and the trainer battle it displaced got its result back")
-          check(true,
-                "the trainer battle this side staged is off the stack, not "
-                .. "merely buried under the co-op screen")
-        end
+        local handed = H.waitFor(game, function()
+          return coopFinished ~= nil
+        end, 10, "the engine's battle to be finished off")
+        check(handed, "and the trainer battle it displaced got its result back")
+        log("co-op result:", tostring(coopFinished))
+        check(not H.onStack(game, staged),
+              "the trainer battle this side staged is off the stack, not "
+              .. "merely buried under the co-op screen")
 
         H.drivePrompts(game, function()
           local top = H.top(game)
@@ -1095,6 +1154,10 @@ return function(game)
               "and the overworld -- not a leaked trainer battle -- is what's "
               .. "actually on top, over the in-game hub too")
         H.closeToOverworld(game)
+        H.assertNoRematch(game, sightNpcId, 120, check)
+        log("defeatedTrainers[" .. tostring(sightNpcId) .. "]="
+            .. tostring(game.save.defeatedTrainers
+                        and game.save.defeatedTrainers[sightNpcId]))
         U.shot(game, SHOT_DIR .. "/join-coop-after.png")
         H.signal("guest_coop_done")
         H.await(game, "host_coop_done")
@@ -1488,6 +1551,7 @@ return function(game)
   -- unconditional rather than guarded by whether the leg ran.
   for _, tag in ipairs({ "guest_saw_char_change",
                          "guest_ready_for_party", "guest_party_joined",
+                         "guest_on_sight_map",
                          "guest_coop_joined", "guest_wild_joined",
                          "guest_wild_done", "guest_coop_done",
                          "guest_left_game" }) do

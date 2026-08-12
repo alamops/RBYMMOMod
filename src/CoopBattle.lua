@@ -64,6 +64,7 @@ local Wire = need("Wire")
 local Gen = need("Gen")
 local CoopSim = need("CoopSim")
 local CoopField = need("CoopField")
+local Battlefield = need("Battlefield")
 -- The 1v1 mediated client, for its snapshots and its senders rather than for
 -- its screen: what a party looks like on the wire must not depend on how many
 -- monsters are on the field.
@@ -124,6 +125,9 @@ local function loadEngine(game)
   -- flash. Grabbed like the rest so a missing one is one warning, not a crash
   -- in the middle of somebody's turn.
   grab("AnimPlayer", "src.battle.AnimPlayer")
+  -- Soft: party icons + OW walk sheets for the Gen1 Battlefield theatre.
+  grab("Sprites", "src.pokemon.Sprites")
+  grab("SpriteRenderer", "src.render.SpriteRenderer")
 
   local generation = Gen.generation(game)
   if not parts.Protocol then
@@ -437,8 +441,12 @@ function M.new(game, opts)
     -- continues three ways).
     hostId = opts.hostId,
     -- The trainer this battle stood in for: their picture, their music, and
-    -- the line they say when they lose.
+    -- the line they say when they lose. oppClass + partyIndex travel with the
+    -- id so computeMusicKind can tell a badge gym fight from the same class's
+    -- non-badge parties (Giovanni #3 vs #2).
     trainer = opts.trainer,
+    oppClass = opts.oppClass,
+    partyIndex = opts.partyIndex,
     trainerPic = opts.trainerPic,
     endBattleText = opts.endBattleText,
     -- Whether winning this one moves anybody's rating. Handed in rather than
@@ -498,6 +506,10 @@ function M.new(game, opts)
     slideAlly = nil,
     slideFoe = nil,
     lastFoeFocus = nil,
+    -- Gen1 top-down theatre: speech bubbles over human trainers when their
+    -- mon acts. Nil until the first human-owned move text / anim lands.
+    battlefieldBubbles = nil,
+    battlefieldLoaded = nil,
   }, M)
 
   local rng = function(a, b)
@@ -663,10 +675,11 @@ end
 -- "trainer" is not good enough: a gym leader has their own theme, the rival's
 -- last fight has another, and the rule that separates them reads a badge table
 -- this mod has no business duplicating. So the engine's `computeMusicKind` is
--- run against a stand-in carrying only the two fields it reads -- which is why
--- the trainer's id travels with the assembled field. A client that joined by
--- invitation and never met this trainer would otherwise hear the ordinary
--- trainer theme while the host heard the gym leader's.
+-- run against a stand-in carrying the fields it reads -- trainer id (Lance /
+-- Rival3), plus `oppClass` + `partyIndex` (badge gym leaders; Giovanni's gym
+-- is #3, not #1). A client that joined by invitation and never met this
+-- trainer would otherwise hear the ordinary trainer theme while the host
+-- heard the gym leader's.
 --
 -- Answered once. The victory theme is `kind .. "Win"`, so a kind that moved
 -- between the start of the battle and the end of it would answer the gym
@@ -680,14 +693,20 @@ function M.musicKind(self)
   end
   local kind = self.trainer and "trainer" or "link"
   if self.trainer then
-    -- Prefer the engine's computeMusicKind when the real BattleState class is
-    -- on hand. After a generation=2 headless load, Gen2Compat may have
-    -- shimmed require("src.battle.BattleState") to a facade that lacks a
-    -- working computeMusicKind — so fall back to the same victories /
-    -- rival / Lance rules BattleState uses (audio/play_battle_music.asm).
+    -- Badge gym leaders key victories as oppClass#partyIndex. Prefer
+    -- self.oppClass / self.partyIndex (PROTOCOL 20 invite path) so Brock is
+    -- not stuck on "trainer". Trainer.id alone still covers Lance / Rival3.
+    -- After a generation=2 headless load, Gen2Compat may have shimmed
+    -- BattleState without a working computeMusicKind — fall back to the same
+    -- victories / rival / Lance rules (audio/play_battle_music.asm).
     local trainer = self.trainer
-    local oppClass = trainer.oppClass or trainer.id or trainer.class
-    local partyIndex = trainer.partyIndex or self.partyIndex or 1
+    local oppClass = self.oppClass
+      or trainer.oppClass
+      or trainer.id
+      or trainer.class
+    local partyIndex = tonumber(self.partyIndex)
+      or tonumber(trainer.partyIndex)
+      or 1
     local eng = engine
     local decided
     if eng and eng.BattleState and type(eng.BattleState.computeMusicKind) == "function" then
@@ -776,6 +795,55 @@ function M:clearIntroFlags()
   self.introBalls = nil
   self.introHide = nil
   self.growIn = nil
+  self.showEnemyTrainer = nil
+end
+
+-- Display name for trainer appear / "sent out" lines (BattleState introText).
+function M:trainerIntroName()
+  local t = self.trainer
+  if type(t) == "table" and type(t.name) == "string" and t.name ~= "" then
+    return Wire.name(t.name) or t.name
+  end
+  if self.sim then
+    for _, slot in ipairs(self.sim.slots or {}) do
+      if slot.owner == nil and self:foeSide(slot.index) then
+        local raw = slot.name
+        if type(raw) == "string" and raw ~= "" then
+          return Wire.name(raw) or raw
+        end
+      end
+    end
+  end
+  return "Trainer"
+end
+
+-- Live foe party list for intro ball chrome (one row; shared tables once).
+function M:foeIntroParty()
+  if not self.sim then return nil end
+  local seen, flat = {}, {}
+  for _, slot in ipairs(self.sim.slots or {}) do
+    if slot.owner == nil and self:foeSide(slot.index) and slot.party then
+      if not seen[slot.party] then
+        seen[slot.party] = true
+        for _, mon in ipairs(slot.party) do
+          flat[#flat + 1] = mon
+        end
+      end
+    end
+  end
+  if #flat == 0 then return nil end
+  return flat
+end
+
+-- Trainer theatrical intro: appear uses trainer face + foe ball row; foes are
+-- hidden until their send-out (mirrors BattleState EnemySendOutFirstMon without
+-- introSlide / trainer-back walk-off). Wild and party-vs-party never arm this.
+-- Invite joiners often have a trainer record but nil trainerPic -- do not hide
+-- foes behind an empty face; keep the old visible-foes / "2 on 2" open.
+function M:usesTrainerIntro()
+  if not self.trainer or not self.trainerPic then return false end
+  if self.mode == "coop_wild" or self.mode == "coop_pvp" then return false end
+  return true
 end
 
 -- Entrance cry via optional Sound (same clips BattleState:playEntranceCry).
@@ -797,9 +865,56 @@ function M:growInScale(index)
   return f < 3 and 0 or f < 7 and 3 / 7 or 5 / 7
 end
 
+-- After the trainer appear line: drop chrome / face, then sequential foe
+-- send-outs (POOF + grow + cry) before the ally Go! gap.
+function M:queueFoeIntroSendOut()
+  self.messages[#self.messages + 1] = {
+    act = function(battle)
+      battle.introBalls = nil
+      battle.showEnemyTrainer = nil
+    end,
+  }
+  local name = self:trainerIntroName()
+  local foes = {}
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if self:foeSide(slot.index) then
+      foes[#foes + 1] = slot
+    end
+  end
+  if #foes == 0 then
+    if self.introHide then
+      for idx, _ in pairs(self.introHide) do
+        local slot = self.sim and self.sim:slot(idx)
+        if slot and slot.owner == nil then self.introHide[idx] = nil end
+      end
+    end
+    return
+  end
+  for _, slot in ipairs(foes) do
+    local idx = slot.index
+    self:say(("%s sent\nout %s!"):format(name, seatMonName(slot)))
+    self.messages[#self.messages + 1] = {
+      anim = "POOF_ANIM", from = idx, attackerIsPlayer = false,
+    }
+    self.messages[#self.messages + 1] = {
+      act = function(battle)
+        if battle.introHide then battle.introHide[idx] = nil end
+        local s = battle.sim and battle.sim:slot(idx)
+        local battler = s and s.battler
+        if battler then
+          battle.growIn = { slot = idx, frame = 0 }
+          battle:playEntranceCry(battler)
+        end
+      end,
+    }
+    self.messages[#self.messages + 1] = { wait = 12 }
+  end
+end
+
 -- After the opening appear line: wait, then sequential viewer-centric
 -- send-outs (my Go! → POOF/grow/cry, then partner sent out). Ball chrome is
--- cleared when the appear page advances (see messages dismiss), not here.
+-- cleared when the appear page advances (see messages dismiss / foe intro
+-- clear act), not here.
 function M:queueIntroSendOut()
   local sendWait = 40
   do
@@ -860,27 +975,51 @@ function M:queueIntroSendOut()
 end
 
 function M:enter()
-  -- The trainer theme, through the engine's own picker so a gym leader still
-  -- gets a gym leader's music. `kind` is the battle's, not this screen's: a
-  -- co-op fight against a trainer is a trainer battle to everything except the
-  -- turn loop. coop_wild uses the wild cue (see musicKind).
+  -- Gen 1: Music.playBattle(kind) via computeMusicKind. Gen 2: BattleMusic
+  -- song labels (Gold has no data.audio.battle[kind] ladder). See Gen.
   local eng = engine
   if eng and eng.Music then
-    pcall(eng.Music.playBattle, self.game.data, self:musicKind(),
-      self.trainer and self.trainer.id or nil)
+    Gen.playBattleMusic(self.game, {
+      Music = eng.Music,
+      kind = self:musicKind(),
+      mode = self.mode,
+      trainer = self.trainer,
+      oppClass = self.oppClass,
+      partyIndex = self.partyIndex,
+    })
+  end
+  -- Arena load once per fight (Gen1 theatre). Soft-fail if the asset is
+  -- missing -- Battlefield.draw still paints a flat stand-in.
+  if Battlefield.enabled(self.game) then
+    self.battlefieldLoaded = true
+    pcall(Battlefield.load, mod)
   end
   -- Intro ball chrome + hide ally humans until their Go!/sent-out step.
-  -- Foes (wild / NPC) stay visible; no introSlide / trainer-back this pass.
+  -- Trainer theatrical: also hide foes and hold the trainer face through the
+  -- appear line (no introSlide / trainer-back). Wild / party-vs-party leave
+  -- foes visible and never arm a trainer face.
   self.introBalls = true
   self.introHide = {}
+  local theatrical = self:usesTrainerIntro()
   for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
     if slot.owner ~= nil and not self:foeSide(slot.index) then
       self.introHide[slot.index] = true
+    elseif theatrical and self:foeSide(slot.index) then
+      self.introHide[slot.index] = true
     end
   end
-  -- Party vs Wild is a grass encounter shared with a partner, not a 2-on-2:
-  -- open with the same sentence solo wild uses (BattleState introText).
-  if self.mode == "coop_wild" then
+  if theatrical then
+    self.showEnemyTrainer = self.trainerPic ~= nil
+    local Sound = eng and eng.Sound
+    if Sound and Sound.play then
+      -- Gen 2 has no Trainer_Appeared clip; sfx() leaves the Gen 1 name and
+      -- Sound.play soft-no-ops when the build lacks it.
+      pcall(Sound.play, self.game.data, Gen.sfx(self.game, "Trainer_Appeared"))
+    end
+    self:say(("%s wants\nto fight!"):format(self:trainerIntroName()))
+    self:queueFoeIntroSendOut()
+  elseif self.mode == "coop_wild" then
+    -- Party vs Wild: same sentence solo wild uses (BattleState introText).
     self:say(("Wild %s\nappeared!"):format(self:wildIntroName()))
   else
     self:say("2 on 2 battle!")
@@ -898,23 +1037,22 @@ end
 
 -- The fanfare, once, when the result is known.
 --
--- The jingle is looked up as `kind .. "Win"`, and the rival's last fight is
--- the one place where the two kinds part company: its battle theme is its own
--- but its victory theme is the gym leader's, so "final" is folded to "gym"
--- here the way the engine folds it. Asking for a "finalWin" that no build has
--- would be silence where the fanfare belongs.
---
--- Guarded against a second call because a result can be reached twice -- a
--- forfeit racing the last knockout -- and the original starts this music once.
+-- Gen 1 looks up `kind .. "Win"` (rival-final folds to gym). Gen 2 plays a
+-- BattleMusic victory label. Guarded against a second call because a result
+-- can be reached twice -- a forfeit racing the last knockout.
 function M:playVictoryMusic()
   if self.result ~= "win" or self.victoryMusicPlayed then return end
   self.victoryMusicPlayed = true
   local eng = engine
   if not (eng and eng.Music) then return end
-  local kind = self:musicKind()
-  if kind == "final" then kind = "gym" end
-  pcall(eng.Music.playVictory, self.game.data, kind,
-    self.trainer and self.trainer.id or nil)
+  Gen.playVictoryMusic(self.game, {
+    Music = eng.Music,
+    kind = self:musicKind(),
+    mode = self.mode,
+    trainer = self.trainer,
+    oppClass = self.oppClass,
+    partyIndex = self.partyIndex,
+  })
 end
 
 -- Give back an item paid for on a turn that never happened.
@@ -948,7 +1086,9 @@ function M:exit()
   -- players back into the overworld and play there forever. The engine's own
   -- finish() restores unconditionally for the same reason.
   local eng = engine
-  if eng and eng.Music then pcall(eng.Music.restoreMap, self.game.data) end
+  if eng and eng.Music then
+    Gen.restoreMapMusic(self.game, { Music = eng.Music })
+  end
   if self.onDone and not self.reported then
     self.reported = true
     self:announce("coop_battle_ended", { result = self.result or "draw" })
@@ -1100,12 +1240,18 @@ function M:update(dt)
       if self.animPlayer and self.animPlayer.update then
         pcall(self.animPlayer.update, self.animPlayer)
       end
+      -- Same contract as BattleState: poll SE_* / sound rows after each tick.
+      self:pollAnimEffects()
       local done = true
       if self.animPlayer and self.animPlayer.isDone then
         local ok, finished = pcall(self.animPlayer.isDone, self.animPlayer)
         done = (not ok) or finished
       end
-      if done or input:wasPressed("b") then self.anim = nil end
+      if done or (input and input:wasPressed("b")) then
+        -- Hit thud after the flash (PlayApplyingAttackSound timing).
+        self:applyPendingHitFx()
+        self.anim = nil
+      end
       return
     end
     -- A falling bar holds the queue exactly as an animation does, and -- like
@@ -1160,6 +1306,7 @@ function M:update(dt)
           -- fall through to dwell
         elseif head.wait then
           if self.introBalls then self.introBalls = nil end
+          if self.showEnemyTrainer then self.showEnemyTrainer = nil end
           head._t = (head._t or 0) + 1
           if head._t >= (tonumber(head.wait) or 0) then
             table.remove(self.messages, 1)
@@ -1182,8 +1329,10 @@ function M:update(dt)
       end
       if self.shown == nil then
         local next = table.remove(self.messages, 1)
+        local fromSlot = nil
         if type(next) == "table" then
           self.acting = next.from or self.acting
+          fromSlot = next.from
           next = next.text
         end
         -- Hub / playEvents lines skip M:say, so wrap here too: a single long
@@ -1194,6 +1343,10 @@ function M:update(dt)
           for i = #pages, 2, -1 do
             table.insert(self.messages, 1, pages[i])
           end
+          -- Bubble when a human-owned mon's "used MOVE" line lands (Gen1
+          -- theatre). fromSlot is preferred; mediated msg rows often omit it
+          -- and leave the actor on self.acting from the prior row.
+          self:noteBattlefieldBubble(fromSlot or self.acting, next)
         end
         self.shown = next
         self.msgClock = 0
@@ -1221,6 +1374,7 @@ function M:update(dt)
       -- the line actually being *up*, not of wall time under a flash.
       local advance = false
       if self.msgClock >= MSG_MIN_DWELL
+         and input
          and (input:wasPressed("a") or input:wasPressed("b")) then
         advance = true
       elseif self.msgClock > MSG_AUTO_ADVANCE then
@@ -1963,22 +2117,19 @@ function M:updateTarget(input)
     return
   end
   if self.targetIndex > #targets then self.targetIndex = #targets end
-  -- ------- one name per row, so one axis moves
-  --
-  -- The list is drawn down the box now rather than across it (see drawTarget),
-  -- so UP and DOWN are what move between the foes. LEFT and RIGHT are kept as
-  -- **aliases** rather than dropped: they moved this picker for a release, a
-  -- player who learned that is not wrong about which two monsters are on the
-  -- field, and there is no second column for them to mean anything else.
-  --
-  -- Clamped at both ends like every other picker on this screen -- DOWN on the
-  -- last foe stays on the last foe rather than flicking back to the first.
+  -- Gen1 battlefield: d-pad walks a field cursor (wraps). Classic / Gen2
+  -- keeps the clamped list picker (LEFT/RIGHT stay aliases for UP/DOWN).
   local step = 0
   if input:wasPressed("up") or input:wasPressed("left") then step = -1
   elseif input:wasPressed("down") or input:wasPressed("right") then step = 1 end
   if step ~= 0 then
-    self.targetIndex =
-      math.max(1, math.min(#targets, self.targetIndex + step))
+    if self:usesBattlefield() then
+      local nextIdx = Battlefield.nextTarget(targets, self.targetIndex or 1, step)
+      if nextIdx then self.targetIndex = nextIdx end
+    else
+      self.targetIndex =
+        math.max(1, math.min(#targets, self.targetIndex + step))
+    end
   elseif input:wasPressed("b") then
     self.phase = "choose"
   elseif input:wasPressed("a") then
@@ -2630,7 +2781,7 @@ function M:playEvents(events)
       -- drain row at all, and a row that asks a bar for where it already is
       -- costs a frame and does nothing.
       local shownAt = showing(event.slot)
-      if shownAt then
+      if shownAt and not self:skipHealShapedDrain(shownAt, event.hp) then
         self.messages[#self.messages + 1] =
           { drain = shownAt, slot = event.slot, to = event.hp }
       end
@@ -2644,7 +2795,7 @@ function M:playEvents(events)
       -- No HP is applied here. Sim truth arrives only on `damage`, so a drain
       -- row that went missing costs an animation and never a number.
       local shownAt = showing(event.slot)
-      if shownAt then
+      if shownAt and not self:skipHealShapedDrain(shownAt, event.to) then
         self.messages[#self.messages + 1] =
           { drain = shownAt, slot = event.slot, to = event.to }
       end
@@ -2658,13 +2809,11 @@ function M:playEvents(events)
       -- falling, and only on the host, so the four clients disagreed about
       -- what they had just watched.
       --
-      -- So the flag is the display's from here on: cleared on the battler the
-      -- row is queued against, and set again when that row comes up. Cleared
-      -- *here* rather than in a pass over the whole batch beforehand, because
-      -- the slot's own battler is no help -- on the host it may already be the
-      -- replacement -- and `showing` is what knows which monster this faint is
-      -- about. Nothing about the *rules* changes: `sim:isDown` is still what
-      -- every rule reads, and it is untouched.
+      -- Display hide uses `displayFainted` (set only when the faint row runs),
+      -- not CoopField's early `fainted` -- that adapter flag stays for the
+      -- effect registry's "do not faint twice" guard. Cleared here so a stale
+      -- display flag cannot survive a re-queue. Nothing about the *rules*
+      -- changes: `sim:isDown` is still what every rule reads.
       --
       -- The sink is queued rather than played: the monster stands on the field
       -- until the row that fells it comes up, and the "fainted!" line is
@@ -2672,7 +2821,7 @@ function M:playEvents(events)
       -- slide and the cry before the text (BattleState:enemyMonFainted).
       local shownAt = showing(event.slot)
       if shownAt then
-        shownAt.fainted = nil
+        shownAt.displayFainted = nil
         self.messages[#self.messages + 1] =
           { faintfx = shownAt, slot = event.slot }
       end
@@ -2729,12 +2878,13 @@ function M:playEvents(events)
       end
     elseif event.kind == "over" then
       self.result = self:resultFor(event.winner)
-      -- The victory theme starts the moment the win is decided, not as the
-      -- screen closes: it is what the defeat line and the trainer's parting
-      -- line are read over, exactly as the engine queues it ahead of its own
-      -- _TrainerDefeatedText. Playing it on the way out would sound the fanfare
-      -- to an empty screen.
-      self:playVictoryMusic()
+      -- Fanfare rides the message queue as an `act`, the way BattleState
+      -- actNext(playVictoryMusic) does -- after this batch's drains and faint
+      -- sinks already appended above, and ahead of the parting text below.
+      -- Inline play here started the jingle under Gust's still-living bar.
+      self.messages[#self.messages + 1] = {
+        act = function(battle) battle:playVictoryMusic() end,
+      }
       -- Why the rating did not move, said once.
       --
       -- Winning a 2-on-2 against a trainer pays everything a trainer battle
@@ -2862,6 +3012,9 @@ function M:startDrain(row)
     return false
   end
   if battler.shownHP == to then return false end
+  -- Faint already queued / display-fainted: never animate a heal-shaped climb
+  -- (multi-attacker KO race left a drain with to > shownHP).
+  if self:skipHealShapedDrain(battler, to) then return false end
   -- The budget is the second half of the same guard, and it covers what a
   -- clamp cannot: the bar moves by a *rate*, so a step small enough to lose
   -- its last fraction to floating point would never reach `to` exactly. 96
@@ -2871,6 +3024,22 @@ function M:startDrain(row)
   self.hitSlot = row.slot
   self.draining = { battler = battler, slot = row.slot, to = to, frames = 120 }
   return true
+end
+
+-- A drain that would climb the bar after this mon is already owed a faint.
+-- Truth HP stays instant; only the display climb is refused.
+function M:skipHealShapedDrain(battler, to)
+  if type(battler) ~= "table" then return true end
+  local shown = battler.shownHP
+  to = tonumber(to)
+  if shown == nil or to == nil or to ~= to then return false end
+  if to <= shown then return false end
+  if battler.displayFainted then return true end
+  if self.faintFx and self.faintFx.battler == battler then return true end
+  for _, row in ipairs(self.messages or {}) do
+    if type(row) == "table" and row.faintfx == battler then return true end
+  end
+  return false
 end
 
 -- One frame of it. `maxHP / 96` per frame is the engine's rate, and it is a
@@ -2911,7 +3080,9 @@ end
 function M:startFaint(row)
   local battler = row.faintfx
   if type(battler) ~= "table" then return false end
-  battler.fainted = true
+  -- Display-only: CoopField may already have set adapter `fainted` during
+  -- resolveTurn. Hiding the pic waits for this row so the sink still plays.
+  battler.displayFainted = true
   self.hitSlot = row.slot
   self.faintFx = { battler = battler, slot = row.slot, frames = FAINT_FRAMES }
   return true
@@ -3048,7 +3219,7 @@ function M:snapDisplay()
     local battler = slot.battler
     if battler and battler.mon then
       battler.shownHP = battler.mon.hp
-      battler.fainted = self.sim:isDown(slot) or nil
+      battler.displayFainted = self.sim:isDown(slot) or nil
     end
   end
 end
@@ -3332,7 +3503,9 @@ end
 -- while a departed monster is still being shown out (M:shownBattlerAt).
 local function hidden(slot, battler)
   if not slot or slot.gone then return true end
-  return battler == nil or battler.fainted == true
+  -- Display faint only -- CoopField's early `fainted` must not hide the pic
+  -- before the queued sink runs.
+  return battler == nil or battler.displayFainted == true
 end
 
 -- Living field seats on one side, in sim slot order (for the side strips).
@@ -3346,6 +3519,9 @@ function M:stripShows(slot)
   if self:sinkingAt(slot.index) then return true end
   local battler = self:shownBattlerAt(slot.index)
   if hidden(slot, battler) then return false end
+  -- Truth may already be down from resolveTurn while the center pic still
+  -- shows this mon: keep the strip icon until display faint / sink done.
+  if battler and not battler.displayFainted then return true end
   if self.sim and self.sim:isDown(slot) and not self.sim:hasReserve(slot) then
     return false
   end
@@ -3729,16 +3905,15 @@ end
 
 -- Whether the trainer is still standing where their monsters will be.
 --
--- Classic Gen 1 scrolls the picture off before the first menu. Co-op NPC
--- fights already seat both foe mons before the opening line, so keeping the
--- pic up through `phase == "messages"` hid WEEDLE/CATERPIE while their HP
--- bars were already drawn -- the entrance read as a stuck trainer. Show the
--- picture only while the foe quarter is still empty (and only before anyone
--- has chosen).
+-- Theatrical intro arms `showEnemyTrainer` while the appear line is up (foes
+-- stay in introHide). Outside that window, only an empty foe quarter keeps the
+-- pic — co-op seats both foe mons before open, so a bare turnCount/messages
+-- rule used to leave the Bug Catcher stuck over WEEDLE/CATERPIE.
 function M:showingTrainer()
   if not self.trainerPic then return false end
   if (self.turnCount or 0) ~= 0 then return false end
   if self.phase ~= "messages" then return false end
+  if self.showEnemyTrainer then return true end
   if self.sim then
     for _, slot in ipairs(self.sim.slots or {}) do
       if self:foeSide(slot.index) then
@@ -4066,6 +4241,7 @@ function M:drawField()
 end
 
 -- Party ball chrome under the opening appear line (both humans' parties).
+-- Trainer theatrical also draws the foe party row (classic top-left).
 -- Positions approximate classic player row + a second row for the partner.
 function M:drawIntroBalls()
   if not self.introBalls then return end
@@ -4074,6 +4250,12 @@ function M:drawIntroBalls()
   local mySlot = self:mySlot()
   local partner = self:partnerOf(mySlot)
   love.graphics.setColor(1, 1, 1, 1)
+  if self:usesTrainerIntro() then
+    local foeParty = self:foeIntroParty()
+    if foeParty then
+      pcall(BS.drawBallRow, BS, foeParty, 64, 16, -8)
+    end
+  end
   if mySlot and mySlot.party then
     pcall(BS.drawBallRow, BS, mySlot.party, 88, 80, 8)
   end
@@ -4092,7 +4274,465 @@ end
 -- instance to the next depending on which display mode each player picked,
 -- which is exactly what two side-by-side clients showed.
 function M:zones()
-  return { { colors = false, x = 0, y = 0, w = 160, h = 144 } }
+  local w, h = 160, 144
+  if self.uiSize then
+    local ok, aw, ah = pcall(self.uiSize, self)
+    if ok and type(aw) == "number" and type(ah) == "number" then
+      w, h = aw, ah
+    end
+  end
+  return { { colors = false, x = 0, y = 0, w = w, h = h } }
+end
+
+-- Gen1 hard-cut onto the top-down Battlefield theatre. Gen2 keeps the
+-- guild-focus classic stage (STAGE_*/strips) entirely.
+function M:usesBattlefield()
+  return Battlefield.enabled(self.game) and true or false
+end
+
+function M:isWideBattleLayout()
+  return self:usesBattlefield()
+end
+
+function M:uiSize()
+  if self:usesBattlefield() then
+    return Battlefield.WIDTH, Battlefield.HEIGHT
+  end
+  return 160, 144
+end
+
+function M:wantsFillScale()
+  return self:usesBattlefield()
+end
+
+-- White letterbox voids so arena edges match the surround (same habit as
+-- engine BattleState). Harmless on the classic Gen2 path.
+M.letterboxWhite = true
+
+-- ------- Battlefield theatre helpers (Gen1 only)
+
+local BATTLEFIELD_BUBBLE_LIFE = 90
+-- Classic message/command chrome lives in the bottom ~48px of 160×144
+-- (Font.drawBox tile row 12 → y=96). Mapped into MENU_BAND on the wide canvas.
+local CLASSIC_MENU_TOP = 96
+local CLASSIC_MENU_H = 48
+
+local function battlefieldFrame(self)
+  if type(self.frame) == "number" then return self.frame end
+  if love and love.timer and love.timer.getTime then
+    return love.timer.getTime() * 60
+  end
+  return 0
+end
+
+local function moveNameFromBattleText(text)
+  if type(text) ~= "string" then return nil end
+  local move = text:match("[Uu]sed\n([^\n!]+)")
+    or text:match("[Uu]sed%s+([^\n!]+)")
+  if not move then return nil end
+  move = move:gsub("^%s+", ""):gsub("%s+$", "")
+  if move == "" then return nil end
+  return move
+end
+
+-- Soft roster / self look lookup. Never throws; missing exports just omit
+-- the walk sheet (Battlefield draws a silhouette).
+local function exportPlayers()
+  local ok, list = pcall(function()
+    if mod.exports and type(mod.exports.players) == "function" then
+      return mod.exports.players()
+    end
+  end)
+  if ok and type(list) == "table" then return list end
+  return nil
+end
+
+local function selfLookId()
+  local ok, id = pcall(function()
+    if mod.exports and type(mod.exports.myLook) == "function" then
+      return mod.exports.myLook()
+    end
+  end)
+  if ok and type(id) == "string" and id ~= "" then return id end
+  ok, id = pcall(function()
+    local chosen = mod.save and mod.save.get and mod.save:get("sprite")
+    if type(chosen) ~= "string" or chosen == "" then
+      chosen = mod.options and mod.options.get and mod.options:get("sprite")
+    end
+    return chosen
+  end)
+  if ok and type(id) == "string" and id ~= "" then return id end
+  return nil
+end
+
+local function ownerLookId(ownerId, selfId)
+  if ownerId == nil then return nil end
+  if selfId ~= nil and ownerId == selfId then return selfLookId() end
+  local players = exportPlayers()
+  if not players then return nil end
+  for _, p in ipairs(players) do
+    if p and p.id == ownerId and type(p.sprite) == "string" and p.sprite ~= "" then
+      return p.sprite
+    end
+  end
+  -- Roster may be a map keyed by id.
+  local row = players[ownerId]
+  if row and type(row.sprite) == "string" and row.sprite ~= "" then
+    return row.sprite
+  end
+  return nil
+end
+
+-- OPP_YOUNGSTER → SPRITE_YOUNGSTER when the catalog has a walk sheet.
+local function trainerWalkSpriteId(trainer, game)
+  if type(trainer) ~= "table" then return nil end
+  local id = trainer.id or trainer.sprite or trainer.spriteId
+  if type(id) ~= "string" or id == "" then return nil end
+  local spriteId = id
+  if spriteId:match("^OPP_") then
+    spriteId = "SPRITE_" .. spriteId:sub(5)
+  elseif not spriteId:match("^SPRITE_") then
+    spriteId = "SPRITE_" .. spriteId
+  end
+  local sprites = game and game.data and game.data.sprites
+  if type(sprites) == "table" and type(sprites[spriteId]) == "table" then
+    return spriteId
+  end
+  -- Soft: accept the id even if we cannot prove the sheet exists here;
+  -- Battlefield.resolveHumanSheet will silhouette if load fails.
+  if sprites == nil then return spriteId end
+  return nil
+end
+
+-- Resolve a battle FRONT pic for the field (not the bag-icon sheet — those
+-- are 16×N and smash when stretched). Ally battlers hold backs in classic
+-- co-op; the arena wants the front for both sides. Cached on the sim slot.
+local function seatFrontFor(self, slot, battler)
+  if not battler then return nil end
+  local mon = battler.mon
+  local species = mon and mon.species
+  if slot and slot._bfFront ~= nil and slot._bfFrontSpecies == species then
+    local cached = slot._bfFront
+    return (cached ~= false) and cached or nil
+  end
+  local resolved = nil
+  local eng = engine
+  local data = self.game and self.game.data
+  local save = self.game and self.game.save
+  -- makeBattler(..., isPlayer=false) loads the species front with palette.
+  if eng and eng.BattleState and eng.BattleState.makeBattler and mon and data then
+    local ok, probe = pcall(eng.BattleState.makeBattler, data, mon, false, save)
+    if ok and probe and probe.sprite then resolved = probe.sprite end
+  end
+  -- Fall back to whatever the live battler already holds (may be a back).
+  if not resolved then resolved = battler.sprite end
+  if slot then
+    slot._bfFront = resolved or false
+    slot._bfFrontSpecies = species
+  end
+  return resolved
+end
+
+-- Resolve a party bag icon to a cached Image on the sim slot (once per
+-- species). Only used as a last-resort field fallback / strip helper.
+local function seatIconFor(self, slot, battler)
+  if not battler then return nil end
+  local mon = battler.mon
+  local species = mon and mon.species
+  if slot and slot._bfIcon ~= nil and slot._bfIconSpecies == species then
+    local cached = slot._bfIcon
+    return (cached ~= false) and cached or nil
+  end
+  local resolved = nil
+  local eng = engine
+  local Sprites = eng and eng.Sprites
+  local data = self.game and self.game.data
+  if Sprites and Sprites.iconPath and mon and data then
+    local path = nil
+    pcall(function()
+      local icons = data.icons
+      local def = data.pokemon and data.pokemon[mon.species]
+      local entry = (icons and icons.bySpecies and icons.bySpecies[mon.species])
+        or (def and def.icon)
+      local name
+      if type(entry) == "string" then
+        name = entry
+        path = icons and icons.icons and icons.icons[entry]
+      elseif type(entry) == "table" then
+        path = entry.image
+      end
+      if not path and def and def.dex and icons and icons.byDex then
+        name = icons.byDex[def.dex]
+        path = name and icons.icons and icons.icons[name]
+      end
+      path = Sprites.iconPath(data, mon, path, { name = name })
+    end)
+    if type(path) == "string" and path ~= "" then
+      local ok, img = pcall(function()
+        if love and love.graphics and love.graphics.newImage then
+          return love.graphics.newImage(path)
+        end
+        return nil
+      end)
+      if ok and img then resolved = img end
+    end
+  end
+  if slot then
+    slot._bfIcon = resolved or false
+    slot._bfIconSpecies = species
+  end
+  return resolved
+end
+
+function M:ensureBattlefieldLoaded()
+  if self.battlefieldLoaded then return end
+  self.battlefieldLoaded = true
+  pcall(Battlefield.reloadArena)
+  pcall(Battlefield.load, mod)
+end
+
+-- Living active field seats for one side (viewer-relative), for Battlefield.
+function M:battlefieldSeats(theirs)
+  local out = {}
+  if not self.sim then return out end
+  local introHide = self.introHide
+  for _, slot in ipairs(self.sim.slots or {}) do
+    if self:foeSide(slot.index) == (theirs and true or false) then
+      local battler = self:shownBattlerAt(slot.index)
+      if not hidden(slot, battler)
+         and not (introHide and introHide[slot.index]) then
+        local mon = battler.mon or {}
+        out[#out + 1] = {
+          index = slot.index,
+          name = battler.name or mon.nickname or mon.species or "?",
+          level = mon.level or 1,
+          hp = displayHP(battler),
+          maxHp = mon.maxHp or mon.hp or 1,
+          status = mon.status,
+          species = mon.species,
+          icon = seatIconFor(self, slot, battler),
+          front = seatFrontFor(self, slot, battler),
+          acting = (self.acting == slot.index)
+            or (self.anim and self.anim.from == slot.index) or false,
+        }
+      end
+    end
+  end
+  return out
+end
+
+function M:battlefieldAllyHumans()
+  local humans = {}
+  local mine = self:mySlot()
+  if not mine then return humans end
+  local mySide = mine.side
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if slot.side == mySide and slot.owner ~= nil and not slot.gone then
+      -- Prefer self first, then partner, in seat order otherwise.
+      humans[#humans + 1] = {
+        id = slot.owner,
+        name = slot.name,
+        spriteId = ownerLookId(slot.owner, self.selfId),
+        _mine = (slot.index == self.mine),
+      }
+    end
+  end
+  table.sort(humans, function(a, b)
+    if a._mine ~= b._mine then return a._mine end
+    return tostring(a.id) < tostring(b.id)
+  end)
+  for _, h in ipairs(humans) do h._mine = nil end
+  return humans
+end
+
+function M:battlefieldFoeHumans()
+  local mode = self.mode
+  if mode == "coop_wild" then return {} end
+  -- Host-sim NPC fights may omit mode; treat trainer + ownerless foes as npc.
+  local npcShape = mode == "coop_npc"
+    or (mode == nil and self.trainer and not self:partyBattle())
+  if npcShape then
+    local spriteId = trainerWalkSpriteId(self.trainer, self.game)
+    if not spriteId then return {} end
+    return {
+      {
+        id = self.trainer and self.trainer.id,
+        name = (self.trainer and self.trainer.name) or self:trainerIntroName(),
+        spriteId = spriteId,
+      },
+    }
+  end
+  -- coop_pvp (and any other human-foe shape): opposing player seats.
+  local humans = {}
+  local mine = self:mySlot()
+  local mySide = mine and mine.side
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if slot.side ~= mySide and slot.owner ~= nil and not slot.gone then
+      humans[#humans + 1] = {
+        id = slot.owner,
+        name = slot.name,
+        spriteId = ownerLookId(slot.owner, self.selfId),
+      }
+    end
+  end
+  return humans
+end
+
+-- 1-based index into allyHumans / foeHumans for a field seat's bubble host.
+-- Human-owned seats match by owner id. coop_npc foe seats (owner nil) map to
+-- foe human 1 when a trainer human is shown. coop_wild has no foe humans, so
+-- ownerless foes stay unmapped.
+function M:battlefieldHumanIndex(slotIndex)
+  local slot = self.sim and self.sim:slot(slotIndex)
+  if not slot then return nil, nil end
+  local theirs = self:foeSide(slotIndex)
+  local humans = theirs and self:battlefieldFoeHumans()
+    or self:battlefieldAllyHumans()
+  if slot.owner then
+    for i, h in ipairs(humans) do
+      if h.id == slot.owner then
+        return theirs and "foe" or "ally", i
+      end
+    end
+  end
+  -- NPC trainer bubble host: any foe seat without a matching owner maps to
+  -- human 1 when we drew a trainer on the right.
+  if theirs and #humans == 1 and slot.owner == nil then
+    return "foe", 1
+  end
+  return nil, nil
+end
+
+function M:noteBattlefieldBubble(slotIndex, text)
+  if not self:usesBattlefield() then return end
+  local move = moveNameFromBattleText(text)
+  if not move then return end
+  -- Humans + coop_npc foe seats (owner nil → foe human 1). coop_wild foes
+  -- have no foeHumans, so battlefieldHumanIndex returns nil.
+  local side, humanIndex = self:battlefieldHumanIndex(slotIndex)
+  if not side then return end
+  self.battlefieldBubbles = {
+    {
+      side = side,
+      humanIndex = humanIndex,
+      text = move,
+      born = battlefieldFrame(self),
+    },
+  }
+end
+
+function M:battlefieldBubbleCtx()
+  local bubbles = self.battlefieldBubbles
+  if type(bubbles) ~= "table" or #bubbles == 0 then return nil end
+  local frame = battlefieldFrame(self)
+  local out = {}
+  local keep = {}
+  for _, b in ipairs(bubbles) do
+    local age = frame - (tonumber(b.born) or frame)
+    if age < BATTLEFIELD_BUBBLE_LIFE then
+      keep[#keep + 1] = b
+      out[#out + 1] = {
+        side = b.side,
+        humanIndex = b.humanIndex,
+        text = b.text,
+        t = 1 - (age / BATTLEFIELD_BUBBLE_LIFE),
+      }
+    end
+  end
+  self.battlefieldBubbles = (#keep > 0) and keep or nil
+  return out
+end
+
+function M:battlefieldCtx()
+  local frame = battlefieldFrame(self)
+  local ctx = {
+    mode = self.mode,
+    frame = frame,
+    allyHumans = self:battlefieldAllyHumans(),
+    foeHumans = self:battlefieldFoeHumans(),
+    allySeats = self:battlefieldSeats(false),
+    foeSeats = self:battlefieldSeats(true),
+    bubbles = self:battlefieldBubbleCtx(),
+    -- Arrow/card only during target pick; Battlefield honors this flag.
+    showTarget = (self.phase == "target"),
+  }
+  if self.phase == "target" and self.sim then
+    local mine = self:mySlot()
+    local targets = mine and self.sim:targetsFor(mine) or {}
+    ctx.targets = targets
+    ctx.targetIndex = self.targetIndex or 1
+  end
+  return ctx
+end
+
+function M:drawMenuBand()
+  local g = love and love.graphics
+  if not (g and g.push) then
+    self:drawMenusClassic()
+    return
+  end
+  local bandY = Battlefield.FIELD_BOTTOM
+  local sx = Battlefield.WIDTH / 160
+  local sy = Battlefield.MENU_BAND / CLASSIC_MENU_H
+  g.push()
+  g.translate(0, bandY)
+  g.scale(sx, sy)
+  g.translate(0, -CLASSIC_MENU_TOP)
+  if g.setScissor then
+    -- Clip to the classic menu band in pre-transform space... actually
+    -- scissor is in screen/canvas pixels. Clip the menu band on the canvas.
+    local prev = { g.getScissor() }
+    g.setScissor(0, bandY, Battlefield.WIDTH, Battlefield.MENU_BAND)
+    self:drawMenusClassic()
+    if prev[1] then
+      g.setScissor(prev[1], prev[2], prev[3], prev[4])
+    else
+      g.setScissor()
+    end
+  else
+    self:drawMenusClassic()
+  end
+  g.pop()
+end
+
+function M:drawMenusClassic()
+  if self.replacing then
+    self:drawReplace()
+  elseif self.runAsk and self.phase ~= "messages" then
+    self:drawRunAsk()
+  elseif self.phase == "choose" then
+    self:drawCommand()
+  elseif self.phase == "move" then
+    self:drawMoves()
+  elseif self.phase == "target" then
+    -- Slim hint in the menu band; field cursor + card live on the arena.
+    self:drawTarget()
+  elseif self.phase == "switch" then
+    self:drawSwitch()
+  elseif self.phase == "item" then
+    self:drawItem()
+  elseif self.phase == "item_party" then
+    self:drawItemParty()
+  elseif self.phase == "item_move" then
+    self:drawItemMove()
+  else
+    self:drawMessage()
+  end
+end
+
+function M:drawBattlefieldSafe()
+  self:ensureBattlefieldLoaded()
+  local eng = {
+    Font = engine and engine.Font,
+    Sprites = engine and engine.Sprites,
+    SpriteRenderer = engine and engine.SpriteRenderer,
+    sprites = self.game and self.game.data and self.game.data.sprites,
+    game = self.game,
+  }
+  local ctx = self:battlefieldCtx()
+  pcall(Battlefield.draw, self, ctx, eng)
+  self:drawMenuBand()
+  love.graphics.setColor(1, 1, 1, 1)
 end
 
 -- ------- animations
@@ -4111,8 +4751,162 @@ end
 local CLASSIC_PLAYER = { x = STAGE_ALLY.x, y = 40 }
 local CLASSIC_ENEMY = { x = STAGE_FOE.x, y = STAGE_FOE.y }
 
+-- ------- move / catch SFX (AnimPlayer pollEffects + hit thuds)
+--
+-- Mirrors BattleState's anim hold: update → pollEffects → playAnimSound /
+-- SFX_TINK; on completion, PlayApplyingAttackSound-style effectiveness thud.
+-- Derived client-side from the following effectiveness line (no PROTOCOL).
+
+local function hitSfxFromText(text)
+  if type(text) ~= "string" then return nil end
+  -- Engine / BattleSim lines may break mid-phrase ("It's super\neffective!").
+  local lower = text:lower():gsub("%s+", " ")
+  if lower:find("super effective", 1, true) then
+    return { sound = "Super_Effective", pitch = 0xe0 }
+  end
+  if lower:find("not very effective", 1, true) then
+    return { sound = "Not_Very_Effective", pitch = 0x50 }
+  end
+  return nil
+end
+
+-- Peek the message queue for the effectiveness line (or a following drain,
+-- which means a damaging hit with neutral matchup → Damage thud).
+function M:peekHitSfx()
+  local sawDrain = false
+  local function remap(sfx)
+    if not sfx then return nil end
+    return {
+      sound = Gen.sfx(self.game, sfx.sound),
+      pitch = sfx.pitch,
+    }
+  end
+  for _, row in ipairs(self.messages or {}) do
+    if type(row) == "table" then
+      if row.anim then break end
+      if row.text then
+        local sfx = remap(hitSfxFromText(row.text))
+        if sfx then return sfx end
+      end
+      if row.drain then sawDrain = true end
+      if row.faintfx then sawDrain = true end
+    elseif type(row) == "string" then
+      local sfx = remap(hitSfxFromText(row))
+      if sfx then return sfx end
+    end
+  end
+  if sawDrain then
+    return { sound = Gen.sfx(self.game, "Damage"), pitch = 0x20 }
+  end
+  return nil
+end
+
+function M:playAnimSound(soundMove)
+  local Sound = engine and engine.Sound
+  if not Sound then return end
+  local data = self.game and self.game.data
+  if not data then return end
+  local animName = self.anim and self.anim.anim
+  local mdef = data.moves and data.moves[soundMove]
+  if animName == "GROWL" or animName == "ROAR" then
+    local from = self.anim and self.anim.from
+    local battler = from and self:shownBattlerAt(from)
+    local species = battler and battler.mon and battler.mon.species
+    if species and Sound.playMoveCry then
+      pcall(Sound.playMoveCry, data, species,
+        mdef and mdef.anim and mdef.anim.tempo)
+    end
+    return
+  end
+  if mdef and mdef.anim then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, mdef.anim)
+    elseif mdef.anim.sound and Sound.play then
+      pcall(Sound.play, data, mdef.anim.sound)
+    end
+  end
+end
+
+-- Soft-fail Sound for one AnimPlayer event (move sound or catch SFX_TINK).
+function M:applyAnimEffect(ev)
+  if type(ev) ~= "table" then return end
+  if ev.sound then self:playAnimSound(ev.sound) end
+  if ev.effect == "SFX_TINK" then
+    local Sound = engine and engine.Sound
+    local data = self.game and self.game.data
+    if Sound and Sound.play and data then
+      pcall(Sound.play, data, Gen.sfx(self.game, "Tink"))
+    end
+  end
+end
+
+function M:pollAnimEffects()
+  local player = self.animPlayer
+  if not (player and player.pollEffects) then return end
+  local ok, events = pcall(player.pollEffects, player)
+  if not ok or type(events) ~= "table" then return end
+  for _, ev in ipairs(events) do
+    self:applyAnimEffect(ev)
+  end
+end
+
+-- Effectiveness thud after the flash (BattleState:applyHitFx sfx half).
+function M:applyPendingHitFx()
+  local hit = self.pendingHit
+  self.pendingHit = nil
+  if not hit or not hit.sfx then return end
+  local Sound = engine and engine.Sound
+  local data = self.game and self.game.data
+  if not (Sound and data) then return end
+  if type(hit.sfx) == "table" then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, hit.sfx)
+    elseif hit.sfx.sound and Sound.play then
+      pcall(Sound.play, data, hit.sfx.sound)
+    end
+  elseif Sound.play then
+    pcall(Sound.play, data, hit.sfx)
+  end
+end
+
+-- Solo's no-AnimPlayer branch: play the move's sound table entry once.
+function M:playMoveAnimFallback(row)
+  local data = self.game and self.game.data
+  local Sound = engine and engine.Sound
+  if not (data and Sound and row and row.anim) then return end
+  local mdef = data.moves and data.moves[row.anim]
+  local anim = mdef and mdef.anim
+  if row.anim == "GROWL" or row.anim == "ROAR" then
+    local from = row.from
+    local battler = from and self:shownBattlerAt(from)
+    local species = battler and battler.mon and battler.mon.species
+    if species and Sound.playMoveCry then
+      pcall(Sound.playMoveCry, data, species, anim and anim.tempo)
+    end
+  elseif anim and anim.sound then
+    if Sound.playMove then
+      pcall(Sound.playMove, data, anim)
+    elseif Sound.play then
+      pcall(Sound.play, data, anim.sound)
+    end
+  end
+end
+
 function M:startAnim(row)
   self.anim = row
+  self.pendingHit = nil
+  -- Trainer callout over the human who ordered this attack (Gen1 battlefield).
+  if row and row.from and type(row.anim) == "string"
+     and row.anim ~= "HIDEPIC_ANIM" and row.anim ~= "SHOWPIC_ANIM"
+     and row.anim ~= "POOF_ANIM" then
+    local moveName = row.anim
+    local def = self.game and self.game.data and self.game.data.moves
+      and self.game.data.moves[row.anim]
+    if def and type(def.name) == "string" and def.name ~= "" then
+      moveName = def.name
+    end
+    self:noteBattlefieldBubble(row.from, "used\n" .. tostring(moveName) .. "!")
+  end
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
   if row.anim == "HIDEPIC_ANIM" then
     self.foePicHidden = true
@@ -4122,12 +4916,16 @@ function M:startAnim(row)
     -- Intro send-out and catch ball chain both play SFX_BALL_POOF.
     local Sound = engine and engine.Sound
     if Sound and Sound.play then
-      pcall(Sound.play, self.game.data, "Ball_Poof")
+      pcall(Sound.play, self.game.data, Gen.sfx(self.game, "Ball_Poof"))
     end
   end
+  local hitSfx = self:peekHitSfx()
+  if hitSfx then self.pendingHit = { sfx = hitSfx } end
   if not (self.animPlayer and self.animPlayer.start) then
-    -- No animation data in this build: the flash is skipped and the messages
-    -- carry on, which is the degrade the header promises.
+    -- No animation data in this build: play the move SFX once (solo's
+    -- no-player branch) and the hit thud, then let the messages carry on.
+    self:playMoveAnimFallback(row)
+    self:applyPendingHitFx()
     self.anim = nil
     return false
   end
@@ -4150,8 +4948,15 @@ function M:startAnim(row)
     ballFlicker = ball == "MASTER_BALL" or ball == "ULTRA_BALL" or nil,
   }
   local ok = pcall(self.animPlayer.start, self.animPlayer, row.anim, isPlayer, opts)
-  if not ok then self.anim = nil end
-  return ok
+  if not ok then
+    self:playMoveAnimFallback(row)
+    self:applyPendingHitFx()
+    self.anim = nil
+    return false
+  end
+  -- Frame-0 sound/effect rows fire immediately (BattleState after start).
+  self:pollAnimEffects()
+  return true
 end
 
 -- How far to shift this animation so it lands on the slot that acted.
@@ -6170,36 +6975,16 @@ end
 function M:drawSafe()
   local eng = engine
   if not eng then return end
+  if self:usesBattlefield() then
+    return self:drawBattlefieldSafe()
+  end
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", 0, 0, 160, 144)
   self:drawField()
   -- Trainer is painted inside drawField (under the panels) while the opening
   -- lines run; drawing it here again put the sprite over ally readouts.
   self:drawAnim()
-  if self.replacing then
-    self:drawReplace()
-  -- Drawn under exactly the condition `update` drives it under, phase included:
-  -- an ask deferred behind a batch of messages must leave the message box on
-  -- screen, or the box would show a question the buttons are not answering.
-  elseif self.runAsk and self.phase ~= "messages" then
-    self:drawRunAsk()
-  elseif self.phase == "choose" then
-    self:drawCommand()
-  elseif self.phase == "move" then
-    self:drawMoves()
-  elseif self.phase == "target" then
-    self:drawTarget()
-  elseif self.phase == "switch" then
-    self:drawSwitch()
-  elseif self.phase == "item" then
-    self:drawItem()
-  elseif self.phase == "item_party" then
-    self:drawItemParty()
-  elseif self.phase == "item_move" then
-    self:drawItemMove()
-  else
-    self:drawMessage()
-  end
+  self:drawMenusClassic()
   love.graphics.setColor(1, 1, 1, 1)
 end
 
