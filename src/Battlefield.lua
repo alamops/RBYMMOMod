@@ -37,6 +37,12 @@ M.CARD_W = 120
 M.CARD_H = 100
 M.CARD_SPRITE = 56
 
+-- Persistent seat plates (the arena HUD): one per side, always up. Ally sits
+-- bottom-left of the field so it clears MENU_BAND; foe sits top-right.
+M.PLATE_W = 176
+M.PLATE_H = 48
+M.PLATE_PAD = 12
+
 M.HUMAN_SCALE = 2
 M.HUMAN_SRC = 16
 M.HUMAN_DRAW = M.HUMAN_SRC * M.HUMAN_SCALE
@@ -68,6 +74,15 @@ end
 local function listOf(t)
   if type(t) ~= "table" then return {} end
   return t
+end
+
+-- Shared by the card, the plates and the bubbles — declared here so the pure
+-- model helpers below can reach it too.
+local function truncate(text, maxChars)
+  if type(text) ~= "string" then return "" end
+  maxChars = maxChars or 12
+  if #text <= maxChars then return text end
+  return text:sub(1, math.max(1, maxChars - 1)) .. "."
 end
 
 -- ------- Gen1 gate
@@ -153,6 +168,168 @@ function M.cardModel(seat)
     icon = seat.icon,
     front = seat.front or seat.frontImage or seat.sprite,
   }
+end
+
+-- Draw geometry for one field mon. Pure (no love), so the headless suite can
+-- assert the flip decision and the placement without a graphics context.
+--   iw/ih  source image dimensions.
+--   opts   x/y override the seat centre (bob + fx offsets); iconFrame selects
+--          the 16×16 bag-icon fallback path; scale is an fx multiplier.
+-- Ally seats carry facing == "right" and are mirrored so the two sides face
+-- each other. Mirroring is a negative x-scale anchored at the sprite's right
+-- edge — the engine's own idiom (SpriteRenderer.blitFrame, SummaryMenu).
+function M.monDrawParams(mon, iw, ih, opts)
+  mon = type(mon) == "table" and mon or {}
+  opts = type(opts) == "table" and opts or {}
+  local box = num(mon.drawW, M.MON_DRAW)
+  iw = math.max(1, num(iw, M.ICON_SRC))
+  ih = math.max(1, num(ih, M.ICON_SRC))
+  local cx = num(opts.x, num(mon.x, 0))
+  local cy = num(opts.y, num(mon.y, 0))
+  local mul = num(opts.scale, 1)
+  if mul < 0 then mul = 0 end
+
+  local sc
+  if opts.iconFrame then
+    -- 16×16 menu frame, integer scale for crisp pixels.
+    iw, ih = 16, 16
+    sc = math.max(2, math.floor(box / 16))
+  else
+    -- Aspect-correct fit inside the mon box (no smash / stretch).
+    sc = math.min(box / iw, box / ih)
+    -- Prefer integer-ish scale when close, for GB sprite crispness.
+    if sc >= 1 then
+      local rounded = math.floor(sc + 0.15)
+      if rounded >= 1 and math.abs(sc - rounded) < 0.2 then sc = rounded end
+    end
+  end
+  sc = sc * mul
+
+  local dw, dh = iw * sc, ih * sc
+  -- Front pics anchor near the feet so the bob reads as a hop on the grass;
+  -- the square icon frame stays centred.
+  local top = opts.iconFrame and (cy - dh / 2) or (cy - dh * 0.85)
+  local flip = mon.facing == "right"
+  return {
+    scale = sc,
+    flip = flip,
+    sx = flip and -sc or sc,
+    sy = sc,
+    w = dw,
+    h = dh,
+    x = flip and (cx + dw / 2) or (cx - dw / 2),
+    y = top,
+  }
+end
+
+-- Persistent seat-plate model. Pure. `shownHp` is the display clock the battle
+-- drains toward `hp`; a seat without one falls back to `hp`, so a caller that
+-- never animates (CoopBattle) reads the same as before.
+function M.plateModel(seat)
+  seat = type(seat) == "table" and seat or {}
+  local base = M.cardModel(seat)
+  local shown = clamp(math.floor(num(seat.shownHp, base.hp) + 0.5),
+    0, base.maxHp)
+  local frac = 0
+  if base.maxHp > 0 then frac = clamp(shown / base.maxHp, 0, 1) end
+  local side = seat.side == "foe" and "foe" or "ally"
+  return {
+    name = truncate(base.name, 10),
+    level = base.level,
+    hp = base.hp,
+    shownHp = shown,
+    maxHp = base.maxHp,
+    frac = frac,
+    status = base.status,
+    side = side,
+  }
+end
+
+-- ------- fx math
+--
+-- The battle owns the clock and hands each effect a progress t in 0..1; every
+-- shape below is a pure function of t, so a frame is reproducible and the
+-- suite can assert it headlessly.
+
+M.FX_LUNGE = 14 -- peak px toward the midline, reached at t == 0.5
+M.FX_SHAKE = 3 -- peak whole-field jolt, px
+M.FX_FAINT_DROP = 0.5 -- fraction of the mon box a fainting seat sinks
+
+local NO_FX = { dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0 }
+
+local function fxT(v)
+  return clamp(num(v, 0), 0, 1)
+end
+
+-- Out and back, peaking mid-effect.
+function M.fxLunge(t)
+  return math.sin(math.pi * fxT(t))
+end
+
+-- Two white pulses across the effect, the second weaker.
+function M.fxFlash(t)
+  t = fxT(t)
+  return math.abs(math.sin(t * math.pi * 2)) * (1 - t * 0.4)
+end
+
+-- Decaying wobble; the sign alternates so it reads as a jolt, not a slide.
+function M.fxShake(t)
+  t = fxT(t)
+  return math.sin(t * math.pi * 6) * (1 - t)
+end
+
+-- Sink fraction (0..1 of FX_FAINT_DROP) and remaining alpha.
+function M.fxFaint(t)
+  t = fxT(t)
+  return t * t, 1 - t
+end
+
+-- Scale-up with a slight overshoot (back-out): 0 at t == 0, 1 at t == 1.
+function M.fxSpawn(t)
+  local u = fxT(t) - 1
+  local c1 = 1.70158
+  return 1 + (c1 + 1) * u * u * u + c1 * u * u
+end
+
+-- Fold the ctx fx list into one seat's draw modifiers. An absent or empty list
+-- yields the neutral record, so a caller that passes no fx draws unchanged.
+-- An entry with no seatIndex applies to every seat on its side.
+function M.fxSeat(fx, side, seatIndex)
+  local out = { dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0 }
+  for _, e in ipairs(listOf(fx)) do
+    if type(e) == "table" and e.side == side
+       and (e.seatIndex == nil or e.seatIndex == seatIndex) then
+      if e.kind == "lunge" then
+        -- Toward the midline: allies charge right, foes left.
+        local dir = side == "foe" and -1 or 1
+        out.dx = out.dx + dir * M.FX_LUNGE * M.fxLunge(e.t)
+      elseif e.kind == "flash" then
+        local f = M.fxFlash(e.t)
+        if f > out.flash then out.flash = f end
+      elseif e.kind == "faint" then
+        local drop, alpha = M.fxFaint(e.t)
+        out.dy = out.dy + drop * M.MON_DRAW * M.FX_FAINT_DROP
+        if alpha < out.alpha then out.alpha = alpha end
+      elseif e.kind == "spawn" then
+        out.scale = out.scale * M.fxSpawn(e.t)
+      end
+    end
+  end
+  if out.scale < 0 then out.scale = 0 end
+  return out
+end
+
+-- Whole-field jolt. `shake` is field-wide, so side / seatIndex are ignored.
+function M.fxFieldShake(fx)
+  local dx, dy = 0, 0
+  for _, e in ipairs(listOf(fx)) do
+    if type(e) == "table" and e.kind == "shake" then
+      local t = fxT(e.t)
+      dx = dx + M.FX_SHAKE * M.fxShake(t)
+      dy = dy + M.FX_SHAKE * 0.6 * math.cos(t * math.pi * 5) * (1 - t)
+    end
+  end
+  return dx, dy
 end
 
 -- dir -1 / +1; wraps. `current` is 1-based index into `targets`, or a seat
@@ -261,6 +438,8 @@ local function placeMons(seats, side, out)
       name = seat and seat.name,
       level = seat and seat.level,
       hp = seat and seat.hp,
+      -- Display clock; nil until a caller animates drains (see plateModel).
+      shownHp = seat and seat.shownHp,
       maxHp = seat and seat.maxHp,
       status = seat and seat.status,
       species = seat and seat.species,
@@ -365,6 +544,30 @@ function M.layout(ctx)
     end
   end
 
+  -- One persistent plate per side, on its primary (first placed) seat. A seat
+  -- carrying no HP figures at all has nothing to plate — skip it rather than
+  -- publish a 0/1 bar.
+  local plates = {}
+  local plated = {}
+  for _, mon in ipairs(mons) do
+    if not plated[mon.side]
+       and (tonumber(mon.maxHp) or tonumber(mon.hp)) then
+      plated[mon.side] = true
+      local ally = mon.side ~= "foe"
+      plates[#plates + 1] = {
+        side = mon.side,
+        x = ally and M.PLATE_PAD or (M.WIDTH - M.PLATE_W - M.PLATE_PAD),
+        y = ally and (M.FIELD_BOTTOM - M.PLATE_H - M.PLATE_PAD) or M.PLATE_PAD,
+        w = M.PLATE_W,
+        h = M.PLATE_H,
+        -- Exact hp/maxHp on your own side only, per series convention.
+        numbers = ally,
+        model = M.plateModel(mon),
+        mon = mon,
+      }
+    end
+  end
+
   local bubbles = {}
   for _, b in ipairs(listOf(ctx.bubbles)) do
     if type(b) == "table" and (b.side == "ally" or b.side == "foe") then
@@ -412,7 +615,10 @@ function M.layout(ctx)
     target = targetMon,
     arrow = arrow,
     card = card,
+    plates = plates,
     bubbles = bubbles,
+    -- Empty unless the caller drives effects; renderers stay neutral then.
+    fx = listOf(ctx.fx),
     frame = num(ctx.frame, 0),
   }
 end
@@ -457,11 +663,70 @@ local function iconBob(frame, acting)
   return base
 end
 
-local function truncate(text, maxChars)
-  if type(text) ~= "string" then return "" end
-  maxChars = maxChars or 12
-  if #text <= maxChars then return text end
-  return text:sub(1, math.max(1, maxChars - 1)) .. "."
+-- ------- trainer sheet colour
+--
+-- SpriteRenderer:resolveImage hands back DMG shades in every colour mode but
+-- ADVANCED / OG RED: the engine expects the whole-canvas zone shader to colour
+-- the sheet, and this canvas opts out of that shader (MediatedBattle:zones) so
+-- the pre-baked mon pics survive. Left alone the trainers are grey. So bake the
+-- OBJ palette here instead, ranked by fidelity, each rung falling through:
+--   1. the engine already returned colour (trueColor record, or a mode that
+--      bakes an OBJ palette itself) — keep that image;
+--   2. the per-sprite OBJ palette the GBC port assigns this character
+--      (PaletteFX.spriteObp), baked with SpriteRenderer.getObpImage's own
+--      shade thresholds and its OBJ-colour-0 alpha key;
+--   3. whatever the engine returned — today's DMG look, never a hard failure.
+-- Requiring engine render modules through pcall is the pattern this file
+-- already uses; a drift upstream costs colour, never the screen.
+local function bakeSheetColor(record, spriteId)
+  if type(record) ~= "table" or record.trueColor then return nil end
+  if type(record.image) ~= "string" or record.image == "" then return nil end
+  if not (love and love.image and love.image.newImageData
+          and love.graphics and love.graphics.newImage) then
+    return nil
+  end
+  local PF = nil
+  do
+    local ok, loaded = pcall(require, "src.render.PaletteFX")
+    if ok then PF = loaded end
+  end
+  if type(PF) ~= "table" or not PF.spriteObp then return nil end
+
+  local engineColored = false
+  pcall(function()
+    engineColored = (PF.usesGbcPack and PF.usesGbcPack() and true or false)
+      or (PF.usesSpriteObp and PF.usesSpriteObp() and true or false)
+  end)
+  if engineColored then return nil end
+
+  local colors = nil
+  pcall(function() colors = PF.spriteObp(record, spriteId) end)
+  if type(colors) ~= "table" or type(colors[4]) ~= "table" then return nil end
+
+  local baked = nil
+  pcall(function()
+    local data = nil
+    local okA, Assets = pcall(require, "src.render.Assets")
+    if okA and type(Assets) == "table" and Assets.imageData then
+      data = Assets.imageData(record.image)
+    else
+      data = love.image.newImageData(record.image)
+    end
+    if not (data and data.mapPixel) then return end
+    data:mapPixel(function(_, _, r, gr, b, a)
+      if a == 0 then return r, gr, b, a end
+      -- OBJ colour 0 is unconditionally transparent on hardware, and the
+      -- extracted sheets carry no alpha of their own.
+      if r > 0.83 then return r, gr, b, 0 end
+      local col = r > 0.5 and colors[2] or r > 0.17 and colors[3] or colors[4]
+      return col[1] / 255, col[2] / 255, col[3] / 255, a
+    end)
+    baked = love.graphics.newImage(data)
+    if baked.setFilter then
+      pcall(function() baked:setFilter("nearest", "nearest") end)
+    end
+  end)
+  return baked
 end
 
 local function resolveHumanSheet(spriteId, eng)
@@ -498,6 +763,8 @@ local function resolveHumanSheet(spriteId, eng)
       if ok then img = loaded end
     end
     if not img then return end
+    local colored = bakeSheetColor(record, spriteId)
+    if colored then img = colored end
 
     local fw = tonumber(record.frameWidth) or M.HUMAN_SRC
     local fh = tonumber(record.frameHeight) or M.HUMAN_SRC
@@ -600,22 +867,27 @@ local function resolveDrawable(sprite)
   return nil, nil
 end
 
-local function drawMonShadow(gfx, x, y, w)
+local function drawMonShadow(gfx, x, y, w, alpha)
+  alpha = alpha == nil and 1 or clamp(num(alpha, 1), 0, 1)
   pcall(function()
     local rw = math.max(14, w * 0.42)
     local rh = math.max(5, w * 0.14)
-    gfx.setColor(0, 0, 0, 0.35)
+    gfx.setColor(0, 0, 0, 0.35 * alpha)
     gfx.ellipse("fill", x, y + 2, rw, rh)
     gfx.setColor(1, 1, 1, 1)
   end)
 end
 
-local function drawMonIcon(mon, frame)
+-- fx: an M.fxSeat record, or nil for the neutral draw.
+local function drawMonIcon(mon, frame, fx)
   local gfx = g()
   if not gfx then return end
+  fx = type(fx) == "table" and fx or NO_FX
+  local alpha = clamp(num(fx.alpha, 1), 0, 1)
+  if alpha <= 0 then return end
   local bob = iconBob(frame, mon.acting)
-  local x = mon.x
-  local y = mon.y + bob
+  local x = mon.x + num(fx.dx, 0)
+  local y = mon.y + bob + num(fx.dy, 0)
   local box = mon.drawW or M.MON_DRAW
 
   -- Prefer battle FRONT art; bag icons are a last resort (and must be cropped).
@@ -626,42 +898,52 @@ local function drawMonIcon(mon, frame)
     fromIcon = img ~= nil
   end
 
-  drawMonShadow(gfx, x, y + box * 0.28, box)
+  drawMonShadow(gfx, x, y + box * 0.28, box, alpha)
 
   local drawn = false
   if img then
     pcall(function()
-      gfx.setColor(1, 1, 1, 1)
       if img.setFilter then pcall(function() img:setFilter("nearest", "nearest") end) end
       local iw, ih = img:getDimensions()
       local quad = fromIcon and iconFrameQuad(img) or nil
-      if quad then
-        -- 16×16 menu frame, integer scale for crisp pixels.
-        local sc = math.max(2, math.floor(box / 16))
-        local dw = 16 * sc
-        gfx.draw(img, quad, x - dw / 2, y - dw / 2, 0, sc, sc)
-        drawn = true
-      else
-        -- Aspect-correct fit inside the mon box (no smash / stretch).
-        local sc = math.min(box / math.max(iw, 1), box / math.max(ih, 1))
-        -- Prefer integer-ish scale when close, for GB sprite crispness.
-        if sc >= 1 then
-          local rounded = math.floor(sc + 0.15)
-          if rounded >= 1 and math.abs(sc - rounded) < 0.2 then sc = rounded end
+      local p = M.monDrawParams(mon, iw, ih, {
+        x = x, y = y, iconFrame = quad ~= nil, scale = fx.scale,
+      })
+      -- A spawn at t == 0 has nothing to draw yet; the shadow already marks
+      -- the seat, so do not fall through to the placeholder box.
+      if p.scale <= 0 then drawn = true; return end
+      local function blit()
+        if quad then
+          gfx.draw(img, quad, p.x, p.y, 0, p.sx, p.sy)
+        else
+          gfx.draw(img, p.x, p.y, 0, p.sx, p.sy)
         end
-        local dw, dh = iw * sc, ih * sc
-        -- Anchor near feet so bob reads as a hop on the grass.
-        gfx.draw(img, x - dw / 2, y - dh * 0.85, 0, sc, sc)
-        drawn = true
       end
+      gfx.setColor(1, 1, 1, alpha)
+      blit()
+      -- White pulse on a defender: one additive re-blit of the same geometry
+      -- (no shader — this canvas has none of its own).
+      local flash = clamp(num(fx.flash, 0), 0, 1)
+      if flash > 0 and gfx.setBlendMode then
+        local mode, alphaMode
+        if gfx.getBlendMode then mode, alphaMode = gfx.getBlendMode() end
+        gfx.setBlendMode("add")
+        local f = flash * alpha
+        gfx.setColor(f, f, f, 1)
+        blit()
+        if mode then gfx.setBlendMode(mode, alphaMode)
+        else gfx.setBlendMode("alpha") end
+      end
+      gfx.setColor(1, 1, 1, 1)
+      drawn = true
     end)
   end
   if drawn then return end
 
   pcall(function()
-    gfx.setColor(0.95, 0.85, 0.2, 0.9)
+    gfx.setColor(0.95, 0.85, 0.2, 0.9 * alpha)
     gfx.rectangle("fill", x - box / 2, y - box / 2, box, box, 2, 2)
-    gfx.setColor(0.2, 0.15, 0.05, 1)
+    gfx.setColor(0.2, 0.15, 0.05, alpha)
     gfx.rectangle("line", x - box / 2, y - box / 2, box, box, 2, 2)
     gfx.setColor(1, 1, 1, 1)
   end)
@@ -741,6 +1023,61 @@ local function drawCard(card, eng)
   end)
 end
 
+-- Persistent seat plate, in drawCard's visual language (rounded white panel,
+-- thresholded bar). The bar reads the display clock, so a caller that drains
+-- `shownHp` animates here for free.
+local function drawPlate(plate)
+  local gfx = g()
+  if not (gfx and plate) then return end
+  local model = plate.model or M.plateModel(plate.mon)
+  pcall(function()
+    local x, y, w, h = plate.x, plate.y, plate.w, plate.h
+    local font = gfx.getFont and gfx.getFont() or nil
+    local function widthOf(text)
+      if font and font.getWidth then return font:getWidth(text) end
+      return #text * 6
+    end
+
+    gfx.setColor(0.06, 0.07, 0.11, 0.4)
+    gfx.rectangle("fill", x + 2, y + 3, w, h, 6, 6)
+    gfx.setColor(1, 1, 1, 0.94)
+    gfx.rectangle("fill", x, y, w, h, 6, 6)
+    gfx.setColor(0.1, 0.1, 0.15, 1)
+    gfx.rectangle("line", x, y, w, h, 6, 6)
+
+    local pad = 8
+    local barW = w - pad * 2
+    local barY = y + h - pad - 8
+    gfx.setColor(0.05, 0.05, 0.1, 1)
+    if gfx.print then
+      gfx.print(model.name, x + pad, y + 4)
+      local right = ("L%d"):format(model.level)
+      if model.status then right = model.status:upper() .. " " .. right end
+      gfx.print(right, x + w - pad - widthOf(right), y + 4)
+      if plate.numbers then
+        local hpText = ("%d/%d"):format(model.shownHp, model.maxHp)
+        gfx.print(hpText, x + w - pad - widthOf(hpText), barY - 14)
+      end
+    end
+
+    gfx.setColor(0.2, 0.2, 0.25, 1)
+    gfx.rectangle("fill", x + pad, barY, barW, 8, 2, 2)
+    local frac = clamp(num(model.frac, 0), 0, 1)
+    if frac > 0.5 then
+      gfx.setColor(0.3, 0.75, 0.35, 1)
+    elseif frac > 0.2 then
+      gfx.setColor(0.85, 0.7, 0.2, 1)
+    else
+      gfx.setColor(0.85, 0.25, 0.2, 1)
+    end
+    if frac > 0 then
+      gfx.rectangle("fill", x + pad, barY, math.max(1, math.floor(barW * frac)),
+        8, 2, 2)
+    end
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
 local function drawBubble(b)
   local gfx = g()
   if not gfx then return end
@@ -776,17 +1113,22 @@ local function drawBubble(b)
   end)
 end
 
-local function drawArena()
+-- outset: px of ground drawn beyond every canvas edge. Non-zero only while a
+-- shake translates the field layer, so the jolt never uncovers the canvas.
+local function drawArena(outset)
   local gfx = g()
   if not gfx then return end
+  outset = num(outset, 0)
+  local ox, oy = -outset, -outset
+  local ow, oh = M.WIDTH + outset * 2, M.HEIGHT + outset * 2
   local img = arenaImage or M.load(mod)
   if img then
     pcall(function()
       gfx.setColor(1, 1, 1, 1)
       local iw, ih = img:getDimensions()
-      local sx = M.WIDTH / math.max(iw, 1)
-      local sy = M.HEIGHT / math.max(ih, 1)
-      gfx.draw(img, 0, 0, 0, sx, sy)
+      local sx = ow / math.max(iw, 1)
+      local sy = oh / math.max(ih, 1)
+      gfx.draw(img, ox, oy, 0, sx, sy)
     end)
     -- Soft grass plate so battle fronts read on the colorful arena.
     pcall(function()
@@ -802,9 +1144,9 @@ local function drawArena()
   -- Flat stand-in so layout still reads without the PNG.
   pcall(function()
     gfx.setColor(0.45, 0.7, 0.35, 1)
-    gfx.rectangle("fill", 0, 0, M.WIDTH, M.FIELD_BOTTOM)
+    gfx.rectangle("fill", ox, oy, ow, M.FIELD_BOTTOM + outset)
     gfx.setColor(0.2, 0.25, 0.3, 1)
-    gfx.rectangle("fill", 0, M.FIELD_BOTTOM, M.WIDTH, M.MENU_BAND)
+    gfx.rectangle("fill", ox, M.FIELD_BOTTOM, ow, M.MENU_BAND + outset)
     gfx.setColor(1, 1, 1, 0.15)
     gfx.line(M.MIDLINE, 0, M.MIDLINE, M.FIELD_BOTTOM)
     gfx.setColor(1, 1, 1, 1)
@@ -820,23 +1162,46 @@ function M.draw(battle, ctx, eng)
       return
     end
     local layout = M.layout(ctx)
-    drawArena()
+    local hasFx = #layout.fx > 0
+    local gfx = g()
 
-    for _, h in ipairs(layout.humans) do
-      pcall(drawHuman, h, layout.frame, eng)
+    -- Shake offsets the whole field layer (ground, humans, mons, plates) but
+    -- never the menu band, which the battle screen draws after this returns.
+    local shakeX, shakeY = 0, 0
+    if hasFx then shakeX, shakeY = M.fxFieldShake(layout.fx) end
+    local shaking = shakeX ~= 0 or shakeY ~= 0
+    local pushed = false
+    if shaking and gfx and gfx.push and gfx.translate then
+      pushed = pcall(gfx.push)
+      if pushed then pcall(gfx.translate, shakeX, shakeY) end
     end
-    for _, mon in ipairs(layout.mons) do
-      pcall(drawMonIcon, mon, layout.frame)
-    end
-    if layout.arrow then
-      pcall(drawArrow, layout.arrow)
-    end
-    if layout.card then
-      pcall(drawCard, layout.card, eng)
-    end
-    for _, b in ipairs(layout.bubbles) do
-      pcall(drawBubble, b)
-    end
+
+    -- One pcall around the field layer so the pop below always runs: a leaked
+    -- translate would drag the menu band the battle screen draws next.
+    pcall(function()
+      drawArena(shaking and (M.FX_SHAKE + 2) or 0)
+
+      for _, h in ipairs(layout.humans) do
+        pcall(drawHuman, h, layout.frame, eng)
+      end
+      for _, mon in ipairs(layout.mons) do
+        pcall(drawMonIcon, mon, layout.frame,
+          hasFx and M.fxSeat(layout.fx, mon.side, mon.seatIndex) or nil)
+      end
+      for _, plate in ipairs(layout.plates) do
+        pcall(drawPlate, plate)
+      end
+      if layout.arrow then
+        pcall(drawArrow, layout.arrow)
+      end
+      if layout.card then
+        pcall(drawCard, layout.card, eng)
+      end
+      for _, b in ipairs(layout.bubbles) do
+        pcall(drawBubble, b)
+      end
+    end)
+    if pushed and gfx and gfx.pop then pcall(gfx.pop) end
   end)
 end
 

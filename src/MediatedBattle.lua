@@ -912,6 +912,48 @@ end
 local MSG_MIN_DWELL = 0.25
 local MSG_AUTO_ADVANCE = 1.6
 
+-- ------- display clock (Battlefield arena only)
+--
+-- Two clocks, the engine's own: `slot.hp` is the referee's number and lands
+-- the instant an event says so, and `slot.shownHp` is the number the arena
+-- plates are drawn from.  The gap between the two *is* the animation, and it
+-- is closed only by a queued row -- so nothing on screen can jump ahead of
+-- the line that explains it.
+--
+-- None of this exists on the classic 160x144 path or on Gen2: those HUDs read
+-- `slot.hp` straight and have no renderer for an effect, so a display clock
+-- there would animate nothing and only cost the queue rows.  Every emitter
+-- below is gated on `usesBattlefield()`.
+
+-- Effect lifetimes in seconds.  `lunge` is held to the battlefield anim dwell
+-- in tickMessages (0.35) so an attacker's lean is never cut off half way.
+local FX_SPAN = {
+  lunge = 0.35,
+  flash = 0.30,
+  shake = 0.25,
+  faint = 0.60,
+  spawn = 0.40,
+}
+
+-- The bar's *rate*, not its duration: `maxHp / 96` a frame is what the engine
+-- uses (BattleState's HP drain), so a 20 HP monster and a 300 HP one empty in
+-- the same second and a half.  The budget is the second half of that: a step
+-- that loses its last fraction to floating point would never land on `to`
+-- exactly, and a drain is deliberately unskippable -- so one that overruns a
+-- whole descent is snapped home rather than left holding the queue forever.
+local DRAIN_FRAMES = 96
+local DRAIN_BUDGET = 120
+
+-- How many 60Hz frames one update covers.  In game this is always 1 (the
+-- engine's step is fixed at 1/60); the headless suite drives whole seconds at
+-- a time and has to land on the far end of a drain rather than wedge on it.
+local function frameCount(dt)
+  local n = floor((tonumber(dt) or 0) * 60 + 0.5)
+  if n < 1 then return 1 end
+  if n > DRAIN_BUDGET then return DRAIN_BUDGET end
+  return n
+end
+
 -- Side a takes field slot 0 and side b takes slot 2.  Mirrored from
 -- src/BattleSim/events.lua's numbering rather than derived, because it is the
 -- numbering every event on the wire is already stated in: a 1v1 leaves the odd
@@ -995,6 +1037,13 @@ function M.new(opts)
     -- Gen1 Battlefield theatre (top-down arena). Unused on Gen2 / when
     -- Battlefield.enabled is false.
     frame = 0,
+    -- Display clock, arena only. `fx` is the list Battlefield renders from;
+    -- `draining` / `faintFx` are the two states that hold the message queue
+    -- while the bar falls and the monster after it. All three stay nil until
+    -- something is actually playing.
+    fx = nil,
+    draining = nil,
+    faintFx = nil,
     battlefieldLoaded = false,
     battlefieldBubbles = nil, -- { { side, humanIndex, text, born }, ... }
     targetIndex = 1,          -- field cursor when a target list exists
@@ -1142,7 +1191,10 @@ function M:battlefieldSeat(slotIndex, isPlayer)
   local slot = self.slots[slotIndex]
   if not slot or not slot.species then return nil end
   -- Keep KO'd seats until releasePic clears the sprite, matching classic hold.
-  if (slot.hp or 0) <= 0 and not slot.sprite and not slot.koHold then
+  -- A seat whose display clock has not caught up is still falling: dropping it
+  -- here would take the bar off the arena in the middle of its own drain.
+  if (slot.hp or 0) <= 0 and not slot.sprite and not slot.koHold
+      and (slot.shownHp or 0) <= 0 then
     return nil
   end
   local monHint = nil
@@ -1182,6 +1234,9 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     name = slot.species,
     level = slot.level or (monHint and monHint.level) or 1,
     hp = slot.hp or 0,
+    -- Display clock. Battlefield falls back to `hp` when this is absent, so a
+    -- seat that never drained reads exactly as it did before.
+    shownHp = self:shownHpOf(slot),
     maxHp = slot.maxHp or 1,
     status = slot.status,
     species = key,
@@ -1314,6 +1369,9 @@ function M:battlefieldCtx()
     showTarget = showTarget,
     frame = frame,
     bubbles = self.battlefieldBubbles,
+    -- One direction only: this screen advances `t`, Battlefield draws whatever
+    -- `t` says. Absent when nothing is playing -- the renderer tolerates that.
+    fx = self.fx,
   }
 end
 
@@ -1480,6 +1538,9 @@ function M:onEvent(msg)
     -- maximum there is -- an event carries current HP and nothing else -- so
     -- the largest value ever seen is what the bar is drawn against.
     self:noteSlot(msg)
+    -- A monster arriving pops onto the field rather than blinking into it.
+    -- No queue row: the send line behind it is what the player is reading.
+    self:emitFx("spawn", msg.slot, msg.side)
     -- New mon on our seat drops any Transform/Mimic overlay until the
     -- referee publishes another `moves` list for it.
     if msg.slot == self:mySlot() then
@@ -1505,8 +1566,19 @@ function M:onEvent(msg)
     end
 
   elseif kind == "damage" or kind == "drain" then
-    self:noteSlot(msg)
+    -- Truth first, then the bar. `syncMineHp` keeps the party sheet on the
+    -- referee's number -- partyRows / mustReplace read it and must never see
+    -- a display clock.
+    local before = self.slots[msg.slot]
+    before = before and before.hp
+    local slot = self:noteSlot(msg)
     self:syncMineHp(msg)
+    self:queueDrain(msg.slot)
+    if slot and before and (slot.hp or 0) < before then
+      -- The defender takes the flash; a damaging hit nudges the whole field.
+      self:emitFx("flash", msg.slot, msg.side)
+      self:emitFx("shake", msg.slot, msg.side)
+    end
 
   elseif kind == "faint" then
     local slot = self:noteSlot(msg)
@@ -1528,6 +1600,12 @@ function M:onEvent(msg)
         self.mustReplace = hasBench
       end
     end
+    -- Arena order, which is the engine's: the bar finishes falling, then the
+    -- monster sinks, and only then does the line print. Both rows block the
+    -- queue while they play; neither exists on the classic path, where the
+    -- faint line still comes straight after the event.
+    self:queueDrain(msg.slot)
+    self:queueFaintFx(msg.slot)
     if msg.text then self:say(("%s fainted!"):format(msg.text)) end
     -- After the faint line has been read (and any anim still ahead of it in
     -- `lines` has played), drop the pic. Queued behind the say so the KO stays
@@ -1633,17 +1711,25 @@ function M:noteSlot(msg)
     slot = { species = nil, hp = 0, maxHp = 1 }
     self.slots[index] = slot
   end
+  local fresh = false
   if msg.text and (msg.t == "send" or msg.t == "switch") then
     slot.species = msg.text
     slot.sprite = nil
     slot.icon = nil
     slot.koHold = nil
+    fresh = true
   end
   if msg.hp ~= nil then
     slot.hp = msg.hp
     if msg.hp > slot.maxHp then slot.maxHp = msg.hp end
   elseif msg.amount ~= nil and msg.t == "damage" then
     slot.hp = max(0, slot.hp - msg.amount)
+  end
+  -- Seed the display clock, or keep it welded to truth where nothing draws
+  -- from it. A monster that just walked on has nothing to animate down from,
+  -- so its bar starts where the referee says it is.
+  if slot.shownHp == nil or fresh or not self:usesBattlefield() then
+    slot.shownHp = slot.hp
   end
   if msg.status ~= nil then slot.status = msg.status end
   -- Do not clear the pic here. Faint often arrives in the same batch as the
@@ -1876,10 +1962,21 @@ function M:finish(result, reason, msg)
   self.result = result or "draw"
   self.phase = "over"
   self.cursor = 1
-  -- Fanfare once the outcome is known (drains / faint lines already ran
-  -- through the event stream). Same guard CoopBattle uses so a second
+  -- Fanfare once the outcome is known. Same guard CoopBattle uses so a second
   -- finish path cannot restart the jingle.
-  if self.result == "win" then self:playVictoryMusic() end
+  --
+  -- On the arena the outcome can land while the loser's bar is still falling
+  -- and its monster has not sunk yet, so the jingle is held until those rows
+  -- have played (#36 -- a fanfare over a KO that still looks alive was the
+  -- reported bug). The classic 160x144 path queues no such rows and fires
+  -- here exactly as it did.
+  if self.result == "win" then
+    if self:usesBattlefield() and self:hasPendingHpFx() then
+      self.victoryMusicHeld = true
+    else
+      self:playVictoryMusic()
+    end
+  end
   if reason == "catch" and result == "win" then
     self:say("Gotcha!")
     self:grantCatch(msg)
@@ -2304,6 +2401,9 @@ function M:exit()
   -- already match the hub and must not be refunded.
   self.pendingItem = nil
   self.pendingItemSlot = nil
+  -- A fanfare still waiting on a drain is dropped rather than started over
+  -- the map theme this is about to restore.
+  self.victoryMusicHeld = nil
   -- Map theme back unconditionally: victory jingles loop until something
   -- stops them (same reason the engine's BattleState:finish restores).
   local eng = loadEngine()
@@ -2347,6 +2447,21 @@ function M:tickMessages(dt, input)
     return true
   end
 
+  -- Two more blocking states, both display-only and both unskippable: the bar
+  -- falling and the monster after it. There is deliberately no input here to
+  -- find -- the queue itself is what holds them, the way the engine reads a
+  -- button only for a text page that has finished printing.
+  if self.draining then
+    self:stepDrain(dt)
+    self.dwell = 0
+    return true
+  end
+  if self.faintFx then
+    -- Retired by stepFx once its `t` reaches 1.
+    self.dwell = 0
+    return true
+  end
+
   self.dwell = self.dwell + (dt or 0)
 
   if self.shown == nil then
@@ -2355,6 +2470,15 @@ function M:tickMessages(dt, input)
     if type(next) == "table" and next.anim then
       self:startAnim(next)
       self.dwell = 0
+      return true
+    end
+    if type(next) == "table" and next.drain ~= nil then
+      -- A bar already where it was going costs nothing but the row.
+      self:startDrain(next)
+      return true
+    end
+    if type(next) == "table" and next.faintfx ~= nil then
+      self:startFaintFx(next)
       return true
     end
     if type(next) == "table" and next.clearPic ~= nil then
@@ -2541,6 +2665,9 @@ function M:startAnim(row)
   -- Top-down theatre: skip classic AnimPlayer stage flashes (coords are
   -- 160×144); message/SFX timing still runs via the dwell path below.
   if self:usesBattlefield() then
+    -- The attacker leans in. The defender's flash and the field's nudge ride
+    -- the damage event behind this row, so a move that misses only lunges.
+    self:emitFx("lunge", row.slot, row.side)
     self:playMoveAnimFallback(row)
     self:applyPendingHitFx()
     return
@@ -2579,11 +2706,206 @@ function M:releasePic(index)
   slot.sprite = nil
   slot.icon = nil
   slot.koHold = nil
+  -- Nothing is drawn from this seat any more; put the two clocks back in step
+  -- so a later send into the same slot cannot inherit a stale descent.
+  slot.shownHp = slot.hp or 0
+end
+
+-- ------- the bar falling, and the monster after it
+
+-- Which arena side a field slot sits on. `side` is the fallback for a row
+-- that names no slot, so an effect still lands the right way round rather
+-- than always as the foe.
+function M:fxSideFor(index, side)
+  if index ~= nil and index == self:mySlot() then return "ally" end
+  if index == nil and side ~= nil then
+    return (side == self.mySide) and "ally" or "foe"
+  end
+  return "foe"
+end
+
+-- Start one effect. Returns the record so a caller that needs to wait on it
+-- (the faint row) can hold the reference rather than search the list.
+--
+-- `seatIndex` is 1-based within the side; a mediated 1v1 has exactly one seat
+-- per side, and the argument is here so a future multi-seat mode does not
+-- have to change the contract Battlefield renders against.
+function M:emitFx(kind, index, side, seatIndex)
+  if not self:usesBattlefield() then return nil end
+  local span = FX_SPAN[kind]
+  if not span then return nil end
+  local fx = {
+    kind = kind,
+    side = self:fxSideFor(index, side),
+    seatIndex = seatIndex or 1,
+    t = 0,
+    elapsed = 0,
+    duration = span,
+  }
+  local list = self.fx
+  if type(list) ~= "table" then
+    list = {}
+    self.fx = list
+  end
+  list[#list + 1] = fx
+  return fx
+end
+
+-- Advance every live effect and retire the finished ones. Scaled by dt so the
+-- fixed 60Hz step reads as one frame and a headless second still completes.
+function M:stepFx(dt)
+  local list = self.fx
+  if type(list) ~= "table" or #list == 0 then return end
+  local step = tonumber(dt) or 0
+  if step <= 0 then step = 1 / 60 end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    if type(fx) == "table" then
+      local span = tonumber(fx.duration) or FX_SPAN[fx.kind] or 0.3
+      if span <= 0 then span = 0.3 end
+      fx.elapsed = (tonumber(fx.elapsed) or 0) + step
+      local t = fx.elapsed / span
+      if t >= 1 then
+        fx.t = 1
+        -- The faint row waits on this one; releasing it is what lets the
+        -- "X fainted!" line behind it print.
+        if self.faintFx == fx then self.faintFx = nil end
+      else
+        fx.t = t
+        kept[#kept + 1] = fx
+      end
+    end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+-- The HP the arena plates are drawn from, which trails `slot.hp` while a
+-- drain plays.
+--
+-- Rounded the engine's way: a bar on its way down rounds up and one on its
+-- way up rounds down, so the number always lags the animation by less than a
+-- point rather than reaching the destination before the bar does.
+function M:shownHpOf(slot)
+  if type(slot) ~= "table" then return 0 end
+  local truth = tonumber(slot.hp) or 0
+  local shown = tonumber(slot.shownHp)
+  if shown == nil then return truth end
+  if shown > truth then return math.ceil(shown) end
+  return floor(shown)
+end
+
+-- Queue the fall for a slot whose truth HP has already moved.
+--
+-- Draining to an absolute target is idempotent, which is why a `damage` event
+-- and the `faint` behind it can both queue one for the same seat without the
+-- bar moving twice: the second finds the first has already landed.
+function M:queueDrain(index)
+  if index == nil then return false end
+  if not self:usesBattlefield() then return false end
+  local slot = self.slots[index]
+  if not slot then return false end
+  local to = tonumber(slot.hp) or 0
+  if slot.shownHp == nil then
+    slot.shownHp = to
+    return false
+  end
+  if slot.shownHp == to then return false end
+  self.lines[#self.lines + 1] = { drain = index, to = to }
+  return true
+end
+
+-- A queued drain row comes up.
+--
+-- `to` is clamped and NaN refused, and that is a wire rule rather than a tidy
+-- one: the number came off the hub, `stepDrain` stops on exact equality, and
+-- a drain is deliberately unskippable -- so an infinity is a stop condition
+-- that never comes true and a message queue that never moves again.
+function M:startDrain(row)
+  local slot = self.slots[row and row.drain]
+  local to = tonumber(row and row.to)
+  if not (slot and to) then return false end
+  if to ~= to then return false end
+  local maxHp = tonumber(slot.maxHp) or 0
+  to = max(0, min(maxHp, to))
+  if slot.shownHp == nil then
+    slot.shownHp = to
+    return false
+  end
+  if slot.shownHp == to then return false end
+  self.draining = { slot = row.drain, to = to, frames = DRAIN_BUDGET }
+  return true
+end
+
+function M:stepDrain(dt)
+  local at = self.draining
+  if not at then return end
+  local slot = self.slots[at.slot]
+  if not slot then
+    self.draining = nil
+    return
+  end
+  local frames = frameCount(dt)
+  at.frames = (tonumber(at.frames) or DRAIN_BUDGET) - frames
+  local step = max(1, tonumber(slot.maxHp) or 1) / DRAIN_FRAMES * frames
+  local shown = tonumber(slot.shownHp) or at.to
+  if shown > at.to then
+    shown = max(at.to, shown - step)
+  else
+    shown = min(at.to, shown + step)
+  end
+  slot.shownHp = shown
+  -- Out of budget: the bar has had longer than a full descent and still has
+  -- not landed, so it is put there. There is no button out of a drain, and
+  -- the only other end to this is a queue that never moves again.
+  if shown == at.to or at.frames <= 0 then
+    slot.shownHp = at.to
+    self.draining = nil
+  end
+end
+
+-- The fall of the monster itself, queued as its own row so the sink finishes
+-- before "X fainted!" prints -- the engine's order, and the reason the pic is
+-- not released until the line behind it has been read.
+function M:queueFaintFx(index)
+  if index == nil then return false end
+  if not self:usesBattlefield() then return false end
+  self.lines[#self.lines + 1] = { faintfx = index }
+  return true
+end
+
+function M:startFaintFx(row)
+  local fx = self:emitFx("faint", row and row.faintfx)
+  if not fx then return false end
+  self.faintFx = fx
+  return true
+end
+
+-- Is a bar still falling, or a monster still on its way down?
+--
+-- The fanfare waits on this (#36): a win announced while the loser's bar is
+-- mid-drain plays the jingle over a monster that still looks alive. Asked of
+-- the queue as well as of the live states, because the outcome message can
+-- land while the rows that show the last KO are still stacked up.
+function M:hasPendingHpFx()
+  if self.draining or self.faintFx then return true end
+  for _, row in ipairs(self.lines or {}) do
+    if type(row) == "table" and (row.drain ~= nil or row.faintfx ~= nil) then
+      return true
+    end
+  end
+  return false
 end
 
 function M:update(dt)
   self.frame = (self.frame or 0) + 1
   self:pruneBattlefieldBubbles()
+  self:stepFx(dt)
+  -- Held fanfare: the outcome was known before the arena had finished showing
+  -- the KO that produced it.
+  if self.victoryMusicHeld and not self:hasPendingHpFx() then
+    self.victoryMusicHeld = nil
+    self:playVictoryMusic()
+  end
 
   local input = self.game and self.game.input
 

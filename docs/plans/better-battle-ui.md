@@ -1,0 +1,205 @@
+# Plan — Better battle UI: arena HUD, sprite facing, trainer color, animations
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-08-12 |
+| Source | /implement request: "review the gen1 field battle UI, use HUD and a modern UI, flip left-side pokemon to look right, fix the trainer chars, fix the animations" |
+| Config | AGENTS_CONFIG.yml (quality preset, host=claude_code) |
+| Branch | feature/better-battle-ui |
+| Base SHA | 201ca00 |
+| Mode | **Autonomous** — the grill and plan-approval gates were bypassed (owner unreachable mid-run). Every unknown is resolved as a logged assumption in §8. |
+
+## 1. Objective & success criteria
+
+Polish the day-old top-down battle arena (`src/Battlefield.lua`, commit `201ca00`) that Gen1
+CoopBattle and MediatedBattle draw through:
+
+1. **Left-seat (ally) mons face right** toward their opponent via horizontal flip; foe seats
+   unchanged.
+2. **Trainer figures render colored** (not DMG grayscale) with correct alpha, both sides.
+3. **A modern persistent HUD** on the arena: per-side plates with name, level, HP bar
+   (color-thresholded), status — visible during normal play, not only in the target card.
+4. **Animations stop looking poor**: HP bars drain over time (two-clock model), fainting mons
+   sink/fade instead of vanishing, attackers lunge, defenders flash, damaging hits nudge the
+   field. All deterministic, frame-based, soft-fail.
+
+Verified by: mod suite green (baseline 3082/3082), new unit assertions, a committed battlefield
+screenshot driver whose pixel checks prove trainer color + ally flip, and a full
+`run-mmo-e2e.sh` pass.
+
+## 2. Context & constraints (spike-verified)
+
+- **Mon flip gap (measured):** `placeMons` computes `facing` ("right" for ally, "left" for foe)
+  and stores `side` (src/Battlefield.lua:253-258), but `drawMonIcon` (:613-668) never reads it —
+  both seats draw the identical unflipped front pic. Confirmed visually by spike screenshot
+  (`spike-shots/battlefield-idle.png`).
+- **Trainer grayscale root cause (measured):** `resolveHumanSheet` (:467-517) uses
+  `SpriteRenderer:resolveImage()`, which in default color modes returns the walk sheet in raw
+  DMG shades by design, expecting the whole-canvas zone shader to recolor it
+  (engine `src/render/SpriteRenderer.lua:249-255`). MediatedBattle registers a full-canvas
+  `colors = false` zone opt-out (src/MediatedBattle.lua:2711-2728) to protect the pre-baked
+  true-color mon pics — which also strands trainer sprites in grayscale. Spike crops confirm
+  zero saturation on both trainers while mons/arena are colored.
+- **Trainer facing already correct:** `drawHuman` (:519-553) flips frame 2 (stand-left) with
+  negative x-scale for `facing == "right"` — matches engine convention
+  (`SpriteRenderer.STAND = {down=0, up=1, left=2, right=2}`, right = flipped left).
+- **No arena HUD exists:** `drawEnemyHUD`/`drawPlayerHUD` run only on the classic 160×144 path
+  (src/MediatedBattle.lua:2989-2991); the battlefield path draws no HP/name/level at all outside
+  the transient target card (`drawCard`, src/Battlefield.lua:684-742).
+- **Animation gaps:** battlefield path skips AnimPlayer entirely
+  (src/MediatedBattle.lua:2543-2547 — a **locked** v1 decision in
+  `docs/plans/coop-battlefield-layout.md`, do not port AnimPlayer); MediatedBattle snaps HP
+  instantly (`noteSlot`/`syncMineHp`, :1614-1657) unlike CoopBattle's `startDrain`/`stepDrain`
+  (src/CoopBattle.lua:2972-3073) and the engine (maxHP/96-per-frame steps); faint just nils the
+  sprite (`releasePic`, :2576-2582). Only `iconBob` exists as an arena animation primitive.
+- **Settled decisions honored** (from prior plans — do not re-litigate): front sprites for field
+  mons (never bag icons); uniform scale only, integer-preferred (never stretch);
+  `battle_sprite_scales` entries must be whole numbers; walk-sheet humans (no invented art —
+  omit humans with no sheet); two-clock HP model (`hp` = sim truth instant, shown HP =
+  display-only, advances through the message queue); victory music queued after drains/faints;
+  no engine tween/shake library exists — the mod writes its own; `battle_anims`/`battle.overlay`
+  are vanilla-loop-only and unusable here.
+- **Engine flip idiom:** `love.graphics.draw(img, x + w*scale, y, 0, -scale, scale)` (right-edge
+  anchored negative x-scale) — used by engine SummaryMenu and Battlefield's own `drawHuman`.
+- Everything soft-fails (`pcall`) and must stay headless-safe (plain LuaJIT suite has no
+  `love.image`/`love.graphics`).
+
+## 3. Approach & key decisions
+
+- **All presentation fixes live in `Battlefield.lua`**; MediatedBattle only feeds it state.
+  CoopBattle inherits the flip, trainer color, and plates for free (both flows call
+  `Battlefield.draw`). (Spike-backed for the two bugs; reasoning for the rest.)
+- **Mon flip:** extract a pure, exported helper `M.monDrawParams(mon, iw, ih)` returning
+  scale/position/flip so the decision is unit-testable headlessly; `drawMonIcon` consumes it.
+  Flip when `mon.facing == "right"`. Applies to both the front-pic path and the icon-quad
+  fallback path. Classic 160×144 back pics untouched (series convention — back art is distinct
+  art, never mirrored front art).
+- **Trainer color:** bake color into the sheet at `resolveHumanSheet` time, ranked by fidelity,
+  every rung pcall-guarded and headless-safe (fall through to the current behavior when
+  `love.image` is absent):
+  1. If the engine already returns a colored image (true-color record, GBC pack active), keep it.
+  2. Otherwise resolve per-sprite OBJ colors the way the engine itself would
+     (`PaletteFX.spriteObp(record, seed)` / `record.paletteSource` via `GbcPalette`) and bake
+     with the same shade→color + white→alpha mapping as the engine's `getObpImage`.
+  3. Last resort: keep the DMG bake (today's look) — never a hard failure.
+  The builder verifies the exact PaletteFX surface against the engine checkout
+  (~/Projects/alamops/gen1recomp/src/render/PaletteFX.lua) and mirrors it in mod code rather
+  than requiring deep engine internals beyond the already-established
+  `SpriteRenderer`/`Assets` pattern.
+- **Modern HUD:** two persistent plates in the visual language of the existing target card
+  (rounded white panel, thresholded HP bar): ally plate bottom-left of the field (above the
+  menu band), foe plate top-right. Name, `L%d`, HP bar, status chip; exact `hp/maxHp` numbers
+  on the ally plate only (classic convention). Plates read `seat.shownHp or seat.hp` so the
+  drain clock animates them. GB menu band stays as-is (familiar, tested; modernizing input
+  menus is out of scope — §8 A2).
+- **Animation model — battle owns time, Battlefield owns pixels:** MediatedBattle advances
+  effect timers in `update(dt)` and passes `ctx.fx`, a list of
+  `{kind, side, seatIndex, t}` with `t` in 0..1
+  (`kind ∈ lunge | flash | shake | faint | spawn`). Battlefield renders each kind as a pure
+  function of `t`: lunge = eased offset toward the midline and back; flash = white tint pulse
+  on the defender; shake = small field offset (damaging hits); faint = sink + alpha fade;
+  spawn = scale-up pop on send-out/switch. Deterministic, no wall-clock, unit-testable.
+- **HP drain (two-clock):** per-seat `shownHp` advancing toward `hp` at the engine-familiar
+  rate (max(1, maxHp/96) per frame), sequenced through the existing message queue so drains
+  finish before faint/victory text — mirroring `coop-battle-hp-sequencing.md` and
+  CoopBattle's implementation. Faint sequence: drain to 0 → faint fx (sink/fade) → "fainted!"
+  text → clearPic.
+- **Alternatives rejected:** porting AnimPlayer to the arena (locked decision, heavy);
+  drawing HUD via engine HudTiles on the arena (GB tiles fight the modern look; card idiom
+  already exists); flipping via pre-flipped ImageData copies (negative x-scale is the
+  established idiom and free).
+
+## 4. Work breakdown — implementation
+
+Contract shared by T1/T2 (pinned here so the wave can run parallel):
+seat records gain optional `shownHp` (number, display clock; renderers fall back to `hp`);
+`ctx.fx` = array of `{kind="lunge"|"flash"|"shake"|"faint"|"spawn", side="ally"|"foe",
+seatIndex=<1-based>, t=<0..1 progress>}`; Battlefield must tolerate `ctx.fx` absent/empty
+(CoopBattle passes none today).
+
+- **T1 — Battlefield presentation** (owns `src/Battlefield.lua` ONLY)
+  Mon flip via exported pure `M.monDrawParams`; trainer color bake in `resolveHumanSheet`
+  (ranked options above); persistent ally/foe plates (new `drawPlate` + exported pure
+  `M.plateModel(seat)` for tests); fx rendering (`lunge/flash/shake/faint/spawn` as pure
+  functions of `t`; shake offsets the whole field layer); keep every draw pcall-wrapped and
+  headless-safe. Acceptance: exported helpers return flip=true only for facing=="right";
+  plates render from seat data alone; no behavior change when `ctx.fx` is absent.
+- **T2 — MediatedBattle state & sequencing** (owns `src/MediatedBattle.lua` ONLY)
+  Two-clock `shownHp` (init on upload/send, step in update at max(1, maxHp/96)/frame, queue-
+  sequenced before faint/over text per hp-sequencing doc); faint fx before `clearPic`; emit fx
+  on move start (attacker lunge), on damage application (defender flash + field shake), on
+  send/switch (spawn); extend `battlefieldSeat`/`battlefieldCtx` to carry `shownHp` + `ctx.fx`;
+  hold anim/message dwell long enough for fx to read (reuse existing `MSG_MIN_DWELL`/anim hold
+  — do not lower it). Victory-music-after-drain ordering (#36) must be preserved. Acceptance:
+  headless state-machine tests can drive damage→drain→faint and observe shownHp stepping and
+  fx lifecycles.
+
+Wave 1 = T1 + T2 in parallel (disjoint files, contract pinned above).
+
+## 5. Work breakdown — tests
+
+- **TT1 — unit suite** (owns `tests/rby_mmo_test.lua` ONLY): assertions for
+  `monDrawParams` (ally flip / foe no-flip / icon-quad path), `plateModel`, fx `t` math
+  (pure renders don't throw headless), MediatedBattle shownHp drain stepping + sequencing
+  (drain completes before faint text), fx emission on damage/send events, trainer-sheet
+  color-path selection degrading gracefully headless. Covers T1+T2.
+- **TT2 — e2e screenshot driver** (owns `tests/drivers/battlefield_shot.lua` (new) +
+  `tests/drivers/run-battlefield-e2e.sh` ONLY): a committed, clean rewrite of the spike driver
+  (proper stub with save/options/exports so spriteIds resolve — no monkey-patching); captures
+  idle + move + faint frames to `SHOT_DIR`; pixel-asserts (ImageData sampling): trainer crop
+  regions contain saturated (non-gray) pixels, ally-mon region differs from a horizontally
+  mirrored foe draw (or asserts via logged `monDrawParams`). Wire into
+  `run-battlefield-e2e.sh` as the screenshot hook its header reserves.
+
+E2e applies (user-visible UI): run recipe — private engine view at `<scratchpad>/engine`
+(shared `mods/rby_mmo` symlink must NOT be repointed), `PATH=/opt/homebrew/bin:$PATH`,
+LÖVE at `/Applications/love.app/Contents/MacOS/love`, `ROM_PATH` from `.env`
+(`/Users/alamosaravali/Downloads/ROMs/Pokemon_Red.gb`), `SHOT_DIR` in scratchpad (never the
+shared /tmp default), driver invocation
+`POKEPORT_DRIVER=... POKEPORT_IDENTITY=bfe2e POKEPORT_TOUCH=0 love .`; full suite:
+`luajit mods/rby_mmo/tests/rby_mmo_test.lua` from the view; full MMO e2e:
+`bash mods/rby_mmo/tests/drivers/run-mmo-e2e.sh` (must run in the foreground of whichever
+session owns it — background runs inside a finished subagent get reaped).
+
+## 6. Execution waves
+
+1. Wave 1: T1 ∥ T2 (implementation).
+2. Checkpoint: suite run + battlefield screenshot spike re-run to eyeball the four fixes;
+   commit.
+3. Phase 5 review of the full diff.
+4. Wave 2: TT1 ∥ TT2 (tests; disjoint files).
+5. Phase 7: full suite + battlefield driver + run-mmo-e2e.sh; Phase 8 fixes to green.
+
+## 7. Blast radius & risks
+
+- `Battlefield.draw` is shared with CoopBattle — plates/flip/trainer color appear there too
+  (intended); CoopBattle passes no `ctx.fx`, so fx must be strictly opt-in. Regression risk on
+  CoopBattle covered by existing layout asserts (tests/rby_mmo_test.lua:11261-11287) + suite.
+- Gen2 and classic 160×144 paths must be byte-identical in behavior (gate at
+  src/MediatedBattle.lua:1012-1029 untouched).
+- `affects_link` stays false — nothing here touches link registries; the suite asserts the
+  link surface is unchanged.
+- Trainer color bake touches an engine-internal surface (PaletteFX) — every call pcall-guarded
+  with the DMG bake as fallback, so an engine drift costs color, never the screen.
+- HP drain changes message sequencing — the #36 victory-music-after-drain fix has suite
+  coverage; TT1 re-asserts ordering.
+- README/docs screenshots of the arena (if any) go stale — regenerate from the e2e run if the
+  battle shots changed (check during Phase 7).
+
+## 8. Open questions / assumptions (autonomous mode)
+
+- **A1:** "gen1 field battle UI" = the top-down Battlefield arena; classic + Gen2 paths
+  untouched.
+- **A2:** "HUD and a modern UI" = persistent modern seat plates + existing card idiom; the GB
+  menu band (commands/moves/message) is retained — replacing input menus is out of scope.
+- **A3:** "left side pokemon" = ally seats; flip only on the arena. Classic back pics stay
+  unflipped (series convention).
+- **A4:** "fix the trainer chars" = the grayscale bug (spike-proven); facing was already
+  correct.
+- **A5:** Animation scope = lunge/flash/shake/faint/spawn + HP drain; no AnimPlayer port
+  (locked decision).
+- **A6:** No version bump on this branch (release-time concern; four files carry it).
+- **A7:** CoopBattle gets the shared Battlefield improvements but no new fx wiring this pass —
+  logged as a follow-up.
+- **A8:** 640×360 canvas stays (its own open question in coop-battlefield-layout.md, separate
+  thread).
