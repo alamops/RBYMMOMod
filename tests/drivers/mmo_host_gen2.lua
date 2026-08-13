@@ -328,13 +328,15 @@ return function(game)
     end, 60, "coop_wild wait after the wild divert")
     check(waiting, "the host diverted into coop_wild wait")
     U.shot(game, SHOT_DIR .. "/host-party-wild-wait.png")
+    -- Round 11: this is the shared cover both modes now raise, so ALONE-only
+    -- is the whole contract rather than a wild-path special case.
     if exports.coopWaiting() ~= nil then
       local aloneRow = H.menuRow(game, "ALONE")
       local waitRow = H.menuRow(game, "WAIT")
       check(aloneRow ~= nil and waitRow == nil,
-            "the wild wait box offers ALONE only (no WAIT)")
+            "the wait cover offers ALONE only (no WAIT)")
     else
-      check(true, "the wild wait box offers ALONE only (no WAIT)")
+      check(true, "the wait cover offers ALONE only (no WAIT)")
       log("note: partner joined before the ALONE row could be sampled")
     end
     H.signal("host_wild_waiting")
@@ -408,32 +410,54 @@ return function(game)
       stagedTrainer = H.stageTrainer(game, coopClass, function(result)
         coopFinished = result
       end)
-      local asked = H.waitFor(game, function()
-        for _, label in ipairs(H.menuLabels(game)) do
-          if label == "WAIT" then return true end
-        end
+      -- Round 11: no ask. Staging the trainer while partied posts COOP_WAIT
+      -- and raises the wait cover on its own -- so this waits for the cover
+      -- (a single ALONE row) or the field itself, and fails on an ask.
+      -- Ported from mmo_host.lua's sight-walk-in leg; see the comments there
+      -- for why sawAsk is sampled inside the loop and why the A tap stays
+      -- gated on `items == nil`.
+      local sawAsk = false
+      local joinedFirst = false
+      local covered = H.waitFor(game, function()
         local promptTop = H.top(game)
+        if promptTop ~= nil and promptTop.sim ~= nil
+            and #promptTop.sim.slots >= 3 then
+          joinedFirst = true
+          return true
+        end
+        local seen = false
+        for _, label in ipairs(H.menuLabels(game)) do
+          if label == "WAIT" then sawAsk = true end
+          if label == "ALONE" then seen = true end
+        end
+        if seen then return true end
         if promptTop and promptTop.items == nil then U.tap(game, "a") end
         return false
-      end, 60 * 6, "the co-op prompt in front of the trainer")
-      check(asked, "the co-op prompt appears in front of a real trainer battle")
+      end, 60 * 6, "the co-op wait cover in front of the trainer")
+      check(covered,
+            "a real trainer battle while partied raises the co-op wait cover "
+            .. "by itself -- or the fight, if the partner was faster")
+      check(not sawAsk,
+            "and no WAIT/ALONE ask is ever shown -- forming the party was the "
+            .. "yes (src/Coop.lua M:onTrainerBattle)")
+      log(("coop cover: joinedFirst=%s sawAsk=%s"):format(
+        tostring(joinedFirst), tostring(sawAsk)))
       U.shot(game, SHOT_DIR .. "/host-coop-prompt.png")
-      check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
 
       -- Marker first, and then a predicate with two halves -- the round 9
       -- change on this side, ported from mmo_host.lua.
       --
-      -- The partner is pulled in automatically now (src/Coop.lua's
-      -- M:autoJoin): they are already standing on this map with nothing on
-      -- screen, so COOP_WAIT goes out, COOP_JOIN comes back, and the wait can
-      -- be *over* within a frame or two of WAIT being chosen. Polling
+      -- The partner is pulled in automatically (src/Coop.lua's M:autoJoin):
+      -- they are already standing on this map with nothing on screen, so
+      -- COOP_WAIT goes out, COOP_JOIN comes back, and the wait can be *over*
+      -- within a frame or two of the trainer triggering. Polling
       -- `coopWaiting() ~= nil` alone can therefore report "this side never
       -- stood at the fight" about a wait that had already been answered.
       --
-      -- So what is asserted is the claim WAIT actually makes: this side ends
-      -- up at the fight. Standing at it and already joined are the two ways
-      -- that can be true, and which one a run sees is a matter of
-      -- milliseconds, so neither may fail it. The marker moves above the poll
+      -- So what is asserted is the claim the wait actually makes: this side
+      -- ends up at the fight. Standing at it and already joined are the two
+      -- ways that can be true, and which one a run sees is a matter of
+      -- milliseconds, so neither may fail it. The marker stays above the poll
       -- for the same reason -- the guest's window opens when COOP_WAIT is
       -- sent, not when this side finishes looking at itself.
       --
@@ -454,11 +478,11 @@ return function(game)
         end
         return false
       end, 45, "this side to be standing at the fight, or already joined")
-      log(("after WAIT: waitBox=%s alreadyJoined=%s"):format(
+      log(("after the trigger: waitBox=%s alreadyJoined=%s"):format(
         tostring(waitSeen), tostring(joinSeen)))
       check(atFight,
-            "and WAIT leaves this side at the fight -- standing at it, or "
-            .. "already pulled into it by the partner it waited for")
+            "and the automatic wait leaves this side at the fight -- standing "
+            .. "at it, or already pulled into it by the partner it waited for")
     else
       H.signal("host_coop_waiting")
     end

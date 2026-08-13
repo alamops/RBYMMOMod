@@ -122,6 +122,22 @@ const FIELDS = {
 //   * a `status` event with a `status` field means the condition was
 //     *inflicted*; the same event with no `status` field means it **cleared**.
 //     `text` carries the sentence either way.
+//
+// `turn` carries a second, optional reading, and it is the client contract for
+// the referee's replace phase:
+//
+//   * `turn` **with** `slot` is a *replacement solicitation* -- the seat at that
+//     field slot fainted with a bench left and is being asked for a send-out.
+//     Its own client opens the switch picker, every other client holds on
+//     "X is choosing who to send out...", and no menu opens for anybody else.
+//     One is emitted per owing seat, in ascending field-slot order, and the
+//     turn number does not advance for it (`amount` repeats the turn the faint
+//     happened on).
+//   * `turn` **without** `slot` is the ordinary choice window opening.
+//
+// It is deliberately expressed in a field the whitelist already carried: a
+// client written before the replace phase existed ignores `slot` and reads both
+// as "a turn opened", which is exactly the behaviour it had.
 const SHAPES = {
   msg: { text: true },
   anim: { slot: true, side: true, text: 'move or ball-anim id',
@@ -142,7 +158,8 @@ const SHAPES = {
   item: { slot: true, side: true, text: 'the item id',
     amount: '1 when a vitamin applied (client save writeback)' },
   run: { slot: true, side: true, text: true },
-  turn: { amount: 'the 1-based turn number' },
+  turn: { amount: 'the 1-based turn number',
+    slot: 'present only on a replacement solicitation: the field slot being asked' },
   over: { text: 'the reason token' },
   wait: { side: true, text: 'who is being waited on' },
   reconnect: { side: true, text: true },

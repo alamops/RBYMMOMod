@@ -93,11 +93,31 @@ local ALERT_PERIOD = 0.85             -- seconds for one rise and fall
 -- Coop:autoJoin clears `offer` *before* it sends the join (so a second tick
 -- cannot double-join), and the battle only reaches the screen a round trip
 -- later -- so keying the mark strictly on a standing offer would show it for
--- zero frames in the one case the whole feature is for.  The grace covers that
--- gap and is dropped the instant the co-op battle starts, so the only time it
--- is spent in full is an offer that ended some other way (a partner who walked
--- off, or a five-minute timeout), where a beat of stale `!` costs nothing.
+-- zero frames in the one case the whole feature is for.
+--
+-- **This grace was never the fix for that, and read as though it were.**  It
+-- decays a mark that already exists; it cannot raise one, and the set-and-
+-- clear happens inside a single inbound handler with no tick in between, so
+-- there was nothing for it to decay.  What raises the mark is Coop's latch
+-- (`offerMarkFor`, read by M:offerMark) and what keeps it readable is
+-- ALERT_MIN below.  This is now what it always actually was: the beat a mark
+-- gets after a *standing* offer ends -- a partner who walked off, or a
+-- five-minute timeout -- where a moment of stale `!` costs nothing.
 local ALERT_HOLD = 1.2
+-- Seconds the mark stands from the tick it went up, whatever happens to the
+-- offer underneath it.  The grace above is measured from the offer ending and
+-- so is worth nothing in the case that matters: an automatic join clears the
+-- offer in the same handler that raised it, and the fight is a couple of relay
+-- round trips behind -- measured at 0.05-0.5s of overworld, an order of
+-- magnitude under anything a person can read.  A floor is the only thing that
+-- turns that into a signal, and it is deliberately longer than one bob
+-- (ALERT_PERIOD) so the thing the player sees is a bubble bouncing over a head
+-- rather than a flicker they are not sure happened.
+--
+-- It is a floor and not a guarantee: the battle screen still ends it early
+-- (M:update), because a mark anchored to a world nobody can see is not a
+-- signal either.  What is owed past that point is a corner line, not a bubble.
+local ALERT_MIN = 2.5
 local ALERT_FILL = { 1, 1, 1 }
 local ALERT_INK = { 0.11, 0.11, 0.16 }
 
@@ -507,13 +527,32 @@ end
 -- must never be the reason one resolves differently.
 function M:offerMark()
   local coop = self.ctx and self.ctx.coop
-  if not (coop and type(coop.pendingOffer) == "function") then return nil end
-  local ok, offer = pcall(coop.pendingOffer, coop)
-  if not (ok and type(offer) == "table") then return nil end
+  if not coop then return nil end
+  local offer
+  if type(coop.pendingOffer) == "function" then
+    local ok, pending = pcall(coop.pendingOffer, coop)
+    if ok and type(pending) == "table" then offer = pending end
+  end
+  -- ...and the latch, which is what actually raises this mark in the case it
+  -- exists for.  A standing offer is the *rare* state: the common one is an
+  -- offer that arrived, was accepted and was cleared inside a single inbound
+  -- handler, before any tick of this loop could observe it (see Coop's
+  -- `offerMarkFor`).  Reading the accessor alone meant polling a field that is
+  -- never non-nil when it is looked at, which is a mark that never appears.
+  --
+  -- The accessor still comes first, so a live offer -- a busy or off-map
+  -- partner, the one case where the two can disagree -- is answered by the
+  -- same question the ACTIONS menu and the trainer trigger ask. The latch is
+  -- read as a plain field because it is not part of the handshake at all: it
+  -- is Coop's record of an arrival, kept for this renderer.
+  if not offer and type(coop.offerMarkFor) == "table" then
+    offer = coop.offerMarkFor
+  end
   -- The offer's sender: the player who is standing at the fight waiting.
-  if not offer.from then return nil end
+  local from = offer and (offer.from or offer.id)
+  if not from then return nil end
   return {
-    id = offer.from,
+    id = from,
     map = offer.map,
     battle = offer.battle,
     clock = 0,
@@ -568,9 +607,16 @@ end
 function M:update(dt)
   dt = tonumber(dt) or 0
   local coop = self.ctx and self.ctx.coop
-  -- The join landed.  The fight is on its way to the screen and the mark has
-  -- said the whole of what it had to say.
-  if coop and (coop.running == true or coop.state ~= nil) then
+  -- The fight is *on* the screen.  Not "the join landed": `running` is set at
+  -- the handoff, two relay round trips before the battle state is pushed, and
+  -- the overworld -- the only thing this mark can be drawn over -- is still
+  -- what the player is looking at for the whole of that gap.  Killing the mark
+  -- on `running` threw away its entire life, which is why it was never seen.
+  --
+  -- The state is the honest end: from here the world is covered, the mark has
+  -- nothing left to annotate, and what the joiner is owed instead is a line in
+  -- the corner that outlives the push (Coop:toastLine).
+  if coop and coop.state ~= nil then
     self.alert = nil
     return
   end
@@ -587,7 +633,15 @@ function M:update(dt)
     alert.hold = ALERT_HOLD
   elseif alert then
     alert.hold = alert.hold - dt
-    if alert.hold <= 0 then
+    -- Two clocks, and the mark lives until both have run out: ALERT_HOLD from
+    -- the last tick the offer stood, ALERT_MIN from the tick it was raised.
+    -- The grace alone is reactive and gives a long-standing offer the beat it
+    -- needs to fade; the floor is what makes a mark that was raised and taken
+    -- in the same second legible at all, which is every automatic join.  A
+    -- mark whose fight reaches the screen inside the floor is still cut off
+    -- there by the state check above -- correctly, since the world it points
+    -- at is gone -- and the corner line carries the rest.
+    if alert.hold <= 0 and alert.clock >= ALERT_MIN then
       self.alert = nil
       return
     end
@@ -1108,6 +1162,7 @@ M.LOCAL_RADIUS = Config.LOCAL_RADIUS
 -- The partner's "!": exported so the suite pins the bob and the grace against
 -- the numbers the renderer actually uses rather than against its own copies.
 M.ALERT_HOLD, M.ALERT_PERIOD, M.ALERT_BOUNCE = ALERT_HOLD, ALERT_PERIOD, ALERT_BOUNCE
+M.ALERT_MIN = ALERT_MIN
 M.ALERT_W, M.ALERT_H, M.ALERT_TAIL, M.ALERT_GAP = ALERT_W, ALERT_H, ALERT_TAIL, ALERT_GAP
 M.ALERT_INK, M.ALERT_FILL = ALERT_INK, ALERT_FILL
 

@@ -103,6 +103,18 @@ coop.here = function()
   local current = World.current()
   return current and current.mapId
 end
+-- The corner, for the one co-op line that has no time to be found anywhere
+-- else. Wired the same way and for the same reason as the two above: Coop owns
+-- no renderer, and the toast queue is built here. The join is the only line
+-- that takes this door -- it is said in the last fraction of a second before a
+-- battle nobody asked for covers this player's overworld, which is also the
+-- last fraction of a second the partner's "!" mark is drawable (see
+-- Overlay.ALERT_MIN). A toast is drawn after the overlay inside the same
+-- render.hud wrap and behind no free-roam gate, so it is the half of that
+-- signal that survives the push.
+coop.toast = function(text)
+  toast:push(text)
+end
 
 ctx.client = M
 ctx.ui = ui

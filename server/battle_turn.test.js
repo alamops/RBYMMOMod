@@ -702,8 +702,12 @@ scenario('replacement_mark', (events) => {
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('npc', { action: 'fight', move: 0 });
   drainInto(battle, events);
-  battle.submitChoice('p1', { action: 'switch', slot: 1 });
+  // npc's fallen b1 owes a replacement first -- close the replace phase
+  // (b fields b2) -- THEN p1 files its voluntary switch to a2 on the
+  // turn-2 window that the closed replace phase opens.
   battle.submitChoice('npc', { action: 'switch', slot: 1 });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'switch', slot: 1 });
   drainInto(battle, events);
   for (let i = 0; i < 6; i += 1) {
     if (battle.outcome()) break;

@@ -2674,6 +2674,268 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12c2. round 11: the replace phase is a phase, not a folded-in choice
+-- ------------------------------------------------------------------
+--
+-- 12c above pins the *outcome* a faint-with-bench has always had: nothing is
+-- auto-sent, and the seat owes a switch.  What round 11 changed is the shape of
+-- the window that collects it.  A faint used to advance the turn and fold the
+-- replacement into the next ordinary choice box, so the player picked a move at
+-- a foe that was not on the field yet.  Now the referee holds a phase of its
+-- own between the two turns -- `_openReplace` / `_closeReplace` -- and the
+-- three things a client reads off that are all invisible to 12c:
+--
+--   * the turn number does NOT move while the phase is open.  A client that
+--     saw turn 2 open would draw the next box; the fight is still on the turn
+--     whose faint opened this.
+--   * the solicitation is a `turn` event WITH `slot` -- one per owing seat, in
+--     `self.fighters` order (side a then side b, ascending field slot).  A
+--     slot-less `turn` still means "ordinary choice window", so the two are
+--     told apart by a field that already rides the wire.
+--   * the phase belongs to the owing seats and to nobody else.  A standing
+--     seat's fight would be an answer to a window that has not opened, and a
+--     `cancel` would be a second way to hold the field open a monster short.
+--
+-- And the clock still covers it: the same deadline sweep that answers an
+-- unanswered move answers an unanswered replacement, so a seat that walks away
+-- mid-replace cannot wedge the fight.
+
+do
+  -- (a) 1v1, the single-fighter case that predates the phase: only one seat can
+  -- ever be owing, and it still opens and closes cleanly.  This is the
+  -- regression guard against a fix that only works for multi-fighter coop.
+  local battle = battleOf({
+    seed = 111001,
+    aMons = {
+      mon({ species = "Alpha", maxHp = 1, atk = 5, spd = 10 }),
+      mon({ species = "Gamma", maxHp = 200, atk = 50, spd = 50 }),
+    },
+    bMons = {
+      mon({ species = "Beta", maxHp = 300, atk = 150, spd = 120, level = 50 }),
+    },
+  })
+  drain(battle)
+  eq(battle:snapshot().turn, 1, "the fight opens on turn 1")
+
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local events = drain(battle)
+
+  local snap = battle:snapshot()
+  eq(snap.phase, "replace", "a faint with a living bench opens the replace phase")
+  eq(snap.turn, 1, "and the turn number does not move while it is open")
+  listEq(snap.waiting, { "p1" }, "only the fallen seat is owed anything")
+
+  local solicits, bare = {}, 0
+  for _, event in ipairs(events) do
+    if event.t == "turn" then
+      if event.slot ~= nil then solicits[#solicits + 1] = event else bare = bare + 1 end
+    end
+  end
+  eq(#solicits, 1, "one solicitation for the one owing seat")
+  eq(solicits[1] and solicits[1].slot, 0, "...naming its field slot")
+  eq(solicits[1] and solicits[1].amount, 1, "...and the turn it is still on")
+  eq(bare, 0, "no ordinary choice window opened behind it")
+
+  ok(battle:submitChoice("p1", { action = "switch", slot = 1 }) == true,
+     "the owing seat's switch is accepted")
+  events = drain(battle)
+  local sawSend, closed = false, nil
+  for _, event in ipairs(events) do
+    if event.t == "send" and event.text == "Gamma" then sawSend = true end
+    if event.t == "turn" and event.slot == nil then closed = event end
+  end
+  ok(sawSend, "the replacement is fielded when the phase closes")
+  ok(closed ~= nil, "and a slot-less turn opens the ordinary window")
+  eq(closed and closed.amount, 2, "...on turn 2")
+  local after = battle:snapshot()
+  eq(after.phase, "choice", "the phase is back to choice")
+  eq(after.turn, 2, "and only now does the turn increment")
+end
+
+do
+  -- (b) one seat per side falls in the SAME action (recoil KO, both benched):
+  -- `_anyMustReplace` finds two owing seats, so two solicitations go out before
+  -- either is answered, and the phase stays open until BOTH have replaced.
+  local battle = battleOf({
+    seed = 111002,
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 1, atk = 200, spd = 90,
+        moves = { move({ id = "take-down", power = 90, effect = 48 }) },
+      }),
+      mon({ species = "Gamma", maxHp = 200 }),
+    },
+    bMons = {
+      mon({ species = "Beta", maxHp = 1, atk = 5, spd = 10 }),
+      mon({ species = "Delta", maxHp = 200 }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local events = drain(battle)
+
+  local snap = battle:snapshot()
+  eq(snap.phase, "replace", "two faints in one action still open one replace phase")
+  eq(snap.turn, 1, "and it holds the turn number just the same")
+  listEq(snap.waiting, { "p1", "p2" }, "both fallen seats are owed")
+
+  local solicits, bare = {}, 0
+  for _, event in ipairs(events) do
+    if event.t == "turn" then
+      if event.slot ~= nil then solicits[#solicits + 1] = event else bare = bare + 1 end
+    end
+  end
+  eq(#solicits, 2, "exactly one solicitation per owing seat")
+  eq(solicits[1] and solicits[1].slot, 0, "...side a's seat (slot 0) first")
+  eq(solicits[2] and solicits[2].slot, 2, "...then side b's (slot 2) -- fighters order")
+  eq(bare, 0, "and no ordinary window opened while both were pending")
+
+  ok(battle:submitChoice("p1", { action = "switch", slot = 1 }) == true,
+     "the first owing seat replaces")
+  events = drain(battle)
+  local earlySend, earlyTurn = false, false
+  for _, event in ipairs(events) do
+    if event.t == "send" then earlySend = true end
+    if event.t == "turn" then earlyTurn = true end
+  end
+  ok(not earlySend, "nothing is fielded on a half-answered phase")
+  ok(not earlyTurn, "and no turn of any shape is emitted")
+  eq(battle:snapshot().phase, "replace", "the phase is still open on the second seat")
+  eq(battle:snapshot().turn, 1, "turn number still pinned")
+
+  ok(battle:submitChoice("p2", { action = "switch", slot = 1 }) == true,
+     "the second owing seat replaces")
+  events = drain(battle)
+  local sends, closes = {}, 0
+  for _, event in ipairs(events) do
+    if event.t == "send" then sends[#sends + 1] = event.text end
+    if event.t == "turn" and event.slot == nil then closes = closes + 1 end
+  end
+  listEq(sends, { "Gamma", "Delta" }, "both replacements field together, side a first")
+  eq(closes, 1, "and a single ordinary window opens for the pair")
+  eq(battle:snapshot().phase, "choice", "the phase closes once nobody owes a send-out")
+  eq(battle:snapshot().turn, 2, "and the turn finally advances")
+end
+
+do
+  -- (c) coop_pvp, two fighters a side, one of side a's falls: the phase is the
+  -- owing seat's alone.  Its partner is refused whatever it asks, and the owing
+  -- seat itself may only switch -- `cancel` is not a way out of a forced
+  -- replacement.
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 111003,
+    sides = {
+      a = {
+        { playerId = "p1", name = "Ann", mons = {
+          mon({ species = "Alpha", maxHp = 300, atk = 20, spd = 80 }),
+          mon({ species = "Omega", maxHp = 300 }) } },
+        { playerId = "q1", name = "Amy", mons = {
+          mon({ species = "Gamma", maxHp = 1, atk = 5, spd = 5 }),
+          mon({ species = "Delta", maxHp = 300 }) } },
+      },
+      b = {
+        { playerId = "p2", name = "Bob", mons = {
+          mon({ species = "Beta", maxHp = 300, atk = 150, spd = 120, level = 50 }) } },
+        { playerId = "q2", name = "Ben", mons = {
+          mon({ species = "Zeta", maxHp = 300, atk = 20, spd = 60 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("q1", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("p2", { action = "fight", move = 0, target = 1 })
+  battle:submitChoice("q2", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local snap = battle:snapshot()
+  eq(snap.phase, "replace", "the partner's KO opens the phase")
+  eq(snap.turn, 1, "on the turn the faint happened")
+  listEq(snap.waiting, { "q1" }, "and only the fallen seat owes anything")
+  ok(fighterIn(snap, "p1").species == "Alpha", "its standing partner is untouched")
+
+  local solicits = {}
+  for _, event in ipairs(events) do
+    if event.t == "turn" and event.slot ~= nil then solicits[#solicits + 1] = event end
+  end
+  eq(#solicits, 1, "one solicitation, for the one owing seat")
+  eq(solicits[1] and solicits[1].slot, 1, "...naming q1's field slot, not the side")
+
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == false,
+     "a standing seat cannot fight during someone else's replacement")
+  ok(battle:submitChoice("p1", { action = "switch", slot = 1 }) == false,
+     "...nor sneak a free switch in on the phase")
+  ok(battle:submitChoice("q1", { action = "cancel" }) == false,
+     "a forced replacement cannot be taken back")
+  ok(battle:submitChoice("q1", { action = "fight", move = 0 }) == false,
+     "and the owing seat itself may not answer with a fight")
+  eq(battle:snapshot().phase, "replace", "four refusals later the phase is untouched")
+  eq(#drain(battle), 0, "and a refused choice emits nothing at all")
+
+  ok(battle:submitChoice("q1", { action = "switch", slot = 1 }) == true,
+     "only the owing seat's switch closes it")
+  events = drain(battle)
+  local sent, closed = nil, false
+  for _, event in ipairs(events) do
+    if event.t == "send" then sent = event end
+    if event.t == "turn" and event.slot == nil then closed = true end
+  end
+  eq(sent and sent.text, "Delta", "the replacement is fielded")
+  eq(sent and sent.slot, 1, "...into the seat that owed it")
+  ok(closed, "and the ordinary window opens behind it")
+  eq(battle:snapshot().phase, "choice", "phase closed")
+  eq(battle:snapshot().turn, 2, "turn advanced exactly once for the whole phase")
+end
+
+do
+  -- (d) nobody answers: the choice clock covers a replace phase the same way it
+  -- covers a choice window.  `_autoChoice` takes its `mustReplace` branch, the
+  -- seat is narrated as having run out of time, and the fight carries on rather
+  -- than wedging on a field that is a monster short.
+  local battle = battleOf({
+    seed = 111004,
+    choiceTimeout = 10,
+    aMons = {
+      mon({ species = "Alpha", maxHp = 1, atk = 5, spd = 10 }),
+      mon({ species = "Gamma", maxHp = 200, atk = 50, spd = 50 }),
+    },
+    bMons = {
+      mon({ species = "Beta", maxHp = 300, atk = 150, spd = 120, level = 50 }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  eq(battle:snapshot().phase, "replace", "the faint left a replacement owed")
+  eq(battle:snapshot().deadline, 10, "and the phase armed the choice clock")
+
+  ok(battle:tick(9) == false, "inside the deadline the sweep does nothing")
+  eq(battle:snapshot().phase, "replace", "so the phase is still waiting")
+  eq(battle:snapshot().turn, 1, "and the turn is still pinned")
+  eq(#drain(battle), 0, "a quiet tick emits nothing")
+
+  ok(battle:tick(11) == true, "past the deadline the sweep acts")
+  local events = drain(battle)
+  local timedOut, sent, closed = false, nil, false
+  for _, event in ipairs(events) do
+    if event.t == "msg" and event.text == "Ann ran out of time" then timedOut = true end
+    if event.t == "send" then sent = event end
+    if event.t == "turn" and event.slot == nil then closed = true end
+  end
+  ok(timedOut, "the unanswered seat is narrated the same as an unanswered move")
+  eq(sent and sent.text, "Gamma", "the auto-picked bench mon is fielded")
+  ok(closed, "and the ordinary window opens")
+  ok(battle:outcome() == nil, "a timed-out replacement does not end the fight")
+  eq(battle:snapshot().phase, "choice", "the phase closed on the clock alone")
+  eq(battle:snapshot().turn, 2, "spending the turn the faint was on")
+  eq(fighterIn(battle:snapshot(), "p1").species, "Gamma", "Gamma really is out")
+end
+
+-- ------------------------------------------------------------------
 -- 12d. auto-pick retreats at low HP to an SE bench mon
 -- ------------------------------------------------------------------
 
@@ -3373,9 +3635,12 @@ do
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("npc", { action = "fight", move = 0 })
   for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
-  -- turn 2: a switches to a2 (side a resolves first), b fields b2
-  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  -- turn 2: npc's fallen b1 owes a replacement first -- close the replace
+  -- phase (b fields b2) -- THEN p1 files its voluntary switch to a2 on the
+  -- turn-2 window that the closed replace phase opens.
   battle:submitChoice("npc", { action = "switch", slot = 1 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
   for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
   -- turn 3+: a2 KOs b2
   for _ = 1, 6 do

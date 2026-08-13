@@ -61,6 +61,20 @@ here must match `manifest.version`.
   design) — the WAIT/ALONE choice showed as a cut-off empty box. Mod
   screens now decline to claim zones when the state beneath authored
   none, matching the engine's own rule.
+- **The party IS the consent — no more WAIT/ALONE.** A partied player who
+  triggers a trainer fight goes straight into the co-op flow; the waiting
+  cover keeps a single ALONE row as the escape, and cancelling the party
+  remains the opt-out for co-op battles entirely.
+- **Replacements resolve before the next turn.** The referee gains a
+  replace phase: after a KO nobody picks a move until every seat owing a
+  replacement has fielded one — NPC replacements land in the same batch
+  (faint, switch, send, turn), and a human's partner sees "X is choosing
+  who to send out..." instead of an empty field behind an open menu.
+- **You can actually see your partner enter a fight.** The `!` bubble is
+  raised the moment the offer arrives (it previously never was — the
+  offer was consumed in the same call that set it), lives for the whole
+  pre-battle window with a 2.5s floor, and the "Joining X's battle!"
+  line is now a toast that survives the battle covering the screen.
 - **Your partner joins co-op fights automatically.** Choosing WAIT at a
   trainer or wild encounter now pulls your partied partner straight into
   the 2v2 — no walking to the NPC, no confirm box (the party itself is

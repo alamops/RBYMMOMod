@@ -886,7 +886,7 @@ return function(game)
 
   if coopClass then
     -- Without a live hub + party, Coop.onTrainerBattle leaves the engine
-    -- battle alone. The wait-for-WAIT loop below used to tap A on any
+    -- battle alone. The wait-for-the-cover loop below used to tap A on any
     -- item-less top screen -- which is exactly BattleState -- and would
     -- then fight the Bug Catcher solo until "ALPHA defeated BUG CATCHER!",
     -- looking like a stuck co-op handoff. Bail here with the real fault.
@@ -897,31 +897,52 @@ return function(game)
 
     if ROLE == "a" then
       staged = stageTrainer()
-      -- The prompt is a text box and then a two-row menu; tap through the
-      -- *prompt's* box rather than mashing, because row one of that menu is
-      -- WAIT and a stray A would answer the question this is trying to
-      -- observe. Never tap A into a BattleState: that is the engine fight
+      -- Round 11: nothing is chosen here. Being partied is the consent, so
+      -- staging the trainer posts COOP_WAIT and raises the wait cover (one
+      -- ALONE row) by itself -- or the field, if B's auto-join beat this loop.
+      -- Both are the contract; an ask is the failure, and it is sampled inside
+      -- the loop because an ask answered between two polls is exactly the
+      -- regression this leg exists to catch.
+      --
+      -- Tap through the *pre-battle* box rather than mashing: the cover's only
+      -- row is ALONE, so a stray A would send this side into the solo fight.
+      -- Never tap A into a BattleState either: that is the engine fight
       -- running alone, which means the intercept never fired.
-      local asked = H.waitFor(game, function()
+      local sawAsk = false
+      local joinedFirst = false
+      local covered = H.waitFor(game, function()
         if not exports.isConnected() then return false end
-        for _, label in ipairs(H.menuLabels(game)) do
-          if label == "WAIT" then return true end
-        end
         local top = H.top(game)
+        if top ~= nil and top.sim ~= nil and #top.sim.slots >= 3 then
+          joinedFirst = true
+          return true
+        end
+        local seen = false
+        for _, label in ipairs(H.menuLabels(game)) do
+          if label == "WAIT" then sawAsk = true end
+          if label == "ALONE" then seen = true end
+        end
+        if seen then return true end
         if top and top.kind == "trainer" then return false end
         if top and top.items == nil then U.tap(game, "a") end
         return false
-      end, 60 * 6, "the co-op prompt in front of the trainer")
-      check(asked, "the co-op prompt appears in front of a real trainer battle")
+      end, 60 * 6, "the co-op wait cover in front of the trainer")
+      check(covered,
+            "a real trainer battle while partied raises the co-op wait cover "
+            .. "by itself -- or the fight, if the partner was faster")
+      check(not sawAsk,
+            "and no WAIT/ALONE ask is ever shown -- forming the party was the "
+            .. "yes (src/Coop.lua M:onTrainerBattle)")
+      log(("coop cover: joinedFirst=%s sawAsk=%s"):format(
+        tostring(joinedFirst), tostring(sawAsk)))
       shot("coop-prompt")
-      check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
 
       -- Round 9: the partner may already be standing on this map with
       -- nothing on screen, so COOP_WAIT can come back as COOP_JOIN within a
-      -- frame or two of WAIT being chosen -- polling coopWaiting() alone can
-      -- report "never stood at the fight" about a wait that had already been
-      -- answered. The marker moves ahead of the poll for the same reason as
-      -- mmo_host.lua's round 9 fix: the guest's window opens when COOP_WAIT
+      -- frame or two of the trainer triggering -- polling coopWaiting() alone
+      -- can report "never stood at the fight" about a wait that had already
+      -- been answered. The marker stays ahead of the poll for the same reason
+      -- as mmo_host.lua's round 9 fix: the guest's window opens when COOP_WAIT
       -- is sent, not when this side finishes looking at itself.
       H.signal("coop_a_waiting")
       local waitSeen, joinSeen = false, false
@@ -937,11 +958,11 @@ return function(game)
         end
         return false
       end, 20, "this side to be standing at the fight, or already joined")
-      log(("after WAIT: waitBox=%s alreadyJoined=%s"):format(
+      log(("after the trigger: waitBox=%s alreadyJoined=%s"):format(
         tostring(waitSeen), tostring(joinSeen)))
       check(atFight,
-            "and WAIT leaves this side at the fight -- standing at it, or "
-            .. "already pulled into it by the partner it waited for")
+            "and the automatic wait leaves this side at the fight -- standing "
+            .. "at it, or already pulled into it by the partner it waited for")
     else
       H.await(game, "coop_a_waiting")
       -- Round 9: no confirm exists any more (askToJoin / closeJoinBox are
@@ -1206,7 +1227,7 @@ return function(game)
     --
     -- Invite-path joiners (role b) never staged a local trainer battle, so
     -- there is nothing to hand a result to -- that is correct. Role a always
-    -- staged one before WAIT.
+    -- staged one before the wait started.
     if staged then
       local handed = H.waitFor(game, function()
         return finished ~= nil

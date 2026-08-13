@@ -7002,11 +7002,12 @@ eq(ann.party:has(), true, "ANN and BOB are a party")
 
 ann.said = {}
 eq(engage(ann), true,
-   "a party member walking into a trainer is asked first")
-check(ann.chooseText:find("BOB"), "and the question names their partner")
-eq(#ann.chosen, 2, "with exactly two answers")
-eq(ann.chosen[2].label, "ALONE",
-   "and BATTLE ALONE last -- which is what B selects")
+   "a party member walking into a trainer starts the wait -- nothing is asked")
+check(ann.chooseText:find("BOB"), "and the cover names their partner")
+eq(#ann.chosen, 1, "with exactly one row")
+eq(ann.chosen[1].label, "ALONE",
+   "ALONE -- which is what B selects")
+eq(ann.coop:isWaiting(), true, "and the wait is already running")
 
 -- ------- rule 2: B is an answer, not an escape
 
@@ -7025,8 +7026,7 @@ eq(ann.coop:isWaiting(), false, "and starts no wait")
 -- retry exists to clear (pinned further down, under "R9-A2").
 
 engage(ann)
-pick(ann, "WAIT")
-eq(ann.coop:isWaiting(), true, "choosing WAIT starts a wait")
+eq(ann.coop:isWaiting(), true, "triggering the trainer starts a wait")
 check(not fightsAlone(ann), "and does not hand the battle back yet")
 check(ann.chosen ~= nil, "a waiting box is put up")
 
@@ -7043,20 +7043,12 @@ eq(bob.chosen, nil, "and no menu is put up either")
 -- ------- rule 2 again: from wait mode, BACK keeps the invite; B is ALONE
 
 ann.said = {}
-eq(#(ann.chosen or {}), 2, "the waiting box has two rows")
-eq(ann.chosen[1].label, "BACK", "BACK first -- reopen wait/alone")
-eq(ann.chosen[2].label, "ALONE", "ALONE last -- which is what B selects")
-pick(ann, "BACK")
-eq(ann.coop:isWaiting(), true,
-   "BACK reopens the choice without ending the wait")
-check(not fightsAlone(ann), "without handing the battle back yet")
-eq(#(ann.chosen or {}), 2, "and reopens the wait/alone choice")
-eq(ann.chosen[2].label, "ALONE", "still with ALONE as the B answer")
+eq(#(ann.chosen or {}), 1, "the waiting cover has one row")
+eq(ann.chosen[1].label, "ALONE", "ALONE -- which is what B selects")
 check(bob.coop:pendingOffer() ~= nil,
       "the offer stays up until ALONE is chosen -- BOB is still held busy")
 
 -- Going alone from wait mode while BOB is still busy holding the offer.
-pick(ann, "WAIT")
 bob.said = {}
 pressB(ann)
 check(fightsAlone(ann), "B on the waiting box fights the trainer alone")
@@ -7071,7 +7063,6 @@ bob.coop.running = false
 -- with nothing standing gets COOP_OFFER_END{alone} back, the same sentence,
 -- and starts no handoff.
 engage(ann)
-pick(ann, "WAIT")
 bob.coop.running = true
 pump(bob)
 check(bob.coop:pendingOffer() ~= nil, "invite is up again")
@@ -7090,7 +7081,6 @@ bob.coop.running = false
 -- ------- R9-A5: the joiner's own offer can expire, and the waiter is told
 
 engage(ann)
-pick(ann, "WAIT")
 bob.coop.running = true -- never takes it: pins the 300s expiry, not a join
 pump(bob)
 check(bob.coop:pendingOffer() ~= nil, "ANN is waiting again")
@@ -7139,7 +7129,6 @@ eq(ann.coop:partnerOnMap("FIX_TOWN"), false,
 engage(ann)
 check(ann.chooseText:find("arrive"),
       "off-map partner gets the wait-to-arrive prompt")
-pick(ann, "WAIT")
 eq(ann.coop:isWaiting(), true, "WAIT is allowed while they are elsewhere")
 check(ann.chooseText:find("arrive"),
       "and the waiting box says they are still arriving")
@@ -7160,7 +7149,6 @@ hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
 bob.mapId = "FIX_ROUTE"
 pump(ann)
 engage(ann)
-pick(ann, "WAIT")
 pump(bob)
 eq(bob.confirmBox, nil, "still off-map, so nothing happens yet")
 check(bob.coop:pendingOffer() ~= nil, "the offer is stored for their arrival")
@@ -7190,7 +7178,6 @@ bob.coop.encounter = nil
 -- ------- silent join: joiner never walked into the trainer (invite path)
 
 engage(ann)
-pick(ann, "WAIT")
 pump(bob)
 eq(bob.coop:pendingOffer(), nil, "the same-map invite is taken immediately")
 eq(bob.confirmBox, nil, "with no confirm at all")
@@ -7215,7 +7202,6 @@ while ann.stack:top() do ann.stack:pop() end
 ann.engine = nil
 ann.coop.encounter = nil
 engage(ann)
-pick(ann, "WAIT")
 pump(bob)
 check(bob.coop:pendingOffer() ~= nil, "still off-map, so the offer just stands")
 bob.mapId = "FIX_TOWN"
@@ -7239,7 +7225,6 @@ ann.coop.running = false
 -- auto-joins it; the two extra COOP_JOINs below just race the same landed
 -- offer and are the ones that must find nothing left to accept.
 engage(ann)
-pick(ann, "WAIT")
 pump(bob)
 bob.transport.send(nil, Wire.COOP_JOIN, { to = ann.id, battle = FIGHT })
 bob.transport.send(nil, Wire.COOP_JOIN, { to = ann.id, battle = FIGHT })
@@ -7272,7 +7257,7 @@ settle(ann); settle(bob)
 
   -- the offer lands mid-fight: quiet until the fight clears, then joins
   rBob.stack:push({ kind = "wild", enemy = { mon = { species = "FIXMON_C" } } })
-  engage(rAnn); pick(rAnn, "WAIT")
+  engage(rAnn)
   pump(rBob)
   check(rBob.coop:pendingOffer() ~= nil, "a busy partner keeps the offer")
   tick(rBob, 2)
@@ -7288,7 +7273,7 @@ settle(ann); settle(bob)
 
   -- the offer lands mid-trade: the same deferral, through Sessions:isBusy()
   rBob.busy = true
-  engage(rAnn); pick(rAnn, "WAIT")
+  engage(rAnn)
   pump(rBob)
   check(rBob.coop:pendingOffer() ~= nil, "a trade is not interrupted either")
   tick(rBob, 3)
@@ -7319,7 +7304,6 @@ end)()
 
   tBob.busy = true -- never frees, so nothing ever takes the offer
   local _, engine = engage(tAnn)
-  pick(tAnn, "WAIT")
   pump(tBob)
   tAnn.said = {}
   tick(tAnn, Config.COOP_ASK_TIMEOUT - 1)
@@ -7352,8 +7336,8 @@ end)()
   if mAnn.id < mBob.id then winner, loser = mAnn, mBob
   else winner, loser = mBob, mAnn end
 
-  engage(mAnn); pick(mAnn, "WAIT")
-  engage(mBob, "OPP_LASS"); pick(mBob, "WAIT")
+  engage(mAnn)
+  engage(mBob, "OPP_LASS")
   pump(mAnn); pump(mBob)
 
   eq(winner.coop:isWaiting(), true, "the smaller playerId keeps its wait")
@@ -7455,7 +7439,6 @@ check(ann.coop.lastPlan.side ~= cal.coop.lastPlan.side,
 
 ann.coop.running = false
 engage(ann)
-pick(ann, "WAIT")
 check(ann.coop.encounter ~= nil, "the encounter is held while waiting")
 eq(ann.finished, nil, "and the engine's battle has not been told anything yet")
 
@@ -7492,7 +7475,6 @@ eq(ann.finished, nil, "with nothing finished off behind its back")
 bob.coop.running = false
 bob.coop.offer = nil
 engage(bob)
-pick(bob, "WAIT")
 check(bob.coop.encounter ~= nil, "BOB's own encounter is held while he waits too")
 eq(bob.finished, nil, "and his own engine battle has not been told anything yet")
 
@@ -7641,7 +7623,6 @@ wAnn.roster:setBusy(wBob.id, false)
 -- join the trainer offer the instant `pump` delivers it, and pendingOffer
 -- would already be nil by the next line.
 engage(wAnn)
-pick(wAnn, "WAIT")
 wBob.busy = true
 pump(wBob)
 check(wBob.coop:pendingOffer() ~= nil, "trainer wait offer is up for the partner")
@@ -8453,7 +8434,6 @@ end)()
 ann.coop.running = false
 ann.said = {}
 engage(ann)
-pick(ann, "WAIT")
 eq(ann.coop:isWaiting(), true, "ANN is waiting again")
 bob.party:leave()
 pump(ann)
@@ -8569,6 +8549,569 @@ check(fightsAlone(ann),
   eq(game.save.defeatedTrainers.route3_bug_a, nil,
      "syntheticFinish did not run on top of consume")
 end)()
+
+end)()
+
+-- ------------------------------------------------------------------
+-- 7b. the co-op "!" latch, the corner line, and the mark's real life
+-- ------------------------------------------------------------------
+--
+-- The "!" bubble over a partner's head is the only warning a free player gets
+-- that their friend is standing at a fight waiting for them -- and it was
+-- almost never seen.  `Coop.offer` is set by onOffer and cleared by autoJoin
+-- inside the *same* inbound handler for exactly the case the mark exists for
+-- (a partner who is free and on this map takes the offer instantly), so a
+-- renderer polling the accessor once a frame was reading a field that had
+-- already gone back to nil.  Three changes fixed it, and all three are pinned
+-- below:
+--
+--   * `Coop.offerMarkFor` -- a latch, written down *before* considerOffer
+--     runs, and released in the six places `self.offer` itself is dropped and
+--     nowhere else;
+--   * `Overlay:offerMark` falling back to that latch, `Overlay:update` no
+--     longer ending the mark on `running` (that is the handoff -- the world is
+--     still on screen for the whole of it), and `Overlay.ALERT_MIN` as a floor
+--     under the mark's life;
+--   * `Coop.toast` -- a third optional client hook, so the one line the joiner
+--     gets ("Joining X's battle!") is also drawn in the corner, where it
+--     outlives the battle screen that is about to cover the overworld.
+--
+-- Driven the way src/Client.lua drives them -- real Coop, real Overlay, real
+-- Toast, stepped coop -> overlay -> toast -> draw -- because "the mark is
+-- live" and "the mark is on screen" are different questions and only the
+-- frame answers the second.  A live-but-undrawn frame is the whole bug.
+
+;(function()
+
+local Coop = need("Coop")
+local Overlay = need("Overlay")
+
+-- The bubble is four love.graphics calls and nothing else here draws, so a
+-- table that answers every name with a no-op is the whole graphics context
+-- this section needs.  Restored exactly as found: later sections have their
+-- own opinions about whether love exists.
+local ambientLove = _G.love
+_G.love = { graphics = setmetatable({}, {
+  __index = function() return function() end end,
+}) }
+
+local warnings = {}
+stubMod.log.warn = function(_, fmt) warnings[#warnings + 1] = tostring(fmt) end
+
+local DT = 1 / 60
+local CELL = Overlay.CELL
+local OFFER = { from = "waiter", name = "WAITER", battle = "PALLET|npc|7",
+                label = "BUG CATCHER", map = "PALLET" }
+local LINE = "Joining WAITER's battle!"
+
+-- A joiner's client, minus the engine: the modules src/Client.lua wires
+-- together, with the same three hooks hung off Coop that install() hangs.
+local function newJoiner()
+  local c = { sent = {}, said = {}, busy = false, map = "PALLET",
+              chat = Chat.new() }
+  c.transport = {
+    isReady = function() return true end,
+    send = function(_, kind, body)
+      c.sent[#c.sent + 1] = { kind = kind, body = body }
+      return true
+    end,
+  }
+  c.ui = {
+    say = function(_, text, done)
+      c.said[#c.said + 1] = text
+      if done then done() end
+    end,
+    pushState = function() end,
+  }
+  -- The party, reduced to the four questions Coop asks of it.  "joiner" sorts
+  -- after "waiter", so the mutual-wait arbitration never fires here and every
+  -- scenario below is about the offer rather than about who wins a tie.
+  c.party = {
+    selfId = "joiner",
+    isPartner = function(_, id) return id == "waiter" end,
+    partnerName = function() return "WAITER" end,
+    has = function() return true end,
+  }
+  c.roster = { get = function(_, id)
+    if id == "waiter" then return { x = 10, y = 12 } end
+  end }
+  c.ctx = {
+    chat = c.chat,
+    roster = c.roster,
+    avatars = { cellOf = function(_, id)
+      if id == "waiter" then return 10, 12 end
+    end },
+  }
+  c.coop = Coop.new(c.transport, c.ui, c.party, c.roster, c.chat)
+  c.toast = Toast.new(c.ctx)
+  c.coop.busy = function() return c.busy end
+  c.coop.here = function() return c.map end
+  c.coop.toast = function(text) c.toast:push(text) end
+  c.ctx.coop = c.coop
+  c.ctx.toast = c.toast
+  c.overlay = Overlay.new(c.ctx)
+  c.game = { stack = { states = {}, top = function() end } }
+  return c
+end
+
+local function sentJoin(c)
+  for _, msg in ipairs(c.sent) do
+    if msg.kind == Wire.COOP_JOIN then return true end
+  end
+  return false
+end
+
+-- The scrollback half of the joiner's line (M:note), which the toast is
+-- *added* to rather than substituted for.
+local function notedJoin(c)
+  for _, entry in ipairs(c.chat.history or {}) do
+    if tostring(entry.text or ""):find(LINE, 1, true) then return true end
+  end
+  return false
+end
+
+-- ...and the corner half (M:toastLine), read off the real Toast queue.
+local function toastedJoin(c)
+  for _, entry in ipairs(c.toast:list()) do
+    if tostring(entry.text or ""):find(LINE, 1, true) then return true end
+  end
+  return false
+end
+
+-- One fixed step in src/Client.lua's order, ending in the frame.  The player
+-- is standing on the waiter's own cell, so the mark lands in the middle of the
+-- playfield and the letterbox clip is never the reason it is refused.
+local function frame(c)
+  c.coop:update(DT, c.game)
+  c.overlay:update(DT)
+  c.toast:update(DT)
+  return c.overlay:drawAlertLayer({ getHeight = function() return 8 end },
+                                  c.map, 10 * CELL, 12 * CELL, 4, 0, 0)
+end
+
+local function run(script, frames)
+  local c = newJoiner()
+  local r = { c = c, live = 0, drawn = 0 }
+  for i = 1, frames do
+    if script then script(c, i) end
+    local verdict = frame(c)
+    if c.overlay.alert then
+      r.live = r.live + 1
+      r.firstFrame = r.firstFrame or i
+      r.lastFrame = i
+    end
+    if verdict == "waiter" then r.drawn = r.drawn + 1 end
+    if not r.joinFrame and sentJoin(c) then r.joinFrame = i end
+    if not r.toastFrame and toastedJoin(c) then r.toastFrame = i end
+    if not r.pushFrame and c.coop.state then r.pushFrame = i end
+  end
+  return r
+end
+
+-- ------- the latch is set before the offer can be taken
+
+-- This is the bug in one call: a free partner already standing on the map
+-- joins inside onOffer itself, so `self.offer` is nil again before the handler
+-- returns.  The latch has to have been written down first or there is nothing
+-- for any renderer to ever see.
+
+local landed = newJoiner()
+landed.coop:onOffer(landed.game, OFFER, "PALLET")
+eq(landed.coop.offer, nil,
+   "a free partner on this map takes the offer inside onOffer itself")
+check(sentJoin(landed), "the join is already on the wire when the handler returns")
+check(type(landed.coop.offerMarkFor) == "table",
+      "and the latch still records that an offer arrived -- it was written "
+      .. "before considerOffer ran, not after")
+eq(landed.coop.offerMarkFor.id, "waiter", "naming who is waiting")
+eq(landed.coop.offerMarkFor.battle, OFFER.battle, "which fight")
+eq(landed.coop.offerMarkFor.map, "PALLET", "and the map it is on")
+landed.overlay:update(DT)
+check(landed.overlay.alert ~= nil,
+      "so the very next tick of the overlay has a mark to draw")
+
+-- ------- and released in the six places the offer is dropped
+
+-- Held standing by a busy client, which is the one state that lets an offer
+-- and its latch be looked at from outside the handler that made them.
+local function standing()
+  local c = newJoiner()
+  c.busy = true
+  c.coop:onOffer(c.game, OFFER, "PALLET")
+  return c
+end
+
+local held = standing()
+check(held.coop.offer ~= nil, "a busy partner leaves the offer standing")
+check(held.coop.offerMarkFor ~= nil, "with the latch beside it")
+
+local byEnd = standing()
+byEnd.coop:onOfferEnd({ reason = "left" })
+eq(byEnd.coop.offerMarkFor, nil,
+   "an offer that ends releases the latch -- there is nothing left to point at")
+
+local byGone = standing()
+byGone.coop:onPeerGone("waiter")
+eq(byGone.coop.offerMarkFor, nil,
+   "the partner going offline releases it -- the avatar it is anchored on is "
+   .. "about to be despawned with them")
+
+-- The one negative case, and the one that guards the `mark.id == id` line: a
+-- crowded map means peers come and go constantly, and any of them dropping
+-- would otherwise silently take the mark down with it.
+local byOther = standing()
+byOther.coop:onPeerGone("somebody-else")
+check(byOther.coop.offerMarkFor ~= nil,
+      "but a *different* player going offline leaves the mark standing")
+eq(byOther.coop.offerMarkFor.id, "waiter",
+   "still pointing at the partner who is actually waiting")
+
+local byParty = standing()
+byParty.coop:onPartyEnd()
+eq(byParty.coop.offerMarkFor, nil, "the party ending releases it")
+
+local byTimeout = standing()
+byTimeout.coop:update(Config.COOP_OFFER_TIMEOUT + 1, nil)
+eq(byTimeout.coop.offer, nil, "five minutes of silence times the offer out")
+eq(byTimeout.coop.offerMarkFor, nil,
+   "and takes the latch with it -- five minutes of \"!\" is not a signal")
+
+local byReset = standing()
+byReset.coop:reset()
+eq(byReset.coop.offerMarkFor, nil,
+   "and a dropped connection resets it: nothing is coming, so nothing is "
+   .. "being pointed at")
+
+-- The sixth release is startBattle, and it is the one release this suite
+-- cannot drive: reaching it needs a live CoopBattle and the engine's link
+-- modules, which plain luajit has not got (see "ownership transfer" above).
+-- Pinned on the source instead, and specifically on its *position* -- the
+-- latch must go between `self.state = state` and `ui:pushState`, because until
+-- that push the overworld is still what the player is looking at and the mark
+-- still has something to annotate.  The count is what keeps the set at six:
+-- one more would be a release the offer does not have, one fewer a mark that
+-- outlives its fight.
+do
+  local handle = io.open(MOD_PATH .. "/src/Coop.lua", "rb")
+  local src = handle and handle:read("*a")
+  if handle then handle:close() end
+  check(src ~= nil, "src/Coop.lua reads back for the two shape checks")
+  src = src or ""
+  local seg = src:match("self%.state = state(.-)self%.ui:pushState")
+  check(seg ~= nil, "startBattle still sets the state and then pushes it")
+  check(seg ~= nil and seg:find("self%.offerMarkFor = nil") ~= nil,
+        "and releases the latch in between -- the fight is on screen, so the "
+        .. "mark has said all it had to say")
+  eq(select(2, src:gsub("self%.offerMarkFor = nil", "")), 6,
+     "the latch is released in exactly six places, one for every place the "
+     .. "offer itself is dropped")
+end
+
+-- ------- the overlay reads the latch, not just the accessor
+
+-- A Coop stand-in reduced to the fields Overlay is allowed to read.  Overlay
+-- owns no part of the handshake and must never be the reason one resolves
+-- differently, so everything here is read-only from its side.
+local function ctxCoop(fields)
+  return {
+    coop = fields,
+    avatars = { cellOf = function(_, id)
+      if id == "waiter" then return 10, 12 end
+    end },
+    roster = { get = function() end },
+  }
+end
+
+local latchOnly = Overlay.new(ctxCoop({ offerMarkFor = {
+  id = "waiter", battle = OFFER.battle, map = "PALLET" } }))
+local fromLatch = latchOnly:offerMark()
+check(fromLatch ~= nil,
+      "a latch alone raises the mark -- no pendingOffer method, no standing "
+      .. "offer, which is the common case and not the rare one")
+eq(fromLatch.id, "waiter", "naming the partner")
+eq(fromLatch.battle, OFFER.battle, "and the fight")
+eq(fromLatch.map, "PALLET", "and the map, so an off-map mark can be refused")
+
+-- The accessor still comes first, because it is the only one of the two that
+-- can disagree: a busy or off-map partner really does have a standing offer,
+-- and that is the one the ACTIONS menu and the trainer trigger are looking at.
+local bothSources = Overlay.new(ctxCoop({
+  pendingOffer = function()
+    return { from = "waiter", battle = "LIVE", map = "PALLET" }
+  end,
+  offerMarkFor = { id = "waiter", battle = "STALE", map = "PALLET" },
+}))
+eq(bothSources:offerMark().battle, "LIVE", "a standing offer outranks the latch")
+
+local throwingAccessor = Overlay.new(ctxCoop({
+  pendingOffer = function() error("no offer for you", 0) end,
+  offerMarkFor = { id = "waiter", battle = "STALE", map = "PALLET" },
+}))
+eq(throwingAccessor:offerMark().battle, "STALE",
+   "and a pendingOffer that throws falls through to the latch rather than "
+   .. "blanking the mark")
+
+eq(Overlay.new(ctxCoop({})):offerMark(), nil, "no offer and no latch marks nobody")
+eq(Overlay.new({}):offerMark(), nil,
+   "and neither does a context with no co-op in it at all")
+
+-- Compatibility, not new behaviour: every other Overlay built in this file is
+-- handed a ctx with no `coop` key, and the latch must not have made one
+-- required.
+local plainOverlay = Overlay.new({ chat = Chat.new() })
+eq(plainOverlay:offerMark(), nil, "an overlay with no co-op context marks nobody")
+check(pcall(function() plainOverlay:update(DT) end),
+      "and steps with nothing to ask")
+eq(plainOverlay.alert, nil, "raising nothing")
+eq(plainOverlay:drawAlertLayer(nil, "PALLET", 0, 0, 1, 0, 0), nil,
+   "and draws nothing")
+
+-- ------- what ends the mark, and what no longer does
+
+local liveCoop = { offerMarkFor = {
+  id = "waiter", battle = OFFER.battle, map = "PALLET" } }
+local liveOverlay = Overlay.new(ctxCoop(liveCoop))
+liveOverlay:update(DT)
+check(liveOverlay.alert ~= nil, "the mark is up")
+liveCoop.running = true
+for _ = 1, 120 do liveOverlay:update(DT) end
+check(liveOverlay.alert ~= nil,
+      "`running` -- the handoff, two relay round trips before the screen -- no "
+      .. "longer ends it: two seconds on and the world is still up, and so is "
+      .. "the mark")
+liveCoop.state = { mediated = true }
+liveOverlay:update(DT)
+eq(liveOverlay.alert, nil,
+   "the battle screen itself does end it -- there is no world left to "
+   .. "annotate, and the corner line carries the rest")
+
+-- ------- the floor, and the union rule under it
+
+check(Overlay.ALERT_MIN > Overlay.ALERT_PERIOD,
+      "ALERT_MIN is longer than one bob -- a deliberate grace, not a token frame")
+
+-- `hold` alone is a grace measured from the last tick the offer stood, which
+-- for an automatic join is the same tick it arrived; on its own it would let a
+-- mark raised and taken in one second die before anybody read it.  Built here
+-- so the grace runs out first and the floor is demonstrably the clock that
+-- keeps the mark alive.
+local floorCoop = { offerMarkFor = {
+  id = "waiter", battle = OFFER.battle, map = "PALLET" } }
+local floorOverlay = Overlay.new(ctxCoop(floorCoop))
+floorOverlay:update(DT)
+floorCoop.offerMarkFor = nil
+local ticks = 1
+for _ = 1, math.ceil(Overlay.ALERT_HOLD / DT) + 2 do
+  floorOverlay:update(DT)
+  ticks = ticks + 1
+end
+check(floorOverlay.alert ~= nil,
+      "with the grace spent the mark is still up -- the floor is the binding "
+      .. "clock, which is what makes an instant join legible at all")
+check(floorOverlay.alert.hold <= 0, "and the grace really has run out")
+check(floorOverlay.alert.clock < Overlay.ALERT_MIN, "while the floor has not")
+while floorOverlay.alert and ticks < 600 do
+  floorOverlay:update(DT)
+  ticks = ticks + 1
+end
+check(ticks < 600, "the mark does end on its own")
+check(math.abs(ticks * DT - Overlay.ALERT_MIN) < 3 * DT,
+      "and it ends at ALERT_MIN from the raise, not at ALERT_HOLD from the "
+      .. "release")
+
+-- ...and the other half of the union: an offer that stood past the floor fades
+-- on the grace instead, so neither clock alone is the rule.
+local graceCoop = { offerMarkFor = {
+  id = "waiter", battle = OFFER.battle, map = "PALLET" } }
+local graceOverlay = Overlay.new(ctxCoop(graceCoop))
+for _ = 1, math.ceil(5 / DT) do graceOverlay:update(DT) end
+check(graceOverlay.alert.clock >= Overlay.ALERT_MIN,
+      "an offer that stood for five seconds is already past the floor")
+graceCoop.offerMarkFor = nil
+local after = 0
+while graceOverlay.alert and after < 600 do
+  graceOverlay:update(DT)
+  after = after + 1
+end
+check(after < 600, "and it still ends")
+check(math.abs(after * DT - Overlay.ALERT_HOLD) < 3 * DT,
+      "on the grace from the last tick the offer stood, this time")
+
+-- ------- the frame: the free joiner, which is the case this all exists for
+
+-- The push is modelled rather than driven (a real CoopBattle needs the
+-- engine's link modules), but modelled off the two adjacent lines the source
+-- pin above asserts: `self.state = state`, then the latch, then pushState.
+local function pushBattle(c)
+  c.coop.state = { mediated = true }
+  c.coop.offerMarkFor = nil
+end
+
+local free = run(function(c, i)
+  if i == 30 then c.coop:onOffer(c.game, OFFER, "PALLET") end
+  if i == 36 then c.coop.running = true end   -- COOP_BATTLE lands
+  if i == 42 then pushBattle(c) end           -- the screen, two hops later
+end, 240)
+
+eq(free.c.coop.offer, nil, "the offer was never observable from a frame at all")
+eq(free.firstFrame, 30,
+   "the mark is live on the very first tick after the offer lands -- "
+   .. "immediately, not eventually")
+eq(free.pushFrame, 42, "and the battle screen arrives twelve frames later")
+eq(free.live, free.pushFrame - free.firstFrame,
+   "the mark is live for the WHOLE pre-push span, frame for frame")
+eq(free.live, 12, "which is 0.2s of overworld with a \"!\" on it")
+eq(free.drawn, free.live,
+   "and every live frame is a DRAWN frame -- a live-but-suppressed mark is "
+   .. "the bug this whole round is about")
+eq(free.lastFrame, 41, "the last live frame is the last one before the push")
+check(free.joinFrame ~= nil, "the join went out")
+check(free.toastFrame ~= nil, "and a line went into the corner")
+check(free.toastFrame <= free.joinFrame + 1,
+      "in the same beat as the join, not after it")
+check(notedJoin(free.c),
+      "and the party scrollback still carries the same line -- the toast is "
+      .. "an addition to the note, never a replacement")
+
+-- ------- the handoff no longer costs the mark its life
+
+local handoff = run(function(c, i)
+  if i == 30 then c.coop:onOffer(c.game, OFFER, "PALLET") end
+  if i == 36 then c.coop.running = true end
+end, 240)
+eq(handoff.firstFrame, 30, "the mark goes up with the offer")
+eq(handoff.lastFrame, 240,
+   "and is still up at the end of a four-second run -- `running` flipped true "
+   .. "at 0.1s and the old kill condition would have ended it there")
+eq(handoff.drawn, handoff.live, "drawn on every one of those frames")
+check(handoff.live * DT > 3,
+      "which is many multiples of a frame past the handoff, not one tick")
+
+-- ------- and with no push at all, the floor is what holds it up
+
+local floorRun = run(function(c, i)
+  if i == 30 then c.coop:onOffer(c.game, OFFER, "PALLET") end
+end, 400)
+check(floorRun.live * DT >= Overlay.ALERT_MIN,
+      "a join the hub drops still leaves a mark up for at least ALERT_MIN")
+check(floorRun.live * DT > Overlay.ALERT_PERIOD, "which is more than one bob")
+
+-- ------- the busy joiner: the old retry path, untouched
+
+local busyRun = run(function(c, i)
+  if i == 1 then c.busy = true end
+  if i == 30 then c.coop:onOffer(c.game, OFFER, "PALLET") end
+  if i == 60 then c.busy = false end
+  if i == 150 then pushBattle(c) end
+end, 240)
+eq(busyRun.firstFrame, 30, "a busy partner's mark goes up all the same")
+check(busyRun.joinFrame ~= nil, "and the fight is joined in the end")
+check(busyRun.joinFrame >= 60,
+      "not when the offer landed -- mid-trade is a deferral, so it stands "
+      .. "until busy() flips false")
+check(busyRun.joinFrame < 130,
+      "and M:update's retry takes it within a retry period of being free")
+check(toastedJoin(busyRun.c), "the corner line lands on the retry too")
+check(notedJoin(busyRun.c), "with the scrollback note beside it")
+
+-- ------- the off-map joiner: live and drawn are different questions
+
+local off = newJoiner()
+off.map = "ROUTE_1"
+off.coop:onOffer(off.game, OFFER, "ROUTE_1")
+check(off.coop.offer ~= nil,
+      "an offer for a map this player is not standing on stands")
+check(off.coop.offerMarkFor ~= nil, "and the mark is raised all the same")
+local offLive, offDrawn, offMapVerdicts = 0, 0, 0
+for _ = 1, 180 do
+  local verdict = frame(off)
+  if off.overlay.alert then offLive = offLive + 1 end
+  if verdict == "waiter" then offDrawn = offDrawn + 1 end
+  if verdict == "off-map" then offMapVerdicts = offMapVerdicts + 1 end
+end
+eq(offLive, 180, "the mark stays live every tick the partner is a map away")
+eq(offDrawn, 0,
+   "and is never once drawn -- there is no head on this screen to put it over")
+eq(offMapVerdicts, 180,
+   "the frame says which of the two it is by name, rather than by silence")
+check(not sentJoin(off), "nothing is joined from another map")
+check(not toastedJoin(off), "and nothing is said in the corner yet")
+
+-- map.entered: `here()` starts answering the shared map, and the retry takes
+-- the offer that was standing all along.
+off.map = "PALLET"
+local walkedOnDrawn = 0
+for _ = 1, 60 do
+  if frame(off) == "waiter" then walkedOnDrawn = walkedOnDrawn + 1 end
+end
+check(sentJoin(off), "walking onto the partner's map joins the fight")
+check(toastedJoin(off), "and the corner line lands then")
+check(notedJoin(off), "with the scrollback note beside it")
+check(walkedOnDrawn > 0, "and the mark is finally drawn, over a head that is here")
+
+-- ------- the waiter's own screen never marks
+
+-- src/Hub.lua never echoes COOP_OFFER back to its sender, so the player who is
+-- standing at the fight has no offer, no latch and nothing to draw.  A mark
+-- over their own head would be the game telling them about themselves.
+local waiter = run(function(c, i)
+  if i == 30 then
+    c.coop.waiting = { battle = OFFER.battle, map = "PALLET", clock = 0 }
+  end
+end, 240)
+eq(waiter.live, 0,
+   "the waiter's own client never raises a mark, across a four-second run")
+eq(waiter.drawn, 0, "so nothing is ever drawn")
+eq(waiter.c.coop.offerMarkFor, nil, "and no latch was ever set")
+
+-- ------- the mark's life is measured from the raise, not from the release
+
+-- Each of these releases the latch half a second after it went up.  Under the
+-- old reactive semantics (a grace counted from the release) the mark would
+-- have ended at 0.5 + ALERT_HOLD = 1.7s; under the union rule it runs to
+-- ALERT_MIN from the raise instead, which is what the player actually needs.
+for _, case in ipairs({
+  { "an offer ending", function(c) c.coop:onOfferEnd({ reason = "left" }) end },
+  { "a partner going offline", function(c) c.coop:onPeerGone("waiter") end },
+  { "the party ending", function(c) c.coop:onPartyEnd() end },
+}) do
+  local name, release = case[1], case[2]
+  local r = run(function(c, i)
+    if i == 1 then c.busy = true end
+    if i == 30 then c.coop:onOffer(c.game, OFFER, "PALLET") end
+    if i == 60 then release(c) end
+  end, 400)
+  eq(r.firstFrame, 30, name .. ": the mark went up when the offer landed")
+  eq(r.c.coop.offerMarkFor, nil, name .. ": and the latch is released")
+  check(r.live * DT > 0.5 + Overlay.ALERT_HOLD,
+        name .. " outlives the old grace-counted-from-release rule")
+  check(math.abs(r.live * DT - Overlay.ALERT_MIN) < 3 * DT,
+        name .. ": the mark's whole life is ALERT_MIN, measured from the raise")
+end
+
+-- ------- the corner hook is optional, and a broken one costs nothing
+
+local quiet = newJoiner()
+quiet.coop.toast = nil
+quiet.coop:onOffer(quiet.game, OFFER, "PALLET")
+check(sentJoin(quiet), "a client with no corner hook at all still joins")
+check(notedJoin(quiet), "and still writes the line to the party log")
+eq(#quiet.toast:list(), 0, "there is simply nothing in the corner")
+
+warnings = {}
+local broken = newJoiner()
+broken.coop.toast = function() error("no corner today", 0) end
+broken.coop:onOffer(broken.game, OFFER, "PALLET")
+check(sentJoin(broken), "a corner that throws does not cost the join")
+check(notedJoin(broken), "nor the party-log line")
+eq(broken.coop.toast, nil,
+   "the hook disarms itself rather than throwing on every line after it")
+check(#warnings > 0, "and says so, once")
+check(warnings[1]:find("party chat log", 1, true) ~= nil,
+      "naming the remediation -- the line is still in the chat log")
+
+stubMod.log.warn = function() end
+_G.love = ambientLove
 
 end)()
 

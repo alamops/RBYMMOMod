@@ -1628,7 +1628,17 @@ function M:update(dt)
     -- out of order still resets the answers. Both of those happen once per
     -- turn, which is the thing being counted; this handover happens whenever a
     -- batch of messages runs out, which is not.
-    self.phase = self.after or "choose"
+    -- ...on to whatever this batch was leading to -- **unless somebody still
+    -- owes a send-out**, in which case the field is a monster short and there
+    -- is no turn behind these messages to answer yet. The box is handed back to
+    -- the wait line naming them (`waitLine` reads the same `awaiting` flag) and
+    -- the grid stays shut until the send lands and the referee opens the turn
+    -- for real. See `M:replaceHold`.
+    if self:replaceHold() then
+      self.phase = "wait"
+    else
+      self.phase = self.after or "choose"
+    end
     -- ...and this is where the turn deadline starts, on the host. See
     -- `M:openTurn` for why it is stamped here and nowhere else.
     self:openTurn()
@@ -1734,6 +1744,36 @@ end
 -- counted down a number nothing would act on. What each client counts is still
 -- its own -- a replayer cannot read the host's -- and all four start it at the
 -- handover, which is the same event the host's own deadline is stamped at.
+-- ------- is the field paused on somebody else's replacement?
+--
+-- True while a *refereed* fight is inside the replace phase and the seat being
+-- asked is not ours. That is the one state where a batch of messages runs out
+-- and there is still nothing to answer: the referee has not opened a turn, it
+-- has asked one seat for a send-out, and it will not resolve anything until
+-- that seat answers. Handing the command grid back here is the bug this exists
+-- to close -- a player picking a move at a foe seat that is empty, whose choice
+-- the referee refuses (`Battle:submitChoice` rejects a standing seat's answer
+-- in the replace phase) and who is then left in a menu nothing will take.
+--
+-- Read off `sim:awaiting` rather than off `medReplaceWait` on purpose: the flag
+-- is set by the `choose` row and cleared by `CoopSim:sendOut`
+-- (src/CoopSim.lua:214) the moment the referee's `send` for that seat is
+-- applied in `playEvents`, so the hold ends on the event that answers it and
+-- needs no clearing of its own. `medReplaceWait` is the phase gate -- it keeps
+-- this off the host-simulated path, where the identical `choose` row means
+-- something the local host is already clocking (`tickStalls`) and where the
+-- grid's behaviour is not this round's to change.
+--
+-- Never against our own seat: that one has `replacing`, which outranks the
+-- phase entirely (see `update`).
+function M:replaceHold()
+  if not self.mediated then return false end
+  if self.result or self.replacing then return false end
+  if not self.medReplaceWait then return false end
+  local pending = self.sim and self.sim:awaitingChoice()
+  return (pending ~= nil and pending.index ~= self.mine)
+end
+
 function M:waitingOn()
   if self.result or self.replacing then return nil end
   local pending = self.sim and self.sim:awaitingChoice()
@@ -8420,6 +8460,32 @@ function M:medRows(msg)
     -- Neither draws anything. `turn` is the signal that the batch collected so
     -- far is complete, and `over` says the field is done -- the outcome is a
     -- separate message and is what this screen actually ends on.
+    --
+    -- ...except a `turn` that names a **slot**, which is not the next turn at
+    -- all. It is the referee's replacement solicitation (`Battle:_openReplace`
+    -- in src/BattleSim/Turn.lua): that seat fainted with a bench left and is
+    -- being asked for a send-out, one event per owing seat, and nothing else
+    -- resolves until every one of them has answered. So it is narrated with the
+    -- **same row a host-simulated faint produces** -- `CoopSim.announceFaint`
+    -- emits `choose` and this screen has always known how to draw it (see the
+    -- `choose` branch in `playEvents`: the seat is marked `awaiting`, its owner
+    -- gets the bench picker, and the other three get the line naming them).
+    -- One replacement pause on this screen rather than two, and the wait line,
+    -- the menu hold and the clear-on-send all come for free because they are
+    -- the ones the co-op path already uses.
+    --
+    -- An older referee sends no `slot` and lands in the comment above: every
+    -- `turn` is a turn, exactly as it was.
+    --
+    -- The trainer is read from the sim rather than the event -- the referee's
+    -- solicitation carries `amount` and `slot` and no name (there is nothing on
+    -- the wire for it), and the seat this screen holds is the same seat the
+    -- referee is asking.
+    if kind == "turn" and index then
+      rows[#rows + 1] = {
+        kind = "choose", slot = index, trainer = slot and slot.name,
+      }
+    end
 
   elseif kind == "chose" or kind == "unchose" or kind == "moves" then
     -- Applied in onBattleEvent (markActed / unmarkActed / medMoveList), never
@@ -8610,23 +8676,69 @@ function M:onBattleEvent(msg)
   -- reason in this section's header: a menu taken away mid-decision is a turn
   -- the player cannot answer.
   if msg.t == "turn" then
+    -- ------- two readings of one event, told apart by `slot`
+    --
+    -- WITHOUT a slot this is the ordinary choice window opening, and everything
+    -- below it is what it always was. WITH one it is the referee soliciting the
+    -- replacement that seat owes -- the choice window is *not* opening, and the
+    -- row `medRows` just queued (`kind = "choose"`) is what asks for it.
+    --
+    -- `medReplaceWait` is the screen's copy of that phase, and it is set before
+    -- the flush because the flush is what plays the rows: `after`, the phase the
+    -- handover lands on when they run out, is decided from it (see
+    -- `M:replaceHold`).
+    local owed = self:medSlotOf(msg)
+    self.medReplaceWait = owed
     self:medFlush()
-    -- Arm replace only after the faint/msg batch is queued: update() drains
-    -- `messages` before `replacing`, so pacing is faint line → picker → send.
-    if self.medMustReplace then
+    if owed == nil then
+      -- Arm replace only after the faint/msg batch is queued: update() drains
+      -- `messages` before `replacing`, so pacing is faint line → picker → send.
+      if self.medMustReplace then
+        local seat = self.sim and self.sim:slot(self.mine)
+        local bench = seat and self:benchOf(seat) or {}
+        if #bench > 0 then
+          self.replacing = true
+          self.switchIndex = 1
+        else
+          -- Empty bench: do not open a dead picker; spectating / over owns this.
+          self.medMustReplace = nil
+          self.replacing = nil
+        end
+      end
+    elseif owed == self.mine then
+      -- ------- and this is the arming, **once**
+      --
+      -- The picker is already open: the `choose` row above ran through
+      -- `playEvents` inside `medFlush` and set `replacing` there, at the same
+      -- point in the batch the old `medMustReplace` block armed it -- after the
+      -- faint rows were queued, before `update` drains them. Re-arming here
+      -- would be a second arming of the same picker off the same event, and it
+      -- would reset `switchIndex` under a player who had already moved the
+      -- cursor with a queued row still playing.
+      --
+      -- So `medMustReplace` is *retired* instead. It was the older stream's way
+      -- of remembering a faint until the next turn opened, and a referee that
+      -- solicits has said the same thing out loud and more precisely -- keeping
+      -- both would arm the picker again on the slot-less turn that follows the
+      -- send, over a seat that is no longer empty. (The `send`/`switch` clear
+      -- above retires it on the ordinary path for the same reason.)
+      --
+      -- What is *not* delegated is the empty-bench refusal: `playEvents` arms
+      -- the picker for our seat unconditionally, and a solicitation this screen
+      -- cannot answer -- a party it disagrees with the referee about -- would
+      -- otherwise open a picker with nothing in it and no way out.
+      self.medMustReplace = nil
       local seat = self.sim and self.sim:slot(self.mine)
       local bench = seat and self:benchOf(seat) or {}
-      if #bench > 0 then
-        self.replacing = true
-        self.switchIndex = 1
-      else
-        -- Empty bench: do not open a dead picker; spectating / over owns this.
-        self.medMustReplace = nil
+      if #bench == 0 then
         self.replacing = nil
+        if seat then seat.awaiting = nil end
+        self.medReplaceWait = nil
       end
     end
   elseif msg.t == "over" then
     self.medMustReplace = nil
+    self.medReplaceWait = nil
     self.replacing = nil
     -- Ball opts / foe hide outlive the turn event: anims still drain from the
     -- message queue after medFlush. Cleared when the fight ends.

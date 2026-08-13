@@ -46,7 +46,15 @@
  *     defer to the next tick.
  *   * *Metronome* picks from host-uploaded metronomePool on the ruleset.
  *   * *Physical / Special* via host-uploaded specialTypes (Gen1 type categories).
- *   * A *faint sends the next living monster in party order*, immediately.
+ *   * A *faint with a living bench opens the `replace` phase*, between the turn
+ *     it happened on and the next one: the turn number does not move, no other
+ *     seat is asked, and nothing resolves until every owed send-out is in --
+ *     then `_resolveSwitches` fields them (`switch` + `send`) and the next turn
+ *     opens. It runs on the same clock as a choice window, so an unanswered
+ *     replacement is auto-picked exactly like an unanswered move.
+ *   * Solicitation for that phase is a `turn` event carrying the owing seat's
+ *     field `slot`, one per seat. A `turn` with `slot` asks that seat for a
+ *     replacement; a `turn` without one opens the ordinary choice window.
  *   * *Residuals* run in field order (side a, then side b), not speed order.
  *   * A *timeout* / NPC auto-picks with bag cures & heals (≤50% HP), X-items,
  *     SE damage, status / setup reading, and SE bench switches (deterministic
@@ -659,11 +667,19 @@ class Battle {
   // a replacement after a faint. A player whose last monster fainted in a 2v2 is
   // a spectator for the rest of the fight, and waiting on them would hang the
   // turn. Multi-turn volatiles auto-fill before the player is asked.
+  //
+  // In the `replace` phase the only thing anybody owes is a replacement: the
+  // seats that are still standing answered last turn and are not being asked
+  // again, so their standing monster must not hold the phase open. Everything
+  // that reads "who are we waiting on" -- `_anyoneOwes`, the timeout sweep in
+  // `tick`, `snapshot().waiting` -- goes through here, which is why the phase
+  // test lives in this one function rather than at each of those call sites.
   _owes(fighter) {
     if (fighter.choice !== null && fighter.choice !== undefined) return false;
     if (fighter.mustReplace) {
       return firstLiving(fighter.mons) !== null;
     }
+    if (this.phase === 'replace') return false;
     if (activeMon(fighter) === null) return false;
     return true;
   }
@@ -898,14 +914,25 @@ class Battle {
    * would be a second vocabulary to keep in step across two runtimes.
    */
   submitChoice(playerId, choice) {
-    if (this.phase !== 'choice') return false;
+    if (this.phase !== 'choice' && this.phase !== 'replace') return false;
     if (!isTable(choice)) return false;
 
     const fighter = this.byId.get(str(playerId) || '');
     if (!fighter) return false;
     if (!has(ACTIONS, choice.action)) return false;
 
+    // The replace phase belongs to the seats that owe a send-out and to nobody
+    // else: a standing seat's fight would be an answer to a turn that has not
+    // opened yet, and taking it here would spend it before the player saw the
+    // successor come out. Refused rather than queued, so the client asks again
+    // on the `turn` that follows the send.
+    if (this.phase === 'replace' && !this._owes(fighter)) return false;
+
     if (choice.action === 'cancel') {
+      // A forced replacement is not a decision that can be taken back: the
+      // field is a monster short until it is answered, so `unchose` here would
+      // only hand the seat a second way to hold the fight open.
+      if (this.phase === 'replace') return false;
       if (fighter.choice === null) return false;
       this._emit('unchose', {
         slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -935,9 +962,13 @@ class Battle {
   }
 
   _maybeResolve() {
-    if (this.phase !== 'choice') return false;
+    if (this.phase !== 'choice' && this.phase !== 'replace') return false;
     for (const fighter of this.fighters) {
       if (this._owes(fighter)) return false;
+    }
+    if (this.phase === 'replace') {
+      this._closeReplace();
+      return true;
     }
     this._resolveTurn();
     return true;
@@ -1245,10 +1276,15 @@ class Battle {
    * which is what makes that loop the thing that carries the fight forward.
    */
   autoPick(playerId) {
-    if (this.phase !== 'choice') return false;
+    if (this.phase !== 'choice' && this.phase !== 'replace') return false;
     const fighter = this.byId.get(str(playerId) || '');
     if (!fighter) return false;
     if (fighter.choice !== null && fighter.choice !== undefined) return false;
+    // Same rule as a human's: in the replace phase only the seats that owe a
+    // send-out may file, so an NPC that is still standing does not answer a
+    // turn that has not opened. The hub's fillNpcChoices calls this in a loop
+    // and stops when nothing files, so the false is how the loop learns to stop.
+    if (this.phase === 'replace' && !this._owes(fighter)) return false;
     if (!fighter.mustReplace && !activeMon(fighter)) return false;
 
     const auto = this._autoChoice(fighter);
@@ -1286,6 +1322,71 @@ class Battle {
       this.forcedPending = true;
       this.deadline = null;
     }
+  }
+
+  // ----------------------------------------------------------------
+  // the replace phase
+  // ----------------------------------------------------------------
+  //
+  // A faint with a living bench used to be folded into the *next* choice
+  // window: the referee incremented the turn, opened it, and the seat's
+  // replacement rode in alongside everybody else's fight. That is one window
+  // with an empty box in it -- the player picked a move at a foe that was not
+  // on the field yet, and the successor only walked out when the turn after
+  // that resolved. Vanilla never does this, and neither does the host sim
+  // beside it: CoopSim's `announceFaint` sends an NPC's next monster out inside
+  // the faint batch and asks a player's seat before the fight goes on.
+  //
+  // So the referee holds a phase of its own between the two turns. Nothing else
+  // is asked for, nothing resolves, and the turn number does not move: the
+  // fight is still on the turn whose faint opened this. When the last owed
+  // replacement is in, `_resolveSwitches` fields them all (`switch` + `send`)
+  // and only then does the next turn open. For a seat with no connection behind
+  // it that whole phase closes inside one hub flush -- NPC choices are filled
+  // before the drain -- so the client reads one batch: faint ... switch ...
+  // send ... turn.
+
+  _anyMustReplace() {
+    for (const fighter of this.fighters) {
+      if (fighter.mustReplace && firstLiving(fighter.mons) !== null) return true;
+    }
+    return false;
+  }
+
+  /*
+   * Solicitation: one `turn` per owing seat, carrying the seat's **field slot**.
+   *
+   * That slot is the whole of the wire change, and it is the client contract:
+   *   * `turn` WITH `slot` -- this seat is being asked for a replacement. Its
+   *     own client opens the switch picker; everyone else holds on "X is
+   *     choosing who to send out...".
+   *   * `turn` WITHOUT `slot` -- the ordinary choice window is open (`_openTurn`).
+   * No new kind, no new field: `slot` is already in the event whitelist and
+   * already rides the wire sanitiser kind-agnostically, so a client built
+   * before this ignores it and degrades to the old behaviour rather than
+   * breaking.
+   *
+   * Seat order is `this.fighters`, which is side a then side b in seating order
+   * -- ascending field slot, and the same order in both runtimes.
+   */
+  _openReplace() {
+    this.phase = 'replace';
+    this.resolveDeadline = null;
+    this.forcedPending = false;
+    for (const fighter of this.fighters) fighter.choice = null;
+    this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
+    for (const fighter of this.fighters) {
+      if (this._owes(fighter)) {
+        this._emit('turn', { amount: this.turn, slot: fighter.slot });
+      }
+    }
+  }
+
+  // Every replacement is in: field them, then open the turn they were owed for.
+  _closeReplace() {
+    this._resolveSwitches();
+    this.turn += 1;
+    this._openTurn();
   }
 
   _speedOf(fighter, mon) {
@@ -1344,6 +1445,14 @@ class Battle {
     // nobody drains is exp that silently never happened.
     this._drainExp();
     if (!this.result) this._checkOver();
+
+    // A seat that fell with a bench left is asked before anything else happens;
+    // see the replace-phase note above. The turn does not advance here: it
+    // advances in `_closeReplace`, once the successor is actually on the field.
+    if (!this.result && this._anyMustReplace()) {
+      this._openReplace();
+      return;
+    }
 
     if (!this.result) {
       this.turn += 1;
@@ -2758,7 +2867,8 @@ class Battle {
     fighter.graceEndsAt = null;
     this._emit('reconnect', { side: fighter.side, text: fighter.name });
 
-    if (this.phase === 'choice' && !this._anyDisconnected() && this.choiceTimeout > 0) {
+    if ((this.phase === 'choice' || this.phase === 'replace')
+        && !this._anyDisconnected() && this.choiceTimeout > 0) {
       this.deadline = this.now + this.choiceTimeout;
     }
     return true;
@@ -2819,7 +2929,16 @@ class Battle {
 
     // The choice clock is suspended while anybody is away; the grace above is
     // the only deadline running for them.
-    if (this.phase === 'choice' && this.deadline !== null && this.now >= this.deadline
+    //
+    // The replace phase runs on the same clock, and has to: a seat that owes a
+    // send-out and never answers would otherwise hold the field forever, with
+    // no turn open for the deadline that used to cover it. `_autoChoice`
+    // already answers a `mustReplace` seat with a bench switch (it is the
+    // branch the NPC side takes), so the same sweep that fills an unanswered
+    // move fills an unanswered replacement, `_maybeResolve` closes the phase,
+    // and the fight carries on one monster down rather than wedging.
+    if ((this.phase === 'choice' || this.phase === 'replace')
+        && this.deadline !== null && this.now >= this.deadline
         && !this._anyDisconnected()) {
       for (const fighter of this.fighters) {
         if (this._owes(fighter)) {
@@ -2838,7 +2957,8 @@ class Battle {
       // deadline already in the past, and every later tick would announce the
       // timeout again. Push the clock instead: the fight waits one more window
       // rather than filling the log.
-      if (this.phase === 'choice' && this.deadline !== null && this.now >= this.deadline) {
+      if ((this.phase === 'choice' || this.phase === 'replace')
+          && this.deadline !== null && this.now >= this.deadline) {
         this.deadline = this.now + this.choiceTimeout;
       }
       return true;

@@ -1845,4 +1845,349 @@ do
   end
 end
 
+-- ------------------------------------------------------------------
+-- 11. the replace phase: `turn` with a `slot` is a solicitation
+-- ------------------------------------------------------------------
+--
+-- PROTOCOL: when a fighter faints with a living bench mon the referee stops
+-- auto-advancing and emits `turn{amount, slot}` -- a solicitation naming
+-- exactly which seat owes a send-out -- ahead of the ordinary slot-less `turn`
+-- that opens the real choice window.  The screen owes three different answers
+-- to that one event, and each is a different way to get it wrong:
+--
+--   * the named seat is ours -> the switch picker, and never the command grid
+--     first, because a grid over a corpse is a turn nobody can take;
+--   * the named seat is somebody else's -> no menu at all, a held
+--     "X is choosing who to send out..." queued *behind* the faint's own sink
+--     and sentence, so the hold does not overwrite the death it explains;
+--   * no `slot` at all -> exactly what an older referee always got.
+--
+-- coop_npc is the fourth case and the one that reads as a bug on sight: the
+-- NPC's replacement is resolved by the referee in-band with no solicitation,
+-- so the batch is faint...switch...send...turn and the grid opens over a seat
+-- that is already filled.
+do
+  local function noInput()
+    return { wasPressed = function() return false end,
+             isDown = function() return false end }
+  end
+
+  -- Run the message queue out, which is where the screen decides what to open:
+  -- every assertion about a *menu* below has to be taken after this, because
+  -- the whole point of the change is that the picker waits for the narration.
+  local function drain(self, guard)
+    self.game.input = noInput()
+    local n = 0
+    while (self.phase == "messages" or self.shown ~= nil or #self.messages > 0)
+          and n < (guard or 400) do
+      self:update(1 / 60)
+      n = n + 1
+    end
+    return n
+  end
+
+  local READY = { battle = "cb1", mode = "coop_npc",
+                  sides = { a = { "ann", "bob" }, b = { "ann" } } }
+
+  -- (a) coop_npc: the referee answers the NPC's own knockout in-band, so
+  -- nothing is solicited and the grid opens over a filled seat.
+  do
+    local slots = npcSlots()
+    slots[3].party[2].species = "FIXMON_B"
+    local other = Wire.name(data.pokemon.FIXMON_B.name)
+    local s = screen({ slots = slots, mine = 1, host = true,
+                       mode = "coop_npc", selfId = "ann" })
+    s:uploadMediated()
+    s:onBattleReady(READY)
+    s.phase = "choose"
+    s:onBattleEvent({ battle = "cb1", seq = 1, t = "faint", slot = 2,
+                      text = SPECIES_NAME })
+    s:onBattleEvent({ battle = "cb1", seq = 2, t = "switch", slot = 2,
+                      text = other })
+    s:onBattleEvent({ battle = "cb1", seq = 3, t = "send", slot = 2,
+                      text = other, hp = 50 })
+    s:onBattleEvent({ battle = "cb1", seq = 4, t = "turn", amount = 2 })
+    eq(s.medReplaceWait, nil,
+       "no solicitation is recorded for an in-band NPC replacement")
+    drain(s)
+    eq(s.phase, "choose", "the grid opens on the slot-less turn")
+    local foe = s.sim:slot(3)
+    eq(foe.active, 2, "and the foe seat has already been advanced")
+    check(foe.battler ~= nil and (foe.battler.mon.hp or 0) > 0,
+          "...to a living monster, so the grid is not over an empty seat")
+    eq(s.sim:awaitingChoice(), nil, "nobody is left awaiting a send-out")
+  end
+
+  -- (b) coop_pvp: a PARTNER's knockout.  The hold, and no grid behind it.
+  do
+    local slots = pvpSlots()
+    slots[2].party = { mon(60, 30), mon(60, 25) }
+    local s = screen({ slots = slots, mine = 1, host = false,
+                       mode = "coop_pvp", selfId = "ann" })
+    s:uploadMediated()
+    s:onBattleReady({ battle = "cb1", mode = "coop_pvp",
+                      sides = { a = { "ann", "bob" }, b = { "cal", "dee" } } })
+    s.phase = "choose"
+    s:onBattleEvent({ battle = "cb1", seq = 1, t = "faint", slot = 1,
+                      text = SPECIES_NAME, amount = 1 })
+    s:onBattleEvent({ battle = "cb1", seq = 2, t = "turn", amount = 3, slot = 1 })
+    eq(s.medReplaceWait, 2, "the solicitation names the partner's seat")
+    check(not s.replacing, "our own picker is NOT armed by somebody else's KO")
+
+    local iFaint, iSink, iHold
+    for i, row in ipairs(s.messages) do
+      local text = type(row) == "table" and row.text or row
+      if type(text) == "string" and text:find("fainted", 1, true) then
+        iFaint = iFaint or i
+      end
+      if type(row) == "table" and row.faintfx ~= nil then iSink = iSink or i end
+      if type(text) == "string" and text:find("choosing", 1, true) then
+        iHold = iHold or i
+      end
+    end
+    check(iHold ~= nil, "'X is choosing who to send out...' is queued")
+    check(iSink and iFaint and iHold and iSink < iFaint and iFaint < iHold,
+          ("...behind the faint's sink and its sentence (sink=%s faint=%s "
+           .. "hold=%s of %d)"):format(tostring(iSink), tostring(iFaint),
+                                       tostring(iHold), #s.messages))
+
+    drain(s)
+    eq(s.phase, "wait", "the grid does NOT open behind the hold")
+    local awaiting = s.sim:awaitingChoice()
+    check(awaiting ~= nil and awaiting.index == 2,
+          "and the seat is marked awaiting a send-out")
+    local box = tostring(s:boxText())
+    check(box:find("aiting", 1, true) ~= nil
+          or box:find("choosing", 1, true) ~= nil,
+          "the box waits rather than offering a turn: " .. box:gsub("\n", "|"))
+    s.waitShown = 99
+    check(tostring(s:boxText()):find("choosing", 1, true) ~= nil,
+          "and once the hint is due the line names who is choosing: "
+          .. tostring(s:boxText()):gsub("\n", "|"))
+
+    s:onBattleEvent({ battle = "cb1", seq = 3, t = "switch", slot = 1,
+                      text = SPECIES_NAME })
+    s:onBattleEvent({ battle = "cb1", seq = 4, t = "send", slot = 1,
+                      text = SPECIES_NAME, hp = 60, mon = 2 })
+    s:onBattleEvent({ battle = "cb1", seq = 5, t = "turn", amount = 3 })
+    eq(s.medReplaceWait, nil, "the slot-less turn clears the wait")
+    eq(s.sim:awaitingChoice(), nil, "awaiting is cleared by the send")
+    drain(s)
+    eq(s.phase, "choose", "and only now does the grid open")
+    eq(s.sim:slot(2).active, 2, "with the partner's seat filled")
+  end
+
+  -- (c) our OWN knockout: the picker before any grid, and armed exactly once.
+  -- `faint amount=1` already arms medMustReplace; the solicitation arrives in
+  -- the same batch, so a second arming here would reset switchIndex under a
+  -- player who had already moved the cursor.
+  do
+    local slots = npcSlots()
+    slots[1].party = { mon(60, 40), mon(60, 35) }
+    local s = screen({ slots = slots, mine = 1, host = true,
+                       mode = "coop_npc", selfId = "ann" })
+    s:uploadMediated()
+    s:onBattleReady(READY)
+    s.phase = "choose"
+    s:onBattleEvent({ battle = "cb1", seq = 1, t = "faint", slot = 0,
+                      text = SPECIES_NAME, amount = 1 })
+    eq(s.medMustReplace, true, "the faint arms medMustReplace")
+    check(not s.replacing, "but the picker waits for the batch to close")
+    s:onBattleEvent({ battle = "cb1", seq = 2, t = "turn", amount = 2, slot = 0 })
+    eq(s.replacing, true, "the solicitation opens the picker")
+    eq(s.medMustReplace, nil,
+       "and retires medMustReplace so the later slot-less turn cannot re-arm it")
+    eq(s.switchIndex, 1, "the cursor starts at the top")
+    s.switchIndex = 2
+    drain(s)
+    check(s.phase ~= "choose" or s.replacing,
+          "no command grid behind the picker (phase=" .. tostring(s.phase)
+          .. " replacing=" .. tostring(s.replacing) .. ")")
+    eq(s.switchIndex, 2, "and nothing re-armed the picker under the cursor")
+
+    s:onBattleEvent({ battle = "cb1", seq = 3, t = "switch", slot = 0,
+                      text = SPECIES_NAME })
+    s:onBattleEvent({ battle = "cb1", seq = 4, t = "send", slot = 0,
+                      text = SPECIES_NAME, hp = 60, mon = 2 })
+    s:onBattleEvent({ battle = "cb1", seq = 5, t = "turn", amount = 2 })
+    check(not s.replacing, "the send closes the picker")
+    drain(s)
+    eq(s.phase, "choose", "and the slot-less turn opens the grid")
+    eq(s.sim:slot(1).active, 2, "with our own seat filled")
+  end
+
+  -- (d) an empty bench: a solicitation this screen cannot answer.
+  do
+    local s = screen({ slots = npcSlots(), mine = 1, host = true,
+                       mode = "coop_npc", selfId = "ann" })
+    s:uploadMediated()
+    s:onBattleReady(READY)
+    s.phase = "choose"
+    s:onBattleEvent({ battle = "cb1", seq = 1, t = "faint", slot = 0,
+                      text = SPECIES_NAME })
+    s:onBattleEvent({ battle = "cb1", seq = 2, t = "turn", amount = 2, slot = 0 })
+    check(not s.replacing, "no dead picker over an empty bench")
+    eq(s.medReplaceWait, nil, "and no hold left standing")
+  end
+
+  -- (e) an older referee, which never puts a `slot` on a `turn`, behaves
+  -- exactly as it did before any of this existed.
+  do
+    local slots = npcSlots()
+    slots[1].party = { mon(60, 40), mon(60, 35) }
+    local s = screen({ slots = slots, mine = 1, host = true,
+                       mode = "coop_npc", selfId = "ann" })
+    s:uploadMediated()
+    s:onBattleReady(READY)
+    s.phase = "choose"
+    s:onBattleEvent({ battle = "cb1", seq = 1, t = "faint", slot = 0,
+                      text = SPECIES_NAME, amount = 1 })
+    s:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
+    eq(s.replacing, true,
+       "an old stream still arms the picker on the slot-less turn")
+    eq(s.medReplaceWait, nil, "and records no replace phase")
+
+    local t = screen({ slots = pvpSlots(), mine = 1, host = false,
+                       mode = "coop_pvp", selfId = "ann" })
+    t:uploadMediated()
+    t:onBattleReady({ battle = "cb1", mode = "coop_pvp",
+                      sides = { a = { "ann", "bob" }, b = { "cal", "dee" } } })
+    t.phase = "choose"
+    t:onBattleEvent({ battle = "cb1", seq = 1, t = "damage", slot = 2, hp = 10 })
+    t:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
+    drain(t)
+    eq(t.phase, "choose", "and an ordinary slot-less turn still opens the grid")
+  end
+
+  -- (f) the joint run: a real coop_pvp refereed by src/BattleSim/Turn.lua,
+  -- replayed into the real screen.  No hand-built events -- the referee emits,
+  -- CoopBattle reads, and the invariant is checked on every frame the loop
+  -- pumps rather than only where this suite thought to look.
+  do
+    local BattleSim = need("BattleSim/init")
+    local RTurn = BattleSim.Turn
+
+    local function rmove()
+      return { id = "FIX_TACKLE", pp = 20, power = 200, accuracy = 255,
+               type = 0, effect = 0, chance = 0 }
+    end
+    local function rmon(hp)
+      return { species = SPECIES_NAME, level = 20, hp = hp, maxHp = 60,
+               stats = { atk = 90, def = 5, spd = 40, spc = 40 },
+               moves = { rmove() } }
+    end
+
+    local battle = assert(RTurn.create({
+      id = "cb1", mode = "coop_pvp", seed = 99, choiceTimeout = 60,
+      reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "ann", name = "ANN", mons = { rmon(60), rmon(60) } },
+              { playerId = "bob", name = "BOB", mons = { rmon(1), rmon(60) } } },
+        b = { { playerId = "cal", name = "CAL", mons = { rmon(60), rmon(60) } },
+              { playerId = "dee", name = "DEE", mons = { rmon(1), rmon(60) } } },
+      },
+    }))
+
+    local slots = pvpSlots()
+    for i = 1, 4 do slots[i].party = { mon(60, 40), mon(60, 40) } end
+    slots[2].party[1].hp = 1
+    slots[4].party[1].hp = 1
+    local s = screen({ slots = slots, mine = 1, host = false,
+                       mode = "coop_pvp", selfId = "ann" })
+    s:uploadMediated()
+    s:onBattleReady({ battle = "cb1", mode = "coop_pvp",
+                      sides = { a = { "ann", "bob" }, b = { "cal", "dee" } } })
+    s.game.input = noInput()
+
+    local violations, solicits, plain = {}, 0, 0
+    local function pump()
+      for _, e in ipairs(battle:drainEvents()) do
+        if e.t == "turn" then
+          if e.slot ~= nil then solicits = solicits + 1 else plain = plain + 1 end
+        end
+        s:onBattleEvent(e)
+      end
+      for _ = 1, 300 do
+        s:update(1 / 60)
+        if s.replacing then break end
+        if s.phase == "choose" then
+          if s.sim:awaitingChoice() ~= nil then
+            violations[#violations + 1] = "grid open while seat "
+              .. tostring(s.sim:awaitingChoice().index) .. " still owes a send-out"
+          end
+          for i = 1, 4 do
+            local seat = s.sim:slot(i)
+            local live = seat and seat.battler and seat.battler.mon
+            local hasReserve = false
+            for _, m in ipairs((seat or {}).party or {}) do
+              if (m.hp or 0) > 0 then hasReserve = true end
+            end
+            if hasReserve and (not live or (live.hp or 0) <= 0) then
+              violations[#violations + 1] =
+                "grid open over empty seat " .. tostring(i)
+            end
+          end
+          break
+        end
+      end
+    end
+
+    pump()
+    local guard = 0
+    while not battle.finished and guard < 14 do
+      guard = guard + 1
+      local snap = battle:snapshot()
+      if snap.phase == "choice" then
+        for _, id in ipairs({ "ann", "bob", "cal", "dee" }) do
+          battle:submitChoice(id, { action = "fight", move = 0 })
+        end
+      elseif snap.phase == "replace" then
+        check(s.phase ~= "choose" or s.replacing ~= nil,
+              ("no command grid during the referee's replace phase (round %d, "
+               .. "phase=%s replacing=%s)"):format(guard, tostring(s.phase),
+                                                   tostring(s.replacing)))
+        -- Only the seats the referee is asking, each answered with its own
+        -- first living reserve: a hardcoded party slot is a choice the referee
+        -- is right to refuse.
+        for _, entry in ipairs(snap.field) do
+          if entry.mustReplace then
+            for i, hp in ipairs(entry.party) do
+              if (hp or 0) > 0 then
+                battle:submitChoice(entry.playerId,
+                  { action = "switch", slot = i - 1 })
+                break
+              end
+            end
+          end
+        end
+      else
+        break
+      end
+      pump()
+    end
+
+    check(solicits >= 2,
+          "the referee really did solicit replacements (" .. solicits .. ")")
+    check(plain >= 2, "with ordinary turns behind them (" .. plain .. ")")
+    check(#violations == 0, "the screen never opened a grid over an empty seat: "
+          .. table.concat(violations, "; "))
+    local ended = battle.finished and "finished" or battle:snapshot().phase
+    check(ended == "over" or ended == "choice" or ended == "finished",
+          "the fight ran to a conclusion rather than stalling in replace: "
+          .. tostring(ended))
+    local emptySeat
+    for i = 1, 4 do
+      local seat = s.sim:slot(i)
+      local live = seat and seat.battler and seat.battler.mon
+      local reserve = false
+      for _, m in ipairs((seat or {}).party or {}) do
+        if (m.hp or 0) > 0 then reserve = true end
+      end
+      if reserve and (not live or (live.hp or 0) <= 0) then emptySeat = i end
+    end
+    eq(emptySeat, nil,
+       "every seat the screen holds with a reserve left has a live monster")
+  end
+end
+
 T.finish("coop_mediated")

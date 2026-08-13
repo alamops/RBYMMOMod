@@ -1209,6 +1209,12 @@ function M.new(opts)
     answeredTurn = false, -- own seat already answered (forced skip or filed choice)
     mustReplace = false,  -- faint with bench: next turn opens the switch picker
     replaceOnly = false,  -- B cannot cancel out of a forced replacement
+    -- The field slot the referee is asking for a send-out, while it is asking.
+    -- Set by a `turn` that carries a slot (the replace phase -- see the `turn`
+    -- branch in `onEvent`), cleared by the send that answers it, by the
+    -- slot-less `turn` that opens the choice window behind it, and by every
+    -- teardown that puts the screen back where the referee says it is.
+    replaceWait = nil,
     anim = nil,           -- { anim = id, slot = n } while AnimPlayer runs
     animPlayer = nil,
     result    = nil,
@@ -1847,6 +1853,15 @@ function M:onEvent(msg)
     -- *rules* -- which sheet is out, whether a replacement is still owed --
     -- stays here, at parse, because the referee is already asking about it.
     local parked = (self.slots[msg.slot] or {}).pending ~= nil
+    -- The solicitation this send answers is over -- for whichever seat it was.
+    -- Cleared on the *event* rather than only on the slot-less `turn` behind
+    -- it, because the referee can answer for a player who ran out of time and
+    -- because the band's hold line is about a seat that is empty: the moment
+    -- the referee says it is filled, the line stops being true. (`mustReplace`
+    -- below is the same clear for our own seat's picker, and has always been.)
+    if self.replaceWait ~= nil and self.replaceWait == msg.slot then
+      self.replaceWait = nil
+    end
     -- New mon on our seat drops any Transform/Mimic overlay until the
     -- referee publishes another `moves` list for it.
     if msg.slot == self:mySlot() then
@@ -2037,8 +2052,60 @@ function M:onEvent(msg)
     -- player is reading out from under them.  update() opens it once the
     -- queue is empty — unless the hub already filed our choice (forced skip /
     -- recharge / trap), in which case answeredTurn keeps the menu closed.
-    self.pendingTurn = true
+    --
+    -- ------- and a `turn` that names a slot is not that turn at all
+    --
+    -- It is the referee's replacement solicitation (`Battle:_openReplace` in
+    -- src/BattleSim/Turn.lua): the seat at that field slot fainted with a bench
+    -- left, and the choice window does **not** open until it has answered and
+    -- the referee has sent the successor out behind a slot-less `turn`. So the
+    -- two readings are told apart here and nowhere else -- everything below
+    -- reads `pendingTurn`, and the whole of "no menu yet" is not setting it.
+    --
+    -- An older referee sends no `slot`, `owed` is nil, and every `turn` opens
+    -- the window exactly as it did.
+    local owed = msg.slot
+    self.replaceWait = owed
     self.answeredTurn = false
+    if owed == nil then
+      self.pendingTurn = true
+    elseif owed == self:mySlot() then
+      -- Our own seat: this is the picker the faint already asked for, so it is
+      -- opened by the flow that has always opened it -- `mustReplace` +
+      -- `replaceOnly` in update(), which waits for the faint's own rows (the
+      -- drain, the sink, "X fainted!") to drain before it takes the box. Set
+      -- here rather than trusted from the `faint`, because the referee has now
+      -- said it out loud: a lossy stream that dropped the faint would otherwise
+      -- open the *command* menu over an empty seat, which is the exact thing
+      -- this phase exists to make unreachable.
+      --
+      -- Except on an empty bench, which is not a picker at all -- `partyRows`
+      -- would list nothing and `updateSwitch` has no B to leave with, since the
+      -- replacement is forced. The referee does not solicit a seat with nothing
+      -- to send, so this is a disagreement about our own party; the screen sits
+      -- and waits for the referee rather than opening a menu with no way out.
+      local hasBench = false
+      for _, m in ipairs(self.mine or {}) do
+        if (m.hp or 0) > 0 then hasBench = true; break end
+      end
+      if hasBench then
+        self.mustReplace = true
+        self.pendingTurn = true
+      else
+        self.mustReplace = false
+        self.pendingTurn = false
+        self.replaceWait = nil
+      end
+    else
+      -- Somebody else's decision: no menu, and a line that says whose. Queued
+      -- through `say` rather than printed, so it lands **behind** the rows the
+      -- faint that caused it already queued -- the bar falling, the monster
+      -- sinking, "X fainted!" -- which is the order they happened in. The band
+      -- keeps saying it after the line is dismissed, for as long as the seat is
+      -- still empty (see `drawModernBand`).
+      self.pendingTurn = false
+      self:say(("%s is choosing\nwho to send out..."):format(self.peerName))
+    end
     -- Hub refused the item (never debited) or spend already landed via `item`.
     self.pendingItem = nil
     self.pendingItemSlot = nil
@@ -2051,6 +2118,7 @@ function M:onEvent(msg)
     self.answeredTurn = false
     self.mustReplace = false
     self.replaceOnly = false
+    self.replaceWait = nil
     self.pendingItem = nil
     self.pendingItemSlot = nil
     self.medBall = nil
@@ -4663,6 +4731,13 @@ end
 -- part of the outcome -- a monster face down, a caught monster inside its ball
 -- -- and snapping it would stand both of them back up under the ending line.
 function M:snapDisplay()
+  -- The replace phase goes too, and forwards like everything else here: this is
+  -- "put the screen where the referee says the field is", and a seat whose
+  -- arrival is being installed below is not a seat anybody is still choosing
+  -- for. Left standing it would hold the band on "X is choosing who to send
+  -- out..." over a monster already on the field, for the rest of a fight that
+  -- was re-synced or ended mid-solicitation.
+  self.replaceWait = nil
   self.ballFlow = nil
   self.fx = nil
   self.animHold = nil
@@ -5189,7 +5264,22 @@ function M:drawModernBand()
   if self.phase == "over" then
     return bandDrew(message(self.shown or ""))
   end
-  return bandDrew(message(("Waiting for\n%s..."):format(self.peerName)))
+  return bandDrew(message(self:holdLine()))
+end
+
+-- What the band says when there is no menu and no queued line: which of the two
+-- waits this is.
+--
+-- "Waiting for X..." is a turn they have not answered yet. A seat still owed a
+-- send-out is a different thing and reads as one -- the field is a monster
+-- short, and the player is owed the reason it has stopped rather than a line
+-- that sounds like an ordinary slow opponent. Our own solicitation never
+-- reaches here: that one is a picker.
+function M:holdLine()
+  if self.replaceWait ~= nil and self.replaceWait ~= self:mySlot() then
+    return ("%s is choosing\nwho to send out..."):format(self.peerName)
+  end
+  return ("Waiting for\n%s..."):format(self.peerName)
 end
 
 function M:drawBattlefieldMenus(Font)
@@ -5254,7 +5344,7 @@ function M:drawBattlefieldMenus(Font)
     if self.phase == "over" then
       return self:drawBox(Font, self.shown or "")
     end
-    self:drawBox(Font, ("Waiting for\n%s..."):format(self.peerName))
+    self:drawBox(Font, self:holdLine())
   end
   self:withMenuBand(chrome)
 end
@@ -5335,7 +5425,7 @@ function M:drawSafe()
   if self.phase == "setup" then
     return self:drawBox(Font, "Getting ready...")
   end
-  self:drawBox(Font, ("Waiting for\n%s..."):format(self.peerName))
+  self:drawBox(Font, self:holdLine())
 end
 
 function M:draw()

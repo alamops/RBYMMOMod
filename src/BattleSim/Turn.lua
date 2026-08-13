@@ -55,11 +55,20 @@
 --   * *Physical / Special* follow Gen1 type categories via host-uploaded
 --     `specialTypes` on the ruleset (indices into the uploaded chart). Absent
 --     specialTypes keeps every damaging move on atk/def.
---   * A *faint sends the next living monster in party order*, immediately and
---     without asking.  The original stops and asks; asking here would mean a
---     second kind of choice phase with its own deadline and its own forfeit
---     rule, and a fight that can hang between two turns is a worse v1 than one
---     that picks in party order.
+--   * A *faint with a living bench opens the `replace` phase*, between the turn
+--     it happened on and the next one.  The turn number does not move, no other
+--     seat is asked, and nothing resolves until every owed send-out is in --
+--     then `_resolveSwitches` fields them (`switch` + `send`) and the next turn
+--     opens.  The choice window never opens over an empty box, which is what
+--     the original does and what `CoopSim.announceFaint` does beside this.  It
+--     is a second kind of choice phase, so it runs on the *same* clock: the
+--     timeout sweep in `tick` covers it, and an unanswered replacement is
+--     auto-picked exactly like an unanswered move.
+--   * Solicitation for that phase is a `turn` event carrying the owing seat's
+--     field `slot`, one per seat.  A `turn` with `slot` asks that seat for a
+--     replacement; a `turn` without one opens the ordinary choice window.  No
+--     new kind and no new field, so a client that ignores `slot` degrades to
+--     the old behaviour instead of breaking.
 --   * *Residuals* run in field order (side a, then side b), not in the speed
 --     order the moves used.  Only the order two burns tick in is at stake, and
 --     field order is the one both runtimes can reproduce without carrying the
@@ -651,11 +660,19 @@ end
 -- a replacement after a faint.  A player whose last monster fainted in a 2v2 is
 -- a spectator for the rest of the fight, and waiting on them would hang the
 -- turn.  Multi-turn volatiles auto-fill before the player is asked.
+--
+-- In the `replace` phase the only thing anybody owes is a replacement: the
+-- seats that are still standing answered last turn and are not being asked
+-- again, so their standing monster must not hold the phase open.  Everything
+-- that reads "who are we waiting on" -- `_anyoneOwes`, the timeout sweep in
+-- `tick`, `snapshot().waiting` -- goes through here, which is why the phase
+-- test lives in this one function rather than at each of those call sites.
 function Battle:_owes(fighter)
   if fighter.choice ~= nil then return false end
   if fighter.mustReplace then
     return firstLiving(fighter.mons) ~= nil
   end
+  if self.phase == "replace" then return false end
   if activeMon(fighter) == nil then return false end
   return true
 end
@@ -896,14 +913,25 @@ end
 -- nothing) are all things the client can see for itself, and a string here
 -- would be a second vocabulary to keep in step across two runtimes.
 function Battle:submitChoice(playerId, choice)
-  if self.phase ~= "choice" then return false end
+  if self.phase ~= "choice" and self.phase ~= "replace" then return false end
   if type(choice) ~= "table" then return false end
 
   local fighter = self.byId[str(playerId) or ""]
   if not fighter then return false end
   if not ACTIONS[choice.action] then return false end
 
+  -- The replace phase belongs to the seats that owe a send-out and to nobody
+  -- else: a standing seat's fight would be an answer to a turn that has not
+  -- opened yet, and taking it here would spend it before the player saw the
+  -- successor come out.  Refused rather than queued, so the client asks again
+  -- on the `turn` that follows the send.
+  if self.phase == "replace" and not self:_owes(fighter) then return false end
+
   if choice.action == "cancel" then
+    -- A forced replacement is not a decision that can be taken back: the field
+    -- is a monster short until it is answered, so `unchose` here would only
+    -- hand the seat a second way to hold the fight open.
+    if self.phase == "replace" then return false end
     if fighter.choice == nil then return false end
     self:_emit("unchose", {
       slot = fighter.slot, side = fighter.side, text = fighter.name,
@@ -940,9 +968,13 @@ function Battle:_anyoneOwes()
 end
 
 function Battle:_maybeResolve()
-  if self.phase ~= "choice" then return false end
+  if self.phase ~= "choice" and self.phase ~= "replace" then return false end
   for _, fighter in ipairs(self.fighters) do
     if self:_owes(fighter) then return false end
+  end
+  if self.phase == "replace" then
+    self:_closeReplace()
+    return true
   end
   self:_resolveTurn()
   return true
@@ -1271,10 +1303,15 @@ end
 -- machine stops owing.  Filing one may resolve the turn and open the next, which
 -- is what makes that loop the thing that carries the fight forward.
 function Battle:autoPick(playerId)
-  if self.phase ~= "choice" then return false end
+  if self.phase ~= "choice" and self.phase ~= "replace" then return false end
   local fighter = self.byId[str(playerId) or ""]
   if not fighter then return false end
   if fighter.choice ~= nil then return false end
+  -- Same rule as a human's: in the replace phase only the seats that owe a
+  -- send-out may file, so an NPC that is still standing does not answer a turn
+  -- that has not opened.  `Hub:fillNpcChoices` calls this in a loop and stops
+  -- when nothing files, so the false is how the loop learns to stop.
+  if self.phase == "replace" and not self:_owes(fighter) then return false end
   if not fighter.mustReplace and not activeMon(fighter) then return false end
 
   local auto = self:_autoChoice(fighter)
@@ -1306,6 +1343,67 @@ function Battle:_openTurn()
     self.forcedPending = true
     self.deadline = nil
   end
+end
+
+-- ------------------------------------------------------------------
+-- the replace phase
+-- ------------------------------------------------------------------
+--
+-- A faint with a living bench used to be folded into the *next* choice window:
+-- the referee incremented the turn, opened it, and the seat's replacement rode
+-- in alongside everybody else's fight.  That is one window with an empty box in
+-- it -- the player picked a move at a foe that was not on the field yet, and
+-- the successor only walked out when the turn after that resolved.  Vanilla
+-- never does this, and neither does the host sim beside it: `CoopSim`'s
+-- `announceFaint` sends an NPC's next monster out inside the faint batch and
+-- asks a player's seat before the fight goes on.
+--
+-- So the referee holds a phase of its own between the two turns.  Nothing else
+-- is asked for, nothing resolves, and the turn number does not move: the fight
+-- is still on the turn whose faint opened this.  When the last owed replacement
+-- is in, `_resolveSwitches` fields them all (`switch` + `send`) and only then
+-- does the next turn open.  For a seat with no connection behind it that whole
+-- phase closes inside one `Hub:flushBattle` -- `fillNpcChoices` runs before the
+-- drain -- so the client reads one batch: faint ... switch ... send ... turn.
+
+function Battle:_anyMustReplace()
+  for _, fighter in ipairs(self.fighters) do
+    if fighter.mustReplace and firstLiving(fighter.mons) ~= nil then return true end
+  end
+  return false
+end
+
+-- Solicitation: one `turn` per owing seat, carrying the seat's **field slot**.
+--
+-- That slot is the whole of the wire change, and it is the client contract:
+--   * `turn` WITH `slot` -- this seat is being asked for a replacement.  Its
+--     own client opens the switch picker; everyone else holds on "X is
+--     choosing who to send out...".
+--   * `turn` WITHOUT `slot` -- the ordinary choice window is open (`_openTurn`).
+-- No new kind, no new field: `slot` is already in `events.FIELDS` and already
+-- rides `Wire.battleEvent` kind-agnostically, so a client built before this
+-- ignores it and degrades to the old behaviour rather than breaking.
+--
+-- Seat order is `self.fighters`, which is side a then side b in seating order
+-- -- ascending field slot, and the same order in both runtimes.
+function Battle:_openReplace()
+  self.phase = "replace"
+  self.resolveDeadline = nil
+  self.forcedPending = false
+  for _, fighter in ipairs(self.fighters) do fighter.choice = nil end
+  self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
+  for _, fighter in ipairs(self.fighters) do
+    if self:_owes(fighter) then
+      self:_emit("turn", { amount = self.turn, slot = fighter.slot })
+    end
+  end
+end
+
+-- Every replacement is in: field them, then open the turn they were owed for.
+function Battle:_closeReplace()
+  self:_resolveSwitches()
+  self.turn = self.turn + 1
+  self:_openTurn()
 end
 
 function Battle:_speedOf(fighter, mon)
@@ -1361,6 +1459,14 @@ function Battle:_resolveTurn()
   -- drains is exp that silently never happened.
   self:_drainExp()
   if not self.result then self:_checkOver() end
+
+  -- A seat that fell with a bench left is asked before anything else happens;
+  -- see the replace-phase note above.  The turn does not advance here: it
+  -- advances in `_closeReplace`, once the successor is actually on the field.
+  if not self.result and self:_anyMustReplace() then
+    self:_openReplace()
+    return
+  end
 
   if not self.result then
     self.turn = self.turn + 1
@@ -2796,7 +2902,8 @@ function Battle:reconnect(playerId)
   fighter.graceEndsAt = nil
   self:_emit("reconnect", { side = fighter.side, text = fighter.name })
 
-  if self.phase == "choice" and not self:_anyDisconnected() and self.choiceTimeout > 0 then
+  if (self.phase == "choice" or self.phase == "replace")
+     and not self:_anyDisconnected() and self.choiceTimeout > 0 then
     self.deadline = self.now + self.choiceTimeout
   end
   return true
@@ -2853,7 +2960,16 @@ function Battle:tick(nowSeconds)
 
   -- The choice clock is suspended while anybody is away; the grace above is
   -- the only deadline running for them.
-  if self.phase == "choice" and self.deadline and self.now >= self.deadline
+  --
+  -- The replace phase runs on the same clock, and has to: a seat that owes a
+  -- send-out and never answers would otherwise hold the field forever, with no
+  -- turn open for the deadline that used to cover it.  `_autoChoice` already
+  -- answers a `mustReplace` seat with a bench switch (it is the branch the NPC
+  -- side takes), so the same sweep that fills an unanswered move fills an
+  -- unanswered replacement, `_maybeResolve` closes the phase, and the fight
+  -- carries on one monster down rather than wedging.
+  if (self.phase == "choice" or self.phase == "replace")
+     and self.deadline and self.now >= self.deadline
      and not self:_anyDisconnected() then
     for _, fighter in ipairs(self.fighters) do
       if self:_owes(fighter) then
@@ -2872,7 +2988,8 @@ function Battle:tick(nowSeconds)
     -- deadline already in the past, and every later tick would announce the
     -- timeout again.  Push the clock instead: the fight waits one more window
     -- rather than filling the log.
-    if self.phase == "choice" and self.deadline and self.now >= self.deadline then
+    if (self.phase == "choice" or self.phase == "replace")
+       and self.deadline and self.now >= self.deadline then
       self.deadline = self.now + self.choiceTimeout
     end
     return true
