@@ -3286,6 +3286,17 @@ end
 
 -- coop_npc: the trainer-shaped exp-awarding mode, same shape as coop_wild
 -- but a 2v2 npc side rather than a single wild seat.
+--
+-- Both a1 and a2 aim at the same seat (b1/slot 2) on purpose: a1 (faster)
+-- KOs it, and a2's identical aim is exactly the mid-turn-dead-target case
+-- `_retarget` exists for. Before the U-wave fix this fizzled ("has no
+-- target") -- silently, since the surrounding assertion only checked
+-- `#expEvents(events) > 0`, which the KO alone already satisfies. The fixed
+-- behaviour changed the stream under that assertion without breaking it: the
+-- fizzle (one `msg`) became a real attack (`anim` + `msg` + `damage`, +2
+-- events over the old shape), landing on b2/slot 3 -- the nearest living
+-- seat -- rather than the corpse a2 actually aimed at. Pinned explicitly here
+-- so that change stays intended rather than silent.
 do
   local battle = battleOf({
     mode = "coop_npc",
@@ -3316,6 +3327,39 @@ do
     for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
   end
   ok(#expEvents(events) > 0, "coop_npc: at least one exp event over a KO")
+
+  -- The retarget itself: a2 (Abe/Gamma) still aimed at the now-dead b1 seat
+  -- (slot 2) when its action ran, immediately after the two exp events b1's
+  -- fall paid out. It must not fizzle -- it swings, and lands on b2 (slot 3).
+  local koIdx, secondExpIdx = nil, nil
+  local expSeen = 0
+  for i, e in ipairs(events) do
+    if e.t == "faint" and e.text == "Beta" then koIdx = i end
+    if e.t == "exp" then
+      expSeen = expSeen + 1
+      if expSeen == 2 then secondExpIdx = i end
+    end
+  end
+  ok(koIdx ~= nil, "coop_npc retarget: b1's Beta really did fall")
+  ok(secondExpIdx ~= nil and secondExpIdx > koIdx,
+     "coop_npc retarget: both exp events (a1 and a2's shares) paid before a2's own action runs")
+
+  local noFizzle, sawAnim, sawDamageOnSlot3 = true, false, false
+  for i = secondExpIdx + 1, #events do
+    local e = events[i]
+    if e.t == "msg" and e.text and e.text:find("has no target", 1, true) then
+      noFizzle = false
+    end
+    if e.t == "anim" and e.side == "a" and e.slot == 1 then sawAnim = true end
+    if sawAnim and e.t == "damage" and e.side == "b" and e.slot == 3 then
+      sawDamageOnSlot3 = true
+      break
+    end
+  end
+  ok(noFizzle, "coop_npc retarget: a2 never says 'has no target' for the dead b1 seat")
+  ok(sawAnim, "coop_npc retarget: a2's move still plays its anim (slot 1, the attacker's own seat)")
+  ok(sawDamageOnSlot3,
+     "coop_npc retarget: a2's attack lands as real damage on b2/slot 3, the nearest living seat")
 end
 
 -- A seat still owing a replacement after its own faint: neither paid nor
@@ -3739,6 +3783,371 @@ do
      "Gamma, party index 1 -- Alpha's fallen index 0 is not reused or renumbered")
   eq(secondKo[1] and secondKo[1].participants, 1,
      "divisor 1 -- Alpha's held mark did not carry over to Gamma")
+end
+
+-- ------------------------------------------------------------------
+-- 12i. dead-target retargeting (`_retarget`, `_useMove`'s call site)
+-- ------------------------------------------------------------------
+--
+-- A fight choice always names a living opposing seat at *choice* time
+-- (`_normaliseChoice` refuses an empty one). A mid-turn faint is the only way
+-- that aim goes stale by the time the action actually runs: in a 2v2, a
+-- faster ally can KO the seat a slower ally is aiming at before the slower
+-- one's own action resolves. `_retarget` is what that slower action asks
+-- instead of fizzling. The rule, restated as the three cases below:
+--   (a) whatever is standing in the SAME field position now, even if it is
+--       not who was aimed at -- a seat is a field position here;
+--   (b) otherwise the nearest living opposing seat by |slot distance|, ties
+--       broken toward the lower seat index;
+--   (c) otherwise nil, and the action is skipped.
+-- Resolved once per action (`_useMove`, before the move runs), so a
+-- multi-hit strike puts every hit on the retargeted seat rather than
+-- re-rolling per hit. `Effects.isCharge`/`isBide` record `targetSlot` off
+-- this same resolved value, not `choice.target`, so a charge's release or a
+-- Bide's payload lands where the action actually went.
+
+-- (a) the owner's case: a faster ally's KO empties the seat a slower ally
+-- aimed at in the same turn. The slower ally's attack must not fizzle -- it
+-- retargets to the nearest living seat and lands there for real damage.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "tap", power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 4 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local koIdx, noFizzle, sawSlowAnim, landed = nil, true, false, false
+  for i, e in ipairs(events) do
+    if e.t == "faint" and e.text == "Beta" then koIdx = i end
+    if e.t == "msg" and e.text and e.text:find("has no target", 1, true) then
+      noFizzle = false
+    end
+    if koIdx and i > koIdx and e.t == "anim" and e.side == "a" and e.slot == 1 then
+      sawSlowAnim = true
+    end
+    if sawSlowAnim and e.t == "damage" and e.side == "b" and e.slot == 3 then
+      landed = true
+    end
+  end
+  ok(koIdx ~= nil, "retarget/owner: fast's hit really KO'd the aimed-at seat")
+  ok(noFizzle, "retarget/owner: slow's attack never says 'has no target'")
+  ok(sawSlowAnim, "retarget/owner: slow's move still plays its anim")
+  ok(landed, "retarget/owner: slow's attack lands as real damage on foeB, the retargeted seat")
+
+  local snap = battle:snapshot()
+  eq(fighterIn(snap, "foeA").hp, 0, "retarget/owner: foeA (the original aim) stayed at 0 hp")
+  eq(fighterIn(snap, "foeB").hp, 182, "retarget/owner: foeB (the retargeted seat) took slow's hit")
+end
+
+-- (b) same-position preference: the aimed-at seat is refilled by a
+-- *voluntary* switch (not a faint) before the slower action runs. Gen 1
+-- switches resolve before fights regardless of speed, so the seat is full
+-- again by the time the aim is honoured -- the original aim lands on
+-- whoever now stands in that same field position, unchanged.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "tap", power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 200, spd = 5 }),
+                   mon({ species = "Epsilon", maxHp = 200, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 4 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "switch", slot = 1 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local sawSwitch, sawSend, landedOnSlot2 = false, false, false
+  for _, e in ipairs(events) do
+    if e.t == "switch" and e.side == "b" and e.slot == 2 then sawSwitch = true end
+    if e.t == "send" and e.side == "b" and e.slot == 2 and e.text == "Epsilon" then sawSend = true end
+    if e.t == "damage" and e.side == "b" and e.slot == 2 then landedOnSlot2 = true end
+  end
+  ok(sawSwitch and sawSend, "retarget/same-position: foeA's switch really refilled slot 2 first")
+  ok(landedOnSlot2, "retarget/same-position: slow's aim at slot 2 still lands there, on the replacement")
+
+  local snap = battle:snapshot()
+  eq(fighterIn(snap, "foeA").hp, 182, "retarget/same-position: Epsilon (the replacement) took slow's hit")
+  eq(fighterIn(snap, "foeB").hp, 6, "retarget/same-position: foeB took fast's original, unretargeted hit")
+end
+
+-- (c) both opposing seats are empty when the action runs, but the field
+-- still owes replacements (both foes have a bench mon left): the action
+-- skips silently -- no target to retarget onto -- and the referee opens the
+-- replace phase right after, soliciting exactly the two seats that fell.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "tap", power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5 }),
+                   mon({ species = "Epsilon", maxHp = 200, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 50,
+                         moves = { move({ id = "boom", power = 100, effect = 7 }) } }),
+                   mon({ species = "Zeta", maxHp = 200, spd = 5 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local sawSkipMsg, replaceSlots = false, {}
+  for _, e in ipairs(events) do
+    if e.t == "msg" and e.text == "Gamma has no target" then sawSkipMsg = true end
+    if e.t == "turn" and e.slot ~= nil then replaceSlots[#replaceSlots + 1] = e.slot end
+  end
+  ok(sawSkipMsg, "retarget/both-empty+bench: slow's action skips with the referee's own line")
+  listEq(replaceSlots, { 2, 3 }, "retarget/both-empty+bench: both fallen seats are solicited to replace")
+  eq(battle:snapshot().phase, "replace",
+     "retarget/both-empty+bench: the referee opened the replace phase, not `over`")
+end
+
+-- (d) the same wipe, but neither foe has a bench mon left: the battle ends
+-- outright (`over`) before slow's action even runs -- there is no action
+-- left to skip, and no replace phase to open.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "tap", power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 50,
+                         moves = { move({ id = "boom", power = 100, effect = 7 }) } }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local sawSkipMsg, sawOver = false, false
+  for _, e in ipairs(events) do
+    if e.t == "msg" and e.text and e.text:find("has no target", 1, true) then sawSkipMsg = true end
+    if e.t == "over" then sawOver = true end
+  end
+  ok(not sawSkipMsg,
+     "retarget/both-empty+no-bench: no skip line -- the fight is over before slow's action runs")
+  ok(sawOver, "retarget/both-empty+no-bench: the battle ends outright")
+  eq(battle:snapshot().phase, "over", "retarget/both-empty+no-bench: phase is `over`, not `replace`")
+end
+
+-- (e) multi-hit: the redirect is resolved once for the whole action, not
+-- once per hit -- every hit of a 2-5-style multi-hit move lands on the same
+-- retargeted seat.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "doubletap", power = 40, effect = 44 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 4 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local sawSlowAnim, hitsOnSlot3, hitsElsewhere = false, 0, 0
+  for _, e in ipairs(events) do
+    if e.t == "anim" and e.side == "a" and e.slot == 1 then sawSlowAnim = true end
+    if sawSlowAnim and e.t == "damage" and e.side == "b" then
+      if e.slot == 3 then hitsOnSlot3 = hitsOnSlot3 + 1 else hitsElsewhere = hitsElsewhere + 1 end
+    end
+  end
+  eq(hitsOnSlot3, 2, "retarget/multi-hit: both hits of the multi-hit move land on the retargeted seat")
+  eq(hitsElsewhere, 0, "retarget/multi-hit: no hit strays back onto the original (dead) aim")
+  eq(fighterIn(battle:snapshot(), "foeB").hp, 164,
+     "retarget/multi-hit: both hits actually subtracted from the survivor's hp")
+end
+
+-- (f) a charge move's first turn records the *retargeted* seat, not the
+-- original dead aim -- so its automatic release next turn (`_fillForcedChoices`)
+-- swings at the seat the charge actually resolved onto.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 5151,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 200,
+                         moves = { move({ id = "smash", power = 40 }) } }) } },
+        { playerId = "charger", name = "Charger",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 90, spd = 10,
+                         moves = { move({ id = "solarbeam", power = 60, effect = 39 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5,
+                         moves = { move({ id = "tackle", power = 20 }) } }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 1,
+                         moves = { move({ id = "tackle", power = 20 }) } }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("charger", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  drain(battle)
+
+  local chargerMon = activeMonOf(battle, "charger")
+  ok(chargerMon and chargerMon.charging ~= nil, "retarget/charge: charging state was set")
+  eq(chargerMon and chargerMon.charging.targetSlot, 3,
+     "retarget/charge: the stored aim is the retargeted seat (3), not the dead original (2)")
+
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local turn2 = drain(battle)
+
+  local released, landedOnSlot3 = false, false
+  for _, e in ipairs(turn2) do
+    if e.t == "anim" and e.side == "a" and e.slot == 1 and e.text == "solarbeam" then released = true end
+    if released and e.t == "damage" and e.side == "b" and e.slot == 3 then landedOnSlot3 = true end
+  end
+  ok(released, "retarget/charge: the charge auto-releases next turn")
+  ok(landedOnSlot3, "retarget/charge: the release lands on the retargeted seat, not the dead original")
+end
+
+-- (g) a Bide's first turn records the retargeted seat the same way; several
+-- turns later, its release (2x the stored damage) is paid to that same
+-- recorded seat.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 6161,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 200,
+                         moves = { move({ id = "smash", power = 40 }) } }) } },
+        { playerId = "bider", name = "Bider",
+          mons = { mon({ species = "Gamma", maxHp = 200, def = 30, spd = 10,
+                         moves = { move({ id = "bide", power = 0, effect = 26 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5,
+                         moves = { move({ id = "tackle", power = 20 }) } }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 400, spd = 1, atk = 60,
+                         moves = { move({ id = "tackle", power = 20 }) } }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("bider", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 1 })
+  drain(battle)
+
+  local biderMon = activeMonOf(battle, "bider")
+  ok(biderMon and biderMon.bide ~= nil, "retarget/bide: bide state was set")
+  eq(biderMon and biderMon.bide.targetSlot, 3,
+     "retarget/bide: the stored aim is the retargeted seat (3), not the dead original (2)")
+
+  local announced, sawReleaseAnim, landedOnSlot3 = false, false, false
+  for _ = 1, 6 do
+    if landedOnSlot3 then break end
+    battle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("foeB", { action = "fight", move = 0, target = 1 })
+    local events = drain(battle)
+    for _, e in ipairs(events) do
+      if e.t == "msg" and e.text == "Gamma unleashed energy" then announced = true end
+      if e.t == "anim" and e.side == "a" and e.slot == 1 and e.text == "bide" then
+        sawReleaseAnim = true
+      end
+      if sawReleaseAnim and e.t == "damage" and e.side == "b" and e.slot == 3 then
+        landedOnSlot3 = true
+      end
+    end
+  end
+  ok(announced, "retarget/bide: bide eventually announces its release")
+  ok(landedOnSlot3, "retarget/bide: the release damage is paid to the retargeted seat")
 end
 
 -- ------------------------------------------------------------------

@@ -61,6 +61,15 @@ here must match `manifest.version`.
   design) — the WAIT/ALONE choice showed as a cut-off empty box. Mod
   screens now decline to claim zones when the state beneath authored
   none, matching the engine's own rule.
+- **A stolen KO redirects your partner's attack.** When a faster ally
+  knocks out the mon a slower attack was aimed at, the attack no longer
+  fizzles ("has no target") — it retargets whoever now stands in that
+  field position, else the nearest living opponent, and only skips when
+  the whole side is down. Applied once per action (multi-hit included);
+  charging moves and Bide track the seat they actually swung at. Both
+  the hub referee and the LAN host-sim pay the same rule (the host-sim
+  already retargeted but attacked corpses when every foe seat was
+  empty — also fixed).
 - **The attack callout shouts once.** A co-op attack raised its
   "PIKACHU! / THUNDERBOLT!" bubble up to three times (the beat's
   re-queued row lacked the guard its 1v1 twin had, and the original

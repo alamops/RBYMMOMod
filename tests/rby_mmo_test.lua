@@ -11815,6 +11815,358 @@ end)()
   eq(client.phase, "move", "and never opened Attack who? on invisible foes")
 end)()
 
+-- ------- dead-target retargeting (`CoopSim.retargetFor` / `runAction`)
+--
+-- The referee twin of this rule lives in `src/BattleSim/Turn.lua`'s
+-- `_retarget` (`tests/battle_sim_turn.lua` pins it there). This is the
+-- host-sim half: `retargetFor` answers the same three-rung question --
+-- (a) same field position, (b) nearest living opposing seat by |slot
+-- distance|, ties to the lower index, (c) nothing, skip -- and `runAction`
+-- is the only caller that resolves through it, once per action, before the
+-- move runs.
+
+;(function()
+  local CoopSim = need("CoopSim")
+  local TACKLE = function(pp) return { { id = "FIX_TACKLE", pp = pp or 20 } } end
+
+  -- 1. same-position replacement hit: an NPC seat that falls sends its next
+  -- party mon out INSIDE the same turn (`announceFaint`), and a slower ally
+  -- who aimed at that seat lands on the replacement rather than being pushed
+  -- across the field -- rule (a), the seat is a field position.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 90, TACKLE()) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 80, TACKLE()) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(4, 30, TACKLE()), mon(60, 30, TACKLE()) } },
+      { side = "b", owner = nil, name = "FOE", party = { mon(60, 20, TACKLE()) } },
+    })
+    local ev = sim:resolveTurn({
+      { slot = 1, move = 1, target = 3 },
+      { slot = 2, move = 1, target = 3 },
+    })
+    local sawSend, sawSecondHit = false, false
+    for _, e in ipairs(ev) do
+      if e.kind == "send" and e.slot == 3 then sawSend = true end
+      if sawSend and e.kind == "damage" and e.slot == 3 then sawSecondHit = true end
+    end
+    check(sawSend, "retargetFor/same-position: the NPC's next mon is sent into slot 3 mid-turn")
+    check(sawSecondHit,
+       "retargetFor/same-position: BOB's attack (aimed at slot 3 before the send) still lands there")
+    eq(sim:slot(3).active, 2, "the seat now holds the replacement, party index 2")
+    check(sim:slot(3).battler.mon.hp < sim:slot(3).battler.mon.stats.hp,
+       "and it actually took BOB's hit, not a fresh switch-in's full HP")
+  end
+
+  -- 2. `retargetFor` direct-called: distance/direction correctness and the
+  -- attacker-slot invariance the doc comment claims -- once the aimed index
+  -- names a real seat, the origin is THAT seat, not the attacker's own, so
+  -- both attackers on a side must agree.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 90, TACKLE()) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 80, TACKLE()) } },
+      { side = "b", owner = "cal", name = "CAL", party = { mon(60, 30, TACKLE()) } },
+      { side = "b", owner = "dee", name = "DEE", party = { mon(60, 20, TACKLE()) } },
+    })
+    sim:slot(3).battler.mon.hp = 0
+    sim:slot(1).battler.mon.hp = 0
+
+    local fromAnn = sim:retargetFor(sim:slot(1), 3)
+    local fromBob = sim:retargetFor(sim:slot(2), 3)
+    eq(fromAnn, sim:slot(4), "retargetFor(attacker=1, aimed=3): the other side-b seat, slot 4")
+    eq(fromBob, sim:slot(4),
+       "retargetFor(attacker=2, aimed=3): the SAME answer -- the origin is the aimed seat, not the attacker")
+
+    local fromCal = sim:retargetFor(sim:slot(3), 1)
+    local fromDee = sim:retargetFor(sim:slot(4), 1)
+    eq(fromCal, sim:slot(2), "retargetFor(attacker=3, aimed=1): the other side-a seat, slot 2, direction reversed")
+    eq(fromDee, sim:slot(2), "retargetFor(attacker=4, aimed=1): attacker-invariant here too")
+  end
+
+  -- 2b. `retargetFor` direct-called: the tie-break. Unreachable through the
+  -- real 4-slot field (two seats a side are always 1 apart, so no integer
+  -- origin is ever equidistant from both) -- stated on a fabricated wider
+  -- field instead, calling the bare function with a hand-built `self` so the
+  -- rule itself is pinned rather than left true only by the field's shape.
+  do
+    local fakeSelf = { living = CoopSim.living, isDown = CoopSim.isDown, slots = {} }
+    local function seat(index, side, hp)
+      return { index = index, side = side, gone = false,
+               battler = { mon = { hp = hp } } }
+    end
+    fakeSelf.slots = {
+      seat(1, "a", 60), seat(2, "a", 60), seat(3, "a", 60),
+      seat(4, "b", 60), seat(5, "b", 0), seat(6, "b", 60),
+    }
+    local best = CoopSim.retargetFor(fakeSelf, fakeSelf.slots[1], 5)
+    eq(best, fakeSelf.slots[4],
+       "retargetFor tie: slots 4 and 6 are equidistant from the dead aim (slot 5) -- "
+       .. "the lower index (4) wins, not the last one seen")
+  end
+
+  -- 3. both-dead silent skip: nothing living opposes the action when it
+  -- runs, and there is nowhere to land -- no message, no anim, no HP moves
+  -- anywhere on the side that has nothing standing. (D3-shaped: the fast
+  -- ally's KO and the foe's own PP-out Struggle recoil both land on turn 1,
+  -- so the slowest ally's identically-aimed action reaches an empty field.)
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 90, TACKLE()) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 10, TACKLE()) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(4, 40, TACKLE()), mon(60, 40, TACKLE()) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(1, 30, TACKLE(0)), mon(60, 30, TACKLE()) } },
+    })
+    local ev = sim:resolveTurn({
+      { slot = 1, move = 1, target = 3 },
+      { slot = 3, move = 1, target = 1 },
+      { slot = 4, move = 1, target = 1 },
+      { slot = 2, move = 1, target = 3 },
+    })
+    -- Every event this turn belongs to a1's KO, dee's Struggle/recoil KO, or
+    -- the exp payouts they fund -- none of it BOB's (slot 2). The absence is
+    -- the pin: no event anywhere names slot 2 as the actor.
+    local bobActed = false
+    for _, e in ipairs(ev) do
+      if e.slot == 2 and (e.kind == "msg" or e.kind == "anim" or e.kind == "damage") then
+        bobActed = true
+      end
+    end
+    check(not bobActed,
+       "retargetFor/both-dead: BOB's action leaves no msg, anim or damage trace -- a true silent skip")
+    eq(sim:slot(3).battler.mon.hp, 0, "slot 3 stayed at 0 -- BOB's aim never landed a stray hit")
+    eq(sim:slot(4).battler.mon.hp, 0, "slot 4 (dee's Struggle recoil KO) is likewise untouched by BOB")
+
+    -- Choice-time and execution-time really are different questions on this
+    -- same field: both b seats still owe a replacement (one bench mon each),
+    -- so `targetsFor` keeps them aimable even though `runAction` just refused
+    -- to let BOB's identical aim connect with either corpse.
+    eq(#sim:targetsFor(sim:slot(2)), 2,
+       "targetsFor/runAction: the two fallen-but-owed seats are still what FIGHT may aim at")
+  end
+
+  -- 3b. both-dead, no bench anywhere left on the seat the action re-aims at:
+  -- same silent-skip shape one KO later, once CAL's own bench is spent too.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 90, TACKLE()) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 10, TACKLE()) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(4, 40, TACKLE()), mon(60, 40, TACKLE()) } },
+      { side = "b", owner = "dee", name = "DEE", party = { mon(1, 30, TACKLE()) } },
+    })
+    sim:resolveTurn({ { slot = 1, move = 1, target = 4 } })
+    local ev = sim:resolveTurn({
+      { slot = 1, move = 1, target = 3 },
+      { slot = 2, move = 1, target = 3 },
+    })
+    local bobActed = false
+    for _, e in ipairs(ev) do
+      if e.slot == 2 and (e.kind == "msg" or e.kind == "anim" or e.kind == "damage") then
+        bobActed = true
+      end
+    end
+    check(not bobActed, "retargetFor/both-dead (3b): BOB's second identical aim is silent too")
+  end
+
+  -- 4. multi-hit: one retarget for the whole action, every hit on the same
+  -- new seat.
+  do
+    assert(data.move_effects.TWO_TO_FIVE_ATTACKS_EFFECT,
+           "multi-hit record present in the merged registry")
+    data.moves.FIX_MULTI = {
+      id = "FIX_MULTI", name = "FIX MULTI", power = 15, accuracy = 100,
+      type = "NORMAL", category = "physical", pp = 20,
+      effect = "TWO_TO_FIVE_ATTACKS_EFFECT",
+    }
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 90, TACKLE()) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 80, { { id = "FIX_MULTI", pp = 20 } }) } },
+      { side = "b", owner = "cal", name = "CAL", party = { mon(4, 30, TACKLE()) } },
+      { side = "b", owner = "dee", name = "DEE", party = { mon(60, 20, TACKLE()) } },
+    })
+    local ev = sim:resolveTurn({
+      { slot = 1, move = 1, target = 3 },
+      { slot = 2, move = 1, target = 3 },
+    })
+    -- Each hit of a multi-hit move moves the bar with its own `drain` event
+    -- (`slot` + the absolute HP it stops at), one per strike; the HP
+    -- accounting itself is a single aggregated `damage` event for the whole
+    -- action. So "every hit landed on the retargeted seat" is read off the
+    -- drain count, and "nothing strayed back onto the dead original aim" off
+    -- there being no drain/damage naming slot 3 at all after the KO.
+    local drainsOnSlot4, drainsOnSlot3AfterKo, damageOnSlot3AfterKo = 0, 0, 0
+    local koIdx = nil
+    for i, e in ipairs(ev) do
+      if e.kind == "faint" and e.slot == 3 then koIdx = i end
+      if koIdx and i > koIdx then
+        if e.kind == "drain" and e.slot == 4 then drainsOnSlot4 = drainsOnSlot4 + 1 end
+        if e.kind == "drain" and e.slot == 3 then drainsOnSlot3AfterKo = drainsOnSlot3AfterKo + 1 end
+        if e.kind == "damage" and e.slot == 3 then damageOnSlot3AfterKo = damageOnSlot3AfterKo + 1 end
+      end
+    end
+    check(koIdx ~= nil, "retargetFor/multi-hit: CAL really fell first")
+    eq(drainsOnSlot3AfterKo, 0, "retargetFor/multi-hit: no hit strays back onto the dead original aim")
+    eq(damageOnSlot3AfterKo, 0, "retargetFor/multi-hit: and no damage accounting against it either")
+    check(drainsOnSlot4 >= 2, "retargetFor/multi-hit: every hit of the multi-hit move landed on DEE instead")
+    check(sim:slot(4).battler.mon.hp < sim:slot(4).battler.mon.stats.hp,
+       "retargetFor/multi-hit: DEE actually took the combined damage")
+  end
+
+  -- 5. cross-path: the referee (`BattleSim/Turn.lua`) and the host sim
+  -- (`CoopSim`) are two independent implementations of the same rule, and a
+  -- scenario shaped like the owner's case has to send both to the same
+  -- seat. The wording differs on purpose where the two diverge: the referee
+  -- narrates the skip ("has no target"); CoopSim's runAction just returns.
+  -- That difference is pinned explicitly here so it reads as intended,
+  -- rather than as one of the two forgetting a line.
+  do
+    local function slurp(path)
+      local h = io.open(path, "rb"); if not h then return nil end
+      local b = h:read("*a"); h:close(); return b
+    end
+    local loadstr = loadstring or load
+    local refCache = {}
+    local function refNeed(name)
+      if refCache[name] ~= nil then return refCache[name] end
+      local path = MOD_PATH .. "/src/" .. name .. ".lua"
+      local body = slurp(path) or error("missing " .. path, 0)
+      local chunk, err = loadstr(body, "@" .. name .. ".lua")
+      if not chunk then error(tostring(err), 0) end
+      refCache[name] = chunk(refNeed); return refCache[name]
+    end
+    local Turn = refNeed("BattleSim/init").Turn
+
+    local function refMove(o)
+      o = o or {}
+      return { id = o.id or "thump", pp = o.pp or 20,
+        power = o.power ~= nil and o.power or 40, accuracy = o.accuracy or 255,
+        type = o.type or 0, effect = o.effect or 0, chance = o.chance or 0 }
+    end
+    local function refMon(o)
+      o = o or {}
+      return { species = o.species or "Alpha", level = o.level or 20,
+        maxHp = o.maxHp or 60, stats = { atk = o.atk or 40, def = o.def or 40,
+          spd = o.spd or 40, spc = o.spc or 40 }, moves = o.moves or { refMove() } }
+    end
+
+    -- 5a. same scenario shape, same seat picked: fast KO's ally retargets
+    -- onto "the other foe" in both engines.
+    local refBattle = Turn.create({
+      id = "cross1", mode = "coop_pvp", seed = 4242,
+      sides = {
+        a = {
+          { playerId = "fast", name = "Fast", mons = {
+            refMon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                     moves = { refMove({ id = "bigsmash", power = 150 }) } }) } },
+          { playerId = "slow", name = "Slow", mons = {
+            refMon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                     moves = { refMove({ id = "tap", power = 40 }) } }) } },
+        },
+        b = {
+          { playerId = "foeA", name = "FoeA", mons = {
+            refMon({ species = "Beta", maxHp = 12, spd = 5 }) } },
+          { playerId = "foeB", name = "FoeB", mons = {
+            refMon({ species = "Delta", maxHp = 200, spd = 4 }) } },
+        },
+      },
+    })
+    refBattle:drainEvents()
+    refBattle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+    refBattle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+    refBattle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+    refBattle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+    local refEvents = refBattle:drainEvents()
+
+    local refLandedOnFoeB, refFizzled = false, false
+    for _, e in ipairs(refEvents) do
+      if e.t == "msg" and e.text and e.text:find("has no target", 1, true) then refFizzled = true end
+      if e.t == "damage" and e.side == "b" and e.slot == 3 then refLandedOnFoeB = true end
+    end
+    check(refLandedOnFoeB and not refFizzled,
+       "cross-path: the referee retargets slow's attack onto foeB, not a fizzle")
+
+    local coopSim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 90, TACKLE()) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 10, TACKLE()) } },
+      { side = "b", owner = "cal", name = "CAL", party = { mon(4, 30, TACKLE()) } },
+      { side = "b", owner = "dee", name = "DEE", party = { mon(60, 20, TACKLE()) } },
+    })
+    local coopEv = coopSim:resolveTurn({
+      { slot = 1, move = 1, target = 3 },
+      { slot = 2, move = 1, target = 3 },
+    })
+    local coopLandedOnDee = false
+    for _, e in ipairs(coopEv) do
+      if e.kind == "damage" and e.slot == 4 then coopLandedOnDee = true end
+    end
+    check(coopLandedOnDee,
+       "cross-path: CoopSim retargets BOB's attack onto DEE -- both engines pick 'the other foe'")
+
+    -- 5b. the wording difference, on the case where nothing is left to hit:
+    -- the referee narrates it, CoopSim does not, and that split is by design.
+    local refBoth = Turn.create({
+      id = "cross2", mode = "coop_pvp", seed = 4242,
+      sides = {
+        a = {
+          { playerId = "fast", name = "Fast", mons = {
+            refMon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                     moves = { refMove({ id = "bigsmash", power = 150 }) } }) } },
+          { playerId = "slow", name = "Slow", mons = {
+            refMon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                     moves = { refMove({ id = "tap", power = 40 }) } }) } },
+        },
+        b = {
+          { playerId = "foeA", name = "FoeA", mons = {
+            refMon({ species = "Beta", maxHp = 12, spd = 5 }),
+            refMon({ species = "Epsilon", maxHp = 200, spd = 5 }) } },
+          { playerId = "foeB", name = "FoeB", mons = {
+            refMon({ species = "Delta", maxHp = 200, spd = 50,
+                     moves = { refMove({ id = "boom", power = 100, effect = 7 }) } }),
+            refMon({ species = "Zeta", maxHp = 200, spd = 5 }) } },
+        },
+      },
+    })
+    refBoth:drainEvents()
+    refBoth:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+    refBoth:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+    refBoth:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+    refBoth:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+    local refBothEvents = refBoth:drainEvents()
+    local refSaysNoTarget = false
+    for _, e in ipairs(refBothEvents) do
+      if e.t == "msg" and e.text == "Gamma has no target" then refSaysNoTarget = true end
+    end
+    check(refSaysNoTarget,
+       "cross-path/wording: the referee narrates the skip -- 'Gamma has no target'")
+
+    local coopBoth = fieldSim({
+      { side = "a", owner = "ann", name = "ANN", party = { mon(60, 90, TACKLE()) } },
+      { side = "a", owner = "bob", name = "BOB", party = { mon(60, 10, TACKLE()) } },
+      { side = "b", owner = "cal", name = "CAL",
+        party = { mon(4, 40, TACKLE()), mon(60, 40, TACKLE()) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(1, 30, TACKLE(0)), mon(60, 30, TACKLE()) } },
+    })
+    local coopBothEv = coopBoth:resolveTurn({
+      { slot = 1, move = 1, target = 3 },
+      { slot = 3, move = 1, target = 1 },
+      { slot = 4, move = 1, target = 1 },
+      { slot = 2, move = 1, target = 3 },
+    })
+    local coopSaysAnything = false
+    for _, e in ipairs(coopBothEv) do
+      if e.slot == 2 and (e.kind == "msg" or e.kind == "anim") then coopSaysAnything = true end
+    end
+    check(not coopSaysAnything,
+       "cross-path/wording: CoopSim's runAction narrates nothing for the same shape -- silent by design, "
+       .. "not a missing line")
+  end
+end)()
+
 -- ------- vertical target list: real navigation, not a coincidental clamp
 --
 -- The picker test above starts each direction already at the edge it is

@@ -643,6 +643,51 @@ function Battle:_firstLivingFoe(fighter)
   return nil
 end
 
+-- Which seat an action actually swings at, given the seat it was aimed at.
+--
+-- A fight choice always names a living opposing seat when it is made:
+-- `_normaliseChoice` refuses an empty one, and the replace phase means the
+-- field is whole again before the next choice window opens.  **A mid-turn
+-- faint is therefore the only way an aim can go stale** -- in a 2v2 the faster
+-- ally KOs the seat the slower ally picked, and without this the slower mon
+-- fizzles ("has no target") instead of swinging.
+--
+-- Preference order:
+--   (a) whatever is standing in the SAME field position.  A seat *is* a field
+--       position here, so this also covers the case where the seat was emptied
+--       and refilled between choice and execution -- the aim the player made
+--       still points at a real monster and is honoured unchanged.
+--   (b) otherwise the NEAREST living opposing seat: smallest
+--       |seat.slot - aimedSlot| (both sit on the same side, so the side base
+--       cancels and this is seat-index distance), ties broken toward the lower
+--       seat index.  With two seats a side that is simply the adjacent seat;
+--       the rule is spelled out so a wider field could not make it ambiguous.
+--   (c) otherwise nil -- the opposing side has nothing standing, the battle is
+--       ending, and the action is skipped.
+--
+-- Only the opposing side is ever searched, so nothing here can redirect a move
+-- onto the user or its ally; self-targeting and side-wide effects ride the
+-- same opposing-seat aim they always did and are untouched.  The answer is
+-- bound once per action in `_useMove`, so a multi-hit strike puts every hit on
+-- the retargeted seat -- an action retargets, not each of its strikes.
+function Battle:_retarget(fighter, slot)
+  local aimed = self:_fighterAtSlot(slot)
+  if aimed and activeMon(aimed) then return aimed end
+
+  local best, bestDistance
+  for _, foe in ipairs(self:_foes(fighter)) do
+    if activeMon(foe) then
+      local distance = foe.slot - slot
+      if distance < 0 then distance = -distance end
+      if bestDistance == nil or distance < bestDistance
+         or (distance == bestDistance and foe.slot < best.slot) then
+        best, bestDistance = foe, distance
+      end
+    end
+  end
+  return best
+end
+
 function Battle:_sideAlive(side)
   for _, fighter in ipairs(self.bySide[side]) do
     if firstLiving(fighter.mons) then return true end
@@ -2061,12 +2106,18 @@ function Battle:_useMove(fighter, mon, opts)
     return
   end
 
-  local target = self:_fighterAtSlot(choice.target)
+  -- Resolved once, here, and used for the whole action: see `_retarget`.
+  local target = self:_retarget(fighter, choice.target)
   local defender = target and activeMon(target)
   if not defender then
     self:_say(mon.species .. " has no target")
     return
   end
+  -- The seat actually swung at.  Anything this action *records* for a later
+  -- turn (a charge's aim, a Bide's aim) records this and not `choice.target`,
+  -- so the release lands where the action went rather than on the seat that
+  -- was already empty when it started.
+  local targetSlot = target.slot
 
   local move = opts.moveOverride or (struggling and STRUGGLE or mon.moves[choice.move])
   local effectId = int(move.effect, 0)
@@ -2096,7 +2147,7 @@ function Battle:_useMove(fighter, mon, opts)
     mon.charging = {
       moveIndex = choice.move,
       effect = effectId,
-      targetSlot = choice.target,
+      targetSlot = targetSlot,
     }
     if Effects.isFly(effectId) then mon.invulnerable = true end
     self:_say(Effects.chargeMessage(mon, effectId))
@@ -2183,7 +2234,7 @@ function Battle:_useMove(fighter, mon, opts)
         turns = Effects.bideTurns(self.rng),
         stored = 0,
         moveIndex = choice.move,
-        targetSlot = choice.target,
+        targetSlot = targetSlot,
       }
       self:_say(mon.species .. " began storing energy")
       self:_markLastMove(mon, choice.move)

@@ -718,6 +718,49 @@ scenario('replacement_mark', (events) => {
   return battle;
 });
 
+// 21. dead-target retargeting (U-wave): a faster ally KOs the seat a slower
+//     ally aimed at, in the same turn. `_retarget` (Turn.js's twin of
+//     Turn.lua:646-690) is the only reason the slower ally's action does not
+//     fizzle -- it redraws no RNG of its own, but its target resolution runs
+//     on every runtime and nothing here reached it before: U1 found no
+//     existing scenario landed an action on a seat that died mid-turn, which
+//     is why the bug (a fizzle, "has no target", where a real attack
+//     belonged) lived undetected. The retargeted hit still draws the same
+//     accuracy/damage/crit bytes a same-turn attack always would, so this
+//     also exercises those draws from a target the choice never named.
+scenario('retarget_ko', (events) => {
+  const battle = build({
+    id: 'rk', mode: 'coop_pvp', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'fast', name: 'Fast', mons: [
+          mn({ species: 'Alpha', maxHp: 200, atk: 200, spd: 90,
+               moves: [mv('bigsmash', 150, 255, 0)] })] },
+        { playerId: 'slow', name: 'Slow', mons: [
+          mn({ species: 'Gamma', maxHp: 200, atk: 60, spd: 10,
+               moves: [mv('tap', 40, 255, 0)] })] },
+      ],
+      b: [
+        { playerId: 'foeA', name: 'FoeA', mons: [
+          mn({ species: 'Beta', maxHp: 12, spd: 5,
+               moves: [mv('thump', 40, 255, 0)] })] },
+        { playerId: 'foeB', name: 'FoeB', mons: [
+          mn({ species: 'Delta', maxHp: 200, spd: 4,
+               moves: [mv('thump', 40, 255, 0)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  // Both allies aim at foeA (slot 2). Fast (spd 90) KOs it; Slow (spd 10)
+  // resolves after and must retarget onto foeB (slot 3) rather than fizzle.
+  battle.submitChoice('fast', { action: 'fight', move: 0, target: 2 });
+  battle.submitChoice('slow', { action: 'fight', move: 0, target: 2 });
+  battle.submitChoice('foeA', { action: 'fight', move: 0, target: 0 });
+  battle.submitChoice('foeB', { action: 'fight', move: 0, target: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -796,7 +839,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.ok(jsRuns.length >= 20, 'the JS half built every scenario');
+  assert.ok(jsRuns.length >= 21, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle_turn_parity.json is available -- '
@@ -892,6 +935,37 @@ test('the KO fight ends, and names who won', () => {
     run.events.filter((event) => event.t === 'over').length, 1,
     'and exactly one over',
   );
+});
+
+test('mid-turn-KO retargeting: the slower ally swings onto the survivor, not "has no target"', () => {
+  const run = byName(jsRuns).get('retarget_ko');
+  const events = run.events;
+
+  const koIdx = events.findIndex((event) => event.t === 'faint' && event.text === 'Beta');
+  assert.ok(koIdx > -1, "fast's hit really KO'd the aimed-at seat (foeA/Beta)");
+
+  assert.ok(
+    !events.some((event) => event.t === 'msg' && event.text && event.text.includes('has no target')),
+    "slow's action never fizzles for the dead aim",
+  );
+
+  let sawSlowAnim = false;
+  let landedOnSlot3 = false;
+  for (let i = koIdx + 1; i < events.length; i += 1) {
+    const event = events[i];
+    if (event.t === 'anim' && event.side === 'a' && event.slot === 1) sawSlowAnim = true;
+    if (sawSlowAnim && event.t === 'damage' && event.side === 'b' && event.slot === 3) {
+      landedOnSlot3 = true;
+      break;
+    }
+  }
+  assert.ok(sawSlowAnim, "slow's move still plays its anim after the mid-turn KO");
+  assert.ok(landedOnSlot3, 'slow’s attack lands as real damage on foeB (slot 3), the retargeted seat');
+
+  assert.strictEqual(run.snapshot.field.find((f) => f.slot === 2).hp, 0,
+    'foeA (the original, now-dead aim) stayed at 0 hp');
+  assert.ok(run.snapshot.field.find((f) => f.slot === 3).hp < 200,
+    'foeB (the retargeted seat) actually took the hit');
 });
 
 test('a wild-mode faint pays exactly one exp event, after the faint and before over', () => {

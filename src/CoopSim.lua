@@ -531,6 +531,60 @@ function M:targetsFor(slot)
   return out
 end
 
+-- Where an action lands when the seat it was aimed at has nobody standing in
+-- it -- the *execution*-time rule, as against `targetsFor`'s choice-time one.
+--
+-- The two are deliberately different questions, and answering the second with
+-- the first is what this exists to stop. `targetsFor` may hand back an **empty
+-- seat that still owes a send-out**, because at choice time that is a legal
+-- thing to aim at: the hub's replace window and the fight menu are the same
+-- phase, and refusing there stalls the turn. At execution time that same seat
+-- holds a corpse, and a move resolved against it announced itself and played
+-- its animation over a monster that had already fallen.
+--
+-- The rule, and it is the referee's (`BattleSim/Turn.lua`,
+-- `server/lib/battle/Turn.js`) so the LAN host and the hub cannot disagree
+-- about the same turn:
+--
+--   (a) the seat itself, whenever something living is standing in it. An NPC
+--       whose monster falls sends the next one out *inside* the same turn, so
+--       a slower ally that aimed at that seat hits the replacement -- the mon
+--       in the same field position -- rather than being pushed across the
+--       field. Handled by the caller's `isDown` check, which is what makes
+--       this function only ever asked the harder half of the question;
+--   (b) otherwise the nearest living opponent, by seat-index distance from the
+--       seat that was aimed at, ties to the lower index. Deterministic on
+--       purpose: the host simulates and three clients replay, so "nearest" has
+--       to be a number and not a preference. With two seats a side there is at
+--       most one living foe left whenever (a) has failed, so the metric never
+--       actually chooses -- it is written out anyway, because the referee's is,
+--       and a rule that agrees only by accident is not the same rule;
+--   (c) otherwise nothing, and the action skips. Every foe seat is empty and
+--       the ones that owe a send-out have not answered yet; there is no living
+--       monster on the other side to hit. Silent, like the no-opponent-left
+--       case this file already had -- rather than a new line of text three
+--       replayers would also have to be taught.
+--
+-- Once per action, not once per hit: the caller resolves this before
+-- `performMove`, so a multi-hit move redirects as a whole and every one of its
+-- hits lands on the same monster.
+--
+-- `aimedIndex` is only trusted when it names a seat this field actually has:
+-- it arrives off the wire, and an index nobody occupies would otherwise put the
+-- origin of the distance somewhere the field does not go. The attacker's own
+-- seat stands in then, which is the same origin a 1v1 would use.
+function M:retargetFor(slot, aimedIndex)
+  local from = (aimedIndex and self.slots[aimedIndex] and aimedIndex) or slot.index
+  local best, bestDist = nil, nil
+  for _, candidate in ipairs(self:living(slot.side == "a" and "b" or "a")) do
+    local dist = math.abs(candidate.index - from)
+    -- `<` and not `<=`: `living` walks in seat order, so the first candidate at
+    -- a given distance is the lower-indexed one, and keeping it is the tiebreak.
+    if bestDist == nil or dist < bestDist then best, bestDist = candidate, dist end
+  end
+  return best
+end
+
 -- ------- the turn
 --
 -- One action per living slot, resolved in speed order over all four rather
@@ -1017,13 +1071,20 @@ function M:runAction(slot, action, emit)
   -- whoever is still standing rather than fizzling, because "your target fell
   -- over so you lose your turn" is a rule nobody agreed to when they picked it.
   --
+  -- `retargetFor` is the rule, and it is the referee's -- see its comment for
+  -- the three rungs and why this one is not `targetsFor(slot)[1]`. The short
+  -- version: `targetsFor` answers a *choice*-time question and will hand back
+  -- an empty seat that still owes a send-out, which is legal to aim at and not
+  -- legal to hit. Resolved through it, a move whose whole opposing side had
+  -- fallen in the same turn announced itself and animated over a corpse.
+  --
   -- Resolved before the move rather than after it, because both gates below
   -- take a target: the confusion self-hit inside `statusInterrupt` reads its
   -- *screens* (Gen 1 checks the opponent's Reflect against a mon hitting
   -- itself -- the real glitch, kept), and `preRechargeChecks` wants a trapping
   -- counter -- which is a different battler again, and is worked out just below.
   if not target or self:isDown(target) or target.side == slot.side then
-    target = self:targetsFor(slot)[1]
+    target = self:retargetFor(slot, action.target)
   end
   if not target then return end
 

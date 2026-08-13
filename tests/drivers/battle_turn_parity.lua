@@ -831,6 +831,49 @@ scenario("replacement_mark", function(events)
   return battle
 end)
 
+-- 21. dead-target retargeting (U-wave): a faster ally KOs the seat a slower
+--     ally aimed at, in the same turn. `_retarget` (Turn.lua:646-690) is the
+--     only reason the slower ally's action does not fizzle -- it redraws no
+--     RNG of its own, but its target resolution runs on every runtime and
+--     nothing here reached it before: U1 found no existing scenario landed
+--     an action on a seat that died mid-turn, which is why the bug (a fizzle,
+--     "has no target", where a real attack belonged) lived undetected. The
+--     retargeted hit still draws the same accuracy/damage/crit bytes a
+--     same-turn attack always would, so this also exercises those draws from
+--     a target the choice never named.
+scenario("retarget_ko", function(events)
+  local battle = build({
+    id = "rk", mode = "coop_pvp", seed = 4242, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast", mons = {
+          mn({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+               moves = { mv("bigsmash", 150, 255, 0) } }) } },
+        { playerId = "slow", name = "Slow", mons = {
+          mn({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+               moves = { mv("tap", 40, 255, 0) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA", mons = {
+          mn({ species = "Beta", maxHp = 12, spd = 5,
+               moves = { mv("thump", 40, 255, 0) } }) } },
+        { playerId = "foeB", name = "FoeB", mons = {
+          mn({ species = "Delta", maxHp = 200, spd = 4,
+               moves = { mv("thump", 40, 255, 0) } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  -- Both allies aim at foeA (slot 2). Fast (spd 90) KOs it; Slow (spd 10)
+  -- resolves after and must retarget onto foeB (slot 3) rather than fizzle.
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
 -- ------------------------------------------------------------------
 
 local out = {}
