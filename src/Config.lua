@@ -121,8 +121,15 @@ M.MOD_ID = "rby_mmo"
 -- the gen check, so a Gold client could join a Red room, or a menu joiner
 -- never learns which trainer to mark beaten. Refusal that names both
 -- versions is the only sentence either player can act on.
+-- 21: the referee emits `exp` battle events (facts only -- slot, species,
+-- level, participants; the hub prices nothing) after a faint in wild /
+-- coop_wild / coop_npc fights, and clients apply the gain to their own
+-- save. A 20-vocabulary client drops the unknown kind silently, so a
+-- mixed pairing would resolve the same fight with one player levelling
+-- and the other not -- a turn the two players saw differently. Refusal
+-- naming both versions beats invisible non-progression.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 20
+M.PROTOCOL = 21
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

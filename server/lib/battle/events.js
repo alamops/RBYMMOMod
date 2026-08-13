@@ -61,17 +61,39 @@ function toNumber(value) {
 //   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 //   unchose    -- cancel cleared a filed answer
 //   moves      -- mid-fight move-list sync after Transform/Mimic
+//   exp        -- a faint's spoils, as facts: who fell (species, level), how
+//                 many shares split it, and which of the paid side's six banks
+//                 this share (`mon`). Never an amount: the intermediator holds
+//                 no species table, so each client runs its own formula over
+//                 its own party.
 const KINDS = {
   msg: true, anim: true, damage: true, drain: true, faint: true,
   send: true, status: true, stat: true, switch: true, item: true,
   run: true, turn: true, over: true, wait: true, reconnect: true,
-  chose: true, unchose: true, moves: true,
+  chose: true, unchose: true, moves: true, exp: true,
 };
 
 // Every key an event may carry, and the type it carries. `battle` and `seq` are
 // stamped by the turn machine rather than passed to `build`, because a caller
 // that could choose its own sequence number could put a hole in the stream, and
 // a hole is what a client reads as lost messages.
+//
+// `species`, `level`, `participants` and `mon` are the `exp` event's facts.
+// They are separate keys rather than a reuse of `text` / `amount` because they
+// travel together into a formula: a client that read a species out of `text`
+// would be reading the same field a faint uses for a sentence, and the first
+// build to change one of those sentences would silently change an award.
+//
+// `mon` is the one key here that is a **party** index (0..5) rather than a
+// field slot: vanilla pays every mon that fought the fallen foe and lived,
+// benched included, and a benched one has no field slot to name. It rides
+// alongside `slot`, which stays the owning fighter's seat.
+//
+// `send` and `switch` carry it for a different reason: they used to name the
+// monster coming in by species alone, and a party holding two of a species has
+// no way to say which. A client resolving the name picked the first match,
+// which is how a fainted duplicate walked back onto the field. The referee
+// already knows the index it chose, so it says it.
 const FIELDS = {
   battle: 'string',
   seq: 'number',
@@ -82,6 +104,10 @@ const FIELDS = {
   hp: 'number',
   side: 'string',
   status: 'string',
+  species: 'string',
+  level: 'number',
+  participants: 'number',
+  mon: 'number',
 };
 
 // ------------------------------------------------------------------
@@ -96,6 +122,22 @@ const FIELDS = {
 //   * a `status` event with a `status` field means the condition was
 //     *inflicted*; the same event with no `status` field means it **cleared**.
 //     `text` carries the sentence either way.
+//
+// `turn` carries a second, optional reading, and it is the client contract for
+// the referee's replace phase:
+//
+//   * `turn` **with** `slot` is a *replacement solicitation* -- the seat at that
+//     field slot fainted with a bench left and is being asked for a send-out.
+//     Its own client opens the switch picker, every other client holds on
+//     "X is choosing who to send out...", and no menu opens for anybody else.
+//     One is emitted per owing seat, in ascending field-slot order, and the
+//     turn number does not advance for it (`amount` repeats the turn the faint
+//     happened on).
+//   * `turn` **without** `slot` is the ordinary choice window opening.
+//
+// It is deliberately expressed in a field the whitelist already carried: a
+// client written before the replace phase existed ignores `slot` and reads both
+// as "a turn opened", which is exactly the behaviour it had.
 const SHAPES = {
   msg: { text: true },
   anim: { slot: true, side: true, text: 'move or ball-anim id',
@@ -107,20 +149,26 @@ const SHAPES = {
   drain: { slot: true, side: true, amount: true, hp: true },
   faint: { slot: true, side: true, text: true,
     amount: '1 when the seat still has a living bench (mustReplace)' },
-  send: { slot: true, side: true, hp: true, text: 'the species' },
+  send: { slot: true, side: true, hp: true, text: 'the species',
+    mon: 'party index (0-5) of the mon the referee fielded' },
   status: { slot: true, side: true, status: 'absent means cleared', text: true },
   stat: { slot: true, side: true, amount: true, text: true },
-  switch: { slot: true, side: true, text: 'the species coming in' },
+  switch: { slot: true, side: true, text: 'the species coming in',
+    mon: 'party index (0-5) of the mon coming in' },
   item: { slot: true, side: true, text: 'the item id',
     amount: '1 when a vitamin applied (client save writeback)' },
   run: { slot: true, side: true, text: true },
-  turn: { amount: 'the 1-based turn number' },
+  turn: { amount: 'the 1-based turn number',
+    slot: 'present only on a replacement solicitation: the field slot being asked' },
   over: { text: 'the reason token' },
   wait: { side: true, text: 'who is being waited on' },
   reconnect: { side: true, text: true },
   chose: { slot: true, side: true, text: 'who answered' },
   unchose: { slot: true, side: true, text: 'who answered' },
   moves: { slot: true, side: true, moves: 'sanitised move list' },
+  exp: { slot: 'the winner being paid', species: 'the monster that fell',
+    level: 'its level', participants: 'how many shares split it',
+    mon: 'party index (0-5) of the mon banking this share; absent means the active one' },
 };
 
 // ------------------------------------------------------------------

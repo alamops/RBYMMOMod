@@ -559,18 +559,19 @@ return function(game)
         return exports.coopWaiting() ~= nil
       end, 60, "coop_wild wait after the wild divert")
       check(waiting, "the host diverted into coop_wild wait")
-      -- Shot first: the partner often auto-joins within a frame, so the ALONE
-      -- choose can already be gone by the time we sample the menu. Missing
-      -- ALONE while waiting is cleared is success (they joined), not failure.
+      -- Shot first: the partner often auto-joins within a frame, so the wait
+      -- can already be over by the time we sample anything.
       U.shot(game, SHOT_DIR .. "/host-party-wild-wait.png")
+      -- Round 13: the wait cover is deleted outright -- no box, no rows, on
+      -- either mode. The engine's own wild encounter stays exactly on
+      -- screen; the only exits are the field opening (partner joined) or
+      -- SOLO_FALLBACK_AFTER's one-line fallback (nobody did).
       if exports.coopWaiting() ~= nil then
-        local aloneRow = H.menuRow(game, "ALONE")
-        local waitRow = H.menuRow(game, "WAIT")
-        check(aloneRow ~= nil and waitRow == nil,
-              "the wild wait box offers ALONE only (no WAIT)")
+        check(H.menuRow(game, "ALONE") == nil and H.menuRow(game, "WAIT") == nil,
+              "no cover -- no menu rows at all while the wait stands")
       else
-        check(true, "the wild wait box offers ALONE only (no WAIT)")
-        log("note: partner joined before the ALONE row could be sampled")
+        check(true, "no cover -- no menu rows at all while the wait stands")
+        log("note: partner joined before the wait could be sampled")
       end
       H.signal("host_wild_waiting")
 
@@ -879,9 +880,15 @@ return function(game)
     H.closeToOverworld(game)
 
     -- Sight-trainer walk-in (not stageTrainer): warp onto Route 3's first
-    -- Bug Catcher line, show the "!", then WAIT. Invite-path syntheticFinish
-    -- stays covered by the Lua suite; this leg proves the overworld rematch
-    -- Quarkst hit after a real engageTrainer.
+    -- Bug Catcher line, show the "!", and the co-op wait starts by itself.
+    -- Invite-path syntheticFinish stays covered by the Lua suite; this leg
+    -- proves the overworld rematch Quarkst hit after a real engageTrainer.
+    --
+    -- Round 11: nothing is chosen here any more. Being partied is the consent
+    -- (src/Coop.lua's header), so walking into the trainer posts COOP_WAIT.
+    -- Round 13 went further and deleted the cover that used to sit in front
+    -- of it too -- the wait now runs invisibly behind the engine's own
+    -- encounter, and this leg asserts no menu of any kind ever appears.
     local SIGHT_MAP = "ROUTE_3"
     local sightObj = H.sightTrainerOn(game.data, SIGHT_MAP)
     check(sightObj ~= nil, "Route 3 has a sighted trainer with two POKeMON")
@@ -901,6 +908,34 @@ return function(game)
     -- for gone-from-the-stack rather than merely told-its-result -- see the
     -- comment on the `handed`/onStack pair below for why both matter.
     local staged = nil
+    -- **Caught the moment it exists, not once the dust has settled.**
+    --
+    -- This is the whole of what round 11 changed here, and it is a change to
+    -- how the leg *watches* rather than to what it asserts. The staged battle
+    -- is found by scanning the stack for a trainer BattleState
+    -- (H.captureStagedTrainer), and src/Coop.lua's M:startBattle takes that
+    -- state off the stack and holds it privately in `engineBattle` the instant
+    -- the co-op screen goes up. So the stack only names it during the window
+    -- between the engine pushing it and the partner's join landing -- and with
+    -- the WAIT/ALONE ask deleted, nothing holds that window open any more: a
+    -- fast auto-join closes it within a frame or two of the trainer
+    -- triggering. Capturing after the poll loop below therefore captured
+    -- nothing on exactly the runs where the join won the race (the loop's
+    -- `joinedFirst` exit), `coopFinished` stayed nil for a handoff that had
+    -- already happened, and the onStack check further down passed vacuously
+    -- against a nil.
+    --
+    -- So it is caught from inside every wait between here and the fight, and
+    -- latched: the first scan that sees it wraps its onFinish and the rest are
+    -- free.
+    local function catchStaged()
+      if staged then return staged end
+      staged = H.captureStagedTrainer(game)
+      if staged then
+        H.wrapBattleFinish(staged, function(result) coopFinished = result end)
+      end
+      return staged
+    end
     check(H.walkIntoTrainerSight(game, sightObj, { dist = 2 }),
           "host walked into trainer sight")
     check(H.awaitTrainerBang(game, 20), "host saw the trainer ! bubble")
@@ -909,33 +944,98 @@ return function(game)
       local deadline = os.time() + 3
       while os.time() < deadline do
         local ow = game.overworld
+        catchStaged()
         if ow and ow.emote and ow.emote.npc then break end
         U.wait(2)
       end
     end
+    catchStaged()
     U.shot(game, SHOT_DIR .. "/host-trainer-sight.png")
-    local asked = H.waitFor(game, function()
+    -- Round 13 deleted the cover -- there is no box to land on any more, on
+    -- either mode. A run sees whichever the network gave it: nothing at all
+    -- (the engine's own pre-battle text, or a blank overworld-shaped wait)
+    -- until the four-slot field comes up, silently, the instant the
+    -- partner's auto-join lands.
+    --
+    -- `sawMenu` is the negative half, and it is sampled *inside* the loop
+    -- rather than after it because the thing it is looking for would be
+    -- transient: a menu that appeared and was answered between two polls is
+    -- exactly the regression this leg exists to catch.
+    --
+    -- The A tap stays gated on `top.items == nil`: it advances the trainer's
+    -- pre-battle text and, if the partner is ever slow enough for
+    -- SOLO_FALLBACK_AFTER to fire, dismisses that one-line fallback too --
+    -- both are plain text boxes now, not a menu with a row to stray onto.
+    local sawMenu = false
+    local joinedFirst = false
+    local joined = H.waitFor(game, function()
       H.softenTopTrainer(game)
-      for _, label in ipairs(H.menuLabels(game)) do
-        if label == "WAIT" then return true end
-      end
+      -- Before either exit is read: on the frame the engine's trainer battle
+      -- goes up this is the only place looking, and on the frame the join
+      -- lands it is already too late (see catchStaged above).
+      catchStaged()
       local top = H.top(game)
+      if top ~= nil and top.sim ~= nil and #top.sim.slots >= 3 then
+        joinedFirst = true
+        return true
+      end
+      if top and top.items ~= nil then sawMenu = true end
       if top and top.items == nil then U.tap(game, "a") end
       return false
-    end, 60 * 12, "the co-op prompt in front of the trainer")
-    check(asked, "the co-op prompt appears in front of a real trainer battle")
-    staged = H.captureStagedTrainer(game)
-    if staged then
-      H.wrapBattleFinish(staged, function(result) coopFinished = result end)
-    end
+    end, 60 * 12, "the field to come up -- no cover stands in front of the trainer")
+    check(joined,
+          "walking into a real trainer while partied is silent -- the field "
+          .. "comes up on its own, standing or already joined")
+    check(not sawMenu,
+          "and no menu of any kind is ever shown -- forming the party was "
+          .. "the yes (src/Coop.lua M:onTrainerBattle)")
+    log(("coop wait: joinedFirst=%s sawMenu=%s"):format(
+      tostring(joinedFirst), tostring(sawMenu)))
+    catchStaged()
+    log("staged trainer captured:", tostring(staged ~= nil))
     H.softenTopTrainer(game)
-    U.shot(game, SHOT_DIR .. "/host-coop-prompt.png")
-    check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
-    local waiting = H.waitSeconds(game, function()
-      return exports.coopWaiting() ~= nil
-    end, 60, "this side to be standing at the fight")
-    check(waiting, "and this side is standing at the fight, waiting")
+    U.shot(game, SHOT_DIR .. "/host-coop-wait.png")
+
+    -- Marker first, and then a predicate with two halves.
+    --
+    -- The partner is pulled in automatically (src/Coop.lua's M:autoJoin): they
+    -- are already standing on this map with nothing on screen, so COOP_WAIT
+    -- goes out, COOP_JOIN comes back, and the wait can be *over* within a
+    -- frame or two of the trainer triggering. Polling `coopWaiting() ~= nil`
+    -- for sixty seconds therefore reported "this side never stood at the
+    -- fight" about a wait that had already been answered -- the opposite of
+    -- the truth.
+    --
+    -- So what is asserted is the claim the wait actually makes: this side ends
+    -- up at the fight. Standing at it and already joined are the two ways that
+    -- can be true, and which one a run sees is a matter of milliseconds, so
+    -- neither may fail it. The marker stays above the poll for the same
+    -- reason -- the guest's window opens when COOP_WAIT is sent, not when this
+    -- side finishes looking at itself.
+    --
+    -- 45s is a generous margin, not the clock: round 13's SOLO_FALLBACK_AFTER
+    -- releases a wait nobody takes into the solo fight after six seconds, so
+    -- both outcomes this leg cares about (still waiting, or already joined)
+    -- are long since decided well inside it.
     H.signal("host_coop_waiting")
+    local waitSeen, joinSeen = false, false
+    local atFight = H.waitSeconds(game, function()
+      if exports.coopWaiting() ~= nil then
+        waitSeen = true
+        return true
+      end
+      local top = H.top(game)
+      if top ~= nil and top.sim ~= nil and #top.sim.slots >= 3 then
+        joinSeen = true
+        return true
+      end
+      return false
+    end, 45, "this side to be standing at the fight, or already joined")
+    log(("after the trigger: waitBox=%s alreadyJoined=%s"):format(
+      tostring(waitSeen), tostring(joinSeen)))
+    check(atFight,
+          "and the automatic wait leaves this side at the fight -- standing "
+          .. "at it, or already pulled into it by the partner it waited for")
 
     -- The guest joins, and four monsters come up on both screens.
     H.await(game, "guest_coop_joined")
@@ -994,6 +1094,14 @@ return function(game)
     -- `coopFinished` is ever going to be set, it already is by the time
     -- `over` above went true, so a 60-second budget here only meant a
     -- genuinely broken handoff took a minute to report as broken.
+    --
+    -- The precondition is asserted first and separately, because the two
+    -- checks under it are both written against `staged` and both pass
+    -- vacuously without one: a leg that never caught the engine's battle is
+    -- reporting on its own eyesight, not on the mod, and it should say which.
+    check(staged ~= nil,
+          "this side's own trainer battle was caught before the co-op screen "
+          .. "displaced it (H.captureStagedTrainer, latched per frame)")
     local handed = H.waitFor(game, function()
       return coopFinished ~= nil
     end, 10, "the engine's battle to be finished off")

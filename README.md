@@ -289,22 +289,24 @@ end-to-end suite.
   <img src="docs/screenshots/link-battle.png" width="300" alt="GUESTY wants to battle!">
 </p>
 
-### 🤜 CO-OP — WAIT FOR YOUR FRIEND
-Walk into a trainer while you're in a party and the game asks you first:
-**wait for your friend, or go in alone.** Waiting invites them on the spot if
-they're on the same map, or holds until they arrive if they're elsewhere —
-they do not have to walk into that trainer. Accept and you fight it together;
-decline (or a late yes after you went alone) and the waiter is told,
-encouraged, and sent into a solo fight. From wait mode, **B is ALONE**.
+### 🤜 CO-OP — YOUR PARTY IS THE YES
+Walk into a trainer while you're partied and standing on the same map, and
+the fight becomes a 2-on-2 by itself — no box, no cover, nothing to choose.
+Being in a party together **is** the consent; the moment your partner's
+screen catches up, they're pulled in silently, behind whatever's already on
+screen.
 
-Four rules make it feel solid rather than fiddly:
+Partner somewhere else? You're told once — **"X was too far to join!"** —
+over the fight the engine already started, and you take it alone, same as
+ever. On the same map but your partner never shows (mid-trade, mid-battle,
+offline)? The wait gives up after six seconds with one line — **"X couldn't
+join!"** — and hands you that same solo fight.
 
-- **A decline ends the wait.** Turn down a join and your friend hears it,
-  then goes in alone. You are not pulled into a fight you never walked into.
+Three rules make it feel solid rather than fiddly:
+
 - **You can't dodge the fight.** The engine has already committed to the
-  encounter by the time the mod gets asked, so every way out of every prompt
-  ends in a battle. **B is BATTLE ALONE**, not "never mind" — and B while
-  waiting reopens that same choice rather than releasing you.
+  encounter by the time the mod gets asked, so there is no way out of it —
+  only who ends up fighting it, and how long they wait to find out.
 - **The door shuts.** Nobody joins a battle that's already started, and an
   offer is taken exactly once.
 - **PARTY BATTLE** sits right under BATTLE on the walk-up menu: two parties,

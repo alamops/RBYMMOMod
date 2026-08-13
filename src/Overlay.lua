@@ -54,6 +54,73 @@ local FRIEND_BLUE = Config.FRIEND_BLUE
 local LABEL_WHITE = { 1, 1, 1 }
 local TAIL = "..."
 
+-- ------- the partner's "!"
+--
+-- When one party member walks into a trainer the engine plays its `!` emote
+-- over that NPC's head -- on *their* screen.  The partner, who is about to be
+-- pulled into the same fight without being asked (Coop:autoJoin), used to see
+-- nothing at all: the world simply froze into a battle.  This draws the same
+-- beat on their screen, so the fight is something they watched start rather
+-- than something that happened to them.
+--
+-- **Over the waiting partner's own head, not the trainer's, and in both
+-- modes.**  Mirroring the engine and marking the NPC is the obvious choice and
+-- the wrong one: NPCs are ROM-derived, and two players on one hub are not
+-- promised the same ROM.  The object the waiter walked into may be a different
+-- trainer in the partner's map data, or absent from it, so a mark placed from
+-- a locally resolved id can land on a stranger or on nothing at all -- and the
+-- side that sent the offer can never see that it did.  The avatar is the one
+-- anchor both copies already agree on, because this mod put it there itself
+-- from presence it sent; it costs no ROM lookup and no map data, and it is the
+-- same projection the nameplates use.  A wild fight has no NPC to argue about
+-- and marks the same head, so there is one rule and no mode branch.
+--
+-- Original vector art, drawn from four love.graphics calls -- no ROM bytes and
+-- no glyph from the extracted font, so it costs nothing legally and nothing at
+-- the charmap (the party marker's lesson: a character the font cannot map
+-- draws as a hole that every string assertion passes straight over).
+--
+-- Sizes are in the game's own 160x144 pixels and multiplied up by the
+-- letterbox scale, unlike the nameplate face: the mark belongs to the world
+-- and to a head in it, so it has to grow with the tiles rather than stay a
+-- fixed number of window pixels the way a corner toast does.
+local ALERT_W, ALERT_H = 11, 12       -- bubble body, game pixels
+local ALERT_TAIL = 3                  -- the point under it, aimed at the head
+local ALERT_GAP = 2                   -- air between the point and the sprite
+local ALERT_BOUNCE = 2                -- travel of the bob, game pixels
+local ALERT_PERIOD = 0.85             -- seconds for one rise and fall
+-- Seconds the mark outlives the offer that raised it.  It has to outlive it:
+-- Coop:autoJoin clears `offer` *before* it sends the join (so a second tick
+-- cannot double-join), and the battle only reaches the screen a round trip
+-- later -- so keying the mark strictly on a standing offer would show it for
+-- zero frames in the one case the whole feature is for.
+--
+-- **This grace was never the fix for that, and read as though it were.**  It
+-- decays a mark that already exists; it cannot raise one, and the set-and-
+-- clear happens inside a single inbound handler with no tick in between, so
+-- there was nothing for it to decay.  What raises the mark is Coop's latch
+-- (`offerMarkFor`, read by M:offerMark) and what keeps it readable is
+-- ALERT_MIN below.  This is now what it always actually was: the beat a mark
+-- gets after a *standing* offer ends -- a partner who walked off, or a
+-- five-minute timeout -- where a moment of stale `!` costs nothing.
+local ALERT_HOLD = 1.2
+-- Seconds the mark stands from the tick it went up, whatever happens to the
+-- offer underneath it.  The grace above is measured from the offer ending and
+-- so is worth nothing in the case that matters: an automatic join clears the
+-- offer in the same handler that raised it, and the fight is a couple of relay
+-- round trips behind -- measured at 0.05-0.5s of overworld, an order of
+-- magnitude under anything a person can read.  A floor is the only thing that
+-- turns that into a signal, and it is deliberately longer than one bob
+-- (ALERT_PERIOD) so the thing the player sees is a bubble bouncing over a head
+-- rather than a flicker they are not sure happened.
+--
+-- It is a floor and not a guarantee: the battle screen still ends it early
+-- (M:update), because a mark anchored to a world nobody can see is not a
+-- signal either.  What is owed past that point is a corner line, not a bubble.
+local ALERT_MIN = 2.5
+local ALERT_FILL = { 1, 1, 1 }
+local ALERT_INK = { 0.11, 0.11, 0.16 }
+
 function M.new(ctx)
   return setmetatable({ ctx = ctx }, M)
 end
@@ -429,6 +496,278 @@ function M:drawSelfLabel(font, game, playerPx, playerPy, scale, gameX, gameY)
   self:drawLabel(font, name, centreX, spriteTop, scale, gameX, gameY, SELF_YELLOW)
 end
 
+-- ------- the partner's "!"
+--
+-- What the standing offer asks this client to mark, or nil.
+--
+-- Read through Coop's own accessor rather than off its field, so the overlay
+-- asks the same question the ACTIONS menu and the trainer trigger ask.  The
+-- offer is read-only here: this module owns no part of the co-op handshake and
+-- must never be the reason one resolves differently.
+--
+-- **It marks the waiting partner, never the trainer, and that is the whole
+-- rule -- in both modes.**
+--
+-- The obvious placement is the NPC's head, because that is where the engine
+-- plays its own emote.  It is the wrong one here: an NPC is ROM-derived, and
+-- two players in one hub are not promised the same ROM.  The trainer the
+-- waiter walked into may be a different object on the partner's map data, or
+-- may not exist on it at all, so an id looked up locally can land the mark on
+-- a stranger or on nothing -- and neither failure is visible from the side
+-- that sent the offer.  The partner's own avatar is the one anchor both
+-- clients already agree on: it is placed from presence this mod sent itself,
+-- and it is the same projection the nameplates use.
+--
+-- A wild fight has no NPC to argue about and marks the same head for the same
+-- reason, so there is one rule and no mode branch.
+--
+-- Read through Coop's own accessor rather than off its field, so the overlay
+-- asks the same question the ACTIONS menu and the trainer trigger ask.  The
+-- offer is read-only here: this module owns no part of the co-op handshake and
+-- must never be the reason one resolves differently.
+function M:offerMark()
+  local coop = self.ctx and self.ctx.coop
+  if not coop then return nil end
+  local offer
+  if type(coop.pendingOffer) == "function" then
+    local ok, pending = pcall(coop.pendingOffer, coop)
+    if ok and type(pending) == "table" then offer = pending end
+  end
+  -- ...and the latch, which is what actually raises this mark in the case it
+  -- exists for.  A standing offer is the *rare* state: the common one is an
+  -- offer that arrived, was accepted and was cleared inside a single inbound
+  -- handler, before any tick of this loop could observe it (see Coop's
+  -- `offerMarkFor`).  Reading the accessor alone meant polling a field that is
+  -- never non-nil when it is looked at, which is a mark that never appears.
+  --
+  -- The accessor still comes first, so a live offer -- a busy or off-map
+  -- partner, the one case where the two can disagree -- is answered by the
+  -- same question the ACTIONS menu and the trainer trigger ask. The latch is
+  -- read as a plain field because it is not part of the handshake at all: it
+  -- is Coop's record of an arrival, kept for this renderer.
+  if not offer and type(coop.offerMarkFor) == "table" then
+    offer = coop.offerMarkFor
+  end
+  -- The offer's sender: the player who is standing at the fight waiting.
+  local from = offer and (offer.from or offer.id)
+  if not from then return nil end
+  return {
+    id = from,
+    map = offer.map,
+    battle = offer.battle,
+    clock = 0,
+    hold = ALERT_HOLD,
+  }
+end
+
+-- The waiter's cell, remembered rather than looked up when it is wanted.
+--
+-- **It has to be remembered, because the avatar is about to disappear.**  The
+-- instant the fight covers the waiter's overworld their client publishes a
+-- presence with no map -- pushPresence reads World.current, which is nil under
+-- a battle -- and that lands within one PRESENCE_INTERVAL (0.125s).  The
+-- roster then drops them off this map and Avatars:sync despawns them.  All of
+-- that is right for a nameplate, which should not float over an empty tile for
+-- somebody who is not in the world any more, and exactly wrong for this mark,
+-- whose entire subject is the fight they just walked into.  Looked up live,
+-- the bubble would appear for about two frames and vanish -- and it would do
+-- it consistently enough to look like a rendering bug rather than a race.
+--
+-- They are standing still at the fight, so the last cell anybody saw them in
+-- is not a stale guess: it is where they are.
+function M:trackAnchor(alert)
+  if not alert then return end
+  local ctx = self.ctx
+  local avatars = ctx and ctx.avatars
+  if avatars and type(avatars.cellOf) == "function" then
+    -- Two returns; see drawAlertLayer for what an `and` would do to them.
+    local ax, ay = avatars:cellOf(alert.id)
+    if ax and ay then
+      alert.wx, alert.wy = ax * CELL, ay * CELL
+      return
+    end
+  end
+  if alert.wx then return end
+  -- Nothing spawned yet.  The roster's cell is a frame or two older and is the
+  -- same number; it covers an offer that lands in the gap between a partner
+  -- arriving on this map and their avatar being built.
+  local roster = ctx and ctx.roster
+  local player = roster and type(roster.get) == "function" and roster:get(alert.id)
+  if player and tonumber(player.x) and tonumber(player.y) then
+    alert.wx, alert.wy = player.x * CELL, player.y * CELL
+  end
+end
+
+-- The mark's life, on the fixed step rather than on drawn frames.
+--
+-- Drawn frames are the wrong clock for two reasons: the bob would run at
+-- whatever frame rate the machine managed, and -- worse -- draw() bails at the
+-- free-roam gate, so a partner sitting in a menu while the offer stands would
+-- never age the mark at all and would meet a full-length one on closing it.
+function M:update(dt)
+  dt = tonumber(dt) or 0
+  local coop = self.ctx and self.ctx.coop
+  -- The fight is *on* the screen.  Not "the join landed": `running` is set at
+  -- the handoff, two relay round trips before the battle state is pushed, and
+  -- the overworld -- the only thing this mark can be drawn over -- is still
+  -- what the player is looking at for the whole of that gap.  Killing the mark
+  -- on `running` threw away its entire life, which is why it was never seen.
+  --
+  -- The state is the honest end: from here the world is covered, the mark has
+  -- nothing left to annotate, and what the joiner is owed instead is a line in
+  -- the corner that outlives the push (Coop:toastLine).
+  if coop and coop.state ~= nil then
+    self.alert = nil
+    return
+  end
+
+  local fresh = self:offerMark()
+  local alert = self.alert
+  if fresh then
+    -- A different fight replaces the mark outright; the same one keeps its
+    -- clock, so the bob is continuous across the frame the offer clears in.
+    if not (alert and alert.id == fresh.id and alert.battle == fresh.battle) then
+      self.alert = fresh
+      alert = fresh
+    end
+    alert.hold = ALERT_HOLD
+  elseif alert then
+    alert.hold = alert.hold - dt
+    -- Two clocks, and the mark lives until both have run out: ALERT_HOLD from
+    -- the last tick the offer stood, ALERT_MIN from the tick it was raised.
+    -- The grace alone is reactive and gives a long-standing offer the beat it
+    -- needs to fade; the floor is what makes a mark that was raised and taken
+    -- in the same second legible at all, which is every automatic join.  A
+    -- mark whose fight reaches the screen inside the floor is still cut off
+    -- there by the state check above -- correctly, since the world it points
+    -- at is gone -- and the corner line carries the rest.
+    if alert.hold <= 0 and alert.clock >= ALERT_MIN then
+      self.alert = nil
+      return
+    end
+  else
+    return
+  end
+  alert.clock = alert.clock + dt
+  -- Every tick, including the ones where the world is not being drawn: this is
+  -- the clock that is still running while the partner sits in a menu, and the
+  -- avatar it is watching does not wait for them to close it.
+  self:trackAnchor(alert)
+end
+
+-- How far above its resting place the bubble sits, in game pixels.
+--
+-- A pure function of the mark's own clock: no per-frame state, so the same
+-- second of the same offer draws at the same height whatever the frame rate,
+-- and the suite can pin the curve without a graphics context.  One smooth arch
+-- per period rather than a sawtooth -- the engine's emote pops, and a mark that
+-- is going to sit on screen for seconds at a time should not.
+function M.alertLift(clock)
+  clock = tonumber(clock) or 0
+  local phase = (clock % ALERT_PERIOD) / ALERT_PERIOD
+  return ALERT_BOUNCE * math.sin(phase * math.pi)
+end
+
+-- The bubble itself: an ink silhouette with a white body inset inside it, so
+-- the border is one shape rather than a stroke that has to be kept in step
+-- with a fill.  `clearance` is window pixels of extra air -- the head this is
+-- drawn over always carries a nameplate, and the mark has to clear it.
+--
+-- Returns false when the mark would be clipped by the playfield edge, which is
+-- drawLabel's rule and for the same reason: half a bubble at the letterbox
+-- reads as a rendering fault, and a mark nobody can read is worse than none.
+function M:drawAlert(centreX, spriteTopY, lift, scale, gameX, gameY, clearance)
+  scale = tonumber(scale) or 1
+  gameX, gameY = tonumber(gameX) or 0, tonumber(gameY) or 0
+  clearance = tonumber(clearance) or 0
+
+  local w, h = ALERT_W * scale, ALERT_H * scale
+  local tail = ALERT_TAIL * scale
+  local cx = gameX + centreX * scale
+  local bottom = gameY + (spriteTopY - ALERT_GAP) * scale
+    - (tonumber(lift) or 0) * scale - clearance
+  local x = math.floor(cx - w / 2)
+  local y = math.floor(bottom - tail - h)
+  if not onScreenWindow(x, y, w, h + tail, gameX, gameY, scale) then
+    return false
+  end
+  cx = x + w / 2
+
+  local line = math.max(1, math.floor(scale * 0.5 + 0.5))
+  local radius = math.max(2, 3 * scale)
+
+  -- A soft shadow under the whole shape: white on a snow tile or a Pokemon
+  -- Center floor is otherwise a bubble with no edge on one side.
+  love.graphics.setColor(0, 0, 0, 0.3)
+  love.graphics.rectangle("fill", x + line, y + line, w, h, radius, radius)
+
+  -- ink: body and point
+  love.graphics.setColor(ALERT_INK[1], ALERT_INK[2], ALERT_INK[3], 1)
+  love.graphics.rectangle("fill", x, y, w, h, radius, radius)
+  love.graphics.polygon("fill", cx - tail, y + h - line, cx + tail, y + h - line,
+                        cx, y + h + tail)
+
+  -- white: the same two shapes, one border in from the edge
+  love.graphics.setColor(ALERT_FILL[1], ALERT_FILL[2], ALERT_FILL[3], 1)
+  love.graphics.rectangle("fill", x + line, y + line, w - line * 2, h - line * 2,
+                          math.max(1, radius - line), math.max(1, radius - line))
+  love.graphics.polygon("fill", cx - (tail - line), y + h - line * 2,
+                        cx + (tail - line), y + h - line * 2,
+                        cx, y + h + tail - line * 2)
+
+  -- the glyph, as two strokes rather than a character: a bar and its dot.
+  local barW = math.max(1, math.floor(2 * scale + 0.5))
+  local barH = math.floor(h * 0.4)
+  local gap = math.max(1, math.floor(scale * 0.7 + 0.5))
+  local bx = math.floor(cx - barW / 2)
+  local by = math.floor(y + h * 0.2)
+  local nib = math.max(1, barW * 0.4)
+  love.graphics.setColor(ALERT_INK[1], ALERT_INK[2], ALERT_INK[3], 1)
+  love.graphics.rectangle("fill", bx, by, barW, barH, nib, nib)
+  love.graphics.rectangle("fill", bx, by + barH + gap, barW, barW, nib, nib)
+  return true
+end
+
+-- Put the live mark on screen, and say what became of it.
+--
+-- The answer is recorded on `last.alert` so an end-to-end driver can tell the
+-- outcomes apart -- nothing standing (nil), the partner is a map away
+-- (`off-map`), nobody ever saw them (`no-anchor`), the head is past the
+-- letterbox (`off-screen`), another mod owns the projection (`not-flat`), and
+-- drawn (`waiter`) -- none of which a screenshot distinguishes from "the
+-- bubble is broken".
+function M:drawAlertLayer(font, mapId, playerPx, playerPy, scale, gameX, gameY)
+  local alert = self.alert
+  if not alert then return nil end
+  -- The partner is not on this screen, so there is no head to mark.  Asked of
+  -- the offer rather than left to the avatar lookup because the two are
+  -- different answers worth telling apart: "they are a map away" is the game
+  -- working, "they are here and their avatar is not" is not.
+  if alert.map and mapId and alert.map ~= mapId then return "off-map" end
+
+  -- The waiter's avatar cell -- the same source drawLabel uses for their
+  -- nameplate, so the mark and the name can never disagree about where they
+  -- are standing, and the whole placement stays inside data this mod sent.
+  --
+  -- Refreshed here as well as on the step so a caller that only ever draws
+  -- still gets a placed mark; trackAnchor is the one that makes it survive the
+  -- avatar being despawned out from under it.
+  self:trackAnchor(alert)
+  -- Nobody has ever seen them: an offer for a map this client has no presence
+  -- for yet.
+  if not alert.wx then return "no-anchor" end
+
+  -- They are wearing a nameplate, and the mark has to clear it.
+  local clearance = font and (font:getHeight() + LABEL_GAP * scale) or 0
+
+  local centreX, spriteTop = M.screenOf(alert.wx, alert.wy, playerPx, playerPy)
+  if not self:drawAlert(centreX, spriteTop, M.alertLift(alert.clock),
+                        scale, gameX, gameY, clearance) then
+    return "off-screen"
+  end
+  return "waiter"
+end
+
 -- ------- drawing in the game's own 160x144 space
 --
 -- Reset the graphics state before drawing, and put it back after.
@@ -759,6 +1098,10 @@ function M:draw(game, viewport)
       end
     end
     last.reached = "roster"
+    -- The mark is placed by the flat camera's grid, the same as a nameplate,
+    -- so a world drawn by somebody else's projection gets the corner list and
+    -- no bubble rather than a bubble over the wrong tile.
+    if self.alert then last.alert = "not-flat" end
     self:drawRoster(labelFont, here, scale, gameX, gameY, game)
     endHud(hudRestore)
     return
@@ -766,6 +1109,12 @@ function M:draw(game, viewport)
 
   if #here == 0 and not self:selfName(game) then
     last.reached = "nobody-here"
+    -- Still marked, and this is the branch that needs it most: the waiter's
+    -- presence goes blank the moment their fight covers their world, so the
+    -- roster reports nobody on this map at exactly the moment the mark is
+    -- standing over the cell they were last seen in (see trackAnchor).
+    last.alert = self:drawAlertLayer(labelFont, current.mapId, playerPx,
+                                     playerPy, scale, gameX, gameY)
     endHud(hudRestore)
     return
   end
@@ -782,6 +1131,12 @@ function M:draw(game, viewport)
     end
   end
   self:drawSelfLabel(labelFont, game, playerPx, playerPy, scale, gameX, gameY)
+
+  -- After the plates, so a bubble that lands on the waiter's own nameplate is
+  -- over it rather than under it.  It is already lifted clear of one (see
+  -- drawAlertLayer); this is the tie-break for the crowded case.
+  last.alert = self:drawAlertLayer(labelFont, current.mapId, playerPx, playerPy,
+                                   scale, gameX, gameY)
 
   endHud(hudRestore)
 end
@@ -804,5 +1159,11 @@ M.FRIEND_BLUE = FRIEND_BLUE
 -- would otherwise only be assertable as "not one of the colours we know".
 M.LABEL_WHITE = LABEL_WHITE
 M.LOCAL_RADIUS = Config.LOCAL_RADIUS
+-- The partner's "!": exported so the suite pins the bob and the grace against
+-- the numbers the renderer actually uses rather than against its own copies.
+M.ALERT_HOLD, M.ALERT_PERIOD, M.ALERT_BOUNCE = ALERT_HOLD, ALERT_PERIOD, ALERT_BOUNCE
+M.ALERT_MIN = ALERT_MIN
+M.ALERT_W, M.ALERT_H, M.ALERT_TAIL, M.ALERT_GAP = ALERT_W, ALERT_H, ALERT_TAIL, ALERT_GAP
+M.ALERT_INK, M.ALERT_FILL = ALERT_INK, ALERT_FILL
 
 return M

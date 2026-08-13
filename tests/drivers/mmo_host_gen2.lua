@@ -328,14 +328,16 @@ return function(game)
     end, 60, "coop_wild wait after the wild divert")
     check(waiting, "the host diverted into coop_wild wait")
     U.shot(game, SHOT_DIR .. "/host-party-wild-wait.png")
+    -- Round 13: the wait cover is deleted outright -- no box, no rows, on
+    -- either mode. The engine's own wild encounter stays exactly on screen;
+    -- the only exits are the field opening (partner joined) or
+    -- SOLO_FALLBACK_AFTER's one-line fallback (nobody did).
     if exports.coopWaiting() ~= nil then
-      local aloneRow = H.menuRow(game, "ALONE")
-      local waitRow = H.menuRow(game, "WAIT")
-      check(aloneRow ~= nil and waitRow == nil,
-            "the wild wait box offers ALONE only (no WAIT)")
+      check(H.menuRow(game, "ALONE") == nil and H.menuRow(game, "WAIT") == nil,
+            "no cover -- no menu rows at all while the wait stands")
     else
-      check(true, "the wild wait box offers ALONE only (no WAIT)")
-      log("note: partner joined before the ALONE row could be sampled")
+      check(true, "no cover -- no menu rows at all while the wait stands")
+      log("note: partner joined before the wait could be sampled")
     end
     H.signal("host_wild_waiting")
 
@@ -408,23 +410,79 @@ return function(game)
       stagedTrainer = H.stageTrainer(game, coopClass, function(result)
         coopFinished = result
       end)
-      local asked = H.waitFor(game, function()
-        for _, label in ipairs(H.menuLabels(game)) do
-          if label == "WAIT" then return true end
-        end
+      -- Round 11: no ask. Staging the trainer while partied posts COOP_WAIT.
+      -- Round 13 deleted the cover that used to sit in front of it too -- the
+      -- wait now runs invisibly behind the engine's own encounter, so this
+      -- waits for the field itself and fails on any menu at all. Ported from
+      -- mmo_host.lua's sight-walk-in leg; see the comments there for why
+      -- sawMenu is sampled inside the loop and why the A tap stays gated on
+      -- `items == nil`.
+      local sawMenu = false
+      local joinedFirst = false
+      local joined = H.waitFor(game, function()
         local promptTop = H.top(game)
+        if promptTop ~= nil and promptTop.sim ~= nil
+            and #promptTop.sim.slots >= 3 then
+          joinedFirst = true
+          return true
+        end
+        if promptTop and promptTop.items ~= nil then sawMenu = true end
         if promptTop and promptTop.items == nil then U.tap(game, "a") end
         return false
-      end, 60 * 6, "the co-op prompt in front of the trainer")
-      check(asked, "the co-op prompt appears in front of a real trainer battle")
-      U.shot(game, SHOT_DIR .. "/host-coop-prompt.png")
-      check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
-      local coopWaiting = H.waitSeconds(game, function()
-        return exports.coopWaiting() ~= nil
-      end, 60, "this side to be standing at the fight")
-      check(coopWaiting, "and this side is standing at the fight, waiting")
+      end, 60 * 6, "the field to come up -- no cover stands in front of the trainer")
+      check(joined,
+            "a real trainer battle while partied is silent -- the field "
+            .. "comes up on its own, standing or already joined")
+      check(not sawMenu,
+            "and no menu of any kind is ever shown -- forming the party was "
+            .. "the yes (src/Coop.lua M:onTrainerBattle)")
+      log(("coop wait: joinedFirst=%s sawMenu=%s"):format(
+        tostring(joinedFirst), tostring(sawMenu)))
+      U.shot(game, SHOT_DIR .. "/host-coop-wait.png")
+
+      -- Marker first, and then a predicate with two halves -- the round 9
+      -- change on this side, ported from mmo_host.lua.
+      --
+      -- The partner is pulled in automatically (src/Coop.lua's M:autoJoin):
+      -- they are already standing on this map with nothing on screen, so
+      -- COOP_WAIT goes out, COOP_JOIN comes back, and the wait can be *over*
+      -- within a frame or two of the trainer triggering. Polling
+      -- `coopWaiting() ~= nil` alone can therefore report "this side never
+      -- stood at the fight" about a wait that had already been answered.
+      --
+      -- So what is asserted is the claim the wait actually makes: this side
+      -- ends up at the fight. Standing at it and already joined are the two
+      -- ways that can be true, and which one a run sees is a matter of
+      -- milliseconds, so neither may fail it. The marker stays above the poll
+      -- for the same reason -- the guest's window opens when COOP_WAIT is
+      -- sent, not when this side finishes looking at itself.
+      --
+      -- 45s is a generous margin, not the clock: round 13's
+      -- SOLO_FALLBACK_AFTER releases a wait nobody takes into the solo fight
+      -- after six seconds, so both outcomes this leg cares about (still
+      -- waiting, or already joined) are long since decided well inside it.
+      H.signal("host_coop_waiting")
+      local waitSeen, joinSeen = false, false
+      local atFight = H.waitSeconds(game, function()
+        if exports.coopWaiting() ~= nil then
+          waitSeen = true
+          return true
+        end
+        local top = H.top(game)
+        if top ~= nil and top.sim ~= nil and #top.sim.slots >= 3 then
+          joinSeen = true
+          return true
+        end
+        return false
+      end, 45, "this side to be standing at the fight, or already joined")
+      log(("after the trigger: waitBox=%s alreadyJoined=%s"):format(
+        tostring(waitSeen), tostring(joinSeen)))
+      check(atFight,
+            "and the automatic wait leaves this side at the fight -- standing "
+            .. "at it, or already pulled into it by the partner it waited for")
+    else
+      H.signal("host_coop_waiting")
     end
-    H.signal("host_coop_waiting")
 
     H.await(game, "guest_coop_joined")
     local onCoopField = H.waitSeconds(game, function()

@@ -86,6 +86,35 @@ local coop = Coop.new(transport, ui, party, ctx.roster, ctx.chat)
 sessions.fighting = function()
   return coop.running == true or coop.state ~= nil
 end
+-- The other direction, and the same reason. A co-op join pushes a battle over
+-- whatever is on screen with nobody asked first, so it has to know about a
+-- trade the way Sessions knows about a fight -- a battle dropped on top of a
+-- live trade is a third player watching a screen that stopped answering.
+-- Wired here because "busy" is a fact about the session, which Coop holds no
+-- dependency on; the join is deferred rather than lost (Coop:retryOffer).
+coop.busy = function()
+  return sessions:isBusy()
+end
+-- Where this player is standing, for that same retry. Coop is handed the map
+-- at every other call site (onOffer, map.entered) and cannot ask the world
+-- itself -- see Coop:challenge's header -- but the fixed step has nobody to
+-- hand it one, so it gets a way to ask.
+coop.here = function()
+  local current = World.current()
+  return current and current.mapId
+end
+-- The corner, for the one co-op line that has no time to be found anywhere
+-- else. Wired the same way and for the same reason as the two above: Coop owns
+-- no renderer, and the toast queue is built here. The join is the only line
+-- that takes this door -- it is said in the last fraction of a second before a
+-- battle nobody asked for covers this player's overworld, which is also the
+-- last fraction of a second the partner's "!" mark is drawable (see
+-- Overlay.ALERT_MIN). A toast is drawn after the overlay inside the same
+-- render.hud wrap and behind no free-roam gate, so it is the half of that
+-- signal that survives the push.
+coop.toast = function(text)
+  toast:push(text)
+end
 
 ctx.client = M
 ctx.ui = ui
@@ -1944,8 +1973,18 @@ local function tick(game, dt)
   -- five seconds Config says and not for however many frames the machine
   -- managed in them.
   toast:update(dt)
+  -- And the partner's "!", for the same reason: the mark over a friend's
+  -- trainer bobs on the fixed step, and -- more to the point -- it has to keep
+  -- ageing while the world is *not* being drawn, because the overlay's draw
+  -- bails at the free-roam gate and a partner sitting in a menu would
+  -- otherwise meet a full-length mark on closing it.
+  overlay:update(dt)
   sessions:update(game, dt)
-  coop:update(dt)
+  -- Handed the stack as well as the clock: a partner's offer that landed while
+  -- this player was busy is re-attempted from in there, and the only way to
+  -- know they are free again is to look. Two field reads on a tick with no
+  -- offer standing -- see Coop:retryOffer.
+  coop:update(dt, game)
   -- A friend ask that arrived mid-battle, put on screen now that the battle is
   -- over. Two field reads on every other tick: the queue is empty on all but a
   -- handful of them, and _drain answers on the first one.
@@ -2036,7 +2075,8 @@ function M.install()
     return next(game, dt)
   end)
 
-  -- Co-op against an NPC: the wait/alone choice, in front of any trainer.
+  -- Co-op against an NPC: hand the trainer to Coop before the player presses
+  -- anything.
   --
   -- **Watched rather than intercepted, and that is what makes it reach every
   -- trainer.** An earlier version wrapped `script.command` and yielded the
@@ -2046,16 +2086,18 @@ function M.install()
   -- event and cannot be cancelled; there is no seam there to hold at.
   --
   -- Both paths end in the same place: `game.stack:push(battle)`. So this
-  -- listens for the push instead of trying to prevent it, and puts the prompt
-  -- **on top of** the battle that just arrived. A StateStack only updates its
-  -- top, so the battle underneath is frozen and completely untouched -- which
-  -- is why BATTLE ALONE costs nothing but closing a menu, and why a player who
-  -- is not in a party never notices any of this happened.
+  -- listens for the push instead of trying to prevent it. There is no cover
+  -- pushed over what just arrived any more (round 13 deleted it): a partied
+  -- player's wait runs invisibly behind the engine's own encounter, which is
+  -- why a player who is not in a party -- or whose partner is on some other
+  -- map -- never notices any of this happened, or is told once and left to
+  -- fight what is already on screen.
   --
   -- src/Coop.lua's onTrainerBattle / onWildEncounter is where the answers
   -- diverge, and their headers explain what the co-op path does with the
-  -- battle it took. Wild divert has no WAIT/ALONE prompt -- only same-map
-  -- auto-join into coop_wild, else the engine wild is left alone.
+  -- battle it took. Both refuse an off-map partner outright now; wild's
+  -- divert is otherwise the same same-map auto-join into coop_wild, else the
+  -- engine wild is left alone.
   -- Gen 2's ui/gen2/BattleState has no `.kind` (Gen 1 BattleState does).  The
   -- fight shape lives on `state.battle` instead: `.wild` / `.trainer`.  Stamp
   -- Gen1-shaped aliases so Coop's onTrainerBattle / onWildEncounter and
@@ -2369,6 +2411,14 @@ function M.install()
     return {
       from = offer.from, name = offer.name,
       battle = offer.battle, label = offer.label,
+      -- Where the fight is, and what kind it is. `map` is the gate the
+      -- overlay's "!" is placed behind (src/Overlay.lua's offerMark): without
+      -- it a driver watching the bubble can see it appear but not that it
+      -- appeared for the right reason. `npcId` renders nothing -- the mark
+      -- anchors to the waiter's avatar, never to a ROM-derived object -- and is
+      -- carried only so a failed synthetic finish can be diagnosed against the
+      -- id the plan actually named.
+      map = offer.map, mode = offer.mode, npcId = offer.npcId,
     }
   end
   mod.exports.coopPlan = function() return coop.lastPlan end

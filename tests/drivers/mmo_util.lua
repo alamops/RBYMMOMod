@@ -1437,10 +1437,14 @@ function M.coopInstance(game)
 end
 
 -- Drop the invite-path confirm without telling the waiter the partner said no.
-function M.dismissInviteForWalkIn(game)
-  local coop = M.coopInstance(game)
-  if not (coop and coop.joinAsk and coop.closeJoinBox) then return false end
-  return coop:closeJoinBox() and true or false
+--
+-- Round 9 deleted the confirm this used to dismiss -- `coop.joinAsk` and
+-- `coop:closeJoinBox` are both gone from src/Coop.lua (offers are taken
+-- automatically now, with no box left for a walk-in to race). Left as an
+-- explicit no-op rather than removed outright: callers already treat `false`
+-- as "nothing to dismiss," which is now unconditionally the truth.
+function M.dismissInviteForWalkIn(game) -- luacheck: ignore game
+  return false
 end
 
 -- Warp onto (or beside) the trainer's facing line. `behind` steps further
@@ -1713,14 +1717,30 @@ function M.partySpeciesCount(game, species)
   return n
 end
 
--- Classic command grid: FIGHT SWITCH / ITEM RUN. From FIGHT, DOWN then A opens
--- the bag; another A commits the highlighted row. Balls need no party pick.
+-- Command grid: FIGHT SWITCH / ITEM RUN. The battlefield band lays the four
+-- commands in ONE row (Battlefield.bandGridCols == 4), so ITEM is two RIGHTs
+-- from FIGHT there; the classic 2x2 keeps ITEM one DOWN. Ask the screen for
+-- its live column count rather than assuming a shape -- the D-wave made draw
+-- and navigation share it, and this helper walking the wrong grid is exactly
+-- how the round-2 band silently broke the catch flow.
+-- Another A commits the highlighted row. Balls need no party pick.
 -- Prefer an empty-ish bag so the first row is the item under test.
 function M.throwBattleItem(game, itemId)
   local top = M.top(game)
   if not (top and top.sim and top.phase == "choose") then return false end
   local U = M.U
-  U.tap(game, "down"); U.wait(6)
+  local cols = 2
+  if top.commandCols then
+    local ok, c = pcall(top.commandCols, top)
+    if ok and tonumber(c) then cols = tonumber(c) end
+  end
+  if cols >= 4 then
+    -- One row of four: FIGHT -> SWITCH -> ITEM.
+    U.tap(game, "right"); U.wait(6)
+    U.tap(game, "right"); U.wait(6)
+  else
+    U.tap(game, "down"); U.wait(6)
+  end
   U.tap(game, "a");    U.wait(10)
   if top.phase ~= "item" then
     top = M.top(game)

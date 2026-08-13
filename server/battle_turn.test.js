@@ -551,6 +551,216 @@ scenario('vitamin', (events) => {
   return battle;
 });
 
+// 16. round 5: wild-mode KO. The faint on the synthetic side b is the one
+//     `_awardExp` pays for -- one `exp` event for the sole owner-slot winner
+//     (slot 0), split one way (participants = 1). Looped like `ko` rather
+//     than aimed at an exact turn count, so the fixture survives a damage
+//     formula tweak without a hand-tuned HP number going stale.
+scenario('wild_ko', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'wk', mode: 'wild', seed: 5001, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80, moves: [thump()] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 60, spd: 10, moves: [thump()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 10; i += 1) {
+    if (battle.outcome()) break;
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// 17. round 5: coop_wild 2v1 KO. Both owner slots are standing when the
+//     wild mon falls, so `_awardExp` walks bySide.a twice -- slot 0 (a1)
+//     then slot 1 (a2), field-slot order -- and each event names
+//     participants = 2, the share count the split is over.
+scenario('coop_wild_ko', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'cwk', mode: 'coop_wild', seed: 5002, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80, moves: [thump()] })] },
+        { playerId: 'a2', name: 'Abe', mons: [
+          mn({ species: 'Gamma', maxHp: 200, atk: 90, spd: 70, moves: [thump()] })] },
+      ],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 200, spd: 10, moves: [thump()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 10; i += 1) {
+    if (battle.outcome()) break;
+    battle.submitChoice('a1', { action: 'fight', move: 0 });
+    battle.submitChoice('a2', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// 18. round 6: participation KO. Mon A fights, switches out alive, and its
+//     replacement (mon B) lands the KO. Vanilla still owes mon A a share --
+//     it was in against this foe (`_refield` / `_awardExp`) -- so the
+//     referee pays both, on the one seat that owns them, each event naming
+//     which party index (`mon`, 0-based) is banking it: 0 for Alpha, 1 for
+//     Gamma, both against a divisor of 2.
+scenario('participation_ko', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const tap = () => mv('tap', 5, 255, 0);
+  const battle = build({
+    id: 'pko', mode: 'wild', seed: 101, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80, moves: [thump()] }),
+        mn({ species: 'Gamma', maxHp: 200, atk: 90, spd: 80, moves: [thump()] }),
+      ] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 90, spd: 10, moves: [tap()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'switch', slot: 1 });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  for (let i = 0; i < 10; i += 1) {
+    if (battle.outcome()) break;
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// 19. an Explosion-style double-KO in coop_wild: a1's move fells the wild
+//     mon AND a1 itself in the same action. `_faint`/`_unfield` take the
+//     self-KO'er out of every participation set before `_drainExp` counts
+//     anyone, so a1 is neither paid nor counted, and the wild mon's one exp
+//     event names only a2, participants = 1.
+scenario('explode_double_ko', (events) => {
+  // This file's own `mv` always writes effect=0 (its pp default lives in
+  // that slot instead) -- every other scenario here is fine with that, but
+  // EXPLODE is effect 7 (lib/battle/effects.js's EXPLODE_EFFECT), so `boom`
+  // is built by hand rather than through the shared helper.
+  const boom = () => ({ id: 'boom', pp: 60, power: 250, accuracy: 255, type: 0,
+    effect: 7, chance: 0 });
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'xa', mode: 'coop_wild', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 200, atk: 200, spd: 90, moves: [boom()] })] },
+        { playerId: 'a2', name: 'Abe', mons: [
+          mn({ species: 'Gamma', maxHp: 200, atk: 40, spd: 80, moves: [thump()] })] },
+      ],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 60, spd: 10, moves: [thump()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('a1', { action: 'fight', move: 0 });
+  battle.submitChoice('a2', { action: 'fight', move: 0 });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// 20. the replacement mark: a1 KOs b1, then on the very next turn a switches
+//     to a2 (still alive, a1 was never fainted) the same turn b fields b2.
+//     Vanilla still marks a1 -- it was standing when b1 fell -- and the
+//     send-out's own mark lands on a2 too, so when a2 finishes off b2 both
+//     a1 and a2 are paid, on the one seat, divisor 2.
+scenario('replacement_mark', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const tap = () => mv('tap', 5, 255, 0);
+  const battle = build({
+    id: 'xd', mode: 'coop_npc', seed: 101, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 200, spd: 80, moves: [thump()] }),
+        mn({ species: 'Gamma', maxHp: 300, atk: 200, spd: 80, moves: [thump()] }),
+      ] }],
+      b: [{ playerId: 'npc', name: 'Rival', mons: [
+        mn({ species: 'Beta', maxHp: 40, spd: 10, moves: [tap()] }),
+        mn({ species: 'Delta', maxHp: 40, spd: 10, moves: [tap()] }),
+      ] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('npc', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  // npc's fallen b1 owes a replacement first -- close the replace phase
+  // (b fields b2) -- THEN p1 files its voluntary switch to a2 on the
+  // turn-2 window that the closed replace phase opens.
+  battle.submitChoice('npc', { action: 'switch', slot: 1 });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'switch', slot: 1 });
+  drainInto(battle, events);
+  for (let i = 0; i < 6; i += 1) {
+    if (battle.outcome()) break;
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('npc', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// 21. dead-target retargeting (U-wave): a faster ally KOs the seat a slower
+//     ally aimed at, in the same turn. `_retarget` (Turn.js's twin of
+//     Turn.lua:646-690) is the only reason the slower ally's action does not
+//     fizzle -- it redraws no RNG of its own, but its target resolution runs
+//     on every runtime and nothing here reached it before: U1 found no
+//     existing scenario landed an action on a seat that died mid-turn, which
+//     is why the bug (a fizzle, "has no target", where a real attack
+//     belonged) lived undetected. The retargeted hit still draws the same
+//     accuracy/damage/crit bytes a same-turn attack always would, so this
+//     also exercises those draws from a target the choice never named.
+scenario('retarget_ko', (events) => {
+  const battle = build({
+    id: 'rk', mode: 'coop_pvp', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'fast', name: 'Fast', mons: [
+          mn({ species: 'Alpha', maxHp: 200, atk: 200, spd: 90,
+               moves: [mv('bigsmash', 150, 255, 0)] })] },
+        { playerId: 'slow', name: 'Slow', mons: [
+          mn({ species: 'Gamma', maxHp: 200, atk: 60, spd: 10,
+               moves: [mv('tap', 40, 255, 0)] })] },
+      ],
+      b: [
+        { playerId: 'foeA', name: 'FoeA', mons: [
+          mn({ species: 'Beta', maxHp: 12, spd: 5,
+               moves: [mv('thump', 40, 255, 0)] })] },
+        { playerId: 'foeB', name: 'FoeB', mons: [
+          mn({ species: 'Delta', maxHp: 200, spd: 4,
+               moves: [mv('thump', 40, 255, 0)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  // Both allies aim at foeA (slot 2). Fast (spd 90) KOs it; Slow (spd 10)
+  // resolves after and must retarget onto foeB (slot 3) rather than fizzle.
+  battle.submitChoice('fast', { action: 'fight', move: 0, target: 2 });
+  battle.submitChoice('slow', { action: 'fight', move: 0, target: 2 });
+  battle.submitChoice('foeA', { action: 'fight', move: 0, target: 0 });
+  battle.submitChoice('foeB', { action: 'fight', move: 0, target: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -629,7 +839,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.ok(jsRuns.length >= 14, 'the JS half built every scenario');
+  assert.ok(jsRuns.length >= 21, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle_turn_parity.json is available -- '
@@ -725,6 +935,130 @@ test('the KO fight ends, and names who won', () => {
     run.events.filter((event) => event.t === 'over').length, 1,
     'and exactly one over',
   );
+});
+
+test('mid-turn-KO retargeting: the slower ally swings onto the survivor, not "has no target"', () => {
+  const run = byName(jsRuns).get('retarget_ko');
+  const events = run.events;
+
+  const koIdx = events.findIndex((event) => event.t === 'faint' && event.text === 'Beta');
+  assert.ok(koIdx > -1, "fast's hit really KO'd the aimed-at seat (foeA/Beta)");
+
+  assert.ok(
+    !events.some((event) => event.t === 'msg' && event.text && event.text.includes('has no target')),
+    "slow's action never fizzles for the dead aim",
+  );
+
+  let sawSlowAnim = false;
+  let landedOnSlot3 = false;
+  for (let i = koIdx + 1; i < events.length; i += 1) {
+    const event = events[i];
+    if (event.t === 'anim' && event.side === 'a' && event.slot === 1) sawSlowAnim = true;
+    if (sawSlowAnim && event.t === 'damage' && event.side === 'b' && event.slot === 3) {
+      landedOnSlot3 = true;
+      break;
+    }
+  }
+  assert.ok(sawSlowAnim, "slow's move still plays its anim after the mid-turn KO");
+  assert.ok(landedOnSlot3, 'slow’s attack lands as real damage on foeB (slot 3), the retargeted seat');
+
+  assert.strictEqual(run.snapshot.field.find((f) => f.slot === 2).hp, 0,
+    'foeA (the original, now-dead aim) stayed at 0 hp');
+  assert.ok(run.snapshot.field.find((f) => f.slot === 3).hp < 200,
+    'foeB (the retargeted seat) actually took the hit');
+});
+
+test('a wild-mode faint pays exactly one exp event, after the faint and before over', () => {
+  const run = byName(jsRuns).get('wild_ko');
+  const kinds = run.events.map((event) => event.t);
+  const expIdx = kinds.indexOf('exp');
+  assert.ok(expIdx > -1, 'the fight paid an exp event');
+  assert.strictEqual(kinds.filter((t) => t === 'exp').length, 1, 'exactly one -- one owner-slot winner');
+  assert.ok(kinds.indexOf('faint') > -1 && kinds.indexOf('faint') < expIdx,
+    'the faint precedes the exp event -- the sheet is still in hand when it is paid');
+  assert.ok(kinds.indexOf('over') > expIdx, 'and the exp event precedes over');
+  const exp = run.events.find((event) => event.t === 'exp');
+  assert.strictEqual(exp.slot, 0, 'paid to the sole owner seat, field slot 0');
+  assert.strictEqual(exp.species, 'Beta', 'naming the wild mon that fell');
+  assert.strictEqual(exp.level, 20, 'and its level');
+  assert.strictEqual(exp.participants, 1, 'split one way -- one standing winner');
+});
+
+test('a coop_wild 2v1 faint pays both owner seats, slot 0 then slot 1', () => {
+  const run = byName(jsRuns).get('coop_wild_ko');
+  const exps = run.events.filter((event) => event.t === 'exp');
+  assert.strictEqual(exps.length, 2, 'one event per standing owner-slot winner');
+  assert.deepStrictEqual(exps.map((event) => event.slot), [0, 1],
+    'field-slot order -- a1 (slot 0) before a2 (slot 1)');
+  for (const exp of exps) {
+    assert.strictEqual(exp.species, 'Beta');
+    assert.strictEqual(exp.level, 20);
+    assert.strictEqual(exp.participants, 2, 'both winners were standing, so the split is two ways');
+  }
+});
+
+test('a switch-out-alive participant is paid alongside its replacement, mon 0 then mon 1', () => {
+  const run = byName(jsRuns).get('participation_ko');
+  const exps = run.events.filter((event) => event.t === 'exp');
+  assert.strictEqual(exps.length, 2, 'both the fighter and its replacement are paid');
+  assert.deepStrictEqual(exps.map((event) => event.slot), [0, 0],
+    'both events sit on the one seat that owns them');
+  assert.deepStrictEqual(exps.map((event) => event.mon), [0, 1],
+    'party index 0 (Alpha, switched out alive) then 1 (Gamma, the replacement)');
+  for (const exp of exps) {
+    assert.strictEqual(exp.species, 'Beta');
+    assert.strictEqual(exp.participants, 2, 'the divisor counts both participants');
+  }
+});
+
+test('a self-KO is neither paid nor counted -- the exploder drops out before the divisor is taken', () => {
+  const run = byName(jsRuns).get('explode_double_ko');
+  const kinds = run.events.map((event) => event.t);
+  // Both faints land -- the wild mon's, then a1's own -- before the one exp
+  // event the knockout funds, and that event is the only one this action pays.
+  const faintIdx = [];
+  kinds.forEach((t, i) => { if (t === 'faint') faintIdx.push(i); });
+  assert.strictEqual(faintIdx.length, 2,
+    "both the wild mon and the self-KO'er faint in this action");
+  const expIdx = kinds.indexOf('exp');
+  assert.ok(expIdx > faintIdx[1], 'the exp event comes after BOTH faints');
+  assert.strictEqual(kinds.filter((t) => t === 'exp').length, 1,
+    'exactly one exp event -- the exploder funds nothing of its own');
+  const exp = run.events.find((event) => event.t === 'exp');
+  assert.strictEqual(exp.slot, 1, "paid to a2's seat, not a1's");
+  assert.strictEqual(exp.mon, 0, "a2's own party index");
+  assert.strictEqual(exp.participants, 1,
+    'divisor 1 -- a1 is dropped from the set, not merely unpaid');
+});
+
+test('the replacement mark: a switch-out survivor and its send-out both bank a KO against a new foe', () => {
+  const run = byName(jsRuns).get('replacement_mark');
+  const allExp = run.events.filter((event) => event.t === 'exp');
+  // b1's own knockout pays one event (only a1 was ever in against it), and
+  // b2's -- the one this test is about -- pays two.
+  assert.strictEqual(allExp.length, 3, 'one event for b1, two for b2');
+  assert.strictEqual(allExp[0].participants, 1, "b1's knockout: a1 alone, divisor 1");
+
+  const exps = allExp.slice(1);
+  assert.strictEqual(exps.length, 2, 'both a1 (standing when b1 fell) and a2 (the send-out) are paid');
+  assert.deepStrictEqual(exps.map((event) => event.slot), [0, 0],
+    'both events sit on the one seat that owns them');
+  assert.deepStrictEqual(exps.map((event) => event.mon), [0, 1],
+    'party index 0 (Alpha, standing at the first KO) then 1 (Gamma, the send-out)');
+  for (const exp of exps) {
+    assert.strictEqual(exp.participants, 2,
+      'the deferred mark carried onto the SECOND foe -- divisor 2, not 1');
+  }
+});
+
+test('1v1 and coop_pvp never emit exp -- the farming-loop gate', () => {
+  const ko = byName(jsRuns).get('ko');
+  assert.ok(ko.events.some((event) => event.t === 'faint'), 'ko: a faint really happened');
+  for (const name of ['ko', 'coop']) {
+    const run = byName(jsRuns).get(name);
+    assert.ok(!run.events.some((event) => event.t === 'exp'),
+      `${name}: a PvP-shaped mode must never pay exp -- that is a farming loop`);
+  }
 });
 
 test('a side that drops past its grace forfeits, and rolls nothing doing it', () => {

@@ -393,22 +393,76 @@ return function(game)
   H.await(game, "host_wild_done")
   H.closeToOverworld(game)
 
-  -- ------- coop_npc (same party; invite-path join)
-  H.await(game, "host_coop_waiting")
-  local offered = H.waitSeconds(game, function()
-    return exports.coopOffer() ~= nil
-  end, 90, "the partner's offer to reach this side")
-  check(offered, "the waiting partner's offer reaches the guest")
-  local offer = exports.coopOffer()
-  if offer then
-    log("offer from:", tostring(offer.name), "battle:", tostring(offer.battle))
+  -- ------- coop_npc (same party; auto-join, no confirm)
+  --
+  -- Round 9 rewrote this leg's contract the same way as mmo_join.lua's
+  -- walk-in leg (see that file's header for the full story): the offer that
+  -- used to *stand*, waiting for this side to answer a join/wait confirm, is
+  -- now taken within a tick by src/Coop.lua's M:autoJoin -- forming the
+  -- party was the yes. Unlike mmo_join.lua's Route 3 leg this side never
+  -- walks anywhere for coop_npc on Gen 2: the host stages its own local
+  -- trainer battle (H.stageTrainer) and this side is pulled straight into it
+  -- from wherever the party leg left it standing, so there is no sight
+  -- line, no walk-in and no local BattleState to assert against here -- only
+  -- the claims round 9 actually makes:
+  --
+  --   "the waiting partner's offer      the offer is gone because it was
+  --    reaches the guest"           ->  TAKEN: a field comes up here with
+  --                                     nothing pressed at all
+  --   "walk-in raised a join or         nothing is raised at all, ever --
+  --    wait prompt"                 ->  watch() below fails the run if a
+  --                                     single YES/NO/WAIT/JOIN row shows
+  --
+  -- Sampled through the barrier as well as after it, same as mmo_join.lua:
+  -- the offer is sent when the host picks WAIT, which is the same moment it
+  -- drops this marker.
+  local sawPrompt, promptWas = false, nil
+  local sawOffer, offerBattle = false, nil
+  local function watch()
+    local offer = exports.coopOffer()
+    if offer then
+      sawOffer = true
+      offerBattle = offerBattle or tostring(offer.battle)
+    end
+    local top = H.top(game)
+    if top ~= nil and top.sim ~= nil then return end
+    for _, label in ipairs(H.menuLabels(game)) do
+      if label == "YES" or label == "NO" or label == "WAIT"
+         or label == "JOIN" then
+        sawPrompt = true
+        promptWas = promptWas or label
+      end
+    end
+    if H.classify(top) == "choice" then
+      sawPrompt = true
+      promptWas = promptWas or ("choice: " .. H.textOf(top))
+    end
   end
 
-  local joinedCoop = H.drivePrompts(game, function()
+  H.await(game, "host_coop_waiting", nil, watch)
+  local joinedCoop = H.waitSeconds(game, function()
+    watch()
     local fieldTop = H.top(game)
     return fieldTop ~= nil and fieldTop.sim ~= nil and #fieldTop.sim.slots >= 3
-  end, 180)
+  end, 90, "the partner's offer to pull this side into the fight")
+  log(("auto-join: offerSeen=%s battle=%s prompt=%s"):format(
+    tostring(sawOffer), tostring(offerBattle), tostring(promptWas)))
   check(joinedCoop, "a four-slot co-op battle is on screen, over the LAN hub")
+  check(not sawPrompt,
+        "and nothing was ever put to this side -- no join confirm, no "
+        .. "WAIT/ALONE row: the party was the yes")
+  local told = H.waitSeconds(game, function()
+    for _, line in ipairs(exports.chat()) do
+      local text = tostring(line.text or "")
+      if text:find("Joining", 1, true) and text:find("HOSTY", 1, true) then
+        return true
+      end
+    end
+    return false
+  end, 30, "the party note naming whose battle this is")
+  check(told,
+        "and the scrollback says whose fight it is rather than a box "
+        .. "asking to be let in (M:autoJoin's note)")
   local coopRefereed = H.awaitMediatedCoop(game, 60, "coop_npc")
   check(coopRefereed,
         "the LAN 2-on-2 is hub-refereed (coop_npc), not host CoopSim")

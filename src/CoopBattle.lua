@@ -119,6 +119,11 @@ local function loadEngine(game)
   grab("EffectRegistry", "src.battle.EffectRegistry")
   grab("ItemEffects", "src.inventory.ItemEffects")
   grab("Experience", "src.battle.Experience")
+  -- The curves behind the exp strip on the ally plates. Soft-grabbed beside
+  -- Experience because it is a *display* dependency: a build without it still
+  -- awards exp and still levels, the plate simply draws no strip (see
+  -- `expFraction`).
+  grab("Growth", "src.pokemon.Growth")
   grab("Pokemon", "src.pokemon.Pokemon")
   grab("Stats", "src.pokemon.Stats")
   -- Optional: a build with no battle_anims still fights, it just does not
@@ -159,6 +164,47 @@ local function loadEngine(game)
 end
 
 M.loadEngine = loadEngine
+
+
+-- ------- how far along its level a monster is
+--
+-- The Gen 2 HUD's own `HpBar.expFraction` (engine src/battle/gen2/HpBar.lua),
+-- ported over Gen 1's spellings: the exp a mon carries is `mon.exp` here
+-- (Gen 2 calls it `experience`), and the curve comes off the species def's
+-- `growthRate` through `Growth.expForLevel` -- the same call
+-- `Experience.apply` levels by, so the strip and the level can never disagree
+-- about where a level ends.
+--
+-- **nil is a real answer and means "draw no strip".** No species def, no
+-- Growth module, no `mon.exp`: three states where any number this could return
+-- would be invented, and an invented exp bar on somebody's plate is worse than
+-- no bar at all. Battlefield's `plateModel` treats a nil `expFrac` as the
+-- no-data state for exactly this. Everything is pcall-guarded because it runs
+-- inside the draw path.
+local function expFraction(data, mon)
+  if type(data) ~= "table" or type(mon) ~= "table" then return nil end
+  if mon.exp == nil then return nil end
+  local eng = engine
+  local Growth = eng and eng.Growth
+  if not (Growth and Growth.expForLevel) then return nil end
+  local def = mon.species and (data.pokemon or {})[mon.species]
+  if not def then return nil end
+  local level = tonumber(mon.level) or 1
+  local ok, base = pcall(Growth.expForLevel, def.growthRate, level,
+    data.growth_rates)
+  if not ok then return nil end
+  local okNext, after = pcall(Growth.expForLevel, def.growthRate, level + 1,
+    data.growth_rates)
+  if not okNext then return nil end
+  base, after = tonumber(base), tonumber(after)
+  if not (base and after) or after <= base then return nil end
+  local into = (tonumber(mon.exp) or base) - base
+  local frac = into / (after - base)
+  -- NaN compares false against every bound there is, so it is refused rather
+  -- than clamped -- the same rule `startDrain` applies to a wire `to`.
+  if frac ~= frac then return nil end
+  return math.max(0, math.min(1, frac))
+end
 
 
 -- ------- packing a party for the wire
@@ -369,6 +415,70 @@ function M.monFromCaughtSheet(game, sheet)
   return mon
 end
 
+-- ------- the way in
+--
+-- **The entry veil: this screen fades up out of black, and that is a
+-- transition the mod draws itself rather than one it borrows.**
+--
+-- A vanilla encounter never cuts to the battle screen. `OverworldState:
+-- pushBattle` (Gen 1) and `World:startBattle` (Gen 2) both push a
+-- BattleTransition *first*, and only when the wipe has finished blacking the
+-- overworld out does the battle come up on top of the black it left behind. So
+-- a fight arriving without one reads as a dropped frame.
+--
+-- One of the two clients in a co-op battle gets that for free and one does not.
+-- The **waiter** walked into the encounter, so the engine already ran its wipe
+-- for them and their engine battle is on screen (that is what the wait now
+-- stands behind -- src/Coop.lua's beginWait). The **joiner** is pulled in from
+-- the overworld by a message: nothing on their machine ever pushed a
+-- transition, and the arena used to land on their overworld as a hard cut.
+--
+-- **Why the engine's own wipe is not what plays here.** Both wipe classes are
+-- engine internals -- `src.render.BattleTransition` and `src.ui.gen2.
+-- BattleTransition` -- and a mod may only require `src.link.*` under the
+-- `network` permission; requiring either would trip the loader's permissions
+-- tripwire and land as a private-require finding in `modkit pack`. The two
+-- public-ish ways to reach one are worse than the problem: the `transitions`
+-- registry only *registers styles* and cannot play one, and the overworld
+-- object handed out by `mod.world` plays one only as a side effect of starting
+-- a whole engine battle (`pushBattle` / `startBattle`), which would push the
+-- battle theme a second time, wants a Gen-1-shaped battle object, has a
+-- different name and signature on Gen 2, and would hold the co-op screen off
+-- the stack for the two-plus seconds of wipe + `BLACK_HOLD` -- two seconds
+-- during which a refereed turn is already open and this client is not
+-- answering it.
+--
+-- So it is drawn here, in this screen's own draw, over the arena it is
+-- revealing: a short hold on black and a fade off it. That is the *tail* of
+-- the engine's transition -- the part that reads as "the battle is arriving"
+-- -- and it costs nothing, because the screen underneath is live and updating
+-- from the first frame.
+--
+-- Armed for **both** clients, not just the joiner. The waiter's engine wipe
+-- ended several seconds and one whole trainer entrance ago, and the swap from
+-- their engine battle to the co-op arena is its own hard cut; the same fade
+-- covers it, and the two players see the fight begin the same way.
+--
+-- Frames, not seconds, because everything else on this screen that moves is
+-- counted in fixed steps (`growIn`, FAINT_FRAMES, EXP_FILL_FRAMES).
+local ENTRY_HOLD = 6    -- full black, while the arena builds its first frame
+local ENTRY_FADE = 18   -- ...and off it
+M.ENTRY_FRAMES = ENTRY_HOLD + ENTRY_FADE
+
+-- How black the veil is on a given frame of the entry, 0 once it is over.
+--
+-- Pure and exported for the reason M.hpBarWidth and Ui.cancelRow are: the
+-- curve is the whole of the effect, and a headless suite can assert it without
+-- a renderer, a window, or a frame ever being drawn.
+function M.entryAlpha(frame)
+  frame = tonumber(frame) or 0
+  if frame < 0 then return 1 end
+  if frame < ENTRY_HOLD then return 1 end
+  local into = frame - ENTRY_HOLD
+  if into >= ENTRY_FADE then return 0 end
+  return (ENTRY_FADE - into) / ENTRY_FADE
+end
+
 -- ------- construction
 --
 -- opts:
@@ -510,6 +620,18 @@ function M.new(game, opts)
     -- mon acts. Nil until the first human-owned move text / anim lands.
     battlefieldBubbles = nil,
     battlefieldLoaded = nil,
+    -- The per-attack chronology's two deliberate gaps (`BEAT_SPAN`): how long
+    -- the queue is held for, how much of that has been spent, and which
+    -- attacker + move already had its shout so a multi-hit move does not get
+    -- one per strike. All nil outside a beat.
+    beatHold = nil,
+    beatDwell = nil,
+    calloutSpent = nil,
+    -- ...and which attack has already been *shouted*, which is a different
+    -- question from which one spent a beat: one attack reaches the bubble from
+    -- two directions (the anim row and the "X used MOVE" line beside it), and
+    -- only the first of them may raise a shout. See `noteBattlefieldBubble`.
+    calloutShout = nil,
   }, M)
 
   local rng = function(a, b)
@@ -590,6 +712,14 @@ function M.new(game, opts)
     local ok, player = pcall(eng.AnimPlayer.new, game.data.battle_anims)
     if ok then self.animPlayer = player end
   end
+  -- Which surround the presenter paints, decided before the first frame rather
+  -- than on the first update (see `refreshLetterbox`).
+  self:refreshLetterbox()
+  -- Armed at construction rather than in `enter()`, so it is already true of
+  -- the object src/Coop.lua's startBattle is about to push -- a screen that
+  -- drew one frame before entering would otherwise show the arena first and
+  -- then fade *in* from it. See "the way in" above.
+  self.entryFrame = 0
   return self
 end
 
@@ -893,6 +1023,10 @@ function M:queueFoeIntroSendOut()
   for _, slot in ipairs(foes) do
     local idx = slot.index
     self:say(("%s sent\nout %s!"):format(name, seatMonName(slot)))
+    -- Line, then the arc, then the burst -- the same three beats a refereed
+    -- arrival gets (see `queueSendBall`), and the seat is already held under
+    -- `introHide` for the whole of it.
+    self:queueSendBall(idx)
     self.messages[#self.messages + 1] = {
       anim = "POOF_ANIM", from = idx, attackerIsPlayer = false,
     }
@@ -903,6 +1037,9 @@ function M:queueFoeIntroSendOut()
         local battler = s and s.battler
         if battler then
           battle.growIn = { slot = idx, frame = 0 }
+          -- The arena's own send-out beat, at the same moment (see
+          -- noteBattlefieldSpawn); growIn is the classic stage's.
+          battle:noteBattlefieldSpawn(idx)
           battle:playEntranceCry(battler)
         end
       end,
@@ -915,19 +1052,53 @@ end
 -- send-outs (my Go! → POOF/grow/cry, then partner sent out). Ball chrome is
 -- cleared when the appear page advances (see messages dismiss / foe intro
 -- clear act), not here.
-function M:queueIntroSendOut()
-  local sendWait = 40
-  do
-    local ok, Timing = pcall(require, "src.core.Timing")
-    if ok and Timing and Timing.BATTLE_START_SENDOUT then
-      sendWait = Timing.BATTLE_START_SENDOUT
-    end
+-- The gap the engine leaves between the opening line and the first monster
+-- coming out (BattleState's own constant, with the engine's default under a
+-- build that does not export it).
+local function sendOutWait()
+  local ok, Timing = pcall(require, "src.core.Timing")
+  if ok and Timing and Timing.BATTLE_START_SENDOUT then
+    return Timing.BATTLE_START_SENDOUT
   end
+  return 40
+end
+
+-- A refereed fight's intro is the **referee's** send-outs, so all this client
+-- queues is the gap in front of them.
+--
+-- Both halves of the client-side intro are skipped in that case
+-- (`queueFoeIntroSendOut` / `queueIntroSendOut`), and the reason is that they
+-- were being played twice. The hub's `_start` emits one `send` per seat the
+-- moment every party is uploaded, `medRows` narrates each one and `playEvents`
+-- queues the swap that reveals it -- so a co-op player watched their monster
+-- come out under "Go! X!", and then watched the same monster come out again a
+-- second later under "ANN sent out X!", with `sim:sendOut` rebuilding every
+-- battler underneath. Two sentences, two bursts, one arrival. The referee's
+-- copy is the one that is kept: it is the one that is authoritative about
+-- *which* monster (`mon` stamp), and it is the only one the other three
+-- clients can be sure they are seeing the same version of.
+--
+-- The chrome still has to come down, and here that is this act's whole job:
+-- the ball row and the trainer's face are dropped by the intro rows on the
+-- client path, and with those gone nothing else would ever clear them.
+function M:queueMediatedIntro()
+  self.messages[#self.messages + 1] = {
+    act = function(battle)
+      battle.introBalls = nil
+      battle.showEnemyTrainer = nil
+    end,
+  }
+  self.messages[#self.messages + 1] = { wait = sendOutWait() }
+end
+
+function M:queueIntroSendOut()
+  local sendWait = sendOutWait()
   self.messages[#self.messages + 1] = { wait = sendWait }
 
   local mine = self.mine
   local mySlot = self:mySlot()
   self:say(("Go! %s!"):format(seatMonName(mySlot)))
+  self:queueSendBall(mine)
   self.messages[#self.messages + 1] = {
     anim = "POOF_ANIM", from = mine, attackerIsPlayer = true,
   }
@@ -938,6 +1109,9 @@ function M:queueIntroSendOut()
       local battler = slot and slot.battler
       if battler then
         battle.growIn = { slot = mine, frame = 0 }
+        -- The arena's own send-out beat, at the same moment (see
+        -- noteBattlefieldSpawn); growIn is the classic stage's.
+        battle:noteBattlefieldSpawn(mine)
         battle:playEntranceCry(battler)
       end
     end,
@@ -957,6 +1131,7 @@ function M:queueIntroSendOut()
   local pIndex = partner.index
   self:say(("%s sent out\n%s!"):format(
     seatOwnerName(partner), seatMonName(partner)))
+  self:queueSendBall(pIndex)
   self.messages[#self.messages + 1] = {
     anim = "POOF_ANIM", from = pIndex, attackerIsPlayer = true,
   }
@@ -967,6 +1142,9 @@ function M:queueIntroSendOut()
       local battler = slot and slot.battler
       if battler then
         battle.growIn = { slot = pIndex, frame = 0 }
+        -- The arena's own send-out beat, at the same moment (see
+        -- noteBattlefieldSpawn); growIn is the classic stage's.
+        battle:noteBattlefieldSpawn(pIndex)
         battle:playEntranceCry(battler)
       end
     end,
@@ -1001,8 +1179,19 @@ function M:enter()
   self.introBalls = true
   self.introHide = {}
   local theatrical = self:usesTrainerIntro()
+  -- A refereed fight hides **every** seat, both sides, whatever the mode: the
+  -- referee sends one `send` per seat out of `_start` before the first turn
+  -- opens (src/BattleSim/Turn.lua), and each of those is what reveals its own
+  -- seat (`applySwap`). A seat left visible would be a monster standing on the
+  -- arena before the sentence that puts it there -- the very complaint the
+  -- doubled intro produced. Nothing is left hidden by a referee that never
+  -- speaks: `failMediation` ends the battle, and `snapDisplay` reveals
+  -- anything still held once the opening sends have played.
+  local refereed = M.mediates(self.mode)
   for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
-    if slot.owner ~= nil and not self:foeSide(slot.index) then
+    if refereed then
+      self.introHide[slot.index] = true
+    elseif slot.owner ~= nil and not self:foeSide(slot.index) then
       self.introHide[slot.index] = true
     elseif theatrical and self:foeSide(slot.index) then
       self.introHide[slot.index] = true
@@ -1017,14 +1206,21 @@ function M:enter()
       pcall(Sound.play, self.game.data, Gen.sfx(self.game, "Trainer_Appeared"))
     end
     self:say(("%s wants\nto fight!"):format(self:trainerIntroName()))
-    self:queueFoeIntroSendOut()
+    if not refereed then self:queueFoeIntroSendOut() end
   elseif self.mode == "coop_wild" then
     -- Party vs Wild: same sentence solo wild uses (BattleState introText).
     self:say(("Wild %s\nappeared!"):format(self:wildIntroName()))
   else
     self:say("2 on 2 battle!")
   end
-  self:queueIntroSendOut()
+  -- The opening line is this client's either way -- it is the frame round the
+  -- fight, not a send-out. What follows it is the referee's send-outs on a
+  -- refereed fight and this client's own on any other. See `queueMediatedIntro`.
+  if refereed then
+    self:queueMediatedIntro()
+  else
+    self:queueIntroSendOut()
+  end
   self.phase = "messages"
   self.after = "choose"
   self:announce("coop_battle_started")
@@ -1155,26 +1351,41 @@ local function listPress(index, count, input)
   return math.max(1, math.min(count, (index or 1) + step))
 end
 
--- Classic Gen 1 battle-command grid: two columns, two rows. Each arrow moves
--- on its own axis and clamps at the edge (BattleState / WideBattle).
-local function gridStep(index, count, direction)
-  local row = math.floor((index - 1) / 2)
-  local col = (index - 1) % 2
+-- The battle-command grid. Each arrow moves on its own axis and clamps at the
+-- edge (BattleState / WideBattle).
+--
+-- `cols` is how many columns the menu is *actually drawn in*, and it has to be
+-- passed rather than assumed: the classic 160×144 chrome and Gen 2 draw the
+-- four commands 2×2, but the modern band lays them out four across whenever it
+-- has the width for it (`Battlefield.bandGridCols`). Stepping a 2×2 grid under
+-- a 1×4 paint sent LEFT/RIGHT nowhere from FIGHT and made UP/DOWN jump two
+-- slabs -- the highlight landed on a button that is not next to the one it
+-- left. Defaults to 2, which is byte-identical to what this did before: for
+-- cols == 2 and count == 4 the row clamp below is the same 1 it was hard-coded
+-- to, and for any smaller count the out-of-range guard already refused the
+-- move.
+local function gridStep(index, count, direction, cols)
+  cols = math.floor(tonumber(cols) or 2)
+  if cols < 1 then cols = 2 end
+  local lastCol = cols - 1
+  local lastRow = math.max(0, math.ceil(count / cols) - 1)
+  local row = math.floor((index - 1) / cols)
+  local col = (index - 1) % cols
   if direction == "left" then col = math.max(0, col - 1)
-  elseif direction == "right" then col = math.min(1, col + 1)
+  elseif direction == "right" then col = math.min(lastCol, col + 1)
   elseif direction == "up" then row = math.max(0, row - 1)
-  elseif direction == "down" then row = math.min(1, row + 1)
+  elseif direction == "down" then row = math.min(lastRow, row + 1)
   else return index end
-  local moved = row * 2 + col + 1
+  local moved = row * cols + col + 1
   if moved > count then return index end
   return moved
 end
 
 local GRID_KEYS = { "left", "right", "up", "down" }
 
-local function gridPress(index, count, input)
+local function gridPress(index, count, input, cols)
   for _, key in ipairs(GRID_KEYS) do
-    if input:wasPressed(key) then return gridStep(index, count, key) end
+    if input:wasPressed(key) then return gridStep(index, count, key, cols) end
   end
   return nil
 end
@@ -1214,10 +1425,25 @@ local MSG_AUTO_ADVANCE = 1.6
 
 function M:update(dt)
   self.frame = self.frame + 1
+  -- The surround the presenter paints round this screen depends on which stage
+  -- is up, and it reads the answer off this object every frame (see
+  -- `refreshLetterbox`).
+  self:refreshLetterbox()
+  -- Arena effects advance on wall time whatever the phase: a lunge or a sink
+  -- started under one phase must not freeze because a menu opened over it.
+  self:stepFx(dt)
   -- Grow-in advances on the same fixed step as the engine's AnimateSendingOutMon.
   if self.growIn then
     self.growIn.frame = (self.growIn.frame or 0) + 1
     if self.growIn.frame >= 12 then self.growIn = nil end
+  end
+  -- The way in, counted on the same fixed step and dropped the instant it is
+  -- spent so the ordinary case is one nil test a frame. Nothing waits on it:
+  -- the battle underneath is running from frame one, and the veil is only what
+  -- the player can see of it. See "the way in".
+  if self.entryFrame then
+    self.entryFrame = self.entryFrame + 1
+    if self.entryFrame >= M.ENTRY_FRAMES then self.entryFrame = nil end
   end
   if self.sim and not self.result then
     self:stepFocusSlides()
@@ -1247,12 +1473,51 @@ function M:update(dt)
         local ok, finished = pcall(self.animPlayer.isDone, self.animPlayer)
         done = (not ok) or finished
       end
+      -- ...and a row that started an arena effect is held for as long as that
+      -- effect plays, on top of whatever the engine's player wanted. The row
+      -- *is* the throw: one that ended first would cut the arc off mid-air and
+      -- let the next line print over a ball still in flight. Only ever set on
+      -- the battlefield path (`startBallFx`), so classic and Gen 2 keep the
+      -- player's own timing exactly.
+      if self.animHold then
+        self.animDwell = (self.animDwell or 0) + (dt or 0)
+        if self.animDwell < self.animHold then done = false end
+      end
       if done or (input and input:wasPressed("b")) then
         -- Hit thud after the flash (PlayApplyingAttackSound timing).
         self:applyPendingHitFx()
         self.anim = nil
+        self.animHold = nil
+        self.animDwell = nil
       end
       return
+    end
+    -- ------- a display beat: the gap that makes two things two things
+    --
+    -- Some of the chronology is a *pause* rather than a thing being drawn. The
+    -- trainer's shout has to be on screen before the monster leans in, and the
+    -- defender has to flash before its bar starts falling -- otherwise the two
+    -- halves land in the same tick and read as one event with decoration on it.
+    --
+    -- Held here, and queue-pure: the row that was about to start goes back at
+    -- the head of the queue (`splitCalloutBeat`, `splitHitBeat`) and this is
+    -- the gap in front of it. Exactly what `startBallFx` does to give a SHAKE
+    -- row's extra wobbles a row each -- still one thing at a time, and the
+    -- queue is still the only sequencer.
+    --
+    -- Held like an animation is, and for the same reasons: the line already on
+    -- screen stays up (nothing here touches `shown`), the dwell clock below is
+    -- not ticked while it runs, and B skips it. The tick the beat *ends* on
+    -- falls straight through to the row waiting behind it rather than spending
+    -- a frame doing nothing.
+    if self.beatHold then
+      self.beatDwell = (self.beatDwell or 0) + (dt or 0)
+      if self.beatDwell < self.beatHold
+         and not (input and input:wasPressed("b")) then
+        return
+      end
+      self.beatHold = nil
+      self.beatDwell = nil
     end
     -- A falling bar holds the queue exactly as an animation does, and -- like
     -- the engine's -- it cannot be hurried. `UpdateHPBar` is not a text page:
@@ -1262,6 +1527,13 @@ function M:update(dt)
     -- counts its frames in.
     if self.draining then
       self:stepDrain()
+      return
+    end
+    -- ...and a filling exp strip holds it the same way, for the same reason:
+    -- it is a bar crawling on the cart's own unskippable loop, not a text page
+    -- with a button to answer it.
+    if self.expFilling then
+      self:stepExpFill()
       return
     end
     if self.faintFx then
@@ -1296,8 +1568,8 @@ function M:update(dt)
       -- in the middle of the thing it is describing.
       local head = self.messages[1]
       if type(head) == "table"
-         and (head.anim or head.drain or head.faintfx
-              or head.wait or head.act) then
+         and (head.anim or head.drain or head.faintfx or head.expfill
+              or head.wait or head.act or head.ballsend) then
         -- Hold wait/act/anim behind opening appear line(s). Drop ball chrome
         -- when the post-appear wait starts (not on every page advance), so a
         -- multi-page appear does not begin the gap early.
@@ -1316,11 +1588,15 @@ function M:update(dt)
           table.remove(self.messages, 1)
           if head.act then
             if type(head.act) == "function" then pcall(head.act, self) end
+          elseif head.ballsend then
+            self:startSendBall(head)
           elseif head.anim then
             self.acting = head.from or self.acting
             self:startAnim(head)
           elseif head.drain then
             self:startDrain(head)
+          elseif head.expfill then
+            self:startExpFill(head)
           else
             self:startFaint(head)
           end
@@ -1346,7 +1622,24 @@ function M:update(dt)
           -- Bubble when a human-owned mon's "used MOVE" line lands (Gen1
           -- theatre). fromSlot is preferred; mediated msg rows often omit it
           -- and leave the actor on self.acting from the prior row.
-          self:noteBattlefieldBubble(fromSlot or self.acting, next)
+          --
+          -- ...and only when the anim row beside it has not shouted already.
+          -- One attack reaches the bubble from both rows, and the referee does
+          -- not agree with itself about their order (the Node half emits the
+          -- anim first, CoopSim the sentence), so `noteBattlefieldBubble` owns
+          -- the "once per attack" rule and answers whether this call is the
+          -- one that raised it.
+          local _, raised = self:noteBattlefieldBubble(fromSlot or self.acting,
+            next)
+          -- ...and a shout *raised* by an announcement line is a **new attack**,
+          -- so the callout beat is owed again. This is what keeps a multi-hit
+          -- move to one shout: the coop queue announces once and then puts an
+          -- anim row in front of every strike, all of them stamped with the
+          -- same actor, so `splitCalloutBeat` needs something other than the
+          -- row itself to tell "the move started" from "it landed again". A
+          -- line that merely refreshed the shout the anim row already made is
+          -- the same attack and re-arms nothing.
+          if raised then self.calloutSpent = nil end
         end
         self.shown = next
         self.msgClock = 0
@@ -1424,7 +1717,17 @@ function M:update(dt)
     -- out of order still resets the answers. Both of those happen once per
     -- turn, which is the thing being counted; this handover happens whenever a
     -- batch of messages runs out, which is not.
-    self.phase = self.after or "choose"
+    -- ...on to whatever this batch was leading to -- **unless somebody still
+    -- owes a send-out**, in which case the field is a monster short and there
+    -- is no turn behind these messages to answer yet. The box is handed back to
+    -- the wait line naming them (`waitLine` reads the same `awaiting` flag) and
+    -- the grid stays shut until the send lands and the referee opens the turn
+    -- for real. See `M:replaceHold`.
+    if self:replaceHold() then
+      self.phase = "wait"
+    else
+      self.phase = self.after or "choose"
+    end
     -- ...and this is where the turn deadline starts, on the host. See
     -- `M:openTurn` for why it is stamped here and nowhere else.
     self:openTurn()
@@ -1530,6 +1833,36 @@ end
 -- counted down a number nothing would act on. What each client counts is still
 -- its own -- a replayer cannot read the host's -- and all four start it at the
 -- handover, which is the same event the host's own deadline is stamped at.
+-- ------- is the field paused on somebody else's replacement?
+--
+-- True while a *refereed* fight is inside the replace phase and the seat being
+-- asked is not ours. That is the one state where a batch of messages runs out
+-- and there is still nothing to answer: the referee has not opened a turn, it
+-- has asked one seat for a send-out, and it will not resolve anything until
+-- that seat answers. Handing the command grid back here is the bug this exists
+-- to close -- a player picking a move at a foe seat that is empty, whose choice
+-- the referee refuses (`Battle:submitChoice` rejects a standing seat's answer
+-- in the replace phase) and who is then left in a menu nothing will take.
+--
+-- Read off `sim:awaiting` rather than off `medReplaceWait` on purpose: the flag
+-- is set by the `choose` row and cleared by `CoopSim:sendOut`
+-- (src/CoopSim.lua:214) the moment the referee's `send` for that seat is
+-- applied in `playEvents`, so the hold ends on the event that answers it and
+-- needs no clearing of its own. `medReplaceWait` is the phase gate -- it keeps
+-- this off the host-simulated path, where the identical `choose` row means
+-- something the local host is already clocking (`tickStalls`) and where the
+-- grid's behaviour is not this round's to change.
+--
+-- Never against our own seat: that one has `replacing`, which outranks the
+-- phase entirely (see `update`).
+function M:replaceHold()
+  if not self.mediated then return false end
+  if self.result or self.replacing then return false end
+  if not self.medReplaceWait then return false end
+  local pending = self.sim and self.sim:awaitingChoice()
+  return (pending ~= nil and pending.index ~= self.mine)
+end
+
 function M:waitingOn()
   if self.result or self.replacing then return nil end
   local pending = self.sim and self.sim:awaitingChoice()
@@ -1676,9 +2009,30 @@ end
 -- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
 M.COMMANDS = { "FIGHT", "SWITCH", "ITEM", "RUN" }
 
+-- How many columns the command menu the player is looking at is laid out in.
+--
+-- Asked of the renderer rather than restated here, so the cursor and the paint
+-- cannot drift: `Battlefield.bandGridCols` is the same rule `drawCommandGrid`
+-- itself uses to place the slabs. Only the battlefield path asks -- the classic
+-- 160×144 chrome and Gen 2 draw `drawCommand`'s own 2×2 and always get 2.
+--
+-- pcall-guarded with the classic answer as the fallback: an older Battlefield
+-- beside this screen has no such export, and a band that has to guess is better
+-- off guessing the layout the GB fallback would draw. Nothing to remediate --
+-- `drawModernBand` already declines the widgets in that build.
+function M:commandCols()
+  if not self:usesBattlefield() then return 2 end
+  local cols = Battlefield and Battlefield.bandGridCols
+  if type(cols) ~= "function" then return 2 end
+  local ok, got = pcall(cols, #M.COMMANDS)
+  got = ok and math.floor(tonumber(got) or 0) or 0
+  if got < 1 then return 2 end
+  return got
+end
+
 function M:updateCommand(input)
   self.commandIndex = self.commandIndex or 1
-  local moved = gridPress(self.commandIndex, #M.COMMANDS, input)
+  local moved = gridPress(self.commandIndex, #M.COMMANDS, input, self:commandCols())
   if moved then
     self.commandIndex = moved
   elseif input:wasPressed("a") then
@@ -2819,6 +3173,49 @@ function M:playEvents(events)
       -- until the row that fells it comes up, and the "fainted!" line is
       -- printed over the top of it -- the engine's own order, which emits the
       -- slide and the cry before the text (BattleState:enemyMonFainted).
+      --
+      -- A knockout is also what an EXP.ALL's *second* pass belongs to, rather
+      -- than the awards that follow it: the referee sends one `exp` per paid
+      -- participant now, and the engine spreads the other half once per faint
+      -- (BattleState:3877-3890, outside its participant loop). Armed here and
+      -- spent by the first award that follows -- see `gainExp`.
+      --
+      -- **A knockout on the other side only.** Nothing owes this client exp
+      -- for its own monster going down, and arming on one would let the next
+      -- award -- a partner's foe knockout two turns later, or the same turn's
+      -- trade -- spend a credit no foe faint created, banking the EXP.ALL half
+      -- a second time for a single knockout. src/MediatedBattle.lua gates its
+      -- twin of this flag the same way (`sideOfSlot(msg.slot) ~= mySide`);
+      -- `foeSide` is this screen's spelling of that test, and it answers false
+      -- when the sides cannot be read, which leaves the flag at whatever it
+      -- was -- `nil` (unmetered) for a harness that narrates no faint at all.
+      if self:foeSide(event.slot) then self.expAllCredit = true end
+      -- **And the number, not only the picture.** A faint used to be handled
+      -- here as a drawing fact alone -- the sink was queued and no HP was
+      -- written -- on the reasoning that `damage` is the only event that
+      -- carries truth. That holds right up until the hp=0 `damage` is the
+      -- event that goes missing, which is precisely the lossy case `medGaps`
+      -- exists to count: the monster then sinks off the field with its local
+      -- copy still holding pre-KO HP, and every rule that reads HP -- and
+      -- `snapDisplay`, which re-derives the display flag from `sim:isDown` --
+      -- goes on believing it is alive. The reported symptom was a knocked-out
+      -- POKeMON standing back up on the next turn boundary with the bar it had
+      -- before the killing blow.
+      --
+      -- So the referee's faint is authoritative about HP as well: nothing can
+      -- be down and above zero. Written onto the battler's `mon`, which is the
+      -- party entry itself -- `BattleState.makeBattler` keeps the monster by
+      -- reference (src/battle/BattleState.lua:483) -- so `hasReserve`,
+      -- `isDown` and both of round 7's `hp <= 0` send-out refusals all read the
+      -- corrected number afterwards. `src/MediatedBattle.lua:1899-1900` is the
+      -- same line on the sibling screen.
+      --
+      -- Guarded by `replaying()` for the reason every other truth-writing
+      -- branch here is: a host that simulated this turn itself already applied
+      -- the knockout, and its own `sim` is where the event came from.
+      local fell = self.sim:slot(event.slot)
+      local down = fell and fell.battler
+      if down and down.mon and self:replaying() then down.mon.hp = 0 end
       local shownAt = showing(event.slot)
       if shownAt then
         shownAt.displayFainted = nil
@@ -2850,7 +3247,28 @@ function M:playEvents(events)
       local leaving = showing(event.slot)
       -- Sim truth, applied *now* rather than in the queue: a replayer's
       -- signature has to match the host's the moment the event is applied.
-      if slot and self:replaying() then self.sim:sendOut(slot, event.index) end
+      --
+      -- ...unless the row names a monster this screen has at 0 HP. No referee
+      -- fields a fainted monster, so such a row is a resolution that went wrong
+      -- upstream (a name that matched two of one species, a `mon` stamp counted
+      -- in a shifted party) -- and fielding it anyway is what put a knocked-out
+      -- POKeMON back on the field standing. The seat is left empty instead: one
+      -- monster missing until the next send is a smaller lie than a dead one
+      -- fighting, and the signature it protects is already broken by the time
+      -- this can fire. CoopSim.sendOut refuses the same thing from the inside;
+      -- this is the outer layer, and it is the one that can still name the row.
+      local coming = slot and event.index and (slot.party or {})[event.index]
+      if slot and self:replaying() then
+        if coming and (coming.hp or 0) <= 0 then
+          mod.log:warn("a refereed send-out named a fainted POKeMON (seat %s, "
+            .. "party slot %s), so the seat was left empty rather than putting "
+            .. "it back on the field; report this with the trainer fought if "
+            .. "the field stays a POKeMON short",
+            tostring(event.slot), tostring(event.index))
+        else
+          self.sim:sendOut(slot, event.index)
+        end
+      end
       -- ...and the *display* follows at its own pace. The outgoing monster is
       -- held in the shadow so it keeps being drawn -- and keeps draining and
       -- sinking -- while its rows play, and the new one is queued behind them
@@ -2862,6 +3280,12 @@ function M:playEvents(events)
         local shadow = self:displayShadow()
         shadow[event.slot] = leaving
         queuing[event.slot] = slot.battler
+        -- ...with the throw that puts it there in front of it, so the arrival
+        -- reads as somebody sending a monster out rather than one appearing.
+        -- Queued between the departing monster's rows and the swap: everything
+        -- owed to the one that left has played by the time the ball leaves the
+        -- trainer's hand. See `queueSendBall` for the seats that get one.
+        self:queueSendBall(event.slot)
         self.messages[#self.messages + 1] =
           { swap = event.slot, battler = slot.battler }
       end
@@ -3021,6 +3445,15 @@ function M:startDrain(row)
   -- frames is the whole descent (see the rate below); the slack is there so an
   -- ordinary drain never meets this at all, and one that does is snapped to
   -- where it was going rather than left holding the queue.
+  --
+  -- The hit reads on the arena before the bar answers it: the defender flashes
+  -- white, the field takes a nudge, and the drain starts a beat later with
+  -- this same row (`splitHitBeat` puts it back at the head of the queue).
+  -- Emitted from the row rather than when the `damage` event arrived because a
+  -- resolved turn arrives as one batch -- all four seats would jolt in the
+  -- same frame, ahead of any text. A climb (a heal, a drain move's restore)
+  -- gets neither the fx nor the beat: nothing was struck.
+  if battler.shownHP > to and self:splitHitBeat(row) then return false end
   self.hitSlot = row.slot
   self.draining = { battler = battler, slot = row.slot, to = to, frames = 120 }
   return true
@@ -3074,6 +3507,166 @@ function M:stepDrain()
   if shown == at.to then self.draining = nil end
 end
 
+-- ------- the exp strip filling, which is the third display clock
+--
+-- Same shape as the drain above and for the same reason: `Experience.apply`
+-- runs the instant the `exp` event is received and moves `mon.exp` and
+-- `mon.level` in one step, so the number the plate is drawn from has to be a
+-- separate clock that trails it. `battler.shownExpFrac` is the strip's fill
+-- (0..1, or nil for "no strip") and `battler.shownLevel` is the number the
+-- level pill prints; the gap between those two and the mon's own truth *is*
+-- the animation, exactly as `shownHP` is for the bar.
+--
+-- Battlefield-only. The classic 160x144 readout has no exp strip and never
+-- reads either clock, so nothing here is ever queued on that path (see
+-- `gainExp`) and the classic exp text flow is byte-identical to what it was.
+
+-- A whole bar in about 1.2 seconds, counted in frames because this screen's
+-- update runs on the engine's fixed 60Hz step (the drain counts the same way).
+-- Linear rather than the cart's accelerating three-frames-a-pixel crawl
+-- (AnimateExpBar): the strip here is a fraction rather than 64 discrete
+-- pixels, so there are no pixel steps to lengthen, and a constant rate reads
+-- as the same deliberate crawl.
+local EXP_FILL_FRAMES = 72
+local EXP_FILL_STEP = 1 / EXP_FILL_FRAMES
+
+-- Seed the two display clocks off the monster's own truth.
+--
+-- Lazy rather than at build time, because the battlers are built in CoopSim
+-- (and, on a real boot, by the engine's `BattleState.makeBattler`) and neither
+-- knows this screen has plates. Idempotent: it only ever fills a nil, so a
+-- clock mid-fill is never yanked back to truth by a draw.
+--
+-- A seeded-nil `shownExpFrac` is not a failure to seed -- it is the honest
+-- "this monster has no fraction to show" (a partner's packed mon carries no
+-- exp), and it is re-asked every call precisely so a monster that gains one
+-- later picks it up.
+function M:seedExpClock(battler)
+  if type(battler) ~= "table" or type(battler.mon) ~= "table" then return end
+  if battler.shownLevel == nil then
+    battler.shownLevel = tonumber(battler.mon.level) or 1
+  end
+  if battler.shownExpFrac == nil then
+    battler.shownExpFrac = expFraction(self.game and self.game.data,
+      battler.mon)
+  end
+end
+
+-- A queued exp-fill row comes up. Answered on the spot (returning false) when
+-- there is nothing to crawl, so the queue never stalls on one.
+--
+-- The row carries the battler rather than a slot, like the drain row does, so
+-- a fill still lands on the monster it was queued for even if the field has
+-- moved on.
+--
+-- **Both ends are read here, not at queue time, and each for its own reason.**
+--
+-- The *target* comes off `battler.mon` now because the mon is still being
+-- written to after the row is queued: with an EXP.ALL held, `gainExp` runs a
+-- second `Experience.apply` pass over the whole party -- and the fighter is in
+-- that party, so a target frozen before that pass is short by whatever the
+-- second half added (two levels' worth, in the case that found this). Reading
+-- it at row-start means every apply pass has already landed, so the strip and
+-- the pill agree with the "grew to level N!" lines printed beside them.
+--
+-- The *start* is the live display clock (`shownExpFrac`/`shownLevel`), because
+-- that is where the strip visibly is. Two awards in one batch both capture
+-- their `from*` before either has played, so honouring the second row's
+-- capture would drag the strip back down to where the first one started.
+-- `row.from*` remains as the fallback for a clock that is still nil -- the
+-- capture `gainExp` takes before `Experience.apply` mutates the mon, which is
+-- the one thing that genuinely cannot be worked back out later.
+function M:startExpFill(row)
+  local battler = row.expfill
+  if type(battler) ~= "table" or type(battler.mon) ~= "table" then
+    return false
+  end
+  local function level(value, fallback)
+    local got = tonumber(value)
+    if not got or got ~= got then return fallback end
+    return math.max(1, math.floor(got))
+  end
+  local function frac(value)
+    local got = tonumber(value)
+    -- NaN refused rather than clamped: `stepExpFill` stops on `>=` against a
+    -- target, and a NaN target is a stop condition that never comes true.
+    if not got or got ~= got then return nil end
+    return math.max(0, math.min(1, got))
+  end
+  local toLevel = level(battler.mon.level, 1)
+  local toFrac = frac(expFraction(self.game and self.game.data,
+    battler.mon)) or 0
+  local from = frac(battler.shownExpFrac)
+  if from == nil then from = frac(row.fromFrac) end
+  -- No fraction to start from means this monster draws no strip at all, so
+  -- there is nothing to fill. The pill is still put where the level is: it is
+  -- printed from `shownLevel` and would otherwise sit a level behind forever.
+  if from == nil then
+    battler.shownLevel = toLevel
+    return false
+  end
+  local fromLevel = math.min(
+    level(battler.shownLevel, level(row.fromLevel, toLevel)), toLevel)
+  battler.shownExpFrac = from
+  battler.shownLevel = fromLevel
+  -- Nothing crossed and nothing added (a rounding-sized gain, or an award
+  -- that priced to zero): put the strip where it belongs and let the queue
+  -- move on rather than holding it for a crawl nobody can see.
+  if fromLevel == toLevel and toFrac <= from then
+    battler.shownExpFrac = toFrac
+    return false
+  end
+  -- The budget, and it is the same guarantee the drain's is: a fill is
+  -- deliberately unskippable, so the only other end to a target it somehow
+  -- cannot reach is a message queue that never moves again. One whole bar per
+  -- level to cross plus two bars of slack, after which it is snapped to where
+  -- it was going.
+  self.expFilling = {
+    battler = battler,
+    slot = row.slot,
+    toLevel = toLevel,
+    toFrac = toFrac,
+    frames = EXP_FILL_FRAMES * (2 + (toLevel - fromLevel)),
+  }
+  return true
+end
+
+-- One frame of it.
+--
+-- A level crossing is the cart's own (AnimateExpBar, engine/battle/core.asm):
+-- the segment fills to full, the level the HUD prints ticks up, and the strip
+-- restarts at empty -- which is why the pill changes as the bar tops out and
+-- not a message later. Two levels in one award is that twice.
+function M:stepExpFill()
+  local at = self.expFilling
+  local battler = at.battler
+  if not (battler and battler.mon) then
+    self.expFilling = nil
+    return
+  end
+  at.frames = (at.frames or 0) - 1
+  if at.frames <= 0 then
+    battler.shownExpFrac = at.toFrac
+    battler.shownLevel = at.toLevel
+    self.expFilling = nil
+    return
+  end
+  local shownLevel = tonumber(battler.shownLevel) or at.toLevel
+  -- Every level still to cross fills the whole strip; the last one stops
+  -- wherever the award actually left the monster.
+  local target = (shownLevel < at.toLevel) and 1 or at.toFrac
+  local shown = math.min(target, (tonumber(battler.shownExpFrac) or 0)
+    + EXP_FILL_STEP)
+  battler.shownExpFrac = shown
+  if shown < target then return end
+  if shownLevel < at.toLevel then
+    battler.shownLevel = shownLevel + 1
+    battler.shownExpFrac = 0
+    return
+  end
+  self.expFilling = nil
+end
+
 -- The fall. The flag goes up *before* the text, which is the engine's order
 -- (BattleState:enemyMonFainted queues the slide and the cry, then says the
 -- line): the sprite is sliding out of its box while the box says why.
@@ -3085,6 +3678,12 @@ function M:startFaint(row)
   battler.displayFainted = true
   self.hitSlot = row.slot
   self.faintFx = { battler = battler, slot = row.slot, frames = FAINT_FRAMES }
+  -- The arena's half of the same fall. `faintFx` above stays the sequencer --
+  -- it is what holds the message queue for its thirty frames -- and this is
+  -- what the seat is actually drawn through while it does (`Battlefield.fxSeat`
+  -- sinks and fades it). Held past its own clock by `stepFx` for as long as the
+  -- sequencer runs, so the two cannot end at different times.
+  self:emitFx("faint", row.slot)
   return true
 end
 
@@ -3159,6 +3758,40 @@ end
 -- screen may finally show what the field has shown since the `send` landed.
 function M:applySwap(row)
   self:displayShadow()[row.swap] = row.battler
+  if row.battler == nil then return end
+  -- The seat is let go of here and nowhere else. Whatever put the hold up --
+  -- the opening hide (`enter`), or the ball row in front of this one -- this
+  -- is the row that says the monster has arrived, so this is where it becomes
+  -- drawable. On a refereed fight it is also the proof that the referee's
+  -- opening send-outs are being played, which is what lets `snapDisplay` tell
+  -- "still waiting for the batch" from "a seat nobody is coming to".
+  if self.introHide then self.introHide[row.swap] = nil end
+  if M.mediates(self.mode) then self.medOpened = true end
+  -- The screen has just caught up with a send-out, so this is the frame the new
+  -- monster appears on the arena. Same beat the intro gets (and the same beat
+  -- the classic stage spends on `growIn`); a monster that blinked into
+  -- existence at full size was the one arrival with no animation at all.
+  self:noteBattlefieldSpawn(row.swap)
+  -- ...and the classic stage's half of the same beat, with the entrance cry
+  -- that goes with it. Both used to be queued by the client-side intro alone,
+  -- so a refereed arrival -- which is now every arrival, the opening pair
+  -- included -- had neither: the monster appeared at full size in silence. Set
+  -- here rather than in the intro because this is the one row every send-out
+  -- on either path passes through.
+  self.growIn = { slot = row.swap, frame = 0 }
+  self:playBallPoof()
+  self:playEntranceCry(row.battler)
+end
+
+-- The ball bursting open, as a sound. The intro's `POOF_ANIM` row plays this
+-- through `startAnim`; a refereed arrival has no such row -- it is a `swap`
+-- with a burst on it -- so it says the same thing here rather than arriving in
+-- silence. Same clip, same soft-fail as everywhere else this screen reaches
+-- for audio (a build with no Sound simply has none).
+function M:playBallPoof()
+  local Sound = engine and engine.Sound
+  if not (Sound and Sound.play) then return end
+  pcall(Sound.play, self.game.data, Gen.sfx(self.game, "Ball_Poof"))
 end
 
 -- Hold what is on screen now, before the sim is asked to move.
@@ -3187,7 +3820,31 @@ end
 -- whole point.
 function M:snapDisplay()
   self.draining = nil
+  self.expFilling = nil
   self.faintFx = nil
+  -- The arena's effects go with them, and a throw's hold goes first: an entry
+  -- retained at t == 1 outlives its own clock on purpose (a held sink, a
+  -- monster inside a ball), so dropping the list without ending the flow that
+  -- justifies the hold would leave a seat hidden for the rest of the fight.
+  self.ballFlow = nil
+  self.fx = nil
+  self.animHold = nil
+  self.animDwell = nil
+  -- ...and so does a display beat, for the sharper version of the same reason:
+  -- a beat is a deliberate gap held in front of a row that the purge below may
+  -- be about to delete, so leaving it standing would be the queue waiting on
+  -- something that is no longer in it. `calloutSpent` goes with it -- the next
+  -- attack after a snap has said nothing yet, and this is also the reset that
+  -- covers the ordinary end of a queue (`update` snaps on the way back to the
+  -- menu), so no attack ever inherits the previous turn's shout.
+  self.beatHold = nil
+  self.beatDwell = nil
+  self.calloutSpent = nil
+  -- ...and the shout key beside it, for exactly the same reason: it is "what
+  -- the attack now playing has already had", and after a snap there is no
+  -- attack playing. Reset together so a seat that opens the next turn with the
+  -- same move it closed this one still gets its callout.
+  self.calloutShout = nil
   -- The shadow goes with them. Nothing is owed an exit any more, so every slot
   -- draws the monster the field says is standing in it -- which is the safety
   -- net for a swap row that never arrived, and the reason a resync puts the
@@ -3208,20 +3865,64 @@ function M:snapDisplay()
   self.shownBattler = {}
   local kept = {}
   for _, row in ipairs(self.messages or {}) do
+    -- `ballsend` goes with the swap it belongs to, and it has to: the arc row
+    -- *hides* its seat and the swap behind it is what shows it again, so a
+    -- throw left in a queue whose arrival has just been dropped would blank a
+    -- seat with nothing left to fill it.
     if not (type(row) == "table"
-            and (row.swap or row.drain or row.faintfx)) then
+            and (row.swap or row.drain or row.faintfx or row.expfill
+                 or row.ballsend)) then
       kept[#kept + 1] = row
     end
   end
   self.messages = kept
   if not self.sim then return end
+  local data = self.game and self.game.data
+  -- Only the seat that owns a strip owns clocks to weld, and the rule is the
+  -- one `battlefieldSeats` draws by: this screen's own slot on the arena, and
+  -- nobody at all on the classic readout. Welding wider than that both invents
+  -- clocks on battlers no plate reads them off -- foes, the partner -- and
+  -- spends a `Growth` walk per battler per queue drain on the classic path,
+  -- which is documented as untouched by any of this.
+  local owns = self:usesBattlefield() and self.mine or nil
   for _, slot in ipairs(self.sim.slots or {}) do
     local battler = slot.battler
     if battler and battler.mon then
       battler.shownHP = battler.mon.hp
-      battler.displayFainted = self.sim:isDown(slot) or nil
+      -- The exp clocks are welded the same way the bar is, and they have to
+      -- be: a battle that ends mid-fill (or a resync that rebuilt the party
+      -- underneath one) would otherwise leave a strip frozen part-way and a
+      -- pill a level behind the monster it names. nil stays nil -- a monster
+      -- with no fraction to show still shows none.
+      if owns and slot.index == owns then
+        battler.shownExpFrac = expFraction(data, battler.mon)
+        battler.shownLevel = tonumber(battler.mon.level) or battler.shownLevel
+      end
+      -- A **one-way latch**, and the direction is the whole of it. Raising the
+      -- flag for a monster the field says is down is a snap catching the
+      -- display up. *Clearing* one that a played faint row put up is the
+      -- display being told a monster that has already sunk off the arena is
+      -- back on its feet -- and since the weld two lines up has just pulled
+      -- `shownHP` to `mon.hp`, it would stand up with a full-looking bar. The
+      -- only way the two can disagree in that direction is an HP number this
+      -- client never received (the faint branch of `playEvents` now closes
+      -- that gap at the source; this is the second lock on the same door).
+      --
+      -- Nothing legitimate needs the clear: a send-out replaces `slot.battler`
+      -- with a different object, and a resync rebuilds every battler, so a
+      -- flag never outlives the monster it was raised for.
+      battler.displayFainted = self.sim:isDown(slot) or battler.displayFainted
+        or nil
     end
   end
+  -- ...and a seat still waiting for an arrival that is no longer coming is
+  -- shown. The rows purged above are the only thing that would ever have
+  -- revealed it (`applySwap`), so a hold left standing here is a seat that
+  -- would stay blank for the rest of the fight. Only once the referee's
+  -- opening send-outs have actually played: before that the queue is empty
+  -- because the batch has not arrived yet, and revealing then would put all
+  -- four monsters on the field ahead of the sentences that send them out.
+  if self.introHide and self.medOpened then self.introHide = nil end
 end
 
 function M:finish()
@@ -4306,8 +5007,38 @@ function M:wantsFillScale()
 end
 
 -- White letterbox voids so arena edges match the surround (same habit as
--- engine BattleState). Harmless on the classic Gen2 path.
+-- engine BattleState) -- on the **classic** stage, which is a white 160×144
+-- canvas the paper shade matches exactly. Harmless on the classic Gen2 path.
+--
+-- How the flag is read, because it decides how it can be answered: the
+-- presenter walks the whole state stack top-down once a frame looking for any
+-- state whose `letterboxWhite` is truthy, and fills the voids with
+-- `PaletteFX.paperShade` when it finds one (engine
+-- src/render/Renderer.lua:809-830). It is a plain field read and never a
+-- call -- so a screen that wants a different answer per display mode has to
+-- shadow the class default on the instance, which is what `refreshLetterbox`
+-- below does.
+--
+-- The arena is not a white canvas. It is edge-to-edge art with its own dark
+-- chrome, and in SGB mode the paper shade is an off-white pink -- so the
+-- surround read as the overworld's paper bleeding into the theatre, which is
+-- the leak this fixes. MediatedBattle simply never sets the flag (see the
+-- `isOpaque` comment in its state table) and gets the engine default, black;
+-- this screen cannot, because Gen 2 still runs the classic stage through the
+-- same object.
 M.letterboxWhite = true
+
+-- Put the flag where the display mode says it belongs. One generation lookup,
+-- idempotent, so it can run on the way in and on every update -- the mode can
+-- move under a hot reload, and the presenter would keep reading a stale answer
+-- off the instance forever otherwise.
+function M:refreshLetterbox()
+  local ok, wide = pcall(self.usesBattlefield, self)
+  if not ok then return end
+  -- `false` rather than nil: nil falls back through `__index` to the class
+  -- default above and paints paper round the arena again.
+  self.letterboxWhite = not wide
+end
 
 -- ------- Battlefield theatre helpers (Gen1 only)
 
@@ -4383,7 +5114,83 @@ local function ownerLookId(ownerId, selfId)
   return nil
 end
 
--- OPP_YOUNGSTER → SPRITE_YOUNGSTER when the catalog has a walk sheet.
+-- ------- trainer class → overworld walk sheet
+--
+-- There is no class→sprite field anywhere in engine data. A trainer record
+-- (`data.trainers`) carries the battle front pic, the parties and the prize
+-- money, and says nothing about the overworld; the walk sheet is chosen per
+-- **map object**, where `data.maps[*].objects[*]` pairs a `sprite` with the
+-- `trainerClass` that object fights as. That is still a real mapping, just an
+-- indirect one -- so it is read out of the data rather than hand-written here:
+-- every object naming a class votes for the sheet it is drawn with, and the
+-- class takes the sheet with the most votes.
+--
+-- Which is what the name transform below cannot do on its own. Red has no
+-- SPRITE_LASS and no SPRITE_BUG_CATCHER -- those classes walk around as
+-- SPRITE_COOLTRAINER_F and SPRITE_YOUNGSTER -- so `OPP_BUG_CATCHER` resolved to
+-- nothing, `battlefieldFoeHumans` returned an empty list, and a coop_npc fight
+-- announced "BUG CATCHER wants to fight!" over an empty right-hand edge.
+--
+-- Ties break on id order so two clients never disagree about a class, and the
+-- whole walk is memoised against the maps table it was built from: one pass
+-- over ~250 maps per boot, and none at all once a battle is running.
+local trainerSpriteVotes = nil
+local trainerSpriteVotesFrom = nil
+
+local function trainerSpritesByClass(data)
+  local maps = type(data) == "table" and data.maps or nil
+  if type(maps) ~= "table" then return nil end
+  if trainerSpriteVotesFrom == maps then return trainerSpriteVotes end
+
+  local votes = {}
+  local ok = pcall(function()
+    for _, map in pairs(maps) do
+      if type(map) == "table" and type(map.objects) == "table" then
+        for _, obj in pairs(map.objects) do
+          if type(obj) == "table" then
+            local class, sprite = obj.trainerClass, obj.sprite
+            if type(class) == "string" and class ~= ""
+               and type(sprite) == "string" and sprite ~= "" then
+              local bucket = votes[class]
+              if not bucket then
+                bucket = {}
+                votes[class] = bucket
+              end
+              bucket[sprite] = (bucket[sprite] or 0) + 1
+            end
+          end
+        end
+      end
+    end
+  end)
+  if not ok then return nil end
+
+  local out = {}
+  for class, bucket in pairs(votes) do
+    local best, bestN = nil, -1
+    for sprite, n in pairs(bucket) do
+      if n > bestN or (n == bestN and (best == nil or sprite < best)) then
+        best, bestN = sprite, n
+      end
+    end
+    out[class] = best
+  end
+  trainerSpriteVotes = out
+  trainerSpriteVotesFrom = maps
+  return out
+end
+
+-- Last resort, best first: a class nobody walks around as on any map (the
+-- unused ones, and anything a mod adds without an overworld object) still gets
+-- a body on the field rather than an empty foe edge. Probed against the
+-- catalog, so a build without one of these falls to the next.
+local GENERIC_TRAINER_SPRITES = {
+  "SPRITE_COOLTRAINER_M", "SPRITE_YOUNGSTER", "SPRITE_GENTLEMAN",
+}
+
+-- OPP_YOUNGSTER → SPRITE_YOUNGSTER when the catalog has a walk sheet; the
+-- overworld's own answer for the classes it does not (OPP_LASS,
+-- OPP_BUG_CATCHER, …); a generic trainer after that.
 local function trainerWalkSpriteId(trainer, game)
   if type(trainer) ~= "table" then return nil end
   local id = trainer.id or trainer.sprite or trainer.spriteId
@@ -4394,13 +5201,24 @@ local function trainerWalkSpriteId(trainer, game)
   elseif not spriteId:match("^SPRITE_") then
     spriteId = "SPRITE_" .. spriteId
   end
-  local sprites = game and game.data and game.data.sprites
+  local data = game and game.data
+  local sprites = data and data.sprites
   if type(sprites) == "table" and type(sprites[spriteId]) == "table" then
     return spriteId
   end
   -- Soft: accept the id even if we cannot prove the sheet exists here;
   -- Battlefield.resolveHumanSheet will silhouette if load fails.
   if sprites == nil then return spriteId end
+  if type(sprites) ~= "table" then return nil end
+
+  local byClass = trainerSpritesByClass(data)
+  local mapped = byClass and byClass[id] or nil
+  if type(mapped) == "string" and type(sprites[mapped]) == "table" then
+    return mapped
+  end
+  for _, generic in ipairs(GENERIC_TRAINER_SPRITES) do
+    if type(sprites[generic]) == "table" then return generic end
+  end
   return nil
 end
 
@@ -4492,6 +5310,14 @@ function M:ensureBattlefieldLoaded()
 end
 
 -- Living active field seats for one side (viewer-relative), for Battlefield.
+--
+-- A seat that is *sinking* is still a seat. `startFaint` raises
+-- `displayFainted` before the fall so the classic stage can hand the pic to
+-- `drawSinking`, which means `hidden` answers yes for the whole of a sink --
+-- and on the arena, where the fall is an fx entry against the seat rather than
+-- a separate draw call, that took the monster off the field a beat before it
+-- fell. The two paths never both draw it: `drawField` is the classic stage and
+-- `Battlefield.draw` is this one, so there is no sink offset applied twice.
 function M:battlefieldSeats(theirs)
   local out = {}
   if not self.sim then return out end
@@ -4499,17 +5325,61 @@ function M:battlefieldSeats(theirs)
   for _, slot in ipairs(self.sim.slots or {}) do
     if self:foeSide(slot.index) == (theirs and true or false) then
       local battler = self:shownBattlerAt(slot.index)
-      if not hidden(slot, battler)
+      local sinking = self:sinkingAt(slot.index)
+      local falling = sinking ~= nil and battler ~= nil and not slot.gone
+        and sinking.battler == battler
+      if (falling or not hidden(slot, battler))
          and not (introHide and introHide[slot.index]) then
         local mon = battler.mon or {}
+        -- The exp strip belongs to *this client's own seat* and no other, for
+        -- the plainest reason: `gainExp` returns early on any slot but
+        -- `self.mine`, so it is the only seat whose clocks are ever moved. A
+        -- foe never earns exp at all; a partner earns it on their own client,
+        -- where it is their own seat. Seeding the partner's plate here bought
+        -- a strip that then sat frozen for the whole battle -- an empty trough
+        -- over a monster that had just levelled, which reads as a bug rather
+        -- than as the absence of information it actually is.
+        --
+        -- Both other seats pass neither field, which is `plateModel`'s
+        -- documented no-data state: no strip, and a level pill printed from
+        -- the real level -- which for a partner is the *live* level, so their
+        -- pill is right the moment their mon levels instead of trailing a
+        -- clock nothing on this client advances.
+        --
+        -- Seeded here, on first sight, because this is where a battler is
+        -- first *noted* by the display: `seedExpClock` only ever fills a nil,
+        -- so a strip mid-fill is never disturbed by a draw.
+        local expFrac, shownLevel
+        if not theirs and slot.index == self.mine then
+          self:seedExpClock(battler)
+          expFrac = battler.shownExpFrac
+          shownLevel = battler.shownLevel
+        end
         out[#out + 1] = {
           index = slot.index,
           name = battler.name or mon.nickname or mon.species or "?",
           level = mon.level or 1,
-          hp = displayHP(battler),
-          maxHp = mon.maxHp or mon.hp or 1,
+          -- The seat HP contract (see Battlefield.cardModel): `hp` is the sim's
+          -- truth and `shownHp` is the display clock the bar is drawn from. The
+          -- gap between them *is* the drain, and passing the clock as both left
+          -- the arena unable to tell a bar mid-fall from a monster that really
+          -- had that much left.
+          hp = mon.hp or 0,
+          shownHp = displayHP(battler),
+          -- `stats.hp` is where a co-op mon keeps its maximum (`startDrain`
+          -- reads the same field); `maxHp` is the mediated sheet's spelling and
+          -- is honoured first for a battler built from one. Falling through to
+          -- `mon.hp` last -- the current number -- is a full bar whatever has
+          -- happened, which is why the plates never moved before the display
+          -- clock was split out.
+          maxHp = mon.maxHp or (mon.stats and mon.stats.hp) or mon.hp or 1,
           status = mon.status,
           species = mon.species,
+          -- Display clocks, not truth: the strip trails `mon.exp` and the
+          -- pill trails `mon.level` for exactly as long as a queued fill
+          -- takes to play (see `startExpFill`).
+          expFrac = expFrac,
+          shownLevel = shownLevel,
           icon = seatIconFor(self, slot, battler),
           front = seatFrontFor(self, slot, battler),
           acting = (self.acting == slot.index)
@@ -4552,13 +5422,20 @@ function M:battlefieldFoeHumans()
   local npcShape = mode == "coop_npc"
     or (mode == nil and self.trainer and not self:partyBattle())
   if npcShape then
-    local spriteId = trainerWalkSpriteId(self.trainer, self.game)
-    if not spriteId then return {} end
+    -- The trainer is on the field whether or not we can name their walk sheet,
+    -- so the entry is unconditional now: this used to bail on a nil spriteId,
+    -- which is exactly what emptied the foe edge of every BUG CATCHER / LASS
+    -- fight. `trainerWalkSpriteId` almost always answers (name transform →
+    -- overworld vote → generic); on the rare nil, Battlefield draws the
+    -- silhouette, which is still a trainer standing there.
+    --
+    -- One entry, and never a player's: this branch is the NPC shape, so the
+    -- foe seats are ownerless by construction and no seat walk runs here.
     return {
       {
         id = self.trainer and self.trainer.id,
         name = (self.trainer and self.trainer.name) or self:trainerIntroName(),
-        spriteId = spriteId,
+        spriteId = trainerWalkSpriteId(self.trainer, self.game),
       },
     }
   end
@@ -4603,22 +5480,103 @@ function M:battlefieldHumanIndex(slotIndex)
   return nil, nil
 end
 
-function M:noteBattlefieldBubble(slotIndex, text)
-  if not self:usesBattlefield() then return end
+-- The acting monster's display name, spelled exactly as the plates spell it
+-- (`battlefieldSeats` uses the same fallback chain) so the callout and the seat
+-- under it never disagree. Soft: a stale slot index is a bubble without a name
+-- line, never a throw out of a message pump.
+local function actingMonName(self, slotIndex)
+  if type(slotIndex) ~= "number" then return nil end
+  local ok, battler = pcall(self.shownBattlerAt, self, slotIndex)
+  if not ok or not battler then return nil end
+  local mon = battler.mon or {}
+  local name = battler.name or mon.nickname or mon.species
+  if type(name) == "string" and name ~= "" then return name end
+  return nil
+end
+
+-- One attack, spelled two ways.
+--
+-- The referee narrates a move under its **id** (`_say(species .. " used " ..
+-- move.id)` in BattleSim/Turn.lua and its Node twin) while the anim row beside
+-- it carries the registry **name**, so "DOUBLE_KICK" and "DOUBLE KICK" reach
+-- this function one after the other for a single attack. Folded to one key so
+-- the shout cannot be raised twice under two spellings of the same move.
+local function calloutKey(move)
+  local key = tostring(move):upper():gsub("[%s_]+", " ")
+  return key
+end
+
+-- Raise the trainer's shout for an attack -- **once**.
+--
+-- Returns `spoke, raised`:
+--
+--   * `spoke` -- there is a shout up for this seat now. `splitCalloutBeat`
+--     reads it: a seat with nobody to shout for it (a coop_wild foe, the
+--     classic stage, a ball marker) must not stall the arena on a bubble that
+--     was never drawn.
+--   * `raised` -- ...and it is a *new* one. Only a new shout means a new
+--     attack, which is what re-arms the callout beat (see `update`'s text
+--     branch).
+--
+-- **The two directions one attack arrives from.** A move reaches here from the
+-- anim row (`splitCalloutBeat`) *and* from the "X used MOVE" line beside it
+-- (`update`'s text branch), and the referee does not even agree with itself
+-- about which comes first: the Node half emits `anim` before it says the
+-- sentence, CoopSim says the sentence first. Whichever arrives first shouts;
+-- the other refreshes it. Without that, one attack raised the bubble two and
+-- three times -- and because the move animation runs between them, the second
+-- raise landed after the first had begun shrinking (or expired outright on a
+-- long animation), which is a trainer who shouts the same order twice.
+--
+-- A refresh is deliberately *not* a raise: it extends the life of the shout it
+-- is part of -- which is what a multi-hit move wants, one announcement whose
+-- bubble lasts the flurry -- without restarting the scale-in the renderer
+-- drives off `t`.
+--
+-- The key is cleared with `calloutSpent`, in `snapDisplay`: both are "what the
+-- attack now playing has already had", and both are reset when the queue hands
+-- back to a menu.
+function M:noteBattlefieldBubble(slotIndex, text, moveName)
+  if not self:usesBattlefield() then return false end
   local move = moveNameFromBattleText(text)
-  if not move then return end
+  if type(moveName) == "string" and moveName ~= "" then move = moveName end
+  if not move then return false end
+  -- The engine's ball / hide / shake markers are not move callouts, and one of
+  -- them reaching here is a bubble that says "used TOSS_ANIM!" over the
+  -- trainer's head. The call sites filter them, and so does this: the message
+  -- path below parses the name out of arbitrary battle text, so a referee
+  -- sentence carrying a marker would otherwise arrive by the back door.
+  if move:find("_ANIM", 1, true) then return false end
   -- Humans + coop_npc foe seats (owner nil → foe human 1). coop_wild foes
   -- have no foeHumans, so battlefieldHumanIndex returns nil.
   local side, humanIndex = self:battlefieldHumanIndex(slotIndex)
-  if not side then return end
+  if not side then return false end
+  local key = calloutKey(move)
+  local shout = self.calloutShout
+  if shout and shout.slot == slotIndex and shout.key == key then
+    -- Already shouted. Refresh the bubble that is up so the announcement lasts
+    -- the attack it belongs to, and raise nothing.
+    local live = self.battlefieldBubbles and self.battlefieldBubbles[1]
+    if live then live.born = battlefieldFrame(self) end
+    return true, false
+  end
+  self.calloutShout = { slot = slotIndex, key = key }
   self.battlefieldBubbles = {
     {
       side = side,
       humanIndex = humanIndex,
-      text = move,
+      -- R3 item 5: line one is the monster, line two the move -- "PIKACHU!"
+      -- over "THUNDERBOLT!". The emitter supplies the two words and the
+      -- renderer owns the shouting; `text` stays as the lead-in it always was
+      -- for the case where the actor cannot be named, which is the only way
+      -- the old sentence still prints.
+      name = actingMonName(self, slotIndex),
+      text = "used",
+      moveName = move,
       born = battlefieldFrame(self),
     },
   }
+  return true, true
 end
 
 function M:battlefieldBubbleCtx()
@@ -4635,6 +5593,12 @@ function M:battlefieldBubbleCtx()
         side = b.side,
         humanIndex = b.humanIndex,
         text = b.text,
+        -- Optional acting-mon name: when present it takes the top line and the
+        -- lead-in text is not printed at all (Battlefield.bubbleLines).
+        name = b.name,
+        -- Optional, and only on a move callout: the renderer gives it its own
+        -- larger line under the lead-in.
+        moveName = b.moveName,
         t = 1 - (age / BATTLEFIELD_BUBBLE_LIFE),
       }
     end
@@ -4643,16 +5607,698 @@ function M:battlefieldBubbleCtx()
   return out
 end
 
+-- ------- arena effects (Gen1 battlefield only)
+--
+-- The screen owns the clock; Battlefield owns the shape. Every entry is
+-- `{ kind, side, seatIndex, t }` by the time it reaches the renderer, and each
+-- shape there is a pure function of `t` -- so a frame is reproducible and the
+-- suite can assert one without a graphics context.
+--
+-- None of this exists on the classic 160×144 stage or on Gen 2: those draw
+-- through `drawField`, which has its own sink (`drawSinking`) and no renderer
+-- for anything else, so every emitter below is gated on `usesBattlefield()`.
+--
+-- Entries are held internally against the **sim slot** rather than against a
+-- seat position: the arena seat index is the slot's place in the *drawn* list,
+-- which is filtered (a fainted seat leaves it), so it can only honestly be
+-- decided at ctx time. `battlefieldFxCtx` does that projection.
+
+-- Effect lifetimes in seconds. Shared with MediatedBattle's twin table --
+-- these two screens draw the same arena, and a throw that took longer on one
+-- of them would be the same animation at two speeds.
+local FX_SPAN = {
+  lunge = 0.35,
+  flash = 0.30,
+  shake = 0.25,
+  faint = 0.60,
+  spawn = 0.40,
+  -- The ball flow. One constant per kind, and each one is also the dwell the
+  -- queued row that emits it is held for -- the row *is* the effect, so a
+  -- throw that outlives its row would be cut off by the next line and a row
+  -- that outlives its throw would stall the fight on a finished animation.
+  recall = 0.35, -- HIDEPIC: the monster shrinks into the ball
+  ball   = 0.60, -- TOSS / GREATTOSS / ULTRATOSS: the arc
+  wobble = 0.70, -- SHAKE: one rock, one per shake the referee counted
+  poof   = 0.45, -- POOF / SHOWPIC: the burst, and what comes out of it
+}
+
+-- The beats between the effects, in seconds. Not effects themselves -- nothing
+-- is drawn for one, and `emitFx` must never be able to take a key from here --
+-- so they are their own table rather than more `FX_SPAN` entries. Shared with
+-- MediatedBattle's twin for the same reason `FX_SPAN` is: the two screens play
+-- the same per-attack chronology and one of them running it at a different
+-- tempo would be the same fight at two speeds.
+--
+-- The chronology these two split apart, in order: the trainer's callout, the
+-- attacker's lunge, the defender's flash + the field's nudge, the HP bar, the
+-- faint sink, the "fainted!" line, the switch choice, and the replacement
+-- arriving on the field. The last four were already strictly ordered -- each
+-- one holds the message queue by itself. The first four were two pairs, each
+-- landing in a single tick, which is what these spans undo.
+local BEAT_SPAN = {
+  -- 1 -> 2. The shout is a moment of its own: the bubble goes up over the
+  -- trainer, and only then does the monster lean in. Comfortably inside the
+  -- bubble's own life (BATTLEFIELD_BUBBLE_LIFE, 90 frames) with the lunge's
+  -- 0.35s on top -- 33 + 21 of 90 -- so the shout is still on screen for the
+  -- whole of the lunge it introduces, which is the point of saying it first.
+  callout = 0.55,
+  -- 3 -> 4. The strike reads before the bar answers it: the defender flashes
+  -- and the field takes its nudge with the bar held exactly where it was, and
+  -- only once that has been seen does the drain start. Deliberately shorter
+  -- than the flash it opens (FX_SPAN.flash is 0.30 too, and `stepFx` keeps
+  -- running through the hold) so the white is still fading off the defender as
+  -- the bar begins to move -- the two are one hit, not two.
+  hit = 0.30,
+}
+
+-- Put `row` back at the head of the queue and hold everything for `span`.
+--
+-- The one primitive both splits below are made of, and the same one
+-- `startBallFx` re-queues a SHAKE row with: the row is not consumed, it is
+-- *deferred*, so the sequencer stays the message queue and nothing anywhere
+-- has to keep a second clock. `update`'s beat branch is the other half.
+--
+-- Answers false when there is no queue to put the row back into, which is the
+-- only way this can fail -- and the caller then does the unsplit thing rather
+-- than dropping the row on the floor.
+function M:holdBeat(row, span)
+  if type(self.messages) ~= "table" then return false end
+  span = tonumber(span)
+  if not span or span <= 0 then return false end
+  table.insert(self.messages, 1, row)
+  self.beatHold = span
+  self.beatDwell = nil
+  return true
+end
+
+-- Beats 1 -> 2: the trainer shouts, and *then* the monster leans in.
+--
+-- These used to land in the same tick -- `startAnim` noted the bubble and
+-- emitted the lunge one line apart -- so the callout was never a beat, only
+-- decoration on the lunge. Now the bubble goes up alone, the anim row goes
+-- back at the head of the queue, and the lunge plays `BEAT_SPAN.callout`
+-- later with its own hold untouched.
+--
+-- **Once per attack, not once per strike.** A multi-hit move on the coop queue
+-- is one announcement and one "used X!" line followed by an anim row per
+-- strike: the engine reuses the announcement's row for hit 1 and inserts a
+-- fresh `{ anim = move.id }` for every hit after it, each with that strike's
+-- own drain row behind it (src/battle/EffectRegistry.lua, the `for h = 1, hits`
+-- loop). Every one of those rows carries the same `from`, because CoopSim's
+-- `drainInto` stamps the actor onto every event an action produced -- so the
+-- row alone cannot tell "the move started" from "it landed again", and a
+-- naive split shouted five times through one Fury Attack. The announcement
+-- line is what owes the beat (`update`'s text branch clears `calloutSpent`
+-- when it raises a shout) and the first anim row behind it spends it.
+--
+-- Returns true when it took the row: the caller must start nothing else this
+-- tick. Returning false still means a shout is up for that seat -- a repeat
+-- strike refreshes the one it is part of, exactly as it did before.
+function M:splitCalloutBeat(row)
+  if not self:usesBattlefield() then return false end
+  if type(row) ~= "table" or row.from == nil then return false end
+  -- **Only on the first pass.** The beat below puts this very row back at the
+  -- head of the queue, so it arrives here twice for one strike; the second
+  -- arrival is the lunge, and re-noting the bubble for it restarted a scale-in
+  -- the lunge is meant to be read *under*. MediatedBattle's `startAnim` has
+  -- guarded its own note this way since the split was written -- this is the
+  -- half of that fix the co-op twin never got.
+  if row.calledOut then return false end
+
+  local moveName = row.anim
+  local def = self.game and self.game.data and self.game.data.moves
+    and self.game.data.moves[row.anim]
+  if def and type(def.name) == "string" and def.name ~= "" then
+    moveName = def.name
+  end
+  -- Raised first, and whether anything was shouted at all is the gate: a seat
+  -- with no human to hang a bubble on (a coop_wild foe) gets no shout, and a
+  -- beat spent waiting for one nobody can see is a fight that pauses for
+  -- nothing. The answer comes back from `noteBattlefieldBubble` rather than
+  -- from the identity of the bubble table: a re-note for an attack already
+  -- shouted refreshes that bubble in place now, so identity would read a
+  -- perfectly good shout as "nobody heard it".
+  local spoke = self:noteBattlefieldBubble(row.from,
+    "used\n" .. tostring(moveName) .. "!", tostring(moveName))
+  if not spoke then return false end
+
+  local spent = self.calloutSpent
+  if spent and spent.from == row.from and spent.anim == row.anim then
+    return false
+  end
+  if not self:holdBeat(row, BEAT_SPAN.callout) then return false end
+  -- Marked with the beat, so the pass that comes back for the lunge is the one
+  -- the guard at the top turns away.
+  row.calledOut = true
+  self.calloutSpent = { from = row.from, anim = row.anim }
+  return true
+end
+
+-- Beats 3 -> 4: the defender takes the hit, and *then* the bar answers it.
+--
+-- `startDrain` used to flash the defender, nudge the field and start the bar
+-- falling in one call, so the strike and its consequence were a single frame
+-- and the flash simply happened to be visible over a moving bar. Now the hit
+-- reads on its own with the bar frozen exactly where it was, and the drain
+-- starts `BEAT_SPAN.hit` later.
+--
+-- Once per drain row rather than once per attack -- the opposite of the
+-- callout, and deliberately: each strike of a multi-hit move gets its own
+-- drain row with its own stop (`drainNext(target, stopAt)`), and each of those
+-- is a separate blow that has to read as one.
+--
+-- Only a *fall*. The caller has already decided this row moves the bar
+-- downwards; a heal, a drain move's restore, a Recover keeps no fx and so
+-- needs no beat in front of one.
+function M:splitHitBeat(row)
+  if not self:usesBattlefield() then return false end
+  if type(row) ~= "table" or row.beat then return false end
+  -- Marked before the hold rather than after, so a row that somehow came back
+  -- round a second time cannot flash twice for one blow.
+  row.beat = true
+  self:emitFx("flash", row.slot)
+  self:emitFx("shake", row.slot)
+  return self:holdBeat(row, BEAT_SPAN.hit)
+end
+
+-- The engine's ball markers, and what each one is on the arena. Ball ids vary
+-- with the ball (`_emitBallChain` in BattleSim/Turn.lua picks the toss by
+-- item), so the toss is listed three times rather than pattern-matched.
+local BALL_FX = {
+  TOSS_ANIM      = "ball",
+  GREATTOSS_ANIM = "ball",
+  ULTRATOSS_ANIM = "ball",
+  HIDEPIC_ANIM   = "recall",
+  SHAKE_ANIM     = "wobble",
+  POOF_ANIM      = "poof",
+  SHOWPIC_ANIM   = "poof",
+}
+
+-- The kinds that mean "this seat is inside the ball". Held at t == 1 the way a
+-- faint sink is (see `stepFx`): the queue leaves a frame or two between one row
+-- ending and the next starting, and a monster that flickered back into view in
+-- that gap would be out of the ball and in it again twice a throw.
+--
+-- **`ball` is not one of them**, and that is chronology rather than an
+-- oversight. The arc is a ball travelling towards a monster that is still
+-- standing there -- the occupant only goes in when HIDEPIC (`recall`) plays,
+-- which is the row after. Listing the arc here did two wrong things at once:
+-- it claimed the seat was occupied before the ball had arrived, and -- because
+-- a held kind is never retired while the flow is open -- it parked a finished
+-- pokeball on top of the seat (`drawFieldFx` draws `ball` at `fxBallPoint`,
+-- which at t == 1 is the seat itself) for the gap between the arc and whatever
+-- came next. `Battlefield.fxSeat` makes the same call on its side of the wire.
+local BALL_HIDE_FX = { recall = true, wobble = true }
+
+-- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
+-- number came off the wire, and a hub claiming a thousand would otherwise
+-- queue a thousand rows the player cannot skip past.
+local BALL_SHAKE_MAX = 8
+
+-- Which arena side a field slot sits on, viewer-relative.
+function M:fxSideFor(index)
+  if index ~= nil and self:foeSide(index) then return "foe" end
+  return "ally"
+end
+
+-- Start one effect. Returns the record so a caller that needs to wait on it can
+-- hold the reference rather than search the list.
+--
+-- `own` is read by the `ball` kind alone and marks a **send**: the seat's own
+-- trainer throwing their own monster out, which leaves that side's trainer
+-- column instead of the one opposite (`Battlefield.ballOrigin`). Absent is a
+-- catch throw, which is what every ball on this screen was before send-outs
+-- grew one. Carried as nil rather than false so the published entry keeps the
+-- shape the renderer's twin publishes.
+function M:emitFx(kind, index, own)
+  if not self:usesBattlefield() then return nil end
+  local span = FX_SPAN[kind]
+  if not span then return nil end
+  local fx = {
+    kind = kind,
+    slot = index,
+    side = self:fxSideFor(index),
+    own = (own == true) or nil,
+    t = 0,
+    elapsed = 0,
+    duration = span,
+  }
+  local list = self.fx
+  if type(list) ~= "table" then
+    list = {}
+    self.fx = list
+  end
+  list[#list + 1] = fx
+  return fx
+end
+
+-- ------- the ball flow
+--
+-- Up to six queued rows describe one throw -- toss, burst, recall, the shakes,
+-- and the pair that ends a failure -- and each one is played here as it reaches
+-- the head of the message queue, never when the packet carrying it arrived.
+-- `_emitBallChain` (src/BattleSim/Turn.lua:1737, mirrored in
+-- server/lib/battle) is the order they come in.
+
+-- The seat a ball row is really about.
+--
+-- Every row in the chain is stamped with the *thrower's* slot, and the engine's
+-- own chain hides the enemy pic whoever threw -- so the arc, the recall and the
+-- wobbles all belong to a seat on the side opposite the thrower. A host-sim row
+-- carries no slot at all (CoopField queues `attackerIsPlayer` and nothing
+-- else), so that is the fallback, and viewer-relative either way.
+-- The first seat on one side of the arena worth pointing an effect at.
+--
+-- "Worth" is doing work: `gone` is the seat having left the field entirely, but
+-- a seat can also still be there with a monster that is down and waiting to be
+-- replaced -- and a ball arcing at a corpse (or a lunge from one) is the wrong
+-- seat when the side has another that is standing. So a live seat wins, and
+-- the first non-`gone` one is the fallback when the whole side is down: an
+-- effect on the wrong seat still beats an effect on nobody, which is what the
+-- caller gets for a nil (`battlefieldFxCtx` drops a slotless entry).
+function M:seatOnSide(wantFoe)
+  local down = nil
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if not slot.gone and self:foeSide(slot.index) == wantFoe then
+      local isDown = false
+      if self.sim and self.sim.isDown then
+        local ok, res = pcall(self.sim.isDown, self.sim, slot)
+        isDown = (ok and res) and true or false
+      end
+      if not isDown then return slot.index end
+      if down == nil then down = slot.index end
+    end
+  end
+  return down
+end
+
+-- Which arena side a row's actor is on, viewer-relative, as a `wantFoe` flag
+-- for `seatOnSide`.
+--
+-- `from` is the honest answer and is always viewer-true. A host-sim row has
+-- none -- `CoopField` queues `attackerIsPlayer` and nothing else -- so that is
+-- the fallback, and it is why this exists as its own function: every consumer
+-- of an anim row's actor has to fall back the same way or it silently does
+-- nothing on the host-sim modes.
+function M:actorIsFoe(row)
+  if type(row) ~= "table" then return nil end
+  if row.from ~= nil then return self:foeSide(row.from) and true or false end
+  if row.attackerIsPlayer ~= nil then return not row.attackerIsPlayer end
+  return nil
+end
+
+function M:ballTargetSlot(row)
+  local threwFoe = self:actorIsFoe(row)
+  if threwFoe == nil then threwFoe = false end
+  -- The far side from the thrower. A catch is a wild fight, where there is
+  -- exactly one seat over there; a 2-on-2 that somehow produced a throw still
+  -- lands it on somebody rather than nobody.
+  return self:seatOnSide(not threwFoe)
+end
+
+-- Retire the hiding effects on one side. Paired with the emit that replaces
+-- them, so the seat is never uncovered between two rows of the same throw.
+function M:dropBallFx(side)
+  local list = self.fx
+  if type(list) ~= "table" then return end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    local hiding = type(fx) == "table" and BALL_HIDE_FX[fx.kind] and fx.side == side
+    if not hiding then kept[#kept + 1] = fx end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+-- The monster is out of the ball (or the seat it was on is gone): drop the hold
+-- that kept it hidden.
+function M:clearBallFlow()
+  local flow = self.ballFlow
+  if not flow then return end
+  self.ballFlow = nil
+  self:dropBallFx(flow.side)
+end
+
+-- A ball marker reaches the head of the queue. Returns the effect kind it
+-- played, or nil for a row with nothing left to show.
+--
+-- Only ever called from the battlefield branch of `startAnim`: the classic
+-- 160×144 path and Gen 2 run the engine's AnimPlayer over these same rows and
+-- have no arena for any of this.
+function M:startBallFx(row)
+  if not self:usesBattlefield() then return nil end
+  if type(row) ~= "table" then return nil end
+  local kind = BALL_FX[row.anim]
+  if not kind then return nil end
+
+  local index = self:ballTargetSlot(row)
+  if index == nil then return nil end
+  local side = self:fxSideFor(index)
+  local flow = self.ballFlow
+  if flow and flow.side ~= side then
+    -- A throw at the other seat: the old one is over whatever it was waiting
+    -- for, and leaving it held would keep a monster in a ball nobody threw.
+    self:clearBallFlow()
+    flow = nil
+  end
+  local hiddenNow = (flow ~= nil) and flow.hidden == true
+
+  if kind == "poof" then
+    -- A POOF outside a throw is the intro's own send-out marker: `queueIntroSendOut`
+    -- stamps it with the seat **coming out** rather than with a thrower, and
+    -- that seat is still under `introHide` while this row plays. Its burst is
+    -- emitted at the reveal instead (`noteBattlefieldSpawn`), where there is a
+    -- monster on the arena for it to happen over.
+    if flow == nil then return nil end
+    -- POOF is both halves of a throw: the ball bursting open on the way in, and
+    -- the monster coming back out of it when it breaks free. Which one it is is
+    -- which side of HIDEPIC the row landed on. A failure ends POOF + SHOWPIC
+    -- and only the first of those is the reappearance -- the second would be a
+    -- burst over a monster already standing there.
+    if row.anim == "SHOWPIC_ANIM" and not hiddenNow then return nil end
+    self:emitFx("poof", index)
+    -- Either way the ball is open, so the hold that hid the seat for the arc
+    -- ends here: a throw the referee gave no shakes at all ends on this row,
+    -- and leaving the flow standing would keep the monster inside a ball that
+    -- had already burst. The recall behind a real catch attempt opens a fresh
+    -- flow of its own (HIDEPIC is the next row).
+    self:clearBallFlow()
+    -- ...and if it *was* hidden, this POOF is the monster coming back out.
+    if hiddenNow then self:emitFx("spawn", index) end
+    self.animHold = FX_SPAN.poof
+    return kind
+  end
+
+  -- SHAKE carries the whole count on a single row (`anim("SHAKE_ANIM", shakes)`
+  -- in both twins -- src/BattleSim/Turn.lua:1752), and the contract is one
+  -- wobble per effect, so the row plays the first rock and puts the remainder
+  -- back at the head of the queue. Still queue-ordered, and still one thing at
+  -- a time: nothing behind it can start until the last wobble has been here.
+  if kind == "wobble" then
+    local left = math.floor(tonumber(row.amount) or 1)
+    if left > BALL_SHAKE_MAX then left = BALL_SHAKE_MAX end
+    if left > 1 and type(self.messages) == "table" then
+      table.insert(self.messages, 1, {
+        anim = row.anim, from = row.from, to = row.to,
+        attackerIsPlayer = row.attackerIsPlayer, amount = left - 1,
+      })
+      -- ...and this row is now worth exactly one wobble, so say so.
+      --
+      -- `startAnim` hands `row.amount` straight to the engine AnimPlayer as
+      -- `opts.shakes`, and the player draws that many passes of SHAKE_ANIM by
+      -- itself. Splitting the row for the arena while leaving the count alone
+      -- ran both fan-outs at once: a three-shake catch played 3 + 2 + 1 = six
+      -- AnimPlayer passes across the three rows -- six tinks and roughly twice
+      -- the dead time -- under three arena wobbles. One pass per row is the
+      -- contract the split was made for.
+      row.amount = 1
+    end
+  end
+
+  -- The hiding kinds. The previous one is dropped in the same call the next is
+  -- emitted in, and `stepFx` holds a finished one at its last frame, so the
+  -- seat stays covered from the recall to the burst that undoes it.
+  self:dropBallFx(side)
+  self.ballFlow = { side = side, slot = index, hidden = hiddenNow or kind == "recall" }
+  self:emitFx(kind, index)
+  self.animHold = FX_SPAN[kind]
+  return kind
+end
+
+-- A monster is revealed on its seat: burst, then scale in.
+--
+-- Called at the moment the pic actually becomes drawable rather than when the
+-- POOF row played -- the intro holds the seat under `introHide` until the `act`
+-- row behind the marker clears it, so a burst emitted with the marker would
+-- have finished before there was anything on the arena to burst over. Paired
+-- with the classic stage's `growIn`, which is the same beat on the other path.
+function M:noteBattlefieldSpawn(index)
+  if index == nil then return end
+  if not self:usesBattlefield() then return end
+  self:emitFx("poof", index)
+  self:emitFx("spawn", index)
+end
+
+-- ------- the throw in front of an arrival
+--
+-- A monster does not simply materialise on its square: somebody throws it
+-- there. The chronology the owner asked for is the original's -- the sentence
+-- that says who is sending what, then the ball leaving that trainer's hand,
+-- and only when it lands the burst and the monster scaling out of it. Three
+-- beats, in three rows: the line is queued by whoever produced the send
+-- (`medRows`, the intro), this is the arc, and the `swap` row behind it is the
+-- reveal (`applySwap` -> `noteBattlefieldSpawn`).
+--
+-- **Nobody throws a wild POKeMON.** A wild side has no trainer standing on it
+-- (`battlefieldFoeHumans` is empty for `coop_wild`), so a seat with no thrower
+-- to hang the arc on keeps the plain burst-and-grow it has always had --
+-- `battlefieldHumanIndex` is the same question the callout bubbles ask, and
+-- answering it here rather than by mode keeps the two agreeing about who is on
+-- the field.
+--
+-- Arena only. The classic 160x144 stage has no field to throw a ball across --
+-- its send-out beat is `growIn`, which `applySwap` runs on both paths.
+function M:queueSendBall(index)
+  if index == nil then return false end
+  if not self:usesBattlefield() then return false end
+  if type(self.messages) ~= "table" then return false end
+  if not self:sentByTrainer(index) then return false end
+  self.messages[#self.messages + 1] = { ballsend = index }
+  return true
+end
+
+-- Is there somebody to have sent this seat's monster out?
+--
+-- One question, two answers on it: whether an arrival is thrown or simply
+-- appears, and whether it is narrated as somebody's send-out at all. A wild
+-- POKeMON is neither -- it walks into the fight on its own -- and it is the
+-- only seat that answers false, because every other shape of this screen
+-- fields either a player or an NPC trainer. `battlefieldHumanIndex` is the
+-- existing spelling of "who on the field owns this seat" (the callout bubbles
+-- hang off the same answer), so the two cannot drift apart.
+function M:sentByTrainer(index)
+  if index == nil then return false end
+  local ok, side = pcall(self.battlefieldHumanIndex, self, index)
+  return (ok and side ~= nil) and true or false
+end
+
+-- The arc row reaching the head of the queue.
+--
+-- The seat is emptied for the flight and stays empty until the reveal drops
+-- the hold -- the ball is *carrying* the monster, so anything standing on the
+-- square while it flies is the arrival happening twice. `introHide` is that
+-- hold: it already means "this seat has nobody on it yet" on both stages, and
+-- an arrival is the same fact as an intro.
+--
+-- Held for the arc's own span, the way every ball row on this screen is held
+-- (`startBallFx` sets `animHold` from the same table). A beat rather than an
+-- `animHold` because there is no engine animation under it to hold *against*:
+-- `holdBeat`'s clock is the one the queue already stops for when a row is a
+-- gap rather than a picture, and B skips it exactly as it skips a throw.
+function M:startSendBall(row)
+  local index = type(row) == "table" and row.ballsend or nil
+  if index == nil then return false end
+  self.introHide = self.introHide or {}
+  self.introHide[index] = true
+  self:emitFx("ball", index, true)
+  self.beatHold = FX_SPAN.ball
+  self.beatDwell = nil
+  return true
+end
+
+-- Advance every live effect and retire the finished ones. Scaled by dt so the
+-- fixed 60Hz step reads as one frame and a headless second still completes.
+function M:stepFx(dt)
+  local list = self.fx
+  if type(list) ~= "table" or #list == 0 then return end
+  local step = tonumber(dt) or 0
+  if step <= 0 then step = 1 / 60 end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    if type(fx) == "table" then
+      local span = tonumber(fx.duration) or FX_SPAN[fx.kind] or 0.3
+      if span <= 0 then span = 0.3 end
+      fx.elapsed = (tonumber(fx.elapsed) or 0) + step
+      local t = fx.elapsed / span
+      if t >= 1 then
+        fx.t = 1
+        -- A finished sink is *held* rather than retired, and the sequencer says
+        -- for how long: `faintFx` / `sinkingAt` is what the message queue is
+        -- actually blocked on (thirty frames of `stepFaint`), and the end state
+        -- of the effect is a monster face down and invisible. Retiring it the
+        -- moment its own clock ran out popped the KO back to full opacity for
+        -- the rest of the fall.
+        if fx.kind == "faint" and self:sinkingAt(fx.slot) then
+          kept[#kept + 1] = fx
+        elseif BALL_HIDE_FX[fx.kind] and self.ballFlow
+            and self.ballFlow.side == fx.side then
+          -- Same hold, same reason, for a monster inside a ball: its end state
+          -- is a seat with nothing standing on it, and the row that undoes that
+          -- is still to come. `startBallFx` replaces it as each row plays and
+          -- `clearBallFlow` drops it when the monster comes back out.
+          kept[#kept + 1] = fx
+        end
+      else
+        fx.t = t
+        kept[#kept + 1] = fx
+      end
+    end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+-- The seats that are about to exist, and where they will sit.
+--
+-- A seat is PENDING when it is not on the arena **and** a send arc is already
+-- in the air at it. `startSendBall` is where both halves are set at once: it
+-- holds the seat under `introHide` (so `battlefieldSeats` stops drawing it --
+-- the ball is carrying that monster) and emits the `ball` effect in the same
+-- call, and the hold lasts until the `swap` row behind the arc reveals it. So
+-- "held and thrown at" is exactly "arriving now".
+--
+-- Both halves of that "and" matter. A held seat with no arc is NOT pending: an
+-- intro holds every seat from the first frame and then reveals them one at a
+-- time, so counting all of them would size the first ball's stack for monsters
+-- that do not arrive until several rows later, and drop that ball a row above
+-- the square its own monster actually pops on. Pending is the arc's own span,
+-- one arrival at a time -- which is how the message queue plays them anyway.
+--
+-- Returns three things, from one walk, so they can never disagree:
+--   drawn    slot -> its position in the side's drawn seat list (what
+--            `Battlefield.seatOf` matches on)
+--   pending  slot -> the position it will hold in the list it is *about* to
+--            belong to: its place in slot order among the seats drawn now plus
+--            the ones arriving with it. `battlefieldSeats` walks `sim.slots` in
+--            this same order, so this is the row the newcomer really takes.
+--   counts   { ally = n, foe = m } -- how many seats each side is about to
+--            gain, which is what `ctx.pendingSeats` publishes.
+--
+-- The index and the count are one contract, not two: `Battlefield.seatAnchor`
+-- reads that index into a stack the count sizes, and a stack sized from a
+-- different set than the index was taken from names the wrong row. That is why
+-- they are produced together here rather than each at its own call site.
+function M:battlefieldPending(allySeats, foeSeats)
+  local drawn = {}
+  for i, seat in ipairs(allySeats or {}) do
+    if seat.index ~= nil then drawn[seat.index] = i end
+  end
+  for i, seat in ipairs(foeSeats or {}) do
+    if seat.index ~= nil then drawn[seat.index] = i end
+  end
+  local pending, counts = {}, { ally = 0, foe = 0 }
+  local held, order = nil, {}
+  for _, fx in ipairs(type(self.fx) == "table" and self.fx or {}) do
+    if type(fx) == "table" and fx.kind == "ball" and fx.slot ~= nil
+        and drawn[fx.slot] == nil and (held == nil or not held[fx.slot]) then
+      held = held or {}
+      held[fx.slot] = true
+      order[#order + 1] = fx.slot
+    end
+  end
+  if held == nil then return drawn, pending, counts end
+
+  local seen = { ally = 0, foe = 0 }
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    local side = self:fxSideFor(slot.index)
+    if drawn[slot.index] ~= nil or held[slot.index] then
+      seen[side] = seen[side] + 1
+      if held[slot.index] then
+        pending[slot.index] = seen[side]
+        counts[side] = counts[side] + 1
+      end
+    end
+  end
+  -- A throw at a seat the sim never listed has no place in slot order to take,
+  -- and the arc is still the only picture of an arrival this screen has -- so
+  -- it goes past the end of the side rather than being dropped, in fx order so
+  -- two of them stay put. This is the old behaviour for every pending seat,
+  -- kept here for the one case that cannot do better.
+  local sideDrawn = { ally = #(allySeats or {}), foe = #(foeSeats or {}) }
+  for _, slot in ipairs(order) do
+    if pending[slot] == nil then
+      local side = self:fxSideFor(slot)
+      counts[side] = counts[side] + 1
+      pending[slot] = sideDrawn[side] + counts[side]
+    end
+  end
+  return drawn, pending, counts
+end
+
+-- Every effect, projected onto the seats actually being drawn.
+--
+-- `seatIndex` is the 1-based position within the side's seat list, which is the
+-- only thing `Battlefield.fxSeat` / `seatOf` can match on -- and that list is
+-- filtered, so the answer moves as monsters leave the field. An effect whose
+-- seat is not on the arena is dropped rather than published with no seat index:
+-- an entry carrying none applies to *every* seat on its side, which in a
+-- 2-on-2 would flash the partner too. The field-wide jolt is the exception --
+-- `fxFieldShake` ignores side and seat by design.
+function M:battlefieldFxCtx(allySeats, foeSeats)
+  local list = self.fx
+  if type(list) ~= "table" or #list == 0 then return nil end
+  local seatIndexOf, pendingIndexOf = self:battlefieldPending(allySeats, foeSeats)
+  -- ...with one exception, and it is the whole of the send-out throw: a ball
+  -- is aimed at a seat that is **deliberately empty** -- there is no monster on
+  -- it until the burst puts one there -- so dropping it for want of a drawn
+  -- seat would be dropping every arc this screen ever throws at an arrival.
+  -- `Battlefield.seatAnchor` places an entry whose seat index names no drawn
+  -- monster, so the arc lands where the monster is about to stand.
+  --
+  -- Such a seat is handed its REAL index -- its place in the list it is about
+  -- to belong to (`pendingSeatIndex`) -- and `battlefieldCtx` publishes the
+  -- matching `pendingSeats` count, which is the half of the contract that
+  -- tells the arena the side is one row taller than it currently draws. The
+  -- two travel together: an index into a two-row stack with the stack still
+  -- sized at one row would name the wrong row. This replaces pushing the index
+  -- past the end of the drawn list, which sized the side correctly but always
+  -- landed the ball on the bottom row -- right when the arrival really was last
+  -- in slot order, one row low in a 2-on-2 whose surviving partner sits behind
+  -- it. See `Battlefield.seatAnchor`'s `pending` contract.
+  local out = {}
+  for _, fx in ipairs(list) do
+    if type(fx) == "table" then
+      if fx.kind == "shake" then
+        out[#out + 1] = { kind = "shake", side = fx.side, t = fx.t }
+      else
+        local seatIndex = fx.slot ~= nil and seatIndexOf[fx.slot] or nil
+        if not seatIndex and fx.kind == "ball" and fx.slot ~= nil then
+          seatIndex = pendingIndexOf[fx.slot]
+        end
+        if seatIndex then
+          out[#out + 1] = {
+            kind = fx.kind, side = fx.side, seatIndex = seatIndex, t = fx.t,
+            own = fx.own,
+          }
+        end
+      end
+    end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
 function M:battlefieldCtx()
   local frame = battlefieldFrame(self)
+  local allySeats = self:battlefieldSeats(false)
+  local foeSeats = self:battlefieldSeats(true)
+  local _, _, pendingSeats = self:battlefieldPending(allySeats, foeSeats)
   local ctx = {
     mode = self.mode,
     frame = frame,
     allyHumans = self:battlefieldAllyHumans(),
     foeHumans = self:battlefieldFoeHumans(),
-    allySeats = self:battlefieldSeats(false),
-    foeSeats = self:battlefieldSeats(true),
+    allySeats = allySeats,
+    foeSeats = foeSeats,
     bubbles = self:battlefieldBubbleCtx(),
+    -- The seats that are one arc away from being drawn (`battlefieldPending`).
+    -- Nothing on the arena moves for this -- the placed monsters are placed --
+    -- but it is what lets `Battlefield.seatAnchor` size an arriving seat's
+    -- stack as the side will be once the ball lands, so the arc, the burst and
+    -- the monster that scales out of it all happen on one square instead of
+    -- the ball landing a row off in a 2-on-2 replacement.
+    pendingSeats = pendingSeats,
+    -- One direction only: this screen advances `t`, Battlefield draws whatever
+    -- `t` says. Absent when nothing is playing -- the renderer tolerates that.
+    fx = self:battlefieldFxCtx(allySeats, foeSeats),
     -- Arrow/card only during target pick; Battlefield honors this flag.
     showTarget = (self.phase == "target"),
   }
@@ -4665,7 +6311,278 @@ function M:battlefieldCtx()
   return ctx
 end
 
+-- ------- the modern band (battlefield path only)
+--
+-- The same phases the GB chrome below draws, drawn instead as Battlefield's
+-- panel widgets. **Draw-only**: every row source and every cursor is the one
+-- the input handlers already read, so what a press does is untouched -- a list
+-- drawn from a different set than `updateSwitch` filters would put the cursor
+-- on the monster above the one the player is looking at.
+--
+-- Classic 160×144 and Gen 2 never reach here: `drawSafe` sends them straight to
+-- `drawMenusClassic`, which is byte-identical to what it always was.
+
+-- Right-hand column for a party row: the numbers the plates publish anyway.
+local function hpRight(mon)
+  if type(mon) ~= "table" then return nil end
+  local hp = tonumber(mon.hp)
+  local max = tonumber(mon.maxHp)
+    or (type(mon.stats) == "table" and tonumber(mon.stats.hp))
+  if not (hp and max) then return nil end
+  return ("%d/%d"):format(hp, max)
+end
+
+-- The commands, with SWITCH under the name the player knows it by -- which is
+-- the two-tile PKMN mark on the classic path and cannot be one here. The order
+-- and the index are `M.COMMANDS`' own: `updateCommand` steps that grid.
+function M:bandCommandItems()
+  local items = {}
+  for i, command in ipairs(M.COMMANDS) do
+    items[i] = { label = (command == "SWITCH") and "PKMN" or command }
+  end
+  return items
+end
+
+-- The move list, and the strip that used to sit beside it. PP is the row's own
+-- right column now; TYPE rides the title, where it belongs to the highlighted
+-- move rather than to the list.
+function M:bandMoveRows()
+  local moves = self:liveMoves()
+  local data = self.game and self.game.data
+  local rows = {}
+  for _, moveInst in ipairs(moves) do
+    local def = (data and data.moves or {})[moveInst.id]
+    local row = { label = (def and def.name) or moveInst.id or "-" }
+    local pp = tonumber(moveInst.pp)
+    if def and tonumber(def.pp) then
+      -- The classic strip's own arithmetic: PP Ups add a fifth of the base
+      -- each, rounded down, exactly as `drawMoves` computes it.
+      local base = tonumber(def.pp) or 0
+      local maxPP = base + (tonumber(moveInst.ppUps) or 0) * math.floor(base / 5)
+      row.right = ("%d/%d"):format(pp or 0, maxPP)
+    elseif pp then
+      row.right = tostring(math.floor(pp))
+    end
+    if pp and pp <= 0 then row.dim = true end
+    rows[#rows + 1] = row
+  end
+  return rows
+end
+
+function M:bandMoveTitle()
+  local moves = self:liveMoves()
+  local pick = moves[self.moveIndex or 1]
+  local def = pick and (self.game and self.game.data and self.game.data.moves
+    or {})[pick.id]
+  if not (def and def.type) then return "MOVES" end
+  local TypeChart = engine and engine.TypeChart
+  local typeName = def.type
+  if TypeChart and TypeChart.displayName then
+    typeName = TypeChart.displayName(def.type) or def.type
+  end
+  return ("MOVES   TYPE/%s"):format(tostring(typeName))
+end
+
+-- The bench, as `benchOf` filters it -- alive, and not the one already out.
+-- Same list `updateSwitch` / `updateReplace` index into.
+function M:bandBenchRows(bench)
+  local pokemon = (self.game and self.game.data and self.game.data.pokemon) or {}
+  local rows = {}
+  for _, entry in ipairs(bench or {}) do
+    local mon = entry.mon or {}
+    local def = pokemon[mon.species]
+    rows[#rows + 1] = {
+      label = tostring(mon.nickname or (def and def.name) or mon.species or "?"),
+      right = hpRight(mon),
+    }
+  end
+  return rows
+end
+
+-- Draw the band, and answer whether the band is now on the screen.
+--
+-- Wrapped by `M:drawModernBand` below, which is what callers use: the wrappers
+-- here turn each widget's own verdict into one flag, and the caller reads that
+-- flag alongside this function's return. A widget answers `false` when it
+-- painted nothing -- no love.graphics, a box too small to label, or its own
+-- internal pcall caught a throw -- and a `false` anywhere means part of the
+-- band is missing, which is the case the GB chrome exists for. `nil` is not a
+-- failure: an older Battlefield beside this screen returns nothing at all, and
+-- those builds are the ones the type checks below already vet.
+function M:drawBandWidgets()
+  local drawMessage = Battlefield.drawMessagePanel
+  local drawGrid = Battlefield.drawCommandGrid
+  local drawList = Battlefield.drawListPanel
+  -- An arena without the band widgets (an older Battlefield beside a newer
+  -- screen) still gets the GB chrome rather than an empty band. Nothing to
+  -- remediate: the caller falls back on a false return.
+  if type(drawMessage) ~= "function" or type(drawGrid) ~= "function"
+     or type(drawList) ~= "function" then
+    return false
+  end
+  local function message(text, opts)
+    if drawMessage(text, opts) == false then self.bandFailed = true end
+  end
+  local function grid(items, cursor, opts)
+    if drawGrid(items, cursor, opts) == false then self.bandFailed = true end
+  end
+  local function list(rows, cursor, opts)
+    if drawList(rows, cursor, opts) == false then self.bandFailed = true end
+  end
+  if type(Battlefield.drawBandBackdrop) == "function" then
+    -- Once, here, and never inside a widget: two scrims would double-darken
+    -- the band.
+    Battlefield.drawBandBackdrop()
+  end
+
+  if self.replacing then
+    local seat = self.sim and self.sim:slot(self.mine)
+    local bench = seat and self:benchOf(seat) or {}
+    if #bench == 0 then
+      message("No one left!")
+    else
+      list(self:bandBenchRows(bench), self.switchIndex or 1,
+        { title = "WHO'S NEXT?" })
+    end
+    return true
+  end
+  if self.runAsk and self.phase ~= "messages" then
+    local ask = self.runAsk
+    local name = ask.name
+    if ask.role == "confirming" then
+      list(RUN_ANSWERS, ask.index or RUN_DEFAULT, { title = "RUN AWAY?" })
+    elseif ask.role == "deciding" then
+      list(RUN_ANSWERS, ask.index or RUN_DEFAULT,
+        { title = ((name or "They") .. ": RUN?") })
+    elseif ask.role == "refused" then
+      message((name or "They") .. " says NO!")
+    elseif ask.role == "fleeing" or not name then
+      message("Getting away...")
+    else
+      message("Asking " .. name .. " to RUN...")
+    end
+    return true
+  end
+  if self.phase == "choose" then
+    grid(self:bandCommandItems(), self.commandIndex or 1)
+    return true
+  end
+  if self.phase == "move" then
+    -- Every move empty: Gen 1 substitutes Struggle whatever was picked, so the
+    -- band says so rather than listing four moves that cannot be used.
+    if not self:hasLivePP() then
+      list({ { label = "STRUGGLE" } }, 1, { title = "NO MOVES LEFT!" })
+    else
+      list(self:bandMoveRows(), self.moveIndex or 1,
+        { title = self:bandMoveTitle() })
+    end
+    return true
+  end
+  if self.phase == "target" then
+    local rows = {}
+    local mine = self:mySlot()
+    for _, entry in ipairs((mine and self.sim:targetsFor(mine)) or {}) do
+      local battler = entry.battler
+      local mon = battler and battler.mon
+      rows[#rows + 1] = {
+        label = (battler and battler.name) or "?",
+        right = hpRight(mon),
+        dim = (mon and (mon.hp or 0) <= 0) or nil,
+      }
+    end
+    list(rows, self.targetIndex or 1, { title = "ATTACK WHO?" })
+    return true
+  end
+  if self.phase == "switch" then
+    local mine = self:mySlot()
+    local bench = mine and self:benchOf(mine) or {}
+    if #bench == 0 then
+      message("There's no one else to send out!")
+    else
+      list(self:bandBenchRows(bench), self.switchIndex or 1, { title = "POKeMON" })
+    end
+    return true
+  end
+  if self.phase == "item" then
+    local items = self:usableItems()
+    if #items == 0 then
+      message("You have nothing to use.")
+      return true
+    end
+    local rows = {}
+    for _, entry in ipairs(items) do
+      rows[#rows + 1] = {
+        label = tostring(entry.name or entry.id),
+        right = entry.count and ("x%d"):format(entry.count) or nil,
+      }
+    end
+    list(rows, self.itemIndex or 1, { title = "ITEMS" })
+    return true
+  end
+  if self.phase == "item_party" then
+    local seat = self:mySlot()
+    local party = (seat and seat.party) or {}
+    local rows = {}
+    for _, row in ipairs(self:itemPartyRows()) do
+      rows[#rows + 1] = {
+        label = row.label,
+        right = hpRight(party[row.index]),
+        -- Shown, not filtered: a Revive wants the fainted one, and
+        -- `updateItemParty` indexes the whole party.
+        dim = row.fainted or nil,
+      }
+    end
+    list(rows, self.switchIndex or 1, { title = "POKeMON" })
+    return true
+  end
+  if self.phase == "item_move" then
+    local seat = self:mySlot()
+    local party = (seat and seat.party) or {}
+    local mon = party[self.itemPartyIndex or (seat and seat.active) or 1]
+    local data = self.game and self.game.data
+    local rows = {}
+    for _, move in ipairs((mon and mon.moves) or {}) do
+      local def = (data and data.moves or {})[move.id]
+      rows[#rows + 1] = {
+        label = tostring((def and def.name) or move.id or "-"),
+        right = tonumber(move.pp) and tostring(math.floor(move.pp)) or nil,
+      }
+    end
+    list(rows, self.moveIndex or 1, { title = "MOVES" })
+    return true
+  end
+  message(self:boxText())
+  return true
+end
+
+function M:drawModernBand()
+  self.bandFailed = nil
+  local drew = self:drawBandWidgets()
+  if not drew then return false end
+  if self.bandFailed then
+    -- Warned once per battle, then quietly: this runs every frame, and a band
+    -- that cannot paint cannot paint sixty times a second into the log either.
+    -- The battle is not interrupted -- the caller redraws the GB chrome over
+    -- the same band on this very frame.
+    if not self.bandFallbackWarned then
+      self.bandFallbackWarned = true
+      if mod and mod.log then
+        mod.log:warn("the 2-on-2 battle band could not be drawn, so the menus "
+          .. "fall back to the Game Boy chrome; the fight is unaffected, but "
+          .. "report this with your window size and whether it repeats")
+      end
+    end
+    return false
+  end
+  return true
+end
+
 function M:drawMenuBand()
+  -- The modern band first; the GB re-projection below is the fallback for a
+  -- build whose Battlefield has no widgets, and for anything that throws on the
+  -- way through them -- a battle must never lose its menu to a panel.
+  local ok, drew = pcall(self.drawModernBand, self)
+  if ok and drew then return end
   local g = love and love.graphics
   if not (g and g.push) then
     self:drawMenusClassic()
@@ -4722,6 +6639,13 @@ end
 
 function M:drawBattlefieldSafe()
   self:ensureBattlefieldLoaded()
+  -- Fill first, exactly as the classic path does before `drawField`: this
+  -- screen declares itself opaque, so the stack stops drawing the overworld
+  -- and clears the UI canvas transparent -- and every pixel the arena does not
+  -- cover (a frame where the arena image failed to load, the seams a shake
+  -- translate opens) would otherwise show whatever was in the canvas last.
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.rectangle("fill", 0, 0, Battlefield.WIDTH, Battlefield.HEIGHT)
   local eng = {
     Font = engine and engine.Font,
     Sprites = engine and engine.Sprites,
@@ -4893,19 +6817,53 @@ function M:playMoveAnimFallback(row)
 end
 
 function M:startAnim(row)
+  -- Is this a real move, or one of the engine's ball markers? Every marker ends
+  -- in `_ANIM` (`TOSS_ANIM`, `SHAKE_ANIM`, `HIDEPIC_ANIM`, …), and the old
+  -- filter named three of the seven by hand -- so a ball throw printed "used
+  -- TOSS_ANIM!" over the thrower's head and made the thrower lurch at it.
+  local moveAnim = type(row.anim) == "string" and row.anim ~= ""
+    and not row.anim:find("_ANIM", 1, true)
+  -- Trainer callout over the human who ordered this attack (Gen1 battlefield),
+  -- and the beat behind it. `splitCalloutBeat` raises the bubble either way;
+  -- when it answers true it has also put this row back at the head of the
+  -- queue, so the shout gets the next half-second to itself and everything
+  -- below -- the lunge, the AnimPlayer, the hit sfx -- runs when the row comes
+  -- round again. Nothing here is started in the meantime: an animation held
+  -- open across a beat would be drawn over a field the beat exists to leave
+  -- still.
+  if moveAnim and self:splitCalloutBeat(row) then return true end
   self.anim = row
+  self.animHold = nil
+  self.animDwell = nil
   self.pendingHit = nil
-  -- Trainer callout over the human who ordered this attack (Gen1 battlefield).
-  if row and row.from and type(row.anim) == "string"
-     and row.anim ~= "HIDEPIC_ANIM" and row.anim ~= "SHOWPIC_ANIM"
-     and row.anim ~= "POOF_ANIM" then
-    local moveName = row.anim
-    local def = self.game and self.game.data and self.game.data.moves
-      and self.game.data.moves[row.anim]
-    if def and type(def.name) == "string" and def.name ~= "" then
-      moveName = def.name
+  -- The arena's half of the same row. The attacker leans in for a real move;
+  -- the markers are the throw itself -- the arc, the recall, each wobble and
+  -- the burst -- one per queued row, each held for as long as it plays.
+  --
+  -- Draw-only and battlefield-only: the classic 160×144 stage and Gen 2 run the
+  -- engine's AnimPlayer over these same rows below, unchanged.
+  if self:usesBattlefield() then
+    if moveAnim then
+      -- The defender's flash and the field's nudge ride the drain row behind
+      -- this one, so a move that misses only lunges.
+      --
+      -- Resolved rather than read straight off `row.from`, for the same reason
+      -- `ballTargetSlot` resolves: a host-sim row (`coop_wild` / `coop_npc`,
+      -- queued by CoopField) carries `attackerIsPlayer` and no `from` at all.
+      -- `emitFx("lunge", nil)` produced a slotless record that
+      -- `battlefieldFxCtx` then dropped -- so those two modes never lunged
+      -- once, and paid for a dead fx record on every move to not do it.
+      local lunger = row.from
+      if lunger == nil then
+        local isFoe = self:actorIsFoe(row)
+        if isFoe ~= nil then lunger = self:seatOnSide(isFoe) end
+      end
+      -- Still nobody: emit nothing. A lunge that cannot name a seat is a
+      -- record the ctx projection throws away one frame later.
+      if lunger ~= nil then self:emitFx("lunge", lunger) end
+    else
+      self:startBallFx(row)
     end
-    self:noteBattlefieldBubble(row.from, "used\n" .. tostring(moveName) .. "!")
   end
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
   if row.anim == "HIDEPIC_ANIM" then
@@ -4926,6 +6884,10 @@ function M:startAnim(row)
     -- no-player branch) and the hit thud, then let the messages carry on.
     self:playMoveAnimFallback(row)
     self:applyPendingHitFx()
+    -- ...unless the arena took the row over. There is no engine animation to
+    -- wait on, but there is a throw in the air, and the dwell in `update` is
+    -- what holds the queue for it.
+    if self.animHold then return true end
     self.anim = nil
     return false
   end
@@ -4951,6 +6913,9 @@ function M:startAnim(row)
   if not ok then
     self:playMoveAnimFallback(row)
     self:applyPendingHitFx()
+    -- Same as above: the arena's effect outlives the player that refused to
+    -- start, and the dwell holds the row for it.
+    if self.animHold then return true end
     self.anim = nil
     return false
   end
@@ -5010,13 +6975,67 @@ end
 -- the engine's own Experience.apply -- which is also what divides the stat
 -- exp, raises the stats and decides whether a level was crossed. Applying a
 -- host-computed number instead would skip all three.
+
+-- The refereed modes whose losing side is a *trainer's*, and so the only ones
+-- that pay the x1.5. A positive list rather than a "not wild" test, so a mode
+-- added later pays the wild rate until somebody decides otherwise: paying too
+-- little is a number a player never notices, paying too much is inflation that
+-- cannot be taken back. Mirrors src/MediatedBattle.lua's reading of the same
+-- rule from the other side of the same event.
+local EXP_TRAINER_MODES = { coop_npc = true }
+
+-- Warn once per screen rather than once per award, on the same reasoning
+-- src/MediatedBattle.lua's `warnNoExp` gives: a fight that cannot resolve one
+-- award usually cannot resolve the next either, and forty identical lines in
+-- the log describe one fact.
+function M:warnNoExp(why)
+  if self.expWarned then return false end
+  self.expWarned = true
+  mod.log:warn("no EXP could be awarded for a knockout in this battle (%s), so "
+    .. "the fight still plays out but nothing levels up -- report this with "
+    .. "the game version; levelling still works in ordinary battles",
+    tostring(why))
+  return true
+end
+
+-- Where the monster behind an *uploaded fight sheet* sits in the party.
+--
+-- **The two referees count in different spaces, and this is the translation.**
+-- The intermediator only ever saw `Mediated.snapshotMons(game, mine.party)`, so
+-- its `mon` is an index into that -- and `snapshotMons` skips any monster it
+-- cannot describe (no stats, no species, no moves), which shifts every index
+-- after the skip. The sheets stamp the party position they were cut from
+-- (`slot`, 0-based), so the position is read back off the sheet rather than
+-- assumed to be the array index.
+--
+-- **The discriminator is the row, not the screen**: `medRows` stamps `med` on
+-- every `exp` row it builds and CoopSim's own events carry none, so a queued
+-- batch stays readable however it was assembled -- rather than depending on
+-- `self.mediated`/`self.medMine` still holding whatever they held when the
+-- event arrived, several seconds of message queue earlier.
+--
+-- No uploaded party (a harness driving the screen directly, or an event that
+-- somehow arrives before the upload) leaves the index alone: that is exactly
+-- the behaviour this replaces. A sheet index the upload has nothing at is a
+-- referee talking about a monster this client never sent it -- `nil`, refused
+-- by the caller, rather than resolved through a fallback that would quietly
+-- pay whoever happened to sit at that number.
+function M:medPartySlot(sheetIndex)
+  local mine = self.medMine
+  if type(mine) ~= "table" or #mine == 0 then return sheetIndex end
+  local sheet = mine[sheetIndex]
+  if type(sheet) ~= "table" then return nil end
+  local slot = tonumber(sheet.slot)
+  if not slot then return sheetIndex end
+  slot = math.floor(slot) + 1
+  if slot < 1 then return sheetIndex end
+  return slot
+end
+
 function M:gainExp(event)
   if event.slot ~= self.mine then return end
   local slot = self.sim:slot(self.mine)
-  local mon = slot and slot.battler and slot.battler.mon
-  local eng = engine
-  local def = mon and event.species and (self.game.data.pokemon or {})[event.species]
-  if not (mon and def and eng and eng.Experience) then return end
+  local battler = slot and slot.battler
 
   -- EXP.ALL, the way the original splits it: the monster that fought takes
   -- half, and the other half is divided again across the whole living party.
@@ -5027,21 +7046,171 @@ function M:gainExp(event)
   local expAll = save and save.inventory and (save.inventory.EXP_ALL or 0) > 0
   local party = (save and save.party) or {}
 
+  -- **Which monster is being paid**, and it is no longer "the one standing
+  -- there".
+  --
+  -- Vanilla pays every party member that was ever in against the fallen foe
+  -- and is still alive (BattleState:3795-3801 walks `save.party` for its
+  -- participant flags, not the field), so a knockout can owe a monster that
+  -- has been sitting in its ball since the second turn. The referee names it:
+  -- `slot` is still the seat, and gates the award to its owner; `mon` is a
+  -- 0-based index into that seat's party. One event per paid participant --
+  -- so this runs once per owed monster, and nothing here collapses two of
+  -- them into one line.
+  --
+  -- The seat's party is the same table `save.party` is for our own seat
+  -- (src/Coop.lua hands the live party in), and it is the one read here
+  -- because the seat is what the index counts. Falling back to `save.party`
+  -- costs nothing and lets a screen assembled without a sim slot still pay.
+  --
+  -- No `mon` at all falls back to the active monster: a PROTOCOL 21 referee
+  -- that predates the field pays whoever was standing, and so does CoopSim's
+  -- own divisor-0 fallback (src/CoopSim.lua:1310-1324, mirroring
+  -- BattleState:3802-3804). An index that names nothing pays nobody rather
+  -- than paying the active by accident -- the guard below returns.
+  --
+  -- **And the two referees do not count in the same space.** CoopSim emits
+  -- `mon` as a position in the *seat's* party (src/CoopSim.lua:1351,
+  -- `row.index - 1`), which is the roster read below. The intermediator counts
+  -- in the party this client *uploaded* -- `Mediated.snapshotMons` skips a
+  -- monster it cannot describe, so one skip shifts every index after it, and
+  -- reading a hub index straight off the roster pays the wrong party member
+  -- (and writes its Stat Exp, its level and its new moves onto them too). The
+  -- mediated rows are translated sheet -> `sheet.slot` -> party position by
+  -- `medPartySlot`, the same two-step src/MediatedBattle.lua's
+  -- `paidSheetIndex` + `savePartyIndex` take. See `medPartySlot` for the
+  -- discriminator.
+  local index = tonumber(event.mon)
+  local mon
+  if index then
+    local roster = (slot and slot.party) or party
+    local at = math.floor(index) + 1
+    if event.med then at = self:medPartySlot(at) end
+    mon = at and roster[at]
+    -- An index that resolves to nobody pays nobody -- but it says so. Silence
+    -- here read in play as "this knockout was worth nothing", which is the one
+    -- reading it is never allowed to have: it is a referee naming a monster
+    -- this client does not hold, and the player is owed exp nobody paid.
+    if not mon then
+      self:warnNoExp(event.med
+        and "the referee paid a party member this client never uploaded"
+        or "the referee named a party member this screen does not hold")
+      return
+    end
+  else
+    mon = battler and battler.mon
+  end
+
+  local eng = engine
+  local def = mon and event.species and (self.game.data.pokemon or {})[event.species]
+  if not (mon and def and eng and eng.Experience) then return end
+
+  -- Is the paid monster the one on the plate? Everything the *display* does
+  -- below hangs on this and nothing else does: a benched award is text only.
+  local active = (battler ~= nil) and (battler.mon == mon)
+
   -- Everyone still standing on the winning side shares it, exactly as the
   -- engine divides a solo battle between its own participants -- so a co-op
   -- knockout is worth half each, not full each. Holding an EXP.ALL doubles
   -- the divisor: that is how the original expresses "half now, half spread".
-  local winners = math.max(1, tonumber(event.winners) or 1)
+  --
+  -- Two spellings for one number, because two referees send it. CoopSim (the
+  -- host-simulated path) has always called it `winners`; the intermediator
+  -- calls it `participants` (src/BattleSim/events.lua, and the JS twin beside
+  -- it). `participants` is preferred where both are present, and the fallback
+  -- is *not* a default of 1: a share count that arrived under the newer name
+  -- and was read under the older one would divide by one and pay every winner
+  -- the whole knockout -- double exp for a 2-on-2, silently.
+  local winners = math.max(1,
+    tonumber(event.participants) or tonumber(event.winners) or 1)
+
+  -- Wild or trainer, decided from the mode the screen already knows.
+  --
+  -- The trainer x1.5 is a real rule of the formula (experience.asm), so it is
+  -- paid on a positive list rather than unconditionally: `coop_wild` is the
+  -- party encounter, and paying it 1.5x would make the same monster worth more
+  -- beaten in the MMO than beaten alone. The host-simulated path carries no
+  -- mode at all (an invite-driven 2-on-2), and there the trainer record is the
+  -- fact that decides it -- the same test `battlefieldFoeHumans` uses to tell
+  -- an NPC fight from a player one. `coop_pvp` pays nothing either way: the
+  -- intermediator awards no exp in it (BattleSim's EXP_MODES).
+  local isTrainer = EXP_TRAINER_MODES[self.mode]
+    or (self.mode == nil and self.trainer ~= nil)
+    or false
 
   mon.statExp = mon.statExp or {}
   mon.exp = mon.exp or 0
+
+  -- Where the strip is *now*, read before the award lands.
+  --
+  -- `Experience.apply` mutates `mon.exp` and `mon.level` in place, so once it
+  -- has run there is nothing left to work the starting fraction back out of --
+  -- the same hazard the HP climb below documents, one field over. That is the
+  -- whole job of this capture, and its only one: `startExpFill` starts from
+  -- the *live* display clock and reaches for `from*` only when that clock is
+  -- still nil, precisely so a second award in the same batch begins where the
+  -- first fill stopped rather than rewinding to a fraction captured before it.
+  --
+  -- Battlefield only. The classic 160x144 readout has no exp strip: nothing
+  -- below is computed, nothing is queued, and its exp text flow is exactly
+  -- what it always was.
+  --
+  -- **Active only**, for the same reason: the strip on screen belongs to the
+  -- monster standing there, and a benched award has no bar of its own to
+  -- crawl. Seeding or capturing off the active battler for somebody else's
+  -- award would move a clock that nothing is about to fill -- and a queued
+  -- fill row would drag the active's strip to the *bench's* fraction.
+  local wide = self:usesBattlefield()
+  local fromFrac, fromLevel
+  if wide and active then
+    self:seedExpClock(battler)
+    fromFrac = battler.shownExpFrac
+    fromLevel = battler.shownLevel or mon.level or 1
+  end
+
   local ok, levels, gained = pcall(eng.Experience.apply, self.game.data, mon,
-    def, event.level or 1, true, winners * (expAll and 2 or 1), false)
+    def, event.level or 1, isTrainer, winners * (expAll and 2 or 1), false)
   if not ok then return end
 
-  self:say((mon.nickname or slot.battler.name or "?")
-    .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
-  self:levelled(mon, slot.battler.name, levels)
+  -- The plate's name is the *active's* name, so it is only a fallback for the
+  -- active: a nickname-less benched monster is named by its own species, the
+  -- way `levelled` names one -- and by ITS species, not `def`, which is the
+  -- monster that was beaten. Reading `def.name` here printed "FOE gained 342
+  -- EXP. Points!" for every benched award.
+  local ownDef = (self.game.data.pokemon or {})[mon.species]
+  local name = mon.nickname or (active and battler.name)
+    or (ownDef and ownDef.name) or "?"
+  self:say(name .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
+
+  -- ...and *then* the strip crawls, which is the cart's chronology: the line
+  -- is read, and the bar answers it. Queued ahead of `levelled` deliberately
+  -- -- the pill ticks over as the strip tops out (`stepExpFill`), so "grew to
+  -- level N!" is printed after the plate already says N rather than a beat
+  -- before it. Guarded on the queue because every other line here goes out
+  -- through `say`, and a caller that stubs `say` has neither a queue nor a
+  -- battler.
+  --
+  -- No target rides on the row. It is read off the mon when the row comes up,
+  -- because the mon is *still being written to* after this point: the EXP.ALL
+  -- pass below walks `save.party`, which is the same table this fighter lives
+  -- in, so a target captured here would be the first half of the award rather
+  -- than the whole of it -- a pill two levels short of the "grew to level N!"
+  -- lines printed right beside it.
+  --
+  -- Queued for the active monster and no other: `active` is the same test the
+  -- capture above made, so a benched award queues no fill row at all and the
+  -- strip on screen is not perturbed by one landing mid-queue.
+  if wide and active and self.messages then
+    self.messages[#self.messages + 1] = {
+      expfill = battler,
+      slot = event.slot,
+      name = name,
+      fromFrac = fromFrac,
+      fromLevel = fromLevel,
+    }
+  end
+
+  self:levelled(mon, active and battler.name or nil, levels)
 
   -- A level raises both HP numbers, and the bar has to be told.
   --
@@ -5054,22 +7223,43 @@ function M:gainExp(event)
   -- Queued after the level lines above, so it plays under them. Guarded on
   -- the battler and on the queue itself, because every other line here goes
   -- out through `say` and a caller that stubs `say` has neither.
-  if slot.battler and self.messages then
+  --
+  -- Active only, and the engine gates its own the same way -- `if mon ==
+  -- self.player.mon then self:drainNext() end` (BattleState:3855): a benched
+  -- monster has no bar, and draining the *active's* bar to a bench-mate's HP
+  -- is a number that was never about it.
+  if active and self.messages then
     self.messages[#self.messages + 1] =
-      { drain = slot.battler, slot = event.slot, to = mon.hp }
+      { drain = battler, slot = event.slot, to = mon.hp }
   end
 
   -- ...and the other half, spread over everyone still standing -- including
   -- the monster that fought, exactly as the original's second pass does.
   -- Fainted party members are skipped, and no "gained EXP" line is printed for
   -- any of them: the original prints only what a level-up produces.
-  if expAll then
+  --
+  -- **Once per knockout, not once per award.** The engine's second pass sits
+  -- outside its participant loop -- `vanillaExpAward` pays every alive
+  -- participant and *then* walks the party once (BattleState:3873-3890) -- so
+  -- one faint spreads one half however many monsters fought it. Here the
+  -- participant loop lives on the referee and arrives as one event each, so
+  -- without this a party that beat a foe with three of its own would bank the
+  -- EXP.ALL half three times over.
+  --
+  -- The credit is armed by the faint itself in `playEvents` and spent by the
+  -- first award that follows it, which is the same shape (and the same
+  -- three-valued flag) src/MediatedBattle.lua uses. `nil` -- no knockout ever
+  -- narrated on this screen -- runs the pass the way it always did: that is
+  -- the direct-call path a harness drives, and metering an award nothing
+  -- announced would silently stop paying it.
+  if expAll and self.expAllCredit ~= false then
+    if self.expAllCredit then self.expAllCredit = false end
     for _, member in ipairs(party) do
       if (member.hp or 0) > 0 then
         member.statExp = member.statExp or {}
         member.exp = member.exp or 0
         local gotOk, gotLevels = pcall(eng.Experience.apply, self.game.data,
-          member, def, event.level or 1, true,
+          member, def, event.level or 1, isTrainer,
           winners * 2 * math.max(1, #party), false)
         if gotOk then self:levelled(member, nil, gotLevels) end
       end
@@ -5086,12 +7276,26 @@ function M:levelled(mon, fallbackName, levels)
   local eng = engine
   local def = (self.game.data.pokemon or {})[mon.species]
   local name = mon.nickname or fallbackName or (def and def.name) or "?"
+  -- Guarded on `def` as well as on the module: `movesLearnedAt` is asked what a
+  -- *species* learns, and a mon whose species this build cannot name has no
+  -- answer to give. Called with nil it threw into the pcall below, which was
+  -- survivable but bought nothing.
+  local learnedAt = def and eng and eng.Experience and eng.Experience.movesLearnedAt
   for _, newLevel in ipairs(levels) do
     self:say(name .. " grew to\nlevel " .. tostring(newLevel) .. "!")
     -- Levelled here, so the moves it learns are decided here too -- the host
     -- cannot know, because it is not the copy that gained the level.
-    local moves = eng and eng.Experience and eng.Experience.movesLearnedAt
-      and select(2, pcall(eng.Experience.movesLearnedAt, def, newLevel))
+    --
+    -- `pcall`'s two returns are read as a pair rather than through
+    -- `select(2, ...)`: on failure the second return is the *error string*, and
+    -- walking a string with `ipairs` throws for real -- out of the level loop,
+    -- out of the award, and out of the event that carried it. So the level-up
+    -- line that had already printed would have been followed by nothing at all.
+    local moves
+    if learnedAt then
+      local okMoves, got = pcall(learnedAt, def, newLevel)
+      if okMoves and type(got) == "table" then moves = got end
+    end
     for _, moveId in ipairs(moves or {}) do
       self:teach(mon, name, moveId)
     end
@@ -6086,6 +8290,12 @@ function M:uploadMediated()
   end
 
   self.medUploaded = true
+  -- Kept, because the referee will count in *this* list and not in the party
+  -- it was cut from. `snapshotMons` skips what it cannot describe, so the two
+  -- are the same array only until the first skip -- and every party-addressed
+  -- field the hub sends back (`exp`'s `mon`, today) has to come back through
+  -- these sheets to find the save monster it means. See `medPartySlot`.
+  self.medMine = mons
   local bag = Mediated.snapshotBag(self.game)
   self.bagSheet = Mediated.bagCounts(bag)
   if self.host then Mediated.sendRuleset(self.transport, self.game) end
@@ -6234,15 +8444,33 @@ function M:medRows(msg)
     say(msg.text)
 
   elseif kind == "send" then
-    -- The referee narrates a monster by name and never by party position, so
-    -- the position is ours to find -- and it has to be found, because the row
-    -- `playEvents` wants is what tells `sim:sendOut` which battler to build.
-    -- A name that matches nothing is a send-out this screen cannot draw; the
-    -- line is still printed, so the field being one monster behind at least has
-    -- an explanation on it.
-    local at = slot and self:medPartyIndex(slot, msg.text)
-    say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
-      tostring(msg.text)))
+    -- Which of that seat's party is coming out, because the row `playEvents`
+    -- wants is what tells `sim:sendOut` which battler to build.
+    --
+    -- The referee stamps the position on the event (`mon`) and also narrates the
+    -- monster by name, and `medSendIndex` reads them in that order: the stamp is
+    -- the referee's own answer, the name is this screen's reconstruction of it,
+    -- and a stamp that does not fit this party falls back to the name rather than
+    -- fielding a number. An older referee sends no stamp at all and the name is
+    -- the whole of it, which is what this did before.
+    --
+    -- Neither matching is a send-out this screen cannot draw; the line is still
+    -- printed, so the field being one monster behind at least has an explanation
+    -- on it.
+    local at = slot and self:medSendIndex(index, slot, msg)
+    -- Whose send-out it is decides the sentence, now that the referee's sends
+    -- are the *only* ones a player sees (the client-side intro that used to
+    -- narrate the opening pair is gone -- see `queueMediatedIntro`). Our own
+    -- monster keeps the wording the original gives it and the intro used to;
+    -- a wild POKeMON is nobody's send-out at all and keeps the "Wild X
+    -- appeared!" it was introduced with, because "TRAINER sent out X!" over a
+    -- monster no trainer owns is simply untrue.
+    if index == self.mine then
+      say(("Go! %s!"):format(tostring(msg.text)))
+    elseif self:sentByTrainer(index) then
+      say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
+        tostring(msg.text)))
+    end
     if at then rows[#rows + 1] = { kind = "send", slot = index, index = at } end
 
   elseif kind == "damage" or kind == "drain" then
@@ -6256,7 +8484,24 @@ function M:medRows(msg)
     end
 
   elseif kind == "faint" then
-    if index then rows[#rows + 1] = { kind = "faint", slot = index } end
+    if index then
+      -- Nothing faints above zero, so the row that says it fell says the
+      -- number too -- for **every** seat, which is what this used to get
+      -- wrong. The hp-zeroing fallback below has always existed for our own
+      -- seat (it is what arms the replace picker), and the other three had
+      -- nothing: a referee `damage` that went missing left a partner's or a
+      -- foe's bar stopped part-way down under a monster that then sank, and
+      -- its local copy alive. Emitted ahead of the faint rather than folded
+      -- into it because `damage` is the one row that both writes HP and
+      -- queues the bar, so the empty bar is *animated* into place in front of
+      -- the sink exactly as an ordinary killing blow's is.
+      --
+      -- Costs nothing on the ordinary path: the killing blow's own `damage`
+      -- has already brought the bar to zero, and a drain row asked for the
+      -- number it is already showing retires immediately (`startDrain`).
+      rows[#rows + 1] = { kind = "damage", slot = index, hp = 0 }
+      rows[#rows + 1] = { kind = "faint", slot = index }
+    end
     -- The referee's `faint` carries the species and no sentence of its own, so
     -- the sentence is made here -- in the original's order, which prints the
     -- line over the top of the monster already sliding down.
@@ -6284,6 +8529,64 @@ function M:medRows(msg)
       end
     end
 
+  elseif kind == "exp" then
+    -- The spoils of the faint above, as a *row* rather than an award made
+    -- here.
+    --
+    -- Queued instead of applied for the reason every other display-mutating
+    -- kind in this function is queued (`faint`, `damage`, `drain`): `medRows`
+    -- runs when the event *arrives* and `playEvents` runs when the batch
+    -- *closes*, and `gainExp` writes into `self.messages` -- the queue
+    -- `playEvents` is filling. Paying at parse time would have put "gained N
+    -- EXP. Points!" ahead of the bar that emptied and the monster that sank,
+    -- on a screen whose whole chronology is that they come first. Routed
+    -- through the ordinary `exp` row, the mediated award lands in
+    -- `playEvents`' walk at exactly the point the host-simulated one does, and
+    -- there is one exp implementation rather than two.
+    --
+    -- `slot` is translated the way every other row's is (`medSlotOf`): the
+    -- referee counts field slots 0..3 and this screen counts CoopSim indices,
+    -- and `gainExp`'s own-slot gate compares against `self.mine`, which is an
+    -- index. The referee sends one of these per *paid participant* -- every
+    -- monster that was in against the fallen foe and lived, benched included
+    -- -- so all four clients see every share of a knockout and each pays only
+    -- the ones on its own seat.
+    --
+    -- `species` is translated too, and it has to be: the referee narrates
+    -- under the *uploaded* token (`Wire.name` of a display name), while
+    -- `gainExp` -- written for CoopSim, which emits registry keys -- looks the
+    -- species straight up in `data.pokemon`. Handing the label through
+    -- unchanged would miss every time and pay nothing, silently.
+    if index then
+      local key = speciesKeyFromSheet(self.game, { species = msg.species })
+      if key then
+        rows[#rows + 1] = {
+          kind = "exp", slot = index, species = key,
+          level = msg.level, participants = msg.participants,
+          -- Which of that seat's six banks it. Carried through untouched --
+          -- it is a party index and needs none of the field-slot translation
+          -- `slot` gets above -- but it is *not* in the same space CoopSim's
+          -- is, so the row is stamped as the referee's below and `gainExp`
+          -- resolves it through the uploaded sheets. Absent from an older
+          -- referee's event, and absent is meaningful -- `gainExp` pays the
+          -- active on a nil.
+          mon = msg.mon,
+          -- The referee wrote this row, so `mon` counts in the party this
+          -- client uploaded rather than in the seat's. See `medPartySlot`.
+          med = true,
+        }
+      elseif index == self.mine and not self.medExpSpeciesWarned then
+        -- Only our own share is ours to pay, so only our own miss is worth a
+        -- line -- and only the first, because a battle that cannot name one
+        -- species usually cannot name the next either.
+        self.medExpSpeciesWarned = true
+        mod.log:warn("the referee named a defeated POKeMON (%s) this build "
+          .. "could not match, so no EXP was awarded for it; report this with "
+          .. "the species if it is a standard one",
+          tostring(msg.species))
+      end
+    end
+
   elseif kind == "anim" then
     -- Play via the existing AnimPlayer path; if mapping fails `startAnim`
     -- no-ops safely. The "X used MOVE" line rides in the `msg` beside this.
@@ -6307,12 +8610,40 @@ function M:medRows(msg)
   elseif kind == "switch" then
     -- Already said in the `msg` beside it, and the `send` that follows every
     -- switch -- printing `text` (a species) would say the same thing twice in
-    -- worse words.
+    -- worse words. Its `mon` stamp is not read here either: the referee emits
+    -- the pair together and carries the same stamp on both, so the `send` above
+    -- is the one place a seat's occupant changes.
 
   elseif kind == "turn" or kind == "over" then
     -- Neither draws anything. `turn` is the signal that the batch collected so
     -- far is complete, and `over` says the field is done -- the outcome is a
     -- separate message and is what this screen actually ends on.
+    --
+    -- ...except a `turn` that names a **slot**, which is not the next turn at
+    -- all. It is the referee's replacement solicitation (`Battle:_openReplace`
+    -- in src/BattleSim/Turn.lua): that seat fainted with a bench left and is
+    -- being asked for a send-out, one event per owing seat, and nothing else
+    -- resolves until every one of them has answered. So it is narrated with the
+    -- **same row a host-simulated faint produces** -- `CoopSim.announceFaint`
+    -- emits `choose` and this screen has always known how to draw it (see the
+    -- `choose` branch in `playEvents`: the seat is marked `awaiting`, its owner
+    -- gets the bench picker, and the other three get the line naming them).
+    -- One replacement pause on this screen rather than two, and the wait line,
+    -- the menu hold and the clear-on-send all come for free because they are
+    -- the ones the co-op path already uses.
+    --
+    -- An older referee sends no `slot` and lands in the comment above: every
+    -- `turn` is a turn, exactly as it was.
+    --
+    -- The trainer is read from the sim rather than the event -- the referee's
+    -- solicitation carries `amount` and `slot` and no name (there is nothing on
+    -- the wire for it), and the seat this screen holds is the same seat the
+    -- referee is asking.
+    if kind == "turn" and index then
+      rows[#rows + 1] = {
+        kind = "choose", slot = index, trainer = slot and slot.name,
+      }
+    end
 
   elseif kind == "chose" or kind == "unchose" or kind == "moves" then
     -- Applied in onBattleEvent (markActed / unmarkActed / medMoveList), never
@@ -6343,21 +8674,93 @@ end
 --
 -- Matched through `Wire.name`, because that is what the *uploaded* species went
 -- through: comparing a raw nickname against a sanitised one would miss every
--- monster whose name carries punctuation the sanitiser drops. A party holding two
--- monsters with the same name matches the first, which is wrong only for a player
--- who nicknamed two of their team identically -- and the alternative, counting
--- faints to track send-outs, is wrong more often and more quietly.
+-- monster whose name carries punctuation the sanitiser drops.
+--
+-- **A name can name two monsters, and in a coop_npc it usually does.** The
+-- earlier reading of this -- "wrong only for a player who nicknamed two of their
+-- team identically" -- was wrong about who hits it: an NPC trainer carrying two
+-- of the same species is ordinary, and src/Coop.lua:1938 deals a trainer's team
+-- alternately into the two ownerless seats, so both copies land in *one* seat and
+-- every replacement send for it collides. Matching the first entry then fielded
+-- the corpse the referee had just knocked down -- a monster standing up again one
+-- KO later, with `slot.active` left disagreeing with the referee for the rest of
+-- the fight.
+--
+-- So a living match wins and a fainted one is only the fallback. That is the
+-- client-side mirror of the rule the referee picks by (`firstLiving`,
+-- src/BattleSim/Turn.lua:405-411, and the bench search `_bestSeBench` builds on
+-- it): the referee never fields a monster at 0 HP, so a living namesake is always
+-- the better reading of the same word. The fallback is kept rather than returning
+-- nil so a client whose HP has drifted from the referee's still draws *something*
+-- for the send -- and `playEvents` refuses to field it, see the guard there.
+--
+-- Counting faints to track send-outs is still wrong more often and more quietly;
+-- the actual cure for the residual (two *living* namesakes in one seat) is the
+-- referee's own `mon` stamp, resolved ahead of this by `medSendIndex`.
 function M:medPartyIndex(slot, species)
   if not (slot and type(species) == "string") then return nil end
   local data = self.game and self.game.data
+  local fallback = nil
   for i, mon in ipairs(slot.party or {}) do
     local def = data and (data.pokemon or {})[mon.species]
     local name = mon.nickname
     if type(name) ~= "string" or name == "" then name = def and def.name end
     if type(name) ~= "string" or name == "" then name = mon.species end
-    if Wire.name(name) == species then return i end
+    if Wire.name(name) == species then
+      if (mon.hp or 0) > 0 then return i end
+      if fallback == nil then fallback = i end
+    end
   end
-  return nil
+  return fallback
+end
+
+-- Which party position the referee *said* it fielded, when it said one.
+--
+-- `send` / `switch` carry `mon`: the 0-based position of the monster the referee
+-- put on the field. It is the same field a mediated `exp` row already carries
+-- (src/BattleSim/Turn.lua:2538, `winner.index - 1`) and it rides the wire on the
+-- same sanitiser -- `Wire.battleEvent` bounds `mon` for every kind, not for `exp`
+-- alone (src/Wire.lua:1706) -- so nothing on the transport had to change for it.
+--
+-- It is preferred over the name because it is the referee's own answer rather
+-- than this screen's reconstruction of it, which closes the one case
+-- `medPartyIndex` cannot read at all: two *living* monsters with the same name in
+-- one seat, where the referee picked the second. A referee that predates the
+-- stamp sends none, and the name is then the whole of the answer -- which is what
+-- this screen did before, unchanged.
+--
+-- Two things it is not:
+--
+--   * **Not the same counting space for our own seat.** The referee counts in the
+--     sheets this client uploaded, and `Mediated.snapshotMons` skips a monster it
+--     cannot describe, so one skip shifts every index after it. Our own seat is
+--     therefore translated sheet -> `sheet.slot` -> party position by
+--     `medPartySlot`, exactly as `gainExp` translates the `mon` on a mediated
+--     `exp` row. An NPC seat has no sheets on this client to translate through
+--     (`npcMons` interleaves both ownerless seats into one list and the hub deals
+--     it back out, src/Hub.lua:1384-1392), so its index is read straight -- and
+--     the checks below are what stands in for the translation.
+--   * **Not trusted blind.** Out of range, or naming a monster this screen has at
+--     0 HP, means the two sides are counting differently -- an older referee, a
+--     skipped sheet, a lossy stream. Either way the name is the better reading,
+--     so `nil` here falls back to it rather than fielding whatever the number
+--     happened to land on.
+function M:medStampIndex(index, slot, mon)
+  local at = tonumber(mon)
+  if not (slot and at) then return nil end
+  at = math.floor(at) + 1
+  if at < 1 then return nil end
+  if index == self.mine then at = self:medPartySlot(at) end
+  local pick = at and (slot.party or {})[at]
+  if not pick then return nil end
+  if (pick.hp or 0) <= 0 then return nil end
+  return at
+end
+
+-- The referee's stamp first, its word second.
+function M:medSendIndex(index, slot, msg)
+  return self:medStampIndex(index, slot, msg and msg.mon)
+      or self:medPartyIndex(slot, msg and msg.text)
 end
 
 -- One thing that happened, in order.
@@ -6431,23 +8834,69 @@ function M:onBattleEvent(msg)
   -- reason in this section's header: a menu taken away mid-decision is a turn
   -- the player cannot answer.
   if msg.t == "turn" then
+    -- ------- two readings of one event, told apart by `slot`
+    --
+    -- WITHOUT a slot this is the ordinary choice window opening, and everything
+    -- below it is what it always was. WITH one it is the referee soliciting the
+    -- replacement that seat owes -- the choice window is *not* opening, and the
+    -- row `medRows` just queued (`kind = "choose"`) is what asks for it.
+    --
+    -- `medReplaceWait` is the screen's copy of that phase, and it is set before
+    -- the flush because the flush is what plays the rows: `after`, the phase the
+    -- handover lands on when they run out, is decided from it (see
+    -- `M:replaceHold`).
+    local owed = self:medSlotOf(msg)
+    self.medReplaceWait = owed
     self:medFlush()
-    -- Arm replace only after the faint/msg batch is queued: update() drains
-    -- `messages` before `replacing`, so pacing is faint line → picker → send.
-    if self.medMustReplace then
+    if owed == nil then
+      -- Arm replace only after the faint/msg batch is queued: update() drains
+      -- `messages` before `replacing`, so pacing is faint line → picker → send.
+      if self.medMustReplace then
+        local seat = self.sim and self.sim:slot(self.mine)
+        local bench = seat and self:benchOf(seat) or {}
+        if #bench > 0 then
+          self.replacing = true
+          self.switchIndex = 1
+        else
+          -- Empty bench: do not open a dead picker; spectating / over owns this.
+          self.medMustReplace = nil
+          self.replacing = nil
+        end
+      end
+    elseif owed == self.mine then
+      -- ------- and this is the arming, **once**
+      --
+      -- The picker is already open: the `choose` row above ran through
+      -- `playEvents` inside `medFlush` and set `replacing` there, at the same
+      -- point in the batch the old `medMustReplace` block armed it -- after the
+      -- faint rows were queued, before `update` drains them. Re-arming here
+      -- would be a second arming of the same picker off the same event, and it
+      -- would reset `switchIndex` under a player who had already moved the
+      -- cursor with a queued row still playing.
+      --
+      -- So `medMustReplace` is *retired* instead. It was the older stream's way
+      -- of remembering a faint until the next turn opened, and a referee that
+      -- solicits has said the same thing out loud and more precisely -- keeping
+      -- both would arm the picker again on the slot-less turn that follows the
+      -- send, over a seat that is no longer empty. (The `send`/`switch` clear
+      -- above retires it on the ordinary path for the same reason.)
+      --
+      -- What is *not* delegated is the empty-bench refusal: `playEvents` arms
+      -- the picker for our seat unconditionally, and a solicitation this screen
+      -- cannot answer -- a party it disagrees with the referee about -- would
+      -- otherwise open a picker with nothing in it and no way out.
+      self.medMustReplace = nil
       local seat = self.sim and self.sim:slot(self.mine)
       local bench = seat and self:benchOf(seat) or {}
-      if #bench > 0 then
-        self.replacing = true
-        self.switchIndex = 1
-      else
-        -- Empty bench: do not open a dead picker; spectating / over owns this.
-        self.medMustReplace = nil
+      if #bench == 0 then
         self.replacing = nil
+        if seat then seat.awaiting = nil end
+        self.medReplaceWait = nil
       end
     end
   elseif msg.t == "over" then
     self.medMustReplace = nil
+    self.medReplaceWait = nil
     self.replacing = nil
     -- Ball opts / foe hide outlive the turn event: anims still drain from the
     -- message queue after medFlush. Cleared when the fight ends.
@@ -6964,12 +9413,52 @@ end
 -- does not become the log.
 function M:draw()
   local ok, err = pcall(self.drawSafe, self)
-  if ok then return end
-  if not self.drawFailed then
+  if not ok and not self.drawFailed then
     self.drawFailed = true
     mod.log:error("the 2-on-2 screen failed to draw (%s); the battle is still "
       .. "running and can be finished blind, but report this", tostring(err))
   end
+  -- Last, and outside the arena's own failure: the veil is the thing that says
+  -- the battle is arriving, and a screen that could not paint its field is
+  -- exactly the one that should not be revealed by a hard cut either.
+  if self.entryFrame then pcall(self.drawEntry, self) end
+end
+
+-- The entry veil, painted over the finished frame.
+--
+-- Handed to the renderer as a whole-surface veil rather than filled into the
+-- 160x144 UI canvas, which is how the engine's own palette-register effects
+-- reach the screen (`Renderer.screenVeil`, set by the battle transition's
+-- flash and by the fade in from white after a battle). Two reasons it has to
+-- be that one: the arena is a widescreen canvas whose size is not 160x144
+-- (`uiSize`), and at any zoom above 1x a veil painted into the letterbox
+-- leaves the surrounding window untouched -- which reads as the fade happening
+-- inside a window rather than to the screen.
+--
+-- The field is re-declared by its drawer every frame (the renderer clears it
+-- at the top of each one), so a popped screen can never leave a sticky veil
+-- behind -- which is also why this is a per-frame write and not a flag.
+--
+-- No renderer -- a headless run, a build drawing straight to the display --
+-- falls back to a rectangle over this screen's own canvas, exactly as the
+-- engine's transitions do.
+function M:drawEntry()
+  local a = M.entryAlpha(self.entryFrame or 0)
+  if a <= 0 then return end
+  local renderer = self.game and self.game.renderer
+  if renderer then
+    renderer.screenVeil = { 0, a }
+    return
+  end
+  if not love then return end
+  local w, h = 160, 144
+  local okSize, uw, uh = pcall(self.uiSize, self)
+  if okSize and type(uw) == "number" and type(uh) == "number" then
+    w, h = uw, uh
+  end
+  love.graphics.setColor(0, 0, 0, a)
+  love.graphics.rectangle("fill", 0, 0, w, h)
+  love.graphics.setColor(1, 1, 1, 1)
 end
 
 function M:drawSafe()

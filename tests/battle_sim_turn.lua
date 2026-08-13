@@ -2674,6 +2674,268 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12c2. round 11: the replace phase is a phase, not a folded-in choice
+-- ------------------------------------------------------------------
+--
+-- 12c above pins the *outcome* a faint-with-bench has always had: nothing is
+-- auto-sent, and the seat owes a switch.  What round 11 changed is the shape of
+-- the window that collects it.  A faint used to advance the turn and fold the
+-- replacement into the next ordinary choice box, so the player picked a move at
+-- a foe that was not on the field yet.  Now the referee holds a phase of its
+-- own between the two turns -- `_openReplace` / `_closeReplace` -- and the
+-- three things a client reads off that are all invisible to 12c:
+--
+--   * the turn number does NOT move while the phase is open.  A client that
+--     saw turn 2 open would draw the next box; the fight is still on the turn
+--     whose faint opened this.
+--   * the solicitation is a `turn` event WITH `slot` -- one per owing seat, in
+--     `self.fighters` order (side a then side b, ascending field slot).  A
+--     slot-less `turn` still means "ordinary choice window", so the two are
+--     told apart by a field that already rides the wire.
+--   * the phase belongs to the owing seats and to nobody else.  A standing
+--     seat's fight would be an answer to a window that has not opened, and a
+--     `cancel` would be a second way to hold the field open a monster short.
+--
+-- And the clock still covers it: the same deadline sweep that answers an
+-- unanswered move answers an unanswered replacement, so a seat that walks away
+-- mid-replace cannot wedge the fight.
+
+do
+  -- (a) 1v1, the single-fighter case that predates the phase: only one seat can
+  -- ever be owing, and it still opens and closes cleanly.  This is the
+  -- regression guard against a fix that only works for multi-fighter coop.
+  local battle = battleOf({
+    seed = 111001,
+    aMons = {
+      mon({ species = "Alpha", maxHp = 1, atk = 5, spd = 10 }),
+      mon({ species = "Gamma", maxHp = 200, atk = 50, spd = 50 }),
+    },
+    bMons = {
+      mon({ species = "Beta", maxHp = 300, atk = 150, spd = 120, level = 50 }),
+    },
+  })
+  drain(battle)
+  eq(battle:snapshot().turn, 1, "the fight opens on turn 1")
+
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local events = drain(battle)
+
+  local snap = battle:snapshot()
+  eq(snap.phase, "replace", "a faint with a living bench opens the replace phase")
+  eq(snap.turn, 1, "and the turn number does not move while it is open")
+  listEq(snap.waiting, { "p1" }, "only the fallen seat is owed anything")
+
+  local solicits, bare = {}, 0
+  for _, event in ipairs(events) do
+    if event.t == "turn" then
+      if event.slot ~= nil then solicits[#solicits + 1] = event else bare = bare + 1 end
+    end
+  end
+  eq(#solicits, 1, "one solicitation for the one owing seat")
+  eq(solicits[1] and solicits[1].slot, 0, "...naming its field slot")
+  eq(solicits[1] and solicits[1].amount, 1, "...and the turn it is still on")
+  eq(bare, 0, "no ordinary choice window opened behind it")
+
+  ok(battle:submitChoice("p1", { action = "switch", slot = 1 }) == true,
+     "the owing seat's switch is accepted")
+  events = drain(battle)
+  local sawSend, closed = false, nil
+  for _, event in ipairs(events) do
+    if event.t == "send" and event.text == "Gamma" then sawSend = true end
+    if event.t == "turn" and event.slot == nil then closed = event end
+  end
+  ok(sawSend, "the replacement is fielded when the phase closes")
+  ok(closed ~= nil, "and a slot-less turn opens the ordinary window")
+  eq(closed and closed.amount, 2, "...on turn 2")
+  local after = battle:snapshot()
+  eq(after.phase, "choice", "the phase is back to choice")
+  eq(after.turn, 2, "and only now does the turn increment")
+end
+
+do
+  -- (b) one seat per side falls in the SAME action (recoil KO, both benched):
+  -- `_anyMustReplace` finds two owing seats, so two solicitations go out before
+  -- either is answered, and the phase stays open until BOTH have replaced.
+  local battle = battleOf({
+    seed = 111002,
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 1, atk = 200, spd = 90,
+        moves = { move({ id = "take-down", power = 90, effect = 48 }) },
+      }),
+      mon({ species = "Gamma", maxHp = 200 }),
+    },
+    bMons = {
+      mon({ species = "Beta", maxHp = 1, atk = 5, spd = 10 }),
+      mon({ species = "Delta", maxHp = 200 }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local events = drain(battle)
+
+  local snap = battle:snapshot()
+  eq(snap.phase, "replace", "two faints in one action still open one replace phase")
+  eq(snap.turn, 1, "and it holds the turn number just the same")
+  listEq(snap.waiting, { "p1", "p2" }, "both fallen seats are owed")
+
+  local solicits, bare = {}, 0
+  for _, event in ipairs(events) do
+    if event.t == "turn" then
+      if event.slot ~= nil then solicits[#solicits + 1] = event else bare = bare + 1 end
+    end
+  end
+  eq(#solicits, 2, "exactly one solicitation per owing seat")
+  eq(solicits[1] and solicits[1].slot, 0, "...side a's seat (slot 0) first")
+  eq(solicits[2] and solicits[2].slot, 2, "...then side b's (slot 2) -- fighters order")
+  eq(bare, 0, "and no ordinary window opened while both were pending")
+
+  ok(battle:submitChoice("p1", { action = "switch", slot = 1 }) == true,
+     "the first owing seat replaces")
+  events = drain(battle)
+  local earlySend, earlyTurn = false, false
+  for _, event in ipairs(events) do
+    if event.t == "send" then earlySend = true end
+    if event.t == "turn" then earlyTurn = true end
+  end
+  ok(not earlySend, "nothing is fielded on a half-answered phase")
+  ok(not earlyTurn, "and no turn of any shape is emitted")
+  eq(battle:snapshot().phase, "replace", "the phase is still open on the second seat")
+  eq(battle:snapshot().turn, 1, "turn number still pinned")
+
+  ok(battle:submitChoice("p2", { action = "switch", slot = 1 }) == true,
+     "the second owing seat replaces")
+  events = drain(battle)
+  local sends, closes = {}, 0
+  for _, event in ipairs(events) do
+    if event.t == "send" then sends[#sends + 1] = event.text end
+    if event.t == "turn" and event.slot == nil then closes = closes + 1 end
+  end
+  listEq(sends, { "Gamma", "Delta" }, "both replacements field together, side a first")
+  eq(closes, 1, "and a single ordinary window opens for the pair")
+  eq(battle:snapshot().phase, "choice", "the phase closes once nobody owes a send-out")
+  eq(battle:snapshot().turn, 2, "and the turn finally advances")
+end
+
+do
+  -- (c) coop_pvp, two fighters a side, one of side a's falls: the phase is the
+  -- owing seat's alone.  Its partner is refused whatever it asks, and the owing
+  -- seat itself may only switch -- `cancel` is not a way out of a forced
+  -- replacement.
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 111003,
+    sides = {
+      a = {
+        { playerId = "p1", name = "Ann", mons = {
+          mon({ species = "Alpha", maxHp = 300, atk = 20, spd = 80 }),
+          mon({ species = "Omega", maxHp = 300 }) } },
+        { playerId = "q1", name = "Amy", mons = {
+          mon({ species = "Gamma", maxHp = 1, atk = 5, spd = 5 }),
+          mon({ species = "Delta", maxHp = 300 }) } },
+      },
+      b = {
+        { playerId = "p2", name = "Bob", mons = {
+          mon({ species = "Beta", maxHp = 300, atk = 150, spd = 120, level = 50 }) } },
+        { playerId = "q2", name = "Ben", mons = {
+          mon({ species = "Zeta", maxHp = 300, atk = 20, spd = 60 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("q1", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("p2", { action = "fight", move = 0, target = 1 })
+  battle:submitChoice("q2", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local snap = battle:snapshot()
+  eq(snap.phase, "replace", "the partner's KO opens the phase")
+  eq(snap.turn, 1, "on the turn the faint happened")
+  listEq(snap.waiting, { "q1" }, "and only the fallen seat owes anything")
+  ok(fighterIn(snap, "p1").species == "Alpha", "its standing partner is untouched")
+
+  local solicits = {}
+  for _, event in ipairs(events) do
+    if event.t == "turn" and event.slot ~= nil then solicits[#solicits + 1] = event end
+  end
+  eq(#solicits, 1, "one solicitation, for the one owing seat")
+  eq(solicits[1] and solicits[1].slot, 1, "...naming q1's field slot, not the side")
+
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == false,
+     "a standing seat cannot fight during someone else's replacement")
+  ok(battle:submitChoice("p1", { action = "switch", slot = 1 }) == false,
+     "...nor sneak a free switch in on the phase")
+  ok(battle:submitChoice("q1", { action = "cancel" }) == false,
+     "a forced replacement cannot be taken back")
+  ok(battle:submitChoice("q1", { action = "fight", move = 0 }) == false,
+     "and the owing seat itself may not answer with a fight")
+  eq(battle:snapshot().phase, "replace", "four refusals later the phase is untouched")
+  eq(#drain(battle), 0, "and a refused choice emits nothing at all")
+
+  ok(battle:submitChoice("q1", { action = "switch", slot = 1 }) == true,
+     "only the owing seat's switch closes it")
+  events = drain(battle)
+  local sent, closed = nil, false
+  for _, event in ipairs(events) do
+    if event.t == "send" then sent = event end
+    if event.t == "turn" and event.slot == nil then closed = true end
+  end
+  eq(sent and sent.text, "Delta", "the replacement is fielded")
+  eq(sent and sent.slot, 1, "...into the seat that owed it")
+  ok(closed, "and the ordinary window opens behind it")
+  eq(battle:snapshot().phase, "choice", "phase closed")
+  eq(battle:snapshot().turn, 2, "turn advanced exactly once for the whole phase")
+end
+
+do
+  -- (d) nobody answers: the choice clock covers a replace phase the same way it
+  -- covers a choice window.  `_autoChoice` takes its `mustReplace` branch, the
+  -- seat is narrated as having run out of time, and the fight carries on rather
+  -- than wedging on a field that is a monster short.
+  local battle = battleOf({
+    seed = 111004,
+    choiceTimeout = 10,
+    aMons = {
+      mon({ species = "Alpha", maxHp = 1, atk = 5, spd = 10 }),
+      mon({ species = "Gamma", maxHp = 200, atk = 50, spd = 50 }),
+    },
+    bMons = {
+      mon({ species = "Beta", maxHp = 300, atk = 150, spd = 120, level = 50 }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  eq(battle:snapshot().phase, "replace", "the faint left a replacement owed")
+  eq(battle:snapshot().deadline, 10, "and the phase armed the choice clock")
+
+  ok(battle:tick(9) == false, "inside the deadline the sweep does nothing")
+  eq(battle:snapshot().phase, "replace", "so the phase is still waiting")
+  eq(battle:snapshot().turn, 1, "and the turn is still pinned")
+  eq(#drain(battle), 0, "a quiet tick emits nothing")
+
+  ok(battle:tick(11) == true, "past the deadline the sweep acts")
+  local events = drain(battle)
+  local timedOut, sent, closed = false, nil, false
+  for _, event in ipairs(events) do
+    if event.t == "msg" and event.text == "Ann ran out of time" then timedOut = true end
+    if event.t == "send" then sent = event end
+    if event.t == "turn" and event.slot == nil then closed = true end
+  end
+  ok(timedOut, "the unanswered seat is narrated the same as an unanswered move")
+  eq(sent and sent.text, "Gamma", "the auto-picked bench mon is fielded")
+  ok(closed, "and the ordinary window opens")
+  ok(battle:outcome() == nil, "a timed-out replacement does not end the fight")
+  eq(battle:snapshot().phase, "choice", "the phase closed on the clock alone")
+  eq(battle:snapshot().turn, 2, "spending the turn the faint was on")
+  eq(fighterIn(battle:snapshot(), "p1").species, "Gamma", "Gamma really is out")
+end
+
+-- ------------------------------------------------------------------
 -- 12d. auto-pick retreats at low HP to an SE bench mon
 -- ------------------------------------------------------------------
 
@@ -2888,6 +3150,1004 @@ do
     if event.t == "anim" and event.slot == 0 then used = event.text end
   end
   eq(used, "thump", "auto-pick skips status/setup against a Substitute")
+end
+
+-- ------------------------------------------------------------------
+-- 12h. round 5: `exp` event emission gates (`_awardExp`)
+-- ------------------------------------------------------------------
+--
+-- The referee holds no species table and can never price a faint (the legal
+-- floor, restated in `_awardExp`'s own comment); what it states is which mode
+-- a faint happened in, who was still standing on the owner side, and how many
+-- of them there were to split across. This section pins the gate itself --
+-- which modes pay at all -- and the one edge case inside a paying mode where
+-- a winner is excluded: a seat still owing a replacement after its own faint.
+
+local thumpMove = function() return move({ id = "thump", power = 40, accuracy = 255 }) end
+
+local function expEvents(events)
+  local out = {}
+  for _, event in ipairs(events) do
+    if event.t == "exp" then out[#out + 1] = event end
+  end
+  return out
+end
+
+-- 1v1: a farming loop the mode gate refuses outright, deliberately rather
+-- than incidentally -- vanilla link battles do not pay either.
+do
+  local battle = battleOf({
+    mode = "1v1",
+    seed = 90101,
+    aMons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) },
+    bMons = { mon({ species = "Beta", maxHp = 30, spd = 10, moves = { thumpMove() } }) },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  ok(#expEvents(events) == 0, "1v1: no exp event, however the fight ends")
+  local sawFaint = false
+  for _, e in ipairs(events) do if e.t == "faint" then sawFaint = true end end
+  ok(sawFaint, "...and a faint really did happen, so the gate is what refused it")
+end
+
+-- coop_pvp: the other PvP shape, same refusal -- paying a player for beating
+-- another player is the farming loop, not a co-op detail.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 90102,
+    sides = {
+      a = { { playerId = "a1", name = "Ann",
+              mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) } } },
+      b = { { playerId = "b1", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 30, spd = 10, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("b1", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  ok(#expEvents(events) == 0, "coop_pvp: no exp event either")
+  local sawFaint = false
+  for _, e in ipairs(events) do if e.t == "faint" then sawFaint = true end end
+  ok(sawFaint, "...and again a faint really happened")
+end
+
+-- wild: the one owner-slot winner is paid, once, naming the fallen wild mon.
+do
+  local battle = battleOf({
+    mode = "wild",
+    seed = 90103,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) } } },
+      b = { { playerId = "wild", name = "Wild",
+              mons = { mon({ species = "Beta", maxHp = 60, spd = 10, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 1, "wild: exactly one exp event")
+  eq(exps[1] and exps[1].slot, 0, "...paid to the sole owner seat, slot 0")
+  eq(exps[1] and exps[1].species, "Beta", "...naming the wild mon that fell")
+  eq(exps[1] and exps[1].participants, 1, "...split one way")
+end
+
+-- coop_wild: both owner seats stand at the KO, so both are paid, in
+-- field-slot order.
+do
+  local battle = battleOf({
+    mode = "coop_wild",
+    seed = 90104,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) } },
+        { playerId = "a2", name = "Abe",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 90, spd = 70, moves = { thumpMove() } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild",
+              mons = { mon({ species = "Beta", maxHp = 200, spd = 10, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("a2", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 2, "coop_wild: one exp event per standing owner-slot winner")
+  eq(exps[1] and exps[1].slot, 0, "...a1 (slot 0) first")
+  eq(exps[2] and exps[2].slot, 1, "...then a2 (slot 1)")
+  eq(exps[1] and exps[1].participants, 2, "...both counted in the split")
+  eq(exps[2] and exps[2].participants, 2, "...on both events")
+end
+
+-- coop_npc: the trainer-shaped exp-awarding mode, same shape as coop_wild
+-- but a 2v2 npc side rather than a single wild seat.
+--
+-- Both a1 and a2 aim at the same seat (b1/slot 2) on purpose: a1 (faster)
+-- KOs it, and a2's identical aim is exactly the mid-turn-dead-target case
+-- `_retarget` exists for. Before the U-wave fix this fizzled ("has no
+-- target") -- silently, since the surrounding assertion only checked
+-- `#expEvents(events) > 0`, which the KO alone already satisfies. The fixed
+-- behaviour changed the stream under that assertion without breaking it: the
+-- fizzle (one `msg`) became a real attack (`anim` + `msg` + `damage`, +2
+-- events over the old shape), landing on b2/slot 3 -- the nearest living
+-- seat -- rather than the corpse a2 actually aimed at. Pinned explicitly here
+-- so that change stays intended rather than silent.
+do
+  local battle = battleOf({
+    mode = "coop_npc",
+    seed = 90105,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }) } },
+        { playerId = "a2", name = "Abe",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 90, spd = 70, moves = { thumpMove() } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob",
+          mons = { mon({ species = "Beta", maxHp = 60, spd = 60, moves = { thumpMove() } }) } },
+        { playerId = "b2", name = "Bea",
+          mons = { mon({ species = "Delta", maxHp = 60, spd = 50, moves = { thumpMove() } }) } },
+      },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 12 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("b1", { action = "fight", move = 0 })
+    battle:submitChoice("b2", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  ok(#expEvents(events) > 0, "coop_npc: at least one exp event over a KO")
+
+  -- The retarget itself: a2 (Abe/Gamma) still aimed at the now-dead b1 seat
+  -- (slot 2) when its action ran, immediately after the two exp events b1's
+  -- fall paid out. It must not fizzle -- it swings, and lands on b2 (slot 3).
+  local koIdx, secondExpIdx = nil, nil
+  local expSeen = 0
+  for i, e in ipairs(events) do
+    if e.t == "faint" and e.text == "Beta" then koIdx = i end
+    if e.t == "exp" then
+      expSeen = expSeen + 1
+      if expSeen == 2 then secondExpIdx = i end
+    end
+  end
+  ok(koIdx ~= nil, "coop_npc retarget: b1's Beta really did fall")
+  ok(secondExpIdx ~= nil and secondExpIdx > koIdx,
+     "coop_npc retarget: both exp events (a1 and a2's shares) paid before a2's own action runs")
+
+  local noFizzle, sawAnim, sawDamageOnSlot3 = true, false, false
+  for i = secondExpIdx + 1, #events do
+    local e = events[i]
+    if e.t == "msg" and e.text and e.text:find("has no target", 1, true) then
+      noFizzle = false
+    end
+    if e.t == "anim" and e.side == "a" and e.slot == 1 then sawAnim = true end
+    if sawAnim and e.t == "damage" and e.side == "b" and e.slot == 3 then
+      sawDamageOnSlot3 = true
+      break
+    end
+  end
+  ok(noFizzle, "coop_npc retarget: a2 never says 'has no target' for the dead b1 seat")
+  ok(sawAnim, "coop_npc retarget: a2's move still plays its anim (slot 1, the attacker's own seat)")
+  ok(sawDamageOnSlot3,
+     "coop_npc retarget: a2's attack lands as real damage on b2/slot 3, the nearest living seat")
+end
+
+-- A seat still owing a replacement after its own faint: neither paid nor
+-- counted in the divisor. a1 has no bench, so once its lone mon goes down it
+-- is permanently `activeMon() == nil` -- exactly what CoopSim's owner-guard
+-- reads as "not standing" -- while a2 finishes the wild mon off alone.
+do
+  local battle = battleOf({
+    mode = "coop_wild",
+    seed = 90106,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 1, spd = 5, moves = { thumpMove() } }) } },
+        { playerId = "a2", name = "Abe",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 100, spd = 60, moves = { thumpMove() } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild",
+              mons = { mon({ species = "Beta", maxHp = 30, spd = 100, atk = 20, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 15 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("a2", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local sawA1Faint = false
+  for _, e in ipairs(events) do
+    if e.t == "faint" and e.slot == 0 then sawA1Faint = true end
+  end
+  ok(sawA1Faint, "the fixture really did down a1 before the wild mon fell")
+  local exps = expEvents(events)
+  eq(#exps, 1, "the seat still owing a replacement is not paid a second event")
+  eq(exps[1] and exps[1].slot, 1, "...only a2 (slot 1), the seat actually standing")
+  eq(exps[1] and exps[1].participants, 1,
+     "...and the divisor is 1 -- the down seat is not counted in the split either")
+end
+
+-- ------------------------------------------------------------------
+-- 12i. round 6: participation -- who fought the monster that fell
+-- ------------------------------------------------------------------
+--
+-- Section 12h pinned the emission GATE (which modes pay, and the one
+-- exclusion the old "standing winners" rule needed). Round 6 replaced
+-- "standing winners" itself with vanilla's real rule: every mon of yours
+-- that was ever in against the fallen foe and is still alive, benched
+-- included (`Battle:_refield` / `Battle:_awardExp`, `src/BattleSim/Turn.lua`).
+-- These four scenarios are the adversarial drive that pinned the Lua/JS twins
+-- against each other (byte-identical event streams, same rng) before this
+-- suite existed to check them on its own; each one is restated here in this
+-- file's own fixture idiom.
+
+-- (a) a mon fights, switches out alive, and its replacement lands the KO:
+-- both are paid, on their own party index, at the one seat that owns them.
+do
+  local battle = battleOf({
+    mode = "wild",
+    seed = 101,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }),
+        mon({ species = "Gamma", maxHp = 200, atk = 90, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 90, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }) } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  local events = drain(battle)
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 2, "switch-out-alive: both the fighter and its replacement are paid")
+  eq(exps[1] and exps[1].slot, 0, "...both events on the one seat that owns them")
+  eq(exps[2] and exps[2].slot, 0, "...")
+  eq(exps[1] and exps[1].mon, 0, "...Alpha, party index 0, first")
+  eq(exps[2] and exps[2].mon, 1, "...then Gamma, party index 1, the replacement")
+  eq(exps[1] and exps[1].participants, 2, "...divisor 2 on both")
+  eq(exps[2] and exps[2].participants, 2, "...")
+end
+
+-- (b) a participant faints before the KO lands: RemoveFaintedPlayerMon drops
+-- it from the set, so it is neither paid nor counted in the divisor.
+do
+  local battle = battleOf({
+    mode = "wild",
+    seed = 202,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 20, atk = 5, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }),
+        mon({ species = "Gamma", maxHp = 300, atk = 90, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 120, atk = 90, spd = 50, moves = { thumpMove() } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  for _ = 1, 14 do
+    if battle:outcome() then break end
+    local snap, replaced = battle:snapshot(), false
+    for _, f in ipairs(snap.field) do
+      if f.playerId == "p1" and f.mustReplace then
+        battle:submitChoice("p1", { action = "switch", slot = 1 })
+        replaced = true
+      end
+    end
+    if not replaced then battle:submitChoice("p1", { action = "fight", move = 0 }) end
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local sawA1Faint = false
+  for _, e in ipairs(events) do
+    if e.t == "faint" and e.slot == 0 then sawA1Faint = true end
+  end
+  ok(sawA1Faint, "the fixture really did faint Alpha before the wild mon fell")
+  local exps = expEvents(events)
+  eq(#exps, 1, "the fainted participant funds no event of its own")
+  eq(exps[1] and exps[1].mon, 1, "...only Gamma, party index 1, is paid")
+  eq(exps[1] and exps[1].participants, 1,
+     "...and the divisor is 1 -- Alpha is dropped from the count too")
+end
+
+-- (c) the foe swaps its monster out and back: each swap resets that seat's
+-- own participation set, so only who is in against the CURRENT foe is paid.
+do
+  local battle = battleOf({
+    mode = "wild",
+    seed = 303,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 300, atk = 5, spd = 80,
+              moves = { move({ id = "tap", power = 5 }) } }),
+        mon({ species = "Gamma", maxHp = 300, atk = 90, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 90, atk = 5, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }),
+        mon({ species = "Delta", maxHp = 300, atk = 5, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }),
+      } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  -- Alpha is in against Beta.
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- Alpha out, Gamma in: Beta's set is now {Alpha, Gamma}.
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- Beta out, Delta in: Delta's set resets to whoever is standing -- {Gamma}.
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "switch", slot = 1 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- Delta out, Beta back: Beta's set resets again to {Gamma} -- Alpha is gone.
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "switch", slot = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 1, "the foe-switch reset leaves only one participant")
+  eq(exps[1] and exps[1].mon, 1, "...Gamma, party index 1 -- Alpha's earlier turn was reset away")
+  eq(exps[1] and exps[1].participants, 1, "...divisor 1")
+end
+
+-- (d) coop_wild: the partner's monster fought and then switched to its
+-- bench; it is still paid, on its own party index, at its own seat.
+do
+  local battle = battleOf({
+    mode = "coop_wild",
+    seed = 404,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mon({ species = "Alpha", maxHp = 300, atk = 90, spd = 80, moves = { thumpMove() } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mon({ species = "Gamma", maxHp = 300, atk = 5, spd = 70,
+                moves = { move({ id = "tap", power = 5 }) } }),
+          mon({ species = "Zeta", maxHp = 300, atk = 5, spd = 70,
+                moves = { move({ id = "tap", power = 5 }) } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 150, atk = 5, spd = 10,
+              moves = { move({ id = "tap", power = 5 }) } }) } } },
+    },
+  })
+  drain(battle)
+  local events = {}
+  battle:submitChoice("a1", { action = "fight", move = 0 })
+  battle:submitChoice("a2", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  battle:submitChoice("a1", { action = "fight", move = 0 })
+  battle:submitChoice("a2", { action = "switch", slot = 1 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  for _ = 1, 10 do
+    if battle:outcome() then break end
+    battle:submitChoice("a1", { action = "fight", move = 0 })
+    battle:submitChoice("a2", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+  local exps = expEvents(events)
+  eq(#exps, 3, "three participants: a1's Alpha, a2's benched Gamma, a2's active Zeta")
+  eq(exps[1] and exps[1].slot, 0, "a1 (slot 0) first")
+  eq(exps[1] and exps[1].mon, 0, "...Alpha, party index 0")
+  eq(exps[2] and exps[2].slot, 1, "then a2 (slot 1)'s bench")
+  eq(exps[2] and exps[2].mon, 0, "...Gamma, party index 0, though it is not on the field")
+  eq(exps[3] and exps[3].slot, 1, "then a2 (slot 1) again")
+  eq(exps[3] and exps[3].mon, 1, "...Zeta, party index 1, the one actually standing")
+  eq(exps[1] and exps[1].participants, 3, "the divisor is 3 on every one of them")
+  eq(exps[2] and exps[2].participants, 3, "...")
+  eq(exps[3] and exps[3].participants, 3, "...")
+end
+
+-- ------------------------------------------------------------------
+-- 12j. round 6 follow-up: the two adversarial orderings, and the
+-- counterfactual that pins the mechanism rather than the outcome
+-- ------------------------------------------------------------------
+--
+-- 12i pinned "who fought the monster that fell" as a standing question. These
+-- three restate the adversarial drive that actually shook that rule out:
+-- (a) a participant that dies in the SAME action as the KO it helped land
+-- must not be paid or counted -- `Battle:_faint`'s own comment calls out the
+-- bug this guards ("the user was still standing, still flagged, and still in
+-- the divisor"); (b) the deferred send-out mark (`fighter.pendingFought`,
+-- held from a faint to the choice window that answers it) survives a foe
+-- swap on the very turn it is consumed; (c) that same held mark is not
+-- inherited by a successor whose OWN owner faults before it ever fields --
+-- the counterfactual that proves (b) is really about a monster still
+-- standing, not about time alone.
+
+-- (a) an Explosion-style double-KO in coop_wild: a1's move fells the wild
+-- mon AND a1 itself. The self-KO'er is dropped from the set before anybody
+-- is counted, so the one exp event this knockout funds names only a2, and
+-- the divisor is 1 -- not 2, which is what "unpaid but still counted" would
+-- have left behind.
+do
+  local boom = move({ id = "boom", power = 250, accuracy = 255, effect = 7 })
+  local battle = battleOf({
+    mode = "coop_wild",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90, moves = { boom } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mon({ species = "Gamma", maxHp = 200, atk = 40, spd = 80, moves = { thumpMove() } }) } },
+      },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mon({ species = "Beta", maxHp = 60, spd = 10, moves = { thumpMove() } }) } } },
+    },
+  })
+  local events = drain(battle)
+  battle:submitChoice("a1", { action = "fight", move = 0 })
+  battle:submitChoice("a2", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+
+  local faints = 0
+  for _, e in ipairs(events) do if e.t == "faint" then faints = faints + 1 end end
+  eq(faints, 2, "both the wild mon and the self-KO'er faint in this action")
+  local exps = expEvents(events)
+  eq(#exps, 1, "exactly one exp event -- the exploder funds nothing of its own")
+  eq(exps[1] and exps[1].slot, 1, "paid to a2's seat, not a1's")
+  eq(exps[1] and exps[1].mon, 0, "a2's own party index")
+  eq(exps[1] and exps[1].participants, 1,
+     "divisor 1 -- a1 is dropped from the set, not merely left unpaid")
+end
+
+-- (b) the replacement mark: a1 KOs b1; on the next turn a switches to a2
+-- (still alive -- a1 was never fainted) the same turn b fields b2. Vanilla
+-- still marks a1 -- it was standing when b1 fell -- and the send-out's own
+-- mark lands on a2 too, so when a2 finishes off b2 both are paid, divisor 2.
+do
+  local tap = move({ id = "tap", power = 5, accuracy = 255 })
+  local battle = battleOf({
+    mode = "coop_npc",
+    seed = 101,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 300, atk = 200, spd = 80, moves = { thumpMove() } }),
+        mon({ species = "Gamma", maxHp = 300, atk = 200, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "npc", name = "Rival", mons = {
+        mon({ species = "Beta", maxHp = 40, spd = 10, moves = { tap } }),
+        mon({ species = "Delta", maxHp = 40, spd = 10, moves = { tap } }),
+      } } },
+    },
+  })
+  local events = drain(battle)
+  -- turn 1: a1 KOs b1
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("npc", { action = "fight", move = 0 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- turn 2: npc's fallen b1 owes a replacement first -- close the replace
+  -- phase (b fields b2) -- THEN p1 files its voluntary switch to a2 on the
+  -- turn-2 window that the closed replace phase opens.
+  battle:submitChoice("npc", { action = "switch", slot = 1 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- turn 3+: a2 KOs b2
+  for _ = 1, 6 do
+    if battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("npc", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+
+  local allExp = expEvents(events)
+  eq(#allExp, 3, "one event for b1's knockout, two for b2's")
+  eq(allExp[1] and allExp[1].participants, 1, "b1's knockout: a1 alone, divisor 1")
+  local exps = { allExp[2], allExp[3] }
+  eq(exps[1] and exps[1].slot, 0, "both of b2's events sit on the one seat that owns them")
+  eq(exps[2] and exps[2].slot, 0, "...")
+  eq(exps[1] and exps[1].mon, 0, "party index 0 (Alpha, standing at the first KO)...")
+  eq(exps[2] and exps[2].mon, 1, "...then 1 (Gamma, the send-out)")
+  eq(exps[1] and exps[1].participants, 2,
+     "the deferred mark carried onto the SECOND foe -- divisor 2, not 1")
+  eq(exps[2] and exps[2].participants, 2, "...")
+end
+
+-- (c) the counterfactual: the held mark's owner faints before its successor
+-- ever fields. `_unfield` (RemoveFaintedPlayerMon) reaches `pendingFought`
+-- too, so the fallen mon's mark does not survive to inflate the NEXT
+-- knockout's divisor -- the successor inherits nothing, because there was
+-- no live monster left to have been "standing" when b1 fell.
+do
+  local slam = move({ id = "slam", power = 250, accuracy = 255, effect = 48 })
+  local tap = move({ id = "tap", power = 5, accuracy = 255 })
+  local battle = battleOf({
+    mode = "coop_npc",
+    seed = 77,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({ species = "Alpha", maxHp = 300, hp = 5, atk = 200, spd = 80, moves = { slam } }),
+        mon({ species = "Gamma", maxHp = 300, atk = 200, spd = 80, moves = { thumpMove() } }),
+      } } },
+      b = { { playerId = "npc", name = "Rival", mons = {
+        mon({ species = "Beta", maxHp = 40, spd = 10, moves = { tap } }),
+        mon({ species = "Delta", maxHp = 40, spd = 10, moves = { tap } }),
+      } } },
+    },
+  })
+  local events = {}
+  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  -- a1 (5 HP) KOs b1 with a 250-power recoil move and its own recoil finishes
+  -- it off in the same action -- exactly 12i(a)'s shape, but here the seat
+  -- still has a bench, so it owes a replacement rather than ending the fight.
+  for _ = 1, 8 do
+    if battle:outcome() then break end
+    local snap, replaced = battle:snapshot(), false
+    for _, f in ipairs(snap.field) do
+      if f.mustReplace then
+        local slot = nil
+        for i, hp in ipairs(f.party or {}) do
+          if (hp or 0) > 0 then slot = i - 1; break end
+        end
+        if slot then
+          battle:submitChoice(f.playerId, { action = "switch", slot = slot })
+          replaced = true
+        end
+      end
+    end
+    if not replaced then
+      battle:submitChoice("p1", { action = "fight", move = 0 })
+      battle:submitChoice("npc", { action = "fight", move = 0 })
+    end
+    for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
+  end
+
+  local faintedA1 = false
+  for _, e in ipairs(events) do
+    if e.t == "faint" and e.slot == 0 and e.text == "Alpha" then faintedA1 = true end
+  end
+  ok(faintedA1, "the fixture really did self-KO Alpha alongside b1")
+  local allExp = expEvents(events)
+  -- The first knockout (b1) paid nobody at all: Alpha was the only
+  -- participant and it fell in the same action, so no exp event exists for
+  -- it -- restated as a positive count rather than an index lookup.
+  local firstKoCount = 0
+  for _, e in ipairs(allExp) do
+    if e.species == "Beta" then firstKoCount = firstKoCount + 1 end
+  end
+  eq(firstKoCount, 0, "b1's knockout funded no event -- its sole participant self-KO'd")
+
+  -- b2's knockout (Delta) is what the counterfactual is about: Gamma, the
+  -- successor Ann fields after Alpha's fall, must NOT inherit a mark from a
+  -- monster that never lived to see it sent out.
+  local secondKo = {}
+  for _, e in ipairs(allExp) do
+    if e.species == "Delta" then secondKo[#secondKo + 1] = e end
+  end
+  eq(#secondKo, 1, "Delta's knockout paid exactly one event -- Gamma alone")
+  eq(secondKo[1] and secondKo[1].mon, 1,
+     "Gamma, party index 1 -- Alpha's fallen index 0 is not reused or renumbered")
+  eq(secondKo[1] and secondKo[1].participants, 1,
+     "divisor 1 -- Alpha's held mark did not carry over to Gamma")
+end
+
+-- ------------------------------------------------------------------
+-- 12i. dead-target retargeting (`_retarget`, `_useMove`'s call site)
+-- ------------------------------------------------------------------
+--
+-- A fight choice always names a living opposing seat at *choice* time
+-- (`_normaliseChoice` refuses an empty one). A mid-turn faint is the only way
+-- that aim goes stale by the time the action actually runs: in a 2v2, a
+-- faster ally can KO the seat a slower ally is aiming at before the slower
+-- one's own action resolves. `_retarget` is what that slower action asks
+-- instead of fizzling. The rule, restated as the three cases below:
+--   (a) whatever is standing in the SAME field position now, even if it is
+--       not who was aimed at -- a seat is a field position here;
+--   (b) otherwise the nearest living opposing seat by |slot distance|, ties
+--       broken toward the lower seat index;
+--   (c) otherwise nil, and the action is skipped.
+-- Resolved once per action (`_useMove`, before the move runs), so a
+-- multi-hit strike puts every hit on the retargeted seat rather than
+-- re-rolling per hit. `Effects.isCharge`/`isBide` record `targetSlot` off
+-- this same resolved value, not `choice.target`, so a charge's release or a
+-- Bide's payload lands where the action actually went.
+
+-- (a) the owner's case: a faster ally's KO empties the seat a slower ally
+-- aimed at in the same turn. The slower ally's attack must not fizzle -- it
+-- retargets to the nearest living seat and lands there for real damage.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "tap", power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 4 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local koIdx, noFizzle, sawSlowAnim, landed = nil, true, false, false
+  for i, e in ipairs(events) do
+    if e.t == "faint" and e.text == "Beta" then koIdx = i end
+    if e.t == "msg" and e.text and e.text:find("has no target", 1, true) then
+      noFizzle = false
+    end
+    if koIdx and i > koIdx and e.t == "anim" and e.side == "a" and e.slot == 1 then
+      sawSlowAnim = true
+    end
+    if sawSlowAnim and e.t == "damage" and e.side == "b" and e.slot == 3 then
+      landed = true
+    end
+  end
+  ok(koIdx ~= nil, "retarget/owner: fast's hit really KO'd the aimed-at seat")
+  ok(noFizzle, "retarget/owner: slow's attack never says 'has no target'")
+  ok(sawSlowAnim, "retarget/owner: slow's move still plays its anim")
+  ok(landed, "retarget/owner: slow's attack lands as real damage on foeB, the retargeted seat")
+
+  local snap = battle:snapshot()
+  eq(fighterIn(snap, "foeA").hp, 0, "retarget/owner: foeA (the original aim) stayed at 0 hp")
+  eq(fighterIn(snap, "foeB").hp, 182, "retarget/owner: foeB (the retargeted seat) took slow's hit")
+end
+
+-- (b) same-position preference: the aimed-at seat is refilled by a
+-- *voluntary* switch (not a faint) before the slower action runs. Gen 1
+-- switches resolve before fights regardless of speed, so the seat is full
+-- again by the time the aim is honoured -- the original aim lands on
+-- whoever now stands in that same field position, unchanged.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "tap", power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 200, spd = 5 }),
+                   mon({ species = "Epsilon", maxHp = 200, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 4 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "switch", slot = 1 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local sawSwitch, sawSend, landedOnSlot2 = false, false, false
+  for _, e in ipairs(events) do
+    if e.t == "switch" and e.side == "b" and e.slot == 2 then sawSwitch = true end
+    if e.t == "send" and e.side == "b" and e.slot == 2 and e.text == "Epsilon" then sawSend = true end
+    if e.t == "damage" and e.side == "b" and e.slot == 2 then landedOnSlot2 = true end
+  end
+  ok(sawSwitch and sawSend, "retarget/same-position: foeA's switch really refilled slot 2 first")
+  ok(landedOnSlot2, "retarget/same-position: slow's aim at slot 2 still lands there, on the replacement")
+
+  local snap = battle:snapshot()
+  eq(fighterIn(snap, "foeA").hp, 182, "retarget/same-position: Epsilon (the replacement) took slow's hit")
+  eq(fighterIn(snap, "foeB").hp, 6, "retarget/same-position: foeB took fast's original, unretargeted hit")
+end
+
+-- (c) both opposing seats are empty when the action runs, but the field
+-- still owes replacements (both foes have a bench mon left): the action
+-- skips silently -- no target to retarget onto -- and the referee opens the
+-- replace phase right after, soliciting exactly the two seats that fell.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "tap", power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5 }),
+                   mon({ species = "Epsilon", maxHp = 200, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 50,
+                         moves = { move({ id = "boom", power = 100, effect = 7 }) } }),
+                   mon({ species = "Zeta", maxHp = 200, spd = 5 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local sawSkipMsg, replaceSlots = false, {}
+  for _, e in ipairs(events) do
+    if e.t == "msg" and e.text == "Gamma has no target" then sawSkipMsg = true end
+    if e.t == "turn" and e.slot ~= nil then replaceSlots[#replaceSlots + 1] = e.slot end
+  end
+  ok(sawSkipMsg, "retarget/both-empty+bench: slow's action skips with the referee's own line")
+  listEq(replaceSlots, { 2, 3 }, "retarget/both-empty+bench: both fallen seats are solicited to replace")
+  eq(battle:snapshot().phase, "replace",
+     "retarget/both-empty+bench: the referee opened the replace phase, not `over`")
+end
+
+-- (d) the same wipe, but neither foe has a bench mon left: the battle ends
+-- outright (`over`) before slow's action even runs -- there is no action
+-- left to skip, and no replace phase to open.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "tap", power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 50,
+                         moves = { move({ id = "boom", power = 100, effect = 7 }) } }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local sawSkipMsg, sawOver = false, false
+  for _, e in ipairs(events) do
+    if e.t == "msg" and e.text and e.text:find("has no target", 1, true) then sawSkipMsg = true end
+    if e.t == "over" then sawOver = true end
+  end
+  ok(not sawSkipMsg,
+     "retarget/both-empty+no-bench: no skip line -- the fight is over before slow's action runs")
+  ok(sawOver, "retarget/both-empty+no-bench: the battle ends outright")
+  eq(battle:snapshot().phase, "over", "retarget/both-empty+no-bench: phase is `over`, not `replace`")
+end
+
+-- (e) multi-hit: the redirect is resolved once for the whole action, not
+-- once per hit -- every hit of a 2-5-style multi-hit move lands on the same
+-- retargeted seat.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 4242,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 90,
+                         moves = { move({ id = "bigsmash", power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 60, spd = 10,
+                         moves = { move({ id = "doubletap", power = 40, effect = 44 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 4 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local sawSlowAnim, hitsOnSlot3, hitsElsewhere = false, 0, 0
+  for _, e in ipairs(events) do
+    if e.t == "anim" and e.side == "a" and e.slot == 1 then sawSlowAnim = true end
+    if sawSlowAnim and e.t == "damage" and e.side == "b" then
+      if e.slot == 3 then hitsOnSlot3 = hitsOnSlot3 + 1 else hitsElsewhere = hitsElsewhere + 1 end
+    end
+  end
+  eq(hitsOnSlot3, 2, "retarget/multi-hit: both hits of the multi-hit move land on the retargeted seat")
+  eq(hitsElsewhere, 0, "retarget/multi-hit: no hit strays back onto the original (dead) aim")
+  eq(fighterIn(battle:snapshot(), "foeB").hp, 164,
+     "retarget/multi-hit: both hits actually subtracted from the survivor's hp")
+end
+
+-- (f) a charge move's first turn records the *retargeted* seat, not the
+-- original dead aim -- so its automatic release next turn (`_fillForcedChoices`)
+-- swings at the seat the charge actually resolved onto.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 5151,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 200,
+                         moves = { move({ id = "smash", power = 40 }) } }) } },
+        { playerId = "charger", name = "Charger",
+          mons = { mon({ species = "Gamma", maxHp = 200, atk = 90, spd = 10,
+                         moves = { move({ id = "solarbeam", power = 60, effect = 39 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5,
+                         moves = { move({ id = "tackle", power = 20 }) } }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 200, spd = 1,
+                         moves = { move({ id = "tackle", power = 20 }) } }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("charger", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  drain(battle)
+
+  local chargerMon = activeMonOf(battle, "charger")
+  ok(chargerMon and chargerMon.charging ~= nil, "retarget/charge: charging state was set")
+  eq(chargerMon and chargerMon.charging.targetSlot, 3,
+     "retarget/charge: the stored aim is the retargeted seat (3), not the dead original (2)")
+
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  local turn2 = drain(battle)
+
+  local released, landedOnSlot3 = false, false
+  for _, e in ipairs(turn2) do
+    if e.t == "anim" and e.side == "a" and e.slot == 1 and e.text == "solarbeam" then released = true end
+    if released and e.t == "damage" and e.side == "b" and e.slot == 3 then landedOnSlot3 = true end
+  end
+  ok(released, "retarget/charge: the charge auto-releases next turn")
+  ok(landedOnSlot3, "retarget/charge: the release lands on the retargeted seat, not the dead original")
+end
+
+-- (g) a Bide's first turn records the retargeted seat the same way; several
+-- turns later, its release (2x the stored damage) is paid to that same
+-- recorded seat.
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    seed = 6161,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ species = "Alpha", maxHp = 200, atk = 200, spd = 200,
+                         moves = { move({ id = "smash", power = 40 }) } }) } },
+        { playerId = "bider", name = "Bider",
+          mons = { mon({ species = "Gamma", maxHp = 200, def = 30, spd = 10,
+                         moves = { move({ id = "bide", power = 0, effect = 26 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ species = "Beta", maxHp = 12, spd = 5,
+                         moves = { move({ id = "tackle", power = 20 }) } }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ species = "Delta", maxHp = 400, spd = 1, atk = 60,
+                         moves = { move({ id = "tackle", power = 20 }) } }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("bider", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 1 })
+  drain(battle)
+
+  local biderMon = activeMonOf(battle, "bider")
+  ok(biderMon and biderMon.bide ~= nil, "retarget/bide: bide state was set")
+  eq(biderMon and biderMon.bide.targetSlot, 3,
+     "retarget/bide: the stored aim is the retargeted seat (3), not the dead original (2)")
+
+  local announced, sawReleaseAnim, landedOnSlot3 = false, false, false
+  for _ = 1, 6 do
+    if landedOnSlot3 then break end
+    battle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("foeB", { action = "fight", move = 0, target = 1 })
+    local events = drain(battle)
+    for _, e in ipairs(events) do
+      if e.t == "msg" and e.text == "Gamma unleashed energy" then announced = true end
+      if e.t == "anim" and e.side == "a" and e.slot == 1 and e.text == "bide" then
+        sawReleaseAnim = true
+      end
+      if sawReleaseAnim and e.t == "damage" and e.side == "b" and e.slot == 3 then
+        landedOnSlot3 = true
+      end
+    end
+  end
+  ok(announced, "retarget/bide: bide eventually announces its release")
+  ok(landedOnSlot3, "retarget/bide: the release damage is paid to the retargeted seat")
 end
 
 -- ------------------------------------------------------------------

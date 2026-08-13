@@ -4,18 +4,23 @@
 --
 -- Three flows live here, and they are less alike than they look.
 --
---   * **Against an NPC.**  One partner walks into a trainer, is asked whether
---     to wait or to go in alone. Waiting is allowed even when the partner is
---     on another map: the invite is stored for them and the join confirm pops
---     automatically when they arrive. They can leave wait mode and take the
---     trainer alone at any time. Accept → both fight it together. Decline →
---     the waiter is told, encouraged, and released into a solo 1v1.
+--   * **Against an NPC.**  One partner walks into a trainer and is asked
+--     nothing at all, and is shown nothing at all: the wait starts on the spot
+--     (COOP_WAIT out) *behind the engine's own encounter presentation*, which
+--     is already on screen and is what the waiter watches for the second the
+--     round trip takes. Same map is required -- a partner who is not standing
+--     here is told so once ("was too far to join!") and the trainer is fought
+--     the vanilla way, with no offer posted at all. The partner is pulled in
+--     automatically -- no confirm, no interaction with the NPC (see M:autoJoin
+--     for the consent model). A partner who is busy when the offer lands does
+--     not lose it: M:update re-attempts it as soon as they are free. The one
+--     out left is the clock: a wait with no join within SOLO_FALLBACK_AFTER
+--     withdraws and releases the waiter into the solo 1v1 with one line.
 --   * **Against a wild.**  Same-map partner online and free → divert into
---     mediated `coop_wild`: host posts COOP_WAIT and covers the engine wild
---     with a wait box (ALONE = withdraw + solo). Partner auto-joins; no
---     WAIT/JOIN invite. Soft-lock: a wait with no join within COOP_ASK_TIMEOUT
---     withdraws and releases into solo wild. Mutual waits arbitrate by
---     lexicographically smaller playerId (their wait wins; see considerOffer).
+--     mediated `coop_wild`: host posts COOP_WAIT and leaves the engine wild on
+--     screen exactly as the trainer path does. Same auto-join, same clock.
+--     Mutual waits arbitrate by lexicographically smaller playerId (their wait
+--     wins; see considerOffer), in both modes.
 --   * **Against another party.**  PARTY BATTLE on the ACTIONS menu, and all
 --     four have to agree before anything starts.
 --
@@ -29,17 +34,21 @@
 -- Three rules are worth naming up front, because every awkward-looking branch
 -- below is one of them being obeyed rather than an oversight.
 --
--- 1. **A decline ends the wait.**  Saying no to an NPC invite tells the
---    waiter (via the hub), clears the offer, and sends them into the solo
---    fight the engine already built under their prompt. The decliner is not
---    dragged into anything -- if they never walked into the trainer, "no" is
---    simply no.
+-- 1. **The party is the consent, on both ends.**  Nobody is asked anything
+--    when a fight begins: forming the party was the yes, the walker-in starts
+--    waiting the instant the trainer triggers, and the partner is pulled in
+--    without a confirm. An offer that cannot be taken this instant (mid-fight,
+--    mid-trade) stays standing and is re-attempted from M:update the moment
+--    this client is free, and the waiter's own clock is what ends a wait
+--    nobody ever takes. The outs did not go anywhere and are the whole reason
+--    no ask is needed: the SOLO_FALLBACK_AFTER self-release, STOP once a fight
+--    is up -- and, for a player who wants none of this, cancelling the party.
 -- 2. **The fight cannot be dodged.**  Once a trainer has been triggered, every
---    exit from every prompt this module raises ends in a battle.  B on the
---    wait/alone choice is BATTLE ALONE, not "never mind"; B while waiting
---    reopens that same choice rather than releasing the player.  The engine
---    has already committed to the encounter by the time we are asked, so a
---    prompt that could be escaped would be a prompt that skipped a trainer.
+--    exit from every prompt this module raises ends in a battle.  The engine
+--    has already committed to the encounter by the time this module is called,
+--    so a prompt that could be escaped would be a prompt that skipped a
+--    trainer -- which is why the wait raises no prompt at all: it leaves the
+--    engine's battle on screen and simply takes it over, or does not.
 -- 3. **The door closes when the battle starts, not when it is agreed.**
 --    running is set at handoff and refuses every later join, because a fourth
 --    monster appearing mid-turn is not a thing the other three agreed to.
@@ -55,6 +64,41 @@ local Gen = need("Gen")
 local CoopBattle = need("CoopBattle")
 local Mediated = need("MediatedBattle")
 
+-- How often a standing offer is re-attempted while this client is busy.
+--
+-- Local rather than a Config constant on purpose: the hubs know nothing about
+-- it -- they hold the offer and relay whatever COOP_JOIN arrives -- and every
+-- co-op number in Config is one the Node twin mirrors. Half a second is below
+-- notice for the player being pulled in and keeps the poll's real cost (a walk
+-- of the state stack) at twice a second on the rare ticks an offer stands.
+local JOIN_RETRY_EVERY = 0.5
+
+-- How long a wait stands before this client gives up and fights alone.
+--
+-- **One timeout, not two.** This used to be Config.COOP_ASK_TIMEOUT (60s),
+-- which was the right number for a wait the player was *watching* -- a cover
+-- was up, nothing else could happen, and a minute was a generous window for a
+-- partner to surface from a menu. There is no cover any more: the waiter is
+-- looking at the engine's own encounter, which they can fight. Sixty seconds
+-- of that is not a wait, it is a solo battle that suddenly turns into a co-op
+-- one halfway through.
+--
+-- Six seconds instead, and the number is chosen against what is on screen
+-- rather than against the network: the engine's entry wipe plus the trainer's
+-- appear-and-send-out runs for several seconds before the player is given a
+-- menu, so the common case (a free partner, a sub-second round trip) is
+-- covered by the animation and the join lands before anything is asked of
+-- them. What is left over is the round-9 retry window -- a partner who was in
+-- a menu or mid-trade when the offer landed gets a handful of re-attempts
+-- (JOIN_RETRY_EVERY) inside it -- and past that the honest answer is that they
+-- are not coming.
+--
+-- Local rather than a Config constant for the same reason JOIN_RETRY_EVERY is:
+-- no hub knows about it. The hubs hold the offer and relay COOP_JOIN; both
+-- twins' own ask expiry is still Config.COOP_ASK_TIMEOUT, which this does not
+-- touch (that clock is the four-way PARTY BATTLE ask, and it is unchanged).
+local SOLO_FALLBACK_AFTER = 6
+
 local M = {}
 M.__index = M
 
@@ -69,11 +113,32 @@ function M.new(transport, ui, party, roster, chat)
     waiting = nil,
     -- the partner's, as it arrived: { from, name, battle, label, map, clock }
     offer = nil,
+    -- Who the overlay's "!" is about, and the one field here that exists for
+    -- the *display* rather than for the handshake: { id, battle, map }.
+    --
+    -- It has to be a latch and not a read of `offer`, because `offer` is set
+    -- and cleared inside a single synchronous handler in the case the mark is
+    -- entirely for -- onOffer sets it, considerOffer takes it, and autoJoin
+    -- clears it before the join is even sent, all before any renderer gets a
+    -- tick.  A field polled once a frame can never see that.  So the arrival
+    -- is written down here instead, and it outlives the offer by design: it is
+    -- released when the fight reaches the screen (startBattle), when the offer
+    -- ends some other way, when the partner goes, when the party does, and on
+    -- the offer's own timeout -- every place `offer` itself is dropped.
+    offerMarkFor = nil,
     -- the four-way PARTY BATTLE ask, ours or theirs
     ask = nil,
-    -- Battle key of an NPC join confirm already on screen, so onOffer and
-    -- walking into the same trainer do not stack a second box.
-    joinAsk = nil,
+    -- Three optional hooks the client installs, all shaped like `fighting`:
+    -- `busy()` answers Sessions:isBusy() (mid-trade / mid-1v1-request),
+    -- `here()` answers the map this player is standing on, and `toast(text)`
+    -- puts one line in the corner of the screen. Coop holds no engine, session
+    -- or renderer dependency of its own -- see M:challenge's header -- so all
+    -- three are handed in by src/Client.lua and all three are optional:
+    -- absent, a join is simply never deferred for a trade, never retried on a
+    -- tick, and says what it has to say in the party log alone.
+    busy = nil,
+    here = nil,
+    toast = nil,
     -- Dedupes the "was brave / went 1-on-1" sentence when an offer ends and
     -- a late yes would otherwise say it twice.
     aloneAnnounced = false,
@@ -165,7 +230,9 @@ function M:reset()
   self:release()
   self:closeAskBox()
   self.waiting, self.offer, self.ask = nil, nil, nil
-  self.joinAsk, self.joinBox = nil, nil
+  -- Nothing is coming for the connection that just dropped, so nothing is
+  -- being pointed at either.
+  self.offerMarkFor = nil
   self.aloneAnnounced = false
   -- Dropped, not fired. The heal and the money are already written to the
   -- save; a warp left armed across a dropped connection would go off in
@@ -178,14 +245,14 @@ end
 -- Let the encounter proceed, exactly once.
 --
 -- Every path out of every prompt this module raises ends here, and the
--- once-only guard is what makes that safe to say: a player who picks BATTLE
--- ALONE while a join is already in flight, or whose party dissolves in the
--- same frame the hub answers, would otherwise resume one suspended script
--- twice -- and the second resume runs a battle nobody is standing in front of.
--- Let the engine's own battle happen: close the prompt and get out of the way.
+-- once-only guard is what makes that safe to say: a wait whose clock runs out
+-- in the same frame the hub answers it, or a player whose party dissolves in
+-- that frame, would otherwise resume one suspended script twice -- and the
+-- second resume runs a battle nobody is standing in front of. Let the engine's
+-- own battle happen: take down whatever is over it and get out of the way.
 --
 -- Nothing is resumed and nothing is started, because nothing was ever stopped
--- -- the battle has been sitting under the prompt the whole time.
+-- -- the battle has been sitting there, on screen, the whole time.
 function M:release()
   local encounter = self.encounter
   self.encounter = nil
@@ -530,6 +597,32 @@ function M:note(text)
   })
 end
 
+-- The corner of the screen, for a line whose moment is too short to be read
+-- anywhere else.
+--
+-- A note goes in the party scrollback, which is the right home for the record
+-- and the wrong one for the news: it is invisible unless the chat window is
+-- open.  That is survivable for everything here except the join, whose whole
+-- window is the fraction of a second before the battle covers the overworld --
+-- the same fraction the "!" mark has, and the reason the mark alone was never
+-- enough.  A toast is drawn in window space after the overlay and behind no
+-- free-roam gate (src/Toast.lua, and src/Client.lua's render.hud wrap), so it
+-- is the one thing this module can say that survives its own battle screen.
+--
+-- Both, never either: the note is the history, the toast is the moment.
+function M:toastLine(text)
+  local push = self.toast
+  if not (text and type(push) == "function") then return false end
+  local ok, err = pcall(push, text)
+  if not ok then
+    self.toast = nil
+    mod.log:warn("a co-op line could not be shown in the corner (%s); it is "
+      .. "still in the party chat log (START > MMO > CHAT)", tostring(err))
+    return false
+  end
+  return true
+end
+
 -- What to call a fight in a sentence.  A script-driven battle need not name
 -- its trainer, and "a battle" is a better answer than refusing the whole offer
 -- over a cosmetic field.
@@ -539,17 +632,25 @@ end
 
 -- ------- against an NPC: the player who arrives first
 --
--- Called when this player triggers a trainer battle.  `startAlone` is the
--- continuation that runs the ordinary 1v1 -- the engine has already decided
--- there is a battle, and every path through here ends by calling it or by
--- handing over to a co-op one.
---
--- Returns true when this module took the encounter over (a prompt is up, and
--- startAlone will be called later or not at all), false when the caller should
--- simply proceed.  False is the answer for a player who is not in a party or
--- not connected: co-op is an addition to the game, and a lone player must
--- never notice it exists.
 -- Called when the engine has just pushed a trainer battle.
+--
+-- **Nothing is asked, and nothing is shown.**  Being in a party *is* the
+-- consent for co-op battles, so a partied player who walks into a trainer with
+-- an online partner on this map goes straight into the wait: COOP_WAIT out,
+-- the engine's own encounter presentation left on screen, the partner auto-
+-- joining a second later.  A player who does not want their fights turned into
+-- 2-on-2s cancels the party; a player who has stopped wanting *this* one just
+-- fights it -- SOLO_FALLBACK_AFTER hands the trainer back if the join has not
+-- landed by then. Those are the outs, and they are why the question stopped
+-- being worth asking.
+--
+-- **Same map is a hard gate**, exactly as it always was on the wild path (see
+-- M:onWildEncounter, which refuses on `partnerOnMap` before anything is sent).
+-- A wait used to be allowed to stand for a partner three screens away, on the
+-- theory that they would walk over -- but the whole shape of this flow now is
+-- that the engine's encounter covers the round trip, and no encounter covers a
+-- walk. A partner who is not here is told so once and the trainer is fought
+-- the ordinary way: no offer posted, nothing to withdraw, nothing to time out.
 --
 -- **The battle object is the whole trick here.** It has already been built and
 -- pushed by the engine -- its enemy party is real, its `onFinish` is wired to
@@ -557,19 +658,21 @@ end
 -- rewards, the whiteout, the script that was waiting) -- and none of that is
 -- anything a mod should be reimplementing.
 --
--- So the prompt goes on top of it rather than instead of it, and the two
--- answers do very different things with almost no code:
+-- So the co-op path stands in for it rather than replacing it, and the two
+-- endings do very different things with almost no code:
 --
---   * BATTLE ALONE simply closes the prompt. The engine's battle is sitting
---     underneath, frozen because a StateStack only updates its top, and it
---     resumes untouched. Nothing was intercepted at all.
+--   * The timeout (and every other release) simply lets go. The engine's
+--     battle has been on screen the whole time and was never touched at all.
 --   * The co-op path pops it, holds it, fights the 2-on-2 in its place, and
 --     then calls its `onFinish` with the result -- so the trainer is marked
 --     beaten, the badge is awarded, a wipe blacks you out and the script
 --     carries on, exactly as if one player had fought it.
 --
--- Returns true when a prompt is up. False means the encounter is none of this
--- module's business, and the engine's battle is left completely alone.
+-- Returns true when this module took the encounter over (a wait is out, or a
+-- join is under way). False means the encounter is none of this module's
+-- business, and the engine's battle is left completely alone -- which is the
+-- answer for a player who is not in a party or not connected: co-op is an
+-- addition to the game, and a lone player must never notice it exists.
 function M:onTrainerBattle(game, state, mapId)
   if not state then return false end
   -- Gen 2 BattleState has no `.kind`; the trainer record sits on state.battle.
@@ -578,12 +681,31 @@ function M:onTrainerBattle(game, state, mapId)
   if kind ~= "trainer" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running then return false end
-  -- Partner has to be online (in the roster). Same map is *not* required: the
-  -- waiter may hold the encounter until they arrive, and the invite pops for
-  -- them on map.entered. Offline / no partner means this is a solo fight.
+  -- Partner has to be online (in the roster). Offline / no partner means this
+  -- is a solo fight, and a lone player must never notice co-op exists -- so
+  -- that case is silent, and only this one is.
   local partner = self.party:partner()
   local here = partner and self.roster:get(partner.id)
   if not here then return false end
+  -- ...and standing on this map. Refused *before* the encounter is claimed and
+  -- before anything is sent: no COOP_WAIT, no offer for the partner to hold,
+  -- no wait to time out. The player is simply told why their partner is not in
+  -- this fight and left to fight it.
+  --
+  -- Said with a box over the trainer the engine just pushed, which is the same
+  -- surface every other pre-battle line in this module uses (M:onDecline's
+  -- pair, M:onPartyEnd's "There's nobody to wait for"): a StateStack only
+  -- updates its top, so the battle underneath is held until the player presses
+  -- A and then resumes untouched. Nothing is released, because nothing was
+  -- ever taken -- `self.encounter` is not set on this path at all.
+  if not self:partnerOnMap(mapId) then
+    local who = (partner and partner.name) or self.party:partnerName()
+      or "Your friend"
+    local line = ("%s was too far\nto join!"):format(who)
+    self:note(line)
+    self.ui:say(line)
+    return false
+  end
 
   local trainer = state.battle and state.battle.trainer
   local oppClass = state.oppClass
@@ -616,12 +738,22 @@ function M:onTrainerBattle(game, state, mapId)
     event = event,
   }
 
+  -- We walked into the fight our partner is already standing at. Nothing left
+  -- to agree about, so nothing is asked: take their offer. The engine trainer
+  -- underneath stays exactly where it is -- startBattle adopts it through
+  -- joinedEngine (same key, by construction), and a join the hub drops too
+  -- late leaves the player fighting it alone, which is rule 2.
   if self:offerMatches(key) then
-    self:askToJoin(game, self.offer)
-    return true
+    return self:autoJoin(self.offer)
   end
-  self:askWaitOrAlone(game)
-  return true
+  -- No ask: the party already answered it. beginWait only fails with no
+  -- encounter, which cannot happen a dozen lines after one was built -- but if
+  -- it ever does, the honest answer is to drop the claim and leave the
+  -- engine's trainer alone rather than hold a claim on an encounter with no
+  -- offer out.
+  if self:beginWait() then return true end
+  self.encounter = nil
+  return false
 end
 
 -- The wild mon the engine just built, for a grant and for the battle key.
@@ -659,8 +791,10 @@ end
 -- just-pushed local wild so it cannot be fought under/after the join). A
 -- trainer offer still refuses divert (solo engine wild).
 --
--- beginWildCoop posts COOP_WAIT and covers the engine wild with a wait box so
--- the host cannot fight solo while the partner auto-joins (see considerOffer).
+-- beginWildCoop posts COOP_WAIT and leaves the engine wild running: the host
+-- watches their own "Wild X appeared!" for the second the partner's auto-join
+-- takes (see considerOffer), and startBattle stands in for that wild whether
+-- or not the player has started fighting it.
 function M:onWildEncounter(game, state, mapId)
   if not state then return false end
   -- Gen 2 BattleState has no `.kind`; a wild fight carries state.battle.wild.
@@ -669,7 +803,6 @@ function M:onWildEncounter(game, state, mapId)
   if kind ~= "wild" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running or self.waiting or self.ask then return false end
-  if self.joinAsk then return false end
   if self.offer then
     if self.offer.mode ~= "coop_wild" then return false end
     -- Partner already waiting on grass: join them; do not start a local wait.
@@ -678,13 +811,17 @@ function M:onWildEncounter(game, state, mapId)
     local partner = self.party:partner()
     local row = partner and self.roster:get(partner.id)
     if row and row.busy then return false end
+    -- Asked here rather than left to autoJoin, because the pop below is not
+    -- reversible: a join refused after it would cost the player the encounter
+    -- they walked into. The offer stays standing for M:update's retry.
+    if self:sessionBusy() then return false end
     local offer = self.offer
     -- Pop the just-pushed wild; their battle key will not match ours, so
     -- joinedEngine would leave this fight under the co-op screen otherwise.
     if game and game.stack and game.stack:top() == state then
       game.stack:pop()
     end
-    return self:autoJoinWild(offer)
+    return self:autoJoin(offer)
   end
   if not self:partnerOnMap(mapId) then return false end
   local partner = self.party:partner()
@@ -710,9 +847,13 @@ function M:onWildEncounter(game, state, mapId)
   return self:beginWildCoop()
 end
 
--- Start a Party vs Wild wait: same wire as trainer WAIT, with a covering box
--- so the engine wild under it cannot update (frozen until join / ALONE /
--- timeout). Short clock still applies -- see M:update.
+-- Start a Party vs Wild wait: same wire as a trainer wait, and the same
+-- absence of anything on screen. The engine wild stays exactly where it is and
+-- keeps running -- its own "Wild X appeared!" and send-out are what the waiter
+-- watches while the round trip happens. Short clock applies -- see M:update.
+--
+-- Nothing is asked here either, and never was: this path is the one the
+-- trainer path was rewritten to match, twice now.
 --
 -- The encounter is held (not released) so a timed-out wait can still hand the
 -- engine wild back via release(), and a successful join can hand it to
@@ -738,7 +879,6 @@ function M:beginWildCoop()
     map = encounter.map,
     mode = "coop_wild",
   })
-  self:showWildWaiting()
   return true
 end
 
@@ -792,8 +932,8 @@ end
 -- Whether the partner is currently standing on `mapId`.
 --
 -- Absence (offline, no roster row) is not "elsewhere" -- it is nobody to wait
--- for, and onTrainerBattle already refused that case. A real row on another
--- map is the wait-for-arrival path.
+-- for, and onTrainerBattle refuses that case one line above the one that asks
+-- this. Both answers now end the same way on both flows: no divert.
 function M:partnerOnMap(mapId)
   if not mapId then return false end
   local partner = self.party:partner()
@@ -801,47 +941,21 @@ function M:partnerOnMap(mapId)
   return row ~= nil and row.map == mapId
 end
 
--- The choice that cannot be escaped.
---
--- Two rows and no cancel: Ui:choose maps B onto the *last* row, and the last
--- row is BATTLE ALONE.  That is rule 2 in one line -- a player who keeps
--- pressing B fights the trainer by themselves, which is what would have
--- happened without this mod installed, rather than walking away from an
--- encounter the engine has already begun.
-function M:askWaitOrAlone(game)
-  local name = self.party:partnerName() or "your friend"
-  local mapId = self.encounter and self.encounter.map
-  local prompt = self:partnerOnMap(mapId)
-    and ("Battle with %s?"):format(name)
-    or ("Wait for %s\nto arrive?"):format(name)
-
-  self.ui:choose(game, prompt, {
-    { label = "WAIT", onSelect = function() self:beginWait() end },
-    {
-      label = "ALONE",
-      onSelect = function()
-        -- Withdraw before releasing.  If an offer of ours is still standing,
-        -- the partner's client has to stop showing it before this side
-        -- disappears into a battle -- an offer whose owner is already fighting
-        -- is the one thing the partner can do nothing about.
-        self:withdraw("alone")
-        self:release()
-      end,
-    },
-  })
-end
-
 -- Start waiting, and tell the partner.
+--
+-- Called straight from onTrainerBattle -- there is no choice and no cover in
+-- front of it any more, so this is the whole of what triggering a trainer with
+-- a partner standing here *does*: one message, one line in the party log, and
+-- the engine's encounter left running on screen.
 --
 -- The encounter is deliberately *not* released here: this is the one branch
 -- that does not end in a battle straight away, and holding the continuation is
--- what leaves the player standing in front of the trainer instead of fighting
--- it.  Everything that ends the wait -- joining, giving up, the party
--- dissolving, the connection dropping -- releases it.
+-- what lets the co-op path hand the engine's trainer its result later.
+-- Everything that ends the wait -- joining, the clock, the party dissolving,
+-- the connection dropping -- releases it.
 --
--- The offer is sent immediately even when the partner is on another map: their
--- client stores it and only raises the join confirm once they share this map
--- (see M:considerOffer / map.entered).
+-- The partner is on this map by the time this runs (onTrainerBattle's gate),
+-- so there is one wording rather than two.
 function M:beginWait()
   local encounter = self.encounter
   if not encounter then return false end
@@ -869,71 +983,35 @@ function M:beginWait()
   if encounter.event then payload.event = encounter.event end
   self.transport:send(Wire.COOP_WAIT, payload)
   local name = self.party:partnerName() or "your friend"
-  if self:partnerOnMap(encounter.map) then
-    self:note(("Waiting for %s at %s."):format(name, fightName(encounter.label)))
-  else
-    self:note(("Waiting for %s to\narrive at %s."):format(
-      name, fightName(encounter.label)))
-  end
-  self:showWaiting()
+  self:note(("Waiting for %s at %s."):format(name, fightName(encounter.label)))
   return true
 end
 
--- The box the waiting player stands behind.
+-- **There is no wait cover, and its absence is the design.**
 --
--- Two rows: BACK reopens wait/alone; ALONE is last so B leaves wait and fights
--- solo -- rule 2 still holds from wait mode. The partner's invite stays up
--- until ALONE (or timeout), so a BACK that later picks WAIT again does not
--- flicker their confirm away.
-function M:showWaiting()
-  local waiting = self.waiting
-  if not waiting then return end
-  local name = self.party:partnerName() or "your friend"
-  local prompt = self:partnerOnMap(waiting.map)
-    and ("Waiting for %s..."):format(name)
-    or ("Waiting for %s\nto arrive..."):format(name)
-  -- nil game, like every other prompt this module raises: Ui falls back to the
-  -- context's current game, which is the only one there is.
-  self.ui:choose(nil, prompt, {
-      {
-        label = "BACK",
-        onSelect = function()
-          self:askWaitOrAlone(nil)
-        end,
-      },
-      {
-        label = "ALONE",
-        onSelect = function()
-          self:withdraw("alone")
-          self:release()
-        end,
-      },
-    })
-end
-
--- Cover the engine wild while a Party vs Wild offer stands.
+-- There used to be one -- a "Waiting for NAME..." choose box with a single
+-- ALONE row -- pushed over the engine's battle so the engine's battle could
+-- not update while the offer was out. It is gone, and nothing replaced it.
 --
--- Single row: ALONE is last (and only), so B maps to withdraw+release and the
--- host fights the engine wild solo -- same ending as trainer ALONE, without a
--- BACK row that would reopen a WAIT/ALONE ask this path never showed. The
--- choose screen is stack-top, so the wild underneath cannot update until this
--- pops (join → startBattle, ALONE/timeout → release, or arbitration unwind).
-function M:showWildWaiting()
-  local waiting = self.waiting
-  if not (waiting and waiting.mode == "coop_wild") then return end
-  local name = self.party:partnerName() or "your friend"
-  local prompt = ("Waiting for %s..."):format(name)
-  self.ui:choose(waiting.game, prompt, {
-    {
-      label = "ALONE",
-      onSelect = function()
-        self:withdraw("alone")
-        self:release()
-      end,
-    },
-  })
-end
-
+-- The reason is arithmetic: the auto-join round trip is sub-second on a live
+-- hub, and a box that is up for a fraction of a second is not a screen, it is
+-- a flicker. Everything it was carrying has somewhere better to be:
+--
+--   * *"who am I waiting for"* -- the engine is already showing the encounter
+--     the wait is about, and the party log carries the sentence (beginWait's
+--     note). The joiner's end of it is the "!" mark and the toast (M:autoJoin).
+--   * *the ALONE row* -- replaced by the two gates that made it redundant:
+--     same map (M:onTrainerBattle) refuses the case a player would have taken
+--     it in, and SOLO_FALLBACK_AFTER (M:update) takes it for them in the case
+--     that is left, with the trainer already on screen and playable.
+--   * *freezing the engine's battle* -- deliberately given up. The waiter can
+--     start fighting the trainer solo in the second before the join lands;
+--     startBattle unwinds that battle and stands in for it either way, which
+--     is exactly what it does for a walk-in joiner who did the same thing.
+--
+-- What is left is that the two clients look the same during the wait: both
+-- watching an engine encounter, one of them about to be replaced.
+--
 -- Take our offer off the table.  Safe to call when there is none: every exit
 -- from a fight goes through here, and making each of them check first would be
 -- four places to forget.
@@ -944,26 +1022,36 @@ function M:withdraw(reason)
   return true
 end
 
--- Take the join confirm down, if it is still up.
+-- Mid-trade, as Sessions sees it.
 --
--- Same rule as closeAskBox: only when the held box is what the player is
--- looking at. An offer ending under a menu leaves the confirm alone rather
--- than popping sixteen states hunting for it.
-function M:closeJoinBox()
-  local held = self.joinBox
-  self.joinBox = nil
-  self.joinAsk = nil
-  if not held then return false end
-  local stack = held.game and held.game.stack
-  local states = stack and stack.states
-  if not (states and held.box) then return false end
-  if states[#states] ~= held.box then return false end
-  return self:unwindTo(held.game, held.box, true)
+-- A join is a battle screen pushed over whatever is there, and pushing one
+-- over a live trade is the one thing an automatic pull must never do: the
+-- other side of that trade is a third player watching a screen that stopped
+-- answering. So it is a gate rather than a race, and the offer it refuses is
+-- kept -- M:update takes it again once the trade is done.
+--
+-- pcall'd, and "cannot say" is answered as not-busy: a hook that throws must
+-- cost the player nothing worse than a join they were expecting anyway. Warned
+-- once, not once a tick, because the retry asks this twice a second.
+function M:sessionBusy()
+  local hook = self.busy
+  if type(hook) ~= "function" then return false end
+  local ok, busy = pcall(hook)
+  if not ok then
+    if not self.busyWarned then
+      self.busyWarned = true
+      mod.log:warn("could not tell whether a trade is in progress (%s); co-op "
+        .. "joins are taken immediately -- finish a trade before joining",
+        tostring(busy))
+    end
+    return false
+  end
+  return busy == true
 end
 
--- One sentence for "they went in alone", shared by the offer ending under the
--- confirm and by a yes that arrives after the wait is already over -- so a
--- race cannot print it twice.
+-- One sentence for "they went in alone", shared by the offer ending while it
+-- still stands and by a join that arrives after the wait is already over -- so
+-- a race cannot print it twice.
 function M:announceAlone(name, onDone)
   if self.aloneAnnounced then
     if onDone then onDone() end
@@ -977,134 +1065,183 @@ end
 
 -- ------- against an NPC: the partner's invite
 
--- Push the join confirm when an offer is live and we are free to answer it.
+-- Take the partner's offer when one is live and we are free to take it.
 --
--- Same-map only: an invite for a fight three screens away is stored (chat
--- note + JOIN row) but not shoved in the player's face. Mid-fight and mid-
--- wait are also quiet -- a box over a wild encounter is worse than a note.
+-- Same-map only, and the gate is kept on this end even though both flows now
+-- refuse to *post* an off-map offer at all (M:onTrainerBattle, and the wild
+-- path before it): a partner can step through a door in the second between the
+-- wait going out and this arriving, and a player cannot be pulled into a
+-- battle happening somewhere they are not. Such an offer is stored (chat note
+-- + JOIN row) and taken if they walk back inside its lifetime. Mid-fight,
+-- mid-trade and mid-ask leave it standing too -- and standing is the whole
+-- trick, because M:update re-attempts it the moment those clear, which is what
+-- fits a busy partner inside the waiter's SOLO_FALLBACK_AFTER window.
 --
--- `coop_wild` never asks: partner auto-joins when free on the same map, which
--- is the whole Party vs Wild product rule. Busy / off-map leaves the offer
--- standing so the host's short wait can time out into solo wild.
+-- Neither mode asks. See M:autoJoin for why, and for what a player who does
+-- not want the fight does instead.
 --
--- Mutual coop_wild waits: lexicographically smaller playerId's wait wins.
--- If offer.from < selfId we withdraw our wait and join theirs; otherwise we
--- keep ours and drop the inbound offer so both sides cannot time out stuck.
+-- Mutual waits: two partners who triggered in the same moment each hold the
+-- other's offer, and lexicographically smaller playerId's wait wins. If
+-- offer.from < selfId we withdraw ours and join theirs; otherwise we keep ours
+-- and drop the inbound offer so both sides cannot sit until their clocks run
+-- out. Mixed modes (their grass against our trainer) are two different fights
+-- and never merge -- the inbound offer is simply left where it is.
 function M:considerOffer(game, myMap)
   local offer = self.offer
   if not offer then return false end
-  if self.joinAsk or self.ask or self.running then return false end
+  if self.ask or self.running then return false end
   if not (offer.map and myMap and offer.map == myMap) then return false end
 
-  if offer.mode == "coop_wild" then
-    if self.waiting then
-      if self.waiting.mode ~= "coop_wild" then return false end
-      local selfId = self.party and self.party.selfId
-      local from = offer.from
-      if not (selfId and from) then return false end
-      if from < selfId then
-        return self:autoJoinWild(offer)
-      end
-      -- Ours wins; clear inbound so waiting+offer cannot block later gates.
-      self.offer = nil
+  if self.waiting then
+    if (self.waiting.mode == "coop_wild") ~= (offer.mode == "coop_wild") then
       return false
     end
-    -- Covered wild under a wait box counts as inFight; free joiners must not
-    -- be mid-fight. Mutual wait is handled above before this check.
-    if self:inFight(game) then return false end
-    return self:autoJoinWild(offer)
+    local selfId = self.party and self.party.selfId
+    local from = offer.from
+    if not (selfId and from) then return false end
+    if from < selfId then
+      return self:autoJoin(offer)
+    end
+    -- Ours wins; clear inbound so waiting+offer cannot block later gates.
+    self.offer = nil
+    return false
   end
 
-  if self.waiting or self:inFight(game) then return false end
-  return self:askToJoin(game, offer)
+  -- A wild we are ourselves waiting on is still on the stack and counts as
+  -- inFight, which is why the mutual case is answered above this rather than
+  -- by it.
+  if self:inFight(game) then return false end
+  return self:autoJoin(offer)
 end
 
--- Answer a Party vs Wild offer without a confirm box.
+-- Take an offer, in either mode, with no confirm box.
 --
--- When called while we already hold a coop_wild wait (mutual divert / menu
--- JOIN after arbitration chose their offer), withdraw ours and discard the
--- local engine wild first -- their battle key will not match ours.
--- Same rule as considerOffer: only join over our wait when offer.from < selfId.
-function M:autoJoinWild(offer)
-  if not (offer and offer.mode == "coop_wild") then return false end
+-- **The consent model, said once.** Forming the party is the consent. Two
+-- players who agreed to travel together have already agreed to fight together,
+-- so a partner standing at a trainer -- or in the grass -- pulls the other in
+-- without a yes/no, which is the rule Party vs Wild always had and the rule
+-- the NPC path now shares. The outs are unchanged and all still cheap: the
+-- waiter's own clock goes in solo (SOLO_FALLBACK_AFTER), the ACTIONS > JOIN
+-- row is there for an offer that could not be taken when it landed, STOP
+-- leaves a fight that has started, and leaving the party ends every offer at
+-- once.
+--
+-- Busy is a deferral and not a refusal: mid-fight, mid-ask and mid-trade all
+-- leave the offer standing for M:update's retry. That retry is the difference
+-- between "the partner was in a menu at the wrong instant" costing the fight
+-- and costing a second.
+--
+-- Called while we already hold a wait (mutual divert, or the menu JOIN row
+-- after arbitration chose their offer): withdraw ours first, and only when
+-- offer.from < selfId -- considerOffer's rule, re-asked here because the menu
+-- row reaches this without going through it. A withdrawn *wild* wait also
+-- discards the local engine wild, whose key will not match theirs; a withdrawn
+-- *trainer* wait keeps it, because a trainer that has been walked into is owed
+-- a battle either way (rule 2) -- startBattle adopts it when it is the same
+-- fight and it resurfaces underneath when it is not.
+function M:autoJoin(offer)
+  if not offer then return false end
   if not self.transport:isReady() then return false end
   if self.running or self.ask then return false end
+  if self:sessionBusy() then return false end
   if self.waiting then
-    if self.waiting.mode ~= "coop_wild" then return false end
+    if (self.waiting.mode == "coop_wild") ~= (offer.mode == "coop_wild") then
+      return false
+    end
     local selfId = self.party and self.party.selfId
     local from = offer.from
     if not (selfId and from and from < selfId) then return false end
+    local wild = self.waiting.kind == "wild"
+      or self.waiting.mode == "coop_wild"
     -- Quiet cancel: onOfferEnd does not announce timeout the way alone/left do.
     self:withdraw("timeout")
-    local enc = self.encounter
-    self.encounter = nil
-    if enc and enc.engine then
-      self:unwindTo(enc.game, enc.engine, true)
+    if wild then
+      local enc = self.encounter
+      self.encounter = nil
+      if enc and enc.engine then
+        self:unwindTo(enc.game, enc.engine, true)
+      end
     end
   end
   local from, battle = offer.from, offer.battle
   -- Cleared before the send so a second considerOffer tick cannot double-join.
-  -- A late alone from the hub still lands as COOP_OFFER_END with no box up.
+  -- A late alone from the hub still lands as COOP_OFFER_END with nothing up.
   self.offer = nil
   self.transport:send(Wire.COOP_JOIN, { to = from, battle = battle })
+  -- One line, in the corner and in the party log rather than a box: being
+  -- pulled into a fight is not disorienting when you are told whose it is, and
+  -- a box here would be the confirm again wearing a different hat.
+  --
+  -- **In the corner because the log alone was invisible.** This is the last
+  -- word the joiner gets before a battle they did not ask for lands on top of
+  -- their overworld, and everything else that could carry it -- the partner's
+  -- "!" mark, the note -- is either covered by that battle or behind a window
+  -- nobody had open. The toast outlives the push (M:toastLine); the note keeps
+  -- the history for anyone who scrolls back.
+  local line = ("Joining %s's battle!"):format(
+    offer.name or self.party:partnerName() or "your friend")
+  self:note(line)
+  self:toastLine(line)
   return true
 end
 
--- The yes/no that ends somebody else's wait.
+-- The retry. An offer that could not be taken when it landed, taken later.
 --
--- No tells the waiter (rule 1) and clears the offer. The decliner is not
--- pulled into a fight they never walked into -- release is a no-op unless
--- they also triggered the trainer themselves.
-function M:askToJoin(game, offer)
-  if not offer then return false end
-  if self.joinAsk then return true end
-  self.joinAsk = offer.battle
-  local box = self.ui:confirm(game,
-    ("Join %s against\n%s?"):format(offer.name, fightName(offer.label)),
-    function(yes)
-      self.joinBox = nil
-      self.joinAsk = nil
-      if not yes then
-        -- Tell the waiter, then step out of the way. Hub clears their offer
-        -- and delivers COOP_DECLINE; they go in alone.
-        if self:offerMatches(offer.battle) then
-          self.offer = nil
-          self.transport:send(Wire.COOP_CANCEL, { reason = "no" })
-        end
-        self:release()
-        return
-      end
-      -- Re-checked at the moment of answering rather than only when the box
-      -- went up: the partner may have given up and gone in alone while this
-      -- sat on screen waiting for a human. Same sentence as onOfferEnd -- a
-      -- yes that is simply late is not a different story from the box being
-      -- taken down under them.
-      if not self:offerMatches(offer.battle) then
-        self:announceAlone(offer.name, function() self:release() end)
-        return
-      end
-      self.transport:send(Wire.COOP_JOIN,
-        { to = offer.from, battle = offer.battle })
-    end)
-  self.joinBox = box and { box = box, game = game } or nil
-  return true
-end
-
--- Walking up to the partner and pressing A, or picking them off the roster,
--- reaches the same yes/no -- which is the third way in. It answers false when
--- there is nothing standing, and the ACTIONS menu uses that to decide whether
--- to offer the row at all.
-function M:joinFromMenu(game)
+-- This is the whole of "the partner gets pulled in" in the case that actually
+-- happens: the offer arrives while they are in a menu, finishing a wild fight,
+-- mid-trade, or one map away, every gate above refuses it, and until this
+-- existed nothing ever asked again -- the fight was lost to a half-second of
+-- bad timing and the only way back was a menu row nobody knew about.
+--
+-- Cheap by construction. The caller only reaches here while an offer stands,
+-- which is rare and bounded (COOP_OFFER_TIMEOUT), and this adds one number and
+-- one compare to those ticks; the real work -- considerOffer's stack walk --
+-- happens twice a second. Nothing at all is done on a tick with no offer.
+--
+-- The map comes from the `here` hook rather than from the caller because this
+-- runs on the fixed step, where nobody handed us one, and Coop deliberately
+-- cannot ask the world itself (see M:challenge's header). No hook, no retry:
+-- the ACTIONS > JOIN row is still there.
+function M:retryOffer(game, dt)
+  if not game then return false end
   local offer = self.offer
   if not offer then return false end
-  -- No encounter is set: nobody triggered a trainer to get here, so releasing
-  -- is a no-op and "no" is simply no, leaving the player standing where they
-  -- were rather than dropping them into a fight they never walked into.
-  -- coop_wild never shows the confirm -- same auto-join as considerOffer.
-  if offer.mode == "coop_wild" then
-    return self:autoJoinWild(offer)
+  if self.running or self.ask then return false end
+  offer.retry = (offer.retry or 0) + (dt or 0)
+  if offer.retry < JOIN_RETRY_EVERY then return false end
+  offer.retry = 0
+  local here = self.here
+  if type(here) ~= "function" then return false end
+  local ok, myMap = pcall(here)
+  if not ok then
+    if not self.hereWarned then
+      self.hereWarned = true
+      mod.log:warn("could not read the current map for a co-op join (%s); use "
+        .. "the JOIN row on your partner to join their battle", tostring(myMap))
+    end
+    return false
   end
-  return self:askToJoin(game, offer)
+  if not myMap then return false end
+  return self:considerOffer(game, myMap)
+end
+
+-- Walking up to the partner and pressing A, or picking them off the roster.
+--
+-- The manual door, and the only one a player has to *find* -- kept precisely
+-- because the automatic one can be closed at the wrong instant: an offer that
+-- landed mid-fight or mid-trade is normally re-taken by M:update's retry, and
+-- this is what that retry falls back to when the player would rather not wait
+-- for it (or when the offer arrived before this build's hooks were wired).
+-- Same auto-join as considerOffer, in both modes -- there is no confirm left
+-- to raise. It answers false when there is nothing standing, and the ACTIONS
+-- menu uses that to decide whether to offer the row at all.
+--
+-- `game` is taken and ignored: nothing here pushes a screen any more, and the
+-- callers (src/Ui.lua's ACTIONS row) still have it to hand.
+function M:joinFromMenu(game) -- luacheck: ignore game
+  local offer = self.offer
+  if not offer then return false end
+  return self:autoJoin(offer)
 end
 
 -- ------- against another party
@@ -1361,6 +1498,12 @@ function M:onOffer(game, msg, myMap)
   if not self.party:isPartner(offer.from) then return end
   offer.clock = 0
   self.offer = offer
+  -- Written down *before* considerOffer, because considerOffer is where the
+  -- offer stops existing: the free-and-on-map case takes it in this same call
+  -- and clears `self.offer` before the send. Set afterwards, the latch would
+  -- record an arrival for exactly the cases the mark is not needed for.
+  self.offerMarkFor =
+    { id = offer.from, battle = offer.battle, map = offer.map }
   self.aloneAnnounced = false
   if offer.mode ~= "coop_wild" then
     self:note(("%s is waiting at %s."):format(offer.name, fightName(offer.label)))
@@ -1376,9 +1519,9 @@ function M:onOfferEnd(msg)
   local reason = Wire.coopReason(msg and msg.reason)
   local name = offer and offer.name
   self.offer = nil
-  -- Yes/no first: an invite that ended under the confirm must not leave a
-  -- box that can only be answered into a late-yes path.
-  self:closeJoinBox()
+  -- The offer ended without a fight, so the mark has nothing left to point at.
+  self.offerMarkFor = nil
+  -- Nothing to take down: an offer is a note and a menu row now, never a box.
   -- "They went in without you" and "they walked away" look identical from
   -- here and read very differently to somebody who was on their way over, so
   -- the two are told apart. A late JOIN that finds no offer also lands here
@@ -1448,8 +1591,8 @@ end
 -- a mismatched one alone rather than handing it somebody else's result.
 --
 -- Matching the key is not quite enough on its own, because an encounter can
--- outlive its battle: a player who says yes keeps theirs deliberately (see
--- M:askToJoin) and the hub can still drop that join -- the partner pressing
+-- outlive its battle: a player who joins keeps theirs deliberately (see
+-- M:autoJoin) and the hub can still drop that join -- the partner pressing
 -- STOP in the same tick is enough -- in which case they fight the trainer
 -- alone, that battle finishes itself, and the reference left behind names
 -- nothing. The key would still match a later fight against the same class on
@@ -2307,6 +2450,12 @@ function M:startBattle(game, field)
   self:closeAskBox()
 
   self.state = state
+  -- The fight is on the screen, so the mark that was pointing at where it was
+  -- about to happen has said the whole of what it had to say. Released beside
+  -- the state rather than on `running` (which is set a round trip earlier, at
+  -- the handoff) because the overworld is still what the player is looking at
+  -- until this line -- and that window is the mark's entire life.
+  self.offerMarkFor = nil
   self.ui:pushState(game, state)
   return true
 end
@@ -2424,6 +2573,13 @@ end
 -- refuse politely. Gen 2 has no Gen2MoveLearnMenu twin, but the Gen 1 screen
 -- still resolves from the registry and works on Gold for the forget prompt —
 -- try it rather than silently dropping earned moves.
+--
+-- Sessions:offerForgets is this function's twin on the mediated 1v1 / wild
+-- path, over the same `{ mon, move }` entries: a fight that is not a co-op
+-- battle has no co-op state to hand this one, so it states the flow itself.
+-- The two differ in how they sequence -- that one hands MoveLearnMenu its own
+-- completion callback, this one paces with a "..." box -- and if this ever
+-- needs revisiting, that is the version to copy.
 function M:offerForgets(game, toLearn)
   if not (game and toLearn and #toLearn > 0) then return false end
   local pending = {}
@@ -2470,8 +2626,7 @@ end
 -- that can no longer resolve.
 function M:onPartyEnd()
   local hadWait = self.waiting ~= nil
-  self.waiting, self.offer = nil, nil
-  self:closeJoinBox()
+  self.waiting, self.offer, self.offerMarkFor = nil, nil, nil
   if self.ask then
     self.ask = nil
     self:closeAskBox()
@@ -2490,7 +2645,14 @@ function M:onPeerGone(id)
   local offer = self.offer
   if offer and offer.from == id then
     self.offer = nil
-    self:closeJoinBox()
+  end
+  -- The mark is anchored on that player's avatar, which is about to be
+  -- despawned with them: pointing at where somebody who left was standing is
+  -- the one thing it must never do. Keyed off the latch rather than the offer,
+  -- which may already have been taken.
+  local mark = self.offerMarkFor
+  if mark and mark.id == id then
+    self.offerMarkFor = nil
   end
   if self.ask and self.ask.peer == id then
     self.ask = nil
@@ -2510,46 +2672,75 @@ function M:onPeerGone(id)
   end
 end
 
--- Clocks, and the two things they expire.
+-- Clocks, and the three things they expire.
 --
--- An offer and an ask are the only states here that nobody is obliged to
--- answer, so they are the only two that can outlive their moment.  Everything
--- else is a player looking at a box, and a player is allowed to take as long
--- as they like.
-function M:update(dt)
+-- An offer, a wait and an ask are the states here nobody is obliged to answer,
+-- so they are the ones that can outlive their moment.  Everything else is a
+-- player looking at a box, and a player is allowed to take as long as they
+-- like.
+--
+-- `game` is optional and only the retry uses it: a caller with no stack to
+-- look at (the suite, and every tick before the first frame) still gets the
+-- clocks, and simply does not re-attempt a standing offer.
+function M:update(dt, game)
   dt = dt or 0
   self.clock = self.clock + dt
 
-  -- The third thing with a clock, and the only one that is not a question:
+  -- The fourth thing with a clock, and the only one that is not a question:
   -- a warp this player is already owed, waiting for the screen it needs.
   if self.pendingWarp then self:pumpBlackout(dt) end
 
   local offer = self.offer
   if offer then
     offer.clock = (offer.clock or 0) + dt
-    if offer.clock >= Config.COOP_OFFER_TIMEOUT then self.offer = nil end
+    if offer.clock >= Config.COOP_OFFER_TIMEOUT then
+      self.offer = nil
+      -- Five minutes of "!" over somebody's head is not a signal any more.
+      self.offerMarkFor = nil
+      -- Five minutes of being busy is an answer, and the waiter is the one
+      -- person who cannot see it: nothing was ever declined, so without this
+      -- they keep a box up until their own clock runs out. Sent as `no`
+      -- because that is the one reason a hub honours from a client with no
+      -- offer of its own (src/Hub.lua's COOP_CANCEL handler and its relay.js
+      -- twin) -- and it is what happened: this client is not coming.
+      --
+      -- Only when we hold no wait of our own, or the same message would clear
+      -- *our* offer at the hub instead of answering theirs.
+      if not self.waiting and self.transport:isReady() then
+        self.transport:send(Wire.COOP_CANCEL, { reason = "no" })
+      end
+    else
+      self:retryOffer(game, dt)
+    end
   end
 
-  -- Waiting has no clock on the trainer path, deliberately.
+  -- Every wait has a clock, it is the same clock on both flows, and it is now
+  -- the *only* thing that ends a wait nobody takes.
   --
-  -- The offer and the ask both expire, because both are questions somebody may
-  -- never answer. Standing at a fight is not a question: the battle cannot be
-  -- dodged (rule 2), so there is nothing for a wait to expire *to* -- B on the
-  -- waiting screen reopens the wait/alone choice, and BATTLE ALONE is how it
-  -- ends. A clock here used to be accumulated and never read, which reads as
-  -- an expiry somebody forgot to finish.
+  -- The trainer path used to have none, deliberately: the partner's confirm
+  -- was a question a human would eventually answer one way or the other, and
+  -- a decline released the waiter. There is no confirm any more (M:autoJoin)
+  -- and no ALONE row either, so this is the whole of "the partner never came".
   --
-  -- Party vs Wild is the exception: the partner is auto-pulled with no JOIN
-  -- confirm, so a busy/lagging partner would leave the host on a covering wait
-  -- box forever. COOP_ASK_TIMEOUT is short enough that solo wild resumes before
-  -- the grass fight feels abandoned, and withdraw clears the hub offer so the
-  -- partner stops holding it.
+  -- SOLO_FALLBACK_AFTER, not COOP_ASK_TIMEOUT -- see the constant for why the
+  -- number moved from 60 to 6 when the cover went away. withdraw clears the
+  -- hub offer so the partner stops holding one for a wait that is over. Rule 2
+  -- still holds: this ends in the battle the engine already built, alone.
   local waiting = self.waiting
-  if waiting and waiting.kind == "wild" then
+  if waiting then
     waiting.clock = (waiting.clock or 0) + dt
-    if waiting.clock >= Config.COOP_ASK_TIMEOUT then
+    if waiting.clock >= SOLO_FALLBACK_AFTER then
       self:withdraw("timeout")
-      self:release()
+      -- One line, where there used to be two -- and the same line on grass
+      -- as at a trainer (owner: the situation is identical, so is the
+      -- honesty). The fight is already on screen behind it, so this is a
+      -- sentence over something the player can see rather than the ending
+      -- of a screen they were held behind; release() takes the box down
+      -- with everything else above the battle.
+      local who = self.party:partnerName() or "Your friend"
+      local line = ("%s couldn't\njoin!"):format(who)
+      self:note(line)
+      self.ui:say(line, function() self:release() end)
     end
   end
 

@@ -500,9 +500,27 @@ check(type(fight.zones) == "function", "zones opt-out is wired")
 local pals = fight:sgbPalettes()
 eq(type(pals), "table", "sgbPalettes returns a zone list")
 eq(pals[1] and pals[1].colors, false, "sgbPalettes opts out of shade remap")
-eq(pals[1] and pals[1].w, 160, "sgbPalettes covers the classic canvas")
+-- `fight.game` is Gen1-shaped (DATA carries no type_chart.generation), so the
+-- 640x360 battlefield hard-cut (commit 201ca00) is live and the opt-out zone
+-- legitimately covers the arena canvas, not the pre-Battlefield 160x144 one.
+eq(pals[1] and pals[1].w, 640,
+   "sgbPalettes covers the battlefield arena canvas once Gen1 + Battlefield "
+   .. "hard-cuts the wide layout")
 local z = fight:zones()
 eq(z[1] and z[1].colors, false, "zones matches the sgbPalettes opt-out")
+eq(z[1] and z[1].w, 640, "...and the same 640-wide arena canvas")
+
+-- Force the classic path the way the gate itself is read (usesBattlefield ->
+-- Battlefield.enabled -> Gen.generation): a Gen2-shaped game, which is the
+-- one real-world case this build still takes the classic 160x144 zone.
+local classicFight = setmetatable({
+  game = { data = { type_chart = { generation = 2 } } },
+}, { __index = Mediated })
+check(not classicFight:usesBattlefield(),
+      "a Gen2-shaped game forces the classic path off the battlefield gate")
+local cz = classicFight:zones()
+eq(cz[1] and cz[1].w, 160,
+   "...and zones covers the classic 160x144 canvas there")
 eq(fight:speciesKeyFor("SQUIRTLE", true), "SQUIRTLE",
    "speciesKeyFor resolves an uploaded registry id")
 
@@ -948,6 +966,406 @@ do
   eq(mon.statExp.attack, 2560, "Stat Exp gains 2560")
   -- Gen1 √EV delta at L100: floor((floor(sqrt(2560)/4) - 0) * 100 / 100) = 12
   eq(mon.stats.attack, 52, "attack rises by the √EV contribution without Stats.calc")
+end
+
+-- ------------------------------------------------------------------
+-- 11. the arrival window: a monster is on the arena when its row says so
+-- ------------------------------------------------------------------
+--
+-- The seat record moves with the referee -- it is what the rules are read from
+-- -- but nothing is *drawn* on the arena until the queued `spawnfx` row plays.
+-- Two mechanisms, one for each state a seat can be in when a send lands, and
+-- both close on that same row: `spawnHide` for an empty seat (the intro), and
+-- `slot.pending` for a seat somebody is still standing on (a switch, or a
+-- replacement batched behind the KO it replaces). CoopBattle's `introHide` and
+-- its display shadow / `applySwap` are the twins.
+
+do
+  local arena = harness("host")
+  arena.game.input = fakeInput()
+  arena.open()
+  local a = arena.sessions.fight
+  arena.sessions:onBattleReady({
+    battle = "7", mode = "1v1", sides = { a = { "me" }, b = { "peer1" } },
+  })
+  check(a:usesBattlefield(), "the arena path is the one under test")
+  local n = 0
+  local function ev(fields)
+    n = n + 1
+    fields.battle = "7"; fields.seq = n
+    arena.sessions:onBattleEvent(fields)
+  end
+  local function drain(limit)
+    local guard = 0
+    while #a.lines > 0 and guard < (limit or 900) do
+      a:update(1 / 60); guard = guard + 1
+    end
+    return guard
+  end
+
+  -- The intro. Both seats are filled at parse and neither is drawn.
+  ev({ t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  eq(a.slots[2].species, "PIDGEY", "the seat record follows the referee at parse")
+  eq(a:battlefieldSeat(2, false), nil,
+     "...but nothing is on the arena until the spawn row: an empty seat is held")
+  eq(a:battlefieldSeat(0, true), nil, "...on our own side too")
+  check(drain() < 900, "the intro queue drains in bounded frames")
+  check(a:battlefieldSeat(2, false) ~= nil,
+        "once the spawn rows have played, both seats draw")
+  check(a:battlefieldSeat(0, true) ~= nil, "...ally included")
+  check(a.spawnHide == nil or next(a.spawnHide) == nil,
+        "and no hold is left standing behind them")
+
+  -- A replacement batched behind the KO: the seat is the fallen monster's
+  -- until the swap, which is what lets its drain and sink play at all.
+  ev({ t = "damage", slot = 2, hp = 0, amount = 24 })
+  ev({ t = "faint", slot = 2, text = "PIDGEY" })
+  ev({ t = "send", slot = 2, text = "RATTATA", hp = 21 })
+  eq(a.slots[2].species, "PIDGEY",
+     "a send into an occupied seat does not relabel it")
+  eq(a.slots[2].pending and a.slots[2].pending.species, "RATTATA",
+     "...the arrival is parked instead")
+  eq(a.slots[2].hp, 0, "...and the fallen monster's own numbers are left alone")
+  local seat = a:battlefieldSeat(2, false)
+  eq(seat and seat.name, "PIDGEY", "so the arena still shows who is falling")
+  local sawSink, drawnBeforeSwap = false, nil
+  local guard = 0
+  while #a.lines > 0 and guard < 900 do
+    a:update(1 / 60); guard = guard + 1
+    for _, e in ipairs(a.fx or {}) do
+      if e.kind == "faint" then sawSink = true end
+    end
+    local live = a:battlefieldSeat(2, false)
+    if live and live.name == "RATTATA" and drawnBeforeSwap == nil then
+      drawnBeforeSwap = sawSink
+    end
+  end
+  check(guard < 900, "the batched queue drains in bounded frames")
+  check(sawSink, "the KO sinks -- its rows still name the occupant they were filed for")
+  eq(drawnBeforeSwap, true,
+     "and the newcomer is first drawn only after that sink, at its own spawn row")
+  eq(a.slots[2].species, "RATTATA", "the seat changes hands exactly once, there")
+  eq(a.slots[2].pending, nil, "...leaving nothing parked")
+  eq(a.slots[2].shownHp, 21, "...and the bar starts where the referee put it")
+
+  -- Teardown: a battle ending mid-window strands neither a hold nor a park.
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  check(a.slots[2].pending ~= nil, "a fresh arrival is parked")
+  a:snapDisplay()
+  eq(a.slots[2].species, "PIDGEY",
+     "snapDisplay closes the window forwards -- the field is where the referee "
+     .. "says it is, not where the queue had gotten to")
+  eq(a.slots[2].pending, nil, "...with nothing parked behind it")
+  eq(a.spawnHide, nil, "...and no seat left hidden")
+end
+
+-- The classic 160x144 path queues no spawn row, so it must not park anything:
+-- there would be nothing to install it.
+do
+  local classic = setmetatable({
+    game = { data = { type_chart = { generation = 2 } } },
+    slots = { [2] = { species = "PIDGEY", hp = 24, maxHp = 24, shownHp = 24 } },
+    lines = {},
+  }, { __index = Mediated })
+  check(not classic:usesBattlefield(), "the Gen2-shaped screen is off the arena")
+  classic:noteSlot({ t = "send", slot = 2, text = "RATTATA", hp = 21 })
+  eq(classic.slots[2].species, "RATTATA",
+     "off the arena a send relabels at parse exactly as it always did")
+  eq(classic.slots[2].pending, nil, "...and parks nothing that could never land")
+end
+
+-- ------------------------------------------------------------------
+-- 12. the replace phase: `turn` with a `slot` is a solicitation
+-- ------------------------------------------------------------------
+--
+-- The referee no longer auto-advances a turn when a fighter faints with a
+-- living bench mon.  It emits `turn{amount, slot}` first -- a solicitation
+-- naming the seat that owes a send-out -- and only then the ordinary slot-less
+-- `turn` that opens the choice window.  Three different answers are owed:
+--
+--   * the seat is ours -> the switch picker, uncancellable, and never the
+--     command grid first: a grid over a corpse is a turn nobody can take;
+--   * the seat is the foe's -> no menu at all, and a held
+--     "X is choosing who to send out..." queued *behind* the faint's own sink
+--     and sentence, so the hold does not overwrite the death it explains;
+--   * no `slot` -> exactly what an older referee always got.
+do
+  -- A fresh fight with both seats sent out, which is the state every case
+  -- below starts from.  Built through the real Sessions path rather than by
+  -- hand, so the screen under test is the one the game pushes.
+  local function newFight()
+    local play = harness("host")
+    play.game.input = fakeInput()
+    play.open()
+    local f = play.sessions.fight
+    play.sessions:onBattleReady({
+      battle = "7", mode = "1v1", sides = { a = { "me" }, b = { "peer1" } },
+    })
+    local function ev(fields)
+      fields.battle = "7"
+      play.sessions:onBattleEvent(fields)
+    end
+    ev({ seq = 1, t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
+    ev({ seq = 2, t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+    return f, ev, play
+  end
+
+  -- Run the narration out and then let update() act on whatever the queue was
+  -- holding: every menu assertion below is about what opens *after* the lines
+  -- have played, which is the whole of the change.
+  local function drainLines(f, guard)
+    local n = 0
+    while (f.shown ~= nil or #f.lines > 0) and n < (guard or 400) do
+      f:update(2.0)
+      n = n + 1
+    end
+    for _ = 1, 4 do f:update(2.0) end
+    return n
+  end
+
+  local function queued(f, needle)
+    if type(f.shown) == "string" and f.shown:find(needle, 1, true) then
+      return true
+    end
+    for _, row in ipairs(f.lines) do
+      if type(row) == "string" and row:find(needle, 1, true) then return true end
+    end
+    return false
+  end
+
+  -- (a) our OWN knockout: turn{slot = mySlot} opens the picker, never the grid.
+  do
+    local f, ev = newFight()
+    local active = f.active
+    f.mine[active].hp = 0
+    for i, m in ipairs(f.mine) do
+      if i ~= active and (m.hp or 0) <= 0 then m.hp = 10 end
+    end
+    ev({ seq = 3, t = "faint", slot = 0, text = "SQUIRTLE", amount = 1 })
+    ev({ seq = 4, t = "turn", amount = 2, slot = 0 })
+    eq(f.replaceWait, 0, "the solicitation names our own seat")
+    eq(f.mustReplace, true, "mustReplace is armed")
+    check(f.phase ~= "switch",
+          "and the picker waits for the faint narration (phase="
+          .. tostring(f.phase) .. ")")
+    drainLines(f)
+    eq(f.phase, "switch", "then the picker opens -- not the command grid")
+    eq(f.replaceOnly, true, "and it cannot be cancelled")
+    ev({ seq = 5, t = "send", slot = 0, text = "CHARMANDER", hp = 40 })
+    check(not f.mustReplace, "the send clears mustReplace")
+    eq(f.replaceWait, nil, "and the solicitation with it")
+    drainLines(f)
+    ev({ seq = 6, t = "turn", amount = 2 })
+    drainLines(f)
+    eq(f.phase, "choose", "the slot-less turn behind it opens the grid")
+  end
+
+  -- (b) the FOE's knockout: a held line, no menu at all, until the send lands.
+  do
+    local f, ev = newFight()
+    ev({ seq = 3, t = "faint", slot = 2, text = "PIDGEY", amount = 1 })
+    ev({ seq = 4, t = "turn", amount = 2, slot = 2 })
+    eq(f.replaceWait, 2, "the solicitation names the foe's seat")
+    eq(f.pendingTurn, false, "no turn is pending: this is not a choice window")
+    eq(f.mustReplace, false, "and our own picker is untouched")
+    check(queued(f, "choosing"),
+          "'X is choosing who to send out...' is queued")
+
+    -- The chronology is the whole point: the sink, "PIDGEY fainted!", and only
+    -- then the hold -- a hold that landed first would erase the death it is
+    -- explaining.
+    local iFaint, iSink, iHold
+    for i, row in ipairs(f.lines) do
+      if type(row) == "string" and row:find("fainted", 1, true) then
+        iFaint = iFaint or i
+      end
+      if type(row) == "table" and row.faintfx ~= nil then iSink = iSink or i end
+      if type(row) == "string" and row:find("choosing", 1, true) then
+        iHold = iHold or i
+      end
+    end
+    check(iSink and iFaint and iHold and iSink < iFaint and iFaint < iHold,
+          ("...behind the faint's sink and its sentence (sink=%s faint=%s "
+           .. "hold=%s of %d)"):format(tostring(iSink), tostring(iFaint),
+                                       tostring(iHold), #f.lines))
+
+    drainLines(f)
+    eq(f.phase, "play", "no menu opens for somebody else's replacement")
+    check(f:holdLine():find("choosing", 1, true) ~= nil,
+          "and the band holds the line: " .. f:holdLine():gsub("\n", "|"))
+    ev({ seq = 5, t = "send", slot = 2, text = "RATTATA", hp = 20 })
+    eq(f.replaceWait, nil, "the send ends the hold")
+    check(f:holdLine():find("Waiting for", 1, true) ~= nil,
+          "and the band goes back to the ordinary wait: "
+          .. f:holdLine():gsub("\n", "|"))
+    drainLines(f)
+    eq(f.phase, "play", "still no menu until a turn opens")
+    ev({ seq = 6, t = "turn", amount = 2 })
+    drainLines(f)
+    eq(f.phase, "choose", "and the slot-less turn opens the grid")
+    eq(f.slots[2].species, "RATTATA", "with the foe seat filled")
+  end
+
+  -- (c) an empty bench: a solicitation we cannot answer opens nothing.
+  do
+    local f, ev = newFight()
+    for _, m in ipairs(f.mine) do m.hp = 0 end
+    ev({ seq = 3, t = "faint", slot = 0, text = "SQUIRTLE" })
+    ev({ seq = 4, t = "turn", amount = 2, slot = 0 })
+    eq(f.mustReplace, false, "no dead picker on an empty bench")
+    eq(f.pendingTurn, false, "...and no turn pending behind it")
+    eq(f.replaceWait, nil, "and no hold left standing")
+    drainLines(f)
+    check(f.phase ~= "switch" and f.phase ~= "choose",
+          "no menu opened (phase=" .. tostring(f.phase) .. ")")
+  end
+
+  -- (d) an older referee, which never puts a `slot` on a `turn`.
+  do
+    local f, ev = newFight()
+    ev({ seq = 3, t = "damage", slot = 2, hp = 10 })
+    ev({ seq = 4, t = "turn", amount = 2 })
+    eq(f.pendingTurn, true, "a slot-less turn is still a turn")
+    eq(f.replaceWait, nil, "and records no replace phase")
+    drainLines(f)
+    eq(f.phase, "choose", "opening the grid exactly as it always did")
+
+    -- ...and the old faint -> slot-less turn -> picker chronology is untouched.
+    local g, gev = newFight()
+    local active = g.active
+    g.mine[active].hp = 0
+    for i, m in ipairs(g.mine) do
+      if i ~= active and (m.hp or 0) <= 0 then m.hp = 10 end
+    end
+    gev({ seq = 3, t = "faint", slot = 0, text = "SQUIRTLE", amount = 1 })
+    gev({ seq = 4, t = "turn", amount = 2 })
+    drainLines(g)
+    eq(g.phase, "switch",
+       "an old stream's faint still opens the picker on the next turn")
+    eq(g.replaceOnly, true, "...still uncancellable")
+  end
+
+  -- (e) teardown: a hold is display state, so anything that snaps the display
+  -- drops it.  A hold that outlived the fight would band a finished screen.
+  do
+    local f, ev = newFight()
+    ev({ seq = 3, t = "faint", slot = 2, text = "PIDGEY", amount = 1 })
+    ev({ seq = 4, t = "turn", amount = 2, slot = 2 })
+    eq(f.replaceWait, 2, "the hold is up")
+    f:snapDisplay()
+    eq(f.replaceWait, nil, "and snapDisplay drops it")
+
+    local g, gev = newFight()
+    gev({ seq = 3, t = "faint", slot = 2, text = "PIDGEY", amount = 1 })
+    gev({ seq = 4, t = "turn", amount = 2, slot = 2 })
+    gev({ seq = 5, t = "over", text = "ko" })
+    eq(g.replaceWait, nil, "and so does `over`")
+  end
+
+  -- (f) the joint run: the real referee's stream, replayed into the real
+  -- screen.  No hand-built events -- src/BattleSim/Turn.lua emits and
+  -- MediatedBattle reads -- and the "no grid over an empty seat" invariant is
+  -- checked on every frame the loop pumps.
+  do
+    local BattleSim = need("BattleSim/init")
+    local Turn = BattleSim.Turn
+
+    local function rmove()
+      return { id = "thump", pp = 20, power = 200, accuracy = 255,
+               type = 0, effect = 0, chance = 0 }
+    end
+    local function rmon(species, hp)
+      return { species = species, level = 20, hp = hp, maxHp = 60,
+               stats = { atk = 90, def = 5, spd = 40, spc = 40 },
+               moves = { rmove() } }
+    end
+
+    local battle = assert(Turn.create({
+      id = "7", mode = "1v1", seed = 4242, choiceTimeout = 60,
+      reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "me", name = "ME",
+                mons = { rmon("SQUIRTLE", 1), rmon("CHARMANDER", 60) } } },
+        b = { { playerId = "peer1", name = "BOB",
+                mons = { rmon("PIDGEY", 1), rmon("RATTATA", 60) } } },
+      },
+    }))
+
+    local play = harness("host")
+    play.game.input = fakeInput()
+    play.open()
+    local f = play.sessions.fight
+    play.sessions:onBattleReady({
+      battle = "7", mode = "1v1", sides = { a = { "me" }, b = { "peer1" } },
+    })
+
+    local violations = {}
+    local seenReplaceTurn, seenSlotlessTurn = 0, 0
+    local function pump()
+      for _, e in ipairs(battle:drainEvents()) do
+        if e.t == "turn" then
+          if e.slot ~= nil then seenReplaceTurn = seenReplaceTurn + 1
+          else seenSlotlessTurn = seenSlotlessTurn + 1 end
+        end
+        play.sessions:onBattleEvent(e)
+      end
+      for _ = 1, 200 do
+        f:update(2.0)
+        if f.phase == "choose" then
+          if f.replaceWait ~= nil then
+            violations[#violations + 1] = "grid open while slot "
+              .. tostring(f.replaceWait) .. " still owes a send-out"
+          end
+          if (f.slots[0] or {}).hp ~= nil and f.slots[0].hp <= 0 then
+            violations[#violations + 1] = "grid open over our own KO'd seat"
+          end
+          if (f.slots[2] or {}).hp ~= nil and f.slots[2].hp <= 0 then
+            violations[#violations + 1] = "grid open over the foe's KO'd seat"
+          end
+          break
+        end
+        if f.phase == "switch" then break end
+      end
+    end
+
+    pump()
+    local guard = 0
+    while not battle.finished and guard < 12 do
+      guard = guard + 1
+      local snap = battle:snapshot()
+      if snap.phase == "choice" then
+        check(f.phase == "choose" or f.phase == "play",
+              ("the referee's choice window is what the screen has open "
+               .. "(round %d, phase=%s)"):format(guard, tostring(f.phase)))
+        battle:submitChoice("me", { action = "fight", move = 0 })
+        battle:submitChoice("peer1", { action = "fight", move = 0 })
+      elseif snap.phase == "replace" then
+        check(f.phase ~= "choose",
+              ("no command grid during the referee's replace phase (round %d, "
+               .. "phase=%s)"):format(guard, tostring(f.phase)))
+        if f.mustReplace then
+          eq(f.phase, "switch",
+             ("our own solicitation is a picker (round %d)"):format(guard))
+        end
+        battle:submitChoice("me", { action = "switch", slot = 1 })
+        battle:submitChoice("peer1", { action = "switch", slot = 1 })
+      else
+        break
+      end
+      pump()
+    end
+
+    check(seenReplaceTurn >= 2, "the referee really did open a replace phase ("
+          .. seenReplaceTurn .. " solicitations)")
+    check(seenSlotlessTurn >= 2, "with the ordinary choice window behind it ("
+          .. seenSlotlessTurn .. " slot-less turns)")
+    check(#violations == 0, "the screen never opened a grid over an empty seat: "
+          .. table.concat(violations, "; "))
+    eq(f.slots[0].species, "CHARMANDER",
+       "our seat ended up filled by the referee's replacement")
+    eq(f.slots[2].species, "RATTATA", "...and the foe's too")
+  end
 end
 
 T.finish("mediated_battle_client")
