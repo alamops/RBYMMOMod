@@ -415,6 +415,70 @@ function M.monFromCaughtSheet(game, sheet)
   return mon
 end
 
+-- ------- the way in
+--
+-- **The entry veil: this screen fades up out of black, and that is a
+-- transition the mod draws itself rather than one it borrows.**
+--
+-- A vanilla encounter never cuts to the battle screen. `OverworldState:
+-- pushBattle` (Gen 1) and `World:startBattle` (Gen 2) both push a
+-- BattleTransition *first*, and only when the wipe has finished blacking the
+-- overworld out does the battle come up on top of the black it left behind. So
+-- a fight arriving without one reads as a dropped frame.
+--
+-- One of the two clients in a co-op battle gets that for free and one does not.
+-- The **waiter** walked into the encounter, so the engine already ran its wipe
+-- for them and their engine battle is on screen (that is what the wait now
+-- stands behind -- src/Coop.lua's beginWait). The **joiner** is pulled in from
+-- the overworld by a message: nothing on their machine ever pushed a
+-- transition, and the arena used to land on their overworld as a hard cut.
+--
+-- **Why the engine's own wipe is not what plays here.** Both wipe classes are
+-- engine internals -- `src.render.BattleTransition` and `src.ui.gen2.
+-- BattleTransition` -- and a mod may only require `src.link.*` under the
+-- `network` permission; requiring either would trip the loader's permissions
+-- tripwire and land as a private-require finding in `modkit pack`. The two
+-- public-ish ways to reach one are worse than the problem: the `transitions`
+-- registry only *registers styles* and cannot play one, and the overworld
+-- object handed out by `mod.world` plays one only as a side effect of starting
+-- a whole engine battle (`pushBattle` / `startBattle`), which would push the
+-- battle theme a second time, wants a Gen-1-shaped battle object, has a
+-- different name and signature on Gen 2, and would hold the co-op screen off
+-- the stack for the two-plus seconds of wipe + `BLACK_HOLD` -- two seconds
+-- during which a refereed turn is already open and this client is not
+-- answering it.
+--
+-- So it is drawn here, in this screen's own draw, over the arena it is
+-- revealing: a short hold on black and a fade off it. That is the *tail* of
+-- the engine's transition -- the part that reads as "the battle is arriving"
+-- -- and it costs nothing, because the screen underneath is live and updating
+-- from the first frame.
+--
+-- Armed for **both** clients, not just the joiner. The waiter's engine wipe
+-- ended several seconds and one whole trainer entrance ago, and the swap from
+-- their engine battle to the co-op arena is its own hard cut; the same fade
+-- covers it, and the two players see the fight begin the same way.
+--
+-- Frames, not seconds, because everything else on this screen that moves is
+-- counted in fixed steps (`growIn`, FAINT_FRAMES, EXP_FILL_FRAMES).
+local ENTRY_HOLD = 6    -- full black, while the arena builds its first frame
+local ENTRY_FADE = 18   -- ...and off it
+M.ENTRY_FRAMES = ENTRY_HOLD + ENTRY_FADE
+
+-- How black the veil is on a given frame of the entry, 0 once it is over.
+--
+-- Pure and exported for the reason M.hpBarWidth and Ui.cancelRow are: the
+-- curve is the whole of the effect, and a headless suite can assert it without
+-- a renderer, a window, or a frame ever being drawn.
+function M.entryAlpha(frame)
+  frame = tonumber(frame) or 0
+  if frame < 0 then return 1 end
+  if frame < ENTRY_HOLD then return 1 end
+  local into = frame - ENTRY_HOLD
+  if into >= ENTRY_FADE then return 0 end
+  return (ENTRY_FADE - into) / ENTRY_FADE
+end
+
 -- ------- construction
 --
 -- opts:
@@ -651,6 +715,11 @@ function M.new(game, opts)
   -- Which surround the presenter paints, decided before the first frame rather
   -- than on the first update (see `refreshLetterbox`).
   self:refreshLetterbox()
+  -- Armed at construction rather than in `enter()`, so it is already true of
+  -- the object src/Coop.lua's startBattle is about to push -- a screen that
+  -- drew one frame before entering would otherwise show the arena first and
+  -- then fade *in* from it. See "the way in" above.
+  self.entryFrame = 0
   return self
 end
 
@@ -1367,6 +1436,14 @@ function M:update(dt)
   if self.growIn then
     self.growIn.frame = (self.growIn.frame or 0) + 1
     if self.growIn.frame >= 12 then self.growIn = nil end
+  end
+  -- The way in, counted on the same fixed step and dropped the instant it is
+  -- spent so the ordinary case is one nil test a frame. Nothing waits on it:
+  -- the battle underneath is running from frame one, and the veil is only what
+  -- the player can see of it. See "the way in".
+  if self.entryFrame then
+    self.entryFrame = self.entryFrame + 1
+    if self.entryFrame >= M.ENTRY_FRAMES then self.entryFrame = nil end
   end
   if self.sim and not self.result then
     self:stepFocusSlides()
@@ -9336,12 +9413,52 @@ end
 -- does not become the log.
 function M:draw()
   local ok, err = pcall(self.drawSafe, self)
-  if ok then return end
-  if not self.drawFailed then
+  if not ok and not self.drawFailed then
     self.drawFailed = true
     mod.log:error("the 2-on-2 screen failed to draw (%s); the battle is still "
       .. "running and can be finished blind, but report this", tostring(err))
   end
+  -- Last, and outside the arena's own failure: the veil is the thing that says
+  -- the battle is arriving, and a screen that could not paint its field is
+  -- exactly the one that should not be revealed by a hard cut either.
+  if self.entryFrame then pcall(self.drawEntry, self) end
+end
+
+-- The entry veil, painted over the finished frame.
+--
+-- Handed to the renderer as a whole-surface veil rather than filled into the
+-- 160x144 UI canvas, which is how the engine's own palette-register effects
+-- reach the screen (`Renderer.screenVeil`, set by the battle transition's
+-- flash and by the fade in from white after a battle). Two reasons it has to
+-- be that one: the arena is a widescreen canvas whose size is not 160x144
+-- (`uiSize`), and at any zoom above 1x a veil painted into the letterbox
+-- leaves the surrounding window untouched -- which reads as the fade happening
+-- inside a window rather than to the screen.
+--
+-- The field is re-declared by its drawer every frame (the renderer clears it
+-- at the top of each one), so a popped screen can never leave a sticky veil
+-- behind -- which is also why this is a per-frame write and not a flag.
+--
+-- No renderer -- a headless run, a build drawing straight to the display --
+-- falls back to a rectangle over this screen's own canvas, exactly as the
+-- engine's transitions do.
+function M:drawEntry()
+  local a = M.entryAlpha(self.entryFrame or 0)
+  if a <= 0 then return end
+  local renderer = self.game and self.game.renderer
+  if renderer then
+    renderer.screenVeil = { 0, a }
+    return
+  end
+  if not love then return end
+  local w, h = 160, 144
+  local okSize, uw, uh = pcall(self.uiSize, self)
+  if okSize and type(uw) == "number" and type(uh) == "number" then
+    w, h = uw, uh
+  end
+  love.graphics.setColor(0, 0, 0, a)
+  love.graphics.rectangle("fill", 0, 0, w, h)
+  love.graphics.setColor(1, 1, 1, 1)
 end
 
 function M:drawSafe()

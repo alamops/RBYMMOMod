@@ -2075,7 +2075,8 @@ function M.install()
     return next(game, dt)
   end)
 
-  -- Co-op against an NPC: the wait/alone choice, in front of any trainer.
+  -- Co-op against an NPC: hand the trainer to Coop before the player presses
+  -- anything.
   --
   -- **Watched rather than intercepted, and that is what makes it reach every
   -- trainer.** An earlier version wrapped `script.command` and yielded the
@@ -2085,16 +2086,18 @@ function M.install()
   -- event and cannot be cancelled; there is no seam there to hold at.
   --
   -- Both paths end in the same place: `game.stack:push(battle)`. So this
-  -- listens for the push instead of trying to prevent it, and puts the prompt
-  -- **on top of** the battle that just arrived. A StateStack only updates its
-  -- top, so the battle underneath is frozen and completely untouched -- which
-  -- is why BATTLE ALONE costs nothing but closing a menu, and why a player who
-  -- is not in a party never notices any of this happened.
+  -- listens for the push instead of trying to prevent it. There is no cover
+  -- pushed over what just arrived any more (round 13 deleted it): a partied
+  -- player's wait runs invisibly behind the engine's own encounter, which is
+  -- why a player who is not in a party -- or whose partner is on some other
+  -- map -- never notices any of this happened, or is told once and left to
+  -- fight what is already on screen.
   --
   -- src/Coop.lua's onTrainerBattle / onWildEncounter is where the answers
   -- diverge, and their headers explain what the co-op path does with the
-  -- battle it took. Wild divert has no WAIT/ALONE prompt -- only same-map
-  -- auto-join into coop_wild, else the engine wild is left alone.
+  -- battle it took. Both refuse an off-map partner outright now; wild's
+  -- divert is otherwise the same same-map auto-join into coop_wild, else the
+  -- engine wild is left alone.
   -- Gen 2's ui/gen2/BattleState has no `.kind` (Gen 1 BattleState does).  The
   -- fight shape lives on `state.battle` instead: `.wild` / `.trainer`.  Stamp
   -- Gen1-shaped aliases so Coop's onTrainerBattle / onWildEncounter and

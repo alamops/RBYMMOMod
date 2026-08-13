@@ -559,20 +559,19 @@ return function(game)
         return exports.coopWaiting() ~= nil
       end, 60, "coop_wild wait after the wild divert")
       check(waiting, "the host diverted into coop_wild wait")
-      -- Shot first: the partner often auto-joins within a frame, so the ALONE
-      -- choose can already be gone by the time we sample the menu. Missing
-      -- ALONE while waiting is cleared is success (they joined), not failure.
+      -- Shot first: the partner often auto-joins within a frame, so the wait
+      -- can already be over by the time we sample anything.
       U.shot(game, SHOT_DIR .. "/host-party-wild-wait.png")
-      -- Round 11: this is the shared cover both modes now raise, so ALONE-only
-      -- is the whole contract rather than a wild-path special case.
+      -- Round 13: the wait cover is deleted outright -- no box, no rows, on
+      -- either mode. The engine's own wild encounter stays exactly on
+      -- screen; the only exits are the field opening (partner joined) or
+      -- SOLO_FALLBACK_AFTER's one-line fallback (nobody did).
       if exports.coopWaiting() ~= nil then
-        local aloneRow = H.menuRow(game, "ALONE")
-        local waitRow = H.menuRow(game, "WAIT")
-        check(aloneRow ~= nil and waitRow == nil,
-              "the wait cover offers ALONE only (no WAIT)")
+        check(H.menuRow(game, "ALONE") == nil and H.menuRow(game, "WAIT") == nil,
+              "no cover -- no menu rows at all while the wait stands")
       else
-        check(true, "the wait cover offers ALONE only (no WAIT)")
-        log("note: partner joined before the ALONE row could be sampled")
+        check(true, "no cover -- no menu rows at all while the wait stands")
+        log("note: partner joined before the wait could be sampled")
       end
       H.signal("host_wild_waiting")
 
@@ -886,9 +885,10 @@ return function(game)
     -- proves the overworld rematch Quarkst hit after a real engageTrainer.
     --
     -- Round 11: nothing is chosen here any more. Being partied is the consent
-    -- (src/Coop.lua's header), so walking into the trainer posts COOP_WAIT and
-    -- raises the wait cover on its own -- there is no WAIT/ALONE ask left to
-    -- select, and this leg asserts one never appears.
+    -- (src/Coop.lua's header), so walking into the trainer posts COOP_WAIT.
+    -- Round 13 went further and deleted the cover that used to sit in front
+    -- of it too -- the wait now runs invisibly behind the engine's own
+    -- encounter, and this leg asserts no menu of any kind ever appears.
     local SIGHT_MAP = "ROUTE_3"
     local sightObj = H.sightTrainerOn(game.data, SIGHT_MAP)
     check(sightObj ~= nil, "Route 3 has a sighted trainer with two POKeMON")
@@ -951,23 +951,24 @@ return function(game)
     end
     catchStaged()
     U.shot(game, SHOT_DIR .. "/host-trainer-sight.png")
-    -- Two ways this can land, and a run sees whichever the network gave it:
-    -- the wait cover (a single ALONE row), or the four-slot field already, if
-    -- the partner's auto-join beat this loop to the frame. Both are the new
-    -- contract; only an ask is a failure.
+    -- Round 13 deleted the cover -- there is no box to land on any more, on
+    -- either mode. A run sees whichever the network gave it: nothing at all
+    -- (the engine's own pre-battle text, or a blank overworld-shaped wait)
+    -- until the four-slot field comes up, silently, the instant the
+    -- partner's auto-join lands.
     --
-    -- `sawAsk` is the negative half, and it is sampled *inside* the loop
+    -- `sawMenu` is the negative half, and it is sampled *inside* the loop
     -- rather than after it because the thing it is looking for would be
-    -- transient: an ask that appeared and was answered between two polls is
+    -- transient: a menu that appeared and was answered between two polls is
     -- exactly the regression this leg exists to catch.
     --
-    -- The A tap stays gated on `top.items == nil`, and now it is load-bearing
-    -- rather than merely tidy: it advances the trainer's pre-battle text, and
-    -- a stray tap on the cover would select its only row and send this side
-    -- into the solo fight.
-    local sawAsk = false
+    -- The A tap stays gated on `top.items == nil`: it advances the trainer's
+    -- pre-battle text and, if the partner is ever slow enough for
+    -- SOLO_FALLBACK_AFTER to fire, dismisses that one-line fallback too --
+    -- both are plain text boxes now, not a menu with a row to stray onto.
+    local sawMenu = false
     local joinedFirst = false
-    local covered = H.waitFor(game, function()
+    local joined = H.waitFor(game, function()
       H.softenTopTrainer(game)
       -- Before either exit is read: on the frame the engine's trainer battle
       -- goes up this is the only place looking, and on the frame the join
@@ -978,27 +979,22 @@ return function(game)
         joinedFirst = true
         return true
       end
-      local seen = false
-      for _, label in ipairs(H.menuLabels(game)) do
-        if label == "WAIT" then sawAsk = true end
-        if label == "ALONE" then seen = true end
-      end
-      if seen then return true end
+      if top and top.items ~= nil then sawMenu = true end
       if top and top.items == nil then U.tap(game, "a") end
       return false
-    end, 60 * 12, "the co-op wait cover in front of the trainer")
-    check(covered,
-          "walking into a real trainer while partied raises the co-op wait "
-          .. "cover by itself -- or the fight, if the partner was faster")
-    check(not sawAsk,
-          "and no WAIT/ALONE ask is ever shown -- forming the party was the "
-          .. "yes (src/Coop.lua M:onTrainerBattle)")
-    log(("coop cover: joinedFirst=%s sawAsk=%s"):format(
-      tostring(joinedFirst), tostring(sawAsk)))
+    end, 60 * 12, "the field to come up -- no cover stands in front of the trainer")
+    check(joined,
+          "walking into a real trainer while partied is silent -- the field "
+          .. "comes up on its own, standing or already joined")
+    check(not sawMenu,
+          "and no menu of any kind is ever shown -- forming the party was "
+          .. "the yes (src/Coop.lua M:onTrainerBattle)")
+    log(("coop wait: joinedFirst=%s sawMenu=%s"):format(
+      tostring(joinedFirst), tostring(sawMenu)))
     catchStaged()
     log("staged trainer captured:", tostring(staged ~= nil))
     H.softenTopTrainer(game)
-    U.shot(game, SHOT_DIR .. "/host-coop-prompt.png")
+    U.shot(game, SHOT_DIR .. "/host-coop-wait.png")
 
     -- Marker first, and then a predicate with two halves.
     --
@@ -1017,9 +1013,10 @@ return function(game)
     -- reason -- the guest's window opens when COOP_WAIT is sent, not when this
     -- side finishes looking at itself.
     --
-    -- 45s, under Config.COOP_ASK_TIMEOUT (60): a wait nobody takes releases
-    -- itself into the solo fight at that clock, and a check that outlived it
-    -- would be reporting on a leg that had already moved on.
+    -- 45s is a generous margin, not the clock: round 13's SOLO_FALLBACK_AFTER
+    -- releases a wait nobody takes into the solo fight after six seconds, so
+    -- both outcomes this leg cares about (still waiting, or already joined)
+    -- are long since decided well inside it.
     H.signal("host_coop_waiting")
     local waitSeen, joinSeen = false, false
     local atFight = H.waitSeconds(game, function()

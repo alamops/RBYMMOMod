@@ -455,6 +455,9 @@ Pinned decisions (scout's open questions):
 - R9-A3: the trainer wait gains the wild path's COOP_ASK_TIMEOUT
   withdraw+release fallback (the confirm's human-decline used to be the escape
   hatch; auto-join removes it, so the waiter must self-release to solo).
+  [Superseded by Round 13: the cover this "self-release" acted on is deleted
+  outright, and the clock is SOLO_FALLBACK_AFTER (6s), not COOP_ASK_TIMEOUT
+  (60s) — see below.]
 - R9-A4: mutual-wait arbitration (lexicographic playerId, the wild rule)
   applies to trainer waits too.
 - R9-A5: the partner's 300s offer expiry now sends COOP_CANCEL so the waiter
@@ -467,3 +470,34 @@ Pinned decisions (scout's open questions):
 
 Wave R9-P1: src/Coop.lua (+Client.lua only if the re-check hook needs it).
 Then R9-P2: drivers + unit pins. Then battery + a live play session.
+
+# Round 13 — the waiting cover is deleted (2026-08-13, owner-directed)
+
+Round 11 left a "Waiting for NAME..." cover (single ALONE row) in front of
+both the trainer and wild waits. Round 13 removes it outright — the
+round-trip is sub-second on a live hub, and a box up for a fraction of a
+second was a flicker, not a screen. Three changes, one orchestrator
+unification:
+
+- **The cover is gone.** `Coop:showWaiting` / `showWildWaiting` are deleted; a
+  wait now runs invisibly behind the engine's own encounter (the trainer
+  battle, or the wild grass) with nothing pushed above it. The clock that
+  ends an unanswered wait moves from `Config.COOP_ASK_TIMEOUT` (60s) to a new
+  local `SOLO_FALLBACK_AFTER` (6s, `src/Coop.lua`) — the ALONE row's job, done
+  by a shorter clock instead of a button.
+- **Same-map is now a hard gate on the trainer path too**, mirroring what
+  Party vs Wild's `onWildEncounter` already required: an off-map partner
+  never gets an offer posted at all — no wait, no wire traffic, one line
+  ("X was too far to join!") over the vanilla fight that proceeds underneath.
+- **Unification**: the wild path's own SOLO_FALLBACK_AFTER fallback used to
+  release silently; it now says the same one line the trainer path does
+  ("X couldn't join!") rather than handing the wild back without a word.
+
+Joiner (and waiter) entry: a 24-frame veil (`CoopBattle.ENTRY_FRAMES` /
+`CoopBattle.entryAlpha`) painted via `game.renderer.screenVeil` covers the
+hard cut into the co-op arena — 6 frames held black while the field builds
+its first frame, 18 fading off it, under half a second.
+
+`src/Coop.lua` + `src/CoopBattle.lua` only; no wire/hub changes (COOP_WAIT /
+COOP_JOIN / COOP_CANCEL payloads untouched, so `twin_parity` and
+`hub_protocol_parity` are unaffected).

@@ -898,44 +898,41 @@ return function(game)
     if ROLE == "a" then
       staged = stageTrainer()
       -- Round 11: nothing is chosen here. Being partied is the consent, so
-      -- staging the trainer posts COOP_WAIT and raises the wait cover (one
-      -- ALONE row) by itself -- or the field, if B's auto-join beat this loop.
-      -- Both are the contract; an ask is the failure, and it is sampled inside
-      -- the loop because an ask answered between two polls is exactly the
+      -- staging the trainer posts COOP_WAIT. Round 13 deleted the cover that
+      -- used to sit in front of it too -- the wait now runs invisibly behind
+      -- the engine's own encounter, so this leg only ever sees the field
+      -- come up, or the fight, if B's auto-join beat this loop. A menu of any
+      -- kind is the failure, and it is sampled inside the loop because one
+      -- that appeared and was answered between two polls is exactly the
       -- regression this leg exists to catch.
       --
-      -- Tap through the *pre-battle* box rather than mashing: the cover's only
-      -- row is ALONE, so a stray A would send this side into the solo fight.
-      -- Never tap A into a BattleState either: that is the engine fight
-      -- running alone, which means the intercept never fired.
-      local sawAsk = false
+      -- Tap through the *pre-battle* box rather than mashing: there is no
+      -- menu to stray onto any more, but a stray A into the wrong box is
+      -- still a stray A. Never tap A into a BattleState either: that is the
+      -- engine fight running alone, which means the intercept never fired.
+      local sawMenu = false
       local joinedFirst = false
-      local covered = H.waitFor(game, function()
+      local joined = H.waitFor(game, function()
         if not exports.isConnected() then return false end
         local top = H.top(game)
         if top ~= nil and top.sim ~= nil and #top.sim.slots >= 3 then
           joinedFirst = true
           return true
         end
-        local seen = false
-        for _, label in ipairs(H.menuLabels(game)) do
-          if label == "WAIT" then sawAsk = true end
-          if label == "ALONE" then seen = true end
-        end
-        if seen then return true end
+        if top and top.items ~= nil then sawMenu = true end
         if top and top.kind == "trainer" then return false end
         if top and top.items == nil then U.tap(game, "a") end
         return false
-      end, 60 * 6, "the co-op wait cover in front of the trainer")
-      check(covered,
-            "a real trainer battle while partied raises the co-op wait cover "
-            .. "by itself -- or the fight, if the partner was faster")
-      check(not sawAsk,
-            "and no WAIT/ALONE ask is ever shown -- forming the party was the "
-            .. "yes (src/Coop.lua M:onTrainerBattle)")
-      log(("coop cover: joinedFirst=%s sawAsk=%s"):format(
-        tostring(joinedFirst), tostring(sawAsk)))
-      shot("coop-prompt")
+      end, 60 * 6, "the field to come up -- no cover stands in front of the trainer")
+      check(joined,
+            "a real trainer battle while partied is silent -- the field "
+            .. "comes up on its own, standing or already joined")
+      check(not sawMenu,
+            "and no menu of any kind is ever shown -- forming the party was "
+            .. "the yes (src/Coop.lua M:onTrainerBattle)")
+      log(("coop wait: joinedFirst=%s sawMenu=%s"):format(
+        tostring(joinedFirst), tostring(sawMenu)))
+      shot("coop-wait")
 
       -- Round 9: the partner may already be standing on this map with
       -- nothing on screen, so COOP_WAIT can come back as COOP_JOIN within a

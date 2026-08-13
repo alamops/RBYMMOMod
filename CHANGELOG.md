@@ -61,6 +61,15 @@ here must match `manifest.version`.
   design) — the WAIT/ALONE choice showed as a cut-off empty box. Mod
   screens now decline to claim zones when the state beneath authored
   none, matching the engine's own rule.
+- **The waiting screen is gone.** Triggering a co-op fight leaves the
+  engine's own encounter on screen while the partner is pulled in
+  (sub-second) — no cover, no flash. If the join hasn't landed in six
+  seconds, the fight proceeds solo with one line: "X couldn't join!" —
+  same message at a trainer or in the grass. A partner on a different
+  map doesn't wait at all: "X was too far to join!" and the solo fight
+  starts immediately (no offer even posted). And the joiner now gets a
+  proper battle-entry fade instead of a cold cut to the arena — drawn
+  through the engine's own screen-veil channel, both sides consistent.
 - **A stolen KO redirects your partner's attack.** When a faster ally
   knocks out the mon a slower attack was aimed at, the attack no longer
   fizzles ("has no target") — it retargets whoever now stands in that

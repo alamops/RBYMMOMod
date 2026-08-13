@@ -58,8 +58,9 @@ end
 -- Menu have none, so a prompt stacked on BattleState inherits the battle
 -- message-box zone. That zone's color 0 is SGB off-white pink (255,239,255),
 -- so Font.drawBox's (1,1,1) fill becomes pink while a menu drawn the same
--- way can read as a white island -- the WAIT/ALONE screen. Claiming this
--- strip as `colors = false` keeps the fill true white; the battle field
+-- way can read as a white island -- a prompt raised over a live battle, such
+-- as Sessions' trade-wait box. Claiming this strip as `colors = false` keeps
+-- the fill true white; the battle field
 -- above still uses the engine's palettes from beneath.
 local UI_PAPER = { colors = false, x = 0, y = 96, w = 160, h = 48 }
 M.UI_PAPER = UI_PAPER
@@ -995,12 +996,15 @@ end
 -- A question with named answers, where **B is an answer and not an escape**.
 --
 -- CONFIRM is the yes/no box, and its B is a no that returns the player to
--- whatever they came from.  That is exactly wrong for a fight that has already
--- been triggered: the engine has committed to the encounter by the time the
--- mod is asked, so a prompt that could be backed out of would be a prompt that
--- skipped a trainer.  Here B selects the **last row** instead -- which the
--- callers order so that the last row is the one that costs the player nothing
--- they had not already accepted (BATTLE ALONE, or reopening the choice).
+-- whatever they came from -- right for an ordinary question, wrong for a
+-- prompt standing in front of something already sent: Sessions' trade-wait
+-- box (the live caller of this today) has already put the request on the
+-- other player's screen, so B has to reopen the choice rather than silently
+-- drop it.  Here B selects the **last row** instead -- which the callers
+-- order so that the last row is the one that costs the player nothing they
+-- had not already accepted.  Co-op's own trainer/wild wait leaned on this
+-- same widget once (BATTLE ALONE); round 13 deleted that cover outright
+-- rather than give it a row to select.
 --
 -- The rows are a Menu, not a TextBox choice, because there can be more than
 -- two of them and because they are commands rather than an answer to a

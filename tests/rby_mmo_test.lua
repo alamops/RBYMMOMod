@@ -6598,11 +6598,14 @@ end)()
 -- about two clients disagreeing about the same fight, and none of it is
 -- visible from one instance asserted against a fake hub.
 --
--- The four rules from the brief, each asserted here by name:
+-- The rules from the brief, each asserted here by name:
 --
---   * the choice cannot be escaped, and B is BATTLE ALONE;
---   * a no leaves nothing behind, so the waiter keeps waiting and the same
---     ask is made again next time;
+--   * there is no cover, ever -- a partied player's trainer wait runs
+--     invisibly behind the engine's own encounter, and ends only by a join
+--     landing, the same-map gate refusing it before it starts, or
+--     SOLO_FALLBACK_AFTER handing the trainer back on its own (round 13);
+--   * an off-map partner is refused up front, said once, over the vanilla
+--     fight that proceeds underneath;
 --   * nobody joins a battle that has started;
 --   * PARTY BATTLE refuses an opponent with no party, and a partner who is
 --     not on this map, and needs all four to agree.
@@ -6615,16 +6618,18 @@ local Ui = need("Ui")
 
 -- A client, with the two prompt widgets recorded rather than drawn.
 --
--- `chosen` is what makes the unescapable choice testable at all: Ui:choose
--- hands over a row list, and pressing B runs the *last* row -- so the harness
--- keeps the rows and offers both "pick by label" and "press B" as separate
--- moves, which is the only way to tell the two apart.
+-- `chosen`/`chooseText` still record whatever Ui:choose is handed -- `pick`
+-- and `pressB` below still know how to answer one -- but round 13 deleted
+-- Coop's only caller of it (the trainer/wild wait cover), so nothing in this
+-- describe block ever populates them any more. They stay wired for the one
+-- generic mechanism test above (`Ui.cancelRow`) and in case a future prompt
+-- needs the same widget; `fightsAlone` is what these scenarios ask instead.
 local function coopSide(hub, name, mapId)
   local side = { name = name, said = {}, chat = Chat.new(),
                  mapId = mapId or "FIX_TOWN" }
-  -- A stand-in for the engine's StateStack. The co-op prompt goes on top of
-  -- the trainer battle rather than replacing it, so "did BATTLE ALONE work"
-  -- is the question "is the engine's battle back on top", and that needs a
+  -- A stand-in for the engine's StateStack. There is no cover pushed over a
+  -- trainer wait any more (round 13), so "is the wait invisible" is the
+  -- question "is the engine's battle still what's on top", and that needs a
   -- stack to ask it of.
   side.stack = {
     states = {},
@@ -6650,7 +6655,7 @@ local function coopSide(hub, name, mapId)
   }
   -- Every prompt this module raises is a state on the stack, so the fakes put
   -- one there: without it `unwindTo` would have nothing to unwind and the
-  -- BATTLE ALONE assertions would pass for the wrong reason.
+  -- `fightsAlone` assertions would pass for the wrong reason.
   side.ui = {
     say = function(_, text, onDone)
       side.said[#side.said + 1] = text
@@ -6771,12 +6776,13 @@ local function pressB(side)
   return true
 end
 
-eq(Ui.cancelRow({ { label = "WAIT" }, { label = "ALONE" } }).label, "ALONE",
-   "B selects the last row of a choice")
+eq(Ui.cancelRow({ { label = "CONTINUE" }, { label = "CANCEL" } }).label,
+   "CANCEL", "B selects the last row of a choice")
 eq(Ui.cancelRow({}), nil, "and an empty choice has no row to select")
 
--- UI paper strip: WAIT/ALONE (and other prompts) claim true-white over the
--- battle message zone so Font.drawBox is not remapped to SGB pink.
+-- UI paper strip: a trade-wait CANCEL box (and other prompts) claims
+-- true-white over the battle message zone so Font.drawBox is not remapped
+-- to SGB pink.
 eq(type(Ui.UI_PAPER), "table", "UI paper rect is published")
 eq(Ui.UI_PAPER.colors, false, "and opts out of palette remapping")
 eq(Ui.UI_PAPER.y, 96, "covering the message / menu strip")
@@ -6793,11 +6799,13 @@ eq(Ui.UI_PAPER.h, 48, "six tiles tall")
 -- purpose, so that is exactly the stack this fires on.
 --
 -- Inventory of the prompts this covers, all four of them withUiPaper'd
--- screens raised over a vanilla engine battle: the co-op WAIT/ALONE menu
--- (CHOOSE -> MENU_CHOOSE), Coop:showWaiting / showWildWaiting, onAsk's
--- confirm, and every Ui:say.  The text-box ones kept their own text and
--- merely erased the field; MENU_CHOOSE disappeared outright, which is the
--- report this pins.
+-- screens raised over a vanilla engine battle: onAsk's confirm (Coop's
+-- four-way PARTY BATTLE ask), Sessions' trade-wait CHOOSE -> MENU_CHOOSE
+-- box, and every Ui:say.  Co-op's own trainer/wild wait raised a CHOOSE ->
+-- MENU_CHOOSE cover here too, once -- round 13 deleted it outright rather
+-- than give the wait a screen to stand behind.  The text-box ones kept their
+-- own text and merely erased the field; MENU_CHOOSE disappeared outright,
+-- which is the report this pins.
 --
 -- Driven through the registered constructors rather than a copy of the
 -- override: withUiPaper is a local, and what is being asserted is what the
@@ -6844,7 +6852,7 @@ do
   for _, name in ipairs({ "MENU_CHOOSE", "CHOOSE", "TEXT", "CONFIRM" }) do
     local id = Ui.SCREEN[name]
     local screen = registry[id].new({}, { text = "?", items = {
-      { label = "WAIT" }, { label = "ALONE" } } })
+      { label = "CONTINUE" }, { label = "CANCEL" } } })
     check(type(screen.sgbPalettes) == "function", name .. " carries the paper")
 
     eq(screen:sgbPalettes(stackedUnder(screen, { CLASSIC_BATTLE })), nil,
@@ -7003,17 +7011,20 @@ eq(ann.party:has(), true, "ANN and BOB are a party")
 ann.said = {}
 eq(engage(ann), true,
    "a party member walking into a trainer starts the wait -- nothing is asked")
-check(ann.chooseText:find("BOB"), "and the cover names their partner")
-eq(#ann.chosen, 1, "with exactly one row")
-eq(ann.chosen[1].label, "ALONE",
-   "ALONE -- which is what B selects")
-eq(ann.coop:isWaiting(), true, "and the wait is already running")
+eq(ann.chosen, nil, "no cover is raised -- there is nothing to press B on")
+eq(#ann.said, 0, "and no text box either")
+eq(ann.stack:top(), ann.engine,
+   "the engine's own encounter is still what's on screen -- nothing pushed "
+   .. "above it")
+eq(ann.coop:isWaiting(), true, "and the wait is already running, invisibly")
 
--- ------- rule 2: B is an answer, not an escape
-
-pressB(ann)
-check(fightsAlone(ann), "pressing B fights the trainer rather than dodging it")
-eq(ann.coop:isWaiting(), false, "and starts no wait")
+-- ------- there is no button to press -- the wait just stands
+--
+-- Round 13 deleted the cover outright: the only ways this wait ends now are
+-- a join landing (round 9's silent auto-join, next), or the clock
+-- (SOLO_FALLBACK_AFTER, pinned standalone below as "R9-A3"). ANN's wait from
+-- above is still running -- carried straight into the next section rather
+-- than restarted.
 
 -- ------- round 9: silent auto-join, and what the partner is told
 --
@@ -7025,10 +7036,10 @@ eq(ann.coop:isWaiting(), false, "and starts no wait")
 -- -- exactly the gate a real mid-fight partner hits, and the one M:update's
 -- retry exists to clear (pinned further down, under "R9-A2").
 
-engage(ann)
-eq(ann.coop:isWaiting(), true, "triggering the trainer starts a wait")
-check(not fightsAlone(ann), "and does not hand the battle back yet")
-check(ann.chosen ~= nil, "a waiting box is put up")
+check(fightsAlone(ann),
+      "the engine's own battle is already what's on top -- there was never "
+      .. "anything pushed over it to hand back")
+check(ann.chosen == nil, "still no cover")
 
 bob.coop.running = true
 pump(bob)
@@ -7040,34 +7051,35 @@ eq(offer.label, "BUG CATCHER", "with something to call the trainer")
 eq(bob.confirmBox, nil, "no confirm is ever raised -- forming the party was the yes")
 eq(bob.chosen, nil, "and no menu is put up either")
 
--- ------- rule 2 again: from wait mode, BACK keeps the invite; B is ALONE
+-- ------- the offer stands until BOB is free, or ANN's clock runs out
 
-ann.said = {}
-eq(#(ann.chosen or {}), 1, "the waiting cover has one row")
-eq(ann.chosen[1].label, "ALONE", "ALONE -- which is what B selects")
 check(bob.coop:pendingOffer() ~= nil,
-      "the offer stays up until ALONE is chosen -- BOB is still held busy")
+      "the offer stays up while BOB is held busy -- there is nothing for "
+      .. "ANN to do but keep waiting")
 
--- Going alone from wait mode while BOB is still busy holding the offer.
+-- ANN's own clock runs out while BOB is still busy holding the offer --
+-- SOLO_FALLBACK_AFTER hands the trainer back to her alone.
 bob.said = {}
-pressB(ann)
-check(fightsAlone(ann), "B on the waiting box fights the trainer alone")
+tick(ann, 6.1)
+check(said(ann, "couldn't"), "she is told once, on screen, why")
+settle(ann)
+check(fightsAlone(ann), "and past SOLO_FALLBACK_AFTER she fights the trainer alone")
 pump(bob)
-eq(bob.coop:pendingOffer(), nil, "the offer is taken down with ALONE")
-check(said(bob, "brave") or said(bob, "1-on-1"),
-      "and they hear that the partner was brave and went 1-on-1")
+eq(bob.coop:pendingOffer(), nil, "the withdraw clears BOB's copy of the offer too")
+eq(#bob.said, 0, "silently -- nothing is said to him unless he tries to join")
 bob.coop.running = false
 
--- Late join: an auto-join that races the alone path and finds the offer
--- already gone lands the same way a late yes to a confirm used to -- COOP_JOIN
--- with nothing standing gets COOP_OFFER_END{alone} back, the same sentence,
--- and starts no handoff.
+-- Late join: a join that arrives after the wait already ended lands the
+-- same way a late yes to the old confirm always did -- COOP_JOIN with
+-- nothing standing gets COOP_OFFER_END{alone} back, the same sentence, and
+-- starts no handoff.
 engage(ann)
 bob.coop.running = true
 pump(bob)
 check(bob.coop:pendingOffer() ~= nil, "invite is up again")
-pressB(ann) -- ALONE from the waiting box
-check(fightsAlone(ann), "ANN went in alone before BOB could take it")
+tick(ann, 6.1)
+settle(ann)
+check(fightsAlone(ann), "ANN's wait times out and she fights alone")
 bob.said = {}
 bob.coop.offer = nil
 bob.coop.aloneAnnounced = false
@@ -7087,9 +7099,9 @@ check(bob.coop:pendingOffer() ~= nil, "ANN is waiting again")
 eq(bob.confirmBox, nil, "and BOB is never asked -- only held busy")
 
 ann.said = {}
--- Freeze ANN's own wait clock out of the way: COOP_ASK_TIMEOUT (60s) would
--- otherwise release her first, and this pins the *offer's* clock on BOB's
--- side, not the wait's.
+-- Freeze ANN's own wait clock out of the way: SOLO_FALLBACK_AFTER (6s,
+-- round 13) would otherwise release her first, and this pins the *offer's*
+-- clock on BOB's side, not the wait's.
 ann.coop.waiting.clock = -1e9
 local cancels = {}
 local origBobSend = bob.transport.send
@@ -7119,61 +7131,51 @@ settle(ann)
 check(fightsAlone(ann), "then the waiter enters the trainer alone")
 bob.coop.running = false
 
--- Off-map partner: wait is allowed; the offer is stored, not raised, until
--- they arrive; waiter can still leave and fight alone.
+-- ------- off-map partner: refused before anything is claimed
+--
+-- Round 13 made same-map a hard gate on the trainer path too, mirroring what
+-- Party vs Wild's onWildEncounter already required: an off-map partner never
+-- gets an offer posted at all -- no wait, no wire traffic, just one line
+-- over the vanilla fight the engine already built.
 hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
 bob.mapId = "FIX_ROUTE"
 pump(ann)
 eq(ann.coop:partnerOnMap("FIX_TOWN"), false,
    "roster sees the partner on another map")
-engage(ann)
-check(ann.chooseText:find("arrive"),
-      "off-map partner gets the wait-to-arrive prompt")
-eq(ann.coop:isWaiting(), true, "WAIT is allowed while they are elsewhere")
-check(ann.chooseText:find("arrive"),
-      "and the waiting box says they are still arriving")
+ann.said = {}
+eq(engage(ann), false, "the trainer is NOT diverted to co-op")
+eq(ann.coop:isWaiting(), false, "no wait is ever started")
+eq(ann.coop.encounter, nil, "and the encounter is never claimed")
+check(said(ann, "too far"), "the player is told BOB was too far to join")
+check(said(ann, "BOB"), "...by name")
+check(noted(ann, "too far"), "and the party log keeps the same sentence")
+check(fightsAlone(ann),
+      "the engine's own trainer is what's on screen underneath it")
 pump(bob)
-check(bob.coop:pendingOffer() ~= nil, "the offer is stored for the off-map partner")
-eq(bob.confirmBox, nil, "and nothing is ever raised until they share the map")
+eq(bob.coop:pendingOffer(), nil, "nothing was ever posted for BOB to hold")
 
--- Leave wait and fight alone before they arrive.
-bob.said = {}
-pressB(ann)
-check(fightsAlone(ann), "B from wait-for-arrival still fights alone")
-pump(bob)
-check(said(bob, "brave") or said(bob, "1-on-1"),
-      "and the arriving partner is told about the 1-on-1")
-
--- Wait again; arriving on the map takes the standing offer, silently.
-hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
-bob.mapId = "FIX_ROUTE"
-pump(ann)
-engage(ann)
-pump(bob)
-eq(bob.confirmBox, nil, "still off-map, so nothing happens yet")
-check(bob.coop:pendingOffer() ~= nil, "the offer is stored for their arrival")
+-- back onto the shared map for what follows
+hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_TOWN", x = 1, y = 1 })
 bob.mapId = "FIX_TOWN"
-bob.coop:considerOffer(bob.game, bob.mapId)
-eq(bob.confirmBox, nil, "arriving on the map takes it -- no confirm, ever")
-eq(bob.coop:pendingOffer(), nil, "and the offer is gone")
-pump(ann); pump(bob)
-check(ann.coop.lastPlan ~= nil, "the fight opens for the waiter")
-settle(ann); settle(bob)
+pump(ann)
 resetCoopWild(ann); resetCoopWild(bob)
 pump(ann); pump(bob)
 
 -- A different trainer on the same map is not that fight.
-hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_TOWN", x = 1, y = 1 })
-bob.mapId = "FIX_TOWN"
-pump(ann)
-engage(bob, "OPP_LASS")
-check(bob.chosen ~= nil, "so BOB gets the wait/alone choice for it instead")
-pick(bob, "ALONE")
+eq(engage(bob, "OPP_LASS"), true,
+   "BOB starts his own wait against a different trainer")
+eq(bob.chosen, nil, "no cover for this one either")
+eq(bob.coop:isWaiting(), true,
+   "and it runs, invisibly, independent of ANN's own idle state")
 -- The solo battle is over for the harness; leave the stack clear so the next
--- invite is not suppressed by inFight.
-while bob.stack:top() do bob.stack:pop() end
-bob.engine = nil
-bob.coop.encounter = nil
+-- invite is not suppressed by inFight -- and since the COOP_WAIT above did
+-- reach ANN (BOB's own partner), drop her copy of the now-abandoned offer
+-- too, the same blunt reset resetCoopWild already gives BOB. Nothing in a
+-- real game is left standing on this: SOLO_FALLBACK_AFTER would clear it in
+-- six seconds on its own.
+resetCoopWild(bob)
+ann.coop.offer = nil
+ann.peer.outbox = {}
 
 -- ------- silent join: joiner never walked into the trainer (invite path)
 
@@ -7195,16 +7197,20 @@ settle(ann); settle(bob)
 eq(ann.coop.running, false, "neither is left marked as mid-battle")
 
 -- Joiner who also walked into the trainer still carries it for unwind
--- (the ACTIONS / same-trainer door into the same wait).
-hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
-bob.mapId = "FIX_ROUTE"
+-- (the ACTIONS / same-trainer door into the same wait). Round 13's same-map
+-- gate makes the old off-map staging for this pin unreachable -- both stay
+-- on FIX_TOWN throughout.
 while ann.stack:top() do ann.stack:pop() end
 ann.engine = nil
 ann.coop.encounter = nil
+-- Held busy through the pump, same trick round 9's own section uses above,
+-- so the offer stands long enough to be walked into rather than being taken
+-- the instant it lands.
+bob.coop.running = true
 engage(ann)
 pump(bob)
-check(bob.coop:pendingOffer() ~= nil, "still off-map, so the offer just stands")
-bob.mapId = "FIX_TOWN"
+check(bob.coop:pendingOffer() ~= nil, "the offer is up for BOB to take")
+bob.coop.running = false
 eq(engage(bob), true,
    "walking into the same trainer while an offer stands joins automatically")
 check(noted(bob, "Joining ANN's battle!"), "naming who is waiting")
@@ -7288,9 +7294,12 @@ end)()
 
 -- ------- R9-A3: a trainer wait nobody takes releases the waiter
 --
--- No confirm is left to decline any more, so the waiter's own clock is what
--- ends a wait nobody takes -- the wild path's fallback (M:update), now shared
--- by the trainer path too.
+-- No cover and no confirm are left to decline any more, so the waiter's own
+-- clock is what ends a wait nobody takes -- SOLO_FALLBACK_AFTER (round 13,
+-- 6s), where there used to be two chained sentences under COOP_ASK_TIMEOUT
+-- (60s): one now, not two, and the orchestrator unified it across both
+-- flows -- the wild path (below) says the very same line, rather than
+-- staying silent the way it once did.
 
 ;(function()
   local tHub = Hub.new({ maxPlayers = 8 })
@@ -7305,19 +7314,117 @@ end)()
   tBob.busy = true -- never frees, so nothing ever takes the offer
   local _, engine = engage(tAnn)
   pump(tBob)
+  eq(tAnn.chosen, nil, "no cover is ever raised over the wait")
   tAnn.said = {}
-  tick(tAnn, Config.COOP_ASK_TIMEOUT - 1)
+  tick(tAnn, 5.5)
   eq(tAnn.coop:isWaiting(), true, "the wait holds until the clock runs out")
-  tick(tAnn, 2)
-  eq(tAnn.coop:isWaiting(), false, "then it ends on its own")
-  check(said(tAnn, "make"), "the waiter is told the partner didn't make it")
-  settle(tAnn)
-  check(said(tAnn, "take"), "and pointed at the solo fight")
+  eq(#tAnn.said, 0, "silently, this whole time")
+  tick(tAnn, 1)
+  eq(tAnn.coop:isWaiting(), false, "just past six seconds it ends on its own")
+  eq(#tAnn.said, 1, "exactly one line -- not the old chained pair")
+  check(said(tAnn, "couldn't"), "\"TBOB couldn't join!\"")
+  check(said(tAnn, "TBOB"), "...by name")
   settle(tAnn)
   eq(tAnn.stack:top(), engine, "which is exactly the battle underneath")
   pump(tBob)
   eq(tBob.coop:pendingOffer(), nil,
      "the withdraw clears the partner's copy too, via COOP_CANCEL")
+end)()
+
+-- ------- R9-A3, from the wild path: the same clock, now saying it too
+--
+-- Party vs Wild's own fallback always used this clock; round 13's
+-- unification is that it now speaks, the same one line, rather than handing
+-- the wild back in silence.
+
+;(function()
+  local wtHub = Hub.new({ maxPlayers = 8 })
+  local wtAnn = coopSide(wtHub, "WTANN")
+  local wtBob = coopSide(wtHub, "WTBOB")
+  pump(wtAnn); pump(wtBob)
+  wtAnn.party:invite({ id = wtBob.client.id, name = "WTBOB" })
+  pump(wtBob)
+  answerConfirm(wtBob, true)
+  pump(wtAnn); pump(wtBob)
+
+  local battle = {
+    kind = "wild", enemy = { mon = { species = "FIXMON_A", level = 5 } },
+    onFinish = function() end,
+  }
+  wtAnn.engine = battle
+  wtAnn.stack:push(battle)
+  eq(wtAnn.coop:onWildEncounter(wtAnn.game, battle, "FIX_TOWN"), true,
+     "the wild divert still fires")
+  eq(wtAnn.chosen, nil, "no cover over the grass either")
+  wtAnn.said = {}
+  tick(wtAnn, 6.1)
+  eq(wtAnn.coop:isWaiting(), false, "the same six-second clock ends it")
+  eq(#wtAnn.said, 1, "and now it speaks -- one line, the same as the trainer path")
+  check(said(wtAnn, "couldn't"), "\"WTBOB couldn't join!\"")
+  settle(wtAnn)
+  eq(wtAnn.stack:top(), battle, "and the engine's own wild is still what's on screen")
+end)()
+
+-- ------- the joiner's (and waiter's) entry veil (round 13)
+--
+-- 24 frames total: 6 held fully black while the arena builds its first
+-- frame, then 18 fading off it -- under half a second, so it covers the cut
+-- rather than holding the fight up. Painted as a whole-surface veil handed
+-- to the renderer (game.renderer.screenVeil), the same channel the engine's
+-- own battle-transition flash and post-battle white fade use.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+
+  -- the curve
+  eq(CoopBattle.entryAlpha(0), 1, "the first frame is fully black")
+  eq(CoopBattle.entryAlpha(5), 1, "and it holds")
+  check(CoopBattle.entryAlpha(7) < 1, "then starts fading")
+  check(CoopBattle.entryAlpha(7) > CoopBattle.entryAlpha(12),
+        "monotonically off the black")
+  check(CoopBattle.entryAlpha(CoopBattle.ENTRY_FRAMES - 1) > 0,
+        "still veiled on the last frame")
+  eq(CoopBattle.entryAlpha(CoopBattle.ENTRY_FRAMES), 0, "and clear after it")
+  check(CoopBattle.ENTRY_FRAMES < 30,
+        "the whole thing is under half a second -- a cut it covers, not a "
+        .. "fight it holds up")
+
+  -- armed on a fresh screen: entryFrame starts at 0, so the very first frame
+  -- a joiner -- or the waiter, handed off the very same way -- ever draws is
+  -- the veil, not the arena underneath it.
+  local state = setmetatable({
+    game = { renderer = {} }, entryFrame = 0,
+  }, { __index = CoopBattle })
+  eq(state.entryFrame, 0, "armed at construction time, before the first draw")
+  state:draw()
+  local veil = state.game.renderer.screenVeil
+  check(type(veil) == "table", "draw() hands the renderer a screen veil")
+  eq(veil and veil[1], 0, "black")
+  eq(veil and veil[2], 1, "at full strength on frame one")
+
+  -- ...and it survives a field that cannot draw at all -- the one frame that
+  -- must never be revealed by a hard cut. M:draw pcalls drawSafe first and
+  -- paints the veil after regardless, which is what this exercises: nothing
+  -- else on `state` is filled in, so drawSafe throws on the missing arena.
+  state.game.renderer.screenVeil = nil
+  state.entryFrame = 12
+  state:draw()
+  veil = state.game.renderer.screenVeil
+  check(veil ~= nil and veil[2] > 0 and veil[2] < 1,
+        "a partly faded veil is still painted over a field that threw")
+
+  -- drawn then dropped: the counter steps once per frame, is dropped the
+  -- frame it is spent, and nothing is painted after -- no sticky veil left
+  -- over a live battle. Stepped by hand the way M:update steps it -- update()
+  -- itself reaches for far more of the screen than this drive builds.
+  state.entryFrame = CoopBattle.ENTRY_FRAMES - 1
+  state.entryFrame = state.entryFrame + 1
+  if state.entryFrame >= CoopBattle.ENTRY_FRAMES then state.entryFrame = nil end
+  eq(state.entryFrame, nil, "the counter is dropped the frame it is spent")
+  state.game.renderer.screenVeil = nil
+  state:draw()
+  eq(state.game.renderer.screenVeil, nil,
+     "after which nothing is painted -- no sticky veil over a live battle")
 end)()
 
 -- ------- R9-A4: mutual trainer waits arbitrate the same way coop_wild does
@@ -7448,13 +7555,14 @@ eq(ann.finished, "win",
    "a finished co-op battle hands its result to the engine's own battle")
 eq(ann.coop.encounter, nil, "and the encounter is spent")
 
--- ...and BATTLE ALONE hands it nothing, because nothing stood in for it: the
--- engine's battle was underneath the prompt the whole time and simply resumes.
+-- ...and nothing stands in for the engine's battle either -- there is no
+-- cover to close any more, so it is already what's on screen, immediately.
 engage(ann)
-check(not fightsAlone(ann), "the prompt is on top of the battle")
-pressB(ann)
-check(fightsAlone(ann), "B closes the prompt and the engine's battle resumes")
+check(fightsAlone(ann),
+      "the engine's own battle is already on top -- nothing was ever "
+      .. "pushed over it to resume from")
 eq(ann.finished, nil, "with nothing finished off behind its back")
+resetCoopWild(ann)
 
 -- ------- BOB's own displaced battle gets its result back too
 --
@@ -7468,9 +7576,10 @@ eq(ann.finished, nil, "with nothing finished off behind its back")
 -- was ever the problem, and that half is pinned by the identity check on
 -- bob.coop.lastPlan.engine above.
 --
--- bob.coop.offer is cleared first so this reaches the ordinary WAIT/ALONE
--- choice rather than a join prompt left over from an earlier scenario in this
--- same suite -- the fight this test cares about is BOB's own, not ANN's.
+-- bob.coop.offer is cleared first so this reaches BOB's own ordinary wait
+-- rather than auto-joining a join prompt left over from an earlier scenario
+-- in this same suite -- the fight this test cares about is BOB's own, not
+-- ANN's.
 
 bob.coop.running = false
 bob.coop.offer = nil
@@ -7648,8 +7757,7 @@ eq(coopWaits[1].battle, WILD_KEY, "and the derived wild battle key")
 eq(wAnn.coop:isWaiting(), true, "the host is waiting")
 eq(wAnn.coop.waiting.mode, "coop_wild", "in coop_wild mode")
 eq(wAnn.coop.waiting.kind, "wild", "holding the engine wild for handoff")
-eq(#(wAnn.chosen or {}), 1, "the wild wait box has one row")
-eq(wAnn.chosen[1].label, "ALONE", "ALONE only -- no BACK on this path")
+eq(wAnn.chosen, nil, "no cover over the grass either -- round 13 deleted it")
 eq(wAnn.client.coopOffer.mode, "coop_wild",
    "the hub stored the mode on the host's standing offer")
 

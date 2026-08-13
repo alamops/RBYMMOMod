@@ -2513,7 +2513,7 @@ end
 handlers[Wire.COOP_CANCEL] = function(self, client, msg)
   if not client.ready then return end
   local reason = Wire.coopReason(msg and msg.reason) or "left"
-  -- Own standing offer withdrawn (STOP / ALONE / timeout).
+  -- Own standing offer withdrawn (STOP / timeout).
   if client.coopOffer then
     return self:clearCoopOffer(client, reason)
   end
