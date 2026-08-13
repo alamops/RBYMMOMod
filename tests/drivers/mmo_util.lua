@@ -1437,10 +1437,14 @@ function M.coopInstance(game)
 end
 
 -- Drop the invite-path confirm without telling the waiter the partner said no.
-function M.dismissInviteForWalkIn(game)
-  local coop = M.coopInstance(game)
-  if not (coop and coop.joinAsk and coop.closeJoinBox) then return false end
-  return coop:closeJoinBox() and true or false
+--
+-- Round 9 deleted the confirm this used to dismiss -- `coop.joinAsk` and
+-- `coop:closeJoinBox` are both gone from src/Coop.lua (offers are taken
+-- automatically now, with no box left for a walk-in to race). Left as an
+-- explicit no-op rather than removed outright: callers already treat `false`
+-- as "nothing to dismiss," which is now unconditionally the truth.
+function M.dismissInviteForWalkIn(game) -- luacheck: ignore game
+  return false
 end
 
 -- Warp onto (or beside) the trainer's facing line. `behind` steps further

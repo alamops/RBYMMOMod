@@ -86,6 +86,23 @@ local coop = Coop.new(transport, ui, party, ctx.roster, ctx.chat)
 sessions.fighting = function()
   return coop.running == true or coop.state ~= nil
 end
+-- The other direction, and the same reason. A co-op join pushes a battle over
+-- whatever is on screen with nobody asked first, so it has to know about a
+-- trade the way Sessions knows about a fight -- a battle dropped on top of a
+-- live trade is a third player watching a screen that stopped answering.
+-- Wired here because "busy" is a fact about the session, which Coop holds no
+-- dependency on; the join is deferred rather than lost (Coop:retryOffer).
+coop.busy = function()
+  return sessions:isBusy()
+end
+-- Where this player is standing, for that same retry. Coop is handed the map
+-- at every other call site (onOffer, map.entered) and cannot ask the world
+-- itself -- see Coop:challenge's header -- but the fixed step has nobody to
+-- hand it one, so it gets a way to ask.
+coop.here = function()
+  local current = World.current()
+  return current and current.mapId
+end
 
 ctx.client = M
 ctx.ui = ui
@@ -1945,7 +1962,11 @@ local function tick(game, dt)
   -- managed in them.
   toast:update(dt)
   sessions:update(game, dt)
-  coop:update(dt)
+  -- Handed the stack as well as the clock: a partner's offer that landed while
+  -- this player was busy is re-attempted from in there, and the only way to
+  -- know they are free again is to look. Two field reads on a tick with no
+  -- offer standing -- see Coop:retryOffer.
+  coop:update(dt, game)
   -- A friend ask that arrived mid-battle, put on screen now that the battle is
   -- over. Two field reads on every other tick: the queue is empty on all but a
   -- handful of them, and _drain answers on the first one.

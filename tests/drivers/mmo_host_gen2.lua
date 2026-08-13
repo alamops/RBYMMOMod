@@ -419,12 +419,49 @@ return function(game)
       check(asked, "the co-op prompt appears in front of a real trainer battle")
       U.shot(game, SHOT_DIR .. "/host-coop-prompt.png")
       check(H.selectLabel(game, "WAIT"), "chose to wait for the party member")
-      local coopWaiting = H.waitSeconds(game, function()
-        return exports.coopWaiting() ~= nil
-      end, 60, "this side to be standing at the fight")
-      check(coopWaiting, "and this side is standing at the fight, waiting")
+
+      -- Marker first, and then a predicate with two halves -- the round 9
+      -- change on this side, ported from mmo_host.lua.
+      --
+      -- The partner is pulled in automatically now (src/Coop.lua's
+      -- M:autoJoin): they are already standing on this map with nothing on
+      -- screen, so COOP_WAIT goes out, COOP_JOIN comes back, and the wait can
+      -- be *over* within a frame or two of WAIT being chosen. Polling
+      -- `coopWaiting() ~= nil` alone can therefore report "this side never
+      -- stood at the fight" about a wait that had already been answered.
+      --
+      -- So what is asserted is the claim WAIT actually makes: this side ends
+      -- up at the fight. Standing at it and already joined are the two ways
+      -- that can be true, and which one a run sees is a matter of
+      -- milliseconds, so neither may fail it. The marker moves above the poll
+      -- for the same reason -- the guest's window opens when COOP_WAIT is
+      -- sent, not when this side finishes looking at itself.
+      --
+      -- 45s, under Config.COOP_ASK_TIMEOUT (60): a wait nobody takes releases
+      -- itself into the solo fight at that clock, and a check that outlived
+      -- it would be reporting on a leg that had already moved on.
+      H.signal("host_coop_waiting")
+      local waitSeen, joinSeen = false, false
+      local atFight = H.waitSeconds(game, function()
+        if exports.coopWaiting() ~= nil then
+          waitSeen = true
+          return true
+        end
+        local top = H.top(game)
+        if top ~= nil and top.sim ~= nil and #top.sim.slots >= 3 then
+          joinSeen = true
+          return true
+        end
+        return false
+      end, 45, "this side to be standing at the fight, or already joined")
+      log(("after WAIT: waitBox=%s alreadyJoined=%s"):format(
+        tostring(waitSeen), tostring(joinSeen)))
+      check(atFight,
+            "and WAIT leaves this side at the fight -- standing at it, or "
+            .. "already pulled into it by the partner it waited for")
+    else
+      H.signal("host_coop_waiting")
     end
-    H.signal("host_coop_waiting")
 
     H.await(game, "guest_coop_joined")
     local onCoopField = H.waitSeconds(game, function()

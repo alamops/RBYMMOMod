@@ -1012,10 +1012,64 @@ return function(game)
         log("party members:", table.concat(members, ","))
         H.signal("guest_party_joined")
 
-        -- Walk-in join on the same sighted trainer the host is waiting at.
-        -- Same-map considerOffer can raise the invite confirm before "!" --
-        -- dismiss that box without COOP_CANCEL, then walk in so onTrainerBattle
-        -- adopts a buried engine (the Quarkst rematch path).
+        -- Pulled into the fight the host is standing at, without moving.
+        --
+        -- **Round 9 rewrote this leg's contract, so it is rewritten here.**
+        -- What used to be staged was a race with a human in it: the host
+        -- waited at a sighted trainer, the offer *stood*, this side walked
+        -- into the same trainer, answered a join/wait confirm, and the engine
+        -- BattleState that walk-in built was displaced by the co-op screen and
+        -- handed its result back afterwards. There is no confirm left to
+        -- answer -- src/Coop.lua's M:autoJoin, whose consent model is that
+        -- forming the party was the yes -- and an offer that lands on a free
+        -- partner already standing on the right map is taken within a tick.
+        --
+        -- Every check that could not survive that is restated against the new
+        -- contract rather than dropped:
+        --
+        --   "the waiting partner's offer      the offer is gone because it was
+        --    reaches the guest"           ->  TAKEN: a four-slot field comes up
+        --                                     here with nothing pressed at all
+        --   "offer is the Route 3 Bug         the fight that comes up is that
+        --    Catcher, not a neighbouring  ->  trainer's: H.assertNoRematch
+        --    Youngster"                       below still asserts the defeat
+        --                                     against this side's own concrete
+        --                                     npcId, which is the same claim
+        --                                     about the same NPC
+        --   "walk-in raised a join or         nothing is raised at all, ever --
+        --    wait prompt"                 ->  watch() below fails the run if a
+        --                                     single yes/no or WAIT row shows
+        --   "walk-in held a local trainer     this side holds none, by design,
+        --    BattleState"                 ->  and must not: the joiner never
+        --                                     walked into the NPC
+        --   "and the trainer battle it        there is nothing to hand back;
+        --    displaced got its result     ->  the joiner's equivalent is
+        --    back"                            M:syntheticFinish crediting the
+        --                                     win off the waiter's npcId (see
+        --                                     the note where that check was)
+        --   "guest walked into trainer        gone from this side entirely --
+        --    sight" / "guest saw the      ->  walking in is what the *waiter*
+        --    trainer ! bubble"                does, and the host driver checks
+        --                                     both against the same NPC. The
+        --                                     shot goes with them:
+        --                                     join-trainer-sight.png is now
+        --                                     join-before-autojoin.png, this
+        --                                     side standing beside the line
+        --                                     with nothing on screen.
+        --
+        -- The walk-in displacement itself is deliberately NOT staged here any
+        -- more. Under round 9 it needs the offer to still be standing when
+        -- this side walks into the same trainer, which only happens while the
+        -- joiner is busy (mid-fight, mid-trade, off-map) -- and M:update
+        -- re-attempts the join every half second, so any window a driver could
+        -- open closes on a clock the driver does not own. That is a race, not
+        -- a scenario, and a race in a suite is a flake with a story. It stays
+        -- covered where the timing is a variable rather than a hope:
+        -- tests/rby_mmo_test.lua's "a walk-in join adopts the buried engine
+        -- when the battle key matches" and "walk-in onBattleOver still
+        -- consumes the buried engine". The *waiter* half of the displacement
+        -- -- a real engine trainer battle built, covered, displaced and handed
+        -- its result -- is still end-to-end, on the host side of this leg.
         local SIGHT_MAP = "ROUTE_3"
         local sightObj = H.sightTrainerOn(game.data, SIGHT_MAP)
         check(sightObj ~= nil, "Route 3 has a sighted trainer with two POKeMON")
@@ -1024,84 +1078,103 @@ return function(game)
             "npcId", tostring(sightNpcId))
 
         H.await(game, "host_ready_for_sight")
+        -- Still beside the sight line rather than on it, and now for two
+        -- reasons instead of one. It keeps this side out of the trainer's cone
+        -- (nothing here may trigger a fight of its own), and it keeps it on
+        -- ROUTE_3 -- which is what the offer's map gate wants (considerOffer
+        -- only pulls a partner in on the map the fight is on) and what
+        -- M:syntheticFinish wants afterwards, since the defeat flag is written
+        -- against an npcId that has to resolve in *this* client's npcPool.
         check(H.warpToSightLine(game, SIGHT_MAP, sightObj, {
               dist = 2, behind = 0, side = 2 }) ~= nil,
               "warped guest beside the trainer sight line")
         check(H.awaitOnMap(game, SIGHT_MAP, 90), "guest arrived on Route 3")
+        -- A clean screen before the watch below starts, and this is the last
+        -- moment it can be taken safely: the host does not walk into the
+        -- trainer until the marker two lines down releases it, so no offer
+        -- exists yet and a B pressed here cannot decline anything. (Once one
+        -- does exist, pressing anything is exactly what this leg must not do.)
+        local beforeTop = H.top(game)
+        if not (beforeTop == nil or beforeTop == game.overworld
+                or beforeTop.isOverworld) then
+          log("WARN something was still on screen before the auto-join watch:",
+              tostring(beforeTop.title or beforeTop.kind or "?"))
+          H.closeToOverworld(game)
+        end
+        U.shot(game, SHOT_DIR .. "/join-before-autojoin.png")
         H.signal("guest_on_sight_map")
 
-        local coopFinished = nil
-        local staged = nil
-        H.await(game, "host_coop_waiting")
-        local offered = H.waitSeconds(game, function()
-          return exports.coopOffer() ~= nil
-        end, 90, "the partner's offer to reach this side")
-        check(offered, "the waiting partner's offer reaches the guest")
-        local offer = exports.coopOffer()
-        if offer then log("offer from:", tostring(offer.name),
-                          "battle:", tostring(offer.battle)) end
-        check(offer and tostring(offer.battle or ""):find("BUG_CATCHER", 1, true),
-              "offer is the Route 3 Bug Catcher, not a neighbouring Youngster")
-
-        -- Invite confirm may already be up (considerOffer). Drop it without
-        -- declining so the walk-in can still hold a local BattleState.
-        if H.dismissInviteForWalkIn(game) then
-          log("dismissed same-map invite confirm for walk-in")
-          U.wait(10)
-        end
-        -- Do not closeToOverworld here: B on a still-live confirm is "no" and
-        -- would send the host into ALONE.
-        local topNow = H.top(game)
-        if not (topNow == game.overworld or (topNow and topNow.isOverworld)) then
-          log("WARN not on overworld before walk-in; top=",
-              tostring(topNow and (topNow.title or topNow.kind or "?")))
-        end
-        check(H.walkIntoTrainerSight(game, sightObj, { dist = 2 }),
-              "guest walked into trainer sight")
-        check(H.awaitTrainerBang(game, 20), "guest saw the trainer ! bubble")
-        do
-          local deadline = os.time() + 3
-          while os.time() < deadline do
-            local ow = game.overworld
-            if ow and ow.emote and ow.emote.npc then break end
-            U.wait(2)
+        -- Everything this side sees between the host reaching the trainer and
+        -- the field coming up, sampled from both wait loops below so the
+        -- window has no gap in it.
+        --
+        -- Nothing in here presses a button, and that is the point: "the
+        -- partner is pulled in without touching anything" is the claim, so the
+        -- driver must not touch anything either. A drivePrompts here would
+        -- answer the very box whose absence is being asserted.
+        --
+        -- The prompt scan stops once the field is up (`top.sim`), because a
+        -- co-op battle raises yes/no boxes of its own -- a fainted mon's
+        -- replacement, a run -- and those are the fight working, not an invite
+        -- confirm. The buried-BattleState scan keeps running: a trainer state
+        -- one slot down is exactly what it is looking for.
+        local sawPrompt, promptWas = false, nil
+        local sawStaged, sawOffer, offerBattle = false, false, nil
+        local function watch()
+          local offer = exports.coopOffer()
+          if offer then
+            sawOffer = true
+            offerBattle = offerBattle or tostring(offer.battle)
           end
-        end
-        U.shot(game, SHOT_DIR .. "/join-trainer-sight.png")
-
-        local joinPrompt = H.waitFor(game, function()
-          H.softenTopTrainer(game)
-          staged = staged or H.captureStagedTrainer(game)
-          -- BattleState under a TextBox / confirm is enough: menuLabels only
-          -- sees choose-rows, not every confirm chrome.
-          if staged then return true end
-          if exports.coopOffer() and H.coopInstance(game)
-              and H.coopInstance(game).joinAsk then
-            return true
-          end
+          if H.captureStagedTrainer(game) then sawStaged = true end
+          local top = H.top(game)
+          if top ~= nil and top.sim ~= nil then return end
           for _, label in ipairs(H.menuLabels(game)) do
-            if label == "YES" or label == "WAIT" or label == "NO" then
+            if label == "YES" or label == "NO" or label == "WAIT"
+               or label == "JOIN" then
+              sawPrompt = true
+              promptWas = promptWas or label
+            end
+          end
+          if H.classify(top) == "choice" then
+            sawPrompt = true
+            promptWas = promptWas or ("choice: " .. H.textOf(top))
+          end
+        end
+
+        -- Sampled through the barrier as well as after it: the offer is sent
+        -- when the host picks WAIT, which is the same moment it drops this
+        -- marker, so the interesting frames start before await returns.
+        H.await(game, "host_coop_waiting", nil, watch)
+        local joined = H.waitSeconds(game, function()
+          watch()
+          local top = H.top(game)
+          return top ~= nil and top.sim ~= nil and #top.sim.slots >= 3
+        end, 90, "the partner's offer to pull this side into the fight")
+        log(("auto-join: offerSeen=%s battle=%s prompt=%s staged=%s"):format(
+          tostring(sawOffer), tostring(offerBattle), tostring(promptWas),
+          tostring(sawStaged)))
+        check(joined, "a four-slot co-op battle is on screen, over the LAN hub")
+        -- The three halves of "automatically", each of which used to be a
+        -- check about the confirm that no longer exists.
+        check(not sawPrompt,
+              "and nothing was ever put to this side -- no join confirm, no "
+              .. "WAIT/ALONE row: the party was the yes")
+        check(not sawStaged,
+              "with no local trainer battle staged here, because this side "
+              .. "never walked into the NPC")
+        local told = H.waitSeconds(game, function()
+          for _, line in ipairs(exports.chat()) do
+            local text = tostring(line.text or "")
+            if text:find("Joining", 1, true) and text:find("HOSTY", 1, true) then
               return true
             end
           end
-          local top = H.top(game)
-          if top and top.items == nil then U.tap(game, "a") end
           return false
-        end, 60 * 12, "the walk-in join / wait prompt")
-        check(joinPrompt, "walk-in raised a join or wait prompt")
-        staged = staged or H.captureStagedTrainer(game)
-        check(staged ~= nil, "walk-in held a local trainer BattleState")
-        if staged then
-          H.wrapBattleFinish(staged, function(result) coopFinished = result end)
-        end
-        H.softenTopTrainer(game)
-
-        -- Say yes to the join (or WAIT then join via offer) until the field is up.
-        local joined = H.drivePrompts(game, function()
-          local top = H.top(game)
-          return top ~= nil and top.sim ~= nil and #top.sim.slots >= 3
-        end, 180)
-        check(joined, "a four-slot co-op battle is on screen, over the LAN hub")
+        end, 30, "the party note naming whose battle this is")
+        check(told,
+              "and the scrollback says whose fight it is rather than a box "
+              .. "asking to be let in (M:autoJoin's note)")
         local refereed = H.awaitMediatedCoop(game, 60, "coop_npc")
         check(refereed,
               "the LAN 2-on-2 is hub-refereed (coop_npc), not host CoopSim")
@@ -1136,14 +1209,26 @@ return function(game)
         check(sync.resyncs == 0, "and never needing the field re-sent")
         check(medGaps == 0, "and no gaps in the mediated event stream")
 
-        local handed = H.waitFor(game, function()
-          return coopFinished ~= nil
-        end, 10, "the engine's battle to be finished off")
-        check(handed, "and the trainer battle it displaced got its result back")
-        log("co-op result:", tostring(coopFinished))
-        check(not H.onStack(game, staged),
-              "the trainer battle this side staged is off the stack, not "
-              .. "merely buried under the co-op screen")
+        -- What the joiner owes instead of a handoff.
+        --
+        -- "The trainer battle it displaced got its result back" cannot be
+        -- asked here any more: this side displaced nothing, because it was
+        -- pulled in rather than walking in (see the leg header). That check
+        -- still runs, on the host -- the side that did walk into the trainer
+        -- and does hold an engine BattleState under the co-op screen.
+        --
+        -- The joiner's own contract is the other branch of M:onBattleOver:
+        -- consume() is a no-op with no buried battle, so a win goes through
+        -- M:syntheticFinish and credits the trainer off the *waiter's* npcId.
+        -- Two things have to be true for that to have happened, and both are
+        -- checked: nothing was left on the stack here, and H.assertNoRematch
+        -- below finds the defeat written against this side's own concrete
+        -- sightNpcId -- which is also what stands in for the deleted "offer is
+        -- the Route 3 Bug Catcher, not a neighbouring Youngster": a synthetic
+        -- finish that named the wrong NPC would fail it.
+        check(H.captureStagedTrainer(game) == nil and not sawStaged,
+              "no engine trainer battle was staged on this side, nor left "
+              .. "buried under the co-op screen")
 
         H.drivePrompts(game, function()
           local top = H.top(game)

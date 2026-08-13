@@ -49,6 +49,16 @@ here must match `manifest.version`.
   `server/lib/battle/Turn.js`); Gen2 (`BattleSim2` / `lib/battle2`)
   stays exp-free. `exp` joins `Wire.BATTLE_EVENTS` and
   `server/lib/sanitize.js`'s event whitelist in lockstep.
+- **Your partner joins co-op fights automatically.** Choosing WAIT at a
+  trainer or wild encounter now pulls your partied partner straight into
+  the 2v2 — no walking to the NPC, no confirm box (the party itself is
+  the consent; a "Joining X's battle!" line lands in their chat). A busy
+  partner (mid-battle, mid-trade) is retried every half-second and joins
+  the moment they're free; if they never free up, the waiter is released
+  to fight alone after the standard ask timeout, and a partner whose
+  offer expires now tells the waiter instead of leaving a stale box.
+  Mutual waits resolve deterministically. The four-way PARTY BATTLE
+  challenge keeps its explicit yes/no — a different consent surface.
 - **Send-outs are thrown.** The owner-designed sequence: the "sent out"
   line prints, the trainer's pokeball arcs from their field position to
   the empty seat, and the mon materializes out of the burst — for every

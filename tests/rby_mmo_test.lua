@@ -6672,6 +6672,14 @@ local function coopSide(hub, name, mapId)
   side.party = Party.new(side.transport, side.ui, side.chat)
   side.coop = Coop.new(side.transport, side.ui, side.party, side.roster,
                        side.chat)
+  -- The two hooks src/Client.lua wires at install, round 9: `busy()` answers
+  -- Sessions:isBusy() (mid-trade) and `here()` answers this player's own map,
+  -- for M:retryOffer. `side.busy` is a plain flag a scenario flips; `here`
+  -- always reads the side's own `mapId`, which every scenario already keeps
+  -- current.
+  side.busy = false
+  side.coop.busy = function() return side.busy end
+  side.coop.here = function() return side.mapId end
   hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
       playerId = testPlayerId("anon16_" .. name),
                              name = name, map = mapId or "FIX_TOWN",
@@ -6727,6 +6735,16 @@ local function said(side, needle)
   return false
 end
 
+-- The joiner's one-line "Joining X's battle!" -- chat/party log, not a box
+-- (M:autoJoin's M:note), so it lives in the chat scrollback rather than
+-- `side.said`.
+local function noted(side, needle)
+  for _, line in ipairs(side.chat.history or {}) do
+    if tostring(line.text or ""):find(needle, 1, true) then return true end
+  end
+  return false
+end
+
 -- Pick a row of the unescapable choice by its label.
 local function pick(side, label)
   for _, item in ipairs(side.chosen or {}) do
@@ -6775,6 +6793,20 @@ local function settle(side)
   side.sayDone = nil
   if done then done() end
   return done ~= nil
+end
+
+-- Drive M:update in fixed steps -- the clock every standing offer, wait and
+-- ask now runs on (round 9). Small steps by default so JOIN_RETRY_EVERY
+-- (0.5s) is crossed the same way a real fixed-step game would; callers
+-- exercising a five-minute offer timeout pass a coarser step.
+local function tick(side, seconds, step)
+  step = step or (1 / 60)
+  local left = seconds
+  while left > 0 do
+    local dt = math.min(step, left)
+    side.coop:update(dt, side.game)
+    left = left - dt
+  end
 end
 
 local function answerConfirm(side, yes)
@@ -6828,7 +6860,8 @@ local function resetCoopWild(side)
   side.coop.waiting = nil
   side.coop.offer = nil
   side.coop.running = false
-  side.coop.joinAsk = nil
+  -- No `joinAsk` any more (round 9 deleted the confirm it belonged to); left
+  -- unset rather than nilled out to avoid implying the field still exists.
   if side.client then side.client.coopOffer = nil end
 end
 
@@ -6885,7 +6918,15 @@ pressB(ann)
 check(fightsAlone(ann), "pressing B fights the trainer rather than dodging it")
 eq(ann.coop:isWaiting(), false, "and starts no wait")
 
--- ------- waiting, and what the partner is told
+-- ------- round 9: silent auto-join, and what the partner is told
+--
+-- No confirm exists any more (askToJoin / closeJoinBox / joinAsk are gone --
+-- see M:autoJoin's header). Forming the party was the yes, so a partner who
+-- is free takes an offer the instant it lands, in the very same `pump` that
+-- delivers it. To read the offer's own fields before that happens, BOB is
+-- made to look mid-battle (`running`) so M:autoJoin's gate holds it standing
+-- -- exactly the gate a real mid-fight partner hits, and the one M:update's
+-- retry exists to clear (pinned further down, under "R9-A2").
 
 engage(ann)
 pick(ann, "WAIT")
@@ -6893,16 +6934,15 @@ eq(ann.coop:isWaiting(), true, "choosing WAIT starts a wait")
 check(not fightsAlone(ann), "and does not hand the battle back yet")
 check(ann.chosen ~= nil, "a waiting box is put up")
 
+bob.coop.running = true
 pump(bob)
 local offer = bob.coop:pendingOffer()
 check(offer ~= nil, "the partner is told about the fight")
 eq(offer.battle, FIGHT, "by key")
 eq(offer.name, "ANN", "and by who is standing there")
 eq(offer.label, "BUG CATCHER", "with something to call the trainer")
-check(bob.confirmBox ~= nil,
-      "and is invited immediately -- no need to walk into the same trainer")
-check(bob.confirmText:find("ANN"), "naming who is waiting")
-eq(bob.chosen, nil, "and is not asked to wait for anybody")
+eq(bob.confirmBox, nil, "no confirm is ever raised -- forming the party was the yes")
+eq(bob.chosen, nil, "and no menu is put up either")
 
 -- ------- rule 2 again: from wait mode, BACK keeps the invite; B is ALONE
 
@@ -6916,65 +6956,85 @@ eq(ann.coop:isWaiting(), true,
 check(not fightsAlone(ann), "without handing the battle back yet")
 eq(#(ann.chosen or {}), 2, "and reopens the wait/alone choice")
 eq(ann.chosen[2].label, "ALONE", "still with ALONE as the B answer")
-pump(bob)
 check(bob.coop:pendingOffer() ~= nil,
-      "the partner's invite stays up until ALONE is chosen")
-check(bob.confirmBox ~= nil, "and their yes/no is still on screen")
+      "the offer stays up until ALONE is chosen -- BOB is still held busy")
 
--- Going alone from wait mode while they still have the invite.
+-- Going alone from wait mode while BOB is still busy holding the offer.
 pick(ann, "WAIT")
 bob.said = {}
 pressB(ann)
 check(fightsAlone(ann), "B on the waiting box fights the trainer alone")
 pump(bob)
-eq(bob.coop:pendingOffer(), nil, "the invite is taken down with ALONE")
-eq(bob.coop.joinAsk, nil, "the yes/no is cleared")
+eq(bob.coop:pendingOffer(), nil, "the offer is taken down with ALONE")
 check(said(bob, "brave") or said(bob, "1-on-1"),
       "and they hear that the partner was brave and went 1-on-1")
+bob.coop.running = false
 
--- Late yes: the confirm raced the alone path and the offer is already gone.
+-- Late join: an auto-join that races the alone path and finds the offer
+-- already gone lands the same way a late yes to a confirm used to -- COOP_JOIN
+-- with nothing standing gets COOP_OFFER_END{alone} back, the same sentence,
+-- and starts no handoff.
 engage(ann)
 pick(ann, "WAIT")
+bob.coop.running = true
 pump(bob)
-check(bob.confirmBox ~= nil, "invite is up again")
+check(bob.coop:pendingOffer() ~= nil, "invite is up again")
 pressB(ann) -- ALONE from the waiting box
-check(fightsAlone(ann), "ANN went in alone before BOB answered")
--- Offer cleared locally without pumping yet; a yes still sitting on the box
--- must say the same brave line (and must not try to join).
+check(fightsAlone(ann), "ANN went in alone before BOB could take it")
 bob.said = {}
 bob.coop.offer = nil
 bob.coop.aloneAnnounced = false
-answerConfirm(bob, true)
+bob.transport.send(nil, Wire.COOP_JOIN, { to = ann.id, battle = FIGHT })
+pump(bob)
 check(said(bob, "brave") or said(bob, "1-on-1"),
-      "a yes that arrives too late gets the same brave 1-on-1 line")
+      "a join that arrives too late gets the same brave 1-on-1 line")
 eq(bob.coop.lastPlan, nil, "and starts no co-op handoff")
-settle(bob)
+bob.coop.running = false
 
--- ------- rule 1: a no ends the wait and sends the waiter in alone
+-- ------- R9-A5: the joiner's own offer can expire, and the waiter is told
 
 engage(ann)
 pick(ann, "WAIT")
+bob.coop.running = true -- never takes it: pins the 300s expiry, not a join
 pump(bob)
 check(bob.coop:pendingOffer() ~= nil, "ANN is waiting again")
-check(bob.confirmBox ~= nil, "and BOB is invited without engaging the trainer")
+eq(bob.confirmBox, nil, "and BOB is never asked -- only held busy")
 
 ann.said = {}
-answerConfirm(bob, false)
-eq(bob.coop:pendingOffer(), nil, "saying no clears the invite")
-check(not fightsAlone(bob),
-      "and does not drop BOB into a fight they never walked into")
+-- Freeze ANN's own wait clock out of the way: COOP_ASK_TIMEOUT (60s) would
+-- otherwise release her first, and this pins the *offer's* clock on BOB's
+-- side, not the wait's.
+ann.coop.waiting.clock = -1e9
+local cancels = {}
+local origBobSend = bob.transport.send
+bob.transport.send = function(transport, msgType, payload)
+  if msgType == Wire.COOP_CANCEL then cancels[#cancels + 1] = payload end
+  return origBobSend(transport, msgType, payload)
+end
+tick(bob, Config.COOP_OFFER_TIMEOUT + 1, 1)
+bob.transport.send = origBobSend
+eq(bob.coop:pendingOffer(), nil, "the standing offer expires after 300s")
+eq(#cancels, 1, "and the hub is told the joiner is not coming")
+-- Sent as `no`, not `timeout`: src/Hub.lua's COOP_CANCEL handler (and the
+-- relay.js twin) only honours a cancel from a client holding no offer of its
+-- own when the reason is exactly `no` -- anything else is dropped as noise,
+-- which is why M:update sends this one specific string.
+eq(cancels[1].reason, "no",
+   "the hub-honoured reason, not \"timeout\" -- see src/Hub.lua's COOP_CANCEL "
+   .. "handler")
 pump(ann)
-eq(ann.coop:isWaiting(), false, "the waiter is told the invite is off")
+eq(ann.coop:isWaiting(), false, "the waiter's wait is over")
 check(said(ann, "not to join") or said(ann, "decided"),
-      "with a sentence that the partner will not join")
+      "told in the decline wording -- the same one a real decline used to earn")
 settle(ann)
 check(said(ann, "alone") or said(ann, "alone!"),
-      "and an encourage line before the solo fight")
+      "and the same encourage line before the solo fight")
 settle(ann)
 check(fightsAlone(ann), "then the waiter enters the trainer alone")
+bob.coop.running = false
 
--- Off-map partner: wait is allowed; invite auto-raises when they arrive;
--- waiter can still leave and fight alone.
+-- Off-map partner: wait is allowed; the offer is stored, not raised, until
+-- they arrive; waiter can still leave and fight alone.
 hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
 bob.mapId = "FIX_ROUTE"
 pump(ann)
@@ -6989,7 +7049,7 @@ check(ann.chooseText:find("arrive"),
       "and the waiting box says they are still arriving")
 pump(bob)
 check(bob.coop:pendingOffer() ~= nil, "the offer is stored for the off-map partner")
-eq(bob.confirmBox, nil, "but is not prompted until they share the map")
+eq(bob.confirmBox, nil, "and nothing is ever raised until they share the map")
 
 -- Leave wait and fight alone before they arrive.
 bob.said = {}
@@ -6999,27 +7059,30 @@ pump(bob)
 check(said(bob, "brave") or said(bob, "1-on-1"),
       "and the arriving partner is told about the 1-on-1")
 
--- Wait again; arriving on the map raises the invite automatically.
+-- Wait again; arriving on the map takes the standing offer, silently.
 hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
 bob.mapId = "FIX_ROUTE"
 pump(ann)
 engage(ann)
 pick(ann, "WAIT")
 pump(bob)
-eq(bob.confirmBox, nil, "still off-map, so no confirm yet")
+eq(bob.confirmBox, nil, "still off-map, so nothing happens yet")
+check(bob.coop:pendingOffer() ~= nil, "the offer is stored for their arrival")
 bob.mapId = "FIX_TOWN"
 bob.coop:considerOffer(bob.game, bob.mapId)
-check(bob.confirmBox ~= nil, "arriving on the map raises the invite")
-answerConfirm(bob, false)
-pump(ann)
-settle(ann); settle(ann)
+eq(bob.confirmBox, nil, "arriving on the map takes it -- no confirm, ever")
+eq(bob.coop:pendingOffer(), nil, "and the offer is gone")
+pump(ann); pump(bob)
+check(ann.coop.lastPlan ~= nil, "the fight opens for the waiter")
+settle(ann); settle(bob)
+resetCoopWild(ann); resetCoopWild(bob)
+pump(ann); pump(bob)
 
 -- A different trainer on the same map is not that fight.
 hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_TOWN", x = 1, y = 1 })
 bob.mapId = "FIX_TOWN"
 pump(ann)
 engage(bob, "OPP_LASS")
-eq(bob.confirmBox, nil, "another trainer on the same map is not the same fight")
 check(bob.chosen ~= nil, "so BOB gets the wait/alone choice for it instead")
 pick(bob, "ALONE")
 -- The solo battle is over for the harness; leave the stack clear so the next
@@ -7028,16 +7091,17 @@ while bob.stack:top() do bob.stack:pop() end
 bob.engine = nil
 bob.coop.encounter = nil
 
--- ------- yes: invite-path handoff (joiner never walked into the trainer)
+-- ------- silent join: joiner never walked into the trainer (invite path)
 
 engage(ann)
 pick(ann, "WAIT")
 pump(bob)
-check(bob.confirmBox ~= nil, "same-map invite is up for the yes path")
-answerConfirm(bob, true)
+eq(bob.coop:pendingOffer(), nil, "the same-map invite is taken immediately")
+eq(bob.confirmBox, nil, "with no confirm at all")
+check(noted(bob, "Joining ANN's battle!"), "and BOB is told whose fight it is")
 pump(ann); pump(bob)
 
-eq(ann.coop:isWaiting(), false, "a yes ends the wait")
+eq(ann.coop:isWaiting(), false, "the join ends the wait")
 check(ann.coop.lastPlan ~= nil, "and the waiting player reaches the handoff")
 check(bob.coop.lastPlan ~= nil, "as does the one who joined")
 eq(bob.coop.lastPlan.engine, nil,
@@ -7048,7 +7112,7 @@ settle(ann); settle(bob)
 eq(ann.coop.running, false, "neither is left marked as mid-battle")
 
 -- Joiner who also walked into the trainer still carries it for unwind
--- (the ACTIONS / same-trainer door into the same yes/no).
+-- (the ACTIONS / same-trainer door into the same wait).
 hub:receive(bob.client, { type = Wire.MOVE, map = "FIX_ROUTE", x = 4, y = 4 })
 bob.mapId = "FIX_ROUTE"
 while ann.stack:top() do ann.stack:pop() end
@@ -7057,16 +7121,15 @@ ann.coop.encounter = nil
 engage(ann)
 pick(ann, "WAIT")
 pump(bob)
-eq(bob.confirmBox, nil, "still off-map, so no auto-invite yet")
+check(bob.coop:pendingOffer() ~= nil, "still off-map, so the offer just stands")
 bob.mapId = "FIX_TOWN"
 eq(engage(bob), true,
-   "walking into the same fight while an offer stands asks to join")
-check(bob.confirmText:find("ANN"), "naming who is waiting")
-answerConfirm(bob, true)
+   "walking into the same trainer while an offer stands joins automatically")
+check(noted(bob, "Joining ANN's battle!"), "naming who is waiting")
 pump(ann); pump(bob)
 check(bob.coop.lastPlan ~= nil, "joiner reaches the handoff")
 check(bob.coop.lastPlan.engine == bob.engine,
-      "and BOB's own trainer battle rides along on his plan too")
+      "and BOB's own trainer battle rides along on his plan too, for the unwind")
 settle(ann); settle(bob)
 
 -- ------- rule 3: nobody joins once it has started
@@ -7076,7 +7139,9 @@ eq(engage(ann), false,
    "a trainer met while a co-op battle is running is left to the engine")
 ann.coop.running = false
 
--- an offer taken up twice starts one fight, not two
+-- an offer taken up twice starts one fight, not two -- BOB's own pump already
+-- auto-joins it; the two extra COOP_JOINs below just race the same landed
+-- offer and are the ones that must find nothing left to accept.
 engage(ann)
 pick(ann, "WAIT")
 pump(bob)
@@ -7090,6 +7155,119 @@ eq(joins, 1, "a second join finds nothing left to accept")
 pump(ann); pump(bob)
 -- both are mid-handoff again; hand their encounters back before moving on
 settle(ann); settle(bob)
+
+-- ------- R9-A2: the retry, mid-fight and mid-trade
+--
+-- The pull that actually happens: an offer lands while the partner is
+-- fighting something else or mid-trade, every immediate gate refuses it, and
+-- this is what takes it a moment later instead of losing it to bad timing.
+-- Fresh hub pair so none of this disturbs ANN/BOB, who carry on into PARTY
+-- BATTLE below.
+
+;(function()
+  local rHub = Hub.new({ maxPlayers = 8 })
+  local rAnn = coopSide(rHub, "RANN")
+  local rBob = coopSide(rHub, "RBOB")
+  pump(rAnn); pump(rBob)
+  rAnn.party:invite({ id = rBob.client.id, name = "RBOB" })
+  pump(rBob)
+  answerConfirm(rBob, true)
+  pump(rAnn); pump(rBob)
+
+  -- the offer lands mid-fight: quiet until the fight clears, then joins
+  rBob.stack:push({ kind = "wild", enemy = { mon = { species = "FIXMON_C" } } })
+  engage(rAnn); pick(rAnn, "WAIT")
+  pump(rBob)
+  check(rBob.coop:pendingOffer() ~= nil, "a busy partner keeps the offer")
+  tick(rBob, 2)
+  check(rBob.coop:pendingOffer() ~= nil,
+        "and the retry stays quiet while he is still fighting")
+  rBob.stack:pop()
+  tick(rBob, 1)
+  eq(rBob.coop:pendingOffer(), nil, "the retry takes it the moment he is free")
+  check(noted(rBob, "Joining RANN's battle!"), "and he is told whose fight it is")
+  pump(rAnn); pump(rBob)
+  check(rAnn.coop.lastPlan ~= nil, "the fight opens for both")
+  settle(rAnn); settle(rBob)
+
+  -- the offer lands mid-trade: the same deferral, through Sessions:isBusy()
+  rBob.busy = true
+  engage(rAnn); pick(rAnn, "WAIT")
+  pump(rBob)
+  check(rBob.coop:pendingOffer() ~= nil, "a trade is not interrupted either")
+  tick(rBob, 3)
+  check(rBob.coop:pendingOffer() ~= nil, "and stays deferred while it runs")
+  rBob.busy = false
+  tick(rBob, 1)
+  eq(rBob.coop:pendingOffer(), nil, "the trade ends and the join lands")
+  pump(rAnn); pump(rBob)
+  check(rAnn.coop.lastPlan ~= nil, "the fight opens for both again")
+  settle(rAnn); settle(rBob)
+end)()
+
+-- ------- R9-A3: a trainer wait nobody takes releases the waiter
+--
+-- No confirm is left to decline any more, so the waiter's own clock is what
+-- ends a wait nobody takes -- the wild path's fallback (M:update), now shared
+-- by the trainer path too.
+
+;(function()
+  local tHub = Hub.new({ maxPlayers = 8 })
+  local tAnn = coopSide(tHub, "TANN")
+  local tBob = coopSide(tHub, "TBOB")
+  pump(tAnn); pump(tBob)
+  tAnn.party:invite({ id = tBob.client.id, name = "TBOB" })
+  pump(tBob)
+  answerConfirm(tBob, true)
+  pump(tAnn); pump(tBob)
+
+  tBob.busy = true -- never frees, so nothing ever takes the offer
+  local _, engine = engage(tAnn)
+  pick(tAnn, "WAIT")
+  pump(tBob)
+  tAnn.said = {}
+  tick(tAnn, Config.COOP_ASK_TIMEOUT - 1)
+  eq(tAnn.coop:isWaiting(), true, "the wait holds until the clock runs out")
+  tick(tAnn, 2)
+  eq(tAnn.coop:isWaiting(), false, "then it ends on its own")
+  check(said(tAnn, "make"), "the waiter is told the partner didn't make it")
+  settle(tAnn)
+  check(said(tAnn, "take"), "and pointed at the solo fight")
+  settle(tAnn)
+  eq(tAnn.stack:top(), engine, "which is exactly the battle underneath")
+  pump(tBob)
+  eq(tBob.coop:pendingOffer(), nil,
+     "the withdraw clears the partner's copy too, via COOP_CANCEL")
+end)()
+
+-- ------- R9-A4: mutual trainer waits arbitrate the same way coop_wild does
+
+;(function()
+  local mHub = Hub.new({ maxPlayers = 8 })
+  local mAnn = coopSide(mHub, "MANN")
+  local mBob = coopSide(mHub, "MBOB")
+  pump(mAnn); pump(mBob)
+  mAnn.party:invite({ id = mBob.client.id, name = "MBOB" })
+  pump(mBob)
+  answerConfirm(mBob, true)
+  pump(mAnn); pump(mBob)
+
+  local winner, loser
+  if mAnn.id < mBob.id then winner, loser = mAnn, mBob
+  else winner, loser = mBob, mAnn end
+
+  engage(mAnn); pick(mAnn, "WAIT")
+  engage(mBob, "OPP_LASS"); pick(mBob, "WAIT")
+  pump(mAnn); pump(mBob)
+
+  eq(winner.coop:isWaiting(), true, "the smaller playerId keeps its wait")
+  eq(loser.coop:isWaiting(), false, "the larger one gives its wait up")
+  eq(winner.coop:pendingOffer(), nil,
+     "and the winner drops the inbound offer rather than holding it")
+  pump(winner); pump(loser); pump(winner); pump(loser)
+  check(winner.coop.lastPlan ~= nil, "the surviving wait becomes the fight")
+  settle(winner); settle(loser)
+end)()
 
 -- ------- PARTY BATTLE: the refusals the brief names
 
@@ -7363,13 +7541,18 @@ eq(wildEngage(wAnn), false, "nor when the partner is session-busy")
 wAnn.roster:setBusy(wBob.id, false)
 
 -- A standing trainer wait is not coop_wild -- local wild stays engine-owned.
+-- WBOB is held busy first: both are on FIX_TOWN, so a free WBOB would auto-
+-- join the trainer offer the instant `pump` delivers it, and pendingOffer
+-- would already be nil by the next line.
 engage(wAnn)
 pick(wAnn, "WAIT")
+wBob.busy = true
 pump(wBob)
 check(wBob.coop:pendingOffer() ~= nil, "trainer wait offer is up for the partner")
 eq(wBob.coop:pendingOffer().mode, nil, "without a coop_wild mode token")
 eq(wildEngage(wBob), false,
    "a wild under a trainer offer does not divert or auto-join")
+wBob.busy = false
 resetCoopWild(wAnn); resetCoopWild(wBob)
 pump(wAnn); pump(wBob)
 

@@ -431,3 +431,39 @@ Pinned design:
 Waves: R6-W1 referee twins + fixtures (opus) ∥ R6-W2 CoopSim.lua (opus) ∥
 R6-W3 Wire+sanitize `mon` field (opus). Then R6-W4 MediatedBattle ∥ R6-W5
 CoopBattle. Then tests → review → fixes → battery.
+
+---
+
+# Round 9 — partner auto-joins coop fights (2026-08-13, owner-directed)
+
+Owner: in 2xNPC and 2xWild the partner must be pulled in automatically after the
+waiter picks WAIT — no interaction with the NPC, no confirm box. Scout ground
+truth: coop_wild ALREADY auto-joins by design (Coop.lua:13-18) but only at
+offer-arrival instant — an offer landing while the partner is busy is NEVER
+retried (the gap the owner almost certainly hit); coop_npc raises an
+askToJoin confirm the partner must answer. Hubs are neutral relays — client-only
+fix in src/Coop.lua.
+
+Pinned decisions (scout's open questions):
+- R9-A1: coop_npc adopts coop_wild's silent auto-join (generalize autoJoinWild
+  into a mode-agnostic autoJoin; considerOffer's trainer branch calls it instead
+  of askToJoin). The ACTIONS→JOIN row stays as a manual fallback.
+- R9-A2: THE RETRY — M:update polls a standing self.offer and re-attempts
+  auto-join once the partner is free (gates: inFight/stack-fight, self.ask,
+  self.waiting, AND Sessions:isBusy() — mid-trade becomes a gate, closing a
+  pre-existing hole). This also fixes the wild-mode failure the owner saw.
+- R9-A3: the trainer wait gains the wild path's COOP_ASK_TIMEOUT
+  withdraw+release fallback (the confirm's human-decline used to be the escape
+  hatch; auto-join removes it, so the waiter must self-release to solo).
+- R9-A4: mutual-wait arbitration (lexicographic playerId, the wild rule)
+  applies to trainer waits too.
+- R9-A5: the partner's 300s offer expiry now sends COOP_CANCEL so the waiter
+  hears it instead of a stale box.
+- R9-A6: the quad four-way ask stays fully manual (a challenge against another
+  party is a different consent surface). Untouched.
+- Drivers: mmo_guest.lua's coop_npc leg flips from driving the confirm to
+  ASSERTING silent auto-join (template: mmo_join.lua:466-479's party-wild leg,
+  including the no-confirm-text assertion).
+
+Wave R9-P1: src/Coop.lua (+Client.lua only if the re-check hook needs it).
+Then R9-P2: drivers + unit pins. Then battery + a live play session.
