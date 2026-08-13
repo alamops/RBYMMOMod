@@ -49,6 +49,18 @@ here must match `manifest.version`.
   `server/lib/battle/Turn.js`); Gen2 (`BattleSim2` / `lib/battle2`)
   stays exp-free. `exp` joins `Wire.BATTLE_EVENTS` and
   `server/lib/sanitize.js`'s event whitelist in lockstep.
+- **Your partner sees the `!` too.** When one party member gets pulled
+  into a fight, the other's screen now shows the classic `!` bubble
+  bobbing over that player's avatar — drawn by the mod (original vector
+  art) and anchored to the avatar rather than any NPC, so it works even
+  when the two players run different ROMs. It stands from the moment the
+  offer lands until the join completes.
+- **Co-op prompts render over classic battles.** A day-one bug in the
+  UI paper machinery flattened the whole frame whenever a mod prompt
+  opened over a classic engine battle (which publishes no color zones by
+  design) — the WAIT/ALONE choice showed as a cut-off empty box. Mod
+  screens now decline to claim zones when the state beneath authored
+  none, matching the engine's own rule.
 - **Your partner joins co-op fights automatically.** Choosing WAIT at a
   trainer or wild encounter now pulls your partied partner straight into
   the 2v2 — no walking to the NPC, no confirm box (the party itself is

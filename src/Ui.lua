@@ -77,6 +77,16 @@ local function withUiPaper(screen)
             if s and s.sgbPalettes then
               local ok, z = pcall(s.sgbPalettes, s, game)
               if ok then zones = z end
+              -- Stop at the first state that OWNS an sgbPalettes, even when it
+              -- answers nil.  This mirrors Game:draw exactly ("the topmost
+              -- state that knows its palette owns the screen" -- engine
+              -- src/core/Game.lua:527-537), which also breaks on the field
+              -- being present and keeps whatever came back.  A nil from an
+              -- owner is an authored answer -- "this frame is raw DMG" -- not
+              -- an absence, so walking past it would inherit zones the engine
+              -- itself would never have consulted: the overworld's per-area
+              -- map zones from BENEATH a battle, painted over the battle
+              -- frame.  Publishing nothing is the honest inheritance here.
               break
             end
           end
@@ -84,10 +94,18 @@ local function withUiPaper(screen)
         end
       end
     end
+    -- A classic BattleState publishes no zones on purpose (it colorises itself
+    -- in drawZonePass and hands the frame a raw DMG canvas -- engine
+    -- src/battle/BattleState.lua:126-134).  Claiming the strip alone there
+    -- makes this screen the frame's zone owner with a one-zone list, so
+    -- PaletteFX.ensureZones short-circuits and every pixel outside y=96..144
+    -- is left unzoned and flattened to paper: the battle field is erased, and
+    -- any menu drawn outside the strip (MENU_CHOOSE sits at y 56..104) with
+    -- it.  Publish nothing instead and give up only the cosmetic true-white
+    -- fill, in the one case where claiming it destroys the frame.
+    if not (type(zones) == "table" and zones[1]) then return nil end
     local out = {}
-    if type(zones) == "table" then
-      for i = 1, #zones do out[i] = zones[i] end
-    end
+    for i = 1, #zones do out[i] = zones[i] end
     out[#out + 1] = UI_PAPER
     return out
   end

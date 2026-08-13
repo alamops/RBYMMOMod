@@ -6782,6 +6782,102 @@ eq(Ui.UI_PAPER.colors, false, "and opts out of palette remapping")
 eq(Ui.UI_PAPER.y, 96, "covering the message / menu strip")
 eq(Ui.UI_PAPER.h, 48, "six tiles tall")
 
+-- ------- and the one frame it must NOT claim
+--
+-- The strip is only ever an *addition* to what the state beneath publishes.
+-- Claiming it on its own makes this screen the frame's zone owner with a
+-- one-zone list; PaletteFX.ensureZones short-circuits on a non-empty list, so
+-- every pixel outside y=96..144 goes unzoned and is flattened to paper -- the
+-- battle field erased, and any box drawn outside the strip (MENU_CHOOSE sits
+-- at y 56..104) with it.  A classic engine BattleState publishes no zones on
+-- purpose, so that is exactly the stack this fires on.
+--
+-- Inventory of the prompts this covers, all four of them withUiPaper'd
+-- screens raised over a vanilla engine battle: the co-op WAIT/ALONE menu
+-- (CHOOSE -> MENU_CHOOSE), Coop:showWaiting / showWildWaiting, onAsk's
+-- confirm, and every Ui:say.  The text-box ones kept their own text and
+-- merely erased the field; MENU_CHOOSE disappeared outright, which is the
+-- report this pins.
+--
+-- Driven through the registered constructors rather than a copy of the
+-- override: withUiPaper is a local, and what is being asserted is what the
+-- screens the mod actually installs publish.
+do
+  local keptScreens, keptHooks, keptUi = stubMod.content.screens, stubMod.hooks,
+                                         stubMod.ui
+  local registry = {}
+  stubMod.content.screens = {
+    register = function(_, id, def) registry[id] = def end,
+    get = function(_, id) return registry[id] end,
+  }
+  stubMod.hooks = { wrap = function() end }
+  stubMod.ui = {
+    push = function() end,
+    Menu = { new = function() return { kind = "menu" } end },
+    ListMenu = { new = function() return { kind = "list" } end },
+    TextBox = { new = function() return { kind = "text" } end },
+  }
+  check(pcall(function() Ui.new({}):install() end),
+        "the paper-bearing screens register under a minimal stub")
+
+  -- A stack whose states are `beneath` in order, with `screen` on top, shaped
+  -- the way withUiPaper's walk reads it (game.stack.states).
+  local function stackedUnder(screen, beneath)
+    local states = {}
+    for i = 1, #beneath do states[i] = beneath[i] end
+    states[#states + 1] = screen
+    return { stack = { states = states } }
+  end
+
+  -- The engine states this walks over, as they really answer:
+  --   classic BattleState  -- owns sgbPalettes, returns nil (raw DMG canvas)
+  --   MediatedBattle       -- owns it, returns its whole-canvas opt-out
+  --   the overworld        -- owns it, returns per-area map zones
+  local CLASSIC_BATTLE = { sgbPalettes = function() return nil end }
+  local MEDIATED = { sgbPalettes = function()
+    return { { colors = false, x = 0, y = 0, w = 160, h = 144 } }
+  end }
+  local OVERWORLD = { sgbPalettes = function()
+    return { { x = 0, y = 0, w = 80, h = 144 }, { x = 80, y = 0, w = 80, h = 144 } }
+  end }
+
+  for _, name in ipairs({ "MENU_CHOOSE", "CHOOSE", "TEXT", "CONFIRM" }) do
+    local id = Ui.SCREEN[name]
+    local screen = registry[id].new({}, { text = "?", items = {
+      { label = "WAIT" }, { label = "ALONE" } } })
+    check(type(screen.sgbPalettes) == "function", name .. " carries the paper")
+
+    eq(screen:sgbPalettes(stackedUnder(screen, { CLASSIC_BATTLE })), nil,
+       name .. " publishes nothing over a state that publishes no zones")
+
+    local over = screen:sgbPalettes(stackedUnder(screen, { MEDIATED }))
+    eq(#over, 2, name .. " appends the strip to a state that does publish")
+    eq(over[1].w, 160, "...keeping what it inherited first")
+    eq(over[2], Ui.UI_PAPER, "...with the paper on top")
+  end
+
+  local screen = registry[Ui.SCREEN.MENU_CHOOSE].new({}, {})
+
+  -- The walk stops at the first state that OWNS an sgbPalettes even when it
+  -- answers nil, the way Game:draw picks the frame's zone owner. Falling
+  -- through to the overworld here would paint a battle frame with the map's
+  -- zones -- zones the engine itself would never have consulted.
+  eq(screen:sgbPalettes(stackedUnder(screen, { OVERWORLD, CLASSIC_BATTLE })), nil,
+     "a nil-answering owner ends the walk rather than leaking the overworld's "
+     .. "zones up from beneath a battle")
+  eq(#screen:sgbPalettes(stackedUnder(screen, { OVERWORLD })), 3,
+     "...while over the overworld itself the strip is still claimed")
+
+  -- Nothing beneath at all is the same shape as a nil answer: there is no
+  -- inherited list to add the strip to, so there is nothing to publish.
+  eq(screen:sgbPalettes(stackedUnder(screen, {})), nil,
+     "and a screen with nothing under it claims nothing")
+  eq(screen:sgbPalettes({}), nil, "nor does one off any stack at all")
+
+  stubMod.content.screens, stubMod.hooks, stubMod.ui = keptScreens, keptHooks,
+                                                       keptUi
+end
+
 -- Run whatever a ui:say was given as its continuation.
 --
 -- In game the player presses A and the box closes; here nothing does, so the

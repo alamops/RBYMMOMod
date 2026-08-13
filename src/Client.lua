@@ -1961,6 +1961,12 @@ local function tick(game, dt)
   -- five seconds Config says and not for however many frames the machine
   -- managed in them.
   toast:update(dt)
+  -- And the partner's "!", for the same reason: the mark over a friend's
+  -- trainer bobs on the fixed step, and -- more to the point -- it has to keep
+  -- ageing while the world is *not* being drawn, because the overlay's draw
+  -- bails at the free-roam gate and a partner sitting in a menu would
+  -- otherwise meet a full-length mark on closing it.
+  overlay:update(dt)
   sessions:update(game, dt)
   -- Handed the stack as well as the clock: a partner's offer that landed while
   -- this player was busy is re-attempted from in there, and the only way to
@@ -2390,6 +2396,14 @@ function M.install()
     return {
       from = offer.from, name = offer.name,
       battle = offer.battle, label = offer.label,
+      -- Where the fight is, and what kind it is. `map` is the gate the
+      -- overlay's "!" is placed behind (src/Overlay.lua's offerMark): without
+      -- it a driver watching the bubble can see it appear but not that it
+      -- appeared for the right reason. `npcId` renders nothing -- the mark
+      -- anchors to the waiter's avatar, never to a ROM-derived object -- and is
+      -- carried only so a failed synthetic finish can be diagnosed against the
+      -- id the plan actually named.
+      map = offer.map, mode = offer.mode, npcId = offer.npcId,
     }
   end
   mod.exports.coopPlan = function() return coop.lastPlan end
