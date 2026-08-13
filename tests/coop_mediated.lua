@@ -2190,4 +2190,86 @@ do
   end
 end
 
+
+-- ------------------------------------------------------------------
+-- 12. one trainer callout per attack, counted every frame
+-- ------------------------------------------------------------------
+--
+-- The path the bug was played on: coop_npc on the arena, refereed by the
+-- intermediator, `onBattleEvent` -> `medRows` -> `playEvents`.
+--
+-- One attack arrives as two rows -- the referee emits `anim` and *then* says
+-- "X used MOVE" (server/lib/battle/Turn.js) -- and the whole move animation
+-- runs between them. Both rows used to raise the callout, and the anim row
+-- raised it twice more (once on its first pass and once when the callout beat
+-- handed the same row back), so the trainer shouted, fell silent while the
+-- animation played, and shouted the same order again. `noteBattlefieldBubble`
+-- owns the rule now: whichever row arrives first shouts and the other only
+-- refreshes it.
+--
+-- Counted as *appearances* -- absent -> present transitions -- because that is
+-- exactly the thing that was seen twice.
+
+do
+  local host = screen({ slots = npcSlots(), mine = 1, host = true,
+                        mode = "coop_npc", selfId = "ann" })
+  host:uploadMediated()
+  host:onBattleReady({ battle = "cb1", mode = "coop_npc",
+    sides = { a = { "ann", "bob" }, b = { "ann" } } })
+  host.game.input = { wasPressed = function() return false end }
+  check(host:usesBattlefield(), "the arena is the stage under test")
+
+  -- The engine's own subanimation player, which `CoopBattle.new` builds
+  -- whenever the build has `battle_anims` -- so there is always one in play,
+  -- and a Gen1 move animation outruns the bubble's 90-frame life. Its absence
+  -- headless is what hid this: with no player the anim row retires on the frame
+  -- it starts and every raise lands within a frame or two of the last.
+  local animLeft = 0
+  host.animPlayer = {
+    start = function() animLeft = 120 end,
+    update = function() animLeft = animLeft - 1 end,
+    isDone = function() return animLeft <= 0 end,
+    draw = function() end,
+  }
+
+  host.phase = "choose"
+  host:onBattleEvent({ battle = "cb1", seq = 1, t = "anim", slot = 0,
+                       side = "a", text = "FIX_TACKLE" })
+  host:onBattleEvent({ battle = "cb1", seq = 2, t = "msg",
+                       text = "FIXMON A used FIX_TACKLE" })
+  host:onBattleEvent({ battle = "cb1", seq = 3, t = "damage", slot = 2, hp = 21 })
+  host:onBattleEvent({ battle = "cb1", seq = 4, t = "turn" })
+
+  local appearances, maxCount, wasUp = 0, 0, false
+  local firstUp, lungeFrame, bubbleAtLunge = nil, nil, nil
+  for i = 1, 400 do
+    host:update(1 / 60)
+    -- Read through the ctx the renderer reads, which is also what ages a
+    -- bubble out: a count taken off the raw table would never expire one.
+    local ctx = host:battlefieldBubbleCtx()
+    local n = (type(ctx) == "table") and #ctx or 0
+    if n > maxCount then maxCount = n end
+    local up = n > 0
+    if up and not wasUp then appearances = appearances + 1 end
+    if up and firstUp == nil then firstUp = i end
+    wasUp = up
+    if lungeFrame == nil then
+      for _, fx in ipairs(host.fx or {}) do
+        if fx.kind == "lunge" then lungeFrame, bubbleAtLunge = i, up end
+      end
+    end
+  end
+
+  eq(appearances, 1,
+     "the refereed attack raises the trainer's callout exactly once -- the "
+     .. "anim row, the beat behind it and the referee's 'used X' line are one "
+     .. "announcement")
+  eq(maxCount, 1, "...and one bubble is the most that is ever up")
+  check(lungeFrame ~= nil, "the lunge did play")
+  check(firstUp ~= nil and lungeFrame ~= nil and firstUp < lungeFrame,
+        "the callout is up before the lunge -- the beat is still a beat")
+  check(bubbleAtLunge == true,
+        "...and still lit when the monster leans in")
+end
+
 T.finish("coop_mediated")

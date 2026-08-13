@@ -61,6 +61,11 @@ here must match `manifest.version`.
   design) — the WAIT/ALONE choice showed as a cut-off empty box. Mod
   screens now decline to claim zones when the state beneath authored
   none, matching the engine's own rule.
+- **The attack callout shouts once.** A co-op attack raised its
+  "PIKACHU! / THUNDERBOLT!" bubble up to three times (the beat's
+  re-queued row lacked the guard its 1v1 twin had, and the original
+  text-line raise sat a whole move animation later) — one shout per
+  attack now, with multi-hit moves refreshing the same bubble.
 - **The party IS the consent — no more WAIT/ALONE.** A partied player who
   triggers a trainer fight goes straight into the co-op flow; the waiting
   cover keeps a single ALONE row as the escape, and cancelling the party

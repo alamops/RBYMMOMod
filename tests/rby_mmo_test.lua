@@ -16020,6 +16020,108 @@ end)()
   check(not healClient.fx, "...and emits no flash or shake either")
 end)()
 
+-- ------- CHRONOLOGY PIN: one shout per attack, counted every single frame
+--
+-- The reported bug, and the reason this is counted rather than sampled: on the
+-- arena a co-op attack raised the trainer's callout **three** times.
+--
+--   1. the anim row's first pass (`splitCalloutBeat`), which is the one that
+--      is meant to;
+--   2. the same row's second pass -- the beat puts it back at the head of the
+--      queue -- which restarted the bubble's scale-in under the lunge;
+--   3. the "X used MOVE" line beside it, arriving after the whole move
+--      animation had played. With the engine's AnimPlayer running (which the
+--      real screen always builds and the headless suite never did) that third
+--      raise landed *after* the first bubble had already expired, so the
+--      trainer shouted, fell silent, and shouted the same order again.
+--
+-- The two rows are one attack and the referee does not agree with itself about
+-- their order -- the Node half emits `anim` before it says the sentence and
+-- CoopSim says the sentence first -- so `noteBattlefieldBubble` owns the rule:
+-- whichever arrives first shouts, the other refreshes.
+--
+-- Counted as *appearances* (absent -> present transitions), because that is
+-- exactly what the player reported seeing twice.
+
+;(function()
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN", party = { mon(96, 50, { tackle() }) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(96, 40, { tackle() }) } },
+    { side = "b", owner = "cal", name = "CAL", party = { mon(96, 30, { tackle() }) } },
+    { side = "b", owner = "dee", name = "DEE", party = { mon(96, 20, { tackle() }) } },
+  })
+  local client = replayer(sim, 1)
+  client.phase, client.frame = "messages", 0
+  client.game.input = { wasPressed = function() return false end }
+  local target = sim:slot(3).battler
+  -- The engine's own subanimation player, which `M.new` builds whenever the
+  -- build has `battle_anims` -- so in play there is always one, and a Gen1 move
+  -- animation runs well over the bubble's 90-frame life. Stubbed here because
+  -- its absence is what hid this: with no player the anim row retires on the
+  -- frame it starts and the three raises land close enough together to read as
+  -- one.
+  local animLeft = 0
+  client.animPlayer = {
+    start = function() animLeft = 120 end,
+    update = function() animLeft = animLeft - 1 end,
+    isDone = function() return animLeft <= 0 end,
+    draw = function() end,
+  }
+
+  -- The referee's own order (server/lib/battle/Turn.js emits `anim` and *then*
+  -- says the sentence), which is the order that put the raises furthest apart.
+  CoopBattle.playEvents(client, {
+    { kind = "anim", anim = "FIX_TACKLE", from = 1 },
+    { kind = "msg", text = "FIXMON A used FIX_TACKLE", from = 1 },
+    { kind = "damage", slot = 3, hp = target.mon.hp - 10 },
+  })
+
+  local appearances, maxCount, wasUp = 0, 0, false
+  local firstUp, lungeFrame, bubbleAtLunge = nil, nil, nil
+  for i = 1, 400 do
+    CoopBattle.update(client, 1 / 60)
+    -- Through the ctx the renderer actually reads, which is also what ages a
+    -- bubble out -- a count taken off the raw table would never expire one.
+    local ctx = client:battlefieldBubbleCtx()
+    local n = (type(ctx) == "table") and #ctx or 0
+    if n > maxCount then maxCount = n end
+    local up = n > 0
+    if up and not wasUp then appearances = appearances + 1 end
+    if up and firstUp == nil then firstUp = i end
+    wasUp = up
+    if lungeFrame == nil then
+      for _, fx in ipairs(client.fx or {}) do
+        if fx.kind == "lunge" then lungeFrame, bubbleAtLunge = i, up end
+      end
+    end
+  end
+
+  eq(appearances, 1,
+     "one attack raises the trainer's shout exactly once -- the anim row, the "
+     .. "beat behind it and the 'used X' line are one announcement, not three")
+  eq(maxCount, 1,
+     "...and never more than one bubble is up over an acting seat at a time")
+  check(lungeFrame ~= nil, "the lunge did play")
+  check(firstUp ~= nil and lungeFrame ~= nil and firstUp < lungeFrame,
+        "the shout is up before the lunge -- the callout beat is still a beat")
+  check(bubbleAtLunge == true,
+        "...and is still lit when the monster leans in, which is the whole "
+        .. "point of saying it first")
+
+  -- ...and the same seat opening the *next* turn with the same move still gets
+  -- its own shout: the key that folds two rows into one attack is reset by
+  -- `snapDisplay`, exactly where `calloutSpent` is.
+  client:snapDisplay()
+  client.frame = 0
+  CoopBattle.playEvents(client, {
+    { kind = "anim", anim = "FIX_TACKLE", from = 1 },
+  })
+  CoopBattle.update(client, 1 / 60)
+  check(client.battlefieldBubbles ~= nil,
+        "a fresh turn's identical attack is announced again -- the fold is "
+        .. "per attack, not for the rest of the battle")
+end)()
+
 -- ------- what a faint does to the four people watching it
 --
 -- The lifecycle, rule by rule, because "a 2-on-2 works" is four separate
@@ -18188,6 +18290,79 @@ end)()
   end
   check(sawFx("flash"),
         "the second strike's drain row earns its own flash + hit beat too")
+end)()
+
+-- ------- CHRONOLOGY PIN: one shout per attack, counted every single frame
+--
+-- The twin half of the co-op pin further up this file. `startAnim` reaches the
+-- bubble twice for one strike -- the callout beat puts the very same row back
+-- at the head of the queue -- and the `row.calledOut` guard is what keeps the
+-- second pass from restarting a scale-in the lunge is meant to be read under.
+-- The referee's `msg` ("X used MOVE") rides beside the anim row and must add
+-- nothing: on this path it never did, and that is the property being nailed
+-- down, because CoopBattle's copy of it did and shouted three times per attack.
+--
+-- Counted per frame rather than sampled, and counted as *appearances* -- the
+-- number of times the bubble goes from absent to present -- because that is
+-- exactly what the player reported seeing twice.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-one-shout",
+                                 role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-one-shout"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "send", slot = 0, side = "a", hp = 30 })
+  send({ t = "send", slot = 2, side = "b", hp = 30 })
+  drainThrow(f)
+
+  -- The referee's own order for one attack: `anim` first and the sentence
+  -- behind it (server/lib/battle/Turn.js `_emit('anim')` then `_say`), which is
+  -- the order that put the two raises furthest apart.
+  send({ t = "anim", slot = 0, side = "a", text = "FIX_TACKLE" })
+  send({ t = "msg", text = "FIXMON A used FIX_TACKLE" })
+  send({ t = "damage", slot = 2, side = "b", hp = 12 })
+
+  local appearances, maxCount, wasUp = 0, 0, false
+  local lungeFrame, bubbleAtLunge = nil, nil
+  local firstUp, lastUp = nil, nil
+  for i = 1, 400 do
+    f:update(1 / 60)
+    local list = f.battlefieldBubbles
+    local n = (type(list) == "table") and #list or 0
+    if n > maxCount then maxCount = n end
+    local up = n > 0
+    if up and not wasUp then appearances = appearances + 1 end
+    if up then
+      if firstUp == nil then firstUp = i end
+      lastUp = i
+    end
+    wasUp = up
+    if lungeFrame == nil then
+      for _, e in ipairs(f.fx or {}) do
+        if e.kind == "lunge" then lungeFrame, bubbleAtLunge = i, up end
+      end
+    end
+  end
+
+  eq(appearances, 1,
+     "the mediated arena raises the trainer's shout exactly once for one "
+     .. "attack -- callout beat, lunge and the 'used X' line behind it are one "
+     .. "announcement, not three")
+  eq(maxCount, 1, "...and never more than one bubble is up at a time")
+  check(lungeFrame ~= nil, "the lunge did play")
+  check(firstUp ~= nil and lungeFrame ~= nil and firstUp < lungeFrame,
+        "the shout is up before the lunge -- the callout beat is still a beat")
+  check(bubbleAtLunge == true,
+        "...and is still lit when the monster leans in, which is the whole "
+        .. "point of saying it first")
 end)()
 
 -- ------- CHRONOLOGY PIN: a heal skips both beats entirely

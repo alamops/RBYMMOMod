@@ -563,6 +563,11 @@ function M.new(game, opts)
     beatHold = nil,
     beatDwell = nil,
     calloutSpent = nil,
+    -- ...and which attack has already been *shouted*, which is a different
+    -- question from which one spent a beat: one attack reaches the bubble from
+    -- two directions (the anim row and the "X used MOVE" line beside it), and
+    -- only the first of them may raise a shout. See `noteBattlefieldBubble`.
+    calloutShout = nil,
   }, M)
 
   local rng = function(a, b)
@@ -1540,17 +1545,24 @@ function M:update(dt)
           -- Bubble when a human-owned mon's "used MOVE" line lands (Gen1
           -- theatre). fromSlot is preferred; mediated msg rows often omit it
           -- and leave the actor on self.acting from the prior row.
-          local hadBubble = self.battlefieldBubbles
-          self:noteBattlefieldBubble(fromSlot or self.acting, next)
-          -- ...and a shout raised by an announcement line is a **new attack**,
+          --
+          -- ...and only when the anim row beside it has not shouted already.
+          -- One attack reaches the bubble from both rows, and the referee does
+          -- not agree with itself about their order (the Node half emits the
+          -- anim first, CoopSim the sentence), so `noteBattlefieldBubble` owns
+          -- the "once per attack" rule and answers whether this call is the
+          -- one that raised it.
+          local _, raised = self:noteBattlefieldBubble(fromSlot or self.acting,
+            next)
+          -- ...and a shout *raised* by an announcement line is a **new attack**,
           -- so the callout beat is owed again. This is what keeps a multi-hit
           -- move to one shout: the coop queue announces once and then puts an
           -- anim row in front of every strike, all of them stamped with the
           -- same actor, so `splitCalloutBeat` needs something other than the
-          -- row itself to tell "the move started" from "it landed again".
-          -- `noteBattlefieldBubble` only ever raises one for a "used X" line,
-          -- so a replaced bubble table *is* that signal.
-          if self.battlefieldBubbles ~= hadBubble then self.calloutSpent = nil end
+          -- row itself to tell "the move started" from "it landed again". A
+          -- line that merely refreshed the shout the anim row already made is
+          -- the same attack and re-arms nothing.
+          if raised then self.calloutSpent = nil end
         end
         self.shown = next
         self.msgClock = 0
@@ -3751,6 +3763,11 @@ function M:snapDisplay()
   self.beatHold = nil
   self.beatDwell = nil
   self.calloutSpent = nil
+  -- ...and the shout key beside it, for exactly the same reason: it is "what
+  -- the attack now playing has already had", and after a snap there is no
+  -- attack playing. Reset together so a seat that opens the next turn with the
+  -- same move it closed this one still gets its callout.
+  self.calloutShout = nil
   -- The shadow goes with them. Nothing is owed an exit any more, so every slot
   -- draws the monster the field says is standing in it -- which is the safety
   -- net for a swap row that never arrived, and the reason a resync puts the
@@ -5400,21 +5417,73 @@ local function actingMonName(self, slotIndex)
   return nil
 end
 
+-- One attack, spelled two ways.
+--
+-- The referee narrates a move under its **id** (`_say(species .. " used " ..
+-- move.id)` in BattleSim/Turn.lua and its Node twin) while the anim row beside
+-- it carries the registry **name**, so "DOUBLE_KICK" and "DOUBLE KICK" reach
+-- this function one after the other for a single attack. Folded to one key so
+-- the shout cannot be raised twice under two spellings of the same move.
+local function calloutKey(move)
+  local key = tostring(move):upper():gsub("[%s_]+", " ")
+  return key
+end
+
+-- Raise the trainer's shout for an attack -- **once**.
+--
+-- Returns `spoke, raised`:
+--
+--   * `spoke` -- there is a shout up for this seat now. `splitCalloutBeat`
+--     reads it: a seat with nobody to shout for it (a coop_wild foe, the
+--     classic stage, a ball marker) must not stall the arena on a bubble that
+--     was never drawn.
+--   * `raised` -- ...and it is a *new* one. Only a new shout means a new
+--     attack, which is what re-arms the callout beat (see `update`'s text
+--     branch).
+--
+-- **The two directions one attack arrives from.** A move reaches here from the
+-- anim row (`splitCalloutBeat`) *and* from the "X used MOVE" line beside it
+-- (`update`'s text branch), and the referee does not even agree with itself
+-- about which comes first: the Node half emits `anim` before it says the
+-- sentence, CoopSim says the sentence first. Whichever arrives first shouts;
+-- the other refreshes it. Without that, one attack raised the bubble two and
+-- three times -- and because the move animation runs between them, the second
+-- raise landed after the first had begun shrinking (or expired outright on a
+-- long animation), which is a trainer who shouts the same order twice.
+--
+-- A refresh is deliberately *not* a raise: it extends the life of the shout it
+-- is part of -- which is what a multi-hit move wants, one announcement whose
+-- bubble lasts the flurry -- without restarting the scale-in the renderer
+-- drives off `t`.
+--
+-- The key is cleared with `calloutSpent`, in `snapDisplay`: both are "what the
+-- attack now playing has already had", and both are reset when the queue hands
+-- back to a menu.
 function M:noteBattlefieldBubble(slotIndex, text, moveName)
-  if not self:usesBattlefield() then return end
+  if not self:usesBattlefield() then return false end
   local move = moveNameFromBattleText(text)
   if type(moveName) == "string" and moveName ~= "" then move = moveName end
-  if not move then return end
+  if not move then return false end
   -- The engine's ball / hide / shake markers are not move callouts, and one of
   -- them reaching here is a bubble that says "used TOSS_ANIM!" over the
   -- trainer's head. The call sites filter them, and so does this: the message
   -- path below parses the name out of arbitrary battle text, so a referee
   -- sentence carrying a marker would otherwise arrive by the back door.
-  if move:find("_ANIM", 1, true) then return end
+  if move:find("_ANIM", 1, true) then return false end
   -- Humans + coop_npc foe seats (owner nil → foe human 1). coop_wild foes
   -- have no foeHumans, so battlefieldHumanIndex returns nil.
   local side, humanIndex = self:battlefieldHumanIndex(slotIndex)
-  if not side then return end
+  if not side then return false end
+  local key = calloutKey(move)
+  local shout = self.calloutShout
+  if shout and shout.slot == slotIndex and shout.key == key then
+    -- Already shouted. Refresh the bubble that is up so the announcement lasts
+    -- the attack it belongs to, and raise nothing.
+    local live = self.battlefieldBubbles and self.battlefieldBubbles[1]
+    if live then live.born = battlefieldFrame(self) end
+    return true, false
+  end
+  self.calloutShout = { slot = slotIndex, key = key }
   self.battlefieldBubbles = {
     {
       side = side,
@@ -5430,6 +5499,7 @@ function M:noteBattlefieldBubble(slotIndex, text, moveName)
       born = battlefieldFrame(self),
     },
   }
+  return true, true
 end
 
 function M:battlefieldBubbleCtx()
@@ -5565,11 +5635,18 @@ end
 -- when it raises a shout) and the first anim row behind it spends it.
 --
 -- Returns true when it took the row: the caller must start nothing else this
--- tick. Returning false still means the bubble was raised -- a repeat strike
--- refreshes the shout it is part of, exactly as it did before.
+-- tick. Returning false still means a shout is up for that seat -- a repeat
+-- strike refreshes the one it is part of, exactly as it did before.
 function M:splitCalloutBeat(row)
   if not self:usesBattlefield() then return false end
   if type(row) ~= "table" or row.from == nil then return false end
+  -- **Only on the first pass.** The beat below puts this very row back at the
+  -- head of the queue, so it arrives here twice for one strike; the second
+  -- arrival is the lunge, and re-noting the bubble for it restarted a scale-in
+  -- the lunge is meant to be read *under*. MediatedBattle's `startAnim` has
+  -- guarded its own note this way since the split was written -- this is the
+  -- half of that fix the co-op twin never got.
+  if row.calledOut then return false end
 
   local moveName = row.anim
   local def = self.game and self.game.data and self.game.data.moves
@@ -5577,21 +5654,25 @@ function M:splitCalloutBeat(row)
   if def and type(def.name) == "string" and def.name ~= "" then
     moveName = def.name
   end
-  -- Raised first, and whether it was raised at all is the gate: a seat with no
-  -- human to hang a bubble on (a coop_wild foe) gets no shout, and a beat
-  -- spent waiting for one nobody can see is a fight that pauses for nothing.
-  -- `noteBattlefieldBubble` replaces the table wholesale when it raises one,
-  -- so identity is the honest test.
-  local before = self.battlefieldBubbles
-  self:noteBattlefieldBubble(row.from, "used\n" .. tostring(moveName) .. "!",
-    tostring(moveName))
-  if self.battlefieldBubbles == before then return false end
+  -- Raised first, and whether anything was shouted at all is the gate: a seat
+  -- with no human to hang a bubble on (a coop_wild foe) gets no shout, and a
+  -- beat spent waiting for one nobody can see is a fight that pauses for
+  -- nothing. The answer comes back from `noteBattlefieldBubble` rather than
+  -- from the identity of the bubble table: a re-note for an attack already
+  -- shouted refreshes that bubble in place now, so identity would read a
+  -- perfectly good shout as "nobody heard it".
+  local spoke = self:noteBattlefieldBubble(row.from,
+    "used\n" .. tostring(moveName) .. "!", tostring(moveName))
+  if not spoke then return false end
 
   local spent = self.calloutSpent
   if spent and spent.from == row.from and spent.anim == row.anim then
     return false
   end
   if not self:holdBeat(row, BEAT_SPAN.callout) then return false end
+  -- Marked with the beat, so the pass that comes back for the lunge is the one
+  -- the guard at the top turns away.
+  row.calledOut = true
   self.calloutSpent = { from = row.from, anim = row.anim }
   return true
 end
