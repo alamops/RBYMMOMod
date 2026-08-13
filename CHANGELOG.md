@@ -49,6 +49,23 @@ here must match `manifest.version`.
   `server/lib/battle/Turn.js`); Gen2 (`BattleSim2` / `lib/battle2`)
   stays exp-free. `exp` joins `Wire.BATTLE_EVENTS` and
   `server/lib/sanitize.js`'s event whitelist in lockstep.
+- **Send-outs are thrown.** The owner-designed sequence: the "sent out"
+  line prints, the trainer's pokeball arcs from their field position to
+  the empty seat, and the mon materializes out of the burst — for every
+  send: battle intros (staggered per seat), switches, and post-faint
+  replacements. Wild appearances keep a plain materialize (nobody throws
+  a wild mon). Along the way: the referee's switch+send pair no longer
+  plays twice on the 1v1 screen, and mediated co-op intros play once
+  (the referee's own send-outs are the intro) instead of twice with
+  different wording. Same-side mons also gained real vertical air (the
+  pair rows moved from touching to a 24px gap; under plate pressure the
+  trainers drift instead of the mons compressing).
+- **A fainted mon stays fainted, even through packet loss.** The co-op
+  screen's faint rows are now HP-authoritative (a lost lethal-damage
+  packet can no longer leave a locally "living" corpse), the fainted
+  display flag is a one-way latch, and every seat's bar drains to zero
+  ahead of the sink — closing the last way a KO'd monster could stand
+  back up with its pre-KO HP.
 - **Send-outs materialize during their spawn beat.** A sent-out mon no
   longer stands on the field before its animation: the arrival is parked
   until its queued spawn row plays (empty seats stay hidden until the

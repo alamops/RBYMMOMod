@@ -11988,8 +11988,18 @@ end)()
 -- So: PITCH_LEFT/RIGHT/TOP/BOTTOM (measured off the PNG, see Battlefield.lua),
 -- one mon COLUMN per side just inside the side line, and one shared row-stack
 -- helper feeding both the trainers and the mons of a side. The only thing that
--- still bends a side off the field's centre line is its own plate stack, and
--- when it bends, the trainers bend with it -- T and P never come apart.
+-- still bends a side off the field's centre line is its own plate stack.
+--
+-- R4 amended the pairing contract, because the owner's next note was that the
+-- two mons of a side sat too close together (MON_ROW_GAP was 60 -- exactly
+-- MON_DRAW, the two boxes touching), and the reason it was 60 is that a
+-- SHARED row list can never be wider than the tightest band either occupant
+-- may stand in: the plated ally band pinches to ~61px for a trainer. So the
+-- stacks decoupled. The mons get MON_ROW_GAP on their own band, and the
+-- pairing is BY INDEX -- trainer i beside mon i -- with vertical drift
+-- tolerated where the plates force it. Where the joint band does hold the full
+-- pitch (every unplated side, and the plated foe side, whose HUD descends from
+-- the top edge), T and P still share one exact y, as before.
 --
 -- The bend is computed PER COLUMN, because a row's two occupants do not stand
 -- in the same place or reach the same distance: the mon column is inboard (at
@@ -12102,6 +12112,65 @@ end)()
     local function foePlateBottom(n)
       return B.PLATE_PAD + n * B.PLATE_H + (n - 1) * B.PLATE_GAP
     end
+    -- Which columns overlap which plate stack, rebuilt from the exported
+    -- constants. Used by every block below, so it lives up here with the rest
+    -- of the derivations; the reasoning it encodes is written out at the plate
+    -- dodge block further down.
+    local function plateLeftOf(side)
+      return (side == "foe") and (B.WIDTH - B.PLATE_W - B.PLATE_PAD) or B.PLATE_PAD
+    end
+    local function overPlates(side, cx, half)
+      local left = plateLeftOf(side)
+      return (cx + half) > left and (cx - half) < (left + B.PLATE_W)
+    end
+    local halfHuman = B.HUMAN_DRAW / 2
+    -- The two occupant kinds. The trainer column's x is not a constant
+    -- (HUMAN_PAD is private), so callers fill it in from a placed trainer.
+    local function occupantsOf(side)
+      return {
+        { what = "mon",
+          x = (side == "foe") and B.MON_COLUMN_FOE or B.MON_COLUMN_ALLY,
+          half = halfBox,
+          up = B.MON_ART_RISE + bob, down = B.MON_SHADOW_DROP + bob },
+        { what = "trainer",
+          half = halfHuman, up = halfHuman, down = halfHuman },
+      }
+    end
+    -- The band a mon may be centred in before any plate is considered: the
+    -- pitch-top feet rule against the field's own top, and the contact shadow
+    -- against PITCH_BOTTOM.
+    local function baseBand()
+      return math.max(B.FIELD_TOP + B.MON_ART_RISE + bob,
+                      B.PITCH_TOP - B.MON_FEET_DROP + bob),
+             B.PITCH_BOTTOM - B.MON_SHADOW_DROP - bob
+    end
+    -- ...and what `plates` plates leave of it for a given occupant list. Ally
+    -- plates climb from the field floor, so an ally band loses its bottom; foe
+    -- plates descend from the top, so a foe band loses its top.
+    local function bandFor(side, plates, occs)
+      local minY, maxY = baseBand()
+      if plates < 1 then return minY, maxY end
+      for _, occ in ipairs(occs) do
+        if overPlates(side, occ.x, occ.half) then
+          if side == "foe" then
+            minY = math.max(minY, foePlateBottom(plates) + occ.up + B.MON_PLATE_CLEAR)
+          else
+            maxY = math.min(maxY, allyPlateTop(plates) - occ.down - B.MON_PLATE_CLEAR)
+          end
+        end
+      end
+      return minY, maxY
+    end
+    -- The R4 pairing verdict itself: a side's trainers ride its mons' exact
+    -- rows only when the JOINT band holds `count` rows at the FULL
+    -- MON_ROW_GAP. Anything less and the mons would have to compress, so the
+    -- shared row is dropped and the pairing survives as an index one.
+    local function sharesRows(side, count, plates, trainerX)
+      local occs = occupantsOf(side)
+      occs[2].x = trainerX
+      local minY, maxY = bandFor(side, plates, occs)
+      return (maxY - minY) >= (count - 1) * B.MON_ROW_GAP
+    end
 
     -- ------- the measured pitch, and the columns derived off it
     check(B.PITCH_LEFT > 0 and B.PITCH_RIGHT < B.WIDTH
@@ -12146,7 +12215,14 @@ end)()
           allyMons[1].x, foeMons[1].x))
     end
 
-    -- ------- 2v2: one trainer per mon, so every trainer shares a row with theirs
+    -- ------- 2v2: one trainer per mon, paired by index -- exactly where the
+    -- joint band allows it, with drift where the plates forbid it
+    --
+    -- The mon pitch is the invariant: both sides keep a full MON_ROW_GAP in
+    -- every 2v2, plated or not. What varies is whether the trainers can stand
+    -- on those very rows, and that is decided per side by `sharesRows` rather
+    -- than asserted as a constant -- so retuning MON_ROW_GAP or PLATE_H moves
+    -- the expectation with the geometry instead of reddening the suite.
     for _, hp in ipairs({ false, true }) do
       local label = hp and "2v2 (plated)" or "2v2 (unplated)"
       local two = field(2, 2, { hp = hp })
@@ -12154,11 +12230,34 @@ end)()
       local allyT, foeT = bySide(two.humans, "y")
       eq(#allyMons, 2, label .. ": two ally mons")
       eq(#allyT, 2, label .. ": two ally trainers")
-      for i = 1, 2 do
-        eq(allyT[i].y, allyMons[i].y,
-           label .. ": ally row " .. i .. " -- T and P share one y")
-        eq(foeT[i].y, foeMons[i].y,
-           label .. ": foe row " .. i .. " -- T and P share one y")
+      local plates = hp and 2 or 0
+      for _, side in ipairs({ "ally", "foe" }) do
+        local mons = (side == "ally") and allyMons or foeMons
+        local ts = (side == "ally") and allyT or foeT
+        local exact = sharesRows(side, 2, plates, ts[1].x)
+        for i = 1, 2 do
+          if exact then
+            eq(ts[i].y, mons[i].y,
+               label .. ": " .. side .. " row " .. i
+                 .. " -- the joint band holds the pitch, so T and P share one y")
+          else
+            -- Index pairing, the R4 contract: same count, same order, and each
+            -- trainer nearer its own mon than any other -- the rows may drift
+            -- vertically under the plate pinch, they may never cross or swap.
+            local own = math.abs(ts[i].y - mons[i].y)
+            local other = math.abs(ts[i].y - mons[3 - i].y)
+            check(own <= other,
+              label .. ": " .. side .. " trainer " .. i
+                .. " still pairs with mon " .. i .. " by index",
+              ("T %d vs own P %d (Δ%d) / other P %d (Δ%d)"):format(
+                ts[i].y, mons[i].y, own, mons[3 - i].y, other))
+          end
+        end
+        if not exact then
+          check(ts[1].y < ts[2].y and mons[1].y < mons[2].y,
+            label .. ": " .. side
+              .. " drifted rows keep their order, top to bottom")
+        end
       end
       eq(allyMons[2].y - allyMons[1].y, B.MON_ROW_GAP,
          label .. ": the two ally rows sit MON_ROW_GAP apart")
@@ -12168,6 +12267,28 @@ end)()
          label .. ": both ally seats share one column")
       eq(foeMons[1].x, foeMons[2].x,
          label .. ": both foe seats share one column")
+    end
+
+    -- The pinch that forced the decoupling, pinned as arithmetic rather than
+    -- as a memory: a plated ally side cannot host two trainer-bearing rows a
+    -- full MON_ROW_GAP apart, while the plated foe side can, and every
+    -- unplated side can.
+    do
+      local plated = field(2, 2, { hp = true })
+      local allyT, foeT = bySide(plated.humans, "y")
+      local allyOccs = occupantsOf("ally")
+      allyOccs[2].x = allyT[1].x
+      local jointMin, jointMax = bandFor("ally", 2, allyOccs)
+      check(not sharesRows("ally", 2, 2, allyT[1].x),
+        "a plated ally side's joint band cannot hold two rows at the full "
+          .. "mon pitch -- this is why the stacks decoupled",
+        ("joint band %d..%d (%d px) vs a needed %d"):format(
+          jointMin, jointMax, jointMax - jointMin, B.MON_ROW_GAP))
+      check(sharesRows("foe", 2, 2, foeT[1].x),
+        "...while the plated FOE side's does, so it keeps the exact pairing")
+      check(sharesRows("ally", 2, 0, allyT[1].x)
+        and sharesRows("foe", 2, 0, foeT[1].x),
+        "...and with no HUD up at all, both sides do")
     end
 
     -- ------- unplated, the two sides agree on their rows exactly
@@ -12195,27 +12316,8 @@ end)()
     -- the very margin they stand in. Keying the dodge on the mon column alone
     -- is the regression this block pins: with the mons inboard nothing dodged,
     -- and the paired trainer rode its mon's row straight back into the plates.
-    local function plateLeftOf(side)
-      return (side == "foe") and (B.WIDTH - B.PLATE_W - B.PLATE_PAD) or B.PLATE_PAD
-    end
-    local function overPlates(side, cx, half)
-      local left = plateLeftOf(side)
-      return (cx + half) > left and (cx - half) < (left + B.PLATE_W)
-    end
-    local halfHuman = B.HUMAN_DRAW / 2
-    -- The two occupant kinds, rebuilt here from the exported constants. The
-    -- trainer column's x is not a constant (HUMAN_PAD is private), so callers
-    -- fill it in from a placed trainer.
-    local function occupantsOf(side)
-      return {
-        { what = "mon",
-          x = (side == "foe") and B.MON_COLUMN_FOE or B.MON_COLUMN_ALLY,
-          half = halfBox,
-          up = B.MON_ART_RISE + bob, down = B.MON_SHADOW_DROP + bob },
-        { what = "trainer",
-          half = halfHuman, up = halfHuman, down = halfHuman },
-      }
-    end
+    -- (plateLeftOf / overPlates / occupantsOf / bandFor are defined with the
+    -- other derivations above, because the pairing verdict needs them too.)
     do
       local two = field(2, 2, { hp = true })
       eq(#two.plates, 4, "a 2v2 with hp figures plates all four seats")
@@ -12236,55 +12338,74 @@ end)()
       check(not overPlates("foe", B.MON_COLUMN_FOE, halfBox),
         "...and the foe mon column too -- so only the trainers force a dodge")
 
-      -- The offset is a whole-side move, not a mons-only one: that is what
-      -- keeps the pairing intact while the side dodges its HUD.
-      eq(allyT[1].y - allyMons[1].y, 0, "the ally trainers ride the ally rows")
-      eq(foeT[2].y - foeMons[2].y, 0, "the foe trainers ride the foe rows")
+      -- Whose constraint reaches whom is now the whole point. A side's MON
+      -- rows answer to the mon column alone; the trainers answer to theirs;
+      -- and the two are one stack only where the joint band holds the full
+      -- pitch (the foe side here, not the ally one).
+      local function capOf(side, occs)
+        local cap, floorY = nil, nil
+        for _, occ in ipairs(occs) do
+          if overPlates(side, occ.x, occ.half) then
+            if side == "foe" then
+              local f = foePlateBottom(2) + occ.up + B.MON_PLATE_CLEAR
+              if floorY == nil or f > floorY then floorY = f end
+            else
+              local c = allyPlateTop(2) - occ.down - B.MON_PLATE_CLEAR
+              if cap == nil or c < cap then cap = c end
+            end
+          end
+        end
+        return cap, floorY
+      end
+      local function occsFor(side, trainerX, kinds)
+        local occs, out = occupantsOf(side), {}
+        for _, occ in ipairs(occs) do
+          if kinds[occ.what] then
+            if occ.what == "trainer" then occ.x = trainerX end
+            out[#out + 1] = occ
+          end
+        end
+        return out
+      end
 
-      -- The band cap / floor is the TIGHTEST constraint over every overlapping
-      -- column, each measured with its own reach.
-      local allyCap, foeFloor = nil, nil
-      for _, occ in ipairs(occupantsOf("ally")) do
-        local x = occ.what == "trainer" and allyT[1].x or occ.x
-        if overPlates("ally", x, occ.half) then
-          local cap = allyPlateTop(2) - occ.down - B.MON_PLATE_CLEAR
-          if allyCap == nil or cap < allyCap then allyCap = cap end
-        end
+      -- ALLY: the joint band cannot hold the pitch, so the shared row is gone.
+      -- The mons keep the field's own centre line -- their column overlaps no
+      -- plate, so nothing lifts them -- while the trainers lift alone, exactly
+      -- as far as their own reach demands and no further.
+      check(not sharesRows("ally", 2, 2, allyT[1].x),
+        "the plated ally side pairs by index, not by shared row")
+      local allyMonCap = capOf("ally", occsFor("ally", allyT[1].x, { mon = true }))
+      eq(allyMonCap, nil, "no ally MON column overlaps the ally plate stack")
+      eq(allyMons[1].y + allyMons[2].y, midY * 2,
+         "so the ally mons keep the field's own centre line, HUD or no HUD")
+      local allyTrainerCap =
+        capOf("ally", occsFor("ally", allyT[1].x, { trainer = true }))
+      eq(allyT[2].y, allyTrainerCap,
+         "while the lower ally trainer sits exactly on its own column's plate "
+           .. "cap -- the lift is the trainers', and it is minimal")
+      for i = 1, 2 do
+        check(math.abs(allyT[i].y - allyMons[i].y) < B.MON_ROW_GAP,
+          "ally trainer " .. i .. " drifts off its own mon by less than a "
+            .. "whole row -- tolerated drift, not a re-ordering",
+          ("T %d vs P %d (Δ%d) vs pitch %d"):format(allyT[i].y, allyMons[i].y,
+            math.abs(allyT[i].y - allyMons[i].y), B.MON_ROW_GAP))
       end
-      for _, occ in ipairs(occupantsOf("foe")) do
-        local x = occ.what == "trainer" and foeT[1].x or occ.x
-        if overPlates("foe", x, occ.half) then
-          local floorY = foePlateBottom(2) + occ.up + B.MON_PLATE_CLEAR
-          if foeFloor == nil or floorY > foeFloor then foeFloor = floorY end
-        end
-      end
-      if allyCap then
-        -- The whole stack slid up, so it is its CENTRE that left the field's
-        -- centre line -- the lower row is still allowed to be below it, just
-        -- not far enough below to reach the plates.
-        check((allyMons[1].y + allyMons[2].y) / 2 < midY,
-          "the ally pair lifts clear of its own bottom-left plate stack",
-          ("ally rows %d/%d, centre %.1f vs mid %d"):format(allyMons[1].y,
-            allyMons[2].y, (allyMons[1].y + allyMons[2].y) / 2, midY))
-        -- Minimal, too: the lift is exactly what the tightest column demands.
-        eq(allyMons[2].y, allyCap,
-           "the lowest ally row sits exactly on the cap its tightest "
-             .. "plate-overlapping column sets -- no further")
-      else
-        eq(allyMons[1].y + allyMons[2].y, midY * 2,
-           "an ally side with no plate-overlapping column needs no lift")
-      end
-      if foeFloor then
-        check((foeMons[1].y + foeMons[2].y) / 2 > midY,
-          "the foe pair drops clear of its own top-right plate stack",
-          ("foe rows %d/%d, centre %.1f vs mid %d"):format(foeMons[1].y,
-            foeMons[2].y, (foeMons[1].y + foeMons[2].y) / 2, midY))
-        eq(foeMons[1].y, foeFloor,
-           "...and the highest foe row exactly on its own floor")
-      else
-        eq(foeMons[1].y + foeMons[2].y, midY * 2,
-           "a foe side with no plate-overlapping column needs no drop either")
-      end
+
+      -- FOE: the joint band DOES hold it, so the whole side moves as one --
+      -- rows and trainers together, dropped exactly to the tightest floor over
+      -- both columns.
+      check(sharesRows("foe", 2, 2, foeT[1].x),
+        "the plated foe side keeps the exact shared row")
+      eq(foeT[2].y - foeMons[2].y, 0, "the foe trainers ride the foe rows")
+      local _, foeFloor = capOf("foe", occsFor("foe", foeT[1].x,
+        { mon = true, trainer = true }))
+      check(foeFloor ~= nil, "the foe trainer column does overlap the foe plates")
+      check((foeMons[1].y + foeMons[2].y) / 2 > midY,
+        "the foe pair drops clear of its own top-right plate stack",
+        ("foe rows %d/%d, centre %.1f vs mid %d"):format(foeMons[1].y,
+          foeMons[2].y, (foeMons[1].y + foeMons[2].y) / 2, midY))
+      eq(foeMons[1].y, foeFloor,
+         "...and the highest foe row exactly on its own floor -- no further")
     end
 
     -- ------- unmatched counts: the shorter side centres and interleaves
@@ -12405,23 +12526,35 @@ end)()
             .. ": sprite box stays fully inside the field",
           ("top=%.1f bottom=%.1f"):format(top, bottom))
       end
-      -- Two mons in one column must never interpenetrate: consecutive rows
-      -- stay a full MON_ROW_GAP apart, and that gap is at least a whole box.
+      -- Two mons in one column must never interpenetrate. MON_DRAW is the hard
+      -- floor at any count (rowStack tightens the pitch rather than push a row
+      -- off the pitch, and a 3-a-side column no shipped mode fields is wider
+      -- than the field band at the full gap); the shipped counts get the whole
+      -- MON_ROW_GAP, which is the R4 pin -- the owner's complaint was exactly
+      -- two boxes at MON_DRAW, touching.
       local colAlly, colFoe = bySide(layout.mons, "y")
       for _, column in ipairs({ colAlly, colFoe }) do
         for i = 2, #column do
-          check(column[i].y - column[i - 1].y >= B.MON_ROW_GAP,
+          local dy = column[i].y - column[i - 1].y
+          check(dy >= B.MON_DRAW,
             label .. " " .. column[i].side .. ": rows " .. (i - 1) .. " and "
-              .. i .. " keep the full row pitch -- the boxes cannot overlap",
-            ("Δy=%d needs >=%d (box %d)"):format(
-              column[i].y - column[i - 1].y, B.MON_ROW_GAP, B.MON_DRAW))
+              .. i .. " never interpenetrate",
+            ("Δy=%d needs >=%d (box)"):format(dy, B.MON_DRAW))
+          if #column <= 2 then
+            check(dy >= B.MON_ROW_GAP,
+              label .. " " .. column[i].side .. ": a shipped-size column keeps "
+                .. "the full row pitch, air and all",
+              ("Δy=%d needs >=%d (box %d + air %d)"):format(dy, B.MON_ROW_GAP,
+                B.MON_DRAW, B.MON_ROW_GAP - B.MON_DRAW))
+          end
         end
       end
     end
-    check(B.MON_ROW_GAP >= B.MON_DRAW,
-      "MON_ROW_GAP is at least a whole mon box, so a full-pitch column of "
-        .. "mons touches at worst and never interpenetrates",
-      ("gap %d vs box %d"):format(B.MON_ROW_GAP, B.MON_DRAW))
+    check(B.MON_ROW_GAP > B.MON_DRAW,
+      "MON_ROW_GAP is MORE than a whole mon box: two mons of a side are "
+        .. "separated by real air, not merely touching (the R4 complaint)",
+      ("gap %d vs box %d -- %dpx of air"):format(B.MON_ROW_GAP, B.MON_DRAW,
+        B.MON_ROW_GAP - B.MON_DRAW))
 
     -- ------- the plated frames, every plate up: nothing under the HUD
     --
@@ -12640,9 +12773,13 @@ end)()
   -- ------- PLATE_H and the strip's own metrics
   --
   -- PLATE_H stayed 48 -- the strip is fitted into the existing bottom inset
-  -- rather than grown onto a taller plate (a 54px plate compressed a plated
-  -- 2v2's paired ally rows below their required pitch). The strip's own
-  -- geometry is exported the same way every other plate metric is.
+  -- rather than grown onto a taller plate. Every pixel of plate is a pixel off
+  -- the band a trainer may stand in: at 48 the plated foe side still keeps its
+  -- trainers on their mons' exact rows, and the plated ally trainers still
+  -- clear their own stack; a 54px plate takes both. (Before R4 decoupled the
+  -- stacks it was worse still -- a taller plate compressed the shared ally
+  -- rows below the mons' own required pitch.) The strip's own geometry is
+  -- exported the same way every other plate metric is.
   eq(Battlefield.PLATE_H, 48, "PLATE_H is still 48 -- the strip did not grow the plate")
   eq(Battlefield.PLATE_EXP_H, 3, "PLATE_EXP_H is the 3px strip height")
   eq(Battlefield.PLATE_EXP_GAP, 2, "PLATE_EXP_GAP is the HP-bar-to-strip gap")
@@ -13181,80 +13318,332 @@ end)()
     return false
   end
 
-  do
-    local anims, restoreAnim = spyStartAnim()
-    local sounds, restoreSound = spySoundPlay()
-    local client = introClient({ sim = wildField(), mode = "coop_wild" })
-    CoopBattle.enter(client)
-    check(client.introBalls == true,
-          "coop_wild enter arms intro ball chrome before the appear line")
-    local history = drainIntro(client)
-    restoreAnim()
-    restoreSound()
-    eq(client.phase, "choose",
-       "coop_wild intro drains to the command menu headlessly")
-    local appear = lineIndex(history, "appeared!")
-    local go = lineIndex(history, "Go!")
-    local partner = lineIndex(history, "sent out")
-    check(appear ~= nil, "the Wild appeared line is shown")
-    check(go ~= nil, "Go! is shown after the appear line")
-    check(partner ~= nil, "the partner sent-out line is shown")
-    if appear and go and partner then
-      check(appear < go, "appear precedes Go!")
-      check(go < partner, "Go! precedes the partner sent-out line")
+  -- ------- round 8: the client-side intro is gone for every mediated mode.
+  --
+  -- `enter()` now only queues the appear line and a gap (`queueMediatedIntro`)
+  -- -- the referee's own opening `send` batch is the intro. Pinning that means
+  -- driving a REAL hub: two real players, a real BattleSim referee, the
+  -- opening batch delivered over the wire exactly as `mmo.battle_event`
+  -- carries it, same as scratchpad/n2_drive_b.lua.
+  local function testPlayerId(seed)
+    local out, s = {}, tostring(seed)
+    for i = 1, 32 do
+      out[i] = string.format("%x", ((s:byte((i - 1) % #s + 1) or 97) + i) % 16)
     end
-    check(countAnim(anims, "POOF_ANIM") >= 1,
-          "at least one POOF_ANIM started during coop_wild intro")
-    if CoopBattle.loadEngine() and CoopBattle.loadEngine().Sound then
-      check(heardSound(sounds, "Ball_Poof"),
-            "Ball_Poof plays when POOF_ANIM starts and Sound is loaded")
+    return table.concat(out)
+  end
+
+  -- One driver for every scenario below: builds a real hub, uploads both
+  -- sides, lets the referee's opening batch land on the host, and returns
+  -- what a test needs to pin the contract -- the sentences said, how many
+  -- times each seat was revealed, an ordered log of every text/ball/reveal
+  -- beat, which balls carried `own`, and a snapshot of `introHide` taken the
+  -- instant `enter()` returns (before any referee content has arrived).
+  local function driveMediatedIntro(opts)
+    local Wire = need("Wire")
+    local Config2 = need("Config")
+    local Hub2 = need("Hub")
+    local CoopSim2 = need("CoopSim")
+    local CoopField2 = need("CoopField")
+    local okBS, BattleState = pcall(require, "src.battle.BattleState")
+    if not okBS then
+      check(false, "BattleState is requirable headlessly")
+      return nil
+    end
+    local sdkData = T.sdk.loadNone().data
+    local ruleset2 = (sdkData.rulesets and sdkData.rulesets.gen1_faithful) or {}
+
+    local function fieldSim2(game, slots)
+      local rng = function(a) return a end
+      local field = CoopField2.new(
+        { BattleState = BattleState, rng = rng }, game, {}, ruleset2)
+      local sim = CoopSim2.new({
+        data = sdkData, ruleset = ruleset2, rng = rng,
+        trainerAI = require("src.battle.TrainerAI"),
+        damage = require("src.battle.Damage"),
+        status = require("src.battle.Status"),
+        turnOrder = require("src.battle.TurnOrder"),
+        field = field, drain = CoopField2.drain,
+        makeBattler = BattleState.makeBattler,
+        itemUse = require("src.inventory.ItemEffects").use,
+        experience = require("src.battle.Experience"),
+        save = game.save, onError = function() end,
+      }, slots)
+      field.slots = sim.slots
+      return sim
+    end
+    local function newGame()
+      return { data = sdkData, save = { inventory = {}, options = {}, party = {} } }
+    end
+    local function screen(o)
+      local game = newGame()
+      local sent = {}
+      local s = setmetatable({
+        game = game, sim = fieldSim2(game, o.slots), mine = o.mine,
+        host = o.host and true or false,
+        messages = {}, pending = {}, events = {}, seq = 0,
+        phase = "messages", moveIndex = 1, targetIndex = 1, frame = 0,
+        waitClock = 0, hostClock = 0, ranksPoints = false,
+        transport = { send = function(_, t, p) sent[#sent + 1] = { type = t, payload = p } end },
+        battleId = "cb1", selfId = o.selfId,
+        mediated = false, medUploaded = false,
+        medPending = {}, medSeq = 0, medGaps = 0,
+        net = { poll = function() return {} end, send = function() end },
+        mode = o.mode, trainer = o.trainer, trainerPic = o.trainerPic,
+      }, { __index = CoopBattle })
+      s.sent = sent
+      return s
+    end
+
+    local peers = {}
+    local hub = Hub2.new({ maxPlayers = 4 })
+    local function join(name)
+      local peer = { outbox = {}, read = 0 }
+      function peer:send(m) self.outbox[#self.outbox + 1] = m end
+      function peer:close() end
+      local c = hub:accept(peer)
+      hub:receive(c, { type = Wire.HELLO, proto = Config2.PROTOCOL,
+        playerId = testPlayerId(name), name = name, map = "PALLET", x = 5, y = 5,
+        facing = "down" })
+      peers[c.id] = peer
+      return c
+    end
+
+    local ann, bob = join("ANN" .. (opts.tag or "")), join("BOB" .. (opts.tag or ""))
+    hub:openCoopBattle("cb1", { ann.id, bob.id }, { mode = opts.mode, hostId = ann.id })
+
+    local slots = opts.slots(ann.id, bob.id)
+    local host = screen({ slots = slots, mine = 1, host = true, selfId = ann.id,
+      mode = opts.mode, trainer = opts.trainer, trainerPic = opts.trainerPic })
+    local guest = screen({ slots = slots, mine = 2, host = false, selfId = bob.id,
+      mode = opts.mode })
+    host.announce = function() end
+    guest.announce = function() end
+    -- The arena path is what the ball flow exists for.
+    host.usesBattlefield = function() return true end
+    -- `uploadMediated`'s coop_wild branch reads `wildCatchMon` (or
+    -- `wildParty`), which the real screen arms from the encounter -- this
+    -- harness has no encounter, so it hands the same mon the wild slot
+    -- itself already carries.
+    if opts.mode == "coop_wild" then
+      for _, slot in ipairs(slots) do
+        if slot.side == "b" and slot.owner == nil then
+          host.wildCatchMon = slot.party[1]
+          break
+        end
+      end
+    end
+
+    local log, sendLines, revealCount, ballOwn = {}, {}, {}, {}
+    local function note(entry) log[#log + 1] = entry end
+
+    local realSay = host.say
+    host.say = function(self, text)
+      local t = tostring(text):gsub("\n", "/")
+      sendLines[#sendLines + 1] = t
+      note("SAY " .. t)
+      return realSay(self, text)
+    end
+    local realSwap = host.applySwap
+    host.applySwap = function(self, row)
+      revealCount[row.swap] = (revealCount[row.swap] or 0) + 1
+      note(("REVEAL seat=%s"):format(tostring(row.swap)))
+      return realSwap(self, row)
+    end
+    local realEmit = host.emitFx
+    host.emitFx = function(self, kind, index, own)
+      if kind == "ball" or kind == "poof" or kind == "spawn" then
+        note(("FX %s seat=%s own=%s"):format(kind, tostring(index), tostring(own)))
+        if kind == "ball" then ballOwn[index] = own end
+      end
+      return realEmit(self, kind, index, own)
+    end
+
+    host:enter()
+    local introHideSnapshot = {}
+    for k, v in pairs(host.introHide or {}) do introHideSnapshot[k] = v end
+
+    host:uploadMediated(); guest:uploadMediated()
+    for _, m in ipairs(host.sent) do
+      local p = {}; for k, v in pairs(m.payload) do p[k] = v end; p.type = m.type
+      hub:receive(ann, p)
+    end
+    for _, m in ipairs(guest.sent) do
+      local p = {}; for k, v in pairs(m.payload) do p[k] = v end; p.type = m.type
+      hub:receive(bob, p)
+    end
+    local function readyFor(peer)
+      for _, m in ipairs(peer.outbox) do
+        if m.type == Wire.BATTLE_READY then return m end
+      end
+    end
+    host:onBattleReady(readyFor(peers[ann.id]))
+    guest:onBattleReady(readyFor(peers[bob.id]))
+
+    local function deliver()
+      local peer = peers[ann.id]
+      while peer.read < #peer.outbox do
+        peer.read = peer.read + 1
+        local m = peer.outbox[peer.read]
+        if m.type == Wire.BATTLE_EVENT then
+          local ev = {}; for k, v in pairs(m) do ev[k] = v end
+          host:onBattleEvent(ev)
+        end
+      end
+    end
+    local function pump(n)
+      for _ = 1, (n or 1) do
+        host.frame = (host.frame or 0) + 1
+        pcall(host.update, host, 1 / 60)
+      end
+    end
+
+    pump(60)
+    deliver()
+
+    -- The referee's whole opening batch is on `host.messages` the instant
+    -- `deliver()` returns -- `playEvents` runs synchronously off the closing
+    -- `turn`/`over`, before a single tick has played any of it. A row's
+    -- narration is a **raw table** appended straight to the queue
+    -- (`medRows`'s `say()` -> `{kind="msg"}` -> playEvents' "msg" branch),
+    -- never routed through the `self:say()` *method* the way `enter()`'s own
+    -- opening line is -- so reading the queue here, in its true play order,
+    -- is what a hook on `say` would have missed entirely.
+    local queueLog = {}
+    for _, row in ipairs(host.messages) do
+      if type(row) == "string" then
+        sendLines[#sendLines + 1] = row
+        queueLog[#queueLog + 1] = "SAY " .. row:gsub("\n", "/")
+      elseif type(row) == "table" then
+        if row.text then
+          sendLines[#sendLines + 1] = tostring(row.text)
+          queueLog[#queueLog + 1] = "SAY " .. tostring(row.text):gsub("\n", "/")
+        elseif row.ballsend then
+          queueLog[#queueLog + 1] = "FX ball seat=" .. tostring(row.ballsend)
+        elseif row.swap then
+          queueLog[#queueLog + 1] = "REVEAL seat=" .. tostring(row.swap)
+        end
+      end
+    end
+
+    pump(900)
+
+    return {
+      client = host, sendLines = sendLines, revealCount = revealCount,
+      log = queueLog, fxLog = log, ballOwn = ballOwn,
+      introHideSnapshot = introHideSnapshot,
+    }
+  end
+
+  -- Where in `log` a substring first shows up -- used the same way the old
+  -- client-only `lineIndex` read `history`, so the chronology assertions
+  -- ("text before ball before reveal") read the same way they always did.
+  local function logIndex(log, needle)
+    for i, entry in ipairs(log) do
+      if tostring(entry):find(needle, 1, true) then return i end
+    end
+    return nil
+  end
+
+  do
+    local wildSlots = function(annId, bobId)
+      return {
+        { side = "a", owner = annId, name = "ANN",
+          party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+        { side = "a", owner = bobId, name = "BOB",
+          party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+        { side = "b", owner = nil, name = "WILD",
+          party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      }
+    end
+    local drive = driveMediatedIntro({ mode = "coop_wild", slots = wildSlots, tag = "W" })
+    check(drive ~= nil, "coop_wild: the drive ran")
+    if drive then
+      check(drive.introHideSnapshot[1] and drive.introHideSnapshot[2]
+            and drive.introHideSnapshot[3],
+            "introHide covers every seat the instant enter() returns -- "
+            .. "before the referee has said anything")
+
+      local goIdx = logIndex(drive.log, "Go!")
+      check(goIdx ~= nil, "Go!-for-own-seat is said for our own arrival")
+      local partnerIdx = logIndex(drive.log, "sent out")
+      check(partnerIdx ~= nil, "the partner's sent-out line plays too")
+
+      eq(drive.revealCount[1], 1, "our own seat is revealed exactly once")
+      eq(drive.revealCount[2], 1, "the partner's seat is revealed exactly once")
+      eq(drive.revealCount[3], 1, "the wild foe's seat is revealed exactly once")
+
+      check(drive.ballOwn[1] == true, "our own seat's ball carries own=true")
+      check(drive.ballOwn[2] == true, "the partner's ball carries own=true too")
+      check(drive.ballOwn[3] == nil,
+            "the wild foe throws no ball at all -- nobody throws a wild POKeMON")
+
+      local wildSay = false
+      for _, line in ipairs(drive.sendLines) do
+        if line:find("WILD", 1, true) or line:find("sent out", 1, true) then
+          if not line:find("BOB", 1, true) and not line:find("Go!", 1, true) then
+            wildSay = true
+          end
+        end
+      end
+      check(not wildSay, "the wild seat is silent -- poof+spawn only, no sentence")
+      local sawPoof3, sawSpawn3 = false, false
+      for _, entry in ipairs(drive.fxLog) do
+        if entry:find("FX poof seat=3", 1, true) then sawPoof3 = true end
+        if entry:find("FX spawn seat=3", 1, true) then sawSpawn3 = true end
+      end
+      check(sawPoof3 and sawSpawn3,
+            "...but the wild seat still pops and spawns onto the field")
+
+      -- Per-seat order: text -> ball(own) -> reveal, for our own arrival.
+      local sayIdx = logIndex(drive.log, "Go! ")
+      local ballIdx = logIndex(drive.log, "FX ball seat=1")
+      local revealIdx = logIndex(drive.log, "REVEAL seat=1")
+      check(sayIdx and ballIdx and revealIdx and sayIdx < ballIdx
+            and ballIdx < revealIdx,
+            "our own seat's chain reads in order: the sentence, then the "
+            .. "ball, then the reveal")
     end
   end
 
   do
-    local anims, restoreAnim = spyStartAnim()
-    local client = introClient({ sim = npcField(), mode = "coop_npc" })
-    CoopBattle.enter(client)
-    local history = drainIntro(client)
-    restoreAnim()
-    eq(client.phase, "choose",
-       "coop_npc intro drains to the command menu headlessly")
-    local battle = lineIndex(history, "2 on 2 battle!")
-    local go = lineIndex(history, "Go!")
-    local partner = lineIndex(history, "sent out")
-    check(battle ~= nil, "the 2 on 2 battle! line is shown")
-    check(go ~= nil, "Go! follows the non-wild appear line")
-    if battle and go then
-      check(battle < go, "2 on 2 battle! precedes Go!")
+    local npcSlots = function(annId, bobId)
+      return {
+        { side = "a", owner = annId, name = "ANN",
+          party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+        { side = "a", owner = bobId, name = "BOB",
+          party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+        { side = "b", owner = nil, name = "TRAINER",
+          party = { mon(50, 20, { { id = "FIX_TACKLE", pp = 20 } }),
+                    mon(50, 18, { { id = "FIX_TACKLE", pp = 20 } }) } },
+        { side = "b", owner = nil, name = "TRAINER",
+          party = { mon(50, 19, { { id = "FIX_TACKLE", pp = 20 } }),
+                    mon(50, 17, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      }
     end
-    check(partner ~= nil, "the partner sent-out line still plays in coop_npc")
-    check(countAnim(anims, "POOF_ANIM") >= 1,
-          "at least one POOF_ANIM started during coop_npc intro")
+    local drive = driveMediatedIntro({ mode = "coop_npc", slots = npcSlots, tag = "N" })
+    check(drive ~= nil, "coop_npc: the drive ran")
+    if drive then
+      check(logIndex(drive.log, "Go!") ~= nil,
+            "Go! follows the non-wild appear line -- said for our own seat")
+      check(logIndex(drive.log, "sent out") ~= nil,
+            "the partner sent-out line still plays in coop_npc")
+      for seat = 1, 4 do
+        eq(drive.revealCount[seat], 1,
+           "seat " .. seat .. " is revealed exactly once -- one reveal per seat")
+      end
+    end
   end
 
   -- ------- TT4 — theatrical trainer chrome (fix-battle-system-v2)
   --
-  -- Trainer coop_npc: wants-to-fight appear, foe ball row, trainer face through
-  -- the appear line, foes in introHide until send-out, all cleared before Go!.
+  -- Trainer coop_npc: wants-to-fight appear, foe ball row, trainer face
+  -- through the appear line, foes in introHide until send-out, all cleared
+  -- once their own reveal lands. The chrome-arming half of this needs no
+  -- referee at all (`enter()` sets it before uploading anything), so it
+  -- still runs the cheap `introClient` way; only the back half -- what used
+  -- to be the client's own "Go!" -- now needs a real referee to drive it.
   do
-    local function advanceUntil(client, pred, cap)
-      cap = cap or 400
-      -- Same A/B-after-dwell stub drainIntro uses -- MSG_AUTO_ADVANCE alone is
-      -- slower than this cap when many send-out pages are queued.
-      local input = {
-        wasPressed = function(_, k)
-          if k ~= "a" and k ~= "b" then return false end
-          return (client.msgClock or 0) >= MSG_MIN_DWELL
-        end,
-      }
-      client.game.input = input
-      for _ = 1, cap do
-        CoopBattle.update(client, 1 / 60)
-        if pred(client) then return true end
-      end
-      return false
-    end
-
     local client = introClient({
       sim = npcField(),
       mode = "coop_npc",
@@ -13271,18 +13660,38 @@ end)()
       check(client.introHide and client.introHide[idx],
             "foe slot " .. idx .. " stays hidden until its send-out")
     end
-    check(advanceUntil(client, function(c)
-      return c.shown and tostring(c.shown):find("wants", 1, true)
-    end), "the wants-to-fight appear line is shown")
-    check(client.showEnemyTrainer == true,
-          "the trainer face stays up while the appear line is on screen")
-    check(advanceUntil(client, function(c)
-      return c.shown and tostring(c.shown):find("Go!", 1, true)
-    end), "Go! follows the theatrical appear/send-out sequence")
-    check(client.showEnemyTrainer == nil,
-          "the trainer face is cleared before Go! -- not stuck over the mons")
-    check(not (client.introHide and client.introHide[3]),
-          "the first foe is out of introHide before ally Go!")
+  end
+
+  do
+    local npcSlots = function(annId, bobId)
+      return {
+        { side = "a", owner = annId, name = "ANN",
+          party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+        { side = "a", owner = bobId, name = "BOB",
+          party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+        { side = "b", owner = nil, name = "TRAINER",
+          party = { mon(50, 20, { { id = "FIX_TACKLE", pp = 20 } }),
+                    mon(50, 18, { { id = "FIX_TACKLE", pp = 20 } }) } },
+        { side = "b", owner = nil, name = "TRAINER",
+          party = { mon(50, 19, { { id = "FIX_TACKLE", pp = 20 } }),
+                    mon(50, 17, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      }
+    end
+    local drive = driveMediatedIntro({
+      mode = "coop_npc", slots = npcSlots, tag = "T",
+      trainer = { id = "OPP_BUG_CATCHER", name = "BUG CATCHER" },
+      trainerPic = { w = 7, h = 7 },
+    })
+    check(drive ~= nil, "theatrical coop_npc: the drive ran")
+    if drive then
+      check(logIndex(drive.log, "Go!") ~= nil,
+            "Go! follows the theatrical appear/send-out sequence")
+      check(drive.client.showEnemyTrainer == nil,
+            "the trainer face is cleared once the referee's sends have "
+            .. "landed -- not stuck over the mons")
+      check(not (drive.client.introHide and drive.client.introHide[3]),
+            "the first foe is out of introHide once its own reveal lands")
+    end
   end
 
   do
@@ -16049,6 +16458,38 @@ do
   end
 end
 
+-- Round 8: a `send`/`switch` arrival is a two-row THROW now, not a bare pop
+-- -- `sendball` (the ball leaves the trainer, held FX_SPAN.ball) then
+-- `spawnfx` (the reveal: applySwap + poof + spawn, held FX_SPAN.poof). Both
+-- rows hold the queue for the whole ~63-frame chain. Every block below that
+-- used to advance a bare arrival with one fixed `update()` tick now drains
+-- the whole chain with this instead -- a single tick only ever reaches the
+-- ball's own hold, never the reveal behind it.
+local function drainThrow(f, guard)
+  -- 220 covers the worst case: a "sent out" line ahead of the chain
+  -- (MSG_AUTO_ADVANCE, ~96 frames) plus the ball and the reveal
+  -- (FX_SPAN.ball + FX_SPAN.poof, ~63 frames) with room to spare.
+  guard = guard or 220
+  local function anyThrow()
+    if type(f.anim) == "table"
+        and (f.anim.sendball ~= nil or f.anim.spawnfx ~= nil) then
+      return true
+    end
+    for _, row in ipairs(f.lines or {}) do
+      if type(row) == "table" and (row.sendball ~= nil or row.spawnfx ~= nil) then
+        return true
+      end
+    end
+    return false
+  end
+  local n = 0
+  while anyThrow() and n < guard do
+    f:update(1 / 60)
+    n = n + 1
+  end
+  return n
+end
+
 -- ------- MediatedBattle wave 1: the two-clock display drain (arena only)
 --
 -- battlefieldSeat's `shownHp` trails `hp` while a bar falls; the gap closes
@@ -16086,22 +16527,26 @@ end
   eq(f.slots[2].hp, 24, "send seeds truth hp at the first (full) figure seen")
   eq(f.slots[2].maxHp, 24, "...and the same figure as the seen maximum")
   eq(f.slots[2].shownHp, 24, "a freshly sent-out seat has nothing to drain from")
-  eq(#f.lines, 1, "the arrival itself queues one row -- the spawn pop")
-  eq(f.lines[1].spawnfx, 2, "...naming the seat that just filled")
+  eq(#f.lines, 2, "the arrival queues two rows -- the ball, then the reveal that pops it")
+  eq(f.lines[1].sendball, 2, "the ball is first, naming the seat it targets")
+  eq(f.lines[2].spawnfx, 2, "...and the reveal waits right behind it")
 
   send({ t = "damage", slot = 2, side = "b", hp = 15 })
   eq(f.slots[2].hp, 15, "damage moves truth hp the instant the event lands")
   eq(f.slots[2].shownHp, 24,
      "and leaves the display clock exactly where it was -- the fall is a "
      .. "queued row, not an instant jump")
-  eq(#f.lines, 2, "the drain row queues behind the spawn pop")
+  eq(#f.lines, 3, "the drain row queues behind the whole send-ball chain")
+
+  drainThrow(f)
+  eq(f.anim, nil, "the send-ball chain (ball + reveal) has fully landed")
+  eq(f.draining, nil,
+     "...ahead of the drain row -- nothing has started falling yet")
+  eq(f.slots[2].shownHp, 24, "...and the bar has not moved either")
 
   f:update(1 / 60)
   eq(f.draining, nil,
-     "the first frame is spent on the spawn pop sitting ahead of the drain")
-  f:update(1 / 60)
-  eq(f.draining, nil,
-     "the second frame reaches the queued drain row and flashes the hit -- "
+     "the next tick reaches the queued drain row and flashes the hit -- "
      .. "the fall itself waits behind BEAT_SPAN.hit")
   eq(f.slots[2].shownHp, 24, "the flash does not itself move the bar")
   check(f.hitHold ~= nil, "...and the hit beat is what is holding it")
@@ -16130,16 +16575,18 @@ end
   local fBig, sendBig = driverFor("b-drain-big")
   sendBig({ t = "send", slot = 2, side = "b", hp = 384 })
   sendBig({ t = "damage", slot = 2, side = "b", hp = 344 })
-  -- The row is reached (and the hit flashed) the same second frame
-  -- regardless of the bar's size -- that is queue position, not fall rate.
+  drainThrow(fBig)
+  -- The row is reached (and the hit flashed) the very next tick once the
+  -- chain has landed, regardless of the bar's size -- that is queue
+  -- position, not fall rate.
   local reached = 0
   while not fBig.hitHold and reached < 10 do
     fBig:update(1 / 60)
     reached = reached + 1
   end
-  eq(reached, 2,
-     "the big bar's drain row is reached (and the hit flashed) on the same "
-     .. "second frame")
+  eq(reached, 1,
+     "the big bar's drain row is reached (and the hit flashed) the tick "
+     .. "right after the send-ball chain lands")
   beatSteps = 0
   while fBig.draining == nil and beatSteps < 60 do
     fBig:update(1 / 60)
@@ -16162,9 +16609,9 @@ end
   send2({ t = "send", slot = 2, side = "b", hp = 24 })
   send2({ t = "damage", slot = 2, side = "b", hp = 15 })
   send2({ t = "msg", text = "next line" })
-  eq(#f2.lines, 3, "the spawn pop, the drain row and the text all wait in the queue")
+  eq(#f2.lines, 4, "the send-ball chain, the drain row and the text all wait in the queue")
 
-  f2:update(1 / 60) -- the pop, which blocks nothing
+  drainThrow(f2) -- the ball + reveal, which block nothing behind them but themselves
   f2:update(1 / 60) -- reaches the drain row and flashes the hit
   eq(f2.draining, nil,
      "the flash holds the bar behind the hit beat before the drain starts")
@@ -16191,22 +16638,45 @@ end
   eq(f2.shown, "next line",
      "only once the drain has fully landed does the queued text show")
 
-  -- 3. A drain row names its occupant, not just its seat. A switch landing
-  -- between queue and play would otherwise run the departed monster's fall
-  -- against the newcomer's bar.
+  -- 3. A lone `switch` is a no-op (round 8). The referee always emits
+  -- `switch` and `send` as a *pair* for the same arrival
+  -- (src/BattleSim/Turn.lua:1432, mirrored in server/lib/battle/Turn.js) --
+  -- `switch` alone never happens on a real stream. Driven alone here, it
+  -- pins exactly what "no-op" means: no row queued, no slot data touched.
   local f3, send3 = driverFor("b-stale")
   send3({ t = "send", slot = 2, side = "b", hp = 30, text = "RATT" })
+  drainThrow(f3)
   send3({ t = "damage", slot = 2, side = "b", hp = 5 })
+  local linesBeforeSwitch = #f3.lines
   send3({ t = "switch", slot = 2, side = "b", hp = 40, text = "PIDGEY" })
+  eq(#f3.lines, linesBeforeSwitch, "a lone switch queues nothing")
+  eq(f3.slots[2].species, "RATT", "...and touches no slot data at all")
+  eq(f3.slots[2].pending, nil, "...nor does it park an arrival")
+
+  -- The real pair: the no-op switch immediately followed by the send that
+  -- does the actual work -- one line, one ball, one burst (the dedup fix),
+  -- and a drain row a prior `damage` queued for the departed monster still
+  -- names its own occupant, so it is dropped rather than run against the
+  -- newcomer's bar.
+  send3({ t = "send", slot = 2, side = "b", hp = 40, text = "PIDGEY" })
+  local sendBalls, spawns = 0, 0
+  for _, row in ipairs(f3.lines) do
+    if type(row) == "table" and row.sendball ~= nil then sendBalls = sendBalls + 1 end
+    if type(row) == "table" and row.spawnfx ~= nil then spawns = spawns + 1 end
+  end
+  eq(sendBalls, 1, "the pair's send half queues exactly one ball...")
+  eq(spawns, 1, "...and exactly one reveal -- not two, and not zero")
+
   guard = 0
   while #f3.lines > 0 and guard < 900 do
     f3:update(1 / 60)
     guard = guard + 1
   end
   check(guard < 900, "the queue drains to empty in a bounded number of frames")
+  eq(f3.slots[2].species, "PIDGEY", "the send half is what hands the seat over")
   eq(f3.slots[2].shownHp, 40,
-     "the stale row is dropped, not deferred -- the newcomer's bar is never "
-     .. "drained to the number the monster that left was heading for")
+     "and the newcomer's bar lands on its own true figure -- never dragged "
+     .. "toward the number the monster that left was heading for")
 end)()
 
 -- ------- MediatedBattle wave 1: faint sequencing (drain -> faintfx -> text)
@@ -16232,14 +16702,16 @@ end)()
   send({ t = "send", slot = 2, side = "b", hp = 20 })
   send({ t = "faint", slot = 2, side = "b", text = "RATT" })
 
-  eq(#f.lines, 5,
-     "five rows are stacked up: the arrival pop the send left behind, then "
-     .. "the bar's fall, the sink, the text, and the sprite release")
-  eq(f.lines[1].spawnfx, 2, "row 1 is the arrival pop still ahead of the faint")
-  eq(f.lines[2].drain, 2, "row 2 is the bar finishing its fall")
-  eq(f.lines[3].faintfx, 2, "row 3 is the monster sinking")
-  eq(f.lines[4], "RATT fainted!", "row 4 is the text, only after the sink")
-  eq(f.lines[5].clearPic, 2, "row 5 releases the sprite, behind the text")
+  eq(#f.lines, 6,
+     "six rows are stacked up: the send-ball chain the send left behind (the "
+     .. "ball, then the reveal), then the bar's fall, the sink, the text, "
+     .. "and the sprite release")
+  eq(f.lines[1].sendball, 2, "row 1 is the ball, still ahead of the faint")
+  eq(f.lines[2].spawnfx, 2, "row 2 is the reveal that pops it")
+  eq(f.lines[3].drain, 2, "row 3 is the bar finishing its fall")
+  eq(f.lines[4].faintfx, 2, "row 4 is the monster sinking")
+  eq(f.lines[5], "RATT fainted!", "row 5 is the text, only after the sink")
+  eq(f.lines[6].clearPic, 2, "row 6 releases the sprite, behind the text")
 
   local sawTextEarly = false
   local guard = 0
@@ -16430,22 +16902,57 @@ end)()
     return fight, send
   end
 
-  -- spawn: unconditional on send/switch, and queued like every other effect
-  -- -- the row *is* the mechanism, so the pop plays with the send line rather
-  -- than the instant the packet was parsed.
+  -- spawn: round 8 makes the arrival a two-row THROW -- the ball leaves the
+  -- trainer first (`sendball`, own=true), and only the reveal row behind it
+  -- (`spawnfx`) installs the monster and bursts poof+spawn. Both rows hold
+  -- the queue for the effect's own lifetime, so nothing appears on the seat
+  -- before the ball has actually landed.
   local f, send = driverFor("b-fx")
   send({ t = "send", slot = 2, side = "b", hp = 30 })
   eq(f.fx, nil, "a send emits nothing at parse time")
-  eq(#f.lines, 1, "it queues a row of its own instead -- that row is the pop")
-  eq(f.lines[1].spawnfx, 2, "...naming the seat that just filled")
+  eq(#f.lines, 2, "it queues two rows: the ball, then the reveal that pops it")
+  eq(f.lines[1].sendball, 2, "the ball is first, naming the seat it targets")
+  eq(f.lines[2].spawnfx, 2, "...and the reveal row waits right behind it")
 
   f:update(1 / 60)
-  eq(#f.fx, 1, "one tick pops the row and emits exactly one fx entry")
-  eq(f.fx[1].kind, "spawn", "...and it is a spawn")
-  eq(f.fx[1].side, "foe", "...on the side the mon actually sent out on")
-  eq(#f.lines, 0,
-     "and the pop holds nothing: the row is consumed, never blocking the "
-     .. "send line behind it")
+  eq(#f.fx, 1, "the ball row pops first and emits exactly one fx entry")
+  eq(f.fx[1].kind, "ball", "...and it is the throw, not the reveal yet")
+  eq(f.fx[1].own, true, "...thrown from the seat's own side (a send, not a catch)")
+  eq(#f.lines, 1, "the reveal row still waits behind the ball's own hold")
+
+  -- Pump only the ball's own hold (not the reveal's), so the reveal row is
+  -- caught the instant it pops -- one tick later and its own poof/spawn fx
+  -- would already have aged out under stepFx, since the row's hold is
+  -- exactly the fx's own lifetime.
+  local ballGuard = 0
+  while f.anim ~= nil and ballGuard < 60 do
+    f:update(1 / 60)
+    ballGuard = ballGuard + 1
+  end
+  check(ballGuard < 60, "the ball's own hold clears in a bounded number of frames")
+  eq(#f.lines, 1, "the reveal row is still the only thing left queued")
+
+  f:update(1 / 60)
+  eq(#f.lines, 0, "the reveal row has now popped too, holding nothing further "
+     .. "behind it")
+  local sawPoof, sawSpawn = false, false
+  for _, e in ipairs(f.fx or {}) do
+    if e.kind == "poof" then sawPoof = true end
+    if e.kind == "spawn" then sawSpawn = true
+      eq(e.side, "foe", "...on the side the mon actually sent out on")
+    end
+  end
+  check(sawPoof, "the reveal bursts a poof...")
+  check(sawSpawn, "...and the monster spawning out of it, in the same row")
+
+  -- Drain the reveal's own hold (FX_SPAN.poof) before moving on -- the next
+  -- block wants a clean queue to pop its own drain row into.
+  local poofGuard = 0
+  while f.anim ~= nil and poofGuard < 60 do
+    f:update(1 / 60)
+    poofGuard = poofGuard + 1
+  end
+  check(poofGuard < 60, "the reveal's own hold clears in a bounded number of frames")
 
   -- flash + shake ride only a real HP drop, and only once the bar they belong
   -- to actually starts falling: a resolved turn arrives as one batch, so
@@ -16486,8 +16993,8 @@ end)()
   send2({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
   eq(f2.fx, nil,
      "the anim event itself emits no fx -- only playing the queued row does")
-  f2:update(1 / 60) -- the arrival pop is queued ahead of the anim row
-  f2.fx = nil -- clear the send's own spawn entry; this block is about lunge
+  drainThrow(f2) -- the send-ball chain is queued ahead of the anim row
+  f2.fx = nil -- clear the send's own ball/poof/spawn entries; this block is about lunge
   f2:update(1 / 60) -- pops the anim row -> startAnim: raises the bubble first
   eq(f2.fx, nil,
      "the callout beat raises the bubble alone -- no lunge until it clears")
@@ -16510,7 +17017,7 @@ end)()
   -- ball-flow chain wave below for the full sequence).
   local f3, send3 = driverFor("b-ball")
   send3({ t = "send", slot = 0, side = "a", hp = 20 })
-  f3:update(1 / 60) -- the arrival pop
+  drainThrow(f3) -- the send-ball chain
   f3.fx = nil
   send3({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
   f3:update(1 / 60)
@@ -16542,6 +17049,136 @@ end)()
   end
   check(not classicRow, "the classic path queues no spawn row at all")
   eq(classic.fx, nil, "...and emits no fx either")
+end)()
+
+-- ------- MediatedBattle wave 1: a superseded arrival's whole chain emits
+-- nothing (round 8)
+--
+-- Two `send`s can land on the same occupied seat before either row plays --
+-- the referee re-parking a seat mid-throw. The seat ends up showing only the
+-- LAST arrival; the first one's ball and reveal rows are both still queued
+-- (superseding is decided at PLAY, not at queue time -- `sendChainLive`), but
+-- neither throws nor bursts anything once reached.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-supersede", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-supersede"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  local function drainThrow2(guard)
+    guard = guard or 220
+    local function anyThrow()
+      if type(f.anim) == "table"
+          and (f.anim.sendball ~= nil or f.anim.spawnfx ~= nil) then
+        return true
+      end
+      for _, row in ipairs(f.lines or {}) do
+        if type(row) == "table" and (row.sendball ~= nil or row.spawnfx ~= nil) then
+          return true
+        end
+      end
+      return false
+    end
+    local n = 0
+    while anyThrow() and n < guard do
+      f:update(1 / 60)
+      n = n + 1
+    end
+    return n
+  end
+
+  send({ t = "send", slot = 2, side = "b", hp = 30, text = "RATT" })
+  drainThrow2() -- RATT lands, so the seat is occupied for what follows
+
+  f.fx = nil
+  local emitted = {}
+  local realEmitFx = f.emitFx
+  f.emitFx = function(self, kind, index, side)
+    emitted[#emitted + 1] = kind
+    return realEmitFx(self, kind, index, side)
+  end
+
+  send({ t = "send", slot = 2, side = "b", hp = 40, text = "PIDGEY" })
+  send({ t = "send", slot = 2, side = "b", hp = 50, text = "SPEAROW" })
+
+  local ballRows, spawnRows = 0, 0
+  for _, row in ipairs(f.lines) do
+    if type(row) == "table" and row.sendball ~= nil then ballRows = ballRows + 1 end
+    if type(row) == "table" and row.spawnfx ~= nil then spawnRows = spawnRows + 1 end
+  end
+  eq(ballRows, 2, "both arrivals each queue their own ball row...")
+  eq(spawnRows, 2, "...and their own reveal row -- superseding happens at "
+     .. "play, not at queue")
+
+  local guard = 0
+  while (#f.lines > 0 or f.shown ~= nil or f.anim ~= nil) and guard < 900 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 900, "the whole double-supersede queue drains in bounded frames")
+  f.emitFx = realEmitFx
+
+  eq(f.slots[2].species, "SPEAROW",
+     "only the LAST arrival is what the seat ends up showing")
+
+  local counts = {}
+  for _, kind in ipairs(emitted) do counts[kind] = (counts[kind] or 0) + 1 end
+  eq(counts.ball or 0, 1,
+     "exactly one ball is ever thrown across the whole exchange -- PIDGEY's "
+     .. "chain is superseded before it plays and throws nothing")
+  eq(counts.poof or 0, 1, "...exactly one reveal bursts a poof")
+  eq(counts.spawn or 0, 1, "...and exactly one spawn -- not two")
+end)()
+
+-- ------- MediatedBattle: the victory fanfare holds through a send-ball
+-- chain too (round 8)
+--
+-- #36's `hasPendingHpFx` already covers a draining bar, a hit beat and a
+-- catch-flow ball row; the round-8 send chain is the same shape of thing --
+-- a ball still in the air, or a burst the monster has not come out of yet --
+-- so it has to hold the fanfare exactly the same way.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local gen1Game = { data = data }
+  local f = MediatedBattle.new({ game = gen1Game, battle = "b-sendfanfare", role = "host" })
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-sendfanfare"
+    fields.seq = seq
+    f:onEvent(fields)
+  end
+
+  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  f:update(1 / 60) -- pops the sendball row -- the ball is now in the air
+  check(type(f.anim) == "table" and f.anim.sendball ~= nil,
+        "the ball is live and holding the queue")
+  check(f:hasPendingHpFx(),
+        "...and it counts as pending, same as a drain or a hit beat")
+
+  f.result = "win"
+  f:finish("win", "over")
+  check(f.victoryMusicHeld == true,
+        "the fanfare is held while the ball is still in the air")
+  check(not f.victoryMusicPlayed, "...and has not actually played yet")
+
+  local guard = 0
+  while f:hasPendingHpFx() and guard < 400 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 400, "the send chain resolves in a bounded number of frames")
+  f:update(1 / 60)
+  check(f.victoryMusicPlayed,
+        "and the fanfare finally plays once the whole chain has landed")
 end)()
 
 -- ------- CHRONOLOGY PIN: the split-beat order, regression-proof
@@ -16585,8 +17222,7 @@ end)()
   local f, send = driverFor("b-chrono")
   send({ t = "send", slot = 0, side = "a", hp = 20 })
   send({ t = "send", slot = 2, side = "b", hp = 20 })
-  f:update(1 / 60) -- pops the mine spawn pop
-  f:update(1 / 60) -- pops the foe spawn pop
+  drainThrow(f) -- both send-ball chains, mine and the foe's
 
   send({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
   send({ t = "faint", slot = 2, side = "b", text = "RATT" })
@@ -16648,9 +17284,10 @@ end)()
   f.fx = nil
   send({ t = "send", slot = 2, side = "b", hp = 30, text = "PIDGEY" })
   -- The fainted line itself sits on the queue until MSG_AUTO_ADVANCE (1.6s,
-  -- 96 ticks) times it out, ahead of the release and the replacement's pop.
+  -- 96 ticks) times it out, ahead of the release and the replacement's own
+  -- ball + reveal (another ~63 ticks together).
   local guard2 = 0
-  while not sawFxOn(f, "spawn") and guard2 < 200 do
+  while not sawFxOn(f, "spawn") and guard2 < 300 do
     f:update(1 / 60)
     guard2 = guard2 + 1
   end
@@ -16685,8 +17322,7 @@ end)()
 
   send({ t = "send", slot = 0, side = "a", hp = 20 })
   send({ t = "send", slot = 2, side = "b", hp = 60 })
-  f:update(1 / 60)
-  f:update(1 / 60)
+  drainThrow(f)
 
   send({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
   send({ t = "damage", slot = 2, side = "b", hp = 50 })
@@ -16750,7 +17386,7 @@ end)()
   end
 
   send({ t = "send", slot = 2, side = "b", hp = 50 })
-  f:update(1 / 60) -- spawn pop
+  drainThrow(f) -- the send-ball chain
   send({ t = "damage", slot = 2, side = "b", hp = 30 })
   local beatSteps = 0
   while f.draining == nil and beatSteps < 60 do
@@ -16792,8 +17428,7 @@ end)()
 
   send({ t = "send", slot = 0, side = "a", hp = 20 })
   send({ t = "send", slot = 2, side = "b", hp = 20 })
-  f:update(1 / 60)
-  f:update(1 / 60)
+  drainThrow(f) -- mine (thrown) and the wild foe's (poof+spawn only, no ball)
 
   send({ t = "anim", slot = 2, side = "b", text = "SOMEANIM" })
   f.fx = nil
@@ -16854,7 +17489,7 @@ end)()
   end
 
   send({ t = "send", slot = 2, side = "b", hp = 20 })
-  f:update(1 / 60) -- pops the arrival pop
+  drainThrow(f) -- the send-ball chain
   send({ t = "damage", slot = 2, side = "b", hp = 10 })
   f:update(1 / 60) -- reaches the drain row -> flashes the hit, sets hitHold
   check(f.hitHold ~= nil, "the hit beat is live")
@@ -17055,6 +17690,19 @@ end)()
         "the foe seat stays visible while the ball is still in the air")
   check(f.ballFlow ~= nil and f.ballFlow.hidden == false,
         "...the flow is open but not yet hidden")
+  -- Round 8 pin (diff-style, against the send-ball chain above): a CATCH
+  -- throw is unchanged byte-for-byte -- TOSS -> ball fx, and that fx carries
+  -- no `own` at all (a send-ball's is stamped `own = true`; the ball-flow
+  -- chain this whole block drives never sets it).
+  do
+    local ballFx
+    for _, e in ipairs(f.fx or {}) do
+      if e.kind == "ball" then ballFx = e end
+    end
+    check(ballFx ~= nil, "the TOSS row does emit a ball fx entry")
+    check(ballFx and ballFx.own == nil,
+          "...with no `own` -- a catch throw, not a send")
+  end
 
   playThrough(f) -- first POOF starts
   eq(f.anim.anim, "POOF_ANIM", "the ball opens next")
@@ -18306,8 +18954,13 @@ end
   local function pump(screen, guard)
     local input = { wasPressed = function() return false end }
     local n = 0
+    -- `screen.anim` covers the send-ball chain too (round 8): a switch's
+    -- arrival now holds the queue behind `sendball`/`spawnfx`, both of which
+    -- run through `self.anim`/`animHold` rather than `draining`/`faintFx`, so
+    -- a pump that only watched those two would stop mid-throw.
     while (#screen.lines > 0 or screen.shown ~= nil or screen.expFilling
-           or screen.draining or screen.faintFx) and n < (guard or 4000) do
+           or screen.draining or screen.faintFx or screen.anim ~= nil)
+          and n < (guard or 4000) do
       screen:update(1 / 60)
       n = n + 1
     end

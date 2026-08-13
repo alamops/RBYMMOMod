@@ -1821,17 +1821,25 @@ function M:onEvent(msg)
       }
     end
 
-  elseif kind == "send" or kind == "switch" then
+  elseif kind == "switch" then
+    -- Nothing. The referee emits `switch` and `send` as a *pair* for the same
+    -- arrival -- voluntary switches and forced post-faint replacements alike
+    -- (`_resolveSwitches`, src/BattleSim/Turn.lua:1432, mirrored in
+    -- server/lib/battle/Turn.js) -- and both carry the same seat, the same
+    -- species and the same `mon` stamp. Running the arrival branch for both
+    -- fielded the newcomer twice: two send lines printed one after the other
+    -- and two arrival chains queued, the first of them bursting over whoever
+    -- was still standing on the seat. `send` is the one place a seat's
+    -- occupant changes here, exactly as it is in CoopBattle's twin
+    -- (src/CoopBattle.lua:8062).
+
+  elseif kind == "send" then
     -- The first HP we are told about is a full bar: the sim sends this the
     -- moment a monster comes out, so the number is that monster's maximum
     -- unless it walked in already hurt.  It is the only handle on a foe's
     -- maximum there is -- an event carries current HP and nothing else -- so
     -- the largest value ever seen is what the bar is drawn against.
     self:noteSlot(msg)
-    -- A monster arriving pops onto the field rather than blinking into it --
-    -- queued, like every other effect, so the pop plays with the send line
-    -- rather than the instant the packet was parsed.
-    self:queueSpawnFx(msg.slot, msg.side)
     -- Parked behind somebody still finishing their exit (`noteSlot`): the seat
     -- below is still *theirs*, so everything that describes what is drawn on it
     -- -- the level pill, the pic, the exp clocks -- is deferred to the swap
@@ -1872,6 +1880,15 @@ function M:onEvent(msg)
         self.expFilling = nil
       end
     end
+    -- The sentence comes FIRST, and the arrival is queued behind it.
+    --
+    -- A trainer says who they are sending out and *then* throws: the line, the
+    -- ball, the burst, the monster. Queued the other way round -- which is what
+    -- this did until round 8 -- the pop took no dwell at all, so the monster
+    -- appeared and the sentence introducing it printed one tick later over a
+    -- monster already standing there. Only the two queue appends move; the
+    -- seat record still follows the referee at parse (`noteSlot` above), which
+    -- is what every rule on this screen is read from.
     if msg.text then
       if msg.slot ~= self:mySlot() then
         self:say(("%s sent out\n%s!"):format(self.peerName, msg.text))
@@ -1882,6 +1899,10 @@ function M:onEvent(msg)
         if not parked then self:arriveOnSeat(msg.slot, true) end
       end
     end
+    -- ...and then the arrival itself: the throw, and the burst it comes out of
+    -- (`queueSpawnFx`). Queued, like every other effect, so it plays where the
+    -- stream put it rather than the instant the packet was parsed.
+    self:queueSpawnFx(msg.slot, msg.side)
 
   elseif kind == "damage" or kind == "drain" then
     -- Truth first, then the bar. `syncMineHp` keeps the party sheet on the
@@ -3493,16 +3514,16 @@ function M:tickMessages(dt, input)
       self:startFaintFx(next)
       return true
     end
+    if type(next) == "table" and next.sendball ~= nil then
+      -- The throw, held for the arc's own lifetime.
+      self:startSendBall(next)
+      return true
+    end
     if type(next) == "table" and next.spawnfx ~= nil then
-      -- Nothing waits on the pop: it plays under the send line, which is the
-      -- next row up. No dwell, exactly like `clearPic`.
-      --
-      -- The swap goes first: this row is where the seat changes hands, so the
-      -- arrival is installed (or its hold dropped) and *then* the pop is
-      -- emitted over it. Every frame before this one showed the seat as it was
-      -- -- empty, or somebody else's -- which is the point.
-      self:applySwap(next)
-      self:emitFx("spawn", next.spawnfx, next.side)
+      -- ...and the reveal it lands on: the swap, the burst, the monster.
+      -- Holds for the burst -- unless the row was superseded, in which case it
+      -- emits nothing and costs no more than the row (`startSpawnFx`).
+      self:startSpawnFx(next)
       return true
     end
     if type(next) == "table" and next.clearPic ~= nil then
@@ -4041,15 +4062,31 @@ function M:shownHpOf(slot)
   return floor(shown)
 end
 
--- The pop a monster arrives with, queued rather than played on arrival.
+-- The arrival, queued rather than played the moment the packet was parsed.
 --
--- It is the one queued effect that holds nothing: the row is consumed, the
--- pop starts, and the send line behind it prints on the next tick over the
--- top of it. Deliberately not in `hasPendingHpFx` either -- a spawn is not a
--- bar or a body, and a fanfare has no reason to wait on one.
+-- **Two rows, not one** -- a monster is *thrown* onto the field:
 --
--- **It is also where the arrival window opens**, for the seat nobody is
--- standing on.
+--   1. `sendball` -- the ball leaves the owning trainer and arcs at the seat,
+--      held for `FX_SPAN.ball` (`startSendBall`);
+--   2. `spawnfx`  -- the reveal: the ball opens, and the monster comes out of
+--      the burst. `applySwap` + `poof` + `spawn` in one row, held for
+--      `FX_SPAN.poof` (`startSpawnFx`).
+--
+-- The send line is already ahead of both (`onEvent`'s `send` branch), so the
+-- whole of it reads as one sentence: "BOB sent out RATTATA!", the throw, the
+-- burst, the monster. Nothing appears before the ball lands -- which is the
+-- point, and was the bug: the pop used to be the *first* row of a send and
+-- took no dwell, so the monster was standing there before its own line.
+--
+-- Nobody throws a wild monster. A wild-side arrival (`sendThrows`) keeps the
+-- plain poof + spawn it always had -- one row, no ball -- and so does any seat
+-- with no trainer to throw from.
+--
+-- Both rows now hold the queue, so both are in `hasPendingHpFx`: a fanfare
+-- must not start over a ball still in the air.
+--
+-- **The reveal row is also where the arrival window closes**, for the seat
+-- nobody is standing on.
 --
 -- A seat that already has an occupant is covered by `slot.pending`: the
 -- newcomer is not on the seat record at all yet, so there is nothing to hide
@@ -4067,7 +4104,17 @@ end
 -- difference worth stating: a ball hold is *held at t == 1* by `stepFx`,
 -- because the row that undoes it may be several rows away. A spawn hold is
 -- dropped by the very row that emits the effect, so it needs no retention at
--- all -- there is no window in which the hold outlives its own row.
+-- all -- there is no window in which the hold outlives its own row. The seat
+-- stays hidden for the whole of the throw, which is exactly what an empty seat
+-- with a ball flying at it should look like.
+--
+-- The send chain is deliberately *not* `ballFlow`. That flow exists for a
+-- throw at an occupied seat -- it hides a monster that is standing there and
+-- holds the hiding effect until the row that opens the ball again. Here the
+-- seat is empty (`spawnHide`) or still somebody else's (`slot.pending`), so
+-- there is nothing to hide and nothing to hold: the two rows carry their own
+-- `animHold` and answer to nobody else. A catch throw landing in the middle of
+-- one is therefore unchanged, which is the property worth keeping.
 --
 -- The row names the arrival it was queued for, the same way the drain, the
 -- sink and the release name their occupant: two sends can reach this queue
@@ -4087,9 +4134,126 @@ function M:queueSpawnFx(index, side)
     self.spawnHide[index] = true
     hide = true
   end
+  local thrown = self:sendThrows(index) or nil
+  if thrown then
+    -- Stamped with the same arrival the reveal row is, so both halves of one
+    -- chain live or die together: a throw whose reveal has been superseded (or
+    -- closed forwards by `snapDisplay`) must not fly at a seat that is already
+    -- showing the monster it was going to deliver.
+    self.lines[#self.lines + 1] = {
+      sendball = index, side = side, arrive = arrive, hide = hide,
+    }
+  end
   self.lines[#self.lines + 1] = {
     spawnfx = index, side = side, arrive = arrive, hide = hide,
   }
+  return true
+end
+
+-- Is there a trainer to throw this arrival's ball?
+--
+-- Everybody on a mediated field is somebody's monster except the wild foe: a
+-- protocol-only wild encounter fields a synthetic seat that no trainer owns
+-- (`mode == "wild"`, our own seat excepted -- we throw ours), and a ball
+-- arcing out of an empty patch of grass is worse than no ball at all. That
+-- seat keeps the plain burst it has always had.
+--
+-- Written as "wild, and not mine" rather than "not mine": every other mode on
+-- this screen (1v1, and the coop modes CoopBattle drives) has a trainer on
+-- both sides, and `ballOrigin`'s own fallback already covers a side whose
+-- trainer is not placed.
+function M:sendThrows(index)
+  if not self:usesBattlefield() then return false end
+  if self.mode ~= "wild" then return true end
+  return index == self:mySlot()
+end
+
+-- Is this row's arrival still the one the seat is waiting for?
+--
+-- One test for both rows of a chain, and it is the round-7 stamp rule read
+-- once rather than twice: a row filed against a parked arrival is live while
+-- that arrival is still parked (`slot.pending == row.arrive`), and a row filed
+-- against an empty seat is live while the hold it raised is still standing
+-- (`spawnHide`). Anything else -- a second send that re-parked the seat, a
+-- `snapDisplay` that closed the window forwards -- means the monster this
+-- chain was going to deliver is already accounted for, and every effect the
+-- chain would play would land on somebody else.
+function M:sendChainLive(row)
+  if type(row) ~= "table" then return false end
+  local index = row.sendball or row.spawnfx
+  if index == nil then return false end
+  if row.arrive ~= nil then
+    local slot = self.slots[index]
+    return slot ~= nil and slot.pending == row.arrive
+  end
+  if row.hide then
+    return (self.spawnHide and self.spawnHide[index]) and true or false
+  end
+  return false
+end
+
+-- The `sendball` row comes up: the ball is in the air.
+--
+-- Held for its own lifetime the way every ball-flow row is (`startBallFx`),
+-- with `self.anim` set so the message band shows the empty box a throw plays
+-- under rather than the line before it -- again exactly as the catch chain
+-- does. The seat it is flying at is hidden or still the departing monster's,
+-- and stays that way until the reveal row behind this one.
+--
+-- `own` is what tells Battlefield the arc starts on the *thrower's* side: a
+-- catch ball comes from the seat opposite its target, a send-out ball comes
+-- from the trainer who owns the seat.
+function M:startSendBall(row)
+  if type(row) ~= "table" then return false end
+  -- The same liveness test the reveal row applies, asked one row earlier: a
+  -- chain whose arrival is no longer the one this seat is waiting for throws
+  -- nothing at all.
+  if not self:sendChainLive(row) then return false end
+  local fx = self:emitFx("ball", row.sendball, row.side)
+  if not fx then return false end
+  fx.own = true
+  self.anim = row
+  self.animHold = FX_SPAN.ball
+  self.dwell = 0
+  return true
+end
+
+-- The `spawnfx` row comes up: the ball opens and the monster is on the arena.
+--
+-- Three things in one row because they are one moment: the seat changes hands
+-- (`applySwap` -- the parked arrival is installed, or the hold on an empty
+-- seat dropped), the burst is emitted over it, and the monster scales out of
+-- the burst. Every frame before this one showed the seat as it was -- empty,
+-- or somebody else's -- which is the point.
+--
+-- **A row that did not land emits nothing.** Two sends can reach the queue
+-- before either row plays; the first row's arrival has then been superseded by
+-- the second's (`applySwap` answers false, `slot.pending ~= row.arrive`) and
+-- the seat still belongs to whoever is being shown out. Bursting anyway --
+-- which is what this did until round 8 -- popped a spawn over the *outgoing*
+-- monster, the second half of the doubled send the owner reported. The same
+-- test covers the other window: a `hide` row whose hold is already gone (a
+-- `snapDisplay` closed it forwards) is stale too, and the monster it would
+-- announce has been standing there since.
+function M:startSpawnFx(row)
+  if type(row) ~= "table" then return false end
+  local index = row.spawnfx
+  -- Asked before the swap, because the swap is what consumes the park this
+  -- reads. `applySwap` still runs either way -- on a stale row it is a no-op
+  -- that answers false, and it is the only thing allowed to change a seat's
+  -- occupant.
+  local live = self:sendChainLive(row)
+  self:applySwap(row)
+  if not live then return false end
+  self:emitFx("poof", index, row.side)
+  self:emitFx("spawn", index, row.side)
+  -- The reveal is a beat of its own now that the send line is ahead of it
+  -- rather than behind it: the burst is read, and only then does the queue move
+  -- on. `FX_SPAN.poof` is the burst's own lifetime, which is the same rule
+  -- every ball row is held by -- the row *is* the effect.
+  self.anim = row
+  self.animHold = FX_SPAN.poof
+  self.dwell = 0
   return true
 end
 
@@ -4461,12 +4625,23 @@ function M:hasPendingHpFx()
   if self.draining or self.faintFx or self.hitHold or self.expFilling then
     return true
   end
-  if type(self.anim) == "table" and BALL_FX[self.anim.anim] then return true end
+  -- A send-out counts for the same reason a throw does, and it is the same
+  -- animation seen from the other end: the referee can call the fight the
+  -- moment a replacement is fielded, and a jingle over a ball still in the air
+  -- -- or over a burst the monster has not come out of yet -- congratulates a
+  -- field that is not on screen yet. Both rows of the chain, queued or
+  -- playing: they hold the queue, so they are owed.
+  if type(self.anim) == "table"
+      and (BALL_FX[self.anim.anim] or self.anim.sendball ~= nil
+           or self.anim.spawnfx ~= nil) then
+    return true
+  end
   for _, row in ipairs(self.lines or {}) do
     if type(row) == "table" then
       if row.drain ~= nil or row.faintfx ~= nil or row.expfill ~= nil then
         return true
       end
+      if row.sendball ~= nil or row.spawnfx ~= nil then return true end
       if row.anim ~= nil and BALL_FX[row.anim] then return true end
     end
   end

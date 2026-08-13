@@ -2,4 +2,4 @@
 [info] loaded mod rby_mmo 1.0.0
 [info] loaded mod rby_mmo 1.0.0
 [info] loaded mod rby_mmo 1.0.0
-4149/4149 checks passed  (rby_mmo)
+4199/4199 checks passed  (rby_mmo)

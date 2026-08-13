@@ -1242,6 +1242,18 @@ do
     end
     return nil
   end
+  -- A mediated faint now queues its own drain-to-zero row (medRows: `damage`
+  -- ahead of `faint`, so a bar with no killing-blow `damage` of its own still
+  -- animates down before the sink) -- a second, unrelated "drain" kind row on
+  -- the same queue as the exp climb. `lastIndex` reads past it to the one an
+  -- exp award actually queued.
+  local function lastIndex(self, kind)
+    local found = nil
+    for i, row in ipairs(self.messages) do
+      if rowKind(row) == kind then found = i end
+    end
+    return found
+  end
 
   -- ------- own share paid (participants honored), partner's share ignored,
   -- and the row order the batch queues.
@@ -1277,19 +1289,79 @@ do
     eq(partner.exp, nil,
        "the partner's own share was not paid by this client -- never even touched")
 
+    local iDrainZero = firstIndex(host, "drain")
     local iFaintFx = firstIndex(host, "faintfx")
     local iFainted = firstIndex(host, "fainted-text")
     local iGained = firstIndex(host, "gained-text")
     local iFill = firstIndex(host, "expfill")
     local iGrew = firstIndex(host, "grew-text")
-    local iClimb = firstIndex(host, "drain")
-    check(iFaintFx and iFainted and iGained and iFill and iGrew and iClimb,
-          "faintfx, fainted-text, gained-text, expfill, grew-text and the HP "
-          .. "climb are all queued")
-    check(iFaintFx < iFainted and iFainted < iGained and iGained < iFill
-          and iFill < iGrew and iGrew < iClimb,
-          "in order: faintfx -> fainted-text -> gained-text -> expfill -> "
-          .. "grew -> HP climb")
+    local iClimb = lastIndex(host, "drain")
+    check(iDrainZero and iFaintFx and iFainted and iGained and iFill and iGrew
+          and iClimb,
+          "the faint's drain-to-zero row, faintfx, fainted-text, gained-text, "
+          .. "expfill, grew-text and the HP climb are all queued")
+    check(iDrainZero ~= iClimb,
+          "...and the drain-to-zero row is a different row from the exp climb")
+    check(iDrainZero < iFaintFx and iFaintFx < iFainted and iFainted < iGained
+          and iGained < iFill and iFill < iGrew and iGrew < iClimb,
+          "in order: the faint's own drain-to-zero -> faintfx -> "
+          .. "fainted-text -> gained-text -> expfill -> grew -> HP climb")
+  end
+
+  -- ------- round 8's money regression: a faint with NO killing-blow `damage`
+  -- of its own -- the dropped-lethal-damage case scratchpad/n2_drive_a2.lua
+  -- caught -- still leaves the corpse at hp == 0 and down, not merely sunk on
+  -- screen with its local copy still reading pre-KO HP. Before the HP-
+  -- authoritative fix (playEvents' `faint` branch, mirroring
+  -- src/MediatedBattle.lua:1899-1900) a stream that lost that one event left
+  -- `isDown` false, and a later `snapDisplay` -- which re-derives
+  -- `displayFainted` from `isDown` -- stood the "fainted" monster back up
+  -- with the bar it had before the blow that killed it.
+  do
+    local host, game = wildScreen()
+    check(host:onBattleReady({ battle = "cb-wild",
+      sides = { a = { "ann", "bob" }, b = { "wild" } } }),
+      "coop_wild battle_ready accepted, mediation on")
+
+    -- `Config.COOP_SIDE` is the wire's FIELD slot for side b's first seat,
+    -- not the sim's own slot index -- `medSlots` (built by `onBattleReady`'s
+    -- `medMap`) is what translates one into the other, exactly as `medSlotOf`
+    -- does for every real wire event.
+    local foeIndex = (host.medSlots or {})[Config.COOP_SIDE]
+    local foeSlot = host.sim:slot(foeIndex)
+    local foeBattler = foeSlot.battler
+    check(foeBattler ~= nil and (foeBattler.mon.hp or 0) > 0,
+          "the wild foe starts alive, with hp above zero")
+
+    -- No `damage` event at all reaches this client for the kill -- exactly
+    -- the dropped-lethal-blow case: the referee's `faint` is the only thing
+    -- this client ever hears about it. `turn` closes the batch the same way
+    -- every other section in this file does.
+    host:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+      slot = Config.COOP_SIDE, text = SPECIES_NAME })
+    host:onBattleEvent({ battle = "cb-wild", seq = 2, t = "turn" })
+
+    eq(foeBattler.mon.hp, 0,
+       "the faint alone zeroes the party record's hp -- authoritative, not "
+       .. "merely a drawing fact deferred to a `damage` that never arrives")
+    check(host.sim:isDown(foeSlot), "...so the sim agrees the seat is down")
+
+    -- Drain the queue -- the faintfx row actually plays and latches
+    -- `displayFainted` (src/CoopBattle.lua:3549) -- then snap repeatedly, the
+    -- way an idle client between turns does.
+    local guard = 0
+    while (#host.messages > 0 or host.shown ~= nil or host.faintFx
+           or host.draining or host.expFilling) and guard < 3000 do
+      host:update(1 / 60)
+      guard = guard + 1
+    end
+    check(guard < 3000, "the sink resolves in a bounded number of frames")
+    host:snapDisplay()
+    host:snapDisplay()
+    check(foeBattler.displayFainted == true,
+          "the seat stays latched down across repeated snapDisplay calls -- "
+          .. "no un-fainting")
+    eq(foeBattler.mon.hp, 0, "...and the bar has nothing to climb back to")
   end
 
   -- ------- an unmatchable species token warns once and pays nothing
@@ -1520,7 +1592,14 @@ do
       eq(bystander.exp, c0, "the unnamed party member gained nothing")
       eq(countKind(fight, "gained-text"), 2, "two gained-texts through the mediated queue")
       eq(countKind(fight, "expfill"), 1, "one fill row -- active only")
-      eq(countKind(fight, "drain"), 1, "one HP climb -- active only")
+      -- Two "drain" rows now, not one: medRows queues its own drain-to-zero
+      -- row ahead of the faint (the same fix the order pin above covers), and
+      -- that is a different row from the exp climb this section is actually
+      -- about. Read past it with lastIndex the same way.
+      eq(countKind(fight, "drain"), 2,
+         "two drains: the faint's own drain-to-zero, and the exp climb")
+      check(lastIndex(fight, "drain") ~= firstIndex(fight, "drain"),
+            "...and they are two different rows, not the same one counted twice")
     end
 
     -- ------- (c) `mon` absent (a PROTOCOL 21 referee) -- both paths fall
