@@ -12,6 +12,7 @@
 -- the mod being broken must never be the reason a player cannot play.
 
 local MODULE_DIR = "src/"
+local EDITOR_CONTENT = "maps/content_editor.lua"
 
 return function(mod)
   local loadstr = loadstring or load
@@ -63,6 +64,23 @@ return function(mod)
     loading[name] = nil
     cache[name] = value == nil and true or value
     return cache[name]
+  end
+
+  local source = mod:read(EDITOR_CONTENT)
+  if not source then
+    mod.log:error("%s is missing", EDITOR_CONTENT)
+  else
+    local chunk, err = loadstr(source, "@rby_mmo/" .. EDITOR_CONTENT)
+    if not chunk then
+      mod.log:error("%s did not compile: %s", EDITOR_CONTENT, tostring(err))
+    else
+      local ok, apply = pcall(chunk)
+      if not ok or type(apply) ~= "function" then
+        mod.log:error("%s must return function(mod)", EDITOR_CONTENT)
+      else
+        apply(mod)
+      end
+    end
   end
 
   local Client = need("Client")
