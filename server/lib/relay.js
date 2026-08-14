@@ -2984,23 +2984,12 @@ class Relay {
             this.publishPoints(winnerId, settled.winner.points);
             this.publishPoints(loserId, settled.loser.points);
             this.noteRankChange(settled);
-            this.noteMatchSettled({
-              at: this.now(),
-              startedAt: match.startedAt,
-              repeats: settled.repeats,
-              winner: {
-                id: settled.winner.key,
-                name: settled.winner.name,
-                points: settled.winner.points,
-                gained: settled.winner.gained,
-              },
-              loser: {
-                id: settled.loser.key,
-                name: settled.loser.name,
-                points: settled.loser.points,
-                lost: settled.loser.lost,
-              },
-            });
+            // The intermediator's settle. `at` is the settlement instant and
+            // not `match.endedAt`: a refereed outcome routinely arrives while
+            // both players are still in the session, so endedAt is usually
+            // unset here -- and where it IS set, the referee's verdict is the
+            // moment that matters, not whenever somebody's socket went.
+            this.noteMatchSettled(match, settled, this.now());
           }
         }
       }
@@ -3115,32 +3104,16 @@ class Relay {
       `${safe(settled.loser.name)} ${settled.loser.points} ` +
       `(-${settled.loser.lost})`);
     this.noteRankChange(settled);
-    // Told here and nowhere else, while `match` is still in scope: this is
-    // the one point where a result is known to be real -- both sides agreed
-    // and both were ranked -- and the only place the battle's own clock is
-    // still readable.
-    this.noteMatchSettled({
-      // When it ended: the moment the session came down, or -- for a pair
-      // that both reported before either left the session, which is a normal
-      // race and not an error -- the moment it settled, which is now. Never
-      // null: a history line whose timestamp is missing is a line no reader
-      // can sort or print.
-      at: match.endedAt || this.now(),
-      startedAt: match.startedAt,
-      repeats: settled.repeats,
-      winner: {
-        id: settled.winner.key,
-        name: settled.winner.name,
-        points: settled.winner.points,
-        gained: settled.winner.gained,
-      },
-      loser: {
-        id: settled.loser.key,
-        name: settled.loser.name,
-        points: settled.loser.points,
-        lost: settled.loser.lost,
-      },
-    });
+    // One of the two points a result is known to be real: both sides agreed
+    // and both were ranked. `settleMediated` is the other -- the referee said
+    // so -- and both hand the ledger its line through `noteMatchSettled`,
+    // which owns the shape so the two can never write different records.
+    // When it ended: the moment the session came down, or -- for a pair that
+    // both reported before either left the session, which is a normal race and
+    // not an error -- the moment it settled, which is now. Never null: a
+    // history line whose timestamp is missing is a line no reader can sort or
+    // print.
+    this.noteMatchSettled(match, settled, match.endedAt || this.now());
     return settled;
   }
 
@@ -3170,8 +3143,45 @@ class Relay {
    * and the players have already been told, so a listener that throws is a
    * line missing from a log file, never a lost result.
    */
-  noteMatchSettled(record) {
+  noteMatchSettled(match, settled, at) {
     if (!this.onMatchSettled) return;
+    /*
+     * **The one definition of a history line, and the reason this builds it
+     * rather than taking one.**
+     *
+     * Two call sites reach the ledger -- `settleMediated` (the referee said
+     * so) and `settleMatch` (both sides agreed) -- and each used to spell the
+     * record out itself, byte-identical apart from the timestamp. Only one of
+     * the two was ever under test, so a field added or dropped on that side
+     * alone would have gone out silently and the ledger would have carried two
+     * shapes.
+     *
+     * That is not a hypothetical about a private object: `history.jsonl` is
+     * append-only, operator-facing, and read back by `lib/cli.js:historyRecord`
+     * -- which renders `NAME #abcd` from `id` (PROTOCOL 16) so two players
+     * called ASH are told apart. A path that stopped emitting `id` would not
+     * write a tidier line, it would write an ambiguous one, and only for
+     * battles settled that particular way.
+     *
+     * `at` stays a parameter because the two sites genuinely disagree about it
+     * and both are right; everything else is fixed here. Nothing else is
+     * added: this file is persisted, so `key`, internals and whole battler
+     * sheets stay out of it. `rank.test.js` and `server.test.js` both pin the
+     * exact key set.
+     */
+    const side = (entry, movedKey, moved) => ({
+      id: entry.key,
+      name: entry.name,
+      points: entry.points,
+      [movedKey]: moved,
+    });
+    const record = {
+      at,
+      startedAt: match.startedAt,
+      repeats: settled.repeats,
+      winner: side(settled.winner, 'gained', settled.winner.gained),
+      loser: side(settled.loser, 'lost', settled.loser.lost),
+    };
     try {
       this.onMatchSettled(record);
     } catch (err) {

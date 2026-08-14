@@ -69,7 +69,7 @@ const KINDS = {
   msg: true, anim: true, damage: true, drain: true, faint: true,
   send: true, status: true, stat: true, switch: true, item: true,
   run: true, turn: true, over: true, wait: true, reconnect: true,
-  chose: true, unchose: true, moves: true,
+  chose: true, unchose: true, moves: true, exp: true,
 };
 
 // Every key an event may carry, and the type it carries. `battle` and `seq` are
@@ -86,6 +86,10 @@ const FIELDS = {
   hp: 'number',
   side: 'string',
   status: 'string',
+  species: 'string',
+  level: 'number',
+  participants: 'number',
+  mon: 'number',
 };
 
 // ------------------------------------------------------------------
@@ -111,20 +115,26 @@ const SHAPES = {
   drain: { slot: true, side: true, amount: true, hp: true },
   faint: { slot: true, side: true, text: true,
     amount: '1 when the seat still has a living bench (mustReplace)' },
-  send: { slot: true, side: true, hp: true, text: 'the species' },
+  send: { slot: true, side: true, hp: true, text: 'the species',
+    mon: 'party index (0-5) of the mon the referee fielded' },
   status: { slot: true, side: true, status: 'absent means cleared', text: true },
   stat: { slot: true, side: true, amount: true, text: true },
-  switch: { slot: true, side: true, text: 'the species coming in' },
+  switch: { slot: true, side: true, text: 'the species coming in',
+    mon: 'party index (0-5) of the mon coming in' },
   item: { slot: true, side: true, text: 'the item id',
     amount: '1 when a vitamin applied (client save writeback)' },
   run: { slot: true, side: true, text: true },
-  turn: { amount: 'the 1-based turn number' },
+  turn: { amount: 'the 1-based turn number',
+    slot: 'present only on a replacement solicitation: the field slot being asked' },
   over: { text: 'the reason token' },
   wait: { side: true, text: 'who is being waited on' },
   reconnect: { side: true, text: true },
   chose: { slot: true, side: true, text: 'who answered' },
   unchose: { slot: true, side: true, text: 'who answered' },
   moves: { slot: true, side: true, moves: 'sanitised move list' },
+  exp: { slot: 'the winner being paid', species: 'the monster that fell',
+    level: 'its level', participants: 'how many shares split it',
+    mon: 'party index (0-5) of the mon banking this share; absent means the active one' },
 };
 
 // ------------------------------------------------------------------

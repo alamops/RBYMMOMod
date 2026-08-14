@@ -281,6 +281,24 @@ return function(game)
     end, 90)
     check(started, "a mediated battle started on the guest")
 
+    -- The arena on the JOINER's screen too. Worth its own check rather than
+    -- trusting the host's: the two clients build their seats from different
+    -- ends of the same wire (`mine` vs the referee's field), and a Gold guest
+    -- that fell back to the 160x144 GB path while the host drew the arena is
+    -- exactly the asymmetry a one-sided assertion would miss.
+    -- docs/plans/gen2-new-battle-system.md.
+    do
+      local battleTop = H.top(game)
+      if H.isMediatedBattle(battleTop) then
+        U.wait(60)
+        check(battleTop.usesBattlefield and battleTop:usesBattlefield() or false,
+              "the joiner's Gold fight is on the top-down arena as well")
+        check(battleTop.drawsWidescreen and battleTop:drawsWidescreen() or false,
+              "...through the same widescreen seam the host uses")
+        U.shot(game, SHOT_DIR .. "/join-battle-open.png")
+      end
+    end
+
     local gaps = 0
     local ended = H.drivePrompts(game, function()
       local battleTop = H.top(game)

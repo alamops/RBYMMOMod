@@ -496,6 +496,10 @@ function M.create(opts)
     turn           = 1,
     seq            = 0,
     buffer         = {},
+    -- What the current action has knocked down and not paid for yet; see
+    -- `_drainExp`.  A list, so the order faints happened in is the order their
+    -- spoils are announced in.
+    pendingExp     = {},
     fighters       = {},
     byId           = {},
     bySide         = { a = {}, b = {} },
@@ -558,6 +562,8 @@ function M.create(opts)
         connected = true,
         graceEndsAt = nil,
         choice    = nil,
+        -- Who has been in against THIS seat's current monster; see `_refield`.
+        fought    = {},
       }
       self.fighters[#self.fighters + 1] = fighter
       self.byId[playerId] = fighter
@@ -566,11 +572,23 @@ function M.create(opts)
     end
   end
 
+  -- Everybody is fielded at once, so the opening participation sets are the
+  -- opening field.  `_refield` re-adds the standing opposition every time it
+  -- runs, so walking the roster once is enough: a later seat's reset cannot
+  -- lose an earlier seat's entry, it re-derives it.
+  for _, fighter in ipairs(self.fighters) do self:_refield(fighter) end
+
+  -- `mon` is the party index the referee itself fielded (here: `firstLiving`),
+  -- zero-based like the `exp` event's.  A client cannot re-derive it from
+  -- `text`: a party may hold the same species twice, and resolving the name
+  -- against the party then picks whichever copy comes first -- which is how a
+  -- fainted duplicate came back onto the field.  The index is unambiguous.
   for _, fighter in ipairs(self.fighters) do
     local mon = activeMon(fighter)
     if mon then
       self:_emit("send", { slot = fighter.slot, side = fighter.side,
-                           hp = mon.hp, text = mon.species })
+                           hp = mon.hp, text = mon.species,
+                           mon = fighter.active - 1 })
     end
   end
 
@@ -648,6 +666,54 @@ function Battle:_firstLivingFoe(fighter)
   return nil
 end
 
+-- Which seat an action actually swings at, given the seat it was aimed at.
+--
+-- A fight choice always names a living opposing seat when it is made:
+-- `_normaliseChoice` refuses an empty one, and the replace phase means the
+-- field is whole again before the next choice window opens.  **A mid-turn
+-- faint is therefore the only way an aim can go stale** -- in a 2v2 the faster
+-- ally KOs the seat the slower ally picked, and without this the slower mon
+-- fizzles ("has no target") instead of swinging.
+--
+-- Preference order:
+--   (a) whatever is standing in the SAME field position.  A seat *is* a field
+--       position here, so this also covers the case where the seat was emptied
+--       and refilled between choice and execution -- the aim the player made
+--       still points at a real monster and is honoured unchanged.
+--   (b) otherwise the NEAREST living opposing seat: smallest
+--       |seat.slot - aimedSlot| (both sit on the same side, so the side base
+--       cancels and this is seat-index distance), ties broken toward the lower
+--       seat index.  With two seats a side that is simply the adjacent seat;
+--       the rule is spelled out so a wider field could not make it ambiguous.
+--   (c) otherwise nil -- the opposing side has nothing standing, the battle is
+--       ending, and the action is skipped.
+--
+-- Only the opposing side is ever searched, so nothing here can redirect a move
+-- onto the user or its ally; self-targeting and side-wide effects ride the
+-- same opposing-seat aim they always did and are untouched.  The answer is
+-- bound once per action in `_useMove`, so a multi-hit strike puts every hit on
+-- the retargeted seat -- an action retargets, not each of its strikes.
+--
+-- Byte-identical to the Gen 1 twin (src/BattleSim/Turn.lua): a stolen KO is a
+-- field-geometry rule, and the field has the same shape in both games.
+function Battle:_retarget(fighter, slot)
+  local aimed = self:_fighterAtSlot(slot)
+  if aimed and activeMon(aimed) then return aimed end
+
+  local best, bestDistance
+  for _, foe in ipairs(self:_foes(fighter)) do
+    if activeMon(foe) then
+      local distance = foe.slot - slot
+      if distance < 0 then distance = -distance end
+      if bestDistance == nil or distance < bestDistance
+         or (distance == bestDistance and foe.slot < best.slot) then
+        best, bestDistance = foe, distance
+      end
+    end
+  end
+  return best
+end
+
 function Battle:_sideAlive(side)
   for _, fighter in ipairs(self.bySide[side]) do
     if firstLiving(fighter.mons) then return true end
@@ -665,11 +731,19 @@ end
 -- a replacement after a faint.  A player whose last monster fainted in a 2v2 is
 -- a spectator for the rest of the fight, and waiting on them would hang the
 -- turn.  Multi-turn volatiles auto-fill before the player is asked.
+--
+-- In the `replace` phase the only thing anybody owes is a replacement: the
+-- seats that are still standing answered last turn and are not being asked
+-- again, so their standing monster must not hold the phase open.  Everything
+-- that reads "who are we waiting on" -- `_anyoneOwes`, the timeout sweep in
+-- `tick`, `snapshot().waiting` -- goes through here, which is why the phase
+-- test lives in this one function rather than at each of those call sites.
 function Battle:_owes(fighter)
   if fighter.choice ~= nil then return false end
   if fighter.mustReplace then
     return firstLiving(fighter.mons) ~= nil
   end
+  if self.phase == "replace" then return false end
   if activeMon(fighter) == nil then return false end
   return true
 end
@@ -910,14 +984,25 @@ end
 -- nothing) are all things the client can see for itself, and a string here
 -- would be a second vocabulary to keep in step across two runtimes.
 function Battle:submitChoice(playerId, choice)
-  if self.phase ~= "choice" then return false end
+  if self.phase ~= "choice" and self.phase ~= "replace" then return false end
   if type(choice) ~= "table" then return false end
 
   local fighter = self.byId[str(playerId) or ""]
   if not fighter then return false end
   if not ACTIONS[choice.action] then return false end
 
+  -- The replace phase belongs to the seats that owe a send-out and to nobody
+  -- else: a standing seat's fight would be an answer to a turn that has not
+  -- opened yet, and taking it here would spend it before the player saw the
+  -- successor come out.  Refused rather than queued, so the client asks again
+  -- on the `turn` that follows the send.
+  if self.phase == "replace" and not self:_owes(fighter) then return false end
+
   if choice.action == "cancel" then
+    -- A forced replacement is not a decision that can be taken back: the field
+    -- is a monster short until it is answered, so `unchose` here would only
+    -- hand the seat a second way to hold the fight open.
+    if self.phase == "replace" then return false end
     if fighter.choice == nil then return false end
     self:_emit("unchose", {
       slot = fighter.slot, side = fighter.side, text = fighter.name,
@@ -954,9 +1039,13 @@ function Battle:_anyoneOwes()
 end
 
 function Battle:_maybeResolve()
-  if self.phase ~= "choice" then return false end
+  if self.phase ~= "choice" and self.phase ~= "replace" then return false end
   for _, fighter in ipairs(self.fighters) do
     if self:_owes(fighter) then return false end
+  end
+  if self.phase == "replace" then
+    self:_closeReplace()
+    return true
   end
   self:_resolveTurn()
   return true
@@ -1285,10 +1374,15 @@ end
 -- machine stops owing.  Filing one may resolve the turn and open the next, which
 -- is what makes that loop the thing that carries the fight forward.
 function Battle:autoPick(playerId)
-  if self.phase ~= "choice" then return false end
+  if self.phase ~= "choice" and self.phase ~= "replace" then return false end
   local fighter = self.byId[str(playerId) or ""]
   if not fighter then return false end
   if fighter.choice ~= nil then return false end
+  -- Same rule as a human's: in the replace phase only the seats that owe a
+  -- send-out may file, so an NPC that is still standing does not answer a turn
+  -- that has not opened.  `Hub:fillNpcChoices` calls this in a loop and stops
+  -- when nothing files, so the false is how the loop learns to stop.
+  if self.phase == "replace" and not self:_owes(fighter) then return false end
   if not fighter.mustReplace and not activeMon(fighter) then return false end
 
   local auto = self:_autoChoice(fighter)
@@ -1320,6 +1414,70 @@ function Battle:_openTurn()
     self.forcedPending = true
     self.deadline = nil
   end
+end
+
+-- ------------------------------------------------------------------
+-- the replace phase
+-- ------------------------------------------------------------------
+--
+-- A faint with a living bench used to be folded into the *next* choice window:
+-- the referee incremented the turn, opened it, and the seat's replacement rode
+-- in alongside everybody else's fight.  That is one window with an empty box in
+-- it -- the player picked a move at a foe that was not on the field yet, and
+-- the successor only walked out when the turn after that resolved.  Vanilla
+-- never does this, and neither does the host sim beside it: `CoopSim`'s
+-- `announceFaint` sends an NPC's next monster out inside the faint batch and
+-- asks a player's seat before the fight goes on.
+--
+-- So the referee holds a phase of its own between the two turns.  Nothing else
+-- is asked for, nothing resolves, and the turn number does not move: the fight
+-- is still on the turn whose faint opened this.  When the last owed replacement
+-- is in, `_resolveSwitches` fields them all (`switch` + `send`) and only then
+-- does the next turn open.  For a seat with no connection behind it that whole
+-- phase closes inside one `Hub:flushBattle` -- `fillNpcChoices` runs before the
+-- drain -- so the client reads one batch: faint ... switch ... send ... turn.
+--
+-- Ported from the Gen 1 twin unchanged: the pacing complaint it answers is
+-- about the *referee's* turn structure, which both generations share.
+
+function Battle:_anyMustReplace()
+  for _, fighter in ipairs(self.fighters) do
+    if fighter.mustReplace and firstLiving(fighter.mons) ~= nil then return true end
+  end
+  return false
+end
+
+-- Solicitation: one `turn` per owing seat, carrying the seat's **field slot**.
+--
+-- That slot is the whole of the wire change, and it is the client contract:
+--   * `turn` WITH `slot` -- this seat is being asked for a replacement.  Its
+--     own client opens the switch picker; everyone else holds on "X is
+--     choosing who to send out...".
+--   * `turn` WITHOUT `slot` -- the ordinary choice window is open (`_openTurn`).
+-- No new kind, no new field: `slot` is already in `events.FIELDS` and already
+-- rides `Wire.battleEvent` kind-agnostically, so a client built before this
+-- ignores it and degrades to the old behaviour rather than breaking.
+--
+-- Seat order is `self.fighters`, which is side a then side b in seating order
+-- -- ascending field slot, and the same order in both runtimes.
+function Battle:_openReplace()
+  self.phase = "replace"
+  self.resolveDeadline = nil
+  self.forcedPending = false
+  for _, fighter in ipairs(self.fighters) do fighter.choice = nil end
+  self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
+  for _, fighter in ipairs(self.fighters) do
+    if self:_owes(fighter) then
+      self:_emit("turn", { amount = self.turn, slot = fighter.slot })
+    end
+  end
+end
+
+-- Every replacement is in: field them, then open the turn they were owed for.
+function Battle:_closeReplace()
+  self:_resolveSwitches()
+  self.turn = self.turn + 1
+  self:_openTurn()
 end
 
 function Battle:_speedOf(fighter, mon)
@@ -1370,7 +1528,19 @@ function Battle:_resolveTurn()
   self:_resolveItems()
   self:_resolveFights()
   if not self.result then self:_resolveResiduals() end
+  -- The residual batch settles the same way an action's does: every flag is off
+  -- before the first share is counted.  Unconditional, because a queue nobody
+  -- drains is exp that silently never happened.
+  self:_drainExp()
   if not self.result then self:_checkOver() end
+
+  -- A seat that fell with a bench left is asked before anything else happens;
+  -- see the replace-phase note above.  The turn does not advance here: it
+  -- advances in `_closeReplace`, once the successor is actually on the field.
+  if not self.result and self:_anyMustReplace() then
+    self:_openReplace()
+    return
+  end
 
   if not self.result then
     self.turn = self.turn + 1
@@ -1412,6 +1582,10 @@ function Battle:_resolveSwitches()
       if mon and mon.hp > 0 then
         fighter.active = choice.slot
         fighter.mustReplace = nil
+        -- The seat's monster changed: its own participation set resets and the
+        -- standing opposition re-marks into it, while the incoming monster
+        -- joins the sets of the foes it is now in against.
+        self:_refield(fighter)
         mon.charging = nil
         mon.invulnerable = false
         mon.thrashing = nil
@@ -1430,10 +1604,16 @@ function Battle:_resolveSwitches()
         mon.leechSeed = nil
         mon.disable = nil
         self:_clearTrapsFrom(fighter.slot)
+        -- `mon` is the index the referee just fielded -- `choice.slot`, already
+        -- normalised to a party position by `_normaliseChoice`.  This is the
+        -- one that matters most: a forced post-faint replacement lands here
+        -- too, so without it a seat holding two of a species re-fields the
+        -- fallen copy on the client while the referee holds the living one.
         self:_emit("switch", { slot = fighter.slot, side = fighter.side,
-                               text = mon.species })
+                               text = mon.species, mon = choice.slot - 1 })
         self:_emit("send", { slot = fighter.slot, side = fighter.side,
-                             hp = mon.hp, text = mon.species })
+                             hp = mon.hp, text = mon.species,
+                             mon = choice.slot - 1 })
       end
     end
   end
@@ -1816,7 +1996,10 @@ function Battle:_resolveFights()
     end
     -- Finalize after each action (not inside `_faint`) so KO + recoil / explode
     -- on the same move can still mutual-faint into a draw, while an empty-bench
-    -- KO still stops the slower seat from acting.
+    -- KO still stops the slower seat from acting.  The action's faint batch is
+    -- complete here, and that is the earliest moment its spoils can be counted
+    -- without paying a monster the same action was still killing (`_drainExp`).
+    self:_drainExp()
     if not self.result then self:_checkOver() end
   end
 end
@@ -1956,12 +2139,18 @@ function Battle:_useMove(fighter, mon, opts)
     return
   end
 
-  local target = self:_fighterAtSlot(choice.target)
+  -- Resolved once, here, and used for the whole action: see `_retarget`.
+  local target = self:_retarget(fighter, choice.target)
   local defender = target and activeMon(target)
   if not defender then
     self:_say(mon.species .. " has no target")
     return
   end
+  -- The seat actually swung at.  Anything this action *records* for a later
+  -- turn (a charge's aim, a Bide's aim) records this and not `choice.target`,
+  -- so the release lands where the action went rather than on the seat that
+  -- was already empty when it started.
+  local targetSlot = target.slot
 
   local move = opts.moveOverride or (struggling and STRUGGLE or mon.moves[choice.move])
   local effectId = int(move.effect, 0)
@@ -1991,7 +2180,7 @@ function Battle:_useMove(fighter, mon, opts)
     mon.charging = {
       moveIndex = choice.move,
       effect = effectId,
-      targetSlot = choice.target,
+      targetSlot = targetSlot,
     }
     if Effects.isFly(effectId) then mon.invulnerable = true end
     self:_say(Effects.chargeMessage(mon, effectId))
@@ -2082,7 +2271,7 @@ function Battle:_useMove(fighter, mon, opts)
         turns = Effects.bideTurns(self.rng),
         stored = 0,
         moveIndex = choice.move,
-        targetSlot = choice.target,
+        targetSlot = targetSlot,
       }
       self:_say(mon.species .. " began storing energy")
       self:_markLastMove(mon, choice.move)
@@ -2363,7 +2552,214 @@ function Battle:_heal(fighter, mon, amount)
   })
 end
 
+-- ------------------------------------------------------------------
+-- participation (who fought the monster that fell)
+-- ------------------------------------------------------------------
+--
+-- Ported from the Gen 1 twin (src/BattleSim/Turn.lua), which mirrors
+-- gen1recomp's own `BattleState:markParticipant` / `awardExp`.  Gen 2 keeps the
+-- same bookkeeping -- `wPartyGainExpFlags` survives into Gold unchanged and
+-- `src/battle/gen2/Battle.lua:awardExperience` walks the same set -- so this is
+-- the Gen 1 machinery verbatim rather than a second derivation.  Where Gen 2
+-- genuinely differs is in what a *share is worth* (its own stat exp, the Exp
+-- Share halved pass, the traded and Lucky Egg boosts), and none of that is here:
+-- the referee announces facts, the client prices them.
+--
+--   * set on send-out -- battle start, a voluntary switch, a post-faint
+--     replacement, and again when the seat opposite sends its next one out.
+--   * cleared when the foe changes: the set is per enemy MONSTER, not per
+--     battle.
+--   * dropped on its own faint (`_unfield`), so a participant that died before
+--     the KO is neither paid NOR counted in the divisor.
+--   * ...and the send-out's own mark lands a turn late here, because a seat is
+--     *asked* for its replacement rather than just sending one.  It is taken at
+--     the faint, against the field the faint happened on, and held in
+--     `fighter.pendingFought` until `_refield` fields the successor.
+--
+-- Keys are strings so the two runtimes agree on membership without agreeing on
+-- table iteration order -- nothing ever walks this table, it is only ever asked.
+local function foughtKey(slot, index)
+  return slot .. ":" .. index
+end
+
+-- This seat's monster just changed (battle start, switch, replacement).
+--
+-- Its own set resets, then the currently standing opposition marks into it --
+-- and the incoming monster marks into each of THEIR sets: a switch-in joins the
+-- standing foe's participants.  A foe of ours that is mid-replacement (nothing
+-- out) is neither read nor written, the same way the engine has no enemy to
+-- mark against.
+function Battle:_refield(fighter)
+  fighter.fought = {}
+  local mine = activeMon(fighter) and fighter.active or nil
+  local foes = self.bySide[fighter.side == "a" and "b" or "a"]
+  for _, foe in ipairs(foes) do
+    if activeMon(foe) then
+      fighter.fought[foughtKey(foe.slot, foe.active)] = true
+      if mine then
+        foe.fought = foe.fought or {}
+        foe.fought[foughtKey(fighter.slot, mine)] = true
+      end
+    end
+  end
+
+  -- ...and the mark the deferred send-out still owes (`_faint` explains why it
+  -- is held rather than taken here): whoever was standing when the monster this
+  -- one replaces went down was in against this one too.  Only this direction is
+  -- owed -- the seat opposite re-derives its own set the next time it refields,
+  -- exactly as the engine keeps flags on one side only.  Consumed once: a seat
+  -- that refields again later starts clean.
+  local pending = fighter.pendingFought
+  fighter.pendingFought = nil
+  if pending then
+    for i = 1, #pending do fighter.fought[pending[i]] = true end
+  end
+end
+
+-- Who is standing opposite this seat right now, as participation keys, in field
+-- order.  A list rather than a set because it is walked: two runtimes agreeing
+-- about a set they only ever ask is cheap, agreeing about one they iterate is
+-- not.
+function Battle:_standingOpposition(fighter)
+  local keys = {}
+  local foes = self.bySide[fighter.side == "a" and "b" or "a"]
+  for _, foe in ipairs(foes) do
+    if activeMon(foe) then keys[#keys + 1] = foughtKey(foe.slot, foe.active) end
+  end
+  return keys
+end
+
+-- RemoveFaintedPlayerMon: a monster that faints stops being a participant
+-- anywhere, so it neither collects nor counts.
+function Battle:_unfield(fighter, index)
+  local key = foughtKey(fighter.slot, index)
+  for _, other in ipairs(self.fighters) do
+    if other.fought then other.fought[key] = nil end
+    -- The held mark is reached too.  A monster that fell while the seat
+    -- opposite was still choosing its replacement was never in against that
+    -- replacement, so it must not be sitting in the set the successor inherits
+    -- -- the same rule, one send-out earlier.
+    local pending = other.pendingFought
+    if pending then
+      for i = #pending, 1, -1 do
+        if pending[i] == key then table.remove(pending, i) end
+      end
+    end
+  end
+end
+
+-- What a faint pays, and to whom.
+--
+-- **Facts, never an amount.**  This referee holds no species table -- it never
+-- has and, by the legal floor this whole server is built under, never will --
+-- so it cannot compute a single point of experience.  What it *can* do is state
+-- the three things the formula needs and nothing else knows: which monster
+-- fell, what level it was, and how many shares split it.  Each client then runs
+-- its own generation's Experience over its own party, which is also the only
+-- place the result can persist.  This is the same shape as the vitamin
+-- writeback and the catch grant: the authority announces, the owner applies.
+--
+-- The mode gate is not a shortcut for the owner check, it is the rule.  A
+-- seated fighter here carries a playerId whether a connection is behind it or a
+-- synthetic wild / trainer seat is, so "does this seat have an owner" is not a
+-- question the turn machine can ask -- but the *mode* answers it, because the
+-- hub only ever seats a synthetic opponent in these three, and always on side
+-- b.  1v1 and coop_pvp are left out deliberately rather than incidentally:
+-- paying a player for beating another player is a farming loop, and it is not
+-- what vanilla does with a link battle either.
+local EXP_MODES = { wild = true, coop_wild = true, coop_npc = true }
+-- The side the owners sit on in those modes; side b is the synthetic seat.
+local EXP_OWNER_SIDE = "a"
+
+-- One event per PAID monster, in seat order and then party order.
+--
+-- Order is load-bearing twice over: the JS twin emits the same list in the same
+-- order, and a stream that differs by a permutation is a parity failure with no
+-- symptom anyone could read.  `bySide` is built in roster index order and
+-- `fieldSlot` is monotonic in that index, so the outer walk is a walk of slots;
+-- the inner one is the party array.
+--
+-- `slot` stays the owning FIGHTER's field slot -- that is the ownership gate,
+-- and it is what a client checks before writing to its own save.  `mon` says
+-- which of that party banks the share, 0-based, because a benched participant
+-- has no field slot to be named by.
+--
+-- The divisor is the engine's: `participants` counts every member of the set,
+-- `alive` is the subset still above zero HP, and only `alive` is paid.  The two
+-- numbers agree in practice because a faint already left the set (`_unfield`)
+-- -- mirrored rather than collapsed so the shape stays comparable.
+--
+-- The empty-set fallback: with nothing flagged, the monster that is out gets
+-- the whole thing.  Two seats can be out here where the engine has one, so all
+-- of the standing ones share it.
+--
+-- No roll is drawn anywhere in here: the parity digest's rngState must not move
+-- because a faint paid out.
+function Battle:_awardExp(fallen, mon)
+  if not EXP_MODES[self.mode] then return end
+  if fallen.side == EXP_OWNER_SIDE then return end
+
+  local fought = fallen.fought or {}
+  local participants, alive = 0, {}
+  for _, fighter in ipairs(self.bySide[EXP_OWNER_SIDE]) do
+    for index = 1, #fighter.mons do
+      if fought[foughtKey(fighter.slot, index)] then
+        participants = participants + 1
+        if fighter.mons[index].hp > 0 then
+          alive[#alive + 1] = { fighter = fighter, index = index }
+        end
+      end
+    end
+  end
+
+  if participants == 0 then
+    for _, fighter in ipairs(self.bySide[EXP_OWNER_SIDE]) do
+      if activeMon(fighter) then
+        participants = participants + 1
+        alive[#alive + 1] = { fighter = fighter, index = fighter.active }
+      end
+    end
+  end
+  if #alive == 0 then return end
+
+  for _, winner in ipairs(alive) do
+    self:_emit("exp", {
+      slot = winner.fighter.slot,
+      species = mon.species,
+      level = mon.level,
+      participants = participants,
+      mon = winner.index - 1,
+    })
+  end
+end
+
+-- Pay for everything the action just felled, in the order it fell.
+--
+-- Split from `_faint` because the engine splits it: knocking a monster *down*
+-- clears its flag, and the payout is queued behind that -- so by the time
+-- anybody is counted, every monster the action killed has already left the set.
+-- Paying inside `_faint` instead put a self-KO'er in its own victim's payout: an
+-- Explosion or a recoil that kills its user runs `_faintUser` *after* the
+-- target's faint, so the user was still standing, still flagged, and still in
+-- the divisor.
+--
+-- Draws nothing: the parity digest's rngState must not move because a faint
+-- paid out, whenever it pays.
+function Battle:_drainExp()
+  local queue = self.pendingExp
+  if #queue == 0 then return end
+  self.pendingExp = {}
+  for i = 1, #queue do self:_awardExp(queue[i].fallen, queue[i].mon) end
+end
+
 function Battle:_faint(fighter, mon)
+  -- RemoveFaintedPlayerMon first: this one is out of every participation set
+  -- before anything below can pay anybody, so a mon that died on the way to the
+  -- KO is not in the divisor.  Keyed off the seat's own party position rather
+  -- than `active`, which the recoil path has not cleared yet.
+  for index = 1, #fighter.mons do
+    if fighter.mons[index] == mon then self:_unfield(fighter, index); break end
+  end
   mon.charging = nil
   mon.invulnerable = false
   mon.mustRecharge = false
@@ -2394,20 +2790,45 @@ function Battle:_faint(fighter, mon)
     amount = next_ and 1 or nil,
   })
 
+  -- Owed here, paid at the end of the action (`_drainExp`), with the fallen
+  -- sheet held in the queue so the payout still names the monster that fell and
+  -- the level it was.  For an ordinary KO nothing moves: the faint, then its
+  -- spoils, and only then anything about what comes next.  What changes is the
+  -- action that fells two: every one of them is out of the sets before the
+  -- first share is counted.
+  self.pendingExp[#self.pendingExp + 1] = { fallen = fighter, mon = mon }
+
   fighter.active = nil
   if next_ then
     -- Ask the seat for a switch on the next choice window; timeout / autoPick
     -- still lands firstLiving (preferring an SE bench). No PROTOCOL bump —
     -- same `switch` + `turn`/`chose` vocabulary; amount rides an existing field.
     fighter.mustReplace = true
+    -- The successor's mark, taken now because the send-out is not now.
+    --
+    -- Vanilla marks whoever is standing at the enemy's send-out, and the engine
+    -- sends out inside the faint itself, while the monster that landed the KO is
+    -- still on the field.  This referee cannot: it asks the seat, and the answer
+    -- arrives on the next choice window, by which time side a's own switches
+    -- have already resolved (`_resolveSwitches` walks side a first).  A player
+    -- who swaps on that turn would hand the incoming foe a set that never heard
+    -- of the monster that beat the last one.  So the send-out's mark is taken
+    -- here, against the field the faint actually happened on, and held until
+    -- `_refield` puts the successor out.
+    fighter.pendingFought = self:_standingOpposition(fighter)
   else
     fighter.mustReplace = nil
+    fighter.pendingFought = nil
   end
 
   -- While resolving, defer `_checkOver` to the caller (after the current move /
   -- residual batch) so the same action can still faint the user (recoil,
-  -- explode) and land a draw. Outside resolve, end immediately.
-  if self.phase ~= "resolving" then self:_checkOver() end
+  -- explode) and land a draw. Outside resolve, end immediately -- and pay
+  -- first, because there is no action boundary out here to pay at.
+  if self.phase ~= "resolving" then
+    self:_drainExp()
+    self:_checkOver()
+  end
 end
 
 function Battle:_resolveResiduals()
@@ -2550,7 +2971,8 @@ function Battle:reconnect(playerId)
   fighter.graceEndsAt = nil
   self:_emit("reconnect", { side = fighter.side, text = fighter.name })
 
-  if self.phase == "choice" and not self:_anyDisconnected() and self.choiceTimeout > 0 then
+  if (self.phase == "choice" or self.phase == "replace")
+     and not self:_anyDisconnected() and self.choiceTimeout > 0 then
     self.deadline = self.now + self.choiceTimeout
   end
   return true
@@ -2607,7 +3029,13 @@ function Battle:tick(nowSeconds)
 
   -- The choice clock is suspended while anybody is away; the grace above is
   -- the only deadline running for them.
-  if self.phase == "choice" and self.deadline and self.now >= self.deadline
+  -- The same sweep covers the replace phase: `_autoChoice` answers a
+  -- `mustReplace` seat with a bench switch (it is the branch the NPC side
+  -- takes), so an unanswered replacement fills like an unanswered move,
+  -- `_maybeResolve` closes the phase, and the fight carries on one monster down
+  -- rather than wedging.
+  if (self.phase == "choice" or self.phase == "replace")
+     and self.deadline and self.now >= self.deadline
      and not self:_anyDisconnected() then
     for _, fighter in ipairs(self.fighters) do
       if self:_owes(fighter) then
@@ -2626,7 +3054,8 @@ function Battle:tick(nowSeconds)
     -- deadline already in the past, and every later tick would announce the
     -- timeout again.  Push the clock instead: the fight waits one more window
     -- rather than filling the log.
-    if self.phase == "choice" and self.deadline and self.now >= self.deadline then
+    if (self.phase == "choice" or self.phase == "replace")
+       and self.deadline and self.now >= self.deadline then
       self.deadline = self.now + self.choiceTimeout
     end
     return true

@@ -651,10 +651,24 @@ function testAdminRoundTripsThroughConfigValidation() {
   const playerCred = auth.newCredential({ secret: 'AA7777' });
 
   const { config: validated, warnings } = config.validate({
+    // `generation` is stated rather than left out. PROTOCOL 20 gave the hub a
+    // generation lock whose compat default (1) is deliberately loud -- a Gen 2
+    // hub that forgets `--generation 2` must be told -- so an omitted key here
+    // costs a warning that has nothing to do with credentials, which is what
+    // broke this assertion when that lock landed.
+    generation: 1,
     auth: { required: true, credentials: [adminCred, playerCred] },
   });
-  ok(warnings.length === 0,
-    'sanity: two credentials minted by newCredential validate with no warnings');
+  // Narrowed to warnings about the thing under test, and it stays narrow on
+  // purpose: this suite owns the credential SHAPE, not config.js's defaulting
+  // behaviour, and a blanket emptiness check makes every future top-level
+  // default a failure here. `config.test.js` has always used the same
+  // `some(...)` idiom for exactly this reason -- it is why that suite survived
+  // the generation lock and this one did not.
+  const credentialWarnings = warnings.filter((w) => /credential|auth/i.test(w));
+  ok(credentialWarnings.length === 0,
+    'sanity: two credentials minted by newCredential validate with no ' +
+    `credential warnings (got ${JSON.stringify(credentialWarnings)})`);
 
   const shapedAdmin = validated.auth.credentials.find((c) => c.secret === 'AA6666');
   const shapedPlayer = validated.auth.credentials.find((c) => c.secret === 'AA7777');

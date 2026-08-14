@@ -1741,9 +1741,23 @@ async function playRankedBattle(port, winnerName, loserName) {
   return { winner, loser, winnerWelcome, loserWelcome, sessionId: winnerSession.id };
 }
 
-// One JSON line, matching the fixed contract in the plan exactly: at,
-// startedAt, repeats, winner{name,points,gained}, loser{name,points,lost} --
-// nothing else on either level.
+// One JSON line: at, startedAt, repeats, winner{id,name,points,gained},
+// loser{id,name,points,lost} -- nothing else on either level.
+//
+// **`id` is PROTOCOL 16 and this assertion predated it.** The plan's original
+// contract named three fields a side; identity then moved to a persistent
+// playerId, leaderboard rows started carrying it, and `noteMatchSettled`
+// (lib/relay.js) began stamping it on every history line so two players called
+// ASH are distinguishable on the ledger. `lib/cli.js:historyRecord` reads it
+// and renders `NAME #abcd` from it -- so a run that dropped `id` would not be
+// a tidier record, it would be an ambiguous ledger, which is the failure the
+// PROTOCOL 16 work existed to fix.
+//
+// Pinned as an exact key set rather than a subset check, deliberately: the
+// point of this assertion is that nothing ELSE leaks into a persisted,
+// operator-facing file (`key`, internals, a whole battler sheet), and a
+// `has-these-keys` test would not catch that. That is also why it is worth
+// updating rather than loosening -- it caught its own contract moving.
 function assertHistoryRecordShape(record, winnerName, loserName) {
   ok(typeof record.at === 'number' && record.at > 0,
     'the record timestamps when the battle ended');
@@ -1752,11 +1766,21 @@ function assertHistoryRecordShape(record, winnerName, loserName) {
   ok(Object.keys(record).sort().join(',') === 'at,loser,repeats,startedAt,winner',
     'carrying exactly the five contract fields, nothing else');
   ok(record.winner.name === winnerName, 'the winner is named');
-  ok(Object.keys(record.winner).sort().join(',') === 'gained,name,points',
-    'the winner sub-object carries exactly its three contract fields');
+  ok(Object.keys(record.winner).sort().join(',') === 'gained,id,name,points',
+    'the winner sub-object carries exactly its four contract fields');
   ok(record.loser.name === loserName, 'the loser is named');
-  ok(Object.keys(record.loser).sort().join(',') === 'lost,name,points',
-    'and the loser sub-object carries exactly its three');
+  ok(Object.keys(record.loser).sort().join(',') === 'id,lost,name,points',
+    'and the loser sub-object carries exactly its four');
+
+  // The id has to be the playerId the hub seated them under, not the display
+  // name folded or a row index: `cli.js` only tags a row when the value looks
+  // like the first four hex of one, so a non-hex id silently un-tags the
+  // ledger and the collision this field exists to break comes straight back.
+  for (const [side, entry] of [['winner', record.winner], ['loser', record.loser]]) {
+    ok(typeof entry.id === 'string' && /^[0-9a-f]{4}/i.test(entry.id),
+      `the ${side}'s id is a playerId cli.js can tag a ledger row from ` +
+      `(got ${JSON.stringify(entry.id)})`);
+  }
 }
 
 // ------- history.jsonl: appended, 0600, one line per settled ranked battle

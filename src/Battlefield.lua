@@ -225,6 +225,12 @@ local arenaTried = false
 local humanCache = {} -- spriteId -> { image, quads } | false
 local iconCache = {} -- path string -> Image | false
 local quadCache = {} -- image -> 16x16 frame-0 quad
+-- Baked Gen 2 front pics; see `M.gen2FrontImage` far below. Declared up here
+-- with its siblings so `reloadArena` can drop it -- it holds baked images with
+-- exactly the property that function exists for (only valid for the colour
+-- mode they were baked in), and being declared at its point of use meant it
+-- was the one cache that survived a reload.
+local monFrontCache = {} -- "species|shiny|mode|path" -> Image | false
 
 -- Force a fresh arena load (e.g. after replacing outdoor_grass_arena.png).
 -- Also drops the derived sprite caches: fight entry is the one moment both the
@@ -235,6 +241,7 @@ function M.reloadArena()
   arenaTried = false
   humanCache = {}
   iconCache = {}
+  monFrontCache = {}
   -- Keyed by image, so it would otherwise pin the images just dropped above.
   quadCache = {}
 end
@@ -279,12 +286,38 @@ local function shout(text)
   return text
 end
 
--- ------- Gen1 gate
+-- ------- the theatre gate
+--
+-- One function, and it is the *only* switch: `MediatedBattle:usesBattlefield`
+-- and `CoopBattle:usesBattlefield` are both one-liners over it, and `uiSize` /
+-- `wantsFillScale` / `isWideBattleLayout` hang off those -- so arena, plates,
+-- band, fx and throws all turn on together or not at all.
+--
+-- It used to read `gen == 1`, and the Gen 1 line kept growing under it: the
+-- modern band, the ball throws, the send-out choreography and the exp strip all
+-- landed on the Gen 1 side of that test while Gold stayed on the 160x144 GB
+-- chrome (`docs/plans/gen2-compatibility.md` deferred it in as many words:
+-- "Gen2 keeps the classic guild-focus / 160x144 path until a later pass").
+-- `docs/plans/gen2-new-battle-system.md` is that pass.
+--
+-- **Nothing in this file was ever Gen 1-shaped**, which is what made the flip
+-- cheap: seats arrive carrying their own `front` image and their own numbers,
+-- and the only engine modules reached from here (`PaletteFX`, `Assets`,
+-- `SpriteRenderer`) are dual-gen already. The generation-specific *sources* --
+-- a front pic, a walk sheet, a trainer face -- resolve in the two screens that
+-- build the seats, behind `Gen` helpers.
+--
+-- Kept as a function rather than becoming `return true` for two reasons: the
+-- pcall still has to swallow a `Gen.generation` that throws on a half-built
+-- game (the draw path calls this), and a generation the engine grows later is
+-- refused rather than assumed -- a Gen 3 boot with no front pics would draw an
+-- arena full of blanks, and the GB fallback is a better answer than that.
+local THEATRE_GENERATIONS = { [1] = true, [2] = true }
 
 function M.enabled(game)
   local ok, gen = pcall(Gen.generation, game)
   if not ok then return false end
-  return (tonumber(gen) or 1) == 1
+  return THEATRE_GENERATIONS[tonumber(gen) or 1] == true
 end
 
 -- ------- asset load
@@ -1588,33 +1621,183 @@ local function paletteFX()
   return nil
 end
 
+-- The Gen 2 rung of the same ladder, and it sits ABOVE `spriteObp` because
+-- `spriteObp` cannot answer on Gold at all: it resolves through
+-- `PaletteFX.gbcPack()`, which is Red's GBC pack and has no Gold rows, so it
+-- returns nil and the trainer falls through to rung 3 -- a DMG-grey figure
+-- standing on a colour arena.
+--
+-- Gold assigns an OBJ palette per sprite record instead (`paletteId` into
+-- `data.gen2Palettes`, resolved by `src/world/gen2/Palettes.spritePalette`),
+-- which is the same pair `src/Client.lua` wears on the overworld player and
+-- `src/Chars.lua` bakes into the portrait. Reached the same way both of those
+-- do, so a Gold trainer on the arena is the colour the overworld just showed.
+--
+-- Daytime matters and is deliberately taken from the live overworld rather
+-- than defaulted: Gold repalettes its sprites at dusk, and a battle entered at
+-- night with a DAY-baked trainer would be visibly the wrong figure.
+-- Split from `gen2SheetColors` deliberately: the daytime is the only thing the
+-- CACHE KEY needs, and it is cheap. Resolving the whole palette to build a key
+-- meant every frame paid a `require`, a `mod.world:overworld()` and a fresh
+-- four-colour table allocation per human -- in the draw path -- before finding
+-- out the sheet was already baked. `resolveHumanSheet` calls this one before
+-- the cache check and the colours one only on a miss.
+local function gen2Daytime()
+  local daytime = "DAY"
+  pcall(function()
+    local ow = mod.world and type(mod.world.overworld) == "function"
+      and mod.world:overworld() or nil
+    if ow and type(ow.daytime) == "string" then daytime = ow.daytime end
+  end)
+  return daytime
+end
+
+local function gen2SheetColors(record, game, daytime)
+  local pals = game and game.data and game.data.gen2Palettes
+  if type(pals) ~= "table" or type(record) ~= "table" then return nil end
+  local ok, Palettes = pcall(require, "src.world.gen2.Palettes")
+  if not (ok and Palettes and type(Palettes.spritePalette) == "function") then
+    return nil
+  end
+  local colors = nil
+  pcall(function()
+    colors = Palettes.spritePalette(pals, daytime or gen2Daytime(), record)
+  end)
+  if type(colors) ~= "table" then return nil end
+  return colors
+end
+
+-- ------- Gen 2 front pics
+--
+-- Gold's `def.spriteFront` is a raw four-shade DMG sheet: colour 0 is WHITE,
+-- and on hardware that is the background the OBJ layer keys out. Loaded
+-- straight through `Assets.image` and drawn over the arena it is therefore a
+-- grey monster inside an opaque white box -- which is exactly what the first
+-- Gold arena run produced.
+--
+-- Gen 1 never hit this because its front pic arrives already resolved: the
+-- probe battler `BattleState.makeBattler` builds hands back a keyed, coloured
+-- image. Gold has no such call, so the mod does the two steps the GBC hardware
+-- does, in the order it does them:
+--
+--   * key colour 0 to transparent;
+--   * map the other three shades onto the species' own palette pair
+--     (`src/world/gen2/Palettes.monColors`, the same table
+--     `src/ui/gen2/BattleState.lua:601` colours its pics through), so a
+--     PIKACHU on the arena is the yellow the cart draws and not a grey blob.
+--
+-- Shade thresholds are `bakeSheetColor`'s, and deliberately the same numbers:
+-- the two bakes read the same kind of extracted sheet, and a second set of
+-- cutoffs would be a second way for the same art to come out wrong.
+--
+-- A species with no palette row still gets the alpha key -- a keyed grey
+-- monster is a far better picture than a white rectangle, and it is what the
+-- engine's own fallback does when `monColors` answers nil.
+--
+-- The cache this fills (`monFrontCache`) is declared at the top of the file
+-- with `humanCache` and friends, not here, so `reloadArena` can drop it.
+
+local function gen2MonColors(game, speciesKey, shiny)
+  local pals = game and game.data and game.data.gen2Palettes
+  if type(pals) ~= "table" then return nil end
+  local ok, Palettes = pcall(require, "src.world.gen2.Palettes")
+  if not (ok and Palettes and type(Palettes.monColors) == "function") then
+    return nil
+  end
+  local colors = nil
+  pcall(function() colors = Palettes.monColors(pals, speciesKey, shiny) end)
+  if type(colors) ~= "table" or type(colors[4]) ~= "table" then return nil end
+  return colors
+end
+
+-- `path` is the species record's own `spriteFront`. Returns an Image, or nil
+-- when there is nothing to bake -- callers fall back to the raw load, which is
+-- still a picture.
+function M.gen2FrontImage(game, speciesKey, path, shiny)
+  if type(path) ~= "string" or path == "" then return nil end
+  if not (love and love.image and love.image.newImageData
+          and love.graphics and love.graphics.newImage) then
+    return nil
+  end
+  -- The colour mode is in the key for the same reason `humanCacheKey` puts it
+  -- in its own: the options screen writes `PaletteFX.mode` live, and a bake is
+  -- only valid for the mode it was made under.
+  local PF = paletteFX()
+  local key = tostring(speciesKey) .. "|" .. (shiny and "s" or "n")
+    .. "|" .. tostring((PF and PF.mode) or "?") .. "|" .. path
+  local hit = monFrontCache[key]
+  if hit ~= nil then return hit or nil end
+
+  local colors = gen2MonColors(game, speciesKey, shiny)
+  local baked = nil
+  pcall(function()
+    local data = nil
+    local okA, Assets = pcall(require, "src.render.Assets")
+    if okA and type(Assets) == "table" and Assets.imageData then
+      data = Assets.imageData(path)
+    else
+      data = love.image.newImageData(path)
+    end
+    if not (data and data.mapPixel) then return end
+    -- `Assets.imageData` builds a fresh ImageData per call today
+    -- (`love.image.newImageData(Assets.resolve(path))` -- no cache), so this
+    -- is safe to map in place. Kept as a note rather than a defensive clone
+    -- because a clone would be a second full-size allocation per bake for a
+    -- hazard that does not exist; if that function ever starts caching, THIS
+    -- is the site that has to clone first.
+    data:mapPixel(function(_, _, r, gr, b, a)
+      if a == 0 then return r, gr, b, a end
+      if r > 0.83 then return r, gr, b, 0 end
+      if not colors then return r, gr, b, a end
+      local col = r > 0.5 and colors[2] or r > 0.17 and colors[3] or colors[4]
+      return col[1] / 255, col[2] / 255, col[3] / 255, a
+    end)
+    baked = love.graphics.newImage(data)
+    if baked.setFilter then
+      pcall(function() baked:setFilter("nearest", "nearest") end)
+    end
+  end)
+
+  monFrontCache[key] = baked or false
+  return baked
+end
+
 -- The bake is colour-mode dependent and the mode can change between battles
 -- (the options screen writes PaletteFX.mode live), so the mode is part of the
 -- cache key — a sheet baked under the previous mode must not be handed back.
-local function humanCacheKey(spriteId)
+--
+-- On Gold the daytime is part of it too, for the reason `gen2SheetColors`
+-- gives: the same sheet is a different set of pixels at dusk, and a cache that
+-- could not tell them apart would hand a night battle its morning trainer.
+local function humanCacheKey(spriteId, daytime)
   local PF = paletteFX()
-  return spriteId .. "|" .. tostring((PF and PF.mode) or "?")
+  local key = spriteId .. "|" .. tostring((PF and PF.mode) or "?")
+  if daytime then key = key .. "|" .. tostring(daytime) end
+  return key
 end
 
-local function bakeSheetColor(record, spriteId)
+local function bakeSheetColor(record, spriteId, gen2Colors)
   if type(record) ~= "table" or record.trueColor then return nil end
   if type(record.image) ~= "string" or record.image == "" then return nil end
   if not (love and love.image and love.image.newImageData
           and love.graphics and love.graphics.newImage) then
     return nil
   end
-  local PF = paletteFX()
-  if type(PF) ~= "table" or not PF.spriteObp then return nil end
 
-  local engineColored = false
-  pcall(function()
-    engineColored = (PF.usesGbcPack and PF.usesGbcPack() and true or false)
-      or (PF.usesSpriteObp and PF.usesSpriteObp() and true or false)
-  end)
-  if engineColored then return nil end
+  local colors = gen2Colors
+  if type(colors) ~= "table" then
+    local PF = paletteFX()
+    if type(PF) ~= "table" or not PF.spriteObp then return nil end
 
-  local colors = nil
-  pcall(function() colors = PF.spriteObp(record, spriteId) end)
+    local engineColored = false
+    pcall(function()
+      engineColored = (PF.usesGbcPack and PF.usesGbcPack() and true or false)
+        or (PF.usesSpriteObp and PF.usesSpriteObp() and true or false)
+    end)
+    if engineColored then return nil end
+
+    pcall(function() colors = PF.spriteObp(record, spriteId) end)
+  end
   if type(colors) ~= "table" or type(colors[4]) ~= "table" then return nil end
 
   local baked = nil
@@ -1643,20 +1826,39 @@ local function bakeSheetColor(record, spriteId)
   return baked
 end
 
-local function resolveHumanSheet(spriteId, eng)
+-- `game` is threaded in from `M.draw` for the Gen 2 rung alone: everything
+-- else here is generation-free, and a caller with no game simply gets the
+-- Gen 1 ladder (which is also what a headless test that hands over neither
+-- love nor a dataset gets).
+local function resolveHumanSheet(spriteId, eng, game, isGen2)
   if type(spriteId) ~= "string" or spriteId == "" then return nil end
-  local key = humanCacheKey(spriteId)
+
+  -- **Cache first.** Only the daytime is needed for the key, and on Gold it is
+  -- part of it because the same trainer is a different set of pixels at dusk.
+  -- Everything else -- the sprite record, the palette table -- is resolved on a
+  -- MISS only: this runs per human per frame from `drawHuman`, and doing the
+  -- palette work up front allocated a colour table per human per frame purely
+  -- to compute a key.
+  local daytime = isGen2 and gen2Daytime() or nil
+  local key = humanCacheKey(spriteId, daytime)
   local hit = humanCache[key]
   if hit ~= nil then return hit or nil end
 
-  local entry = false
+  local record = nil
   pcall(function()
-    local record = nil
     if eng and eng.sprites and type(eng.sprites[spriteId]) == "table" then
       record = eng.sprites[spriteId]
     elseif mod and mod.content and mod.content.sprites and mod.content.sprites.get then
       record = mod.content.sprites:get(spriteId)
     end
+  end)
+  local gen2Colors = nil
+  if isGen2 and type(record) == "table" then
+    gen2Colors = gen2SheetColors(record, game, daytime)
+  end
+
+  local entry = false
+  pcall(function()
     if type(record) ~= "table" then return end
 
     local img = nil
@@ -1678,7 +1880,7 @@ local function resolveHumanSheet(spriteId, eng)
       if ok then img = loaded end
     end
     if not img then return end
-    local colored = bakeSheetColor(record, spriteId)
+    local colored = bakeSheetColor(record, spriteId, gen2Colors)
     if colored then img = colored end
 
     local fw = tonumber(record.frameWidth) or M.HUMAN_SRC
@@ -1698,10 +1900,10 @@ local function resolveHumanSheet(spriteId, eng)
   return entry or nil
 end
 
-local function drawHuman(h, frame, eng)
+local function drawHuman(h, frame, eng, game, isGen2)
   local gfx = g()
   if not gfx then return end
-  local sheet = resolveHumanSheet(h.spriteId, eng)
+  local sheet = resolveHumanSheet(h.spriteId, eng, game, isGen2)
   local scale = M.HUMAN_SCALE
   local ox = math.floor(M.HUMAN_DRAW / 2)
   local oy = M.HUMAN_DRAW
@@ -2605,9 +2807,14 @@ end
 -- eng: optional engine bag (Font, Sprites, SpriteRenderer, …).
 function M.draw(battle, ctx, eng)
   pcall(function()
-    if not M.enabled(battle and battle.game or (eng and eng.game)) then
+    local drawGame = (battle and battle.game) or (eng and eng.game)
+    if not M.enabled(drawGame) then
       return
     end
+    -- Once per frame, not once per human: `Gen.generation` allocates a closure
+    -- per `pcall` it makes, and the answer cannot change inside a frame.
+    local okGen, drawGen = pcall(Gen.generation, drawGame)
+    local drawGen2 = okGen and drawGen == 2
     local layout = M.layout(ctx)
     local hasFx = #layout.fx > 0
     local gfx = g()
@@ -2629,7 +2836,7 @@ function M.draw(battle, ctx, eng)
       drawArena()
 
       for _, h in ipairs(layout.humans) do
-        pcall(drawHuman, h, layout.frame, eng)
+        pcall(drawHuman, h, layout.frame, eng, drawGame, drawGen2)
       end
       for _, mon in ipairs(layout.mons) do
         pcall(drawMonIcon, mon, layout.frame,

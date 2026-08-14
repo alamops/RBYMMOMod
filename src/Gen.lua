@@ -361,6 +361,27 @@ function M.playVictoryMusic(game, opts)
   end
 end
 
+-- The overworld walk-sheet catalog, by generation.
+--
+-- Gold keeps its sprite records on `data.gen2Sprites`; `data.sprites` is Gen 1's
+-- table and on a Gold boot is either absent or the wrong shape. The engine's own
+-- resolution is `rawget(data, "gen2Sprites") or data.sprites`
+-- (`src/world/gen2/NPC.lua:195`) and this is that line, in one place, because
+-- three call sites in this mod were reading `data.sprites` directly -- which is
+-- why the arena's trainers were invisible on Gold: the record lookup found
+-- nothing, `resolveHumanSheet` returned no sheet, and the figure simply never
+-- drew. `rawget` and not a plain index for the reason the engine uses it: a
+-- dataset may carry a metatable that would synthesise a Gen 1 answer.
+function M.spriteCatalog(game)
+  local data = game and game.data
+  if type(data) ~= "table" then return nil end
+  local gen2 = rawget(data, "gen2Sprites")
+  if type(gen2) == "table" then return gen2 end
+  local sprites = data.sprites
+  if type(sprites) == "table" then return sprites end
+  return nil
+end
+
 function M.restoreMapMusic(game, opts)
   opts = opts or {}
   local Music = opts.Music

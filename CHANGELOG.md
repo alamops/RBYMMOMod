@@ -8,12 +8,80 @@ here must match `manifest.version`.
 
 ### Added
 
+- **The battle theatre is not a Gen 1 feature any more.** Gold gets the
+  top-down arena, the plates, the modern band, the fx and the throws — the
+  same picture Red has, on the same 640×360 field.
+  `docs/plans/gen2-compatibility.md` deferred this in as many words ("Gen2
+  keeps the classic guild-focus / 160×144 path until a later pass"); this is
+  that pass. Four things had to be true and each failed on its own first:
+  - **The gate.** `Battlefield.enabled` answered `gen == 1`; it is now a
+    capability question, and it is still a gate rather than `true` (a
+    generation the engine grows later has no front pics this file knows how
+    to ask for, and the GB fallback beats an arena full of blanks).
+  - **The surface, which is where the two games genuinely differ.**
+    `src/core/Game.lua` widens the render surface for a screen that asks
+    (`uiSize` / `wantsFillScale`); **`src/core/Game2.lua` has no such seam
+    at all**, and `Chrome.fitScale` hardcodes the 160×144 panel grid — so
+    the arena rendered into a 160-wide surface and the window showed its
+    top-left corner at 6×. What Gold has instead is
+    `drawsWidescreen()` / `drawWidescreen(w, h)`, the same pair its own
+    battle screen uses, so both mediated screens now paint the window
+    through it with Renderer's fill-scale arithmetic reproduced in window
+    space. Same theatre, one different delivery function — no engine change,
+    no `engine_internals` reach. The screens' `render.zones` opt-out follows
+    the same rule: a zone rect is in the *receiving* generation's space, so
+    Gold gets 160×144 (its `blitZones` scales every rect by `w/160`) while
+    Gen 1 keeps stating the arena canvas.
+  - **Front pics.** Gen 1 gets a keyed, coloured pic as a side effect of
+    `BattleState.makeBattler`, which Gold does not have. Gold's
+    `def.spriteFront` is a raw four-shade sheet whose colour 0 is WHITE, so
+    loaded straight it is a grey monster in an opaque white box. The mod now
+    does what the hardware does: key colour 0, then map the other three onto
+    the species' own palette (`gen2/Palettes.monColors`).
+  - **Trainers.** They were invisible on Gold, because three sites read
+    `data.sprites` — Gen 1's table. Gold keeps its walk sheets on
+    `data.gen2Sprites`; `Gen.spriteCatalog` is that resolution in one place.
+    Their colour comes from the per-sprite Gold OBJ palette, keyed by
+    daytime so a night battle is not wearing its morning trainer.
+- **Experience in Gen 2 mediated battles.** PROTOCOL 21 shipped exp for the
+  Gen 1 twins only; the participation set, `_unfield`, `_awardExp` and the
+  facts-only `exp` event now exist in `src/BattleSim2` and
+  `server/lib/battle2` as well, under the same mode gate (`wild`,
+  `coop_wild`, `coop_npc` — never 1v1 or `coop_pvp`, which would be a
+  farming loop). **No PROTOCOL bump:** `exp` already rides Wire's whitelist
+  and carries no generation tag, because "Beta fell at level 20, split two
+  ways" is the same sentence in both games. What differs is downstream, and
+  new `src/Exp2.lua` owns it: Gold banks on `mon.experience`, has its own
+  five-key stat-exp block, and replaces EXP.ALL with **EXP.SHARE** — a held
+  item that halves the pool once for both passes and pays a second pass to
+  the **holders only**, plus the traded and Lucky Egg ×1.5 multipliers. Every
+  number comes from the engine's own `battle/gen2/Mon`, so an MMO fight on
+  Gold pays exactly what the same fight pays offline.
+- **Stolen-KO retargeting and the replace phase on Gen 2.** Both were Gen 1
+  twins only. A faster ally's KO no longer leaves the slower ally fizzling
+  with "has no target" on Gold, and a faint with a living bench opens the
+  referee's replace phase there too — one `turn` per owing seat carrying its
+  field slot, the turn number holding still until the successor is out.
+  `send` / `switch` now carry the fielded party index on Gen 2 as well, so a
+  seat holding two of a species can no longer re-field the fallen copy.
+- **Gen 2 arena e2e.** `tests/drivers/run-battlefield-e2e-gen2.sh` runs the
+  *same* screenshot driver as its Gen 1 sibling against a live Gold boot —
+  `battlefield_shot.lua` now resolves its looks through `Gen.defaultSprite`,
+  its species through the live dex, and boots through `mmo_util.bootToPlay`.
+  Both carts pass its 34 pixel assertions. `run-mmo-e2e-gen2.sh` gained arena
+  checks on **both** clients (the two build their seats from different ends
+  of the same wire) and an end-to-end exp check on the `coop_npc` leg —
+  asserted on awards actually applied rather than on a number that moved,
+  and deliberately not on `coop_wild`, which ends by MASTER_BALL and has no
+  faint to pay for. Both drivers still exit 0 with no Gold cache.
+
 - **Modern battle band.** The stretched GB message box and menus at the bottom
   of the arena are replaced by native widescreen panels (message, command
   grid, scrolling lists with PP/HP columns) in the plate visual language,
-  shared by CoopBattle and MediatedBattle; the classic 160×144 and Gen2
-  screens keep their GB chrome. The command grid lays out 4-across and the
-  cursor walks it that way.
+  shared by CoopBattle and MediatedBattle; the classic 160×144 screen keeps
+  its GB chrome (Gen 2 joined the band in the entry at the top of this
+  release). The command grid lays out 4-across and the cursor walks it that
+  way.
 - **Pokéball throws animate on the arena.** An original vector pokéball arcs
   to the target, the mon recalls into it at the engine's HIDEPIC beat, each
   referee shake reads as one wobble, and the break-free or catch resolves in
@@ -45,9 +113,10 @@ here must match `manifest.version`.
   move learning included). Paying modes are
   `wild`, `coop_wild` and `coop_npc` — the modes vanilla itself awards
   exp for; 1v1 and `coop_pvp` never emit, so there is no PvP farming
-  loop. Gen1 twins only (`src/BattleSim/Turn.lua` +
-  `server/lib/battle/Turn.js`); Gen2 (`BattleSim2` / `lib/battle2`)
-  stays exp-free. `exp` joins `Wire.BATTLE_EVENTS` and
+  loop. Landed on the Gen1 twins first (`src/BattleSim/Turn.lua` +
+  `server/lib/battle/Turn.js`); `BattleSim2` / `lib/battle2` follow in
+  the Gen 2 battle-system entry at the top of this release, with the
+  Gold-side formula in `src/Exp2.lua`. `exp` joins `Wire.BATTLE_EVENTS` and
   `server/lib/sanitize.js`'s event whitelist in lockstep.
 - **Your partner sees the `!` too.** When one party member gets pulled
   into a fight, the other's screen now shows the classic `!` bubble
@@ -141,8 +210,9 @@ here must match `manifest.version`.
   attacker lunges, then the hit flashes with the bar frozen, then the HP
   drains — followed by the already-ordered sink, fainted line, switch
   choice and send-out. Multi-hit moves call out once and land one hit beat
-  per strike; heals skip both beats; classic and Gen2 screens are
-  untouched. The order is pinned by per-twin regression tests.
+  per strike; heals skip both beats; the classic screen is untouched (Gen 2
+  joined the arena in the entry at the top of this release). The order is
+  pinned by per-twin regression tests.
 - **Trainer speech bubbles v2.** Rounded callouts with the move name
   emphasized on its own line, sized from real font metrics.
 - **Battlefield HUD plates.** The Gen1 arena now shows a persistent plate per
@@ -219,8 +289,9 @@ here must match `manifest.version`.
   preserved; bag-icon sheets were stretching/smashing), field-cursor
   targeting with arrow + floating status card (name / Lxx / HP / status /
   front sprite), Pokémon bob + ground shadow, and trainer-head callout
-  bubbles when a human’s mon acts (not wild). Gen2 keeps the classic
-  guild-focus / 160×144 path until a later pass.
+  bubbles when a human’s mon acts (not wild). Gen2 kept the classic
+  guild-focus / 160×144 path until a later pass — which is the entry at the
+  top of this release.
 - **PROTOCOL 20 — gen lock + co-op invite joiner finish.** `Config.PROTOCOL` /
   `relay.js` bump **18 → 20** (both parallel branches had claimed 19). Client
   `mmo.hello` carries `generation` (1|2); Hub.lua and the Node relay refuse a

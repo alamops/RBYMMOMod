@@ -63,7 +63,14 @@ return function(game)
   local SHOT_DIR = os.getenv("SHOT_DIR") or "/tmp/rby_mmo_bf_shots"
   os.execute('mkdir -p "' .. SHOT_DIR .. '" 2>/dev/null')
 
-  U.newGame(game)
+  -- Boot to free-roam through the shared helper rather than `U.newGame`
+  -- directly: Gold with POKEPORT_DRIVER already lands in free-roam (empty
+  -- stack) and mashing A through a Gen 1 intro flow it does not have is how a
+  -- Gold run wedges on an open Start menu. `H.bootToPlay` is the same door
+  -- every other Gen 2 driver in this folder goes through.
+  H.bootToPlay(game)
+  local GEN = H.generation(game)
+  log("generation =", tostring(GEN))
   if game.save and game.save.player then
     game.save.player.name = "RED"
   end
@@ -92,7 +99,17 @@ return function(game)
   -- Proper mod facade stub: save/options/exports/content are real (if
   -- minimal) implementations rather than absent, so the production
   -- sprite-resolution code in MediatedBattle / Chars / Cast runs unmodified.
-  local saveData = { sprite = "SPRITE_RED" }
+  -- The self look. Gold has no SPRITE_RED: its overworld catalog is its own,
+  -- and `Gen.defaultSprite` is what every production call site resolves the
+  -- boot's default walker through -- so the driver asks it rather than naming
+  -- a Gen 1 id that would silently fall back and draw the wrong figure.
+  -- Resolved after the resolver below exists; seeded here so the facade the
+  -- resolver is handed is already shaped.
+  local saveData = { sprite = nil }
+  -- Forward-declared: `stub.exports.players` below closes over PEER_SPRITE,
+  -- and a local declared after that closure would not be the same variable --
+  -- the closure would read a global and hand the peer a nil look.
+  local SELF_SPRITE, PEER_SPRITE = "SPRITE_RED", "SPRITE_BLUE"
   local stub = {
     id = "rby_mmo",
     path = "mods/rby_mmo",
@@ -120,7 +137,7 @@ return function(game)
     },
     exports = {
       players = function()
-        return { { id = PEER_ID, name = "BLUE", sprite = "SPRITE_BLUE" } }
+        return { { id = PEER_ID, name = "BLUE", sprite = PEER_SPRITE } }
       end,
     },
     content = {
@@ -141,6 +158,66 @@ return function(game)
   local Mediated = resolve("MediatedBattle")
   local Battlefield = resolve("Battlefield")
   local Cast = resolve("Cast")
+  local GenMod = resolve("Gen")
+
+  -- Both looks, per generation. The peer's rides `mod.exports.players()`,
+  -- which MediatedBattle reads verbatim with no registry involved, so it has
+  -- to be an id the boot's catalog actually holds.
+  do
+    local ok, def = pcall(GenMod.defaultSprite, game)
+    if ok and type(def) == "string" and def ~= "" then SELF_SPRITE = def end
+    if GEN == 2 then
+      -- A second, visibly different walker for the peer. Gold's catalog is
+      -- keyed by its own ids, so the peer falls back to the boot default when
+      -- the preferred one is absent -- two identical trainers is a worse
+      -- picture than a wrong id is a failure.
+      -- `Gen.spriteCatalog`, NOT `game.data.sprites` -- Gold keeps its walk
+      -- sheets on `data.gen2Sprites`, and reading Gen 1's table here is the
+      -- same bug this pass fixed in `src/`. It failed silently: the loop never
+      -- matched, the fallback below rewrote the peer to the ally's own look,
+      -- and the "foe trainer saturated" assertion then re-tested the ally
+      -- while reading as if it had covered the peer.
+      local sprites = GenMod.spriteCatalog(game)
+      PEER_SPRITE = nil
+      -- **Skipping SELF_SPRITE is the point.** `Gen.defaultSprite` answers
+      -- SPRITE_CHRIS on Gold, and a candidate list that led with the same id
+      -- picked it -- handing both sides the same walker while reading like it
+      -- had chosen a second one. The assertion below is what caught that.
+      for _, candidate in ipairs({ "SPRITE_KRIS", "SPRITE_LASS", "SPRITE_BLUE",
+                                   "SPRITE_YOUNGSTER", "SPRITE_COOLTRAINER_F",
+                                   "SPRITE_BUG_CATCHER" }) do
+        if candidate ~= SELF_SPRITE
+           and type(sprites) == "table" and sprites[candidate] then
+          PEER_SPRITE = candidate
+          break
+        end
+      end
+      -- Last resort: any walker in this boot's catalog that is not our own,
+      -- taken in sorted order so the pick is the same on every run.
+      if not PEER_SPRITE and type(sprites) == "table" then
+        local ids = {}
+        for id in pairs(sprites) do
+          if type(id) == "string" and id ~= SELF_SPRITE then
+            ids[#ids + 1] = id
+          end
+        end
+        table.sort(ids)
+        PEER_SPRITE = ids[1]
+      end
+      if not PEER_SPRITE then
+        -- Loud, because a silent fallback is what hid the bug above: two
+        -- identical trainers still draw, so nothing else in this run would
+        -- say the peer look was never independently resolved.
+        log("warn", "no distinct Gen2 peer walker found; both sides will "
+          .. "wear " .. tostring(SELF_SPRITE))
+        PEER_SPRITE = SELF_SPRITE
+      end
+    end
+  end
+  saveData.sprite = SELF_SPRITE
+  local distinctLooks = PEER_SPRITE ~= SELF_SPRITE
+  log("self sprite =", SELF_SPRITE, "peer sprite =", PEER_SPRITE,
+      "distinct=" .. tostring(distinctLooks))
 
   log("Battlefield.enabled(game) =", tostring(Battlefield.enabled(game)))
   local castOk = Cast.install()
@@ -154,10 +231,35 @@ return function(game)
     battle = "battlefield-e2e",
     transport = { send = function() return true end },
   })
+  -- The two species the arena stands on. Kanto's 151 are in Gold's dex too,
+  -- so the Gen 1 pair resolves on both boots -- but it is *checked* rather
+  -- than assumed, because a species key the dataset does not hold resolves to
+  -- no front pic and the frame under test would be an empty seat that still
+  -- passed every colour assertion below.
+  local MINE_SPECIES, FOE_SPECIES = "PIKACHU", "BULBASAUR"
+  local speciesInDex = false
+  do
+    local pokedex = (game.data and game.data.pokemon) or {}
+    local function firstPresent(...)
+      for _, key in ipairs({ ... }) do
+        if type(pokedex[key]) == "table" then return key end
+      end
+      return nil
+    end
+    MINE_SPECIES = firstPresent("PIKACHU", "CYNDAQUIL", "TOTODILE") or MINE_SPECIES
+    FOE_SPECIES = firstPresent("BULBASAUR", "CHIKORITA", "SENTRET") or FOE_SPECIES
+    log("species mine =", MINE_SPECIES, "foe =", FOE_SPECIES)
+    -- Recorded rather than asserted here: `check` is defined below, with the
+    -- rest of the assertions, and the seed has to happen before the screen is
+    -- pushed. Reported in the assertion block instead.
+    speciesInDex = type(pokedex[MINE_SPECIES]) == "table"
+      and type(pokedex[FOE_SPECIES]) == "table"
+  end
+
   screen.phase = "choose"
   screen.uploaded = true
   screen.mine = {
-    { species = "PIKACHU", level = 25, nickname = "SPARKY",
+    { species = MINE_SPECIES, level = 25, nickname = "SPARKY",
       hp = 40, stats = { hp = 55 },
       -- `maxPp`, not `ppMax`: M:bandMoveRows() (src/MediatedBattle.lua:3565)
       -- reads `move.maxPp` for the PP column the new moves-list frame
@@ -168,10 +270,10 @@ return function(game)
   }
   screen.active = 1
   screen.slots[screen:foeSlot()] = {
-    species = "BULBASAUR", level = 18, hp = 32, maxHp = 45,
+    species = FOE_SPECIES, level = 18, hp = 32, maxHp = 45,
   }
   screen.slots[screen:mySlot()] = {
-    species = "PIKACHU", level = 25, hp = 40, maxHp = 55,
+    species = MINE_SPECIES, level = 25, hp = 40, maxHp = 55,
   }
 
   game.stack:push(screen)
@@ -189,6 +291,18 @@ return function(game)
       log("FAIL", label, detail or "")
     end
   end
+
+  -- The deferred seed check (see the species block above): a key the dataset
+  -- does not hold resolves to no front pic, and the frame under test would be
+  -- an empty seat that still passed every colour assertion below.
+  check(speciesInDex, "both seeded species are in this boot's dex",
+        MINE_SPECIES .. "/" .. FOE_SPECIES)
+  check(Battlefield.enabled(game),
+        "the theatre gate is up for this boot", "generation " .. tostring(GEN))
+  check(distinctLooks,
+        "the two trainers wear different walkers, so the foe-side saturation "
+        .. "checks below really do exercise the peer's own look",
+        SELF_SPRITE .. " vs " .. PEER_SPRITE)
 
   -- Fill-scale letterbox transform, derived from the screenshot's own pixel
   -- dimensions (see header comment for why render.hud's viewport is not

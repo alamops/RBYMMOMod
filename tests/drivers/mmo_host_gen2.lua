@@ -256,6 +256,38 @@ return function(game)
       local battleTop = H.top(game)
       log(("mediated: peer=%s phase=%s"):format(
         tostring(battleTop.peerName), tostring(battleTop.phase)))
+
+      -- ------- the arena, on Gold
+      --
+      -- docs/plans/gen2-new-battle-system.md: the top-down theatre is no
+      -- longer a Gen 1 feature. The three things checked here are the three
+      -- that decide whether a Gold fight is the same picture a Red one is,
+      -- and each of them failed on its own in the first Gold arena run:
+      --
+      --   * the gate. `Battlefield.enabled` used to answer `gen == 1`.
+      --   * the SURFACE, which is the part that is genuinely different on
+      --     Gold: `src/core/Game2.lua` has no `uiSize` / `wantsFillScale`
+      --     seam at all, so a state that wants the window has to say so with
+      --     `drawsWidescreen()` (the same pair Gold's own battle uses). With
+      --     the gate up but this false, the arena rendered into a 160-wide
+      --     surface -- the window showed its top-left corner at 6x.
+      --   * that the fight still *draws*, which the screenshot beside this
+      --     is the real evidence for.
+      local usesArena = battleTop.usesBattlefield
+        and battleTop:usesBattlefield() or false
+      check(usesArena, "the Gold mediated fight is on the top-down arena")
+      local wide = battleTop.drawsWidescreen
+        and battleTop:drawsWidescreen() or false
+      check(wide,
+            "...taking the window through Gold's own widescreen seam "
+            .. "(Game2 has no uiSize/fill-scale)")
+      local aw, ah = battleTop:uiSize()
+      check(aw == 640 and ah == 360,
+            ("...at the arena's own 640x360 (got %sx%s)"):format(
+              tostring(aw), tostring(ah)))
+      check(battleTop:commandCols() == 4,
+            "...and the modern band lays its commands out four across")
+
       U.shot(game, SHOT_DIR .. "/host-battle-open.png")
     end
 
@@ -322,6 +354,7 @@ return function(game)
     end
     check(staged ~= nil, "staged a wild battle on the host")
     log("wild species:", WILD_SPECIES)
+
 
     local waiting = H.waitSeconds(game, function()
       return exports.coopWaiting() ~= nil
@@ -394,6 +427,12 @@ return function(game)
             "coop_battle_ended fired after Party vs Wild")
     end
     log("engine wild result:", tostring(wildFinished))
+
+    -- No exp check on this leg by design: it ends with a MASTER_BALL, and a
+    -- caught foe never faints -- there is nothing for the referee's
+    -- `_awardExp` to drain, so paying nothing here is the correct answer.
+    -- The Gen 2 payout is asserted on the coop_npc leg below, which ends by KO.
+
     U.shot(game, SHOT_DIR .. "/host-party-wild-after.png")
     H.signal("host_wild_done")
     H.await(game, "guest_wild_done")
@@ -485,6 +524,22 @@ return function(game)
     end
 
     H.await(game, "guest_coop_joined")
+    -- ------- experience, before the fight that pays it
+    --
+    -- `coop_npc` rather than `coop_wild`: both are paying modes, but the
+    -- coop_wild leg above ends by MASTER_BALL, and a caught foe never faints
+    -- -- so there is nothing for `_awardExp` to drain and paying nothing is
+    -- the correct answer there. A 2-on-2 against a trainer ends by KO, which
+    -- is the case worth checking.
+    local coopExpBefore = nil
+    do
+      local mine = game.save and game.save.party and game.save.party[1]
+      if type(mine) == "table" then
+        coopExpBefore = tonumber(mine.experience) or 0
+        log(("exp before coop_npc: %d (level %s)"):format(
+          coopExpBefore, tostring(mine.level)))
+      end
+    end
     local onCoopField = H.waitSeconds(game, function()
       local fieldTop = H.top(game)
       return fieldTop ~= nil and fieldTop.sim ~= nil and #fieldTop.sim.slots == 4
@@ -508,7 +563,16 @@ return function(game)
       check(exports.coopDrawFailed() == false, "and it drew without error")
     end
 
+    -- Sampled off the live screen, not read afterwards.
+    --
+    -- `exports.coopSync()` answers from `coop.state`, which is nil the moment
+    -- the fight leaves the stack -- so every counter read *after* the loop is
+    -- reading zeros from an absent screen rather than facts from a finished
+    -- one. (That is why `medGaps` is sampled here too.) The award count has to
+    -- be taken the same way, and taking the max keeps the last non-zero sample
+    -- rather than whatever the final tick happened to see.
     local coopMedGaps = 0
+    local coopExpPaid = 0
     local coopOver = H.drivePrompts(game, function()
       local fieldTop = H.top(game)
       return fieldTop == nil or fieldTop.sim == nil
@@ -516,6 +580,8 @@ return function(game)
       local fieldTop = H.top(game)
       if H.isMediatedCoop(fieldTop) then
         coopMedGaps = tonumber(fieldTop.medGaps) or coopMedGaps
+        local paid = tonumber(fieldTop.expPaid) or 0
+        if paid > coopExpPaid then coopExpPaid = paid end
       end
       U.tap(game, "a")
     end)
@@ -526,6 +592,45 @@ return function(game)
     check(coopSync.gaps == 0, "with no turn lost by the Lua hub")
     check(coopSync.desyncs == 0, "and no drift between the two copies")
     check(coopMedGaps == 0, "and no gaps in the mediated event stream")
+
+    -- ------- and the award landed, end to end
+    --
+    -- PROTOCOL 21 shipped exp for the Gen 1 twins only; round 7 brought the
+    -- participation set and `_awardExp` across to `BattleSim2` /
+    -- `server/lib/battle2`, and `src/Exp2.lua` prices the referee's
+    -- facts-only event with GOLD's formula (`mon.experience`, Gen 2 stat exp,
+    -- the EXP.SHARE halved pass rather than Gen 1's EXP.ALL).
+    -- docs/plans/gen2-new-battle-system.md.
+    --
+    -- `expPaid` is the assertion and the experience delta is the corroboration,
+    -- deliberately in that order: the count says the Gen 2 referee EMITTED the
+    -- event and this client APPLIED it -- three links (hub sim, wire, client
+    -- formula) no headless test can span -- while a delta alone would pass on
+    -- a number that moved for some other reason. The amount itself is not
+    -- checked here; it is the engine's own `Mon.experienceGain` and is pinned
+    -- byte-for-byte in the suite's Exp2 section.
+    if coopExpBefore ~= nil then
+      local mine = game.save and game.save.party and game.save.party[1]
+      local coopExpAfter = type(mine) == "table"
+        and (tonumber(mine.experience) or 0) or nil
+      log(("exp after coop_npc: %s (level %s) expPaid=%d"):format(
+        tostring(coopExpAfter), tostring(mine and mine.level), coopExpPaid))
+      if coopExpPaid > 0 then
+        check(true, "the Gen 2 referee paid experience for a refereed KO")
+        check(coopExpAfter ~= nil and coopExpAfter > coopExpBefore,
+              ("...and it persisted to this save (%d -> %s)"):format(
+                coopExpBefore, tostring(coopExpAfter)))
+      else
+        -- Nobody fell on this side's watch (the partner's mon took every KO,
+        -- or the fight ended on a forfeit). Not a failure -- but it must not
+        -- read as a pass either, so it is logged and the weaker invariant is
+        -- what is asserted.
+        log("note: no award reached this copy this fight (expPaid=0)")
+        check(coopExpAfter == nil or coopExpAfter >= coopExpBefore,
+              "Gen 2 exp never goes backwards")
+      end
+    end
+
     log("co-op result:", tostring(coopFinished))
     if stagedTrainer then
       check(not H.onStack(game, stagedTrainer),

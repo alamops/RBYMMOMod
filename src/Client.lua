@@ -2452,6 +2452,25 @@ function M.install()
       gaps = (state and state.gaps) or 0,
       desyncs = (state and state.desyncs) or 0,
       resyncs = (state and state.resyncs) or 0,
+      -- How many experience awards this copy actually applied.
+      --
+      -- Exp is the one part of a refereed fight with no visible artefact a
+      -- driver can wait for: the referee emits facts (it holds no species
+      -- table and can never price a faint), the client prices them, and the
+      -- result lands in a save field. Watching `save.party[i].experience`
+      -- climb is weaker than it looks -- it would pass on a fight that never
+      -- emitted anything and would *fail* on one that ended by catch, where
+      -- paying nothing is right. This is the count of awards applied, which
+      -- is the fact an e2e wants to assert. Zero offline and zero in the
+      -- non-paying modes (1v1, coop_pvp) by design.
+      --
+      -- **Unlike its siblings above, this one survives the fight.** They read
+      -- `coop.state`, which is nil the moment the battle leaves the stack, so
+      -- they answer 0 for the whole window in which somebody would naturally
+      -- ask. `Coop.finish` latches this count on the way out, so a caller can
+      -- read it during the fight OR after it and get the same number.
+      expPaid = (state and tonumber(state.expPaid))
+        or (coop and tonumber(coop.lastExpPaid)) or 0,
     }
   end
   mod.exports.coopDrawFailed = function()

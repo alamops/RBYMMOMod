@@ -2498,6 +2498,11 @@ function M:onBattleOver(result, game, state, toLearn)
   end
 
   self.running = false
+  -- Latched off the screen before it goes, so the counter survives the state
+  -- that produced it. Everything on `coop.state` reads 0 the instant this line
+  -- nils it, which is exactly when a caller asking "how did that fight go"
+  -- runs -- `exports.coopSync().expPaid` was unreadable for that reason.
+  self.lastExpPaid = (self.state and tonumber(self.state.expPaid)) or 0
   self.battle, self.inbox, self.state = nil, nil, nil
   self.lastResult = result
   -- The held battle is put back in the encounter slot so consume() -- the one

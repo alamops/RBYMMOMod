@@ -24,6 +24,14 @@ Live-ops that only exist on the dedicated hub:
 - Bans / allowlist / auth throttle / join-code CSPRNG
 - UPnP, Docker packaging, `rby-mmo-hub` CLI, config file schema
 - Log redaction and structured ops logging
+- The settled-battle ledger (`history.jsonl`) and the `onMatchSettled` hook
+  that feeds it. The in-game host scores battles the same way — `ranking ids`
+  above is a real twin — but it keeps no ledger file, so there is deliberately
+  no Lua half of `Relay.noteMatchSettled`. That method owns the record's shape
+  for both of its callers (`settleMediated` and `settleMatch`); it used to be
+  spelled out at each, which meant only one of the two was ever executed by a
+  test. Pinned now by `server/rank.test.js` (both paths) and
+  `server/server.test.js` (over real sockets).
 
 Do **not** invent a Lua twin for these. Document a new Node-only surface here
 when you add one.
@@ -42,6 +50,15 @@ node --test server/hub_protocol_parity.test.js
 ```
 
 4. If BattleSim draw sites move, regenerate `battle_turn_parity.json` the same way.
+   **`BattleSim2` has its own pair** — regenerate `battle2_turn_parity.json`
+   whenever a Gen 2 draw site, the `exp` payout, the replace phase or
+   `_retarget` moves:
+
+```sh
+luajit tests/drivers/battle2_turn_parity.lua . > tests/fixtures/battle2_turn_parity.json
+node --test server/battle2_turn.test.js
+```
+
 5. Do **not** codegen or transpile Lua↔JS. Keep extracting pure cores when a
    third copy appears.
 

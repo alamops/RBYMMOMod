@@ -510,14 +510,40 @@ local z = fight:zones()
 eq(z[1] and z[1].colors, false, "zones matches the sgbPalettes opt-out")
 eq(z[1] and z[1].w, 640, "...and the same 640-wide arena canvas")
 
--- Force the classic path the way the gate itself is read (usesBattlefield ->
--- Battlefield.enabled -> Gen.generation): a Gen2-shaped game, which is the
--- one real-world case this build still takes the classic 160x144 zone.
-local classicFight = setmetatable({
+-- Gold takes the arena too, from round 7
+-- (docs/plans/gen2-new-battle-system.md), so a Gen2-shaped game is no longer
+-- the classic stand-in it used to be here.
+local goldFight = setmetatable({
   game = { data = { type_chart = { generation = 2 } } },
 }, { __index = Mediated })
+check(goldFight:usesBattlefield(),
+      "a Gen2-shaped game takes the battlefield gate as well")
+check(goldFight:drawsWidescreen(),
+      "...and reaches the window through Gold's widescreen seam, since "
+      .. "src/core/Game2.lua has no uiSize / fill-scale of its own")
+-- ...but its ZONE stays 160x144, because a zone rect is in the receiving
+-- generation's space and Gold's is always screen space: `Game2:blitZones`
+-- scales every rect by `w/160, h/144`, so the arena's own 640 would mean four
+-- times the window there. It clamped back to the window and looked right,
+-- which is exactly why this is asserted rather than left to the eye.
+local gz = goldFight:zones()
+eq(gz[1] and gz[1].w, 160,
+   "...while its zone stays in Gold's 160x144 screen space")
+eq(gz[1] and gz[1].h, 144, "...both axes")
+eq(gz[1] and gz[1].colors, false,
+   "...and still opts out of the palette shader, which is all the zone is for")
+
+-- The classic 160x144 zone is what a boot with the gate DOWN takes: still a
+-- live path (`Battlefield.enabled` answers false whenever `Gen.generation`
+-- throws on a half-built game), just no longer reachable by naming a
+-- generation. `usesBattlefield` set on the instance shadows the class method,
+-- which is the single switch every one of these surfaces reads.
+local classicFight = setmetatable({
+  game = { data = {} },
+  usesBattlefield = function() return false end,
+}, { __index = Mediated })
 check(not classicFight:usesBattlefield(),
-      "a Gen2-shaped game forces the classic path off the battlefield gate")
+      "with the gate down the classic path is what is left")
 local cz = classicFight:zones()
 eq(cz[1] and cz[1].w, 160,
    "...and zones covers the classic 160x144 canvas there")
@@ -1062,13 +1088,19 @@ end
 
 -- The classic 160x144 path queues no spawn row, so it must not park anything:
 -- there would be nothing to install it.
+--
+-- Driven by the gate rather than by a generation, since round 7: Gold takes
+-- the arena too (docs/plans/gen2-new-battle-system.md), so a Gen2-shaped game
+-- is no longer the classic stand-in. `usesBattlefield` on the instance shadows
+-- the class method, and it is the one switch every arena surface reads.
 do
   local classic = setmetatable({
-    game = { data = { type_chart = { generation = 2 } } },
+    game = { data = {} },
+    usesBattlefield = function() return false end,
     slots = { [2] = { species = "PIDGEY", hp = 24, maxHp = 24, shownHp = 24 } },
     lines = {},
   }, { __index = Mediated })
-  check(not classic:usesBattlefield(), "the Gen2-shaped screen is off the arena")
+  check(not classic:usesBattlefield(), "the gate is down on this screen")
   classic:noteSlot({ t = "send", slot = 2, text = "RATTATA", hp = 21 })
   eq(classic.slots[2].species, "RATTATA",
      "off the arena a send relabels at parse exactly as it always did")

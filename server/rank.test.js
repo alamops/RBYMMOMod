@@ -823,6 +823,86 @@ function testMatchSettledHook() {
 }
 
 /*
+ * The OTHER way a ranked 1v1 reaches the ledger, and the one nothing covered.
+ *
+ * `settleMatch` (above) is both players reporting and agreeing. `settleMediated`
+ * is the intermediator's verdict -- the referee ran the fight, so there is
+ * nothing to agree about -- and it wrote its own copy of the history record,
+ * spelled out by hand, byte-identical to the other except for the timestamp.
+ * Neither this suite nor `server.test.js` ever executed that copy: server.test
+ * drives the agreed path, and the mediated suites build a Relay with no
+ * `onMatchSettled`, so the record was never built at all.
+ *
+ * That is a bad thing to leave untested about an append-only, operator-facing
+ * file that `lib/cli.js` reads back: a field added or dropped on one side alone
+ * would have shipped silently, and `history.jsonl` would have carried two
+ * shapes depending on how each battle happened to end. Both sites now go
+ * through `noteMatchSettled`, which owns the shape; this is the test that
+ * proves the second one really does produce the first one's record.
+ */
+function testMediatedSettleWritesTheSameHistoryShape() {
+  const clock = makeClock();
+  const records = [];
+  const relay = new Relay({
+    maxPlayers: 8, log: quiet, now: clock.now,
+    onMatchSettled: (record) => records.push(record),
+  });
+
+  const one = dial(relay, 'REFONE');
+  const two = dial(relay, 'REFTWO');
+  const startedAt = clock.now();
+  const matchId = fight(relay, one, two);
+  clock.advance(50);
+
+  // A refereed battle over the session the match paperwork is keyed by --
+  // `settleMediated` looks the match up by the battle's own id, which is what
+  // ties a hub-run fight back to the two ranked seats that started it.
+  const battle = {
+    id: matchId, mode: '1v1', hostId: one.id,
+    memberIds: [one.id, two.id],
+    sides: { a: [one.id], b: [two.id] },
+    npcIds: [], ruleset: null,
+    parties: new Map(), bags: new Map(), bagHold: Object.create(null),
+    sim: null, settled: false,
+  };
+  relay.battles.set(battle.id, battle);
+  relay.settleMediated(battle, {
+    outcome: 'win', winners: [one.id], losers: [two.id],
+  });
+
+  ok(records.length === 1,
+    'a refereed 1v1 between two ranked players writes exactly one history line');
+  const record = records[0];
+
+  // The same four assertions testMatchSettledHook makes about the agreed
+  // path. They are repeated rather than shared on purpose: the point is that
+  // two DIFFERENT code paths produce one shape, and a helper both call would
+  // pass just as happily if they had diverged and the helper were wrong.
+  ok(Object.keys(record).sort().join(',') === 'at,loser,repeats,startedAt,winner',
+    'the record carries exactly the contract fields, nothing else');
+  ok(Object.keys(record.winner).sort().join(',') === 'gained,id,name,points',
+    'the winner sub-record is id, name, points and gained');
+  ok(Object.keys(record.loser).sort().join(',') === 'id,lost,name,points',
+    'the loser sub-record is id, name, points and lost');
+  ok(record.winner.id === one.id && record.loser.id === two.id,
+    'history sides are keyed by persistent player id, exactly as the agreed '
+    + 'path keys them -- this is what cli.js tags a ledger row from');
+
+  ok(record.startedAt === startedAt,
+    'startedAt is the moment the session started, not the moment it settled');
+  // Deliberately the settlement instant and not `match.endedAt`: a refereed
+  // outcome routinely lands while both players are still in the session, so
+  // endedAt is usually unset here -- and where it is set, the referee's
+  // verdict is the moment that matters, not whenever a socket went.
+  ok(record.at === clock.now(),
+    'at is the moment the referee settled it');
+  ok(record.at >= record.startedAt, 'at never precedes startedAt');
+  ok(record.winner.name === 'REFONE' && record.loser.name === 'REFTWO',
+    'winner and loser are named correctly');
+  ok(record.winner.gained > 0, 'the winner actually gained points');
+}
+
+/*
  * kickByName: the operator's half of a refusal. Everybody playing under that
  * name goes, not somebody -- a name is only unique among ranked players -- and
  * the caller is told exactly how many and who.
@@ -1160,6 +1240,7 @@ function main() {
   testHubNameReserved();
   testWelcomeMotd();
   testMatchSettledHook();
+  testMediatedSettleWritesTheSameHistoryShape();
   testKickByName();
   testAnnounce();
 

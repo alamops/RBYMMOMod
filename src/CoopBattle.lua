@@ -65,6 +65,10 @@ local Gen = need("Gen")
 local CoopSim = need("CoopSim")
 local CoopField = need("CoopField")
 local Battlefield = need("Battlefield")
+-- The Gen 2 half of the award. See `src/Exp2.lua`'s header: Gold has no
+-- `src/battle/Experience.lua` twin, so a mediated Gen 2 faint is priced through
+-- the engine's own `src/battle/gen2/Mon` primitives instead.
+local Exp2 = need("Exp2")
 -- The 1v1 mediated client, for its snapshots and its senders rather than for
 -- its screen: what a party looks like on the wire must not depend on how many
 -- monsters are on the field.
@@ -181,8 +185,19 @@ M.loadEngine = loadEngine
 -- no bar at all. Battlefield's `plateModel` treats a nil `expFrac` as the
 -- no-data state for exactly this. Everything is pcall-guarded because it runs
 -- inside the draw path.
-local function expFraction(data, mon)
+-- `game` rather than `data`, since round 7, for the reason MediatedBattle's
+-- twin gives: a Gen 2 monster's progress is `mon.experience` against Gold's own
+-- curve, and reading Gen 1's `Growth.expForLevel` off `mon.exp` answers nil on
+-- every Gold boot -- a plate that silently never drew its strip. Callers with
+-- only a dataset pass `{ data = data }`.
+local function expFraction(game, mon)
+  local data = game and game.data
   if type(data) ~= "table" or type(mon) ~= "table" then return nil end
+  if Gen.generation(game) == 2 then
+    local okFrac, frac2 = pcall(Exp2.fraction, game, mon)
+    if okFrac then return frac2 end
+    return nil
+  end
   if mon.exp == nil then return nil end
   local eng = engine
   local Growth = eng and eng.Growth
@@ -3547,8 +3562,7 @@ function M:seedExpClock(battler)
     battler.shownLevel = tonumber(battler.mon.level) or 1
   end
   if battler.shownExpFrac == nil then
-    battler.shownExpFrac = expFraction(self.game and self.game.data,
-      battler.mon)
+    battler.shownExpFrac = expFraction(self.game, battler.mon)
   end
 end
 
@@ -3594,8 +3608,7 @@ function M:startExpFill(row)
     return math.max(0, math.min(1, got))
   end
   local toLevel = level(battler.mon.level, 1)
-  local toFrac = frac(expFraction(self.game and self.game.data,
-    battler.mon)) or 0
+  local toFrac = frac(expFraction(self.game, battler.mon)) or 0
   local from = frac(battler.shownExpFrac)
   if from == nil then from = frac(row.fromFrac) end
   -- No fraction to start from means this monster draws no strip at all, so
@@ -3895,7 +3908,7 @@ function M:snapDisplay()
       -- pill a level behind the monster it names. nil stays nil -- a monster
       -- with no fraction to show still shows none.
       if owns and slot.index == owns then
-        battler.shownExpFrac = expFraction(data, battler.mon)
+        battler.shownExpFrac = expFraction(self.game, battler.mon)
         battler.shownLevel = tonumber(battler.mon.level) or battler.shownLevel
       end
       -- A **one-way latch**, and the direction is the whole of it. Raising the
@@ -4974,9 +4987,17 @@ end
 -- WideBattle takes. Without it the same battle renders differently from one
 -- instance to the next depending on which display mode each player picked,
 -- which is exactly what two side-by-side clients showed.
+-- **The rect is in the RECEIVING generation's space, which is not the space
+-- this screen draws in.** MediatedBattle's twin of this function carries the
+-- full note: Gen 1 zone rects are the widened UI canvas' own coordinates, and
+-- Gold's are always 160x144 screen space whatever the state drew
+-- (`Game2:blitZones` scales by `w/160, h/144` before it scissors). A 640-wide
+-- rect on Gold means 4x the window, and only rendered correctly because that
+-- clamps back to the window -- while still forcing every frame onto the
+-- present-canvas path.
 function M:zones()
   local w, h = 160, 144
-  if self.uiSize then
+  if self.uiSize and self:generation() ~= 2 then
     local ok, aw, ah = pcall(self.uiSize, self)
     if ok and type(aw) == "number" and type(ah) == "number" then
       w, h = aw, ah
@@ -5201,8 +5222,10 @@ local function trainerWalkSpriteId(trainer, game)
   elseif not spriteId:match("^SPRITE_") then
     spriteId = "SPRITE_" .. spriteId
   end
-  local data = game and game.data
-  local sprites = data and data.sprites
+  -- `Gen.spriteCatalog`, not `data.sprites`: Gold keeps its walk sheets on
+  -- `data.gen2Sprites`, and reading Gen 1's table on a Gold boot proves nothing
+  -- about a sheet that is really there.
+  local sprites = Gen.spriteCatalog(game)
   if type(sprites) == "table" and type(sprites[spriteId]) == "table" then
     return spriteId
   end
@@ -5237,8 +5260,30 @@ local function seatFrontFor(self, slot, battler)
   local eng = engine
   local data = self.game and self.game.data
   local save = self.game and self.game.save
-  -- makeBattler(..., isPlayer=false) loads the species front with palette.
-  if eng and eng.BattleState and eng.BattleState.makeBattler and mon and data then
+  -- The one genuinely generation-shaped source the theatre needs. On Gen 1,
+  -- makeBattler(..., isPlayer=false) loads the species front with palette; that
+  -- module does not exist on Gold, which keeps the front path on the species
+  -- record itself (`def.spriteFront`, what `src/ui/gen2/BattleState.lua:pic`
+  -- reads). MediatedBattle's `seatFront` is the twin of this branch and carries
+  -- the fuller note on what the Gold arm deliberately does not reproduce.
+  if Gen.generation(self.game) == 2 then
+    local def = data and type(data.pokemon) == "table" and species
+      and data.pokemon[species] or nil
+    local path = type(def) == "table" and def.spriteFront or nil
+    if type(path) == "string" and path ~= "" then
+      -- Baked, not loaded raw -- see `Battlefield.gen2FrontImage`.
+      local shiny = (mon and mon.shiny) and true or false
+      resolved = Battlefield.gen2FrontImage(self.game, species, path, shiny)
+      if not resolved then
+        local ok, img = pcall(function()
+          local Assets = require("src.render.Assets")
+          if Assets and Assets.image then return Assets.image(path) end
+          return love.graphics.newImage(path)
+        end)
+        if ok and img then resolved = img end
+      end
+    end
+  elseif eng and eng.BattleState and eng.BattleState.makeBattler and mon and data then
     local ok, probe = pcall(eng.BattleState.makeBattler, data, mon, false, save)
     if ok and probe and probe.sprite then resolved = probe.sprite end
   end
@@ -6650,7 +6695,7 @@ function M:drawBattlefieldSafe()
     Font = engine and engine.Font,
     Sprites = engine and engine.Sprites,
     SpriteRenderer = engine and engine.SpriteRenderer,
-    sprites = self.game and self.game.data and self.game.data.sprites,
+    sprites = Gen.spriteCatalog(self.game),
     game = self.game,
   }
   local ctx = self:battlefieldCtx()
@@ -7043,8 +7088,16 @@ function M:gainExp(event)
   -- holding one doubles the divisor on the first pass and the second pass
   -- divides by the party size on top.
   local save = self.game.save
-  local expAll = save and save.inventory and (save.inventory.EXP_ALL or 0) > 0
+  local generation = Gen.generation(self.game)
   local party = (save and save.party) or {}
+  local expAll = generation ~= 2
+    and save and save.inventory and (save.inventory.EXP_ALL or 0) > 0
+  -- Gen 2's EXP.SHARE, which is not EXP.ALL: a HELD item found on the party by
+  -- id, halving the pool once for both passes, with the second pass paying the
+  -- holders only. See `src/Exp2.lua` and MediatedBattle's twin of this block.
+  -- Taken before the first pass, since that pass can level a holder.
+  local shareHolders = (generation == 2) and Exp2.holders(party) or nil
+  local halved = shareHolders ~= nil and #shareHolders > 0
 
   -- **Which monster is being paid**, and it is no longer "the one standing
   -- there".
@@ -7103,7 +7156,15 @@ function M:gainExp(event)
 
   local eng = engine
   local def = mon and event.species and (self.game.data.pokemon or {})[event.species]
-  if not (mon and def and eng and eng.Experience) then return end
+  -- Which generation's formula prices this faint. The referee's facts are
+  -- generation-free; everything downstream of them is not. See MediatedBattle's
+  -- twin of this branch and `src/Exp2.lua`.
+  if not (mon and def) then return end
+  if generation == 2 then
+    if not Exp2.available() then return end
+  elseif not (eng and eng.Experience) then
+    return
+  end
 
   -- Is the paid monster the one on the plate? Everything the *display* does
   -- below hangs on this and nothing else does: a benched award is text only.
@@ -7138,8 +7199,14 @@ function M:gainExp(event)
     or (self.mode == nil and self.trainer ~= nil)
     or false
 
+  -- Gen 2 banks its exp on `mon.experience`; `mon.exp` is Gen 1's field and
+  -- seeding it on a Gold save would leave a number nothing ever reads.
   mon.statExp = mon.statExp or {}
-  mon.exp = mon.exp or 0
+  if generation == 2 then
+    mon.experience = mon.experience or 0
+  else
+    mon.exp = mon.exp or 0
+  end
 
   -- Where the strip is *now*, read before the award lands.
   --
@@ -7168,9 +7235,23 @@ function M:gainExp(event)
     fromLevel = battler.shownLevel or mon.level or 1
   end
 
-  local ok, levels, gained = pcall(eng.Experience.apply, self.game.data, mon,
-    def, event.level or 1, isTrainer, winners * (expAll and 2 or 1), false)
-  if not ok then return end
+  -- The first pass. Both arms hand back the same two values -- the list of
+  -- levels reached and the raw amount the "gained N EXP" line says -- so
+  -- everything below this point is generation-free again.
+  local ok, levels, gained
+  if generation == 2 then
+    -- `winners` is the referee's divisor unmodified: Gen 2's Share tax is the
+    -- `halved` flag on the pool, not a doubling of the divisor.
+    levels, gained = Exp2.apply(self.game, mon, def, {
+      level = event.level or 1, participants = winners, isTrainer = isTrainer,
+      halved = halved, save = save,
+    })
+    if levels == nil then return end
+  else
+    ok, levels, gained = pcall(eng.Experience.apply, self.game.data, mon,
+      def, event.level or 1, isTrainer, winners * (expAll and 2 or 1), false)
+    if not ok then return end
+  end
 
   -- The plate's name is the *active's* name, so it is only a fallback for the
   -- active: a nickname-less benched monster is named by its own species, the
@@ -7180,6 +7261,16 @@ function M:gainExp(event)
   local ownDef = (self.game.data.pokemon or {})[mon.species]
   local name = mon.nickname or (active and battler.name)
     or (ownDef and ownDef.name) or "?"
+  -- One tally per award actually applied, for the e2e to assert on.
+  --
+  -- Exp is the one part of a refereed fight with no visible artefact a driver
+  -- can wait for: the referee emits facts, the client prices them, and the
+  -- result lands in a save field. A leg that only watched the party's
+  -- `experience` climb would pass just as happily if the referee never emitted
+  -- anything and the number moved for some other reason -- and would fail on a
+  -- fight that ended by catch, where paying nothing is correct. This counts the
+  -- awards this screen actually applied, which is the fact worth asserting.
+  self.expPaid = (self.expPaid or 0) + 1
   self:say(name .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
 
   -- ...and *then* the strip crawls, which is the cart's chronology: the line
@@ -7265,6 +7356,28 @@ function M:gainExp(event)
       end
     end
   end
+
+  -- ...and Gen 2's own second pass: the EXP.SHARE holders, divided by how many
+  -- of them there are rather than by the party size, and taxed by the same
+  -- `halved` the first pass paid. A holder that fought is in both passes on
+  -- purpose -- that is the item. Metered by the same one-knockout credit, and
+  -- for the identical reason; only one of the two arms is ever live on a boot.
+  if halved and self.expAllCredit ~= false then
+    if self.expAllCredit then self.expAllCredit = false end
+    local shares = math.max(1, #shareHolders)
+    for _, holderIndex in ipairs(shareHolders) do
+      local member = party[holderIndex]
+      if type(member) == "table" and (member.hp or 0) > 0 then
+        member.statExp = member.statExp or {}
+        member.experience = member.experience or 0
+        local gotLevels = Exp2.apply(self.game, member, def, {
+          level = event.level or 1, participants = shares,
+          isTrainer = isTrainer, halved = true, save = save,
+        })
+        if gotLevels then self:levelled(member, nil, gotLevels) end
+      end
+    end
+  end
 end
 
 -- What a level-up costs, wherever it happened: a line, whatever moves come
@@ -7280,7 +7393,13 @@ function M:levelled(mon, fallbackName, levels)
   -- *species* learns, and a mon whose species this build cannot name has no
   -- answer to give. Called with nil it threw into the pcall below, which was
   -- survivable but bought nothing.
-  local learnedAt = def and eng and eng.Experience and eng.Experience.movesLearnedAt
+  -- Gen 2 keeps its level-up table on `def.levelMoves` where Gen 1 uses
+  -- `def.learnset`, and has no `Experience` module to ask -- so the lookup goes
+  -- through `Exp2.movesLearnedAt`, which answers the same list shape off the
+  -- Gold record. Everything after this line is generation-free.
+  local learnedAt = def and (
+    (Gen.generation(self.game) == 2) and Exp2.movesLearnedAt
+    or (eng and eng.Experience and eng.Experience.movesLearnedAt))
   for _, newLevel in ipairs(levels) do
     self:say(name .. " grew to\nlevel " .. tostring(newLevel) .. "!")
     -- Levelled here, so the moves it learns are decided here too -- the host
@@ -9461,9 +9580,71 @@ function M:drawEntry()
   love.graphics.setColor(1, 1, 1, 1)
 end
 
+-- ------- how the arena reaches the screen, per generation
+--
+-- Twin of `MediatedBattle:drawWidescreen`, and that function's header carries
+-- the full note. In one line: Gen 1 widens the render surface for a state that
+-- asks (`uiSize` / `wantsFillScale`), Gold has no such seam and instead lets a
+-- state paint the whole window in window units via `drawsWidescreen()` /
+-- `drawWidescreen(w, h)` -- the same pair Gold's own battle screen uses. Same
+-- theatre, one different delivery function.
+-- The boot's generation, resolved once per screen.
+--
+-- `Gen.generation` allocates a closure for each of the two `pcall`s it makes,
+-- and `drawsWidescreen` is asked every frame by `Game2:drawScene` (and again
+-- by `drawSafe`). A fight cannot change cart mid-battle, so the answer is
+-- memoised on the instance -- `false` is never a valid answer, so a plain
+-- `if not` re-resolve is safe and there is no separate "asked yet" flag.
+function M:generation()
+  local cached = self._generation
+  if cached then return cached end
+  local ok, gen = pcall(Gen.generation, self.game)
+  gen = (ok and tonumber(gen)) or 1
+  self._generation = gen
+  return gen
+end
+
+function M:drawsWidescreen()
+  if self:generation() ~= 2 then return false end
+  return self:usesBattlefield()
+end
+
+function M:drawWidescreen(winW, winH)
+  local G = love.graphics
+  winW = tonumber(winW) or 0
+  winH = tonumber(winH) or 0
+  if winW <= 0 or winH <= 0 then return end
+
+  G.setColor(0, 0, 0, 1)
+  G.rectangle("fill", 0, 0, winW, winH)
+
+  local up = math.min(winH / Battlefield.HEIGHT, winW / Battlefield.WIDTH)
+  if not (up > 0) then return end
+  local ox = math.floor((winW - Battlefield.WIDTH * up) / 2)
+  local oy = math.floor((winH - Battlefield.HEIGHT * up) / 2)
+
+  G.push()
+  G.translate(ox, oy)
+  G.scale(up, up)
+  -- Guarded so the pop always runs: a leaked transform would drag whatever
+  -- Game2 blits next off its own grid.
+  local ok, err = pcall(self.drawBattlefieldSafe, self)
+  G.pop()
+  G.setColor(1, 1, 1, 1)
+
+  if not ok and not self.drawFailed then
+    self.drawFailed = true
+    mod.log:error("the co-op battle arena failed to draw on this generation "
+      .. "(%s); the fight is still running and can be finished blind, but "
+      .. "report this", tostring(err))
+  end
+end
+
 function M:drawSafe()
   local eng = engine
   if not eng then return end
+  -- Already painted edge to edge by `drawWidescreen`; see its header.
+  if self:drawsWidescreen() then return end
   if self:usesBattlefield() then
     return self:drawBattlefieldSafe()
   end

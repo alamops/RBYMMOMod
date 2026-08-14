@@ -12623,8 +12623,19 @@ end)()
     data = { type_chart = { generation = 2 }, gen2Statuses = {} },
   }
   eq(Gen.generation(goldGame), 2, "Gold-shaped stub is generation 2")
-  check(not Battlefield.enabled(goldGame),
-        "Gen2 keeps the classic guild-focus path")
+  -- Round 7 (docs/plans/gen2-new-battle-system.md): the theatre is no longer a
+  -- Gen 1 feature. `gen2-compatibility` deferred it in as many words -- "Gen2
+  -- keeps the classic guild-focus / 160x144 path until a later pass" -- and
+  -- this is that pass, so a Gold boot gets the arena, the plates, the band and
+  -- the throws exactly as Red does.
+  check(Battlefield.enabled(goldGame),
+        "Gen2 draws the top-down theatre too")
+  -- Still a gate rather than `true`: a generation the engine grows later has no
+  -- front pics this file knows how to ask for, and the GB fallback is a better
+  -- answer than an arena full of blanks.
+  check(not Battlefield.enabled({ data = { type_chart = { generation = 3 } } })
+        or Gen.generation({ data = { type_chart = { generation = 3 } } }) ~= 3,
+        "an unknown generation falls back to the classic path")
 
   for _, mode in ipairs({ "coop_wild", "wild" }) do
     local wild = Battlefield.layout({
@@ -12714,22 +12725,46 @@ end)()
   check(mediated:wantsFillScale(),
         "MediatedBattle wantsFillScale on Gen1")
 
+  -- Gen 2 gets the same theatre from round 7
+  -- (docs/plans/gen2-new-battle-system.md): a Gold boot is a wide, fill-scaled
+  -- 640x360 arena exactly as Red is, so the generation is no longer what these
+  -- answer on.
   local goldCoop = setmetatable({ game = goldGame }, { __index = CoopBattle })
   local gw, gh = goldCoop:uiSize()
-  eq(gw, 160, "CoopBattle stays classic width on Gen2")
-  eq(gh, 144, "CoopBattle stays classic height on Gen2")
-  check(not goldCoop:isWideBattleLayout(),
-        "CoopBattle is not wide on Gen2")
-  check(not goldCoop:wantsFillScale(),
-        "CoopBattle does not fill-scale on Gen2")
+  eq(gw, 640, "CoopBattle draws the theatre at full width on Gen2 too")
+  eq(gh, 360, "...and full height")
+  check(goldCoop:isWideBattleLayout(), "CoopBattle is wide on Gen2")
+  check(goldCoop:wantsFillScale(), "CoopBattle fill-scales on Gen2")
+
+  -- **The classic 160x144 path is now reached by the gate being off, not by a
+  -- generation.** It is still a live path -- `Battlefield.enabled` answers
+  -- false whenever `Gen.generation` throws on a half-built game, and every
+  -- screen still carries the whole GB renderer behind it -- so the rows below
+  -- keep testing it, driven the way production reaches it: with the theatre
+  -- gate down. `usesBattlefield` is the single switch every one of those
+  -- surfaces reads (`uiSize`, `wantsFillScale`, `isWideBattleLayout`,
+  -- `commandCols`), which is why overriding it here is the whole of the stub.
+  local classicCoop = setmetatable(
+    { game = gen1Game, usesBattlefield = function() return false end },
+    { __index = CoopBattle })
+  local cw, ch = classicCoop:uiSize()
+  eq(cw, 160, "with the theatre gate down the screen is 160 wide")
+  eq(ch, 144, "...and 144 tall")
+  check(not classicCoop:isWideBattleLayout(), "...not a wide layout")
+  check(not classicCoop:wantsFillScale(), "...and not fill-scaled")
 
   -- MediatedBattle's own commandCols: four across on the battlefield, two
   -- off it -- the same rule CoopBattle asks Battlefield.bandGridCols for.
   eq(mediated:commandCols(), 4,
      "MediatedBattle asks the renderer on Gen1 and gets four across")
   local goldMediated = setmetatable({ game = goldGame }, { __index = MediatedBattle })
-  eq(goldMediated:commandCols(), 2,
-     "...but stays two columns off the battlefield (classic Gen2 stage)")
+  eq(goldMediated:commandCols(), 4,
+     "...and four across on Gen2 as well, now that Gold draws the band")
+  local classicMediated = setmetatable(
+    { game = gen1Game, usesBattlefield = function() return false end },
+    { __index = MediatedBattle })
+  eq(classicMediated:commandCols(), 2,
+     "...but two off the battlefield, where the GB command box is 2x2")
 
   -- D2's verified walk: from FIGHT, four RIGHTs in a row on the four-across
   -- band land 1 -> 2 -> 3 -> 4 -> 4 -- one row, clamped at the last slab.
@@ -13196,14 +13231,20 @@ end)()
         "and never once the command menu is up")
 end)()
 
--- ------- the command box, as a classic 2x2 grid (Gen2 / classic stage)
+-- ------- the command box, as a classic 2x2 grid (theatre gate down)
 --
 -- FIGHT SWITCH / ITEM RUN. Each arrow moves on its own axis and clamps at
 -- the edge (same rule as BattleState's DisplayBattleMenu). This is the
 -- byte-identical truth table for a client that does NOT draw on the
--- battlefield -- a Gen2-shaped game keeps the classic guild-focus stage, so
--- `commandCols()` answers two and `gridStep` degenerates to the original
--- 2x2 it always was.
+-- battlefield, so `commandCols()` answers two and `gridStep` degenerates to
+-- the original 2x2 it always was.
+--
+-- Driven by the gate rather than by a generation, since round 7: Gold draws
+-- the four-across band too (docs/plans/gen2-new-battle-system.md), so a
+-- Gen2-shaped game is no longer the classic stand-in it used to be. The gate
+-- itself is still live -- `Battlefield.enabled` answers false whenever
+-- `Gen.generation` throws on a half-built game -- and this is the behaviour
+-- behind it.
 
 ;(function()
   local CoopBattle = need("CoopBattle")
@@ -13212,7 +13253,7 @@ end)()
   eq(CoopBattle.COMMANDS[2], "SWITCH", "top-right is SWITCH (classic PKMN slot)")
   eq(CoopBattle.COMMANDS[3], "ITEM", "bottom-left is ITEM")
   eq(CoopBattle.COMMANDS[4], "RUN", "bottom-right is RUN")
-  local goldGame = { data = { type_chart = { generation = 2 }, gen2Statuses = {} } }
+  local classicGame = { data = {} }
   local truth = {
     { 1, "up", 1 }, { 1, "down", 3 }, { 1, "left", 1 }, { 1, "right", 2 },
     { 2, "up", 2 }, { 2, "down", 4 }, { 2, "left", 1 }, { 2, "right", 2 },
@@ -13221,9 +13262,11 @@ end)()
   }
   for _, row in ipairs(truth) do
     local from, direction, expect = row[1], row[2], row[3]
-    local client = setmetatable({ commandIndex = from, game = goldGame },
+    local client = setmetatable(
+      { commandIndex = from, game = classicGame,
+        usesBattlefield = function() return false end },
       { __index = CoopBattle })
-    eq(client:commandCols(), 2, "Gen2 keeps two columns")
+    eq(client:commandCols(), 2, "the gate being down keeps two columns")
     CoopBattle.updateCommand(client,
       { wasPressed = function(_, k) return k == direction end })
     eq(client.commandIndex, expect,
@@ -18416,14 +18459,18 @@ end)()
   eq(ballFx and ballFx.side, "foe",
      "...landing on the foe seat the toss targets, not the thrower's own")
 
-  -- None of this exists on the classic path: Gen2 keeps the guild-focus
-  -- screen, so there is no arena for a pop to play on and no row for it.
-  local goldGame = {
-    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
-  }
+  -- None of this exists on the classic path: with the theatre gate down there
+  -- is no arena for a pop to play on and no row for it.
+  --
+  -- Driven by the gate rather than by a generation, since round 7: Gold draws
+  -- the arena too now (docs/plans/gen2-new-battle-system.md), so a Gen2-shaped
+  -- game is no longer the classic stand-in. `usesBattlefield` set on the
+  -- INSTANCE shadows the class method (`M.__index = M`), which is the whole
+  -- stub -- every fx site in this file reads that one switch.
   local classic = MediatedBattle.new({
-    game = goldGame, battle = "b-fx-gold", role = "host",
+    game = { data = {} }, battle = "b-fx-gold", role = "host",
   })
+  classic.usesBattlefield = function() return false end
   classic:onEvent({
     battle = "b-fx-gold", seq = 1, t = "send", slot = 2, side = "b", hp = 30,
   })
@@ -18909,8 +18956,11 @@ end)()
 
 ;(function()
   local MediatedBattle = need("MediatedBattle")
-  local goldGame = { data = { type_chart = { generation = 2 }, gen2Statuses = {} } }
-  local f = MediatedBattle.new({ game = goldGame, battle = "b-classic-pin", role = "host" })
+  -- The gate, not a generation: Gold draws the arena from round 7, so the
+  -- classic path is reached by `usesBattlefield` being false (set on the
+  -- instance, which shadows the class method).
+  local f = MediatedBattle.new({ game = { data = {} }, battle = "b-classic-pin", role = "host" })
+  f.usesBattlefield = function() return false end
   local seq = 0
   local function send(fields)
     seq = seq + 1
@@ -19517,15 +19567,18 @@ end)()
   check(not f.victoryMusicHeld, "one more tick and the held flag clears")
   check(f.victoryMusicPlayed, "...and the fanfare has now actually played")
 
-  -- Classic (Gen2) never holds: finish() plays straight through, and the
-  -- display clock is welded to truth rather than queuing anything at all.
-  local goldGame = {
-    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
-  }
+  -- Classic never holds: finish() plays straight through, and the display
+  -- clock is welded to truth rather than queuing anything at all.
+  --
+  -- Reached by the gate, not by a generation: Gold draws the arena from round 7
+  -- (docs/plans/gen2-new-battle-system.md), so `usesBattlefield` is set on the
+  -- instance -- which shadows the class method -- to stand in for the boot
+  -- where `Battlefield.enabled` answered false.
   local classic = MediatedBattle.new({
-    game = goldGame, battle = "b-classic", role = "host",
+    game = { data = {} }, battle = "b-classic", role = "host",
   })
-  check(not classic:usesBattlefield(), "Gen2 stays off the battlefield gate")
+  classic.usesBattlefield = function() return false end
+  check(not classic:usesBattlefield(), "the stub really has the gate down")
   local cseq = 0
   local function csend(fields)
     cseq = cseq + 1
@@ -19816,15 +19869,15 @@ if eng and eng.Growth and eng.Experience then
     local expected = (known.exp - eng.Growth.expForLevel(rate, 12, data.growth_rates))
       / (eng.Growth.expForLevel(rate, 13, data.growth_rates)
          - eng.Growth.expForLevel(rate, 12, data.growth_rates))
-    check(math.abs(expFraction(data, known) - expected) < 1e-9,
+    check(math.abs(expFraction({ data = data }, known) - expected) < 1e-9,
           "expFraction: a known curve matches Growth.expForLevel computed by hand")
 
-    eq(expFraction(data, { species = expSpecies, level = 12, exp = nil }), nil,
+    eq(expFraction({ data = data }, { species = expSpecies, level = 12, exp = nil }), nil,
        "expFraction: no mon.exp at all answers nil, not a fabricated 0")
-    eq(expFraction(data, { species = "NOT_A_SPECIES", level = 12, exp = 500 }), nil,
+    eq(expFraction({ data = data }, { species = "NOT_A_SPECIES", level = 12, exp = 500 }), nil,
        "expFraction: an unknown species def answers nil")
     eq(expFraction(nil, known), nil, "expFraction: no data table answers nil")
-    eq(expFraction(data, nil), nil, "expFraction: no mon answers nil")
+    eq(expFraction({ data = data }, nil), nil, "expFraction: no mon answers nil")
   end
 
   local function newFight(slots, gameParty)
@@ -19956,7 +20009,7 @@ if eng and eng.Growth and eng.Experience then
     local finalSeat = seatOf(1)
     eq(finalSeat.shownLevel, mine.level,
        "once the queue drains, the pill has landed on the monster's true level")
-    local finalTruth = expFraction(data, mine)
+    local finalTruth = expFraction({ data = data }, mine)
     check(finalTruth ~= nil
           and math.abs(finalSeat.expFrac - finalTruth) < 1e-6,
           "...and the strip has landed on the true final fraction")
@@ -20028,7 +20081,7 @@ if eng and eng.Growth and eng.Experience then
        "...and purges every expfill row, including the second one that never started")
 
     local battler = fight.sim:slot(1).battler
-    local truth = expFraction(data, mine)
+    local truth = expFraction({ data = data }, mine)
     check(truth ~= nil and math.abs(battler.shownExpFrac - truth) < 1e-9,
           "the strip is welded to the monster's true fraction, not left mid-crawl")
     eq(battler.shownLevel, mine.level,
@@ -20150,7 +20203,7 @@ if eng and eng.Growth and eng.Experience then
       end
     end
     local seat = seatOf(1)
-    local truth = expFraction(data, mine)
+    local truth = expFraction({ data = data }, mine)
     eq(seat.shownLevel, mine.level,
        "EXP.ALL: the pill lands on the monster's true final level, after "
        .. "both Experience.apply passes")
@@ -20227,7 +20280,7 @@ if eng and eng.Growth and eng.Experience then
           "the strip's progress (shownLevel + shownExpFrac) never moves "
           .. "backwards across the whole drive")
 
-    local truth = expFraction(data, mine)
+    local truth = expFraction({ data = data }, mine)
     check(battler.shownLevel == mine.level
           and truth ~= nil and math.abs(battler.shownExpFrac - truth) < 1e-6,
           "both clocks land on the monster's true final level/fraction")
@@ -20275,7 +20328,7 @@ if eng and eng.Growth and eng.Experience then
     check(guard < 8000, "it resolves in a bounded number of frames")
     check(worst < 1e-9,
           "no rewind when the second award lands mid-crawl either")
-    local truth = expFraction(data, mine)
+    local truth = expFraction({ data = data }, mine)
     check(battler.shownLevel == mine.level
           and truth ~= nil and math.abs(battler.shownExpFrac - truth) < 1e-6,
           "and both clocks still land on truth")
@@ -20322,7 +20375,7 @@ if eng and eng.Growth and eng.Experience then
     local w1 = fight.sim:slot(1).battler
     local w2 = fight.sim:slot(2).battler
     local w3 = fight.sim:slot(3).battler
-    local truth = expFraction(data, mine)
+    local truth = expFraction({ data = data }, mine)
     check(truth ~= nil and math.abs(w1.shownExpFrac - truth) < 1e-9
           and w1.shownLevel == mine.level,
           "battlefield snapDisplay: the owned battler is welded to truth")
@@ -20537,7 +20590,12 @@ end
           "the strip's progress (shownLevel + shownExpFrac) never moves "
           .. "backwards across the whole drive")
 
-    local truth = expFraction(data, mine)
+    -- A game rather than a bare dataset: MediatedBattle's `expFraction` takes
+    -- the whole game from round 7, because the curve it reads is the boot's
+    -- generation's (`mon.exp` + Growth on Gen 1, `mon.experience` + Gen 2's own
+    -- `Mon` on Gold). This fixture is a Gen 1 game, so both halves resolve the
+    -- Gen 1 way; the Gen 2 branch is pinned in `Exp2`'s own section below.
+    local truth = expFraction({ data = data }, mine)
     eq(screen.slots[0].shownLevel, mine.level,
        "the pill lands on the monster's true final level")
     check(truth ~= nil and math.abs(screen.slots[0].shownExpFrac - truth) < 1e-6,
@@ -21516,15 +21574,25 @@ end)()
        "battlefield on: the instance shadows the class default with false "
        .. "-- the arena is its own dark chrome, not a white GB canvas")
 
+    -- A Gold boot is on the arena too from round 7, so it withdraws the white
+    -- vote exactly as Red does.
     local goldGame = {
       data = { type_chart = { generation = 2 }, gen2Statuses = {} },
     }
     local goldClient = setmetatable({ game = goldGame }, { __index = CoopBattle })
     goldClient:refreshLetterbox()
-    eq(goldClient.letterboxWhite, true,
-       "classic Gen2 stays on the class default, true -- explicitly re-set, "
-       .. "not merely inherited, so a hot reload can't leave it stale")
-    eq(goldClient.letterboxWhite, CoopBattle.letterboxWhite,
+    eq(goldClient.letterboxWhite, false,
+       "Gen2 is on the arena too, so it takes the same dark chrome")
+
+    -- The classic path -- gate down -- is what keeps the class default.
+    local classicClient = setmetatable(
+      { game = { data = data }, usesBattlefield = function() return false end },
+      { __index = CoopBattle })
+    classicClient:refreshLetterbox()
+    eq(classicClient.letterboxWhite, true,
+       "with the gate down the white GB canvas is explicitly re-set, not "
+       .. "merely inherited, so a hot reload can't leave it stale")
+    eq(classicClient.letterboxWhite, CoopBattle.letterboxWhite,
        "...matching the class default it preserves")
   end
 
@@ -23514,6 +23582,233 @@ stubSprites = {}
 stubMod.ui = nil
 stubMod.hooks = nil
 stubMod.content.screens = nil
+
+end)()
+
+-- ------- src/Exp2.lua: pricing a refereed faint on Gold
+--
+-- The referee states facts and never an amount (the legal floor: no ROM bytes
+-- on a hub), so every number a Gen 2 award produces is computed right here, on
+-- the player's own save, out of the engine's own `src/battle/gen2/Mon`.  That
+-- makes this the one place a Gold fight in the MMO could silently pay
+-- differently from the same fight offline -- so the arithmetic is checked
+-- against `Mon.experienceGain` itself rather than against a number typed in
+-- here, and the *orchestration* around it (which item taxes the pool, who the
+-- second pass pays, which field the exp lands in) is checked by hand, because
+-- that is the part `Exp2` owns and could get wrong on its own.
+--
+-- Synthetic species throughout: no ROM-derived name appears below.
+
+;(function()
+
+local Exp2 = need("Exp2")
+
+if not Exp2.available() then
+  -- A checkout without the Gen 2 battle modules cannot answer any of this, and
+  -- a suite that silently passed would be worse than one that says so.
+  check(true, "(this engine checkout has no src/battle/gen2/Mon -- Exp2 skipped)")
+  return
+end
+
+local Mon = Exp2.loadEngine().Mon
+
+-- No `growth_rates` and no coefficient rows, so `Mon.experienceForLevel` falls
+-- through to its own `level^3` arm -- a curve this file can also compute, which
+-- is what makes the fraction assertions below checkable by hand.
+local FALLEN = {
+  name = "BETA", baseExp = 100,
+  baseStats = { hp = 50, attack = 60, defense = 70, speed = 80,
+                specialAttack = 90, specialDefense = 40 },
+}
+local MINE = {
+  name = "ALPHA", growthRate = nil,
+  baseStats = { hp = 50, attack = 50, defense = 50, speed = 50,
+                specialAttack = 50, specialDefense = 50 },
+  levelMoves = { { level = 7, move = "FIX_A" }, { level = 8, move = "FIX_B" },
+                 { level = 8, move = "FIX_C" } },
+}
+
+local function goldGame(party)
+  return {
+    data = {
+      type_chart = { generation = 2 },
+      gen2Statuses = {},
+      pokemon = { ALPHA = MINE, BETA = FALLEN },
+    },
+    save = { player = { id = 12345 }, party = party or {} },
+  }
+end
+
+local function monOf(o)
+  o = o or {}
+  return {
+    species = "ALPHA",
+    level = o.level or 5,
+    experience = o.experience or (o.level or 5) ^ 3,
+    hp = o.hp == nil and 20 or o.hp,
+    maxHp = 20,
+    dvs = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+    stats = { hp = 20, attack = 10, defense = 10, speed = 10,
+              specialAttack = 10, specialDefense = 10 },
+    statExp = Mon.newStatExp and Mon.newStatExp() or {},
+    item = o.item,
+    otId = o.otId,
+    isEgg = o.isEgg,
+  }
+end
+
+-- 1. the amount is the engine's, not this file's.
+do
+  local game = goldGame()
+  local mon = monOf({ level = 5 })
+  local levels, gained = Exp2.apply(game, mon, FALLEN,
+    { level = 20, participants = 1, isTrainer = false, save = game.save })
+  check(levels ~= nil, "Exp2.apply answers on a well-formed award")
+  eq(gained, Mon.experienceGain(FALLEN, 20, 1, false, {}),
+     "the amount is exactly what the engine's own experienceGain says")
+  check(mon.experience > 125,
+        "and it lands on mon.experience -- Gen 2's field, not Gen 1's mon.exp")
+  eq(mon.exp, nil, "mon.exp is never seeded on a Gold save")
+end
+
+-- 2. every multiplier is the engine's too, and each is asked for by name.
+do
+  local plain = Mon.experienceGain(FALLEN, 20, 1, false, {})
+
+  local game = goldGame()
+  local mon = monOf()
+  local _, trainerGain = Exp2.apply(game, mon, FALLEN,
+    { level = 20, participants = 1, isTrainer = true, save = game.save })
+  eq(trainerGain, Mon.experienceGain(FALLEN, 20, 1, true, {}),
+     "a coop_npc faint pays the trainer x1.5")
+  check(trainerGain > plain, "...which really is more than the wild rate")
+
+  -- Traded is the mon's OT against the player's, so a different id is a
+  -- boosted award and a missing one is the player's own monster.
+  local traded = goldGame()
+  local outsider = monOf({ otId = 999 })
+  local _, tradedGain = Exp2.apply(traded, outsider, FALLEN,
+    { level = 20, participants = 1, isTrainer = false, save = traded.save })
+  eq(tradedGain, Mon.experienceGain(FALLEN, 20, 1, false, { traded = true }),
+     "an outsider's award carries the traded x1.5")
+  check(Exp2.traded(traded.save, monOf({ otId = 12345 })) == false,
+        "...and a mon whose OT is the player is not an outsider")
+  check(Exp2.traded(traded.save, monOf()) == false,
+        "...nor is one with no recorded OT at all")
+
+  -- LUCKY_EGG is checked by item ID, the way the cart's `cp LUCKY_EGG` does.
+  local egg = goldGame()
+  local holder = monOf({ item = "LUCKY_EGG" })
+  local _, eggGain = Exp2.apply(egg, holder, FALLEN,
+    { level = 20, participants = 1, isTrainer = false, save = egg.save })
+  eq(eggGain, Mon.experienceGain(FALLEN, 20, 1, false, { luckyEgg = true }),
+     "a LUCKY_EGG holder's award carries its x1.5")
+
+  -- The Share tax halves the pool ONCE, up front -- it is not a doubled
+  -- divisor, which is how Gen 1's EXP.ALL expresses its own halving.
+  local shared = goldGame()
+  local _, halvedGain = Exp2.apply(shared, monOf(), FALLEN,
+    { level = 20, participants = 1, isTrainer = false, halved = true,
+      save = shared.save })
+  -- The rule, stated where it is easy to get backwards: `halved` rides through
+  -- as the engine's own pool tax (baseExp halved before the level multiply),
+  -- and the divisor stays the referee's participant count. Gen 1 expresses its
+  -- EXP.ALL halving the other way -- by doubling the divisor -- and a Gen 2
+  -- award written that way would round differently on most base values.
+  eq(halvedGain, Mon.experienceGain(FALLEN, 20, 1, false, { halved = true }),
+     "the EXP.SHARE tax is the halved pool, not a doubled divisor")
+  check(halvedGain < plain, "...and the tax really costs the holder something")
+end
+
+-- 3. stat exp lands, divided by the pass's own count, on Gen 2's five keys.
+do
+  local game = goldGame()
+  local mon = monOf()
+  Exp2.apply(game, mon, FALLEN,
+    { level = 20, participants = 2, isTrainer = false, save = game.save })
+  eq(mon.statExp.attack, math.floor(FALLEN.baseStats.attack / 2),
+     "stat exp is the fallen monster's base stat, divided by the pass count")
+  eq(mon.statExp.special, math.floor(FALLEN.baseStats.specialAttack / 2),
+     "...and Gen 2's `special` key draws from the loser's specialAttack")
+end
+
+-- 4. levels come back as a LIST, so both screens' level printer stays one
+--    function whatever generation raised it.
+do
+  local game = goldGame()
+  -- Level 5 on a cubic curve is 125 exp; level 8 is 512. One award big enough
+  -- to cross three thresholds has to report all three.
+  local mon = monOf({ level = 5, experience = 125 })
+  local levels = Exp2.apply(game, mon, FALLEN,
+    { level = 100, participants = 1, isTrainer = true, save = game.save })
+  check(type(levels) == "table", "the level report is a list")
+  if #levels > 0 then
+    eq(levels[1], 6, "starting at the first level actually crossed")
+    eq(levels[#levels], mon.level, "and ending on the level the mon now is")
+    eq(#levels, mon.level - 5, "with one entry per level, not one per award")
+  end
+end
+
+-- 5. the holder list is the EXP.SHARE pass's whole population.
+do
+  local party = {
+    monOf({ item = "EXP_SHARE" }),                 -- 1: a holder
+    monOf(),                                       -- 2: no item
+    monOf({ item = "EXP_SHARE", hp = 0 }),         -- 3: fainted holder
+    monOf({ item = "EXP_SHARE", isEgg = true }),   -- 4: an egg
+    monOf({ item = "LUCKY_EGG" }),                 -- 5: the other item
+    monOf({ item = "EXP_SHARE" }),                 -- 6: a holder
+  }
+  local holders = Exp2.holders(party)
+  eq(#holders, 2, "only living, non-egg EXP_SHARE holders count")
+  eq(holders[1], 1, "...in party order")
+  eq(holders[2], 6, "...both of them")
+  eq(#Exp2.holders({}), 0, "an empty party holds nothing")
+  eq(#Exp2.holders(nil), 0, "and neither does no party at all")
+end
+
+-- 6. the strip fraction, which is what the plate draws.
+do
+  local game = goldGame()
+  -- Cubic curve: level 6 starts at 216 and level 7 at 343, so 216 + 127/2 is
+  -- exactly half way. Computed here rather than asserted as a constant, so the
+  -- test states the *rule* and not one arithmetic result.
+  local here, next_ = 6 ^ 3, 7 ^ 3
+  local mon = monOf({ level = 6, experience = here + math.floor((next_ - here) / 2) })
+  local frac = Exp2.fraction(game, mon)
+  check(frac ~= nil and math.abs(frac - 0.5) < 0.01,
+        "Exp2.fraction reads mon.experience against Gold's own curve")
+
+  eq(Exp2.fraction(game, { species = "NOT_A_SPECIES", level = 6, experience = 300 }),
+     nil, "an unknown species answers nil, not a fabricated 0")
+  eq(Exp2.fraction(game, nil), nil, "no mon answers nil")
+  eq(Exp2.fraction(nil, mon), nil, "no game answers nil")
+  eq(Exp2.fraction(game, monOf({ level = 100, experience = 100 ^ 3 })), 1,
+     "a max-level mon reads as full rather than as no data")
+end
+
+-- 7. level-up moves come off Gen 2's `levelMoves`, not Gen 1's `learnset`.
+do
+  local at8 = Exp2.movesLearnedAt(MINE, 8)
+  eq(#at8, 2, "every move learned at exactly that level is offered")
+  eq(at8[1], "FIX_B", "...in table order")
+  eq(#Exp2.movesLearnedAt(MINE, 7), 1, "and a level with one move offers one")
+  eq(#Exp2.movesLearnedAt(MINE, 9), 0, "a level with none offers none")
+  eq(#Exp2.movesLearnedAt(nil, 8), 0, "no species def answers an empty list")
+end
+
+-- 8. refusals are reasons, never raises: this runs inside an event handler,
+--    and a handler that throws takes the whole battle stream with it.
+do
+  local game = goldGame()
+  local levels, why = Exp2.apply(game, monOf(), nil,
+    { level = 20, participants = 1 })
+  eq(levels, nil, "no species record for the fallen monster is a refusal")
+  check(type(why) == "string", "...carrying a reason a log line can print")
+  eq(Exp2.apply(game, nil, FALLEN, { level = 20 }), nil, "and so is no monster")
+  eq(Exp2.apply({ }, monOf(), FALLEN, { level = 20 }), nil,
+     "and so is no dataset to price it with")
+end
 
 end)()
 

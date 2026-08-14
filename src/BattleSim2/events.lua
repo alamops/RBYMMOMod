@@ -39,13 +39,18 @@ local floor = math.floor
 -- the closed set
 -- ------------------------------------------------------------------
 --
--- A subset of Wire.BATTLE_EVENTS, not a mirror of it exactly: `exp` is
--- Gen1-only (see docs/plans/better-battle-ui.md R5-A2 — Gen2 mediated stays
--- exp-free, and only the Gen1 side carries a mirror-assertion test), so
--- adding a kind to Wire does NOT automatically belong here. Adding a kind
--- that *does* belong here is still a wire change: the Node twin, Wire's
--- whitelist and the screen all have to learn it in the same version, so the
--- set is written out longhand rather than derived.
+-- A subset of Wire.BATTLE_EVENTS, not a mirror of it exactly: adding a kind to
+-- Wire does NOT automatically belong here. Adding a kind that *does* belong
+-- here is still a wire change: the Node twin, Wire's whitelist and the screen
+-- all have to learn it in the same version, so the set is written out longhand
+-- rather than derived.
+--
+-- `exp` was Gen1-only for one release (docs/plans/better-battle-ui.md R5-A2);
+-- docs/plans/gen2-new-battle-system.md closes that gap. It needs no PROTOCOL
+-- bump because the kind already rides Wire's whitelist and carries no
+-- generation tag -- the facts a faint pays out on (who fell, what level, how
+-- many shares) are the same sentence in both games, and each client prices
+-- them with its own generation's formula.
 --
 --   msg        -- a line of text for the box
 --   anim       -- play a move's animation
@@ -65,11 +70,12 @@ local floor = math.floor
 --   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 --   unchose    -- cancel cleared a filed answer
 --   moves      -- mid-fight move-list sync after Transform/Mimic
+--   exp        -- a faint paid out; facts only, the client prices it
 M.KINDS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
-  chose = true, unchose = true, moves = true,
+  chose = true, unchose = true, moves = true, exp = true,
 }
 
 -- Every key an event may carry, and the type it carries.  `battle` and `seq`
@@ -77,15 +83,19 @@ M.KINDS = {
 -- caller that could choose its own sequence number could put a hole in the
 -- stream, and a hole is what a client reads as lost messages.
 M.FIELDS = {
-  battle = "string",
-  seq    = "number",
-  t      = "string",
-  text   = "string",
-  amount = "number",
-  slot   = "number",
-  hp     = "number",
-  side   = "string",
-  status = "string",
+  battle       = "string",
+  seq          = "number",
+  t            = "string",
+  text         = "string",
+  amount       = "number",
+  slot         = "number",
+  hp           = "number",
+  side         = "string",
+  status       = "string",
+  species      = "string",
+  level        = "number",
+  participants = "number",
+  mon          = "number",
 }
 
 -- ------------------------------------------------------------------
@@ -118,21 +128,27 @@ M.SHAPES = {
   drain     = { slot = true, side = true, amount = true, hp = true },
   faint     = { slot = true, side = true, text = true,
                 amount = "1 when the seat still has a living bench (mustReplace)" },
-  send      = { slot = true, side = true, hp = true, text = "the species" },
+  send      = { slot = true, side = true, hp = true, text = "the species",
+                mon = "party index (0-5) of the mon the referee fielded" },
   status    = { slot = true, side = true, status = "absent means cleared",
                 text = true },
   stat      = { slot = true, side = true, amount = true, text = true },
-  switch    = { slot = true, side = true, text = "the species coming in" },
+  switch    = { slot = true, side = true, text = "the species coming in",
+                mon = "party index (0-5) of the mon coming in" },
   item      = { slot = true, side = true, text = "the item id",
                 amount = "1 when a vitamin applied (client save writeback)" },
   run       = { slot = true, side = true, text = true },
-  turn      = { amount = "the 1-based turn number" },
+  turn      = { amount = "the 1-based turn number",
+                slot = "present only on a replacement solicitation: the field slot being asked" },
   over      = { text = "the reason token" },
   wait      = { side = true, text = "who is being waited on" },
   reconnect = { side = true, text = true },
   chose     = { slot = true, side = true, text = "who answered" },
   unchose   = { slot = true, side = true, text = "who answered" },
   moves     = { slot = true, side = true, moves = "sanitised move list" },
+  exp       = { slot = "the winner being paid", species = "the monster that fell",
+                level = "its level", participants = "how many shares split it",
+                mon = "party index (0-5) of the mon banking this share; absent means the active one" },
 }
 
 -- ------------------------------------------------------------------

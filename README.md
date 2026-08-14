@@ -1185,6 +1185,38 @@ pass count.
 > Two windows open and drive themselves. Don't click into them — you'll
 > steal the input the drivers are queueing.
 
+### 🥇 …and the same thing on Gold
+
+Gen 2 is a peer product surface, not a flag, so it has its own pair of live
+runs:
+
+```sh
+bash mods/rby_mmo/tests/drivers/run-mmo-e2e-gen2.sh          # two Gold instances
+bash mods/rby_mmo/tests/drivers/run-battlefield-e2e-gen2.sh  # the Gold arena
+```
+
+The first is the Gen 1 run's twin — presence, chat, trade (held items and
+mail), mediated 1v1, party, `coop_wild`, `coop_npc` — plus two things only a
+live Gold boot can prove:
+
+- 🎨 **the battle arena is on screen on _both_ clients**, at its own 640×360,
+  reaching the window through Gold's widescreen seam rather than the 160×144
+  panel. Checked on each side separately, because the two clients build their
+  seats from opposite ends of the same wire and a joiner that quietly fell
+  back to GB chrome is exactly what one-sided assertions miss
+- ⭐ **experience really is paid** — the Gen 2 referee emits the award, this
+  client prices it with Gold's own formula, and it persists to the save.
+  Asserted on awards actually applied rather than on a number that moved, and
+  taken off the `coop_npc` leg: the `coop_wild` one ends with a MASTER_BALL,
+  and a caught foe never faints, so paying nothing there is correct
+
+The second runs the **same** screenshot driver as its Gen 1 sibling against a
+Gold boot — one driver, 34 pixel assertions, both carts — so a change that
+looks right on Red and wrong on Gold fails rather than ships.
+
+Both skip cleanly (exit 0) when there is no Gold cache and no
+`GOLD_ROM_PATH`, because CI has no ROM and must not fail for not having one.
+
 ---
 
 ## 📦 Cutting a release
