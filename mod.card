@@ -175,11 +175,19 @@ return {
       "A SERVERS row on the disconnected menu, once you have connected "
         .. "anywhere before: every hub you have reached, favorites pinned "
         .. "above the rest and sorted by address descending otherwise, each "
-        .. "with its own CONNECT / FAVORITE-UNFAVORITE / EDIT HOST / "
-        .. "EDIT CODE / RENAME submenu. Entries default-named by address, "
-        .. "rename up to 16 characters, and persist across quits, CONTINUE "
-        .. "and save-slot switches in rby_mmo_servers.json; the list caps at "
-        .. "16 with the oldest non-favorite evicted first.",
+        .. "with its own CONNECT / AUTOJOIN / FAVORITE-UNFAVORITE / "
+        .. "EDIT HOST / EDIT CODE / RENAME submenu. Entries default-named by "
+        .. "address, rename up to 16 characters, and persist across quits, "
+        .. "CONTINUE and save-slot switches in rby_mmo_servers.json; the list "
+        .. "caps at 16 with the oldest non-favorite evicted first.",
+      "AUTOJOIN on any one of those rows (the official row included): this "
+        .. "copy dials that hub by itself the next time you enter a game -- "
+        .. "CONTINUE or NEW GAME, once the world is actually up, never at the "
+        .. "title screen. Exactly one server may be armed, so arming a second "
+        .. "asks a yes/no naming the one it would displace; the armed row is "
+        .. "marked with a down arrow on the list, and anything the hub "
+        .. "refuses the dial with comes back as one dismissible box naming "
+        .. "the server.",
     },
     known = {
       "MMO 1v1 and co-op fights are hub-refereed (BattleSim): clients upload "

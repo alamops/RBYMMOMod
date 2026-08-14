@@ -538,7 +538,7 @@ played there — recency only decides which *non*-favorite gets dropped when
 the list is full.
 
 Pick an entry and a submenu opens: **`CONNECT`** dials it exactly the way
-`JOIN GAME` does, **`FAVORITE`/`UNFAVORITE`** flips the pin, **`EDIT HOST`**
+`JOIN GAME` does, **`AUTOJOIN`** is below (see next), **`FAVORITE`/`UNFAVORITE`** flips the pin, **`EDIT HOST`**
 and **`EDIT CODE`** reopen the address or passcode on the naming grid, and
 **`RENAME`** is the only one that touches the label — entries are named after
 the address you dialled with the standard port left off (`192.168.1.20:7788`
@@ -555,9 +555,39 @@ save slots, because it's kept in its own file rather than the save. It holds
 16 entries; past that, the one you haven't reconnected to in the longest
 time is dropped first, and a favorite is never the one that goes.
 
+**`AUTOJOIN` opens you straight into one of them.** Arm a row and this copy
+dials that hub by itself the next time you enter a game — `CONTINUE` or
+`NEW GAME`, once you're actually standing in the world. It never fires at the
+title screen, and never on its own: launching the game and stopping at the
+menu connects you to nothing. The armed row is marked `▼` on the list, so
+you can see which hub your game opens into without opening anything, and its
+own row reads `NO AUTOJOIN` — press it again to switch it off. `RBY MMO
+OFFICIAL` can be the armed one too; it's the only setting on that row that's
+yours rather than built in.
+
+**Only one server can auto-join.** Arming a second is what disarms the first,
+so the game asks first — `Stop auto-joining <NAME>?`, yes or no, naming the
+hub that would lose it. The setting outlives a save reload like the list
+does, follows a row through `EDIT HOST`, and goes with it on `DELETE`.
+
+If the hub turns the dial down — unreachable, full, wants a passcode this
+copy doesn't have, hangs up mid-handshake, or just never answers — you get one
+dismissible box that names the server and keeps the hub's own words. You
+pressed nothing to start it, so it says so rather than leaving an unexplained
+error on a game you just opened. Nothing else happens: fix the row (or switch
+`AUTOJOIN` off) under `SERVERS` and carry on playing.
+
+One thing auto-join deliberately *doesn't* do: it never changes what
+`JOIN GAME` opens prefilled with. Pressing `CONNECT` on a row does — that's
+you saying where you join from now on — but a dial that happens by itself
+every time you enter a game shouldn't quietly replace the address you last
+typed.
+
 <p align="center">
   <img src="docs/screenshots/servers-list.png" width="300" alt="The SERVERS list: a favorited hub, marked with an arrow in the right-hand column">
-  <img src="docs/screenshots/servers-submenu.png" width="300" alt="The per-server submenu: CONNECT, UNFAVORITE, EDIT HOST, EDIT CODE, RENAME, DELETE">
+  <img src="docs/screenshots/servers-submenu.png" width="300" alt="The per-server submenu: CONNECT, AUTOJOIN, UNFAVORITE, EDIT HOST, EDIT CODE, RENAME, DELETE">
+  <img src="docs/screenshots/servers-autojoin.png" width="300" alt="The SERVERS list with the auto-join hub marked with a down arrow in the right-hand column">
+  <img src="docs/screenshots/servers-autojoin-switch.png" width="300" alt="Arming a second server asks Stop auto-joining, naming the hub that would lose it">
   <img src="docs/screenshots/servers-confirm.png" width="300" alt="The DELETE confirmation asking to forget the server, with the cursor starting on NO">
 </p>
 
@@ -689,7 +719,7 @@ behind it.
 
 | Row | Shows up when | What it does |
 | --- | --- | --- |
-| `SERVERS` | not in a game, and you've connected somewhere before | pick a hub you've reached before, and reconnect, rename, favorite or edit it |
+| `SERVERS` | not in a game, and you've connected somewhere before | pick a hub you've reached before, and reconnect, auto-join, rename, favorite or edit it |
 | `HOST GAME` | not in a game | make a trainer, then the room size and the passcode |
 | `JOIN GAME` | not in a game | make a trainer, then the address and the passcode |
 | `CHARACTER` | not in a game, or connected | change who you look like, right now — in a game it sits under `RANK` and everyone sees it |

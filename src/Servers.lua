@@ -178,6 +178,16 @@ function M.new(ctx)
     -- their save folder is unreadable once per keypress, which buries the
     -- sentence that mattered under the sentence that mattered.
     said = {},
+    -- Which hub this copy dials by itself on the way into a game -- one key,
+    -- or none.
+    --
+    -- A scalar rather than a flag on each row, and that is the whole of the
+    -- "only one server can auto-join" rule: two rows cannot both hold a value
+    -- that has room for one answer, so there is no state a bug could leave
+    -- where the list disagrees with itself. It also lets the *featured* row --
+    -- which is product configuration and is deliberately never persisted as
+    -- history -- be chosen, which a per-row flag could not.
+    autoKey = nil,
   }, M)
 end
 
@@ -264,17 +274,37 @@ end
 -- Applies rows to the table, newest reader wins. `only` restricts it to keys
 -- this session has neither seen nor deliberately dropped, which is what the
 -- write path needs and the load path does not.
+--
+-- The auto-join key rides in on the same rows, as an `auto` flag on the one
+-- row that carries it, so the mirror and the file stay a plain array of
+-- servers and a build that predates this reads them exactly as it always did.
+-- It is read off `raw` rather than kept on the sanitised entry deliberately:
+-- the store's answer to "which hub auto-joins" is self.autoKey and nothing
+-- else, and a second copy of it sitting on a row is a second copy that could
+-- disagree. Returned rather than assigned so _load can decide which reader's
+-- answer wins.
+--
+-- Skipped entirely under `only`, which is the write path folding in another
+-- save slot's rows: what this copy auto-joins is a setting this session is in
+-- the middle of writing, and the rows being folded in are the older word.
 function M:_ingest(rows, only)
+  local auto = nil
   for _, raw in ipairs(rows or {}) do
     local entry = sanitise(raw)
+    if entry and not only and raw.auto == true and auto == nil then
+      auto = entry.key
+    end
     -- Older builds may already have remembered the official address after a
     -- successful welcome. It is represented by the synthetic row now, so it
-    -- is neither loaded into the persisted store nor counted by eviction.
+    -- is neither loaded into the persisted store nor counted by eviction --
+    -- but its `auto` flag above is still read, because the featured row is
+    -- exactly the row that has nowhere else to record one.
     if entry and entry.key ~= FEATURED_KEY then
       local known = self.entries[entry.key] ~= nil or self.dropped[entry.key]
       if not (only and known) then self.entries[entry.key] = entry end
     end
   end
+  return auto
 end
 
 -- The cap, applied by throwing away the hub you have not been to in longest.
@@ -314,6 +344,11 @@ local function evict(self, keep)
     if not oldestKey then return end
     self.entries[oldestKey] = nil
     self.dropped[oldestKey] = true
+    -- The auto-join key points at a row, so a row that goes takes it with it.
+    -- Left behind it would be a setting naming a hub that is no longer on the
+    -- list -- nothing would dial, and the menu would have no row to draw the
+    -- mark on, so the player would have no way to see that it was still set.
+    if self.autoKey == oldestKey then self.autoKey = nil end
     count = count - 1
   end
 end
@@ -330,10 +365,24 @@ end
 function M:_load()
   if self.loaded then return end
   self.loaded = true
-  self:_ingest(self:_saved())
+  self.autoKey = self:_ingest(self:_saved())
   local rows = self:_read()
-  if rows then self:_ingest(rows) end
+  if rows then
+    -- The file is the durable half, so its answer wins -- but only when it
+    -- actually has one. A file written by a build that predates auto-join
+    -- carries no flag at all, and reading that silence as "off" would throw
+    -- away a setting the mirror still remembers.
+    self.autoKey = self:_ingest(rows) or self.autoKey
+  end
   evict(self)
+  -- A key that survived both readers but names no row is nothing this store
+  -- can act on -- the row was evicted by the other half of the merge, or
+  -- deleted by another save slot. The featured row is the exception: it is
+  -- synthetic and is always there to be dialled.
+  if self.autoKey and self.autoKey ~= FEATURED_KEY
+      and not self.entries[self.autoKey] then
+    self.autoKey = nil
+  end
 end
 
 -- The persisted rows in their display order, and the exact array that gets
@@ -347,6 +396,43 @@ function M:_rows()
     if a.fav ~= b.fav then return a.fav end
     return a.key > b.key
   end)
+  return out
+end
+
+-- The array both mirrors are handed: _rows() with the auto-join flag stamped
+-- back onto the row that holds it.
+--
+-- Copies rather than the live entries, because the flag is derived state --
+-- self.autoKey is the answer -- and writing it onto the canonical tables
+-- would put a second copy of it in every reader's hands, including the ones
+-- list() and menuList() hand outside this file.
+--
+-- Copied field by field rather than field by *name*: before the flag existed
+-- this wrote _rows() itself, so whatever sanitise defined was what got
+-- persisted, by construction. Re-listing the fields here would make this a
+-- second declaration of the row shape -- and the next field added to sanitise
+-- would work perfectly in memory, vanish on relaunch, and fail no test,
+-- because sanitise would just fill its default back in on the way in.
+--
+-- The featured row is appended when it is the one that auto-joins, and only
+-- then. It is product configuration rather than history, so it is not on the
+-- list and must not consume one of SERVER_LIST_MAX's slots -- but "I dial the
+-- official hub on the way in" is a player setting like any other, and this
+-- stub is the only place it can be written down. Nothing but the key and the
+-- flag is persisted with it: the name, code and address stay canonical in
+-- Config, and every reader of this file drops the row on the way back in.
+function M:_persistRows()
+  local out = {}
+  for _, entry in ipairs(self:_rows()) do
+    local row = {}
+    for field, value in pairs(entry) do row[field] = value end
+    if self.autoKey == entry.key then row.auto = true end
+    out[#out + 1] = row
+  end
+  if self.autoKey == FEATURED_KEY then
+    out[#out + 1] = { key = FEATURED_KEY,
+                      address = Config.FEATURED_SERVER_HOST, auto = true }
+  end
   return out
 end
 
@@ -376,7 +462,7 @@ function M:_persist(keep)
     evict(self, keep)
   end
 
-  local list = self:_rows()
+  local list = self:_persistRows()
   local save = self.mod and self.mod.save
   if save then pcall(save.set, save, SAVE_KEY, list) end
 
@@ -461,6 +547,81 @@ function M:menuGet(key, game)
     return featuredEntry()
   end
   return self.entries[id]
+end
+
+-- ------- auto-join
+--
+-- One hub, dialled by the client on the way into a game rather than by the
+-- player through four menus. The store's whole job here is the "one" -- what
+-- to do about it is src/Client.lua's, and when is the moment a world comes
+-- up, never a relaunch on its own.
+
+-- The key that auto-joins, or nil. Normalised, so it can be compared against
+-- anything menuList hands out.
+function M:autoJoinKey()
+  self:_load()
+  return self.autoKey
+end
+
+-- Whether *this* row is the one. Takes a key or an address, like get().
+function M:isAutoJoin(key)
+  self:_load()
+  local id = keyOf(key)
+  return id ~= nil and id == self.autoKey
+end
+
+-- The row to dial, resolved the way the menu resolves one -- so a generation
+-- that cannot see the featured server cannot auto-join it either, and a key
+-- whose row went away answers nil rather than handing back a half-entry.
+function M:autoJoinEntry(game)
+  self:_load()
+  if not self.autoKey then return nil end
+  return self:menuGet(self.autoKey, game)
+end
+
+-- Turn it on for one row, or off.
+--
+-- Turning it on is what turns it off everywhere else, and no caller has to
+-- ask: there is one key. A screen that wants to *tell* the player which hub
+-- it is about to displace asks autoJoinEntry first -- that question is the
+-- player's to answer, and answering it is not this store's job.
+--
+-- `on` false only clears the key when this row is the one holding it, so a
+-- stale menu row cannot switch off a setting that has since moved.
+--
+-- `game` is the boot the row is being resolved against, and it is here for
+-- the same reason menuGet takes one: the featured row is generation-gated, so
+-- a Gold game must not be able to arm a dial at a hub it is not allowed to
+-- see. Absent, it resolves as Gen 1 -- which is what every headless caller is.
+function M:setAutoJoin(key, on, game)
+  self:_load()
+  local id = keyOf(key)
+  if not id then
+    self:_warn("could not set auto-join for a server with no address -- open "
+      .. "START > MMO > SERVERS and pick a row that is on the list")
+    return nil
+  end
+
+  if not on then
+    local entry = self:menuGet(id, game)
+    if self.autoKey == id then
+      self.autoKey = nil
+      self:_persist()
+    end
+    return entry or true
+  end
+
+  -- Only a row that exists: the key is what the client dials, and one naming
+  -- nothing would be a setting that fails silently every launch.
+  local entry = self:menuGet(id, game)
+  if not entry then
+    self:_warn("no server is stored for %s, so it cannot auto-join -- connect "
+      .. "to it once from START > MMO > JOIN GAME", tostring(key))
+    return nil
+  end
+  self.autoKey = id
+  self:_persist(id)
+  return entry
 end
 
 -- A hub answered our welcome, so it goes on the list.
@@ -587,11 +748,18 @@ function M:setAddress(key, newAddress)
     return nil
   end
   if id ~= entry.key then
+    -- The auto-join key travels with the row for the reason the name and the
+    -- favourite flag do: a hub that changed address is the same hub, and a
+    -- player who set it to auto-join did not ask for that to lapse because
+    -- its IP moved. Read before the re-key, written after, so the comparison
+    -- is against the key the setting was actually stored under.
+    local wasAuto = self.autoKey == entry.key
     self.entries[entry.key] = nil
     self.dropped[entry.key] = true
     self.entries[id] = entry
     self.dropped[id] = nil
     entry.key = id
+    if wasAuto then self.autoKey = id end
   end
   entry.address = clean
   self:_persist(entry.key)
@@ -662,6 +830,9 @@ function M:remove(key)
   end
   self.entries[entry.key] = nil
   self.dropped[entry.key] = true
+  -- And the auto-join setting with it, for eviction's reason: a key naming a
+  -- row nobody can see is a dial the player has no way to turn off.
+  if self.autoKey == entry.key then self.autoKey = nil end
   self:_persist()
   return entry
 end

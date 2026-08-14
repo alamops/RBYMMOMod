@@ -163,6 +163,28 @@ function M:update(dt)
     self:fail("the hub stopped responding -- reconnect from START > MMO")
   end
 
+  -- The handshake's own deadline, which the ready-state timeout above cannot
+  -- cover: it measures silence since the last message, and a connection that
+  -- has never been welcomed has never had one.
+  --
+  -- Both hubs already hold a client to this same budget from their side
+  -- (src/Hub.lua's sweep and server/lib/limits.js, both Config.HANDSHAKE_TIMEOUT
+  -- seconds), so this is not a new rule -- it is the rule applied by the one
+  -- party that can still see the socket when the other end is not a hub of
+  -- ours at all. Without it a listener that accepts and never answers -- a
+  -- stale port forward, some unrelated service on 7788, a wedged third-party
+  -- build -- leaves this side in `connecting` forever: no connection, no
+  -- error, and nothing for a caller to report. That is invisible on a dial
+  -- the player pressed, and completely silent on one they did not (see
+  -- src/Client.lua's auto-join).
+  --
+  -- Measured from `clock`, which both connect() and attach() reset to zero,
+  -- so it covers a hosting copy's own loopback attach as well as a dial.
+  if self.state == "connecting" and self.clock > Config.HANDSHAKE_TIMEOUT then
+    self:fail("the hub never finished connecting -- it may not be a hub, or "
+      .. "may be running a different build")
+  end
+
   if self.net.closed and self.state ~= "closed" then
     self:fail(self.error or "the hub closed the connection")
   end
