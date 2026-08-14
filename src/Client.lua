@@ -191,6 +191,35 @@ local authSent = false
 -- stays silent; cleared only on intentional leave / stopHosting.
 local connectedAnnounced = false
 
+-- ------- auto-join
+--
+-- One hub, dialled by this file rather than by four menu presses. Which hub
+-- is src/Servers.lua's answer (one key, so "only one server auto-joins" is
+-- structural rather than enforced); *when* is this table.
+--
+-- `armed` is set when a world takes over -- CONTINUE and NEW GAME, which are
+-- the two ways a player enters a game -- and spent on the first tick that
+-- finds them actually standing in it. It is deliberately not set at load: a
+-- copy sitting on the title screen has not entered anything, and dialling a
+-- hub for a save nobody has opened would put this player on somebody's roster
+-- while they read the menu.
+--
+-- `dialling` is true from the dial until the hub either welcomes us or
+-- refuses, and it is what turns every failure sentence on that path into one
+-- that names the auto-join. A player who pressed nothing and is handed
+-- "could not reach 10.0.0.4:7788" has no way to know why their game tried.
+--
+-- `quiet` diverts the connect path's own sentence into `message` for exactly
+-- that rewrite, rather than letting two boxes stack up over a game that has
+-- only just come up.
+local autoJoin = {
+  armed = false,
+  dialling = false,
+  name = nil,
+  quiet = false,
+  message = nil,
+}
+
 -- ------- helpers
 
 -- Every entry point below is reachable both ways: menu code calls
@@ -1128,28 +1157,100 @@ end
 
 -- ------- connect / disconnect
 
-function M.connect(a, b)
-  local game = arg1(a, b) or ctx.game
+-- What a refused dial says, and to whom.
+--
+-- Ordinarily the player, in a box, exactly as before. During an auto-join the
+-- sentence is kept instead, so autoJoinFailed below can put it under a line
+-- that says which server this was and that nobody asked for it -- one box
+-- rather than two, and one that makes sense to a player who has just pressed
+-- CONTINUE and pressed nothing since.
+local function connectSay(text)
+  if autoJoin.quiet then
+    autoJoin.message = text
+    return
+  end
+  ui:say(text)
+end
+
+-- The auto-join dial is over, one way or another.
+--
+-- Called from the success path and from every refusal, and by M.leave, so
+-- `dialling` can never outlive the connection it describes -- a stale one
+-- would put "Couldn't auto-join" in front of a failure the player caused
+-- themselves an hour later.
+local function autoJoinSettled()
+  autoJoin.dialling, autoJoin.name = false, nil
+  autoJoin.quiet, autoJoin.message = false, nil
+end
+
+-- The one dismissible box the whole feature can produce.
+--
+-- Everything a hub can refuse a connection with funnels here -- an address
+-- that will not dial, a socket that will not open, a challenge we have no
+-- code for, an mmo.error, a hang-up mid-handshake -- because the player did
+-- not ask for any of it and the only useful thing to tell them is which
+-- server it was and what it said. The remediation goes to the log beside it,
+-- which is where a sentence too long for a text box belongs.
+local function autoJoinFailed(reason)
+  local name = autoJoin.name
+  autoJoinSettled()
+  mod.log:warn("auto-join to %s failed (%s) -- open START > MMO > SERVERS and "
+    .. "either fix that row's address and join code or turn its AUTOJOIN row "
+    .. "off", tostring(name or "the saved server"),
+    tostring(reason or "no reason given"))
+  local text = ("Couldn't auto-join\n%s."):format(name or "that server")
+  local why = reason and tostring(reason) or nil
+  if why and why ~= "" then text = text .. "\n" .. why end
+  ui:say(text)
+end
+
+-- connect(game) / connect(game, address), and the colon form of both.
+--
+-- `address` is optional and is dialled *without* being stored -- see the
+-- comment on `address` below for why that distinction exists at all. The
+-- argument shuffle is arg1's, done by hand because there are two values to
+-- shift rather than one.
+function M.connect(a, b, c)
+  local game, wanted
+  if a == M then game, wanted = b, c else game, wanted = a, b end
+  game = game or ctx.game
   if not game then return false end
+  -- Any dial the player asked for cancels whatever the auto-join was in the
+  -- middle of: it is the same transport, so a connection that is theirs must
+  -- not be reported as this feature's when it goes wrong.
+  if not autoJoin.quiet then autoJoinSettled() end
   if transport:isOpen() or M.isHosting() then
-    ui:say("You're already in\na game.")
+    connectSay("You're already in\na game.")
     return false
   end
 
-  local address = M.joinAddress()
+  -- Dial *this* address, without adopting it.
+  --
+  -- The stored one is the default and stays the default: every caller that
+  -- has always dialled "wherever JOIN GAME points" passes nothing and gets
+  -- exactly that, and the two menu paths that pick a hub deliberately write
+  -- it first (setJoinAddress) because choosing a row *is* the player saying
+  -- where they join from now on.
+  --
+  -- What needs the other answer is the dial nobody pressed: auto-join runs
+  -- unattended on every entry into a game, and writing its row through would
+  -- silently replace whatever the player last typed into JOIN GAME with a
+  -- hub they never chose as their default.
+  local address = withPort(wanted) or M.joinAddress()
   -- Official public hub is Gen 1-only until a Gen 2 deploy exists. Refuse
   -- here (not only by hiding the SERVERS row) so a typed / options JOIN to
   -- play.rbymmo.com on Gold gets a clear sentence instead of a generation
   -- mismatch from the hub.
   if Servers.isFeaturedAddress(address)
       and not Config.featuredServerAllowed(Gen.generation(game)) then
-    ui:say("Official server is\nGen 1 only for now.\nHost a Gold game\ninstead.")
+    connectSay(
+      "Official server is\nGen 1 only for now.\nHost a Gold game\ninstead.")
     return false
   end
 
   local ok, err = transport:connect(address)
   if not ok then
-    ui:say(tostring(err or "Couldn't connect."))
+    connectSay(tostring(err or "Couldn't connect."))
     return false
   end
 
@@ -1157,6 +1258,86 @@ function M.connect(a, b)
   M.sendHello(game)
   M.applyLook(game)
   return true
+end
+
+-- The dial nobody pressed.
+--
+-- Runs off the fixed step rather than off the save event that armed it,
+-- because "entered the game" is not a thing an event can prove: save.loaded
+-- lands while the world is still being built (M.applyLook above says the same
+-- about the same moment), and NEW GAME fires save.created before Oak has
+-- finished asking who you are. World.current() answering is the proof --
+-- there is an overworld and this player is standing in it -- and it costs one
+-- field read on the ticks between a save landing and a world coming up.
+--
+-- Spent whatever happens, including when there is nothing to do: the flag
+-- means "a world was entered and the dial has not been considered yet", so
+-- leaving it set after a decision would re-dial on the next map, and after a
+-- LEAVE it would drag the player back into the game they just walked out of.
+--
+-- CONNECT's own pre-flight is deliberately not repeated here beyond the two
+-- that decide whether to try at all -- M.connect refuses an open transport
+-- and a Gen 2 boot dialling the official hub itself, and its sentences are
+-- the ones the box ends up carrying.
+local function tryAutoJoin(game)
+  if not World.current() then return end
+  autoJoin.armed = false
+  -- Already somewhere: a player who hosted or joined between the save landing
+  -- and their feet hitting the ground has answered this question themselves.
+  if transport:isOpen() or M.isHosting() then return end
+
+  local entry, armed
+  local ok, why = pcall(function()
+    entry = servers:autoJoinEntry(game)
+    armed = servers:autoJoinKey()
+  end)
+  if not ok then
+    mod.log:warn("could not read the auto-join server (%s) -- nothing was "
+      .. "dialled; set it again under START > MMO > SERVERS", tostring(why))
+    return
+  end
+  if not entry then
+    -- Armed, but at a row this boot cannot resolve: today that is only the
+    -- official hub on a Gen 2 game, which the menu hides and menuGet refuses
+    -- for the same reason M.connect would refuse the dial. Doing nothing is
+    -- the right answer -- there is nothing to reach -- but doing it *silently*
+    -- leaves a player who set this on Red wondering why Gold never connects,
+    -- with nothing in the log to find. No box: nobody pressed anything, and
+    -- this is a standing condition rather than a failure of this launch.
+    if armed then
+      mod.log:warn("auto-join is set to %s, which this game cannot reach -- "
+        .. "the official server is Gen 1 only for now; host a Gold game or "
+        .. "point AUTOJOIN at another row under START > MMO > SERVERS",
+        tostring(armed))
+    end
+    return
+  end
+
+  autoJoin.name = entry.name
+  -- Normalised but deliberately NOT stored: the port has to be filled in
+  -- before the join code is filed, because the code is keyed on exactly the
+  -- string the transport dials. What the SERVERS menu's CONNECT does here
+  -- instead is setJoinAddress -- adopting the row as the standing JOIN GAME
+  -- target -- which is right for a row the player just chose and wrong for a
+  -- dial that happens by itself on every entry into a game.
+  local target = withPort(entry.address)
+  if not target then
+    return autoJoinFailed("That address is\nno good.")
+  end
+  if entry.code then M.setJoinCode(target, entry.code) end
+
+  autoJoin.quiet, autoJoin.message = true, nil
+  local dialledOk = M.connect(game, target)
+  autoJoin.quiet = false
+  if not dialledOk then
+    local said = autoJoin.message
+    autoJoin.message = nil
+    return autoJoinFailed(said)
+  end
+  -- The socket is open and the hello is away. Everything that can still go
+  -- wrong -- a challenge with no code, an mmo.error, a hang-up -- is a
+  -- message away, so the flag stays up until the welcome lands.
+  autoJoin.dialling = true
 end
 
 -- ------- hosting
@@ -1308,6 +1489,11 @@ end
 -- Leaving covers both shapes so callers never have to ask which they are:
 -- a host stops the game for everyone, a guest just walks out.
 function M.leave()
+  -- Walking out is an answer to the auto-join too: the dial it describes is
+  -- the one being torn down, and a flag left standing would flavour the next
+  -- unrelated failure as this feature's. The *setting* is untouched -- it is
+  -- about the next time a world comes up, not about this session.
+  autoJoinSettled()
   if M.isHosting() then return M.stopHosting() end
   M.disconnect()
   connectedAnnounced = false
@@ -1331,6 +1517,15 @@ function M.saveLoaded()
   M.leave()
   M.restoreLook()
   M.syncLook()
+  -- A world is taking over, which is the one thing "entered the game" can
+  -- mean: CONTINUE and NEW GAME both arrive here, and nothing else does. The
+  -- dial itself waits for the tick that finds the player standing in it --
+  -- see tryAutoJoin for why the event is too early to act on.
+  --
+  -- After M.leave above, deliberately: leaving is what clears the last
+  -- session's flag, and arming before it would be armed and then spent on a
+  -- teardown that has nothing to do with this save.
+  autoJoin.armed = true
   -- "Once per session" for the unranked explanation meant once per
   -- *process*, so a player who loaded a different save was never told why a
   -- co-op trainer win paid nothing -- which is precisely the player who has
@@ -1506,6 +1701,14 @@ handlers[Wire.CHALLENGE] = function(game, msg)
     -- holding the socket open only buys the player a connection that dies
     -- behind the screen they are still typing on.
     M.disconnect()
+    -- An auto-join is told, not asked. The code grid is the right answer for
+    -- a player who just pressed CONNECT and is standing in front of the
+    -- screen; dropping it in front of somebody who pressed CONTINUE and got
+    -- a world is a demand for six characters they did not come here to type.
+    -- The row is theirs to fix under SERVERS, and the box says so.
+    if autoJoin.dialling then
+      return autoJoinFailed("It needs a join\ncode.")
+    end
     ui:say("This game needs a\njoin code.", function()
       M.askJoinCode(game, address, address ~= nil)
     end)
@@ -1519,6 +1722,9 @@ handlers[Wire.CHALLENGE] = function(game, msg)
     mod.log:warn("could not answer the hub's challenge (%s) -- re-enter the "
       .. "code from START > MMO > JOIN GAME", tostring(why))
     M.disconnect()
+    if autoJoin.dialling then
+      return autoJoinFailed("Couldn't answer\nits join code.")
+    end
     ui:say("Couldn't answer\nthis game's code.")
     return
   end
@@ -1570,6 +1776,10 @@ handlers[Wire.WELCOME] = function(game, msg)
     ctx.roster:put(Wire.presence(raw))
   end
   transport:markReady()
+  -- The auto-join, if this was one, is over and it worked: nothing after this
+  -- point is a failure of it, and the player is told they are connected by
+  -- the same toast every other arrival gets.
+  autoJoinSettled()
   pushPresence(true)
   -- A mediated fight that survived a brief drop asks the intermediator to
   -- resume: both hubs already honour mmo.battle_reconnect inside the grace.
@@ -1872,6 +2082,12 @@ handlers[Wire.ERROR] = function(game, msg)
   local wrongCode = authSent and not transport:isReady()
   local address = dialled
   transport:fail(text)
+  -- An auto-join says nothing here on purpose. transport:fail has closed the
+  -- socket, so the tick that is running this handler falls straight into its
+  -- own lost-connection branch a few lines later -- which is the one place
+  -- that turns a dead transport into the auto-join's single box, and saying
+  -- it twice would stack two boxes over a game that has only just come up.
+  if autoJoin.dialling then return end
   if wrongCode then
     ui:say(text, function() M.askJoinCode(game, address, address ~= nil) end)
   else
@@ -1931,6 +2147,12 @@ local function tick(game, dt)
   -- would put every hosted message one tick behind.
   if server.running then server:update(dt) end
 
+  -- One field read on every step this mod is installed for, and false on all
+  -- but the handful that follow a save landing. It has to sit above the
+  -- "not open" return: a copy with no connection is exactly the copy this is
+  -- for.
+  if autoJoin.armed then tryAutoJoin(game) end
+
   if not transport:isOpen() then return end
 
   for _, msg in ipairs(transport:update(dt)) do
@@ -1953,6 +2175,9 @@ local function tick(game, dt)
     -- restored look, so there is now one teardown and no second list to
     -- keep in step with it.
     local reason = transport.error
+    -- Read up front, beside the reason, so the two halves of the sentence
+    -- this branch may have to say are taken from the same instant.
+    local wasAutoJoin = autoJoin.dialling
     -- Logged so a headless / e2e run can see *why* the socket went away --
     -- hub hang-up, idle timeout, write error -- rather than only noticing
     -- later that a co-op prompt never appeared over a solo trainer fight.
@@ -1962,7 +2187,16 @@ local function tick(game, dt)
       mod.log:warn("hub connection lost (no reason from the transport)")
     end
     M.disconnect()
-    if reason then ui:say(tostring(reason)) end
+    -- Every way a hub can refuse a connection it never welcomed arrives here
+    -- -- mmo.error, a hang-up, a handshake that ran out -- so this is the one
+    -- place the auto-join has to speak, and it speaks even when the transport
+    -- gave no reason at all: the player pressed nothing, so silence would
+    -- leave them in a single-player game with no idea the dial happened.
+    if wasAutoJoin then
+      autoJoinFailed(reason)
+    elseif reason then
+      ui:say(tostring(reason))
+    end
     return
   end
 
@@ -2379,6 +2613,12 @@ function M.install()
   -- that connecting actually recorded a hub, which is otherwise only visible
   -- by opening a menu.
   mod.exports.servers = function() return servers:list() end
+  -- Which hub this copy dials on the way into a game, or nil. The key rather
+  -- than the row, because that is the whole of the setting -- and because it
+  -- is the one thing about auto-join a test can read without a world: whether
+  -- it *fired* is visible in isConnected, but whether it was ever armed is
+  -- otherwise only visible by opening a menu.
+  mod.exports.autoJoinServer = function() return servers:autoJoinKey() end
   mod.exports.players = function() return ctx.roster:sorted() end
   -- The people this copy keeps on the hub it is on, newest friend first --
   -- rows, never the store, so nothing outside this mod can add to or empty

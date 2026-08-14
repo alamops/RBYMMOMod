@@ -1093,6 +1093,10 @@ return function(game)
         and activeBefore.battler.mon.species
       -- Command grid is classic 2x2: FIGHT SWITCH / ITEM RUN. RIGHT from
       -- FIGHT lands on SWITCH.
+      -- SWITCH is COMMANDS[2], and one RIGHT from FIGHT reaches index 2 under
+      -- *both* layouts the grid is drawn in -- the classic 2x2 and the band's
+      -- one row of four -- so this tap is correct rather than lucky. The ITEM
+      -- leg below is where that stopped being true; see H.throwBattleItem.
       check(H.awaitCommandMenu(game, "the command menu before SWITCH"),
             "the command grid is answerable before SWITCH is pressed")
       U.tap(game, "right"); U.wait(6)
@@ -1123,13 +1127,27 @@ return function(game)
         mon.hp = math.max(1, math.floor((mon.stats.hp or 2) / 2))
       end
       local hurt = mon and mon.hp or 0
-      -- ITEM is bottom-left on the classic command grid (FIGHT SWITCH /
-      -- ITEM RUN). DOWN from FIGHT lands on it.
+      -- ITEM is bottom-left on the *classic* 2x2 grid (FIGHT SWITCH / ITEM
+      -- RUN), and "DOWN from FIGHT" was hard-coded here on that basis. The
+      -- modern band lays the four commands across one row, where DOWN
+      -- correctly goes nowhere (gridStep refuses to leave a grid one row
+      -- tall) -- so the tap left the cursor on FIGHT, the A after it played an
+      -- ordinary attack, and this leg spent 45 seconds waiting for an item
+      -- nobody had chosen. The SWITCH leg above survived only because its one
+      -- RIGHT happens to reach index 2 in either shape.
+      --
+      -- H.throwBattleItem is the helper that already learned this, when the
+      -- same band silently broke the catch flow: it asks the screen for its
+      -- live column count instead of assuming a shape. It also picks the bag
+      -- row *by id* rather than taking row one, which matters here for a
+      -- second reason -- potionId comes off a `pairs` walk of the item table,
+      -- so the two guests seed different potions (SUPER_POTION and POTION in
+      -- the run that caught this) and "the first usable row" is not reliably
+      -- the one this leg then asserts was spent.
       check(H.awaitCommandMenu(game, "the command menu before ITEM"),
             "the command grid is answerable before ITEM is pressed")
-      U.tap(game, "down"); U.wait(6)
-      U.tap(game, "a");    U.wait(10)   -- open the bag
-      U.tap(game, "a");    U.wait(20)   -- pick the first usable item
+      check(H.throwBattleItem(game, potionId),
+            "ITEM opens the bag and the potion is the row that is committed")
       -- Mediated heals (POTION etc.) open a party picker; host-sim commits on
       -- the bag row. Without this A the ITEM choice never leaves, the partner's
       -- SWITCH never resolves, and both waits time out together.

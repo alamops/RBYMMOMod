@@ -8,6 +8,40 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Auto-join one server.** `START > MMO > SERVERS`, pick a row, `AUTOJOIN`:
+  from then on this copy dials that hub by itself the next time you enter a
+  game — CONTINUE or NEW GAME, once the world is actually up, never at the
+  title screen and never on a relaunch that stops there. The list marks it
+  with `▼` (and still `▶` for a favourite, so a row can carry both), and the
+  row reads `NO AUTOJOIN` while it is armed. **Only one server can auto-join**
+  — the store keeps a single key, so arming a second is what disarms the
+  first, and the screen asks `Stop auto-joining <NAME>?` before it moves.
+  The official row can hold it too, which is the one thing on that row that
+  is a player setting rather than product configuration. The setting rides in
+  the same two mirrors the server list does (so it outlives a save reload),
+  travels with a row through `EDIT HOST`, and goes with it on `DELETE`.
+  Anything the hub refuses the dial with — unreachable, full, a join code it
+  wants and this copy does not have, a hang-up mid-handshake — comes back as
+  one dismissible box that names the server and keeps the hub's own words,
+  because nobody pressed anything and an unattributed error reads as the game
+  breaking. Auto-join dials its row **without adopting it** — unlike `CONNECT`,
+  which is you choosing where you join from now on, so it still writes the row
+  through as the standing `JOIN GAME` address. New export:
+  `mod.exports.autoJoinServer()`.
+
+### Fixed
+
+- **A hub that accepts and never answers is given up on.** The transport's
+  idle timeout measures silence *since the last message*, so it never covered
+  a connection that had never had one: a listener that took the socket and
+  never welcomed us — a stale port forward, an unrelated service on the port,
+  a wedged third-party build — left the client in `connecting` forever, with
+  no connection, no error and nothing to put on screen. The handshake now
+  carries its own deadline client-side (`Config.HANDSHAKE_TIMEOUT`, the same
+  budget `src/Hub.lua` and `server/lib/limits.js` already hold clients to from
+  their side). Affects every dial, not just auto-join — but auto-join is where
+  it mattered most, being the one nobody presses.
+
 - **Modern battle band.** The stretched GB message box and menus at the bottom
   of the arena are replaced by native widescreen panels (message, command
   grid, scrolling lists with PP/HP columns) in the plate visual language,

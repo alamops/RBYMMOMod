@@ -1170,6 +1170,38 @@ function M:install()
     return nil
   end
 
+  -- Whether this row is the one the client dials on the way into a game.
+  -- Guarded like the two above, so a store that predates auto-join draws a
+  -- list with no marks on it rather than a screen that throws on the way up.
+  local function serverIsAutoJoin(key)
+    local store = serverStore()
+    if not (store and store.isAutoJoin) then return false end
+    local ok, is = pcall(store.isAutoJoin, store, key)
+    return ok and is == true
+  end
+
+  -- What to call the row that currently auto-joins, for the question asked
+  -- before that setting moves. nil when nothing holds it.
+  --
+  -- Resolved off the *key* the store holds rather than off autoJoinEntry, and
+  -- that is the whole point of it existing: autoJoinEntry answers "the row
+  -- this boot may dial", which is nil for the official server on a Gen 2 game
+  -- -- and the servers file is machine-level, shared by every boot, so a
+  -- player who armed the official hub on Red and then opens SERVERS on Gold
+  -- would have had it replaced without ever being asked. A name is available
+  -- either way; the key is the honest fallback when even that is not.
+  local function serverAutoJoinName()
+    local store = serverStore()
+    if not (store and store.autoJoinKey) then return nil end
+    local ok, key = pcall(store.autoJoinKey, store)
+    if not (ok and type(key) == "string") then return nil end
+    -- No `game`: this is asking who holds the setting, not who may be
+    -- dialled, so the generation gate must not hide the answer.
+    local entry = store.menuGet and select(2, pcall(store.menuGet, store, key))
+    local name = type(entry) == "table" and entry.name or nil
+    return key, Wire.text(name, Config.SERVER_NAME_MAX) or name or key
+  end
+
   -- The mark on a favourite row.
   --
   -- Not the "*" a list like this would carry anywhere else: the extracted
@@ -1178,12 +1210,54 @@ function M:install()
   -- (see its note below). "▶" is on the sheet, right-aligned in the row's
   -- own second column, so a pinned server actually shows that it is one.
   --
-  -- The trailing space is load-bearing, not a typo: ListMenu right-aligns
-  -- the second column at 160 - 8 - width, and a name at the 16-glyph cap
-  -- ends exactly where a one-glyph mark starts, so the two touch. The space
-  -- is drawn as nothing and widens the column by one 8px cell, which shifts
-  -- the arrow one cell left and leaves the gap a full-length name needs.
-  local FAV_MARK = "▶ "
+  -- The blank cell that used to be part of this string is MARK_PAD below,
+  -- now that a row can carry two marks.
+  local FAV_MARK = "▶"
+
+  -- The mark on the row this copy dials by itself on the way into a game.
+  --
+  -- Not "▲", which is the obvious shape for it and is the *same tile* as "▶"
+  -- -- the extracted charmap maps both sequences to code 237 -- so a
+  -- pinned row and an auto-join row would have been drawn identically. Of the
+  -- arrows the sheet actually distinguishes, "▷" is already the friend mark on
+  -- the PLAYERS list, which leaves "▼" -- and it earns the place rather than
+  -- merely being what was left: it points *into* the row, which is what this
+  -- setting does on the way in. The list menu draws no more-below arrow of its
+  -- own (only Menu does), so nothing else on this screen is that glyph.
+  local AUTO_MARK = "▼"
+
+  -- The blank cell every mark column ends with. Load-bearing, not a typo:
+  -- ListMenu right-aligns the second column at 160 - 8 - width, and a name at
+  -- the 16-glyph cap ends exactly where a one-glyph mark starts, so the two
+  -- touch. The space is drawn as nothing and widens the column by one 8px
+  -- cell, which shifts the marks one cell left and leaves the gap a
+  -- full-length name needs.
+  local MARK_PAD = " "
+
+  -- The right-hand column for one row, and what the name has room for beside
+  -- it. Two marks are a cell wider than one, so a row carrying both gives the
+  -- name back that cell rather than letting the arrows land on its last
+  -- glyph -- and a row carrying one is left exactly as wide as it has always
+  -- been, so nothing that fitted before stops fitting now.
+  --
+  -- The name is handed back untouched in every case but that one, and the
+  -- reason is subtler than saving a call: defaultName falls back to the raw
+  -- address when the sanitiser has nothing to keep (`Wire.text(shown) or
+  -- shown`), so a name that does not survive Wire.text can be sitting on a
+  -- row -- and passing every label through it would draw that row one way
+  -- with a mark and another way without. The trim's own fallback is a plain
+  -- cut for the same reason: `or entry.name` would hand back the *untrimmed*
+  -- name, which is precisely the overlap the trim exists to prevent.
+  local function serverRowMarks(entry, auto)
+    local marks, count = "", 0
+    if auto then marks, count = marks .. AUTO_MARK, count + 1 end
+    if entry.fav then marks, count = marks .. FAV_MARK, count + 1 end
+    if count == 0 then return nil, entry.name end
+    if count < 2 then return marks .. MARK_PAD, entry.name end
+    local room = Config.SERVER_NAME_MAX - (count - 1)
+    return marks .. MARK_PAD,
+           Wire.text(entry.name, room) or entry.name:sub(1, room)
+  end
 
   -- ------- the main MMO menu
 
@@ -1930,9 +2004,14 @@ function M:install()
   screens:register(SCREEN.SERVERS, { new = function(game)
     local items = {}
     for _, entry in ipairs(serverMenuList(game)) do
+      -- Two marks share the one column a ListMenu row has: "▼" for the hub
+      -- this copy dials on the way in, "▶" for a favourite. A row can be
+      -- both, which is why the name is measured against what the marks leave
+      -- rather than against the cap.
+      local right, label = serverRowMarks(entry, serverIsAutoJoin(entry.key))
       items[#items + 1] = {
-        label = entry.name,
-        right = entry.fav and FAV_MARK or nil,
+        label = label,
+        right = right,
         value = entry.key,
       }
     end
@@ -1964,14 +2043,22 @@ function M:install()
     end
 
     local key = entry.key
+    local isAuto = serverIsAutoJoin(key)
     local items = {
       -- CONNECT first: it is what the list is for, and every other row is a
       -- correction to make before pressing it.
       { label = "CONNECT", connect = true },
+      -- Second, and on the featured row too, which is the one exception to
+      -- "CONNECT is the whole of the official server's screen": auto-join is
+      -- not a property of the hub, it is this copy saying which hub it opens
+      -- into, and the official one is the likeliest answer. The row says what
+      -- pressing it does, like UNFAVORITE below.
+      { label = isAuto and "NO AUTOJOIN" or "AUTOJOIN", auto = true },
     }
     -- The featured row is product-owned: its label, address, code and place
-    -- at the top are not player settings. CONNECT is therefore its complete
-    -- action screen. Remembered rows keep the six actions they had before.
+    -- at the top are not player settings. CONNECT and AUTOJOIN are therefore
+    -- its complete action screen. Remembered rows keep the six actions they
+    -- had before.
     if not entry.featured then
       -- The row says what pressing it does, not what the entry is -- the
       -- same rule the MMO menu's END GAME / LEAVE row follows.
@@ -2030,12 +2117,51 @@ function M:install()
       client:connect(game)
     end
 
+    -- Arm or disarm the dial, and say so when it will not take.
+    --
+    -- The store owns "only one", so nothing here has to clear anything: the
+    -- key it keeps has room for one answer. What is here is the *question*
+    -- that has to be asked before the answer moves, which is not the store's
+    -- to ask -- turning this on somewhere else silently turns it off where it
+    -- already was, and a setting that moves without being mentioned is one the
+    -- player finds out about on the launch it does not happen.
+    local function setAuto(row, on)
+      local ok = store.setAutoJoin and store:setAutoJoin(key, on, game)
+      if not ok then
+        mod.log:warn("could not change auto-join for the server %s -- back out "
+          .. "to SERVERS, reopen it and try again", tostring(entry.name))
+      end
+      -- Back to this menu with the cursor where it was, the way FAVORITE
+      -- comes back and for its reason: the row now reads the other way round
+      -- and a second press is far likelier to be "no, put it back" than a
+      -- request to dial.
+      reopen(row)
+    end
+
     for row, item in ipairs(items) do
       local wantsConnect, wantsFav, field = item.connect, item.fav, item.field
-      local wantsRemove = item.remove
+      local wantsRemove, wantsAuto = item.remove, item.auto
       item.onSelect = function()
         if wantsConnect then
           mod.ui.push(game, SCREEN.CHARSET, { verb = "JOIN", onReady = dial })
+        elseif wantsAuto then
+          if isAuto then return setAuto(row, false) end
+          -- Whoever holds it now, if anybody -- and named, because "some
+          -- other server" is not an answer a player can weigh and this list
+          -- is the only place the name lives. Asked by key rather than by
+          -- dialable row so the question survives a boot that cannot resolve
+          -- the holder: see serverAutoJoinName.
+          local otherKey, otherName = serverAutoJoinName()
+          if not otherKey then return setAuto(row, true) end
+          -- Two lines, so the box never has to page, and the name is on the
+          -- second where a full sixteen glyphs still fit.
+          self:confirm(game, ("Stop auto-joining\n%s?"):format(otherName),
+            function(yes)
+              -- A no leaves the setting exactly where it was and lands back on
+              -- the row that asked, which still reads AUTOJOIN.
+              if not yes then return reopen(row) end
+              setAuto(row, true)
+            end)
         elseif wantsFav then
           if not (store.setFavorite and store:setFavorite(key, not entry.fav)) then
             mod.log:warn("could not change the favourite mark on the server "

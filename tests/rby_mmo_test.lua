@@ -1240,6 +1240,38 @@ transport:update(Config.TIMEOUT + 1)
 eq(transport:isOpen(), false, "a silent hub times out")
 check(transport.error ~= nil, "and says why")
 
+-- ------- the handshake's own deadline
+--
+-- The timeout above measures silence since the last message, so it cannot
+-- cover a connection that has never had one: a listener that accepts the
+-- socket and never welcomes us -- a stale port forward, some unrelated
+-- service on the port, a wedged third-party build -- would otherwise sit in
+-- `connecting` forever, producing no connection, no error and nothing for a
+-- caller to report. Both hubs already hold a client to this same budget from
+-- their side (Config.HANDSHAKE_TIMEOUT); this is that rule applied by the
+-- one party who can still see a socket whose far end is not a hub of ours.
+do
+  local mute = Transport.new()
+  mute:attach({
+    closed = false,
+    send = function() end,
+    update = function() end,
+    poll = function() return {} end,
+    close = function(self) self.closed = true end,
+  })
+  check(mute:isOpen(), "a connection that has not been welcomed is open")
+  mute:update(Config.HANDSHAKE_TIMEOUT - 1)
+  check(mute:isOpen(),
+        "and stays open for the whole handshake budget, so a slow hub is not "
+        .. "cut off mid-challenge")
+  mute:update(2)
+  eq(mute:isOpen(), false, "past it, a hub that never answered is given up on")
+  check(mute.error ~= nil,
+        "with a reason, so the caller has something to put on screen -- the "
+        .. "auto-join dial is the one nobody pressed and so the one where "
+        .. "silence is indistinguishable from nothing having happened")
+end
+
 -- ------------------------------------------------------------------
 -- 3. Hub: the relay a hosting player runs
 -- ------------------------------------------------------------------
@@ -22399,6 +22431,151 @@ do
      .. "invisible forever")
 end
 
+-- ------- auto-join: one key, so "only one server" is structural
+--
+-- The store keeps a single key rather than a flag per row, which is what
+-- makes the rule impossible to break: two rows cannot both hold a value with
+-- room for one answer. Everything below is that one property, seen from the
+-- angles a menu can reach it from.
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local first = store:record("auto-a.example")
+  local second = store:record("auto-b.example")
+
+  eq(store:autoJoinKey(), nil, "nothing auto-joins until it is asked for")
+  eq(store:autoJoinEntry(), nil, "and there is no row to dial")
+  eq(store:isAutoJoin(first.key), false, "no row carries the mark either")
+
+  local armed = store:setAutoJoin(first.key, true)
+  check(armed ~= nil, "a stored row can be set to auto-join")
+  eq(store:autoJoinKey(), first.key, "and becomes the one key")
+  eq(store:isAutoJoin(first.key), true, "so it reports as the auto-join row")
+  local entry = store:autoJoinEntry()
+  eq(entry and entry.address, first.address,
+     "and autoJoinEntry resolves to the row the client has to dial")
+
+  -- The whole rule, in one call: arming the second is what disarms the first.
+  store:setAutoJoin(second.key, true)
+  eq(store:autoJoinKey(), second.key, "arming another row moves the key")
+  eq(store:isAutoJoin(first.key), false,
+     "and the row that had it no longer does -- only one server auto-joins")
+
+  -- Off only answers for the row that actually holds it, so a stale menu row
+  -- cannot switch off a setting that has since moved on.
+  store:setAutoJoin(first.key, false)
+  eq(store:autoJoinKey(), second.key,
+     "turning it off on a row that does not hold it changes nothing")
+  store:setAutoJoin(second.key, false)
+  eq(store:autoJoinKey(), nil, "turning it off on the row that does clears it")
+
+  eq(store:setAutoJoin("never-seen.example", true), nil,
+     "a key naming no row is refused rather than stored as a dial that "
+     .. "would fail silently every launch")
+  eq(store:autoJoinKey(), nil, "and nothing is armed by the refusal")
+end
+
+-- ------- auto-join: the featured row can hold it, and is the one row with
+-- nowhere else to record it
+
+do
+  stubSave = {}
+  local store = Servers.new()
+  local featuredKey = Config.FEATURED_SERVER_HOST:lower()
+
+  check(store:setAutoJoin(Config.FEATURED_SERVER_HOST, true) ~= nil,
+        "the official row can be the one that auto-joins -- it is product "
+        .. "configuration, but opening into it is a player setting")
+  eq(store:autoJoinKey(), featuredKey, "and it is the key that is kept")
+  local entry = store:autoJoinEntry()
+  eq(entry and entry.address, Config.FEATURED_SERVER_HOST,
+     "autoJoinEntry hands back the canonical official address")
+  eq(entry and entry.code, Config.FEATURED_SERVER_CODE,
+     "with the canonical official code, so the dial answers its challenge")
+  eq(#store:list(), 0,
+     "and the official hub is still not a persisted recent")
+
+  -- Generation-gated exactly as the menu is: a Gold boot cannot see the
+  -- official row, so it must not be able to dial one either.
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  eq(store:autoJoinEntry(goldGame), nil,
+     "a Gen 2 boot resolves the official auto-join row to nothing")
+  eq(store:setAutoJoin(Config.FEATURED_SERVER_HOST, true, goldGame), nil,
+     "and cannot arm one either -- the row it would dial is not one that "
+     .. "boot is allowed to see")
+
+  -- The stub the mirror carries it in: a row with the key and the flag and
+  -- nothing else, so a build that predates auto-join drops it on the way in
+  -- exactly as it already drops a saved copy of the official address.
+  local rows = stubSave.servers
+  eq(type(rows) == "table" and #rows, 1,
+     "the official auto-join is written as one stub row")
+  eq(rows[1].auto, true, "carrying the flag")
+  eq(rows[1].name, nil,
+     "and none of the fields Config owns -- the canonical copy stays there")
+end
+
+-- ------- auto-join: it survives a relaunch, and it follows its row
+
+do
+  stubSave = {}
+  local writer = Servers.new()
+  local row = writer:record("survives.example")
+  writer:setAutoJoin(row.key, true)
+
+  local reader = Servers.new()
+  eq(reader:autoJoinKey(), row.key,
+     "a fresh store reads the auto-join back out of the mirror")
+
+  -- Derived state, and kept that way: the flag is stamped onto the persisted
+  -- copy, never onto the entry every reader of list()/menuList() holds.
+  eq(reader:get(row.key).auto, nil,
+     "the row itself carries no second copy of the setting to disagree with")
+
+  -- EDIT HOST re-keys the row in place, so the setting has to travel with it
+  -- -- a hub that changed address is the same hub.
+  local moved = reader:setAddress(row.key, "moved.example:9191")
+  eq(reader:autoJoinKey(), moved.key,
+     "changing a row's address carries its auto-join to the new key")
+  eq(reader:isAutoJoin("survives.example"), false,
+     "and leaves nothing behind under the old one")
+
+  -- DELETE takes it with the row: a key naming a row nobody can see is a
+  -- dial the player has no way to turn off.
+  reader:remove(moved.key)
+  eq(reader:autoJoinKey(), nil, "deleting the row clears the auto-join")
+
+  local afterDelete = Servers.new()
+  eq(afterDelete:autoJoinKey(), nil,
+     "and the write that deleted it did not leave the flag on disk")
+end
+
+-- ------- auto-join: a key that names no surviving row is dropped at load
+
+do
+  -- Hand-edited, or written by a copy whose row was evicted underneath it.
+  stubSave = { servers = {
+    { address = "still-here.example:7788", last = 5 },
+    { address = "not-here.example:7788", last = 4, auto = true },
+  } }
+  local store = Servers.new()
+  -- The row is loaded, so this is not the gone case -- the gone case is the
+  -- one below it.
+  eq(store:autoJoinKey(), "not-here.example:7788",
+     "a flag on a row that did load is honoured")
+
+  stubSave = { servers = {
+    { address = "still-here.example:7788", last = 5 },
+    { auto = true },
+  } }
+  local orphan = Servers.new()
+  eq(orphan:autoJoinKey(), nil,
+     "but a flag on a row too broken to sanitise arms nothing")
+end
+
 _G.love = ambientLove
 
 end)()
@@ -22490,6 +22667,19 @@ local hookChains = {}
 local miniSave, miniOptions = {}, {}
 local screens = {}
 local miniWarns = {}
+-- Captured rather than swallowed, so the auto-join section below can drive
+-- the same save.loaded / save.created listeners the engine emits into. Every
+-- other section here wants the no-op, and gets it: nothing calls these unless
+-- it asks for them by name.
+local miniEvents = {}
+-- Where this copy is standing, as far as src/World.lua can tell. nil is the
+-- headless default and the honest one -- no Game, no overworld -- and the
+-- auto-join section sets it to stand the player somewhere.
+local miniWorld = { here = nil }
+-- Every screen this Client asks for. The boxes it puts up are the only
+-- evidence a player ever sees of a dial they did not press, so they are
+-- recorded rather than performed -- the same seam section 16 uses.
+local miniPushes = {}
 
 local miniMod = {
   id = "rby_mmo",
@@ -22516,8 +22706,14 @@ local miniMod = {
   },
   events = {
     emit = function() end,
-    on = function() end,
+    on = function(_, name, fn)
+      miniEvents[name] = miniEvents[name] or {}
+      miniEvents[name][#miniEvents[name] + 1] = fn
+    end,
     once = function() end,
+  },
+  world = {
+    current = function() return miniWorld.here end,
   },
   assets = { path = function(_, relative) return MOD_PATH .. "/" .. relative end },
   content = {
@@ -22539,12 +22735,19 @@ local miniMod = {
       hookChains[name][#hookChains[name] + 1] = fn
     end,
   },
-  ui = {},
+  ui = {
+    push = function(_, id, opts)
+      miniPushes[#miniPushes + 1] = { id = id, opts = opts }
+    end,
+  },
   exports = {},
 }
 
 local Client = resolver(miniMod)("Client")
 check(Client ~= nil, "a Client instance builds against its own mod facade")
+-- The same resolver, so this is the very Ui module that Client pushes
+-- through -- the screen ids below are the ones it actually names.
+local miniUi = resolver(miniMod)("Ui")
 Client.install()
 
 local stepFn = hookChains["input.step"] and hookChains["input.step"][1]
@@ -22703,6 +22906,224 @@ eq(miniSave["code:" .. FORGET_ADDR], nil,
 eq(miniSave["rank:" .. FORGET_ADDR], "a-claim-ticket",
    "but the rank claim ticket for the same hub is left exactly as it was")
 
+-- ------- a refused dial the player *did* press still says so
+--
+-- M.connect's three player-facing sentences all go through connectSay now,
+-- which diverts them into the auto-join's own box while a dial is in flight.
+-- That makes a stuck `quiet` flag -- an early return slipped between the two
+-- assignments in tryAutoJoin, a future caller that sets it and forgets --
+-- into a silent swallow of *every* manual connect failure: no box, no log,
+-- just a dead CONNECT press. Pinned here because it is invisible otherwise.
+
+do
+  Client.leave()
+  Client.transport.connect = function(self)
+    self.error = "no route to host"
+    self.state = "closed"
+    return false, self.error
+  end
+
+  miniPushes = {}
+  local pressed = Client.connect({})
+  eq(pressed, false, "a refused dial reports failure to its caller")
+  local box = miniPushes[#miniPushes]
+  check(box ~= nil and box.id == miniUi.SCREEN.TEXT,
+        "and still puts the ordinary dismissible box on screen when no "
+        .. "auto-join is in flight")
+  eq(box and box.opts and box.opts.text, "no route to host",
+     "carrying the transport's own reason, unwrapped -- the player pressed "
+     .. "this, so it is not attributed to anything they did not")
+end
+
+-- ------- auto-join: the dial nobody pressed
+--
+-- Two halves, and both are load-bearing. *Which* hub is the store's answer
+-- and is pinned in section 13; what is pinned here is *when* -- a world
+-- coming up, not a save event and not a relaunch on its own -- and what the
+-- player is told when it does not work, which is the only evidence they ever
+-- get that their game tried to connect at all.
+--
+-- Driven through the real save.loaded listener and the real per-tick pump,
+-- because both are what the engine drives and the flag between them is a
+-- private upvalue.
+
+local function enterGame()
+  for _, fn in ipairs(miniEvents["save.loaded"] or {}) do fn() end
+end
+
+do
+  Client.disconnect()
+  Client.leave()
+
+  local AUTO_ADDR = "auto.example.test:9191"
+  local netAuto = fakeNet()
+  local dials, dialledAt = 0, nil
+  Client.transport.connect = function(self, address)
+    dials = dials + 1
+    dialledAt = address
+    self.net = netAuto
+    self.state = "connecting"
+    self.error = nil
+    self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+    return true
+  end
+
+  local store = Client.servers()
+  store:record(AUTO_ADDR)
+  store:setAutoJoin(store:get(AUTO_ADDR).key, true)
+  -- Whatever JOIN GAME is pointed at right now. Read before the dial, because
+  -- the point below is that an unattended dial does not move it.
+  local prefillBefore = Client.joinAddress()
+  check(prefillBefore ~= AUTO_ADDR,
+        "the standing JOIN address starts somewhere other than the auto-join "
+        .. "row, so the assertion below can tell them apart")
+
+  -- Nothing has entered a game yet, so nothing dials however many steps run.
+  miniWorld.here = { mapId = 1, x = 2, y = 3 }
+  stepFn(passthroughNext, {}, 0.016)
+  eq(dials, 0, "a tick with no world entered behind it dials nothing")
+
+  -- A save landing is not the moment either: the world is still being built
+  -- when it lands, which is why the flag waits for a tick that can see one.
+  miniWorld.here = nil
+  enterGame()
+  stepFn(passthroughNext, {}, 0.016)
+  eq(dials, 0,
+     "and neither is the save event on its own -- there is no world yet")
+
+  miniWorld.here = { mapId = 1, x = 2, y = 3 }
+  stepFn(passthroughNext, {}, 0.016)
+  eq(dials, 1, "the first tick that finds the player in a world dials")
+  eq(dialledAt, AUTO_ADDR,
+     "at the address on the auto-join row, port and all")
+  -- Dialled without being adopted. The SERVERS menu's CONNECT deliberately
+  -- writes the row through as the standing JOIN target, because pressing it
+  -- *is* the player choosing where they join from now on -- but this dial
+  -- happens by itself on every entry into a game, and doing the same would
+  -- silently replace whatever they last typed into JOIN GAME.
+  eq(Client.joinAddress(), prefillBefore,
+     "and the standing JOIN GAME address is left exactly as the player had it")
+
+  -- Spent, not standing: a flag left up would re-dial on every later step.
+  stepFn(passthroughNext, {}, 0.016)
+  eq(dials, 1, "and the arming is spent -- one entry into a game, one dial")
+
+  netAuto.inbox = { { type = Wire.WELCOME, id = "auto-peer", players = {} } }
+  miniPushes = {}
+  stepFn(passthroughNext, {}, 0.016)
+  check(Client.isConnected(), "a welcome finishes the auto-join")
+  eq(#miniPushes, 0,
+     "and puts no box on screen -- arriving is what the toast is for")
+end
+
+-- ------- auto-join: a hub that refuses says so, in a box the player can
+-- dismiss
+
+do
+  Client.leave()
+  local netRefuse = fakeNet()
+  Client.transport.connect = function(self)
+    self.net = netRefuse
+    self.state = "connecting"
+    self.error = nil
+    self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+    return true
+  end
+
+  local store = Client.servers()
+  local row = store:get("auto.example.test:9191")
+  store:rename(row.key, "MY HUB")
+  store:setAutoJoin(row.key, true)
+
+  miniWorld.here = { mapId = 1, x = 2, y = 3 }
+  miniPushes = {}
+  enterGame()
+  stepFn(passthroughNext, {}, 0.016)
+  check(Client.transport:isOpen(), "the dial goes out")
+
+  netRefuse.inbox = { { type = Wire.ERROR, message = "This game is full." } }
+  stepFn(passthroughNext, {}, 0.016)
+
+  check(not Client.isConnected(), "a refusal ends the connection")
+  local box = miniPushes[#miniPushes]
+  check(box ~= nil, "and the player is told, rather than left in a "
+        .. "single-player game wondering")
+  eq(box and box.id, miniUi.SCREEN.TEXT,
+     "through the ordinary dismissible text box, not a modal choice")
+  local text = (box and box.opts and box.opts.text) or ""
+  check(text:find("auto%-join") ~= nil,
+        "the sentence says this was the auto-join -- the player pressed "
+        .. "nothing, so an unattributed error reads as the game breaking")
+  check(text:find("MY HUB", 1, true) ~= nil,
+        "and names the row it was for, which is the row they have to fix")
+  check(text:find("This game is full.", 1, true) ~= nil,
+        "with the hub's own words kept, because only the hub knows why")
+
+  -- One box, not two: the ERROR handler and the tick's lost-connection
+  -- branch both fire on the same step, and the auto-join speaks from exactly
+  -- one of them.
+  local boxes = 0
+  for _, push in ipairs(miniPushes) do
+    if push.id == miniUi.SCREEN.TEXT then boxes = boxes + 1 end
+  end
+  eq(boxes, 1, "and there is exactly one of it")
+end
+
+-- ------- auto-join: a hub that wants a code we do not have is told, not
+-- asked
+--
+-- The code grid is the right answer for a player standing in front of the
+-- screen having just pressed CONNECT. Dropping it in front of somebody who
+-- pressed CONTINUE is a demand for six characters they did not come here to
+-- type -- so the auto-join path says what happened and stops.
+
+do
+  Client.leave()
+  local netCode = fakeNet()
+  Client.transport.connect = function(self)
+    self.net = netCode
+    self.state = "connecting"
+    self.error = nil
+    self.clock, self.lastHeard, self.lastPing = 0, 0, 0
+    return true
+  end
+
+  local CODELESS = "codeless.example.test:9191"
+  local store = Client.servers()
+  store:record(CODELESS)
+  store:setAutoJoin(store:get(CODELESS).key, true)
+  -- No per-hub code, and no standing option code to fall back to either.
+  miniSave["code:" .. CODELESS] = nil
+  miniOptions.code = nil
+
+  miniWorld.here = { mapId = 1, x = 2, y = 3 }
+  miniPushes = {}
+  enterGame()
+  stepFn(passthroughNext, {}, 0.016)
+
+  netCode.inbox = { { type = Wire.CHALLENGE, nonce = ("a"):rep(32) } }
+  stepFn(passthroughNext, {}, 0.016)
+
+  local pushed = {}
+  for _, push in ipairs(miniPushes) do pushed[#pushed + 1] = push.id end
+  for _, id in ipairs(pushed) do
+    check(id ~= miniUi.SCREEN.JOINCODE,
+          "no code grid is pushed at somebody who pressed nothing")
+  end
+  local box = miniPushes[#miniPushes]
+  eq(box and box.id, miniUi.SCREEN.TEXT, "just the one dismissible sentence")
+  local text = (box and box.opts and box.opts.text) or ""
+  check(text:find("auto%-join") ~= nil, "which says the auto-join failed")
+  check(text:find("join") ~= nil and text:find("code") ~= nil,
+        "and that a join code is what it wanted")
+  check(box and box.opts and box.opts.onDone == nil,
+        "with nothing waiting behind it to drag the player into a grid")
+
+  store:setAutoJoin(store:get(CODELESS).key, false)
+  miniWorld.here = nil
+  Client.leave()
+end
+
 _G.love = ambientLove
 
 end)()
@@ -22853,6 +23274,64 @@ do
   end
 end
 
+-- ------- SCREEN.SERVERS: the auto-join mark
+--
+-- The row this copy dials on the way into a game is marked so the player can
+-- see which one it is without opening it. "▼" and not "▲": both "▲" and "▶"
+-- map to charmap code 237 (data/generated/font.lua), so an up arrow would
+-- have been drawn as the favourite mark's own tile.
+
+do
+  ctx.servers = storeWith({ "auto-host", "plain-host" })
+  local autoKey = ctx.servers:get("auto-host").key
+  ctx.servers:setAutoJoin(autoKey, true)
+
+  local marks = {}
+  for _, item in ipairs(serversDef.new({}).items) do
+    marks[item.value] = item.right
+  end
+  eq(marks[autoKey], "▼ ",
+     "the auto-join row carries ▼, in the same right column the favourite "
+     .. "mark uses")
+  eq(marks[ctx.servers:get("plain-host").key], nil,
+     "and no other row does -- only one server auto-joins")
+
+  -- One mark is exactly the column the favourite mark has always had, so a
+  -- name that fitted beside it before still fits, untouched. It is handed
+  -- back verbatim rather than re-sanitised: defaultName falls back to the raw
+  -- address when the sanitiser has nothing to keep, so passing every label
+  -- through Wire.text would draw such a row one way with a mark and another
+  -- way without.
+  ctx.servers:rename(autoKey, ("N"):rep(Config.SERVER_NAME_MAX))
+  local whole
+  for _, item in ipairs(serversDef.new({}).items) do
+    if item.value == autoKey then whole = item.label end
+  end
+  eq(whole, ("N"):rep(Config.SERVER_NAME_MAX),
+     "a full-length name keeps every glyph beside a single mark")
+  ctx.servers:rename(autoKey, "auto-host")
+
+  -- Both at once: two marks are a cell wider than one, so the name gives that
+  -- cell back rather than letting the arrows land on its last glyph.
+  ctx.servers:setFavorite(autoKey, true)
+  local both, label
+  for _, item in ipairs(serversDef.new({}).items) do
+    if item.value == autoKey then both, label = item.right, item.label end
+  end
+  eq(both, "▼▶ ", "a row that is both shows both, auto-join first")
+  eq(label, ctx.servers:get(autoKey).name,
+     "and a name that already fits is untouched by the extra mark")
+
+  ctx.servers:rename(autoKey, ("N"):rep(Config.SERVER_NAME_MAX))
+  local trimmed
+  for _, item in ipairs(serversDef.new({}).items) do
+    if item.value == autoKey then trimmed = item.label end
+  end
+  eq(#trimmed, Config.SERVER_NAME_MAX - 1,
+     "a full-length name gives up one glyph to the second mark rather than "
+     .. "being drawn underneath it")
+end
+
 ctx.servers = storeWith({})
 do
   local menu = serversDef.new({})
@@ -22862,6 +23341,13 @@ do
      "the featured row is first under its official name")
   eq(menu.items[1].value, Config.FEATURED_SERVER_HOST:lower(),
      "and selects the key for the official address")
+  eq(menu.items[1].right, nil,
+     "and carries no mark until it is the one that auto-joins")
+
+  ctx.servers:setAutoJoin(Config.FEATURED_SERVER_HOST, true)
+  eq(serversDef.new({}).items[1].right, "▼ ",
+     "the official row takes the mark like any other")
+  ctx.servers:setAutoJoin(Config.FEATURED_SERVER_HOST, false)
 end
 
 -- ------- SCREEN.SERVERACT: the fixed row order, and the gone-entry case
@@ -22874,9 +23360,14 @@ do
   local featured = ctx.servers:menuList()[1]
   local game = {}
   local menu = actDef.new(game, { key = featured.key })
-  eq(#menu.items, 1,
-     "the featured server action screen contains only CONNECT")
-  eq(menu.items[1].label, "CONNECT", "and CONNECT is that sole action")
+  -- Two, not one: the featured row's label, address, code and place at the
+  -- top are still product configuration and still have no rows, but
+  -- auto-join is this copy saying which hub it opens into -- a player
+  -- setting, and the official server is the likeliest answer to it.
+  eq(#menu.items, 2,
+     "the featured server action screen contains CONNECT and AUTOJOIN")
+  eq(menu.items[1].label, "CONNECT", "with CONNECT first, as the list is for")
+  eq(menu.items[2].label, "AUTOJOIN", "and auto-join second")
 
   local calls = {}
   local realClient = ctx.client
@@ -22933,22 +23424,28 @@ do
   local menu = actDef.new({}, { key = actKey })
   local order = {}
   for i, item in ipairs(menu.items) do order[i] = item.label end
-  local expectedOrder = { "CONNECT", "FAVORITE", "EDIT HOST", "EDIT CODE",
-                           "RENAME", "DELETE" }
-  eq(#order, #expectedOrder, "the six rows the plan names, DELETE last")
+  local expectedOrder = { "CONNECT", "AUTOJOIN", "FAVORITE", "EDIT HOST",
+                           "EDIT CODE", "RENAME", "DELETE" }
+  eq(#order, #expectedOrder, "the seven rows the plan names, DELETE last")
   for i, label in ipairs(expectedOrder) do
     eq(order[i], label, "row " .. i .. " is " .. label)
   end
   -- Menu grows the box downwards to fit its rows (th = rows * 2 + 2), so ty
-  -- is what keeps the last row on an 18-tile screen -- pinned here so a
-  -- seventh row added later trips this instead of only failing on-screen.
+  -- is what keeps the last row on an 18-tile screen -- pinned here so an
+  -- eighth row added later trips this instead of only failing on-screen.
   eq(menu.opts and menu.opts.ty, 18 - (#expectedOrder * 2 + 2),
-     "ty is recalculated for six rows, not left at the five-row value")
+     "ty is recalculated for seven rows, not left at the six-row value")
 
   ctx.servers:setFavorite(actKey, true)
   local refreshed = actDef.new({}, { key = actKey })
-  eq(refreshed.items[2].label, "UNFAVORITE",
-     "the second row flips once the entry is a favourite")
+  eq(refreshed.items[3].label, "UNFAVORITE",
+     "the favourite row flips once the entry is a favourite")
+  -- The same "the row says what pressing it does" rule, on the row above it.
+  ctx.servers:setAutoJoin(actKey, true)
+  local armed = actDef.new({}, { key = actKey })
+  eq(armed.items[2].label, "NO AUTOJOIN",
+     "and the auto-join row flips once this is the hub that auto-joins")
+  ctx.servers:setAutoJoin(actKey, false)
 
   local gone = actDef.new({}, { key = "no-such-key:1234" })
   check(gone.items == nil,
@@ -22985,13 +23482,111 @@ do
   -- request to dial.
   pushes = {}
   local menu = actDef.new({}, { key = actKey })
-  menu.items[2].onSelect()
+  menu.items[3].onSelect()
   local last = pushes[#pushes]
   check(last ~= nil, "toggling the favourite reopens the menu")
   eq(last.id, Ui.SCREEN.SERVERACT, "on SERVERACT itself")
   eq(last.opts and last.opts.key, actKey, "for the same entry")
-  eq(last.opts and last.opts.row, 2,
+  eq(last.opts and last.opts.row, 3,
      "with the cursor back on the row that was just pressed, not on CONNECT")
+  pushes = {}
+end
+
+-- ------- SCREEN.SERVERACT: AUTOJOIN, and the question asked before the
+-- setting moves
+--
+-- The store owns "only one auto-join", so nothing on this screen has to clear
+-- anything -- there is one key. What the screen owns is the *question*:
+-- arming this row silently disarms whichever row had it, and a setting that
+-- moves without being mentioned is one the player finds out about on the
+-- launch it does not happen.
+
+do
+  ctx.servers = storeWith({ "arm-a.example", "arm-b.example" })
+  local keyA = ctx.servers:get("arm-a.example").key
+  local keyB = ctx.servers:get("arm-b.example").key
+
+  -- Nothing armed yet: no question to ask, so the press just takes.
+  pushes = {}
+  actDef.new({}, { key = keyA }).items[2].onSelect()
+  eq(ctx.servers:autoJoinKey(), keyA,
+     "with nothing else armed, AUTOJOIN takes on the press")
+  local back = pushes[#pushes]
+  check(back ~= nil and back.id == Ui.SCREEN.SERVERACT,
+        "and reopens this menu rather than the list")
+  eq(back.opts and back.opts.row, 2,
+     "with the cursor back on the row that was just pressed")
+
+  -- The row now reads the other way round, and pressing it is an ordinary
+  -- undo -- no question, because nothing is being displaced.
+  pushes = {}
+  local armed = actDef.new({}, { key = keyA })
+  eq(armed.items[2].label, "NO AUTOJOIN", "the row says what pressing it does")
+  armed.items[2].onSelect()
+  eq(ctx.servers:autoJoinKey(), nil, "so pressing it turns auto-join off")
+  check((pushes[#pushes] or {}).id == Ui.SCREEN.SERVERACT,
+        "still landing back on this menu")
+
+  -- The case the question exists for.
+  ctx.servers:setAutoJoin(keyA, true)
+  pushes = {}
+  actDef.new({}, { key = keyB }).items[2].onSelect()
+  local ask = pushes[#pushes]
+  check(ask ~= nil and ask.id == Ui.SCREEN.CONFIRM,
+        "arming a second server asks first")
+  check(ask.opts and ask.opts.text
+        and ask.opts.text:find(ctx.servers:get(keyA).name, 1, true) ~= nil,
+        "and the question names the server that would lose it, which is the "
+        .. "only place that name is written down")
+  check(type(ask.opts and ask.opts.onChoose) == "function",
+        "answered through onChoose, like every other yes/no in this mod")
+  eq(ctx.servers:autoJoinKey(), keyA, "nothing has moved while it is open")
+
+  pushes = {}
+  ask.opts.onChoose(false)
+  eq(ctx.servers:autoJoinKey(), keyA,
+     "a no leaves the setting exactly where it was")
+  local declined = pushes[#pushes]
+  check(declined ~= nil and declined.id == Ui.SCREEN.SERVERACT,
+        "and reopens the row that asked")
+  eq(declined.opts and declined.opts.key, keyB, "for the entry it was about")
+  eq(declined.opts and declined.opts.row, 2, "cursor still on AUTOJOIN")
+
+  pushes = {}
+  local reask = actDef.new({}, { key = keyB })
+  reask.items[2].onSelect()
+  pushes[#pushes].opts.onChoose(true)
+  eq(ctx.servers:autoJoinKey(), keyB, "a yes moves it to this row")
+  eq(ctx.servers:isAutoJoin(keyA), false, "and off the one that had it")
+  pushes = {}
+
+  -- The boot that cannot resolve the holder still has to ask.
+  --
+  -- The servers file is machine-level and shared by every boot, so a player
+  -- can arm the official row on Red and then open SERVERS on Gold -- where
+  -- menuGet refuses that key, because the official hub is Gen 1 only. Asking
+  -- "which row may I dial" there answers nil, and a screen that took that for
+  -- "nothing is armed" would replace the setting without a word. The question
+  -- is about which key is *held*, which every boot can answer.
+  ctx.servers:setAutoJoin(Config.FEATURED_SERVER_HOST, true)
+  local goldGame = {
+    data = { type_chart = { generation = 2 }, gen2Statuses = {} },
+  }
+  eq(ctx.servers:autoJoinEntry(goldGame), nil,
+     "Gold cannot resolve the official row as something to dial")
+  pushes = {}
+  actDef.new(goldGame, { key = keyA }).items[2].onSelect()
+  local goldAsk = pushes[#pushes]
+  check(goldAsk ~= nil and goldAsk.id == Ui.SCREEN.CONFIRM,
+        "but arming another row on Gold still asks first")
+  check(goldAsk.opts and goldAsk.opts.text
+        and goldAsk.opts.text:find(Config.FEATURED_SERVER_NAME, 1, true) ~= nil,
+        "and still names the official row it would displace")
+  pushes = {}
+  goldAsk.opts.onChoose(false)
+  eq(ctx.servers:autoJoinKey(), Config.FEATURED_SERVER_HOST:lower(),
+     "a no on Gold leaves the official row armed, exactly as it was")
+  ctx.servers:setAutoJoin(Config.FEATURED_SERVER_HOST, false)
   pushes = {}
 end
 
@@ -23004,7 +23599,7 @@ do
 
   pushes = {}
   local menu = actDef.new({}, { key = delKey })
-  menu.items[6].onSelect()
+  menu.items[7].onSelect()
 
   local confirmPush = pushes[#pushes]
   check(confirmPush ~= nil and confirmPush.id == Ui.SCREEN.CONFIRM,
@@ -23029,7 +23624,7 @@ do
   check(declined ~= nil and declined.id == Ui.SCREEN.SERVERACT,
         "declining reopens SERVERACT, not the list")
   eq(declined.opts and declined.opts.key, delKey, "for the same entry")
-  eq(declined.opts and declined.opts.row, 6, "cursor still on DELETE")
+  eq(declined.opts and declined.opts.row, 7, "cursor still on DELETE")
   check(ctx.servers:get(delKey) ~= nil, "and nothing was actually deleted")
 
   -- "yes": the row is really gone, and the list is where it lands.
@@ -23062,7 +23657,7 @@ do
 
   pushes = {}
   local menu = actDef.new({}, { key = clearKey })
-  menu.items[6].onSelect()
+  menu.items[7].onSelect()
   local confirmPush = pushes[#pushes]
   pushes = {}
   confirmPush.opts.onChoose(true)
@@ -23102,7 +23697,7 @@ do
 
   pushes = {}
   local menu = actDef.new({}, { key = noForgetKey })
-  menu.items[6].onSelect()
+  menu.items[7].onSelect()
   local confirmPush = pushes[#pushes]
   pushes = {}
   local ok = pcall(confirmPush.opts.onChoose, true)
@@ -23140,7 +23735,7 @@ do
 
   pushes = {}
   local menu = actDef.new({}, { key = fakeEntry.key })
-  menu.items[6].onSelect()
+  menu.items[7].onSelect()
   local confirmPush = pushes[#pushes]
   pushes = {}
   confirmPush.opts.onChoose(true)
@@ -23149,7 +23744,7 @@ do
   check(reopened ~= nil and reopened.id == Ui.SCREEN.SERVERACT,
         "a store with no remove reopens SERVERACT, not the gone TextBox")
   eq(reopened.opts and reopened.opts.key, fakeEntry.key, "for the same entry")
-  eq(reopened.opts and reopened.opts.row, 6, "cursor still on DELETE")
+  eq(reopened.opts and reopened.opts.row, 7, "cursor still on DELETE")
 
   ctx.servers = realServers
   pushes = {}
@@ -23163,7 +23758,7 @@ do
 
   pushes = {}
   local menu = actDef.new({}, { key = vanishKey })
-  menu.items[6].onSelect()
+  menu.items[7].onSelect()
   local confirmPush = pushes[#pushes]
   check(confirmPush ~= nil, "DELETE still asks first")
 

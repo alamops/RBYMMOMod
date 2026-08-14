@@ -1439,6 +1439,100 @@ return function(game)
               check(not exports.isConnected(), "and left a third time cleanly")
               H.closeToOverworld(game)
 
+              -- ------- 9b. AUTOJOIN, and the question asked before it moves
+              --
+              -- The menu half of auto-join, on the real screens: the row
+              -- flips to NO AUTOJOIN once it is armed, the list draws the
+              -- mark that lets a player see which hub it is without opening
+              -- anything, and arming a *second* server puts up a yes/no box
+              -- that names the one it would displace. The dial itself is
+              -- pinned headless (the mod suite drives the real save.loaded
+              -- listener and the real per-tick pump); what only a real screen
+              -- can show is that these rows exist, read right, and answer.
+              --
+              -- Left switched off at the end, deliberately: the setting is in
+              -- a file that outlives this save, and a driver that walked away
+              -- having armed one would make the next run dial a hub nobody
+              -- asked it to.
+              local autoLabel = H.serverLabel(exports, dialled)
+              if H.openMmo(game) and H.selectLabel(game, "SERVERS")
+                 and H.selectLabel(game, autoLabel) then
+                U.wait(20)
+                local armedRow = H.selectLabel(game, "AUTOJOIN")
+                check(armedRow, "AUTOJOIN is on the entry's own submenu")
+                if armedRow then
+                  U.wait(20)
+                  local armedKey = (type(exports.autoJoinServer) == "function"
+                                     and exports.autoJoinServer()) or nil
+                  check(armedKey ~= nil and armedKey == dialled:lower(),
+                        ("AUTOJOIN arms the row that was pressed (key %s)")
+                          :format(tostring(armedKey)))
+                  -- The row now says what pressing it does, the other way
+                  -- round -- the same rule FAVORITE / UNFAVORITE follows.
+                  local flipped = false
+                  for _, l in ipairs(H.menuLabels(game)) do
+                    if H.labelMatches(l, "NO AUTOJOIN") then flipped = true end
+                  end
+                  check(flipped, "and the row flips to NO AUTOJOIN")
+
+                  -- Back to the list, where the mark is the only thing that
+                  -- tells a player which hub their game opens into.
+                  U.tap(game, "b")
+                  U.wait(20)
+                  U.shot(game, SHOT_DIR .. "/servers-autojoin.png")
+
+                  -- The other half: arming the official row displaces this
+                  -- one, and is not allowed to do it quietly.
+                  if H.selectLabel(game, "RBY MMO OFFICIAL") then
+                    U.wait(20)
+                    if H.selectLabel(game, "AUTOJOIN") then
+                      local asked = H.waitFor(game, function()
+                        return H.classify(H.top(game)) == "choice"
+                      end, 90, "the AUTOJOIN switch confirm")
+                      check(asked,
+                            "arming a second server asks before the setting "
+                              .. "moves")
+                      if asked then
+                        U.shot(game, SHOT_DIR .. "/servers-autojoin-switch.png")
+                        -- YES is index 1, walked by hand so the box could be
+                        -- photographed first -- the DELETE leg below does the
+                        -- same thing for the same reason.
+                        local box, guard = H.top(game), 0
+                        while (H.top(game) == box) and (box.index or 1) > 1
+                              and guard < 4 do
+                          U.tap(game, "up"); U.wait(3); guard = guard + 1
+                        end
+                        U.tap(game, "a")
+                        U.wait(20)
+                        local moved =
+                          (type(exports.autoJoinServer) == "function"
+                            and exports.autoJoinServer()) or nil
+                        check(moved ~= nil and moved ~= dialled:lower(),
+                              ("and a YES moves it to the official row "
+                               .. "(key %s)"):format(tostring(moved)))
+                        -- Off again, on whichever row now holds it.
+                        if H.selectLabel(game, "NO AUTOJOIN") then
+                          U.wait(20)
+                        end
+                      end
+                    else
+                      check(false, "AUTOJOIN is on the official row too")
+                    end
+                  else
+                    check(false, "the official row is still on the list")
+                  end
+                  local cleared = (type(exports.autoJoinServer) == "function"
+                                    and exports.autoJoinServer()) or nil
+                  check(cleared == nil,
+                        ("and the driver leaves auto-join switched off "
+                         .. "(key %s)"):format(tostring(cleared)))
+                end
+                H.closeToOverworld(game)
+              else
+                check(false, "SERVERS still opens on the remembered row for "
+                               .. "the AUTOJOIN leg")
+              end
+
               -- ------- 10. DELETE, behind a yes/no confirm
               --
               -- The same row the SERVERS leg above just dialled through,
