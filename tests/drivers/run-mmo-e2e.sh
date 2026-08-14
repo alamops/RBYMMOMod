@@ -48,6 +48,12 @@ ADDR_FILE="${MMO_ADDR_FILE:-/tmp/rby_mmo_addr-$RUN_ID.txt}"
 # joining the first -- which is what a fixed 7788 did, and it looked like a
 # roster bug rather than a harness one.
 MMO_GAME_PORT="${RBY_MMO_PORT:-$(( 7500 + ($$ % 200) ))}"
+# Still exported, because the drivers themselves read it (tests/drivers/mmo_util.lua)
+# and they are engine-level scripts, not mod code. What changed with the mod
+# sandbox is how the *game* learns it: a mod can no longer read the
+# environment, so the port goes into each instance's options.lua below --
+# through the same modOptions bucket the mod manager writes, which is what
+# keeps this run exercising the real setting rather than a test-only door.
 export RBY_MMO_PORT="$MMO_GAME_PORT"
 
 # ...and the guest has to dial *that* port.
@@ -198,8 +204,8 @@ enable_mod_for() {
   dir="$(save_dir_for "$1")"
   [ -n "$dir" ] || fail "could not determine LOVE's save directory for $1"
   mkdir -p "$dir"
-  printf 'return { mods = { rby_mmo = true%s }, modOptions = { rby_mmo = { hub = "%s", sprite = "%s" } } }\n' \
-    "$EXTRA_MODS" "$MMO_JOIN_ADDRESS" "$2" > "$dir/options.lua"
+  printf 'return { mods = { rby_mmo = true%s }, modOptions = { rby_mmo = { hub = "%s", sprite = "%s", port = "%s" } } }\n' \
+    "$EXTRA_MODS" "$MMO_JOIN_ADDRESS" "$2" "$MMO_GAME_PORT" > "$dir/options.lua"
   echo "$dir"
 }
 HOST_SPRITE="${MMO_HOST_SPRITE:-SPRITE_RED}"

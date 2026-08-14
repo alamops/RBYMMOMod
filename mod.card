@@ -168,18 +168,20 @@ return {
         .. "them arriving is the same blue -- so a name worth noticing does "
         .. "not have to be read to be noticed. A friendship is a pair of "
         .. "trainer names on one hub (the same identity the ranking claims) "
-        .. "and lives in this copy's own rby_mmo_friends.json, so it survives "
-        .. "CONTINUE and save-slot switches and works identically on a "
-        .. "dedicated hub and a game hosted from inside the game. Removing "
+        .. "and is kept in this game's own mod storage, so it survives "
+        .. "CONTINUE and works identically on a dedicated hub and a game "
+        .. "hosted from inside the game. One list per save file, since the "
+        .. "engine's mod sandbox scopes a mod's storage that way. Removing "
         .. "one takes it off both sides.",
       "A SERVERS row on the disconnected menu, once you have connected "
         .. "anywhere before: every hub you have reached, favorites pinned "
         .. "above the rest and sorted by address descending otherwise, each "
         .. "with its own CONNECT / AUTOJOIN / FAVORITE-UNFAVORITE / "
         .. "EDIT HOST / EDIT CODE / RENAME submenu. Entries default-named by "
-        .. "address, rename up to 16 characters, and persist across quits, "
-        .. "CONTINUE and save-slot switches in rby_mmo_servers.json; the list "
-        .. "caps at 16 with the oldest non-favorite evicted first.",
+        .. "address, rename up to 16 characters, and persist across quits and "
+        .. "CONTINUE in this game's own mod storage -- one list per save "
+        .. "file, since the engine's mod sandbox scopes it that way; the "
+        .. "list caps at 16 with the oldest non-favorite evicted first.",
       "AUTOJOIN on any one of those rows (the official row included): this "
         .. "copy dials that hub by itself the next time you enter a game -- "
         .. "CONTINUE or NEW GAME, once the world is actually up, never at the "
@@ -247,11 +249,12 @@ return {
         .. "grace is a forfeit loss for the missing seat (not a dual-report "
         .. "draw). Display names are cosmetic; the board keys on the "
         .. "persistent player id PROTOCOL 16 mints once.",
-      "That player id lives in the save and in rby_mmo_player_id.json in the "
-        .. "game's save folder, and it crosses the same unencrypted link the "
-        .. "join code does -- anyone who can read either can steal the "
-        .. "rating. It is closer to an account than the old claim tickets, "
-        .. "and still not a real login.",
+      "That player id lives in the save and in this game's own mod storage, "
+        .. "and it crosses the same unencrypted link the join code does -- "
+        .. "anyone who can read either can steal the rating. It is closer to "
+        .. "an account than the old claim tickets, and still not a real "
+        .. "login. It is per save file: start a second game and the board "
+        .. "sees a second player.",
       "The locations `rby-mmo-hub players` prints are map ids with their "
         .. "underscores taken out (PALLET_TOWN reads as PALLET TOWN), not the "
         .. "names Kanto itself uses. The real ones live in the ROM, which a "
@@ -303,6 +306,11 @@ return {
   },
 
   compat_notes = {
+    "Needs engine 0.1.86 or newer. That floor is the mod sandbox: this "
+      .. "version keeps its server list, friends lists and player id in "
+      .. "mod.storage, which older engines do not have — on one of those "
+      .. "the mod would load and then quietly forget all three between "
+      .. "launches, which is worse than being told it does not fit.",
     "Runs on Gen 1 (Red/Blue/Yellow) and Gen 2 (Gold). Use a Gen 1 hub "
       .. "with a Gen 1 boot and a Gen 2 hub with a Gen 2 boot — hubs refuse "
       .. "cross-generation joins. Both carts get the same product: mediated "
@@ -328,5 +336,5 @@ return {
         .. "under the SIL Open Font License 1.1" },
   },
 
-  compat = { engine = ">=0.0.0-0 <2.0.0", modApi = 2 },
+  compat = { engine = ">=0.1.86 <2.0.0", modApi = 2 },
 }

@@ -54,13 +54,14 @@
 --
 -- Shaped like src/Party.lua for the protocol half (a transport and a ui handed
 -- in, no engine modules, no love) and like src/Servers.lua for the storage
--- half (a file, mirrored into mod.save, both read through one sanitiser).
--- That is what lets the suite drive the whole handshake -- both sides of it --
--- and the persistence, under plain luajit.
+-- half (a mod.storage key, mirrored into mod.save, both read through one
+-- sanitiser). That is what lets the suite drive the whole handshake -- both
+-- sides of it -- and the persistence, under plain luajit.
 
 local need, chunkMod = ...
 local Config = need("Config")
 local Wire = need("Wire")
+local Store = need("Store")
 
 local M = {}
 M.__index = M
@@ -160,62 +161,35 @@ end
 -- engine happens to flush with the rest of a save, nothing in connecting
 -- writes one, and CONTINUE replaces the whole table -- so a friend made this
 -- session and never saved would be gone by the next launch, which is exactly
--- the case a friends list exists for.  Reads prefer the file, because a save
--- reload is precisely when mod.save holds the older answer.
+-- the case a friends list exists for.  Reads prefer the durable half, because
+-- a save reload is precisely when mod.save holds the older answer.
 --
--- love is absent under the headless test interpreter, and every path here
--- answers "no file" when it is, which leaves the mod.save half as the whole
--- behaviour there rather than failing.
+-- That durable half was rby_mmo_friends.json until the mod sandbox removed
+-- love's filesystem module, and is a mod.storage key now (src/Store.lua).  One
+-- property did not survive the move: a file was shared by every save slot on
+-- this copy, and a storage key belongs to one playthrough, so a second game
+-- keeps a
+-- second set of friends lists.
+--
+-- mod.storage is absent under the headless test interpreter and answers
+-- "nothing here" before a playthrough exists, and every path below reads both
+-- as "no store", which leaves the mod.save half as the whole behaviour there
+-- rather than failing.
 
-local function filesystem()
-  if type(love) ~= "table" then return nil end
-  if type(love.filesystem) ~= "table" then return nil end
-  return love.filesystem
-end
-
--- src.link.Json is already this mod's encoder, so a file of our own is not a
--- reason to carry a second one.  Resolved once and remembered, the failure
--- included: under the headless interpreter there is no engine to require from,
--- and asking again on every write would be a pcall per keypress.
-local jsonModule, jsonTried = nil, false
-local function json()
-  if jsonTried then return jsonModule end
-  jsonTried = true
-  local ok, module = pcall(require, "src.link.Json")
-  if ok and type(module) == "table" then jsonModule = module end
-  return jsonModule
-end
-
--- The whole file -- every bucket, not only ours -- and second whether it is
--- *there and unreadable*, which love.filesystem.read cannot say on its own: a
--- missing file and a failed read are the same nil.  The two want opposite
--- things from the writer, and getting that backwards is how a list is lost:
--- there is nothing to lose by writing over a file that is not there, and every
--- other save slot's friends to lose by writing over one that is and would not
--- open.
+-- The whole store -- every bucket, not only ours -- and second whether it is
+-- *there and unreadable*, which one nil cannot say on its own: a key never
+-- written and a key that will not decode look the same from here.  The two
+-- want opposite things from the writer, and getting that backwards is how a
+-- list is lost: there is nothing to lose by writing over a key that is not
+-- there, and every other hub's friends to lose by writing over one that is and
+-- would not open.
 function M:_read()
-  local fs, Json = filesystem(), json()
-  if not (fs and Json) then return nil, false end
-
-  local ok, body = pcall(fs.read, Config.FRIENDS_FILE)
-  if not ok or type(body) ~= "string" then
-    local exists = false
-    if type(fs.getInfo) == "function" then
-      local asked, info = pcall(fs.getInfo, Config.FRIENDS_FILE)
-      exists = asked and type(info) == "table"
-    end
-    return nil, exists
-  end
-  -- An empty file is readable and says nothing, which is the same as no file.
-  if body == "" then return nil, false end
-
-  local decoded = Json.decode(body)
-  if type(decoded) ~= "table" then
-    self:_warn("%s is not readable as JSON -- delete it from the game's save "
-      .. "folder to reset this copy's friends lists", Config.FRIENDS_FILE)
+  local stored, unreadable = Store.read(self.mod, Config.FRIENDS_KEY)
+  if unreadable then return nil, true end
+  if type(stored) ~= "table" or type(stored.buckets) ~= "table" then
     return nil, false
   end
-  return decoded, false
+  return stored.buckets, false
 end
 
 function M:_saved()
@@ -241,13 +215,13 @@ end
 
 -- Replace our bucket in both mirrors, and only ours.
 --
--- The file is re-read first, because it holds every hub this copy plays on and
--- every trainer name it plays them under -- and a write of our cached table
--- alone would be a write that forgot all of them.
+-- The store is re-read first, because it holds every hub this playthrough
+-- plays on and every trainer name it plays them under -- and a write of our
+-- cached table alone would be a write that forgot all of them.
 --
 -- **The one thing this must never do is turn a read failure into a wipe.**  A
--- file that exists and would not open is left exactly as it is: the mirror
--- still took the change, and the file repairs itself the next time it reads.
+-- store that exists and would not open is left exactly as it is: the mirror
+-- still took the change, and the store repairs itself the next time it reads.
 function M:_persist()
   if not self.bucket then return false end
   local rows = self:_rows()
@@ -259,15 +233,13 @@ function M:_persist()
     pcall(save.set, save, SAVE_KEY, buckets)
   end
 
-  local fs, Json = filesystem(), json()
-  if not (fs and Json) then return false end
+  if not Store.available(self.mod) then return false end
 
   local stored, unreadable = self:_read()
   if unreadable then
-    self:_warn("%s could not be read, so this session's friends were not "
-      .. "written to it and nothing in it was overwritten -- the list still "
-      .. "works for this game; delete the file from the game's save folder if "
-      .. "this repeats", Config.FRIENDS_FILE)
+    self:_warn("this copy's stored friends lists could not be read, so this "
+      .. "session's friends were not written over them and nothing in them "
+      .. "was lost -- the list still works for this game")
     return false
   end
 
@@ -279,19 +251,15 @@ function M:_persist()
   end
   out[self.bucket] = rows
 
-  local ok, encoded = pcall(Json.encode, out)
-  if not (ok and type(encoded) == "string") then
-    self:_warn("could not encode %s (%s) -- friends made this session will "
-      .. "not survive a relaunch; delete the file from the game's save folder "
-      .. "if this repeats", Config.FRIENDS_FILE, tostring(encoded))
-    return false
-  end
-
-  local called, wrote, why = pcall(fs.write, Config.FRIENDS_FILE, encoded)
-  if not (called and wrote) then
-    self:_warn("could not write %s (%s) -- friends made this session will be "
-      .. "forgotten on relaunch unless the game is saved while connected",
-      Config.FRIENDS_FILE, tostring(called and why or wrote))
+  local wrote, why = Store.write(self.mod, Config.FRIENDS_KEY, { buckets = out })
+  if not wrote then
+    -- Silent before a playthrough is identified, for src/Servers.lua's reason:
+    -- that state is the engine deciding which game this is, not a store that
+    -- refused, and the mirror above already took the change.
+    if why == Store.NO_PLAYTHROUGH then return false end
+    self:_warn("could not store the friends lists (%s) -- friends made this "
+      .. "session will be forgotten on relaunch unless the game is saved "
+      .. "while connected", tostring(why))
     return false
   end
   return true
@@ -303,9 +271,11 @@ end
 --
 -- Read here rather than lazily, because every question the screens ask is
 -- about *this* bucket and there is exactly one moment at which the bucket is
--- decided.  The save mirror goes in first and the file over the top of it, key
--- by key, because the file is the durable copy and mod.save is the one a
--- CONTINUE can rewind.
+-- decided.  The save mirror goes in first and the store over the top of it, key
+-- by key, because the store is the durable copy and mod.save is the one a
+-- CONTINUE can rewind -- which is also what carries a player forward off the
+-- old JSON file: an empty store and a populated mirror means the mirror is the
+-- whole answer, and the next friend made writes it into the store.
 function M:setHub(address, name)
   self:reset()
   local bucket = bucketKey(address, name)
@@ -413,7 +383,7 @@ end
 
 -- ------- writing the list
 
--- Add somebody, both halves of which are one moment: the row and the file.
+-- Add somebody, both halves of which are one moment: the row and the store.
 --
 -- Bounded by Config.FRIENDS_MAX, and refused rather than trimmed when it is
 -- reached -- dropping the oldest friend to make room for a new one would be

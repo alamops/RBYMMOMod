@@ -85,6 +85,10 @@ fi
 RUN_ID="${MMO_RUN_ID:-$$}"
 ADDR_FILE="${MMO_ADDR_FILE:-/tmp/rby_mmo_gen2_addr-$RUN_ID.txt}"
 MMO_GAME_PORT="${RBY_MMO_PORT:-$(( 7600 + ($$ % 200) ))}"
+# Exported for the drivers, which are engine-level scripts and can still read
+# the environment; the game learns the port from each instance's options.lua
+# instead, because a sandboxed mod cannot. Same split as run-mmo-e2e.sh, which
+# carries the long version of this note.
 export RBY_MMO_PORT="$MMO_GAME_PORT"
 
 if [ -n "${MMO_JOIN_ADDRESS:-}" ] && [ "${MMO_JOIN_ADDRESS##*:}" != "$MMO_GAME_PORT" ]; then
@@ -196,8 +200,8 @@ enable_mod_for() {
   dir="$(save_dir_for "$1")"
   [ -n "$dir" ] || fail "could not determine LOVE's save directory for $1"
   mkdir -p "$dir"
-  printf 'return { mods = { rby_mmo = true%s }, modOptions = { rby_mmo = { hub = "%s", sprite = "%s" } } }\n' \
-    "$EXTRA_MODS" "$MMO_JOIN_ADDRESS" "$2" > "$dir/options.lua"
+  printf 'return { mods = { rby_mmo = true%s }, modOptions = { rby_mmo = { hub = "%s", sprite = "%s", port = "%s" } } }\n' \
+    "$EXTRA_MODS" "$MMO_JOIN_ADDRESS" "$2" "$MMO_GAME_PORT" > "$dir/options.lua"
   echo "$dir"
 }
 

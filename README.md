@@ -209,9 +209,10 @@ front of a friend's nickname, because being somebody's friend is true at the
 same time as `PARTY`, `BUSY` and wherever they're standing.
 
 A friendship is **a pair of trainer names on one hub** — the same identity the
-ranking claims — kept in your own copy's `rby_mmo_friends.json`, filed under
-the hub *and* the name you play it as, so two people sharing a machine keep two
-lists. It's client-side on purpose: a friends table on the hub would work on a
+ranking claims — kept in your own game's mod storage, filed under the hub
+*and* the name you play it as, so two people sharing a machine keep two lists.
+(One set of lists per save file: the engine's mod sandbox scopes a mod's
+storage per playthrough, so a second game starts with an empty one.) It's client-side on purpose: a friends table on the hub would work on a
 dedicated server and lose everything on a game hosted from inside somebody's
 copy, which has no disk to keep one on. `UNFRIEND` takes it off **both** sides,
 so the two lists can't quietly disagree.
@@ -482,8 +483,9 @@ score, which the `RANK` screen tells them in as many words. Nobody is thrown
 out for it: a friend who lost their save shouldn't lose the hub.
 
 Be clear about what that is worth. PROTOCOL 16 seats you under a **persistent
-player id** the mod mints once (`rby_mmo_player_id.json`) — that id is the
-rank-board key and the wire presence id. Display names can collide; ids
+player id** the mod mints once — that id is the rank-board key and the wire
+presence id, and it is per save file (the mod sandbox scopes a mod's storage
+per playthrough, so a second game is a second player to the board). Display names can collide; ids
 cannot, and a second live connection with the same id is refused. Mid-ranked
 battle drops still forfeit after reconnect grace (intermediator), not a
 no-score draw. It is closer to an account than the old per-hub claim ticket,
@@ -1182,8 +1184,8 @@ hosts, one joins, and both sides assert:
   winner is on the leaderboard when `RANK` is opened
 - ✅ a guest LEAVEs and keeps playing
 - 🎫 **and can come back as themselves** — the guest rejoins through the real
-  menus under the same persistent player id (`rby_mmo_player_id.json`), and
-  finds its rating where it left it
+  menus under the same persistent player id, and finds its rating where it
+  left it
 
 The dedicated-hub run — `run-hub-e2e.sh`, two guests and a real Node hub, no
 in-game host anywhere — adds the party leg on top of all of that:

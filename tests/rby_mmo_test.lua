@@ -24407,4 +24407,346 @@ end
 
 end)()
 
+-- ------------------------------------------------------------------
+-- 18. The durable half, after the mod sandbox
+-- ------------------------------------------------------------------
+--
+-- The recents list, the friends lists and the player id each keep two
+-- copies: a mod.save mirror, and a durable store a save reload cannot
+-- rewind. That durable half was a JSON file beside the save until the
+-- engine's mod sandbox removed the filesystem module, and it is a
+-- mod.storage key now (src/Store.lua).
+--
+-- It was never covered here before, for a reason that stopped being true
+-- with the move: standing a love filesystem up under plain luajit is a
+-- second in-memory filesystem to reason about, and section 13 removes love
+-- rather than build one. mod.storage is a four-method facade, so the
+-- durable half is finally something a headless stub can drive -- and it is
+-- the half that carries a player's list across a CONTINUE, which is the
+-- whole reason it exists.
+--
+-- Driven against facades built here rather than the shared stubMod, which
+-- deliberately has no storage: attaching one there would make every earlier
+-- section dual-write into a store that outlives its `stubSave = {}` reset,
+-- and cross-contaminate blocks that are written to start from nothing.
+
+;(function()
+
+local ambientLove = _G.love
+_G.love = nil
+
+local Store = need("Store")
+local Servers = need("Servers")
+local Friends = need("Friends")
+local Client = need("Client")
+
+-- The engine's contract, small enough to state exactly (src/mods/Storage.lua):
+-- read hands back a decoded table, or nil plus a code; write answers true, or
+-- false plus a code. `broken` is the case the callers' whole write path is
+-- built around -- a store that is there and will not open.
+local function storageStub()
+  local self = { data = {}, writes = 0, broken = false, noPlaythrough = false }
+  self.facade = {
+    read = function(_, game, key)
+      if not game then return nil, "not_in_playthrough", "no game" end
+      -- What storage answers while the engine has not settled which game this
+      -- is: a real state, and deliberately not a fault on either path.
+      if self.noPlaythrough then
+        return nil, "not_in_playthrough", "no playthrough yet"
+      end
+      if self.broken then return nil, "verify_failed", "could not be verified" end
+      local hit = self.data[key]
+      if hit == nil then return nil, "not_found", "nothing stored" end
+      return hit
+    end,
+    write = function(_, game, key, value)
+      if not game then return false, "not_in_playthrough", "no game" end
+      if self.noPlaythrough then
+        return false, "not_in_playthrough", "no playthrough yet"
+      end
+      if type(value) ~= "table" then return false, "encode_failed", "not data" end
+      self.writes = self.writes + 1
+      self.data[key] = value
+      return true
+    end,
+    list = function() return {} end,
+    delete = function() return false, "not_found" end,
+  }
+  return self
+end
+
+-- A mod facade with a storage half and a save half of its own, so two of them
+-- can share one store the way two launches of the game do.
+local function facadeOn(storage, save)
+  save = save or {}
+  local warns = {}
+  return {
+    id = "rby_mmo",
+    game = {},
+    storage = storage and storage.facade or nil,
+    save = {
+      get = function(_, key, default)
+        local value = save[key]
+        if value == nil then return default end
+        return value
+      end,
+      set = function(_, key, value) save[key] = value end,
+    },
+    log = {
+      info = function() end,
+      warn = function(_, fmt, ...)
+        local ok, line = pcall(string.format, fmt, ...)
+        warns[#warns + 1] = ok and line or fmt
+      end,
+      error = function() end,
+    },
+  }, save, warns
+end
+
+-- ------- Store itself: the two answers a caller is allowed to act on
+
+do
+  local storage = storageStub()
+  local mod = facadeOn(storage)
+
+  local value, unreadable = Store.read(mod, "servers")
+  eq(value, nil, "an unwritten key reads as nothing")
+  eq(unreadable, false, "and not_found is not a store that would not open")
+
+  check(Store.write(mod, "servers", { rows = { 1 } }), "a data table writes")
+  local back = Store.read(mod, "servers")
+  eq(type(back) == "table" and back.rows[1], 1, "and reads back whole")
+
+  storage.broken = true
+  value, unreadable = Store.read(mod, "servers")
+  eq(value, nil, "a store that will not decode hands back nothing")
+  eq(unreadable, true, "and says so, which is what stops the writer")
+  storage.broken = false
+
+  -- The degradations, which are what every caller leans on: no facade at all
+  -- (an older engine, or the headless stub), and no game yet (the title
+  -- screen, before a playthrough exists). Both are "nothing here" and neither
+  -- is a fault.
+  local bare = facadeOn(nil)
+  eq(Store.available(bare), false, "no storage facade is no durable half")
+  eq(select(2, Store.read(bare, "servers")), false,
+     "and reads as nothing rather than as a store that would not open")
+
+  local titleScreen = facadeOn(storage)
+  titleScreen.game = nil
+  eq(Store.available(titleScreen), false, "no game yet is no durable half")
+  eq(select(2, Store.read(titleScreen, "servers")), false,
+     "and is an ordinary answer, not a failure")
+  eq(Store.write(titleScreen, "servers", { rows = {} }), false,
+     "and a write before a playthrough exists lands nowhere")
+end
+
+-- ------- the recents list survives a save reload
+
+do
+  local storage = storageStub()
+
+  local firstMod = facadeOn(storage)
+  local first = Servers.new({ mod = firstMod })
+  check(first:record("192.168.1.20:7788") ~= nil, "a hub is recorded")
+  eq(type(storage.data[Config.SERVERS_KEY]) == "table"
+     and #storage.data[Config.SERVERS_KEY].rows, 1,
+     "and lands in the durable store, not only in the mirror")
+
+  -- The second launch: the same store, an empty mirror. This is exactly what a
+  -- CONTINUE does to mod.save, and the case the durable half exists for.
+  local secondMod = facadeOn(storage)
+  local second = Servers.new({ mod = secondMod })
+  local rows = second:list()
+  eq(#rows, 1, "a fresh copy with an empty save mirror still has the hub")
+  eq(rows[1].address, "192.168.1.20:7788", "with the address it was recorded under")
+end
+
+-- ------- and a read failure never becomes a wipe
+
+do
+  local storage = storageStub()
+  local firstMod = facadeOn(storage)
+  local first = Servers.new({ mod = firstMod })
+  first:record("kept.example:7788")
+  local before = storage.data[Config.SERVERS_KEY]
+  eq(#before.rows, 1, "one hub is stored")
+
+  storage.broken = true
+  local mod, save, warns = facadeOn(storage)
+  local blind = Servers.new({ mod = mod })
+  blind:record("other.example:7788")
+
+  eq(storage.data[Config.SERVERS_KEY], before,
+     "a store that would not open is left exactly as it was")
+  eq(type(save.servers) == "table" and #save.servers, 1,
+     "while the mirror still took this session's change")
+  check(#warns > 0, "and the player is told once, in a sentence they can act on")
+end
+
+-- ------- friends: the same two halves, keyed per hub
+
+do
+  local storage = storageStub()
+
+  local firstMod = facadeOn(storage)
+  local first = Friends.new(nil, nil, { mod = firstMod })
+  first:setHub("hub.example:7788", "ASH")
+  check(first:_add("MISTY"), "a friend is added to the open bucket")
+  check(type(storage.data[Config.FRIENDS_KEY]) == "table",
+        "and the bucket lands in the durable store")
+
+  local secondMod = facadeOn(storage)
+  local second = Friends.new(nil, nil, { mod = secondMod })
+  second:setHub("hub.example:7788", "ASH")
+  eq(#second:list(), 1, "a fresh copy with an empty mirror still has the friend")
+  eq(second:list()[1].name, "MISTY", "under the name they were kept as")
+
+  -- Another trainer on the same hub is another bucket, and writing one must
+  -- not forget the other -- the rule the whole re-read-before-write path in
+  -- _persist exists for.
+  local thirdMod = facadeOn(storage)
+  local third = Friends.new(nil, nil, { mod = thirdMod })
+  third:setHub("hub.example:7788", "GARY")
+  third:_add("BROCK")
+
+  local backMod = facadeOn(storage)
+  local back = Friends.new(nil, nil, { mod = backMod })
+  back:setHub("hub.example:7788", "ASH")
+  eq(#back:list(), 1, "the first trainer's list survived the second's write")
+end
+
+-- ------- the port override, after the environment stopped being readable
+
+do
+  local before = Config.DEFAULT_PORT
+
+  eq(Config.applyPort(7799), 7799, "a valid port is taken")
+  eq(Config.DEFAULT_HUB, "127.0.0.1:7799", "and the default hub moves with it")
+  eq(Config.applyPort("7801"), 7801, "a numeric string is a number")
+  eq(Config.applyPort(nil), Config.DEFAULT_PORT_FALLBACK,
+     "an unset option falls back rather than producing an unusable address")
+  eq(Config.applyPort("nonsense"), Config.DEFAULT_PORT_FALLBACK, "so does junk")
+  eq(Config.applyPort(0), Config.DEFAULT_PORT_FALLBACK, "so does out of range")
+  eq(Config.applyPort(70000), Config.DEFAULT_PORT_FALLBACK, "at either end")
+  eq(Config.applyPort(7788.5), Config.DEFAULT_PORT_FALLBACK,
+     "and a port has to be whole")
+
+  -- Left as this suite found it: every section above is written against
+  -- Config.DEFAULT_PORT as a symbol, and leaving it moved would rewrite what
+  -- they mean.
+  Config.applyPort(before)
+  eq(Config.DEFAULT_PORT, before, "and the suite's port is restored")
+end
+
+-- ------- a write before a playthrough exists is not a complaint
+
+do
+  local storage = storageStub()
+  storage.noPlaythrough = true
+  local mod, save, warns = facadeOn(storage)
+  local store = Servers.new({ mod = mod })
+
+  check(store:record("quiet.example:7788") ~= nil, "the hub is still recorded")
+  eq(#warns, 0,
+     "a write before a playthrough is identified says nothing to the player")
+  eq(type(save.servers) == "table" and #save.servers, 1,
+     "and the mirror took the change, which is what carries the session")
+
+  -- The read path already treated this state as ordinary; the point of the
+  -- pair is that the write path agrees with it.
+  eq(select(2, Store.read(mod, Config.SERVERS_KEY)), false,
+     "the read half calls the same state nothing-here rather than unreadable")
+  eq(select(2, Store.write(mod, Config.SERVERS_KEY, { rows = {} })),
+     Store.NO_PLAYTHROUGH,
+     "and the write half names it, so a caller can stay quiet about it")
+end
+
+-- ------- one Servers outlives the playthrough it cached
+
+do
+  local storage = storageStub()
+  local mod, save = facadeOn(storage)
+  local store = Servers.new({ mod = mod })
+
+  check(store:record("first.example:7788") ~= nil, "a hub is recorded")
+  eq(#store:list(), 1, "and listed")
+
+  -- The save underneath changed: another playthrough is another store and
+  -- another mirror. This object is built once when the mod loads and lives as
+  -- long as the process, so nothing about that swap reaches it on its own.
+  storage.data = {}
+  save.servers = nil
+  eq(#store:list(), 1,
+     "left alone it would keep showing the previous game's hubs -- the bug")
+
+  store:reset()
+  eq(#store:list(), 0,
+     "reset is what makes the next read start from the game now open")
+  eq(store:record("second.example:7788") ~= nil, true, "and recording works after")
+  eq(#storage.data[Config.SERVERS_KEY].rows, 1,
+     "with only the new game's hub written to the new store")
+end
+
+-- ------- the player id, which is the one that costs a rank history
+
+do
+  local storage = storageStub()
+  -- Client holds the shared stubMod, not a facade of ours, so the storage half
+  -- is lent to it here and handed back below -- never left nil'd, which is the
+  -- rule every section that borrows a stubMod field follows.
+  local prevStorage, prevGame = stubMod.storage, stubMod.game
+  local prevSave = stubSave
+  stubMod.storage, stubMod.game = storage.facade, {}
+
+  local FIRST = string.rep("a1b2c3d4", 4)
+  local SECOND = string.rep("9f8e7d6c", 4)
+
+  -- Upgrading: a build that kept this in a JSON file left the id in the mirror
+  -- and nowhere this copy can still open.
+  stubSave = { playerId = FIRST }
+  Client.resetPlayerIdCache()
+  eq(Client.playerId(), FIRST, "the mirrored id is what the hub is told")
+  eq(type(storage.data[Config.PLAYER_ID_KEY]) == "table"
+     and storage.data[Config.PLAYER_ID_KEY].id, FIRST,
+     "and it is carried into the store, so a CONTINUE cannot take it away")
+  local writes = storage.writes
+  Client.playerId()
+  Client.playerId()
+  eq(storage.writes, writes, "asking again costs no further writes")
+
+  -- Recall: the store is the half a save reload cannot rewind.
+  storage.data[Config.PLAYER_ID_KEY] = { id = SECOND }
+  stubSave = {}
+  Client.resetPlayerIdCache()
+  eq(Client.playerId(), SECOND, "an id in the store is recalled when the mirror is empty")
+  eq(stubSave.playerId, SECOND, "and mirrored, so the rest of the session agrees")
+
+  -- The save underneath changed. Storage is per playthrough and this cache is
+  -- per process, so without the reset the new game is handed the old game's
+  -- identity -- and a hub would seat two games as one player.
+  local second = storageStub()
+  stubMod.storage = second.facade
+  stubSave = {}
+  eq(Client.playerId(), SECOND,
+     "left alone the cache hands a new playthrough the old id -- the bug")
+
+  Client.resetPlayerIdCache()
+  stubSave = {}
+  local minted = Client.playerId()
+  check(minted ~= SECOND,
+        "reset is what makes a second game a second player")
+  check(Wire.playerId(minted) ~= nil, "and what it mints is a well-formed id")
+  eq(second.data[Config.PLAYER_ID_KEY]
+     and second.data[Config.PLAYER_ID_KEY].id, minted,
+     "written to the store the new playthrough actually has")
+
+  stubMod.storage, stubMod.game = prevStorage, prevGame
+  stubSave = prevSave
+end
+
+_G.love = ambientLove
+
+end)()
+
 T.finish("rby_mmo")

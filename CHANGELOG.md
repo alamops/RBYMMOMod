@@ -247,6 +247,45 @@ here must match `manifest.version`.
   engine-rate two-clock HP drain (`max(1, maxHp/96)` per frame); victory
   music keeps waiting for drains and faints to finish.
 
+### Changed
+
+- **The mod runs under the engine's new mod sandbox.** Mod code no longer has
+  `io`, the environment, or love's filesystem module, and `_G` is private per
+  mod. Three stores that kept a JSON file beside the save — the recent-hubs
+  list, the friends lists and the persistent player id — now go through
+  `mod.storage` via one shared `src/Store.lua`; `"filesystem"` is gone from
+  `manifest.permissions` (there is no such permission any more, and under
+  `api: 2` an unknown one is a hard load error, so this line alone would have
+  stopped the mod loading). The two-mirror design is unchanged: `mod.save`
+  still takes every write and is still read first, which is also what carries
+  an existing list or player id forward — **nobody loses a friends list or a
+  rank identity by updating.**
+- **`RBY_MMO_PORT` is now a `HOST PORT` option row.** A sandboxed mod cannot
+  read the environment, and this one read it while `Config` was still loading,
+  which would have taken the whole mod down rather than merely losing a
+  setting. The port an in-game host binds is set in the mod manager instead —
+  visible to the player who actually needs it, which an env var never was.
+  Takes effect on the next launch. The end-to-end drivers pass it through
+  `options.lua`, the same bucket the manager writes.
+- **`game_version` floors at the current engine, `>=0.1.86 <2.0.0`.** It was
+  `>=0.0.0-0`, which claimed this mod runs on every engine ever released --
+  true when it kept its own files, false now that the three stores need
+  `mod.storage`. On an older engine the mod would load and then quietly forget
+  the server list, the friends lists and the player id between launches; a
+  loader that refuses with a version it can name is the better failure. Dev
+  checkouts are unaffected — the loader skips this gate on a `0.0.0-dev`
+  engine. `mod.card`'s `compat.engine` moved with it.
+
+### Removed
+
+- **A recents list, friends list or player id is no longer shared between save
+  files on one copy.** `mod.storage` is scoped per playthrough, and a file was
+  not. Starting a second game gives it its own hub list, its own friends and
+  **its own player id** — so a hub, and the rank board, see two players where
+  there was one. This is a real loss and it is not one this mod can fix from
+  its side; the case is written up for upstream in
+  `docs/upstream/machine-level-storage.md`.
+
 ### Fixed
 
 - **A hub that accepts and never answers is given up on.** The transport's

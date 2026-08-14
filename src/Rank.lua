@@ -55,7 +55,7 @@ Board.__index = Board
 --
 -- Keying on the connection id would reset everybody's rating on every
 -- reconnect. Keying on trainer name required claim tickets (not accounts).
--- A client-minted playerId that survives CONTINUE (durable file + mod.save)
+-- A client-minted playerId that survives CONTINUE (mod.storage + mod.save)
 -- is closer to an account: same id → same rating; duplicate live connections
 -- with the same id are refused at admit.
 --

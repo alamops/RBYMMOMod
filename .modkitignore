@@ -126,6 +126,16 @@ docs/plans/nire-back-sprite-pixel-ratio.md
 docs/plans/non-blocking-avatars.md
 docs/plans/coop-joiner-refights-the-trainer.md
 docs/plans/in-game-notifications.md
+# The upstream issue behind the mod-sandbox migration: a request for storage
+# scoped to the copy rather than to one playthrough. Same footing as the plans
+# above -- it argues with the engine about Storage.lua, and a player who
+# unpacks this archive has no use for that argument. Listed by name, because a
+# bare docs/upstream/ line would do nothing.
+docs/upstream/machine-level-storage.md
+# And the small one that raising game_version to the current engine turned up:
+# the mod manager is the one of three call sites that does not skip the engine
+# version check on a 0.0.0-dev build. Same footing as the file above.
+docs/upstream/manager-missing-dev-engine-exemption.md
 # The upstream RFC behind co-op battles. It is a proposal against the *engine*,
 # not mod content -- a player unpacking this archive has no use for a document
 # arguing about BattleState's battler slots. Listed by name for the same reason

@@ -810,15 +810,16 @@ rather than refusing to run — a leaderboard is not a reason to take a hub off
 the air.
 
 Ratings are keyed by **player id**, not trainer name. The mod mints the id
-once (`rby_mmo_player_id.json` + save) and sends it on every hello; the hub
-seats you under that id and scores under it. Display names are cosmetic —
+once per playthrough (the client's own mod storage + the save) and sends it on
+every hello; the hub seats you under that id and scores under it. Display names are cosmetic —
 two players can both type `ASH` and both score. `rby-mmo-hub ranking` and
 the in-game RANK screen append `#` + the first four hex of the id when a
 name collides so you can tell them apart. Duplicate *live* connections with
 the same id are refused ("You're already connected."). It is closer to an
 account than the old claim-ticket scheme and still not a real login: the id
-lives in the save folder and crosses the same unencrypted link the passcode
-does. Deleting `ranking.json` clears the season. Legacy name-only rows
+lives on the player's own machine and crosses the same unencrypted link the
+passcode does. It is per playthrough, so one person with two save files is two
+players to the board. Deleting `ranking.json` clears the season. Legacy name-only rows
 without an `id` are skipped on load (season reset).
 
 The second is **`history.jsonl`**, the match ledger

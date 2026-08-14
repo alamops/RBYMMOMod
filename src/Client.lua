@@ -10,6 +10,7 @@
 local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
+local Store = need("Store")
 local Sha256 = need("Sha256")
 local Transport = need("Transport")
 local Roster = need("Roster")
@@ -412,7 +413,7 @@ end
 -- setHostJoinCode drops its code.
 --
 -- The rank claim ticket is deliberately NOT cleared — PROTOCOL 16 identity
--- is the persistent playerId (PLAYER_ID_FILE / mod.save), not a per-hub
+-- is the persistent playerId (PLAYER_ID_KEY / mod.save), not a per-hub
 -- ticket. Deleting a bookmark must not cost a rating.
 --
 -- arg1 for the reason the setters above give: reached as
@@ -425,71 +426,69 @@ function M.forgetHub(a, b)
   return true
 end
 
-local jsonModule, jsonTried = nil, false
-
-local function filesystem()
-  if type(love) ~= "table" then return nil end
-  if type(love.filesystem) ~= "table" then return nil end
-  return love.filesystem
-end
-
--- src.link.Json is already this mod's encoder -- HostServer speaks the wire
--- with it -- so a file of our own is not a reason to carry a second one.
-local function json()
-  if jsonTried then return jsonModule end
-  jsonTried = true
-  local ok, module = pcall(require, "src.link.Json")
-  if ok and type(module) == "table" then jsonModule = module end
-  return jsonModule
-end
-
 -- ------- persistent playerId (PROTOCOL 16)
 --
--- One UUID-shaped hex string per LOVE save folder. Survives CONTINUE
--- (durable JSON + mod.save mirror). The hub seats you under this id; ranking
--- keys on it; a second live connection with the same id is refused.
+-- One UUID-shaped hex string, durable across CONTINUE (a mod.storage key plus
+-- the mod.save mirror). The hub seats you under this id; ranking keys on it; a
+-- second live connection with the same id is refused.
+--
+-- It was one id per LOVE save folder while it lived in a JSON file of its own.
+-- The mod sandbox removed love's filesystem module, and mod.storage -- the
+-- replacement -- is scoped to a playthrough, so it is one id per playthrough
+-- now. That is the sharpest edge of the sandbox change anywhere in this mod,
+-- because a player's rank history is filed under this string: a second game on
+-- the same copy is a second player as far as any hub is concerned. The mirror
+-- below is what keeps it from being worse than that -- it is read first, so
+-- nobody loses the id they already have by updating the mod, and src/Store.lua
+-- carries the upstream note.
 
 local playerIdStore = { loaded = false, id = nil, unreadable = false }
 
-local function loadPlayerIdFile()
+local function loadPlayerIdStore()
   if playerIdStore.loaded then
     return playerIdStore.id, playerIdStore.unreadable
   end
   playerIdStore.loaded = true
-  local fs, Json = filesystem(), json()
-  if not (fs and Json) then return nil, false end
-  local ok, body = pcall(fs.read, Config.PLAYER_ID_FILE)
-  if not ok then
+  local stored, unreadable = Store.read(mod, Config.PLAYER_ID_KEY)
+  if unreadable then
     playerIdStore.unreadable = true
-    mod.log:warn("%s could not be read -- this copy will mint a player id "
-      .. "into mod.save only until the file is readable again; delete it "
-      .. "from the game's save folder to reset identity", Config.PLAYER_ID_FILE)
+    mod.log:warn("this playthrough's stored player id could not be read -- "
+      .. "this copy will keep an id in mod.save only until the store is "
+      .. "readable again, so a rank history may not follow you until it is")
     return nil, true
   end
-  if type(body) ~= "string" or body == "" then return nil, false end
-  local decoded
-  local dok, result = pcall(Json.decode, body)
-  if dok and type(result) == "table" then decoded = result end
-  if not decoded then
-    playerIdStore.unreadable = true
-    return nil, true
-  end
-  local id = Wire.playerId(decoded.id)
+  if type(stored) ~= "table" then return nil, false end
+  local id = Wire.playerId(stored.id)
   playerIdStore.id = id
   return id, false
 end
 
-local function storePlayerIdFile(id)
-  local fs, Json = filesystem(), json()
-  if not (fs and Json) then return false end
+local function storePlayerId(id)
   if playerIdStore.unreadable then return false end
-  local encoded
-  local ok, result = pcall(Json.encode, { id = id })
-  if ok and type(result) == "string" then encoded = result end
-  if not encoded then return false end
-  local called, wrote = pcall(fs.write, Config.PLAYER_ID_FILE, encoded)
-  if not (called and wrote) then return false end
+  if not Store.write(mod, Config.PLAYER_ID_KEY, { id = id }) then return false end
   playerIdStore.loaded, playerIdStore.id = true, id
+  return true
+end
+
+-- Drop what the cache above is holding, so the next playerId() asks the store
+-- again.
+--
+-- **The cache is per process and what it caches is per playthrough**, and
+-- those were the same thing until the mod sandbox moved this out of a file the
+-- whole copy shared. Without this, a player who loads a different save -- or
+-- starts a new game -- and has no id mirrored in it is handed the *previous*
+-- playthrough's id, which is then written into the new save's mirror: two
+-- games playing as one player, on the one value a hub refuses duplicates of
+-- and a rank board files history under. It is also never written to the new
+-- playthrough's store, so the second game's identity would live only in the
+-- half a CONTINUE rewinds.
+--
+-- Reached from M.saveLoaded (save.loaded and save.created both) and from the
+-- suite, which has no other way in: playerIdStore is a local by design.
+function M.resetPlayerIdCache()
+  playerIdStore.loaded = false
+  playerIdStore.id = nil
+  playerIdStore.unreadable = false
   return true
 end
 
@@ -498,11 +497,22 @@ local playerIdSeq = 0
 -- Mint or recall the persistent player id. Never raises.
 function M.playerId()
   local fromSave = Wire.playerId(mod.save:get("playerId"))
-  if fromSave then return fromSave end
-  local fromFile = loadPlayerIdFile()
-  if fromFile then
-    mod.save:set("playerId", fromFile)
-    return fromFile
+  if fromSave then
+    -- Carry an id forward into the store, once. A player arriving from a build
+    -- that kept this in a JSON file has it in the mirror and nowhere this copy
+    -- can still open, and the mirror is the half a CONTINUE rewinds -- so
+    -- leaving it there would mean losing the identity, and the rank history
+    -- filed under it, at the first save reload. loadPlayerIdStore caches and
+    -- storePlayerId fills that cache, so a write that lands happens once per
+    -- playthrough; one that cannot land is retried on the next call, which is
+    -- what carries the id in as soon as the store will take it.
+    if not loadPlayerIdStore() then storePlayerId(fromSave) end
+    return fromSave
+  end
+  local fromStore = loadPlayerIdStore()
+  if fromStore then
+    mod.save:set("playerId", fromStore)
+    return fromStore
   end
   playerIdSeq = playerIdSeq + 1
   local raw = Hub.Entropy.shared:bytes(16)
@@ -523,7 +533,7 @@ function M.playerId()
     return nil
   end
   mod.save:set("playerId", id)
-  storePlayerIdFile(id)
+  storePlayerId(id)
   return id
 end
 
@@ -1532,6 +1542,17 @@ function M.saveLoaded()
   -- not heard it. Reset with the save -- and a fresh file counts: NEW GAME
   -- routes through here too, and its player has heard nothing at all.
   CoopBattle.saidUnranked = nil
+  -- The same mistake, on state that costs more than a missing sentence.
+  --
+  -- Both of these cache something the mod sandbox made per playthrough, in an
+  -- object that lives as long as the process. Left alone, the game the player
+  -- just opened would show the previous one's hub list and write it back into
+  -- its store, and could be handed the previous one's player id -- which is
+  -- what a hub seats them under and what a rank board files their history
+  -- against. Each holds the argument in full; both belong here because here is
+  -- where the engine says the save underneath us changed.
+  servers:reset()
+  M.resetPlayerIdCache()
 end
 
 -- ------- outgoing chat
@@ -1808,9 +1829,9 @@ handlers[Wire.WELCOME] = function(game, msg)
   --
   -- Wrapped, and the whole point of the wrapping is that this is bookkeeping
   -- on the one path every single connection takes. The store refuses rather
-  -- than raises, so nothing here is expected to throw -- but a save folder
-  -- this copy cannot write must never be the reason a player is not in the
-  -- game they just joined.
+  -- than raises, so nothing here is expected to throw -- but a store this copy
+  -- cannot write must never be the reason a player is not in the game they
+  -- just joined.
   if dialled then
     local kept, why = pcall(function()
       servers:record(dialled, authSent and M.joinCode(dialled) or nil)
@@ -2265,6 +2286,15 @@ function M.install()
     end
   end
 
+  -- Before the schema below, not after: the JOIN row defaults to
+  -- Config.DEFAULT_HUB, and defining it first would offer the player an
+  -- address on a port this copy is not about to listen on.
+  --
+  -- mod.options:get answers from the stored options.lua value whether or not a
+  -- schema has been defined yet -- the row two lines down exists so the player
+  -- can see and change it, not so this read works.
+  Config.applyPort(mod.options:get("port"))
+
   mod.options:define({
     -- The cap the host picks. min/max make the row itself refuse anything
     -- outside 2..64, so the clamp in Config is a backstop against a hand
@@ -2272,6 +2302,23 @@ function M.install()
     { key = "maxplayers", label = "MAX PLAYERS", type = "number",
       default = Config.DEFAULT_PLAYERS,
       min = Config.MIN_PLAYERS, max = Config.MAX_PLAYERS, step = 1 },
+    -- The port an in-game host binds. This replaced the RBY_MMO_PORT
+    -- environment variable, which the mod sandbox made unreadable -- and it is
+    -- the better home for it: 7788 is a guess, and the player whose router or
+    -- second program already holds it is exactly the player who cannot be
+    -- expected to set an env var. Changing it takes effect on the next launch,
+    -- because Config reads it once at install.
+    --
+    -- **Text, not a number row, and that is not a style choice.** The
+    -- manager's number row steps by one per press, and pressing A on it opens
+    -- QuantityBox -- which also steps by one and draws its value behind the
+    -- multiply glyph, so a port would read as "x7788" and 7788 would be seven
+    -- thousand presses from 1. The JOIN row above already takes a whole
+    -- host:port as text through the naming grid; this is the same input, and
+    -- Config.applyPort validates the string it gets (range, whole numbers,
+    -- junk) exactly as it would validate a number.
+    { key = "port", label = "HOST PORT", type = "text",
+      default = tostring(Config.DEFAULT_PORT_FALLBACK), maxLen = 5 },
     { key = "hub", label = "JOIN", type = "text", default = Config.DEFAULT_HUB },
     -- The standing join code, so it can be seen and changed deliberately
     -- rather than only when a hub happens to ask for it -- and, since the

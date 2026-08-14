@@ -18,21 +18,28 @@
 -- the whole table with whatever was last written -- so a hub recorded this
 -- session and never saved would be gone by the next launch, which is exactly
 -- the case a recents list exists for. So the list is written to mod.save,
--- still, and to one file of this mod's own that a save reload cannot take
--- away. Reads prefer the file, because a save reload is precisely when
--- mod.save holds the older answer.
+-- still, and to a durable store of this mod's own that a save reload cannot
+-- take away. Reads prefer the durable half, because a save reload is precisely
+-- when mod.save holds the older answer.
 --
--- That also settles what the list *is*: machine-level state, shared by every
--- save slot on this copy, not a fact about one trainer's game.
+-- That durable half was a JSON file beside the save until the mod sandbox
+-- removed love's filesystem module; it is a mod.storage key now
+-- (src/Store.lua), and one sentence that used to be here went with the file:
+-- the list was machine-level state shared by every save slot on this copy, and
+-- storage is scoped per playthrough, so a second game keeps a second list.
+-- Everything else about the design is unchanged, including the rule the write
+-- path is built on -- a read failure must never become a wipe.
 --
--- love is absent under the headless test interpreter, and every path here
--- answers "no file" when it is -- which leaves the mod.save half as the whole
--- behaviour there rather than failing.
+-- mod.storage is absent under the headless test interpreter and answers
+-- "nothing here" before a playthrough exists, and every path below treats both
+-- as "no store" -- which leaves the mod.save half as the whole behaviour there
+-- rather than failing.
 
 local need, chunkMod = ...
 local Config = need("Config")
 local Gen = need("Gen")
 local Wire = need("Wire")
+local Store = need("Store")
 
 local M = {}
 M.__index = M
@@ -79,10 +86,30 @@ end
 -- list cannot rename the canonical copy in memory. The key is made by the
 -- same normaliser as every remembered hub, which is what lets ingestion and
 -- presentation recognise an old saved copy as the same server.
-local FEATURED_KEY = keyOf(Config.FEATURED_SERVER_HOST)
+--
+-- Resolved on first use and remembered, rather than computed while this chunk
+-- loads, because Config.DEFAULT_PORT is no longer settled by then: the PORT
+-- option is applied during install, after every module here has been read
+-- (Config.applyPort). A key baked at load would be keyed on the fallback port
+-- while every later keyOf() used the one the player set -- one hub filed under
+-- two keys, and isFeaturedAddress answering false for the official host.
+-- FEATURED_SERVER_HOST carries an explicit port today, which makes that
+-- harmless; this makes it harmless whatever that constant says next.
+--
+-- A table rather than a plain local so "not resolved yet" stays distinct from
+-- "resolved to nil", which is what a malformed FEATURED_SERVER_HOST gives.
+local featuredKeyMemo = {}
+local function featuredKey()
+  if not featuredKeyMemo.done then
+    featuredKeyMemo.done = true
+    featuredKeyMemo.key = keyOf(Config.FEATURED_SERVER_HOST)
+  end
+  return featuredKeyMemo.key
+end
+
 local function featuredEntry()
   return {
-    key = FEATURED_KEY,
+    key = featuredKey(),
     address = Config.FEATURED_SERVER_HOST,
     name = Config.FEATURED_SERVER_NAME,
     fav = false,
@@ -101,7 +128,7 @@ end
 -- that skipped the SERVERS menu.
 function M.isFeaturedAddress(address)
   local id = keyOf(address)
-  return id ~= nil and id == FEATURED_KEY
+  return id ~= nil and id == featuredKey()
 end
 
 -- What a hub is called before anybody names it.
@@ -167,15 +194,15 @@ function M.new(ctx)
     mod = (type(ctx) == "table" and ctx.mod) or chunkMod,
     entries = {},
     -- Keys this session removed on purpose -- evicted, or re-keyed by EDIT
-    -- HOST. The write below folds in rows it finds on disk that it has never
-    -- seen, and without this a row another copy still holds would walk back
-    -- in the moment it was dropped here.
+    -- HOST. The write below folds in rows it finds in the store that it has
+    -- never seen, and without this a row this session recorded a moment ago
+    -- would walk back in the instant it was dropped here.
     dropped = {},
     loaded = false,
-    -- Which of the file complaints below have already been said once. The
-    -- file is re-read on every write, so a broken one is a standing condition
+    -- Which of the store complaints below have already been said once. The
+    -- store is re-read on every write, so a broken one is a standing condition
     -- and not a blip: unlatched, a player toggling FAVORITE would be told
-    -- their save folder is unreadable once per keypress, which buries the
+    -- their server list is unreadable once per keypress, which buries the
     -- sentence that mattered under the sentence that mattered.
     said = {},
     -- Which hub this copy dials by itself on the way into a game -- one key,
@@ -189,6 +216,33 @@ function M.new(ctx)
     -- history -- be chosen, which a per-row flag could not.
     autoKey = nil,
   }, M)
+end
+
+-- Forget everything this instance is holding, so the next read starts over.
+--
+-- **This exists because the store is scoped to a playthrough and this object
+-- is not.** One Servers is built when the mod loads and lives as long as the
+-- process, while what it caches now belongs to whichever game is open: a
+-- player who loads a different save -- or starts a new one -- would otherwise
+-- keep seeing the previous playthrough's hubs, and the next hub they recorded
+-- would write that whole list into the new playthrough's store. Under the old
+-- machine-level file the cache and the data agreed and none of this was
+-- needed; per-playthrough storage is what made the lifetimes differ.
+--
+-- Client calls it from saveLoaded, which the engine reaches through
+-- save.loaded and through save.created -- NEW GAME emits only the second.
+-- Every field M.new sets except the facade, which is the one thing here that
+-- does belong to the process. autoKey included: which hub this copy dials on
+-- the way in is written into the store beside the rows, so it is as much a
+-- fact about one playthrough as they are -- and carrying it across would arm
+-- the new game with the old one's choice, then persist it there on the next
+-- write.
+function M:reset()
+  self.entries = {}
+  self.dropped = {}
+  self.said = {}
+  self.loaded = false
+  self.autoKey = nil
 end
 
 function M:_warn(fmt, ...)
@@ -206,62 +260,37 @@ end
 
 -- ------- persistence
 
-local function filesystem()
-  if type(love) ~= "table" then return nil end
-  if type(love.filesystem) ~= "table" then return nil end
-  return love.filesystem
-end
-
--- src.link.Json is already this mod's encoder, so a file of our own is not a
--- reason to carry a second one. Resolved once and remembered, including the
--- failure: under the headless interpreter there is no engine to require from
--- and asking again every write would be a pcall per keystroke.
-local jsonModule, jsonTried = nil, false
-local function json()
-  if jsonTried then return jsonModule end
-  jsonTried = true
-  local ok, module = pcall(require, "src.link.Json")
-  if ok and type(module) == "table" then jsonModule = module end
-  return jsonModule
-end
-
--- The file, and second whether it is *there and unreadable* -- which
--- love.filesystem.read cannot say on its own, because a missing file and a
--- failed read are the same nil. The two want opposite things from the writer:
--- there is nothing to lose by writing over a file that does not exist, and
--- everything to lose by writing over one that does and would not open.
+-- The stored rows, and second whether the store is *there and unreadable* --
+-- which one nil cannot say on its own, because a key that was never written
+-- and one that will not decode look the same from here. The two want opposite
+-- things from the writer: there is nothing to lose by writing over a key that
+-- does not exist, and everything to lose by writing over one that does and
+-- would not open.
 --
--- A file that will not decode is a third case and is treated as empty, so the
--- next hub recorded rewrites it whole and repairs it. Refusing to remember
--- anything until the player deletes a file nobody told them about would be a
--- worse answer than losing a list of addresses.
+-- This was a JSON file until the mod sandbox took love's filesystem module
+-- away, and the encoder went with it -- mod.storage hands back a decoded
+-- table, so the src.link.Json round trip this used to do is simply gone. What
+-- has not changed is the contract above, which the whole write path is built
+-- on.
+--
+-- A store that will not decode is Storage's problem before it is ours: it
+-- stages, verifies and keeps a backup generation, so the case that reaches
+-- here is one where every copy is gone. Treating that as "there, leave it
+-- alone" rather than as empty is the safe direction, and a list of addresses
+-- is the cheapest thing in the mod to lose if that judgement is ever wrong.
+-- Silent about the failure on purpose: _persist is the path that has to say
+-- something, because it is the one where the player's change is at stake, and
+-- one sentence said once beats the same sentence from both halves.
 function M:_read()
-  local fs, Json = filesystem(), json()
-  if not (fs and Json) then return nil, false end
-
-  local ok, body = pcall(fs.read, Config.SERVERS_FILE)
-  if not ok or type(body) ~= "string" then
-    local exists = false
-    if type(fs.getInfo) == "function" then
-      local asked, info = pcall(fs.getInfo, Config.SERVERS_FILE)
-      exists = asked and type(info) == "table"
-    end
-    return nil, exists
-  end
-  -- An empty file is readable and says nothing, which is the same as no file.
-  if body == "" then return nil, false end
-
-  local decoded = Json.decode(body)
-  if type(decoded) ~= "table" then
-    self:_warnOnce("decode", "%s is not readable as JSON -- delete it from the "
-      .. "game's save folder to reset this copy's server list",
-      Config.SERVERS_FILE)
+  local stored, unreadable = Store.read(self.mod, Config.SERVERS_KEY)
+  if unreadable then return nil, true end
+  if type(stored) ~= "table" or type(stored.rows) ~= "table" then
     return nil, false
   end
-  return decoded, false
+  return stored.rows, false
 end
 
--- The rows the save mirror is holding, in the same shape the file uses so one
+-- The rows the save mirror is holding, in the same shape the store uses so one
 -- sanitiser covers both.
 function M:_saved()
   local save = self.mod and self.mod.save
@@ -276,17 +305,17 @@ end
 -- write path needs and the load path does not.
 --
 -- The auto-join key rides in on the same rows, as an `auto` flag on the one
--- row that carries it, so the mirror and the file stay a plain array of
--- servers and a build that predates this reads them exactly as it always did.
+-- row that carries it, so both mirrors stay a plain array of servers and a
+-- build that predates this reads them exactly as it always did.
 -- It is read off `raw` rather than kept on the sanitised entry deliberately:
 -- the store's answer to "which hub auto-joins" is self.autoKey and nothing
 -- else, and a second copy of it sitting on a row is a second copy that could
 -- disagree. Returned rather than assigned so _load can decide which reader's
 -- answer wins.
 --
--- Skipped entirely under `only`, which is the write path folding in another
--- save slot's rows: what this copy auto-joins is a setting this session is in
--- the middle of writing, and the rows being folded in are the older word.
+-- Skipped entirely under `only`, which is the write path folding in rows the
+-- store already holds: what this copy auto-joins is a setting this session is
+-- in the middle of writing, and the rows being folded in are the older word.
 function M:_ingest(rows, only)
   local auto = nil
   for _, raw in ipairs(rows or {}) do
@@ -299,7 +328,7 @@ function M:_ingest(rows, only)
     -- is neither loaded into the persisted store nor counted by eviction --
     -- but its `auto` flag above is still read, because the featured row is
     -- exactly the row that has nowhere else to record one.
-    if entry and entry.key ~= FEATURED_KEY then
+    if entry and entry.key ~= featuredKey() then
       local known = self.entries[entry.key] ~= nil or self.dropped[entry.key]
       if not (only and known) then self.entries[entry.key] = entry end
     end
@@ -353,9 +382,14 @@ local function evict(self, keep)
   end
 end
 
--- Read once a session. The save mirror goes in first and the file over the top
--- of it, key by key, because the file is the durable copy and mod.save is the
--- one a CONTINUE can rewind.
+-- Read once a session. The save mirror goes in first and the store over the
+-- top of it, key by key, because the store is the durable copy and mod.save is
+-- the one a CONTINUE can rewind.
+--
+-- That order is also the upgrade path off the old JSON file: a player arriving
+-- from a build that wrote one has an empty store and a populated mirror, so
+-- the mirror is the whole answer for one session and the next recorded hub
+-- writes it into the store.
 --
 -- Then the cap, because nothing so far has applied it: the two halves are
 -- merged key by key and either of them may be longer than the list is allowed
@@ -377,9 +411,9 @@ function M:_load()
   evict(self)
   -- A key that survived both readers but names no row is nothing this store
   -- can act on -- the row was evicted by the other half of the merge, or
-  -- deleted by another save slot. The featured row is the exception: it is
+  -- deleted in an earlier session. The featured row is the exception: it is
   -- synthetic and is always there to be dialled.
-  if self.autoKey and self.autoKey ~= FEATURED_KEY
+  if self.autoKey and self.autoKey ~= featuredKey()
       and not self.entries[self.autoKey] then
     self.autoKey = nil
   end
@@ -429,24 +463,28 @@ function M:_persistRows()
     if self.autoKey == entry.key then row.auto = true end
     out[#out + 1] = row
   end
-  if self.autoKey == FEATURED_KEY then
-    out[#out + 1] = { key = FEATURED_KEY,
+  if self.autoKey == featuredKey() then
+    out[#out + 1] = { key = featuredKey(),
                       address = Config.FEATURED_SERVER_HOST, auto = true }
   end
   return out
 end
 
--- Write both halves, and in that order: the mirror always, the file
+-- Write both halves, and in that order: the mirror always, the store
 -- best-effort.
 --
--- The file is re-read first, because another save slot -- or a second copy of
--- the game running under the same LOVE identity -- may have recorded a hub
--- since we last looked, and writing our cached table back over it would drop
--- theirs. Rows this session dropped on purpose are not folded back in.
+-- The store is re-read first. Under the old file that was load-bearing --
+-- another save slot could have recorded a hub since we last looked, and
+-- writing our cached table back over it would drop theirs. A storage key
+-- belongs to one playthrough, so that particular race is gone; the re-read
+-- stays because it costs a decode nobody notices and it is what makes this
+-- path safe against a second writer arriving later, which is the direction
+-- upstream would move if the machine-level gap is ever closed. Rows this
+-- session dropped on purpose are not folded back in.
 --
 -- **The one thing this must never do is turn a read failure into a wipe.** The
--- write is the whole list, so a file that exists and would not open is left
--- exactly as it is: the mirror still took the change, and the file repairs
+-- write is the whole list, so a store that exists and would not open is left
+-- exactly as it is: the mirror still took the change, and the store repairs
 -- itself the next time it reads.
 --
 -- `keep` is the caller's row, and it is here for the same reason it is on the
@@ -466,29 +504,23 @@ function M:_persist(keep)
   local save = self.mod and self.mod.save
   if save then pcall(save.set, save, SAVE_KEY, list) end
 
-  local fs, Json = filesystem(), json()
-  if not (fs and Json) then return false end
+  if not Store.available(self.mod) then return false end
   if unreadable then
-    self:_warnOnce("unreadable", "%s could not be read, so this session's "
-      .. "server list was not written to it and nothing in it was overwritten "
-      .. "-- the list still works for this game; delete the file from the "
-      .. "game's save folder if this repeats", Config.SERVERS_FILE)
+    self:_warnOnce("unreadable", "this copy's stored server list could not be "
+      .. "read, so this session's list was not written over it and nothing in "
+      .. "it was lost -- the list still works for this game")
     return false
   end
 
-  local ok, encoded = pcall(Json.encode, list)
-  if not (ok and type(encoded) == "string") then
-    self:_warn("could not encode %s (%s) -- the server list will not survive a "
-      .. "relaunch; delete the file from the game's save folder if this "
-      .. "repeats", Config.SERVERS_FILE, tostring(encoded))
-    return false
-  end
-
-  local called, wrote, why = pcall(fs.write, Config.SERVERS_FILE, encoded)
-  if not (called and wrote) then
-    self:_warn("could not write %s (%s) -- hubs you connect to will be "
-      .. "forgotten on relaunch unless the game is saved while connected",
-      Config.SERVERS_FILE, tostring(called and why or wrote))
+  local wrote, why = Store.write(self.mod, Config.SERVERS_KEY, { rows = list })
+  if not wrote then
+    -- Silent before a playthrough is identified: that is not a fault, it is
+    -- the engine still deciding which game this is, and the mirror above
+    -- already took the change.
+    if why == Store.NO_PLAYTHROUGH then return false end
+    self:_warn("could not store the server list (%s) -- hubs you connect to "
+      .. "will be forgotten on relaunch unless the game is saved while "
+      .. "connected", tostring(why))
     return false
   end
   return true
@@ -529,7 +561,7 @@ function M:menuList(game)
     -- `_ingest` and `record` already keep this key out of entries. Retain the
     -- guard at the projection boundary too: even a caller that has modified
     -- the public entries table cannot make the official server appear twice.
-    if entry.key ~= FEATURED_KEY then out[#out + 1] = entry end
+    if entry.key ~= featuredKey() then out[#out + 1] = entry end
   end
   return out
 end
@@ -542,7 +574,7 @@ function M:menuGet(key, game)
   self:_load()
   local id = keyOf(key)
   if not id then return nil end
-  if id == FEATURED_KEY then
+  if id == featuredKey() then
     if not featuredVisible(game) then return nil end
     return featuredEntry()
   end
@@ -644,7 +676,7 @@ function M:record(address, code)
   -- A welcome from the official hub proves the synthetic row works; it does
   -- not turn product configuration into player history. In particular this
   -- skips persistence and eviction, and keeps the configured code canonical.
-  if key == FEATURED_KEY then
+  if key == featuredKey() then
     self.entries[key] = nil
     return featuredEntry()
   end
@@ -671,7 +703,7 @@ end
 -- refused when nothing printable survives -- a blank row is a row nobody can
 -- tell from the one above it.
 function M:rename(key, name)
-  if keyOf(key) == FEATURED_KEY then
+  if keyOf(key) == featuredKey() then
     self:_warn("the featured server is built in and cannot be renamed")
     return nil
   end
@@ -697,7 +729,7 @@ function M:rename(key, name)
 end
 
 function M:setFavorite(key, fav)
-  if keyOf(key) == FEATURED_KEY then
+  if keyOf(key) == featuredKey() then
     self:_warn("the featured server is already pinned and cannot be changed")
     return nil
   end
@@ -725,7 +757,7 @@ end
 -- only answer that leaves one row per hub -- and the alternative, refusing the
 -- edit, would strand the player with two rows and no way to merge them.
 function M:setAddress(key, newAddress)
-  if keyOf(key) == FEATURED_KEY then
+  if keyOf(key) == featuredKey() then
     self:_warn("the featured server's address is built in and cannot be changed")
     return nil
   end
@@ -743,7 +775,7 @@ function M:setAddress(key, newAddress)
   end
 
   local id = clean:lower()
-  if entry.featured or id == FEATURED_KEY then
+  if entry.featured or id == featuredKey() then
     self:_warn("the featured server's address is built in and cannot be changed")
     return nil
   end
@@ -775,7 +807,7 @@ end
 -- through to the connect path and fail every challenge silently, which is the
 -- failure this validation exists to turn into a sentence.
 function M:setCode(key, code)
-  if keyOf(key) == FEATURED_KEY then
+  if keyOf(key) == featuredKey() then
     self:_warn("the featured server's join code is built in and cannot be changed")
     return nil
   end
@@ -803,17 +835,21 @@ end
 -- The player is finished with this hub.
 --
 -- Dropped rather than emptied, and marked as dropped for the same reason
--- eviction and EDIT HOST mark theirs: the write re-reads the file and folds
--- in rows it has never seen, so the copy of this row still sitting on disk --
--- written by another save slot, or by this session a moment ago -- would walk
--- straight back in on the very write that was meant to remove it. The mark is
--- what makes a delete a delete.
+-- eviction and EDIT HOST mark theirs: the write re-reads the store and folds
+-- in rows it has never seen, so the copy of this row still sitting in it --
+-- written by this session a moment ago -- would walk straight back in on the
+-- very write that was meant to remove it. The mark is what makes a delete a
+-- delete.
+--
+-- That list used to include "written by another save slot", and no longer
+-- can: a storage key belongs to one playthrough, so this session is the only
+-- writer. The mark is still load-bearing for the rest of it.
 --
 -- Nothing is handed to _persist as the row to keep, which every other mutator
 -- does: this is the one write that wants the list shorter, so the eviction
 -- that follows a fold-in has no row here to protect.
 function M:remove(key)
-  if keyOf(key) == FEATURED_KEY then
+  if keyOf(key) == featuredKey() then
     self:_warn("the featured server is built in and cannot be deleted")
     return nil
   end

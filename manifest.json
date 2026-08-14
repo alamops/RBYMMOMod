@@ -7,11 +7,10 @@
   "profile": "content",
   "category": "MECHANIC",
   "games": ["gen1", "gen2"],
-  "game_version": ">=0.0.0-0 <2.0.0",
+  "game_version": ">=0.1.86 <2.0.0",
   "priority": 50,
   "permissions": [
     "network",
-    "filesystem",
     "engine_internals"
   ],
   "affects_link": false,

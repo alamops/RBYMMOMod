@@ -134,23 +134,48 @@ M.PROTOCOL = 21
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
 --
--- Overridable by environment, which is not only a test affordance: 7788 is a
--- guess, and a player whose router or another program already has it needs a
--- way out that is not editing the mod. It is also what lets two end-to-end
--- runs -- two agents, two worktrees -- host at the same time on one machine
--- instead of one silently joining the other's game.
+-- Overridable, which is not only a test affordance: 7788 is a guess, and a
+-- player whose router or another program already has it needs a way out that
+-- is not editing the mod. It is also what lets two end-to-end runs -- two
+-- agents, two worktrees -- host at the same time on one machine instead of one
+-- silently joining the other's game.
 --
--- Read once, at load, and validated: a junk value falls back rather than
--- producing an address nothing can dial.
-local function portFromEnv(fallback)
-  local raw = os.getenv and os.getenv("RBY_MMO_PORT")
-  local n = tonumber(raw or "")
-  if n and n == math.floor(n) and n > 0 and n < 65536 then return n end
-  return fallback
-end
-
-M.DEFAULT_PORT = portFromEnv(7788)
+-- **The override used to be RBY_MMO_PORT and cannot be any more.** The mod
+-- sandbox removes the environment reader, and this file read its value at
+-- load -- so the old line was not merely a lost setting: it ran while Config
+-- was still being required, and a sandbox that raises rather than returning
+-- nil would have taken the whole mod down through main.lua's resolver.
+--
+-- The replacement is the
+-- PORT row in the options schema (src/Client.lua's install), which is the
+-- better channel anyway -- an env var is invisible to the player who needs it,
+-- and options.lua is where the end-to-end drivers already write this mod's
+-- settings per instance.
+--
+-- 7788 until applyPort is told otherwise, and validated there: a junk value
+-- falls back rather than producing an address nothing can dial.
+M.DEFAULT_PORT_FALLBACK = 7788
+M.DEFAULT_PORT = M.DEFAULT_PORT_FALLBACK
 M.DEFAULT_HUB = ("127.0.0.1:%d"):format(M.DEFAULT_PORT)
+
+-- Called once, from install, before the options schema is defined -- because
+-- the schema's JOIN row defaults to DEFAULT_HUB and would otherwise offer the
+-- player an address on a port this copy is not listening on.
+--
+-- A mutable constant is the smaller change than a Config.defaultPort() every
+-- one of the nine call sites has to learn: this value was already decided at
+-- runtime, and all that moves is which channel decides it. Returns the port in
+-- force so the caller can log it.
+function M.applyPort(value)
+  local n = tonumber(value or "")
+  if n and n == math.floor(n) and n > 0 and n < 65536 then
+    M.DEFAULT_PORT = n
+  else
+    M.DEFAULT_PORT = M.DEFAULT_PORT_FALLBACK
+  end
+  M.DEFAULT_HUB = ("127.0.0.1:%d"):format(M.DEFAULT_PORT)
+  return M.DEFAULT_PORT
+end
 
 -- The player cap the host picks when starting a game.
 --
@@ -596,11 +621,16 @@ M.FRIEND_HOLD = 7 * 24 * 3600
 M.FRIEND_HOLD_PER_NAME = 8
 M.FRIEND_HOLD_MAX = 1024
 
--- Where the list is kept, in the LOVE save directory beside the server list
--- and the rank tickets.  Its own file rather than a corner of mod.save for the
--- reason SERVERS_FILE is: friendship is machine-level state that has to
--- survive CONTINUE and belongs to every save slot on this copy at once.
-M.FRIENDS_FILE = "rby_mmo_friends.json"
+-- Where the list is kept: a mod.storage key of its own, beside the server list
+-- and the rank tickets, rather than a corner of mod.save -- for the reason
+-- SERVERS_KEY is, that friendship has to survive a CONTINUE and mod.save is
+-- the half a CONTINUE rewinds.
+--
+-- This was rby_mmo_friends.json until the mod sandbox took love's filesystem
+-- module away, and one thing changed with it that the sentence above used to
+-- also claim: a file belonged to every save slot on this copy at once, and a
+-- storage key belongs to one playthrough.  See src/Store.lua.
+M.FRIENDS_KEY = "friends"
 
 -- What a friend is drawn in: the nameplate over their head and the line in the
 -- corner when they arrive.
@@ -860,11 +890,20 @@ M.RANK_MAX = 9999
 -- How many rows the RANK screen asks for, and the brief's number.
 M.RANK_TOP = 10
 -- Persistent player identity (PROTOCOL 16): 16 random bytes as lowercase hex.
--- One per LOVE install / save folder — closer to an account than a per-hub
--- claim ticket. Sent on every hello; the hub uses it as client.id and as the
--- rank-board key. Duplicate live connections with the same id are refused.
+-- Closer to an account than a per-hub claim ticket. Sent on every hello; the
+-- hub uses it as client.id and as the rank-board key. Duplicate live
+-- connections with the same id are refused.
+--
+-- It was one id per LOVE install / save folder while it lived in
+-- rby_mmo_player_id.json. The mod sandbox took love's filesystem module away
+-- and the replacement is scoped to a playthrough, so it is one id per
+-- playthrough now -- the sharpest edge of that change anywhere in the mod,
+-- because it is what a rank history is filed under. The mod.save mirror is
+-- read first and carries an existing id forward, so no player loses one by
+-- upgrading; a player who starts a second game gets a second identity.
+-- src/Store.lua.
 M.PLAYER_ID_HEX = 32
-M.PLAYER_ID_FILE = "rby_mmo_player_id.json"
+M.PLAYER_ID_KEY = "identity"
 -- How long a pairing stays "recently played" for the rematch discount, and
 -- how many meetings inside it take a win to nothing (halving each time, so
 -- the sixth rematch in the window is already worth zero).
@@ -923,10 +962,15 @@ M.SERVER_NAME_MAX = 16
 -- has not yet reached the end of what is kept, and nobody realistically plays
 -- on more hubs than that without favouriting the ones they mean to keep.
 M.SERVER_LIST_MAX = 16
--- Where the list is kept, in the LOVE save directory beside the rank tickets
--- and the engine's own save files. Its own file rather than a corner of
--- mod.save because a server list is machine-level state: it must survive
--- CONTINUE, and it belongs to every save slot on this copy at once.
-M.SERVERS_FILE = "rby_mmo_servers.json"
+-- Where the list is kept: a mod.storage key of its own rather than a corner of
+-- mod.save, because a recents list must survive a CONTINUE and mod.save is
+-- exactly the half a CONTINUE rewinds.
+--
+-- This was rby_mmo_servers.json in the LOVE save directory until the mod
+-- sandbox took love's filesystem module away. One promise did not survive the
+-- move: a file belonged to every save slot on this copy at once, and a storage
+-- key belongs to one playthrough. src/Store.lua carries the whole of that
+-- story.
+M.SERVERS_KEY = "servers"
 
 return M
