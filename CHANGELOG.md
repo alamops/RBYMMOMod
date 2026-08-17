@@ -306,6 +306,20 @@ here must match `manifest.version`.
   degrades to applying the evolution outright with a line saying so: the
   trade is committed on both sides by then, and there is no second chance
   at a trade evolution.
+- **A finished trade is now written to disk, twice, the way the cable club
+  writes it.** pokered's `cable_club.asm` calls `SaveSAVtoSRAM` straight
+  after every trade so the swap is on the cartridge before the animation
+  runs, and the engine's `LinkState` does the same and then writes again
+  once the evolution movie ends (gen1recomp #222). A hub trade did neither:
+  the received POKéMON lived only in memory until the player happened to
+  open START > SAVE, so a force-quit lost it *and* handed back the one that
+  was traded away — two of the same POKéMON in the world, which is exactly
+  the duplication this session's teardown exists to prevent, arriving by the
+  back door. Worse here than on a cable, because finishing locally
+  deliberately does not end the session: this side sits in `settling` while
+  the peer acknowledges. Both writes are guarded and never raise — a build
+  with no `writeSave` is not a failure, and a refused or throwing write
+  leaves the swap in memory and names START > SAVE as the way out.
 - **A hub that accepts and never answers is given up on.** The transport's
   idle timeout measures silence *since the last message*, so it never covered
   a connection that had never had one: a listener that took the socket and

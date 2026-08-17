@@ -4973,6 +4973,7 @@ local function tradeSide(hub, name, species)
     ctx = {},
   }
   side.sessions = Sessions.new(side.transport, side.ui)
+  side.saves = 0
   side.game = {
     data = Data,
     save = {
@@ -4980,6 +4981,17 @@ local function tradeSide(hub, name, species)
       player = { name = name },
       pokedex = { seen = {}, owned = {} },
     },
+    -- The cable club commits a trade to the cartridge the instant it lands
+    -- (gen1recomp #222); this counts the same writes on the hub path, and
+    -- snapshots the party at each one so a test can say *what* was saved
+    -- rather than only that something was.
+    writeSave = function(self)
+      side.saves = side.saves + 1
+      local names = {}
+      for _, mon in ipairs(self.save.party) do names[#names + 1] = mon.species end
+      side.savedParty = table.concat(names, ",")
+      return true
+    end,
   }
   hub:receive(side.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
       playerId = testPlayerId("anon14_" .. name),
@@ -5085,6 +5097,22 @@ eq(#ann.game.save.party, 1, "ANN's party did not grow")
 eq(#bob.game.save.party, 1, "nor did BOB's")
 eq(ann.sessions.active, nil, "and the session is closed on ANN's side")
 eq(bob.sessions.active, nil, "and on BOB's")
+
+-- ------- and it is on disk, not just in memory
+--
+-- The cable club writes the save the instant the swap commits (pokered's
+-- cable_club.asm calls SaveSAVtoSRAM after every trade; gen1recomp #222).
+-- Nothing here did, so a force-quit between the trade and the player's next
+-- visit to START > SAVE lost the mon they received and gave back the one
+-- they sent -- two of the same POKéMON in the world, which is precisely the
+-- duplication the rest of this section exists to prevent, arriving by the
+-- back door.  A hub trade holds that window open longer than a cable trade
+-- does: this side sits in "settling" while the peer acknowledges.
+
+check(ann.saves >= 1, "the trade is committed to disk rather than left in memory")
+eq(ann.savedParty, "FIXMON_C", "with the swap already in the party that was written")
+check(bob.saves >= 1, "and the same on the other side of it")
+eq(bob.savedParty, "FIXMON_B", "carrying his half of the swap")
 
 -- ------- the other ordering, which used to decide who lost a POKéMON
 
@@ -5251,8 +5279,8 @@ local fixtureEvos = Data.pokemon.FIXMON_C.evolutions
 Data.pokemon.FIXMON_C.evolutions = { { method = "TRADE", species = "FIXMON_A" } }
 
 local evolveCall
-Evolution.evolve = function(_, mon, species, _, via)
-  evolveCall = { mon = mon, species = species, via = via }
+Evolution.evolve = function(_, mon, species, onDone, via)
+  evolveCall = { mon = mon, species = species, via = via, done = onDone }
 end
 
 local _, ann9, bob9 = pairAtConfirm()
@@ -5271,6 +5299,17 @@ eq(evolveCall.mon, ann9.game.save.party[1],
    "for the record that just landed in the party, not the sheet off the wire")
 eq(evolveCall.species, "FIXMON_A", "into what the engine said it becomes")
 eq(evolveCall.via, "TRADE", "as a trade evolution, which B cannot cancel")
+
+-- The second write of the pair: what the swap committed was the pre-evo, so
+-- the movie ending has to put the species the player is now looking at on
+-- disk instead.  The engine applies before it calls back, so the stub does.
+local savedBefore = ann9.saves
+check(type(evolveCall.done) == "function",
+      "and the engine is handed something to call when the movie ends")
+evolveCall.mon.species = "FIXMON_A"
+evolveCall.done()
+eq(ann9.saves, savedBefore + 1, "which writes the save a second time")
+eq(ann9.savedParty, "FIXMON_A", "with the evolved species on it, not the pre-evo")
 
 evolveCall = nil
 dismissSay(bob9)
@@ -5301,6 +5340,9 @@ dismissSay(ann10)
 eq(partyOf(ann10), "FIXMON_A", "the POKéMON evolved even with no screen to do it in")
 eq(#ann10.game.save.party, 1, "and the party did not grow while doing it")
 eq(ann10.game.save.pokedex.owned.FIXMON_A, true, "with the dex told about it")
+eq(ann10.savedParty, "FIXMON_A",
+   "and the evolved species reached the disk too -- the movie is what was "
+   .. "lost, not the evolution and not the save")
 check(#evoWarns > 0 and evoWarns[1]:find("evolution screen"),
       "and a line naming what the player missed rather than what broke")
 

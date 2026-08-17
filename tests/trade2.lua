@@ -260,10 +260,12 @@ do
 
   local other = { species = "TOTODILE", level = 5 }
   local evolving = { species = "CYNDAQUIL", level = 10 }
+  local saves = 0
   local evoGame = {
     data = { pokemon = { CYNDAQUIL = {}, QUILAVA = {} } },
     save = { generation = 2, party = { other, evolving } },
     stack = { pop = function(stack) stack.popped = true end },
+    writeSave = function() saves = saves + 1 return true end,
   }
   local entry = { method = "EVOLVE_TRADE", into = "QUILAVA" }
   local sessions = Sessions.new({}, {})
@@ -275,8 +277,12 @@ do
   eq(pushes[1].opts.mon, evolving, "for the mon that landed there")
   eq(pushes[1].opts.entry, entry, "driven by the row, not by a species id")
   eq(pushes[1].opts.party, evoGame.save.party, "writing back into the real party")
+  eq(saves, 0, "nothing is written while the movie is still playing")
   pushes[1].opts.onDone({})
   eq(evoGame.stack.popped, true, "and the screen is popped by whoever pushed it")
+  -- The trade's own write landed the pre-evo; this is what replaces it with
+  -- the species the player ends up holding (gen1recomp #222's second save).
+  eq(saves, 1, "with the evolved Gold party committed to disk on the way out")
 
   -- A party that moved under us between the swap and the box being dismissed
   -- is searched rather than trusted; the wrong index is the one thing here
@@ -286,6 +292,26 @@ do
   check(sessions:evolveTraded(evoGame, evolving, "QUILAVA", entry, 2),
     "a stale slot still finds the mon")
   eq(pushes[1].opts.index, 1, "at where it actually sits now")
+
+  -- ------- and a save that cannot happen is said out loud, not swallowed
+  --
+  -- The swap has already happened in memory by the time any of this runs, so
+  -- a throwing or refusing writeSave must not take the trade down with it --
+  -- but the player has to be told, because the way out is theirs to take.
+  -- `false` is a refusal rather than a throw (a tool session vetoing writes)
+  -- and reads the same from here.
+  local before = #warns
+  eq(sessions:saveTrade({ save = {} }), false,
+    "a build with no writeSave at all is not a failure")
+  eq(#warns, before, "and says nothing about it")
+
+  eq(sessions:saveTrade({ writeSave = function() return false end }), false,
+    "a refused write is reported")
+  eq(sessions:saveTrade({ writeSave = function() error("disk full", 0) end }), false,
+    "and so is one that throws")
+  eq(#warns, before + 2, "one line each")
+  check(warns[#warns]:find("START") ~= nil,
+    "naming somewhere the player can go from")
 
   stubMod.ui = nil
   Gen.generation = realGen
