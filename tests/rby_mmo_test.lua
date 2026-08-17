@@ -4950,7 +4950,14 @@ local function tradeSide(hub, name, species)
     isReady = function() return true end,
   }
   side.ui = {
-    say = function(_, text) side.said[#side.said + 1] = text end,
+    -- A real say pushes a box the player has to dismiss and hands it back,
+    -- which is what the trade evolution waits on: the movie follows the
+    -- "traded over!" line rather than opening underneath it.
+    say = function(_, text, onDone)
+      side.said[#side.said + 1] = text
+      side.sayDone = onDone
+      return { kind = "text" }
+    end,
     confirm = function(_, _, text, cb)
       side.confirmText = text
       side.confirmBox = cb
@@ -5015,6 +5022,13 @@ local function answerConfirm(side, yes)
   local box = side.confirmBox
   side.confirmBox = nil
   box(yes)
+end
+
+-- A on the last line this side was shown.
+local function dismissSay(side)
+  local box = side.sayDone
+  side.sayDone = nil
+  if box then box() end
 end
 
 -- Two players, paired through the hub, driven as far as both confirm boxes
@@ -5212,6 +5226,89 @@ orphan:onRelay({ from = "1", payload = {} })
 eq(#warns, 1, "a relay with no session open is logged exactly once")
 
 stubMod.log.warn = function() end
+
+-- ------- the trade evolution
+--
+-- TradeSession answers what a received mon becomes and stops there; turning
+-- that answer into a screen has always been the caller's job, and on the
+-- cable club the caller is src/link/LinkState.lua.  Nothing here was that
+-- caller, so `apply`'s second return went on the floor and an MMO-traded
+-- KADABRA stayed a KADABRA -- silently, on both sides.
+--
+-- Driven against the engine's own Evolution.evolve, recorded rather than
+-- run: what is worth pinning is that the seam is reached at all, for the mon
+-- that just landed, with the `via` that stops B working.  The movie itself
+-- is the engine's and has the engine's tests.
+--
+-- In a `do` block of its own: the chunk this sits in is already close to
+-- LuaJIT's 200-active-local ceiling, and a scoped block hands its slots back.
+
+do
+
+local Evolution = require("src.pokemon.Evolution")
+local realEvolve = Evolution.evolve
+local fixtureEvos = Data.pokemon.FIXMON_C.evolutions
+Data.pokemon.FIXMON_C.evolutions = { { method = "TRADE", species = "FIXMON_A" } }
+
+local evolveCall
+Evolution.evolve = function(_, mon, species, _, via)
+  evolveCall = { mon = mon, species = species, via = via }
+end
+
+local _, ann9, bob9 = pairAtConfirm()
+answerConfirm(ann9, true)
+pump(ann9); pump(ann9)
+pump(bob9)
+answerConfirm(bob9, true)
+pump(bob9); pump(ann9); pump(bob9); pump(ann9)
+
+eq(partyOf(ann9), "FIXMON_C", "ANN receives the POKéMON with a trade row on it")
+eq(evolveCall, nil, "and nothing evolves while the trade box is still up")
+
+dismissSay(ann9)
+check(evolveCall ~= nil, "dismissing that box is what starts the evolution")
+eq(evolveCall.mon, ann9.game.save.party[1],
+   "for the record that just landed in the party, not the sheet off the wire")
+eq(evolveCall.species, "FIXMON_A", "into what the engine said it becomes")
+eq(evolveCall.via, "TRADE", "as a trade evolution, which B cannot cancel")
+
+evolveCall = nil
+dismissSay(bob9)
+eq(evolveCall, nil, "while the side holding a POKéMON with no trade row evolves nothing")
+
+-- ------- ...and a screen that will not open does not cost the evolution
+--
+-- The trade is committed on both sides by the time this runs, and there is
+-- no second chance at a trade evolution: a mon left as the wrong species is
+-- left that way forever.  So the movie failing degrades to applying it
+-- outright, with a line saying so, rather than to nothing at all.
+
+local evoWarns = {}
+stubMod.log.warn = function(_, fmt, ...)
+  local okFmt, line = pcall(string.format, fmt, ...)
+  evoWarns[#evoWarns + 1] = okFmt and line or tostring(fmt)
+end
+Evolution.evolve = function() error("no evolution screen in this build", 0) end
+
+local _, ann10, bob10 = pairAtConfirm()
+answerConfirm(ann10, true)
+pump(ann10); pump(ann10)
+pump(bob10)
+answerConfirm(bob10, true)
+pump(bob10); pump(ann10); pump(bob10); pump(ann10)
+dismissSay(ann10)
+
+eq(partyOf(ann10), "FIXMON_A", "the POKéMON evolved even with no screen to do it in")
+eq(#ann10.game.save.party, 1, "and the party did not grow while doing it")
+eq(ann10.game.save.pokedex.owned.FIXMON_A, true, "with the dex told about it")
+check(#evoWarns > 0 and evoWarns[1]:find("evolution screen"),
+      "and a line naming what the player missed rather than what broke")
+
+Evolution.evolve = realEvolve
+Data.pokemon.FIXMON_C.evolutions = fixtureEvos
+stubMod.log.warn = function() end
+
+end
 
 -- ------- a ranked battle's paperwork survives the session it belonged to
 --

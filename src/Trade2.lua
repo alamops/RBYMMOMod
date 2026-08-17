@@ -160,12 +160,32 @@ local function packParty2(party, indices)
   return mons
 end
 
-local function tradeEvolveTo(data, received)
+-- What a received mon evolves into, and the EvosAttacks row that said so.
+--
+-- Gold's own rules, through the engine's Gen 2 evolution module: `ctx.link`
+-- is what turns the EVOLVE_TRADE rows on and every other method off, and it
+-- is also what brings the conditions a hand-rolled scan cannot see -- an
+-- Everstone refusing, a KING'S ROCK row demanding its held item, and the
+-- EvosAttacks order that makes Poliwhirl's stone row beat its trade row.
+--
+-- **The row is returned as well as the species**, because src/Sessions.lua
+-- drives Gen2EvolutionAnim with it: that screen reads `entry.into` and eats
+-- the held item itself, so handing it a species id would lose both.
+--
+-- The scan below is the fallback for an engine without the module -- the
+-- same first-TRADE-row answer, minus the conditions it has no way to weigh.
+local function tradeEvolution(data, received)
+  local ok, Evolution = pcall(require, "src.core.gen2.Evolution")
+  if ok and type(Evolution) == "table" and Evolution.checkMon then
+    local entry = Evolution.checkMon(data, received, { link = true })
+    if entry then return entry.into, entry end
+    return nil
+  end
   local def = data and data.pokemon and data.pokemon[received.species]
   for _, evo in ipairs((def and def.evolutions) or {}) do
     local method = evo.method
     if method == "TRADE" or method == "EVOLVE_TRADE" then
-      return evo.species or evo.into
+      return evo.species or evo.into, evo
     end
   end
   return nil
@@ -341,7 +361,8 @@ function TradeSession:advance()
   end
 end
 
--- Apply into Gen 2 party + party mail. Returns received mon, evolveTo.
+-- Apply into Gen 2 party + party mail. Returns received mon, evolveTo, and
+-- the evolution row that decided it (nil when nothing evolves).
 function TradeSession:apply(game)
   game = game or self.game
   if self.stage ~= "done" then
@@ -367,10 +388,10 @@ function TradeSession:apply(game)
   if game and game.save then
     markDex(game.save, received.species)
   end
-  local evolveTo = tradeEvolveTo(self.data, received)
+  local evolveTo, evoEntry = tradeEvolution(self.data, received)
   emit("trade.completed",
     { sent = sent, received = received, evolveTo = evolveTo })
-  return received, evolveTo
+  return received, evolveTo, evoEntry
 end
 
 return M

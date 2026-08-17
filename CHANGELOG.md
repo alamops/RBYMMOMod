@@ -288,6 +288,24 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **A POKéMON traded over the MMO now evolves.** KADABRA stayed KADABRA,
+  MACHOKE stayed MACHOKE, and Gold's held-item trades stayed put — on both
+  transports and in both games. Neither TradeSession was at fault: both
+  answer *whether* the received mon evolves and hand it back as a second
+  return, and turning that answer into a screen has always been the caller's
+  job. On the cable club the caller is the engine's `LinkState`; nothing in
+  this mod was its opposite number, so the answer was dropped on the floor
+  with nothing logged on either side. `src/Sessions.lua` is now that caller:
+  the movie follows the "was traded over!" line rather than opening under it,
+  Gen 1 goes through `Evolution.evolve` with `via="TRADE"` so B cannot cancel
+  it, and Gold pushes the engine's own `Gen2EvolutionAnim` (row, party slot
+  and pop included) the way `Game2:afterRareCandy` does. `src/Trade2.lua`
+  stopped scanning for a TRADE row by hand and asks the engine's Gen 2
+  evolution module instead, so an Everstone refuses and a KING'S ROCK row
+  demands — and gets eaten by — its held item. A screen that cannot open
+  degrades to applying the evolution outright with a line saying so: the
+  trade is committed on both sides by then, and there is no second chance
+  at a trade evolution.
 - **A hub that accepts and never answers is given up on.** The transport's
   idle timeout measures silence *since the last message*, so it never covered
   a connection that had never had one: a listener that took the socket and
