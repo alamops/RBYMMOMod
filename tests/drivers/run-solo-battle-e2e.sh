@@ -46,8 +46,17 @@ set -uo pipefail
 # ------------------------------------------------------------------ layout
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENGINE_ROOT=""
+# An explicit override wins, and it is the one that matters when this mod is
+# being developed in a worktree: the *shared* gen1recomp checkout has
+# mods/rby_mmo pointing at the main clone, so a run started from a worktree
+# path would load a copy of this mod that has no src/SoloBattle.lua in it. Point
+# GEN1RECOMP_ROOT at a private engine view whose mods/rby_mmo is this branch.
+if [ -n "${GEN1RECOMP_ROOT:-}" ] && [ -f "${GEN1RECOMP_ROOT}/main.lua" ]; then
+  ENGINE_ROOT="$GEN1RECOMP_ROOT"
+fi
 probe="$SCRIPT_DIR"
 for _ in 1 2 3 4 5 6 7 8; do
+  [ -n "$ENGINE_ROOT" ] && break
   if [ -f "$probe/main.lua" ] && [ -d "$probe/mods" ]; then
     ENGINE_ROOT="$probe"
     break
@@ -85,7 +94,9 @@ for arg in "$@"; do
     --gen2|--gold|gen2|gold) WANT_GEN1=0; WANT_GEN2=1 ;;
     --both|both) WANT_GEN1=1; WANT_GEN2=1 ;;
     -h|--help)
-      sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+      # Absolute: this script has already cd'd to the engine root, so a
+      # relative $0 no longer resolves.
+      sed -n '2,45p' "$SCRIPT_DIR/$(basename "$0")" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) fail "unknown argument: $arg (try --gen1, --gen2, --both)" ;;
   esac
@@ -340,15 +351,24 @@ run_leg() {
 
   # stdbuf is GNU coreutils and is not on every mac; without it the log is
   # block-buffered, which only costs liveness while the run is in flight.
-  local -a buffered=()
-  command -v stdbuf >/dev/null 2>&1 && buffered=(stdbuf -oL -eL)
-
-  env "${envs[@]}" \
-      SHOT_DIR="$shots" \
-      POKEPORT_IDENTITY="$identity" \
-      POKEPORT_TOUCH=0 \
-      POKEPORT_DRIVER="$DRIVER" \
-      "${buffered[@]}" "$LOVE" . >"$logfile" 2>&1 &
+  # Spelled as two branches rather than an optional array: expanding an empty
+  # array under `set -u` is an unbound-variable error on bash 3.2, which is
+  # what /usr/bin/env bash still resolves to on a stock mac.
+  if command -v stdbuf >/dev/null 2>&1; then
+    env "${envs[@]}" \
+        SHOT_DIR="$shots" \
+        POKEPORT_IDENTITY="$identity" \
+        POKEPORT_TOUCH=0 \
+        POKEPORT_DRIVER="$DRIVER" \
+        stdbuf -oL -eL "$LOVE" . >"$logfile" 2>&1 &
+  else
+    env "${envs[@]}" \
+        SHOT_DIR="$shots" \
+        POKEPORT_IDENTITY="$identity" \
+        POKEPORT_TOUCH=0 \
+        POKEPORT_DRIVER="$DRIVER" \
+        "$LOVE" . >"$logfile" 2>&1 &
+  fi
   local pid=$!
 
   local waited=0

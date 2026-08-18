@@ -43,21 +43,29 @@
 --      battle that never had one.
 --   8. **a catch** in a solo wild fight adds the monster exactly once.
 --
--- ------- three helpers that are deliberately local
+-- ------- what is local here, and why
 --
--- `mmo_util.lua` is shared by every driver in this folder and four other
--- agents are in it; these three exist only for this file and are written here
--- rather than added there:
+-- `mmo_util.lua` is shared by every driver in this folder and several agents
+-- are in it at once, so nothing below was added there. Each of these is either
+-- solo-shaped or a thing the shared file gets wrong for a mediated screen:
 --
---   * `stageRefusedWild` -- mmo_util's `stageWild` pushes the state itself, and
+--   * `bootToPlay` / `stackNames` -- the shared boot goes through the engine's
+--     `U.newGame`, whose 400-tap Gen 1 budget is now short of the intro's ~441
+--     and which returns silently when it runs out. See the long note at the
+--     boot below. Converge on `H.newGame` / `H.stackNames` once
+--     `fix/fix-battle-system-target` lands.
+--   * `medOnStack` / `awaitCommandMenu` / `throwItem` -- a solo fight is a
+--     `MediatedBattle`, which carries no `.sim`; every fight helper in
+--     mmo_util keys on that field and would report a fight over before its
+--     first turn opened.
+--   * `stageRefusedWild` -- mmo_util's `stageWild` pushes the state itself and
 --     the divert fires *inside* that push (StateStack:push emits screen.pushed
 --     after enter()), so a refusal field stamped on the returned state would
---     always be stamped one frame too late. This builds the same battle and
---     marks it before the push.
+--     always be one frame too late. This marks it before the push.
 --   * `dropStaged` -- take a staged battle back off the stack by identity. The
 --     legs that assert "the engine kept it" must not then fight it.
---   * `moneyOf` / `expOf` -- the two save fields that are spelled differently
---     per generation (`save.money` vs `save.player.money`, `mon.exp` vs
+--   * `moneyOf` / `expOf` -- the two save fields spelled differently per
+--     generation (`save.money` vs `save.player.money`, `mon.exp` vs
 --     `mon.experience`). Mirrors src/Gen.lua's `money` accessor rather than
 --     reaching into the mod, which is sandboxed away from a driver.
 
@@ -216,14 +224,26 @@ return function(game)
       return state, "battleType=5 (roaming)"
     end
     local BattleState = require("src.battle.BattleState")
-    local ok, battle = pcall(BattleState.newWild, game, species, level)
-    if not (ok and battle and not battle.dead) then
-      return nil, "newWild refused " .. tostring(species)
+    local function build()
+      local ok, battle = pcall(BattleState.newWild, game, species, level)
+      if ok and battle and not battle.dead then return battle end
+      return nil
     end
-    local marked = pcall(function() battle:makeGhost() end)
-    battle.ghost = true
+    local battle = build()
+    if not battle then return nil, "newWild refused " .. tostring(species) end
+    local how = "makeGhost()"
+    if not pcall(function() battle:makeGhost() end) then
+      -- The ghost disguise loads art generated from the player's own cache and
+      -- a build without it would leave the state half-mutated -- worse than
+      -- not disguised at all. Start over and set the one field
+      -- Config.SOLO_REFUSED actually reads.
+      battle = build()
+      if not battle then return nil, "newWild refused on the retry" end
+      battle.ghost = true
+      how = "ghost field (makeGhost unavailable)"
+    end
     game.stack:push(battle)
-    return battle, marked and "makeGhost()" or "ghost field"
+    return battle, how
   end
 
   -- The species a wild leg fights. SENTRET is Gold's Route 29 opener and does
@@ -237,6 +257,41 @@ return function(game)
     return nil, nil
   end
 
+  -- ------------------------------------------------------------------
+  -- driving the mod's screen
+  -- ------------------------------------------------------------------
+  --
+  -- **A solo fight is a `MediatedBattle`, and a MediatedBattle has no `.sim`.**
+  -- That field belongs to `CoopBattle`, the 2-on-2 screen, and every helper in
+  -- mmo_util that touches a fight keys on it -- `awaitCommandMenu`,
+  -- `throwBattleItem`, and the `top.sim == nil` done-predicate the co-op legs
+  -- pass to `drivePrompts`. Reused here they would be worse than useless: the
+  -- done-predicate is true on the very first poll, so a fight would report
+  -- itself finished before its first turn opened and every save assertion
+  -- after it would read an untouched party as a passing one.
+  --
+  -- So the three below read the mediated screen's own machine instead: its
+  -- `mmoBattle` marker, its `phase` (setup/play/choose/move/item/... --
+  -- src/MediatedBattle.lua), and `M.COMMANDS` = FIGHT / SWITCH / ITEM / RUN.
+  -- They stay local rather than joining mmo_util for the same reason
+  -- everything else here does; if the shared file ever grows a mediated-screen
+  -- vocabulary, these are what it should be.
+
+  -- The mod's screen anywhere on the stack, not merely on top: a box pushed
+  -- over the fight for a frame must not read as the fight being over.
+  local function medOnStack()
+    for _, state in ipairs((game.stack and game.stack.states) or {}) do
+      if state and state.mmoBattle == true then return state end
+    end
+    return nil
+  end
+
+  local function medTop()
+    local top = H.top(game)
+    if H.isMediatedBattle(top) then return top end
+    return nil
+  end
+
   -- Wait for this mod's screen to be the thing on the stack. The divert is
   -- synchronous inside StateStack:push, so this is a formality -- but a
   -- formality that names the failure when the row is off, the kind was
@@ -247,13 +302,56 @@ return function(game)
     end, 240, what or "the mod's battle screen to take the encounter")
   end
 
-  -- Mash the fight to its end, the way the co-op legs do: drivePrompts
-  -- answers whatever box is up, and the extra tap moves the command grid
-  -- (FIGHT -> move 1, which frontloadDamage made the strongest one).
+  -- The command grid really being what the player is looking at. "phase ==
+  -- choose" and nothing weaker: the opening line holds the message box for its
+  -- whole dwell, and a driver that taps an arrow into that lands every press
+  -- behind it one step out of order.
+  local function awaitCommandMenu(what)
+    return H.waitSeconds(game, function()
+      local top = medTop()
+      return top ~= nil and top.phase == "choose"
+    end, 60, what or "the solo command grid")
+  end
+
+  -- FIGHT / SWITCH / ITEM / RUN, then the bag row for `itemId`.
+  --
+  -- The grid's shape is asked for rather than assumed -- the battlefield band
+  -- lays all four in one row, classic GB chrome and Gold keep the 2x2 -- which
+  -- is the same rule mmo_util's own version follows and the same one that
+  -- silently broke the co-op catch flow when it was assumed instead.
+  local function throwItem(itemId)
+    local top = medTop()
+    if not (top and top.phase == "choose") then return false end
+    local cols = 2
+    if type(top.commandCols) == "function" then
+      local ok, got = pcall(top.commandCols, top)
+      if ok and tonumber(got) then cols = tonumber(got) end
+    end
+    if cols >= 4 then
+      U.tap(game, "right"); U.wait(6)
+      U.tap(game, "right"); U.wait(6)
+    else
+      U.tap(game, "down"); U.wait(6)
+    end
+    U.tap(game, "a"); U.wait(10)
+    top = medTop()
+    if not (top and top.phase == "item") then return false end
+    local items = (type(top.usableItems) == "function") and top:usableItems() or {}
+    local want = 1
+    for i, row in ipairs(items) do
+      if row.id == itemId then want = i break end
+    end
+    top.itemIndex = want
+    U.tap(game, "a"); U.wait(20)
+    return true
+  end
+
+  -- Mash the fight to its end, the way the co-op legs do: drivePrompts answers
+  -- whatever box is up, and the extra tap walks the command grid (FIGHT ->
+  -- move 1, which frontloadDamage made the strongest one).
   local function fightToEnd(seconds)
     return H.drivePrompts(game, function()
-      local top = H.top(game)
-      return top == nil or top.sim == nil
+      return medOnStack() == nil
     end, seconds or 240, function()
       U.tap(game, "a")
     end)
@@ -392,7 +490,9 @@ return function(game)
     love.event.quit(1)
     return
   end
-  check(exports.isConnected() == false,
+  local connected = type(exports.isConnected) == "function"
+    and exports.isConnected() or false
+  check(connected == false,
         "and nothing is connected -- this is the offline copy the row is for")
 
   freshParty()
@@ -411,27 +511,71 @@ return function(game)
   -- `ManagerState:buildOptionRows` (src/mods/ManagerState.lua) and, for the
   -- flip, the row's own `step()`. A row that is in there is a row the player
   -- can see; a `step()` that flips it is the flip a player performs.
-  local managerFlipped = false
-  do
+  -- The manager, opened the way F10 opens it, and its own row model.
+  local function openManager()
     local okScreens, Screens = pcall(require, "src.ui.Screens")
-    local mgr = nil
-    if okScreens and Screens then
-      local okPush, pushed = pcall(Screens.push, game, "ManagerState")
-      mgr = (okPush and pushed) or nil
-      if mgr == nil and H.top(game) ~= nil
-         and H.top(game).screenId == "ManagerState" then
-        mgr = H.top(game)
-      end
+    if not (okScreens and Screens) then return nil end
+    local okPush, pushed = pcall(Screens.push, game, "ManagerState")
+    local mgr = (okPush and pushed) or nil
+    if mgr == nil then
+      local top = H.top(game)
+      if top and top.screenId == "ManagerState" then mgr = top end
     end
+    return mgr
+  end
+
+  local function closeManager(mgr)
+    if mgr and H.top(game) == mgr then
+      pcall(function() game.stack:pop() end)
+      U.wait(6)
+    end
+    H.closeToOverworld(game)
+  end
+
+  local function schemaRows()
+    return game.mods and game.mods.optionSchemas
+      and game.mods.optionSchemas[MOD_ID]
+  end
+
+  -- The SOLO BATTLES row as the OPTIONS.. screen builds it.
+  local function soloRowOf(mgr)
+    local schema = schemaRows()
+    local entry = mgr and mgr.byId and mgr.byId[MOD_ID] or nil
+    if not (mgr and entry and type(schema) == "table"
+            and type(mgr.buildOptionRows) == "function") then
+      return nil, entry
+    end
+    local okRows, rows = pcall(mgr.buildOptionRows, mgr, entry, schema)
+    if not (okRows and type(rows) == "table") then
+      log("warn buildOptionRows failed:", tostring(rows))
+      return nil, entry
+    end
+    local labels, soloRow = {}, nil
+    for _, row in ipairs(rows) do
+      labels[#labels + 1] = tostring(row.label)
+      if row.id == OPTION_KEY then soloRow = row end
+    end
+    log("manager option rows:", table.concat(labels, ","))
+    return soloRow, entry
+  end
+
+  -- What mod.options:get actually reads (Loader's per-mod option store).
+  local function optionValue()
+    local stored = game.mods and game.mods.modOptions
+      and game.mods.modOptions[MOD_ID]
+    return stored and stored[OPTION_KEY]
+  end
+
+  do
+    local mgr = openManager()
     check(mgr ~= nil, "F10's mod manager opens (Screens.push ManagerState)")
 
-    local schema = game.mods and game.mods.optionSchemas
-      and game.mods.optionSchemas[MOD_ID]
+    local schema = schemaRows()
     check(type(schema) == "table",
           "the mod published an options schema to the loader")
 
-    -- The schema's own answer to "what does this default to", read before any
-    -- stored value can shadow it.
+    -- The schema's own answer to "what does this default to", which is the
+    -- answer a player with no options.lua at all would get.
     local declared = nil
     for _, row in ipairs(schema or {}) do
       if row.key == OPTION_KEY then declared = row end
@@ -448,24 +592,8 @@ return function(game)
           ("and its label is %q"):format(OPTION_LABEL),
           declared and tostring(declared.label))
 
-    local entry = mgr and mgr.byId and mgr.byId[MOD_ID] or nil
+    local soloRow, entry = soloRowOf(mgr)
     check(entry ~= nil, "the manager lists rby_mmo among the installed mods")
-
-    local soloRow = nil
-    if mgr and entry and type(schema) == "table"
-       and type(mgr.buildOptionRows) == "function" then
-      local okRows, rows = pcall(mgr.buildOptionRows, mgr, entry, schema)
-      if okRows and type(rows) == "table" then
-        local labels = {}
-        for _, row in ipairs(rows) do
-          labels[#labels + 1] = tostring(row.label)
-          if row.id == OPTION_KEY then soloRow = row end
-        end
-        log("manager option rows:", table.concat(labels, ","))
-      else
-        log("warn buildOptionRows failed:", tostring(rows))
-      end
-    end
     check(soloRow ~= nil,
           "the OPTIONS.. screen really draws a SOLO BATTLES row")
     if soloRow then
@@ -475,42 +603,21 @@ return function(game)
       check(shown == "OFF",
             "and it reads OFF before anybody touches it", tostring(shown))
       shot("solo-manager-row")
-      -- The flip a player performs: the row's own step(), which is what the
-      -- options screen calls on LEFT/RIGHT/A.
-      local okStep = pcall(soloRow.step, soloRow, 1)
-      local after = soloRow.value and soloRow.value() or nil
-      managerFlipped = okStep and after == "ON"
-      log("flipped through the row's own step():", tostring(managerFlipped),
-          "now reads", tostring(after))
     end
-
-    if mgr and H.top(game) == mgr then
-      pcall(function() game.stack:pop() end)
-      U.wait(6)
-    end
-    H.closeToOverworld(game)
-  end
-
-  -- The flip must land where mod.options:get reads: loader.modOptions.
-  local function optionValue()
-    local stored = game.mods and game.mods.modOptions
-      and game.mods.modOptions[MOD_ID]
-    return stored and stored[OPTION_KEY]
+    closeManager(mgr)
+    check(optionValue() ~= true,
+          "and nothing has turned it on behind the player's back")
   end
 
   -- ------------------------------------------------------------------
   -- 2. default OFF is honoured
   -- ------------------------------------------------------------------
   --
-  -- Deliberately run *before* the flip is committed. The wrapper seeds the row
-  -- OFF in options.lua so this leg is the same leg on a re-run of a dirty
-  -- identity, and the manager's step() above is undone here for exactly that
-  -- reason: what is being proved is that an untouched copy of this mod does
-  -- not take the game's battles.
+  -- Run before anything is flipped, so what it proves is what it says: an
+  -- untouched copy of this mod does not take the game's battles. The wrapper
+  -- seeds the row OFF in options.lua rather than leaving the key absent, so
+  -- this leg is the same leg on an identity a previous run left dirty.
   do
-    if game.mods and game.mods.modOptions and game.mods.modOptions[MOD_ID] then
-      game.mods.modOptions[MOD_ID][OPTION_KEY] = false
-    end
     check(optionValue() ~= true, "the row is off for the default-OFF leg")
 
     freshParty()
@@ -535,19 +642,33 @@ return function(game)
   end
 
   -- ------------------------------------------------------------------
-  -- 3. flipping it on takes effect on the next encounter, no relaunch
+  -- 3. flipping it on, through the row a player would press
   -- ------------------------------------------------------------------
+  --
+  -- Not a write into loader.modOptions. `ManagerState:buildOptionRows` gives
+  -- each toggle a `step()` closure, and that closure is exactly what the
+  -- options screen calls when the row is pressed -- it writes both
+  -- save.options.modOptions and loader.modOptions and emits
+  -- mod.options_changed, none of which a driver poking one table would do.
+  --
+  -- Mid-session and with no relaunch, which is the half of success criterion 1
+  -- that a pre-seeded options.lua can never show: the very next encounter
+  -- (leg 4) is the assertion that it took.
   do
-    if game.mods then
-      game.mods.modOptions = game.mods.modOptions or {}
-      game.mods.modOptions[MOD_ID] = game.mods.modOptions[MOD_ID] or {}
-      game.mods.modOptions[MOD_ID][OPTION_KEY] = true
+    local mgr = openManager()
+    local soloRow = soloRowOf(mgr)
+    check(soloRow ~= nil, "reopened the manager on the SOLO BATTLES row")
+    local flipped, shown = false, nil
+    if soloRow then
+      local okStep = pcall(soloRow.step, soloRow, 1)
+      shown = soloRow.value and soloRow.value() or nil
+      flipped = okStep and shown == "ON"
     end
+    check(flipped, "the row's own step() turns it ON", tostring(shown))
+    closeManager(mgr)
     check(optionValue() == true,
-          "SOLO BATTLES is on, in the table mod.options:get reads")
-    check(managerFlipped,
-          "and the manager row's own step() is what a player would use to "
-          .. "get here")
+          "and it landed in the table mod.options:get reads",
+          tostring(optionValue()))
   end
 
   -- ------------------------------------------------------------------
@@ -574,14 +695,14 @@ return function(game)
             "and the engine's own battle is frozen underneath, not destroyed")
       do
         local top = H.top(game)
-        log(("solo wild: id=%s mode=%s slots=%s"):format(
+        log(("solo wild: id=%s mode=%s phase=%s"):format(
           tostring(top and top.battleId), tostring(top and top.mode),
-          tostring(top and top.sim and #top.sim.slots)))
+          tostring(top and top.phase)))
         check(top and top.mode == "wild",
               "seated as a wild fight, so catching and running are legal",
               tostring(top and top.mode))
       end
-      check(H.awaitCommandMenu(game, "the solo wild command grid"),
+      check(awaitCommandMenu("the solo wild command grid"),
             "the command grid opens on the mod's screen")
       shot("solo-wild-battle")
 
@@ -659,14 +780,14 @@ return function(game)
               "and the engine's trainer battle is frozen underneath")
         do
           local top = H.top(game)
-          log(("solo trainer: id=%s mode=%s slots=%s"):format(
+          log(("solo trainer: id=%s mode=%s phase=%s"):format(
             tostring(top and top.battleId), tostring(top and top.mode),
-            tostring(top and top.sim and #top.sim.slots)))
+            tostring(top and top.phase)))
           check(top and top.mode == "coop_npc",
                 "seated as coop_npc, so a ball cannot catch a trainer's mon",
                 tostring(top and top.mode))
         end
-        check(H.awaitCommandMenu(game, "the solo trainer command grid"),
+        check(awaitCommandMenu("the solo trainer command grid"),
               "the command grid opens on the mod's screen")
         shot("solo-trainer-battle")
 
@@ -764,7 +885,7 @@ return function(game)
         if H.isMediatedBattle(H.top(game)) then return true end
         local top = H.top(game)
         -- The pre-battle text is a plain box; advance it, never a menu row.
-        if top ~= nil and top.items == nil and top.sim == nil then
+        if top ~= nil and top.items == nil and not H.isMediatedBattle(top) then
           U.tap(game, "a")
         end
         return false
@@ -777,7 +898,7 @@ return function(game)
       shot("solo-sight-trainer")
 
       if diverted then
-        check(H.awaitCommandMenu(game, "the sighted-trainer command grid"),
+        check(awaitCommandMenu("the sighted-trainer command grid"),
               "the command grid opens")
         local over, seen = fightToEnd(360)
         check(over, "the sighted trainer fight runs to an end", tostring(seen))
@@ -825,9 +946,9 @@ return function(game)
     if staged then
       check(awaitDivert("the solo catch divert"),
             "the encounter diverts onto this mod's battle screen")
-      check(H.awaitCommandMenu(game, "the command grid before MASTER_BALL"),
+      check(awaitCommandMenu("the command grid before MASTER_BALL"),
             "the command grid opens")
-      check(H.throwBattleItem(game, "MASTER_BALL"),
+      check(throwItem("MASTER_BALL"),
             "filed MASTER_BALL from the ITEM menu")
       local over, seen = fightToEnd(240)
       check(over, "the catch runs the fight to an end", tostring(seen))
