@@ -1,0 +1,92 @@
+[info] loaded mod rby_mmo 1.0.0
+SOLO_E2E:	ok booted to a playable overworld
+SOLO_E2E:	generation =	2
+SOLO_E2E:	stack after boot:	<empty stack>
+SOLO_E2E:	ok and nothing is connected -- this is the offline copy the row is for
+SOLO_E2E:	party:	CYNDAQUIL
+SOLO_E2E:	ok F10's mod manager opens (Screens.push ManagerState)
+SOLO_E2E:	ok the mod published an options schema to the loader
+SOLO_E2E:	ok the schema carries a "solo" row
+SOLO_E2E:	ok and it is a toggle, not a choice or a number  [toggle]
+SOLO_E2E:	ok and it defaults to OFF (Config.SOLO_BATTLES_DEFAULT)  [false]
+SOLO_E2E:	ok and its label is "SOLO BATTLES"  [SOLO BATTLES]
+SOLO_E2E:	manager option rows:	MAX PLAYERS,HOST PORT,JOIN,JOIN CODE,MY SPRITE,B TO RUN,SOLO BATTLES,RESET DEFAULTS
+SOLO_E2E:	ok the manager lists rby_mmo among the installed mods
+SOLO_E2E:	ok the OPTIONS.. screen really draws a SOLO BATTLES row
+SOLO_E2E:	ok the row reads SOLO BATTLES  [SOLO BATTLES]
+SOLO_E2E:	ok and it reads OFF before anybody touches it  [OFF]
+SOLO_E2E:	ok and nothing has turned it on behind the player's back
+SOLO_E2E:	ok the row is off for the default-OFF leg
+SOLO_E2E:	ok staged a wild encounter with the row off  [PIDGEY]
+SOLO_E2E:	ok with SOLO BATTLES off the mod's screen never appears
+SOLO_E2E:	ok the engine's own battle is what the player is looking at
+SOLO_E2E:	ok and it comes back off the stack cleanly
+SOLO_E2E:	ok nothing finished the engine's battle behind the player's back
+SOLO_E2E:	ok back in the overworld after the OFF leg
+SOLO_E2E:	manager option rows:	MAX PLAYERS,HOST PORT,JOIN,JOIN CODE,MY SPRITE,B TO RUN,SOLO BATTLES,RESET DEFAULTS
+SOLO_E2E:	ok reopened the manager on the SOLO BATTLES row
+SOLO_E2E:	ok the row's own step() turns it ON  [ON]
+SOLO_E2E:	ok and it landed in the table mod.options:get reads  [true]
+[info] gen2 facade: src.battle.BattleState -> function: 0x01196deec8
+SOLO_E2E:	ok staged a wild encounter with the row on  [PIDGEY]
+SOLO_E2E:	ok the encounter diverts onto this mod's battle screen
+SOLO_E2E:	ok and the engine's own battle is frozen underneath, not destroyed
+SOLO_E2E:	solo wild: id=nil mode=wild phase=play
+SOLO_E2E:	ok seated as a wild fight, so catching and running are legal  [wild]
+SOLO_E2E:	ok the command grid opens on the mod's screen
+SOLO_E2E:	ok the solo wild fight runs to an end  [text]
+[driver]	WARN could not get back to the overworld; top is	?
+[driver]	TIMEOUT waiting 30s for the overworld to come back
+SOLO_E2E:	FAIL and the overworld is restored
+SOLO_E2E:	ok the engine's own battle was told it was a win  [win]
+SOLO_E2E:	FAIL and it is off the stack -- no rematch waiting underneath
+SOLO_E2E:	ok exp landed on the real save monster  [117360 -> 117399]
+SOLO_E2E:	ok and the PP it spent is on the save too  [90 -> 89]
+SOLO_E2E:	ok HP reflects the fight and the winner is standing  [112 -> 112]
+SOLO_E2E:	ok a won wild fight adds nobody to the party
+SOLO_E2E:	engine battle.started since the leg opened:	1
+SOLO_E2E:	refused kind staged as:	battleType=5 (roaming)
+SOLO_E2E:	ok a Config.SOLO_REFUSED battle is handed straight back to the engine
+SOLO_E2E:	ok the engine's own battle is what the player is looking at
+SOLO_E2E:	ok and it comes back off the stack cleanly
+[driver]	WARN could not get back to the overworld; top is	?
+[driver]	TIMEOUT waiting 30s for the overworld to come back
+SOLO_E2E:	FAIL back in the overworld after the refused leg
+SOLO_E2E:	ok the dataset has a trainer with two POKeMON  [BUG_CATCHER total level 6]
+SOLO_E2E:	ok staged a trainer battle  [BUG_CATCHER]
+[driver]	TIMEOUT waiting for the solo trainer divert
+SOLO_E2E:	FAIL the trainer diverts onto this mod's battle screen
+SOLO_E2E:	ok and the engine's trainer battle is frozen underneath
+SOLO_E2E:	solo trainer: id=nil mode=nil phase=intro
+SOLO_E2E:	FAIL seated as coop_npc, so a ball cannot catch a trainer's mon  [nil]
+[driver]	TIMEOUT waiting 60s for the solo trainer command grid
+SOLO_E2E:	FAIL the command grid opens on the mod's screen
+SOLO_E2E:	ok the solo trainer fight runs to an end  []
+[driver]	WARN could not get back to the overworld; top is	?
+[driver]	TIMEOUT waiting 30s for the overworld to come back
+SOLO_E2E:	FAIL and the overworld is restored
+SOLO_E2E:	FAIL the engine's trainer battle got its result back -- which is the script that was waiting, resumed  [nil]
+SOLO_E2E:	FAIL and it is off the stack, so the trainer is not refought
+SOLO_E2E:	FAIL prize money was paid onto the save  [3000 -> 3000]
+SOLO_E2E:	FAIL and the trainer's mons paid exp  [117360 -> 117360]
+SOLO_E2E:	FAIL and the player can walk again  [PLAYERS_HOUSE_2F 3,3]
+SOLO_E2E:	skip the sighted-trainer leg -- no Gen 1-shaped sight trainer on ROUTE_3 (generation 2)
+SOLO_E2E:	ok seeded a MASTER_BALL
+SOLO_E2E:	ok staged a wild encounter to catch  [RATTATA]
+[driver]	TIMEOUT waiting for the solo catch divert
+SOLO_E2E:	FAIL the encounter diverts onto this mod's battle screen
+[driver]	TIMEOUT waiting 60s for the command grid before MASTER_BALL
+SOLO_E2E:	FAIL the command grid opens
+SOLO_E2E:	FAIL filed MASTER_BALL from the ITEM menu
+SOLO_E2E:	ok the catch runs the fight to an end  []
+[driver]	WARN could not get back to the overworld; top is	?
+[driver]	TIMEOUT waiting 30s for the overworld to come back
+SOLO_E2E:	FAIL and the overworld is restored
+SOLO_E2E:	FAIL the ball was spent  [1 -> 1]
+SOLO_E2E:	FAIL the party grew by exactly one  [1 -> 1]
+SOLO_E2E:	FAIL the caught RATTATA is in the party exactly once  [0 -> 0]
+SOLO_E2E:	FAIL and the engine's battle was told 'caught', not 'win' -- a catch must not read back as a trainer beaten  [nil]
+SOLO_E2E:	shots in	/private/tmp/claude-501/-Users-alamosaravali--agetor-worktrees-3dae4f01-563f-4a1d-83e1-31af5c40fe63/cfeb920b-328a-4eb6-834d-3f11e414a0dc/scratchpad/solo-shots/gen2
+SOLO_E2E:	GAPS:20
+SOLO_E2E:	SUMMARY	pass=44	fail=20
+SOLO_E2E:	DONE

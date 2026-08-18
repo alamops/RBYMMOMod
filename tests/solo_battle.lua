@@ -233,16 +233,45 @@ local function fightOf(kind, o)
   -- Gen 1 pops the battle itself and *then* calls onFinish; Gold's pop lives
   -- inside the onDone closure. Which of the two a state carries is what
   -- `_ended` branches on -- see section 10.
+  --
+  -- Three shapes, because the two obvious ones are not the only two a Gold
+  -- battle arrives in:
+  --
+  --   * default          -- Gen 1: onFinish only, and it does not pop.
+  --   * `gold`           -- Gold through World:startBattle: onDone pops, and
+  --                         src/Client.lua aliases the absent onFinish onto it,
+  --                         so both fields name the same popping function.
+  --   * `goldNoPop`      -- Gold pushed by anything else: an onDone that does
+  --                         *not* pop, which is the shape that stranded a
+  --                         finished battle on the stack. Section 10's third
+  --                         case is the regression.
+  --   * `goldSplit`      -- the same disagreement from the other side: a
+  --                         popping onDone that is never called, because a
+  --                         different onFinish is what the ritual selects.
   local ending = {}
-  if o.gold then
+  local function record(result)
+    ending[#ending + 1] = { result = result, top = game.stack:top() }
+  end
+  if o.goldSplit then
     state.onDone = function(result)
-      ending[#ending + 1] = { result = result, top = game.stack:top() }
+      ending[#ending + 1] = { result = result, via = "onDone" }
       game.stack:pop()
     end
-  else
     state.onFinish = function(result)
-      ending[#ending + 1] = { result = result, top = game.stack:top() }
+      ending[#ending + 1] = { result = result, via = "onFinish",
+                              top = game.stack:top() }
     end
+  elseif o.goldNoPop then
+    state.onDone = function(result) record(result) end
+    state.onFinish = state.onDone
+  elseif o.gold then
+    state.onDone = function(result)
+      record(result)
+      game.stack:pop()
+    end
+    state.onFinish = state.onDone
+  else
+    state.onFinish = function(result) record(result) end
   end
   for key, value in pairs(o.mark or {}) do state[key] = value end
   game.stack:push(state)
@@ -950,6 +979,111 @@ end)()
   ok(prompts[1] and prompts[1].top and prompts[1].top.isOverworld,
      "after that pop, over the world -- pushed before it, the menu is what "
      .. "the pop would have taken")
+end)()
+
+;(function()
+  -- And the shape that stranded a player: a Gold battle whose `onDone` does
+  -- *not* pop.
+  --
+  -- `World:startBattle` builds a closure that pops, and every Gold battle the
+  -- overworld itself raises carries it -- but "this state has an onDone" and
+  -- "somebody is going to take this battle off the stack" are two different
+  -- facts, and `_ended` used to read the first as the second. Anything that
+  -- pushes `Gen2BattleState` with a callback of its own -- another mod, a
+  -- driver staging an encounter, a future engine path -- produces this state,
+  -- and the ending it used to get was: the mod's screen closes, the ritual runs,
+  -- the buried battle is told it was won, and it is still sitting there. The
+  -- player is standing on a finished battle they cannot leave and which would
+  -- be fought again the moment anything above it cleared. Nothing recovered
+  -- from it short of a reload.
+  --
+  -- So the assertion is the outcome, not the branch: whoever was supposed to
+  -- pop it, a battle that was handed its result is off the stack -- and the
+  -- forget prompt is still raised over the world exactly once, because the
+  -- correction has to happen *before* the prompt or it takes the prompt with it.
+  prompts = {}
+  local f = fightOf("trainer", {
+    goldNoPop = true,
+    party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200,
+                    level = 40 }) },
+    foes = { mon({ species = "BETA", spd = 5, maxHp = 20, atk = 1 }) },
+    seed = 7,
+  })
+  playOut(f)
+  f.fight.toLearn = { { mon = f.party[1], move = "THUMP" } }
+  f.fight:exit()
+
+  eq(#f.ending, 1, "the ritual ran on a Gold battle whose onDone never pops")
+  eq(f.ending[1].result, "win", "with the verdict the screen reached")
+  eq(Coop.stackHolds(f.game, f.state), false,
+     "and the battle is off the stack anyway -- nobody popped it, so the "
+     .. "ending looked and took it down itself")
+  ok(f.game.stack:top() and f.game.stack:top().isOverworld
+     or (f.game.stack:top() and f.game.stack:top().moveLearn),
+     "leaving the world, not a finished battle, under what is on top")
+  eq(#prompts, 1, "the forget prompt still went up exactly once")
+  ok(prompts[1] and prompts[1].top and prompts[1].top.isOverworld,
+     "over the world -- the correction ran before the prompt, so there was "
+     .. "nothing left for it to unwind through")
+end)()
+
+;(function()
+  -- The same disagreement, read from the other side: `onDone` pops, but
+  -- `onDone` is not what runs.
+  --
+  -- `Coop.finishBuriedBattle` selects `onFinish or onDone`, so a state carrying
+  -- both calls the first and the popping closure on the second is never
+  -- reached. Reading the pop off `onDone` while the ritual runs `onFinish` is
+  -- the drift itself, which is why the selection now lives in one exported
+  -- place -- `Coop.buriedFinisher` -- and both sides ask it.
+  prompts = {}
+  local f = fightOf("trainer", {
+    goldSplit = true,
+    party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200,
+                    level = 40 }) },
+    foes = { mon({ species = "BETA", spd = 5, maxHp = 20, atk = 1 }) },
+    seed = 7,
+  })
+  playOut(f)
+  f.fight.toLearn = { { mon = f.party[1], move = "THUMP" } }
+  f.fight:exit()
+
+  eq(#f.ending, 1, "exactly one of the two callbacks ran")
+  eq(f.ending[1].via, "onFinish", "the one the ritual selects")
+  eq(Coop.stackHolds(f.game, f.state), false,
+     "and the battle is off the stack, though the callback that pops it "
+     .. "was never the one called")
+  eq(#prompts, 1, "the forget prompt went up exactly once")
+  ok(prompts[1] and prompts[1].top and prompts[1].top.isOverworld,
+     "over the world")
+end)()
+
+;(function()
+  -- The other half of the same rule: a battle the unwind could *not* reach was
+  -- never told how it went, and must be left exactly where it is.
+  --
+  -- The correction is gated on the battle having been finished off, which is
+  -- what separates "nobody popped it" from "we declined to finish it". Sixteen
+  -- screens above the buried battle is `unwindStackTo` giving up; `_ended`
+  -- declines to pay the prize and mark the trainer beaten, and the ordinary
+  -- engine battle is left underneath to be fought for real. A correction that
+  -- popped it anyway would delete a battle nobody ever resolved.
+  prompts = {}
+  local f = fightOf("trainer", {
+    goldNoPop = true,
+    party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200,
+                    level = 40 }) },
+    foes = { mon({ species = "BETA", spd = 5, maxHp = 20, atk = 1 }) },
+    seed = 7,
+  })
+  playOut(f)
+  -- Seventeen states over the buried battle: one more than the unwind's guard.
+  for _ = 1, 17 do f.game.stack:push({ pile = true }) end
+  f.fight:exit()
+
+  eq(#f.ending, 0, "a battle too deeply buried to reach was never finished")
+  eq(Coop.stackHolds(f.game, f.state), true, "and is still on the stack, "
+     .. "waiting to be fought as an ordinary battle")
 end)()
 
 ;(function()

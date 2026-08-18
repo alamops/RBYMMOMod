@@ -362,6 +362,26 @@ function M.payTrainerPrize(engine, game, result)
   return 0
 end
 
+-- Which of a buried battle's two callbacks is the one that will actually run.
+--
+-- Gen 1 BattleState uses onFinish; Gen 2's ui/gen2/BattleState uses onDone
+-- (Client stamps onFinish from onDone when present, but accept either), so a
+-- Gold battle usually carries both fields pointing at the same function.
+--
+-- Exported, and the selection lives here alone, because a caller that needs to
+-- reason about *what that function does* has to be reasoning about the same
+-- function this ritual calls. src/SoloBattle.lua asks exactly that -- "does the
+-- ritual take the battle off the stack for itself?" -- and it used to ask it of
+-- `engine.onDone` while the ritual called a different `engine.onFinish`. On a
+-- Gold battle pushed by something other than World:startBattle those two are
+-- not the same function and do not agree about the pop, and the player was left
+-- standing on a battle that had already been told it was over.
+function M.buriedFinisher(engine)
+  local finish = engine and (engine.onFinish or engine.onDone)
+  if type(finish) ~= "function" then return nil end
+  return finish
+end
+
 -- Tell the buried engine battle how the fight it never ran went.
 --
 -- `engine` is the frozen BattleState underneath, `game` is what holds the
@@ -371,9 +391,7 @@ end
 -- was anything to finish at all, and -- when there was -- whether the engine
 -- ran the blackout ritual itself so the caller must not run a second one.
 function M.finishBuriedBattle(engine, game, result, blackout)
-  -- Gen 1 BattleState uses onFinish; Gen 2's ui/gen2/BattleState uses onDone
-  -- (Client stamps onFinish from onDone when present, but accept either).
-  local finish = engine and (engine.onFinish or engine.onDone)
+  local finish = M.buriedFinisher(engine)
   if not finish then return false end
 
   M.payTrainerPrize(engine, game, result)

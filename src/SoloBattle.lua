@@ -1238,9 +1238,24 @@ end
 --
 -- So on Gold the battle is left where it is and the ritual takes it down, and
 -- the prompts go up after -- because anything pushed before it would be exactly
--- what that pop took. `engine.onDone` is the test rather than the generation
+-- what that pop took. The callback is the test rather than the generation
 -- number, because "does the ritual pop for itself" is a property of the
 -- callback and not of the game.
+--
+-- ------- and the prediction is checked rather than trusted
+--
+-- Which is still a guess about somebody else's closure, and it was wrong the
+-- first time it met one: a Gold battle that carries an `onDone` which does not
+-- pop -- anything that pushed `Gen2BattleState` itself rather than going
+-- through `World:startBattle` -- was predicted to take itself down, and nobody
+-- did. The buried battle stayed on the stack under a finished fight, with the
+-- player standing on a battle that had already been told it was won.
+--
+-- The fix is not a better guess. Between the ritual and the prompts this
+-- function now *looks*: a battle that was handed its result and is still on the
+-- stack is taken off, by identity, exactly as the other branch would have taken
+-- it off. The prediction chooses the order; the observation decides the
+-- outcome. See `settleStack` below for what it is gated on and why.
 function M:_ended(result, toLearn)
   local game, engine, sim = self.game, self.engine, self.sim
   local reason, save, levels = self.reason, self.save, self.levels
@@ -1280,7 +1295,18 @@ function M:_ended(result, toLearn)
 
   -- Whether the ritual takes the battle off the stack for itself. See the
   -- generation note in this function's header.
-  local ritualPops = engine ~= nil and type(engine.onDone) == "function"
+  --
+  -- Asked of the function `Coop.finishBuriedBattle` will actually call --
+  -- `Coop.buriedFinisher`, which is that ritual's own selection -- and not of
+  -- `engine.onDone` regardless of whether that is the one that runs. The two
+  -- are the same function on a Gold battle World:startBattle pushed, because
+  -- Client aliases the missing `onFinish` onto `onDone`; they are *not* the
+  -- same on a Gold battle pushed by anything else that supplied its own
+  -- `onFinish`, and asking the wrong one predicted a pop that no function on
+  -- the state was ever going to perform.
+  local finisher = Coop.buriedFinisher(engine)
+  local ritualPops = finisher ~= nil and engine ~= nil
+    and finisher == engine.onDone
 
   -- Step 4. `mayFinish` is what the unwind's answer is *for*: `unwindStackTo`
   -- gives up after sixteen pops, and a target it never reached is a battle
@@ -1309,13 +1335,50 @@ function M:_ended(result, toLearn)
                                                     blackout)
   end
 
+  -- Step 4c -- and whatever was predicted, check.
+  --
+  -- `ritualPops` is an inference about somebody else's closure, and an
+  -- inference is a guess however carefully it is made: it is right about the
+  -- two shapes this repo knows (Gen 1's onFinish, which never pops, and the
+  -- popping closure `World:startBattle` hands Gold), and it is a guess about
+  -- every other way a battle can arrive on the stack. When it guesses high --
+  -- "the ritual will pop this" for a callback that does not -- the player is
+  -- left standing on a battle that has already been told it was won, which
+  -- resumes the moment anything above it clears and cannot be dismissed. That
+  -- is the worst ending this feature has, and it is not worth risking on a
+  -- prediction when the answer is *observable one line later*.
+  --
+  -- So the prediction only chooses the order, and this decides the outcome: a
+  -- battle that was told how it went and is still on the stack comes off, by
+  -- identity, exactly as the non-popping branch would have taken it off.
+  --
+  -- Gated on `handled`, which is the difference between "nobody popped it" and
+  -- "we declined to finish it". A battle the unwind could not reach was never
+  -- given its result and is still owed a real fight -- see `mayFinish` above --
+  -- so it must be left exactly where it is.
+  --
+  -- Before the forget prompts, never after: the prompts push MoveLearnMenu
+  -- straight above whatever is on top, and an unwind that ran after them is an
+  -- unwind that takes them down again.
+  local function settleStack()
+    if not (engine and handled) then return end
+    if Coop.stackHolds(game, engine) ~= true then return end
+    if not Coop.unwindStackTo(game, engine, true) then
+      self:warn("settle", "this battle is over but its screen could not be "
+        .. "closed; if the old battle comes back, walk out of it as usual or "
+        .. "reload from your last save")
+    end
+  end
+
   -- Steps 5 and 6, in whichever order the buried battle's own pop allows.
   if ritualPops then
     finishEngine()
+    settleStack()
     offerForgets()
   else
     offerForgets()
     finishEngine()
+    settleStack()
   end
 
   if blackout and not (handled and engineRitual) then

@@ -188,6 +188,43 @@ return function(game)
     return not H.onStack(game, state)
   end
 
+  -- Make a staged Gold battle end the way a real Gold battle ends.
+  --
+  -- On Gen 2 the pop that takes a finished battle off the stack does not live
+  -- in `Gen2BattleState` at all: it lives inside the `onDone` closure
+  -- `World:startBattle` builds around it (engine `src/world/gen2/World.lua`),
+  -- and `src/Client.lua` aliases the state's absent `onFinish` onto it -- so
+  -- every Gold battle a player can walk into carries *one* function, on both
+  -- fields, and that function pops.
+  --
+  -- `mmo_util`'s Gen 2 staging pushes `Gen2BattleState` itself with a callback
+  -- of its own, which recorded the outcome and popped nothing. That is a shape
+  -- no Gold player can produce, and it is exactly the question
+  -- `src/SoloBattle.lua`'s ending has to answer -- who takes the buried battle
+  -- down -- so a leg staged that way was exercising a path the product does not
+  -- ship while leaving the one it does ship untested. (It found a real
+  -- fragility doing so, which is now fixed and covered headlessly: the
+  -- non-popping shape is `goldNoPop` in `mods/rby_mmo/tests/solo_battle.lua`
+  -- section 10.)
+  --
+  -- So the callbacks are restamped to Gold's real shape. Gen 1 is left alone:
+  -- there the pop is `BattleState:finish`'s own, `onFinish` never pops, and
+  -- `mmo_util`'s staging is already faithful.
+  local function likeWorldStartBattle(state, onFinish)
+    if state == nil or H.generation(game) ~= 2 then return state end
+    local done = function(outcome)
+      -- `World:startBattle` pops unconditionally. By identity here, because
+      -- the engine's unconditional pop is safe on the invariants an overworld
+      -- maintains and a driver has none of them: a wrong guess would take the
+      -- world down and every assertion after it would blame the mod.
+      if H.top(game) == state then pcall(function() game.stack:pop() end) end
+      if onFinish then onFinish(outcome) end
+    end
+    state.onDone = done
+    state.onFinish = done
+    return state
+  end
+
   -- A wild encounter this mod is required to hand straight back.
   --
   -- Gen 1 gets a real Pokemon Tower ghost through BattleState's own
@@ -252,7 +289,7 @@ return function(game)
   local function stageWildOf(candidates, level, onFinish)
     for _, species in ipairs(candidates) do
       local staged = H.stageWild(game, species, level or 5, onFinish)
-      if staged then return staged, species end
+      if staged then return likeWorldStartBattle(staged, onFinish), species end
     end
     return nil, nil
   end
@@ -768,9 +805,9 @@ return function(game)
       local moneyBefore = moneyOf()
       local expBefore = expOf(lead())
       local finished = nil
-      local staged = H.stageTrainer(game, class, function(result)
-        finished = result
-      end)
+      local record = function(result) finished = result end
+      local staged = likeWorldStartBattle(H.stageTrainer(game, class, record),
+                                          record)
       check(staged ~= nil, "staged a trainer battle", tostring(class))
 
       if staged then
