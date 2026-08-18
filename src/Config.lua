@@ -561,6 +561,89 @@ M.BATTLE_TYPE_MAX = 20
 -- ship in this repo.
 M.BATTLE_METRONOME_POOL_MAX = 200
 
+-- ------- solo battles
+--
+-- The same referee with nobody on the other end of a socket: one player's
+-- ordinary wild encounters and every trainer they walk into, run by
+-- src/BattleSim in this process instead of by a hub.  src/SoloBattle.lua owns
+-- the fight and src/SoloBrain.lua answers for the opponent; the screen is the
+-- mediated one, because from a client's side a battle it does not referee
+-- looks the same whether the referee is across a wire or a table away.
+--
+-- Nothing here is on the wire.  No message type, no PROTOCOL, no server/ twin,
+-- no new BattleSim mode -- the turn machine has never needed a socket to run
+-- (src/BattleSim/Turn.lua requires nothing at all), so a solo fight is a Turn
+-- built locally and pumped locally, and the numbers below are the only new
+-- vocabulary the feature has.
+
+-- Whether the mod takes a lone player's battles at all.
+--
+-- Off, and a mod-manager row rather than a decision made here, because this is
+-- the one thing this mod does that changes a fight the player was going to
+-- have anyway.  Everything else is an addition -- a nameplate over a stranger,
+-- a bubble, a partner in a battle that could not otherwise exist -- and a copy
+-- with nobody to talk to is meant to be as close to absent as it can be.  With
+-- this on, the screen a single-player game shows for every wild and every
+-- trainer is this mod's, which is a different game than the one that was
+-- installed: worth offering, not worth assuming.
+--
+-- Read at the encounter rather than at install, like every row but `port`, so
+-- a player who flips it mid-session gets it on the next battle and not on the
+-- next launch.
+M.SOLO_BATTLES_DEFAULT = false
+
+-- Which BattleSim mode each solo fight is seated as.
+--
+-- Two modes rather than one, and the difference is mechanical rather than
+-- descriptive: BattleSim reads the mode's *name*.  Effects.isWildMode and
+-- Effects.teleportRunAllowed both gate catching and fleeing on
+-- mode:find("wild"), so a trainer fight seated as `wild` is a fight where a
+-- Poke Ball lands on Brock's ONIX and keeps it.  Under `coop_npc` the same
+-- throw hits Turn.lua's refusal -- "But it failed", ball spent, turn consumed
+-- -- which is exactly Gen 1's answer, obtained without a line of the referee
+-- or its JS twin moving.
+--
+-- `coop_npc` rather than `1v1` for the trainer, which is the shape it looks
+-- like, for the other half of the same argument: Turn's EXP_MODES pays the
+-- winning side in wild, coop_wild and coop_npc and deliberately not in 1v1 or
+-- coop_pvp, because paying a player for beating another player is a farming
+-- loop.  A solo trainer fight is not that -- it is the game's own trainer, and
+-- it owes exp.  coop_npc is also already the mode meaning "humans on a,
+-- something synthetic on b", which is the seating either way.
+M.SOLO_WILD_MODE = "wild"
+M.SOLO_TRAINER_MODE = "coop_npc"
+
+-- How long the local referee waits on the player's choice.  Zero, which Turn
+-- reads as "no deadline at all" rather than as "immediately".
+--
+-- BATTLE_CHOICE_TIMEOUT exists so that one player thinking cannot freeze
+-- another player's screen; in a solo fight there is no other player, and the
+-- opponent answers in the same breath the turn opens.  Every second of that
+-- clock would therefore be spent doing the one thing single-player games have
+-- never done -- picking a move for someone who paused to read their party, or
+-- put the game down mid-route.  The vanilla battle menu waits forever, so this
+-- one does too.
+M.SOLO_CHOICE_TIMEOUT = 0
+
+-- The battles this mod hands straight back to the engine.
+--
+-- Which kinds it *takes* is a whitelist read off the pushed state (`wild` and
+-- `trainer`, and nothing else -- a link battle is excluded by not being
+-- either).  These are the exceptions inside that whitelist: fights the engine
+-- spells as an ordinary wild encounter and then mutates into something
+-- BattleSim has no model for.  Safari swaps the whole menu for BALL / BAIT /
+-- ROCK / RUN over a step and ball budget; the Marowak ghost is uncatchable and
+-- unhittable until the Silph Scope; the Viridian old man is a scripted
+-- demonstration whose throw is meant to succeed (or, once, to fail) on cue.
+-- Running any of them through a referee that models none of it would not be a
+-- worse battle, it would be a wrong one.
+--
+-- Refusal is silent and the vanilla battle simply proceeds -- the player is
+-- told nothing, because from where they are standing nothing happened.  A
+-- generation whose battle state carries none of these fields matches none of
+-- them, which is the correct answer there too.
+M.SOLO_REFUSED = { "safari", "ghost", "noCatch", "demo" }
+
 -- Chat.  "party" is delivered to the other member wherever they are, so it
 -- is the one scope with neither a radius nor a name to type.
 M.CHAT_SCOPES = { "global", "local", "private", "party" }

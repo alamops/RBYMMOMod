@@ -8,6 +8,58 @@ here must match `manifest.version`.
 
 ### Added
 
+- **This mod's battle system, with nobody else in the room.** A new
+  `SOLO BATTLES` row in the mod manager (`F10` → `MMO`), **default OFF**,
+  routes ordinary wild encounters and *every* trainer — walked into,
+  talked to, scripted, rival, gym leader — through this mod's own
+  `BattleSim` referee and its battle screen, in a copy with no hub, no
+  partner and no network at all. Off by default because it substitutes a
+  hand-written twin for the engine's own battle: somebody who installed
+  this mod for the overworld should keep the vanilla fight until they ask
+  for something else. The row is read at the decision point rather than
+  at load, so flipping it takes effect on the very next encounter — no
+  relaunch, no reload.
+  - **Solo never touches the wire.** No `Hub`, no `Transport`, no `Wire`
+    message, no `Config.PROTOCOL` bump and nothing under `server/`: a
+    `BattleSim` `Turn` is constructed and pumped in-process, and the
+    events it drains feed the same `MediatedBattle` screen an online
+    fight uses. That is the whole reason this arrives without a protocol
+    event — hub/twin parity, `affects_link` and the link fingerprint are
+    untouched by construction. The hub's dealer was measured and
+    deliberately skipped: it deals an NPC party round-robin across every
+    co-op seat before it reads the narrowed sides, so a one-seat fight
+    silently orphans mons a three-mon trainer should be fielding.
+  - **The opponent is the engine's own `TrainerAI`.** Because no choice
+    crosses the wire, the NPC's move can be computed locally against the
+    real per-trainer brain — the scoring layers off `trainer.aiMods`, the
+    item and switch budgets off `ai_classes` — and then submitted as an
+    ordinary `submitChoice`. A gym leader therefore plays like *that* gym
+    leader rather than like a generic auto-picker, and
+    `src/BattleSim/Turn.lua` is left untouched, so the Lua and Node twins
+    cannot drift apart over a feature Node never sees. `autoPick` stays
+    as the fallback for anything the bridge cannot answer.
+  - **One fighter per side, and the mode name matters.** A wild fight
+    keeps `mode = "wild"`, where catching and fleeing are exactly what is
+    wanted; a trainer fight runs as `coop_npc`, carrying the trainer's
+    whole party on the single opposing fighter. That is deliberate rather
+    than incidental: `Effects.isWildMode` and `teleportRunAllowed` gate
+    catching and running on `mode:find("wild")`, so seating a trainer as
+    a wild fight would let a player throw a ball at Brock's ONIX. Under
+    `coop_npc` the ball fails in the game's own words, the item is spent
+    and the turn is consumed — correct Gen 1 trainer semantics, for free.
+  - **Three battles are left on the vanilla engine, silently:** the
+    Safari Zone, the Marowak ghost, and the old man's catching demo in
+    Viridian. Each has mechanics `BattleSim` does not model — Safari
+    balls and bait, a ghost that cannot be caught or identified, a
+    scripted demo that plays itself — and a half-modelled version of any
+    of them is worse than no version. The divert simply declines and the
+    engine's battle runs; any error on that path logs a warning and
+    steps aside the same way, so a failure costs a fancier battle screen
+    and never the encounter.
+  - Gen 1 (Red/Blue/Yellow) and Gen 2 (Gold), and co-op keeps priority
+    wherever it already applies — solo only takes an encounter the co-op
+    path declined. Design notes and the measured evidence behind the
+    decisions above: `docs/plans/offline-solo-battles.md`.
 - **The battle theatre is not a Gen 1 feature any more.** Gold gets the
   top-down arena, the plates, the modern band, the fx and the throws — the
   same picture Red has, on the same 640×360 field.

@@ -17,6 +17,7 @@ Working notes for features that were (or are being) implemented in this repo.
 | [`guild-focus-battle-ui.md`](guild-focus-battle-ui.md) | CoopBattle focus stage + side strips |
 | [`hub-twin-parity.md`](hub-twin-parity.md) | Hub.lua ↔ relay.js drift process + carve-outs |
 | [`battle-sim-move-effects.md`](battle-sim-move-effects.md) | Complete; locked BattleSim decisions |
+| [`offline-solo-battles.md`](offline-solo-battles.md) | Solo wild + trainer fights on BattleSim, option default off, no wire change — in progress |
 
 ## Historical
 

@@ -148,6 +148,16 @@ return {
         .. "are refused the way any trainer battle refuses them; against "
         .. "another party, RUN asks your partner first, and a consented flee "
         .. "ends the battle as the runners' loss.",
+      "SOLO BATTLES, a mod-manager option that is off by default: turn it "
+        .. "on and ordinary wild encounters and every trainer -- walked "
+        .. "into, talked to, scripted, rival, gym leader -- are fought on "
+        .. "this mod's own battle system instead of the engine's, in a copy "
+        .. "with no hub, no partner and no network. The referee runs "
+        .. "in-process, so nothing goes on the wire and no protocol changes; "
+        .. "the opponent is driven by the engine's own TrainerAI, so a gym "
+        .. "leader still plays like that gym leader. The Safari Zone, the "
+        .. "Marowak ghost and the Viridian old-man demo are left on the "
+        .. "vanilla engine, since their mechanics are not modelled.",
       "Hold-B running: on foot, holding B halves the frames per tile, the "
         .. "same speed a bike gives, with a `B TO RUN` option (default on) "
         .. "to turn it off. Other players see it too -- presence carries the "
@@ -196,7 +206,9 @@ return {
         .. "party and bag sheets, and a modified client can invent a "
         .. "plausible team or item counts on upload. Bag proofs only stop "
         .. "mid-fight free heals without a matching stack. Solo wild/trainer "
-        .. "fights stay on the local engine.",
+        .. "fights stay on the local engine unless SOLO BATTLES is turned "
+        .. "on, and even then they are refereed in-process with nothing "
+        .. "uploaded anywhere.",
       "A ranked 2-on-2 is scored as two matches paired by slot order, so "
         .. "every player gets one rated result but which opponent they are "
         .. "paired with is arbitrary. A co-op battle against an NPC scores "

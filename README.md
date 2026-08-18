@@ -430,6 +430,56 @@ played, since both of you attack both of them and you lose together. Not two
 who fought whom, and rating it that way meant the same battle between the same
 four people paid differently depending on the seating.
 
+### 🧍 SOLO — THE SAME BATTLE SYSTEM, NOBODY ELSE IN THE ROOM
+Everything above needs other people. This doesn't. Turn **`SOLO BATTLES`** on
+in the mod manager (`F10` → `MMO`) and the fights you have on your own run on
+*this mod's* battle system instead of the engine's: the grass, the caves, the
+water, the rod — and **every trainer in the game**, walked into, talked to,
+scripted, rival, gym leader.
+
+**It's off by default**, and that's on purpose. Installing this mod to walk
+around Kanto with your friends shouldn't quietly replace the fight you've
+been having since 1996. The row is read when the encounter starts, not when
+the game loads, so flipping it applies at the **very next** battle — nothing
+to relaunch, nothing to reload, and nothing changes about a save either way.
+
+**Nothing goes on the wire.** There is no hub, no connection and no partner
+in this: the referee is built and pumped *inside your own copy*, and the
+battle you watch is the same screen a mediated fight uses, fed from a
+simulation running a few lines away. No protocol number moves, `server/`
+isn't involved, and a copy that has never been online behaves identically to
+one that has.
+
+**The trainer plays like themselves.** Because no choice has to cross a wire,
+the opponent's move is picked by the **engine's own `TrainerAI`** — the real
+per-trainer scoring layers, the real item and switch budgets — and handed to
+the referee as an ordinary choice. Brock plays Brock. The alternative was a
+generic auto-picker, and you'd have noticed.
+
+**It's still a trainer battle, mechanically.** A trainer's monsters can't be
+caught and you can't run from them: throw a ball and it fails in the game's
+own words, the ball is spent, the turn is gone. That falls out of how the
+fight is seated rather than being bolted on afterwards — the wild fight is
+seated as a wild fight, where catching and fleeing are the whole point, and a
+trainer fight is not.
+
+**The save is the save.** Exp and level-ups, a catch, HP, PP and status, the
+prize money, the defeated flag, badges and TMs, the evolution check, the
+script that was waiting for the battle to end — all of it lands where it
+lands in vanilla. Lose and you black out the way you always did.
+
+**Three fights are left exactly where they are:** the **Safari Zone**, the
+**Marowak ghost** in Pokémon Tower and the **old man's catching demo** in
+Viridian. Each is a battle with mechanics this simulation doesn't model, and
+a half-modelled Safari Zone is worse than no Safari Zone — so the vanilla
+battle runs and the mod stays invisible. Same posture for anything that goes
+wrong on the way in: it logs a line and steps aside, so the worst case costs
+you a fancier battle screen and never the encounter.
+
+Both carts — Gen 1 (Red/Blue/Yellow) and Gold. And if you're connected and
+partied, **co-op still wins**: solo only takes the fights co-op didn't.
+Design notes: [`docs/plans/offline-solo-battles.md`](docs/plans/offline-solo-battles.md).
+
 ### 🏆 RANKED — AND YOU CAN'T FARM IT
 Every link battle is scored, on the hub, for both players. Win and you gain
 points; lose and you lose them, never past **0**. How many depends on who you
@@ -779,6 +829,7 @@ the `PLAYERS` list to start one from.
 | `JOIN CODE` | *(empty)* | the passcode used for a hub you haven't typed one for |
 | `MY SPRITE` | RED | who you look like, to everyone including you — the `CHARACTER` row is the in-game way to the same thing, on your own or mid-game, and its choice sticks to your save |
 | `B TO RUN` | on | hold B on foot to move at bike speed |
+| `SOLO BATTLES` | off | fight wild encounters and every trainer on this mod's battle system, on your own and offline — see above |
 
 These are just the *defaults* — HOST GAME asks the room size every time and
 JOIN GAME lets you type an address and a passcode, and those in-game choices
