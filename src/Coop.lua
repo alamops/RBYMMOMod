@@ -546,11 +546,33 @@ local BLACKOUT_WARP_WAIT = 60
 -- `Coop.blackout(self, game)` so long as it also pumps it every frame with
 -- `Coop.pumpBlackout(self, dt)`. Nothing below reads a party, a transport or a
 -- roster, so a lone player's blackout is the same blackout.
-function M:blackout(game)
+--
+-- ------- and the four things it may have to say
+--
+-- The ritual is holder-agnostic but its warnings were not: every one of them
+-- named the 2-on-2, because for a long time a 2-on-2 was the only fight that
+-- could reach here. A lone player who blacks out of a solo wild encounter and
+-- is then told that "a lost 2-on-2 could not black you out" is being told
+-- about a feature they were not using, which is worse than saying nothing --
+-- it sends them looking for a partner that was never there.
+--
+-- So the noun is an argument. `context` is the word the four warnings use for
+-- the fight that was lost, it defaults to "2-on-2", and every existing caller
+-- passes nothing -- which is why co-op's four lines are still, to the byte,
+-- the four lines it has always printed. `src/SoloBattle.lua` passes "battle".
+--
+-- Parked on `pendingWarp` rather than taken again by the pump, because the
+-- deferred half runs frames later and the holder is the only thing that
+-- crosses that gap: a pump that had to be told the noun every frame would be
+-- one more thing a second caller could get wrong, and its default would be
+-- co-op's word on a solo player's screen again.
+function M:blackout(game, context)
   local save = game and game.save
+  local noun = (type(context) == "string" and context ~= "") and context
+    or "2-on-2"
   if not save then
-    mod.log:warn("a lost 2-on-2 could not black you out (no save); walk to a "
-      .. "POKéMON CENTER to heal")
+    mod.log:warn("a lost %s could not black you out (no save); walk to a "
+      .. "POKéMON CENTER to heal", noun)
     return false
   end
 
@@ -572,11 +594,11 @@ function M:blackout(game)
   if not (api and target and target.map) then
     -- Healed and taxed but not moved. Said out loud rather than silently
     -- half-done: the player is standing somewhere they did not expect to be.
-    mod.log:warn("a lost 2-on-2 healed your party but could not send you to a "
-      .. "POKéMON CENTER; walk out and back in, or reload your last save")
+    mod.log:warn("a lost %s healed your party but could not send you to a "
+      .. "POKéMON CENTER; walk out and back in, or reload your last save", noun)
     return false
   end
-  self.pendingWarp = { game = game, target = target, clock = 0 }
+  self.pendingWarp = { game = game, target = target, clock = 0, context = noun }
   -- Called through M rather than off `self` so a holder that is not a Coop
   -- instance -- see the note above -- still reaches the pump. For a real Coop
   -- instance this resolves to the identical function `self:pumpBlackout(0)`
@@ -600,6 +622,11 @@ function M:pumpBlackout(dt)
   local pending = self.pendingWarp
   if not pending then return false end
 
+  -- The noun M:blackout parked here, for the two warnings below. Defaulted a
+  -- second time rather than trusted, because a holder can be handed a warp
+  -- table by a suite that never went through blackout at all.
+  local noun = (type(pending.context) == "string" and pending.context ~= "")
+    and pending.context or "2-on-2"
   pending.clock = (pending.clock or 0) + (dt or 0)
   local stack = pending.game and pending.game.stack
   local top = stack and stack.top and stack:top()
@@ -609,9 +636,9 @@ function M:pumpBlackout(dt)
     -- is already gone, so this is a player standing in the wrong place, not a
     -- player stuck at zero HP.
     self.pendingWarp = nil
-    mod.log:warn("your party was healed after the 2-on-2 but the trip to a "
+    mod.log:warn("your party was healed after the %s but the trip to a "
       .. "POKéMON CENTER never got a chance to start; walk there, or reload "
-      .. "from your last save")
+      .. "from your last save", noun)
     return false
   end
 
@@ -634,9 +661,9 @@ function M:pumpBlackout(dt)
   local ok, done, why = pcall(api.warpTo, api, target.map, target.x, target.y,
                               "down")
   if not (ok and done) then
-    mod.log:warn("a lost 2-on-2 healed your party but the warp to a POKéMON "
+    mod.log:warn("a lost %s healed your party but the warp to a POKéMON "
       .. "CENTER failed (%s); reload from your last save if you are stuck",
-      tostring(ok and why or done))
+      noun, tostring(ok and why or done))
     return false
   end
   return true
@@ -1009,7 +1036,22 @@ function M.unwindStackTo(game, target, alsoPop)
     stack:pop()
     guard = guard + 1
   end
-  if alsoPop and stack:top() == target then stack:pop() end
+  -- **The guard tripping is not the same thing as arriving**, and until this
+  -- said so it was reported as one: sixteen pops that never reached the target
+  -- returned `true` exactly as a clean unwind did, and `alsoPop` -- the whole
+  -- point of the call on the losing path -- silently never happened.
+  --
+  -- Harmless while every caller ignored the answer. Not harmless for
+  -- src/SoloBattle.lua, which unwinds to a buried BattleState and then tells it
+  -- it was won: a target still on the stack under a pile too deep to clear
+  -- would be marked beaten *and* left where it is, so it resumes the moment the
+  -- pile comes off and the player fights the same trainer a second time. False
+  -- is what lets that caller decline to finish a battle it could not reach.
+  --
+  -- Only the guard case is new. A target that had already left the stack has
+  -- answered `false` from the line above since that check was written.
+  if stack:top() ~= target then return false end
+  if alsoPop then stack:pop() end
   return true
 end
 

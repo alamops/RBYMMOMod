@@ -599,9 +599,20 @@ M.SOLO_BATTLES_DEFAULT = false
 -- Effects.teleportRunAllowed both gate catching and fleeing on
 -- mode:find("wild"), so a trainer fight seated as `wild` is a fight where a
 -- Poke Ball lands on Brock's ONIX and keeps it.  Under `coop_npc` the same
--- throw hits Turn.lua's refusal -- "But it failed", ball spent, turn consumed
--- -- which is exactly Gen 1's answer, obtained without a line of the referee
--- or its JS twin moving.
+-- throw hits Turn.lua's refusal instead -- and the *mechanics* of that refusal
+-- are vanilla's, obtained without a line of the referee or its JS twin moving:
+-- the ball is debited (src/ui/BagMenu.lua:167-169 on the engine side,
+-- MediatedBattle:confirmPendingItem here), the throw does not catch, and the
+-- turn is spent -- which is exactly what BattleState:throwBall's non-wild arm
+-- does (src/battle/BattleState.lua:4886-4922: animate the block, then
+-- executeAction / queueResidual / endOfTurn).
+--
+-- **The wording is not vanilla's, and this is the one place that is written
+-- down.**  The cart prints "The trainer blocked the BALL!" and then "Don't be
+-- a thief!"; the referee narrates its own generic refusal -- "used an item",
+-- "But it failed".  A player loses the same ball and the same turn either way
+-- and reads a different sentence about it, so nobody should take the line
+-- above for a fidelity test that was passed.
 --
 -- `coop_npc` rather than `1v1` for the trainer, which is the shape it looks
 -- like, for the other half of the same argument: Turn's EXP_MODES pays the
@@ -639,10 +650,80 @@ M.SOLO_CHOICE_TIMEOUT = 0
 -- worse battle, it would be a wrong one.
 --
 -- Refusal is silent and the vanilla battle simply proceeds -- the player is
--- told nothing, because from where they are standing nothing happened.  A
--- generation whose battle state carries none of these fields matches none of
--- them, which is the correct answer there too.
-M.SOLO_REFUSED = { "safari", "ghost", "noCatch", "demo" }
+-- told nothing, because from where they are standing nothing happened.
+--
+-- ------- the same list is not the same list on Gold
+--
+-- The first four names are Gen 1's, and for a while this list stopped there on
+-- the theory that a Gen 2 battle "carries none of these fields, which is the
+-- right answer there too".  That was simply false.  Gold has every one of
+-- these fights; it spells them differently:
+--
+--   * `contest` -- the Bug-Catching Contest (src/ui/gen2/BattleState.lua:225).
+--     PARK BALLs only, a ball budget, the caught mon HELD rather than added,
+--     and a draw on the last ball.  Gold's Safari Zone in all but name, and
+--     BattleSim models not one part of it.
+--   * `tutorial` -- BATTLETYPE_TUTORIAL, the DUDE's catching demonstration
+--     (src/core/gen2/CatchTutorial.lua).  An empty player party, his pack, and
+--     a throw that cannot fail.  The exact twin of Gen 1's `demo`.
+--   * `roaming` -- Raikou, Entei and Suicune.  Two things ride on it that the
+--     referee has no idea about: the beast flees on its own first turn
+--     (TryEnemyFlee's AlwaysFleeMons), and the end of the battle banks its
+--     remaining HP back into the save's roam slot.  Refereed here it would
+--     stand and fight, and its wounds would not follow it.
+--
+-- ------- and one of them is a number, not a field
+--
+-- wBattleType is a byte.  BATTLETYPE_FORCESHINY (7, the Lake of Rage Gyarados)
+-- and BATTLETYPE_TRAP (9, the Rocket base) are battles vanilla refuses to let
+-- you run from at all (src/battle/gen2/Battle.lua:3787-3792 -- running from the
+-- Gyarados used to forfeit the one-shot shiny), and a referee that ends a fight
+-- on any `run` cannot honour that.  A numeric value is truthy for every number
+-- including zero, so the field loop above cannot be asked the question: it
+-- needs its own set, keyed by value.
+--
+-- The two spellings overlap on purpose.  `contest` / `tutorial` / `roaming` are
+-- how *this engine* marks those fights, and 6 / 3 / 5 are the cart's byte for
+-- the same three -- so a script (or a later engine version) that arms the byte
+-- instead of the field is refused by the other half of the pair.
+--
+-- Audited and deliberately **not** listed: CANLOSE (1, the Cherrygrove rival),
+-- because the "do not white out" exception lives inside the engine's own
+-- post-battle closure and this mod hands the result to exactly that closure;
+-- FORCEITEM (10) and FISH ("fish"), because the held item and the fishing flag
+-- are both stamped on the wild monster before the battle exists, so what the
+-- referee is handed is already correct (the one loss is the LURE BALL's
+-- fishing multiplier, which the referee's catch maths does not read); TREE (8)
+-- and DEBUG (2), which this engine never arms.
+M.SOLO_REFUSED = {
+  "safari", "ghost", "noCatch", "demo",      -- Gen 1
+  "contest", "tutorial", "roaming",          -- Gen 2
+}
+M.SOLO_REFUSED_BATTLE_TYPES = {
+  [3] = true,   -- BATTLETYPE_TUTORIAL   (the DUDE's demonstration)
+  [5] = true,   -- BATTLETYPE_ROAMING    (the three beasts)
+  [6] = true,   -- BATTLETYPE_CONTEST    (the Bug-Catching Contest)
+  [7] = true,   -- BATTLETYPE_FORCESHINY (the Red Gyarados)
+  [9] = true,   -- BATTLETYPE_TRAP       (no escape, Rocket base)
+}
+
+-- How many frames in a row the local referee may fail before the fight is
+-- handed back.
+--
+-- `SoloBattle:_pump` contains a throw out of `tick` or `drainEvents` rather
+-- than letting it reach the mod's own pcall in src/Client.lua, because one bad
+-- event should not take a whole battle down.  The failure that is *not*
+-- survivable is the deterministic one: the same throw, every frame, forever.
+-- The turn never resolves, no outcome is ever produced, SOLO_CHOICE_TIMEOUT is
+-- zero so no deadline saves it -- and in a trainer fight RUN is refused, so the
+-- player is standing in front of a battle screen with no way out of it at all.
+--
+-- Small on purpose.  A referee that has thrown three times running is not
+-- having a bad frame, and the honest answer at that point is to put the
+-- engine's own battle back on screen (SoloBattle:reset does exactly that) and
+-- let the player fight it the ordinary way.  A count of one would give up on a
+-- single unlucky frame that the next tick would have walked straight past.
+M.SOLO_FAULT_LIMIT = 3
 
 -- Chat.  "party" is delivered to the other member wherever they are, so it
 -- is the one scope with neither a radius nor a name to type.

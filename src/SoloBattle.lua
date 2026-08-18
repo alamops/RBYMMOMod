@@ -51,9 +51,14 @@
 -- mechanical rather than descriptive: `Effects.isWildMode` gates catching and
 -- fleeing on `mode:find("wild")`, so a trainer fight seated as `wild` is a
 -- fight where a Poke Ball lands on BROCK's ONIX and keeps it. Under `coop_npc`
--- the same throw hits the referee's own refusal, which is the Gen 1 answer,
--- obtained without a line of the referee moving. See Config's solo section for
--- the rest of that argument, including why it is not `1v1`.
+-- the same throw hits the referee's own refusal instead, and that refusal
+-- *costs* what Gen 1 costs -- the ball is gone and the turn is spent, exactly
+-- as `BattleState:throwBall`'s non-wild arm charges for it -- without a line of
+-- the referee moving. It does not *say* what Gen 1 says: the cart prints "The
+-- trainer blocked the BALL!" and "Don't be a thief!", the referee prints "used
+-- an item" and "But it failed". Right price, wrong words, and worth knowing
+-- which half is which. See Config's solo section for the rest of that
+-- argument, including why it is not `1v1`.
 --
 -- ------- who writes what to the save, which is the part to get right
 --
@@ -189,15 +194,32 @@ end
 -- wrong one. See Config.SOLO_REFUSED.
 --
 -- Checked one level down as well, for the same reason M.kindOf is: a Gen 2
--- state that ever carries one of these carries it on the inner battle. A
--- generation whose battles have none of these fields matches none of them,
--- which is the right answer there too.
+-- state that ever carries one of these carries it on the inner battle -- and
+-- Gold does carry them. It carries them under its own names (`contest` for the
+-- Bug-Catching Contest, `tutorial` for the DUDE's demonstration, `roaming` for
+-- a beast), which is why the list in Config has a Gen 2 half; and it carries
+-- two of them as a *number* on `battleType` rather than as a field at all,
+-- which is why there is a second, value-keyed set beside it. A number is truthy
+-- whatever it is, so a name loop asked about `battleType` would refuse every
+-- Gen 2 battle ever fought.
+--
+-- Both spellings are checked at both levels. The state and its inner battle
+-- disagree about where each of these lives depending on which layer set it --
+-- `contest` and `tutorial` are the screen's, `roaming` and `battleType` are the
+-- battle's -- and asking all four questions is cheaper than remembering which.
 function M.refused(state)
   if type(state) ~= "table" then return false end
   local inner = type(state.battle) == "table" and state.battle or nil
   for _, field in ipairs(Config.SOLO_REFUSED) do
     if state[field] then return true end
     if inner and inner[field] then return true end
+  end
+  local byValue = Config.SOLO_REFUSED_BATTLE_TYPES
+  if type(byValue) == "table" then
+    local outer = tonumber(state.battleType)
+    if outer and byValue[outer] then return true end
+    local within = inner and tonumber(inner.battleType) or nil
+    if within and byValue[within] then return true end
   end
   return false
 end
@@ -321,11 +343,15 @@ function M.new(ui, opts)
     game = nil,
 
     kind = nil,       -- "wild" | "trainer"
+    generation = nil, -- 1 or 2, for the arithmetic that differs between them
     mapId = nil,      -- where it was walked into, for a caller that asks
     reason = nil,     -- the referee's own word for how it ended
     wildMon = nil,    -- the engine's wild monster, for the catch grant
     settled = false,  -- the outcome has been handed to the screen
-    refuseRun = nil,  -- a RUN the trainer path declined, owed a refusal line
+    refuseRun = nil,  -- a RUN the trainer path declined, owed a fresh menu
+    failedRun = nil,  -- a wild RUN the escape roll refused, owed a spent turn
+    runAttempts = 0,  -- escape attempts this fight; the odds climb with it
+    faults = 0,       -- consecutive frames the referee threw in -- see M:_pump
     counter = 0,      -- battle ids, so two fights in a session never collide
     clock = 0,        -- seconds since this fight opened; the referee's `now`
     seq = 0,          -- our own event numbering -- see M:_feed
@@ -517,7 +543,14 @@ function M:_begin(game, state, mapId, kind)
     -- fills it from the announced side b, which is the path the wild screen
     -- was written for. A trainer fight names the seat, because that is what
     -- `resultFor` reads the verdict against.
-    peerId = (kind == "wild") and nil or FOE_SEAT,
+    --
+    -- Spelled with a branch rather than `x and nil or y`, which is the one
+    -- ternary Lua does not have: `true and nil` is nil and `nil or y` is y, so
+    -- that idiom hands back the *false* arm on both sides of the test and this
+    -- line quietly named the seat on the wild path it was written to leave
+    -- empty. Harmless as it turned out -- `onReady` sets the same value one
+    -- call later -- but see the bag below, where the same shape was not.
+    peerId = (kind ~= "wild") and FOE_SEAT or nil,
     peerName = (kind == "wild") and "WILD" or foeName(state),
     mode = mode,
     wildParty = (kind == "wild") and enemySheets or nil,
@@ -555,8 +588,16 @@ function M:_begin(game, state, mapId, kind)
       name = (kind == "wild") and (enemySheets[1].species or "WILD")
         or foeName(state),
       mons = enemySheets,
-      bag = (kind == "wild") and nil
-        or npcBag(Turn, SoloBrain.trainerOf(state), game.data, generation),
+      -- **Nil on the wild path, and it has to be spelled as a branch.**
+      -- `(kind == "wild") and nil or npcBag(...)` reads like a ternary and is
+      -- not one: `true and nil` is nil, `nil or npcBag(...)` is the bag, so
+      -- the wild seat was handed the gym kit on *both* sides of the test. The
+      -- symptom is the exact one npcBag's own header says must never happen --
+      -- `Turn._autoChoice` reaches for a bag before it reaches for a move, so
+      -- a RATTATA was drinking SUPER POTIONs and spraying X ATTACK.
+      bag = (kind ~= "wild")
+        and npcBag(Turn, SoloBrain.trainerOf(state), game.data, generation)
+        or nil,
     } },
   }
 
@@ -599,9 +640,12 @@ function M:_begin(game, state, mapId, kind)
 
   self.fight, self.sim, self.brain = fight, sim, brain
   self.engine, self.game, self.kind = state, game, kind
+  self.generation = generation
   self.wildMon = wildMon
   self.mapId = mapId
-  self.settled, self.reason, self.refuseRun = false, nil, nil
+  self.settled, self.reason = false, nil
+  self.refuseRun, self.failedRun = nil, nil
+  self.runAttempts, self.faults = 0, 0
   self.clock, self.seq = 0, 0
   self.playerMoves, self.playerTurns = {}, 0
   self.playerMon, self.playerMove = nil, nil
@@ -688,38 +732,178 @@ end
 -- the player's turn
 -- ------------------------------------------------------------------
 
--- **RUN is refused in a trainer battle, here and nowhere else.**
+-- **RUN is decided here, in both of the ways it can go, and nowhere else.**
 --
--- The referee's `_resolveRuns` is not gated on the mode: a `run` from either
--- side ends the fight, and the side that ran is recorded as the loser. Online
--- that is correct -- fleeing a duel is a concession -- but in a solo trainer
--- fight it would mean pressing RUN forfeits the gym, and a forfeit reads as a
--- loss, and a loss blacks the player out. Vanilla's answer is "No! There's no
--- running from a trainer battle!", the turn is not spent, and the menu comes
--- straight back.
+-- The referee's `_resolveRuns` is not gated on the mode and rolls no dice: a
+-- `run` from either side ends the fight there and then, and the side that ran
+-- is recorded as the loser. Online that is correct -- fleeing a duel is a
+-- concession, and a duel has no escape odds -- but neither half of it is
+-- single-player's answer, so both halves are answered at this boundary. The
+-- referee never learns that RUN was pressed, which is the whole point:
+-- `src/BattleSim/Turn.lua` has a JavaScript twin with parity fixtures over it
+-- and does not move for this feature.
 --
--- So the choice is not forwarded, and the screen is un-wedged the way the
--- referee would un-wedge it: the refusal as a line, then a fresh `turn` to
--- reopen the window the screen believes it has already answered. The referee's
--- own turn is still open and this seat still owes it, so the very next choice
--- resolves normally. Forging the two events is legitimate exactly because this
--- file *is* the referee -- and it is why every event is renumbered on its way
--- to the screen (see M:_feed) rather than carrying the referee's sequence.
+-- ------- a trainer's RUN
 --
--- **Parked for the pump rather than fed from here**, which is the same rule the
--- rest of this seam runs on and the one place it is easy to get wrong:
--- `MediatedBattle:sendChoice` sets `phase`, `pendingTurn` and `answeredTurn`
--- *after* the transport call returns, so a `turn` fed from inside it is
--- overwritten one line later and the menu never comes back. Measured, not
--- guessed -- it was the first way this was written.
+-- Forwarded, it would mean pressing RUN forfeits the gym, and a forfeit reads
+-- as a loss, and a loss blacks the player out. Vanilla refuses: "No! There's
+-- no running from a trainer battle!", `afterQueue = "menu"`, and the turn is
+-- **not** spent (`BattleState:tryRun`'s trainer arm returns before the roll).
+--
+-- The refusal *line* is not ours. `MediatedBattle:updateCommand` already says
+-- it, on the screen, before it files the choice -- so all this owes is the
+-- `turn` that reopens the window the screen believes it has already answered.
+-- A second copy of the sentence fed from here is what the player used to read
+-- twice, in two consecutive boxes. Leave the line to the screen.
+--
+-- ------- a wild RUN
+--
+-- Vanilla rolls for it (`BattleState:runRoll`, and Gold's
+-- `Battle:runRollVanilla`), and a referee that always lets you go is not a
+-- kindness -- it is a silent difficulty change to ordinary single-player play,
+-- where every wild encounter becomes one free press of B. So the roll happens
+-- here, against the referee's own current effective speeds, and only an escape
+-- that actually succeeded is forwarded. A failed one prints "Can't escape!"
+-- and **spends the turn**, which is the half that is easy to leave out and the
+-- half the enemy's free attack lives in.
+--
+-- ------- **parked for the pump rather than acted on from here**
+--
+-- Which is the same rule the rest of this seam runs on and the one place it is
+-- easy to get wrong: `MediatedBattle:sendChoice` sets `phase`, `pendingTurn`
+-- and `answeredTurn` *after* the transport call returns, so a `turn` fed from
+-- inside it is overwritten one line later and the menu never comes back.
+-- Measured, not guessed -- it was the first way this was written. The failed
+-- escape rides the same parking space for the same reason, plus one of its
+-- own: the events its spent turn produces must land *after* "Can't escape!",
+-- and from in here they would land in the middle of the screen's own bookkeeping.
 function M:_choose(payload)
   local sim = self.sim
   if not (sim and type(payload) == "table") then return false end
-  if payload.action == "run" and self.kind == "trainer" then
-    self.refuseRun = true
-    return false
+  if payload.action == "run" then
+    if self.kind == "trainer" then
+      self.refuseRun = true
+      return false
+    end
+    if not self:_escapes() then
+      self.failedRun = true
+      return false
+    end
   end
   return sim:submitChoice(PLAYER_SEAT, payload) and true or false
+end
+
+-- The escape roll, in each generation's own arithmetic, out of 256.
+--
+-- Gen 1 (`engine/battle/core.asm` TryRunningFromBattle, ported at
+-- `src/battle/BattleState.lua:runRollVanilla`): faster than the foe is a
+-- guaranteed getaway; otherwise `b = floor(enemySpeed / 4) % 256`, a zero `b`
+-- is a guaranteed getaway too (the cartridge's divide-by-zero overflow), and
+-- the odds are `floor(playerSpeed * 32 / b) + 30 * (attempts - 1)` against one
+-- random byte, escaping on `roll <= odds` -- the original's `jr nc` keeps the
+-- equal case.
+--
+-- Gen 2 (`src/battle/gen2/Battle.lua:runRollVanilla`) is close but not the
+-- same, and guessing would have been wrong twice: the divisor is clamped to 1
+-- rather than allowed to overflow, the attempt bonus is `30 * attempts` rather
+-- than `30 * (attempts - 1)` -- so Gold's *first* try already carries it -- and
+-- the comparison is strict, `roll < odds`.
+--
+-- Returned as a number rather than a boolean so the two comparisons stay next
+-- to the two formulas that need them.
+local function escapeOdds(generation, pSpd, eSpd, attempts)
+  if pSpd >= eSpd then return 256 end
+  if generation == 2 then
+    return floor(pSpd * 32 / max(1, floor(eSpd / 4))) + 30 * attempts
+  end
+  local b = floor(eSpd / 4) % 256
+  if b == 0 then return 256 end
+  return floor(pSpd * 32 / b) + 30 * (attempts - 1)
+end
+
+-- Did this attempt get away?
+--
+-- The speeds are the *referee's*, taken through its own `_speedOf`, which is
+-- the one place badge boosts, stat stages and paralysis are all folded in
+-- together -- and the same three things vanilla's `wBattleMonSpeed` carries
+-- into `TryRunningFromBattle`. Re-deriving them here from the sheets would be a
+-- second speed formula to keep in step with the one the fight is actually
+-- being fought under.
+--
+-- The roll comes off the referee's own RNG, so a solo fight remains exactly
+-- reproducible from its seed -- an escape is part of the battle, not something
+-- happening beside it.
+--
+-- A fight this cannot price -- no active monster on one side, a referee with no
+-- speed to report -- lets the player go. Failing open is the honest default
+-- here: the alternative is a wild encounter nobody can leave, which is the one
+-- state a wild encounter must never be in.
+function M:_escapes()
+  local sim = self.sim
+  local player = sim and sim.byId and sim.byId[PLAYER_SEAT]
+  local foe = sim and sim.byId and sim.byId[FOE_SEAT]
+  local mine, theirs = activeOf(player), activeOf(foe)
+  if not (mine and theirs) then return true end
+
+  -- Counted before the roll and never rolled back, which is vanilla's order
+  -- too: a refused attempt still raises the odds of the next one.
+  self.runAttempts = (self.runAttempts or 0) + 1
+
+  local okMine, pSpd = pcall(sim._speedOf, sim, player, mine)
+  local okTheirs, eSpd = pcall(sim._speedOf, sim, foe, theirs)
+  pSpd, eSpd = tonumber(okMine and pSpd), tonumber(okTheirs and eSpd)
+  if not (pSpd and eSpd) then
+    self:warn("runspeed", "the escape odds for this battle could not be "
+      .. "worked out, so you got away; report this with the POKéMON you were "
+      .. "running from")
+    return true
+  end
+
+  local odds = escapeOdds(self.generation, floor(pSpd), floor(eSpd),
+                          self.runAttempts)
+  if odds >= 256 then return true end
+
+  local rng = sim.rng
+  local okRoll, roll = pcall(function() return rng:byte() end)
+  if not (okRoll and tonumber(roll)) then return true end
+  if self.generation == 2 then return roll < odds end
+  return roll <= odds
+end
+
+-- The turn a failed escape costs, spent without the referee being asked for a
+-- move the player did not make.
+--
+-- `submitChoice` cannot express this. Its `ACTIONS` set is fight / item /
+-- switch / run / cancel, and there is deliberately no "do nothing" on the wire
+-- -- an online client that could file one could stall a turn for everybody
+-- else. The referee has the concept, though, and uses it constantly:
+-- `_fillForcedChoices` writes `{ action = "skip" }` straight onto a seat that
+-- must recharge, is trapped, or is storing energy. A failed escape is exactly
+-- that shape -- the seat is spending its turn on nothing -- so it is written
+-- the same way.
+--
+-- Writing `fighter.choice` from outside is otherwise this file's one banned
+-- move (see M:_answerFoe on why a brain's answer must go through
+-- `submitChoice`), and the reason it is safe here is that the ban is about
+-- *index vocabulary*: `submitChoice` normalises zero-based moves and party
+-- positions, `fighter.choice` holds them already converted, and a choice that
+-- carries no index at all cannot be caught between the two.
+--
+-- `forcedPending` is then the referee's own way of saying "every living seat is
+-- answered, close this turn on the next tick" -- set by `_openTurn` when a
+-- whole turn came out forced. Setting it here rather than reaching for the
+-- private `_maybeResolve` means the turn closes inside `tick`, on the pump's
+-- own next line, through the referee's own path. Without it the fight would
+-- wedge: the opponent has usually answered several frames ago, so nothing else
+-- in the frame would be left to notice that the turn is complete.
+function M:_spendTurn()
+  local sim = self.sim
+  local player = sim and sim.byId and sim.byId[PLAYER_SEAT]
+  if not (player and sim.phase == "choice") then return false end
+  if player.choice ~= nil then return false end
+  player.choice = { action = "skip" }
+  sim.forcedPending = true
+  return true
 end
 
 -- ------------------------------------------------------------------
@@ -746,28 +930,80 @@ end
 -- again, because that tick will have produced more. A pump that drained only
 -- after the choice-driven path would stall the first time nobody had a choice
 -- to make.
+--
+-- ------- and a referee that throws is contained, but only for so long
+--
+-- A throw out of `tick` or `drainEvents` is caught rather than allowed to reach
+-- src/Client.lua's pcall, because one bad frame should not take a whole battle
+-- down. What that used to hide is the failure that is not a bad frame: a
+-- deterministic throw repeats every frame forever. The turn never resolves,
+-- `outcome()` stays nil, `SOLO_CHOICE_TIMEOUT` is zero so no deadline arrives
+-- -- and in a trainer fight RUN is refused, so the player is left standing in
+-- front of a battle screen with no way out of it at all, reading a warning that
+-- asks them to "finish or leave this battle" and cannot do either.
+--
+-- So the frames are counted. `Config.SOLO_FAULT_LIMIT` in a row and the fight
+-- is handed back: `M:reset` takes our screen off and leaves the engine's own
+-- battle -- which has been sitting underneath the whole time -- on top, to be
+-- fought the ordinary way. The counter is per *frame*, not per call, and it
+-- resets on any frame that completes cleanly, so an isolated bad event never
+-- accumulates toward it.
 function M:_pump()
   local sim, fight = self.sim, self.fight
   if not (sim and fight) then return false end
 
-  -- A RUN the trainer path refused last frame, answered now that the screen
-  -- has finished writing over its own choice state. See M:_choose.
+  -- A RUN the trainer path refused last frame, answered now that the screen has
+  -- finished writing over its own choice state. See M:_choose.
+  --
+  -- **The `turn` and nothing else.** The refusal line is the screen's own --
+  -- `MediatedBattle:updateCommand` prints "No! There's no\nrunning from a\n
+  -- trainer battle!" before it files the choice -- so a copy fed from here is
+  -- the same sentence in a second box. All this owes is the window: vanilla
+  -- returns straight to the menu (`afterQueue = "menu"`) and does not spend the
+  -- turn, so the seat still owes the referee an answer and the next choice
+  -- resolves normally.
   if self.refuseRun then
     self.refuseRun = nil
-    self:_feed({ t = "msg", text = "No! There's no running\nfrom a trainer battle!" })
     self:_feed({ t = "turn", amount = sim.turn })
   end
 
+  -- A wild RUN the escape roll turned down, answered in the same place and for
+  -- the same reason. Line first, then the turn is spent on nothing, so the
+  -- enemy's free attack lands behind "Can't escape!" rather than in front of it.
+  if self.failedRun then
+    self.failedRun = nil
+    self:_feed({ t = "msg", text = "Can't escape!" })
+    self:_spendTurn()
+  end
+
   self:_answerFoe()
-  self:_drain()
+  local faults = self:_drain()
 
   local ok, err = pcall(sim.tick, sim, floor(self.clock))
   if not ok then
-    self:warn("tick", "the mod's battle referee stopped answering (%s); "
-      .. "finish or leave this battle and report it with the fight you were "
-      .. "in", tostring(err))
+    faults = faults + 1
+    self:warn("tick", "the mod's battle referee stopped answering (%s); it is "
+      .. "given a few more frames and then this fight is handed back to the "
+      .. "ordinary battle system; report it with the fight you were in",
+      tostring(err))
   end
-  self:_drain()
+  faults = faults + self:_drain()
+
+  if faults > 0 then
+    self.faults = (self.faults or 0) + 1
+    if self.faults >= (tonumber(Config.SOLO_FAULT_LIMIT) or 3) then
+      -- Said unconditionally rather than through M:warn, because this is the
+      -- one line in the sequence that names something the player can act on
+      -- and it must not be swallowed as a repeat of the warnings above it.
+      mod.log:error("the mod's battle system could not keep this fight going, "
+        .. "so the ordinary battle has been put back on screen -- fight it as "
+        .. "usual; turn SOLO BATTLES off in the mod manager if it happens again")
+      self:reset()
+      return false
+    end
+  else
+    self.faults = 0
+  end
 
   local outcome = sim:outcome()
   if outcome and not self.settled then self:_settle(outcome) end
@@ -775,12 +1011,24 @@ function M:_pump()
 end
 
 -- Everything the referee has produced since the last look, in order.
+--
+-- Answers how many faults it hit -- 0 or 1 -- so M:_pump can count a frame
+-- rather than a call. A drain that throws used to fail completely silently,
+-- which made a fight that stalled here unattributable: the events simply
+-- stopped arriving and nothing anywhere said why.
 function M:_drain()
   local sim, fight = self.sim, self.fight
-  if not (sim and fight) then return end
+  if not (sim and fight) then return 0 end
   local ok, events = pcall(sim.drainEvents, sim)
-  if not (ok and type(events) == "table") then return end
+  if not ok then
+    self:warn("drain", "this battle's events could not be read from the mod's "
+      .. "referee (%s); if the fight stops moving it will be handed back to "
+      .. "the ordinary battle system", tostring(events))
+    return 1
+  end
+  if type(events) ~= "table" then return 0 end
   for _, event in ipairs(events) do self:_feed(event) end
+  return 0
 end
 
 -- One event, renumbered, onto the screen.
@@ -951,18 +1199,48 @@ end
 --      overworld's `afterBattle` offers evolutions to exactly the monsters the
 --      battle recorded, and the battle that recorded them is this one.
 --   3. **The blackout is decided once, before anything heals.**
---   4. **The forget prompts go up before the ritual**, as they do in co-op:
---      they are the player's own screens and belong over the world, not under
---      a warp.
---   5. **The buried battle is unwound to by identity and popped**, and only
---      then told how it went. Popped, because left on the stack it would
---      resume the moment ours came off and the player would fight the same
---      trainer twice. By identity, because a text box or a transition can be
---      sitting between the two and a fixed number of pops is a guess.
+--   4. **The buried battle comes off the stack first**, unwound to by identity.
+--      By identity, because a text box or a transition can be sitting between
+--      the two and a fixed number of pops is a guess. Off, because left there
+--      it would resume the moment ours came off and the player would fight the
+--      same trainer twice.
+--
+--      This step used to be number five, *after* the forget prompts, and that
+--      inversion was a real bug rather than an untidiness. `Coop.offerForgets`
+--      pushes `MoveLearnMenu` synchronously, straight above the buried battle;
+--      an unwind that then popped everything above that battle destroyed the
+--      menu -- and, for two moves at once, the "..." box carrying the
+--      continuation -- in the same frame it was raised. Every solo level-up
+--      that taught a fifth move lost it silently. Co-op never had the bug
+--      because co-op unwinds at the *start* of its fight (`Coop.lua:2510`) and
+--      so has nothing left above the battle by prompt time; solo unwinds at the
+--      end, which inverts the pair. Doing it first here reproduces exactly the
+--      stack shape co-op prompts over: the world, and nothing above it.
+--   5. **The forget prompts go up, over the world**, as they do in co-op: they
+--      are the player's own screens and belong over the world, not under a
+--      warp -- and `Coop.pumpBlackout` is written to wait for them, since the
+--      thing it waits for is the overworld coming back to the top.
 --   6. **The ritual runs, and the whiteout is run by whoever the engine did
 --      not run it for.** A won trainer battle whose winner's own team was
 --      wiped is the case that needs the second half: the engine marks the
 --      trainer beaten and deliberately does not black anybody out.
+--
+-- ------- except that 4 and 5 swap over on Gold, and have to
+--
+-- `Coop.finishBuriedBattle` calls `onFinish`, and the two generations disagree
+-- about who pops the battle around it. Gen 1's `BattleState:finish` pops the
+-- state itself and *then* calls `onFinish`, so a caller standing in for it pops
+-- first and hands the ritual a state already off the stack -- which is the
+-- contract co-op has always run on. Gen 2 has no such split: the pop lives
+-- *inside* the closure `World:startBattle` hands to `Gen2BattleState` as
+-- `onDone`, which the loader aliases onto `onFinish` (`src/Client.lua:2523`),
+-- and it pops the top of the stack unconditionally.
+--
+-- So on Gold the battle is left where it is and the ritual takes it down, and
+-- the prompts go up after -- because anything pushed before it would be exactly
+-- what that pop took. `engine.onDone` is the test rather than the generation
+-- number, because "does the ritual pop for itself" is a property of the
+-- callback and not of the game.
 function M:_ended(result, toLearn)
   local game, engine, sim = self.game, self.engine, self.sim
   local reason, save, levels = self.reason, self.save, self.levels
@@ -972,7 +1250,8 @@ function M:_ended(result, toLearn)
   self.fight, self.sim, self.brain = nil, nil, nil
   self.engine, self.game, self.wildMon = nil, nil, nil
   self.kind, self.reason, self.save, self.levels = nil, nil, nil, nil
-  self.settled, self.refuseRun = false, nil
+  self.settled, self.refuseRun, self.failedRun = false, nil, nil
+  self.generation, self.runAttempts, self.faults = nil, 0, 0
 
   if not (game and sim) then return false end
 
@@ -990,20 +1269,59 @@ function M:_ended(result, toLearn)
   -- flow because it cannot reach Coop at all; this file can, and a third copy
   -- of "put the moves a level taught to the player" would be a third thing to
   -- keep in step.
-  local okForgets, whyForgets = pcall(Coop.offerForgets, self, game, toLearn)
-  if not okForgets then
-    self:warn("forgets", "a move learned in this battle could not be offered "
-      .. "(%s); it can still be learned by levelling again", tostring(whyForgets))
+  local function offerForgets()
+    local okForgets, whyForgets = pcall(Coop.offerForgets, self, game, toLearn)
+    if not okForgets then
+      self:warn("forgets", "a move learned in this battle could not be offered "
+        .. "(%s); it can still be learned by levelling again",
+        tostring(whyForgets))
+    end
+  end
+
+  -- Whether the ritual takes the battle off the stack for itself. See the
+  -- generation note in this function's header.
+  local ritualPops = engine ~= nil and type(engine.onDone) == "function"
+
+  -- Step 4. `mayFinish` is what the unwind's answer is *for*: `unwindStackTo`
+  -- gives up after sixteen pops, and a target it never reached is a battle
+  -- still buried under a pile. Finishing it anyway would mark the trainer
+  -- beaten and pay their prize while leaving them on the stack to be fought
+  -- again when the pile clears -- so an unwind that did not arrive declines to
+  -- finish, and the engine's own battle is left to run for real. A target that
+  -- was already gone from the stack answers false too, and that one is *not* a
+  -- reason to decline: there is nothing to unwind and nothing to fight twice.
+  local mayFinish = engine ~= nil
+  if engine then
+    local reachable = Coop.stackHolds(game, engine) ~= false
+    local unwound = Coop.unwindStackTo(game, engine, not ritualPops)
+    if reachable and not unwound then
+      mayFinish = false
+      self:warn("unwind", "this battle's rewards could not be handed over "
+        .. "because too many screens were open above it, so the ordinary "
+        .. "battle is still waiting underneath -- fight it as usual")
+    end
   end
 
   local handled, engineRitual = false, false
-  if engine then
-    Coop.unwindStackTo(game, engine, true)
+  local function finishEngine()
+    if not (engine and mayFinish) then return end
     handled, engineRitual = Coop.finishBuriedBattle(engine, game, outcome,
                                                     blackout)
   end
+
+  -- Steps 5 and 6, in whichever order the buried battle's own pop allows.
+  if ritualPops then
+    finishEngine()
+    offerForgets()
+  else
+    offerForgets()
+    finishEngine()
+  end
+
   if blackout and not (handled and engineRitual) then
-    Coop.blackout(self, game)
+    -- "battle", not co-op's default "2-on-2": a lone player's four possible
+    -- blackout warnings must not describe a feature they were not using.
+    Coop.blackout(self, game, "battle")
   end
 
   -- And nothing else, deliberately: a wild encounter that ended in a catch has
@@ -1207,6 +1525,8 @@ function M:reset()
   self.engine, self.game, self.wildMon = nil, nil, nil
   self.kind, self.reason, self.save, self.levels = nil, nil, nil, nil
   self.settled, self.pendingWarp, self.refuseRun = false, nil, nil
+  self.failedRun, self.generation = nil, nil
+  self.runAttempts, self.faults = 0, 0
   self.playerMoves, self.playerTurns = nil, 0
   self.playerMon, self.playerMove = nil, nil
   if game and fight and engine then

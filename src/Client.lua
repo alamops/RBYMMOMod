@@ -1538,8 +1538,15 @@ end
 
 -- Another save has taken over the world.
 --
--- Three steps, and the order is the whole of it. The session belongs to the
--- world that is going away, so it comes down first. The stashed original
+-- Reached from save.loaded and save.created both, which is what makes this
+-- the place every per-playthrough reset belongs: a fresh file arrives here
+-- and nowhere else, so anything wired to one event alone silently skips NEW
+-- GAME.
+--
+-- Four steps, and the order is the whole of it. A solo battle is refereeing
+-- a party that has just stopped existing, so it is dropped before anything
+-- else runs. The session belongs to the world that is going away, so it
+-- comes down next. The stashed original
 -- belongs to *that* world's player entity, so it is dropped rather than
 -- carried across -- restoreLook writes back only onto the entity it was
 -- taken from, which makes a torn-down world a no-op and clears the stale
@@ -1550,6 +1557,27 @@ end
 -- exist yet when the event lands. That is not a failure worth reporting:
 -- refreshLook wears the choice on the first map.entered instead.
 function M.saveLoaded()
+  -- A solo battle in flight does not survive the file changing underneath
+  -- it, and is dropped rather than allowed to try.
+  --
+  -- Loading (F2, or CONTINUE from the title) is a hard SaveData.load plus a
+  -- restore, and NEW GAME builds a save from nothing: either way the party
+  -- this fight opened against stops being the party the game is playing.
+  -- What the fight still owes that party is HP, PP and status, and writing a
+  -- lost playthrough's damage onto a freshly loaded -- or freshly created --
+  -- one is the kind of corruption nobody would ever trace back to a battle.
+  -- SoloBattle does hold the save table it opened against and refuses to
+  -- write across it, but refusing to write is only half an answer -- the
+  -- screen would still be up, refereeing a fight about monsters that no
+  -- longer exist. reset() ends it and puts the engine's own battle back.
+  --
+  -- pcall'd for the reason every reset on this path is: tearing a fight down
+  -- must never be the thing that takes the save path with it.
+  --
+  -- Ahead of everything below and outside everything any of it gates on:
+  -- this is true of a single-player copy that never saw a hub, which is
+  -- exactly the copy most likely to be in one of these fights.
+  pcall(solo.reset, solo)
   M.leave()
   M.restoreLook()
   M.syncLook()
@@ -2777,26 +2805,7 @@ function M.install()
   -- hosting, the listener has to come down with it rather than serving a
   -- world nobody is standing in. The character goes with the save too: the
   -- one being loaded may have chosen somebody else, or nobody.
-  mod.events:on("save.loaded", function()
-    -- A solo battle in flight does not survive the file changing underneath
-    -- it, and is dropped rather than allowed to try.
-    --
-    -- Loading (F2, or CONTINUE from the title) is a hard SaveData.load plus a
-    -- restore: the party this fight opened against stops being the party the
-    -- game is playing. What the fight still owes that party is HP, PP and
-    -- status, and writing a lost playthrough's damage onto a freshly loaded
-    -- one is the kind of corruption nobody would ever trace back to a battle.
-    -- SoloBattle does hold the save table it opened against and refuses to
-    -- write across it, but refusing to write is only half an answer -- the
-    -- screen would still be up, refereeing a fight about monsters that no
-    -- longer exist. reset() ends it and puts the engine's own battle back.
-    --
-    -- Ahead of the teardown below and outside everything it gates on: this is
-    -- true of a single-player copy that never saw a hub, which is exactly the
-    -- copy most likely to be in one of these fights.
-    pcall(solo.reset, solo)
-    M.saveLoaded()
-  end)
+  mod.events:on("save.loaded", function() M.saveLoaded() end)
 
   -- NEW GAME needs the very same resync, and it does not announce itself the
   -- same way: starting a fresh file emits save.created, never save.loaded, so

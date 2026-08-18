@@ -45,8 +45,13 @@ here must match `manifest.version`.
     than incidental: `Effects.isWildMode` and `teleportRunAllowed` gate
     catching and running on `mode:find("wild")`, so seating a trainer as
     a wild fight would let a player throw a ball at Brock's ONIX. Under
-    `coop_npc` the ball fails in the game's own words, the item is spent
-    and the turn is consumed — correct Gen 1 trainer semantics, for free.
+    `coop_npc` the throw is refused, the item is spent and the turn is
+    consumed — which is what vanilla charges for the same mistake, since
+    `BagMenu` debits the ball before `BattleState:throwBall` and the
+    non-wild arm still runs the turn out. The mechanics match for free;
+    the *script* does not — the referee prints its own generic `used an
+    item` / `But it failed` rather than the cartridge's `The TRAINER
+    blocked the BALL!` and `Don't be a thief!`.
   - **Three battles are left on the vanilla engine, silently:** the
     Safari Zone, the Marowak ghost, and the old man's catching demo in
     Viridian. Each has mechanics `BattleSim` does not model — Safari

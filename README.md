@@ -457,16 +457,28 @@ the referee as an ordinary choice. Brock plays Brock. The alternative was a
 generic auto-picker, and you'd have noticed.
 
 **It's still a trainer battle, mechanically.** A trainer's monsters can't be
-caught and you can't run from them: throw a ball and it fails in the game's
-own words, the ball is spent, the turn is gone. That falls out of how the
-fight is seated rather than being bolted on afterwards — the wild fight is
-seated as a wild fight, where catching and fleeing are the whole point, and a
-trainer fight is not.
+caught and you can't run from them: throw a ball and the throw is refused,
+the ball is spent, the turn is gone — which is exactly what the engine
+charges you for the same mistake. The *lines* are the referee's own, though:
+you get a plain `used an item` / `But it failed` where the cartridge would
+have said `The TRAINER blocked the BALL!` and `Don't be a thief!`. Same
+price, different words. The refusal itself falls out of how the fight is
+seated rather than being bolted on afterwards — the wild fight is seated as a
+wild fight, where catching and fleeing are the whole point, and a trainer
+fight is not.
 
 **The save is the save.** Exp and level-ups, a catch, HP, PP and status, the
 prize money, the defeated flag, badges and TMs, the evolution check, the
-script that was waiting for the battle to end — all of it lands where it
-lands in vanilla. Lose and you black out the way you always did.
+script that was waiting for the battle to end — every one of those is written
+to your **real save**, onto the same objects the party screen and the PC
+read, not into a sandbox that gets thrown away at the end. Lose and you black
+out the way you always did.
+
+**What happens between the first turn and the last is our simulation.** That
+is the row you turned on, so read the paragraph above for what it says: the
+*results* land on your save. It isn't a promise of turn-for-turn parity with
+the cartridge inside the fight — the referee is a hand-written twin of the
+engine's battle, and where it differs, it differs.
 
 **Three fights are left exactly where they are:** the **Safari Zone**, the
 **Marowak ghost** in Pokémon Tower and the **old man's catching demo** in
