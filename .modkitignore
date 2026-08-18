@@ -49,6 +49,16 @@ tests/mediated_battle_client.lua
 tests/coop_mediated.lua
 tests/drivers/battle_turn_parity.lua
 
+# The solo-battle work. The two suites stand alone (their own need() resolver,
+# no engine reach) but they are still test code, and this file's rule is that
+# a player's archive carries the mod and nothing else -- the suites that prove
+# it belong to the checkout. The driver pair goes for the older reason as
+# well: it reaches tests/drivers/util.lua and means nothing outside a repo.
+tests/solo_battle.lua
+tests/solo_brain.lua
+tests/drivers/solo_battle_e2e.lua
+tests/drivers/run-solo-battle-e2e.sh
+
 # Working notes for whoever picks this up next; not mod content. The two
 # machine-readable ones describe how coding agents are driven in this
 # checkout -- they configure a tool, not a game, and a player who unpacks the

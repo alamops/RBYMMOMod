@@ -4593,6 +4593,155 @@ stubOptions.hub, stubSave.hub = "10.0.0.9:7788", "mybox:1"
 eq(Client.isHosting(), false, "a fresh client is not hosting")
 
 -- ------------------------------------------------------------------
+-- 9a. SOLO BATTLES: the option row, and which fights it takes
+-- ------------------------------------------------------------------
+--
+-- The one row this mod defines that changes a fight the player was already
+-- going to have, rather than adding something new -- see Config.lua's own
+-- header on SOLO_BATTLES_DEFAULT. Off by default is the headline
+-- requirement here: a silent flip to on would be the worst regression this
+-- feature could ship, so it is pinned on its own, against the *real*
+-- loader's own copy of the schema (run.loader.optionSchemas -- the table
+-- src/mods/Loader.lua's options.define actually stored), not a stub that
+-- could drift from what mod.options:define was really handed.
+
+;(function()
+
+local SoloBattle = need("SoloBattle")
+
+local schema = run.loader.optionSchemas["rby_mmo"]
+check(schema ~= nil, "the mod defined an options schema")
+
+local row
+for _, r in ipairs(schema or {}) do
+  if r.key == SoloBattle.OPTION then row = r end
+end
+check(row ~= nil, "the SOLO BATTLES row is in it, filed under SoloBattle.OPTION")
+
+eq(row.key, SoloBattle.OPTION,
+   "the row's key is the same constant SoloBattle.lua reads, not a second "
+   .. "spelling of \"solo\" that could drift from it")
+eq(row.label, SoloBattle.OPTION_LABEL,
+   "and so is the label -- src/Client.lua (which defines the row) and "
+   .. "src/SoloBattle.lua (which reads it) cannot disagree by construction")
+eq(row.type, "toggle", "a plain on/off, like every other switch on this menu")
+
+-- The headline requirement, pinned on its own rather than folded into the
+-- row check above: a reviewer scanning for "does this default to on" should
+-- find the answer on one line.
+eq(Config.SOLO_BATTLES_DEFAULT, false,
+   "Config.SOLO_BATTLES_DEFAULT is false -- flipping this silently would be "
+   .. "the worst regression this feature could ship")
+eq(row.default, Config.SOLO_BATTLES_DEFAULT,
+   "the row's own default is that same constant, not a second copy of "
+   .. "false that could drift from it")
+eq(row.default, false, "so the row is confirmed off, explicitly")
+
+-- The manager draws every row's label in a fixed-width Game Boy font box;
+-- MAX PLAYERS (11 characters) and B TO RUN (8) are the existing high-water
+-- marks it has to fit alongside.
+eq(row.label, row.label:upper(),
+   "the label is ALL CAPS, like MAX PLAYERS and B TO RUN")
+check(#row.label <= 18,
+      "and short enough for the row -- " .. #row.label .. " characters")
+
+-- ------- read lazily: nothing caches the row at construction
+--
+-- No `enabled` override below, so M:isOn() falls back to its own default
+-- branch -- mod.options:get(M.OPTION) -- the same call src/Client.lua's own
+-- closure makes. Driven against that reading path (stubOptions, the table
+-- stubMod.options.get actually answers from) rather than any private field
+-- on the instance, so what is pinned is that a mid-session flip needs no
+-- relaunch and nothing built once at construction time.
+local savedSoloOption = stubOptions.solo
+local fresh = SoloBattle.new({}, {})
+
+stubOptions.solo = nil
+eq(fresh:isOn(), false, "with nothing stored, the row reads off")
+
+stubOptions.solo = true
+eq(fresh:isOn(), true,
+   "flipping the stored option turns it on for the very next read -- no "
+   .. "relaunch, no re-construction of the instance above it")
+
+stubOptions.solo = false
+eq(fresh:isOn(), false, "and back off just as live")
+
+stubOptions.solo = savedSoloOption
+
+-- ------- kindOf: both generations' shapes for "this is a fight I take"
+
+eq(SoloBattle.kindOf({ kind = "wild" }), "wild", "Gen 1: state.kind says wild")
+eq(SoloBattle.kindOf({ kind = "trainer" }), "trainer", "and trainer")
+eq(SoloBattle.kindOf({ kind = "link" }), nil,
+   "a kind that is neither is refused by not being named, not remembered")
+eq(SoloBattle.kindOf({}), nil, "no kind at all, and nothing underneath either")
+
+eq(SoloBattle.kindOf({ battle = { wild = true } }), "wild",
+   "Gen 2: no .kind on the shell, so its inner battle answers instead -- .wild")
+eq(SoloBattle.kindOf({ battle = { trainer = { classId = "OPP_BUG_CATCHER" } } }),
+   "trainer", "or .trainer")
+eq(SoloBattle.kindOf({ battle = {} }), nil,
+   "an inner battle that says neither is not a fight this file takes")
+eq(SoloBattle.kindOf({ kind = "link", battle = { wild = true } }), nil,
+   "an explicit non-wild/trainer kind wins outright -- the inner battle is "
+   .. "never consulted once state.kind says anything at all")
+eq(SoloBattle.kindOf(nil), nil, "and a non-table is simply not a fight")
+eq(SoloBattle.kindOf("nope"), nil, "neither is a string")
+
+-- ------- refused: the exceptions inside that whitelist
+
+for _, field in ipairs({ "safari", "ghost", "noCatch", "demo" }) do
+  eq(SoloBattle.refused({ kind = "wild", [field] = true }), true,
+     "Gen 1's " .. field .. " is handed straight back to the engine")
+end
+
+-- Gold spells two of these on the outer shell (BattleState's own fields)
+-- and the third one level down, on the inner battle -- see Config.SOLO_
+-- REFUSED's own header for why. Both are checked at both levels by the
+-- code under test; this pins the shapes it actually has to handle.
+for _, field in ipairs({ "contest", "tutorial" }) do
+  eq(SoloBattle.refused({ kind = "wild", [field] = true }), true,
+     "Gen 2's " .. field .. " lives on the outer shell and is refused there")
+end
+eq(SoloBattle.refused({ battle = { wild = true, roaming = true } }), true,
+   "roaming lives one level down, on the inner battle, and is refused there")
+
+for _, code in ipairs({ 3, 5, 6, 7, 9 }) do
+  eq(SoloBattle.refused({ battleType = code }), true,
+     "battleType " .. code .. " is refused at the outer level too, for a "
+     .. "script (or a later engine) that arms the byte instead of the field")
+  eq(SoloBattle.refused({ battle = { wild = true, battleType = code } }), true,
+     "and at the inner level, where Gold actually carries it")
+end
+
+-- The one CANLOSE-adjacent number deliberately NOT in the refused set
+-- (Config's own audit note): the "do not white out" exception lives inside
+-- the engine's post-battle closure, and this mod hands the result to
+-- exactly that closure -- so 1 has to pass straight through untouched.
+eq(SoloBattle.refused({ battleType = 1 }), false,
+   "CANLOSE (1) is not refused -- Config's own audited exception")
+
+eq(SoloBattle.refused({ kind = "wild" }), false,
+   "an ordinary wild encounter is accepted")
+eq(SoloBattle.refused({ kind = "trainer" }), false,
+   "so is an ordinary trainer")
+eq(SoloBattle.refused("nope"), false, "and a non-table refuses nothing, harmlessly")
+
+-- kindOf + refused together are the whole whitelist a caller like
+-- src/Client.lua's screen.pushed listener reads: an ordinary encounter of
+-- either kind clears both gates, an exceptional one does not, whatever
+-- kindOf said.
+check(SoloBattle.kindOf({ kind = "wild" }) == "wild"
+      and not SoloBattle.refused({ kind = "wild" }),
+      "an ordinary wild fight clears both gates")
+check(SoloBattle.kindOf({ kind = "trainer" }) == "trainer"
+      and not SoloBattle.refused({ kind = "trainer" }),
+      "and so does an ordinary trainer")
+
+end)()
+
+-- ------------------------------------------------------------------
 -- 9b. mmo.sprite from the client: push, reconcile, and the ack
 -- ------------------------------------------------------------------
 --
@@ -23190,6 +23339,97 @@ do
   store:setAutoJoin(store:get(CODELESS).key, false)
   miniWorld.here = nil
   Client.leave()
+end
+
+-- ------- screen.pushed: co-op then solo divert order (SOLO BATTLES)
+--
+-- offerFight's whole policy is the order it tries the two diverts: co-op
+-- goes first, on exactly its existing terms, and solo only ever sees a
+-- fight co-op declined -- never one it threw trying to claim. Driven
+-- through the real listener install() registered above, with ctx.coop and
+-- ctx.solo (src/Client.lua's own module-level instances, reachable off
+-- Client.ctx) swapped for recorders: what a claimed, declined or thrown
+-- divert actually *does* is somebody else's suite (Coop's own section far
+-- above this one; SoloBattle's fight mechanics are tests/solo_battle.lua's
+-- job, not this file's) -- this is only the order Client.lua tries them in.
+
+do
+  local pushedFn = miniEvents["screen.pushed"] and miniEvents["screen.pushed"][1]
+  check(pushedFn ~= nil, "install() subscribes to screen.pushed")
+
+  local calls
+  local function spy(tag, result)
+    return function() calls[#calls + 1] = tag; return result end
+  end
+
+  -- Rearmed before every case: a fresh pair of recorders and a clean log,
+  -- so one case's leftover call can never be mistaken for the next one's.
+  local function armSpies(coopResult)
+    calls = {}
+    Client.ctx.coop.onTrainerBattle = spy("coop", coopResult)
+    Client.ctx.coop.onWildEncounter = spy("coop", coopResult)
+    Client.ctx.solo.onTrainerBattle = spy("solo", true)
+    Client.ctx.solo.onWildEncounter = spy("solo", true)
+  end
+
+  local TRAINER_STATE = { kind = "trainer" }
+  local WILD_STATE = { kind = "wild" }
+
+  -- Disconnected and the row off: two field reads and a return -- nothing
+  -- tried at all, the same early exit a menu or a text box takes.
+  armSpies(false)
+  Client.transport.isReady = function() return false end
+  miniOptions.solo = false
+  pushedFn({ state = TRAINER_STATE })
+  eq(#calls, 0, "disconnected with the row off tries neither divert")
+
+  -- Disconnected and the row on: solo is offered the fight directly. There
+  -- is no transport for co-op to be ready on, so it is never called at all
+  -- -- not called-and-declined, never reached.
+  armSpies(false)
+  miniOptions.solo = true
+  pushedFn({ state = TRAINER_STATE })
+  eq(table.concat(calls, ","), "solo",
+     "disconnected with the row on: solo takes it, co-op is never asked")
+
+  -- Connected: co-op goes first, on its own terms, regardless of the row.
+  armSpies(true) -- co-op claims it
+  Client.transport.isReady = function() return true end
+  pushedFn({ state = TRAINER_STATE })
+  eq(table.concat(calls, ","), "coop",
+     "connected and co-op claims the fight: solo is never asked")
+
+  armSpies(false) -- co-op declines
+  pushedFn({ state = TRAINER_STATE })
+  eq(table.concat(calls, ","), "coop,solo",
+     "connected and co-op declines: solo gets exactly the fight handed back")
+
+  -- A throw is not a decline. offerFight's own pcall around the co-op call
+  -- has to stop right there: co-op may have half-claimed the encounter
+  -- before it failed, and a second screen over a battle that already has
+  -- one is a worse ending than the ordinary fight the warning already
+  -- promised -- this is the main co-op regression risk in the whole change.
+  calls = {}
+  Client.ctx.coop.onTrainerBattle = function() error("boom") end
+  Client.ctx.coop.onWildEncounter = function() error("boom") end
+  Client.ctx.solo.onTrainerBattle = spy("solo", true)
+  Client.ctx.solo.onWildEncounter = spy("solo", true)
+  local ranWithoutThrowing = pcall(pushedFn, { state = TRAINER_STATE })
+  check(ranWithoutThrowing,
+        "the listener itself never throws -- offerFight's own pcall around "
+        .. "the co-op call already caught it")
+  eq(#calls, 0,
+     "and a co-op throw does not fall through to solo -- the engine's own "
+     .. "battle, already on screen, is left exactly as it was")
+
+  -- Wild encounters take the identical order (kindOf just routes on
+  -- state.kind, and offerFight does not care which it was handed).
+  armSpies(false)
+  pushedFn({ state = WILD_STATE })
+  eq(table.concat(calls, ","), "coop,solo", "a wild encounter takes the same order")
+
+  Client.transport.isReady = function() return false end
+  miniOptions.solo = false
 end
 
 _G.love = ambientLove

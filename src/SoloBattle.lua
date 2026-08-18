@@ -1509,8 +1509,17 @@ end
 
 -- Everything let go of, with nothing finished off.
 --
--- For the paths that are not an ending: the mod being disabled, a hot reload, a
--- save being loaded out from under a fight. The buried engine battle is
+-- For the paths that are not an ending: a save loaded or created out from under
+-- a fight, and a referee that has faulted often enough to be given up on. Those
+-- two are the only callers that exist. A mod being disabled does not reach here
+-- and does not need to -- the manager's toggle ends in `love.event.quit`, so
+-- there is no in-process teardown to run -- and an F5 hot reload cannot reach
+-- here at all: `dev/HotReload.lua` drops the outgoing loader wholesale without
+-- calling into it, so a fight in flight would strand its screen on the stack.
+-- Closing that would need a teardown seam the mod API does not have, which is
+-- an upstream change rather than something to fake from this side.
+--
+-- The buried engine battle is
 -- deliberately *not* told anything -- it has not been fought -- and is left on
 -- the stack, where it is the battle the player is now looking at. That is the
 -- same answer `Coop:release` gives, and it is the honest one: an encounter that

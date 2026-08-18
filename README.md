@@ -441,7 +441,11 @@ scripted, rival, gym leader.
 around Kanto with your friends shouldn't quietly replace the fight you've
 been having since 1996. The row is read when the encounter starts, not when
 the game loads, so flipping it applies at the **very next** battle — nothing
-to relaunch, nothing to reload, and nothing changes about a save either way.
+to relaunch and nothing to reload. Flipping the row writes nothing to your
+save by itself. One thing genuinely does differ while a mod-run battle is on
+screen, though: `F1` won't take a mid-battle checkpoint, because the engine's
+checkpoint only knows the overworld and its own battle, and ours is neither.
+Finish the fight — or turn the row back off — and `F1` behaves as it always has.
 
 **Nothing goes on the wire.** There is no hub, no connection and no partner
 in this: the referee is built and pumped *inside your own copy*, and the

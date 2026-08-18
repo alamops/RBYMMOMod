@@ -79,6 +79,11 @@ local CoopSim = need("CoopSim")
 local CoopField = need("CoopField")
 local CoopBattle = need("CoopBattle")
 local Mediated = need("MediatedBattle")
+-- Only needed from section 13 on (TT4's regression guard on I3's extraction),
+-- but resolved here beside its siblings rather than lazily -- Coop itself
+-- need()s CoopBattle and Mediated, both already cached above, so this adds no
+-- new module to the graph, just a name for what was already loaded.
+local Coop = need("Coop")
 
 local function testPlayerId(seed)
   local s = tostring(seed or "")
@@ -2270,6 +2275,316 @@ do
         "the callout is up before the lunge -- the beat is still a beat")
   check(bubbleAtLunge == true,
         "...and still lit when the monster leans in")
+end
+
+-- ------------------------------------------------------------------
+-- 13. the post-battle ritual, extracted (TT4 — regression guard on I3)
+-- ------------------------------------------------------------------
+--
+-- src/Coop.lua's prize/blackout/onFinish/unwind sequence was lifted out of
+-- M:consume into reusable statics (M.payTrainerPrize, M.finishBuriedBattle,
+-- M.unwindStackTo / M.stackHolds, plus M:blackout / M:pumpBlackout made
+-- holder-agnostic) so src/SoloBattle.lua could call the same ritual with no
+-- co-op encounter around it. The extraction was meant to change nothing about
+-- what co-op itself does -- this section is the executable half of that
+-- promise, so a later edit to this file that reorders or narrows the ritual
+-- fails a test instead of shipping.
+--
+-- A `Coop` instance is built by hand throughout, the same way section 1 below
+-- builds a `CoopBattle` screen without its constructor: nothing here needs a
+-- transport, a ui or a real overworld, only the fields the function under
+-- test actually reads off `self`.
+
+-- A minimal StateStack double, shaped like the one src/Coop.lua and
+-- tests/rby_mmo_test.lua both drive `unwindTo`/`onStack` against: `states` is
+-- the array, `top`/`pop` are the two methods the ritual calls.
+local function bareStack(states)
+  return {
+    states = states,
+    top = function(self) return self.states[#self.states] end,
+    pop = function(self) return table.remove(self.states) end,
+  }
+end
+
+-- 13.1 -- prize before blackout: the ordering is load-bearing, both ways.
+--
+-- Run through M:onBattleOver itself, not a hand-rolled re-ordering of its two
+-- calls -- so a future edit that swaps the order in the source, not just in a
+-- test's idea of the order, is what this catches.
+do
+  -- A win whose winner still has a party standing: the ordinary case, no
+  -- ritual needed, the engine's own prize is the only money that moves.
+  local finishArg
+  local engine = {
+    trainer = { baseMoney = 10 },
+    enemyParty = { { level = 20 } },
+    onFinish = function(o) finishArg = o end,
+  }
+  local game = { save = { money = 100, party = { mon(30, 10) } },
+                 data = { constants = {} } }
+  local coop = setmetatable({ engineBattle = engine }, { __index = Coop })
+  coop:onBattleOver("win", game, nil, nil)
+  eq(finishArg, "win", "a plain win hands the engine a plain win")
+  eq(game.save.money, 300,
+     "prize alone: 100 + (baseMoney 10 * best enemy level 20)")
+
+  -- A win whose winner's own team is wiped: M.blacksOut says true even on a
+  -- win (the safety net co-op re-hangs because BattleState:finish never ran),
+  -- so the ritual's own blackout runs -- but only *after* the prize the same
+  -- call already paid. Halving before paying would leave 200; halving after
+  -- paying leaves 150. Only one of those is the vanilla order.
+  local finishArg2
+  local engine2 = {
+    trainer = { baseMoney = 10 },
+    enemyParty = { { level = 20 } },
+    onFinish = function(o) finishArg2 = o end,
+  }
+  local game2 = { save = { money = 100, party = { mon(0, 10) } },
+                  data = { constants = {} } }
+  local coop2 = setmetatable({ engineBattle = engine2 }, { __index = Coop })
+  coop2:onBattleOver("win", game2, nil, nil)
+  eq(finishArg2, "win",
+     "a win stays a win for the engine even when the winner blacks out -- "
+     .. "see M:consume: the defeat flag is owed to the world, the ritual to "
+     .. "the player")
+  eq(game2.save.money, 150,
+     "prize paid first (100 -> 300), THEN halved by the safety-net blackout "
+     .. "(300 -> 150) -- a reordering would leave 200, not 150")
+
+  -- A loss: no prize (the payTrainerPrize gate is `result == "win"`), and the
+  -- outcome is aliased to the engine's own "lose" spelling with engineRitual
+  -- handed back true -- which is what stops onBattleOver from ALSO halving
+  -- the money itself and taxing the player twice for one defeat.
+  local finishArg3
+  local engine3 = {
+    trainer = { baseMoney = 10 },
+    enemyParty = { { level = 20 } },
+    onFinish = function(o) finishArg3 = o end,
+  }
+  local game3 = { save = { money = 100, party = { mon(0, 10) } },
+                  data = { constants = {} } }
+  local coop3 = setmetatable({ engineBattle = engine3 }, { __index = Coop })
+  coop3:onBattleOver("loss", game3, nil, nil)
+  eq(finishArg3, "lose",
+     "a co-op 'loss' is spelled 'lose' for the engine's own afterBattle, "
+     .. "which is the string that actually triggers its blackout")
+  eq(game3.save.money, 100,
+     "no prize on a loss, and the caller's own blackout does not also fire "
+     .. "-- the engine's ritual (engineRitual=true) already owns it")
+end
+
+-- 13.2 -- M.finishBuriedBattle: onFinish/onDone aliasing and the early-out.
+do
+  -- Gen 1 shape: onFinish present.
+  local seenFinish
+  local engine1 = {
+    trainer = { baseMoney = 5 }, enemyParty = { { level = 10 } },
+    onFinish = function(o) seenFinish = o end,
+  }
+  local game1 = { save = { money = 0 } }
+  local handled1, ritual1 = Coop.finishBuriedBattle(engine1, game1, "win", false)
+  eq(handled1, true, "an onFinish engine is handled")
+  eq(ritual1, false, "...and a win never claims the engine ritual")
+  eq(seenFinish, "win", "...onFinish gets the result")
+  eq(game1.save.money, 50, "...and the prize (5 * 10) is paid")
+
+  -- Gen 2 shape: only onDone, no onFinish at all (the raw shape before
+  -- Client.lua's alias runs, or a fixture that never stamped one).
+  local seenDone
+  local engine2 = {
+    trainer = { baseMoney = 5 }, enemyParty = { { level = 10 } },
+    onDone = function(o) seenDone = o end,
+  }
+  local game2 = { save = { money = 0 } }
+  local handled2 = Coop.finishBuriedBattle(engine2, game2, "win", false)
+  eq(handled2, true, "an onDone-only engine (Gen 2 shape) is handled too")
+  eq(seenDone, "win", "...through onDone, since there is no onFinish to prefer")
+  eq(game2.save.money, 50, "...and pays the same prize either alias")
+
+  -- Both present: onFinish is preferred (the shape Client.lua actually stamps
+  -- on Gold once it aliases onFinish from onDone -- both fields end up set,
+  -- and only one should be called or a double-pop is exactly what happens).
+  local seenFinish3, seenDone3
+  local engine3 = {
+    onFinish = function(o) seenFinish3 = o end,
+    onDone = function(o) seenDone3 = o end,
+  }
+  Coop.finishBuriedBattle(engine3, { save = {} }, "draw", false)
+  eq(seenFinish3, "draw", "onFinish is called when both are present")
+  eq(seenDone3, nil, "...and onDone is not also called")
+
+  -- Neither present at all: early-out before any money moves.
+  local engine4 = { trainer = { baseMoney = 5 }, enemyParty = { { level = 10 } } }
+  local game4 = { save = { money = 0 } }
+  local handled4, ritual4 = Coop.finishBuriedBattle(engine4, game4, "win", false)
+  eq(handled4, false, "no onFinish and no onDone: nothing to finish")
+  eq(ritual4, nil, "...and no ritual verdict is offered")
+  eq(game4.save.money, 0, "...the early-out is before the prize, not after")
+end
+
+-- 13.3 -- Coop.blacksOut: the loss rule, the safety-net rule, and the
+-- deliberate false for a headless/empty party.
+do
+  check(Coop.blacksOut("loss", { save = { party = { mon(80, 10) } } }),
+        "a lost battle blacks out even with a healthy-looking party record")
+  check(Coop.blacksOut("win", { save = { party = { mon(0, 10), mon(0, 10) } } }),
+        "a WON battle still blacks out when the winner's own party is wiped "
+        .. "-- the safety net BattleState:finish would have run")
+  check(not Coop.blacksOut("win", { save = { party = { mon(1, 10) } } }),
+        "a win with anything standing does not black out")
+  check(not Coop.blacksOut("win", { save = { party = {} } }),
+        "an empty party is not a wipe -- a headless load is not a defeat")
+  check(not Coop.blacksOut("win", { save = {} }),
+        "no party field at all reads the same as an empty one")
+  check(not Coop.blacksOut("win", nil),
+        "no game/save at all: still not a blackout, never an error")
+end
+
+-- 13.4 -- M.unwindStackTo: identity, not count, and an honest guard.
+do
+  -- Pops by identity with unrelated states sitting between the target and the
+  -- top -- a fixed pop-count would either stop short or eat the target.
+  local below, target, mid1, mid2, mid3 = {}, {}, {}, {}, {}
+  local stack = bareStack({ below, target, mid1, mid2, mid3 })
+  local game = { stack = stack }
+  local ok = Coop.unwindStackTo(game, target, false)
+  check(ok, "the target is reached through the states stacked above it")
+  eq(#stack.states, 2, "only what was above the target came off")
+  check(stack.states[2] == target, "...leaving the target itself on top")
+  check(stack.states[1] == below, "...and what was under it untouched")
+
+  -- alsoPop additionally takes the target itself, by the same identity check.
+  local below2, target2, mid = {}, {}, {}
+  local stack2 = bareStack({ below2, target2, mid })
+  check(Coop.unwindStackTo({ stack = stack2 }, target2, true),
+        "alsoPop still reports success when it reaches the target")
+  eq(#stack2.states, 1, "...and the target itself is popped too")
+  check(stack2.states[1] == below2, "...leaving only what was under it")
+
+  -- The guard: more than sixteen states between the top and the target means
+  -- the loop gives up before arriving, and the fixed review finding is that
+  -- this must say so rather than claim the clean-unwind `true`.
+  local target3 = {}
+  local states3 = { target3 }
+  for i = 1, 20 do states3[#states3 + 1] = {} end
+  local stack3 = bareStack(states3)
+  local before = #stack3.states
+  local reached = Coop.unwindStackTo({ stack = stack3 }, target3, true)
+  eq(reached, false,
+     "a target still buried after sixteen pops is reported as NOT reached")
+  eq(#stack3.states, before - 16,
+     "...exactly the guard's sixteen pops happened, no more")
+  check(stack3.states[#stack3.states] ~= target3,
+        "...the target is still buried, not falsely popped by alsoPop")
+
+  -- A target no longer on the stack at all answers false immediately, with
+  -- nothing popped -- the case M.stackHolds itself has always covered.
+  local stale = {}
+  local stack4 = bareStack({ {}, {} })
+  local lenBefore = #stack4.states
+  eq(Coop.unwindStackTo({ stack = stack4 }, stale, true), false,
+     "a stale target (already off the stack) is declined, not hunted for")
+  eq(#stack4.states, lenBefore, "...and nothing was popped looking for it")
+end
+
+-- 13.5 -- the blackout warning wording: unchanged when `context` is absent.
+--
+-- The four lines below are quoted exactly as src/Coop.lua's git history has
+-- always printed them; the only thing under test is that omitting the new
+-- `context` argument still reaches all four, byte for byte.
+do
+  local function lastWarn()
+    return warns[#warns]
+  end
+
+  -- 1. No save at all.
+  local before1 = #warns
+  local coop1 = setmetatable({}, { __index = Coop })
+  eq(coop1:blackout({}), false, "no save: the ritual declines")
+  check(#warns > before1, "...and says so")
+  eq(lastWarn(),
+     "a lost 2-on-2 could not black you out (no save); walk to a "
+     .. "POKéMON CENTER to heal",
+     "co-op's default noun is still \"2-on-2\" when context is omitted")
+
+  -- 2. Healed and taxed, but no heal point / no world API to warp through.
+  local before2 = #warns
+  local coop2 = setmetatable({}, { __index = Coop })
+  local game2 = { save = { money = 100 }, data = { constants = {} } }
+  eq(coop2:blackout(game2), false, "no warp target: the ritual half-completes")
+  check(#warns > before2, "...and says so")
+  eq(lastWarn(),
+     "a lost 2-on-2 healed your party but could not send you to a "
+     .. "POKéMON CENTER; walk out and back in, or reload your last save",
+     "still the unmodified co-op wording")
+  eq(game2.save.money, 50, "...but the halving itself still ran (100 -> 50)")
+
+  -- 3. Warp armed, but the overworld never comes back on top before the wait
+  -- runs out -- pumpBlackout's own warning, reached by jumping its clock past
+  -- BLACKOUT_WARP_WAIT in one call rather than iterating real frames.
+  stubMod.world = { warpTo = function() return true end }
+  local before3 = #warns
+  local coop3 = setmetatable({}, { __index = Coop })
+  local game3 = { save = { money = 100, lastHeal = { map = "FIX_TOWN" } },
+                  stack = bareStack({ { isOverworld = false } }) }
+  eq(coop3:blackout(game3), false,
+     "armed but not yet resolved: the first attempt (dt=0) declines")
+  check(coop3.pendingWarp ~= nil, "...and the warp is left pending")
+  coop3:pumpBlackout(61)
+  check(#warns > before3, "the wait-timeout warning fires once the clock runs out")
+  eq(lastWarn(),
+     "your party was healed after the 2-on-2 but the trip to a POKéMON "
+     .. "CENTER never got a chance to start; walk there, or reload from "
+     .. "your last save",
+     "still the unmodified co-op wording")
+  eq(coop3.pendingWarp, nil, "...and the pending warp is given up on")
+
+  -- 4. Warp armed, overworld is on top, but the warp itself fails.
+  stubMod.world = { warpTo = function() return nil, "boom" end }
+  local before4 = #warns
+  local coop4 = setmetatable({}, { __index = Coop })
+  local game4 = { save = { money = 100, lastHeal = { map = "FIX_TOWN" } },
+                  stack = bareStack({ { isOverworld = true } }) }
+  eq(coop4:blackout(game4), false, "the warp itself fails")
+  check(#warns > before4, "...and says so")
+  eq(lastWarn(),
+     "a lost 2-on-2 healed your party but the warp to a POKéMON CENTER "
+     .. "failed (boom); reload from your last save if you are stuck",
+     "still the unmodified co-op wording, including the failure reason")
+
+  -- Restored: nothing else in this file, and no earlier section, drives
+  -- mod.world -- left set, a later suite loading this file's stubMod would
+  -- inherit a warpTo that always fails.
+  stubMod.world = nil
+end
+
+-- 13.6 -- the method wrappers agree with the statics they forward to.
+do
+  local target, mid = {}, {}
+  local coop = setmetatable({}, { __index = Coop })
+
+  -- onStack / stackHolds
+  local gameOn = { stack = bareStack({ target, mid }) }
+  eq(coop:onStack(gameOn, target), Coop.stackHolds(gameOn, target),
+     "M:onStack and Coop.stackHolds agree")
+  check(coop:onStack(gameOn, target) == true,
+        "...and both correctly say the target is there")
+  local gameOff = { stack = bareStack({ mid }) }
+  eq(coop:onStack(gameOff, target), Coop.stackHolds(gameOff, target),
+     "...and agree just as well when the answer is false")
+
+  -- unwindTo / unwindStackTo, driven against two independent stacks built the
+  -- same way so neither call can be seeing the other's side effects.
+  local targetA, midA = {}, {}
+  local stackA = bareStack({ targetA, midA })
+  local targetB, midB = {}, {}
+  local stackB = bareStack({ targetB, midB })
+  local resultMethod = coop:unwindTo({ stack = stackA }, targetA, true)
+  local resultStatic = Coop.unwindStackTo({ stack = stackB }, targetB, true)
+  eq(resultMethod, resultStatic,
+     "M:unwindTo and Coop.unwindStackTo return the same verdict")
+  eq(#stackA.states, #stackB.states,
+     "...and leave the stack in the same shape")
 end
 
 T.finish("coop_mediated")
