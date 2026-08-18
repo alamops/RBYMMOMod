@@ -6,6 +6,8 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-08-17
+
 ### Added
 
 - **The battle theatre is not a Gen 1 feature any more.** Gold gets the
