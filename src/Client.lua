@@ -25,6 +25,11 @@ local Coop = need("Coop")
 -- which is an *instance* and is nil between battles -- which is exactly when
 -- a save is loaded.
 local CoopBattle = need("CoopBattle")
+-- The mod's own battle system for a player with nobody to play with. The one
+-- module in here that *substitutes* for a piece of the game instead of adding
+-- to it, and so the one gated on an option row rather than on a connection --
+-- src/SoloBattle.lua's header carries the whole argument.
+local SoloBattle = need("SoloBattle")
 local Ui = need("Ui")
 local Overlay = need("Overlay")
 local Sessions = need("Sessions")
@@ -116,6 +121,26 @@ end
 coop.toast = function(text)
   toast:push(text)
 end
+-- The fights nobody else is in: an ordinary wild encounter and every trainer,
+-- refereed in this process and fought on the mod's own screen, for a player
+-- with no hub and no partner.
+--
+-- Built unconditionally and costing nothing until it is used. It holds no
+-- fight, no referee and no state until an encounter is handed to it, and it is
+-- handed nothing while the row is off -- which is why constructing it here,
+-- beside modules that do need a connection, does not break the promise at the
+-- top of this file (see the pump in tick(), which is where that promise really
+-- is bent, and why).
+--
+-- Handed the same `ui` its siblings get and nothing else: it speaks to no
+-- transport, sends no message and does not know the hub exists.
+local solo = SoloBattle.new(ui, {
+  -- Asked through a function so it is asked *late* -- at the encounter, not
+  -- here. mod.options:get answers from the player's live options, so this
+  -- closure is the whole of "flipping the row mid-session takes effect on the
+  -- next battle", with no relaunch and nothing to invalidate.
+  enabled = function() return mod.options:get(SoloBattle.OPTION) == true end,
+})
 
 ctx.client = M
 ctx.ui = ui
@@ -124,6 +149,7 @@ ctx.sessions = sessions
 ctx.party = party
 ctx.friends = friends
 ctx.coop = coop
+ctx.solo = solo
 ctx.server = server
 ctx.servers = servers
 
@@ -2174,6 +2200,43 @@ local function tick(game, dt)
   -- for.
   if autoJoin.armed then tryAutoJoin(game) end
 
+  -- The mod's own battle, refereed here, one frame at a time.
+  --
+  -- **This is the deliberate exception to the rule at the top of this file.**
+  -- Everything else per-tick is skipped outright when the player is not
+  -- connected, so an installed-but-offline copy is as close to absent as it
+  -- can be. A solo battle is *for* the offline copy; hanging its pump off the
+  -- transport would mean the one feature written for players with nobody to
+  -- play with only ran for players who had somebody. So it sits above the "not
+  -- open" return on purpose, and it is the only thing here that does.
+  --
+  -- Pumped unconditionally rather than only while a fight is up, because the
+  -- fight is not the longest thing it owns: a lost battle heals the party,
+  -- takes half the money and parks a warp to a POKéMON CENTER that waits for
+  -- the overworld to come back, and that wait outlives the battle that caused
+  -- it (Coop.pumpBlackout, from SoloBattle:update). A pump that stopped when
+  -- the fight did would leave a player who blacked out healed, charged, and
+  -- standing exactly where they fainted.
+  --
+  -- With the row off it is one field read and a return -- SoloBattle:update
+  -- pumps nothing when it holds no warp and no referee -- which is as close to
+  -- absent as an exception to that rule can be.
+  --
+  -- pcall'd, unlike its neighbours, and for a reason peculiar to it: this
+  -- tick's own failure handler leaves the hub, and a bug in a single-player
+  -- battle has no business dropping a connection it never used. A throw costs
+  -- the fight instead of the session -- reset() puts the engine's own battle
+  -- back on top of the stack, so the player finishes what they walked into the
+  -- ordinary way, and the cleared state stops the warning repeating every
+  -- frame.
+  local pumped, soloErr = pcall(solo.update, solo, dt, game)
+  if not pumped then
+    mod.log:warn("the solo battle pump failed (%s); this battle is handed back "
+      .. "to the game to finish -- turn SOLO BATTLES off in the mod manager "
+      .. "(F10) if it happens again", tostring(soloErr))
+    pcall(solo.reset, solo)
+  end
+
   if not transport:isOpen() then return end
 
   for _, msg in ipairs(transport:update(dt)) do
@@ -2339,6 +2402,26 @@ function M.install()
     -- else -- a player who finds their walk unexpectedly fast should have
     -- somewhere to turn it off without uninstalling the mod.
     { key = "run", label = "B TO RUN", type = "toggle", default = true },
+    -- The game's own battles, fought on this mod's screen, with nobody else
+    -- involved.
+    --
+    -- **Off by default, and that is not timidity.** Every other row here
+    -- changes something the mod added -- who can join, what you look like,
+    -- what B does. This one changes something the game already did: with it
+    -- on, an ordinary wild encounter and every trainer stop being the engine's
+    -- own battle and become a fight refereed by src/BattleSim on the same
+    -- screen a mediated online fight uses. A player who installed this for
+    -- nameplates and chat should never meet that without having asked for it.
+    --
+    -- Read at the encounter rather than at install (the `solo` singleton near
+    -- the top of this file holds the closure that reads it), so flipping it
+    -- takes effect on the very next battle -- no relaunch, unlike HOST PORT,
+    -- which Config can only read once. The key and the label come from
+    -- SoloBattle rather than being spelled here, because the file that defines
+    -- the row and the file that reads it are the only two things that have to
+    -- agree on them, and this way they agree by construction.
+    { key = SoloBattle.OPTION, label = SoloBattle.OPTION_LABEL,
+      type = "toggle", default = Config.SOLO_BATTLES_DEFAULT },
   })
 
   ui:install()
@@ -2414,30 +2497,91 @@ function M.install()
     end
   end
 
+  -- One encounter, offered to co-op and then to solo.
+  --
+  -- Both diverts answer the same question the same way -- true means "this
+  -- fight is mine now, the engine's battle is buried and I will hand it its
+  -- result", false means "not mine, leave it completely alone" -- so the order
+  -- below *is* the policy: co-op first, on exactly the terms it has always
+  -- had, and solo only over what co-op handed back. A partnered player with a
+  -- partner standing on this map never reaches the second call, whatever the
+  -- SOLO BATTLES row says.
+  --
+  -- Co-op is only ever called when the transport is ready, which is where the
+  -- gate that used to guard this whole listener now lives. Solo has no
+  -- transport to be ready -- a player with no hub at all is the population it
+  -- was written for -- so it sits outside that gate, and outside it is the
+  -- only place it could sit.
+  --
+  -- The pcall around each is the posture this listener has had since the co-op
+  -- divert landed: a divert that throws warns, names what the player should
+  -- expect instead, and leaves the engine's own battle -- already on screen --
+  -- to be fought. A throw is deliberately *not* read as a refusal: co-op may
+  -- have claimed the encounter before it failed, and a second screen over a
+  -- battle that already has one is a worse ending than the ordinary fight the
+  -- warning just promised.
+  local function offerFight(state, mapId, connected, kind)
+    local taken = false
+    if connected then
+      local ok, err = pcall(function()
+        if kind == "trainer" then
+          taken = coop:onTrainerBattle(ctx.game, state, mapId) == true
+        else
+          taken = coop:onWildEncounter(ctx.game, state, mapId) == true
+        end
+      end)
+      if not ok then
+        if kind == "trainer" then
+          mod.log:warn("the co-op prompt failed (%s); this trainer is fought "
+            .. "the ordinary way -- the battle itself is unaffected",
+            tostring(err))
+        else
+          mod.log:warn("the party wild divert failed (%s); this encounter is "
+            .. "fought the ordinary way -- the battle itself is unaffected",
+            tostring(err))
+        end
+        return
+      end
+      if taken then return end
+    end
+    -- Silent when it declines, always: SoloBattle returns false for a row that
+    -- is off, a battle kind it does not model (Safari, the ghost, the old
+    -- man's demo) and a party it could not describe, and in every one of those
+    -- cases nothing has happened from where the player is standing -- the
+    -- engine's battle is on screen and about to be fought exactly as it always
+    -- was. Only a throw is worth a line.
+    local ok, err = pcall(function()
+      if kind == "trainer" then
+        solo:onTrainerBattle(ctx.game, state, mapId)
+      else
+        solo:onWildEncounter(ctx.game, state, mapId)
+      end
+    end)
+    if not ok then
+      mod.log:warn("the solo battle divert failed (%s); this %s is fought on "
+        .. "the game's own battle screen instead -- the battle itself is "
+        .. "unaffected; turn SOLO BATTLES off in the mod manager (F10) if it "
+        .. "keeps happening", tostring(err),
+        kind == "trainer" and "trainer" or "encounter")
+    end
+  end
+
   mod.events:on("screen.pushed", function(payload)
     local state = payload and payload.state
     if not state then return end
-    if not transport:isReady() then return end
+    -- Read once and handed down, so the two branches below cannot disagree
+    -- about whether there was a hub at the moment the fight started.
+    local connected = transport:isReady()
+    -- Nothing to offer anybody: no connection for co-op and the row off for
+    -- solo. Two field reads and a return on every screen a disconnected copy
+    -- with the row off ever pushes -- a menu, a text box, the pause screen --
+    -- and it leaves without touching the pushed state at all.
+    if not connected and not solo:isOn() then return end
     stampGen2FightAliases(state)
     local current = World.current()
     local mapId = current and current.mapId
-    if state.kind == "trainer" then
-      local ok, err = pcall(function()
-        coop:onTrainerBattle(ctx.game, state, mapId)
-      end)
-      if not ok then
-        mod.log:warn("the co-op prompt failed (%s); this trainer is fought the "
-          .. "ordinary way -- the battle itself is unaffected", tostring(err))
-      end
-    elseif state.kind == "wild" then
-      local ok, err = pcall(function()
-        coop:onWildEncounter(ctx.game, state, mapId)
-      end)
-      if not ok then
-        mod.log:warn("the party wild divert failed (%s); this encounter is "
-          .. "fought the ordinary way -- the battle itself is unaffected",
-          tostring(err))
-      end
+    if state.kind == "trainer" or state.kind == "wild" then
+      offerFight(state, mapId, connected, state.kind)
     end
   end)
 
@@ -2633,7 +2777,26 @@ function M.install()
   -- hosting, the listener has to come down with it rather than serving a
   -- world nobody is standing in. The character goes with the save too: the
   -- one being loaded may have chosen somebody else, or nobody.
-  mod.events:on("save.loaded", function() M.saveLoaded() end)
+  mod.events:on("save.loaded", function()
+    -- A solo battle in flight does not survive the file changing underneath
+    -- it, and is dropped rather than allowed to try.
+    --
+    -- Loading (F2, or CONTINUE from the title) is a hard SaveData.load plus a
+    -- restore: the party this fight opened against stops being the party the
+    -- game is playing. What the fight still owes that party is HP, PP and
+    -- status, and writing a lost playthrough's damage onto a freshly loaded
+    -- one is the kind of corruption nobody would ever trace back to a battle.
+    -- SoloBattle does hold the save table it opened against and refuses to
+    -- write across it, but refusing to write is only half an answer -- the
+    -- screen would still be up, refereeing a fight about monsters that no
+    -- longer exist. reset() ends it and puts the engine's own battle back.
+    --
+    -- Ahead of the teardown below and outside everything it gates on: this is
+    -- true of a single-player copy that never saw a hub, which is exactly the
+    -- copy most likely to be in one of these fights.
+    pcall(solo.reset, solo)
+    M.saveLoaded()
+  end)
 
   -- NEW GAME needs the very same resync, and it does not announce itself the
   -- same way: starting a fresh file emits save.created, never save.loaded, so
