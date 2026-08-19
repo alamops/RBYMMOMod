@@ -151,8 +151,11 @@ return function(game)
 
   -- ------- a fresh game, four different trainers
 
-  U.newGame(game)
-  -- U.newGame mashes A through the naming grid, so all four would otherwise
+  if not H.newGame(game, TAG) then
+    log("RESULT 1 failure(s)")
+    return
+  end
+  -- H.newGame mashes A through the naming grid, so all four would otherwise
   -- be called AAAAAAA -- and with four of them on one roster, indistinguishable
   -- in a way two never quite are. Name them here instead.
   if game.save and game.save.player then

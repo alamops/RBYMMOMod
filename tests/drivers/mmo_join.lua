@@ -41,8 +41,11 @@ return function(game)
     return ok
   end
 
-  U.newGame(game)
-  -- U.newGame mashes A through the naming grid, so both sides would
+  if not H.newGame(game, TAG) then
+    log("RESULT 1 failure(s)")
+    return
+  end
+  -- H.newGame mashes A through the naming grid, so both sides would
   -- otherwise be called AAAAAAA and no roster assertion could tell
   -- them apart. Name them here instead.
   if game.save and game.save.player then
@@ -67,7 +70,7 @@ return function(game)
   -- (SPRITE_COOLTRAINER_M, never RED -- see Client.explicitChoice), and the
   -- widened refreshLook wears an explicit choice on the very first
   -- map.entered (src/Client.lua's refreshLook), which already fired, more
-  -- than once, during U.newGame's walk through the intro. So this may
+  -- than once, during H.newGame's walk through the intro. So this may
   -- already be a mod-built renderer for the chosen character rather than
   -- the engine's own -- kept only to prove *something* is drawn at all.
   -- Every check below asks which character the sheet draws from, not

@@ -140,6 +140,53 @@ end
 -- then failed as "no chat row" on a menu that plainly had one.
 M.labelMatches = labelMatches
 
+-- What a menu is actually offering, for a failure message.  "TIMEOUT waiting
+-- for menu row MMO" says only that the row was not there, which is the one
+-- thing already known -- and a row that is missing because the *menu* is not
+-- the one the driver thinks it is on reads exactly the same as a row that is
+-- missing because the mod failed to add it.  Naming the rows separates those
+-- two in the log, without a second run to find out.
+local function stateName(state)
+  if state == nil then return "nil" end
+  for _, key in ipairs({ "name", "id", "kind", "label", "title" }) do
+    if type(state[key]) == "string" then return state[key] end
+  end
+  local fields = {}
+  for key, value in pairs(state) do
+    if type(key) == "string" and type(value) ~= "function" then
+      fields[#fields + 1] = key
+    end
+  end
+  table.sort(fields)
+  return "?{" .. table.concat(fields, ",", 1, math.min(#fields, 8)) .. "}"
+end
+
+-- Every state on the stack, bottom to top, for the same reason rowLabels
+-- exists: "no items" does not say whether the menu failed to open or opened
+-- as something else.
+function M.stackNames(game)
+  local out = {}
+  for _, state in ipairs((game.stack and game.stack.states) or {}) do
+    out[#out + 1] = stateName(state)
+  end
+  if #out == 0 then return "<empty stack>" end
+  return table.concat(out, " > ")
+end
+
+function M.rowLabels(game)
+  local top = M.top(game)
+  if not (top and type(top.items) == "table") then
+    return (top and "<top state has no items: " .. stateName(top) .. ">"
+      or "<nothing on the stack>") .. "  stack: " .. M.stackNames(game)
+  end
+  local names = {}
+  for _, item in ipairs(top.items) do
+    names[#names + 1] = tostring(item.label)
+  end
+  if #names == 0 then return "<menu is empty>" end
+  return table.concat(names, " | ")
+end
+
 function M.selectLabel(game, label, frames)
   local ok = M.waitFor(game, function()
     local top = M.top(game)
@@ -149,7 +196,10 @@ function M.selectLabel(game, label, frames)
     end
     return false
   end, frames or 240, "menu row " .. label)
-  if not ok then return false end
+  if not ok then
+    U.log("  the menu on top offered: " .. M.rowLabels(game))
+    return false
+  end
 
   local menu = M.top(game)
   local target
@@ -875,6 +925,62 @@ function M.generation(game)
   return 1
 end
 
+-- Walk the new-game intro to the overworld, and say so if it does not arrive.
+--
+-- This is `tests/drivers/util.lua`'s `U.newGame` with the two properties that
+-- file cannot give it from where it sits.
+--
+-- **A budget that is not a guess.** `U.newGame` mashes A up to 400 times and
+-- then returns whatever happened.  Measured on 2026-08-18 against engine `dev`,
+-- the Gen 1 intro -- title, Oak's speech, YOUR NAME?, HIS NAME?, the shrink
+-- beat -- needs **441**.  It outgrew the budget by about a tenth, so every MMO
+-- driver was being handed a game still sitting in Oak's speech.
+--
+-- **A failure that says so.** That is the half that actually cost the day.
+-- `U.newGame` returns nothing, so the caller walked on, read `game.save` (which
+-- exists the whole time, seeded by the driver itself) and logged "in the
+-- overworld as HOSTY with CHARIZARD" -- while OakSpeech was on screen.  The
+-- first symptom came three steps later as `TIMEOUT waiting for menu row MMO`,
+-- which reads exactly like a broken start-menu hook and sent the investigation
+-- to the wrong file.  A driver that cannot reach the overworld has to say
+-- *that*, at the moment it happens.
+--
+-- The budget below is ~3x the measured cost, not 1.1x, precisely because the
+-- last one was set to the intro's length on the day it was written.  It costs
+-- nothing on a healthy run: the loop stops the frame the overworld is on top.
+M.INTRO_A_TAPS = 1500
+
+function M.newGame(game, tag)
+  U.wait(5)
+  U.tap(game, "start")             -- skip the intro movie
+  U.wait(10)
+
+  local title = M.top(game)
+  for _ = 1, 90 do
+    U.tap(game, "a")
+    U.wait(5)
+    if M.top(game) ~= title then break end
+  end
+
+  -- CONTINUE may or may not be on the menu; NEW GAME is first without a save.
+  U.tap(game, "a")
+  U.wait(10)
+
+  for _ = 1, M.INTRO_A_TAPS do
+    U.tap(game, "a")
+    U.wait(2)
+    if game.overworld and M.top(game) == game.overworld then
+      U.wait(10)
+      return true
+    end
+  end
+
+  U.log(tag or "DRIVER",
+    "FAIL the new-game intro never reached the overworld in "
+    .. M.INTRO_A_TAPS .. " A taps -- still on: " .. M.stackNames(game))
+  return false
+end
+
 -- Reach a playable overworld without thrashing an open Start menu.
 --
 -- Gen 2 + POKEPORT_DRIVER already lands in free-roam (empty stack). Gen 1
@@ -900,7 +1006,7 @@ function M.bootToPlay(game)
     end
     return M.inPlay(game)
   end
-  U.newGame(game)
+  M.newGame(game)
   return M.inPlay(game)
 end
 

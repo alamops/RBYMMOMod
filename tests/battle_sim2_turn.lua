@@ -594,6 +594,80 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- whom the referee swings at when nobody chose (`_autoTarget`)
+-- ------------------------------------------------------------------
+--
+-- The Gen 1 twin's tests/battle_sim_turn.lua carries the long version of this
+-- story.  Short version: every aim the referee filed for itself used to be
+-- "the lowest-numbered living foe", so on a side holding two players the NPCs
+-- swung at seat 0 every turn and the second player was never attacked at all.
+-- Gold inherited the rule and therefore the bug, so it inherits the pin.
+
+local function aimSides(foes)
+  local sideB = {}
+  for i = 1, foes do
+    sideB[i] = { playerId = "n" .. i, name = "Npc" .. i, mons = {
+      mon({ species = "Beta", maxHp = 400, spe = 90 }) } }
+  end
+  return {
+    a = {
+      { playerId = "p1", name = "One", mons = { mon({ species = "Alpha", maxHp = 400, spe = 10 }) } },
+      { playerId = "p2", name = "Two", mons = { mon({ species = "Gamma", maxHp = 400, spe = 10 }) } },
+    },
+    b = sideB,
+  }
+end
+
+for _, case in ipairs({
+  { mode = "coop_wild", foes = 1 },
+  { mode = "coop_npc",  foes = 2 },
+}) do
+  local battle = battleOf({ id = "aim", mode = case.mode, seed = 4242, sides = aimSides(case.foes) })
+  drain(battle)
+  local onSlot0, onSlot1 = 0, 0
+  for _ = 1, 10 do
+    battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("p2", { action = "fight", move = 0, target = 2 })
+    for i = 1, case.foes do battle:autoPick("n" .. i) end
+    for _, event in ipairs(drain(battle)) do
+      if event.t == "damage" and event.side == "a" then
+        if event.slot == 0 then onSlot0 = onSlot0 + 1 else onSlot1 = onSlot1 + 1 end
+      end
+    end
+    if battle.result then break end
+  end
+  ok(onSlot0 > 0, case.mode .. ": the npc side still attacks the first player")
+  ok(onSlot1 > 0, case.mode .. ": and it attacks the second one too (the reported bug)")
+end
+
+-- An aim is drawn from a second generator, so asking for one must not spend a
+-- byte of the battle's own -- otherwise every vector in the Gold pack moves.
+do
+  local battle = battleOf({ id = "aim", mode = "coop_npc", seed = 4242, sides = aimSides(2) })
+  drain(battle)
+  local before = battle.rng:state()
+  local npc = battle.byId["n1"]
+  local seen = {}
+  for _ = 1, 32 do seen[battle:_autoTarget(npc).slot] = true end
+  eq(battle.rng:state(), before, "aim: 32 draws later the battle RNG has not moved")
+  ok(seen[0] and seen[1], "aim: and those draws reached both player seats")
+end
+
+-- One living foe is answered without a draw at all, which is why every 1v1 and
+-- wild fixture replays byte for byte after aims began to spread.
+do
+  local battle = battleOf({ id = "solo", seed = 4242, sides = {
+    a = { { playerId = "p1", name = "One", mons = { mon({ species = "Alpha" }) } } },
+    b = { { playerId = "p2", name = "Two", mons = { mon({ species = "Beta" }) } } },
+  } })
+  drain(battle)
+  local before = battle.aim:state()
+  local fighter = battle.byId["p2"]
+  for _ = 1, 8 do eq(battle:_autoTarget(fighter).slot, 0, "aim: 1v1 has one answer") end
+  eq(battle.aim:state(), before, "aim: and a fight with one foe never touches the aim stream")
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("battle_sim2_turn: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

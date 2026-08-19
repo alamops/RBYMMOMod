@@ -6,6 +6,76 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every LOVE end-to-end driver was dead, and said the wrong thing about
+  why.** `run-mmo-e2e.sh` and its four siblings failed at
+  `TIMEOUT waiting for menu row MMO`, which reads exactly like a broken
+  `ui.start_menu.items` hook. The start menu was fine; the game was still in
+  Oak's speech. `tests/drivers/util.lua`'s `U.newGame` (the engine's helper)
+  mashes A up to **400** times to walk the intro — measured against engine
+  `dev` on 2026-08-18, that intro now needs **441**. It outgrew the budget by
+  about a tenth.
+
+  The budget alone would have been a five-minute fix. What cost the day is
+  that `U.newGame` returns nothing when it runs out: the driver walked on,
+  read `game.save` (which the driver seeds itself, so it is populated the
+  whole time) and logged "in the overworld as HOSTY with CHARIZARD" while
+  OakSpeech was on screen. The first visible symptom arrived three steps
+  later, in a different subsystem.
+
+  So the mod's drivers no longer call it. `mmo_util.lua` grows its own
+  `H.newGame(game, tag)` with a budget ~3x the measured cost — deliberately
+  not 1.1x, since that is how the last one was set — that stops the frame the
+  overworld is on top, and that **fails loudly** with the state stack it is
+  stuck on. Every driver that booted a new game now bails on a false return
+  instead of testing a game that never started. `H.selectLabel` also names the
+  rows the menu did offer when a lookup times out, and `H.stackNames` prints
+  the whole stack, so "the row is missing" and "you are not on that menu" stop
+  reading the same in a log.
+
+  All five drivers pass again: `run-mmo-e2e.sh` (0 failures both sides),
+  `run-party-wild-e2e.sh` (hub-refereed `coop_wild`, 0 gaps / 0 desyncs),
+  `run-mmo-e2e-gen2.sh` (Gold 2-on-2 over the in-game hub), and
+  `run-hub-e2e.sh` (a `coop_npc` brokered by the Node hub).
+
+- **In a two-player fight, the enemy attacked one player and only ever that
+  player.** Reported from a real game: "the enemy only attacks my friend and
+  never me, no matter who hosts." It was neither a networking fault nor a
+  seating fault. Every aim the referee files *for itself* — an NPC's pick, the
+  identical pick a human's timeout files, and the lock-in turns of thrash,
+  rage and bide, where nobody is offered a target — resolved through
+  `_firstLivingFoe`, which answers "the lowest-numbered living foe". With one
+  foe that is the only possible answer; with two players on a side it meant a
+  `coop_wild` wild monster, and *both* seats of a `coop_npc` trainer, swung at
+  seat 0 on every turn of every fight. The player in seat 1 was never attacked
+  once. ("No matter who hosts" is what hid it: seat order is the co-op party's
+  member order, and member 1 is whoever *sent the invite* — nothing to do with
+  who hosts.)
+
+  Those aims now spread uniformly over the living opposing seats, in all four
+  runtimes (`src/BattleSim`, `src/BattleSim2`, `server/lib/battle`,
+  `server/lib/battle2`). Three properties keep that safe to add to a sim two
+  processes must agree on byte for byte:
+  - The draw is on a **second generator** (`aim`, seeded from the battle seed
+    plus a fixed offset), never on the battle's own. No roll that already
+    existed moved, and no recorded vector changed — the Gen 1 parity fixture
+    regenerated with **every pre-existing scenario byte-identical**.
+  - **One living foe is answered without drawing at all**, so a 1v1, and the
+    lone wild seat of a `wild` / `coop_wild` fight, never touch the aim stream
+    and replay exactly as before.
+  - The draw is `byte()` and not `nextInt`, whose span modulo reaches an LCG's
+    bit 0 — a two-seat side would have got a perfect A-B-A-B rota instead of a
+    spread.
+
+  A player's own move with the aim left off still defaults to the first living
+  foe: that wants to be a predictable default the client can show, not a die
+  roll. Pinned by a new `coop_npc_aim` scenario in both halves of the Gen 1
+  turn-parity pair, by the Gen 2 fixture's `exp_coop` / `replace` scenarios
+  (whose NPC hits moved off seat 0 while `rngState` held still), and by
+  co-op targeting tests in `tests/battle_sim_turn.lua` and
+  `tests/battle_sim2_turn.lua`.
+
 ## [1.0.8] - 2026-08-17
 
 ### Added

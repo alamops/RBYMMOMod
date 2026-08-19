@@ -761,6 +761,51 @@ scenario('retarget_ko', (events) => {
   return battle;
 });
 
+// Who the referee swings at when nobody chose. A coop_npc trainer holds two
+// seats with no connection behind them, so both file their own picks through
+// `autoPick` -- and until the aim stream existed, both picked "the lowest
+// living foe" and hammered seat 0 for the whole fight while the second player
+// was never attacked once.
+//
+// Six turns is enough for the spread to show, and the fixture pins the aims
+// themselves rather than merely "they were not all seat 0": the aim draw is a
+// second generator, and a second generator is a second way for the runtimes to
+// part company. The snapshot's `rngState` is the other half of the claim -- it
+// must be exactly what it was before aims spread, because the draws come off
+// `aim` and never off `rng`.
+scenario('coop_npc_aim', (events) => {
+  const battle = build({
+    id: 'aim', mode: 'coop_npc', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'p1', name: 'One', mons: [
+          mn({ species: 'Alpha', maxHp: 400, spd: 10,
+               moves: [mv('tap', 40, 255, 0)] })] },
+        { playerId: 'p2', name: 'Two', mons: [
+          mn({ species: 'Gamma', maxHp: 400, spd: 10,
+               moves: [mv('tap', 40, 255, 0)] })] },
+      ],
+      b: [
+        { playerId: 'n1', name: 'NpcA', mons: [
+          mn({ species: 'Beta', maxHp: 400, spd: 90,
+               moves: [mv('thump', 40, 255, 0)] })] },
+        { playerId: 'n2', name: 'NpcB', mons: [
+          mn({ species: 'Delta', maxHp: 400, spd: 80,
+               moves: [mv('thump', 40, 255, 0)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 6; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0, target: 2 });
+    battle.submitChoice('p2', { action: 'fight', move: 0, target: 3 });
+    battle.autoPick('n1');
+    battle.autoPick('n2');
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -966,6 +1011,55 @@ test('mid-turn-KO retargeting: the slower ally swings onto the survivor, not "ha
     'foeA (the original, now-dead aim) stayed at 0 hp');
   assert.ok(run.snapshot.field.find((f) => f.slot === 3).hp < 200,
     'foeB (the retargeted seat) actually took the hit');
+});
+
+test('a coop_npc trainer spreads its aim across both players, not seat 0 every turn', () => {
+  const run = byName(jsRuns).get('coop_npc_aim');
+  const hits = run.events
+    .filter((event) => event.t === 'damage' && event.side === 'a')
+    .map((event) => event.slot);
+
+  assert.strictEqual(hits.length, 12, 'two npc seats swung once each for six turns');
+  assert.ok(hits.includes(0), 'the first player was attacked');
+  assert.ok(hits.includes(1),
+    'and so was the second -- the bug this pins is that slot 1 was never once hit');
+
+  // Not merely "both appear": a rota would also satisfy that. The aim is drawn
+  // per action, so the two seats of a single turn are free to agree or differ.
+  const turns = [];
+  for (let i = 0; i < hits.length; i += 2) turns.push([hits[i], hits[i + 1]]);
+  assert.ok(turns.some(([x, y]) => x === y), 'some turns both npcs gang up on one player');
+  assert.ok(turns.some(([x, y]) => x !== y), 'and on others they split -- it is a draw, not a rota');
+
+  // The load-bearing half, asserted directly rather than inferred: an aim draw
+  // must not spend a byte of the battle's own generator. One that did would
+  // move every roll after it and silently rewrite the whole vector pack next
+  // door -- a regression with no symptom a player could describe.
+  const probe = build({
+    id: 'probe', mode: 'coop_npc', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'p1', name: 'One', mons: [
+          mn({ species: 'Alpha', maxHp: 400, spd: 10, moves: [mv('tap', 40, 255, 0)] })] },
+        { playerId: 'p2', name: 'Two', mons: [
+          mn({ species: 'Gamma', maxHp: 400, spd: 10, moves: [mv('tap', 40, 255, 0)] })] },
+      ],
+      b: [
+        { playerId: 'n1', name: 'NpcA', mons: [
+          mn({ species: 'Beta', maxHp: 400, spd: 90, moves: [mv('thump', 40, 255, 0)] })] },
+        { playerId: 'n2', name: 'NpcB', mons: [
+          mn({ species: 'Delta', maxHp: 400, spd: 80, moves: [mv('thump', 40, 255, 0)] })] },
+      ],
+    },
+  });
+  const before = probe.rng.state();
+  const npc = probe.byId.get ? probe.byId.get('n1') : probe.byId.n1;
+  const aims = new Set();
+  for (let i = 0; i < 32; i += 1) aims.add(probe._autoTarget(npc).slot);
+  assert.strictEqual(probe.rng.state(), before,
+    'thirty-two aim draws later, the battle RNG has not moved');
+  assert.deepStrictEqual([...aims].sort(), [0, 1],
+    'and those draws did reach both player seats');
 });
 
 test('a wild-mode faint pays exactly one exp event, after the faint and before over', () => {

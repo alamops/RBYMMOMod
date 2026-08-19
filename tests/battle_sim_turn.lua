@@ -4151,6 +4151,112 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12k. whom the referee swings at when nobody chose (`_autoTarget`)
+-- ------------------------------------------------------------------
+--
+-- Reported from a real two-player game: "the enemy only attacks my friend and
+-- never me, no matter who hosts."  It was not a networking fault and not a
+-- seating fault.  Every aim the referee files for itself went through
+-- `_firstLivingFoe`, which answers "the lowest-numbered living foe" -- so a
+-- coop_wild's wild monster, and *both* seats of a coop_npc trainer, swung at
+-- seat 0 on every turn of every fight.  The player sitting in seat 1 was never
+-- attacked once, for the whole battle, in either co-op mode.
+--
+-- ("No matter who hosts" is the part that hid it: seat order is the coop
+-- party's member order, and member 1 is whoever *sent the invite* -- nothing
+-- to do with who is hosting.  Two friends where the same one always invites
+-- get the same seat 0 every time.)
+
+local function aimBattle(mode, seed, foes)
+  local sideB = {}
+  for i, name in ipairs(foes) do
+    sideB[i] = { playerId = "n" .. i, name = name, mons = {
+      mon({ species = "Beta", maxHp = 400, spd = 90 }) } }
+  end
+  return Turn.create({
+    id = "aim", mode = mode, seed = seed, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "p1", name = "One", mons = { mon({ species = "Alpha", maxHp = 400, spd = 10 }) } },
+        { playerId = "p2", name = "Two", mons = { mon({ species = "Gamma", maxHp = 400, spd = 10 }) } },
+      },
+      b = sideB,
+    },
+  }), sideB
+end
+
+-- The bug, stated as the fight the player actually played: two humans, an NPC
+-- side that answers for itself, and a count of who got hit.
+for _, case in ipairs({
+  { mode = "coop_wild", foes = { "Wild" } },
+  { mode = "coop_npc",  foes = { "NpcA", "NpcB" } },
+}) do
+  local battle, sideB = aimBattle(case.mode, 4242, case.foes)
+  drain(battle)
+  local onSlot0, onSlot1 = 0, 0
+  for _ = 1, 10 do
+    battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("p2", { action = "fight", move = 0, target = 2 })
+    for _, foe in ipairs(sideB) do battle:autoPick(foe.playerId) end
+    for _, event in ipairs(drain(battle)) do
+      if event.t == "damage" and event.side == "a" then
+        if event.slot == 0 then onSlot0 = onSlot0 + 1 else onSlot1 = onSlot1 + 1 end
+      end
+    end
+    if battle.result then break end
+  end
+  ok(onSlot0 > 0, case.mode .. ": the npc side still attacks the first player")
+  ok(onSlot1 > 0, case.mode .. ": and it attacks the second one too (the reported bug)")
+end
+
+-- A draw, not a rota: the two seats of a coop_npc turn are free to agree.
+do
+  local battle, sideB = aimBattle("coop_npc", 4242, { "NpcA", "NpcB" })
+  drain(battle)
+  local ganged, split = false, false
+  for _ = 1, 12 do
+    battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("p2", { action = "fight", move = 0, target = 3 })
+    for _, foe in ipairs(sideB) do battle:autoPick(foe.playerId) end
+    local hits = {}
+    for _, event in ipairs(drain(battle)) do
+      if event.t == "damage" and event.side == "a" then hits[#hits + 1] = event.slot end
+    end
+    if #hits == 2 then
+      if hits[1] == hits[2] then ganged = true else split = true end
+    end
+    if battle.result then break end
+  end
+  ok(ganged, "coop_npc: some turns both npcs gang up on one player")
+  ok(split, "coop_npc: and on others they split -- a draw, not an alternation")
+end
+
+-- The half that keeps every recorded vector honest: an aim is drawn from a
+-- second generator, so asking for one must not spend a byte of the battle's
+-- own.  A draw that leaked onto `rng` would move every roll after it.
+do
+  local battle = aimBattle("coop_npc", 4242, { "NpcA", "NpcB" })
+  drain(battle)
+  local before = battle.rng:state()
+  local npc = battle.byId["n1"]
+  local seen = {}
+  for _ = 1, 32 do seen[battle:_autoTarget(npc).slot] = true end
+  eq(battle.rng:state(), before, "aim: 32 draws later the battle RNG has not moved")
+  ok(seen[0] and seen[1], "aim: and those draws reached both player seats")
+end
+
+-- One living foe is answered without a draw at all, which is why every 1v1 and
+-- wild fixture in this suite replays byte for byte after aims began to spread.
+do
+  local battle = battleOf({ seed = 4242 })
+  drain(battle)
+  local before = battle.aim:state()
+  local fighter = battle.byId["p2"]
+  for _ = 1, 8 do eq(battle:_autoTarget(fighter).slot, 0, "aim: 1v1 has one answer") end
+  eq(battle.aim:state(), before, "aim: and a fight with one foe never touches the aim stream")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

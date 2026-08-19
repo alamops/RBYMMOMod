@@ -48,8 +48,11 @@ return function(game)
   os.remove(ADDR_FILE)
   os.remove(ADDR_FILE .. ".tmp")
 
-  U.newGame(game)
-  -- U.newGame mashes A through the naming grid, so both sides would
+  if not H.newGame(game, TAG) then
+    log("RESULT 1 failure(s)")
+    return
+  end
+  -- H.newGame mashes A through the naming grid, so both sides would
   -- otherwise be called AAAAAAA and no roster assertion could tell
   -- them apart. Name them here instead.
   if game.save and game.save.player then

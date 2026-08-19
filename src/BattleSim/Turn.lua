@@ -119,6 +119,14 @@ M.RESOLVE_TIMEOUT     = 30    -- Config.BATTLE_RESOLVE_TIMEOUT
 -- Below this the side-a member of a tied group moves first.
 M.TIE_BREAK_ROLL = 128
 
+-- Where the aim stream starts, relative to the battle's own seed.  See
+-- `_autoTarget`: the referee's choice of *whom* to swing at is drawn from a
+-- second generator so that adding it moved no roll in the first one, and a
+-- second generator started on the same number would be the same sequence
+-- read twice -- every aim would echo a damage roll.  The offset is arbitrary
+-- and load-bearing only in that both runtimes use it.
+M.AIM_SEED_OFFSET = 1597334677
+
 M.MODES = {
   ["1v1"] = true, coop_npc = true, coop_pvp = true, wild = true, coop_wild = true,
 }
@@ -462,6 +470,7 @@ function M.create(opts)
     mode           = mode,
     seed           = int(opts.seed, 0),
     rng            = Rng.new(int(opts.seed, 0)),
+    aim            = Rng.new(int(opts.seed, 0) + M.AIM_SEED_OFFSET),
     chart          = type(opts.chart) == "table" and opts.chart or nil,
     specialTypes   = nil,
     metronomePool  = nil,
@@ -643,6 +652,51 @@ function Battle:_firstLivingFoe(fighter)
   return nil
 end
 
+-- Which opposing seat an action *nobody chose* swings at.
+--
+-- Every aim the referee files for itself comes through here: an NPC's pick,
+-- the identical pick a human's timeout files, and the lock-in turns of
+-- thrash / rage / bide, where nobody is asked for a target because the move
+-- does not offer one.
+--
+-- It used to be `_firstLivingFoe`, which answers "the lowest-numbered living
+-- foe" -- the right answer to a question with one possible answer, and the
+-- wrong one the moment a side holds two players.  A coop_wild's wild monster
+-- and *both* seats of a coop_npc trainer swung at seat 0 every turn of every
+-- fight, so the second player on the side was never once attacked.  Reported
+-- from a real two-player game, and reproducible in one sitting: 18 damage
+-- events, 18 of them on slot 0.
+--
+-- So: uniform over the living opposing seats.  Three properties make that
+-- safe to add to a sim two runtimes have to agree on byte for byte.
+--
+--   * The draw is on `self.aim`, not `self.rng`.  A draw on the battle's own
+--     generator would shift every roll after it and silently rewrite every
+--     recorded vector; this one cannot move a number that already exists.
+--   * One living foe is answered without drawing at all.  A 1v1, and the lone
+--     wild seat of a wild / coop_wild fight, therefore consume nothing and
+--     replay exactly as they always did -- the aim stream in those fights is
+--     never even touched.
+--   * `byte()` is the draw, not `nextInt`.  `nextInt` takes the whole LCG
+--     state modulo the span, and this generator's bit 0 alternates every
+--     step, so a two-seat side would have got a perfect A-B-A-B rota rather
+--     than a spread.  `byte()` reads bits 16..23, which is the reason
+--     Rng.lua puts them there.
+--
+-- Draw order is the parity contract, exactly as it is for `self.rng`: both
+-- runtimes call this at the same points, in the same seat order, or their
+-- aim streams part company.  tests/fixtures/battle_sim_vectors.json's
+-- sibling drivers are what hold that.
+function Battle:_autoTarget(fighter)
+  local living = {}
+  for _, foe in ipairs(self:_foes(fighter)) do
+    if activeMon(foe) then living[#living + 1] = foe end
+  end
+  if #living == 0 then return nil end
+  if #living == 1 then return living[1] end
+  return living[(self.aim:byte() % #living) + 1]
+end
+
 -- Which seat an action actually swings at, given the seat it was aimed at.
 --
 -- A fight choice always names a living opposing seat when it is made:
@@ -749,7 +803,7 @@ function Battle:_fillForcedChoices()
           slot = fighter.slot, side = fighter.side, text = fighter.name,
         })
       else
-        local foe = self:_firstLivingFoe(fighter)
+        local foe = self:_autoTarget(fighter)
         if foe then
           self:_say(mon.species .. " unleashed energy")
           fighter.choice = {
@@ -806,7 +860,7 @@ function Battle:_fillForcedChoices()
     end
 
     if mon.thrashing and mon.thrashing.turns > 0 then
-      local foe = self:_firstLivingFoe(fighter)
+      local foe = self:_autoTarget(fighter)
       if foe then
         self:_say(mon.species .. " thrashing about")
         fighter.choice = {
@@ -822,7 +876,7 @@ function Battle:_fillForcedChoices()
     end
 
     if mon.raging and mon.rageMove and mon.rageMove > 0 then
-      local foe = self:_firstLivingFoe(fighter)
+      local foe = self:_autoTarget(fighter)
       if foe then
         self:_say(mon.species .. "'s RAGE is building")
         fighter.choice = {
@@ -938,6 +992,10 @@ function Battle:_normaliseChoice(fighter, choice)
         return nil
       end
     else
+      -- Deliberately `_firstLivingFoe` and not `_autoTarget`: this is a
+      -- *player's* move with the aim left off, and the answer to that is a
+      -- predictable default the client can show, not a die roll.  Only the
+      -- aims nobody chose spread.
       targetFighter = self:_firstLivingFoe(fighter)
       if not targetFighter then
         for _, foe in ipairs(self:_foes(fighter)) do
@@ -1157,7 +1215,7 @@ end
 
 function Battle:_autoChoice(fighter)
   if fighter.mustReplace then
-    local foe = self:_firstLivingFoe(fighter)
+    local foe = self:_autoTarget(fighter)
     local defender = foe and activeMon(foe)
     local se = self:_bestSeBench(fighter, defender)
     if se then return { action = "switch", slot = se } end
@@ -1180,7 +1238,7 @@ function Battle:_autoChoice(fighter)
     if mon.bide.turns > 0 then
       return { action = "skip" }
     end
-    local foe = self:_firstLivingFoe(fighter)
+    local foe = self:_autoTarget(fighter)
     if foe then
       return {
         action = "fight",
@@ -1197,7 +1255,7 @@ function Battle:_autoChoice(fighter)
     return { action = "skip" }
   end
   if mon.thrashing and mon.thrashing.turns > 0 then
-    local foe = self:_firstLivingFoe(fighter)
+    local foe = self:_autoTarget(fighter)
     if foe then
       return {
         action = "fight",
@@ -1207,13 +1265,13 @@ function Battle:_autoChoice(fighter)
     end
   end
   if mon.raging and mon.rageMove and mon.rageMove > 0 then
-    local foe = self:_firstLivingFoe(fighter)
+    local foe = self:_autoTarget(fighter)
     if foe then
       return { action = "fight", move = mon.rageMove, target = foe.slot }
     end
   end
 
-  local foe = self:_firstLivingFoe(fighter)
+  local foe = self:_autoTarget(fighter)
   if not foe then
     for _, f in ipairs(self:_foes(fighter)) do
       if f.mustReplace then foe = f; break end
@@ -1700,6 +1758,8 @@ function Battle:_resolveOneItem(fighter)
     if not Effects.isWildMode(self.mode) then
       self:_say("But it failed")
     else
+      -- Wild modes seat exactly one monster on side b, so "the first living
+      -- foe" and "the only foe" are the same seat -- no aim to spread.
       local foe = self:_firstLivingFoe(fighter)
       local target = foe and activeMon(foe)
       if not target then
