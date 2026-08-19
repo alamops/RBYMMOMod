@@ -517,6 +517,8 @@ return function(game)
     -- link battle, and the coop_npc trainer leg.
     if os.getenv("MMO_PARTY_WILD_E2E") == "1" then
       local WILD_SPECIES = "PIDGEY"
+      -- Six characters so the assertion cannot pass on a species name.
+      local WILD_NICKNAME = "MMOMON"
       local announced = H.listenForModEvents(game, {
         "mod.rby_mmo.coop_battle_started",
         "mod.rby_mmo.coop_battle_ended",
@@ -545,6 +547,9 @@ return function(game)
 
       -- Bag sheet is uploaded when the mediated fight starts; seed before divert.
       check(H.giveItem(game, "MASTER_BALL", 1), "seeded a MASTER_BALL for the catch")
+      -- Subscribed before the throw: the mod's announcement is guarded on
+      -- there being a listener, which is exactly the case worth proving.
+      local caughtEvents, caughtPayloads = H.listenForEvents({ "pokemon.caught" })
       local partyBefore = H.partySpeciesCount(game)
       local speciesBefore = H.partySpeciesCount(game, WILD_SPECIES)
       local ballsBefore = (game.save.inventory and game.save.inventory.MASTER_BALL) or 0
@@ -602,6 +607,16 @@ return function(game)
             "filed MASTER_BALL from the ITEM menu")
       log("threw MASTER_BALL")
 
+      -- The prompt the catch earns, driven before the battle is closed
+      -- because that is where the mod puts it: on the last tick of the
+      -- ending, with the fight still on screen and the player not yet let
+      -- off it. A catcher who is never asked is the bug this drives.
+      local named = H.answerNicknamePrompt(game, WILD_NICKNAME, 90,
+        function()
+          U.shot(game, SHOT_DIR .. "/host-party-wild-nickname.png")
+        end)
+      check(named, "the catcher is asked to name what they caught, and can")
+
       local medGaps = 0
       local over = H.drivePrompts(game, function()
         local top = H.top(game)
@@ -631,6 +646,30 @@ return function(game)
             "catcher party grew after the MASTER_BALL catch")
       check(speciesAfter > speciesBefore,
             ("caught %s was granted to the host party"):format(WILD_SPECIES))
+      local kept = H.partyNickname(game, WILD_SPECIES)
+      check(kept == WILD_NICKNAME,
+            "and the name typed on the grid is the one the save keeps")
+      log("caught nickname:", tostring(kept))
+
+      -- ...and the rest of the paperwork a catch does: the #DEX, the OT
+      -- stamp, and the event every other catch in the game fires.
+      check(H.dexOwned(game, WILD_SPECIES) == true,
+            ("the #DEX marks the caught %s as owned"):format(WILD_SPECIES))
+      local caught = H.partyMon(game, WILD_SPECIES)
+      local myName = game.save.player and game.save.player.name
+      check(caught ~= nil and caught.ot == myName,
+            "the catcher is stamped on it as the original trainer")
+      check(caught ~= nil and caught.otId ~= nil, "...with their trainer id")
+      check(caughtEvents["pokemon.caught"] >= 1,
+            "pokemon.caught fired for a catch the engine never saw")
+      local payload = caughtPayloads["pokemon.caught"]
+      check(payload ~= nil and payload.species == WILD_SPECIES
+            and payload.destination == "party",
+            "...naming the species and where it went")
+      log(("catch paperwork: dex=%s ot=%s otId=%s events=%d ball=%s"):format(
+        tostring(H.dexOwned(game, WILD_SPECIES)),
+        tostring(caught and caught.ot), tostring(caught and caught.otId),
+        caughtEvents["pokemon.caught"], tostring(payload and payload.ball)))
       log(("catch grant: party %d -> %d, %s %d -> %d, balls %d -> %d"):format(
         partyBefore, partyAfter, WILD_SPECIES, speciesBefore, speciesAfter,
         ballsBefore, ballsAfter))

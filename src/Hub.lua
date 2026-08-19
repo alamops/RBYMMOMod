@@ -1357,6 +1357,17 @@ function M:isNpcSeat(record, seat)
   return false
 end
 
+-- Is this seat wildlife rather than a trainer?  Wild / coop_wild seat their one
+-- synthetic fighter with a wild monster, and a wild monster carries no bag --
+-- so it is never handed the gym kit `tryStartSim` seeds a trainer seat with.
+-- BattleSim refuses an item from that seat as well (`isWildSeat` in
+-- BattleSim/Turn.lua): this only keeps the bag from existing in the first place.
+function M:isWildSeat(record, seat)
+  if not record then return false end
+  if record.mode ~= "wild" and record.mode ~= "coop_wild" then return false end
+  return self:isNpcSeat(record, seat)
+end
+
 -- Which seat a party fills.  Normally the sender's own id.  For coop_npc the
 -- host may also upload the trainer's party under side "b", which is dealt across
 -- the synthetic npc seats rather than displacing their own team -- so this
@@ -1536,9 +1547,11 @@ function M:tryStartSim(record)
     local party = record.parties[seat]
     if not party then return nil end
     local client = self.clients[seat]
-    -- Seed NPC seats with a gym-style kit when the host uploaded no bag.
+    -- Seed trainer NPC seats with a gym-style kit when the host uploaded no
+    -- bag.  A wild seat is skipped: wildlife does not carry items.
     record.bags = record.bags or {}
-    if not record.bags[seat] and self:isNpcSeat(record, seat) then
+    if not record.bags[seat] and self:isNpcSeat(record, seat)
+       and not self:isWildSeat(record, seat) then
       record.bags[seat] = self:cloneBagMap(self.Turn.DEFAULT_NPC_BAG)
     end
     local bag = record.bags[seat]

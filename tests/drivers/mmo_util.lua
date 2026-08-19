@@ -560,6 +560,197 @@ function M.enterJoinCode(game, code)
   return true
 end
 
+-- ------- the nickname prompt a catch earns
+--
+-- An MMO catch is granted by the mod (MediatedBattle / CoopBattle
+-- `grantCatch`), and the catcher is asked to name what they caught exactly as
+-- the engine's own catch asks: a yes/no box once the ending has finished
+-- printing, then the letter grid behind a YES.
+--
+-- Driven properly rather than skipped, because "can the catcher actually name
+-- it" is the question this leg exists to answer -- and because a prompt left
+-- standing swallows the taps the rest of the leg makes to close the battle.
+
+-- Which naming grid is on top, if either: the two generations are different
+-- screens with different fields (Gen 1 keeps `glyphs` and a `grid()`; Gold
+-- keeps the typed string on `text` and its board behind `rows()`).
+function M.namingGridKind(top)
+  if type(top) ~= "table" then return nil end
+  if type(top.glyphs) == "table" and type(top.grid) == "function" then
+    return "gen1"
+  end
+  if type(top.text) == "string" and type(top.rows) == "function"
+     and type(top.characterAt) == "function" then
+    return "gen2"
+  end
+  return nil
+end
+
+-- Gold's board, walked the way M.typeOnGrid walks Gen 1's: step the cursor
+-- rather than compute a tap count, because both axes wrap and SELECT swaps in
+-- a page with different rows. Cursor coordinates are 0-based here, and the
+-- row past the last letter row is the fat case/DEL/END one.
+local function gen2Cell(screen, ch)
+  local grid = screen:rows()
+  for r = 1, #grid do
+    for c = 1, #(grid[r] or {}) do
+      if grid[r][c] == ch then return r - 1, c - 1 end
+    end
+  end
+  return nil
+end
+
+local function typeOnGen2Grid(game, screen, text)
+  for i = 1, #text do
+    local ch = text:sub(i, i)
+    local r, c = gen2Cell(screen, ch)
+    if not r then
+      U.tap(game, "select") -- the other case page
+      U.wait(2)
+      r, c = gen2Cell(screen, ch)
+    end
+    if not r then
+      U.log("WARN no cell on Gold's naming grid for", ch)
+      return false
+    end
+    for _ = 1, 12 do
+      if screen.row == r then break end
+      U.tap(game, "down")
+      U.wait(1)
+    end
+    for _ = 1, 12 do
+      if screen.col == c then break end
+      U.tap(game, "right")
+      U.wait(1)
+    end
+    if screen.row ~= r or screen.col ~= c then
+      U.log("WARN could not reach Gold's cell for", ch)
+      return false
+    end
+    U.tap(game, "a")
+    U.wait(2)
+  end
+  return true
+end
+
+-- Wait for the prompt, answer YES, type `name`, confirm.
+--
+-- Returns true only when the grid actually held what was typed -- the point
+-- of the leg is that the catcher can name the monster, and a grid that came
+-- up empty is a failure with a screenshot rather than a pass.
+-- `onGrid` (optional) runs once the grid is up and before anything is typed,
+-- which is the only moment an empty naming screen can be photographed.
+function M.answerNicknamePrompt(game, name, seconds, onGrid)
+  local asked = M.waitSeconds(game, function()
+    local top = M.top(game)
+    if M.namingGridKind(top) then return true end
+    local text = (M.textOf(top) or ""):lower()
+    return text:find("nickname", 1, true) ~= nil
+  end, seconds or 90, "the nickname prompt after a catch")
+  if not asked then
+    U.log("WARN no nickname prompt after the catch")
+    return false
+  end
+
+  -- A finishes the printing, and A again answers the yes/no under it. YES is
+  -- where the box opens (the mod passes no defaultNo here), so this needs no
+  -- cursor walk -- but it does need a bound, because pressing A into a grid
+  -- types letters.
+  local guard = 0
+  while M.namingGridKind(M.top(game)) == nil and guard < 40 do
+    U.tap(game, "a")
+    U.wait(6)
+    guard = guard + 1
+  end
+  local screen = M.top(game)
+  local kind = M.namingGridKind(screen)
+  if not kind then
+    U.log("WARN the nickname question never opened a naming grid")
+    return false
+  end
+
+  if onGrid then pcall(onGrid, screen, kind) end
+
+  if kind == "gen1" then
+    if not M.typeOnGrid(game, name) then return false end
+    local typed = table.concat(screen.glyphs)
+    if typed ~= name then
+      U.log("WARN the grid holds", typed, "not", name)
+      return false
+    end
+    -- START is the confirm on Gen 1 (or the ED cell); the screen pops itself.
+    U.tap(game, "start")
+  else
+    if not typeOnGen2Grid(game, screen, name) then return false end
+    if screen.text ~= name then
+      U.log("WARN Gold's grid holds", tostring(screen.text), "not", name)
+      return false
+    end
+    -- Gold's START only parks the cursor on END; A on END is the confirm.
+    U.tap(game, "start")
+    U.wait(4)
+    U.tap(game, "a")
+  end
+  U.wait(30)
+  return true
+end
+
+-- The party's own copy of the mon of `species` -- what a driver asserts the
+-- catch's paperwork against (nickname, OT, whatever else lands on it).
+function M.partyMon(game, species)
+  local party = game.save and game.save.party or {}
+  for _, mon in ipairs(party) do
+    if mon.species == species then return mon end
+  end
+  return nil
+end
+
+-- What the party is calling the mon of `species` -- its nickname when it has
+-- one, so a driver can assert the name it just typed actually landed.
+function M.partyNickname(game, species)
+  local mon = M.partyMon(game, species)
+  return mon and mon.nickname
+end
+
+-- Is this species marked in the #DEX -- `caught` on Gold, `owned` on Red,
+-- the same pair src/Gen.lua stamps and reads back.
+function M.dexOwned(game, species)
+  local dex = game.save and game.save.pokedex
+  if type(dex) ~= "table" then return nil end
+  local bag = dex.caught or dex.owned or {}
+  return bag[species] and true or false
+end
+
+-- Listen for real ENGINE events, by subscribing rather than by wrapping emit.
+--
+-- M.captureEvents above counts emits by patching Runtime.emit, which is
+-- enough for an event the engine fires unconditionally. It is not enough here:
+-- an emitter that guards on Runtime.wants (this mod's caught announcement
+-- does, and every hot engine site does) emits **nothing** when no listener is
+-- subscribed -- so a counter that never subscribes measures its own absence.
+-- This subscribes for real, which is also the thing worth proving: another
+-- mod listening for `pokemon.caught` hears an MMO catch.
+--
+-- Returns two tables keyed by event name: how many arrived, and the last
+-- payload of each.
+function M.listenForEvents(names)
+  local Runtime = require("src.mods.Runtime")
+  local bus = Runtime.events
+  local counts, last = {}, {}
+  for _, name in ipairs(names) do counts[name] = 0 end
+  if type(bus) ~= "table" or type(bus.on) ~= "function" then
+    U.log("WARN no live mod event bus; engine events cannot be heard")
+    return counts, last
+  end
+  for _, name in ipairs(names) do
+    bus:on(name, function(payload)
+      counts[name] = counts[name] + 1
+      last[name] = payload
+    end, 0, "mmo_e2e")
+  end
+  return counts, last
+end
+
 -- ------- phase barriers
 --
 -- The two drivers are separate processes with no channel between them but

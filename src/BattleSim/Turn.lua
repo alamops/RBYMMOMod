@@ -134,6 +134,19 @@ local function maxFighters(mode, side)
   return M.FIGHTERS_PER_SIDE
 end
 
+-- The wild monster's seat.  Wildlife is always the synthetic side-b seat of a
+-- mode whose name says "wild" (the seat `maxFighters` caps at one above and
+-- `_awardExp` pays the other side for), and wildlife carries no bag: a wild
+-- monster never uses an item, no matter who asks on its behalf.  Both askers
+-- are gated -- `_normaliseChoice` refuses a submitted one, `_autoItemChoice`
+-- never picks one -- because the seat can be driven from either end.
+local WILD_SIDE = "b"
+
+local function isWildSeat(mode, fighter)
+  return fighter ~= nil and fighter.side == WILD_SIDE
+    and Effects.isWildMode(mode)
+end
+
 -- Wire spells a condition as a three-letter token and Status.lua spells it as
 -- a word.  Both are accepted on the way in and the token is what goes back out
 -- on an event, so neither vocabulary leaks into the other's file.
@@ -879,6 +892,9 @@ function Battle:_normaliseChoice(fighter, choice)
   if action == "item" then
     local item = str(choice.item)
     if not item then return nil end
+    -- Wildlife has no bag and no hands.  Refused rather than ignored so a wild
+    -- seat that is somehow handed one never spends the turn on it either.
+    if isWildSeat(self.mode, fighter) then return nil end
     -- A fighter with a bag sheet must actually hold the stack (hub/NPC auto).
     -- Seats with no bag stay permissive so headless fixtures can still item.
     if fighter.bag and not self:_bagHas(fighter, item) then return nil end
@@ -1113,6 +1129,9 @@ end
 -- Bag item for the active mon: cure → heal ≤50% → X-item while stages flat.
 function Battle:_autoItemChoice(fighter, mon)
   if not fighter.bag then return nil end
+  -- A wild monster is not a trainer: it never reaches into a bag, even when the
+  -- hub seeded its seat with one.
+  if isWildSeat(self.mode, fighter) then return nil end
 
   if mon.status then
     local list = AUTO_STATUS_CURE[mon.status]

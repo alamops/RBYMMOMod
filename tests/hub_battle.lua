@@ -676,6 +676,16 @@ do
   eq(#record.parties[record.npcIds[1]].mons, 1, "dealt one to each seat")
   eq(#record.parties[record.npcIds[2]].mons, 1, "both of them, not one seat's two")
 
+  -- A trainer seat the host uploaded no bag for is seeded with the gym kit, so
+  -- a gym leader can potion.  The wild-seat block below is the other half of
+  -- this claim: wildlife is never seeded, because a wild monster has no bag.
+  ok(not hub:isWildSeat(record, record.npcIds[1]),
+     "a coop_npc npc seat is a trainer, not wildlife")
+  ok(record.bags[record.npcIds[1]] ~= nil, "so it was seeded with a gym kit")
+  eq(record.sim.byId[record.npcIds[1]].bag.POTION,
+     need("BattleSim/Turn").DEFAULT_NPC_BAG.POTION,
+     "the kit the sim actually fights with")
+
   local ready = take(annPeer, Wire.BATTLE_READY)
   ok(ready ~= nil, "the field is announced")
   ok(Wire.battleReady(ready) ~= nil, "in a shape the client's sanitiser accepts")
@@ -737,6 +747,16 @@ do
   record.ruleset = { chart = CHART, seed = 1 }
   ok(hub:tryStartSim(record), "wild sim starts")
   ok(record.sim ~= nil, "and the intermediator is running")
+
+  -- Wildlife carries no bag.  The seat is synthetic exactly as a coop_npc
+  -- trainer seat is, and it used to be seeded with the same gym kit -- which is
+  -- how a wild monster ended up drinking a Potion mid-fight.  BattleSim refuses
+  -- an item from the seat as well; this is the bag never existing.
+  ok(hub:isNpcSeat(record, record.npcIds[1]), "the wild seat is a synthetic seat")
+  ok(hub:isWildSeat(record, record.npcIds[1]), "and it is wildlife, not a trainer")
+  eq(record.bags[record.npcIds[1]], nil, "so no gym kit was seeded onto it")
+  eq(record.sim.byId[record.npcIds[1]].bag, nil,
+     "and it fights with no bag at all")
 end
 
 -- ------- coop_wild: two humans, one wild seat; 2-human gate; catcher on catch
@@ -801,6 +821,10 @@ do
   hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "cw-catch", side = "b",
     mons = { mon({ species = "PIDGEY", catchRate = 255 }) } })
   ok(record.sim ~= nil, "coop_wild sim starts with two humans and a wild party")
+  ok(hub:isWildSeat(record, record.npcIds[1]),
+     "coop_wild's synthetic seat is wildlife too")
+  eq(record.sim.byId[record.npcIds[1]].bag, nil,
+     "and it is seated with no bag either")
   take(annPeer, Wire.BATTLE_READY)
   take(bobPeer, Wire.BATTLE_READY)
 

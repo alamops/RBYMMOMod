@@ -2110,7 +2110,14 @@ function M:onEvent(msg)
     end
     -- Ball id for AnimPlayer opts on the following toss/shake chain.
     local effect = msg.text and effectsFor(self.game).itemEffect(msg.text)
-    if effect and effect.ball then self.medBall = msg.text end
+    if effect and effect.ball then
+      self.medBall = msg.text
+      -- ...and the same id, kept past the `over` that clears medBall, for the
+      -- `ball` field of the caught announcement. Only our own throws: the
+      -- catcher is the thrower, and in a co-op fight the last ball on the
+      -- wire may have been somebody else's.
+      if msg.slot == self:mySlot() then self.caughtBall = msg.text end
+    end
 
   elseif kind == "turn" then
     -- Held rather than acted on: the lines this turn's events produced are
@@ -3116,17 +3123,117 @@ function M:grantCatch(msg)
   local game = self.game
   local save = game and game.save
   if not save then return end
+  -- The name the prompt will ask about: a fresh catch has no nickname, so
+  -- this is the species record's display name -- the same thing the engine's
+  -- own catch prompt asks about (BattleState:storeCaughtMon passes
+  -- `self.enemy.name`).
+  local label = speciesName(game and game.data, mon)
+  -- The #DEX, the OT stamp and (on Gold) the UNOWN form, before the monster
+  -- is put anywhere -- the order `BattleState:storeCaughtMon` writes them in,
+  -- and the reason a catch with nowhere to go still counts as seen.
+  local isNew = Gen.recordCatch(game, mon)
   local okParty, Party = pcall(require, "src.pokemon.Party")
-  if okParty and Party.add(save.party, mon) then
-    self:say((mon.nickname or mon.species or "It") .. " was\nadded to the party!")
-    return
-  end
   local okBoxes, Boxes = pcall(require, "src.pokemon.Boxes")
-  if okBoxes and Boxes.deposit(save, mon) then
-    self:say((mon.nickname or mon.species or "It") .. " was\nsent to the PC!")
+  local destination
+  if okParty and Party.add(save.party, mon) then
+    destination = "party"
+  elseif okBoxes and Boxes.deposit(save, mon) then
+    destination = "box"
+  else
+    self:say("But every BOX\nis full!")
     return
   end
-  self:say("But every BOX\nis full!")
+  -- The new-entry line goes in front of the line saying where the monster
+  -- went, which is where the engine prints it. The #DEX *page* that follows
+  -- it there is deliberately not opened: this screen has one queue and one
+  -- prompt seam, and a dex entry over a co-op battle three other people are
+  -- still leaving is a screen nobody asked for.
+  if isNew then self:say(Gen.dexAddedText(game, label)) end
+  if destination == "party" then
+    self:say((mon.nickname or mon.species or "It") .. " was\nadded to the party!")
+  else
+    self:say((mon.nickname or mon.species or "It") .. " was\nsent to the PC!")
+  end
+  -- Asked for a boxed catch too: AddPartyMon and SendNewMonToBox both call
+  -- AskName on the cart (item_effects.asm), so a full party costs the player
+  -- the slot, never the naming.
+  self:oweNickname(mon, label)
+  M.announceCaught(self, game, mon, destination, isNew, self.caughtBall)
+end
+
+-- The engine's own `pokemon.caught`, for a catch the engine never saw.
+--
+-- **Emitted through `src.mods.Runtime` rather than `mod.events:emit`**, which
+-- is the one place this mod reaches past the facade on purpose. The facade
+-- namespaces a mod's emits to `mod.<id>.*` so no mod can forge an engine
+-- event, and CoopBattle's own `announce` obeys that rule for battle
+-- start/end. This is the other case, and src/Trade2.lua already draws the
+-- line here: that file *is* the Gen 2 TradeSession the engine has not got, so
+-- it emits `pokemon.received` and `trade.completed` under the engine's names
+-- rather than inventing private ones nothing listens for. A caught monster is
+-- the same -- `grantCatch` stands in for `storeCaughtMon`, which emits this,
+-- and a dex tracker or a shiny logger listening for `pokemon.caught` should
+-- see an MMO catch exactly as it sees a solo one. Announcing it under a
+-- private name instead would mean every such mod needs an rby_mmo special
+-- case to keep working in an MMO game, which is the outcome the rule exists
+-- to prevent, not to cause.
+--
+-- Same payload keys as both engine sites, so one listener covers all three:
+-- `isNew` is the dex answer read before the stamp, `destination` is the home
+-- the monster actually got, and `ball` is the id this client last threw.
+-- `battle` is this screen and not a `BattleState` -- there is no BattleState
+-- in a mediated fight -- so a listener that reaches into it must check what
+-- it got. Wrapped in pcall + `wants` for the same reason every hot path in
+-- this mod is: a listener that throws must not take the catch down with it.
+function M.announceCaught(screen, game, mon, destination, isNew, ball)
+  pcall(function()
+    local Runtime = require("src.mods.Runtime")
+    if type(Runtime.emit) ~= "function" then return end
+    if Runtime.wants and not Runtime.wants("pokemon.caught") then return end
+    Runtime.emit("pokemon.caught", {
+      battle = screen, mon = mon, species = mon.species,
+      isNew = isNew and true or false, ball = ball,
+      destination = destination, game = game,
+    })
+  end)
+end
+
+-- ------- the nickname the catcher is owed
+--
+-- Recorded here and asked *later*, and the gap is the whole point: this runs
+-- inside `finish`, one line after "Gotcha!" is queued and while the rest of
+-- the ending is still to print.  A grid pushed now would land on top of the
+-- lines that say what just happened -- the player would be typing a name for
+-- a catch they have not been told about yet.
+--
+-- So it waits for the message queue to run dry (see `update`'s over branch),
+-- which is exactly where the engine asks it: after the caught text, and
+-- before the player is allowed to leave the battle.
+function M:oweNickname(mon, label)
+  if type(mon) ~= "table" then return false end
+  self.owedNickname = { mon = mon, label = label }
+  return true
+end
+
+-- Put the prompt up, once, when there is nothing left on screen to read.
+--
+-- Returns true when it took the frame -- the screen is no longer the top of
+-- the stack, so the A that would have closed the battle must not also be
+-- read as one.  The record is cleared before the push rather than after the
+-- answer: a prompt that failed to open is not owed a second attempt, and the
+-- fight has to stay leavable either way.
+function M:askOwedNickname()
+  local owed = self.owedNickname
+  if not owed then return false end
+  self.owedNickname = nil
+  local ui = self.ui
+  if not (ui and type(ui.askNickname) == "function" and self.game) then
+    return false
+  end
+  local ok = pcall(function()
+    ui:askNickname(self.game, owed.mon, owed.label)
+  end)
+  return ok
 end
 
 function M:finish(result, reason, msg)
@@ -4994,6 +5101,10 @@ function M:update(dt)
   if self:tickMessages(dt, input) then return end
 
   if self.phase == "over" then
+    -- The catch's naming prompt, owed since `grantCatch` and asked now that
+    -- the ending has finished printing -- the engine's own ordering, and the
+    -- last thing between the player and the way out.
+    if self:askOwedNickname() then return end
     if input and input:wasPressed("a") then self:leave() end
     return
   end

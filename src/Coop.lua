@@ -2357,6 +2357,9 @@ function M:startBattle(game, field)
   state, err = CoopBattle.new(game, {
     slots = slots,
     mine = mine,
+    -- Handed the screen pusher so the fight can put up the prompts it earns
+    -- -- today, the naming grid a coop_wild catch owes its catcher.
+    ui = self.ui,
     -- Carried from the battle the co-op one displaced: its trainer record is
     -- what the AI reads a class off, and its aiUses is the allowance the
     -- engine had already computed for it.

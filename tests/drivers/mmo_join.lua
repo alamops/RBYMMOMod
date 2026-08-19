@@ -518,6 +518,11 @@ return function(game)
           "non-catcher party size unchanged after the host's catch")
     check(speciesAfter == speciesBefore,
           ("non-catcher did not receive the caught %s"):format(WILD_SPECIES))
+    -- ...and none of the catch's paperwork either: the #DEX entry belongs to
+    -- whoever threw the ball, exactly as it does on the cart.
+    check(H.dexOwned(game, WILD_SPECIES) ~= true,
+          ("the non-catcher's #DEX does not mark %s as caught"):format(
+            WILD_SPECIES))
     log(("no catch grant on guest: party %d, %s %d"):format(
       partyAfter, WILD_SPECIES, speciesAfter))
     U.shot(game, SHOT_DIR .. "/join-party-wild-after.png")
