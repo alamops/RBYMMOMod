@@ -1,7 +1,7 @@
 {
   "id": "rby_mmo",
   "name": "RBY MMO",
-  "version": "1.0.8",
+  "version": "1.0.10",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",

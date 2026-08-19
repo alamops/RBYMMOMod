@@ -3153,6 +3153,80 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12f3. wildlife never uses an item, from either end
+-- ------------------------------------------------------------------
+--
+-- A wild monster has no bag and no hands.  The seat is driven from two ends --
+-- the hub auto-picks for it, and a submitted choice can arrive addressed to it
+-- -- so both are pinned here.  The bag is handed to the wild seat deliberately:
+-- the point is that even a seat that HAS one never spends it, so a hub that
+-- seeds the wrong kit (which is what `wild` did with `DEFAULT_NPC_BAG`) cannot
+-- put a Potion in a Rattata's mouth.  Trainer seats are unaffected -- 12f above
+-- is the same fixture on the default 1v1 mode and still spends its Potion.
+
+for _, mode in ipairs({ "wild", "coop_wild" }) do
+  do
+    local battle = battleOf({
+      mode = mode,
+      choiceTimeout = 10,
+      seed = 88010,
+      sides = {
+        a = {
+          { playerId = "p1", name = "Ann",
+            mons = { mon({ species = "Alpha", maxHp = 200, spd = 90,
+                           moves = { move({ id = "thump", power = 40 }) } }) } },
+        },
+        b = {
+          { playerId = "wild", name = "Wild",
+            -- Hurt below half and poisoned: 12f's fixture files a heal here.
+            mons = { mon({ species = "Beta", maxHp = 200, hp = 40, spd = 10,
+                           status = "PSN",
+                           moves = { move({ id = "thump", power = 40 }) } }) },
+            bag = { POTION = 2, FULL_HEAL = 1, X_ATTACK = 1 } },
+        },
+      },
+    })
+    drain(battle)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    ok(battle:tick(11) == true, mode .. ": the wild seat's turn resolves")
+    local events = drain(battle)
+    local itemUsed = nil
+    for _, event in ipairs(events) do
+      if event.t == "item" and event.side == "b" then itemUsed = event.text end
+    end
+    eq(itemUsed, nil, mode .. ": auto-pick never reaches the wild seat's bag")
+    eq(battle.byId.wild.bag.POTION, 2, mode .. ": and spends none of it")
+    eq(battle.byId.wild.bag.FULL_HEAL, 1, mode .. ": cure untouched too")
+    eq(battle.byId.wild.mons[1].status, "poison", mode .. ": still poisoned")
+  end
+
+  do
+    local battle = battleOf({
+      mode = mode,
+      seed = 88011,
+      sides = {
+        a = {
+          { playerId = "p1", name = "Ann",
+            mons = { mon({ species = "Alpha", maxHp = 200, spd = 90 }) },
+            bag = { POTION = 1 } },
+        },
+        b = {
+          { playerId = "wild", name = "Wild",
+            mons = { mon({ species = "Beta", maxHp = 200, hp = 40, spd = 10 }) },
+            bag = { POTION = 1 } },
+        },
+      },
+    })
+    drain(battle)
+    ok(battle:submitChoice("wild", { action = "item", item = "POTION", slot = 0 })
+       == false, mode .. ": a submitted item from the wild seat is refused")
+    eq(battle.byId.wild.choice, nil, mode .. ": and files nothing")
+    ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 0 })
+       == true, mode .. ": the player on side a still may")
+  end
+end
+
+-- ------------------------------------------------------------------
 -- 12h. round 5: `exp` event emission gates (`_awardExp`)
 -- ------------------------------------------------------------------
 --

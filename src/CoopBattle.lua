@@ -581,6 +581,10 @@ function M.new(game, opts)
     ranksPoints = opts.ranksPoints and true or false,
     net = opts.net,
     onDone = opts.onDone,
+    -- The mod's screen pusher, for the prompts this fight earns. Only the
+    -- catcher's naming grid uses it today, and a screen built without one
+    -- (the headless suite) simply never asks -- the catch is still granted.
+    ui = opts.ui,
     -- ------- the intermediator's half, all of it inert until it answers
     --
     -- `mediated` is the flag every cut below is gated on, and it is set by
@@ -1697,6 +1701,11 @@ function M:update(dt)
     -- on screen and nothing to wait for -- the next tick takes the row behind
     -- it rather than treating the queue as spent.
     if #self.messages > 0 then return end
+    -- The catch's naming prompt, owed since `grantCatch` and asked here:
+    -- everything the ending had to say has been read, and the screen is about
+    -- to pop. It takes this tick (the push makes it no longer the top of the
+    -- stack), and `finish` runs on the tick after the player answers.
+    if self.result and self:askOwedNickname() then return end
     if self.result then return self:finish() end
     -- The queue is empty and nobody is mid-effect, so whatever the bars were
     -- animating towards is simply where they are. Snapped rather than left to
@@ -8723,7 +8732,14 @@ function M:medRows(msg)
     -- Ball id for AnimPlayer opts on the following toss/shake chain.
     local Effects = need("BattleSim/Effects")
     local effect = msg.text and Effects.itemEffect(msg.text)
-    if effect and effect.ball then self.medBall = msg.text end
+    if effect and effect.ball then
+      self.medBall = msg.text
+      -- ...and the same id kept past the `over` that clears medBall, for the
+      -- `ball` field of the caught announcement. Our own throws only: three
+      -- other people may be throwing balls at the same wild, and the catcher
+      -- is the one whose ball worked.
+      if self:medSlotOf(msg) == self.mine then self.caughtBall = msg.text end
+    end
     say(msg.text)
 
   elseif kind == "switch" then
@@ -9142,17 +9158,89 @@ function M:grantCatch(msg)
   local game = self.game
   local save = game and game.save
   if not save then return end
+  -- What the naming prompt will ask about: the species record's display name,
+  -- because a wild that has just been caught has no nickname yet. Same choice
+  -- MediatedBattle:grantCatch makes, and the same one the engine's own catch
+  -- makes (it asks about `self.enemy.name`).
+  local label = M.caughtLabel(game, mon)
+  -- The #DEX, the OT stamp and (on Gold) the UNOWN form, before the monster is
+  -- put anywhere -- the order the engine's own capture writes them in.
+  local isNew = Gen.recordCatch(game, mon)
   local okParty, Party = pcall(require, "src.pokemon.Party")
-  if okParty and Party.add(save.party, mon) then
-    self:say((mon.nickname or mon.species or "It") .. " was\nadded to the party!")
-    return
-  end
   local okBoxes, Boxes = pcall(require, "src.pokemon.Boxes")
-  if okBoxes and Boxes.deposit(save, mon) then
-    self:say((mon.nickname or mon.species or "It") .. " was\nsent to the PC!")
+  local destination
+  if okParty and Party.add(save.party, mon) then
+    destination = "party"
+  elseif okBoxes and Boxes.deposit(save, mon) then
+    destination = "box"
+  else
+    self:say("But every BOX\nis full!")
     return
   end
-  self:say("But every BOX\nis full!")
+  -- In front of the line saying where it went, which is where the engine
+  -- prints it. The #DEX page that follows it there is deliberately not
+  -- opened -- see MediatedBattle:grantCatch for why.
+  if isNew then self:say(Gen.dexAddedText(game, label)) end
+  if destination == "party" then
+    self:say((mon.nickname or mon.species or "It") .. " was\nadded to the party!")
+  else
+    self:say((mon.nickname or mon.species or "It") .. " was\nsent to the PC!")
+  end
+  -- Boxed catches are named too: AddPartyMon and SendNewMonToBox both call
+  -- AskName on the cart, so a full party costs the slot and not the naming.
+  self:oweNickname(mon, label)
+  -- The engine's own `pokemon.caught`, through MediatedBattle's announcer --
+  -- shared rather than twinned, because unlike the grant itself there is
+  -- nothing co-op-shaped about it, and two copies of a *published event's*
+  -- payload is two ways for one contract to drift. Its header carries the
+  -- reasoning for emitting an engine name at all.
+  Mediated.announceCaught(self, game, mon, destination, isNew, self.caughtBall)
+end
+
+-- The species record's display name, falling back to the id.
+function M.caughtLabel(game, mon)
+  local data = game and game.data
+  local def = type(data) == "table" and type(data.pokemon) == "table"
+    and data.pokemon[mon.species] or nil
+  local name = def and def.name
+  if type(name) ~= "string" or name == "" then name = mon.species end
+  if type(name) ~= "string" or name == "" then return "POKeMON" end
+  return name
+end
+
+-- ------- the nickname the catcher is owed
+--
+-- MediatedBattle:oweNickname / askOwedNickname's twin, for the same reason
+-- grantCatch is one: this file owns the coop_wild path outright.
+--
+-- Recorded on the grant and asked once the message queue has run dry, which
+-- on this screen is the tick that would otherwise call `finish` and pop the
+-- battle (see `update`'s "messages" branch). That gap is deliberate: the
+-- grant happens while "Gotcha!" and the line saying where the monster went
+-- are still queued, and a grid pushed then would have the player naming a
+-- catch nobody had told them about.
+function M:oweNickname(mon, label)
+  if type(mon) ~= "table" then return false end
+  self.owedNickname = { mon = mon, label = label }
+  return true
+end
+
+-- Returns true when it took the frame, which is what holds `finish` off for
+-- as long as the prompt is up. Cleared before the push, not after the answer:
+-- a prompt that could not open is not owed a second try, and the fight has to
+-- end either way.
+function M:askOwedNickname()
+  local owed = self.owedNickname
+  if not owed then return false end
+  self.owedNickname = nil
+  local ui = self.ui
+  if not (ui and type(ui.askNickname) == "function" and self.game) then
+    return false
+  end
+  local ok = pcall(function()
+    ui:askNickname(self.game, owed.mon, owed.label)
+  end)
+  return ok
 end
 
 -- ------- one turn's intent

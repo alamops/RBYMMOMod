@@ -148,6 +148,223 @@ function M.startMenuId(game)
   return "Start" .. "Menu"
 end
 
+-- ------- the nickname a catch earns
+--
+-- A wild caught on the engine's own path is named through
+-- BattleState:askNicknameUI: the caught text, then "Do you want to give a
+-- nickname to X?", then the letter grid.  A wild caught in an MMO fight is
+-- granted by this mod instead (MediatedBattle / CoopBattle `grantCatch`), and
+-- until this existed the grant went straight into the party -- the catcher
+-- never got the prompt every other catch in the game gives them.
+--
+-- The two generations differ in three ways that a single call site would
+-- otherwise have to know: the screen id, the opts shape, and -- the one that
+-- actually bites -- who pops the screen.  Gen 1's NamingScreen pops *itself*
+-- before calling onDone (src/ui/NamingScreen.lua); Gold's does not, and its
+-- callers pop for it (src/ui/gen2/BattleState.lua:answerNickname).  So this
+-- pops on Gold and leaves Gen 1 alone: doing either on both generations
+-- either strands the grid on the stack forever or takes the screen underneath
+-- it down with the answer.
+
+function M.nicknameScreenId(game)
+  if M.generation(game) == 2 then return "Gen2NamingScreen" end
+  -- Split for the reason startMenuId's is: gen2check MK409 flags a bare Gen 1
+  -- screen id literal in a helper that also answers with a Gen 2 one.
+  return "Naming" .. "Screen"
+end
+
+-- The sentence the prompt asks, in the player's own copy's words where the
+-- dataset carries them.
+--
+-- Gen 1 has the ROM string (_DoYouWantToNicknameText, whose CONT is a tab and
+-- whose {RAM} token is the species); Gold's engine prints a plain sentence of
+-- its own (Gen2 BattleState:askNickname), so there is nothing to look up and
+-- the fallback *is* the line.  `displayName` is substituted through a function
+-- so a name carrying `%` cannot blow up gsub's replacement parser.
+function M.nicknamePromptText(game, displayName)
+  local name = tostring(displayName or "")
+  if name == "" then name = "POKeMON" end
+  if M.generation(game) == 2 then
+    return "Give a nickname to\n" .. name .. "?"
+  end
+  local text = game and game.data and game.data.text
+    and game.data.text._DoYouWantToNicknameText
+  if type(text) == "string" and text ~= "" then
+    local out = text:gsub("\t", "\n"):gsub("{RAM:?[%w_]*}", function()
+      return name
+    end)
+    return out
+  end
+  return "Do you want to\ngive a nickname\nto " .. name .. "?"
+end
+
+-- Put the letter grid up for `mon`, and write what was typed onto it.
+--
+-- `onDone` is called with the typed name (or nil) *after* the grid has left
+-- the stack, so a caller can carry on sequencing from it.  Returns false when
+-- no screen went up -- a build with no naming screen registered, or a push
+-- that threw -- which is the caller's cue to say so rather than wait for an
+-- answer that is never coming.
+function M.askNickname(game, mon, displayName, onDone)
+  if not (type(game) == "table" and type(mon) == "table") then return false end
+  local gen2 = M.generation(game) == 2
+  local name = tostring(displayName or mon.species or "")
+
+  -- Guarded because the two screens reach it differently (Gold's onCancel and
+  -- onDone are both endings) and a nickname must not be written twice.
+  local answered = false
+  local function done(typed)
+    if answered then return end
+    answered = true
+    if gen2 then
+      pcall(function() game.stack:pop() end)
+    end
+    if type(typed) == "string" and typed ~= "" then mon.nickname = typed end
+    if onDone then onDone(typed) end
+  end
+
+  local opts
+  if gen2 then
+    local data = game.data or {}
+    local icons = data.gen2Icons
+    local iconId = icons and icons.species and icons.species[mon.species]
+    local entry = iconId and icons.icons and icons.icons[iconId]
+    opts = {
+      type = "nickname",
+      monName = name,
+      iconPath = entry and entry.image or nil,
+      menuGfx = data.gen2MenuGfx,
+      onDone = done,
+      onCancel = function() done(nil) end,
+    }
+  else
+    opts = {
+      title = "NICKNAME?",
+      maxLen = Config.NICKNAME_MAX,
+      onDone = done,
+    }
+  end
+
+  local pushed
+  local ok = pcall(function()
+    pushed = mod.ui.push(game, M.nicknameScreenId(game), opts)
+  end)
+  -- A pcall that succeeds but hands back nothing table-shaped is as
+  -- screen-less as a throw (an unregistered id resolves to nil), and both
+  -- leave the catcher waiting on a grid that never came up.
+  if not (ok and type(pushed) == "table") then
+    mod.log:warn("could not open the naming screen for the POKeMON you just "
+      .. "caught; it keeps its species name and can be renamed at the NAME "
+      .. "RATER")
+    return false
+  end
+  return true
+end
+
+-- ------- the rest of what a capture writes into the save
+--
+-- Adding the monster to the party is only the visible half of a catch. The
+-- engine's own capture (`BattleState:storeCaughtMon` on Red,
+-- `Gen2 BattleState:pushCaught` on Gold) also marks the #DEX, stamps the
+-- catcher onto the mon as its original trainer, and -- on Gold -- registers
+-- an UNOWN's form.  An MMO catch is granted by this mod, so none of it
+-- happened: the caught monster was owned by nobody, the dex never moved, and
+-- an UNOWN caught in a co-op fight never unlocked its letter.
+--
+-- All three are the same shape of question -- "which field does this
+-- generation keep it in" -- so they live here together, and the engine's own
+-- helpers do the writing wherever it exports one (`BattleState.stampOT`,
+-- `Mon.stampOT`, `Unown.registerCatch`). The dex is written directly because
+-- neither generation exports a marker: Gen 1's `markOwned` is a `BattleState`
+-- static that reads `game.save.pokedex.owned`, Gold stamps
+-- `pokedex.caught` inline, and the rule for which of the two a save carries
+-- is already stated once in this file (see `dexCounts`).
+
+-- The catcher's name and id on the monster they caught. `mon.traded` is
+-- respected by both engine stamps: a traded mon keeps the id it arrived with.
+local function stampOT(game, save, mon)
+  if type(save.player) ~= "table" then return false end
+  local path = (M.generation(game) == 2)
+    and "src.battle.gen2.Mon" or "src.battle.BattleState"
+  local stamped = false
+  pcall(function()
+    local engine = require(path)
+    if type(engine.stampOT) == "function" then
+      engine.stampOT(save, mon)
+      stamped = true
+    end
+  end)
+  if stamped then return true end
+  -- No engine module to ask (a headless load, a build without it): the OT
+  -- name is the half a player sees on the status screen, so it is written
+  -- rather than dropped. The id is left alone -- inventing one here would be
+  -- inventing the number the traded check turns on.
+  mon.ot = mon.ot or save.player.name
+  return mon.ot ~= nil
+end
+
+-- Seen + owned/caught, and whether this species was new.
+--
+-- `caught` when the save carries it or declares generation 2, `owned`
+-- otherwise -- the same rule src/Trade2.lua marks a received trade under, and
+-- the same pair `dexCounts` reads back out.
+local function markDex(save, species)
+  local dex = save.pokedex
+  if not (type(dex) == "table" and type(species) == "string") then return nil end
+  dex.seen = dex.seen or {}
+  dex.seen[species] = true
+  if dex.caught ~= nil or save.generation == 2 then
+    dex.caught = dex.caught or {}
+    local knew = dex.caught[species] and true or false
+    dex.caught[species] = true
+    return not knew
+  end
+  dex.owned = dex.owned or {}
+  local knew = dex.owned[species] and true or false
+  dex.owned[species] = true
+  return not knew
+end
+
+-- Everything the engine's own capture does to the save except choosing the
+-- monster's home, which is the caller's (party, then a box).
+--
+-- Returns whether the species was **new** to the dex, which is the answer the
+-- "new #DEX data" line is asked for -- and nil when this save has no dex at
+-- all, which is not the same as "already known".
+--
+-- Ordered the way the engine orders it: the dex and the OT are written before
+-- the monster is put anywhere, so a catch that ends up with nowhere to go
+-- still counted as seen (`storeCaughtMon` marks owned before `Party.add`).
+function M.recordCatch(game, mon)
+  if not (type(game) == "table" and type(mon) == "table") then return nil end
+  local save = game.save
+  if type(save) ~= "table" then return nil end
+  stampOT(game, save, mon)
+  local isNew = markDex(save, mon.species)
+  if M.generation(game) == 2 then
+    -- AddPartyMon's `.registerunowndex`: the form list UNOWN MODE and
+    -- VAR_UNOWNCOUNT read. A no-op for every species but UNOWN.
+    pcall(function()
+      local Unown = require("src.core.gen2.Unown")
+      if type(Unown.registerCatch) == "function" then
+        Unown.registerCatch(save, mon)
+      end
+    end)
+  end
+  return isNew
+end
+
+-- "This one is new", in each game's own words (_ItemUseBallText06 on Red,
+-- NewDexDataText on Gold).
+function M.dexAddedText(game, displayName)
+  local name = tostring(displayName or "")
+  if name == "" then name = "It" end
+  if M.generation(game) == 2 then
+    return name .. "'s data was newly\nadded to the #DEX."
+  end
+  return "New POKéDEX data\nwill be added for\n" .. name .. "!"
+end
+
 function M.avatarName(playerId)
   return "mmo_" .. tostring(playerId)
 end

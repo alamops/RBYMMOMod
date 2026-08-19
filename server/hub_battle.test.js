@@ -308,6 +308,15 @@ function testCoopNpcMediated() {
     && record.parties.get('nc1b').mons.length === 1,
     "and the trainer's team is dealt one to each seat");
 
+  // A trainer seat the host uploaded no bag for is seeded with the gym kit, so
+  // a gym leader can potion. testCoopWildCatchCatcher is the other half of this
+  // claim: wildlife is never seeded, because a wild monster has no bag.
+  ok(!relay.isWildSeat(record, 'nc1a'),
+    'a coop_npc npc seat is a trainer, not wildlife');
+  ok(record.bags.get('nc1a'), 'so it was seeded with a gym kit');
+  ok(record.sim.byId.get('nc1a').bag.POTION === relay.Turn.DEFAULT_NPC_BAG.POTION,
+    'the kit the sim actually fights with');
+
   const ready = take(a, 'mmo.battle_ready');
   ok(ready && ready.sides.b.length === 2,
     'both trainer seats are advertised on side b');
@@ -441,6 +450,16 @@ function testCoopWildCatchCatcher() {
     }],
   });
   ok(record && record.sim, 'coop_wild sim starts with two humans and a wild party');
+
+  // Wildlife carries no bag. The seat is synthetic exactly as a coop_npc
+  // trainer seat is, and it used to be seeded with the same gym kit -- which is
+  // how a wild monster ended up drinking a Potion mid-fight. The turn machine
+  // refuses an item from the seat as well; this is the bag never existing.
+  const wildSeat = record.npcIds[0];
+  ok(relay.isNpcSeat(record, wildSeat), 'the wild seat is a synthetic seat');
+  ok(relay.isWildSeat(record, wildSeat), 'and it is wildlife, not a trainer');
+  ok(!record.bags.get(wildSeat), 'so no gym kit was seeded onto it');
+  ok(!record.sim.byId.get(wildSeat).bag, 'and it fights with no bag at all');
   take(a, 'mmo.battle_ready');
   take(b, 'mmo.battle_ready');
   a.peer.outbox = [];

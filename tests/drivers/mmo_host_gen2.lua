@@ -340,7 +340,11 @@ return function(game)
       "mod.rby_mmo.coop_battle_ended",
     }) or nil
     check(H.giveItem(game, "MASTER_BALL", 1), "seeded a MASTER_BALL for the catch")
+    -- Subscribed before the throw: the announcement is guarded on a listener.
+    local caughtEvents, caughtPayloads = H.listenForEvents({ "pokemon.caught" })
     local WILD_SPECIES = "SENTRET"
+    -- Six characters, so the assertion cannot pass on a species name.
+    local WILD_NICKNAME = "MMOMON"
     local wildFinished = nil
     local staged = H.stageWild(game, WILD_SPECIES, 5, function(result)
       wildFinished = result
@@ -404,6 +408,14 @@ return function(game)
           "filed MASTER_BALL from the ITEM menu")
     log("threw MASTER_BALL")
 
+    -- The naming prompt the catch earns, on Gold's own grid (the mod picks
+    -- the screen by generation). Driven here because the mod asks it on the
+    -- last tick of the ending, with the fight still on screen.
+    local named = H.answerNicknamePrompt(game, WILD_NICKNAME, 90, function()
+      U.shot(game, SHOT_DIR .. "/host-party-wild-nickname.png")
+    end)
+    check(named, "the catcher is asked to name what they caught, and can")
+
     local medGaps = 0
     local over = H.drivePrompts(game, function()
       local fieldTop = H.top(game)
@@ -427,6 +439,28 @@ return function(game)
             "coop_battle_ended fired after Party vs Wild")
     end
     log("engine wild result:", tostring(wildFinished))
+    local kept = H.partyNickname(game, WILD_SPECIES)
+    check(kept == WILD_NICKNAME,
+          "and the name typed on Gold's grid is the one the save keeps")
+    log("caught nickname:", tostring(kept))
+
+    -- ...and the paperwork: Gold keeps the dex bit under `caught`, and its OT
+    -- stamp is the Gen 2 one (ot + otName).
+    check(H.dexOwned(game, WILD_SPECIES) == true,
+          ("the #DEX marks the caught %s"):format(WILD_SPECIES))
+    local caught = H.partyMon(game, WILD_SPECIES)
+    local myName = game.save.player and game.save.player.name
+    check(caught ~= nil and caught.ot == myName,
+          "the catcher is stamped on it as the original trainer")
+    check(caughtEvents["pokemon.caught"] >= 1,
+          "pokemon.caught fired for a catch the engine never saw")
+    local payload = caughtPayloads["pokemon.caught"]
+    check(payload ~= nil and payload.species == WILD_SPECIES,
+          "...naming the species that was caught")
+    log(("catch paperwork: dex=%s ot=%s otId=%s events=%d"):format(
+      tostring(H.dexOwned(game, WILD_SPECIES)),
+      tostring(caught and caught.ot), tostring(caught and caught.otId),
+      caughtEvents["pokemon.caught"]))
 
     -- No exp check on this leg by design: it ends with a MASTER_BALL, and a
     -- caught foe never faints -- there is nothing for the referee's
