@@ -789,9 +789,17 @@ end
 -- Gen 2 art / palettes / battle pics are not ready yet, so both NIREs stay
 -- Gen 1-only until that work lands (Chars / Gen / Cast all honour this).
 --
--- `dir` holds three files, all original art shaped like the engine's own:
--- walk.png (16x96, six 16x16 frames), front.png (56x56, the trainer-card and
--- intro pic) and back.png (48x48, the battle back pic).
+-- `dir` holds four files, all original art shaped like the engine's own:
+-- walk.png (16x96, six 16x16 frames), bike.png (the same sheet, riding),
+-- front.png (56x56, the trainer-card and intro pic) and back.png (48x48, the
+-- battle back pic).
+--
+-- bike.png is the mount, not a character. The engine reads exactly one bike
+-- sheet, field.playerSprites.bike, resolved once in Player.new -- so a
+-- character wearing a bike is not a catalog entry anybody can pick, it is a
+-- second renderer put on the live player next to the first (Cast.bikeDef,
+-- Client.applyLook). Six frames in the same order as walk.png, because the
+-- renderer poses both through the same STAND / WALK tables.
 --
 -- walk.png is original-ish silhouette work: modkit MK302 rejects perceptual
 -- near-duplicates of the player's ROM-derived cache (blue.png / fisher.png

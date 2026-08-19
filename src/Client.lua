@@ -1039,11 +1039,45 @@ end
 -- walking through a door.
 local originalLook = nil
 local lookOwner = nil
+-- The bicycle is a second sheet on the same object (Player.new reads
+-- field.playerSprites.bike into player.bikeSprite, and Player:pose picks it
+-- over the walking one while onBike), so wearing a character means swapping
+-- two renderers, not one -- and putting a character back means putting both
+-- back. It rides the same owner pin as originalLook -- stashed and cleared
+-- with it, never on its own -- so nil is never ambiguous here: it can only
+-- mean "this boot's player had no bike sheet", which is a thing a Gen 2 boot
+-- and a stubbed player both are.
+local originalBike = nil
 
 local function playerEntity()
   local world = mod.world
   local ow = world and type(world.overworld) == "function" and world:overworld() or nil
   return ow and ow.player or nil
+end
+
+-- A renderer for the character's own bike sheet, or nil for a character
+-- that has none -- which is every vanilla one, and every one of ours on a
+-- boot it is not ready for (Cast.bikeDef decides both).
+--
+-- A failure here is a cosmetic one and is treated as such: warn once and
+-- answer nil, so the player keeps the engine's bicycle instead of losing the
+-- character they actually chose over art that would not load.
+local bikeWarned = {}
+local function bikeRenderer(id)
+  local def = Cast.bikeDef(id)
+  if not def then return nil end
+  local ok, renderer = pcall(function()
+    local SpriteRenderer = require("src.render.SpriteRenderer")
+    return SpriteRenderer.new(def, "player")
+  end)
+  if ok and renderer then return renderer end
+  if not bikeWarned[id] then
+    bikeWarned[id] = true
+    mod.log:warn("could not load %s's bicycle sheet; you will ride the "
+      .. "game's own -- reinstall the mod folder so %s is present",
+      tostring(id), tostring(def.image))
+  end
+  return nil
 end
 
 function M.applyLook(game)
@@ -1063,9 +1097,16 @@ function M.applyLook(game)
   end
   if lookOwner ~= player then
     originalLook = player.sprite
+    originalBike = player.bikeSprite
     lookOwner = player
   end
   player.sprite = renderer
+  -- The bicycle, from the same choice and in the same breath.  Written on
+  -- every apply and not only when there is a sheet to write: this is also
+  -- the path from one character to another on a player already wearing one,
+  -- and a character without bike art of its own has to hand the engine's own
+  -- bike sheet back rather than keep pedalling as whoever came before.
+  player.bikeSprite = bikeRenderer(id) or originalBike
   -- Gen 2 World:applySpritePalette reads spriteDef; without it the worn
   -- sheet stays DMG greyscale (same class of bug as Chars.portrait).
   player.spriteDef = record
@@ -1124,8 +1165,13 @@ function M.restoreLook()
   -- renderer over it would be this same bug pointing the other way.
   if lookOwner and originalLook ~= nil and playerEntity() == lookOwner then
     lookOwner.sprite = originalLook
+    -- The bicycle goes back in the same breath, and unconditionally: nil is
+    -- a legitimate original here (a boot with no bike sheet), so gating this
+    -- on it the way the walking sheet is gated would leave the mod's bicycle
+    -- under a restored trainer.
+    lookOwner.bikeSprite = originalBike
   end
-  originalLook, lookOwner = nil, nil
+  originalLook, originalBike, lookOwner = nil, nil, nil
 end
 
 -- Put the player in whatever their standing choice says they are.

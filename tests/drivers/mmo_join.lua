@@ -1714,6 +1714,18 @@ return function(game)
         check(pickOk and pickLook ~= beforeLook,
               "and the rendered sheet actually changed, with no connection "
                 .. "open")
+
+        -- And on the bicycle, offline. The host proves the mount over a
+        -- live connection; this proves it belongs to the character rather
+        -- than to the session -- and, with nobody else in the world, it is
+        -- the frame with no nameplate across it, which is the one the
+        -- README shows.
+        local bikeSheet = H.shotBike(game, SHOT_DIR .. "/guest-bike.png")
+        log("offline bike sheet:", tostring(bikeSheet))
+        check(type(bikeSheet) == "string"
+              and bikeSheet:find("assets/chars/", 1, true) ~= nil
+              and bikeSheet:find("bike.png", 1, true) ~= nil,
+              "and NIRE's own bicycle is under them with no game open")
       end
     end
   else

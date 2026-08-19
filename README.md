@@ -651,6 +651,15 @@ own, until you pick somebody else.
   <img src="docs/screenshots/nire-battle.png" width="330" alt="A link battle starting, with NIRE's back pic where Red's would be">
 </p>
 
+**And they have bicycles.** The bike is a whole second walking sheet in this
+game — the engine loads one and only one, which is why every mod character
+before this turned back into RED the moment they mounted. Both of these have
+their own, so the character you picked is the one pedalling:
+
+<p align="center">
+  <img src="docs/screenshots/nire-bike.png" width="300" alt="NIRE on a bicycle in the overworld, facing the camera">
+</p>
+
 Same card, same badges, a different trainer on it — `NIRE` on the left,
 `NIRE HOOD` on the right:
 

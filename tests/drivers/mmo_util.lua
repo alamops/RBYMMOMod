@@ -2023,6 +2023,58 @@ function M.shotLook(game, path)
   return worn and (worn.def and worn.def.image or worn.image) or nil
 end
 
+-- Mount the bicycle and photograph it, returning the sheet the player
+-- actually posed from.
+--
+-- The third pic of a character, and the one with the quietest failure. The
+-- bicycle is a whole second overworld sheet -- Player.new resolves
+-- field.playerSprites.bike once and Player:pose prefers player.bikeSprite
+-- while onBike -- so a character can be worn correctly everywhere this file
+-- already looks and still turn back into RED the moment its rider mounts.
+-- Nothing in either flow had ever been on a bicycle.
+--
+-- Mounted through save.onBike, which is what the bag's BICYCLE row writes
+-- (src/ui/BagMenu.lua) and what OverworldController copies onto the player
+-- every tick -- not a flag poked onto the player behind the engine's back.
+-- Indoors is fine and is where both drivers stand: the mount check that
+-- cares about the map runs on a warp, so the pose here is the same pose a
+-- route would draw.
+--
+-- Call it with nothing in flight from the peer. It closes what is on top
+-- before it mounts, and B on a request box is an answer: dropped between the
+-- guest's trade ask and the host's reply, this refused the trade and the run
+-- failed two legs later, in the trade, with nothing pointing back here.
+--
+-- The sheet is read back off pose() rather than off player.bikeSprite so the
+-- answer is what the frame drew, not what was installed for it.
+function M.shotBike(game, path)
+  local ow
+  for i = #game.stack.states, 1, -1 do
+    if game.stack.states[i].isOverworld then ow = game.stack.states[i] break end
+  end
+  ow = ow or game.overworld
+  local player = ow and ow.player
+  if not (player and game.save) then return nil end
+
+  local wasOnBike = game.save.onBike
+  M.closeToOverworld(game)
+  player.facing = "down"
+  game.save.onBike = true
+  U.wait(20)
+
+  local drawn
+  pcall(function()
+    local sprite = (player:pose())
+    drawn = sprite and (sprite.def and sprite.def.image or sprite.image) or nil
+  end)
+  U.shot(game, path)
+
+  game.save.onBike = wasOnBike
+  player.onBike = not not wasOnBike
+  U.wait(10)
+  return drawn
+end
+
 -- Open the game's own TRAINER CARD and photograph it, returning the path
 -- the player pic resolved to.
 --

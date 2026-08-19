@@ -752,6 +752,23 @@ return function(game)
     check(wornOk and wornLook == "SPRITE_NIRE",
           "and it is exactly the character just picked")
 
+    -- On the bicycle, which is the one pose a worn character used to lose.
+    -- Asserted on the sheet the frame actually posed from: RED's bike sheet
+    -- comes out of the ROM cache (assets/generated/), so "under
+    -- assets/chars/" is exactly the difference between the character riding
+    -- and the character being replaced by RED the moment they mount.
+    --
+    -- Taken before the signal below rather than after it: shotBike closes
+    -- what is on top, and past that signal the guest's trade ask is in
+    -- flight -- a B on that box is a NO, and the run then failed in the
+    -- trade with nothing pointing back to here.
+    local bikeSheet = H.shotBike(game, SHOT_DIR .. "/host-bike.png")
+    log("bike sheet:", tostring(bikeSheet))
+    check(type(bikeSheet) == "string"
+          and bikeSheet:find("assets/chars/", 1, true) ~= nil
+          and bikeSheet:find("bike.png", 1, true) ~= nil,
+          "NIRE rides NIRE's own bicycle sheet, not RED's")
+
     -- Signalled unconditionally: a failed pick above is already reported by
     -- the checks that just ran, and the guest is waiting on this marker
     -- regardless of how this leg went -- staying silent would only turn one

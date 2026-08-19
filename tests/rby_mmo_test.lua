@@ -3743,6 +3743,32 @@ eq(Cast.pic(nil, "back"), nil, "and wearing nothing changes nothing")
 eq(Cast.owns("SPRITE_NIRE"), true, "NIRE is ours")
 eq(Cast.owns("SPRITE_RED"), false, "RED is not")
 
+-- ------- the bicycle
+--
+-- A record and not a path, and deliberately not a catalog entry: the engine
+-- reads one bike sheet id (field.playerSprites.bike) once, in Player.new, so
+-- a registered SPRITE_NIRE_BIKE would be a character in the picker that
+-- still put RED on the bicycle underneath whoever picked it. What the mount
+-- needs is the record SpriteRenderer poses from, which is what this hands
+-- out -- shaped exactly like the walking one it belongs to.
+local bike = Cast.bikeDef("SPRITE_NIRE")
+check(type(bike) == "table", "NIRE has a bicycle sheet")
+check(bike.image and bike.image:find("bike.png", 1, true),
+      "and it is the bike art, not the walking sheet")
+eq(bike.frames, Config.CHAR_FRAMES, "six frames, like every overworld sheet")
+eq(bike.walker, true, "and a walk cycle, or it would not pedal")
+eq(bike.paletteSource, Config.CHAR_PALETTE_SOURCE,
+   "coloured off the same palette as the character riding it")
+check(Cast.bikeDef("SPRITE_NIRE_HOOD"), "NIRE HOOD has one too")
+eq(Cast.bikeDef("SPRITE_RED"), nil, "RED keeps the bicycle the game gave it")
+eq(Cast.bikeDef(nil), nil, "and wearing nothing changes nothing")
+do
+  local offered = {}
+  for _, id in ipairs(Chars.list()) do offered[id] = true end
+  eq(offered.SPRITE_NIRE_BIKE, nil,
+     "the bicycle is never a character anybody can pick")
+end
+
 -- ------- the art is really there, and really the size the engine reads it at
 --
 -- A PNG's IHDR is its first chunk, so width and height are bytes 17..24 --
@@ -3765,6 +3791,7 @@ end
 
 for _, char in ipairs(Config.OWN_CHARS) do
   for file, want in pairs({ ["walk.png"] = { 16, 96 },
+                            ["bike.png"] = { 16, 96 },
                             ["front.png"] = { 56, 56 },
                             ["back.png"] = { 48, 48 } }) do
     local w, h = pngSize(MOD_PATH .. "/" .. char.dir .. "/" .. file)
@@ -6536,6 +6563,7 @@ end)()
 ;(function()
 
 local Client = need("Client")
+local Cast = need("Cast")
 
 -- The real renderer needs a graphics context; the bookkeeping under test
 -- does not care what the object is, only which one is where.
@@ -6581,6 +6609,61 @@ eq(Client.wornLook(), nil, "and restoreLook alone is wearing nothing again")
 
 Client.restoreLook()
 eq(red.sprite, redSheet, "and restoring twice is not a second restore")
+
+-- ------- the bicycle, which is a second sheet on the same object
+--
+-- Player.new reads field.playerSprites.bike into player.bikeSprite and
+-- Player:pose prefers it while onBike, so a character whose bike art was
+-- never installed pedals away as RED the moment they mount. Both renderers
+-- move together, and both come back together -- and a character with no bike
+-- art of its own has to leave the engine's alone rather than inherit
+-- whoever was worn before it.
+
+local rider = newPlayer("rider")
+rider.bikeSprite = { vanilla = "red bike" }
+overworld.player = rider
+local riderSheet, riderBike = rider.sprite, rider.bikeSprite
+
+stubSave.sprite = "SPRITE_ROCKET"
+check(Client.applyLook(), "wearing a character with no bike art of its own")
+check(rider.sprite ~= riderSheet, "swaps the walking sheet")
+eq(rider.bikeSprite, riderBike, "and leaves the game's own bicycle alone")
+
+stubSave.sprite = "SPRITE_NIRE"
+eq(Client.spriteChoice(), "SPRITE_NIRE", "sanity: NIRE is in the catalog")
+check(Client.applyLook(), "wearing one of ours")
+check(rider.bikeSprite ~= riderBike, "puts our bicycle on the player too")
+eq(rider.bikeSprite.worn.image, Cast.bikeDef("SPRITE_NIRE").image,
+   "built from the character's own bike art")
+eq(rider.bikeSprite.worn.walker, true, "which pedals rather than stands")
+eq(rider.bikeSprite.kind, "player", "as the player's own renderer")
+
+-- The path this used to get wrong: one player object, two characters in a
+-- row. The stash is only re-read when the *entity* changes, so a second
+-- apply has to overwrite the bicycle rather than skip it.
+stubSave.sprite = "SPRITE_ROCKET"
+check(Client.applyLook(), "changing to a character without bike art")
+eq(rider.bikeSprite, riderBike, "hands the game's bicycle straight back")
+
+stubSave.sprite = "SPRITE_NIRE"
+check(Client.applyLook(), "wearing ours again")
+check(rider.bikeSprite ~= riderBike, "our bicycle is on")
+Client.restoreLook()
+eq(rider.sprite, riderSheet, "leaving gives the trainer back")
+eq(rider.bikeSprite, riderBike, "and the bicycle with it")
+
+-- A boot with no bike sheet at all (Gold, and every stubbed player above):
+-- nil is the original, so the restore has to write nil rather than treat it
+-- as "nothing to put back" and leave ours pedalling.
+local walker = newPlayer("walker")
+overworld.player = walker
+check(Client.applyLook(), "wearing ours on a player with no bicycle")
+check(walker.bikeSprite ~= nil, "still gets one")
+Client.restoreLook()
+eq(walker.bikeSprite, nil, "and gives the absence back on the way out")
+
+overworld.player = red
+stubSave.sprite = "SPRITE_ROCKET"
 
 -- ------- explicitChoice: what counts as "asked to be somebody else"
 --

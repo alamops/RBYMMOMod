@@ -49,8 +49,9 @@ return {
         .. "ordinary sprite records, and marked with the engine's hollow "
         .. "arrow in the cursor's column so the two are told apart from the "
         .. "ROM's own cast. Wearing one also changes the pics the "
-        .. "game draws you with: the battle back pic, the trainer card and "
-        .. "Oak's intro, for as long as you are wearing them.",
+        .. "game draws you with: the battle back pic, the trainer card, "
+        .. "Oak's intro and the bicycle, for as long as you are wearing "
+        .. "them.",
       "A CHARACTER row on the MMO menu, twice over: under HOST GAME and JOIN "
         .. "GAME while you are on your own, and under RANK -- above LEAVE and "
         .. "END GAME -- while you are in a game. Both open the same character "

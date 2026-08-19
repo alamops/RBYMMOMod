@@ -6,6 +6,33 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Added
+
+- **NIRE and NIRE HOOD have bicycles.** Both characters ship a bike sheet of
+  their own (`assets/chars/<char>/bike.png`, 16×96, the same six frames in
+  the same order as their walking sheet), and the character you chose is who
+  rides it.
+
+  This was the one pose a worn character could still lose. The engine reads
+  exactly one bike sheet — `field.playerSprites.bike`, resolved once in
+  `Player.new` into `player.bikeSprite`, which `Player:pose` prefers while
+  `onBike` — so everything the mod already did was right and you still turned
+  back into RED the moment you mounted.
+
+  It is not a catalog entry and deliberately never will be: a registered
+  `SPRITE_NIRE_BIKE` would be a row in the CHARACTER picker that still put
+  RED on the bicycle underneath whoever picked it. `Cast.bikeDef` hands out
+  the record instead and `Client.applyLook` builds a second renderer onto the
+  live player beside the walking one — both swapped together when you wear a
+  character, both put back together when you stop. A character with no bike
+  art of its own (every vanilla one) leaves the game's bicycle exactly where
+  it was, including on the path from one character straight to another.
+
+  Covered where it draws rather than only where it is installed: the
+  end-to-end host driver now mounts through `save.onBike` — what the bag's
+  BICYCLE row writes — and asserts on the sheet the frame actually posed
+  from (`tests/drivers/mmo_util.lua`, `M.shotBike`).
+
 ## [1.0.8] - 2026-08-17
 
 ### Added
