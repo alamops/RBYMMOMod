@@ -24888,4 +24888,385 @@ _G.love = ambientLove
 
 end)()
 
+-- ------- the nickname a catch earns, in an MMO fight
+--
+-- The engine asks every catcher whether they want to name what they just
+-- caught (BattleState:storeCaughtMon -> askNicknameUI).  An MMO catch is
+-- granted by this mod instead -- `grantCatch` on either battle screen -- and
+-- until this block existed the grant went straight into the party: the
+-- catcher in a co-op or mediated wild fight was the one player in the game
+-- who never got the prompt.
+--
+-- Four things are pinned here, and the timing is the one worth stating.  The
+-- grant happens *inside* the ending, one line after "Gotcha!" is queued, so
+-- the prompt cannot be put up there -- it is recorded as owed, and asked at
+-- the moment the message queue runs dry, which is the last tick before the
+-- player is allowed off the screen.
+
+;(function()
+
+local Gen = need("Gen")
+local Config = need("Config")
+local MediatedBattle = need("MediatedBattle")
+local CoopBattle = need("CoopBattle")
+
+local gen1 = { data = { pokemon = { PIDGEY = { name = "PIDGEY" } } } }
+local gen2 = { data = { gen2Constants = {}, pokemon = { PIDGEY = { name = "PIDGEY" } } } }
+
+-- ------- Gen: which screen, and what the question says
+
+eq(Gen.nicknameScreenId(gen1), "NamingScreen", "Gen 1 catches open the Gen 1 grid")
+eq(Gen.nicknameScreenId(gen2), "Gen2NamingScreen", "and Gold's opens Gold's")
+eq(Config.NICKNAME_MAX, 10,
+   "the grid takes the same ten characters every other nickname in the save gets")
+
+check(Gen.nicknamePromptText(gen1, "PIDGEY"):find("PIDGEY", 1, true) ~= nil,
+      "the question names the POKeMON that was caught")
+check(Gen.nicknamePromptText(gen1, "PIDGEY"):lower():find("nickname", 1, true) ~= nil,
+      "...and asks about a nickname")
+
+-- The ROM sentence when the dataset carries one: CONT is a tab, and the
+-- {RAM} token is where the species goes.
+local romGame = {
+  data = {
+    pokemon = { PIDGEY = { name = "PIDGEY" } },
+    text = { _DoYouWantToNicknameText = "Do you want to\tgive a nickname\tto {RAM:StringBuffer1}?" },
+  },
+}
+local romLine = Gen.nicknamePromptText(romGame, "PIDGEY")
+check(romLine:find("PIDGEY", 1, true) ~= nil,
+      "the player's own copy's wording is used when the dataset carries it")
+check(romLine:find("\t", 1, true) == nil,
+      "...with the extractor's CONT turned into the newline a box scrolls on")
+check(romLine:find("{RAM", 1, true) == nil, "...and no token left unfilled")
+
+-- A name carrying a gsub escape is data, not a replacement pattern.
+check(Gen.nicknamePromptText(romGame, "100%"):find("100%", 1, true) ~= nil,
+      "a name carrying a gsub escape is substituted as data, not as a pattern")
+
+-- ------- MediatedBattle: recorded on the grant, asked when the box is empty
+
+local asked
+local uiStub = {
+  askNickname = function(_, _, mon, label)
+    asked = { mon = mon, label = label }
+    return true
+  end,
+}
+
+local function wildFight()
+  local mon = { species = "PIDGEY", level = 5, hp = 4, stats = { hp = 20 } }
+  local game = {
+    data = gen1.data,
+    save = { party = {}, inventory = {} },
+    input = { wasPressed = function() return false end },
+  }
+  local f = MediatedBattle.new({
+    game = game, battle = "b-nickname", role = "host", mode = "wild",
+    ui = uiStub, wildCatchMon = mon,
+  })
+  f.uploaded = true
+  return f, game, mon
+end
+
+do
+  asked = nil
+  local f, game, mon = wildFight()
+  f:finish("win", "catch", { reason = "catch" })
+  eq(#game.save.party, 1, "the catch is still granted")
+  eq(asked, nil, "but nothing is asked while the ending is still printing")
+  check(f.owedNickname ~= nil and f.owedNickname.mon == mon,
+        "the prompt is recorded as owed instead")
+
+  -- Drain the ending. `leave` is stubbed so the run cannot pop a stack this
+  -- game does not have, and so "was the fight leavable yet" is answerable.
+  local left = false
+  f.leave = function() left = true end
+  local guard = 0
+  while asked == nil and guard < 600 do
+    f:update(1 / 60)
+    guard = guard + 1
+  end
+  check(guard < 600, "the prompt goes up once the queue runs dry")
+  eq(asked.mon, mon, "and it asks about the monster that was just caught")
+  eq(asked.label, "PIDGEY", "under the species record's display name")
+  eq(left, false, "the fight is not left out from under the question")
+  eq(f.owedNickname, nil, "and the debt is cleared, so it is asked once")
+
+  -- Asked once even if the screen keeps running: a second grid over the first
+  -- would be a second name for one catch.
+  asked = nil
+  f:update(1 / 60)
+  eq(asked, nil, "a prompt already put up is not put up again")
+end
+
+-- The naming itself is the engine's screen writing onto the mon; what this
+-- mod owes is that the answer lands on the party's copy and not on a
+-- throwaway. The grant adds the very table `grantCatch` was holding, so the
+-- name typed into the grid is the one the save keeps.
+do
+  asked = nil
+  local f, game, mon = wildFight()
+  f:finish("win", "catch", { reason = "catch" })
+  eq(game.save.party[1], mon, "the party holds the caught monster itself")
+  f.owedNickname.mon.nickname = "BIRB"
+  eq(game.save.party[1].nickname, "BIRB",
+     "so a name written by the grid is the name the save has")
+end
+
+-- A grant that could not add the monster anywhere owes nothing: there is no
+-- monster to name.
+do
+  asked = nil
+  local f = wildFight()
+  f.wildCatchMon = nil
+  f:grantCatch({ caught = { species = "PIDGEY" } })
+  eq(f.owedNickname, nil, "a catch that could not be added asks nothing")
+end
+
+-- A screen built without the mod's pusher (the headless suite, a build whose
+-- UI failed to come up) still ends: the debt is dropped, not waited on.
+do
+  local f, game = wildFight()
+  f.ui = nil
+  f:finish("win", "catch", { reason = "catch" })
+  check(f.owedNickname ~= nil, "the debt is recorded either way")
+  eq(f:askOwedNickname(), false, "but with nothing to ask with it is dropped")
+  eq(f.owedNickname, nil, "...and cleared, so the fight is leavable")
+  eq(#game.save.party, 1, "the catch itself is unaffected")
+end
+
+-- ------- CoopBattle: the same rule on the coop_wild path
+
+do
+  local mon = { species = "PIDGEY", level = 5 }
+  local said = {}
+  local coopAsked = nil
+  local screen = setmetatable({
+    game = {
+      data = gen1.data,
+      save = { party = {}, inventory = {} },
+    },
+    messages = {},
+    ui = {
+      askNickname = function(_, _, m, label)
+        coopAsked = { mon = m, label = label }
+        return true
+      end,
+    },
+    wildCatchMon = mon,
+    say = function(_, text) said[#said + 1] = text end,
+  }, CoopBattle)
+
+  screen:grantCatch({})
+  eq(#screen.game.save.party, 1, "the co-op catcher gets the monster")
+  check(screen.owedNickname ~= nil, "and is owed the naming prompt for it")
+  eq(screen.owedNickname.label, "PIDGEY", "under the species display name")
+
+  eq(screen:askOwedNickname(), true, "which the screen asks for itself")
+  eq(coopAsked.mon, mon, "about the monster it just granted")
+  eq(screen:askOwedNickname(), false, "and asks exactly once")
+end
+
+end)()
+
+-- ------- the rest of what a catch writes into the save
+--
+-- Adding the monster is only the visible half. The engine's own capture also
+-- marks the #DEX, stamps the catcher as the OT, registers an UNOWN's form on
+-- Gold, and emits `pokemon.caught` -- and an MMO grant did none of it, so a
+-- co-op catch left a monster owned by nobody, a dex that never moved, and
+-- every listener (a dex tracker, a shiny logger) silent.
+
+;(function()
+
+local Gen = need("Gen")
+local MediatedBattle = need("MediatedBattle")
+local CoopBattle = need("CoopBattle")
+
+local POKEDEX = { pokemon = { PIDGEY = { name = "PIDGEY" } } }
+
+local function gen1Save()
+  return {
+    party = {}, inventory = {},
+    player = { name = "RED", id = 4242 },
+    pokedex = { seen = {}, owned = {} },
+  }
+end
+
+-- ------- Gen.recordCatch
+
+do
+  local game = { data = POKEDEX, save = gen1Save() }
+  local mon = { species = "PIDGEY", level = 5 }
+  local isNew = Gen.recordCatch(game, mon)
+  eq(isNew, true, "a species the dex has never held is new")
+  eq(game.save.pokedex.seen.PIDGEY, true, "a catch is seen")
+  eq(game.save.pokedex.owned.PIDGEY, true, "...and owned, which Gen 1 keeps in `owned`")
+  eq(mon.ot, "RED", "the catcher is stamped on as the original trainer")
+  eq(mon.otId, 4242, "...with their id, which is what the traded check reads")
+
+  -- Asked again for a species already in the dex: still stamped, no longer new.
+  local second = { species = "PIDGEY", level = 9 }
+  eq(Gen.recordCatch(game, second), false,
+     "a second one of the same species is not a new entry")
+  eq(second.ot, "RED", "but it is still the catcher's monster")
+end
+
+-- A traded monster keeps the id it arrived with (engine/battle/experience.asm),
+-- which is the rule both engine stamps carry and this must not undo.
+do
+  local game = { data = POKEDEX, save = gen1Save() }
+  local traded = { species = "PIDGEY", level = 5, traded = true, otId = 7 }
+  Gen.recordCatch(game, traded)
+  eq(traded.otId, 7, "a traded monster keeps its own OT id")
+end
+
+-- Gold keeps the same bit under `caught`, which is the pair Gen.dexCounts and
+-- src/Trade2.lua already read.
+do
+  local game = {
+    data = { gen2Constants = {}, pokemon = POKEDEX.pokemon },
+    save = {
+      generation = 2, party = {}, player = { name = "GOLD", id = 11 },
+      pokedex = { seen = {}, caught = {} },
+    },
+  }
+  local mon = { species = "PIDGEY", level = 5 }
+  eq(Gen.recordCatch(game, mon), true, "new on Gold too")
+  eq(game.save.pokedex.caught.PIDGEY, true, "...and Gold stamps `caught`")
+  eq(game.save.pokedex.owned, nil, "leaving Gen 1's table alone")
+  eq(mon.ot, "GOLD", "the OT stamp is the Gen 2 one")
+end
+
+-- A save with no dex at all is not "already known": nil says there was
+-- nothing to answer with, so no new-entry line is printed for it.
+do
+  local game = { data = POKEDEX, save = { party = {}, player = { name = "RED" } } }
+  eq(Gen.recordCatch(game, { species = "PIDGEY" }), nil,
+     "a save with no #DEX answers nil rather than false")
+end
+
+check(Gen.dexAddedText({ data = POKEDEX }, "PIDGEY"):find("PIDGEY", 1, true) ~= nil,
+      "the new-entry line names the species")
+
+-- ------- the grant, end to end on the screen
+
+do
+  local game = {
+    data = POKEDEX, save = gen1Save(),
+    input = { wasPressed = function() return false end },
+  }
+  local mon = { species = "PIDGEY", level = 5, hp = 4, stats = { hp = 20 } }
+  local f = MediatedBattle.new({
+    game = game, battle = "b-record", role = "host", mode = "wild",
+    wildCatchMon = mon,
+  })
+  f.uploaded = true
+  f.caughtBall = "ULTRA_BALL"
+  f:finish("win", "catch", { reason = "catch" })
+
+  eq(game.save.party[1], mon, "the monster is in the party")
+  eq(game.save.pokedex.owned.PIDGEY, true, "the #DEX moved with the catch")
+  eq(mon.ot, "RED", "and the catcher owns what they caught")
+
+  -- The new-entry line is queued in front of the line saying where it went,
+  -- which is the order the engine prints them in.
+  local dexLine, homeLine
+  for i, text in ipairs(f.lines) do
+    if type(text) == "string" then
+      if text:find("POK", 1, true) and text:find("data", 1, true) then
+        dexLine = dexLine or i
+      end
+      if text:find("added to the party", 1, true) then homeLine = homeLine or i end
+    end
+  end
+  check(dexLine ~= nil, "a new species says so")
+  check(homeLine ~= nil, "and the monster's new home is announced")
+  check(dexLine and homeLine and dexLine < homeLine,
+        "...in that order -- the #DEX line first")
+end
+
+-- A full party sends the catch to a box, and the paperwork is the same:
+-- AddPartyMon and SendNewMonToBox both stamp and both call AskName, so the
+-- only thing a full party costs is the slot.
+do
+  local Party = require("src.pokemon.Party")
+  local game = { data = POKEDEX, save = gen1Save() }
+  for _ = 1, Party.MAX do
+    game.save.party[#game.save.party + 1] = { species = "RATTATA", level = 2 }
+  end
+  local mon = { species = "PIDGEY", level = 5 }
+  local f = MediatedBattle.new({
+    game = game, battle = "b-box", role = "host", mode = "wild",
+    wildCatchMon = mon,
+  })
+  f.uploaded = true
+  f:grantCatch({})
+  eq(#game.save.party, Party.MAX, "a full party stays full")
+  eq(game.save.pokedex.owned.PIDGEY, true, "the #DEX still moves")
+  eq(mon.ot, "RED", "the boxed monster is still the catcher's")
+  check(f.owedNickname ~= nil and f.owedNickname.mon == mon,
+        "and a boxed catch is still owed its naming prompt")
+end
+
+-- ------- the announcement
+--
+-- `pokemon.caught` under the engine's own name, so a listener that already
+-- watches for a catch hears an MMO one too (see the announcer's header for
+-- why this one event is not under `mod.rby_mmo.`).
+do
+  local Runtime = require("src.mods.Runtime")
+  local bus = Runtime.events
+  local heard = {}
+  local unsubscribe
+  if type(bus) == "table" and type(bus.on) == "function" then
+    unsubscribe = bus:on("pokemon.caught", function(payload)
+      heard[#heard + 1] = payload
+    end, 0, "rby_mmo_suite")
+  end
+  if unsubscribe == nil then
+    check(true, "(no live event bus in this run -- the emit is asserted in game)")
+  else
+    local game = {
+      data = POKEDEX, save = gen1Save(),
+      input = { wasPressed = function() return false end },
+    }
+    local mon = { species = "PIDGEY", level = 5 }
+    local f = MediatedBattle.new({
+      game = game, battle = "b-emit", role = "host", mode = "wild",
+      wildCatchMon = mon,
+    })
+    f.uploaded = true
+    f.caughtBall = "ULTRA_BALL"
+    f:grantCatch({})
+    eq(#heard, 1, "one catch, one pokemon.caught")
+    local payload = heard[1] or {}
+    eq(payload.mon, mon, "carrying the monster")
+    eq(payload.species, "PIDGEY", "its species")
+    eq(payload.isNew, true, "whether the entry was new")
+    eq(payload.destination, "party", "where it went")
+    eq(payload.ball, "ULTRA_BALL", "and what caught it")
+    unsubscribe()
+  end
+end
+
+-- CoopBattle's grant records the same things: it is a twin of the mediated
+-- one, and a co-op catcher's save must not end up different from a 1v1's.
+do
+  local game = { data = POKEDEX, save = gen1Save() }
+  local mon = { species = "PIDGEY", level = 5 }
+  local screen = setmetatable({
+    game = game, messages = {},
+    wildCatchMon = mon,
+    say = function() end,
+  }, CoopBattle)
+  screen:grantCatch({})
+  eq(game.save.party[1], mon, "the co-op catcher gets the monster")
+  eq(game.save.pokedex.owned.PIDGEY, true, "the #DEX moved for a co-op catch too")
+  eq(mon.ot, "RED", "and the co-op catcher owns it")
+end
+
+end)()
+
 T.finish("rby_mmo")

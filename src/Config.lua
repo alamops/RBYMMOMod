@@ -865,6 +865,14 @@ M.CHAR_PALETTE_SOURCE = "ROM:SpriteSheetPointerTable[0]"
 
 M.NAME_MAX = 10
 
+-- What the nickname grid a catch opens will let you type (Gen 1).
+--
+-- The engine's own catch prompt opens NamingScreen with maxLen 10
+-- (BattleState:askNicknameUI), and a name typed in an MMO fight has to fit
+-- the same box every other nickname in the save does.  Gold carries its own
+-- limit on the screen's `nickname` type and is left to it.
+M.NICKNAME_MAX = 10
+
 -- ------- ranked PVP
 --
 -- The arithmetic these feed is in src/Rank.lua, and the reasoning about what

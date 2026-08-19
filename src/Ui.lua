@@ -993,6 +993,49 @@ function M:confirm(game, text, onChoose, opts)
   })
 end
 
+-- ------- the prompt a catch earns
+--
+-- "Do you want to give a nickname to X?", and the letter grid behind a YES.
+-- The engine asks this of every wild the player catches on its own path
+-- (BattleState:askNicknameUI); an MMO catch is granted by this mod, so this
+-- is where the same two screens are put up for it.
+--
+-- The rhythm is vanilla's rather than two boxes at once: CONFIRM prints the
+-- sentence and opens the yes/no under it once the text has finished, and only
+-- a YES opens the grid.  `onDone` fires on **both** answers and on a failure
+-- to open either screen, because the caller behind it is a battle screen
+-- waiting to be allowed to close -- a path that answers nothing would leave
+-- the player holding a finished fight they cannot leave.
+--
+-- Nothing here writes the nickname: Gen.askNickname owns that, and owns the
+-- generation's screen id, opts shape and pop rule with it.
+function M:askNickname(game, mon, displayName, onDone)
+  game = game or self.ctx.game
+  local function finish(name)
+    if onDone then onDone(name) end
+  end
+  if not (game and type(mon) == "table") then
+    finish(nil)
+    return false
+  end
+  local pushed = self:confirm(game, Gen.nicknamePromptText(game, displayName),
+    function(yes)
+      if not yes then return finish(nil) end
+      if not Gen.askNickname(game, mon, displayName, finish) then
+        finish(nil)
+      end
+    end)
+  if type(pushed) ~= "table" then
+    -- No box went up (a build with no UI at all), so the answer is the one a
+    -- NO would have given rather than a fight that never ends.
+    mod.log:warn("could not ask about a nickname for the POKeMON you just "
+      .. "caught; it keeps its species name")
+    finish(nil)
+    return false
+  end
+  return true
+end
+
 -- A question with named answers, where **B is an answer and not an escape**.
 --
 -- CONFIRM is the yes/no box, and its B is a no that returns the player to
