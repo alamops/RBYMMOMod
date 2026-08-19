@@ -3153,6 +3153,80 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12f3. wildlife never uses an item, from either end
+-- ------------------------------------------------------------------
+--
+-- A wild monster has no bag and no hands.  The seat is driven from two ends --
+-- the hub auto-picks for it, and a submitted choice can arrive addressed to it
+-- -- so both are pinned here.  The bag is handed to the wild seat deliberately:
+-- the point is that even a seat that HAS one never spends it, so a hub that
+-- seeds the wrong kit (which is what `wild` did with `DEFAULT_NPC_BAG`) cannot
+-- put a Potion in a Rattata's mouth.  Trainer seats are unaffected -- 12f above
+-- is the same fixture on the default 1v1 mode and still spends its Potion.
+
+for _, mode in ipairs({ "wild", "coop_wild" }) do
+  do
+    local battle = battleOf({
+      mode = mode,
+      choiceTimeout = 10,
+      seed = 88010,
+      sides = {
+        a = {
+          { playerId = "p1", name = "Ann",
+            mons = { mon({ species = "Alpha", maxHp = 200, spd = 90,
+                           moves = { move({ id = "thump", power = 40 }) } }) } },
+        },
+        b = {
+          { playerId = "wild", name = "Wild",
+            -- Hurt below half and poisoned: 12f's fixture files a heal here.
+            mons = { mon({ species = "Beta", maxHp = 200, hp = 40, spd = 10,
+                           status = "PSN",
+                           moves = { move({ id = "thump", power = 40 }) } }) },
+            bag = { POTION = 2, FULL_HEAL = 1, X_ATTACK = 1 } },
+        },
+      },
+    })
+    drain(battle)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    ok(battle:tick(11) == true, mode .. ": the wild seat's turn resolves")
+    local events = drain(battle)
+    local itemUsed = nil
+    for _, event in ipairs(events) do
+      if event.t == "item" and event.side == "b" then itemUsed = event.text end
+    end
+    eq(itemUsed, nil, mode .. ": auto-pick never reaches the wild seat's bag")
+    eq(battle.byId.wild.bag.POTION, 2, mode .. ": and spends none of it")
+    eq(battle.byId.wild.bag.FULL_HEAL, 1, mode .. ": cure untouched too")
+    eq(battle.byId.wild.mons[1].status, "poison", mode .. ": still poisoned")
+  end
+
+  do
+    local battle = battleOf({
+      mode = mode,
+      seed = 88011,
+      sides = {
+        a = {
+          { playerId = "p1", name = "Ann",
+            mons = { mon({ species = "Alpha", maxHp = 200, spd = 90 }) },
+            bag = { POTION = 1 } },
+        },
+        b = {
+          { playerId = "wild", name = "Wild",
+            mons = { mon({ species = "Beta", maxHp = 200, hp = 40, spd = 10 }) },
+            bag = { POTION = 1 } },
+        },
+      },
+    })
+    drain(battle)
+    ok(battle:submitChoice("wild", { action = "item", item = "POTION", slot = 0 })
+       == false, mode .. ": a submitted item from the wild seat is refused")
+    eq(battle.byId.wild.choice, nil, mode .. ": and files nothing")
+    ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 0 })
+       == true, mode .. ": the player on side a still may")
+  end
+end
+
+-- ------------------------------------------------------------------
 -- 12h. round 5: `exp` event emission gates (`_awardExp`)
 -- ------------------------------------------------------------------
 --
@@ -4148,6 +4222,112 @@ do
   end
   ok(announced, "retarget/bide: bide eventually announces its release")
   ok(landedOnSlot3, "retarget/bide: the release damage is paid to the retargeted seat")
+end
+
+-- ------------------------------------------------------------------
+-- 12k. whom the referee swings at when nobody chose (`_autoTarget`)
+-- ------------------------------------------------------------------
+--
+-- Reported from a real two-player game: "the enemy only attacks my friend and
+-- never me, no matter who hosts."  It was not a networking fault and not a
+-- seating fault.  Every aim the referee files for itself went through
+-- `_firstLivingFoe`, which answers "the lowest-numbered living foe" -- so a
+-- coop_wild's wild monster, and *both* seats of a coop_npc trainer, swung at
+-- seat 0 on every turn of every fight.  The player sitting in seat 1 was never
+-- attacked once, for the whole battle, in either co-op mode.
+--
+-- ("No matter who hosts" is the part that hid it: seat order is the coop
+-- party's member order, and member 1 is whoever *sent the invite* -- nothing
+-- to do with who is hosting.  Two friends where the same one always invites
+-- get the same seat 0 every time.)
+
+local function aimBattle(mode, seed, foes)
+  local sideB = {}
+  for i, name in ipairs(foes) do
+    sideB[i] = { playerId = "n" .. i, name = name, mons = {
+      mon({ species = "Beta", maxHp = 400, spd = 90 }) } }
+  end
+  return Turn.create({
+    id = "aim", mode = mode, seed = seed, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "p1", name = "One", mons = { mon({ species = "Alpha", maxHp = 400, spd = 10 }) } },
+        { playerId = "p2", name = "Two", mons = { mon({ species = "Gamma", maxHp = 400, spd = 10 }) } },
+      },
+      b = sideB,
+    },
+  }), sideB
+end
+
+-- The bug, stated as the fight the player actually played: two humans, an NPC
+-- side that answers for itself, and a count of who got hit.
+for _, case in ipairs({
+  { mode = "coop_wild", foes = { "Wild" } },
+  { mode = "coop_npc",  foes = { "NpcA", "NpcB" } },
+}) do
+  local battle, sideB = aimBattle(case.mode, 4242, case.foes)
+  drain(battle)
+  local onSlot0, onSlot1 = 0, 0
+  for _ = 1, 10 do
+    battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("p2", { action = "fight", move = 0, target = 2 })
+    for _, foe in ipairs(sideB) do battle:autoPick(foe.playerId) end
+    for _, event in ipairs(drain(battle)) do
+      if event.t == "damage" and event.side == "a" then
+        if event.slot == 0 then onSlot0 = onSlot0 + 1 else onSlot1 = onSlot1 + 1 end
+      end
+    end
+    if battle.result then break end
+  end
+  ok(onSlot0 > 0, case.mode .. ": the npc side still attacks the first player")
+  ok(onSlot1 > 0, case.mode .. ": and it attacks the second one too (the reported bug)")
+end
+
+-- A draw, not a rota: the two seats of a coop_npc turn are free to agree.
+do
+  local battle, sideB = aimBattle("coop_npc", 4242, { "NpcA", "NpcB" })
+  drain(battle)
+  local ganged, split = false, false
+  for _ = 1, 12 do
+    battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("p2", { action = "fight", move = 0, target = 3 })
+    for _, foe in ipairs(sideB) do battle:autoPick(foe.playerId) end
+    local hits = {}
+    for _, event in ipairs(drain(battle)) do
+      if event.t == "damage" and event.side == "a" then hits[#hits + 1] = event.slot end
+    end
+    if #hits == 2 then
+      if hits[1] == hits[2] then ganged = true else split = true end
+    end
+    if battle.result then break end
+  end
+  ok(ganged, "coop_npc: some turns both npcs gang up on one player")
+  ok(split, "coop_npc: and on others they split -- a draw, not an alternation")
+end
+
+-- The half that keeps every recorded vector honest: an aim is drawn from a
+-- second generator, so asking for one must not spend a byte of the battle's
+-- own.  A draw that leaked onto `rng` would move every roll after it.
+do
+  local battle = aimBattle("coop_npc", 4242, { "NpcA", "NpcB" })
+  drain(battle)
+  local before = battle.rng:state()
+  local npc = battle.byId["n1"]
+  local seen = {}
+  for _ = 1, 32 do seen[battle:_autoTarget(npc).slot] = true end
+  eq(battle.rng:state(), before, "aim: 32 draws later the battle RNG has not moved")
+  ok(seen[0] and seen[1], "aim: and those draws reached both player seats")
+end
+
+-- One living foe is answered without a draw at all, which is why every 1v1 and
+-- wild fixture in this suite replays byte for byte after aims began to spread.
+do
+  local battle = battleOf({ seed = 4242 })
+  drain(battle)
+  local before = battle.aim:state()
+  local fighter = battle.byId["p2"]
+  for _ = 1, 8 do eq(battle:_autoTarget(fighter).slot, 0, "aim: 1v1 has one answer") end
+  eq(battle.aim:state(), before, "aim: and a fight with one foe never touches the aim stream")
 end
 
 -- ------------------------------------------------------------------

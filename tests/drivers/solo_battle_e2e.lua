@@ -49,11 +49,11 @@
 -- are in it at once, so nothing below was added there. Each of these is either
 -- solo-shaped or a thing the shared file gets wrong for a mediated screen:
 --
---   * `bootToPlay` / `stackNames` -- the shared boot goes through the engine's
---     `U.newGame`, whose 400-tap Gen 1 budget is now short of the intro's ~441
---     and which returns silently when it runs out. See the long note at the
---     boot below. Converge on `H.newGame` / `H.stackNames` once
---     `fix/fix-battle-system-target` lands.
+--   * `bootToPlay` / `stackNames` -- thin wrappers now, nothing more. They
+--     were real copies while the shared boot still went through the engine's
+--     `U.newGame` and its 400-tap Gen 1 budget, short of the intro's ~441;
+--     `H.newGame` fixed that upstream and `H.bootToPlay` routes through it, so
+--     these just spare the call sites a `game` argument.
 --   * `medOnStack` / `awaitCommandMenu` / `throwItem` -- a solo fight is a
 --     `MediatedBattle`, which carries no `.sim`; every fight helper in
 --     mmo_util keys on that field and would report a fight over before its
@@ -401,103 +401,25 @@ return function(game)
   end
 
   -- ------------------------------------------------------------------
-  -- boot -- local, and deliberately not H.bootToPlay
+  -- boot
   -- ------------------------------------------------------------------
   --
-  -- `mmo_util`'s `M.bootToPlay` goes through the engine's `U.newGame`, whose
-  -- Gen 1 arm mashes A **400 times** and then simply returns. Measured against
-  -- engine `dev` on 2026-08-18 the intro now reaches the overworld at tap 441,
-  -- so that budget runs out mid-OakSpeech -- and `U.newGame` returns nothing,
-  -- logs nothing, and leaves the driver asserting against a speech bubble. The
-  -- symptom surfaces three legs later in whatever subsystem is touched next,
-  -- which is why it reads as a broken menu hook rather than as a boot that
-  -- never finished.
-  --
-  -- So: tap until the overworld *is* the top state, on a budget with ~3x
-  -- headroom, and on failure say which screen we are stuck on rather than
-  -- walking on. Every call site below bails on false.
-  --
-  -- This is a local copy on purpose. The shared fix -- `H.newGame`,
-  -- `M.INTRO_A_TAPS`, `H.stackNames` -- is landing on `fix/fix-battle-system-
-  -- target`; when that merges, delete the three functions below and call
-  -- `H.newGame` / `H.stackNames` instead.
-  local INTRO_A_TAPS = 1500
-
-  -- Name an unknown state well enough that a stuck boot names its own screen.
-  -- `screenId` is stamped by Screens.build on everything pushed through the
-  -- registry; the rest are field fingerprints (OakSpeech is the one that
-  -- matters here, and `demoTrueColor` is its own -- src/ui/OakSpeech.lua).
-  local function nameOfState(state)
-    if state == nil then return "nil" end
-    if type(state) ~= "table" then return tostring(state) end
-    if state.screenId then return tostring(state.screenId) end
-    if state.isOverworld or state == game.overworld then return "Overworld" end
-    if state.demoTrueColor ~= nil then return "OakSpeech" end
-    if state.mmoBattle then return "MediatedBattle(mod)" end
-    if state.sim ~= nil then return "battle-sim screen" end
-    if state.kind == "wild" or state.kind == "trainer" then
-      return "BattleState(" .. tostring(state.kind) .. ")"
-    end
-    if state.grid ~= nil then return "naming grid" end
-    if state.items ~= nil then return "menu" end
-    if state.onChoose ~= nil and state.index ~= nil then return "choice box" end
-    if state.text ~= nil or state.lines ~= nil then return "text box" end
-    return tostring(state)
+  -- `H.bootToPlay` again, now that it is safe to use.  This driver carried its
+  -- own copy of the boot because `mmo_util`'s went through the engine's
+  -- `U.newGame`, whose Gen 1 arm mashed A 400 times against an intro that
+  -- reaches the overworld at tap 441 -- and then returned nothing, so a driver
+  -- walked on and asserted against OakSpeech while reading a save it had
+  -- seeded itself.  That is fixed upstream of here now: `H.newGame` waits for
+  -- the overworld to actually be on top, on a budget with real headroom, and
+  -- names the stack it is stuck on when it gives up.  `H.bootToPlay` routes
+  -- through it, so the local copy has done its job and is gone -- one boot for
+  -- every driver in the repo, which is the point of keeping it in `mmo_util`.
+  local function bootToPlay()
+    return H.bootToPlay(game) and H.inPlay(game)
   end
 
   local function stackNames()
-    local out = {}
-    for i, state in ipairs((game.stack and game.stack.states) or {}) do
-      out[#out + 1] = ("%d=%s"):format(i, nameOfState(state))
-    end
-    if #out == 0 then return "<empty stack>" end
-    return table.concat(out, " / ")
-  end
-
-  local function bootToPlay()
-    U.wait(20)
-    if H.inPlay(game) then return true end
-
-    if H.generation(game) == 2 then
-      -- Gold with POKEPORT_DRIVER lands in free-roam by itself; the only rule
-      -- is never to mash A at an open Start menu (`list` + `onClose`), which
-      -- is how a PACK flash-loop happens in a real window.
-      for _ = 1, INTRO_A_TAPS do
-        if H.inPlay(game) then U.wait(10) return true end
-        local top = H.top(game)
-        if top and top.list ~= nil and type(top.onClose) == "function" then
-          U.tap(game, "b")
-          U.wait(4)
-        else
-          U.tap(game, "a")
-          U.wait(2)
-        end
-      end
-      log("BOOT FAILED after", tostring(INTRO_A_TAPS),
-          "taps; stack bottom->top:", stackNames())
-      return false
-    end
-
-    -- Gen 1: intro movie, title, MainMenu, then OakSpeech + the naming grid.
-    U.wait(5)
-    U.tap(game, "start")
-    U.wait(10)
-    local title = H.top(game)
-    for _ = 1, 60 do
-      if H.top(game) ~= title then break end
-      U.tap(game, "a")
-      U.wait(5)
-    end
-    U.tap(game, "a") -- NEW GAME is row 1 when there is no save
-    U.wait(10)
-    for _ = 1, INTRO_A_TAPS do
-      if H.inPlay(game) then U.wait(10) return true end
-      U.tap(game, "a")
-      U.wait(2)
-    end
-    log("BOOT FAILED after", tostring(INTRO_A_TAPS),
-        "taps; stack bottom->top:", stackNames())
-    return false
+    return H.stackNames(game)
   end
 
   local events = H.captureEvents({ "battle.started", "battle.ended" })

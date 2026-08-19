@@ -12,6 +12,7 @@ end
 
 return function(game)
   local U = require("tests.drivers.util")
+  local H = dofile("mods/rby_mmo/tests/drivers/mmo_util.lua")
   local Pokemon = require("src.pokemon.Pokemon")
   local TAG = "COOP_STATUS:"
   local function log(...)
@@ -23,7 +24,14 @@ return function(game)
   local SHOT_DIR = os.getenv("SHOT_DIR") or "/tmp/rby_mmo_coop_status"
   os.execute('mkdir -p "' .. SHOT_DIR .. '" 2>/dev/null')
 
-  U.newGame(game)
+  -- H.newGame, not U.newGame: the engine helper's A-tap budget is shorter
+  -- than the intro and it reports nothing when it runs out, so a short run
+  -- hands back a game still in Oak's speech and the shot is of the wrong
+  -- screen. See the note above M.newGame in mmo_util.lua.
+  if not H.newGame(game, TAG) then
+    log("FAIL could not reach the overworld")
+    return
+  end
   if game.save and game.save.player then
     game.save.player.name = "HOSTY"
   end

@@ -48,8 +48,11 @@ return function(game)
   os.remove(ADDR_FILE)
   os.remove(ADDR_FILE .. ".tmp")
 
-  U.newGame(game)
-  -- U.newGame mashes A through the naming grid, so both sides would
+  if not H.newGame(game, TAG) then
+    log("RESULT 1 failure(s)")
+    return
+  end
+  -- H.newGame mashes A through the naming grid, so both sides would
   -- otherwise be called AAAAAAA and no roster assertion could tell
   -- them apart. Name them here instead.
   if game.save and game.save.player then
@@ -517,6 +520,8 @@ return function(game)
     -- link battle, and the coop_npc trainer leg.
     if os.getenv("MMO_PARTY_WILD_E2E") == "1" then
       local WILD_SPECIES = "PIDGEY"
+      -- Six characters so the assertion cannot pass on a species name.
+      local WILD_NICKNAME = "MMOMON"
       local announced = H.listenForModEvents(game, {
         "mod.rby_mmo.coop_battle_started",
         "mod.rby_mmo.coop_battle_ended",
@@ -545,6 +550,9 @@ return function(game)
 
       -- Bag sheet is uploaded when the mediated fight starts; seed before divert.
       check(H.giveItem(game, "MASTER_BALL", 1), "seeded a MASTER_BALL for the catch")
+      -- Subscribed before the throw: the mod's announcement is guarded on
+      -- there being a listener, which is exactly the case worth proving.
+      local caughtEvents, caughtPayloads = H.listenForEvents({ "pokemon.caught" })
       local partyBefore = H.partySpeciesCount(game)
       local speciesBefore = H.partySpeciesCount(game, WILD_SPECIES)
       local ballsBefore = (game.save.inventory and game.save.inventory.MASTER_BALL) or 0
@@ -602,6 +610,16 @@ return function(game)
             "filed MASTER_BALL from the ITEM menu")
       log("threw MASTER_BALL")
 
+      -- The prompt the catch earns, driven before the battle is closed
+      -- because that is where the mod puts it: on the last tick of the
+      -- ending, with the fight still on screen and the player not yet let
+      -- off it. A catcher who is never asked is the bug this drives.
+      local named = H.answerNicknamePrompt(game, WILD_NICKNAME, 90,
+        function()
+          U.shot(game, SHOT_DIR .. "/host-party-wild-nickname.png")
+        end)
+      check(named, "the catcher is asked to name what they caught, and can")
+
       local medGaps = 0
       local over = H.drivePrompts(game, function()
         local top = H.top(game)
@@ -631,6 +649,30 @@ return function(game)
             "catcher party grew after the MASTER_BALL catch")
       check(speciesAfter > speciesBefore,
             ("caught %s was granted to the host party"):format(WILD_SPECIES))
+      local kept = H.partyNickname(game, WILD_SPECIES)
+      check(kept == WILD_NICKNAME,
+            "and the name typed on the grid is the one the save keeps")
+      log("caught nickname:", tostring(kept))
+
+      -- ...and the rest of the paperwork a catch does: the #DEX, the OT
+      -- stamp, and the event every other catch in the game fires.
+      check(H.dexOwned(game, WILD_SPECIES) == true,
+            ("the #DEX marks the caught %s as owned"):format(WILD_SPECIES))
+      local caught = H.partyMon(game, WILD_SPECIES)
+      local myName = game.save.player and game.save.player.name
+      check(caught ~= nil and caught.ot == myName,
+            "the catcher is stamped on it as the original trainer")
+      check(caught ~= nil and caught.otId ~= nil, "...with their trainer id")
+      check(caughtEvents["pokemon.caught"] >= 1,
+            "pokemon.caught fired for a catch the engine never saw")
+      local payload = caughtPayloads["pokemon.caught"]
+      check(payload ~= nil and payload.species == WILD_SPECIES
+            and payload.destination == "party",
+            "...naming the species and where it went")
+      log(("catch paperwork: dex=%s ot=%s otId=%s events=%d ball=%s"):format(
+        tostring(H.dexOwned(game, WILD_SPECIES)),
+        tostring(caught and caught.ot), tostring(caught and caught.otId),
+        caughtEvents["pokemon.caught"], tostring(payload and payload.ball)))
       log(("catch grant: party %d -> %d, %s %d -> %d, balls %d -> %d"):format(
         partyBefore, partyAfter, WILD_SPECIES, speciesBefore, speciesAfter,
         ballsBefore, ballsAfter))
@@ -751,6 +793,23 @@ return function(game)
           "the host's own worn look actually changed")
     check(wornOk and wornLook == "SPRITE_NIRE",
           "and it is exactly the character just picked")
+
+    -- On the bicycle, which is the one pose a worn character used to lose.
+    -- Asserted on the sheet the frame actually posed from: RED's bike sheet
+    -- comes out of the ROM cache (assets/generated/), so "under
+    -- assets/chars/" is exactly the difference between the character riding
+    -- and the character being replaced by RED the moment they mount.
+    --
+    -- Taken before the signal below rather than after it: shotBike closes
+    -- what is on top, and past that signal the guest's trade ask is in
+    -- flight -- a B on that box is a NO, and the run then failed in the
+    -- trade with nothing pointing back to here.
+    local bikeSheet = H.shotBike(game, SHOT_DIR .. "/host-bike.png")
+    log("bike sheet:", tostring(bikeSheet))
+    check(type(bikeSheet) == "string"
+          and bikeSheet:find("assets/chars/", 1, true) ~= nil
+          and bikeSheet:find("bike.png", 1, true) ~= nil,
+          "NIRE rides NIRE's own bicycle sheet, not RED's")
 
     -- Signalled unconditionally: a failed pick above is already reported by
     -- the checks that just ran, and the guest is waiting on this marker

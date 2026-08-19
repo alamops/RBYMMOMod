@@ -3,11 +3,20 @@
 -- **The two kinds part company here, and have since PROTOCOL 10.**
 --
 -- A *trade* is still the engine's own machinery: Protocol.TradeSession is a
--- symmetric state machine -- trade evolutions, the OT bookkeeping that marks a
+-- symmetric state machine -- the swap itself, the OT bookkeeping that marks a
 -- mon as traded, all of it -- driven over a SessionNet whose payloads the hub
 -- forwards unread.  So for a trade this module carries the request, runs the
 -- engine's real hello/verdict handshake, hands the session to TradeSession,
 -- and tears it down when either side leaves.
+--
+-- **One thing TradeSession decides but does not do: the trade evolution.**
+-- `apply` answers what the received mon becomes and hands that back as its
+-- second return; on the cable-club path src/link/LinkState.lua is what turns
+-- the answer into a screen.  A hub trade has no LinkState, so this module is
+-- that screen's opposite number -- see M:evolveTraded.  Reading the header
+-- above as "TradeSession does evolutions too" is exactly the mistake that
+-- left every MMO-traded MACHOKE a MACHOKE: the second return was dropped on
+-- the floor here and nothing errored, on either side.
 --
 -- A *battle* no longer touches any of that.  The intermediator -- the Node hub
 -- or a LAN host running src/BattleSim/ -- resolves the fight itself, so both
@@ -853,7 +862,12 @@ function M:advanceTrade(game, session)
 
   elseif trade.stage == "done" and not session.applied then
     session.applied = true
-    local ok, received = pcall(function() return trade:apply(game) end)
+    -- The slot the received mon lands in, read before apply so the evolution
+    -- below writes back into the party position the swap actually used
+    -- rather than searching for the record afterwards.
+    local slot = trade.myPick
+    local ok, received, evolveTo, evoEntry =
+      pcall(function() return trade:apply(game) end)
 
     -- Reaching "done" means two things at once: the peer's confirm is in
     -- hand, and this side's own confirm went out before the machine could
@@ -873,8 +887,30 @@ function M:advanceTrade(game, session)
     session.net:send({ type = APPLIED })
 
     if ok then
+      -- On the cartridge before anything is drawn -- see M:saveTrade.  First,
+      -- and ahead of the box: the swap is already in game.save.party, and
+      -- every frame it is only there is a frame a force-quit can undo it in.
+      self:saveTrade(game)
+
       local name = received and tostring(received.species) or "a POKéMON"
-      self.ui:say(("%s was\ntraded over!"):format(name))
+      -- The evolution follows the line, never sits under it: the cable club
+      -- prints "Trade completed!" and only then flashes the mon, and a movie
+      -- opening on top of a box the player is still reading would bury it.
+      --
+      -- Runs immediately when nothing was pushed to wait on -- a build with
+      -- no UI, or a harness whose `say` is a stub -- because the trade is
+      -- committed on both sides by now and there is no second chance at it.
+      -- The guard is what keeps a stub that *both* calls back and returns
+      -- nothing from evolving the same mon twice.
+      local evolved = false
+      local function evolve()
+        if evolved then return end
+        evolved = true
+        self:evolveTraded(game, received, evolveTo, evoEntry, slot)
+      end
+      if not self.ui:say(("%s was\ntraded over!"):format(name), evolve) then
+        evolve()
+      end
     else
       -- The peer has our confirm and will apply regardless, so there is no
       -- undo to offer; what there is, is a way to see what actually landed.
@@ -888,6 +924,185 @@ function M:advanceTrade(game, session)
     self:endSession(trade.error and ("The trade stopped:\n" .. trade.error)
       or "The trade was\ncancelled.")
   end
+end
+
+-- ------- committing the trade to disk
+
+-- The swap, on the cartridge, the moment it happens -- and again once the
+-- evolution that followed it has settled.
+--
+-- Both saves are the cable club's (src/link/LinkState.lua's "done" branch,
+-- gen1recomp #222): pokered's engine/link/cable_club.asm calls SaveSAVtoSRAM
+-- straight after every trade, so the trade is committed before the animation
+-- runs, and the second write is what keeps the *evolved* species on disk
+-- rather than the pre-evo `apply` landed.  Without them the received mon
+-- lives only in memory until the player happens to open START > SAVE: a
+-- force-quit loses it outright, and a reset gives back the one that was
+-- traded away -- so the pair of them are now two copies of the same mon in
+-- the world, which is the duplication this session's whole teardown exists
+-- to prevent, arriving by the back door.
+--
+-- **A hub trade holds that window open longer than a cable trade does.**
+-- Finishing locally is deliberately not what ends the session here: this
+-- side sits in "settling" for as long as SETTLE_TIMEOUT while the peer
+-- acknowledges, and the player is free to walk away, be dropped, or quit
+-- during it.
+--
+-- Guarded and pcall'd rather than called flat.  A build with no writeSave --
+-- the headless suites, the LinkBattle-shaped fake games the engine's own
+-- call site names -- is not a failure, and a save that throws must not take
+-- the trade down with it: the swap has happened in memory either way, and
+-- the honest thing to do is say so and name the way out.  `false` is a
+-- refusal rather than a throw (src/script/Commands.lua reads it that way for
+-- a tool session that vetoes writes) and is reported the same.
+function M:saveTrade(game)
+  if type(game) ~= "table" or type(game.writeSave) ~= "function" then
+    return false
+  end
+  local ok, wrote = pcall(game.writeSave, game)
+  if ok and wrote ~= false then return true end
+  mod.log:warn("could not save after the trade (%s) -- the POKéMON is in "
+    .. "the party, but save from START > SAVE before quitting or it will "
+    .. "not be there next time",
+    ok and "the game refused the write" or tostring(wrote))
+  return false
+end
+
+-- ------- trade evolutions
+
+-- KADABRA into ALAKAZAM, on the side that just received it.
+--
+-- Both TradeSessions answer *whether* a received mon evolves and stop there
+-- (src/link/Protocol.lua's `evolveTo`, src/Trade2.lua's row) -- turning that
+-- answer into a screen has always been the caller's job, and on the cable
+-- club the caller is src/link/LinkState.lua.  This is the hub trade's half
+-- of that, and until it existed the answer went nowhere.
+--
+-- Two games, two screens, one shape:
+--
+--   * **Gen 1** goes through `Evolution.evolve`, which owns the
+--     EvolutionState push, and is handed via="TRADE" so B cannot cancel it
+--     (pokered skips the flash B-poll under LINK_STATE_TRADING, #213).
+--   * **Gold** has no link trade of its own, so this pushes the engine's
+--     Gen2EvolutionAnim the way src/core/Game2.lua's afterRareCandy does --
+--     including the pop, because that screen reports through `onDone` and
+--     leaves the stack to whoever pushed it.  B is left working there: the
+--     engine's screen only refuses a cancel for `force` (a stone), and
+--     inventing a second rule for it here is not this module's call.
+--
+-- Nothing raises: a missing module, an unregistered screen or a push that
+-- throws all fall through to applying the evolution outright, because the
+-- trade is committed on both sides by the time this runs and a mon left as
+-- the wrong species is permanent -- there is no second chance at a trade
+-- evolution.  The player is told what they missed rather than what broke.
+function M:evolveTraded(game, mon, evolveTo, entry, slot)
+  if not (game and type(mon) == "table" and evolveTo) then return false end
+
+  local isGen2 = Gen.generation(game) == 2
+  local ok, Evolution = pcall(require,
+    isGen2 and "src.core.gen2.Evolution" or "src.pokemon.Evolution")
+  if not (ok and type(Evolution) == "table") then
+    mod.log:warn("the engine's evolution module is unavailable, so the "
+      .. "POKéMON just traded over did not evolve -- update gen1recomp "
+      .. "(dev branch); the trade itself is safe")
+    return false
+  end
+
+  -- Gold's screen is driven by the row rather than by a species id; a build
+  -- whose TradeSession only answered the species still gets a usable one.
+  if isGen2 and type(entry) ~= "table" then
+    entry = { method = "EVOLVE_TRADE", into = evolveTo }
+  end
+
+  -- The second write of the pair M:saveTrade documents, on the far side of
+  -- the movie: what `apply` committed to disk was the pre-evo, and this is
+  -- what puts the species the player is now looking at there instead.
+  local function persist() self:saveTrade(game) end
+
+  local shown
+  if isGen2 then
+    shown = self:showGen2Evolution(game, mon, entry, slot, persist)
+  else
+    shown = pcall(Evolution.evolve, game, mon, evolveTo, persist, "TRADE")
+  end
+  if shown then return true end
+
+  -- No screen went up.  `evolve` applies before it prints on its headless
+  -- branch, so a mon already carrying the new species is one that got there
+  -- -- re-applying would rebuild its stats a second time for nothing.
+  if mon.species == evolveTo then return true end
+
+  -- Gold's `apply` builds a new record and answers nil when it cannot -- an
+  -- unknown target species, a dataset with no base stats behind it -- so the
+  -- fallback is only a success when something came back.  Gen 1 mutates in
+  -- place, and the species is the same statement of it.
+  local ran, applied = pcall(function()
+    if not isGen2 then
+      Evolution.apply(game, mon, evolveTo, "TRADE")
+      return mon.species == evolveTo
+    end
+    local evolvedMon = Evolution.apply(game.data, mon, entry)
+    if not evolvedMon then return false end
+    local party = game.save and game.save.party
+    if party and slot and party[slot] == mon then party[slot] = evolvedMon end
+    if Evolution.markPokedex then
+      Evolution.markPokedex(game.save, evolvedMon.species)
+    end
+    return true
+  end)
+  if ran and applied then
+    -- The movie is what the player lost, not the evolution and not the save.
+    persist()
+    mod.log:warn("could not open the evolution screen, so %s evolved into "
+      .. "%s without one -- the POKéMON is fine; report the line above",
+      tostring(mon.nickname or mon.species), tostring(evolveTo))
+    return true
+  end
+
+  mod.log:warn("%s did not evolve after the trade -- trade it again to give "
+    .. "the evolution another chance", tostring(mon.nickname or mon.species))
+  return false
+end
+
+-- The Gen 2 push, split out because it carries the slot bookkeeping the Gen
+-- 1 path does not need: EvolutionAnim builds a *new* party record and files
+-- it at `index`, so a wrong index would write the evolved mon over somebody
+-- else's slot.  `slot` is what the trade filed the mon into; it is verified
+-- against the party rather than trusted, and searched for if the party moved
+-- under us between the swap and the box being dismissed.
+--
+-- `onDone` is the caller's second save, run beside the pop rather than
+-- handed to the screen: Gen2EvolutionAnim reports and then waits to be taken
+-- down, so both belong to whoever pushed it.
+function M:showGen2Evolution(game, mon, entry, slot, onDone)
+  local party = game.save and game.save.party
+  if type(party) ~= "table" then return false end
+  if party[slot] ~= mon then
+    slot = nil
+    for i, member in ipairs(party) do
+      if member == mon then
+        slot = i
+        break
+      end
+    end
+    if not slot then return false end
+  end
+
+  local ok, pushed = pcall(mod.ui.push, game, "Gen2EvolutionAnim", {
+    mon = mon,
+    entry = entry,
+    index = slot,
+    party = party,
+    save = game.save,
+    onDone = function()
+      local stack = game.stack
+      if stack and stack.pop then stack:pop() end
+      -- After the pop, so the write sees the party the screen finished
+      -- filing rather than one mid-commit.
+      if onDone then onDone() end
+    end,
+  })
+  return ok and type(pushed) == "table"
 end
 
 -- ------- per-tick

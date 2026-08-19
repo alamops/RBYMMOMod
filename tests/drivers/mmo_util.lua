@@ -140,6 +140,53 @@ end
 -- then failed as "no chat row" on a menu that plainly had one.
 M.labelMatches = labelMatches
 
+-- What a menu is actually offering, for a failure message.  "TIMEOUT waiting
+-- for menu row MMO" says only that the row was not there, which is the one
+-- thing already known -- and a row that is missing because the *menu* is not
+-- the one the driver thinks it is on reads exactly the same as a row that is
+-- missing because the mod failed to add it.  Naming the rows separates those
+-- two in the log, without a second run to find out.
+local function stateName(state)
+  if state == nil then return "nil" end
+  for _, key in ipairs({ "name", "id", "kind", "label", "title" }) do
+    if type(state[key]) == "string" then return state[key] end
+  end
+  local fields = {}
+  for key, value in pairs(state) do
+    if type(key) == "string" and type(value) ~= "function" then
+      fields[#fields + 1] = key
+    end
+  end
+  table.sort(fields)
+  return "?{" .. table.concat(fields, ",", 1, math.min(#fields, 8)) .. "}"
+end
+
+-- Every state on the stack, bottom to top, for the same reason rowLabels
+-- exists: "no items" does not say whether the menu failed to open or opened
+-- as something else.
+function M.stackNames(game)
+  local out = {}
+  for _, state in ipairs((game.stack and game.stack.states) or {}) do
+    out[#out + 1] = stateName(state)
+  end
+  if #out == 0 then return "<empty stack>" end
+  return table.concat(out, " > ")
+end
+
+function M.rowLabels(game)
+  local top = M.top(game)
+  if not (top and type(top.items) == "table") then
+    return (top and "<top state has no items: " .. stateName(top) .. ">"
+      or "<nothing on the stack>") .. "  stack: " .. M.stackNames(game)
+  end
+  local names = {}
+  for _, item in ipairs(top.items) do
+    names[#names + 1] = tostring(item.label)
+  end
+  if #names == 0 then return "<menu is empty>" end
+  return table.concat(names, " | ")
+end
+
 function M.selectLabel(game, label, frames)
   local ok = M.waitFor(game, function()
     local top = M.top(game)
@@ -149,7 +196,10 @@ function M.selectLabel(game, label, frames)
     end
     return false
   end, frames or 240, "menu row " .. label)
-  if not ok then return false end
+  if not ok then
+    U.log("  the menu on top offered: " .. M.rowLabels(game))
+    return false
+  end
 
   local menu = M.top(game)
   local target
@@ -560,6 +610,197 @@ function M.enterJoinCode(game, code)
   return true
 end
 
+-- ------- the nickname prompt a catch earns
+--
+-- An MMO catch is granted by the mod (MediatedBattle / CoopBattle
+-- `grantCatch`), and the catcher is asked to name what they caught exactly as
+-- the engine's own catch asks: a yes/no box once the ending has finished
+-- printing, then the letter grid behind a YES.
+--
+-- Driven properly rather than skipped, because "can the catcher actually name
+-- it" is the question this leg exists to answer -- and because a prompt left
+-- standing swallows the taps the rest of the leg makes to close the battle.
+
+-- Which naming grid is on top, if either: the two generations are different
+-- screens with different fields (Gen 1 keeps `glyphs` and a `grid()`; Gold
+-- keeps the typed string on `text` and its board behind `rows()`).
+function M.namingGridKind(top)
+  if type(top) ~= "table" then return nil end
+  if type(top.glyphs) == "table" and type(top.grid) == "function" then
+    return "gen1"
+  end
+  if type(top.text) == "string" and type(top.rows) == "function"
+     and type(top.characterAt) == "function" then
+    return "gen2"
+  end
+  return nil
+end
+
+-- Gold's board, walked the way M.typeOnGrid walks Gen 1's: step the cursor
+-- rather than compute a tap count, because both axes wrap and SELECT swaps in
+-- a page with different rows. Cursor coordinates are 0-based here, and the
+-- row past the last letter row is the fat case/DEL/END one.
+local function gen2Cell(screen, ch)
+  local grid = screen:rows()
+  for r = 1, #grid do
+    for c = 1, #(grid[r] or {}) do
+      if grid[r][c] == ch then return r - 1, c - 1 end
+    end
+  end
+  return nil
+end
+
+local function typeOnGen2Grid(game, screen, text)
+  for i = 1, #text do
+    local ch = text:sub(i, i)
+    local r, c = gen2Cell(screen, ch)
+    if not r then
+      U.tap(game, "select") -- the other case page
+      U.wait(2)
+      r, c = gen2Cell(screen, ch)
+    end
+    if not r then
+      U.log("WARN no cell on Gold's naming grid for", ch)
+      return false
+    end
+    for _ = 1, 12 do
+      if screen.row == r then break end
+      U.tap(game, "down")
+      U.wait(1)
+    end
+    for _ = 1, 12 do
+      if screen.col == c then break end
+      U.tap(game, "right")
+      U.wait(1)
+    end
+    if screen.row ~= r or screen.col ~= c then
+      U.log("WARN could not reach Gold's cell for", ch)
+      return false
+    end
+    U.tap(game, "a")
+    U.wait(2)
+  end
+  return true
+end
+
+-- Wait for the prompt, answer YES, type `name`, confirm.
+--
+-- Returns true only when the grid actually held what was typed -- the point
+-- of the leg is that the catcher can name the monster, and a grid that came
+-- up empty is a failure with a screenshot rather than a pass.
+-- `onGrid` (optional) runs once the grid is up and before anything is typed,
+-- which is the only moment an empty naming screen can be photographed.
+function M.answerNicknamePrompt(game, name, seconds, onGrid)
+  local asked = M.waitSeconds(game, function()
+    local top = M.top(game)
+    if M.namingGridKind(top) then return true end
+    local text = (M.textOf(top) or ""):lower()
+    return text:find("nickname", 1, true) ~= nil
+  end, seconds or 90, "the nickname prompt after a catch")
+  if not asked then
+    U.log("WARN no nickname prompt after the catch")
+    return false
+  end
+
+  -- A finishes the printing, and A again answers the yes/no under it. YES is
+  -- where the box opens (the mod passes no defaultNo here), so this needs no
+  -- cursor walk -- but it does need a bound, because pressing A into a grid
+  -- types letters.
+  local guard = 0
+  while M.namingGridKind(M.top(game)) == nil and guard < 40 do
+    U.tap(game, "a")
+    U.wait(6)
+    guard = guard + 1
+  end
+  local screen = M.top(game)
+  local kind = M.namingGridKind(screen)
+  if not kind then
+    U.log("WARN the nickname question never opened a naming grid")
+    return false
+  end
+
+  if onGrid then pcall(onGrid, screen, kind) end
+
+  if kind == "gen1" then
+    if not M.typeOnGrid(game, name) then return false end
+    local typed = table.concat(screen.glyphs)
+    if typed ~= name then
+      U.log("WARN the grid holds", typed, "not", name)
+      return false
+    end
+    -- START is the confirm on Gen 1 (or the ED cell); the screen pops itself.
+    U.tap(game, "start")
+  else
+    if not typeOnGen2Grid(game, screen, name) then return false end
+    if screen.text ~= name then
+      U.log("WARN Gold's grid holds", tostring(screen.text), "not", name)
+      return false
+    end
+    -- Gold's START only parks the cursor on END; A on END is the confirm.
+    U.tap(game, "start")
+    U.wait(4)
+    U.tap(game, "a")
+  end
+  U.wait(30)
+  return true
+end
+
+-- The party's own copy of the mon of `species` -- what a driver asserts the
+-- catch's paperwork against (nickname, OT, whatever else lands on it).
+function M.partyMon(game, species)
+  local party = game.save and game.save.party or {}
+  for _, mon in ipairs(party) do
+    if mon.species == species then return mon end
+  end
+  return nil
+end
+
+-- What the party is calling the mon of `species` -- its nickname when it has
+-- one, so a driver can assert the name it just typed actually landed.
+function M.partyNickname(game, species)
+  local mon = M.partyMon(game, species)
+  return mon and mon.nickname
+end
+
+-- Is this species marked in the #DEX -- `caught` on Gold, `owned` on Red,
+-- the same pair src/Gen.lua stamps and reads back.
+function M.dexOwned(game, species)
+  local dex = game.save and game.save.pokedex
+  if type(dex) ~= "table" then return nil end
+  local bag = dex.caught or dex.owned or {}
+  return bag[species] and true or false
+end
+
+-- Listen for real ENGINE events, by subscribing rather than by wrapping emit.
+--
+-- M.captureEvents above counts emits by patching Runtime.emit, which is
+-- enough for an event the engine fires unconditionally. It is not enough here:
+-- an emitter that guards on Runtime.wants (this mod's caught announcement
+-- does, and every hot engine site does) emits **nothing** when no listener is
+-- subscribed -- so a counter that never subscribes measures its own absence.
+-- This subscribes for real, which is also the thing worth proving: another
+-- mod listening for `pokemon.caught` hears an MMO catch.
+--
+-- Returns two tables keyed by event name: how many arrived, and the last
+-- payload of each.
+function M.listenForEvents(names)
+  local Runtime = require("src.mods.Runtime")
+  local bus = Runtime.events
+  local counts, last = {}, {}
+  for _, name in ipairs(names) do counts[name] = 0 end
+  if type(bus) ~= "table" or type(bus.on) ~= "function" then
+    U.log("WARN no live mod event bus; engine events cannot be heard")
+    return counts, last
+  end
+  for _, name in ipairs(names) do
+    bus:on(name, function(payload)
+      counts[name] = counts[name] + 1
+      last[name] = payload
+    end, 0, "mmo_e2e")
+  end
+  return counts, last
+end
+
 -- ------- phase barriers
 --
 -- The two drivers are separate processes with no channel between them but
@@ -875,6 +1116,62 @@ function M.generation(game)
   return 1
 end
 
+-- Walk the new-game intro to the overworld, and say so if it does not arrive.
+--
+-- This is `tests/drivers/util.lua`'s `U.newGame` with the two properties that
+-- file cannot give it from where it sits.
+--
+-- **A budget that is not a guess.** `U.newGame` mashes A up to 400 times and
+-- then returns whatever happened.  Measured on 2026-08-18 against engine `dev`,
+-- the Gen 1 intro -- title, Oak's speech, YOUR NAME?, HIS NAME?, the shrink
+-- beat -- needs **441**.  It outgrew the budget by about a tenth, so every MMO
+-- driver was being handed a game still sitting in Oak's speech.
+--
+-- **A failure that says so.** That is the half that actually cost the day.
+-- `U.newGame` returns nothing, so the caller walked on, read `game.save` (which
+-- exists the whole time, seeded by the driver itself) and logged "in the
+-- overworld as HOSTY with CHARIZARD" -- while OakSpeech was on screen.  The
+-- first symptom came three steps later as `TIMEOUT waiting for menu row MMO`,
+-- which reads exactly like a broken start-menu hook and sent the investigation
+-- to the wrong file.  A driver that cannot reach the overworld has to say
+-- *that*, at the moment it happens.
+--
+-- The budget below is ~3x the measured cost, not 1.1x, precisely because the
+-- last one was set to the intro's length on the day it was written.  It costs
+-- nothing on a healthy run: the loop stops the frame the overworld is on top.
+M.INTRO_A_TAPS = 1500
+
+function M.newGame(game, tag)
+  U.wait(5)
+  U.tap(game, "start")             -- skip the intro movie
+  U.wait(10)
+
+  local title = M.top(game)
+  for _ = 1, 90 do
+    U.tap(game, "a")
+    U.wait(5)
+    if M.top(game) ~= title then break end
+  end
+
+  -- CONTINUE may or may not be on the menu; NEW GAME is first without a save.
+  U.tap(game, "a")
+  U.wait(10)
+
+  for _ = 1, M.INTRO_A_TAPS do
+    U.tap(game, "a")
+    U.wait(2)
+    if game.overworld and M.top(game) == game.overworld then
+      U.wait(10)
+      return true
+    end
+  end
+
+  U.log(tag or "DRIVER",
+    "FAIL the new-game intro never reached the overworld in "
+    .. M.INTRO_A_TAPS .. " A taps -- still on: " .. M.stackNames(game))
+  return false
+end
+
 -- Reach a playable overworld without thrashing an open Start menu.
 --
 -- Gen 2 + POKEPORT_DRIVER already lands in free-roam (empty stack). Gen 1
@@ -900,7 +1197,7 @@ function M.bootToPlay(game)
     end
     return M.inPlay(game)
   end
-  U.newGame(game)
+  M.newGame(game)
   return M.inPlay(game)
 end
 
@@ -2021,6 +2318,58 @@ function M.shotLook(game, path)
 
   local worn = player.sprite
   return worn and (worn.def and worn.def.image or worn.image) or nil
+end
+
+-- Mount the bicycle and photograph it, returning the sheet the player
+-- actually posed from.
+--
+-- The third pic of a character, and the one with the quietest failure. The
+-- bicycle is a whole second overworld sheet -- Player.new resolves
+-- field.playerSprites.bike once and Player:pose prefers player.bikeSprite
+-- while onBike -- so a character can be worn correctly everywhere this file
+-- already looks and still turn back into RED the moment its rider mounts.
+-- Nothing in either flow had ever been on a bicycle.
+--
+-- Mounted through save.onBike, which is what the bag's BICYCLE row writes
+-- (src/ui/BagMenu.lua) and what OverworldController copies onto the player
+-- every tick -- not a flag poked onto the player behind the engine's back.
+-- Indoors is fine and is where both drivers stand: the mount check that
+-- cares about the map runs on a warp, so the pose here is the same pose a
+-- route would draw.
+--
+-- Call it with nothing in flight from the peer. It closes what is on top
+-- before it mounts, and B on a request box is an answer: dropped between the
+-- guest's trade ask and the host's reply, this refused the trade and the run
+-- failed two legs later, in the trade, with nothing pointing back here.
+--
+-- The sheet is read back off pose() rather than off player.bikeSprite so the
+-- answer is what the frame drew, not what was installed for it.
+function M.shotBike(game, path)
+  local ow
+  for i = #game.stack.states, 1, -1 do
+    if game.stack.states[i].isOverworld then ow = game.stack.states[i] break end
+  end
+  ow = ow or game.overworld
+  local player = ow and ow.player
+  if not (player and game.save) then return nil end
+
+  local wasOnBike = game.save.onBike
+  M.closeToOverworld(game)
+  player.facing = "down"
+  game.save.onBike = true
+  U.wait(20)
+
+  local drawn
+  pcall(function()
+    local sprite = (player:pose())
+    drawn = sprite and (sprite.def and sprite.def.image or sprite.image) or nil
+  end)
+  U.shot(game, path)
+
+  game.save.onBike = wasOnBike
+  player.onBike = not not wasOnBike
+  U.wait(10)
+  return drawn
 end
 
 -- Open the game's own TRAINER CARD and photograph it, returning the path

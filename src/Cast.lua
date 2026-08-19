@@ -19,6 +19,13 @@
 -- the engine offers exactly one seam over them, the `player.sprite` hook, so
 -- that is what Client wraps and this file answers.
 --
+-- The bicycle is a fourth of those, and the one with no seam at all: the
+-- ride is a whole second overworld sheet (field.playerSprites.bike), built
+-- into the player object at Player.new and never asked about again. So it
+-- is not registered and not hooked -- M.bikeDef hands out the record and
+-- Client.applyLook puts a renderer for it on the live player, next to the
+-- walking one it already swaps there.
+--
 -- Every failure here is a warning and a character that is simply not
 -- offered. A sprite that would not register must not take the multiplayer
 -- down with it, and Chars.resolve already turns a character this copy does
@@ -182,6 +189,35 @@ function M.pic(id, side)
   -- engine on Chris (or whoever the boot already chose).
   if not Config.ownCharAllowed(char, Gen.generation()) then return nil end
   return assetPath(char, side == "back" and "back.png" or "front.png")
+end
+
+-- The sheet the player should be drawn from while on the bicycle, as a
+-- sprite record, or nil to leave the engine's own bike sheet alone.
+--
+-- A record and not a path because the bike sheet is not in the catalog and
+-- never should be: `field.playerSprites.bike` names exactly one id, read
+-- once in Player.new, so a second one would be a character in the CHARACTER
+-- picker that nobody can be -- pick it and the game would still put RED on
+-- the bicycle underneath you. What the mount needs is what SpriteRenderer
+-- needs, which is the record itself; Client.applyLook builds the renderer
+-- from it and hangs it on the live player beside the walking one.
+--
+-- Same shape install() registers, and deliberately so: frames and palette
+-- decided in one place means a bike sheet cannot drift from the walking
+-- sheet it belongs to. Gen-gated like M.pic -- Gold puts CHRIS on the
+-- bicycle and this mod's characters are not ready for that boot yet.
+function M.bikeDef(id)
+  local char = registered[id]
+  if not char then return nil end
+  if not Config.ownCharAllowed(char, Gen.generation()) then return nil end
+  local image = assetPath(char, "bike.png")
+  if not image then return nil end
+  return {
+    image = image,
+    frames = Config.CHAR_FRAMES,
+    walker = true,
+    paletteSource = Config.CHAR_PALETTE_SOURCE,
+  }
 end
 
 -- Is this one of ours?  Chars.available answers the catalog question; this

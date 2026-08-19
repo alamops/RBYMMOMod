@@ -65,6 +65,178 @@ here must match `manifest.version`.
     wherever it already applies — solo only takes an encounter the co-op
     path declined. Design notes and the measured evidence behind the
     decisions above: `docs/plans/offline-solo-battles.md`.
+
+- **NIRE and NIRE HOOD have bicycles.** Both characters ship a bike sheet of
+  their own (`assets/chars/<char>/bike.png`, 16×96, the same six frames in
+  the same order as their walking sheet), and the character you chose is who
+  rides it.
+
+  This was the one pose a worn character could still lose. The engine reads
+  exactly one bike sheet — `field.playerSprites.bike`, resolved once in
+  `Player.new` into `player.bikeSprite`, which `Player:pose` prefers while
+  `onBike` — so everything the mod already did was right and you still turned
+  back into RED the moment you mounted.
+
+  It is not a catalog entry and deliberately never will be: a registered
+  `SPRITE_NIRE_BIKE` would be a row in the CHARACTER picker that still put
+  RED on the bicycle underneath whoever picked it. `Cast.bikeDef` hands out
+  the record instead and `Client.applyLook` builds a second renderer onto the
+  live player beside the walking one — both swapped together when you wear a
+  character, both put back together when you stop. A character with no bike
+  art of its own (every vanilla one) leaves the game's bicycle exactly where
+  it was, including on the path from one character straight to another.
+
+  Covered where it draws rather than only where it is installed: the
+  end-to-end host driver now mounts through `save.onBike` — what the bag's
+  BICYCLE row writes — and asserts on the sheet the frame actually posed
+  from (`tests/drivers/mmo_util.lua`, `M.shotBike`).
+
+### Fixed
+
+- **Every LOVE end-to-end driver was dead, and said the wrong thing about
+  why.** `run-mmo-e2e.sh` and its four siblings failed at
+  `TIMEOUT waiting for menu row MMO`, which reads exactly like a broken
+  `ui.start_menu.items` hook. The start menu was fine; the game was still in
+  Oak's speech. `tests/drivers/util.lua`'s `U.newGame` (the engine's helper)
+  mashes A up to **400** times to walk the intro — measured against engine
+  `dev` on 2026-08-18, that intro now needs **441**. It outgrew the budget by
+  about a tenth.
+
+  The budget alone would have been a five-minute fix. What cost the day is
+  that `U.newGame` returns nothing when it runs out: the driver walked on,
+  read `game.save` (which the driver seeds itself, so it is populated the
+  whole time) and logged "in the overworld as HOSTY with CHARIZARD" while
+  OakSpeech was on screen. The first visible symptom arrived three steps
+  later, in a different subsystem.
+
+  So the mod's drivers no longer call it. `mmo_util.lua` grows its own
+  `H.newGame(game, tag)` with a budget ~3x the measured cost — deliberately
+  not 1.1x, since that is how the last one was set — that stops the frame the
+  overworld is on top, and that **fails loudly** with the state stack it is
+  stuck on. Every driver that booted a new game now bails on a false return
+  instead of testing a game that never started. `H.selectLabel` also names the
+  rows the menu did offer when a lookup times out, and `H.stackNames` prints
+  the whole stack, so "the row is missing" and "you are not on that menu" stop
+  reading the same in a log.
+
+  All five drivers pass again: `run-mmo-e2e.sh` (0 failures both sides),
+  `run-party-wild-e2e.sh` (hub-refereed `coop_wild`, 0 gaps / 0 desyncs),
+  `run-mmo-e2e-gen2.sh` (Gold 2-on-2 over the in-game hub), and
+  `run-hub-e2e.sh` (a `coop_npc` brokered by the Node hub).
+
+- **In a two-player fight, the enemy attacked one player and only ever that
+  player.** Reported from a real game: "the enemy only attacks my friend and
+  never me, no matter who hosts." It was neither a networking fault nor a
+  seating fault. Every aim the referee files *for itself* — an NPC's pick, the
+  identical pick a human's timeout files, and the lock-in turns of thrash,
+  rage and bide, where nobody is offered a target — resolved through
+  `_firstLivingFoe`, which answers "the lowest-numbered living foe". With one
+  foe that is the only possible answer; with two players on a side it meant a
+  `coop_wild` wild monster, and *both* seats of a `coop_npc` trainer, swung at
+  seat 0 on every turn of every fight. The player in seat 1 was never attacked
+  once. ("No matter who hosts" is what hid it: seat order is the co-op party's
+  member order, and member 1 is whoever *sent the invite* — nothing to do with
+  who hosts.)
+
+  Those aims now spread uniformly over the living opposing seats, in all four
+  runtimes (`src/BattleSim`, `src/BattleSim2`, `server/lib/battle`,
+  `server/lib/battle2`). Three properties keep that safe to add to a sim two
+  processes must agree on byte for byte:
+  - The draw is on a **second generator** (`aim`, seeded from the battle seed
+    plus a fixed offset), never on the battle's own. No roll that already
+    existed moved, and no recorded vector changed — the Gen 1 parity fixture
+    regenerated with **every pre-existing scenario byte-identical**.
+  - **One living foe is answered without drawing at all**, so a 1v1, and the
+    lone wild seat of a `wild` / `coop_wild` fight, never touch the aim stream
+    and replay exactly as before.
+  - The draw is `byte()` and not `nextInt`, whose span modulo reaches an LCG's
+    bit 0 — a two-seat side would have got a perfect A-B-A-B rota instead of a
+    spread.
+
+  A player's own move with the aim left off still defaults to the first living
+  foe: that wants to be a predictable default the client can show, not a die
+  roll. Pinned by a new `coop_npc_aim` scenario in both halves of the Gen 1
+  turn-parity pair, by the Gen 2 fixture's `exp_coop` / `replace` scenarios
+  (whose NPC hits moved off seat 0 while `rngState` held still), and by
+  co-op targeting tests in `tests/battle_sim_turn.lua` and
+  `tests/battle_sim2_turn.lua`.
+
+## [1.0.10] - 2026-08-18
+
+### Fixed
+
+- **The catcher can name what they caught.** A wild caught in an MMO fight —
+  the co-op `coop_wild` divert, or a mediated 1v1 wild — was granted straight
+  into the party or the PC, and that was the end of it: the catcher was the
+  one player in the game who never saw "Do you want to give a nickname to
+  X?". The engine asks it on its own catch path
+  (`BattleState:storeCaughtMon` → `askNicknameUI`); this mod grants MMO
+  catches itself (`grantCatch` on both battle screens) and had no equivalent.
+  - Both screens now record the prompt as *owed* on the grant and ask it when
+    the message queue runs dry — after "Gotcha!" and the line saying where the
+    monster went, and before the player is allowed off the battle, which is
+    the engine's own ordering. Asking at grant time would have put a letter
+    grid over a catch the player had not been told about yet.
+  - Boxed catches are asked too: `AddPartyMon` and `SendNewMonToBox` both call
+    `AskName` on the cart, so a full party costs the slot and not the naming.
+  - `src/Gen.lua` owns the generation split (`nicknameScreenId`,
+    `nicknamePromptText`, `askNickname`): Red opens `NamingScreen` with the
+    ROM's own `_DoYouWantToNicknameText`, Gold opens `Gen2NamingScreen` with
+    its species icon — and, the part that actually bites, Gen 1's grid pops
+    itself before calling back while Gold's does not, so this pops for Gold
+    and leaves Gen 1 alone.
+  - A build that cannot open either screen says so and lets the fight end
+    rather than holding the player on a finished battle.
+
+- **...and the rest of what a catch does.** Adding the monster was the only
+  thing an MMO grant did, so a caught POKéMON was owned by nobody, the
+  #DEX never moved, an UNOWN caught on Gold never unlocked its letter, and no
+  mod listening for a catch heard one. `Gen.recordCatch` now does what the
+  engine's own capture does to the save, before the monster is given a home
+  (which is the order `BattleState:storeCaughtMon` writes them in, and why a
+  catch with nowhere to go still counts as seen):
+  - **The #DEX** — seen plus owned, under `caught` on a Gold save and `owned`
+    on a Red one, the same pair `Gen.dexCounts` and `src/Trade2.lua` already
+    agree on. A species that was new says so on screen, in each game's own
+    words. The #DEX *entry page* the engine opens next is deliberately not
+    pushed: a battle screen with one queue and three other players still
+    leaving it is the wrong place for it.
+  - **The OT stamp** — through the engine's own `BattleState.stampOT` /
+    `Mon.stampOT`, so the fields (and the rule that a traded monster keeps the
+    id it arrived with) stay the engine's.
+  - **UNOWN** — `Unown.registerCatch` on Gold, which is what UNOWN MODE and
+    `VAR_UNOWNCOUNT` read.
+  - **`pokemon.caught`** — emitted under the engine's own name, with the same
+    payload keys both engine sites use (`mon`, `species`, `isNew`, `ball`,
+    `destination`, `game`), so a dex tracker or a shiny logger hears an MMO
+    catch exactly as it hears a solo one. This is the one place the mod
+    reaches past `mod.events:emit` (which namespaces a mod's events to
+    `mod.<id>.*`), and it is the same line `src/Trade2.lua` already draws for
+    `pokemon.received` / `trade.completed`: where this mod *stands in for* an
+    engine path, it says what that path says. Announcing under a private name
+    instead would make every catch-listening mod need an rby_mmo special case.
+    Only the catcher's client records or announces anything.
+
+- **A wild POKéMON cannot use items any more.** Wild fights were drinking
+  POTIONs, curing their own status and reading X ATTACK mid-battle, which is
+  something no wild encounter has ever done in any of these games. The bag was
+  not the wild monster's: `wild` and `coop_wild` seat their wildlife on the
+  *same synthetic NPC seat machinery* a `coop_npc` trainer sits on, and
+  `Hub:tryStartSim` seeded every one of those seats with `DEFAULT_NPC_BAG` --
+  the gym-style kit that exists so a trainer can potion. The auto-pick then
+  found a bag and used it. Fixed at both ends rather than one: the hub
+  (`src/Hub.lua`, `server/lib/relay.js`) now asks `isWildSeat` and seeds only
+  the trainer seats, and all four turn-machine twins (`src/BattleSim/Turn.lua`,
+  `src/BattleSim2/Turn.lua`, `server/lib/battle/Turn.js`,
+  `server/lib/battle2/Turn.js`) refuse an item choice from the wild seat
+  outright -- both the one they pick for it and one submitted on its behalf --
+  so a bag that arrives from anywhere else is still never spent. A trainer
+  battle is untouched: a gym leader still potions.
+
+## [1.0.8] - 2026-08-17
+
+### Added
+
 - **The battle theatre is not a Gen 1 feature any more.** Gold gets the
   top-down arena, the plates, the modern band, the fx and the throws — the
   same picture Red has, on the same 640×360 field.
@@ -345,6 +517,38 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **A POKéMON traded over the MMO now evolves.** KADABRA stayed KADABRA,
+  MACHOKE stayed MACHOKE, and Gold's held-item trades stayed put — on both
+  transports and in both games. Neither TradeSession was at fault: both
+  answer *whether* the received mon evolves and hand it back as a second
+  return, and turning that answer into a screen has always been the caller's
+  job. On the cable club the caller is the engine's `LinkState`; nothing in
+  this mod was its opposite number, so the answer was dropped on the floor
+  with nothing logged on either side. `src/Sessions.lua` is now that caller:
+  the movie follows the "was traded over!" line rather than opening under it,
+  Gen 1 goes through `Evolution.evolve` with `via="TRADE"` so B cannot cancel
+  it, and Gold pushes the engine's own `Gen2EvolutionAnim` (row, party slot
+  and pop included) the way `Game2:afterRareCandy` does. `src/Trade2.lua`
+  stopped scanning for a TRADE row by hand and asks the engine's Gen 2
+  evolution module instead, so an Everstone refuses and a KING'S ROCK row
+  demands — and gets eaten by — its held item. A screen that cannot open
+  degrades to applying the evolution outright with a line saying so: the
+  trade is committed on both sides by then, and there is no second chance
+  at a trade evolution.
+- **A finished trade is now written to disk, twice, the way the cable club
+  writes it.** pokered's `cable_club.asm` calls `SaveSAVtoSRAM` straight
+  after every trade so the swap is on the cartridge before the animation
+  runs, and the engine's `LinkState` does the same and then writes again
+  once the evolution movie ends (gen1recomp #222). A hub trade did neither:
+  the received POKéMON lived only in memory until the player happened to
+  open START > SAVE, so a force-quit lost it *and* handed back the one that
+  was traded away — two of the same POKéMON in the world, which is exactly
+  the duplication this session's teardown exists to prevent, arriving by the
+  back door. Worse here than on a cable, because finishing locally
+  deliberately does not end the session: this side sits in `settling` while
+  the peer acknowledges. Both writes are guarded and never raise — a build
+  with no `writeSave` is not a failure, and a refused or throwing write
+  leaves the swap in memory and names START > SAVE as the way out.
 - **A hub that accepts and never answers is given up on.** The transport's
   idle timeout measures silence *since the last message*, so it never covered
   a connection that had never had one: a listener that took the socket and

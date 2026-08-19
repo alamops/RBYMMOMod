@@ -541,3 +541,60 @@ test('the Gen2 event vocabulary knows exp, the party index and the ask slot', ()
   assert.strictEqual(built.participants, 2);
   assert.strictEqual(built.mon, 1);
 });
+
+// ------------------------------------------------------------------
+// wildlife never uses an item, from either end
+// ------------------------------------------------------------------
+//
+// Twin of tests/battle_sim2_turn.lua's section 4, and byte-shared with the Gen 1
+// pair. A wild monster has no bag and no hands, and its seat is driven from two
+// ends -- the hub auto-picks for it, and a submitted choice can arrive addressed
+// to it -- so both are pinned. The wild seat is handed a bag on purpose: even a
+// seat that HAS one must never spend it, so a hub seeding the wrong kit cannot
+// put a Potion in a wild monster's mouth.
+
+const wildBattle2 = (mode, id, bBag) => build({
+  id, mode, seed: 88010, choiceTimeout: 10, reconnectGrace: 60,
+  sides: {
+    a: [{
+      playerId: 'p1', name: 'Ann', bag: { POTION: 1 },
+      mons: [mn({ species: 'Alpha', maxHp: 200, spe: 90, moves: [mv('thump', 40, 255, 0)] })],
+    }],
+    b: [{
+      playerId: 'wild', name: 'Wild', bag: bBag,
+      // Hurt below half and poisoned: a trainer seat heals or cures here.
+      mons: [mn({
+        species: 'Beta', maxHp: 200, hp: 40, spe: 10, status: 'PSN',
+        moves: [mv('thump', 40, 255, 0)],
+      })],
+    }],
+  },
+});
+
+for (const mode of ['wild', 'coop_wild']) {
+  test(`${mode}: auto-pick never reaches the wild seat's bag`, () => {
+    const battle = wildBattle2(mode, 'wa', { POTION: 2, FULL_HEAL: 1, X_ATTACK: 1 });
+    battle.drainEvents();
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    assert.strictEqual(battle.tick(11), true, "the wild seat's turn resolves");
+    const items = battle.drainEvents().filter((event) => event.t === 'item');
+    assert.deepStrictEqual(items, [], 'no item event came off the wild seat');
+    assert.strictEqual(battle.byId.get('wild').bag.POTION, 2, 'and it spent none of it');
+    assert.strictEqual(battle.byId.get('wild').bag.FULL_HEAL, 1, 'cure untouched too');
+    assert.strictEqual(battle.byId.get('wild').mons[0].status, 'poison', 'still poisoned');
+  });
+
+  test(`${mode}: a submitted item from the wild seat is refused`, () => {
+    const battle = wildBattle2(mode, 'wb', { POTION: 1 });
+    battle.drainEvents();
+    assert.strictEqual(
+      battle.submitChoice('wild', { action: 'item', item: 'POTION', slot: 0 }), false,
+      'wildlife cannot be talked into using an item',
+    );
+    assert.strictEqual(battle.byId.get('wild').choice, null, 'and files nothing');
+    assert.strictEqual(
+      battle.submitChoice('p1', { action: 'item', item: 'POTION', slot: 0 }), true,
+      'the player on side a still may',
+    );
+  });
+}

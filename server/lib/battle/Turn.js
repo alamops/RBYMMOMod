@@ -95,6 +95,14 @@ const RESOLVE_TIMEOUT = 30; // Config.BATTLE_RESOLVE_TIMEOUT
 // Below this the side-a member of a tied group moves first.
 const TIE_BREAK_ROLL = 128;
 
+// Where the aim stream starts, relative to the battle's own seed. See
+// `_autoTarget`: the referee's choice of *whom* to swing at is drawn from a
+// second generator so that adding it moved no roll in the first one, and a
+// second generator started on the same number would be the same sequence read
+// twice -- every aim would echo a damage roll. The offset is arbitrary and
+// load-bearing only in that both runtimes use it.
+const AIM_SEED_OFFSET = 1597334677;
+
 const MODES = {
   '1v1': true, coop_npc: true, coop_pvp: true, wild: true, coop_wild: true,
 };
@@ -155,6 +163,18 @@ function maxFighters(mode, side) {
   }
   if (mode === '1v1' || mode === 'wild') return 1;
   return FIGHTERS_PER_SIDE;
+}
+
+// The wild monster's seat. Wildlife is always the synthetic side-b seat of a
+// mode whose name says "wild" (the seat `maxFighters` caps at one above and
+// `_awardExp` pays the other side for), and wildlife carries no bag: a wild
+// monster never uses an item, no matter who asks on its behalf. Both askers are
+// gated -- `_normaliseChoice` refuses a submitted one, `_autoItemChoice` never
+// picks one -- because the seat can be driven from either end.
+const WILD_SIDE = 'b';
+
+function isWildSeat(mode, fighter) {
+  return !!fighter && fighter.side === WILD_SIDE && Effects.isWildMode(mode);
 }
 
 // Auto-pick priorities (twin of Turn.lua AUTO_* tables).
@@ -547,6 +567,7 @@ class Battle {
     this.mode = has(MODES, opts.mode) ? opts.mode : '1v1';
     this.seed = int(opts.seed, 0);
     this.rng = Rng.create(int(opts.seed, 0));
+    this.aim = Rng.create(int(opts.seed, 0) + AIM_SEED_OFFSET);
     this.chart = isTable(opts.chart) ? opts.chart : null;
     this.specialTypes = null;
     if (Array.isArray(opts.specialTypes)) {
@@ -650,6 +671,50 @@ class Battle {
       if (activeMon(foe)) return foe;
     }
     return null;
+  }
+
+  // Which opposing seat an action *nobody chose* swings at.
+  //
+  // Every aim the referee files for itself comes through here: an NPC's pick,
+  // the identical pick a human's timeout files, and the lock-in turns of
+  // thrash / rage / bide, where nobody is asked for a target because the move
+  // does not offer one.
+  //
+  // It used to be `_firstLivingFoe`, which answers "the lowest-numbered living
+  // foe" -- the right answer to a question with one possible answer, and the
+  // wrong one the moment a side holds two players. A coop_wild's wild monster
+  // and *both* seats of a coop_npc trainer swung at seat 0 every turn of every
+  // fight, so the second player on the side was never once attacked. Reported
+  // from a real two-player game, and reproducible in one sitting: 18 damage
+  // events, 18 of them on slot 0.
+  //
+  // So: uniform over the living opposing seats. Three properties make that
+  // safe to add to a sim two runtimes have to agree on byte for byte.
+  //
+  //   * The draw is on `this.aim`, not `this.rng`. A draw on the battle's own
+  //     generator would shift every roll after it and silently rewrite every
+  //     recorded vector; this one cannot move a number that already exists.
+  //   * One living foe is answered without drawing at all. A 1v1, and the lone
+  //     wild seat of a wild / coop_wild fight, therefore consume nothing and
+  //     replay exactly as they always did -- the aim stream in those fights is
+  //     never even touched.
+  //   * `byte()` is the draw, not `nextInt`. `nextInt` takes the whole LCG
+  //     state modulo the span, and this generator's bit 0 alternates every
+  //     step, so a two-seat side would have got a perfect A-B-A-B rota rather
+  //     than a spread. `byte()` reads bits 16..23, which is the reason Rng.js
+  //     puts them there.
+  //
+  // Draw order is the parity contract, exactly as it is for `this.rng`: both
+  // runtimes call this at the same points, in the same seat order, or their
+  // aim streams part company. The turn-parity drivers are what hold that.
+  _autoTarget(fighter) {
+    const living = [];
+    for (const foe of this._foes(fighter)) {
+      if (activeMon(foe)) living.push(foe);
+    }
+    if (living.length === 0) return null;
+    if (living.length === 1) return living[0];
+    return living[this.aim.byte() % living.length];
   }
 
   // Which seat an action actually swings at, given the seat it was aimed at.
@@ -758,7 +823,7 @@ class Battle {
             slot: fighter.slot, side: fighter.side, text: fighter.name,
           });
         } else {
-          const foe = this._firstLivingFoe(fighter);
+          const foe = this._autoTarget(fighter);
           if (foe) {
             this._say(`${mon.species} unleashed energy`);
             fighter.choice = {
@@ -815,7 +880,7 @@ class Battle {
       }
 
       if (mon.thrashing && mon.thrashing.turns > 0) {
-        const foe = this._firstLivingFoe(fighter);
+        const foe = this._autoTarget(fighter);
         if (foe) {
           this._say(`${mon.species} thrashing about`);
           fighter.choice = {
@@ -831,7 +896,7 @@ class Battle {
       }
 
       if (mon.raging && mon.rageMove && mon.rageMove > 0) {
-        const foe = this._firstLivingFoe(fighter);
+        const foe = this._autoTarget(fighter);
         if (foe) {
           this._say(`${mon.species}'s RAGE is building`);
           fighter.choice = {
@@ -883,6 +948,9 @@ class Battle {
     if (action === 'item') {
       const item = str(choice.item);
       if (!item) return null;
+      // Wildlife has no bag and no hands. Refused rather than ignored so a wild
+      // seat that is somehow handed one never spends the turn on it either.
+      if (isWildSeat(this.mode, fighter)) return null;
       // A fighter with a bag sheet must actually hold the stack (hub/NPC auto).
       // Seats with no bag stay permissive so headless fixtures can still item.
       if (fighter.bag && !this._bagHas(fighter, item)) return null;
@@ -939,6 +1007,10 @@ class Battle {
           return null;
         }
       } else {
+        // Deliberately `_firstLivingFoe` and not `_autoTarget`: this is a
+        // *player's* move with the aim left off, and the answer to that is a
+        // predictable default the client can show, not a die roll. Only the
+        // aims nobody chose spread.
         targetFighter = this._firstLivingFoe(fighter);
         if (!targetFighter) {
           for (const foe of this._foes(fighter)) {
@@ -1074,6 +1146,9 @@ class Battle {
   // Bag item for the active mon: cure → heal ≤50% → X-item while stages flat.
   _autoItemChoice(fighter, mon) {
     if (!fighter.bag) return null;
+    // A wild monster is not a trainer: it never reaches into a bag, even when
+    // the hub seeded its seat with one.
+    if (isWildSeat(this.mode, fighter)) return null;
 
     if (mon.status) {
       const list = AUTO_STATUS_CURE[mon.status];
@@ -1120,7 +1195,7 @@ class Battle {
 
   _autoChoice(fighter) {
     if (fighter.mustReplace) {
-      const foe = this._firstLivingFoe(fighter);
+      const foe = this._autoTarget(fighter);
       const defender = foe && activeMon(foe);
       const se = this._bestSeBench(fighter, defender);
       if (se) return { action: 'switch', slot: se };
@@ -1143,7 +1218,7 @@ class Battle {
       if (mon.bide.turns > 0) {
         return { action: 'skip' };
       }
-      const foe = this._firstLivingFoe(fighter);
+      const foe = this._autoTarget(fighter);
       if (foe) {
         return {
           action: 'fight',
@@ -1160,7 +1235,7 @@ class Battle {
       return { action: 'skip' };
     }
     if (mon.thrashing && mon.thrashing.turns > 0) {
-      const foe = this._firstLivingFoe(fighter);
+      const foe = this._autoTarget(fighter);
       if (foe) {
         return {
           action: 'fight',
@@ -1170,13 +1245,13 @@ class Battle {
       }
     }
     if (mon.raging && mon.rageMove && mon.rageMove > 0) {
-      const foe = this._firstLivingFoe(fighter);
+      const foe = this._autoTarget(fighter);
       if (foe) {
         return { action: 'fight', move: mon.rageMove, target: foe.slot };
       }
     }
 
-    let foe = this._firstLivingFoe(fighter);
+    let foe = this._autoTarget(fighter);
     if (!foe) {
       for (const f of this._foes(fighter)) {
         if (f.mustReplace) { foe = f; break; }
@@ -1692,6 +1767,9 @@ class Battle {
       if (!Effects.isWildMode(this.mode)) {
         this._say('But it failed');
       } else {
+        // Wild modes seat exactly one monster on side b, so "the first
+        // living foe" and "the only foe" are the same seat -- no aim to
+        // spread.
         const foe = this._firstLivingFoe(fighter);
         const target = foe && activeMon(foe);
         if (!target) {
@@ -3182,6 +3260,7 @@ module.exports = {
   RECONNECT_GRACE,
   RESOLVE_TIMEOUT,
   TIE_BREAK_ROLL,
+  AIM_SEED_OFFSET,
   DEFAULT_NPC_BAG,
   MODES,
   SIDES,

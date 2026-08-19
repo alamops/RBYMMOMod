@@ -874,6 +874,51 @@ scenario("retarget_ko", function(events)
   return battle
 end)
 
+-- Who the referee swings at when nobody chose.  A coop_npc trainer holds two
+-- seats with no connection behind them, so both file their own picks through
+-- `autoPick` -- and until the aim stream existed, both picked "the lowest
+-- living foe" and hammered seat 0 for the whole fight while the second player
+-- was never attacked once.
+--
+-- Six turns is enough for the spread to show, and the fixture pins the aims
+-- themselves rather than merely "they were not all seat 0": the aim draw is a
+-- second generator, and a second generator is a second way for the runtimes to
+-- part company.  The snapshot's `rngState` is the other half of the claim --
+-- it must be exactly what it was before aims spread, because the draws come
+-- off `aim` and never off `rng`.
+scenario("coop_npc_aim", function(events)
+  local battle = build({
+    id = "aim", mode = "coop_npc", seed = 4242, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "p1", name = "One", mons = {
+          mn({ species = "Alpha", maxHp = 400, spd = 10,
+               moves = { mv("tap", 40, 255, 0) } }) } },
+        { playerId = "p2", name = "Two", mons = {
+          mn({ species = "Gamma", maxHp = 400, spd = 10,
+               moves = { mv("tap", 40, 255, 0) } }) } },
+      },
+      b = {
+        { playerId = "n1", name = "NpcA", mons = {
+          mn({ species = "Beta", maxHp = 400, spd = 90,
+               moves = { mv("thump", 40, 255, 0) } }) } },
+        { playerId = "n2", name = "NpcB", mons = {
+          mn({ species = "Delta", maxHp = 400, spd = 80,
+               moves = { mv("thump", 40, 255, 0) } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 6 do
+    battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("p2", { action = "fight", move = 0, target = 3 })
+    battle:autoPick("n1")
+    battle:autoPick("n2")
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
 -- ------------------------------------------------------------------
 
 local out = {}
