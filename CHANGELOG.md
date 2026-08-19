@@ -6,6 +6,60 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The catcher can name what they caught.** A wild caught in an MMO fight —
+  the co-op `coop_wild` divert, or a mediated 1v1 wild — was granted straight
+  into the party or the PC, and that was the end of it: the catcher was the
+  one player in the game who never saw "Do you want to give a nickname to
+  X?". The engine asks it on its own catch path
+  (`BattleState:storeCaughtMon` → `askNicknameUI`); this mod grants MMO
+  catches itself (`grantCatch` on both battle screens) and had no equivalent.
+  - Both screens now record the prompt as *owed* on the grant and ask it when
+    the message queue runs dry — after "Gotcha!" and the line saying where the
+    monster went, and before the player is allowed off the battle, which is
+    the engine's own ordering. Asking at grant time would have put a letter
+    grid over a catch the player had not been told about yet.
+  - Boxed catches are asked too: `AddPartyMon` and `SendNewMonToBox` both call
+    `AskName` on the cart, so a full party costs the slot and not the naming.
+  - `src/Gen.lua` owns the generation split (`nicknameScreenId`,
+    `nicknamePromptText`, `askNickname`): Red opens `NamingScreen` with the
+    ROM's own `_DoYouWantToNicknameText`, Gold opens `Gen2NamingScreen` with
+    its species icon — and, the part that actually bites, Gen 1's grid pops
+    itself before calling back while Gold's does not, so this pops for Gold
+    and leaves Gen 1 alone.
+  - A build that cannot open either screen says so and lets the fight end
+    rather than holding the player on a finished battle.
+
+- **...and the rest of what a catch does.** Adding the monster was the only
+  thing an MMO grant did, so a caught POKéMON was owned by nobody, the
+  #DEX never moved, an UNOWN caught on Gold never unlocked its letter, and no
+  mod listening for a catch heard one. `Gen.recordCatch` now does what the
+  engine's own capture does to the save, before the monster is given a home
+  (which is the order `BattleState:storeCaughtMon` writes them in, and why a
+  catch with nowhere to go still counts as seen):
+  - **The #DEX** — seen plus owned, under `caught` on a Gold save and `owned`
+    on a Red one, the same pair `Gen.dexCounts` and `src/Trade2.lua` already
+    agree on. A species that was new says so on screen, in each game's own
+    words. The #DEX *entry page* the engine opens next is deliberately not
+    pushed: a battle screen with one queue and three other players still
+    leaving it is the wrong place for it.
+  - **The OT stamp** — through the engine's own `BattleState.stampOT` /
+    `Mon.stampOT`, so the fields (and the rule that a traded monster keeps the
+    id it arrived with) stay the engine's.
+  - **UNOWN** — `Unown.registerCatch` on Gold, which is what UNOWN MODE and
+    `VAR_UNOWNCOUNT` read.
+  - **`pokemon.caught`** — emitted under the engine's own name, with the same
+    payload keys both engine sites use (`mon`, `species`, `isNew`, `ball`,
+    `destination`, `game`), so a dex tracker or a shiny logger hears an MMO
+    catch exactly as it hears a solo one. This is the one place the mod
+    reaches past `mod.events:emit` (which namespaces a mod's events to
+    `mod.<id>.*`), and it is the same line `src/Trade2.lua` already draws for
+    `pokemon.received` / `trade.completed`: where this mod *stands in for* an
+    engine path, it says what that path says. Announcing under a private name
+    instead would make every catch-listening mod need an rby_mmo special case.
+    Only the catcher's client records or announces anything.
+
 ## [1.0.8] - 2026-08-17
 
 ### Added
