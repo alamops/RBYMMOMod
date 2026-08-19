@@ -6,6 +6,26 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-08-18
+
+### Fixed
+
+- **A wild POKéMON cannot use items any more.** Wild fights were drinking
+  POTIONs, curing their own status and reading X ATTACK mid-battle, which is
+  something no wild encounter has ever done in any of these games. The bag was
+  not the wild monster's: `wild` and `coop_wild` seat their wildlife on the
+  *same synthetic NPC seat machinery* a `coop_npc` trainer sits on, and
+  `Hub:tryStartSim` seeded every one of those seats with `DEFAULT_NPC_BAG` --
+  the gym-style kit that exists so a trainer can potion. The auto-pick then
+  found a bag and used it. Fixed at both ends rather than one: the hub
+  (`src/Hub.lua`, `server/lib/relay.js`) now asks `isWildSeat` and seeds only
+  the trainer seats, and all four turn-machine twins (`src/BattleSim/Turn.lua`,
+  `src/BattleSim2/Turn.lua`, `server/lib/battle/Turn.js`,
+  `server/lib/battle2/Turn.js`) refuse an item choice from the wild seat
+  outright -- both the one they pick for it and one submitted on its behalf --
+  so a bag that arrives from anywhere else is still never spent. A trainer
+  battle is untouched: a gym leader still potions.
+
 ## [1.0.8] - 2026-08-17
 
 ### Added

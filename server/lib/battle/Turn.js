@@ -157,6 +157,18 @@ function maxFighters(mode, side) {
   return FIGHTERS_PER_SIDE;
 }
 
+// The wild monster's seat. Wildlife is always the synthetic side-b seat of a
+// mode whose name says "wild" (the seat `maxFighters` caps at one above and
+// `_awardExp` pays the other side for), and wildlife carries no bag: a wild
+// monster never uses an item, no matter who asks on its behalf. Both askers are
+// gated -- `_normaliseChoice` refuses a submitted one, `_autoItemChoice` never
+// picks one -- because the seat can be driven from either end.
+const WILD_SIDE = 'b';
+
+function isWildSeat(mode, fighter) {
+  return !!fighter && fighter.side === WILD_SIDE && Effects.isWildMode(mode);
+}
+
 // Auto-pick priorities (twin of Turn.lua AUTO_* tables).
 const AUTO_STATUS_PRI = {
   32: 4, // SLEEP_EFFECT
@@ -883,6 +895,9 @@ class Battle {
     if (action === 'item') {
       const item = str(choice.item);
       if (!item) return null;
+      // Wildlife has no bag and no hands. Refused rather than ignored so a wild
+      // seat that is somehow handed one never spends the turn on it either.
+      if (isWildSeat(this.mode, fighter)) return null;
       // A fighter with a bag sheet must actually hold the stack (hub/NPC auto).
       // Seats with no bag stay permissive so headless fixtures can still item.
       if (fighter.bag && !this._bagHas(fighter, item)) return null;
@@ -1074,6 +1089,9 @@ class Battle {
   // Bag item for the active mon: cure → heal ≤50% → X-item while stages flat.
   _autoItemChoice(fighter, mon) {
     if (!fighter.bag) return null;
+    // A wild monster is not a trainer: it never reaches into a bag, even when
+    // the hub seeded its seat with one.
+    if (isWildSeat(this.mode, fighter)) return null;
 
     if (mon.status) {
       const list = AUTO_STATUS_CURE[mon.status];

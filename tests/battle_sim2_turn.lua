@@ -594,6 +594,73 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 4. wildlife never uses an item, from either end
+-- ------------------------------------------------------------------
+--
+-- Byte-shared with the Gen 1 twin's 12f3 and with server/lib/battle2/Turn.js.
+-- A wild monster has no bag and no hands, and its seat is driven from two ends
+-- -- the hub auto-picks for it, and a submitted choice can arrive addressed to
+-- it -- so both are pinned.  The wild seat is handed a bag on purpose: the
+-- point is that even a seat that HAS one never spends it, so a hub seeding the
+-- wrong kit cannot put a Potion in a wild monster's mouth.
+
+for _, mode in ipairs({ "wild", "coop_wild" }) do
+  do
+    local battle = battleOf({
+      mode = mode,
+      choiceTimeout = 10,
+      seed = 88010,
+      sides = {
+        a = {
+          { playerId = "p1", name = "Ann",
+            mons = { mon({ species = "Alpha", maxHp = 200, spe = 90 }) } },
+        },
+        b = {
+          { playerId = "wild", name = "Wild",
+            -- Hurt below half and poisoned: a trainer seat heals or cures here.
+            mons = { mon({ species = "Beta", maxHp = 200, hp = 40, spe = 10,
+                           status = "PSN" }) },
+            bag = { POTION = 2, FULL_HEAL = 1, X_ATTACK = 1 } },
+        },
+      },
+    })
+    drain(battle)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    ok(battle:tick(11) == true, mode .. ": the wild seat's turn resolves")
+    local items = ofKind(drain(battle), "item")
+    eq(#items, 0, mode .. ": auto-pick never reaches the wild seat's bag")
+    eq(battle.byId.wild.bag.POTION, 2, mode .. ": and spends none of it")
+    eq(battle.byId.wild.bag.FULL_HEAL, 1, mode .. ": cure untouched too")
+    eq(battle.byId.wild.mons[1].status, "poison", mode .. ": still poisoned")
+  end
+
+  do
+    local battle = battleOf({
+      mode = mode,
+      seed = 88011,
+      sides = {
+        a = {
+          { playerId = "p1", name = "Ann",
+            mons = { mon({ species = "Alpha", maxHp = 200, spe = 90 }) },
+            bag = { POTION = 1 } },
+        },
+        b = {
+          { playerId = "wild", name = "Wild",
+            mons = { mon({ species = "Beta", maxHp = 200, hp = 40, spe = 10 }) },
+            bag = { POTION = 1 } },
+        },
+      },
+    })
+    drain(battle)
+    ok(battle:submitChoice("wild", { action = "item", item = "POTION", slot = 0 })
+       == false, mode .. ": a submitted item from the wild seat is refused")
+    eq(battle.byId.wild.choice, nil, mode .. ": and files nothing")
+    ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 0 })
+       == true, mode .. ": the player on side a still may")
+  end
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("battle_sim2_turn: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

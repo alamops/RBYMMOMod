@@ -2554,6 +2554,20 @@ class Relay {
   }
 
   /*
+   * Is this seat wildlife rather than a trainer? Wild / coop_wild seat their one
+   * synthetic fighter with a wild monster, and a wild monster carries no bag --
+   * so it is never handed the gym kit tryStartSim seeds a trainer seat with.
+   * The turn machine refuses an item from that seat as well (isWildSeat in
+   * lib/battle/Turn.js): this only keeps the bag from existing in the first
+   * place.
+   */
+  isWildSeat(record, seat) {
+    if (!record) return false;
+    if (record.mode !== 'wild' && record.mode !== 'coop_wild') return false;
+    return this.isNpcSeat(record, seat);
+  }
+
+  /*
    * Which seat a party fills. Normally the sender's own id. For coop_npc the
    * host may also upload the trainer party under side "b", which is dealt across
    * the synthetic npc seats rather than displacing their own team -- so this
@@ -2720,9 +2734,11 @@ class Relay {
       const party = record.parties.get(seat);
       if (!party) return null;
       const client = this.clients.get(seat);
-      // Seed NPC seats with a gym-style kit when the host uploaded no bag.
+      // Seed trainer NPC seats with a gym-style kit when the host uploaded no
+      // bag. A wild seat is skipped: wildlife does not carry items.
       if (!record.bags) record.bags = new Map();
-      if (!record.bags.has(seat) && this.isNpcSeat(record, seat)) {
+      if (!record.bags.has(seat) && this.isNpcSeat(record, seat)
+          && !this.isWildSeat(record, seat)) {
         record.bags.set(seat, this.cloneBagMap(this.Turn.DEFAULT_NPC_BAG));
       }
       const bag = record.bags.get(seat);
