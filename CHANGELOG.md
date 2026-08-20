@@ -93,6 +93,49 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **A solo fight drew the player's POKéMON from behind, and its trainer not
+  at all.** With `SOLO BATTLES` on, the arena stood a dark placeholder
+  rectangle where the opposing trainer should be, and drew this client's own
+  monster as its *back* pic, mirrored — the view the classic 160×144 stage
+  wants — where a co-op fight of the same shape draws the front pic. Two
+  separate causes under one screen.
+
+  **The trainer.** `MediatedBattle:battlefieldCtx` folds every non-wild shape
+  into `"1v1"` for the arena's geometry, and the foe-figure arm was reading
+  that folded value — so a `coop_npc` fight was described as a *peer* battle
+  and asked the roster for the sprite of a player a solo fight does not have.
+  `Battlefield.drawHuman` falls back to a silhouette for a figure that names
+  no walk sheet, and that silhouette was the whole trainer. The arm now tests
+  the fight's real mode first and resolves the NPC's overworld sheet the way
+  co-op always has; `src/SoloBattle.lua` hands the screen the engine's own
+  `data.trainers` record for it to read.
+
+  **The monster.** `MediatedBattle:seatFront` hands the arena a front pic for
+  *both* sides, and on Gen 1 it gets one by building a throwaway battler. It
+  was passing the wire sheet straight to `BattleState.makeBattler`, which is
+  written against the engine's own mon: it measures the HP bar with
+  `mon.stats.hp`, and a `Wire.battleMon` sheet keeps its maximum beside the
+  stats as `maxHp` and has no `stats.hp` at all. So the call threw, the pcall
+  swallowed it, and this returned nil for **every** seat — which looked like
+  it worked, because the caller falls back to the pic the slot already holds
+  and a foe's slot pic is already a front. Only this client's own seat, whose
+  slot pic is the back, showed it. It builds a save-mon-shaped stub now, the
+  same one `refreshSlotSprite` has always built.
+
+  `Gen.trainerWalkSpriteId` is the co-op resolver moved to `src/Gen.lua` so
+  both screens share one copy (`MediatedBattle` cannot require `CoopBattle`
+  without closing a cycle). Moving it fixed a second bug it had been hiding:
+  the class→walk-sheet vote over `data.maps` read a bare `data`, a name no
+  scope there binds, so the lookup found the global nil and every class the
+  name transform could not resolve fell straight past the overworld's own
+  answer into the generic list — a LASS fought as `SPRITE_COOLTRAINER_M`
+  rather than as the `SPRITE_COOLTRAINER_F` she walks around as.
+
+  Covered where it draws: the solo end-to-end driver now probes the live arena
+  in both the wild and the trainer leg, asserting that our own seat's pic is
+  not the back pic the slot holds and that the trainer on the foe edge names a
+  real walk sheet.
+
 - **A nicknamed POKéMON was a blank box at Lv 1 on the other player's
   screen.** In an MMO battle the opponent's monster drew as the arena's
   placeholder square with `Lv 1` under it, and knocking it out paid no

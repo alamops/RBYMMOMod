@@ -73,6 +73,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Sessions = need("Sessions")
 local Mediated = need("MediatedBattle")
+local Gen = need("Gen")
 
 -- ------------------------------------------------------------------
 -- a world small enough to state every expected number about
@@ -1472,6 +1473,106 @@ do
        "our seat ended up filled by the referee's replacement")
     eq(f.slots[2].species, "RATTATA", "...and the foe's too")
   end
+end
+
+-- ------------------------------------------------------------------
+-- 14. who is standing on the foe edge of the arena
+-- ------------------------------------------------------------------
+--
+-- `Battlefield.drawHuman` falls back to a dark placeholder rectangle for a
+-- human that names no walk sheet, and that is what a **solo trainer fight**
+-- drew for its whole length: `battlefieldCtx` folds every non-wild shape into
+-- "1v1" for the arena's geometry, and the foe-human arm was reading that same
+-- folded value -- so a `coop_npc` fight was described as a peer battle and
+-- asked the roster for a sprite belonging to a player who does not exist.
+--
+-- The trainer arm has to be tested *ahead* of the peer arm for exactly that
+-- reason, and the walk-sheet resolution under it is `Gen.trainerWalkSpriteId`,
+-- which co-op has always used and which now has one home rather than two.
+do
+  -- Red has SPRITE_YOUNGSTER and no SPRITE_LASS, which is the shape that makes
+  -- all three rungs of the ladder reachable in one fixture.
+  local SPRITES = {
+    SPRITE_YOUNGSTER     = { frames = 4 },
+    SPRITE_COOLTRAINER_F = { frames = 4 },
+    SPRITE_COOLTRAINER_M = { frames = 4 },
+  }
+  local ARENA = {
+    pokemon = DATA.pokemon,
+    sprites = SPRITES,
+    -- Two objects fight as LASS drawn with the cooltrainer sheet and one with
+    -- the youngster sheet, so the vote has a winner rather than a tie.
+    maps = {
+      ROUTE_3 = { objects = {
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_COOLTRAINER_F" },
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_YOUNGSTER" },
+      } },
+      ROUTE_4 = { objects = {
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_COOLTRAINER_F" },
+      } },
+    },
+  }
+  local game = {
+    data = ARENA,
+    save = { party = {}, player = { name = "ANN" } },
+  }
+
+  -- ------- the resolver itself
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_YOUNGSTER" }, game), "SPRITE_YOUNGSTER",
+     "OPP_YOUNGSTER walks around as SPRITE_YOUNGSTER, by the name transform")
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_LASS" }, game), "SPRITE_COOLTRAINER_F",
+     "a class with no sheet of its own takes the one the overworld votes for")
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_NOBODY" }, game), "SPRITE_COOLTRAINER_M",
+     "...and a class nobody walks around as still gets a body, not an empty edge")
+  eq(Gen.trainerWalkSpriteId(nil, game), nil, "no trainer names no sheet")
+  eq(Gen.trainerWalkSpriteId({}, game), nil, "...nor does a record with no id")
+
+  -- ------- and what the arena is told
+  local function screen(fields)
+    local self = setmetatable({
+      game = game,
+      slots = {}, lines = {}, mine = {},
+      active = 1, mySide = "a", phase = "play",
+      commandIndex = 1, frame = 1,
+    }, { __index = Mediated })
+    for k, v in pairs(fields) do self[k] = v end
+    return self
+  end
+
+  local npc = screen({
+    mode = "coop_npc",
+    peerName = "LASS",
+    trainer = { id = "OPP_LASS", name = "LASS" },
+  }):battlefieldCtx()
+  eq(#npc.foeHumans, 1, "a solo trainer fight stands one figure on the foe edge")
+  eq(npc.foeHumans[1].spriteId, "SPRITE_COOLTRAINER_F",
+     "...with the trainer's own walk sheet, not a placeholder silhouette")
+  eq(npc.foeHumans[1].name, "LASS", "...named as the trainer")
+  eq(npc.foeHumans[1].id, "OPP_LASS", "...and identified by their class")
+
+  -- The entry is unconditional, exactly as CoopBattle builds it: a trainer
+  -- whose sheet cannot be named is still a trainer standing there, and the
+  -- silhouette is a better answer than an empty edge.
+  local nameless = screen({
+    mode = "coop_npc", peerId = "npc", peerName = "BUG CATCHER",
+  }):battlefieldCtx()
+  eq(#nameless.foeHumans, 1,
+     "a trainer record that never arrived still puts somebody on the edge")
+  eq(nameless.foeHumans[1].spriteId, nil, "...with no sheet to name")
+  eq(nameless.foeHumans[1].name, "BUG CATCHER",
+     "...still named from the fight, never as an absent FRIEND")
+
+  local wild = screen({ mode = "wild", peerName = "WILD" }):battlefieldCtx()
+  eq(#wild.foeHumans, 0, "a wild fight leaves the foe edge empty")
+
+  -- The peer arm, unchanged: an ordinary MMO 1v1 is still drawn from the
+  -- roster, and nothing above may have moved it.
+  local peer = screen({
+    mode = "1v1", peerId = "peer1", peerName = "BOB",
+  }):battlefieldCtx()
+  eq(#peer.foeHumans, 1, "an MMO 1v1 still stands the peer on the foe edge")
+  eq(peer.foeHumans[1].id, "peer1", "...identified by their player id")
+  eq(peer.foeHumans[1].name, "BOB", "...and named from the roster")
 end
 
 T.finish("mediated_battle_client")

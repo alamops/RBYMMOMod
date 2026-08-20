@@ -1160,6 +1160,14 @@ function M.new(opts)
     peerName  = opts.peerName or "FRIEND",
     onDone    = opts.onDone,
 
+    -- The NPC the other seat is fighting as, on a `coop_npc` fight -- the
+    -- engine's own `data.trainers` record, handed straight through by
+    -- src/SoloBattle.lua. Read for exactly one thing: the overworld walk sheet
+    -- the arena stands on the foe edge (`battlefieldCtx`). Nil on every other
+    -- shape, including a peer fight, where the figure on that edge is a
+    -- player and comes from the roster instead.
+    trainer   = opts.trainer,
+
     -- A test hook, and named as one.  With it set, a turn is answered the
     -- instant it opens with the first move at the default target, which is
     -- what lets the headless suite drive a whole fight with no input device.
@@ -1276,6 +1284,21 @@ function M.new(opts)
     targetIndex = 1,          -- field cursor when a target list exists
   }, M)
 end
+
+-- The exp-awarding modes that have a *trainer* on the other side.
+--
+-- The referee's own gate is `EXP_MODES` = wild / coop_wild / coop_npc
+-- (server/lib/battle/Turn.js, src/BattleSim/Turn.lua). Two of those three are
+-- wildlife; only `coop_npc` fields a trainer, so the x1.5 belongs to it alone
+-- and every other token -- including a mode this screen never learned -- pays
+-- the plain wild rate.
+--
+-- Declared here, with the file's constants, rather than beside the exp award
+-- that was its first reader: `battlefieldCtx` now asks the same question to
+-- decide whether the foe edge of the arena holds a trainer or a peer, and a
+-- `local` is only in scope *below* its declaration -- left where it was, that
+-- read would have found the global nil and indexed it.
+local TRAINER_MODES = { coop_npc = true }
 
 -- ------- Gen1 Battlefield theatre gate
 --
@@ -1413,9 +1436,46 @@ function M:seatFront(speciesKey, monHint, slot, isOwn)
   local eng = loadEngine()
   local data = self.game and self.game.data
   local save = self.game and self.game.save
-  local mon = monHint
-  if (not mon or not mon.species) and data then
-    mon = { species = speciesKey, level = (monHint and monHint.level) or 5 }
+  -- **A save-mon-shaped stub, and never the wire sheet itself.**
+  --
+  -- `BattleState.makeBattler` is written against the engine's own mon: it
+  -- indexes `data.pokemon[mon.species]` for the definition it names the
+  -- battler from, and it measures the HP bar with
+  -- `Timing.hpBarPixels(mon.hp, math.max(1, mon.stats.hp))`. A `Wire.battleMon`
+  -- sheet answers neither. Its `species` is the *display* token (the nickname
+  -- wherever the player set one), and its `stats` is the wire dialect --
+  -- `atk`/`def`/`spd`/`spc`, with **no `hp` at all**, because the maximum
+  -- travels beside it as `maxHp`. So `mon.stats.hp` was nil, `math.max` threw,
+  -- the pcall swallowed it and this function returned nil for *every* seat on
+  -- Gen 1.
+  --
+  -- Which looked like it worked, because the caller falls back to
+  -- `slot.sprite`: a foe's slot pic is already the front (`refreshSlotSprite`
+  -- passes isPlayer=false), so the opponent drew correctly by accident, while
+  -- this client's own monster drew the *back* pic the classic 1v1 stage wants
+  -- -- the arena showing PIKACHU from behind, mirrored, where co-op shows the
+  -- front pic. The two screens agree again now, which is the whole point of
+  -- `seatFrontFor` in src/CoopBattle.lua being this function's twin: it never
+  -- hit this because it is handed a real `battler.mon`.
+  --
+  -- Same shape as `refreshSlotSprite`'s stub, deliberately -- the id in
+  -- `species` and the narrated token kept as `nickname` -- so the two pics a
+  -- seat can hold are resolved off the same description.
+  local mon = nil
+  if data then
+    local maxHp = (slot and slot.maxHp) or (monHint and monHint.maxHp) or 1
+    mon = {
+      species = speciesKey,
+      nickname = (slot and slot.species) or (monHint and monHint.species),
+      level = (monHint and monHint.level) or (slot and slot.level) or 5,
+      hp = (slot and slot.hp) or (monHint and monHint.hp) or maxHp,
+      stats = {
+        hp = maxHp,
+        attack = 1, defense = 1, speed = 1, special = 1,
+      },
+      moves = (monHint and monHint.moves) or { { id = "TACKLE", pp = 1 } },
+      status = slot and slot.status or nil,
+    }
   end
   if Gen.generation(self.game) == 2 then
     local def = data and type(data.pokemon) == "table" and data.pokemon[speciesKey]
@@ -1677,7 +1737,27 @@ function M:battlefieldCtx()
     spriteId = selfSpriteId(),
   }}
   local foeHumans = {}
-  if mode == "1v1" then
+  -- Who is standing on the foe edge: an NPC trainer, a peer, or nobody.
+  --
+  -- **The trainer arm has to come first**, because `mode` above folds every
+  -- non-wild shape into "1v1" for the arena's geometry -- so a `coop_npc`
+  -- fight fell into the peer arm and was drawn from `self.peerId`, which a
+  -- solo battle never has. `peerSpriteId(nil)` is nil, and a human with no
+  -- sheet is `Battlefield.drawHuman`'s placeholder silhouette: the dark box
+  -- that stood where the trainer should have been for the whole of every solo
+  -- trainer fight.
+  --
+  -- One entry and never a player's, exactly as
+  -- `CoopBattle:battlefieldFoeHumans` builds it: the entry is unconditional
+  -- even when the walk sheet cannot be named, because the trainer *is* on the
+  -- field either way and the silhouette is still a trainer standing there.
+  if TRAINER_MODES[self.mode] then
+    foeHumans[1] = {
+      id = (self.trainer and self.trainer.id) or self.peerId,
+      name = (self.trainer and self.trainer.name) or self.peerName or "FRIEND",
+      spriteId = Gen.trainerWalkSpriteId(self.trainer, self.game),
+    }
+  elseif mode == "1v1" then
     foeHumans[1] = {
       id = self.peerId,
       name = self.peerName or "FRIEND",
@@ -2319,15 +2399,6 @@ function M:paidSheetIndex(msg)
   if index < 1 then return self.active or 1 end
   return index
 end
-
--- The exp-awarding modes that have a *trainer* on the other side.
---
--- The referee's own gate is `EXP_MODES` = wild / coop_wild / coop_npc
--- (server/lib/battle/Turn.js, src/BattleSim/Turn.lua). Two of those three are
--- wildlife; only `coop_npc` fields a trainer, so the x1.5 belongs to it alone
--- and every other token -- including a mode this screen never learned -- pays
--- the plain wild rate.
-local TRAINER_MODES = { coop_npc = true }
 
 -- Warn once per screen rather than once per faint: a build with no Experience
 -- module loses exp on every knockout, and forty identical lines in the log

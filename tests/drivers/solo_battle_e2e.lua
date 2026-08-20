@@ -350,6 +350,44 @@ return function(game)
     end, 60, what or "the solo command grid")
   end
 
+  -- ------- what the arena is actually holding
+  --
+  -- The two halves of the picture a solo fight draws, read off the live screen
+  -- rather than off a fixture, because both were wrong in a way only a real
+  -- boot could show:
+  --
+  --   * **the player's own front pic.** `MediatedBattle:seatFront` hands the
+  --     arena a *front* for both sides -- that is the whole difference between
+  --     this theatre and the classic 160x144 stage, where the player's side is
+  --     a back pic. When it fails it falls back to `slot.sprite`, which on our
+  --     own seat *is* that back pic, so the failure draws a monster seen from
+  --     behind and mirrored rather than an empty seat. Nothing but comparing
+  --     the two images catches that: a nil check passes on the wrong pic.
+  --   * **the figure on the foe edge.** `Battlefield.drawHuman` falls back to a
+  --     dark placeholder rectangle when a human names no walk sheet, which is
+  --     what a solo trainer fight drew for the whole battle.
+  --
+  -- Soft throughout: a probe that throws must not take the leg with it.
+  local function arenaProbe(mine)
+    local top = medTop()
+    if not top then return nil end
+    local out = {}
+    pcall(function()
+      if not (top.usesBattlefield and top:usesBattlefield()) then
+        out.classic = true
+        return
+      end
+      local index = mine and top:mySlot() or top:foeSlot()
+      local slot = top.slots and top.slots[index]
+      local seat = top.battlefieldSeat and top:battlefieldSeat(index, mine)
+      out.front = seat and seat.front or nil
+      out.slotSprite = slot and slot.sprite or nil
+      local ctx = top.battlefieldCtx and top:battlefieldCtx() or nil
+      out.foeHumans = ctx and ctx.foeHumans or nil
+    end)
+    return out
+  end
+
   -- FIGHT / SWITCH / ITEM / RUN, then the bag row for `itemId`.
   --
   -- The grid's shape is asked for rather than assumed -- the battlefield band
@@ -665,6 +703,28 @@ return function(game)
             "the command grid opens on the mod's screen")
       shot("solo-wild-battle")
 
+      do
+        local arena = arenaProbe(true)
+        if arena and arena.classic then
+          skip("the wild arena probe", "this generation draws the classic stage")
+        else
+          log(("solo wild arena: front=%s back=%s same=%s foeHumans=%d"):format(
+            tostring(arena and arena.front ~= nil),
+            tostring(arena and arena.slotSprite ~= nil),
+            tostring(arena and arena.front == arena.slotSprite),
+            arena and arena.foeHumans and #arena.foeHumans or -1))
+          check(arena ~= nil and arena.front ~= nil,
+                "our own seat hands the arena a pic to draw")
+          check(arena ~= nil and arena.slotSprite ~= nil
+                  and arena.front ~= arena.slotSprite,
+                "...and it is the FRONT pic co-op draws, not the classic "
+                .. "stage's back pic")
+          check(arena ~= nil and arena.foeHumans ~= nil
+                  and #arena.foeHumans == 0,
+                "a wild fight stands nobody on the foe edge")
+        end
+      end
+
       local over, seen = fightToEnd(240)
       check(over, "the solo wild fight runs to an end", tostring(seen))
       check(backToOverworld(), "and the overworld is restored")
@@ -749,6 +809,33 @@ return function(game)
         check(awaitCommandMenu("the solo trainer command grid"),
               "the command grid opens on the mod's screen")
         shot("solo-trainer-battle")
+
+        do
+          local arena = arenaProbe(true)
+          if arena and arena.classic then
+            skip("the trainer arena probe",
+                 "this generation draws the classic stage")
+          else
+            local who = arena and arena.foeHumans and arena.foeHumans[1] or nil
+            log(("solo trainer arena: front=%s same=%s foe=%s sheet=%s"):format(
+              tostring(arena and arena.front ~= nil),
+              tostring(arena and arena.front == arena.slotSprite),
+              tostring(who and who.name), tostring(who and who.spriteId)))
+            check(arena ~= nil and arena.front ~= nil
+                    and arena.front ~= arena.slotSprite,
+                  "our own seat draws its front pic here too")
+            check(who ~= nil,
+                  "the trainer is standing on the foe edge")
+            check(who ~= nil and type(who.spriteId) == "string"
+                    and who.spriteId ~= "",
+                  "...with a real walk sheet, not the placeholder silhouette",
+                  tostring(who and who.spriteId))
+            check(who ~= nil and type(who.name) == "string"
+                    and who.name ~= "" and who.name ~= "FRIEND",
+                  "...named as the trainer and not as an absent peer",
+                  tostring(who and who.name))
+          end
+        end
 
         local over, seen = fightToEnd(360)
         check(over, "the solo trainer fight runs to an end", tostring(seen))
