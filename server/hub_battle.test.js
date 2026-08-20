@@ -174,6 +174,58 @@ function testMediatedOneVOneKo() {
     'the mediated record is cleared after settle');
 }
 
+// A nicknamed monster, all the way across the hub.
+//
+// `species` on the wire is the token the fight is *narrated* under, which is
+// the nickname wherever the player set one -- so it is the one name the client
+// opposite cannot resolve to anything. Its seat had no front pic to draw, no
+// number for its level pill and no base rate to price an award with: the peer's
+// monster came up as a blank box at Lv 1. The id has to survive the sanitiser
+// on the way in and be stated on the `send` on the way out, and this asserts
+// both ends of that at once.
+function testNicknamedMonKeepsItsId() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'NICKA');
+  const b = dial(relay, 'NICKB');
+  const session = openBattle(relay, a, b);
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  const nicknamed = { ...mon(90), species: 'MALBABISCO', speciesId: 'SQUIRTLE', level: 8 };
+  uploadAndReady(relay, a, b, session, { aMons: [nicknamed] });
+
+  const sends = takeAll(b, 'mmo.battle_event').filter((e) => e.t === 'send');
+  const foe = sends.find((e) => e.slot === 0);
+  ok(foe != null, "the guest is told about the host's send-out");
+  ok(foe.text === 'MALBABISCO', 'narrated under the nickname, as it always was');
+  ok(foe.speciesId === 'SQUIRTLE',
+    'and the registry id rides along, which is the only thing art resolves by');
+  ok(foe.level === 8, 'as does the level the pill prints');
+
+  // The other half of the sanitiser's contract: an id that is not id-shaped
+  // refuses the battler outright rather than arriving as prose.
+  const relay2 = makeRelay(makeClock());
+  const c = dial(relay2, 'BADIDA');
+  const d = dial(relay2, 'BADIDB');
+  const session2 = openBattle(relay2, c, d);
+  c.peer.outbox = [];
+  d.peer.outbox = [];
+  relay2.handle(c.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  relay2.handle(c.id, {
+    type: 'mmo.battle_party',
+    battle: session2.id,
+    mons: [{ ...mon(90), speciesId: 'not an id!' }],
+  });
+  relay2.handle(d.id, {
+    type: 'mmo.battle_party', battle: session2.id, mons: [mon(20)],
+  });
+  const record = relay2.battles.get(session2.id);
+  ok(record && !record.sim,
+    'a battler with an unreadable id is refused, so the fight never starts');
+  ok(take(c, 'mmo.battle_ready') === null && take(d, 'mmo.battle_ready') === null,
+    '...and neither side is told to open a battle screen');
+}
+
 function testRelayHardCutDuringBattle() {
   const clock = makeClock();
   const relay = makeRelay(clock);
@@ -576,6 +628,7 @@ function testBagProofs() {
 }
 
 testMediatedOneVOneKo();
+testNicknamedMonKeepsItsId();
 testRelayHardCutDuringBattle();
 testDisconnectForfeitAfterGrace();
 testDrawCarriesNoLists();

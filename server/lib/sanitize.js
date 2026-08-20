@@ -957,6 +957,25 @@ function cleanBattleMon(raw) {
     mon.heldItem = heldItem;
   }
 
+  // Optional registry id for the species, alongside the prose `species` above.
+  //
+  // `species` is what the fight is *narrated* under, which is the nickname when
+  // the monster has one -- so it is the one field that cannot be resolved back
+  // to a pokedex row, and a nicknamed monster arrived on the other player's
+  // screen as a blank seat with no front pic and no level. The id is what art,
+  // types and the exp base rate are actually looked up by, so it travels as its
+  // own id-shaped field rather than overloading the prose one -- which is the
+  // rule this file's own header states.
+  //
+  // Optional both ways: a PROTOCOL 21 client sends none, and present-but-
+  // unreadable refuses the battler, the posture every other id-shaped field on
+  // this sheet gets.
+  if (raw.speciesId !== undefined && raw.speciesId !== null) {
+    const speciesId = cleanId(raw.speciesId);
+    if (!speciesId) return null;
+    mon.speciesId = speciesId;
+  }
+
   return mon;
 }
 
@@ -1208,6 +1227,17 @@ function cleanBattleEvent(raw) {
   if (raw.species !== undefined && raw.species !== null) {
     const species = cleanText(raw.species, NAME_MAX);
     if (species) event.species = species;
+  }
+  // The same monster's registry id, and the reason it is a second field rather
+  // than a spelling of the one above: `species` is prose (a nickname when the
+  // monster has one), and prose resolves back to a pokedex row only by luck.
+  // `send` / `switch` carry it so the seat opposite can draw a front pic and an
+  // exp award can price a nicknamed monster; `exp` carries it for the award.
+  // Optional -- an intermediator that predates it sends none, and every reader
+  // falls back to matching the prose name exactly as it did before.
+  if (raw.speciesId !== undefined && raw.speciesId !== null) {
+    const speciesId = cleanId(raw.speciesId);
+    if (speciesId) event.speciesId = speciesId;
   }
   if (raw.level !== undefined && raw.level !== null) {
     const level = cleanInt(raw.level, 1, LEVEL_MAX);

@@ -1492,7 +1492,7 @@ function M:battlefieldSeat(slotIndex, isPlayer)
       monHint = nil
     end
   end
-  local key = self:speciesKeyFor(slot.species, isPlayer) or slot.species
+  local key = self:seatSpeciesKey(slot, isPlayer) or slot.species
   local acting = false
   if self.anim and self.anim.slot == slotIndex then acting = true end
   local icon = slot.icon
@@ -2377,9 +2377,23 @@ function M:gainExp(msg)
   -- for any of them -- inventing one pays a number nobody refereed -- so the
   -- award is skipped and said so, and the fight carries on. Never thrown: an
   -- event handler that throws takes the whole stream with it.
+  --
+  -- `speciesId` first, for the reason `seatSpeciesKey` gives: `species` is the
+  -- name the fight was narrated under, which is the *nickname* when the fallen
+  -- monster had one -- and a nickname resolves to no pokedex row, so a
+  -- nicknamed foe used to fall for nothing at all. The name stays as the
+  -- fallback so a PROTOCOL 21 referee pays exactly what it always did.
+  local pokedex = type(data.pokemon) == "table" and data.pokemon or nil
+  local id = msg.speciesId
+  local key = nil
+  if pokedex and type(id) == "string" and id ~= "" and pokedex[id] then
+    key = id
+  end
   local label = msg.species
-  local key = (type(label) == "string" and label ~= "") and self:speciesKeyFor(label) or nil
-  local def = key and type(data.pokemon) == "table" and data.pokemon[key] or nil
+  if not key and type(label) == "string" and label ~= "" then
+    key = self:speciesKeyFor(label)
+  end
+  local def = key and pokedex and pokedex[key] or nil
   local level = tonumber(msg.level)
   local participants = tonumber(msg.participants)
   if not (def and level and participants and participants >= 1) then
@@ -2835,13 +2849,22 @@ function M:noteSlot(msg)
       -- sink either way.
       slot.pending = {
         species = msg.text,
+        speciesId = msg.speciesId,
         hp = msg.hp,
         status = msg.status,
-        level = nil,   -- filled by `arriveOnSeat` at the swap, own seat only
+        -- The referee's, when it stated one (it has said so since PROTOCOL 22);
+        -- otherwise filled by `arriveOnSeat` at the swap, own seat only.
+        level = msg.level,
       }
       return slot
     end
     slot.species = msg.text
+    -- Cleared before it is re-set, not merely overwritten: a referee that
+    -- predates the field says nothing about the newcomer's species, and the
+    -- previous occupant's id left standing would draw the monster that just
+    -- walked off. Same for the level pill.
+    slot.speciesId = msg.speciesId
+    slot.level = msg.level
     slot.sprite = nil
     slot.icon = nil
     slot.koHold = nil
@@ -2915,6 +2938,28 @@ function M:trackActive(species, msg)
   if fallback ~= nil then self.active = fallback end
 end
 
+-- The registry id for whoever is standing on a seat, art and all.
+--
+-- The referee states it outright from PROTOCOL 22 (`send` / `switch` carry
+-- `speciesId`), and that is the only reading that survives a nickname: the
+-- prose name a fight is narrated under is the *nickname* when the monster has
+-- one, so a peer's MALBABISCO matched no pokedex row, drew no front pic and
+-- printed no level -- a plain box on the arena where a monster should be.
+--
+-- Everything below it is the pre-22 ladder, kept whole: an id this build has no
+-- row for is not preferred over a name it can still resolve, and a referee that
+-- states none leaves the seat exactly where it was.
+function M:seatSpeciesKey(slot, isPlayer)
+  if type(slot) ~= "table" then return nil end
+  local id = slot.speciesId
+  if type(id) == "string" and id ~= "" then
+    local data = self.game and self.game.data
+    local pokedex = data and data.pokemon
+    if type(pokedex) == "table" and pokedex[id] then return id end
+  end
+  return self:speciesKeyFor(slot.species, isPlayer)
+end
+
 -- Map a narrated name back to a pokemon registry id for battle art.
 function M:speciesKeyFor(label, preferMine)
   if type(label) ~= "string" or label == "" then return nil end
@@ -2951,7 +2996,7 @@ function M:refreshSlotSprite(index, isPlayer)
     slot.sprite = nil
     return
   end
-  local key = self:speciesKeyFor(slot.species, isPlayer)
+  local key = self:seatSpeciesKey(slot, isPlayer)
   if not key or not data.pokemon or not data.pokemon[key] then
     slot.sprite = nil
     return
@@ -3965,7 +4010,7 @@ function M:playAnimSound(soundMove)
   local mdef = data.moves and data.moves[soundMove]
   if animName == "GROWL" or animName == "ROAR" then
     local slot = self.anim and self.slots and self.slots[self.anim.slot]
-    local species = slot and self:speciesKeyFor(slot.species, true)
+    local species = slot and self:seatSpeciesKey(slot, true)
     if not species and slot then species = slot.species end
     if species and Sound.playMoveCry then
       pcall(Sound.playMoveCry, data, species,
@@ -4033,7 +4078,7 @@ function M:playMoveAnimFallback(row)
   local anim = mdef and mdef.anim
   if row.anim == "GROWL" or row.anim == "ROAR" then
     local slot = row.slot and self.slots and self.slots[row.slot]
-    local species = slot and self:speciesKeyFor(slot.species, true)
+    local species = slot and self:seatSpeciesKey(slot, true)
     if not species and slot then species = slot.species end
     if species and Sound.playMoveCry then
       pcall(Sound.playMoveCry, data, species, anim and anim.tempo)
@@ -4631,6 +4676,8 @@ function M:applySwap(row)
   if not (arrival and slot and slot.pending == arrival) then return false end
   slot.pending = nil
   slot.species = arrival.species
+  slot.speciesId = arrival.speciesId
+  slot.level = arrival.level
   slot.sprite = nil
   slot.icon = nil
   slot.koHold = nil

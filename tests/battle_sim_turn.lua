@@ -131,6 +131,7 @@ local function mon(o)
   if o.mist then out.mist = true end
   if o.substitute then out.substitute = o.substitute end
   if o.catchRate ~= nil then out.catchRate = o.catchRate end
+  if o.speciesId then out.speciesId = o.speciesId end
   if o.evs then out.evs = o.evs end
   return out
 end
@@ -318,6 +319,36 @@ do
   eq(party[1].status, nil, "and its condition")
 
   eq(#battle:drainEvents(), 0, "a drained buffer comes back empty")
+end
+
+-- ------------------------------------------------------------------
+-- 1c. what a send says about the monster it fields
+-- ------------------------------------------------------------------
+--
+-- `text` is the token the fight is *narrated* under, and on a real upload that
+-- token is the player's nickname wherever their monster has one -- so it is the
+-- one thing on the event that the client opposite cannot look anything up by.
+-- `speciesId` and `level` ride beside it for exactly that seat: without them it
+-- has no front pic to draw, no number for the level pill, and (on the faint) no
+-- base rate to price the award with.  Both are pass-through -- no formula here
+-- reads either, and there is no species table to read them against.
+
+do
+  local battle = battleOf({
+    aMons = { mon({ species = "Nickname", speciesId = "alpha", level = 33 }) },
+    bMons = { mon({ species = "Beta" }) },
+  })
+  local sends = {}
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "send" then sends[event.slot] = event end
+  end
+  ok(sends[0] ~= nil and sends[2] ~= nil, "the opening fields both seats")
+  eq(sends[0].text, "Nickname", "the send narrates under the uploaded token")
+  eq(sends[0].speciesId, "alpha", "...and states the registry id beside it")
+  eq(sends[0].level, 33, "...and the level, which nothing else on the wire says")
+  eq(sends[2].speciesId, nil, "a sheet that stated no id produces no field")
+  eq(sends[2].level, 20, "...though the level is always known")
+  ok(Events.check(sends[0]), "and the event is one Wire's whitelist accepts")
 end
 
 -- ------------------------------------------------------------------

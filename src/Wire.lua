@@ -1409,6 +1409,25 @@ function M.battleMon(raw)
     if not out.heldItem then return nil end
   end
 
+  -- Optional registry id for the species, alongside the prose `species` above.
+  --
+  -- `species` is what the fight is *narrated* under, which is the nickname when
+  -- the monster has one -- so it is the one field that cannot be resolved back
+  -- to a pokedex row, and a nicknamed monster arrived on the other player's
+  -- screen as a blank seat with no front pic and no level.  The id is what art,
+  -- types and the exp base rate are actually looked up by, so it travels as its
+  -- own id-shaped field rather than overloading the prose one (the same rule
+  -- the sanitiser's own header states).
+  --
+  -- Optional both ways: a PROTOCOL 21 client sends none, and a client that
+  -- cannot describe the species (an id its own pokedex has no row for) is no
+  -- worse off than it was.  Present-but-unreadable refuses the battler, the
+  -- posture every other id-shaped field on this sheet gets.
+  if raw.speciesId ~= nil then
+    out.speciesId = M.id(raw.speciesId)
+    if not out.speciesId then return nil end
+  end
+
   return out
 end
 
@@ -1686,6 +1705,14 @@ function M.battleEvent(raw)
   -- get (M.name / M.int over LEVEL_MAX), because they are the same quantities
   -- read off the same monster -- an event is not a second dialect for them.
   if raw.species ~= nil then out.species = M.name(raw.species) end
+  -- The same monster's registry id, and the reason it is a second field rather
+  -- than a spelling of the one above: `species` is prose (a nickname when the
+  -- monster has one), and prose resolves back to a pokedex row only by luck.
+  -- `send` / `switch` carry it so the seat opposite can draw a front pic and an
+  -- exp award can price a nicknamed monster; `exp` carries it for the award.
+  -- Optional -- an intermediator that predates it sends none, and every reader
+  -- falls back to matching the prose name exactly as it did before.
+  if raw.speciesId ~= nil then out.speciesId = M.id(raw.speciesId) end
   if raw.level ~= nil then out.level = M.int(raw.level, 1, M.LEVEL_MAX) end
   if raw.participants ~= nil then
     -- Deliberately not `winners`: an OUTCOME's winners is a list of player ids,

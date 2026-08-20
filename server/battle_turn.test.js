@@ -1286,6 +1286,38 @@ test('the party the caller handed over is not the party that fights', () => {
   assert.strictEqual(battle.drainEvents().length, 0, 'a drained buffer comes back empty');
 });
 
+// `text` is the token the fight is *narrated* under, and on a real upload that
+// token is the player's nickname wherever their monster has one -- so it is the
+// one thing on the event the client opposite cannot look anything up by.
+// `speciesId` and `level` ride beside it for exactly that seat: without them it
+// has no front pic to draw, no number for the level pill, and (on the faint) no
+// base rate to price the award with. Both are pass-through -- no formula here
+// reads either, and there is no species table to read them against.
+test('a send states the registry id and the level, not just the narrated name', () => {
+  const battle = build({
+    id: 'sid', mode: '1v1', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [{
+        ...mn({ species: 'Nickname', level: 33, moves: [mv('thump', 40, 255, 0)] }),
+        speciesId: 'alpha',
+      }] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  const sends = new Map();
+  for (const event of battle.drainEvents()) {
+    if (event.t === 'send') sends.set(event.slot, event);
+  }
+  assert.ok(sends.has(0) && sends.has(2), 'the opening fields both seats');
+  assert.strictEqual(sends.get(0).text, 'Nickname', 'narrated under the uploaded token');
+  assert.strictEqual(sends.get(0).speciesId, 'alpha', 'with the registry id beside it');
+  assert.strictEqual(sends.get(0).level, 33, 'and the level nothing else on the wire says');
+  assert.strictEqual(sends.get(2).speciesId, undefined, 'a sheet with no id produces no field');
+  assert.strictEqual(sends.get(2).level, 20, 'though the level is always known');
+  assert.ok(Events.check(sends.get(0))[0], "and it is an event Wire's whitelist accepts");
+});
+
 test('every event emitted is in the closed vocabulary, with contiguous seq', () => {
   let count = 0;
   for (const run of jsRuns) {

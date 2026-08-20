@@ -199,6 +199,20 @@ local packed = Wire.battleParty({ battle = "7", mons = mons })
 check(packed ~= nil, "the snapshot survives Wire.battleParty unchanged")
 eq(#packed.mons, 2, "with both mons still in it")
 eq(packed.battle, "7", "filed under the battle it was uploaded for")
+-- ...and with the one field that is *not* prose still on it. `species` is the
+-- nickname where there is one, so it is the id that decides what the seat
+-- opposite draws and what an exp award is priced from; a sanitiser that
+-- dropped it is the difference between a monster and a blank box at Lv 1.
+eq(packed.mons[2].species, "SHELLY", "the narration token crosses as itself")
+eq(packed.mons[2].speciesId, "SQUIRTLE",
+   "...and the registry id crosses beside it, nickname or no nickname")
+check(Wire.battleMon({ species = "SHELLY", speciesId = "not a species!",
+                       level = 5, hp = 1, maxHp = 1,
+                       stats = { atk = 1, def = 1, spd = 1, spc = 1 },
+                       moves = { { id = "EMBER", pp = 1, power = 1,
+                                   accuracy = 255, type = 0, effect = 0,
+                                   chance = 0 } } }) == nil,
+      "an unreadable id refuses the battler, like every other id on the sheet")
 
 -- Defaults, for a move this build has a slot for but no record of -- a modded
 -- move whose definition did not survive. 40 power at full accuracy is a plain
@@ -1105,6 +1119,66 @@ do
   eq(classic.slots[2].species, "RATTATA",
      "off the arena a send relabels at parse exactly as it always did")
   eq(classic.slots[2].pending, nil, "...and parks nothing that could never land")
+end
+
+-- ------------------------------------------------------------------
+-- 11b. a nicknamed foe: the seat opposite needs an id, not a nickname
+-- ------------------------------------------------------------------
+--
+-- Every name on this wire is the token the fight is *narrated* under, and that
+-- token is the nickname when the monster has one.  So the client opposite had
+-- exactly one string for a monster it has never seen a sheet of, and that
+-- string matched no pokedex row: no front pic (the arena drew its placeholder
+-- box), no level (the pill printed 1) and, on a faint, no base rate to price
+-- the award with.  From PROTOCOL 22 the referee states the id and the level on
+-- `send` / `switch`, and this is what reads them.
+do
+  local function seatFor(fields)
+    local screen = setmetatable({
+      game = { data = { pokemon = DATA.pokemon } },
+      usesBattlefield = function() return false end,
+      slots = {},
+      lines = {},
+      mine = {},
+      active = 1,
+    }, { __index = Mediated })
+    screen:noteSlot(fields)
+    return screen, screen.slots[fields.slot]
+  end
+
+  local screen, slot = seatFor({ t = "send", slot = 2, text = "MALBABISCO",
+                                 speciesId = "SQUIRTLE", level = 8, hp = 24 })
+  eq(slot.species, "MALBABISCO", "the seat keeps the name the fight narrates")
+  eq(screen:seatSpeciesKey(slot, false), "SQUIRTLE",
+     "...and resolves its art through the id the referee stated")
+  eq(slot.level, 8, "...with a level for the pill to print")
+
+  -- A referee that predates the field, and the two cases it splits into.
+  local older, oldSlot = seatFor({ t = "send", slot = 2, text = "SQUIRTLE",
+                                   hp = 24 })
+  eq(oldSlot.speciesId, nil, "a pre-22 referee states no id")
+  eq(older:seatSpeciesKey(oldSlot, false), "SQUIRTLE",
+     "...and the display-name scan still answers, exactly as it always did")
+  local blind, blindSlot = seatFor({ t = "send", slot = 2,
+                                     text = "MALBABISCO", hp = 24 })
+  eq(blind:seatSpeciesKey(blindSlot, false), nil,
+     "...which is the one question a nickname could never answer")
+
+  -- An id this build has no row for is not preferred over a name it can still
+  -- resolve: a hub is free to relay a species from a copy of the game this one
+  -- does not have.
+  local modded, moddedSlot = seatFor({ t = "send", slot = 2, text = "SQUIRTLE",
+                                       speciesId = "MISSINGNO", hp = 24 })
+  eq(modded:seatSpeciesKey(moddedSlot, false), "SQUIRTLE",
+     "an id with no pokedex row falls through to the name")
+
+  -- And the seat changing hands takes both fields with it: the previous
+  -- occupant's id left standing would draw the monster that just walked off.
+  screen:noteSlot({ t = "send", slot = 2, text = "CHARMANDER", hp = 30 })
+  eq(screen.slots[2].speciesId, nil, "a send with no id clears the last one")
+  eq(screen.slots[2].level, nil, "...and the level that went with it")
+  eq(screen:seatSpeciesKey(screen.slots[2], false), "CHARMANDER",
+     "...leaving the newcomer's own name to answer")
 end
 
 -- ------------------------------------------------------------------

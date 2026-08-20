@@ -35,6 +35,31 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **A nicknamed POKéMON was a blank box at Lv 1 on the other player's
+  screen.** In an MMO battle the opponent's monster drew as the arena's
+  placeholder square with `Lv 1` under it, and knocking it out paid no
+  experience at all. Every one of the three had one cause: the only name that
+  crossed the wire was the token the fight is *narrated* under, and that token
+  is the **nickname** wherever a player set one. A nickname is in no pokedex,
+  so the client opposite had nothing to look a front pic, a level or an
+  experience base rate up by — and a monster with no nickname worked fine,
+  which is why this looked like a sprite bug rather than a wire one.
+
+  **PROTOCOL is now 22.** Battler sheets on `mmo.battle_party` carry an
+  optional `speciesId` — the registry id, id-shaped and sanitised as one — and
+  the referee states it back on `send`, `switch` and `exp`, alongside the
+  monster's `level`, which nothing on the wire had ever said about a seat that
+  was not your own. Both intermediators learned it in the same version
+  (`server/lib/battle`, `server/lib/battle2` and their two Lua twins), and both
+  are pass-through: no formula reads either field, and neither hub holds a
+  species table to read them against. The client prefers the id and falls back
+  to the display-name scan it has always used, so a fight refereed by an older
+  intermediator behaves exactly as it did before.
+
+  The same id fixes the co-op path's exp award, which resolved a fallen foe by
+  the same unresolvable nickname (`CoopBattle`), and the two cry lookups that
+  played the wrong monster's GROWL/ROAR.
+
 - **Every LOVE end-to-end driver was dead, and said the wrong thing about
   why.** `run-mmo-e2e.sh` and its four siblings failed at
   `TIMEOUT waiting for menu row MMO`, which reads exactly like a broken

@@ -129,7 +129,21 @@ M.MOD_ID = "rby_mmo"
 -- and the other not -- a turn the two players saw differently. Refusal
 -- naming both versions beats invisible non-progression.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 21
+--
+-- 22 is `speciesId`: an optional registry id on each `mmo.battle_party`
+-- battler sheet, which the referee relays back on `send`, `switch` and `exp`.
+-- Every other way this wire names a monster is the token the fight is
+-- *narrated* under -- and that token is the **nickname** when the monster has
+-- one -- so the client opposite had nothing to look a front pic, a level pill
+-- or an exp base rate up by. A nicknamed monster arrived on the other player's
+-- screen as an empty box at Lv 1 and fell for no exp at all. A protocol-21
+-- intermediator strips the field off the upload and states none on the events,
+-- which is precisely that failure, and it is the kind no player can diagnose
+-- from inside the fight: the names are right, the HP bars are right, and only
+-- the picture and the number under it are wrong. Refusal naming both versions
+-- is the only sentence either player can act on.
+-- This number lives here and in server/lib/relay.js -- bump them together.
+M.PROTOCOL = 22
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

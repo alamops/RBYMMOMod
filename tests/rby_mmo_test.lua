@@ -20754,6 +20754,30 @@ end
     eq(mine.exp, before, "...and one naming a teammate's own seat is ignored the same way")
   end
 
+  -- ------- a nicknamed foe. The referee narrates under the token the fight
+  -- is fought under, and that token is the peer's *nickname* when their
+  -- monster has one -- so `species` alone reaches no pokedex row, there is no
+  -- base rate to read off one, and a nicknamed foe used to fall for nothing at
+  -- all while a plain one paid. From PROTOCOL 22 the event carries the
+  -- registry id beside the name, and that is what prices the award.
+  do
+    local mine = monAt(12)
+    local screen = newScreen({ party = { mine }, mode = "wild", role = "host",
+      battle = "b-nick" })
+    local before = mine.exp
+    screen:gainExp({ slot = 0, species = "MALBABISCO", level = 40,
+                     participants = 1 })
+    eq(mine.exp, before,
+       "a nickname alone prices nothing -- it names no row to read a rate off")
+    -- The warn is once per screen, so a second skip would be silent; clearing
+    -- it keeps this half honest about which call is being asserted.
+    screen.expWarned = nil
+    screen:gainExp({ slot = 0, species = "MALBABISCO", speciesId = foeSpecies,
+                     level = 40, participants = 1 })
+    check(mine.exp > before,
+          "...and the id the referee states beside it is what pays the award")
+  end
+
   -- ------- save-mon mutation vs. the referee sheet, and the row order the
   -- award queues on the battlefield path (text -> expfill -> grew/learned)
   do

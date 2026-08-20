@@ -8686,7 +8686,13 @@ function M:medRows(msg)
     -- species straight up in `data.pokemon`. Handing the label through
     -- unchanged would miss every time and pay nothing, silently.
     if index then
-      local key = speciesKeyFromSheet(self.game, { species = msg.species })
+      -- `speciesId` first when the referee stated one (PROTOCOL 22): the
+      -- narration token is the *nickname* where the fallen monster had one,
+      -- and a nickname matches no pokedex row -- so a nicknamed foe fell for
+      -- nothing at all. `speciesKeyFromSheet` already prefers the id and falls
+      -- back to the name, which is what a pre-22 referee still gets.
+      local key = speciesKeyFromSheet(self.game,
+        { species = msg.species, speciesId = msg.speciesId })
       if key then
         rows[#rows + 1] = {
           kind = "exp", slot = index, species = key,

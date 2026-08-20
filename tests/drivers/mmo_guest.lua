@@ -1454,6 +1454,45 @@ return function(game)
   if inBattle then
     U.wait(90)
     shot("battle-open")
+
+    -- ------- what the foe's seat knows about the foe, over the Node hub
+    --
+    -- The twin of the host driver's probe, and it is the leg that matters for
+    -- `server/lib/`: this fight is refereed by the dedicated hub, so the
+    -- registry id has to survive that sanitiser and be stated back on `send`.
+    -- Without it the seat has no pokedex row to draw a front pic from and no
+    -- level to print, which is the placeholder box under `Lv 1`.
+    local top = H.top(game)
+    local foeSlot = (top.mySlot and top:mySlot() == 0) and 2 or 0
+    H.waitFor(game, function()
+      local live = H.top(game)
+      return H.isMediatedBattle(live)
+        and live.battlefieldSeat
+        and live:battlefieldSeat(foeSlot, false) ~= nil
+    end, 60 * 20, "the foe to finish walking onto the arena")
+    local seat = nil
+    pcall(function()
+      local live = H.top(game)
+      local slot = live.slots and live.slots[foeSlot]
+      if slot then
+        seat = {
+          name = slot.species, id = slot.speciesId, level = slot.level,
+          key = live.seatSpeciesKey and live:seatSpeciesKey(slot, false) or nil,
+          front = (live:battlefieldSeat(foeSlot, false) or {}).front,
+        }
+      end
+    end)
+    log(("foe seat: name=%s id=%s level=%s key=%s front=%s"):format(
+      tostring(seat and seat.name), tostring(seat and seat.id),
+      tostring(seat and seat.level), tostring(seat and seat.key),
+      tostring(seat and seat.front ~= nil)))
+    check(seat ~= nil and seat.id ~= nil,
+      "the dedicated hub states the foe's registry id on the wire")
+    check(seat ~= nil and (tonumber(seat.level) or 0) > 1,
+      "...and its real level, not the Lv 1 a seat with no level printed")
+    check(seat ~= nil and seat.key ~= nil and seat.front ~= nil,
+      "...so the arena draws the monster instead of its placeholder box")
+    shot("battle-foe")
   end
 
   local gaps = 0

@@ -124,7 +124,16 @@ function defaultSpriteFor(generation) {
 // 21: referee-emitted `exp` battle events (facts only) after faints in
 // wild / coop_wild / coop_npc -- a 20-vocabulary client would drop them
 // and silently never level from a fight its partner levelled from.
-const PROTOCOL = 21;
+// 22: `speciesId` -- an optional registry id on mmo.battle_party's battler
+// sheets, relayed back on the `send` / `switch` / `exp` events. Everything
+// else on the wire names a monster by the token the fight is *narrated*
+// under, which is the nickname when it has one, so the seat opposite had
+// nothing to look a front pic, a level or an exp base rate up by: a peer's
+// nicknamed monster drew as an empty box at Lv 1 and fell for no exp. A
+// protocol-21 hub strips the field from the upload and states none on the
+// events, which is exactly that failure -- and it is one no player can
+// diagnose from inside the fight, since every other part of it works.
+const PROTOCOL = 22;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right

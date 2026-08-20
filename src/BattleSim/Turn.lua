@@ -332,6 +332,13 @@ local function copyMon(raw, fallback)
 
   local out = {
     species     = str(raw.species) or "?",
+    -- The pokedex id behind that prose name, when the sender stated one.  Kept
+    -- rather than dropped for the same reason `slot` is: it is not the sim's to
+    -- use -- no formula here reads it, and there is no species table to read it
+    -- against -- but it is the only thing on the sheet that lets the client
+    -- *opposite* draw this monster and price the exp it is worth, and the
+    -- referee is the only party that can hand it over.  Absent stays absent.
+    speciesId   = str(raw.speciesId),
     slot        = max(0, int(raw.slot, max(0, int(fallback, 0)))),
     level       = max(1, int(raw.level, 1)),
     hp          = hp,
@@ -587,6 +594,7 @@ function M.create(opts)
     if mon then
       self:_emit("send", { slot = fighter.slot, side = fighter.side,
                            hp = mon.hp, text = mon.species,
+                           speciesId = mon.speciesId, level = mon.level,
                            mon = fighter.active - 1 })
     end
   end
@@ -1658,9 +1666,11 @@ function Battle:_resolveSwitches()
         -- too, so without it a seat holding two of a species re-fields the
         -- fallen copy on the client while the referee holds the living one.
         self:_emit("switch", { slot = fighter.slot, side = fighter.side,
-                               text = mon.species, mon = choice.slot - 1 })
+                               text = mon.species, speciesId = mon.speciesId,
+                               level = mon.level, mon = choice.slot - 1 })
         self:_emit("send", { slot = fighter.slot, side = fighter.side,
                              hp = mon.hp, text = mon.species,
+                             speciesId = mon.speciesId, level = mon.level,
                              mon = choice.slot - 1 })
       end
     end
@@ -2781,6 +2791,7 @@ function Battle:_awardExp(fallen, mon)
     self:_emit("exp", {
       slot = winner.fighter.slot,
       species = mon.species,
+      speciesId = mon.speciesId,
       level = mon.level,
       participants = participants,
       mon = winner.index - 1,

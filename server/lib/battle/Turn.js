@@ -414,6 +414,14 @@ function copyMon(raw, fallback) {
 
   const out = {
     species: str(raw.species) || '?',
+    // The pokedex id behind that prose name, when the sender stated one. Kept
+    // rather than dropped for the same reason `slot` is: no formula here reads
+    // it and there is no species table to read it against, but it is the only
+    // thing on the sheet that lets the client *opposite* draw this monster and
+    // price the exp it is worth, and the referee is the only party that can
+    // hand it over. Absent stays absent -- written below rather than here, so
+    // a sheet without one carries no key at all (the shape Lua produces, and
+    // the one the determinism fixtures compare against).
     slot: Math.max(0, int(raw.slot, Math.max(0, int(fallback, 0)))),
     level: Math.max(1, int(raw.level, 1)),
     hp,
@@ -464,6 +472,8 @@ function copyMon(raw, fallback) {
     }
     out.evs = evs;
   }
+  const speciesId = str(raw.speciesId);
+  if (speciesId) out.speciesId = speciesId;
   return out;
 }
 
@@ -1643,10 +1653,12 @@ class Battle {
           // one.
           this._emit('switch', {
             slot: fighter.slot, side: fighter.side, text: mon.species,
+            speciesId: mon.speciesId, level: mon.level,
             mon: choice.slot - 1,
           });
           this._emit('send', {
             slot: fighter.slot, side: fighter.side, hp: mon.hp, text: mon.species,
+            speciesId: mon.speciesId, level: mon.level,
             mon: choice.slot - 1,
           });
         }
@@ -2744,6 +2756,7 @@ class Battle {
       this._emit('exp', {
         slot: winner.fighter.slot,
         species: mon.species,
+        speciesId: mon.speciesId,
         level: mon.level,
         participants,
         mon: winner.index - 1,
@@ -3235,6 +3248,7 @@ function attempt(opts) {
     if (mon) {
       self._emit('send', {
         slot: fighter.slot, side: fighter.side, hp: mon.hp, text: mon.species,
+        speciesId: mon.speciesId, level: mon.level,
         mon: fighter.active - 1,
       });
     }
