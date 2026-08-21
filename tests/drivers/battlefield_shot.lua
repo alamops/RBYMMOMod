@@ -261,12 +261,23 @@ return function(game)
   screen.mine = {
     { species = MINE_SPECIES, level = 25, nickname = "SPARKY",
       hp = 40, stats = { hp = 55 },
-      -- `maxPp`, not `ppMax`: M:bandMoveRows() (src/MediatedBattle.lua:3565)
-      -- reads `move.maxPp` for the PP column the new moves-list frame
+      -- `maxPp`, not `ppMax`: M:bandMoveRows() (src/MediatedBattle.lua)
+      -- reads `move.maxPp` for the PP column the moves-list frame
       -- exercises -- get this wrong and drawModernBand's pcall just
       -- swallows the mismatch and the frame silently falls back to the
       -- classic GB list instead of the widget under test.
-      moves = { { id = "THUNDERBOLT", pp = 15, maxPp = 15 } } },
+      --
+      -- Four moves, not one: the list draws its type and PP as *columns*
+      -- measured across the visible rows, so a single-row sheet cannot show
+      -- whether they line up. Two ELECTRIC and two NORMAL, with the widest
+      -- name (THUNDERSHOCK) beside the widest type, is the row that runs out
+      -- of width first.
+      moves = {
+        { id = "THUNDERSHOCK", pp = 25, maxPp = 30 },
+        { id = "GROWL",        pp = 39, maxPp = 40 },
+        { id = "THUNDER_WAVE", pp = 20, maxPp = 20 },
+        { id = "QUICK_ATTACK", pp = 30, maxPp = 30 },
+      } },
   }
   screen.active = 1
   screen.slots[screen:foeSlot()] = {
@@ -577,8 +588,46 @@ return function(game)
   end
 
   -- ---- (b) moves-list frame: phase == "move", drawListPanel's MOVES list ----
+  --
+  -- The rows are asserted here rather than only photographed: the type column
+  -- is resolved through the *real* TypeChart against this boot's own dataset,
+  -- which is the half a fixture-stubbed unit test cannot reach. A move whose
+  -- record this boot does not carry would silently drop its type and the
+  -- screenshot would still look like a perfectly good moves list.
   screen.phase = "move"
   screen.cursor = 1
+  do
+    local moveRows = screen:bandMoveRows()
+    check(#moveRows == 4, "move: one row per move on the sheet",
+          "rows=" .. tostring(#moveRows))
+    local tagged, tags = 0, {}
+    for _, row in ipairs(moveRows) do
+      if type(row.tag) == "string" and row.tag ~= "" then
+        tagged = tagged + 1
+        tags[#tags + 1] = row.tag
+      end
+    end
+    check(tagged == #moveRows,
+          "move: every row states its own type, resolved through the real "
+          .. "TypeChart", table.concat(tags, "/"))
+    check(moveRows[1].tag == "ELECTRIC" and moveRows[2].tag == "NORMAL",
+          "move: the type on the row is the move's own, not the cursor's",
+          tostring(moveRows[1].tag) .. " / " .. tostring(moveRows[2].tag))
+    check(moveRows[1].right == "25/30",
+          "move: PP still keeps its own column beside the type",
+          tostring(moveRows[1].right))
+
+    -- The cursor's memory, on the same live screen. Nothing is committed --
+    -- `pickMove` is what writes it, and it opens the list where the player
+    -- left it rather than back on row one.
+    check(screen:rememberedMove() == 1,
+          "move: a monster that has not attacked yet opens on its first move")
+    screen.moveMemory = screen.moveMemory or {}
+    screen.moveMemory[screen.active] = 3
+    check(screen:rememberedMove() == 3,
+          "move: and afterwards on the move it was last sent into a turn with")
+    screen.moveMemory[screen.active] = nil
+  end
   U.wait(6)
   local path3 = SHOT_DIR .. "/battlefield-move.png"
   if U.shot(game, path3) then

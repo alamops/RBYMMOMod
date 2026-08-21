@@ -13584,6 +13584,13 @@ end)()
   local okList = pcall(Battlefield.drawListPanel,
     { { label = "TACKLE", right = "20/20" } }, 1, { title = "MOVES" })
   check(okList, "drawListPanel does not throw headless")
+  -- The type column: with a tag, and with a tag on only some of the rows --
+  -- an item's move list carries none, and the two must share one panel.
+  local okTagged = pcall(Battlefield.drawListPanel, {
+    { label = "THUNDERSHOCK", tag = "ELECTRIC", right = "25/25" },
+    { label = "GROWL", right = "39/39" },
+  }, 1, { title = "MOVES" })
+  check(okTagged, "drawListPanel does not throw on a row carrying a tag")
 
   -- Edge-shaped inputs: empty rows, an oversized list (overflow), and no
   -- title -- all still headless-safe.
@@ -22036,10 +22043,66 @@ end)()
     eq(#rows, 2, "one row per live move")
     eq(rows[1].label, "FIX BOOST", "the label is the move's display name")
     eq(rows[1].right, "0/20", "PP is its own right column, current/max")
+    eq(rows[1].tag, "NORMAL",
+       "the move's type is the row's own column, left of PP -- so all four "
+       .. "types are readable at once instead of only the highlighted one")
+    eq(moveClient:bandMoveTitle(), "MOVES",
+       "...and the title no longer restates the cursor's type")
     check(rows[1].dim == true, "a move at 0 PP is dimmed")
     eq(rows[2].right, "18/24",
        "PP Ups add a fifth of base pp each -- floor(20/5)*1 == 4 -> 24")
     check(not rows[2].dim, "a move with PP left is not dimmed")
+
+    -- ------- the move cursor remembers what this monster last used
+    --
+    -- A Gen 1 fight is mostly one attack repeated, so opening the list on row
+    -- one every turn charges the player a walk down it for a choice they
+    -- already made. The memory is *only* where the cursor opens -- nothing is
+    -- pre-committed, and B still backs out to the command grid.
+    local cursorClient = setmetatable({
+      medMoveList = {
+        { id = "FIX_BOOST", pp = 20, ppUps = 0 },
+        { id = "FIX_BOOST", pp = 20, ppUps = 0 },
+        { id = "FIX_BOOST", pp = 20, ppUps = 0 },
+      },
+      moveMemory = {},
+      game = { data = data },
+      mySlot = function() return { active = 2 } end,
+    }, { __index = CoopBattle })
+
+    eq(cursorClient:rememberedMove(), 1,
+       "a monster that has not attacked yet opens on its first move")
+    cursorClient.moveMemory[2] = 3
+    eq(cursorClient:rememberedMove(), 3,
+       "...and afterwards on the move it was last sent into a turn with")
+    cursorClient.moveMemory[1] = 2
+    eq(cursorClient:rememberedMove(), 3,
+       "the memory is keyed by party slot, so the mon on the bench keeps its "
+       .. "own row rather than moving this one's cursor")
+    cursorClient.moveMemory[2] = 9
+    eq(cursorClient:rememberedMove(), 1,
+       "a remembered row past the end of the sheet it has *now* (Transform, "
+       .. "Mimic) opens on the first rather than on a row nothing draws")
+
+    -- What writes it: `commit`, so none of the three fight call sites can
+    -- forget to, and none of the item / switch / run ones can write to it.
+    local commitClient = setmetatable({
+      medMoveList = cursorClient.medMoveList,
+      moveMemory = {},
+      mediated = true,
+      game = { data = data },
+      mine = 1,
+      mySlot = function() return { active = 2 } end,
+      sendMediatedChoice = function() return true end,
+    }, { __index = CoopBattle })
+    commitClient:commit({ slot = 1, move = 2, target = 3 })
+    eq(commitClient.moveMemory[2], 2, "a fight remembers the move it sent")
+    commitClient:commit({ slot = 1, kind = "item", item = "ETHER", move = 1 })
+    eq(commitClient.moveMemory[2], 2,
+       "an item's `move` names the move being restored, not one being used, "
+       .. "so it leaves the memory alone")
+    commitClient:commit({ slot = 1, kind = "run" })
+    eq(commitClient.moveMemory[2], 2, "...and so does a run")
 
     local items = CoopBattle.bandCommandItems({})
     eq(items[1].label, "FIGHT", "the grid keeps the classic FIGHT/SWITCH/ITEM/RUN order")

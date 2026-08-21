@@ -6,6 +6,8 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.17] - 2026-08-19
+
 ### Added
 
 - **This mod's battle system, with nobody else in the room.** A new
@@ -90,6 +92,31 @@ here must match `manifest.version`.
   end-to-end host driver now mounts through `save.onBike` — what the bag's
   BICYCLE row writes — and asserts on the sheet the frame actually posed
   from (`tests/drivers/mmo_util.lua`, `M.shotBike`).
+
+### Changed
+
+- **The MOVES list opens on the move you last used, and every row states its
+  own type.** Two things the battle menu was making the player pay for.
+
+  The list used to open on row one every single turn, so a Gen 1 fight — which
+  is mostly one attack repeated — charged a walk back down the list for a
+  decision already made. It now opens on the move this monster was last sent
+  into a turn with (`rememberedMove`, on both the mediated screen and the
+  co-op one). Nothing is pre-committed: it is only where the cursor starts, B
+  still backs out to the command grid, and the choice on the wire is byte-for
+  -byte the one it always was. The memory is per monster rather than per
+  battle — row 2 of the mon you switched to is a different move — and it is
+  clamped against the sheet that monster has *now*, so a Transform or a Mimic
+  cannot leave the cursor on a row nothing draws.
+
+  Type used to ride the panel title (`MOVES   TYPE/ELECTRIC`), which meant it
+  only ever described whichever row the cursor was on: comparing four moves
+  took four presses. It is now a column on each row, just left of PP, so the
+  whole sheet reads at once — and the title is back to plain `MOVES` rather
+  than restating the cursor. `Battlefield.drawListPanel` grew an optional
+  per-row `tag` for it, measured as a column across the visible rows so both
+  it and PP line up down the panel; a list with no tag on any row is laid out
+  exactly where it always was.
 
 ### Fixed
 
