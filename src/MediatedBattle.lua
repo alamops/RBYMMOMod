@@ -1438,9 +1438,20 @@ function M:seatFront(speciesKey, monHint, slot, isOwn)
       -- described. Only this client's own seat has a save mon behind it; a
       -- peer's or a wild's stays false, which is the honest answer, because
       -- nothing on the wire ever told us.
-      local own = isOwn and self:saveMon(self.active) or nil
-      local shiny = (own and own.species == speciesKey and own.shiny)
-        and true or false
+      -- A hint that carries the flag answers for itself. The party preview
+      -- passes the SAVE mon -- the copy that knows -- for a monster that is
+      -- not the active one, and asking about the active seat would paint the
+      -- wrong bench monster gold. Every arena seat hands in a
+      -- `Wire.battleMon`, which carries no `shiny` at all, so those still fall
+      -- through to the active save mon exactly as they did.
+      local shiny
+      if monHint ~= nil and monHint.shiny ~= nil then
+        shiny = monHint.shiny and true or false
+      else
+        local own = isOwn and self:saveMon(self.active) or nil
+        shiny = (own and own.species == speciesKey and own.shiny)
+          and true or false
+      end
       resolved = Battlefield.gen2FrontImage(self.game, speciesKey, path, shiny)
       if not resolved then
         local ok, img = pcall(function()
@@ -5520,6 +5531,39 @@ function M:bandMoveRows()
   return rows
 end
 
+-- The same battle FRONT pic the arena draws, for a party monster that is not
+-- on the field -- what the POKeMON panel shows beside its rows.
+--
+-- The SAVE mon is the source, not the uploaded sheet: `Wire.battleMon` carries
+-- no shiny flag (see `seatFront`), and the save copy is the only one that
+-- knows. It falls back to the sheet when the save slot will not resolve, so a
+-- party the save no longer matches still shows a monster rather than a hole.
+--
+-- Cached on the screen and keyed by species + shiny. `seatFront`'s own cache
+-- lives on a field slot and holds one species at a time, which is right for a
+-- seat and wrong here -- a six-monster party walk would evict it on every row.
+function M:partyFront(index, sheet)
+  local mon = self:saveMon(index)
+  if type(mon) ~= "table" then mon = sheet end
+  if type(mon) ~= "table" then return nil end
+  local species = mon.species
+  if type(species) ~= "string" or species == "" then return nil end
+  local key = species .. (mon.shiny and "*" or "")
+  local cache = self._bfPartyFronts
+  if not cache then
+    cache = {}
+    self._bfPartyFronts = cache
+  end
+  local hit = cache[key]
+  if hit == nil then
+    -- No slot: nothing here belongs to a field seat, so nothing may write
+    -- into a seat's cache either.
+    hit = self:seatFront(species, mon, nil, true) or false
+    cache[key] = hit
+  end
+  return hit or nil
+end
+
 function M:bandPartyRows(all)
   local rows = {}
   for _, row in ipairs(self:partyRows()) do
@@ -5527,7 +5571,11 @@ function M:bandPartyRows(all)
     -- party (a Revive wants the fainted one). Both match their handler.
     if all or (not row.fainted and (self.replaceOnly or not row.active)) then
       local mon = (self.mine or {})[row.index]
-      local entry = { label = row.label, dim = row.fainted or nil }
+      local entry = {
+        label = row.label,
+        dim = row.fainted or nil,
+        front = self:partyFront(row.index, mon),
+      }
       if mon and tonumber(mon.hp) and tonumber(mon.maxHp) then
         entry.right = ("%d/%d"):format(mon.hp, mon.maxHp)
       end
