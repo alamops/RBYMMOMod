@@ -59,6 +59,266 @@ here must match `manifest.version`.
   watching one fight see the same sparks and the suite can assert a frame
   headlessly.
 
+### Fixed
+
+- **Psychic moves were being fought as Physical in every refereed battle.**
+  MMO 1v1, co-op 2-on-2 and the solo battles that run on this mod's referee
+  all resolved Psychic damage on Attack/Defense instead of Special/Special,
+  and Light Screen did not halve it. In Gen 1 that is Alakazam, Mewtwo and
+  Exeggutor fighting with the wrong stat.
+
+  The cause is one letter of a registry id. A type's id is `PSYCHIC_TYPE`,
+  because `PSYCHIC` is already a *move*; the client's list of Special types
+  keyed on the display name, so Psychic silently dropped out of the
+  `specialTypes` the ruleset uploads. Six of the seven types matched, and the
+  guard only spoke when *none* did, so nothing ever looked wrong.
+
+  The client no longer matches type names at all: the physical/special split
+  now comes off the chart's own type records (`category`, which every type the
+  `type_chart` registry serves already carries). That is the engine's own
+  answer, so it is right for both generations without a second list — Gen 2's
+  Dark arrives on its own — and a mod that registers a nineteenth type is
+  honoured rather than guessed at. The name list survives only as a fallback
+  for a data pack whose types carry no category, and it now knows both
+  spellings of Psychic.
+
+  The guard was the other half of the bug and is fixed too: a type whose
+  category cannot be determined is **named** in the warning instead of being
+  quietly fought as Physical.
+
+  Nothing else on the wire moves — `specialTypes` is a list of chart indices
+  and no recorded fixture carries one, so both twin-parity suites are
+  unchanged.
+
+## [1.0.22] - 2026-08-20
+
+### Fixed
+
+- **The battle text box named every move by its slug.** "NIRE used
+  DOUBLE_KICK", "MIRROR_MOVE is disabled", "NIRE learned THUNDER_SHOCK" — the
+  registry key, underscores and all, in the one place a player actually reads
+  the fight. It affected every fight this mod referees: MMO, co-op and the
+  solo battles behind `SOLO BATTLES`. The move *menu* and the trainer's shout
+  bubble were always right, which is what made it look cosmetic and local
+  rather than what it was.
+
+  The cause is the referee, not the screen. There is no move table on either
+  intermediator and there never will be (the legal floor: no ROM bytes), so a
+  move arrives carrying everything needed to resolve it — power, accuracy,
+  type, effect — and `id` was the only spelling of it on the wire. Every
+  sentence the referee wrote therefore printed the id, because it had nothing
+  else to print.
+
+  **PROTOCOL is now 26.** Each move on an `mmo.battle_party` battler sheet
+  carries an optional `name`, the display name from the uploading player's own
+  decoded copy, and the referee narrates under it. This is the same split
+  `species` / `speciesId` already carries (PROTOCOL 22), in the other
+  direction: there the wire had the display token and needed the id; here it
+  had the id and needed the display token. `id` keeps riding beside it
+  unchanged — it is what a client looks the move animation and the move-menu
+  label up by, and `anim` events still carry it and only it.
+
+  Five call sites were saying a move's name and all five now say the same one:
+  the attack line, both halves of Disable, Disable wearing off, and Mimic's
+  "learned" — and Mimic's copy carries the name across with it, so a mimicked
+  move does not revert to its slug on every turn afterwards. A move this build
+  has no record of states no name and is narrated under its id, which is also
+  what a protocol-25 client's whole sheet looks like, so the fallback is the
+  ordinary path rather than a defensive branch. All four halves of the
+  intermediator learned it in the same version — `src/BattleSim`,
+  `src/BattleSim2`, `server/lib/battle`, `server/lib/battle2` — with the
+  narration pinned on both runtimes by a new `move_names` scenario in each
+  turn-parity pair.
+
+- **The VPS install command stood up a hub that refused every client.**
+  `server/README.md`'s five-command walkthrough cloned `--branch v0.8.0` —
+  twenty-nine tagged releases back, speaking `PROTOCOL` 7 against a mod that
+  now speaks 26. Anyone who followed it got a hub whose every join was refused
+  for a protocol mismatch, which is exactly the failure the number exists to
+  make legible and exactly the one nobody can diagnose from inside the game.
+  The clone no longer names a version at all: a hand-copied one drifts, and a
+  hub that has drifted is not an old hub, it is a hub nobody can join. Pinning
+  a release is still documented, beside the check that makes it safe.
+
+## [1.0.21] - 2026-08-20
+
+### Added
+
+- **How many they have left, for every trainer on the field.** Each player
+  in a battle now carries a named roster chip on the arena — their name and
+  a ball for each of their six party slots, live: a full ball for a
+  monster that is standing, an amber one for a monster carrying a status,
+  a spent grey one for a monster that is down, and an empty ring for a
+  slot they never filled. Six slots always, however many the trainer
+  brought, so every chip on screen is read against the same ruler and
+  "they have four left" is a glance rather than a count. Drawn for every
+  shape of trainer fight this mod referees — solo trainer, MMO 1v1, co-op
+  2-on-2, 2-on-NPC, party-vs-party — and never for a wild monster, which
+  has no trainer to have a party.
+  - **Chips take the two corners the HUD plates do not.** Allies stack
+    down from the top-left and foes up from the bottom-right, mirroring
+    the diagonal the plates already establish (allies climbing from the
+    floor at the left, foes descending from the top at the right). The
+    suite asserts directly that no chip lands on a plate in a full
+    2-on-2, so moving either stack without the other fails a test rather
+    than shipping an overlap.
+  - **The ball is original vector art**, as the throw ball already was:
+    two hemispheres, a band and a button, built from primitives. No ROM
+    pixels, here or anywhere.
+  - Nothing is drawn where nothing is known: a trainer whose party this
+    client was never told about stands on the field with no chip rather
+    than with six blank rings, because an empty row is the claim "they
+    have nothing left" and that is a much worse thing to say wrongly.
+
+### Changed
+
+- **Every battle screenshot in the README recaptured.** `link-battle`,
+  `coop-battle`, `coop-item`, `coop-switch`, `party-battle`,
+  `party-spectating` and `nire-battle` were all still pictures of the
+  classic 160×144 chrome — stale since the widescreen arena landed, long
+  before this branch — so a reader met a battle screen the build has not
+  drawn in months. Retaken from real e2e runs (the dedicated-hub, quad and
+  battlefield drivers) and cropped to the arena's own 1024×576, which is the
+  widescreen twin of the existing 800×720 rule: the frame is 1024×768 with
+  the 640×360 canvas fill-scaled 1.6×, so the letterbox is exactly 96px top
+  and bottom and `sips -c 576 1024` removes it. Displayed at 760px rather
+  than 300 because a 16:9 shot at 300 is 169 tall and nothing on it is
+  legible.
+  - The prose under **BATTLE — ANYWHERE** went with them. It still described
+    MMO fights as "the real lockstep simulation a link cable runs" — which
+    stopped being true at `PROTOCOL` 10, when the hub took over the rolls and
+    the engine's lockstep path was hard-cut.
+  - So did one clause in the character section: on this mod's own arena a
+    worn character is the *figure standing on the edge*, and the back pic
+    over your shoulder is the game's own battles.
+
+- **`PROTOCOL` 24 → 25: the referee publishes each seat's party roster.**
+  A new `team` battle event carries a seat's ball states — how many
+  monsters it brought and which are healthy, statused or down — and
+  nothing else: no species, no level, no moves, which is exactly what the
+  classic ball row reveals and no more. It exists because an MMO fight has
+  no other honest source for it. Both clients upload a party to the
+  referee and neither uploads one to the other, and `mmo.relay` is
+  hard-cut for the length of a mediated battle, so the intermediator is
+  the only party to the exchange that can say how much the other player
+  has left. Emitted on a diff, so a fight that changes no ball state
+  publishes nothing; emitted inside the faint batch, so the ball darkens
+  in the same beat the monster goes down.
+  - Co-op battles need none of it — every client already holds every
+    seat's party, because all four of them replay one host's events — and
+    a co-op chip reads the live sheets the sim is fighting with.
+  - A protocol-24 intermediator emits no such kind and a client drops an
+    unknown one whole, so a mixed pairing would leave the chip beside a
+    peer's name empty for the whole fight while the player's own filled in
+    normally: a half-drawn screen that reads as "they brought nothing"
+    rather than as a hub that cannot do this. Refusal naming both versions
+    is the only sentence either player can act on — update the hub and the
+    clients together.
+  - This work was bumped out of a number twice while it was open — off 23 by
+    the PVP-invite fix, then off 24 by `maxHp` — so it lands on 25, which
+    means all three vocabularies. That is the rule the `PROTOCOL` block in
+    `src/Config.lua` has followed since 5 and 6 were each claimed twice: a
+    shared number is the one failure it exists to prevent, and moving is
+    cheap. Read it as a fact about a project with several branches open
+    against one wire, not as bad luck.
+
+## [1.0.20] - 2026-08-20
+
+### Fixed
+
+- **A hurt POKéMON's HP bar filled all the way up in the next fight.** Take
+  damage, win, walk into the next encounter, and this mod's battle screen drew
+  a **full** bar over the HP you actually had — both plates and both classic
+  HUDs printed `42/42` for a monster carrying 42 of its 200. It stayed wrong
+  for the rest of that fight, and the number under the bar was the one a player
+  decides whether to reach for a POTION on.
+
+  The referee always knew better; the wire had no way to say so. Every reading
+  of HP on this protocol is a *current* number, so a client had no handle on a
+  seat's maximum at all and stood in the largest HP it had ever seen there —
+  which is exactly right for a monster sent out whole, and wrong for every one
+  that is not. Nothing later ever raises that guess, so the first send decided
+  the bar for the whole fight.
+
+  **PROTOCOL 24** adds `maxHp` to the event vocabulary: the referee states what
+  a bar is out of on the `send` a monster walks out on, and on the `drain` an
+  HP UP produces — the one thing mid-fight that moves the ceiling itself. Both
+  turn machines and both of their JavaScript twins emit it, both sanitisers
+  pass it, and `MediatedBattle` takes a stated maximum as truth (keeping the
+  old guess only as the fallback for a stream that carries none, and lifting it
+  to the HP that arrives with it if the two ever disagree). The plate then
+  prints `<current>/<total>` over a bar filled to that fraction, which is what
+  it always meant to.
+
+  Visible in a solo fight because that is the one that writes HP back to your
+  save, but the fix is on the wire: an MMO or LAN fight where a peer sends out
+  a hurt monster drew the same full bar.
+
+## [1.0.19] - 2026-08-20
+
+### Fixed
+
+- **A battle invite refused itself, and neither player could see why.** The
+  roster row an asker reads said "busy" only when the *hub* had that player
+  in a trade or a 1v1 — while the asked client refused invites for a wild
+  encounter, a trainer, a co-op handoff, an invite already on its screen, or
+  an ask of its own. So a player fighting a PIDGEY was published to everyone
+  as free, asked, and refused in the same second, with nothing on either
+  screen to explain it: the asked player saw no box at all, and the asker
+  read "X refused to battle.", the same sentence a person pressing NO earns.
+  Presence now carries everything that would bounce an invite (both hubs read
+  it, having discarded the field until now), the refusal carries *why* —
+  "BOB is in a battle." — and the refusing side gets a line in the corner
+  saying somebody asked.
+
+- **Two invites that crossed cancelled each other out.** Both players
+  pressing BATTLE inside one round trip — what two friends who have just
+  agreed to fight do — left each one busy with its own ask and refusing the
+  other's, so both read "they refused" about somebody who had in fact just
+  asked them. The hub, the only party that sees both asks, now starts the
+  battle they both asked for.
+
+- **Asking somebody who had just left locked you out of PVP for the rest of
+  the session.** The hub dropped an undeliverable request in silence, and
+  nothing on the client cleared the ask it was still holding — which marks it
+  busy, so from then on every invite received was auto-refused and every one
+  sent was turned away with "You're already busy with someone." The hub now
+  answers with a refusal naming the reason, and an ask nobody ever answers is
+  taken back after two minutes rather than held forever. The same silent lock
+  was reachable through an invite box that left the screen without being
+  answered (a blackout, a save load); that is now answered as the no it is.
+## [1.0.18] - 2026-08-20
+
+### Fixed
+
+- **`WRAP` and friends hit one time too many.** `WRAP`, `BIND`, `CLAMP` and
+  `FIRE_SPIN` roll a 2–5 counter, and in Gen 1 that number is the *total* count
+  of attacks the move gets — the one that lands it included. The referee was
+  applying the move's damage and then ticking a residual for the full counter at
+  the end of that same turn, so a 2-turn `WRAP` struck three times and a 5-turn
+  one struck six. The trap is now marked on the turn it lands and spends that
+  attack off the counter without paying damage twice, which puts a chain back at
+  2–5 hits costing the victim 1–4 turns. Fixed in all four sim twins
+  (`src/BattleSim`, `src/BattleSim2`, `server/lib/battle`, `server/lib/battle2`)
+  and pinned by a new `trap_chain` scenario in both cross-runtime turn-parity
+  pairs, so a runtime that ever counts it the other way fails rather than drifts.
+
+- **A `cancel` could unlock a trapped monster — and hang the fight.** The
+  referee fills the answer for a seat that has no choice to make (trap lock-in,
+  `HYPER_BEAM` recharge, `BIDE`, a thrash, a charge release), and
+  `submitChoice`'s `cancel` branch cleared *any* filed answer, forced ones
+  included. A client could cancel out of a `WRAP` and switch away. Worse, a trap
+  forces **both** seats, and a turn where every seat is forced deliberately opens
+  with no deadline — so clearing one of those answers left the battle waiting on
+  a choice with nothing left to time it out, permanently. Forced answers are now
+  marked and refuse `cancel`; an ordinary answer is still cancellable as before.
+  The stock client never sent one, so this was only reachable from a modified
+  peer, but the hub forwards `cancel` from anybody.
+
+## [1.0.17] - 2026-08-19
+
+### Added
+
 - **This mod's battle system, with nobody else in the room.** A new
   `SOLO BATTLES` row in the mod manager (`F10` → `MMO`), **default OFF**,
   routes ordinary wild encounters and *every* trainer — walked into,
@@ -142,36 +402,75 @@ here must match `manifest.version`.
   BICYCLE row writes — and asserts on the sheet the frame actually posed
   from (`tests/drivers/mmo_util.lua`, `M.shotBike`).
 
+### Changed
+
+- **The MOVES list opens on the move you last used, and every row states its
+  own type.** Two things the battle menu was making the player pay for.
+
+  The list used to open on row one every single turn, so a Gen 1 fight — which
+  is mostly one attack repeated — charged a walk back down the list for a
+  decision already made. It now opens on the move this monster was last sent
+  into a turn with (`rememberedMove`, on both the mediated screen and the
+  co-op one). Nothing is pre-committed: it is only where the cursor starts, B
+  still backs out to the command grid, and the choice on the wire is byte-for
+  -byte the one it always was. The memory is per monster rather than per
+  battle — row 2 of the mon you switched to is a different move — and it is
+  clamped against the sheet that monster has *now*, so a Transform or a Mimic
+  cannot leave the cursor on a row nothing draws.
+
+  Type used to ride the panel title (`MOVES   TYPE/ELECTRIC`), which meant it
+  only ever described whichever row the cursor was on: comparing four moves
+  took four presses. It is now a column on each row, just left of PP, so the
+  whole sheet reads at once — and the title is back to plain `MOVES` rather
+  than restating the cursor. `Battlefield.drawListPanel` grew an optional
+  per-row `tag` for it, measured as a column across the visible rows so both
+  it and PP line up down the panel; a list with no tag on any row is laid out
+  exactly where it always was.
+
 ### Fixed
 
-- **Psychic moves were being fought as Physical in every refereed battle.**
-  MMO 1v1, co-op 2-on-2 and the solo battles that run on this mod's referee
-  all resolved Psychic damage on Attack/Defense instead of Special/Special,
-  and Light Screen did not halve it. In Gen 1 that is Alakazam, Mewtwo and
-  Exeggutor fighting with the wrong stat.
+- **A solo fight drew the player's POKéMON from behind, and its trainer not
+  at all.** With `SOLO BATTLES` on, the arena stood a dark placeholder
+  rectangle where the opposing trainer should be, and drew this client's own
+  monster as its *back* pic, mirrored — the view the classic 160×144 stage
+  wants — where a co-op fight of the same shape draws the front pic. Two
+  separate causes under one screen.
 
-  The cause is one letter of a registry id. A type's id is `PSYCHIC_TYPE`,
-  because `PSYCHIC` is already a *move*; the client's list of Special types
-  keyed on the display name, so Psychic silently dropped out of the
-  `specialTypes` the ruleset uploads. Six of the seven types matched, and the
-  guard only spoke when *none* did, so nothing ever looked wrong.
+  **The trainer.** `MediatedBattle:battlefieldCtx` folds every non-wild shape
+  into `"1v1"` for the arena's geometry, and the foe-figure arm was reading
+  that folded value — so a `coop_npc` fight was described as a *peer* battle
+  and asked the roster for the sprite of a player a solo fight does not have.
+  `Battlefield.drawHuman` falls back to a silhouette for a figure that names
+  no walk sheet, and that silhouette was the whole trainer. The arm now tests
+  the fight's real mode first and resolves the NPC's overworld sheet the way
+  co-op always has; `src/SoloBattle.lua` hands the screen the engine's own
+  `data.trainers` record for it to read.
 
-  The client no longer matches type names at all: the physical/special split
-  now comes off the chart's own type records (`category`, which every type the
-  `type_chart` registry serves already carries). That is the engine's own
-  answer, so it is right for both generations without a second list — Gen 2's
-  Dark arrives on its own — and a mod that registers a nineteenth type is
-  honoured rather than guessed at. The name list survives only as a fallback
-  for a data pack whose types carry no category, and it now knows both
-  spellings of Psychic.
+  **The monster.** `MediatedBattle:seatFront` hands the arena a front pic for
+  *both* sides, and on Gen 1 it gets one by building a throwaway battler. It
+  was passing the wire sheet straight to `BattleState.makeBattler`, which is
+  written against the engine's own mon: it measures the HP bar with
+  `mon.stats.hp`, and a `Wire.battleMon` sheet keeps its maximum beside the
+  stats as `maxHp` and has no `stats.hp` at all. So the call threw, the pcall
+  swallowed it, and this returned nil for **every** seat — which looked like
+  it worked, because the caller falls back to the pic the slot already holds
+  and a foe's slot pic is already a front. Only this client's own seat, whose
+  slot pic is the back, showed it. It builds a save-mon-shaped stub now, the
+  same one `refreshSlotSprite` has always built.
 
-  The guard was the other half of the bug and is fixed too: a type whose
-  category cannot be determined is **named** in the warning instead of being
-  quietly fought as Physical.
+  `Gen.trainerWalkSpriteId` is the co-op resolver moved to `src/Gen.lua` so
+  both screens share one copy (`MediatedBattle` cannot require `CoopBattle`
+  without closing a cycle). Moving it fixed a second bug it had been hiding:
+  the class→walk-sheet vote over `data.maps` read a bare `data`, a name no
+  scope there binds, so the lookup found the global nil and every class the
+  name transform could not resolve fell straight past the overworld's own
+  answer into the generic list — a LASS fought as `SPRITE_COOLTRAINER_M`
+  rather than as the `SPRITE_COOLTRAINER_F` she walks around as.
 
-  Nothing else on the wire moves — `specialTypes` is a list of chart indices
-  and no recorded fixture carries one, so both twin-parity suites are
-  unchanged.
+  Covered where it draws: the solo end-to-end driver now probes the live arena
+  in both the wild and the trainer leg, asserting that our own seat's pic is
+  not the back pic the slot holds and that the trainer on the foe edge names a
+  real walk sheet.
 
 - **A nicknamed POKéMON was a blank box at Lv 1 on the other player's
   screen.** In an MMO battle the opponent's monster drew as the arena's

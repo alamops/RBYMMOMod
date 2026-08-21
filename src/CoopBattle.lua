@@ -623,6 +623,13 @@ function M.new(game, opts)
     gen2Mediated = gen2Mediated or nil,
     phase = "intro",
     moveIndex = 1,
+    -- The move each of our party was last sent into a turn with, keyed by its
+    -- party index. Where the move list *opens* and nothing else (see
+    -- `rememberedMove`): a Gen 1 fight is mostly one attack repeated, and
+    -- re-walking the list to it every turn is the tax this removes. Per
+    -- monster, because the fourth row of the mon you switched to is a
+    -- different move.
+    moveMemory = {},
     targetIndex = 1,
     frame = 0,
     messages = {},
@@ -2031,6 +2038,21 @@ function M:liveMoves()
   return (battler and battler.curMoves) or {}
 end
 
+-- Where the move list opens: the move this monster last actually used, or its
+-- first move if it has not attacked yet.
+--
+-- Clamped against the list it has *now* rather than the one it had then --
+-- Transform and Mimic rewrite a sheet mid-fight, and a cursor left past the
+-- end would open on a row that is not drawn.
+function M:rememberedMove()
+  local slot = self:mySlot()
+  local moves = self:liveMoves()
+  local key = (slot and slot.active) or 1
+  local want = math.floor(tonumber((self.moveMemory or {})[key]) or 1)
+  if want < 1 or want > #moves then return 1 end
+  return want
+end
+
 function M:hasLivePP()
   if self.medMoveList then
     for _, move in ipairs(self.medMoveList) do
@@ -2074,7 +2096,7 @@ function M:updateCommand(input)
   elseif input:wasPressed("a") then
     local command = M.COMMANDS[self.commandIndex]
     if command == "FIGHT" then
-      self.moveIndex = 1
+      self.moveIndex = self:rememberedMove()
       self.phase = "move"
     elseif command == "SWITCH" then
       self.switchIndex = 1
@@ -2927,6 +2949,15 @@ end
 
 function M:commit(action)
   self.phase = "wait"
+  -- A fight, and only a fight: `kind` is set on run / switch / item, and an
+  -- item's `move` names the move being restored rather than one being used.
+  -- Taken here rather than at the three call sites in `updateMove` /
+  -- `updateTarget` so a fourth can never forget to.
+  if action and action.kind == nil and tonumber(action.move) then
+    local slot = self:mySlot()
+    self.moveMemory = self.moveMemory or {}
+    self.moveMemory[(slot and slot.active) or 1] = math.floor(action.move)
+  end
   -- Your own answer is in, whoever else's is not -- which is what keeps the
   -- wait line from naming the person reading it.
   self:markActed(action.slot)
@@ -5175,112 +5206,14 @@ end
 
 -- ------- trainer class → overworld walk sheet
 --
--- There is no class→sprite field anywhere in engine data. A trainer record
--- (`data.trainers`) carries the battle front pic, the parties and the prize
--- money, and says nothing about the overworld; the walk sheet is chosen per
--- **map object**, where `data.maps[*].objects[*]` pairs a `sprite` with the
--- `trainerClass` that object fights as. That is still a real mapping, just an
--- indirect one -- so it is read out of the data rather than hand-written here:
--- every object naming a class votes for the sheet it is drawn with, and the
--- class takes the sheet with the most votes.
---
--- Which is what the name transform below cannot do on its own. Red has no
--- SPRITE_LASS and no SPRITE_BUG_CATCHER -- those classes walk around as
--- SPRITE_COOLTRAINER_F and SPRITE_YOUNGSTER -- so `OPP_BUG_CATCHER` resolved to
--- nothing, `battlefieldFoeHumans` returned an empty list, and a coop_npc fight
--- announced "BUG CATCHER wants to fight!" over an empty right-hand edge.
---
--- Ties break on id order so two clients never disagree about a class, and the
--- whole walk is memoised against the maps table it was built from: one pass
--- over ~250 maps per boot, and none at all once a battle is running.
-local trainerSpriteVotes = nil
-local trainerSpriteVotesFrom = nil
-
-local function trainerSpritesByClass(data)
-  local maps = type(data) == "table" and data.maps or nil
-  if type(maps) ~= "table" then return nil end
-  if trainerSpriteVotesFrom == maps then return trainerSpriteVotes end
-
-  local votes = {}
-  local ok = pcall(function()
-    for _, map in pairs(maps) do
-      if type(map) == "table" and type(map.objects) == "table" then
-        for _, obj in pairs(map.objects) do
-          if type(obj) == "table" then
-            local class, sprite = obj.trainerClass, obj.sprite
-            if type(class) == "string" and class ~= ""
-               and type(sprite) == "string" and sprite ~= "" then
-              local bucket = votes[class]
-              if not bucket then
-                bucket = {}
-                votes[class] = bucket
-              end
-              bucket[sprite] = (bucket[sprite] or 0) + 1
-            end
-          end
-        end
-      end
-    end
-  end)
-  if not ok then return nil end
-
-  local out = {}
-  for class, bucket in pairs(votes) do
-    local best, bestN = nil, -1
-    for sprite, n in pairs(bucket) do
-      if n > bestN or (n == bestN and (best == nil or sprite < best)) then
-        best, bestN = sprite, n
-      end
-    end
-    out[class] = best
-  end
-  trainerSpriteVotes = out
-  trainerSpriteVotesFrom = maps
-  return out
-end
-
--- Last resort, best first: a class nobody walks around as on any map (the
--- unused ones, and anything a mod adds without an overworld object) still gets
--- a body on the field rather than an empty foe edge. Probed against the
--- catalog, so a build without one of these falls to the next.
-local GENERIC_TRAINER_SPRITES = {
-  "SPRITE_COOLTRAINER_M", "SPRITE_YOUNGSTER", "SPRITE_GENTLEMAN",
-}
-
--- OPP_YOUNGSTER → SPRITE_YOUNGSTER when the catalog has a walk sheet; the
--- overworld's own answer for the classes it does not (OPP_LASS,
--- OPP_BUG_CATCHER, …); a generic trainer after that.
+-- Moved to `Gen.trainerWalkSpriteId` (src/Gen.lua), because the solo screen
+-- asks the same question: `MediatedBattle:battlefieldCtx` needs the NPC
+-- trainer's walk sheet for a `coop_npc` fight, and it cannot require this
+-- module without closing a cycle. The vote-over-map-objects walk and the
+-- generic fallbacks live there unchanged; see that header for why the mapping
+-- has to be read out of `data.maps` rather than written down.
 local function trainerWalkSpriteId(trainer, game)
-  if type(trainer) ~= "table" then return nil end
-  local id = trainer.id or trainer.sprite or trainer.spriteId
-  if type(id) ~= "string" or id == "" then return nil end
-  local spriteId = id
-  if spriteId:match("^OPP_") then
-    spriteId = "SPRITE_" .. spriteId:sub(5)
-  elseif not spriteId:match("^SPRITE_") then
-    spriteId = "SPRITE_" .. spriteId
-  end
-  -- `Gen.spriteCatalog`, not `data.sprites`: Gold keeps its walk sheets on
-  -- `data.gen2Sprites`, and reading Gen 1's table on a Gold boot proves nothing
-  -- about a sheet that is really there.
-  local sprites = Gen.spriteCatalog(game)
-  if type(sprites) == "table" and type(sprites[spriteId]) == "table" then
-    return spriteId
-  end
-  -- Soft: accept the id even if we cannot prove the sheet exists here;
-  -- Battlefield.resolveHumanSheet will silhouette if load fails.
-  if sprites == nil then return spriteId end
-  if type(sprites) ~= "table" then return nil end
-
-  local byClass = trainerSpritesByClass(data)
-  local mapped = byClass and byClass[id] or nil
-  if type(mapped) == "string" and type(sprites[mapped]) == "table" then
-    return mapped
-  end
-  for _, generic in ipairs(GENERIC_TRAINER_SPRITES) do
-    if type(sprites[generic]) == "table" then return generic end
-  end
-  return nil
+  return Gen.trainerWalkSpriteId(trainer, game)
 end
 
 -- Resolve a battle FRONT pic for the field (not the bag-icon sheet — those
@@ -5486,6 +5419,14 @@ function M:battlefieldAllyHumans()
         id = slot.owner,
         name = slot.name,
         spriteId = ownerLookId(slot.owner, self.selfId),
+        -- The roster chip's party. **No wire needed on this screen**: a co-op
+        -- fight hands every client every seat's party at construction
+        -- (`Coop.lua` unpacks each `slot.party` before `CoopBattle.new`),
+        -- because all four of them are replaying one host's events and a
+        -- replay needs the sheets. So the chip reads the live table the sim is
+        -- fighting with -- which is also why it never lags: a faint writes hp
+        -- on that table, and the next frame draws it.
+        party = slot.party,
         _mine = (slot.index == self.mine),
       }
     end
@@ -5519,6 +5460,13 @@ function M:battlefieldFoeHumans()
         id = self.trainer and self.trainer.id,
         name = (self.trainer and self.trainer.name) or self:trainerIntroName(),
         spriteId = trainerWalkSpriteId(self.trainer, self.game),
+        -- The same flattened list the trainer's intro ball row draws
+        -- (`drawIntroBalls`), so the row that appears for two seconds at the
+        -- open and the chip that stands for the whole fight can never disagree
+        -- about how many the trainer brought. Both foe seats in a 2-on-2 come
+        -- out of one party, and `foeIntroParty` dedupes on table identity, so
+        -- this is one roster for one trainer rather than the same six twice.
+        party = self:foeIntroParty(),
       },
     }
   end
@@ -5532,6 +5480,9 @@ function M:battlefieldFoeHumans()
         id = slot.owner,
         name = slot.name,
         spriteId = ownerLookId(slot.owner, self.selfId),
+        -- Held locally for the same reason the ally side's is: everybody in a
+        -- co-op fight replays one host's events off everybody's sheets.
+        party = slot.party,
       }
     end
   end
@@ -5579,11 +5530,16 @@ end
 
 -- One attack, spelled two ways.
 --
--- The referee narrates a move under its **id** (`_say(species .. " used " ..
--- move.id)` in BattleSim/Turn.lua and its Node twin) while the anim row beside
--- it carries the registry **name**, so "DOUBLE_KICK" and "DOUBLE KICK" reach
--- this function one after the other for a single attack. Folded to one key so
--- the shout cannot be raised twice under two spellings of the same move.
+-- The sentence and the anim row beside it do not have to agree on how a move is
+-- spelled, and often do not. From PROTOCOL 26 the referee narrates a move under
+-- the display **name** its sheet carried (`_say(species .. " used " ..
+-- moveLabel(move))` in BattleSim/Turn.lua and its three twins) and falls back to
+-- the **id** for a sheet that carried none -- an older client's, or a move this
+-- build has no record of -- while the anim row always carries the id and the
+-- registry name is what this side looks up from it. So "DOUBLE_KICK" and
+-- "DOUBLE KICK" still reach this function one after the other for a single
+-- attack. Folded to one key so the shout cannot be raised twice under two
+-- spellings of the same move.
 local function calloutKey(move)
   local key = tostring(move):upper():gsub("[%s_]+", " ")
   return key
@@ -6557,9 +6513,29 @@ function M:bandCommandItems()
   return items
 end
 
+-- A move's type under the name the classic TYPE/ strip prints.
+--
+-- `displayName` is what turns PSYCHIC_TYPE into PSYCHIC and a modded type into
+-- its registered name; it answers from the module's own vanilla records when
+-- nothing called `load`, so this is safe wherever it is asked. Without the
+-- module at all the raw type id is still true, just less pretty.
+function M:moveTypeName(id)
+  local moves = self.game and self.game.data and self.game.data.moves
+  local def = type(moves) == "table" and moves[id] or nil
+  local typeId = def and def.type
+  if type(typeId) ~= "string" or typeId == "" then return nil end
+  local TypeChart = engine and engine.TypeChart
+  if TypeChart and type(TypeChart.displayName) == "function" then
+    local ok, name = pcall(TypeChart.displayName, typeId)
+    if ok and type(name) == "string" and name ~= "" then return name end
+  end
+  return typeId
+end
+
 -- The move list, and the strip that used to sit beside it. PP is the row's own
--- right column now; TYPE rides the title, where it belongs to the highlighted
--- move rather than to the list.
+-- right column and TYPE the column left of it -- on every row, because what
+-- the player is comparing four ways is on the four rows, not on a strip that
+-- can only ever describe the highlighted one.
 function M:bandMoveRows()
   local moves = self:liveMoves()
   local data = self.game and self.game.data
@@ -6567,6 +6543,7 @@ function M:bandMoveRows()
   for _, moveInst in ipairs(moves) do
     local def = (data and data.moves or {})[moveInst.id]
     local row = { label = (def and def.name) or moveInst.id or "-" }
+    row.tag = self:moveTypeName(moveInst.id)
     local pp = tonumber(moveInst.pp)
     if def and tonumber(def.pp) then
       -- The classic strip's own arithmetic: PP Ups add a fifth of the base
@@ -6583,18 +6560,11 @@ function M:bandMoveRows()
   return rows
 end
 
+-- Just "MOVES" since the type moved onto the rows: the title used to carry
+-- `TYPE/x` for the highlighted move, and repeating on the header what every
+-- row already says is a header that only ever restates the cursor.
 function M:bandMoveTitle()
-  local moves = self:liveMoves()
-  local pick = moves[self.moveIndex or 1]
-  local def = pick and (self.game and self.game.data and self.game.data.moves
-    or {})[pick.id]
-  if not (def and def.type) then return "MOVES" end
-  local TypeChart = engine and engine.TypeChart
-  local typeName = def.type
-  if TypeChart and TypeChart.displayName then
-    typeName = TypeChart.displayName(def.type) or def.type
-  end
-  return ("MOVES   TYPE/%s"):format(tostring(typeName))
+  return "MOVES"
 end
 
 -- The bench, as `benchOf` filters it -- alive, and not the one already out.

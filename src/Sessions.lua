@@ -84,6 +84,24 @@ local CONFIRM_TIMEOUT = 60
 -- No human is involved and nothing is at stake by then, so it is short.
 local SETTLE_TIMEOUT = 10
 
+-- REQUEST_TIMEOUT covers an ask that has gone out and never come back.
+--
+-- There is a human on the other end reading a yes/no box, so it is the most
+-- generous of the three -- but it is not open-ended, and the reason is that
+-- an ask with no clock is the one piece of state here that can strand a
+-- player for the rest of a session.  `outgoing` makes this client busy, and
+-- the hub answers a request pointed at somebody who has already left with
+-- silence: nothing arrives, nothing clears it, and from then on every invite
+-- *this* player receives is auto-refused while their own are turned away with
+-- "You're already busy with someone."  Only the CANCEL row on the waiting box
+-- could break it, and a box popped by a blackout or a save load takes that
+-- escape with it.
+--
+-- Firing sends the ordinary cancel -- see M:cancelRequest -- so the asked
+-- player's box is taken down with a sentence rather than left to be answered
+-- into a hub that has already forgotten the ask.
+local REQUEST_TIMEOUT = 120
+
 local linkModules, linkTried
 
 -- Loaded on demand: a player who never trades or battles should not drag
@@ -169,6 +187,31 @@ end
 function M:inFight(game)
   if self.fighting and self.fighting(game) then return true end
   return M.stackHasFight(game)
+end
+
+-- **Why an invite arriving right now could not be put to this player**, or
+-- nil when it could.  One statement of "busy", read from two places that
+-- used to disagree:
+--
+--   * M:onRequest, which refuses on it, and
+--   * Client's presence push, which is what everybody else's roster row --
+--     and so the decision to ask at all -- is drawn from.
+--
+-- They *did* disagree, and that disagreement is the whole bug this exists to
+-- close.  Presence carried isBusy alone (a hub session), so a player in an
+-- ordinary wild or trainer fight was published as free, asked, and refused
+-- in the same breath -- with nothing on either screen to say why.  A refusal
+-- the asker could have seen coming is a refusal nobody has to send.
+--
+-- Ordered cheap-first because presence asks this on every tick: four field
+-- reads answer it for a player standing in a field, and only a player who is
+-- otherwise idle pays for the stack walk.
+function M:busyReason(game)
+  if self.fight then return "fighting" end
+  if self.active or self.outgoing then return "busy" end
+  if self.incoming then return "asked" end
+  if self:inFight(game) then return "fighting" end
+  return nil
 end
 
 -- ------- prompt stack helpers
@@ -289,8 +332,17 @@ function M:onRequest(game, msg)
   -- queued.  A yes/no over a wild encounter, a link battle, or a co-op
   -- screen is worse than a refusal the asker can act on now -- and is how
   -- invites used to appear in the middle of fights.
-  if self:isBusy() or self.incoming or self:inFight(game) then
-    self.transport:send(Wire.RESPOND, { to = from, kind = kind, accept = false })
+  --
+  -- The refusal carries *why*, so the asker reads "BOB is in a battle."
+  -- rather than the flat "BOB refused to battle." a person pressing NO
+  -- earns.  And it is said in the corner on this side too: an invite that
+  -- was answered on the player's behalf, with nothing on screen at any
+  -- point, is the one refusal neither player could diagnose.
+  local reason = self:busyReason(game)
+  if reason then
+    self.transport:send(Wire.RESPOND,
+      { to = from, kind = kind, accept = false, reason = reason })
+    self:sayRefused(name, kind)
     return
   end
 
@@ -308,17 +360,51 @@ function M:onRequest(game, msg)
   self.incomingBox = { box = box, game = game }
 end
 
+-- The corner line an auto-refusal leaves on the *refusing* player's screen.
+--
+-- A toast rather than a box, and the choice is the whole point of the seam:
+-- this fires while the player is mid-fight or mid-trade, and a modal there is
+-- exactly the interruption onRequest refuses the invite to avoid.  The corner
+-- is the one surface that can speak without being asked to (see Toast's
+-- header), so it is the only place this line could go.
+--
+-- Wired by Client, absent in a headless build, and silent when it is: an
+-- invite is still refused correctly with nobody to tell.
+function M:sayRefused(name, kind)
+  if not self.toast then return end
+  self.toast(("%s asked to %s"):format(name,
+    kind == "trade" and "trade" or "battle"))
+end
+
+-- What a refusal reads as, given the reason the far side sent with it.
+--
+-- Pure and named so the suite can pin every sentence without standing up a
+-- hub -- and so the two kinds pick their wording in one place rather than at
+-- each call site.  An unknown or absent reason falls through to the flat
+-- sentence, which is the honest one for the case it describes: a person read
+-- the box and said no.
+function M.declineText(name, kind, reason)
+  local battle = kind ~= "trade"
+  if reason == "fighting" then
+    return ("%s is in\na battle."):format(name)
+  elseif reason == "busy" then
+    return ("%s is busy\nright now."):format(name)
+  elseif reason == "asked" then
+    return ("%s is answering\nsomeone else."):format(name)
+  elseif reason == "gone" then
+    return ("%s has left\nthe game."):format(name)
+  end
+  if battle then return ("%s refused\nto battle."):format(name) end
+  return ("%s said no."):format(name)
+end
+
 function M:onDecline(msg)
   local outgoing = self.outgoing
   local name = Wire.name(msg.name) or (outgoing and outgoing.name) or "They"
   local kind = outgoing and outgoing.kind
   self.outgoing = nil
   self:closeWaitBox()
-  if kind == "battle" then
-    self.ui:say(("%s refused\nto battle."):format(name))
-  else
-    self.ui:say(("%s said no."):format(name))
-  end
+  self.ui:say(M.declineText(name, kind, Wire.declineReason(msg.reason)))
 end
 
 -- The asker walked away before we answered.  Their name is stamped by the
@@ -1147,6 +1233,8 @@ function M:update(game, dt)
   end
   self.linkWasDown = not alive
 
+  self:waitOutRequest(game, dt)
+
   local session = self.active
   if not session then return end
 
@@ -1190,6 +1278,55 @@ function M:update(game, dt)
   end
 
   self:waitOut(session, dt)
+end
+
+-- The two halves of an unanswered ask that can strand this client, swept
+-- once per tick.  Neither is about a live session, which is why this runs
+-- above the "no session, nothing to do" return rather than inside waitOut.
+--
+--   * **Our ask, with no answer.** Clocked on REQUEST_TIMEOUT and cancelled
+--     when it runs out -- see that constant for the lock this breaks.
+--
+--   * **Their ask, with no box left to answer it in.** `incoming` is cleared
+--     by the confirm's own callback, so a box that leaves the stack any other
+--     way (a blackout, a save load, anything that clears the stack under it)
+--     used to leave this side marked as holding an invite forever: silently
+--     refusing every later one, with nothing on screen to answer.  A box gone
+--     without an answer *is* a no, so it is sent as one and the asker stops
+--     waiting.
+--
+-- **The box has to have been seen on the stack before its absence means
+-- anything.** "Not on the stack" is the same answer for a box that was
+-- dismissed and one that was never pushed -- a build with no UI, a harness
+-- whose `confirm` is a stub, a push that failed -- and only the first of
+-- those is an unanswered invite.  Latching on the first sighting is what
+-- tells them apart; unwindTo can treat the two alike because doing nothing is
+-- right either way, and this cannot, because it sends a refusal.
+function M:waitOutRequest(game, dt)
+  dt = tonumber(dt) or 0
+
+  local outgoing = self.outgoing
+  if outgoing then
+    outgoing.clock = (outgoing.clock or 0) + dt
+    if outgoing.clock >= REQUEST_TIMEOUT then
+      local name = outgoing.name or "They"
+      self:cancelRequest()
+      self.ui:say(("%s never\nanswered."):format(name))
+    end
+  end
+
+  local incoming = self.incoming
+  local held = incoming and self.incomingBox
+  if not (held and held.box) then return end
+  local on = self:onStack(held.game or game, held.box)
+  if on then
+    held.seen = true
+  elseif on == false and held.seen then
+    self.incoming = nil
+    self.incomingBox = nil
+    self.transport:send(Wire.RESPOND,
+      { to = incoming.from, kind = incoming.kind, accept = false })
+  end
 end
 
 -- The two places a session can no longer make progress on its own, and how

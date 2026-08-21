@@ -73,6 +73,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Sessions = need("Sessions")
 local Mediated = need("MediatedBattle")
+local Gen = need("Gen")
 
 -- ------------------------------------------------------------------
 -- a world small enough to state every expected number about
@@ -99,11 +100,14 @@ local DATA = {
     },
   },
   moves = {
-    EMBER   = { power = 40, accuracy = 100, type = "FIRE", pp = 25 },
+    EMBER   = { name = "EMBER", power = 40, accuracy = 100, type = "FIRE", pp = 25 },
     -- a status move: 0 power is an ordinary answer, not a missing field
-    GROWL   = { power = 0, accuracy = 100, type = "NORMAL", pp = 40 },
-    -- accuracy that is not a round 100, to pin the byte conversion
-    HYDRO   = { power = 120, accuracy = 80, type = "WATER", pp = 5 },
+    GROWL   = { name = "GROWL", power = 0, accuracy = 100, type = "NORMAL", pp = 40 },
+    -- accuracy that is not a round 100, to pin the byte conversion.  Its name
+    -- also differs from its id, which is the ordinary case in a real build
+    -- (HYDRO_PUMP / "HYDRO PUMP") and the only one that can tell the two
+    -- fields apart.
+    HYDRO   = { name = "HYDRO PUMP", power = 120, accuracy = 80, type = "WATER", pp = 5 },
   },
   pokemon = {
     CHARMANDER = { name = "CHARMANDER", types = { "FIRE" } },
@@ -172,7 +176,7 @@ eq(mons[1].evs.atk, 100, "and stat exp as evs")
 -- Everything the sim needs to resolve the move, because there is no move table
 -- on either intermediator and there must never be one.
 local ember = mons[1].moves[1]
-eq(ember.id, "EMBER", "the move id, for narration")
+eq(ember.id, "EMBER", "the move id, for art and for indexing")
 eq(ember.power, 40, "its power")
 eq(ember.pp, 25, "its remaining PP")
 -- The engine keeps a percent; Gen 1 compares an 8-bit value against a 0-255
@@ -186,6 +190,16 @@ eq(mons[2].moves[2].power, 0, "a status move keeps its 0 power rather than a def
 eq(ember.effect, 0, "effect is 0: the engine names it with a string and the "
   .. "wire wants a number, so there is no mapping to state")
 eq(ember.chance, 0, "and so is its chance")
+
+-- ...and the name it is *narrated* under (PROTOCOL 26), which is a different
+-- field from the id doing a different job.  The referee holds no move table to
+-- look one up in, so without this every sentence it writes prints the registry
+-- key: "SHELLY used HYDRO", in the one place a player reads the fight.
+eq(ember.name, "EMBER", "a move whose name matches its id still states it")
+eq(mons[2].moves[1].name, "HYDRO PUMP",
+   "...and one whose name differs from its id crosses as the name")
+eq(mons[2].moves[1].id, "HYDRO",
+   "...with the id still beside it, because that is what the anim is drawn from")
 
 -- Sent even though both sanitisers drop it today. See the note in
 -- MediatedBattle.typesOf: the sim already reads raw.types, and the day the two
@@ -206,6 +220,24 @@ eq(packed.battle, "7", "filed under the battle it was uploaded for")
 eq(packed.mons[2].species, "SHELLY", "the narration token crosses as itself")
 eq(packed.mons[2].speciesId, "SQUIRTLE",
    "...and the registry id crosses beside it, nickname or no nickname")
+eq(packed.mons[2].moves[1].name, "HYDRO PUMP",
+   "the move's display name survives the real sanitiser too")
+-- Optional both ways.  A protocol-25 client states no name at all, and the
+-- referee narrates that move under its id exactly as it always did -- so an
+-- absent name must not refuse the move, the battler and then the party.
+local noName = Wire.battleMove({ id = "HYDRO", pp = 5, power = 120,
+                                 accuracy = 204, type = 2, effect = 0, chance = 0 })
+check(noName ~= nil, "a move with no name is still a move")
+eq(noName.name, nil, "...and states none rather than inventing one")
+-- Present-but-unreadable is refused, on this sanitiser's own rule: a field
+-- that arrived and did not survive is the sending side being wrong about
+-- something, and narrating under the id anyway would hide it.
+check(Wire.battleMove({ id = "HYDRO", name = 7, pp = 5, power = 120,
+                        accuracy = 204, type = 2, effect = 0,
+                        chance = 0 }) == nil,
+      "a name that is not prose refuses the move")
+eq(Wire.moveName(("X"):rep(40)), ("X"):rep(Config.MOVE_NAME_MAX),
+   "an over-long name is cut to MOVE_NAME_MAX rather than to NAME_MAX")
 check(Wire.battleMon({ species = "SHELLY", speciesId = "not a species!",
                        level = 5, hp = 1, maxHp = 1,
                        stats = { atk = 1, def = 1, spd = 1, spc = 1 },
@@ -224,6 +256,8 @@ eq(#unknown, 1, "a mon whose move has no record is still brought")
 eq(unknown[1].moves[1].power, 40, "an unknown move defaults to 40 power")
 eq(unknown[1].moves[1].accuracy, 255, "...full accuracy")
 eq(unknown[1].moves[1].type, 0, "...and type 0")
+eq(unknown[1].moves[1].name, nil,
+   "...and no name at all, so the referee narrates it under its id")
 
 -- The edges that must not throw, because every one of them is a real build.
 eq(#Mediated.snapshotParty(gameWith({}, DATA)), 0, "an empty party snapshots empty")
@@ -1795,6 +1829,369 @@ do
        "our seat ended up filled by the referee's replacement")
     eq(f.slots[2].species, "RATTATA", "...and the foe's too")
   end
+end
+
+-- ------------------------------------------------------------------
+-- 14. the move list: a type column, and a cursor that remembers
+-- ------------------------------------------------------------------
+--
+-- Two things the player asked the menu for, and both are *presentation only*:
+-- the wire, the choice and the sim are untouched by either.
+--
+--   * every row states its own type, so four moves can be compared at once
+--     rather than one at a time under the cursor;
+--   * the list opens on the move this monster last actually used, because a
+--     Gen 1 fight is mostly one attack repeated and walking back down to it
+--     every turn is a tax on a decision already made.
+do
+  local function client()
+    return setmetatable({
+      game = { data = DATA },
+      phase = "move",
+      active = 1,
+      cursor = 1,
+      moveMemory = {},
+      commandIndex = 1,
+      mine = {
+        { species = "CHARMANDER", moves = {
+            { id = "EMBER", pp = 25, maxPp = 25 },
+            { id = "GROWL", pp = 40, maxPp = 40 },
+            { id = "HYDRO", pp = 5, maxPp = 5 },
+        } },
+        { species = "SQUIRTLE", moves = { { id = "HYDRO", pp = 5, maxPp = 5 } } },
+      },
+    }, { __index = Mediated })
+  end
+
+  -- ------- the type column
+  local f = client()
+  local rows = f:bandMoveRows()
+  eq(#rows, 3, "one row per move")
+  eq(rows[1].tag, "FIRE", "the type is the row's own column...")
+  eq(rows[1].right, "25/25", "...and does not displace the PP beside it")
+  eq(rows[2].tag, "NORMAL", "a status move states its type too")
+  eq(rows[3].tag, "WATER", "...as does every other row, not just the hot one")
+
+  -- A referee-published sheet after Transform/Mimic can name a move this copy
+  -- has no record of. No record, no type: a blank column says nothing, and
+  -- inventing one would say something false.
+  f.mine[1].moves[3] = { id = "MYSTERY", pp = 5 }
+  rows = f:bandMoveRows()
+  eq(rows[3].tag, nil, "a move the dataset does not carry gets no type column")
+  eq(rows[3].label, "MYSTERY", "...and still shows under its id")
+
+  -- ------- the cursor
+  local g = client()
+  eq(g:rememberedMove(), 1,
+     "a monster that has not attacked yet opens on its first move")
+
+  local sent = {}
+  g.sendChoice = function(_, choice) sent[#sent + 1] = choice; return true end
+  check(g:pickMove(2), "the second move is sendable")
+  eq(sent[1].move, 1, "the wire is still 0-based, unchanged by any of this")
+  eq(g.moveMemory[1], 2, "and the move actually sent is what gets remembered")
+
+  local input = fakeInput()
+  g.phase = "choose"
+  g.commandIndex = 1
+  input.press("a")
+  g:updateCommand(input)
+  eq(g.phase, "move", "FIGHT opens the move list")
+  eq(g.cursor, 2, "...on the move this monster last used, not back on row one")
+
+  -- Per monster: the one that comes in after a switch opens on its own first
+  -- move, because row 2 of its sheet is a different move entirely.
+  g.active = 2
+  g.phase = "choose"
+  input.press("a")
+  g:updateCommand(input)
+  eq(g.cursor, 1, "a monster that has not attacked yet opens on row one, "
+     .. "whatever the one it replaced was using")
+
+  -- Sent is what counts. A refused send leaves the turn unspent, so moving
+  -- the cursor for it would be the menu reporting a decision never taken.
+  g.active = 1
+  g.sendChoice = function() return false end
+  check(not g:pickMove(3), "a refused send reports the refusal")
+  eq(g.moveMemory[1], 2, "...and leaves the remembered move where it was")
+
+  -- The sheet it has *now* is what the memory is clamped against: Transform
+  -- and Mimic rewrite one mid-fight, and a cursor past the end opens on a row
+  -- that is not drawn.
+  g.moveMemory[1] = 9
+  eq(g:rememberedMove(), 1,
+     "a remembered row past the end of the current sheet falls back to one")
+end
+
+-- ------------------------------------------------------------------
+-- 15. who is standing on the foe edge of the arena
+-- ------------------------------------------------------------------
+--
+-- `Battlefield.drawHuman` falls back to a dark placeholder rectangle for a
+-- human that names no walk sheet, and that is what a **solo trainer fight**
+-- drew for its whole length: `battlefieldCtx` folds every non-wild shape into
+-- "1v1" for the arena's geometry, and the foe-human arm was reading that same
+-- folded value -- so a `coop_npc` fight was described as a peer battle and
+-- asked the roster for a sprite belonging to a player who does not exist.
+--
+-- The trainer arm has to be tested *ahead* of the peer arm for exactly that
+-- reason, and the walk-sheet resolution under it is `Gen.trainerWalkSpriteId`,
+-- which co-op has always used and which now has one home rather than two.
+do
+  -- Red has SPRITE_YOUNGSTER and no SPRITE_LASS, which is the shape that makes
+  -- all three rungs of the ladder reachable in one fixture.
+  local SPRITES = {
+    SPRITE_YOUNGSTER     = { frames = 4 },
+    SPRITE_COOLTRAINER_F = { frames = 4 },
+    SPRITE_COOLTRAINER_M = { frames = 4 },
+  }
+  local ARENA = {
+    pokemon = DATA.pokemon,
+    sprites = SPRITES,
+    -- Two objects fight as LASS drawn with the cooltrainer sheet and one with
+    -- the youngster sheet, so the vote has a winner rather than a tie.
+    maps = {
+      ROUTE_3 = { objects = {
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_COOLTRAINER_F" },
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_YOUNGSTER" },
+      } },
+      ROUTE_4 = { objects = {
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_COOLTRAINER_F" },
+      } },
+    },
+  }
+  local game = {
+    data = ARENA,
+    save = { party = {}, player = { name = "ANN" } },
+  }
+
+  -- ------- the resolver itself
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_YOUNGSTER" }, game), "SPRITE_YOUNGSTER",
+     "OPP_YOUNGSTER walks around as SPRITE_YOUNGSTER, by the name transform")
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_LASS" }, game), "SPRITE_COOLTRAINER_F",
+     "a class with no sheet of its own takes the one the overworld votes for")
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_NOBODY" }, game), "SPRITE_COOLTRAINER_M",
+     "...and a class nobody walks around as still gets a body, not an empty edge")
+  eq(Gen.trainerWalkSpriteId(nil, game), nil, "no trainer names no sheet")
+  eq(Gen.trainerWalkSpriteId({}, game), nil, "...nor does a record with no id")
+
+  -- ------- and what the arena is told
+  local function screen(fields)
+    local self = setmetatable({
+      game = game,
+      slots = {}, lines = {}, mine = {},
+      active = 1, mySide = "a", phase = "play",
+      commandIndex = 1, frame = 1,
+    }, { __index = Mediated })
+    for k, v in pairs(fields) do self[k] = v end
+    return self
+  end
+
+  local npc = screen({
+    mode = "coop_npc",
+    peerName = "LASS",
+    trainer = { id = "OPP_LASS", name = "LASS" },
+  }):battlefieldCtx()
+  eq(#npc.foeHumans, 1, "a solo trainer fight stands one figure on the foe edge")
+  eq(npc.foeHumans[1].spriteId, "SPRITE_COOLTRAINER_F",
+     "...with the trainer's own walk sheet, not a placeholder silhouette")
+  eq(npc.foeHumans[1].name, "LASS", "...named as the trainer")
+  eq(npc.foeHumans[1].id, "OPP_LASS", "...and identified by their class")
+
+  -- The entry is unconditional, exactly as CoopBattle builds it: a trainer
+  -- whose sheet cannot be named is still a trainer standing there, and the
+  -- silhouette is a better answer than an empty edge.
+  local nameless = screen({
+    mode = "coop_npc", peerId = "npc", peerName = "BUG CATCHER",
+  }):battlefieldCtx()
+  eq(#nameless.foeHumans, 1,
+     "a trainer record that never arrived still puts somebody on the edge")
+  eq(nameless.foeHumans[1].spriteId, nil, "...with no sheet to name")
+  eq(nameless.foeHumans[1].name, "BUG CATCHER",
+     "...still named from the fight, never as an absent FRIEND")
+
+  local wild = screen({ mode = "wild", peerName = "WILD" }):battlefieldCtx()
+  eq(#wild.foeHumans, 0, "a wild fight leaves the foe edge empty")
+
+  -- The peer arm, unchanged: an ordinary MMO 1v1 is still drawn from the
+  -- roster, and nothing above may have moved it.
+  local peer = screen({
+    mode = "1v1", peerId = "peer1", peerName = "BOB",
+  }):battlefieldCtx()
+  eq(#peer.foeHumans, 1, "an MMO 1v1 still stands the peer on the foe edge")
+  eq(peer.foeHumans[1].id, "peer1", "...identified by their player id")
+  eq(peer.foeHumans[1].name, "BOB", "...and named from the roster")
+
+  -- ------- the roster chip's party (PROTOCOL 24)
+  --
+  -- A `team` event is the only thing this screen is ever told about a monster
+  -- that is not on the field, and the only source there is for the seat
+  -- opposite: no client uploads a party to any other client.
+
+  -- Our own side falls back to the sheets we uploaded, so a PROTOCOL 22
+  -- referee that emits no `team` at all still fills the player's own row
+  -- rather than leaving both sides blank.
+  local ownFallback = screen({
+    mode = "1v1", peerId = "peer1", peerName = "BOB",
+    mine = { { species = "A", hp = 20 }, { species = "B", hp = 0 } },
+  }):battlefieldCtx()
+  eq(ownFallback.allyHumans[1].party and #ownFallback.allyHumans[1].party, 2,
+     "with no team event the player's own chip reads the uploaded sheets")
+  eq(ownFallback.foeHumans[1].party, nil,
+     "...and the peer's stays empty, because there is nothing honest to put in it")
+
+  -- With the referee talking, both sides come off the referee -- including our
+  -- own, which is the seat where the two could disagree and the referee is the
+  -- one that has been fighting with the sheets.
+  local told = screen({
+    mode = "1v1", peerId = "peer1", peerName = "BOB",
+    mine = { { species = "A", hp = 20 }, { species = "B", hp = 0 } },
+    teams = { [0] = "ooxs", [2] = "ox" },
+  }):battlefieldCtx()
+  eq(told.allyHumans[1].party, "ooxs",
+     "the referee's roster wins over the uploaded sheets on our own seat")
+  eq(told.foeHumans[1].party, "ox",
+     "and the peer's roster is drawn from the only source there is")
+
+  -- The solo trainer path runs the same referee over a table transport, so an
+  -- NPC's ball row arrives exactly as a stranger's does.
+  local solo = screen({
+    mode = "coop_npc", peerName = "LASS",
+    trainer = { id = "OPP_LASS", name = "LASS" },
+    teams = { [2] = "ooo" },
+  }):battlefieldCtx()
+  eq(solo.foeHumans[1].party, "ooo",
+     "a solo trainer's roster comes off the same event a peer's does")
+
+  -- A wild fight has no foe human at all, so there is nothing to hang a roster
+  -- on even if the referee published one for the seat.
+  local wildTeam = screen({
+    mode = "wild", peerName = "WILD",
+    mine = { { species = "A", hp = 20 } },
+    teams = { [0] = "o", [2] = "o" },
+  }):battlefieldCtx()
+  eq(#wildTeam.foeHumans, 0, "a wild fight still has nobody to put a chip under")
+  eq(wildTeam.allyHumans[1].party, "o",
+     "...while the player's own roster is published as it is in any other fight")
+end
+
+-- ------- the `team` event reaches `teams` and nothing else
+--
+-- Stored raw and read by the arena alone: it is a chip, never a rule. A screen
+-- that let a roster decide `mustReplace` would be taking a rule off a field the
+-- referee sends for drawing.
+do
+  local screen = setmetatable({
+    battle = "b1", seq = 0, gaps = 0, phase = "play",
+    slots = {}, lines = {}, teams = {}, mine = {}, active = 1, mySide = "a",
+  }, { __index = Mediated })
+
+  screen:onEvent({ battle = "b1", seq = 1, t = "team", slot = 0, team = "oox" })
+  screen:onEvent({ battle = "b1", seq = 2, t = "team", slot = 2, team = "x" })
+  eq(screen.teams[0], "oox", "a team event lands on the seat it names")
+  eq(screen.teams[2], "x", "...on either side")
+  eq(screen.mustReplace, nil, "and decides nothing about whose turn it is")
+
+  screen:onEvent({ battle = "b1", seq = 3, t = "team", slot = 0, team = "oxx" })
+  eq(screen.teams[0], "oxx", "a later roster replaces the one before it")
+
+  -- Wire drops a malformed roster off the event rather than trimming it (a
+  -- short roster is a different party), so what reaches here is a `team` with
+  -- no `team` field -- which must leave the last good one standing.
+  screen:onEvent({ battle = "b1", seq = 4, t = "team", slot = 0 })
+  eq(screen.teams[0], "oxx",
+     "a team event whose roster was dropped at the boundary changes nothing")
+end
+
+-- ------------------------------------------------------------------
+-- 15. what the bar is out of: `maxHp` on a send (PROTOCOL 24)
+-- ------------------------------------------------------------------
+--
+-- Every other reading of HP on this wire is a *current* number, so a client
+-- had no handle on a seat's maximum at all and took the largest HP it had ever
+-- seen there for it. That is right for a monster sent out whole and wrong for
+-- every one that is not: a party mon that ended the last fight on 42 of 200
+-- opened the next one with a **full** bar over the number 42, and stayed that
+-- way for the whole fight, because nothing later ever raises the guess.
+--
+-- The referee has held the real maximum since it built the battler, so from
+-- PROTOCOL 24 it states it -- on the `send` a monster walks out on, and on the
+-- `drain` an HP UP produces, which is the one thing mid-fight that moves the
+-- ceiling itself. The guess stays behind as the fallback for a stream that
+-- states none, which is what the seat below with no `maxHp` still asserts.
+
+do
+  local Battlefield = need("Battlefield")
+  local hurt = harness("host")
+  hurt.game.input = fakeInput()
+  hurt.open()
+  local h = hurt.sessions.fight
+  hurt.sessions:onBattleReady({
+    battle = "7", mode = "1v1", sides = { a = { "me" }, b = { "peer1" } },
+  })
+  local n = 0
+  local function ev(fields)
+    n = n + 1
+    fields.battle = "7"; fields.seq = n
+    hurt.sessions:onBattleEvent(fields)
+  end
+  -- A send into an occupied seat is parked behind the queue it arrives with
+  -- (section 11), so every leg below plays its rows out before it reads the
+  -- seat -- otherwise it would be asserting against the previous occupant.
+  local function settle()
+    local guard = 0
+    while #h.lines > 0 and guard < 900 do
+      h:update(1 / 60); guard = guard + 1
+    end
+    return guard < 900
+  end
+
+  -- Our own monster, walking out on 42 of the 200 it has: the reported bug.
+  ev({ t = "send", slot = 0, text = "SQUIRTLE", hp = 42, maxHp = 200 })
+  eq(h.slots[0].hp, 42, "the send still sets the current HP")
+  eq(h.slots[0].maxHp, 200, "and the referee's maximum is what it is out of")
+  eq(h.slots[0].shownHp, 42, "the display clock starts where the referee is")
+  local plate = Battlefield.plateModel({
+    hp = h.slots[0].hp, shownHp = h.slots[0].shownHp,
+    maxHp = h.slots[0].maxHp, side = "ally",
+  })
+  eq(plate.frac, 42 / 200, "so the plate draws a fifth of a bar, not a full one")
+  eq(("%d/%d"):format(plate.shownHp, plate.maxHp), "42/200",
+     "...over the pair of numbers the ally plate prints")
+
+  -- With none stated, the older reading of this wire is still what happens.
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  check(settle(), "the intro queue drains in bounded frames")
+  eq(h.slots[2].maxHp, 24,
+     "a stream that states no maximum falls back to the largest HP seen")
+
+  -- A maximum under the HP arriving with it is a stream disagreeing with
+  -- itself; the bar still has to be a fraction, never past its own end.
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 30, maxHp = 10 })
+  check(settle(), "the swap queue drains in bounded frames")
+  eq(h.slots[2].maxHp, 30, "an under-stated maximum is lifted to the HP")
+
+  -- An HP UP moves the ceiling, and says so on the drain that announces it.
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 100, maxHp = 200 })
+  check(settle(), "...and so does the one behind it")
+  ev({ t = "drain", slot = 2, amount = 2, hp = 102, maxHp = 202 })
+  eq(h.slots[2].hp, 102, "the rise lands")
+  eq(h.slots[2].maxHp, 202, "...and the ceiling it moved lands with it")
+
+  -- And through the arrival window: a send into an occupied seat is parked,
+  -- so its maximum has to be parked with it and installed at the swap -- the
+  -- bar underneath is still the departing monster's, drawn against theirs.
+  local before = h.slots[2].maxHp
+  ev({ t = "damage", slot = 2, hp = 0, amount = 102 })
+  ev({ t = "faint", slot = 2, text = "PIDGEY" })
+  ev({ t = "send", slot = 2, text = "RATTATA", hp = 9, maxHp = 60 })
+  eq(h.slots[2].maxHp, before,
+     "the seat keeps the falling monster's ceiling while the arrival is parked")
+  eq(h.slots[2].pending and h.slots[2].pending.maxHp, 60,
+     "...and the newcomer's rides on the park")
+  check(settle(), "the batched queue drains in bounded frames")
+  eq(h.slots[2].species, "RATTATA", "the seat changes hands at the swap")
+  eq(h.slots[2].maxHp, 60, "...and takes the ceiling that was parked with it")
 end
 
 T.finish("mediated_battle_client")

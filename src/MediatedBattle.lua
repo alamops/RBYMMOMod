@@ -108,6 +108,11 @@ local function loadEngine()
     AnimPlayer = grab("AnimPlayer", "src.battle.AnimPlayer"),
     BattleState = grab("BattleState", "src.battle.BattleState"),
     Sprites = grab("Sprites", "src.pokemon.Sprites"),
+    -- Display only, and soft for that reason: it names a move's type for the
+    -- move list's own column (`moveTypeName`). `displayName` needs no `load`
+    -- -- it falls back to the module's vanilla records -- so a build without
+    -- the chart shows the raw type id rather than losing the column.
+    TypeChart = grab("TypeChart", "src.battle.TypeChart"),
     -- Exp is the *client's* arithmetic and can only ever be. The referee holds
     -- no species table (the legal floor -- no ROM bytes on a hub), so it can
     -- never price a faint: it states what fell and how many shared it, and
@@ -511,6 +516,14 @@ moveOf = function(data, slot, order)
   local maxPp = clamp(intOr(slot.maxPp or slot.pp, pp), pp, 99)
   return {
     id       = id,
+    -- What the referee narrates this move under (PROTOCOL 26).  `id` is a
+    -- registry key -- DOUBLE_KICK -- and every sentence the sim writes used to
+    -- print it, because it was the only spelling of the move on the wire.  The
+    -- referee holds no move table to look a name up in, so the name travels
+    -- with the move the way `species` does with the monster.  nil when this
+    -- build has no record for the move: the sim then falls back to the id,
+    -- which is the sentence a protocol-25 fight has always shown.
+    name     = def and Wire.moveName(def.name) or nil,
     pp       = pp,
     maxPp    = maxPp,
     power    = clamp(intOr(def and def.power, 40), 0, 999),
@@ -1245,6 +1258,14 @@ function M.new(opts)
     peerName  = opts.peerName or "FRIEND",
     onDone    = opts.onDone,
 
+    -- The NPC the other seat is fighting as, on a `coop_npc` fight -- the
+    -- engine's own `data.trainers` record, handed straight through by
+    -- src/SoloBattle.lua. Read for exactly one thing: the overworld walk sheet
+    -- the arena stands on the foe edge (`battlefieldCtx`). Nil on every other
+    -- shape, including a peer fight, where the figure on that edge is a
+    -- player and comes from the roster instead.
+    trainer   = opts.trainer,
+
     -- A test hook, and named as one.  With it set, a turn is answered the
     -- instant it opens with the first move at the default target, which is
     -- what lets the headless suite drive a whole fight with no input device.
@@ -1280,10 +1301,22 @@ function M.new(opts)
     active    = 1,         -- which of ours is out, as an index into `mine`
     mySide    = (opts.role == "guest") and "b" or "a",
     slots     = {},        -- field slot -> { species, hp, maxHp }
+    -- field slot -> the referee's roster string for that seat ("oosx"), from
+    -- the `team` event. The ONLY thing this screen is ever told about a
+    -- monster that is not on the field, and the only source there is for the
+    -- seat opposite: nobody uploads a party to anybody but the referee. Read
+    -- by `battlefieldCtx` and by nothing else -- it is a chip and never a rule.
+    teams     = {},
     lines     = {},
     shown     = nil,
     dwell     = 0,
     cursor    = 1,
+    -- The move each of ours was last sent into a turn with, keyed by its index
+    -- into `mine`. Purely where the cursor opens (see `rememberedMove`): a
+    -- Gen 1 fight is mostly one attack repeated, and re-walking the list to it
+    -- every turn is the tax this removes. Per monster, not per battle -- the
+    -- fourth row of the mon you switched to is a different move.
+    moveMemory = {},
     commandIndex = 1,
     itemIndex = 1,
     switchIndex = 1,
@@ -1369,6 +1402,21 @@ function M.new(opts)
     targetIndex = 1,          -- field cursor when a target list exists
   }, M)
 end
+
+-- The exp-awarding modes that have a *trainer* on the other side.
+--
+-- The referee's own gate is `EXP_MODES` = wild / coop_wild / coop_npc
+-- (server/lib/battle/Turn.js, src/BattleSim/Turn.lua). Two of those three are
+-- wildlife; only `coop_npc` fields a trainer, so the x1.5 belongs to it alone
+-- and every other token -- including a mode this screen never learned -- pays
+-- the plain wild rate.
+--
+-- Declared here, with the file's constants, rather than beside the exp award
+-- that was its first reader: `battlefieldCtx` now asks the same question to
+-- decide whether the foe edge of the arena holds a trainer or a peer, and a
+-- `local` is only in scope *below* its declaration -- left where it was, that
+-- read would have found the global nil and indexed it.
+local TRAINER_MODES = { coop_npc = true }
 
 -- ------- Gen1 Battlefield theatre gate
 --
@@ -1506,9 +1554,46 @@ function M:seatFront(speciesKey, monHint, slot, isOwn)
   local eng = loadEngine()
   local data = self.game and self.game.data
   local save = self.game and self.game.save
-  local mon = monHint
-  if (not mon or not mon.species) and data then
-    mon = { species = speciesKey, level = (monHint and monHint.level) or 5 }
+  -- **A save-mon-shaped stub, and never the wire sheet itself.**
+  --
+  -- `BattleState.makeBattler` is written against the engine's own mon: it
+  -- indexes `data.pokemon[mon.species]` for the definition it names the
+  -- battler from, and it measures the HP bar with
+  -- `Timing.hpBarPixels(mon.hp, math.max(1, mon.stats.hp))`. A `Wire.battleMon`
+  -- sheet answers neither. Its `species` is the *display* token (the nickname
+  -- wherever the player set one), and its `stats` is the wire dialect --
+  -- `atk`/`def`/`spd`/`spc`, with **no `hp` at all**, because the maximum
+  -- travels beside it as `maxHp`. So `mon.stats.hp` was nil, `math.max` threw,
+  -- the pcall swallowed it and this function returned nil for *every* seat on
+  -- Gen 1.
+  --
+  -- Which looked like it worked, because the caller falls back to
+  -- `slot.sprite`: a foe's slot pic is already the front (`refreshSlotSprite`
+  -- passes isPlayer=false), so the opponent drew correctly by accident, while
+  -- this client's own monster drew the *back* pic the classic 1v1 stage wants
+  -- -- the arena showing PIKACHU from behind, mirrored, where co-op shows the
+  -- front pic. The two screens agree again now, which is the whole point of
+  -- `seatFrontFor` in src/CoopBattle.lua being this function's twin: it never
+  -- hit this because it is handed a real `battler.mon`.
+  --
+  -- Same shape as `refreshSlotSprite`'s stub, deliberately -- the id in
+  -- `species` and the narrated token kept as `nickname` -- so the two pics a
+  -- seat can hold are resolved off the same description.
+  local mon = nil
+  if data then
+    local maxHp = (slot and slot.maxHp) or (monHint and monHint.maxHp) or 1
+    mon = {
+      species = speciesKey,
+      nickname = (slot and slot.species) or (monHint and monHint.species),
+      level = (monHint and monHint.level) or (slot and slot.level) or 5,
+      hp = (slot and slot.hp) or (monHint and monHint.hp) or maxHp,
+      stats = {
+        hp = maxHp,
+        attack = 1, defense = 1, speed = 1, special = 1,
+      },
+      moves = (monHint and monHint.moves) or { { id = "TACKLE", pp = 1 } },
+      status = slot and slot.status or nil,
+    }
   end
   if Gen.generation(self.game) == 2 then
     local def = data and type(data.pokemon) == "table" and data.pokemon[speciesKey]
@@ -1745,6 +1830,26 @@ end
 
 -- A move's display name, CoopBattle's lookup: the registry name when the build
 -- has one, the wire id otherwise.
+-- A move's type under the name the player reads on the classic TYPE/ strip.
+--
+-- `TypeChart.displayName` is the mapping that turns PSYCHIC_TYPE into PSYCHIC
+-- and a modded type into its registered name, and it answers from the module's
+-- own vanilla records when nothing called `load` -- so this is safe on a
+-- screen that never touched the chart. A build without the module at all falls
+-- through to the raw id, which still says something true.
+function M:moveTypeName(id)
+  local moves = self.game and self.game.data and self.game.data.moves
+  local def = type(moves) == "table" and moves[id] or nil
+  local typeId = def and def.type
+  if type(typeId) ~= "string" or typeId == "" then return nil end
+  local TypeChart = (loadEngine() or {}).TypeChart
+  if TypeChart and type(TypeChart.displayName) == "function" then
+    local ok, name = pcall(TypeChart.displayName, typeId)
+    if ok and type(name) == "string" and name ~= "" then return name end
+  end
+  return typeId
+end
+
 function M:moveLabel(id)
   if type(id) ~= "string" or id == "" then return nil end
   local moves = self.game and self.game.data and self.game.data.moves
@@ -1762,19 +1867,71 @@ function M:battlefieldTargets()
   return { foe }
 end
 
+-- The roster the chip beside a trainer's name draws, for one field seat.
+--
+-- The referee's word first, and our own uploaded sheets only as the fallback.
+-- Two reasons, and the second is the one that matters: the referee is what has
+-- been *fighting* with those sheets, so where the two could disagree it is
+-- right -- and a PROTOCOL 22 intermediator emits no `team` at all, in which
+-- case falling back is what still gets the player their own row rather than
+-- leaving both sides blank. There is no fallback for the seat opposite, and
+-- there cannot be: nobody uploads a party to anybody but the referee.
+--
+-- nil rather than an empty list when there is nothing to say, because
+-- `rosterModel` reads nil as "this trainer published no roster" and draws no
+-- chip, while six blank rings would claim they have nothing left.
+function M:seatRoster(slot, ownSheets)
+  local roster = slot and self.teams and self.teams[slot]
+  if type(roster) == "string" and roster ~= "" then return roster end
+  if ownSheets and type(self.mine) == "table" and #self.mine > 0 then
+    return self.mine
+  end
+  return nil
+end
+
 function M:battlefieldCtx()
   local mode = (self.mode == "wild") and "wild" or "1v1"
   local allyHumans = {{
     id = "self",
     name = playerName(self.game),
     spriteId = selfSpriteId(),
+    party = self:seatRoster(self:mySlot(), true),
   }}
   local foeHumans = {}
-  if mode == "1v1" then
+  -- Who is standing on the foe edge: an NPC trainer, a peer, or nobody.
+  --
+  -- **The trainer arm has to come first**, because `mode` above folds every
+  -- non-wild shape into "1v1" for the arena's geometry -- so a `coop_npc`
+  -- fight fell into the peer arm and was drawn from `self.peerId`, which a
+  -- solo battle never has. `peerSpriteId(nil)` is nil, and a human with no
+  -- sheet is `Battlefield.drawHuman`'s placeholder silhouette: the dark box
+  -- that stood where the trainer should have been for the whole of every solo
+  -- trainer fight.
+  --
+  -- One entry and never a player's, exactly as
+  -- `CoopBattle:battlefieldFoeHumans` builds it: the entry is unconditional
+  -- even when the walk sheet cannot be named, because the trainer *is* on the
+  -- field either way and the silhouette is still a trainer standing there.
+  --
+  -- Both arms carry the foe's roster off the referee and neither has a
+  -- fallback: an NPC's party is as invisible to this screen as a peer's is.
+  -- That is not a gap in the solo path -- a solo fight runs the same referee
+  -- over a table transport (`SoloBattle:_transport`), so the `team` events
+  -- arrive there exactly as they do off a hub, and the trainer's ball row is
+  -- filled by the same code that fills a stranger's.
+  if TRAINER_MODES[self.mode] then
+    foeHumans[1] = {
+      id = (self.trainer and self.trainer.id) or self.peerId,
+      name = (self.trainer and self.trainer.name) or self.peerName or "FRIEND",
+      spriteId = Gen.trainerWalkSpriteId(self.trainer, self.game),
+      party = self:seatRoster(self:foeSlot(), false),
+    }
+  elseif mode == "1v1" then
     foeHumans[1] = {
       id = self.peerId,
       name = self.peerName or "FRIEND",
       spriteId = peerSpriteId(self.peerId),
+      party = self:seatRoster(self:foeSlot(), false),
     }
   end
 
@@ -1999,11 +2156,13 @@ function M:onEvent(msg)
     -- (src/CoopBattle.lua:8062).
 
   elseif kind == "send" then
-    -- The first HP we are told about is a full bar: the sim sends this the
-    -- moment a monster comes out, so the number is that monster's maximum
-    -- unless it walked in already hurt.  It is the only handle on a foe's
-    -- maximum there is -- an event carries current HP and nothing else -- so
-    -- the largest value ever seen is what the bar is drawn against.
+    -- **The referee says what the bar is out of** (`maxHp`, PROTOCOL 24), and
+    -- that is the whole of what a seat's maximum is now taken from.  Before
+    -- it, an event carried current HP and nothing else, so the largest value
+    -- ever seen on the seat had to stand in for the maximum -- true only for a
+    -- monster that walks out whole, and the reason one that walked out hurt
+    -- drew a full bar over a number that was not its maximum.  `noteSlot`
+    -- keeps that reading as the fallback for a stream that states none.
     self:noteSlot(msg)
     -- Parked behind somebody still finishing their exit (`noteSlot`): the seat
     -- below is still *theirs*, so everything that describes what is drawn on it
@@ -2344,6 +2503,15 @@ function M:onEvent(msg)
     if msg.slot == self:mySlot() and type(msg.moves) == "table" then
       self.liveMoves = msg.moves
     end
+
+  elseif kind == "team" then
+    -- Both sides, and our own is not skipped as redundant: `mine` is the sheets
+    -- we uploaded and the referee is the thing that has been fighting with
+    -- them, so on the one seat where the two could disagree the referee is
+    -- right. Stored raw; `Battlefield.rosterModel` reads the string dialect.
+    if msg.slot ~= nil and type(msg.team) == "string" then
+      self.teams[msg.slot] = msg.team
+    end
   end
 end
 
@@ -2433,15 +2601,6 @@ function M:paidSheetIndex(msg)
   if index < 1 then return self.active or 1 end
   return index
 end
-
--- The exp-awarding modes that have a *trainer* on the other side.
---
--- The referee's own gate is `EXP_MODES` = wild / coop_wild / coop_npc
--- (server/lib/battle/Turn.js, src/BattleSim/Turn.lua). Two of those three are
--- wildlife; only `coop_npc` fields a trainer, so the x1.5 belongs to it alone
--- and every other token -- including a mode this screen never learned -- pays
--- the plain wild rate.
-local TRAINER_MODES = { coop_npc = true }
 
 -- Warn once per screen rather than once per faint: a build with no Experience
 -- module loses exp on every knockout, and forty identical lines in the log
@@ -2938,6 +3097,7 @@ function M:noteSlot(msg)
   -- monster's bar falling.)
   local parked = slot.pending
   if parked and not (msg.text and (msg.t == "send" or msg.t == "switch")) then
+    if msg.maxHp ~= nil then parked.maxHp = msg.maxHp end
     if msg.hp ~= nil then
       parked.hp = msg.hp
     elseif msg.amount ~= nil and msg.t == "damage" then
@@ -2965,6 +3125,11 @@ function M:noteSlot(msg)
         species = msg.text,
         speciesId = msg.speciesId,
         hp = msg.hp,
+        -- What that HP is out of, when the referee stated it (PROTOCOL 24).
+        -- Installed by `applySwap`, not written to the seat here: the bar
+        -- underneath still belongs to the monster finishing its exit, and its
+        -- own maximum is what its queued fall is being drawn against.
+        maxHp = msg.maxHp,
         status = msg.status,
         -- The referee's, when it stated one (it has said so since PROTOCOL 22);
         -- otherwise filled by `arriveOnSeat` at the swap, own seat only.
@@ -2984,6 +3149,17 @@ function M:noteSlot(msg)
     slot.koHold = nil
     fresh = true
   end
+  -- **The referee's own maximum, when it states one (PROTOCOL 24).**
+  -- Everything below it is the older reading of this wire, kept as the
+  -- fallback rather than deleted: an event used to carry current HP and
+  -- nothing else, so the largest HP a seat had ever shown was taken for its
+  -- maximum. That is right for a monster that walks out whole and wrong for
+  -- every one that does not -- a party mon that ended the last fight on 42 of
+  -- 200 opened the next one with a *full* bar over the number 42. A stated
+  -- maximum ends the guessing for that seat; `max` keeps it above whatever HP
+  -- arrives with it, so a stream that disagrees with itself still draws a
+  -- fraction rather than a bar past its own end.
+  if msg.maxHp ~= nil then slot.maxHp = max(1, msg.maxHp) end
   if msg.hp ~= nil then
     slot.hp = msg.hp
     if msg.hp > slot.maxHp then slot.maxHp = msg.hp end
@@ -3494,7 +3670,29 @@ function M:pickMove(index)
   local mon = self:activeMon()
   local moves = mon and mon.moves
   if not (moves and moves[index]) then return false end
-  return self:sendChoice({ action = "fight", move = index - 1 })
+  local sent = self:sendChoice({ action = "fight", move = index - 1 })
+  -- Remembered only once the choice is really on the wire: a refused send
+  -- leaves the turn unspent, and moving the cursor for it would be the menu
+  -- reporting a decision that was not taken.
+  if sent then
+    self.moveMemory = self.moveMemory or {}
+    self.moveMemory[self.active or 1] = index
+  end
+  return sent
+end
+
+-- Where the move list opens: the move this monster last actually used, or its
+-- first move if it has not attacked yet.
+--
+-- Clamped against the list it has *now* rather than the one it had then --
+-- Transform and Mimic rewrite a sheet mid-fight, and a cursor left past the
+-- end would open on a row that is not drawn.
+function M:rememberedMove()
+  local mon = self:activeMon()
+  local moves = (mon and mon.moves) or {}
+  local want = math.floor(tonumber((self.moveMemory or {})[self.active or 1]) or 1)
+  if want < 1 or want > #moves then return 1 end
+  return want
 end
 
 -- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
@@ -3687,7 +3885,7 @@ function M:updateCommand(input)
   elseif input:wasPressed("a") then
     local command = M.COMMANDS[self.commandIndex]
     if command == "FIGHT" then
-      self.cursor = 1
+      self.cursor = self:rememberedMove()
       self.phase = "move"
     elseif command == "SWITCH" then
       self.switchIndex = 1
@@ -4938,10 +5136,12 @@ function M:applySwap(row)
   slot.sprite = nil
   slot.icon = nil
   slot.koHold = nil
-  -- Same reading of a first HP as `noteSlot`'s: what the referee says a monster
-  -- is on the moment it walks out is the biggest bar this seat has ever been
-  -- told about, unless it walked in already hurt.
+  -- Same reading of an arrival's numbers as `noteSlot`'s, and for the same
+  -- reason: the maximum the referee stated for this monster (PROTOCOL 24) is
+  -- what its bar is out of, and the older guess -- the biggest HP the seat has
+  -- ever been told about -- is only what is left when it stated none.
   slot.hp = arrival.hp or 0
+  if arrival.maxHp ~= nil then slot.maxHp = max(1, arrival.maxHp) end
   if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
   -- A monster that just walked on has nothing to animate down from, so its bar
   -- starts where the referee says it is -- and the predecessor's descent, which
@@ -5369,6 +5569,7 @@ function M:snapDisplay()
       slot.icon = nil
       slot.koHold = nil
       slot.hp = arrival.hp or 0
+      if arrival.maxHp ~= nil then slot.maxHp = max(1, arrival.maxHp) end
       if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
       slot.status = arrival.status
       -- No `arriveOnSeat` here: `exit` calls this on stubs that carry neither a
@@ -5784,6 +5985,10 @@ function M:bandMoveRows()
     -- list after Transform/Mimic carries `pp` and may carry no maximum, so the
     -- right column is dropped rather than invented.
     local row = { label = self:moveLabel(move.id) or tostring(move.id) }
+    -- The type, in the column left of PP. Same reason PP is on the row rather
+    -- than under it: what the player is comparing four ways is on the four
+    -- rows, not on a strip that only ever describes the highlighted one.
+    row.tag = self:moveTypeName(move.id)
     local pp = tonumber(move.pp)
     local maxPp = tonumber(move.maxPp)
     if pp and maxPp then

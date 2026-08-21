@@ -334,6 +334,87 @@ scenarios[#scenarios + 1] = {
   end,
 }
 
+-- The invite, end to end: the busy a roster row is drawn from, the reason a
+-- refusal carries, and two asks that crossed.
+--
+-- Every field here is one a client reads to decide whether to *offer* a
+-- battle or what to say when one comes back, so a one-sided drift is a
+-- refusal that reads correctly on one hosting path and as a snub on the
+-- other -- for the same event, with nothing in the game to tell them apart.
+--
+-- The reason is normalised to a sentinel rather than left absent: a nil field
+-- vanishes from a Lua table, and "no key" and "null" are not the same value
+-- to the comparison on the far side.
+local function slimDecline(msg)
+  if not msg then return { absent = true } end
+  return {
+    kind = msg.kind,
+    reason = msg.reason or "(none)",
+    named = msg.name ~= nil,
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "invite_busy_reason_and_cross",
+  run = function()
+    local hub = makeHub()
+    local a = dial(hub, "ASKER", ID_A)
+    local b = dial(hub, "ASKED", ID_B)
+    take(a.peer, Wire.WELCOME); take(b.peer, Wire.WELCOME)
+    takeAll(a.peer, Wire.JOIN); takeAll(b.peer, Wire.JOIN)
+    a.peer.outbox, b.peer.outbox = {}, {}
+
+    -- A client's own word on being mid-fight, which no hub can see for itself
+    hub:receive(b.client, { type = Wire.MOVE, map = "PALLET", x = 6, y = 5,
+                            facing = "down", busy = true })
+    local busyMove = take(a.peer, Wire.MOVE)
+    hub:receive(b.client, { type = Wire.MOVE, map = "PALLET", x = 6, y = 5,
+                            facing = "down", busy = "yes" })
+    local looseMove = take(a.peer, Wire.MOVE)
+    a.peer.outbox, b.peer.outbox = {}, {}
+
+    -- An ask nobody is there to answer
+    hub:receive(a.client, { type = Wire.REQUEST, to = "nobodyatall",
+                            kind = "battle" })
+    local gone = slimDecline(take(a.peer, Wire.DECLINE))
+    a.peer.outbox, b.peer.outbox = {}, {}
+
+    -- A refusal that carries why, and one that made its reason up
+    hub:receive(a.client, { type = Wire.REQUEST, to = b.id, kind = "battle" })
+    take(b.peer, Wire.REQUEST)
+    hub:receive(b.client, { type = Wire.RESPOND, to = a.id, kind = "battle",
+                            accept = false, reason = "fighting" })
+    local reasoned = slimDecline(take(a.peer, Wire.DECLINE))
+
+    hub:receive(a.client, { type = Wire.REQUEST, to = b.id, kind = "battle" })
+    take(b.peer, Wire.REQUEST)
+    hub:receive(b.client, { type = Wire.RESPOND, to = a.id, kind = "battle",
+                            accept = false, reason = "your mother" })
+    local forged = slimDecline(take(a.peer, Wire.DECLINE))
+    a.peer.outbox, b.peer.outbox = {}, {}
+
+    -- Two invites that crossed are an agreement, not a collision
+    hub:receive(a.client, { type = Wire.REQUEST, to = b.id, kind = "battle" })
+    hub:receive(b.client, { type = Wire.REQUEST, to = a.id, kind = "battle" })
+    local crossA, crossB = take(a.peer, Wire.SESSION), take(b.peer, Wire.SESSION)
+    local crossed = {
+      id = crossA and crossA.id or "(none)",
+      askerRole = crossA and crossA.role or "(none)",
+      answererRole = crossB and crossB.role or "(none)",
+      refusals = #takeAll(a.peer, Wire.DECLINE) + #takeAll(b.peer, Wire.DECLINE),
+    }
+
+    return {
+      busy = busyMove and busyMove.busy == true,
+      looseBusy = looseMove and looseMove.busy == true,
+      gone = gone,
+      reasoned = reasoned,
+      forged = forged,
+      crossed = crossed,
+    }
+  end,
+}
+
 scenarios[#scenarios + 1] = {
   name = "mediated_ko_settle",
   run = function()

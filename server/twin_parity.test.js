@@ -24,7 +24,11 @@ const ROOT = path.join(__dirname, '..');
 const {
   PROTOCOL, DEFAULT_SPRITE, DEFAULT_SPRITE_GEN2, defaultSpriteFor, SPRITE_GATE_MS,
 } = require('./lib/relay.js');
-const { PLAYER_ID_HEX, BATTLE_EVENT_TYPES } = require('./lib/sanitize.js');
+const {
+  PLAYER_ID_HEX, BATTLE_EVENT_TYPES, DECLINE_REASONS,
+  TEAM_TOKENS, cleanBattleTeam, BATTLE_MON_MAX,
+  MOVE_NAME_MAX, cleanBattleMove,
+} = require('./lib/sanitize.js');
 
 function read(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -111,6 +115,35 @@ test('sprite gate is half a second on both sides', () => {
   assert.strictEqual(SPRITE_GATE_MS, 500);
 });
 
+test('MOVE_NAME_MAX matches Config / Wire / sanitize', () => {
+  // PROTOCOL 26's `name` is prose, and a limit that differs by one character is
+  // a hub and a client that narrate a fight under two different spellings of the
+  // same move -- the exact defect the field was added to remove. It is its own
+  // number rather than NAME_MAX because ten characters cuts "THUNDERSHOCK".
+  const config = read('src/Config.lua');
+  assert.strictEqual(
+    luaAssignNumber(config, 'MOVE_NAME_MAX'), MOVE_NAME_MAX,
+    'bump Config.MOVE_NAME_MAX and sanitize.MOVE_NAME_MAX together',
+  );
+  assert.ok(MOVE_NAME_MAX >= 12,
+    'both generations ship twelve-character move names ("THUNDERSHOCK")');
+});
+
+test('a battle move sheet accepts a display name and survives without one', () => {
+  // Both halves of the optional, on the JS hub. The Lua half of the same pair
+  // is tests/rby_mmo_test.lua's Wire section.
+  const base = {
+    id: 'THUNDER_SHOCK', pp: 30, power: 40, accuracy: 255,
+    type: 3, effect: 0, chance: 0,
+  };
+  assert.strictEqual(cleanBattleMove({ ...base, name: 'THUNDERSHOCK' }).name,
+    'THUNDERSHOCK', 'a stated name comes through');
+  assert.strictEqual(cleanBattleMove(base).name, undefined,
+    'a protocol-25 sheet states none, and that is not a refusal');
+  assert.strictEqual(cleanBattleMove({ ...base, name: 42 }), null,
+    'present-but-unreadable refuses the move rather than narrating under the id');
+});
+
 test('shared hello refuse strings stay twin-worded', () => {
   const hub = read('src/Hub.lua');
   const relay = read('server/lib/relay.js');
@@ -147,6 +180,68 @@ test('Wire.BATTLE_EVENTS matches sanitize.js BATTLE_EVENT_TYPES', () => {
     'Wire.BATTLE_EVENTS and sanitize.js BATTLE_EVENT_TYPES must name the same '
     + 'closed vocabulary -- add a new battle event kind to both in the same change',
   );
+});
+
+test('Wire.DECLINE_REASONS matches sanitize.js DECLINE_REASONS', () => {
+  // Why an invite came back refused. Each value picks a different sentence on
+  // the asker's screen, so a one-sided add is a refusal that reads correctly
+  // on one hosting path and falls back to "they refused" on the other -- for
+  // the same event, with nothing to tell the two apart from inside the game.
+  const wire = read('src/Wire.lua');
+  const tableMatch = wire.match(/M\.DECLINE_REASONS\s*=\s*\{([\s\S]*?)\}/);
+  assert.ok(tableMatch, 'Wire.lua must assign M.DECLINE_REASONS as a table');
+  const luaReasons = [...tableMatch[1].matchAll(/(\w+)\s*=\s*true/g)]
+    .map((m) => m[1]).sort();
+  assert.ok(luaReasons.length > 0, 'Wire.DECLINE_REASONS parsed at least one reason');
+
+  assert.deepStrictEqual(
+    Object.keys(DECLINE_REASONS).sort(), luaReasons,
+    'Wire.DECLINE_REASONS and sanitize.js DECLINE_REASONS must name the same '
+    + 'closed vocabulary -- add a new refusal reason to both in the same change',
+  );
+});
+
+test('the team roster alphabet is the same three tokens on both sides', () => {
+  // A one-sided token is the quiet kind of drift: the referee would publish a
+  // roster its own hub sanitises away, or a client would draw a state the other
+  // runtime can never produce. Both halves spell the set out longhand (the sim
+  // directories run with no Config), so this is the only place they are read
+  // side by side.
+  const wire = read('src/Wire.lua');
+  const tableMatch = wire.match(/M\.TEAM_TOKENS\s*=\s*\{([\s\S]*?)\}/);
+  assert.ok(tableMatch, 'Wire.lua must assign M.TEAM_TOKENS as a table');
+  const luaTokens = [...tableMatch[1].matchAll(/(\w+)\s*=\s*true/g)].map((m) => m[1]).sort();
+  assert.deepStrictEqual([...TEAM_TOKENS].sort(), luaTokens,
+    'Wire.TEAM_TOKENS and sanitize.js TEAM_TOKENS must name the same alphabet');
+
+  // ...and the two sim mirrors, which are where the tokens are actually
+  // produced. They mirror rather than import, so they can drift silently.
+  for (const rel of ['src/BattleSim/events.lua', 'src/BattleSim2/events.lua']) {
+    const src = read(rel);
+    const mirror = src.match(/M\.TEAM_TOKENS\s*=\s*\{([\s\S]*?)\}/);
+    assert.ok(mirror, `${rel} must assign M.TEAM_TOKENS`);
+    const kinds = [...mirror[1].matchAll(/(\w+)\s*=\s*true/g)].map((m) => m[1]).sort();
+    assert.deepStrictEqual(kinds, luaTokens, `${rel} mirrors Wire's roster alphabet`);
+  }
+});
+
+test('a roster is refused whole rather than trimmed to what parses', () => {
+  // The twin of Wire.battleTeam, and the assertion that matters is the refusal:
+  // a truncated sentence is a shorter sentence, but a truncated roster is a
+  // different party -- three balls where the seat holds five -- and the chip
+  // would tell a player their opponent is two monsters closer to beaten than
+  // they are.
+  assert.strictEqual(cleanBattleTeam('oxs'), 'oxs');
+  assert.strictEqual(cleanBattleTeam('o'), 'o');
+  assert.strictEqual(cleanBattleTeam('o'.repeat(BATTLE_MON_MAX)), 'o'.repeat(BATTLE_MON_MAX));
+
+  assert.strictEqual(cleanBattleTeam(''), null, 'an empty roster is not a seat');
+  assert.strictEqual(cleanBattleTeam('o'.repeat(BATTLE_MON_MAX + 1)), null,
+    'past BATTLE_MON_MAX is refused, not cut to six');
+  assert.strictEqual(cleanBattleTeam('ooq'), null, 'one unreadable token refuses the row');
+  assert.strictEqual(cleanBattleTeam('OOO'), null, 'the alphabet is exact');
+  assert.strictEqual(cleanBattleTeam(3), null, 'a count is not a roster');
+  assert.strictEqual(cleanBattleTeam(null), null, 'and nothing is not a roster');
 });
 
 test('inbound client→hub message types match on both hubs', () => {
