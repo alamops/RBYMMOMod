@@ -6,6 +6,90 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Added
+
+- **Particles and effects for every move, every attack and every item a bag
+  can open in a fight.** A new `src/Vfx.lua` is the catalogue — which look a
+  move, an item, a condition or a stat stage wears — and `src/Battlefield.lua`
+  grew the renderer for it: twenty-five particle styles (embers, splash,
+  leaves, bolts, ice shards, psychic rings, rock, dirt, gusts, bubbles,
+  swarms, wisps, gleams, spirals, shadow, sparkles, healing motes, stat
+  arrows, blasts, notes, smoke) over eighteen type palettes, drawn as
+  vectors — no particle texture, so nothing here is a ROM-derived byte.
+
+  **Every move resolves.** A move's look comes from its type, its delivery
+  from its category and its *weight from its power*, so a move this mod has
+  never seen — a Gen 2 id, a move another mod added — still gets a defensible
+  effect rather than a blank field.
+
+  **Power is read in five bands**, not scaled continuously: particle counts
+  round to whole particles, so a smooth curve would give nearly every move its
+  own number and nearly none of them a difference anybody could see. Each band
+  is two or three particles and three or four pixels of radius apart — Tackle
+  (35) throws 9 sparks across 29px where Mega Kick (120) throws 17 across 41px,
+  and Ember → Fire Punch → Flamethrower → Fire Blast step 14 → 16 → 19 → 22.
+  Power 1 is exempt: Gen 1 uses it to mark fixed-damage and one-hit-KO moves,
+  so Guillotine and Seismic Toss take the middle band rather than being drawn
+  as the weakest attacks in the game. On top of that a catalogue of 137 signature moves says where
+  the type is a poor description of what the player sees: Flamethrower and
+  Hyper Beam are beams, Explosion is a field-wide blast, Swords Dance plays
+  on the user, Growl is notes thrown at the target.
+
+  **Five deliveries**, so an effect happens where the move does: `burst` at
+  the target, `projectile` (a bright core on an arc with a trail, bursting on
+  arrival), `beam` (attacker to target, opening and fading), `self`, and
+  `field`. A travelling effect whose thrower has left the field degrades to a
+  burst on the target rather than firing from the corner of the canvas.
+
+  **On the beats that were already there.** The move's particles ride the
+  attacker's lunge (beat 2) — so a status move and a miss both draw, which an
+  effect gated on damage would never have done — and the blow landing adds a
+  compact impact burst in that move's colours on beat 3, on the seat whose bar
+  is about to fall. Nothing about the fight's pacing moved: no new hold, no new
+  dwell. Items, conditions landing and stat stages are filed as queue rows in
+  referee order and take no hold at all, so the effect runs *under* the
+  sentence that explains it.
+
+  **In every fight this mod runs**: mediated 1v1, co-op 2-on-2, and the solo
+  wild/trainer battles that use the same screen. Thrown balls are deliberately
+  untouched — the throw chain already draws the arc, the rocking and the burst.
+
+  Particles are pure functions of `(which particle, how far through, which
+  emission)` with a hashed seed rather than `math.random`, so two players
+  watching one fight see the same sparks and the suite can assert a frame
+  headlessly.
+
+### Fixed
+
+- **Psychic moves were being fought as Physical in every refereed battle.**
+  MMO 1v1, co-op 2-on-2 and the solo battles that run on this mod's referee
+  all resolved Psychic damage on Attack/Defense instead of Special/Special,
+  and Light Screen did not halve it. In Gen 1 that is Alakazam, Mewtwo and
+  Exeggutor fighting with the wrong stat.
+
+  The cause is one letter of a registry id. A type's id is `PSYCHIC_TYPE`,
+  because `PSYCHIC` is already a *move*; the client's list of Special types
+  keyed on the display name, so Psychic silently dropped out of the
+  `specialTypes` the ruleset uploads. Six of the seven types matched, and the
+  guard only spoke when *none* did, so nothing ever looked wrong.
+
+  The client no longer matches type names at all: the physical/special split
+  now comes off the chart's own type records (`category`, which every type the
+  `type_chart` registry serves already carries). That is the engine's own
+  answer, so it is right for both generations without a second list — Gen 2's
+  Dark arrives on its own — and a mod that registers a nineteenth type is
+  honoured rather than guessed at. The name list survives only as a fallback
+  for a data pack whose types carry no category, and it now knows both
+  spellings of Psychic.
+
+  The guard was the other half of the bug and is fixed too: a type whose
+  category cannot be determined is **named** in the warning instead of being
+  quietly fought as Physical.
+
+  Nothing else on the wire moves — `specialTypes` is a list of chart indices
+  and no recorded fixture carries one, so both twin-parity suites are
+  unchanged.
+
 ## [1.0.22] - 2026-08-20
 
 ### Fixed

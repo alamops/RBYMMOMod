@@ -3,7 +3,7 @@ return {
     .. "trade and battle.",
   author = "alamo",
   tags = { "multiplayer", "mmo", "chat", "party", "friends", "trade", "pvp",
-           "ranking", "coop", "ui" },
+           "ranking", "coop", "ui", "battle", "effects" },
 
   differences = {
     changed = {
@@ -201,6 +201,29 @@ return {
         .. "marked with a down arrow on the list, and anything the hub "
         .. "refuses the dial with comes back as one dismissible box naming "
         .. "the server.",
+      "Particles and effects on the battle arena for every move, every "
+        .. "attack and every item a bag can open in a fight: twenty-five "
+        .. "vector particle styles over eighteen type palettes, drawn as "
+        .. "shapes rather than sprites so nothing here is a picture. A "
+        .. "move's look comes from its type, its delivery from its "
+        .. "category and its weight from its power (five bands, so the "
+        .. "difference is one a player can see), so a move this mod has "
+        .. "never seen still draws "
+        .. "something; on top of that, 137 signature moves are named "
+        .. "where the type is a poor description -- Flamethrower and Hyper "
+        .. "Beam are beams, Explosion fills the field, Swords Dance plays on "
+        .. "the user, Growl is notes thrown at the target. Five deliveries "
+        .. "(burst on the target, a projectile that flies and bursts on "
+        .. "arrival, a beam, on the user, across the field), each keyed to "
+        .. "the beats the arena already had -- the move's effect rides the "
+        .. "attacker's lunge, so a status move and a miss both draw, and the "
+        .. "blow landing adds a compact burst in that move's colours. Items, "
+        .. "conditions and stat stages are filed in referee order and take "
+        .. "no hold, so they run under the sentence that explains them. "
+        .. "Thrown balls are untouched: the throw chain already draws the "
+        .. "arc, the rocking and the burst. Particles are pure functions of "
+        .. "a hashed seed rather than a roll, so two players watching one "
+        .. "fight see the same sparks.",
     },
     known = {
       "MMO 1v1 and co-op fights are hub-refereed (BattleSim): clients upload "

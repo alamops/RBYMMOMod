@@ -11,7 +11,7 @@ A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp).
 ![LÖVE 11.x](https://img.shields.io/badge/L%C3%96VE-11.x-e64998?style=for-the-badge)
 ![Players 2–64](https://img.shields.io/badge/players-2--64-3aa757?style=for-the-badge)
 ![No server needed](https://img.shields.io/badge/dedicated%20server-optional-4c8fd6?style=for-the-badge)
-![v1.0.22](https://img.shields.io/badge/version-1.0.22-3aa757?style=for-the-badge)
+![v1.0.23](https://img.shields.io/badge/version-1.0.23-3aa757?style=for-the-badge)
 ![MIT](https://img.shields.io/badge/licence-MIT-666?style=for-the-badge)
 
 **No server to rent. No accounts. No signup.** One of you hosts from inside
@@ -527,6 +527,44 @@ you a fancier battle screen and never the encounter.
 Both carts — Gen 1 (Red/Blue/Yellow) and Gold. And if you're connected and
 partied, **co-op still wins**: solo only takes the fights co-op didn't.
 Design notes: [`docs/plans/offline-solo-battles.md`](docs/plans/offline-solo-battles.md).
+
+### ✨ EVERY MOVE LOOKS LIKE SOMETHING
+Fire comes off in embers that rise and cool. Water throws droplets that arc and
+fall, over a ripple in the turf. Thunderbolt is a beam with a white core;
+Solarbeam and Hyper Beam are too. Ice hangs in crystals, Psychic pulls motes in
+along a spiral, Rock and Ground fling chunks that tumble under gravity, Poison
+bubbles up and pops, Bug swarms, Ghost drifts off in wisps, Steel gleams,
+Explosion is a blast that fills the field. **Nothing is exempt** — a move with
+no entry of its own still wears its type's look, so a move from another mod, or
+one this mod has never heard of, draws something rather than nothing.
+
+**And how hard it hit shows.** Power is read in five bands, so Tackle is a
+small scuff and Mega Kick is a wallop in the same white; Ember, Fire Punch,
+Flamethrower and Fire Blast each throw visibly more fire than the last. Bands
+rather than a sliding scale, because two particles is a difference you can see
+and two hundredths of one is not.
+
+**Where an effect happens follows what the move is.** A move that touches
+bursts on the target; one that is fired flies to it, trailing, and bursts on
+arrival; a beam is drawn from attacker to defender; a stat boost, a heal or a
+screen plays on the user; Earthquake, Explosion and a Poké Flute play across
+the whole field.
+
+**Items too.** A potion lifts green sparks off the monster's feet; a status
+cure washes it in rings; a Revive is a column of light; the X shelf and Dire
+Hit throw up the same arrows a stat stage does; a Poké Doll is a puff of smoke.
+Balls are the one thing left alone — a thrown ball already has its own arc,
+its own rocking on the grass and its own burst.
+
+**And the fight's rhythm did not move.** The move's effect rides the lunge the
+attacker already had, so a status move and a move that missed both draw; the
+blow landing adds a compact burst in that move's colours on the seat whose bar
+is about to fall. Conditions and stat stages are filed in the referee's own
+order and run *under* the sentence that explains them. Nothing waits on a
+particle.
+
+It is the same in every fight this mod runs: online, 2-on-2 co-op, and the solo
+battles above.
 
 ### 🏆 RANKED — AND YOU CAN'T FARM IT
 Every link battle is scored, on the hub, for both players. Win and you gain
@@ -1442,7 +1480,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `1.0.22` (`experimental: false` — on by default when installed). The full
+It's `1.0.23` (`experimental: false` — on by default when installed). The full
 list lives in `mod.card` under `differences.known`. The ones that'll actually
 bite you:
 

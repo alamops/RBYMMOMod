@@ -14,6 +14,11 @@ local Gen = need("Gen")
 -- Type only: Toast owns the mod's one per-size font cache (Rajdhani, linear
 -- filter, engine-default fallback). Nothing else is borrowed from it.
 local Toast = need("Toast")
+-- The particle catalogue: which look a move / item / condition wears, and the
+-- pure math one particle of it follows. It draws nothing -- this file is the
+-- only thing in the mod that touches a canvas -- and it requires nothing, so
+-- the suite can assert a frame's worth of particles with no LOVE in process.
+local Vfx = need("Vfx")
 
 local M = {}
 
@@ -656,10 +661,44 @@ M.FX_BALL_SPIN = math.pi * 2.5 -- radians of spin across the whole throw
 M.FX_WOBBLE_ANGLE = 0.35 -- ≈20° peak rock, three rocks per SHAKE row
 M.FX_POOF_R = 30 -- outer ring radius at the end of a poof
 
+-- ------- particle fx
+--
+-- A `vfx` entry is one emission from src/Vfx.lua's catalogue -- a move, a bag
+-- item, a condition landing, a stat stage moving -- and it is the one fx kind
+-- that carries its own look on the record rather than being named by `kind`:
+-- `style`, `palette`, `delivery`, `scale`, `intensity` and `seed`, plus the
+-- seat it lands on (`side` / `seatIndex`) and, for the deliveries that travel,
+-- the seat it came from (`fromSide` / `fromSeat`).
+--
+-- It is field-level, not a seat modifier: nothing about it moves, tints or
+-- hides the monster it plays over (`M.fxSeat` skips it by construction), so an
+-- effect can never be the reason a sprite goes missing.
+M.FX_VFX_R = 34        -- a burst's radius on a 60px monster, at scale 1
+M.FX_VFX_FIELD = 2.4   -- ...times this for a `field` delivery (Earthquake)
+M.FX_VFX_TRAVEL = 0.5  -- fraction of a projectile's life spent in the air
+M.FX_VFX_TRAIL = 5     -- motes behind a projectile's core
+M.FX_BEAM_W = 11       -- a beam's half-width at its widest, px
+
 local NO_FX = {
   dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0,
   -- The seat's mon is inside a ball (ball / wobble): draw nothing for it.
   hidden = false,
+}
+
+-- The kinds that are *seat modifiers* -- they move, tint, shrink or hide the
+-- monster standing on a seat -- as against the field-level kinds (`shake`,
+-- `ball`, `poof`, `vfx`) which draw something of their own and leave the
+-- occupant alone.
+--
+-- Tested before anything else in `M.fxSeat` and not merely absent from its
+-- if-chain, because the chain allocates its accumulator the moment a side
+-- matches: a particle effect on the ally side would have handed every ally
+-- seat a fresh table holding exactly the neutral values, which is a per-frame
+-- allocation for nothing and -- since callers compare against the shared
+-- NO_FX -- a record that is equal in value but not identical.
+local SEAT_FX = {
+  lunge = true, flash = true, faint = true, spawn = true,
+  recall = true, wobble = true,
 }
 
 local function fxT(v)
@@ -755,7 +794,7 @@ end
 function M.fxSeat(fx, side, seatIndex)
   local out = nil
   for _, e in ipairs(listOf(fx)) do
-    if type(e) == "table" and e.side == side
+    if type(e) == "table" and SEAT_FX[e.kind] and e.side == side
        and (e.seatIndex == nil or e.seatIndex == seatIndex) then
       out = out or {
         dx = 0, dy = 0, alpha = 1, scale = 1, flash = 0, hidden = false,
@@ -2724,8 +2763,377 @@ local function anchorCounts(layout, side)
   return { mons = mons, humans = humans, plates = plates, pending = pending }
 end
 
--- Field-level fx that are not seat modifiers: the ball in flight, the ball
--- rocking on the ground, and the poof a mon materialises out of.
+-- ------- particle fx: math locals
+--
+-- The one place in this file that pulls math functions into locals. Every
+-- other draw helper here runs once per frame per widget; a particle emission
+-- runs `Vfx.count` times per effect per frame -- twenty-odd calls each doing a
+-- sin, a cos and two comparisons -- and several effects can be live at once.
+
+local cos, sin, pi = math.cos, math.sin, math.pi
+local max, min = math.max, math.min
+
+-- ------- particle shapes
+--
+-- One primitive per `shape` in src/Vfx.lua's style table, each drawn from the
+-- particle's own position and angle. Every one of them is a handful of vector
+-- ops -- there is no particle texture and there never will be one, because a
+-- bitmap here would be an asset this repo cannot ship (see the legal posture in
+-- CLAUDE.md) and because vectors scale with the arena's fill-scale canvas for
+-- free.
+--
+-- The polygon scratch tables are module-level and re-filled in place. A frame
+-- can carry a couple of hundred particles across several live effects, and a
+-- fresh vertex table per particle per frame is the one allocation in this file
+-- that would actually show up in a 60Hz budget. Each table is always written
+-- in full, so `#` never sees a stale vertex from a larger shape.
+local POLY3 = { 0, 0, 0, 0, 0, 0 }
+local POLY4 = { 0, 0, 0, 0, 0, 0, 0, 0 }
+local POLY5 = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+local POLY8 = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+-- Write vertex `n` of `poly` as the local offset (lx, ly) rotated by `ang` and
+-- placed at (x, y).
+local function put(poly, n, x, y, lx, ly, c, s)
+  poly[n * 2 - 1] = x + lx * c - ly * s
+  poly[n * 2] = y + lx * s + ly * c
+end
+
+-- The pentagon a rock / dirt chunk is, deliberately irregular so a tumbling
+-- one never reads as a spinning circle.
+local CHUNK_X = { 1.0, 0.35, -0.85, -0.75, 0.30 }
+local CHUNK_Y = { 0.15, 1.0, 0.60, -0.60, -1.0 }
+
+-- Draw one particle. `ax, ay` is the effect's anchor (a bolt is drawn *from*
+-- it), `x, y` the particle, `r` its radius in px, `ang` its rotation.
+local function drawParticleShape(gfx, shape, ax, ay, x, y, r, ang)
+  if r <= 0.2 then return end
+  local c, s = cos(ang), sin(ang)
+
+  if shape == "dot" then
+    gfx.circle("fill", x, y, r)
+
+  elseif shape == "puff" then
+    -- The soft body only. Its brighter core is a second circle the caller
+    -- draws (`drawVfxBurst`), because the core wants the palette's *first*
+    -- colour rather than the tint this particle was given -- which is what
+    -- makes smoke and flame read as lit from the inside.
+    gfx.circle("fill", x, y, r)
+
+  elseif shape == "streak" then
+    -- A taper pointing back at the anchor: wide where the particle is, closed
+    -- where it came from. Three vertices, so it stays a spray and never a
+    -- lozenge.
+    local len = r * 2.6
+    put(POLY3, 1, x, y, 0, -r * 0.55, c, s)
+    put(POLY3, 2, x, y, 0, r * 0.55, c, s)
+    put(POLY3, 3, x, y, -len, 0, c, s)
+    gfx.polygon("fill", POLY3)
+
+  elseif shape == "bolt" then
+    -- Three segments from the anchor to the particle, each kicked sideways --
+    -- electricity that travels in a straight line is a laser, not a spark.
+    local dx, dy = x - ax, y - ay
+    local nx, ny = -dy, dx
+    local len = (nx * nx + ny * ny) ^ 0.5
+    if len > 0.001 then nx, ny = nx / len, ny / len end
+    local k = r * 0.75
+    gfx.line(ax, ay,
+      ax + dx * 0.33 + nx * k, ay + dy * 0.33 + ny * k,
+      ax + dx * 0.66 - nx * k, ay + dy * 0.66 - ny * k,
+      x, y)
+
+  elseif shape == "shard" then
+    local w = r * 0.42
+    put(POLY4, 1, x, y, r * 1.5, 0, c, s)
+    put(POLY4, 2, x, y, 0, w, c, s)
+    put(POLY4, 3, x, y, -r * 1.5, 0, c, s)
+    put(POLY4, 4, x, y, 0, -w, c, s)
+    gfx.polygon("fill", POLY4)
+
+  elseif shape == "leaf" then
+    -- A lens: two points on the long axis, two bulges off it.
+    put(POLY4, 1, x, y, r * 1.35, 0, c, s)
+    put(POLY4, 2, x, y, 0, r * 0.62, c, s)
+    put(POLY4, 3, x, y, -r * 1.35, 0, c, s)
+    put(POLY4, 4, x, y, 0, -r * 0.62, c, s)
+    gfx.polygon("fill", POLY4)
+
+  elseif shape == "chunk" then
+    for i = 1, 5 do
+      put(POLY5, i, x, y, CHUNK_X[i] * r, CHUNK_Y[i] * r, c, s)
+    end
+    gfx.polygon("fill", POLY5)
+
+  elseif shape == "arc" then
+    -- A crescent sweep. Drawn as a stroked arc so wind reads as motion rather
+    -- than as a row of dots.
+    gfx.arc("line", "open", x, y, r * 1.8, ang - 0.9, ang + 0.9)
+
+  elseif shape == "ring" then
+    gfx.circle("line", x, y, r)
+
+  elseif shape == "star" then
+    -- Four points and four deep valleys: a twinkle, not an octagon.
+    for i = 1, 8 do
+      local a = ang + (i - 1) * (pi / 4)
+      local rad = ((i % 2) == 1) and r * 1.5 or r * 0.34
+      POLY8[i * 2 - 1] = x + cos(a) * rad
+      POLY8[i * 2] = y + sin(a) * rad
+    end
+    gfx.polygon("fill", POLY8)
+
+  elseif shape == "arrow" then
+    -- Head plus stem, pointing along `ang` (0 is up, pi is down), because a
+    -- stat stage is the one effect a player is meant to *count*.
+    put(POLY3, 1, x, y, 0, -r * 1.25, c, s)
+    put(POLY3, 2, x, y, -r * 0.85, -r * 0.1, c, s)
+    put(POLY3, 3, x, y, r * 0.85, -r * 0.1, c, s)
+    gfx.polygon("fill", POLY3)
+    put(POLY4, 1, x, y, -r * 0.34, -r * 0.1, c, s)
+    put(POLY4, 2, x, y, r * 0.34, -r * 0.1, c, s)
+    put(POLY4, 3, x, y, r * 0.34, r * 1.15, c, s)
+    put(POLY4, 4, x, y, -r * 0.34, r * 1.15, c, s)
+    gfx.polygon("fill", POLY4)
+
+  elseif shape == "note" then
+    -- A head and a flag. `ang` is a bob rather than a spin, so the note stays
+    -- upright while it drifts.
+    put(POLY4, 1, x, y, -r * 0.62, r * 0.62, c, s)
+    put(POLY4, 2, x, y, r * 0.10, r * 0.62, c, s)
+    put(POLY4, 3, x, y, r * 0.10, -r * 1.05, c, s)
+    put(POLY4, 4, x, y, -r * 0.30, -r * 1.05, c, s)
+    gfx.polygon("fill", POLY4)
+    gfx.circle("fill", x + (-r * 0.26) * c - (r * 0.62) * s,
+      y + (-r * 0.26) * s + (r * 0.62) * c, r * 0.52)
+
+  else
+    gfx.circle("fill", x, y, r)
+  end
+end
+
+-- The style-level flourish: one expanding outline at the anchor, drawn once
+-- rather than per particle. Three shapes, and each says something different --
+-- a shock is the concussion of a blow, a wave is the ripple a heavy landing
+-- puts through the ground (so it is flattened), a pulse is two soft rings
+-- breathing out of a heal or a psychic pull.
+local function drawVfxRing(gfx, kind, x, y, R, t, color)
+  local lw = gfx.getLineWidth and gfx.getLineWidth() or 1
+  if kind == "shock" then
+    local e = 1 - (1 - t) * (1 - t)
+    local a = (1 - t) * 0.8
+    if a > 0.01 then
+      if gfx.setLineWidth then pcall(gfx.setLineWidth, 2 + 2 * (1 - t)) end
+      gfx.setColor(color[1], color[2], color[3], a)
+      gfx.circle("line", x, y, max(1, R * (0.25 + e * 1.05)))
+    end
+  elseif kind == "wave" then
+    local e = 1 - (1 - t) * (1 - t) * (1 - t)
+    local a = (1 - t) * 0.55
+    if a > 0.01 then
+      if gfx.setLineWidth then pcall(gfx.setLineWidth, 2) end
+      gfx.setColor(color[1], color[2], color[3], a)
+      gfx.ellipse("line", x, y + R * 0.42,
+        max(1, R * (0.3 + e * 1.25)), max(1, R * (0.3 + e * 1.25) * 0.34))
+    end
+  elseif kind == "pulse" then
+    if gfx.setLineWidth then pcall(gfx.setLineWidth, 2) end
+    for i = 1, 2 do
+      local u = t * 1.35 - (i - 1) * 0.3
+      if u > 0 and u < 1 then
+        gfx.setColor(color[1], color[2], color[3], (1 - u) * 0.5)
+        gfx.circle("line", x, y, max(1, R * (0.2 + u * 0.9)))
+      end
+    end
+  end
+  if gfx.setLineWidth then pcall(gfx.setLineWidth, lw) end
+end
+
+-- One emission's particles, at (x, y) with radius R and progress t.
+local function drawVfxBurst(gfx, styleName, pal, x, y, R, t, seed, intensity)
+  local def = Vfx.style(styleName)
+  local n = Vfx.count(styleName, intensity)
+  local line = def.shape == "bolt" or def.shape == "ring" or def.shape == "arc"
+  local lw = gfx.getLineWidth and gfx.getLineWidth() or 1
+  if line and gfx.setLineWidth then pcall(gfx.setLineWidth, 2) end
+  for i = 1, n do
+    local px, py, pr, pa, tint, ang = Vfx.particle(styleName, i, n, t, seed)
+    if pa > 0.01 then
+      local c = pal[tint] or pal[2]
+      local sx, sy = x + px * R, y + py * R
+      local rad = pr * def.size
+      gfx.setColor(c[1], c[2], c[3], pa)
+      drawParticleShape(gfx, def.shape, x, y, sx, sy, rad, ang)
+      -- A puff's core: the same mote again at half the radius in the palette's
+      -- brightest colour, which is what makes smoke read as lit from inside.
+      if def.shape == "puff" and rad > 2 then
+        local core = pal[1]
+        gfx.setColor(core[1], core[2], core[3], pa * 0.55)
+        gfx.circle("fill", sx, sy, rad * 0.45)
+      end
+    end
+  end
+  if line and gfx.setLineWidth then pcall(gfx.setLineWidth, lw) end
+  if def.ring then
+    drawVfxRing(gfx, def.ring, x, y, R, t, pal[1])
+  end
+end
+
+-- The flash at the anchor as an effect opens: brief, and gone by a third of
+-- the way through. It is what stops a burst from looking like it faded in.
+local function drawVfxGlow(gfx, def, pal, x, y, R, t)
+  local glow = num(def.glow, 0)
+  if glow <= 0 or t >= 0.34 then return end
+  local u = 1 - t / 0.34
+  local c = pal[1]
+  gfx.setColor(c[1], c[2], c[3], glow * u * u)
+  gfx.circle("fill", x, y, max(1, R * (0.28 + 0.32 * u)))
+end
+
+-- A beam: attacker to defender, widening as it opens, held, then thinning out.
+-- Two passes -- an outer body in the palette's mid colour and a thin core in
+-- its brightest -- which is the whole trick that makes a flat quad read as
+-- energy rather than as a coloured stick.
+local function drawVfxBeam(gfx, x0, y0, x1, y1, t, pal, R)
+  local dx, dy = x1 - x0, y1 - y0
+  local len = (dx * dx + dy * dy) ^ 0.5
+  if len < 0.001 then return end
+  local nx, ny = -dy / len, dx / len
+  -- Opens in the first fifth, holds, and is gone by the end.
+  local open = min(1, t / 0.2)
+  local fade = (t > 0.55) and (1 - (t - 0.55) / 0.45) or 1
+  local w = M.FX_BEAM_W * (R / M.FX_VFX_R) * open * max(0, fade)
+  if w <= 0.2 then return end
+  for pass = 1, 2 do
+    local half = (pass == 1) and w or w * 0.34
+    local c = (pass == 1) and pal[2] or pal[1]
+    local a = ((pass == 1) and 0.55 or 0.9) * max(0, fade)
+    POLY4[1] = x0 + nx * half; POLY4[2] = y0 + ny * half
+    POLY4[3] = x1 + nx * half; POLY4[4] = y1 + ny * half
+    POLY4[5] = x1 - nx * half; POLY4[6] = y1 - ny * half
+    POLY4[7] = x0 - nx * half; POLY4[8] = y0 - ny * half
+    gfx.setColor(c[1], c[2], c[3], a)
+    gfx.polygon("fill", POLY4)
+  end
+end
+
+-- A projectile in flight: a bright core on a shallow arc, with a short tail of
+-- motes strung out behind it along the path it has already covered.
+local function drawVfxFlight(gfx, x0, y0, x1, y1, u, pal, R, seed)
+  -- One arc, evaluated at several points: the core is at `u` and each trail
+  -- mote at a fraction of the flight behind it, so the tail lies *on* the path
+  -- the core actually took rather than on a straight line under it.
+  local function at(p)
+    return x0 + (x1 - x0) * p, y0 + (y1 - y0) * p - 4 * p * (1 - p) * R * 0.55
+  end
+  for i = M.FX_VFX_TRAIL, 1, -1 do
+    local p = u - i * 0.055
+    if p > 0 then
+      local tx, ty = at(p)
+      local c = pal[2]
+      gfx.setColor(c[1], c[2], c[3], 0.5 * (1 - i / (M.FX_VFX_TRAIL + 1)))
+      gfx.circle("fill", tx, ty, max(1, R * 0.20 * (1 - i * 0.13)))
+    end
+  end
+  local cx, cy = at(u)
+  local mid, core = pal[2], pal[1]
+  gfx.setColor(mid[1], mid[2], mid[3], 0.75)
+  gfx.circle("fill", cx, cy, max(1, R * 0.38))
+  gfx.setColor(core[1], core[2], core[3], 1)
+  gfx.circle("fill", cx, cy, max(1, R * 0.20))
+end
+
+-- Where an anchored effect actually lands: the seat if it is on the arena,
+-- otherwise the spot that seat is about to occupy. Same fallback the ball flow
+-- uses, and for the same reason -- an effect aimed at an empty seat (a send-out
+-- burst, an item used on a monster still coming in) must land where the
+-- monster will be, not be dropped.
+local function vfxAnchor(layout, side, seatIndex)
+  local seat = seatOf(layout, side, seatIndex)
+  if seat then return seat.x, seat.y end
+  return M.seatAnchor(side, seatIndex, anchorCounts(layout, side))
+end
+
+-- One `vfx` entry, end to end: resolve its look, work out where it plays, and
+-- hand the particles to the burst above.
+--
+-- The five deliveries and what each one does with the clock:
+--
+--   burst       the whole life is the burst, at the target seat.
+--   self        the same, at the seat it came from.
+--   field       the same, at mid-field and much wider -- Earthquake, Explosion,
+--               a Poke Flute, weather.
+--   projectile  the first M.FX_VFX_TRAVEL of the life is the flight and draws
+--               *only* the core and its tail; the remainder is the burst on
+--               arrival, replayed from t == 0 so the impact is a whole effect
+--               rather than the tail end of one.
+--   beam        the beam is drawn for the whole life and the burst rides under
+--               its far end, opening a beat late so the beam is seen to arrive
+--               before anything answers it.
+--
+-- A travelling delivery whose origin is missing (an effect published with no
+-- `fromSide`, or a thrower whose seat has left the field) degrades to a burst
+-- at the target rather than firing from the canvas corner: half an effect in
+-- the right place beats a whole one in the wrong one.
+local function drawVfx(layout, e)
+  local gfx = g()
+  if not gfx then return end
+  local def, styleName = Vfx.style(e.style)
+  local pal = Vfx.palette(e.palette)
+  local t = fxT(e.t)
+  local scale = clamp(num(e.scale, 1), 0.2, 3)
+  local intensity = clamp(num(e.intensity, 1), 0.15, 2.5)
+  local seed = math.floor(num(e.seed, 0))
+  local R = M.FX_VFX_R * scale
+
+  local side = e.side
+  local fromSide = (e.fromSide == "foe" or e.fromSide == "ally") and e.fromSide or nil
+  local delivery = e.delivery
+  if not Vfx.DELIVERIES[delivery] then delivery = "burst" end
+
+  local x, y = vfxAnchor(layout, side, e.seatIndex)
+  local burstT = t
+
+  if delivery == "self" then
+    if fromSide then x, y = vfxAnchor(layout, fromSide, e.fromSeat) end
+  elseif delivery == "field" then
+    x = M.MIDLINE
+    y = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.5)
+    R = R * M.FX_VFX_FIELD
+  elseif delivery == "projectile" and fromSide then
+    local ox, oy = vfxAnchor(layout, fromSide, e.fromSeat)
+    local travel = M.FX_VFX_TRAVEL
+    if t < travel then
+      pcall(drawVfxFlight, gfx, ox, oy, x, y, t / travel, pal, R, seed)
+      pcall(gfx.setColor, 1, 1, 1, 1)
+      return
+    end
+    burstT = (t - travel) / (1 - travel)
+  elseif delivery == "beam" and fromSide then
+    local ox, oy = vfxAnchor(layout, fromSide, e.fromSeat)
+    pcall(drawVfxBeam, gfx, ox, oy, x, y, t, pal, R)
+    burstT = clamp((t - 0.15) / 0.85, 0, 1)
+  end
+
+  -- Additive for the styles that are light rather than matter: overlapping
+  -- embers brighten into a hot core instead of stacking into an opaque blob.
+  -- The mode is restored in the same call it is set in, inside its own pcall,
+  -- so a throw mid-emission cannot leave the rest of the frame in "add" (same
+  -- guard shape as drawMonIcon's blend-mode re-blit and drawPoof's line width).
+  local additive = Vfx.additive(styleName) and gfx.setBlendMode ~= nil
+  local restored = false
+  if additive then restored = pcall(gfx.setBlendMode, "add", "alphamultiply") end
+  pcall(function()
+    drawVfxGlow(gfx, def, pal, x, y, R, burstT)
+    drawVfxBurst(gfx, styleName, pal, x, y, R, burstT, seed, intensity)
+  end)
+  if restored then pcall(gfx.setBlendMode, "alpha", "alphamultiply") end
+  pcall(gfx.setColor, 1, 1, 1, 1)
+end
+
+-- Field-level fx that are not seat modifiers: a move's (or an item's, or a
+-- condition's) particles, the ball in flight, the ball rocking on the ground,
+-- and the poof a mon materialises out of.
 --
 -- None of these needs an occupant, and a send-out has none by construction:
 -- the seat is empty from the throw until the burst installs the monster. So an
@@ -2740,7 +3148,9 @@ local function drawFieldFx(layout)
   for _, e in ipairs(listOf(layout.fx)) do
     local side = type(e) == "table"
       and (e.side == "foe" or e.side == "ally") and e.side or nil
-    if side and (e.kind == "ball" or e.kind == "wobble" or e.kind == "poof") then
+    if side and e.kind == "vfx" then
+      pcall(drawVfx, layout, e)
+    elseif side and (e.kind == "ball" or e.kind == "wobble" or e.kind == "poof") then
       local seat = seatOf(layout, side, e.seatIndex)
       local x, y = nil, nil
       if seat then

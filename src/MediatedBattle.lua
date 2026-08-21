@@ -45,6 +45,9 @@ local Wire = need("Wire")
 local Effects1 = need("BattleSim/Effects")
 local Gen = need("Gen")
 local Battlefield = need("Battlefield")
+-- Which particle effect a move / item / condition / stat stage wears. A
+-- catalogue, not a renderer: Battlefield draws what this resolves.
+local Vfx = need("Vfx")
 -- The Gen 2 half of the award. Gen 1 prices a refereed faint with the engine's
 -- `src/battle/Experience.lua`, which Gold does not have -- its award lives
 -- inside a live `src/battle/gen2/Battle.lua` this screen never owns. `Exp2` is
@@ -337,26 +340,85 @@ function M.snapshotRuleset(game)
     end
   end
 
-  -- Gen1 Special category is type-based.  Indices match the chart axes above
-  -- so the intermediator never needs type *names*.
+  -- ------- which types are Special
+  --
+  -- Gen 1 and Gen 2 both split physical from special by TYPE, and the chart
+  -- itself is the authority: every type record the `type_chart` registry
+  -- serves carries a `category` of "physical" or "special"
+  -- (src/battle/TypeChart.lua's TYPES, merged into `data.type_chart.types` by
+  -- the registry's own write). Reading it means a mod that registers a
+  -- nineteenth type is honoured, Gen 2's Dark is picked up without a second
+  -- list here, and -- the reason this stopped being a name match -- **a type
+  -- whose registry id is not its own name still resolves**.
+  --
+  -- That last one was a real, shipped bug. Psychic's id is `PSYCHIC_TYPE`,
+  -- because `PSYCHIC` is already a move; the old table keyed on `PSYCHIC`, so
+  -- Psychic dropped out of the uploaded list and every Psychic move in every
+  -- refereed fight was resolved on atk/def instead of spc/spc, with Light
+  -- Screen not halving it. Six of the seven types matched, so the guard below
+  -- -- which only fired at *zero* -- never said a word.
+  --
+  -- The two name lists are the fallback for a type the chart ships without a
+  -- category, and Gold needs them: `TypeChart.TYPES` carries records for the
+  -- fifteen Gen 1 types only, so on a Gen 2 boot Dark and Steel reach the
+  -- chart through their matchups with no record behind them.
+  --
+  -- **Physical is listed as well as Special, and not for symmetry.** The
+  -- warning below fires for a type neither list nor record can place, and
+  -- without the physical names every Gen 2 Steel move would raise a false
+  -- alarm about a type that is Physical exactly as intended. A warning that
+  -- cries wolf on stock data is a warning nobody reads.
   local SPECIAL = {
     FIRE = true, WATER = true, GRASS = true, ELECTRIC = true,
-    ICE = true, PSYCHIC = true, DRAGON = true,
+    ICE = true, DRAGON = true, DARK = true,
+    PSYCHIC = true, PSYCHIC_TYPE = true,
+  }
+  local PHYSICAL = {
+    NORMAL = true, FIGHTING = true, FLYING = true, POISON = true,
+    GROUND = true, ROCK = true, BUG = true, GHOST = true, STEEL = true,
+    BIRD = true, -- the unused beta type at chart index 13
   }
   local specialTypes = {}
   if order then
+    local records = type(data) == "table" and type(data.type_chart) == "table"
+      and data.type_chart.types or nil
+    local unknown = {}
     for i, id in ipairs(order.ids) do
-      if SPECIAL[id] then specialTypes[#specialTypes + 1] = i - 1 end
+      local record = type(records) == "table" and records[id] or nil
+      local category = type(record) == "table" and record.category or nil
+      local isSpecial
+      if category ~= nil then
+        isSpecial = (category == "special")
+      else
+        isSpecial = SPECIAL[id] == true
+        -- Neither the record nor either name list places this one, so it is
+        -- about to be fought as Physical on a guess.
+        if not isSpecial and not PHYSICAL[id] then
+          unknown[#unknown + 1] = id
+        end
+      end
+      if isSpecial then specialTypes[#specialTypes + 1] = i - 1 end
     end
-    -- A chart with types but zero Special matches means Light Screen / Spc
-    -- damage will never fire. Name the remediation rather than silently
-    -- degrading to "everything is Physical".
+    -- Named rather than counted, and that is the fix to the guard: a list
+    -- that is *partly* wrong is the dangerous case, and counting only caught
+    -- the totally-empty one.
+    if #unknown > 0 then
+      local one = #unknown == 1
+      mod.log:warn("type chart has no category for %s; %s will be fought as "
+        .. "Physical (atk/def) and Light Screen will not halve %s. Give the "
+        .. "type record a category of \"special\" or \"physical\", or upload "
+        .. "specialTypes yourself",
+        table.concat(unknown, ", "),
+        one and "it" or "they", one and "it" or "them")
+    end
+    -- ...and the original guard, still worth keeping: a chart that resolved
+    -- cleanly and yielded nothing Special at all is a ruleset in which Light
+    -- Screen and Special damage can never fire.
     if #order.ids > 0 and #specialTypes == 0 then
-      mod.log:warn("type chart has %d types but none match Gen1 Special "
-        .. "(FIRE/WATER/GRASS/ELECTRIC/ICE/PSYCHIC/DRAGON); Light Screen and "
-        .. "Special damage will treat every move as Physical. Check that "
-        .. "type ids use those names (or upload specialTypes yourself)",
-        #order.ids)
+      mod.log:warn("type chart has %d types and none of them are Special; "
+        .. "Light Screen and Special damage will treat every move as "
+        .. "Physical. Check the type records' `category` (or upload "
+        .. "specialTypes yourself)", #order.ids)
     end
   end
 
@@ -1028,6 +1090,19 @@ local FX_SPAN = {
   ball   = 0.60, -- TOSS / GREATTOSS / ULTRATOSS: the arc
   wobble = 0.70, -- SHAKE: one rock, one per shake the referee counted
   poof   = 0.45, -- POOF / SHOWPIC: the burst, and what comes out of it
+  -- Particles (src/Vfx.lua). One span for every look, because a span here is a
+  -- pacing decision and the catalogue is a *visual* one -- the two must not be
+  -- able to drift, or adding a prettier Fire effect would silently lengthen
+  -- every Fire attack. A spec that genuinely needs longer says so on the
+  -- record (`duration`), which is how Explosion and a Poke Flute get their
+  -- extra fifth of a second without moving anything else.
+  --
+  -- 0.50 rather than the lunge's 0.35 on purpose: the effect is emitted on the
+  -- lunge beat and is meant to still be running when the hit beat lands behind
+  -- it, so a fired move is in the air while the attacker leans and bursts as
+  -- the defender flashes. It outliving its beat costs nothing -- `stepFx` runs
+  -- on its own clock and retires it wherever the queue has got to.
+  vfx    = 0.50,
 }
 
 -- The per-attack chronology's two deliberate gaps. One attack is four beats on
@@ -1088,6 +1163,16 @@ local BALL_FX = {
 -- here only kept a finished arc alive at t == 1 and dropped it again on a
 -- side-wide clear that has nothing to do with it.
 local BALL_HIDE_FX = { recall = true, wobble = true }
+
+-- The fields a `vfx` record carries beyond the shared kind / side / seatIndex
+-- / t. Written out longhand rather than copied by pairs() so the wire this
+-- screen publishes to Battlefield stays a closed set: a field invented here
+-- and never read there is a look that silently does nothing, and a field that
+-- shadowed `kind` or `elapsed` would be an effect that never retires.
+local VFX_KEYS = {
+  "style", "palette", "delivery", "scale", "intensity", "seed",
+  "fromSide", "fromSeat",
+}
 
 -- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
 -- number came off the wire, and a hub claiming a thousand would otherwise
@@ -1282,6 +1367,14 @@ function M.new(opts)
     -- strip that answers the award. All of them stay nil until something is
     -- actually playing.
     fx = nil,
+    -- The move whose particles are on screen, kept so the impact burst on the
+    -- beat behind it can borrow that move's colours (`startMoveVfx`).
+    moveVfx = nil,
+    -- Counts up per emission and wraps; it is what stops two casts of the same
+    -- move from drawing the identical particles. Deliberately a counter and
+    -- not a roll: both players' screens step it the same way over the same
+    -- event stream, so a shared fight stays a shared sight.
+    vfxSeed = 0,
     draining = nil,
     faintFx = nil,
     -- Seats holding an arrival that has not had its spawn beat yet: slot index
@@ -2154,7 +2247,7 @@ function M:onEvent(msg)
     -- arrives as one batch, so both seats would jolt in the same frame, ahead
     -- of the text that explains either. `startDrain` fires them when the bar
     -- this row queued actually starts falling.
-    self:queueDrain(msg.slot)
+    self:queueDrain(msg.slot, msg.status)
 
   elseif kind == "faint" then
     local slot = self:noteSlot(msg)
@@ -2259,6 +2352,22 @@ function M:onEvent(msg)
 
   elseif kind == "status" then
     self:noteSlot(msg)
+    -- An event carrying a `status` inflicted it; one carrying none cleared it,
+    -- and a condition lifting is a sentence rather than a sight -- the
+    -- catalogue answers nil for the token that is not there, so nothing is
+    -- filed. Anchored on the seat that took it, in that condition's colours.
+    self:queueVfx(Vfx.forStatus(msg.status), msg.slot)
+
+  elseif kind == "stat" then
+    -- Arrows on the seat, and the direction comes off the sentence rather than
+    -- off `amount`: the referee sends the resulting *stage*, not the change
+    -- (src/BattleSim/Turn.lua's three `_emit("stat")` sites), so the number
+    -- alone cannot say which way it went. Every one of those three is a rise,
+    -- which is why "rose" is the default and "fell" is what is looked for --
+    -- a referee that grows a drop event still draws the right arrows.
+    local down = type(msg.text) == "string"
+      and msg.text:lower():find("fell", 1, true) ~= nil
+    self:queueVfx(Vfx.forStat(down and -1 or 1), msg.slot)
 
   elseif kind == "item" then
     -- Debit only once the hub has accepted and resolved the item choice.
@@ -2267,6 +2376,11 @@ function M:onEvent(msg)
     if msg.slot == self:mySlot() then
       self:confirmPendingItem(msg.text, msg.amount)
     end
+    -- ...and what it looks like, on the seat of whoever opened the bag. Balls
+    -- answer nil (`Vfx.forItem`) and are left to the throw chain below, which
+    -- already draws the arc, the rocking and the burst -- a second effect over
+    -- that would be drawing the same throw twice.
+    self:queueVfx(Vfx.forItem(msg.text), msg.slot, msg.slot)
     -- Ball id for AnimPlayer opts on the following toss/shake chain.
     local effect = msg.text and effectsFor(self.game).itemEffect(msg.text)
     if effect and effect.ball then
@@ -4109,6 +4223,12 @@ function M:tickMessages(dt, input)
       self:startFaintFx(next)
       return true
     end
+    if type(next) == "table" and next.vfxrow ~= nil then
+      -- No dwell and no hold: the line this effect belongs to is the very next
+      -- row, and the effect is meant to play under it. See `startVfxRow`.
+      self:startVfxRow(next)
+      return true
+    end
     if type(next) == "table" and next.sendball ~= nil then
       -- The throw, held for the arc's own lifetime.
       self:startSendBall(next)
@@ -4349,6 +4469,15 @@ function M:startAnim(row)
       -- The defender's flash and the field's nudge ride the drain row behind
       -- this one -- their own beat again -- so a move that misses only lunges.
       self:emitFx("lunge", row.slot, row.side)
+      -- ...and the move's own particles, on the same beat as the lean, because
+      -- the two are one action: the monster leans in and the fire leaves it.
+      --
+      -- Emitted for **every** move, not only the ones that connect -- a status
+      -- move never reaches a drain row and a miss never reaches one either, so
+      -- an effect gated on damage would leave two thirds of the move list
+      -- drawing nothing. What the blow landing adds is its own, smaller burst
+      -- (`startDrain`, beat 3).
+      self:startMoveVfx(row)
     else
       -- ...and the markers it excludes are the throw itself: the arc, the
       -- recall, each wobble and the burst, one per queued row and each held
@@ -4455,7 +4584,7 @@ end
 -- `seatIndex` is 1-based within the side; a mediated 1v1 has exactly one seat
 -- per side, and the argument is here so a future multi-seat mode does not
 -- have to change the contract Battlefield renders against.
-function M:emitFx(kind, index, side, seatIndex)
+function M:emitFx(kind, index, side, seatIndex, extra)
   if not self:usesBattlefield() then return nil end
   local span = FX_SPAN[kind]
   if not span then return nil end
@@ -4467,6 +4596,19 @@ function M:emitFx(kind, index, side, seatIndex)
     elapsed = 0,
     duration = span,
   }
+  -- `extra` is the particle record's own payload (style, palette, delivery,
+  -- scale, intensity, seed, and the seat a travelling effect launches from).
+  -- Copied key by key rather than merged wholesale so a caller cannot
+  -- accidentally overwrite `kind`, `t` or `elapsed` -- the three fields
+  -- `stepFx` owns -- and so a spec table from the catalogue can be handed in
+  -- directly without being defensively copied first.
+  if type(extra) == "table" then
+    for _, key in ipairs(VFX_KEYS) do
+      if extra[key] ~= nil then fx[key] = extra[key] end
+    end
+    local span2 = tonumber(extra.duration)
+    if span2 and span2 > 0 then fx.duration = span2 end
+  end
   local list = self.fx
   if type(list) ~= "table" then
     list = {}
@@ -4474,6 +4616,121 @@ function M:emitFx(kind, index, side, seatIndex)
   end
   list[#list + 1] = fx
   return fx
+end
+
+-- ------- particles
+--
+-- One emission, from a spec src/Vfx.lua resolved. Everything that has a look
+-- goes through here -- a move, an item, a condition landing, a stat stage
+-- moving -- so there is exactly one place that decides what a seed is, which
+-- seat an effect is anchored to and which one it travels from.
+--
+-- `targetIndex` is the field slot the effect lands on; `fromIndex` the slot it
+-- comes from, and it is only meaningful for the travelling deliveries
+-- (projectile / beam) and for `self`. A nil spec is not an error -- the
+-- catalogue answers nil for a thrown ball, which already has a whole flow of
+-- its own, and for an item that does nothing -- so it is simply not drawn.
+function M:emitVfx(spec, targetIndex, fromIndex)
+  if type(spec) ~= "table" then return nil end
+  if not self:usesBattlefield() then return nil end
+  -- The seed is what stops two Flamethrowers in a row from drawing the
+  -- identical sixteen sparks. Counted rather than random: two clients watching
+  -- the same fight see the same particles, and a headless run is reproducible.
+  self.vfxSeed = ((tonumber(self.vfxSeed) or 0) + 1) % 512
+  local extra = {
+    style = spec.style,
+    palette = spec.palette,
+    delivery = spec.delivery,
+    scale = spec.scale,
+    intensity = spec.intensity,
+    duration = spec.duration,
+    seed = self.vfxSeed,
+  }
+  if fromIndex ~= nil then
+    extra.fromSide = self:fxSideFor(fromIndex)
+    extra.fromSeat = 1
+  end
+  return self:emitFx("vfx", targetIndex, nil, nil, extra)
+end
+
+-- The move a queued `anim` row names, as the engine's own record. nil for a
+-- ball marker, for a row naming a move this build does not have, and headless.
+function M:moveDefFor(animId)
+  if type(animId) ~= "string" or animId == "" then return nil end
+  local data = self.game and self.game.data
+  local moves = data and data.moves
+  if type(moves) ~= "table" then return nil end
+  local def = moves[animId]
+  return (type(def) == "table") and def or nil
+end
+
+-- The seat opposite a slot, which is where a move aimed at "the other side"
+-- lands. A mediated fight is 1v1, so this is exact rather than a guess.
+function M:opposingSlot(index)
+  if index == self:foeSlot() then return self:mySlot() end
+  return self:foeSlot()
+end
+
+-- A move's particles, on the lunge beat.
+--
+-- The spec is also kept (`self.moveVfx`) because beat 3's impact burst is
+-- drawn in the *attacking move's* colours, and that beat is a different row --
+-- so the two are joined by remembering the last move played rather than by
+-- either row carrying the other's business. Cleared first, so a row this
+-- refuses to draw for cannot leave the previous move's palette standing.
+--
+-- Returns the effect record, or nil for a row with no move behind it.
+function M:startMoveVfx(row)
+  self.moveVfx = nil
+  if not self:usesBattlefield() then return nil end
+  if type(row) ~= "table" then return nil end
+  local animId = row.anim
+  if type(animId) ~= "string" or animId == "" then return nil end
+
+  -- `moveDefFor` is nil for a move this build does not carry -- a Gen 2 id on
+  -- a Gen 1 boot, a referee running a mod this client does not have -- and the
+  -- catalogue answers for a nil definition rather than refusing: an unknown
+  -- move draws NORMAL's impact, which is the right amount of "something
+  -- happened" for a move nobody here can name.
+  local spec = Vfx.forMove(animId, self:moveDefFor(animId))
+  self.moveVfx = spec
+
+  local from = row.slot
+  if from == nil and row.side ~= nil then from = slotOfSide(row.side) end
+  if from == nil then from = self:mySlot() end
+  -- A move that acts on its user plays on the user's own seat; everything else
+  -- is aimed at the seat opposite, which in a 1v1 is exactly one seat.
+  local target = (spec.delivery == "self") and from or self:opposingSlot(from)
+  return self:emitVfx(spec, target, from)
+end
+
+-- A queued particle row -- an item opening, a condition landing, a stat stage
+-- moving -- reaching the head of the queue.
+--
+-- **It takes no hold.** Every one of these has a sentence of its own coming
+-- immediately behind it ("X was healed", "X was poisoned!"), and the effect is
+-- meant to be running *under* that line rather than before it: holding here
+-- would insert half a second of empty arena between the item being used and
+-- the box saying so. The row costs one tick and the queue moves straight on.
+function M:startVfxRow(row)
+  if type(row) ~= "table" then return false end
+  local spec = row.vfxrow
+  if type(spec) ~= "table" then return false end
+  self:emitVfx(spec, row.slot, row.from)
+  return true
+end
+
+-- File one, in referee order. Called at parse rather than at play so the
+-- effect keeps its place in the stream relative to the lines around it; a nil
+-- spec (a thrown ball, an item with no look, a condition clearing) files
+-- nothing at all.
+function M:queueVfx(spec, index, fromIndex)
+  if type(spec) ~= "table" then return false end
+  if not self:usesBattlefield() then return false end
+  self.lines[#self.lines + 1] = {
+    vfxrow = spec, slot = index, from = fromIndex,
+  }
+  return true
 end
 
 -- ------- the ball flow
@@ -4905,7 +5162,12 @@ end
 -- can land between queue and play, and a fall meant for the monster that left
 -- would otherwise be run against the one that replaced it. CoopBattle's twin
 -- names the battler for the same reason.
-function M:queueDrain(index)
+-- `residual` is the `damage` event's own `status` field, present when a burn
+-- or poison ticking dealt the damage rather than a move. It rides on the row
+-- because beat 3's impact burst borrows the *attacking move's* palette, and a
+-- residual has no attacking move -- taking the last one's colours would paint
+-- a poison tick in the last Fire attack's orange.
+function M:queueDrain(index, residual)
   if index == nil then return false end
   if not self:usesBattlefield() then return false end
   local slot = self.slots[index]
@@ -4916,7 +5178,10 @@ function M:queueDrain(index)
     return false
   end
   if slot.shownHp == to then return false end
-  self.lines[#self.lines + 1] = { drain = index, to = to, species = slot.species }
+  self.lines[#self.lines + 1] = {
+    drain = index, to = to, species = slot.species,
+    residual = (residual ~= nil) or nil,
+  }
   return true
 end
 
@@ -4968,6 +5233,14 @@ function M:startDrain(row)
     table.insert(self.lines, 1, row)
     self:emitFx("flash", row.drain)
     self:emitFx("shake", row.drain)
+    -- The punctuation on the blow, in the attacking move's own colours: a
+    -- compact impact burst on the seat that took it. Small and short on
+    -- purpose -- the move's own effect is very likely still running over this
+    -- same seat, and this is the moment of contact inside it, not a second
+    -- effect competing with it. `self.anim` is the row that opened this
+    -- exchange, so a residual or a recoil with no move behind it gets the
+    -- neutral white burst rather than borrowing the last move's palette.
+    self:emitVfx(Vfx.forImpact(not row.residual and self.moveVfx or nil), row.drain)
     self.hitHold = BEAT_SPAN.hit
     return true
   end
@@ -5270,6 +5543,10 @@ function M:snapDisplay()
   self.replaceWait = nil
   self.ballFlow = nil
   self.fx = nil
+  -- The last move's palette goes with the effects it coloured: the next thing
+  -- to strike after a re-sync has no move behind it yet, and beat 3 would
+  -- otherwise open in the colours of an attack from before the gap.
+  self.moveVfx = nil
   self.animHold = nil
   self.hitHold = nil
   self.draining = nil

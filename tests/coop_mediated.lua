@@ -864,6 +864,82 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 5c. particle rows (src/Vfx.lua) -- items, conditions, stat stages
+-- ------------------------------------------------------------------
+--
+-- A move's particles ride the lunge beat inside `startAnim` and are covered by
+-- the battlefield driver; what is pinned here is the other three, which reach
+-- the arena as *queued rows* so they keep their place in the referee's order.
+-- The two that must file nothing are as load-bearing as the ones that do: a
+-- thrown ball already has a whole flow of its own, and a condition clearing is
+-- a sentence rather than a sight.
+
+do
+  local fxScreen = screen({ slots = npcSlots(), mine = 1, host = true,
+                            mode = "coop_npc", selfId = "ann" })
+  fxScreen:uploadMediated()
+  -- The id the upload minted, not one invented here: `onBattleReady` refuses a
+  -- battle that is not the one this screen uploaded for, and a refused ready
+  -- leaves `medSlots` empty -- which reads downstream as "every event names a
+  -- seat this client does not have" rather than as a setup mistake.
+  fxScreen:onBattleReady({ battle = fxScreen.battleId, mode = "coop_npc",
+    sides = { a = { "ann", "bob" }, b = { "ann" } } })
+  check(fxScreen.mediated == true, "the vfx screen is on the mediated path")
+
+  local function vfxRows(msg)
+    local out = {}
+    for _, row in ipairs(fxScreen:medRows(msg)) do
+      if row.kind == "vfx" then out[#out + 1] = row end
+    end
+    return out
+  end
+
+  local item = vfxRows({ t = "item", slot = 0, text = "POTION" })
+  eq(#item, 1, "an item files one particle row")
+  eq(item[1].spec.style, "heal", "...with the look the catalogue gave it")
+  eq(item[1].slot, 1, "...on the seat that opened the bag, mapped through medSlots")
+
+  eq(#vfxRows({ t = "item", slot = 0, text = "POKE_BALL" }), 0,
+     "a thrown ball files none: the throw chain already draws the arc, the "
+     .. "rocking and the burst")
+
+  local burn = vfxRows({ t = "status", slot = 0, status = "BRN",
+                         text = "was burned!" })
+  eq(#burn, 1, "a condition landing files one")
+  eq(burn[1].spec.style, "ember", "...in that condition's own look")
+
+  eq(#vfxRows({ t = "status", slot = 0, text = "is cured!" }), 0,
+     "a condition lifting files none -- a sentence rather than a sight")
+
+  local rose = vfxRows({ t = "stat", slot = 0, amount = 2,
+                         text = "PIKACHU's ATTACK rose" })
+  eq(#rose, 1, "a stat stage files one")
+  eq(rose[1].spec.style, "buff", "...arrows up, read off the sentence")
+  local fell = vfxRows({ t = "stat", slot = 0, amount = 2,
+                         text = "PIKACHU's DEFENSE fell" })
+  eq(fell[1] and fell[1].spec.style, "debuff", "...and arrows down for a drop")
+
+  -- The rows reach the queue as effects `update` will play, not as text.
+  fxScreen:playEvents({ { kind = "vfx", spec = { style = "heal",
+    palette = "HEAL", delivery = "self" }, slot = 1, from = 1 } })
+  local queued = nil
+  for _, row in ipairs(fxScreen.messages) do
+    if type(row) == "table" and row.vfxrow then queued = row end
+  end
+  check(queued ~= nil, "playEvents queues the effect rather than emitting it")
+  eq(queued and queued.vfxrow.style, "heal", "...carrying the look intact")
+
+  -- ...and off the arena nothing is emitted at all: the classic 160x144 path
+  -- has no renderer for a particle, so an emission there would cost a record
+  -- to draw nothing.
+  local classic = screen({ slots = npcSlots(), mine = 1, host = true,
+                           mode = "coop_npc", selfId = "ann" })
+  classic.usesBattlefield = function() return false end
+  eq(classic:emitVfx({ style = "heal", palette = "HEAL", delivery = "self" }, 1),
+     nil, "the classic path emits no particle effect")
+end
+
+-- ------------------------------------------------------------------
 -- 6. how it ends
 -- ------------------------------------------------------------------
 --
