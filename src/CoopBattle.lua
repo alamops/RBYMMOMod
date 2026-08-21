@@ -617,6 +617,13 @@ function M.new(game, opts)
     gen2Mediated = gen2Mediated or nil,
     phase = "intro",
     moveIndex = 1,
+    -- The move each of our party was last sent into a turn with, keyed by its
+    -- party index. Where the move list *opens* and nothing else (see
+    -- `rememberedMove`): a Gen 1 fight is mostly one attack repeated, and
+    -- re-walking the list to it every turn is the tax this removes. Per
+    -- monster, because the fourth row of the mon you switched to is a
+    -- different move.
+    moveMemory = {},
     targetIndex = 1,
     frame = 0,
     messages = {},
@@ -2019,6 +2026,21 @@ function M:liveMoves()
   return (battler and battler.curMoves) or {}
 end
 
+-- Where the move list opens: the move this monster last actually used, or its
+-- first move if it has not attacked yet.
+--
+-- Clamped against the list it has *now* rather than the one it had then --
+-- Transform and Mimic rewrite a sheet mid-fight, and a cursor left past the
+-- end would open on a row that is not drawn.
+function M:rememberedMove()
+  local slot = self:mySlot()
+  local moves = self:liveMoves()
+  local key = (slot and slot.active) or 1
+  local want = math.floor(tonumber((self.moveMemory or {})[key]) or 1)
+  if want < 1 or want > #moves then return 1 end
+  return want
+end
+
 function M:hasLivePP()
   if self.medMoveList then
     for _, move in ipairs(self.medMoveList) do
@@ -2062,7 +2084,7 @@ function M:updateCommand(input)
   elseif input:wasPressed("a") then
     local command = M.COMMANDS[self.commandIndex]
     if command == "FIGHT" then
-      self.moveIndex = 1
+      self.moveIndex = self:rememberedMove()
       self.phase = "move"
     elseif command == "SWITCH" then
       self.switchIndex = 1
@@ -2915,6 +2937,15 @@ end
 
 function M:commit(action)
   self.phase = "wait"
+  -- A fight, and only a fight: `kind` is set on run / switch / item, and an
+  -- item's `move` names the move being restored rather than one being used.
+  -- Taken here rather than at the three call sites in `updateMove` /
+  -- `updateTarget` so a fourth can never forget to.
+  if action and action.kind == nil and tonumber(action.move) then
+    local slot = self:mySlot()
+    self.moveMemory = self.moveMemory or {}
+    self.moveMemory[(slot and slot.active) or 1] = math.floor(action.move)
+  end
   -- Your own answer is in, whoever else's is not -- which is what keeps the
   -- wait line from naming the person reading it.
   self:markActed(action.slot)
@@ -6397,9 +6428,29 @@ function M:bandCommandItems()
   return items
 end
 
+-- A move's type under the name the classic TYPE/ strip prints.
+--
+-- `displayName` is what turns PSYCHIC_TYPE into PSYCHIC and a modded type into
+-- its registered name; it answers from the module's own vanilla records when
+-- nothing called `load`, so this is safe wherever it is asked. Without the
+-- module at all the raw type id is still true, just less pretty.
+function M:moveTypeName(id)
+  local moves = self.game and self.game.data and self.game.data.moves
+  local def = type(moves) == "table" and moves[id] or nil
+  local typeId = def and def.type
+  if type(typeId) ~= "string" or typeId == "" then return nil end
+  local TypeChart = engine and engine.TypeChart
+  if TypeChart and type(TypeChart.displayName) == "function" then
+    local ok, name = pcall(TypeChart.displayName, typeId)
+    if ok and type(name) == "string" and name ~= "" then return name end
+  end
+  return typeId
+end
+
 -- The move list, and the strip that used to sit beside it. PP is the row's own
--- right column now; TYPE rides the title, where it belongs to the highlighted
--- move rather than to the list.
+-- right column and TYPE the column left of it -- on every row, because what
+-- the player is comparing four ways is on the four rows, not on a strip that
+-- can only ever describe the highlighted one.
 function M:bandMoveRows()
   local moves = self:liveMoves()
   local data = self.game and self.game.data
@@ -6407,6 +6458,7 @@ function M:bandMoveRows()
   for _, moveInst in ipairs(moves) do
     local def = (data and data.moves or {})[moveInst.id]
     local row = { label = (def and def.name) or moveInst.id or "-" }
+    row.tag = self:moveTypeName(moveInst.id)
     local pp = tonumber(moveInst.pp)
     if def and tonumber(def.pp) then
       -- The classic strip's own arithmetic: PP Ups add a fifth of the base
@@ -6423,18 +6475,11 @@ function M:bandMoveRows()
   return rows
 end
 
+-- Just "MOVES" since the type moved onto the rows: the title used to carry
+-- `TYPE/x` for the highlighted move, and repeating on the header what every
+-- row already says is a header that only ever restates the cursor.
 function M:bandMoveTitle()
-  local moves = self:liveMoves()
-  local pick = moves[self.moveIndex or 1]
-  local def = pick and (self.game and self.game.data and self.game.data.moves
-    or {})[pick.id]
-  if not (def and def.type) then return "MOVES" end
-  local TypeChart = engine and engine.TypeChart
-  local typeName = def.type
-  if TypeChart and TypeChart.displayName then
-    typeName = TypeChart.displayName(def.type) or def.type
-  end
-  return ("MOVES   TYPE/%s"):format(tostring(typeName))
+  return "MOVES"
 end
 
 -- The bench, as `benchOf` filters it -- alive, and not the one already out.

@@ -105,6 +105,11 @@ local function loadEngine()
     AnimPlayer = grab("AnimPlayer", "src.battle.AnimPlayer"),
     BattleState = grab("BattleState", "src.battle.BattleState"),
     Sprites = grab("Sprites", "src.pokemon.Sprites"),
+    -- Display only, and soft for that reason: it names a move's type for the
+    -- move list's own column (`moveTypeName`). `displayName` needs no `load`
+    -- -- it falls back to the module's vanilla records -- so a build without
+    -- the chart shows the raw type id rather than losing the column.
+    TypeChart = grab("TypeChart", "src.battle.TypeChart"),
     -- Exp is the *client's* arithmetic and can only ever be. The referee holds
     -- no species table (the legal floor -- no ROM bytes on a hub), so it can
     -- never price a faint: it states what fell and how many shared it, and
@@ -1199,6 +1204,12 @@ function M.new(opts)
     shown     = nil,
     dwell     = 0,
     cursor    = 1,
+    -- The move each of ours was last sent into a turn with, keyed by its index
+    -- into `mine`. Purely where the cursor opens (see `rememberedMove`): a
+    -- Gen 1 fight is mostly one attack repeated, and re-walking the list to it
+    -- every turn is the tax this removes. Per monster, not per battle -- the
+    -- fourth row of the mon you switched to is a different move.
+    moveMemory = {},
     commandIndex = 1,
     itemIndex = 1,
     switchIndex = 1,
@@ -1652,6 +1663,26 @@ end
 
 -- A move's display name, CoopBattle's lookup: the registry name when the build
 -- has one, the wire id otherwise.
+-- A move's type under the name the player reads on the classic TYPE/ strip.
+--
+-- `TypeChart.displayName` is the mapping that turns PSYCHIC_TYPE into PSYCHIC
+-- and a modded type into its registered name, and it answers from the module's
+-- own vanilla records when nothing called `load` -- so this is safe on a
+-- screen that never touched the chart. A build without the module at all falls
+-- through to the raw id, which still says something true.
+function M:moveTypeName(id)
+  local moves = self.game and self.game.data and self.game.data.moves
+  local def = type(moves) == "table" and moves[id] or nil
+  local typeId = def and def.type
+  if type(typeId) ~= "string" or typeId == "" then return nil end
+  local TypeChart = (loadEngine() or {}).TypeChart
+  if TypeChart and type(TypeChart.displayName) == "function" then
+    local ok, name = pcall(TypeChart.displayName, typeId)
+    if ok and type(name) == "string" and name ~= "" then return name end
+  end
+  return typeId
+end
+
 function M:moveLabel(id)
   if type(id) ~= "string" or id == "" then return nil end
   local moves = self.game and self.game.data and self.game.data.moves
@@ -3380,7 +3411,29 @@ function M:pickMove(index)
   local mon = self:activeMon()
   local moves = mon and mon.moves
   if not (moves and moves[index]) then return false end
-  return self:sendChoice({ action = "fight", move = index - 1 })
+  local sent = self:sendChoice({ action = "fight", move = index - 1 })
+  -- Remembered only once the choice is really on the wire: a refused send
+  -- leaves the turn unspent, and moving the cursor for it would be the menu
+  -- reporting a decision that was not taken.
+  if sent then
+    self.moveMemory = self.moveMemory or {}
+    self.moveMemory[self.active or 1] = index
+  end
+  return sent
+end
+
+-- Where the move list opens: the move this monster last actually used, or its
+-- first move if it has not attacked yet.
+--
+-- Clamped against the list it has *now* rather than the one it had then --
+-- Transform and Mimic rewrite a sheet mid-fight, and a cursor left past the
+-- end would open on a row that is not drawn.
+function M:rememberedMove()
+  local mon = self:activeMon()
+  local moves = (mon and mon.moves) or {}
+  local want = math.floor(tonumber((self.moveMemory or {})[self.active or 1]) or 1)
+  if want < 1 or want > #moves then return 1 end
+  return want
 end
 
 -- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
@@ -3573,7 +3626,7 @@ function M:updateCommand(input)
   elseif input:wasPressed("a") then
     local command = M.COMMANDS[self.commandIndex]
     if command == "FIGHT" then
-      self.cursor = 1
+      self.cursor = self:rememberedMove()
       self.phase = "move"
     elseif command == "SWITCH" then
       self.switchIndex = 1
@@ -5507,6 +5560,10 @@ function M:bandMoveRows()
     -- list after Transform/Mimic carries `pp` and may carry no maximum, so the
     -- right column is dropped rather than invented.
     local row = { label = self:moveLabel(move.id) or tostring(move.id) }
+    -- The type, in the column left of PP. Same reason PP is on the row rather
+    -- than under it: what the player is comparing four ways is on the four
+    -- rows, not on a strip that only ever describes the highlighted one.
+    row.tag = self:moveTypeName(move.id)
     local pp = tonumber(move.pp)
     local maxPp = tonumber(move.maxPp)
     if pp and maxPp then
