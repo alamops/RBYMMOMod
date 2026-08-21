@@ -143,7 +143,21 @@ M.MOD_ID = "rby_mmo"
 -- the picture and the number under it are wrong. Refusal naming both versions
 -- is the only sentence either player can act on.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 22
+--
+-- 23 is the invite that stopped refusing itself, and it moves two fields.
+-- (a) `busy` on `mmo.move` is now *read* by the hub and OR'd into the busy
+-- every roster row is drawn from -- it was sent by every client and thrown
+-- away by both hubs, so a player in an ordinary wild or trainer fight was
+-- published as free to ask and their client refused the invite a second
+-- later. (b) `mmo.decline` carries an optional `reason` from the closed
+-- Wire.DECLINE_REASONS set, and `mmo.respond` carries it on the way in, so
+-- an auto-refusal reads as "BOB is in a battle." instead of wearing the
+-- sentence a person pressing NO earns. A protocol-22 hub keeps discarding
+-- the flag and stripping the reason, which is exactly the bug: invites
+-- refused with nothing on either screen to say why, and a roster nobody
+-- could trust. Refusal naming both versions is the only sentence either
+-- player can act on.
+M.PROTOCOL = 23
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

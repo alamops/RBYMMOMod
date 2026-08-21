@@ -126,6 +126,27 @@ const FACINGS = new Set(['up', 'down', 'left', 'right']);
 const KINDS = new Set(['trade', 'battle']);
 const SCOPES = new Set(['global', 'local', 'private', 'party']);
 
+/*
+ * Why an invite came back refused, when the refusal was not a human pressing
+ * NO. A closed set rather than free text, for the reason COOP_REASONS is one:
+ * every value picks a different sentence on the asker's screen, and an
+ * unknown one has nothing to draw.
+ *
+ * **Absent is the important value.** No reason means a person read the box
+ * and said no, which is the only refusal that was ever worth the flat 'X
+ * refused to battle.' Every other one is a fact about the moment -- they are
+ * mid-fight, mid-trade, already holding somebody else's ask, or no longer
+ * here -- and telling the asker which is the difference between a sentence
+ * they can act on and one that reads as a snub. Mirrors Wire.DECLINE_REASONS.
+ */
+const DECLINE_REASONS = {
+  fighting: true, busy: true, asked: true, gone: true,
+};
+
+function cleanDeclineReason(value) {
+  return DECLINE_REASONS[value] ? value : null;
+}
+
 // You and one friend. The rules that make a party feel solid all follow from
 // the pair -- an invite is only offered when both sides are unattached, and
 // either member leaving ends it for both -- so this is the design, not a
@@ -1361,6 +1382,7 @@ module.exports = {
   cleanLabel,
   cleanSide,
   cleanCoopReason,
+  cleanDeclineReason,
   cleanPartyEvent,
   cleanSpriteId,
   cleanMapId,
@@ -1391,6 +1413,7 @@ module.exports = {
   payloadOk,
   FACINGS,
   KINDS,
+  DECLINE_REASONS,
   SCOPES,
   PARTY_MAX,
   OUTCOMES,

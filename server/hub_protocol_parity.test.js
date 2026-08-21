@@ -162,6 +162,18 @@ function slimRefuse(msg) {
   return { message: msg.message };
 }
 
+// The reason is normalised to a sentinel rather than left absent: a nil field
+// vanishes from a Lua table, and "no key" and "null" are not the same value
+// to the comparison against it.
+function slimDecline(msg) {
+  if (!msg) return { absent: true };
+  return {
+    kind: msg.kind,
+    reason: msg.reason || '(none)',
+    named: msg.name !== undefined && msg.name !== null,
+  };
+}
+
 function openFight(relay, a, b) {
   relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
   relay.handle(b.id, {
@@ -275,6 +287,81 @@ function runJs() {
         return {
           refuse: slimRefuse(take(player, 'mmo.error')),
           protocol: PROTOCOL,
+        };
+      })(),
+    },
+    {
+      // The invite, end to end: the busy a roster row is drawn from, the
+      // reason a refusal carries, and two asks that crossed. Every field is
+      // one a client reads to decide whether to *offer* a battle or what to
+      // say when one comes back, so a one-sided drift is a refusal that
+      // reads correctly on one hosting path and as a snub on the other.
+      name: 'invite_busy_reason_and_cross',
+      result: (() => {
+        const clock = makeClock();
+        const relay = makeRelay(clock);
+        const a = dial(relay, 'ASKER', ID_A);
+        const b = dial(relay, 'ASKED', ID_B);
+        take(a, 'mmo.welcome'); take(b, 'mmo.welcome');
+        takeAll(a, 'mmo.join'); takeAll(b, 'mmo.join');
+        a.peer.outbox = []; b.peer.outbox = [];
+
+        // A client's own word on being mid-fight, which no hub can see itself
+        relay.handle(b.id, {
+          type: 'mmo.move', map: 'PALLET', x: 6, y: 5, facing: 'down', busy: true,
+        });
+        const busyMove = take(a, 'mmo.move');
+        relay.handle(b.id, {
+          type: 'mmo.move', map: 'PALLET', x: 6, y: 5, facing: 'down', busy: 'yes',
+        });
+        const looseMove = take(a, 'mmo.move');
+        a.peer.outbox = []; b.peer.outbox = [];
+
+        // An ask nobody is there to answer
+        relay.handle(a.id, {
+          type: 'mmo.request', to: 'nobodyatall', kind: 'battle',
+        });
+        const gone = slimDecline(take(a, 'mmo.decline'));
+        a.peer.outbox = []; b.peer.outbox = [];
+
+        // A refusal that carries why, and one that made its reason up
+        relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+        take(b, 'mmo.request');
+        relay.handle(b.id, {
+          type: 'mmo.respond', to: a.id, kind: 'battle', accept: false,
+          reason: 'fighting',
+        });
+        const reasoned = slimDecline(take(a, 'mmo.decline'));
+
+        relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+        take(b, 'mmo.request');
+        relay.handle(b.id, {
+          type: 'mmo.respond', to: a.id, kind: 'battle', accept: false,
+          reason: 'your mother',
+        });
+        const forged = slimDecline(take(a, 'mmo.decline'));
+        a.peer.outbox = []; b.peer.outbox = [];
+
+        // Two invites that crossed are an agreement, not a collision
+        relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+        relay.handle(b.id, { type: 'mmo.request', to: a.id, kind: 'battle' });
+        const crossA = take(a, 'mmo.session');
+        const crossB = take(b, 'mmo.session');
+        const crossed = {
+          id: (crossA && crossA.id) || '(none)',
+          askerRole: (crossA && crossA.role) || '(none)',
+          answererRole: (crossB && crossB.role) || '(none)',
+          refusals: takeAll(a, 'mmo.decline').length
+            + takeAll(b, 'mmo.decline').length,
+        };
+
+        return {
+          busy: Boolean(busyMove && busyMove.busy === true),
+          looseBusy: Boolean(looseMove && looseMove.busy === true),
+          gone,
+          reasoned,
+          forged,
+          crossed,
         };
       })(),
     },
