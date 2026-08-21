@@ -281,13 +281,19 @@ the engine's *own* `TradeSession`, untouched — so your Kadabra still evolves,
 and the mon still gets stamped as traded with the original OT.
 
 ### ⚔️ BATTLE — ANYWHERE
-Same deal, on the grass where you're standing. The real lockstep simulation a
-link cable runs, carried over the wire. **Zero desyncs** across the full
-end-to-end suite.
+Same deal, on the grass where you're standing — and it is fought on this
+mod's own battle system, on its own field, with the **hub** doing the rolling
+rather than either player's copy. **Zero desyncs** across the full end-to-end
+suite, and by construction rather than by luck: one process resolves the
+turn and both clients draw the same event stream, so there are no two
+simulations left to disagree.
 
 <p align="center">
   <img src="docs/screenshots/interact-menu.png" width="300" alt="PROFILE / INVITE / TRADE / BATTLE / WHISPER menu">
-  <img src="docs/screenshots/link-battle.png" width="300" alt="GUESTY wants to battle!">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/link-battle.png" width="760" alt="A 1-on-1 on the mod's arena: RED and BLUE on opposite edges each with a roster chip, PIKACHU against BULBASAUR, HP plates in the far corners and FIGHT / PKMN / ITEM / RUN across the bottom">
 </p>
 
 ### 🤜 CO-OP — YOUR PARTY IS THE YES
@@ -343,9 +349,32 @@ Forced multi-turn states inject `skip` rather than rehosting the engine UI.
 Metronome picks from a host-uploaded ephemeral move pool.
 
 <p align="center">
-  <img src="docs/screenshots/coop-battle.png" width="300" alt="Four monsters on one field: WEEDLE and CATERPIE reading out top-left, CHARIZARD and PIKACHU bottom-right, FIGHT / ITEM / SWITCH / RUN below">
-  <img src="docs/screenshots/coop-item.png" width="300" alt="The same field from the other player's screen, their own PIKACHU marked with the cursor">
+  <img src="docs/screenshots/coop-battle.png" width="760" alt="Four monsters on one field: CHARIZARD and PIKACHU against WEEDLE and CATERPIE, ALPHA and BETA's roster chips stacked top-left, the trainer's bottom-right, FIGHT / PKMN / ITEM / RUN below">
 </p>
+
+<p align="center">
+  <img src="docs/screenshots/coop-item.png" width="760" alt="The same field from the other player's screen: the chips have swapped order, BETA's own on top, as ALPHA sends out PIDGEY">
+</p>
+
+**Every trainer on the field carries a roster chip.** A small named panel in
+the arena's corners — their name, and a ball for each of their six party
+slots: a full ball for a monster that is standing, an amber one for a
+monster carrying a status, a spent grey one for a monster that is down, and
+an empty ring for a slot they never filled. Six slots always, however many
+they brought, so every chip is read against the same ruler and *how much have
+they got left* is a glance rather than a count. Allies stack down from the
+top-left and opponents up from the bottom-right, so a chip never lands on a
+HUD plate however many seats a side fields. Drawn for every trainer fight
+this mod referees — solo trainer, 1-on-1, 2-on-2, 2-on-NPC, party vs party —
+and never for a wild monster, which has no trainer to have a party.
+
+For an MMO fight the roster is **published by the referee** (`PROTOCOL 24`,
+the `team` event): both clients upload a party to the hub and neither uploads
+one to the other, so the intermediator is the only party to the exchange that
+can say how much the other player has left. It states ball states and nothing
+else — no species, no level, no moves — which is exactly what the classic
+ball row reveals. Co-op needs none of it: every client already holds every
+seat's party, because all four of them replay one host's events.
 
 All four commands are there — **FIGHT, ITEM, SWITCH, RUN** — with items going
 through the engine's own item effects. Against a trainer, RUN and a thrown
@@ -379,8 +408,11 @@ script was waiting. Animations play, through the engine's own player, moved
 onto whichever of the four monsters acted.
 
 <p align="center">
-  <img src="docs/screenshots/party-battle.png" width="300" alt="Four humans on one field: BLASTOISE and VENUSAUR against CHARIZARD and PIKACHU">
   <img src="docs/screenshots/party-ask.png" width="300" alt="ALPHA wants a 2-on-2 battle! -- the four-way ask, as it reaches one of the other three">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/party-battle.png" width="760" alt="Four humans on one field: CHARIZARD and PIKACHU against BLASTOISE and VENUSAUR, with a roster chip for each of the four -- ALPHA and BETA top-left, DELTA and GAMMA bottom-right">
 </p>
 
 **A faint is four different things depending on who you are.** Lose one with
@@ -391,7 +423,7 @@ rather than being handed a menu that answers nothing. A side only falls when
 **both** its trainers have.
 
 <p align="center">
-  <img src="docs/screenshots/party-spectating.png" width="300" alt="GAMMA's screen after their last POKeMON fell: their slot gone from the readout, their partner VENUSAUR still fighting">
+  <img src="docs/screenshots/party-spectating.png" width="760" alt="GAMMA's screen after their last POKeMON fell: their own roster chip showing a single spent ball, their plate gone, and their partner DELTA still fielding BLASTOISE and VENUSAUR">
 </p>
 
 **And losing sends you home, the way the game always did.** Every player
@@ -495,6 +527,44 @@ you a fancier battle screen and never the encounter.
 Both carts — Gen 1 (Red/Blue/Yellow) and Gold. And if you're connected and
 partied, **co-op still wins**: solo only takes the fights co-op didn't.
 Design notes: [`docs/plans/offline-solo-battles.md`](docs/plans/offline-solo-battles.md).
+
+### ✨ EVERY MOVE LOOKS LIKE SOMETHING
+Fire comes off in embers that rise and cool. Water throws droplets that arc and
+fall, over a ripple in the turf. Thunderbolt is a beam with a white core;
+Solarbeam and Hyper Beam are too. Ice hangs in crystals, Psychic pulls motes in
+along a spiral, Rock and Ground fling chunks that tumble under gravity, Poison
+bubbles up and pops, Bug swarms, Ghost drifts off in wisps, Steel gleams,
+Explosion is a blast that fills the field. **Nothing is exempt** — a move with
+no entry of its own still wears its type's look, so a move from another mod, or
+one this mod has never heard of, draws something rather than nothing.
+
+**And how hard it hit shows.** Power is read in five bands, so Tackle is a
+small scuff and Mega Kick is a wallop in the same white; Ember, Fire Punch,
+Flamethrower and Fire Blast each throw visibly more fire than the last. Bands
+rather than a sliding scale, because two particles is a difference you can see
+and two hundredths of one is not.
+
+**Where an effect happens follows what the move is.** A move that touches
+bursts on the target; one that is fired flies to it, trailing, and bursts on
+arrival; a beam is drawn from attacker to defender; a stat boost, a heal or a
+screen plays on the user; Earthquake, Explosion and a Poké Flute play across
+the whole field.
+
+**Items too.** A potion lifts green sparks off the monster's feet; a status
+cure washes it in rings; a Revive is a column of light; the X shelf and Dire
+Hit throw up the same arrows a stat stage does; a Poké Doll is a puff of smoke.
+Balls are the one thing left alone — a thrown ball already has its own arc,
+its own rocking on the grass and its own burst.
+
+**And the fight's rhythm did not move.** The move's effect rides the lunge the
+attacker already had, so a status move and a move that missed both draw; the
+blow landing adds a compact burst in that move's colours on the seat whose bar
+is about to fall. Conditions and stat stages are filed in the referee's own
+order and run *under* the sentence that explains them. Nothing waits on a
+particle.
+
+It is the same in every fight this mod runs: online, 2-on-2 co-op, and the solo
+battles above.
 
 ### 🏆 RANKED — AND YOU CAN'T FARM IT
 Every link battle is scored, on the hub, for both players. Win and you gain
@@ -707,14 +777,15 @@ by [Mirasein](https://www.mirasein.me):
 else, marked with a **`▷`** in the cursor's column so you can tell which is
 which, and work the same way — worn on the map, sent over the wire, drawn on
 your trainer card — but they go one step further than a borrowed ROM
-character can. Wear one and it's you in **battle** too: the back pic over
-your shoulder when a battle starts, the pic on your trainer card, and the one
+character can. Wear one and it's you in **battle** too: the figure standing
+on the arena's own edge in a fight this mod referees, the back pic over your
+shoulder in the game's own battles, the pic on your trainer card, and the one
 Oak shrinks into if you start a new game. That follows the walking sprite
 exactly: it's you for as long as you're wearing them, in a game or on your
 own, until you pick somebody else.
 
 <p align="center">
-  <img src="docs/screenshots/nire-battle.png" width="330" alt="A link battle starting, with NIRE's back pic where Red's would be">
+  <img src="docs/screenshots/nire-battle.png" width="760" alt="NIRE standing on the arena's own ally edge mid-battle, in the spot Red would otherwise be, with a callout reading PIKACHU! THUNDERBOLT!">
 </p>
 
 **And they have bicycles.** The bike is a whole second walking sheet in this

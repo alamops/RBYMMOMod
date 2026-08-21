@@ -425,11 +425,26 @@ return function(game)
     end
     if asked then
       H.signal("guest_asked_battle_in_fight")
+      -- The sentence, not merely that one arrived.
+      --
+      -- This used to read "HOSTY refused to battle." -- the same words a
+      -- person pressing NO earns -- for a refusal no person was involved in.
+      -- The refusal now carries why, and it is the whole point of the fix:
+      -- the asker can tell "they are mid-fight, ask again in a minute" from
+      -- "they said no", which from inside the game was previously impossible.
+      local seen = ""
       local refused = H.waitSeconds(game, function()
         local text = (H.textOf(H.top(game)) or ""):lower()
-        return text:find("refused", 1, true) ~= nil
-      end, 60, "HOSTY refused to battle")
+        if text ~= "" then seen = text end
+        return text:find("battle", 1, true) ~= nil
+          and (text:find("is in", 1, true) ~= nil
+               or text:find("refused", 1, true) ~= nil)
+      end, 60, "HOSTY to answer the mid-fight ask")
       check(refused, "saw the battle refusal after asking mid-fight")
+      log("refusal read:", seen == "" and "(nothing)" or seen)
+      check(seen:find("is in", 1, true) ~= nil,
+            "and it names the fight rather than reading as a flat no -- "
+            .. "a refusal nobody chose must not wear the words of one somebody did")
       check(not (exports.isSessionBusy and exports.isSessionBusy()),
             "the outgoing ask is cleared after the refusal")
       U.shot(game, SHOT_DIR .. "/join-invite-refused.png")

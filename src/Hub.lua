@@ -453,6 +453,26 @@ local function send(client, msgType, payload)
   client.peer:send(msg)
 end
 
+-- Can this player be asked for a trade or a battle right now?
+--
+-- Two authorities, OR'd, because neither can see the whole answer.  The hub
+-- owns the sessions it brokered and is the only party that can be trusted
+-- about them; everything else that would bounce an invite -- a wild fight, a
+-- trainer, a co-op handoff, an invite already on their screen -- happens
+-- entirely inside one client and reaches here only because that client says
+-- so.  Publishing the hub's half alone is what let a player in an ordinary
+-- battle be listed as free, asked, and refused in the same second.
+--
+-- The client half is advisory and cannot be otherwise: a client that lies
+-- says only "do not ask me", which is a thing it can already achieve by
+-- refusing.  It is deliberately not consulted where a session is *started*
+-- (see the REQUEST handler) -- that gate stays on the hub's own view, so a
+-- stale flag costs at most one honest refusal rather than a battle nobody
+-- could arrange.
+local function busyNow(client)
+  return client.sessionId ~= nil or client.busy == true
+end
+
 local function presenceOf(client)
   return {
     id = client.id,
@@ -462,17 +482,17 @@ local function presenceOf(client)
     x = client.x,
     y = client.y,
     facing = client.facing,
-    busy = client.sessionId ~= nil,
+    busy = busyNow(client),
     -- Whether, not which.  Everyone needs this -- it is what decides
     -- whether their menus offer to invite this player -- and nobody outside
     -- the party needs the id, so the id does not leave the hub.
     party = client.partyId ~= nil,
     -- One question only: was that step a fast one.  Not "why" -- a sprint on
     -- foot and a bike both cover a tile in 8 frames, so both set this and
-    -- neither is told apart, which is all a watcher can draw anyway.  Unlike
-    -- busy, this hub cannot work it out: it never sees the B button or the
-    -- bike, so the client is the only authority and this is what it last
-    -- reported.
+    -- neither is told apart, which is all a watcher can draw anyway.  Like
+    -- the client's half of busy, this hub cannot work it out: it never sees
+    -- the B button or the bike, so the client is the only authority and this
+    -- is what it last reported.
     fast = client.fast == true,
     profile = client.profile,
     -- Carried with presence rather than with the card: a rating moves while
@@ -538,8 +558,16 @@ function M:accept(peer, trusted)
     sprite = Config.defaultSpriteFor(self.generation),
     map = nil, x = nil, y = nil, facing = "down",
     fast = false,     -- nobody arrives mid-stride; the first move says otherwise
+    -- What the client last said about its own availability: a fight on its
+    -- screen, an invite it is already holding.  Nobody arrives mid-battle
+    -- either, and a client that never reports it stays askable -- which is
+    -- exactly the behaviour every build before this one had.
+    busy = false,
     sessionId = nil,
     pendingTo = nil,
+    -- ...and what it asked for, so two asks that crossed can be told from a
+    -- trade crossing a battle (see the REQUEST handler).
+    pendingKind = nil,
     partyId = nil,
     partyPendingTo = nil,   -- the invite this client is waiting on an answer to
     lastChat = -math.huge,
@@ -665,7 +693,9 @@ function M:drop(client)
   -- an outstanding request pointed at a player who just left would let the
   -- asker wait forever for an answer nobody can give
   for _, other in pairs(self.clients) do
-    if other.pendingTo == client.id then other.pendingTo = nil end
+    if other.pendingTo == client.id then
+      other.pendingTo, other.pendingKind = nil, nil
+    end
     if other.partyPendingTo == client.id then other.partyPendingTo = nil end
   end
   if client.ready then
@@ -2153,6 +2183,11 @@ handlers[Wire.MOVE] = function(self, client, msg)
   -- false to JS's Boolean().  Comparing against true is the one test both
   -- languages answer identically for every JSON value.
   client.fast = msg.fast == true
+  -- Client-truth, and strict for exactly the reason `fast` is: the two hubs
+  -- have to publish the same roster for the same wire bytes, and comparing
+  -- against true is the one test Lua and JS answer identically for every
+  -- JSON value a malformed client can send.
+  client.busy = msg.busy == true
   self:broadcast(Wire.MOVE, presenceOf(client), client.id)
 end
 
@@ -2261,14 +2296,51 @@ end
 handlers[Wire.REQUEST] = function(self, client, msg)
   if not client.ready or client.sessionId then return end
   local kind = Wire.KINDS[msg.kind] and msg.kind or nil
+  if not kind then return end
   local target = self.clients[Wire.id(msg.to) or ""]
-  if not (kind and target and target.ready) or target.id == client.id then
-    return
+  -- Asking somebody who is not here any more is answered, not dropped.
+  --
+  -- Silence was the old answer, and it is the worst one available: the asker
+  -- holds an `outgoing` that nothing will ever clear, which marks them busy
+  -- for the rest of the session -- refusing every invite they receive and
+  -- turning away every one they try to send.  A roster row goes stale for
+  -- the length of one broadcast, so this is reachable by simply pressing
+  -- BATTLE at the wrong moment.
+  --
+  -- No name on it: there is no client left to read one off, and the asker
+  -- falls back to the name it asked under (see Sessions:onDecline).
+  if not (target and target.ready) then
+    return send(client, Wire.DECLINE, { kind = kind, reason = "gone" })
   end
+  if target.id == client.id then return end
   if target.sessionId then
-    return send(client, Wire.DECLINE, { name = target.name, kind = kind })
+    return send(client, Wire.DECLINE,
+      { name = target.name, kind = kind, reason = "busy" })
   end
+
+  -- Two invites that crossed are an agreement, not a collision.
+  --
+  -- Both of them pressed BATTLE inside one round trip, which is exactly what
+  -- two friends who just agreed to fight do.  Each client marks itself busy
+  -- the moment it asks, so each refused the other's invite as it landed and
+  -- both players read "they refused" about somebody who had in fact just
+  -- asked them.  Nothing is missing here that a yes/no box would add: both
+  -- sides asked for this fight, unprompted, and the box would only be asking
+  -- one of them to confirm a thing they had already chosen.
+  --
+  -- Resolved on the hub rather than by a rule on each client because only
+  -- the hub sees both asks, and a tie-break the two clients derive
+  -- separately is a tie-break that can disagree.  The kind has to match --
+  -- a trade crossing a battle is two different requests, not one agreement,
+  -- and it falls through to the ordinary path.  `target` hosts: they asked
+  -- first, which is the same rule the ordinary path uses.
+  if target.pendingTo == client.id and target.pendingKind == kind then
+    target.pendingTo, target.pendingKind = nil, nil
+    return self:startSession(target, client, kind)
+  end
+
   client.pendingTo = target.id
+  client.pendingKind = kind
   send(target, Wire.REQUEST,
     { from = client.id, name = client.name, kind = kind })
 end
@@ -2282,13 +2354,20 @@ handlers[Wire.RESPOND] = function(self, client, msg)
   -- only the player who was actually asked can answer, and only while the
   -- ask is still outstanding
   if asker.pendingTo ~= client.id then return end
-  asker.pendingTo = nil
+  asker.pendingTo, asker.pendingKind = nil, nil
 
   if not msg.accept then
-    return send(asker, Wire.DECLINE, { name = client.name, kind = kind })
+    -- Carried through rather than read: the reason belongs to the client
+    -- that refused -- only it knows whether a person pressed NO or its own
+    -- guard answered for them -- and the closed set is what stops a forged
+    -- one putting an invented sentence on the asker's screen.  Absent stays
+    -- absent, which is how a human no still reads as one.
+    return send(asker, Wire.DECLINE, { name = client.name, kind = kind,
+                                       reason = Wire.declineReason(msg.reason) })
   end
   if client.sessionId or asker.sessionId then
-    return send(asker, Wire.DECLINE, { name = client.name, kind = kind })
+    return send(asker, Wire.DECLINE,
+      { name = client.name, kind = kind, reason = "busy" })
   end
   self:startSession(asker, client, kind)
 end
@@ -2301,7 +2380,7 @@ handlers[Wire.REQUEST_CANCEL] = function(self, client)
   if not client.ready then return end
   local targetId = client.pendingTo
   if not targetId then return end
-  client.pendingTo = nil
+  client.pendingTo, client.pendingKind = nil, nil
   local target = self.clients[targetId]
   if target and target.ready then
     send(target, Wire.REQUEST_CANCEL, { from = client.id, name = client.name })

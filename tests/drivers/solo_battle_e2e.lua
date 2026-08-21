@@ -350,6 +350,53 @@ return function(game)
     end, 60, what or "the solo command grid")
   end
 
+  -- ------- what the arena is actually holding
+  --
+  -- The two halves of the picture a solo fight draws, read off the live screen
+  -- rather than off a fixture, because both were wrong in a way only a real
+  -- boot could show:
+  --
+  --   * **the player's own front pic.** `MediatedBattle:seatFront` hands the
+  --     arena a *front* for both sides -- that is the whole difference between
+  --     this theatre and the classic 160x144 stage, where the player's side is
+  --     a back pic. When it fails it falls back to `slot.sprite`, which on our
+  --     own seat *is* that back pic, so the failure draws a monster seen from
+  --     behind and mirrored rather than an empty seat. Nothing but comparing
+  --     the two images catches that: a nil check passes on the wrong pic.
+  --   * **the figure on the foe edge.** `Battlefield.drawHuman` falls back to a
+  --     dark placeholder rectangle when a human names no walk sheet, which is
+  --     what a solo trainer fight drew for the whole battle.
+  --
+  -- Soft throughout: a probe that throws must not take the leg with it.
+  local function arenaProbe(mine)
+    local top = medTop()
+    if not top then return nil end
+    local out = {}
+    pcall(function()
+      if not (top.usesBattlefield and top:usesBattlefield()) then
+        out.classic = true
+        return
+      end
+      local index = mine and top:mySlot() or top:foeSlot()
+      local slot = top.slots and top.slots[index]
+      local seat = top.battlefieldSeat and top:battlefieldSeat(index, mine)
+      out.front = seat and seat.front or nil
+      out.slotSprite = slot and slot.sprite or nil
+      local ctx = top.battlefieldCtx and top:battlefieldCtx() or nil
+      out.foeHumans = ctx and ctx.foeHumans or nil
+      out.allyHumans = ctx and ctx.allyHumans or nil
+      -- What the referee has said about each seat's party (`team`, PROTOCOL
+      -- 24). Resolved here, where the screen is in scope, and taken off
+      -- `top.teams` rather than off the ctx -- so a nil at the call site means
+      -- "no event ever arrived" rather than "the ctx dropped it".
+      local mineSlot = top.mySlot and top:mySlot() or nil
+      local foeSlot = top.foeSlot and top:foeSlot() or nil
+      out.mineTeam = top.teams and mineSlot and top.teams[mineSlot] or nil
+      out.foeTeam = top.teams and foeSlot and top.teams[foeSlot] or nil
+    end)
+    return out
+  end
+
   -- FIGHT / SWITCH / ITEM / RUN, then the bag row for `itemId`.
   --
   -- The grid's shape is asked for rather than assumed -- the battlefield band
@@ -665,6 +712,28 @@ return function(game)
             "the command grid opens on the mod's screen")
       shot("solo-wild-battle")
 
+      do
+        local arena = arenaProbe(true)
+        if arena and arena.classic then
+          skip("the wild arena probe", "this generation draws the classic stage")
+        else
+          log(("solo wild arena: front=%s back=%s same=%s foeHumans=%d"):format(
+            tostring(arena and arena.front ~= nil),
+            tostring(arena and arena.slotSprite ~= nil),
+            tostring(arena and arena.front == arena.slotSprite),
+            arena and arena.foeHumans and #arena.foeHumans or -1))
+          check(arena ~= nil and arena.front ~= nil,
+                "our own seat hands the arena a pic to draw")
+          check(arena ~= nil and arena.slotSprite ~= nil
+                  and arena.front ~= arena.slotSprite,
+                "...and it is the FRONT pic co-op draws, not the classic "
+                .. "stage's back pic")
+          check(arena ~= nil and arena.foeHumans ~= nil
+                  and #arena.foeHumans == 0,
+                "a wild fight stands nobody on the foe edge")
+        end
+      end
+
       local over, seen = fightToEnd(240)
       check(over, "the solo wild fight runs to an end", tostring(seen))
       check(backToOverworld(), "and the overworld is restored")
@@ -690,6 +759,88 @@ return function(game)
             "a won wild fight adds nobody to the party")
       log("engine battle.started since the leg opened:",
           tostring(events["battle.started"] - startedBefore))
+    end
+  end
+
+  -- ------------------------------------------------------------------
+  -- 4b. the fight after that one: a hurt monster's bar is out of its own
+  --     maximum, not out of the HP it walked in on
+  -- ------------------------------------------------------------------
+  --
+  -- **Deliberately no `freshParty()`.** The leg above just wrote HP back to
+  -- the save, so this is the second encounter of the day with the monster that
+  -- fought the first -- which is exactly where the bug lived. An event on this
+  -- wire carries current HP, and the screen used to take the largest HP it had
+  -- ever seen on a seat for that seat's maximum: a monster walking out on 42
+  -- of 200 drew a **full** bar with "42/200" collapsed to "42/42" over it, and
+  -- stayed that way for the whole fight. From PROTOCOL 24 the referee states
+  -- the maximum on the `send`.
+  --
+  -- Out here rather than only in the suites because the numbers a player reads
+  -- come off the *save's* stat block through the real snapshot, the real
+  -- referee and the real screen -- and each of those three could have been the
+  -- one that lost them.
+  do
+    local before = lead()
+    local maxIn = tonumber(before and before.stats and before.stats.hp) or 0
+    check(maxIn > 0, "the save monster states a maximum to check against")
+    check((tonumber(before and before.hp) or 0) > 0,
+          "and it came out of the last fight standing")
+    -- **The wound is written here rather than fought for**, and that is the
+    -- one liberty this leg takes. The lead is a level-50 starter and the
+    -- staged encounters are level 5, so the fight above lands no damage on it
+    -- at all -- the leg would pass on a monster that walked in whole, which is
+    -- precisely the case the old guess already got right. So the save is put
+    -- where a real fight leaves it: hurt, on a monster whose maximum only its
+    -- own stat block knows. Everything after this point is the real path --
+    -- the real snapshot, the real referee, the real send, the real screen.
+    if before then before.hp = math.max(1, math.floor(maxIn / 4)) end
+    local hpIn = tonumber(before and before.hp) or 0
+    log(("solo second fight opens on %d/%d"):format(hpIn, maxIn))
+    check(hpIn < maxIn, "the monster walks into this one hurt",
+          ("%d/%d"):format(hpIn, maxIn))
+
+    local finished = nil
+    local staged, species = stageWildOf({ "PIDGEY", "SENTRET", "RATTATA" }, 5,
+      function(result) finished = result end)
+    check(staged ~= nil, "staged a second wild encounter", tostring(species))
+
+    if staged then
+      check(awaitDivert("the second solo wild divert"),
+            "the second encounter diverts too")
+      check(awaitCommandMenu("the second solo wild command grid"),
+            "the command grid opens on it")
+
+      local top = medTop()
+      local slot = top and top.slots and top.slots[top:mySlot()]
+      local shown = slot and (slot.shownHp or slot.hp) or nil
+      log(("solo second seat: hp=%s shownHp=%s maxHp=%s"):format(
+        tostring(slot and slot.hp), tostring(shown),
+        tostring(slot and slot.maxHp)))
+      check(slot ~= nil, "our own seat is on the field")
+      check(slot ~= nil and tonumber(slot.maxHp) == maxIn,
+            "the seat is drawn against the save's own maximum",
+            ("%s vs %d"):format(tostring(slot and slot.maxHp), maxIn))
+      check(slot ~= nil and tonumber(slot.hp) == hpIn,
+            "...over the HP it really walked in on",
+            ("%s vs %d"):format(tostring(slot and slot.hp), hpIn))
+      -- The bar itself, through the same model the plate draws from: a hurt
+      -- monster must not produce a full one.
+      if slot and maxIn > 0 then
+        local frac = math.min(1, math.max(0, (tonumber(shown) or 0) / maxIn))
+        log(("solo second bar: frac=%.3f"):format(frac))
+        check(frac < 1,
+              "a monster that walked in hurt draws a part-filled bar",
+              ("%.3f"):format(frac))
+        check(math.abs(frac - hpIn / maxIn) < 0.001,
+              "...filled to exactly the fraction the numbers state",
+              ("%.3f vs %.3f"):format(frac, hpIn / maxIn))
+      end
+      shot("solo-wild-second-hp")
+
+      local over, seen = fightToEnd(240)
+      check(over, "the second solo wild fight runs to an end", tostring(seen))
+      check(backToOverworld(), "and the overworld is restored after it")
     end
   end
 
@@ -749,6 +900,60 @@ return function(game)
         check(awaitCommandMenu("the solo trainer command grid"),
               "the command grid opens on the mod's screen")
         shot("solo-trainer-battle")
+
+        do
+          local arena = arenaProbe(true)
+          if arena and arena.classic then
+            skip("the trainer arena probe",
+                 "this generation draws the classic stage")
+          else
+            local who = arena and arena.foeHumans and arena.foeHumans[1] or nil
+            log(("solo trainer arena: front=%s same=%s foe=%s sheet=%s"):format(
+              tostring(arena and arena.front ~= nil),
+              tostring(arena and arena.front == arena.slotSprite),
+              tostring(who and who.name), tostring(who and who.spriteId)))
+            check(arena ~= nil and arena.front ~= nil
+                    and arena.front ~= arena.slotSprite,
+                  "our own seat draws its front pic here too")
+            check(who ~= nil,
+                  "the trainer is standing on the foe edge")
+            check(who ~= nil and type(who.spriteId) == "string"
+                    and who.spriteId ~= "",
+                  "...with a real walk sheet, not the placeholder silhouette",
+                  tostring(who and who.spriteId))
+            check(who ~= nil and type(who.name) == "string"
+                    and who.name ~= "" and who.name ~= "FRIEND",
+                  "...named as the trainer and not as an absent peer",
+                  tostring(who and who.name))
+
+            -- The roster chips, end to end through the real referee.
+            --
+            -- A solo fight runs the same `BattleSim` `Turn` an MMO fight does,
+            -- over a table transport instead of a socket, so this is the leg
+            -- that proves the `team` events are actually emitted, sanitised
+            -- and stored -- on the one path where the trainer's party is not
+            -- otherwise knowable to the screen. Nothing on this client holds
+            -- the NPC's sheets: if the chip has a roster, the referee sent it.
+            local mineTeam = arena and arena.mineTeam or nil
+            local foeTeam = arena and arena.foeTeam or nil
+            log(("solo trainer rosters: mine=%s foe=%s"):format(
+              tostring(mineTeam), tostring(foeTeam)))
+            check(type(mineTeam) == "string" and #mineTeam > 0,
+                  "the referee published our own party roster",
+                  tostring(mineTeam))
+            check(type(foeTeam) == "string" and #foeTeam > 0,
+                  "...and the trainer's, which is the only source there is "
+                  .. "for a party this client never held",
+                  tostring(foeTeam))
+            check(who ~= nil and who.party == foeTeam,
+                  "...and it is what the trainer's roster chip draws from",
+                  tostring(who and who.party))
+            local us = arena and arena.allyHumans and arena.allyHumans[1] or nil
+            check(us ~= nil and us.party == mineTeam,
+                  "our own chip reads the referee too, not the uploaded sheets",
+                  tostring(us and us.party))
+          end
+        end
 
         local over, seen = fightToEnd(360)
         check(over, "the solo trainer fight runs to an end", tostring(seen))

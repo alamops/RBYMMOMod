@@ -45,6 +45,9 @@ local Wire = need("Wire")
 local Effects1 = need("BattleSim/Effects")
 local Gen = need("Gen")
 local Battlefield = need("Battlefield")
+-- Which particle effect a move / item / condition / stat stage wears. A
+-- catalogue, not a renderer: Battlefield draws what this resolves.
+local Vfx = need("Vfx")
 -- The Gen 2 half of the award. Gen 1 prices a refereed faint with the engine's
 -- `src/battle/Experience.lua`, which Gold does not have -- its award lives
 -- inside a live `src/battle/gen2/Battle.lua` this screen never owns. `Exp2` is
@@ -105,6 +108,11 @@ local function loadEngine()
     AnimPlayer = grab("AnimPlayer", "src.battle.AnimPlayer"),
     BattleState = grab("BattleState", "src.battle.BattleState"),
     Sprites = grab("Sprites", "src.pokemon.Sprites"),
+    -- Display only, and soft for that reason: it names a move's type for the
+    -- move list's own column (`moveTypeName`). `displayName` needs no `load`
+    -- -- it falls back to the module's vanilla records -- so a build without
+    -- the chart shows the raw type id rather than losing the column.
+    TypeChart = grab("TypeChart", "src.battle.TypeChart"),
     -- Exp is the *client's* arithmetic and can only ever be. The referee holds
     -- no species table (the legal floor -- no ROM bytes on a hub), so it can
     -- never price a faint: it states what fell and how many shared it, and
@@ -332,26 +340,85 @@ function M.snapshotRuleset(game)
     end
   end
 
-  -- Gen1 Special category is type-based.  Indices match the chart axes above
-  -- so the intermediator never needs type *names*.
+  -- ------- which types are Special
+  --
+  -- Gen 1 and Gen 2 both split physical from special by TYPE, and the chart
+  -- itself is the authority: every type record the `type_chart` registry
+  -- serves carries a `category` of "physical" or "special"
+  -- (src/battle/TypeChart.lua's TYPES, merged into `data.type_chart.types` by
+  -- the registry's own write). Reading it means a mod that registers a
+  -- nineteenth type is honoured, Gen 2's Dark is picked up without a second
+  -- list here, and -- the reason this stopped being a name match -- **a type
+  -- whose registry id is not its own name still resolves**.
+  --
+  -- That last one was a real, shipped bug. Psychic's id is `PSYCHIC_TYPE`,
+  -- because `PSYCHIC` is already a move; the old table keyed on `PSYCHIC`, so
+  -- Psychic dropped out of the uploaded list and every Psychic move in every
+  -- refereed fight was resolved on atk/def instead of spc/spc, with Light
+  -- Screen not halving it. Six of the seven types matched, so the guard below
+  -- -- which only fired at *zero* -- never said a word.
+  --
+  -- The two name lists are the fallback for a type the chart ships without a
+  -- category, and Gold needs them: `TypeChart.TYPES` carries records for the
+  -- fifteen Gen 1 types only, so on a Gen 2 boot Dark and Steel reach the
+  -- chart through their matchups with no record behind them.
+  --
+  -- **Physical is listed as well as Special, and not for symmetry.** The
+  -- warning below fires for a type neither list nor record can place, and
+  -- without the physical names every Gen 2 Steel move would raise a false
+  -- alarm about a type that is Physical exactly as intended. A warning that
+  -- cries wolf on stock data is a warning nobody reads.
   local SPECIAL = {
     FIRE = true, WATER = true, GRASS = true, ELECTRIC = true,
-    ICE = true, PSYCHIC = true, DRAGON = true,
+    ICE = true, DRAGON = true, DARK = true,
+    PSYCHIC = true, PSYCHIC_TYPE = true,
+  }
+  local PHYSICAL = {
+    NORMAL = true, FIGHTING = true, FLYING = true, POISON = true,
+    GROUND = true, ROCK = true, BUG = true, GHOST = true, STEEL = true,
+    BIRD = true, -- the unused beta type at chart index 13
   }
   local specialTypes = {}
   if order then
+    local records = type(data) == "table" and type(data.type_chart) == "table"
+      and data.type_chart.types or nil
+    local unknown = {}
     for i, id in ipairs(order.ids) do
-      if SPECIAL[id] then specialTypes[#specialTypes + 1] = i - 1 end
+      local record = type(records) == "table" and records[id] or nil
+      local category = type(record) == "table" and record.category or nil
+      local isSpecial
+      if category ~= nil then
+        isSpecial = (category == "special")
+      else
+        isSpecial = SPECIAL[id] == true
+        -- Neither the record nor either name list places this one, so it is
+        -- about to be fought as Physical on a guess.
+        if not isSpecial and not PHYSICAL[id] then
+          unknown[#unknown + 1] = id
+        end
+      end
+      if isSpecial then specialTypes[#specialTypes + 1] = i - 1 end
     end
-    -- A chart with types but zero Special matches means Light Screen / Spc
-    -- damage will never fire. Name the remediation rather than silently
-    -- degrading to "everything is Physical".
+    -- Named rather than counted, and that is the fix to the guard: a list
+    -- that is *partly* wrong is the dangerous case, and counting only caught
+    -- the totally-empty one.
+    if #unknown > 0 then
+      local one = #unknown == 1
+      mod.log:warn("type chart has no category for %s; %s will be fought as "
+        .. "Physical (atk/def) and Light Screen will not halve %s. Give the "
+        .. "type record a category of \"special\" or \"physical\", or upload "
+        .. "specialTypes yourself",
+        table.concat(unknown, ", "),
+        one and "it" or "they", one and "it" or "them")
+    end
+    -- ...and the original guard, still worth keeping: a chart that resolved
+    -- cleanly and yielded nothing Special at all is a ruleset in which Light
+    -- Screen and Special damage can never fire.
     if #order.ids > 0 and #specialTypes == 0 then
-      mod.log:warn("type chart has %d types but none match Gen1 Special "
-        .. "(FIRE/WATER/GRASS/ELECTRIC/ICE/PSYCHIC/DRAGON); Light Screen and "
-        .. "Special damage will treat every move as Physical. Check that "
-        .. "type ids use those names (or upload specialTypes yourself)",
-        #order.ids)
+      mod.log:warn("type chart has %d types and none of them are Special; "
+        .. "Light Screen and Special damage will treat every move as "
+        .. "Physical. Check the type records' `category` (or upload "
+        .. "specialTypes yourself)", #order.ids)
     end
   end
 
@@ -449,6 +516,14 @@ moveOf = function(data, slot, order)
   local maxPp = clamp(intOr(slot.maxPp or slot.pp, pp), pp, 99)
   return {
     id       = id,
+    -- What the referee narrates this move under (PROTOCOL 26).  `id` is a
+    -- registry key -- DOUBLE_KICK -- and every sentence the sim writes used to
+    -- print it, because it was the only spelling of the move on the wire.  The
+    -- referee holds no move table to look a name up in, so the name travels
+    -- with the move the way `species` does with the monster.  nil when this
+    -- build has no record for the move: the sim then falls back to the id,
+    -- which is the sentence a protocol-25 fight has always shown.
+    name     = def and Wire.moveName(def.name) or nil,
     pp       = pp,
     maxPp    = maxPp,
     power    = clamp(intOr(def and def.power, 40), 0, 999),
@@ -1015,6 +1090,19 @@ local FX_SPAN = {
   ball   = 0.60, -- TOSS / GREATTOSS / ULTRATOSS: the arc
   wobble = 0.70, -- SHAKE: one rock, one per shake the referee counted
   poof   = 0.45, -- POOF / SHOWPIC: the burst, and what comes out of it
+  -- Particles (src/Vfx.lua). One span for every look, because a span here is a
+  -- pacing decision and the catalogue is a *visual* one -- the two must not be
+  -- able to drift, or adding a prettier Fire effect would silently lengthen
+  -- every Fire attack. A spec that genuinely needs longer says so on the
+  -- record (`duration`), which is how Explosion and a Poke Flute get their
+  -- extra fifth of a second without moving anything else.
+  --
+  -- 0.50 rather than the lunge's 0.35 on purpose: the effect is emitted on the
+  -- lunge beat and is meant to still be running when the hit beat lands behind
+  -- it, so a fired move is in the air while the attacker leans and bursts as
+  -- the defender flashes. It outliving its beat costs nothing -- `stepFx` runs
+  -- on its own clock and retires it wherever the queue has got to.
+  vfx    = 0.50,
 }
 
 -- The per-attack chronology's two deliberate gaps. One attack is four beats on
@@ -1075,6 +1163,16 @@ local BALL_FX = {
 -- here only kept a finished arc alive at t == 1 and dropped it again on a
 -- side-wide clear that has nothing to do with it.
 local BALL_HIDE_FX = { recall = true, wobble = true }
+
+-- The fields a `vfx` record carries beyond the shared kind / side / seatIndex
+-- / t. Written out longhand rather than copied by pairs() so the wire this
+-- screen publishes to Battlefield stays a closed set: a field invented here
+-- and never read there is a look that silently does nothing, and a field that
+-- shadowed `kind` or `elapsed` would be an effect that never retires.
+local VFX_KEYS = {
+  "style", "palette", "delivery", "scale", "intensity", "seed",
+  "fromSide", "fromSeat",
+}
 
 -- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
 -- number came off the wire, and a hub claiming a thousand would otherwise
@@ -1160,6 +1258,14 @@ function M.new(opts)
     peerName  = opts.peerName or "FRIEND",
     onDone    = opts.onDone,
 
+    -- The NPC the other seat is fighting as, on a `coop_npc` fight -- the
+    -- engine's own `data.trainers` record, handed straight through by
+    -- src/SoloBattle.lua. Read for exactly one thing: the overworld walk sheet
+    -- the arena stands on the foe edge (`battlefieldCtx`). Nil on every other
+    -- shape, including a peer fight, where the figure on that edge is a
+    -- player and comes from the roster instead.
+    trainer   = opts.trainer,
+
     -- A test hook, and named as one.  With it set, a turn is answered the
     -- instant it opens with the first move at the default target, which is
     -- what lets the headless suite drive a whole fight with no input device.
@@ -1195,10 +1301,22 @@ function M.new(opts)
     active    = 1,         -- which of ours is out, as an index into `mine`
     mySide    = (opts.role == "guest") and "b" or "a",
     slots     = {},        -- field slot -> { species, hp, maxHp }
+    -- field slot -> the referee's roster string for that seat ("oosx"), from
+    -- the `team` event. The ONLY thing this screen is ever told about a
+    -- monster that is not on the field, and the only source there is for the
+    -- seat opposite: nobody uploads a party to anybody but the referee. Read
+    -- by `battlefieldCtx` and by nothing else -- it is a chip and never a rule.
+    teams     = {},
     lines     = {},
     shown     = nil,
     dwell     = 0,
     cursor    = 1,
+    -- The move each of ours was last sent into a turn with, keyed by its index
+    -- into `mine`. Purely where the cursor opens (see `rememberedMove`): a
+    -- Gen 1 fight is mostly one attack repeated, and re-walking the list to it
+    -- every turn is the tax this removes. Per monster, not per battle -- the
+    -- fourth row of the mon you switched to is a different move.
+    moveMemory = {},
     commandIndex = 1,
     itemIndex = 1,
     switchIndex = 1,
@@ -1249,6 +1367,14 @@ function M.new(opts)
     -- strip that answers the award. All of them stay nil until something is
     -- actually playing.
     fx = nil,
+    -- The move whose particles are on screen, kept so the impact burst on the
+    -- beat behind it can borrow that move's colours (`startMoveVfx`).
+    moveVfx = nil,
+    -- Counts up per emission and wraps; it is what stops two casts of the same
+    -- move from drawing the identical particles. Deliberately a counter and
+    -- not a roll: both players' screens step it the same way over the same
+    -- event stream, so a shared fight stays a shared sight.
+    vfxSeed = 0,
     draining = nil,
     faintFx = nil,
     -- Seats holding an arrival that has not had its spawn beat yet: slot index
@@ -1276,6 +1402,21 @@ function M.new(opts)
     targetIndex = 1,          -- field cursor when a target list exists
   }, M)
 end
+
+-- The exp-awarding modes that have a *trainer* on the other side.
+--
+-- The referee's own gate is `EXP_MODES` = wild / coop_wild / coop_npc
+-- (server/lib/battle/Turn.js, src/BattleSim/Turn.lua). Two of those three are
+-- wildlife; only `coop_npc` fields a trainer, so the x1.5 belongs to it alone
+-- and every other token -- including a mode this screen never learned -- pays
+-- the plain wild rate.
+--
+-- Declared here, with the file's constants, rather than beside the exp award
+-- that was its first reader: `battlefieldCtx` now asks the same question to
+-- decide whether the foe edge of the arena holds a trainer or a peer, and a
+-- `local` is only in scope *below* its declaration -- left where it was, that
+-- read would have found the global nil and indexed it.
+local TRAINER_MODES = { coop_npc = true }
 
 -- ------- Gen1 Battlefield theatre gate
 --
@@ -1413,9 +1554,46 @@ function M:seatFront(speciesKey, monHint, slot, isOwn)
   local eng = loadEngine()
   local data = self.game and self.game.data
   local save = self.game and self.game.save
-  local mon = monHint
-  if (not mon or not mon.species) and data then
-    mon = { species = speciesKey, level = (monHint and monHint.level) or 5 }
+  -- **A save-mon-shaped stub, and never the wire sheet itself.**
+  --
+  -- `BattleState.makeBattler` is written against the engine's own mon: it
+  -- indexes `data.pokemon[mon.species]` for the definition it names the
+  -- battler from, and it measures the HP bar with
+  -- `Timing.hpBarPixels(mon.hp, math.max(1, mon.stats.hp))`. A `Wire.battleMon`
+  -- sheet answers neither. Its `species` is the *display* token (the nickname
+  -- wherever the player set one), and its `stats` is the wire dialect --
+  -- `atk`/`def`/`spd`/`spc`, with **no `hp` at all**, because the maximum
+  -- travels beside it as `maxHp`. So `mon.stats.hp` was nil, `math.max` threw,
+  -- the pcall swallowed it and this function returned nil for *every* seat on
+  -- Gen 1.
+  --
+  -- Which looked like it worked, because the caller falls back to
+  -- `slot.sprite`: a foe's slot pic is already the front (`refreshSlotSprite`
+  -- passes isPlayer=false), so the opponent drew correctly by accident, while
+  -- this client's own monster drew the *back* pic the classic 1v1 stage wants
+  -- -- the arena showing PIKACHU from behind, mirrored, where co-op shows the
+  -- front pic. The two screens agree again now, which is the whole point of
+  -- `seatFrontFor` in src/CoopBattle.lua being this function's twin: it never
+  -- hit this because it is handed a real `battler.mon`.
+  --
+  -- Same shape as `refreshSlotSprite`'s stub, deliberately -- the id in
+  -- `species` and the narrated token kept as `nickname` -- so the two pics a
+  -- seat can hold are resolved off the same description.
+  local mon = nil
+  if data then
+    local maxHp = (slot and slot.maxHp) or (monHint and monHint.maxHp) or 1
+    mon = {
+      species = speciesKey,
+      nickname = (slot and slot.species) or (monHint and monHint.species),
+      level = (monHint and monHint.level) or (slot and slot.level) or 5,
+      hp = (slot and slot.hp) or (monHint and monHint.hp) or maxHp,
+      stats = {
+        hp = maxHp,
+        attack = 1, defense = 1, speed = 1, special = 1,
+      },
+      moves = (monHint and monHint.moves) or { { id = "TACKLE", pp = 1 } },
+      status = slot and slot.status or nil,
+    }
   end
   if Gen.generation(self.game) == 2 then
     local def = data and type(data.pokemon) == "table" and data.pokemon[speciesKey]
@@ -1425,25 +1603,23 @@ function M:seatFront(speciesKey, monHint, slot, isOwn)
       -- colour 0 is WHITE, so the raw image is a grey monster in an opaque
       -- white box. `Battlefield.gen2FrontImage` keys colour 0 and applies the
       -- species palette -- see its header.
-      -- **Shiny is read off the SAVE mon, not the sheet.** `monHint` here is a
-      -- `Wire.battleMon`, and that shape carries no `shiny` -- so asking it
-      -- was an argument that is structurally always false, which reads like
-      -- working code and is worse than not asking. The save mon is the copy
-      -- that knows.
+      -- **Shiny comes from whichever copy of the monster actually knows.**
+      -- Two callers ask, and they hand in different shapes:
       --
-      -- **`isOwn` and not a species match**, which is the trap the first
-      -- version of this walked into: a foe running the same species as this
-      -- client's active monster would have matched on the name and inherited
-      -- *our* shiny flag, drawing the opponent in a palette the referee never
-      -- described. Only this client's own seat has a save mon behind it; a
-      -- peer's or a wild's stays false, which is the honest answer, because
-      -- nothing on the wire ever told us.
-      -- A hint that carries the flag answers for itself. The party preview
-      -- passes the SAVE mon -- the copy that knows -- for a monster that is
-      -- not the active one, and asking about the active seat would paint the
-      -- wrong bench monster gold. Every arena seat hands in a
-      -- `Wire.battleMon`, which carries no `shiny` at all, so those still fall
-      -- through to the active save mon exactly as they did.
+      --   * An ARENA SEAT hands in a `Wire.battleMon`, which carries no
+      --     `shiny` at all -- so asking the sheet would be an argument that is
+      --     structurally always false, which reads like working code and is
+      --     worse than not asking. Those fall through to the save mon behind
+      --     this client's own seat, gated on **`isOwn` and not a species
+      --     match**: that is the trap the first version walked into, where a
+      --     foe running the same species as our active monster matched on the
+      --     name and inherited *our* flag, drawn in a palette the referee
+      --     never described. A peer's or a wild's stays false, which is the
+      --     honest answer, because nothing on the wire ever told us.
+      --   * The PARTY PREVIEW hands in the SAVE mon, which does carry the
+      --     flag, for a monster that is usually not the active one. A hint
+      --     that carries it answers for itself -- probing the active seat
+      --     instead would paint the wrong bench monster gold.
       local shiny
       if monHint ~= nil and monHint.shiny ~= nil then
         shiny = monHint.shiny and true or false
@@ -1663,6 +1839,26 @@ end
 
 -- A move's display name, CoopBattle's lookup: the registry name when the build
 -- has one, the wire id otherwise.
+-- A move's type under the name the player reads on the classic TYPE/ strip.
+--
+-- `TypeChart.displayName` is the mapping that turns PSYCHIC_TYPE into PSYCHIC
+-- and a modded type into its registered name, and it answers from the module's
+-- own vanilla records when nothing called `load` -- so this is safe on a
+-- screen that never touched the chart. A build without the module at all falls
+-- through to the raw id, which still says something true.
+function M:moveTypeName(id)
+  local moves = self.game and self.game.data and self.game.data.moves
+  local def = type(moves) == "table" and moves[id] or nil
+  local typeId = def and def.type
+  if type(typeId) ~= "string" or typeId == "" then return nil end
+  local TypeChart = (loadEngine() or {}).TypeChart
+  if TypeChart and type(TypeChart.displayName) == "function" then
+    local ok, name = pcall(TypeChart.displayName, typeId)
+    if ok and type(name) == "string" and name ~= "" then return name end
+  end
+  return typeId
+end
+
 function M:moveLabel(id)
   if type(id) ~= "string" or id == "" then return nil end
   local moves = self.game and self.game.data and self.game.data.moves
@@ -1680,19 +1876,71 @@ function M:battlefieldTargets()
   return { foe }
 end
 
+-- The roster the chip beside a trainer's name draws, for one field seat.
+--
+-- The referee's word first, and our own uploaded sheets only as the fallback.
+-- Two reasons, and the second is the one that matters: the referee is what has
+-- been *fighting* with those sheets, so where the two could disagree it is
+-- right -- and a PROTOCOL 22 intermediator emits no `team` at all, in which
+-- case falling back is what still gets the player their own row rather than
+-- leaving both sides blank. There is no fallback for the seat opposite, and
+-- there cannot be: nobody uploads a party to anybody but the referee.
+--
+-- nil rather than an empty list when there is nothing to say, because
+-- `rosterModel` reads nil as "this trainer published no roster" and draws no
+-- chip, while six blank rings would claim they have nothing left.
+function M:seatRoster(slot, ownSheets)
+  local roster = slot and self.teams and self.teams[slot]
+  if type(roster) == "string" and roster ~= "" then return roster end
+  if ownSheets and type(self.mine) == "table" and #self.mine > 0 then
+    return self.mine
+  end
+  return nil
+end
+
 function M:battlefieldCtx()
   local mode = (self.mode == "wild") and "wild" or "1v1"
   local allyHumans = {{
     id = "self",
     name = playerName(self.game),
     spriteId = selfSpriteId(),
+    party = self:seatRoster(self:mySlot(), true),
   }}
   local foeHumans = {}
-  if mode == "1v1" then
+  -- Who is standing on the foe edge: an NPC trainer, a peer, or nobody.
+  --
+  -- **The trainer arm has to come first**, because `mode` above folds every
+  -- non-wild shape into "1v1" for the arena's geometry -- so a `coop_npc`
+  -- fight fell into the peer arm and was drawn from `self.peerId`, which a
+  -- solo battle never has. `peerSpriteId(nil)` is nil, and a human with no
+  -- sheet is `Battlefield.drawHuman`'s placeholder silhouette: the dark box
+  -- that stood where the trainer should have been for the whole of every solo
+  -- trainer fight.
+  --
+  -- One entry and never a player's, exactly as
+  -- `CoopBattle:battlefieldFoeHumans` builds it: the entry is unconditional
+  -- even when the walk sheet cannot be named, because the trainer *is* on the
+  -- field either way and the silhouette is still a trainer standing there.
+  --
+  -- Both arms carry the foe's roster off the referee and neither has a
+  -- fallback: an NPC's party is as invisible to this screen as a peer's is.
+  -- That is not a gap in the solo path -- a solo fight runs the same referee
+  -- over a table transport (`SoloBattle:_transport`), so the `team` events
+  -- arrive there exactly as they do off a hub, and the trainer's ball row is
+  -- filled by the same code that fills a stranger's.
+  if TRAINER_MODES[self.mode] then
+    foeHumans[1] = {
+      id = (self.trainer and self.trainer.id) or self.peerId,
+      name = (self.trainer and self.trainer.name) or self.peerName or "FRIEND",
+      spriteId = Gen.trainerWalkSpriteId(self.trainer, self.game),
+      party = self:seatRoster(self:foeSlot(), false),
+    }
+  elseif mode == "1v1" then
     foeHumans[1] = {
       id = self.peerId,
       name = self.peerName or "FRIEND",
       spriteId = peerSpriteId(self.peerId),
+      party = self:seatRoster(self:foeSlot(), false),
     }
   end
 
@@ -1917,11 +2165,13 @@ function M:onEvent(msg)
     -- (src/CoopBattle.lua:8062).
 
   elseif kind == "send" then
-    -- The first HP we are told about is a full bar: the sim sends this the
-    -- moment a monster comes out, so the number is that monster's maximum
-    -- unless it walked in already hurt.  It is the only handle on a foe's
-    -- maximum there is -- an event carries current HP and nothing else -- so
-    -- the largest value ever seen is what the bar is drawn against.
+    -- **The referee says what the bar is out of** (`maxHp`, PROTOCOL 24), and
+    -- that is the whole of what a seat's maximum is now taken from.  Before
+    -- it, an event carried current HP and nothing else, so the largest value
+    -- ever seen on the seat had to stand in for the maximum -- true only for a
+    -- monster that walks out whole, and the reason one that walked out hurt
+    -- drew a full bar over a number that was not its maximum.  `noteSlot`
+    -- keeps that reading as the fallback for a stream that states none.
     self:noteSlot(msg)
     -- Parked behind somebody still finishing their exit (`noteSlot`): the seat
     -- below is still *theirs*, so everything that describes what is drawn on it
@@ -2006,7 +2256,7 @@ function M:onEvent(msg)
     -- arrives as one batch, so both seats would jolt in the same frame, ahead
     -- of the text that explains either. `startDrain` fires them when the bar
     -- this row queued actually starts falling.
-    self:queueDrain(msg.slot)
+    self:queueDrain(msg.slot, msg.status)
 
   elseif kind == "faint" then
     local slot = self:noteSlot(msg)
@@ -2111,6 +2361,22 @@ function M:onEvent(msg)
 
   elseif kind == "status" then
     self:noteSlot(msg)
+    -- An event carrying a `status` inflicted it; one carrying none cleared it,
+    -- and a condition lifting is a sentence rather than a sight -- the
+    -- catalogue answers nil for the token that is not there, so nothing is
+    -- filed. Anchored on the seat that took it, in that condition's colours.
+    self:queueVfx(Vfx.forStatus(msg.status), msg.slot)
+
+  elseif kind == "stat" then
+    -- Arrows on the seat, and the direction comes off the sentence rather than
+    -- off `amount`: the referee sends the resulting *stage*, not the change
+    -- (src/BattleSim/Turn.lua's three `_emit("stat")` sites), so the number
+    -- alone cannot say which way it went. Every one of those three is a rise,
+    -- which is why "rose" is the default and "fell" is what is looked for --
+    -- a referee that grows a drop event still draws the right arrows.
+    local down = type(msg.text) == "string"
+      and msg.text:lower():find("fell", 1, true) ~= nil
+    self:queueVfx(Vfx.forStat(down and -1 or 1), msg.slot)
 
   elseif kind == "item" then
     -- Debit only once the hub has accepted and resolved the item choice.
@@ -2119,6 +2385,11 @@ function M:onEvent(msg)
     if msg.slot == self:mySlot() then
       self:confirmPendingItem(msg.text, msg.amount)
     end
+    -- ...and what it looks like, on the seat of whoever opened the bag. Balls
+    -- answer nil (`Vfx.forItem`) and are left to the throw chain below, which
+    -- already draws the arc, the rocking and the burst -- a second effect over
+    -- that would be drawing the same throw twice.
+    self:queueVfx(Vfx.forItem(msg.text), msg.slot, msg.slot)
     -- Ball id for AnimPlayer opts on the following toss/shake chain.
     local effect = msg.text and effectsFor(self.game).itemEffect(msg.text)
     if effect and effect.ball then
@@ -2241,6 +2512,15 @@ function M:onEvent(msg)
     if msg.slot == self:mySlot() and type(msg.moves) == "table" then
       self.liveMoves = msg.moves
     end
+
+  elseif kind == "team" then
+    -- Both sides, and our own is not skipped as redundant: `mine` is the sheets
+    -- we uploaded and the referee is the thing that has been fighting with
+    -- them, so on the one seat where the two could disagree the referee is
+    -- right. Stored raw; `Battlefield.rosterModel` reads the string dialect.
+    if msg.slot ~= nil and type(msg.team) == "string" then
+      self.teams[msg.slot] = msg.team
+    end
   end
 end
 
@@ -2330,15 +2610,6 @@ function M:paidSheetIndex(msg)
   if index < 1 then return self.active or 1 end
   return index
 end
-
--- The exp-awarding modes that have a *trainer* on the other side.
---
--- The referee's own gate is `EXP_MODES` = wild / coop_wild / coop_npc
--- (server/lib/battle/Turn.js, src/BattleSim/Turn.lua). Two of those three are
--- wildlife; only `coop_npc` fields a trainer, so the x1.5 belongs to it alone
--- and every other token -- including a mode this screen never learned -- pays
--- the plain wild rate.
-local TRAINER_MODES = { coop_npc = true }
 
 -- Warn once per screen rather than once per faint: a build with no Experience
 -- module loses exp on every knockout, and forty identical lines in the log
@@ -2835,6 +3106,7 @@ function M:noteSlot(msg)
   -- monster's bar falling.)
   local parked = slot.pending
   if parked and not (msg.text and (msg.t == "send" or msg.t == "switch")) then
+    if msg.maxHp ~= nil then parked.maxHp = msg.maxHp end
     if msg.hp ~= nil then
       parked.hp = msg.hp
     elseif msg.amount ~= nil and msg.t == "damage" then
@@ -2862,6 +3134,11 @@ function M:noteSlot(msg)
         species = msg.text,
         speciesId = msg.speciesId,
         hp = msg.hp,
+        -- What that HP is out of, when the referee stated it (PROTOCOL 24).
+        -- Installed by `applySwap`, not written to the seat here: the bar
+        -- underneath still belongs to the monster finishing its exit, and its
+        -- own maximum is what its queued fall is being drawn against.
+        maxHp = msg.maxHp,
         status = msg.status,
         -- The referee's, when it stated one (it has said so since PROTOCOL 22);
         -- otherwise filled by `arriveOnSeat` at the swap, own seat only.
@@ -2881,6 +3158,17 @@ function M:noteSlot(msg)
     slot.koHold = nil
     fresh = true
   end
+  -- **The referee's own maximum, when it states one (PROTOCOL 24).**
+  -- Everything below it is the older reading of this wire, kept as the
+  -- fallback rather than deleted: an event used to carry current HP and
+  -- nothing else, so the largest HP a seat had ever shown was taken for its
+  -- maximum. That is right for a monster that walks out whole and wrong for
+  -- every one that does not -- a party mon that ended the last fight on 42 of
+  -- 200 opened the next one with a *full* bar over the number 42. A stated
+  -- maximum ends the guessing for that seat; `max` keeps it above whatever HP
+  -- arrives with it, so a stream that disagrees with itself still draws a
+  -- fraction rather than a bar past its own end.
+  if msg.maxHp ~= nil then slot.maxHp = max(1, msg.maxHp) end
   if msg.hp ~= nil then
     slot.hp = msg.hp
     if msg.hp > slot.maxHp then slot.maxHp = msg.hp end
@@ -3391,7 +3679,29 @@ function M:pickMove(index)
   local mon = self:activeMon()
   local moves = mon and mon.moves
   if not (moves and moves[index]) then return false end
-  return self:sendChoice({ action = "fight", move = index - 1 })
+  local sent = self:sendChoice({ action = "fight", move = index - 1 })
+  -- Remembered only once the choice is really on the wire: a refused send
+  -- leaves the turn unspent, and moving the cursor for it would be the menu
+  -- reporting a decision that was not taken.
+  if sent then
+    self.moveMemory = self.moveMemory or {}
+    self.moveMemory[self.active or 1] = index
+  end
+  return sent
+end
+
+-- Where the move list opens: the move this monster last actually used, or its
+-- first move if it has not attacked yet.
+--
+-- Clamped against the list it has *now* rather than the one it had then --
+-- Transform and Mimic rewrite a sheet mid-fight, and a cursor left past the
+-- end would open on a row that is not drawn.
+function M:rememberedMove()
+  local mon = self:activeMon()
+  local moves = (mon and mon.moves) or {}
+  local want = math.floor(tonumber((self.moveMemory or {})[self.active or 1]) or 1)
+  if want < 1 or want > #moves then return 1 end
+  return want
 end
 
 -- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
@@ -3584,7 +3894,7 @@ function M:updateCommand(input)
   elseif input:wasPressed("a") then
     local command = M.COMMANDS[self.commandIndex]
     if command == "FIGHT" then
-      self.cursor = 1
+      self.cursor = self:rememberedMove()
       self.phase = "move"
     elseif command == "SWITCH" then
       self.switchIndex = 1
@@ -3922,6 +4232,12 @@ function M:tickMessages(dt, input)
       self:startFaintFx(next)
       return true
     end
+    if type(next) == "table" and next.vfxrow ~= nil then
+      -- No dwell and no hold: the line this effect belongs to is the very next
+      -- row, and the effect is meant to play under it. See `startVfxRow`.
+      self:startVfxRow(next)
+      return true
+    end
     if type(next) == "table" and next.sendball ~= nil then
       -- The throw, held for the arc's own lifetime.
       self:startSendBall(next)
@@ -4162,6 +4478,15 @@ function M:startAnim(row)
       -- The defender's flash and the field's nudge ride the drain row behind
       -- this one -- their own beat again -- so a move that misses only lunges.
       self:emitFx("lunge", row.slot, row.side)
+      -- ...and the move's own particles, on the same beat as the lean, because
+      -- the two are one action: the monster leans in and the fire leaves it.
+      --
+      -- Emitted for **every** move, not only the ones that connect -- a status
+      -- move never reaches a drain row and a miss never reaches one either, so
+      -- an effect gated on damage would leave two thirds of the move list
+      -- drawing nothing. What the blow landing adds is its own, smaller burst
+      -- (`startDrain`, beat 3).
+      self:startMoveVfx(row)
     else
       -- ...and the markers it excludes are the throw itself: the arc, the
       -- recall, each wobble and the burst, one per queued row and each held
@@ -4268,7 +4593,7 @@ end
 -- `seatIndex` is 1-based within the side; a mediated 1v1 has exactly one seat
 -- per side, and the argument is here so a future multi-seat mode does not
 -- have to change the contract Battlefield renders against.
-function M:emitFx(kind, index, side, seatIndex)
+function M:emitFx(kind, index, side, seatIndex, extra)
   if not self:usesBattlefield() then return nil end
   local span = FX_SPAN[kind]
   if not span then return nil end
@@ -4280,6 +4605,19 @@ function M:emitFx(kind, index, side, seatIndex)
     elapsed = 0,
     duration = span,
   }
+  -- `extra` is the particle record's own payload (style, palette, delivery,
+  -- scale, intensity, seed, and the seat a travelling effect launches from).
+  -- Copied key by key rather than merged wholesale so a caller cannot
+  -- accidentally overwrite `kind`, `t` or `elapsed` -- the three fields
+  -- `stepFx` owns -- and so a spec table from the catalogue can be handed in
+  -- directly without being defensively copied first.
+  if type(extra) == "table" then
+    for _, key in ipairs(VFX_KEYS) do
+      if extra[key] ~= nil then fx[key] = extra[key] end
+    end
+    local span2 = tonumber(extra.duration)
+    if span2 and span2 > 0 then fx.duration = span2 end
+  end
   local list = self.fx
   if type(list) ~= "table" then
     list = {}
@@ -4287,6 +4625,121 @@ function M:emitFx(kind, index, side, seatIndex)
   end
   list[#list + 1] = fx
   return fx
+end
+
+-- ------- particles
+--
+-- One emission, from a spec src/Vfx.lua resolved. Everything that has a look
+-- goes through here -- a move, an item, a condition landing, a stat stage
+-- moving -- so there is exactly one place that decides what a seed is, which
+-- seat an effect is anchored to and which one it travels from.
+--
+-- `targetIndex` is the field slot the effect lands on; `fromIndex` the slot it
+-- comes from, and it is only meaningful for the travelling deliveries
+-- (projectile / beam) and for `self`. A nil spec is not an error -- the
+-- catalogue answers nil for a thrown ball, which already has a whole flow of
+-- its own, and for an item that does nothing -- so it is simply not drawn.
+function M:emitVfx(spec, targetIndex, fromIndex)
+  if type(spec) ~= "table" then return nil end
+  if not self:usesBattlefield() then return nil end
+  -- The seed is what stops two Flamethrowers in a row from drawing the
+  -- identical sixteen sparks. Counted rather than random: two clients watching
+  -- the same fight see the same particles, and a headless run is reproducible.
+  self.vfxSeed = ((tonumber(self.vfxSeed) or 0) + 1) % 512
+  local extra = {
+    style = spec.style,
+    palette = spec.palette,
+    delivery = spec.delivery,
+    scale = spec.scale,
+    intensity = spec.intensity,
+    duration = spec.duration,
+    seed = self.vfxSeed,
+  }
+  if fromIndex ~= nil then
+    extra.fromSide = self:fxSideFor(fromIndex)
+    extra.fromSeat = 1
+  end
+  return self:emitFx("vfx", targetIndex, nil, nil, extra)
+end
+
+-- The move a queued `anim` row names, as the engine's own record. nil for a
+-- ball marker, for a row naming a move this build does not have, and headless.
+function M:moveDefFor(animId)
+  if type(animId) ~= "string" or animId == "" then return nil end
+  local data = self.game and self.game.data
+  local moves = data and data.moves
+  if type(moves) ~= "table" then return nil end
+  local def = moves[animId]
+  return (type(def) == "table") and def or nil
+end
+
+-- The seat opposite a slot, which is where a move aimed at "the other side"
+-- lands. A mediated fight is 1v1, so this is exact rather than a guess.
+function M:opposingSlot(index)
+  if index == self:foeSlot() then return self:mySlot() end
+  return self:foeSlot()
+end
+
+-- A move's particles, on the lunge beat.
+--
+-- The spec is also kept (`self.moveVfx`) because beat 3's impact burst is
+-- drawn in the *attacking move's* colours, and that beat is a different row --
+-- so the two are joined by remembering the last move played rather than by
+-- either row carrying the other's business. Cleared first, so a row this
+-- refuses to draw for cannot leave the previous move's palette standing.
+--
+-- Returns the effect record, or nil for a row with no move behind it.
+function M:startMoveVfx(row)
+  self.moveVfx = nil
+  if not self:usesBattlefield() then return nil end
+  if type(row) ~= "table" then return nil end
+  local animId = row.anim
+  if type(animId) ~= "string" or animId == "" then return nil end
+
+  -- `moveDefFor` is nil for a move this build does not carry -- a Gen 2 id on
+  -- a Gen 1 boot, a referee running a mod this client does not have -- and the
+  -- catalogue answers for a nil definition rather than refusing: an unknown
+  -- move draws NORMAL's impact, which is the right amount of "something
+  -- happened" for a move nobody here can name.
+  local spec = Vfx.forMove(animId, self:moveDefFor(animId))
+  self.moveVfx = spec
+
+  local from = row.slot
+  if from == nil and row.side ~= nil then from = slotOfSide(row.side) end
+  if from == nil then from = self:mySlot() end
+  -- A move that acts on its user plays on the user's own seat; everything else
+  -- is aimed at the seat opposite, which in a 1v1 is exactly one seat.
+  local target = (spec.delivery == "self") and from or self:opposingSlot(from)
+  return self:emitVfx(spec, target, from)
+end
+
+-- A queued particle row -- an item opening, a condition landing, a stat stage
+-- moving -- reaching the head of the queue.
+--
+-- **It takes no hold.** Every one of these has a sentence of its own coming
+-- immediately behind it ("X was healed", "X was poisoned!"), and the effect is
+-- meant to be running *under* that line rather than before it: holding here
+-- would insert half a second of empty arena between the item being used and
+-- the box saying so. The row costs one tick and the queue moves straight on.
+function M:startVfxRow(row)
+  if type(row) ~= "table" then return false end
+  local spec = row.vfxrow
+  if type(spec) ~= "table" then return false end
+  self:emitVfx(spec, row.slot, row.from)
+  return true
+end
+
+-- File one, in referee order. Called at parse rather than at play so the
+-- effect keeps its place in the stream relative to the lines around it; a nil
+-- spec (a thrown ball, an item with no look, a condition clearing) files
+-- nothing at all.
+function M:queueVfx(spec, index, fromIndex)
+  if type(spec) ~= "table" then return false end
+  if not self:usesBattlefield() then return false end
+  self.lines[#self.lines + 1] = {
+    vfxrow = spec, slot = index, from = fromIndex,
+  }
+  return true
 end
 
 -- ------- the ball flow
@@ -4692,10 +5145,12 @@ function M:applySwap(row)
   slot.sprite = nil
   slot.icon = nil
   slot.koHold = nil
-  -- Same reading of a first HP as `noteSlot`'s: what the referee says a monster
-  -- is on the moment it walks out is the biggest bar this seat has ever been
-  -- told about, unless it walked in already hurt.
+  -- Same reading of an arrival's numbers as `noteSlot`'s, and for the same
+  -- reason: the maximum the referee stated for this monster (PROTOCOL 24) is
+  -- what its bar is out of, and the older guess -- the biggest HP the seat has
+  -- ever been told about -- is only what is left when it stated none.
   slot.hp = arrival.hp or 0
+  if arrival.maxHp ~= nil then slot.maxHp = max(1, arrival.maxHp) end
   if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
   -- A monster that just walked on has nothing to animate down from, so its bar
   -- starts where the referee says it is -- and the predecessor's descent, which
@@ -4716,7 +5171,12 @@ end
 -- can land between queue and play, and a fall meant for the monster that left
 -- would otherwise be run against the one that replaced it. CoopBattle's twin
 -- names the battler for the same reason.
-function M:queueDrain(index)
+-- `residual` is the `damage` event's own `status` field, present when a burn
+-- or poison ticking dealt the damage rather than a move. It rides on the row
+-- because beat 3's impact burst borrows the *attacking move's* palette, and a
+-- residual has no attacking move -- taking the last one's colours would paint
+-- a poison tick in the last Fire attack's orange.
+function M:queueDrain(index, residual)
   if index == nil then return false end
   if not self:usesBattlefield() then return false end
   local slot = self.slots[index]
@@ -4727,7 +5187,10 @@ function M:queueDrain(index)
     return false
   end
   if slot.shownHp == to then return false end
-  self.lines[#self.lines + 1] = { drain = index, to = to, species = slot.species }
+  self.lines[#self.lines + 1] = {
+    drain = index, to = to, species = slot.species,
+    residual = (residual ~= nil) or nil,
+  }
   return true
 end
 
@@ -4779,6 +5242,14 @@ function M:startDrain(row)
     table.insert(self.lines, 1, row)
     self:emitFx("flash", row.drain)
     self:emitFx("shake", row.drain)
+    -- The punctuation on the blow, in the attacking move's own colours: a
+    -- compact impact burst on the seat that took it. Small and short on
+    -- purpose -- the move's own effect is very likely still running over this
+    -- same seat, and this is the moment of contact inside it, not a second
+    -- effect competing with it. `self.anim` is the row that opened this
+    -- exchange, so a residual or a recoil with no move behind it gets the
+    -- neutral white burst rather than borrowing the last move's palette.
+    self:emitVfx(Vfx.forImpact(not row.residual and self.moveVfx or nil), row.drain)
     self.hitHold = BEAT_SPAN.hit
     return true
   end
@@ -5081,6 +5552,10 @@ function M:snapDisplay()
   self.replaceWait = nil
   self.ballFlow = nil
   self.fx = nil
+  -- The last move's palette goes with the effects it coloured: the next thing
+  -- to strike after a re-sync has no move behind it yet, and beat 3 would
+  -- otherwise open in the colours of an attack from before the gap.
+  self.moveVfx = nil
   self.animHold = nil
   self.hitHold = nil
   self.draining = nil
@@ -5103,6 +5578,7 @@ function M:snapDisplay()
       slot.icon = nil
       slot.koHold = nil
       slot.hp = arrival.hp or 0
+      if arrival.maxHp ~= nil then slot.maxHp = max(1, arrival.maxHp) end
       if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
       slot.status = arrival.status
       -- No `arriveOnSeat` here: `exit` calls this on stubs that carry neither a
@@ -5518,6 +5994,10 @@ function M:bandMoveRows()
     -- list after Transform/Mimic carries `pp` and may carry no maximum, so the
     -- right column is dropped rather than invented.
     local row = { label = self:moveLabel(move.id) or tostring(move.id) }
+    -- The type, in the column left of PP. Same reason PP is on the row rather
+    -- than under it: what the player is comparing four ways is on the four
+    -- rows, not on a strip that only ever describes the highlighted one.
+    row.tag = self:moveTypeName(move.id)
     local pp = tonumber(move.pp)
     local maxPp = tonumber(move.maxPp)
     if pp and maxPp then

@@ -279,6 +279,10 @@ function copyMove(raw) {
   const maxPp = Math.max(pp, int(raw.maxPp, pp));
   return {
     id: str(raw.id) || 'move',
+    // Optional (PROTOCOL 26), and absence is a real answer rather than a gap
+    // to fill: a sheet from a protocol-25 client states no name, and the
+    // sentences below fall back to the id exactly as they always did.
+    name: str(raw.name),
     pp,
     maxPp,
     power: Math.max(0, int(raw.power, 0)),
@@ -287,6 +291,21 @@ function copyMove(raw) {
     effect: Math.max(0, int(raw.effect, 0)),
     chance: Math.max(0, int(raw.chance, 0)),
   };
+}
+
+/*
+ * What a move is *called* in a sentence: the display name its sheet carried
+ * (PROTOCOL 26), or its registry id when it carried none.
+ *
+ * Prose only. An `anim` event carries the **id** and has to keep carrying it --
+ * that is what a client looks the move animation and the move-menu label up by
+ * -- so the two spellings are never interchangeable, and every call here is a
+ * line somebody reads rather than a key something indexes.
+ */
+function moveLabel(move, fallback) {
+  const back = fallback || 'move';
+  if (!isTable(move)) return back;
+  return str(move.name) || str(move.id) || back;
 }
 
 // A defender with no stated types is type 0, which the chart lookup reads as
@@ -650,6 +669,41 @@ class Battle {
   }
 
   /*
+   * Every seat's party roster, published when -- and only when -- it moved.
+   *
+   * **This is the only thing on the wire that describes a monster nobody has
+   * seen.** A mediated fight tells each client about the field and nothing
+   * else, which is right for every other event and wrong for exactly one
+   * question: how many monsters is the other player still holding, and how many
+   * of those are spent. Both clients uploaded a party to the referee and
+   * neither uploaded one to the other, so the referee is the only party to the
+   * fight that can answer it -- which is why this is an event and not something
+   * a screen derives.
+   *
+   * What it carries is a ball row and no more (`Events.teamString`): a count
+   * and three states. Not a species, not a level, not a move. That line is
+   * where it is because it is where the original draws it -- the row a
+   * trainer's intro puts on screen is exactly this much -- and because anything
+   * past it is a team preview one player never agreed to give.
+   *
+   * Diffed rather than announced, so a fight that changes nothing costs
+   * nothing. `fighter.team` starts null, so the first sync always publishes --
+   * which is how the opening rosters reach a client (`_openTurn` runs at the
+   * end of construction, behind the send-outs).
+   */
+  _syncTeams() {
+    for (const fighter of this.fighters) {
+      const roster = Events.teamString(fighter.mons);
+      if (roster !== fighter.team) {
+        fighter.team = roster;
+        this._emit('team', {
+          slot: fighter.slot, side: fighter.side, team: roster,
+        });
+      }
+    }
+  }
+
+  /*
    * Everything since the last call, in order, and the buffer is emptied. A
    * caller that drops the returned list drops those events for good, which is
    * deliberate: the alternative -- a buffer that grows until somebody reads it
@@ -818,6 +872,7 @@ class Battle {
       if (mon.mustRecharge) {
         mon.mustRecharge = false;
         this._say(`${mon.species} must recharge`);
+        fighter.forced = true;
         fighter.choice = { action: 'skip' };
         this._emit('chose', {
           slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -828,6 +883,7 @@ class Battle {
       if (mon.bide) {
         if (mon.bide.turns > 0) {
           this._say(`${mon.species} is storing energy`);
+          fighter.forced = true;
           fighter.choice = { action: 'skip' };
           this._emit('chose', {
             slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -836,6 +892,7 @@ class Battle {
           const foe = this._autoTarget(fighter);
           if (foe) {
             this._say(`${mon.species} unleashed energy`);
+            fighter.forced = true;
             fighter.choice = {
               action: 'fight',
               move: mon.bide.moveIndex,
@@ -852,6 +909,7 @@ class Battle {
 
       if (mon.trapped && mon.trapped.turns > 0) {
         this._say(`${mon.species} can't move`);
+        fighter.forced = true;
         fighter.choice = { action: 'skip' };
         this._emit('chose', {
           slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -865,10 +923,11 @@ class Battle {
         // do not re-enter _useMove (that would re-roll damage).
         const move = mon.moves[mon.trapping.moveIndex - 1];
         const moveId = (move && move.id) || 'attack';
-        this._say(`${mon.species}'s ${moveId} continues`);
+        this._say(`${mon.species}'s ${moveLabel(move, 'attack')} continues`);
         this._emit('anim', {
           slot: fighter.slot, side: fighter.side, text: moveId,
         });
+        fighter.forced = true;
         fighter.choice = { action: 'skip' };
         this._emit('chose', {
           slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -878,6 +937,7 @@ class Battle {
 
       if (mon.charging) {
         const c = mon.charging;
+        fighter.forced = true;
         fighter.choice = {
           action: 'fight',
           move: c.moveIndex,
@@ -893,6 +953,7 @@ class Battle {
         const foe = this._autoTarget(fighter);
         if (foe) {
           this._say(`${mon.species} thrashing about`);
+          fighter.forced = true;
           fighter.choice = {
             action: 'fight',
             move: mon.thrashing.moveIndex,
@@ -909,6 +970,7 @@ class Battle {
         const foe = this._autoTarget(fighter);
         if (foe) {
           this._say(`${mon.species}'s RAGE is building`);
+          fighter.forced = true;
           fighter.choice = {
             action: 'fight',
             move: mon.rageMove,
@@ -1063,6 +1125,13 @@ class Battle {
       // only hand the seat a second way to hold the fight open.
       if (this.phase === 'replace') return false;
       if (fighter.choice === null) return false;
+      // A referee-filled answer is not the player's to take back.  Trap
+      // lock-in, recharge, Bide, thrash and a charge release all fill the seat
+      // at `_openTurn`; without this a client could cancel out of a Wrap and
+      // switch away, and on a turn where *every* seat is forced -- which is
+      // exactly what a trap looks like -- `_openTurn` left no deadline, so the
+      // cleared choice would hang the fight with nothing to time it out.
+      if (fighter.forced) return false;
       this._emit('unchose', {
         slot: fighter.slot, side: fighter.side, text: fighter.name,
       });
@@ -1444,8 +1513,17 @@ class Battle {
     this.phase = 'choice';
     this.resolveDeadline = null;
     this.forcedPending = false;
-    for (const fighter of this.fighters) fighter.choice = null;
+    for (const fighter of this.fighters) {
+      fighter.choice = null;
+      fighter.forced = null;
+    }
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
+    // Before the window opens, not after: a player deciding this turn is
+    // looking at the rosters, and anything a status or a bench potion moved
+    // last turn has to be on them by the time the menu is up. Faints are
+    // already current -- `_faint` publishes inside its own batch -- so on most
+    // turns this emits nothing at all.
+    this._syncTeams();
     this._emit('turn', { amount: this.turn });
     this._fillForcedChoices();
     // When every living seat is forced, defer resolve to the next tick so
@@ -1505,8 +1583,14 @@ class Battle {
     this.phase = 'replace';
     this.resolveDeadline = null;
     this.forcedPending = false;
-    for (const fighter of this.fighters) fighter.choice = null;
+    for (const fighter of this.fighters) {
+      fighter.choice = null;
+      fighter.forced = null;
+    }
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
+    // The other window a player answers from, and the same reason: whoever is
+    // picking a replacement is picking it off the roster.
+    this._syncTeams();
     for (const fighter of this.fighters) {
       if (this._owes(fighter)) {
         this._emit('turn', { amount: this.turn, slot: fighter.slot });
@@ -1657,7 +1741,8 @@ class Battle {
             mon: choice.slot - 1,
           });
           this._emit('send', {
-            slot: fighter.slot, side: fighter.side, hp: mon.hp, text: mon.species,
+            slot: fighter.slot, side: fighter.side, hp: mon.hp, maxHp: mon.maxHp,
+            text: mon.species,
             speciesId: mon.speciesId, level: mon.level,
             mon: choice.slot - 1,
           });
@@ -1832,7 +1917,10 @@ class Battle {
         if (result.stat === 'hp' && result.delta > 0) {
           this._emit('drain', {
             slot: fighter.slot, side: fighter.side,
-            amount: result.delta, hp: mon.hp,
+            // ...and what the bar is now out of: an HP UP moves the maximum
+            // itself, so a client told only the new HP would draw the rise
+            // against the old ceiling.
+            amount: result.delta, hp: mon.hp, maxHp: mon.maxHp,
           });
         } else if (result.delta > 0) {
           this._emit('stat', {
@@ -2189,8 +2277,7 @@ class Battle {
     if (!struggling && mon.disable && mon.disable.turns > 0
         && mon.disable.moveIndex === choice.move) {
       const blocked = mon.moves[choice.move - 1];
-      const moveId = blocked && blocked.id ? blocked.id : 'move';
-      this._say(`${moveId} is disabled`);
+      this._say(`${moveLabel(blocked)} is disabled`);
       return;
     }
 
@@ -2215,7 +2302,7 @@ class Battle {
 
     if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) move.pp -= 1;
     this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
-    this._say(`${mon.species} used ${move.id}`);
+    this._say(`${mon.species} used ${moveLabel(move)}`);
 
     if (choice.bideRelease && mon.bide) {
       const stored = mon.bide.stored;
@@ -2506,10 +2593,15 @@ class Battle {
 
     if (Effects.isTrapping(effectId) && totalDealt > 0) {
       const turns = Effects.trapTurns(this.rng);
+      // `turns` is Gen1's *total* attack count (2..5), and the hit that just
+      // landed was the first of them -- so the trap is marked `fresh` and the
+      // residual at the end of this same turn ticks the counter without
+      // dealing damage a second time.  Without it a 2-turn Wrap hit 3 times.
       defender.trapped = {
         turns,
         damage: totalDealt,
         fromSlot: fighter.slot,
+        fresh: true,
       };
       mon.trapping = {
         turns,
@@ -2824,6 +2916,11 @@ class Battle {
     // open the replace picker from this rather than guessing from local HP.
     if (next) faintEv.amount = 1;
     this._emit('faint', faintEv);
+    // Immediately behind the faint line rather than at the next window, because
+    // this is the one roster change a player is *watching* happen: the ball
+    // goes dark in the same batch the monster goes down in, and a fight that
+    // ends on this faint has no next window to have said it at.
+    this._syncTeams();
 
     // Owed here, paid at the end of the action (`_drainExp`), with the fallen
     // sheet held in the queue so the payout still names the monster that fell
@@ -2885,8 +2982,16 @@ class Battle {
       mon = activeMon(fighter);
       if (mon && mon.trapped && mon.trapped.turns > 0) {
         const trap = mon.trapped;
-        this._say(`${mon.species} is hurt by the trap`);
-        this._damage(fighter, mon, trap.damage, null);
+        // The turn the trap landed on already paid its damage through the move
+        // itself: spend that attack off the counter here and say nothing.
+        // Every later turn is a real residual.  A trap that arrived on a sheet
+        // rather than from a move carries no `fresh` mark and ticks at once.
+        if (trap.fresh) {
+          trap.fresh = null;
+        } else {
+          this._say(`${mon.species} is hurt by the trap`);
+          this._damage(fighter, mon, trap.damage, null);
+        }
         trap.turns -= 1;
         if (trap.turns <= 0) {
           mon.trapped = null;
@@ -2926,7 +3031,7 @@ class Battle {
           const cleared = mon.moves[idx - 1];
           mon.disable = null;
           if (cleared && cleared.id) {
-            this._say(`${cleared.id} is no longer disabled`);
+            this._say(`${moveLabel(cleared)} is no longer disabled`);
           }
         }
       }
@@ -3223,6 +3328,9 @@ function attempt(opts) {
         connected: true,
         graceEndsAt: null,
         choice: null,
+        // The roster last published for this seat (`_syncTeams`). null rather
+        // than the opening string, so the first sync always publishes.
+        team: null,
         // Who has been in against THIS seat's current monster; see `_refield`.
         fought: Object.create(null),
       };
@@ -3247,7 +3355,8 @@ function attempt(opts) {
     const mon = activeMon(fighter);
     if (mon) {
       self._emit('send', {
-        slot: fighter.slot, side: fighter.side, hp: mon.hp, text: mon.species,
+        slot: fighter.slot, side: fighter.side, hp: mon.hp, maxHp: mon.maxHp,
+        text: mon.species,
         speciesId: mon.speciesId, level: mon.level,
         mon: fighter.active - 1,
       });

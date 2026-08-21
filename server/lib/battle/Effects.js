@@ -163,6 +163,19 @@ function category(id) {
   return CATEGORIES[n];
 }
 
+/*
+ * What a move is *called* in a sentence: the display name its sheet carried
+ * (PROTOCOL 26), or its registry id when it carried none. Turn.js keeps the
+ * same one-line rule; both are prose, never a key something indexes.
+ */
+function moveLabel(move, fallback) {
+  const back = fallback || 'move';
+  if (move === null || typeof move !== 'object') return back;
+  if (typeof move.name === 'string' && move.name !== '') return move.name;
+  if (typeof move.id === 'string' && move.id !== '') return move.id;
+  return back;
+}
+
 function clampStage(stage) {
   const s = int(stage, 0);
   if (s < STAGE_MIN) return STAGE_MIN;
@@ -445,8 +458,7 @@ function applyPrimary(ctx) {
     }
     const turns = (rng ? rng.byte() : 0) % 4 + 2;
     targetMon.disable = { moveIndex: lastIdx, turns };
-    const moveId = targetMon.moves[lastIdx - 1].id || 'move';
-    out.messages.push(`${moveId} was disabled`);
+    out.messages.push(`${moveLabel(targetMon.moves[lastIdx - 1])} was disabled`);
     return out;
   }
 
@@ -512,6 +524,9 @@ function applyPrimary(ctx) {
     }
     userMon.moves[moveIndex - 1] = {
       id: source.id || 'move',
+      // The copy is narrated under the same name the original was, so a
+      // mimicked move does not revert to its slug on the learner's screen.
+      name: source.name,
       pp: Math.max(0, int(source.pp, 0)),
       power: Math.max(0, int(source.power, 0)),
       accuracy: Math.max(0, int(source.accuracy, 255)),
@@ -519,7 +534,7 @@ function applyPrimary(ctx) {
       effect: Math.max(0, int(source.effect, 0)),
       chance: Math.max(0, int(source.chance, 0)),
     };
-    out.messages.push(`${userMon.species} learned ${source.id || 'move'}`);
+    out.messages.push(`${userMon.species} learned ${moveLabel(source)}`);
     out.movesChanged = true;
     return out;
   }
@@ -538,6 +553,7 @@ function applyPrimary(ctx) {
     userMon.stages.eva = clampStage(targetMon.stages.eva);
     userMon.moves = targetMon.moves.map((m) => ({
       id: m.id || 'move',
+      name: m.name,
       pp: Math.max(0, int(m.pp, 0)),
       power: Math.max(0, int(m.power, 0)),
       accuracy: Math.max(0, int(m.accuracy, 255)),
@@ -888,6 +904,7 @@ function caughtSheet(mon) {
     if (!m) continue;
     moves.push({
       id: m.id || 'move',
+      name: m.name,
       pp: Math.max(0, int(m.pp, 0)),
       power: Math.max(0, int(m.power, 0)),
       accuracy: Math.max(0, int(m.accuracy, 255)),

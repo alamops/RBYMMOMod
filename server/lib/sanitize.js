@@ -126,6 +126,27 @@ const FACINGS = new Set(['up', 'down', 'left', 'right']);
 const KINDS = new Set(['trade', 'battle']);
 const SCOPES = new Set(['global', 'local', 'private', 'party']);
 
+/*
+ * Why an invite came back refused, when the refusal was not a human pressing
+ * NO. A closed set rather than free text, for the reason COOP_REASONS is one:
+ * every value picks a different sentence on the asker's screen, and an
+ * unknown one has nothing to draw.
+ *
+ * **Absent is the important value.** No reason means a person read the box
+ * and said no, which is the only refusal that was ever worth the flat 'X
+ * refused to battle.' Every other one is a fact about the moment -- they are
+ * mid-fight, mid-trade, already holding somebody else's ask, or no longer
+ * here -- and telling the asker which is the difference between a sentence
+ * they can act on and one that reads as a snub. Mirrors Wire.DECLINE_REASONS.
+ */
+const DECLINE_REASONS = {
+  fighting: true, busy: true, asked: true, gone: true,
+};
+
+function cleanDeclineReason(value) {
+  return DECLINE_REASONS[value] ? value : null;
+}
+
 // You and one friend. The rules that make a party feel solid all follow from
 // the pair -- an invite is only offered when both sides are unattached, and
 // either member leaving ends it for both -- so this is the design, not a
@@ -212,6 +233,16 @@ const COOP_LABEL_MAX = 16;
 
 function cleanLabel(value) {
   return cleanText(value, COOP_LABEL_MAX);
+}
+
+// What a move is called, as opposed to what identifies it (PROTOCOL 26). Prose,
+// so it borrows cleanText -- but with its own limit, because a move name is not
+// a player name and NAME_MAX cuts "THUNDERSHOCK" to "THUNDERSHO". Twin of
+// Config.MOVE_NAME_MAX / Wire.moveName.
+const MOVE_NAME_MAX = 16;
+
+function cleanMoveName(value) {
+  return cleanText(value, MOVE_NAME_MAX);
 }
 
 function cleanBattleKey(value) {
@@ -553,6 +584,12 @@ const BATTLE_ACTIONS = new Map([
  *              species table and can never compute one, so the referee states
  *              the facts and each client runs its own Experience formula over
  *              its own party.
+ *   team       a seat's party roster, as ball states: how many monsters it
+ *              brought and which of them are healthy / statused / down. The
+ *              referee is the only party to a mediated fight holding every
+ *              party, so it is the only one that can say this about the seat
+ *              opposite. Ball states and nothing else -- no species, no level,
+ *              no moves -- which is exactly what the classic ball row reveals.
  *
  * Closed, because the vocabulary is the contract between the turn machine and
  * the screen: an unknown kind has no animation, no sentence and no state change
@@ -562,8 +599,46 @@ const BATTLE_ACTIONS = new Map([
 const BATTLE_EVENT_TYPES = new Set([
   'msg', 'anim', 'damage', 'drain', 'faint', 'send', 'status', 'stat',
   'switch', 'item', 'run', 'turn', 'over', 'wait', 'reconnect',
-  'chose', 'unchose', 'moves', 'exp',
+  'chose', 'unchose', 'moves', 'exp', 'team',
 ]);
+
+/*
+ * The three ball states a roster is spelled in. Wire.lua spells this
+ * M.TEAM_TOKENS.
+ *
+ *   o  standing, nothing wrong with it
+ *   s  standing, carrying a status
+ *   x  down
+ *
+ * No token for an empty slot. An empty slot is not a party member -- the roster
+ * says that by being short, and its length is therefore the party size, which
+ * is half of what the event is for.
+ */
+const TEAM_TOKENS = new Set(['o', 's', 'x']);
+
+/*
+ * A seat's roster.
+ *
+ * **Refused whole rather than trimmed to the part that parses**, which is the
+ * opposite of what cleanText does, and the difference is what the value is for.
+ * A truncated sentence is a shorter sentence; a truncated roster is a
+ * *different party* -- three balls where the seat holds five -- and a client
+ * would draw the other player as two monsters closer to beaten than they are.
+ * There is no partially-correct reading of this field, so a malformed one is
+ * dropped and the chip keeps the last roster it was told.
+ *
+ * Bounded by BATTLE_MON_MAX because that is the rule the referee builds parties
+ * under, and empty is refused because a seat with no monsters is not a seat
+ * that is in the fight.
+ */
+function cleanBattleTeam(value) {
+  if (typeof value !== 'string') return null;
+  if (value.length < 1 || value.length > BATTLE_MON_MAX) return null;
+  for (const ch of value) {
+    if (!TEAM_TOKENS.has(ch)) return null;
+  }
+  return value;
+}
 
 // The reasons a mediated fight ends that a screen currently has a sentence for:
 // nobody answered in time, a side dropped and its grace ran out, somebody fled,
@@ -829,6 +904,18 @@ function cleanBattleMove(raw) {
     const maxPp = cleanInt(raw.maxPp, 0, PP_MAX);
     if (maxPp === null) return null;
     move.maxPp = maxPp;
+  }
+  // `name` (PROTOCOL 26) is the one field here that may legitimately be absent
+  // besides `maxPp`, and for the same reason: absence is a real answer. It is
+  // what the referee narrates the move under -- a hub holds no move table to
+  // look one up in and never will -- and a sender that states none is a
+  // protocol-25 client, whose fight narrates under `id` exactly as it always
+  // did. Present-but-unreadable is refused rather than dropped, on this
+  // function's own rule.
+  if (raw.name !== undefined && raw.name !== null) {
+    const name = cleanMoveName(raw.name);
+    if (!name) return null;
+    move.name = name;
   }
   return move;
 }
@@ -1219,6 +1306,17 @@ function cleanBattleEvent(raw) {
     const hp = cleanInt(raw.hp, 0, HP_MAX);
     if (hp !== null) event.hp = hp;
   }
+  // What that HP is out of, on the events that can move it: `send` states it
+  // for the monster walking on, and a `drain` states it when an HP UP raised
+  // the ceiling itself. Optional, and its absence is not a zero: a client that
+  // is told none falls back to the oldest reading of this wire -- the largest
+  // HP it has ever seen on the seat -- which is right for a monster that came
+  // out whole and wrong for one that came out hurt. Floored at 1 for the reason
+  // cleanBattleMon floors it there: the bar divides by it.
+  if (raw.maxHp !== undefined && raw.maxHp !== null) {
+    const maxHp = cleanInt(raw.maxHp, 1, HP_MAX);
+    if (maxHp !== null) event.maxHp = maxHp;
+  }
   // `exp` carries the facts a client needs to run its own award: which monster
   // fell and how many shares split it. Same sanitisers a battler's own fields
   // get (cleanText over NAME_MAX / cleanInt over LEVEL_MAX), because they are
@@ -1263,6 +1361,16 @@ function cleanBattleEvent(raw) {
   if (raw.mon !== undefined && raw.mon !== null) {
     const mon = cleanInt(raw.mon, 0, SLOT_MAX);
     if (mon !== null) event.mon = mon;
+  }
+  // The `team` event's roster (PROTOCOL 24), and the one field here that is
+  // neither a number nor prose: a fixed alphabet, one character per party
+  // member. Dropped rather than trimmed when it does not parse -- see
+  // cleanBattleTeam, where a short roster is a different party rather than a
+  // shorter sentence. A `team` event that loses its roster is an event with
+  // nothing in it, which is exactly what a client ignores.
+  if (raw.team !== undefined && raw.team !== null) {
+    const team = cleanBattleTeam(raw.team);
+    if (team) event.team = team;
   }
   if (raw.side !== undefined && raw.side !== null) {
     const side = cleanSide(raw.side);
@@ -1361,6 +1469,7 @@ module.exports = {
   cleanLabel,
   cleanSide,
   cleanCoopReason,
+  cleanDeclineReason,
   cleanPartyEvent,
   cleanSpriteId,
   cleanMapId,
@@ -1386,11 +1495,13 @@ module.exports = {
   cleanBattleReady,
   cleanBattleChoice,
   cleanBattleEvent,
+  cleanBattleTeam,
   cleanBattleOutcome,
   cleanBattleReconnect,
   payloadOk,
   FACINGS,
   KINDS,
+  DECLINE_REASONS,
   SCOPES,
   PARTY_MAX,
   OUTCOMES,
@@ -1405,6 +1516,8 @@ module.exports = {
   PAYLOAD_MAX_NODES,
   COOP_KEY_MAX,
   COOP_LABEL_MAX,
+  MOVE_NAME_MAX,
+  cleanMoveName,
   SIDES,
   COOP_REASONS,
   PARTY_EVENTS,
@@ -1451,4 +1564,5 @@ module.exports = {
   AMOUNT_MAX,
   PARTICIPANTS_MAX,
   REASON_MAX,
+  TEAM_TOKENS,
 };

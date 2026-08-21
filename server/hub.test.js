@@ -325,6 +325,24 @@ async function main() {
     cal.send('mmo.request', { to: bobWelcome.id, kind: 'battle' });
     const declined = await cal.expect('mmo.decline');
     ok(declined.name === 'BOB', 'a busy player auto-declines');
+    ok(declined.reason === 'busy', 'saying which kind of no it is');
+
+    // ...and an ask pointed at somebody who is not here is answered, not
+    // dropped. Silence stranded the asker: `outgoing` marks a client busy,
+    // nothing else clears it, and from then on every invite they receive is
+    // refused and every one they send is turned away.
+    cal.drain('mmo.decline');
+    cal.send('mmo.request', { to: 'nobodyatall', kind: 'battle' });
+    const vanished = await cal.expect('mmo.decline');
+    ok(vanished.reason === 'gone', 'asking a stranger comes back refused');
+    ok(vanished.name === undefined,
+      'with no name -- there is no client left to read one off');
+
+    // a request with no valid kind is still dropped: there is nothing to answer
+    cal.drain('mmo.decline');
+    cal.send('mmo.request', { to: 'nobodyatall', kind: 'duel' });
+    await cal.expectSilence('mmo.decline', 250);
+    ok(true, 'a request with no valid kind earns no reply at all');
 
     // ------- teardown of the live session, then cancel an unanswered ask
     //
@@ -349,6 +367,84 @@ async function main() {
     bob.send('mmo.respond', { to: annWelcome.id, kind: 'battle', accept: true });
     await ann.expectSilence('mmo.session');
     ok(true, 'accepting a cancelled ask starts no session');
+
+    // ------- the busy everybody else reads, and invites that cross
+    //
+    // The twin of src/Hub.lua's own block. `busy` on a roster row used to
+    // mean "the hub has this player in a session" and nothing else, while
+    // the client refused invites for a wild fight, a trainer, a co-op
+    // handoff or an ask of its own -- so a player in an ordinary battle was
+    // published as free, asked, and refused in the same second.
+
+    ann.drain('mmo.move');
+    bob.send('mmo.move', { map: 'PALLET', x: 6, y: 5, facing: 'up', busy: true });
+    const busyMove = await ann.expect('mmo.move');
+    ok(busyMove.busy === true,
+      'a client that says it is mid-fight is published as busy');
+
+    // ...strictly, because the Lua hub has to publish the same roster for
+    // the same bytes and the two languages disagree about "yes" and 0.
+    ann.drain('mmo.move');
+    bob.send('mmo.move', { map: 'PALLET', x: 6, y: 5, facing: 'up', busy: 'yes' });
+    const looseMove = await ann.expect('mmo.move');
+    ok(looseMove.busy === false, 'only a literal true counts');
+
+    // The flag is advisory, never a gate: a stale one costs one honest
+    // refusal rather than a battle that could not be arranged.
+    ann.drain('mmo.move');
+    bob.send('mmo.move', { map: 'PALLET', x: 6, y: 5, facing: 'up', busy: true });
+    await ann.expect('mmo.move');
+    bob.drain('mmo.request');
+    ann.send('mmo.request', { to: bobWelcome.id, kind: 'battle' });
+    await bob.expect('mmo.request');
+    ok(true, 'an ask still reaches a client that called itself busy');
+
+    // The refusing client's reason is carried through...
+    ann.drain('mmo.decline');
+    bob.send('mmo.respond',
+      { to: annWelcome.id, kind: 'battle', accept: false, reason: 'fighting' });
+    const reasoned = await ann.expect('mmo.decline');
+    ok(reasoned.reason === 'fighting',
+      'a refusal carries why, so the asker reads a fact rather than a snub');
+
+    // ...but only from the closed set.
+    bob.drain('mmo.request');
+    ann.send('mmo.request', { to: bobWelcome.id, kind: 'battle' });
+    await bob.expect('mmo.request');
+    ann.drain('mmo.decline');
+    bob.send('mmo.respond',
+      { to: annWelcome.id, kind: 'battle', accept: false, reason: 'your mother' });
+    const forged = await ann.expect('mmo.decline');
+    ok(forged.reason === undefined,
+      'an invented reason is stripped, and it reads as a human no');
+
+    // Two invites that crossed are an agreement, not a collision: both
+    // players pressed BATTLE inside one round trip, and each client -- busy
+    // from the moment it asked -- refused the other as it landed.
+    ann.drain('mmo.session');
+    bob.drain('mmo.session');
+    ann.drain('mmo.decline');
+    bob.drain('mmo.decline');
+    ann.send('mmo.request', { to: bobWelcome.id, kind: 'battle' });
+    bob.send('mmo.request', { to: annWelcome.id, kind: 'battle' });
+    const crossedAnn = await ann.expect('mmo.session');
+    const crossedBob = await bob.expect('mmo.session');
+    ok(crossedAnn.id === crossedBob.id,
+      'two asks that crossed start the one battle both of them asked for');
+    ok(crossedAnn.role === 'host', 'and the one who asked first hosts');
+    ann.send('mmo.session_leave', {});
+    await bob.expect('mmo.session_end');
+
+    // ...and only when they asked for the same thing.
+    ann.drain('mmo.session');
+    cal.drain('mmo.session');
+    ann.send('mmo.request', { to: calWelcome.id, kind: 'trade' });
+    await cal.expect('mmo.request');
+    cal.send('mmo.request', { to: annWelcome.id, kind: 'battle' });
+    await ann.expectSilence('mmo.session', 250);
+    ok(true, 'a trade crossing a battle starts nothing -- two requests, not one');
+    ann.send('mmo.request_cancel', {});
+    cal.send('mmo.request_cancel', {});
 
     // ------- parties
     //

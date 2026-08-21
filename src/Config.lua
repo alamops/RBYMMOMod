@@ -143,7 +143,82 @@ M.MOD_ID = "rby_mmo"
 -- the picture and the number under it are wrong. Refusal naming both versions
 -- is the only sentence either player can act on.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 22
+--
+-- 23 is the invite that stopped refusing itself, and it moves two fields.
+-- (a) `busy` on `mmo.move` is now *read* by the hub and OR'd into the busy
+-- every roster row is drawn from -- it was sent by every client and thrown
+-- away by both hubs, so a player in an ordinary wild or trainer fight was
+-- published as free to ask and their client refused the invite a second
+-- later. (b) `mmo.decline` carries an optional `reason` from the closed
+-- Wire.DECLINE_REASONS set, and `mmo.respond` carries it on the way in, so
+-- an auto-refusal reads as "BOB is in a battle." instead of wearing the
+-- sentence a person pressing NO earns. A protocol-22 hub keeps discarding
+-- the flag and stripping the reason, which is exactly the bug: invites
+-- refused with nothing on either screen to say why, and a roster nobody
+-- could trust. Refusal naming both versions is the only sentence either
+-- player can act on.
+--
+-- 24 is `maxHp`: what a bar is out of, stated by the referee on `send` -- and
+-- on the `drain` an HP UP produces, which is the one thing in a fight that
+-- moves the ceiling itself.  Every other reading of HP on this wire is a
+-- current number, so a client had no handle on the maximum at all and took the
+-- largest HP it had ever seen on a seat for it.  That is right for a monster
+-- that walks out whole and wrong for every one that does not: a party monster
+-- that ended the last fight on 42 of 200 opened the next one drawing a *full*
+-- bar, with both HUDs printing "42/42", and it stayed wrong for the rest of
+-- that fight because nothing later ever raises the guess.  A protocol-23
+-- intermediator states none and a client falls back to the guess, which is
+-- exactly the failure -- and it is on the player's *own* monster, which is the
+-- one bar they read every turn.
+--
+-- 25 is the `team` battle event: a seat's party roster, as ball states -- how
+-- many monsters it brought, and which of them are healthy, statused or down.
+-- Every other event on this wire is about the field, and that is the right
+-- scope for all of them but one question: how much does the other player have
+-- left.  Both clients upload a party to the referee and neither uploads one to
+-- the other, and `mmo.relay` is hard-cut for the length of a mediated fight, so
+-- the referee is the only party to the exchange that can answer it.  A
+-- protocol-24 intermediator emits no such kind, and `Wire.battleEvent` drops an
+-- unknown one whole -- so the roster chip beside a peer's name would sit empty
+-- for the entire fight while the player's own filled in normally.  That is the
+-- worst shape this failure could take: not a blank screen but a *half*-drawn
+-- one, which reads as "they brought nothing" rather than as a hub that cannot
+-- do this.  Refusal naming both versions is the only sentence either player can
+-- act on.
+--
+-- **This branch has now been bumped out of a number twice**, first off 23 by
+-- the invite fix and then off 24 by `maxHp`, which makes four occasions this
+-- file has recorded (the two 5s, the two 6s, 17/20, and these).  The rule has
+-- not moved and did not need to: two branches that both say N and mean
+-- different vocabularies are precisely the silence this number exists to turn
+-- into a sentence, so the second to land moves rather than sharing.  25
+-- therefore means *all* of it -- a client that says 25 speaks 23's and 24's
+-- vocabularies too -- which is why the roster chip merges main rather than the
+-- other way round.  The pattern is worth reading as a fact about the project
+-- rather than as bad luck: several branches are open against this wire at any
+-- time, and the number is cheap to move while a shared one is not.
+--
+-- 26 is `name`: an optional display name on each move of an
+-- `mmo.battle_party` battler sheet, which is what the referee narrates the
+-- move under.  `id` is a registry identifier and stays one -- it is what a
+-- client looks a move animation and a move-menu label up by -- but it was
+-- also the only spelling of the move on the wire, so every sentence the
+-- referee wrote said it: "NIRE used DOUBLE_KICK", "DOUBLE_KICK is disabled",
+-- "NIRE learned MIRROR_MOVE".  The screen showed the slug in the one place a
+-- player reads the fight.  This is the same split `species` / `speciesId`
+-- already carries (PROTOCOL 22), in the other direction: there the wire had
+-- the display token and needed the id; here it had the id and needed the
+-- display token.  A protocol-25 intermediator strips the field off the upload
+-- and narrates under the id exactly as before -- which is the bug, not a
+-- crash, so refusal naming both versions is what tells a player why their
+-- fight reads wrong.
+--
+-- **This one asked for 23 as well**, and is the third branch in a row to be
+-- moved off a number rather than share one -- which is the paragraph above
+-- proving itself rather than contradicting itself.  26 means all of it: a
+-- client that says 26 speaks 23's, 24's and 25's vocabularies too.
+-- This number lives here and in server/lib/relay.js -- bump them together.
+M.PROTOCOL = 26
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -550,6 +625,15 @@ M.BATTLE_BAG_COUNT_MAX = 99
 -- into this list, so a party that carried more would be a party with slots no
 -- mmo.battle_choice can reach and no screen has a button for.
 M.BATTLE_MOVE_MAX = 4
+
+-- The display name of one of those moves, as the referee narrates it.
+--
+-- Its own limit for the same reason COOP_LABEL_MAX is: a move name is not a
+-- trainer name, and at ten characters NAME_MAX cuts "THUNDERSHOCK" to
+-- "THUNDERSHO" -- a fight narrated under a move nobody owns. Sixteen clears
+-- the longest name either generation ships (twelve) with room for a data
+-- pack's own, and still bounds a field a stranger sends.
+M.MOVE_NAME_MAX = 16
 
 -- The widest type chart an ephemeral ruleset may upload.
 --

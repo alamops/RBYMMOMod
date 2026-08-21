@@ -31,6 +31,8 @@ src/SessionNet.lua   a Net-shaped shim so engine link code runs over the hub
 src/Sessions.lua     requests; trade → TradeSession; battle → MediatedBattle
 src/MediatedBattle.lua  thin client for hub-refereed fights (snapshots, events, choices)
 src/BattleSim/       Lua half of the battle intermediator (formulas + turn machine)
+src/Battlefield.lua  the arena: seat layout, HUD plates, and every battle effect drawn
+src/Vfx.lua          the particle catalogue: which look a move / item / status wears
 src/World.lua        guarded mod.world:current()
 src/Client.lua       wiring: options, hooks, events, inbound dispatch
 server/hub.js        the hub (node, no deps, newline-JSON over TCP)

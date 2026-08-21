@@ -1495,7 +1495,7 @@ are the same five commands. Run them as `root`:
 # 1. Docker, if the image you booted has none
 curl -fsSL https://get.docker.com | sh
 
-# 2. The code
+# 2. The code, at the newest release
 git clone --depth 1 https://github.com/alamops/RBYMMOMod.git
 cd RBYMMOMod/server
 
@@ -1507,6 +1507,24 @@ docker compose exec hub rby-mmo-hub invite list --reveal
 
 # 5. What the hub thinks of itself
 docker compose exec hub rby-mmo-hub doctor
+```
+
+**No version is written into that clone, on purpose.** A hub and the mods
+dialling it have to agree on `PROTOCOL` — a mismatch is refused by name and
+version, which is the whole point of the number — so a hub pinned to a release
+older than what your friends are playing refuses every one of them, and says
+so in a sentence they cannot act on from inside the game. This page used to
+name a tag, and it went stale the way every hand-copied version number does:
+it still said `v0.8.0`, twenty-nine tagged releases back, when that tag speaks
+`PROTOCOL` 7 and this one speaks 26 — so anyone following it stood up a hub
+that refused the very clients it was for, nineteen bumps out of date. Taking
+the default branch is what keeps the hub current with the mod people actually
+install. To pin a specific release instead, name one and check that its
+`src/Config.lua` `PROTOCOL` matches the copy your friends run:
+
+```sh
+# whichever tag github.com/alamops/RBYMMOMod/releases names
+git clone --depth 1 --branch v1.0.9 https://github.com/alamops/RBYMMOMod.git
 ```
 
 #### Reading the passcode out of a container
@@ -1878,11 +1896,11 @@ On the one path where no passcode is required — the `node hub.js` shim — the
 exchange is byte-identical to what it has always been: `hello`, then
 `welcome`.
 
-**`PROTOCOL` is 10**, and it lives in **`lib/relay.js`** (not `hub.js` any
+**`PROTOCOL` is 26**, and it lives in **`lib/relay.js`** (not `hub.js` any
 more) and in **`src/Config.lua`**. Bump both together on any incompatible
-change. The hub refuses a mismatched client by name and version — *"This hub
-speaks protocol 10; your mod speaks 9."* — rather than letting two dialects
-talk past each other, and the game renders that sentence.
+change. The hub refuses a mismatched client by name and version — *"This game
+speaks protocol 26; yours speaks 25."* — rather than letting two dialects talk
+past each other, and the game renders that sentence.
 
 Every bump so far has been *additive*, and it is worth saying why an additive
 change moves the number at all. Nothing has ever been removed, so an old

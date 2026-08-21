@@ -552,6 +552,15 @@ function M:_begin(game, state, mapId, kind)
     -- call later -- but see the bag below, where the same shape was not.
     peerId = (kind ~= "wild") and FOE_SEAT or nil,
     peerName = (kind == "wild") and "WILD" or foeName(state),
+    -- The NPC record, so the arena can stand them on the foe edge.
+    --
+    -- The screen reads it for one thing -- `Gen.trainerWalkSpriteId`, the same
+    -- class-to-walk-sheet resolution `CoopBattle:battlefieldFoeHumans` does --
+    -- and without it a solo trainer fight drew the placeholder silhouette
+    -- there, because the only other figure a `coop_npc` seat could name is a
+    -- peer and a solo fight has none. Nil on a wild fight, where the foe edge
+    -- is correctly empty.
+    trainer = (kind ~= "wild") and SoloBrain.trainerOf(state) or nil,
     mode = mode,
     wildParty = (kind == "wild") and enemySheets or nil,
     wildCatchMon = wildMon,

@@ -94,13 +94,40 @@ local function encScalar(v)
   return "null"
 end
 
+-- Flat until `moves` arrived.  A `moves` event (Transform / Mimic republishing
+-- a live move list) is the one event kind carrying a table value, and encoding
+-- it as `null` -- which is what encScalar does with any table -- would have made
+-- every such event compare equal on both runtimes no matter what was in it.
+-- One level of nesting is all the vocabulary has, so one level is all this
+-- takes; a deeper value would still land as null, loudly, in a diff.
 local function encObject(tbl)
   local keys = {}
   for k in pairs(tbl) do keys[#keys + 1] = k end
   table.sort(keys)
   local parts = {}
   for _, k in ipairs(keys) do
-    parts[#parts + 1] = encString(k) .. ":" .. encScalar(tbl[k])
+    local v = tbl[k]
+    if type(v) == "table" then
+      local rows = {}
+      for i = 1, #v do
+        local row = v[i]
+        if type(row) == "table" then
+          local inner = {}
+          for ik in pairs(row) do inner[#inner + 1] = ik end
+          table.sort(inner)
+          local cells = {}
+          for _, ik in ipairs(inner) do
+            cells[#cells + 1] = encString(ik) .. ":" .. encScalar(row[ik])
+          end
+          rows[i] = "{" .. table.concat(cells, ",") .. "}"
+        else
+          rows[i] = encScalar(row)
+        end
+      end
+      parts[#parts + 1] = encString(k) .. ":[" .. table.concat(rows, ",") .. "]"
+    else
+      parts[#parts + 1] = encString(k) .. ":" .. encScalar(v)
+    end
   end
   return "{" .. table.concat(parts, ",") .. "}"
 end
@@ -331,6 +358,97 @@ scenario("retarget", function(events)
   battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
   battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
   drainInto(battle, events)
+  return battle
+end)
+
+-- 5. a whole trapping chain.  Gen1's 2..5 counter is a *total* attack count, so
+--    the turn Wrap lands on deals the move's damage and no residual on top of
+--    it; every later turn is one attack, forced on both seats and therefore
+--    ticked rather than submitted.  The tail also pins that a referee-filled
+--    answer cannot be cancelled away -- silently, so what shows up on the wire
+--    is the absence of an `unchose`.
+scenario("trap_chain", function(events)
+  local wrap = function()
+    return { id = "wrap", pp = 60, power = 5, accuracy = 255, type = 0,
+             effect = 42, chance = 0 }
+  end
+  local battle = build({
+    id = "trp", mode = "1v1", seed = 9999,
+    choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mn({ species = "Alpha", maxHp = 400, spe = 120,
+                            moves = { wrap() } }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mn({ species = "Beta", maxHp = 400, def = 200, spe = 1,
+                            moves = { mv("tap", 40, 255, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  for step = 1, 10 do
+    battle:tick(step)
+    drainInto(battle, events)
+  end
+  battle:submitChoice("p2", { action = "cancel" })
+  battle:submitChoice("p2", { action = "switch", slot = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- the display name a sheet carries (PROTOCOL 26), and the id it falls back to
+-- when it carries none.  The Gen 1 pair next door explains the shape; this is
+-- the Gen 2 twin of it, because BattleSim2 / lib/battle2 narrate a move from
+-- their own copies of the same five call sites.
+scenario("move_names", function(events)
+  -- `mv` writes effect=0, so the two effect moves are built by hand.  86 is
+  -- DISABLE_EFFECT and 82 is MIMIC_EFFECT (src/BattleSim2/Effects.lua).
+  local swipe = function()
+    return { id = "slow_swipe", name = "SLOW SWIPE", pp = 60, power = 10,
+             accuracy = 255, type = 0, effect = 0, chance = 0 }
+  end
+  local lockdown = function()
+    return { id = "lock_down", name = "LOCK DOWN", pp = 60, power = 0,
+             accuracy = 255, type = 0, effect = 86, chance = 0 }
+  end
+  local copycat = function()
+    return { id = "copy_cat", name = "COPY CAT", pp = 60, power = 0,
+             accuracy = 255, type = 0, effect = 82, chance = 0 }
+  end
+  local thump = function()
+    return { id = "thump", name = "THUMP HIT", pp = 60, power = 10,
+             accuracy = 255, type = 0, effect = 0, chance = 0 }
+  end
+  -- No `name` at all: the protocol-25 sheet, narrated under its id.
+  local nudge = function() return mv("nudge", 10, 255, 0) end
+  local battle = build({
+    id = "mn", mode = "1v1", seed = 4242, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spe = 90,
+             moves = { swipe(), lockdown(), copycat() } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spe = 10,
+             moves = { thump(), nudge() } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 1 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 2 })
+  battle:submitChoice("p2", { action = "fight", move = 1 })
+  drainInto(battle, events)
+  for _ = 1, 5 do
+    battle:submitChoice("p1", { action = "fight", move = 2 })
+    battle:submitChoice("p2", { action = "fight", move = 1 })
+    drainInto(battle, events)
+  end
   return battle
 end)
 
