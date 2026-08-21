@@ -371,6 +371,16 @@ function M.nameKey(value)
   return name:upper()
 end
 
+-- What a move is *called*, as opposed to what identifies it.
+--
+-- Prose, so it borrows M.text -- but with MOVE_NAME_MAX rather than NAME_MAX,
+-- because a move name is not a player name and ten characters cuts
+-- "THUNDERSHOCK" to "THUNDERSHO".  The id beside it stays M.id: the two are
+-- different fields doing different jobs (see M.battleMove).
+function M.moveName(value)
+  return M.text(value, Config.MOVE_NAME_MAX)
+end
+
 -- A sprite id is an engine identifier (SPRITE_RED), not prose.
 --
 -- Running one through M.text strips the underscore -- it is not a character
@@ -1222,6 +1232,16 @@ end
 -- uploaded chart has no row for is still a well-formed party -- the sim reads
 -- that gap as neutral, which is a far better answer than refusing somebody's
 -- whole team over one mismatched index.
+--
+-- `name` (PROTOCOL 23) is the one exception to "every field is required", and
+-- it is optional for the same reason `maxPp` is: absence is a real answer.  It
+-- is what the referee narrates the move under -- an intermediator holds no move
+-- table to look one up in and never will -- and a sender that states none is a
+-- protocol-22 client, whose fight narrates under the id exactly as it always
+-- did.  Present-but-unreadable is refused rather than dropped, on this
+-- function's own rule: a field that arrived and did not survive is the sending
+-- side being wrong about something, and quietly narrating under the id would
+-- hide it.
 function M.battleMove(raw)
   if type(raw) ~= "table" then return nil end
   local out = {
@@ -1242,6 +1262,10 @@ function M.battleMove(raw)
   if raw.maxPp ~= nil then
     out.maxPp = M.int(raw.maxPp, 0, 99)
     if out.maxPp == nil then return nil end
+  end
+  if raw.name ~= nil then
+    out.name = M.moveName(raw.name)
+    if out.name == nil then return nil end
   end
   return out
 end

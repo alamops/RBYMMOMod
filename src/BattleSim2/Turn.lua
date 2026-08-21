@@ -201,6 +201,10 @@ local function copyMove(raw)
   local maxPp = max(pp, int(raw.maxPp, pp))
   return {
     id       = str(raw.id) or "move",
+    -- Optional (PROTOCOL 23), and absence is a real answer rather than a gap
+    -- to fill: a sheet from a protocol-22 client states no name, and the
+    -- sentences below fall back to the id exactly as they always did.
+    name     = str(raw.name),
     pp       = pp,
     maxPp    = maxPp,
     power    = max(0, int(raw.power, 0)),
@@ -209,6 +213,19 @@ local function copyMove(raw)
     effect   = max(0, int(raw.effect, 0)),
     chance   = max(0, int(raw.chance, 0)),
   }
+end
+
+-- What a move is *called* in a sentence: the display name its sheet carried
+-- (PROTOCOL 23), or its registry id when it carried none.
+--
+-- Prose only.  An `anim` event carries the **id** and has to keep carrying it
+-- -- that is what a client looks the move animation and the move-menu label up
+-- by -- so the two spellings are never interchangeable, and every call here is
+-- a line somebody reads rather than a key something indexes.
+local function moveLabel(move, fallback)
+  fallback = fallback or "move"
+  if type(move) ~= "table" then return fallback end
+  return str(move.name) or str(move.id) or fallback
 end
 
 -- A defender with no stated types is type 0, which the chart lookup reads as
@@ -882,7 +899,7 @@ function Battle:_fillForcedChoices()
       -- do not re-enter _useMove (that would re-roll damage).
       local move = mon.moves[mon.trapping.moveIndex]
       local moveId = move and move.id or "attack"
-      self:_say(mon.species .. "'s " .. moveId .. " continues")
+      self:_say(mon.species .. "'s " .. moveLabel(move, "attack") .. " continues")
       self:_emit("anim", {
         slot = fighter.slot, side = fighter.side, text = moveId,
       })
@@ -2223,8 +2240,7 @@ function Battle:_useMove(fighter, mon, opts)
   if not struggling and mon.disable and mon.disable.turns > 0
      and mon.disable.moveIndex == choice.move then
     local blocked = mon.moves[choice.move]
-    local moveId = blocked and blocked.id or "move"
-    self:_say(moveId .. " is disabled")
+    self:_say(moveLabel(blocked) .. " is disabled")
     return
   end
 
@@ -2250,7 +2266,7 @@ function Battle:_useMove(fighter, mon, opts)
     move.pp = move.pp - 1
   end
   self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = move.id })
-  self:_say(mon.species .. " used " .. move.id)
+  self:_say(mon.species .. " used " .. moveLabel(move))
 
   if choice.bideRelease and mon.bide then
     local stored = mon.bide.stored
@@ -2977,7 +2993,7 @@ function Battle:_resolveResiduals()
         local cleared = mon.moves[idx]
         mon.disable = nil
         if cleared and cleared.id then
-          self:_say(cleared.id .. " is no longer disabled")
+          self:_say(moveLabel(cleared) .. " is no longer disabled")
         end
       end
     end

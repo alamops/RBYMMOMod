@@ -262,6 +262,10 @@ function copyMove(raw) {
   const maxPp = Math.max(pp, int(raw.maxPp, pp));
   return {
     id: str(raw.id) || 'move',
+    // Optional (PROTOCOL 23), and absence is a real answer rather than a gap
+    // to fill: a sheet from a protocol-22 client states no name, and the
+    // sentences below fall back to the id exactly as they always did.
+    name: str(raw.name),
     pp,
     maxPp,
     power: Math.max(0, int(raw.power, 0)),
@@ -270,6 +274,21 @@ function copyMove(raw) {
     effect: Math.max(0, int(raw.effect, 0)),
     chance: Math.max(0, int(raw.chance, 0)),
   };
+}
+
+/*
+ * What a move is *called* in a sentence: the display name its sheet carried
+ * (PROTOCOL 23), or its registry id when it carried none.
+ *
+ * Prose only. An `anim` event carries the **id** and has to keep carrying it --
+ * that is what a client looks the move animation and the move-menu label up by
+ * -- so the two spellings are never interchangeable, and every call here is a
+ * line somebody reads rather than a key something indexes.
+ */
+function moveLabel(move, fallback) {
+  const back = fallback || 'move';
+  if (!isTable(move)) return back;
+  return str(move.name) || str(move.id) || back;
 }
 
 // A defender with no stated types is type 0, which the chart lookup reads as
@@ -878,7 +897,7 @@ class Battle {
         // do not re-enter _useMove (that would re-roll damage).
         const move = mon.moves[mon.trapping.moveIndex - 1];
         const moveId = (move && move.id) || 'attack';
-        this._say(`${mon.species}'s ${moveId} continues`);
+        this._say(`${mon.species}'s ${moveLabel(move, 'attack')} continues`);
         this._emit('anim', {
           slot: fighter.slot, side: fighter.side, text: moveId,
         });
@@ -2207,8 +2226,7 @@ class Battle {
     if (!struggling && mon.disable && mon.disable.turns > 0
         && mon.disable.moveIndex === choice.move) {
       const blocked = mon.moves[choice.move - 1];
-      const moveId = blocked && blocked.id ? blocked.id : 'move';
-      this._say(`${moveId} is disabled`);
+      this._say(`${moveLabel(blocked)} is disabled`);
       return;
     }
 
@@ -2233,7 +2251,7 @@ class Battle {
 
     if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) move.pp -= 1;
     this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
-    this._say(`${mon.species} used ${move.id}`);
+    this._say(`${mon.species} used ${moveLabel(move)}`);
 
     if (choice.bideRelease && mon.bide) {
       const stored = mon.bide.stored;
@@ -2937,7 +2955,7 @@ class Battle {
           const cleared = mon.moves[idx - 1];
           mon.disable = null;
           if (cleared && cleared.id) {
-            this._say(`${cleared.id} is no longer disabled`);
+            this._say(`${moveLabel(cleared)} is no longer disabled`);
           }
         }
       }

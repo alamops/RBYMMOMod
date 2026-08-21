@@ -4362,6 +4362,84 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12l. what a move is *called* in a sentence (PROTOCOL 23)
+-- ------------------------------------------------------------------
+--
+-- The referee holds no move table and never will, so before the sheet carried
+-- a display name the only spelling of a move on the wire was its registry id
+-- -- and every sentence written about one printed that: "Alpha used
+-- SLOW_SWIPE", "SLOW_SWIPE is disabled".  The slug reached the one box a
+-- player actually reads the fight in.
+--
+-- Five call sites say a move's name and all five are checked here, because
+-- each was its own `.id`: the attack line, both halves of Disable, Disable
+-- wearing off, and Mimic's "learned".  The id keeps riding on `anim` -- that is
+-- what a client looks the move animation up by -- so the two spellings must
+-- never be swapped for each other, which is the last check below.
+
+do
+  local swipe = move({ id = "slow_swipe", power = 10 })
+  swipe.name = "SLOW SWIPE"
+  local lockdown = move({ id = "lock_down", power = 0, effect = 86 })
+  lockdown.name = "LOCK DOWN"
+  local copycat = move({ id = "copy_cat", power = 0, effect = 82 })
+  copycat.name = "COPY CAT"
+  local thump = move({ id = "thump", power = 10 })
+  thump.name = "THUMP HIT"
+  -- No name at all: what a protocol-22 client uploads, and what every move on
+  -- a mixed hub's other half still looks like.
+  local nudge = move({ id = "nudge", power = 10 })
+
+  local battle = battleOf({
+    id = "names", seed = 4242,
+    aMons = { mon({ species = "Alpha", maxHp = 400, spd = 90,
+                    moves = { swipe, lockdown, copycat } }) },
+    bMons = { mon({ species = "Beta", maxHp = 400, spd = 10,
+                    moves = { thump, nudge } }) },
+  })
+  local said, animated = {}, {}
+  local function step(aMove, bMove)
+    battle:submitChoice("p1", { action = "fight", move = aMove })
+    battle:submitChoice("p2", { action = "fight", move = bMove })
+    for _, event in ipairs(drain(battle)) do
+      if event.t == "msg" then said[#said + 1] = event.text end
+      if event.t == "anim" then animated[#animated + 1] = event.text end
+    end
+  end
+  drain(battle)
+  step(0, 0)                       -- both swing
+  step(1, 0)                       -- Disable lands, then refuses Bob's pick
+  step(2, 1)                       -- Mimic copies the disabled move
+  for _ = 1, 5 do step(2, 1) end   -- the copy is used; Disable wears off
+
+  local function spoke(line)
+    for _, text in ipairs(said) do if text == line then return true end end
+    return false
+  end
+
+  ok(spoke("Alpha used SLOW SWIPE"), "an attack prints the move's display name")
+  ok(spoke("THUMP HIT was disabled"), "Disable landing names the move")
+  ok(spoke("THUMP HIT is disabled"), "and so does the refusal it causes")
+  ok(spoke("THUMP HIT is no longer disabled"), "and so does it wearing off")
+  ok(spoke("Alpha learned THUMP HIT"), "Mimic names what it copied")
+  ok(spoke("Alpha used THUMP HIT"),
+     "and the copy carries the name with it -- a copy that dropped it would "
+     .. "revert to the slug on every turn afterwards")
+
+  -- Not a defensive branch: half the sheets on a mixed hub carry no name, and
+  -- the fallback is the sentence those fights have always shown.
+  ok(spoke("Beta used nudge"), "a move with no name is narrated under its id")
+
+  local sawId, sawName = false, false
+  for _, text in ipairs(animated) do
+    if text == "slow_swipe" then sawId = true end
+    if text == "SLOW SWIPE" then sawName = true end
+  end
+  ok(sawId, "the anim row still carries the registry id")
+  ok(not sawName, "and never the display name, which no art is filed under")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

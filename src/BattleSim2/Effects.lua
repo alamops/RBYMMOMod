@@ -207,6 +207,19 @@ function M.category(id)
   return M.CATEGORIES[id]
 end
 
+-- What a move is *called* in a sentence: the display name its sheet carried
+-- (PROTOCOL 23), or its registry id when it carried none.  Turn.lua keeps the
+-- same one-line rule; both are prose, never a key something indexes.
+local function moveLabel(move, fallback)
+  fallback = fallback or "move"
+  if type(move) ~= "table" then return fallback end
+  local name = move.name
+  if type(name) == "string" and name ~= "" then return name end
+  local id = move.id
+  if type(id) == "string" and id ~= "" then return id end
+  return fallback
+end
+
 function M.clampStage(stage)
   local s = int(stage, 0)
   if s < M.STAGE_MIN then return M.STAGE_MIN end
@@ -494,9 +507,8 @@ function M.applyPrimary(ctx)
     end
     local turns = (rng and rng:byte() or 0) % 4 + 2
     targetMon.disable = { moveIndex = lastIdx, turns = turns }
-    local moveId = targetMon.moves[lastIdx].id or "move"
     out.messages[#out.messages + 1] =
-      moveId .. " was disabled"
+      moveLabel(targetMon.moves[lastIdx]) .. " was disabled"
     return out
   end
 
@@ -568,6 +580,9 @@ function M.applyPrimary(ctx)
     end
     userMon.moves[moveIndex] = {
       id = source.id or "move",
+      -- The copy is narrated under the same name the original was, so a
+      -- mimicked move does not revert to its slug on the learner's screen.
+      name = source.name,
       pp = max(0, int(source.pp, 0)),
       power = max(0, int(source.power, 0)),
       accuracy = max(0, int(source.accuracy, 255)),
@@ -576,7 +591,7 @@ function M.applyPrimary(ctx)
       chance = max(0, int(source.chance, 0)),
     }
     out.messages[#out.messages + 1] =
-      userMon.species .. " learned " .. (source.id or "move")
+      userMon.species .. " learned " .. moveLabel(source)
     out.movesChanged = true
     return out
   end
@@ -602,6 +617,7 @@ function M.applyPrimary(ctx)
       local m = targetMon.moves[i]
       copied[#copied + 1] = {
         id = m.id or "move",
+        name = m.name,
         pp = max(0, int(m.pp, 0)),
         power = max(0, int(m.power, 0)),
         accuracy = max(0, int(m.accuracy, 255)),
@@ -1016,6 +1032,7 @@ function M.caughtSheet(mon)
     if m then
       moves[#moves + 1] = {
         id = m.id or "move",
+        name = m.name,
         pp = math.max(0, int(m.pp, 0)),
         power = math.max(0, int(m.power, 0)),
         accuracy = math.max(0, int(m.accuracy, 255)),

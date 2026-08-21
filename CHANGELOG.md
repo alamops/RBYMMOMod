@@ -93,6 +93,52 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **The battle text box named every move by its slug.** "NIRE used
+  DOUBLE_KICK", "MIRROR_MOVE is disabled", "NIRE learned THUNDER_SHOCK" — the
+  registry key, underscores and all, in the one place a player actually reads
+  the fight. It affected every fight this mod referees: MMO, co-op and the
+  solo battles behind `SOLO BATTLES`. The move *menu* and the trainer's shout
+  bubble were always right, which is what made it look cosmetic and local
+  rather than what it was.
+
+  The cause is the referee, not the screen. There is no move table on either
+  intermediator and there never will be (the legal floor: no ROM bytes), so a
+  move arrives carrying everything needed to resolve it — power, accuracy,
+  type, effect — and `id` was the only spelling of it on the wire. Every
+  sentence the referee wrote therefore printed the id, because it had nothing
+  else to print.
+
+  **PROTOCOL is now 23.** Each move on an `mmo.battle_party` battler sheet
+  carries an optional `name`, the display name from the uploading player's own
+  decoded copy, and the referee narrates under it. This is the same split
+  `species` / `speciesId` already carries (PROTOCOL 22), in the other
+  direction: there the wire had the display token and needed the id; here it
+  had the id and needed the display token. `id` keeps riding beside it
+  unchanged — it is what a client looks the move animation and the move-menu
+  label up by, and `anim` events still carry it and only it.
+
+  Five call sites were saying a move's name and all five now say the same one:
+  the attack line, both halves of Disable, Disable wearing off, and Mimic's
+  "learned" — and Mimic's copy carries the name across with it, so a mimicked
+  move does not revert to its slug on every turn afterwards. A move this build
+  has no record of states no name and is narrated under its id, which is also
+  what a protocol-22 client's whole sheet looks like, so the fallback is the
+  ordinary path rather than a defensive branch. All four halves of the
+  intermediator learned it in the same version — `src/BattleSim`,
+  `src/BattleSim2`, `server/lib/battle`, `server/lib/battle2` — with the
+  narration pinned on both runtimes by a new `move_names` scenario in each
+  turn-parity pair.
+
+- **The VPS install command stood up a hub that refused every client.**
+  `server/README.md`'s five-command walkthrough cloned `--branch v0.8.0` —
+  twenty-nine tagged releases back, speaking `PROTOCOL` 7 against a mod that
+  now speaks 23. Anyone who followed it got a hub whose every join was refused
+  for a protocol mismatch, which is exactly the failure the number exists to
+  make legible and exactly the one nobody can diagnose from inside the game.
+  The clone no longer names a version at all: a hand-copied one drifts, and a
+  hub that has drifted is not an old hub, it is a hub nobody can join. Pinning
+  a release is still documented, beside the check that makes it safe.
+
 - **A nicknamed POKéMON was a blank box at Lv 1 on the other player's
   screen.** In an MMO battle the opponent's monster drew as the arena's
   placeholder square with `Lv 1` under it, and knocking it out paid no

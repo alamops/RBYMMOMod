@@ -806,6 +806,76 @@ scenario('coop_npc_aim', (events) => {
   return battle;
 });
 
+// 25. the display name a sheet carries (PROTOCOL 23), and the id it falls back
+//     to when it carries none. Both spellings appear in one fight, because both
+//     reach the same sentences: "used", the two halves of Disable, and Mimic's
+//     "learned". A protocol-22 client uploads moves with no `name` at all, so
+//     the fallback is not a defensive branch -- it is what half the fights on a
+//     mixed hub narrate under, and the two runtimes have to agree on it word
+//     for word.
+scenario('move_names', (events) => {
+  // `mv` writes effect=0, so the two effect moves are built by hand the way
+  // `explode_double_ko` builds EXPLODE. 86 is DISABLE_EFFECT and 82 is
+  // MIMIC_EFFECT (lib/battle/Effects.js).
+  const swipe = () => ({
+    id: 'slow_swipe', name: 'SLOW SWIPE', pp: 60, power: 10,
+    accuracy: 255, type: 0, effect: 0, chance: 0,
+  });
+  const lockdown = () => ({
+    id: 'lock_down', name: 'LOCK DOWN', pp: 60, power: 0,
+    accuracy: 255, type: 0, effect: 86, chance: 0,
+  });
+  const copycat = () => ({
+    id: 'copy_cat', name: 'COPY CAT', pp: 60, power: 0,
+    accuracy: 255, type: 0, effect: 82, chance: 0,
+  });
+  const thump = () => ({
+    id: 'thump', name: 'THUMP HIT', pp: 60, power: 10,
+    accuracy: 255, type: 0, effect: 0, chance: 0,
+  });
+  // No `name` at all: the protocol-22 sheet, narrated under its id.
+  const nudge = () => mv('nudge', 10, 255, 0);
+  const battle = build({
+    id: 'mn', mode: '1v1', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90,
+             moves: [swipe(), lockdown(), copycat()] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10,
+             moves: [thump(), nudge()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  // 1: both swing. "Alpha used SLOW SWIPE" and "Beta used THUMP HIT" are the
+  //    line this whole field exists for; before it they read "slow_swipe".
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  // 2: Ann is faster, so Disable lands on the move Bob just used and then
+  //    refuses the one he picked -- "THUMP HIT was disabled", "THUMP HIT is
+  //    disabled", both under the same spelling the attack was.
+  battle.submitChoice('p1', { action: 'fight', move: 1 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  // 3: Mimic copies Bob's last move. The copy has to carry the name across
+  //    with it, or "Alpha learned THUMP HIT" reverts to the slug here and on
+  //    every turn the copy is used afterwards. Bob falls back to the move that
+  //    carries no name at all.
+  battle.submitChoice('p1', { action: 'fight', move: 2 });
+  battle.submitChoice('p2', { action: 'fight', move: 1 });
+  drainInto(battle, events);
+  // 4-8: the copy is used, and Disable wears off somewhere in here ("THUMP HIT
+  //      is no longer disabled") -- the one sentence that is written from a
+  //      move nobody chose this turn.
+  for (let i = 0; i < 5; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 2 });
+    battle.submitChoice('p2', { action: 'fight', move: 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -1060,6 +1130,37 @@ test('a coop_npc trainer spreads its aim across both players, not seat 0 every t
     'thirty-two aim draws later, the battle RNG has not moved');
   assert.deepStrictEqual([...aims].sort(), [0, 1],
     'and those draws did reach both player seats');
+});
+
+test('every sentence about a move prints its name, and falls back to the id', () => {
+  const run = byName(jsRuns).get('move_names');
+  const said = run.events.filter((event) => event.t === 'msg').map((event) => event.text);
+
+  // The line the whole field exists for. Before PROTOCOL 23 this read
+  // "Alpha used slow_swipe" -- the id, in the one place a player reads the
+  // fight.
+  assert.ok(said.includes('Alpha used SLOW SWIPE'), 'an attack prints the display name');
+
+  // Every other sentence that names a move, all four of them, because they are
+  // four separate call sites and each one used to spell the id.
+  assert.ok(said.includes('THUMP HIT was disabled'), 'Disable landing names the move');
+  assert.ok(said.includes('THUMP HIT is disabled'), 'and so does the refusal it causes');
+  assert.ok(said.includes('THUMP HIT is no longer disabled'), 'and so does it wearing off');
+  assert.ok(said.includes('Alpha learned THUMP HIT'), 'Mimic names what it copied');
+  assert.ok(said.includes('Alpha used THUMP HIT'),
+    'and the copy keeps the name -- a copy that dropped it would revert to the '
+    + 'slug on every turn afterwards');
+
+  // The fallback is not a defensive branch: a protocol-22 client uploads moves
+  // with no name at all, and half the fights on a mixed hub narrate under this.
+  assert.ok(said.includes('Beta used nudge'), 'a move with no name is narrated under its id');
+
+  // The id has to keep travelling on `anim` regardless -- that is what a client
+  // looks the move animation and the move-menu label up by, and a referee that
+  // started sending the display name there would break art rather than text.
+  const anims = run.events.filter((event) => event.t === 'anim').map((event) => event.text);
+  assert.ok(anims.includes('slow_swipe'), 'the anim row still carries the registry id');
+  assert.ok(!anims.includes('SLOW SWIPE'), 'and never the display name');
 });
 
 test('a wild-mode faint pays exactly one exp event, after the faint and before over', () => {

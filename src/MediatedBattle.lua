@@ -449,6 +449,14 @@ moveOf = function(data, slot, order)
   local maxPp = clamp(intOr(slot.maxPp or slot.pp, pp), pp, 99)
   return {
     id       = id,
+    -- What the referee narrates this move under (PROTOCOL 23).  `id` is a
+    -- registry key -- DOUBLE_KICK -- and every sentence the sim writes used to
+    -- print it, because it was the only spelling of the move on the wire.  The
+    -- referee holds no move table to look a name up in, so the name travels
+    -- with the move the way `species` does with the monster.  nil when this
+    -- build has no record for the move: the sim then falls back to the id,
+    -- which is the sentence a protocol-22 fight has always shown.
+    name     = def and Wire.moveName(def.name) or nil,
     pp       = pp,
     maxPp    = maxPp,
     power    = clamp(intOr(def and def.power, 40), 0, 999),

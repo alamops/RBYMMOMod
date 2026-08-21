@@ -735,6 +735,73 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- what a move is *called* in a sentence (PROTOCOL 23)
+-- ------------------------------------------------------------------
+--
+-- Gen 2's own copies of the five call sites that name a move.  The Gen 1 twin
+-- (tests/battle_sim_turn.lua, section 12l) carries the same block, and
+-- separately on purpose: BattleSim2 is a twin of BattleSim rather than an
+-- import of it, so a fix landed on one half of one generation is exactly the
+-- drift this catches.
+
+do
+  local swipe = move({ id = "slow_swipe", power = 10 })
+  swipe.name = "SLOW SWIPE"
+  local lockdown = move({ id = "lock_down", power = 0, effect = 86 })
+  lockdown.name = "LOCK DOWN"
+  local copycat = move({ id = "copy_cat", power = 0, effect = 82 })
+  copycat.name = "COPY CAT"
+  local thump = move({ id = "thump", power = 10 })
+  thump.name = "THUMP HIT"
+  -- No name at all: what a protocol-22 client uploads.
+  local nudge = move({ id = "nudge", power = 10 })
+
+  local battle = battleOf({ id = "names", seed = 4242, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = {
+      mon({ species = "Alpha", maxHp = 400, spe = 90,
+            moves = { swipe, lockdown, copycat } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = {
+      mon({ species = "Beta", maxHp = 400, spe = 10,
+            moves = { thump, nudge } }) } } },
+  } })
+  local said, animated = {}, {}
+  local function step(aMove, bMove)
+    battle:submitChoice("p1", { action = "fight", move = aMove })
+    battle:submitChoice("p2", { action = "fight", move = bMove })
+    for _, event in ipairs(drain(battle)) do
+      if event.t == "msg" then said[#said + 1] = event.text end
+      if event.t == "anim" then animated[#animated + 1] = event.text end
+    end
+  end
+  drain(battle)
+  step(0, 0)
+  step(1, 0)
+  step(2, 1)
+  for _ = 1, 5 do step(2, 1) end
+
+  local function spoke(line)
+    for _, text in ipairs(said) do if text == line then return true end end
+    return false
+  end
+
+  ok(spoke("Alpha used SLOW SWIPE"), "gen2: an attack prints the display name")
+  ok(spoke("THUMP HIT was disabled"), "gen2: Disable landing names the move")
+  ok(spoke("THUMP HIT is disabled"), "gen2: and so does the refusal it causes")
+  ok(spoke("THUMP HIT is no longer disabled"), "gen2: and so does it wearing off")
+  ok(spoke("Alpha learned THUMP HIT"), "gen2: Mimic names what it copied")
+  ok(spoke("Alpha used THUMP HIT"), "gen2: and the copy keeps the name")
+  ok(spoke("Beta used nudge"), "gen2: a move with no name is narrated under its id")
+
+  local sawId, sawName = false, false
+  for _, text in ipairs(animated) do
+    if text == "slow_swipe" then sawId = true end
+    if text == "SLOW SWIPE" then sawName = true end
+  end
+  ok(sawId, "gen2: the anim row still carries the registry id")
+  ok(not sawName, "gen2: and never the display name")
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("battle_sim2_turn: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

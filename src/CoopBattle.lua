@@ -5550,11 +5550,16 @@ end
 
 -- One attack, spelled two ways.
 --
--- The referee narrates a move under its **id** (`_say(species .. " used " ..
--- move.id)` in BattleSim/Turn.lua and its Node twin) while the anim row beside
--- it carries the registry **name**, so "DOUBLE_KICK" and "DOUBLE KICK" reach
--- this function one after the other for a single attack. Folded to one key so
--- the shout cannot be raised twice under two spellings of the same move.
+-- The sentence and the anim row beside it do not have to agree on how a move is
+-- spelled, and often do not. From PROTOCOL 23 the referee narrates a move under
+-- the display **name** its sheet carried (`_say(species .. " used " ..
+-- moveLabel(move))` in BattleSim/Turn.lua and its three twins) and falls back to
+-- the **id** for a sheet that carried none -- an older client's, or a move this
+-- build has no record of -- while the anim row always carries the id and the
+-- registry name is what this side looks up from it. So "DOUBLE_KICK" and
+-- "DOUBLE KICK" still reach this function one after the other for a single
+-- attack. Folded to one key so the shout cannot be raised twice under two
+-- spellings of the same move.
 local function calloutKey(move)
   local key = tostring(move):upper():gsub("[%s_]+", " ")
   return key

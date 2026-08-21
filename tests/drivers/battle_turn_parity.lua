@@ -84,13 +84,40 @@ local function encScalar(v)
   return "null"
 end
 
+-- Flat until `moves` arrived.  A `moves` event (Transform / Mimic republishing
+-- a live move list) is the one event kind carrying a table value, and encoding
+-- it as `null` -- which is what encScalar does with any table -- would have made
+-- every such event compare equal on both runtimes no matter what was in it.
+-- One level of nesting is all the vocabulary has, so one level is all this
+-- takes; a deeper value would still land as null, loudly, in a diff.
 local function encObject(tbl)
   local keys = {}
   for k in pairs(tbl) do keys[#keys + 1] = k end
   table.sort(keys)
   local parts = {}
   for _, k in ipairs(keys) do
-    parts[#parts + 1] = encString(k) .. ":" .. encScalar(tbl[k])
+    local v = tbl[k]
+    if type(v) == "table" then
+      local rows = {}
+      for i = 1, #v do
+        local row = v[i]
+        if type(row) == "table" then
+          local inner = {}
+          for ik in pairs(row) do inner[#inner + 1] = ik end
+          table.sort(inner)
+          local cells = {}
+          for _, ik in ipairs(inner) do
+            cells[#cells + 1] = encString(ik) .. ":" .. encScalar(row[ik])
+          end
+          rows[i] = "{" .. table.concat(cells, ",") .. "}"
+        else
+          rows[i] = encScalar(row)
+        end
+      end
+      parts[#parts + 1] = encString(k) .. ":[" .. table.concat(rows, ",") .. "]"
+    else
+      parts[#parts + 1] = encString(k) .. ":" .. encScalar(v)
+    end
   end
   return "{" .. table.concat(parts, ",") .. "}"
 end
@@ -914,6 +941,76 @@ scenario("coop_npc_aim", function(events)
     battle:submitChoice("p2", { action = "fight", move = 0, target = 3 })
     battle:autoPick("n1")
     battle:autoPick("n2")
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- 25. the display name a sheet carries (PROTOCOL 23), and the id it falls back
+--     to when it carries none.  Both spellings appear in one fight, because
+--     both reach the same sentences: "used", the two halves of Disable, and
+--     Mimic's "learned".  A protocol-22 client uploads moves with no `name` at
+--     all, so the fallback is not a defensive branch -- it is what half the
+--     fights on a mixed hub narrate under, and the two runtimes have to agree
+--     on it word for word.
+scenario("move_names", function(events)
+  -- `mv` writes effect=0, so the two effect moves are built by hand the way
+  -- `explode_double_ko` builds EXPLODE.  86 is DISABLE_EFFECT and 82 is
+  -- MIMIC_EFFECT (src/BattleSim/Effects.lua).
+  local swipe = function()
+    return { id = "slow_swipe", name = "SLOW SWIPE", pp = 60, power = 10,
+             accuracy = 255, type = 0, effect = 0, chance = 0 }
+  end
+  local lockdown = function()
+    return { id = "lock_down", name = "LOCK DOWN", pp = 60, power = 0,
+             accuracy = 255, type = 0, effect = 86, chance = 0 }
+  end
+  local copycat = function()
+    return { id = "copy_cat", name = "COPY CAT", pp = 60, power = 0,
+             accuracy = 255, type = 0, effect = 82, chance = 0 }
+  end
+  local thump = function()
+    return { id = "thump", name = "THUMP HIT", pp = 60, power = 10,
+             accuracy = 255, type = 0, effect = 0, chance = 0 }
+  end
+  -- No `name` at all: the protocol-22 sheet, narrated under its id.
+  local nudge = function() return mv("nudge", 10, 255, 0) end
+  local battle = build({
+    id = "mn", mode = "1v1", seed = 4242, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 90,
+             moves = { swipe(), lockdown(), copycat() } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 10,
+             moves = { thump(), nudge() } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  -- 1: both swing.  "Alpha used SLOW SWIPE" and "Beta used THUMP HIT" are the
+  --    line this whole field exists for; before it they read "slow_swipe".
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  -- 2: Ann is faster, so Disable lands on the move Bob just used and then
+  --    refuses the one he picked -- "THUMP HIT was disabled", "THUMP HIT is
+  --    disabled", both under the same spelling the attack was.
+  battle:submitChoice("p1", { action = "fight", move = 1 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  -- 3: Mimic copies Bob's last move.  The copy has to carry the name across
+  --    with it, or "Alpha learned THUMP HIT" reverts to the slug here and on
+  --    every turn the copy is used afterwards.  Bob falls back to the move
+  --    that carries no name at all.
+  battle:submitChoice("p1", { action = "fight", move = 2 })
+  battle:submitChoice("p2", { action = "fight", move = 1 })
+  drainInto(battle, events)
+  -- 4-8: the copy is used, and Disable wears off somewhere in here ("THUMP
+  --      HIT is no longer disabled") -- the one sentence that is written from
+  --      a move nobody chose this turn.
+  for _ = 1, 5 do
+    battle:submitChoice("p1", { action = "fight", move = 2 })
+    battle:submitChoice("p2", { action = "fight", move = 1 })
     drainInto(battle, events)
   end
   return battle

@@ -133,7 +133,16 @@ function defaultSpriteFor(generation) {
 // protocol-21 hub strips the field from the upload and states none on the
 // events, which is exactly that failure -- and it is one no player can
 // diagnose from inside the fight, since every other part of it works.
-const PROTOCOL = 22;
+// 23: `name` -- an optional display name on each move of an mmo.battle_party
+// battler sheet, which is what the referee narrates the move under. `id` is a
+// registry key and stays one (a client looks the animation and the move-menu
+// label up by it), but it was the only spelling of the move on the wire, so
+// every sentence the referee wrote printed the slug: "NIRE used DOUBLE_KICK".
+// The same split `species` / `speciesId` carries, in the other direction. A
+// protocol-22 hub strips the field off the upload and narrates under the id
+// exactly as before -- the bug rather than a crash, which is why the bump
+// names it.
+const PROTOCOL = 23;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right

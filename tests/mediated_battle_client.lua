@@ -99,11 +99,14 @@ local DATA = {
     },
   },
   moves = {
-    EMBER   = { power = 40, accuracy = 100, type = "FIRE", pp = 25 },
+    EMBER   = { name = "EMBER", power = 40, accuracy = 100, type = "FIRE", pp = 25 },
     -- a status move: 0 power is an ordinary answer, not a missing field
-    GROWL   = { power = 0, accuracy = 100, type = "NORMAL", pp = 40 },
-    -- accuracy that is not a round 100, to pin the byte conversion
-    HYDRO   = { power = 120, accuracy = 80, type = "WATER", pp = 5 },
+    GROWL   = { name = "GROWL", power = 0, accuracy = 100, type = "NORMAL", pp = 40 },
+    -- accuracy that is not a round 100, to pin the byte conversion.  Its name
+    -- also differs from its id, which is the ordinary case in a real build
+    -- (HYDRO_PUMP / "HYDRO PUMP") and the only one that can tell the two
+    -- fields apart.
+    HYDRO   = { name = "HYDRO PUMP", power = 120, accuracy = 80, type = "WATER", pp = 5 },
   },
   pokemon = {
     CHARMANDER = { name = "CHARMANDER", types = { "FIRE" } },
@@ -172,7 +175,7 @@ eq(mons[1].evs.atk, 100, "and stat exp as evs")
 -- Everything the sim needs to resolve the move, because there is no move table
 -- on either intermediator and there must never be one.
 local ember = mons[1].moves[1]
-eq(ember.id, "EMBER", "the move id, for narration")
+eq(ember.id, "EMBER", "the move id, for art and for indexing")
 eq(ember.power, 40, "its power")
 eq(ember.pp, 25, "its remaining PP")
 -- The engine keeps a percent; Gen 1 compares an 8-bit value against a 0-255
@@ -186,6 +189,16 @@ eq(mons[2].moves[2].power, 0, "a status move keeps its 0 power rather than a def
 eq(ember.effect, 0, "effect is 0: the engine names it with a string and the "
   .. "wire wants a number, so there is no mapping to state")
 eq(ember.chance, 0, "and so is its chance")
+
+-- ...and the name it is *narrated* under (PROTOCOL 23), which is a different
+-- field from the id doing a different job.  The referee holds no move table to
+-- look one up in, so without this every sentence it writes prints the registry
+-- key: "SHELLY used HYDRO", in the one place a player reads the fight.
+eq(ember.name, "EMBER", "a move whose name matches its id still states it")
+eq(mons[2].moves[1].name, "HYDRO PUMP",
+   "...and one whose name differs from its id crosses as the name")
+eq(mons[2].moves[1].id, "HYDRO",
+   "...with the id still beside it, because that is what the anim is drawn from")
 
 -- Sent even though both sanitisers drop it today. See the note in
 -- MediatedBattle.typesOf: the sim already reads raw.types, and the day the two
@@ -206,6 +219,24 @@ eq(packed.battle, "7", "filed under the battle it was uploaded for")
 eq(packed.mons[2].species, "SHELLY", "the narration token crosses as itself")
 eq(packed.mons[2].speciesId, "SQUIRTLE",
    "...and the registry id crosses beside it, nickname or no nickname")
+eq(packed.mons[2].moves[1].name, "HYDRO PUMP",
+   "the move's display name survives the real sanitiser too")
+-- Optional both ways.  A protocol-22 client states no name at all, and the
+-- referee narrates that move under its id exactly as it always did -- so an
+-- absent name must not refuse the move, the battler and then the party.
+local noName = Wire.battleMove({ id = "HYDRO", pp = 5, power = 120,
+                                 accuracy = 204, type = 2, effect = 0, chance = 0 })
+check(noName ~= nil, "a move with no name is still a move")
+eq(noName.name, nil, "...and states none rather than inventing one")
+-- Present-but-unreadable is refused, on this sanitiser's own rule: a field
+-- that arrived and did not survive is the sending side being wrong about
+-- something, and narrating under the id anyway would hide it.
+check(Wire.battleMove({ id = "HYDRO", name = 7, pp = 5, power = 120,
+                        accuracy = 204, type = 2, effect = 0,
+                        chance = 0 }) == nil,
+      "a name that is not prose refuses the move")
+eq(Wire.moveName(("X"):rep(40)), ("X"):rep(Config.MOVE_NAME_MAX),
+   "an over-long name is cut to MOVE_NAME_MAX rather than to NAME_MAX")
 check(Wire.battleMon({ species = "SHELLY", speciesId = "not a species!",
                        level = 5, hp = 1, maxHp = 1,
                        stats = { atk = 1, def = 1, spd = 1, spc = 1 },
@@ -224,6 +255,8 @@ eq(#unknown, 1, "a mon whose move has no record is still brought")
 eq(unknown[1].moves[1].power, 40, "an unknown move defaults to 40 power")
 eq(unknown[1].moves[1].accuracy, 255, "...full accuracy")
 eq(unknown[1].moves[1].type, 0, "...and type 0")
+eq(unknown[1].moves[1].name, nil,
+   "...and no name at all, so the referee narrates it under its id")
 
 -- The edges that must not throw, because every one of them is a real build.
 eq(#Mediated.snapshotParty(gameWith({}, DATA)), 0, "an empty party snapshots empty")
