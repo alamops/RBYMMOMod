@@ -13375,6 +13375,557 @@ end)()
         "...nor on y, which is what keeps the outset covering the edge")
 end)()
 
+-- ------- the particle catalogue (src/Vfx.lua)
+--
+-- The contract this module exists to keep is that **every move resolves**: an
+-- id the engine does not carry, a move with no definition, a type this build
+-- has never heard of. So the assertions below are mostly about the fallbacks,
+-- not about the pretty cases -- a Fire move drawing embers is obvious, a move
+-- from a mod drawing nothing at all is the bug.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Vfx.lua", "rb") then
+    check(true, "(Vfx unavailable -- catalogue tests skipped)")
+    return
+  end
+  local Vfx = need("Vfx")
+
+  -- ------- resolution: a look for everything
+
+  local fire = Vfx.forMove("FLAMETHROWER", { type = "FIRE", power = 95 })
+  eq(fire.style, "ember", "a Fire move wears its type's look")
+  eq(fire.palette, "FIRE", "...and its type's colours")
+  eq(fire.delivery, "beam", "Flamethrower is a stream, per its MOVE_STYLE entry")
+
+  local tackle = Vfx.forMove("TACKLE", { type = "NORMAL", power = 35 })
+  eq(tackle.style, "impact", "a move with no entry falls through to its type")
+  eq(tackle.delivery, "burst",
+     "a physical type lands on the target rather than travelling to it")
+
+  local ember = Vfx.forMove("EMBER", { type = "FIRE", power = 40 })
+  eq(ember.delivery, "projectile",
+     "a Gen1 Special type is fired, which is the rule that covers every move "
+     .. "this catalogue has never seen")
+
+  -- The fallback that matters: nothing may resolve to nothing.
+  local unknown = Vfx.forMove("A_MOD_MOVE_NOBODY_HAS", nil)
+  check(type(unknown) == "table", "an unknown move still resolves to a look")
+  eq(unknown.style, "impact", "...NORMAL's impact")
+  eq(unknown.palette, "NORMAL", "...in NORMAL's colours")
+  check(Vfx.STYLES[unknown.style] ~= nil, "...and it names a real style")
+  check(Vfx.PALETTES[unknown.palette] ~= nil, "...and a real palette")
+
+  local weirdType = Vfx.forMove("WHATEVER", { type = "COSMIC", power = 60 })
+  eq(weirdType.style, "impact", "a type with no entry falls back rather than "
+     .. "drawing nothing")
+  eq(weirdType.palette, "NORMAL", "...and borrows NORMAL's colours")
+
+  -- A move that deals no damage is a gesture, not a blow.
+  local growl = Vfx.forMove("GROWL", { type = "NORMAL", power = 0 })
+  check(growl.intensity < 1, "a status move spends fewer particles than a hit")
+
+  -- ------- how hard it hit: power bands
+  --
+  -- The type says what an effect looks like; the power says how much of it
+  -- there is. Bands rather than a curve, because `M.count` rounds to whole
+  -- particles -- a continuous function would give nearly every move its own
+  -- number and nearly none of them a difference anybody could see.
+
+  eq(Vfx.powerBand(0), nil, "a status move has no power band")
+  eq(Vfx.powerBand(nil), nil, "...and neither does a move with no power field")
+  eq(Vfx.powerBand(Vfx.FIXED_DAMAGE_POWER), nil,
+     "power 1 is Gen 1's fixed-damage marker, not a weak move: no band")
+
+  -- The edges, both sides. An off-by-one here is a move drawn a whole step
+  -- lighter or heavier than the one next to it in the same list.
+  for _, case in ipairs({ { 2, 1 }, { 39, 1 }, { 40, 2 }, { 64, 2 },
+                          { 65, 3 }, { 89, 3 }, { 90, 4 }, { 119, 4 },
+                          { 120, 5 }, { 170, 5 }, { 999, 5 } }) do
+    eq(Vfx.powerBand(case[1]), Vfx.POWER_BANDS[case[2]],
+       ("power %d falls in band %d"):format(case[1], case[2]))
+  end
+
+  -- Monotonic in both of the things a player can see. Not a restatement of
+  -- the table: it is the property the table exists to have, and the one an
+  -- edit that reorders a row would break.
+  local lastCount, lastScale, breaks = -1, -1, {}
+  for _, power in ipairs({ 5, 20, 35, 40, 50, 64, 65, 75, 89, 90, 100, 119,
+                           120, 150, 170 }) do
+    local spec = Vfx.forMove("A_MOVE_WITH_NO_ENTRY",
+      { type = "NORMAL", power = power })
+    local n = Vfx.count(spec.style, spec.intensity)
+    if n < lastCount or spec.scale < lastScale then
+      breaks[#breaks + 1] = tostring(power)
+    end
+    lastCount, lastScale = n, spec.scale
+  end
+  eq(#breaks, 0, "a stronger move never draws fewer particles or a smaller "
+     .. "effect (" .. table.concat(breaks, ",") .. ")")
+
+  -- ...and the bands are actually *visible*, which is the whole justification
+  -- for banding instead of scaling continuously.
+  local weak = Vfx.forMove("W", { type = "NORMAL", power = 35 })
+  local huge = Vfx.forMove("H", { type = "NORMAL", power = 120 })
+  check(Vfx.count(huge.style, huge.intensity)
+        >= Vfx.count(weak.style, weak.intensity) + 4,
+        "the lightest and heaviest bands differ by several whole particles")
+  check(huge.scale >= weak.scale * 1.3,
+        "...and by a third again in radius")
+
+  -- A named move keeps its authored weight: the band is applied to the base,
+  -- so M.MOVE_STYLE still wins where it speaks.
+  local slide = Vfx.forMove("ROCK_SLIDE", { type = "ROCK", power = 75 })
+  eq(slide.scale, 1.30, "Rock Slide keeps the scale it was authored with")
+  eq(slide.intensity, 1.2, "...and the intensity, over its band's 1.00")
+  local splash = Vfx.forMove("SPLASH", { type = "WATER", power = 0 })
+  eq(splash.intensity, 0.6, "SPLASH stays as feeble as it was written")
+
+  -- Fire Blast is the opposite case, and the reason the catalogue stopped
+  -- restating weight it can get for free: it names a scale the band cannot
+  -- guess, and says nothing about intensity so the band's 1.38 applies.
+  local blast = Vfx.forMove("FIRE_BLAST", { type = "FIRE", power = 120 })
+  eq(blast.scale, 1.40, "Fire Blast names its own radius")
+  eq(blast.intensity, Vfx.powerBand(120).intensity,
+     "...and takes its weight from its power band")
+
+  -- **The four that were capped by accident.** Every entry in M.MOVE_STYLE
+  -- was written before power bands existed, when 1.0 was every move's
+  -- baseline and 1.25 meant "heavier than usual" -- which, once a 120-power
+  -- move's band became 1.38, silently turned those numbers into a *cap*.
+  -- These were all being drawn lighter than an unnamed move of the same
+  -- power.
+  --
+  -- **Listed with their real powers rather than derived**, because the general
+  -- form needs a move table and there isn't one to use: this tier runs on a
+  -- checkout that has never seen a ROM, and the committed fixture set carries
+  -- four moves, none of them named here. A version of this check written
+  -- against that fixture compiles, passes, and examines nothing -- which is
+  -- worse than no check, so it is not written.
+  for _, case in ipairs({ { "FIRE_BLAST", 120 }, { "THUNDER", 120 },
+                          { "BLIZZARD", 120 }, { "SELFDESTRUCT", 130 } }) do
+    local id, power = case[1], case[2]
+    local entry = Vfx.MOVE_STYLE[id]
+    local band = Vfx.powerBand(power)
+    check(entry ~= nil, id .. " is still in the catalogue")
+    check(entry == nil or entry.intensity == nil
+          or entry.intensity >= band.intensity,
+          id .. " (power " .. power .. ") is not capped below its own band -- "
+          .. "leave intensity out and let the band speak")
+  end
+
+  -- The fixed-damage moves take the middle band rather than the lightest, so
+  -- an OHKO is not drawn as the smallest effect in the game.
+  local ohko = Vfx.forMove("A_MOVE_WITH_NO_ENTRY",
+    { type = "NORMAL", power = Vfx.FIXED_DAMAGE_POWER })
+  local mid = Vfx.forMove("A_MOVE_WITH_NO_ENTRY", { type = "NORMAL", power = 75 })
+  eq(ohko.intensity, mid.intensity,
+     "a fixed-damage move is drawn at the middle weight, not the lightest")
+  local swords = Vfx.forMove("SWORDS_DANCE", { type = "NORMAL", power = 0 })
+  eq(swords.delivery, "self", "a self-buff plays on the user's own seat")
+
+  -- Every entry in the override table has to name a style, a palette and a
+  -- delivery the renderer knows -- a typo here is an effect that silently
+  -- becomes NORMAL's impact.
+  local badStyle, badPal, badDeliv = 0, 0, 0
+  for id, entry in pairs(Vfx.MOVE_STYLE) do
+    if entry.style and not Vfx.STYLES[entry.style] then badStyle = badStyle + 1 end
+    if entry.palette and not Vfx.PALETTES[entry.palette] then badPal = badPal + 1 end
+    if entry.delivery and not Vfx.DELIVERIES[entry.delivery] then
+      badDeliv = badDeliv + 1
+    end
+    check(id == id:upper(), "MOVE_STYLE ids are upper case (" .. id .. ")")
+  end
+  eq(badStyle, 0, "every MOVE_STYLE entry names a style the renderer draws")
+  eq(badPal, 0, "...a palette it can colour with")
+  eq(badDeliv, 0, "...and a delivery it can place")
+
+  -- Every type in the style map has a palette of the same name, which is what
+  -- lets `typeSpec` derive both from one id.
+  local missingPal = 0
+  for typeId in pairs(Vfx.TYPE_STYLE) do
+    if not Vfx.PALETTES[typeId] then missingPal = missingPal + 1 end
+  end
+  eq(missingPal, 0, "every type with a look also has a palette")
+
+  -- ...and the assertion in the other direction, which is the one that
+  -- matters: every id a **move record actually carries** resolves to that
+  -- type's look.
+  --
+  -- The two are not the same check, and the gap between them is not
+  -- hypothetical -- it shipped. A move's `type` is an id into the type_chart
+  -- registry, and two of those ids do not spell their own type: `PSYCHIC_TYPE`
+  -- (the cart's constant, because `PSYCHIC` is already a move) and `BIRD` (the
+  -- unused beta type at chart index 13). Keying only on `PSYCHIC` sent all 15
+  -- Gen 1 Psychic moves to NORMAL's impact, and nothing failed -- they simply
+  -- drew the wrong effect. Hard-coded rather than read off `data.moves`
+  -- because this tier has to run on a checkout that has never seen a ROM.
+  local TYPE_IDS = {
+    NORMAL = "NORMAL", FIGHTING = "FIGHTING", FLYING = "FLYING",
+    POISON = "POISON", GROUND = "GROUND", ROCK = "ROCK", BUG = "BUG",
+    GHOST = "GHOST", STEEL = "STEEL", FIRE = "FIRE", WATER = "WATER",
+    GRASS = "GRASS", ELECTRIC = "ELECTRIC", ICE = "ICE", DRAGON = "DRAGON",
+    DARK = "DARK", FAIRY = "FAIRY",
+    -- the two that are not their own name
+    PSYCHIC_TYPE = "PSYCHIC", BIRD = "FLYING",
+  }
+  local wrongType = {}
+  for id, wantPalette in pairs(TYPE_IDS) do
+    local spec = Vfx.forMove("A_MOVE_WITH_NO_ENTRY", { type = id, power = 40 })
+    if spec.palette ~= wantPalette then
+      wrongType[#wrongType + 1] = id .. "->" .. tostring(spec.palette)
+    end
+  end
+  eq(#wrongType, 0, "every registry type id resolves to its own type's look ("
+     .. table.concat(wrongType, ",") .. ")")
+
+  -- Spot-check the one that shipped wrong, by name, so a future edit to the
+  -- alias table cannot quietly undo it.
+  eq(Vfx.typeKey("PSYCHIC_TYPE"), "PSYCHIC",
+     "PSYCHIC_TYPE is the registry id for Psychic in both generations")
+  eq(Vfx.forMove("CONFUSION", { type = "PSYCHIC_TYPE", power = 50 }).style,
+     "psi", "...so an unnamed Psychic move wears Psychic's look, not Normal's")
+
+  -- ------- the bag
+
+  local potion = Vfx.forItem("POTION")
+  eq(potion.style, "heal", "a potion is restoration")
+  eq(potion.delivery, "self", "...on the seat of whoever opened the bag")
+  eq(Vfx.forItem("POKE_BALL"), nil,
+     "a ball draws nothing here: the throw chain already owns the arc, the "
+     .. "rocking and the burst, and a second effect would draw it twice")
+  eq(Vfx.forItem("MASTER_BALL"), nil, "...every ball, not only the first one")
+  eq(Vfx.forItem("ESCAPE_ROPE"), nil,
+     "an item that cannot open in a fight has no look")
+  eq(Vfx.forItem(nil), nil, "...and neither does no item at all")
+  eq(Vfx.forItem("X_ATTACK").style, "buff",
+     "an X item wears the same arrows a stat stage does, because that is "
+     .. "what it is")
+
+  -- Every battle-usable item src/BattleSim/Effects.lua answers for, except the
+  -- balls, has a look. This is the assertion that keeps the two lists in step:
+  -- an item that grows an in-battle effect and no entry here uses a bag slot
+  -- and shows nothing.
+  local Effects = need("BattleSim/Effects")
+  local BALLS = { POKE_BALL = true, GREAT_BALL = true, ULTRA_BALL = true,
+                  MASTER_BALL = true, SAFARI_BALL = true }
+  local unlooked = {}
+  for _, id in ipairs({
+    "POTION", "SUPER_POTION", "HYPER_POTION", "MAX_POTION", "FULL_RESTORE",
+    "FRESH_WATER", "SODA_POP", "LEMONADE", "ANTIDOTE", "BURN_HEAL", "ICE_HEAL",
+    "AWAKENING", "PARLYZ_HEAL", "FULL_HEAL", "REVIVE", "MAX_REVIVE", "ETHER",
+    "MAX_ETHER", "ELIXER", "MAX_ELIXER", "X_ATTACK", "X_DEFEND", "X_SPEED",
+    "X_SPECIAL", "X_ACCURACY", "DIRE_HIT", "GUARD_SPEC", "HP_UP", "PROTEIN",
+    "IRON", "CARBOS", "CALCIUM", "POKE_DOLL", "POKE_FLUTE",
+  }) do
+    check(Effects.itemEffect(id) ~= nil,
+      id .. " is a battle item the sim answers for")
+    if not BALLS[id] and Vfx.forItem(id) == nil then
+      unlooked[#unlooked + 1] = id
+    end
+  end
+  eq(#unlooked, 0,
+     "every non-ball battle item has a look (" .. table.concat(unlooked, ",") .. ")")
+
+  -- ------- conditions and stages
+
+  eq(Vfx.forStatus("BRN").style, "ember",
+     "a burn wears fire, keyed on the token the wire really carries")
+  eq(Vfx.forStatus("burn").style, "ember",
+     "...and on the turn machine's own name for the same condition")
+  eq(Vfx.forStatus("BURN").style, "ember", "...matched case-insensitively")
+
+  -- Every token that can travel has a look. This is the assertion that keeps
+  -- the catalogue in step with Wire's vocabulary: a status a client is told
+  -- about and cannot draw lands with no sight of it at all.
+  local Wire = need("Wire")
+  local blind = {}
+  for token in pairs(Wire.STATUSES) do
+    if Vfx.forStatus(token) == nil then blind[#blind + 1] = token end
+  end
+  eq(#blind, 0,
+     "every wire status token has a look (" .. table.concat(blind, ",") .. ")")
+  eq(Vfx.forStatus(nil), nil,
+     "a status event with no token cleared the condition -- a sentence, not "
+     .. "a sight")
+  eq(Vfx.forStatus("nonsense"), nil, "an unknown token draws nothing")
+
+  eq(Vfx.forStat(1).style, "buff", "a rise is arrows up")
+  eq(Vfx.forStat(-1).style, "debuff", "a drop is arrows down")
+  eq(Vfx.forStat(0), nil, "a stage that did not move draws nothing")
+  check(Vfx.forStat(2).intensity > Vfx.forStat(1).intensity,
+        "two stages spend more arrows than one")
+
+  local impact = Vfx.forImpact({ palette = "WATER" })
+  eq(impact.style, "impact", "the hit beat's punctuation is always an impact")
+  eq(impact.palette, "WATER", "...in the attacking move's colours")
+  eq(Vfx.forImpact(nil).palette, "NORMAL",
+     "a hit with no move behind it -- a residual, a recoil -- gets neutral "
+     .. "white rather than the last move's colours")
+
+  -- ------- the particle math
+  --
+  -- Pure, bounded and reproducible: two clients watching one fight have to see
+  -- the same sparks, and a headless run has to be able to assert a frame.
+
+  eq(Vfx.rand01(3, 4, 5), Vfx.rand01(3, 4, 5), "the hash is a function")
+  check(Vfx.rand01(3, 4, 5) ~= Vfx.rand01(3, 4, 6),
+        "...and the salt separates the axes")
+  local r = Vfx.rand01(11, 7, 2)
+  check(r >= 0 and r < 1, "the hash lands in 0..1")
+
+  local styles = {}
+  for name in pairs(Vfx.STYLES) do styles[#styles + 1] = name end
+  table.sort(styles)
+  eq(#styles >= 20, true, "the catalogue carries a real spread of looks")
+
+  local nondet, nan, oob, badTint = 0, 0, 0, 0
+  for _, style in ipairs(styles) do
+    local n = Vfx.count(style, 1)
+    for i = 1, n do
+      for k = 0, 20 do
+        local t = k / 20
+        local x, y, rad, a, tint = Vfx.particle(style, i, n, t, 7)
+        local x2, y2, rad2, a2 = Vfx.particle(style, i, n, t, 7)
+        if x ~= x2 or y ~= y2 or rad ~= rad2 or a ~= a2 then
+          nondet = nondet + 1
+        end
+        if x ~= x or y ~= y or rad ~= rad or a ~= a then nan = nan + 1 end
+        if a < 0 or a > 1 or rad < 0 then oob = oob + 1 end
+        if math.abs(x) > 3 or math.abs(y) > 3 then oob = oob + 1 end
+        if tint < 1 or tint > 3 then badTint = badTint + 1 end
+      end
+    end
+  end
+  eq(nondet, 0, "a particle is the same every time it is asked for")
+  eq(nan, 0, "no style produces a NaN anywhere in its life")
+  eq(oob, 0, "every particle stays inside its effect's own radius, and every "
+     .. "alpha inside 0..1")
+  eq(badTint, 0, "every particle names one of the palette's three colours")
+
+  -- A different seed is a different emission: two casts of the same move must
+  -- not draw the identical sparks.
+  local sameSeed, diffSeed = 0, 0
+  for i = 1, Vfx.count("ember", 1) do
+    local ax = Vfx.particle("ember", i, 16, 0.5, 1)
+    local bx = Vfx.particle("ember", i, 16, 0.5, 1)
+    local cx = Vfx.particle("ember", i, 16, 0.5, 2)
+    if ax == bx then sameSeed = sameSeed + 1 end
+    if ax ~= cx then diffSeed = diffSeed + 1 end
+  end
+  check(sameSeed > 0, "one seed replays the same emission")
+  check(diffSeed > 0, "...and another seed does not")
+
+  -- Intensity scales the spend and is clamped at both ends, so a hub sending
+  -- a nonsense number cannot ask for ten thousand particles a frame.
+  check(Vfx.count("ember", 2) > Vfx.count("ember", 0.5),
+        "intensity scales how many particles an emission spends")
+  check(Vfx.count("ember", 1e9) <= 48, "...and the spend is capped")
+  check(Vfx.count("ember", -5) >= 1, "...and never falls to nothing")
+  eq(Vfx.count("no_such_style", 1), Vfx.count(Vfx.DEFAULT_STYLE, 1),
+     "an unknown style counts as the default one rather than erroring")
+
+  -- An unborn or spent particle answers alpha 0 rather than nil, so the
+  -- renderer's loop is a straight 1..n with no hole in it.
+  local _, _, _, alphaEnd = Vfx.particle("ember", 1, 16, 1, 3)
+  check(alphaEnd >= 0, "a spent particle answers an alpha, not nil")
+end)()
+
+-- ------- the particle fx entry, through Battlefield's own seat fold
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- vfx seat tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+
+  -- A `vfx` is field-level: it draws something of its own and leaves the
+  -- monster it plays over completely alone. Asserted by identity against the
+  -- shared neutral record, which is also what proves the fold does not
+  -- allocate a per-seat table for one.
+  local neutral = Battlefield.fxSeat(nil, "ally", 1)
+  local withVfx = Battlefield.fxSeat(
+    { { kind = "vfx", side = "ally", seatIndex = 1, t = 0.5,
+        style = "ember", palette = "FIRE", delivery = "burst" } }, "ally", 1)
+  eq(withVfx, neutral,
+     "a particle effect never moves, tints or hides the seat it plays over")
+
+  -- ...and neither does a ball in flight, which is the other field-level kind
+  -- that names a side.
+  eq(Battlefield.fxSeat({ { kind = "ball", side = "foe", seatIndex = 1, t = 0.3 } },
+     "foe", 1), neutral, "an arc in the air leaves its target standing")
+
+  -- The seat modifiers still fold, so the gate did not turn everything off.
+  local lunged = Battlefield.fxSeat(
+    { { kind = "lunge", side = "ally", seatIndex = 1, t = 0.5 } }, "ally", 1)
+  check(lunged.dx > 0, "a lunge still moves the seat it belongs to")
+
+  -- A vfx entry rides ctx.fx through the layout untouched, which is the whole
+  -- of the contract between the two screens and the renderer.
+  local layout = Battlefield.layout({
+    mode = "mmo",
+    allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24 } },
+    foeSeats = { { index = 3, name = "RATT", hp = 18, maxHp = 18 } },
+    fx = { { kind = "vfx", side = "foe", seatIndex = 1, t = 0.25,
+             style = "spark", palette = "ELECTRIC", delivery = "projectile",
+             fromSide = "ally", fromSeat = 1, seed = 4 } },
+  })
+  eq(#layout.fx, 1, "the layout publishes the effect list as given")
+  eq(layout.fx[1].style, "spark", "...with the look intact")
+  eq(layout.fx[1].fromSide, "ally", "...and the seat it launched from")
+end)()
+
+-- ------- the particle renderer, against a counting canvas
+--
+-- **Why this exists.** Every draw call in src/Battlefield.lua is wrapped in a
+-- pcall, which is exactly right for a renderer -- a broken effect must never be
+-- the reason a battle screen goes down -- and exactly wrong for a suite: a
+-- typo in an emitter would be swallowed and the only symptom would be an
+-- effect nobody ever sees. So the canvas is stubbed and the primitives are
+-- *counted*: a style that throws on its first particle issues almost nothing,
+-- and that is what fails here.
+--
+-- The stub answers any call, so this pins the shapes rather than the API.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- renderer smoke tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+  local Vfx = need("Vfx")
+
+  local counts = {}
+  local function tally(name)
+    return function(...)
+      counts[name] = (counts[name] or 0) + 1
+    end
+  end
+  local gfx = {
+    circle = tally("circle"), polygon = tally("polygon"), line = tally("line"),
+    arc = tally("arc"), ellipse = tally("ellipse"),
+    rectangle = tally("rectangle"), draw = tally("draw"),
+    setColor = tally("setColor"), setBlendMode = tally("setBlendMode"),
+    push = tally("push"), pop = tally("pop"), translate = tally("translate"),
+    origin = tally("origin"), setScissor = tally("setScissor"),
+    print = tally("print"), printf = tally("printf"),
+    setLineWidth = tally("setLineWidth"),
+    getLineWidth = function() return 1 end,
+    getFont = function() return nil end,
+    setFont = tally("setFont"),
+    getWidth = function() return 640 end,
+    getHeight = function() return 360 end,
+  }
+  -- Anything this suite did not think of answers a no-op rather than throwing:
+  -- the renderer is allowed to reach for a primitive nobody listed, and the
+  -- point here is the particle shapes, not the API surface.
+  setmetatable(gfx, { __index = function() return function() end end })
+
+  local savedLove = _G.love
+  _G.love = { graphics = gfx }
+
+  local function drawWith(fx)
+    counts = {}
+    Battlefield.draw({ game = { data = {} } }, {
+      mode = "mmo",
+      allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24 } },
+      foeSeats = { { index = 3, name = "RATT", hp = 18, maxHp = 18 } },
+      fx = fx,
+    }, nil)
+    return (counts.circle or 0) + (counts.polygon or 0) + (counts.line or 0)
+      + (counts.arc or 0) + (counts.ellipse or 0)
+  end
+
+  -- The floor: the arena and two seats with no effects at all. Every count
+  -- below is compared against this, so a style is only credited with what it
+  -- drew rather than with the field it drew over.
+  local baseline = drawWith(nil)
+
+  local styles = {}
+  for name in pairs(Vfx.STYLES) do styles[#styles + 1] = name end
+  table.sort(styles)
+
+  local silent = {}
+  for _, style in ipairs(styles) do
+    local drew = drawWith({ {
+      kind = "vfx", side = "foe", seatIndex = 1, t = 0.45,
+      style = style, palette = "FIRE", delivery = "burst", seed = 3,
+    } })
+    if drew <= baseline then silent[#silent + 1] = style end
+  end
+  eq(#silent, 0,
+     "every style draws something at mid-effect (" ..
+     table.concat(silent, ",") .. ")")
+
+  -- ...and every style survives its whole life, not only its middle: an
+  -- emitter that divides by (1 - t) is fine at 0.45 and throws at 1.
+  local broke = {}
+  for _, style in ipairs(styles) do
+    for _, t in ipairs({ 0, 0.01, 0.5, 0.99, 1 }) do
+      local ok = pcall(drawWith, { {
+        kind = "vfx", side = "ally", seatIndex = 1, t = t,
+        style = style, palette = "WATER", delivery = "burst", seed = 11,
+      } })
+      if not ok then broke[#broke + 1] = style .. "@" .. tostring(t) end
+    end
+  end
+  eq(#broke, 0, "no style throws anywhere in 0..1 (" ..
+     table.concat(broke, ",") .. ")")
+
+  -- Each delivery puts something on the canvas, including the two that travel
+  -- (which draw a flight or a beam instead of a burst for part of their life).
+  local deliveries = {}
+  for name in pairs(Vfx.DELIVERIES) do deliveries[#deliveries + 1] = name end
+  table.sort(deliveries)
+  local blank = {}
+  for _, delivery in ipairs(deliveries) do
+    for _, t in ipairs({ 0.2, 0.7 }) do
+      local drew = drawWith({ {
+        kind = "vfx", side = "foe", seatIndex = 1, t = t,
+        style = "spark", palette = "ELECTRIC", delivery = delivery,
+        fromSide = "ally", fromSeat = 1, seed = 5,
+      } })
+      if drew <= baseline then blank[#blank + 1] = delivery .. "@" .. tostring(t) end
+    end
+  end
+  eq(#blank, 0, "every delivery draws through its whole life (" ..
+     table.concat(blank, ",") .. ")")
+
+  -- A travelling delivery with no origin still draws: it degrades to a burst
+  -- at the target rather than firing from the canvas corner.
+  local orphan = drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.3,
+    style = "ember", palette = "FIRE", delivery = "beam", seed = 6,
+  } })
+  check(orphan > baseline,
+        "a beam whose thrower has left the field falls back to a burst")
+
+  -- Junk on the record is drawn as the defaults rather than refused: every one
+  -- of these fields arrives from another process.
+  local junk = drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.4,
+    style = "no_such_style", palette = "NO_SUCH_PALETTE",
+    delivery = "sideways", scale = 0 / 0, intensity = -3, seed = "x",
+  } })
+  check(junk > baseline, "a nonsense effect record still draws the default look")
+
+  -- The additive styles set a blend mode, and every one they set is put back:
+  -- a leaked "add" would brighten the whole rest of the frame.
+  counts = {}
+  Battlefield.draw({ game = { data = {} } }, {
+    mode = "mmo",
+    allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24 } },
+    foeSeats = { { index = 3, name = "RATT", hp = 18, maxHp = 18 } },
+    fx = { { kind = "vfx", side = "foe", seatIndex = 1, t = 0.4,
+             style = "ember", palette = "FIRE", delivery = "burst", seed = 2 } },
+  }, nil)
+  check((counts.setBlendMode or 0) >= 2,
+        "an additive style sets the blend mode and puts it back again")
+  eq((counts.setBlendMode or 0) % 2, 0, "...in pairs, never an odd number")
+
+  _G.love = savedLove
+end)()
+
 -- ------- Gen1 Battlefield wave 1: layout plates + ctx.fx passthrough
 
 ;(function()

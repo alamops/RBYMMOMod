@@ -65,6 +65,12 @@ local Gen = need("Gen")
 local CoopSim = need("CoopSim")
 local CoopField = need("CoopField")
 local Battlefield = need("Battlefield")
+-- Which particle effect a move / item / condition / stat stage wears. A
+-- catalogue, not a renderer: Battlefield draws what this resolves. Shared with
+-- MediatedBattle's twin so the two screens never disagree about what a move
+-- looks like -- a player in a co-op fight and the same player in a 1v1 are
+-- watching the same Flamethrower.
+local Vfx = need("Vfx")
 -- The Gen 2 half of the award. See `src/Exp2.lua`'s header: Gold has no
 -- `src/battle/Experience.lua` twin, so a mediated Gen 2 faint is priced through
 -- the engine's own `src/battle/gen2/Mon` primitives instead.
@@ -1588,7 +1594,7 @@ function M:update(dt)
       local head = self.messages[1]
       if type(head) == "table"
          and (head.anim or head.drain or head.faintfx or head.expfill
-              or head.wait or head.act or head.ballsend) then
+              or head.wait or head.act or head.ballsend or head.vfxrow) then
         -- Hold wait/act/anim behind opening appear line(s). Drop ball chrome
         -- when the post-appear wait starts (not on every page advance), so a
         -- multi-page appear does not begin the gap early.
@@ -1616,6 +1622,12 @@ function M:update(dt)
             self:startDrain(head)
           elseif head.expfill then
             self:startExpFill(head)
+          elseif head.vfxrow then
+            -- **Takes no hold.** The sentence this belongs to is the very next
+            -- row and the effect is meant to run under it; holding here would
+            -- put half a second of empty arena between the item being used and
+            -- the box saying so.
+            self:emitVfx(head.vfxrow, head.slot, head.from)
           else
             self:startFaint(head)
           end
@@ -3136,6 +3148,14 @@ function M:playEvents(events)
       self.messages[#self.messages + 1] =
         { anim = event.anim, from = event.from, to = event.to,
           attackerIsPlayer = event.attackerIsPlayer, amount = event.amount }
+    elseif event.kind == "vfx" then
+      -- Queued rather than emitted here, so the effect keeps its place in the
+      -- stream relative to the lines around it -- a batch arrives all at once,
+      -- and an effect played at parse would be on screen several sentences
+      -- before the one it belongs to.
+      self.messages[#self.messages + 1] =
+        { vfxrow = event.spec, slot = event.slot, from = event.from }
+
     elseif event.kind == "damage" then
       -- The replayers are told the resulting HP rather than the amount, so a
       -- dropped or reordered event cannot leave a bar drifting away from the
@@ -3161,7 +3181,12 @@ function M:playEvents(events)
       local shownAt = showing(event.slot)
       if shownAt and not self:skipHealShapedDrain(shownAt, event.hp) then
         self.messages[#self.messages + 1] =
-          { drain = shownAt, slot = event.slot, to = event.hp }
+          -- `status` on a damage event means a residual dealt it -- a burn, a
+          -- poison tick. Carried through because beat 3's impact burst borrows
+          -- the attacking move's palette and a residual has no attacking move.
+          -- The `drain` branch below never sets it: those rows are strikes.
+          { drain = shownAt, slot = event.slot, to = event.hp,
+            residual = (event.status ~= nil) or nil }
       end
     elseif event.kind == "drain" then
       -- One per strike, placed by the field in the engine's own queue order --
@@ -3850,6 +3875,10 @@ function M:snapDisplay()
   -- justifies the hold would leave a seat hidden for the rest of the fight.
   self.ballFlow = nil
   self.fx = nil
+  -- The last move's palette goes with the effects it coloured: after a snap
+  -- there is no attack playing, and beat 3 would otherwise open the next blow
+  -- in the colours of one from before the gap.
+  self.moveVfx = nil
   self.animHold = nil
   self.animDwell = nil
   -- ...and so does a display beat, for the sharper version of the same reason:
@@ -5694,6 +5723,12 @@ local FX_SPAN = {
   ball   = 0.60, -- TOSS / GREATTOSS / ULTRATOSS: the arc
   wobble = 0.70, -- SHAKE: one rock, one per shake the referee counted
   poof   = 0.45, -- POOF / SHOWPIC: the burst, and what comes out of it
+  -- Particles (src/Vfx.lua), and MediatedBattle's twin verbatim -- the two
+  -- screens must not drift on a rhythm the player reads as the game's. One
+  -- span for every look, because a span is a pacing decision and the catalogue
+  -- is a visual one; a spec that genuinely needs longer carries its own
+  -- `duration` (Explosion, a Poke Flute).
+  vfx    = 0.50,
 }
 
 -- The beats between the effects, in seconds. Not effects themselves -- nothing
@@ -5832,6 +5867,12 @@ function M:splitHitBeat(row)
   row.beat = true
   self:emitFx("flash", row.slot)
   self:emitFx("shake", row.slot)
+  -- The punctuation on the blow, in the attacking move's colours, on the seat
+  -- whose bar is about to fall -- which is the one seat in a 2-on-2 that is
+  -- known exactly. `row.residual` marks a burn or a poison ticking: there is no
+  -- attacking move behind those, and borrowing the last one's palette would
+  -- paint a poison tick in the last Fire attack's orange.
+  self:emitVfx(Vfx.forImpact(not row.residual and self.moveVfx or nil), row.slot)
   return self:holdBeat(row, BEAT_SPAN.hit)
 end
 
@@ -5864,6 +5905,13 @@ local BALL_FX = {
 -- came next. `Battlefield.fxSeat` makes the same call on its side of the wire.
 local BALL_HIDE_FX = { recall = true, wobble = true }
 
+-- The fields a `vfx` record carries beyond the shared kind / slot / side / t.
+-- `fromSlot` is a *field slot*; `battlefieldFxCtx` turns it into the seat index
+-- Battlefield matches on, the same projection every other field here gets.
+local VFX_KEYS = {
+  "style", "palette", "delivery", "scale", "intensity", "seed", "fromSlot",
+}
+
 -- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
 -- number came off the wire, and a hub claiming a thousand would otherwise
 -- queue a thousand rows the player cannot skip past.
@@ -5884,7 +5932,7 @@ end
 -- catch throw, which is what every ball on this screen was before send-outs
 -- grew one. Carried as nil rather than false so the published entry keeps the
 -- shape the renderer's twin publishes.
-function M:emitFx(kind, index, own)
+function M:emitFx(kind, index, own, extra)
   if not self:usesBattlefield() then return nil end
   local span = FX_SPAN[kind]
   if not span then return nil end
@@ -5897,6 +5945,18 @@ function M:emitFx(kind, index, own)
     elapsed = 0,
     duration = span,
   }
+  -- `extra` is a particle record's own payload -- style, palette, delivery,
+  -- scale, intensity, seed, and the slot a travelling effect launches from.
+  -- Copied key by key rather than merged so a caller cannot overwrite `kind`,
+  -- `t` or `elapsed`, the three fields `stepFx` owns. MediatedBattle's twin
+  -- does the same with the same key list.
+  if type(extra) == "table" then
+    for _, key in ipairs(VFX_KEYS) do
+      if extra[key] ~= nil then fx[key] = extra[key] end
+    end
+    local given = tonumber(extra.duration)
+    if given and given > 0 then fx.duration = given end
+  end
   local list = self.fx
   if type(list) ~= "table" then
     list = {}
@@ -5904,6 +5964,80 @@ function M:emitFx(kind, index, own)
   end
   list[#list + 1] = fx
   return fx
+end
+
+-- ------- particles
+--
+-- One emission, from a spec src/Vfx.lua resolved. Everything with a look goes
+-- through here, so there is one place that decides what a seed is and which
+-- slots an effect is anchored to and travels from.
+--
+-- `fromSlot` rides on the record as a **field slot** and is projected to a
+-- seat index by `battlefieldFxCtx` alongside the target's, because a seat
+-- index is only meaningful against the list of monsters actually drawn -- and
+-- in a 2-on-2 that list changes as monsters leave.
+--
+-- A nil spec draws nothing: the catalogue answers nil for a thrown ball (which
+-- already has a whole flow of its own) and for an item with no effect.
+function M:emitVfx(spec, targetSlot, fromSlot)
+  if type(spec) ~= "table" then return nil end
+  if not self:usesBattlefield() then return nil end
+  if targetSlot == nil then return nil end
+  -- Counted, not rolled: every client watching this fight steps the same
+  -- counter over the same event stream, so the four players see one sight.
+  self.vfxSeed = ((tonumber(self.vfxSeed) or 0) + 1) % 512
+  return self:emitFx("vfx", targetSlot, nil, {
+    style = spec.style,
+    palette = spec.palette,
+    delivery = spec.delivery,
+    scale = spec.scale,
+    intensity = spec.intensity,
+    duration = spec.duration,
+    seed = self.vfxSeed,
+    fromSlot = fromSlot,
+  })
+end
+
+-- The move a queued `anim` row names, as the engine's own record. nil for a
+-- ball marker, for a move this build does not carry, and headless.
+function M:moveDefFor(animId)
+  if type(animId) ~= "string" or animId == "" then return nil end
+  local data = self.game and self.game.data
+  local moves = data and data.moves
+  if type(moves) ~= "table" then return nil end
+  local def = moves[animId]
+  return (type(def) == "table") and def or nil
+end
+
+-- A move's particles, on the lunge beat, and the spec kept so the impact burst
+-- on the beat behind it can borrow this move's colours.
+--
+-- **The target is the first live seat opposite, not a named one.** A coop anim
+-- row carries the actor (`from`, or `attackerIsPlayer` on the host-sim modes)
+-- and nothing else -- neither producer stamps a victim on it -- so in a 2-on-2
+-- an aimed move plays at the opposing partner that is still standing rather
+-- than at the one it actually chose. `seatOnSide` is the same resolution the
+-- lunge already uses, and the blow itself is exact: `splitHitBeat` bursts on
+-- the slot whose bar is about to fall, which is the seat that was really hit.
+function M:startMoveVfx(row, lunger)
+  self.moveVfx = nil
+  if not self:usesBattlefield() then return nil end
+  if type(row) ~= "table" then return nil end
+  local animId = row.anim
+  if type(animId) ~= "string" or animId == "" then return nil end
+
+  local spec = Vfx.forMove(animId, self:moveDefFor(animId))
+  self.moveVfx = spec
+
+  local from = lunger
+  if from == nil then from = row.from end
+  if from == nil then return nil end
+  local target = from
+  if spec.delivery ~= "self" then
+    target = self:seatOnSide(not self:foeSide(from))
+  end
+  if target == nil then return nil end
+  return self:emitVfx(spec, target, from)
 end
 
 -- ------- the ball flow
@@ -6314,14 +6448,40 @@ function M:battlefieldFxCtx(allySeats, foeSeats)
         out[#out + 1] = { kind = "shake", side = fx.side, t = fx.t }
       else
         local seatIndex = fx.slot ~= nil and seatIndexOf[fx.slot] or nil
-        if not seatIndex and fx.kind == "ball" and fx.slot ~= nil then
+        -- Same exception, and for the same reason: a `vfx` can be aimed at a
+        -- seat that is deliberately empty -- the burst an arrival comes out of,
+        -- an item used on a monster still walking on -- so it is anchored on
+        -- the row the seat is about to occupy rather than dropped.
+        if not seatIndex and fx.slot ~= nil
+            and (fx.kind == "ball" or fx.kind == "vfx") then
           seatIndex = pendingIndexOf[fx.slot]
         end
         if seatIndex then
-          out[#out + 1] = {
+          local row = {
             kind = fx.kind, side = fx.side, seatIndex = seatIndex, t = fx.t,
             own = fx.own,
           }
+          if fx.kind == "vfx" then
+            row.style = fx.style
+            row.palette = fx.palette
+            row.delivery = fx.delivery
+            row.scale = fx.scale
+            row.intensity = fx.intensity
+            row.seed = fx.seed
+            -- The launching seat, projected the same way the target was. A
+            -- thrower whose own seat has left the field publishes none, and
+            -- `Battlefield.drawVfx` degrades a travelling delivery to a burst
+            -- at the target rather than firing it from the canvas corner.
+            local from = fx.fromSlot
+            if from ~= nil then
+              local fromIndex = seatIndexOf[from] or pendingIndexOf[from]
+              if fromIndex then
+                row.fromSide = self:fxSideFor(from)
+                row.fromSeat = fromIndex
+              end
+            end
+          end
+          out[#out + 1] = row
         end
       end
     end
@@ -6914,7 +7074,14 @@ function M:startAnim(row)
       end
       -- Still nobody: emit nothing. A lunge that cannot name a seat is a
       -- record the ctx projection throws away one frame later.
-      if lunger ~= nil then self:emitFx("lunge", lunger) end
+      if lunger ~= nil then
+        self:emitFx("lunge", lunger)
+        -- ...and the move's own particles on the same beat, because the lean
+        -- and what leaves the monster are one action. Emitted for every move,
+        -- not only the ones that connect: a status move never reaches a drain
+        -- row and neither does a miss.
+        self:startMoveVfx(row, lunger)
+      end
     else
       self:startBallFx(row)
     end
@@ -8746,7 +8913,38 @@ function M:medRows(msg)
       -- is the one whose ball worked.
       if self:medSlotOf(msg) == self.mine then self.caughtBall = msg.text end
     end
+    -- ...and what the bag looks like opening, on the seat of whoever opened
+    -- it. Balls answer nil (`Vfx.forItem`) and are left to the throw chain,
+    -- which already draws the arc, the rocking and the burst.
+    local look = Vfx.forItem(msg.text)
+    if look and index then
+      rows[#rows + 1] = { kind = "vfx", spec = look, slot = index, from = index }
+    end
     say(msg.text)
+
+  elseif kind == "status" then
+    -- **New branch, and it only draws.** The sentence for a condition already
+    -- arrives as its own `msg` event, which is why this handler never needed a
+    -- case for `status` before; what it adds is the sight of one landing. An
+    -- event carrying a `status` inflicted it, one carrying none cleared it, and
+    -- a condition lifting is a sentence rather than a sight -- the catalogue
+    -- answers nil for the token that is not there.
+    local look = Vfx.forStatus(msg.status)
+    if look and index then
+      rows[#rows + 1] = { kind = "vfx", spec = look, slot = index }
+    end
+
+  elseif kind == "stat" then
+    -- Arrows on the seat, and the direction comes off the sentence rather than
+    -- off `amount`: the referee sends the resulting *stage*, not the change,
+    -- so the number alone cannot say which way it went. Same reading as
+    -- MediatedBattle's twin.
+    local down = type(msg.text) == "string"
+      and msg.text:lower():find("fell", 1, true) ~= nil
+    local look = Vfx.forStat(down and -1 or 1)
+    if look and index then
+      rows[#rows + 1] = { kind = "vfx", spec = look, slot = index }
+    end
 
   elseif kind == "switch" then
     -- Already said in the `msg` beside it, and the `send` that follows every

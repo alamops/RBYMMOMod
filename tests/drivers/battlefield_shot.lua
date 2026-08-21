@@ -159,6 +159,10 @@ return function(game)
   local Battlefield = resolve("Battlefield")
   local Cast = resolve("Cast")
   local GenMod = resolve("Gen")
+  -- The particle catalogue, so this driver can ask for the same look the
+  -- screen will emit rather than hard-coding a style name that would rot the
+  -- first time the catalogue changed its mind about Thunderbolt.
+  local Vfx = resolve("Vfx")
 
   -- Both looks, per generation. The peer's rides `mod.exports.players()`,
   -- which MediatedBattle reads verbatim with no registry involved, so it has
@@ -661,6 +665,195 @@ return function(game)
   else
     log("warn", "bubble frame did not reach disk", path5)
   end
+
+  -- ---- (e) particles frame: a move's own effect, on the arena ----
+  --
+  -- The half of this feature a headless suite cannot see. `tests/rby_mmo_test`
+  -- pins the catalogue, the particle math and (against a counting canvas) that
+  -- every style issues primitives; what only a real LOVE can answer is whether
+  -- those primitives land as *pixels on the arena*. So the frame is captured
+  -- twice -- once with the effect list empty, once mid-effect -- and the two
+  -- are compared for pixels in the move's own palette. Anything that leaves
+  -- the effect invisible (a blend mode never restored, a colour left at zero
+  -- alpha, a canvas the particles are drawn outside of) shows up as the two
+  -- counts being equal.
+  --
+  -- Thunderbolt because the player's own move list already carries it: it is
+  -- Electric, so the catalogue gives it a beam in a palette (near-white core,
+  -- strong yellow body) that nothing else on a grass arena wears.
+  screen.phase = "choose"
+  screen.fx = nil
+  screen.moveVfx = nil
+  U.wait(3)
+
+  -- **The corridor, not the whole frame.** Counting the move's colours over
+  -- the entire image sounds simpler and is not usable: both monsters are drawn
+  -- in it, PIKACHU is yellow, the sprites bob between two captures, and on
+  -- Gold they are in full colour rather than DMG grey -- so the frame-wide
+  -- count moves by more than the effect does and swings either way depending
+  -- on the generation (measured: Gen 1 +143, Gold -51 for the same effect).
+  --
+  -- So the scan is the empty grass *between* the two seats, inset well clear
+  -- of both monsters. Nothing but the arena is ever drawn there, which makes
+  -- the baseline count a floor rather than a moving number, and a beam or a
+  -- burst crossing it is the only thing that can raise it.
+  local function corridorRect()
+    local lay = Battlefield.layout(screen:battlefieldCtx())
+    local ally, foe = nil, nil
+    for _, mon in ipairs(lay.mons) do
+      if mon.side == "ally" then ally = mon elseif mon.side == "foe" then foe = mon end
+    end
+    if not (ally and foe) then return nil end
+    local x0 = math.min(ally.x, foe.x) + Battlefield.MON_DRAW
+    local x1 = math.max(ally.x, foe.x) - Battlefield.MON_DRAW
+    if x1 <= x0 then return nil end
+    local cy = (ally.y + foe.y) / 2
+    return { x = x0, y = cy - 18, w = x1 - x0, h = 36 }
+  end
+
+  -- Yellow, and bright: r and g high with b well behind them. Grass, slate
+  -- panels and white glyphs all fail it.
+  local function paletteYellowCount(data, imgW, imgH, toScreen, rect)
+    if not rect then return nil end
+    local x0, y0 = toScreen(rect.x, rect.y)
+    local x1, y1 = toScreen(rect.x + rect.w, rect.y + rect.h)
+    x0, y0 = clampInt(x0, 0, imgW - 1), clampInt(y0, 0, imgH - 1)
+    x1, y1 = clampInt(x1, 0, imgW - 1), clampInt(y1, 0, imgH - 1)
+    local n = 0
+    for y = y0, y1 do
+      for x = x0, x1 do
+        local r, g, b = data:getPixel(x, y)
+        if r > 0.72 and g > 0.55 and b < 0.42 and (g - b) > 0.2 then
+          n = n + 1
+        end
+      end
+    end
+    return n
+  end
+
+  local corridor = corridorRect()
+  check(corridor ~= nil, "particles: a corridor between the two seats to scan",
+    corridor and ("x=%d w=%d"):format(corridor.x, corridor.w) or "none")
+
+  local baseCount = nil
+  local pathBase = SHOT_DIR .. "/battlefield-vfx-before.png"
+  if U.shot(game, pathBase) then
+    log("captured", pathBase)
+    local okB, dataB = loadShot(pathBase)
+    if okB and dataB then
+      local wB, hB = dataB:getDimensions()
+      local toScreenB = fillTransform(wB, hB)
+      baseCount = paletteYellowCount(dataB, wB, hB, toScreenB, corridor)
+      log("particles", "baseline corridor px", tostring(baseCount))
+    end
+  end
+
+  local MOVE_ID = "THUNDERBOLT"
+  local moveDef = screen:moveDefFor(MOVE_ID)
+  check(moveDef ~= nil,
+    "particles: the move resolves against the imported move table",
+    "type=" .. tostring(moveDef and moveDef.type))
+  local spec = Vfx.forMove(MOVE_ID, moveDef)
+  check(spec ~= nil and spec.style ~= nil,
+    "particles: the catalogue answers for it",
+    "style=" .. tostring(spec and spec.style)
+    .. " palette=" .. tostring(spec and spec.palette)
+    .. " delivery=" .. tostring(spec and spec.delivery))
+
+  -- `calledOut` spends the callout beat up front, so the lunge -- and the
+  -- particles that ride it -- fire on this row's first pass through
+  -- `startAnim`. The beat itself is what the bubble frame above covers.
+  screen.lines[#screen.lines + 1] =
+    { anim = MOVE_ID, slot = screen:mySlot(), side = "a", calledOut = true }
+  local function liveVfx()
+    for _, e in ipairs(screen.fx or {}) do
+      if e.kind == "vfx" then return e end
+    end
+    return nil
+  end
+  local reachedVfx = H.waitFor(game, function() return liveVfx() ~= nil end,
+    200, "the move's particles to reach the arena")
+  check(reachedVfx, "particles: a move emits a vfx effect",
+    "fxCount=" .. tostring(screen.fx and #screen.fx or 0))
+
+  local entry = liveVfx()
+  if entry then
+    check(entry.style == spec.style,
+      "particles: the effect carries the catalogue's look",
+      "style=" .. tostring(entry.style))
+    check(entry.palette == spec.palette,
+      "particles: ...and its colours", "palette=" .. tostring(entry.palette))
+    check(entry.side == "foe",
+      "particles: aimed at the seat opposite the attacker",
+      "side=" .. tostring(entry.side))
+    check(entry.fromSide == "ally",
+      "particles: launched from the attacker's own seat",
+      "fromSide=" .. tostring(entry.fromSide))
+    -- ...and it survives the ctx projection into the renderer's own list,
+    -- which is the contract between this screen and Battlefield.
+    local vfxLayout = Battlefield.layout(screen:battlefieldCtx())
+    local published = nil
+    for _, e in ipairs(vfxLayout.fx or {}) do
+      if e.kind == "vfx" then published = e end
+    end
+    check(published ~= nil and published.style == spec.style,
+      "particles: the effect reaches the layout the renderer draws from",
+      "style=" .. tostring(published and published.style))
+  end
+
+  -- Held on the effect's own progress rather than on a frame count, so the
+  -- capture lands at a known point in its life however fast the driver's
+  -- clock happens to run.
+  --
+  -- **The timing is tuned to this move's delivery, and changing MOVE_ID means
+  -- retiming it.** Thunderbolt is a beam, which is drawn at full width from
+  -- t == 0.2 and starts fading at t == 0.55 -- just past the travel boundary
+  -- is its brightest moment. A *thrown* move spends its first
+  -- M.FX_VFX_TRAVEL as a small core out in mid-field and only then begins its
+  -- burst, so the same instant catches it with almost nothing drawn and the
+  -- pixel count below reads as a regression rather than as bad timing (tried;
+  -- Ember lands 18 px over the baseline here against 143 for Thunderbolt).
+  -- The exhaustive per-style, per-delivery coverage is the counting-canvas
+  -- block in tests/rby_mmo_test.lua; this frame's job is the one thing that
+  -- cannot be faked -- real pixels, on a real arena, out of a real LOVE.
+  local opened = H.waitFor(game, function()
+    local e = liveVfx()
+    return e ~= nil and (tonumber(e.t) or 0) > Battlefield.FX_VFX_TRAVEL + 0.02
+  end, 200, "the effect to reach the brightest part of its life")
+  check(opened, "particles: the effect reaches its burst",
+    "t=" .. tostring(liveVfx() and liveVfx().t))
+  local path7 = SHOT_DIR .. "/battlefield-vfx.png"
+  if U.shot(game, path7) then
+    log("captured", path7)
+    local ok7, data7 = loadShot(path7)
+    if ok7 and data7 then
+      local w7, h7 = data7:getDimensions()
+      local toScreen7 = fillTransform(w7, h7)
+      local fxCount = paletteYellowCount(data7, w7, h7, toScreen7, corridor)
+      log("particles", "effect corridor px", tostring(fxCount))
+      if baseCount and fxCount then
+        -- The baseline is structurally zero -- the corridor is bare grass and
+        -- nothing else is ever drawn there -- so the margin is a guard against
+        -- a stray antialiased pixel rather than a tuned threshold.
+        check(fxCount > baseCount + 20,
+          "particles: the effect puts its own colours on the arena",
+          ("baseline=%d effect=%d"):format(baseCount, fxCount))
+      else
+        check(false, "particles: baseline frame reached disk")
+      end
+    else
+      check(false, "particles: load screenshot", tostring(data7))
+    end
+  else
+    check(false, "particles: screenshot reached disk", path7)
+  end
+
+  -- ...and the effect retires on its own clock rather than sticking: a
+  -- particle list that never empties is a frame that never goes quiet again.
+  local retired = H.waitFor(game, function() return liveVfx() == nil end,
+    200, "the effect to retire")
+  check(retired, "particles: the effect retires when its span is spent",
+    "fxCount=" .. tostring(screen.fx and #screen.fx or 0))
 
   -- ---- third human check: SELF as SPRITE_NIRE (requantize pin) ----
   -- RED and BLUE stayed the trainers for every frame above, so the (a)

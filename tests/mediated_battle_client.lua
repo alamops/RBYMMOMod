@@ -269,6 +269,100 @@ local specialSet = {}
 for _, idx in ipairs(ruleset.specialTypes or {}) do specialSet[idx] = true end
 check(specialSet[0] and specialSet[2], "FIRE and WATER indices are Special")
 check(not specialSet[1], "NORMAL is Physical")
+
+-- ------- the physical/special split comes off the chart's own records
+--
+-- Gen 1 and Gen 2 both split by TYPE, and every type record the registry
+-- serves carries `category`. Reading it (rather than matching type *names*) is
+-- what makes this survive the case that shipped broken for months: a type
+-- whose registry id is not its own name.
+do
+  local function rulesetFor(types, matchups)
+    return Mediated.snapshotRuleset({
+      data = { type_chart = { types = types, matchups = matchups or {} },
+               moves = {} },
+    })
+  end
+  local function specialIds(rules, types)
+    local order = Mediated.typeOrder({ type_chart = { types = types, matchups = {} } })
+    local byIndex = {}
+    for id, idx in pairs((order and order.index) or {}) do byIndex[idx] = id end
+    local out = {}
+    for _, idx in ipairs(rules.specialTypes or {}) do out[byIndex[idx]] = true end
+    return out
+  end
+
+  -- PSYCHIC_TYPE is the real registry id in BOTH generations -- `PSYCHIC` is
+  -- taken by the move. This is the regression: keying on the display name
+  -- dropped the whole type out of the upload, and every Psychic move was then
+  -- refereed on atk/def with Light Screen not halving it.
+  local gen1 = {
+    NORMAL       = { name = "NORMAL",   category = "physical" },
+    PSYCHIC_TYPE = { name = "PSYCHIC",  category = "special" },
+    FIRE         = { name = "FIRE",     category = "special" },
+  }
+  local got = specialIds(rulesetFor(gen1), gen1)
+  check(got.PSYCHIC_TYPE,
+        "PSYCHIC_TYPE is uploaded as Special -- the id, not the display name")
+  check(got.FIRE, "...alongside the types whose id and name agree")
+  check(not got.NORMAL, "...and a physical type stays out")
+
+  -- Gen 2 adds Dark, and it arrives the same way: off the record, with no
+  -- second name list in the client.
+  local gen2 = {
+    DARK  = { name = "DARK",  category = "special" },
+    STEEL = { name = "STEEL", category = "physical" },
+  }
+  local g2 = specialIds(rulesetFor(gen2), gen2)
+  check(g2.DARK, "Gen 2's Dark is Special, read off its record")
+  check(not g2.STEEL, "...and Steel is not")
+
+  -- ...and Gold in practice, where they arrive with NO record at all:
+  -- `TypeChart.TYPES` carries the fifteen Gen 1 types only, so on a Gen 2 boot
+  -- Dark and Steel reach the chart through their matchups alone. Both name
+  -- lists have to place them, and neither may raise the warning.
+  local goldish = { DARK = { name = "DARK" }, STEEL = { name = "STEEL" },
+                    NORMAL = { name = "NORMAL" } }
+  local mark = #warns
+  local gold = specialIds(rulesetFor(goldish), goldish)
+  check(gold.DARK, "record-less Dark still uploads as Special (Gold)")
+  check(not gold.STEEL, "record-less Steel stays Physical (Gold)")
+  local cried = false
+  for i = mark + 1, #warns do
+    if tostring(warns[i]):find("STEEL", 1, true)
+       or tostring(warns[i]):find("DARK", 1, true) then cried = true end
+  end
+  check(not cried, "...and neither raises a warning: a guard that cries wolf "
+        .. "on stock Gold data is a guard nobody reads")
+
+  -- A mod's own type is honoured, which is the point of reading records at
+  -- all -- no name list could know about it.
+  local modded = {
+    NORMAL = { name = "NORMAL", category = "physical" },
+    AETHER = { name = "AETHER", category = "special" },
+  }
+  check(specialIds(rulesetFor(modded), modded).AETHER,
+        "a type this client has never heard of is Special if its record says so")
+
+  -- A record with no category at all falls back to the name list, and a type
+  -- neither knows is *named* in a warning rather than silently fought as
+  -- Physical. The old guard only spoke when the count hit zero, which is why
+  -- six-of-seven went unnoticed.
+  local before = #warns
+  local vague = {
+    NORMAL  = { name = "NORMAL" },
+    FIRE    = { name = "FIRE" },
+    MYSTERY = { name = "MYSTERY" },
+  }
+  local v = specialIds(rulesetFor(vague), vague)
+  check(v.FIRE, "with no categories, the name fallback still finds FIRE")
+  local named = false
+  for i = before + 1, #warns do
+    if tostring(warns[i]):find("MYSTERY", 1, true) then named = true end
+  end
+  check(named, "a type with no category is named in the warning, not silently "
+        .. "treated as Physical")
+end
 check(ruleset.metronomePool and #ruleset.metronomePool >= 1,
       "Metronome pool is uploaded from the host move table")
 local metroHasMetronome = false
@@ -959,21 +1053,62 @@ if ok and type(Data) == "table" then
     local realRules = Mediated.snapshotRuleset({ data = Data })
     check(Wire.battleRuleset(realRules) ~= nil,
           "as does a ruleset built from the real type chart")
-    -- Fixture Data may be a subset of Gen1; assert the upload derives Special
-    -- indices from the same ordered id list snapshotRuleset uses.
-    local SPECIAL = {
-      FIRE = true, WATER = true, GRASS = true, ELECTRIC = true,
-      ICE = true, PSYCHIC = true, DRAGON = true,
-    }
+    -- ------- which types went up as Special
+    --
+    -- **This used to rebuild snapshotRuleset's own name table and assert the
+    -- upload matched it**, which is a tautology: the list could be wrong in
+    -- any way at all and both halves were wrong together. It was, for a long
+    -- time -- Psychic's registry id is `PSYCHIC_TYPE` (because `PSYCHIC` is a
+    -- move), the table keyed on `PSYCHIC`, and the whole type shipped as
+    -- Physical. Six of seven matched, so nothing looked odd.
+    --
+    -- So the expectation is derived from the chart's own `category` records
+    -- now -- the thing the production code is supposed to be reading -- and
+    -- falls back to the *ids* rather than the display names.
     local order = Mediated.typeOrder(Data)
-    local expectSpecial = 0
+    local charted = type(Data.type_chart) == "table" and Data.type_chart.types
+    local SPECIAL_IDS = {
+      FIRE = true, WATER = true, GRASS = true, ELECTRIC = true,
+      ICE = true, DRAGON = true, DARK = true,
+      PSYCHIC = true, PSYCHIC_TYPE = true,
+    }
+    local expectSpecial, expectIds = 0, {}
     if order then
       for _, id in ipairs(order.ids) do
-        if SPECIAL[id] then expectSpecial = expectSpecial + 1 end
+        local record = type(charted) == "table" and charted[id] or nil
+        local category = type(record) == "table" and record.category or nil
+        local isSpecial
+        if category ~= nil then isSpecial = (category == "special")
+        else isSpecial = SPECIAL_IDS[id] == true end
+        if isSpecial then
+          expectSpecial = expectSpecial + 1
+          expectIds[id] = true
+        end
       end
     end
     eq(realRules.specialTypes and #realRules.specialTypes, expectSpecial,
-       "specialTypes covers every Gen1 Special name in the type order")
+       "specialTypes covers every Special type in the chart's own records")
+
+    -- ...and the one that would have caught it, stated as the fact it is:
+    -- if this dataset carries Psychic at all, Psychic is Special. Skipped
+    -- rather than failed on a fixture that has no Psychic, because this tier
+    -- runs against whatever the checkout has.
+    local psychicId = nil
+    for _, id in ipairs((order and order.ids) or {}) do
+      if id == "PSYCHIC_TYPE" or id == "PSYCHIC" then psychicId = id end
+    end
+    if psychicId then
+      local idx = order.index[psychicId]
+      local got = false
+      for _, v in ipairs(realRules.specialTypes or {}) do
+        if v == idx then got = true end
+      end
+      check(got, "Psychic is uploaded as Special (id " .. psychicId
+            .. ", chart index " .. tostring(idx) .. ") -- it is the type whose "
+            .. "registry id is not its own name")
+    else
+      check(true, "(this dataset carries no Psychic type -- check skipped)")
+    end
     local moveN = 0
     if type(Data.moves) == "table" then
       for id in pairs(Data.moves) do
@@ -1098,6 +1233,194 @@ do
      .. "says it is, not where the queue had gotten to")
   eq(a.slots[2].pending, nil, "...with nothing parked behind it")
   eq(a.spawnHide, nil, "...and no seat left hidden")
+end
+
+-- ------- particles, through the queue that orders them
+--
+-- Every move, every item and every condition landing has a look
+-- (src/Vfx.lua), and the assertions that matter are about *when* it is
+-- emitted rather than what it looks like: an effect played at parse instead of
+-- at the row's turn in the queue is on screen several sentences before the one
+-- it belongs to, which is the defect the whole beat structure exists to avoid.
+
+do
+  local arena = harness("host")
+  arena.game.input = fakeInput()
+  -- Two move records, so the catalogue resolves a real type rather than
+  -- falling through to NORMAL. `moveDefFor` reads exactly this table.
+  arena.game.data = arena.game.data or {}
+  arena.game.data.moves = arena.game.data.moves or {}
+  arena.game.data.moves.EMBER = { id = "EMBER", type = "FIRE", power = 40 }
+  arena.game.data.moves.GROWL = { id = "GROWL", type = "NORMAL", power = 0 }
+  -- The session id is the battle id (`harness`), so it is named here rather
+  -- than left on the default -- the events below have to reach this fight.
+  arena.open("9")
+  local a = arena.sessions.fight
+  arena.sessions:onBattleReady({
+    battle = "9", mode = "1v1", sides = { a = { "me" }, b = { "peer1" } },
+  })
+  local n = 0
+  local function ev(fields)
+    n = n + 1
+    fields.battle = "9"; fields.seq = n
+    arena.sessions:onBattleEvent(fields)
+  end
+  local function drain(limit)
+    local guard = 0
+    while #a.lines > 0 and guard < (limit or 900) do
+      a:update(1 / 60); guard = guard + 1
+    end
+    return guard
+  end
+  local function liveVfx()
+    local out = {}
+    for _, e in ipairs(a.fx or {}) do
+      if e.kind == "vfx" then out[#out + 1] = e end
+    end
+    return out
+  end
+
+  ev({ t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  check(drain() < 900, "the intro queue drains in bounded frames")
+  a.fx = nil
+
+  -- ------- a move: emitted on the lunge beat, aimed at the seat opposite
+
+  ev({ t = "anim", slot = 0, side = "a", text = "EMBER" })
+  local sawMove, moveEntry = false, nil
+  local guard = 0
+  while #a.lines > 0 and guard < 900 do
+    a:update(1 / 60); guard = guard + 1
+    for _, e in ipairs(liveVfx()) do
+      if not sawMove then sawMove, moveEntry = true, e end
+    end
+  end
+  check(sawMove, "a move emits particles")
+  eq(moveEntry.style, "ember", "...its type's look")
+  eq(moveEntry.palette, "FIRE", "...its type's colours")
+  eq(moveEntry.side, "foe", "...aimed at the seat opposite the attacker")
+  eq(moveEntry.fromSide, "ally", "...and launched from the attacker's own")
+  eq(a.moveVfx and a.moveVfx.palette, "FIRE",
+     "the move's colours are kept for the impact burst on the beat behind it")
+
+  -- A status move draws too. This is the case an effect gated on damage would
+  -- have missed entirely -- Growl never reaches a drain row.
+  a.fx = nil
+  ev({ t = "anim", slot = 0, side = "a", text = "GROWL" })
+  local sawStatusMove = false
+  guard = 0
+  while #a.lines > 0 and guard < 900 do
+    a:update(1 / 60); guard = guard + 1
+    if #liveVfx() > 0 then sawStatusMove = true end
+  end
+  check(sawStatusMove, "a move that deals no damage still draws something")
+
+  -- ...and so does a move nobody here can name, which is the fallback the
+  -- catalogue exists to guarantee.
+  a.fx = nil
+  ev({ t = "anim", slot = 0, side = "a", text = "A_MOVE_FROM_A_MOD" })
+  local sawUnknown = false
+  guard = 0
+  while #a.lines > 0 and guard < 900 do
+    a:update(1 / 60); guard = guard + 1
+    if #liveVfx() > 0 then sawUnknown = true end
+  end
+  check(sawUnknown, "an unknown move draws NORMAL's impact rather than nothing")
+
+  -- ------- an item: filed at parse, played at its turn in the queue
+
+  a.fx = nil
+  ev({ t = "item", slot = 0, side = "a", text = "POTION" })
+  eq(#liveVfx(), 0,
+     "an item's effect is not on screen the instant the packet arrived")
+  local filed = false
+  for _, row in ipairs(a.lines) do
+    if type(row) == "table" and row.vfxrow then filed = true end
+  end
+  check(filed, "...it is filed as a row, in the referee's own order")
+  guard = 0
+  local sawItem = false
+  while #a.lines > 0 and guard < 900 do
+    a:update(1 / 60); guard = guard + 1
+    for _, e in ipairs(liveVfx()) do
+      if e.style == "heal" then sawItem = true end
+    end
+  end
+  check(sawItem, "...and plays when that row comes up")
+
+  -- A ball files nothing: the throw chain behind it already draws the arc, the
+  -- rocking and the burst, and a second effect would draw the throw twice.
+  a.fx = nil
+  local before = #a.lines
+  ev({ t = "item", slot = 0, side = "a", text = "POKE_BALL" })
+  local ballRows = 0
+  for _, row in ipairs(a.lines) do
+    if type(row) == "table" and row.vfxrow then ballRows = ballRows + 1 end
+  end
+  eq(ballRows, 0, "a thrown ball files no particle row of its own")
+  check(#a.lines >= before, "...and the ball chain behind it is untouched")
+  check(drain() < 900, "the queue still drains")
+
+  -- ------- a condition landing, and one lifting
+
+  a.fx = nil
+  -- The wire's own token, which is what a `status` event really carries
+  -- (Wire.STATUSES: SLP / PSN / BRN / FRZ / PAR / TOX) -- not the turn
+  -- machine's internal long name. The catalogue keys both.
+  ev({ t = "status", slot = 2, side = "b", status = "BRN", text = "burned!" })
+  local burnFiled = false
+  for _, row in ipairs(a.lines) do
+    if type(row) == "table" and row.vfxrow then burnFiled = true end
+  end
+  check(burnFiled, "a condition landing files a row")
+  check(drain() < 900, "...which drains")
+
+  local cleared = #a.lines
+  ev({ t = "status", slot = 2, side = "b", text = "is cured!" })
+  local clearRows = 0
+  for _, row in ipairs(a.lines) do
+    if type(row) == "table" and row.vfxrow then clearRows = clearRows + 1 end
+  end
+  eq(clearRows, 0,
+     "a condition lifting is a sentence rather than a sight -- no row filed")
+  check(#a.lines >= cleared, "...and nothing else is disturbed")
+  check(drain() < 900, "the queue drains")
+
+  -- ------- the seed advances, so two casts are not the same emission
+
+  a.fx = nil
+  local seedBefore = a.vfxSeed
+  ev({ t = "anim", slot = 0, side = "a", text = "EMBER" })
+  check(drain() < 900, "the second cast drains")
+  check(a.vfxSeed ~= seedBefore, "each emission takes its own seed")
+
+  -- ------- and none of it happens off the arena
+  --
+  -- The classic 160x144 path has no renderer for a particle, so an emission
+  -- there would cost the queue a row to draw nothing.
+  local classic = harness("host")
+  classic.game.input = fakeInput()
+  classic.open("10")
+  local c = classic.sessions.fight
+  c.usesBattlefield = function() return false end
+  classic.sessions:onBattleReady({
+    battle = "10", mode = "1v1", sides = { a = { "me" }, b = { "peer1" } },
+  })
+  local m = 0
+  local function cev(fields)
+    m = m + 1
+    fields.battle = "10"; fields.seq = m
+    classic.sessions:onBattleEvent(fields)
+  end
+  cev({ t = "item", slot = 0, side = "a", text = "POTION" })
+  local offArena = 0
+  for _, row in ipairs(c.lines) do
+    if type(row) == "table" and row.vfxrow then offArena = offArena + 1 end
+  end
+  eq(offArena, 0, "the classic path files no particle rows")
+  eq(c:emitVfx({ style = "ember", palette = "FIRE", delivery = "burst" }, 2),
+     nil, "...and emits none if asked directly")
 end
 
 -- The classic 160x144 path queues no spawn row, so it must not park anything:
