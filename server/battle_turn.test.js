@@ -806,6 +806,43 @@ scenario('coop_npc_aim', (events) => {
   return battle;
 });
 
+
+// 25. a whole trapping chain: Wrap lands, the counter is Gen1's *total* attack
+//     count, so the turn it lands on deals the move's damage and no residual on
+//     top of it -- every later turn is one attack, narrated as a forced skip on
+//     both seats. A turn forced on every seat opens without a deadline and
+//     waits for a `tick`, so this is also the one scenario where the batch
+//     counts prove the two runtimes advance that chain in the same steps.
+scenario('trap_chain', (events) => {
+  const wrap = () => ({ id: 'wrap', pp: 60, power: 5, accuracy: 255, type: 0,
+    effect: 42, chance: 0 });
+  const battle = build({
+    id: 'xt', mode: '1v1', seed: 9999, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 120, moves: [wrap()] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, def: 200, spd: 1,
+          moves: [mv('tap', 40, 255, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  // The forced turns resolve one tick at a time; ten is past the longest roll.
+  for (let step = 1; step <= 10; step += 1) {
+    battle.tick(step);
+    drainInto(battle, events);
+  }
+  // A referee-filled answer cannot be taken back -- the refusal is silent, so
+  // what this pins is that neither runtime emits an `unchose` for it.
+  battle.submitChoice('p2', { action: 'cancel' });
+  battle.submitChoice('p2', { action: 'switch', slot: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------

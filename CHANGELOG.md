@@ -6,6 +6,8 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.20] - 2026-08-20
+
 ### Added
 
 - **How many they have left, for every trainer on the field.** Each player
@@ -82,6 +84,71 @@ here must match `manifest.version`.
     landed, so this takes 24 — a number that means both vocabularies, per the
     rule the `PROTOCOL` block in `src/Config.lua` has followed since 5 and 6
     were each claimed twice.
+
+## [1.0.19] - 2026-08-20
+
+### Fixed
+
+- **A battle invite refused itself, and neither player could see why.** The
+  roster row an asker reads said "busy" only when the *hub* had that player
+  in a trade or a 1v1 — while the asked client refused invites for a wild
+  encounter, a trainer, a co-op handoff, an invite already on its screen, or
+  an ask of its own. So a player fighting a PIDGEY was published to everyone
+  as free, asked, and refused in the same second, with nothing on either
+  screen to explain it: the asked player saw no box at all, and the asker
+  read "X refused to battle.", the same sentence a person pressing NO earns.
+  Presence now carries everything that would bounce an invite (both hubs read
+  it, having discarded the field until now), the refusal carries *why* —
+  "BOB is in a battle." — and the refusing side gets a line in the corner
+  saying somebody asked.
+
+- **Two invites that crossed cancelled each other out.** Both players
+  pressing BATTLE inside one round trip — what two friends who have just
+  agreed to fight do — left each one busy with its own ask and refusing the
+  other's, so both read "they refused" about somebody who had in fact just
+  asked them. The hub, the only party that sees both asks, now starts the
+  battle they both asked for.
+
+- **Asking somebody who had just left locked you out of PVP for the rest of
+  the session.** The hub dropped an undeliverable request in silence, and
+  nothing on the client cleared the ask it was still holding — which marks it
+  busy, so from then on every invite received was auto-refused and every one
+  sent was turned away with "You're already busy with someone." The hub now
+  answers with a refusal naming the reason, and an ask nobody ever answers is
+  taken back after two minutes rather than held forever. The same silent lock
+  was reachable through an invite box that left the screen without being
+  answered (a blackout, a save load); that is now answered as the no it is.
+## [1.0.18] - 2026-08-20
+
+### Fixed
+
+- **`WRAP` and friends hit one time too many.** `WRAP`, `BIND`, `CLAMP` and
+  `FIRE_SPIN` roll a 2–5 counter, and in Gen 1 that number is the *total* count
+  of attacks the move gets — the one that lands it included. The referee was
+  applying the move's damage and then ticking a residual for the full counter at
+  the end of that same turn, so a 2-turn `WRAP` struck three times and a 5-turn
+  one struck six. The trap is now marked on the turn it lands and spends that
+  attack off the counter without paying damage twice, which puts a chain back at
+  2–5 hits costing the victim 1–4 turns. Fixed in all four sim twins
+  (`src/BattleSim`, `src/BattleSim2`, `server/lib/battle`, `server/lib/battle2`)
+  and pinned by a new `trap_chain` scenario in both cross-runtime turn-parity
+  pairs, so a runtime that ever counts it the other way fails rather than drifts.
+
+- **A `cancel` could unlock a trapped monster — and hang the fight.** The
+  referee fills the answer for a seat that has no choice to make (trap lock-in,
+  `HYPER_BEAM` recharge, `BIDE`, a thrash, a charge release), and
+  `submitChoice`'s `cancel` branch cleared *any* filed answer, forced ones
+  included. A client could cancel out of a `WRAP` and switch away. Worse, a trap
+  forces **both** seats, and a turn where every seat is forced deliberately opens
+  with no deadline — so clearing one of those answers left the battle waiting on
+  a choice with nothing left to time it out, permanently. Forced answers are now
+  marked and refuse `cancel`; an ordinary answer is still cancellable as before.
+  The stock client never sent one, so this was only reachable from a modified
+  peer, but the hub forwards `cancel` from anybody.
+
+## [1.0.17] - 2026-08-19
+
+### Added
 
 - **This mod's battle system, with nobody else in the room.** A new
   `SOLO BATTLES` row in the mod manager (`F10` → `MMO`), **default OFF**,
@@ -165,6 +232,31 @@ here must match `manifest.version`.
   end-to-end host driver now mounts through `save.onBike` — what the bag's
   BICYCLE row writes — and asserts on the sheet the frame actually posed
   from (`tests/drivers/mmo_util.lua`, `M.shotBike`).
+
+### Changed
+
+- **The MOVES list opens on the move you last used, and every row states its
+  own type.** Two things the battle menu was making the player pay for.
+
+  The list used to open on row one every single turn, so a Gen 1 fight — which
+  is mostly one attack repeated — charged a walk back down the list for a
+  decision already made. It now opens on the move this monster was last sent
+  into a turn with (`rememberedMove`, on both the mediated screen and the
+  co-op one). Nothing is pre-committed: it is only where the cursor starts, B
+  still backs out to the command grid, and the choice on the wire is byte-for
+  -byte the one it always was. The memory is per monster rather than per
+  battle — row 2 of the mon you switched to is a different move — and it is
+  clamped against the sheet that monster has *now*, so a Transform or a Mimic
+  cannot leave the cursor on a row nothing draws.
+
+  Type used to ride the panel title (`MOVES   TYPE/ELECTRIC`), which meant it
+  only ever described whichever row the cursor was on: comparing four moves
+  took four presses. It is now a column on each row, just left of PP, so the
+  whole sheet reads at once — and the title is back to plain `MOVES` rather
+  than restating the cursor. `Battlefield.drawListPanel` grew an optional
+  per-row `tag` for it, measured as a column across the visible rows so both
+  it and PP line up down the panel; a list with no tag on any row is laid out
+  exactly where it always was.
 
 ### Fixed
 

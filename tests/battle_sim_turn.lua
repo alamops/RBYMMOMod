@@ -1382,14 +1382,28 @@ do
 
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
-  local events = drain(battle)
+  local landing = drain(battle)
 
-  local trapMsg = false
-  for _, event in ipairs(events) do
-    if event.t == "msg" and event.text:find("trap", 1, true) then trapMsg = true end
+  -- Gen1's 2..5 is the *total* attack count, and the hit that applied the trap
+  -- was the first of them -- so the turn it lands on deals the move's damage
+  -- and nothing else.  A residual here would be that hit counted twice.
+  local landingTrapMsg = false
+  for _, event in ipairs(landing) do
+    if event.t == "msg" and event.text:find("trap", 1, true) then landingTrapMsg = true end
   end
-  ok(trapMsg, "trapped mon takes residual trap damage")
-  ok(fighterIn(battle:snapshot(), "p2").hp < 200,
+  ok(not landingTrapMsg, "the turn the trap lands on deals no residual on top of the hit")
+  local afterHit = fighterIn(battle:snapshot(), "p2").hp
+  ok(afterHit < 200, "the trapping move itself damages the victim")
+
+  -- The turn after is forced on both seats, so it waits for a tick.
+  battle:tick(battle.now + 1)
+  local residual = drain(battle)
+  local residualMsg = false
+  for _, event in ipairs(residual) do
+    if event.t == "msg" and event.text:find("trap", 1, true) then residualMsg = true end
+  end
+  ok(residualMsg, "trapped mon takes residual trap damage on the turns that follow")
+  ok(fighterIn(battle:snapshot(), "p2").hp < afterHit,
      "trap residual reduces trapped mon HP")
 end
 
@@ -1408,6 +1422,106 @@ do
      "trapping locks the attacker into a skip")
   eq(battle.byId.p2.choice and battle.byId.p2.choice.action, "skip",
      "trapped locks the victim into a skip")
+end
+
+-- A trapping move is worth `trapTurns` attacks in total, not one more than
+-- that: the counter covers the hit that applied it plus the residuals.  Both
+-- ends of the 2..5 roll are checked by playing many seeds rather than by
+-- reaching into the RNG, and the victim loses one turn per attack after the
+-- first.
+do
+  local attacks, lost = {}, {}
+  for seed = 1, 120 do
+    local battle = battleOf({
+      seed = seed,
+      aMons = { mon({ species = "Alpha", maxHp = 999, spd = 120,
+                      moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) },
+      bMons = { mon({ species = "Beta", maxHp = 999, def = 200, spd = 1,
+                      moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    })
+    drain(battle)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+
+    local hits, skipped = 0, 0
+    for _ = 1, 30 do
+      for _ = 1, 8 do
+        if battle:outcome() then break end
+        if not battle:tick(battle.now + 1) then break end
+      end
+      for _, event in ipairs(drain(battle)) do
+        if event.t == "msg" then
+          if event.text == "Alpha used wrap" then hits = hits + 1 end
+          if event.text:find("hurt by the trap", 1, true) then hits = hits + 1 end
+          if event.text:find("can't move", 1, true) then skipped = skipped + 1 end
+        end
+      end
+      -- The chain is over the moment the victim is asked for a choice again.
+      -- (`skip` is the referee's word, not a submittable action, so the probe
+      -- has to be a real one.)
+      if battle:submitChoice("p2", { action = "fight", move = 0 }) then break end
+    end
+    attacks[hits] = (attacks[hits] or 0) + 1
+    lost[skipped] = (lost[skipped] or 0) + 1
+  end
+
+  -- 1 attack / 0 lost turns is the run where the move simply missed and no
+  -- trap was ever applied; everything else has to sit inside Gen1's range.
+  local strayAttacks, strayLost = nil, nil
+  for count in pairs(attacks) do
+    if count ~= 1 and (count < 2 or count > 5) then strayAttacks = count end
+  end
+  for count in pairs(lost) do
+    if count ~= 0 and (count < 1 or count > 4) then strayLost = count end
+  end
+  eq(strayAttacks, nil, "a trap is worth 2..5 attacks, never 6")
+  eq(strayLost, nil, "a trap costs the victim 1..4 turns")
+  ok(attacks[2] and attacks[5], "both ends of the 2..5 roll are reached")
+end
+
+-- A referee-filled answer is not the player's to take back.  A trap forces
+-- *both* seats, so `_openTurn` leaves that turn without a deadline -- a cancel
+-- that cleared one of those choices would hang the fight outright.
+do
+  local battle = battleOf({
+    seed = 9999,
+    aMons = { mon({ species = "Alpha", maxHp = 999, spd = 120,
+                    moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) },
+    bMons = { mon({ species = "Beta", maxHp = 999, def = 200, spd = 1,
+                    moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+
+  eq(battle.deadline, nil, "a turn forced on every seat opens without a deadline")
+  ok(battle.byId.p2.forced, "the trapped seat is marked as answered by the referee")
+  ok(battle:submitChoice("p2", { action = "cancel" }) == false,
+     "cancel cannot clear a forced trap answer")
+  ok(battle:submitChoice("p2", { action = "switch", slot = 0 }) == false,
+     "and the victim still cannot switch out of the trap")
+  ok(battle.byId.p2.choice ~= nil, "the forced answer survived the cancel")
+
+  -- The refusal is what keeps the clock alive: the chain still runs to its end.
+  local ticked = false
+  for _ = 1, 40 do
+    if battle:outcome() then break end
+    if battle:submitChoice("p2", { action = "fight", move = 0 }) then ticked = true; break end
+    if not battle:tick(battle.now + 1) then break end
+    drain(battle)
+  end
+  ok(ticked, "the trap chain still ends after a refused cancel")
+end
+
+-- An ordinary answer stays cancellable -- the guard is about forced fills only.
+do
+  local battle = battleOf({})
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "an ordinary answer files")
+  ok(battle:submitChoice("p1", { action = "cancel" }), "and can still be taken back")
+  ok(battle.byId.p1.choice == nil, "cancel cleared it")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "and the seat can answer again")
 end
 
 -- ------------------------------------------------------------------

@@ -334,6 +334,43 @@ scenario("retarget", function(events)
   return battle
 end)
 
+-- 5. a whole trapping chain.  Gen1's 2..5 counter is a *total* attack count, so
+--    the turn Wrap lands on deals the move's damage and no residual on top of
+--    it; every later turn is one attack, forced on both seats and therefore
+--    ticked rather than submitted.  The tail also pins that a referee-filled
+--    answer cannot be cancelled away -- silently, so what shows up on the wire
+--    is the absence of an `unchose`.
+scenario("trap_chain", function(events)
+  local wrap = function()
+    return { id = "wrap", pp = 60, power = 5, accuracy = 255, type = 0,
+             effect = 42, chance = 0 }
+  end
+  local battle = build({
+    id = "trp", mode = "1v1", seed = 9999,
+    choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mn({ species = "Alpha", maxHp = 400, spe = 120,
+                            moves = { wrap() } }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mn({ species = "Beta", maxHp = 400, def = 200, spe = 1,
+                            moves = { mv("tap", 40, 255, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  for step = 1, 10 do
+    battle:tick(step)
+    drainInto(battle, events)
+  end
+  battle:submitChoice("p2", { action = "cancel" })
+  battle:submitChoice("p2", { action = "switch", slot = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
 -- ------------------------------------------------------------------
 
 local out = {}

@@ -315,6 +315,32 @@ M.BATTLE_RECONNECT = "mmo.battle_reconnect"
 
 M.FACINGS = { up = true, down = true, left = true, right = true }
 M.KINDS = { trade = true, battle = true }
+
+-- Why an invite came back refused, when the refusal was not a human pressing
+-- NO.  A closed set rather than free text, for the reason COOP_REASONS is
+-- one: every value picks a different sentence on the asker's screen, and an
+-- unknown one has nothing to draw.
+--
+-- **Absent is the important value.** No reason means a person read the box
+-- and said no, which is the only refusal that was ever worth the flat "X
+-- refused to battle." Every other one is a fact about the moment -- they are
+-- mid-fight, mid-trade, already holding somebody else's ask, or no longer
+-- here -- and telling the asker which is the difference between a sentence
+-- they can act on and one that reads as a snub.
+--
+--   fighting  -- a battle is on their screen (their own wild/trainer fight
+--                counts: it is why this set exists)
+--   busy      -- a trade or battle session, or an ask of their own out
+--   asked     -- somebody else's invite is already on their screen
+--   gone      -- the hub could not deliver it: they have left
+M.DECLINE_REASONS = {
+  fighting = true, busy = true, asked = true, gone = true,
+}
+
+function M.declineReason(value)
+  if M.DECLINE_REASONS[value] then return value end
+  return nil
+end
 -- What a client may claim about a battle it just finished.  "draw" is a real
 -- answer and not a refusal to answer: a dropped link, a mutual run and a
 -- desync all end that way, and all three score nothing.

@@ -2840,6 +2840,9 @@ local LIST_ROW_MAX = 15
 local LIST_TITLE_H = 12
 local LIST_PAD_X = 8
 local LIST_PAD_Y = 4
+-- The gutter between a row's `tag` column and its `right` column. Wide enough
+-- that ELECTRIC and 25/25 read as two figures rather than one run-on string.
+local LIST_TAG_GAP = 10
 
 -- The rect a band widget draws into, clamped to MENU_BAND so an opts override
 -- can never paint over the field.
@@ -2967,9 +2970,12 @@ function M.drawCommandGrid(items, cursor, opts)
   return ok
 end
 
--- Moves / items / party: a scrolling list of { label, right?, dim? }. `right`
--- is right-aligned in the secondary colour (PP "12/15", a type name);
--- opts.title prints a small header, opts.visible overrides the row count.
+-- Moves / items / party: a scrolling list of { label, tag?, right?, dim? }.
+-- `right` is right-aligned against the panel edge in the secondary colour (PP
+-- "12/15", HP, a count); `tag` is a second right-aligned column just left of
+-- it, drawn a size smaller (a move's type). Both are laid out as columns
+-- across the visible rows, so they line up down the list. opts.title prints a
+-- small header, opts.visible overrides the row count.
 function M.drawListPanel(rows, cursor, opts)
   local gfx = g()
   if not gfx then return false end
@@ -3004,6 +3010,32 @@ function M.drawListPanel(rows, cursor, opts)
     end
     withFont(gfx, M.FONT_SECONDARY, function(font)
       local th = heightWith(font)
+      -- Two right-hand columns, both measured before anything paints.
+      -- `right` (PP, HP, a count) keeps the panel edge it always had; `tag` --
+      -- a move's type -- takes a column of its own to the left of it. Measured
+      -- once across the visible rows rather than per row, so each reads as a
+      -- column down the panel instead of stepping in and out with whatever
+      -- that row's own text happens to measure.
+      local micro = uiFont(M.FONT_MICRO)
+      local rightCol, tagCol = 0, 0
+      for slot = 0, visible - 1 do
+        local row = rows[first + slot]
+        if type(row) == "table" then
+          if row.right ~= nil and tostring(row.right) ~= "" then
+            rightCol = math.max(rightCol, widthWith(font, tostring(row.right)))
+          end
+          if row.tag ~= nil and tostring(row.tag) ~= "" then
+            tagCol = math.max(tagCol, widthWith(micro, tostring(row.tag)))
+          end
+        end
+      end
+      local rightEdge = x + w - pad
+      local tagRight = rightEdge - rightCol - (rightCol > 0 and LIST_TAG_GAP or 0)
+      -- What a label may not paint into. A list with no tag on any row
+      -- reserves exactly what the right column always reserved, so every
+      -- untagged panel is laid out where it always was.
+      local reserve = (rightCol > 0) and (rightCol + 8) or 0
+      if tagCol > 0 then reserve = reserve + tagCol + LIST_TAG_GAP end
       for slot = 0, visible - 1 do
         local row = rows[first + slot]
         if row then
@@ -3024,17 +3056,33 @@ function M.drawListPanel(rows, cursor, opts)
             gfx.rectangle("fill", x + pad - 2, ry, 2, rowH - 2)
           end
           local ty = ry + math.floor((rowH - th) / 2)
-          local rightW = 0
           if right ~= nil and tostring(right) ~= "" then
             right = tostring(right)
-            rightW = widthWith(font, right) + 8
             setColor(gfx, dim and TEXT_DIM or TEXT_MUTED)
-            gfx.print(right, x + w - pad - rightW + 8, ty)
+            gfx.print(right, rightEdge - widthWith(font, right), ty)
           end
           setColor(gfx, dim and TEXT_DIM or (hot and TEXT_ON or TEXT_MUTED))
           gfx.print(fitLine(font, tostring(label or ""),
-            w - pad * 2 - rightW - 6), x + pad + 4, ty)
+            w - pad * 2 - reserve - 6), x + pad + 4, ty)
         end
+      end
+      -- The tag column, in the micro face the title already uses: smaller than
+      -- the row so a move's type reads as a note about the row rather than a
+      -- second name for it. One pass, so the face changes once per panel.
+      if tagCol > 0 then
+        withFont(gfx, M.FONT_MICRO, function(mfont)
+          local mh = heightWith(mfont)
+          for slot = 0, visible - 1 do
+            local row = rows[first + slot]
+            local tag = (type(row) == "table") and row.tag or nil
+            if tag ~= nil and tostring(tag) ~= "" then
+              tag = tostring(tag)
+              setColor(gfx, row.dim and TEXT_DIM or TEXT_MUTED)
+              gfx.print(tag, tagRight - widthWith(mfont, tag),
+                top + slot * rowH + math.floor((rowH - mh) / 2))
+            end
+          end
+        end)
       end
       -- Scroll thumb, only when there is something off-panel.
       if count > visible then

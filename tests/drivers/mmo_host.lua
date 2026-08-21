@@ -495,6 +495,23 @@ return function(game)
       H.signal("host_in_fight")
 
       H.await(game, "guest_asked_battle_in_fight")
+      -- The corner line, caught while it is still up.
+      --
+      -- An invite refused on this player's behalf used to leave *nothing* on
+      -- this screen at any point: no box (correctly -- a yes/no over a fight
+      -- is what the refusal exists to avoid) and no other trace, so the
+      -- player never learned somebody had asked. A toast is the one surface
+      -- that can speak over a battle without interrupting it, and it lives
+      -- about five seconds -- hence a poll rather than a look after the fact.
+      local asked = H.waitSeconds(game, function()
+        for _, line in ipairs((exports.toasts() or {}).lines or {}) do
+          if tostring(line.text or ""):find("GUESTY", 1, true) then return true end
+        end
+        return false
+      end, 20, "the corner to say somebody asked for a battle")
+      check(asked, "the player is told an invite arrived, though it was "
+            .. "refused for them -- a refusal nobody sees is one nobody can "
+            .. "report")
       -- Room for the request to land if auto-refuse ever fails to clear it.
       U.wait(45)
       check(not (exports.hasIncomingRequest and exports.hasIncomingRequest()),

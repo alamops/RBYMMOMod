@@ -144,14 +144,19 @@ M.MOD_ID = "rby_mmo"
 -- is the only sentence either player can act on.
 -- This number lives here and in server/lib/relay.js -- bump them together.
 --
--- 23 was claimed on a parallel branch that this one had never met -- the
--- PVP-invite fix, which reads `busy` off `mmo.move` into the roster flag on
--- both hubs and adds an optional `reason` to `mmo.decline` / `mmo.respond`.
--- The rule the 5-and-6 paragraphs above set is the one that applies: two
--- branches that both say "23" and mean different vocabularies are precisely
--- the silence this number exists to turn into a sentence, so the second one
--- to land moves rather than sharing.  24 is therefore the first number that
--- means both, and a client that says 24 speaks 23's vocabulary as well.
+-- 23 is the invite that stopped refusing itself, and it moves two fields.
+-- (a) `busy` on `mmo.move` is now *read* by the hub and OR'd into the busy
+-- every roster row is drawn from -- it was sent by every client and thrown
+-- away by both hubs, so a player in an ordinary wild or trainer fight was
+-- published as free to ask and their client refused the invite a second
+-- later. (b) `mmo.decline` carries an optional `reason` from the closed
+-- Wire.DECLINE_REASONS set, and `mmo.respond` carries it on the way in, so
+-- an auto-refusal reads as "BOB is in a battle." instead of wearing the
+-- sentence a person pressing NO earns. A protocol-22 hub keeps discarding
+-- the flag and stripping the reason, which is exactly the bug: invites
+-- refused with nothing on either screen to say why, and a roster nobody
+-- could trust. Refusal naming both versions is the only sentence either
+-- player can act on.
 --
 -- 24 is the `team` battle event: a seat's party roster, as ball states -- how
 -- many monsters it brought, and which of them are healthy, statused or down.
@@ -160,13 +165,23 @@ M.MOD_ID = "rby_mmo"
 -- left.  Both clients upload a party to the referee and neither uploads one to
 -- the other, and `mmo.relay` is hard-cut for the length of a mediated fight, so
 -- the referee is the only party to the exchange that can answer it.  A
--- protocol-22 intermediator emits no such kind, and `Wire.battleEvent` drops an
+-- protocol-23 intermediator emits no such kind, and `Wire.battleEvent` drops an
 -- unknown one whole -- so the roster chip beside a peer's name would sit empty
 -- for the entire fight while the player's own filled in normally.  That is the
 -- worst shape this failure could take: not a blank screen but a *half*-drawn
 -- one, which reads as "they brought nothing" rather than as a hub that cannot
 -- do this.  Refusal naming both versions is the only sentence either player can
 -- act on.
+--
+-- **23 and 24 were claimed at the same moment**, by two branches that had never
+-- met: the invite fix above, and this one.  That is the third time this file
+-- has had to record it (see the two 5s, the two 6s, and 17/20), and the rule
+-- those set is the one that applied again -- two branches that both say "23"
+-- and mean different vocabularies are precisely the silence this number exists
+-- to turn into a sentence, so the second to land moved rather than sharing.
+-- 24 therefore means *both*: a client that says 24 speaks 23's vocabulary as
+-- well, which is why the roster chip landed on top of the invite fix rather
+-- than beside it.
 -- This number lives here and in server/lib/relay.js -- bump them together.
 M.PROTOCOL = 24
 

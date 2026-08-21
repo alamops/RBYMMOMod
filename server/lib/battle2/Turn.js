@@ -852,6 +852,7 @@ class Battle {
       if (mon.mustRecharge) {
         mon.mustRecharge = false;
         this._say(`${mon.species} must recharge`);
+        fighter.forced = true;
         fighter.choice = { action: 'skip' };
         this._emit('chose', {
           slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -862,6 +863,7 @@ class Battle {
       if (mon.bide) {
         if (mon.bide.turns > 0) {
           this._say(`${mon.species} is storing energy`);
+          fighter.forced = true;
           fighter.choice = { action: 'skip' };
           this._emit('chose', {
             slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -870,6 +872,7 @@ class Battle {
           const foe = this._autoTarget(fighter);
           if (foe) {
             this._say(`${mon.species} unleashed energy`);
+            fighter.forced = true;
             fighter.choice = {
               action: 'fight',
               move: mon.bide.moveIndex,
@@ -886,6 +889,7 @@ class Battle {
 
       if (mon.trapped && mon.trapped.turns > 0) {
         this._say(`${mon.species} can't move`);
+        fighter.forced = true;
         fighter.choice = { action: 'skip' };
         this._emit('chose', {
           slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -903,6 +907,7 @@ class Battle {
         this._emit('anim', {
           slot: fighter.slot, side: fighter.side, text: moveId,
         });
+        fighter.forced = true;
         fighter.choice = { action: 'skip' };
         this._emit('chose', {
           slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -912,6 +917,7 @@ class Battle {
 
       if (mon.charging) {
         const c = mon.charging;
+        fighter.forced = true;
         fighter.choice = {
           action: 'fight',
           move: c.moveIndex,
@@ -927,6 +933,7 @@ class Battle {
         const foe = this._autoTarget(fighter);
         if (foe) {
           this._say(`${mon.species} thrashing about`);
+          fighter.forced = true;
           fighter.choice = {
             action: 'fight',
             move: mon.thrashing.moveIndex,
@@ -943,6 +950,7 @@ class Battle {
         const foe = this._autoTarget(fighter);
         if (foe) {
           this._say(`${mon.species}'s RAGE is building`);
+          fighter.forced = true;
           fighter.choice = {
             action: 'fight',
             move: mon.rageMove,
@@ -1097,6 +1105,13 @@ class Battle {
       // only hand the seat a second way to hold the fight open.
       if (this.phase === 'replace') return false;
       if (fighter.choice === null) return false;
+      // A referee-filled answer is not the player's to take back.  Trap
+      // lock-in, recharge, Bide, thrash and a charge release all fill the seat
+      // at `_openTurn`; without this a client could cancel out of a Wrap and
+      // switch away, and on a turn where *every* seat is forced -- which is
+      // exactly what a trap looks like -- `_openTurn` left no deadline, so the
+      // cleared choice would hang the fight with nothing to time it out.
+      if (fighter.forced) return false;
       this._emit('unchose', {
         slot: fighter.slot, side: fighter.side, text: fighter.name,
       });
@@ -1478,7 +1493,10 @@ class Battle {
     this.phase = 'choice';
     this.resolveDeadline = null;
     this.forcedPending = false;
-    for (const fighter of this.fighters) fighter.choice = null;
+    for (const fighter of this.fighters) {
+      fighter.choice = null;
+      fighter.forced = null;
+    }
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
     // Before the window opens: a player deciding this turn is looking at the
     // rosters, and anything a status or a bench potion moved last turn has to
@@ -1541,7 +1559,10 @@ class Battle {
     this.phase = 'replace';
     this.resolveDeadline = null;
     this.forcedPending = false;
-    for (const fighter of this.fighters) fighter.choice = null;
+    for (const fighter of this.fighters) {
+      fighter.choice = null;
+      fighter.forced = null;
+    }
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
     // The other window a player answers from, and the same reason.
     this._syncTeams();
@@ -2563,10 +2584,15 @@ class Battle {
 
     if (Effects.isTrapping(effectId) && totalDealt > 0) {
       const turns = Effects.trapTurns(this.rng);
+      // `turns` is Gen1's *total* attack count (2..5), and the hit that just
+      // landed was the first of them -- so the trap is marked `fresh` and the
+      // residual at the end of this same turn ticks the counter without
+      // dealing damage a second time.  Without it a 2-turn Wrap hit 3 times.
       defender.trapped = {
         turns,
         damage: totalDealt,
         fromSlot: fighter.slot,
+        fresh: true,
       };
       mon.trapping = {
         turns,
@@ -2926,8 +2952,16 @@ class Battle {
       mon = activeMon(fighter);
       if (mon && mon.trapped && mon.trapped.turns > 0) {
         const trap = mon.trapped;
-        this._say(`${mon.species} is hurt by the trap`);
-        this._damage(fighter, mon, trap.damage, null);
+        // The turn the trap landed on already paid its damage through the move
+        // itself: spend that attack off the counter here and say nothing.
+        // Every later turn is a real residual.  A trap that arrived on a sheet
+        // rather than from a move carries no `fresh` mark and ticks at once.
+        if (trap.fresh) {
+          trap.fresh = null;
+        } else {
+          this._say(`${mon.species} is hurt by the trap`);
+          this._damage(fighter, mon, trap.damage, null);
+        }
         trap.turns -= 1;
         if (trap.turns <= 0) {
           mon.trapped = null;

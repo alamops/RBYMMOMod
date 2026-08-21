@@ -1476,7 +1476,99 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 14. who is standing on the foe edge of the arena
+-- 14. the move list: a type column, and a cursor that remembers
+-- ------------------------------------------------------------------
+--
+-- Two things the player asked the menu for, and both are *presentation only*:
+-- the wire, the choice and the sim are untouched by either.
+--
+--   * every row states its own type, so four moves can be compared at once
+--     rather than one at a time under the cursor;
+--   * the list opens on the move this monster last actually used, because a
+--     Gen 1 fight is mostly one attack repeated and walking back down to it
+--     every turn is a tax on a decision already made.
+do
+  local function client()
+    return setmetatable({
+      game = { data = DATA },
+      phase = "move",
+      active = 1,
+      cursor = 1,
+      moveMemory = {},
+      commandIndex = 1,
+      mine = {
+        { species = "CHARMANDER", moves = {
+            { id = "EMBER", pp = 25, maxPp = 25 },
+            { id = "GROWL", pp = 40, maxPp = 40 },
+            { id = "HYDRO", pp = 5, maxPp = 5 },
+        } },
+        { species = "SQUIRTLE", moves = { { id = "HYDRO", pp = 5, maxPp = 5 } } },
+      },
+    }, { __index = Mediated })
+  end
+
+  -- ------- the type column
+  local f = client()
+  local rows = f:bandMoveRows()
+  eq(#rows, 3, "one row per move")
+  eq(rows[1].tag, "FIRE", "the type is the row's own column...")
+  eq(rows[1].right, "25/25", "...and does not displace the PP beside it")
+  eq(rows[2].tag, "NORMAL", "a status move states its type too")
+  eq(rows[3].tag, "WATER", "...as does every other row, not just the hot one")
+
+  -- A referee-published sheet after Transform/Mimic can name a move this copy
+  -- has no record of. No record, no type: a blank column says nothing, and
+  -- inventing one would say something false.
+  f.mine[1].moves[3] = { id = "MYSTERY", pp = 5 }
+  rows = f:bandMoveRows()
+  eq(rows[3].tag, nil, "a move the dataset does not carry gets no type column")
+  eq(rows[3].label, "MYSTERY", "...and still shows under its id")
+
+  -- ------- the cursor
+  local g = client()
+  eq(g:rememberedMove(), 1,
+     "a monster that has not attacked yet opens on its first move")
+
+  local sent = {}
+  g.sendChoice = function(_, choice) sent[#sent + 1] = choice; return true end
+  check(g:pickMove(2), "the second move is sendable")
+  eq(sent[1].move, 1, "the wire is still 0-based, unchanged by any of this")
+  eq(g.moveMemory[1], 2, "and the move actually sent is what gets remembered")
+
+  local input = fakeInput()
+  g.phase = "choose"
+  g.commandIndex = 1
+  input.press("a")
+  g:updateCommand(input)
+  eq(g.phase, "move", "FIGHT opens the move list")
+  eq(g.cursor, 2, "...on the move this monster last used, not back on row one")
+
+  -- Per monster: the one that comes in after a switch opens on its own first
+  -- move, because row 2 of its sheet is a different move entirely.
+  g.active = 2
+  g.phase = "choose"
+  input.press("a")
+  g:updateCommand(input)
+  eq(g.cursor, 1, "a monster that has not attacked yet opens on row one, "
+     .. "whatever the one it replaced was using")
+
+  -- Sent is what counts. A refused send leaves the turn unspent, so moving
+  -- the cursor for it would be the menu reporting a decision never taken.
+  g.active = 1
+  g.sendChoice = function() return false end
+  check(not g:pickMove(3), "a refused send reports the refusal")
+  eq(g.moveMemory[1], 2, "...and leaves the remembered move where it was")
+
+  -- The sheet it has *now* is what the memory is clamped against: Transform
+  -- and Mimic rewrite one mid-fight, and a cursor past the end opens on a row
+  -- that is not drawn.
+  g.moveMemory[1] = 9
+  eq(g:rememberedMove(), 1,
+     "a remembered row past the end of the current sheet falls back to one")
+end
+
+-- ------------------------------------------------------------------
+-- 15. who is standing on the foe edge of the arena
 -- ------------------------------------------------------------------
 --
 -- `Battlefield.drawHuman` falls back to a dark placeholder rectangle for a
