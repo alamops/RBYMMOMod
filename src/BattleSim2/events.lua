@@ -86,6 +86,16 @@ M.KINDS = {
 -- are stamped by the turn machine rather than passed to `M.build`, because a
 -- caller that could choose its own sequence number could put a hole in the
 -- stream, and a hole is what a client reads as lost messages.
+--
+-- `maxHp` rides on `send`, and it is the field whose absence used to be read as
+-- a value.  An event states current HP; a client had no other handle on what a
+-- bar was out of, so it took the largest HP it had ever seen for that seat as
+-- the maximum -- correct for a monster that walks out whole, and wrong for
+-- every one that does not.  A party mon that ended the last fight on 42 of 200
+-- opened the next one drawing a *full* bar over the number 42.  The referee
+-- holds the real maximum from the moment it builds the battler, so it says it,
+-- and the guess stays behind only as the fallback for a stream that carries
+-- none.
 M.FIELDS = {
   battle       = "string",
   seq          = "number",
@@ -94,6 +104,7 @@ M.FIELDS = {
   amount       = "number",
   slot         = "number",
   hp           = "number",
+  maxHp        = "number",
   side         = "string",
   status       = "string",
   species      = "string",
@@ -131,10 +142,14 @@ M.SHAPES = {
                 amount = "shake count on SHAKE_ANIM (0-3)" },
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
-  drain     = { slot = true, side = true, amount = true, hp = true },
+  drain     = { slot = true, side = true, amount = true, hp = true,
+                maxHp = "set only when an HP UP moved the ceiling itself" },
   faint     = { slot = true, side = true, text = true,
                 amount = "1 when the seat still has a living bench (mustReplace)" },
-  send      = { slot = true, side = true, hp = true, text = "the species",
+  send      = { slot = true, side = true, hp = true,
+                maxHp = "what that HP is out of, so the bar is a fraction "
+                        .. "rather than a guess",
+                text = "the species",
                 speciesId = "registry id for the art, when the sheet named one",
                 level = "the monster's level, for the seat opposite's pill",
                 mon = "party index (0-5) of the mon the referee fielded" },

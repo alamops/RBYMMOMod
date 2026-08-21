@@ -158,14 +158,27 @@ M.MOD_ID = "rby_mmo"
 -- could trust. Refusal naming both versions is the only sentence either
 -- player can act on.
 --
--- 24 is the `team` battle event: a seat's party roster, as ball states -- how
+-- 24 is `maxHp`: what a bar is out of, stated by the referee on `send` -- and
+-- on the `drain` an HP UP produces, which is the one thing in a fight that
+-- moves the ceiling itself.  Every other reading of HP on this wire is a
+-- current number, so a client had no handle on the maximum at all and took the
+-- largest HP it had ever seen on a seat for it.  That is right for a monster
+-- that walks out whole and wrong for every one that does not: a party monster
+-- that ended the last fight on 42 of 200 opened the next one drawing a *full*
+-- bar, with both HUDs printing "42/42", and it stayed wrong for the rest of
+-- that fight because nothing later ever raises the guess.  A protocol-23
+-- intermediator states none and a client falls back to the guess, which is
+-- exactly the failure -- and it is on the player's *own* monster, which is the
+-- one bar they read every turn.
+--
+-- 25 is the `team` battle event: a seat's party roster, as ball states -- how
 -- many monsters it brought, and which of them are healthy, statused or down.
 -- Every other event on this wire is about the field, and that is the right
 -- scope for all of them but one question: how much does the other player have
 -- left.  Both clients upload a party to the referee and neither uploads one to
 -- the other, and `mmo.relay` is hard-cut for the length of a mediated fight, so
 -- the referee is the only party to the exchange that can answer it.  A
--- protocol-23 intermediator emits no such kind, and `Wire.battleEvent` drops an
+-- protocol-24 intermediator emits no such kind, and `Wire.battleEvent` drops an
 -- unknown one whole -- so the roster chip beside a peer's name would sit empty
 -- for the entire fight while the player's own filled in normally.  That is the
 -- worst shape this failure could take: not a blank screen but a *half*-drawn
@@ -173,17 +186,19 @@ M.MOD_ID = "rby_mmo"
 -- do this.  Refusal naming both versions is the only sentence either player can
 -- act on.
 --
--- **23 and 24 were claimed at the same moment**, by two branches that had never
--- met: the invite fix above, and this one.  That is the third time this file
--- has had to record it (see the two 5s, the two 6s, and 17/20), and the rule
--- those set is the one that applied again -- two branches that both say "23"
--- and mean different vocabularies are precisely the silence this number exists
--- to turn into a sentence, so the second to land moved rather than sharing.
--- 24 therefore means *both*: a client that says 24 speaks 23's vocabulary as
--- well, which is why the roster chip landed on top of the invite fix rather
--- than beside it.
+-- **This branch has now been bumped out of a number twice**, first off 23 by
+-- the invite fix and then off 24 by `maxHp`, which makes four occasions this
+-- file has recorded (the two 5s, the two 6s, 17/20, and these).  The rule has
+-- not moved and did not need to: two branches that both say N and mean
+-- different vocabularies are precisely the silence this number exists to turn
+-- into a sentence, so the second to land moves rather than sharing.  25
+-- therefore means *all* of it -- a client that says 25 speaks 23's and 24's
+-- vocabularies too -- which is why the roster chip merges main rather than the
+-- other way round.  The pattern is worth reading as a fact about the project
+-- rather than as bad luck: several branches are open against this wire at any
+-- time, and the number is cheap to move while a shared one is not.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 24
+M.PROTOCOL = 25
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

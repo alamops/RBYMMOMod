@@ -2055,11 +2055,13 @@ function M:onEvent(msg)
     -- (src/CoopBattle.lua:8062).
 
   elseif kind == "send" then
-    -- The first HP we are told about is a full bar: the sim sends this the
-    -- moment a monster comes out, so the number is that monster's maximum
-    -- unless it walked in already hurt.  It is the only handle on a foe's
-    -- maximum there is -- an event carries current HP and nothing else -- so
-    -- the largest value ever seen is what the bar is drawn against.
+    -- **The referee says what the bar is out of** (`maxHp`, PROTOCOL 24), and
+    -- that is the whole of what a seat's maximum is now taken from.  Before
+    -- it, an event carried current HP and nothing else, so the largest value
+    -- ever seen on the seat had to stand in for the maximum -- true only for a
+    -- monster that walks out whole, and the reason one that walked out hurt
+    -- drew a full bar over a number that was not its maximum.  `noteSlot`
+    -- keeps that reading as the fallback for a stream that states none.
     self:noteSlot(msg)
     -- Parked behind somebody still finishing their exit (`noteSlot`): the seat
     -- below is still *theirs*, so everything that describes what is drawn on it
@@ -2973,6 +2975,7 @@ function M:noteSlot(msg)
   -- monster's bar falling.)
   local parked = slot.pending
   if parked and not (msg.text and (msg.t == "send" or msg.t == "switch")) then
+    if msg.maxHp ~= nil then parked.maxHp = msg.maxHp end
     if msg.hp ~= nil then
       parked.hp = msg.hp
     elseif msg.amount ~= nil and msg.t == "damage" then
@@ -3000,6 +3003,11 @@ function M:noteSlot(msg)
         species = msg.text,
         speciesId = msg.speciesId,
         hp = msg.hp,
+        -- What that HP is out of, when the referee stated it (PROTOCOL 24).
+        -- Installed by `applySwap`, not written to the seat here: the bar
+        -- underneath still belongs to the monster finishing its exit, and its
+        -- own maximum is what its queued fall is being drawn against.
+        maxHp = msg.maxHp,
         status = msg.status,
         -- The referee's, when it stated one (it has said so since PROTOCOL 22);
         -- otherwise filled by `arriveOnSeat` at the swap, own seat only.
@@ -3019,6 +3027,17 @@ function M:noteSlot(msg)
     slot.koHold = nil
     fresh = true
   end
+  -- **The referee's own maximum, when it states one (PROTOCOL 24).**
+  -- Everything below it is the older reading of this wire, kept as the
+  -- fallback rather than deleted: an event used to carry current HP and
+  -- nothing else, so the largest HP a seat had ever shown was taken for its
+  -- maximum. That is right for a monster that walks out whole and wrong for
+  -- every one that does not -- a party mon that ended the last fight on 42 of
+  -- 200 opened the next one with a *full* bar over the number 42. A stated
+  -- maximum ends the guessing for that seat; `max` keeps it above whatever HP
+  -- arrives with it, so a stream that disagrees with itself still draws a
+  -- fraction rather than a bar past its own end.
+  if msg.maxHp ~= nil then slot.maxHp = max(1, msg.maxHp) end
   if msg.hp ~= nil then
     slot.hp = msg.hp
     if msg.hp > slot.maxHp then slot.maxHp = msg.hp end
@@ -4852,10 +4871,12 @@ function M:applySwap(row)
   slot.sprite = nil
   slot.icon = nil
   slot.koHold = nil
-  -- Same reading of a first HP as `noteSlot`'s: what the referee says a monster
-  -- is on the moment it walks out is the biggest bar this seat has ever been
-  -- told about, unless it walked in already hurt.
+  -- Same reading of an arrival's numbers as `noteSlot`'s, and for the same
+  -- reason: the maximum the referee stated for this monster (PROTOCOL 24) is
+  -- what its bar is out of, and the older guess -- the biggest HP the seat has
+  -- ever been told about -- is only what is left when it stated none.
   slot.hp = arrival.hp or 0
+  if arrival.maxHp ~= nil then slot.maxHp = max(1, arrival.maxHp) end
   if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
   -- A monster that just walked on has nothing to animate down from, so its bar
   -- starts where the referee says it is -- and the predecessor's descent, which
@@ -5263,6 +5284,7 @@ function M:snapDisplay()
       slot.icon = nil
       slot.koHold = nil
       slot.hp = arrival.hp or 0
+      if arrival.maxHp ~= nil then slot.maxHp = max(1, arrival.maxHp) end
       if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
       slot.status = arrival.status
       -- No `arriveOnSeat` here: `exit` calls this on stubs that carry neither a

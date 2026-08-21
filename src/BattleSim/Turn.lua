@@ -596,7 +596,8 @@ function M.create(opts)
     local mon = activeMon(fighter)
     if mon then
       self:_emit("send", { slot = fighter.slot, side = fighter.side,
-                           hp = mon.hp, text = mon.species,
+                           hp = mon.hp, maxHp = mon.maxHp,
+                           text = mon.species,
                            speciesId = mon.speciesId, level = mon.level,
                            mon = fighter.active - 1 })
     end
@@ -1735,7 +1736,8 @@ function Battle:_resolveSwitches()
                                text = mon.species, speciesId = mon.speciesId,
                                level = mon.level, mon = choice.slot - 1 })
         self:_emit("send", { slot = fighter.slot, side = fighter.side,
-                             hp = mon.hp, text = mon.species,
+                             hp = mon.hp, maxHp = mon.maxHp,
+                             text = mon.species,
                              speciesId = mon.speciesId, level = mon.level,
                              mon = choice.slot - 1 })
       end
@@ -1898,7 +1900,10 @@ function Battle:_resolveOneItem(fighter)
       if result.stat == "hp" and result.delta > 0 then
         self:_emit("drain", {
           slot = fighter.slot, side = fighter.side,
-          amount = result.delta, hp = mon.hp,
+          -- ...and what the bar is now out of: an HP UP moves the maximum
+          -- itself, so a client told only the new HP would draw the rise
+          -- against the old ceiling.
+          amount = result.delta, hp = mon.hp, maxHp = mon.maxHp,
         })
       elseif result.delta > 0 then
         self:_emit("stat", {

@@ -1747,4 +1747,95 @@ do
      "a team event whose roster was dropped at the boundary changes nothing")
 end
 
+-- ------------------------------------------------------------------
+-- 15. what the bar is out of: `maxHp` on a send (PROTOCOL 24)
+-- ------------------------------------------------------------------
+--
+-- Every other reading of HP on this wire is a *current* number, so a client
+-- had no handle on a seat's maximum at all and took the largest HP it had ever
+-- seen there for it. That is right for a monster sent out whole and wrong for
+-- every one that is not: a party mon that ended the last fight on 42 of 200
+-- opened the next one with a **full** bar over the number 42, and stayed that
+-- way for the whole fight, because nothing later ever raises the guess.
+--
+-- The referee has held the real maximum since it built the battler, so from
+-- PROTOCOL 24 it states it -- on the `send` a monster walks out on, and on the
+-- `drain` an HP UP produces, which is the one thing mid-fight that moves the
+-- ceiling itself. The guess stays behind as the fallback for a stream that
+-- states none, which is what the seat below with no `maxHp` still asserts.
+
+do
+  local Battlefield = need("Battlefield")
+  local hurt = harness("host")
+  hurt.game.input = fakeInput()
+  hurt.open()
+  local h = hurt.sessions.fight
+  hurt.sessions:onBattleReady({
+    battle = "7", mode = "1v1", sides = { a = { "me" }, b = { "peer1" } },
+  })
+  local n = 0
+  local function ev(fields)
+    n = n + 1
+    fields.battle = "7"; fields.seq = n
+    hurt.sessions:onBattleEvent(fields)
+  end
+  -- A send into an occupied seat is parked behind the queue it arrives with
+  -- (section 11), so every leg below plays its rows out before it reads the
+  -- seat -- otherwise it would be asserting against the previous occupant.
+  local function settle()
+    local guard = 0
+    while #h.lines > 0 and guard < 900 do
+      h:update(1 / 60); guard = guard + 1
+    end
+    return guard < 900
+  end
+
+  -- Our own monster, walking out on 42 of the 200 it has: the reported bug.
+  ev({ t = "send", slot = 0, text = "SQUIRTLE", hp = 42, maxHp = 200 })
+  eq(h.slots[0].hp, 42, "the send still sets the current HP")
+  eq(h.slots[0].maxHp, 200, "and the referee's maximum is what it is out of")
+  eq(h.slots[0].shownHp, 42, "the display clock starts where the referee is")
+  local plate = Battlefield.plateModel({
+    hp = h.slots[0].hp, shownHp = h.slots[0].shownHp,
+    maxHp = h.slots[0].maxHp, side = "ally",
+  })
+  eq(plate.frac, 42 / 200, "so the plate draws a fifth of a bar, not a full one")
+  eq(("%d/%d"):format(plate.shownHp, plate.maxHp), "42/200",
+     "...over the pair of numbers the ally plate prints")
+
+  -- With none stated, the older reading of this wire is still what happens.
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  check(settle(), "the intro queue drains in bounded frames")
+  eq(h.slots[2].maxHp, 24,
+     "a stream that states no maximum falls back to the largest HP seen")
+
+  -- A maximum under the HP arriving with it is a stream disagreeing with
+  -- itself; the bar still has to be a fraction, never past its own end.
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 30, maxHp = 10 })
+  check(settle(), "the swap queue drains in bounded frames")
+  eq(h.slots[2].maxHp, 30, "an under-stated maximum is lifted to the HP")
+
+  -- An HP UP moves the ceiling, and says so on the drain that announces it.
+  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 100, maxHp = 200 })
+  check(settle(), "...and so does the one behind it")
+  ev({ t = "drain", slot = 2, amount = 2, hp = 102, maxHp = 202 })
+  eq(h.slots[2].hp, 102, "the rise lands")
+  eq(h.slots[2].maxHp, 202, "...and the ceiling it moved lands with it")
+
+  -- And through the arrival window: a send into an occupied seat is parked,
+  -- so its maximum has to be parked with it and installed at the swap -- the
+  -- bar underneath is still the departing monster's, drawn against theirs.
+  local before = h.slots[2].maxHp
+  ev({ t = "damage", slot = 2, hp = 0, amount = 102 })
+  ev({ t = "faint", slot = 2, text = "PIDGEY" })
+  ev({ t = "send", slot = 2, text = "RATTATA", hp = 9, maxHp = 60 })
+  eq(h.slots[2].maxHp, before,
+     "the seat keeps the falling monster's ceiling while the arrival is parked")
+  eq(h.slots[2].pending and h.slots[2].pending.maxHp, 60,
+     "...and the newcomer's rides on the park")
+  check(settle(), "the batched queue drains in bounded frames")
+  eq(h.slots[2].species, "RATTATA", "the seat changes hands at the swap")
+  eq(h.slots[2].maxHp, 60, "...and takes the ceiling that was parked with it")
+end
+
 T.finish("mediated_battle_client")
