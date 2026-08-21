@@ -24,7 +24,9 @@ const ROOT = path.join(__dirname, '..');
 const {
   PROTOCOL, DEFAULT_SPRITE, DEFAULT_SPRITE_GEN2, defaultSpriteFor, SPRITE_GATE_MS,
 } = require('./lib/relay.js');
-const { PLAYER_ID_HEX, BATTLE_EVENT_TYPES } = require('./lib/sanitize.js');
+const {
+  PLAYER_ID_HEX, BATTLE_EVENT_TYPES, DECLINE_REASONS,
+} = require('./lib/sanitize.js');
 
 function read(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -146,6 +148,25 @@ test('Wire.BATTLE_EVENTS matches sanitize.js BATTLE_EVENT_TYPES', () => {
     jsKinds, luaKinds,
     'Wire.BATTLE_EVENTS and sanitize.js BATTLE_EVENT_TYPES must name the same '
     + 'closed vocabulary -- add a new battle event kind to both in the same change',
+  );
+});
+
+test('Wire.DECLINE_REASONS matches sanitize.js DECLINE_REASONS', () => {
+  // Why an invite came back refused. Each value picks a different sentence on
+  // the asker's screen, so a one-sided add is a refusal that reads correctly
+  // on one hosting path and falls back to "they refused" on the other -- for
+  // the same event, with nothing to tell the two apart from inside the game.
+  const wire = read('src/Wire.lua');
+  const tableMatch = wire.match(/M\.DECLINE_REASONS\s*=\s*\{([\s\S]*?)\}/);
+  assert.ok(tableMatch, 'Wire.lua must assign M.DECLINE_REASONS as a table');
+  const luaReasons = [...tableMatch[1].matchAll(/(\w+)\s*=\s*true/g)]
+    .map((m) => m[1]).sort();
+  assert.ok(luaReasons.length > 0, 'Wire.DECLINE_REASONS parsed at least one reason');
+
+  assert.deepStrictEqual(
+    Object.keys(DECLINE_REASONS).sort(), luaReasons,
+    'Wire.DECLINE_REASONS and sanitize.js DECLINE_REASONS must name the same '
+    + 'closed vocabulary -- add a new refusal reason to both in the same change',
   );
 });
 

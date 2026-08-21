@@ -39,7 +39,8 @@ const {
   cleanText, cleanId, cleanSpriteId, cleanMapId, cleanInt, cleanHex,
   cleanProfile, cleanOutcome, cleanPoints, cleanPlayerId, payloadOk, FACINGS,
   KINDS, SCOPES, NAME_MAX, MESSAGE_MAX, MOTD_MAX, LOCAL_RADIUS,
-  cleanBattleKey, cleanCoopReason, cleanCoopOfferMode, cleanLabel, cleanPartyEvent, PARTY_MAX,
+  cleanBattleKey, cleanCoopReason, cleanDeclineReason, cleanCoopOfferMode, cleanLabel,
+  cleanPartyEvent, PARTY_MAX,
   cleanBattleRuleset, cleanBattleParty, cleanBattleChoice, cleanBattleReconnect,
   BATTLE_MOVE_MAX,
 } = require('./sanitize');
@@ -133,7 +134,17 @@ function defaultSpriteFor(generation) {
 // protocol-21 hub strips the field from the upload and states none on the
 // events, which is exactly that failure -- and it is one no player can
 // diagnose from inside the fight, since every other part of it works.
-const PROTOCOL = 22;
+// 23: the invite that stopped refusing itself, and it moves two fields.
+// (a) `busy` on mmo.move is now *read* here and OR'd into the busy every
+// roster row is drawn from -- every client already sent it and both hubs
+// threw it away, so a player in an ordinary wild or trainer fight was
+// published as free to ask and their client refused the invite a second
+// later. (b) mmo.decline carries an optional `reason` from the closed
+// DECLINE_REASONS set, and mmo.respond carries it on the way in, so an
+// auto-refusal reads as "BOB is in a battle." rather than wearing the
+// sentence a person pressing NO earns. A protocol-22 hub discards the flag
+// and strips the reason, which is precisely the bug.
+const PROTOCOL = 23;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
@@ -250,6 +261,28 @@ function parseLine(line) {
   return msg;
 }
 
+/*
+ * Can this player be asked for a trade or a battle right now?
+ *
+ * Two authorities, OR'd, because neither can see the whole answer. The hub
+ * owns the sessions it brokered and is the only party that can be trusted
+ * about them; everything else that would bounce an invite -- a wild fight, a
+ * trainer, a co-op handoff, an invite already on their screen -- happens
+ * entirely inside one client and reaches here only because that client says
+ * so. Publishing the hub's half alone is what let a player in an ordinary
+ * battle be listed as free, asked, and refused in the same second.
+ *
+ * The client half is advisory and cannot be otherwise: a client that lies
+ * says only "do not ask me", which it can already achieve by refusing. It is
+ * deliberately not consulted where a session is *started* (see the
+ * mmo.request handler) -- that gate stays on the hub's own view, so a stale
+ * flag costs at most one honest refusal rather than a battle nobody could
+ * arrange. Twin of src/Hub.lua's busyNow.
+ */
+function busyNow(client) {
+  return Boolean(client.sessionId) || client.busy === true;
+}
+
 function presenceOf(client) {
   return {
     id: client.id,
@@ -259,7 +292,7 @@ function presenceOf(client) {
     x: client.x,
     y: client.y,
     facing: client.facing,
-    busy: Boolean(client.sessionId),
+    busy: busyNow(client),
     // Whether they are in *a* party, never which one. It is the only thing
     // anyone outside that party needs -- it decides whether their menus
     // offer to invite this player -- and a party id on every presence would
@@ -267,10 +300,10 @@ function presenceOf(client) {
     party: Boolean(client.partyId),
     // One question only: was that step a fast one. Not "why" -- a sprint on
     // foot and a bike both cover a tile in 8 frames, so both set this and
-    // neither is told apart, which is all a watcher can draw anyway. Unlike
-    // busy, this cannot be derived here: the hub never sees the B button or
-    // the bike, so the client is the only authority on it and this is the
-    // value it last reported.
+    // neither is told apart, which is all a watcher can draw anyway. Like
+    // the client's half of busy, this cannot be derived here: the hub never
+    // sees the B button or the bike, so the client is the only authority on
+    // it and this is the value it last reported.
     fast: Boolean(client.fast),
     // The trainer card the player shows others. Carried here because
     // src/Hub.lua does (Hub.lua:74): a player on a dedicated hub would
@@ -427,6 +460,11 @@ handlers['mmo.move'] = (relay, client, msg) => {
   // Lua's `and`. Comparing against true is the one test both languages
   // answer identically for every JSON value.
   client.fast = msg.fast === true;
+  // Client-truth, and strict for exactly the reason `fast` is: the two hubs
+  // have to publish the same roster for the same wire bytes, and comparing
+  // against true is the one test Lua and JS answer identically for every
+  // JSON value a malformed client can send.
+  client.busy = msg.busy === true;
   relay.broadcast('mmo.move', presenceOf(client), client.id);
   // Crossing into another map -- or out of the world entirely, into a battle
   // or a menu, which is what a null cell means -- is the only part of a step
@@ -533,13 +571,51 @@ handlers['mmo.chat'] = (relay, client, msg) => {
 handlers['mmo.request'] = (relay, client, msg) => {
   if (!client.ready || client.sessionId) return;
   const kind = KINDS.has(msg.kind) ? msg.kind : null;
+  if (!kind) return;
   const target = relay.get(cleanId(msg.to));
-  if (!kind || !target || !target.ready || target.id === client.id) return;
+  // Asking somebody who is not here any more is answered, not dropped.
+  //
+  // Silence was the old answer, and it is the worst one available: the asker
+  // holds an `outgoing` that nothing will ever clear, which marks them busy
+  // for the rest of the session -- refusing every invite they receive and
+  // turning away every one they try to send. A roster row goes stale for the
+  // length of one broadcast, so this is reachable by simply pressing BATTLE
+  // at the wrong moment.
+  //
+  // No name on it: there is no client left to read one off, and the asker
+  // falls back to the name it asked under (see Sessions:onDecline).
+  if (!target || !target.ready) {
+    return relay.send(client, 'mmo.decline', { kind, reason: 'gone' });
+  }
+  if (target.id === client.id) return;
 
   if (target.sessionId) {
-    return relay.send(client, 'mmo.decline', { name: target.name, kind });
+    return relay.send(client, 'mmo.decline',
+      { name: target.name, kind, reason: 'busy' });
   }
+
+  // Two invites that crossed are an agreement, not a collision.
+  //
+  // Both of them pressed BATTLE inside one round trip, which is exactly what
+  // two friends who just agreed to fight do. Each client marks itself busy
+  // the moment it asks, so each refused the other's invite as it landed and
+  // both players read "they refused" about somebody who had in fact just
+  // asked them. Nothing is missing here that a yes/no box would add: both
+  // sides asked for this fight, unprompted.
+  //
+  // Resolved on the hub rather than by a rule on each client because only
+  // the hub sees both asks, and a tie-break the two clients derive
+  // separately is one that can disagree. The kind has to match -- a trade
+  // crossing a battle is two different requests, not one agreement -- and
+  // `target` hosts, having asked first, which is the ordinary path's rule.
+  if (target.pendingTo === client.id && target.pendingKind === kind) {
+    target.pendingTo = null;
+    target.pendingKind = null;
+    return relay.startSession(target, client, kind);
+  }
+
   client.pendingTo = target.id;
+  client.pendingKind = kind;
   relay.send(target, 'mmo.request', { from: client.id, name: client.name, kind });
 };
 
@@ -553,12 +629,27 @@ handlers['mmo.respond'] = (relay, client, msg) => {
   // ask is still outstanding
   if (asker.pendingTo !== client.id) return;
   asker.pendingTo = null;
+  asker.pendingKind = null;
 
   if (!msg.accept) {
-    return relay.send(asker, 'mmo.decline', { name: client.name, kind });
+    // Carried through rather than read: the reason belongs to the client
+    // that refused -- only it knows whether a person pressed NO or its own
+    // guard answered for them -- and the closed set is what stops a forged
+    // one putting an invented sentence on the asker's screen.
+    //
+    // **Absent stays absent, and the key is left off rather than sent as
+    // null.** That is how a human no still reads as one -- and it is also
+    // what src/Hub.lua puts on the wire for the same refusal, since a nil
+    // field in Lua is simply a key that is not there. A `reason: null` here
+    // would be the two hubs sending different bytes for one event.
+    const reason = cleanDeclineReason(msg.reason);
+    const out = { name: client.name, kind };
+    if (reason) out.reason = reason;
+    return relay.send(asker, 'mmo.decline', out);
   }
   if (client.sessionId || asker.sessionId) {
-    return relay.send(asker, 'mmo.decline', { name: client.name, kind });
+    return relay.send(asker, 'mmo.decline',
+      { name: client.name, kind, reason: 'busy' });
   }
   relay.startSession(asker, client, kind);
 };
@@ -572,6 +663,7 @@ handlers['mmo.request_cancel'] = (relay, client) => {
   const targetId = client.pendingTo;
   if (!targetId) return;
   client.pendingTo = null;
+  client.pendingKind = null;
   const target = relay.clients.get(targetId);
   if (target && target.ready) {
     relay.send(target, 'mmo.request_cancel',
@@ -1580,7 +1672,7 @@ class Relay {
         map: client.map,
         x: client.x,
         y: client.y,
-        busy: Boolean(client.sessionId),
+        busy: busyNow(client),
         party: Boolean(client.partyId),
         points: client.points,
         ranked: Boolean(client.ranked),
@@ -1714,8 +1806,16 @@ class Relay {
       // nobody arrives mid-stride: the first mmo.move says otherwise or it
       // stays false
       fast: false,
+      // What the client last said about its own availability: a fight on its
+      // screen, an invite it is already holding. Nobody arrives mid-battle
+      // either, and a client that never reports it stays askable -- which is
+      // exactly the behaviour every build before this one had.
+      busy: false,
       sessionId: null,
       pendingTo: null,
+      // ...and what it asked for, so two asks that crossed can be told from a
+      // trade crossing a battle (see the mmo.request handler).
+      pendingKind: null,
       partyId: null,
       partyPendingTo: null,
       // The mediated fight this connection is in, if any. Holds a session id
@@ -1853,7 +1953,10 @@ class Relay {
     // an outstanding request pointed at a player who just left would leave
     // the asker waiting forever for an answer nobody can give
     for (const other of this.clients.values()) {
-      if (other.pendingTo === playerId) other.pendingTo = null;
+      if (other.pendingTo === playerId) {
+        other.pendingTo = null;
+        other.pendingKind = null;
+      }
       if (other.partyPendingTo === playerId) other.partyPendingTo = null;
     }
     if (client.ready) {

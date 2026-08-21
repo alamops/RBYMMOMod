@@ -93,6 +93,36 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **A battle invite refused itself, and neither player could see why.** The
+  roster row an asker reads said "busy" only when the *hub* had that player
+  in a trade or a 1v1 — while the asked client refused invites for a wild
+  encounter, a trainer, a co-op handoff, an invite already on its screen, or
+  an ask of its own. So a player fighting a PIDGEY was published to everyone
+  as free, asked, and refused in the same second, with nothing on either
+  screen to explain it: the asked player saw no box at all, and the asker
+  read "X refused to battle.", the same sentence a person pressing NO earns.
+  Presence now carries everything that would bounce an invite (both hubs read
+  it, having discarded the field until now), the refusal carries *why* —
+  "BOB is in a battle." — and the refusing side gets a line in the corner
+  saying somebody asked.
+
+- **Two invites that crossed cancelled each other out.** Both players
+  pressing BATTLE inside one round trip — what two friends who have just
+  agreed to fight do — left each one busy with its own ask and refusing the
+  other's, so both read "they refused" about somebody who had in fact just
+  asked them. The hub, the only party that sees both asks, now starts the
+  battle they both asked for.
+
+- **Asking somebody who had just left locked you out of PVP for the rest of
+  the session.** The hub dropped an undeliverable request in silence, and
+  nothing on the client cleared the ask it was still holding — which marks it
+  busy, so from then on every invite received was auto-refused and every one
+  sent was turned away with "You're already busy with someone." The hub now
+  answers with a refusal naming the reason, and an ask nobody ever answers is
+  taken back after two minutes rather than held forever. The same silent lock
+  was reachable through an invite box that left the screen without being
+  answered (a blackout, a save load); that is now answered as the no it is.
+
 - **A solo fight drew the player's POKéMON from behind, and its trainer not
   at all.** With `SOLO BATTLES` on, the arena stood a dark placeholder
   rectangle where the opposing trainer should be, and drew this client's own
