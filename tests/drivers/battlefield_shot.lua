@@ -286,6 +286,27 @@ return function(game)
   screen.slots[screen:mySlot()] = {
     species = MINE_SPECIES, level = 25, hp = 40, maxHp = 55,
   }
+  -- The rosters the referee publishes (`team`, PROTOCOL 24), which is what
+  -- the corner chips are drawn from. Seeded here rather than left to the
+  -- `mine` fallback so BOTH chips are on the frame under test: the fallback
+  -- only ever fills the player's own, and a foe chip that never drew is
+  -- exactly the regression these assertions exist to catch. Mixed states on
+  -- purpose -- a live ball, a statused one and a spent one -- so the frame
+  -- exercises all three cap colours plus the empty rings past the party.
+  screen.teams[screen:mySlot()] = "oosx"
+  screen.teams[screen:foeSlot()] = "oox"
+
+  -- The chip's ball run in canvas space: past the fixed name column, one
+  -- pitch per slot, centred on the panel. Mirrors drawRoster's own arithmetic
+  -- (src/Battlefield.lua) -- if the two ever disagree, this driver is
+  -- measuring empty panel and would pass a frame with no balls on it.
+  local function ballRunRect(chip)
+    local x = chip.x + Battlefield.ROSTER_PAD + Battlefield.ROSTER_NAME_W
+      + Battlefield.ROSTER_GAP
+    local w = Battlefield.ROSTER_SLOTS * Battlefield.ROSTER_BALL_PITCH
+    local r = Battlefield.ROSTER_BALL_R
+    return { x = x, y = chip.y + chip.h / 2 - r, w = w, h = r * 2 }
+  end
 
   game.stack:push(screen)
   U.wait(20)
@@ -514,6 +535,46 @@ return function(game)
         ("best row white fraction=%.3f"):format(textFrac))
     else
       check(false, label .. ": ally plate present")
+    end
+
+    -- (b2) the roster chips: one per trainer, in the two corners the plates
+    -- do not use. Three things are asserted and each one fails a different
+    -- regression: that both chips exist at all (the foe's is the one with no
+    -- local fallback), that the panel is really painted (a layout entry with
+    -- no draw behind it would pass every model test in the suite), and that
+    -- the ball run inside it carries saturated colour -- a red cap -- rather
+    -- than being an empty panel with a name on it.
+    local chipsBySide = {}
+    for _, chip in ipairs(layout.rosters) do chipsBySide[chip.side] = chip end
+    for _, side in ipairs({ "ally", "foe" }) do
+      local chip = chipsBySide[side]
+      if chip then
+        local darkFrac = darkPanelFraction(data, imgW, imgH, toScreen, chip, 3)
+        check(darkFrac > 0.25, label .. ": " .. side .. " roster chip is painted",
+          ("dark fraction=%.2f at %d,%d %dx%d"):format(
+            darkFrac, chip.x, chip.y, chip.w, chip.h))
+        local run = ballRunRect(chip)
+        local sat = maxSaturation(data, imgW, imgH, toScreen, run, 0)
+        check(sat > 0.12, label .. ": " .. side .. " roster chip has coloured balls",
+          ("max sat=%.3f run=%d,%d %dx%d"):format(sat, run.x, run.y, run.w, run.h))
+        local textFrac = maxRowWhiteFraction(data, imgW, imgH, toScreen, chip, 3)
+        check(textFrac > 0.03, label .. ": " .. side .. " roster chip names its trainer",
+          ("best row bright fraction=%.3f"):format(textFrac))
+      else
+        check(false, label .. ": " .. side .. " roster chip present")
+      end
+    end
+
+    -- ...and the rule the corners were chosen for, restated against the frame
+    -- that was actually drawn rather than against a hand-built layout.
+    for _, chip in ipairs(layout.rosters) do
+      for _, plate in ipairs(layout.plates) do
+        local hit = chip.x < plate.x + plate.w and plate.x < chip.x + chip.w
+          and chip.y < plate.y + plate.h and plate.y < chip.y + chip.h
+        check(not hit, label .. ": no roster chip overlaps a HUD plate",
+          ("chip %s at %d,%d vs %s plate at %d,%d"):format(
+            chip.side, chip.x, chip.y, plate.side, plate.x, plate.y))
+      end
     end
 
     -- (c) belt-and-braces: monDrawParams reports flip=true for the ally seat

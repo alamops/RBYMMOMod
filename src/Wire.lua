@@ -1678,8 +1678,44 @@ M.BATTLE_EVENTS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
-  chose = true, unchose = true, moves = true, exp = true,
+  chose = true, unchose = true, moves = true, exp = true, team = true,
 }
+
+-- The three ball states a roster is spelled in, and the most of them a seat may
+-- claim.  Mirrored from src/BattleSim/events.lua rather than required from it,
+-- for the reason that file's header gives: the sim runs with no Config.
+--
+--   o  standing, nothing wrong with it
+--   s  standing, carrying a status
+--   x  down
+--
+-- No token for an empty slot.  An empty slot is not a party member -- the
+-- roster says that by being short, and its length is therefore the party size,
+-- which is half of what the event is for.
+M.TEAM_TOKENS = { o = true, s = true, x = true }
+
+-- A seat's roster.
+--
+-- **Refused whole rather than trimmed to the part that parses**, which is the
+-- opposite of what `M.text` does one function down, and the difference is what
+-- the value is for.  A truncated sentence is a shorter sentence; a truncated
+-- roster is a *different party* -- three balls where the seat holds five -- and
+-- a client would draw the other player as two monsters closer to beaten than
+-- they are.  There is no partially-correct reading of this field, so a
+-- malformed one is dropped and the chip keeps the last roster it was told.
+--
+-- Bounded by BATTLE_MON_MAX because that is the rule the referee builds parties
+-- under (`Turn.MONS_PER_PARTY`), and empty is refused because a seat with no
+-- monsters is not a seat that is in the fight.
+function M.battleTeam(value)
+  if type(value) ~= "string" then return nil end
+  local n = #value
+  if n < 1 or n > Config.BATTLE_MON_MAX then return nil end
+  for i = 1, n do
+    if not M.TEAM_TOKENS[value:sub(i, i)] then return nil end
+  end
+  return value
+end
 
 -- One thing to draw.
 --
@@ -1765,6 +1801,13 @@ function M.battleEvent(raw)
   -- referee that predates this field pays the mon that was standing at the
   -- faint, so a client that gets no `mon` falls back to the active one.
   if raw.mon ~= nil then out.mon = M.int(raw.mon, 0, M.SLOT_MAX) end
+  -- The `team` event's roster (PROTOCOL 24), and the one field here that is
+  -- neither a number nor prose: a fixed alphabet, one character per party
+  -- member.  Dropped rather than trimmed when it does not parse -- see
+  -- `M.battleTeam`, where a short roster is a different party rather than a
+  -- shorter sentence.  A `team` event that loses its roster is an event with
+  -- nothing in it, which is exactly what a client ignores.
+  if raw.team ~= nil then out.team = M.battleTeam(raw.team) end
   if raw.side ~= nil then out.side = M.side(raw.side) end
   if raw.status ~= nil then
     -- battleStatus answers `false` for present-but-unknown, which is not a

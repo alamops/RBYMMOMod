@@ -1202,9 +1202,11 @@ test('a side that drops past its grace forfeits, and rolls nothing doing it', ()
     run.snapshot.rngState, 7,
     'the seed is untouched -- a forfeit consults no roll on either runtime',
   );
+  // One `team` per seat behind the opening send-outs: `_openTurn` syncs the
+  // rosters before it opens the window, and the first sync always publishes.
   assert.deepStrictEqual(
     run.events.map((event) => event.t),
-    ['send', 'send', 'turn', 'wait', 'over'],
+    ['send', 'send', 'team', 'team', 'turn', 'wait', 'over'],
   );
 });
 
@@ -1233,9 +1235,13 @@ test('residuals tick in field order, not speed order', () => {
 
 test('a switch resolves before an item, and neither spends a roll', () => {
   const run = byName(jsRuns).get('switch_item');
+  // The two opening `team` rows, and no more: nothing in this run changes a
+  // ball state, so the diff in `_syncTeams` publishes nothing on the second
+  // window.
   assert.deepStrictEqual(
     run.events.map((event) => event.t),
-    ['send', 'send', 'turn', 'chose', 'chose', 'switch', 'send', 'item', 'msg', 'msg', 'turn'],
+    ['send', 'send', 'team', 'team', 'turn', 'chose', 'chose',
+     'switch', 'send', 'item', 'msg', 'msg', 'turn'],
   );
   // 'restore' is an unknown id: announce + "But it failed", still no RNG draw.
   assert.strictEqual(run.snapshot.rngState, 13, 'the seed is untouched');

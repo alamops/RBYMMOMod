@@ -650,6 +650,41 @@ class Battle {
   }
 
   /*
+   * Every seat's party roster, published when -- and only when -- it moved.
+   *
+   * **This is the only thing on the wire that describes a monster nobody has
+   * seen.** A mediated fight tells each client about the field and nothing
+   * else, which is right for every other event and wrong for exactly one
+   * question: how many monsters is the other player still holding, and how many
+   * of those are spent. Both clients uploaded a party to the referee and
+   * neither uploaded one to the other, so the referee is the only party to the
+   * fight that can answer it -- which is why this is an event and not something
+   * a screen derives.
+   *
+   * What it carries is a ball row and no more (`Events.teamString`): a count
+   * and three states. Not a species, not a level, not a move. That line is
+   * where it is because it is where the original draws it -- the row a
+   * trainer's intro puts on screen is exactly this much -- and because anything
+   * past it is a team preview one player never agreed to give.
+   *
+   * Diffed rather than announced, so a fight that changes nothing costs
+   * nothing. `fighter.team` starts null, so the first sync always publishes --
+   * which is how the opening rosters reach a client (`_openTurn` runs at the
+   * end of construction, behind the send-outs).
+   */
+  _syncTeams() {
+    for (const fighter of this.fighters) {
+      const roster = Events.teamString(fighter.mons);
+      if (roster !== fighter.team) {
+        fighter.team = roster;
+        this._emit('team', {
+          slot: fighter.slot, side: fighter.side, team: roster,
+        });
+      }
+    }
+  }
+
+  /*
    * Everything since the last call, in order, and the buffer is emptied. A
    * caller that drops the returned list drops those events for good, which is
    * deliberate: the alternative -- a buffer that grows until somebody reads it
@@ -1464,6 +1499,12 @@ class Battle {
       fighter.forced = null;
     }
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
+    // Before the window opens, not after: a player deciding this turn is
+    // looking at the rosters, and anything a status or a bench potion moved
+    // last turn has to be on them by the time the menu is up. Faints are
+    // already current -- `_faint` publishes inside its own batch -- so on most
+    // turns this emits nothing at all.
+    this._syncTeams();
     this._emit('turn', { amount: this.turn });
     this._fillForcedChoices();
     // When every living seat is forced, defer resolve to the next tick so
@@ -1528,6 +1569,9 @@ class Battle {
       fighter.forced = null;
     }
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
+    // The other window a player answers from, and the same reason: whoever is
+    // picking a replacement is picking it off the roster.
+    this._syncTeams();
     for (const fighter of this.fighters) {
       if (this._owes(fighter)) {
         this._emit('turn', { amount: this.turn, slot: fighter.slot });
@@ -2854,6 +2898,11 @@ class Battle {
     // open the replace picker from this rather than guessing from local HP.
     if (next) faintEv.amount = 1;
     this._emit('faint', faintEv);
+    // Immediately behind the faint line rather than at the next window, because
+    // this is the one roster change a player is *watching* happen: the ball
+    // goes dark in the same batch the monster goes down in, and a fight that
+    // ends on this faint has no next window to have said it at.
+    this._syncTeams();
 
     // Owed here, paid at the end of the action (`_drainExp`), with the fallen
     // sheet held in the queue so the payout still names the monster that fell
@@ -3261,6 +3310,9 @@ function attempt(opts) {
         connected: true,
         graceEndsAt: null,
         choice: null,
+        // The roster last published for this seat (`_syncTeams`). null rather
+        // than the opening string, so the first sync always publishes.
+        team: null,
         // Who has been in against THIS seat's current monster; see `_refield`.
         fought: Object.create(null),
       };

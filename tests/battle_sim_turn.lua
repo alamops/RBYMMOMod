@@ -4502,6 +4502,123 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 24. team rosters (PROTOCOL 24)
+-- ------------------------------------------------------------------
+--
+-- The only thing this wire says about a monster nobody has seen, and the only
+-- source there is for the seat opposite: no client uploads a party to any other
+-- client.  So what is asserted here is not "the field said the right thing" but
+-- the two properties a roster chip is built on -- that the count is the party's
+-- and that the states follow the fight.
+
+-- The token function, before any battle uses it.
+do
+  eq(Events.teamToken({ hp = 30 }), "o", "team: a standing monster is `o`")
+  eq(Events.teamToken({ hp = 30, status = "PSN" }), "s", "team: a statused one is `s`")
+  eq(Events.teamToken({ hp = 0 }), "x", "team: a downed one is `x`")
+  -- Fainted beats statused, and it has to: the status field that put a monster
+  -- down is still set on it, so asking about the status first would draw a
+  -- spent ball as merely poisoned.
+  eq(Events.teamToken({ hp = 0, status = "PSN" }), "x",
+    "team: down outranks statused on the same monster")
+  eq(Events.teamToken(nil), nil, "team: nothing is not a ball")
+  eq(Events.teamString({ mon({ hp = 30 }), mon({ hp = 0 }), mon({ hp = 5, status = "BRN" }) }),
+    "oxs", "team: the roster is one character per member, in party order")
+  eq(#Events.teamString({ mon(), mon(), mon() }), 3,
+    "team: and its length is the party size -- there is no empty-slot token")
+  eq(Events.teamString(nil), "", "team: no party is no roster")
+end
+
+-- The opening: one per seat, behind the send-outs and in front of the window.
+do
+  local battle = battleOf({
+    aMons = { mon(), mon({ species = "Spare" }) },
+    bMons = { mon({ species = "Beta" }) },
+  })
+  local list = drain(battle)
+  local order, rosters = {}, {}
+  for _, event in ipairs(list) do
+    order[#order + 1] = event.t
+    if event.t == "team" then rosters[event.slot] = event.team end
+  end
+  listEq(order, { "send", "send", "team", "team", "turn" },
+    "team: the opening rosters land behind the send-outs and ahead of the turn")
+  eq(rosters[0], "oo", "team: side a's seat published the two it brought")
+  eq(rosters[2], "o", "team: and side b's the one it brought")
+end
+
+-- Nothing changed, nothing said.  The diff is what keeps this off a wire that
+-- carries it on every window of every fight.
+do
+  local battle = battleOf()
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local second = kinds(drain(battle))
+  eq(second.team, nil,
+    "team: a turn that moved no ball state re-publishes nothing")
+end
+
+-- A faint darkens the ball inside its own batch, not at the next window: this
+-- is the one roster change a player watches happen.
+do
+  local battle = battleOf({
+    aMons = { mon({ hp = 1 }), mon({ species = "Spare" }) },
+    bMons = { mon({ species = "Beta", spd = 200, moves = { move({ power = 200 }) } }) },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local list = drain(battle)
+  local faintAt, teamAt, roster
+  for i, event in ipairs(list) do
+    if event.t == "faint" and not faintAt then faintAt = i end
+    if event.t == "team" and event.slot == 0 and not teamAt then
+      teamAt, roster = i, event.team
+    end
+  end
+  ok(faintAt ~= nil, "team: the fixture landed the knockout it was built for")
+  ok(teamAt ~= nil and faintAt ~= nil and teamAt == faintAt + 1,
+    "team: the roster follows the faint line immediately")
+  eq(roster, "xo", "team: and the ball that went down is the one that darkened")
+end
+
+-- A status is published too -- at the window, because that is when the player
+-- who has to act on it is looking.
+do
+  local battle = battleOf({
+    aMons = { mon(), mon({ species = "Spare" }) },
+    bMons = { mon({ species = "Beta" }) },
+  })
+  drain(battle)
+  -- Written onto the sheet the referee is fighting with, which is what a
+  -- residual or a side-effect would have done; the publisher does not care
+  -- which of them did it.
+  battle.byId["p1"].mons[1].status = "PSN"
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local published
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "team" and event.slot == 0 then published = event.team end
+  end
+  eq(published, "so", "team: a condition on a party member reaches the roster")
+end
+
+-- The bench is in it.  A seat that never fields its fourth monster still says
+-- it has one -- which is the whole of "how many have they got left".
+do
+  local battle = battleOf({
+    aMons = { mon(), mon({ species = "B" }), mon({ species = "C" }),
+              mon({ species = "D" }) },
+  })
+  local roster
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "team" and event.slot == 0 then roster = event.team end
+  end
+  eq(roster, "oooo", "team: the roster counts the bench, not the field")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

@@ -658,6 +658,43 @@ end
 eq(Wire.members(overfull), nil,
    "a hub claiming more members than PARTY_MAX is refused, not truncated")
 
+-- ------- Wire.battleTeam: a seat's roster, refused whole or not at all
+--
+-- The same rule Wire.members follows, and for a sharper reason. A truncated
+-- sentence is a shorter sentence; a truncated roster is a DIFFERENT PARTY --
+-- three balls where the seat holds five -- and the chip would tell a player
+-- their opponent is two monsters closer to beaten than they are. There is no
+-- partially-correct reading of this field.
+
+;(function()
+eq(Wire.battleTeam("ooo"), "ooo", "a roster of live balls survives")
+eq(Wire.battleTeam("oxs"), "oxs", "as does one mixing all three states")
+eq(Wire.battleTeam("o"), "o", "a one-monster seat is a one-character roster")
+local sixBalls = string.rep("o", Config.BATTLE_MON_MAX)
+eq(Wire.battleTeam(sixBalls), sixBalls, "and a full party is exactly six")
+
+eq(Wire.battleTeam(""), nil, "an empty roster is not a seat that is fighting")
+eq(Wire.battleTeam(string.rep("o", Config.BATTLE_MON_MAX + 1)), nil,
+   "a seat claiming more than BATTLE_MON_MAX is refused, not truncated")
+eq(Wire.battleTeam("ooq"), nil, "one token this build cannot read refuses the row")
+eq(Wire.battleTeam("OOO"), nil, "the alphabet is exact -- no case folding")
+eq(Wire.battleTeam("o x"), nil, "and no whitespace to pad a short party with")
+eq(Wire.battleTeam(3), nil, "a count is not a roster")
+eq(Wire.battleTeam(nil), nil, "and nothing is not a roster")
+
+-- On the event: a `team` whose roster does not parse arrives with no roster at
+-- all rather than with a shortened one, which is exactly what a client ignores.
+local goodTeam = Wire.battleEvent(
+  { battle = "b1", seq = 4, t = "team", slot = 2, side = "b", team = "oxs" })
+check(goodTeam ~= nil, "a well-formed team event survives the boundary")
+eq(goodTeam.team, "oxs", "carrying its roster")
+eq(goodTeam.slot, 2, "and the seat it is about")
+local badTeam = Wire.battleEvent(
+  { battle = "b1", seq = 5, t = "team", slot = 2, side = "b", team = "oo!" })
+check(badTeam ~= nil, "a malformed roster does not put a hole in the stream")
+eq(badTeam.team, nil, "...it just arrives with nothing to draw")
+end)()
+
 -- ------- Wire.partyEvent: what your partner just did, off the wire
 --
 -- The fighter never sends their own name and the hub stamps it from the
@@ -13561,6 +13598,162 @@ end)()
      "a seat with no clock reads truth hp on the card too")
 end)()
 
+-- ------- Gen1 Battlefield: the roster chip (how many, and how they are)
+--
+-- One named panel per TRAINER carrying six balls: the question the plates
+-- cannot answer, asked per player rather than per seat. What is pinned here is
+-- the model (both party dialects, all four ball states, six slots always) and
+-- the placement rule that keeps a chip off its own side's HUD stack.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- roster chip tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+  local OK, STATUS, KO, NONE =
+    Battlefield.ROSTER_OK, Battlefield.ROSTER_STATUS,
+    Battlefield.ROSTER_KO, Battlefield.ROSTER_NONE
+
+  -- Dialect 1: a list of sheets, which is what a locally-held party is.
+  local mine = Battlefield.rosterModel({ name = "ANN", party = {
+    { hp = 30, maxHp = 30 },
+    { hp = 0, maxHp = 24 },
+    { hp = 9, maxHp = 20, status = "PSN" },
+  } })
+  eq(mine.name, "ANN", "the chip is named for the trainer, not the monster")
+  eq(mine.balls[1], OK, "a standing party member is a live ball")
+  eq(mine.balls[2], KO, "a fainted one is spent")
+  eq(mine.balls[3], STATUS, "a statused one is its own state")
+  eq(mine.held, 3, "held counts what the trainer actually brought")
+  eq(mine.standing, 2, "standing counts what they have left")
+  eq(#mine.balls, 6, "and the row is six wide however many they brought")
+  eq(mine.balls[4], NONE, "the slots past the party are empty rings")
+  eq(mine.balls[6], NONE, "...all the way to six")
+
+  -- Down beats statused on one monster, exactly as the referee's token does:
+  -- a fainted monster's status field is still set, and reading it first would
+  -- draw a spent ball as merely poisoned.
+  local downed = Battlefield.rosterModel({ party = { { hp = 0, status = "PSN" } } })
+  eq(downed.balls[1], KO, "a downed monster is down even while it is poisoned")
+
+  -- Dialect 2: the referee's roster string, which is all a client ever gets
+  -- about the seat opposite.
+  local theirs = Battlefield.rosterModel({ name = "BOB", party = "oxs" })
+  eq(theirs.balls[1], OK, "`o` reads back as a live ball")
+  eq(theirs.balls[2], KO, "`x` as a spent one")
+  eq(theirs.balls[3], STATUS, "`s` as a statused one")
+  eq(theirs.held, 3, "a roster string's length is the party size")
+  eq(theirs.balls[4], NONE, "and it pads to six like any other")
+
+  -- Nothing to say says nothing. Six blank rings under a name is the claim
+  -- "this trainer has no monsters", which is much worse than no chip at all.
+  eq(Battlefield.rosterModel({ name = "NOBODY" }), nil,
+     "a trainer with no party publishes no chip")
+  eq(Battlefield.rosterModel({ name = "NOBODY", party = {} }), nil,
+     "and neither does an empty one")
+  eq(Battlefield.rosterModel({ name = "NOBODY", party = "" }), nil,
+     "nor an empty roster string")
+
+  -- An unreadable sheet is a monster the trainer still brought: `ko` is the
+  -- reading that never tells a player their opponent has less than they do.
+  local unreadable = Battlefield.rosterModel({ party = { {}, { hp = 12 } } })
+  eq(unreadable.held, 2, "a sheet with no HP is still a party member")
+  eq(unreadable.balls[1], KO, "...drawn as spent rather than as absent")
+
+  -- Six is the cap. A seventh is not drawn rather than widening the row.
+  local seven = Battlefield.rosterModel({ party = "ooooooo" })
+  eq(seven.held, 6, "a roster past six is cut to six")
+
+  -- ------- placement
+  --
+  -- Allies down from the top-left, foes up from the bottom-right: the two
+  -- corners the plate stacks never reach.
+  local duo = Battlefield.layout({
+    mode = "coop_pvp",
+    allyHumans = { { id = "ann", name = "ANN", party = "oo" },
+                   { id = "cid", name = "CID", party = "ox" } },
+    foeHumans = { { id = "bob", name = "BOB", party = "ooo" },
+                  { id = "dot", name = "DOT", party = "x" } },
+    allySeats = { { index = 1, name = "PIKA", hp = 10, maxHp = 20 },
+                  { index = 2, name = "RATT", hp = 10, maxHp = 20 } },
+    foeSeats = { { index = 3, name = "WEED", hp = 10, maxHp = 20 },
+                 { index = 4, name = "ODDI", hp = 10, maxHp = 20 } },
+  })
+  eq(#duo.rosters, 4, "a 2-on-2 publishes a chip for all four trainers")
+  local allyChips, foeChips = {}, {}
+  for _, chip in ipairs(duo.rosters) do
+    if chip.side == "foe" then foeChips[#foeChips + 1] = chip
+    else allyChips[#allyChips + 1] = chip end
+  end
+  eq(#allyChips, 2, "two of them on the ally side")
+  eq(#foeChips, 2, "and two on the foe side")
+  eq(allyChips[1].model.name, "ANN",
+     "chip order follows the human order, so the local player is chip 1")
+  check(allyChips[1].y < allyChips[2].y,
+        "ally chips stack downward from the top edge")
+  check(foeChips[1].y > foeChips[2].y,
+        "foe chips stack upward from the bottom edge")
+  check(allyChips[1].x < duo.midline and foeChips[1].x > duo.midline,
+        "each side's chips sit on that side's margin")
+  for _, chip in ipairs(duo.rosters) do
+    eq(chip.w, Battlefield.ROSTER_W, "every chip is one width")
+    eq(chip.h, Battlefield.ROSTER_H, "and one height")
+    check(chip.x >= 0 and chip.x + chip.w <= Battlefield.WIDTH,
+          "a chip stays inside the canvas horizontally")
+    check(chip.y >= Battlefield.FIELD_TOP
+          and chip.y + chip.h <= Battlefield.FIELD_BOTTOM,
+          "and inside the FIELD -- never in the letterbox or under the menu band")
+  end
+
+  -- The rule the corners were chosen for: with a full plate stack on both
+  -- sides, no chip may touch a plate. This is the assertion that fails if
+  -- somebody moves the plate stack or the chip margin without the other.
+  local function overlaps(a, b)
+    return a.x < b.x + b.w and b.x < a.x + a.w
+       and a.y < b.y + b.h and b.y < a.y + a.h
+  end
+  local collided = nil
+  for _, chip in ipairs(duo.rosters) do
+    for _, plate in ipairs(duo.plates) do
+      if overlaps(chip, plate) then
+        collided = collided or (chip.model.name .. " over a " .. plate.side .. " plate")
+      end
+    end
+  end
+  eq(collided, nil, "no roster chip lands on a HUD plate in a full 2-on-2")
+
+  -- A wild fight has no trainer on the foe edge, so it gets no chip there --
+  -- and the player still gets their own, which is the whole point of asking
+  -- the question per player.
+  local wild = Battlefield.layout({
+    mode = "wild",
+    allyHumans = { { id = "ann", name = "ANN", party = "ooxo" } },
+    foeHumans = { { id = "nope", name = "NOPE", party = "oooooo" } },
+    allySeats = { { index = 1, name = "PIKA", hp = 10, maxHp = 20 } },
+    foeSeats = { { index = 3, name = "RATT", hp = 10, maxHp = 20 } },
+  })
+  eq(#wild.rosters, 1, "a wild fight publishes exactly one chip")
+  eq(wild.rosters[1].side, "ally", "...and it is the player's")
+
+  -- A trainer nobody described stands on the field with no chip under them,
+  -- rather than with an empty one.
+  local silent = Battlefield.layout({
+    mode = "coop_npc",
+    allyHumans = { { id = "ann", name = "ANN", party = "oo" } },
+    foeHumans = { { id = "bug", name = "BUG" } },
+    allySeats = { { index = 1, name = "PIKA", hp = 10, maxHp = 20 } },
+    foeSeats = { { index = 3, name = "WEED", hp = 10, maxHp = 20 } },
+  })
+  eq(#silent.rosters, 1, "an undescribed trainer publishes no chip")
+  eq(silent.rosters[1].side, "ally", "...while the player's still draws")
+  local stoodFoe = false
+  for _, h in ipairs(silent.humans) do
+    if h.side == "foe" then stoodFoe = true end
+  end
+  check(stoodFoe, "and that trainer is still standing on the field")
+end)()
+
 -- ------- Gen1 Battlefield wave 1: fx math (pure functions of t)
 --
 -- Every renderer in Battlefield.lua is a pure function of a 0..1 progress the
@@ -22664,6 +22857,65 @@ end)()
     }, { __index = CoopBattle })
     eq(#client:battlefieldFoeHumans(), 0,
        "coop_pvp draws foe humans from owned seats -- none owned here, so zero")
+  end
+
+  -- ------- the roster chip's party, on the screen that needs no wire for it
+  --
+  -- A co-op fight hands every client every seat's party at construction --
+  -- all four of them are replaying one host's events, and a replay needs the
+  -- sheets -- so the chip reads the live tables the sim is fighting with and
+  -- there is no `team` event in it. That is the whole difference between this
+  -- screen and MediatedBattle, and it is worth pinning: a refactor that made
+  -- CoopBattle wait on the referee for this would blank four chips.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }), mon(40, 0, { move() }) } },
+      { side = "a", owner = "cid", name = "CID",
+        party = { mon(60, 30, { move() }) } },
+      { side = "b", owner = "bob", name = "BOB",
+        party = { mon(60, 20, { move() }), mon(50, 50, { move() }) } },
+      { side = "b", owner = "dot", name = "DOT",
+        party = { mon(60, 10, { move() }) } },
+    })
+    local client = setmetatable({
+      mode = "coop_pvp", sim = sim, mine = 1, selfId = "ann",
+      game = { data = { sprites = genericSprites } },
+    }, { __index = CoopBattle })
+
+    local allies = client:battlefieldAllyHumans()
+    eq(#allies, 2, "both ally seats stand a trainer")
+    eq(allies[1].name, "ANN", "the local player sorts first")
+    eq(allies[1].party and #allies[1].party, 2,
+       "...and carries their own party for the chip")
+    eq(allies[1].party, sim.slots[1].party,
+       "the chip reads the sim's live table, so a faint shows the frame it lands")
+    eq(allies[2].party and #allies[2].party, 1,
+       "the partner's party rides along too -- co-op holds every sheet locally")
+
+    local foes = client:battlefieldFoeHumans()
+    eq(#foes, 2, "and both opposing players are named")
+    eq(foes[1].party and #foes[1].party, 2,
+       "an opposing player's party needs no wire on this screen either")
+
+    -- The chip and the trainer intro's ball row are one source, so the row
+    -- that shows for two seconds at the open and the chip that stands for the
+    -- whole fight can never disagree about how many the trainer brought.
+    local npcSim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { move() }), mon(60, 30, { move() }) } },
+    })
+    local npcClient = setmetatable({
+      mode = "coop_npc", sim = npcSim, mine = 1, selfId = "ann",
+      trainer = { id = "OPP_BUG_CATCHER", name = "BUG CATCHER" },
+      game = { data = { sprites = genericSprites } },
+    }, { __index = CoopBattle })
+    local npcFoes = npcClient:battlefieldFoeHumans()
+    eq(#npcFoes, 1, "an NPC side is one trainer however many seats it fields")
+    eq(npcFoes[1].party and #npcFoes[1].party, 2,
+       "...carrying the flattened party the intro ball row draws")
   end
 
   -- The coop move bubble's `name` agrees with the plate's own name source:

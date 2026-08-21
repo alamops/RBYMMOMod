@@ -153,7 +153,21 @@ function defaultSpriteFor(generation) {
 // over the number 42, and both HUDs printed "42/42". A protocol-23 hub states
 // none and the client falls back to that guess, which is precisely the bug --
 // visible on your own monster, every fight after the first one it was hurt in.
-const PROTOCOL = 24;
+// 25: the `team` battle event -- a seat's party roster as ball states (how
+// many it brought; which are healthy / statused / down). Every other event
+// here is about the field, which is the right scope for all of them but one
+// question: how much does the other player have left. Both clients upload a
+// party to the referee and neither uploads one to the other, and mmo.relay is
+// hard-cut for the length of a mediated fight, so the referee is the only
+// party that can answer it. A protocol-24 hub emits no such kind and the
+// client's sanitiser drops an unknown one whole, so the roster chip beside a
+// peer's name would sit empty for the whole fight while the player's own
+// filled in normally -- a half-drawn screen that reads as "they brought
+// nothing" rather than as a hub that cannot do this.
+// This branch was bumped out of 23 by the invite fix and out of 24 by maxHp;
+// the second to land moves rather than sharing, so 25 means all of it. The
+// fuller note is in src/Config.lua.
+const PROTOCOL = 25;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right

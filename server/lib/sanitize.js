@@ -574,6 +574,12 @@ const BATTLE_ACTIONS = new Map([
  *              species table and can never compute one, so the referee states
  *              the facts and each client runs its own Experience formula over
  *              its own party.
+ *   team       a seat's party roster, as ball states: how many monsters it
+ *              brought and which of them are healthy / statused / down. The
+ *              referee is the only party to a mediated fight holding every
+ *              party, so it is the only one that can say this about the seat
+ *              opposite. Ball states and nothing else -- no species, no level,
+ *              no moves -- which is exactly what the classic ball row reveals.
  *
  * Closed, because the vocabulary is the contract between the turn machine and
  * the screen: an unknown kind has no animation, no sentence and no state change
@@ -583,8 +589,46 @@ const BATTLE_ACTIONS = new Map([
 const BATTLE_EVENT_TYPES = new Set([
   'msg', 'anim', 'damage', 'drain', 'faint', 'send', 'status', 'stat',
   'switch', 'item', 'run', 'turn', 'over', 'wait', 'reconnect',
-  'chose', 'unchose', 'moves', 'exp',
+  'chose', 'unchose', 'moves', 'exp', 'team',
 ]);
+
+/*
+ * The three ball states a roster is spelled in. Wire.lua spells this
+ * M.TEAM_TOKENS.
+ *
+ *   o  standing, nothing wrong with it
+ *   s  standing, carrying a status
+ *   x  down
+ *
+ * No token for an empty slot. An empty slot is not a party member -- the roster
+ * says that by being short, and its length is therefore the party size, which
+ * is half of what the event is for.
+ */
+const TEAM_TOKENS = new Set(['o', 's', 'x']);
+
+/*
+ * A seat's roster.
+ *
+ * **Refused whole rather than trimmed to the part that parses**, which is the
+ * opposite of what cleanText does, and the difference is what the value is for.
+ * A truncated sentence is a shorter sentence; a truncated roster is a
+ * *different party* -- three balls where the seat holds five -- and a client
+ * would draw the other player as two monsters closer to beaten than they are.
+ * There is no partially-correct reading of this field, so a malformed one is
+ * dropped and the chip keeps the last roster it was told.
+ *
+ * Bounded by BATTLE_MON_MAX because that is the rule the referee builds parties
+ * under, and empty is refused because a seat with no monsters is not a seat
+ * that is in the fight.
+ */
+function cleanBattleTeam(value) {
+  if (typeof value !== 'string') return null;
+  if (value.length < 1 || value.length > BATTLE_MON_MAX) return null;
+  for (const ch of value) {
+    if (!TEAM_TOKENS.has(ch)) return null;
+  }
+  return value;
+}
 
 // The reasons a mediated fight ends that a screen currently has a sentence for:
 // nobody answered in time, a side dropped and its grace ran out, somebody fled,
@@ -1296,6 +1340,16 @@ function cleanBattleEvent(raw) {
     const mon = cleanInt(raw.mon, 0, SLOT_MAX);
     if (mon !== null) event.mon = mon;
   }
+  // The `team` event's roster (PROTOCOL 24), and the one field here that is
+  // neither a number nor prose: a fixed alphabet, one character per party
+  // member. Dropped rather than trimmed when it does not parse -- see
+  // cleanBattleTeam, where a short roster is a different party rather than a
+  // shorter sentence. A `team` event that loses its roster is an event with
+  // nothing in it, which is exactly what a client ignores.
+  if (raw.team !== undefined && raw.team !== null) {
+    const team = cleanBattleTeam(raw.team);
+    if (team) event.team = team;
+  }
   if (raw.side !== undefined && raw.side !== null) {
     const side = cleanSide(raw.side);
     if (side) event.side = side;
@@ -1419,6 +1473,7 @@ module.exports = {
   cleanBattleReady,
   cleanBattleChoice,
   cleanBattleEvent,
+  cleanBattleTeam,
   cleanBattleOutcome,
   cleanBattleReconnect,
   payloadOk,
@@ -1485,4 +1540,5 @@ module.exports = {
   AMOUNT_MAX,
   PARTICIPANTS_MAX,
   REASON_MAX,
+  TEAM_TOKENS,
 };

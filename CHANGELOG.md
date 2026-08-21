@@ -6,6 +6,88 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.21] - 2026-08-20
+
+### Added
+
+- **How many they have left, for every trainer on the field.** Each player
+  in a battle now carries a named roster chip on the arena — their name and
+  a ball for each of their six party slots, live: a full ball for a
+  monster that is standing, an amber one for a monster carrying a status,
+  a spent grey one for a monster that is down, and an empty ring for a
+  slot they never filled. Six slots always, however many the trainer
+  brought, so every chip on screen is read against the same ruler and
+  "they have four left" is a glance rather than a count. Drawn for every
+  shape of trainer fight this mod referees — solo trainer, MMO 1v1, co-op
+  2-on-2, 2-on-NPC, party-vs-party — and never for a wild monster, which
+  has no trainer to have a party.
+  - **Chips take the two corners the HUD plates do not.** Allies stack
+    down from the top-left and foes up from the bottom-right, mirroring
+    the diagonal the plates already establish (allies climbing from the
+    floor at the left, foes descending from the top at the right). The
+    suite asserts directly that no chip lands on a plate in a full
+    2-on-2, so moving either stack without the other fails a test rather
+    than shipping an overlap.
+  - **The ball is original vector art**, as the throw ball already was:
+    two hemispheres, a band and a button, built from primitives. No ROM
+    pixels, here or anywhere.
+  - Nothing is drawn where nothing is known: a trainer whose party this
+    client was never told about stands on the field with no chip rather
+    than with six blank rings, because an empty row is the claim "they
+    have nothing left" and that is a much worse thing to say wrongly.
+
+### Changed
+
+- **Every battle screenshot in the README recaptured.** `link-battle`,
+  `coop-battle`, `coop-item`, `coop-switch`, `party-battle`,
+  `party-spectating` and `nire-battle` were all still pictures of the
+  classic 160×144 chrome — stale since the widescreen arena landed, long
+  before this branch — so a reader met a battle screen the build has not
+  drawn in months. Retaken from real e2e runs (the dedicated-hub, quad and
+  battlefield drivers) and cropped to the arena's own 1024×576, which is the
+  widescreen twin of the existing 800×720 rule: the frame is 1024×768 with
+  the 640×360 canvas fill-scaled 1.6×, so the letterbox is exactly 96px top
+  and bottom and `sips -c 576 1024` removes it. Displayed at 760px rather
+  than 300 because a 16:9 shot at 300 is 169 tall and nothing on it is
+  legible.
+  - The prose under **BATTLE — ANYWHERE** went with them. It still described
+    MMO fights as "the real lockstep simulation a link cable runs" — which
+    stopped being true at `PROTOCOL` 10, when the hub took over the rolls and
+    the engine's lockstep path was hard-cut.
+  - So did one clause in the character section: on this mod's own arena a
+    worn character is the *figure standing on the edge*, and the back pic
+    over your shoulder is the game's own battles.
+
+- **`PROTOCOL` 24 → 25: the referee publishes each seat's party roster.**
+  A new `team` battle event carries a seat's ball states — how many
+  monsters it brought and which are healthy, statused or down — and
+  nothing else: no species, no level, no moves, which is exactly what the
+  classic ball row reveals and no more. It exists because an MMO fight has
+  no other honest source for it. Both clients upload a party to the
+  referee and neither uploads one to the other, and `mmo.relay` is
+  hard-cut for the length of a mediated battle, so the intermediator is
+  the only party to the exchange that can say how much the other player
+  has left. Emitted on a diff, so a fight that changes no ball state
+  publishes nothing; emitted inside the faint batch, so the ball darkens
+  in the same beat the monster goes down.
+  - Co-op battles need none of it — every client already holds every
+    seat's party, because all four of them replay one host's events — and
+    a co-op chip reads the live sheets the sim is fighting with.
+  - A protocol-24 intermediator emits no such kind and a client drops an
+    unknown one whole, so a mixed pairing would leave the chip beside a
+    peer's name empty for the whole fight while the player's own filled in
+    normally: a half-drawn screen that reads as "they brought nothing"
+    rather than as a hub that cannot do this. Refusal naming both versions
+    is the only sentence either player can act on — update the hub and the
+    clients together.
+  - This work was bumped out of a number twice while it was open — off 23 by
+    the PVP-invite fix, then off 24 by `maxHp` — so it lands on 25, which
+    means all three vocabularies. That is the rule the `PROTOCOL` block in
+    `src/Config.lua` has followed since 5 and 6 were each claimed twice: a
+    shared number is the one failure it exists to prevent, and moving is
+    cheap. Read it as a fact about a project with several branches open
+    against one wire, not as bad luck.
+
 ## [1.0.20] - 2026-08-20
 
 ### Fixed
