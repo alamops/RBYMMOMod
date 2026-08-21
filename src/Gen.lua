@@ -599,6 +599,128 @@ function M.spriteCatalog(game)
   return nil
 end
 
+-- ------- trainer class -> overworld walk sheet
+--
+-- There is no class->sprite field anywhere in engine data. A trainer record
+-- (`data.trainers`) carries the battle front pic, the parties and the prize
+-- money, and says nothing about the overworld; the walk sheet is chosen per
+-- **map object**, where `data.maps[*].objects[*]` pairs a `sprite` with the
+-- `trainerClass` that object fights as. That is still a real mapping, just an
+-- indirect one -- so it is read out of the data rather than hand-written here:
+-- every object naming a class votes for the sheet it is drawn with, and the
+-- class takes the sheet with the most votes.
+--
+-- Which is what the name transform below cannot do on its own. Red has no
+-- SPRITE_LASS and no SPRITE_BUG_CATCHER -- those classes walk around as
+-- SPRITE_COOLTRAINER_F and SPRITE_YOUNGSTER -- so `OPP_BUG_CATCHER` resolved to
+-- nothing and the foe edge of the arena was left empty.
+--
+-- Ties break on id order so two clients never disagree about a class, and the
+-- whole walk is memoised against the maps table it was built from: one pass
+-- over ~250 maps per boot, and none at all once a battle is running.
+--
+-- **Lives here, and not in a battle screen**, because both of them ask it --
+-- `CoopBattle:battlefieldFoeHumans` for a co-op NPC fight and
+-- `MediatedBattle:battlefieldCtx` for the solo one -- and MediatedBattle cannot
+-- require CoopBattle without closing a cycle. It sits next to `spriteCatalog`
+-- for the reason that function exists: this is a walk-sheet question, and the
+-- catalog it has to be answered against is generation-shaped.
+local trainerSpriteVotes = nil
+local trainerSpriteVotesFrom = nil
+
+local function trainerSpritesByClass(data)
+  local maps = type(data) == "table" and data.maps or nil
+  if type(maps) ~= "table" then return nil end
+  if trainerSpriteVotesFrom == maps then return trainerSpriteVotes end
+
+  local votes = {}
+  local ok = pcall(function()
+    for _, map in pairs(maps) do
+      if type(map) == "table" and type(map.objects) == "table" then
+        for _, obj in pairs(map.objects) do
+          if type(obj) == "table" then
+            local class, sprite = obj.trainerClass, obj.sprite
+            if type(class) == "string" and class ~= ""
+               and type(sprite) == "string" and sprite ~= "" then
+              local bucket = votes[class]
+              if not bucket then
+                bucket = {}
+                votes[class] = bucket
+              end
+              bucket[sprite] = (bucket[sprite] or 0) + 1
+            end
+          end
+        end
+      end
+    end
+  end)
+  if not ok then return nil end
+
+  local out = {}
+  for class, bucket in pairs(votes) do
+    local best, bestN = nil, -1
+    for sprite, n in pairs(bucket) do
+      if n > bestN or (n == bestN and (best == nil or sprite < best)) then
+        best, bestN = sprite, n
+      end
+    end
+    out[class] = best
+  end
+  trainerSpriteVotes = out
+  trainerSpriteVotesFrom = maps
+  return out
+end
+
+-- Last resort, best first: a class nobody walks around as on any map (the
+-- unused ones, and anything a mod adds without an overworld object) still gets
+-- a body on the field rather than an empty foe edge. Probed against the
+-- catalog, so a build without one of these falls to the next.
+local GENERIC_TRAINER_SPRITES = {
+  "SPRITE_COOLTRAINER_M", "SPRITE_YOUNGSTER", "SPRITE_GENTLEMAN",
+}
+
+-- OPP_YOUNGSTER -> SPRITE_YOUNGSTER when the catalog has a walk sheet; the
+-- overworld's own answer for the classes it does not (OPP_LASS,
+-- OPP_BUG_CATCHER, ...); a generic trainer after that.
+function M.trainerWalkSpriteId(trainer, game)
+  if type(trainer) ~= "table" then return nil end
+  local id = trainer.id or trainer.sprite or trainer.spriteId
+  if type(id) ~= "string" or id == "" then return nil end
+  local spriteId = id
+  if spriteId:match("^OPP_") then
+    spriteId = "SPRITE_" .. spriteId:sub(5)
+  elseif not spriteId:match("^SPRITE_") then
+    spriteId = "SPRITE_" .. spriteId
+  end
+  -- `M.spriteCatalog`, not `data.sprites`: Gold keeps its walk sheets on
+  -- `data.gen2Sprites`, and reading Gen 1's table on a Gold boot proves nothing
+  -- about a sheet that is really there.
+  local sprites = M.spriteCatalog(game)
+  if type(sprites) == "table" and type(sprites[spriteId]) == "table" then
+    return spriteId
+  end
+  -- Soft: accept the id even if we cannot prove the sheet exists here;
+  -- Battlefield.resolveHumanSheet will silhouette if load fails.
+  if sprites == nil then return spriteId end
+  if type(sprites) ~= "table" then return nil end
+
+  -- **`game.data`, and it used to be a bare `data`** -- a name no scope here
+  -- binds, so the lookup found the global nil, the vote table was never built
+  -- and every class the name transform could not resolve fell straight past
+  -- the overworld's own answer into the generic list. A LASS fought as a
+  -- COOLTRAINER_M rather than as the SPRITE_COOLTRAINER_F she walks around
+  -- as, which reads as a lazy fallback rather than as the dead branch it was.
+  local byClass = trainerSpritesByClass(game and game.data)
+  local mapped = byClass and byClass[id] or nil
+  if type(mapped) == "string" and type(sprites[mapped]) == "table" then
+    return mapped
+  end
+  for _, generic in ipairs(GENERIC_TRAINER_SPRITES) do
+    if type(sprites[generic]) == "table" then return generic end
+  end
+  return nil
+end
+
 function M.restoreMapMusic(game, opts)
   opts = opts or {}
   local Music = opts.Music

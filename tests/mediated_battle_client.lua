@@ -73,6 +73,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Sessions = need("Sessions")
 local Mediated = need("MediatedBattle")
+local Gen = need("Gen")
 
 -- ------------------------------------------------------------------
 -- a world small enough to state every expected number about
@@ -1472,6 +1473,198 @@ do
        "our seat ended up filled by the referee's replacement")
     eq(f.slots[2].species, "RATTATA", "...and the foe's too")
   end
+end
+
+-- ------------------------------------------------------------------
+-- 14. the move list: a type column, and a cursor that remembers
+-- ------------------------------------------------------------------
+--
+-- Two things the player asked the menu for, and both are *presentation only*:
+-- the wire, the choice and the sim are untouched by either.
+--
+--   * every row states its own type, so four moves can be compared at once
+--     rather than one at a time under the cursor;
+--   * the list opens on the move this monster last actually used, because a
+--     Gen 1 fight is mostly one attack repeated and walking back down to it
+--     every turn is a tax on a decision already made.
+do
+  local function client()
+    return setmetatable({
+      game = { data = DATA },
+      phase = "move",
+      active = 1,
+      cursor = 1,
+      moveMemory = {},
+      commandIndex = 1,
+      mine = {
+        { species = "CHARMANDER", moves = {
+            { id = "EMBER", pp = 25, maxPp = 25 },
+            { id = "GROWL", pp = 40, maxPp = 40 },
+            { id = "HYDRO", pp = 5, maxPp = 5 },
+        } },
+        { species = "SQUIRTLE", moves = { { id = "HYDRO", pp = 5, maxPp = 5 } } },
+      },
+    }, { __index = Mediated })
+  end
+
+  -- ------- the type column
+  local f = client()
+  local rows = f:bandMoveRows()
+  eq(#rows, 3, "one row per move")
+  eq(rows[1].tag, "FIRE", "the type is the row's own column...")
+  eq(rows[1].right, "25/25", "...and does not displace the PP beside it")
+  eq(rows[2].tag, "NORMAL", "a status move states its type too")
+  eq(rows[3].tag, "WATER", "...as does every other row, not just the hot one")
+
+  -- A referee-published sheet after Transform/Mimic can name a move this copy
+  -- has no record of. No record, no type: a blank column says nothing, and
+  -- inventing one would say something false.
+  f.mine[1].moves[3] = { id = "MYSTERY", pp = 5 }
+  rows = f:bandMoveRows()
+  eq(rows[3].tag, nil, "a move the dataset does not carry gets no type column")
+  eq(rows[3].label, "MYSTERY", "...and still shows under its id")
+
+  -- ------- the cursor
+  local g = client()
+  eq(g:rememberedMove(), 1,
+     "a monster that has not attacked yet opens on its first move")
+
+  local sent = {}
+  g.sendChoice = function(_, choice) sent[#sent + 1] = choice; return true end
+  check(g:pickMove(2), "the second move is sendable")
+  eq(sent[1].move, 1, "the wire is still 0-based, unchanged by any of this")
+  eq(g.moveMemory[1], 2, "and the move actually sent is what gets remembered")
+
+  local input = fakeInput()
+  g.phase = "choose"
+  g.commandIndex = 1
+  input.press("a")
+  g:updateCommand(input)
+  eq(g.phase, "move", "FIGHT opens the move list")
+  eq(g.cursor, 2, "...on the move this monster last used, not back on row one")
+
+  -- Per monster: the one that comes in after a switch opens on its own first
+  -- move, because row 2 of its sheet is a different move entirely.
+  g.active = 2
+  g.phase = "choose"
+  input.press("a")
+  g:updateCommand(input)
+  eq(g.cursor, 1, "a monster that has not attacked yet opens on row one, "
+     .. "whatever the one it replaced was using")
+
+  -- Sent is what counts. A refused send leaves the turn unspent, so moving
+  -- the cursor for it would be the menu reporting a decision never taken.
+  g.active = 1
+  g.sendChoice = function() return false end
+  check(not g:pickMove(3), "a refused send reports the refusal")
+  eq(g.moveMemory[1], 2, "...and leaves the remembered move where it was")
+
+  -- The sheet it has *now* is what the memory is clamped against: Transform
+  -- and Mimic rewrite one mid-fight, and a cursor past the end opens on a row
+  -- that is not drawn.
+  g.moveMemory[1] = 9
+  eq(g:rememberedMove(), 1,
+     "a remembered row past the end of the current sheet falls back to one")
+end
+
+-- ------------------------------------------------------------------
+-- 15. who is standing on the foe edge of the arena
+-- ------------------------------------------------------------------
+--
+-- `Battlefield.drawHuman` falls back to a dark placeholder rectangle for a
+-- human that names no walk sheet, and that is what a **solo trainer fight**
+-- drew for its whole length: `battlefieldCtx` folds every non-wild shape into
+-- "1v1" for the arena's geometry, and the foe-human arm was reading that same
+-- folded value -- so a `coop_npc` fight was described as a peer battle and
+-- asked the roster for a sprite belonging to a player who does not exist.
+--
+-- The trainer arm has to be tested *ahead* of the peer arm for exactly that
+-- reason, and the walk-sheet resolution under it is `Gen.trainerWalkSpriteId`,
+-- which co-op has always used and which now has one home rather than two.
+do
+  -- Red has SPRITE_YOUNGSTER and no SPRITE_LASS, which is the shape that makes
+  -- all three rungs of the ladder reachable in one fixture.
+  local SPRITES = {
+    SPRITE_YOUNGSTER     = { frames = 4 },
+    SPRITE_COOLTRAINER_F = { frames = 4 },
+    SPRITE_COOLTRAINER_M = { frames = 4 },
+  }
+  local ARENA = {
+    pokemon = DATA.pokemon,
+    sprites = SPRITES,
+    -- Two objects fight as LASS drawn with the cooltrainer sheet and one with
+    -- the youngster sheet, so the vote has a winner rather than a tie.
+    maps = {
+      ROUTE_3 = { objects = {
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_COOLTRAINER_F" },
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_YOUNGSTER" },
+      } },
+      ROUTE_4 = { objects = {
+        { trainerClass = "OPP_LASS", sprite = "SPRITE_COOLTRAINER_F" },
+      } },
+    },
+  }
+  local game = {
+    data = ARENA,
+    save = { party = {}, player = { name = "ANN" } },
+  }
+
+  -- ------- the resolver itself
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_YOUNGSTER" }, game), "SPRITE_YOUNGSTER",
+     "OPP_YOUNGSTER walks around as SPRITE_YOUNGSTER, by the name transform")
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_LASS" }, game), "SPRITE_COOLTRAINER_F",
+     "a class with no sheet of its own takes the one the overworld votes for")
+  eq(Gen.trainerWalkSpriteId({ id = "OPP_NOBODY" }, game), "SPRITE_COOLTRAINER_M",
+     "...and a class nobody walks around as still gets a body, not an empty edge")
+  eq(Gen.trainerWalkSpriteId(nil, game), nil, "no trainer names no sheet")
+  eq(Gen.trainerWalkSpriteId({}, game), nil, "...nor does a record with no id")
+
+  -- ------- and what the arena is told
+  local function screen(fields)
+    local self = setmetatable({
+      game = game,
+      slots = {}, lines = {}, mine = {},
+      active = 1, mySide = "a", phase = "play",
+      commandIndex = 1, frame = 1,
+    }, { __index = Mediated })
+    for k, v in pairs(fields) do self[k] = v end
+    return self
+  end
+
+  local npc = screen({
+    mode = "coop_npc",
+    peerName = "LASS",
+    trainer = { id = "OPP_LASS", name = "LASS" },
+  }):battlefieldCtx()
+  eq(#npc.foeHumans, 1, "a solo trainer fight stands one figure on the foe edge")
+  eq(npc.foeHumans[1].spriteId, "SPRITE_COOLTRAINER_F",
+     "...with the trainer's own walk sheet, not a placeholder silhouette")
+  eq(npc.foeHumans[1].name, "LASS", "...named as the trainer")
+  eq(npc.foeHumans[1].id, "OPP_LASS", "...and identified by their class")
+
+  -- The entry is unconditional, exactly as CoopBattle builds it: a trainer
+  -- whose sheet cannot be named is still a trainer standing there, and the
+  -- silhouette is a better answer than an empty edge.
+  local nameless = screen({
+    mode = "coop_npc", peerId = "npc", peerName = "BUG CATCHER",
+  }):battlefieldCtx()
+  eq(#nameless.foeHumans, 1,
+     "a trainer record that never arrived still puts somebody on the edge")
+  eq(nameless.foeHumans[1].spriteId, nil, "...with no sheet to name")
+  eq(nameless.foeHumans[1].name, "BUG CATCHER",
+     "...still named from the fight, never as an absent FRIEND")
+
+  local wild = screen({ mode = "wild", peerName = "WILD" }):battlefieldCtx()
+  eq(#wild.foeHumans, 0, "a wild fight leaves the foe edge empty")
+
+  -- The peer arm, unchanged: an ordinary MMO 1v1 is still drawn from the
+  -- roster, and nothing above may have moved it.
+  local peer = screen({
+    mode = "1v1", peerId = "peer1", peerName = "BOB",
+  }):battlefieldCtx()
+  eq(#peer.foeHumans, 1, "an MMO 1v1 still stands the peer on the foe edge")
+  eq(peer.foeHumans[1].id, "peer1", "...identified by their player id")
+  eq(peer.foeHumans[1].name, "BOB", "...and named from the roster")
 end
 
 T.finish("mediated_battle_client")

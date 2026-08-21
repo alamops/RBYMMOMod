@@ -6,6 +6,36 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.18] - 2026-08-20
+
+### Fixed
+
+- **`WRAP` and friends hit one time too many.** `WRAP`, `BIND`, `CLAMP` and
+  `FIRE_SPIN` roll a 2–5 counter, and in Gen 1 that number is the *total* count
+  of attacks the move gets — the one that lands it included. The referee was
+  applying the move's damage and then ticking a residual for the full counter at
+  the end of that same turn, so a 2-turn `WRAP` struck three times and a 5-turn
+  one struck six. The trap is now marked on the turn it lands and spends that
+  attack off the counter without paying damage twice, which puts a chain back at
+  2–5 hits costing the victim 1–4 turns. Fixed in all four sim twins
+  (`src/BattleSim`, `src/BattleSim2`, `server/lib/battle`, `server/lib/battle2`)
+  and pinned by a new `trap_chain` scenario in both cross-runtime turn-parity
+  pairs, so a runtime that ever counts it the other way fails rather than drifts.
+
+- **A `cancel` could unlock a trapped monster — and hang the fight.** The
+  referee fills the answer for a seat that has no choice to make (trap lock-in,
+  `HYPER_BEAM` recharge, `BIDE`, a thrash, a charge release), and
+  `submitChoice`'s `cancel` branch cleared *any* filed answer, forced ones
+  included. A client could cancel out of a `WRAP` and switch away. Worse, a trap
+  forces **both** seats, and a turn where every seat is forced deliberately opens
+  with no deadline — so clearing one of those answers left the battle waiting on
+  a choice with nothing left to time it out, permanently. Forced answers are now
+  marked and refuse `cancel`; an ordinary answer is still cancellable as before.
+  The stock client never sent one, so this was only reachable from a modified
+  peer, but the hub forwards `cancel` from anybody.
+
+## [1.0.17] - 2026-08-19
+
 ### Added
 
 - **This mod's battle system, with nobody else in the room.** A new
@@ -91,31 +121,75 @@ here must match `manifest.version`.
   BICYCLE row writes — and asserts on the sheet the frame actually posed
   from (`tests/drivers/mmo_util.lua`, `M.shotBike`).
 
+### Changed
+
+- **The MOVES list opens on the move you last used, and every row states its
+  own type.** Two things the battle menu was making the player pay for.
+
+  The list used to open on row one every single turn, so a Gen 1 fight — which
+  is mostly one attack repeated — charged a walk back down the list for a
+  decision already made. It now opens on the move this monster was last sent
+  into a turn with (`rememberedMove`, on both the mediated screen and the
+  co-op one). Nothing is pre-committed: it is only where the cursor starts, B
+  still backs out to the command grid, and the choice on the wire is byte-for
+  -byte the one it always was. The memory is per monster rather than per
+  battle — row 2 of the mon you switched to is a different move — and it is
+  clamped against the sheet that monster has *now*, so a Transform or a Mimic
+  cannot leave the cursor on a row nothing draws.
+
+  Type used to ride the panel title (`MOVES   TYPE/ELECTRIC`), which meant it
+  only ever described whichever row the cursor was on: comparing four moves
+  took four presses. It is now a column on each row, just left of PP, so the
+  whole sheet reads at once — and the title is back to plain `MOVES` rather
+  than restating the cursor. `Battlefield.drawListPanel` grew an optional
+  per-row `tag` for it, measured as a column across the visible rows so both
+  it and PP line up down the panel; a list with no tag on any row is laid out
+  exactly where it always was.
+
 ### Fixed
 
-- **`WRAP` and friends hit one time too many.** `WRAP`, `BIND`, `CLAMP` and
-  `FIRE_SPIN` roll a 2–5 counter, and in Gen 1 that number is the *total* count
-  of attacks the move gets — the one that lands it included. The referee was
-  applying the move's damage and then ticking a residual for the full counter at
-  the end of that same turn, so a 2-turn `WRAP` struck three times and a 5-turn
-  one struck six. The trap is now marked on the turn it lands and spends that
-  attack off the counter without paying damage twice, which puts a chain back at
-  2–5 hits costing the victim 1–4 turns. Fixed in all four sim twins
-  (`src/BattleSim`, `src/BattleSim2`, `server/lib/battle`, `server/lib/battle2`)
-  and pinned by a new `trap_chain` scenario in both cross-runtime turn-parity
-  pairs, so a runtime that ever counts it the other way fails rather than drifts.
+- **A solo fight drew the player's POKéMON from behind, and its trainer not
+  at all.** With `SOLO BATTLES` on, the arena stood a dark placeholder
+  rectangle where the opposing trainer should be, and drew this client's own
+  monster as its *back* pic, mirrored — the view the classic 160×144 stage
+  wants — where a co-op fight of the same shape draws the front pic. Two
+  separate causes under one screen.
 
-- **A `cancel` could unlock a trapped monster — and hang the fight.** The
-  referee fills the answer for a seat that has no choice to make (trap lock-in,
-  `HYPER_BEAM` recharge, `BIDE`, a thrash, a charge release), and
-  `submitChoice`'s `cancel` branch cleared *any* filed answer, forced ones
-  included. A client could cancel out of a `WRAP` and switch away. Worse, a trap
-  forces **both** seats, and a turn where every seat is forced deliberately opens
-  with no deadline — so clearing one of those answers left the battle waiting on
-  a choice with nothing left to time it out, permanently. Forced answers are now
-  marked and refuse `cancel`; an ordinary answer is still cancellable as before.
-  The stock client never sent one, so this was only reachable from a modified
-  peer, but the hub forwards `cancel` from anybody.
+  **The trainer.** `MediatedBattle:battlefieldCtx` folds every non-wild shape
+  into `"1v1"` for the arena's geometry, and the foe-figure arm was reading
+  that folded value — so a `coop_npc` fight was described as a *peer* battle
+  and asked the roster for the sprite of a player a solo fight does not have.
+  `Battlefield.drawHuman` falls back to a silhouette for a figure that names
+  no walk sheet, and that silhouette was the whole trainer. The arm now tests
+  the fight's real mode first and resolves the NPC's overworld sheet the way
+  co-op always has; `src/SoloBattle.lua` hands the screen the engine's own
+  `data.trainers` record for it to read.
+
+  **The monster.** `MediatedBattle:seatFront` hands the arena a front pic for
+  *both* sides, and on Gen 1 it gets one by building a throwaway battler. It
+  was passing the wire sheet straight to `BattleState.makeBattler`, which is
+  written against the engine's own mon: it measures the HP bar with
+  `mon.stats.hp`, and a `Wire.battleMon` sheet keeps its maximum beside the
+  stats as `maxHp` and has no `stats.hp` at all. So the call threw, the pcall
+  swallowed it, and this returned nil for **every** seat — which looked like
+  it worked, because the caller falls back to the pic the slot already holds
+  and a foe's slot pic is already a front. Only this client's own seat, whose
+  slot pic is the back, showed it. It builds a save-mon-shaped stub now, the
+  same one `refreshSlotSprite` has always built.
+
+  `Gen.trainerWalkSpriteId` is the co-op resolver moved to `src/Gen.lua` so
+  both screens share one copy (`MediatedBattle` cannot require `CoopBattle`
+  without closing a cycle). Moving it fixed a second bug it had been hiding:
+  the class→walk-sheet vote over `data.maps` read a bare `data`, a name no
+  scope there binds, so the lookup found the global nil and every class the
+  name transform could not resolve fell straight past the overworld's own
+  answer into the generic list — a LASS fought as `SPRITE_COOLTRAINER_M`
+  rather than as the `SPRITE_COOLTRAINER_F` she walks around as.
+
+  Covered where it draws: the solo end-to-end driver now probes the live arena
+  in both the wild and the trainer leg, asserting that our own seat's pic is
+  not the back pic the slot holds and that the trainer on the foe edge names a
+  real walk sheet.
 
 - **A nicknamed POKéMON was a blank box at Lv 1 on the other player's
   screen.** In an MMO battle the opponent's monster drew as the arena's
