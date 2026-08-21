@@ -1678,7 +1678,8 @@ class Battle {
             mon: choice.slot - 1,
           });
           this._emit('send', {
-            slot: fighter.slot, side: fighter.side, hp: mon.hp, text: mon.species,
+            slot: fighter.slot, side: fighter.side, hp: mon.hp, maxHp: mon.maxHp,
+            text: mon.species,
             speciesId: mon.speciesId, level: mon.level,
             mon: choice.slot - 1,
           });
@@ -1853,7 +1854,10 @@ class Battle {
         if (result.stat === 'hp' && result.delta > 0) {
           this._emit('drain', {
             slot: fighter.slot, side: fighter.side,
-            amount: result.delta, hp: mon.hp,
+            // ...and what the bar is now out of: an HP UP moves the maximum
+            // itself, so a client told only the new HP would draw the rise
+            // against the old ceiling.
+            amount: result.delta, hp: mon.hp, maxHp: mon.maxHp,
           });
         } else if (result.delta > 0) {
           this._emit('stat', {
@@ -3281,7 +3285,8 @@ function attempt(opts) {
     const mon = activeMon(fighter);
     if (mon) {
       self._emit('send', {
-        slot: fighter.slot, side: fighter.side, hp: mon.hp, text: mon.species,
+        slot: fighter.slot, side: fighter.side, hp: mon.hp, maxHp: mon.maxHp,
+        text: mon.species,
         speciesId: mon.speciesId, level: mon.level,
         mon: fighter.active - 1,
       });

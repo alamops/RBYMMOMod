@@ -157,7 +157,20 @@ M.MOD_ID = "rby_mmo"
 -- refused with nothing on either screen to say why, and a roster nobody
 -- could trust. Refusal naming both versions is the only sentence either
 -- player can act on.
-M.PROTOCOL = 23
+-- 24 is `maxHp`: what a bar is out of, stated by the referee on `send` -- and
+-- on the `drain` an HP UP produces, which is the one thing in a fight that
+-- moves the ceiling itself.  Every other reading of HP on this wire is a
+-- current number, so a client had no handle on the maximum at all and took the
+-- largest HP it had ever seen on a seat for it.  That is right for a monster
+-- that walks out whole and wrong for every one that does not: a party monster
+-- that ended the last fight on 42 of 200 opened the next one drawing a *full*
+-- bar, with both HUDs printing "42/42", and it stayed wrong for the rest of
+-- that fight because nothing later ever raises the guess.  A protocol-23
+-- intermediator states none and a client falls back to the guess, which is
+-- exactly the failure -- and it is on the player's *own* monster, which is the
+-- one bar they read every turn.
+-- This number lives here and in server/lib/relay.js -- bump them together.
+M.PROTOCOL = 24
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

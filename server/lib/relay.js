@@ -144,7 +144,16 @@ function defaultSpriteFor(generation) {
 // auto-refusal reads as "BOB is in a battle." rather than wearing the
 // sentence a person pressing NO earns. A protocol-22 hub discards the flag
 // and strips the reason, which is precisely the bug.
-const PROTOCOL = 23;
+// 24: `maxHp` -- what a bar is out of, stated by the referee on `send` (and on
+// the `drain` an HP UP produces, which moves the ceiling itself). An event
+// carried current HP and nothing else, so a client had to take the largest HP
+// it had ever seen on a seat for that seat's maximum -- right for a monster
+// that walks out whole, wrong for every one that does not. A party mon that
+// ended the last fight on 42 of 200 opened the next one drawing a *full* bar
+// over the number 42, and both HUDs printed "42/42". A protocol-23 hub states
+// none and the client falls back to that guess, which is precisely the bug --
+// visible on your own monster, every fight after the first one it was hurt in.
+const PROTOCOL = 24;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right

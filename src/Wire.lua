@@ -1726,6 +1726,14 @@ function M.battleEvent(raw)
   -- name: an event is about somebody who is out, not about a bench position.
   if raw.slot ~= nil then out.slot = M.int(raw.slot, 0, M.FIELD_MAX) end
   if raw.hp ~= nil then out.hp = M.int(raw.hp, 0, M.HP_MAX) end
+  -- What that HP is out of, on the events that can move it: `send` states it
+  -- for the monster walking on, and a `drain` states it when an HP UP raised
+  -- the ceiling itself.  Optional, and its absence is not a zero: a client
+  -- that is told none falls back to the oldest reading of this wire -- the
+  -- largest HP it has ever seen on the seat -- which is right for a monster
+  -- that came out whole and wrong for one that came out hurt.  Floored at 1
+  -- for the reason M.battleMon floors it there: the bar divides by it.
+  if raw.maxHp ~= nil then out.maxHp = M.int(raw.maxHp, 1, M.HP_MAX) end
   -- `exp` carries the facts a client needs to run its own award: which monster
   -- fell and how many shares split it.  Same sanitisers a battler's own fields
   -- get (M.name / M.int over LEVEL_MAX), because they are the same quantities

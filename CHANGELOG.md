@@ -6,6 +6,38 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.20] - 2026-08-20
+
+### Fixed
+
+- **A hurt POKéMON's HP bar filled all the way up in the next fight.** Take
+  damage, win, walk into the next encounter, and this mod's battle screen drew
+  a **full** bar over the HP you actually had — both plates and both classic
+  HUDs printed `42/42` for a monster carrying 42 of its 200. It stayed wrong
+  for the rest of that fight, and the number under the bar was the one a player
+  decides whether to reach for a POTION on.
+
+  The referee always knew better; the wire had no way to say so. Every reading
+  of HP on this protocol is a *current* number, so a client had no handle on a
+  seat's maximum at all and stood in the largest HP it had ever seen there —
+  which is exactly right for a monster sent out whole, and wrong for every one
+  that is not. Nothing later ever raises that guess, so the first send decided
+  the bar for the whole fight.
+
+  **PROTOCOL 24** adds `maxHp` to the event vocabulary: the referee states what
+  a bar is out of on the `send` a monster walks out on, and on the `drain` an
+  HP UP produces — the one thing mid-fight that moves the ceiling itself. Both
+  turn machines and both of their JavaScript twins emit it, both sanitisers
+  pass it, and `MediatedBattle` takes a stated maximum as truth (keeping the
+  old guess only as the fallback for a stream that carries none, and lifting it
+  to the HP that arrives with it if the two ever disagree). The plate then
+  prints `<current>/<total>` over a bar filled to that fraction, which is what
+  it always meant to.
+
+  Visible in a solo fight because that is the one that writes HP back to your
+  save, but the fix is on the wire: an MMO or LAN fight where a peer sends out
+  a hurt monster drew the same full bar.
+
 ## [1.0.19] - 2026-08-20
 
 ### Fixed

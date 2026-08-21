@@ -1240,6 +1240,17 @@ function cleanBattleEvent(raw) {
     const hp = cleanInt(raw.hp, 0, HP_MAX);
     if (hp !== null) event.hp = hp;
   }
+  // What that HP is out of, on the events that can move it: `send` states it
+  // for the monster walking on, and a `drain` states it when an HP UP raised
+  // the ceiling itself. Optional, and its absence is not a zero: a client that
+  // is told none falls back to the oldest reading of this wire -- the largest
+  // HP it has ever seen on the seat -- which is right for a monster that came
+  // out whole and wrong for one that came out hurt. Floored at 1 for the reason
+  // cleanBattleMon floors it there: the bar divides by it.
+  if (raw.maxHp !== undefined && raw.maxHp !== null) {
+    const maxHp = cleanInt(raw.maxHp, 1, HP_MAX);
+    if (maxHp !== null) event.maxHp = maxHp;
+  }
   // `exp` carries the facts a client needs to run its own award: which monster
   // fell and how many shares split it. Same sanitisers a battler's own fields
   // get (cleanText over NAME_MAX / cleanInt over LEVEL_MAX), because they are

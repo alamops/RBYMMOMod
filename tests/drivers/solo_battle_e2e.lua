@@ -754,6 +754,88 @@ return function(game)
   end
 
   -- ------------------------------------------------------------------
+  -- 4b. the fight after that one: a hurt monster's bar is out of its own
+  --     maximum, not out of the HP it walked in on
+  -- ------------------------------------------------------------------
+  --
+  -- **Deliberately no `freshParty()`.** The leg above just wrote HP back to
+  -- the save, so this is the second encounter of the day with the monster that
+  -- fought the first -- which is exactly where the bug lived. An event on this
+  -- wire carries current HP, and the screen used to take the largest HP it had
+  -- ever seen on a seat for that seat's maximum: a monster walking out on 42
+  -- of 200 drew a **full** bar with "42/200" collapsed to "42/42" over it, and
+  -- stayed that way for the whole fight. From PROTOCOL 24 the referee states
+  -- the maximum on the `send`.
+  --
+  -- Out here rather than only in the suites because the numbers a player reads
+  -- come off the *save's* stat block through the real snapshot, the real
+  -- referee and the real screen -- and each of those three could have been the
+  -- one that lost them.
+  do
+    local before = lead()
+    local maxIn = tonumber(before and before.stats and before.stats.hp) or 0
+    check(maxIn > 0, "the save monster states a maximum to check against")
+    check((tonumber(before and before.hp) or 0) > 0,
+          "and it came out of the last fight standing")
+    -- **The wound is written here rather than fought for**, and that is the
+    -- one liberty this leg takes. The lead is a level-50 starter and the
+    -- staged encounters are level 5, so the fight above lands no damage on it
+    -- at all -- the leg would pass on a monster that walked in whole, which is
+    -- precisely the case the old guess already got right. So the save is put
+    -- where a real fight leaves it: hurt, on a monster whose maximum only its
+    -- own stat block knows. Everything after this point is the real path --
+    -- the real snapshot, the real referee, the real send, the real screen.
+    if before then before.hp = math.max(1, math.floor(maxIn / 4)) end
+    local hpIn = tonumber(before and before.hp) or 0
+    log(("solo second fight opens on %d/%d"):format(hpIn, maxIn))
+    check(hpIn < maxIn, "the monster walks into this one hurt",
+          ("%d/%d"):format(hpIn, maxIn))
+
+    local finished = nil
+    local staged, species = stageWildOf({ "PIDGEY", "SENTRET", "RATTATA" }, 5,
+      function(result) finished = result end)
+    check(staged ~= nil, "staged a second wild encounter", tostring(species))
+
+    if staged then
+      check(awaitDivert("the second solo wild divert"),
+            "the second encounter diverts too")
+      check(awaitCommandMenu("the second solo wild command grid"),
+            "the command grid opens on it")
+
+      local top = medTop()
+      local slot = top and top.slots and top.slots[top:mySlot()]
+      local shown = slot and (slot.shownHp or slot.hp) or nil
+      log(("solo second seat: hp=%s shownHp=%s maxHp=%s"):format(
+        tostring(slot and slot.hp), tostring(shown),
+        tostring(slot and slot.maxHp)))
+      check(slot ~= nil, "our own seat is on the field")
+      check(slot ~= nil and tonumber(slot.maxHp) == maxIn,
+            "the seat is drawn against the save's own maximum",
+            ("%s vs %d"):format(tostring(slot and slot.maxHp), maxIn))
+      check(slot ~= nil and tonumber(slot.hp) == hpIn,
+            "...over the HP it really walked in on",
+            ("%s vs %d"):format(tostring(slot and slot.hp), hpIn))
+      -- The bar itself, through the same model the plate draws from: a hurt
+      -- monster must not produce a full one.
+      if slot and maxIn > 0 then
+        local frac = math.min(1, math.max(0, (tonumber(shown) or 0) / maxIn))
+        log(("solo second bar: frac=%.3f"):format(frac))
+        check(frac < 1,
+              "a monster that walked in hurt draws a part-filled bar",
+              ("%.3f"):format(frac))
+        check(math.abs(frac - hpIn / maxIn) < 0.001,
+              "...filled to exactly the fraction the numbers state",
+              ("%.3f vs %.3f"):format(frac, hpIn / maxIn))
+      end
+      shot("solo-wild-second-hp")
+
+      local over, seen = fightToEnd(240)
+      check(over, "the second solo wild fight runs to an end", tostring(seen))
+      check(backToOverworld(), "and the overworld is restored after it")
+    end
+  end
+
+  -- ------------------------------------------------------------------
   -- 5. a refused kind stays vanilla
   -- ------------------------------------------------------------------
   do

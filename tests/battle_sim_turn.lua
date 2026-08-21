@@ -349,6 +349,32 @@ do
   eq(sends[2].speciesId, nil, "a sheet that stated no id produces no field")
   eq(sends[2].level, 20, "...though the level is always known")
   ok(Events.check(sends[0]), "and the event is one Wire's whitelist accepts")
+
+  -- `maxHp` is the same kind of field for the same reason: every other reading
+  -- of HP on this wire is a current number, so a client that was told only
+  -- `hp` had to take the largest it had ever seen on a seat for that seat's
+  -- maximum -- right for a monster sent out whole, and wrong for every one
+  -- that walks out already hurt.  The referee has held the real maximum since
+  -- it built the battler, so it says it.
+  eq(sends[0].maxHp, 60, "a send states what its HP is out of")
+  eq(sends[0].hp, 60, "...which the opening send matches, nobody having moved")
+end
+
+-- ...and the case the guess got wrong, stated outright: a party monster that
+-- walked into this fight from the last one, hurt.
+do
+  local battle = battleOf({
+    aMons = { mon({ maxHp = 200, hp = 42 }) },
+    bMons = { mon({ species = "Beta" }) },
+  })
+  local send
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "send" and event.slot == 0 then send = event end
+  end
+  ok(send ~= nil, "the hurt monster is fielded")
+  eq(send.hp, 42, "the send carries the HP it really has")
+  eq(send.maxHp, 200, "...and the maximum that HP is a fifth of")
+  ok(Events.check(send), "still an event Wire's whitelist accepts")
 end
 
 -- ------------------------------------------------------------------
