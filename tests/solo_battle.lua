@@ -1098,6 +1098,45 @@ end)()
 end)()
 
 -- ------------------------------------------------------------------
+-- 11. the second fight of the day: a bar that is out of the real maximum
+-- ------------------------------------------------------------------
+--
+-- A solo fight writes HP back to the save, so the *next* encounter opens with
+-- a monster that is already hurt -- and that is the one case the mediated
+-- screen used to get wrong. An event on this wire carries current HP, and the
+-- screen had no other handle on a seat's maximum, so it took the largest HP it
+-- had ever seen there for one: a monster walking out on 42 of 200 drew a full
+-- bar with "42/42" printed over it, for the rest of the fight.
+--
+-- The referee has held the real maximum since it built the battler, and from
+-- PROTOCOL 24 states it on the `send`. Asserted here, on a whole fight through
+-- the fake transport, because this is where a player meets it -- the wire-level
+-- reading is tests/mediated_battle_client.lua's section 15.
+
+;(function()
+  local hurt = mon({ species = "ALPHA", spd = 90, atk = 40, maxHp = 200,
+                     level = 20 })
+  hurt.hp = 42
+  local f = fightOf("wild", { party = { hurt } })
+  ok(f.started, "a hurt party still opens the fight")
+
+  local sheet = f.fight.mine[1]
+  eq(sheet.hp, 42, "the upload describes the monster as it is")
+  eq(sheet.maxHp, 200, "...with the maximum beside it")
+
+  local seat = f.fight.slots[f.fight:mySlot()]
+  eq(seat.hp, 42, "the screen's own seat holds that HP")
+  eq(seat.maxHp, 200, "and is drawn against the real maximum, not against 42")
+  eq(("%d/%d"):format(seat.shownHp or seat.hp, seat.maxHp), "42/200",
+     "so the plate prints the pair a player can act on")
+
+  -- The foe of a wild fight walks out whole, which is the case the old guess
+  -- got right -- it must keep getting it right.
+  local foe = f.fight.slots[f.fight:foeSlot()]
+  eq(foe.hp, foe.maxHp, "a wild monster is still out of its own whole bar")
+end)()
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("solo_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)
