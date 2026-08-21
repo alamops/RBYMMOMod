@@ -261,12 +261,23 @@ return function(game)
   screen.mine = {
     { species = MINE_SPECIES, level = 25, nickname = "SPARKY",
       hp = 40, stats = { hp = 55 },
-      -- `maxPp`, not `ppMax`: M:bandMoveRows() (src/MediatedBattle.lua:3565)
-      -- reads `move.maxPp` for the PP column the new moves-list frame
+      -- `maxPp`, not `ppMax`: M:bandMoveRows() (src/MediatedBattle.lua)
+      -- reads `move.maxPp` for the PP column the moves-list frame
       -- exercises -- get this wrong and drawModernBand's pcall just
       -- swallows the mismatch and the frame silently falls back to the
       -- classic GB list instead of the widget under test.
-      moves = { { id = "THUNDERBOLT", pp = 15, maxPp = 15 } } },
+      --
+      -- Four moves, not one: the list draws its type and PP as *columns*
+      -- measured across the visible rows, so a single-row sheet cannot show
+      -- whether they line up. Two ELECTRIC and two NORMAL, with the widest
+      -- name (THUNDERSHOCK) beside the widest type, is the row that runs out
+      -- of width first.
+      moves = {
+        { id = "THUNDERSHOCK", pp = 25, maxPp = 30 },
+        { id = "GROWL",        pp = 39, maxPp = 40 },
+        { id = "THUNDER_WAVE", pp = 20, maxPp = 20 },
+        { id = "QUICK_ATTACK", pp = 30, maxPp = 30 },
+      } },
   }
   screen.active = 1
   screen.slots[screen:foeSlot()] = {
@@ -275,6 +286,27 @@ return function(game)
   screen.slots[screen:mySlot()] = {
     species = MINE_SPECIES, level = 25, hp = 40, maxHp = 55,
   }
+  -- The rosters the referee publishes (`team`, PROTOCOL 24), which is what
+  -- the corner chips are drawn from. Seeded here rather than left to the
+  -- `mine` fallback so BOTH chips are on the frame under test: the fallback
+  -- only ever fills the player's own, and a foe chip that never drew is
+  -- exactly the regression these assertions exist to catch. Mixed states on
+  -- purpose -- a live ball, a statused one and a spent one -- so the frame
+  -- exercises all three cap colours plus the empty rings past the party.
+  screen.teams[screen:mySlot()] = "oosx"
+  screen.teams[screen:foeSlot()] = "oox"
+
+  -- The chip's ball run in canvas space: past the fixed name column, one
+  -- pitch per slot, centred on the panel. Mirrors drawRoster's own arithmetic
+  -- (src/Battlefield.lua) -- if the two ever disagree, this driver is
+  -- measuring empty panel and would pass a frame with no balls on it.
+  local function ballRunRect(chip)
+    local x = chip.x + Battlefield.ROSTER_PAD + Battlefield.ROSTER_NAME_W
+      + Battlefield.ROSTER_GAP
+    local w = Battlefield.ROSTER_SLOTS * Battlefield.ROSTER_BALL_PITCH
+    local r = Battlefield.ROSTER_BALL_R
+    return { x = x, y = chip.y + chip.h / 2 - r, w = w, h = r * 2 }
+  end
 
   game.stack:push(screen)
   U.wait(20)
@@ -505,6 +537,46 @@ return function(game)
       check(false, label .. ": ally plate present")
     end
 
+    -- (b2) the roster chips: one per trainer, in the two corners the plates
+    -- do not use. Three things are asserted and each one fails a different
+    -- regression: that both chips exist at all (the foe's is the one with no
+    -- local fallback), that the panel is really painted (a layout entry with
+    -- no draw behind it would pass every model test in the suite), and that
+    -- the ball run inside it carries saturated colour -- a red cap -- rather
+    -- than being an empty panel with a name on it.
+    local chipsBySide = {}
+    for _, chip in ipairs(layout.rosters) do chipsBySide[chip.side] = chip end
+    for _, side in ipairs({ "ally", "foe" }) do
+      local chip = chipsBySide[side]
+      if chip then
+        local darkFrac = darkPanelFraction(data, imgW, imgH, toScreen, chip, 3)
+        check(darkFrac > 0.25, label .. ": " .. side .. " roster chip is painted",
+          ("dark fraction=%.2f at %d,%d %dx%d"):format(
+            darkFrac, chip.x, chip.y, chip.w, chip.h))
+        local run = ballRunRect(chip)
+        local sat = maxSaturation(data, imgW, imgH, toScreen, run, 0)
+        check(sat > 0.12, label .. ": " .. side .. " roster chip has coloured balls",
+          ("max sat=%.3f run=%d,%d %dx%d"):format(sat, run.x, run.y, run.w, run.h))
+        local textFrac = maxRowWhiteFraction(data, imgW, imgH, toScreen, chip, 3)
+        check(textFrac > 0.03, label .. ": " .. side .. " roster chip names its trainer",
+          ("best row bright fraction=%.3f"):format(textFrac))
+      else
+        check(false, label .. ": " .. side .. " roster chip present")
+      end
+    end
+
+    -- ...and the rule the corners were chosen for, restated against the frame
+    -- that was actually drawn rather than against a hand-built layout.
+    for _, chip in ipairs(layout.rosters) do
+      for _, plate in ipairs(layout.plates) do
+        local hit = chip.x < plate.x + plate.w and plate.x < chip.x + chip.w
+          and chip.y < plate.y + plate.h and plate.y < chip.y + chip.h
+        check(not hit, label .. ": no roster chip overlaps a HUD plate",
+          ("chip %s at %d,%d vs %s plate at %d,%d"):format(
+            chip.side, chip.x, chip.y, plate.side, plate.x, plate.y))
+      end
+    end
+
     -- (c) belt-and-braces: monDrawParams reports flip=true for the ally seat
     -- (facing == "right"), flip=false for the foe (facing == "left").
     for _, mon in ipairs(layout.mons) do
@@ -577,8 +649,46 @@ return function(game)
   end
 
   -- ---- (b) moves-list frame: phase == "move", drawListPanel's MOVES list ----
+  --
+  -- The rows are asserted here rather than only photographed: the type column
+  -- is resolved through the *real* TypeChart against this boot's own dataset,
+  -- which is the half a fixture-stubbed unit test cannot reach. A move whose
+  -- record this boot does not carry would silently drop its type and the
+  -- screenshot would still look like a perfectly good moves list.
   screen.phase = "move"
   screen.cursor = 1
+  do
+    local moveRows = screen:bandMoveRows()
+    check(#moveRows == 4, "move: one row per move on the sheet",
+          "rows=" .. tostring(#moveRows))
+    local tagged, tags = 0, {}
+    for _, row in ipairs(moveRows) do
+      if type(row.tag) == "string" and row.tag ~= "" then
+        tagged = tagged + 1
+        tags[#tags + 1] = row.tag
+      end
+    end
+    check(tagged == #moveRows,
+          "move: every row states its own type, resolved through the real "
+          .. "TypeChart", table.concat(tags, "/"))
+    check(moveRows[1].tag == "ELECTRIC" and moveRows[2].tag == "NORMAL",
+          "move: the type on the row is the move's own, not the cursor's",
+          tostring(moveRows[1].tag) .. " / " .. tostring(moveRows[2].tag))
+    check(moveRows[1].right == "25/30",
+          "move: PP still keeps its own column beside the type",
+          tostring(moveRows[1].right))
+
+    -- The cursor's memory, on the same live screen. Nothing is committed --
+    -- `pickMove` is what writes it, and it opens the list where the player
+    -- left it rather than back on row one.
+    check(screen:rememberedMove() == 1,
+          "move: a monster that has not attacked yet opens on its first move")
+    screen.moveMemory = screen.moveMemory or {}
+    screen.moveMemory[screen.active] = 3
+    check(screen:rememberedMove() == 3,
+          "move: and afterwards on the move it was last sent into a turn with")
+    screen.moveMemory[screen.active] = nil
+  end
   U.wait(6)
   local path3 = SHOT_DIR .. "/battlefield-move.png"
   if U.shot(game, path3) then

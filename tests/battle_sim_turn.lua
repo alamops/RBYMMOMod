@@ -349,6 +349,32 @@ do
   eq(sends[2].speciesId, nil, "a sheet that stated no id produces no field")
   eq(sends[2].level, 20, "...though the level is always known")
   ok(Events.check(sends[0]), "and the event is one Wire's whitelist accepts")
+
+  -- `maxHp` is the same kind of field for the same reason: every other reading
+  -- of HP on this wire is a current number, so a client that was told only
+  -- `hp` had to take the largest it had ever seen on a seat for that seat's
+  -- maximum -- right for a monster sent out whole, and wrong for every one
+  -- that walks out already hurt.  The referee has held the real maximum since
+  -- it built the battler, so it says it.
+  eq(sends[0].maxHp, 60, "a send states what its HP is out of")
+  eq(sends[0].hp, 60, "...which the opening send matches, nobody having moved")
+end
+
+-- ...and the case the guess got wrong, stated outright: a party monster that
+-- walked into this fight from the last one, hurt.
+do
+  local battle = battleOf({
+    aMons = { mon({ maxHp = 200, hp = 42 }) },
+    bMons = { mon({ species = "Beta" }) },
+  })
+  local send
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "send" and event.slot == 0 then send = event end
+  end
+  ok(send ~= nil, "the hurt monster is fielded")
+  eq(send.hp, 42, "the send carries the HP it really has")
+  eq(send.maxHp, 200, "...and the maximum that HP is a fifth of")
+  ok(Events.check(send), "still an event Wire's whitelist accepts")
 end
 
 -- ------------------------------------------------------------------
@@ -1382,14 +1408,28 @@ do
 
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
-  local events = drain(battle)
+  local landing = drain(battle)
 
-  local trapMsg = false
-  for _, event in ipairs(events) do
-    if event.t == "msg" and event.text:find("trap", 1, true) then trapMsg = true end
+  -- Gen1's 2..5 is the *total* attack count, and the hit that applied the trap
+  -- was the first of them -- so the turn it lands on deals the move's damage
+  -- and nothing else.  A residual here would be that hit counted twice.
+  local landingTrapMsg = false
+  for _, event in ipairs(landing) do
+    if event.t == "msg" and event.text:find("trap", 1, true) then landingTrapMsg = true end
   end
-  ok(trapMsg, "trapped mon takes residual trap damage")
-  ok(fighterIn(battle:snapshot(), "p2").hp < 200,
+  ok(not landingTrapMsg, "the turn the trap lands on deals no residual on top of the hit")
+  local afterHit = fighterIn(battle:snapshot(), "p2").hp
+  ok(afterHit < 200, "the trapping move itself damages the victim")
+
+  -- The turn after is forced on both seats, so it waits for a tick.
+  battle:tick(battle.now + 1)
+  local residual = drain(battle)
+  local residualMsg = false
+  for _, event in ipairs(residual) do
+    if event.t == "msg" and event.text:find("trap", 1, true) then residualMsg = true end
+  end
+  ok(residualMsg, "trapped mon takes residual trap damage on the turns that follow")
+  ok(fighterIn(battle:snapshot(), "p2").hp < afterHit,
      "trap residual reduces trapped mon HP")
 end
 
@@ -1408,6 +1448,106 @@ do
      "trapping locks the attacker into a skip")
   eq(battle.byId.p2.choice and battle.byId.p2.choice.action, "skip",
      "trapped locks the victim into a skip")
+end
+
+-- A trapping move is worth `trapTurns` attacks in total, not one more than
+-- that: the counter covers the hit that applied it plus the residuals.  Both
+-- ends of the 2..5 roll are checked by playing many seeds rather than by
+-- reaching into the RNG, and the victim loses one turn per attack after the
+-- first.
+do
+  local attacks, lost = {}, {}
+  for seed = 1, 120 do
+    local battle = battleOf({
+      seed = seed,
+      aMons = { mon({ species = "Alpha", maxHp = 999, spd = 120,
+                      moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) },
+      bMons = { mon({ species = "Beta", maxHp = 999, def = 200, spd = 1,
+                      moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    })
+    drain(battle)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+
+    local hits, skipped = 0, 0
+    for _ = 1, 30 do
+      for _ = 1, 8 do
+        if battle:outcome() then break end
+        if not battle:tick(battle.now + 1) then break end
+      end
+      for _, event in ipairs(drain(battle)) do
+        if event.t == "msg" then
+          if event.text == "Alpha used wrap" then hits = hits + 1 end
+          if event.text:find("hurt by the trap", 1, true) then hits = hits + 1 end
+          if event.text:find("can't move", 1, true) then skipped = skipped + 1 end
+        end
+      end
+      -- The chain is over the moment the victim is asked for a choice again.
+      -- (`skip` is the referee's word, not a submittable action, so the probe
+      -- has to be a real one.)
+      if battle:submitChoice("p2", { action = "fight", move = 0 }) then break end
+    end
+    attacks[hits] = (attacks[hits] or 0) + 1
+    lost[skipped] = (lost[skipped] or 0) + 1
+  end
+
+  -- 1 attack / 0 lost turns is the run where the move simply missed and no
+  -- trap was ever applied; everything else has to sit inside Gen1's range.
+  local strayAttacks, strayLost = nil, nil
+  for count in pairs(attacks) do
+    if count ~= 1 and (count < 2 or count > 5) then strayAttacks = count end
+  end
+  for count in pairs(lost) do
+    if count ~= 0 and (count < 1 or count > 4) then strayLost = count end
+  end
+  eq(strayAttacks, nil, "a trap is worth 2..5 attacks, never 6")
+  eq(strayLost, nil, "a trap costs the victim 1..4 turns")
+  ok(attacks[2] and attacks[5], "both ends of the 2..5 roll are reached")
+end
+
+-- A referee-filled answer is not the player's to take back.  A trap forces
+-- *both* seats, so `_openTurn` leaves that turn without a deadline -- a cancel
+-- that cleared one of those choices would hang the fight outright.
+do
+  local battle = battleOf({
+    seed = 9999,
+    aMons = { mon({ species = "Alpha", maxHp = 999, spd = 120,
+                    moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) },
+    bMons = { mon({ species = "Beta", maxHp = 999, def = 200, spd = 1,
+                    moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+
+  eq(battle.deadline, nil, "a turn forced on every seat opens without a deadline")
+  ok(battle.byId.p2.forced, "the trapped seat is marked as answered by the referee")
+  ok(battle:submitChoice("p2", { action = "cancel" }) == false,
+     "cancel cannot clear a forced trap answer")
+  ok(battle:submitChoice("p2", { action = "switch", slot = 0 }) == false,
+     "and the victim still cannot switch out of the trap")
+  ok(battle.byId.p2.choice ~= nil, "the forced answer survived the cancel")
+
+  -- The refusal is what keeps the clock alive: the chain still runs to its end.
+  local ticked = false
+  for _ = 1, 40 do
+    if battle:outcome() then break end
+    if battle:submitChoice("p2", { action = "fight", move = 0 }) then ticked = true; break end
+    if not battle:tick(battle.now + 1) then break end
+    drain(battle)
+  end
+  ok(ticked, "the trap chain still ends after a refused cancel")
+end
+
+-- An ordinary answer stays cancellable -- the guard is about forced fills only.
+do
+  local battle = battleOf({})
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "an ordinary answer files")
+  ok(battle:submitChoice("p1", { action = "cancel" }), "and can still be taken back")
+  ok(battle.byId.p1.choice == nil, "cancel cleared it")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "and the seat can answer again")
 end
 
 -- ------------------------------------------------------------------
@@ -4362,7 +4502,124 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 12l. what a move is *called* in a sentence (PROTOCOL 23)
+-- 24. team rosters (PROTOCOL 24)
+-- ------------------------------------------------------------------
+--
+-- The only thing this wire says about a monster nobody has seen, and the only
+-- source there is for the seat opposite: no client uploads a party to any other
+-- client.  So what is asserted here is not "the field said the right thing" but
+-- the two properties a roster chip is built on -- that the count is the party's
+-- and that the states follow the fight.
+
+-- The token function, before any battle uses it.
+do
+  eq(Events.teamToken({ hp = 30 }), "o", "team: a standing monster is `o`")
+  eq(Events.teamToken({ hp = 30, status = "PSN" }), "s", "team: a statused one is `s`")
+  eq(Events.teamToken({ hp = 0 }), "x", "team: a downed one is `x`")
+  -- Fainted beats statused, and it has to: the status field that put a monster
+  -- down is still set on it, so asking about the status first would draw a
+  -- spent ball as merely poisoned.
+  eq(Events.teamToken({ hp = 0, status = "PSN" }), "x",
+    "team: down outranks statused on the same monster")
+  eq(Events.teamToken(nil), nil, "team: nothing is not a ball")
+  eq(Events.teamString({ mon({ hp = 30 }), mon({ hp = 0 }), mon({ hp = 5, status = "BRN" }) }),
+    "oxs", "team: the roster is one character per member, in party order")
+  eq(#Events.teamString({ mon(), mon(), mon() }), 3,
+    "team: and its length is the party size -- there is no empty-slot token")
+  eq(Events.teamString(nil), "", "team: no party is no roster")
+end
+
+-- The opening: one per seat, behind the send-outs and in front of the window.
+do
+  local battle = battleOf({
+    aMons = { mon(), mon({ species = "Spare" }) },
+    bMons = { mon({ species = "Beta" }) },
+  })
+  local list = drain(battle)
+  local order, rosters = {}, {}
+  for _, event in ipairs(list) do
+    order[#order + 1] = event.t
+    if event.t == "team" then rosters[event.slot] = event.team end
+  end
+  listEq(order, { "send", "send", "team", "team", "turn" },
+    "team: the opening rosters land behind the send-outs and ahead of the turn")
+  eq(rosters[0], "oo", "team: side a's seat published the two it brought")
+  eq(rosters[2], "o", "team: and side b's the one it brought")
+end
+
+-- Nothing changed, nothing said.  The diff is what keeps this off a wire that
+-- carries it on every window of every fight.
+do
+  local battle = battleOf()
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local second = kinds(drain(battle))
+  eq(second.team, nil,
+    "team: a turn that moved no ball state re-publishes nothing")
+end
+
+-- A faint darkens the ball inside its own batch, not at the next window: this
+-- is the one roster change a player watches happen.
+do
+  local battle = battleOf({
+    aMons = { mon({ hp = 1 }), mon({ species = "Spare" }) },
+    bMons = { mon({ species = "Beta", spd = 200, moves = { move({ power = 200 }) } }) },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local list = drain(battle)
+  local faintAt, teamAt, roster
+  for i, event in ipairs(list) do
+    if event.t == "faint" and not faintAt then faintAt = i end
+    if event.t == "team" and event.slot == 0 and not teamAt then
+      teamAt, roster = i, event.team
+    end
+  end
+  ok(faintAt ~= nil, "team: the fixture landed the knockout it was built for")
+  ok(teamAt ~= nil and faintAt ~= nil and teamAt == faintAt + 1,
+    "team: the roster follows the faint line immediately")
+  eq(roster, "xo", "team: and the ball that went down is the one that darkened")
+end
+
+-- A status is published too -- at the window, because that is when the player
+-- who has to act on it is looking.
+do
+  local battle = battleOf({
+    aMons = { mon(), mon({ species = "Spare" }) },
+    bMons = { mon({ species = "Beta" }) },
+  })
+  drain(battle)
+  -- Written onto the sheet the referee is fighting with, which is what a
+  -- residual or a side-effect would have done; the publisher does not care
+  -- which of them did it.
+  battle.byId["p1"].mons[1].status = "PSN"
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local published
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "team" and event.slot == 0 then published = event.team end
+  end
+  eq(published, "so", "team: a condition on a party member reaches the roster")
+end
+
+-- The bench is in it.  A seat that never fields its fourth monster still says
+-- it has one -- which is the whole of "how many have they got left".
+do
+  local battle = battleOf({
+    aMons = { mon(), mon({ species = "B" }), mon({ species = "C" }),
+              mon({ species = "D" }) },
+  })
+  local roster
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "team" and event.slot == 0 then roster = event.team end
+  end
+  eq(roster, "oooo", "team: the roster counts the bench, not the field")
+end
+
+-- ------------------------------------------------------------------
+-- 12l. what a move is *called* in a sentence (PROTOCOL 26)
 -- ------------------------------------------------------------------
 --
 -- The referee holds no move table and never will, so before the sheet carried
@@ -4386,7 +4643,7 @@ do
   copycat.name = "COPY CAT"
   local thump = move({ id = "thump", power = 10 })
   thump.name = "THUMP HIT"
-  -- No name at all: what a protocol-22 client uploads, and what every move on
+  -- No name at all: what a protocol-25 client uploads, and what every move on
   -- a mixed hub's other half still looks like.
   local nudge = move({ id = "nudge", power = 10 })
 

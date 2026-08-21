@@ -946,10 +946,48 @@ scenario("coop_npc_aim", function(events)
   return battle
 end)
 
--- 25. the display name a sheet carries (PROTOCOL 23), and the id it falls back
+-- 25. a whole trapping chain: Wrap lands, the counter is Gen1's *total* attack
+--     count, so the turn it lands on deals the move's damage and no residual on
+--     top of it -- every later turn is one attack, narrated as a forced skip on
+--     both seats.  A turn forced on every seat opens without a deadline and
+--     waits for a `tick`, so this is also the one scenario where the batch
+--     counts prove the two runtimes advance that chain in the same steps.
+scenario("trap_chain", function(events)
+  local wrap = function()
+    return { id = "wrap", pp = 60, power = 5, accuracy = 255, type = 0,
+             effect = 42, chance = 0 }
+  end
+  local battle = build({
+    id = "xt", mode = "1v1", seed = 9999, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 120, moves = { wrap() } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, def = 200, spd = 1,
+             moves = { mv("tap", 40, 255, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  -- The forced turns resolve one tick at a time; ten is past the longest roll.
+  for step = 1, 10 do
+    battle:tick(step)
+    drainInto(battle, events)
+  end
+  -- A referee-filled answer cannot be taken back -- the refusal is silent, so
+  -- what this pins is that neither runtime emits an `unchose` for it.
+  battle:submitChoice("p2", { action = "cancel" })
+  battle:submitChoice("p2", { action = "switch", slot = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- 26. the display name a sheet carries (PROTOCOL 26), and the id it falls back
 --     to when it carries none.  Both spellings appear in one fight, because
 --     both reach the same sentences: "used", the two halves of Disable, and
---     Mimic's "learned".  A protocol-22 client uploads moves with no `name` at
+--     Mimic's "learned".  A protocol-25 client uploads moves with no `name` at
 --     all, so the fallback is not a defensive branch -- it is what half the
 --     fights on a mixed hub narrate under, and the two runtimes have to agree
 --     on it word for word.
@@ -973,7 +1011,7 @@ scenario("move_names", function(events)
     return { id = "thump", name = "THUMP HIT", pp = 60, power = 10,
              accuracy = 255, type = 0, effect = 0, chance = 0 }
   end
-  -- No `name` at all: the protocol-22 sheet, narrated under its id.
+  -- No `name` at all: the protocol-25 sheet, narrated under its id.
   local nudge = function() return mv("nudge", 10, 255, 0) end
   local battle = build({
     id = "mn", mode = "1v1", seed = 4242, choiceTimeout = 60, reconnectGrace = 60,

@@ -315,6 +315,32 @@ M.BATTLE_RECONNECT = "mmo.battle_reconnect"
 
 M.FACINGS = { up = true, down = true, left = true, right = true }
 M.KINDS = { trade = true, battle = true }
+
+-- Why an invite came back refused, when the refusal was not a human pressing
+-- NO.  A closed set rather than free text, for the reason COOP_REASONS is
+-- one: every value picks a different sentence on the asker's screen, and an
+-- unknown one has nothing to draw.
+--
+-- **Absent is the important value.** No reason means a person read the box
+-- and said no, which is the only refusal that was ever worth the flat "X
+-- refused to battle." Every other one is a fact about the moment -- they are
+-- mid-fight, mid-trade, already holding somebody else's ask, or no longer
+-- here -- and telling the asker which is the difference between a sentence
+-- they can act on and one that reads as a snub.
+--
+--   fighting  -- a battle is on their screen (their own wild/trainer fight
+--                counts: it is why this set exists)
+--   busy      -- a trade or battle session, or an ask of their own out
+--   asked     -- somebody else's invite is already on their screen
+--   gone      -- the hub could not deliver it: they have left
+M.DECLINE_REASONS = {
+  fighting = true, busy = true, asked = true, gone = true,
+}
+
+function M.declineReason(value)
+  if M.DECLINE_REASONS[value] then return value end
+  return nil
+end
 -- What a client may claim about a battle it just finished.  "draw" is a real
 -- answer and not a refusal to answer: a dropped link, a mutual run and a
 -- desync all end that way, and all three score nothing.
@@ -1233,11 +1259,11 @@ end
 -- that gap as neutral, which is a far better answer than refusing somebody's
 -- whole team over one mismatched index.
 --
--- `name` (PROTOCOL 23) is the one exception to "every field is required", and
+-- `name` (PROTOCOL 26) is the one exception to "every field is required", and
 -- it is optional for the same reason `maxPp` is: absence is a real answer.  It
 -- is what the referee narrates the move under -- an intermediator holds no move
 -- table to look one up in and never will -- and a sender that states none is a
--- protocol-22 client, whose fight narrates under the id exactly as it always
+-- protocol-25 client, whose fight narrates under the id exactly as it always
 -- did.  Present-but-unreadable is refused rather than dropped, on this
 -- function's own rule: a field that arrived and did not survive is the sending
 -- side being wrong about something, and quietly narrating under the id would
@@ -1676,8 +1702,44 @@ M.BATTLE_EVENTS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
-  chose = true, unchose = true, moves = true, exp = true,
+  chose = true, unchose = true, moves = true, exp = true, team = true,
 }
+
+-- The three ball states a roster is spelled in, and the most of them a seat may
+-- claim.  Mirrored from src/BattleSim/events.lua rather than required from it,
+-- for the reason that file's header gives: the sim runs with no Config.
+--
+--   o  standing, nothing wrong with it
+--   s  standing, carrying a status
+--   x  down
+--
+-- No token for an empty slot.  An empty slot is not a party member -- the
+-- roster says that by being short, and its length is therefore the party size,
+-- which is half of what the event is for.
+M.TEAM_TOKENS = { o = true, s = true, x = true }
+
+-- A seat's roster.
+--
+-- **Refused whole rather than trimmed to the part that parses**, which is the
+-- opposite of what `M.text` does one function down, and the difference is what
+-- the value is for.  A truncated sentence is a shorter sentence; a truncated
+-- roster is a *different party* -- three balls where the seat holds five -- and
+-- a client would draw the other player as two monsters closer to beaten than
+-- they are.  There is no partially-correct reading of this field, so a
+-- malformed one is dropped and the chip keeps the last roster it was told.
+--
+-- Bounded by BATTLE_MON_MAX because that is the rule the referee builds parties
+-- under (`Turn.MONS_PER_PARTY`), and empty is refused because a seat with no
+-- monsters is not a seat that is in the fight.
+function M.battleTeam(value)
+  if type(value) ~= "string" then return nil end
+  local n = #value
+  if n < 1 or n > Config.BATTLE_MON_MAX then return nil end
+  for i = 1, n do
+    if not M.TEAM_TOKENS[value:sub(i, i)] then return nil end
+  end
+  return value
+end
 
 -- One thing to draw.
 --
@@ -1724,6 +1786,14 @@ function M.battleEvent(raw)
   -- name: an event is about somebody who is out, not about a bench position.
   if raw.slot ~= nil then out.slot = M.int(raw.slot, 0, M.FIELD_MAX) end
   if raw.hp ~= nil then out.hp = M.int(raw.hp, 0, M.HP_MAX) end
+  -- What that HP is out of, on the events that can move it: `send` states it
+  -- for the monster walking on, and a `drain` states it when an HP UP raised
+  -- the ceiling itself.  Optional, and its absence is not a zero: a client
+  -- that is told none falls back to the oldest reading of this wire -- the
+  -- largest HP it has ever seen on the seat -- which is right for a monster
+  -- that came out whole and wrong for one that came out hurt.  Floored at 1
+  -- for the reason M.battleMon floors it there: the bar divides by it.
+  if raw.maxHp ~= nil then out.maxHp = M.int(raw.maxHp, 1, M.HP_MAX) end
   -- `exp` carries the facts a client needs to run its own award: which monster
   -- fell and how many shares split it.  Same sanitisers a battler's own fields
   -- get (M.name / M.int over LEVEL_MAX), because they are the same quantities
@@ -1755,6 +1825,13 @@ function M.battleEvent(raw)
   -- referee that predates this field pays the mon that was standing at the
   -- faint, so a client that gets no `mon` falls back to the active one.
   if raw.mon ~= nil then out.mon = M.int(raw.mon, 0, M.SLOT_MAX) end
+  -- The `team` event's roster (PROTOCOL 24), and the one field here that is
+  -- neither a number nor prose: a fixed alphabet, one character per party
+  -- member.  Dropped rather than trimmed when it does not parse -- see
+  -- `M.battleTeam`, where a short roster is a different party rather than a
+  -- shorter sentence.  A `team` event that loses its roster is an event with
+  -- nothing in it, which is exactly what a client ignores.
+  if raw.team ~= nil then out.team = M.battleTeam(raw.team) end
   if raw.side ~= nil then out.side = M.side(raw.side) end
   if raw.status ~= nil then
     -- battleStatus answers `false` for present-but-unknown, which is not a

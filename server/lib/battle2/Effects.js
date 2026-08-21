@@ -166,7 +166,7 @@ function category(id) {
 
 /*
  * What a move is *called* in a sentence: the display name its sheet carried
- * (PROTOCOL 23), or its registry id when it carried none. Turn.js keeps the
+ * (PROTOCOL 26), or its registry id when it carried none. Turn.js keeps the
  * same one-line rule; both are prose, never a key something indexes.
  */
 function moveLabel(move, fallback) {

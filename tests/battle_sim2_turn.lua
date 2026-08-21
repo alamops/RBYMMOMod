@@ -734,8 +734,105 @@ do
   eq(battle.aim:state(), before, "aim: and a fight with one foe never touches the aim stream")
 end
 
+
 -- ------------------------------------------------------------------
--- what a move is *called* in a sentence (PROTOCOL 23)
+-- trapping moves: the counter is a total attack count, and the answer the
+-- referee files for a locked seat is not the player's to take back
+-- ------------------------------------------------------------------
+
+-- Gen1's 2..5 roll counts the hit that applied the trap, so the turn it lands
+-- on deals the move's damage and no residual on top of it.  Counting it the
+-- other way made a 2-turn Wrap hit three times.
+do
+  local battle = battleOf({ seed = 9999, sides = {
+    a = { { playerId = "p1", name = "One", mons = {
+      mon({ species = "Alpha", maxHp = 999, spe = 120,
+            moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) } } },
+    b = { { playerId = "p2", name = "Two", mons = {
+      mon({ species = "Beta", maxHp = 999, def = 200, spe = 1,
+            moves = { move({ id = "tap", power = 0 }) } }) } } },
+  } })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+
+  local landingResidual = false
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "msg" and event.text:find("hurt by the trap", 1, true) then
+      landingResidual = true
+    end
+  end
+  ok(not landingResidual, "the turn the trap lands on deals no residual on top of the hit")
+
+  local beta = battle.byId["p2"]
+  local afterHit = beta.mons[beta.active].hp
+  ok(afterHit < 999, "the trapping move itself damages the victim")
+
+  -- The turn after is forced on both seats, so it waits for a tick.
+  battle:tick(battle.now + 1)
+  local residual = false
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "msg" and event.text:find("hurt by the trap", 1, true) then
+      residual = true
+    end
+  end
+  ok(residual, "the turns that follow each deal one residual")
+  ok(beta.mons[beta.active].hp < afterHit, "trap residual reduces trapped mon HP")
+end
+
+-- A trap forces *both* seats, so `_openTurn` leaves that turn without a
+-- deadline: a cancel that cleared one of those answers would hang the fight
+-- with nothing left to time it out.
+do
+  local battle = battleOf({ seed = 9999, sides = {
+    a = { { playerId = "p1", name = "One", mons = {
+      mon({ species = "Alpha", maxHp = 999, spe = 120,
+            moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) } } },
+    b = { { playerId = "p2", name = "Two", mons = {
+      mon({ species = "Beta", maxHp = 999, def = 200, spe = 1,
+            moves = { move({ id = "tap", power = 0 }) } }),
+      mon({ species = "Delta", maxHp = 999, spe = 1,
+            moves = { move({ id = "tap", power = 0 }) } }) } } },
+  } })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+
+  eq(battle.deadline, nil, "a turn forced on every seat opens without a deadline")
+  ok(battle.byId["p2"].forced, "the trapped seat is marked as answered by the referee")
+  ok(battle:submitChoice("p2", { action = "cancel" }) == false,
+     "cancel cannot clear a forced trap answer")
+  ok(battle:submitChoice("p2", { action = "switch", slot = 1 }) == false,
+     "and the victim still cannot switch out of the trap")
+  ok(battle.byId["p2"].choice ~= nil, "the forced answer survived the cancel")
+
+  -- The refusal is what keeps the clock alive: the chain still runs to its end.
+  local freed = false
+  for _ = 1, 40 do
+    if battle:outcome() then break end
+    if battle:submitChoice("p2", { action = "fight", move = 0 }) then freed = true; break end
+    if not battle:tick(battle.now + 1) then break end
+    drain(battle)
+  end
+  ok(freed, "the trap chain still ends after a refused cancel")
+end
+
+-- An ordinary answer stays cancellable -- the guard is about forced fills only.
+do
+  local battle = battleOf({ sides = {
+    a = { { playerId = "p1", name = "One", mons = { mon({ species = "Alpha" }) } } },
+    b = { { playerId = "p2", name = "Two", mons = { mon({ species = "Beta" }) } } },
+  } })
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "an ordinary answer files")
+  ok(battle:submitChoice("p1", { action = "cancel" }), "and can still be taken back")
+  ok(battle.byId["p1"].choice == nil, "cancel cleared it")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "and the seat can answer again")
+end
+
+-- ------------------------------------------------------------------
+-- what a move is *called* in a sentence (PROTOCOL 26)
 -- ------------------------------------------------------------------
 --
 -- Gen 2's own copies of the five call sites that name a move.  The Gen 1 twin
@@ -753,7 +850,7 @@ do
   copycat.name = "COPY CAT"
   local thump = move({ id = "thump", power = 10 })
   thump.name = "THUMP HIT"
-  -- No name at all: what a protocol-22 client uploads.
+  -- No name at all: what a protocol-25 client uploads.
   local nudge = move({ id = "nudge", power = 10 })
 
   local battle = battleOf({ id = "names", seed = 4242, sides = {

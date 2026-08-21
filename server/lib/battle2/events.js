@@ -65,17 +65,31 @@ function toNumber(value) {
 //   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 //   unchose    -- cancel cleared a filed answer
 //   moves      -- mid-fight move-list sync after Transform/Mimic
+//   team       -- a seat's party roster, as ball states: how many monsters it
+//                 brought and which are healthy / statused / down. Ball states
+//                 and nothing else -- no species, no level, no moves -- which
+//                 is exactly what the classic ball row reveals.
 const KINDS = {
   msg: true, anim: true, damage: true, drain: true, faint: true,
   send: true, status: true, stat: true, switch: true, item: true,
   run: true, turn: true, over: true, wait: true, reconnect: true,
-  chose: true, unchose: true, moves: true, exp: true,
+  chose: true, unchose: true, moves: true, exp: true, team: true,
 };
 
 // Every key an event may carry, and the type it carries. `battle` and `seq` are
 // stamped by the turn machine rather than passed to `build`, because a caller
 // that could choose its own sequence number could put a hole in the stream, and
 // a hole is what a client reads as lost messages.
+//
+// `maxHp` rides on `send`, and it is the field whose absence used to be read as
+// a value. An event states current HP; a client had no other handle on what a
+// bar was out of, so it took the largest HP it had ever seen for that seat as
+// the maximum -- correct for a monster that walks out whole, and wrong for
+// every one that does not. A party mon that ended the last fight on 42 of 200
+// opened the next one drawing a *full* bar over the number 42. The referee
+// holds the real maximum from the moment it builds the battler, so it says it,
+// and the guess stays behind only as the fallback for a stream that carries
+// none.
 const FIELDS = {
   battle: 'string',
   seq: 'number',
@@ -84,6 +98,7 @@ const FIELDS = {
   amount: 'number',
   slot: 'number',
   hp: 'number',
+  maxHp: 'number',
   side: 'string',
   status: 'string',
   species: 'string',
@@ -91,6 +106,7 @@ const FIELDS = {
   level: 'number',
   participants: 'number',
   mon: 'number',
+  team: 'string',
 };
 
 // ------------------------------------------------------------------
@@ -113,10 +129,13 @@ const SHAPES = {
     slot: true, side: true, amount: true, hp: 'hp left',
     status: 'set when a residual dealt it',
   },
-  drain: { slot: true, side: true, amount: true, hp: true },
+  drain: { slot: true, side: true, amount: true, hp: true,
+    maxHp: 'set only when an HP UP moved the ceiling itself' },
   faint: { slot: true, side: true, text: true,
     amount: '1 when the seat still has a living bench (mustReplace)' },
-  send: { slot: true, side: true, hp: true, text: 'the species',
+  send: { slot: true, side: true, hp: true,
+    maxHp: 'what that HP is out of, so the bar is a fraction rather than a guess',
+    text: 'the species',
     speciesId: 'registry id for the art, when the sheet named one',
     level: "the monster's level, for the seat opposite's pill",
     mon: 'party index (0-5) of the mon the referee fielded' },
@@ -141,6 +160,8 @@ const SHAPES = {
     speciesId: 'its registry id, when the sheet named one',
     level: 'its level', participants: 'how many shares split it',
     mon: 'party index (0-5) of the mon banking this share; absent means the active one' },
+  team: { slot: 'the seat whose roster this is', side: true,
+    team: 'one token per party member, in party order: o / s / x' },
 };
 
 // ------------------------------------------------------------------
@@ -157,6 +178,45 @@ function fieldSlot(side, index) {
   let n = toNumber(index);
   if (n === null) n = 1;
   return base + Math.max(0, Math.floor(n) - 1);
+}
+
+// ------------------------------------------------------------------
+// team rosters
+// ------------------------------------------------------------------
+//
+// One character per party member, in party order: `o` standing and clean, `s`
+// standing with a status, `x` down. There is no fourth token for an empty slot,
+// because an empty slot is not a party member -- the roster says that by being
+// short, which is what keeps its length equal to the party size.
+//
+// Gen 2's twin of server/lib/battle/events.js, kept token-for-token: the two
+// generations share one sanitiser and one roster chip.
+const TEAM_OK = 'o';
+const TEAM_STATUS = 's';
+const TEAM_FAINTED = 'x';
+const TEAM_TOKENS = { o: true, s: true, x: true };
+
+// Fainted first: a fainted monster's status field is still whatever put it
+// there, and asking about the status first would draw a down monster as merely
+// poisoned.
+function teamToken(mon) {
+  if (!mon || typeof mon !== 'object') return null;
+  const hp = toNumber(mon.hp);
+  if (hp === null || hp <= 0) return TEAM_FAINTED;
+  if (typeof mon.status === 'string' && mon.status !== '') return TEAM_STATUS;
+  return TEAM_OK;
+}
+
+// A member this cannot describe is `x` rather than dropped: dropping would
+// shorten the roster, and drawing an unreadable monster as spent is the reading
+// that never overstates what the other player has left.
+function teamString(mons) {
+  if (!Array.isArray(mons)) return '';
+  let out = '';
+  for (let i = 0; i < mons.length; i += 1) {
+    out += teamToken(mons[i]) || TEAM_FAINTED;
+  }
+  return out;
 }
 
 const MOVE_FIELDS = {
@@ -253,6 +313,12 @@ module.exports = {
   SHAPES,
   SIDE_SLOTS,
   fieldSlot,
+  TEAM_OK,
+  TEAM_STATUS,
+  TEAM_FAINTED,
+  TEAM_TOKENS,
+  teamToken,
+  teamString,
   build,
   check,
   toNumber,

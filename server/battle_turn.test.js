@@ -806,10 +806,46 @@ scenario('coop_npc_aim', (events) => {
   return battle;
 });
 
-// 25. the display name a sheet carries (PROTOCOL 23), and the id it falls back
+// 25. a whole trapping chain: Wrap lands, the counter is Gen1's *total* attack
+//     count, so the turn it lands on deals the move's damage and no residual on
+//     top of it -- every later turn is one attack, narrated as a forced skip on
+//     both seats. A turn forced on every seat opens without a deadline and
+//     waits for a `tick`, so this is also the one scenario where the batch
+//     counts prove the two runtimes advance that chain in the same steps.
+scenario('trap_chain', (events) => {
+  const wrap = () => ({ id: 'wrap', pp: 60, power: 5, accuracy: 255, type: 0,
+    effect: 42, chance: 0 });
+  const battle = build({
+    id: 'xt', mode: '1v1', seed: 9999, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 120, moves: [wrap()] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, def: 200, spd: 1,
+          moves: [mv('tap', 40, 255, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  // The forced turns resolve one tick at a time; ten is past the longest roll.
+  for (let step = 1; step <= 10; step += 1) {
+    battle.tick(step);
+    drainInto(battle, events);
+  }
+  // A referee-filled answer cannot be taken back -- the refusal is silent, so
+  // what this pins is that neither runtime emits an `unchose` for it.
+  battle.submitChoice('p2', { action: 'cancel' });
+  battle.submitChoice('p2', { action: 'switch', slot: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// 26. the display name a sheet carries (PROTOCOL 26), and the id it falls back
 //     to when it carries none. Both spellings appear in one fight, because both
 //     reach the same sentences: "used", the two halves of Disable, and Mimic's
-//     "learned". A protocol-22 client uploads moves with no `name` at all, so
+//     "learned". A protocol-25 client uploads moves with no `name` at all, so
 //     the fallback is not a defensive branch -- it is what half the fights on a
 //     mixed hub narrate under, and the two runtimes have to agree on it word
 //     for word.
@@ -833,7 +869,7 @@ scenario('move_names', (events) => {
     id: 'thump', name: 'THUMP HIT', pp: 60, power: 10,
     accuracy: 255, type: 0, effect: 0, chance: 0,
   });
-  // No `name` at all: the protocol-22 sheet, narrated under its id.
+  // No `name` at all: the protocol-25 sheet, narrated under its id.
   const nudge = () => mv('nudge', 10, 255, 0);
   const battle = build({
     id: 'mn', mode: '1v1', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
@@ -1136,7 +1172,7 @@ test('every sentence about a move prints its name, and falls back to the id', ()
   const run = byName(jsRuns).get('move_names');
   const said = run.events.filter((event) => event.t === 'msg').map((event) => event.text);
 
-  // The line the whole field exists for. Before PROTOCOL 23 this read
+  // The line the whole field exists for. Before PROTOCOL 26 this read
   // "Alpha used slow_swipe" -- the id, in the one place a player reads the
   // fight.
   assert.ok(said.includes('Alpha used SLOW SWIPE'), 'an attack prints the display name');
@@ -1151,7 +1187,7 @@ test('every sentence about a move prints its name, and falls back to the id', ()
     'and the copy keeps the name -- a copy that dropped it would revert to the '
     + 'slug on every turn afterwards');
 
-  // The fallback is not a defensive branch: a protocol-22 client uploads moves
+  // The fallback is not a defensive branch: a protocol-25 client uploads moves
   // with no name at all, and half the fights on a mixed hub narrate under this.
   assert.ok(said.includes('Beta used nudge'), 'a move with no name is narrated under its id');
 
@@ -1266,9 +1302,11 @@ test('a side that drops past its grace forfeits, and rolls nothing doing it', ()
     run.snapshot.rngState, 7,
     'the seed is untouched -- a forfeit consults no roll on either runtime',
   );
+  // One `team` per seat behind the opening send-outs: `_openTurn` syncs the
+  // rosters before it opens the window, and the first sync always publishes.
   assert.deepStrictEqual(
     run.events.map((event) => event.t),
-    ['send', 'send', 'turn', 'wait', 'over'],
+    ['send', 'send', 'team', 'team', 'turn', 'wait', 'over'],
   );
 });
 
@@ -1297,9 +1335,13 @@ test('residuals tick in field order, not speed order', () => {
 
 test('a switch resolves before an item, and neither spends a roll', () => {
   const run = byName(jsRuns).get('switch_item');
+  // The two opening `team` rows, and no more: nothing in this run changes a
+  // ball state, so the diff in `_syncTeams` publishes nothing on the second
+  // window.
   assert.deepStrictEqual(
     run.events.map((event) => event.t),
-    ['send', 'send', 'turn', 'chose', 'chose', 'switch', 'send', 'item', 'msg', 'msg', 'turn'],
+    ['send', 'send', 'team', 'team', 'turn', 'chose', 'chose',
+     'switch', 'send', 'item', 'msg', 'msg', 'turn'],
   );
   // 'restore' is an unknown id: announce + "But it failed", still no RNG draw.
   assert.strictEqual(run.snapshot.rngState, 13, 'the seed is untouched');

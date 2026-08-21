@@ -121,6 +121,14 @@ end
 coop.toast = function(text)
   toast:push(text)
 end
+-- The same door, for the same reason, one module over. Sessions refuses an
+-- invite that arrives mid-fight or mid-trade rather than stacking a yes/no
+-- over it -- correct, and until now completely silent on this side: the
+-- player never learned somebody had asked. A box is the interruption the
+-- refusal exists to avoid, so the corner is the only place the line fits.
+sessions.toast = function(text)
+  toast:push(text)
+end
 -- The fights nobody else is in: an ordinary wild encounter and every trainer,
 -- refereed in this process and fought on the mod's own screen, for a player
 -- with no hub and no partner.
@@ -1760,7 +1768,15 @@ end
 local function pushPresence(force)
   if not transport:isReady() then return end
   local current = World.current()
-  local busy = sessions:isBusy()
+  -- Everything that would make an invite bounce, not just a hub session.
+  --
+  -- This used to be `sessions:isBusy()`, which knows about trades and 1v1s
+  -- and nothing else -- so a player in an ordinary wild or trainer fight was
+  -- published to every roster in the game as free to ask, and their client
+  -- refused the invite that arrived a second later. The roster row is the
+  -- only thing an asker has to go on; it now answers the same question the
+  -- refusal does. See Sessions:busyReason.
+  local busy = sessions:busyReason(ctx.game) ~= nil
   local fast = M.fastNow and true or false
   if not force and not presenceChanged(current, busy, fast) then return end
 

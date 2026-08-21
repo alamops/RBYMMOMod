@@ -658,6 +658,43 @@ end
 eq(Wire.members(overfull), nil,
    "a hub claiming more members than PARTY_MAX is refused, not truncated")
 
+-- ------- Wire.battleTeam: a seat's roster, refused whole or not at all
+--
+-- The same rule Wire.members follows, and for a sharper reason. A truncated
+-- sentence is a shorter sentence; a truncated roster is a DIFFERENT PARTY --
+-- three balls where the seat holds five -- and the chip would tell a player
+-- their opponent is two monsters closer to beaten than they are. There is no
+-- partially-correct reading of this field.
+
+;(function()
+eq(Wire.battleTeam("ooo"), "ooo", "a roster of live balls survives")
+eq(Wire.battleTeam("oxs"), "oxs", "as does one mixing all three states")
+eq(Wire.battleTeam("o"), "o", "a one-monster seat is a one-character roster")
+local sixBalls = string.rep("o", Config.BATTLE_MON_MAX)
+eq(Wire.battleTeam(sixBalls), sixBalls, "and a full party is exactly six")
+
+eq(Wire.battleTeam(""), nil, "an empty roster is not a seat that is fighting")
+eq(Wire.battleTeam(string.rep("o", Config.BATTLE_MON_MAX + 1)), nil,
+   "a seat claiming more than BATTLE_MON_MAX is refused, not truncated")
+eq(Wire.battleTeam("ooq"), nil, "one token this build cannot read refuses the row")
+eq(Wire.battleTeam("OOO"), nil, "the alphabet is exact -- no case folding")
+eq(Wire.battleTeam("o x"), nil, "and no whitespace to pad a short party with")
+eq(Wire.battleTeam(3), nil, "a count is not a roster")
+eq(Wire.battleTeam(nil), nil, "and nothing is not a roster")
+
+-- On the event: a `team` whose roster does not parse arrives with no roster at
+-- all rather than with a shortened one, which is exactly what a client ignores.
+local goodTeam = Wire.battleEvent(
+  { battle = "b1", seq = 4, t = "team", slot = 2, side = "b", team = "oxs" })
+check(goodTeam ~= nil, "a well-formed team event survives the boundary")
+eq(goodTeam.team, "oxs", "carrying its roster")
+eq(goodTeam.slot, 2, "and the seat it is about")
+local badTeam = Wire.battleEvent(
+  { battle = "b1", seq = 5, t = "team", slot = 2, side = "b", team = "oo!" })
+check(badTeam ~= nil, "a malformed roster does not put a hole in the stream")
+eq(badTeam.team, nil, "...it just arrives with nothing to draw")
+end)()
+
 -- ------- Wire.partyEvent: what your partner just did, off the wire
 --
 -- The fighter never sends their own name and the hub stamps it from the
@@ -725,6 +762,20 @@ eq(Wire.outcome("draw"), "draw", "and a draw, which scores nothing")
 eq(Wire.outcome("WIN"), nil, "the vocabulary is exact, not case-folded")
 eq(Wire.outcome("victory"), nil, "an invented outcome is refused")
 eq(Wire.outcome(1), nil, "and so is a number")
+
+-- Why an invite came back refused.  A closed set, because each value picks a
+-- different sentence on the asker's screen -- and absent is the value that
+-- matters most: it is what a person pressing NO leaves behind, and the only
+-- refusal that deserves the flat "X refused to battle."
+eq(Wire.declineReason("fighting"), "fighting", "a fight is a reason")
+eq(Wire.declineReason("busy"), "busy", "so is a session already open")
+eq(Wire.declineReason("asked"), "asked", "so is somebody else's ask")
+eq(Wire.declineReason("gone"), "gone", "and so is a player who has left")
+eq(Wire.declineReason(nil), nil,
+   "absent stays absent -- that is a human saying no, not a reason")
+eq(Wire.declineReason("no"), nil, "an invented reason is refused, not printed")
+eq(Wire.declineReason("FIGHTING"), nil,
+   "the vocabulary is exact, not case-folded")
 
 eq(Wire.points(120), 120, "a rating in range survives")
 eq(Wire.points(0), 0, "zero is a rating, not a missing one")
@@ -1850,11 +1901,133 @@ hub:receive(far, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
 local declined = take(farPeer, Wire.DECLINE)
 check(declined ~= nil, "a busy player declines")
 eq(declined.name, "BOB", "naming them")
+eq(declined.reason, "busy", "and saying which kind of no it is")
+
+-- ...and an ask pointed at somebody who is not here is answered, not dropped.
+--
+-- Silence was the old answer and it stranded the asker: `outgoing` marks a
+-- client busy, nothing else clears it, and from then on every invite they
+-- receive is refused and every one they send is turned away.
+farPeer.outbox = {}
+hub:receive(far, { type = Wire.REQUEST, to = "nobodyatall", kind = "battle" })
+local vanished = take(farPeer, Wire.DECLINE)
+check(vanished ~= nil, "an ask pointed at a stranger comes back refused")
+eq(vanished.reason, "gone", "saying they are not here")
+eq(vanished.name, nil,
+   "with no name on it -- there is no client left to read one off, and the "
+   .. "asker falls back to the name it asked under")
+
+-- a malformed kind is still dropped in silence: there is nothing to answer
+farPeer.outbox = {}
+hub:receive(far, { type = Wire.REQUEST, to = "nobodyatall", kind = "duel" })
+eq(take(farPeer, Wire.DECLINE), nil,
+   "a request with no valid kind earns no reply at all")
 
 hub:receive(ann, { type = Wire.SESSION_LEAVE })
 local ended = take(bobPeer, Wire.SESSION_END)
 check(ended ~= nil, "leaving ends the session for the other side")
 eq(ended.reason, "peer_left", "with a reason")
+
+-- ------- the busy everybody else reads, and invites that cross
+--
+-- Driven on a hub of its own, for the reason the party block below is: these
+-- assertions are about who is askable, and reading a roster the trade above
+-- left traffic on would be reading somebody else's scenario.
+--
+-- The bug all of this closes: `busy` on a roster row meant "the hub has this
+-- player in a session" and nothing else, while the *client* refused invites
+-- for a wild fight, a trainer, a co-op handoff or an ask of its own.  A
+-- player in an ordinary battle was published as free, asked, and refused in
+-- the same second -- with nothing on either screen to say why.
+
+;(function()
+
+local askHub = Hub.new({ maxPlayers = 4 })
+local one, onePeer = join(askHub, "ONE", "PALLET", 5, 5)
+local two, twoPeer = join(askHub, "TWO", "PALLET", 6, 5)
+local three, threePeer = join(askHub, "THREE", "PALLET", 7, 5)
+onePeer.outbox, twoPeer.outbox, threePeer.outbox = {}, {}, {}
+
+-- A client says it is busy; the hub publishes it.  It is the only party that
+-- can know -- a wild encounter never reaches the hub at all.
+askHub:receive(two, { type = Wire.MOVE, map = "PALLET", x = 6, y = 5,
+                      busy = true })
+local moved = take(onePeer, Wire.MOVE)
+check(moved ~= nil, "a step is broadcast to the others")
+eq(moved.busy, true,
+   "and a client that says it is mid-fight is published as busy, so the "
+   .. "roster row an asker reads agrees with the refusal they would get")
+
+-- ...strictly, because both hubs have to publish the same roster for the
+-- same wire bytes and Lua and JS truthiness disagree about "yes" and 0.
+onePeer.outbox = {}
+askHub:receive(two, { type = Wire.MOVE, map = "PALLET", x = 6, y = 5,
+                      busy = "yes" })
+eq((take(onePeer, Wire.MOVE) or {}).busy, false,
+   "only a literal true counts -- the twin hubs cannot disagree on a string")
+
+-- The flag is advisory and deliberately not a gate: a stale one costs one
+-- honest refusal, never a battle that could not be arranged.
+onePeer.outbox, twoPeer.outbox = {}, {}
+askHub:receive(two, { type = Wire.MOVE, map = "PALLET", x = 6, y = 5,
+                      busy = true })
+onePeer.outbox, twoPeer.outbox = {}, {}
+askHub:receive(one, { type = Wire.REQUEST, to = two.id, kind = "battle" })
+check(take(twoPeer, Wire.REQUEST) ~= nil,
+      "an ask still reaches a client that called itself busy -- the client "
+      .. "answers it, and only the hub's own sessions are a gate here")
+eq(take(onePeer, Wire.DECLINE), nil, "so the hub refuses nothing on its behalf")
+
+-- The refusing client's reason is carried through to the asker...
+twoPeer.outbox, onePeer.outbox = {}, {}
+askHub:receive(two, { type = Wire.RESPOND, to = one.id, kind = "battle",
+                      accept = false, reason = "fighting" })
+local reasoned = take(onePeer, Wire.DECLINE)
+check(reasoned ~= nil, "a refusal reaches the asker")
+eq(reasoned.reason, "fighting",
+   "carrying why, so the asker reads a fact rather than a snub")
+
+-- ...but only from the closed set: a forged reason cannot put an invented
+-- sentence on somebody else's screen.
+onePeer.outbox, twoPeer.outbox = {}, {}
+askHub:receive(one, { type = Wire.REQUEST, to = two.id, kind = "battle" })
+twoPeer.outbox, onePeer.outbox = {}, {}
+askHub:receive(two, { type = Wire.RESPOND, to = one.id, kind = "battle",
+                      accept = false, reason = "your mother" })
+eq((take(onePeer, Wire.DECLINE) or {}).reason, nil,
+   "an invented reason is stripped, and the refusal reads as a human no")
+
+-- Two invites that crossed are an agreement, not a collision.
+--
+-- Both players pressed BATTLE inside one round trip -- what two friends who
+-- just agreed to fight do -- and each client, busy from the moment it asked,
+-- refused the other's invite as it landed.  Both read "they refused" about
+-- somebody who had just asked them.
+onePeer.outbox, twoPeer.outbox = {}, {}
+askHub:receive(one, { type = Wire.REQUEST, to = two.id, kind = "battle" })
+askHub:receive(two, { type = Wire.REQUEST, to = one.id, kind = "battle" })
+local oneSession = take(onePeer, Wire.SESSION)
+local twoSession = take(twoPeer, Wire.SESSION)
+check(oneSession ~= nil and twoSession ~= nil,
+      "two asks that crossed start the battle both of them asked for")
+eq(oneSession.id, twoSession.id, "one session, not two")
+eq(oneSession.role, "host",
+   "and the one who asked first hosts, exactly as on the ordinary path")
+eq(take(onePeer, Wire.DECLINE), nil, "with no refusal on either side")
+eq(take(twoPeer, Wire.DECLINE), nil, "...on either side")
+askHub:receive(one, { type = Wire.SESSION_LEAVE })
+onePeer.outbox, twoPeer.outbox, threePeer.outbox = {}, {}, {}
+
+-- ...and only when they asked for the same thing.  A trade crossing a battle
+-- is two different requests, and neither player agreed to the other's.
+askHub:receive(one, { type = Wire.REQUEST, to = three.id, kind = "trade" })
+threePeer.outbox = {}
+askHub:receive(three, { type = Wire.REQUEST, to = one.id, kind = "battle" })
+eq(take(onePeer, Wire.SESSION), nil,
+   "a trade crossing a battle starts nothing -- neither agreed to the other")
+eq(take(threePeer, Wire.SESSION), nil, "...on either side")
+
+end)()
 
 -- ------- parties
 --
@@ -5099,6 +5272,157 @@ end)()
 local Sessions = need("Sessions")
 local Data = T.fixtures.load()
 local Pokemon = require("src.pokemon.Pokemon")
+
+-- ------- who is askable, and what a refusal says
+--
+-- The half of the invite bug that lives on this side.  onRequest refuses on
+-- one set of conditions and presence used to publish another, so a player in
+-- an ordinary wild fight was listed as free to ask and refused the invite
+-- that followed.  busyReason is the single statement both now read.
+
+;(function()
+
+-- One Sessions with nothing under it: no hub, no screens, no game.  Every
+-- assertion here is about the module's own bookkeeping, and a stub that
+-- records rather than draws is the whole harness it needs.
+local function bare(stack)
+  local side = { sent = {}, said = {}, toasts = {} }
+  side.sessions = Sessions.new({
+    send = function(_, msgType, payload)
+      side.sent[#side.sent + 1] = { type = msgType, payload = payload or {} }
+      return true
+    end,
+    isReady = function() return true end,
+  }, {
+    say = function(_, text) side.said[#side.said + 1] = text end,
+    confirm = function(_, _, _, cb) side.confirmBox = cb; return { box = true } end,
+    choose = function() return { box = true } end,
+    pushState = function() end,
+    ctx = {},
+  })
+  side.sessions.toast = function(text) side.toasts[#side.toasts + 1] = text end
+  side.game = { stack = { states = stack or {} } }
+  return side
+end
+
+local function lastSent(side, msgType)
+  for i = #side.sent, 1, -1 do
+    if side.sent[i].type == msgType then return side.sent[i].payload end
+  end
+  return nil
+end
+
+-- Nothing is happening: an invite can be put to this player.
+local idle = bare()
+eq(idle.sessions:busyReason(idle.game), nil,
+   "a player standing in a field is askable")
+
+-- An ordinary wild battle is the case the whole fix is about.  It never
+-- reaches the hub, so the client is the only party that can report it.
+local inWild = bare({ { kind = "overworld" }, { kind = "wild" } })
+eq(inWild.sessions:busyReason(inWild.game), "fighting",
+   "a wild encounter makes this player unaskable -- the hub cannot see it, "
+   .. "so saying so is the only way anybody else can know")
+
+local inTrainer = bare({ { kind = "trainer" } })
+eq(inTrainer.sessions:busyReason(inTrainer.game), "fighting",
+   "and so does a trainer")
+
+-- The mod's own screens count too: a mediated fight has no engine kind.
+local mediated = bare({ { mmoBattle = true } })
+eq(mediated.sessions:busyReason(mediated.game), "fighting",
+   "a mediated battle screen counts, though it is not a BattleState")
+
+-- An ask of our own already out, and somebody else's already on screen.
+local asking = bare()
+asking.sessions.outgoing = { to = "x", kind = "battle", name = "X" }
+eq(asking.sessions:busyReason(asking.game), "busy",
+   "an ask of our own makes us busy -- two invites in flight is never valid")
+
+local asked = bare()
+asked.sessions.incoming = { from = "x", kind = "battle", name = "X" }
+eq(asked.sessions:busyReason(asked.game), "asked",
+   "and so does somebody else's invite already on screen")
+
+-- The refusal carries why, and says so in the corner on this side.
+local busyOne = bare({ { kind = "wild" } })
+busyOne.sessions:onRequest(busyOne.game,
+  { from = "abc123", name = "ANN", kind = "battle" })
+local refusal = lastSent(busyOne, Wire.RESPOND)
+check(refusal ~= nil, "an invite arriving mid-fight is answered at once")
+eq(refusal.accept, false, "refused")
+eq(refusal.reason, "fighting", "and it says why rather than reading as a snub")
+eq(busyOne.confirmBox, nil, "with no yes/no box stacked over the fight")
+eq(#busyOne.toasts, 1,
+   "and a line in the corner, because an invite answered on the player's "
+   .. "behalf with nothing on screen is one neither player could diagnose")
+check(busyOne.toasts[1]:find("ANN", 1, true) ~= nil, "naming who asked")
+
+-- A free player is asked properly, and nothing is sent until they answer.
+local freeOne = bare()
+freeOne.sessions:onRequest(freeOne.game,
+  { from = "abc123", name = "ANN", kind = "battle" })
+check(freeOne.confirmBox ~= nil, "a free player gets the box")
+eq(lastSent(freeOne, Wire.RESPOND), nil, "and nothing is answered for them")
+eq(#freeOne.toasts, 0, "nor is anything said in the corner")
+
+-- What each reason reads as.  Pure, so the sentences can be pinned without
+-- standing up a screen -- and absent is a human pressing NO, which is the
+-- only refusal that ever deserved the flat wording.
+eq(Sessions.declineText("BOB", "battle", "fighting"), "BOB is in\na battle.",
+   "a refusal from a fight says so")
+eq(Sessions.declineText("BOB", "battle", "busy"), "BOB is busy\nright now.",
+   "and one from a session says that")
+eq(Sessions.declineText("BOB", "battle", "gone"), "BOB has left\nthe game.",
+   "and one the hub could not deliver names the reason nobody could see")
+eq(Sessions.declineText("BOB", "battle", nil), "BOB refused\nto battle.",
+   "no reason is a person saying no, and reads exactly as it always did")
+eq(Sessions.declineText("BOB", "trade", nil), "BOB said no.",
+   "which is worded for the kind that was asked")
+
+-- An ask nothing ever answers used to strand this client for the session:
+-- `outgoing` marks it busy, and only the CANCEL row could clear it -- a row
+-- a blackout or a save load can take away with the box it lives on.
+local stuck = bare()
+stuck.sessions:request({ id = "peer1", name = "HAL" }, "battle")
+check(stuck.sessions:isBusy(), "asking makes this client busy")
+stuck.sessions:update(stuck.game, 30)
+check(stuck.sessions:isBusy(), "and it stays busy while there is time left")
+stuck.sessions:update(stuck.game, 3600)
+check(not stuck.sessions:isBusy(),
+      "but an ask nobody ever answers is taken back rather than held forever")
+check(lastSent(stuck, Wire.REQUEST_CANCEL) ~= nil,
+      "with the ordinary cancel, so the asked player's box comes down too")
+check(#stuck.said > 0 and stuck.said[#stuck.said]:find("HAL", 1, true) ~= nil,
+      "and the player is told, rather than left wondering")
+
+-- The same for their ask: a box that leaves the stack unanswered used to
+-- leave this side holding an invite forever, silently refusing every later
+-- one with nothing on screen to answer.
+local box = { confirm = true }
+local dropped = bare({ { kind = "overworld" }, box })
+dropped.sessions.incoming = { from = "peer1", kind = "battle", name = "ANN" }
+dropped.sessions.incomingBox = { box = box, game = dropped.game }
+dropped.sessions:update(dropped.game, 0)
+check(dropped.sessions.incoming ~= nil,
+      "an invite whose box is still up is left alone")
+table.remove(dropped.game.stack.states)   -- the box goes, unanswered
+dropped.sessions:update(dropped.game, 0)
+eq(dropped.sessions.incoming, nil,
+   "a box that left the stack without an answer stops holding this client")
+eq((lastSent(dropped, Wire.RESPOND) or {}).accept, false,
+   "and the asker is told no rather than left waiting on a box nobody has")
+
+-- ...but a box that was never on a stack at all is not an abandoned invite.
+-- Absence reads the same for both, and only the latch tells them apart.
+local stubbed = bare()
+stubbed.sessions.incoming = { from = "peer1", kind = "battle", name = "ANN" }
+stubbed.sessions.incomingBox = { box = { confirm = true }, game = stubbed.game }
+stubbed.sessions:update(stubbed.game, 0)
+check(stubbed.sessions.incoming ~= nil,
+      "a box that was never seen on the stack is not read as one that left")
+
+end)()
 
 local warns = {}
 local function clearWarns()
@@ -13274,6 +13598,162 @@ end)()
      "a seat with no clock reads truth hp on the card too")
 end)()
 
+-- ------- Gen1 Battlefield: the roster chip (how many, and how they are)
+--
+-- One named panel per TRAINER carrying six balls: the question the plates
+-- cannot answer, asked per player rather than per seat. What is pinned here is
+-- the model (both party dialects, all four ball states, six slots always) and
+-- the placement rule that keeps a chip off its own side's HUD stack.
+
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- roster chip tests skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+  local OK, STATUS, KO, NONE =
+    Battlefield.ROSTER_OK, Battlefield.ROSTER_STATUS,
+    Battlefield.ROSTER_KO, Battlefield.ROSTER_NONE
+
+  -- Dialect 1: a list of sheets, which is what a locally-held party is.
+  local mine = Battlefield.rosterModel({ name = "ANN", party = {
+    { hp = 30, maxHp = 30 },
+    { hp = 0, maxHp = 24 },
+    { hp = 9, maxHp = 20, status = "PSN" },
+  } })
+  eq(mine.name, "ANN", "the chip is named for the trainer, not the monster")
+  eq(mine.balls[1], OK, "a standing party member is a live ball")
+  eq(mine.balls[2], KO, "a fainted one is spent")
+  eq(mine.balls[3], STATUS, "a statused one is its own state")
+  eq(mine.held, 3, "held counts what the trainer actually brought")
+  eq(mine.standing, 2, "standing counts what they have left")
+  eq(#mine.balls, 6, "and the row is six wide however many they brought")
+  eq(mine.balls[4], NONE, "the slots past the party are empty rings")
+  eq(mine.balls[6], NONE, "...all the way to six")
+
+  -- Down beats statused on one monster, exactly as the referee's token does:
+  -- a fainted monster's status field is still set, and reading it first would
+  -- draw a spent ball as merely poisoned.
+  local downed = Battlefield.rosterModel({ party = { { hp = 0, status = "PSN" } } })
+  eq(downed.balls[1], KO, "a downed monster is down even while it is poisoned")
+
+  -- Dialect 2: the referee's roster string, which is all a client ever gets
+  -- about the seat opposite.
+  local theirs = Battlefield.rosterModel({ name = "BOB", party = "oxs" })
+  eq(theirs.balls[1], OK, "`o` reads back as a live ball")
+  eq(theirs.balls[2], KO, "`x` as a spent one")
+  eq(theirs.balls[3], STATUS, "`s` as a statused one")
+  eq(theirs.held, 3, "a roster string's length is the party size")
+  eq(theirs.balls[4], NONE, "and it pads to six like any other")
+
+  -- Nothing to say says nothing. Six blank rings under a name is the claim
+  -- "this trainer has no monsters", which is much worse than no chip at all.
+  eq(Battlefield.rosterModel({ name = "NOBODY" }), nil,
+     "a trainer with no party publishes no chip")
+  eq(Battlefield.rosterModel({ name = "NOBODY", party = {} }), nil,
+     "and neither does an empty one")
+  eq(Battlefield.rosterModel({ name = "NOBODY", party = "" }), nil,
+     "nor an empty roster string")
+
+  -- An unreadable sheet is a monster the trainer still brought: `ko` is the
+  -- reading that never tells a player their opponent has less than they do.
+  local unreadable = Battlefield.rosterModel({ party = { {}, { hp = 12 } } })
+  eq(unreadable.held, 2, "a sheet with no HP is still a party member")
+  eq(unreadable.balls[1], KO, "...drawn as spent rather than as absent")
+
+  -- Six is the cap. A seventh is not drawn rather than widening the row.
+  local seven = Battlefield.rosterModel({ party = "ooooooo" })
+  eq(seven.held, 6, "a roster past six is cut to six")
+
+  -- ------- placement
+  --
+  -- Allies down from the top-left, foes up from the bottom-right: the two
+  -- corners the plate stacks never reach.
+  local duo = Battlefield.layout({
+    mode = "coop_pvp",
+    allyHumans = { { id = "ann", name = "ANN", party = "oo" },
+                   { id = "cid", name = "CID", party = "ox" } },
+    foeHumans = { { id = "bob", name = "BOB", party = "ooo" },
+                  { id = "dot", name = "DOT", party = "x" } },
+    allySeats = { { index = 1, name = "PIKA", hp = 10, maxHp = 20 },
+                  { index = 2, name = "RATT", hp = 10, maxHp = 20 } },
+    foeSeats = { { index = 3, name = "WEED", hp = 10, maxHp = 20 },
+                 { index = 4, name = "ODDI", hp = 10, maxHp = 20 } },
+  })
+  eq(#duo.rosters, 4, "a 2-on-2 publishes a chip for all four trainers")
+  local allyChips, foeChips = {}, {}
+  for _, chip in ipairs(duo.rosters) do
+    if chip.side == "foe" then foeChips[#foeChips + 1] = chip
+    else allyChips[#allyChips + 1] = chip end
+  end
+  eq(#allyChips, 2, "two of them on the ally side")
+  eq(#foeChips, 2, "and two on the foe side")
+  eq(allyChips[1].model.name, "ANN",
+     "chip order follows the human order, so the local player is chip 1")
+  check(allyChips[1].y < allyChips[2].y,
+        "ally chips stack downward from the top edge")
+  check(foeChips[1].y > foeChips[2].y,
+        "foe chips stack upward from the bottom edge")
+  check(allyChips[1].x < duo.midline and foeChips[1].x > duo.midline,
+        "each side's chips sit on that side's margin")
+  for _, chip in ipairs(duo.rosters) do
+    eq(chip.w, Battlefield.ROSTER_W, "every chip is one width")
+    eq(chip.h, Battlefield.ROSTER_H, "and one height")
+    check(chip.x >= 0 and chip.x + chip.w <= Battlefield.WIDTH,
+          "a chip stays inside the canvas horizontally")
+    check(chip.y >= Battlefield.FIELD_TOP
+          and chip.y + chip.h <= Battlefield.FIELD_BOTTOM,
+          "and inside the FIELD -- never in the letterbox or under the menu band")
+  end
+
+  -- The rule the corners were chosen for: with a full plate stack on both
+  -- sides, no chip may touch a plate. This is the assertion that fails if
+  -- somebody moves the plate stack or the chip margin without the other.
+  local function overlaps(a, b)
+    return a.x < b.x + b.w and b.x < a.x + a.w
+       and a.y < b.y + b.h and b.y < a.y + a.h
+  end
+  local collided = nil
+  for _, chip in ipairs(duo.rosters) do
+    for _, plate in ipairs(duo.plates) do
+      if overlaps(chip, plate) then
+        collided = collided or (chip.model.name .. " over a " .. plate.side .. " plate")
+      end
+    end
+  end
+  eq(collided, nil, "no roster chip lands on a HUD plate in a full 2-on-2")
+
+  -- A wild fight has no trainer on the foe edge, so it gets no chip there --
+  -- and the player still gets their own, which is the whole point of asking
+  -- the question per player.
+  local wild = Battlefield.layout({
+    mode = "wild",
+    allyHumans = { { id = "ann", name = "ANN", party = "ooxo" } },
+    foeHumans = { { id = "nope", name = "NOPE", party = "oooooo" } },
+    allySeats = { { index = 1, name = "PIKA", hp = 10, maxHp = 20 } },
+    foeSeats = { { index = 3, name = "RATT", hp = 10, maxHp = 20 } },
+  })
+  eq(#wild.rosters, 1, "a wild fight publishes exactly one chip")
+  eq(wild.rosters[1].side, "ally", "...and it is the player's")
+
+  -- A trainer nobody described stands on the field with no chip under them,
+  -- rather than with an empty one.
+  local silent = Battlefield.layout({
+    mode = "coop_npc",
+    allyHumans = { { id = "ann", name = "ANN", party = "oo" } },
+    foeHumans = { { id = "bug", name = "BUG" } },
+    allySeats = { { index = 1, name = "PIKA", hp = 10, maxHp = 20 } },
+    foeSeats = { { index = 3, name = "WEED", hp = 10, maxHp = 20 } },
+  })
+  eq(#silent.rosters, 1, "an undescribed trainer publishes no chip")
+  eq(silent.rosters[1].side, "ally", "...while the player's still draws")
+  local stoodFoe = false
+  for _, h in ipairs(silent.humans) do
+    if h.side == "foe" then stoodFoe = true end
+  end
+  check(stoodFoe, "and that trainer is still standing on the field")
+end)()
+
 -- ------- Gen1 Battlefield wave 1: fx math (pure functions of t)
 --
 -- Every renderer in Battlefield.lua is a pure function of a 0..1 progress the
@@ -13584,6 +14064,13 @@ end)()
   local okList = pcall(Battlefield.drawListPanel,
     { { label = "TACKLE", right = "20/20" } }, 1, { title = "MOVES" })
   check(okList, "drawListPanel does not throw headless")
+  -- The type column: with a tag, and with a tag on only some of the rows --
+  -- an item's move list carries none, and the two must share one panel.
+  local okTagged = pcall(Battlefield.drawListPanel, {
+    { label = "THUNDERSHOCK", tag = "ELECTRIC", right = "25/25" },
+    { label = "GROWL", right = "39/39" },
+  }, 1, { title = "MOVES" })
+  check(okTagged, "drawListPanel does not throw on a row carrying a tag")
 
   -- Edge-shaped inputs: empty rows, an oversized list (overflow), and no
   -- title -- all still headless-safe.
@@ -22036,10 +22523,66 @@ end)()
     eq(#rows, 2, "one row per live move")
     eq(rows[1].label, "FIX BOOST", "the label is the move's display name")
     eq(rows[1].right, "0/20", "PP is its own right column, current/max")
+    eq(rows[1].tag, "NORMAL",
+       "the move's type is the row's own column, left of PP -- so all four "
+       .. "types are readable at once instead of only the highlighted one")
+    eq(moveClient:bandMoveTitle(), "MOVES",
+       "...and the title no longer restates the cursor's type")
     check(rows[1].dim == true, "a move at 0 PP is dimmed")
     eq(rows[2].right, "18/24",
        "PP Ups add a fifth of base pp each -- floor(20/5)*1 == 4 -> 24")
     check(not rows[2].dim, "a move with PP left is not dimmed")
+
+    -- ------- the move cursor remembers what this monster last used
+    --
+    -- A Gen 1 fight is mostly one attack repeated, so opening the list on row
+    -- one every turn charges the player a walk down it for a choice they
+    -- already made. The memory is *only* where the cursor opens -- nothing is
+    -- pre-committed, and B still backs out to the command grid.
+    local cursorClient = setmetatable({
+      medMoveList = {
+        { id = "FIX_BOOST", pp = 20, ppUps = 0 },
+        { id = "FIX_BOOST", pp = 20, ppUps = 0 },
+        { id = "FIX_BOOST", pp = 20, ppUps = 0 },
+      },
+      moveMemory = {},
+      game = { data = data },
+      mySlot = function() return { active = 2 } end,
+    }, { __index = CoopBattle })
+
+    eq(cursorClient:rememberedMove(), 1,
+       "a monster that has not attacked yet opens on its first move")
+    cursorClient.moveMemory[2] = 3
+    eq(cursorClient:rememberedMove(), 3,
+       "...and afterwards on the move it was last sent into a turn with")
+    cursorClient.moveMemory[1] = 2
+    eq(cursorClient:rememberedMove(), 3,
+       "the memory is keyed by party slot, so the mon on the bench keeps its "
+       .. "own row rather than moving this one's cursor")
+    cursorClient.moveMemory[2] = 9
+    eq(cursorClient:rememberedMove(), 1,
+       "a remembered row past the end of the sheet it has *now* (Transform, "
+       .. "Mimic) opens on the first rather than on a row nothing draws")
+
+    -- What writes it: `commit`, so none of the three fight call sites can
+    -- forget to, and none of the item / switch / run ones can write to it.
+    local commitClient = setmetatable({
+      medMoveList = cursorClient.medMoveList,
+      moveMemory = {},
+      mediated = true,
+      game = { data = data },
+      mine = 1,
+      mySlot = function() return { active = 2 } end,
+      sendMediatedChoice = function() return true end,
+    }, { __index = CoopBattle })
+    commitClient:commit({ slot = 1, move = 2, target = 3 })
+    eq(commitClient.moveMemory[2], 2, "a fight remembers the move it sent")
+    commitClient:commit({ slot = 1, kind = "item", item = "ETHER", move = 1 })
+    eq(commitClient.moveMemory[2], 2,
+       "an item's `move` names the move being restored, not one being used, "
+       .. "so it leaves the memory alone")
+    commitClient:commit({ slot = 1, kind = "run" })
+    eq(commitClient.moveMemory[2], 2, "...and so does a run")
 
     local items = CoopBattle.bandCommandItems({})
     eq(items[1].label, "FIGHT", "the grid keeps the classic FIGHT/SWITCH/ITEM/RUN order")
@@ -22314,6 +22857,65 @@ end)()
     }, { __index = CoopBattle })
     eq(#client:battlefieldFoeHumans(), 0,
        "coop_pvp draws foe humans from owned seats -- none owned here, so zero")
+  end
+
+  -- ------- the roster chip's party, on the screen that needs no wire for it
+  --
+  -- A co-op fight hands every client every seat's party at construction --
+  -- all four of them are replaying one host's events, and a replay needs the
+  -- sheets -- so the chip reads the live tables the sim is fighting with and
+  -- there is no `team` event in it. That is the whole difference between this
+  -- screen and MediatedBattle, and it is worth pinning: a refactor that made
+  -- CoopBattle wait on the referee for this would blank four chips.
+  do
+    local sim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }), mon(40, 0, { move() }) } },
+      { side = "a", owner = "cid", name = "CID",
+        party = { mon(60, 30, { move() }) } },
+      { side = "b", owner = "bob", name = "BOB",
+        party = { mon(60, 20, { move() }), mon(50, 50, { move() }) } },
+      { side = "b", owner = "dot", name = "DOT",
+        party = { mon(60, 10, { move() }) } },
+    })
+    local client = setmetatable({
+      mode = "coop_pvp", sim = sim, mine = 1, selfId = "ann",
+      game = { data = { sprites = genericSprites } },
+    }, { __index = CoopBattle })
+
+    local allies = client:battlefieldAllyHumans()
+    eq(#allies, 2, "both ally seats stand a trainer")
+    eq(allies[1].name, "ANN", "the local player sorts first")
+    eq(allies[1].party and #allies[1].party, 2,
+       "...and carries their own party for the chip")
+    eq(allies[1].party, sim.slots[1].party,
+       "the chip reads the sim's live table, so a faint shows the frame it lands")
+    eq(allies[2].party and #allies[2].party, 1,
+       "the partner's party rides along too -- co-op holds every sheet locally")
+
+    local foes = client:battlefieldFoeHumans()
+    eq(#foes, 2, "and both opposing players are named")
+    eq(foes[1].party and #foes[1].party, 2,
+       "an opposing player's party needs no wire on this screen either")
+
+    -- The chip and the trainer intro's ball row are one source, so the row
+    -- that shows for two seconds at the open and the chip that stands for the
+    -- whole fight can never disagree about how many the trainer brought.
+    local npcSim = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { move() }) } },
+      { side = "b", owner = nil, name = "FOE",
+        party = { mon(60, 30, { move() }), mon(60, 30, { move() }) } },
+    })
+    local npcClient = setmetatable({
+      mode = "coop_npc", sim = npcSim, mine = 1, selfId = "ann",
+      trainer = { id = "OPP_BUG_CATCHER", name = "BUG CATCHER" },
+      game = { data = { sprites = genericSprites } },
+    }, { __index = CoopBattle })
+    local npcFoes = npcClient:battlefieldFoeHumans()
+    eq(#npcFoes, 1, "an NPC side is one trainer however many seats it fields")
+    eq(npcFoes[1].party and #npcFoes[1].party, 2,
+       "...carrying the flattened party the intro ball row draws")
   end
 
   -- The coop move bubble's `name` agrees with the plate's own name source:

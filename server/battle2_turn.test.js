@@ -219,7 +219,41 @@ scenario('retarget', (events) => {
   return battle;
 });
 
-// the display name a sheet carries (PROTOCOL 23), and the id it falls back to
+// 5. a whole trapping chain. Gen1's 2..5 counter is a *total* attack count, so
+//    the turn Wrap lands on deals the move's damage and no residual on top of
+//    it; every later turn is one attack, forced on both seats and therefore
+//    ticked rather than submitted. The tail also pins that a referee-filled
+//    answer cannot be cancelled away -- silently, so what shows up on the wire
+//    is the absence of an `unchose`.
+scenario('trap_chain', (events) => {
+  const wrap = () => ({ id: 'wrap', pp: 60, power: 5, accuracy: 255, type: 0,
+    effect: 42, chance: 0 });
+  const battle = build({
+    id: 'trp', mode: '1v1', seed: 9999,
+    choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spe: 120, moves: [wrap()] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, def: 200, spe: 1,
+          moves: [mv('tap', 40, 255, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  for (let step = 1; step <= 10; step += 1) {
+    battle.tick(step);
+    drainInto(battle, events);
+  }
+  battle.submitChoice('p2', { action: 'cancel' });
+  battle.submitChoice('p2', { action: 'switch', slot: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// the display name a sheet carries (PROTOCOL 26), and the id it falls back to
 // when it carries none. The Gen 1 pair next door explains the shape; this is
 // the Gen 2 twin of it, because BattleSim2 / lib/battle2 narrate a move from
 // their own copies of the same five call sites.
@@ -242,7 +276,7 @@ scenario('move_names', (events) => {
     id: 'thump', name: 'THUMP HIT', pp: 60, power: 10,
     accuracy: 255, type: 0, effect: 0, chance: 0,
   });
-  // No `name` at all: the protocol-22 sheet, narrated under its id.
+  // No `name` at all: the protocol-25 sheet, narrated under its id.
   const nudge = () => mv('nudge', 10, 255, 0);
   const battle = build({
     id: 'mn', mode: '1v1', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
@@ -336,7 +370,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 5, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 6, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -542,7 +576,7 @@ test('every sentence about a move prints its name, and falls back to the id', ()
   assert.ok(said.includes('Alpha learned THUMP HIT'), 'Mimic names what it copied');
   assert.ok(said.includes('Alpha used THUMP HIT'), 'and the copy keeps the name');
   assert.ok(said.includes('Beta used nudge'),
-    'a move with no name -- a protocol-22 sheet -- is narrated under its id');
+    'a move with no name -- a protocol-25 sheet -- is narrated under its id');
 
   const anims = run.events.filter((event) => event.t === 'anim').map((event) => event.text);
   assert.ok(anims.includes('slow_swipe'), 'the anim row still carries the registry id');
