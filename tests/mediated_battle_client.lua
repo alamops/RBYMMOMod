@@ -1573,6 +1573,86 @@ do
   eq(#peer.foeHumans, 1, "an MMO 1v1 still stands the peer on the foe edge")
   eq(peer.foeHumans[1].id, "peer1", "...identified by their player id")
   eq(peer.foeHumans[1].name, "BOB", "...and named from the roster")
+
+  -- ------- the roster chip's party (PROTOCOL 24)
+  --
+  -- A `team` event is the only thing this screen is ever told about a monster
+  -- that is not on the field, and the only source there is for the seat
+  -- opposite: no client uploads a party to any other client.
+
+  -- Our own side falls back to the sheets we uploaded, so a PROTOCOL 22
+  -- referee that emits no `team` at all still fills the player's own row
+  -- rather than leaving both sides blank.
+  local ownFallback = screen({
+    mode = "1v1", peerId = "peer1", peerName = "BOB",
+    mine = { { species = "A", hp = 20 }, { species = "B", hp = 0 } },
+  }):battlefieldCtx()
+  eq(ownFallback.allyHumans[1].party and #ownFallback.allyHumans[1].party, 2,
+     "with no team event the player's own chip reads the uploaded sheets")
+  eq(ownFallback.foeHumans[1].party, nil,
+     "...and the peer's stays empty, because there is nothing honest to put in it")
+
+  -- With the referee talking, both sides come off the referee -- including our
+  -- own, which is the seat where the two could disagree and the referee is the
+  -- one that has been fighting with the sheets.
+  local told = screen({
+    mode = "1v1", peerId = "peer1", peerName = "BOB",
+    mine = { { species = "A", hp = 20 }, { species = "B", hp = 0 } },
+    teams = { [0] = "ooxs", [2] = "ox" },
+  }):battlefieldCtx()
+  eq(told.allyHumans[1].party, "ooxs",
+     "the referee's roster wins over the uploaded sheets on our own seat")
+  eq(told.foeHumans[1].party, "ox",
+     "and the peer's roster is drawn from the only source there is")
+
+  -- The solo trainer path runs the same referee over a table transport, so an
+  -- NPC's ball row arrives exactly as a stranger's does.
+  local solo = screen({
+    mode = "coop_npc", peerName = "LASS",
+    trainer = { id = "OPP_LASS", name = "LASS" },
+    teams = { [2] = "ooo" },
+  }):battlefieldCtx()
+  eq(solo.foeHumans[1].party, "ooo",
+     "a solo trainer's roster comes off the same event a peer's does")
+
+  -- A wild fight has no foe human at all, so there is nothing to hang a roster
+  -- on even if the referee published one for the seat.
+  local wildTeam = screen({
+    mode = "wild", peerName = "WILD",
+    mine = { { species = "A", hp = 20 } },
+    teams = { [0] = "o", [2] = "o" },
+  }):battlefieldCtx()
+  eq(#wildTeam.foeHumans, 0, "a wild fight still has nobody to put a chip under")
+  eq(wildTeam.allyHumans[1].party, "o",
+     "...while the player's own roster is published as it is in any other fight")
+end
+
+-- ------- the `team` event reaches `teams` and nothing else
+--
+-- Stored raw and read by the arena alone: it is a chip, never a rule. A screen
+-- that let a roster decide `mustReplace` would be taking a rule off a field the
+-- referee sends for drawing.
+do
+  local screen = setmetatable({
+    battle = "b1", seq = 0, gaps = 0, phase = "play",
+    slots = {}, lines = {}, teams = {}, mine = {}, active = 1, mySide = "a",
+  }, { __index = Mediated })
+
+  screen:onEvent({ battle = "b1", seq = 1, t = "team", slot = 0, team = "oox" })
+  screen:onEvent({ battle = "b1", seq = 2, t = "team", slot = 2, team = "x" })
+  eq(screen.teams[0], "oox", "a team event lands on the seat it names")
+  eq(screen.teams[2], "x", "...on either side")
+  eq(screen.mustReplace, nil, "and decides nothing about whose turn it is")
+
+  screen:onEvent({ battle = "b1", seq = 3, t = "team", slot = 0, team = "oxx" })
+  eq(screen.teams[0], "oxx", "a later roster replaces the one before it")
+
+  -- Wire drops a malformed roster off the event rather than trimming it (a
+  -- short roster is a different party), so what reaches here is a `team` with
+  -- no `team` field -- which must leave the last good one standing.
+  screen:onEvent({ battle = "b1", seq = 4, t = "team", slot = 0 })
+  eq(screen.teams[0], "oxx",
+     "a team event whose roster was dropped at the boundary changes nothing")
 end
 
 T.finish("mediated_battle_client")

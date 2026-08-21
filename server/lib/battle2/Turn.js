@@ -661,6 +661,27 @@ class Battle {
   }
 
   /*
+   * Every seat's party roster, published when -- and only when -- it moved.
+   *
+   * Gen 2's twin of `server/lib/battle/Turn.js:_syncTeams`; read that one's
+   * header for why the referee is the only party to a mediated fight that can
+   * say this, and why it says a ball row and never a sheet. Same three tokens,
+   * same diff, same three call sites, in the same order -- the roster chip does
+   * not know which generation drew it.
+   */
+  _syncTeams() {
+    for (const fighter of this.fighters) {
+      const roster = Events.teamString(fighter.mons);
+      if (roster !== fighter.team) {
+        fighter.team = roster;
+        this._emit('team', {
+          slot: fighter.slot, side: fighter.side, team: roster,
+        });
+      }
+    }
+  }
+
+  /*
    * Everything since the last call, in order, and the buffer is emptied. A
    * caller that drops the returned list drops those events for good, which is
    * deliberate: the alternative -- a buffer that grows until somebody reads it
@@ -1459,6 +1480,10 @@ class Battle {
     this.forcedPending = false;
     for (const fighter of this.fighters) fighter.choice = null;
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
+    // Before the window opens: a player deciding this turn is looking at the
+    // rosters, and anything a status or a bench potion moved last turn has to
+    // be on them by the time the menu is up.
+    this._syncTeams();
     this._emit('turn', { amount: this.turn });
     this._fillForcedChoices();
     // When every living seat is forced, defer resolve to the next tick so
@@ -1518,6 +1543,8 @@ class Battle {
     this.forcedPending = false;
     for (const fighter of this.fighters) fighter.choice = null;
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
+    // The other window a player answers from, and the same reason.
+    this._syncTeams();
     for (const fighter of this.fighters) {
       if (this._owes(fighter)) {
         this._emit('turn', { amount: this.turn, slot: fighter.slot });
@@ -2839,6 +2866,9 @@ class Battle {
     // open the replace picker from this rather than guessing from local HP.
     if (next) faintEv.amount = 1;
     this._emit('faint', faintEv);
+    // Inside the faint batch, so the ball goes dark in the same beat the
+    // monster goes down -- and so a fight that ends here still said it.
+    this._syncTeams();
 
     // Owed here, paid at the end of the action (`_drainExp`), with the fallen
     // sheet held in the queue so the payout still names the monster that fell
@@ -3231,6 +3261,9 @@ function attempt(opts) {
         connected: true,
         graceEndsAt: null,
         choice: null,
+        // The roster last published for this seat (`_syncTeams`). null rather
+        // than the opening string, so the first sync always publishes.
+        team: null,
         // Who has been in against THIS seat's current monster; see `_refield`.
         // Null-prototype, matching the Gen 1 twin: the keys are attacker-shaped
         // only in the sense that they are built from slot/index, but the two

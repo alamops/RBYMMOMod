@@ -24,7 +24,9 @@ const ROOT = path.join(__dirname, '..');
 const {
   PROTOCOL, DEFAULT_SPRITE, DEFAULT_SPRITE_GEN2, defaultSpriteFor, SPRITE_GATE_MS,
 } = require('./lib/relay.js');
-const { PLAYER_ID_HEX, BATTLE_EVENT_TYPES } = require('./lib/sanitize.js');
+const {
+  PLAYER_ID_HEX, BATTLE_EVENT_TYPES, TEAM_TOKENS, cleanBattleTeam, BATTLE_MON_MAX,
+} = require('./lib/sanitize.js');
 
 function read(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -147,6 +149,49 @@ test('Wire.BATTLE_EVENTS matches sanitize.js BATTLE_EVENT_TYPES', () => {
     'Wire.BATTLE_EVENTS and sanitize.js BATTLE_EVENT_TYPES must name the same '
     + 'closed vocabulary -- add a new battle event kind to both in the same change',
   );
+});
+
+test('the team roster alphabet is the same three tokens on both sides', () => {
+  // A one-sided token is the quiet kind of drift: the referee would publish a
+  // roster its own hub sanitises away, or a client would draw a state the other
+  // runtime can never produce. Both halves spell the set out longhand (the sim
+  // directories run with no Config), so this is the only place they are read
+  // side by side.
+  const wire = read('src/Wire.lua');
+  const tableMatch = wire.match(/M\.TEAM_TOKENS\s*=\s*\{([\s\S]*?)\}/);
+  assert.ok(tableMatch, 'Wire.lua must assign M.TEAM_TOKENS as a table');
+  const luaTokens = [...tableMatch[1].matchAll(/(\w+)\s*=\s*true/g)].map((m) => m[1]).sort();
+  assert.deepStrictEqual([...TEAM_TOKENS].sort(), luaTokens,
+    'Wire.TEAM_TOKENS and sanitize.js TEAM_TOKENS must name the same alphabet');
+
+  // ...and the two sim mirrors, which are where the tokens are actually
+  // produced. They mirror rather than import, so they can drift silently.
+  for (const rel of ['src/BattleSim/events.lua', 'src/BattleSim2/events.lua']) {
+    const src = read(rel);
+    const mirror = src.match(/M\.TEAM_TOKENS\s*=\s*\{([\s\S]*?)\}/);
+    assert.ok(mirror, `${rel} must assign M.TEAM_TOKENS`);
+    const kinds = [...mirror[1].matchAll(/(\w+)\s*=\s*true/g)].map((m) => m[1]).sort();
+    assert.deepStrictEqual(kinds, luaTokens, `${rel} mirrors Wire's roster alphabet`);
+  }
+});
+
+test('a roster is refused whole rather than trimmed to what parses', () => {
+  // The twin of Wire.battleTeam, and the assertion that matters is the refusal:
+  // a truncated sentence is a shorter sentence, but a truncated roster is a
+  // different party -- three balls where the seat holds five -- and the chip
+  // would tell a player their opponent is two monsters closer to beaten than
+  // they are.
+  assert.strictEqual(cleanBattleTeam('oxs'), 'oxs');
+  assert.strictEqual(cleanBattleTeam('o'), 'o');
+  assert.strictEqual(cleanBattleTeam('o'.repeat(BATTLE_MON_MAX)), 'o'.repeat(BATTLE_MON_MAX));
+
+  assert.strictEqual(cleanBattleTeam(''), null, 'an empty roster is not a seat');
+  assert.strictEqual(cleanBattleTeam('o'.repeat(BATTLE_MON_MAX + 1)), null,
+    'past BATTLE_MON_MAX is refused, not cut to six');
+  assert.strictEqual(cleanBattleTeam('ooq'), null, 'one unreadable token refuses the row');
+  assert.strictEqual(cleanBattleTeam('OOO'), null, 'the alphabet is exact');
+  assert.strictEqual(cleanBattleTeam(3), null, 'a count is not a roster');
+  assert.strictEqual(cleanBattleTeam(null), null, 'and nothing is not a roster');
 });
 
 test('inbound client→hub message types match on both hubs', () => {

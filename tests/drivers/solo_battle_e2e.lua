@@ -384,6 +384,15 @@ return function(game)
       out.slotSprite = slot and slot.sprite or nil
       local ctx = top.battlefieldCtx and top:battlefieldCtx() or nil
       out.foeHumans = ctx and ctx.foeHumans or nil
+      out.allyHumans = ctx and ctx.allyHumans or nil
+      -- What the referee has said about each seat's party (`team`, PROTOCOL
+      -- 24). Resolved here, where the screen is in scope, and taken off
+      -- `top.teams` rather than off the ctx -- so a nil at the call site means
+      -- "no event ever arrived" rather than "the ctx dropped it".
+      local mineSlot = top.mySlot and top:mySlot() or nil
+      local foeSlot = top.foeSlot and top:foeSlot() or nil
+      out.mineTeam = top.teams and mineSlot and top.teams[mineSlot] or nil
+      out.foeTeam = top.teams and foeSlot and top.teams[foeSlot] or nil
     end)
     return out
   end
@@ -834,6 +843,33 @@ return function(game)
                     and who.name ~= "" and who.name ~= "FRIEND",
                   "...named as the trainer and not as an absent peer",
                   tostring(who and who.name))
+
+            -- The roster chips, end to end through the real referee.
+            --
+            -- A solo fight runs the same `BattleSim` `Turn` an MMO fight does,
+            -- over a table transport instead of a socket, so this is the leg
+            -- that proves the `team` events are actually emitted, sanitised
+            -- and stored -- on the one path where the trainer's party is not
+            -- otherwise knowable to the screen. Nothing on this client holds
+            -- the NPC's sheets: if the chip has a roster, the referee sent it.
+            local mineTeam = arena and arena.mineTeam or nil
+            local foeTeam = arena and arena.foeTeam or nil
+            log(("solo trainer rosters: mine=%s foe=%s"):format(
+              tostring(mineTeam), tostring(foeTeam)))
+            check(type(mineTeam) == "string" and #mineTeam > 0,
+                  "the referee published our own party roster",
+                  tostring(mineTeam))
+            check(type(foeTeam) == "string" and #foeTeam > 0,
+                  "...and the trainer's, which is the only source there is "
+                  .. "for a party this client never held",
+                  tostring(foeTeam))
+            check(who ~= nil and who.party == foeTeam,
+                  "...and it is what the trainer's roster chip draws from",
+                  tostring(who and who.party))
+            local us = arena and arena.allyHumans and arena.allyHumans[1] or nil
+            check(us ~= nil and us.party == mineTeam,
+                  "our own chip reads the referee too, not the uploaded sheets",
+                  tostring(us and us.party))
           end
         end
 

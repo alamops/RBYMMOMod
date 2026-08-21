@@ -1203,6 +1203,12 @@ function M.new(opts)
     active    = 1,         -- which of ours is out, as an index into `mine`
     mySide    = (opts.role == "guest") and "b" or "a",
     slots     = {},        -- field slot -> { species, hp, maxHp }
+    -- field slot -> the referee's roster string for that seat ("oosx"), from
+    -- the `team` event. The ONLY thing this screen is ever told about a
+    -- monster that is not on the field, and the only source there is for the
+    -- seat opposite: nobody uploads a party to anybody but the referee. Read
+    -- by `battlefieldCtx` and by nothing else -- it is a chip and never a rule.
+    teams     = {},
     lines     = {},
     shown     = nil,
     dwell     = 0,
@@ -1729,12 +1735,35 @@ function M:battlefieldTargets()
   return { foe }
 end
 
+-- The roster the chip beside a trainer's name draws, for one field seat.
+--
+-- The referee's word first, and our own uploaded sheets only as the fallback.
+-- Two reasons, and the second is the one that matters: the referee is what has
+-- been *fighting* with those sheets, so where the two could disagree it is
+-- right -- and a PROTOCOL 22 intermediator emits no `team` at all, in which
+-- case falling back is what still gets the player their own row rather than
+-- leaving both sides blank. There is no fallback for the seat opposite, and
+-- there cannot be: nobody uploads a party to anybody but the referee.
+--
+-- nil rather than an empty list when there is nothing to say, because
+-- `rosterModel` reads nil as "this trainer published no roster" and draws no
+-- chip, while six blank rings would claim they have nothing left.
+function M:seatRoster(slot, ownSheets)
+  local roster = slot and self.teams and self.teams[slot]
+  if type(roster) == "string" and roster ~= "" then return roster end
+  if ownSheets and type(self.mine) == "table" and #self.mine > 0 then
+    return self.mine
+  end
+  return nil
+end
+
 function M:battlefieldCtx()
   local mode = (self.mode == "wild") and "wild" or "1v1"
   local allyHumans = {{
     id = "self",
     name = playerName(self.game),
     spriteId = selfSpriteId(),
+    party = self:seatRoster(self:mySlot(), true),
   }}
   local foeHumans = {}
   -- Who is standing on the foe edge: an NPC trainer, a peer, or nobody.
@@ -1751,17 +1780,26 @@ function M:battlefieldCtx()
   -- `CoopBattle:battlefieldFoeHumans` builds it: the entry is unconditional
   -- even when the walk sheet cannot be named, because the trainer *is* on the
   -- field either way and the silhouette is still a trainer standing there.
+  --
+  -- Both arms carry the foe's roster off the referee and neither has a
+  -- fallback: an NPC's party is as invisible to this screen as a peer's is.
+  -- That is not a gap in the solo path -- a solo fight runs the same referee
+  -- over a table transport (`SoloBattle:_transport`), so the `team` events
+  -- arrive there exactly as they do off a hub, and the trainer's ball row is
+  -- filled by the same code that fills a stranger's.
   if TRAINER_MODES[self.mode] then
     foeHumans[1] = {
       id = (self.trainer and self.trainer.id) or self.peerId,
       name = (self.trainer and self.trainer.name) or self.peerName or "FRIEND",
       spriteId = Gen.trainerWalkSpriteId(self.trainer, self.game),
+      party = self:seatRoster(self:foeSlot(), false),
     }
   elseif mode == "1v1" then
     foeHumans[1] = {
       id = self.peerId,
       name = self.peerName or "FRIEND",
       spriteId = peerSpriteId(self.peerId),
+      party = self:seatRoster(self:foeSlot(), false),
     }
   end
 
@@ -2309,6 +2347,15 @@ function M:onEvent(msg)
   elseif kind == "moves" then
     if msg.slot == self:mySlot() and type(msg.moves) == "table" then
       self.liveMoves = msg.moves
+    end
+
+  elseif kind == "team" then
+    -- Both sides, and our own is not skipped as redundant: `mine` is the sheets
+    -- we uploaded and the referee is the thing that has been fighting with
+    -- them, so on the one seat where the two could disagree the referee is
+    -- right. Stored raw; `Battlefield.rosterModel` reads the string dialect.
+    if msg.slot ~= nil and type(msg.team) == "string" then
+      self.teams[msg.slot] = msg.team
     end
   end
 end

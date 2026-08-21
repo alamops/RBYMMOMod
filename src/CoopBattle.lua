@@ -5359,6 +5359,14 @@ function M:battlefieldAllyHumans()
         id = slot.owner,
         name = slot.name,
         spriteId = ownerLookId(slot.owner, self.selfId),
+        -- The roster chip's party. **No wire needed on this screen**: a co-op
+        -- fight hands every client every seat's party at construction
+        -- (`Coop.lua` unpacks each `slot.party` before `CoopBattle.new`),
+        -- because all four of them are replaying one host's events and a
+        -- replay needs the sheets. So the chip reads the live table the sim is
+        -- fighting with -- which is also why it never lags: a faint writes hp
+        -- on that table, and the next frame draws it.
+        party = slot.party,
         _mine = (slot.index == self.mine),
       }
     end
@@ -5392,6 +5400,13 @@ function M:battlefieldFoeHumans()
         id = self.trainer and self.trainer.id,
         name = (self.trainer and self.trainer.name) or self:trainerIntroName(),
         spriteId = trainerWalkSpriteId(self.trainer, self.game),
+        -- The same flattened list the trainer's intro ball row draws
+        -- (`drawIntroBalls`), so the row that appears for two seconds at the
+        -- open and the chip that stands for the whole fight can never disagree
+        -- about how many the trainer brought. Both foe seats in a 2-on-2 come
+        -- out of one party, and `foeIntroParty` dedupes on table identity, so
+        -- this is one roster for one trainer rather than the same six twice.
+        party = self:foeIntroParty(),
       },
     }
   end
@@ -5405,6 +5420,9 @@ function M:battlefieldFoeHumans()
         id = slot.owner,
         name = slot.name,
         spriteId = ownerLookId(slot.owner, self.selfId),
+        -- Held locally for the same reason the ally side's is: everybody in a
+        -- co-op fight replays one host's events off everybody's sheets.
+        party = slot.party,
       }
     end
   end

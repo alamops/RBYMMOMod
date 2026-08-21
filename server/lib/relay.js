@@ -133,7 +133,23 @@ function defaultSpriteFor(generation) {
 // protocol-21 hub strips the field from the upload and states none on the
 // events, which is exactly that failure -- and it is one no player can
 // diagnose from inside the fight, since every other part of it works.
-const PROTOCOL = 22;
+// 23: the PVP-invite fix (`busy` on mmo.move; optional `reason` on
+// mmo.decline / mmo.respond), landed on a parallel branch. Two branches that
+// both say "23" and mean different vocabularies are exactly the silence this
+// number exists to prevent, so the second to land moves -- 24 is the first
+// number that means both, and a client saying 24 speaks 23's vocabulary too.
+// 24: the `team` battle event -- a seat's party roster as ball states (how
+// many it brought; which are healthy / statused / down). Every other event
+// here is about the field, which is the right scope for all of them but one
+// question: how much does the other player have left. Both clients upload a
+// party to the referee and neither uploads one to the other, and mmo.relay is
+// hard-cut for the length of a mediated fight, so the referee is the only
+// party that can answer it. A protocol-22 hub emits no such kind and the
+// client's sanitiser drops an unknown one whole, so the roster chip beside a
+// peer's name would sit empty for the whole fight while the player's own
+// filled in normally -- a half-drawn screen that reads as "they brought
+// nothing" rather than as a hub that cannot do this.
+const PROTOCOL = 24;
 
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right

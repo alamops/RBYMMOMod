@@ -65,11 +65,21 @@ local floor = math.floor
 --                 this share (`mon`).  Never an amount: the intermediator holds
 --                 no species table, so each client runs its own formula over
 --                 its own party.
+--   team       -- a seat's party roster, as ball states: how many monsters it
+--                 brought and which of them are healthy / statused / down.
+--                 The referee is the only party to a mediated fight that holds
+--                 every party, so it is the only one that can say this about
+--                 the seat *opposite* -- and the roster chip on the arena is
+--                 the whole reason it is said.  Deliberately states nothing
+--                 else about a bench monster: no species, no level, no moves.
+--                 The classic ball row reveals exactly this much and no more,
+--                 and a hub that leaked a bench sheet would be handing one
+--                 player the other's team preview.
 M.KINDS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
-  chose = true, unchose = true, moves = true, exp = true,
+  chose = true, unchose = true, moves = true, exp = true, team = true,
 }
 
 -- Every key an event may carry, and the type it carries.  `battle` and `seq`
@@ -108,6 +118,7 @@ M.FIELDS = {
   level        = "number",
   participants = "number",
   mon          = "number",
+  team         = "string",
 }
 
 -- ------------------------------------------------------------------
@@ -180,6 +191,8 @@ M.SHAPES = {
                 speciesId = "its registry id, when the sheet named one",
                 level = "its level", participants = "how many shares split it",
                 mon = "party index (0-5) of the mon banking this share; absent means the active one" },
+  team      = { slot = "the seat whose roster this is", side = true,
+                team = "one token per party member, in party order: o / s / x" },
 }
 
 -- ------------------------------------------------------------------
@@ -198,6 +211,57 @@ function M.fieldSlot(side, index)
   local n = tonumber(index)
   if not n or n ~= n then n = 1 end
   return base + math.max(0, floor(n) - 1)
+end
+
+-- ------------------------------------------------------------------
+-- team rosters
+-- ------------------------------------------------------------------
+--
+-- One character per party member, in party order:
+--
+--   o  -- standing, and nothing wrong with it
+--   s  -- standing, carrying a status
+--   x  -- down
+--
+-- Three tokens and no fourth, because the fourth ball the classic row draws
+-- ("this slot is empty") is not a party member at all -- it is the *absence*
+-- of one, and the roster says that by being short.  A five-mon party is five
+-- characters; the renderer pads.  That is what keeps the length meaningful:
+-- `#roster` is the party size, which is the first half of the question this
+-- event exists to answer.
+--
+-- Single characters rather than words because this is published on every
+-- change to every seat for the whole of a fight, and because a fixed
+-- one-character alphabet is a sanitiser a hub can write in one line and both
+-- runtimes can agree on exactly (`Wire.battleTeam`, `cleanBattleTeam`).
+M.TEAM_OK      = "o"
+M.TEAM_STATUS  = "s"
+M.TEAM_FAINTED = "x"
+M.TEAM_TOKENS  = { o = true, s = true, x = true }
+
+-- A monster's ball state.  Fainted first: a fainted monster's status field is
+-- still whatever put it there in the original, and asking about the status
+-- first would draw a down monster as merely poisoned.
+function M.teamToken(mon)
+  if type(mon) ~= "table" then return nil end
+  if (tonumber(mon.hp) or 0) <= 0 then return M.TEAM_FAINTED end
+  local status = mon.status
+  if type(status) == "string" and status ~= "" then return M.TEAM_STATUS end
+  return M.TEAM_OK
+end
+
+-- The whole roster, as one string.  A member this cannot describe is `x`
+-- rather than dropped: dropping would shorten the roster, and the length is
+-- the party size -- a monster nobody can read is still a monster the seat
+-- brought, and drawing it as spent is the reading that never overstates what
+-- the other player has left.
+function M.teamString(mons)
+  if type(mons) ~= "table" then return "" end
+  local out = {}
+  for i = 1, #mons do
+    out[i] = M.teamToken(mons[i]) or M.TEAM_FAINTED
+  end
+  return table.concat(out)
 end
 
 local MOVE_FIELDS = { id = "string", pp = "number", power = "number",

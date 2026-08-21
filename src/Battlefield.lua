@@ -162,6 +162,44 @@ M.PLATE_EXP_GAP = 2 -- HP bar bottom to EXP strip top
 -- ends makes it read as subordinate to the HP bar it hangs under.
 M.PLATE_EXP_XINSET = 2
 
+-- ------- the roster chip
+--
+-- One small named panel per TRAINER on the field: their name, and a ball for
+-- each of the six party slots. It answers the one question the plates cannot --
+-- how much has this player got left -- and it answers it per *player*, which is
+-- why it carries a name and why there is exactly one of them per human rather
+-- than one per seat. In a 2-on-2 that difference is the whole point: two plates
+-- on a side describe two monsters, and two chips describe two opponents.
+--
+-- **Six slots always, however many the party holds.** A player with three
+-- monsters shows three balls and three empty rings, not a three-wide chip:
+-- every chip on screen is then the same width and read against the same ruler,
+-- and "they have four left" is a glance rather than a count. The empty ring is
+-- the fourth state the classic row draws, and it means the same thing here.
+--
+-- Placed in the corner its own side's HUD stack does not use -- allies down
+-- from the top-left, foes up from the bottom-right -- so a chip can never land
+-- on a plate however many seats a side fields. That is the diagonal the plates
+-- already establish (allies climb from the floor at the left, foes descend from
+-- the top at the right); the chips take the other two corners rather than
+-- inventing a third arrangement.
+M.ROSTER_SLOTS = 6
+M.ROSTER_BALL_R = 4
+M.ROSTER_BALL_PITCH = 11
+M.ROSTER_PAD = 6            -- panel edge to its contents
+M.ROSTER_GAP = 6            -- name column to the first ball
+M.ROSTER_NAME_W = 62        -- fixed, so every chip's balls start at one x
+M.ROSTER_H = 22
+M.ROSTER_W = M.ROSTER_PAD * 2 + M.ROSTER_NAME_W + M.ROSTER_GAP
+  + M.ROSTER_SLOTS * M.ROSTER_BALL_PITCH
+-- Between two chips on the same side. Smaller than PLATE_GAP because the chips
+-- are a quarter the height and a wide gutter would read as two unrelated
+-- widgets rather than one side's roster.
+M.ROSTER_STACK_GAP = 4
+-- Shared with the plates on purpose: the four corner widgets sit on one margin,
+-- so the arena has a single inset rather than two that drift.
+M.ROSTER_MARGIN = M.PLATE_PAD
+
 M.HUMAN_SCALE = 2
 M.HUMAN_SRC = 16
 M.HUMAN_DRAW = M.HUMAN_SRC * M.HUMAN_SCALE
@@ -509,6 +547,97 @@ function M.plateModel(seat)
     side = side,
     expFrac = expFrac,
     shownLevel = shownLevel,
+  }
+end
+
+-- ------- the roster chip's contents
+--
+-- Four ball states, and they are the classic row's four:
+--
+--   ok      standing, nothing wrong with it
+--   status  standing, carrying a condition
+--   ko      down
+--   none    this party slot was never filled
+--
+-- `ko` before `status` when both could apply: a fainted monster's status field
+-- is still whatever put it there, and asking about the status first would draw
+-- a spent ball as merely poisoned.
+M.ROSTER_OK = "ok"
+M.ROSTER_STATUS = "status"
+M.ROSTER_KO = "ko"
+M.ROSTER_NONE = "none"
+
+-- Two dialects of "a party" reach this, and both are ordinary:
+--
+--   * a list of monsters -- anything with `hp` and `status`, which is what a
+--     locally-held party is: CoopBattle's `slot.party`, MediatedBattle's
+--     `mine`, an engine `save.party`.
+--   * a roster STRING -- "oosx" -- which is what a referee publishes about a
+--     seat this client never uploaded and can therefore never hold sheets for
+--     (`Wire.battleTeam`, one character per member).
+--
+-- Both are accepted here rather than normalised at each of the four call sites,
+-- because the difference between them is not a difference about the chip: it is
+-- a difference about whether this client happens to own the party, and the chip
+-- draws the same thing either way.
+local ROSTER_TOKENS = {
+  o = M.ROSTER_OK, s = M.ROSTER_STATUS, x = M.ROSTER_KO,
+}
+
+local function rosterBall(entry)
+  if type(entry) == "string" then
+    return ROSTER_TOKENS[entry] or M.ROSTER_NONE
+  end
+  if type(entry) ~= "table" then return M.ROSTER_NONE end
+  -- A monster with no HP figures at all is a sheet this build cannot read, not
+  -- an empty slot: it is still a monster the trainer brought, and `ko` is the
+  -- reading that never tells a player their opponent has less than they do.
+  local hp = tonumber(entry.hp)
+  if hp == nil or hp ~= hp or hp <= 0 then return M.ROSTER_KO end
+  local status = entry.status
+  if type(status) == "string" and status ~= "" then return M.ROSTER_STATUS end
+  return M.ROSTER_OK
+end
+
+-- nil when this human has no roster to publish -- an NPC nobody described, or
+-- the empty side of a wild fight. A chip is never drawn empty: six blank rings
+-- under a name says "this trainer has nothing", which is a different and much
+-- worse claim than saying nothing at all.
+function M.rosterModel(human)
+  human = type(human) == "table" and human or {}
+  local party = human.party
+  local balls, held = {}, 0
+  if type(party) == "string" then
+    for i = 1, math.min(#party, M.ROSTER_SLOTS) do
+      balls[i] = rosterBall(party:sub(i, i))
+      held = held + 1
+    end
+  elseif type(party) == "table" then
+    for i = 1, math.min(#party, M.ROSTER_SLOTS) do
+      balls[i] = rosterBall(party[i])
+      held = held + 1
+    end
+  end
+  if held == 0 then return nil end
+  for i = held + 1, M.ROSTER_SLOTS do balls[i] = M.ROSTER_NONE end
+  -- Truncated to the name column rather than fitted at draw time, so the model
+  -- is assertable headless and two chips never disagree about how long a name
+  -- may be.
+  local name = human.name
+  if type(name) ~= "string" or name == "" then name = "TRAINER" end
+  return {
+    name = truncate(name, 8),
+    balls = balls,
+    -- What the row adds up to, kept because a caller (and the suite) should not
+    -- have to re-walk the list to ask the question the chip exists to answer.
+    held = held,
+    standing = (function()
+      local n = 0
+      for i = 1, held do
+        if balls[i] ~= M.ROSTER_KO then n = n + 1 end
+      end
+      return n
+    end)(),
   }
 end
 
@@ -984,6 +1113,12 @@ local function placeHumans(humans, side, rows, paired, plates, out)
       id = human and human.id,
       name = human and human.name,
       spriteId = human and human.spriteId,
+      -- This trainer's party, for the roster chip. Carried verbatim -- list of
+      -- sheets or referee roster string, see `M.rosterModel` -- because the
+      -- placer's job is where a figure stands and the chip's shape is not its
+      -- business. Absent for a side nobody described, which is what leaves a
+      -- wild fight's foe edge without one.
+      party = human and human.party,
       x = x,
       y = y,
       facing = facing,
@@ -1273,6 +1408,39 @@ function M.layout(ctx)
     end
   end
 
+  -- One chip per trainer who published a party, stacked into the corner that
+  -- side's plates do not use: allies down from the top-left, foes up from the
+  -- bottom-right. The stack order is `humans`, which `placeHumans` built from
+  -- the caller's list -- so in co-op the local player is chip 1 on their side,
+  -- exactly as they are figure 1.
+  local rosters = {}
+  local chippedAlly, chippedFoe = 0, 0
+  for _, human in ipairs(humans) do
+    local model = M.rosterModel(human)
+    if model then
+      local ally = human.side ~= "foe"
+      local step
+      if ally then
+        step = chippedAlly * (M.ROSTER_H + M.ROSTER_STACK_GAP)
+        chippedAlly = chippedAlly + 1
+      else
+        step = chippedFoe * (M.ROSTER_H + M.ROSTER_STACK_GAP)
+        chippedFoe = chippedFoe + 1
+      end
+      rosters[#rosters + 1] = {
+        side = human.side,
+        humanIndex = human.index,
+        x = ally and M.ROSTER_MARGIN or (M.WIDTH - M.ROSTER_W - M.ROSTER_MARGIN),
+        y = ally and (M.FIELD_TOP + M.ROSTER_MARGIN + step)
+          or (M.FIELD_BOTTOM - M.ROSTER_H - M.ROSTER_MARGIN - step),
+        w = M.ROSTER_W,
+        h = M.ROSTER_H,
+        model = model,
+        human = human,
+      }
+    end
+  end
+
   local bubbles = {}
   for _, b in ipairs(listOf(ctx.bubbles)) do
     if type(b) == "table" and (b.side == "ally" or b.side == "foe") then
@@ -1330,6 +1498,7 @@ function M.layout(ctx)
     arrow = arrow,
     card = card,
     plates = plates,
+    rosters = rosters,
     bubbles = bubbles,
     -- Empty unless the caller drives effects; renderers stay neutral then.
     fx = listOf(ctx.fx),
@@ -2195,6 +2364,88 @@ local function drawPlate(plate)
   end)
 end
 
+-- ------- the roster chip
+--
+-- ORIGINAL vector art, the same rule the throw ball follows: two hemispheres, a
+-- band and a button, built from primitives. Nothing here is derived from ROM
+-- pixels and nothing may ever be. This is a second, much smaller ball rather
+-- than a call into `drawPokeball` because at r=4 that one's shade crescent,
+-- specular highlight and seam line are all sub-pixel -- they cost six draws a
+-- ball, six balls a chip, four chips a frame, and land as noise. What survives
+-- at this size is the silhouette and the cap colour, so that is what is drawn.
+--
+-- The cap is what carries the state; the shell never changes shape. A player
+-- reads the row by colour, and a shape that also changed would make an empty
+-- slot and a fainted one look like different *kinds* of thing rather than
+-- different amounts of the same one.
+local ROSTER_CAP_OK = { 0.86, 0.22, 0.20 }
+local ROSTER_CAP_STATUS = { 0.93, 0.75, 0.22 }
+-- Spent: the colour is gone out of it, and it sits at reduced alpha so a beaten
+-- row reads as emptier at a glance than a healthy one, before any single ball
+-- is looked at.
+local ROSTER_CAP_KO = { 0.34, 0.35, 0.40 }
+local ROSTER_KO_ALPHA = 0.55
+local ROSTER_SHELL = { 0.95, 0.95, 0.96 }
+local ROSTER_BAND = { 0.10, 0.10, 0.13 }
+-- An unfilled slot is a ring and nothing else. Not a grey ball: a grey ball is
+-- a monster that is down, and those two must never be confusable -- one is a
+-- player who has been beaten five times and one is a player who brought one.
+local ROSTER_EMPTY = { 1, 1, 1, 0.20 }
+
+local function drawRosterBall(gfx, x, y, r, state)
+  if state == M.ROSTER_NONE or state == nil then
+    local lw = gfx.getLineWidth and gfx.getLineWidth() or 1
+    if gfx.setLineWidth then pcall(gfx.setLineWidth, 1) end
+    gfx.setColor(ROSTER_EMPTY[1], ROSTER_EMPTY[2], ROSTER_EMPTY[3], ROSTER_EMPTY[4])
+    gfx.circle("line", x, y, r)
+    if gfx.setLineWidth then pcall(gfx.setLineWidth, lw) end
+    return
+  end
+  local ko = state == M.ROSTER_KO
+  local alpha = ko and ROSTER_KO_ALPHA or 1
+  local cap = ROSTER_CAP_OK
+  if state == M.ROSTER_STATUS then cap = ROSTER_CAP_STATUS
+  elseif ko then cap = ROSTER_CAP_KO end
+  -- Lower hemisphere is the whole disc; the cap covers the top half.
+  gfx.setColor(ROSTER_SHELL[1], ROSTER_SHELL[2], ROSTER_SHELL[3], alpha)
+  gfx.circle("fill", x, y, r)
+  gfx.setColor(cap[1], cap[2], cap[3], alpha)
+  gfx.arc("fill", "pie", x, y, r, math.pi, math.pi * 2)
+  -- Band and button in one dark tone: at r=4 a bordered button is a smudge, so
+  -- the button is the band's own colour with a white face and no ring.
+  gfx.setColor(ROSTER_BAND[1], ROSTER_BAND[2], ROSTER_BAND[3], alpha)
+  gfx.rectangle("fill", x - r, y - 1, r * 2, 2)
+  gfx.circle("fill", x, y, r * 0.40)
+  gfx.setColor(ROSTER_SHELL[1], ROSTER_SHELL[2], ROSTER_SHELL[3], alpha)
+  gfx.circle("fill", x, y, r * 0.20)
+  gfx.setColor(1, 1, 1, 1)
+end
+
+local function drawRoster(chip)
+  local gfx = g()
+  if not (gfx and chip) then return end
+  local model = chip.model or M.rosterModel(chip.human)
+  if not model then return end
+  pcall(function()
+    local x, y, w, h = chip.x, chip.y, chip.w, chip.h
+    panel(gfx, x, y, w, h)
+    withFont(gfx, M.FONT_MICRO, function(micro)
+      setColor(gfx, TEXT_MUTED)
+      local name = fitLine(micro, model.name, M.ROSTER_NAME_W)
+      gfx.print(name, x + M.ROSTER_PAD,
+        y + math.floor((h - heightWith(micro)) / 2))
+    end)
+    local bx = x + M.ROSTER_PAD + M.ROSTER_NAME_W + M.ROSTER_GAP
+      + math.floor(M.ROSTER_BALL_PITCH / 2)
+    local by = y + math.floor(h / 2)
+    for i = 1, M.ROSTER_SLOTS do
+      drawRosterBall(gfx, bx + (i - 1) * M.ROSTER_BALL_PITCH, by,
+        M.ROSTER_BALL_R, model.balls[i])
+    end
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
 -- Trainer callout: a rounded near-white card with a tail toward the speaker.
 -- Two lines at most — the acting mon, then the move emphasised under it.
 -- Pure in t: scale-in, float and fade all read from the caller's clock (t
@@ -2847,6 +3098,14 @@ function M.draw(battle, ctx, eng)
       if hasFx then pcall(drawFieldFx, layout) end
       for _, plate in ipairs(layout.plates) do
         pcall(drawPlate, plate)
+      end
+      -- After the plates and before the pointer: the chips sit in the two
+      -- corners the plates never reach, so the order between those two is free
+      -- -- but the target card is clamped toward canvas centre and CAN land on
+      -- a chip, and while somebody is choosing a target the card is the thing
+      -- they are reading.
+      for _, chip in ipairs(layout.rosters) do
+        pcall(drawRoster, chip)
       end
       if layout.arrow then
         pcall(drawArrow, layout.arrow)

@@ -568,6 +568,9 @@ function M.create(opts)
         connected = true,
         graceEndsAt = nil,
         choice    = nil,
+        -- The roster last published for this seat (`_syncTeams`).  nil rather
+        -- than the opening string, so the first sync always publishes.
+        team      = nil,
         -- Who has been in against THIS seat's current monster; see `_refield`.
         fought    = {},
       }
@@ -638,6 +641,39 @@ end
 
 function Battle:_say(text)
   return self:_emit("msg", { text = text })
+end
+
+-- Every seat's party roster, published when -- and only when -- it moved.
+--
+-- **This is the only thing on the wire that describes a monster nobody has
+-- seen.**  A mediated fight tells each client about the field and nothing else,
+-- which is right for every other event and wrong for exactly one question: how
+-- many monsters is the other player still holding, and how many of those are
+-- spent.  Both clients uploaded a party to the referee and neither uploaded one
+-- to the other, so the referee is the only party to the fight that can answer
+-- it -- which is why this is an event and not something a screen derives.
+--
+-- What it carries is a ball row and no more (`Events.teamString`): a count and
+-- three states.  Not a species, not a level, not a move.  That line is where it
+-- is because it is where the original draws it -- the row a trainer's intro
+-- puts on screen is exactly this much -- and because anything past it is a team
+-- preview one player never agreed to give.
+--
+-- Diffed rather than announced, so a fight that changes nothing costs nothing:
+-- a seat is re-published only when one of its monsters changed ball state.
+-- `fighter.team` starts nil, so the first sync always publishes -- which is how
+-- the opening rosters reach a client (`_openTurn` runs at the end of `create`,
+-- behind the send-outs).
+function Battle:_syncTeams()
+  for _, fighter in ipairs(self.fighters) do
+    local roster = Events.teamString(fighter.mons)
+    if roster ~= fighter.team then
+      fighter.team = roster
+      self:_emit("team", {
+        slot = fighter.slot, side = fighter.side, team = roster,
+      })
+    end
+  end
 end
 
 -- Everything since the last call, in order, and the buffer is emptied.  A
@@ -1464,6 +1500,12 @@ function Battle:_openTurn()
   self.forcedPending = false
   for _, fighter in ipairs(self.fighters) do fighter.choice = nil end
   self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
+  -- Before the window opens, not after: a player deciding this turn is looking
+  -- at the rosters, and anything a status or a bench potion moved last turn has
+  -- to be on them by the time the menu is up.  Faints are already current --
+  -- `_faint` publishes inside its own batch -- so on most turns this emits
+  -- nothing at all.
+  self:_syncTeams()
   self:_emit("turn", { amount = self.turn })
   self:_fillForcedChoices()
   -- When every living seat is forced, do not resolve in this same call: the
@@ -1522,6 +1564,9 @@ function Battle:_openReplace()
   self.forcedPending = false
   for _, fighter in ipairs(self.fighters) do fighter.choice = nil end
   self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
+  -- The other window a player answers from, and the same reason: whoever is
+  -- picking a replacement is picking it off the roster.
+  self:_syncTeams()
   for _, fighter in ipairs(self.fighters) do
     if self:_owes(fighter) then
       self:_emit("turn", { amount = self.turn, slot = fighter.slot })
@@ -2859,6 +2904,11 @@ function Battle:_faint(fighter, mon)
     -- Omitted when the seat is out of mons so empty-bench never arms a picker.
     amount = next_ and 1 or nil,
   })
+  -- Immediately behind the faint line rather than at the next window, because
+  -- this is the one roster change a player is *watching* happen: the ball goes
+  -- dark in the same batch the monster goes down in, and a fight that ends on
+  -- this faint has no next window to have said it at.
+  self:_syncTeams()
 
   -- Owed here, paid at the end of the action (`_drainExp`), with the fallen
   -- sheet held in the queue so the payout still names the monster that fell and

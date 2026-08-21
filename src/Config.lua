@@ -143,7 +143,32 @@ M.MOD_ID = "rby_mmo"
 -- the picture and the number under it are wrong. Refusal naming both versions
 -- is the only sentence either player can act on.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 22
+--
+-- 23 was claimed on a parallel branch that this one had never met -- the
+-- PVP-invite fix, which reads `busy` off `mmo.move` into the roster flag on
+-- both hubs and adds an optional `reason` to `mmo.decline` / `mmo.respond`.
+-- The rule the 5-and-6 paragraphs above set is the one that applies: two
+-- branches that both say "23" and mean different vocabularies are precisely
+-- the silence this number exists to turn into a sentence, so the second one
+-- to land moves rather than sharing.  24 is therefore the first number that
+-- means both, and a client that says 24 speaks 23's vocabulary as well.
+--
+-- 24 is the `team` battle event: a seat's party roster, as ball states -- how
+-- many monsters it brought, and which of them are healthy, statused or down.
+-- Every other event on this wire is about the field, and that is the right
+-- scope for all of them but one question: how much does the other player have
+-- left.  Both clients upload a party to the referee and neither uploads one to
+-- the other, and `mmo.relay` is hard-cut for the length of a mediated fight, so
+-- the referee is the only party to the exchange that can answer it.  A
+-- protocol-22 intermediator emits no such kind, and `Wire.battleEvent` drops an
+-- unknown one whole -- so the roster chip beside a peer's name would sit empty
+-- for the entire fight while the player's own filled in normally.  That is the
+-- worst shape this failure could take: not a blank screen but a *half*-drawn
+-- one, which reads as "they brought nothing" rather than as a hub that cannot
+-- do this.  Refusal naming both versions is the only sentence either player can
+-- act on.
+-- This number lives here and in server/lib/relay.js -- bump them together.
+M.PROTOCOL = 24
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

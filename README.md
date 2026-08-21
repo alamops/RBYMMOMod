@@ -11,7 +11,7 @@ A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp).
 ![LÖVE 11.x](https://img.shields.io/badge/L%C3%96VE-11.x-e64998?style=for-the-badge)
 ![Players 2–64](https://img.shields.io/badge/players-2--64-3aa757?style=for-the-badge)
 ![No server needed](https://img.shields.io/badge/dedicated%20server-optional-4c8fd6?style=for-the-badge)
-![v1.0.10](https://img.shields.io/badge/version-1.0.10-3aa757?style=for-the-badge)
+![v1.0.16](https://img.shields.io/badge/version-1.0.16-3aa757?style=for-the-badge)
 ![MIT](https://img.shields.io/badge/licence-MIT-666?style=for-the-badge)
 
 **No server to rent. No accounts. No signup.** One of you hosts from inside
@@ -281,13 +281,19 @@ the engine's *own* `TradeSession`, untouched — so your Kadabra still evolves,
 and the mon still gets stamped as traded with the original OT.
 
 ### ⚔️ BATTLE — ANYWHERE
-Same deal, on the grass where you're standing. The real lockstep simulation a
-link cable runs, carried over the wire. **Zero desyncs** across the full
-end-to-end suite.
+Same deal, on the grass where you're standing — and it is fought on this
+mod's own battle system, on its own field, with the **hub** doing the rolling
+rather than either player's copy. **Zero desyncs** across the full end-to-end
+suite, and by construction rather than by luck: one process resolves the
+turn and both clients draw the same event stream, so there are no two
+simulations left to disagree.
 
 <p align="center">
   <img src="docs/screenshots/interact-menu.png" width="300" alt="PROFILE / INVITE / TRADE / BATTLE / WHISPER menu">
-  <img src="docs/screenshots/link-battle.png" width="300" alt="GUESTY wants to battle!">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/link-battle.png" width="760" alt="A 1-on-1 on the mod's arena: RED and BLUE on opposite edges each with a roster chip, PIKACHU against BULBASAUR, HP plates in the far corners and FIGHT / PKMN / ITEM / RUN across the bottom">
 </p>
 
 ### 🤜 CO-OP — YOUR PARTY IS THE YES
@@ -343,9 +349,32 @@ Forced multi-turn states inject `skip` rather than rehosting the engine UI.
 Metronome picks from a host-uploaded ephemeral move pool.
 
 <p align="center">
-  <img src="docs/screenshots/coop-battle.png" width="300" alt="Four monsters on one field: WEEDLE and CATERPIE reading out top-left, CHARIZARD and PIKACHU bottom-right, FIGHT / ITEM / SWITCH / RUN below">
-  <img src="docs/screenshots/coop-item.png" width="300" alt="The same field from the other player's screen, their own PIKACHU marked with the cursor">
+  <img src="docs/screenshots/coop-battle.png" width="760" alt="Four monsters on one field: CHARIZARD and PIKACHU against WEEDLE and CATERPIE, ALPHA and BETA's roster chips stacked top-left, the trainer's bottom-right, FIGHT / PKMN / ITEM / RUN below">
 </p>
+
+<p align="center">
+  <img src="docs/screenshots/coop-item.png" width="760" alt="The same field from the other player's screen: the chips have swapped order, BETA's own on top, as ALPHA sends out PIDGEY">
+</p>
+
+**Every trainer on the field carries a roster chip.** A small named panel in
+the arena's corners — their name, and a ball for each of their six party
+slots: a full ball for a monster that is standing, an amber one for a
+monster carrying a status, a spent grey one for a monster that is down, and
+an empty ring for a slot they never filled. Six slots always, however many
+they brought, so every chip is read against the same ruler and *how much have
+they got left* is a glance rather than a count. Allies stack down from the
+top-left and opponents up from the bottom-right, so a chip never lands on a
+HUD plate however many seats a side fields. Drawn for every trainer fight
+this mod referees — solo trainer, 1-on-1, 2-on-2, 2-on-NPC, party vs party —
+and never for a wild monster, which has no trainer to have a party.
+
+For an MMO fight the roster is **published by the referee** (`PROTOCOL 24`,
+the `team` event): both clients upload a party to the hub and neither uploads
+one to the other, so the intermediator is the only party to the exchange that
+can say how much the other player has left. It states ball states and nothing
+else — no species, no level, no moves — which is exactly what the classic
+ball row reveals. Co-op needs none of it: every client already holds every
+seat's party, because all four of them replay one host's events.
 
 All four commands are there — **FIGHT, ITEM, SWITCH, RUN** — with items going
 through the engine's own item effects. Against a trainer, RUN and a thrown
@@ -379,8 +408,11 @@ script was waiting. Animations play, through the engine's own player, moved
 onto whichever of the four monsters acted.
 
 <p align="center">
-  <img src="docs/screenshots/party-battle.png" width="300" alt="Four humans on one field: BLASTOISE and VENUSAUR against CHARIZARD and PIKACHU">
   <img src="docs/screenshots/party-ask.png" width="300" alt="ALPHA wants a 2-on-2 battle! -- the four-way ask, as it reaches one of the other three">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/party-battle.png" width="760" alt="Four humans on one field: CHARIZARD and PIKACHU against BLASTOISE and VENUSAUR, with a roster chip for each of the four -- ALPHA and BETA top-left, DELTA and GAMMA bottom-right">
 </p>
 
 **A faint is four different things depending on who you are.** Lose one with
@@ -391,7 +423,7 @@ rather than being handed a menu that answers nothing. A side only falls when
 **both** its trainers have.
 
 <p align="center">
-  <img src="docs/screenshots/party-spectating.png" width="300" alt="GAMMA's screen after their last POKeMON fell: their slot gone from the readout, their partner VENUSAUR still fighting">
+  <img src="docs/screenshots/party-spectating.png" width="760" alt="GAMMA's screen after their last POKeMON fell: their own roster chip showing a single spent ball, their plate gone, and their partner DELTA still fielding BLASTOISE and VENUSAUR">
 </p>
 
 **And losing sends you home, the way the game always did.** Every player
@@ -707,14 +739,15 @@ by [Mirasein](https://www.mirasein.me):
 else, marked with a **`▷`** in the cursor's column so you can tell which is
 which, and work the same way — worn on the map, sent over the wire, drawn on
 your trainer card — but they go one step further than a borrowed ROM
-character can. Wear one and it's you in **battle** too: the back pic over
-your shoulder when a battle starts, the pic on your trainer card, and the one
+character can. Wear one and it's you in **battle** too: the figure standing
+on the arena's own edge in a fight this mod referees, the back pic over your
+shoulder in the game's own battles, the pic on your trainer card, and the one
 Oak shrinks into if you start a new game. That follows the walking sprite
 exactly: it's you for as long as you're wearing them, in a game or on your
 own, until you pick somebody else.
 
 <p align="center">
-  <img src="docs/screenshots/nire-battle.png" width="330" alt="A link battle starting, with NIRE's back pic where Red's would be">
+  <img src="docs/screenshots/nire-battle.png" width="760" alt="NIRE standing on the arena's own ally edge mid-battle, in the spot Red would otherwise be, with a callout reading PIKACHU! THUNDERBOLT!">
 </p>
 
 **And they have bicycles.** The bike is a whole second walking sheet in this
@@ -1409,7 +1442,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `1.0.10` (`experimental: false` — on by default when installed). The full
+It's `1.0.16` (`experimental: false` — on by default when installed). The full
 list lives in `mod.card` under `differences.known`. The ones that'll actually
 bite you:
 

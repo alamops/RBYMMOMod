@@ -913,6 +913,47 @@ return function(game)
         "...so the seat resolves a pokedex row to draw the monster from")
       check(seat ~= nil and seat.front ~= nil,
         "...and hands the arena a front pic rather than its placeholder box")
+
+      -- ------- and how much of the peer is left (`team`, PROTOCOL 24)
+      --
+      -- The only claim on this wire about a monster that is not on the field,
+      -- and the reason it has to be on the wire at all: both clients upload a
+      -- party to the hub and neither uploads one to the other, and `mmo.relay`
+      -- is hard-cut for the length of a mediated fight. So this process holds
+      -- no sheet of the peer's -- if a roster is here, the referee sent it
+      -- over a real socket, through the real sanitiser, in the real hub. That
+      -- is what the corner chip beside the peer's name is drawn from, and
+      -- there is nothing else it could be drawn from.
+      local mineSlot = (top.mySlot and top:mySlot()) or 0
+      local rosters, chips = nil, nil
+      pcall(function()
+        local live = H.top(game)
+        rosters = {
+          mine = live.teams and live.teams[mineSlot] or nil,
+          foe = live.teams and live.teams[foeSlot] or nil,
+        }
+        local ctx = live.battlefieldCtx and live:battlefieldCtx() or nil
+        chips = {
+          mine = ctx and ctx.allyHumans and ctx.allyHumans[1]
+            and ctx.allyHumans[1].party or nil,
+          foe = ctx and ctx.foeHumans and ctx.foeHumans[1]
+            and ctx.foeHumans[1].party or nil,
+        }
+      end)
+      log(("rosters: mine=%s foe=%s   chips: mine=%s foe=%s"):format(
+        tostring(rosters and rosters.mine), tostring(rosters and rosters.foe),
+        tostring(chips and chips.mine), tostring(chips and chips.foe)))
+      check(rosters ~= nil and type(rosters.mine) == "string"
+              and #rosters.mine > 0,
+        "the hub publishes this seat's own party roster",
+        tostring(rosters and rosters.mine))
+      check(rosters ~= nil and type(rosters.foe) == "string"
+              and #rosters.foe > 0,
+        "...and the peer's, which no other message on this wire carries",
+        tostring(rosters and rosters.foe))
+      check(chips ~= nil and chips.foe == (rosters and rosters.foe),
+        "...and the peer's roster chip is drawn from exactly that",
+        tostring(chips and chips.foe))
     end
 
     local gaps = 0
