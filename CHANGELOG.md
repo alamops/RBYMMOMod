@@ -6,6 +6,42 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.18] - 2026-08-20
+
+### Fixed
+
+- **A battle invite refused itself, and neither player could see why.** The
+  roster row an asker reads said "busy" only when the *hub* had that player
+  in a trade or a 1v1 — while the asked client refused invites for a wild
+  encounter, a trainer, a co-op handoff, an invite already on its screen, or
+  an ask of its own. So a player fighting a PIDGEY was published to everyone
+  as free, asked, and refused in the same second, with nothing on either
+  screen to explain it: the asked player saw no box at all, and the asker
+  read "X refused to battle.", the same sentence a person pressing NO earns.
+  Presence now carries everything that would bounce an invite (both hubs read
+  it, having discarded the field until now), the refusal carries *why* —
+  "BOB is in a battle." — and the refusing side gets a line in the corner
+  saying somebody asked.
+
+- **Two invites that crossed cancelled each other out.** Both players
+  pressing BATTLE inside one round trip — what two friends who have just
+  agreed to fight do — left each one busy with its own ask and refusing the
+  other's, so both read "they refused" about somebody who had in fact just
+  asked them. The hub, the only party that sees both asks, now starts the
+  battle they both asked for.
+
+- **Asking somebody who had just left locked you out of PVP for the rest of
+  the session.** The hub dropped an undeliverable request in silence, and
+  nothing on the client cleared the ask it was still holding — which marks it
+  busy, so from then on every invite received was auto-refused and every one
+  sent was turned away with "You're already busy with someone." The hub now
+  answers with a refusal naming the reason, and an ask nobody ever answers is
+  taken back after two minutes rather than held forever. The same silent lock
+  was reachable through an invite box that left the screen without being
+  answered (a blackout, a save load); that is now answered as the no it is.
+
+## [1.0.17] - 2026-08-19
+
 ### Added
 
 - **This mod's battle system, with nobody else in the room.** A new
@@ -91,37 +127,32 @@ here must match `manifest.version`.
   BICYCLE row writes — and asserts on the sheet the frame actually posed
   from (`tests/drivers/mmo_util.lua`, `M.shotBike`).
 
+### Changed
+
+- **The MOVES list opens on the move you last used, and every row states its
+  own type.** Two things the battle menu was making the player pay for.
+
+  The list used to open on row one every single turn, so a Gen 1 fight — which
+  is mostly one attack repeated — charged a walk back down the list for a
+  decision already made. It now opens on the move this monster was last sent
+  into a turn with (`rememberedMove`, on both the mediated screen and the
+  co-op one). Nothing is pre-committed: it is only where the cursor starts, B
+  still backs out to the command grid, and the choice on the wire is byte-for
+  -byte the one it always was. The memory is per monster rather than per
+  battle — row 2 of the mon you switched to is a different move — and it is
+  clamped against the sheet that monster has *now*, so a Transform or a Mimic
+  cannot leave the cursor on a row nothing draws.
+
+  Type used to ride the panel title (`MOVES   TYPE/ELECTRIC`), which meant it
+  only ever described whichever row the cursor was on: comparing four moves
+  took four presses. It is now a column on each row, just left of PP, so the
+  whole sheet reads at once — and the title is back to plain `MOVES` rather
+  than restating the cursor. `Battlefield.drawListPanel` grew an optional
+  per-row `tag` for it, measured as a column across the visible rows so both
+  it and PP line up down the panel; a list with no tag on any row is laid out
+  exactly where it always was.
+
 ### Fixed
-
-- **A battle invite refused itself, and neither player could see why.** The
-  roster row an asker reads said "busy" only when the *hub* had that player
-  in a trade or a 1v1 — while the asked client refused invites for a wild
-  encounter, a trainer, a co-op handoff, an invite already on its screen, or
-  an ask of its own. So a player fighting a PIDGEY was published to everyone
-  as free, asked, and refused in the same second, with nothing on either
-  screen to explain it: the asked player saw no box at all, and the asker
-  read "X refused to battle.", the same sentence a person pressing NO earns.
-  Presence now carries everything that would bounce an invite (both hubs read
-  it, having discarded the field until now), the refusal carries *why* —
-  "BOB is in a battle." — and the refusing side gets a line in the corner
-  saying somebody asked.
-
-- **Two invites that crossed cancelled each other out.** Both players
-  pressing BATTLE inside one round trip — what two friends who have just
-  agreed to fight do — left each one busy with its own ask and refusing the
-  other's, so both read "they refused" about somebody who had in fact just
-  asked them. The hub, the only party that sees both asks, now starts the
-  battle they both asked for.
-
-- **Asking somebody who had just left locked you out of PVP for the rest of
-  the session.** The hub dropped an undeliverable request in silence, and
-  nothing on the client cleared the ask it was still holding — which marks it
-  busy, so from then on every invite received was auto-refused and every one
-  sent was turned away with "You're already busy with someone." The hub now
-  answers with a refusal naming the reason, and an ask nobody ever answers is
-  taken back after two minutes rather than held forever. The same silent lock
-  was reachable through an invite box that left the screen without being
-  answered (a blackout, a save load); that is now answered as the no it is.
 
 - **A solo fight drew the player's POKéMON from behind, and its trainer not
   at all.** With `SOLO BATTLES` on, the arena stood a dark placeholder
