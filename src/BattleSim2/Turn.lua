@@ -835,6 +835,7 @@ function Battle:_fillForcedChoices()
     if mon.mustRecharge then
       mon.mustRecharge = false
       self:_say(mon.species .. " must recharge")
+      fighter.forced = true
       fighter.choice = { action = "skip" }
       self:_emit("chose", {
         slot = fighter.slot, side = fighter.side, text = fighter.name,
@@ -845,6 +846,7 @@ function Battle:_fillForcedChoices()
     if mon.bide then
       if mon.bide.turns > 0 then
         self:_say(mon.species .. " is storing energy")
+        fighter.forced = true
         fighter.choice = { action = "skip" }
         self:_emit("chose", {
           slot = fighter.slot, side = fighter.side, text = fighter.name,
@@ -853,6 +855,7 @@ function Battle:_fillForcedChoices()
         local foe = self:_autoTarget(fighter)
         if foe then
           self:_say(mon.species .. " unleashed energy")
+          fighter.forced = true
           fighter.choice = {
             action = "fight",
             move = mon.bide.moveIndex,
@@ -869,6 +872,7 @@ function Battle:_fillForcedChoices()
 
     if mon.trapped and mon.trapped.turns > 0 then
       self:_say(mon.species .. " can't move")
+      fighter.forced = true
       fighter.choice = { action = "skip" }
       self:_emit("chose", {
         slot = fighter.slot, side = fighter.side, text = fighter.name,
@@ -886,6 +890,7 @@ function Battle:_fillForcedChoices()
       self:_emit("anim", {
         slot = fighter.slot, side = fighter.side, text = moveId,
       })
+      fighter.forced = true
       fighter.choice = { action = "skip" }
       self:_emit("chose", {
         slot = fighter.slot, side = fighter.side, text = fighter.name,
@@ -895,6 +900,7 @@ function Battle:_fillForcedChoices()
 
     if mon.charging then
       local c = mon.charging
+      fighter.forced = true
       fighter.choice = {
         action = "fight",
         move = c.moveIndex,
@@ -910,6 +916,7 @@ function Battle:_fillForcedChoices()
       local foe = self:_autoTarget(fighter)
       if foe then
         self:_say(mon.species .. " thrashing about")
+        fighter.forced = true
         fighter.choice = {
           action = "fight",
           move = mon.thrashing.moveIndex,
@@ -926,6 +933,7 @@ function Battle:_fillForcedChoices()
       local foe = self:_autoTarget(fighter)
       if foe then
         self:_say(mon.species .. "'s RAGE is building")
+        fighter.forced = true
         fighter.choice = {
           action = "fight",
           move = mon.rageMove,
@@ -1086,6 +1094,13 @@ function Battle:submitChoice(playerId, choice)
     -- hand the seat a second way to hold the fight open.
     if self.phase == "replace" then return false end
     if fighter.choice == nil then return false end
+    -- A referee-filled answer is not the player's to take back.  Trap lock-in,
+    -- recharge, Bide, thrash and a charge release all fill the seat at
+    -- `_openTurn`; without this a client could cancel out of a Wrap and switch
+    -- away, and on a turn where *every* seat is forced -- which is exactly what
+    -- a trap looks like -- `_openTurn` left no deadline, so the cleared choice
+    -- would hang the fight with nothing left to time it out.
+    if fighter.forced then return false end
     self:_emit("unchose", {
       slot = fighter.slot, side = fighter.side, text = fighter.name,
     })
@@ -1488,7 +1503,10 @@ function Battle:_openTurn()
   self.phase = "choice"
   self.resolveDeadline = nil
   self.forcedPending = false
-  for _, fighter in ipairs(self.fighters) do fighter.choice = nil end
+  for _, fighter in ipairs(self.fighters) do
+    fighter.choice = nil
+    fighter.forced = nil
+  end
   self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
   self:_emit("turn", { amount = self.turn })
   self:_fillForcedChoices()
@@ -1549,7 +1567,10 @@ function Battle:_openReplace()
   self.phase = "replace"
   self.resolveDeadline = nil
   self.forcedPending = false
-  for _, fighter in ipairs(self.fighters) do fighter.choice = nil end
+  for _, fighter in ipairs(self.fighters) do
+    fighter.choice = nil
+    fighter.forced = nil
+  end
   self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
   for _, fighter in ipairs(self.fighters) do
     if self:_owes(fighter) then
@@ -2545,10 +2566,15 @@ function Battle:_useMove(fighter, mon, opts)
 
   if Effects.isTrapping(effectId) and totalDealt > 0 then
     local turns = Effects.trapTurns(self.rng)
+    -- `turns` is Gen1's *total* attack count (2..5), and the hit that just
+    -- landed was the first of them -- so the trap is marked `fresh` and the
+    -- residual at the end of this same turn ticks the counter without dealing
+    -- damage a second time.  Without it a 2-turn Wrap hit three times.
     defender.trapped = {
       turns = turns,
       damage = totalDealt,
       fromSlot = fighter.slot,
+      fresh = true,
     }
     mon.trapping = {
       turns = turns,
@@ -2939,8 +2965,16 @@ function Battle:_resolveResiduals()
     mon = activeMon(fighter)
     if mon and mon.trapped and mon.trapped.turns > 0 then
       local trap = mon.trapped
-      self:_say(mon.species .. " is hurt by the trap")
-      self:_damage(fighter, mon, trap.damage, nil)
+      -- The turn the trap landed on already paid its damage through the move
+      -- itself: spend that attack off the counter here and say nothing.  Every
+      -- later turn is a real residual.  A trap that arrived on a sheet rather
+      -- than from a move carries no `fresh` mark and ticks immediately.
+      if trap.fresh then
+        trap.fresh = nil
+      else
+        self:_say(mon.species .. " is hurt by the trap")
+        self:_damage(fighter, mon, trap.damage, nil)
+      end
       trap.turns = trap.turns - 1
       if trap.turns <= 0 then
         mon.trapped = nil
