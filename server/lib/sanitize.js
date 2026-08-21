@@ -235,6 +235,16 @@ function cleanLabel(value) {
   return cleanText(value, COOP_LABEL_MAX);
 }
 
+// What a move is called, as opposed to what identifies it (PROTOCOL 26). Prose,
+// so it borrows cleanText -- but with its own limit, because a move name is not
+// a player name and NAME_MAX cuts "THUNDERSHOCK" to "THUNDERSHO". Twin of
+// Config.MOVE_NAME_MAX / Wire.moveName.
+const MOVE_NAME_MAX = 16;
+
+function cleanMoveName(value) {
+  return cleanText(value, MOVE_NAME_MAX);
+}
+
 function cleanBattleKey(value) {
   if (typeof value !== 'string') return null;
   if (value.length > COOP_KEY_MAX) return null;
@@ -895,6 +905,18 @@ function cleanBattleMove(raw) {
     if (maxPp === null) return null;
     move.maxPp = maxPp;
   }
+  // `name` (PROTOCOL 26) is the one field here that may legitimately be absent
+  // besides `maxPp`, and for the same reason: absence is a real answer. It is
+  // what the referee narrates the move under -- a hub holds no move table to
+  // look one up in and never will -- and a sender that states none is a
+  // protocol-25 client, whose fight narrates under `id` exactly as it always
+  // did. Present-but-unreadable is refused rather than dropped, on this
+  // function's own rule.
+  if (raw.name !== undefined && raw.name !== null) {
+    const name = cleanMoveName(raw.name);
+    if (!name) return null;
+    move.name = name;
+  }
   return move;
 }
 
@@ -1494,6 +1516,8 @@ module.exports = {
   PAYLOAD_MAX_NODES,
   COOP_KEY_MAX,
   COOP_LABEL_MAX,
+  MOVE_NAME_MAX,
+  cleanMoveName,
   SIDES,
   COOP_REASONS,
   PARTY_EVENTS,

@@ -253,6 +253,60 @@ scenario('trap_chain', (events) => {
   return battle;
 });
 
+// the display name a sheet carries (PROTOCOL 26), and the id it falls back to
+// when it carries none. The Gen 1 pair next door explains the shape; this is
+// the Gen 2 twin of it, because BattleSim2 / lib/battle2 narrate a move from
+// their own copies of the same five call sites.
+scenario('move_names', (events) => {
+  // `mv` writes effect=0, so the two effect moves are built by hand. 86 is
+  // DISABLE_EFFECT and 82 is MIMIC_EFFECT (lib/battle2/Effects.js).
+  const swipe = () => ({
+    id: 'slow_swipe', name: 'SLOW SWIPE', pp: 60, power: 10,
+    accuracy: 255, type: 0, effect: 0, chance: 0,
+  });
+  const lockdown = () => ({
+    id: 'lock_down', name: 'LOCK DOWN', pp: 60, power: 0,
+    accuracy: 255, type: 0, effect: 86, chance: 0,
+  });
+  const copycat = () => ({
+    id: 'copy_cat', name: 'COPY CAT', pp: 60, power: 0,
+    accuracy: 255, type: 0, effect: 82, chance: 0,
+  });
+  const thump = () => ({
+    id: 'thump', name: 'THUMP HIT', pp: 60, power: 10,
+    accuracy: 255, type: 0, effect: 0, chance: 0,
+  });
+  // No `name` at all: the protocol-25 sheet, narrated under its id.
+  const nudge = () => mv('nudge', 10, 255, 0);
+  const battle = build({
+    id: 'mn', mode: '1v1', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spe: 90,
+             moves: [swipe(), lockdown(), copycat()] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spe: 10,
+             moves: [thump(), nudge()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 1 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 2 });
+  battle.submitChoice('p2', { action: 'fight', move: 1 });
+  drainInto(battle, events);
+  for (let i = 0; i < 5; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 2 });
+    battle.submitChoice('p2', { action: 'fight', move: 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -316,7 +370,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 5, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 6, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -505,6 +559,28 @@ test('during the replace phase only the seat that owes may answer', () => {
   assert.ok(battle.autoPick('npc'), 'only the seat that owes may answer');
   assert.strictEqual(battle.snapshot().phase, 'choice',
     'and answering it closes the phase');
+});
+
+test('every sentence about a move prints its name, and falls back to the id', () => {
+  // Gen 2's own copies of the five call sites. Byte-shared with the Gen 1 pair
+  // next door, and separate on purpose: BattleSim2 / lib/battle2 are a twin,
+  // not an import, so a fix applied to one half of one generation is exactly
+  // the drift this catches.
+  const run = byName(jsRuns).get('move_names');
+  const said = run.events.filter((event) => event.t === 'msg').map((event) => event.text);
+
+  assert.ok(said.includes('Alpha used SLOW SWIPE'), 'an attack prints the display name');
+  assert.ok(said.includes('THUMP HIT was disabled'), 'Disable landing names the move');
+  assert.ok(said.includes('THUMP HIT is disabled'), 'and so does the refusal it causes');
+  assert.ok(said.includes('THUMP HIT is no longer disabled'), 'and so does it wearing off');
+  assert.ok(said.includes('Alpha learned THUMP HIT'), 'Mimic names what it copied');
+  assert.ok(said.includes('Alpha used THUMP HIT'), 'and the copy keeps the name');
+  assert.ok(said.includes('Beta used nudge'),
+    'a move with no name -- a protocol-25 sheet -- is narrated under its id');
+
+  const anims = run.events.filter((event) => event.t === 'anim').map((event) => event.text);
+  assert.ok(anims.includes('slow_swipe'), 'the anim row still carries the registry id');
+  assert.ok(!anims.includes('SLOW SWIPE'), 'and never the display name');
 });
 
 // The highest-consequence path in the phase and the one neither generation

@@ -27,6 +27,7 @@ const {
 const {
   PLAYER_ID_HEX, BATTLE_EVENT_TYPES, DECLINE_REASONS,
   TEAM_TOKENS, cleanBattleTeam, BATTLE_MON_MAX,
+  MOVE_NAME_MAX, cleanBattleMove,
 } = require('./lib/sanitize.js');
 
 function read(rel) {
@@ -112,6 +113,35 @@ test('sprite gate is half a second on both sides', () => {
     'Hub.lua SPRITE_GATE must stay 0.5 s to match SPRITE_GATE_MS',
   );
   assert.strictEqual(SPRITE_GATE_MS, 500);
+});
+
+test('MOVE_NAME_MAX matches Config / Wire / sanitize', () => {
+  // PROTOCOL 26's `name` is prose, and a limit that differs by one character is
+  // a hub and a client that narrate a fight under two different spellings of the
+  // same move -- the exact defect the field was added to remove. It is its own
+  // number rather than NAME_MAX because ten characters cuts "THUNDERSHOCK".
+  const config = read('src/Config.lua');
+  assert.strictEqual(
+    luaAssignNumber(config, 'MOVE_NAME_MAX'), MOVE_NAME_MAX,
+    'bump Config.MOVE_NAME_MAX and sanitize.MOVE_NAME_MAX together',
+  );
+  assert.ok(MOVE_NAME_MAX >= 12,
+    'both generations ship twelve-character move names ("THUNDERSHOCK")');
+});
+
+test('a battle move sheet accepts a display name and survives without one', () => {
+  // Both halves of the optional, on the JS hub. The Lua half of the same pair
+  // is tests/rby_mmo_test.lua's Wire section.
+  const base = {
+    id: 'THUNDER_SHOCK', pp: 30, power: 40, accuracy: 255,
+    type: 3, effect: 0, chance: 0,
+  };
+  assert.strictEqual(cleanBattleMove({ ...base, name: 'THUNDERSHOCK' }).name,
+    'THUNDERSHOCK', 'a stated name comes through');
+  assert.strictEqual(cleanBattleMove(base).name, undefined,
+    'a protocol-25 sheet states none, and that is not a refusal');
+  assert.strictEqual(cleanBattleMove({ ...base, name: 42 }), null,
+    'present-but-unreadable refuses the move rather than narrating under the id');
 });
 
 test('shared hello refuse strings stay twin-worded', () => {

@@ -164,11 +164,20 @@ function defaultSpriteFor(generation) {
 // peer's name would sit empty for the whole fight while the player's own
 // filled in normally -- a half-drawn screen that reads as "they brought
 // nothing" rather than as a hub that cannot do this.
-// This branch was bumped out of 23 by the invite fix and out of 24 by maxHp;
-// the second to land moves rather than sharing, so 25 means all of it. The
-// fuller note is in src/Config.lua.
-const PROTOCOL = 25;
-
+// 26: `name` -- an optional display name on each move of an mmo.battle_party
+// battler sheet, which is what the referee narrates the move under. `id` is a
+// registry key and stays one (a client looks the animation and the move-menu
+// label up by it), but it was the only spelling of the move on the wire, so
+// every sentence the referee wrote printed the slug: "NIRE used DOUBLE_KICK".
+// The same split `species` / `speciesId` carries, in the other direction. A
+// protocol-25 hub strips the field off the upload and narrates under the id
+// exactly as before -- the bug rather than a crash, which is why the bump
+// names it.
+// The roster chip was bumped out of 23 by the invite fix and out of 24 by
+// maxHp; this one asked for 23 as well and moved to 26. The second to land
+// moves rather than sharing, so 26 means all of it. The fuller note is in
+// src/Config.lua.
+const PROTOCOL = 26;
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
 // now, and an ask that outlives the moment is one somebody answers yes to long

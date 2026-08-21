@@ -197,8 +197,28 @@ M.MOD_ID = "rby_mmo"
 -- other way round.  The pattern is worth reading as a fact about the project
 -- rather than as bad luck: several branches are open against this wire at any
 -- time, and the number is cheap to move while a shared one is not.
+--
+-- 26 is `name`: an optional display name on each move of an
+-- `mmo.battle_party` battler sheet, which is what the referee narrates the
+-- move under.  `id` is a registry identifier and stays one -- it is what a
+-- client looks a move animation and a move-menu label up by -- but it was
+-- also the only spelling of the move on the wire, so every sentence the
+-- referee wrote said it: "NIRE used DOUBLE_KICK", "DOUBLE_KICK is disabled",
+-- "NIRE learned MIRROR_MOVE".  The screen showed the slug in the one place a
+-- player reads the fight.  This is the same split `species` / `speciesId`
+-- already carries (PROTOCOL 22), in the other direction: there the wire had
+-- the display token and needed the id; here it had the id and needed the
+-- display token.  A protocol-25 intermediator strips the field off the upload
+-- and narrates under the id exactly as before -- which is the bug, not a
+-- crash, so refusal naming both versions is what tells a player why their
+-- fight reads wrong.
+--
+-- **This one asked for 23 as well**, and is the third branch in a row to be
+-- moved off a number rather than share one -- which is the paragraph above
+-- proving itself rather than contradicting itself.  26 means all of it: a
+-- client that says 26 speaks 23's, 24's and 25's vocabularies too.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 25
+M.PROTOCOL = 26
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -605,6 +625,15 @@ M.BATTLE_BAG_COUNT_MAX = 99
 -- into this list, so a party that carried more would be a party with slots no
 -- mmo.battle_choice can reach and no screen has a button for.
 M.BATTLE_MOVE_MAX = 4
+
+-- The display name of one of those moves, as the referee narrates it.
+--
+-- Its own limit for the same reason COOP_LABEL_MAX is: a move name is not a
+-- trainer name, and at ten characters NAME_MAX cuts "THUNDERSHOCK" to
+-- "THUNDERSHO" -- a fight narrated under a move nobody owns. Sixteen clears
+-- the longest name either generation ships (twelve) with room for a data
+-- pack's own, and still bounds a field a stranger sends.
+M.MOVE_NAME_MAX = 16
 
 -- The widest type chart an ephemeral ruleset may upload.
 --
