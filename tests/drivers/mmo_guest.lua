@@ -1104,6 +1104,30 @@ return function(game)
             "the command grid is answerable before SWITCH is pressed")
       U.tap(game, "right"); U.wait(6)
       U.tap(game, "a");    U.wait(10)   -- open the bench
+      -- The bench list, before anything is taken off it. This is the one
+      -- frame the POKeMON panel's front-pic gutter is on screen in a co-op
+      -- fight -- `bandBenchRows` hands each row the arena's own art and
+      -- `Battlefield.drawListPanel` draws the highlighted one beside the
+      -- list. Shot here rather than after the press, where the panel is gone
+      -- and the band is back to "Go! <mon>!".
+      do
+        local open = H.top(game)
+        check(open ~= nil and open.phase == "switch",
+              "the bench list is open before a monster is taken off it",
+              tostring(open and open.phase))
+        local rows = open and open.bandBenchRows
+          and open:bandBenchRows(open:benchOf(open:mySlot()))
+        check(type(rows) == "table" and #rows > 0,
+              "the bench list has rows to draw",
+              ("%d row(s)"):format(rows and #rows or 0))
+        -- Nil only when the engine could not resolve a front pic at all; the
+        -- gutter then draws nothing and the list is the plain one it was
+        -- before. Worth a check rather than a silent downgrade.
+        check(rows and rows[1] and rows[1].front ~= nil,
+              "the highlighted bench row carries the arena's front pic",
+              tostring(rows and rows[1] and rows[1].front))
+        shot("coop-bench")
+      end
       U.tap(game, "a");    U.wait(20)   -- take the first one on it
       local after = H.waitSeconds(game, function()
         local now = H.top(game)

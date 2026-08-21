@@ -3380,12 +3380,119 @@ function M.drawCommandGrid(items, cursor, opts)
   return ok
 end
 
--- Moves / items / party: a scrolling list of { label, tag?, right?, dim? }.
--- `right` is right-aligned against the panel edge in the secondary colour (PP
--- "12/15", HP, a count); `tag` is a second right-aligned column just left of
--- it, drawn a size smaller (a move's type). Both are laid out as columns
--- across the visible rows, so they line up down the list. opts.title prints a
--- small header, opts.visible overrides the row count.
+-- ------- the POKeMON panel's front-pic gutter
+
+-- The same battle FRONT pic the arena draws for a monster, minimized into the
+-- left of a list panel. A party list is a list of monsters and nothing on it
+-- said which one; the arena already has the art, so the panel borrows it
+-- rather than inventing a second, differently-posed portrait.
+--
+-- LIST_PREVIEW is MON_DRAW -- the field's own box -- so "minimized" is a
+-- scale-down of the field sprite and nothing else. LIST_PREVIEW_FOOT is the
+-- room the contact shadow needs under it, and LIST_PREVIEW_MIN_W is the row
+-- width below which the gutter is dropped whole: a caller that boxes the list
+-- into part of the band gets its rows back rather than a portrait with no
+-- room left to name it.
+M.LIST_PREVIEW = M.MON_DRAW
+local LIST_PREVIEW_FOOT = 6
+local LIST_PREVIEW_GAP = 8
+local LIST_PREVIEW_MIN_W = 220
+
+-- Where that gutter sits, and what the rows get once it is taken out, for the
+-- same rect `opts` describes. Pure and exported: the mod suite runs headless
+-- (no love.graphics, so nothing below can be asserted by drawing), and this is
+-- the half of the widget that can be. `nil` means "no gutter" -- the caller
+-- then draws the list full width, exactly as it did before.
+function M.listPreviewRect(opts)
+  local x, y, w, h = M.bandRect(opts)
+  local size = math.min(M.LIST_PREVIEW, h - LIST_PAD_Y * 2 - LIST_PREVIEW_FOOT)
+  if size < 24 then return nil end
+  local contentX = x + LIST_PAD_X + size + LIST_PREVIEW_GAP
+  local contentW = w - (contentX - x)
+  if contentW < LIST_PREVIEW_MIN_W then return nil end
+  return {
+    x = x + LIST_PAD_X,
+    y = y + LIST_PAD_Y,
+    size = size,
+    contentX = contentX,
+    contentW = contentW,
+  }
+end
+
+-- Does this row list want the gutter at all? Asked of the whole list, never of
+-- the highlighted row alone: reserving it per row would slide every label
+-- sideways the moment the cursor passed a monster whose front pic did not
+-- resolve, which reads as the panel twitching rather than as missing art.
+local function rowsWantPreview(rows)
+  for _, row in ipairs(rows) do
+    if type(row) == "table" and (row.front ~= nil or row.icon ~= nil) then
+      return true
+    end
+  end
+  return false
+end
+
+-- The minimized pic itself. Same sources and same order as a field seat --
+-- `front` first, the 16xN bag sheet cropped as the last resort -- and the same
+-- scale and mirror rules, because monDrawParams owns both. It faces right, the
+-- way the ally side of the arena does, so it looks into the rows beside it.
+--
+-- Its own pcall: a sprite that throws mid-blit costs the portrait, never the
+-- menu around it. The caller's pcall would have failed the whole widget and
+-- sent a live fight to the GB chrome over a decoration.
+local function drawListPreview(gfx, row, rect, facing)
+  local img = resolveDrawable(row.front)
+  local fromIcon = false
+  if not img then
+    img = resolveDrawable(row.icon)
+    fromIcon = img ~= nil
+  end
+  if not img then return end
+  if facing ~= "left" then facing = "right" end
+  local alpha = row.dim and 0.4 or 1
+  pcall(function()
+    if img.setFilter then
+      pcall(function() img:setFilter("nearest", "nearest") end)
+    end
+    local iw, ih = img:getDimensions()
+    local quad = fromIcon and iconFrameQuad(img) or nil
+    local cx = rect.x + rect.size / 2
+    local p = M.monDrawParams({ drawW = rect.size, facing = facing }, iw, ih,
+      { x = cx, y = rect.y, iconFrame = quad ~= nil })
+    if p.scale <= 0 or p.h <= 0 then return end
+    -- Centred in the box, not feet-anchored to a seat centre: the band has no
+    -- ground line for the pic to stand on. Only the y monDrawParams computed
+    -- is replaced -- its scale, its flip and its horizontal anchor are the
+    -- parts that make this the same sprite the field draws.
+    local ty = rect.y + math.floor((rect.size - p.h) / 2)
+    drawMonShadow(gfx, cx, ty + p.h - 2, p.w, alpha)
+    gfx.setColor(1, 1, 1, alpha)
+    if quad then
+      gfx.draw(img, quad, p.x, ty, 0, p.sx, p.sy)
+    else
+      gfx.draw(img, p.x, ty, 0, p.sx, p.sy)
+    end
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
+-- Moves / items / party: a scrolling list of
+-- { label, tag?, right?, dim?, front? }.
+--
+-- `right` is right-aligned against the row's right edge in the secondary
+-- colour (PP "12/15", HP, a count); `tag` is a second right-aligned column
+-- just left of it, drawn a size smaller (a move's type). Both are laid out as
+-- columns across the visible rows, so they line up down the list. opts.title
+-- prints a small header, opts.visible overrides the row count.
+--
+-- A row that carries `front` (or `icon`) makes this a POKeMON panel: the list
+-- indents past a left gutter and the highlighted row's monster is drawn in it,
+-- minimized, from the same art the arena uses. opts.preview == false declines
+-- the gutter; opts.previewFacing overrides which way the pic looks.
+--
+-- The row rect is what everything inside a row measures against, gutter or no
+-- gutter -- so "the row's right edge" is the panel's own edge on every list
+-- that reserves no portrait, which is every list that is not a party.
 function M.drawListPanel(rows, cursor, opts)
   local gfx = g()
   if not gfx then return false end
@@ -3393,6 +3500,14 @@ function M.drawListPanel(rows, cursor, opts)
   opts = type(opts) == "table" and opts or {}
   local x, y, w, h = M.bandRect(opts)
   local pad = LIST_PAD_X
+  -- The panel keeps x/w; the ROWS get lx/lw, which is the whole indent. The
+  -- gutter is inside the panel, so its backdrop must still span the full rect.
+  local preview = nil
+  if opts.preview ~= false and rowsWantPreview(rows) then
+    preview = M.listPreviewRect(opts)
+  end
+  local lx = preview and preview.contentX or x
+  local lw = preview and preview.contentW or w
   local title = nil
   if type(opts.title) == "string" and opts.title ~= "" then title = opts.title end
   local top = y + LIST_PAD_Y + (title and LIST_TITLE_H or 0)
@@ -3412,10 +3527,21 @@ function M.drawListPanel(rows, cursor, opts)
   -- "no moves left" list is supposed to show, so it must not trip a fallback.
   local ok = pcall(function()
     panel(gfx, x, y, w, h)
+    if preview then
+      -- A hairline between the portrait and the rows, so the indent reads as
+      -- a gutter rather than as a list that lost its left margin.
+      setColor(gfx, PANEL_LINE)
+      gfx.rectangle("fill", preview.contentX - math.floor(LIST_PREVIEW_GAP / 2),
+        y + LIST_PAD_Y, 1, h - LIST_PAD_Y * 2)
+      local shown = rows[cursor]
+      if type(shown) == "table" then
+        drawListPreview(gfx, shown, preview, opts.previewFacing)
+      end
+    end
     if title then
       withFont(gfx, M.FONT_MICRO, function(micro)
         setColor(gfx, TEXT_MUTED)
-        gfx.print(tostring(title):upper(), x + pad + 2, y + LIST_PAD_Y - 1)
+        gfx.print(tostring(title):upper(), lx + pad + 2, y + LIST_PAD_Y - 1)
       end)
     end
     withFont(gfx, M.FONT_SECONDARY, function(font)
@@ -3439,7 +3565,7 @@ function M.drawListPanel(rows, cursor, opts)
           end
         end
       end
-      local rightEdge = x + w - pad
+      local rightEdge = lx + lw - pad
       local tagRight = rightEdge - rightCol - (rightCol > 0 and LIST_TAG_GAP or 0)
       -- What a label may not paint into. A list with no tag on any row
       -- reserves exactly what the right column always reserved, so every
@@ -3460,10 +3586,10 @@ function M.drawListPanel(rows, cursor, opts)
           local hot = (first + slot) == cursor
           if hot then
             gfx.setColor(1, 1, 1, 0.10)
-            gfx.rectangle("fill", x + pad - 2, ry - 1, w - pad * 2 + 4,
+            gfx.rectangle("fill", lx + pad - 2, ry - 1, lw - pad * 2 + 4,
               rowH, 2, 2)
             setColor(gfx, PANEL_LINE_HOT)
-            gfx.rectangle("fill", x + pad - 2, ry, 2, rowH - 2)
+            gfx.rectangle("fill", lx + pad - 2, ry, 2, rowH - 2)
           end
           local ty = ry + math.floor((rowH - th) / 2)
           if right ~= nil and tostring(right) ~= "" then
@@ -3473,7 +3599,7 @@ function M.drawListPanel(rows, cursor, opts)
           end
           setColor(gfx, dim and TEXT_DIM or (hot and TEXT_ON or TEXT_MUTED))
           gfx.print(fitLine(font, tostring(label or ""),
-            w - pad * 2 - reserve - 6), x + pad + 4, ty)
+            lw - pad * 2 - reserve - 6), lx + pad + 4, ty)
         end
       end
       -- The tag column, in the micro face the title already uses: smaller than
@@ -3501,9 +3627,9 @@ function M.drawListPanel(rows, cursor, opts)
         local span = trackH - thumbH
         local at = (count > visible) and ((first - 1) / (count - visible)) or 0
         gfx.setColor(1, 1, 1, 0.10)
-        gfx.rectangle("fill", x + w - pad + 1, top, 2, trackH, 1, 1)
+        gfx.rectangle("fill", lx + lw - pad + 1, top, 2, trackH, 1, 1)
         gfx.setColor(1, 1, 1, 0.45)
-        gfx.rectangle("fill", x + w - pad + 1, top + span * at, 2, thumbH, 1, 1)
+        gfx.rectangle("fill", lx + lw - pad + 1, top + span * at, 2, thumbH, 1, 1)
       end
     end)
     gfx.setColor(1, 1, 1, 1)

@@ -5318,6 +5318,34 @@ local function seatIconFor(self, slot, battler)
   return resolved
 end
 
+-- The same battle FRONT pic the arena draws, for a monster that is NOT on the
+-- field: the party rows the POKeMON panel previews beside its list.
+--
+-- Its own cache, on the screen rather than on a sim slot. `seatFrontFor` keys
+-- its cache by the species standing in that slot, which is right for a seat
+-- and wrong for a bench walk -- six monsters through one slot would evict on
+-- every row and reload the art every frame. Species plus shiny is what changes
+-- the pic, so that is the key.
+local function partyFrontFor(self, mon)
+  if type(mon) ~= "table" then return nil end
+  local species = mon.species
+  if species == nil then return nil end
+  local key = tostring(species) .. (mon.shiny and "*" or "")
+  local cache = self._bfPartyFronts
+  if not cache then
+    cache = {}
+    self._bfPartyFronts = cache
+  end
+  local hit = cache[key]
+  if hit == nil then
+    -- No slot: nothing here belongs to a field seat, so nothing may write
+    -- into a seat's cache either.
+    hit = seatFrontFor(self, nil, { mon = mon }) or false
+    cache[key] = hit
+  end
+  return hit or nil
+end
+
 function M:ensureBattlefieldLoaded()
   if self.battlefieldLoaded then return end
   self.battlefieldLoaded = true
@@ -6578,6 +6606,7 @@ function M:bandBenchRows(bench)
     rows[#rows + 1] = {
       label = tostring(mon.nickname or (def and def.name) or mon.species or "?"),
       right = hpRight(mon),
+      front = partyFrontFor(self, mon),
     }
   end
   return rows
@@ -6711,6 +6740,7 @@ function M:drawBandWidgets()
       rows[#rows + 1] = {
         label = row.label,
         right = hpRight(party[row.index]),
+        front = partyFrontFor(self, party[row.index]),
         -- Shown, not filtered: a Revive wants the fainted one, and
         -- `updateItemParty` indexes the whole party.
         dim = row.fainted or nil,

@@ -14638,6 +14638,33 @@ end)()
   check(okGridEmpty, "drawCommandGrid does not throw on an empty item list")
   local okMessageNil = pcall(Battlefield.drawMessagePanel, nil)
   check(okMessageNil, "drawMessagePanel does not throw on nil text")
+
+  -- listPreviewRect: the POKeMON panel's front-pic gutter. The drawing half
+  -- cannot be asserted headless, so the geometry is what is pinned -- the
+  -- gutter's own box, and the rows' rect once it is taken out.
+  local gutter = Battlefield.listPreviewRect()
+  check(type(gutter) == "table", "the full-width band spares a preview gutter")
+  local _, bandY, bandW, bandH = Battlefield.bandRect()
+  eq(gutter.size, math.min(Battlefield.LIST_PREVIEW, bandH - 8 - 6),
+     "the pic's box is MON_DRAW, or what the band's height leaves under it")
+  check(gutter.size + gutter.contentW < bandW,
+        "the gutter and the rows together stay inside the panel, gap and all")
+  check(gutter.contentX > gutter.x + gutter.size,
+        "the rows start past the gutter, never on top of it")
+  check(gutter.y >= bandY, "the gutter stays inside the band it was cut from")
+  check(Battlefield.listPreviewRect({ w = 240 }) == nil,
+        "a band boxed too narrow drops the gutter whole rather than "
+        .. "squeezing the rows out of it")
+
+  -- A row list carrying front pics is the POKeMON panel; one carrying none is
+  -- every other list, and neither may throw with no graphics context.
+  local okPreview = pcall(Battlefield.drawListPanel,
+    { { label = "NIDORINA", right = "59/59", front = "nope.png" } }, 1,
+    { title = "POKeMON" })
+  check(okPreview, "drawListPanel does not throw on a row carrying a front pic")
+  local okPreviewOff = pcall(Battlefield.drawListPanel,
+    { { label = "NIDORINA", front = "nope.png" } }, 1, { preview = false })
+  check(okPreviewOff, "...nor with the gutter declined")
 end)()
 
 -- ------- trainer entrance: only while the foe quarter is empty
@@ -23083,6 +23110,26 @@ end)()
     eq(rows[2].right, "18/24",
        "PP Ups add a fifth of base pp each -- floor(20/5)*1 == 4 -> 24")
     check(not rows[2].dim, "a move with PP left is not dimmed")
+
+    -- The POKeMON rows carry the arena's own front pic, so the band can draw
+    -- the highlighted monster beside its list. Headless there is no engine to
+    -- resolve one, so the cache the resolver writes through is seeded here --
+    -- which is also the assertion that it is keyed by species (plus shiny),
+    -- not by whatever slot happened to ask.
+    local benchClient = setmetatable({
+      game = { data = data },
+      _bfPartyFronts = { [species] = "front-pic", [species .. "*"] = "shiny-pic" },
+    }, { __index = CoopBattle })
+    local bench = benchClient:bandBenchRows({
+      { index = 2, mon = { species = species, hp = 9, stats = { hp = 9 } } },
+      { index = 3, mon = { species = species, shiny = true, hp = 9,
+                           stats = { hp = 9 } } },
+    })
+    eq(bench[1].front, "front-pic",
+       "a bench row carries the same front pic the arena draws for it")
+    eq(bench[2].front, "shiny-pic",
+       "...and a shiny one gets its own, or the whole party would share a "
+       .. "palette the first row happened to load")
 
     -- ------- the move cursor remembers what this monster last used
     --

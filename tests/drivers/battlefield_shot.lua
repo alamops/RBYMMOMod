@@ -28,8 +28,9 @@
 -- players(), which MediatedBattle reads verbatim with no registry involved.
 --
 -- Captures, in order: idle (choose, RED/BLUE) -> action (choose, damage fx)
--- -> move (moves list) -> ball (throw fx, target seat hidden from HIDEPIC on)
--- -> bubble (rounded callout) -> nire (self as SPRITE_NIRE, saturation pin).
+-- -> move (moves list) -> party (the switch list and its front-pic gutter)
+-- -> ball (throw fx, target seat hidden from HIDEPIC on) -> bubble (rounded
+-- callout) -> nire (self as SPRITE_NIRE, saturation pin).
 --
 -- Coordinate approach (point 4 in the TT2 brief): the battlefield draws into
 -- a 640x360 canvas that Renderer fill-scales to the window, aspect
@@ -241,6 +242,10 @@ return function(game)
   -- no front pic and the frame under test would be an empty seat that still
   -- passed every colour assertion below.
   local MINE_SPECIES, FOE_SPECIES = "PIKACHU", "BULBASAUR"
+  -- The bench the POKeMON frame lists. Three, so the panel is the shape the
+  -- player actually sees (active filtered out of a four-monster party) rather
+  -- than a one-row list that would never show the gutter doing its job.
+  local BENCH_SPECIES = {}
   local speciesInDex = false
   do
     local pokedex = (game.data and game.data.pokemon) or {}
@@ -252,7 +257,13 @@ return function(game)
     end
     MINE_SPECIES = firstPresent("PIKACHU", "CYNDAQUIL", "TOTODILE") or MINE_SPECIES
     FOE_SPECIES = firstPresent("BULBASAUR", "CHIKORITA", "SENTRET") or FOE_SPECIES
-    log("species mine =", MINE_SPECIES, "foe =", FOE_SPECIES)
+    BENCH_SPECIES = {
+      firstPresent("NIDORINA", "RATTATA", "HOOTHOOT"),
+      firstPresent("CHARMANDER", "PIDGEY", "MAREEP"),
+      firstPresent("SQUIRTLE", "SPEAROW", "GEODUDE"),
+    }
+    log("species mine =", MINE_SPECIES, "foe =", FOE_SPECIES,
+        "bench =", table.concat(BENCH_SPECIES, "/"))
     -- Recorded rather than asserted here: `check` is defined below, with the
     -- rest of the assertions, and the seed has to happen before the screen is
     -- pushed. Reported in the assertion block instead.
@@ -283,6 +294,16 @@ return function(game)
         { id = "QUICK_ATTACK", pp = 30, maxPp = 30 },
       } },
   }
+  -- The bench, behind the active one. Nothing else on this screen reads past
+  -- `active` (the moves list, the plates and the arena all index the seat),
+  -- so these exist for the POKeMON frame alone.
+  for i, key in ipairs(BENCH_SPECIES) do
+    screen.mine[#screen.mine + 1] = {
+      species = key, level = 20 + i, hp = 30 + i * 5, maxHp = 30 + i * 5,
+      stats = { hp = 30 + i * 5 },
+      moves = { { id = "THUNDERBOLT", pp = 15, maxPp = 15 } },
+    }
+  end
   screen.active = 1
   screen.slots[screen:foeSlot()] = {
     species = FOE_SPECIES, level = 18, hp = 32, maxHp = 45,
@@ -704,6 +725,53 @@ return function(game)
     assertShots(path3, "move")
   else
     log("warn", "move frame did not reach disk", path3)
+  end
+
+  -- ---- (b2) POKeMON frame: the switch list, with its front-pic gutter ----
+  -- The list the SWITCH command opens, which is the one list whose rows are
+  -- monsters -- so `drawListPanel` reserves a gutter on its left and draws the
+  -- highlighted row's battle FRONT pic in it, minimized off the same art the
+  -- arena is standing on two panels up.
+  --
+  -- The assertion is colour, in the gutter's own rect: the band is slate and
+  -- the rows are white-on-slate, so nothing else in that box is saturated. A
+  -- pic that failed to resolve leaves the gutter empty, which every other
+  -- check on the frame would still pass.
+  screen.phase = "switch"
+  screen.switchIndex = 1
+  U.wait(6)
+  local path3b = SHOT_DIR .. "/battlefield-party.png"
+  if U.shot(game, path3b) then
+    log("captured", path3b)
+    assertShots(path3b, "party")
+    local rows = screen:bandPartyRows(false)
+    check(#rows == #BENCH_SPECIES,
+      "party: the list is the bench, with the active one filtered out",
+      ("%d rows"):format(#rows))
+    check(type(rows[1]) == "table" and rows[1].front ~= nil,
+      "party: the highlighted row carries a front pic for the gutter to draw",
+      tostring(rows[1] and rows[1].front))
+    local gutter = Battlefield.listPreviewRect()
+    if gutter then
+      local ok, data = loadShot(path3b)
+      if ok and data then
+        local imgW, imgH = data:getDimensions()
+        local toScreen = fillTransform(imgW, imgH)
+        local sat = maxSaturation(data, imgW, imgH, toScreen,
+          { x = gutter.x, y = gutter.y, w = gutter.size, h = gutter.size }, 0.15)
+        check(sat > 0.12,
+          "party: the gutter carries a saturated monster, not empty slate",
+          ("max sat=%.3f box=%d,%d %dx%d"):format(sat, gutter.x, gutter.y,
+            gutter.size, gutter.size))
+      else
+        check(false, "party: reload screenshot for the gutter check",
+          tostring(data))
+      end
+    else
+      check(false, "party: the full-width band spares a preview gutter")
+    end
+  else
+    log("warn", "party frame did not reach disk", path3b)
   end
 
   -- ---- (c) ball frame: TOSS visible in flight, hidden from HIDEPIC on ----

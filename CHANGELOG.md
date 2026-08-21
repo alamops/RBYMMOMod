@@ -8,6 +8,30 @@ here must match `manifest.version`.
 
 ### Added
 
+- **The POKéMON menu shows the POKéMON.** Picking who to send out — the
+  `PKMN` command mid-fight, the forced pick after a faint, and the party
+  an item is aimed at — used to be a list of names and HP over an
+  otherwise empty band. The panel now keeps a gutter on its left and
+  draws the highlighted monster in it, minimized from the *same* battle
+  front pic the arena is standing on: same art, same palette, same
+  mirror, so what the menu shows and what is on the field are one
+  picture rather than two. Every screen the arena serves gets it —
+  co-op, MMO and solo fights alike.
+  - **The arena's art, borrowed rather than re-derived.**
+    `Battlefield.drawListPanel` grew a `front` field per row and
+    `Battlefield.listPreviewRect`, the pure geometry the gutter is cut
+    with; the two battle screens resolve a party monster's pic through
+    the same resolver their field seats use. It is the SAVE monster that
+    is asked for it in an MMO fight, not the uploaded sheet — a wire
+    sheet carries no shiny flag, so asking it would have painted a shiny
+    bench monster in the ordinary palette.
+  - **The gutter is reserved by the list, not by the row.** A monster
+    whose pic will not resolve leaves the gutter empty instead of
+    collapsing it, so no label slides sideways as the cursor moves past
+    it; a caller that boxes the list into part of the band drops the
+    gutter whole rather than squeezing the rows. Nothing else changes:
+    a MOVES or ITEMS list carries no front pic and is drawn exactly as
+    it was.
 - **Particles and effects for every move, every attack and every item a bag
   can open in a fight.** A new `src/Vfx.lua` is the catalogue — which look a
   move, an item, a condition or a stat stage wears — and `src/Battlefield.lua`

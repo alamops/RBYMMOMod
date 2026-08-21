@@ -1832,6 +1832,54 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 11c. the POKeMON panel's front pic: which copy of the monster answers
+-- ------------------------------------------------------------------
+--
+-- The band draws the highlighted party row's monster beside the list, from the
+-- arena's own art.  Two things about *where that art comes from* are worth
+-- pinning, because both are silent when wrong: the SAVE mon is what is asked
+-- (an uploaded sheet carries no shiny flag at all), and the cache is keyed by
+-- species plus shiny rather than by the slot that asked -- a party walk goes
+-- through six monsters and a slot-shaped cache would evict on every row.
+do
+  local screen = setmetatable({
+    game = {
+      data = { pokemon = DATA.pokemon },
+      save = { party = {
+        { species = "SQUIRTLE", level = 8 },
+        { species = "SQUIRTLE", level = 9, shiny = true },
+      } },
+    },
+    mine = {
+      { species = "SQUIRTLE", hp = 24, maxHp = 24, slot = 0 },
+      { species = "SQUIRTLE", hp = 26, maxHp = 26, slot = 1 },
+    },
+    active = 1,
+    _bfPartyFronts = { SQUIRTLE = "plain-pic", ["SQUIRTLE*"] = "shiny-pic" },
+  }, { __index = Mediated })
+
+  local rows = screen:bandPartyRows(true)
+  eq(#rows, 2, "the item menu lists the whole party")
+  eq(rows[1].front, "plain-pic",
+     "a party row carries the same front pic the arena draws for it")
+  eq(rows[2].front, "shiny-pic",
+     "...and the shiny one gets its own, off the SAVE mon -- the uploaded "
+     .. "sheet has no flag to read")
+  eq(rows[2].right, "26/26", "the HP column is unchanged by any of this")
+
+  -- No save behind the sheet (a party the save no longer matches): the sheet
+  -- answers instead, so the panel shows a monster rather than a hole.
+  local sheetOnly = setmetatable({
+    game = { data = { pokemon = DATA.pokemon }, save = { party = {} } },
+    mine = { { species = "SQUIRTLE", hp = 24, maxHp = 24, slot = 0 } },
+    active = 1,
+    _bfPartyFronts = { SQUIRTLE = "plain-pic" },
+  }, { __index = Mediated })
+  eq(sheetOnly:bandPartyRows(true)[1].front, "plain-pic",
+     "with no save slot behind it the uploaded sheet names the species")
+end
+
+-- ------------------------------------------------------------------
 -- 14. the move list: a type column, and a cursor that remembers
 -- ------------------------------------------------------------------
 --
