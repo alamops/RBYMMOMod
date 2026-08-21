@@ -6,6 +6,34 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.0.18] - 2026-08-20
+
+### Fixed
+
+- **`WRAP` and friends hit one time too many.** `WRAP`, `BIND`, `CLAMP` and
+  `FIRE_SPIN` roll a 2–5 counter, and in Gen 1 that number is the *total* count
+  of attacks the move gets — the one that lands it included. The referee was
+  applying the move's damage and then ticking a residual for the full counter at
+  the end of that same turn, so a 2-turn `WRAP` struck three times and a 5-turn
+  one struck six. The trap is now marked on the turn it lands and spends that
+  attack off the counter without paying damage twice, which puts a chain back at
+  2–5 hits costing the victim 1–4 turns. Fixed in all four sim twins
+  (`src/BattleSim`, `src/BattleSim2`, `server/lib/battle`, `server/lib/battle2`)
+  and pinned by a new `trap_chain` scenario in both cross-runtime turn-parity
+  pairs, so a runtime that ever counts it the other way fails rather than drifts.
+
+- **A `cancel` could unlock a trapped monster — and hang the fight.** The
+  referee fills the answer for a seat that has no choice to make (trap lock-in,
+  `HYPER_BEAM` recharge, `BIDE`, a thrash, a charge release), and
+  `submitChoice`'s `cancel` branch cleared *any* filed answer, forced ones
+  included. A client could cancel out of a `WRAP` and switch away. Worse, a trap
+  forces **both** seats, and a turn where every seat is forced deliberately opens
+  with no deadline — so clearing one of those answers left the battle waiting on
+  a choice with nothing left to time it out, permanently. Forced answers are now
+  marked and refuse `cancel`; an ordinary answer is still cancellable as before.
+  The stock client never sent one, so this was only reachable from a modified
+  peer, but the hub forwards `cancel` from anybody.
+
 ## [1.0.17] - 2026-08-19
 
 ### Added
