@@ -147,11 +147,12 @@ end
 -- `shape` is the primitive src/Battlefield.lua draws for one particle:
 --
 --   dot     a filled circle
---   puff    a soft circle with a lighter core (smoke, flame, wisp)
+--   puff    a soft circle with a lighter core (smoke, wisp)
+--   flame   a teardrop, pointed up (fire)
 --   streak  a line pointing away from the anchor (impact spray)
---   bolt    a jagged three-segment line from the anchor (electricity)
+--   bolt    a jagged five-segment line from the anchor (electricity)
 --   shard   a narrow diamond, rotated (ice, crystal)
---   leaf    a lens shape, rotated (foliage)
+--   leaf    an ovate leaf, pointed tip and a stem, rotated (foliage)
 --   chunk   a rough pentagon, rotated (rock, dirt)
 --   arc     a crescent stroke (wind)
 --   ring    a circle outline (bubbles)
@@ -169,10 +170,10 @@ end
 
 M.STYLES = {
   impact  = { count = 12, shape = "streak", size = 4.0, ring = "shock", glow = 0.55 },
-  ember   = { count = 16, shape = "puff",   size = 4.2, glow = 0.50 },
+  ember   = { count = 16, shape = "flame",  size = 5.4, glow = 0.50 },
   splash  = { count = 14, shape = "dot",    size = 3.4, ring = "wave",  glow = 0.35 },
-  leaf    = { count = 12, shape = "leaf",   size = 4.6, glow = 0.25 },
-  spark   = { count = 15, shape = "bolt",   size = 4.0, ring = "shock", glow = 0.60 },
+  leaf    = { count = 14, shape = "leaf",   size = 6.4, glow = 0.25 },
+  spark   = { count = 15, shape = "bolt",   size = 5.4, ring = "shock", glow = 0.60 },
   shard   = { count = 12, shape = "shard",  size = 4.6, glow = 0.40 },
   psi     = { count = 14, shape = "dot",    size = 3.2, ring = "pulse", glow = 0.45 },
   rock    = { count = 11, shape = "chunk",  size = 4.4, glow = 0.20 },
@@ -262,6 +263,8 @@ EMIT.impact = function(i, n, t, r1, r2, r3)
 end
 
 -- Flames: staggered births, a rising waver, and a cooling tint as they climb.
+-- The angle is a small lean, not a spin -- a flame that tumbles reads as a
+-- leaf, and a flame that sits dead upright in a row reads as a row of dots.
 EMIT.ember = function(i, n, t, r1, r2, r3)
   local born = r1 * 0.35
   local u = (t - born) / (1 - born)
@@ -269,7 +272,8 @@ EMIT.ember = function(i, n, t, r1, r2, r3)
   local x = (r2 - 0.5) * 1.3 * (0.35 + u * 0.65) + sin(u * pi * 3 + r3 * 6.283) * 0.14
   local y = 0.5 - u * 1.5
   local tint = (u < 0.35) and 1 or ((u < 0.75) and 2 or 3)
-  return x, y, (0.45 + r3 * 0.75) * (1 - u * 0.8), 1 - u * u, tint, 0
+  local lean = (r2 - 0.5) * 0.55 + sin(u * pi * 3 + r3 * 6.283) * 0.28
+  return x, y, (0.45 + r3 * 0.75) * (1 - u * 0.8), 1 - u * u, tint, lean
 end
 
 -- Droplets thrown up and out, then pulled back down: gravity is the t^2 term.
@@ -534,9 +538,12 @@ end
 --   burst       at the seat it lands on. The default, and what every contact
 --               move gets: the blow is at the defender, not in between.
 --   projectile  a core travelling attacker -> defender, trailing as it goes,
---               bursting on arrival. What a thrown or fired move looks like.
---   beam        a drawn beam from attacker to defender that widens, holds and
---               fades, with the burst under its far end.
+--               bursting on arrival. Ember, spark, leaf, shard, splash, rock
+--               and psi wear those looks in the air; everything else is a
+--               bright ball (Shadow Ball).
+--   beam        ember / spark / shard / splash / psi wear fire, lightning,
+--               crystals, water and a helix of motes; other styles keep a
+--               widening energy quad, with the burst under the far end.
 --   self        at the user's own seat: a stat boost, a heal, a screen.
 --   field       across the whole arena: Earthquake, Explosion, a Poke Flute.
 --
@@ -663,7 +670,10 @@ M.MOVE_STYLE = {
   BLIZZARD     = { scale = 1.35 },
   FIRE_BLAST   = { delivery = "projectile", scale = 1.40 },
   SACRED_FIRE  = { delivery = "projectile", scale = 1.30 },
-  THUNDER      = { scale = 1.35 },
+  -- Thunder is a strike, not a thrown object: a projectile here is a yellow
+  -- ball in the air for half the life, which is the opposite of lightning.
+  THUNDER      = { delivery = "burst", scale = 1.35 },
+  PETAL_DANCE  = { style = "leaf", scale = 1.20 },
   SANDSTORM    = { style = "quake", palette = "GROUND", delivery = "field",
                    scale = 1.45, duration = 0.60 },
   ROCK_SLIDE   = { scale = 1.30, intensity = 1.2 },
@@ -677,6 +687,7 @@ M.MOVE_STYLE = {
   MEGAHORN     = { style = "impact", palette = "BUG", scale = 1.20 },
 
   -- ------- thrown, not swung
+  RAZOR_LEAF   = { delivery = "projectile", scale = 1.15 },
   LEECH_SEED   = { style = "leaf", delivery = "projectile", scale = 0.85 },
   SHADOW_BALL  = { delivery = "projectile", scale = 1.10 },
   EGG_BOMB     = { delivery = "projectile", scale = 1.10 },

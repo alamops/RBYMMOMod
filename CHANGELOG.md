@@ -55,15 +55,24 @@ here must match `manifest.version`.
   Power 1 is exempt: Gen 1 uses it to mark fixed-damage and one-hit-KO moves,
   so Guillotine and Seismic Toss take the middle band rather than being drawn
   as the weakest attacks in the game. On top of that a catalogue of 137 signature moves says where
-  the type is a poor description of what the player sees: Flamethrower and
-  Hyper Beam are beams, Explosion is a field-wide blast, Swords Dance plays
-  on the user, Growl is notes thrown at the target.
+  the type is a poor description of what the player sees: Flamethrower is a
+  fire stream (not a laser), Thunderbolt is jagged lightning, Ice Beam is a
+  crystal stream, Hydro Pump is a water jet, Psybeam is a helix of motes,
+  Explosion is a field-wide blast, Swords Dance plays on the user, Growl is
+  notes thrown at the target. Travelling ember / spark / leaf / shard /
+  splash / rock / psi wear those looks in the air -- a generic projectile
+  core is a ball, which is why Ember, Thunder Shock, Razor Leaf, Ice Punch,
+  Water Gun, Rock Throw and Confusion used to read as coloured orbs. Thunder
+  is a strike at the target rather than a thrown object.
 
   **Five deliveries**, so an effect happens where the move does: `burst` at
-  the target, `projectile` (a bright core on an arc with a trail, bursting on
-  arrival), `beam` (attacker to target, opening and fading), `self`, and
-  `field`. A travelling effect whose thrower has left the field degrades to a
-  burst on the target rather than firing from the corner of the canvas.
+  the target, `projectile` (ember, spark, leaf, shard, splash, rock and psi
+  travel as fire / lightning / foliage / crystals / water / chunks / motes;
+  everything else is a bright core on an arc, bursting on arrival), `beam`
+  (fire stream, jagged bolt, crystal stream, water jet or psychic helix for
+  those styles, otherwise an energy quad from attacker to target), `self`,
+  and `field`. A travelling effect whose thrower has left the field degrades
+  to a burst on the target rather than firing from the corner of the canvas.
 
   **On the beats that were already there.** The move's particles ride the
   attacker's lunge (beat 2) — so a status move and a miss both draw, which an

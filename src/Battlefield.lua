@@ -2791,6 +2791,10 @@ local POLY3 = { 0, 0, 0, 0, 0, 0 }
 local POLY4 = { 0, 0, 0, 0, 0, 0, 0, 0 }
 local POLY5 = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 local POLY8 = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+-- A jagged bolt's vertices, refilled in place. 7 points = 14 numbers; extras
+-- are niled so `gfx.line` never traces a stale kink from a longer bolt.
+local LIGHTN = {}
+local unpack = unpack or table.unpack
 
 -- Write vertex `n` of `poly` as the local offset (lx, ly) rotated by `ang` and
 -- placed at (x, y).
@@ -2817,8 +2821,20 @@ local function drawParticleShape(gfx, shape, ax, ay, x, y, r, ang)
     -- The soft body only. Its brighter core is a second circle the caller
     -- draws (`drawVfxBurst`), because the core wants the palette's *first*
     -- colour rather than the tint this particle was given -- which is what
-    -- makes smoke and flame read as lit from the inside.
+    -- makes smoke read as lit from the inside.
     gfx.circle("fill", x, y, r)
+
+  elseif shape == "flame" then
+    -- A teardrop: round base, pointed crown. ang == 0 is up (negative y), so
+    -- a rising ember stands as fire and a lean from the emitter reads as a
+    -- flicker rather than a spin. A circle here is a ball; this is the shape
+    -- that stops Flamethrower looking like a beam of dots.
+    put(POLY5, 1, x, y, 0, -r * 1.75, c, s)
+    put(POLY5, 2, x, y, r * 0.58, -r * 0.15, c, s)
+    put(POLY5, 3, x, y, r * 0.46, r * 0.90, c, s)
+    put(POLY5, 4, x, y, -r * 0.46, r * 0.90, c, s)
+    put(POLY5, 5, x, y, -r * 0.58, -r * 0.15, c, s)
+    gfx.polygon("fill", POLY5)
 
   elseif shape == "streak" then
     -- A taper pointing back at the anchor: wide where the particle is, closed
@@ -2831,16 +2847,19 @@ local function drawParticleShape(gfx, shape, ax, ay, x, y, r, ang)
     gfx.polygon("fill", POLY3)
 
   elseif shape == "bolt" then
-    -- Three segments from the anchor to the particle, each kicked sideways --
-    -- electricity that travels in a straight line is a laser, not a spark.
+    -- Five segments from the anchor to the particle, each kicked sideways --
+    -- electricity that travels in a straight line is a laser, not a spark,
+    -- and three kinks at this scale still read as a short stick.
     local dx, dy = x - ax, y - ay
     local nx, ny = -dy, dx
     local len = (nx * nx + ny * ny) ^ 0.5
     if len > 0.001 then nx, ny = nx / len, ny / len end
-    local k = r * 0.75
+    local k = r * 1.15
     gfx.line(ax, ay,
-      ax + dx * 0.33 + nx * k, ay + dy * 0.33 + ny * k,
-      ax + dx * 0.66 - nx * k, ay + dy * 0.66 - ny * k,
+      ax + dx * 0.20 + nx * k, ay + dy * 0.20 + ny * k,
+      ax + dx * 0.40 - nx * k * 0.9, ay + dy * 0.40 - ny * k * 0.9,
+      ax + dx * 0.62 + nx * k * 0.75, ay + dy * 0.62 + ny * k * 0.75,
+      ax + dx * 0.82 - nx * k * 0.45, ay + dy * 0.82 - ny * k * 0.45,
       x, y)
 
   elseif shape == "shard" then
@@ -2852,12 +2871,15 @@ local function drawParticleShape(gfx, shape, ax, ay, x, y, r, ang)
     gfx.polygon("fill", POLY4)
 
   elseif shape == "leaf" then
-    -- A lens: two points on the long axis, two bulges off it.
-    put(POLY4, 1, x, y, r * 1.35, 0, c, s)
-    put(POLY4, 2, x, y, 0, r * 0.62, c, s)
-    put(POLY4, 3, x, y, -r * 1.35, 0, c, s)
-    put(POLY4, 4, x, y, 0, -r * 0.62, c, s)
-    gfx.polygon("fill", POLY4)
+    -- An ovate leaf, not a diamond: sharp tip, full belly, a pinched stem.
+    -- A four-point lens at this size is a green ball; five points with a
+    -- stem is the smallest shape that still reads as foliage in flight.
+    put(POLY5, 1, x, y, r * 1.75, 0, c, s)
+    put(POLY5, 2, x, y, r * 0.20, r * 0.78, c, s)
+    put(POLY5, 3, x, y, -r * 1.20, r * 0.22, c, s)
+    put(POLY5, 4, x, y, -r * 1.55, 0, c, s)
+    put(POLY5, 5, x, y, r * 0.20, -r * 0.78, c, s)
+    gfx.polygon("fill", POLY5)
 
   elseif shape == "chunk" then
     for i = 1, 5 do
@@ -2964,12 +2986,17 @@ local function drawVfxBurst(gfx, styleName, pal, x, y, R, t, seed, intensity)
       local rad = pr * def.size
       gfx.setColor(c[1], c[2], c[3], pa)
       drawParticleShape(gfx, def.shape, x, y, sx, sy, rad, ang)
-      -- A puff's core: the same mote again at half the radius in the palette's
-      -- brightest colour, which is what makes smoke read as lit from inside.
-      if def.shape == "puff" and rad > 2 then
+      -- A puff's / flame's core: the same mote again at half the radius in
+      -- the palette's brightest colour, which is what makes smoke and fire
+      -- read as lit from inside.
+      if (def.shape == "puff" or def.shape == "flame") and rad > 2 then
         local core = pal[1]
         gfx.setColor(core[1], core[2], core[3], pa * 0.55)
-        gfx.circle("fill", sx, sy, rad * 0.45)
+        if def.shape == "flame" then
+          drawParticleShape(gfx, "flame", x, y, sx, sy, rad * 0.45, ang)
+        else
+          gfx.circle("fill", sx, sy, rad * 0.45)
+        end
       end
     end
   end
@@ -2990,24 +3017,259 @@ local function drawVfxGlow(gfx, def, pal, x, y, R, t)
   gfx.circle("fill", x, y, max(1, R * (0.28 + 0.32 * u)))
 end
 
--- A beam: attacker to defender, widening as it opens, held, then thinning out.
--- Two passes -- an outer body in the palette's mid colour and a thin core in
--- its brightest -- which is the whole trick that makes a flat quad read as
--- energy rather than as a coloured stick.
-local function drawVfxBeam(gfx, x0, y0, x1, y1, t, pal, R)
+-- A long jagged bolt from (x0,y0) to (x1,y1). `amp` is the sideways kick in
+-- px; `salt` picks a distinct fork from the same seed. Drawn twice -- a thick
+-- mid-colour body and a thin hot core -- so it reads as lightning and not as
+-- a single-pixel scribble.
+local function drawLightning(gfx, x0, y0, x1, y1, pal, amp, seed, salt, alpha)
+  local dx, dy = x1 - x0, y1 - y0
+  local len = (dx * dx + dy * dy) ^ 0.5
+  if len < 0.5 then return end
+  local nx, ny = -dy / len, dx / len
+  local segs = 6
+  LIGHTN[1], LIGHTN[2] = x0, y0
+  for i = 1, segs - 1 do
+    local p = i / segs
+    local taper = min(p, 1 - p) * 2
+    local kick = (Vfx.rand01(seed, salt, i) - 0.5) * 2 * amp * taper
+    LIGHTN[i * 2 + 1] = x0 + dx * p + nx * kick
+    LIGHTN[i * 2 + 2] = y0 + dy * p + ny * kick
+  end
+  LIGHTN[segs * 2 + 1] = x1
+  LIGHTN[segs * 2 + 2] = y1
+  for i = segs * 2 + 3, #LIGHTN do LIGHTN[i] = nil end
+  local mid, core = pal[2] or pal[1], pal[1]
+  local lw = gfx.getLineWidth and gfx.getLineWidth() or 1
+  if gfx.setLineWidth then pcall(gfx.setLineWidth, 4.2) end
+  gfx.setColor(mid[1], mid[2], mid[3], alpha * 0.6)
+  gfx.line(unpack(LIGHTN))
+  if gfx.setLineWidth then pcall(gfx.setLineWidth, 1.7) end
+  gfx.setColor(core[1], core[2], core[3], alpha)
+  gfx.line(unpack(LIGHTN))
+  if gfx.setLineWidth then pcall(gfx.setLineWidth, lw) end
+end
+
+-- Flames along a line (or the flown part of one). Not a quad: a geometric
+-- beam in fire colours is what made Flamethrower look like a laser. Each
+-- mote is the same teardrop the ember burst uses, so a stream and an impact
+-- are one vocabulary.
+local function drawFireStream(gfx, x0, y0, x1, y1, pal, R, seed, salt, alpha, n)
+  local dx, dy = x1 - x0, y1 - y0
+  local len = (dx * dx + dy * dy) ^ 0.5
+  if len < 0.5 then return end
+  local nx, ny = -dy / len, dx / len
+  n = n or 14
+  for i = 1, n do
+    local p = (i - 0.5) / n
+    local r1 = Vfx.rand01(seed, salt, i)
+    local r2 = Vfx.rand01(seed, salt + 1, i)
+    local r3 = Vfx.rand01(seed, salt + 2, i)
+    local wobble = (r1 - 0.5) * R * 0.42
+    local rise = -r2 * R * 0.28
+    local x = x0 + dx * p + nx * wobble
+    local y = y0 + dy * p + ny * wobble + rise
+    local rad = (0.16 + r3 * 0.22) * R
+    local tint = (p < 0.3) and 1 or ((p < 0.7) and 2 or 3)
+    local c = pal[tint] or pal[2]
+    local ang = (r1 - 0.5) * 0.7
+    gfx.setColor(c[1], c[2], c[3], alpha * (0.65 + r2 * 0.35))
+    drawParticleShape(gfx, "flame", x0, y0, x, y, rad, ang)
+    local core = pal[1]
+    gfx.setColor(core[1], core[2], core[3], alpha * 0.5)
+    drawParticleShape(gfx, "flame", x0, y0, x, y, rad * 0.45, ang)
+  end
+end
+
+-- Thrown matter along an arc: leaves, ice crystals, rocks. The generic
+-- projectile core is a circle, which is why Razor Leaf was a green ball,
+-- Ice Punch a white one and Rock Throw a grey one. Same primitive the
+-- burst already draws, strung along the path instead.
+local function drawTumbleFlight(gfx, shape, at, u, pal, R, seed)
+  local n = (shape == "chunk") and 7 or 8
+  local spinRate = (shape == "chunk") and 2.4 or ((shape == "shard") and 4.2 or 5.0)
+  local sizeMul = (shape == "chunk") and 0.30 or 0.24
+  for i = n, 1, -1 do
+    local p = u - (i - 1) * 0.075
+    if p > 0.02 then
+      local r1 = Vfx.rand01(seed, i, 4)
+      local r2 = Vfx.rand01(seed, i, 5)
+      local cx, cy = at(p)
+      local sway = (r2 - 0.5) * R * 0.28
+      local ang = r1 * 6.283 + p * pi * spinRate
+      local c = pal[(r1 < 0.45) and 1 or 2] or pal[2]
+      local rad = R * (sizeMul + r2 * 0.14) * (1 - (i - 1) * 0.07)
+      gfx.setColor(c[1], c[2], c[3], 0.9 * (1 - (i - 1) / (n + 1)))
+      drawParticleShape(gfx, shape, cx, cy, cx + sway, cy, max(1.5, rad), ang)
+    end
+  end
+end
+
+-- Droplets along a line (Hydro Pump) or the flown part of one (Water Gun).
+-- A single circle here is a blue ball; many, slightly sagging, is water.
+local function drawWaterStream(gfx, x0, y0, x1, y1, pal, R, seed, salt, alpha, n)
+  local dx, dy = x1 - x0, y1 - y0
+  local len = (dx * dx + dy * dy) ^ 0.5
+  if len < 0.5 then return end
+  local nx, ny = -dy / len, dx / len
+  n = n or 16
+  for i = 1, n do
+    local p = (i - 0.5) / n
+    local r1 = Vfx.rand01(seed, salt, i)
+    local r2 = Vfx.rand01(seed, salt + 1, i)
+    local r3 = Vfx.rand01(seed, salt + 2, i)
+    local wobble = (r1 - 0.5) * R * 0.28
+    local sag = p * p * R * 0.18
+    local x = x0 + dx * p + nx * wobble
+    local y = y0 + dy * p + ny * wobble + sag
+    local rad = (0.10 + r3 * 0.16) * R
+    local c = pal[(r2 < 0.4) and 1 or 2] or pal[2]
+    gfx.setColor(c[1], c[2], c[3], alpha * (0.55 + r2 * 0.4))
+    gfx.circle("fill", x, y, max(1.1, rad))
+  end
+end
+
+-- Ice crystals along a line. Ice Beam wearing a laser is the same bug as
+-- Flamethrower: the delivery was "beam" so the renderer drew a quad.
+local function drawShardStream(gfx, x0, y0, x1, y1, pal, R, seed, salt, alpha, n)
+  local dx, dy = x1 - x0, y1 - y0
+  local len = (dx * dx + dy * dy) ^ 0.5
+  if len < 0.5 then return end
+  local nx, ny = -dy / len, dx / len
+  n = n or 12
+  for i = 1, n do
+    local p = (i - 0.5) / n
+    local r1 = Vfx.rand01(seed, salt, i)
+    local r2 = Vfx.rand01(seed, salt + 1, i)
+    local r3 = Vfx.rand01(seed, salt + 2, i)
+    local wobble = (r1 - 0.5) * R * 0.32
+    local x = x0 + dx * p + nx * wobble
+    local y = y0 + dy * p + ny * wobble
+    local rad = (0.16 + r3 * 0.18) * R
+    local c = pal[(r2 < 0.5) and 1 or 2] or pal[2]
+    local ang = r1 * 6.283 + p * pi * 3
+    gfx.setColor(c[1], c[2], c[3], alpha * (0.7 + r2 * 0.3))
+    drawParticleShape(gfx, "shard", x0, y0, x, y, rad, ang)
+  end
+end
+
+-- Psychic motes along a line, helixed so the column reads as a beam of
+-- thought rather than a pink stick. Psybeam keeps a thin core underneath
+-- so the name still holds.
+local function drawPsiStream(gfx, x0, y0, x1, y1, pal, R, seed, t, alpha)
+  local dx, dy = x1 - x0, y1 - y0
+  local len = (dx * dx + dy * dy) ^ 0.5
+  if len < 0.5 then return end
+  local nx, ny = -dy / len, dx / len
+  local n = 16
+  for i = 1, n do
+    local p = (i - 0.5) / n
+    local r1 = Vfx.rand01(seed, 7, i)
+    local ang = p * pi * 6 + t * pi * 4 + r1
+    local rad = R * (0.14 + r1 * 0.12)
+    local x = x0 + dx * p + nx * cos(ang) * rad
+    local y = y0 + dy * p + ny * sin(ang) * rad * 0.75
+    local c = pal[(r1 < 0.4) and 1 or 2] or pal[2]
+    gfx.setColor(c[1], c[2], c[3], alpha * (0.55 + r1 * 0.4))
+    gfx.circle("fill", x, y, max(1.1, R * 0.09))
+  end
+end
+
+-- Psychic projectile: motes orbit the path, pulled slightly inward as they
+-- go. A single core here is a pink ball; the burst is already a spiral.
+local function drawPsiFlight(gfx, at, u, pal, R, seed)
+  local n = 14
+  for i = 1, n do
+    local p = u * ((i - 0.5) / n)
+    if p > 0.02 then
+      local r1 = Vfx.rand01(seed, i, 6)
+      local r2 = Vfx.rand01(seed, i, 7)
+      local cx, cy = at(p)
+      local ang = r1 * 6.283 + u * pi * 4
+      local rad = R * (0.16 + r2 * 0.22) * (1 - p * 0.45)
+      local c = pal[(r1 < 0.4) and 1 or 2] or pal[2]
+      gfx.setColor(c[1], c[2], c[3], 0.8 * (0.4 + p * 0.6))
+      gfx.circle("fill", cx + cos(ang) * rad, cy + sin(ang) * rad * 0.7,
+        max(1.1, R * 0.09))
+    end
+  end
+end
+
+-- A beam: attacker to defender. Hyper Beam stays a widening energy quad.
+-- Ember, spark, shard, splash and psi do not -- those styles wearing a laser
+-- is what made fire look like a beam, Thunderbolt a yellow stick, Ice Beam
+-- a cyan laser and Hydro Pump a blue one.
+local function drawVfxBeam(gfx, styleName, x0, y0, x1, y1, t, pal, R, seed)
   local dx, dy = x1 - x0, y1 - y0
   local len = (dx * dx + dy * dy) ^ 0.5
   if len < 0.001 then return end
   local nx, ny = -dy / len, dx / len
-  -- Opens in the first fifth, holds, and is gone by the end.
   local open = min(1, t / 0.2)
   local fade = (t > 0.55) and (1 - (t - 0.55) / 0.45) or 1
-  local w = M.FX_BEAM_W * (R / M.FX_VFX_R) * open * max(0, fade)
+  fade = max(0, fade)
+  if fade <= 0.01 then return end
+  seed = seed or 0
+
+  if styleName == "ember" then
+    local xHead = x0 + dx * open
+    local yHead = y0 + dy * open
+    drawFireStream(gfx, x0, y0, xHead, yHead, pal, R, seed, 1, 0.85 * fade, 14)
+    return
+  end
+  if styleName == "spark" then
+    local xHead = x0 + dx * open
+    local yHead = y0 + dy * open
+    local flick = 0.45 + 0.55 * Vfx.rand01(seed, math.floor(t * 22), 9)
+    drawLightning(gfx, x0, y0, xHead, yHead, pal, R * 0.32, seed, 1, fade * flick)
+    if flick > 0.55 then
+      local mid = 0.45 + Vfx.rand01(seed, 3, 8) * 0.2
+      local mx = x0 + dx * mid * open
+      local my = y0 + dy * mid * open
+      local fork = 0.35
+      drawLightning(gfx, mx, my,
+        mx + dx * fork * open + nx * R * 0.45,
+        my + dy * fork * open + ny * R * 0.45,
+        pal, R * 0.22, seed, 2, fade * flick * 0.7)
+    end
+    return
+  end
+  if styleName == "shard" then
+    local xHead = x0 + dx * open
+    local yHead = y0 + dy * open
+    drawShardStream(gfx, x0, y0, xHead, yHead, pal, R, seed, 1, 0.85 * fade, 12)
+    return
+  end
+  if styleName == "splash" then
+    local xHead = x0 + dx * open
+    local yHead = y0 + dy * open
+    drawWaterStream(gfx, x0, y0, xHead, yHead, pal, R, seed, 1, 0.85 * fade, 18)
+    return
+  end
+  if styleName == "psi" then
+    local xHead = x0 + dx * open
+    local yHead = y0 + dy * open
+    -- A thin core so Psybeam still reads as a beam, then the helix on top
+    -- so it is thought rather than a coloured stick.
+    local w = M.FX_BEAM_W * (R / M.FX_VFX_R) * open * fade * 0.28
+    if w > 0.2 then
+      local c = pal[2]
+      POLY4[1] = x0 + nx * w; POLY4[2] = y0 + ny * w
+      POLY4[3] = xHead + nx * w; POLY4[4] = yHead + ny * w
+      POLY4[5] = xHead - nx * w; POLY4[6] = yHead - ny * w
+      POLY4[7] = x0 - nx * w; POLY4[8] = y0 - ny * w
+      gfx.setColor(c[1], c[2], c[3], 0.28 * fade)
+      gfx.polygon("fill", POLY4)
+    end
+    drawPsiStream(gfx, x0, y0, xHead, yHead, pal, R, seed, t, 0.9 * fade)
+    return
+  end
+
+  -- Opens in the first fifth, holds, and is gone by the end.
+  local w = M.FX_BEAM_W * (R / M.FX_VFX_R) * open * fade
   if w <= 0.2 then return end
   for pass = 1, 2 do
     local half = (pass == 1) and w or w * 0.34
     local c = (pass == 1) and pal[2] or pal[1]
-    local a = ((pass == 1) and 0.55 or 0.9) * max(0, fade)
+    local a = ((pass == 1) and 0.55 or 0.9) * fade
     POLY4[1] = x0 + nx * half; POLY4[2] = y0 + ny * half
     POLY4[3] = x1 + nx * half; POLY4[4] = y1 + ny * half
     POLY4[5] = x1 - nx * half; POLY4[6] = y1 - ny * half
@@ -3017,15 +3279,56 @@ local function drawVfxBeam(gfx, x0, y0, x1, y1, t, pal, R)
   end
 end
 
--- A projectile in flight: a bright core on a shallow arc, with a short tail of
--- motes strung out behind it along the path it has already covered.
-local function drawVfxFlight(gfx, x0, y0, x1, y1, u, pal, R, seed)
-  -- One arc, evaluated at several points: the core is at `u` and each trail
-  -- mote at a fraction of the flight behind it, so the tail lies *on* the path
-  -- the core actually took rather than on a straight line under it.
+-- A projectile in flight. The default is still a bright core on a shallow
+-- arc (Shadow Ball, Egg Bomb). Named styles wear their own look while they
+-- travel -- a generic circle here is why Ember was a fireball, Thunder Shock
+-- a yellow ball, Razor Leaf a green one, Ice Punch a white one, Water Gun
+-- a blue one, Rock Throw a grey one and Confusion a pink one.
+local function drawVfxFlight(gfx, styleName, x0, y0, x1, y1, u, pal, R, seed)
   local function at(p)
     return x0 + (x1 - x0) * p, y0 + (y1 - y0) * p - 4 * p * (1 - p) * R * 0.55
   end
+  seed = seed or 0
+  local cx, cy = at(u)
+
+  if styleName == "ember" then
+    drawFireStream(gfx, x0, y0, cx, cy, pal, R * 0.85, seed, 3, 0.9, 10)
+    return
+  end
+  if styleName == "spark" then
+    local flick = 0.5 + 0.5 * Vfx.rand01(seed, math.floor(u * 20), 9)
+    drawLightning(gfx, x0, y0, cx, cy, pal, R * 0.28, seed, 1, flick)
+    if flick > 0.5 then
+      drawLightning(gfx, x0, y0,
+        cx + (cy - y0) * 0.12, cy - (cx - x0) * 0.12,
+        pal, R * 0.18, seed, 2, flick * 0.65)
+    end
+    return
+  end
+  if styleName == "leaf" then
+    drawTumbleFlight(gfx, "leaf", at, u, pal, R, seed)
+    return
+  end
+  if styleName == "shard" then
+    drawTumbleFlight(gfx, "shard", at, u, pal, R, seed)
+    return
+  end
+  if styleName == "rock" or styleName == "quake" then
+    drawTumbleFlight(gfx, "chunk", at, u, pal, R, seed)
+    return
+  end
+  if styleName == "splash" then
+    drawWaterStream(gfx, x0, y0, cx, cy, pal, R * 0.9, seed, 3, 0.9, 14)
+    return
+  end
+  if styleName == "psi" then
+    drawPsiFlight(gfx, at, u, pal, R, seed)
+    return
+  end
+
+  -- One arc, evaluated at several points: the core is at `u` and each trail
+  -- mote at a fraction of the flight behind it, so the tail lies *on* the path
+  -- the core actually took rather than on a straight line under it.
   for i = M.FX_VFX_TRAIL, 1, -1 do
     local p = u - i * 0.055
     if p > 0 then
@@ -3035,7 +3338,6 @@ local function drawVfxFlight(gfx, x0, y0, x1, y1, u, pal, R, seed)
       gfx.circle("fill", tx, ty, max(1, R * 0.20 * (1 - i * 0.13)))
     end
   end
-  local cx, cy = at(u)
   local mid, core = pal[2], pal[1]
   gfx.setColor(mid[1], mid[2], mid[3], 0.75)
   gfx.circle("fill", cx, cy, max(1, R * 0.38))
@@ -3063,12 +3365,16 @@ end
 --   self        the same, at the seat it came from.
 --   field       the same, at mid-field and much wider -- Earthquake, Explosion,
 --               a Poke Flute, weather.
---   projectile  the first M.FX_VFX_TRAVEL of the life is the flight and draws
---               *only* the core and its tail; the remainder is the burst on
---               arrival, replayed from t == 0 so the impact is a whole effect
---               rather than the tail end of one.
---   beam        the beam is drawn for the whole life and the burst rides under
---               its far end, opening a beat late so the beam is seen to arrive
+--   projectile  the first M.FX_VFX_TRAVEL of the life is the flight; ember,
+--               spark, leaf, shard, splash, rock, quake and psi wear their
+--               own look in the air, everything else is a core and a tail,
+--               then the remainder is the burst on arrival, replayed from
+--               t == 0 so the impact is a whole effect rather than the tail
+--               end of one.
+--   beam        ember / spark / shard / splash / psi wear their own look
+--               (fire, lightning, crystals, water, a helix of motes); other
+--               styles keep the energy quad. The burst rides under the far
+--               end, opening a beat late so the stream is seen to arrive
 --               before anything answers it.
 --
 -- A travelling delivery whose origin is missing (an effect published with no
@@ -3104,14 +3410,29 @@ local function drawVfx(layout, e)
     local ox, oy = vfxAnchor(layout, fromSide, e.fromSeat)
     local travel = M.FX_VFX_TRAVEL
     if t < travel then
-      pcall(drawVfxFlight, gfx, ox, oy, x, y, t / travel, pal, R, seed)
+      -- Additive for the styles that are light: a spark in flight is
+      -- lightning, an ember in flight is fire, and both want overlapping
+      -- strokes to brighten rather than to stack opaque. Restored before
+      -- return so a throw cannot leak "add" onto the rest of the frame.
+      local add = Vfx.additive(styleName) and gfx.setBlendMode ~= nil
+      local restoredFlight = false
+      if add then restoredFlight = pcall(gfx.setBlendMode, "add", "alphamultiply") end
+      pcall(drawVfxFlight, gfx, styleName, ox, oy, x, y, t / travel, pal, R, seed)
+      if restoredFlight then pcall(gfx.setBlendMode, "alpha", "alphamultiply") end
       pcall(gfx.setColor, 1, 1, 1, 1)
       return
     end
     burstT = (t - travel) / (1 - travel)
   elseif delivery == "beam" and fromSide then
     local ox, oy = vfxAnchor(layout, fromSide, e.fromSeat)
-    pcall(drawVfxBeam, gfx, ox, oy, x, y, t, pal, R)
+    -- Ember / spark / psi beams are light; they want additive the same way
+    -- the burst does. Ice and water streams are matter and do not.
+    local stream = (styleName == "ember" or styleName == "spark"
+      or styleName == "psi") and gfx.setBlendMode ~= nil
+    local restoredBeam = false
+    if stream then restoredBeam = pcall(gfx.setBlendMode, "add", "alphamultiply") end
+    pcall(drawVfxBeam, gfx, styleName, ox, oy, x, y, t, pal, R, seed)
+    if restoredBeam then pcall(gfx.setBlendMode, "alpha", "alphamultiply") end
     burstT = clamp((t - 0.15) / 0.85, 0, 1)
   end
 
