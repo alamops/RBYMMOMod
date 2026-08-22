@@ -22,15 +22,18 @@ local check, eq = T.check, T.eq
 
 local MOD_PATH = "mods/rby_mmo"
 -- Agetor / out-of-tree checkouts may leave mods/rby_mmo pointed at another
--- tree; fall back to this suite's mod root so dual-gen (and the rest) still
--- exercise the checkout under test. Same pattern as tests/trade2.lua.
-if not io.open(MOD_PATH .. "/src/Gen.lua", "rb") then
+-- tree. Prefer the checkout this suite was loaded from whenever it actually
+-- contains the mod -- otherwise a worktree run would silently test the
+-- symlink's target instead of the files under edit.
+do
   local src = debug.getinfo(1, "S").source
   if type(src) == "string" and src:sub(1, 1) == "@" then
     local dir = src:sub(2):match("(.+)[/\\]")
     if dir then
       local fallback = dir:gsub("[/\\]tests$", "")
-      if io.open(fallback .. "/src/Gen.lua", "rb") then
+      local handle = io.open(fallback .. "/src/Gen.lua", "rb")
+      if handle then
+        handle:close()
         MOD_PATH = fallback
       end
     end
@@ -13886,6 +13889,40 @@ end)()
   eq(ember.delivery, "projectile",
      "a Gen1 Special type is fired, which is the rule that covers every move "
      .. "this catalogue has never seen")
+  eq(Vfx.STYLES.ember.shape, "flame",
+     "a Fire look is a teardrop, not a puff -- a puff in flight is a ball")
+  eq(Vfx.STYLES.leaf.shape, "leaf", "Grass wears an ovate leaf, not a dot")
+  eq(Vfx.STYLES.spark.shape, "bolt", "Electric wears a jagged bolt")
+
+  local thunder = Vfx.forMove("THUNDER", { type = "ELECTRIC", power = 120 })
+  eq(thunder.delivery, "burst",
+     "Thunder strikes the target; it is not a thrown ball")
+  eq(thunder.style, "spark", "...and the strike is lightning")
+
+  local razor = Vfx.forMove("RAZOR_LEAF", { type = "GRASS", power = 55 })
+  eq(razor.style, "leaf", "Razor Leaf is foliage")
+  eq(razor.delivery, "projectile", "...thrown, not a beam of green")
+
+  eq(Vfx.STYLES.shard.shape, "shard", "Ice wears crystals, not a ball")
+  eq(Vfx.STYLES.splash.shape, "dot", "Water wears droplets")
+  eq(Vfx.STYLES.rock.shape, "chunk", "Rock wears tumbling chunks")
+  eq(Vfx.STYLES.psi.shape, "dot", "Psychic wears motes, not one orb")
+
+  local iceBeam = Vfx.forMove("ICE_BEAM", { type = "ICE", power = 95 })
+  eq(iceBeam.style, "shard", "Ice Beam keeps Ice's crystals")
+  eq(iceBeam.delivery, "beam", "...and the stream delivery")
+
+  local hydro = Vfx.forMove("HYDRO_PUMP", { type = "WATER", power = 120 })
+  eq(hydro.style, "splash", "Hydro Pump is water")
+  eq(hydro.delivery, "beam", "...as a jet, not a thrown ball")
+
+  local rockThrow = Vfx.forMove("ROCK_THROW", { type = "ROCK", power = 50 })
+  eq(rockThrow.style, "rock", "Rock Throw is a chunk")
+  eq(rockThrow.delivery, "projectile", "...lobbed, not a grey ball")
+
+  local psybeam = Vfx.forMove("PSYBEAM", { type = "PSYCHIC_TYPE", power = 65 })
+  eq(psybeam.style, "psi", "Psybeam is Psychic's look")
+  eq(psybeam.delivery, "beam", "...and still a beam")
 
   -- The fallback that matters: nothing may resolve to nothing.
   local unknown = Vfx.forMove("A_MOD_MOVE_NOBODY_HAS", nil)
@@ -14320,6 +14357,8 @@ end)()
   -- below is compared against this, so a style is only credited with what it
   -- drew rather than with the field it drew over.
   local baseline = drawWith(nil)
+  local baseLine, basePoly = counts.line or 0, counts.polygon or 0
+  local baseCircle = counts.circle or 0
 
   local styles = {}
   for name in pairs(Vfx.STYLES) do styles[#styles + 1] = name end
@@ -14379,6 +14418,109 @@ end)()
   } })
   check(orphan > baseline,
         "a beam whose thrower has left the field falls back to a burst")
+
+  -- Travelling fire / lightning / grass wear their own look in the air, not
+  -- the generic ball-or-laser that made them unreadable. Counted against the
+  -- empty-field baseline so a plate outline cannot pass for a bolt.
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.25,
+    style = "spark", palette = "ELECTRIC", delivery = "projectile",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.line or 0) > baseLine,
+        "a spark projectile in flight is a bolt, not a thrown ball")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.25,
+    style = "leaf", palette = "GRASS", delivery = "projectile",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.polygon or 0) > basePoly,
+        "a leaf projectile in flight is a leaf, not a green ball")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.4,
+    style = "impact", palette = "NORMAL", delivery = "beam",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  local laserPoly = counts.polygon or 0
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.4,
+    style = "ember", palette = "FIRE", delivery = "beam",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.polygon or 0) > laserPoly,
+        "an ember beam is a fire stream, not a two-pass laser")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.4,
+    style = "spark", palette = "ELECTRIC", delivery = "beam",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.line or 0) > baseLine,
+        "a spark beam is jagged lightning, not a yellow stick")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.25,
+    style = "shard", palette = "ICE", delivery = "projectile",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.polygon or 0) > basePoly,
+        "an ice projectile in flight is a crystal, not a white ball")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.25,
+    style = "rock", palette = "ROCK", delivery = "projectile",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.polygon or 0) > basePoly,
+        "a rock projectile in flight is a chunk, not a grey ball")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.25,
+    style = "spirit", palette = "GHOST", delivery = "projectile",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  local ballCircle = counts.circle or 0
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.25,
+    style = "splash", palette = "WATER", delivery = "projectile",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.circle or 0) > ballCircle,
+        "a water projectile in flight is many droplets, not one orb")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.25,
+    style = "psi", palette = "PSYCHIC", delivery = "projectile",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.circle or 0) > ballCircle,
+        "a psychic projectile in flight is a spiral of motes, not a pink ball")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.4,
+    style = "shard", palette = "ICE", delivery = "beam",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.polygon or 0) > laserPoly,
+        "an ice beam is a crystal stream, not a two-pass laser")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.4,
+    style = "splash", palette = "WATER", delivery = "beam",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.circle or 0) > baseCircle,
+        "a water beam is a jet of droplets, not a blue laser")
+
+  drawWith({ {
+    kind = "vfx", side = "foe", seatIndex = 1, t = 0.4,
+    style = "psi", palette = "PSYCHIC", delivery = "beam",
+    fromSide = "ally", fromSeat = 1, seed = 5,
+  } })
+  check((counts.circle or 0) > baseCircle,
+        "a psychic beam carries motes, not only a coloured stick")
 
   -- Junk on the record is drawn as the defaults rather than refused: every one
   -- of these fields arrives from another process.
