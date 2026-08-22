@@ -865,6 +865,34 @@ return function(game)
     -- not apply -- wait on `mmoBattle` / `isFighting`, and treat stream gaps
     -- as the desync equivalent.
 
+    -- SWITCH needs somewhere to switch to, and a driver save that has just
+    -- traded still holds exactly one monster. Added *before* the battle is
+    -- asked for, because `MediatedBattle:start` snapshots `game.save.party`
+    -- the moment the hub pairs the two seats -- a bench added after that is a
+    -- bench the referee never hears about. Put back after the fight (see the
+    -- teardown below): a leg that changes the save owns undoing it, and the
+    -- co-op leg behind this one is entitled to the party it was written for.
+    --
+    -- Small and low on purpose. This leg is a test of what the arena *draws*
+    -- when a monster is switched into a blow, not of how long it can survive
+    -- one, and a bulky bench would spend the fight's whole budget proving it.
+    local benchSpecies, addedBench = nil, false
+    do
+      local Pokemon = require("src.pokemon.Pokemon")
+      if #(game.save.party or {}) < 2 then
+        local made, extra = pcall(Pokemon.new, game.data, "PIDGEY", 12)
+        if made and extra then
+          game.save.party[#game.save.party + 1] = extra
+          benchSpecies, addedBench = extra.species, true
+        end
+      else
+        benchSpecies = game.save.party[2].species
+      end
+      log("mediated switch target:", tostring(benchSpecies))
+    end
+    check(benchSpecies ~= nil,
+          "the host has a bench to switch to in the mediated 1v1")
+
     H.await(game, "guest_battle_requested")
     local started, btrail = H.drivePrompts(game, function()
       return H.inMediatedFight(game, exports)
@@ -971,6 +999,172 @@ return function(game)
       check(chips ~= nil and chips.foe == (rosters and rosters.foe),
         "...and the peer's roster chip is drawn from exactly that",
         tostring(chips and chips.foe))
+
+      -- ------- SWITCH, and the blow that answers it in the same turn
+      --
+      -- The only leg anywhere that presses SWITCH on a **mediated** screen.
+      -- The co-op leg next door presses the same command on `CoopBattle`,
+      -- which is a different screen with a different display model, so until
+      -- this existed `MediatedBattle`'s switch had no end-to-end cover at all.
+      --
+      -- The referee fields every switch before it runs a single fight
+      -- (`Battle:_resolveTurn`), so **a switch and the attack answering it are
+      -- one batch**. On the arena a `send` into a seat somebody is still
+      -- standing on is *parked* (`noteSlot`), and everything the referee then
+      -- says about that seat belongs to the monster in the park rather than the
+      -- one walking off. What this watches is the display rows that fall out of
+      -- that -- and the whole claim is one sentence: the newcomer arrives on
+      -- the bar it **walked out** with and is then seen to lose it.
+      --
+      -- Read off the seat instead of the park, the fall was measured against
+      -- the departing monster, came out as no fall at all, and nothing was
+      -- queued: the newcomer was installed already low and the attack that hurt
+      -- it played no flash, no nudge and no bar. That is invisible to a
+      -- headless assertion on truth HP -- `slot.hp` was right the whole time --
+      -- which is exactly why it belongs out here, against a real hub, a real
+      -- peer and the real paced queue.
+      local mySlot = (top.mySlot and top:mySlot()) or 0
+      -- Who this seat opened with, so an attempt can name the monster that is
+      -- *not* standing on it without caring which way round the pair is.
+      local leadSpecies = ((H.top(game).slots or {})[mySlot] or {}).species
+      local target, obs = nil, {}
+      local function sample()
+        local live = H.top(game)
+        if not H.isMediatedBattle(live) then return end
+        local slot = live.slots and live.slots[mySlot] or nil
+        if not slot then return end
+        local parked = slot.pending
+        if parked and parked.species == target then
+          -- The window itself. Sampled rather than inferred, so a run where
+          -- the arrival was never parked says so instead of asserting about a
+          -- window it was never in.
+          obs.parked = true
+          obs.walkedOutOn = tonumber(parked.shownHp) or obs.walkedOutOn
+          obs.parkedMax = tonumber(parked.maxHp) or obs.parkedMax
+        end
+        for _, row in ipairs(live.lines or {}) do
+          if row.drain == mySlot and row.species == target then
+            -- The regression, stated exactly: a fall filed against the monster
+            -- that took it rather than the one that left.
+            obs.drainTo = tonumber(row.to) or obs.drainTo
+          end
+        end
+        if slot.species == target then
+          if obs.arrivedOn == nil then obs.arrivedOn = tonumber(slot.shownHp) end
+          local shown = tonumber(slot.shownHp)
+          if shown and (obs.low == nil or shown < obs.low) then obs.low = shown end
+        end
+      end
+
+      -- Up to three of our own choice windows. One is usually enough -- the
+      -- guest mashes FIGHT with a frontloaded move (`H.frontloadDamage`), so
+      -- the blow lands on the turn we switch -- but a miss is a legal roll and
+      -- a leg that a miss can fail is a leg that fails for no reason. Each
+      -- attempt switches to whoever is *not* out, so the bench and the lead
+      -- take turns walking into it.
+      for attempt = 1, 3 do
+        if obs.drainTo ~= nil then break end
+        -- A forced replacement outranks the command grid, and nobody else is
+        -- pressing anything on this side yet -- so answer it here, or the
+        -- window this attempt is waiting for never opens and the leg spends
+        -- its budget watching a picker.
+        local held = H.top(game)
+        if H.isMediatedBattle(held) and held.phase == "switch" then
+          U.tap(game, "a"); U.wait(20)
+        end
+        local mine = H.waitSeconds(game, function()
+          local live = H.top(game)
+          return H.isMediatedBattle(live) and live.phase == "choose"
+            and live.mustReplace ~= true and live.result == nil
+        end, 45, "the host's own choice window")
+        if not mine then
+          log(("mediated switch: no choice window on attempt %d"):format(attempt))
+          break
+        end
+        local live = H.top(game)
+        local standing = (live.slots and live.slots[mySlot] or {}).species
+        target = (standing == benchSpecies) and leadSpecies or benchSpecies
+        obs = {}
+
+        -- FIGHT is index 1 and SWITCH is index 2, so one RIGHT reaches it
+        -- under *both* layouts the grid is drawn in -- the band's one row of
+        -- four and the classic 2x2. Same tap the co-op leg makes, and correct
+        -- rather than lucky for the same reason.
+        U.tap(game, "right"); U.wait(6)
+        U.tap(game, "a");     U.wait(10)
+        local bench = H.top(game)
+        local opened = H.isMediatedBattle(bench) and bench.phase == "switch"
+        -- Asserted on the **first** attempt only. A retry runs on a field the
+        -- first turn has already moved -- the monster we switched to may have
+        -- been knocked down and the bench emptied behind it -- and
+        -- `updateSwitch` answering "There's no one to switch to!" is that
+        -- field, not a defect. Failing on it would invent a failure on a
+        -- perfectly good tree whenever the first blow missed.
+        if attempt == 1 then
+          check(opened, "SWITCH opens the mediated bench list",
+                tostring(bench and bench.phase))
+        elseif not opened then
+          log(("mediated switch: nothing left to send on attempt %d (%s)")
+            :format(attempt, tostring(bench and bench.phase)))
+        end
+        -- Only commit into a list that is actually open: an A pressed at a
+        -- command grid that never moved files a *move* instead, and the leg
+        -- would then assert about a turn nobody switched on.
+        if not opened then break end
+        -- Shot here, while the list is up and before anything is taken off
+        -- it. This is the one frame the *mediated* bench list is on screen in
+        -- the whole run, and it holds until the press below -- so the picture
+        -- means the same thing every run. Photographing the turn afterwards
+        -- would catch whatever the fight had moved on to instead.
+        if attempt == 1 then
+          U.shot(game, SHOT_DIR .. "/host-battle-switch.png")
+        end
+        U.tap(game, "a");     U.wait(6)
+
+        -- Everything from here is display, so it is sampled every frame: the
+        -- park, the queued fall and the seat's own clock all live for a
+        -- handful of frames each and none of them survives to be read after.
+        H.waitFor(game, function()
+          sample()
+          local now = H.top(game)
+          if not H.isMediatedBattle(now) then return true end
+          -- Done when a menu of ours is up (or the fight is over) *and* the
+          -- queue that explains this turn has been read to the end. `switch`
+          -- counts: a newcomer knocked down inside the very window under test
+          -- is answered with the forced picker, not the command grid, and
+          -- waiting only for `choose` would sit through that whole phase.
+          local settled = #(now.lines or {}) == 0 and now.draining == nil
+            and now.shown == nil
+          return settled and (now.phase == "choose" or now.phase == "switch"
+            or now.result ~= nil)
+        end, 60 * 25, "the switched-into turn to play out")
+
+        log(("mediated switch %d: to=%s parked=%s walkedOutOn=%s arrivedOn=%s "
+             .. "low=%s drainTo=%s"):format(
+          attempt, tostring(target), tostring(obs.parked),
+          tostring(obs.walkedOutOn), tostring(obs.arrivedOn),
+          tostring(obs.low), tostring(obs.drainTo)))
+      end
+
+      check(obs.parked == true,
+            "the switched-in POKeMON is parked behind the one walking off")
+      check(obs.arrivedOn ~= nil,
+            "...and then takes the seat", tostring(obs.arrivedOn))
+      -- The three that are the fix. Held together rather than separately: a
+      -- bar that starts full and never moves, and a bar that starts low and
+      -- never moves, are the same still picture to a player and the same
+      -- silence to a single assertion.
+      check(obs.drainTo ~= nil,
+            "the blow that landed in that window queues its fall against the "
+            .. "newcomer, not the monster that left")
+      check(obs.arrivedOn ~= nil and obs.walkedOutOn ~= nil
+              and obs.arrivedOn == obs.walkedOutOn,
+            "...the newcomer's bar starts where it walked out",
+            ("arrived on %s, walked out on %s"):format(
+              tostring(obs.arrivedOn), tostring(obs.walkedOutOn)))
+      check(obs.low ~= nil and obs.arrivedOn ~= nil and obs.low < obs.arrivedOn,
+            "...and is then seen to fall, so the attack reads on the arena",
+            ("%s -> %s"):format(tostring(obs.arrivedOn), tostring(obs.low)))
     end
 
     local gaps = 0
@@ -995,6 +1189,19 @@ return function(game)
     -- settle, broadcast -- is exercised against a real battle rather than a
     -- fabricated result.
     H.closeToOverworld(game)
+
+    -- Put the party back the way this leg found it. The bench monster exists
+    -- only so SWITCH had somewhere to send, and the co-op leg below was
+    -- written against a one-monster host -- so leaving it behind would fail a
+    -- later leg with a defect this one invented. A leg that changes the save
+    -- owns undoing it (the co-op driver's switch test does the same).
+    local tail = game.save.party and game.save.party[#game.save.party]
+    if addedBench and #(game.save.party or {}) > 1
+       and tail and tail.species == benchSpecies then
+      table.remove(game.save.party)
+      log("removed the extra POKeMON the mediated switch needed")
+    end
+
     H.rankAfterBattle(game, exports, check)
 
     -- ------- 6b. a co-op battle, over the *in-game* hub

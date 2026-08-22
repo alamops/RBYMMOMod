@@ -2260,7 +2260,14 @@ function M:onEvent(msg)
 
   elseif kind == "faint" then
     local slot = self:noteSlot(msg)
-    if slot then slot.hp = 0 end
+    -- Whoever the referee just knocked down, which is the parked arrival when
+    -- one is waiting: a monster switched in and KO'd inside the same batch is
+    -- down before its own `spawnfx` row has played, and zeroing the seat there
+    -- would put its knockout on the monster still walking off. `noteSlot` has
+    -- already routed the number; this is the belt-and-braces beside it, routed
+    -- the same way.
+    local down = slot and (slot.pending or slot) or nil
+    if down then down.hp = 0 end
     if msg.slot == self:mySlot() then
       local mon = self.mine and self.mine[self.active]
       if mon then mon.hp = 0 end
@@ -2290,7 +2297,7 @@ function M:onEvent(msg)
     -- on screen through the flash + "X fainted!". Stamped with its occupant
     -- for the same reason the drain row is: an auto-replacement batched behind
     -- the KO would otherwise have this row take the newcomer's pic down.
-    self.lines[#self.lines + 1] = { clearPic = msg.slot, species = slot and slot.species }
+    self.lines[#self.lines + 1] = { clearPic = msg.slot, species = down and down.species }
     -- A knockout on the *other* side is the only thing that can owe this
     -- client experience, so this is where the credit for one is banked. See
     -- the `exp` branch below for what spends it.
@@ -3101,9 +3108,13 @@ function M:noteSlot(msg)
   -- exit. So a `damage` / `faint` / `status` that lands in the window is
   -- written to the parked record and never to the seat -- the departing
   -- monster's numbers are what its own queued rows are still animating
-  -- against. (Only a forced-choice turn resolving while this queue is busy can
-  -- produce one; the bar simply arrives already low, rather than the wrong
-  -- monster's bar falling.)
+  -- against.
+  --
+  -- That window is not the rarity it was once taken for: **a voluntary switch
+  -- and the attack that answers it resolve in the same batch**, so every hit
+  -- landing on a monster the turn it walked out arrives here. `hp` moves and
+  -- `shownHp` does not, which is what leaves the fall for `queueDrain` to file
+  -- and `applySwap` to hand over -- see the pair of them.
   local parked = slot.pending
   if parked and not (msg.text and (msg.t == "send" or msg.t == "switch")) then
     if msg.maxHp ~= nil then parked.maxHp = msg.maxHp end
@@ -3134,6 +3145,15 @@ function M:noteSlot(msg)
         species = msg.text,
         speciesId = msg.speciesId,
         hp = msg.hp,
+        -- Where this monster's bar *starts*, frozen at the HP it walked out
+        -- with. `hp` above follows the referee for the whole of the park
+        -- window; this does not, and the gap between the two is the fall the
+        -- queue still owes. Without it an arrival that was struck before its
+        -- own `spawnfx` row played was installed at its post-hit number with
+        -- nothing left to animate -- which is why an attack on a monster that
+        -- had just switched in read as no attack at all: no flash, no nudge,
+        -- no impact burst and a bar that never moved.
+        shownHp = msg.hp,
         -- What that HP is out of, when the referee stated it (PROTOCOL 24).
         -- Installed by `applySwap`, not written to the seat here: the bar
         -- underneath still belongs to the monster finishing its exit, and its
@@ -5150,12 +5170,20 @@ function M:applySwap(row)
   -- what its bar is out of, and the older guess -- the biggest HP the seat has
   -- ever been told about -- is only what is left when it stated none.
   slot.hp = arrival.hp or 0
+  -- The bar starts where this monster *walked out*, which is where it already
+  -- stands on every ordinary arrival and is higher than it on the one that
+  -- matters: a hit landing inside the park window moved `arrival.hp` and left
+  -- `arrival.shownHp` where the send put it, and the gap between the two is
+  -- the drain row waiting behind this one. Taking the current number here
+  -- swallowed that fall -- the newcomer simply appeared already low and the
+  -- attack that hurt it showed nothing at all.
+  --
+  -- The predecessor's descent, which ended on this same seat record, is
+  -- overwritten either way: it is never inherited.
+  slot.shownHp = arrival.shownHp or slot.hp
   if arrival.maxHp ~= nil then slot.maxHp = max(1, arrival.maxHp) end
   if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
-  -- A monster that just walked on has nothing to animate down from, so its bar
-  -- starts where the referee says it is -- and the predecessor's descent, which
-  -- ended on this same record, must not be inherited.
-  slot.shownHp = slot.hp
+  if slot.shownHp > (slot.maxHp or 1) then slot.maxHp = slot.shownHp end
   slot.status = arrival.status
   self:arriveOnSeat(index, index == self:mySlot())
   return true
@@ -5176,19 +5204,32 @@ end
 -- because beat 3's impact burst borrows the *attacking move's* palette, and a
 -- residual has no attacking move -- taking the last one's colours would paint
 -- a poison tick in the last Fire attack's orange.
+--
+-- **Filed against whoever this seat will be showing when the row comes up**,
+-- which is not always who is standing on it now. An arrival parked behind a
+-- monster still finishing its exit (`noteSlot`) is already the one the referee
+-- is talking about, and its own `spawnfx` row is ahead of this one in the
+-- queue -- so a hit that lands inside that window is filed against the
+-- *newcomer* and falls after the swap that puts it on the seat. Read off the
+-- seat instead, the fall was measured between the departing monster's HP and
+-- its own display clock, found them equal, and queued nothing: the switch and
+-- the attack that answers it resolve in one batch, so that was every attack on
+-- a monster the turn it came in. CoopBattle asks the queue the same question
+-- for the same reason (`showing`, src/CoopBattle.lua:3158).
 function M:queueDrain(index, residual)
   if index == nil then return false end
   if not self:usesBattlefield() then return false end
   local slot = self.slots[index]
   if not slot then return false end
-  local to = tonumber(slot.hp) or 0
-  if slot.shownHp == nil then
-    slot.shownHp = to
+  local occupant = slot.pending or slot
+  local to = tonumber(occupant.hp) or 0
+  if occupant.shownHp == nil then
+    occupant.shownHp = to
     return false
   end
-  if slot.shownHp == to then return false end
+  if occupant.shownHp == to then return false end
   self.lines[#self.lines + 1] = {
-    drain = index, to = to, species = slot.species,
+    drain = index, to = to, species = occupant.species,
     residual = (residual ~= nil) or nil,
   }
   return true
@@ -5293,11 +5334,17 @@ end
 -- Stamped with its occupant, exactly like the drain row: the referee can batch
 -- an auto-replacement behind the KO, and a sink meant for the monster that left
 -- would otherwise play against the one standing there now.
+--
+-- A parked arrival is stamped in preference to the seat, exactly as the drain
+-- row is: the monster that walked in and fell inside one batch has not been
+-- installed yet, and a sink named after the one still walking off would be
+-- dropped by `startFaintFx` the moment the swap landed.
 function M:queueFaintFx(index)
   if index == nil then return false end
   if not self:usesBattlefield() then return false end
   local slot = self.slots[index]
-  self.lines[#self.lines + 1] = { faintfx = index, species = slot and slot.species }
+  local occupant = slot and (slot.pending or slot) or nil
+  self.lines[#self.lines + 1] = { faintfx = index, species = occupant and occupant.species }
   return true
 end
 
