@@ -1258,6 +1258,55 @@ do
   eq(a.slots[2].pending, nil, "...leaving nothing parked")
   eq(a.slots[2].shownHp, 21, "...and the bar starts where the referee put it")
 
+  -- ------- the hit that lands inside the window belongs to the newcomer
+  --
+  -- The switch and the attack that answers it resolve in **one batch** -- the
+  -- referee fields every switch before it runs a single fight
+  -- (`_resolveTurn`, src/BattleSim/Turn.lua) -- so a monster is struck while
+  -- its own arrival is still parked on every turn somebody switches into a
+  -- move. Read off the seat, that fall was measured against the *departing*
+  -- monster's numbers, came out as no fall at all, and queued nothing: the
+  -- newcomer was installed at its post-hit HP and the attack showed nothing.
+  -- No flash, no nudge, no impact burst, no bar. So the row is filed against
+  -- whoever the seat will be showing when it plays, and the arrival carries
+  -- the HP it walked out with for the bar to start from.
+  local hits = 0
+  for _, e in ipairs(a.fx or {}) do if e.kind == "flash" then hits = hits + 1 end end
+  ev({ t = "switch", slot = 2, text = "NIDORAN", speciesId = 29, level = 6, mon = 2 })
+  ev({ t = "send", slot = 2, text = "NIDORAN", hp = 26, maxHp = 26,
+       speciesId = 29, level = 6, mon = 2 })
+  ev({ t = "anim", slot = 0, side = "a", text = "TACKLE" })
+  ev({ t = "damage", slot = 2, hp = 17, amount = 9 })
+  eq(a.slots[2].species, "RATTATA",
+     "the seat is still the departing monster's while the arrival is parked")
+  eq(a.slots[2].hp, 21, "...and the hit is not written to its numbers")
+  eq(a.slots[2].pending.hp, 17, "the referee's number lands on the newcomer")
+  eq(a.slots[2].pending.shownHp, 26,
+     "...whose bar still starts where it walked out")
+  local filed = nil
+  for _, row in ipairs(a.lines) do
+    if row.drain then filed = row end
+  end
+  check(filed ~= nil, "a fall is queued for it -- this is the regression")
+  eq(filed and filed.species, "NIDORAN",
+     "...named for the monster that took it, so it survives the swap")
+  eq(filed and filed.to, 17, "...and falls to the referee's number")
+
+  local sawHit, walkedOutAt = false, nil
+  guard = 0
+  while (#a.lines > 0 or a.draining) and guard < 1500 do
+    a:update(1 / 60); guard = guard + 1
+    if a.slots[2].species == "NIDORAN" and walkedOutAt == nil then
+      walkedOutAt = a.slots[2].shownHp
+    end
+    for _, e in ipairs(a.fx or {}) do if e.kind == "flash" then sawHit = true end end
+  end
+  check(guard < 1500, "the batch drains in bounded frames")
+  eq(walkedOutAt, 26, "the newcomer is drawn whole, before the blow reads")
+  check(sawHit, "...the hit reads on it (beat 3: the flash and the nudge)")
+  eq(a.slots[2].shownHp, 17, "...and the bar finishes where the referee put it")
+  eq(a.slots[2].hp, 17, "...with the seat's truth agreeing")
+
   -- Teardown: a battle ending mid-window strands neither a hold nor a park.
   ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
   check(a.slots[2].pending ~= nil, "a fresh arrival is parked")

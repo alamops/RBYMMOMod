@@ -85,6 +85,47 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **An attack on a POKéMON that had just switched in did nothing at all.**
+  Switch a monster out and the attack that answers it landed on nothing you
+  could see: no white flash, no nudge of the field, no impact burst, and a HP
+  bar that never moved. The newcomer simply walked onto the arena with a bar
+  already short, and the sentence naming the move that shortened it printed
+  over a still screen. It happened on every turn somebody switched into a
+  move — in MMO 1v1 and in the solo fights the same screen serves.
+
+  The two events are one batch. The referee fields every switch before it runs
+  a single fight (`_resolveTurn`), so the `send` and the `damage` that answers
+  it are parsed in the same breath — and on the arena a send into an occupied
+  seat is *parked* rather than applied, so the departing monster can finish
+  draining and sinking on numbers that are still its own. The referee's damage
+  was routed to that parked record correctly. The **display row** was not:
+  `queueDrain` measured the fall against the seat, found the departing
+  monster's bar already where its HP said it was, and queued nothing. The
+  arrival was then installed at its post-hit number with nothing left to
+  animate.
+
+  Display rows are now filed against whoever the seat will be showing when
+  they come up — the parked arrival when one is waiting — and the arrival
+  carries the HP it walked out with for its bar to start from. So the monster
+  arrives whole, the hit reads on it, and the bar falls. The same routing
+  fixes the knockout inside that window: a monster switched in and KO'd on the
+  same turn now drains, sinks and releases its pic as itself, instead of
+  spending the departing monster's sink on the wrong sprite.
+
+  Client-side only — no wire field moves, `PROTOCOL` is unchanged, and both
+  twin-parity suites are untouched. Co-op battles never had it: `CoopBattle`
+  already asks its queue who a row belongs to (`showing`), which is the
+  precedent this follows.
+
+  The end-to-end run now presses SWITCH on a **mediated** screen and watches
+  the blow answer it — the co-op leg beside it drives `CoopBattle`, a
+  different screen with a different display model, so this path had no live
+  cover at all. The new leg asserts the newcomer is parked behind the monster
+  walking off, that the fall is queued against the *newcomer*, that its bar
+  starts where it walked out, and that it is then seen to move; on the
+  unfixed code all of them fail. `host-battle-switch.png` is the mediated
+  bench list, which nothing had photographed before.
+
 - **Psychic moves were being fought as Physical in every refereed battle.**
   MMO 1v1, co-op 2-on-2 and the solo battles that run on this mod's referee
   all resolved Psychic damage on Attack/Defense instead of Special/Special,
