@@ -1457,6 +1457,8 @@ do
     if type(row) == "table" and row.vfxrow then burnFiled = true end
   end
   check(burnFiled, "a condition landing files a row")
+  eq(a.slots[2] and a.slots[2].status, "BRN",
+     "...and writes the chip the plate draws")
   check(drain() < 900, "...which drains")
 
   local cleared = #a.lines
@@ -1467,6 +1469,8 @@ do
   end
   eq(clearRows, 0,
      "a condition lifting is a sentence rather than a sight -- no row filed")
+  eq(a.slots[2] and a.slots[2].status, nil,
+     "...and the chip comes off, the same way a wake or an item cure must")
   check(#a.lines >= cleared, "...and nothing else is disturbed")
   check(drain() < 900, "the queue drains")
 
@@ -1525,6 +1529,77 @@ do
   eq(classic.slots[2].species, "RATTATA",
      "off the arena a send relabels at parse exactly as it always did")
   eq(classic.slots[2].pending, nil, "...and parks nothing that could never land")
+end
+
+-- ------------------------------------------------------------------
+-- 11a. status chips: inflict writes, a lift (wake / item) clears
+-- ------------------------------------------------------------------
+--
+-- The referee says a condition is gone by sending a `status` event with no
+-- token (BattleSim/Events.lua). The plate reads `slot.status`, so a client
+-- that only wrote when the field was present kept SLEEP after a wake and
+-- every badge after an Awakening / Full Heal / Antidote.
+
+do
+  local Battlefield = need("Battlefield")
+  local screen = setmetatable({
+    game = {
+      data = DATA,
+      save = { party = { mon("CHARMANDER", { status = "SLP" }) } },
+    },
+    usesBattlefield = function() return true end,
+    slots = {},
+    lines = {},
+    mine = { { species = "CHARMANDER", status = "SLP", slot = 0 } },
+    active = 1,
+    mySlot = function() return 0 end,
+  }, { __index = Mediated })
+
+  screen:noteSlot({ t = "send", slot = 0, text = "CHARMANDER", hp = 30,
+                    status = "SLP" })
+  eq(screen.slots[0].status, "SLP", "a send that walked in asleep shows SLEEP")
+  eq(Battlefield.cardModel(screen.slots[0]).status, "SLP",
+     "...and the card the arena draws agrees")
+
+  screen:noteSlot({ t = "status", slot = 0, text = "CHARMANDER woke up" })
+  screen:syncMineStatus({ t = "status", slot = 0, text = "CHARMANDER woke up" })
+  eq(screen.slots[0].status, nil, "a wake with no token takes the chip off")
+  eq(Battlefield.cardModel(screen.slots[0]).status, nil, "...the card too")
+  eq(screen.mine[1].status, nil, "...and the fight sheet")
+  eq(screen.game.save.party[1].status, nil, "...and the save mon behind it")
+
+  -- Every other standing condition, the way an item cure arrives.
+  for _, token in ipairs({ "PSN", "BRN", "FRZ", "PAR", "TOX" }) do
+    screen:noteSlot({ t = "status", slot = 0, status = token,
+                      text = "was afflicted" })
+    eq(screen.slots[0].status, token, token .. " lands on the chip")
+    screen:noteSlot({ t = "status", slot = 0, text = "recovered" })
+    eq(screen.slots[0].status, nil, "...and an item cure clears " .. token)
+  end
+
+  -- A residual `damage` names the status that dealt it; it must not be
+  -- readable as a lift, and a damage that names none must not wipe the chip.
+  screen:noteSlot({ t = "status", slot = 0, status = "BRN", text = "burned" })
+  screen:noteSlot({ t = "damage", slot = 0, hp = 28 })
+  eq(screen.slots[0].status, "BRN",
+     "a hit that did not mention a condition leaves the chip")
+  screen:noteSlot({ t = "damage", slot = 0, hp = 24, status = "BRN" })
+  eq(screen.slots[0].status, "BRN",
+     "...and a residual that names it keeps it")
+
+  -- Parked arrival: the departing monster keeps its chip; a cure in the
+  -- window belongs to the newcomer.
+  screen:noteSlot({ t = "send", slot = 2, text = "PIDGEY", hp = 24,
+                    status = "SLP" })
+  screen:noteSlot({ t = "send", slot = 2, text = "RATTATA", hp = 21,
+                    status = "PSN" })
+  eq(screen.slots[2].status, "SLP",
+     "the departing chip stays while the arrival is parked")
+  eq(screen.slots[2].pending.status, "PSN", "...the newcomer carries its own")
+  screen:noteSlot({ t = "status", slot = 2, text = "recovered" })
+  eq(screen.slots[2].status, "SLP",
+     "a cure in the window is not the departing mon's")
+  eq(screen.slots[2].pending.status, nil, "...it clears the newcomer")
 end
 
 -- ------------------------------------------------------------------
