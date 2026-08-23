@@ -6,6 +6,16 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **After a catch, the name and status screens fill the window.** On the
+  Gen 1 battlefield those pages are still 160×144, and the engine keeps the
+  640×360 arena underneath them, so the letter grid and the STATUS /
+  Attack / Defense / Speed / Special page sat as a postage stamp in the
+  middle of the fight. They now take the window (fill-scale at Game Boy
+  size) for the catch, and the status page is shown before the nickname
+  question so the numbers are readable.
+
 ### Added
 
 - **The POKéMON menu shows the POKéMON.** Picking who to send out — the

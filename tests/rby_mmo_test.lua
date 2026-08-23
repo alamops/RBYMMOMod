@@ -26940,6 +26940,124 @@ do
   end
 end
 
+-- ------- catch pages must fill the window, not the arena's postage stamp
+--
+-- NamingScreen / SummaryMenu / the nickname confirm are 160×144. Game.lua
+-- keeps a wide battle's 640×360 surface and only X-centres those pages, so
+-- they used to render tiny in the middle of the battlefield. fitCatchPage
+-- claims the wide-battle slot at GB size with fill-scale; only while a
+-- Gen 1 battlefield fight is actually on the stack.
+
+local gen1Data = POKEDEX
+local gen2Data = { gen2Constants = {}, pokemon = { PIDGEY = { name = "PIDGEY" } } }
+
+do
+  local battle = { usesBattlefield = function() return true end }
+  local game = { data = gen1Data, stack = { states = { battle } } }
+  local page = {}
+  Gen.fitCatchPage(page, game)
+  check(page.isWideBattleLayout and page:isWideBattleLayout(),
+        "a catch page over the arena claims the wide-battle slot")
+  local uw, uh = page:uiSize()
+  eq(uw, 160, "at Game Boy width, so fill-scale owns the window")
+  eq(uh, 144, "and Game Boy height")
+  check(page:wantsFillScale(), "and asks to fill the window")
+end
+
+do
+  local page = {}
+  Gen.fitCatchPage(page, { data = gen1Data, stack = { states = {} } })
+  eq(page.isWideBattleLayout, nil,
+     "Oak / the NAME RATER keep the ordinary letterbox -- no fight underneath")
+end
+
+do
+  local battle = { usesBattlefield = function() return true end }
+  local gold = { data = gen2Data, stack = { states = { battle } } }
+  local page = {}
+  Gen.fitCatchPage(page, gold)
+  eq(page.isWideBattleLayout, nil,
+     "Gold is left alone -- it already paints window-space")
+end
+
+do
+  local painted
+  local page = {
+    draw = function() painted = true end,
+  }
+  local battle = { usesBattlefield = function() return true end }
+  local game = { data = gen1Data, stack = { states = { battle } } }
+  Gen.fitCatchPage(page, game)
+  local rects = {}
+  local prevLove = _G.love
+  _G.love = { graphics = {
+    setColor = function() end,
+    rectangle = function(_, _, _, w, h)
+      rects[#rects + 1] = { w = w, h = h }
+    end,
+  } }
+  page:draw()
+  _G.love = prevLove
+  eq(painted, true, "the confirm still draws its own box")
+  eq(rects[1] and rects[1].w, 160,
+     "...after a full-page paper fill, so the clipped arena does not show")
+  eq(rects[1] and rects[1].h, 144, "...covering the take-over canvas")
+end
+
+do
+  local page = { isOpaque = true, draw = function() end }
+  local battle = { usesBattlefield = function() return true end }
+  local game = { data = gen1Data, stack = { states = { battle } } }
+  local baseDraw = page.draw
+  Gen.fitCatchPage(page, game)
+  eq(page.draw, baseDraw,
+     "an opaque naming / status page already fills 160×144 -- no extra paper")
+end
+
+-- Status first when the arena is up: the numbers page, then the nickname.
+do
+  local pushed, asked
+  local prevUi = stubMod.ui
+  stubMod.ui = {
+    push = function(_, id, mon)
+      pushed = { id = id, mon = mon, page = 1, game = nil }
+      function pushed:update()
+        if self.page == 1 then
+          self.page = 2
+        else
+          local stack = self.game.stack.states
+          for i = #stack, 1, -1 do
+            if stack[i] == self then table.remove(stack, i) end
+          end
+        end
+      end
+      return pushed
+    end,
+  }
+  local battle = { usesBattlefield = function() return true end }
+  local game = { data = gen1Data, stack = { states = { battle } } }
+  local mon = { species = "PIDGEY", level = 5, hp = 12, stats = { hp = 20 } }
+  local shown = Gen.showCaughtStatus(game, mon, function() asked = true end)
+  stubMod.ui = prevUi
+  eq(shown, true, "the status page goes up over the arena")
+  eq(pushed.id, "SummaryMenu", "and it is the engine STATUS screen")
+  eq(pushed.mon, mon, "for the monster that was just caught")
+  check(pushed.isWideBattleLayout and pushed:isWideBattleLayout(),
+        "sized to fill the window, not the arena's postage stamp")
+  pushed.game = game
+  game.stack.states[#game.stack.states + 1] = pushed
+  pushed:update(1 / 60)
+  eq(asked, nil, "page 1 only turns the page")
+  pushed:update(1 / 60)
+  eq(asked, true, "closing page 2 is what releases the nickname prompt")
+end
+
+do
+  eq(Gen.showCaughtStatus({ data = gen1Data, stack = { states = {} } },
+                          { species = "PIDGEY" }, function() end),
+     false, "no status page when there is no arena underneath")
+end
+
 -- CoopBattle's grant records the same things: it is a twin of the mediated
 -- one, and a co-op catcher's save must not end up different from a 1v1's.
 do

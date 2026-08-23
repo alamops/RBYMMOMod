@@ -198,6 +198,107 @@ function M.nicknamePromptText(game, displayName)
   return "Do you want to\ngive a nickname\nto " .. name .. "?"
 end
 
+-- ------- catch pages on the battlefield
+--
+-- NamingScreen, SummaryMenu and the nickname confirm are 160×144 pages.
+-- Game.lua keeps a wide battle's surface (640×360 here) and only X-centres
+-- those pages (`classicOffset`), so after a catch they land as a postage
+-- stamp in the middle of the arena. Claiming the wide-battle slot at GB
+-- size with fill-scale makes the page fill the window the way every other
+-- naming / status screen in this game does.
+--
+-- Only Gen 1, and only while a battlefield fight is actually on the stack:
+-- Gold paints window-space via `drawsWidescreen`, and Oak / the NAME RATER
+-- must keep the ordinary letterbox.
+
+M.CATCH_PAGE_W = 160
+M.CATCH_PAGE_H = 144
+
+function M.catchPageOverBattlefield(game)
+  if M.generation(game) ~= 1 then return false end
+  local states = game and game.stack and game.stack.states
+  if type(states) ~= "table" then return false end
+  for i = 1, #states do
+    local state = states[i]
+    if state and type(state.usesBattlefield) == "function" then
+      local ok, yes = pcall(state.usesBattlefield, state)
+      if ok and yes then return true end
+    end
+  end
+  return false
+end
+
+function M.fitCatchPage(screen, game)
+  if type(screen) ~= "table" then return screen end
+  if not M.catchPageOverBattlefield(game) then return screen end
+  screen.isWideBattleLayout = function() return true end
+  screen.uiSize = function()
+    return M.CATCH_PAGE_W, M.CATCH_PAGE_H
+  end
+  screen.wantsFillScale = function() return true end
+  -- A TextBox only paints the bottom strip. The take-over canvas is
+  -- 160×144; without paper the clipped 640×360 arena would show through
+  -- the top 96px. Opaque pages already fill themselves.
+  if not screen.isOpaque then
+    local baseDraw = screen.draw
+    if type(baseDraw) == "function" then
+      screen.draw = function(self, ...)
+        local love = rawget(_G, "love")
+        local g = love and love.graphics
+        if g and g.setColor and g.rectangle then
+          g.setColor(1, 1, 1, 1)
+          g.rectangle("fill", 0, 0, M.CATCH_PAGE_W, M.CATCH_PAGE_H)
+        end
+        return baseDraw(self, ...)
+      end
+    end
+  end
+  return screen
+end
+
+-- The status screen (HP, STATUS, ATTACK / DEFENSE / SPEED / SPECIAL) for
+-- the monster just caught, sized the same way as the naming grid. `onDone`
+-- runs after the player closes page 2. Returns false when no page went up
+-- so the caller can go straight to the nickname prompt.
+function M.showCaughtStatus(game, mon, onDone)
+  if not (type(game) == "table" and type(mon) == "table") then return false end
+  if not M.catchPageOverBattlefield(game) then return false end
+  local pushed
+  local ok = pcall(function()
+    pushed = mod.ui.push(game, "SummaryMenu", mon)
+  end)
+  if not (ok and type(pushed) == "table") then return false end
+  M.fitCatchPage(pushed, game)
+  local baseUpdate = pushed.update
+  if type(onDone) == "function" and type(baseUpdate) == "function" then
+    local closed = false
+    pushed.update = function(self, dt)
+      local page = self.page
+      local out = baseUpdate(self, dt)
+      -- StatusScreen: A/B on page 2 pops. After that call the page is still
+      -- 2 but the screen is gone; membership is the honest closed test.
+      if not closed and page == 2 then
+        local stack = self.game and self.game.stack and self.game.stack.states
+        local still = false
+        if type(stack) == "table" then
+          for i = 1, #stack do
+            if stack[i] == self then
+              still = true
+              break
+            end
+          end
+        end
+        if not still then
+          closed = true
+          onDone()
+        end
+      end
+      return out
+    end
+  end
+  return true
+end
+
 -- Put the letter grid up for `mon`, and write what was typed onto it.
 --
 -- `onDone` is called with the typed name (or nil) *after* the grid has left
@@ -258,6 +359,7 @@ function M.askNickname(game, mon, displayName, onDone)
       .. "RATER")
     return false
   end
+  M.fitCatchPage(pushed, game)
   return true
 end
 
