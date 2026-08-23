@@ -995,10 +995,11 @@ end
 
 -- ------- the prompt a catch earns
 --
--- "Do you want to give a nickname to X?", and the letter grid behind a YES.
--- The engine asks this of every wild the player catches on its own path
--- (BattleState:askNicknameUI); an MMO catch is granted by this mod, so this
--- is where the same two screens are put up for it.
+-- Status screen (when the arena would shrink it), then "Do you want to
+-- give a nickname to X?", then the letter grid behind a YES.
+-- The engine asks the last two of every wild the player catches on its own
+-- path (BattleState:askNicknameUI); an MMO catch is granted by this mod, so
+-- this is where those screens are put up for it.
 --
 -- The rhythm is vanilla's rather than two boxes at once: CONFIRM prints the
 -- sentence and opens the yes/no under it once the text has finished, and only
@@ -1018,22 +1019,33 @@ function M:askNickname(game, mon, displayName, onDone)
     finish(nil)
     return false
   end
-  local pushed = self:confirm(game, Gen.nicknamePromptText(game, displayName),
-    function(yes)
-      if not yes then return finish(nil) end
-      if not Gen.askNickname(game, mon, displayName, finish) then
-        finish(nil)
-      end
-    end)
-  if type(pushed) ~= "table" then
-    -- No box went up (a build with no UI at all), so the answer is the one a
-    -- NO would have given rather than a fight that never ends.
-    mod.log:warn("could not ask about a nickname for the POKeMON you just "
-      .. "caught; it keeps its species name")
-    finish(nil)
-    return false
+  local function askName()
+    local pushed = self:confirm(game, Gen.nicknamePromptText(game, displayName),
+      function(yes)
+        if not yes then return finish(nil) end
+        if not Gen.askNickname(game, mon, displayName, finish) then
+          finish(nil)
+        end
+      end)
+    if type(pushed) ~= "table" then
+      -- No box went up (a build with no UI at all), so the answer is the one a
+      -- NO would have given rather than a fight that never ends.
+      mod.log:warn("could not ask about a nickname for the POKeMON you just "
+        .. "caught; it keeps its species name")
+      finish(nil)
+      return false
+    end
+    -- Same postage-stamp problem as the grid: the confirm is a 160×144
+    -- TextBox X-centred on the 640×360 arena unless it takes the window.
+    Gen.fitCatchPage(pushed, game)
+    return true
   end
-  return true
+  -- Status / numbers first when the arena would have shrunk that page;
+  -- otherwise the nickname question is the first thing up, as before.
+  if Gen.showCaughtStatus(game, mon, askName) then
+    return true
+  end
+  return askName()
 end
 
 -- A question with named answers, where **B is an answer and not an escape**.
