@@ -2367,11 +2367,15 @@ function M:onEvent(msg)
     end
 
   elseif kind == "status" then
+    -- `noteSlot` writes the token, or clears the chip when the event carries
+    -- none -- wake, thaw, and every status-heal item travel that way. The
+    -- sheet and the save mon stay in step so a party card and the fight after
+    -- this one do not keep a condition the referee already lifted.
     self:noteSlot(msg)
-    -- An event carrying a `status` inflicted it; one carrying none cleared it,
-    -- and a condition lifting is a sentence rather than a sight -- the
-    -- catalogue answers nil for the token that is not there, so nothing is
-    -- filed. Anchored on the seat that took it, in that condition's colours.
+    self:syncMineStatus(msg)
+    -- A condition lifting is a sentence rather than a sight: the catalogue
+    -- answers nil for the token that is not there, so nothing is filed.
+    -- Anchored on the seat that took it, in that condition's colours.
     self:queueVfx(Vfx.forStatus(msg.status), msg.slot)
 
   elseif kind == "stat" then
@@ -2542,6 +2546,21 @@ function M:syncMineHp(msg)
   elseif msg.amount ~= nil and msg.t == "damage" then
     mon.hp = max(0, (mon.hp or 0) - msg.amount)
   end
+end
+
+-- Keep the fight sheet -- and the save mon behind it -- on the referee's
+-- condition. `noteSlot` owns the seat chip; this is the party copy the
+-- POKéMON panel and the next fight both read. A `status` event with no
+-- token is a cure, the same contract the seat uses.
+function M:syncMineStatus(msg)
+  if msg.t ~= "status" then return end
+  if msg.slot ~= self:mySlot() then return end
+  local status = msg.status
+  if type(status) ~= "string" or status == "" then status = nil end
+  local sheet = self.mine and self.mine[self.active]
+  if sheet then sheet.status = status end
+  local save = self:saveMon()
+  if save then save.status = status end
 end
 
 -- ------- exp
@@ -3095,6 +3114,27 @@ end
 -- same reason and against the same failure. An arrival into an *empty* seat
 -- lands immediately and is covered by `spawnHide` instead (`queueSpawnFx`);
 -- both windows end at the same row.
+
+-- The referee's reading of a condition, onto a seat or a parked arrival.
+-- A `status` event with no token **cleared** it -- wake, thaw, item cure --
+-- which is the contract in BattleSim/Events.lua. Every other event only
+-- writes a condition when it states one: a residual `damage` carries the
+-- status that dealt it, a `send` carries the newcomer's, and neither is
+-- allowed to wipe a chip they never mentioned.
+local function applyMsgStatus(target, msg)
+  if type(target) ~= "table" or type(msg) ~= "table" then return end
+  if msg.t == "status" then
+    local status = msg.status
+    if type(status) ~= "string" or status == "" then
+      target.status = nil
+    else
+      target.status = status
+    end
+  elseif msg.status ~= nil then
+    target.status = msg.status
+  end
+end
+
 function M:noteSlot(msg)
   local index = msg.slot
   if index == nil then return nil end
@@ -3123,7 +3163,7 @@ function M:noteSlot(msg)
     elseif msg.amount ~= nil and msg.t == "damage" then
       parked.hp = max(0, (parked.hp or 0) - msg.amount)
     end
-    if msg.status ~= nil then parked.status = msg.status end
+    applyMsgStatus(parked, msg)
     if msg.t == "faint" then parked.hp = 0 end
     return slot
   end
@@ -3201,7 +3241,7 @@ function M:noteSlot(msg)
   if slot.shownHp == nil or fresh or not self:usesBattlefield() then
     slot.shownHp = slot.hp
   end
-  if msg.status ~= nil then slot.status = msg.status end
+  applyMsgStatus(slot, msg)
   -- Do not clear the pic here. Faint often arrives in the same batch as the
   -- move's `anim`, which is only played later from `lines` -- nil'ing the
   -- sprite the moment HP hits 0 made the mon vanish under the still-queued

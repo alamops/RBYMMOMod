@@ -94,6 +94,19 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **A status chip stayed on the mon card after the condition lifted.** Sleep
+  that wore off, a thaw, and every status-heal item (Awakening, Antidote,
+  Burn Heal, Ice Heal, Parlyz Heal, Full Heal, Full Restore, Poké Flute)
+  left the SLEEP / PSN / BRN / FRZ / PAR / TOX badge on the plate. The
+  referee already said the condition was gone — a `status` event with no
+  token, the contract `BattleSim/Events.lua` writes down — but both
+  screens only *wrote* a chip when the field was present, so a clear was
+  a no-op. MMO 1v1 now clears the seat (and the save mon behind it) on
+  that event; a refereed co-op fight applies the same reading to
+  `mon.status`, which is what the arena plate draws. A residual `damage`
+  or a `send` that never mentioned a condition still leaves the chip
+  alone.
+
 - **An attack on a POKéMON that had just switched in did nothing at all.**
   Switch a monster out and the attack that answers it landed on nothing you
   could see: no white flash, no nudge of the field, no impact burst, and a HP

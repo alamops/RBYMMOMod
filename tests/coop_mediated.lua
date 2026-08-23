@@ -911,6 +911,25 @@ do
   eq(#vfxRows({ t = "status", slot = 0, text = "is cured!" }), 0,
      "a condition lifting files none -- a sentence rather than a sight")
 
+  -- The plate reads `mon.status`. A `status` event used to file VFX only, so a
+  -- wake or an Awakening left the SLEEP chip on the card. Truth is a row now.
+  local statusRows = fxScreen:medRows({ t = "status", slot = 0, text = "woke up" })
+  eq(#statusRows, 1, "a lift still yields a row -- the truth, not a sight")
+  eq(statusRows[1].kind, "status", "...that playEvents applies to the battler")
+  eq(statusRows[1].status, nil, "...with no token, which is the clear")
+
+  local sleeper = fxScreen.sim:slot(1).battler.mon
+  sleeper.status = "SLP"
+  fxScreen:playEvents({ { kind = "status", slot = 1 } })
+  eq(sleeper.status, nil, "a wake (or an item cure) takes the chip off")
+  for _, token in ipairs({ "PSN", "BRN", "FRZ", "PAR", "TOX" }) do
+    sleeper.status = token
+    fxScreen:playEvents({ { kind = "status", slot = 1 } })
+    eq(sleeper.status, nil, token .. " lifts the same way")
+  end
+  fxScreen:playEvents({ { kind = "status", slot = 1, status = "BRN" } })
+  eq(sleeper.status, "BRN", "an inflict still writes the token")
+
   local rose = vfxRows({ t = "stat", slot = 0, amount = 2,
                          text = "PIKACHU's ATTACK rose" })
   eq(#rose, 1, "a stat stage files one")

@@ -3114,10 +3114,11 @@ end
 -- True for the three clients that are not the host, and true for **all four** on
 -- the mediated path -- the host included, because a refereed turn was resolved
 -- somewhere else and its `sim` never touched the numbers the events carry. The
--- two branches in `playEvents` that ask are exactly the two that write sim truth
--- (`damage` applies HP, `send` swaps a battler), and a host that skipped them
--- because it "already did it" would draw a field nobody ever changed: bars that
--- never move, and a monster that faints on three screens out of four.
+-- branches in `playEvents` that ask are the ones that write sim truth
+-- (`damage` applies HP, `status` writes or clears a condition, `send` swaps
+-- a battler), and a host that skipped them because it "already did it" would
+-- draw a field nobody ever changed: bars that never move, a chip that never
+-- lifts, and a monster that faints on three screens out of four.
 function M:replaying()
   return (not self.host) or self.mediated
 end
@@ -3186,6 +3187,22 @@ function M:playEvents(events)
       -- before the one it belongs to.
       self.messages[#self.messages + 1] =
         { vfxrow = event.spec, slot = event.slot, from = event.from }
+
+    elseif event.kind == "status" then
+      -- The referee's reading of a condition, applied the same way HP is:
+      -- only when this copy is replaying somebody else's arithmetic. A
+      -- `status` field inflicted it; none cleared it (wake, thaw, item).
+      -- The arena plate and the classic readout both read `mon.status`, and
+      -- on our own seat that table *is* the save party, so a cure persists.
+      local slot = self.sim:slot(event.slot)
+      if slot and slot.battler and slot.battler.mon and self:replaying() then
+        local status = event.status
+        if type(status) ~= "string" or status == "" then
+          slot.battler.mon.status = nil
+        else
+          slot.battler.mon.status = status
+        end
+      end
 
     elseif event.kind == "damage" then
       -- The replayers are told the resulting HP rather than the amount, so a
@@ -8923,12 +8940,12 @@ function M:medRows(msg)
     say(msg.text)
 
   elseif kind == "status" then
-    -- **New branch, and it only draws.** The sentence for a condition already
-    -- arrives as its own `msg` event, which is why this handler never needed a
-    -- case for `status` before; what it adds is the sight of one landing. An
-    -- event carrying a `status` inflicted it, one carrying none cleared it, and
-    -- a condition lifting is a sentence rather than a sight -- the catalogue
-    -- answers nil for the token that is not there.
+    -- Truth first: the plate reads `mon.status`, and a condition the referee
+    -- lifted (wake, thaw, Awakening, Full Heal) arrives with no token. The
+    -- VFX row still only draws -- a lift is a sentence rather than a sight.
+    if index then
+      rows[#rows + 1] = { kind = "status", slot = index, status = msg.status }
+    end
     local look = Vfx.forStatus(msg.status)
     if look and index then
       rows[#rows + 1] = { kind = "vfx", spec = look, slot = index }
