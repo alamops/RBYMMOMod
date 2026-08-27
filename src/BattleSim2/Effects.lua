@@ -342,6 +342,24 @@ local function fighterFields(fighter)
   return { slot = fighter.slot, side = fighter.side }
 end
 
+-- Confusion is a volatile, not a major status: it does not occupy `mon.status`
+-- and does not persist on the party sheet. The chip is a `confused` flag on
+-- the status event (1 inflicted, 0 snapped out), independent of PSN/SLP/…
+local function confuse(out, fighter, mon, rng, failIfAlready)
+  if mon.confusion and mon.confusion > 0 then
+    if failIfAlready then out.nothing = true end
+    return
+  end
+  local turns = (rng and rng:byte() or 0) % 4 + 2
+  mon.confusion = turns
+  local text = mon.species .. " became confused"
+  out.messages[#out.messages + 1] = text
+  local fields = fighterFields(fighter)
+  fields.confused = 1
+  fields.text = text
+  out.events[#out.events + 1] = { kind = "status", fields = fields }
+end
+
 local function applyStatChange(out, fighter, mon, stat, delta)
   if delta < 0 and mon.mist then
     out.messages[#out.messages + 1] = "But it failed"
@@ -471,13 +489,7 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 49 then -- CONFUSION_EFFECT
-    if targetMon.confusion and targetMon.confusion > 0 then
-      out.nothing = true
-      return out
-    end
-    local turns = (rng and rng:byte() or 0) % 4 + 2
-    targetMon.confusion = turns
-    out.messages[#out.messages + 1] = targetMon.species .. " became confused"
+    confuse(out, targetFighter, targetMon, rng, true)
     return out
   end
 
@@ -736,10 +748,7 @@ function M.applySide(ctx)
   end
 
   if effectId == 76 then -- confusion side
-    if targetMon.confusion and targetMon.confusion > 0 then return out end
-    local turns = (rng and rng:byte() or 0) % 4 + 2
-    targetMon.confusion = turns
-    out.messages[#out.messages + 1] = targetMon.species .. " became confused"
+    confuse(out, targetFighter, targetMon, rng, false)
     return out
   end
 

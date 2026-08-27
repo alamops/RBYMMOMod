@@ -130,6 +130,7 @@ local function mon(o)
   if o.stages then out.stages = o.stages end
   if o.mist then out.mist = true end
   if o.substitute then out.substitute = o.substitute end
+  if o.confusion then out.confusion = o.confusion end
   if o.catchRate ~= nil then out.catchRate = o.catchRate end
   if o.speciesId then out.speciesId = o.speciesId end
   if o.evs then out.evs = o.evs end
@@ -358,6 +359,81 @@ do
   -- it built the battler, so it says it.
   eq(sends[0].maxHp, 60, "a send states what its HP is out of")
   eq(sends[0].hp, 60, "...which the opening send matches, nobody having moved")
+end
+
+-- ...and a monster that walked in already statused. A `status` event is an
+-- inflict or a lift; the condition it *arrived* with is a fact about the
+-- occupant, and without it on the send the plate draws a healthy card.
+do
+  local battle = battleOf({
+    aMons = { mon({ status = "PSN" }) },
+    bMons = { mon({ species = "Beta", status = "SLP" }) },
+  })
+  local sends = {}
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "send" then sends[event.slot] = event end
+  end
+  eq(sends[0] and sends[0].status, "PSN",
+     "a send names the poison the occupant walked in with")
+  eq(sends[2] and sends[2].status, "SLP",
+     "...and the sleeper on the other seat, so both cards can show a chip")
+  ok(Events.check(sends[0]), "still an event Wire's whitelist accepts")
+end
+
+-- Confusion is a fight-local volatile, not a standing status. A send names
+-- it with `confused=1` so the plate can draw CNF without putting CNF on the
+-- party sheet; an inflict is a status event with the same flag and no token.
+do
+  local battle = battleOf({
+    aMons = { mon({ confusion = 3, status = "PSN" }) },
+    bMons = { mon({ species = "Beta" }) },
+  })
+  local send
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "send" and event.slot == 0 then send = event end
+  end
+  eq(send and send.confused, 1,
+     "a send names the confusion the occupant walked in with")
+  eq(send and send.status, "PSN", "...without dropping the standing poison")
+  ok(Events.check(send), "still an event Wire's whitelist accepts")
+end
+
+do
+  local battle = battleOf({
+    aMons = { mon({ spd = 90,
+      moves = { move({ id = "daze", power = 0, effect = 49, accuracy = 255 }) } }) },
+    bMons = { mon({ species = "Beta", spd = 10 }) },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local inflicted
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "status" and event.confused == 1 then inflicted = event end
+  end
+  ok(inflicted ~= nil, "confuse-ray emits a status event with confused=1")
+  eq(inflicted and inflicted.status, nil,
+     "...and no standing-status token, so PSN is not wiped")
+  ok(inflicted and Events.check(inflicted),
+     "still an event Wire's whitelist accepts")
+end
+
+do
+  -- turnsRemaining 1 always snaps out (Status.confusionTick).
+  local battle = battleOf({
+    aMons = { mon({ confusion = 1, spd = 90 }) },
+    bMons = { mon({ species = "Beta", spd = 10 }) },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local snapped
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "status" and event.confused == 0 then snapped = event end
+  end
+  ok(snapped ~= nil, "snapping out emits confused=0")
+  eq(snapped and snapped.status, nil,
+     "...without a standing-status token, so PSN would be left alone")
 end
 
 -- ...and the case the guess got wrong, stated outright: a party monster that
@@ -4694,6 +4770,56 @@ do
   end
   ok(sawId, "the anim row still carries the registry id")
   ok(not sawName, "and never the display name, which no art is filed under")
+end
+
+-- ------------------------------------------------------------------
+-- 12m. autoPick never leaves a living choice-phase seat owing
+-- ------------------------------------------------------------------
+--
+-- `_autoChoice` used to return nil when the active mon has no moves (and when
+-- there is nobody across the field to aim at). Hub then waits out the choice
+-- clock and retries the same nil. Solo sets SOLO_CHOICE_TIMEOUT to 0 -- "no
+-- deadline at all" -- so the NPC never files, the player has already answered,
+-- and the band sits on "Waiting for X..." with RUN refused in a trainer fight.
+-- An empty sheet with a living foe is now Struggle; skip is only no-target.
+
+do
+  local battle = battleOf({
+    choiceTimeout = 0,
+    aMons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80 }) },
+    bMons = { mon({ species = "Beta", maxHp = 200, spd = 10, moves = {} }) },
+  })
+  drain(battle)
+  eq(battle.turn, 1, "the opening window is turn 1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "the player files")
+  ok(battle:autoPick("p2"), "an empty-moves NPC still files")
+  local struggle = false
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "anim" and event.text == "STRUGGLE" then struggle = true end
+  end
+  ok(struggle, "the empty sheet Struggles rather than skipping")
+  ok(battle.turn >= 2 or battle:outcome() ~= nil,
+     "the turn closed rather than sitting on an owed NPC")
+end
+
+-- The timeout sweep must file Struggle too, not push the clock on a nil pick.
+do
+  local battle = battleOf({
+    choiceTimeout = 10,
+    aMons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80 }) },
+    bMons = { mon({ species = "Beta", maxHp = 200, spd = 10, moves = {} }) },
+  })
+  drain(battle)
+  eq(battle.turn, 1, "the opening window is turn 1")
+  ok(battle:tick(9) == false, "inside the deadline the sweep does nothing")
+  ok(battle:tick(11) == true, "past the deadline the sweep files")
+  local struggle = false
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "anim" and event.text == "STRUGGLE" then struggle = true end
+  end
+  ok(struggle, "an unanswered empty sheet Struggles rather than pushing the clock")
+  ok(battle.turn >= 2 or battle:outcome() ~= nil,
+     "the timeout closed the turn instead of waiting another window")
 end
 
 -- ------------------------------------------------------------------

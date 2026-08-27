@@ -96,6 +96,10 @@ M.KINDS = {
 -- holds the real maximum from the moment it builds the battler, so it says it,
 -- and the guess stays behind only as the fallback for a stream that carries
 -- none.
+--
+-- `confused` is the fight-local volatile (not a Wire.STATUSES token): 1 on
+-- send when the newcomer is already confused, and 1/0 on a status event for
+-- inflict / snap-out. It never occupies `status`, so PSN and confusion coexist.
 M.FIELDS = {
   battle       = "string",
   seq          = "number",
@@ -113,6 +117,7 @@ M.FIELDS = {
   participants = "number",
   mon          = "number",
   team         = "string",
+  confused     = "number",
 }
 
 -- ------------------------------------------------------------------
@@ -129,10 +134,11 @@ M.FIELDS = {
 --     b takes 2 and 3) -- it is *not* the party index a `switch` choice names.
 --     Same word, two numbers, and the one the event carries is always about
 --     somebody who is out on the field.
---   * a `status` event with a `status` field means the condition was
---     *inflicted*; the same event with no `status` field means it **cleared**.
---     There is no "none" token in Wire's status vocabulary to say it with, and
---     `text` carries the sentence either way.
+--   * a `status` event with a `status` field means the standing condition was
+--     *inflicted*; the same event with no `status` field and no `confused`
+--     field means the standing condition **cleared**. `confused` is a
+--     separate 0/1 flag for the fight-local volatile (1 inflicted, 0 snapped
+--     out) and never occupies `status` -- a mon can be PSN and confused.
 --
 -- `turn` puts the 1-based turn number in `amount`, which is the only numeric
 -- field it has and is compared rather than sized, so a long fight is fine.
@@ -152,9 +158,14 @@ M.SHAPES = {
                 text = "the species",
                 speciesId = "registry id for the art, when the sheet named one",
                 level = "the monster's level, for the seat opposite's pill",
-                mon = "party index (0-5) of the mon the referee fielded" },
+                mon = "party index (0-5) of the mon the referee fielded",
+                status = "the newcomer's condition when it already has one; "
+                         .. "absent is healthy",
+                confused = "1 when the newcomer is confused (a volatile, not "
+                           .. "a standing status)" },
   status    = { slot = true, side = true, status = "absent means cleared",
-                text = true },
+                text = true,
+                confused = "1 inflicted, 0 snapped out; independent of status" },
   stat      = { slot = true, side = true, amount = true, text = true },
   switch    = { slot = true, side = true, text = "the species coming in",
                 speciesId = "registry id for the art, when the sheet named one",

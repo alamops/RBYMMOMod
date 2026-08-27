@@ -198,14 +198,27 @@ function M.trainerOf(state)
   return nil
 end
 
+-- The engine's per-class record for this trainer, or nil.
+--
+-- Shared by itemsFor / bagFor / _usesFor so a third caller cannot resolve the
+-- class one way and the budget another.
+local function classOf(trainer, data)
+  local eng = loadEngine()
+  local TrainerAI = eng and eng.TrainerAI
+  if not (TrainerAI and type(TrainerAI.classFor) == "function") then return nil end
+  local ok, class = pcall(TrainerAI.classFor,
+    { trainer = trainer, data = data })
+  if ok and type(class) == "table" then return class end
+  return nil
+end
+
 -- Every item id this trainer's AI could ever reach for.
 --
 -- Exported for the caller's benefit rather than used here: a `coop_npc` seat
--- whose `bag` sheet is set is held to it (`Turn._bagHas`), and
--- `Turn.DEFAULT_NPC_BAG` holds four generic ids that between them cover none of
--- GIOVANNI's GUARD SPEC, LANCE's HYPER POTION or BRUNO's X DEFEND. A caller
--- that seeds the NPC bag from this list gets the fight the trainer was written
--- to fight; one that does not will simply see those choices declined here.
+-- whose `bag` sheet is set is held to it (`Turn._bagHas`). The ids come from
+-- the trainer's own `items` list and, on Gen 1, the class's `item` -- not from
+-- `Turn.DEFAULT_NPC_BAG`, which is a generic gym kit that made every Youngster
+-- look like Brock.
 function M.itemsFor(trainer, data, generation)
   local out = {}
   if type(trainer) ~= "table" then return out end
@@ -218,13 +231,48 @@ function M.itemsFor(trainer, data, generation)
   if generation == 2 or type(trainer.items) == "table" then
     for _, id in ipairs(trainer.items or {}) do put(id) end
   end
-  local eng = loadEngine()
-  local TrainerAI = eng and eng.TrainerAI
-  if TrainerAI and type(TrainerAI.classFor) == "function" then
-    local ok, class = pcall(TrainerAI.classFor,
-      { trainer = trainer, data = data })
-    if ok and type(class) == "table" then put(class.item) end
+  local class = classOf(trainer, data)
+  if class then put(class.item) end
+  return out
+end
+
+-- The trainer's actual kit, as id → count.
+--
+-- Gen 2 (and any trainer that already carries an `items` list): each entry is
+-- one use, the way AI_TryItem spends `trainer.items`. Gen 1 with no list: the
+-- class's `item` × `uses`, which is what BattleState would have allowed -- a
+-- bug catcher with uses = 0 carries nothing, a gym leader with uses = 2
+-- carries two of their item. Empty when there is nothing to carry; never the
+-- generic gym kit.
+function M.bagFor(trainer, data, generation)
+  local bag = {}
+  if type(trainer) ~= "table" then return bag end
+  if generation == 2 or type(trainer.items) == "table" then
+    for _, id in ipairs(trainer.items or {}) do
+      if type(id) == "string" and id ~= "" then
+        bag[id] = (bag[id] or 0) + 1
+      end
+    end
   end
+  if generation ~= 2 then
+    local class = classOf(trainer, data)
+    local item = class and class.item
+    local uses = class and max(0, tonumber(class.uses) or 0) or 0
+    if type(item) == "string" and item ~= "" and uses > 0 then
+      bag[item] = max(bag[item] or 0, uses)
+    end
+  end
+  return bag
+end
+
+-- bagFor as a `{id, count}` list the wire (and sendParty) already speaks.
+function M.bagEntries(trainer, data, generation)
+  local bag = M.bagFor(trainer, data, generation)
+  local out = {}
+  for id, count in pairs(bag) do
+    out[#out + 1] = { id = id, count = count }
+  end
+  table.sort(out, function(a, b) return a.id < b.id end)
   return out
 end
 
@@ -468,11 +516,8 @@ end
 -- zero for a trainer whose class never reaches for anything.
 function M:_usesFor()
   if self.generation ~= 1 then return 0 end
-  local TrainerAI = (loadEngine() or {}).TrainerAI
-  if not (TrainerAI and type(TrainerAI.classFor) == "function") then return 0 end
-  local ok, class = pcall(TrainerAI.classFor,
-    { trainer = self.trainer, data = self.data })
-  if not ok or type(class) ~= "table" then return 0 end
+  local class = classOf(self.trainer, self.data)
+  if not class then return 0 end
   return max(0, tonumber(class.uses) or 0)
 end
 

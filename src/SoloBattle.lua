@@ -130,17 +130,6 @@ M.OPTION_LABEL = "SOLO BATTLES"
 local PLAYER_SEAT = "solo_player"
 local FOE_SEAT = "solo_foe"
 
--- How much of each item the trainer's seat is given.
---
--- The bag is a *floor*, not the budget. What actually limits a trainer is the
--- AI's own counter -- `class.uses` on Gen 1, the `items` list Gen 2's AI_TryItem
--- consumes -- and `src/SoloBrain.lua` spends that itself. The referee's bag is
--- underneath it as a possession check (`Turn._bagHas`), and the only failure
--- mode worth avoiding is the bag running out first and turning a gym leader's
--- second FULL HEAL into a refused choice. One per monster the trainer brought
--- cannot bind before the AI's own counter does.
-local NPC_ITEM_STOCK = Config.BATTLE_MON_MAX
-
 -- ------------------------------------------------------------------
 -- the referee, per generation
 -- ------------------------------------------------------------------
@@ -459,29 +448,24 @@ function M:_seed()
   return 0
 end
 
--- The trainer's kit, as a sheet the referee will hold them to.
+-- The trainer's kit, as the side-"b" sheet this client just uploaded.
 --
--- `Turn.DEFAULT_NPC_BAG` is the generic gym kit the hub seeds an unclaimed NPC
--- seat with (`Hub.lua:1542`) -- and the hub is the *only* place that does it,
--- so a caller with no hub has to do it itself or field a trainer who cannot
--- reach for anything. On top of it go the items this particular trainer's AI
--- would actually use, which `SoloBrain.itemsFor` reports: the default kit holds
--- none of GIOVANNI's GUARD SPEC, LANCE's HYPER POTION or BRUNO's X DEFEND, and
--- a choice for an item the seat does not hold is simply refused.
---
--- The wild seat gets no bag at all, which is both correct and load-bearing: a
--- seat with no sheet fails `Turn._bagHas`, so `Turn:autoPick` -- the fallback
--- picker, and the only thing answering for a wild monster -- never reaches for
--- an item. A RATTATA with a POTION would be nobody's idea of Gen 1.
-local function npcBag(Turn, trainer, data, generation)
-  local bag = {}
-  for id, count in pairs(Turn.DEFAULT_NPC_BAG or {}) do bag[id] = count end
-  local ok, wanted = pcall(SoloBrain.itemsFor, trainer, data, generation)
-  if ok and type(wanted) == "table" then
-    for _, id in ipairs(wanted) do
-      bag[id] = max(bag[id] or 0, NPC_ITEM_STOCK)
+-- 1xNPC: the player sends the NPC items from their game data with the NPC
+-- party. The referee holds that claim for this fight only -- not a gym kit
+-- seeded onto the seat. Empty (Youngster, wild) is nil so `_autoItemChoice`
+-- never treats an empty table as "a bag".
+local function bagFromUpload(party)
+  local entries = party and party.bag
+  if type(entries) ~= "table" then return nil end
+  local bag, any = {}, false
+  for _, entry in ipairs(entries) do
+    if type(entry) == "table" and type(entry.id) == "string"
+        and type(entry.count) == "number" and entry.count > 0 then
+      bag[entry.id] = entry.count
+      any = true
     end
   end
+  if not any then return nil end
   return bag
 end
 
@@ -561,6 +545,7 @@ function M:_begin(game, state, mapId, kind)
     -- peer and a solo fight has none. Nil on a wild fight, where the foe edge
     -- is correctly empty.
     trainer = (kind ~= "wild") and SoloBrain.trainerOf(state) or nil,
+    npcParty = (kind ~= "wild") and enemySheets or nil,
     mode = mode,
     wildParty = (kind == "wild") and enemySheets or nil,
     wildCatchMon = wildMon,
@@ -597,16 +582,9 @@ function M:_begin(game, state, mapId, kind)
       name = (kind == "wild") and (enemySheets[1].species or "WILD")
         or foeName(state),
       mons = enemySheets,
-      -- **Nil on the wild path, and it has to be spelled as a branch.**
-      -- `(kind == "wild") and nil or npcBag(...)` reads like a ternary and is
-      -- not one: `true and nil` is nil, `nil or npcBag(...)` is the bag, so
-      -- the wild seat was handed the gym kit on *both* sides of the test. The
-      -- symptom is the exact one npcBag's own header says must never happen --
-      -- `Turn._autoChoice` reaches for a bag before it reaches for a move, so
-      -- a RATTATA was drinking SUPER POTIONs and spraying X ATTACK.
-      bag = (kind ~= "wild")
-        and npcBag(Turn, SoloBrain.trainerOf(state), game.data, generation)
-        or nil,
+      -- Side b is the uploaded NPC claim (wild encounter, or the trainer
+      -- plus their kit). Side nil is the player's own party.
+      bag = (kind ~= "wild") and bagFromUpload(pending.wild) or nil,
     } },
   }
 
@@ -720,8 +698,8 @@ function M:_transport(pending)
       if msgType == Wire.BATTLE_RULESET then
         pending.ruleset = payload
       elseif msgType == Wire.BATTLE_PARTY then
-        -- Side b is the wild encounter the screen was handed; side nil is the
-        -- player's own party, which is what side a is built from.
+        -- Side b is the NPC claim (wild encounter or trainer + kit); side nil
+        -- is the player's own party, which is what side a is built from.
         if payload and payload.side == "b" then
           pending.wild = payload
         else
@@ -942,14 +920,15 @@ end
 --
 -- ------- and a referee that throws is contained, but only for so long
 --
--- A throw out of `tick` or `drainEvents` is caught rather than allowed to reach
--- src/Client.lua's pcall, because one bad frame should not take a whole battle
--- down. What that used to hide is the failure that is not a bad frame: a
--- deterministic throw repeats every frame forever. The turn never resolves,
--- `outcome()` stays nil, `SOLO_CHOICE_TIMEOUT` is zero so no deadline arrives
--- -- and in a trainer fight RUN is refused, so the player is left standing in
--- front of a battle screen with no way out of it at all, reading a warning that
--- asks them to "finish or leave this battle" and cannot do either.
+-- A throw out of `tick`, `drainEvents`, or the opponent's picker is caught
+-- rather than allowed to reach src/Client.lua's pcall, because one bad frame
+-- should not take a whole battle down. What that used to hide is the failure
+-- that is not a bad frame: a deterministic throw repeats every frame forever.
+-- The turn never resolves, `outcome()` stays nil, `SOLO_CHOICE_TIMEOUT` is
+-- zero so no deadline arrives -- and in a trainer fight RUN is refused, so
+-- the player is left standing in front of a battle screen with no way out of
+-- it at all, reading a warning that asks them to "finish or leave this battle"
+-- and cannot do either.
 --
 -- So the frames are counted. `Config.SOLO_FAULT_LIMIT` in a row and the fight
 -- is handed back: `M:reset` takes our screen off and leaves the engine's own
@@ -985,8 +964,16 @@ function M:_pump()
     self:_spendTurn()
   end
 
-  self:_answerFoe()
-  local faults = self:_drain()
+  local faults = 0
+  local okFoe, foeErr = pcall(self._answerFoe, self)
+  if not okFoe then
+    faults = faults + 1
+    self:warn("foe", "the opponent in this battle could not pick a move (%s); "
+      .. "it is given a few more frames and then this fight is handed back to "
+      .. "the ordinary battle system; report it with the trainer you were fighting",
+      tostring(foeErr))
+  end
+  faults = faults + self:_drain()
 
   local ok, err = pcall(sim.tick, sim, floor(self.clock))
   if not ok then
@@ -1126,37 +1113,58 @@ end
 -- position rather than a count off the array. `SoloBrain` answers in
 -- `submitChoice`'s, which is why its result goes through `submitChoice` and
 -- must never be assigned to `fighter.choice`.
+--
+-- Looped the way `Hub:fillNpcChoices` is: filing the last outstanding choice
+-- can resolve the turn and open the next one, where a forced skip on the
+-- player leaves the NPC owing again. One pick per frame used to paint
+-- "Waiting for X..." for a frame of that chain; a pick that filed nothing
+-- (empty moves, no target) used to paint it forever, because
+-- `SOLO_CHOICE_TIMEOUT` is 0. `Turn:autoPick` now files Struggle (empty sheet)
+-- or skip (no target) rather than declining, and the loop is what carries a
+-- trap/recharge chain without a wait line.
 function M:_answerFoe()
   local sim = self.sim
   local foe = sim and sim.byId and sim.byId[FOE_SEAT]
-  if not owes(sim, foe) then return false end
+  if not (sim and foe) then return false end
 
-  local brain = self.brain
-  if brain then
-    -- Tracked here, once, at the moment the opponent is actually asked --
-    -- which is also the moment the turn count means something.
-    if sim.phase == "choice" then self:_trackPlayer() end
-    local player = sim.byId[PLAYER_SEAT]
-    local ok, choice = pcall(brain.choose, brain, {
-      mon = foe.mons[foe.active],
-      foe = player and player.mons and player.mons[player.active] or nil,
-      party = foe.mons,
-      active = foe.active,
-      bag = foe.bag,
-      mustReplace = foe.mustReplace and true or false,
-      playerUsedMoves = self.playerMoves,
-      playerTurns = self.playerTurns,
-    })
-    if not ok then
-      self:warn("brain", "the trainer's own AI could not be asked for a move "
-        .. "(%s), so this fight is played with the referee's generic picker; "
-        .. "report this with the trainer you were fighting", tostring(choice))
-    elseif type(choice) == "table" and sim:submitChoice(FOE_SEAT, choice) then
-      return true
+  local bound = (tonumber(Config.BATTLE_MON_MAX) or 6)
+    * math.max(1, tonumber(Config.COOP_FIGHTERS) or 1)
+  local filed = false
+  for _ = 1, bound do
+    if not owes(sim, foe) then break end
+
+    local got = false
+    local brain = self.brain
+    if brain then
+      -- Tracked here, once, at the moment the opponent is actually asked --
+      -- which is also the moment the turn count means something.
+      if sim.phase == "choice" then self:_trackPlayer() end
+      local player = sim.byId[PLAYER_SEAT]
+      local ok, choice = pcall(brain.choose, brain, {
+        mon = foe.mons[foe.active],
+        foe = player and player.mons and player.mons[player.active] or nil,
+        party = foe.mons,
+        active = foe.active,
+        bag = foe.bag,
+        mustReplace = foe.mustReplace and true or false,
+        playerUsedMoves = self.playerMoves,
+        playerTurns = self.playerTurns,
+      })
+      if not ok then
+        self:warn("brain", "the trainer's own AI could not be asked for a move "
+          .. "(%s), so this fight is played with the referee's generic picker; "
+          .. "report this with the trainer you were fighting", tostring(choice))
+      elseif type(choice) == "table" and sim:submitChoice(FOE_SEAT, choice) then
+        got = true
+      end
     end
+    if not got then
+      got = sim:autoPick(FOE_SEAT) and true or false
+    end
+    if not got then break end
+    filed = true
   end
-
-  return sim:autoPick(FOE_SEAT) and true or false
+  return filed
 end
 
 -- ------------------------------------------------------------------

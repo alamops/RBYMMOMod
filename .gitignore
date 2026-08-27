@@ -18,3 +18,7 @@
 # e2e scratch output (the Gen 1 sibling predates this and is tracked)
 tmp/e2e-battlefield-gen2/
 tmp/e2e-solo-battle/
+
+# Node-hub e2e referee dump (runtime scratch; item ids must never appear)
+npc_bags.txt
+npc_bags_refuse_test.txt

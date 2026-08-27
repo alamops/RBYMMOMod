@@ -486,7 +486,7 @@ do
      "the authority's side-b upload is the trainer's team")
   eq(hub:battleSeat(record, ann, { side = "a" }), ann.id,
      "and their side-a upload is still their own")
-  eq(hub:battleSeat(record, bob, { side = "b" }), bob.id,
+  eq(hub:battleSeat(record, bob, { side = "b" }), nil,
      "a partner cannot fill the trainer's seat by claiming side b")
 
   local stranger = join(hub, "CAL")
@@ -676,15 +676,16 @@ do
   eq(#record.parties[record.npcIds[1]].mons, 1, "dealt one to each seat")
   eq(#record.parties[record.npcIds[2]].mons, 1, "both of them, not one seat's two")
 
-  -- A trainer seat the host uploaded no bag for is seeded with the gym kit, so
-  -- a gym leader can potion.  The wild-seat block below is the other half of
-  -- this claim: wildlife is never seeded, because a wild monster has no bag.
+  -- A trainer seat the host uploaded no bag for stays empty. The gym kit
+  -- used to be seeded onto *each* NPC seat, so a 2v2 looked like eight
+  -- healing items and every Youngster drank potions. Hosts now upload the
+  -- trainer's own kit with the side-"b" party; nothing here invents one.
   ok(not hub:isWildSeat(record, record.npcIds[1]),
      "a coop_npc npc seat is a trainer, not wildlife")
-  ok(record.bags[record.npcIds[1]] ~= nil, "so it was seeded with a gym kit")
-  eq(record.sim.byId[record.npcIds[1]].bag.POTION,
-     need("BattleSim/Turn").DEFAULT_NPC_BAG.POTION,
-     "the kit the sim actually fights with")
+  eq(record.sim.byId[record.npcIds[1]].bag, nil,
+     "no uploaded bag means no gym kit")
+  eq(record.sim.byId[record.npcIds[2]].bag, nil,
+     "...on either seat")
 
   local ready = take(annPeer, Wire.BATTLE_READY)
   ok(ready ~= nil, "the field is announced")
@@ -720,6 +721,64 @@ do
        and msg.text:find("ran out of time", 1, true) then hurried = true end
   end
   ok(not hurried, "and nothing in the log says anybody ran out of time")
+end
+
+-- One trainer, one bag: an uploaded kit is shared across both NPC seats,
+-- not cloned, so a 2v2 cannot drink the same potion twice.
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  hub.forceBattleSeed = 1
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  hub:openCoopBattle("c-bag", { ann.id, bob.id },
+    { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["c-bag"]
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "c-bag", chart = CHART })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "c-bag", side = "a",
+                     mons = { bruiser() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "c-bag", side = "a",
+                     mons = { bruiser() } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "c-bag", side = "b",
+                     mons = { glassjaw(), glassjaw() },
+                     bag = { { id = "POTION", count = 1 } } })
+  ok(record.sim ~= nil, "the fight opens with the trainer's uploaded kit")
+  local bagA = record.sim.byId[record.npcIds[1]].bag
+  local bagB = record.sim.byId[record.npcIds[2]].bag
+  eq(bagA and bagA.POTION, 1, "one potion, the count the trainer actually has")
+  eq(bagB and bagB.POTION, 1, "visible on the second seat too")
+  ok(bagA == bagB, "the same table -- spending one spends both")
+end
+
+-- Guest side-"b" is not an NPC upload. Only the initiator fills the trainer
+-- kit; a guest sheet on that side is dropped rather than overwriting them.
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  hub.forceBattleSeed = 1
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  hub:openCoopBattle("c-guestb", { ann.id, bob.id },
+    { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["c-guestb"]
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "c-guestb", chart = CHART })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "c-guestb", side = "a",
+                     mons = { bruiser() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "c-guestb", side = "a",
+                     mons = { bruiser() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "c-guestb", side = "b",
+                     mons = { glassjaw(), glassjaw() },
+                     bag = { { id = "POTION", count = 9 } } })
+  eq(record.sim, nil, "a guest side-b does not open the fight")
+  eq(record.parties[bob.id] and record.parties[bob.id].mons[1].hp, bruiser().hp,
+     "and does not replace the guest's own party")
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "c-guestb", side = "b",
+                     mons = { glassjaw(), glassjaw() },
+                     bag = { { id = "POTION", count = 1 } } })
+  ok(record.sim ~= nil, "the initiator's side-b is what seats the trainer")
+  eq(record.sim.byId[record.npcIds[1]].bag and
+       record.sim.byId[record.npcIds[1]].bag.POTION, 1,
+     "with the initiator's kit, not the guest's")
 end
 
 -- ------- protocol-only wild: one human, one NPC seat, catch sheet on outcome

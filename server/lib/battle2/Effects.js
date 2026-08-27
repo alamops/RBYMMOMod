@@ -298,6 +298,24 @@ function fighterFields(fighter) {
   return { slot: fighter.slot, side: fighter.side };
 }
 
+// Confusion is a volatile, not a major status: it does not occupy `mon.status`
+// and does not persist on the party sheet. The chip is a `confused` flag on
+// the status event (1 inflicted, 0 snapped out), independent of PSN/SLP/…
+function confuse(out, fighter, mon, rng, failIfAlready) {
+  if (mon.confusion && mon.confusion > 0) {
+    if (failIfAlready) out.nothing = true;
+    return;
+  }
+  const turns = (rng ? rng.byte() : 0) % 4 + 2;
+  mon.confusion = turns;
+  const text = `${mon.species} became confused`;
+  out.messages.push(text);
+  const fields = fighterFields(fighter);
+  fields.confused = 1;
+  fields.text = text;
+  out.events.push({ kind: 'status', fields });
+}
+
 function applyStatChange(out, fighter, mon, stat, delta) {
   if (delta < 0 && mon.mist) {
     out.messages.push('But it failed');
@@ -425,13 +443,7 @@ function applyPrimary(ctx) {
   }
 
   if (effectId === 49) {
-    if (targetMon.confusion && targetMon.confusion > 0) {
-      out.nothing = true;
-      return out;
-    }
-    const turns = (rng ? rng.byte() : 0) % 4 + 2;
-    targetMon.confusion = turns;
-    out.messages.push(`${targetMon.species} became confused`);
+    confuse(out, targetFighter, targetMon, rng, true);
     return out;
   }
 
@@ -671,10 +683,7 @@ function applySide(ctx) {
   }
 
   if (effectId === 76) {
-    if (targetMon.confusion && targetMon.confusion > 0) return out;
-    const turns = (rng ? rng.byte() : 0) % 4 + 2;
-    targetMon.confusion = turns;
-    out.messages.push(`${targetMon.species} became confused`);
+    confuse(out, targetFighter, targetMon, rng, false);
     return out;
   }
 

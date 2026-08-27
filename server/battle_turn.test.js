@@ -1372,6 +1372,47 @@ test('a spent move is spent, and an empty one Struggles', () => {
   );
 });
 
+test('autoPick Struggles rather than hanging when the NPC has no move', () => {
+  const battle = build({
+    id: 'emptymoves', mode: '1v1', seed: 3, choiceTimeout: 0, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80,
+          moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, spd: 10, moves: [] })] }],
+    },
+  });
+  battle.drainEvents();
+  assert.ok(battle.submitChoice('p1', { action: 'fight', move: 0 }), 'the player files');
+  assert.ok(battle.autoPick('p2'), 'an empty-moves NPC still files');
+  assert.ok(battle.drainEvents().some((event) => event.t === 'anim' && event.text === 'STRUGGLE'),
+    'the empty sheet Struggles rather than skipping');
+  assert.ok(battle.turn >= 2 || battle.outcome(),
+    'the turn closed rather than sitting on an owed NPC');
+});
+
+test('timeout sweep Struggles an empty sheet instead of pushing the clock', () => {
+  const battle = build({
+    id: 'emptymoves-timeout', mode: '1v1', seed: 3, choiceTimeout: 10, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80,
+          moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, spd: 10, moves: [] })] }],
+    },
+  });
+  battle.drainEvents();
+  assert.strictEqual(battle.turn, 1, 'the opening window is turn 1');
+  assert.strictEqual(battle.tick(9), false, 'inside the deadline the sweep does nothing');
+  assert.strictEqual(battle.tick(11), true, 'past the deadline the sweep files');
+  assert.ok(battle.drainEvents().some((event) => event.t === 'anim' && event.text === 'STRUGGLE'),
+    'an unanswered empty sheet Struggles rather than pushing the clock');
+  assert.ok(battle.turn >= 2 || battle.outcome(),
+    'the timeout closed the turn instead of waiting another window');
+});
+
 // ------------------------------------------------------------------
 // properties a fixture cannot state
 // ------------------------------------------------------------------
@@ -1459,6 +1500,25 @@ test('a send states the registry id and the level, not just the narrated name', 
   assert.strictEqual(sends.get(2).speciesId, undefined, 'a sheet with no id produces no field');
   assert.strictEqual(sends.get(2).level, 20, 'though the level is always known');
   assert.ok(Events.check(sends.get(0))[0], "and it is an event Wire's whitelist accepts");
+});
+
+test('a send names the condition the occupant walked in with', () => {
+  const battle = build({
+    id: 'sst', mode: '1v1', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', status: 'PSN', moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', status: 'SLP', moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  const sends = new Map();
+  for (const event of battle.drainEvents()) {
+    if (event.t === 'send') sends.set(event.slot, event);
+  }
+  assert.strictEqual(sends.get(0).status, 'PSN', 'poisoned walk-in is on the send');
+  assert.strictEqual(sends.get(2).status, 'SLP', '...and the sleeper on the other seat');
+  assert.ok(Events.check(sends.get(0))[0], "still an event Wire's whitelist accepts");
 });
 
 test('every event emitted is in the closed vocabulary, with contiguous seq', () => {

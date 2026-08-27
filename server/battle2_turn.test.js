@@ -561,6 +561,47 @@ test('during the replace phase only the seat that owes may answer', () => {
     'and answering it closes the phase');
 });
 
+test('autoPick Struggles rather than hanging when the NPC has no move', () => {
+  const battle = build({
+    id: 'emptymoves', mode: '1v1', seed: 3, choiceTimeout: 0, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spe: 80,
+          moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, spe: 10, moves: [] })] }],
+    },
+  });
+  battle.drainEvents();
+  assert.ok(battle.submitChoice('p1', { action: 'fight', move: 0 }), 'the player files');
+  assert.ok(battle.autoPick('p2'), 'an empty-moves NPC still files');
+  assert.ok(battle.drainEvents().some((event) => event.t === 'anim' && event.text === 'STRUGGLE'),
+    'the empty sheet Struggles rather than skipping');
+  assert.ok(battle.turn >= 2 || battle.outcome(),
+    'the turn closed rather than sitting on an owed NPC');
+});
+
+test('timeout sweep Struggles an empty sheet instead of pushing the clock', () => {
+  const battle = build({
+    id: 'emptymoves-timeout', mode: '1v1', seed: 3, choiceTimeout: 10, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spe: 80,
+          moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, spe: 10, moves: [] })] }],
+    },
+  });
+  battle.drainEvents();
+  assert.strictEqual(battle.turn, 1, 'the opening window is turn 1');
+  assert.strictEqual(battle.tick(9), false, 'inside the deadline the sweep does nothing');
+  assert.strictEqual(battle.tick(11), true, 'past the deadline the sweep files');
+  assert.ok(battle.drainEvents().some((event) => event.t === 'anim' && event.text === 'STRUGGLE'),
+    'an unanswered empty sheet Struggles rather than pushing the clock');
+  assert.ok(battle.turn >= 2 || battle.outcome(),
+    'the timeout closed the turn instead of waiting another window');
+});
+
 test('every sentence about a move prints its name, and falls back to the id', () => {
   // Gen 2's own copies of the five call sites. Byte-shared with the Gen 1 pair
   // next door, and separate on purpose: BattleSim2 / lib/battle2 are a twin,
@@ -640,6 +681,7 @@ test('the Gen2 event vocabulary knows exp, the party index and the ask slot', ()
   assert.strictEqual(Events.FIELDS.participants, 'number');
   assert.strictEqual(Events.FIELDS.mon, 'number');
   assert.ok(Events.SHAPES.send.mon, '`send` promises the party index it fielded');
+  assert.ok(Events.SHAPES.send.status, '...and the condition a newcomer walked in with');
   assert.ok(Events.SHAPES.switch.mon, 'and so does `switch`');
   assert.ok(Events.SHAPES.turn.slot, '`turn` documents the solicitation slot');
 

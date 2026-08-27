@@ -197,7 +197,10 @@ const AUTO_X_ITEM = [
   { id: 'GUARD_SPEC', flag: 'mist' },
 ];
 
-// Default kit for coop_npc trainer seats with no uploaded bag (Gen1 gym-style).
+// Default kit kept as a named gym-style reference. Not auto-seeded onto
+// unclaimed coop_npc seats: hosts upload the trainer's own items, and a
+// Youngster with an empty kit must stay empty (seeding this made 2v2s look
+// like eight healing items).
 const DEFAULT_NPC_BAG = {
   POTION: 2, SUPER_POTION: 1, FULL_HEAL: 1, X_ATTACK: 1,
 };
@@ -1456,8 +1459,35 @@ class Battle {
     }
 
     if (pick === null) pick = 1;
-    if (!mon.moves[pick - 1]) return null;
+    // An empty sheet is Struggle, not a hang: `_useMove` treats allPpEmpty
+    // (including `moves.length === 0`) as the synthetic STRUGGLE even with no slot.
     return { action: 'fight', move: pick, target: foe.slot };
+  }
+
+  /*
+   * What autoPick / the timeout sweep files when `_autoChoice` has no answer.
+   *
+   * A living seat in the choice phase that `_autoChoice` cannot describe (empty
+   * moves, nothing across the field to aim at) used to return null, so nothing
+   * was filed. The hub then waited out BATTLE_CHOICE_TIMEOUT and retried the
+   * same null (deadline pushed). Solo sets SOLO_CHOICE_TIMEOUT to 0, which this
+   * file reads as "no deadline at all", so the NPC never files, the player has
+   * already answered, and the band sits on "Waiting for X..." with RUN refused
+   * in a trainer fight -- a battle with no way out.
+   *
+   * An empty sheet with a living foe is now a fight (`_autoChoice` names slot
+   * 1; `_useMove` turns that into Struggle). Skip remains for the leftover
+   * case: a living seat with nobody across the field to aim at. A mustReplace
+   * seat with no living bench stays null: that seat cannot skip a send-out,
+   * and `_checkOver` should have ended the fight.
+   */
+  _autoChoiceOrSkip(fighter) {
+    const auto = this._autoChoice(fighter);
+    if (auto) return auto;
+    if (this.phase === 'choice' && activeMon(fighter)) {
+      return { action: 'skip' };
+    }
+    return null;
   }
 
   /*
@@ -1487,7 +1517,7 @@ class Battle {
     if (this.phase === 'replace' && !this._owes(fighter)) return false;
     if (!fighter.mustReplace && !activeMon(fighter)) return false;
 
-    const auto = this._autoChoice(fighter);
+    const auto = this._autoChoiceOrSkip(fighter);
     if (!auto) return false;
     fighter.choice = auto;
     this._emit('chose', {
@@ -1739,6 +1769,9 @@ class Battle {
             text: mon.species,
             speciesId: mon.speciesId, level: mon.level,
             mon: choice.slot - 1,
+            status: mon.status && has(STATUS_TO_WIRE, mon.status)
+              ? STATUS_TO_WIRE[mon.status] : undefined,
+            confused: (mon.confusion && mon.confusion > 0) ? 1 : undefined,
           });
         }
       }
@@ -2057,10 +2090,17 @@ class Battle {
           healed = true;
         }
         let cleared = false;
-        if (effect.clearAllStatus && mon.status) {
-          mon.status = null;
-          mon.statusTurns = 0;
-          cleared = true;
+        let clearedConfusion = false;
+        if (effect.clearAllStatus) {
+          if (mon.status) {
+            mon.status = null;
+            mon.statusTurns = 0;
+            cleared = true;
+          }
+          if (mon.confusion && mon.confusion > 0) {
+            mon.confusion = 0;
+            clearedConfusion = true;
+          }
         } else if (effect.clearStatuses && mon.status
                    && effect.clearStatuses[mon.status]) {
           mon.status = null;
@@ -2073,7 +2113,13 @@ class Battle {
             text: `${mon.species} recovered`,
           });
         }
-        if (!applied && !healed && !cleared) {
+        if (clearedConfusion) {
+          this._emit('status', {
+            slot: fighter.slot, side: fighter.side, confused: 0,
+            text: `${mon.species} recovered`,
+          });
+        }
+        if (!applied && !healed && !cleared && !clearedConfusion) {
           this._say('But it failed');
         }
       }
@@ -2189,6 +2235,10 @@ class Battle {
         mon.confusion = int(gate.turnsRemaining, 0);
         if (gate.snappedOut) {
           this._say(`${mon.species} snapped out of confusion`);
+          this._emit('status', {
+            slot: fighter.slot, side: fighter.side, confused: 0,
+            text: `${mon.species} snapped out of confusion`,
+          });
         } else if (gate.selfHit) {
           this._say(`${mon.species} hurt itself in confusion`);
           this._damage(fighter, mon, gate.selfDamage || 0, null);
@@ -2270,11 +2320,13 @@ class Battle {
 
   _useMove(fighter, mon, opts = {}) {
     const choice = fighter.choice;
-    if (!mon.moves[choice.move - 1]) return;
+    // Empty sheet (`moves.length === 0`) is Struggle. Returning here used to
+    // eat that turn before `allPpEmpty` could pick the synthetic move.
+    const struggling = allPpEmpty(mon) || choice.struggle;
+    if (!struggling && !mon.moves[choice.move - 1]) return;
 
     if (!this._runGates(fighter, mon)) return;
 
-    const struggling = allPpEmpty(mon) || choice.struggle;
     if (!struggling && mon.disable && mon.disable.turns > 0
         && mon.disable.moveIndex === choice.move) {
       const blocked = mon.moves[choice.move - 1];
@@ -2640,6 +2692,10 @@ class Battle {
         const turns = this.rng.byte() % 4 + 2;
         mon.confusion = turns;
         this._say(`${mon.species} became confused`);
+        this._emit('status', {
+          slot: fighter.slot, side: fighter.side, confused: 1,
+          text: `${mon.species} became confused`,
+        });
       }
     }
   }
@@ -3180,7 +3236,7 @@ class Battle {
         && !this._anyDisconnected()) {
       for (const fighter of this.fighters) {
         if (this._owes(fighter)) {
-          const auto = this._autoChoice(fighter);
+          const auto = this._autoChoiceOrSkip(fighter);
           if (auto) {
             fighter.choice = auto;
             this._emit('chose', {
@@ -3352,6 +3408,9 @@ function attempt(opts) {
         text: mon.species,
         speciesId: mon.speciesId, level: mon.level,
         mon: fighter.active - 1,
+        status: mon.status && has(STATUS_TO_WIRE, mon.status)
+          ? STATUS_TO_WIRE[mon.status] : undefined,
+        confused: (mon.confusion && mon.confusion > 0) ? 1 : undefined,
       });
     }
   }

@@ -1404,6 +1404,15 @@ class Relay {
     this.motd = typeof opts.motd === 'string' ? opts.motd : '';
     this.log = opts.log || createLog();
     this.now = typeof opts.now === 'function' ? opts.now : Date.now;
+    // LOVE e2e on a dedicated hub cannot peek fighter.bag. When set, the
+    // referee writes NPC-bag *shape* here after shareNpcBags (shared / empty
+    // / gym-seed / heal count) so the driver can assert one kit, not two gym
+    // copies. Item ids stay off the disk: those stacks are a client claim
+    // from the player's loaded game, held for this fight only. This hub
+    // holds no ROM inventory table (legal floor). Absent in every normal
+    // deploy.
+    this.dumpNpcBagsPath = typeof opts.dumpNpcBags === 'string'
+      && opts.dumpNpcBags !== '' ? opts.dumpNpcBags : null;
 
     /** id -> client */
     this.clients = new Map();
@@ -2700,7 +2709,9 @@ class Relay {
   /*
    * Is this seat wildlife rather than a trainer? Wild / coop_wild seat their one
    * synthetic fighter with a wild monster, and a wild monster carries no bag --
-   * so it is never handed the gym kit tryStartSim seeds a trainer seat with.
+   * so it is never handed a bag. Trainer seats carry the kit the host
+   * uploaded with the side-"b" party (the trainer's own items), not the
+   * generic gym kit DEFAULT_NPC_BAG used to seed.
    * The turn machine refuses an item from that seat as well (isWildSeat in
    * lib/battle/Turn.js): this only keeps the bag from existing in the first
    * place.
@@ -2712,19 +2723,19 @@ class Relay {
   }
 
   /*
-   * Which seat a party fills. Normally the sender's own id. For coop_npc the
-   * host may also upload the trainer party under side "b", which is dealt across
-   * the synthetic npc seats rather than displacing their own team -- so this
-   * answers the *first* of them, and fillBattleParty below does the dealing.
+   * Which seat a party fills. Normally the sender's own id.
+   *
+   * NPC fights (wild / coop_wild / coop_npc): only the initiator (host)
+   * may upload side "b" — that is the NPC team and, for a trainer, the
+   * items from *their* game data. A guest side-"b" is refused rather than
+   * applied to the guest's own seat.
    */
   battleSeat(record, client, party) {
     if (!record.memberIds.includes(client.id)) return null;
-    if (record.mode === 'coop_npc' && party.side === 'b'
-        && client.id === record.hostId && record.npcIds) {
-      return record.npcIds[0];
-    }
-    if ((record.mode === 'wild' || record.mode === 'coop_wild') && party.side === 'b'
-        && client.id === record.hostId && record.npcIds) {
+    const npcSide = record.mode === 'coop_npc'
+      || record.mode === 'wild' || record.mode === 'coop_wild';
+    if (npcSide && party.side === 'b') {
+      if (client.id !== record.hostId || !record.npcIds) return null;
       return record.npcIds[0];
     }
     return client.id;
@@ -2783,6 +2794,13 @@ class Relay {
     // field and may hold more than these seats one day, so only the seats
     // actually given up are taken out of it.
     record.sides.b = record.sides.b.filter((s) => !dropped.has(s));
+    // One trainer, one bag. Applied to the first remaining seat; shareNpcBags
+    // aliases the rest after the sim is built so a 2v2 does not duplicate the
+    // kit (two DEFAULT_NPC_BAG copies was eight healing items).
+    if (!record.bags) record.bags = new Map();
+    if (kept[0] && !this.isWildSeat(record, kept[0])) {
+      record.bags.set(kept[0], this.bagMap(party.bag));
+    }
     return true;
   }
 
@@ -2811,6 +2829,141 @@ class Relay {
       }
     }
     return any ? out : null;
+  }
+
+  /*
+   * One trainer, one bag. After Turn.create each NPC fighter holds a clone, so
+   * a 2v2 would otherwise drink the kit twice. Alias the remaining seats onto
+   * the first fighter's bag (and the hub sheet) so a potion spent on either
+   * box is spent once. Wildlife is skipped: those seats carry no bag.
+   */
+  shareNpcBags(record) {
+    const seats = record && record.npcIds;
+    if (!record || !record.sim || !Array.isArray(seats) || seats.length < 2) {
+      return;
+    }
+    if (this.isWildSeat(record, seats[0])) return;
+    const primary = record.sim.byId.get(seats[0]);
+    if (!primary) return;
+    if (!record.bags) record.bags = new Map();
+    for (let i = 1; i < seats.length; i += 1) {
+      const other = record.sim.byId.get(seats[i]);
+      if (other) other.bag = primary.bag;
+      record.bags.set(seats[i], record.bags.get(seats[0]));
+    }
+  }
+
+  // Scratch dumps stay out of the working tree so a trainer kit decoded from
+  // the player's ROM cannot land in git or a packed archive.
+  dumpPathAllowed(dest) {
+    if (typeof dest !== 'string' || dest === '') return false;
+    const path = require('node:path');
+    const resolved = path.resolve(dest);
+    if (!path.isAbsolute(resolved)) return false;
+    const cwd = path.resolve(process.cwd());
+    const rel = path.relative(cwd, resolved);
+    if (rel === '') return false;
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return false;
+    return true;
+  }
+
+  // Gym-seed stack whose BattleSim effect heals or cures. Not a ROM table
+  // and not a substring match: HYPER_POTION heals but is not in the seed,
+  // X_ATTACK is in the seed but does not heal.
+  isDumpHeal(id, seed) {
+    if (!seed || seed[id] == null) return false;
+    const effect = this.Effects && this.Effects.itemEffect(id);
+    if (!effect) return false;
+    return (typeof effect.heal === 'number' && effect.heal > 0)
+      || !!effect.healFull
+      || !!effect.clearStatuses
+      || !!effect.clearAllStatus;
+  }
+
+  // Shape of one NPC bag for the e2e dump. Counts and flags only -- never
+  // item ids. Those stacks are a client sheet from the player's game, held
+  // for this fight only. `gym` is this mod's former DEFAULT_NPC_BAG seed.
+  npcBagFlags(bag) {
+    const seed = (this.Turn && this.Turn.DEFAULT_NPC_BAG) || {};
+    const counts = Object.create(null);
+    let heal = 0;
+    let any = false;
+    if (bag && typeof bag === 'object') {
+      const ids = Object.keys(bag);
+      for (let i = 0; i < ids.length; i += 1) {
+        const id = ids[i];
+        const n = bag[id];
+        if (typeof n !== 'number' || n <= 0) continue;
+        any = true;
+        counts[id] = n;
+        if (this.isDumpHeal(id, seed)) heal += n;
+      }
+    }
+    let gym = any;
+    const seedIds = Object.keys(seed);
+    if (!any || seedIds.length === 0) {
+      gym = false;
+    } else {
+      for (let i = 0; i < seedIds.length; i += 1) {
+        const id = seedIds[i];
+        if ((counts[id] || 0) !== seed[id]) { gym = false; break; }
+      }
+      if (gym) {
+        const have = Object.keys(counts);
+        for (let i = 0; i < have.length; i += 1) {
+          if (seed[have[i]] == null) { gym = false; break; }
+        }
+      }
+    }
+    return { empty: !any, gym, heal };
+  }
+
+  /*
+   * Test-only: write NPC-bag shape after shareNpcBags so a LOVE driver on a
+   * Node hub can see the referee kit without a client sheet leaving this
+   * process. Line 1 is `mode shared n`; each later line is
+   * `seat<TAB>empty=<0|1><TAB>gym=<0|1><TAB>heal=<n>`. `heal` is gym-seed
+   * stacks whose BattleSim effect heals or cures. Item ids never appear:
+   * those stacks came from the player's game and are not a hub inventory.
+   */
+  dumpNpcBags(record) {
+    const dest = this.dumpNpcBagsPath;
+    if (!dest || !record || !record.sim || record.mode !== 'coop_npc') return;
+    if (!this.dumpPathAllowed(dest)) {
+      this.log.warn('npc bag dump refused: path must be absolute and outside the working tree');
+      return;
+    }
+    const seats = record.npcIds || [];
+    if (!seats.length) return;
+    const fighters = seats.map((seat) => record.sim.byId.get(seat));
+    const shared = fighters.length >= 2
+      && fighters[0] != null && fighters[1] != null
+      && fighters[0].bag === fighters[1].bag;
+    const lines = [`${record.mode}\t${shared ? 1 : 0}\t${seats.length}`];
+    for (let i = 0; i < seats.length; i += 1) {
+      const flags = this.npcBagFlags(fighters[i] && fighters[i].bag);
+      lines.push(
+        `${seats[i]}\tempty=${flags.empty ? 1 : 0}\tgym=${flags.gym ? 1 : 0}\theal=${flags.heal}`
+      );
+    }
+    const body = `${lines.join('\n')}\n`;
+    for (let i = 0; i < fighters.length; i += 1) {
+      const bag = fighters[i] && fighters[i].bag;
+      if (!bag || typeof bag !== 'object') continue;
+      const ids = Object.keys(bag);
+      for (let j = 0; j < ids.length; j += 1) {
+        const id = ids[j];
+        if (typeof id === 'string' && id !== '' && body.indexOf(id) >= 0) {
+          this.log.warn('npc bag dump refused: item ids must not leave the hub');
+          return;
+        }
+      }
+    }
+    try {
+      require('node:fs').writeFileSync(dest, body);
+    } catch (err) {
+      this.log.warn(`npc bag dump failed: ${err && err.message ? err.message : err}`);
+    }
   }
 
   canSpendBag(record, clientId, itemId) {
@@ -2878,13 +3031,10 @@ class Relay {
       const party = record.parties.get(seat);
       if (!party) return null;
       const client = this.clients.get(seat);
-      // Seed trainer NPC seats with a gym-style kit when the host uploaded no
-      // bag. A wild seat is skipped: wildlife does not carry items.
+      // Trainer bags come from the host's side-"b" upload (the trainer's own
+      // kit). An unclaimed seat is empty -- not DEFAULT_NPC_BAG -- so a
+      // Youngster does not spam potions they never carried.
       if (!record.bags) record.bags = new Map();
-      if (!record.bags.has(seat) && this.isNpcSeat(record, seat)
-          && !this.isWildSeat(record, seat)) {
-        record.bags.set(seat, this.cloneBagMap(this.Turn.DEFAULT_NPC_BAG));
-      }
       const bag = record.bags.get(seat);
       const bagCopy = this.cloneBagMap(bag);
       return {
@@ -2944,6 +3094,8 @@ class Relay {
       return false;
     }
     record.sim = created.battle;
+    this.shareNpcBags(record);
+    this.dumpNpcBags(record);
 
     /*
      * The npc seats are advertised under their own ids, not hidden behind the
@@ -3181,6 +3333,8 @@ class Relay {
       const member = this.clients.get(memberId);
       if (member && member.battleId === record.id) member.battleId = null;
     }
+    // Dropping the record drops bags with it: a client sheet for this fight,
+    // never a hub inventory.
     this.battles.delete(record.id);
   }
 

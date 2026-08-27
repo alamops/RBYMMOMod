@@ -1389,7 +1389,9 @@ end
 
 -- Is this seat wildlife rather than a trainer?  Wild / coop_wild seat their one
 -- synthetic fighter with a wild monster, and a wild monster carries no bag --
--- so it is never handed the gym kit `tryStartSim` seeds a trainer seat with.
+-- so it is never handed a bag. Trainer seats carry the kit the host
+-- uploaded with the side-"b" party (the trainer's own items), not the
+-- generic gym kit DEFAULT_NPC_BAG used to seed.
 -- BattleSim refuses an item from that seat as well (`isWildSeat` in
 -- BattleSim/Turn.lua): this only keeps the bag from existing in the first place.
 function M:isWildSeat(record, seat)
@@ -1398,23 +1400,22 @@ function M:isWildSeat(record, seat)
   return self:isNpcSeat(record, seat)
 end
 
--- Which seat a party fills.  Normally the sender's own id.  For coop_npc the
--- host may also upload the trainer's party under side "b", which is dealt across
--- the synthetic npc seats rather than displacing their own team -- so this
--- answers the *first* of them, and `fillBattleParty` below is what does the
--- dealing.
+-- Which seat a party fills.  Normally the sender's own id.
+--
+-- NPC fights (wild / coop_wild / coop_npc): only the initiator (host) may
+-- upload side "b" -- that is the NPC team and, for a trainer, the items from
+-- *their* game data. A guest side-"b" is refused rather than applied to the
+-- guest's own seat.
 function M:battleSeat(record, client, party)
   local member = false
   for _, memberId in ipairs(record.memberIds) do
     if memberId == client.id then member = true break end
   end
   if not member then return nil end
-  if record.mode == "coop_npc" and party.side == "b"
-     and client.id == record.hostId and record.npcIds then
-    return record.npcIds[1]
-  end
-  if (record.mode == "wild" or record.mode == "coop_wild") and party.side == "b"
-     and client.id == record.hostId and record.npcIds then
+  local npcSide = record.mode == "coop_npc"
+    or record.mode == "wild" or record.mode == "coop_wild"
+  if npcSide and party.side == "b" then
+    if client.id ~= record.hostId or not record.npcIds then return nil end
     return record.npcIds[1]
   end
   return client.id
@@ -1475,6 +1476,13 @@ function M:fillBattleParty(record, client, party)
     if not dropped[seat] then sideB[#sideB + 1] = seat end
   end
   record.sides.b = sideB
+  -- One trainer, one bag. Applied to the first remaining seat; shareNpcBags
+  -- aliases the rest after the sim is built so a 2v2 does not duplicate the
+  -- kit (two DEFAULT_NPC_BAG copies was eight healing items).
+  record.bags = record.bags or {}
+  if kept[1] and not self:isWildSeat(record, kept[1]) then
+    record.bags[kept[1]] = self:bagMap(party.bag)
+  end
   return true
 end
 
@@ -1502,6 +1510,26 @@ function M:cloneBagMap(src)
   end
   if not any then return nil end
   return out
+end
+
+-- One trainer, one bag. After Turn.create each NPC fighter holds a clone, so
+-- a 2v2 would otherwise drink the kit twice. Alias the remaining seats onto
+-- the first fighter's bag (and the hub sheet) so a potion spent on either
+-- box is spent once. Wildlife is skipped: those seats carry no bag.
+function M:shareNpcBags(record)
+  local seats = record and record.npcIds
+  if not (record and record.sim and type(seats) == "table" and #seats >= 2) then
+    return
+  end
+  if self:isWildSeat(record, seats[1]) then return end
+  local primary = record.sim.byId[seats[1]]
+  if not primary then return end
+  record.bags = record.bags or {}
+  for i = 2, #seats do
+    local other = record.sim.byId[seats[i]]
+    if other then other.bag = primary.bag end
+    record.bags[seats[i]] = record.bags[seats[1]]
+  end
 end
 
 -- Items proved present but never decremented (BattleSim noConsume, e.g. Poké Flute).
@@ -1577,13 +1605,10 @@ function M:tryStartSim(record)
     local party = record.parties[seat]
     if not party then return nil end
     local client = self.clients[seat]
-    -- Seed trainer NPC seats with a gym-style kit when the host uploaded no
-    -- bag.  A wild seat is skipped: wildlife does not carry items.
+    -- Trainer bags come from the host's side-"b" upload (the trainer's own
+    -- kit). An unclaimed seat is empty -- not DEFAULT_NPC_BAG -- so a
+    -- Youngster does not spam potions they never carried.
     record.bags = record.bags or {}
-    if not record.bags[seat] and self:isNpcSeat(record, seat)
-       and not self:isWildSeat(record, seat) then
-      record.bags[seat] = self:cloneBagMap(self.Turn.DEFAULT_NPC_BAG)
-    end
     local bag = record.bags[seat]
     return {
       playerId = seat,
@@ -1644,6 +1669,7 @@ function M:tryStartSim(record)
     return false
   end
   record.sim = battle
+  self:shareNpcBags(record)
 
   -- The npc seats are advertised under their own ids, not hidden behind the
   -- host's.
@@ -1896,6 +1922,8 @@ end
 -- Forget the fight and let its players out of it.  A record that outlived its
 -- battle would keep every member's battleId pointed at something settled, and
 -- the next fight they were offered would find a seat already taken.
+-- Dropping the record drops bags with it: a client sheet for this fight,
+-- never a hub inventory.
 function M:clearBattle(record)
   if not record then return end
   for _, memberId in ipairs(record.memberIds) do

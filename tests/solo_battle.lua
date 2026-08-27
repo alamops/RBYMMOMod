@@ -226,7 +226,7 @@ local function fightOf(kind, o)
       kind = "trainer",
       enemyParty = o.foes or { mon({ species = "BETA", spd = 5, maxHp = 400,
                                      atk = 5 }) },
-      trainer = { baseMoney = o.baseMoney or 20, classId = "OPP_ALPHA" },
+      trainer = o.trainer or { baseMoney = o.baseMoney or 20, classId = "OPP_ALPHA" },
       oppClass = "OPP_ALPHA",
     }
   end
@@ -398,16 +398,21 @@ end
   eq(table.concat(levels, ","), "11,12,13",
      "in party order, so the trainer leads with the monster it means to")
 
-  -- The kit `Hub.lua:1542` seeds an unclaimed NPC seat with, which a caller
-  -- with no hub has to seed itself: without it `Turn._bagHas` refuses every
-  -- item choice and a gym leader fights bare-handed.
+  -- The trainer's own kit. This fixture has no items list and no AI class
+  -- that would give it one, so the seat is empty -- not DEFAULT_NPC_BAG.
+  -- A Youngster that spammed potions was the gym kit being handed to every
+  -- NPC; gym leaders still reach for their class item via SoloBrain.bagFor.
   local bag = foe.bag
-  ok(type(bag) == "table", "the trainer's seat carries a bag")
-  local missing = nil
-  for id in pairs(Turn.DEFAULT_NPC_BAG or {}) do
-    if not (bag and bag[id]) then missing = missing or id end
-  end
-  eq(missing, nil, "holding every id the referee's default NPC kit names")
+  eq(bag, nil, "a trainer with no items carries no bag")
+end)()
+
+;(function()
+  local f = fightOf("trainer", {
+    trainer = { baseMoney = 20, classId = "OPP_ALPHA",
+                items = { "POTION", "POTION" } },
+  })
+  eq(f.sim.byId[FOE].bag and f.sim.byId[FOE].bag.POTION, 2,
+     "the trainer's own items list is the bag, counted per entry")
 end)()
 
 ;(function()
@@ -731,11 +736,10 @@ end)()
 -- 7. the wild seat carries no bag
 -- ------------------------------------------------------------------
 --
--- `(kind == "wild") and nil or npcBag(...)` reads like a ternary and is not
--- one: `true and nil` is nil and `nil or npcBag(...)` is the bag, so the wild
--- seat was handed the gym kit on *both* sides of the test.
--- `Turn._autoChoice` reaches for a bag before it reaches for a move, so the
--- symptom was a wild monster drinking SUPER POTIONs and spraying X ATTACK.
+-- Wild is 1xNPC with no items: the player uploads the encounter as side "b"
+-- without a bag. A trainer 1xNPC sends the kit from this game's data on that
+-- same side. Seeding DEFAULT_NPC_BAG onto wildlife made `Turn._autoChoice`
+-- drink potions before it attacked.
 
 ;(function()
   local f = fightOf("wild", {})
@@ -764,6 +768,33 @@ end)()
   ok(turns >= 100, "the fights ran long enough to matter (" .. turns
      .. " turns over eight seeds)")
   eq(used, 0, "and a wild monster reached for an item in none of them")
+end)()
+
+-- ------------------------------------------------------------------
+-- 7b. an NPC with nothing to file still spends the turn
+-- ------------------------------------------------------------------
+--
+-- `Turn:_autoChoice` used to return nil when the active mon has no moves.
+-- Solo's choice clock is 0 (no deadline), and a trainer fight refuses RUN, so
+-- a pick that filed nothing used to leave the band on "Waiting for X..."
+-- forever. `_begin` already pumped the NPC once, so wipe the filed choice
+-- too: this turn is the hang case. One update after the player files is
+-- enough; the empty sheet Struggles.
+
+;(function()
+  local f = fightOf("trainer", {
+    party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200 }) },
+    foes = { mon({ species = "BETA", spd = 5, maxHp = 80, atk = 5 }) },
+  })
+  ok(f.started, "the fight opened")
+  f.sim.byId[FOE].mons[1].moves = {}
+  f.sim.byId[FOE].choice = nil
+  local turnBefore = f.sim.turn
+  ok(f.fight:sendChoice({ action = "fight", move = 0 }), "the player answers")
+  eq(f.sim.turn, turnBefore, "the NPC has not answered yet")
+  f.solo:update(1 / 60, f.game)
+  ok(f.sim.turn > turnBefore or f.sim:outcome() ~= nil,
+     "one pump after the player files is enough")
 end)()
 
 -- ------------------------------------------------------------------

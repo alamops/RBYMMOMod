@@ -592,6 +592,8 @@ return function(game)
     if onCoopField then
       check(H.awaitCommandMenu(game, "the command menu for the battle shot"),
             "the co-op command grid opens once the opening line is done")
+      H.assertTrainerKit(game, check, log, { class = coopClass })
+      H.assertZeroPpRefused(game, check, log)
       U.wait(30)
       U.shot(game, SHOT_DIR .. "/host-coop-battle.png")
       check(exports.coopDrawFailed() == false, "and it drew without error")

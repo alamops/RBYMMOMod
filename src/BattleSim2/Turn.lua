@@ -466,7 +466,10 @@ local function copyBag(raw)
   return out
 end
 
--- Default kit for coop_npc trainer seats with no uploaded bag (Gen1 gym-style).
+-- Default kit kept as a named gym-style reference. Not auto-seeded onto
+-- unclaimed coop_npc seats: hosts upload the trainer's own items, and a
+-- Youngster with an empty kit must stay empty (seeding this made 2v2s look
+-- like eight healing items).
 M.DEFAULT_NPC_BAG = {
   POTION = 2, SUPER_POTION = 1, FULL_HEAL = 1, X_ATTACK = 1,
 }
@@ -639,7 +642,9 @@ function M.create(opts)
                            hp = mon.hp, maxHp = mon.maxHp,
                            text = mon.species,
                            speciesId = mon.speciesId, level = mon.level,
-                           mon = fighter.active - 1 })
+                           mon = fighter.active - 1,
+                           status = mon.status and M.STATUS_TO_WIRE[mon.status] or nil,
+                           confused = (mon.confusion and mon.confusion > 0) and 1 or nil })
     end
   end
 
@@ -1497,8 +1502,33 @@ function Battle:_autoChoice(fighter)
   end
 
   pick = pick or 1
-  if not mon.moves[pick] then return nil end
+  -- An empty sheet is Struggle, not a hang: `_useMove` treats allPpEmpty
+  -- (including `#moves == 0`) as the synthetic STRUGGLE even with no slot.
   return { action = "fight", move = pick, target = foe.slot }
+end
+
+-- What autoPick / the timeout sweep files when `_autoChoice` has no answer.
+--
+-- A living seat in the choice phase that `_autoChoice` cannot describe (empty
+-- moves, nothing across the field to aim at) used to return nil, so nothing
+-- was filed. The hub then waited out BATTLE_CHOICE_TIMEOUT and retried the
+-- same nil (deadline pushed). Solo sets SOLO_CHOICE_TIMEOUT to 0, which this
+-- file reads as "no deadline at all", so the NPC never files, the player has
+-- already answered, and the band sits on "Waiting for X..." with RUN refused
+-- in a trainer fight -- a battle with no way out.
+--
+-- An empty sheet with a living foe is now a fight (`_autoChoice` names slot 1;
+-- `_useMove` turns that into Struggle). Skip remains for the leftover case:
+-- a living seat with nobody across the field to aim at. A mustReplace seat
+-- with no living bench stays nil: that seat cannot skip a send-out, and
+-- `_checkOver` should have ended the fight.
+function Battle:_autoChoiceOrSkip(fighter)
+  local auto = self:_autoChoice(fighter)
+  if auto then return auto end
+  if self.phase == "choice" and activeMon(fighter) then
+    return { action = "skip" }
+  end
+  return nil
 end
 
 -- File that pick for a seat that has nobody to send one.
@@ -1525,7 +1555,7 @@ function Battle:autoPick(playerId)
   if self.phase == "replace" and not self:_owes(fighter) then return false end
   if not fighter.mustReplace and not activeMon(fighter) then return false end
 
-  local auto = self:_autoChoice(fighter)
+  local auto = self:_autoChoiceOrSkip(fighter)
   if not auto then return false end
   fighter.choice = auto
   self:_emit("chose", {
@@ -1768,7 +1798,9 @@ function Battle:_resolveSwitches()
                              hp = mon.hp, maxHp = mon.maxHp,
                              text = mon.species,
                              speciesId = mon.speciesId, level = mon.level,
-                             mon = choice.slot - 1 })
+                             mon = choice.slot - 1,
+                             status = mon.status and M.STATUS_TO_WIRE[mon.status] or nil,
+                           confused = (mon.confusion and mon.confusion > 0) and 1 or nil })
       end
     end
   end
@@ -2084,9 +2116,16 @@ function Battle:_resolveOneItem(fighter)
         healed = true
       end
       local cleared = false
-      if effect.clearAllStatus and mon.status then
-        mon.status, mon.statusTurns = nil, 0
-        cleared = true
+      local clearedConfusion = false
+      if effect.clearAllStatus then
+        if mon.status then
+          mon.status, mon.statusTurns = nil, 0
+          cleared = true
+        end
+        if mon.confusion and mon.confusion > 0 then
+          mon.confusion = 0
+          clearedConfusion = true
+        end
       elseif effect.clearStatuses and mon.status
          and effect.clearStatuses[mon.status] then
         mon.status, mon.statusTurns = nil, 0
@@ -2098,7 +2137,13 @@ function Battle:_resolveOneItem(fighter)
           text = mon.species .. " recovered",
         })
       end
-      if not applied and not healed and not cleared then
+      if clearedConfusion then
+        self:_emit("status", {
+          slot = fighter.slot, side = fighter.side, confused = 0,
+          text = mon.species .. " recovered",
+        })
+      end
+      if not applied and not healed and not cleared and not clearedConfusion then
         self:_say("But it failed")
       end
     end
@@ -2206,6 +2251,10 @@ function Battle:_runGates(fighter, mon)
       mon.confusion = int(gate.turnsRemaining, 0)
       if gate.snappedOut then
         self:_say(mon.species .. " snapped out of confusion")
+        self:_emit("status", {
+          slot = fighter.slot, side = fighter.side, confused = 0,
+          text = mon.species .. " snapped out of confusion",
+        })
       elseif gate.selfHit then
         self:_say(mon.species .. " hurt itself in confusion")
         self:_damage(fighter, mon, gate.selfDamage or 0, nil)
@@ -2286,11 +2335,13 @@ end
 function Battle:_useMove(fighter, mon, opts)
   opts = opts or {}
   local choice = fighter.choice
-  if not mon.moves[choice.move] then return end
+  -- Empty sheet (`#moves == 0`) is Struggle. Returning here used to eat that
+  -- turn before `allPpEmpty` could pick the synthetic move.
+  local struggling = allPpEmpty(mon) or choice.struggle
+  if not struggling and not mon.moves[choice.move] then return end
 
   if not self:_runGates(fighter, mon) then return end
 
-  local struggling = allPpEmpty(mon) or choice.struggle
   if not struggling and mon.disable and mon.disable.turns > 0
      and mon.disable.moveIndex == choice.move then
     local blocked = mon.moves[choice.move]
@@ -2649,6 +2700,10 @@ function Battle:_useMove(fighter, mon, opts)
       local turns = self.rng:byte() % 4 + 2
       mon.confusion = turns
       self:_say(mon.species .. " became confused")
+      self:_emit("status", {
+        slot = fighter.slot, side = fighter.side, confused = 1,
+        text = mon.species .. " became confused",
+      })
     end
   end
 end
@@ -3215,7 +3270,7 @@ function Battle:tick(nowSeconds)
      and not self:_anyDisconnected() then
     for _, fighter in ipairs(self.fighters) do
       if self:_owes(fighter) then
-        local auto = self:_autoChoice(fighter)
+        local auto = self:_autoChoiceOrSkip(fighter)
         if auto then
           fighter.choice = auto
           self:_emit("chose", {

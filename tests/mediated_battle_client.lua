@@ -29,6 +29,17 @@ local T = require("tests.modkit")
 local check, eq = T.check, T.eq
 
 local MOD_PATH = "mods/rby_mmo"
+do
+  local invoked = arg and arg[0]
+  local dir = invoked and invoked:match("^(.*)[/\\]tests[/\\][^/\\]+$")
+  if dir and dir ~= "" then
+    local handle = io.open(dir .. "/src/Gen.lua", "rb")
+    if handle then
+      handle:close()
+      MOD_PATH = dir
+    end
+  end
+end
 
 -- ------------------------------------------------------------------
 -- the module graph, resolved the way main.lua resolves it
@@ -1561,12 +1572,67 @@ do
   eq(Battlefield.cardModel(screen.slots[0]).status, "SLP",
      "...and the card the arena draws agrees")
 
+  -- A send that predates carrying `status` still paints our own chip from
+  -- the snapshot sheet, which is how a poisoned walk-in used to look healthy.
+  local omitted = setmetatable({
+    usesBattlefield = function() return true end,
+    slots = {},
+    lines = {},
+    mine = { { species = "CHARMANDER", status = "PSN", slot = 0 } },
+    active = 1,
+    mySlot = function() return 0 end,
+  }, { __index = Mediated })
+  omitted:noteSlot({ t = "send", slot = 0, text = "CHARMANDER", hp = 30 })
+  omitted:arriveOnSeat(0, true)
+  eq(omitted.slots[0].status, "PSN",
+     "a send that named no condition still takes the chip off our own sheet")
+  eq(Battlefield.cardModel(omitted.slots[0]).status, "PSN",
+     "...and the card agrees")
+
   screen:noteSlot({ t = "status", slot = 0, text = "CHARMANDER woke up" })
   screen:syncMineStatus({ t = "status", slot = 0, text = "CHARMANDER woke up" })
   eq(screen.slots[0].status, nil, "a wake with no token takes the chip off")
   eq(Battlefield.cardModel(screen.slots[0]).status, nil, "...the card too")
   eq(screen.mine[1].status, nil, "...and the fight sheet")
   eq(screen.game.save.party[1].status, nil, "...and the save mon behind it")
+
+  -- Confusion is a volatile, not a standing token: it must not occupy
+  -- `slot.status` (a mon can be PSN and confused) and a snap-out must not
+  -- wipe the save.
+  screen:noteSlot({ t = "status", slot = 0, status = "PSN", text = "poisoned" })
+  screen:syncMineStatus({ t = "status", slot = 0, status = "PSN",
+                          text = "poisoned" })
+  screen:noteSlot({ t = "status", slot = 0, confused = 1,
+                    text = "CHARMANDER became confused" })
+  eq(screen.slots[0].status, "PSN", "confuse does not clear standing poison")
+  eq(screen.slots[0].confused, true, "...and the CNF chip lights")
+  eq(Battlefield.cardModel(screen.slots[0]).confused, true,
+     "...and the card the arena draws agrees")
+  eq(screen.game.save.party[1].status, "PSN", "...the save is still poisoned")
+  screen:noteSlot({ t = "status", slot = 0, confused = 0,
+                    text = "CHARMANDER snapped out of confusion" })
+  screen:syncMineStatus({ t = "status", slot = 0, confused = 0,
+                          text = "CHARMANDER snapped out of confusion" })
+  eq(screen.slots[0].confused, nil, "snap-out takes the CNF chip off")
+  eq(screen.slots[0].status, "PSN", "...and leaves poison")
+  eq(screen.game.save.party[1].status, "PSN", "...and the save")
+
+  -- Walk-in on a fresh seat: a send against an occupied battlefield seat
+  -- parks the arrival, so this is its own stub.
+  local dazed = setmetatable({
+    usesBattlefield = function() return true end,
+    slots = {},
+    lines = {},
+    mine = { { species = "CHARMANDER", slot = 0 } },
+    active = 1,
+    mySlot = function() return 0 end,
+  }, { __index = Mediated })
+  dazed:noteSlot({ t = "send", slot = 0, text = "CHARMANDER", hp = 30,
+                   confused = 1, status = "SLP" })
+  eq(dazed.slots[0].confused, true, "a send that walked in confused shows CNF")
+  eq(dazed.slots[0].status, "SLP", "...beside the standing sleep")
+  eq(Battlefield.cardModel(dazed.slots[0]).confused, true,
+     "...and the card agrees")
 
   -- Every other standing condition, the way an item cure arrives.
   for _, token in ipairs({ "PSN", "BRN", "FRZ", "PAR", "TOX" }) do
@@ -2086,6 +2152,33 @@ do
   g.sendChoice = function() return false end
   check(not g:pickMove(3), "a refused send reports the refusal")
   eq(g.moveMemory[1], 2, "...and leaves the remembered move where it was")
+
+  -- A move with no PP is refused *here*, before it hits the wire. The hub
+  -- would drop it in silence, this screen would have already left the menu,
+  -- and both players would wait out BATTLE_CHOICE_TIMEOUT.
+  local h = client()
+  h.lines = {}
+  h.answeredTurn = false
+  h.mine[1].moves[2].pp = 0
+  h.sendChoice = function()
+    error("a 0-PP move must not be sent")
+  end
+  check(not h:pickMove(2), "a move with no PP is not sent")
+  eq(h.phase, "move", "the menu stays open")
+  eq(h.answeredTurn, false, "the turn is not spent")
+  check(h.lines[1] and h.lines[1]:find("PP", 1, true),
+        "and the player is told why")
+
+  -- Every slot empty is Struggle: any index is legal and still goes.
+  local struggleSent = {}
+  h.mine[1].moves[1].pp = 0
+  h.mine[1].moves[3].pp = 0
+  h.sendChoice = function(_, choice)
+    struggleSent[#struggleSent + 1] = choice
+    return true
+  end
+  check(h:pickMove(1), "every slot empty is Struggle and still sends")
+  eq(struggleSent[1] and struggleSent[1].move, 0, "...as slot 0")
 
   -- The sheet it has *now* is what the memory is clamped against: Transform
   -- and Mimic rewrite one mid-fight, and a cursor past the end opens on a row

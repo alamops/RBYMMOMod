@@ -1064,6 +1064,8 @@ local CONFUSE = { style = "psi",   palette = "PSYCHIC" }
 M.STATUS_STYLE = {
   -- the wire tokens
   BRN = BURN, FRZ = FREEZE, PAR = PARA, PSN = POISON, TOX = TOXIC, SLP = SLEEP,
+  -- CNF is the HUD chip for the confusion volatile (not a Wire.STATUSES token)
+  CNF = CONFUSE,
   -- ...and the turn machine's own names for the same six, plus the volatile
   burn = BURN, freeze = FREEZE, paralysis = PARA, poison = POISON,
   toxic = TOXIC, sleep = SLEEP, confusion = CONFUSE,
