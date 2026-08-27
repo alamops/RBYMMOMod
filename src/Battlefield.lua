@@ -260,6 +260,8 @@ M.STATUS_COLORS = {
   slp = { 0.48, 0.53, 0.61 },
   par = { 0.93, 0.75, 0.22 },
   frz = { 0.40, 0.78, 0.94 },
+  -- Psychic pink, distinct from SLP gray: confusion is a volatile, not sleep.
+  cnf = { 0.90, 0.42, 0.72 },
 }
 local STATUS_FALLBACK = { 0.55, 0.58, 0.65 }
 
@@ -447,6 +449,8 @@ function M.cardModel(seat)
   else
     status = status:sub(1, 3)
   end
+  local confused = seat.confused == true
+      or (type(seat.confused) == "number" and seat.confused > 0)
   local species = seat.species
   if type(species) ~= "string" then species = nil end
   local shown = clamp(math.floor(num(seat.shownHp, hp) + 0.5), 0, maxHp)
@@ -457,6 +461,7 @@ function M.cardModel(seat)
     shownHp = shown,
     maxHp = maxHp,
     status = status,
+    confused = confused or nil,
     species = species,
     index = seat.index,
     icon = seat.icon,
@@ -549,6 +554,7 @@ function M.plateModel(seat)
     maxHp = base.maxHp,
     frac = frac,
     status = base.status,
+    confused = base.confused,
     side = side,
     expFrac = expFrac,
     shownLevel = shownLevel,
@@ -1222,6 +1228,7 @@ local function placeMons(seats, side, rows, out)
       shownLevel = seat and seat.shownLevel,
       maxHp = seat and seat.maxHp,
       status = seat and seat.status,
+      confused = seat and seat.confused,
       species = seat and seat.species,
       icon = seat and seat.icon,
       front = seat and (seat.front or seat.frontImage or seat.sprite),
@@ -2331,8 +2338,12 @@ local function drawCard(card, eng)
     withFont(gfx, M.FONT_MICRO, function(micro)
       local pillW = pillWidth(micro, model.level)
       drawLevelPill(gfx, micro, model.level, x + w - pad - pillW, y + 5, 13)
+      local chipX = x + pad
       if model.status then
-        drawStatusChip(gfx, micro, model.status, x + pad, barY - 15, 12)
+        chipX = chipX + drawStatusChip(gfx, micro, model.status, chipX, barY - 15, 12) + 2
+      end
+      if model.confused then
+        drawStatusChip(gfx, micro, "CNF", chipX, barY - 15, 12)
       end
       withFont(gfx, M.FONT_PRIMARY, function(primary)
         setColor(gfx, TEXT_ON)
@@ -2382,8 +2393,12 @@ local function drawPlate(plate)
       local pillW = pillWidth(micro, level)
       drawLevelPill(gfx, micro, level, x + w - pad - pillW, y + 4, 13)
       local chipRight = x + w - pad
+      local chipX = x + pad
       if model.status then
-        drawStatusChip(gfx, micro, model.status, x + pad, y + 20, 12)
+        chipX = chipX + drawStatusChip(gfx, micro, model.status, chipX, y + 20, 12) + 2
+      end
+      if model.confused then
+        drawStatusChip(gfx, micro, "CNF", chipX, y + 20, 12)
       end
       if plate.numbers then
         -- Exact figures on your own side only, per series convention.

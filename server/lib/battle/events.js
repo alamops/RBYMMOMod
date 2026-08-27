@@ -114,6 +114,16 @@ const KINDS = {
 // holds the real maximum from the moment it builds the battler, so it says it,
 // and the guess stays behind only as the fallback for a stream that carries
 // none.
+//
+// `status` rides on `send` for the same walk-in reason. A `status` *event* is
+// an inflict or a lift; a monster that *arrived* poisoned is not an event, it
+// is a fact about the occupant, and without it on the send the plate draws a
+// healthy card over a condition the referee has been fighting with since
+// `create`.
+//
+// `confused` is the fight-local volatile (not a Wire.STATUSES token): 1 on
+// send when the newcomer is already confused, and 1/0 on a status event for
+// inflict / snap-out. It never occupies `status`, so PSN and confusion coexist.
 const FIELDS = {
   battle: 'string',
   seq: 'number',
@@ -131,6 +141,7 @@ const FIELDS = {
   participants: 'number',
   mon: 'number',
   team: 'string',
+  confused: 'number',
 };
 
 // ------------------------------------------------------------------
@@ -178,8 +189,11 @@ const SHAPES = {
     text: 'the species',
     speciesId: 'registry id for the art, when the sheet named one',
     level: "the monster's level, for the seat opposite's pill",
-    mon: 'party index (0-5) of the mon the referee fielded' },
-  status: { slot: true, side: true, status: 'absent means cleared', text: true },
+    mon: 'party index (0-5) of the mon the referee fielded',
+    status: "the newcomer's condition when it already has one; absent is healthy",
+    confused: '1 when the newcomer is confused (a volatile, not a standing status)' },
+  status: { slot: true, side: true, status: 'absent means cleared', text: true,
+    confused: '1 inflicted, 0 snapped out; independent of status' },
   stat: { slot: true, side: true, amount: true, text: true },
   switch: { slot: true, side: true, text: 'the species coming in',
     speciesId: 'registry id for the art, when the sheet named one',

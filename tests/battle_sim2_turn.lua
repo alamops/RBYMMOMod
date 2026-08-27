@@ -579,6 +579,8 @@ do
   eq(Events.FIELDS.mon, "number", "...and a party index")
   ok(Events.SHAPES.send and Events.SHAPES.send.mon ~= nil,
      "`send` promises the party index it fielded")
+  ok(Events.SHAPES.send.status ~= nil,
+     "...and the condition a newcomer walked in with")
   ok(Events.SHAPES.switch and Events.SHAPES.switch.mon ~= nil,
      "...and so does `switch`")
   ok(Events.SHAPES.turn and Events.SHAPES.turn.slot ~= nil,
@@ -896,6 +898,56 @@ do
   end
   ok(sawId, "gen2: the anim row still carries the registry id")
   ok(not sawName, "gen2: and never the display name")
+end
+
+-- autoPick never leaves a living choice-phase seat owing: an empty moveset
+-- used to return nil, and with choiceTimeout 0 the fight sat forever. An empty
+-- sheet with a living foe is now Struggle; skip is only no-target.
+do
+  local battle = battleOf({
+    choiceTimeout = 0,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spe = 80 }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 200, spe = 10, moves = {} }) } } },
+    },
+  })
+  drain(battle)
+  eq(battle.turn, 1, "the opening window is turn 1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "the player files")
+  ok(battle:autoPick("p2"), "an empty-moves NPC still files")
+  local struggle = false
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "anim" and event.text == "STRUGGLE" then struggle = true end
+  end
+  ok(struggle, "gen2: the empty sheet Struggles rather than skipping")
+  ok(battle.turn >= 2 or battle:outcome() ~= nil,
+     "the turn closed rather than sitting on an owed NPC")
+end
+
+-- The timeout sweep must file Struggle too, not push the clock on a nil pick.
+do
+  local battle = battleOf({
+    choiceTimeout = 10,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spe = 80 }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 200, spe = 10, moves = {} }) } } },
+    },
+  })
+  drain(battle)
+  eq(battle.turn, 1, "the opening window is turn 1")
+  ok(battle:tick(9) == false, "inside the deadline the sweep does nothing")
+  ok(battle:tick(11) == true, "past the deadline the sweep files")
+  local struggle = false
+  for _, event in ipairs(drain(battle)) do
+    if event.t == "anim" and event.text == "STRUGGLE" then struggle = true end
+  end
+  ok(struggle, "gen2: an unanswered empty sheet Struggles rather than pushing the clock")
+  ok(battle.turn >= 2 or battle:outcome() ~= nil,
+     "the timeout closed the turn instead of waiting another window")
 end
 
 -- ------------------------------------------------------------------

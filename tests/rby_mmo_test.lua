@@ -12552,6 +12552,48 @@ end)()
   eq(client.phase, "target", "it opens the picker exactly as before")
 end)()
 
+-- A move with no PP is not committed. The hub would refuse it with silence,
+-- the client would already be in wait, and both players would sit out the
+-- choice clock. Stay on the list, the way Gen 1 does.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(60, 50, { { id = "FIX_BOOST", pp = 0 },
+                              { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local committed = {}
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "move",
+    moveIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+    commit = function(_, action) committed[#committed + 1] = action end,
+  }, { __index = CoopBattle })
+  local function pressA() return { wasPressed = function(_, k) return k == "a" end } end
+
+  CoopBattle.updateMove(client, pressA())
+  eq(#committed, 0, "a move with no PP is not committed")
+  eq(client.phase, "messages", "the player is shown why")
+  eq(client.after, "move", "and comes back to the same list")
+
+  -- Every slot empty is Struggle: the 0-PP refusal must not fire. Struggle
+  -- needs a target (recoil attack), so the picker opens rather than a silent
+  -- wait.
+  for _, moveInst in ipairs(sim:slot(1).battler.curMoves) do moveInst.pp = 0 end
+  client.phase = "move"
+  client.after = nil
+  CoopBattle.updateMove(client, pressA())
+  eq(#committed, 0, "Struggle is not auto-committed -- it needs a target")
+  eq(client.phase, "target", "so the picker opens rather than refusing")
+end)()
+
 -- ------- the target picker is a list of both, not one name at a time
 --
 -- Finding 3. `drawTarget` shows both living opponents through `drawList`,
@@ -13433,6 +13475,11 @@ end)()
   eq(card.hp, 100, "cardModel clamps hp to maxHp")
   eq(card.maxHp, 100, "cardModel keeps maxHp")
   eq(card.status, "par", "cardModel truncates status to three letters")
+  local confused = Battlefield.cardModel({
+    species = "pikachu", hp = 10, maxHp = 10, status = "PSN", confused = true,
+  })
+  eq(confused.status, "PSN", "cardModel keeps standing status beside confusion")
+  eq(confused.confused, true, "...and publishes the confused chip")
 
   local gen1Game = { data = data }
   local CoopBattle = need("CoopBattle")
@@ -14737,7 +14784,7 @@ end)()
   eq(Battlefield.bandGridCols(-1), 0, "...and so is a negative count")
 
   -- Status colours: one entry per status this build actually inflicts.
-  for _, key in ipairs({ "psn", "brn", "slp", "par", "frz" }) do
+  for _, key in ipairs({ "psn", "brn", "slp", "par", "frz", "cnf" }) do
     local color = Battlefield.STATUS_COLORS[key]
     check(type(color) == "table" and type(color[1]) == "number"
           and type(color[2]) == "number" and type(color[3]) == "number",
@@ -21619,6 +21666,13 @@ if eng and eng.Growth and eng.Experience then
     local finalSeat = seatOf(1)
     eq(finalSeat.shownLevel, mine.level,
        "once the queue drains, the pill has landed on the monster's true level")
+    eq(finalSeat.maxHp, mine.stats.hp,
+       "...and the plate's maximum is the post-level max HP")
+    eq(finalSeat.hp, mine.hp,
+       "...and current HP matches the save (same table on this host-sim path)")
+    local shownHp = finalSeat.shownHp
+    eq(shownHp, mine.hp,
+       "...and the bar has climbed to that HP, so the numbers and fill agree")
     local finalTruth = expFraction({ data = data }, mine)
     check(finalTruth ~= nil
           and math.abs(finalSeat.expFrac - finalTruth) < 1e-6,
@@ -22141,20 +22195,45 @@ end
     mine.exp = expAt(12, 0.4)
     local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-order" })
     check(screen:usesBattlefield(), "the fixture game stays on the battlefield gate")
-    screen.slots[0] = { species = expSpecies, hp = mine.hp, maxHp = mine.stats.hp }
-    local refereeHpBefore = screen.slots[0].hp
+    local maxBefore = mine.stats.hp
+    local hpBefore = mine.hp
+    -- Hurt on the plate, full on the save: the climb must add the level's
+    -- gain, not copy the save's HP (that would heal to full).
+    screen.slots[0] = {
+      species = expSpecies, hp = math.max(1, hpBefore - 8),
+      maxHp = maxBefore, shownHp = math.max(1, hpBefore - 8),
+    }
+    local plateHpBefore = screen.slots[0].hp
+    local plateMaxBefore = screen.slots[0].maxHp
     local levelBefore = mine.level
 
     screen:gainExp({ slot = 0, species = foeSpecies, level = 60, participants = 1 })
 
     check(mine.level > levelBefore, "the award crosses at least one level boundary")
-    eq(screen.slots[0].hp, refereeHpBefore,
-       "the referee's own field-slot hp is untouched by the level-up -- it is a "
-       .. "different table than the save mon")
+    local grown = mine.stats.hp - maxBefore
+    check(grown > 0, "the level-up raised max HP")
+    eq(screen.slots[0].maxHp, plateMaxBefore + grown,
+       "the plate's maximum climbs by the level's HP gain")
+    eq(screen.slots[0].hp, plateHpBefore + grown,
+       "...and current HP rises by the same amount, not to the save's full HP")
+    check(screen.slots[0].hp < mine.hp or plateHpBefore == hpBefore,
+          "...so a hurt fighter is not healed to full off the save file")
 
-    local textIdx, fillIdx, growIdx = nil, nil, nil
+    -- The referee never levels, so the next damage packet still states the
+    -- pre-level pair. The plate must keep the climb rather than snap back.
+    screen:noteSlot({
+      t = "damage", slot = 0,
+      hp = plateHpBefore, maxHp = plateMaxBefore,
+    })
+    eq(screen.slots[0].maxHp, plateMaxBefore + grown,
+       "a later referee packet does not take the level's max HP back")
+    eq(screen.slots[0].hp, plateHpBefore + grown,
+       "...nor the current-HP gain")
+
+    local textIdx, fillIdx, growIdx, drainIdx = nil, nil, nil, nil
     for i, row in ipairs(screen.lines) do
       if type(row) == "table" and row.expfill and not fillIdx then fillIdx = i
+      elseif type(row) == "table" and row.drain and not drainIdx then drainIdx = i
       elseif isText(row) then
         if not textIdx then textIdx = i
         elseif not growIdx then growIdx = i end
@@ -22162,8 +22241,10 @@ end
     end
     check(textIdx ~= nil and fillIdx ~= nil and growIdx ~= nil,
           "the batch queued a gained-text row, an expfill row and a grow-text row")
+    check(drainIdx ~= nil, "...and an HP-climb drain so the bar and numbers update")
     check(textIdx < fillIdx, "the gained-EXP text is queued ahead of the fill")
     check(fillIdx < growIdx, "...and the fill is queued ahead of the first grow-text")
+    check(growIdx < drainIdx, "...and the level text is queued ahead of the HP climb")
 
     -- Moves move too, when the level crossed teaches one: the same learnset
     -- probe the classic "levelling up offers the move" test above uses, so
@@ -22188,6 +22269,9 @@ end
     else
       check(true, "(the fixture species has no level-up learnset in the crossed range)")
     end
+    pump(screen)
+    eq(screen.slots[0].shownHp, screen.slots[0].hp,
+       "the bar climbs to the new current HP, so the numbers and fill agree")
   end
 
   -- ------- fill monotonic across back-to-back events, and both clocks land
@@ -23323,6 +23407,43 @@ end)()
        .. "so it leaves the memory alone")
     commitClient:commit({ slot = 1, kind = "run" })
     eq(commitClient.moveMemory[2], 2, "...and so does a run")
+
+    -- A refused fight send must not leave the seat in wait: that is the
+    -- stall where both players watch the clock for a choice the hub never
+    -- took (0-PP, a disabled slot, a dropped packet).
+    commitClient.sendMediatedChoice = function() return false end
+    commitClient.phase = "choose"
+    commitClient:commit({ slot = 1, move = 1, target = 3 })
+    eq(commitClient.phase, "choose",
+       "a refused fight choice returns to the menu")
+    eq(commitClient.moveMemory[2], 2,
+       "...and does not remember a move the hub never took")
+
+    -- Same gate as the move menu, reached via commit (the target picker).
+    -- Must say why and stay on messages -- not bounce to choose with a blank
+    -- box the way a silent `return false` used to.
+    local ppClient = setmetatable({
+      medMoveList = {
+        { id = "FIX_BOOST", pp = 0, ppUps = 0 },
+        { id = "FIX_TACKLE", pp = 20, ppUps = 0 },
+      },
+      moveMemory = {},
+      messages = {},
+      mediated = true,
+      battleId = "b-pp",
+      game = { data = data },
+      mine = 1,
+      mySlot = function() return { active = 2 } end,
+    }, { __index = CoopBattle })
+    ppClient.phase = "choose"
+    ppClient:commit({ slot = 1, move = 1, target = 3 })
+    eq(ppClient.phase, "messages",
+       "a 0-PP fight that skipped the move menu still shows why")
+    eq(ppClient.after, "move", "...and comes back to the list")
+    check((ppClient.messages[1] or ""):find("no PP left", 1, true),
+          "the PP sentence is shown")
+    eq(ppClient.moveMemory[2], nil,
+       "...and does not remember a move the hub never took")
 
     local items = CoopBattle.bandCommandItems({})
     eq(items[1].label, "FIGHT", "the grid keeps the classic FIGHT/SWITCH/ITEM/RUN order")

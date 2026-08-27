@@ -308,6 +308,19 @@ echo "  join code: ****** (6 chars, required)"
 # `lsof` or `ss` to exist on the machine.
 
 echo "  starting the hub on $HUB_ADDRESS (max $MAX)..."
+# LOVE cannot peek Node fighter.bag. The referee writes NPC-bag *shape*
+# here after shareNpcBags (shared / empty / gym-seed / heal count) so the
+# guest driver can assert one trainer bag, not two gym copies. Item ids
+# never appear: those stacks are a client sheet from the player's ROM.
+# Exported before the hub *and* the two LOVE processes start so all three
+# inherit it. Absent in every normal deploy; skipped for an external hub,
+# which this script does not start and cannot dump from. Path is under
+# SYNC_DIR (/tmp), never the checkout -- a dump must not become source.
+# MMO_E2E=1 is the production gate: server.js ignores MMO_BATTLE_DUMP
+# unless this is set, so a live hub cannot dump by env accident.
+export MMO_E2E=1
+export MMO_BATTLE_DUMP="${SYNC_DIR}/npc_bags.txt"
+echo "  npc bag dump: $MMO_BATTLE_DUMP"
 # `node` directly rather than the hub_cli function: backgrounding a shell
 # function puts a subshell between this script and the server, `$!` names the
 # subshell, and the kill in cleanup then leaves the real hub running -- with

@@ -931,13 +931,18 @@ function cleanBattleMove(raw) {
  * pre-fight sheet stays a client claim because the hub holds no ROM species
  * table and never will (legal floor / no ROM bytes).
  *
- * **Bags (PROTOCOL 15).** Optional `bag` on the party message. The hub holds a
- * stack on `item` choice accept and decrements only when the turn resolves, so
- * cancel/unchose never needs a refund. Entries must be BattleSim-known
- * (`itemEffect`), including vitamins (fight-local Stat Exp; client writebacks
- * save.statExp). Counts and battler sheets remain a claim (inventing 99
- * POTION or a god team on upload is the accepted bound). Absent `bag`
- * means empty.
+ * **Bags (PROTOCOL 15).** Optional `bag` on the party message. Held on the
+ * fight record only (not a hub inventory) and dropped when the fight is.
+ * Who sends what: 1v1 / coop_pvp — each human uploads their own bag with
+ * their party. 1xNPC / 2xNPC — each human still uploads their own; the
+ * initiator (host) also uploads the NPC party as side "b" with that NPC's
+ * items from *their* game data. Nobody else may fill side "b". The hub
+ * holds a stack on `item` choice accept and decrements only when the turn
+ * resolves, so cancel/unchose never needs a refund. Entries must be
+ * BattleSim-known (`itemEffect`), including vitamins (fight-local Stat Exp;
+ * client writebacks save.statExp). Counts and battler sheets remain a claim
+ * (inventing 99 POTION or a god team on upload is the accepted bound).
+ * Absent `bag` means empty.
  *
  * `species` is prose rather than an id, and gets NAME_MAX like
  * Wire.partyEvent's, because what it is for is the name in "PIKACHU used ...",
@@ -1381,6 +1386,12 @@ function cleanBattleEvent(raw) {
     // status and must not be stored as one.
     const status = cleanBattleStatus(raw.status);
     if (status) event.status = status;
+  }
+  // Fight-local volatile, not a standing status: 1 confused, 0 snapped out.
+  // Absent means "do not touch the chip". Never a party-sheet field.
+  if (raw.confused !== undefined && raw.confused !== null) {
+    const confused = cleanInt(raw.confused, 0, 1);
+    if (confused !== null) event.confused = confused;
   }
   if (raw.moves !== undefined && raw.moves !== null) {
     if (Array.isArray(raw.moves)) {

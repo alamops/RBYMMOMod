@@ -1345,14 +1345,23 @@ end
 -- table and never will (legal floor / no ROM bytes).
 --
 -- **Bags (PROTOCOL 15).** The party message may carry an optional `bag` — a
--- list of `{id, count}` stacks. The hub stores it under the connection, holds
+-- list of `{id, count}` stacks. The hub stores it on the fight record, holds
 -- a stack when an `item` choice is accepted, and decrements only when the turn
--- resolves (so `cancel`/`unchose` never needs a refund). Entries must be ids
--- BattleSim knows (`itemEffect`), including vitamins (fight-local Stat Exp;
--- client writebacks `save.statExp` on confirm). Counts and battler sheets
--- remain a **claim**: a modified client can still invent 99 POTION or a god
--- team on upload. That is the accepted bound — mid-fight free heals without a
--- matching stack are what the bag removes. Absent `bag` means empty.
+-- resolves (so `cancel`/`unchose` never needs a refund). The record dies with
+-- the fight: this is not a hub inventory. Who sends what:
+--
+--   * 1v1 / 2v2 (coop_pvp): each human uploads their own bag with their party.
+--   * 1xNPC / 2xNPC: each human still uploads their own bag; the initiator
+--     (host) also uploads the NPC party as side "b", with that NPC's items
+--     from *their* game data (trainer class kit, or none for wild). Nobody
+--     else may fill side "b". The hub has no ROM item table and never will.
+--
+-- Entries must be ids BattleSim knows (`itemEffect`), including vitamins
+-- (fight-local Stat Exp; client writebacks `save.statExp` on confirm). Counts
+-- and battler sheets remain a **claim**: a modified client can still invent
+-- 99 POTION or a god team on upload. That is the accepted bound — mid-fight
+-- free heals without a matching stack are what the bag removes. Absent `bag`
+-- means empty.
 --
 -- `hp` above `maxHp` is refused even though both are individually in range,
 -- because it is the one incoherence that reaches arithmetic rather than a screen:
@@ -1838,6 +1847,9 @@ function M.battleEvent(raw)
     -- status and must not be stored as one.
     out.status = M.battleStatus(raw.status) or nil
   end
+  -- Fight-local volatile, not a standing status: 1 confused, 0 snapped out.
+  -- Absent means "do not touch the chip". Never a party-sheet field.
+  if raw.confused ~= nil then out.confused = M.int(raw.confused, 0, 1) end
   if type(raw.moves) == "table" then
     local moves = {}
     for _, entry in ipairs(raw.moves) do

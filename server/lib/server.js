@@ -572,6 +572,14 @@ function start(options = {}) {
     generation: config.generation,
     auth: authPort(config, noteCredentialUse, authThrottle),
     log,
+    // Test-only scratch path. Honoured only under MMO_E2E=1 so a production
+    // hub that happens to have MMO_BATTLE_DUMP in the environment does not
+    // write on every coop_npc fight. The file is bag *shape* (counts/flags),
+    // never item ids -- those stacks are a client claim from the player's
+    // loaded game, held for this fight only.
+    dumpNpcBags: process.env.MMO_E2E === '1'
+      ? (process.env.MMO_BATTLE_DUMP || null)
+      : null,
   });
 
   /** Registered sockets, so shutdown can reach the ones that will not leave. */

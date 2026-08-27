@@ -2252,6 +2252,16 @@ function M:updateMove(input)
     local pick = moves[self.moveIndex]
     local mine = self:mySlot()
     local hasPP = self:hasLivePP()
+    -- One empty slot is not Struggle: the hub refuses that choice with
+    -- silence, the client has already left the menu, and both players wait
+    -- out BATTLE_CHOICE_TIMEOUT. Say so and stay on the list, the way Gen 1
+    -- does. Every slot empty is Struggle and still commits.
+    if pick and hasPP and (tonumber(pick.pp) or 0) <= 0 then
+      self:say("There's no PP left\nfor this move!")
+      self.phase = "messages"
+      self.after = "move"
+      return
+    end
     if pick and hasPP and not self:needsTarget(pick) then
       local first = targets[1]
       return self:commit({ slot = self.mine, move = self.moveIndex,
@@ -2951,12 +2961,18 @@ function M:commit(action)
   self.phase = "wait"
   -- A fight, and only a fight: `kind` is set on run / switch / item, and an
   -- item's `move` names the move being restored rather than one being used.
-  -- Taken here rather than at the three call sites in `updateMove` /
-  -- `updateTarget` so a fourth can never forget to.
+  -- Written only once the choice actually goes (mediated send, or host-sim
+  -- below): a refused 0-PP send must not open next turn on a row nobody took.
+  local memKey, memMove
   if action and action.kind == nil and tonumber(action.move) then
     local slot = self:mySlot()
+    memKey = (slot and slot.active) or 1
+    memMove = math.floor(action.move)
+  end
+  local function remember()
+    if not memKey then return end
     self.moveMemory = self.moveMemory or {}
-    self.moveMemory[(slot and slot.active) or 1] = math.floor(action.move)
+    self.moveMemory[memKey] = memMove
   end
   -- Your own answer is in, whoever else's is not -- which is what keeps the
   -- wait line from naming the person reading it.
@@ -2970,14 +2986,22 @@ function M:commit(action)
   -- opinion about this turn on a wire that has already cut it.
   if self.mediated then
     local ok = self:sendMediatedChoice(action)
-    if not ok and action.kind == "item" then
-      self.pendingItem = nil
-      self.pendingItemSlot = nil
+    if not ok then
+      if action.kind == "item" then
+        self.pendingItem = nil
+        self.pendingItemSlot = nil
+      end
       self:unmarkActed(action.slot)
-      self.phase = "choose"
+      -- A choice the hub never took must not leave this seat in wait: that
+      -- is the stall where both players watch the clock because a 0-PP move
+      -- (or any other refused send) was treated as answered.
+      if self.phase == "wait" then self.phase = "choose" end
+      return ok
     end
+    remember()
     return ok
   end
+  remember()
   -- ...and everybody else is told, **including when this client is the host**.
   --
   -- The host used to file straight into `pending` and return, so its own
@@ -3192,15 +3216,27 @@ function M:playEvents(events)
       -- The referee's reading of a condition, applied the same way HP is:
       -- only when this copy is replaying somebody else's arithmetic. A
       -- `status` field inflicted it; none cleared it (wake, thaw, item).
-      -- The arena plate and the classic readout both read `mon.status`, and
-      -- on our own seat that table *is* the save party, so a cure persists.
+      -- Confusion is a volatile on the battler (`confusedTurns`), never a
+      -- standing token on `mon.status` -- a confused-only event must not
+      -- wipe PSN, and CNF must not land on the save sheet.
       local slot = self.sim:slot(event.slot)
-      if slot and slot.battler and slot.battler.mon and self:replaying() then
-        local status = event.status
-        if type(status) ~= "string" or status == "" then
-          slot.battler.mon.status = nil
-        else
-          slot.battler.mon.status = status
+      if slot and slot.battler and self:replaying() then
+        if event.confused ~= nil then
+          if event.confused == 1 then
+            slot.battler.confusedTurns = slot.battler.confusedTurns or 2
+          else
+            slot.battler.confusedTurns = nil
+          end
+        end
+        if slot.battler.mon then
+          local status = event.status
+          if type(status) ~= "string" or status == "" then
+            if event.confused == nil then
+              slot.battler.mon.status = nil
+            end
+          else
+            slot.battler.mon.status = status
+          end
         end
       end
 
@@ -3365,6 +3401,15 @@ function M:playEvents(events)
         else
           self.sim:sendOut(slot, event.index)
         end
+        -- Walk-in confusion is a fact about the occupant, like send.status.
+        -- Host-sim already has confusedTurns on the battler it built.
+        if slot.battler then
+          if event.confused == 1 then
+            slot.battler.confusedTurns = slot.battler.confusedTurns or 2
+          else
+            slot.battler.confusedTurns = nil
+          end
+        end
       end
       -- ...and the *display* follows at its own pace. The outgoing monster is
       -- held in the shadow so it keeps being drawn -- and keeps draining and
@@ -3526,7 +3571,8 @@ function M:startDrain(row)
   local to = tonumber(row.to)
   if not (type(battler) == "table" and battler.mon and to) then return false end
   if to ~= to then return false end
-  local max = tonumber(battler.mon.stats and battler.mon.stats.hp) or 0
+  local max = tonumber(battler.mon.maxHp)
+    or tonumber(battler.mon.stats and battler.mon.stats.hp) or 0
   to = math.max(0, math.min(max, to))
   if battler.shownHP == nil then
     battler.shownHP = to
@@ -3593,7 +3639,8 @@ function M:stepDrain()
     return
   end
   local shown = battler.shownHP or at.to
-  local max = (battler.mon.stats and battler.mon.stats.hp) or 1
+  local max = tonumber(battler.mon.maxHp)
+    or (battler.mon.stats and battler.mon.stats.hp) or 1
   local step = math.max(1, max) / 96
   if shown > at.to then
     shown = math.max(at.to, shown - step)
@@ -4494,8 +4541,14 @@ end
 local function statusTag(battler)
   local mon = battler and battler.mon
   local status = mon and mon.status
-  if type(status) ~= "string" or status == "" then return nil end
-  return status:sub(1, 3)
+  if type(status) == "string" and status ~= "" then
+    return status:sub(1, 3)
+  end
+  -- Confusion is a volatile on the battler, not on the save sheet.
+  if battler and (battler.confusedTurns or 0) > 0 then
+    return "CNF"
+  end
+  return nil
 end
 
 -- Draw `text` at (x, y), scaling on X only when it would run past `maxW`.
@@ -4555,7 +4608,8 @@ local function drawReadout(self, battler, panel, row, mine)
   if status then status = M.hudSanitize(status) end
   local nameRaw = M.hudSanitize(battler.name or "?")
   local hp = displayHP(battler)
-  local maxHp = (battler.mon.stats and battler.mon.stats.hp) or 0
+  local maxHp = tonumber(battler.mon.maxHp)
+    or (battler.mon.stats and battler.mon.stats.hp) or 0
   local hpNums = M.hudSanitize(("%d/%d"):format(hp, maxHp))
   local borderR = (panel.tx + panel.tw - 1) * 8
   local nameLeft = ox
@@ -5435,6 +5489,7 @@ function M:battlefieldSeats(theirs)
           -- clock was split out.
           maxHp = mon.maxHp or (mon.stats and mon.stats.hp) or mon.hp or 1,
           status = mon.status,
+          confused = (battler.confusedTurns or 0) > 0,
           species = mon.species,
           -- Display clocks, not truth: the strip trails `mon.exp` and the
           -- pill trails `mon.level` for exactly as long as a queued fill
@@ -7328,10 +7383,12 @@ function M:gainExp(event)
   -- discriminator.
   local index = tonumber(event.mon)
   local mon
+  local paidAt
   if index then
     local roster = (slot and slot.party) or party
     local at = math.floor(index) + 1
     if event.med then at = self:medPartySlot(at) end
+    paidAt = at
     mon = at and roster[at]
     -- An index that resolves to nobody pays nobody -- but it says so. Silence
     -- here read in play as "this knockout was worth nothing", which is the one
@@ -7345,6 +7402,7 @@ function M:gainExp(event)
     end
   else
     mon = battler and battler.mon
+    paidAt = slot and slot.active
   end
 
   local eng = engine
@@ -7428,6 +7486,12 @@ function M:gainExp(event)
     fromLevel = battler.shownLevel or mon.level or 1
   end
 
+  -- Max HP before any apply pass. A level raises both numbers on the save
+  -- mon; the plate is a different table on the mediated path, so the climb
+  -- is the *delta*, never a copy of save HP (the save is not taking the
+  -- fight's damage).
+  local oldMax = tonumber(mon.stats and mon.stats.hp)
+
   -- The first pass. Both arms hand back the same two values -- the list of
   -- levels reached and the raw amount the "gained N EXP" line says -- so
   -- everything below this point is generation-free again.
@@ -7496,26 +7560,8 @@ function M:gainExp(event)
 
   self:levelled(mon, active and battler.name or nil, levels)
 
-  -- A level raises both HP numbers, and the bar has to be told.
-  --
-  -- `Experience.apply` runs the moment the event is received, so max HP and
-  -- current HP move mid-queue while `shownHP` stays where the last drain left
-  -- it -- and a bar drawn from an old number against a new denominator is a
-  -- bar that visibly *shrinks* on the level-up, and stays wrong until the next
-  -- snap. So the climb is queued like any other bar movement and animates
-  -- upward, which is what the engine's own level-up does (gen1recomp #224).
-  -- Queued after the level lines above, so it plays under them. Guarded on
-  -- the battler and on the queue itself, because every other line here goes
-  -- out through `say` and a caller that stubs `say` has neither.
-  --
-  -- Active only, and the engine gates its own the same way -- `if mon ==
-  -- self.player.mon then self:drainNext() end` (BattleState:3855): a benched
-  -- monster has no bar, and draining the *active's* bar to a bench-mate's HP
-  -- is a number that was never about it.
-  if active and self.messages then
-    self.messages[#self.messages + 1] =
-      { drain = battler, slot = event.slot, to = mon.hp }
-  end
+  -- HP climb is queued after every apply pass (EXP.ALL included), not here:
+  -- a frozen `to` captured before the second pass undershoots the bar.
 
   -- ...and the other half, spread over everyone still standing -- including
   -- the monster that fought, exactly as the original's second pass does.
@@ -7570,6 +7616,44 @@ function M:gainExp(event)
         if gotLevels then self:levelled(member, nil, gotLevels) end
       end
     end
+  end
+
+  -- Stamp `maxHp` from the engine stat block: the plate prefers `mon.maxHp`
+  -- (the mediated sheet spelling) over `stats.hp`, and Experience.apply only
+  -- writes the latter. Without this a level-up moves the save numbers and
+  -- leaves the bar out of the old maximum.
+  --
+  -- Current HP on a *different* display table rises by the same delta --
+  -- copying save HP would heal to full, because the save is not the copy
+  -- taking mid-fight damage. Same-table (host-sim) already received the
+  -- gain inside Experience.apply, so it is left alone.
+  local newMax = tonumber(mon.stats and mon.stats.hp)
+  local grown = 0
+  if newMax and newMax == newMax then
+    newMax = math.floor(newMax)
+    grown = newMax - math.floor(tonumber(oldMax) or newMax)
+    if newMax > 0 then mon.maxHp = newMax end
+  end
+  local display = battler and battler.mon
+  local fieldedAt = slot and tonumber(slot.active)
+  local onPlate = display ~= nil and (display == mon
+    or (paidAt ~= nil and fieldedAt ~= nil and paidAt == fieldedAt))
+  if onPlate and display ~= mon then
+    display.stats = display.stats or {}
+    if newMax and newMax > 0 then display.stats.hp = newMax end
+    display.maxHp = display.stats.hp or mon.maxHp
+    if grown > 0 then
+      local ceiling = tonumber(display.maxHp) or newMax or 0
+      display.hp = math.min(ceiling, (tonumber(display.hp) or 0) + grown)
+    end
+    if mon.level then display.level = mon.level end
+  end
+  -- Climb after every apply pass so `to` is the HP the monster actually has.
+  -- Active / on-plate only: a benched award has no bar (BattleState:3855).
+  if onPlate and grown > 0 and self.messages then
+    self.messages[#self.messages + 1] = {
+      drain = battler, slot = event.slot, to = (display or mon).hp,
+    }
   end
 end
 
@@ -8614,14 +8698,16 @@ function M:uploadMediated()
   Mediated.sendParty(self.transport, self.battleId, mons, mine.side, bag,
     Mediated.badgesOf(self.game))
 
-  -- ...and the trainer's team, from the host alone. `Hub:battleSeat` maps a
-  -- side-"b" party from the host of a coop_npc onto the synthetic npc seat
-  -- rather than displacing the host's own, which is why this can be a second
-  -- mmo.battle_party on the same connection.
+  -- ...and the trainer's team, from the initiator alone. `Hub:battleSeat`
+  -- maps a side-"b" party from the host of a coop_npc onto the synthetic npc
+  -- seat rather than displacing their own, which is why this can be a second
+  -- mmo.battle_party on the same connection. Kit is this game's trainer
+  -- data, held on the hub for this fight only.
   if self.host and self.mode == "coop_npc" then
     local npc = self:npcMons()
     if npc and #npc > 0 then
-      Mediated.sendParty(self.transport, self.battleId, npc, "b")
+      Mediated.sendParty(self.transport, self.battleId, npc, "b",
+        Mediated.trainerBagEntries(self.trainer, self.game))
     else
       mod.log:warn("the trainer's party could not be described for a refereed "
         .. "2-on-2 -- report which trainer it was")
@@ -8783,7 +8869,11 @@ function M:medRows(msg)
       say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
         tostring(msg.text)))
     end
-    if at then rows[#rows + 1] = { kind = "send", slot = index, index = at } end
+    if at then
+      rows[#rows + 1] = {
+        kind = "send", slot = index, index = at, confused = msg.confused,
+      }
+    end
 
   elseif kind == "damage" or kind == "drain" then
     -- The resulting HP and never the amount, which is the rule the co-op
@@ -8943,10 +9033,18 @@ function M:medRows(msg)
     -- Truth first: the plate reads `mon.status`, and a condition the referee
     -- lifted (wake, thaw, Awakening, Full Heal) arrives with no token. The
     -- VFX row still only draws -- a lift is a sentence rather than a sight.
+    -- `confused` rides beside it: 1 inflicted, 0 snapped out, never a
+    -- standing token.
     if index then
-      rows[#rows + 1] = { kind = "status", slot = index, status = msg.status }
+      rows[#rows + 1] = {
+        kind = "status", slot = index, status = msg.status,
+        confused = msg.confused,
+      }
     end
     local look = Vfx.forStatus(msg.status)
+    if not look and msg.confused == 1 then
+      look = Vfx.forStatus("confusion")
+    end
     if look and index then
       rows[#rows + 1] = { kind = "vfx", spec = look, slot = index }
     end
@@ -9494,6 +9592,20 @@ function M:sendMediatedChoice(action)
   elseif kind == "run" then
     fields = { action = "run" }
   else
+    local moveIndex = math.floor(tonumber(action.move) or 1)
+    -- Same gate as the move menu: a 0-PP index is refused here so a call
+    -- site that skipped the menu cannot put a choice on the wire the hub
+    -- will silently drop.
+    local pick = self:liveMoves()[moveIndex]
+    if pick and self:hasLivePP() and (tonumber(pick.pp) or 0) <= 0 then
+      -- Same sentence and phase as updateMove. A call site that skipped the
+      -- menu (target-picker commit) must still show why the choice did not
+      -- go -- otherwise commit returns the seat to choose with a blank box.
+      self:say("There's no PP left\nfor this move!")
+      self.phase = "messages"
+      self.after = "move"
+      return false
+    end
     fields = { action = "fight", move = (action.move or 1) - 1,
                target = self:medFieldOf(action.target) }
   end

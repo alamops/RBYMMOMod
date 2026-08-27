@@ -360,14 +360,16 @@ function testCoopNpcMediated() {
     && record.parties.get('nc1b').mons.length === 1,
     "and the trainer's team is dealt one to each seat");
 
-  // A trainer seat the host uploaded no bag for is seeded with the gym kit, so
-  // a gym leader can potion. testCoopWildCatchCatcher is the other half of this
-  // claim: wildlife is never seeded, because a wild monster has no bag.
+  // A trainer seat the host uploaded no bag for stays empty. The gym kit
+  // used to be seeded onto *each* NPC seat, so a 2v2 looked like eight
+  // healing items and every Youngster drank potions. Hosts now upload the
+  // trainer's own kit with the side-"b" party; nothing here invents one.
   ok(!relay.isWildSeat(record, 'nc1a'),
     'a coop_npc npc seat is a trainer, not wildlife');
-  ok(record.bags.get('nc1a'), 'so it was seeded with a gym kit');
-  ok(record.sim.byId.get('nc1a').bag.POTION === relay.Turn.DEFAULT_NPC_BAG.POTION,
-    'the kit the sim actually fights with');
+  ok(!record.sim.byId.get('nc1a').bag,
+    'no uploaded bag means no gym kit');
+  ok(!record.sim.byId.get('nc1b').bag,
+    '...on either seat');
 
   const ready = take(a, 'mmo.battle_ready');
   ok(ready && ready.sides.b.length === 2,
@@ -397,6 +399,160 @@ function testCoopNpcMediated() {
     "and the trainer's seats as the side that lost");
   ok(clock.now() === 1_000_000,
     'and no time passed at all -- the trainer answered in the same breath');
+}
+
+function testCoopNpcTrainerBagShared() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'BAGA');
+  const b = dial(relay, 'BAGB');
+  relay.openCoopBattle('c-bag', [a.id, b.id],
+    { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get('c-bag');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'c-bag', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'c-bag', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'c-bag',
+    side: 'b',
+    mons: [mon(10, 1), mon(10, 1)],
+    bag: [{ id: 'POTION', count: 1 }],
+  });
+  ok(record.sim !== null, "the fight opens with the trainer's uploaded kit");
+  const bagA = record.sim.byId.get(record.npcIds[0]).bag;
+  const bagB = record.sim.byId.get(record.npcIds[1]).bag;
+  ok(bagA && bagA.POTION === 1,
+    'one potion, the count the trainer actually has');
+  ok(bagB && bagB.POTION === 1, 'visible on the second seat too');
+  ok(bagA === bagB, 'the same table -- spending one spends both');
+}
+
+function testCoopNpcGuestSideBRefused() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'HOSTA');
+  const b = dial(relay, 'GUESTB');
+  relay.openCoopBattle('c-guestb', [a.id, b.id],
+    { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get('c-guestb');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'c-guestb', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'c-guestb', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party',
+    battle: 'c-guestb',
+    side: 'b',
+    mons: [mon(10, 1), mon(10, 1)],
+    bag: [{ id: 'POTION', count: 9 }],
+  });
+  ok(record.sim === null, 'a guest side-b does not open the fight');
+  ok(record.parties.get(b.id) && record.parties.get(b.id).mons[0].hp === 100,
+    "and does not replace the guest's own party");
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'c-guestb',
+    side: 'b',
+    mons: [mon(10, 1), mon(10, 1)],
+    bag: [{ id: 'POTION', count: 1 }],
+  });
+  ok(record.sim !== null, "the initiator's side-b is what seats the trainer");
+  ok(record.sim.byId.get(record.npcIds[0]).bag
+      && record.sim.byId.get(record.npcIds[0]).bag.POTION === 1,
+    "with the initiator's kit, not the guest's");
+}
+
+function testCoopNpcBagDump() {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dest = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'npc-bags-')),
+    'npc_bags.txt');
+  const clock = makeClock();
+  const relay = makeRelay(clock, { dumpNpcBags: dest });
+  const a = dial(relay, 'DUMPA');
+  const b = dial(relay, 'DUMPB');
+  relay.openCoopBattle('c-dump', [a.id, b.id],
+    { mode: 'coop_npc', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'c-dump', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'c-dump', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'c-dump',
+    side: 'b',
+    mons: [mon(10, 1), mon(10, 1)],
+    bag: [{ id: 'POTION', count: 1 }],
+  });
+  const record = relay.battles.get('c-dump');
+  const text = fs.readFileSync(dest, 'utf8');
+  const lines = text.trimEnd().split('\n');
+  ok(lines[0] === 'coop_npc\t1\t2',
+    'dump header is mode, shared, seat count');
+  ok(lines[1] === `${record.npcIds[0]}\tempty=0\tgym=0\theal=1`,
+    'first seat is shape-only: one heal, not the gym seed');
+  ok(lines[2] === `${record.npcIds[1]}\tempty=0\tgym=0\theal=1`,
+    'second seat aliases the same shape');
+  ok(text.indexOf('POTION') < 0 && text.indexOf('SUPER_POTION') < 0,
+    'item ids never leave the hub (player game sheet stays in the client)');
+  ok(text.indexOf('FULL_HEAL') < 0 && text.indexOf('X_ATTACK') < 0,
+    'and neither do other stacks from that same sheet');
+}
+
+function testCoopNpcBagDumpStaysOutOfTree() {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const dest = path.join(process.cwd(), 'npc_bags_refuse_test.txt');
+  try { fs.unlinkSync(dest); } catch (_) {}
+  const clock = makeClock();
+  const relay = makeRelay(clock, { dumpNpcBags: dest });
+  const a = dial(relay, 'TREESA');
+  const b = dial(relay, 'TREESB');
+  relay.openCoopBattle('c-tree', [a.id, b.id],
+    { mode: 'coop_npc', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'c-tree', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'c-tree', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'c-tree',
+    side: 'b',
+    mons: [mon(10, 1), mon(10, 1)],
+    bag: [{ id: 'POTION', count: 1 }],
+  });
+  ok(!fs.existsSync(dest),
+    'a dump path inside the working tree is refused');
+}
+
+function testNpcBagHealCountsGymKitOnly() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const flags = relay.npcBagFlags({ HYPER_POTION: 8, POTION: 1 });
+  ok(flags.heal === 1,
+    'heal counts gym-kit POTION, not a HYPER_POTION substring match');
+  ok(flags.gym === false, 'HYPER_POTION extra keeps gym=false');
+  const gym = relay.npcBagFlags({
+    POTION: 2, SUPER_POTION: 1, FULL_HEAL: 1, X_ATTACK: 1,
+  });
+  ok(gym.heal === 4, 'one gym kit is 2+1+1 heals (X_ATTACK is not a heal)');
+  ok(gym.gym === true, '...and matches the former seed');
 }
 
 function testTradeRelayStillWorks() {
@@ -633,6 +789,11 @@ testRelayHardCutDuringBattle();
 testDisconnectForfeitAfterGrace();
 testDrawCarriesNoLists();
 testCoopNpcMediated();
+testCoopNpcTrainerBagShared();
+testCoopNpcGuestSideBRefused();
+testCoopNpcBagDump();
+testCoopNpcBagDumpStaysOutOfTree();
+testNpcBagHealCountsGymKitOnly();
 testCoopWildSeating();
 testCoopWildCatchCatcher();
 testTradeRelayStillWorks();

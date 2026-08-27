@@ -37,6 +37,9 @@
 --   6. **a solo trainer fight** diverts, plays to a win, and pays out: prize
 --      money on the save, the engine's onFinish called with "win" (which is
 --      the script's resume), and the player back in the overworld and walking.
+--      The foe bag is the trainer's own kit (empty for a uses=0 Youngster,
+--      never DEFAULT_NPC_BAG), and picking a 0-PP move stays on the list
+--      instead of spending the turn.
 --   7. **a real sighted trainer** (Gen 1; Gold's map objects carry no Gen 1
 --      sight cone, so the leg skips there) walked into for real, so the
 --      *defeated flag* is asserted against a live npcId rather than a staged
@@ -58,6 +61,9 @@
 --     `MediatedBattle`, which carries no `.sim`; every fight helper in
 --     mmo_util keys on that field and would report a fight over before its
 --     first turn opened.
+--   * Trainer-kit and 0-PP probes *do* live in mmo_util (`assertTrainerKit`,
+--     `assertZeroPpRefused`): the same two bugs show up on hub-refereed
+--     2v2s, and a solo-only copy would not catch a doubled NPC bag.
 --   * `stageRefusedWild` -- mmo_util's `stageWild` pushes the state itself and
 --     the divert fires *inside* that push (StateStack:push emits screen.pushed
 --     after enter()), so a refusal field stamped on the returned state would
@@ -899,6 +905,8 @@ return function(game)
         end
         check(awaitCommandMenu("the solo trainer command grid"),
               "the command grid opens on the mod's screen")
+        H.assertTrainerKit(game, check, log, { solo = true, class = class })
+        H.assertZeroPpRefused(game, check, log)
         shot("solo-trainer-battle")
 
         do

@@ -833,7 +833,7 @@ return function(game)
       end
     end
     coopClass = best and best.id
-    if best then log("co-op trainer:", best.id, "total level", best.total) end
+    if best then log("co-op trainer: picked, total level", best.total) end
     check(coopClass ~= nil, "the dataset has a trainer with two POKeMON to fight")
   end
 
@@ -860,7 +860,8 @@ return function(game)
     if potionId then
       game.save.inventory[potionId] = (game.save.inventory[potionId] or 0) + 3
     end
-    log("switch target:", tostring(switchTarget), "item:", tostring(potionId))
+    log("switch target:", switchTarget and "set" or "none",
+        "item:", potionId and "set" or "none")
   end
 
   local finished = nil
@@ -887,7 +888,13 @@ return function(game)
     return battle
   end
 
+  local partyWatch
   if coopClass then
+    -- Extra host-upload log only. The eight-item lock is the Node referee
+    -- dump (MMO_BATTLE_DUMP): wrapping mmo.battle_party sees the client's
+    -- sheet, not fighter.bag, so a hub that re-seeded DEFAULT_NPC_BAG would
+    -- still look green. Role a is the one that stages and uploads side b.
+    if ROLE == "a" then partyWatch = H.watchPartyUploads(game) end
     -- Without a live hub + party, Coop.onTrainerBattle leaves the engine
     -- battle alone. The wait-for-the-cover loop below used to tap A on any
     -- item-less top screen -- which is exactly BattleState -- and would
@@ -1065,6 +1072,18 @@ return function(game)
       -- The command box is what this screenshot is of, so it waits for it.
       check(H.awaitCommandMenu(game, "the co-op command menu for the battle shot"),
             "the co-op command grid opens once the opening line is done")
+      H.assertTrainerKit(game, check, log, { class = coopClass })
+      if partyWatch then
+        if log then
+          local uploaded = H.uploadedTrainerBag(partyWatch)
+          log("host uploaded side-b (not the referee bag):",
+              (uploaded and uploaded.nonempty) and "present" or "empty")
+        end
+        if partyWatch.stop then partyWatch.stop() end
+      end
+      if ROLE == "a" then
+        H.assertZeroPpRefused(game, check, log)
+      end
       U.wait(30)
       shot("coop-battle")
       -- The screen is guarded against a draw error, so a layout bug is one log

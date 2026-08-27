@@ -564,6 +564,35 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 9b. SoloBrain.bagFor -- actual counts, not the gym kit
+-- ------------------------------------------------------------------
+
+do
+  DATA.ai_classes.FIX_TRAINER_BAGFOR = { item = "FIX_ITEM_CLASS", uses = 2 }
+  local trainer = { id = "FIX_TRAINER_BAGFOR" }
+  local bag = SoloBrain.bagFor(trainer, DATA, 1)
+  eq(bag.FIX_ITEM_CLASS, 2, "Gen 1 with no items list: class.item x class.uses")
+end
+
+do
+  DATA.ai_classes.FIX_TRAINER_BAGNONE = { item = "FIX_ITEM_UNUSED", uses = 0 }
+  local trainer = { id = "FIX_TRAINER_BAGNONE" }
+  local bag = SoloBrain.bagFor(trainer, DATA, 1)
+  eq(bag.FIX_ITEM_UNUSED, nil, "uses = 0 is an empty bag, not a free potion")
+end
+
+do
+  local trainer = { id = "FIX_TRAINER_BAG2", items = { "FIX_ITEM_A", "FIX_ITEM_A", "FIX_ITEM_B" } }
+  local bag = SoloBrain.bagFor(trainer, DATA, 2)
+  eq(bag.FIX_ITEM_A, 2, "Gen 2 counts duplicate entries as uses")
+  eq(bag.FIX_ITEM_B, 1, "...and keeps the rest")
+  local entries = SoloBrain.bagEntries(trainer, DATA, 2)
+  eq(#entries, 2, "bagEntries is the wire shape")
+  eq(entries[1].id, "FIX_ITEM_A", "...sorted by id")
+  eq(entries[1].count, 2, "...with the counted uses")
+end
+
+-- ------------------------------------------------------------------
 -- 10. disabled and empty-PP slots are never returned
 -- ------------------------------------------------------------------
 

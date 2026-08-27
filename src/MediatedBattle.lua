@@ -44,6 +44,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Effects1 = need("BattleSim/Effects")
 local Gen = need("Gen")
+local SoloBrain = need("SoloBrain")
 local Battlefield = need("Battlefield")
 -- Which particle effect a move / item / condition / stat stage wears. A
 -- catalogue, not a renderer: Battlefield draws what this resolves.
@@ -754,10 +755,10 @@ end
 
 -- One seat's team.  `side` is optional for a 1v1 -- there are two combatants and
 -- the intermediator knows which is which from the session it brokered -- and is
--- what tells a co-op upload apart: it is how the host of a fight against an NPC
--- fills the synthetic npc seat (side "b") without displacing its own.
--- `bag` is the optional inventory claim for this fight (PROTOCOL 15); omit or
--- pass nil for an empty sheet.
+-- what tells an NPC upload apart: only the initiator fills the synthetic npc
+-- seat (side "b") without displacing their own. 1v1 / 2v2 humans each send
+-- their own party (and bag). `bag` is the optional inventory claim for this
+-- fight (PROTOCOL 15); omit or pass nil for an empty sheet.
 -- `badges` is optional: a list of earned badge ids for human seats (not NPC).
 function M.sendParty(transport, battle, mons, side, bag, badges)
   if not (transport and battle) then return false end
@@ -845,6 +846,23 @@ function M.itemIsBattleUsable(id, game)
   if effect.pokeFlute or effect.noConsume then return effect end
   if def and (def.key or def.machine) then return nil end
   return effect
+end
+
+-- Trainer kit as a `{id, count}` list for a side-"b" NPC upload. From the
+-- initiator's game data (SoloBrain.bagEntries), filtered to BattleSim-known
+-- ids so an unknown class item cannot refuse the whole party sheet.
+function M.trainerBagEntries(trainer, game)
+  if not trainer then return nil end
+  local ok, entries = pcall(SoloBrain.bagEntries, trainer,
+    game and game.data, Gen.generation(game))
+  if not (ok and type(entries) == "table") then return nil end
+  local out = {}
+  for _, entry in ipairs(entries) do
+    if type(entry) == "table" and M.itemIsBattleUsable(entry.id, game) then
+      out[#out + 1] = entry
+    end
+  end
+  return out
 end
 
 -- Engine save.statExp keys for BattleSim vitaminStat tokens.
@@ -1265,6 +1283,9 @@ function M.new(opts)
     -- shape, including a peer fight, where the figure on that edge is a
     -- player and comes from the roster instead.
     trainer   = opts.trainer,
+    -- Trainer sheets for a solo 1xNPC upload (side "b"), same claim the
+    -- co-op host sends. Nil on wild (wildParty) and on every peer fight.
+    npcParty  = opts.npcParty,
 
     -- A test hook, and named as one.  With it set, a turn is answered the
     -- instant it opens with the first move at the default target, which is
@@ -1739,7 +1760,12 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     -- seat that never drained reads exactly as it did before.
     shownHp = self:shownHpOf(slot),
     maxHp = slot.maxHp or 1,
-    status = slot.status,
+    -- Own-seat fallback: the snapshot sheet already named the condition, and
+    -- a send that predates carrying `status` would otherwise draw a healthy
+    -- card over a poisoned monster. The foe's chip is the send itself -- we
+    -- hold no sheet for them.
+    status = slot.status or (monHint and monHint.status) or nil,
+    confused = slot.confused or false,
     species = key,
     icon = icon,
     front = front,
@@ -2028,6 +2054,7 @@ end
 
 function M:say(text)
   if type(text) ~= "string" or text == "" then return end
+  self.lines = self.lines or {}
   self.lines[#self.lines + 1] = text
 end
 
@@ -2064,12 +2091,17 @@ function M:start(game)
   if self.role == "host" or self.mode == "wild" then
     M.sendRuleset(self.transport, self.game)
   end
-  -- No side: a 1v1 has none to name. Wild uploads the encounter as side "b".
+  -- No side: a 1v1 has none to name. NPC uploads (wild / trainer) are side
+  -- "b" from this client, the initiator. Wild carries no bag; a trainer
+  -- carries the kit from this game's data, for this fight only.
   local bag = M.snapshotBag(self.game)
   self.bagSheet = M.bagCounts(bag)
   M.sendParty(self.transport, self.battle, mons, nil, bag, M.badgesOf(self.game))
   if self.mode == "wild" and type(self.wildParty) == "table" and #self.wildParty > 0 then
     M.sendParty(self.transport, self.battle, self.wildParty, "b")
+  elseif type(self.npcParty) == "table" and #self.npcParty > 0 then
+    M.sendParty(self.transport, self.battle, self.npcParty, "b",
+      M.trainerBagEntries(self.trainer, self.game))
   end
   return true
 end
@@ -2376,7 +2408,8 @@ function M:onEvent(msg)
     -- A condition lifting is a sentence rather than a sight: the catalogue
     -- answers nil for the token that is not there, so nothing is filed.
     -- Anchored on the seat that took it, in that condition's colours.
-    self:queueVfx(Vfx.forStatus(msg.status), msg.slot)
+    self:queueVfx(Vfx.forStatus(msg.status)
+      or (msg.confused == 1 and Vfx.forStatus("confusion") or nil), msg.slot)
 
   elseif kind == "stat" then
     -- Arrows on the seat, and the direction comes off the sentence rather than
@@ -2541,8 +2574,13 @@ function M:syncMineHp(msg)
   if msg.slot ~= self:mySlot() then return end
   local mon = self.mine and self.mine[self.active]
   if not mon then return end
+  local slot = self.slots[msg.slot]
+  local grown = (type(slot) == "table" and tonumber(slot.levelHpGrown)) or 0
+  if grown < 0 then grown = 0 end
   if msg.hp ~= nil then
-    mon.hp = msg.hp
+    local hp = msg.hp
+    if hp > 0 and grown > 0 then hp = hp + grown end
+    mon.hp = hp
   elseif msg.amount ~= nil and msg.t == "damage" then
     mon.hp = max(0, (mon.hp or 0) - msg.amount)
   end
@@ -2555,6 +2593,11 @@ end
 function M:syncMineStatus(msg)
   if msg.t ~= "status" then return end
   if msg.slot ~= self:mySlot() then return end
+  -- Confusion is fight-local; a confused-only event must not write the save
+  -- (snap-out would otherwise clear PSN).
+  if msg.confused ~= nil and (type(msg.status) ~= "string" or msg.status == "") then
+    return
+  end
   local status = msg.status
   if type(status) ~= "string" or status == "" then status = nil end
   local sheet = self.mine and self.mine[self.active]
@@ -2803,6 +2846,11 @@ function M:gainExp(msg)
     self:warnNoExp("the party monster this fight is holding has no stat block")
     return false
   end
+  -- Max HP before any apply pass. A level raises both numbers on the save
+  -- mon; the arena still holds the referee's pre-level pair, so the plate
+  -- is told the *delta* after every pass (EXP.ALL included) rather than
+  -- copied from the save -- the save is not taking mid-fight damage.
+  local oldMax = tonumber(mon.stats.hp)
   -- The fourth thing `apply` reads, and the one this used to look up *after*
   -- the award: recomputing the stats needs the receiving monster's own species
   -- record, so a species this build cannot name is the same half-way throw.
@@ -2930,16 +2978,9 @@ function M:gainExp(msg)
 
   self:levelled(mon, name, levels)
 
-  -- **No HP-climb row, and that is a decision rather than an omission.**
-  -- CoopBattle queues one because there the levelling mon *is* the battler on
-  -- the field, so its max HP moves under a bar mid-fight. Here the field is the
-  -- referee's: `slot.hp` / `slot.maxHp` are its numbers, the save mon is a
-  -- different table, and this fight goes on being fought with the sheet that
-  -- was uploaded. Climbing the arena bar to a save-file HP would put a number
-  -- on screen no referee holds -- one the very next `damage` event would
-  -- contradict, and one `startDrain` would clamp against the old maximum
-  -- anyway. The stat gain is real and is already banked; it shows in the party
-  -- screen, and in the next battle's upload.
+  -- **HP climb is queued after every apply pass**, not here. EXP.ALL /
+  -- EXP.SHARE can still raise this same mon; `syncLevelHp` at the end of
+  -- `gainExp` sees the full delta.
 
   -- ...and the other half, spread over everyone still standing -- including
   -- the monster that fought, exactly as the original's second pass does.
@@ -3021,7 +3062,52 @@ function M:gainExp(msg)
       end
     end
   end
+
+  -- A level raises both HP numbers, and the bar has to be told. The field
+  -- is the referee's sheet, the save mon is a different table, and copying
+  -- save HP onto the plate would heal to full (the save is not taking the
+  -- fight's damage). The delta is the level's own gain, added to the
+  -- referee's pair, then the bar climbs -- same chronology CoopBattle uses
+  -- (gen1recomp #224). Bench awards stay text and save-file only.
+  self:syncLevelHp(paidIndex, oldMax, mon, onField)
   return true
+end
+
+-- Apply a level-up's HP growth to the plate (and the fight sheet the party
+-- menu reads). `grown` is maxHP after Experience.apply minus maxHP before;
+-- current HP on the arena rises by the same amount, never to the save mon's
+-- post-award HP.
+function M:syncLevelHp(paidIndex, oldMax, mon, onField)
+  local newMax = tonumber(mon and mon.stats and mon.stats.hp)
+  if not newMax or newMax ~= newMax then return end
+  newMax = floor(newMax)
+  local grown = newMax - floor(tonumber(oldMax) or newMax)
+  if grown <= 0 then return end
+  local sheet = self.mine and self.mine[paidIndex]
+  if type(sheet) == "table" then
+    sheet.maxHp = newMax
+    sheet.hp = min(newMax, (tonumber(sheet.hp) or 0) + grown)
+    if mon.level then sheet.level = mon.level end
+  end
+  if not onField then return end
+  local index = self:mySlot()
+  local arena = index ~= nil and self.slots[index]
+  if type(arena) ~= "table" then return end
+  arena.maxHp = max(1, (tonumber(arena.maxHp) or 1) + grown)
+  arena.hp = max(0, (tonumber(arena.hp) or 0) + grown)
+  if arena.hp > arena.maxHp then arena.maxHp = arena.hp end
+  -- Remember the delta: the referee never levels, so the next `damage`
+  -- still states the pre-level pair. noteSlot / syncMineHp add this back
+  -- rather than snapping the plate (and the party sheet) to the old numbers.
+  arena.levelHpGrown = (tonumber(arena.levelHpGrown) or 0) + grown
+  -- Raise the ceiling before the climb so startDrain does not clamp `to`
+  -- against the old maximum. Battlefield queues the bar; classic has no
+  -- drain and welds the display clock to truth.
+  if self:usesBattlefield() then
+    self:queueDrain(index)
+  else
+    arena.shownHp = arena.hp
+  end
 end
 
 -- What a level-up costs, wherever it happened: a line, and whatever moves come
@@ -3121,12 +3207,23 @@ end
 -- writes a condition when it states one: a residual `damage` carries the
 -- status that dealt it, a `send` carries the newcomer's, and neither is
 -- allowed to wipe a chip they never mentioned.
+--
+-- Confusion is a fight-local volatile, not a standing status: `confused=1/0`
+-- is independent of PSN/SLP/… and a confused-only event must not clear them.
+-- A send that omits the flag means the newcomer is not confused.
 local function applyMsgStatus(target, msg)
   if type(target) ~= "table" or type(msg) ~= "table" then return end
+  if msg.confused ~= nil then
+    target.confused = (tonumber(msg.confused) or 0) == 1 or nil
+  elseif msg.t == "send" then
+    target.confused = nil
+  end
   if msg.t == "status" then
     local status = msg.status
     if type(status) ~= "string" or status == "" then
-      target.status = nil
+      if msg.confused == nil then
+        target.status = nil
+      end
     else
       target.status = status
     end
@@ -3204,6 +3301,7 @@ function M:noteSlot(msg)
         -- otherwise filled by `arriveOnSeat` at the swap, own seat only.
         level = msg.level,
       }
+      applyMsgStatus(slot.pending, msg)
       return slot
     end
     slot.species = msg.text
@@ -3228,10 +3326,20 @@ function M:noteSlot(msg)
   -- maximum ends the guessing for that seat; `max` keeps it above whatever HP
   -- arrives with it, so a stream that disagrees with itself still draws a
   -- fraction rather than a bar past its own end.
-  if msg.maxHp ~= nil then slot.maxHp = max(1, msg.maxHp) end
+  --
+  -- A local level-up is the other disagreement: the hub never applies
+  -- Experience, so the next `damage` still carries the pre-level pair.
+  -- `levelHpGrown` is that delta; it is added here rather than letting the
+  -- packet take the climb back off the plate. A fresh send is a new occupant,
+  -- so the delta is dropped and the referee's numbers win.
+  if fresh then slot.levelHpGrown = 0 end
+  local grown = (not fresh and tonumber(slot.levelHpGrown)) or 0
+  if grown < 0 then grown = 0 end
+  if msg.maxHp ~= nil then slot.maxHp = max(1, msg.maxHp) + grown end
   if msg.hp ~= nil then
     slot.hp = msg.hp
-    if msg.hp > slot.maxHp then slot.maxHp = msg.hp end
+    if slot.hp > 0 and grown > 0 then slot.hp = slot.hp + grown end
+    if slot.hp > slot.maxHp then slot.maxHp = slot.hp end
   elseif msg.amount ~= nil and msg.t == "damage" then
     slot.hp = max(0, slot.hp - msg.amount)
   end
@@ -3435,7 +3543,13 @@ function M:arriveOnSeat(index, isPlayer)
     slot.shownExpFrac = nil
     slot.shownLevel = nil
     local mon = self.mine and self.mine[self.active]
-    if mon and mon.level then slot.level = mon.level end
+    if type(mon) == "table" then
+      if mon.level then slot.level = mon.level end
+      -- Fill, don't clobber: a send that named the condition already wrote
+      -- the seat, and a send that predates the field still gets the chip
+      -- from the snapshot sheet.
+      if slot.status == nil and mon.status then slot.status = mon.status end
+    end
   end
   self:refreshSlotSprite(index, isPlayer)
   return true
@@ -3739,6 +3853,28 @@ function M:pickMove(index)
   local mon = self:activeMon()
   local moves = mon and mon.moves
   if not (moves and moves[index]) then return false end
+  -- One empty slot is not Struggle. The hub refuses that choice with silence
+  -- (`_normaliseChoice`), this screen has already marked the turn answered,
+  -- and both players wait out BATTLE_CHOICE_TIMEOUT. Stay on the list.
+  -- Every slot empty is Struggle and still sends.
+  local pp = tonumber(moves[index].pp) or 0
+  if pp <= 0 then
+    local leftover = false
+    for _, move in ipairs(moves) do
+      if (tonumber(move.pp) or 0) > 0 then leftover = true; break end
+    end
+    if leftover then
+      self:say("There's no PP left\nfor this move!")
+      return false
+    end
+  end
+  local disable = mon.disable
+  if type(disable) == "table" and (tonumber(disable.turns) or 0) > 0
+     and tonumber(disable.moveIndex) == index then
+    local name = self:moveLabel(moves[index].id) or "The move"
+    self:say(name .. "\nis disabled!")
+    return false
+  end
   local sent = self:sendChoice({ action = "fight", move = index - 1 })
   -- Remembered only once the choice is really on the wire: a refused send
   -- leaves the turn unspent, and moving the cursor for it would be the menu
@@ -5225,6 +5361,7 @@ function M:applySwap(row)
   if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
   if slot.shownHp > (slot.maxHp or 1) then slot.maxHp = slot.shownHp end
   slot.status = arrival.status
+  slot.confused = arrival.confused
   self:arriveOnSeat(index, index == self:mySlot())
   return true
 end
@@ -5668,6 +5805,7 @@ function M:snapDisplay()
       if arrival.maxHp ~= nil then slot.maxHp = max(1, arrival.maxHp) end
       if slot.hp > (slot.maxHp or 1) then slot.maxHp = slot.hp end
       slot.status = arrival.status
+      slot.confused = arrival.confused
       -- No `arriveOnSeat` here: `exit` calls this on stubs that carry neither a
       -- game nor a party, and the pic is refreshed by the next draw anyway
       -- (`battlefieldSeat` resolves a nil sprite through `seatFront`). The
@@ -5922,6 +6060,8 @@ function M:drawEnemyHUD(Font, HudTiles)
   -- put status on the HP bar instead (CoopBattle.drawReadout).
   if slot.status then
     Font.draw(tostring(slot.status):sub(1, 3), 40, 8)
+  elseif slot.confused then
+    Font.draw("CNF", 40, 8)
   elseif slot.level then
     if HudTiles and HudTiles.tile then
       pcall(HudTiles.tile, 0x6E, 32, 8) -- <LV>
@@ -5934,12 +6074,13 @@ function M:drawEnemyHUD(Font, HudTiles)
     for i = 2, 9 do pcall(HudTiles.tile, 0x76, i * 8, 24) end
     pcall(HudTiles.tile, 0x78, 80, 24)
   end
-  local shown = { hp = slot.hp, stats = { hp = slot.maxHp or 1 } }
+  local shownHp = self:shownHpOf(slot)
+  local shown = { hp = shownHp, stats = { hp = slot.maxHp or 1 } }
   local drew = HudTiles and pcall(HudTiles.drawHPBar, self.game and self.game.data,
     2, 2, shown, nil, false)
   if not drew then
     love.graphics.setColor(0, 0, 0, 1)
-    Font.draw(("%d/%d"):format(slot.hp, slot.maxHp or 0), 16, 16)
+    Font.draw(("%d/%d"):format(shownHp, slot.maxHp or 0), 16, 16)
   end
 end
 
@@ -5953,6 +6094,8 @@ function M:drawPlayerHUD(Font, HudTiles)
   Font.draw(name, nameX(Font, 10, name), 56)
   if slot.status then
     Font.draw(tostring(slot.status):sub(1, 3), 120, 64)
+  elseif slot.confused then
+    Font.draw("CNF", 120, 64)
   else
     local level = slot.level
       or (self.mine and self.mine[self.active] and self.mine[self.active].level)
@@ -5963,15 +6106,16 @@ function M:drawPlayerHUD(Font, HudTiles)
       Font.draw(tostring(level), 120, 64)
     end
   end
-  local shown = { hp = slot.hp or 0, stats = { hp = slot.maxHp or 1 } }
+  local shownHp = self:shownHpOf(slot)
+  local shown = { hp = shownHp, stats = { hp = slot.maxHp or 1 } }
   local drew = HudTiles and pcall(HudTiles.drawHPBar, self.game and self.game.data,
     10, 9, shown, 1, false)
   if not drew then
     love.graphics.setColor(0, 0, 0, 1)
-    Font.draw(("%d/%d"):format(slot.hp or 0, slot.maxHp or 0), 88, 72)
+    Font.draw(("%d/%d"):format(shownHp, slot.maxHp or 0), 88, 72)
   else
     love.graphics.setColor(0, 0, 0, 1)
-    Font.draw(("%3d/%3d"):format(slot.hp or 0, slot.maxHp or 0), 88, 80)
+    Font.draw(("%3d/%3d"):format(shownHp, slot.maxHp or 0), 88, 80)
   end
   if HudTiles and HudTiles.tile then
     pcall(HudTiles.tile, 0x73, 144, 80)
@@ -5987,13 +6131,20 @@ function M:drawAnim()
   pcall(self.animPlayer.draw, self.animPlayer)
 end
 
-function M:drawBox(Font, text)
+function M:drawBox(Font, text, opts)
+  opts = opts or {}
   Font.drawBox(0, 12, 20, 6)
   love.graphics.setColor(0, 0, 0, 1)
   local y = 112
   for line in tostring(text or ""):gmatch("[^\n]+") do
     Font.draw(line, 8, y)
     y = y + 16
+  end
+  -- Hold lines pass `{ hint = false }` so a page caret cannot look like
+  -- "press A" while the player is waiting on the other seat. Other boxes
+  -- keep today's no-caret default; only an explicit hint draws ▼.
+  if opts.hint then
+    pcall(Font.drawCode, Font, 0xEE, 144, 144)
   end
 end
 
@@ -6229,7 +6380,7 @@ function M:drawModernBand()
   if self.phase == "over" then
     return bandDrew(message(self.shown or ""))
   end
-  return bandDrew(message(self:holdLine()))
+  return bandDrew(message(self:holdLine(), { hint = false }))
 end
 
 -- What the band says when there is no menu and no queued line: which of the two
@@ -6309,7 +6460,7 @@ function M:drawBattlefieldMenus(Font)
     if self.phase == "over" then
       return self:drawBox(Font, self.shown or "")
     end
-    self:drawBox(Font, self:holdLine())
+    self:drawBox(Font, self:holdLine(), { hint = false })
   end
   self:withMenuBand(chrome)
 end
@@ -6483,7 +6634,7 @@ function M:drawSafe()
   if self.phase == "setup" then
     return self:drawBox(Font, "Getting ready...")
   end
-  self:drawBox(Font, self:holdLine())
+  self:drawBox(Font, self:holdLine(), { hint = false })
 end
 
 function M:draw()

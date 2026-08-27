@@ -2086,6 +2086,536 @@ function M.awaitCommandMenu(game, what)
   end, 30, what or "the co-op command menu")
 end
 
+-- ------- trainer kits and 0-PP (the two battle-system regressions)
+--
+-- Shared on purpose: solo_battle_e2e.lua, the Node-hub guest pair, and the
+-- LAN host/join pair all have to see the same two bugs. A helper that lived
+-- only in the solo driver would leave the 2v2 (eight healing items) untested
+-- on the path that actually seats two NPC boxes.
+
+-- Gym-style kit Turn.DEFAULT_NPC_BAG used to seed onto every NPC seat. Two
+-- seats × that map is four POTIONs + two SUPER POTIONs + two FULL HEALs.
+M.DEFAULT_NPC_KIT = {
+  POTION = 2, SUPER_POTION = 1, FULL_HEAL = 1, X_ATTACK = 1,
+}
+
+function M.modCtx(game)
+  local exports = M.exports(game)
+  local fn = exports and exports.isFighting
+  if type(fn) ~= "function" or not debug or not debug.getupvalue then
+    return nil
+  end
+  local i = 1
+  while true do
+    local name, val = debug.getupvalue(fn, i)
+    if not name then break end
+    if name == "ctx" then return val end
+    i = i + 1
+  end
+  return nil
+end
+
+function M.bagSummary(bag)
+  if type(bag) ~= "table" then return "(none)" end
+  -- Shape only. Item ids are the player's ROM sheet; they stay out of logs
+  -- and dump files (legal floor: no ROM inventory table in this repo).
+  if bag.heal ~= nil and bag.gym ~= nil then
+    return string.format("empty=%s gym=%s heal=%s",
+      bag.empty and "1" or "0", bag.gym and "1" or "0",
+      tostring(bag.heal))
+  end
+  local empty = true
+  for _, count in pairs(bag) do
+    if (tonumber(count) or 0) > 0 then empty = false; break end
+  end
+  return string.format("empty=%s gym=%s heal=%s",
+    empty and "1" or "0",
+    M.matchesDefaultKit(bag, 1) and "1" or "0",
+    tostring(M.bagHealCount(bag)))
+end
+
+function M.bagHealCount(bag)
+  -- Gym-seed stacks that are not X-items. Derived from DEFAULT_NPC_KIT
+  -- rather than a hardcoded heal list, so this helper does not name a ROM
+  -- inventory. HYPER_POTION is not in the seed and does not count.
+  local n = 0
+  if type(bag) ~= "table" then return 0 end
+  for id, count in pairs(bag) do
+    if type(id) == "string" and M.DEFAULT_NPC_KIT[id]
+        and not id:match("^X_") then
+      n = n + (tonumber(count) or 0)
+    end
+  end
+  return n
+end
+
+function M.matchesDefaultKit(bag, copies)
+  copies = math.floor(tonumber(copies) or 1)
+  if copies < 1 then copies = 1 end
+  if type(bag) ~= "table" then return false end
+  for id, n in pairs(M.DEFAULT_NPC_KIT) do
+    if (tonumber(bag[id]) or 0) ~= n * copies then return false end
+  end
+  local extra = false
+  for id, count in pairs(bag) do
+    if type(id) == "string" and (tonumber(count) or 0) > 0
+        and M.DEFAULT_NPC_KIT[id] == nil then
+      extra = true
+      break
+    end
+  end
+  return not extra
+end
+
+local function kitFromRecord(rec)
+  if type(rec) ~= "table" then return nil end
+  if type(rec.items) == "table" then
+    local bag = {}
+    for _, id in ipairs(rec.items) do
+      if type(id) == "string" and id ~= "" then
+        bag[id] = (bag[id] or 0) + 1
+      end
+    end
+    return bag
+  end
+  if type(rec.item) == "string" and rec.item ~= "" then
+    local uses = math.max(0, math.floor(tonumber(rec.uses) or 0))
+    if uses <= 0 then return {} end
+    return { [rec.item] = uses }
+  end
+  if rec.uses ~= nil and math.floor(tonumber(rec.uses) or 0) <= 0 then
+    return {}
+  end
+  return nil
+end
+
+function M.expectedTrainerKit(game, classId)
+  local data = game and game.data
+  if not (data and classId) then return nil end
+  local found = kitFromRecord(data.ai_classes and data.ai_classes[classId])
+  if found then return found end
+  found = kitFromRecord(data.trainers and data.trainers[classId])
+  if found then return found end
+  local classes = data.trainers and data.trainers.classes
+  local classRec = classes and classes[classId]
+  found = kitFromRecord(classRec)
+  if found then return found end
+  if type(classRec) == "table" and type(classRec.trainers) == "table" then
+    local best
+    for _, row in ipairs(classRec.trainers) do
+      local party = row and row.party
+      if party and #party >= 2 then
+        local total = 0
+        for _, spec in ipairs(party) do total = total + (spec.level or 0) end
+        if best == nil or total < best.total then
+          best = { row = row, total = total }
+        end
+      end
+    end
+    if best then return kitFromRecord(best.row) end
+    if classRec.trainers[1] then return kitFromRecord(classRec.trainers[1]) end
+  end
+  return nil
+end
+
+function M.soloFoeBag(game)
+  local ctx = M.modCtx(game)
+  local solo = ctx and ctx.solo
+  local foe = solo and solo.sim and solo.sim.byId and solo.sim.byId.solo_foe
+  return foe and foe.bag
+end
+
+function M.hubNpcBags(game)
+  local ctx = M.modCtx(game)
+  local hub = ctx and ctx.server and ctx.server.hub
+  if not (hub and type(hub.battles) == "table") then return nil end
+  for _, record in pairs(hub.battles) do
+    if record and record.mode == "coop_npc" and record.sim
+        and type(record.npcIds) == "table" and #record.npcIds >= 1 then
+      local bags, fighters = {}, {}
+      for i, seat in ipairs(record.npcIds) do
+        local fighter = record.sim.byId and record.sim.byId[seat]
+        fighters[i] = fighter
+        bags[i] = (fighter and fighter.bag)
+          or (record.bags and record.bags[seat])
+      end
+      local shared = #fighters >= 2
+        and fighters[1] ~= nil and fighters[2] ~= nil
+        and fighters[1].bag == fighters[2].bag
+      return { bags = bags, shared = shared, n = #record.npcIds }
+    end
+  end
+  return nil
+end
+
+-- Capture side-"b" mmo.battle_party bags the host uploads (the trainer kit).
+-- Extra signal only: the eight-item lock is the Node referee dump
+-- (M.readBattleDump / MMO_BATTLE_DUMP), not this wrap. An upload can be
+-- honest and the hub can still seed DEFAULT_NPC_BAG after it.
+function M.watchPartyUploads(game)
+  local seen = { uploads = {} }
+  local ctx = M.modCtx(game)
+  local transport = ctx and ctx.client and ctx.client.transport
+  if not (transport and type(transport.send) == "function") then
+    return seen
+  end
+  local inner = transport.send
+  transport.send = function(self, msgType, payload)
+    if msgType == "mmo.battle_party" and type(payload) == "table" then
+      -- Shape only: the bag itself is the player's game sheet and must
+      -- not sit on a log or a watch table that e2e prints.
+      local nonempty = false
+      if type(payload.bag) == "table" then
+        for _, entry in ipairs(payload.bag) do
+          if type(entry) == "table" and (tonumber(entry.count) or 0) > 0 then
+            nonempty = true
+            break
+          end
+        end
+      end
+      seen.uploads[#seen.uploads + 1] = {
+        side = payload.side,
+        nonempty = nonempty,
+      }
+    end
+    return inner(self, msgType, payload)
+  end
+  seen.stop = function()
+    if transport.send ~= inner then transport.send = inner end
+  end
+  return seen
+end
+
+function M.uploadedTrainerBag(watch)
+  if not (watch and watch.uploads) then return nil end
+  for i = #watch.uploads, 1, -1 do
+    local row = watch.uploads[i]
+    if row and row.side == "b" then
+      return { nonempty = row.nonempty == true }
+    end
+  end
+  return nil
+end
+
+local function bagIsEmpty(bag)
+  if type(bag) ~= "table" then return true end
+  for _, count in pairs(bag) do
+    if (tonumber(count) or 0) > 0 then return false end
+  end
+  return true
+end
+
+-- Referee NPC-bag *shape* the Node hub wrote for LOVE e2e (MMO_BATTLE_DUMP).
+-- Line 1 is `mode<TAB>shared<TAB>n`; each later line is
+-- `seat<TAB>empty=<0|1><TAB>gym=<0|1><TAB>heal=<n>`. Item ids never appear:
+-- those stacks are a client claim from the player's loaded game, and the
+-- hub holds no ROM inventory table.
+function M.readBattleDump(path)
+  path = path or os.getenv("MMO_BATTLE_DUMP")
+  if type(path) ~= "string" or path == "" then return nil end
+  local handle = io.open(path, "r")
+  if not handle then return nil end
+  local header = handle:read("*l")
+  if type(header) ~= "string" then handle:close(); return nil end
+  local mode, sharedBit, n = header:match("^(%S+)\t([01])\t(%d+)$")
+  n = tonumber(n) or 0
+  local bags = {}
+  local well = mode ~= nil
+  for _ = 1, n do
+    local line = handle:read("*l") or ""
+    local rest = line:match("^[^\t]*\t(.*)$") or ""
+    local empty, gym, heal = rest:match("^empty=([01])\tgym=([01])\theal=(%d+)$")
+    heal = tonumber(heal)
+    if not heal then well = false end
+    bags[#bags + 1] = {
+      empty = empty == "1",
+      gym = gym == "1",
+      heal = heal,
+    }
+  end
+  handle:close()
+  if not well then return nil end
+  return {
+    mode = mode,
+    shared = sharedBit == "1",
+    n = n,
+    bags = bags,
+  }
+end
+
+-- Live trainer kit vs the gym-kit seed and vs the class's own uses.
+--
+-- Prefer the in-process referee (SoloBattle / LAN Hub.lua). On a Node hub,
+-- read MMO_BATTLE_DUMP -- that is fighter.bag after shareNpcBags, not the
+-- client's upload. An upload is necessary but not the eight-item bug
+-- (the hub used to seed DEFAULT_NPC_BAG after an empty one).
+function M.assertTrainerKit(game, check, log, opts)
+  opts = opts or {}
+  local expected = M.expectedTrainerKit(game, opts.class)
+  if log then
+    local kind = "unknown"
+    if expected ~= nil then
+      kind = bagIsEmpty(expected) and "empty" or "nonempty"
+    end
+    log("trainer kit expected:", kind, "class", tostring(opts.class))
+  end
+
+  local dumpPath = os.getenv("MMO_BATTLE_DUMP")
+  if dumpPath == "" then dumpPath = nil end
+
+  local bag, shared, source
+  if opts.solo then
+    bag = M.soloFoeBag(game)
+    source = "solo foe"
+  else
+    local npc = M.hubNpcBags(game)
+    if npc then
+      bag = npc.bags[1]
+      shared = npc.shared
+      source = "lan hub"
+      if npc.n >= 2 then
+        check(shared == true,
+              "both NPC seats share one bag table -- a 2v2 does not clone "
+              .. "the kit",
+              M.bagSummary(npc.bags[1]) .. " / " .. M.bagSummary(npc.bags[2]))
+      end
+    else
+      local dumped = M.readBattleDump(dumpPath)
+      if dumped and dumped.mode and dumped.n >= 1 then
+        bag = dumped.bags[1]
+        shared = dumped.shared
+        source = "node hub dump"
+        if dumped.n >= 2 then
+          check(shared == true,
+                "both NPC seats share one bag -- a 2v2 does not clone the kit",
+                M.bagSummary(dumped.bags[1]) .. " / "
+                  .. M.bagSummary(dumped.bags[2]))
+        end
+      elseif dumpPath then
+        check(false,
+              "the Node hub dumped NPC bags for this fight",
+              tostring(dumpPath))
+        return
+      else
+        if log then
+          log("skip trainer kit -- no in-process hub on this side")
+        end
+        return
+      end
+    end
+  end
+  if log then
+    log("trainer kit actual (" .. source .. "):", M.bagSummary(bag))
+  end
+
+  if source == "node hub dump" then
+    -- Shape only: item ids never left the hub. gym is this mod's former
+    -- DEFAULT_NPC_BAG seed; heal is gym-seed stacks that heal or cure.
+    check(bag.gym ~= true,
+          "the trainer is not carrying the generic gym kit",
+          M.bagSummary(bag))
+    check((tonumber(bag.heal) or 0) < 8,
+          "healing items stay under two gym kits",
+          tostring(bag.heal))
+    if expected ~= nil and bagIsEmpty(expected) then
+      check(bag.empty == true,
+            "a trainer with no items carries none -- not potion spam",
+            M.bagSummary(bag))
+    elseif expected ~= nil then
+      check(bag.empty ~= true,
+            "a trainer that carries items still has a bag on the referee",
+            M.bagSummary(bag))
+    end
+    return
+  end
+
+  check(not M.matchesDefaultKit(bag, 1),
+        "the trainer is not carrying the generic gym kit",
+        M.bagSummary(bag))
+  check(not M.matchesDefaultKit(bag, 2),
+        "and not two copies of it (the 2v2 eight-item seed)",
+        M.bagSummary(bag))
+  check(M.bagHealCount(bag) < 8,
+        "healing items stay under two gym kits",
+        tostring(M.bagHealCount(bag)))
+
+  if expected ~= nil and bagIsEmpty(expected) then
+    check(bagIsEmpty(bag),
+          "a trainer with no items carries none -- not potion spam",
+          M.bagSummary(bag))
+  elseif expected ~= nil then
+    -- Uploads drop ids BattleSim cannot use, so actual ⊆ expected rather
+    -- than a byte match. Extra stacks from the gym kit fail this. The
+    -- check names no item: those ids are the player's ROM sheet.
+    for id, count in pairs(bag or {}) do
+      if type(id) == "string" and (tonumber(count) or 0) > 0 then
+        check((tonumber(expected[id]) or 0) >= (tonumber(count) or 0),
+              "no extra stack beyond the trainer's own kit",
+              M.bagSummary(bag))
+      end
+    end
+  end
+end
+
+local function screenSays(top)
+  if not top then return "" end
+  local chunks = {}
+  -- The live box: both screens pop the queue into `shown` on the next ticks,
+  -- so a wait after the A tap will miss `lines` / `messages` and still have
+  -- the PP sentence here.
+  if type(top.shown) == "string" and top.shown ~= "" then
+    chunks[#chunks + 1] = top.shown
+  elseif type(top.shown) == "table" then
+    for _, line in ipairs(top.shown) do
+      chunks[#chunks + 1] = tostring(line)
+    end
+  end
+  if type(top.lines) == "table" then
+    for _, line in ipairs(top.lines) do
+      chunks[#chunks + 1] = tostring(line)
+    end
+  end
+  if type(top.messages) == "table" then
+    for _, page in ipairs(top.messages) do
+      if type(page) == "table" then
+        for _, line in ipairs(page) do
+          chunks[#chunks + 1] = tostring(line)
+        end
+      elseif type(page) == "string" then
+        chunks[#chunks + 1] = page
+      end
+    end
+  end
+  return table.concat(chunks, "\n")
+end
+
+local function liveMovesOf(top)
+  if not top then return nil end
+  if top.mmoBattle == true then
+    local mon = top.activeMon and top:activeMon()
+    return mon and mon.moves
+  end
+  if type(top.liveMoves) == "function" then
+    local ok, moves = pcall(top.liveMoves, top)
+    if ok then return moves end
+  end
+  return nil
+end
+
+local function backToChoose(game)
+  for _ = 1, 48 do
+    local top = M.top(game)
+    if not top then return false end
+    if top.phase == "choose" then return true end
+    if top.phase == "messages" then
+      U.tap(game, "a")
+    else
+      U.tap(game, "b")
+    end
+    U.wait(4)
+  end
+  local top = M.top(game)
+  return top ~= nil and top.phase == "choose"
+end
+
+-- Drain one move, pick it, and require the menu to stay put with a PP line.
+-- Restore PP afterwards so the mash-A remainder of the leg can still finish.
+-- A one-move lead gets a dummy empty slot so leftover PP still exists --
+-- skipping that case would leave the stall untested on a starter.
+function M.assertZeroPpRefused(game, check, log)
+  local top = M.top(game)
+  if not top or (top.phase ~= "choose" and top.phase ~= "move") then
+    check(false, "the command grid is up for the 0-PP pick",
+          tostring(top and top.phase))
+    return
+  end
+  local moves = liveMovesOf(top)
+  if type(moves) ~= "table" or #moves < 1 then
+    check(false, "the lead has a move list for the 0-PP pick")
+    return
+  end
+  local live = {}
+  for i, move in ipairs(moves) do
+    if (tonumber(move.pp) or 0) > 0 then live[#live + 1] = i end
+  end
+  if #live < 1 then
+    check(false, "the lead has PP left on some other move so 0-PP is not Struggle")
+    return
+  end
+  local emptyAt, saved, appended = nil, nil, false
+  if #live >= 2 or #moves >= 2 then
+    emptyAt = live[#live]
+    if #live < 2 then
+      -- Two slots, only one with PP: drain a slot that is not the leftover.
+      for i = 1, #moves do
+        if i ~= live[1] then emptyAt = i; break end
+      end
+    end
+    saved = tonumber(moves[emptyAt].pp) or 0
+    moves[emptyAt].pp = 0
+  else
+    local template = moves[live[1]]
+    moves[#moves + 1] = {
+      id = template.id, pp = 0, ppMax = template.ppMax or 0,
+    }
+    appended = true
+    emptyAt = #moves
+  end
+
+  local function restore()
+    if appended then
+      table.remove(moves, emptyAt)
+    elseif emptyAt and saved ~= nil then
+      moves[emptyAt].pp = saved
+    end
+  end
+
+  if top.phase == "choose" then
+    top.commandIndex = 1
+    U.tap(game, "a")
+    U.wait(8)
+    top = M.top(game)
+  end
+  if not (top and top.phase == "move") then
+    restore()
+    check(false, "FIGHT opened the move list for the 0-PP pick",
+          tostring(top and top.phase))
+    backToChoose(game)
+    return
+  end
+
+  if top.mmoBattle == true then
+    top.cursor = emptyAt
+  else
+    top.moveIndex = emptyAt
+  end
+  top.answeredTurn = top.answeredTurn or false
+  U.tap(game, "a")
+  U.wait(12)
+  top = M.top(game)
+  local text = screenSays(top)
+  local phase = top and top.phase
+  local stalled = phase == "play" or phase == "wait"
+    or (top and top.answeredTurn == true)
+  if log then
+    log(("0-PP pick: phase=%s answered=%s text=%s"):format(
+      tostring(phase), tostring(top and top.answeredTurn),
+      text:gsub("%s+", " "):sub(1, 80)))
+  end
+  restore()
+
+  check(not stalled,
+        "a move with no PP is refused locally -- the turn is not spent",
+        tostring(phase))
+  check(phase == "move" or phase == "messages",
+        "the player stays on the list (or the PP line) rather than waiting",
+        tostring(phase))
+  check(type(text) == "string" and text:find("PP", 1, true) ~= nil,
+        "and is told the move has no PP left")
+  check(backToChoose(game),
+        "the command grid comes back so the fight can continue")
+end
+
 -- Listen for the mod's *own* events, the way another mod would.
 --
 -- Two buses, and they are not the same one. `Runtime.emit` carries the
