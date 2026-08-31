@@ -9388,6 +9388,123 @@ check(fightsAlone(ann),
      "syntheticFinish did not run on top of consume")
 end)()
 
+-- ------- issue #65 — co-op level-ups must run Evolution.checkParty
+--
+-- The engine offers level-up evolutions from BattleState:finish via
+-- Evolution.checkParty(game, onDone, battle.leveledUp). A co-op fight never
+-- runs that finish: it pops the buried battle up front and later only calls
+-- onFinish, which is OverworldState:afterBattle — and afterBattle no longer
+-- walks leveledUp. CoopBattle.levelled still records the set; handing it to
+-- afterBattle is not enough. The check has to run on the way out, or a
+-- Caterpie that hit 7 in a 2-on-2 stays a Caterpie until the next wild
+-- level-up or a Rare Candy.
+
+;(function()
+  local Evolution = require("src.pokemon.Evolution")
+  local CoopBattle = need("CoopBattle")
+  local realCheck = Evolution.checkParty
+  local seen
+  Evolution.checkParty = function(game, onDone, leveledUp)
+    seen = { game = game, onDone = onDone, leveledUp = leveledUp }
+    return 0
+  end
+
+  local function restore() Evolution.checkParty = realCheck end
+
+  -- The screen still records what levelled. That set is what checkParty
+  -- walks; without it the offer below would have nothing to offer.
+  local recorded = setmetatable({
+    game = { data = { pokemon = {} } },
+    say = function() end,
+  }, { __index = CoopBattle })
+  local abra = { species = "FIXMON_A", nickname = "ABBY" }
+  recorded:levelled(abra, "ABBY", { 16 })
+  check(recorded.leveledUp and recorded.leveledUp[abra],
+        "CoopBattle.levelled notes the save-party mon for the evolution check")
+
+  local caterpie = { species = "CATERPIE", level = 7, hp = 20, stats = { hp = 20 } }
+  local function bareStack(states)
+    return {
+      states = states,
+      top = function(self) return self.states[#self.states] end,
+      pop = function(self) return table.remove(self.states) end,
+      push = function(self, st) self.states[#self.states + 1] = st end,
+    }
+  end
+  local buried = {
+    kind = "trainer",
+    trainer = { baseMoney = 10 },
+    enemyParty = { { level = 8 } },
+    onFinish = function() end,
+  }
+  local game = {
+    stack = bareStack({ {} }),
+    save = { party = { caterpie }, money = 0 },
+  }
+  local walkIn = setmetatable({
+    running = false,
+    engineBattle = buried,
+    battle = { plan = {} },
+    transport = { send = function() end },
+    ui = { say = function() end },
+  }, { __index = Coop })
+  walkIn:onBattleOver("win", game, { leveledUp = { [caterpie] = true } }, {})
+  restore()
+
+  check(seen ~= nil,
+        "a co-op win that levelled a mon runs Evolution.checkParty")
+  eq(seen.game, game, "against the save that took the level")
+  check(seen.leveledUp and seen.leveledUp[caterpie],
+        "for the same party mon CoopBattle.levelled recorded")
+
+  -- Invite / menu joiner: no buried BattleState, so consume is a no-op and
+  -- syntheticFinish is the path that has to offer. Same stub as TT3.
+  seen = nil
+  Evolution.checkParty = function(game, onDone, leveledUp)
+    seen = { game = game, leveledUp = leveledUp }
+    return 0
+  end
+  local ow = {
+    engaging = true,
+    map = { def = { label = "FIX_TOWN" } },
+    npcPool = {
+      route3_bug_a = {
+        frozen = true,
+        def = { trainerClass = "OPP_BUG_CATCHER", trainerParty = 1, index = 1 },
+      },
+    },
+    checkVictoryRewards = function() end,
+    afterBattle = function() end,
+  }
+  local inviteGame = {
+    save = { money = 100, defeatedTrainers = {}, flags = {}, party = { caterpie } },
+    data = {
+      trainers = {
+        OPP_BUG_CATCHER = {
+          baseMoney = 10,
+          parties = { { { level = 12 } } },
+        },
+      },
+    },
+    stack = bareStack({ ow }),
+  }
+  local invite = setmetatable({
+    running = false,
+    battle = { plan = { npcId = "route3_bug_a" } },
+    transport = { send = function() end },
+    ui = { say = function() end },
+  }, { __index = Coop })
+  local savedWorld = stubMod.world
+  stubMod.world = { overworld = function() return ow end }
+  invite:onBattleOver("win", inviteGame, { leveledUp = { [caterpie] = true } }, {})
+  stubMod.world = savedWorld
+  restore()
+  check(seen ~= nil,
+        "an invite-joiner win that levelled a mon also runs checkParty")
+  check(seen.leveledUp and seen.leveledUp[caterpie],
+        "off the co-op screen's set, not a second copy")
+end)()
+
 end)()
 
 -- ------------------------------------------------------------------
