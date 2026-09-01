@@ -585,7 +585,10 @@ end)()
   local sim, fight = f.sim, f.fight
   local hpBefore = sim.byId[PLAYER].mons[1].hp
   local turnBefore = sim.turn
-  fight:sendChoice({ action = "run" })
+  ok(fight:sendChoice({ action = "run" }),
+     "a failed escape is handled, not a refused send")
+  eq(fight.answeredTurn, true, "so the menu closes for the pump")
+  eq(fight.phase, "play", "and the command slab is gone while the line plays")
   f.solo:update(1 / 60, f.game)
   f.solo:update(1 / 60, f.game)
 
@@ -651,6 +654,8 @@ end)()
 
   eq(saidTimes(fight, "running from"), 1, "the screen refuses, once")
   eq(f.solo.refuseRun, true, "and the referee parked the refusal for the pump")
+  eq(fight.answeredTurn, true, "the send is handled, so the menu closes")
+  eq(fight.phase, "play", "until the pump feeds the turn that reopens it")
 
   f.solo:update(1 / 60, f.game)
   eq(saidTimes(fight, "running from"), 1,
@@ -795,6 +800,94 @@ end)()
   f.solo:update(1 / 60, f.game)
   ok(f.sim.turn > turnBefore or f.sim:outcome() ~= nil,
      "one pump after the player files is enough")
+end)()
+
+-- ------------------------------------------------------------------
+-- 7c. a fainted wild in the choice window does not wait forever
+-- ------------------------------------------------------------------
+--
+-- The screenshot hang: Drowzee's bar empty, Marcel asleep, band on
+-- "Waiting for WILD...". The wild is already down, so `_owes` is false
+-- for it and autoPick will not file. The player can still press FIGHT;
+-- that used to be refused (no living target) while the screen marked
+-- the turn answered, and SOLO_CHOICE_TIMEOUT is 0, so the wait never
+-- ended. One pump must close the fight.
+
+;(function()
+  local f = fightOf("wild", {
+    party = { mon({ species = "ALPHA", spd = 90, atk = 40, maxHp = 200 }) },
+    wildMon = mon({ species = "BETA", spd = 5, maxHp = 40, atk = 5 }),
+  })
+  ok(f.started, "the encounter opened")
+  local foe = f.sim.byId[FOE]
+  foe.mons[1].hp = 0
+  foe.active = nil
+  f.solo:update(1 / 60, f.game)
+  local out = f.sim:outcome()
+  ok(out ~= nil, "one pump ends a wild that is already down")
+  eq(out and out.reason, "ko", "as a knockout, not a timeout")
+  eq(f.fight.phase, "over", "and the screen leaves the wait line")
+  eq(f.fight.finished, true, "finish ran, so draw no longer calls holdLine")
+  for _ = 1, 30 do f.solo:update(1 / 60, f.game) end
+  ok(f.sim:outcome() ~= nil, "later pumps do not reopen the window")
+  eq(f.fight.phase, "over", "thirty frames later it is still over")
+end)()
+
+;(function()
+  local f = fightOf("wild", {
+    party = { mon({ species = "ALPHA", spd = 90, atk = 40, maxHp = 200 }) },
+    wildMon = mon({ species = "BETA", spd = 5, maxHp = 40, atk = 5 }),
+  })
+  local player = f.sim.byId[PLAYER]
+  player.mons[1].status = "sleep"
+  player.mons[1].statusTurns = 3
+  local foe = f.sim.byId[FOE]
+  foe.mons[1].hp = 0
+  foe.active = nil
+  -- The player still files, the way an asleep seat does in Gen 1. The
+  -- referee must not refuse the fight and leave the band waiting.
+  ok(f.fight:sendChoice({ action = "fight", move = 0 }),
+     "FIGHT against a downed wild is not a silent refusal")
+  f.solo:update(1 / 60, f.game)
+  ok(f.sim:outcome() ~= nil, "and the asleep player is not stuck waiting")
+  eq(f.fight.phase, "over", "the hold line is gone")
+  eq(f.fight.finished, true, "the ending is on the screen, not Waiting for WILD")
+end)()
+
+-- Sleep alone is not the hang: an asleep lead still finishes a living wild.
+;(function()
+  local f = fightOf("wild", {
+    party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200 }) },
+    wildMon = mon({ species = "BETA", spd = 5, maxHp = 20, atk = 5 }),
+  })
+  f.sim.byId[PLAYER].mons[1].status = "sleep"
+  f.sim.byId[PLAYER].mons[1].statusTurns = 2
+  local out = playOut(f, 80)
+  ok(out ~= nil, "sleep alone does not wedge a wild fight")
+end)()
+
+-- The client contract: a transport that returns false must not mark the
+-- turn answered. A hub send that returns nil is still a success.
+;(function()
+  local Mediated = need("MediatedBattle")
+  local seen = 0
+  eq(Mediated.submitChoice({
+    send = function() seen = seen + 1; return false end,
+  }, "solo_1", { action = "fight", move = 0 }), false,
+     "an explicit false send keeps the turn unspent")
+  eq(seen, 1, "the choice still reached the transport")
+
+  eq(Mediated.submitChoice({
+    send = function() end,
+  }, "solo_1", { action = "fight", move = 0 }), true,
+     "a hub send that returns nil is still a success")
+
+  local f = fightOf("wild", {})
+  eq(f.fight.answeredTurn, false, "the opening window is unanswered")
+  eq(f.fight:sendChoice({ action = "switch", slot = 5 }), false,
+     "a switch that names nobody is refused")
+  eq(f.fight.answeredTurn, false,
+     "and the screen does not pretend the turn was spent")
 end)()
 
 -- ------------------------------------------------------------------
