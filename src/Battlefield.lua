@@ -2136,6 +2136,12 @@ local function overworldFrom(game)
     if type(gow) == "table" and gow.map then
       found = gow
     end
+    -- Gold hangs the live map on game.world, not game.overworld
+    -- and not an isOverworld stack state.
+    local gw = game.world
+    if type(gw) == "table" and gw.map then
+      found = gw
+    end
   end)
   return found
 end
@@ -2148,7 +2154,7 @@ end
 local ARENA_FIELD_TILESETS = {
   OVERWORLD = true, FOREST = true, PLATEAU = true,
   CAVERN = true, CEMETERY = true, UNDERGROUND = true,
-  GYM = true, DOJO = true,
+  GYM = true, DOJO = true, TILESET_GYM = true,
   TILESET_JOHTO = true, TILESET_KANTO = true,
   TILESET_PARK = true, TILESET_FOREST = true,
   TILESET_CAVE = true, TILESET_ICE_PATH = true,
@@ -2161,34 +2167,48 @@ local ARENA_INDOOR_HINT = {
   FACILITY = true, MANSION = true, SHIP = true, SHIP_PORT = true,
 }
 
+-- GYM / DOJO / TILESET_GYM: keep the gym sheet even when the map says
+-- INDOOR (every Johto gym does). A house environment must not win.
+local function gymSheet(id)
+  if type(id) ~= "string" or id == "" then return false end
+  local u = id:upper()
+  return u == "GYM" or u == "DOJO" or u == "TILESET_GYM"
+    or u:find("GYM", 1, true) ~= nil
+end
+
 -- Pure: can the suite assert a house map falls back without LOVE.
 function M.arenaFieldTileset(tilesetId, mapDef)
+  local id = tilesetId
+  if (type(id) ~= "string" or id == "") and type(mapDef) == "table" then
+    id = mapDef.tileset
+  end
+  if gymSheet(id) then return true end
   if type(mapDef) == "table" then
     if mapDef.outdoor == true then return true end
     if mapDef.outdoor == false then return false end
     local env = mapDef.environment
     if env == "INDOOR" then return false end
     if env == "TOWN" or env == "ROUTE" or env == "CAVE" then return true end
-    if type(tilesetId) ~= "string" or tilesetId == "" then
-      tilesetId = mapDef.tileset
+    if type(id) ~= "string" or id == "" then
+      id = mapDef.tileset
     end
   end
-  if type(tilesetId) ~= "string" or tilesetId == "" then return false end
-  local id = tilesetId:upper()
-  if ARENA_FIELD_TILESETS[tilesetId] or ARENA_FIELD_TILESETS[id] then
+  if type(id) ~= "string" or id == "" then return false end
+  local uid = id:upper()
+  if ARENA_FIELD_TILESETS[id] or ARENA_FIELD_TILESETS[uid] then
     return true
   end
-  if ARENA_INDOOR_HINT[tilesetId] or ARENA_INDOOR_HINT[id] then
+  if ARENA_INDOOR_HINT[id] or ARENA_INDOOR_HINT[uid] then
     return false
   end
-  if id:find("HOUSE", 1, true) or id:find("CENTER", 1, true)
-      or id:find("MART", 1, true) or id:find("INTERIOR", 1, true)
-      or id:find("LAB", 1, true) or id:find("GATE", 1, true) then
+  if uid:find("HOUSE", 1, true) or uid:find("CENTER", 1, true)
+      or uid:find("MART", 1, true) or uid:find("INTERIOR", 1, true)
+      or uid:find("LAB", 1, true) or uid:find("GATE", 1, true) then
     return false
   end
-  if id:find("OVERWORLD", 1, true) or id:find("FOREST", 1, true)
-      or id:find("CAVE", 1, true) or id:find("CAVERN", 1, true)
-      or id:find("PARK", 1, true) then
+  if uid:find("OVERWORLD", 1, true) or uid:find("FOREST", 1, true)
+      or uid:find("CAVE", 1, true) or uid:find("CAVERN", 1, true)
+      or uid:find("PARK", 1, true) then
     return true
   end
   return false
@@ -2222,12 +2242,33 @@ local function lookupTileset(sets, id)
   return nil
 end
 
+local function nonemptyTilesets(t)
+  if type(t) ~= "table" then return nil end
+  for _, row in pairs(t) do
+    if type(row) == "table" and type(row.image) == "string" then
+      return t
+    end
+  end
+  return nil
+end
+
 local function gameTilesets(game)
   local data = game and game.data
   if type(data) ~= "table" then return nil end
-  if type(data.tilesets) == "table" then return data.tilesets end
-  if type(data.gen2Tilesets) == "table" then return data.gen2Tilesets end
-  return nil
+  local gen2 = nonemptyTilesets(data.gen2Tilesets)
+  local gen1 = nonemptyTilesets(data.tilesets)
+  local gen = nil
+  pcall(function() gen = Gen.generation(game) end)
+  if gen == 2 then return gen2 or gen1 end
+  return gen1 or gen2
+end
+
+function M.arenaTilesets(game)
+  return gameTilesets(game)
+end
+
+function M.overworldFrom(game)
+  return overworldFrom(game)
 end
 
 local function fallbackFieldTileset(game)
@@ -2246,7 +2287,10 @@ local function fallbackIndoorTileset(game, id)
   if not sets then return nil end
   local ts = lookupTileset(sets, id)
   if ts then return ts end
-  local prefer = { "REDS_HOUSE_2", "REDS_HOUSE_1", "HOUSE" }
+  local prefer = {
+    "REDS_HOUSE_2", "REDS_HOUSE_1", "HOUSE",
+    "TILESET_PLAYERS_HOUSE", "TILESET_PLAYERS_ROOM", "TILESET_HOUSE",
+  }
   for i = 1, #prefer do
     ts = lookupTileset(sets, prefer[i])
     if ts then return ts end
@@ -2281,16 +2325,59 @@ end
 -- from a route therefore paints gym tiles with ROUTE (grass-green +
 -- ice-blue). Name the town from the map id so a gym fight wears that
 -- town's palette even when lastOutdoor is wrong.
-local function gymTownPalette(map)
+-- BLACKTHORN_GYM_2F and the other multi-floor gyms need `_GYM` not `_GYM$`.
+function M.gymTownPalette(map)
   local id = nil
   pcall(function()
     id = (map and map.id) or (map and map.def and map.def.id)
   end)
   if type(id) ~= "string" then return nil end
-  return id:match("^([A-Z]+)_GYM$")
+  return id:match("^([A-Z]+)_GYM")
+end
+
+local function gen2Context(game, map)
+  local ts = map and map.tileset
+  if type(ts) == "table" and ts.generation == 2 then return true end
+  local pals = game and game.data and game.data.gen2Palettes
+  if type(pals) == "table" and type(pals.bg) == "table" then return true end
+  local gen = nil
+  pcall(function() gen = Gen.generation(game) end)
+  return gen == 2
+end
+
+-- Gold: environment / special-tileset BG set, not an SGB town name.
+-- AZALEA is not in the Red SGB pack; forcing it painted Johto gyms ROUTE.
+local function gen2BgColors(game, ow, map)
+  local pals = game and game.data and game.data.gen2Palettes
+  if type(pals) ~= "table" then return nil end
+  local ok, Palettes = pcall(require, "src.world.gen2.Palettes")
+  if not (ok and Palettes and type(Palettes.bgSet) == "function") then
+    return nil
+  end
+  local daytime = (ow and type(ow.daytime) == "string" and ow.daytime)
+    or gen2Daytime()
+  local set = nil
+  pcall(function()
+    set = Palettes.bgSet(pals, map and map.def, daytime)
+  end)
+  if type(set) ~= "table" then return nil end
+  local colors = set[1] or set[2]
+  if type(colors) == "table" and type(colors[4]) == "table" then
+    return colors
+  end
+  return nil
+end
+
+-- SGB town name for a Gen 1 gym, or nil on Gold (use GBC pals instead).
+function M.arenaSgbPaletteName(game, map)
+  if gen2Context(game, map) then return nil end
+  return M.gymTownPalette(map)
 end
 
 local function romBgColors(game, ow, map)
+  if gen2Context(game, map) then
+    return gen2BgColors(game, ow, map)
+  end
   local PF = paletteFX()
   if type(PF) ~= "table" or type(PF.pal) ~= "function" then return nil end
   local name = "ROUTE"
@@ -2301,9 +2388,13 @@ local function romBgColors(game, ow, map)
       name = map.palette
     end
   end)
-  local town = gymTownPalette(map)
+  local town = M.arenaSgbPaletteName(game, map)
   if type(town) == "string" and town ~= "" then
-    name = town
+    local named = nil
+    pcall(function() named = PF.pal(game and game.data, town) end)
+    if type(named) == "table" and type(named[4]) == "table" then
+      name = town
+    end
   end
   local colors = nil
   pcall(function() colors = PF.pal(game and game.data, name) end)
@@ -2390,7 +2481,28 @@ local function pickRomBlocks(tileset, map, ow)
   for _, t in ipairs(listOf(tileset.walkable)) do
     walk[t] = true
   end
-  local function walkableBlock(block)
+  local function collisionWalkable(quad)
+    if type(quad) ~= "table" then return false end
+    local n = 0
+    for i = 1, 4 do
+      local c = quad[i]
+      -- LAND: CollisionPermissionTable lo-nybble 0. Floor $00 is the
+      -- gym/cave ground; grass $14/$18 is a field. Do not require
+      -- src.world.gen2.Permissions (loader tripwire).
+      if c == 0 or c == 0x10 or c == 0x14 or c == 0x18 or c == 0x1c then
+        n = n + 1
+      end
+    end
+    -- 3 of 4: a statue on a floor plinth is 2/4 and must stay decor.
+    return n >= 3
+  end
+  local function walkableBlock(block, index)
+    if type(tileset.collision) == "table" and type(index) == "number" then
+      local quad = tileset.collision[index]
+      if type(quad) == "table" then
+        return collisionWalkable(quad)
+      end
+    end
     if type(block) ~= "table" then return false end
     local n = 0
     for i = 1, 16 do
@@ -2409,13 +2521,20 @@ local function pickRomBlocks(tileset, map, ow)
   if roomSheet then
     -- Plain floor + plain wall. Skip the $AA filler REDS_HOUSE puts at
     -- index 1, the all-zero GYM filler, and mixed furniture / statue
-    -- scraps (many unique tiles).
+    -- scraps (many unique tiles). Gen 2 sheets can have tile ids >= 128
+    -- (Crystal two-bank); that is not filler there.
+    local gen2sheet = tileset.generation == 2
+      or type(tileset.collision) == "table"
     local function junk(block)
       if type(block) ~= "table" then return true end
       local n, zeros = 0, 0
       for i = 1, 16 do
         local t = block[i]
-        if type(t) ~= "number" or t >= 128 then n = n + 1 end
+        if type(t) ~= "number" then
+          n = n + 1
+        elseif (not gen2sheet) and t >= 128 then
+          n = n + 1
+        end
         if t == 0 then zeros = zeros + 1 end
       end
       return n >= 8 or zeros >= 8
@@ -2437,7 +2556,7 @@ local function pickRomBlocks(tileset, map, ow)
     for i = 1, #blocks do
       if not junk(blocks[i]) then
         local s = score(blocks[i])
-        if walkableBlock(blocks[i]) then
+        if walkableBlock(blocks[i], i) then
           if s > bestGS then bestG, bestGS = i, s end
         elseif s > bestDS then
           bestD, bestDS = i, s
@@ -2446,10 +2565,10 @@ local function pickRomBlocks(tileset, map, ow)
     end
     if bestGS > 0 then ground, surround = bestG, bestG end
     if bestDS > 0 then decor = bestD end
-    -- GYM / DOJO: the plain wall is a pale slab. The sheet's own
-    -- Rhydon statues (tiles 7/8/23/24) are what make the rim read as
-    -- a gym, the same way $0F trees mark an overworld field.
-    if id == "GYM" or id == "DOJO" then
+    -- GYM / DOJO / TILESET_GYM: the plain wall is a pale slab. Gen 1
+    -- Rhydon statues (tiles 7/8/23/24) mark the rim when present;
+    -- otherwise the most pictorial non-walkable block (Johto gyms).
+    if gymSheet(id) then
       local statue = { [7] = true, [8] = true, [23] = true, [24] = true }
       local bestSt, bestStN = nil, 0
       for i = 1, #blocks do
@@ -2461,7 +2580,27 @@ local function pickRomBlocks(tileset, map, ow)
           if n > bestStN then bestSt, bestStN = i, n end
         end
       end
-      if bestStN >= 8 then decor = bestSt end
+      if bestStN >= 8 then
+        decor = bestSt
+      else
+        local bestMix, bestMixU = nil, 3
+        for i = 1, #blocks do
+          if not junk(blocks[i]) and not walkableBlock(blocks[i], i)
+              and i ~= ground then
+            local uniq = 0
+            local seen = {}
+            for k = 1, 16 do
+              local t = blocks[i][k]
+              if t ~= nil and not seen[t] then
+                seen[t] = true
+                uniq = uniq + 1
+              end
+            end
+            if uniq > bestMixU then bestMix, bestMixU = i, uniq end
+          end
+        end
+        if bestMix then decor = bestMix end
+      end
     end
   end
   if not roomSheet then

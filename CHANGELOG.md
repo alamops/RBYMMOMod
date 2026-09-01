@@ -23,6 +23,11 @@ here must match `manifest.version`.
   floor, not the first striped hybrid (which stamped as scanlines). A
   gym rim is the sheet's Rhydon statues, and the fight wears that
   town's palette (`PEWTER_GYM` → PEWTER) rather than inheriting ROUTE.
+  Gold gyms keep `TILESET_GYM` even though every Johto gym is
+  `environment = INDOOR`; walkability comes from `COLL_*` quads when
+  the sheet has no Gen 1 `walkable` list; multi-floor ids like
+  `BLACKTHORN_GYM_2F` still name the town; and the bake uses the GBC
+  environment set, not an SGB name (`AZALEA` is not in Red's pack).
 
 ### Fixed
 
