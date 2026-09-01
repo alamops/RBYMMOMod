@@ -296,6 +296,24 @@ simulations left to disagree.
   <img src="docs/screenshots/link-battle.png" width="760" alt="A 1-on-1 on the mod's arena: RED and BLUE on opposite edges each with a roster chip, PIKACHU against BULBASAUR, HP plates in the far corners and FIGHT / PKMN / ITEM / RUN across the bottom">
 </p>
 
+The field is the room you are standing in. A live fight stamps that map's
+tileset into the two platforms — ROM pixels at runtime, never shipped.
+
+<p align="center">
+  <img src="docs/screenshots/arena-route.png" width="760" alt="Route fight: OVERWORLD grass underfoot and a tree-wall surround">
+</p>
+<p align="center"><em>Route / grass — overworld grass and the tree wall</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/arena-house.png" width="760" alt="Indoor fight in Red's bedroom: house floor and walls, not Pallet roofs">
+</p>
+<p align="center"><em>House / mart / bedroom — actual floor and walls, not Pallet roofs</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/arena-gym.png" width="760" alt="Pewter Gym fight stamped from that room's own GYM tileset">
+</p>
+<p align="center"><em>Gym / cave — still that room's own sheet</em></p>
+
 ### 🤜 CO-OP — YOUR PARTY IS THE YES
 Walk into a trainer while you're partied and standing on the same map, and
 the fight becomes a 2-on-2 by itself — no box, no cover, nothing to choose.

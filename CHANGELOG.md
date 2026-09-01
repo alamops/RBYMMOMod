@@ -17,7 +17,9 @@ here must match `manifest.version`.
   sheet. `assets/battle/outdoor_grass_arena.png` and
   `assets/battle/indoor_house_arena.png` are original pixel art (the
   outdoor and indoor generators) and are only the no-ROM fallbacks.
-  Seat layout is unchanged.
+  Seat layout is unchanged. README **BATTLE — ANYWHERE** now shows the
+  three looks: route grass + tree wall, indoor house floor, Pewter Gym's
+  own sheet.
 
 ### Fixed
 
