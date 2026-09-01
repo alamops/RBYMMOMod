@@ -19,7 +19,10 @@ here must match `manifest.version`.
   outdoor and indoor generators) and are only the no-ROM fallbacks.
   Seat layout is unchanged. README **BATTLE — ANYWHERE** now shows the
   three looks: route grass + tree wall, indoor house floor, Pewter Gym's
-  own sheet.
+  own sheet. A gym or cave with no grass tile uses that sheet's plain
+  floor, not the first striped hybrid (which stamped as scanlines). A
+  gym rim is the sheet's Rhydon statues, and the fight wears that
+  town's palette (`PEWTER_GYM` → PEWTER) rather than inheriting ROUTE.
 
 ### Fixed
 

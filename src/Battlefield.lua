@@ -2277,6 +2277,19 @@ local function romTileset(game)
   return fallbackFieldTileset(game), nil, ow
 end
 
+-- Interiors inherit the last outdoor map. A teleport into PEWTER_GYM
+-- from a route therefore paints gym tiles with ROUTE (grass-green +
+-- ice-blue). Name the town from the map id so a gym fight wears that
+-- town's palette even when lastOutdoor is wrong.
+local function gymTownPalette(map)
+  local id = nil
+  pcall(function()
+    id = (map and map.id) or (map and map.def and map.def.id)
+  end)
+  if type(id) ~= "string" then return nil end
+  return id:match("^([A-Z]+)_GYM$")
+end
+
 local function romBgColors(game, ow, map)
   local PF = paletteFX()
   if type(PF) ~= "table" or type(PF.pal) ~= "function" then return nil end
@@ -2288,6 +2301,10 @@ local function romBgColors(game, ow, map)
       name = map.palette
     end
   end)
+  local town = gymTownPalette(map)
+  if type(town) == "string" and town ~= "" then
+    name = town
+  end
   local colors = nil
   pcall(function() colors = PF.pal(game and game.data, name) end)
   if type(colors) ~= "table" or type(colors[4]) ~= "table" then
@@ -2382,21 +2399,26 @@ local function pickRomBlocks(tileset, map, ow)
     return n >= 8
   end
   -- Grass fights stay on grass: the first other walkable on OVERWORLD is
-  -- a flower/path scrap, and the first solid is a house roof.
+  -- a flower/path scrap, and the first solid is a house roof. A gym or
+  -- cave has no grassTile -- the first other walkable there is a striped
+  -- wall/floor hybrid, which stamps as scanlines with white rectangles.
   local surround, decor = ground, ground
   local id = tileset.id or (map and map.def and map.def.tileset)
   local indoor = M.arenaIndoor(id, map and map.def)
-  if indoor then
-    -- Plain floor + plain wall. Skip the $AA filler block REDS_HOUSE
-    -- puts at index 1, and skip mixed furniture (many unique tiles).
+  local roomSheet = indoor or type(grass) ~= "number"
+  if roomSheet then
+    -- Plain floor + plain wall. Skip the $AA filler REDS_HOUSE puts at
+    -- index 1, the all-zero GYM filler, and mixed furniture / statue
+    -- scraps (many unique tiles).
     local function junk(block)
       if type(block) ~= "table" then return true end
-      local n = 0
+      local n, zeros = 0, 0
       for i = 1, 16 do
         local t = block[i]
         if type(t) ~= "number" or t >= 128 then n = n + 1 end
+        if t == 0 then zeros = zeros + 1 end
       end
-      return n >= 8
+      return n >= 8 or zeros >= 8
     end
     local function score(block)
       local counts, modeN, uniq = {}, 0, 0
@@ -2424,18 +2446,25 @@ local function pickRomBlocks(tileset, map, ow)
     end
     if bestGS > 0 then ground, surround = bestG, bestG end
     if bestDS > 0 then decor = bestD end
-  elseif type(grass) ~= "number" then
-    for i = 1, #blocks do
-      if i ~= ground then
-        if walkableBlock(blocks[i]) then
-          if surround == ground then surround = i end
-        elseif decor == ground then
-          decor = i
+    -- GYM / DOJO: the plain wall is a pale slab. The sheet's own
+    -- Rhydon statues (tiles 7/8/23/24) are what make the rim read as
+    -- a gym, the same way $0F trees mark an overworld field.
+    if id == "GYM" or id == "DOJO" then
+      local statue = { [7] = true, [8] = true, [23] = true, [24] = true }
+      local bestSt, bestStN = nil, 0
+      for i = 1, #blocks do
+        if not junk(blocks[i]) then
+          local n = 0
+          for k = 1, 16 do
+            if statue[blocks[i][k]] then n = n + 1 end
+          end
+          if n > bestStN then bestSt, bestStN = i, n end
         end
       end
+      if bestStN >= 8 then decor = bestSt end
     end
   end
-  if not indoor then
+  if not roomSheet then
     if (id == "OVERWORLD" or id == nil) and blocks[OVERWORLD_TREE_WALL + 1] then
       decor = OVERWORLD_TREE_WALL + 1
     elseif map and map.def and type(map.def.borderBlock) == "number"

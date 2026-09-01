@@ -14076,6 +14076,74 @@ end)()
     end
   end
   do
+    -- GYM has no grassTile. The first other walkable is a striped
+    -- wall/floor hybrid (block 2); picking that as surround is the
+    -- scanline field the Pewter Gym screenshot showed.
+    local blocks = {
+      { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+      { 5, 5, 5, 5, 16, 16, 16, 16, 17, 17, 17, 17, 17, 17, 17, 17 },
+      { 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20 },
+      { 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15 },
+      { 17, 17, 17, 17, 17, 17, 17, 17, 6, 6, 6, 6, 22, 22, 22, 22 },
+      { 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17 },
+    }
+    local g, s, d = Battlefield.pickArenaBlocks({
+      id = "GYM",
+      walkable = { 3, 17, 22, 25 },
+      blocks = blocks,
+    })
+    eq(g, 6, "GYM ground is the plain walkable floor, not the stripe block")
+    eq(s, 6, "GYM surround stays on that floor")
+    eq(d, 3, "GYM decor is the plain wall when the sheet has no statues")
+    check(g ~= 2 and s ~= 2 and d ~= 2,
+          "GYM pick skips the striped wall/floor hybrid")
+    check(d ~= 1, "GYM decor is not the all-zero filler")
+    local withStatues = {}
+    for i = 1, #blocks do withStatues[i] = blocks[i] end
+    withStatues[7] = { 7, 8, 7, 8, 23, 24, 23, 24, 7, 8, 17, 17, 23, 24, 17, 17 }
+    local _, _, d2 = Battlefield.pickArenaBlocks({
+      id = "GYM",
+      walkable = { 3, 17, 22, 25 },
+      blocks = withStatues,
+    })
+    eq(d2, 7, "GYM decor prefers the Rhydon-statue block over a plain wall")
+  end
+  do
+    local tsOk, generated = pcall(dofile, "data/generated/tilesets.lua")
+    if tsOk and type(generated) == "table"
+        and type(generated.GYM) == "table" then
+      local gym = generated.GYM
+      local g, s, d = Battlefield.pickArenaBlocks(gym)
+      local floorIdx, wallIdx
+      for i, block in ipairs(gym.blocks) do
+        local n17, n20, n15 = 0, 0, 0
+        for k = 1, 16 do
+          if block[k] == 17 then n17 = n17 + 1 end
+          if block[k] == 20 then n20 = n20 + 1 end
+          if block[k] == 15 then n15 = n15 + 1 end
+        end
+        if n17 == 16 then floorIdx = i end
+        if n20 == 16 and not wallIdx then wallIdx = i end
+        if n15 == 16 and not wallIdx then wallIdx = i end
+      end
+      eq(g, floorIdx, "imported GYM ground is the all-floor (tile 17) block")
+      eq(s, floorIdx, "imported GYM surround is that floor")
+      check(d ~= 2, "imported GYM decor is not the striped hybrid")
+      local statueN = 0
+      local db = gym.blocks[d]
+      if type(db) == "table" then
+        local statue = { [7] = true, [8] = true, [23] = true, [24] = true }
+        for k = 1, 16 do
+          if statue[db[k]] then statueN = statueN + 1 end
+        end
+      end
+      check(statueN >= 8,
+            "imported GYM decor is a Rhydon-statue block, not a pale slab")
+    else
+      check(true, "(no generated tilesets -- GYM pick skipped)")
+    end
+  end
+  do
     local arenaFile = io.open(MOD_PATH .. "/assets/battle/outdoor_grass_arena.png", "rb")
     check(arenaFile ~= nil, "arena PNG ships with the mod")
     if arenaFile then
