@@ -28,6 +28,16 @@ here must match `manifest.version`.
 
 ### Added
 
+- **Mid-battle evolutions on co-op / MMO / solo custom fights.** A level-up
+  that qualifies now plays the evolution movie on the arena after that
+  mon's "grew to level N!" lines — flash, sparkle, B-cancel after the
+  80-frame grace, same clock as the engine's EvolutionState — instead of
+  waiting until the fight ends. Accept and cancel both stick: the
+  after-battle check will not re-offer a prompt the player already
+  answered. Local only, same contract as exp and levels: the save and
+  this client's sprite update; the hub and everyone else keep the
+  uploaded pre-evo sheet for the rest of this fight.
+
 - **The POKéMON menu shows the POKéMON.** Picking who to send out — the
   `PKMN` command mid-fight, the forced pick after a faint, and the party
   an item is aimed at — used to be a list of names and HP over an

@@ -63,6 +63,7 @@ local Wire = need("Wire")
 local Gen = need("Gen")
 local CoopBattle = need("CoopBattle")
 local Mediated = need("MediatedBattle")
+local EvolveFx = need("EvolveFx")
 
 -- How often a standing offer is re-attempted while this client is busy.
 --
@@ -382,81 +383,6 @@ function M.buriedFinisher(engine)
   return finish
 end
 
-local function gen2Daytime()
-  local ok, Palettes = pcall(require, "src.render.Palettes")
-  if not (ok and type(Palettes) == "table"
-      and type(Palettes.clockDaytime) == "function") then
-    return nil
-  end
-  local good, tod = pcall(Palettes.clockDaytime)
-  if good then return tod end
-  return nil
-end
-
--- Gold's EvolveAfterBattle: flag the slots that levelled, plan the rows, push
--- Gen2EvolutionAnim one at a time. B-cancel is a real choice there, so a
--- missing screen skips rather than applying the species change outright.
-local function offerEvolutionsGen2(game, leveledUp)
-  local ok, Evolution = pcall(require, "src.core.gen2.Evolution")
-  if not (ok and type(Evolution) == "table"
-      and type(Evolution.plan) == "function") then
-    mod.log:warn("the engine's Gen 2 evolution module is unavailable, so "
-      .. "POKéMON that levelled in this battle were not offered evolutions "
-      .. "-- level again in a wild fight or use a RARE CANDY")
-    return false
-  end
-  local party = game.save and game.save.party
-  if type(party) ~= "table" then return false end
-  local flags = {}
-  local flagged = false
-  for i, mon in ipairs(party) do
-    if leveledUp[mon] then
-      flags[i] = true
-      flagged = true
-    end
-  end
-  if not flagged then return false end
-  local planned = Evolution.plan(game.data, party, flags,
-    { timeOfDay = gen2Daytime() })
-  if type(planned) ~= "table" or #planned == 0 then return false end
-  if not (mod.ui and type(mod.ui.push) == "function") then
-    mod.log:warn("could not open the evolution screen, so POKéMON that "
-      .. "levelled in this battle were not offered evolutions -- level "
-      .. "again in a wild fight or use a RARE CANDY")
-    return false
-  end
-
-  local pending = {}
-  for i, row in ipairs(planned) do pending[i] = row end
-  local function nextOne()
-    local row = table.remove(pending, 1)
-    if not row then return end
-    local pushed
-    local ran = pcall(function()
-      pushed = mod.ui.push(game, "Gen2EvolutionAnim", {
-        mon = row.mon,
-        entry = row.entry,
-        index = row.index,
-        party = party,
-        save = game.save,
-        onDone = function()
-          local stack = game.stack
-          if stack and stack.pop then stack:pop() end
-          nextOne()
-        end,
-      })
-    end)
-    if not (ran and type(pushed) == "table") then
-      mod.log:warn("could not open the evolution screen for %s; it can still "
-        .. "evolve by levelling again or with a RARE CANDY",
-        tostring(row.mon and (row.mon.nickname or row.mon.species)))
-      nextOne()
-    end
-  end
-  nextOne()
-  return true
-end
-
 -- Level-up evolutions the engine's BattleState:finish would have offered.
 --
 -- A co-op (or solo-mediated) fight never runs that finish: it pops the buried
@@ -471,39 +397,16 @@ end
 -- `leveledUp` is the set CoopBattle.levelled (and SoloBattle.levelledSince)
 -- already records, keyed by the save-party monster Evolution.checkParty
 -- walks. Absent or empty is a real no -- nothing levelled, nothing to offer.
-function M.offerEvolutions(game, leveledUp, result)
-  if not (game and type(leveledUp) == "table") then return false end
-  local any = false
-  for _ in pairs(leveledUp) do
-    any = true
-    break
-  end
-  if not any then return false end
-
-  if Gen.generation(game) == 2 then
-    -- Gold only sweeps after a win (ExitBattle's wBattleResult & $f). Co-op
-    -- spells a loss "loss"; the engine spells it "lose".
-    local outcome = result
-    if outcome == "loss" then outcome = "lose" end
-    if outcome == "lose" or outcome == "draw" then return false end
-    return offerEvolutionsGen2(game, leveledUp)
-  end
-
-  local ok, Evolution = pcall(require, "src.pokemon.Evolution")
-  if not (ok and type(Evolution) == "table"
-      and type(Evolution.checkParty) == "function") then
-    mod.log:warn("the engine's evolution module is unavailable, so POKéMON "
-      .. "that levelled in this battle were not offered evolutions -- level "
-      .. "again in a wild fight or use a RARE CANDY")
-    return false
-  end
-  local ran, err = pcall(Evolution.checkParty, game, nil, leveledUp)
-  if not ran then
-    mod.log:warn("evolutions from this fight could not be offered (%s); "
-      .. "level again in a wild fight or use a RARE CANDY", tostring(err))
-    return false
-  end
-  return true
+-- `evoResolved` is the set a mid-battle movie already answered (accept or
+-- cancel): those mons must not be offered again.
+--
+-- Body lives on EvolveFx so Sessions:endMediated can call the same offer
+-- without requiring this module (that graph is a cycle).
+function M.offerEvolutions(game, leveledUp, result, evoResolved)
+  return EvolveFx.offerEvolutions(game, leveledUp, result, evoResolved, {
+    warn = function(fmt, ...) mod.log:warn(fmt, ...) end,
+    ui = mod.ui,
+  })
 end
 
 -- Tell the buried engine battle how the fight it never ran went.
@@ -534,7 +437,7 @@ function M.finishBuriedBattle(engine, game, result, blackout)
   -- whites out. This fight already popped that screen, so the offer sits on
   -- the overworld -- the same place the forget-a-move menu already goes --
   -- and pumpBlackout waits for it when a warp is owed.
-  M.offerEvolutions(game, engine.leveledUp, result)
+  M.offerEvolutions(game, engine.leveledUp, result, engine.evoResolved)
 
   local ok, err = pcall(finish, outcome)
   if not ok then
@@ -2508,8 +2411,9 @@ function M:syntheticFinish(game, plan, coopState)
       oppClass = class,
       partyIndex = partyIndex,
       leveledUp = coopState and coopState.leveledUp or nil,
+      evoResolved = coopState and coopState.evoResolved or nil,
     }
-    M.offerEvolutions(game, stub.leveledUp, "win")
+    M.offerEvolutions(game, stub.leveledUp, "win", stub.evoResolved)
     if type(ow.afterBattle) == "function" then
       local ok, err = pcall(ow.afterBattle, ow, "win", stub)
       if not ok then
@@ -2801,6 +2705,7 @@ function M:onBattleOver(result, game, state, toLearn)
     -- the list of what levelled is the one this client built for its own
     -- party -- which is exactly the party the evolution check will walk.
     self.engineBattle.leveledUp = state and state.leveledUp or nil
+    self.engineBattle.evoResolved = state and state.evoResolved or nil
     self.encounter = { engine = self.engineBattle, game = game }
     self.engineBattle = nil
   end

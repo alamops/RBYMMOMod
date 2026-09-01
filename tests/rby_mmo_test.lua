@@ -9507,6 +9507,454 @@ end)()
 
 end)()
 
+-- ------- mid-battle evolutions (EvolveFx + queue + B-cancel + fallback skip)
+--
+-- Vanilla still only evolves after a fight. The custom screens offer a
+-- level-up evolution on the arena after that mon's grew-to lines, with the
+-- same 80-frame grace and flash clock as EvolutionState. Local only: the
+-- save updates; the hub keeps the pre-evo sheet. A movie the player already
+-- answered (accept or cancel) must not be re-offered by offerEvolutions.
+
+;(function()
+  local EvolveFx = need("EvolveFx")
+  local CoopBattle = need("CoopBattle")
+  local MediatedBattle = need("MediatedBattle")
+  local Coop = need("Coop")
+  local Battlefield = need("Battlefield")
+  local Sessions = need("Sessions")
+
+  eq(EvolveFx.CANCEL_GRACE_FRAMES, 80, "grace matches EvolutionState")
+  eq(EvolveFx.ANIM_LOOP_FRAMES, 288, "anim loop matches EvolutionState")
+  eq(EvolveFx.FLASH_FRAMES, 368, "flash is grace plus the loop")
+
+  check(not EvolveFx.showsNew(-1), "grace (negative t) shows the old form")
+  check(not EvolveFx.showsNew(0), "the loop opens on the old form")
+  -- Iteration 1: hold 16 frames of the old pic, then 6 swap frames.
+  check(not EvolveFx.showsNew(15), "still the old form at the end of the first hold")
+  check(EvolveFx.showsNew(16), "first swap frame shows the new form")
+  check(not EvolveFx.showsNew(19), "the second half of that swap is the old form again")
+  check(not EvolveFx.canCancel(80), "B is illegal on the last grace frame")
+  check(EvolveFx.canCancel(81), "B is legal on the first flash frame")
+
+  local movie = EvolveFx.begin({
+    evolve = { species = "WORM", nickname = "WIGGLY" },
+    from = "WORM", into = "MOTH", name = "WIGGLY",
+  })
+  eq(EvolveFx.picSpecies(movie), "WORM", "the movie opens on the old form")
+  EvolveFx.advance(movie, nil, true)
+  check(not movie.done, "B during the first frame does not cancel")
+  eq(movie.canceled, false, "...and does not mark canceled")
+
+  movie.frame = EvolveFx.CANCEL_GRACE_FRAMES
+  EvolveFx.advance(movie, nil, true)
+  -- advance adds 1 then checks t > GRACE, so frame becomes 81 and B is legal
+  check(movie.done, "B after grace ends the movie")
+  check(movie.canceled, "and marks it canceled")
+  eq(EvolveFx.picSpecies(movie), "WORM", "cancel keeps the old form on screen")
+
+  local run = EvolveFx.begin({
+    evolve = { species = "WORM", nickname = "WIGGLY" },
+    from = "WORM", into = "MOTH", name = "WIGGLY",
+  })
+  for _ = 1, EvolveFx.FLASH_FRAMES do
+    EvolveFx.advance(run, nil, false)
+  end
+  check(run.done, "driving the clock to FLASH_FRAMES completes the movie")
+  check(not run.canceled, "...without a cancel")
+  eq(EvolveFx.picSpecies(run), "MOTH", "and settles on the new form")
+
+  local mon = { species = "WORM", nickname = "WIGGLY", level = 7 }
+  local skip = { [mon] = true }
+  local leveled = { [mon] = true }
+  eq(EvolveFx.withoutResolved(leveled, skip), nil,
+     "a resolved mon is dropped from the after-battle set")
+  local keptEmpty = EvolveFx.withoutResolved(leveled, {})
+  check(keptEmpty and keptEmpty[mon],
+        "an empty skip set still walks the mon")
+  local other = { species = "BIRD" }
+  local mixed = { [mon] = true, [other] = true }
+  local left = EvolveFx.withoutResolved(mixed, skip)
+  check(left and left[other] and not left[mon],
+        "only the resolved mon is subtracted")
+
+  local holder = { leveledUp = { [mon] = true } }
+  EvolveFx.markResolved(holder, mon)
+  check(holder.evoResolved and holder.evoResolved[mon],
+        "markResolved records the answer")
+  check(not holder.leveledUp[mon],
+        "...and drops leveledUp so checkParty will not re-offer")
+
+  -- Queue: a LEVEL row at the current level is an evolve row; a mon that
+  -- does not qualify is not. say is stubbed so grew-to lines stay out of
+  -- the queue -- enqueue writes the special row itself.
+  local evoData = {
+    pokemon = {
+      WORM = {
+        name = "WORM",
+        evolutions = { { method = "LEVEL", species = "MOTH", level = 7 } },
+      },
+      MOTH = { name = "MOTH" },
+      BIRD = { name = "BIRD", evolutions = {} },
+    },
+  }
+  local qualifying = setmetatable({
+    game = { data = evoData },
+    messages = {},
+    say = function() end,
+  }, { __index = CoopBattle })
+  local worm = { species = "WORM", nickname = "WIGGLY", level = 7, hp = 10,
+    stats = { hp = 10 } }
+  qualifying:levelled(worm, "WIGGLY", { 7 })
+  local found
+  for _, row in ipairs(qualifying.messages) do
+    if type(row) == "table" and row.evolve == worm then found = row end
+  end
+  check(found ~= nil, "levelled queues an evolve row when pendingFor matches")
+  eq(found.into, "MOTH", "...into the LEVEL-row species")
+  check(qualifying.leveledUp and qualifying.leveledUp[worm],
+        "...and still records leveledUp for the fallback")
+
+  local birdBattle = setmetatable({
+    game = { data = evoData },
+    messages = {},
+    say = function() end,
+  }, { __index = CoopBattle })
+  local bird = { species = "BIRD", nickname = "PIP", level = 20, hp = 10,
+    stats = { hp = 10 } }
+  birdBattle:levelled(bird, "PIP", { 20 })
+  local birdRow
+  for _, row in ipairs(birdBattle.messages) do
+    if type(row) == "table" and row.evolve then birdRow = row end
+  end
+  eq(birdRow, nil, "a mon with no LEVEL row is not queued")
+
+  local mediated = setmetatable({
+    game = { data = evoData },
+    lines = {},
+    say = MediatedBattle.say,
+  }, { __index = MediatedBattle })
+  mediated:levelled(worm, "WIGGLY", { 7 })
+  check(mediated.leveledUp and mediated.leveledUp[worm],
+        "MediatedBattle.levelled now records leveledUp")
+  local medFound
+  for _, row in ipairs(mediated.lines) do
+    if type(row) == "table" and row.evolve == worm then medFound = row end
+  end
+  check(medFound ~= nil, "...and queues the same evolve row")
+
+  -- Drive the movie on a stub screen: complete applies; B after grace does
+  -- not. Engine Evolution.apply needs a real Stats.calc; pcall the apply
+  -- path and only assert species when it actually ran.
+  local applyMon = {
+    species = "WORM", nickname = "WIGGLY", level = 7, hp = 10,
+    dvs = { hp = 8, attack = 8, defense = 8, speed = 8, special = 8 },
+    statExp = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+    stats = { hp = 10, attack = 10, defense = 10, speed = 10, special = 10 },
+    moves = { { id = "TACKLE", pp = 35 } },
+  }
+  local applyGame = {
+    data = evoData,
+    save = { party = { applyMon }, pokedex = { seen = {}, owned = {} } },
+    input = { wasPressed = function() return false end },
+  }
+  -- Pad the species defs so Stats.calc (if loaded) has something to eat.
+  evoData.pokemon.WORM.baseStats = evoData.pokemon.WORM.baseStats
+    or { hp = 10, attack = 10, defense = 10, speed = 10, special = 10 }
+  evoData.pokemon.MOTH.baseStats = evoData.pokemon.MOTH.baseStats
+    or { hp = 20, attack = 10, defense = 10, speed = 10, special = 10 }
+
+  local screen = setmetatable({
+    game = applyGame,
+    messages = {},
+    say = function() end,
+  }, { __index = CoopBattle })
+  local row = {
+    evolve = applyMon, from = "WORM", into = "MOTH", via = "LEVEL",
+    name = "WIGGLY",
+  }
+  check(screen:startEvolve(row), "startEvolve accepts a well-formed row")
+  check(screen.evolving, "and holds the movie")
+  check(tostring(screen.shown):find("evolving", 1, true),
+        "...under the 'is evolving!' line")
+  for _ = 1, EvolveFx.FLASH_FRAMES + 2 do
+    screen:stepEvolve()
+    if not screen.evolving then break end
+  end
+  check(not screen.evolving, "the movie ends of its own clock")
+  if applyMon.species == "MOTH" then
+    check(screen.evoResolved and screen.evoResolved[applyMon],
+          "a successful apply marks evoResolved")
+    check(tostring(screen.shown):find("evolved", 1, true),
+          "success prints the evolved-into line")
+  else
+    -- Headless apply can no-op (no Stats.calc); the clock still finished
+    -- and must not have claimed a species change it did not make.
+    eq(applyMon.species, "WORM",
+       "a failed apply leaves the species so the fallback can still offer")
+  end
+
+  -- B after grace: species unchanged, still resolved so the fallback skips.
+  local cancelMon = {
+    species = "WORM", nickname = "WIGGLY", level = 7, hp = 10,
+    stats = { hp = 10 },
+  }
+  local cancelGame = {
+    data = evoData,
+    save = { party = { cancelMon } },
+    input = { wasPressed = function(_, key) return key == "b" end },
+  }
+  local cancelScreen = setmetatable({
+    game = cancelGame,
+    messages = {},
+    say = function() end,
+  }, { __index = CoopBattle })
+  cancelScreen:startEvolve({
+    evolve = cancelMon, from = "WORM", into = "MOTH", via = "LEVEL",
+    name = "WIGGLY",
+  })
+  -- Walk the grace with B held: wasPressed is a fresh edge every tick in
+  -- this stub, but the clock refuses it until frame > 80.
+  cancelGame.input.wasPressed = function() return false end
+  for _ = 1, EvolveFx.CANCEL_GRACE_FRAMES do
+    cancelScreen:stepEvolve()
+  end
+  check(cancelScreen.evolving, "still running at the end of grace")
+  eq(cancelMon.species, "WORM", "...and has not applied")
+  cancelGame.input.wasPressed = function(_, key) return key == "b" end
+  cancelScreen:stepEvolve()
+  check(not cancelScreen.evolving, "B after grace ends the movie")
+  eq(cancelMon.species, "WORM", "cancel does not change the species")
+  check(cancelScreen.evoResolved and cancelScreen.evoResolved[cancelMon],
+        "...but still marks resolved so the fallback will not re-offer")
+  check(tostring(cancelScreen.shown):find("stopped evolving", 1, true),
+        "...and prints the stopped-evolving line")
+
+  -- offerEvolutions subtracts evoResolved.
+  local Evolution = require("src.pokemon.Evolution")
+  local realCheck = Evolution.checkParty
+  local seen
+  Evolution.checkParty = function(game, onDone, leveledUp)
+    seen = leveledUp
+    return 0
+  end
+  local caterpie = { species = "CATERPIE", level = 7 }
+  Coop.offerEvolutions(
+    { data = { pokemon = {} }, save = { party = { caterpie } } },
+    { [caterpie] = true },
+    "win",
+    { [caterpie] = true })
+  Evolution.checkParty = realCheck
+  check(seen == nil,
+        "offerEvolutions does not call checkParty for a resolved mon")
+
+  seen = nil
+  Evolution.checkParty = function(game, onDone, leveledUp)
+    seen = leveledUp
+    return 0
+  end
+  Coop.offerEvolutions(
+    { data = { pokemon = {} }, save = { party = { caterpie } } },
+    { [caterpie] = true },
+    "win",
+    nil)
+  Evolution.checkParty = realCheck
+  check(seen and seen[caterpie],
+        "and still offers when no mid-battle movie played")
+
+  -- Gen 2 apply replaces the party slot and retargets on-plate pointers.
+  local old = { species = "SLUG", level = 8 }
+  local new = { species = "SNAIL", level = 8 }
+  local g2holder = {
+    leveledUp = { [old] = true },
+    toLearn = { { mon = old, move = "TACKLE" } },
+    sim = { slots = { { battler = { mon = old } } } },
+  }
+  EvolveFx.retarget(g2holder, old, new)
+  check(g2holder.leveledUp[new] and not g2holder.leveledUp[old],
+        "Gen 2 retarget moves the leveledUp key")
+  eq(g2holder.toLearn[1].mon, new, "...and the toLearn pointer")
+  eq(g2holder.sim.slots[1].battler.mon, new, "...and the on-plate battler")
+
+  local grown, newMax, newHp = EvolveFx.hpGrowth(50, 70, 20)
+  eq(grown, 20, "evo HP growth is the max-HP delta")
+  eq(newMax, 70, "...the new ceiling")
+  eq(newHp, 40, "...and fight current HP, not save HP")
+  local noGrow, sameMax, sameHp = EvolveFx.hpGrowth(50, 50, 20)
+  eq(noGrow, 0, "no growth when max HP is unchanged")
+  eq(sameMax, 50, "...")
+  eq(sameHp, 20, "...and current HP is left alone")
+
+  local cacheMovie = EvolveFx.begin({
+    evolve = { species = "WORM" }, from = "WORM", into = "MOTH",
+  })
+  EvolveFx.formCachePut(cacheMovie, "front", "WORM", "old-pic")
+  EvolveFx.formCachePut(cacheMovie, "front", "MOTH", "new-pic")
+  eq(EvolveFx.formCacheGet(cacheMovie, "front", "WORM"), "old-pic",
+     "movie cache keeps the old front")
+  eq(EvolveFx.formCacheGet(cacheMovie, "front", "MOTH"), "new-pic",
+     "...and the new one, so a flash does not reload")
+  eq(EvolveFx.formCacheGet(cacheMovie, "front", "BIRD"), nil,
+     "a third species is a miss")
+  check(EvolveFx.flashPulse(cacheMovie) >= 0, "flashPulse is defined on an open movie")
+  cacheMovie.done = true
+  eq(EvolveFx.flashPulse(cacheMovie), 0, "...and 0 once the movie has settled")
+
+  -- Post-evo plate: grow the arena pair, remember it on levelHpGrown, and
+  -- survive a hub snapshot that still carries the pre-evo maximum.
+  local saveEvo = {
+    species = "MOTH", level = 7, hp = 99,
+    stats = { hp = 70 },
+  }
+  local arena = { maxHp = 50, hp = 20, levelHpGrown = 10, species = "WORM" }
+  local hpFight = setmetatable({
+    game = { data = evoData, save = { party = { saveEvo } } },
+    mine = { { species = "WORM", maxHp = 50, hp = 20, slot = 0 } },
+    slots = { [0] = arena },
+    active = 1,
+    mySide = "a",
+    usesBattlefield = function() return false end,
+    refreshSlotSprite = function() end,
+  }, { __index = MediatedBattle })
+  hpFight:refreshAfterEvolve(saveEvo, 50, 20)
+  eq(arena.maxHp, 70, "the plate ceiling is the evolved max HP")
+  eq(arena.hp, 40, "...and current HP grew by the same delta, not save HP")
+  eq(arena.levelHpGrown, 30, "...which is added to the level-only grown")
+  eq(hpFight.mine[1].hp, 40, "the fight sheet matches the plate, not save HP")
+  hpFight:noteSlot({ t = "hp", slot = 0, hp = 10, maxHp = 40 })
+  eq(arena.maxHp, 70, "a pre-evo hub pair does not snap the evolved ceiling")
+  eq(arena.hp, 40, "...nor the grown current HP (10 + 30 grown)")
+
+  -- Off the plate: a benched (or switched-out) mon that hits its evo level
+  -- still queues the movie, still applies to *that* save record, and does
+  -- not flash the fighter standing on the field. EXP.ALL / EXP.SHARE / a
+  -- participant sitting in its ball all land here via levelled().
+  local fieldMon = {
+    species = "BIRD", nickname = "LEAD", level = 10, hp = 30,
+    stats = { hp = 30 },
+  }
+  local benchMon = {
+    species = "WORM", nickname = "BENCH", level = 7, hp = 10,
+    dvs = { hp = 8, attack = 8, defense = 8, speed = 8, special = 8 },
+    statExp = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+    stats = { hp = 10, attack = 10, defense = 10, speed = 10, special = 10 },
+    moves = { { id = "TACKLE", pp = 35 } },
+  }
+  local fxCalls = {}
+  local benchFight = setmetatable({
+    game = {
+      data = evoData,
+      save = { party = { fieldMon, benchMon }, pokedex = { seen = {}, owned = {} } },
+      input = { wasPressed = function() return false end },
+    },
+    mine = { { slot = 0, species = "BIRD" }, { slot = 1, species = "WORM" } },
+    active = 1,
+    slots = { [0] = { species = "BIRD", speciesId = "BIRD", hp = 20, maxHp = 30 } },
+    mySide = "a",
+    usesBattlefield = function() return false end,
+    emitFx = function(_, kind, index)
+      fxCalls[#fxCalls + 1] = { kind = kind, index = index }
+    end,
+    emitVfx = function() end,
+    refreshSlotSprite = function() end,
+    teach = function() end,
+    musicKind = function() return "wild" end,
+  }, { __index = MediatedBattle })
+  benchFight:levelled(benchMon, "BENCH", { 7 })
+  local benchRow
+  for _, row in ipairs(benchFight.lines) do
+    if type(row) == "table" and row.evolve == benchMon then benchRow = row end
+  end
+  check(benchRow ~= nil, "levelled on a benched mon still queues an evolve row")
+  eq(benchFight:evolveSlot(benchMon), nil, "...and evolveSlot finds no plate")
+  eq(benchFight:evolveSlot(fieldMon), 0, "...while the fighter still owns the seat")
+  check(benchFight:startEvolve(benchRow), "startEvolve accepts the bench row")
+  check(benchFight.evolving and benchFight.evolving.center,
+        "a bench evolve row plays as a centered pic")
+  check(benchFight.evolving.slot == nil, "...with no plate to flash")
+  eq(#fxCalls, 0, "...and emits no seat FX on the fighter")
+  for _ = 1, EvolveFx.FLASH_FRAMES + 2 do
+    benchFight:stepEvolve()
+    if not benchFight.evolving then break end
+  end
+  check(not benchFight.evolving, "the bench movie ends of its own clock")
+  eq(fieldMon.species, "BIRD", "the fighter on the plate is untouched")
+  eq(benchFight.slots[0].speciesId, "BIRD", "...including its seat pic")
+  if benchMon.species == "MOTH" then
+    check(benchFight.evoResolved and benchFight.evoResolved[benchMon],
+          "a successful bench apply marks evoResolved on the benched mon")
+  else
+    eq(benchMon.species, "WORM",
+       "a failed bench apply leaves the species for the after-battle fallback")
+  end
+
+  -- Same contract on CoopBattle: sim has the fighter, not the bench.
+  local coopField = { species = "BIRD", nickname = "LEAD" }
+  local coopBench = { species = "WORM", nickname = "BENCH", level = 7 }
+  local coop = setmetatable({
+    game = { data = evoData, save = { party = { coopField, coopBench } } },
+    sim = { slots = { { index = 1, battler = { mon = coopField } } } },
+    messages = {},
+    say = function() end,
+  }, { __index = CoopBattle })
+  eq(coop:evolveSlot(coopBench), nil, "CoopBattle: a benched mon has no seat")
+  eq(coop:evolveSlot(coopField), 1, "...the fighter does")
+  coop:levelled(coopBench, "BENCH", { 7 })
+  local coopRow
+  for _, row in ipairs(coop.messages) do
+    if type(row) == "table" and row.evolve == coopBench then coopRow = row end
+  end
+  check(coopRow ~= nil, "CoopBattle.levelled queues the bench evolve row")
+  check(coop:startEvolve(coopRow), "...")
+  check(coop.evolving and coop.evolving.center,
+        "CoopBattle plays a bench movie off the plate too")
+  eq(coopField.species, "BIRD", "and does not retarget the fighter")
+
+  local laid = Battlefield.layout({
+    evolveCenter = { front = "PIC", flash = 0.5 },
+  })
+  check(laid.evolveCenter and laid.evolveCenter.front == "PIC",
+        "Battlefield.layout passes a centered evo pic through")
+  eq(laid.evolveCenter.x, Battlefield.MIDLINE,
+     "...on the field midline")
+
+  -- MMO 1v1 exit: leftover leveledUp still reaches checkParty.
+  local Evolution = require("src.pokemon.Evolution")
+  local realCheck = Evolution.checkParty
+  local seenEnd
+  Evolution.checkParty = function(game, onDone, leveledUp)
+    seenEnd = leveledUp
+    return 0
+  end
+  local leftover = { species = "CATERPIE", level = 7 }
+  local sessions = Sessions.new({ send = function() end }, {})
+  local leftoverGame = { data = { pokemon = {} }, save = { party = { leftover } } }
+  sessions.fight = {
+    leveledUp = { [leftover] = true },
+    result = "win",
+    game = leftoverGame,
+  }
+  sessions:endMediated(leftoverGame, {})
+  Evolution.checkParty = realCheck
+  check(seenEnd and seenEnd[leftover],
+        "endMediated offers evolutions a mid-movie snap left unanswered")
+
+  seenEnd = nil
+  Evolution.checkParty = function(game, onDone, leveledUp)
+    seenEnd = leveledUp
+    return 0
+  end
+  sessions.fight = {
+    leveledUp = { [leftover] = true },
+    evoResolved = { [leftover] = true },
+    result = "win",
+    game = leftoverGame,
+  }
+  sessions:endMediated(leftoverGame, {})
+  Evolution.checkParty = realCheck
+  check(seenEnd == nil,
+        "...and still skips a prompt the player already answered")
+end)()
+
 -- ------------------------------------------------------------------
 -- 7b. the co-op "!" latch, the corner line, and the mark's real life
 -- ------------------------------------------------------------------
@@ -13990,6 +14438,13 @@ end)()
   local scoped = Battlefield.fxSeat(
     { { kind = "flash", side = "ally", seatIndex = 1, t = 0.25 } }, "ally", 2)
   eq(scoped.flash, 0, "a seat-scoped fx entry does not reach a different seat")
+
+  local evoFlash = Battlefield.fxSeat(
+    { { kind = "evolve", side = "ally", seatIndex = 1, t = 0.5 } }, "ally", 1)
+  check(evoFlash.flash > 0, "an evolve fx whites the matching seat")
+  local evoMiss = Battlefield.fxSeat(
+    { { kind = "evolve", side = "ally", seatIndex = 1, t = 0.5 } }, "ally", 2)
+  eq(evoMiss.flash, 0, "...and no other")
 
   -- Nothing matched: the neutral answer is one shared record, so a caller that
   -- wrote into what fxSeat handed back would move every unaffected seat on the
