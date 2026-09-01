@@ -1524,7 +1524,7 @@ install. To pin a specific release instead, name one and check that its
 
 ```sh
 # whichever tag github.com/alamops/RBYMMOMod/releases names
-git clone --depth 1 --branch v1.0.9 https://github.com/alamops/RBYMMOMod.git
+git clone --depth 1 --branch v1.1.9 https://github.com/alamops/RBYMMOMod.git
 ```
 
 #### Reading the passcode out of a container

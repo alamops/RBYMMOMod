@@ -6,6 +6,8 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.1.9] - 2026-08-31
+
 ### Changed
 
 - **The battlefield is a Pokémon-like outdoor field, not a sports pitch.**
