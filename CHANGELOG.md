@@ -8,6 +8,16 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **Levels gained in a co-op battle now offer evolutions.** The engine
+  moved that check onto `BattleState:finish` (on the battle screen, before
+  the white-out). A 2-on-2 never runs that finish — it pops the buried
+  battle up front and only called `afterBattle`, which does not walk
+  `leveledUp` — so a Caterpie that hit 7 in co-op stayed a Caterpie until
+  the next wild level-up or a Rare Candy. The co-op screen already recorded
+  who levelled; both the walk-in and invite-joiner exits now run the
+  engine's own `Evolution.checkParty` (and Gold's `Evolution.plan`) off
+  that set.
+
 - **After a catch, the name and status screens fill the window.** On the
   Gen 1 battlefield those pages are still 160×144, and the engine keeps the
   640×360 arena underneath them, so the letter grid and the STATUS /
@@ -17,6 +27,16 @@ here must match `manifest.version`.
   question so the numbers are readable.
 
 ### Added
+
+- **Mid-battle evolutions on co-op / MMO / solo custom fights.** A level-up
+  that qualifies now plays the evolution movie on the arena after that
+  mon's "grew to level N!" lines — flash, sparkle, B-cancel after the
+  80-frame grace, same clock as the engine's EvolutionState — instead of
+  waiting until the fight ends. Accept and cancel both stick: the
+  after-battle check will not re-offer a prompt the player already
+  answered. Local only, same contract as exp and levels: the save and
+  this client's sprite update; the hub and everyone else keep the
+  uploaded pre-evo sheet for the rest of this fight.
 
 - **The POKéMON menu shows the POKéMON.** Picking who to send out — the
   `PKMN` command mid-fight, the forced pick after a faint, and the party

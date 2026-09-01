@@ -63,6 +63,7 @@ local Wire = need("Wire")
 local Gen = need("Gen")
 local CoopBattle = need("CoopBattle")
 local Mediated = need("MediatedBattle")
+local EvolveFx = need("EvolveFx")
 
 -- How often a standing offer is re-attempted while this client is busy.
 --
@@ -382,6 +383,32 @@ function M.buriedFinisher(engine)
   return finish
 end
 
+-- Level-up evolutions the engine's BattleState:finish would have offered.
+--
+-- A co-op (or solo-mediated) fight never runs that finish: it pops the buried
+-- battle up front and later only calls onFinish, which is OverworldState:
+-- afterBattle. afterBattle does not walk `leveledUp` -- Evolution.checkParty
+-- lives on BattleState:finish, on the battle screen, before the white-out
+-- (end_of_battle.asm / #1656). Stamping the set onto the buried battle and
+-- handing it to afterBattle therefore offered nothing, which is why a mon
+-- that hit its evolution level in a 2-on-2 stayed unevolved until the next
+-- wild level-up or a Rare Candy (#65).
+--
+-- `leveledUp` is the set CoopBattle.levelled (and SoloBattle.levelledSince)
+-- already records, keyed by the save-party monster Evolution.checkParty
+-- walks. Absent or empty is a real no -- nothing levelled, nothing to offer.
+-- `evoResolved` is the set a mid-battle movie already answered (accept or
+-- cancel): those mons must not be offered again.
+--
+-- Body lives on EvolveFx so Sessions:endMediated can call the same offer
+-- without requiring this module (that graph is a cycle).
+function M.offerEvolutions(game, leveledUp, result, evoResolved)
+  return EvolveFx.offerEvolutions(game, leveledUp, result, evoResolved, {
+    warn = function(fmt, ...) mod.log:warn(fmt, ...) end,
+    ui = mod.ui,
+  })
+end
+
 -- Tell the buried engine battle how the fight it never ran went.
 --
 -- `engine` is the frozen BattleState underneath, `game` is what holds the
@@ -405,6 +432,12 @@ function M.finishBuriedBattle(engine, game, result, blackout)
     outcome = "lose"
     engineRitual = true
   end
+
+  -- Before afterBattle: vanilla offers evolutions on the battle screen, then
+  -- whites out. This fight already popped that screen, so the offer sits on
+  -- the overworld -- the same place the forget-a-move menu already goes --
+  -- and pumpBlackout waits for it when a warp is owed.
+  M.offerEvolutions(game, engine.leveledUp, result, engine.evoResolved)
 
   local ok, err = pcall(finish, outcome)
   if not ok then
@@ -2369,19 +2402,24 @@ function M:syntheticFinish(game, plan, coopState)
           tostring(class), tostring(err))
       end
     end
-    -- Stub battle for afterBattle: evolutions read leveledUp; kind/oppClass
-    -- keep the Oak's Lab rival blackout exception honest if it ever lands here.
+    -- Stub battle for afterBattle: kind/oppClass keep the Oak's Lab rival
+    -- blackout exception honest if it ever lands here. Evolutions do not
+    -- read leveledUp off this stub -- afterBattle never did; they go through
+    -- M.offerEvolutions, the same check the walk-in path runs.
     local stub = {
       kind = "trainer",
       oppClass = class,
       partyIndex = partyIndex,
       leveledUp = coopState and coopState.leveledUp or nil,
+      evoResolved = coopState and coopState.evoResolved or nil,
     }
+    M.offerEvolutions(game, stub.leveledUp, "win", stub.evoResolved)
     if type(ow.afterBattle) == "function" then
       local ok, err = pcall(ow.afterBattle, ow, "win", stub)
       if not ok then
-        mod.log:warn("co-op afterBattle could not run (%s); evolutions from "
-          .. "this fight may need a reload from your last save", tostring(err))
+        mod.log:warn("co-op afterBattle could not run (%s); trainer scripts "
+          .. "or map flags for this fight may need a reload from your last "
+          .. "save", tostring(err))
       end
     end
     ow.engaging = false
@@ -2660,13 +2698,14 @@ function M:onBattleOver(result, game, state, toLearn)
   -- place that knows how to finish a trainer off -- can reach it.
   if self.engineBattle then
     -- What levelled, carried across to the battle that is about to be told
-    -- how this went: OverworldState:afterBattle offers evolutions to exactly
-    -- the mons the battle recorded, and the battle that recorded them here is
-    -- the co-op one, not the one holding the flag.
+    -- how this went. finishBuriedBattle runs Evolution.checkParty off this
+    -- set (afterBattle does not); the battle that recorded them here is the
+    -- co-op one, not the one holding the flag.
     -- Read off the *battle*, not the sim: exp is applied per client now, so
     -- the list of what levelled is the one this client built for its own
     -- party -- which is exactly the party the evolution check will walk.
     self.engineBattle.leveledUp = state and state.leveledUp or nil
+    self.engineBattle.evoResolved = state and state.evoResolved or nil
     self.encounter = { engine = self.engineBattle, game = game }
     self.engineBattle = nil
   end

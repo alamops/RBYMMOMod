@@ -75,6 +75,10 @@ local Vfx = need("Vfx")
 -- `src/battle/Experience.lua` twin, so a mediated Gen 2 faint is priced through
 -- the engine's own `src/battle/gen2/Mon` primitives instead.
 local Exp2 = need("Exp2")
+-- Mid-battle evolution movie: timing + apply. Drawing stays on this screen
+-- and on Battlefield -- EvolutionState is a 160x144 page and must not be
+-- pushed onto the arena.
+local EvolveFx = need("EvolveFx")
 -- The 1v1 mediated client, for its snapshots and its senders rather than for
 -- its screen: what a party looks like on the wire must not depend on how many
 -- monsters are on the field.
@@ -1568,6 +1572,13 @@ function M:update(dt)
       self:stepExpFill()
       return
     end
+    -- The evolution movie holds the queue the same way a filling strip does:
+    -- it is not a text page, A does not skip it, and MSG_AUTO_ADVANCE must
+    -- not dismiss "is evolving!" while the flash is still running.
+    if self.evolving then
+      self:stepEvolve()
+      return
+    end
     if self.faintFx then
       self:stepFaint()
       return
@@ -1601,7 +1612,8 @@ function M:update(dt)
       local head = self.messages[1]
       if type(head) == "table"
          and (head.anim or head.drain or head.faintfx or head.expfill
-              or head.wait or head.act or head.ballsend or head.vfxrow) then
+              or head.evolve or head.wait or head.act or head.ballsend
+              or head.vfxrow) then
         -- Hold wait/act/anim behind opening appear line(s). Drop ball chrome
         -- when the post-appear wait starts (not on every page advance), so a
         -- multi-page appear does not begin the gap early.
@@ -1629,6 +1641,8 @@ function M:update(dt)
             self:startDrain(head)
           elseif head.expfill then
             self:startExpFill(head)
+          elseif head.evolve then
+            self:startEvolve(head)
           elseif head.vfxrow then
             -- **Takes no hold.** The sentence this belongs to is the very next
             -- row and the effect is meant to run under it; holding here would
@@ -3809,6 +3823,111 @@ function M:stepExpFill()
   self.expFilling = nil
 end
 
+-- Mid-battle evolution movie. Timing and apply live in EvolveFx; this is the
+-- queue hold, the seat FX, and the line the box keeps up while they run.
+-- Local only: the save and this client's pic update; the hub keeps the
+-- uploaded pre-evo sheet for the rest of this fight.
+function M:evolveSlot(mon)
+  if not (self.sim and mon) then return nil end
+  for _, slot in ipairs(self.sim.slots or {}) do
+    local battler = slot.battler
+    if battler and battler.mon == mon then return slot.index end
+  end
+  return nil
+end
+
+function M:startEvolve(row)
+  local movie = EvolveFx.begin(row)
+  if not movie then return false end
+  self.evolving = movie
+  self.shown = EvolveFx.evolvingLine(movie)
+  self.msgClock = 0
+  local eng = engine
+  EvolveFx.playMusic(self.game, eng and eng.Music)
+  movie.oldSprite = nil
+  movie.newSprite = nil
+  local index = self:evolveSlot(movie.mon)
+  movie.slot = index
+  movie.center = index == nil
+  if index then
+    local slot = self.sim and self.sim:slot(index)
+    local battler = slot and slot.battler
+    movie.oldSprite = battler and battler.sprite
+    self:emitFx("evolve", index, nil, { duration = EvolveFx.MOVIE_SECONDS })
+    self:emitVfx({ style = "sparkle", palette = "FAIRY", delivery = "burst" },
+      index)
+    self:emitVfx({ style = "shine", palette = "NORMAL", delivery = "burst" },
+      index)
+  end
+  return true
+end
+
+function M:stepEvolve()
+  local movie = self.evolving
+  if type(movie) ~= "table" then
+    self.evolving = nil
+    return
+  end
+  local input = self.game and self.game.input
+  local pressedB = input and input:wasPressed("b")
+  EvolveFx.advance(movie, nil, pressedB)
+  if not movie.done then return end
+  self.evolving = nil
+  local line
+  if movie.canceled then
+    EvolveFx.markResolved(self, movie.mon)
+    line = EvolveFx.stoppedLine(movie)
+  else
+    local applied = EvolveFx.applyTo(self.game, movie, self)
+    if applied then
+      EvolveFx.markResolved(self, applied)
+      self:refreshAfterEvolve(applied)
+      EvolveFx.playCry(self.game, engine and engine.Sound, movie.into)
+      for _, moveId in ipairs(EvolveFx.learnMoveIds(self.game, applied)) do
+        self:teach(applied, movie.name, moveId)
+      end
+      line = EvolveFx.evolvedLine(movie, self.game)
+    else
+      -- Apply failed: leave leveledUp so the after-battle fallback still owes
+      -- this mon. The stopped line is honest -- the species did not change.
+      line = EvolveFx.stoppedLine(movie)
+    end
+  end
+  EvolveFx.restoreBattleMusic(self.game, {
+    Music = engine and engine.Music,
+    kind = self:musicKind(),
+    mode = self.mode,
+    trainer = self.trainer,
+    oppClass = self.oppClass,
+    partyIndex = self.partyIndex,
+  })
+  self.shown = line
+  self.msgClock = 0
+end
+
+function M:refreshAfterEvolve(mon)
+  if not mon then return end
+  if not self.sim then return end
+  for _, slot in ipairs(self.sim.slots or {}) do
+    local battler = slot.battler
+    if battler and battler.mon == mon then
+      slot._bfFront = nil
+      slot._bfFrontSpecies = nil
+      local newMax = tonumber(mon.stats and mon.stats.hp) or tonumber(mon.maxHp)
+      if newMax and newMax == newMax and newMax > 0 then
+        newMax = math.floor(newMax)
+        mon.maxHp = newMax
+        battler.mon.maxHp = newMax
+        local hp = tonumber(mon.hp)
+        if hp then
+          hp = math.max(1, math.min(newMax, math.floor(hp)))
+          mon.hp = hp
+        end
+      end
+    end
+  end
+end
+
 -- The fall. The flag goes up *before* the text, which is the engine's order
 -- (BattleState:enemyMonFainted queues the slide and the cry, then says the
 -- line): the sprite is sliding out of its box while the box says why.
@@ -4009,6 +4128,23 @@ function M:snapDisplay()
   -- rather than change what is drawn, and cutting a player's last few lines
   -- off mid-sentence is a worse lie than reading them a moment late.
   self.shownBattler = {}
+  -- A movie in flight is abandoned without applying: the screen is being
+  -- told the field has moved on, and a species change mid-snap would be a
+  -- form the player never saw finish. leveledUp stays so the after-battle
+  -- fallback still offers. Queued (unplayed) evolve rows are kept -- they
+  -- are the fallback's other half, and dropping them here would skip a
+  -- prompt the player never answered.
+  if self.evolving then
+    EvolveFx.restoreBattleMusic(self.game, {
+      Music = engine and engine.Music,
+      kind = self:musicKind(),
+      mode = self.mode,
+      trainer = self.trainer,
+      oppClass = self.oppClass,
+      partyIndex = self.partyIndex,
+    })
+    self.evolving = nil
+  end
   local kept = {}
   for _, row in ipairs(self.messages or {}) do
     -- `ballsend` goes with the swap it belongs to, and it has to: the arc row
@@ -5025,6 +5161,7 @@ function M:drawField()
     local sinking = self:sinkingAt(index)
     local sprite = (sinking and sinking.battler and sinking.battler.sprite)
       or (battler and battler.sprite)
+    sprite = self:evolveDrawSprite(battler, sprite)
     local x, y, scale = self:picOriginFor(index, sprite)
     local hideIntro = introHide and introHide[index]
     if sprite and x and not (hideFoes and theirs)
@@ -5070,6 +5207,7 @@ function M:drawField()
   -- or its focus arrow when they share the edge.
   drawSideStrip(self, self:stripSeats(false), true, self:desiredAllyFocus())
   drawSideStrip(self, self:stripSeats(true), false, self:desiredFoeFocus())
+  self:drawEvolveCenterClassic()
   local foe = self:desiredFoeFocus()
   local Font = engine.Font
   if foe then
@@ -5294,6 +5432,12 @@ local function seatFrontFor(self, slot, battler)
   if not battler then return nil end
   local mon = battler.mon
   local species = mon and mon.species
+  local movie = self.evolving
+  if movie and movie.mon == mon then
+    species = EvolveFx.picSpecies(movie) or species
+    local hit = EvolveFx.formCacheGet(movie, "front", species)
+    if hit ~= nil then return hit or nil end
+  end
   if slot and slot._bfFront ~= nil and slot._bfFrontSpecies == species then
     local cached = slot._bfFront
     return (cached ~= false) and cached or nil
@@ -5326,16 +5470,61 @@ local function seatFrontFor(self, slot, battler)
       end
     end
   elseif eng and eng.BattleState and eng.BattleState.makeBattler and mon and data then
-    local ok, probe = pcall(eng.BattleState.makeBattler, data, mon, false, save)
+    local probeMon = mon
+    if species and species ~= mon.species then
+      probeMon = {
+        species = species,
+        nickname = mon.nickname,
+        level = mon.level or 1,
+        hp = mon.hp or 1,
+        stats = mon.stats or { hp = 1 },
+        moves = mon.moves or { { id = "TACKLE", pp = 1 } },
+        dvs = mon.dvs,
+        shiny = mon.shiny,
+      }
+    end
+    local ok, probe = pcall(eng.BattleState.makeBattler, data, probeMon, false, save)
     if ok and probe and probe.sprite then resolved = probe.sprite end
   end
   -- Fall back to whatever the live battler already holds (may be a back).
   if not resolved then resolved = battler.sprite end
+  if movie and movie.mon == mon then
+    EvolveFx.formCachePut(movie, "front", species, resolved)
+  end
   if slot then
     slot._bfFront = resolved or false
     slot._bfFrontSpecies = species
   end
   return resolved
+end
+
+-- Classic 160x144 pic swap during the movie. Battlefield goes through
+-- seatFrontFor (species key already follows picSpecies); this is the back/front
+-- the GB stage draws from battler.sprite. Lazy: the into pic is probed the
+-- first time the flash wants it, so a missing ROM still plays the text movie.
+function M:evolveDrawSprite(battler, fallback)
+  local movie = self.evolving
+  if not (movie and battler and battler.mon == movie.mon) then
+    return fallback
+  end
+  local species = EvolveFx.picSpecies(movie)
+  local hit = EvolveFx.formCacheGet(movie, "front", species)
+  if hit ~= nil then return hit or fallback end
+  if species == movie.into then
+    if movie.newSprite == nil then
+      local fake = {
+        mon = {
+          species = movie.into,
+          shiny = movie.mon and movie.mon.shiny,
+          level = movie.mon and movie.mon.level,
+        },
+      }
+      movie.newSprite = seatFrontFor(self, nil, fake) or false
+      EvolveFx.formCachePut(movie, "front", movie.into, movie.newSprite)
+    end
+    if movie.newSprite then return movie.newSprite end
+  end
+  return movie.oldSprite or fallback
 end
 
 -- Resolve a party bag icon to a cached Image on the sim slot (once per
@@ -5344,6 +5533,12 @@ local function seatIconFor(self, slot, battler)
   if not battler then return nil end
   local mon = battler.mon
   local species = mon and mon.species
+  local movie = self.evolving
+  if movie and movie.mon == mon then
+    species = EvolveFx.picSpecies(movie) or species
+    local hit = EvolveFx.formCacheGet(movie, "icon", species)
+    if hit ~= nil then return hit or nil end
+  end
   if slot and slot._bfIcon ~= nil and slot._bfIconSpecies == species then
     local cached = slot._bfIcon
     return (cached ~= false) and cached or nil
@@ -5354,10 +5549,11 @@ local function seatIconFor(self, slot, battler)
   local data = self.game and self.game.data
   if Sprites and Sprites.iconPath and mon and data then
     local path = nil
+    local iconSpecies = species or mon.species
     pcall(function()
       local icons = data.icons
-      local def = data.pokemon and data.pokemon[mon.species]
-      local entry = (icons and icons.bySpecies and icons.bySpecies[mon.species])
+      local def = data.pokemon and data.pokemon[iconSpecies]
+      local entry = (icons and icons.bySpecies and icons.bySpecies[iconSpecies])
         or (def and def.icon)
       local name
       if type(entry) == "string" then
@@ -5381,6 +5577,9 @@ local function seatIconFor(self, slot, battler)
       end)
       if ok and img then resolved = img end
     end
+  end
+  if movie and movie.mon == mon then
+    EvolveFx.formCachePut(movie, "icon", species, resolved)
   end
   if slot then
     slot._bfIcon = resolved or false
@@ -5415,6 +5614,45 @@ local function partyFrontFor(self, mon)
     cache[key] = hit
   end
   return hit or nil
+end
+
+function M:evolveCenterFront()
+  local movie = self.evolving
+  if not (movie and movie.center) then return nil end
+  local species = EvolveFx.picSpecies(movie)
+  if species == nil then return nil end
+  local hit = EvolveFx.formCacheGet(movie, "front", species)
+  if hit ~= nil then return hit or nil end
+  local stub = {
+    species = species,
+    shiny = movie.mon and movie.mon.shiny,
+    level = movie.mon and movie.mon.level,
+  }
+  local resolved = partyFrontFor(self, stub)
+  EvolveFx.formCachePut(movie, "front", species, resolved)
+  return resolved
+end
+
+function M:evolveCenterCtx()
+  local movie = self.evolving
+  if not (movie and movie.center) then return nil end
+  local front = self:evolveCenterFront()
+  if not front then return nil end
+  return { front = front, flash = EvolveFx.flashPulse(movie) }
+end
+
+function M:drawEvolveCenterClassic()
+  local movie = self.evolving
+  if not (movie and movie.center) or not love then return end
+  local sprite = self:evolveCenterFront()
+  if not sprite then return end
+  local ok, iw, ih = pcall(sprite.getDimensions, sprite)
+  iw = (ok and type(iw) == "number" and iw) or 56
+  ih = (ok and type(ih) == "number" and ih) or 56
+  local x = math.floor((160 - iw) / 2)
+  local y = math.floor((96 - ih) / 2)
+  love.graphics.setColor(1, 1, 1, 1)
+  pcall(love.graphics.draw, sprite, x, y)
 end
 
 function M:ensureBattlefieldLoaded()
@@ -5785,6 +6023,10 @@ local FX_SPAN = {
   -- is a visual one; a spec that genuinely needs longer carries its own
   -- `duration` (Explosion, a Poke Flute).
   vfx    = 0.50,
+  -- Mid-battle evolution movie. The real lifetime is EvolveFx.MOVIE_SECONDS
+  -- (the cart's 368-frame flash); this default is only what emitFx needs to
+  -- accept the kind, and startEvolve overwrites duration.
+  evolve = 6.14,
 }
 
 -- The beats between the effects, in seconds. Not effects themselves -- nothing
@@ -6569,6 +6811,8 @@ function M:battlefieldCtx()
     -- One direction only: this screen advances `t`, Battlefield draws whatever
     -- `t` says. Absent when nothing is playing -- the renderer tolerates that.
     fx = self:battlefieldFxCtx(allySeats, foeSeats),
+    -- Bench / EXP.ALL movie: no plate to flash, so a front pic in the middle.
+    evolveCenter = self:evolveCenterCtx(),
     -- Arrow/card only during target pick; Battlefield honors this flag.
     showTarget = (self.phase == "target"),
   }
@@ -7698,6 +7942,11 @@ function M:levelled(mon, fallbackName, levels)
   end
   self.leveledUp = self.leveledUp or {}
   self.leveledUp[mon] = true
+  -- After the grew-to / teach lines for this award: queue the movie if this
+  -- mon now qualifies. Bench EXP.ALL still qualifies; the movie has no seat
+  -- FX off the plate, but the text, B-cancel and apply still run.
+  self.messages = self.messages or {}
+  EvolveFx.enqueue(self.messages, self.game, mon, self)
 end
 
 -- ------- learning a move

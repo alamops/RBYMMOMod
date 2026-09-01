@@ -56,6 +56,7 @@ local SessionNet = need("SessionNet")
 local MediatedBattle = need("MediatedBattle")
 local Gen = need("Gen")
 local Trade2 = need("Trade2")
+local EvolveFx = need("EvolveFx")
 
 local M = {}
 M.__index = M
@@ -593,7 +594,19 @@ function M:endMediated(game, toLearn)
   local fight = self.fight
   self.fight = nil
   if fight then self.transport:send(Wire.SESSION_LEAVE, {}) end
-  self:offerForgets(game or (fight and fight.game), toLearn)
+  game = game or (fight and fight.game)
+  -- Forgets first, then the #65 fallback: same order Coop.onBattleOver uses.
+  -- The fight is already off `self.fight`, so the sets have to be read off
+  -- the snapshot -- a mid-movie snapDisplay abandoned apply and left
+  -- leveledUp for this offer; evoResolved subtracts a prompt the player
+  -- already answered on the arena.
+  self:offerForgets(game, toLearn)
+  if fight then
+    EvolveFx.offerEvolutions(game, fight.leveledUp, fight.result, fight.evoResolved, {
+      warn = function(fmt, ...) mod.log:warn(fmt, ...) end,
+      ui = (self.ui and self.ui.push and self.ui) or mod.ui,
+    })
+  end
 end
 
 -- Moves a monster levelled into during a mediated fight but had no room for.

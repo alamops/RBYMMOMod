@@ -104,6 +104,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Gen = need("Gen")
 local Coop = need("Coop")
+local EvolveFx = need("EvolveFx")
 local MediatedBattle = need("MediatedBattle")
 local SoloBrain = need("SoloBrain")
 
@@ -1276,6 +1277,10 @@ end
 function M:_ended(result, toLearn)
   local game, engine, sim = self.game, self.engine, self.sim
   local reason, save, levels = self.reason, self.save, self.levels
+  -- Snapshot before the fight is released: a mid-battle movie that already
+  -- answered (accept or cancel) must not be re-offered by checkParty, and
+  -- `self.fight` is about to be nilled.
+  local evoResolved = self.fight and self.fight.evoResolved
   -- Released before any of it runs. Everything below can push a screen, and a
   -- screen that pushes is a `screen.pushed` back into the divert -- which must
   -- find no fight in the slot rather than a half-finished one.
@@ -1290,7 +1295,9 @@ function M:_ended(result, toLearn)
   self:_reconcile(sim, game, save)
 
   local levelled = M.levelledSince(game, save, levels)
+  levelled = EvolveFx.withoutResolved(levelled, evoResolved)
   if engine and levelled then engine.leveledUp = levelled end
+  if engine and evoResolved then engine.evoResolved = evoResolved end
 
   local outcome = M.engineResult(result, reason)
   local blackout = Coop.blacksOut(outcome, game)
@@ -1462,12 +1469,14 @@ end
 -- set keyed by the save-party monster.
 --
 -- Derived rather than recorded, because the level-ups happened inside the
--- screen and it keeps no such list (`CoopBattle` does; `MediatedBattle` does
--- not, and this file may not change it). The difference between the level a
+-- screen and this file may not reach into `MediatedBattle.leveledUp` after
+-- `_ended` has released the fight. The difference between the level a
 -- monster had when the fight opened and the level it has now is the same fact
 -- by a shorter route -- and a monster the snapshot never saw is one that
 -- joined the party during the fight, which is a monster that was caught and
--- has therefore not levelled into anything.
+-- has therefore not levelled into anything. Subtract `evoResolved` (a movie
+-- the player already answered mid-fight) before handing this to
+-- `Coop.offerEvolutions`.
 function M.levelledSince(game, save, levels)
   local party = game and game.save and game.save.party
   if not (type(levels) == "table" and type(party) == "table") then return nil end

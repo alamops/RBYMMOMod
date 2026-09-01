@@ -1,5 +1,5 @@
-[info] loaded mod rby_mmo 1.1.0
-[info] loaded mod rby_mmo 1.1.0
-[info] loaded mod rby_mmo 1.1.0
-[info] loaded mod rby_mmo 1.1.0
-5174/5174 checks passed  (rby_mmo)
+[info] loaded mod rby_mmo 1.1.1
+[info] loaded mod rby_mmo 1.1.1
+[info] loaded mod rby_mmo 1.1.1
+[info] loaded mod rby_mmo 1.1.1
+5341/5341 checks passed  (rby_mmo)
