@@ -945,9 +945,13 @@ M.BATTLE_HUD_META_ADVANCE = 4
 M.BATTLE_HUD_META_HEIGHT = 5
 
 -- Top-down battlefield theatre (Gen1 CoopBattle / MediatedBattle).
--- Arena art is an original asset under assets/battle/; canvas is 16:9 within
--- Renderer uiSize caps so fill-scale can stretch it to the window.
+-- Live fights stamp the player's own tileset (assets/generated after a
+-- ROM import -- never shipped). These paths are the no-ROM fallbacks,
+-- original pixel art from tools/gen_outdoor_grass_arena.py and
+-- tools/gen_indoor_house_arena.py. Canvas is 16:9 within Renderer uiSize
+-- caps so fill-scale can stretch it to the window.
 M.BATTLEFIELD_ARENA = "assets/battle/outdoor_grass_arena.png"
+M.BATTLEFIELD_ARENA_INDOOR = "assets/battle/indoor_house_arena.png"
 M.BATTLEFIELD_WIDTH = 640
 M.BATTLEFIELD_HEIGHT = 360
 

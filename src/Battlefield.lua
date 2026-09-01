@@ -37,21 +37,13 @@ M.MIDLINE = math.floor(M.WIDTH / 2)
 -- 60, not 72: at 72 the four seats of a 2v2 crowd the plates and the arena
 -- reads as a close-up rather than a field (R2 owner review).
 M.MON_DRAW = 60
--- The PITCH: the white boundary rectangle painted into the arena PNG. Mons
--- stand on the marked field; trainers stay out in the margins beside it.
---
--- Measured, not guessed. assets/battle/outdoor_grass_arena.png is 640x360 and
--- drawArena stretches it over the whole canvas (with a K = FX_SHAKE + 2 px
--- overscan on every edge), so an image pixel maps to
---   canvas = -K + image * (SIZE + 2K) / SIZE.
--- Scanning the PNG for low-saturation bright pixels (lum >= 140, sat <= 0.28 --
--- there is no pure white in the art; the brightest line pixel is ~193) finds
--- the endlines at image y = 92 and y = 271 and a double side line per half.
--- The INNER stroke of each pair is the playing edge: it runs image x 124 -> 116
--- down the left and 515 -> 523 down the right (the art has a slight
--- perspective flare, plus corner arcs above y = 115). Taking the most
--- restrictive x of each side and folding in the overscan gives the
--- axis-aligned canvas rect below -- inside it on every row, at rest.
+-- The PITCH: the playing rectangle the two grass platforms are authored
+-- against. Mons stand on those mounds; trainers stay out in the dirt
+-- margins beside them. The numbers are a layout contract, not a scan of
+-- painted sidelines -- the arena is original pixel art (see
+-- tools/gen_outdoor_grass_arena.py), the same no-ROM rule as Vfx and
+-- drawPokeball, and drawArena stretches the 640x360 PNG over the whole
+-- canvas (with a K = FX_SHAKE + 2 px overscan on every edge).
 M.PITCH_LEFT = 121
 M.PITCH_RIGHT = 517
 M.PITCH_TOP = 90
@@ -71,8 +63,9 @@ M.PITCH_BOTTOM = 273
 -- compressed the rows to 44px and 60px mons overlapped inside their column
 -- (owner-rejected).
 M.MON_PITCH_INSET = 69
--- The arena art's centre circle (also painted into the PNG): centred on
--- MIDLINE with this radius. The columns clear its stroke by a wide margin.
+-- Breathing room the mon columns keep off the midline. Named for the
+-- centre circle the old sports-field PNG painted; the platforms no
+-- longer draw one, but the clearance is still the rule the columns use.
 M.CENTER_CIRCLE_R = 46
 -- Row pitch for a MON stack, centre to centre. Must be at least MON_DRAW or
 -- two mons in one column interpenetrate; at exactly MON_DRAW the two 60px
@@ -366,12 +359,52 @@ function M.enabled(game)
 end
 
 -- ------- asset load
+--
+-- Prefer the player's own ROM tiles at runtime (the overworld tileset the
+-- fight is standing on). Those pixels never ship in this repo -- they live
+-- in assets/generated/ after a ROM import, the same cache the sprites
+-- already read. The authored PNG and the two-platform stand-in are only
+-- what a headless boot or a missing cache falls back to.
 
-function M.load(modFacade)
+local function peekGame()
+  local game = nil
+  pcall(function()
+    game = mod and mod.world and mod.world.game
+  end)
+  if type(game) == "table" then return game end
+  return nil
+end
+
+function M.load(modFacade, game)
   modFacade = modFacade or mod
   if arenaTried then return arenaImage end
 
-  local path = Config.BATTLEFIELD_ARENA
+  game = game or peekGame()
+  if type(M.composeRomArena) == "function" then
+    local rom = M.composeRomArena(game)
+    if rom then
+      arenaImage = rom
+      arenaTried = true
+      return arenaImage
+    end
+  end
+  -- No game yet (fight entry before the world facade is live): do not lock
+  -- the PNG in, or the first draw could never upgrade to the ROM tiles.
+  if not game then return nil end
+
+  local indoor = false
+  pcall(function()
+    local ow = modFacade and modFacade.world and modFacade.world.overworld
+      and modFacade.world:overworld()
+    local map = ow and ow.map
+    local id = (map and map.tileset and map.tileset.id)
+      or (map and map.def and map.def.tileset)
+    indoor = M.arenaIndoor(id, map and map.def)
+  end)
+  local path = indoor and Config.BATTLEFIELD_ARENA_INDOOR or Config.BATTLEFIELD_ARENA
+  if type(path) ~= "string" or path == "" then
+    path = Config.BATTLEFIELD_ARENA
+  end
   if type(path) ~= "string" or path == "" then return nil end
 
   local resolved = path
@@ -399,7 +432,7 @@ function M.load(modFacade)
 
   if modFacade and modFacade.log and modFacade.log.warn then
     modFacade.log:warn("could not load battlefield arena %s; top-down "
-      .. "theatre draws without the grass plate -- reinstall the mod so "
+      .. "theatre paints the two-platform stand-in -- reinstall the mod so "
       .. "%s is present", tostring(path), tostring(path))
   end
   return nil
@@ -2041,6 +2074,442 @@ local function bakeSheetColor(record, spriteId, gen2Colors)
   return baked
 end
 
+-- ------- ROM arena (player cache only)
+--
+-- Gen 1/2 carts have no painted battle backdrop. What they do have is the
+-- overworld tileset the player is standing on. We stamp those blocks into
+-- the two-platform layout: the fight looks like the route it started on,
+-- and not a pixel of that sheet is committed here.
+
+local function peekOverworld()
+  local ow = nil
+  pcall(function()
+    if mod and mod.world and mod.world.overworld then
+      ow = mod.world:overworld()
+    end
+  end)
+  return type(ow) == "table" and ow or nil
+end
+
+-- The shot driver (and any stub facade) loads this file with a mod that
+-- has no world. The live Game still has the overworld on the stack --
+-- read it from there so a house fight is not composed as OVERWORLD.
+local function overworldFrom(game)
+  local ow = peekOverworld()
+  if ow then return ow end
+  if type(game) ~= "table" then return nil end
+  local found = nil
+  pcall(function()
+    local states = game.stack and game.stack.states
+    if type(states) == "table" then
+      for i = #states, 1, -1 do
+        local st = states[i]
+        if type(st) == "table" and st.isOverworld then
+          found = st
+          return
+        end
+      end
+    end
+    local gow = game.overworld
+    if type(gow) == "table" and gow.map then
+      found = gow
+    end
+  end)
+  return found
+end
+
+-- Tilesets that already look like a place you would fight. Houses, marts,
+-- bedrooms and labs do not -- a boot on REDS_HOUSE_2F stamped green roofs
+-- across the mounds. Indoor maps fall back to OVERWORLD grass instead.
+-- Gyms and caves stay on their own sheet: those fights are supposed to
+-- look like the room they started in.
+local ARENA_FIELD_TILESETS = {
+  OVERWORLD = true, FOREST = true, PLATEAU = true,
+  CAVERN = true, CEMETERY = true, UNDERGROUND = true,
+  GYM = true, DOJO = true,
+  TILESET_JOHTO = true, TILESET_KANTO = true,
+  TILESET_PARK = true, TILESET_FOREST = true,
+  TILESET_CAVE = true, TILESET_ICE_PATH = true,
+  JOHTO_OVERWORLD = true,
+}
+
+local ARENA_INDOOR_HINT = {
+  HOUSE = true, MART = true, POKECENTER = true, INTERIOR = true,
+  LAB = true, LOBBY = true, CLUB = true, MUSEUM = true,
+  FACILITY = true, MANSION = true, SHIP = true, SHIP_PORT = true,
+}
+
+-- Pure: can the suite assert a house map falls back without LOVE.
+function M.arenaFieldTileset(tilesetId, mapDef)
+  if type(mapDef) == "table" then
+    if mapDef.outdoor == true then return true end
+    if mapDef.outdoor == false then return false end
+    local env = mapDef.environment
+    if env == "INDOOR" then return false end
+    if env == "TOWN" or env == "ROUTE" or env == "CAVE" then return true end
+    if type(tilesetId) ~= "string" or tilesetId == "" then
+      tilesetId = mapDef.tileset
+    end
+  end
+  if type(tilesetId) ~= "string" or tilesetId == "" then return false end
+  local id = tilesetId:upper()
+  if ARENA_FIELD_TILESETS[tilesetId] or ARENA_FIELD_TILESETS[id] then
+    return true
+  end
+  if ARENA_INDOOR_HINT[tilesetId] or ARENA_INDOOR_HINT[id] then
+    return false
+  end
+  if id:find("HOUSE", 1, true) or id:find("CENTER", 1, true)
+      or id:find("MART", 1, true) or id:find("INTERIOR", 1, true)
+      or id:find("LAB", 1, true) or id:find("GATE", 1, true) then
+    return false
+  end
+  if id:find("OVERWORLD", 1, true) or id:find("FOREST", 1, true)
+      or id:find("CAVE", 1, true) or id:find("CAVERN", 1, true)
+      or id:find("PARK", 1, true) then
+    return true
+  end
+  return false
+end
+
+-- Inverse of the field check: a named indoor tileset (or a map that
+-- says it is indoor). Empty input is neither -- a headless boot with
+-- no map still takes the outdoor PNG, not a bedroom.
+function M.arenaIndoor(tilesetId, mapDef)
+  if M.arenaFieldTileset(tilesetId, mapDef) then return false end
+  if type(mapDef) == "table" then
+    if mapDef.outdoor == false then return true end
+    if mapDef.environment == "INDOOR" then return true end
+    if type(tilesetId) ~= "string" or tilesetId == "" then
+      tilesetId = mapDef.tileset
+    end
+  end
+  if type(tilesetId) ~= "string" or tilesetId == "" then return false end
+  return true
+end
+
+local function lookupTileset(sets, id)
+  if type(sets) ~= "table" or type(id) ~= "string" then return nil end
+  local ts = sets[id]
+  if type(ts) == "table" and type(ts.image) == "string" then return ts end
+  for _, row in pairs(sets) do
+    if type(row) == "table" and row.id == id and type(row.image) == "string" then
+      return row
+    end
+  end
+  return nil
+end
+
+local function gameTilesets(game)
+  local data = game and game.data
+  if type(data) ~= "table" then return nil end
+  if type(data.tilesets) == "table" then return data.tilesets end
+  if type(data.gen2Tilesets) == "table" then return data.gen2Tilesets end
+  return nil
+end
+
+local function fallbackFieldTileset(game)
+  local sets = gameTilesets(game)
+  if not sets then return nil end
+  local prefer = { "OVERWORLD", "TILESET_JOHTO", "JOHTO_OVERWORLD", "FOREST" }
+  for i = 1, #prefer do
+    local ts = lookupTileset(sets, prefer[i])
+    if ts then return ts end
+  end
+  return nil
+end
+
+local function fallbackIndoorTileset(game, id)
+  local sets = gameTilesets(game)
+  if not sets then return nil end
+  local ts = lookupTileset(sets, id)
+  if ts then return ts end
+  local prefer = { "REDS_HOUSE_2", "REDS_HOUSE_1", "HOUSE" }
+  for i = 1, #prefer do
+    ts = lookupTileset(sets, prefer[i])
+    if ts then return ts end
+  end
+  return nil
+end
+
+local function romTileset(game)
+  local ow = overworldFrom(game)
+  local map = ow and ow.map
+  local live = map and map.tileset
+  local liveId = (type(live) == "table" and live.id)
+    or (map and map.def and map.def.tileset)
+  local def = map and map.def
+  local field = M.arenaFieldTileset(liveId, def)
+  local indoor = M.arenaIndoor(liveId, def)
+  if type(live) == "table" and type(live.image) == "string" then
+    if field or indoor then
+      return live, map, ow
+    end
+  end
+  if indoor then
+    local ts = fallbackIndoorTileset(game, liveId)
+    if ts then return ts, map, ow end
+  end
+  -- Unknown / no live map: OVERWORLD grass, and drop the map so we do
+  -- not feed a bedroom block id into the overworld sheet.
+  return fallbackFieldTileset(game), nil, ow
+end
+
+local function romBgColors(game, ow, map)
+  local PF = paletteFX()
+  if type(PF) ~= "table" or type(PF.pal) ~= "function" then return nil end
+  local name = "ROUTE"
+  pcall(function()
+    if ow and type(ow.paletteNameFor) == "function" and map then
+      name = ow:paletteNameFor(map) or name
+    elseif type(map) == "table" and type(map.palette) == "string" then
+      name = map.palette
+    end
+  end)
+  local colors = nil
+  pcall(function() colors = PF.pal(game and game.data, name) end)
+  if type(colors) ~= "table" or type(colors[4]) ~= "table" then
+    pcall(function() colors = PF.pal(game and game.data, "ROUTE") end)
+  end
+  if type(colors) ~= "table" or type(colors[4]) ~= "table" then return nil end
+  return colors
+end
+
+-- BG tiles: colour 0 is paper, not a key. Same 4-shade cutoffs as
+-- bakeSheetColor so a tile and a trainer sheet agree on what "light" is.
+local function bakeTilesetBg(path, colors)
+  if type(path) ~= "string" or path == "" then return nil end
+  if type(colors) ~= "table" or type(colors[4]) ~= "table" then return nil end
+  if not (love and love.image and love.image.newImageData
+      and love.graphics and love.graphics.newImage) then
+    return nil
+  end
+  local baked = nil
+  pcall(function()
+    local data = nil
+    local okA, Assets = pcall(require, "src.render.Assets")
+    if okA and type(Assets) == "table" and Assets.imageData then
+      data = Assets.imageData(path)
+    else
+      data = love.image.newImageData(path)
+    end
+    if not (data and data.mapPixel) then return end
+    data:mapPixel(function(_, _, r, gr, b, a)
+      if a == 0 then return r, gr, b, a end
+      local col = r > 0.83 and colors[1]
+        or r > 0.5 and colors[2]
+        or r > 0.17 and colors[3]
+        or colors[4]
+      return col[1] / 255, col[2] / 255, col[3] / 255, a
+    end)
+    baked = love.graphics.newImage(data)
+    if baked.setFilter then
+      pcall(function() baked:setFilter("nearest", "nearest") end)
+    end
+  end)
+  return baked
+end
+
+local function countTile(block, tile)
+  if type(block) ~= "table" or tile == nil then return 0 end
+  local n = 0
+  for i = 1, 16 do
+    if block[i] == tile then n = n + 1 end
+  end
+  return n
+end
+
+-- Engine TREE_WALL_BLOCK ($0F). Named here so the mod never requires
+-- src.render.TileRenderer -- the loader tripwire would swallow that
+-- require, and the first non-walkable OVERWORLD block is a Pallet roof.
+local OVERWORLD_TREE_WALL = 0x0F
+
+local function pickRomBlocks(tileset, map, ow)
+  local blocks = tileset and tileset.blocks
+  if type(blocks) ~= "table" or #blocks < 1 then return nil end
+  local ground = 1
+  local grass = tileset.grassTile
+  if type(grass) == "number" then
+    local best, score = 1, -1
+    for i = 1, #blocks do
+      local n = countTile(blocks[i], grass)
+      if n > score then best, score = i, n end
+    end
+    if score > 0 then ground = best end
+  elseif map and type(map.blockAt) == "function" then
+    local p = (ow and ow.player) or (map and map.player)
+    local cx = p and (p.cellX or p.x)
+    local cy = p and (p.cellY or p.y)
+    if type(cx) == "number" and type(cy) == "number" then
+      local ok, id = pcall(map.blockAt, map, math.floor(cx / 2), math.floor(cy / 2))
+      if ok and type(id) == "number" and blocks[id + 1] then
+        ground = id + 1
+      end
+    end
+  end
+  local walk = {}
+  for _, t in ipairs(listOf(tileset.walkable)) do
+    walk[t] = true
+  end
+  local function walkableBlock(block)
+    if type(block) ~= "table" then return false end
+    local n = 0
+    for i = 1, 16 do
+      if walk[block[i]] then n = n + 1 end
+    end
+    return n >= 8
+  end
+  -- Grass fights stay on grass: the first other walkable on OVERWORLD is
+  -- a flower/path scrap, and the first solid is a house roof.
+  local surround, decor = ground, ground
+  local id = tileset.id or (map and map.def and map.def.tileset)
+  local indoor = M.arenaIndoor(id, map and map.def)
+  if indoor then
+    -- Plain floor + plain wall. Skip the $AA filler block REDS_HOUSE
+    -- puts at index 1, and skip mixed furniture (many unique tiles).
+    local function junk(block)
+      if type(block) ~= "table" then return true end
+      local n = 0
+      for i = 1, 16 do
+        local t = block[i]
+        if type(t) ~= "number" or t >= 128 then n = n + 1 end
+      end
+      return n >= 8
+    end
+    local function score(block)
+      local counts, modeN, uniq = {}, 0, 0
+      for i = 1, 16 do
+        local t = block[i]
+        if t ~= nil then
+          counts[t] = (counts[t] or 0) + 1
+          if counts[t] == 1 then uniq = uniq + 1 end
+          if counts[t] > modeN then modeN = counts[t] end
+        end
+      end
+      return modeN * 4 - uniq
+    end
+    local bestG, bestGS = ground, -1
+    local bestD, bestDS = decor, -1
+    for i = 1, #blocks do
+      if not junk(blocks[i]) then
+        local s = score(blocks[i])
+        if walkableBlock(blocks[i]) then
+          if s > bestGS then bestG, bestGS = i, s end
+        elseif s > bestDS then
+          bestD, bestDS = i, s
+        end
+      end
+    end
+    if bestGS > 0 then ground, surround = bestG, bestG end
+    if bestDS > 0 then decor = bestD end
+  elseif type(grass) ~= "number" then
+    for i = 1, #blocks do
+      if i ~= ground then
+        if walkableBlock(blocks[i]) then
+          if surround == ground then surround = i end
+        elseif decor == ground then
+          decor = i
+        end
+      end
+    end
+  end
+  if not indoor then
+    if (id == "OVERWORLD" or id == nil) and blocks[OVERWORLD_TREE_WALL + 1] then
+      decor = OVERWORLD_TREE_WALL + 1
+    elseif map and map.def and type(map.def.borderBlock) == "number"
+        and blocks[map.def.borderBlock + 1] then
+      decor = map.def.borderBlock + 1
+    end
+  end
+  return ground, surround, decor
+end
+
+-- Pure: the suite can pin grass + tree-wall without LOVE.
+function M.pickArenaBlocks(tileset, map, ow)
+  return pickRomBlocks(tileset, map, ow)
+end
+
+local function stampBlock(gfx, img, quads, block, x, y)
+  if type(block) ~= "table" then return end
+  for i = 1, 16 do
+    local tile = block[i]
+    local q = quads[tile]
+    if q then
+      gfx.draw(img, q, x + ((i - 1) % 4) * 8, y + math.floor((i - 1) / 4) * 8)
+    end
+  end
+end
+
+function M.composeRomArena(game)
+  if type(game) ~= "table" then return nil end
+  if not (love and love.graphics and love.graphics.newCanvas) then return nil end
+  local tileset, map, ow = romTileset(game)
+  if not tileset then return nil end
+  local colors = romBgColors(game, ow, map)
+  local img = bakeTilesetBg(tileset.image, colors)
+  if not img then
+    local ok, raw = pcall(love.graphics.newImage, tileset.image)
+    if ok then img = raw end
+  end
+  if not img then return nil end
+  local ground, surround, decor = pickRomBlocks(tileset, map, ow)
+  if not ground then return nil end
+  local blocks = tileset.blocks
+  local iw, ih = 8, 8
+  pcall(function()
+    iw, ih = img:getDimensions()
+  end)
+  local perRow = tonumber(tileset.tilesPerRow) or math.max(1, math.floor(iw / 8))
+  local quads = {}
+  local tileCount = math.floor(iw / 8) * math.floor(ih / 8)
+  for t = 0, tileCount - 1 do
+    local ok, q = pcall(love.graphics.newQuad,
+      (t % perRow) * 8, math.floor(t / perRow) * 8, 8, 8, iw, ih)
+    if ok then quads[t] = q end
+  end
+  local okC, canvas = pcall(love.graphics.newCanvas, M.WIDTH, M.HEIGHT)
+  if not (okC and canvas) then return nil end
+  local prev = nil
+  pcall(function() prev = love.graphics.getCanvas() end)
+  local painted = false
+  pcall(function()
+    love.graphics.setCanvas(canvas)
+    local indoor = M.arenaIndoor(
+      tileset.id or (map and map.def and map.def.tileset),
+      map and map.def)
+    if indoor then
+      love.graphics.clear(0.55, 0.38, 0.22, 1)
+    else
+      love.graphics.clear(0.69, 0.52, 0.31, 1)
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+    local function inEllipse(x, y, cx, cy, rx, ry)
+      local dx, dy = (x - cx) / rx, (y - cy) / ry
+      return dx * dx + dy * dy <= 1
+    end
+    for by = 0, math.ceil(M.HEIGHT / 32) do
+      for bx = 0, math.ceil(M.WIDTH / 32) do
+        local px, py = bx * 32 + 16, by * 32 + 16
+        local which = surround
+        if inEllipse(px, py, M.MON_COLUMN_ALLY, 188, 102, 82)
+            or inEllipse(px, py, M.MON_COLUMN_FOE, 162, 90, 72) then
+          which = ground
+        elseif bx <= 1 or bx >= 18 or by == 0 then
+          which = decor
+        end
+        stampBlock(love.graphics, img, quads, blocks[which], bx * 32, by * 32)
+      end
+    end
+    painted = true
+  end)
+  pcall(function() love.graphics.setCanvas(prev) end)
+  if not painted then return nil end
+  pcall(function()
+    if canvas.setFilter then canvas:setFilter("nearest", "nearest") end
+  end)
+  return canvas, map ~= nil
+end
+
 -- `game` is threaded in from `M.draw` for the Gen 2 rung alone: everything
 -- else here is generation-free, and a caller with no game simply gets the
 -- Gen 1 ladder (which is also what a headless test that hands over neither
@@ -3517,16 +3986,16 @@ end
 -- The ground is drawn K px beyond every canvas edge so a shake translate never
 -- uncovers it. Unconditional, every frame: outsetting only while shaking would
 -- rescale the arena image at the first and last frame of every jolt, which
--- reads as a zoom-pop. Everything painted on the ground (the soft grass plate)
--- rides the same transform, or it slides against it.
-local function drawArena()
+-- reads as a zoom-pop. Seats and fx ride the same transform, or they slide
+-- against the dirt.
+local function drawArena(game)
   local gfx = g()
   if not gfx then return end
   local K = M.FX_SHAKE + 2
   local ox, oy = -K, -K
   local ow, oh = M.WIDTH + K * 2, M.HEIGHT + K * 2
   local zx, zy = ow / M.WIDTH, oh / M.HEIGHT
-  local img = arenaImage or M.load(mod)
+  local img = M.load(mod, game) or arenaImage
   if img then
     pcall(function()
       gfx.setColor(1, 1, 1, 1)
@@ -3535,25 +4004,59 @@ local function drawArena()
       local sy = oh / math.max(ih, 1)
       gfx.draw(img, ox, oy, 0, sx, sy)
     end)
-    -- Soft grass plate so battle fronts read on the colorful arena.
-    pcall(function()
-      gfx.setColor(0.12, 0.22, 0.1, 0.22)
-      gfx.ellipse("fill",
-        ox + M.MIDLINE * zx,
-        oy + (M.FIELD_TOP + M.FIELD_HEIGHT * 0.55) * zy,
-        M.WIDTH * 0.38 * zx, M.FIELD_HEIGHT * 0.28 * zy)
-      gfx.setColor(1, 1, 1, 1)
-    end)
     return
   end
-  -- Flat stand-in so layout still reads without the PNG.
+  -- Original two-platform stand-in (same idea as drawPokeball). Used only
+  -- when the PNG is missing -- never a ROM plate, never the old sports pitch.
   pcall(function()
-    gfx.setColor(0.45, 0.7, 0.35, 1)
-    gfx.rectangle("fill", ox, oy, ow, M.FIELD_BOTTOM + K)
-    gfx.setColor(0.2, 0.25, 0.3, 1)
-    gfx.rectangle("fill", ox, M.FIELD_BOTTOM, ow, M.MENU_BAND + K)
-    gfx.setColor(1, 1, 1, 0.15)
-    gfx.line(M.MIDLINE, 0, M.MIDLINE, M.FIELD_BOTTOM)
+    local indoor = false
+    pcall(function()
+      local ow = peekOverworld()
+      local map = ow and ow.map
+      local id = (map and map.tileset and map.tileset.id)
+        or (map and map.def and map.def.tileset)
+      indoor = M.arenaIndoor(id, map and map.def)
+    end)
+    if indoor then
+      gfx.setColor(0.82, 0.70, 0.52, 1)
+      gfx.rectangle("fill", ox, oy, ow, 92 * zy)
+      gfx.setColor(0.62, 0.28, 0.24, 1)
+      gfx.rectangle("fill", ox, oy + 86 * zy, ow, 12 * zy)
+      gfx.setColor(0.55, 0.38, 0.22, 1)
+      gfx.rectangle("fill", ox, oy + 98 * zy, ow, oh - 98 * zy)
+      gfx.setColor(0.40, 0.26, 0.14, 1)
+      gfx.rectangle("fill", ox, oy + M.FIELD_BOTTOM * zy, ow, M.MENU_BAND * zy + K)
+      gfx.setColor(0.28, 0.16, 0.10, 1)
+      gfx.ellipse("fill", ox + (M.MON_COLUMN_FOE + 4) * zx,
+        oy + 174 * zy, 90 * zx, 62 * zy)
+      gfx.ellipse("fill", ox + (M.MON_COLUMN_ALLY + 4) * zx,
+        oy + 196 * zy, 102 * zx, 70 * zy)
+      gfx.setColor(0.70, 0.50, 0.30, 1)
+      gfx.ellipse("fill", ox + M.MON_COLUMN_FOE * zx,
+        oy + 162 * zy, 90 * zx, 72 * zy)
+      gfx.ellipse("fill", ox + M.MON_COLUMN_ALLY * zx,
+        oy + 188 * zy, 102 * zx, 82 * zy)
+    else
+      gfx.setColor(0.52, 0.78, 0.90, 1)
+      gfx.rectangle("fill", ox, oy, ow, 92 * zy)
+      gfx.setColor(0.29, 0.53, 0.34, 1)
+      gfx.ellipse("fill", ox + 160 * zx, oy + 86 * zy, 140 * zx, 28 * zy)
+      gfx.ellipse("fill", ox + 480 * zx, oy + 88 * zy, 150 * zx, 26 * zy)
+      gfx.setColor(0.69, 0.52, 0.31, 1)
+      gfx.rectangle("fill", ox, oy + 98 * zy, ow, oh - 98 * zy)
+      gfx.setColor(0.46, 0.32, 0.19, 1)
+      gfx.rectangle("fill", ox, oy + M.FIELD_BOTTOM * zy, ow, M.MENU_BAND * zy + K)
+      gfx.setColor(0.14, 0.32, 0.16, 1)
+      gfx.ellipse("fill", ox + (M.MON_COLUMN_FOE + 4) * zx,
+        oy + 174 * zy, 90 * zx, 62 * zy)
+      gfx.ellipse("fill", ox + (M.MON_COLUMN_ALLY + 4) * zx,
+        oy + 196 * zy, 102 * zx, 70 * zy)
+      gfx.setColor(0.36, 0.69, 0.32, 1)
+      gfx.ellipse("fill", ox + M.MON_COLUMN_FOE * zx,
+        oy + 162 * zy, 90 * zx, 72 * zy)
+      gfx.ellipse("fill", ox + M.MON_COLUMN_ALLY * zx,
+        oy + 188 * zy, 102 * zx, 82 * zy)
+    end
     gfx.setColor(1, 1, 1, 1)
   end)
 end
@@ -4004,7 +4507,7 @@ function M.draw(battle, ctx, eng)
     -- One pcall around the field layer so the pop below always runs: a leaked
     -- translate would drag the menu band the battle screen draws next.
     pcall(function()
-      drawArena()
+      drawArena(drawGame)
 
       for _, h in ipairs(layout.humans) do
         pcall(drawHuman, h, layout.frame, eng, drawGame, drawGen2)

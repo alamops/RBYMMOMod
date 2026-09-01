@@ -6,6 +6,19 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The battlefield is a Pokémon-like outdoor field, not a sports pitch.**
+  A live fight stamps the player's own tileset into the two-platform
+  layout — ROM pixels at runtime, never committed. A route or cave
+  uses OVERWORLD / forest / cavern blocks (grass + tree-wall `$0F` on
+  the overworld sheet). A house, mart, or bedroom uses that indoor
+  sheet's plain floor and wall, not Pallet roofs. Gyms keep their own
+  sheet. `assets/battle/outdoor_grass_arena.png` and
+  `assets/battle/indoor_house_arena.png` are original pixel art (the
+  outdoor and indoor generators) and are only the no-ROM fallbacks.
+  Seat layout is unchanged.
+
 ### Fixed
 
 - **After a catch, the name and status screens fill the window.** On the

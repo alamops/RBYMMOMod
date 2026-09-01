@@ -13384,6 +13384,168 @@ end)()
 
   check(Config.BATTLEFIELD_ARENA:match("outdoor_grass_arena%.png$") ~= nil,
         "arena art path ends with outdoor_grass_arena.png")
+  check(Config.BATTLEFIELD_ARENA_INDOOR:match("indoor_house_arena%.png$") ~= nil,
+        "indoor arena art path ends with indoor_house_arena.png")
+  check(type(Battlefield.composeRomArena) == "function",
+        "ROM tileset compose is a Battlefield entry")
+  eq(Battlefield.composeRomArena(nil), nil,
+     "no game means no ROM compose (headless / no cache)")
+  eq(Battlefield.composeRomArena({}), nil,
+     "an empty game with no tilesets does not invent ROM art")
+  check(type(Battlefield.arenaFieldTileset) == "function",
+        "arenaFieldTileset classifies indoor vs field")
+  eq(Battlefield.arenaFieldTileset("HOUSE"), false,
+     "HOUSE is indoor -- arena uses the house sheet")
+  check(type(Battlefield.arenaIndoor) == "function",
+        "arenaIndoor classifies house maps")
+  eq(Battlefield.arenaIndoor("HOUSE"), true, "HOUSE is an indoor arena")
+  eq(Battlefield.arenaIndoor("REDS_HOUSE_2"), true,
+     "REDS_HOUSE_2 is an indoor arena")
+  eq(Battlefield.arenaIndoor("OVERWORLD"), false,
+     "OVERWORLD is not an indoor arena")
+  eq(Battlefield.arenaIndoor(nil), false,
+     "no tileset is not indoor -- outdoor PNG stays the default")
+  eq(Battlefield.arenaIndoor(nil, { environment = "INDOOR" }), true,
+     "Gen2 INDOOR environment is an indoor arena")
+  eq(Battlefield.arenaFieldTileset("REDS_HOUSE_2"), false,
+     "REDS_HOUSE_2 is indoor")
+  eq(Battlefield.arenaFieldTileset("MART"), false, "MART is indoor")
+  eq(Battlefield.arenaFieldTileset("POKECENTER"), false,
+     "POKECENTER is indoor")
+  eq(Battlefield.arenaFieldTileset("OVERWORLD"), true,
+     "OVERWORLD is a field tileset")
+  eq(Battlefield.arenaFieldTileset("FOREST"), true, "FOREST is a field")
+  eq(Battlefield.arenaFieldTileset("CAVERN"), true, "CAVERN is a field")
+  eq(Battlefield.arenaFieldTileset("GYM"), true,
+     "GYM keeps its own sheet")
+  eq(Battlefield.arenaFieldTileset(nil, { outdoor = true }), true,
+     "map.def.outdoor=true is a field")
+  eq(Battlefield.arenaFieldTileset("OVERWORLD", { outdoor = false }), false,
+     "map.def.outdoor=false is indoor even on OVERWORLD")
+  eq(Battlefield.arenaFieldTileset(nil, { environment = "INDOOR" }), false,
+     "Gen2 INDOOR environment is indoor")
+  eq(Battlefield.arenaFieldTileset(nil, { environment = "ROUTE" }), true,
+     "Gen2 ROUTE environment is a field")
+  eq(Battlefield.arenaFieldTileset(nil, { tileset = "REDS_HOUSE_2" }), false,
+     "tileset on the map def is enough to classify")
+  check(type(Battlefield.pickArenaBlocks) == "function",
+        "pickArenaBlocks is a Battlefield entry")
+  do
+    local blocks = {}
+    for i = 1, 16 do
+      blocks[i] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+    end
+    blocks[1] = { 10, 10, 40, 41, 75, 75, 75, 31, 10, 10, 10, 31, 26, 26, 26, 79 }
+    for i = 1, 16 do blocks[5][i] = 82 end
+    blocks[16] = { 64, 65, 64, 65, 80, 81, 80, 81, 64, 65, 64, 65, 80, 81, 80, 81 }
+    local g, s, d = Battlefield.pickArenaBlocks({
+      id = "OVERWORLD",
+      grassTile = 82,
+      walkable = { 82, 0 },
+      blocks = blocks,
+    })
+    eq(g, 5, "OVERWORLD ground is the grassTile-majority block")
+    eq(s, 5, "OVERWORLD surround stays on grass, not a path scrap")
+    eq(d, 16, "OVERWORLD decor is the tree-wall block $0F")
+    check(d ~= 1, "OVERWORLD decor is not the first building block")
+  end
+  do
+    local tsOk, generated = pcall(dofile, "data/generated/tilesets.lua")
+    if tsOk and type(generated) == "table"
+        and type(generated.OVERWORLD) == "table" then
+      local ow = generated.OVERWORLD
+      local g, s, d = Battlefield.pickArenaBlocks(ow)
+      local grassIdx
+      for i, block in ipairs(ow.blocks) do
+        local n = 0
+        for k = 1, 16 do
+          if block[k] == ow.grassTile then n = n + 1 end
+        end
+        if n == 16 then grassIdx = i break end
+      end
+      eq(g, grassIdx, "imported OVERWORLD ground is the all-grass block")
+      eq(s, grassIdx, "imported OVERWORLD surround is grass too")
+      eq(d, 0x0F + 1, "imported OVERWORLD decor is tree wall $0F")
+    else
+      check(true, "(no generated tilesets -- OVERWORLD pick skipped)")
+    end
+  end
+  do
+    local blocks = {
+      { 170, 171, 170, 171, 186, 187, 186, 187, 170, 171, 170, 171, 186, 187, 186, 187 },
+      { 2, 3, 38, 39, 18, 19, 54, 55, 2, 3, 44, 42, 18, 19, 60, 58 },
+      { 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16 },
+      { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+    }
+    local g, s, d = Battlefield.pickArenaBlocks({
+      id = "REDS_HOUSE_2",
+      walkable = { 1, 2, 3, 18 },
+      blocks = blocks,
+    })
+    eq(g, 4, "indoor ground is the plain walkable floor, not the $AA filler")
+    eq(s, 4, "indoor surround stays on that floor")
+    eq(d, 3, "indoor decor is the plain wall, not furniture")
+    check(g ~= 1 and d ~= 1, "indoor pick skips the $AA filler block")
+  end
+  do
+    local tsOk, generated = pcall(dofile, "data/generated/tilesets.lua")
+    if tsOk and type(generated) == "table"
+        and type(generated.REDS_HOUSE_2) == "table" then
+      local house = generated.REDS_HOUSE_2
+      local g, s, d = Battlefield.pickArenaBlocks(house)
+      local floorIdx, wallIdx
+      for i, block in ipairs(house.blocks) do
+        local n1, n16 = 0, 0
+        for k = 1, 16 do
+          if block[k] == 1 then n1 = n1 + 1 end
+          if block[k] == 16 then n16 = n16 + 1 end
+        end
+        if n1 == 16 then floorIdx = i end
+        if n16 == 16 then wallIdx = i end
+      end
+      eq(g, floorIdx, "imported REDS_HOUSE_2 ground is the all-floor block")
+      eq(s, floorIdx, "imported REDS_HOUSE_2 surround is that floor")
+      eq(d, wallIdx, "imported REDS_HOUSE_2 decor is the all-wall block")
+    else
+      check(true, "(no generated tilesets -- REDS_HOUSE_2 pick skipped)")
+    end
+  end
+  do
+    local arenaFile = io.open(MOD_PATH .. "/assets/battle/outdoor_grass_arena.png", "rb")
+    check(arenaFile ~= nil, "arena PNG ships with the mod")
+    if arenaFile then
+      local hdr = arenaFile:read(24)
+      arenaFile:close()
+      check(type(hdr) == "string" and hdr:sub(1, 8) == "\137PNG\r\n\26\n",
+            "arena file is a PNG")
+      if type(hdr) == "string" and #hdr >= 24 then
+        local function u32(s)
+          local b1, b2, b3, b4 = s:byte(1, 4)
+          return ((b1 * 256 + b2) * 256 + b3) * 256 + b4
+        end
+        eq(u32(hdr:sub(17, 20)), 640, "arena PNG is 640 wide")
+        eq(u32(hdr:sub(21, 24)), 360, "arena PNG is 360 tall")
+      end
+    end
+  end
+  do
+    local arenaFile = io.open(MOD_PATH .. "/assets/battle/indoor_house_arena.png", "rb")
+    check(arenaFile ~= nil, "indoor arena PNG ships with the mod")
+    if arenaFile then
+      local hdr = arenaFile:read(24)
+      arenaFile:close()
+      check(type(hdr) == "string" and hdr:sub(1, 8) == "\137PNG\r\n\26\n",
+            "indoor arena file is a PNG")
+      if type(hdr) == "string" and #hdr >= 24 then
+        local function u32(s)
+          local b1, b2, b3, b4 = s:byte(1, 4)
+          return ((b1 * 256 + b2) * 256 + b3) * 256 + b4
+        end
+        eq(u32(hdr:sub(17, 20)), 640, "indoor arena PNG is 640 wide")
+        eq(u32(hdr:sub(21, 24)), 360, "indoor arena PNG is 360 tall")
+      end
+    end
+  end
   eq(Config.BATTLEFIELD_WIDTH, 640, "battlefield canvas width is 640")
   eq(Config.BATTLEFIELD_HEIGHT, 360, "battlefield canvas height is 360")
   eq(Battlefield.WIDTH, 640, "Battlefield.WIDTH mirrors Config")
@@ -14961,13 +15123,14 @@ end)()
 --
 -- Three things in that: a trainer and THEIR mon share a row (a rank put two
 -- mons on one y and neither of them beside a trainer); the mons stand INSIDE
--- the pitch painted into the arena art (the 0.14 seat's box ran 59..195, and
--- the pitch's left line is at x=121 -- the mon was entirely off the marked
--- grass); and the trainers stay out in the margin where they already were.
+-- the pitch the two grass platforms are authored against (the 0.14 seat's
+-- box ran 59..195, and the pitch's left edge is at x=121 -- the mon was
+-- entirely off the marked grass); and the trainers stay out in the margin
+-- where they already were.
 -- Where the two sides field different counts, the shorter stack simply centres
 -- and interleaves -- nobody is forced onto a row to match.
 --
--- So: PITCH_LEFT/RIGHT/TOP/BOTTOM (measured off the PNG, see Battlefield.lua),
+-- So: PITCH_LEFT/RIGHT/TOP/BOTTOM (the playing contract, see Battlefield.lua),
 -- one mon COLUMN per side just inside the side line, and one shared row-stack
 -- helper feeding both the trainers and the mons of a side. The only thing that
 -- still bends a side off the field's centre line is its own plate stack.
@@ -15494,8 +15657,8 @@ end)()
         else
           check(m.x > layout.midline, who .. ": stays on its own half")
         end
-        -- The arena art's centre circle: the columns clear its stroke by a
-        -- wide margin, which is what the old far seat did not.
+        -- Midline clearance: the columns stay off the gap between the two
+        -- platforms, which is what the old far seat did not.
         check(math.abs(m.x - layout.midline) > B.CENTER_CIRCLE_R + halfBox,
           who .. ": clears the arena's centre circle",
           ("|x-mid|=%d needs >%d"):format(math.abs(m.x - layout.midline),
