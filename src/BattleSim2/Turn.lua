@@ -1105,7 +1105,13 @@ function Battle:_normaliseChoice(fighter, choice)
           if foe.mustReplace then targetFighter = foe; break end
         end
       end
-      if not targetFighter then return nil end
+      if not targetFighter then
+        -- Same leftover as `_autoChoiceOrSkip`: a living seat with nobody
+        -- across the field to aim at spends the turn rather than hanging
+        -- the window. Solo's choice clock is 0, so a refused FIGHT used
+        -- to mark the band answered and wait for WILD forever.
+        return { action = "skip" }
+      end
     end
     return { action = "fight", move = index + 1, target = targetFighter.slot }
   end
@@ -1570,6 +1576,11 @@ end
 -- ------------------------------------------------------------------
 
 function Battle:_openTurn()
+  -- A side that is already down must not be asked for a move. Without this,
+  -- a faint that left the field in `choice` (or `_closeReplace` after an
+  -- empty send-out) opened a window nobody across the field could answer,
+  -- and Solo's zero timeout left the band on "Waiting for WILD...".
+  if self:_checkOver() then return end
   self.phase = "choice"
   self.resolveDeadline = nil
   self.forcedPending = false
@@ -3219,6 +3230,13 @@ function Battle:tick(nowSeconds)
   local now = int(nowSeconds, self.now)
   if now > self.now then self.now = now end
   if self.result then return false end
+
+  -- A side that is already down must not sit out a choice window. Solo's
+  -- clock is 0, so a faint that left the field in `choice` used to wait
+  -- forever for an answer nobody can file -- the band on "Waiting for WILD...".
+  if (self.phase == "choice" or self.phase == "replace") and self:_checkOver() then
+    return true
+  end
 
   -- Forced-only turns opened by the previous resolve wait here so one drain
   -- does not swallow a whole trap / recharge / thrash chain.

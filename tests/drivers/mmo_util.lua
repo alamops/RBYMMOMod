@@ -2715,6 +2715,14 @@ end
 function M.shotCoopPhases(game, shotFn, seen)
   seen = seen or {}
   local now = M.top(game)
+  -- Mid-battle evolution is not a phase: the movie sits on `evolving` while
+  -- the screen is still in messages/wait. Capture it once so a live fight
+  -- that actually levels into an evo leaves a reviewable frame.
+  if now and now.evolving and not seen.evolving then
+    seen.evolving = true
+    U.wait(2)
+    shotFn("phase-evolving")
+  end
   if not (now and now.sim and type(now.phase) == "string") then return seen end
   local phase = now.phase
   if phase ~= "choose" and phase ~= "move" and phase ~= "target"

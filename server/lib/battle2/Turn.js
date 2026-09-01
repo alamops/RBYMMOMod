@@ -1091,7 +1091,13 @@ class Battle {
             if (foe.mustReplace) { targetFighter = foe; break; }
           }
         }
-        if (!targetFighter) return null;
+        if (!targetFighter) {
+          // Same leftover as `_autoChoiceOrSkip`: a living seat with nobody
+          // across the field to aim at spends the turn rather than hanging
+          // the window. Solo's choice clock is 0, so a refused FIGHT used
+          // to mark the band answered and wait for WILD forever.
+          return { action: 'skip' };
+        }
       }
       return { action: 'fight', move: index + 1, target: targetFighter.slot };
     }
@@ -1539,6 +1545,11 @@ class Battle {
   }
 
   _openTurn() {
+    // A side that is already down must not be asked for a move. Without this,
+    // a faint that left the field in `choice` (or `_closeReplace` after an
+    // empty send-out) opened a window nobody across the field could answer,
+    // and Solo's zero timeout left the band on "Waiting for WILD...".
+    if (this._checkOver()) return;
     this.phase = 'choice';
     this.resolveDeadline = null;
     this.forcedPending = false;
@@ -3183,6 +3194,13 @@ class Battle {
     const now = int(nowSeconds, this.now);
     if (now > this.now) this.now = now;
     if (this.result) return false;
+
+    // A side that is already down must not sit out a choice window. Solo's
+    // clock is 0, so a faint that left the field in `choice` used to wait
+    // forever for an answer nobody can file -- the band on "Waiting for WILD...".
+    if ((this.phase === 'choice' || this.phase === 'replace') && this._checkOver()) {
+      return true;
+    }
 
     // Forced-only turns opened by the previous resolve wait here so one drain
     // does not swallow a whole trap / recharge / thrash chain.

@@ -4823,6 +4823,49 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12n. a dead side in the choice window ends the fight
+-- ------------------------------------------------------------------
+--
+-- A faint that left the field in `choice` (active cleared, hp 0, no
+-- `_checkOver`) used to hang: the player filed FIGHT, `_normaliseChoice`
+-- returned nil (no living foe), Solo's clock is 0 so nothing timed out,
+-- and the band sat on "Waiting for WILD...". tick() now ends that window,
+-- and a FIGHT with nobody to aim at is a skip so the turn can close.
+
+do
+  local battle = battleOf({
+    choiceTimeout = 0,
+    mode = "wild",
+    aMons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80 }) },
+    bMons = { mon({ species = "Beta", maxHp = 40, spd = 10 }) },
+  })
+  drain(battle)
+  local foe = battle.byId.p2
+  foe.mons[1].hp = 0
+  foe.active = nil
+  ok(battle:tick(0) == true, "one tick notices the empty side")
+  local out = battle:outcome()
+  ok(out ~= nil, "and the fight ends rather than waiting for the wild")
+  eq(out and out.reason, "ko", "as a knockout")
+end
+
+do
+  local battle = battleOf({
+    choiceTimeout = 0,
+    mode = "wild",
+    aMons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spd = 80 }) },
+    bMons = { mon({ species = "Beta", maxHp = 40, spd = 10 }) },
+  })
+  drain(battle)
+  local foe = battle.byId.p2
+  foe.mons[1].hp = 0
+  foe.active = nil
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }),
+     "FIGHT with nobody to aim at is accepted as a skip")
+  ok(battle:outcome() ~= nil, "and the skip closes the fight")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

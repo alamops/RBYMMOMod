@@ -737,7 +737,7 @@ local NO_FX = {
 -- NO_FX -- a record that is equal in value but not identical.
 local SEAT_FX = {
   lunge = true, flash = true, faint = true, spawn = true,
-  recall = true, wobble = true,
+  recall = true, wobble = true, evolve = true,
 }
 
 local function fxT(v)
@@ -844,6 +844,14 @@ function M.fxSeat(fx, side, seatIndex)
         out.dx = out.dx + dir * M.FX_LUNGE * M.fxLunge(e.t)
       elseif e.kind == "flash" then
         local f = M.fxFlash(e.t)
+        if f > out.flash then out.flash = f end
+      elseif e.kind == "evolve" then
+        -- Faster than a hit flash: fxFlash is two pulses over the whole
+        -- duration, and this movie lasts ~6s, so that envelope would sit
+        -- dim for most of the swap. The pic is already trading places on
+        -- the cart's accelerating loop; this is the silhouette on top.
+        local t = fxT(e.t)
+        local f = math.abs(math.sin(t * math.pi * 16)) * (0.4 + 0.6 * t)
         if f > out.flash then out.flash = f end
       elseif e.kind == "faint" then
         local drop, alpha = M.fxFaint(e.t)
@@ -1592,6 +1600,20 @@ function M.layout(ctx)
       foe = pendingCount(ctx.pendingSeats, "foe"),
     },
     frame = num(ctx.frame, 0),
+    -- Bench evolution movie: a front pic in the middle of the field, with
+    -- the same white pulse the on-plate `evolve` fx uses.
+    evolveCenter = (function()
+      local evo = ctx.evolveCenter
+      if type(evo) ~= "table" or evo.front == nil then return nil end
+      return {
+        front = evo.front,
+        flash = clamp(num(evo.flash, 0), 0, 1),
+        x = M.MIDLINE,
+        y = math.floor(M.FIELD_TOP + M.FIELD_HEIGHT * 0.42),
+        drawW = M.MON_DRAW * 1.35,
+        drawH = M.MON_DRAW * 1.35,
+      }
+    end)(),
   }
 end
 
@@ -4515,6 +4537,19 @@ function M.draw(battle, ctx, eng)
       for _, mon in ipairs(layout.mons) do
         pcall(drawMonIcon, mon, layout.frame,
           hasFx and M.fxSeat(layout.fx, mon.side, mon.seatIndex) or nil)
+      end
+      if layout.evolveCenter then
+        local evo = layout.evolveCenter
+        pcall(drawMonIcon, {
+          x = evo.x,
+          y = evo.y,
+          front = evo.front,
+          drawW = evo.drawW,
+          drawH = evo.drawH,
+        }, layout.frame, {
+          dx = 0, dy = 0, alpha = 1, scale = 1,
+          flash = evo.flash, hidden = false,
+        })
       end
       -- Balls / poofs sit above the mons (a ball occludes the seat it lands
       -- on) but under the HUD, which never yields the field.

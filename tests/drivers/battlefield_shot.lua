@@ -30,7 +30,10 @@
 -- Captures, in order: idle (choose, RED/BLUE) -> action (choose, damage fx)
 -- -> move (moves list) -> party (the switch list and its front-pic gutter)
 -- -> ball (throw fx, target seat hidden from HIDEPIC on) -> bubble (rounded
--- callout) -> nire (self as SPRITE_NIRE, saturation pin).
+-- callout) -> nire (self as SPRITE_NIRE, saturation pin) -> evolve-grace
+-- (on-plate "is evolving!" before the flash) -> evolve-flash (white pulse
+-- mid-swap) -> evolve-done (settled into form) -> evolve-bench (centered
+-- pic for a mon that is not on a seat).
 --
 -- Coordinate approach (point 4 in the TT2 brief): the battlefield draws into
 -- a 640x360 canvas that Renderer fill-scales to the window, aspect
@@ -1070,6 +1073,132 @@ return function(game)
     end
   else
     log("warn", "nire frame did not reach disk", path6)
+  end
+
+  -- ---- mid-battle evolution movie (on-plate, then bench/center) ----
+  --
+  -- The rest of this driver never levels a mon, so the new EvolveFx path
+  -- would otherwise leave no PNG. Stamp a well-formed movie on the live
+  -- screen (same startEvolve the fight uses) and pin the clock so each
+  -- capture is a known beat: grace, flash, settled, then a centered bench
+  -- pic. Pixel asserts stay light -- these frames exist for eyeballing.
+  local evolveOk, evolveErr = pcall(function()
+    local EvolveFx = resolve("EvolveFx")
+    local pokedex = (game.data and game.data.pokemon) or {}
+    local function present(key)
+      return type(pokedex[key]) == "table" and key or nil
+    end
+    local intoOnPlate = present("RAICHU") or present("CROBAT") or "RAICHU"
+    local benchFrom = present(BENCH_SPECIES[1]) or present("NIDORINA")
+      or present("CATERPIE") or BENCH_SPECIES[1]
+    local benchInto = present("NIDOQUEEN") or present("METAPOD")
+      or present("CHARMELEON") or intoOnPlate
+    -- Real save mons so conclude/apply paints the evolved form. Gen 2 uses
+    -- Mon.new; Gen 1 Pokemon.new. A plain table is enough for identity if
+    -- both constructors miss, but then apply no-ops and the settled shot
+    -- stays on "is evolving!".
+    local function makeMon(species, level, nick)
+      local mon
+      if GEN == 2 then
+        local ok, Mon = pcall(require, "src.battle.gen2.Mon")
+        if ok and Mon and type(Mon.new) == "function" then
+          local ran, result = pcall(Mon.new, game.data, species, level)
+          if ran then mon = result end
+        end
+      else
+        local ok, Pokemon = pcall(require, "src.pokemon.Pokemon")
+        if ok and Pokemon and type(Pokemon.new) == "function" then
+          local ran, result = pcall(Pokemon.new, game.data, species, level)
+          if ran then mon = result end
+        end
+      end
+      if type(mon) ~= "table" then
+        mon = { species = species, level = level, hp = 40, stats = { hp = 55 } }
+      end
+      mon.nickname = nick
+      return mon
+    end
+    local lead = makeMon(MINE_SPECIES, 25, "SPARKY")
+    local benchMon = benchFrom and makeMon(benchFrom, 16, "BENCH") or nil
+    game.save = game.save or {}
+    game.save.party = { lead }
+    screen.active = 1
+    screen.phase = "messages"
+    local started = screen:startEvolve({
+      evolve = lead, from = MINE_SPECIES, into = intoOnPlate,
+      via = "LEVEL", name = "SPARKY",
+    })
+    check(started == true, "evolve: startEvolve accepts an on-plate row")
+    local movie = screen.evolving
+    check(movie ~= nil and movie.center ~= true,
+      "evolve: on-plate movie is tied to a seat, not centered")
+
+    if movie then
+      movie.frame = 40
+      U.wait(2)
+      local pathG = SHOT_DIR .. "/battlefield-evolve-grace.png"
+      if U.shot(game, pathG) then
+        log("captured", pathG)
+        check(true, "evolve: grace frame reached disk")
+      else
+        check(false, "evolve: grace frame reached disk", pathG)
+      end
+
+      movie.frame = 140
+      movie.done = false
+      U.wait(2)
+      local pathF = SHOT_DIR .. "/battlefield-evolve-flash.png"
+      if U.shot(game, pathF) then
+        log("captured", pathF)
+        check(true, "evolve: flash frame reached disk")
+      else
+        check(false, "evolve: flash frame reached disk", pathF)
+      end
+
+      movie.frame = EvolveFx.FLASH_FRAMES
+      movie.done = true
+      movie.canceled = false
+      U.wait(2)
+      local pathD = SHOT_DIR .. "/battlefield-evolve-done.png"
+      if U.shot(game, pathD) then
+        log("captured", pathD)
+        check(true, "evolve: settled frame reached disk")
+      else
+        check(false, "evolve: settled frame reached disk", pathD)
+      end
+    end
+
+    screen.evolving = nil
+    if benchMon then
+      game.save.party = { lead, benchMon }
+      local benchStarted = screen:startEvolve({
+        evolve = benchMon, from = benchFrom, into = benchInto,
+        via = "LEVEL", name = "BENCH",
+      })
+      check(benchStarted == true, "evolve: startEvolve accepts a bench row")
+      local benchMovie = screen.evolving
+      check(benchMovie ~= nil and benchMovie.center == true,
+        "evolve: bench movie is centered (no seat)")
+      if benchMovie then
+        benchMovie.frame = 140
+        benchMovie.done = false
+        U.wait(2)
+        local pathB = SHOT_DIR .. "/battlefield-evolve-bench.png"
+        if U.shot(game, pathB) then
+          log("captured", pathB)
+          check(true, "evolve: bench-center frame reached disk")
+        else
+          check(false, "evolve: bench-center frame reached disk", pathB)
+        end
+      end
+      screen.evolving = nil
+    else
+      check(false, "evolve: bench mon resolved from this boot's dex")
+    end
+  end)
+  if not evolveOk then
+    log("warn", "evolve frames threw:", tostring(evolveErr))
+    check(false, "evolve: frames ran without throwing", tostring(evolveErr))
   end
 
   log("GAPS:" .. tostring(fail))
