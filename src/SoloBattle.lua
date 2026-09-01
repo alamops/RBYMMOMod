@@ -707,7 +707,11 @@ function M:_transport(pending)
           pending.party = payload
         end
       elseif msgType == Wire.BATTLE_CHOICE then
-        solo:_choose(payload)
+        -- `false` is a real referee refusal (already answered, a switch
+        -- that names nobody). The screen keeps the menu open then.
+        -- Parked RUN is handled, not refused -- `_choose` returns true
+        -- so `sendChoice` still closes the menu for the pump.
+        return solo:_choose(payload) and true or false
       end
       -- Everything else -- a session leave on the way out, a reconnect nudge
       -- from a transport that never dropped -- is about a hub this fight does
@@ -771,11 +775,11 @@ function M:_choose(payload)
   if payload.action == "run" then
     if self.kind == "trainer" then
       self.refuseRun = true
-      return false
+      return true
     end
     if not self:_escapes() then
       self.failedRun = true
-      return false
+      return true
     end
   end
   return sim:submitChoice(PLAYER_SEAT, payload) and true or false

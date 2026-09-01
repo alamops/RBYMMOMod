@@ -1413,6 +1413,49 @@ test('timeout sweep Struggles an empty sheet instead of pushing the clock', () =
     'the timeout closed the turn instead of waiting another window');
 });
 
+test('a dead wild in the choice window ends the fight on tick', () => {
+  const battle = build({
+    id: 'deadwild-tick', mode: 'wild', seed: 3, choiceTimeout: 0, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80,
+          moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'WILD', mons: [
+        mn({ species: 'Beta', maxHp: 40, spd: 10,
+          moves: [mv('nudge', 10, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  const foe = battle.byId.get('p2');
+  foe.mons[0].hp = 0;
+  foe.active = null;
+  assert.strictEqual(battle.tick(0), true, 'one tick notices the empty side');
+  const out = battle.outcome();
+  assert.ok(out, 'and the fight ends rather than waiting for the wild');
+  assert.strictEqual(out.reason, 'ko', 'as a knockout');
+});
+
+test('FIGHT with nobody to aim at is a skip that closes a dead wild', () => {
+  const battle = build({
+    id: 'deadwild-skip', mode: 'wild', seed: 3, choiceTimeout: 0, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 90, spd: 80,
+          moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'WILD', mons: [
+        mn({ species: 'Beta', maxHp: 40, spd: 10,
+          moves: [mv('nudge', 10, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  const foe = battle.byId.get('p2');
+  foe.mons[0].hp = 0;
+  foe.active = null;
+  assert.ok(battle.submitChoice('p1', { action: 'fight', move: 0 }),
+    'FIGHT with nobody to aim at is accepted as a skip');
+  assert.ok(battle.outcome(), 'and the skip closes the fight');
+});
+
 // ------------------------------------------------------------------
 // properties a fixture cannot state
 // ------------------------------------------------------------------

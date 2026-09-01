@@ -1056,7 +1056,11 @@ function M.submitChoice(transport, battle, fields)
       .. "sent; press again, or wait for the turn clock")
     return false
   end
-  transport:send(Wire.BATTLE_CHOICE, out)
+  -- `false` is a real refusal (already answered, a switch that names
+  -- nobody). The hub send returns true/nil; only an explicit false must
+  -- keep the menu open. A no-target FIGHT is a skip at the referee now,
+  -- not a failed send.
+  if transport:send(Wire.BATTLE_CHOICE, out) == false then return false end
   return true
 end
 

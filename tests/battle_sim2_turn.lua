@@ -950,6 +950,50 @@ do
      "the timeout closed the turn instead of waiting another window")
 end
 
+-- A dead side left in `choice` must end the fight. Same hang the Gen 1
+-- twin pins: FIGHT used to return nil (no living foe) and a zero timeout
+-- sat on "Waiting for WILD...".
+do
+  local battle = battleOf({
+    choiceTimeout = 0,
+    mode = "wild",
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spe = 80 }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 40, spe = 10 }) } } },
+    },
+  })
+  drain(battle)
+  local foe = battle.byId.p2
+  foe.mons[1].hp = 0
+  foe.active = nil
+  ok(battle:tick(0) == true, "gen2: one tick notices the empty side")
+  local out = battle:outcome()
+  ok(out ~= nil, "gen2: and the fight ends rather than waiting for the wild")
+  eq(out and out.reason, "ko", "gen2: as a knockout")
+end
+
+do
+  local battle = battleOf({
+    choiceTimeout = 0,
+    mode = "wild",
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha", maxHp = 200, atk = 90, spe = 80 }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 40, spe = 10 }) } } },
+    },
+  })
+  drain(battle)
+  local foe = battle.byId.p2
+  foe.mons[1].hp = 0
+  foe.active = nil
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }),
+     "gen2: FIGHT with nobody to aim at is accepted as a skip")
+  ok(battle:outcome() ~= nil, "gen2: and the skip closes the fight")
+end
+
 -- ------------------------------------------------------------------
 
 io.write(string.format("battle_sim2_turn: %d passed, %d failed\n", passed, failed))
