@@ -4,7 +4,7 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [Unreleased]
+## [1.1.9] - 2026-08-31
 
 ### Changed
 
@@ -17,7 +17,17 @@ here must match `manifest.version`.
   sheet. `assets/battle/outdoor_grass_arena.png` and
   `assets/battle/indoor_house_arena.png` are original pixel art (the
   outdoor and indoor generators) and are only the no-ROM fallbacks.
-  Seat layout is unchanged.
+  Seat layout is unchanged. README **BATTLE — ANYWHERE** now shows the
+  three looks: route grass + tree wall, indoor house floor, Pewter Gym's
+  own sheet. A gym or cave with no grass tile uses that sheet's plain
+  floor, not the first striped hybrid (which stamped as scanlines). A
+  gym rim is the sheet's Rhydon statues, and the fight wears that
+  town's palette (`PEWTER_GYM` → PEWTER) rather than inheriting ROUTE.
+  Gold gyms keep `TILESET_GYM` even though every Johto gym is
+  `environment = INDOOR`; walkability comes from `COLL_*` quads when
+  the sheet has no Gen 1 `walkable` list; multi-floor ids like
+  `BLACKTHORN_GYM_2F` still name the town; and the bake uses the GBC
+  environment set, not an SGB name (`AZALEA` is not in Red's pack).
 
 ### Fixed
 

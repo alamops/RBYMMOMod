@@ -13983,6 +13983,46 @@ end)()
   eq(Battlefield.arenaFieldTileset("CAVERN"), true, "CAVERN is a field")
   eq(Battlefield.arenaFieldTileset("GYM"), true,
      "GYM keeps its own sheet")
+  eq(Battlefield.arenaFieldTileset("TILESET_GYM"), true,
+     "TILESET_GYM keeps its own sheet")
+  eq(Battlefield.arenaFieldTileset("TILESET_GYM", { environment = "INDOOR" }),
+     true, "Johto gyms stay on TILESET_GYM even though environment is INDOOR")
+  eq(Battlefield.arenaIndoor("TILESET_GYM", { environment = "INDOOR" }), false,
+     "TILESET_GYM is not the house indoor fallback")
+  eq(Battlefield.arenaFieldTileset(nil, {
+       tileset = "TILESET_GYM", environment = "INDOOR",
+     }), true, "AZALEA_GYM-shaped def keeps TILESET_GYM")
+  check(type(Battlefield.gymTownPalette) == "function",
+        "gymTownPalette is a Battlefield entry")
+  eq(Battlefield.gymTownPalette({ id = "PEWTER_GYM" }), "PEWTER",
+     "PEWTER_GYM names the Pewter SGB pack")
+  eq(Battlefield.gymTownPalette({ id = "AZALEA_GYM" }), "AZALEA",
+     "AZALEA_GYM names the town")
+  eq(Battlefield.gymTownPalette({ id = "BLACKTHORN_GYM_2F" }), "BLACKTHORN",
+     "BLACKTHORN_GYM_2F still names the town")
+  eq(Battlefield.arenaSgbPaletteName({}, { id = "PEWTER_GYM" }), "PEWTER",
+     "Gen 1 gyms still apply the town SGB name")
+  eq(Battlefield.arenaSgbPaletteName({
+       data = { gen2Palettes = { bg = { {} } } },
+     }, { id = "AZALEA_GYM" }), nil,
+     "Gold does not force an SGB town name that is not in the Red pack")
+  do
+    local sets = Battlefield.arenaTilesets({
+      data = {
+        tilesets = {},
+        gen2Tilesets = { TILESET_GYM = { id = "TILESET_GYM", image = "x.png" } },
+      },
+    })
+    eq(sets and sets.TILESET_GYM and sets.TILESET_GYM.image, "x.png",
+       "empty data.tilesets does not hide data.gen2Tilesets")
+  end
+  do
+    local ow = Battlefield.overworldFrom({
+      world = { map = { id = "AZALEA_GYM" } },
+    })
+    eq(ow and ow.map and ow.map.id, "AZALEA_GYM",
+       "Gold game.world is the live overworld for compose")
+  end
   eq(Battlefield.arenaFieldTileset(nil, { outdoor = true }), true,
      "map.def.outdoor=true is a field")
   eq(Battlefield.arenaFieldTileset("OVERWORLD", { outdoor = false }), false,
@@ -14074,6 +14114,102 @@ end)()
     else
       check(true, "(no generated tilesets -- REDS_HOUSE_2 pick skipped)")
     end
+  end
+  do
+    -- GYM has no grassTile. The first other walkable is a striped
+    -- wall/floor hybrid (block 2); picking that as surround is the
+    -- scanline field the Pewter Gym screenshot showed.
+    local blocks = {
+      { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+      { 5, 5, 5, 5, 16, 16, 16, 16, 17, 17, 17, 17, 17, 17, 17, 17 },
+      { 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20 },
+      { 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15 },
+      { 17, 17, 17, 17, 17, 17, 17, 17, 6, 6, 6, 6, 22, 22, 22, 22 },
+      { 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17 },
+    }
+    local g, s, d = Battlefield.pickArenaBlocks({
+      id = "GYM",
+      walkable = { 3, 17, 22, 25 },
+      blocks = blocks,
+    })
+    eq(g, 6, "GYM ground is the plain walkable floor, not the stripe block")
+    eq(s, 6, "GYM surround stays on that floor")
+    eq(d, 3, "GYM decor is the plain wall when the sheet has no statues")
+    check(g ~= 2 and s ~= 2 and d ~= 2,
+          "GYM pick skips the striped wall/floor hybrid")
+    check(d ~= 1, "GYM decor is not the all-zero filler")
+    local withStatues = {}
+    for i = 1, #blocks do withStatues[i] = blocks[i] end
+    withStatues[7] = { 7, 8, 7, 8, 23, 24, 23, 24, 7, 8, 17, 17, 23, 24, 17, 17 }
+    local _, _, d2 = Battlefield.pickArenaBlocks({
+      id = "GYM",
+      walkable = { 3, 17, 22, 25 },
+      blocks = withStatues,
+    })
+    eq(d2, 7, "GYM decor prefers the Rhydon-statue block over a plain wall")
+  end
+  do
+    local tsOk, generated = pcall(dofile, "data/generated/tilesets.lua")
+    if tsOk and type(generated) == "table"
+        and type(generated.GYM) == "table" then
+      local gym = generated.GYM
+      local g, s, d = Battlefield.pickArenaBlocks(gym)
+      local floorIdx, wallIdx
+      for i, block in ipairs(gym.blocks) do
+        local n17, n20, n15 = 0, 0, 0
+        for k = 1, 16 do
+          if block[k] == 17 then n17 = n17 + 1 end
+          if block[k] == 20 then n20 = n20 + 1 end
+          if block[k] == 15 then n15 = n15 + 1 end
+        end
+        if n17 == 16 then floorIdx = i end
+        if n20 == 16 and not wallIdx then wallIdx = i end
+        if n15 == 16 and not wallIdx then wallIdx = i end
+      end
+      eq(g, floorIdx, "imported GYM ground is the all-floor (tile 17) block")
+      eq(s, floorIdx, "imported GYM surround is that floor")
+      check(d ~= 2, "imported GYM decor is not the striped hybrid")
+      local statueN = 0
+      local db = gym.blocks[d]
+      if type(db) == "table" then
+        local statue = { [7] = true, [8] = true, [23] = true, [24] = true }
+        for k = 1, 16 do
+          if statue[db[k]] then statueN = statueN + 1 end
+        end
+      end
+      check(statueN >= 8,
+            "imported GYM decor is a Rhydon-statue block, not a pale slab")
+    else
+      check(true, "(no generated tilesets -- GYM pick skipped)")
+    end
+  end
+  do
+    -- Gold TILESET_GYM: no walkable list, COLL quads, environment INDOOR.
+    local floor = { 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17 }
+    local stripe = { 5, 5, 5, 5, 16, 16, 16, 16, 17, 17, 17, 17, 17, 17, 17, 17 }
+    local wall = { 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20 }
+    local zero = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    local statue = { 40, 41, 40, 41, 56, 57, 56, 57, 40, 41, 17, 17, 56, 57, 17, 17 }
+    local blocks = { zero, stripe, wall, floor, statue }
+    local collision = {
+      { 7, 7, 7, 7 },
+      { 0, 0, 7, 7 },
+      { 7, 7, 7, 7 },
+      { 0, 0, 0, 0 },
+      { 7, 7, 0, 0 },
+    }
+    local g, s, d = Battlefield.pickArenaBlocks({
+      id = "TILESET_GYM",
+      generation = 2,
+      blocks = blocks,
+      collision = collision,
+    }, { def = { environment = "INDOOR", tileset = "TILESET_GYM" } })
+    eq(g, 4, "TILESET_GYM ground is the COLL-floor block, not the stripe")
+    eq(s, 4, "TILESET_GYM surround stays on that floor")
+    eq(d, 5, "TILESET_GYM decor is the pictorial statue block")
+    check(g ~= 2 and s ~= 2 and d ~= 2,
+          "TILESET_GYM pick skips the striped hybrid")
+    check(d ~= 1, "TILESET_GYM decor is not the all-zero filler")
   end
   do
     local arenaFile = io.open(MOD_PATH .. "/assets/battle/outdoor_grass_arena.png", "rb")
