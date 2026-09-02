@@ -15720,6 +15720,19 @@ end)()
   local wobble = Battlefield.fxSeat(
     { { kind = "wobble", side = "foe", t = 0.2 } }, "foe", 1)
   eq(wobble.hidden, true, "...but a wobble does")
+  local digMid = Battlefield.fxSeat(
+    { { kind = "dig", side = "ally", seatIndex = 1, t = 0.5 } }, "ally", 1)
+  eq(digMid.hidden, false, "a dig mid-slide is still drawn (sinking)")
+  check(digMid.dy > 0, "...and has slid downward")
+  local digDone = Battlefield.fxSeat(
+    { { kind = "dig", side = "ally", seatIndex = 1, t = 1 } }, "ally", 1)
+  eq(digDone.hidden, true, "...then stays hidden at t == 1")
+  local flyDone = Battlefield.fxSeat(
+    { { kind = "fly", side = "foe", seatIndex = 1, t = 1 } }, "foe", 1)
+  eq(flyDone.hidden, true, "a finished fly lift hides the seat")
+  check(Battlefield.fxSeat(
+    { { kind = "fly", side = "foe", seatIndex = 1, t = 0.4 } }, "foe", 1).dy < 0,
+    "...after sliding upward")
   local recallMid = Battlefield.fxSeat(
     { { kind = "recall", side = "foe", t = 0.5 } }, "foe", 1)
   eq(recallMid.hidden, false,
@@ -21951,6 +21964,142 @@ end)()
   eq(f2.anim.anim, "POOF_ANIM", "the row still plays, for its text/timing")
   eq(f2.ballFlow, nil, "...but opens no flow")
   eq(f2.fx, nil, "...and emits no fx of its own -- startBallFx's guard refuses it")
+end)()
+
+-- Dig / Fly charge hides the seat and holds it until the release anim.
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local Battlefield = need("Battlefield")
+  local fight = MediatedBattle.new({
+    game = { data = data }, battle = "b-digfly", role = "host",
+  })
+  fight.usesBattlefield = function() return true end
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-digfly"
+    fields.seq = seq
+    fight:onEvent(fields)
+  end
+  local function playThrough(guard)
+    guard = guard or 200
+    local was = fight.anim
+    local n = 0
+    while n < guard do
+      fight:update(1 / 60)
+      n = n + 1
+      if fight.anim ~= nil and fight.anim ~= was then break end
+    end
+  end
+  local function waitHidden(side, want, guard)
+    guard = guard or 120
+    for _ = 1, guard do
+      fight:update(1 / 60)
+      local hidden = Battlefield.fxSeat(fight.fx or {}, side, 1).hidden
+      if (hidden == true) == want then return true end
+    end
+    return false
+  end
+
+  send({ t = "anim", slot = 0, side = "a", text = "DIG", amount = 1 })
+  playThrough()
+  eq(fight.anim and fight.anim.anim, "DIG", "DIG charge row plays")
+  check(waitHidden("ally", true),
+        "DIG charge hides the ally seat and holds it")
+  check(fight.vanishFlow ~= nil, "...vanishFlow is open")
+
+  send({ t = "anim", slot = 0, side = "a", text = "DIG" })
+  playThrough()
+  check(waitHidden("ally", false),
+        "DIG release clears the hide")
+
+  send({ t = "anim", slot = 1, side = "b", text = "FLY", amount = 1 })
+  playThrough()
+  check(waitHidden("foe", true),
+        "FLY charge hides the foe seat")
+end)()
+
+-- Faint while vanished must drop the hide so the sink (and a later send) show.
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local Battlefield = need("Battlefield")
+  local fight = MediatedBattle.new({
+    game = { data = data }, battle = "b-digfaint", role = "host",
+  })
+  fight.usesBattlefield = function() return true end
+  local seq = 0
+  local function send(fields)
+    seq = seq + 1
+    fields.battle = "b-digfaint"
+    fields.seq = seq
+    fight:onEvent(fields)
+  end
+  send({ t = "anim", slot = 0, side = "a", text = "DIG", amount = 1 })
+  local hidden = false
+  for _ = 1, 120 do
+    fight:update(1 / 60)
+    if Battlefield.fxSeat(fight.fx or {}, "ally", 1).hidden then
+      hidden = true
+      break
+    end
+  end
+  check(hidden, "faint-case: DIG charge hides the seat")
+  fight.lines[#fight.lines + 1] = { faintfx = 0 }
+  local shown = false
+  for _ = 1, 80 do
+    fight:update(1 / 60)
+    if not Battlefield.fxSeat(fight.fx or {}, "ally", 1).hidden then
+      shown = true
+      break
+    end
+  end
+  check(shown, "faint while Dig-vanished clears the hide so the sink can play")
+end)()
+
+-- CoopBattle: vanishFlow must drop on faint and send-out, and Gen 2 vanished
+-- state must start a hold with no anim row.
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local battle = setmetatable({
+    game = { data = data },
+    mine = 1,
+    fx = {
+      { kind = "dig", slot = 1, side = "ally", t = 1, elapsed = 1, duration = 0.45 },
+    },
+    vanishFlow = { [1] = "dig" },
+    sim = {
+      slots = {
+        { battler = { vanished = true, chargeMove = "DIG" }, side = "a" },
+        { battler = { vanished = true, chargeMove = "FLY" }, side = "b" },
+      },
+    },
+  }, { __index = CoopBattle })
+  battle.sim.slot = function(self, i) return self.slots[i] end
+  function battle:usesBattlefield() return true end
+  function battle:noteBattlefieldSpawn() end
+  function battle:playBallPoof() end
+  function battle:playEntranceCry() end
+
+  eq(battle:slotVanishKind(1), "dig", "Coop: vanished + DIG is a dig hold")
+  eq(battle:slotVanishKind(2), "fly", "Coop: vanished + FLY is a fly hold")
+
+  battle:startFaint({ faintfx = { sprite = {} }, slot = 1 })
+  eq(battle.vanishFlow[1], nil, "Coop startFaint drops vanishFlow")
+
+  battle.vanishFlow = { [2] = "fly" }
+  battle.fx = {
+    { kind = "fly", slot = 2, side = "foe", t = 1, elapsed = 1, duration = 0.45 },
+  }
+  battle:applySwap({ swap = 2, battler = { sprite = {} } })
+  eq(battle.vanishFlow[2], nil, "Coop applySwap drops vanishFlow")
+
+  battle.vanishFlow = nil
+  battle.fx = nil
+  battle.faintFx = nil
+  battle.sim.slots[1].battler = { vanished = true, chargeMove = "DIG" }
+  battle:syncVanishHolds()
+  eq(battle.vanishFlow and battle.vanishFlow[1], "dig",
+     "Coop syncVanishHolds starts a dig hold from Gen2 vanished state")
 end)()
 
 -- ------- MediatedBattle wave 2 (round 2): SHAKE amount fan-out clamps at 8

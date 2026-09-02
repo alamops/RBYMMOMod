@@ -839,11 +839,50 @@ function M.isFly(effectId)
   return int(effectId, 0) == 43
 end
 
-function M.chargeMessage(mon, effectId)
-  if M.isFly(effectId) then
-    return mon.species .. " flew up high"
+-- Registry id, uppercased. Dig vs Fly share an effect in one gen and not
+-- the other; the cart keys vanish and charge text off the move id.
+function M.moveKey(moveOrId)
+  local id = moveOrId
+  if type(moveOrId) == "table" then id = moveOrId.id end
+  if type(id) ~= "string" then return "" end
+  return string.upper(id)
+end
+
+function M.isDigMove(moveOrId)
+  return M.moveKey(moveOrId) == "DIG"
+end
+
+function M.isSwift(effectId)
+  return int(effectId, 0) == 17
+end
+
+-- Fly (effect 43) and Dig (CHARGE + move.id, the engine's special case).
+function M.vanishes(effectId, moveOrId)
+  return M.isFly(effectId) or M.isDigMove(moveOrId)
+end
+
+function M.chargeMessage(mon, effectId, moveOrId)
+  local key = M.moveKey(moveOrId)
+  local species = (mon and mon.species) or "POKéMON"
+  if key == "DIG" then return species .. " dug a hole" end
+  if key == "SOLARBEAM" then return species .. " took in sunlight" end
+  if key == "SKULL_BASH" then return species .. " lowered its head" end
+  if key == "RAZOR_WIND" then return species .. " made a whirlwind" end
+  if key == "FLY" or M.isFly(effectId) then return species .. " flew up high" end
+  return species .. " is glowing"
+end
+
+-- Gen 1 cartridge: Swift skips the invuln check; Thunder reaches Fly;
+-- Earthquake / Fissure miss Dig (Stadium is the other rule).
+function M.hitsInvulnerable(chargeMoveId, attackerMove)
+  local charge = M.moveKey(chargeMoveId)
+  local id = M.moveKey(attackerMove)
+  if id == "SWIFT" then return true end
+  if type(attackerMove) == "table" and M.isSwift(attackerMove.effect) then
+    return true
   end
-  return mon.species .. " is glowing"
+  if charge == "FLY" and id == "THUNDER" then return true end
+  return false
 end
 
 function M.isTrapping(effectId)

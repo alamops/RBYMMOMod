@@ -146,10 +146,20 @@ function int(value, fallback) {
   return Math.floor(n);
 }
 
+const GEN2_EFFECT_ID = {
+  EFFECT_RAZOR_WIND: 39,
+  EFFECT_SOLARBEAM: 39,
+  EFFECT_SKULL_BASH: 39,
+  EFFECT_SKY_ATTACK: 39,
+  EFFECT_FLY: 43,
+};
+
 function idOf(name) {
   if (typeof name !== 'string') return null;
   const hit = BY_NAME[name];
-  return hit === undefined ? null : hit;
+  if (hit !== undefined) return hit;
+  const mapped = GEN2_EFFECT_ID[name];
+  return mapped === undefined ? null : mapped;
 }
 
 function nameOf(id) {
@@ -766,9 +776,46 @@ function isFly(effectId) {
   return int(effectId, 0) === 43;
 }
 
-function chargeMessage(mon, effectId) {
-  if (isFly(effectId)) return `${mon.species} flew up high`;
-  return `${mon.species} is glowing`;
+function moveKey(moveOrId) {
+  let id = moveOrId;
+  if (moveOrId && typeof moveOrId === 'object') id = moveOrId.id;
+  if (typeof id !== 'string') return '';
+  return id.toUpperCase();
+}
+
+function isDigMove(moveOrId) {
+  return moveKey(moveOrId) === 'DIG';
+}
+
+function isSwift(effectId) {
+  return int(effectId, 0) === 17;
+}
+
+function vanishes(effectId, moveOrId) {
+  return isFly(effectId) || isDigMove(moveOrId);
+}
+
+function chargeMessage(mon, effectId, moveOrId) {
+  const key = moveKey(moveOrId);
+  const species = (mon && mon.species) || 'POKéMON';
+  if (key === 'DIG') return `${species} dug a hole`;
+  if (key === 'SOLARBEAM') return `${species} took in sunlight`;
+  if (key === 'SKULL_BASH') return `${species} lowered its head`;
+  if (key === 'RAZOR_WIND') return `${species} made a whirlwind`;
+  if (key === 'FLY' || isFly(effectId)) return `${species} flew up high`;
+  return `${species} is glowing`;
+}
+
+const FLY_DIG_EXCEPTIONS = {
+  FLY: { GUST: true, WHIRLWIND: true, THUNDER: true, TWISTER: true },
+  DIG: { EARTHQUAKE: true, FISSURE: true, MAGNITUDE: true },
+};
+
+function hitsInvulnerable(chargeMoveId, attackerMove) {
+  const charge = moveKey(chargeMoveId);
+  const id = moveKey(attackerMove);
+  const reaches = FLY_DIG_EXCEPTIONS[charge];
+  return !!(reaches && reaches[id]);
 }
 
 function isTrapping(effectId) {
@@ -1113,7 +1160,13 @@ module.exports = {
   fixedDamage,
   isCharge,
   isFly,
+  moveKey,
+  isDigMove,
+  isSwift,
+  vanishes,
   chargeMessage,
+  hitsInvulnerable,
+  FLY_DIG_EXCEPTIONS,
   isTrapping,
   trapTurns,
   isHyperBeam,

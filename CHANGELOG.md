@@ -14,6 +14,20 @@ here must match `manifest.version`.
   party vs a trainer seats up to 3 foe mons; vs wild still one wild.
   **PROTOCOL is now 27.** Older hubs still pair-only / 4-slot field.
 
+## [1.1.11] - 2026-09-01
+
+### Fixed
+
+- **Dig, Fly, and the other two-turn charge moves now play as two turns.**
+  Dig slides under the field and stays gone; Fly lifts off and stays gone;
+  both come back on the hitting turn. SolarBeam, Skull Bash, Razor Wind and
+  Sky Attack stay visible and only glow on the setup beat. Hits-while-hidden
+  follow the cartridge per generation (Gen 1 Swift / Thunder; Gen 2
+  Gust / Twister / Earthquake and the rest of the engine table). A faint or
+  send-out drops the hide so the sink and the replacement stay visible. Gold
+  uploads `EFFECT_FLY` / `EFFECT_SOLARBEAM` as charge moves instead of
+  resolving them as a one-turn hit.
+
 ## [1.1.10] - 2026-09-01
 
 ### Fixed

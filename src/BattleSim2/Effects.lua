@@ -190,9 +190,20 @@ local function int(value, fallback)
   return floor(n)
 end
 
+-- Crystal names the same charge/vanish family with EFFECT_* strings whose
+-- numbers are not 39/43. Map them onto the shared charge/fly ids so a Gold
+-- host upload two-turns instead of resolving as a one-turn hit (idOf → 0).
+local GEN2_EFFECT_ID = {
+  EFFECT_RAZOR_WIND = 39,
+  EFFECT_SOLARBEAM = 39,
+  EFFECT_SKULL_BASH = 39,
+  EFFECT_SKY_ATTACK = 39,
+  EFFECT_FLY = 43,
+}
+
 function M.idOf(name)
   if type(name) ~= "string" then return nil end
-  return BY_NAME[name]
+  return BY_NAME[name] or GEN2_EFFECT_ID[name]
 end
 
 function M.nameOf(id)
@@ -835,11 +846,48 @@ function M.isFly(effectId)
   return int(effectId, 0) == 43
 end
 
-function M.chargeMessage(mon, effectId)
-  if M.isFly(effectId) then
-    return mon.species .. " flew up high"
-  end
-  return mon.species .. " is glowing"
+function M.moveKey(moveOrId)
+  local id = moveOrId
+  if type(moveOrId) == "table" then id = moveOrId.id end
+  if type(id) ~= "string" then return "" end
+  return string.upper(id)
+end
+
+function M.isDigMove(moveOrId)
+  return M.moveKey(moveOrId) == "DIG"
+end
+
+function M.isSwift(effectId)
+  return int(effectId, 0) == 17
+end
+
+function M.vanishes(effectId, moveOrId)
+  return M.isFly(effectId) or M.isDigMove(moveOrId)
+end
+
+function M.chargeMessage(mon, effectId, moveOrId)
+  local key = M.moveKey(moveOrId)
+  local species = (mon and mon.species) or "POKéMON"
+  if key == "DIG" then return species .. " dug a hole" end
+  if key == "SOLARBEAM" then return species .. " took in sunlight" end
+  if key == "SKULL_BASH" then return species .. " lowered its head" end
+  if key == "RAZOR_WIND" then return species .. " made a whirlwind" end
+  if key == "FLY" or M.isFly(effectId) then return species .. " flew up high" end
+  return species .. " is glowing"
+end
+
+-- CheckHit's .FlyDigMoves (Crystal effect_commands.asm:1713-1746).
+-- Swift does *not* reach a vanished target in Gen 2.
+M.FLY_DIG_EXCEPTIONS = {
+  FLY = { GUST = true, WHIRLWIND = true, THUNDER = true, TWISTER = true },
+  DIG = { EARTHQUAKE = true, FISSURE = true, MAGNITUDE = true },
+}
+
+function M.hitsInvulnerable(chargeMoveId, attackerMove)
+  local charge = M.moveKey(chargeMoveId)
+  local id = M.moveKey(attackerMove)
+  local reaches = M.FLY_DIG_EXCEPTIONS[charge]
+  return (reaches and reaches[id]) and true or false
 end
 
 function M.isTrapping(effectId)

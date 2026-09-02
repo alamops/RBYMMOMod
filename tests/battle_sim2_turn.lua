@@ -1218,6 +1218,102 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- two-turn charge / vanish (Gen 2 exceptions + EFFECT_* upload aliases)
+-- ------------------------------------------------------------------
+
+do
+  local Effects = need("BattleSim2/Effects")
+  eq(Effects.idOf("EFFECT_FLY"), 43, "gen2: EFFECT_FLY maps onto FLY_EFFECT")
+  eq(Effects.idOf("EFFECT_SOLARBEAM"), 39, "gen2: EFFECT_SOLARBEAM maps onto CHARGE")
+  eq(Effects.idOf("EFFECT_SKULL_BASH"), 39, "gen2: EFFECT_SKULL_BASH maps onto CHARGE")
+  eq(Effects.idOf("FLY_EFFECT"), 43, "gen2: Gen1 FLY_EFFECT name still resolves")
+  ok(Effects.hitsInvulnerable("FLY", { id = "GUST" }), "gen2: Gust reaches Fly")
+  ok(Effects.hitsInvulnerable("FLY", { id = "TWISTER" }), "gen2: Twister reaches Fly")
+  ok(Effects.hitsInvulnerable("FLY", { id = "WHIRLWIND" }), "gen2: Whirlwind reaches Fly")
+  ok(Effects.hitsInvulnerable("DIG", { id = "EARTHQUAKE" }), "gen2: Earthquake reaches Dig")
+  ok(Effects.hitsInvulnerable("DIG", { id = "FISSURE" }), "gen2: Fissure reaches Dig")
+  ok(Effects.hitsInvulnerable("DIG", { id = "MAGNITUDE" }), "gen2: Magnitude reaches Dig")
+  ok(not Effects.hitsInvulnerable("FLY", { id = "SWIFT" }), "gen2: Swift misses Fly")
+  ok(not Effects.hitsInvulnerable("DIG", { id = "TACKLE" }), "gen2: Tackle misses Dig")
+  local mon = { species = "Alpha" }
+  eq(Effects.chargeMessage(mon, 39, "SOLARBEAM"), "Alpha took in sunlight")
+  eq(Effects.chargeMessage(mon, 39, "SKULL_BASH"), "Alpha lowered its head")
+  eq(Effects.chargeMessage(mon, 39, "RAZOR_WIND"), "Alpha made a whirlwind")
+end
+
+do
+  local battle = battleOf({
+    seed = 5151,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({
+                species = "Alpha", maxHp = 200, spe = 120, atk = 80,
+                moves = { move({ id = "DIG", power = 60, effect = 39, pp = 10 }) },
+              }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({
+                species = "Beta", maxHp = 200, spe = 1, def = 40, atk = 80,
+                moves = { move({ id = "EARTHQUAKE", power = 80, accuracy = 255 }) },
+              }) } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn1 = drain(battle)
+  local dug, failed, damaged = false, false, false
+  for _, event in ipairs(turn1) do
+    if event.t == "msg" and event.text:find("dug a hole", 1, true) then dug = true end
+    if event.t == "msg" and event.text:find("But it failed", 1, true) then failed = true end
+    if event.t == "damage" and event.slot == 0 then damaged = true end
+  end
+  ok(dug, "gen2: DIG announces dug a hole")
+  ok(not failed, "gen2: Earthquake reaches a digging target")
+  ok(damaged, "gen2: Earthquake damages the digging user")
+
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn2 = drain(battle)
+  local released, foeDamaged = false, false
+  for _, event in ipairs(turn2) do
+    if event.t == "anim" and event.text == "DIG" and event.amount == nil then
+      released = true
+    end
+    if event.t == "damage" and event.slot ~= 0 then foeDamaged = true end
+  end
+  ok(released, "gen2: DIG turn two auto-releases")
+  ok(foeDamaged, "gen2: DIG turn two still hits after being struck underground")
+end
+
+do
+  local battle = battleOf({
+    seed = 5252,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({
+                species = "Alpha", maxHp = 200, spe = 120,
+                moves = { move({ id = "FLY", power = 70, effect = 43 }) },
+              }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({
+                species = "Beta", maxHp = 200, spe = 1, atk = 80,
+                moves = { move({ id = "SWIFT", power = 60, effect = 17, accuracy = 255 }) },
+              }) } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn1 = drain(battle)
+  local failed, damaged = false, false
+  for _, event in ipairs(turn1) do
+    if event.t == "msg" and event.text:find("But it failed", 1, true) then failed = true end
+    if event.t == "damage" and event.slot == 0 then damaged = true end
+  end
+  ok(failed, "gen2: Swift misses a flying target")
+  ok(not damaged, "gen2: Swift deals no damage while the target is airborne")
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("battle_sim2_turn: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)
