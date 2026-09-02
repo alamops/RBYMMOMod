@@ -4,7 +4,7 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [1.1.9] - 2026-08-31
+## [1.1.10] - 2026-09-01
 
 ### Fixed
 
@@ -21,6 +21,8 @@ here must match `manifest.version`.
   the fifth move for after the fight — a forget menu would stall the
   other humans through the hub's choice timeout. Leftovers still ride
   out with `toLearn` if they leave before answering. Both gens.
+
+## [1.1.9] - 2026-08-31
 
 ### Changed
 
