@@ -37,6 +37,8 @@ src/World.lua        guarded mod.world:current()
 src/Client.lua       wiring: options, hooks, events, inbound dispatch
 server/hub.js        the hub (node, no deps, newline-JSON over TCP)
 server/lib/battle/   Node half of the battle intermediator (mirrors BattleSim)
+scripts/run-server.sh    VPS install+run via Docker (latest GitHub release; --generation 1|2)
+scripts/upgrade-server.sh  move a running hub onto a GitHub release (keeps /data and gen lock)
 tests/               the mod's suite (excluded from the packed archive)
 ```
 

@@ -4,6 +4,24 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [Unreleased]
+
+### Added
+
+- **One-shot Docker install, and a matching upgrade, for a dedicated hub.**
+  `scripts/run-server.sh` is the VPS walkthrough as a script: Docker if the
+  box has none, a clone of the newest GitHub *release* (not `main`, and not
+  a version stamped into the file), `compose up`, wait until healthy, then
+  print the join code on that terminal. `scripts/upgrade-server.sh` moves
+  an existing clone onto that same latest release, or `--version vX.Y.Z`,
+  rebuilds, and leaves the named volume — so the passcode friends already
+  have stays. PROTOCOL is named when it changes, because a hub that has
+  moved and a zip that has not refuse each other. `--generation 1|2`
+  (default 1, RBY) locks the hub to a cart generation and writes
+  `RBY_MMO_GENERATION` into `server/.env`; upgrade keeps that lock so a
+  Gold hub is not reset to 1. The VPS section of `server/README.md` now
+  points at the pair instead of five commands to copy.
+
 ## [1.2.0] - 2026-09-01
 
 ### Changed
