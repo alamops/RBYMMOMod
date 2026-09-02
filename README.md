@@ -1039,7 +1039,28 @@ address.
 
 Lives in [`server/`](server/README.md). Node 22+, **zero dependencies**, or a
 container. Every setting is reachable from the CLI — nothing requires editing
-a file by hand.
+a file by hand. On a fresh VPS the whole Docker path is one script, which
+clones the newest GitHub release (the same channel as the mod zip) and
+prints the join code on that terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 2
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --port 25565
+```
+
+Default is generation 1 (Red/Blue/Yellow). `--generation 2` (or `-g 2`) is
+Gold. `--port` is the host port friends type (container port stays 7788).
+Both are written into `server/.env` (`RBY_MMO_GENERATION`,
+`RBY_MMO_HOST_PORT`) so a later `compose up` or
+`scripts/upgrade-server.sh` keeps them. Compose leaves generation empty
+when unset, so a Gold lock already in `config.json` is not forced back to
+1. Friends on the other generation are refused.
+
+`scripts/upgrade-server.sh` later moves that box onto a newer release, or
+`--version vX.Y.Z`, without rotating the passcode or resetting those
+locks. The walkthrough, and what a protocol mismatch actually does, is in
+[server/README.md](server/README.md).
 
 **First run** writes a config at mode `0600` and prints the passcode once:
 
