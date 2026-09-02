@@ -978,6 +978,51 @@ do
   end
 end
 
+-- ------------------------------------------------------------------
+-- mid-fight learn / replace (PROTOCOL 28)
+-- ------------------------------------------------------------------
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local fight = openFight(hub)
+  local record = hub.battles[fight.id]
+  ok(record.sim ~= nil, "the fight is live before the learn")
+  local live = record.sim.byId[fight.ann.client.id].mons[1]
+  live.moves = {
+    { id = "OLD", pp = 10, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 },
+  }
+  local function payload(moves)
+    return { mon = 0, moves = moves }
+  end
+  ok(hub:applyBattleMoveset(record, fight.ann.client, payload({
+    { id = "OLD", pp = 99, power = 999, accuracy = 255, type = 0, effect = 0, chance = 0 },
+    { id = "NEW", pp = 20, power = 80, accuracy = 255, type = 0, effect = 0, chance = 0,
+      name = "New" },
+  })), "an append of one slot is accepted")
+  eq(live.moves[2] and live.moves[2].id, "NEW", "the Lua hub holds the learned move")
+  eq(live.moves[1].pp, 10, "unchanged slot keeps hub PP")
+  eq(live.moves[1].power, 40, "and hub power, not the client's rewrite")
+
+  eq(hub:applyBattleMoveset(record, fight.ann.client, payload({
+    { id = "AAA", pp = 20, power = 80, accuracy = 255, type = 0, effect = 0, chance = 0 },
+    { id = "BBB", pp = 20, power = 80, accuracy = 255, type = 0, effect = 0, chance = 0 },
+  })), false, "rewriting two slots is refused")
+  eq(live.moves[1].id, "OLD", "...and the sheet is untouched")
+
+  ok(hub:applyBattleMoveset(record, fight.ann.client, payload({
+    { id = "OLD", pp = 10, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 },
+    { id = "SWAP", pp = 15, power = 60, accuracy = 255, type = 0, effect = 0, chance = 0 },
+  })), "replacing exactly one id is accepted")
+  eq(live.moves[2].id, "SWAP", "...on the slot the next fight choice will execute")
+
+  live.transformed = true
+  eq(hub:applyBattleMoveset(record, fight.ann.client, payload({
+    { id = "OLD", pp = 10, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 },
+    { id = "SWAP", pp = 15, power = 60, accuracy = 255, type = 0, effect = 0, chance = 0 },
+    { id = "NEW", pp = 20, power = 80, accuracy = 255, type = 0, effect = 0, chance = 0 },
+  })), false, "a transformed battler is left alone")
+end
+
 -- Wave 2 T2d: hub generation selects BattleSim vs BattleSim2 at Hub.new.
 do
   local Turn1 = need("BattleSim/Turn")

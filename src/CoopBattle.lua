@@ -83,6 +83,9 @@ local EvolveFx = need("EvolveFx")
 -- its screen: what a party looks like on the wire must not depend on how many
 -- monsters are on the field.
 local Mediated = need("MediatedBattle")
+-- Free-slot apply + the generation's own forget prompt. Shared with
+-- MediatedBattle so a 1v1 and a 2-on-2 cannot disagree about "already knows".
+local LearnMove = need("LearnMove")
 
 local M = {}
 M.__index = M
@@ -7955,10 +7958,11 @@ end
 -- the live party entry that the save keeps. Every client sees the event; three
 -- of them ignore it.
 --
--- With a free slot the move is simply learned. With four already known there
--- is a choice to make, and it needs a screen -- so it is remembered and put to
--- the player once the battle is over rather than opened on top of a battle
--- three other people are still fighting.
+-- A free slot is learned this fight (save mon, FIGHT overlay, PROTOCOL 28).
+-- A full set is still a choice only this owner can make -- and opening the
+-- forget menu here would stall the other humans through the hub's choice
+-- timeout -- so it is announced and banked for `offerForgets` after the
+-- screen pops. 1v1 / wild opens the prompt mid-award; see MediatedBattle.
 function M:learnMove(event)
   if event.slot ~= self.mine then return end
   local slot = self.sim:slot(self.mine)
@@ -7968,22 +7972,68 @@ function M:learnMove(event)
 end
 
 function M:teach(mon, name, moveId)
-  local def = (self.game.data.moves or {})[moveId]
-  if not def then return end
-  for _, known in ipairs(mon.moves or {}) do
-    if known.id == moveId then return end
-  end
+  local data = self.game and self.game.data
+  local status = LearnMove.apply(mon, moveId, data)
+  if status == "missing" or status == "known" then return end
+  local def = type(data) == "table" and (data.moves or {})[moveId] or nil
   name = name or "?"
 
-  if #(mon.moves or {}) < 4 then
-    mon.moves[#mon.moves + 1] = { id = moveId, pp = def.pp }
-    self:say(name .. " learned\n" .. (def.name or moveId) .. "!")
+  if status == "learned" then
+    self:say(name .. " learned\n" .. ((def and def.name) or moveId) .. "!")
+    self:syncFightMoves(mon)
     return
   end
 
   self.toLearn = self.toLearn or {}
   self.toLearn[#self.toLearn + 1] = { mon = mon, move = moveId }
-  self:say(name .. " is trying to\nlearn " .. (def.name or moveId) .. "!")
+  self:say(name .. " is trying to\nlearn "
+    .. ((def and def.name) or moveId) .. "!")
+end
+
+-- Which uploaded sheet a save-party mon sits behind. Inverse of
+-- `medPartySlot`: identity on the live party table, then the sheet whose
+-- stamped `slot` names that position.
+function M:sheetIndexFor(mon)
+  if type(mon) ~= "table" then return nil end
+  local slot = self:mySlot()
+  local roster = (slot and slot.party)
+    or (self.game and self.game.save and self.game.save.party)
+  if type(roster) ~= "table" then return nil end
+  local partyIndex
+  for i, entry in ipairs(roster) do
+    if entry == mon then partyIndex = i; break end
+  end
+  if not partyIndex then return nil end
+  local mine = self.medMine
+  if type(mine) ~= "table" or #mine == 0 then return partyIndex end
+  for i = 1, #mine do
+    if self:medPartySlot(i) == partyIndex then return i end
+  end
+  return nil
+end
+
+-- Host-sim: `curMoves` is the same table as `mon.moves`, so the free-slot
+-- write is already live. Mediated: rebuild the overlay the FIGHT menu reads
+-- and publish PROTOCOL 28 so the referee executes the new move.
+function M:syncFightMoves(mon)
+  local slot = self:mySlot()
+  local battler = slot and slot.battler
+  if battler and battler.mon == mon and type(battler.curMoves) == "table"
+     and battler.curMoves ~= mon.moves then
+    battler.curMoves = mon.moves
+  end
+  if self.medMoveList and battler and battler.mon == mon then
+    self.medMoveList = nil
+  end
+  if not (self.mediated and self.transport and self.battleId) then return false end
+  local index = self:sheetIndexFor(mon)
+  if not index then return false end
+  local moves = Mediated.sheetMoves(self.game, mon)
+  if #moves == 0 then return false end
+  if self.medMine and self.medMine[index] then
+    self.medMine[index].moves = moves
+  end
+  return Mediated.sendMoveset(self.transport, self.battleId, index - 1, moves)
 end
 
 -- ------- nobody is saying anything
