@@ -217,19 +217,23 @@ M.MOD_ID = "rby_mmo"
 -- moved off a number rather than share one -- which is the paragraph above
 -- proving itself rather than contradicting itself.  26 means all of it: a
 -- client that says 26 speaks 23's, 24's and 25's vocabularies too.
--- This number lives here and in server/lib/relay.js -- bump them together.
 --
--- 27 is claimed in-flight by 3x3 seating / party-of-three, so this bump
--- does not take it. 28 is `mmo.battle_moveset`: a client telling the
--- referee that one of its own party members learned or replaced a move
--- mid-fight (level-up or the evolution that follows). The hub holds no
--- learnset and never will, so the save-file copy is the only one that can
--- decide the new sheet -- and a protocol-26 intermediator answers the type
--- with silence, which is the bug this names: the save mon learns TACKLE,
--- the FIGHT menu still shows the uploaded four, and the next choice
--- executes the old move at that index. Refusal naming both versions is the
--- only sentence either player can act on.
-M.PROTOCOL = 28
+-- 27 is 3-player parties (`PARTY_MAX` 3) and the 3-wide mediated fields that
+-- follow from it (`COOP_SIDE` / `COOP_FIGHTERS` as products of that cap).  A
+-- party of three, a 3-on-3 open, or a target at field slot 4 or 5 is a closed
+-- seating contract a protocol-26 hub still treats as a pair of humans, a
+-- `coop_wild` of exactly two, and a `FIELD_MAX` of 0‥3 -- so the third
+-- member, the third seat, or the wider target is dropped or answered with
+-- silence rather than a sentence.  Refusal naming both versions is the only
+-- line either player can act on.
+--
+-- **A parallel unmerged branch also asked for 27** (`mmo.battle_moveset` /
+-- learn-move on the fix-learning tip).  If that lands first, this number
+-- moves rather than sharing -- the same rule the two 5s, the two 6s, and the
+-- 23s already proved.  27 on this line means the party/field widen; a later
+-- tip that needs another bump takes the next free integer.
+-- This number lives here and in server/lib/relay.js -- bump them together.
+M.PROTOCOL = 29
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
@@ -360,24 +364,25 @@ M.RUN_DIVISOR = 2
 -- cyclists did for as long as the wire had no way to say they were fast.
 M.FAST_STEP_FRAMES = math.max(1, math.floor(16 / M.RUN_DIVISOR))
 
--- Parties: you and one friend, travelling together.
+-- Parties: up to three players travelling together.
 --
--- Two is the whole design, not a first step towards six.  A party here is a
--- standing pair -- one marker over one head, one extra chat scope, one
--- members list that fits in a command box -- and every rule that makes it
--- feel solid follows from the pair: an invite is only offered when *both*
--- sides are unattached, and either member leaving ends it for both, because
--- with two people "the party continues without you" is not a thing that
--- exists.  Raising this number would not widen the feature, it would make
--- all three of those rules wrong at once.
-M.PARTY_MAX = 2
+-- Three is the cap, not a first step towards six.  A party here is a standing
+-- group -- one marker over each head, one extra chat scope, one members list
+-- that fits in a command box -- and the rules that make it feel solid follow
+-- from that size: a pair may invite a third when the target is unattached and
+-- the asker's party still has room; one of three leaving leaves a remainder
+-- party of two; the group dissolves only when fewer than two remain, because
+-- a remainder of one is not a party.  Raising this number further would not
+-- widen the same feature, it would make the invite-with-room and remainder-
+-- leave rules a different design.
+M.PARTY_MAX = 3
 
 -- ------- co-op battles
 --
--- Two players from one party fighting one battle together, and then four
--- players fighting each other.  Three files: src/Coop.lua is the agreement
--- (who is waiting, who may join, what a no costs), src/CoopSim.lua is the
--- four-slot field, and src/CoopBattle.lua is the screen it is drawn on.
+-- Players from one party fighting one battle together, and then two parties
+-- fighting each other.  Three files: src/Coop.lua is the agreement (who is
+-- waiting, who may join, what a no costs), src/CoopSim.lua is the field, and
+-- src/CoopBattle.lua is the screen it is drawn on.
 --
 -- The field is the mod's own, because the engine has none: BattleState carries
 -- exactly one active battler per side and TurnOrder compares a pair.  What sits
@@ -385,10 +390,11 @@ M.PARTY_MAX = 2
 -- badge boosts, the status records -- so a mon hits for the same number here as
 -- it does in a wild battle.
 --
--- Cap on fighters: two parties of PARTY_MAX. Written as a product rather than
--- the literal 4 so that the day PARTY_MAX moves, the side that has to move
--- with it is not a number somebody has to remember. NPC co-op may use fewer
--- (a one-monster trainer fills only one foe seat).
+-- Cap on fighters: two parties of PARTY_MAX (six at the current cap). Written
+-- as a product rather than the literal so that the day PARTY_MAX moves, the
+-- side that has to move with it is not a number somebody has to remember.
+-- NPC and wild fights may use fewer foe seats (human count on one side, or a
+-- single wild opposite the party).
 M.COOP_SIDE = M.PARTY_MAX
 M.COOP_FIGHTERS = M.PARTY_MAX * 2
 
@@ -434,10 +440,10 @@ M.COOP_LABEL_MAX = 16
 -- partner's client forever -- not to hurry anybody.
 M.COOP_OFFER_TIMEOUT = 300
 
--- How long the four-way PARTY BATTLE ask waits for its three answers.  Shorter
--- than an offer because every one of the four is looking at a box right now,
--- and an ask that outlives the moment it was made is an ask somebody answers
--- yes to long after they stopped meaning it.
+-- How long a PARTY BATTLE ask waits for everyone except the asker.  Shorter
+-- than an offer because every one of them is looking at a box right now, and
+-- an ask that outlives the moment it was made is an ask somebody answers yes
+-- to long after they stopped meaning it.
 M.COOP_ASK_TIMEOUT = 60
 
 -- How much longer a *client* waits before giving up on an ask than the hub

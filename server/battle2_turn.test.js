@@ -144,8 +144,8 @@ scenario('exp_coop', (events) => {
   drainInto(battle, events);
   for (let i = 0; i < 8; i += 1) {
     if (battle.outcome()) break;
-    battle.submitChoice('a1', { action: 'fight', move: 0, target: 2 });
-    battle.submitChoice('a2', { action: 'fight', move: 0, target: 2 });
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
     battle.autoPick('wild');
     drainInto(battle, events);
   }
@@ -176,8 +176,8 @@ scenario('replace', (events) => {
   drainInto(battle, events);
   for (let i = 0; i < 4; i += 1) {
     if (battle.outcome()) break;
-    battle.submitChoice('a1', { action: 'fight', move: 0, target: 2 });
-    battle.submitChoice('a2', { action: 'fight', move: 0, target: 2 });
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
     // Called twice on purpose: the first files the ordinary turn's answer, the
     // second the replacement the KO opened. A loop that stopped after one would
     // leave the phase open, which is what `fillNpcChoices` does not.
@@ -211,8 +211,8 @@ scenario('retarget', (events) => {
     },
   });
   drainInto(battle, events);
-  battle.submitChoice('fast', { action: 'fight', move: 0, target: 2 });
-  battle.submitChoice('slow', { action: 'fight', move: 0, target: 2 });
+  battle.submitChoice('fast', { action: 'fight', move: 0, target: 3 });
+  battle.submitChoice('slow', { action: 'fight', move: 0, target: 3 });
   battle.submitChoice('foeA', { action: 'fight', move: 0, target: 0 });
   battle.submitChoice('foeB', { action: 'fight', move: 0, target: 0 });
   drainInto(battle, events);
@@ -488,7 +488,7 @@ test('a KO with a bench opens the replace phase before the next turn', () => {
   const run = byName(jsRuns).get('replace');
   const solicit = run.events.find((e) => e.t === 'turn' && e.slot !== undefined);
   assert.ok(solicit, 'a replacement solicitation was raised');
-  assert.strictEqual(solicit.slot, 2, 'naming the seat that owes');
+  assert.strictEqual(solicit.slot, 3, 'naming the seat that owes');
 
   const firstTurn = run.events.find((e) => e.t === 'turn' && e.slot === undefined);
   assert.strictEqual(solicit.amount, firstTurn.amount,
@@ -513,7 +513,7 @@ test('every send and switch names the party index it fielded', () => {
         + 'two of a species would re-field the fallen copy');
     }
   }
-  const replacement = run.events.find((e) => e.t === 'switch' && e.slot === 2);
+  const replacement = run.events.find((e) => e.t === 'switch' && e.slot === 3);
   assert.strictEqual(replacement.mon, 1, 'the post-faint replacement is party index 1');
 });
 
@@ -540,8 +540,8 @@ test('during the replace phase only the seat that owes may answer', () => {
     },
   });
   battle.drainEvents();
-  battle.submitChoice('a1', { action: 'fight', move: 0, target: 2 });
-  battle.submitChoice('a2', { action: 'fight', move: 0, target: 2 });
+  battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+  battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
   battle.autoPick('npc');
   battle.drainEvents();
 
@@ -689,8 +689,8 @@ test('an unanswered replacement times out instead of wedging the fight', () => {
     },
   });
   battle.drainEvents();
-  battle.submitChoice('a1', { action: 'fight', move: 0, target: 2 });
-  battle.submitChoice('a2', { action: 'fight', move: 0, target: 2 });
+  battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+  battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
   battle.autoPick('npc');
   battle.drainEvents();
   assert.strictEqual(battle.snapshot().phase, 'replace');
@@ -700,7 +700,7 @@ test('an unanswered replacement times out instead of wedging the fight', () => {
     'the deadline passing is a tick that did something');
   assert.strictEqual(battle.snapshot().phase, 'choice',
     'the sweep filled the owed replacement and closed the phase');
-  const sent = battle.drainEvents().filter((e) => e.t === 'send' && e.slot === 2);
+  const sent = battle.drainEvents().filter((e) => e.t === 'send' && e.slot === 3);
   assert.ok(sent.length > 0, 'and the successor really was fielded');
 });
 
@@ -748,23 +748,31 @@ test('the Gen2 event vocabulary knows exp, the party index and the ask slot', ()
 // seat that HAS one must never spend it, so a hub seeding the wrong kit cannot
 // put a Potion in a wild monster's mouth.
 
-const wildBattle2 = (mode, id, bBag) => build({
-  id, mode, seed: 88010, choiceTimeout: 10, reconnectGrace: 60,
-  sides: {
-    a: [{
-      playerId: 'p1', name: 'Ann', bag: { POTION: 1 },
-      mons: [mn({ species: 'Alpha', maxHp: 200, spe: 90, moves: [mv('thump', 40, 255, 0)] })],
-    }],
-    b: [{
-      playerId: 'wild', name: 'Wild', bag: bBag,
-      // Hurt below half and poisoned: a trainer seat heals or cures here.
-      mons: [mn({
-        species: 'Beta', maxHp: 200, hp: 40, spe: 10, status: 'PSN',
-        moves: [mv('thump', 40, 255, 0)],
-      })],
-    }],
-  },
-});
+const wildBattle2 = (mode, id, bBag) => {
+  const sideA = [{
+    playerId: 'p1', name: 'Ann', bag: { POTION: 1 },
+    mons: [mn({ species: 'Alpha', maxHp: 200, spe: 90, moves: [mv('thump', 40, 255, 0)] })],
+  }];
+  if (mode === 'coop_wild') {
+    sideA.push({
+      playerId: 'p2', name: 'Pat',
+      mons: [mn({ species: 'Gamma', maxHp: 200, spe: 1, moves: [mv('thump', 1, 255, 0)] })],
+    });
+  }
+  return build({
+    id, mode, seed: 88010, choiceTimeout: 10, reconnectGrace: 60,
+    sides: {
+      a: sideA,
+      b: [{
+        playerId: 'wild', name: 'Wild', bag: bBag,
+        mons: [mn({
+          species: 'Beta', maxHp: 200, hp: 40, spe: 10, status: 'PSN',
+          moves: [mv('thump', 40, 255, 0)],
+        })],
+      }],
+    },
+  });
+};
 
 for (const mode of ['wild', 'coop_wild']) {
   test(`${mode}: auto-pick never reaches the wild seat's bag`, () => {

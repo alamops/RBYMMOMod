@@ -129,6 +129,17 @@ local function join(hub, name)
   return client, peer
 end
 
+local function partyForm(hub, asker, invitee)
+  hub:receive(asker, { type = Wire.PARTY_INVITE, to = invitee.id })
+  hub:receive(invitee, { type = Wire.PARTY_RESPOND, to = asker.id, accept = true })
+end
+
+local function coopAskCount(hub)
+  local n = 0
+  for _ in pairs(hub.coopAsks or {}) do n = n + 1 end
+  return n
+end
+
 -- ------------------------------------------------------------------
 -- the fixtures
 -- ------------------------------------------------------------------
@@ -496,7 +507,7 @@ do
   -- An inferred plan still has to produce a field somebody can fight on.
   local pvp = hub:openMediatedBattle("pvp-1",
     { memberIds = { ann.id, bob.id, stranger.id } })
-  eq(pvp.mode, "coop_pvp", "three or more is inferred as a four-way")
+  eq(pvp.mode, "coop_pvp", "three humans infer coop_pvp without synthetic seats")
   eq(#pvp.sides.a + #pvp.sides.b, 3, "with everybody placed on one side or other")
   eq(pvp.npcIds, nil, "and no synthetic seats, because both sides are players")
 end
@@ -845,7 +856,7 @@ do
   local record = hub:openMediatedBattle("cw-2", {
     mode = "coop_wild", hostId = ann.id, memberIds = { ann.id },
   })
-  eq(record, nil, "coop_wild refuses without exactly two humans")
+  eq(record, nil, "coop_wild refuses with one human")
 end
 
 do
@@ -858,7 +869,151 @@ do
     mode = "coop_wild", hostId = ann.id,
     memberIds = { ann.id, bob.id, cal.id },
   })
-  eq(record, nil, "coop_wild refuses with three humans")
+  ok(record ~= nil, "coop_wild opens with three humans")
+  eq(#(record.npcIds or {}), 1, "still one synthetic wild seat")
+  eq(#record.sides.a, 3, "side a is three humans")
+  eq(#record.sides.b, 1, "side b is the wild seat")
+  eq(#hub:seatsNeeded(record), 4, "four seats owe a party")
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 8 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  local cal = join(hub, "CAL")
+
+  local record = hub:openMediatedBattle("npc-3h", {
+    mode = "coop_npc", hostId = ann.id,
+    memberIds = { ann.id, bob.id, cal.id },
+  })
+  ok(record ~= nil, "coop_npc opens with three humans")
+  eq(#(record.npcIds or {}), 3, "foe seats match the human count")
+  eq(#record.sides.a, 3, "side a is three humans")
+  eq(#record.sides.b, 3, "side b is three trainer seats")
+  eq(#hub:seatsNeeded(record), 6, "six seats owe a party")
+end
+
+-- ------- parties: grow to three, refuse a fourth, leave-one-of-three
+
+do
+  local hub = Hub.new({ maxPlayers = 8 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  local cal, calPeer = join(hub, "CAL")
+  local dee, deePeer = join(hub, "DEE")
+
+  partyForm(hub, ann, bob)
+  local pair = take(annPeer, Wire.PARTY)
+  take(bobPeer, Wire.PARTY)
+  eq(#pair.members, 2, "a new party starts with two members")
+
+  partyForm(hub, ann, cal)
+  local trioAnn = take(annPeer, Wire.PARTY)
+  local trioBob = take(bobPeer, Wire.PARTY)
+  local trioCal = take(calPeer, Wire.PARTY)
+  eq(#trioAnn.members, 3, "inviting a third carries the full roster")
+  eq(trioBob.id, trioAnn.id, "every member shares one party id")
+  eq(trioCal.id, trioAnn.id, "including the newcomer")
+
+  hub:receive(ann, { type = Wire.PARTY_INVITE, to = dee.id })
+  eq(take(deePeer, Wire.PARTY_INVITE), nil,
+     "a full party never forwards a fourth invite")
+
+  hub:receive(cal, { type = Wire.PARTY_LEAVE })
+  local duoAnn = take(annPeer, Wire.PARTY)
+  local duoBob = take(bobPeer, Wire.PARTY)
+  eq(#duoAnn.members, 2, "two remain after one of three leaves")
+  eq(take(annPeer, Wire.PARTY_END), nil,
+     "survivors are not told the party ended")
+  eq(take(bobPeer, Wire.PARTY_END), nil,
+     "survivors are not told the party ended")
+  local calEnd = take(calPeer, Wire.PARTY_END)
+  ok(calEnd ~= nil, "the leaver hears party_end")
+  eq(calEnd.reason, "left", "with reason left")
+end
+
+-- ------- square party PvP: mismatch decline, 2v2 and 3v3 ask
+
+do
+  local hub = Hub.new({ maxPlayers = 8 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  local cal, calPeer = join(hub, "CAL")
+  local dee, deePeer = join(hub, "DEE")
+  local eve, evePeer = join(hub, "EVE")
+
+  partyForm(hub, ann, bob)
+  take(annPeer, Wire.PARTY)
+  take(bobPeer, Wire.PARTY)
+  partyForm(hub, ann, cal)
+  take(annPeer, Wire.PARTY)
+  take(bobPeer, Wire.PARTY)
+  take(calPeer, Wire.PARTY)
+
+  partyForm(hub, dee, eve)
+  take(deePeer, Wire.PARTY)
+  take(evePeer, Wire.PARTY)
+
+  hub:receive(ann, { type = Wire.COOP_CHALLENGE, to = dee.id })
+  local mismatch = take(annPeer, Wire.COOP_DECLINE)
+  ok(mismatch ~= nil, "3v2 challenge declines on the asker")
+  eq(mismatch.reason, "mismatch", "with reason mismatch")
+  eq(coopAskCount(hub), 0, "and no ask is created")
+  eq(take(bobPeer, Wire.COOP_ASK), nil, "no partner is asked on mismatch")
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 8 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  local eve, evePeer = join(hub, "EVE")
+  local fay, fayPeer = join(hub, "FAY")
+
+  partyForm(hub, ann, bob)
+  take(annPeer, Wire.PARTY)
+  take(bobPeer, Wire.PARTY)
+  partyForm(hub, eve, fay)
+  take(evePeer, Wire.PARTY)
+  take(fayPeer, Wire.PARTY)
+
+  hub:receive(ann, { type = Wire.COOP_CHALLENGE, to = eve.id })
+  eq(take(annPeer, Wire.COOP_DECLINE), nil, "2v2 challenge is not declined")
+  ok(coopAskCount(hub) == 1, "2v2 opens one ask")
+  ok(take(bobPeer, Wire.COOP_ASK) ~= nil, "the asker's partner is asked")
+  ok(take(evePeer, Wire.COOP_ASK) ~= nil, "the challenged party is asked")
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 8 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  local cal, calPeer = join(hub, "CAL")
+  local dee, deePeer = join(hub, "DEE")
+  local eve, evePeer = join(hub, "EVE")
+  local fay, fayPeer = join(hub, "FAY")
+
+  partyForm(hub, ann, bob)
+  take(annPeer, Wire.PARTY)
+  take(bobPeer, Wire.PARTY)
+  partyForm(hub, ann, cal)
+  take(annPeer, Wire.PARTY)
+  take(bobPeer, Wire.PARTY)
+  take(calPeer, Wire.PARTY)
+
+  partyForm(hub, dee, eve)
+  take(deePeer, Wire.PARTY)
+  take(evePeer, Wire.PARTY)
+  partyForm(hub, dee, fay)
+  take(deePeer, Wire.PARTY)
+  take(evePeer, Wire.PARTY)
+  take(fayPeer, Wire.PARTY)
+
+  hub:receive(ann, { type = Wire.COOP_CHALLENGE, to = dee.id })
+  eq(take(annPeer, Wire.COOP_DECLINE), nil, "3v3 challenge is not declined")
+  ok(coopAskCount(hub) == 1, "3v3 opens one ask")
+  ok(take(bobPeer, Wire.COOP_ASK) ~= nil, "every asker-side member is asked")
+  ok(take(calPeer, Wire.COOP_ASK) ~= nil, "including the third traveller")
+  ok(take(deePeer, Wire.COOP_ASK) ~= nil, "the challenged side is asked too")
 end
 
 do

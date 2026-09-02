@@ -121,8 +121,8 @@ const FIELDS = {
 // The whitelist says what *may* be present; this table says what the turn
 // machine promises to send. The two readings that are easy to get backwards:
 //
-//   * `slot` on an event is a **field slot** (0..3: side a takes 0 and 1, side
-//     b takes 2 and 3) -- it is *not* the party index a `switch` choice names.
+//   * `slot` on an event is a **field slot** (0..5: side a takes 0..2, side
+//     b takes 3..5) -- it is *not* the party index a `switch` choice names.
 //   * a `status` event with a `status` field means the condition was
 //     *inflicted*; the same event with no `status` field means it **cleared**.
 //     `text` carries the sentence either way.
@@ -176,10 +176,11 @@ const SHAPES = {
 // field slots
 // ------------------------------------------------------------------
 //
-// A 1v1 uses slots 0 and 2 and leaves the odd ones empty, which keeps one
-// numbering across all three modes -- packing a 1v1 into 0 and 1 would make a
-// client's "which box is this" change meaning with the mode.
-const SIDE_SLOTS = 2;
+// A 1v1 uses slots 0 and 3 and leaves the middle ones empty, which keeps one
+// numbering across all modes -- packing a 1v1 into 0 and 1 would make a
+// client's "which box is this" change meaning with the mode. Side a is 0..2,
+// side b is 3..5 (SIDE_SLOTS = Config.COOP_SIDE).
+const SIDE_SLOTS = 3;
 
 function fieldSlot(side, index) {
   const base = side === 'b' ? SIDE_SLOTS : 0;

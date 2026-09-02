@@ -109,7 +109,7 @@ M.VERSION = 1
 -- Mirrored from Config rather than required, for the reason in events.lua:
 -- this directory runs where Config does not.
 M.MONS_PER_PARTY      = 6     -- Config.BATTLE_MON_MAX
-M.FIGHTERS_PER_SIDE   = 2     -- Config.COOP_SIDE
+M.FIGHTERS_PER_SIDE   = 3     -- Config.COOP_SIDE
 M.CHOICE_TIMEOUT      = 60    -- Config.BATTLE_CHOICE_TIMEOUT
 M.RECONNECT_GRACE     = 60    -- Config.BATTLE_RECONNECT_GRACE
 M.RESOLVE_TIMEOUT     = 30    -- Config.BATTLE_RESOLVE_TIMEOUT
@@ -130,8 +130,9 @@ M.MODES = {
 }
 M.SIDES = { "a", "b" }
 
--- Roster cap per side. coop_wild is 2v1 (humans on a, wild on b); other modes
--- keep a single per-side ceiling (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
+-- Roster cap per side. coop_wild is humans vs one wild (up to FIGHTERS_PER_SIDE
+-- humans on a, wild on b); other modes keep a single per-side ceiling
+-- (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
 local function maxFighters(mode, side)
   if mode == "coop_wild" then
     return (side == "a") and M.FIGHTERS_PER_SIDE or 1
@@ -580,6 +581,10 @@ function M.create(opts)
     local sideMax = maxFighters(mode, side)
     if #roster > sideMax then
       return nil, "side " .. side .. " has more fighters than " .. mode .. " allows"
+    end
+    -- Hub opens coop_wild for 2 or 3 humans; a lone human is a solo wild.
+    if mode == "coop_wild" and side == "a" and #roster < 2 then
+      return nil, "side a has fewer fighters than coop_wild allows"
     end
     for index = 1, #roster do
       local entry = roster[index]

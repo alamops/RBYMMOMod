@@ -487,14 +487,14 @@ do
   eq(hostScreen.mediated, true, "and the fight is refereed from here")
   eq(hostScreen.medSlots[0], 1, "field slot 0 is the host's own box")
   eq(hostScreen.medSlots[1], 2, "field slot 1 is its partner's")
-  eq(hostScreen.medSlots[2], 3,
-     "and field slot 2 is the trainer's, not the host's -- the advertised id "
+  eq(hostScreen.medSlots[3], 3,
+     "and field slot 3 is the trainer's first, not the host's -- the advertised id "
      .. "is where a choice for it arrives from, not who stands in it")
-  eq(hostScreen.medSlots[3], 4, "field slot 3 is the trainer's second")
-  eq(hostScreen.medFields[3], 2, "and back the other way")
-  eq(hostScreen.medFields[4], 3,
+  eq(hostScreen.medSlots[4], 4, "field slot 4 is the trainer's second")
+  eq(hostScreen.medFields[3], 3, "and back the other way")
+  eq(hostScreen.medFields[4], 4,
      "with the fourth box on a field slot of its own now: the intermediator "
-     .. "seats two npcs where this screen draws two")
+     .. "seats two npcs at field slots 3 and 4 where this screen draws two")
 
   -- And the trainer answers. Nothing below advances the hub's clock, so a turn
   -- that needed BATTLE_CHOICE_TIMEOUT to close would not close at all -- which
@@ -592,8 +592,8 @@ do
   eq(fight.battle, "cb1", "against this battle")
   eq(fight.action, "fight", "as a fight")
   eq(fight.move, 0, "with the move index zero-based, as the wire counts")
-  eq(fight.target, 2,
-     "and the target as a *field* slot -- box 3 on this screen is field slot 2")
+  eq(fight.target, 3,
+     "and the target as a *field* slot -- box 3 on this screen is field slot 3")
   check(Wire.battleChoice(fight) ~= nil, "and it survives Wire.battleChoice")
 
   -- A target the roster never described is sent as no target rather than as a
@@ -718,10 +718,10 @@ do
   eq(#host.messages, 0, "but nothing is queued yet")
   eq(host.phase, "choose", "and the menu is still open")
 
-  -- Field slot 2 is the trainer's box, which on this screen is box 3. Getting
+  -- Field slot 3 is the trainer's first box, which on this screen is box 3. Getting
   -- that translation backwards would put every one of the referee's numbers on
   -- the wrong monster, and it is the one mistake the screen could not survive.
-  host:onBattleEvent({ battle = "cb1", seq = 2, t = "damage", slot = 2, hp = 21 })
+  host:onBattleEvent({ battle = "cb1", seq = 2, t = "damage", slot = 3, hp = 21 })
   host:onBattleEvent({ battle = "cb1", seq = 3, t = "turn" })
   eq(host.phase, "messages", "the turn closes the batch and it plays")
   check(said(host, "FIX TACKLE"), "the referee's own sentence is what is read")
@@ -733,7 +733,7 @@ do
 
   -- A faint is a slide plus a sentence, and the sentence is made here: the
   -- referee's faint carries a species and no words of its own.
-  host:onBattleEvent({ battle = "cb1", seq = 4, t = "faint", slot = 2,
+  host:onBattleEvent({ battle = "cb1", seq = 4, t = "faint", slot = 3,
                        text = SPECIES_NAME })
   host:onBattleEvent({ battle = "cb1", seq = 5, t = "turn" })
   check(said(host, "fainted"), "a faint is narrated")
@@ -783,7 +783,7 @@ do
   sendScreen:onBattleReady({ battle = "cb1", mode = "coop_npc",
     sides = { a = { "ann", "bob" }, b = { "ann" } } })
   eq(sendScreen.sim:slot(3).active, 1, "the trainer leads with its first")
-  sendScreen:onBattleEvent({ battle = "cb1", seq = 1, t = "send", slot = 2,
+  sendScreen:onBattleEvent({ battle = "cb1", seq = 1, t = "send", slot = 3,
                              text = otherName, hp = 50 })
   sendScreen:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
   check(said(sendScreen, "sent out"), "a send-out is narrated")
@@ -798,7 +798,7 @@ do
   unknown:uploadMediated()
   unknown:onBattleReady({ battle = "cb1", mode = "coop_npc",
     sides = { a = { "ann", "bob" }, b = { "ann" } } })
-  unknown:onBattleEvent({ battle = "cb1", seq = 1, t = "send", slot = 2,
+  unknown:onBattleEvent({ battle = "cb1", seq = 1, t = "send", slot = 3,
                           text = "NOBODY", hp = 50 })
   unknown:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
   check(said(unknown, "sent out"), "an unmatched send-out is still narrated")
@@ -1569,7 +1569,16 @@ do
     local FOE = "FIXMON_B"
     local FOE_NAME = Wire.name(data.pokemon[FOE].name)
 
-    local function partyMon()
+    local function partyMon(opts)
+      opts = opts or {}
+      if opts.nearLevel then
+        return { species = SPECIES, level = 5, hp = 20, exp = 179,
+          stats = { hp = 20, attack = 30, defense = 30, special = 30, speed = 40 },
+          dvs = { hp = 8, attack = 8, defense = 8, speed = 8, special = 8 },
+          statExp = { hp = 0, attack = 0, defense = 0, speed = 0, special = 0 },
+          moves = { { id = "FIX_TACKLE", pp = 20 } },
+        }
+      end
       return { species = SPECIES, level = 10, hp = 20, exp = 0,
         stats = { hp = 20, attack = 30, defense = 30, special = 30, speed = 40 },
         dvs = { hp = 8, attack = 8, defense = 8, speed = 8, special = 8 },
@@ -1577,10 +1586,10 @@ do
         moves = { { id = "FIX_TACKLE", pp = 20 } },
       }
     end
-    local function benchGame(n)
+    local function benchGame(n, opts)
       local g = newGame()
       g.save.party = {}
-      for i = 1, (n or 3) do g.save.party[i] = partyMon() end
+      for i = 1, (n or 3) do g.save.party[i] = partyMon(opts) end
       return g
     end
     local function countKind(self, kind)
@@ -1594,7 +1603,7 @@ do
     -- ------- (a) host-sim path: the active AND the bench are paid, each on
     -- its own party index, and only the active's strip fills.
     do
-      local game = benchGame(3)
+      local game = benchGame(3, { nearLevel = true })
       local active, bench, bystander =
         game.save.party[1], game.save.party[2], game.save.party[3]
       local host = wildScreen({ game = game, mode = "coop_npc" })
@@ -1659,7 +1668,7 @@ do
     -- and onBattleEvent -> medFlush pays the bench the same way the host-sim
     -- path does.
     do
-      local game = benchGame(3)
+      local game = benchGame(3, { nearLevel = true })
       local active, bench, bystander =
         game.save.party[1], game.save.party[2], game.save.party[3]
       local fight = wildScreen({ game = game, mode = "coop_npc" })
@@ -2000,11 +2009,11 @@ do
     s:uploadMediated()
     s:onBattleReady(READY)
     s.phase = "choose"
-    s:onBattleEvent({ battle = "cb1", seq = 1, t = "faint", slot = 2,
+    s:onBattleEvent({ battle = "cb1", seq = 1, t = "faint", slot = 3,
                       text = SPECIES_NAME })
-    s:onBattleEvent({ battle = "cb1", seq = 2, t = "switch", slot = 2,
+    s:onBattleEvent({ battle = "cb1", seq = 2, t = "switch", slot = 3,
                       text = other })
-    s:onBattleEvent({ battle = "cb1", seq = 3, t = "send", slot = 2,
+    s:onBattleEvent({ battle = "cb1", seq = 3, t = "send", slot = 3,
                       text = other, hp = 50 })
     s:onBattleEvent({ battle = "cb1", seq = 4, t = "turn", amount = 2 })
     eq(s.medReplaceWait, nil,
@@ -2153,7 +2162,7 @@ do
     t:onBattleReady({ battle = "cb1", mode = "coop_pvp",
                       sides = { a = { "ann", "bob" }, b = { "cal", "dee" } } })
     t.phase = "choose"
-    t:onBattleEvent({ battle = "cb1", seq = 1, t = "damage", slot = 2, hp = 10 })
+    t:onBattleEvent({ battle = "cb1", seq = 1, t = "damage", slot = 3, hp = 10 })
     t:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
     drain(t)
     eq(t.phase, "choose", "and an ordinary slot-less turn still opens the grid")
@@ -2337,7 +2346,7 @@ do
                        side = "a", text = "FIX_TACKLE" })
   host:onBattleEvent({ battle = "cb1", seq = 2, t = "msg",
                        text = "FIXMON A used FIX_TACKLE" })
-  host:onBattleEvent({ battle = "cb1", seq = 3, t = "damage", slot = 2, hp = 21 })
+  host:onBattleEvent({ battle = "cb1", seq = 3, t = "damage", slot = 3, hp = 21 })
   host:onBattleEvent({ battle = "cb1", seq = 4, t = "turn" })
 
   local appearances, maxCount, wasUp = 0, 0, false
@@ -2417,7 +2426,7 @@ do
   }
   local game = { save = { money = 100, party = { mon(30, 10) } },
                  data = { constants = {} } }
-  local coop = setmetatable({ engineBattle = engine }, { __index = Coop })
+  local coop = setmetatable({ engineBattle = engine, party = { count = function() return 2 end } }, { __index = Coop })
   coop:onBattleOver("win", game, nil, nil)
   eq(finishArg, "win", "a plain win hands the engine a plain win")
   eq(game.save.money, 300,
@@ -2436,7 +2445,7 @@ do
   }
   local game2 = { save = { money = 100, party = { mon(0, 10) } },
                   data = { constants = {} } }
-  local coop2 = setmetatable({ engineBattle = engine2 }, { __index = Coop })
+  local coop2 = setmetatable({ engineBattle = engine2, party = { count = function() return 2 end } }, { __index = Coop })
   coop2:onBattleOver("win", game2, nil, nil)
   eq(finishArg2, "win",
      "a win stays a win for the engine even when the winner blacks out -- "
@@ -2458,7 +2467,7 @@ do
   }
   local game3 = { save = { money = 100, party = { mon(0, 10) } },
                   data = { constants = {} } }
-  local coop3 = setmetatable({ engineBattle = engine3 }, { __index = Coop })
+  local coop3 = setmetatable({ engineBattle = engine3, party = { count = function() return 2 end } }, { __index = Coop })
   coop3:onBattleOver("loss", game3, nil, nil)
   eq(finishArg3, "lose",
      "a co-op 'loss' is spelled 'lose' for the engine's own afterBattle, "

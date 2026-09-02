@@ -84,10 +84,11 @@ M.CENTER_CIRCLE_R = 46
 -- where the joint band holds the full pitch the trainers still ride the mon
 -- rows exactly, and where it does not the pairing is by INDEX only -- trainer
 -- i beside mon i, with vertical drift -- rather than the mons compressing back
--- onto each other. Three or more rows a side still exceed the field band at
--- this pitch (two gaps of 84 is 168 over a 154px band); rowStack tightens the
--- gap for those, with MON_DRAW as the floor nothing may cross. No shipped mode
--- fields more than two a side.
+-- onto each other. Three rows a side exceed the field band at this pitch
+-- (two gaps of 84 is 168 over a 154px band); rowStack tightens the gap for
+-- those, with MON_DRAW as the floor nothing may cross. 3-wide is a shipped
+-- mode (3×3 / 3×NPC); the plate stack switches to PLATE_H_3 / PLATE_GAP_3
+-- so the HUD still leaves a trainer dodge band rather than dropping it.
 M.MON_ROW_GAP = 84
 -- Extra px a mon keeps between its drawn extent and its own side's plate
 -- stack. The stack is nudged off the field's centre line by exactly as much as
@@ -131,24 +132,32 @@ M.CARD_SPRITE = 48
 
 -- Persistent seat plates (the arena HUD): one per placed seat, always up.
 -- Ally plates stack upward from the field floor so they clear MENU_BAND; foe
--- plates stack downward from the top edge. A 2v2 shows four.
+-- plates stack downward from the top edge. A 2v2 shows four; a 3v3 shows six.
 M.PLATE_W = 176
 M.PLATE_H = 48
 M.PLATE_PAD = 12
--- Gap between two stacked plates on the same side.
+-- Gap between two stacked plates on the same side (1- and 2-wide).
 M.PLATE_GAP = 6
+-- 3-wide stack metrics. Three full-height plates (3×48 + 2×6 = 156) push
+-- allyPlateTop to 112 and foePlateBottom to 168 -- deep into the mon band --
+-- and the bandHolds floor used to drop the trainer dodge as the only way out.
+-- Prefer a slightly shorter plate (still fits name + Lv + status + HP + EXP
+-- inset) and a tighter gap so the 3-stack stays at 140px (allyTop = foeBot =
+-- 140) and dodge still runs. 1-/2-wide keep PLATE_H / PLATE_GAP untouched.
+M.PLATE_H_3 = 44
+M.PLATE_GAP_3 = 4
 -- Inner plate metrics. The EXP strip lives INSIDE the bottom inset rather
--- than on 6px of new plate: PLATE_H is what every placement reads
--- (allyPlateTop / foePlateBottom, the stack step in M.layout, dodgePlates),
--- and every pixel it grows is a pixel off the band a TRAINER may stand in --
--- which is what decides whether a side's trainers ride their mons' rows
--- exactly or only pair by index (sideRows). The mon rows themselves no longer
--- depend on it (they are dodged per column, and the mon column clears the HUD
--- in x), but a taller plate would push the ally trainers further off their
--- mons and eventually cost the foe side its exact pairing too, so the plate
--- does not grow. The inset absorbs the strip instead:
--- HP bar at INSET+HP_H off the floor, then EXP_GAP, the strip, and the 2px
--- that remain to the plate edge.
+-- than on 6px of new plate: plateStackMetrics(n) is what every placement
+-- reads (allyPlateTop / foePlateBottom, the stack step in M.layout,
+-- dodgePlates), and every pixel a plate grows is a pixel off the band a
+-- TRAINER may stand in -- which is what decides whether a side's trainers
+-- ride their mons' rows exactly or only pair by index (sideRows). The mon
+-- rows themselves no longer depend on it (they are dodged per column, and
+-- the mon column clears the HUD in x), but a taller plate would push the
+-- ally trainers further off their mons and eventually cost the foe side its
+-- exact pairing too, so the 2-wide plate does not grow. The inset absorbs
+-- the strip instead: HP bar at INSET+HP_H off the floor, then EXP_GAP, the
+-- strip, and the 2px that remain to the plate edge.
 M.PLATE_INSET = 7 -- panel edge to the HP bar, left / right / bottom
 M.PLATE_HP_H = 7
 M.PLATE_EXP_H = 3
@@ -956,17 +965,19 @@ end
 -- comes out of this. Count evenly spaced rows, centred on `centerY`, kept
 -- inside minY..maxY: the whole stack slides to fit before any single row is
 -- clamped, so the spacing stays even and the order never collapses. If even
--- the tightest slide will not fit, the gap tightens instead (a floor of 1 keeps
--- the order stable). Two calls with the same count / gap / centre / bounds
--- return the same ys, which is what makes a trainer and the mon it sent out
--- share a row.
-local function rowStack(count, gap, centerY, minY, maxY)
+-- the tightest slide will not fit, the gap tightens instead. `minGap` (default
+-- 1) is the floor nothing may cross -- mons pass MON_DRAW so two boxes in one
+-- column never interpenetrate; trainers leave the default. Two calls with the
+-- same count / gap / centre / bounds / floor return the same ys, which is what
+-- makes a trainer and the mon it sent out share a row.
+local function rowStack(count, gap, centerY, minY, maxY, minGap)
   local ys = {}
   count = math.floor(num(count, 0))
   if count < 1 then return ys end
   if maxY < minY then maxY = minY end
+  local floor = math.max(1, math.floor(num(minGap, 1)))
   if count > 1 then
-    gap = math.max(1, math.min(gap, math.floor((maxY - minY) / (count - 1))))
+    gap = math.max(floor, math.min(gap, math.floor((maxY - minY) / (count - 1))))
   end
   local span = (count - 1) * gap
   local top = centerY - span / 2
@@ -978,18 +989,36 @@ local function rowStack(count, gap, centerY, minY, maxY)
   return ys
 end
 
+-- Plate height + inter-plate gap for a side showing `n` plates. 1- and 2-wide
+-- keep the full PLATE_H / PLATE_GAP; 3-wide switches to the compact pair so the
+-- stack still clears the mon columns and leaves a trainer dodge band.
+local function plateStackMetrics(n)
+  n = math.floor(num(n, 0))
+  if n >= 3 then return M.PLATE_H_3, M.PLATE_GAP_3 end
+  return M.PLATE_H, M.PLATE_GAP
+end
+
 -- The plate stacks, as pure functions of how many plates a side shows. These
 -- mirror the stacking M.layout does below; placement has to know where the HUD
 -- will land before the HUD is built.
 local function allyPlateTop(n)
+  n = math.floor(num(n, 0))
   if n < 1 then return M.FIELD_BOTTOM end
-  return M.FIELD_BOTTOM - M.PLATE_PAD - n * M.PLATE_H - (n - 1) * M.PLATE_GAP
+  local h, g = plateStackMetrics(n)
+  return M.FIELD_BOTTOM - M.PLATE_PAD - n * h - (n - 1) * g
 end
 
 local function foePlateBottom(n)
+  n = math.floor(num(n, 0))
   if n < 1 then return M.FIELD_TOP end
-  return M.PLATE_PAD + n * M.PLATE_H + (n - 1) * M.PLATE_GAP
+  local h, g = plateStackMetrics(n)
+  return M.PLATE_PAD + n * h + (n - 1) * g
 end
+
+-- Exported for shot drivers / suite layout asserts (same arithmetic layout uses).
+M.plateStackMetrics = plateStackMetrics
+M.allyPlateTop = allyPlateTop
+M.foePlateBottom = foePlateBottom
 
 -- A seat only earns a plate if it carries HP figures (M.layout skips the rest
 -- rather than publish a 0/1 bar), so that -- not the seat count -- is what the
@@ -1069,11 +1098,12 @@ local function dodgePlates(side, plates, minY, maxY, occupants)
 end
 
 -- Dodging the HUD is worth it only while the rows can still be told apart.
--- A tall enough plate stack (3+ a side, which no shipped mode fields) eats the
--- band outright, and putting every seat on one pixel is a worse picture than a
--- sprite behind a translucent panel -- so past this floor the caller drops the
--- narrowing, or (better, when it has the option) drops the T-P pairing and lets
--- each stack dodge on its own terms.
+-- A tall enough plate stack can eat the band outright; putting every seat on
+-- one pixel is a worse picture than a sprite behind a translucent panel -- so
+-- past this floor the caller drops the narrowing, or (better, when it has the
+-- option) drops the T-P pairing and lets each stack dodge on its own terms.
+-- 3-wide plates use PLATE_H_3 / PLATE_GAP_3 so the trainer dodge still holds
+-- at n=3 rather than relying on this drop as the only path.
 local function bandHolds(count, gap, minY, maxY)
   return (maxY - minY) >= (count - 1) * math.ceil(gap / 2)
 end
@@ -1127,9 +1157,11 @@ local function sideRows(side, count, plates, humanCount)
 
   -- What the mons alone need. At the shipped inset this is the base band --
   -- the mon column clears the HUD horizontally -- but the arithmetic stays
-  -- honest if the inset is retuned outboard again.
+  -- honest if the inset is retuned outboard again. Drop the dodge only when
+  -- the narrowed band cannot keep seats MON_DRAW apart; with PLATE_H_3 the
+  -- 3-wide trainer path still holds, so this drop is no longer the n=3 path.
   local monMin, monMax = dodgePlates(side, plates, baseMin, baseMax, { mon })
-  if not bandHolds(count, M.MON_ROW_GAP, monMin, monMax) then
+  if not bandFits(count, M.MON_DRAW, monMin, monMax) then
     monMin, monMax = baseMin, baseMax
   end
 
@@ -1159,7 +1191,7 @@ local function sideRows(side, count, plates, humanCount)
   end
 
   local centerY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT / 2)
-  return rowStack(count, M.MON_ROW_GAP, centerY, minY, maxY), paired
+  return rowStack(count, M.MON_ROW_GAP, centerY, minY, maxY, M.MON_DRAW), paired
 end
 
 -- `rows` is that side's mon row list, and `paired` is sideRows' verdict on
@@ -1484,29 +1516,34 @@ function M.layout(ctx)
 
   -- One persistent plate per placed seat, stacked away from its own edge so a
   -- 2v2 (CoopBattle) keeps a HUD for every seat rather than only the primary
-  -- one. A seat carrying no HP figures at all has nothing to plate — skip it
-  -- rather than publish a 0/1 bar.
+  -- one -- and a 3v3 uses the compact PLATE_H_3 stack so six plates still clear
+  -- the mon columns. A seat carrying no HP figures at all has nothing to
+  -- plate — skip it rather than publish a 0/1 bar.
   local plates = {}
   local stackedAlly, stackedFoe = 0, 0
+  local allyPlateH, allyPlateGap = plateStackMetrics(allyPlates)
+  local foePlateH, foePlateGap = plateStackMetrics(foePlates)
   for _, mon in ipairs(mons) do
     if tonumber(mon.maxHp) or tonumber(mon.hp) then
       local ally = mon.side ~= "foe"
+      local ph = ally and allyPlateH or foePlateH
+      local pg = ally and allyPlateGap or foePlateGap
       local step
       if ally then
-        step = stackedAlly * (M.PLATE_H + M.PLATE_GAP)
+        step = stackedAlly * (ph + pg)
         stackedAlly = stackedAlly + 1
       else
-        step = stackedFoe * (M.PLATE_H + M.PLATE_GAP)
+        step = stackedFoe * (ph + pg)
         stackedFoe = stackedFoe + 1
       end
       plates[#plates + 1] = {
         side = mon.side,
         x = ally and M.PLATE_PAD or (M.WIDTH - M.PLATE_W - M.PLATE_PAD),
         -- Allies climb from the field floor, foes descend from the top.
-        y = ally and (M.FIELD_BOTTOM - M.PLATE_H - M.PLATE_PAD - step)
+        y = ally and (M.FIELD_BOTTOM - ph - M.PLATE_PAD - step)
           or (M.PLATE_PAD + step),
         w = M.PLATE_W,
-        h = M.PLATE_H,
+        h = ph,
         -- Exact hp/maxHp on your own side only, per series convention.
         numbers = ally,
         model = M.plateModel(mon),
@@ -3071,20 +3108,24 @@ local function drawPlate(plate)
       local level = model.shownLevel or model.level
       local pillW = pillWidth(micro, level)
       drawLevelPill(gfx, micro, level, x + w - pad - pillW, y + 4, 13)
+      -- Status / exact-HP sit just above the HP bar (barY - 14). At PLATE_H=48
+      -- that is y+20, the old fixed offset; at PLATE_H_3=44 it tracks the bar
+      -- so a shorter plate does not drop the chip onto the trough.
+      local statusY = barY - 14
       local chipRight = x + w - pad
       local chipX = x + pad
       if model.status then
-        chipX = chipX + drawStatusChip(gfx, micro, model.status, chipX, y + 20, 12) + 2
+        chipX = chipX + drawStatusChip(gfx, micro, model.status, chipX, statusY, 12) + 2
       end
       if model.confused then
-        drawStatusChip(gfx, micro, "CNF", chipX, y + 20, 12)
+        drawStatusChip(gfx, micro, "CNF", chipX, statusY, 12)
       end
       if plate.numbers then
         -- Exact figures on your own side only, per series convention.
         withFont(gfx, M.FONT_SECONDARY, function(secondary)
           local hpText = ("%d/%d"):format(model.shownHp, model.maxHp)
           setColor(gfx, TEXT_MUTED)
-          gfx.print(hpText, chipRight - widthWith(secondary, hpText), y + 19)
+          gfx.print(hpText, chipRight - widthWith(secondary, hpText), statusY - 1)
         end)
       end
       withFont(gfx, M.FONT_PRIMARY, function(primary)

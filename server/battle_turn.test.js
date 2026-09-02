@@ -473,7 +473,7 @@ scenario('coop', (events) => {
   for (let i = 0; i < 4; i += 1) {
     if (battle.outcome()) break;
     battle.submitChoice('a1', { action: 'fight', move: 0 });
-    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
     battle.submitChoice('b1', { action: 'fight', move: 0 });
     battle.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
     drainInto(battle, events);
@@ -751,10 +751,10 @@ scenario('retarget_ko', (events) => {
     },
   });
   drainInto(battle, events);
-  // Both allies aim at foeA (slot 2). Fast (spd 90) KOs it; Slow (spd 10)
-  // resolves after and must retarget onto foeB (slot 3) rather than fizzle.
-  battle.submitChoice('fast', { action: 'fight', move: 0, target: 2 });
-  battle.submitChoice('slow', { action: 'fight', move: 0, target: 2 });
+  // Both allies aim at foeA (slot 3). Fast (spd 90) KOs it; Slow (spd 10)
+  // resolves after and must retarget onto foeB (slot 4) rather than fizzle.
+  battle.submitChoice('fast', { action: 'fight', move: 0, target: 3 });
+  battle.submitChoice('slow', { action: 'fight', move: 0, target: 3 });
   battle.submitChoice('foeA', { action: 'fight', move: 0, target: 0 });
   battle.submitChoice('foeB', { action: 'fight', move: 0, target: 0 });
   drainInto(battle, events);
@@ -797,8 +797,8 @@ scenario('coop_npc_aim', (events) => {
   });
   drainInto(battle, events);
   for (let i = 0; i < 6; i += 1) {
-    battle.submitChoice('p1', { action: 'fight', move: 0, target: 2 });
-    battle.submitChoice('p2', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('p1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('p2', { action: 'fight', move: 0, target: 4 });
     battle.autoPick('n1');
     battle.autoPick('n2');
     drainInto(battle, events);
@@ -1101,21 +1101,21 @@ test('mid-turn-KO retargeting: the slower ally swings onto the survivor, not "ha
   );
 
   let sawSlowAnim = false;
-  let landedOnSlot3 = false;
+  let landedOnSlot4 = false;
   for (let i = koIdx + 1; i < events.length; i += 1) {
     const event = events[i];
     if (event.t === 'anim' && event.side === 'a' && event.slot === 1) sawSlowAnim = true;
-    if (sawSlowAnim && event.t === 'damage' && event.side === 'b' && event.slot === 3) {
-      landedOnSlot3 = true;
+    if (sawSlowAnim && event.t === 'damage' && event.side === 'b' && event.slot === 4) {
+      landedOnSlot4 = true;
       break;
     }
   }
   assert.ok(sawSlowAnim, "slow's move still plays its anim after the mid-turn KO");
-  assert.ok(landedOnSlot3, 'slow’s attack lands as real damage on foeB (slot 3), the retargeted seat');
+  assert.ok(landedOnSlot4, 'slow’s attack lands as real damage on foeB (slot 4), the retargeted seat');
 
-  assert.strictEqual(run.snapshot.field.find((f) => f.slot === 2).hp, 0,
+  assert.strictEqual(run.snapshot.field.find((f) => f.slot === 3).hp, 0,
     'foeA (the original, now-dead aim) stayed at 0 hp');
-  assert.ok(run.snapshot.field.find((f) => f.slot === 3).hp < 200,
+  assert.ok(run.snapshot.field.find((f) => f.slot === 4).hp < 200,
     'foeB (the retargeted seat) actually took the hit');
 });
 
@@ -1536,12 +1536,12 @@ test('a send states the registry id and the level, not just the narrated name', 
   for (const event of battle.drainEvents()) {
     if (event.t === 'send') sends.set(event.slot, event);
   }
-  assert.ok(sends.has(0) && sends.has(2), 'the opening fields both seats');
+  assert.ok(sends.has(0) && sends.has(3), 'the opening fields both seats');
   assert.strictEqual(sends.get(0).text, 'Nickname', 'narrated under the uploaded token');
   assert.strictEqual(sends.get(0).speciesId, 'alpha', 'with the registry id beside it');
   assert.strictEqual(sends.get(0).level, 33, 'and the level nothing else on the wire says');
-  assert.strictEqual(sends.get(2).speciesId, undefined, 'a sheet with no id produces no field');
-  assert.strictEqual(sends.get(2).level, 20, 'though the level is always known');
+  assert.strictEqual(sends.get(3).speciesId, undefined, 'a sheet with no id produces no field');
+  assert.strictEqual(sends.get(3).level, 20, 'though the level is always known');
   assert.ok(Events.check(sends.get(0))[0], "and it is an event Wire's whitelist accepts");
 });
 
@@ -1560,7 +1560,7 @@ test('a send names the condition the occupant walked in with', () => {
     if (event.t === 'send') sends.set(event.slot, event);
   }
   assert.strictEqual(sends.get(0).status, 'PSN', 'poisoned walk-in is on the send');
-  assert.strictEqual(sends.get(2).status, 'SLP', '...and the sleeper on the other seat');
+  assert.strictEqual(sends.get(3).status, 'SLP', '...and the sleeper on the other seat');
   assert.ok(Events.check(sends.get(0))[0], "still an event Wire's whitelist accepts");
 });
 
@@ -1645,7 +1645,7 @@ test('what a choice may say', () => {
   no('p1', { action: 'fight', move: true }, 'a boolean is not a move index');
 
   assert.strictEqual(
-    battle.submitChoice('p1', { action: 'fight', move: 0, target: 2 }), true,
+    battle.submitChoice('p1', { action: 'fight', move: 0, target: 3 }), true,
     'a well-formed choice is accepted',
   );
   no('p1', { action: 'fight', move: 0 }, 'a second choice in the same turn is refused');
@@ -1750,23 +1750,31 @@ test('a wedged resolve aborts on the wall-clock ceiling', () => {
 // it, so a hub seeding the wrong kit (which is what `wild` did with
 // DEFAULT_NPC_BAG) cannot put a Potion in a wild monster's mouth.
 
-const wildBattle = (mode, id, bBag) => build({
-  id, mode, seed: 88010, choiceTimeout: 10, reconnectGrace: 60,
-  sides: {
-    a: [{
-      playerId: 'p1', name: 'Ann', bag: { POTION: 1 },
-      mons: [mn({ species: 'Alpha', maxHp: 200, spd: 90, moves: [mv('thump', 40, 255, 0)] })],
-    }],
-    b: [{
-      playerId: 'wild', name: 'Wild', bag: bBag,
-      // Hurt below half and poisoned: a trainer seat heals or cures here.
-      mons: [mn({
-        species: 'Beta', maxHp: 200, hp: 40, spd: 10, status: 'PSN',
-        moves: [mv('thump', 40, 255, 0)],
-      })],
-    }],
-  },
-});
+const wildBattle = (mode, id, bBag) => {
+  const sideA = [{
+    playerId: 'p1', name: 'Ann', bag: { POTION: 1 },
+    mons: [mn({ species: 'Alpha', maxHp: 200, spd: 90, moves: [mv('thump', 40, 255, 0)] })],
+  }];
+  if (mode === 'coop_wild') {
+    sideA.push({
+      playerId: 'p2', name: 'Pat',
+      mons: [mn({ species: 'Gamma', maxHp: 200, spd: 1, moves: [mv('thump', 1, 255, 0)] })],
+    });
+  }
+  return build({
+    id, mode, seed: 88010, choiceTimeout: 10, reconnectGrace: 60,
+    sides: {
+      a: sideA,
+      b: [{
+        playerId: 'wild', name: 'Wild', bag: bBag,
+        mons: [mn({
+          species: 'Beta', maxHp: 200, hp: 40, spd: 10, status: 'PSN',
+          moves: [mv('thump', 40, 255, 0)],
+        })],
+      }],
+    },
+  });
+};
 
 for (const mode of ['wild', 'coop_wild']) {
   test(`${mode}: auto-pick never reaches the wild seat's bag`, () => {

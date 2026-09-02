@@ -82,7 +82,7 @@ const VERSION = 1;
 // Mirrored from Config rather than required, for the reason in events.js: this
 // directory runs where Config does not.
 const MONS_PER_PARTY = 6; // Config.BATTLE_MON_MAX
-const FIGHTERS_PER_SIDE = 2; // Config.COOP_SIDE
+const FIGHTERS_PER_SIDE = 3; // Config.COOP_SIDE
 const CHOICE_TIMEOUT = 60; // Config.BATTLE_CHOICE_TIMEOUT
 const RECONNECT_GRACE = 60; // Config.BATTLE_RECONNECT_GRACE
 const RESOLVE_TIMEOUT = 30; // Config.BATTLE_RESOLVE_TIMEOUT
@@ -138,8 +138,9 @@ function foughtKey(slot, index) {
   return `${slot}:${index}`;
 }
 
-// Roster cap per side. coop_wild is 2v1 (humans on a, wild on b); other modes
-// keep a single per-side ceiling (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
+// Roster cap per side. coop_wild is N vs 1 wild (humans on a, wild on b) -- not
+// exactly 2v1; other modes keep a single per-side ceiling (1 for 1v1/wild,
+// FIGHTERS_PER_SIDE otherwise).
 function maxFighters(mode, side) {
   if (mode === 'coop_wild') {
     return side === 'a' ? FIGHTERS_PER_SIDE : 1;
@@ -997,7 +998,7 @@ class Battle {
   //
   // Indices arrive zero-based, because that is how they ride on the wire:
   // `move` is 0..3 into the monster's moves, `slot` is 0..5 into the party, and
-  // `target` is a 0..3 *field* slot. They are converted here, once, so nothing
+  // `target` is a 0..5 *field* slot. They are converted here, once, so nothing
   // downstream has to remember which of the three it is holding.
 
   _normaliseChoice(fighter, choice) {
@@ -3372,6 +3373,10 @@ function attempt(opts) {
     const sideMax = maxFighters(self.mode, side);
     if (roster.length > sideMax) {
       return refuse(`side ${side} has more fighters than ${self.mode} allows`);
+    }
+    // Hub opens coop_wild for 2 or 3 humans; a lone human is a solo wild.
+    if (self.mode === 'coop_wild' && side === 'a' && roster.length < 2) {
+      return refuse('side a has fewer fighters than coop_wild allows');
     }
     for (let index = 1; index <= roster.length; index += 1) {
       const entry = roster[index - 1];

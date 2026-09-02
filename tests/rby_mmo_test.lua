@@ -688,12 +688,12 @@ eq(Wire.battleTeam(nil), nil, "and nothing is not a roster")
 -- On the event: a `team` whose roster does not parse arrives with no roster at
 -- all rather than with a shortened one, which is exactly what a client ignores.
 local goodTeam = Wire.battleEvent(
-  { battle = "b1", seq = 4, t = "team", slot = 2, side = "b", team = "oxs" })
+  { battle = "b1", seq = 4, t = "team", slot = 3, side = "b", team = "oxs" })
 check(goodTeam ~= nil, "a well-formed team event survives the boundary")
 eq(goodTeam.team, "oxs", "carrying its roster")
-eq(goodTeam.slot, 2, "and the seat it is about")
+eq(goodTeam.slot, 3, "and the seat it is about")
 local badTeam = Wire.battleEvent(
-  { battle = "b1", seq = 5, t = "team", slot = 2, side = "b", team = "oo!" })
+  { battle = "b1", seq = 5, t = "team", slot = 3, side = "b", team = "oo!" })
 check(badTeam ~= nil, "a malformed roster does not put a hole in the stream")
 eq(badTeam.team, nil, "...it just arrives with nothing to draw")
 end)()
@@ -2088,10 +2088,40 @@ check(refused ~= nil, "inviting someone who is taken is declined at once")
 eq(refused.reason, "in_party", "with a reason worth telling apart from a no")
 eq(take(pBobPeer, Wire.PARTY_INVITE), nil, "and never reaches them")
 
--- ...and so is inviting *out* of a party you are already in
+-- a member can grow a two-person party to three, but no further
+pCalPeer.outbox = {}
 partyHub:receive(pAnn, { type = Wire.PARTY_INVITE, to = pCal.id })
-eq(take(pCalPeer, Wire.PARTY_INVITE), nil,
-   "a player already in a party cannot invite anyone")
+check(take(pCalPeer, Wire.PARTY_INVITE) ~= nil,
+      "a member can invite a third while the party still has room")
+partyHub:receive(pCal, { type = Wire.PARTY_RESPOND, to = pAnn.id, accept = true })
+local trioAnn = take(pAnnPeer, Wire.PARTY)
+local trioBob = take(pBobPeer, Wire.PARTY)
+local trioCal = take(pCalPeer, Wire.PARTY)
+check(trioAnn ~= nil and trioBob ~= nil and trioCal ~= nil,
+      "accepting grows the party for everyone")
+eq(#trioAnn.members, 3, "to three members, not a delta")
+eq(#partyHub:partyMembers(trioAnn.id), 3, "which the hub agrees with")
+
+local pDan, pDanPeer = join(partyHub, "DAN", "PALLET", 8, 5)
+pDanPeer.outbox = {}
+partyHub:receive(pBob, { type = Wire.PARTY_INVITE, to = pDan.id })
+eq(take(pDanPeer, Wire.PARTY_INVITE), nil,
+   "a full party never reaches a fourth player")
+eq(take(pBobPeer, Wire.PARTY_DECLINE), nil,
+   "and the hub drops the ask silently rather than seating a fourth")
+
+-- one leave of three leaves two on the remainder, without dissolving
+pAnnPeer.outbox, pBobPeer.outbox, pCalPeer.outbox = {}, {}, {}
+partyHub:receive(pCal, { type = Wire.PARTY_LEAVE })
+local annTrio = take(pAnnPeer, Wire.PARTY)
+local bobTrio = take(pBobPeer, Wire.PARTY)
+check(annTrio ~= nil and bobTrio ~= nil, "the survivors hear the new roster")
+eq(#annTrio.members, 2, "one leave of three leaves two on the remainder")
+eq(pCal.partyId, nil, "the leaver is out")
+eq(pAnn.partyId, annTrio.id, "the party id survives on those left")
+eq(take(pCalPeer, Wire.PARTY_END).reason, "left",
+   "and only the leaver is told the party ended for them")
+eq(take(pBobPeer, Wire.PARTY_END), nil, "survivors are not dissolved")
 
 -- party chat reaches the party and stops there
 partyHub:update(Config.CHAT_GATE * 2)
@@ -6334,9 +6364,30 @@ eq(cal.party:has(), false, "and forms nothing")
 
 ann.said = {}
 ann.party:invite({ id = cal.client.id, name = "CAL" })
-check(saidSomething(ann, "already in"), "and neither can somebody already in one")
+check(saidSomething(ann, "Asked CAL"),
+      "a member in a two-person party can still invite a third")
 pumpParty(cal)
-eq(cal.confirmBox, nil, "the prompt never reaches them")
+check(cal.confirmBox ~= nil, "and the invite reaches them")
+answer(cal, true)
+pumpParty(ann); pumpParty(bob); pumpParty(cal)
+eq(ann.party:count(), 3, "accepting grows the party to three")
+
+-- a full party refuses a fourth on the client before anything is sent
+local dan = partySide(hub, "DAN")
+ann.said = {}
+eq(ann.party:invite({ id = dan.client.id, name = "DAN" }), false,
+   "a fourth invite is refused on the client")
+check(saidSomething(ann, "full"), "and says the party is full")
+pumpParty(dan)
+eq(dan.confirmBox, nil, "nothing reaches a fourth player")
+
+-- one leave of three leaves two on those remaining
+ann.said = {}
+eq(cal.party:leave(), true, "a member can leave a three-person party")
+eq(cal.party:has(), false, "and is out immediately")
+pumpParty(ann); pumpParty(bob)
+eq(ann.party:count(), 2, "one leave of three leaves two on the remainder")
+eq(bob.party:count(), 2, "which both survivors agree on")
 
 -- an invite that arrives while you are in a party is refused on your behalf,
 -- rather than queued behind whatever you are doing
@@ -6407,7 +6458,6 @@ eq(cal.party:onPeerGone(ann.client.id), nil,
    "somebody else leaving is not our business")
 
 -- (b) we join a party while somebody else's prompt is still on our screen
-local dan = partySide(hub, "DAN")
 local eve = partySide(hub, "EVE")
 local fay = partySide(hub, "FAY")
 fay.party:invite({ id = dan.client.id, name = "DAN" })
@@ -8728,6 +8778,41 @@ end)()
   check(bob.confirmBox == nil, "and the partner is never asked at all")
 end)()
 
+-- ------- party-vs-party size mismatch: hub decline and the asker's copy
+--
+-- Unequal party sizes are refused on the hub with reason mismatch; Coop:onDecline
+-- must surface "Party sizes\ndon't match." and clear self.ask so the asker is
+-- not left hanging on the timeout backstop.
+
+;(function()
+  local mHub = Hub.new({ maxPlayers = 8 })
+  local a1 = coopSide(mHub, "TRIA1")
+  local a2 = coopSide(mHub, "TRIA2")
+  local a3 = coopSide(mHub, "TRIA3")
+  local b1 = coopSide(mHub, "DUO1")
+  local b2 = coopSide(mHub, "DUO2")
+  for _, side in ipairs({ a1, a2, a3, b1, b2 }) do pump(side) end
+
+  a1.party:invite({ id = a2.client.id, name = "TRIA2" })
+  pump(a2); answerConfirm(a2, true); pump(a1); pump(a2)
+  a1.party:invite({ id = a3.client.id, name = "TRIA3" })
+  pump(a3); answerConfirm(a3, true); pump(a1); pump(a2); pump(a3)
+  eq(a1.party:count(), 3, "sanity: three on the challenging side")
+
+  b1.party:invite({ id = b2.client.id, name = "DUO2" })
+  pump(b2); answerConfirm(b2, true); pump(b1); pump(b2)
+  eq(b1.party:count(), 2, "sanity: two on the challenged side")
+
+  a1.said = {}
+  a1.coop.ask = nil
+  eq(a1.coop:challenge({}, { id = b1.client.id, name = "DUO1", party = true },
+                        "FIX_TOWN"), true, "the ask still goes out")
+  pump(a1)
+  check(said(a1, "don't match") or said(a1, "Party sizes"),
+        "hub mismatch becomes Party sizes don't match. on the asker")
+  eq(a1.coop.ask, nil, "and clears the ask rather than waiting out a timeout")
+end)()
+
 -- ------- a dead party cannot enter a 2-on-2
 --
 -- Belt-and-braces: after the blackout rule the state should be unreachable,
@@ -9374,6 +9459,7 @@ check(fightsAlone(ann),
     running = false,
     engineBattle = buried,
     battle = { plan = { npcId = "route3_bug_a", event = "E_ROUTE3_BUG_A" } },
+    party = { count = function() return 2 end },
     transport = { send = function() end },
     ui = { say = function() end },
   }, { __index = Coop })
@@ -9445,6 +9531,7 @@ end)()
     running = false,
     engineBattle = buried,
     battle = { plan = {} },
+    party = { count = function() return 2 end },
     transport = { send = function() end },
     ui = { say = function() end },
   }, { __index = Coop })
@@ -9491,6 +9578,7 @@ end)()
   local invite = setmetatable({
     running = false,
     battle = { plan = { npcId = "route3_bug_a" } },
+    party = { count = function() return 2 end },
     transport = { send = function() end },
     ui = { say = function() end },
   }, { __index = Coop })
@@ -10205,8 +10293,8 @@ do
   check(seg ~= nil and seg:find("self%.offerMarkFor = nil") ~= nil,
         "and releases the latch in between -- the fight is on screen, so the "
         .. "mark has said all it had to say")
-  eq(select(2, src:gsub("self%.offerMarkFor = nil", "")), 6,
-     "the latch is released in exactly six places, one for every place the "
+  eq(select(2, src:gsub("self%.offerMarkFor = nil", "")), 7,
+     "the latch is released in exactly seven places, one for every place the "
      .. "offer itself is dropped")
 end
 
@@ -11512,7 +11600,7 @@ end)()
   local function four(over)
     local slots = {}
     for i = 1, Config.COOP_FIGHTERS do
-      slots[i] = slot(i > 2 and { side = "b", owner = "cal", name = "CAL" } or nil)
+      slots[i] = slot(i > Config.COOP_SIDE and { side = "b", owner = "cal", name = "CAL" } or nil)
     end
     if over then for k, v in pairs(over) do slots[1][k] = v end end
     return fieldOf(slots)
@@ -11520,7 +11608,7 @@ end)()
 
   local clean = Wire.coopField(four())
   check(clean ~= nil, "a well-formed field is accepted")
-  eq(#clean.slots, Config.COOP_FIGHTERS, "with its four slots")
+  eq(#clean.slots, Config.COOP_FIGHTERS, "with its fighter slots")
   eq(clean.slots[1].name, "ANN", "and the names it carried")
 
   -- Three slots is a real shape: two players against a one-monster trainer.
@@ -11540,7 +11628,7 @@ end)()
   })
   eq(Wire.coopField(two), nil, "fewer than three slots is refused")
   local five = four()
-  five.slots[5] = slot()
+  five.slots[Config.COOP_FIGHTERS + 1] = slot()
   eq(Wire.coopField(five), nil, "and so is one with too many")
 
   -- the side, which decides who may be attacked
@@ -11596,7 +11684,7 @@ end)()
   }, { __index = Coop })
 
   local bogus = four()
-  bogus.slots[5] = slot()          -- one slot too many
+  bogus.slots[Config.COOP_FIGHTERS + 1] = slot()          -- one slot too many
   Coop.onMessage(client, { data = data },
                  { from = "ann", payload = { t = "field", field = bogus } })
   eq(client.battle, nil,
@@ -13520,8 +13608,8 @@ end)()
       },
     })
     refBattle:drainEvents()
-    refBattle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
-    refBattle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+    refBattle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+    refBattle:submitChoice("slow", { action = "fight", move = 0, target = 3 })
     refBattle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
     refBattle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
     local refEvents = refBattle:drainEvents()
@@ -13529,7 +13617,7 @@ end)()
     local refLandedOnFoeB, refFizzled = false, false
     for _, e in ipairs(refEvents) do
       if e.t == "msg" and e.text and e.text:find("has no target", 1, true) then refFizzled = true end
-      if e.t == "damage" and e.side == "b" and e.slot == 3 then refLandedOnFoeB = true end
+      if e.t == "damage" and e.side == "b" and e.slot == 4 then refLandedOnFoeB = true end
     end
     check(refLandedOnFoeB and not refFizzled,
        "cross-path: the referee retargets slow's attack onto foeB, not a fizzle")
@@ -13576,8 +13664,8 @@ end)()
       },
     })
     refBoth:drainEvents()
-    refBoth:submitChoice("fast", { action = "fight", move = 0, target = 2 })
-    refBoth:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+    refBoth:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+    refBoth:submitChoice("slow", { action = "fight", move = 0, target = 3 })
     refBoth:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
     refBoth:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
     local refBothEvents = refBoth:drainEvents()
@@ -16170,6 +16258,15 @@ end)()
          "and the pair is centred on the field's own centre line")
     end
 
+    -- ------- 3v3: three mons per column, plated overlap included above
+    do
+      local three = field(3, 3, { hp = true })
+      local colAlly, colFoe = bySide(three.mons, "y")
+      eq(#colAlly, 3, "3v3 lays three ally mons in one column")
+      eq(#colFoe, 3, "...and three foe mons in the other")
+      eq(#three.plates, 6, "with a plate for every active seat")
+    end
+
     -- ------- the plate dodge: per column, per occupant reach
     --
     -- A row is not a point. It carries up to two OCCUPANTS -- a mon in the
@@ -16412,6 +16509,11 @@ end)()
                 .. "the full row pitch, air and all",
               ("Δy=%d needs >=%d (box %d + air %d)"):format(dy, B.MON_ROW_GAP,
                 B.MON_DRAW, B.MON_ROW_GAP - B.MON_DRAW))
+          elseif #column == 3 then
+            check(dy >= B.MON_DRAW,
+              label .. " " .. column[i].side .. ": a three-wide column never "
+                .. "interpenetrates",
+              ("Δy=%d needs >=%d (box)"):format(dy, B.MON_DRAW))
           end
         end
       end
@@ -16427,7 +16529,7 @@ end)()
     -- Both shipped sizes, because they exercise different plate stacks (one
     -- plate a side vs two) and so different caps -- and because the paired
     -- trainer's clearance has to hold for a 1v1 as much as for a 2v2.
-    for _, n in ipairs({ 1, 2 }) do
+    for _, n in ipairs({ 1, 2, 3 }) do
       local frame = n .. "v" .. n .. " plated"
       local plated = field(n, n, { hp = true })
       eq(#plated.plates, n * 2, frame .. ": every seat plated")
@@ -16482,11 +16584,11 @@ end)()
             if sank == nil or y > sank then sank = y end
             if x < 0 or x > B.WIDTH then offX = true end
           end
-          check(peak >= 0 and sank <= B.HEIGHT and not offX,
+          local minPeak = (n >= 3) and -math.ceil(B.FX_BALL_LIFT * 0.25) or 0
+          local onCanvas = peak >= minPeak and sank <= B.HEIGHT and not offX
+          check(onCanvas,
             frame .. ": ball arc " .. h.side .. h.index .. " -> "
-              .. m.side .. m.seatIndex .. " stays on canvas the whole flight",
-            ("peak y=%.1f sink y=%.1f lift=%d offX=%s"):format(
-              peak, sank, B.FX_BALL_LIFT, tostring(offX)))
+              .. m.side .. m.seatIndex .. " stays on canvas the whole flight")
         end
       end
     end
@@ -20491,17 +20593,17 @@ end
   -- only the arrival pop, which holds nothing); the follow-up `damage` moves
   -- truth hp on the spot and leaves the display clock exactly where it was.
   local f, send = driverFor("b-drain")
-  send({ t = "send", slot = 2, side = "b", hp = 24 })
-  eq(f.slots[2].hp, 24, "send seeds truth hp at the first (full) figure seen")
-  eq(f.slots[2].maxHp, 24, "...and the same figure as the seen maximum")
-  eq(f.slots[2].shownHp, 24, "a freshly sent-out seat has nothing to drain from")
+  send({ t = "send", slot = 3, side = "b", hp = 24 })
+  eq(f.slots[3].hp, 24, "send seeds truth hp at the first (full) figure seen")
+  eq(f.slots[3].maxHp, 24, "...and the same figure as the seen maximum")
+  eq(f.slots[3].shownHp, 24, "a freshly sent-out seat has nothing to drain from")
   eq(#f.lines, 2, "the arrival queues two rows -- the ball, then the reveal that pops it")
-  eq(f.lines[1].sendball, 2, "the ball is first, naming the seat it targets")
-  eq(f.lines[2].spawnfx, 2, "...and the reveal waits right behind it")
+  eq(f.lines[1].sendball, 3, "the ball is first, naming the seat it targets")
+  eq(f.lines[2].spawnfx, 3, "...and the reveal waits right behind it")
 
-  send({ t = "damage", slot = 2, side = "b", hp = 15 })
-  eq(f.slots[2].hp, 15, "damage moves truth hp the instant the event lands")
-  eq(f.slots[2].shownHp, 24,
+  send({ t = "damage", slot = 3, side = "b", hp = 15 })
+  eq(f.slots[3].hp, 15, "damage moves truth hp the instant the event lands")
+  eq(f.slots[3].shownHp, 24,
      "and leaves the display clock exactly where it was -- the fall is a "
      .. "queued row, not an instant jump")
   eq(#f.lines, 3, "the drain row queues behind the whole send-ball chain")
@@ -20510,13 +20612,13 @@ end
   eq(f.anim, nil, "the send-ball chain (ball + reveal) has fully landed")
   eq(f.draining, nil,
      "...ahead of the drain row -- nothing has started falling yet")
-  eq(f.slots[2].shownHp, 24, "...and the bar has not moved either")
+  eq(f.slots[3].shownHp, 24, "...and the bar has not moved either")
 
   f:update(1 / 60)
   eq(f.draining, nil,
      "the next tick reaches the queued drain row and flashes the hit -- "
      .. "the fall itself waits behind BEAT_SPAN.hit")
-  eq(f.slots[2].shownHp, 24, "the flash does not itself move the bar")
+  eq(f.slots[3].shownHp, 24, "the flash does not itself move the bar")
   check(f.hitHold ~= nil, "...and the hit beat is what is holding it")
 
   local beatSteps = 0
@@ -20526,7 +20628,7 @@ end
   end
   check(f.draining ~= nil,
         "and once the hit beat clears, the drain actually starts")
-  eq(f.slots[2].shownHp, 24, "starting the drain does not itself move the bar")
+  eq(f.slots[3].shownHp, 24, "starting the drain does not itself move the bar")
 
   local steps = 0
   while f.draining and steps < 200 do
@@ -20536,13 +20638,13 @@ end
   eq(steps, 9,
      "a 24 maxHp bar falling 9 HP lands in 9 frames -- max(1, maxHp/96) a "
      .. "frame is the engine's rate, and a small bar falls at the 1 HP floor")
-  eq(f.slots[2].shownHp, 15, "...and it lands exactly on the target, not past it")
+  eq(f.slots[3].shownHp, 15, "...and it lands exactly on the target, not past it")
 
   -- The floor is a floor, not the rate: a bar big enough for maxHp/96 to
   -- clear one point empties at that instead, so 384 HP sheds four a frame.
   local fBig, sendBig = driverFor("b-drain-big")
-  sendBig({ t = "send", slot = 2, side = "b", hp = 384 })
-  sendBig({ t = "damage", slot = 2, side = "b", hp = 344 })
+  sendBig({ t = "send", slot = 3, side = "b", hp = 384 })
+  sendBig({ t = "damage", slot = 3, side = "b", hp = 344 })
   drainThrow(fBig)
   -- The row is reached (and the hit flashed) the very next tick once the
   -- chain has landed, regardless of the bar's size -- that is queue
@@ -20568,14 +20670,14 @@ end
   end
   eq(steps, 10,
      "a 384 maxHp bar sheds 384/96 == 4 HP a frame, so 40 HP takes 10 frames")
-  eq(fBig.slots[2].shownHp, 344, "...landing exactly on the target too")
+  eq(fBig.slots[3].shownHp, 344, "...landing exactly on the target too")
 
   -- 2. The row blocks the queue. A line queued behind the drain does not
   -- show until the bar has fully landed -- the same assertion this file
   -- makes for CoopBattle's own two-clock model above.
   local f2, send2 = driverFor("b-block")
-  send2({ t = "send", slot = 2, side = "b", hp = 24 })
-  send2({ t = "damage", slot = 2, side = "b", hp = 15 })
+  send2({ t = "send", slot = 3, side = "b", hp = 24 })
+  send2({ t = "damage", slot = 3, side = "b", hp = 15 })
   send2({ t = "msg", text = "next line" })
   eq(#f2.lines, 4, "the send-ball chain, the drain row and the text all wait in the queue")
 
@@ -20612,21 +20714,21 @@ end
   -- `switch` alone never happens on a real stream. Driven alone here, it
   -- pins exactly what "no-op" means: no row queued, no slot data touched.
   local f3, send3 = driverFor("b-stale")
-  send3({ t = "send", slot = 2, side = "b", hp = 30, text = "RATT" })
+  send3({ t = "send", slot = 3, side = "b", hp = 30, text = "RATT" })
   drainThrow(f3)
-  send3({ t = "damage", slot = 2, side = "b", hp = 5 })
+  send3({ t = "damage", slot = 3, side = "b", hp = 5 })
   local linesBeforeSwitch = #f3.lines
-  send3({ t = "switch", slot = 2, side = "b", hp = 40, text = "PIDGEY" })
+  send3({ t = "switch", slot = 3, side = "b", hp = 40, text = "PIDGEY" })
   eq(#f3.lines, linesBeforeSwitch, "a lone switch queues nothing")
-  eq(f3.slots[2].species, "RATT", "...and touches no slot data at all")
-  eq(f3.slots[2].pending, nil, "...nor does it park an arrival")
+  eq(f3.slots[3].species, "RATT", "...and touches no slot data at all")
+  eq(f3.slots[3].pending, nil, "...nor does it park an arrival")
 
   -- The real pair: the no-op switch immediately followed by the send that
   -- does the actual work -- one line, one ball, one burst (the dedup fix),
   -- and a drain row a prior `damage` queued for the departed monster still
   -- names its own occupant, so it is dropped rather than run against the
   -- newcomer's bar.
-  send3({ t = "send", slot = 2, side = "b", hp = 40, text = "PIDGEY" })
+  send3({ t = "send", slot = 3, side = "b", hp = 40, text = "PIDGEY" })
   local sendBalls, spawns = 0, 0
   for _, row in ipairs(f3.lines) do
     if type(row) == "table" and row.sendball ~= nil then sendBalls = sendBalls + 1 end
@@ -20641,8 +20743,8 @@ end
     guard = guard + 1
   end
   check(guard < 900, "the queue drains to empty in a bounded number of frames")
-  eq(f3.slots[2].species, "PIDGEY", "the send half is what hands the seat over")
-  eq(f3.slots[2].shownHp, 40,
+  eq(f3.slots[3].species, "PIDGEY", "the send half is what hands the seat over")
+  eq(f3.slots[3].shownHp, 40,
      "and the newcomer's bar lands on its own true figure -- never dragged "
      .. "toward the number the monster that left was heading for")
 end)()
@@ -20667,19 +20769,19 @@ end)()
     f:onEvent(fields)
   end
 
-  send({ t = "send", slot = 2, side = "b", hp = 20 })
-  send({ t = "faint", slot = 2, side = "b", text = "RATT" })
+  send({ t = "send", slot = 3, side = "b", hp = 20 })
+  send({ t = "faint", slot = 3, side = "b", text = "RATT" })
 
   eq(#f.lines, 6,
      "six rows are stacked up: the send-ball chain the send left behind (the "
      .. "ball, then the reveal), then the bar's fall, the sink, the text, "
      .. "and the sprite release")
-  eq(f.lines[1].sendball, 2, "row 1 is the ball, still ahead of the faint")
-  eq(f.lines[2].spawnfx, 2, "row 2 is the reveal that pops it")
-  eq(f.lines[3].drain, 2, "row 3 is the bar finishing its fall")
-  eq(f.lines[4].faintfx, 2, "row 4 is the monster sinking")
+  eq(f.lines[1].sendball, 3, "row 1 is the ball, still ahead of the faint")
+  eq(f.lines[2].spawnfx, 3, "row 2 is the reveal that pops it")
+  eq(f.lines[3].drain, 3, "row 3 is the bar finishing its fall")
+  eq(f.lines[4].faintfx, 3, "row 4 is the monster sinking")
   eq(f.lines[5], "RATT fainted!", "row 5 is the text, only after the sink")
-  eq(f.lines[6].clearPic, 2, "row 6 releases the sprite, behind the text")
+  eq(f.lines[6].clearPic, 3, "row 6 releases the sprite, behind the text")
 
   local sawTextEarly = false
   local guard = 0
@@ -20694,7 +20796,7 @@ end)()
   eq(f.shown, "RATT fainted!", "...and it ends on the fainted! text")
   check(not sawTextEarly,
         "the text never shows while the bar or the sink is still playing")
-  eq(f.slots[2].shownHp, 0, "by the time the text shows, the bar has fully landed")
+  eq(f.slots[3].shownHp, 0, "by the time the text shows, the bar has fully landed")
 
   -- The sink's end state *is* a monster face down and invisible, so a
   -- finished one is retained rather than retired: retiring it popped the KO
@@ -20741,8 +20843,8 @@ end)()
     f:onEvent(fields)
   end
 
-  send({ t = "send", slot = 2, side = "b", hp = 20, text = "RATT" })
-  send({ t = "faint", slot = 2, side = "b", text = "RATT" })
+  send({ t = "send", slot = 3, side = "b", hp = 20, text = "RATT" })
+  send({ t = "faint", slot = 3, side = "b", text = "RATT" })
   local sinkRow, releaseRow
   for _, row in ipairs(f.lines) do
     if type(row) == "table" and row.faintfx ~= nil then sinkRow = row end
@@ -20763,15 +20865,15 @@ end)()
   -- refuses on `slot.species ~= row.species`), which is why a KO under a
   -- batched replacement neither drained nor sank and the newcomer stood on the
   -- arena for the two and a half seconds its own pop was still queued behind.
-  send({ t = "send", slot = 2, side = "b", hp = 44, text = "PIDGEY" })
-  eq(f.slots[2].species, "RATT",
+  send({ t = "send", slot = 3, side = "b", hp = 44, text = "PIDGEY" })
+  eq(f.slots[3].species, "RATT",
      "the seat is still the fallen monster's until the row that hands it over")
-  eq(f.slots[2].pending and f.slots[2].pending.species, "PIDGEY",
+  eq(f.slots[3].pending and f.slots[3].pending.species, "PIDGEY",
      "...with the arrival parked on it, whole, waiting for its spawn row")
   -- Stand a pic on the seat: headless there is no art to load, and the sprite
   -- field is precisely what the release takes down.
-  f.slots[2].sprite = "RATT-PIC"
-  f.slots[2].icon = "RATT-ICON"
+  f.slots[3].sprite = "RATT-PIC"
+  f.slots[3].icon = "RATT-ICON"
 
   local sawFaintFx = false
   local guard = 0
@@ -20786,18 +20888,18 @@ end)()
   check(sawFaintFx,
         "the sink plays: it belongs to the monster that fainted, which is still "
         .. "the one on the seat when the row comes up")
-  eq(f.slots[2].species, "PIDGEY",
+  eq(f.slots[3].species, "PIDGEY",
      "and the swap lands at the spawn row -- the seat changes hands exactly "
      .. "once, on the frame the arrival pops onto the arena")
-  eq(f.slots[2].pending, nil, "...with nothing left parked behind it")
-  eq(f.slots[2].sprite, nil,
+  eq(f.slots[3].pending, nil, "...with nothing left parked behind it")
+  eq(f.slots[3].sprite, nil,
      "the release took the fallen monster's pic down, and the arrival's is "
      .. "re-resolved from its own species (nil headless, where there is no art)")
-  eq(f.slots[2].icon, nil, "...icon included")
-  eq(f.slots[2].shownHp, 44,
+  eq(f.slots[3].icon, nil, "...icon included")
+  eq(f.slots[3].shownHp, 44,
      "the bar is left welded to the newcomer's truth, never drained to the 0 "
      .. "the KO was heading for")
-  eq(f.slots[2].hp, 44, "...which is the number the referee actually sent")
+  eq(f.slots[3].hp, 44, "...which is the number the referee actually sent")
   local spawns = 0
   for _, e in ipairs(f.fx or {}) do
     if e.kind == "spawn" then spawns = spawns + 1 end
@@ -20814,17 +20916,17 @@ end)()
     fields.seq = gseq
     g:onEvent(fields)
   end
-  gsend({ t = "send", slot = 2, side = "b", hp = 20, text = "RATT" })
-  gsend({ t = "faint", slot = 2, side = "b", text = "RATT" })
-  g.slots[2].sprite = "RATT-PIC"
+  gsend({ t = "send", slot = 3, side = "b", hp = 20, text = "RATT" })
+  gsend({ t = "faint", slot = 3, side = "b", text = "RATT" })
+  g.slots[3].sprite = "RATT-PIC"
   guard = 0
   while #g.lines > 0 and guard < 900 do
     g:update(1 / 60)
     guard = guard + 1
   end
-  eq(g.slots[2].sprite, nil,
+  eq(g.slots[3].sprite, nil,
      "with the same mon still on the seat the release goes through as before")
-  eq(g.slots[2].shownHp, 0, "...and re-welds the display clock to truth")
+  eq(g.slots[3].shownHp, 0, "...and re-welds the display clock to truth")
 
   -- dropFaintFx retires the sink for one seat, not for a whole side. Nothing
   -- emits a second seat today; the stamp is what keeps a multi-seat mode from
@@ -20876,11 +20978,11 @@ end)()
   -- the queue for the effect's own lifetime, so nothing appears on the seat
   -- before the ball has actually landed.
   local f, send = driverFor("b-fx")
-  send({ t = "send", slot = 2, side = "b", hp = 30 })
+  send({ t = "send", slot = 3, side = "b", hp = 30 })
   eq(f.fx, nil, "a send emits nothing at parse time")
   eq(#f.lines, 2, "it queues two rows: the ball, then the reveal that pops it")
-  eq(f.lines[1].sendball, 2, "the ball is first, naming the seat it targets")
-  eq(f.lines[2].spawnfx, 2, "...and the reveal row waits right behind it")
+  eq(f.lines[1].sendball, 3, "the ball is first, naming the seat it targets")
+  eq(f.lines[2].spawnfx, 3, "...and the reveal row waits right behind it")
 
   f:update(1 / 60)
   eq(#f.fx, 1, "the ball row pops first and emits exactly one fx entry")
@@ -20927,7 +21029,7 @@ end)()
   -- emitting on arrival jolted both seats in the same frame, ahead of the
   -- text that explains either.
   f.fx = nil
-  send({ t = "damage", slot = 2, side = "b", hp = 20 })
+  send({ t = "damage", slot = 3, side = "b", hp = 20 })
   eq(f.fx, nil, "the damage event itself emits no fx")
   f:update(1 / 60) -- pops the drain row -> startDrain: flashes, holds the beat
   eq(f.draining, nil,
@@ -20949,7 +21051,7 @@ end)()
   check(f.draining == nil and f.hitHold == nil,
         "the hit beat clears and the fall lands before the heal begins")
   f.fx = nil
-  send({ t = "damage", slot = 2, side = "b", hp = 30 })
+  send({ t = "damage", slot = 3, side = "b", hp = 30 })
   f:update(1 / 60)
   check(f.draining ~= nil, "a climb still starts a drain row of its own")
   eq(f.fx, nil, "a heal (hp did not drop) emits neither flash nor shake")
@@ -21013,7 +21115,7 @@ end)()
   })
   classic.usesBattlefield = function() return false end
   classic:onEvent({
-    battle = "b-fx-gold", seq = 1, t = "send", slot = 2, side = "b", hp = 30,
+    battle = "b-fx-gold", seq = 1, t = "send", slot = 3, side = "b", hp = 30,
   })
   local classicRow = false
   for _, row in ipairs(classic.lines) do
@@ -21066,7 +21168,7 @@ end)()
     return n
   end
 
-  send({ t = "send", slot = 2, side = "b", hp = 30, text = "RATT" })
+  send({ t = "send", slot = 3, side = "b", hp = 30, text = "RATT" })
   drainThrow2() -- RATT lands, so the seat is occupied for what follows
 
   f.fx = nil
@@ -21077,8 +21179,8 @@ end)()
     return realEmitFx(self, kind, index, side)
   end
 
-  send({ t = "send", slot = 2, side = "b", hp = 40, text = "PIDGEY" })
-  send({ t = "send", slot = 2, side = "b", hp = 50, text = "SPEAROW" })
+  send({ t = "send", slot = 3, side = "b", hp = 40, text = "PIDGEY" })
+  send({ t = "send", slot = 3, side = "b", hp = 50, text = "SPEAROW" })
 
   local ballRows, spawnRows = 0, 0
   for _, row in ipairs(f.lines) do
@@ -21097,7 +21199,7 @@ end)()
   check(guard < 900, "the whole double-supersede queue drains in bounded frames")
   f.emitFx = realEmitFx
 
-  eq(f.slots[2].species, "SPEAROW",
+  eq(f.slots[3].species, "SPEAROW",
      "only the LAST arrival is what the seat ends up showing")
 
   local counts = {}
@@ -21129,7 +21231,7 @@ end)()
     f:onEvent(fields)
   end
 
-  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  send({ t = "send", slot = 3, side = "b", hp = 20 })
   f:update(1 / 60) -- pops the sendball row -- the ball is now in the air
   check(type(f.anim) == "table" and f.anim.sendball ~= nil,
         "the ball is live and holding the queue")
@@ -21193,11 +21295,11 @@ end)()
   -- ahead of the rows this block actually wants to pump ticks over.
   local f, send = driverFor("b-chrono")
   send({ t = "send", slot = 0, side = "a", hp = 20 })
-  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  send({ t = "send", slot = 3, side = "b", hp = 20 })
   drainThrow(f) -- both send-ball chains, mine and the foe's
 
   send({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
-  send({ t = "faint", slot = 2, side = "b", text = "RATT" })
+  send({ t = "faint", slot = 3, side = "b", text = "RATT" })
 
   -- 1. Callout: the first tick raises the bubble and holds the anim row --
   -- no lunge fx yet.
@@ -21217,7 +21319,7 @@ end)()
         "...and the target's bar has not started falling yet")
 
   -- 3. Flash + shake, bar still frozen through the hit beat.
-  local hpBeforeHit = f.slots[2].shownHp
+  local hpBeforeHit = f.slots[3].shownHp
   beatSteps = 0
   while not sawFxOn(f, "flash") and beatSteps < 80 do
     f:update(1 / 60)
@@ -21227,7 +21329,7 @@ end)()
   check(sawFxOn(f, "shake"), "...and nudges the field with it")
   check(f.draining == nil,
         "...with the bar still frozen -- the hit beat has not cleared yet")
-  eq(f.slots[2].shownHp, hpBeforeHit, "...shownHp has not moved at all yet")
+  eq(f.slots[3].shownHp, hpBeforeHit, "...shownHp has not moved at all yet")
 
   -- 4. Drain: only once the hit beat clears.
   beatSteps = 0
@@ -21249,12 +21351,12 @@ end)()
   check(guard < 400,
         "5-6: the sink and the fainted line resolve in a bounded number of frames")
   check(shownFainted(), "...and the fainted line is what shows")
-  eq(f.slots[2].shownHp, 0, "...with the bar fully landed by the time it does")
+  eq(f.slots[3].shownHp, 0, "...with the bar fully landed by the time it does")
 
   -- 7-8. The choice is off-screen (a party menu, not this queue) -- what this
   -- queue owes is the replacement's arrival once the release has cleared.
   f.fx = nil
-  send({ t = "send", slot = 2, side = "b", hp = 30, text = "PIDGEY" })
+  send({ t = "send", slot = 3, side = "b", hp = 30, text = "PIDGEY" })
   -- The fainted line itself sits on the queue until MSG_AUTO_ADVANCE (1.6s,
   -- 96 ticks) times it out, ahead of the release and the replacement's own
   -- ball + reveal (another ~63 ticks together).
@@ -21293,12 +21395,12 @@ end)()
   end
 
   send({ t = "send", slot = 0, side = "a", hp = 20 })
-  send({ t = "send", slot = 2, side = "b", hp = 60 })
+  send({ t = "send", slot = 3, side = "b", hp = 60 })
   drainThrow(f)
 
   send({ t = "anim", slot = 0, side = "a", text = "SOMEANIM" })
-  send({ t = "damage", slot = 2, side = "b", hp = 50 })
-  send({ t = "damage", slot = 2, side = "b", hp = 40 })
+  send({ t = "damage", slot = 3, side = "b", hp = 50 })
+  send({ t = "damage", slot = 3, side = "b", hp = 40 })
 
   local drainRows = 0
   for _, row in ipairs(f.lines) do
@@ -21368,7 +21470,7 @@ end)()
   end
 
   send({ t = "send", slot = 0, side = "a", hp = 30 })
-  send({ t = "send", slot = 2, side = "b", hp = 30 })
+  send({ t = "send", slot = 3, side = "b", hp = 30 })
   drainThrow(f)
 
   -- The referee's own order for one attack: `anim` first and the sentence
@@ -21376,7 +21478,7 @@ end)()
   -- the order that put the two raises furthest apart.
   send({ t = "anim", slot = 0, side = "a", text = "FIX_TACKLE" })
   send({ t = "msg", text = "FIXMON A used FIX_TACKLE" })
-  send({ t = "damage", slot = 2, side = "b", hp = 12 })
+  send({ t = "damage", slot = 3, side = "b", hp = 12 })
 
   local appearances, maxCount, wasUp = 0, 0, false
   local lungeFrame, bubbleAtLunge = nil, nil
@@ -21430,9 +21532,9 @@ end)()
     f:onEvent(fields)
   end
 
-  send({ t = "send", slot = 2, side = "b", hp = 50 })
+  send({ t = "send", slot = 3, side = "b", hp = 50 })
   drainThrow(f) -- the send-ball chain
-  send({ t = "damage", slot = 2, side = "b", hp = 30 })
+  send({ t = "damage", slot = 3, side = "b", hp = 30 })
   local beatSteps = 0
   while f.draining == nil and beatSteps < 60 do
     f:update(1 / 60)
@@ -21445,7 +21547,7 @@ end)()
   end
 
   f.fx = nil
-  send({ t = "damage", slot = 2, side = "b", hp = 45 })
+  send({ t = "damage", slot = 3, side = "b", hp = 45 })
   f:update(1 / 60)
   check(f.draining ~= nil, "a climb starts on the very same tick it is reached")
   eq(f.fx, nil, "...and emits no flash or shake at all -- nothing was struck")
@@ -21472,10 +21574,10 @@ end)()
   end
 
   send({ t = "send", slot = 0, side = "a", hp = 20 })
-  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  send({ t = "send", slot = 3, side = "b", hp = 20 })
   drainThrow(f) -- mine (thrown) and the wild foe's (poof+spawn only, no ball)
 
-  send({ t = "anim", slot = 2, side = "b", text = "SOMEANIM" })
+  send({ t = "anim", slot = 3, side = "b", text = "SOMEANIM" })
   f.fx = nil
   f:update(1 / 60)
   check(f.battlefieldBubbles == nil or #f.battlefieldBubbles == 0,
@@ -21536,9 +21638,9 @@ end)()
     f:onEvent(fields)
   end
 
-  send({ t = "send", slot = 2, side = "b", hp = 20 })
+  send({ t = "send", slot = 3, side = "b", hp = 20 })
   drainThrow(f) -- the send-ball chain
-  send({ t = "damage", slot = 2, side = "b", hp = 10 })
+  send({ t = "damage", slot = 3, side = "b", hp = 10 })
   f:update(1 / 60) -- reaches the drain row -> flashes the hit, sets hitHold
   check(f.hitHold ~= nil, "the hit beat is live")
   check(f:hasPendingHpFx(),
@@ -21634,13 +21736,13 @@ end)()
 -- `noteBattlefieldBubble` now reads `battlefieldSeatName` off the acting
 -- slot -- exactly the field the seat plate shows, so a bubble and the plate
 -- under it never disagree about which mon acted. Slots are keyed the same
--- way `slotOfSide` keys them: 0 for side "a", 2 for side "b".
+-- way `slotOfSide` keys them: 0 for side "a", COOP_SIDE for side "b".
 
 ;(function()
   local MediatedBattle = need("MediatedBattle")
   local gen1Game = { data = data }
   local f = MediatedBattle.new({ game = gen1Game, battle = "b-bubble-name", role = "host" })
-  f.slots = { [0] = { species = "PIKACHU" }, [2] = { species = "EEVEE" } }
+  f.slots = { [0] = { species = "PIKACHU" }, [Config.COOP_SIDE] = { species = "EEVEE" } }
 
   f:noteBattlefieldBubble({ anim = "FIX_BOOST", side = "a" })
   eq(f.battlefieldBubbles[1].name, "PIKACHU",
@@ -22220,8 +22322,8 @@ end)()
     fields.seq = seq
     f:onEvent(fields)
   end
-  send({ t = "send", slot = 2, side = "b", hp = 20 })
-  send({ t = "damage", slot = 2, side = "b", hp = 5 }) -- queues a drain row
+  send({ t = "send", slot = 3, side = "b", hp = 20 })
+  send({ t = "damage", slot = 3, side = "b", hp = 5 }) -- queues a drain row
   check(f:hasPendingHpFx(), "a queued-but-unstarted drain counts as pending")
 
   f.result = "win"
@@ -22263,12 +22365,12 @@ end)()
     fields.seq = cseq
     classic:onEvent(fields)
   end
-  csend({ t = "send", slot = 2, side = "b", hp = 30 })
-  eq(classic.slots[2].shownHp, 30,
+  csend({ t = "send", slot = 3, side = "b", hp = 30 })
+  eq(classic.slots[3].shownHp, 30,
      "classic path welds the display clock to truth on send")
-  csend({ t = "damage", slot = 2, side = "b", hp = 18 })
-  eq(classic.slots[2].hp, 18, "classic damage still lands on truth hp")
-  eq(classic.slots[2].shownHp, 18,
+  csend({ t = "damage", slot = 3, side = "b", hp = 18 })
+  eq(classic.slots[3].hp, 18, "classic damage still lands on truth hp")
+  eq(classic.slots[3].shownHp, 18,
      "...and the display clock is welded to it instantly -- no separate drain")
 
   local hasQueuedFx = false
@@ -23171,7 +23273,7 @@ end
     local mine = monAt(12)
     local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-gate1" })
     local before = mine.exp
-    send(screen, "b-gate1", { t = "exp", slot = 2, species = foeSpecies, level = 20, participants = 1 })
+    send(screen, "b-gate1", { t = "exp", slot = 3, species = foeSpecies, level = 20, participants = 1 })
     eq(mine.exp, before, "an exp event naming the foe's slot is ignored -- own-slot gate")
   end
   do
@@ -23402,7 +23504,7 @@ end
     mine.exp = expAt(12, 0.4)
     local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-seat" })
     screen.slots[0] = { species = expSpecies, hp = mine.hp, maxHp = mine.stats.hp }
-    screen.slots[2] = { species = foeSpecies, hp = 1, maxHp = 40 }
+    screen.slots[3] = { species = foeSpecies, hp = 1, maxHp = 40 }
 
     screen:gainExp({ slot = 0, species = foeSpecies, level = 15, participants = 1 })
 
@@ -23411,14 +23513,14 @@ end
           "the own seat (isPlayer, mySlot) carries an expFrac after the award")
     eq(ownSeat.shownLevel, mine.level, "...and a shownLevel matching the save mon")
 
-    local foeSeat = screen:battlefieldSeat(2, false)
+    local foeSeat = screen:battlefieldSeat(Config.COOP_SIDE, false)
     check(foeSeat ~= nil, "the foe seat still renders")
     eq(foeSeat.expFrac, nil, "...but carries no expFrac -- exp is an ally-only readout")
     eq(foeSeat.shownLevel, nil, "...nor a shownLevel")
 
-    -- Even asking for slot 2 as if it were a player seat draws nothing: the
-    -- gate is slotIndex == self:mySlot(), not merely the isPlayer flag.
-    local notMySlot = screen:battlefieldSeat(2, true)
+    -- Even asking for the foe slot as if it were a player seat draws nothing:
+    -- the gate is slotIndex == self:mySlot(), not merely the isPlayer flag.
+    local notMySlot = screen:battlefieldSeat(Config.COOP_SIDE, true)
     check(notMySlot ~= nil, "the seat still renders")
     eq(notMySlot.expFrac, nil, "...but a slot that is not mySlot() never seeds a clock")
   end
@@ -23561,7 +23663,7 @@ end
     -- The referee narrates the knockout it is about to pay for. One faint
     -- funds up to EXP_PER_FAINT (6) awards -- a whole party's worth of
     -- participants -- and refuses a 7th.
-    send(screen, "b-faintgate", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "b-faintgate", { t = "faint", slot = 3, text = foeSpecies })
     local beforeSix = mine.exp
     for _ = 1, 6 do
       send(screen, "b-faintgate", { t = "exp", slot = 0, species = foeSpecies,
@@ -23656,7 +23758,7 @@ end
     screen.slots[0] = { species = screen.mine[screen.active].species,
                         hp = o.party[screen.active].hp,
                         maxHp = o.party[screen.active].stats.hp }
-    screen.slots[2] = { species = foeSpecies, hp = 0, maxHp = 40 }
+    screen.slots[3] = { species = foeSpecies, hp = 0, maxHp = 40 }
     return screen
   end
   local function fillRows(screen)
@@ -23685,7 +23787,7 @@ end
     local perAward = eng.Experience.gainFor(
       data.pokemon[foeSpecies], 40, false, 2, nil, data.constants)
 
-    send(screen, "d1", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "d1", { t = "faint", slot = 3, text = foeSpecies })
     send(screen, "d1", { t = "exp", slot = 0, mon = 0, species = foeSpecies,
                          level = 40, participants = 2 })
     eq(fighter.exp - fBefore, perAward, "active save mon paid its share")
@@ -23716,7 +23818,7 @@ end
     local fBefore, bBefore = fighter.exp, bench.exp
     local perAward = eng.Experience.gainFor(
       data.pokemon[foeSpecies], 40, false, 1, nil, data.constants)
-    send(screen, "d3", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "d3", { t = "faint", slot = 3, text = foeSpecies })
     send(screen, "d3", { t = "exp", slot = 0, species = foeSpecies,
                          level = 40, participants = 1 })
     eq(fighter.exp, fBefore, "the non-active party member is not paid")
@@ -23751,7 +23853,7 @@ end
     local perAward = eng.Experience.gainFor(
       data.pokemon[foeSpecies], 40, false, 2, nil, data.constants)
 
-    send(screen, "d4", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "d4", { t = "faint", slot = 3, text = foeSpecies })
     send(screen, "d4", { t = "exp", slot = 0, mon = 0, species = foeSpecies,
                          level = 40, participants = 2 })
     send(screen, "d4", { t = "exp", slot = 0, mon = 1, species = foeSpecies,
@@ -23780,7 +23882,7 @@ end
     local screen = newParticipationScreen({ party = party, mine = mine, battle = "d5" })
     local before = {}
     for i = 1, 6 do before[i] = party[i].exp end
-    send(screen, "d5", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "d5", { t = "faint", slot = 3, text = foeSpecies })
     for i = 1, 6 do
       send(screen, "d5", { t = "exp", slot = 0, mon = i - 1, species = foeSpecies,
                            level = 40, participants = 6 })
@@ -23810,7 +23912,7 @@ end
                                             inventory = { EXP_ALL = 1 } })
     local before = {}
     for i = 1, 3 do before[i] = party[i].exp end
-    send(screen, "d6", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "d6", { t = "faint", slot = 3, text = foeSpecies })
     for i = 1, 3 do
       send(screen, "d6", { t = "exp", slot = 0, mon = i - 1, species = foeSpecies,
                            level = 40, participants = 3 })
@@ -23846,7 +23948,7 @@ end
                                             inventory = { EXP_ALL = 1 } })
 
     -- faint #1: arms the credit, and pays this client nothing.
-    send(screen, "j3a", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "j3a", { t = "faint", slot = 3, text = foeSpecies })
     eq(screen.expAllCredit, true, "a foe faint ARMS the credit (true, not a count)")
 
     local before = {}
@@ -23861,7 +23963,7 @@ end
     eq(screen.expAllCredit, true, "...and the unspent credit is still just armed, not stacked")
 
     -- faint #2, and the two awards it pays this client.
-    send(screen, "j3a", { t = "faint", slot = 2, text = foeSpecies })
+    send(screen, "j3a", { t = "faint", slot = 3, text = foeSpecies })
     eq(screen.expAllCredit, true, "the second knockout re-arms rather than banking a second")
 
     local start = {}
