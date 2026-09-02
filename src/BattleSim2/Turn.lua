@@ -109,7 +109,7 @@ M.VERSION = 1
 -- Mirrored from Config rather than required, for the reason in events.lua:
 -- this directory runs where Config does not.
 M.MONS_PER_PARTY      = 6     -- Config.BATTLE_MON_MAX
-M.FIGHTERS_PER_SIDE   = 2     -- Config.COOP_SIDE
+M.FIGHTERS_PER_SIDE   = 3     -- Config.COOP_SIDE
 M.CHOICE_TIMEOUT      = 60    -- Config.BATTLE_CHOICE_TIMEOUT
 M.RECONNECT_GRACE     = 60    -- Config.BATTLE_RECONNECT_GRACE
 M.RESOLVE_TIMEOUT     = 30    -- Config.BATTLE_RESOLVE_TIMEOUT
@@ -130,8 +130,9 @@ M.MODES = {
 }
 M.SIDES = { "a", "b" }
 
--- Roster cap per side. coop_wild is 2v1 (humans on a, wild on b); other modes
--- keep a single per-side ceiling (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
+-- Roster cap per side. coop_wild is humans vs one wild (up to FIGHTERS_PER_SIDE
+-- humans on a, wild on b); other modes keep a single per-side ceiling
+-- (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
 local function maxFighters(mode, side)
   if mode == "coop_wild" then
     return (side == "a") and M.FIGHTERS_PER_SIDE or 1
@@ -323,6 +324,7 @@ local function copyMon(raw, fallback)
       moveIndex = max(1, int(raw.charging.moveIndex, 1)),
       effect = max(0, int(raw.charging.effect, 0)),
       targetSlot = int(raw.charging.targetSlot, nil),
+      moveId = str(raw.charging.moveId),
     }
   end
 
@@ -579,6 +581,10 @@ function M.create(opts)
     local sideMax = maxFighters(mode, side)
     if #roster > sideMax then
       return nil, "side " .. side .. " has more fighters than " .. mode .. " allows"
+    end
+    -- Hub opens coop_wild for 2 or 3 humans; a lone human is a solo wild.
+    if mode == "coop_wild" and side == "a" and #roster < 2 then
+      return nil, "side a has fewer fighters than coop_wild allows"
     end
     for index = 1, #roster do
       local entry = roster[index]
@@ -2381,7 +2387,11 @@ function Battle:_useMove(fighter, mon, opts)
   if not struggling and move.pp > 0 and not releasing and not choice.bideRelease then
     move.pp = move.pp - 1
   end
-  self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = move.id })
+  local chargingUp = Effects.isCharge(effectId) and not mon.charging
+  self:_emit("anim", {
+    slot = fighter.slot, side = fighter.side, text = move.id,
+    amount = chargingUp and 1 or nil,
+  })
   self:_say(mon.species .. " used " .. moveLabel(move))
 
   if choice.bideRelease and mon.bide then
@@ -2402,9 +2412,10 @@ function Battle:_useMove(fighter, mon, opts)
       moveIndex = choice.move,
       effect = effectId,
       targetSlot = targetSlot,
+      moveId = move.id,
     }
-    if Effects.isFly(effectId) then mon.invulnerable = true end
-    self:_say(Effects.chargeMessage(mon, effectId))
+    if Effects.vanishes(effectId, move) then mon.invulnerable = true end
+    self:_say(Effects.chargeMessage(mon, effectId, move.id))
     self:_markLastMove(mon, choice.move)
     return
   end
@@ -2415,13 +2426,20 @@ function Battle:_useMove(fighter, mon, opts)
   end
 
   if defender.invulnerable then
-    self:_say("But it failed")
-    if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
-    if Effects.isJumpKick(effectId) then
-      self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
+    local chargeMoveId = defender.charging and defender.charging.moveId
+    if not chargeMoveId and defender.charging then
+      local charged = defender.moves and defender.moves[defender.charging.moveIndex]
+      chargeMoveId = charged and charged.id or nil
     end
-    self:_markLastMove(mon, choice.move)
-    return
+    if not Effects.hitsInvulnerable(chargeMoveId, move) then
+      self:_say("But it failed")
+      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isJumpKick(effectId) then
+        self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
+      end
+      self:_markLastMove(mon, choice.move)
+      return
+    end
   end
 
   if Effects.isMirrorMove(effectId) and not mirrorCopy then

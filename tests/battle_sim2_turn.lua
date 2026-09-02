@@ -93,6 +93,11 @@ local function eq(actual, expected, what)
   end
 end
 
+local function listEq(actual, expected, what)
+  if type(actual) ~= "table" then return eq(tostring(actual), table.concat(expected, ","), what) end
+  eq(table.concat(actual, ","), table.concat(expected, ","), what)
+end
+
 -- ------------------------------------------------------------------
 -- fixtures
 -- ------------------------------------------------------------------
@@ -188,6 +193,17 @@ local function coopSides(aMons, bMons)
   }
 end
 
+local function coopWildSides3(aMons, bMon)
+  return {
+    a = {
+      { playerId = "a1", name = "Ann", mons = aMons[1] },
+      { playerId = "a2", name = "Abe", mons = aMons[2] },
+      { playerId = "a3", name = "Cal", mons = aMons[3] },
+    },
+    b = { { playerId = "wild", name = "Wild", mons = { bMon } } },
+  }
+end
+
 -- ------------------------------------------------------------------
 -- 1. the exp mode gate
 -- ------------------------------------------------------------------
@@ -275,8 +291,8 @@ do
   })
   -- coop_wild seats the wild mon on b under the id the roster gave it.
   local events = play(battle, function(b)
-    b:submitChoice("a1", { action = "fight", move = 0, target = 2 })
-    b:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 3 })
     b:autoPick("npc")
   end)
   local exps = ofKind(events, "exp")
@@ -363,8 +379,8 @@ do
         mon({ species = "Delta", maxHp = 200, spe = 10 }) }),
   })
   local events = play(battle, function(b)
-    b:submitChoice("a1", { action = "fight", move = 0, target = 2 })
-    b:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 3 })
     b:autoPick("npc")
   end, 3)
 
@@ -385,7 +401,7 @@ do
   end
   ok(sawFaint, "the KO that opens the phase really happened")
   ok(solicited ~= nil, "a replacement solicitation was raised")
-  eq(solicited and solicited.slot, 2, "...naming the seat that owes, slot 2")
+  eq(solicited and solicited.slot, 3, "...naming the seat that owes, slot 3")
 
   -- The turn number does not move across the phase: the fight is still on the
   -- turn whose faint opened it.
@@ -427,13 +443,13 @@ do
         mon({ species = "Delta", maxHp = 200, spe = 10 }) }),
   })
   drain(battle)
-  battle:submitChoice("a1", { action = "fight", move = 0, target = 2 })
-  battle:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
   battle:autoPick("npc")
   drain(battle)
   eq(battle:snapshot().phase, "replace",
      "the KO left the machine in the replace phase")
-  eq(battle:submitChoice("a1", { action = "fight", move = 0, target = 2 }), false,
+  eq(battle:submitChoice("a1", { action = "fight", move = 0, target = 3 }), false,
      "a standing seat's fight is refused during the phase")
   eq(battle:submitChoice("a1", { action = "cancel" }), false,
      "...and so is a cancel: a forced replacement cannot be taken back")
@@ -459,8 +475,8 @@ do
         mon({ species = "Delta", maxHp = 400, spe = 10 }) }),
   })
   drain(battle)
-  battle:submitChoice("a1", { action = "fight", move = 0, target = 2 })
-  battle:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
   battle:autoPick("npc")
   drain(battle)
   eq(battle:snapshot().phase, "replace", "the KO opened the phase")
@@ -472,7 +488,7 @@ do
      "the sweep filled the owed replacement and closed the phase")
   local sent = 0
   for _, event in ipairs(drain(battle)) do
-    if event.t == "send" and event.slot == 2 then sent = sent + 1 end
+    if event.t == "send" and event.slot == 3 then sent = sent + 1 end
   end
   ok(sent > 0, "...and the successor really was fielded")
 end
@@ -486,8 +502,8 @@ end
 -- swings at whoever is left.
 
 do
-  -- Two foe seats.  a1 (fastest) empties slot 2; a2 aimed there too and must
-  -- land on slot 3 -- rule (b), the nearest living opposing seat.
+  -- Two foe seats.  a1 (fastest) empties slot 3; a2 aimed there too and must
+  -- land on slot 4 -- rule (b), the nearest living opposing seat.
   local battle = battleOf({
     mode = "coop_pvp", seed = 90109,
     sides = {
@@ -506,8 +522,8 @@ do
     },
   })
   drain(battle)
-  battle:submitChoice("a1", { action = "fight", move = 0, target = 2 })
-  battle:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
   battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
   battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
   local events = drain(battle)
@@ -521,11 +537,11 @@ do
   end
   ok(not fizzled, "the slower ally does not fizzle on the seat its partner emptied")
 
-  local hitSlot3 = false
+  local hitSlot4 = false
   for _, event in ipairs(events) do
-    if event.t == "damage" and event.slot == 3 then hitSlot3 = true end
+    if event.t == "damage" and event.slot == 4 then hitSlot4 = true end
   end
-  ok(hitSlot3, "...it swings at the nearest living opposing seat instead")
+  ok(hitSlot4, "...it swings at the nearest living opposing seat instead")
 end
 
 -- Nothing standing opposite: the action is skipped rather than redirected onto
@@ -546,8 +562,8 @@ do
     },
   })
   drain(battle)
-  battle:submitChoice("a1", { action = "fight", move = 0, target = 2 })
-  battle:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
   battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
   local events = drain(battle)
   local hitOwnSide = false
@@ -606,6 +622,19 @@ end
 -- point is that even a seat that HAS one never spends it, so a hub seeding the
 -- wrong kit cannot put a Potion in a wild monster's mouth.
 
+-- 1v1 wild keeps a lone human; coop_wild now refuses that seating, so the
+-- partner is a dummy who never acts (timeout auto-picks a weak tap).
+local function wildHumans(mode, p1)
+  if mode == "coop_wild" then
+    return {
+      p1,
+      { playerId = "p2", name = "Pat",
+        mons = { mon({ species = "Gamma", maxHp = 200, spe = 1 }) } },
+    }
+  end
+  return { p1 }
+end
+
 for _, mode in ipairs({ "wild", "coop_wild" }) do
   do
     local battle = battleOf({
@@ -613,10 +642,10 @@ for _, mode in ipairs({ "wild", "coop_wild" }) do
       choiceTimeout = 10,
       seed = 88010,
       sides = {
-        a = {
-          { playerId = "p1", name = "Ann",
-            mons = { mon({ species = "Alpha", maxHp = 200, spe = 90 }) } },
-        },
+        a = wildHumans(mode, {
+          playerId = "p1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 200, spe = 90 }) },
+        }),
         b = {
           { playerId = "wild", name = "Wild",
             -- Hurt below half and poisoned: a trainer seat heals or cures here.
@@ -641,11 +670,11 @@ for _, mode in ipairs({ "wild", "coop_wild" }) do
       mode = mode,
       seed = 88011,
       sides = {
-        a = {
-          { playerId = "p1", name = "Ann",
-            mons = { mon({ species = "Alpha", maxHp = 200, spe = 90 }) },
-            bag = { POTION = 1 } },
-        },
+        a = wildHumans(mode, {
+          playerId = "p1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 200, spe = 90 }) },
+          bag = { POTION = 1 },
+        }),
         b = {
           { playerId = "wild", name = "Wild",
             mons = { mon({ species = "Beta", maxHp = 200, hp = 40, spe = 10 }) },
@@ -695,8 +724,8 @@ for _, case in ipairs({
   drain(battle)
   local onSlot0, onSlot1 = 0, 0
   for _ = 1, 10 do
-    battle:submitChoice("p1", { action = "fight", move = 0, target = 2 })
-    battle:submitChoice("p2", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("p1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("p2", { action = "fight", move = 0, target = 3 })
     for i = 1, case.foes do battle:autoPick("n" .. i) end
     for _, event in ipairs(drain(battle)) do
       if event.t == "damage" and event.side == "a" then
@@ -720,6 +749,200 @@ do
   for _ = 1, 32 do seen[battle:_autoTarget(npc).slot] = true end
   eq(battle.rng:state(), before, "aim: 32 draws later the battle RNG has not moved")
   ok(seen[0] and seen[1], "aim: and those draws reached both player seats")
+end
+
+do
+  eq(Events.fieldSlot("b", 1), 3, "1v1 foe field slot is 3 not 2")
+  eq(Events.fieldSlot("a", 1), 0, "...side a index 1 is slot 0")
+  eq(Events.fieldSlot("b", 2), 4, "...side b index 2 is slot 4")
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_pvp",
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = { mon({ maxHp = 200, spe = 80 }) } },
+        { playerId = "a2", name = "Abe", mons = { mon({ maxHp = 200, spe = 70 }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = { mon({ maxHp = 200, spe = 60 }) } },
+        { playerId = "b2", name = "Bea", mons = { mon({ maxHp = 200, spe = 50 }) } },
+      },
+    },
+  })
+  drain(battle)
+  local slots = {}
+  for _, entry in ipairs(battle:snapshot().field) do slots[#slots + 1] = entry.slot end
+  listEq(slots, { 0, 1, 3, 4 }, "2v2 coop_pvp uses slots 0, 1, 3, 4")
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_wild", seed = 90112,
+    sides = coopWildSides3(
+      { { mon({ maxHp = 200, spe = 80 }) },
+        { mon({ maxHp = 200, spe = 70 }) },
+        { mon({ maxHp = 200, spe = 60 }) } },
+      mon({ maxHp = 200, spe = 10 })),
+  })
+  drain(battle)
+  eq(#battle.bySide.a, 3, "coop_wild 3-human create: side a length 3")
+  eq(#battle.bySide.b, 1, "coop_wild 3-human create: side b length 1")
+  eq(#battle:snapshot().field, 4, "coop_wild create accepts 3v1 seating")
+end
+
+do
+  local battle, err = Turn.create({
+    mode = "coop_wild", seed = 90113,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mon() } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mon() } } },
+    },
+  })
+  ok(battle == nil, "coop_wild refuses one human on side a")
+  ok(type(err) == "string", "refusal names why: " .. tostring(err))
+end
+
+do
+  local battle, err = Turn.create({
+    mode = "coop_wild", seed = 90114,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = { mon() } },
+        { playerId = "a2", name = "Abe", mons = { mon() } },
+        { playerId = "a3", name = "Cal", mons = { mon() } },
+        { playerId = "a4", name = "Dan", mons = { mon() } },
+      },
+      b = { { playerId = "wild", name = "Wild", mons = { mon() } } },
+    },
+  })
+  ok(battle == nil, "coop_wild refuses four humans on side a")
+  ok(type(err) == "string" and err:find("side a", 1, true) ~= nil,
+     "refusal names side a: " .. tostring(err))
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_pvp", seed = 90115,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = { mon({ maxHp = 200, spe = 80 }) } },
+        { playerId = "a2", name = "Abe", mons = { mon({ maxHp = 200, spe = 70 }) } },
+        { playerId = "a3", name = "Cal", mons = { mon({ maxHp = 200, spe = 60 }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = { mon({ maxHp = 200, spe = 55 }) } },
+        { playerId = "b2", name = "Bea", mons = { mon({ maxHp = 200, spe = 50 }) } },
+        { playerId = "b3", name = "Ben", mons = { mon({ maxHp = 200, spe = 45 }) } },
+      },
+    },
+  })
+  drain(battle)
+  eq(#battle:snapshot().field, 6, "3v3 coop_pvp create puts six fighters on the field")
+  local slots = {}
+  for _, entry in ipairs(battle:snapshot().field) do slots[#slots + 1] = entry.slot end
+  listEq(slots, { 0, 1, 2, 3, 4, 5 }, "3v3 uses field slots 0 through 5")
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_pvp", seed = 90116,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mon({ maxHp = 200, spe = 80 }) } } },
+      b = {
+        { playerId = "b1", name = "Bob", mons = { mon({ maxHp = 200, spe = 60 }) } },
+        { playerId = "b2", name = "Bea", mons = { mon({ maxHp = 200, spe = 50 }) } },
+        { playerId = "b3", name = "Ben", mons = { mon({ maxHp = 200, spe = 40 }) } },
+      },
+    },
+  })
+  drain(battle)
+  for _, slot in ipairs({ 3, 4, 5 }) do
+    ok(battle:submitChoice("a1", { action = "fight", move = 0, target = slot }) == true,
+       "coop_pvp: target " .. slot .. " is accepted while three foes live")
+    ok(battle:submitChoice("a1", { action = "cancel" }) == true,
+       "...and can be taken back before the turn closes")
+  end
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_npc", seed = 90117,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = { mon({ maxHp = 200, spe = 80 }) } },
+        { playerId = "a2", name = "Abe", mons = { mon({ maxHp = 200, spe = 70 }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = { mon({ maxHp = 200, spe = 60 }) } },
+        { playerId = "b2", name = "Bea", mons = { mon({ maxHp = 200, spe = 50 }) } },
+        { playerId = "b3", name = "Ben", mons = { mon({ maxHp = 200, spe = 40 }) } },
+      },
+    },
+  })
+  drain(battle)
+  for _, slot in ipairs({ 3, 4, 5 }) do
+    ok(battle:submitChoice("a1", { action = "fight", move = 0, target = slot }) == true,
+       "coop_npc: target " .. slot .. " is accepted while three foes live")
+    ok(battle:submitChoice("a1", { action = "cancel" }) == true,
+       "...and can be taken back before the turn closes")
+  end
+end
+
+do
+  local battle = battleOf({ id = "aim", mode = "coop_npc", seed = 4242, sides = aimSides(3) })
+  drain(battle)
+  local onSlot0, onSlot1 = 0, 0
+  for _ = 1, 10 do
+    battle:submitChoice("p1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("p2", { action = "fight", move = 0, target = 3 })
+    for i = 1, 3 do battle:autoPick("n" .. i) end
+    for _, event in ipairs(drain(battle)) do
+      if event.t == "damage" and event.side == "a" then
+        if event.slot == 0 then onSlot0 = onSlot0 + 1 else onSlot1 = onSlot1 + 1 end
+      end
+    end
+    if battle.result then break end
+  end
+  ok(onSlot0 > 0, "aim/3foe: npcs still attack the first player")
+  ok(onSlot1 > 0, "aim/3foe: and they attack the second one too")
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_pvp", seed = 90118,
+    sides = {
+      a = {
+        { playerId = "fast", name = "Fast",
+          mons = { mon({ maxHp = 200, atk = 200, spe = 99,
+                         moves = { move({ power = 150 }) } }) } },
+        { playerId = "slow", name = "Slow",
+          mons = { mon({ maxHp = 200, atk = 60, spe = 10,
+                         moves = { move({ power = 40 }) } }) } },
+      },
+      b = {
+        { playerId = "foeA", name = "FoeA",
+          mons = { mon({ maxHp = 12, spe = 5 }) } },
+        { playerId = "foeB", name = "FoeB",
+          mons = { mon({ maxHp = 400, spe = 5 }) } },
+        { playerId = "foeC", name = "FoeC",
+          mons = { mon({ maxHp = 400, spe = 4 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("foeC", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+  local hitSlot4 = false
+  for _, e in ipairs(events) do
+    if e.t == "damage" and e.side == "b" and e.slot == 4 then hitSlot4 = true end
+  end
+  ok(hitSlot4, "retarget/3foe: slower ally retargets to foeB at slot 4, the nearest living seat")
 end
 
 -- One living foe is answered without a draw at all, which is why every 1v1 and
@@ -992,6 +1215,102 @@ do
   ok(battle:submitChoice("p1", { action = "fight", move = 0 }),
      "gen2: FIGHT with nobody to aim at is accepted as a skip")
   ok(battle:outcome() ~= nil, "gen2: and the skip closes the fight")
+end
+
+-- ------------------------------------------------------------------
+-- two-turn charge / vanish (Gen 2 exceptions + EFFECT_* upload aliases)
+-- ------------------------------------------------------------------
+
+do
+  local Effects = need("BattleSim2/Effects")
+  eq(Effects.idOf("EFFECT_FLY"), 43, "gen2: EFFECT_FLY maps onto FLY_EFFECT")
+  eq(Effects.idOf("EFFECT_SOLARBEAM"), 39, "gen2: EFFECT_SOLARBEAM maps onto CHARGE")
+  eq(Effects.idOf("EFFECT_SKULL_BASH"), 39, "gen2: EFFECT_SKULL_BASH maps onto CHARGE")
+  eq(Effects.idOf("FLY_EFFECT"), 43, "gen2: Gen1 FLY_EFFECT name still resolves")
+  ok(Effects.hitsInvulnerable("FLY", { id = "GUST" }), "gen2: Gust reaches Fly")
+  ok(Effects.hitsInvulnerable("FLY", { id = "TWISTER" }), "gen2: Twister reaches Fly")
+  ok(Effects.hitsInvulnerable("FLY", { id = "WHIRLWIND" }), "gen2: Whirlwind reaches Fly")
+  ok(Effects.hitsInvulnerable("DIG", { id = "EARTHQUAKE" }), "gen2: Earthquake reaches Dig")
+  ok(Effects.hitsInvulnerable("DIG", { id = "FISSURE" }), "gen2: Fissure reaches Dig")
+  ok(Effects.hitsInvulnerable("DIG", { id = "MAGNITUDE" }), "gen2: Magnitude reaches Dig")
+  ok(not Effects.hitsInvulnerable("FLY", { id = "SWIFT" }), "gen2: Swift misses Fly")
+  ok(not Effects.hitsInvulnerable("DIG", { id = "TACKLE" }), "gen2: Tackle misses Dig")
+  local mon = { species = "Alpha" }
+  eq(Effects.chargeMessage(mon, 39, "SOLARBEAM"), "Alpha took in sunlight")
+  eq(Effects.chargeMessage(mon, 39, "SKULL_BASH"), "Alpha lowered its head")
+  eq(Effects.chargeMessage(mon, 39, "RAZOR_WIND"), "Alpha made a whirlwind")
+end
+
+do
+  local battle = battleOf({
+    seed = 5151,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({
+                species = "Alpha", maxHp = 200, spe = 120, atk = 80,
+                moves = { move({ id = "DIG", power = 60, effect = 39, pp = 10 }) },
+              }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({
+                species = "Beta", maxHp = 200, spe = 1, def = 40, atk = 80,
+                moves = { move({ id = "EARTHQUAKE", power = 80, accuracy = 255 }) },
+              }) } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn1 = drain(battle)
+  local dug, failed, damaged = false, false, false
+  for _, event in ipairs(turn1) do
+    if event.t == "msg" and event.text:find("dug a hole", 1, true) then dug = true end
+    if event.t == "msg" and event.text:find("But it failed", 1, true) then failed = true end
+    if event.t == "damage" and event.slot == 0 then damaged = true end
+  end
+  ok(dug, "gen2: DIG announces dug a hole")
+  ok(not failed, "gen2: Earthquake reaches a digging target")
+  ok(damaged, "gen2: Earthquake damages the digging user")
+
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn2 = drain(battle)
+  local released, foeDamaged = false, false
+  for _, event in ipairs(turn2) do
+    if event.t == "anim" and event.text == "DIG" and event.amount == nil then
+      released = true
+    end
+    if event.t == "damage" and event.slot ~= 0 then foeDamaged = true end
+  end
+  ok(released, "gen2: DIG turn two auto-releases")
+  ok(foeDamaged, "gen2: DIG turn two still hits after being struck underground")
+end
+
+do
+  local battle = battleOf({
+    seed = 5252,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({
+                species = "Alpha", maxHp = 200, spe = 120,
+                moves = { move({ id = "FLY", power = 70, effect = 43 }) },
+              }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({
+                species = "Beta", maxHp = 200, spe = 1, atk = 80,
+                moves = { move({ id = "SWIFT", power = 60, effect = 17, accuracy = 255 }) },
+              }) } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn1 = drain(battle)
+  local failed, damaged = false, false
+  for _, event in ipairs(turn1) do
+    if event.t == "msg" and event.text:find("But it failed", 1, true) then failed = true end
+    if event.t == "damage" and event.slot == 0 then damaged = true end
+  end
+  ok(failed, "gen2: Swift misses a flying target")
+  ok(not damaged, "gen2: Swift deals no damage while the target is airborne")
 end
 
 -- ------------------------------------------------------------------

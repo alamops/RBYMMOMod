@@ -36,6 +36,15 @@ load_env() {
   done < "$file"
 }
 
+# Worktrees ship no .env (gitignored). Fill empty keys from the main clone
+# so ROM_PATH / GOLD_ROM_PATH autopick the same way they do on main.
+# `load_env` never overwrites a key that is already set.
+load_canon_env() {
+  local canon="${RBY_MMO_ENV:-$HOME/Projects/alamops/RBYMMOMod/.env}"
+  [ -f "$canon" ] || return 0
+  load_env "$canon"
+}
+
 # Which game a ROM actually is, by SHA-1. Empty when it cannot be told.
 rom_version_of() {
   local path="$1"

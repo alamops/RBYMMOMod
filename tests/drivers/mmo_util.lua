@@ -1006,6 +1006,39 @@ local PHASE = {
   quad_fought            = 900,  -- a whole 2-on-2 driven by four tappers
   quad_ranked            = 360,  -- the hub scoring two winners and two losers
   quad_left              = 300,  -- menus + LEAVE
+
+  -- ------- six-client 3×3 PvP (tests/drivers/run-hex-e2e.sh)
+  --
+  -- Two parties of three, one 3-on-3 between them. Budgets are quad's plus
+  -- slack for six LOVE VMs on one machine and two invite rounds per party.
+  hex_ready              = 1200, -- cold boot + menus + a code, times six
+  hex_seen               = 360,  -- five peers to arrive on each roster
+  hex_paired             = 720,  -- two invites per party + both flags
+  hex_agreed             = 720,  -- six-way yes + six parties to a host
+  hex_fought             = 1200, -- a whole 3-on-3 driven by six tappers
+  hex_ranked             = 480,  -- the hub scoring three winners and losers
+  hex_left               = 360,  -- menus + LEAVE
+
+  -- ------- party-size mismatch (tests/drivers/run-party-mismatch-e2e.sh)
+  --
+  -- Five guests: party of three vs party of two. The ask must refuse with
+  -- spoken mismatch copy and clear without hanging.
+  mismatch_ready         = 900,  -- cold boot + menus + a code, times five
+  mismatch_seen          = 300,  -- four peers on each roster
+  mismatch_paired        = 600,  -- grow a 3-party and a 2-party at once
+  mismatch_challenged    = 240,  -- menus + the bad PARTY BATTLE row
+  mismatch_cleared       = 240,  -- the mismatch line + ask cleared
+  mismatch_left          = 300,  -- menus + LEAVE
+
+  -- ------- three-client PvE (tests/drivers/run-trip-e2e.sh)
+  --
+  -- One party of three on the Node hub: coop_npc then coop_wild field legs.
+  trip_ready             = 900,  -- cold boot + menus + a code, times three
+  trip_seen              = 240,  -- two peers on each roster
+  trip_party             = 480,  -- two invites + party-of-three flag
+  trip_npc               = 600,  -- stage trainer + 3-wide coop_npc field
+  trip_wild              = 600,  -- stage wild + 4-slot coop_wild field
+  trip_left              = 300,  -- menus + LEAVE
 }
 
 local SYNC_DIR = os.getenv("MMO_SYNC_DIR") or "/tmp/rby_mmo_sync"
@@ -1026,6 +1059,12 @@ function M.patience(name)
   -- "incomplete" about a leg that was working.
   local shared = name:match("^quad_%a_(.+)$")
   if shared and PHASE["quad_" .. shared] then return PHASE["quad_" .. shared] end
+  shared = name:match("^hex_%a_(.+)$")
+  if shared and PHASE["hex_" .. shared] then return PHASE["hex_" .. shared] end
+  shared = name:match("^mismatch_%a_(.+)$")
+  if shared and PHASE["mismatch_" .. shared] then return PHASE["mismatch_" .. shared] end
+  shared = name:match("^trip_%a_(.+)$")
+  if shared and PHASE["trip_" .. shared] then return PHASE["trip_" .. shared] end
   return 180
 end
 

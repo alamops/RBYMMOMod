@@ -22,6 +22,48 @@ here must match `manifest.version`.
   Gold hub is not reset to 1. The VPS section of `server/README.md` now
   points at the pair instead of five commands to copy.
 
+## [1.2.0] - 2026-09-01
+
+### Changed
+
+- **Parties hold three, and a 3-wide fight is legal.** `PARTY_MAX` is 3.
+  A pair can invite a third; one of three leaving leaves the other two.
+  Party PvP is 2-on-2 or 3-on-3 only (mismatch is refused). A 3-player
+  party vs a trainer seats up to 3 foe mons; vs wild still one wild.
+  **PROTOCOL is now 27.** Older hubs still pair-only / 4-slot field.
+
+## [1.1.11] - 2026-09-01
+
+### Fixed
+
+- **Dig, Fly, and the other two-turn charge moves now play as two turns.**
+  Dig slides under the field and stays gone; Fly lifts off and stays gone;
+  both come back on the hitting turn. SolarBeam, Skull Bash, Razor Wind and
+  Sky Attack stay visible and only glow on the setup beat. Hits-while-hidden
+  follow the cartridge per generation (Gen 1 Swift / Thunder; Gen 2
+  Gust / Twister / Earthquake and the rest of the engine table). A faint or
+  send-out drops the hide so the sink and the replacement stay visible. Gold
+  uploads `EFFECT_FLY` / `EFFECT_SOLARBEAM` as charge moves instead of
+  resolving them as a one-turn hit.
+
+## [1.1.10] - 2026-09-01
+
+### Fixed
+
+- **Mons can learn or replace a move during a mediated battle.** A
+  level-up (or the evolution that follows) used to write the new move
+  onto the save copy only — or bank a full moveset until after the
+  fight — so the FIGHT menu still showed the uploaded sheet and the
+  referee still executed the old move at that index. A free slot now
+  lands on the save mon *and* the fight sheet, then goes out as
+  `mmo.battle_moveset` (PROTOCOL 28) so the new move is usable this
+  fight. A full set on 1v1 / wild opens the generation's own forget
+  prompt mid-award (Gen 1 `MoveLearnMenu`, Gen 2 `Game2:learnMoveOn`)
+  and holds that client's queue until they answer. Co-op still banks
+  the fifth move for after the fight — a forget menu would stall the
+  other humans through the hub's choice timeout. Leftovers still ride
+  out with `toLearn` if they leave before answering. Both gens.
+
 ## [1.1.9] - 2026-08-31
 
 ### Changed

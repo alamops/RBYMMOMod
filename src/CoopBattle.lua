@@ -83,6 +83,9 @@ local EvolveFx = need("EvolveFx")
 -- its screen: what a party looks like on the wire must not depend on how many
 -- monsters are on the field.
 local Mediated = need("MediatedBattle")
+-- Free-slot apply + the generation's own forget prompt. Shared with
+-- MediatedBattle so a 1v1 and a 2-on-2 cannot disagree about "already knows".
+local LearnMove = need("LearnMove")
 
 local M = {}
 M.__index = M
@@ -1468,6 +1471,9 @@ function M:update(dt)
   -- Arena effects advance on wall time whatever the phase: a lunge or a sink
   -- started under one phase must not freeze because a menu opened over it.
   self:stepFx(dt)
+  -- Gen 2 charge can set vanished/chargeMove with no anim row. Start the
+  -- hide from that state so Dig/Fly still leave the seat.
+  self:syncVanishHolds()
   -- Grow-in advances on the same fixed step as the engine's AnimateSendingOutMon.
   if self.growIn then
     self.growIn.frame = (self.growIn.frame or 0) + 1
@@ -2621,7 +2627,7 @@ end
 --
 -- Answered off the field rather than off the trainer record, because that is
 -- the description all four clients were built from: a co-op battle against an
--- NPC carries two ownerless slots and a party battle carries none.
+-- NPC carries ownerless slots and a party battle carries none.
 -- `self.trainer` would be a weaker test -- a script-driven battle need not name
 -- a trainer at all -- and this is the question the run rule turns on.
 function M:partyBattle()
@@ -3939,6 +3945,10 @@ function M:startFaint(row)
   battler.displayFainted = true
   self.hitSlot = row.slot
   self.faintFx = { battler = battler, slot = row.slot, frames = FAINT_FRAMES }
+  -- Drop a Dig/Fly hold first: `fxSeat.hidden` would skip the sink (and a
+  -- later send-out on this slot would stay invisible). Same reason ballFlow
+  -- is dropped when a pic is released.
+  self:clearVanishAt(row.slot)
   -- The arena's half of the same fall. `faintFx` above stays the sequencer --
   -- it is what holds the message queue for its thirty frames -- and this is
   -- what the seat is actually drawn through while it does (`Battlefield.fxSeat`
@@ -4019,6 +4029,8 @@ end
 -- screen may finally show what the field has shown since the `send` landed.
 function M:applySwap(row)
   self:displayShadow()[row.swap] = row.battler
+  -- A replacement must not inherit the predecessor's Dig/Fly hide.
+  self:clearVanishAt(row.swap)
   if row.battler == nil then return end
   -- The seat is let go of here and nowhere else. Whatever put the hold up --
   -- the opening hide (`enter`), or the ball row in front of this one -- this
@@ -4931,10 +4943,10 @@ function M:foeSide(index)
   return (slot ~= nil and ours ~= nil and slot.side ~= ours) and true or false
 end
 
--- Visual lane for a field slot: 1-2 = your pair (bottom-left), 3-4 = theirs
--- (top-right). Field indices stay a1,a2,b1,b2 on the wire; only drawing keys
--- off this remapping so every client still sees itself on the Gen 1 "player"
--- half of the screen.
+-- Visual lane for a field slot: allies first (bottom-left), then foes
+-- (top-right) offset by #ally. Field indices stay on the wire; only drawing
+-- keys off this remapping so every client still sees itself on the Gen 1
+-- "player" half of the screen.
 function M:viewPos(index)
   if type(index) ~= "number" or not self.sim then return index end
   local mine = self:mySlot()
@@ -4952,7 +4964,7 @@ function M:viewPos(index)
     if id == index then return i end
   end
   for i, id in ipairs(foe) do
-    if id == index then return i + 2 end
+    if id == index then return i + #ally end
   end
   return index
 end
@@ -4973,12 +4985,11 @@ function M:panelSlots(which)
   return rows
 end
 
--- How big slot `index` draws. Near pair (view lanes 1–2) uses ALLY_SCALE so
--- the backs fill the field down to the text box; far pair stays FOE_SCALE.
+-- How big slot `index` draws. Own side uses ALLY_SCALE so the backs fill
+-- the field down to the text box; the far side stays FOE_SCALE.
 function M:scaleFor(index)
-  local pos = self:viewPos(index)
-  if not pos then return PIC_SCALE end
-  if pos <= 2 then return ALLY_SCALE end
+  if index == nil then return PIC_SCALE end
+  if not self:foeSide(index) then return ALLY_SCALE end
   return FOE_SCALE
 end
 
@@ -6023,6 +6034,9 @@ local FX_SPAN = {
   -- is a visual one; a spec that genuinely needs longer carries its own
   -- `duration` (Explosion, a Poke Flute).
   vfx    = 0.50,
+  dig    = 0.45,
+  fly    = 0.45,
+  emerge = 0.35,
   -- Mid-battle evolution movie. The real lifetime is EvolveFx.MOVIE_SECONDS
   -- (the cart's 368-frame flash); this default is only what emitFx needs to
   -- accept the kind, and startEvolve overwrites duration.
@@ -6203,6 +6217,13 @@ local BALL_FX = {
 -- came next. `Battlefield.fxSeat` makes the same call on its side of the wire.
 local BALL_HIDE_FX = { recall = true, wobble = true }
 
+local VANISH_MOVES = { DIG = true, FLY = true }
+local CHARGE_SETUP_MOVES = {
+  DIG = true, FLY = true,
+  SOLARBEAM = true, SKULL_BASH = true, RAZOR_WIND = true, SKY_ATTACK = true,
+}
+local VANISH_HIDE_FX = { dig = true, fly = true }
+
 -- The fields a `vfx` record carries beyond the shared kind / slot / side / t.
 -- `fromSlot` is a *field slot*; `battlefieldFxCtx` turns it into the seat index
 -- Battlefield matches on, the same projection every other field here gets.
@@ -6294,6 +6315,97 @@ function M:emitVfx(spec, targetSlot, fromSlot)
     seed = self.vfxSeed,
     fromSlot = fromSlot,
   })
+end
+
+function M:battlerAt(slotIndex)
+  if slotIndex == nil or not self.sim then return nil end
+  local slot = self.sim.slot and self.sim:slot(slotIndex)
+  if slot and slot.battler then return slot.battler end
+  local field = self.sim.fieldObj or self.sim.field
+  local fslot = field and field.slots and field.slots[slotIndex]
+  return fslot and fslot.battler or nil
+end
+
+-- Dig vs Fly, and only those. Charging SolarBeam is not a vanish.
+function M:slotVanishKind(slotIndex)
+  local battler = self:battlerAt(slotIndex)
+  if not battler then return nil end
+  local id = nil
+  local charging = battler.charging
+  if type(charging) == "table" then
+    id = charging.id or charging.moveId
+  elseif type(charging) == "string" then
+    id = charging
+  end
+  if id == nil then id = battler.chargeMove end
+  if type(id) == "string" then id = string.upper(id) end
+  if id == "DIG" then return "dig" end
+  if id == "FLY" then return "fly" end
+  if battler.vanished == true then return "fly" end
+  if battler.invulnerable == true then return "fly" end
+  return nil
+end
+
+function M:slotIsVanishing(slotIndex)
+  return self:slotVanishKind(slotIndex) ~= nil
+end
+
+-- Engine Gen 2 charge prints a line and returns with no anim. Pick up the
+-- hide from battler.vanished / chargeMove so the seat still empties.
+function M:syncVanishHolds()
+  if not self:usesBattlefield() or not self.sim then return end
+  local count = (self.sim.slots and #self.sim.slots) or 0
+  if count < 1 then count = 4 end
+  for i = 1, count do
+    if self:sinkingAt(i) then
+      -- Don't re-hide a KO; startFaint already dropped the hold so the sink
+      -- can play.
+    else
+      local battler = self:battlerAt(i)
+      local kind = (battler and not battler.displayFainted)
+        and self:slotVanishKind(i) or nil
+      if kind and not (self.vanishFlow and self.vanishFlow[i]) then
+        self:startVanish(kind, i)
+        self:startChargeVfx({ anim = kind == "dig" and "DIG" or "FLY" }, i)
+      end
+    end
+  end
+end
+
+function M:dropVanishFx(slotIndex)
+  local list = self.fx
+  if type(list) ~= "table" then return end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    local hiding = type(fx) == "table" and VANISH_HIDE_FX[fx.kind]
+      and fx.slot == slotIndex
+    if not hiding then kept[#kept + 1] = fx end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+function M:clearVanishAt(slotIndex)
+  if self.vanishFlow then self.vanishFlow[slotIndex] = nil end
+  self:dropVanishFx(slotIndex)
+end
+
+function M:startVanish(kind, slotIndex)
+  if not self:usesBattlefield() then return nil end
+  if not VANISH_HIDE_FX[kind] or slotIndex == nil then return nil end
+  self:dropVanishFx(slotIndex)
+  self.vanishFlow = self.vanishFlow or {}
+  self.vanishFlow[slotIndex] = kind
+  self:emitFx(kind, slotIndex)
+  return kind
+end
+
+function M:startChargeVfx(row, slotIndex)
+  if type(row) ~= "table" then return nil end
+  local spec = Vfx.CHARGE_STYLE and (Vfx.CHARGE_STYLE[row.anim]
+    or (row.anim == "SLIDE_DOWN_ANIM" and Vfx.CHARGE_STYLE.DIG)
+    or (row.anim == "TELEPORT" and Vfx.CHARGE_STYLE.FLY))
+  if not spec then return nil end
+  return self:emitVfx(spec, slotIndex, slotIndex)
 end
 
 -- The move a queued `anim` row names, as the engine's own record. nil for a
@@ -6583,6 +6695,7 @@ end
 function M:startSendBall(row)
   local index = type(row) == "table" and row.ballsend or nil
   if index == nil then return false end
+  self:clearVanishAt(index)
   self.introHide = self.introHide or {}
   self.introHide[index] = true
   self:emitFx("ball", index, true)
@@ -6621,6 +6734,9 @@ function M:stepFx(dt)
           -- is a seat with nothing standing on it, and the row that undoes that
           -- is still to come. `startBallFx` replaces it as each row plays and
           -- `clearBallFlow` drops it when the monster comes back out.
+          kept[#kept + 1] = fx
+        elseif VANISH_HIDE_FX[fx.kind] and self.vanishFlow
+            and fx.slot and self.vanishFlow[fx.slot] then
           kept[#kept + 1] = fx
         end
       else
@@ -7391,12 +7507,28 @@ function M:startAnim(row)
       -- Still nobody: emit nothing. A lunge that cannot name a seat is a
       -- record the ctx projection throws away one frame later.
       if lunger ~= nil then
-        self:emitFx("lunge", lunger)
-        -- ...and the move's own particles on the same beat, because the lean
-        -- and what leaves the monster are one action. Emitted for every move,
-        -- not only the ones that connect: a status move never reaches a drain
-        -- row and neither does a miss.
-        self:startMoveVfx(row, lunger)
+        local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
+        local slideDown = row.anim == "SLIDE_DOWN_ANIM"
+        local flyCharge = row.anim == "TELEPORT" and self:slotVanishKind(lunger) == "fly"
+        local already = self.vanishFlow and self.vanishFlow[lunger]
+        -- First DIG/FLY on a seat is the charge even without amount=1 (Gen 2
+        -- host-sim charge may omit the anim, and a mediated row may drop
+        -- amount). A second DIG/FLY with the hold open is the release.
+        local firstVanish = VANISH_MOVES[row.anim] and not already
+        if firstVanish or slideDown or flyCharge or (VANISH_MOVES[row.anim] and setup and not already) then
+          self:startVanish((row.anim == "DIG" or slideDown) and "dig" or "fly", lunger)
+          self:startChargeVfx(row, lunger)
+        elseif VANISH_MOVES[row.anim] and already then
+          self:clearVanishAt(lunger)
+          self:emitFx("emerge", lunger)
+          self:emitFx("lunge", lunger)
+          self:startMoveVfx(row, lunger)
+        elseif setup then
+          self:startChargeVfx(row, lunger)
+        else
+          self:emitFx("lunge", lunger)
+          self:startMoveVfx(row, lunger)
+        end
       end
     else
       self:startBallFx(row)
@@ -7955,10 +8087,11 @@ end
 -- the live party entry that the save keeps. Every client sees the event; three
 -- of them ignore it.
 --
--- With a free slot the move is simply learned. With four already known there
--- is a choice to make, and it needs a screen -- so it is remembered and put to
--- the player once the battle is over rather than opened on top of a battle
--- three other people are still fighting.
+-- A free slot is learned this fight (save mon, FIGHT overlay, PROTOCOL 28).
+-- A full set is still a choice only this owner can make -- and opening the
+-- forget menu here would stall the other humans through the hub's choice
+-- timeout -- so it is announced and banked for `offerForgets` after the
+-- screen pops. 1v1 / wild opens the prompt mid-award; see MediatedBattle.
 function M:learnMove(event)
   if event.slot ~= self.mine then return end
   local slot = self.sim:slot(self.mine)
@@ -7968,22 +8101,68 @@ function M:learnMove(event)
 end
 
 function M:teach(mon, name, moveId)
-  local def = (self.game.data.moves or {})[moveId]
-  if not def then return end
-  for _, known in ipairs(mon.moves or {}) do
-    if known.id == moveId then return end
-  end
+  local data = self.game and self.game.data
+  local status = LearnMove.apply(mon, moveId, data)
+  if status == "missing" or status == "known" then return end
+  local def = type(data) == "table" and (data.moves or {})[moveId] or nil
   name = name or "?"
 
-  if #(mon.moves or {}) < 4 then
-    mon.moves[#mon.moves + 1] = { id = moveId, pp = def.pp }
-    self:say(name .. " learned\n" .. (def.name or moveId) .. "!")
+  if status == "learned" then
+    self:say(name .. " learned\n" .. ((def and def.name) or moveId) .. "!")
+    self:syncFightMoves(mon)
     return
   end
 
   self.toLearn = self.toLearn or {}
   self.toLearn[#self.toLearn + 1] = { mon = mon, move = moveId }
-  self:say(name .. " is trying to\nlearn " .. (def.name or moveId) .. "!")
+  self:say(name .. " is trying to\nlearn "
+    .. ((def and def.name) or moveId) .. "!")
+end
+
+-- Which uploaded sheet a save-party mon sits behind. Inverse of
+-- `medPartySlot`: identity on the live party table, then the sheet whose
+-- stamped `slot` names that position.
+function M:sheetIndexFor(mon)
+  if type(mon) ~= "table" then return nil end
+  local slot = self:mySlot()
+  local roster = (slot and slot.party)
+    or (self.game and self.game.save and self.game.save.party)
+  if type(roster) ~= "table" then return nil end
+  local partyIndex
+  for i, entry in ipairs(roster) do
+    if entry == mon then partyIndex = i; break end
+  end
+  if not partyIndex then return nil end
+  local mine = self.medMine
+  if type(mine) ~= "table" or #mine == 0 then return partyIndex end
+  for i = 1, #mine do
+    if self:medPartySlot(i) == partyIndex then return i end
+  end
+  return nil
+end
+
+-- Host-sim: `curMoves` is the same table as `mon.moves`, so the free-slot
+-- write is already live. Mediated: rebuild the overlay the FIGHT menu reads
+-- and publish PROTOCOL 28 so the referee executes the new move.
+function M:syncFightMoves(mon)
+  local slot = self:mySlot()
+  local battler = slot and slot.battler
+  if battler and battler.mon == mon and type(battler.curMoves) == "table"
+     and battler.curMoves ~= mon.moves then
+    battler.curMoves = mon.moves
+  end
+  if self.medMoveList and battler and battler.mon == mon then
+    self.medMoveList = nil
+  end
+  if not (self.mediated and self.transport and self.battleId) then return false end
+  local index = self:sheetIndexFor(mon)
+  if not index then return false end
+  local moves = Mediated.sheetMoves(self.game, mon)
+  if #moves == 0 then return false end
+  if self.medMine and self.medMine[index] then
+    self.medMine[index].moves = moves
+  end
+  return Mediated.sendMoveset(self.transport, self.battleId, index - 1, moves)
 end
 
 -- ------- nobody is saying anything
@@ -8825,11 +9004,12 @@ end
 -- The translation is the whole of the risk, so the two readings that are easy to
 -- get backwards are named:
 --
---   * a **field slot** on the wire is 0..3 (side a takes 0 and 1, side b takes 2
---     and 3, per src/BattleSim/events.lua) while this screen numbers its slots
---     1..4 in a1,a2,b1,b2 order. They are not the same number and the map
---     between them is built from the hub's own roster, not from the arithmetic
---     that happens to line up today -- see `medMap`.
+--   * a **field slot** on the wire is 0..(COOP_SIDE*2-1) (side a takes
+--     0..COOP_SIDE-1, side b takes COOP_SIDE upward, per
+--     src/BattleSim/events.lua's SIDE_SLOTS) while this screen numbers its
+--     slots 1..N in a1,a2,[a3,]b1,b2,[b3] order. They are not the same number
+--     and the map between them is built from the hub's own roster, not from
+--     the arithmetic that happens to line up today -- see `medMap`.
 --   * a `switch` **choice** names a party index; a `send` **event** names a field
 --     slot. Same word, two numbers.
 --
@@ -8853,12 +9033,12 @@ end
 -- The NPC side's team, as one party in the order the trainer would send it out.
 --
 -- Re-interleaved, because that is how it was split: src/Coop.lua's `npcSide`
--- deals the trainer's party alternately into the two ownerless slots so that a
--- pair of players meets a pair of monsters. Taking one from each slot in turn
--- gives back the original order -- and order is the whole of what is at stake
--- here, because the referee sends the next living monster out in party order and
--- never asks. Concatenating instead would have a gym leader lead with the
--- monster it meant to finish on.
+-- deals the trainer's party alternately into the ownerless slots so that
+-- players meet as many monsters as the field seats. Taking one from each
+-- slot in turn gives back the original order -- and order is the whole of
+-- what is at stake here, because the referee sends the next living monster
+-- out in party order and never asks. Concatenating instead would have a gym
+-- leader lead with the monster it meant to finish on.
 --
 -- One party and not two, because the intermediator seats one npc: see
 -- Config.MEDIATED_COOP's first reason.
@@ -8891,7 +9071,7 @@ end
 
 -- Sheets for the wild seat (coop_wild side b): prebuilt `wildParty`, else a
 -- snapshot of the stashed `wildCatchMon`. Never npcMons interleave — that
--- assumes two ownerless trainer slots.
+-- walks every ownerless trainer slot.
 function M:wildMons()
   if type(self.wildParty) == "table" and #self.wildParty > 0 then
     return self.wildParty
@@ -9010,8 +9190,8 @@ function M:medMap(sides)
   if not self.sim then return byField, byIndex end
   for _, side in ipairs({ "a", "b" }) do
     local ids = (type(sides) == "table" and sides[side]) or {}
-    -- Config.COOP_SIDE is the same 2 that src/BattleSim/events.lua mirrors as
-    -- SIDE_SLOTS; one side's worth of field slots is what separates the bases.
+    -- Config.COOP_SIDE is the same SIDE_SLOTS src/BattleSim/events.lua
+    -- mirrors; one side's worth of field slots is what separates the bases.
     local base = (side == "b") and Config.COOP_SIDE or 0
     local spare = {}
     for _, slot in ipairs(self.sim.slots or {}) do
@@ -9196,7 +9376,8 @@ function M:medRows(msg)
     -- there is one exp implementation rather than two.
     --
     -- `slot` is translated the way every other row's is (`medSlotOf`): the
-    -- referee counts field slots 0..3 and this screen counts CoopSim indices,
+    -- referee counts field slots 0..(COOP_SIDE*2-1) and this screen counts
+    -- CoopSim indices,
     -- and `gainExp`'s own-slot gate compares against `self.mine`, which is an
     -- index. The referee sends one of these per *paid participant* -- every
     -- monster that was in against the fallen foe and lived, benched included

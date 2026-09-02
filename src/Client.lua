@@ -939,7 +939,8 @@ end
 -- one of them would be a packet built, encoded and sent for a hub to drop on
 -- arrival.  `partner()` as well as `has()`, because the two answer different
 -- questions: a members list that came back holding nobody but us is still a
--- party, and there is no one in it to tell.
+-- party, and there is no one in it to tell.  The hub fans the event to every
+-- partner; this gate only needs "at least one".
 local function sendPartyEvent(fields)
   if not transport:isReady() then return false end
   if not (party:has() and party:partner()) then return false end

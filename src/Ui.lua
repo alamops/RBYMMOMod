@@ -2483,12 +2483,17 @@ function M:install()
       {
         label = "LEAVE",
         onSelect = function()
-          -- Asked first, and the question names them: leaving ends the party
-          -- for both of you, which is not what "leave" usually implies and
-          -- is not something to discover by pressing A.
-          local name = party:partnerName() or "your friend"
+          -- Asked first. At two people, leaving dissolves the party, so the
+          -- question names them; at three the other two stay, so it does not.
+          local text
+          if party:count() > 2 then
+            text = "Leave the party?"
+          else
+            local name = party:partnerName() or "your friend"
+            text = ("Leave the party\nwith %s?"):format(name)
+          end
           mod.ui.push(game, SCREEN.CONFIRM, {
-            text = ("Leave the party\nwith %s?"):format(name),
+            text = text,
             onChoose = function(yes)
               if not yes then return mod.ui.push(game, SCREEN.PARTY) end
               party:leave()
@@ -2789,13 +2794,13 @@ function M:install()
       unfriend = isFriend,
     }
 
-    -- INVITE appears only when a party could actually be formed -- neither
-    -- of you already in one. Offered-then-refused is the failure this
-    -- avoids: the hub would answer with a decline, so a row that is always
-    -- there would be a button whose usual result is a box saying no.
-    -- Absent, not greyed: the menu is sized to its rows, and a permanently
-    -- dead row in a four-line box is a line the useful commands do not get.
-    if not (ctx.party:has() or player.party) then
+    -- INVITE appears when the target is unattached and we have room -- either
+    -- we are not in a party yet, or we are in one under PARTY_MAX. A pair
+    -- inviting a third is the whole of the size-3 path; a full party or a
+    -- target who already has one would only earn a decline box, so the row
+    -- stays absent rather than greyed.
+    if not player.party
+        and (not ctx.party:has() or ctx.party:count() < Config.PARTY_MAX) then
       items[#items + 1] = { label = "INVITE", invite = true }
     end
 

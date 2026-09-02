@@ -147,11 +147,12 @@ function cleanDeclineReason(value) {
   return DECLINE_REASONS[value] ? value : null;
 }
 
-// You and one friend. The rules that make a party feel solid all follow from
-// the pair -- an invite is only offered when both sides are unattached, and
-// either member leaving ends it for both -- so this is the design, not a
-// first step towards six. Kept in step with Config.PARTY_MAX.
-const PARTY_MAX = 2;
+// Up to three players. The rules that make a party feel solid follow from
+// that size: a pair may invite a third when the target is unattached and the
+// asker's party still has room; one of three leaving leaves a remainder of
+// two; the group dissolves only when fewer than two remain. Three is the
+// design, not a first step towards six. Kept in step with Config.PARTY_MAX.
+const PARTY_MAX = 3;
 
 // What a client may claim about a battle it just finished. 'draw' is a real
 // answer rather than a refusal to answer: a dropped link, a mutual run and a
@@ -265,6 +266,8 @@ function cleanCoopOfferMode(value) {
 const SIDES = { a: true, b: true };
 const COOP_REASONS = {
   alone: true, left: true, started: true, no: true, gone: true, timeout: true,
+  // party-vs-party size not equal / not 2-or-3 (hub refuse; T7 phrases)
+  mismatch: true,
 };
 
 function cleanSide(value) {
@@ -473,10 +476,10 @@ const COOP_BADGES_MAX = 32;
  *
  *   SLOT_MAX   a *party* index -- which of your six. What `mon.slot` and
  *              `choice.slot` are bounded by.
- *   FIELD_MAX  a position *on the field* -- four, because a party is a pair and
- *              two parties meet. What `choice.target` and `event.slot` are
- *              bounded by: an event is about somebody who is out, not about a
- *              bench position.
+ *   FIELD_MAX  a position *on the field* -- COOP_FIGHTERS slots (0-based),
+ *              two parties of PARTY_MAX. What `choice.target` and `event.slot`
+ *              are bounded by: an event is about somebody who is out, not about
+ *              a bench position.
  *   ...and `choice.move`, bounded by BATTLE_MOVE_MAX - 1.
  *
  * **All of them are zero-based**, which is the one thing they do share, and it is
@@ -510,10 +513,10 @@ const AMOUNT_MAX = 9999;
 // the client's own Experience formula. Twelve rather than BATTLE_MON_MAX
 // because vanilla pays every mon that was ever in against the fallen foe and is
 // still alive, benched included -- so a co-op faint can be split across two
-// full parties: BATTLE_MON_MAX (6) * COOP_SIDE (2) = 12. One number that covers
-// both shapes beats two that have to be kept in step; it bounds a foreign value
-// before it enters a formula, it does not restate a game rule.
-const PARTICIPANTS_MAX = 12;
+// full parties: BATTLE_MON_MAX * COOP_SIDE. One number that covers both shapes
+// beats two that have to be kept in step; it bounds a foreign value before it
+// enters a formula, it does not restate a game rule.
+const PARTICIPANTS_MAX = BATTLE_MON_MAX * COOP_SIDE;
 // How long a reason token this build has never heard of may be. Refused past it
 // rather than trimmed -- a cut token matches nothing and is a value nobody sent.
 const REASON_MAX = 32;
@@ -1461,6 +1464,27 @@ function cleanBattleOutcome(raw) {
   return result;
 }
 
+// mmo.battle_moveset. One of the sender's own party members, as they now
+// claim its moves (PROTOCOL 28). Bounded numbers, 1..BATTLE_MOVE_MAX long;
+// a missing field refuses the message rather than applying a half-sheet
+// over a live battler. The hub then allows only add-one or replace-one.
+function cleanBattleMoveset(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const battle = cleanId(raw.battle);
+  const mon = cleanInt(raw.mon, 0, BATTLE_MON_MAX - 1);
+  if (!battle || mon === null) return null;
+  if (!Array.isArray(raw.moves) || raw.moves.length < 1) return null;
+  const moves = [];
+  for (const entry of raw.moves) {
+    if (moves.length >= BATTLE_MOVE_MAX) return null;
+    const move = cleanBattleMove(entry);
+    if (!move) return null;
+    moves.push(move);
+  }
+  if (moves.length === 0) return null;
+  return { battle, mon, moves };
+}
+
 // mmo.battle_reconnect. Names the fight and nothing else: who is rejoining is
 // the connection it arrived on, and a client that supplied its own identity
 // would be claiming somebody else's seat at the field.
@@ -1509,6 +1533,7 @@ module.exports = {
   cleanBattleTeam,
   cleanBattleOutcome,
   cleanBattleReconnect,
+  cleanBattleMoveset,
   payloadOk,
   FACINGS,
   KINDS,
