@@ -26,6 +26,15 @@ here must match `manifest.version`.
 
 ### Changed
 
+- **A release is the version in `manifest.json`, or it does not ship.**
+  Pushing to `main` no longer auto-bumps the last tag, and it no longer
+  takes a number from a `workflow_dispatch` input or a `[release X.Y.Z]`
+  line in the commit message. Those paths could publish a version the
+  tree never declared. If the manifest is the same as, or lower than,
+  the latest `vX.Y.Z` tag, the job fails. Pull requests against `main`
+  run that same check without packing or publishing, so a forgotten bump
+  fails the PR instead of going red on `main` after merge.
+
 - **Parties hold three, and a 3-wide fight is legal.** `PARTY_MAX` is 3.
   A pair can invite a third; one of three leaving leaves the other two.
   Party PvP is 2-on-2 or 3-on-3 only (mismatch is refused). A 3-player
