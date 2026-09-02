@@ -1471,6 +1471,9 @@ function M:update(dt)
   -- Arena effects advance on wall time whatever the phase: a lunge or a sink
   -- started under one phase must not freeze because a menu opened over it.
   self:stepFx(dt)
+  -- Gen 2 charge can set vanished/chargeMove with no anim row. Start the
+  -- hide from that state so Dig/Fly still leave the seat.
+  self:syncVanishHolds()
   -- Grow-in advances on the same fixed step as the engine's AnimateSendingOutMon.
   if self.growIn then
     self.growIn.frame = (self.growIn.frame or 0) + 1
@@ -3942,6 +3945,10 @@ function M:startFaint(row)
   battler.displayFainted = true
   self.hitSlot = row.slot
   self.faintFx = { battler = battler, slot = row.slot, frames = FAINT_FRAMES }
+  -- Drop a Dig/Fly hold first: `fxSeat.hidden` would skip the sink (and a
+  -- later send-out on this slot would stay invisible). Same reason ballFlow
+  -- is dropped when a pic is released.
+  self:clearVanishAt(row.slot)
   -- The arena's half of the same fall. `faintFx` above stays the sequencer --
   -- it is what holds the message queue for its thirty frames -- and this is
   -- what the seat is actually drawn through while it does (`Battlefield.fxSeat`
@@ -4022,6 +4029,8 @@ end
 -- screen may finally show what the field has shown since the `send` landed.
 function M:applySwap(row)
   self:displayShadow()[row.swap] = row.battler
+  -- A replacement must not inherit the predecessor's Dig/Fly hide.
+  self:clearVanishAt(row.swap)
   if row.battler == nil then return end
   -- The seat is let go of here and nowhere else. Whatever put the hold up --
   -- the opening hide (`enter`), or the ball row in front of this one -- this
@@ -6026,6 +6035,9 @@ local FX_SPAN = {
   -- is a visual one; a spec that genuinely needs longer carries its own
   -- `duration` (Explosion, a Poke Flute).
   vfx    = 0.50,
+  dig    = 0.45,
+  fly    = 0.45,
+  emerge = 0.35,
   -- Mid-battle evolution movie. The real lifetime is EvolveFx.MOVIE_SECONDS
   -- (the cart's 368-frame flash); this default is only what emitFx needs to
   -- accept the kind, and startEvolve overwrites duration.
@@ -6206,6 +6218,13 @@ local BALL_FX = {
 -- came next. `Battlefield.fxSeat` makes the same call on its side of the wire.
 local BALL_HIDE_FX = { recall = true, wobble = true }
 
+local VANISH_MOVES = { DIG = true, FLY = true }
+local CHARGE_SETUP_MOVES = {
+  DIG = true, FLY = true,
+  SOLARBEAM = true, SKULL_BASH = true, RAZOR_WIND = true, SKY_ATTACK = true,
+}
+local VANISH_HIDE_FX = { dig = true, fly = true }
+
 -- The fields a `vfx` record carries beyond the shared kind / slot / side / t.
 -- `fromSlot` is a *field slot*; `battlefieldFxCtx` turns it into the seat index
 -- Battlefield matches on, the same projection every other field here gets.
@@ -6297,6 +6316,97 @@ function M:emitVfx(spec, targetSlot, fromSlot)
     seed = self.vfxSeed,
     fromSlot = fromSlot,
   })
+end
+
+function M:battlerAt(slotIndex)
+  if slotIndex == nil or not self.sim then return nil end
+  local slot = self.sim.slot and self.sim:slot(slotIndex)
+  if slot and slot.battler then return slot.battler end
+  local field = self.sim.fieldObj or self.sim.field
+  local fslot = field and field.slots and field.slots[slotIndex]
+  return fslot and fslot.battler or nil
+end
+
+-- Dig vs Fly, and only those. Charging SolarBeam is not a vanish.
+function M:slotVanishKind(slotIndex)
+  local battler = self:battlerAt(slotIndex)
+  if not battler then return nil end
+  local id = nil
+  local charging = battler.charging
+  if type(charging) == "table" then
+    id = charging.id or charging.moveId
+  elseif type(charging) == "string" then
+    id = charging
+  end
+  if id == nil then id = battler.chargeMove end
+  if type(id) == "string" then id = string.upper(id) end
+  if id == "DIG" then return "dig" end
+  if id == "FLY" then return "fly" end
+  if battler.vanished == true then return "fly" end
+  if battler.invulnerable == true then return "fly" end
+  return nil
+end
+
+function M:slotIsVanishing(slotIndex)
+  return self:slotVanishKind(slotIndex) ~= nil
+end
+
+-- Engine Gen 2 charge prints a line and returns with no anim. Pick up the
+-- hide from battler.vanished / chargeMove so the seat still empties.
+function M:syncVanishHolds()
+  if not self:usesBattlefield() or not self.sim then return end
+  local count = (self.sim.slots and #self.sim.slots) or 0
+  if count < 1 then count = 4 end
+  for i = 1, count do
+    if self:sinkingAt(i) then
+      -- Don't re-hide a KO; startFaint already dropped the hold so the sink
+      -- can play.
+    else
+      local battler = self:battlerAt(i)
+      local kind = (battler and not battler.displayFainted)
+        and self:slotVanishKind(i) or nil
+      if kind and not (self.vanishFlow and self.vanishFlow[i]) then
+        self:startVanish(kind, i)
+        self:startChargeVfx({ anim = kind == "dig" and "DIG" or "FLY" }, i)
+      end
+    end
+  end
+end
+
+function M:dropVanishFx(slotIndex)
+  local list = self.fx
+  if type(list) ~= "table" then return end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    local hiding = type(fx) == "table" and VANISH_HIDE_FX[fx.kind]
+      and fx.slot == slotIndex
+    if not hiding then kept[#kept + 1] = fx end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+function M:clearVanishAt(slotIndex)
+  if self.vanishFlow then self.vanishFlow[slotIndex] = nil end
+  self:dropVanishFx(slotIndex)
+end
+
+function M:startVanish(kind, slotIndex)
+  if not self:usesBattlefield() then return nil end
+  if not VANISH_HIDE_FX[kind] or slotIndex == nil then return nil end
+  self:dropVanishFx(slotIndex)
+  self.vanishFlow = self.vanishFlow or {}
+  self.vanishFlow[slotIndex] = kind
+  self:emitFx(kind, slotIndex)
+  return kind
+end
+
+function M:startChargeVfx(row, slotIndex)
+  if type(row) ~= "table" then return nil end
+  local spec = Vfx.CHARGE_STYLE and (Vfx.CHARGE_STYLE[row.anim]
+    or (row.anim == "SLIDE_DOWN_ANIM" and Vfx.CHARGE_STYLE.DIG)
+    or (row.anim == "TELEPORT" and Vfx.CHARGE_STYLE.FLY))
+  if not spec then return nil end
+  return self:emitVfx(spec, slotIndex, slotIndex)
 end
 
 -- The move a queued `anim` row names, as the engine's own record. nil for a
@@ -6586,6 +6696,7 @@ end
 function M:startSendBall(row)
   local index = type(row) == "table" and row.ballsend or nil
   if index == nil then return false end
+  self:clearVanishAt(index)
   self.introHide = self.introHide or {}
   self.introHide[index] = true
   self:emitFx("ball", index, true)
@@ -6624,6 +6735,9 @@ function M:stepFx(dt)
           -- is a seat with nothing standing on it, and the row that undoes that
           -- is still to come. `startBallFx` replaces it as each row plays and
           -- `clearBallFlow` drops it when the monster comes back out.
+          kept[#kept + 1] = fx
+        elseif VANISH_HIDE_FX[fx.kind] and self.vanishFlow
+            and fx.slot and self.vanishFlow[fx.slot] then
           kept[#kept + 1] = fx
         end
       else
@@ -7394,12 +7508,28 @@ function M:startAnim(row)
       -- Still nobody: emit nothing. A lunge that cannot name a seat is a
       -- record the ctx projection throws away one frame later.
       if lunger ~= nil then
-        self:emitFx("lunge", lunger)
-        -- ...and the move's own particles on the same beat, because the lean
-        -- and what leaves the monster are one action. Emitted for every move,
-        -- not only the ones that connect: a status move never reaches a drain
-        -- row and neither does a miss.
-        self:startMoveVfx(row, lunger)
+        local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
+        local slideDown = row.anim == "SLIDE_DOWN_ANIM"
+        local flyCharge = row.anim == "TELEPORT" and self:slotVanishKind(lunger) == "fly"
+        local already = self.vanishFlow and self.vanishFlow[lunger]
+        -- First DIG/FLY on a seat is the charge even without amount=1 (Gen 2
+        -- host-sim charge may omit the anim, and a mediated row may drop
+        -- amount). A second DIG/FLY with the hold open is the release.
+        local firstVanish = VANISH_MOVES[row.anim] and not already
+        if firstVanish or slideDown or flyCharge or (VANISH_MOVES[row.anim] and setup and not already) then
+          self:startVanish((row.anim == "DIG" or slideDown) and "dig" or "fly", lunger)
+          self:startChargeVfx(row, lunger)
+        elseif VANISH_MOVES[row.anim] and already then
+          self:clearVanishAt(lunger)
+          self:emitFx("emerge", lunger)
+          self:emitFx("lunge", lunger)
+          self:startMoveVfx(row, lunger)
+        elseif setup then
+          self:startChargeVfx(row, lunger)
+        else
+          self:emitFx("lunge", lunger)
+          self:startMoveVfx(row, lunger)
+        end
       end
     else
       self:startBallFx(row)

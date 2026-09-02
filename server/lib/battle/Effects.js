@@ -761,9 +761,47 @@ function isFly(effectId) {
   return int(effectId, 0) === 43;
 }
 
-function chargeMessage(mon, effectId) {
-  if (isFly(effectId)) return `${mon.species} flew up high`;
-  return `${mon.species} is glowing`;
+function moveKey(moveOrId) {
+  let id = moveOrId;
+  if (moveOrId && typeof moveOrId === 'object') id = moveOrId.id;
+  if (typeof id !== 'string') return '';
+  return id.toUpperCase();
+}
+
+function isDigMove(moveOrId) {
+  return moveKey(moveOrId) === 'DIG';
+}
+
+function isSwift(effectId) {
+  return int(effectId, 0) === 17;
+}
+
+function vanishes(effectId, moveOrId) {
+  return isFly(effectId) || isDigMove(moveOrId);
+}
+
+function chargeMessage(mon, effectId, moveOrId) {
+  const key = moveKey(moveOrId);
+  const species = (mon && mon.species) || 'POKéMON';
+  if (key === 'DIG') return `${species} dug a hole`;
+  if (key === 'SOLARBEAM') return `${species} took in sunlight`;
+  if (key === 'SKULL_BASH') return `${species} lowered its head`;
+  if (key === 'RAZOR_WIND') return `${species} made a whirlwind`;
+  if (key === 'FLY' || isFly(effectId)) return `${species} flew up high`;
+  return `${species} is glowing`;
+}
+
+// Gen 1 cartridge: Swift skips the invuln check; Thunder reaches Fly;
+// Earthquake / Fissure miss Dig.
+function hitsInvulnerable(chargeMoveId, attackerMove) {
+  const charge = moveKey(chargeMoveId);
+  const id = moveKey(attackerMove);
+  if (id === 'SWIFT') return true;
+  if (attackerMove && typeof attackerMove === 'object' && isSwift(attackerMove.effect)) {
+    return true;
+  }
+  if (charge === 'FLY' && id === 'THUNDER') return true;
+  return false;
 }
 
 function isTrapping(effectId) {
@@ -1095,7 +1133,12 @@ module.exports = {
   fixedDamage,
   isCharge,
   isFly,
+  moveKey,
+  isDigMove,
+  isSwift,
+  vanishes,
   chargeMessage,
+  hitsInvulnerable,
   isTrapping,
   trapTurns,
   isHyperBeam,

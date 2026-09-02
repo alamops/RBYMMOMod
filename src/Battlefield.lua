@@ -699,6 +699,10 @@ M.FX_BALL_LIFT = 46 -- peak px the arc rises above the straight line
 M.FX_BALL_SPIN = math.pi * 2.5 -- radians of spin across the whole throw
 M.FX_WOBBLE_ANGLE = 0.35 -- ≈20° peak rock, three rocks per SHAKE row
 M.FX_POOF_R = 30 -- outer ring radius at the end of a poof
+-- Dig / Fly vanish: slide a whole icon-height so the sprite leaves the seat
+-- before `hidden` sticks. Original geometry — no ROM battle_anims.
+M.FX_DIG_DROP = 0.90
+M.FX_FLY_LIFT = 0.95
 
 -- ------- particle fx
 --
@@ -738,6 +742,7 @@ local NO_FX = {
 local SEAT_FX = {
   lunge = true, flash = true, faint = true, spawn = true,
   recall = true, wobble = true, evolve = true,
+  dig = true, fly = true, emerge = true,
 }
 
 local function fxT(v)
@@ -873,6 +878,21 @@ function M.fxSeat(fx, side, seatIndex)
         -- ball aimed at an empty seat has nothing to hide either way, and a
         -- `recall` held at t == 1 still reads invisible through scale/alpha 0.
         out.hidden = true
+      elseif e.kind == "dig" then
+        -- Slide down into the field, then stay gone (held at t == 1).
+        local t = fxT(e.t)
+        out.dy = out.dy + M.MON_DRAW * M.FX_DIG_DROP * t
+        if 1 - t < out.alpha then out.alpha = 1 - t end
+        if t >= 1 then out.hidden = true end
+      elseif e.kind == "fly" then
+        -- Lift off the field, then stay gone (held at t == 1).
+        local t = fxT(e.t)
+        out.dy = out.dy - M.MON_DRAW * M.FX_FLY_LIFT * t
+        if 1 - t < out.alpha then out.alpha = 1 - t end
+        if t >= 1 then out.hidden = true end
+      elseif e.kind == "emerge" then
+        -- Come back for the hitting turn. Same back-out as a send-out spawn.
+        out.scale = out.scale * M.fxSpawn(e.t)
       end
     end
   end

@@ -442,7 +442,7 @@ function M.snapshotRuleset(game)
     table.sort(ids)
     for _, id in ipairs(ids) do
       if #metronomePool >= Config.BATTLE_METRONOME_POOL_MAX then break end
-      local sheet = moveOf(data, { id = id, pp = 5 }, order)
+      local sheet = moveOf(data, { id = id, pp = 5 }, order, Gen.generation(game))
       if sheet and sheet.effect ~= Effects.idOf("METRONOME_EFFECT")
          and id ~= "STRUGGLE" and id ~= "struggle" then
         metronomePool[#metronomePool + 1] = sheet
@@ -494,7 +494,7 @@ end
 -- accuracy on type 0 is a plain hit: weaker than assuming the best and far
 -- better than refusing the move, which would refuse the monster and then the
 -- whole party.
-moveOf = function(data, slot, order)
+moveOf = function(data, slot, order, generation)
   if type(slot) ~= "table" then return nil end
   local id = Wire.id(slot.id)
   if not id then return nil end
@@ -514,7 +514,13 @@ moveOf = function(data, slot, order)
   local chance = 0
   if def then
     if def.effect then
-      effect = Effects.idOf(def.effect) or 0
+      -- Gen 2 EFFECT_FLY / EFFECT_SOLARBEAM etc. only resolve on BattleSim2.
+      local pack = Effects1
+      if generation == 2 then
+        if not Effects2 then Effects2 = need("BattleSim2/Effects") end
+        pack = Effects2
+      end
+      effect = pack.idOf(def.effect) or 0
     end
     chance = clamp(intOr(def.chance, 0), 0, 100)
   end
@@ -691,7 +697,7 @@ function M.snapshotMons(game, party)
         local moves = {}
         for _, slot in ipairs(mon.moves or {}) do
           if #moves >= Config.BATTLE_MOVE_MAX then break end
-          local move = moveOf(data, slot, order)
+          local move = moveOf(data, slot, order, generation)
           if move then moves[#moves + 1] = move end
         end
         if #moves > 0 then
@@ -1157,6 +1163,10 @@ local FX_SPAN = {
   -- the defender flashes. It outliving its beat costs nothing -- `stepFx` runs
   -- on its own clock and retires it wherever the queue has got to.
   vfx    = 0.50,
+  -- Dig / Fly vanish. Held at t == 1 (VANISH_HIDE_FX) until release or clear.
+  dig    = 0.45,
+  fly    = 0.45,
+  emerge = 0.35,
   -- Mid-battle evolution movie. Real lifetime is EvolveFx.MOVIE_SECONDS;
   -- this default is only what emitFx needs to accept the kind.
   evolve = 6.14,
@@ -1220,6 +1230,18 @@ local BALL_FX = {
 -- here only kept a finished arc alive at t == 1 and dropped it again on a
 -- side-wide clear that has nothing to do with it.
 local BALL_HIDE_FX = { recall = true, wobble = true }
+
+-- Charge/vanish setup. `anim.amount == 1` is the first turn (BattleSim).
+local VANISH_MOVES = { DIG = true, FLY = true }
+local CHARGE_SETUP_MOVES = {
+  DIG = true, FLY = true,
+  SOLARBEAM = true, SKULL_BASH = true, RAZOR_WIND = true, SKY_ATTACK = true,
+}
+local VANISH_HIDE_FX = { dig = true, fly = true }
+
+local function vanishKey(side, seatIndex)
+  return tostring(side or "") .. ":" .. tostring(seatIndex or 1)
+end
 
 -- The fields a `vfx` record carries beyond the shared kind / side / seatIndex
 -- / t. Written out longhand rather than copied by pairs() so the wire this
@@ -4816,18 +4838,23 @@ function M:startAnim(row)
       and not row.anim:find("_ANIM", 1, true)
     if moveAnim then
       -- Beat 2, with the callout above already spent and its bubble still up.
-      -- The defender's flash and the field's nudge ride the drain row behind
-      -- this one -- their own beat again -- so a move that misses only lunges.
-      self:emitFx("lunge", row.slot, row.side)
-      -- ...and the move's own particles, on the same beat as the lean, because
-      -- the two are one action: the monster leans in and the fire leaves it.
-      --
-      -- Emitted for **every** move, not only the ones that connect -- a status
-      -- move never reaches a drain row and a miss never reaches one either, so
-      -- an effect gated on damage would leave two thirds of the move list
-      -- drawing nothing. What the blow landing adds is its own, smaller burst
-      -- (`startDrain`, beat 3).
-      self:startMoveVfx(row)
+      -- Charge/vanish setup (`amount == 1`) is not a lunge: Dig/Fly leave the
+      -- seat, SolarBeam-class glows in place. Release is a normal lean+strike.
+      local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
+      if VANISH_MOVES[row.anim] and setup then
+        self:startVanish(row.anim == "DIG" and "dig" or "fly", row)
+        self:startChargeVfx(row)
+      elseif VANISH_MOVES[row.anim] then
+        self:clearVanishAt(row.slot, row.side)
+        self:emitFx("emerge", row.slot, row.side)
+        self:emitFx("lunge", row.slot, row.side)
+        self:startMoveVfx(row)
+      elseif setup then
+        self:startChargeVfx(row)
+      else
+        self:emitFx("lunge", row.slot, row.side)
+        self:startMoveVfx(row)
+      end
     else
       -- ...and the markers it excludes are the throw itself: the arc, the
       -- recall, each wobble and the burst, one per queued row and each held
@@ -4878,6 +4905,7 @@ function M:releasePic(index, row)
   if not slot then return end
   if row ~= nil and slot.species ~= row.species then
     self:dropFaintFx(index)
+    self:clearVanishAt(index)
     return
   end
   slot.sprite = nil
@@ -4893,6 +4921,7 @@ function M:releasePic(index, row)
   -- And the same for a throw held on this seat: there is no monster left here
   -- to keep inside a ball.
   if self.ballFlow and self.ballFlow.index == index then self:clearBallFlow() end
+  self:clearVanishAt(index)
 end
 
 -- Retire any faint effect on the seat a released pic sat on.
@@ -5131,6 +5160,45 @@ function M:clearBallFlow()
   self:dropBallFx(flow.side)
 end
 
+function M:dropVanishFx(side, seatIndex)
+  local list = self.fx
+  if type(list) ~= "table" then return end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    local hiding = type(fx) == "table" and VANISH_HIDE_FX[fx.kind]
+      and fx.side == side
+      and (fx.seatIndex == nil or fx.seatIndex == (seatIndex or 1))
+    if not hiding then kept[#kept + 1] = fx end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+function M:clearVanishAt(index, side)
+  local fxSide = self:fxSideFor(index, side)
+  local key = vanishKey(fxSide, 1)
+  if self.vanishFlow then self.vanishFlow[key] = nil end
+  self:dropVanishFx(fxSide, 1)
+end
+
+function M:startVanish(kind, row)
+  if not self:usesBattlefield() then return nil end
+  if not VANISH_HIDE_FX[kind] then return nil end
+  local index = row and row.slot
+  local fxSide = self:fxSideFor(index, row and row.side)
+  self:dropVanishFx(fxSide, 1)
+  self.vanishFlow = self.vanishFlow or {}
+  self.vanishFlow[vanishKey(fxSide, 1)] = { kind = kind, index = index, side = fxSide }
+  self:emitFx(kind, index, row and row.side)
+  return kind
+end
+
+function M:startChargeVfx(row)
+  if type(row) ~= "table" then return nil end
+  local spec = Vfx.CHARGE_STYLE and Vfx.CHARGE_STYLE[row.anim]
+  if not spec then return nil end
+  return self:emitVfx(spec, row.slot, row.slot)
+end
+
 -- A ball marker reaches the head of the queue. Returns the effect kind it
 -- played, or nil for a row with nothing left to show.
 --
@@ -5238,6 +5306,10 @@ function M:stepFx(dt)
           -- is still to come. `startBallFx` replaces it as each row plays and
           -- `clearBallFlow` drops it when the monster comes back out (or the
           -- seat is released), so nothing here outlives the throw.
+          kept[#kept + 1] = fx
+        elseif VANISH_HIDE_FX[fx.kind] and self.vanishFlow
+            and self.vanishFlow[vanishKey(fx.side, fx.seatIndex)] then
+          -- Dig / Fly charge: stay gone through the foe's turn until release.
           kept[#kept + 1] = fx
         end
       else
@@ -5480,6 +5552,7 @@ function M:applySwap(row)
   -- that installs; the seat keeps who it is showing until then.
   if not (arrival and slot and slot.pending == arrival) then return false end
   slot.pending = nil
+  if index ~= nil then self:clearVanishAt(index) end
   slot.species = arrival.species
   slot.speciesId = arrival.speciesId
   slot.level = arrival.level
@@ -5672,6 +5745,9 @@ end
 
 function M:startFaintFx(row)
   local index = row and row.faintfx
+  -- Drop Dig/Fly hide first so the sink is drawn; `fxSeat.hidden` would skip
+  -- it, and a send batched behind the KO would inherit the empty seat.
+  if index ~= nil then self:clearVanishAt(index) end
   local slot = self.slots[index]
   -- Somebody else is standing here now: the sink belongs to the monster that
   -- was recalled, and playing it would drop the newcomer through the floor
