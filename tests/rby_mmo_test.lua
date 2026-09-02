@@ -28217,4 +28217,174 @@ end
 
 end)()
 
+-- Mid-battle learn / replace: a free slot must land on the fight sheet
+-- (and go out as mmo.battle_moveset) so the new move is usable this fight;
+-- a full set queues the forget prompt rather than waiting until after.
+;(function()
+  local LearnMove = need("LearnMove")
+  local MediatedBattle = need("MediatedBattle")
+  local moveDef = { name = "GROWL", pp = 40, power = 0, accuracy = 100,
+    type = "NORMAL", chance = 0 }
+  local data = {
+    moves = {
+      TACKLE = { name = "TACKLE", pp = 35, power = 40, accuracy = 100,
+        type = "NORMAL", chance = 0 },
+      GROWL = moveDef,
+    },
+    pokemon = {},
+  }
+  local function saveMon(moves)
+    return { species = "FIXMON_A", nickname = "FIX", level = 16,
+      moves = moves, stats = { hp = 40 }, hp = 40 }
+  end
+  local function wireMove(id, pp)
+    return { id = id, pp = pp, power = 40, accuracy = 255, type = 0,
+      effect = 0, chance = 0 }
+  end
+
+  eq(LearnMove.apply(nil, "GROWL", data), "missing",
+     "LearnMove.apply refuses no mon")
+  eq(LearnMove.apply({ moves = {} }, "NOPE", data), "missing",
+     "...and an unknown move")
+  local one = saveMon({ { id = "TACKLE", pp = 35 } })
+  eq(LearnMove.apply(one, "TACKLE", data), "known",
+     "...and a move already on the set")
+  eq(LearnMove.apply(one, "GROWL", data), "learned",
+     "a free slot is filled")
+  eq(one.moves[2].id, "GROWL", "...on the save mon")
+  local full = saveMon({
+    { id = "A", pp = 1 }, { id = "B", pp = 1 },
+    { id = "C", pp = 1 }, { id = "D", pp = 1 },
+  })
+  eq(LearnMove.apply(full, "GROWL", data), "full",
+     "four known is a forget prompt, not a silent drop")
+  eq(#full.moves, 4, "...and the fifth is not jammed on")
+
+  local ok, parsed = pcall(Wire.battleMoveset, {
+    battle = "b-learn", mon = 0,
+    moves = { wireMove("GROWL", 40) },
+  })
+  check(ok and parsed and parsed.mon == 0 and parsed.moves[1].id == "GROWL",
+        "Wire.battleMoveset accepts a one-move sheet")
+  eq(Wire.battleMoveset({ battle = "b-learn", mon = 0, moves = {} }), nil,
+     "...and refuses an empty list")
+  eq(Wire.battleMoveset({ battle = "b-learn", mon = 9,
+      moves = { wireMove("GROWL", 40) } }), nil,
+     "...and a party index past BATTLE_MON_MAX")
+
+  local sent = {}
+  local mon = saveMon({ { id = "TACKLE", pp = 35 } })
+  local screen = MediatedBattle.new({
+    game = { data = data, save = { party = { mon }, inventory = {} } },
+    battle = "b-learn",
+    role = "host",
+    mode = "wild",
+    transport = {
+      send = function(_, typ, payload)
+        sent[#sent + 1] = { type = typ, payload = payload }
+        return true
+      end,
+    },
+  })
+  screen.mine = { { slot = 0, moves = { wireMove("TACKLE", 35) } } }
+  screen.active = 1
+  check(screen:teach(mon, "FIX", "GROWL"),
+        "a free slot is taught mid-fight")
+  eq(mon.moves[2].id, "GROWL", "...on the save mon")
+  eq(screen.mine[1].moves[2] and screen.mine[1].moves[2].id, "GROWL",
+     "...and on the fight sheet the FIGHT menu reads")
+  local published
+  for _, row in ipairs(sent) do
+    if row.type == Wire.BATTLE_MOVESET then published = row.payload end
+  end
+  check(published ~= nil, "...and the referee is told")
+  eq(published.mon, 0, "...naming the uploaded sheet")
+  eq(published.moves[2] and published.moves[2].id, "GROWL",
+     "...with the new move on it")
+
+  local packed = saveMon({
+    { id = "TACKLE", pp = 35 }, { id = "A", pp = 1 },
+    { id = "B", pp = 1 }, { id = "C", pp = 1 },
+  })
+  local fullScreen = MediatedBattle.new({
+    game = { data = data, save = { party = { packed }, inventory = {} } },
+    battle = "b-full", role = "host", mode = "wild",
+    transport = { send = function() return true end },
+  })
+  fullScreen.mine = { { slot = 0, moves = {
+    wireMove("TACKLE", 35), wireMove("A", 1), wireMove("B", 1), wireMove("C", 1),
+  } } }
+  check(fullScreen:teach(packed, "FIX", "GROWL"),
+        "a full set is still accepted as earned")
+  eq(#packed.moves, 4, "...without writing a fifth slot")
+  eq(fullScreen.toLearn[1] and fullScreen.toLearn[1].move, "GROWL",
+     "...banked in case the player leaves before answering")
+  local learnRow
+  for _, row in ipairs(fullScreen.lines or {}) do
+    if type(row) == "table" and row.learn then learnRow = row.learn end
+  end
+  check(learnRow and learnRow.move == "GROWL",
+        "...and queued as a mid-fight forget row, not deferred text")
+
+  local CoopBattle = need("CoopBattle")
+  local coopSent = {}
+  local coopMon = saveMon({ { id = "TACKLE", pp = 35 } })
+  local coopParty = { coopMon }
+  local coop = setmetatable({
+    game = { data = data, save = { party = coopParty, inventory = {} } },
+    mediated = true,
+    battleId = "b-coop-learn",
+    mine = 1,
+    medMine = { { slot = 0, moves = { wireMove("TACKLE", 35) } } },
+    sim = { slot = function() return { party = coopParty } end },
+    say = function() end,
+    messages = {},
+    transport = {
+      send = function(_, typ, payload)
+        coopSent[#coopSent + 1] = { type = typ, payload = payload }
+        return true
+      end,
+    },
+  }, CoopBattle)
+  coop:teach(coopMon, "FIX", "GROWL")
+  eq(coopMon.moves[2] and coopMon.moves[2].id, "GROWL",
+     "co-op free slot still lands on the save mon")
+  eq(coop.medMine[1].moves[2] and coop.medMine[1].moves[2].id, "GROWL",
+     "...and on the overlay the FIGHT menu reads")
+  local coopPublished
+  for _, row in ipairs(coopSent) do
+    if row.type == Wire.BATTLE_MOVESET then coopPublished = row.payload end
+  end
+  check(coopPublished ~= nil and coopPublished.moves[2]
+          and coopPublished.moves[2].id == "GROWL",
+        "...and PROTOCOL 28 goes out for the referee")
+
+  local packedCoop = saveMon({
+    { id = "TACKLE", pp = 35 }, { id = "A", pp = 1 },
+    { id = "B", pp = 1 }, { id = "C", pp = 1 },
+  })
+  local coopFull = setmetatable({
+    game = { data = data, save = { party = { packedCoop }, inventory = {} } },
+    mediated = true,
+    battleId = "b-coop-full",
+    mine = 1,
+    medMine = { { slot = 0, moves = {
+      wireMove("TACKLE", 35), wireMove("A", 1), wireMove("B", 1), wireMove("C", 1),
+    } } },
+    sim = { slot = function() return { party = { packedCoop } } end },
+    say = function() end,
+    messages = {},
+    transport = { send = function() return true end },
+  }, CoopBattle)
+  coopFull:teach(packedCoop, "FIX", "GROWL")
+  eq(#packedCoop.moves, 4, "co-op full set does not write a fifth slot")
+  eq(coopFull.toLearn[1] and coopFull.toLearn[1].move, "GROWL",
+     "...banked for after the fight")
+  local coopLearnRow
+  for _, row in ipairs(coopFull.messages or {}) do
+    if type(row) == "table" and row.learn then coopLearnRow = row end
+  end
+  eq(coopLearnRow, nil, "...and does not open a forget prompt mid-fight")
+end)()
+
 T.finish("rby_mmo")

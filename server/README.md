@@ -1896,10 +1896,10 @@ On the one path where no passcode is required — the `node hub.js` shim — the
 exchange is byte-identical to what it has always been: `hello`, then
 `welcome`.
 
-**`PROTOCOL` is 26**, and it lives in **`lib/relay.js`** (not `hub.js` any
+**`PROTOCOL` is 28**, and it lives in **`lib/relay.js`** (not `hub.js` any
 more) and in **`src/Config.lua`**. Bump both together on any incompatible
 change. The hub refuses a mismatched client by name and version — *"This game
-speaks protocol 26; yours speaks 25."* — rather than letting two dialects talk
+speaks protocol 28; yours speaks 27."* — rather than letting two dialects talk
 past each other, and the game renders that sentence.
 
 Every bump so far has been *additive*, and it is worth saying why an additive

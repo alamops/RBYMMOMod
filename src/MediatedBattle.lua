@@ -57,6 +57,9 @@ local Exp2 = need("Exp2")
 -- Mid-battle evolution movie: timing + apply. Twin of CoopBattle's own
 -- require -- the two screens must not drift on qualify / cancel / apply.
 local EvolveFx = need("EvolveFx")
+-- Free-slot apply + the generation's own forget prompt. Shared with
+-- CoopBattle so a 1v1 and a 2-on-2 cannot disagree about "already knows".
+local LearnMove = need("LearnMove")
 
 local M = {}
 M.__index = M
@@ -787,6 +790,32 @@ function M.sendParty(transport, battle, mons, side, bag, badges)
   return true
 end
 
+-- Wire-shaped moves for a save mon, the same `moveOf` the opening upload
+-- used. A learn that wrote only `{ id, pp }` onto the save copy has to
+-- travel with power / accuracy / effect or the referee treats it as a
+-- 40-power type-0 hit.
+function M.sheetMoves(game, mon)
+  local data = game and game.data
+  local order = typeOrder(data)
+  local moves = {}
+  for _, slot in ipairs((mon and mon.moves) or {}) do
+    if #moves >= Config.BATTLE_MOVE_MAX then break end
+    local move = moveOf(data, slot, order)
+    if move then moves[#moves + 1] = move end
+  end
+  return moves
+end
+
+-- PROTOCOL 28: tell the referee this party member's moveset changed.
+function M.sendMoveset(transport, battle, monIndex0, moves)
+  if not (transport and battle) then return false end
+  if type(moves) ~= "table" or #moves == 0 then return false end
+  local msg = { battle = battle, mon = monIndex0, moves = moves }
+  if not Wire.battleMoveset(msg) then return false end
+  if transport:send(Wire.BATTLE_MOVESET, msg) == false then return false end
+  return true
+end
+
 -- The badges this player has earned, as a list for the wire.
 --
 -- Read off the badge *rows* rather than off a list written down here, so a mod
@@ -1445,9 +1474,14 @@ function M.new(opts)
     -- them. Own seat only: the peer's client draws the peer's own strip, the
     -- same ownership rule the whole exp path runs on.
     expFilling = nil,
-    -- Moves a level-up produced for a monster that already knows four, handed
-    -- to `onDone` on the way out (CoopBattle's `toLearn`, same shape).
+    -- Moves a level-up produced for a monster that already knows four.
+    -- Offered mid-fight via `LearnMove.open`; leftover entries ride out with
+    -- `onDone` if the player left before answering (CoopBattle's same shape).
     toLearn = nil,
+    -- A forget prompt is on the stack: `{ mon, move, name }`. Holds the
+    -- message queue the way `evolving` does, so the next turn does not open
+    -- under the Yes/No box.
+    learning = nil,
     -- #36: the fanfare finish() parked because the arena still owed one of those.
     victoryMusicHeld = nil,
     battlefieldLoaded = false,
@@ -3219,30 +3253,76 @@ end
 
 -- ------- learning a move
 --
--- CoopBattle's twin. A monster with a free slot simply learns it; a full
--- moveset is a choice only its owner can make, so it is set aside and handed
--- to `onDone` -- the session that pushed this screen is where a forget prompt
--- belongs, not over a battle that is still finishing its own lines. Until one
--- is wired there the move is announced and kept in the list rather than
--- silently dropped: `toLearn` is the record that it was earned.
+-- A free slot is applied to the save mon *and* the fight sheet, then published
+-- to the referee so the new move is usable this fight. A full moveset queues
+-- the generation's own forget prompt (`LearnMove.open`) as a blocking row --
+-- this screen is 1v1 / wild, so the pause is the same one vanilla takes.
+-- Co-op banks the fifth move for after the fight instead (see CoopBattle).
+-- `toLearn` is the leftover if the player leaves before answering.
 function M:teach(mon, name, moveId)
   local data = self.game and self.game.data
+  local status = LearnMove.apply(mon, moveId, data)
+  if status == "missing" or status == "known" then return false end
   local def = type(data) == "table" and (data.moves or {})[moveId] or nil
-  if not def then return false end
-  mon.moves = mon.moves or {}
-  for _, known in ipairs(mon.moves) do
-    if known.id == moveId then return false end
-  end
   name = name or "?"
-  if #mon.moves < 4 then
-    mon.moves[#mon.moves + 1] = { id = moveId, pp = def.pp }
-    self:say(name .. " learned\n" .. (def.name or moveId) .. "!")
+  if status == "learned" then
+    self:say(name .. " learned\n" .. ((def and def.name) or moveId) .. "!")
+    self:syncFightMoves(mon)
     return true
   end
   self.toLearn = self.toLearn or {}
   self.toLearn[#self.toLearn + 1] = { mon = mon, move = moveId }
-  self:say(name .. " is trying to\nlearn " .. (def.name or moveId) .. "!")
+  self.lines = self.lines or {}
+  self.lines[#self.lines + 1] = { learn = { mon = mon, move = moveId, name = name } }
   return true
+end
+
+-- Which uploaded sheet a save-party mon sits behind. Identity on the table
+-- `Experience.apply` already mutated -- an index into the party can move.
+function M:sheetIndexFor(mon)
+  if type(mon) ~= "table" then return nil end
+  for i = 1, #(self.mine or {}) do
+    if self:saveMon(i) == mon then return i end
+  end
+  return nil
+end
+
+-- Rebuild this sheet from the save mon and tell the referee. Transform's
+-- `liveMoves` overlay is left alone: the real sheet still updates so the
+-- new move is there when the transform ends.
+function M:syncFightMoves(mon)
+  local index = self:sheetIndexFor(mon)
+  if not index then return false end
+  local sheet = self.mine and self.mine[index]
+  if type(sheet) ~= "table" then return false end
+  local moves = M.sheetMoves(self.game, mon)
+  if #moves == 0 then return false end
+  sheet.moves = moves
+  return M.sendMoveset(self.transport, self.battle, index - 1, moves)
+end
+
+function M:finishLearn(row, learned)
+  self.learning = nil
+  if type(row) ~= "table" then return end
+  LearnMove.drop(self.toLearn, row.mon, row.move)
+  if learned then self:syncFightMoves(row.mon) end
+end
+
+function M:startLearn(row)
+  if type(row) ~= "table" or type(row.mon) ~= "table" then return false end
+  self.learning = row
+  local opened = LearnMove.open(self.game, row.mon, row.move, function(learned)
+    self:finishLearn(row, learned)
+  end)
+  if opened then return true end
+  -- No forget UI on this build: keep the toLearn leftover for after-battle
+  -- and announce the try so the award sequence still reads as a level-up.
+  self.learning = nil
+  local data = self.game and self.game.data
+  local def = type(data) == "table" and (data.moves or {})[row.move] or nil
+  self:say((row.name or "?") .. " is trying to\nlearn "
+    .. ((def and def.name) or tostring(row.move)) .. "!")
+  return false
 end
 
 -- Record whatever an event said about a field slot.  Every event that names one
@@ -4375,12 +4455,10 @@ function M:exit()
   if eng and eng.Music and self.game then
     Gen.restoreMapMusic(self.game, { Music = eng.Music })
   end
-  -- `toLearn` rides out with the result, exactly as CoopBattle's does: a
-  -- monster that levelled into a fifth move needs a forget prompt, and that
-  -- belongs to whoever pushed this screen (Coop hands its list to
-  -- `offerForgets`), not over a battle still reading its own last lines. A
-  -- session that ignores the second argument is no worse off than before --
-  -- the move is announced and the level is banked either way.
+  -- Leftover `toLearn` rides out if the player left before answering a
+  -- mid-fight forget prompt. Sessions / Coop still offer those after the
+  -- screen pops. A prompt still on the stack must not hold a dead queue.
+  self.learning = nil
   if self.onDone then self.onDone(self.result or "draw", self.toLearn) end
 end
 
@@ -4463,6 +4541,12 @@ function M:tickMessages(dt, input)
     self.dwell = 0
     return true
   end
+  -- Forget prompt on the stack: hold the award sequence the way a filling
+  -- strip does, so the next `turn` does not open under Yes/No.
+  if self.learning then
+    self.dwell = 0
+    return true
+  end
   if self.faintFx then
     -- Retired by stepFx once its `t` reaches 1.
     self.dwell = 0
@@ -4501,6 +4585,10 @@ function M:tickMessages(dt, input)
     end
     if type(next) == "table" and next.evolve ~= nil then
       self:startEvolve(next)
+      return true
+    end
+    if type(next) == "table" and next.learn ~= nil then
+      self:startLearn(next.learn)
       return true
     end
     if type(next) == "table" and next.faintfx ~= nil then
