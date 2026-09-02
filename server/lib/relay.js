@@ -177,7 +177,11 @@ function defaultSpriteFor(generation) {
 // maxHp; this one asked for 23 as well and moved to 26. The second to land
 // moves rather than sharing, so 26 means all of it. The fuller note is in
 // src/Config.lua.
-const PROTOCOL = 26;
+// 27: 3-player parties (`PARTY_MAX` 3) and the 3-wide mediated fields that
+// follow (`COOP_SIDE` / `COOP_FIGHTERS` products). A protocol-26 hub still
+// treats parties as pairs and `FIELD_MAX` as 0‥3 -- third member / wider
+// open / slot 4‥5 drop or silence. Fuller note in src/Config.lua.
+const PROTOCOL = 27;
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
 // now, and an ask that outlives the moment is one somebody answers yes to long
@@ -216,7 +220,8 @@ const BATTLE_RESOLVE_TIMEOUT = 30;
 // How many fighters one side of a co-op field holds, which is Config.COOP_SIDE
 // and is written as PARTY_MAX for that file's reason: two parties meet, so the
 // day a party grows the side grows with it rather than a literal 2 having to be
-// remembered here. It is also how many synthetic seats a coop_npc trainer takes.
+// remembered here. coop_npc foe seats are minted from this fight's human
+// count (#memberIds), not always COOP_SIDE -- empty trainer seats still drop.
 const COOP_SIDE = PARTY_MAX;
 
 // The seed range an authority client may propose, mirrored from sanitize's
@@ -714,11 +719,17 @@ handlers['mmo.request_cancel'] = (relay, client) => {
 // session, so two friends may team up while one of them is mid-trade. Being
 // busy stops you battling, not travelling together.
 handlers['mmo.party_invite'] = (relay, client, msg) => {
-  if (!client.ready || client.partyId) return;
+  if (!client.ready) return;
+  // Asker may already have a partyId when that party still has room
+  // (# < PARTY_MAX). Do not silent-drop an asker who is in a 2-person party.
+  if (client.partyId) {
+    if (relay.partyMembers(client.partyId).length >= PARTY_MAX) return;
+  }
   const target = relay.get(cleanId(msg.to));
   if (!target || !target.ready || target.id === client.id) return;
   // Answered here rather than forwarded: the asker learns at once that this
   // player is taken, instead of waiting on a prompt nobody will ever see.
+  // Target must be unattached.
   if (target.partyId) {
     return relay.send(client, 'mmo.party_decline',
       { name: target.name, reason: 'in_party' });
@@ -745,16 +756,24 @@ handlers['mmo.party_respond'] = (relay, client, msg) => {
   // Re-checked at the moment of forming, not only when the invite went out:
   // either of them could have joined somebody else's party while this one sat
   // on screen waiting for a human to read it.
-  if (client.partyId || asker.partyId) {
+  // Invitee must be unattached; asker's party must have room (or both free).
+  if (client.partyId) {
     return relay.send(asker, 'mmo.party_decline',
       { name: client.name, reason: 'in_party' });
+  }
+  if (asker.partyId) {
+    if (relay.partyMembers(asker.partyId).length >= PARTY_MAX) {
+      return relay.send(asker, 'mmo.party_decline',
+        { name: client.name, reason: 'in_party' });
+    }
+    return relay.joinParty(asker.partyId, client);
   }
   relay.startParty(asker, client);
 };
 
 handlers['mmo.party_leave'] = (relay, client) => {
   if (!client.ready) return;
-  relay.endParty(client, 'peer_left');
+  relay.leaveParty(client, 'peer_left');
 };
 
 /*
@@ -892,7 +911,7 @@ handlers['mmo.friend_remove'] = (relay, client, msg) => {
 // the two hosting paths and not the other.
 //
 // Two things live here and a third deliberately does not. The hub decides who
-// may *hear* about an offer (only the one player its owner travels with -- a
+// may *hear* about an offer (every other member of its owner's party -- a
 // client choosing its own audience would be a client inviting strangers into
 // its partner's fight) and whether all four *agreed*. It does not run the
 // battle; it says who consented and stops, exactly as it does for a 1v1.
@@ -901,8 +920,8 @@ handlers['mmo.coop_wait'] = (relay, client, msg) => {
   if (!client.ready || !client.partyId) return;
   const battle = cleanBattleKey(msg.battle);
   if (!battle) return;
-  const partner = relay.partnerOf(client);
-  if (!partner) return;
+  const partners = relay.partnersOf(client);
+  if (!partners.length) return;
 
   const label = cleanLabel(msg.label);
   const map = cleanMapId(msg.map);
@@ -920,7 +939,9 @@ handlers['mmo.coop_wait'] = (relay, client, msg) => {
   if (mode) offer.mode = mode;
   if (npcId) offer.npcId = npcId;
   if (event) offer.event = event;
-  relay.send(partner, 'mmo.coop_offer', offer);
+  for (const partner of partners) {
+    relay.send(partner, 'mmo.coop_offer', offer);
+  }
 };
 
 handlers['mmo.coop_cancel'] = (relay, client, msg) => {
@@ -932,14 +953,17 @@ handlers['mmo.coop_cancel'] = (relay, client, msg) => {
     return;
   }
   // Partner declined our invite: clear the waiter's offer and tell them so
-  // they can go in alone. Only `no` takes this path.
+  // they can go in alone. Only `no` takes this path. Walk every other member:
+  // partnerOf alone can miss the waiter in a 3-person party.
   if (reason === 'no') {
-    const partner = relay.partnerOf(client);
-    if (partner && partner.coopOffer) {
-      partner.coopOffer = null;
-      relay.send(partner, 'mmo.coop_decline', {
-        name: client.name, reason: 'no',
-      });
+    for (const partner of relay.partnersOf(client)) {
+      if (partner.coopOffer) {
+        partner.coopOffer = null;
+        relay.send(partner, 'mmo.coop_decline', {
+          name: client.name, reason: 'no',
+        });
+        break;
+      }
     }
   }
 };
@@ -970,15 +994,15 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   host.coopOffer = null;
   client.coopOffer = null;
 
-  const members = relay.partyMembers(client.partyId)
-    .map((m) => ({ id: m.id, name: m.name }));
+  const party = relay.partyMembers(client.partyId);
+  const members = party.map((m) => ({ id: m.id, name: m.name }));
+  const memberIds = party.map((m) => m.id);
 
   // Told differently on purpose: the player who was waiting learns *who*
   // joined -- it is the answer they have been standing there for -- and the
   // player who joined is handed the roster, because they never had one.
-  // The pair get a fan-out group of their own, on the same footing as a
-  // four-player one: from here on the battle traffic does not care which of the
-  // two ways it was agreed.
+  // Seat every current party member (hub order), not only host+joiner --
+  // otherwise a 3-person party vs NPC is silently 2vN.
   // The mode is taken from the offer when the waiter named one: coop_wild for
   // Party vs Wild (auto-join grass), otherwise coop_npc for the trainer path.
   // The four-way path below is the only one that makes a coop_pvp, because it
@@ -988,7 +1012,7 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // other.
   const battleId = `c${relay.nextCoopAsk++}`;
   const mode = offer.mode === 'coop_wild' ? 'coop_wild' : 'coop_npc';
-  relay.openCoopBattle(battleId, [host.id, client.id],
+  relay.openCoopBattle(battleId, memberIds,
     { mode, hostId: host.id });
 
   // `plan` is the hub's mediated battle id (`c*`). Without it the waiting
@@ -1004,12 +1028,18 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // as coop_wild without re-deriving from an offer that is already cleared.
   // `npcId` / `event` (PROTOCOL 20) ride so a menu joiner can finish the
   // trainer off without a local BattleState -- never fuzzy-matched by class.
+  // Every non-host party member gets coop_battle so a third seat is not
+  // left holding a mediated id with no screen.
   const battleMsg = {
     id: battleId, side: 'a', allies: members, battle, host: host.id, mode,
   };
   if (offer.npcId) battleMsg.npcId = offer.npcId;
   if (offer.event) battleMsg.event = offer.event;
-  relay.send(client, 'mmo.coop_battle', battleMsg);
+  for (const memberId of memberIds) {
+    if (memberId === host.id) continue;
+    const member = relay.clients.get(memberId);
+    if (member && member.ready) relay.send(member, 'mmo.coop_battle', battleMsg);
+  }
 };
 
 // Battle traffic, fanned out to everyone else in the same battle. The payload
@@ -1084,7 +1114,14 @@ handlers['mmo.coop_challenge'] = (relay, client, msg) => {
 
   const mine = relay.partyMembers(client.partyId);
   const theirs = relay.partyMembers(target.partyId);
-  if (mine.length !== PARTY_MAX || theirs.length !== PARTY_MAX) return;
+  // Square-only PvP: equal sizes, and that size is 2 or 3 (not === PARTY_MAX).
+  // On mismatch or a size-1 party, decline with reason mismatch -- NEVER a
+  // silent return (that left the asker hanging on "Nobody answered in time").
+  const n = mine.length;
+  if (n !== theirs.length || (n !== 2 && n !== 3)) {
+    return relay.send(client, 'mmo.coop_decline',
+      { name: target.name, reason: 'mismatch' });
+  }
 
   const id = `c${relay.nextCoopAsk++}`;
   const sideA = mine.map((m) => m.id);
@@ -1096,7 +1133,8 @@ handlers['mmo.coop_challenge'] = (relay, client, msg) => {
     sideA,
     sideB,
     everyone,
-    // The asker's own yes is implied by asking; the other three are counted.
+    // The asker's own yes is implied by asking; needed scales with size
+    // (3 for 2v2, 5 for 3v3).
     answers: new Set([client.id]),
     needed: everyone.length - 1,
     // relay.now(), not Date.now(): the suites drive this hub off an injected
@@ -1981,10 +2019,10 @@ class Relay {
      */
     const fighting = this.leaveBattle(client);
     if (client.coopBattleId && !fighting) this.closeCoopBattle(client.coopBattleId);
-    // A party outlives a trade but not a connection: the other member is told
-    // while this one is still in the table, so the presence that goes out
-    // with it is the one where they are no longer in a party.
-    this.endParty(client, 'peer_left');
+    // A party outlives a trade but not a connection: leaveParty keeps a
+    // remainder of 2+ and only dissolves when fewer than two would remain.
+    // The leaver is still in the table so presence goes out without them.
+    this.leaveParty(client, 'peer_left');
     const playerId = client.id;
     this.clients.delete(playerId);
     if (client.ephemeralId && this.byEphemeral) {
@@ -2045,6 +2083,7 @@ class Relay {
     return out;
   }
 
+  // Create a brand-new 2-person party. A third joins via joinParty, not here.
   startParty(a, b) {
     const id = String(this.nextParty++);
     this.parties.set(id, [a.id, b.id]);
@@ -2071,13 +2110,79 @@ class Relay {
     this.log.info(`party ${id}: ${safe(a.name)} + ${safe(b.name)}`);
   }
 
-  // One member leaving ends it for both. At PARTY_MAX = 2 there is no party
-  // left to continue, and a "party" of one that still showed a members list
-  // and a chat scope with nowhere to send would be worse than none.
+  // Append an unattached player to an existing party that still has room.
+  // Every member (including the newbie) is handed the FULL new list -- there
+  // is no delta to miss -- and presence goes out so INVITE rows update.
+  joinParty(partyId, newbie) {
+    if (!partyId || !newbie || newbie.partyId) return false;
+    const ids = this.parties.get(partyId);
+    if (!ids) return false;
+    if (ids.length >= PARTY_MAX) return false;
+    if (this.partyMembers(partyId).length >= PARTY_MAX) return false;
+
+    ids.push(newbie.id);
+    newbie.partyId = partyId;
+    newbie.partyPendingTo = null;
+
+    const members = this.partyMembers(partyId)
+      .map((m) => ({ id: m.id, name: m.name }));
+    for (const member of this.partyMembers(partyId)) {
+      this.send(member, 'mmo.party', { id: partyId, members });
+    }
+    this.broadcast('mmo.move', presenceOf(newbie), newbie.id);
+    this.noteRosterChange();
+    this.log.info(`party ${partyId}: + ${safe(newbie.name)}`);
+    return true;
+  }
+
+  // One member leaves. When two or more ready members remain, the party id
+  // stays and only the leaver is told party_end; when fewer than two would
+  // remain, dissolve via endParty (a party of one is not a party).
+  leaveParty(client, reason) {
+    const id = client.partyId;
+    if (!id) return;
+    // Remainder leave is still a lost seat on any in-flight PARTY BATTLE ask.
+    // (Harmless when drop already cleared asks before calling leaveParty.)
+    this.clearCoopAsks(client, 'gone');
+    const memberIds = this.parties.get(id) || [];
+    let remaining = 0;
+    for (const memberId of memberIds) {
+      if (memberId === client.id) continue;
+      const other = this.clients.get(memberId);
+      if (other && other.ready && other.partyId === id) remaining += 1;
+    }
+    if (remaining < 2) {
+      return this.endParty(client, reason);
+    }
+
+    // Remainder stays: clear this client's offer while the party still exists
+    // so partnersOf can still find the others to tell.
+    this.clearCoopOffer(client, 'gone');
+    const kept = memberIds.filter((memberId) => memberId !== client.id);
+    this.parties.set(id, kept);
+    client.partyId = null;
+    client.partyPendingTo = null;
+
+    const members = this.partyMembers(id)
+      .map((m) => ({ id: m.id, name: m.name }));
+    for (const member of this.partyMembers(id)) {
+      this.send(member, 'mmo.party', { id, members });
+    }
+    // Remaining members are NOT sent party_end -- only the updated roster.
+    if (this.clients.has(client.id)) {
+      this.send(client, 'mmo.party_end', { reason: 'left' });
+      this.broadcast('mmo.move', presenceOf(client), client.id);
+    }
+    this.noteRosterChange();
+  }
+
+  // Dissolve the whole party. leaveParty calls this when fewer than two
+  // ready members would remain; a "party" of one that still showed a members
+  // list and a chat scope with nowhere to send would be worse than none.
   endParty(client, reason) {
     const id = client.partyId;
     if (!id) return;
-    // Both offers go with the party, and while it still exists: an offer is
+    // All offers go with the party, and while it still exists: an offer is
     // only ever shown to a party member, so one that outlived its party would
     // be a box nothing left alive could take down.
     this.clearCoopOffer(client, 'gone');
@@ -2108,9 +2213,9 @@ class Relay {
 
   // ------- co-op battles
 
-  // The other member of this client's party, or null. At PARTY_MAX = 2 there
-  // is at most one, which is what lets an offer be forwarded without the
-  // sender naming a recipient.
+  // The first other member of this client's party, or null. Kept for
+  // 2-person offer paths that name a single partner; prefer partnersOf when
+  // a 3-person party must hear about a wait or a withdrawn offer.
   partnerOf(client) {
     if (!client.partyId) return null;
     for (const member of this.partyMembers(client.partyId)) {
@@ -2119,17 +2224,29 @@ class Relay {
     return null;
   }
 
-  // Drop this client's standing offer and tell whoever was being shown it.
+  // Every other ready member of this client's party (0..PARTY_MAX-1).
+  partnersOf(client) {
+    const out = [];
+    if (!client || !client.partyId) return out;
+    for (const member of this.partyMembers(client.partyId)) {
+      if (member.id !== client.id) out.push(member);
+    }
+    return out;
+  }
+
+  // Drop this client's standing offer and tell every other member who was
+  // being shown it. A 3-person party waiting at a trainer has told both
+  // partners, so both must hear the end -- partnerOf alone would leave one
+  // holding a box for a fight that is no longer on offer.
   //
   // Four callers -- withdrawing, being taken up on, the party dissolving, the
-  // connection dropping -- because all four otherwise leave the partner
+  // connection dropping -- because all four otherwise leave the partners
   // holding a box for a fight that is no longer on offer, and a box that can
   // only be answered into nothing is what this message exists to prevent.
   clearCoopOffer(client, reason) {
     if (!client || !client.coopOffer) return false;
     client.coopOffer = null;
-    const partner = this.partnerOf(client);
-    if (partner) {
+    for (const partner of this.partnersOf(client)) {
       this.send(partner, 'mmo.coop_offer_end', { reason: reason || 'left' });
     }
     return true;
@@ -2620,12 +2737,13 @@ class Relay {
    * Open the hub's record of a fight. The sim is still null: a ruleset and
    * every required party have to arrive before tryStartSim takes it over.
    *
-   * `npcIds` is set for coop_npc (two synthetic seats) and for wild /
-   * coop_wild (one seat). Coop_npc: two players meet two monsters. Wild: one
-   * player meets one wild mon on a hub NPC seat (protocol-only — no overworld
-   * divert). Coop_wild: two humans on side a, one wild seat on side b
-   * (overworld divert is client-side). The host uploads the NPC / wild team
-   * as side "b".
+   * `npcIds` is set for coop_npc (one synthetic seat per human in this
+   * fight — not always COOP_SIDE / two) and for wild / coop_wild (one seat).
+   * Coop_npc: N players meet up to N monsters (empty trainer seats still
+   * dropped later by fillBattleParty). Wild: one player meets one wild mon on
+   * a hub NPC seat (protocol-only — no overworld divert). Coop_wild: N humans
+   * (2 or 3) on side a, one wild seat on side b (overworld divert is
+   * client-side). The host uploads the NPC / wild team as side "b".
    *
    * They are ids a client could in principle type, and that is safe rather than
    * sloppy: client ids are minted as decimal counters, these carry a letter and
@@ -2648,18 +2766,22 @@ class Relay {
         && mode !== 'wild' && mode !== 'coop_wild') {
       mode = memberIds.length <= 2 ? '1v1' : 'coop_pvp';
     }
-    // coop_wild is a 2v1 contract (exactly two humans vs one wild seat).
-    if (mode === 'coop_wild' && memberIds.length !== 2) return null;
+    // coop_wild is N humans vs 1 wild (exactly 2 or 3 humans, one wild seat).
+    if (mode === 'coop_wild' && memberIds.length !== 2 && memberIds.length !== 3) {
+      return null;
+    }
 
     const hostId = p.hostId || memberIds[0];
     let npcIds = null;
     if (mode === 'coop_npc') {
+      // Foe seats = this fight's human count, not COOP_SIDE blindly (2v2 stays
+      // 2-wide; a 3-person party is 3v3). Empty seats still dropped later.
       npcIds = [];
-      for (let i = 0; i < COOP_SIDE; i += 1) {
+      for (let i = 0; i < memberIds.length; i += 1) {
         npcIds.push(`n${id}${String.fromCharCode(97 + i)}`);
       }
     } else if (mode === 'wild' || mode === 'coop_wild') {
-      // One synthetic wild seat. Wild: one human. Coop_wild: two humans.
+      // One synthetic wild seat. Wild: one human. Coop_wild: 2 or 3 humans.
       // Protocol-only here — overworld divert for coop_wild is client-side.
       npcIds = [`n${id}a`];
     }

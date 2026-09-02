@@ -4,6 +4,16 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [Unreleased]
+
+### Changed
+
+- **Parties hold three, and a 3-wide fight is legal.** `PARTY_MAX` is 3.
+  A pair can invite a third; one of three leaving leaves the other two.
+  Party PvP is 2-on-2 or 3-on-3 only (mismatch is refused). A 3-player
+  party vs a trainer seats up to 3 foe mons; vs wild still one wild.
+  **PROTOCOL is now 27.** Older hubs still pair-only / 4-slot field.
+
 ## [1.1.9] - 2026-08-31
 
 ### Changed

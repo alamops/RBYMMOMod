@@ -96,6 +96,18 @@ function mon(power, hp) {
   };
 }
 
+function partyForm(relay, asker, invitee) {
+  relay.handle(asker.id, { type: 'mmo.party_invite', to: invitee.id });
+  take(invitee, 'mmo.party_invite');
+  relay.handle(invitee.id, {
+    type: 'mmo.party_respond', to: asker.id, accept: true,
+  });
+}
+
+function coopAskCount(relay) {
+  return relay.coopAsks.size;
+}
+
 function openBattle(relay, a, b) {
   a.peer.outbox = [];
   b.peer.outbox = [];
@@ -157,7 +169,7 @@ function testMediatedOneVOneKo() {
     if (!relay.battles.has(session.id)) break;
     relay.handle(a.id, {
       type: 'mmo.battle_choice', battle: session.id,
-      action: 'fight', move: 0, target: 2,
+      action: 'fight', move: 0, target: 3,
     });
     relay.handle(b.id, {
       type: 'mmo.battle_choice', battle: session.id,
@@ -605,15 +617,20 @@ function testCoopWildSeating() {
     hostId: a.id,
     memberIds: [a.id],
   });
-  ok(solo === null, 'coop_wild refuses without exactly two humans');
+  ok(solo === null, 'coop_wild refuses with one human');
 
   const c = dial(relay, 'CWILDC');
-  const crowd = relay.openMediatedBattle('cw-3', {
+  const trio = relay.openMediatedBattle('cw-3', {
     mode: 'coop_wild',
     hostId: a.id,
     memberIds: [a.id, b.id, c.id],
   });
-  ok(crowd === null, 'coop_wild refuses with three humans');
+  ok(trio && trio.npcIds.length === 1,
+    'coop_wild with three humans still has one wild seat');
+  ok(trio.sides.a.length === 3 && trio.sides.b.length === 1,
+    'side a is three humans and side b is the wild seat');
+  ok(relay.seatsNeeded(trio).length === 4,
+    'four seats owe a party');
 }
 
 function testCoopWildCatchCatcher() {
@@ -696,6 +713,147 @@ function testCoopWildCatchCatcher() {
     'both players hear the outcome');
   ok(!relay.battles.has('cw-catch'),
     'the record is cleared like any other settlement');
+}
+
+function testCoopNpcThreeHumans() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'NPC3A');
+  const b = dial(relay, 'NPC3B');
+  const c = dial(relay, 'NPC3C');
+  const record = relay.openMediatedBattle('npc-3h', {
+    mode: 'coop_npc',
+    hostId: a.id,
+    memberIds: [a.id, b.id, c.id],
+  });
+  ok(record && record.npcIds.length === 3,
+    'coop_npc with three humans seats three trainer slots');
+  ok(record.sides.a.length === 3 && record.sides.b.length === 3,
+    'three humans face three foe seats');
+  ok(relay.seatsNeeded(record).length === 6,
+    'six seats owe a party');
+}
+
+function testPartyGrowLeave() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const ann = dial(relay, 'PGROWA');
+  const bob = dial(relay, 'PGROWB');
+  const cal = dial(relay, 'PGROWC');
+  const dee = dial(relay, 'PGROWD');
+
+  partyForm(relay, ann, bob);
+  const pair = take(ann, 'mmo.party');
+  take(bob, 'mmo.party');
+  ok(pair.members.length === 2, 'a new party starts with two members');
+
+  partyForm(relay, ann, cal);
+  const trioAnn = take(ann, 'mmo.party');
+  take(bob, 'mmo.party');
+  take(cal, 'mmo.party');
+  ok(trioAnn.members.length === 3, 'inviting a third carries the full roster');
+
+  relay.handle(ann.id, { type: 'mmo.party_invite', to: dee.id });
+  ok(take(dee, 'mmo.party_invite') === null,
+    'a full party never forwards a fourth invite');
+
+  relay.handle(cal.id, { type: 'mmo.party_leave' });
+  const duoAnn = take(ann, 'mmo.party');
+  take(bob, 'mmo.party');
+  ok(duoAnn.members.length === 2, 'two remain after one of three leaves');
+  ok(take(ann, 'mmo.party_end') === null,
+    'survivors are not told the party ended');
+  ok(take(bob, 'mmo.party_end') === null,
+    'survivors are not told the party ended');
+  const calEnd = take(cal, 'mmo.party_end');
+  ok(calEnd && calEnd.reason === 'left',
+    'only the leaver hears party_end with reason left');
+}
+
+function testCoopChallengeMismatch() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const ann = dial(relay, 'MISMA');
+  const bob = dial(relay, 'MISMB');
+  const cal = dial(relay, 'MISMC');
+  const dee = dial(relay, 'MISMD');
+  const eve = dial(relay, 'MISME');
+
+  partyForm(relay, ann, bob);
+  take(ann, 'mmo.party');
+  take(bob, 'mmo.party');
+  partyForm(relay, ann, cal);
+  take(ann, 'mmo.party');
+  take(bob, 'mmo.party');
+  take(cal, 'mmo.party');
+
+  partyForm(relay, dee, eve);
+  take(dee, 'mmo.party');
+  take(eve, 'mmo.party');
+
+  relay.handle(ann.id, { type: 'mmo.coop_challenge', to: dee.id });
+  const decline = take(ann, 'mmo.coop_decline');
+  ok(decline && decline.reason === 'mismatch',
+    '3v2 challenge declines on the asker with reason mismatch');
+  ok(coopAskCount(relay) === 0, 'and no ask is created');
+  ok(take(bob, 'mmo.coop_ask') === null,
+    'no partner is asked on mismatch');
+}
+
+function testCoopChallengeSquare() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const ann = dial(relay, 'SQ2A');
+  const bob = dial(relay, 'SQ2B');
+  const eve = dial(relay, 'SQ2E');
+  const fay = dial(relay, 'SQ2F');
+
+  partyForm(relay, ann, bob);
+  take(ann, 'mmo.party');
+  take(bob, 'mmo.party');
+  partyForm(relay, eve, fay);
+  take(eve, 'mmo.party');
+  take(fay, 'mmo.party');
+
+  relay.handle(ann.id, { type: 'mmo.coop_challenge', to: eve.id });
+  ok(take(ann, 'mmo.coop_decline') === null, '2v2 challenge is not declined');
+  ok(coopAskCount(relay) === 1, '2v2 opens one ask');
+  ok(take(bob, 'mmo.coop_ask') !== null, 'the asker\'s partner is asked');
+  ok(take(eve, 'mmo.coop_ask') !== null, 'the challenged party is asked');
+
+  // 3v3 is its own hub, matching the Lua twin: six more seats on this
+  // relay would overflow maxPlayers (the 2v2 four are still online).
+  const clock3 = makeClock();
+  const relay3 = makeRelay(clock3);
+  const ann3 = dial(relay3, 'SQ3A');
+  const bob3 = dial(relay3, 'SQ3B');
+  const cal3 = dial(relay3, 'SQ3C');
+  const dee3 = dial(relay3, 'SQ3D');
+  const eve3 = dial(relay3, 'SQ3E');
+  const fay3 = dial(relay3, 'SQ3F');
+
+  partyForm(relay3, ann3, bob3);
+  take(ann3, 'mmo.party');
+  take(bob3, 'mmo.party');
+  partyForm(relay3, ann3, cal3);
+  take(ann3, 'mmo.party');
+  take(bob3, 'mmo.party');
+  take(cal3, 'mmo.party');
+
+  partyForm(relay3, dee3, eve3);
+  take(dee3, 'mmo.party');
+  take(eve3, 'mmo.party');
+  partyForm(relay3, dee3, fay3);
+  take(dee3, 'mmo.party');
+  take(eve3, 'mmo.party');
+  take(fay3, 'mmo.party');
+
+  relay3.handle(ann3.id, { type: 'mmo.coop_challenge', to: dee3.id });
+  ok(take(ann3, 'mmo.coop_decline') === null, '3v3 challenge is not declined');
+  ok(coopAskCount(relay3) === 1, '3v3 opens one ask');
+  ok(take(bob3, 'mmo.coop_ask') !== null, 'every asker-side member is asked');
+  ok(take(cal3, 'mmo.coop_ask') !== null, 'including the third traveller');
+  ok(take(dee3, 'mmo.coop_ask') !== null, 'the challenged side is asked too');
 }
 
 function testBagProofs() {
@@ -796,6 +954,10 @@ testCoopNpcBagDumpStaysOutOfTree();
 testNpcBagHealCountsGymKitOnly();
 testCoopWildSeating();
 testCoopWildCatchCatcher();
+testCoopNpcThreeHumans();
+testPartyGrowLeave();
+testCoopChallengeMismatch();
+testCoopChallengeSquare();
 testTradeRelayStillWorks();
 testBagProofs();
 

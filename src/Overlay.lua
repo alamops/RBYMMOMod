@@ -807,18 +807,18 @@ end
 
 -- ------- the TOWN MAP (Gen 1) / POKeGEAR MAP (Gen 2)
 --
--- Where in Kanto your friend actually is.
+-- Where in Kanto your partners actually are.
 --
 -- The overworld tells you about the players standing in the room with you.
 -- The one thing a party wants that it cannot answer is the other question --
 -- *where are they* -- and Kanto already has a screen for exactly that. So
--- when the TOWN MAP is open, the party member is drawn on it: their
--- character at their city, with their nickname above it. Not a dot and not
--- an icon; the same person you would see if you walked there.
+-- when the TOWN MAP is open, every non-self party member is drawn on it:
+-- their character at their city, with their nickname above it. Not a dot
+-- and not an icon; the same person you would see if you walked there.
 --
 -- Party only, and deliberately. Every player on a busy hub drawn at once
 -- would bury the map under characters, and the map is 20x18 tiles with a
--- 16x16 character on it. At PARTY_MAX = 2 there is exactly one to draw.
+-- 16x16 character on it. Up to two markers at PARTY_MAX = 3; density is OK.
 --
 -- Gen 2's MAP card is src.ui.gen2.Pokegear, not TownMap: different
 -- coordinates (landmark index, Johto/Kanto regions) and no `byMap`. Soft

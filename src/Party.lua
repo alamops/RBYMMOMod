@@ -1,10 +1,11 @@
--- Parties: you and one friend, and the invite that got you there.
+-- Parties: up to Config.PARTY_MAX travellers, and the invite that got you there.
 --
--- A party is two players who have agreed to travel together.  What it buys
--- is small and deliberate -- a marker over your partner's head, a chat scope
--- that reaches them wherever they are, and a members list you can open their
--- trainer card from -- and what it costs is one field on every presence.
--- Config.PARTY_MAX says why it is two and not six.
+-- A party is two or three players who have agreed to travel together.  What
+-- it buys is small and deliberate -- a marker over each partner's head, a
+-- chat scope that reaches them wherever they are, and a members list you can
+-- open their trainer card from -- and what it costs is one field on every
+-- presence.  Config.PARTY_MAX is three: a pair can invite a third, and one
+-- of three leaving leaves a remainder of two.
 --
 -- **The hub owns the membership; this module owns what the player sees.**
 -- Nothing here decides that a party exists: mmo.party arrives with the whole
@@ -78,9 +79,10 @@ end
 
 function M:count() return #self.members end
 
--- The other member.  At PARTY_MAX = 2 there is exactly one, which is what
--- lets the party chat scope take no target and the LEAVE prompt name a
--- person rather than a group.
+-- The first other member.  Call sites that still speak of "your friend" in
+-- the singular -- a LEAVE prompt at size 2, a party-event gate that only
+-- needs "is there anyone to tell" -- keep using this; size-3 copy goes
+-- through partners() instead.
 function M:partner()
   for _, member in ipairs(self.members) do
     if not self:isSelf(member.id) then return member end
@@ -91,6 +93,17 @@ end
 function M:partnerName()
   local partner = self:partner()
   return partner and partner.name or nil
+end
+
+-- Every other member, in hub order.  At PARTY_MAX = 3 there are up to two.
+function M:partners()
+  local out = {}
+  for _, member in ipairs(self.members) do
+    if not self:isSelf(member.id) then
+      out[#out + 1] = { id = member.id, name = member.name }
+    end
+  end
+  return out
 end
 
 -- Everything about the party goes, including a half-finished invite: a
@@ -116,8 +129,12 @@ end
 
 function M:invite(peer)
   if not (peer and peer.id) then return false end
-  if self:has() then
-    self.ui:say("You're already in\na party.")
+  if self:isMember(peer.id) then
+    self.ui:say("They're already\nin your party.")
+    return false
+  end
+  if self:count() >= Config.PARTY_MAX then
+    self.ui:say("Your party is\nfull.")
     return false
   end
   if self.outgoing then
@@ -138,6 +155,10 @@ function M:onInvite(game, msg)
   -- Answered immediately rather than queued, for the same reason a trade
   -- request is: a prompt that surfaces minutes later, over whatever the
   -- player is doing by then, is worse than a no the asker can act on now.
+  --
+  -- An invitee already in a party declines even when that party still has
+  -- room: growing happens from the asker's side, not by accepting a second
+  -- invite into somebody else's list.
   if self:has() or self.incoming or self.outgoing then
     self.transport:send(Wire.PARTY_RESPOND, { to = from, accept = false })
     return
@@ -192,6 +213,17 @@ end
 
 -- ------- the party itself
 
+-- First-formation toast: one partner keeps the singular copy; two names both.
+local function formationCopy(partners)
+  if #partners >= 2 then
+    local a = partners[1].name or "a friend"
+    local b = partners[2].name or "a friend"
+    return ("with %s and %s"):format(a, b)
+  end
+  local name = (partners[1] and partners[1].name) or "your friend"
+  return ("with %s"):format(name)
+end
+
 function M:onParty(msg)
   local id = Wire.id(msg.id)
   local members = Wire.members(msg.members)
@@ -212,17 +244,44 @@ function M:onParty(msg)
   end
 
   local had = self.id
+  local prev = self.members
   self.id, self.members = id, members
   self.outgoing, self.incoming = nil, nil
-  if had == id then return end
 
-  local name = self:partnerName() or "your friend"
-  self:note(("Teamed up with %s."):format(name))
-  self.ui:say(("You're in a party\nwith %s!"):format(name))
+  -- Same party id with a different roster: a third joined, or one left and
+  -- the remainder stayed.  Toast the delta rather than replaying formation.
+  if had == id then
+    local was = {}
+    for _, member in ipairs(prev) do was[member.id] = member end
+    local now = {}
+    for _, member in ipairs(members) do now[member.id] = member end
+    for mid, member in pairs(now) do
+      if not was[mid] and not self:isSelf(mid) then
+        local name = member.name or "Someone"
+        self:note(("%s joined the party."):format(name))
+        self.ui:say(("%s joined\nthe party."):format(name))
+      end
+    end
+    for mid, member in pairs(was) do
+      if not now[mid] and not self:isSelf(mid) then
+        local name = member.name or "Someone"
+        self:note(("%s left the party."):format(name))
+        self.ui:say(("%s left\nthe party."):format(name))
+      end
+    end
+    return
+  end
+
+  local with = formationCopy(self:partners())
+  self:note(("Teamed up %s."):format(with))
+  self.ui:say(("You're in a party\n%s!"):format(with))
 end
 
 -- The hub says the party is over.  Reasons are `left` (we are the one who
 -- left, so the box would be telling us what we just did) and `peer_left`.
+-- At size 3 a single peer leaving normally arrives as mmo.party with the
+-- remainder, not as party_end -- this path is the dissolve (or a hub that
+-- still ends the whole group).
 function M:onEnd(msg)
   if not self:has() then
     -- Our own leave already cleared the state optimistically; the hub's
@@ -230,28 +289,39 @@ function M:onEnd(msg)
     self.outgoing, self.incoming = nil, nil
     return
   end
-  local name = self:partnerName() or "Your friend"
+  local partners = self:partners()
   local reason = msg and msg.reason
   self:reset()
   if reason == "left" then return end
-  self:note(("%s left the party."):format(name))
-  self.ui:say(("%s left\nthe party."):format(name))
+  -- Naming only the first partner would lie when two people just left the
+  -- list together; keep the singular peer_left copy at size 2.
+  if #partners > 1 then
+    self:note("Someone left the party.")
+    self.ui:say("Someone left\nthe party.")
+  else
+    local name = (partners[1] and partners[1].name) or "Your friend"
+    self:note(("%s left the party."):format(name))
+    self.ui:say(("%s left\nthe party."):format(name))
+  end
 end
 
--- Leaving ends the party for both of us -- there is no "the party continues
--- without you" at two people, which is the whole of Config.PARTY_MAX's
--- consequence.
---
--- Cleared here rather than on the hub's answer, and that ordering is the
--- point: pressing LEAVE has to leave, even on a connection that is already
--- dying.  The hub's mmo.party_end lands a moment later on a client that has
--- nothing left to clear, which onEnd treats as ordinary.
+-- Leaving clears us locally and asks the hub to drop us.  At two people the
+-- hub dissolves the party; at three the other two stay together.  Cleared
+-- here rather than on the hub's answer: pressing LEAVE has to leave, even on
+-- a connection that is already dying.  The hub's follow-up (party_end, or
+-- mmo.party with the remainder) lands on a client that has nothing left to
+-- clear, which onEnd / onParty treat as ordinary.
 function M:leave()
   if not self:has() then return false end
-  local name = self:partnerName() or "your friend"
+  local partners = self:partners()
   self:reset()
   self.transport:send(Wire.PARTY_LEAVE, {})
-  self:note(("Left the party with %s."):format(name))
+  if #partners > 1 then
+    self:note("Left the party.")
+  else
+    local name = (partners[1] and partners[1].name) or "your friend"
+    self:note(("Left the party with %s."):format(name))
+  end
   return true
 end
 

@@ -474,6 +474,44 @@ async function main() {
     const flagged = await cal.expect('mmo.move');
     ok(flagged.party === true, 'the rest of the hub sees them as spoken for');
 
+    // a two-person party can invite a third
+    ann.send('mmo.party_invite', { to: calWelcome.id });
+    await cal.expect('mmo.party_invite');
+    cal.send('mmo.party_respond', { to: annWelcome.id, accept: true });
+    const trioAnn = await ann.expect('mmo.party');
+    const trioBob = await bob.expect('mmo.party');
+    const trioCal = await cal.expect('mmo.party');
+    ok(trioAnn.members.length === 3, 'accepting a third carries the full roster');
+    ok(trioBob.id === trioAnn.id && trioCal.id === trioAnn.id,
+      'all three share one party id');
+
+    // a full party cannot grow further
+    const eveParty = new Client(PORT);
+    await eveParty.ready();
+    eveParty.send('mmo.hello', {
+      proto: PROTOCOL, playerId: testPlayerId('EVEP'), name: 'EVEP',
+      sprite: 'SPRITE_RED', map: 'PALLET', x: 2, y: 2, facing: 'down',
+    });
+    const evePartyWelcome = await eveParty.expect('mmo.welcome');
+    ann.drain('mmo.join');
+    bob.drain('mmo.join');
+    cal.drain('mmo.join');
+    ann.send('mmo.party_invite', { to: evePartyWelcome.id });
+    await eveParty.expectSilence('mmo.party_invite');
+    ok(true, 'a full party never forwards a fourth invite');
+    eveParty.close();
+
+    // one of three leaving leaves two in the party
+    cal.drain('mmo.move');
+    cal.send('mmo.party_leave', {});
+    const duoAnn = await ann.expect('mmo.party');
+    const duoBob = await bob.expect('mmo.party');
+    ok(duoAnn.members.length === 2, 'two remain after one of three leaves');
+    await ann.expectSilence('mmo.party_end');
+    await bob.expectSilence('mmo.party_end');
+    const calLeft = await cal.expect('mmo.party_end');
+    ok(calLeft.reason === 'left', 'only the leaver hears party_end with reason left');
+
     // somebody already in a party is refused before a prompt is ever shown
     cal.send('mmo.party_invite', { to: bobWelcome.id });
     const taken = await cal.expect('mmo.party_decline');
@@ -698,6 +736,58 @@ async function main() {
     ann.send('mmo.coop_challenge', { to: calWelcome.id });
     await cal.expectSilence('mmo.coop_ask');
     ok(true, 'a party cannot challenge a player who has none');
+
+    // 3v2 party PvP is refused on the asker with reason mismatch
+    ann.send('mmo.party_invite', { to: calWelcome.id });
+    await cal.expect('mmo.party_invite');
+    cal.send('mmo.party_respond', { to: annWelcome.id, accept: true });
+    await ann.expect('mmo.party');
+    await bob.expect('mmo.party');
+    await cal.expect('mmo.party');
+
+    const deePvP = new Client(PORT);
+    await deePvP.ready();
+    deePvP.send('mmo.hello', {
+      proto: PROTOCOL, playerId: testPlayerId('DEEPVP'), name: 'DEEPVP',
+      sprite: 'SPRITE_RED', map: 'PALLET', x: 3, y: 3, facing: 'down',
+    });
+    const deePvPWelcome = await deePvP.expect('mmo.welcome');
+    const evePvP = new Client(PORT);
+    await evePvP.ready();
+    evePvP.send('mmo.hello', {
+      proto: PROTOCOL, playerId: testPlayerId('EVEPVP'), name: 'EVEPVP',
+      sprite: 'SPRITE_BLUE', map: 'PALLET', x: 4, y: 4, facing: 'down',
+    });
+    const evePvPWelcome = await evePvP.expect('mmo.welcome');
+    deePvP.send('mmo.party_invite', { to: evePvPWelcome.id });
+    await evePvP.expect('mmo.party_invite');
+    evePvP.send('mmo.party_respond', { to: deePvPWelcome.id, accept: true });
+    await deePvP.expect('mmo.party');
+    await evePvP.expect('mmo.party');
+
+    ann.send('mmo.coop_challenge', { to: deePvPWelcome.id });
+    const mismatch = await ann.expect('mmo.coop_decline');
+    ok(mismatch.reason === 'mismatch',
+      '3v2 challenge declines on the asker with reason mismatch');
+    await bob.expectSilence('mmo.coop_ask');
+    await cal.expectSilence('mmo.coop_ask');
+    await deePvP.expectSilence('mmo.coop_ask');
+    ok(true, 'and no ask is created on mismatch');
+
+    deePvP.close();
+    evePvP.close();
+    await sleep(100);
+    for (const client of [ann, bob, cal]) {
+      client.drain('mmo.part');
+      client.drain('mmo.join');
+    }
+
+    // back to a pair for the teardown scenarios below
+    cal.drain('mmo.move');
+    cal.send('mmo.party_leave', {});
+    await ann.expect('mmo.party');
+    await bob.expect('mmo.party');
+    await cal.expect('mmo.party_end');
 
     // ...and the offer dies with the party rather than outliving it
     ann.send('mmo.coop_wait', { battle: FIGHT, label: 'BUG CATCHER' });

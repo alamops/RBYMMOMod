@@ -2621,7 +2621,7 @@ end
 --
 -- Answered off the field rather than off the trainer record, because that is
 -- the description all four clients were built from: a co-op battle against an
--- NPC carries two ownerless slots and a party battle carries none.
+-- NPC carries ownerless slots and a party battle carries none.
 -- `self.trainer` would be a weaker test -- a script-driven battle need not name
 -- a trainer at all -- and this is the question the run rule turns on.
 function M:partyBattle()
@@ -4931,10 +4931,10 @@ function M:foeSide(index)
   return (slot ~= nil and ours ~= nil and slot.side ~= ours) and true or false
 end
 
--- Visual lane for a field slot: 1-2 = your pair (bottom-left), 3-4 = theirs
--- (top-right). Field indices stay a1,a2,b1,b2 on the wire; only drawing keys
--- off this remapping so every client still sees itself on the Gen 1 "player"
--- half of the screen.
+-- Visual lane for a field slot: allies first (bottom-left), then foes
+-- (top-right) offset by #ally. Field indices stay on the wire; only drawing
+-- keys off this remapping so every client still sees itself on the Gen 1
+-- "player" half of the screen.
 function M:viewPos(index)
   if type(index) ~= "number" or not self.sim then return index end
   local mine = self:mySlot()
@@ -4952,7 +4952,7 @@ function M:viewPos(index)
     if id == index then return i end
   end
   for i, id in ipairs(foe) do
-    if id == index then return i + 2 end
+    if id == index then return i + #ally end
   end
   return index
 end
@@ -4973,12 +4973,11 @@ function M:panelSlots(which)
   return rows
 end
 
--- How big slot `index` draws. Near pair (view lanes 1–2) uses ALLY_SCALE so
--- the backs fill the field down to the text box; far pair stays FOE_SCALE.
+-- How big slot `index` draws. Own side uses ALLY_SCALE so the backs fill
+-- the field down to the text box; the far side stays FOE_SCALE.
 function M:scaleFor(index)
-  local pos = self:viewPos(index)
-  if not pos then return PIC_SCALE end
-  if pos <= 2 then return ALLY_SCALE end
+  if index == nil then return PIC_SCALE end
+  if not self:foeSide(index) then return ALLY_SCALE end
   return FOE_SCALE
 end
 
@@ -8825,11 +8824,12 @@ end
 -- The translation is the whole of the risk, so the two readings that are easy to
 -- get backwards are named:
 --
---   * a **field slot** on the wire is 0..3 (side a takes 0 and 1, side b takes 2
---     and 3, per src/BattleSim/events.lua) while this screen numbers its slots
---     1..4 in a1,a2,b1,b2 order. They are not the same number and the map
---     between them is built from the hub's own roster, not from the arithmetic
---     that happens to line up today -- see `medMap`.
+--   * a **field slot** on the wire is 0..(COOP_SIDE*2-1) (side a takes
+--     0..COOP_SIDE-1, side b takes COOP_SIDE upward, per
+--     src/BattleSim/events.lua's SIDE_SLOTS) while this screen numbers its
+--     slots 1..N in a1,a2,[a3,]b1,b2,[b3] order. They are not the same number
+--     and the map between them is built from the hub's own roster, not from
+--     the arithmetic that happens to line up today -- see `medMap`.
 --   * a `switch` **choice** names a party index; a `send` **event** names a field
 --     slot. Same word, two numbers.
 --
@@ -8853,12 +8853,12 @@ end
 -- The NPC side's team, as one party in the order the trainer would send it out.
 --
 -- Re-interleaved, because that is how it was split: src/Coop.lua's `npcSide`
--- deals the trainer's party alternately into the two ownerless slots so that a
--- pair of players meets a pair of monsters. Taking one from each slot in turn
--- gives back the original order -- and order is the whole of what is at stake
--- here, because the referee sends the next living monster out in party order and
--- never asks. Concatenating instead would have a gym leader lead with the
--- monster it meant to finish on.
+-- deals the trainer's party alternately into the ownerless slots so that
+-- players meet as many monsters as the field seats. Taking one from each
+-- slot in turn gives back the original order -- and order is the whole of
+-- what is at stake here, because the referee sends the next living monster
+-- out in party order and never asks. Concatenating instead would have a gym
+-- leader lead with the monster it meant to finish on.
 --
 -- One party and not two, because the intermediator seats one npc: see
 -- Config.MEDIATED_COOP's first reason.
@@ -8891,7 +8891,7 @@ end
 
 -- Sheets for the wild seat (coop_wild side b): prebuilt `wildParty`, else a
 -- snapshot of the stashed `wildCatchMon`. Never npcMons interleave — that
--- assumes two ownerless trainer slots.
+-- walks every ownerless trainer slot.
 function M:wildMons()
   if type(self.wildParty) == "table" and #self.wildParty > 0 then
     return self.wildParty
@@ -9010,8 +9010,8 @@ function M:medMap(sides)
   if not self.sim then return byField, byIndex end
   for _, side in ipairs({ "a", "b" }) do
     local ids = (type(sides) == "table" and sides[side]) or {}
-    -- Config.COOP_SIDE is the same 2 that src/BattleSim/events.lua mirrors as
-    -- SIDE_SLOTS; one side's worth of field slots is what separates the bases.
+    -- Config.COOP_SIDE is the same SIDE_SLOTS src/BattleSim/events.lua
+    -- mirrors; one side's worth of field slots is what separates the bases.
     local base = (side == "b") and Config.COOP_SIDE or 0
     local spare = {}
     for _, slot in ipairs(self.sim.slots or {}) do
@@ -9196,7 +9196,8 @@ function M:medRows(msg)
     -- there is one exp implementation rather than two.
     --
     -- `slot` is translated the way every other row's is (`medSlotOf`): the
-    -- referee counts field slots 0..3 and this screen counts CoopSim indices,
+    -- referee counts field slots 0..(COOP_SIDE*2-1) and this screen counts
+    -- CoopSim indices,
     -- and `gainExp`'s own-slot gate compares against `self.mine`, which is an
     -- index. The referee sends one of these per *paid participant* -- every
     -- monster that was in against the fallen foe and lived, benched included

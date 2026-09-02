@@ -153,8 +153,8 @@ M.FIELDS = {
 -- fields are marked, and the two readings that are easy to get backwards are
 -- spelled out:
 --
---   * `slot` on an event is a **field slot** (0..3: side a takes 0 and 1, side
---     b takes 2 and 3) -- it is *not* the party index a `switch` choice names.
+--   * `slot` on an event is a **field slot** (0..5: side a takes 0..2, side
+--     b takes 3..5) -- it is *not* the party index a `switch` choice names.
 --     Same word, two numbers, and the one the event carries is always about
 --     somebody who is out on the field.
 --   * a `status` event with a `status` field means the standing condition was
@@ -231,12 +231,12 @@ M.SHAPES = {
 -- field slots
 -- ------------------------------------------------------------------
 --
--- Mirrors Config.COOP_SIDE (PARTY_MAX, which is 2) rather than requiring it,
--- for the reason in the header.  A 1v1 uses slots 0 and 2 and leaves the odd
--- ones empty, which keeps one numbering across all three modes -- the
--- alternative, packing a 1v1 into 0 and 1, would mean a client's "which box is
--- this" changes meaning with the mode.
-M.SIDE_SLOTS = 2
+-- Mirrors Config.COOP_SIDE (PARTY_MAX, which is 3) rather than requiring it,
+-- for the reason in the header.  A 1v1 uses slots 0 and 3 and leaves the odd
+-- ones empty, which keeps one numbering across all modes -- the alternative,
+-- packing a 1v1 into 0 and 1, would mean a client's "which box is this"
+-- changes meaning with the mode.
+M.SIDE_SLOTS = 3
 
 function M.fieldSlot(side, index)
   local base = (side == "b") and M.SIDE_SLOTS or 0

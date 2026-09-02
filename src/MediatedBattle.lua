@@ -1238,22 +1238,25 @@ local function frameCount(dt)
   return n
 end
 
--- Side a takes field slot 0 and side b takes slot 2.  Mirrored from
--- src/BattleSim/events.lua's numbering rather than derived, because it is the
--- numbering every event on the wire is already stated in: a 1v1 leaves the odd
--- slots empty so that "which box is this" does not change meaning with the
--- mode.
-local function slotOfSide(side) return side == "b" and 2 or 0 end
+-- Side a takes field slots 0..COOP_SIDE-1 and side b takes COOP_SIDE.. .
+-- Mirrored from src/BattleSim/events.lua's SIDE_SLOTS rather than derived,
+-- because it is the numbering every event on the wire is already stated in:
+-- a 1v1 leaves the partner seats empty so that "which box is this" does not
+-- change meaning with the mode (foe is slot COOP_SIDE, not 1).
+local function slotOfSide(side)
+  return side == "b" and Config.COOP_SIDE or 0
+end
 
--- ...and back the other way. Side a holds slots 0-1, side b holds 2-3, so the
--- read is a halving rather than an equality -- a co-op seat sits on the odd
--- slot of its side and is no less that side's for it. A slot this build cannot
--- read as a number is nobody's, and answers "a" so that the one caller (the
--- exp credit below) treats it as *not* a foe -- the conservative half.
+-- ...and back the other way. Side a holds 0..COOP_SIDE-1, side b holds
+-- COOP_SIDE upward, so the read is a threshold rather than an equality -- a
+-- co-op seat past the lead of its side is no less that side's for it. A slot
+-- this build cannot read as a number is nobody's, and answers "a" so that the
+-- one caller (the exp credit below) treats it as *not* a foe -- the
+-- conservative half.
 local function sideOfSlot(index)
   local n = tonumber(index)
   if not n then return "a" end
-  return (math.floor(n) >= 2) and "b" or "a"
+  return (math.floor(n) >= Config.COOP_SIDE) and "b" or "a"
 end
 
 -- How many `exp` events one observed foe knockout may pay for.

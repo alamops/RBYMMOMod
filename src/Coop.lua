@@ -829,16 +829,10 @@ function M:onTrainerBattle(game, state, mapId)
   if kind ~= "trainer" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running then return false end
-  -- Partner has to be online (in the roster). Offline / no partner means this
-  -- is a solo fight, and a lone player must never notice co-op exists -- so
-  -- that case is silent, and only this one is.
-  local partner = self.party:partner()
-  local here = partner and self.roster:get(partner.id)
-  if not here then return false end
-  -- ...and standing on this map. Refused *before* the encounter is claimed and
-  -- before anything is sent: no COOP_WAIT, no offer for the partner to hold,
-  -- no wait to time out. The player is simply told why their partner is not in
-  -- this fight and left to fight it.
+  -- Every partner has to be standing on this map. Refused *before* the
+  -- encounter is claimed and before anything is sent: no COOP_WAIT, no offer
+  -- for anyone to hold, no wait to time out. A 3-person party with one person
+  -- off-map is a solo fight, and the player is told who is missing.
   --
   -- Said with a box over the trainer the engine just pushed, which is the same
   -- surface every other pre-battle line in this module uses (M:onDecline's
@@ -846,9 +840,15 @@ function M:onTrainerBattle(game, state, mapId)
   -- updates its top, so the battle underneath is held until the player presses
   -- A and then resumes untouched. Nothing is released, because nothing was
   -- ever taken -- `self.encounter` is not set on this path at all.
-  if not self:partnerOnMap(mapId) then
-    local who = (partner and partner.name) or self.party:partnerName()
-      or "Your friend"
+  --
+  -- No partners at all (or none still in the roster as a party) is silent: a
+  -- lone player must never notice co-op exists. Naming starts once there is
+  -- somebody the divert would have needed.
+  local partners = self.party:partners()
+  if #partners == 0 then return false end
+  local away = self:partnerAway(mapId)
+  if away then
+    local who = away.name or "Your friend"
     local line = ("%s was too far\nto join!"):format(who)
     self:note(line)
     self.ui:say(line)
@@ -928,11 +928,11 @@ end
 
 -- Called when the engine has just pushed a wild encounter.
 --
--- Divert only when partied, the partner is roster-online on *this* map, and
+-- Divert only when partied, every partner is roster-online on *this* map, and
 -- neither side is busy. Busy here is: we are already mid-co-op / mid-ask /
 -- mid-wait, another fight is already on the stack (excluding this just-pushed
--- wild), or their presence says session-busy. Otherwise return false and leave
--- the engine wild completely alone.
+-- wild), or any partner's presence says session-busy. Otherwise return false
+-- and leave the engine wild completely alone.
 --
 -- Exception: a standing `coop_wild` offer from the partner means they already
 -- diverted -- join that fight instead of opening a second wait (and drop the
@@ -954,11 +954,16 @@ function M:onWildEncounter(game, state, mapId)
   if self.offer then
     if self.offer.mode ~= "coop_wild" then return false end
     -- Partner already waiting on grass: join them; do not start a local wait.
-    if not self:partnerOnMap(mapId) then return false end
+    -- Every partner must be on this map -- same gate as a fresh divert.
+    local away = self:partnerAway(mapId)
+    if away or #self.party:partners() == 0 then return false end
     if self:inFightExcept(game, state) then return false end
-    local partner = self.party:partner()
-    local row = partner and self.roster:get(partner.id)
-    if row and row.busy then return false end
+    local busy = false
+    for _, partner in ipairs(self.party:partners()) do
+      local row = self.roster:get(partner.id)
+      if row and row.busy then busy = true; break end
+    end
+    if busy then return false end
     -- Asked here rather than left to autoJoin, because the pop below is not
     -- reversible: a join refused after it would cost the player the encounter
     -- they walked into. The offer stays standing for M:update's retry.
@@ -971,10 +976,17 @@ function M:onWildEncounter(game, state, mapId)
     end
     return self:autoJoin(offer)
   end
-  if not self:partnerOnMap(mapId) then return false end
-  local partner = self.party:partner()
-  local row = partner and self.roster:get(partner.id)
-  if row and row.busy then return false end
+  local partners = self.party:partners()
+  if #partners == 0 then return false end
+  -- Off-map (any partner): silent solo engine wild -- a spoken line on every
+  -- grass tile would spam. Trainer divert is the path that names who is away.
+  if self:partnerAway(mapId) then return false end
+  local busy = false
+  for _, partner in ipairs(partners) do
+    local row = self.roster:get(partner.id)
+    if row and row.busy then busy = true; break end
+  end
+  if busy then return false end
   if self:inFightExcept(game, state) then return false end
 
   local mon = M.wildMonOf(state)
@@ -1110,16 +1122,38 @@ function M:unwindTo(game, target, alsoPop)
   return M.unwindStackTo(game, target, alsoPop)
 end
 
--- Whether the partner is currently standing on `mapId`.
+-- First party partner who is not standing on `mapId` (offline or elsewhere).
+-- Nil when every partner is here -- the divert / challenge gate's yes case.
+function M:partnerAway(mapId)
+  if not mapId then return nil end
+  for _, partner in ipairs(self.party:partners()) do
+    local row = self.roster:get(partner.id)
+    if not (row and row.map == mapId) then return partner end
+  end
+  return nil
+end
+
+-- Whether every party partner is currently standing on `mapId`.
 --
--- Absence (offline, no roster row) is not "elsewhere" -- it is nobody to wait
--- for, and onTrainerBattle refuses that case one line above the one that asks
--- this. Both answers now end the same way on both flows: no divert.
+-- Absence (offline, no roster row) counts as away -- a 3-wide divert or
+-- challenge must not start with one of three missing. Both flows refuse the
+-- same way: no divert / no ask armed, and the caller names who is missing.
+function M:partnersOnMap(mapId)
+  local partners = self.party:partners()
+  if not mapId or #partners == 0 then return false end
+  return self:partnerAway(mapId) == nil
+end
+
+-- Kept as the divert/challenge predicate name; means *all* partners now.
 function M:partnerOnMap(mapId)
-  if not mapId then return false end
-  local partner = self.party:partner()
-  local row = partner and self.roster:get(partner.id)
-  return row ~= nil and row.map == mapId
+  return self:partnersOnMap(mapId)
+end
+
+-- "2-on-2" or "3-on-3" for the current party size. Anything that is not
+-- exactly three is the pair noun -- size-1 should never reach a fight line,
+-- and the default matches every historical string.
+local function partyFightNoun(n)
+  return (tonumber(n) == 3) and "3-on-3" or "2-on-2"
 end
 
 -- Start waiting, and tell the partner.
@@ -1466,21 +1500,30 @@ function M:challenge(game, peer, myMap)
     return false
   end
   -- Their side of it.  presence.party is the one thing every client is told
-  -- about every other -- deliberately a bool and never a party id -- and it is
-  -- exactly the fact this row needs.
+  -- about every other -- deliberately a bool and never a party size -- and it
+  -- is exactly the fact this row needs. Their size is unknown here; a
+  -- mismatch is the hub's `coop_decline` reason, not a client pre-check.
   if not peer.party then
     self.ui:say(("%s isn't in\na party."):format(peer.name or "They"))
     return false
   end
 
-  -- Our own partner has to be standing here.  A four-way battle whose fourth
-  -- player is two maps away is one that would begin without them and finish
-  -- before they arrived.
-  local partner = self.party:partner()
-  local here = partner and self.roster:get(partner.id)
-  if not (here and here.map and myMap and here.map == myMap) then
+  -- Square-only PvP: our side must be 2 or 3. Checked before self.ask is set
+  -- so a refuse never leaves the asker hanging on "You already asked".
+  local n = self.party:count()
+  if n ~= 2 and n ~= 3 then
+    self.ui:say("Your party can't\nbattle like that.")
+    return false
+  end
+
+  -- Every partner has to be standing here.  A six-way whose third is two maps
+  -- away is one that would begin without them and finish before they arrived.
+  -- Named before anything is written down -- same no-hang rule as the size
+  -- check above.
+  local away = self:partnerAway(myMap)
+  if away or not myMap then
     self.ui:say(("%s isn't on\nthis map."):format(
-      (partner and partner.name) or "Your friend"))
+      (away and away.name) or "Your friend"))
     return false
   end
 
@@ -1489,7 +1532,8 @@ function M:challenge(game, peer, myMap)
     return false
   end
 
-  self.ask = { role = "asker", peer = peer.id, name = peer.name, clock = 0 }
+  self.ask = { role = "asker", peer = peer.id, name = peer.name, clock = 0,
+               size = n }
   self.transport:send(Wire.COOP_CHALLENGE, { to = peer.id })
   -- Held, not just shown. This box is a screen on the engine's stack that
   -- dismisses itself when the player presses A -- and a player who does not
@@ -1498,8 +1542,8 @@ function M:challenge(game, peer, myMap)
   -- down there, and it resurfaces intact when the battle pops: a sentence
   -- about an ask that was answered several minutes ago. See M:closeAskBox.
   self.askBox = {
-    box = self.ui:say(("Asked %s for a\n2-on-2 battle."):format(
-      peer.name or "them")),
+    box = self.ui:say(("Asked %s for a\n%s battle."):format(
+      peer.name or "them", partyFightNoun(n))),
     game = game,
   }
   return true
@@ -1618,8 +1662,14 @@ function M:onAsk(game, msg)
     return
   end
 
-  self.ask = { role = "asked", id = id, name = name, side = side, clock = 0 }
-  self.ui:confirm(game, ("%s wants a\n2-on-2 battle!"):format(name),
+  -- Hub ask is same-size, so our count is theirs when the wire carries no
+  -- size. A future `size` on the ask wins when present. Stashed on ask so
+  -- onPartyEnd can still name the fight after membership has already reset.
+  local n = tonumber(msg.size) or self.party:count()
+  self.ask = { role = "asked", id = id, name = name, side = side, clock = 0,
+               size = n }
+  self.ui:confirm(game, ("%s wants a\n%s battle!"):format(
+      name, partyFightNoun(n)),
     function(yes)
       local pending = self.ask
       if not (pending and pending.role == "asked") then return end
@@ -1658,7 +1708,11 @@ function M:onDecline(msg)
   -- one of them stale, is what a player would otherwise be left pressing A
   -- through.
   self:closeAskBox()
-  if reason == "timeout" then
+  if reason == "mismatch" then
+    -- Hub refused party-vs-party size (unequal, or not 2-or-3). Cleared above
+    -- so the asker is never left armed waiting out "Nobody answered in time".
+    self.ui:say("Party sizes\ndon't match.")
+  elseif reason == "timeout" then
     self.ui:say("Nobody answered\nin time.")
   elseif reason == "gone" then
     self.ui:say(("%s went\noffline."):format(name or "Someone"))
@@ -1838,6 +1892,9 @@ function M:onBattle(game, msg)
   local foes = Wire.members(msg and msg.foes)
   self.ask = nil
   self.waiting = nil
+  -- A third member pulled in by COOP_BATTLE fan-out must not keep a leftover
+  -- JOIN mark or a mid-fight COOP_CANCEL path armed from the invite they rode.
+  self.offer, self.offerMarkFor = nil, nil
   -- The ask is answered, so the sentence about having asked has nothing left
   -- to say. Closed here as well as in startBattle because a battle that never
   -- assembles still has to leave the screen clean.
@@ -1918,7 +1975,8 @@ function M:begin(game, plan)
     -- The engine's link modules are what pack a party, and without them there
     -- is no battle to have. Said out loud, and the trainer handed back, rather
     -- than leaving four players staring at nothing.
-    return self:abandon("2-on-2 needs the\nlink modules.")
+    return self:abandon(("%s needs the\nlink modules."):format(
+      partyFightNoun(self.party:count())))
   end
 
   self.battle.parties[self.party.selfId or "me"] = packed
@@ -2237,11 +2295,11 @@ end
 
 -- The NPC side, taken from the battle the engine already built.
 --
--- The trainer's own party is split across up to two slots so a multi-mon
--- trainer is a genuine 2-on-2 rather than two players taking turns on one
--- monster. A trainer with only one mon gets a single foe seat -- the hub's
--- mediated path drops empty NPC seats the same way -- so parties can fight
--- any trainer, not only those with two or more POKéMON.
+-- The trainer's own party is dealt round-robin across one bucket per human on
+-- our side (N = max(1, #plan.allies)), matching the hub's one-NPC-seat-per-
+-- human mint. Empty buckets are dropped -- a one-mon trainer (or a wild mon)
+-- still yields a single foe seat -- so parties can fight any trainer, not
+-- only those with enough POKéMON to fill every seat.
 --
 -- `enemyParty` is a list of real monsters with fixed trainer DVs and computed
 -- stats -- the engine made them a moment ago when it constructed the battle
@@ -2259,9 +2317,11 @@ function M:npcSide(game, plan)
   end
   if not (party and #party > 0) then return nil end
 
-  local left, right = {}, {}
+  local n = math.max(1, #(plan.allies or {}))
+  local buckets = {}
+  for b = 1, n do buckets[b] = {} end
   for i, mon in ipairs(party) do
-    local into = (i % 2 == 1) and left or right
+    local into = buckets[((i - 1) % n) + 1]
     into[#into + 1] = mon
   end
   local label = plan.label or "TRAINER"
@@ -2271,11 +2331,12 @@ function M:npcSide(game, plan)
   -- one. Wire.payloadOk bounds what may be forwarded, and a packed party is
   -- the shape it was bounded for.
   local out = {}
-  out[#out + 1] = { side = "b", owner = nil, name = label,
-                    party = CoopBattle.packParty(left, game) }
-  if #right > 0 then
-    out[#out + 1] = { side = "b", owner = nil, name = label,
-                      party = CoopBattle.packParty(right, game) }
+  for b = 1, n do
+    local bucket = buckets[b]
+    if #bucket > 0 then
+      out[#out + 1] = { side = "b", owner = nil, name = label,
+                        party = CoopBattle.packParty(bucket, game) }
+    end
   end
   for _, entry in ipairs(out) do
     if not entry.party then return nil end
@@ -2709,7 +2770,8 @@ function M:onBattleOver(result, game, state, toLearn)
     self.encounter = { engine = self.engineBattle, game = game }
     self.engineBattle = nil
   end
-  self:note(("The 2-on-2 ended in a %s."):format(tostring(result)))
+  self:note(("The %s ended in a %s."):format(
+    partyFightNoun(self.party:count()), tostring(result)))
 
   -- Asked here, first, and once.
   --
@@ -2821,11 +2883,14 @@ end
 -- that can no longer resolve.
 function M:onPartyEnd()
   local hadWait = self.waiting ~= nil
+  -- party:onEnd already reset membership before this runs, so party:count()
+  -- would always read as a pair. Use the size stashed when the ask was made.
+  local noun = partyFightNoun((self.ask and self.ask.size) or 2)
   self.waiting, self.offer, self.offerMarkFor = nil, nil, nil
   if self.ask then
     self.ask = nil
     self:closeAskBox()
-    self.ui:say("The 2-on-2 battle\nis off.")
+    self.ui:say(("The %s battle\nis off."):format(noun))
   end
   -- A player standing at a trainer waiting for a partner who has just left the
   -- party is a player waiting for nobody, so the fight is handed back rather

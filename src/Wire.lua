@@ -709,7 +709,8 @@ M.LEVEL_MAX = 100
 -- `name` is required and `from` is not.  The name is what every one of the
 -- five sentences is about, so an event without one is not something any
 -- screen can show; the id is only there because the other party messages
--- carry one, and at PARTY_MAX = 2 there is exactly one player it could name.
+-- carry one, and at PARTY_MAX there is room for every other member the party
+-- may name (one at size 2, two at size 3).
 function M.partyEvent(raw)
   if type(raw) ~= "table" then return nil end
   local needs = M.PARTY_EVENTS[raw.kind]
@@ -757,9 +758,10 @@ end
 --   no        -- somebody in the four said no
 --   gone      -- somebody dropped
 --   timeout   -- nobody answered in time
+--   mismatch  -- party-vs-party size not equal / not 2-or-3 (hub refuse; T7 phrases)
 M.COOP_REASONS = {
   alone = true, left = true, started = true,
-  no = true, gone = true, timeout = true,
+  no = true, gone = true, timeout = true, mismatch = true,
 }
 
 function M.coopReason(value)
@@ -808,7 +810,7 @@ function M.badges(value)
   return out
 end
 
--- The assembled field, as it reaches the other three clients.
+-- The assembled field, as it reaches the other clients in the fight.
 --
 -- **This is the one payload that used to be taken on trust**, and it is the
 -- least defensible one to trust: the "host" is another player's client, not a
@@ -821,7 +823,7 @@ end
 --   * the slot **count** (3‥COOP_FIGHTERS), because `buildField` only ever
 --     checked it on the sending side -- so a modified host could send fifty
 --     and every client would build fifty. Three is a real shape: two players
---     against a one-monster trainer;
+--     against a one-monster trainer (and still valid for a 2v1 wild);
 --   * the **side**, because `targetsFor` reads it as one of two values and an
 --     arbitrary third makes "who may I attack" incoherent;
 --   * the **name**, because it is drawn on screen and interpolated into
@@ -835,9 +837,9 @@ end
 function M.coopField(raw)
   if type(raw) ~= "table" or type(raw.slots) ~= "table" then return nil end
   local n = #raw.slots
-  -- Floor is three: a co-op party needs two humans, and an NPC fight needs at
-  -- least one foe seat. Cap is the full four-fighter field (two parties, or a
-  -- trainer with enough monsters to fill both foe seats).
+  -- Floor is three: a co-op party needs two humans, and an NPC / wild fight
+  -- needs at least one foe seat. Cap is COOP_FIGHTERS (two parties of
+  -- PARTY_MAX, or a trainer filling every foe seat the side width allows).
   if n < 3 or n > Config.COOP_FIGHTERS then return nil end
 
   local slots = {}
@@ -1073,10 +1075,10 @@ M.AMOUNT_MAX = 9999
 -- the client's own Experience formula.  Twelve rather than BATTLE_MON_MAX
 -- because vanilla pays every mon that was ever in against the fallen foe and is
 -- still alive, benched included -- so a co-op faint can be split across two
--- full parties: BATTLE_MON_MAX (6) * COOP_SIDE (2) = 12.  One number that
--- covers both shapes beats two that have to be kept in step; it bounds a
--- foreign value before it enters a formula, it does not restate a game rule.
-M.PARTICIPANTS_MAX = 12
+-- full parties: BATTLE_MON_MAX * COOP_SIDE. One number that covers both shapes
+-- beats two that have to be kept in step. It bounds a foreign value before it
+-- enters a formula, it does not restate a game rule.
+M.PARTICIPANTS_MAX = Config.BATTLE_MON_MAX * Config.COOP_SIDE
 
 -- How long a reason token this build has never heard of may be.  Refused past it
 -- rather than trimmed -- a cut token matches nothing and is a value nobody sent.
@@ -1086,10 +1088,10 @@ M.REASON_MAX = 32
 --
 --   SLOT_MAX   a *party* index -- which of your six.  What `mon.slot` and
 --              `choice.slot` are bounded by.
---   FIELD_MAX  a position *on the field* -- four, because a party is a pair and
---              two parties meet.  What `choice.target` and `event.slot` are
---              bounded by: an event is about somebody who is out, not about a
---              bench position.
+--   FIELD_MAX  a position *on the field* -- COOP_FIGHTERS seats (two parties
+--              of PARTY_MAX), zero-based so FIELD_MAX = COOP_FIGHTERS - 1.
+--              What `choice.target` and `event.slot` are bounded by: an event
+--              is about somebody who is out, not about a bench position.
 --
 -- Written as offsets from Config's own numbers rather than as literals, so the
 -- day PARTY_MAX moves the field moves with it instead of being a number
