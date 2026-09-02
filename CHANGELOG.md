@@ -4,6 +4,19 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.2.0] - 2026-09-01
+
+### Changed
+
+- **A release is the version in `manifest.json`, or it does not ship.**
+  Pushing to `main` no longer auto-bumps the last tag, and it no longer
+  takes a number from a `workflow_dispatch` input or a `[release X.Y.Z]`
+  line in the commit message. Those paths could publish a version the
+  tree never declared. If the manifest is the same as, or lower than,
+  the latest `vX.Y.Z` tag, the job fails. Pull requests against `main`
+  run that same check without packing or publishing, so a forgotten bump
+  fails the PR instead of going red on `main` after merge.
+
 ## [1.1.9] - 2026-08-31
 
 ### Changed

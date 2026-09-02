@@ -11,7 +11,7 @@ A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp).
 ![LÖVE 11.x](https://img.shields.io/badge/L%C3%96VE-11.x-e64998?style=for-the-badge)
 ![Players 2–64](https://img.shields.io/badge/players-2--64-3aa757?style=for-the-badge)
 ![No server needed](https://img.shields.io/badge/dedicated%20server-optional-4c8fd6?style=for-the-badge)
-![v1.1.9](https://img.shields.io/badge/version-1.1.9-3aa757?style=for-the-badge)
+![v1.2.0](https://img.shields.io/badge/version-1.2.0-3aa757?style=for-the-badge)
 ![MIT](https://img.shields.io/badge/licence-MIT-666?style=for-the-badge)
 
 **No server to rent. No accounts. No signup.** One of you hosts from inside
@@ -1424,14 +1424,14 @@ GitHub Actions run away from a commit, so it can't quietly drift from the
 source.
 
 **To ship a version:** bump `version` in `manifest.json`, add the matching
-`CHANGELOG.md` heading, push. The workflow takes the manifest's version when
-it's ahead of every existing tag, which makes bumping the manifest the normal
-way to cut a release. Failing that it falls back, in order, to a
-`workflow_dispatch` input, a `[release X.Y.Z]` tag in the commit message, or
-a patch bump on the newest `vX.Y.Z`. Whichever wins is written into the
-manifest *inside the archive*, so an installed copy never reports a version
-the release it came from doesn't have. An existing tag or release is refused
-rather than overwritten.
+`CHANGELOG.md` heading, then open the PR. The workflow always uses that
+number — it never auto-bumps and never takes a version from a manual run
+or a commit message. A pull request whose manifest is the same as, or
+lower than, an existing `vX.Y.Z` release fails the version check (no zip,
+no GitHub Release); bump first, then merge. After merge the same job packs
+and publishes. The packed archive keeps that same number, so an installed
+copy never reports a version the release it came from doesn't have. An
+existing tag or release is refused rather than overwritten.
 
 Each run publishes `rby_mmo-<version>.zip` plus `sha256sums.txt`. The
 filename matters: the launcher's update check looks for `<id>-<version>.zip`
@@ -1498,7 +1498,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `1.1.9` (`experimental: false` — on by default when installed). The full
+It's `1.2.0` (`experimental: false` — on by default when installed). The full
 list lives in `mod.card` under `differences.known`. The ones that'll actually
 bite you:
 
