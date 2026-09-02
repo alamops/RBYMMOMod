@@ -323,6 +323,7 @@ local function copyMon(raw, fallback)
       moveIndex = max(1, int(raw.charging.moveIndex, 1)),
       effect = max(0, int(raw.charging.effect, 0)),
       targetSlot = int(raw.charging.targetSlot, nil),
+      moveId = str(raw.charging.moveId),
     }
   end
 
@@ -2381,7 +2382,11 @@ function Battle:_useMove(fighter, mon, opts)
   if not struggling and move.pp > 0 and not releasing and not choice.bideRelease then
     move.pp = move.pp - 1
   end
-  self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = move.id })
+  local chargingUp = Effects.isCharge(effectId) and not mon.charging
+  self:_emit("anim", {
+    slot = fighter.slot, side = fighter.side, text = move.id,
+    amount = chargingUp and 1 or nil,
+  })
   self:_say(mon.species .. " used " .. moveLabel(move))
 
   if choice.bideRelease and mon.bide then
@@ -2402,9 +2407,10 @@ function Battle:_useMove(fighter, mon, opts)
       moveIndex = choice.move,
       effect = effectId,
       targetSlot = targetSlot,
+      moveId = move.id,
     }
-    if Effects.isFly(effectId) then mon.invulnerable = true end
-    self:_say(Effects.chargeMessage(mon, effectId))
+    if Effects.vanishes(effectId, move) then mon.invulnerable = true end
+    self:_say(Effects.chargeMessage(mon, effectId, move.id))
     self:_markLastMove(mon, choice.move)
     return
   end
@@ -2415,13 +2421,20 @@ function Battle:_useMove(fighter, mon, opts)
   end
 
   if defender.invulnerable then
-    self:_say("But it failed")
-    if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
-    if Effects.isJumpKick(effectId) then
-      self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
+    local chargeMoveId = defender.charging and defender.charging.moveId
+    if not chargeMoveId and defender.charging then
+      local charged = defender.moves and defender.moves[defender.charging.moveIndex]
+      chargeMoveId = charged and charged.id or nil
     end
-    self:_markLastMove(mon, choice.move)
-    return
+    if not Effects.hitsInvulnerable(chargeMoveId, move) then
+      self:_say("But it failed")
+      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isJumpKick(effectId) then
+        self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
+      end
+      self:_markLastMove(mon, choice.move)
+      return
+    end
   end
 
   if Effects.isMirrorMove(effectId) and not mirrorCopy then

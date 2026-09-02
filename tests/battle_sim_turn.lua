@@ -1422,6 +1422,131 @@ do
   ok(alpha and alpha.charging == nil, "CHARGE_EFFECT clears charging after release")
 end
 
+-- Dig (CHARGE + move.id) vanishes, talks like Dig, and Earthquake misses.
+do
+  local battle = battleOf({
+    seed = 4242,
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 200, spd = 120, atk = 80, level = 40,
+        moves = { move({ id = "DIG", power = 60, effect = 39, pp = 10 }) },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1, def = 40, atk = 80,
+        moves = { move({ id = "EARTHQUAKE", power = 80, effect = 0, accuracy = 255 }) },
+      }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn1 = drain(battle)
+  local dug, failed, damaged, chargeAnim = false, false, false, false
+  for _, event in ipairs(turn1) do
+    if event.t == "msg" and event.text:find("dug a hole", 1, true) then dug = true end
+    if event.t == "msg" and event.text:find("But it failed", 1, true) then failed = true end
+    if event.t == "damage" then damaged = true end
+    if event.t == "anim" and event.text == "DIG" and event.amount == 1 then
+      chargeAnim = true
+    end
+  end
+  ok(dug, "DIG turn one announces dug a hole")
+  ok(chargeAnim, "DIG charge anim carries amount=1")
+  ok(failed, "Gen1 Earthquake misses a digging target")
+  ok(not damaged, "DIG charge turn deals no damage")
+  local alpha = activeMonOf(battle, "p1")
+  ok(alpha and alpha.invulnerable == true, "DIG sets invulnerable")
+  eq(alpha and alpha.moves[1].pp, 9, "DIG spends PP only on the charge turn")
+
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn2 = drain(battle)
+  local released, foeDamaged = false, false
+  for _, event in ipairs(turn2) do
+    if event.t == "anim" and event.text == "DIG" and event.amount == nil then
+      released = true
+    end
+    if event.t == "damage" and event.slot == 2 then foeDamaged = true end
+  end
+  ok(released, "DIG turn two auto-releases without amount=1")
+  ok(foeDamaged, "DIG turn two deals damage")
+  alpha = activeMonOf(battle, "p1")
+  ok(alpha and alpha.invulnerable ~= true, "DIG release clears invulnerable")
+  ok(alpha and alpha.charging == nil, "DIG release clears charging")
+end
+
+-- Charge-family setup lines key off move.id (hyphenated ids still glow).
+do
+  local Effects = need("BattleSim/Effects")
+  local mon = { species = "Alpha" }
+  eq(Effects.chargeMessage(mon, 39, "SOLARBEAM"), "Alpha took in sunlight")
+  eq(Effects.chargeMessage(mon, 39, "SKULL_BASH"), "Alpha lowered its head")
+  eq(Effects.chargeMessage(mon, 39, "RAZOR_WIND"), "Alpha made a whirlwind")
+  eq(Effects.chargeMessage(mon, 39, "SKY_ATTACK"), "Alpha is glowing")
+  eq(Effects.chargeMessage(mon, 39, "solar-beam"), "Alpha is glowing")
+end
+
+-- Fly: Thunder reaches, a normal tackle does not.
+do
+  local battle = battleOf({
+    seed = 4343,
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 200, spd = 120, atk = 80, level = 40,
+        moves = { move({ id = "FLY", power = 70, effect = 43, pp = 10 }) },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1, def = 40, atk = 80,
+        moves = { move({ id = "THUNDER", power = 80, effect = 0, accuracy = 255 }) },
+      }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn1 = drain(battle)
+  local flew, failed, damaged = false, false, false
+  for _, event in ipairs(turn1) do
+    if event.t == "msg" and event.text:find("flew up high", 1, true) then flew = true end
+    if event.t == "msg" and event.text:find("But it failed", 1, true) then failed = true end
+    if event.t == "damage" and event.slot == 0 then damaged = true end
+  end
+  ok(flew, "FLY turn one announces flew up high")
+  ok(not failed, "Gen1 Thunder reaches a flying target")
+  ok(damaged, "Gen1 Thunder damages the flying user")
+end
+
+-- Swift hits Fly/Dig in Gen 1 (accuracy skip also skips invuln).
+do
+  local battle = battleOf({
+    seed = 4444,
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 200, spd = 120,
+        moves = { move({ id = "FLY", power = 70, effect = 43 }) },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1, atk = 80,
+        moves = { move({ id = "SWIFT", power = 60, effect = 17, accuracy = 255 }) },
+      }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn1 = drain(battle)
+  local damaged = false
+  for _, event in ipairs(turn1) do
+    if event.t == "damage" and event.slot == 0 then damaged = true end
+  end
+  ok(damaged, "Gen1 Swift hits a flying target")
+end
+
 do
   local battle = battleOf({
     seed = 8888,

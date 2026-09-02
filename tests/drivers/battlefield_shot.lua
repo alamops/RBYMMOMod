@@ -822,6 +822,40 @@ return function(game)
     log("warn", "ball frame did not reach disk", path4)
   end
 
+  -- ---- Dig / Fly vanish: charge hides the seat and holds it ----
+  -- Drop the ball hold so a leftover wobble cannot steal the seat assert.
+  if screen.clearBallFlow then screen:clearBallFlow() end
+  screen.fx = nil
+  screen.ballFlow = nil
+  screen.lines[#screen.lines + 1] = {
+    anim = "DIG", slot = screen:mySlot(), side = "a", amount = 1,
+  }
+  local reachedDig = H.waitFor(game, function()
+    return Battlefield.fxSeat(screen.fx, "ally", 1).hidden == true
+  end, 80, "DIG charge to hide the ally seat")
+  check(reachedDig, "dig: charge hides the ally seat")
+  local pathDig = SHOT_DIR .. "/battlefield-dig.png"
+  if U.shot(game, pathDig) then
+    log("captured", pathDig)
+  else
+    log("warn", "dig frame did not reach disk", pathDig)
+  end
+  screen.lines[#screen.lines + 1] = {
+    anim = "DIG", slot = screen:mySlot(), side = "a",
+  }
+  local emerged = H.waitFor(game, function()
+    return Battlefield.fxSeat(screen.fx or {}, "ally", 1).hidden ~= true
+  end, 80, "DIG release to show the ally seat")
+  check(emerged, "dig: release clears the hide")
+
+  screen.lines[#screen.lines + 1] = {
+    anim = "FLY", slot = screen:foeSlot(), side = "b", amount = 1,
+  }
+  local reachedFly = H.waitFor(game, function()
+    return Battlefield.fxSeat(screen.fx, "foe", 1).hidden == true
+  end, 80, "FLY charge to hide the foe seat")
+  check(reachedFly, "fly: charge hides the foe seat")
+
   -- ---- (d) bubble frame: rounded callout, moveName emphasised ----
   screen:noteBattlefieldBubble({ anim = "THUNDERBOLT", slot = screen:mySlot() })
   U.wait(3)

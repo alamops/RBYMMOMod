@@ -396,6 +396,7 @@ function copyMon(raw, fallback) {
       moveIndex: Math.max(1, int(raw.charging.moveIndex, 1)),
       effect: Math.max(0, int(raw.charging.effect, 0)),
       targetSlot: int(raw.charging.targetSlot, null),
+      moveId: str(raw.charging.moveId),
     };
   }
 
@@ -2365,7 +2366,11 @@ class Battle {
     const mirrorCopy = opts.mirrorCopy === true;
 
     if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) move.pp -= 1;
-    this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
+    const chargingUp = Effects.isCharge(effectId) && !mon.charging;
+    this._emit('anim', {
+      slot: fighter.slot, side: fighter.side, text: move.id,
+      amount: chargingUp ? 1 : undefined,
+    });
     this._say(`${mon.species} used ${moveLabel(move)}`);
 
     if (choice.bideRelease && mon.bide) {
@@ -2387,9 +2392,10 @@ class Battle {
         moveIndex: choice.move,
         effect: effectId,
         targetSlot,
+        moveId: move.id,
       };
-      if (Effects.isFly(effectId)) mon.invulnerable = true;
-      this._say(Effects.chargeMessage(mon, effectId));
+      if (Effects.vanishes(effectId, move)) mon.invulnerable = true;
+      this._say(Effects.chargeMessage(mon, effectId, move.id));
       this._markLastMove(mon, choice.move);
       return;
     }
@@ -2400,13 +2406,20 @@ class Battle {
     }
 
     if (defender.invulnerable) {
-      this._say('But it failed');
-      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-      if (Effects.isJumpKick(effectId)) {
-        this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+      let chargeMoveId = defender.charging && defender.charging.moveId;
+      if (!chargeMoveId && defender.charging) {
+        const charged = defender.moves && defender.moves[defender.charging.moveIndex - 1];
+        chargeMoveId = charged && charged.id;
       }
-      this._markLastMove(mon, choice.move);
-      return;
+      if (!Effects.hitsInvulnerable(chargeMoveId, move)) {
+        this._say('But it failed');
+        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isJumpKick(effectId)) {
+          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+        }
+        this._markLastMove(mon, choice.move);
+        return;
+      }
     }
 
     if (Effects.isMirrorMove(effectId) && !mirrorCopy) {

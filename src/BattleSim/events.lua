@@ -182,7 +182,7 @@ M.FIELDS = {
 M.SHAPES = {
   msg       = { text = true },
   anim      = { slot = true, side = true, text = "move or ball-anim id",
-                amount = "shake count on SHAKE_ANIM (0-3)" },
+                amount = "shake count on SHAKE_ANIM (0-3); 1 on a charge/vanish setup beat" },
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
   drain     = { slot = true, side = true, amount = true, hp = true,
