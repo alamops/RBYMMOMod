@@ -1445,14 +1445,14 @@ GitHub Actions run away from a commit, so it can't quietly drift from the
 source.
 
 **To ship a version:** bump `version` in `manifest.json`, add the matching
-`CHANGELOG.md` heading, then open the PR. The workflow always uses that
-number — it never auto-bumps and never takes a version from a manual run
-or a commit message. A pull request whose manifest is the same as, or
-lower than, an existing `vX.Y.Z` release fails the version check (no zip,
-no GitHub Release); bump first, then merge. After merge the same job packs
-and publishes. The packed archive keeps that same number, so an installed
-copy never reports a version the release it came from doesn't have. An
-existing tag or release is refused rather than overwritten.
+`CHANGELOG.md` heading, then merge to `main`. The workflow runs only on
+that branch after the merge — never on a pull request — and always uses
+the manifest number. It never auto-bumps and never takes a version from
+a manual run or a commit message. If the manifest is the same as, or
+lower than, an existing `vX.Y.Z` release, the job fails. The packed
+archive keeps that same number, so an installed copy never reports a
+version the release it came from doesn't have. An existing tag or
+release is refused rather than overwritten.
 
 Each run publishes `rby_mmo-<version>.zip` plus `sha256sums.txt`. The
 filename matters: the launcher's update check looks for `<id>-<version>.zip`
