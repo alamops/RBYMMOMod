@@ -31,9 +31,8 @@ here must match `manifest.version`.
   takes a number from a `workflow_dispatch` input or a `[release X.Y.Z]`
   line in the commit message. Those paths could publish a version the
   tree never declared. If the manifest is the same as, or lower than,
-  the latest `vX.Y.Z` tag, the job fails. Pull requests against `main`
-  run that same check without packing or publishing, so a forgotten bump
-  fails the PR instead of going red on `main` after merge.
+  the latest `vX.Y.Z` tag, the job fails. The workflow runs only after
+  a merge to `main`, not on pull requests.
 
 - **Parties hold three, and a 3-wide fight is legal.** `PARTY_MAX` is 3.
   A pair can invite a third; one of three leaving leaves the other two.
