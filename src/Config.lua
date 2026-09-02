@@ -218,7 +218,18 @@ M.MOD_ID = "rby_mmo"
 -- proving itself rather than contradicting itself.  26 means all of it: a
 -- client that says 26 speaks 23's, 24's and 25's vocabularies too.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 26
+--
+-- 27 is claimed in-flight by 3x3 seating / party-of-three, so this bump
+-- does not take it. 28 is `mmo.battle_moveset`: a client telling the
+-- referee that one of its own party members learned or replaced a move
+-- mid-fight (level-up or the evolution that follows). The hub holds no
+-- learnset and never will, so the save-file copy is the only one that can
+-- decide the new sheet -- and a protocol-26 intermediator answers the type
+-- with silence, which is the bug this names: the save mon learns TACKLE,
+-- the FIGHT menu still shows the uploaded four, and the next choice
+-- executes the old move at that index. Refusal naming both versions is the
+-- only sentence either player can act on.
+M.PROTOCOL = 28
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

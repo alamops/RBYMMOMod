@@ -42,6 +42,7 @@ const {
   cleanBattleKey, cleanCoopReason, cleanDeclineReason, cleanCoopOfferMode, cleanLabel,
   cleanPartyEvent, PARTY_MAX,
   cleanBattleRuleset, cleanBattleParty, cleanBattleChoice, cleanBattleReconnect,
+  cleanBattleMoveset,
   BATTLE_MOVE_MAX,
 } = require('./sanitize');
 const {
@@ -177,7 +178,13 @@ function defaultSpriteFor(generation) {
 // maxHp; this one asked for 23 as well and moved to 26. The second to land
 // moves rather than sharing, so 26 means all of it. The fuller note is in
 // src/Config.lua.
-const PROTOCOL = 26;
+// 27 is claimed in-flight by 3x3 seating / party-of-three. 28:
+// mmo.battle_moveset -- a client publishing a mid-fight learn / replace
+// for one of its own party members. A protocol-26 hub answers the type with
+// silence, so the save mon learns and the referee still executes the uploaded
+// sheet. Refusal naming both versions is the only sentence either player can
+// act on. Bump with Config.PROTOCOL.
+const PROTOCOL = 28;
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
 // now, and an ask that outlives the moment is one somebody answers yes to long
@@ -1256,6 +1263,14 @@ handlers['mmo.battle_choice'] = (relay, client, msg) => {
  * id, so a returning process is rekeyed to it on admit and may reattach to a
  * fight still inside reconnect grace.
  */
+handlers['mmo.battle_moveset'] = (relay, client, msg) => {
+  const record = mediatedOf(relay, client);
+  if (!record || !record.sim) return;
+  const payload = cleanBattleMoveset(msg);
+  if (!payload || payload.battle !== record.id) return;
+  relay.applyBattleMoveset(record, client, payload);
+};
+
 handlers['mmo.battle_reconnect'] = (relay, client, msg) => {
   const record = mediatedOf(relay, client);
   if (!record || !record.sim) return;
@@ -1361,6 +1376,30 @@ handlers['mmo.ranks'] = (relay, client) => {
   client.lastRanks = now;
   relay.send(client, 'mmo.ranking', { entries: relay.leaderboard() });
 };
+
+// A mid-fight learn may append one slot or change exactly one id. Same length
+// with zero id changes is an idempotent retry. Anything else (two swaps, a
+// shrink, a full rewrite) is a moveset editor, not a level-up.
+function movesetDeltaOk(old, incoming) {
+  const prevLen = Array.isArray(old) ? old.length : 0;
+  const nextLen = incoming.length;
+  if (nextLen === prevLen) {
+    let changed = 0;
+    for (let i = 0; i < nextLen; i += 1) {
+      const prev = old[i];
+      if (!prev || prev.id !== incoming[i].id) changed += 1;
+    }
+    return changed <= 1;
+  }
+  if (nextLen === prevLen + 1) {
+    for (let i = 0; i < prevLen; i += 1) {
+      const prev = old[i];
+      if (!prev || prev.id !== incoming[i].id) return false;
+    }
+    return true;
+  }
+  return false;
+}
 
 // --------------------------------------------------------------------- relay
 
@@ -2739,6 +2778,63 @@ class Relay {
       return record.npcIds[0];
     }
     return client.id;
+  }
+
+  /*
+   * Mid-fight learn / replace (PROTOCOL 28). Twin of Hub:applyBattleMoveset.
+   *
+   * The referee holds no learnset, so the client that owns the save copy is
+   * the only party that can name the new sheet. Only an append of one slot
+   * or a single-id replace is applied -- a full rewrite after seeing the
+   * foe is not a learn. Unchanged ids keep the hub's PP *and* power /
+   * accuracy / effect, so this is not a free Ether or a live stat editor.
+   * A transformed battler is left alone: Transform wrote over `mon.moves`
+   * in place, and replacing that list would end the transform a turn early.
+   */
+  applyBattleMoveset(record, client, payload) {
+    if (!record || !record.sim || !payload) return false;
+    const byId = record.sim.byId;
+    const fighter = byId && (typeof byId.get === 'function'
+      ? byId.get(client.id) : byId[client.id]);
+    if (!fighter || !Array.isArray(fighter.mons)) return false;
+    const mon = fighter.mons[payload.mon];
+    if (!mon || mon.transformed) return false;
+    const incoming = payload.moves;
+    if (!Array.isArray(incoming) || incoming.length === 0) return false;
+    const old = Array.isArray(mon.moves) ? mon.moves : [];
+    if (!movesetDeltaOk(old, incoming)) return false;
+    const next = [];
+    for (let i = 0; i < incoming.length; i += 1) {
+      const nm = incoming[i];
+      const prev = old[i];
+      if (prev && prev.id === nm.id) {
+        next.push({
+          id: prev.id,
+          name: prev.name != null ? prev.name : nm.name,
+          pp: prev.pp,
+          maxPp: prev.maxPp != null ? prev.maxPp : nm.maxPp,
+          power: prev.power,
+          accuracy: prev.accuracy,
+          type: prev.type != null ? prev.type : nm.type,
+          effect: prev.effect,
+          chance: prev.chance,
+        });
+      } else {
+        next.push({
+          id: nm.id,
+          name: nm.name,
+          pp: nm.pp,
+          maxPp: nm.maxPp,
+          power: nm.power,
+          accuracy: nm.accuracy,
+          type: nm.type,
+          effect: nm.effect,
+          chance: nm.chance,
+        });
+      }
+    }
+    mon.moves = next;
+    return true;
   }
 
   /*
