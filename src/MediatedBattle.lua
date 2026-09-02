@@ -57,6 +57,9 @@ local Exp2 = need("Exp2")
 -- Mid-battle evolution movie: timing + apply. Twin of CoopBattle's own
 -- require -- the two screens must not drift on qualify / cancel / apply.
 local EvolveFx = need("EvolveFx")
+-- Free-slot apply + the generation's own forget prompt. Shared with
+-- CoopBattle so a 1v1 and a 2-on-2 cannot disagree about "already knows".
+local LearnMove = need("LearnMove")
 
 local M = {}
 M.__index = M
@@ -439,7 +442,7 @@ function M.snapshotRuleset(game)
     table.sort(ids)
     for _, id in ipairs(ids) do
       if #metronomePool >= Config.BATTLE_METRONOME_POOL_MAX then break end
-      local sheet = moveOf(data, { id = id, pp = 5 }, order)
+      local sheet = moveOf(data, { id = id, pp = 5 }, order, Gen.generation(game))
       if sheet and sheet.effect ~= Effects.idOf("METRONOME_EFFECT")
          and id ~= "STRUGGLE" and id ~= "struggle" then
         metronomePool[#metronomePool + 1] = sheet
@@ -491,7 +494,7 @@ end
 -- accuracy on type 0 is a plain hit: weaker than assuming the best and far
 -- better than refusing the move, which would refuse the monster and then the
 -- whole party.
-moveOf = function(data, slot, order)
+moveOf = function(data, slot, order, generation)
   if type(slot) ~= "table" then return nil end
   local id = Wire.id(slot.id)
   if not id then return nil end
@@ -511,7 +514,13 @@ moveOf = function(data, slot, order)
   local chance = 0
   if def then
     if def.effect then
-      effect = Effects.idOf(def.effect) or 0
+      -- Gen 2 EFFECT_FLY / EFFECT_SOLARBEAM etc. only resolve on BattleSim2.
+      local pack = Effects1
+      if generation == 2 then
+        if not Effects2 then Effects2 = need("BattleSim2/Effects") end
+        pack = Effects2
+      end
+      effect = pack.idOf(def.effect) or 0
     end
     chance = clamp(intOr(def.chance, 0), 0, 100)
   end
@@ -688,7 +697,7 @@ function M.snapshotMons(game, party)
         local moves = {}
         for _, slot in ipairs(mon.moves or {}) do
           if #moves >= Config.BATTLE_MOVE_MAX then break end
-          local move = moveOf(data, slot, order)
+          local move = moveOf(data, slot, order, generation)
           if move then moves[#moves + 1] = move end
         end
         if #moves > 0 then
@@ -778,6 +787,32 @@ function M.sendParty(transport, battle, mons, side, bag, badges)
     if same then msg.generation = gen end
   end
   transport:send(Wire.BATTLE_PARTY, msg)
+  return true
+end
+
+-- Wire-shaped moves for a save mon, the same `moveOf` the opening upload
+-- used. A learn that wrote only `{ id, pp }` onto the save copy has to
+-- travel with power / accuracy / effect or the referee treats it as a
+-- 40-power type-0 hit.
+function M.sheetMoves(game, mon)
+  local data = game and game.data
+  local order = typeOrder(data)
+  local moves = {}
+  for _, slot in ipairs((mon and mon.moves) or {}) do
+    if #moves >= Config.BATTLE_MOVE_MAX then break end
+    local move = moveOf(data, slot, order)
+    if move then moves[#moves + 1] = move end
+  end
+  return moves
+end
+
+-- PROTOCOL 28: tell the referee this party member's moveset changed.
+function M.sendMoveset(transport, battle, monIndex0, moves)
+  if not (transport and battle) then return false end
+  if type(moves) ~= "table" or #moves == 0 then return false end
+  local msg = { battle = battle, mon = monIndex0, moves = moves }
+  if not Wire.battleMoveset(msg) then return false end
+  if transport:send(Wire.BATTLE_MOVESET, msg) == false then return false end
   return true
 end
 
@@ -1128,6 +1163,10 @@ local FX_SPAN = {
   -- the defender flashes. It outliving its beat costs nothing -- `stepFx` runs
   -- on its own clock and retires it wherever the queue has got to.
   vfx    = 0.50,
+  -- Dig / Fly vanish. Held at t == 1 (VANISH_HIDE_FX) until release or clear.
+  dig    = 0.45,
+  fly    = 0.45,
+  emerge = 0.35,
   -- Mid-battle evolution movie. Real lifetime is EvolveFx.MOVIE_SECONDS;
   -- this default is only what emitFx needs to accept the kind.
   evolve = 6.14,
@@ -1192,6 +1231,18 @@ local BALL_FX = {
 -- side-wide clear that has nothing to do with it.
 local BALL_HIDE_FX = { recall = true, wobble = true }
 
+-- Charge/vanish setup. `anim.amount == 1` is the first turn (BattleSim).
+local VANISH_MOVES = { DIG = true, FLY = true }
+local CHARGE_SETUP_MOVES = {
+  DIG = true, FLY = true,
+  SOLARBEAM = true, SKULL_BASH = true, RAZOR_WIND = true, SKY_ATTACK = true,
+}
+local VANISH_HIDE_FX = { dig = true, fly = true }
+
+local function vanishKey(side, seatIndex)
+  return tostring(side or "") .. ":" .. tostring(seatIndex or 1)
+end
+
 -- The fields a `vfx` record carries beyond the shared kind / side / seatIndex
 -- / t. Written out longhand rather than copied by pairs() so the wire this
 -- screen publishes to Battlefield stays a closed set: a field invented here
@@ -1238,22 +1289,25 @@ local function frameCount(dt)
   return n
 end
 
--- Side a takes field slot 0 and side b takes slot 2.  Mirrored from
--- src/BattleSim/events.lua's numbering rather than derived, because it is the
--- numbering every event on the wire is already stated in: a 1v1 leaves the odd
--- slots empty so that "which box is this" does not change meaning with the
--- mode.
-local function slotOfSide(side) return side == "b" and 2 or 0 end
+-- Side a takes field slots 0..COOP_SIDE-1 and side b takes COOP_SIDE.. .
+-- Mirrored from src/BattleSim/events.lua's SIDE_SLOTS rather than derived,
+-- because it is the numbering every event on the wire is already stated in:
+-- a 1v1 leaves the partner seats empty so that "which box is this" does not
+-- change meaning with the mode (foe is slot COOP_SIDE, not 1).
+local function slotOfSide(side)
+  return side == "b" and Config.COOP_SIDE or 0
+end
 
--- ...and back the other way. Side a holds slots 0-1, side b holds 2-3, so the
--- read is a halving rather than an equality -- a co-op seat sits on the odd
--- slot of its side and is no less that side's for it. A slot this build cannot
--- read as a number is nobody's, and answers "a" so that the one caller (the
--- exp credit below) treats it as *not* a foe -- the conservative half.
+-- ...and back the other way. Side a holds 0..COOP_SIDE-1, side b holds
+-- COOP_SIDE upward, so the read is a threshold rather than an equality -- a
+-- co-op seat past the lead of its side is no less that side's for it. A slot
+-- this build cannot read as a number is nobody's, and answers "a" so that the
+-- one caller (the exp credit below) treats it as *not* a foe -- the
+-- conservative half.
 local function sideOfSlot(index)
   local n = tonumber(index)
   if not n then return "a" end
-  return (math.floor(n) >= 2) and "b" or "a"
+  return (math.floor(n) >= Config.COOP_SIDE) and "b" or "a"
 end
 
 -- How many `exp` events one observed foe knockout may pay for.
@@ -1423,9 +1477,14 @@ function M.new(opts)
     -- them. Own seat only: the peer's client draws the peer's own strip, the
     -- same ownership rule the whole exp path runs on.
     expFilling = nil,
-    -- Moves a level-up produced for a monster that already knows four, handed
-    -- to `onDone` on the way out (CoopBattle's `toLearn`, same shape).
+    -- Moves a level-up produced for a monster that already knows four.
+    -- Offered mid-fight via `LearnMove.open`; leftover entries ride out with
+    -- `onDone` if the player left before answering (CoopBattle's same shape).
     toLearn = nil,
+    -- A forget prompt is on the stack: `{ mon, move, name }`. Holds the
+    -- message queue the way `evolving` does, so the next turn does not open
+    -- under the Yes/No box.
+    learning = nil,
     -- #36: the fanfare finish() parked because the arena still owed one of those.
     victoryMusicHeld = nil,
     battlefieldLoaded = false,
@@ -3197,30 +3256,76 @@ end
 
 -- ------- learning a move
 --
--- CoopBattle's twin. A monster with a free slot simply learns it; a full
--- moveset is a choice only its owner can make, so it is set aside and handed
--- to `onDone` -- the session that pushed this screen is where a forget prompt
--- belongs, not over a battle that is still finishing its own lines. Until one
--- is wired there the move is announced and kept in the list rather than
--- silently dropped: `toLearn` is the record that it was earned.
+-- A free slot is applied to the save mon *and* the fight sheet, then published
+-- to the referee so the new move is usable this fight. A full moveset queues
+-- the generation's own forget prompt (`LearnMove.open`) as a blocking row --
+-- this screen is 1v1 / wild, so the pause is the same one vanilla takes.
+-- Co-op banks the fifth move for after the fight instead (see CoopBattle).
+-- `toLearn` is the leftover if the player leaves before answering.
 function M:teach(mon, name, moveId)
   local data = self.game and self.game.data
+  local status = LearnMove.apply(mon, moveId, data)
+  if status == "missing" or status == "known" then return false end
   local def = type(data) == "table" and (data.moves or {})[moveId] or nil
-  if not def then return false end
-  mon.moves = mon.moves or {}
-  for _, known in ipairs(mon.moves) do
-    if known.id == moveId then return false end
-  end
   name = name or "?"
-  if #mon.moves < 4 then
-    mon.moves[#mon.moves + 1] = { id = moveId, pp = def.pp }
-    self:say(name .. " learned\n" .. (def.name or moveId) .. "!")
+  if status == "learned" then
+    self:say(name .. " learned\n" .. ((def and def.name) or moveId) .. "!")
+    self:syncFightMoves(mon)
     return true
   end
   self.toLearn = self.toLearn or {}
   self.toLearn[#self.toLearn + 1] = { mon = mon, move = moveId }
-  self:say(name .. " is trying to\nlearn " .. (def.name or moveId) .. "!")
+  self.lines = self.lines or {}
+  self.lines[#self.lines + 1] = { learn = { mon = mon, move = moveId, name = name } }
   return true
+end
+
+-- Which uploaded sheet a save-party mon sits behind. Identity on the table
+-- `Experience.apply` already mutated -- an index into the party can move.
+function M:sheetIndexFor(mon)
+  if type(mon) ~= "table" then return nil end
+  for i = 1, #(self.mine or {}) do
+    if self:saveMon(i) == mon then return i end
+  end
+  return nil
+end
+
+-- Rebuild this sheet from the save mon and tell the referee. Transform's
+-- `liveMoves` overlay is left alone: the real sheet still updates so the
+-- new move is there when the transform ends.
+function M:syncFightMoves(mon)
+  local index = self:sheetIndexFor(mon)
+  if not index then return false end
+  local sheet = self.mine and self.mine[index]
+  if type(sheet) ~= "table" then return false end
+  local moves = M.sheetMoves(self.game, mon)
+  if #moves == 0 then return false end
+  sheet.moves = moves
+  return M.sendMoveset(self.transport, self.battle, index - 1, moves)
+end
+
+function M:finishLearn(row, learned)
+  self.learning = nil
+  if type(row) ~= "table" then return end
+  LearnMove.drop(self.toLearn, row.mon, row.move)
+  if learned then self:syncFightMoves(row.mon) end
+end
+
+function M:startLearn(row)
+  if type(row) ~= "table" or type(row.mon) ~= "table" then return false end
+  self.learning = row
+  local opened = LearnMove.open(self.game, row.mon, row.move, function(learned)
+    self:finishLearn(row, learned)
+  end)
+  if opened then return true end
+  -- No forget UI on this build: keep the toLearn leftover for after-battle
+  -- and announce the try so the award sequence still reads as a level-up.
+  self.learning = nil
+  local data = self.game and self.game.data
+  local def = type(data) == "table" and (data.moves or {})[row.move] or nil
+  self:say((row.name or "?") .. " is trying to\nlearn "
+    .. ((def and def.name) or tostring(row.move)) .. "!")
+  return false
 end
 
 -- Record whatever an event said about a field slot.  Every event that names one
@@ -4353,12 +4458,10 @@ function M:exit()
   if eng and eng.Music and self.game then
     Gen.restoreMapMusic(self.game, { Music = eng.Music })
   end
-  -- `toLearn` rides out with the result, exactly as CoopBattle's does: a
-  -- monster that levelled into a fifth move needs a forget prompt, and that
-  -- belongs to whoever pushed this screen (Coop hands its list to
-  -- `offerForgets`), not over a battle still reading its own last lines. A
-  -- session that ignores the second argument is no worse off than before --
-  -- the move is announced and the level is banked either way.
+  -- Leftover `toLearn` rides out if the player left before answering a
+  -- mid-fight forget prompt. Sessions / Coop still offer those after the
+  -- screen pops. A prompt still on the stack must not hold a dead queue.
+  self.learning = nil
   if self.onDone then self.onDone(self.result or "draw", self.toLearn) end
 end
 
@@ -4441,6 +4544,12 @@ function M:tickMessages(dt, input)
     self.dwell = 0
     return true
   end
+  -- Forget prompt on the stack: hold the award sequence the way a filling
+  -- strip does, so the next `turn` does not open under Yes/No.
+  if self.learning then
+    self.dwell = 0
+    return true
+  end
   if self.faintFx then
     -- Retired by stepFx once its `t` reaches 1.
     self.dwell = 0
@@ -4479,6 +4588,10 @@ function M:tickMessages(dt, input)
     end
     if type(next) == "table" and next.evolve ~= nil then
       self:startEvolve(next)
+      return true
+    end
+    if type(next) == "table" and next.learn ~= nil then
+      self:startLearn(next.learn)
       return true
     end
     if type(next) == "table" and next.faintfx ~= nil then
@@ -4728,18 +4841,23 @@ function M:startAnim(row)
       and not row.anim:find("_ANIM", 1, true)
     if moveAnim then
       -- Beat 2, with the callout above already spent and its bubble still up.
-      -- The defender's flash and the field's nudge ride the drain row behind
-      -- this one -- their own beat again -- so a move that misses only lunges.
-      self:emitFx("lunge", row.slot, row.side)
-      -- ...and the move's own particles, on the same beat as the lean, because
-      -- the two are one action: the monster leans in and the fire leaves it.
-      --
-      -- Emitted for **every** move, not only the ones that connect -- a status
-      -- move never reaches a drain row and a miss never reaches one either, so
-      -- an effect gated on damage would leave two thirds of the move list
-      -- drawing nothing. What the blow landing adds is its own, smaller burst
-      -- (`startDrain`, beat 3).
-      self:startMoveVfx(row)
+      -- Charge/vanish setup (`amount == 1`) is not a lunge: Dig/Fly leave the
+      -- seat, SolarBeam-class glows in place. Release is a normal lean+strike.
+      local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
+      if VANISH_MOVES[row.anim] and setup then
+        self:startVanish(row.anim == "DIG" and "dig" or "fly", row)
+        self:startChargeVfx(row)
+      elseif VANISH_MOVES[row.anim] then
+        self:clearVanishAt(row.slot, row.side)
+        self:emitFx("emerge", row.slot, row.side)
+        self:emitFx("lunge", row.slot, row.side)
+        self:startMoveVfx(row)
+      elseif setup then
+        self:startChargeVfx(row)
+      else
+        self:emitFx("lunge", row.slot, row.side)
+        self:startMoveVfx(row)
+      end
     else
       -- ...and the markers it excludes are the throw itself: the arc, the
       -- recall, each wobble and the burst, one per queued row and each held
@@ -4790,6 +4908,7 @@ function M:releasePic(index, row)
   if not slot then return end
   if row ~= nil and slot.species ~= row.species then
     self:dropFaintFx(index)
+    self:clearVanishAt(index)
     return
   end
   slot.sprite = nil
@@ -4805,6 +4924,7 @@ function M:releasePic(index, row)
   -- And the same for a throw held on this seat: there is no monster left here
   -- to keep inside a ball.
   if self.ballFlow and self.ballFlow.index == index then self:clearBallFlow() end
+  self:clearVanishAt(index)
 end
 
 -- Retire any faint effect on the seat a released pic sat on.
@@ -5043,6 +5163,45 @@ function M:clearBallFlow()
   self:dropBallFx(flow.side)
 end
 
+function M:dropVanishFx(side, seatIndex)
+  local list = self.fx
+  if type(list) ~= "table" then return end
+  local kept = {}
+  for _, fx in ipairs(list) do
+    local hiding = type(fx) == "table" and VANISH_HIDE_FX[fx.kind]
+      and fx.side == side
+      and (fx.seatIndex == nil or fx.seatIndex == (seatIndex or 1))
+    if not hiding then kept[#kept + 1] = fx end
+  end
+  self.fx = (#kept > 0) and kept or nil
+end
+
+function M:clearVanishAt(index, side)
+  local fxSide = self:fxSideFor(index, side)
+  local key = vanishKey(fxSide, 1)
+  if self.vanishFlow then self.vanishFlow[key] = nil end
+  self:dropVanishFx(fxSide, 1)
+end
+
+function M:startVanish(kind, row)
+  if not self:usesBattlefield() then return nil end
+  if not VANISH_HIDE_FX[kind] then return nil end
+  local index = row and row.slot
+  local fxSide = self:fxSideFor(index, row and row.side)
+  self:dropVanishFx(fxSide, 1)
+  self.vanishFlow = self.vanishFlow or {}
+  self.vanishFlow[vanishKey(fxSide, 1)] = { kind = kind, index = index, side = fxSide }
+  self:emitFx(kind, index, row and row.side)
+  return kind
+end
+
+function M:startChargeVfx(row)
+  if type(row) ~= "table" then return nil end
+  local spec = Vfx.CHARGE_STYLE and Vfx.CHARGE_STYLE[row.anim]
+  if not spec then return nil end
+  return self:emitVfx(spec, row.slot, row.slot)
+end
+
 -- A ball marker reaches the head of the queue. Returns the effect kind it
 -- played, or nil for a row with nothing left to show.
 --
@@ -5150,6 +5309,10 @@ function M:stepFx(dt)
           -- is still to come. `startBallFx` replaces it as each row plays and
           -- `clearBallFlow` drops it when the monster comes back out (or the
           -- seat is released), so nothing here outlives the throw.
+          kept[#kept + 1] = fx
+        elseif VANISH_HIDE_FX[fx.kind] and self.vanishFlow
+            and self.vanishFlow[vanishKey(fx.side, fx.seatIndex)] then
+          -- Dig / Fly charge: stay gone through the foe's turn until release.
           kept[#kept + 1] = fx
         end
       else
@@ -5392,6 +5555,7 @@ function M:applySwap(row)
   -- that installs; the seat keeps who it is showing until then.
   if not (arrival and slot and slot.pending == arrival) then return false end
   slot.pending = nil
+  if index ~= nil then self:clearVanishAt(index) end
   slot.species = arrival.species
   slot.speciesId = arrival.speciesId
   slot.level = arrival.level
@@ -5584,6 +5748,9 @@ end
 
 function M:startFaintFx(row)
   local index = row and row.faintfx
+  -- Drop Dig/Fly hide first so the sink is drawn; `fxSeat.hidden` would skip
+  -- it, and a send batched behind the KO would inherit the empty seat.
+  if index ~= nil then self:clearVanishAt(index) end
   local slot = self.slots[index]
   -- Somebody else is standing here now: the sink belongs to the monster that
   -- was recalled, and playing it would drop the newcomer through the floor

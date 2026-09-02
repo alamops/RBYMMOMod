@@ -680,10 +680,10 @@ function M:drop(client)
   if client.coopBattleId and not fighting then
     self:closeCoopBattle(client.coopBattleId)
   end
-  -- A party outlives a trade but not a connection: the other member is told
-  -- while this one is still in the table, so the presence that goes out with
-  -- it is the one where they are no longer in a party.
-  self:endParty(client, "peer_left")
+  -- A party outlives a trade but not a connection: leaveParty keeps a
+  -- remainder of 2+ and only dissolves when fewer than two would remain.
+  -- The leaver is still in the table so presence goes out without them.
+  self:leaveParty(client, "peer_left")
   self.clients[client.id] = nil
   if client.ephemeralId and self.byEphemeral then
     self.byEphemeral[client.ephemeralId] = nil
@@ -820,6 +820,7 @@ function M:partyMembers(partyId)
   return out
 end
 
+-- Create a brand-new 2-person party.  A third joins through joinParty, not here.
 function M:startParty(a, b)
   local id = tostring(self.nextParty)
   self.nextParty = self.nextParty + 1
@@ -843,13 +844,86 @@ function M:startParty(a, b)
   self:broadcast(Wire.MOVE, presenceOf(b), b.id)
 end
 
--- One member leaving ends it for both.  At two people there is no party left
--- to continue, and a "party" of one that still showed a PARTY row and a
--- party chat scope with nowhere to send would be worse than none.
+-- Append an unattached player to an existing party that still has room.
+-- Every member (including the newbie) is handed the FULL new list -- there
+-- is no delta to miss -- and presence goes out so INVITE rows update.
+function M:joinParty(partyId, newbie)
+  if not partyId or not newbie or newbie.partyId then return false end
+  local ids = self.parties[partyId]
+  if not ids then return false end
+  if #ids >= Config.PARTY_MAX then return false end
+  if #self:partyMembers(partyId) >= Config.PARTY_MAX then return false end
+
+  ids[#ids + 1] = newbie.id
+  newbie.partyId = partyId
+  newbie.partyPendingTo = nil
+
+  local members = {}
+  for _, member in ipairs(self:partyMembers(partyId)) do
+    members[#members + 1] = { id = member.id, name = member.name }
+  end
+  for _, member in ipairs(self:partyMembers(partyId)) do
+    send(member, Wire.PARTY, { id = partyId, members = members })
+  end
+  self:broadcast(Wire.MOVE, presenceOf(newbie), newbie.id)
+  return true
+end
+
+-- One member leaves.  When two or more ready members remain, the party id
+-- stays and only the leaver is told party_end; when fewer than two would
+-- remain, dissolve via endParty (a party of one is not a party).
+function M:leaveParty(client, reason)
+  local id = client.partyId
+  if not id then return end
+  -- Remainder leave is still a lost seat on any in-flight PARTY BATTLE ask.
+  -- (Harmless when drop already cleared asks before calling leaveParty.)
+  self:clearCoopAsks(client, "gone")
+  local memberIds = self.parties[id] or {}
+  local remaining = 0
+  for _, memberId in ipairs(memberIds) do
+    if memberId ~= client.id then
+      local other = self.clients[memberId]
+      if other and other.ready and other.partyId == id then
+        remaining = remaining + 1
+      end
+    end
+  end
+  if remaining < 2 then
+    return self:endParty(client, reason)
+  end
+
+  -- Remainder stays: clear this client's offer while the party still exists
+  -- so partnersOf can still find the others to tell.
+  self:clearCoopOffer(client, "gone")
+  local kept = {}
+  for _, memberId in ipairs(memberIds) do
+    if memberId ~= client.id then kept[#kept + 1] = memberId end
+  end
+  self.parties[id] = kept
+  client.partyId = nil
+  client.partyPendingTo = nil
+
+  local members = {}
+  for _, member in ipairs(self:partyMembers(id)) do
+    members[#members + 1] = { id = member.id, name = member.name }
+  end
+  for _, member in ipairs(self:partyMembers(id)) do
+    send(member, Wire.PARTY, { id = id, members = members })
+  end
+  -- Remaining members are NOT sent party_end -- only the updated roster.
+  if self.clients[client.id] then
+    send(client, Wire.PARTY_END, { reason = "left" })
+    self:broadcast(Wire.MOVE, presenceOf(client), client.id)
+  end
+end
+
+-- Dissolve the whole party.  leaveParty calls this when fewer than two
+-- ready members would remain; a "party" of one that still showed a PARTY
+-- row and a party chat scope with nowhere to send would be worse than none.
 function M:endParty(client, reason)
   local id = client.partyId
   if not id then return end
-  -- Both offers go with the party, and while it still exists: an offer is only
+  -- All offers go with the party, and while it still exists: an offer is only
   -- ever shown to a party member, so one that outlived its party would be a box
   -- on somebody's screen that nothing left alive could ever take down.
   self:clearCoopOffer(client, "gone")
@@ -882,8 +956,8 @@ end
 --
 -- The hub owns two things here and deliberately not a third.
 --
---   * **Who may hear about an offer.**  A co-op offer only ever reaches the
---     one player its owner is travelling with, because the hub is the only
+--   * **Who may hear about an offer.**  A co-op offer reaches every other
+--     member of its owner's party (partnersOf), because the hub is the only
 --     party to the exchange that knows who that is.  A client asking to tell
 --     "everyone at this fight" would be a client choosing its own audience.
 --   * **Whether all four agreed.**  A PARTY BATTLE needs three yesses, and
@@ -893,9 +967,9 @@ end
 -- What it does *not* own is the battle.  Nothing below simulates a turn; the
 -- hub says who agreed and stops, exactly as it does for a 1v1 session.
 
--- The other member of this client's party, or nil.  At PARTY_MAX = 2 there is
--- at most one, which is what lets an offer be forwarded without naming a
--- recipient.
+-- The first other member of this client's party, or nil.  Kept for
+-- 2-person offer paths that name a single partner; prefer partnersOf when
+-- a 3-person party must hear about a wait or a withdrawn offer.
 function M:partnerOf(client)
   if not client.partyId then return nil end
   for _, member in ipairs(self:partyMembers(client.partyId)) do
@@ -904,18 +978,29 @@ function M:partnerOf(client)
   return nil
 end
 
--- Drop this client's standing offer and tell whoever was being shown it.
+-- Every other ready member of this client's party (0..PARTY_MAX-1).
+function M:partnersOf(client)
+  local out = {}
+  if not client or not client.partyId then return out end
+  for _, member in ipairs(self:partyMembers(client.partyId)) do
+    if member.id ~= client.id then out[#out + 1] = member end
+  end
+  return out
+end
+
+-- Drop this client's standing offer and tell every other member who was
+-- being shown it.  A 3-person party waiting at a trainer has told both
+-- partners, so both must hear the end -- partnerOf alone would leave one
+-- holding a box for a fight that is no longer on offer.
 --
 -- Called from four places -- the client withdrawing, the offer being taken,
 -- the party dissolving, the connection dropping -- because all four leave the
--- partner holding a box for a fight that is no longer on offer, and a box that
--- can only be answered into nothing is the failure this whole message exists
--- to prevent.
+-- partners holding a box, and a box that can only be answered into nothing is
+-- the failure this whole message exists to prevent.
 function M:clearCoopOffer(client, reason)
   if not client or not client.coopOffer then return false end
   client.coopOffer = nil
-  local partner = self:partnerOf(client)
-  if partner then
+  for _, partner in ipairs(self:partnersOf(client)) do
     send(partner, Wire.COOP_OFFER_END, { reason = reason or "left" })
   end
   return true
@@ -1292,11 +1377,13 @@ end
 -- Open the hub's record of a fight.  The sim is still nil: a ruleset and every
 -- required party have to arrive before tryStartSim takes it over.
 --
--- `npcIds` is set for coop_npc (**two** synthetic seats) and for wild /
--- coop_wild (**one** seat). Coop_npc: two players meet two monsters. Wild: one
--- player meets one wild mon on a hub NPC seat (protocol-only — no overworld
--- divert). Coop_wild: two humans on side a, one wild seat on side b (overworld
--- divert is client-side). The host uploads the NPC / wild team as side "b".
+-- `npcIds` is set for coop_npc (**one synthetic seat per human** in this
+-- fight — not always COOP_SIDE / two) and for wild / coop_wild (**one** seat).
+-- Coop_npc: N players meet up to N monsters (empty trainer seats still
+-- dropped later by fillBattleParty). Wild: one player meets one wild mon on
+-- a hub NPC seat (protocol-only — no overworld divert). Coop_wild: N humans
+-- (2 or 3) on side a, one wild seat on side b (overworld divert is
+-- client-side). The host uploads the NPC / wild team as side "b".
 --
 -- They are ids a client could in principle type, and that is safe rather than
 -- sloppy: client ids are minted as decimal counters, these carry a letter and
@@ -1317,17 +1404,19 @@ function M:openMediatedBattle(id, plan)
   -- Accept coop_wild explicitly so seating works before Turn.MODES gains it (T3).
   local mode = (self.Turn.MODES[plan.mode] or plan.mode == "coop_wild") and plan.mode
     or ((#memberIds <= 2) and "1v1" or "coop_pvp")
-  -- coop_wild is a 2v1 contract (exactly two humans vs one wild seat).
-  if mode == "coop_wild" and #memberIds ~= 2 then return nil end
+  -- coop_wild is N humans vs 1 wild (exactly 2 or 3 humans, one wild seat).
+  if mode == "coop_wild" and #memberIds ~= 2 and #memberIds ~= 3 then return nil end
   local hostId = plan.hostId or memberIds[1]
   local npcIds = nil
   if mode == "coop_npc" then
+    -- Foe seats = this fight's human count, not COOP_SIDE blindly (2v2 stays
+    -- 2-wide; a 3-person party is 3v3). Empty seats still dropped later.
     npcIds = {}
-    for i = 1, Config.COOP_SIDE do
+    for i = 1, #memberIds do
       npcIds[i] = "n" .. tostring(id) .. string.char(96 + i)
     end
   elseif mode == "wild" or mode == "coop_wild" then
-    -- One synthetic wild seat. Wild: one human. Coop_wild: two humans.
+    -- One synthetic wild seat. Wild: one human. Coop_wild: 2 or 3 humans.
     -- Protocol-only here — overworld divert for coop_wild is client-side.
     npcIds = { "n" .. tostring(id) .. "a" }
   end
@@ -1483,6 +1572,69 @@ function M:fillBattleParty(record, client, party)
   if kept[1] and not self:isWildSeat(record, kept[1]) then
     record.bags[kept[1]] = self:bagMap(party.bag)
   end
+  return true
+end
+
+-- A mid-fight learn may append one slot or change exactly one id. Same
+-- length with zero id changes is an idempotent retry. Twin of
+-- movesetDeltaOk in server/lib/relay.js.
+local function movesetDeltaOk(old, incoming)
+  local prevLen = type(old) == "table" and #old or 0
+  local nextLen = #incoming
+  if nextLen == prevLen then
+    local changed = 0
+    for i = 1, nextLen do
+      local prev = old[i]
+      if not (prev and prev.id == incoming[i].id) then
+        changed = changed + 1
+      end
+    end
+    return changed <= 1
+  end
+  if nextLen == prevLen + 1 then
+    for i = 1, prevLen do
+      local prev = old[i]
+      if not (prev and prev.id == incoming[i].id) then return false end
+    end
+    return true
+  end
+  return false
+end
+
+-- Mid-fight learn / replace (PROTOCOL 28). Twin of Relay.applyBattleMoveset.
+-- Unchanged ids keep the hub's PP and combat fields; a transformed battler
+-- is left alone so this does not end Transform a turn early.
+function M:applyBattleMoveset(record, client, payload)
+  if not (record and record.sim and payload) then return false end
+  local fighter = record.sim.byId and record.sim.byId[client.id]
+  if not (fighter and type(fighter.mons) == "table") then return false end
+  local mon = fighter.mons[payload.mon + 1]
+  if not mon or mon.transformed then return false end
+  local incoming = payload.moves
+  if type(incoming) ~= "table" or #incoming == 0 then return false end
+  local old = type(mon.moves) == "table" and mon.moves or {}
+  if not movesetDeltaOk(old, incoming) then return false end
+  local nextMoves = {}
+  for i, nm in ipairs(incoming) do
+    local prev = old[i]
+    if prev and prev.id == nm.id then
+      nextMoves[i] = {
+        id = prev.id, name = prev.name ~= nil and prev.name or nm.name,
+        pp = prev.pp,
+        maxPp = prev.maxPp ~= nil and prev.maxPp or nm.maxPp,
+        power = prev.power, accuracy = prev.accuracy,
+        type = prev.type ~= nil and prev.type or nm.type,
+        effect = prev.effect, chance = prev.chance,
+      }
+    else
+      nextMoves[i] = {
+        id = nm.id, name = nm.name, pp = nm.pp, maxPp = nm.maxPp,
+        power = nm.power, accuracy = nm.accuracy, type = nm.type,
+        effect = nm.effect, chance = nm.chance,
+      }
+    end
+  end
+  mon.moves = nextMoves
   return true
 end
 
@@ -2427,11 +2579,17 @@ end
 -- session, so two friends may team up while one of them is mid-trade.  Being
 -- busy stops you battling, not travelling together.
 handlers[Wire.PARTY_INVITE] = function(self, client, msg)
-  if not client.ready or client.partyId then return end
+  if not client.ready then return end
+  -- Asker may already have a partyId when that party still has room
+  -- (# < PARTY_MAX).  Do not silent-drop an asker who is in a 2-person party.
+  if client.partyId then
+    if #self:partyMembers(client.partyId) >= Config.PARTY_MAX then return end
+  end
   local target = self.clients[Wire.id(msg.to) or ""]
   if not (target and target.ready) or target.id == client.id then return end
   -- Answered here rather than forwarded: the asker learns at once that this
   -- player is taken, instead of waiting on a prompt nobody will ever see.
+  -- Target must be unattached.
   if target.partyId then
     return send(client, Wire.PARTY_DECLINE,
       { name = target.name, reason = "in_party" })
@@ -2456,16 +2614,24 @@ handlers[Wire.PARTY_RESPOND] = function(self, client, msg)
   -- Re-checked at the moment of forming, not only when the invite went out:
   -- either of them could have joined somebody else's party while this one
   -- sat on screen waiting for a human to read it.
-  if client.partyId or asker.partyId then
+  -- Invitee must be unattached; asker's party must have room (or both free).
+  if client.partyId then
     return send(asker, Wire.PARTY_DECLINE,
       { name = client.name, reason = "in_party" })
+  end
+  if asker.partyId then
+    if #self:partyMembers(asker.partyId) >= Config.PARTY_MAX then
+      return send(asker, Wire.PARTY_DECLINE,
+        { name = client.name, reason = "in_party" })
+    end
+    return self:joinParty(asker.partyId, client)
   end
   self:startParty(asker, client)
 end
 
 handlers[Wire.PARTY_LEAVE] = function(self, client)
   if not client.ready then return end
-  self:endParty(client, "peer_left")
+  self:leaveParty(client, "peer_left")
 end
 
 -- What the person you are travelling with just did in a fight.  Party-only,
@@ -2587,16 +2753,16 @@ end
 
 -- ------- co-op
 
--- "I am standing at this fight, waiting."  Forwarded to exactly one player --
--- the one this client is travelling with -- and refused outright for a client
--- with no party, because an offer nobody can accept is a message with nowhere
--- to go.
+-- "I am standing at this fight, waiting."  Forwarded to every other member
+-- of this client's party -- a 3-person party waiting at a trainer must tell
+-- both partners -- and refused outright for a client with no party, because
+-- an offer nobody can accept is a message with nowhere to go.
 handlers[Wire.COOP_WAIT] = function(self, client, msg)
   if not client.ready or not client.partyId then return end
   local battle = Wire.battleKey(msg.battle)
   if not battle then return end
-  local partner = self:partnerOf(client)
-  if not partner then return end
+  local partners = self:partnersOf(client)
+  if #partners == 0 then return end
 
   -- Optional mode: only coop_wild is stored (Party vs Wild auto-join). Absent
   -- keeps the trainer WAIT/JOIN invite path.
@@ -2627,7 +2793,9 @@ handlers[Wire.COOP_WAIT] = function(self, client, msg)
   if mode then offer.mode = mode end
   if npcId then offer.npcId = npcId end
   if event then offer.event = event end
-  send(partner, Wire.COOP_OFFER, offer)
+  for _, partner in ipairs(partners) do
+    send(partner, Wire.COOP_OFFER, offer)
+  end
 end
 
 handlers[Wire.COOP_CANCEL] = function(self, client, msg)
@@ -2639,12 +2807,15 @@ handlers[Wire.COOP_CANCEL] = function(self, client, msg)
   end
   -- Partner declined our invite: clear the waiter's offer and tell them so
   -- they can go in alone. Only `no` takes this path -- other reasons without
-  -- an own offer are noise from a client that is not waiting.
+  -- an own offer are noise from a client that is not waiting.  Walk every
+  -- other member: partnerOf alone can miss the waiter in a 3-person party.
   if reason == "no" then
-    local partner = self:partnerOf(client)
-    if partner and partner.coopOffer then
-      partner.coopOffer = nil
-      send(partner, Wire.COOP_DECLINE, { name = client.name, reason = "no" })
+    for _, partner in ipairs(self:partnersOf(client)) do
+      if partner.coopOffer then
+        partner.coopOffer = nil
+        send(partner, Wire.COOP_DECLINE, { name = client.name, reason = "no" })
+        break
+      end
     end
   end
 end
@@ -2677,17 +2848,18 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   client.coopOffer = nil
 
   local members = {}
+  local memberIds = {}
   for _, member in ipairs(self:partyMembers(client.partyId)) do
     members[#members + 1] = { id = member.id, name = member.name }
+    memberIds[#memberIds + 1] = member.id
   end
 
   -- The two sides of one agreement, told differently on purpose: the player
   -- who was waiting learns *who* joined (it is the answer they have been
   -- standing there for), and the player who joined is handed the roster,
   -- because they never had one.
-  -- The pair get a fan-out group of their own, on the same footing as a
-  -- four-player one: from here on the battle traffic does not care which of
-  -- the two ways it was agreed.
+  -- Seat every current party member (hub order), not only host+joiner --
+  -- otherwise a 3-person party vs NPC is silently 2vN.
   --
   -- The mode is taken from the offer when the waiter named one: coop_wild for
   -- Party vs Wild (auto-join grass), otherwise coop_npc for the trainer path.
@@ -2699,7 +2871,7 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   local id = "c" .. tostring(self.nextCoopAsk)
   self.nextCoopAsk = self.nextCoopAsk + 1
   local mode = offer.mode == "coop_wild" and "coop_wild" or "coop_npc"
-  self:openCoopBattle(id, { host.id, client.id },
+  self:openCoopBattle(id, memberIds,
     { mode = mode, hostId = host.id })
 
   -- `plan` is the hub's mediated battle id (`c*`). Without it the waiting
@@ -2715,13 +2887,20 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   -- CoopBattle opens as coop_wild without re-deriving from a cleared offer.
   -- `npcId` / `event` (PROTOCOL 20) ride so a menu joiner can finish the
   -- trainer off without a local BattleState -- never fuzzy-matched by class.
+  -- Every non-host party member gets COOP_BATTLE so a third seat is not
+  -- left holding a mediated id with no screen.
   local battleMsg = {
     id = id, side = "a", allies = members, battle = battle, host = host.id,
     mode = mode,
   }
   if offer.npcId then battleMsg.npcId = offer.npcId end
   if offer.event then battleMsg.event = offer.event end
-  send(client, Wire.COOP_BATTLE, battleMsg)
+  for _, memberId in ipairs(memberIds) do
+    if memberId ~= host.id then
+      local member = self.clients[memberId]
+      if member and member.ready then send(member, Wire.COOP_BATTLE, battleMsg) end
+    end
+  end
 end
 
 -- Battle traffic, fanned out to everyone else in the same battle.
@@ -2799,7 +2978,14 @@ handlers[Wire.COOP_CHALLENGE] = function(self, client, msg)
 
   local mine = self:partyMembers(client.partyId)
   local theirs = self:partyMembers(target.partyId)
-  if #mine ~= Config.PARTY_MAX or #theirs ~= Config.PARTY_MAX then return end
+  -- Square-only PvP: equal sizes, and that size is 2 or 3 (not == PARTY_MAX).
+  -- On mismatch or a size-1 party, decline with reason mismatch -- NEVER a
+  -- silent return (that left the asker hanging on "Nobody answered in time").
+  local n = #mine
+  if n ~= #theirs or (n ~= 2 and n ~= 3) then
+    return send(client, Wire.COOP_DECLINE,
+      { name = target.name, reason = "mismatch" })
+  end
 
   local id = "c" .. tostring(self.nextCoopAsk)
   self.nextCoopAsk = self.nextCoopAsk + 1
@@ -2817,7 +3003,8 @@ handlers[Wire.COOP_CHALLENGE] = function(self, client, msg)
   self.coopAsks[id] = {
     asker = client.id, name = client.name,
     sideA = sideA, sideB = sideB, everyone = everyone,
-    -- The asker's own yes is implied by asking; the other three are counted.
+    -- The asker's own yes is implied by asking; needed scales with size
+    -- (3 for 2v2, 5 for 3v3).
     answers = { [client.id] = true },
     needed = #everyone - 1,
     startedAt = self.clock,
@@ -2943,6 +3130,14 @@ end
 -- whose socket actually died cannot come back through here at all: identity on
 -- this hub is the connection, so the returning process is a new client with a
 -- new id and its fight forfeits when the grace runs out.
+handlers[Wire.BATTLE_MOVESET] = function(self, client, msg)
+  local record = mediatedOf(self, client)
+  if not record or not record.sim then return end
+  local payload = Wire.battleMoveset(msg)
+  if not payload or payload.battle ~= record.id then return end
+  self:applyBattleMoveset(record, client, payload)
+end
+
 handlers[Wire.BATTLE_RECONNECT] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or not record.sim then return end

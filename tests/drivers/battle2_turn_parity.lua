@@ -277,8 +277,8 @@ scenario("exp_coop", function(events)
   drainInto(battle, events)
   for _ = 1, 8 do
     if battle:outcome() then break end
-    battle:submitChoice("a1", { action = "fight", move = 0, target = 2 })
-    battle:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
     battle:autoPick("wild")
     drainInto(battle, events)
   end
@@ -313,8 +313,8 @@ scenario("replace", function(events)
   drainInto(battle, events)
   for _ = 1, 4 do
     if battle:outcome() then break end
-    battle:submitChoice("a1", { action = "fight", move = 0, target = 2 })
-    battle:submitChoice("a2", { action = "fight", move = 0, target = 2 })
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
     -- Called twice on purpose: the first files the ordinary turn's answer, the
     -- second the replacement the KO opened.  A loop that stopped after one
     -- would leave the phase open, which is what `Hub:fillNpcChoices` does not.
@@ -353,8 +353,8 @@ scenario("retarget", function(events)
     },
   })
   drainInto(battle, events)
-  battle:submitChoice("fast", { action = "fight", move = 0, target = 2 })
-  battle:submitChoice("slow", { action = "fight", move = 0, target = 2 })
+  battle:submitChoice("fast", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("slow", { action = "fight", move = 0, target = 3 })
   battle:submitChoice("foeA", { action = "fight", move = 0, target = 0 })
   battle:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
   drainInto(battle, events)

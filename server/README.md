@@ -32,11 +32,24 @@ whichever word the surface being described uses.
 
 ### Docker
 
+On a VPS with nothing cloned yet, [`scripts/run-server.sh`](../scripts/run-server.sh)
+is the whole path — Docker, the newest GitHub release, compose up, the join
+code on that terminal. `--generation 2` locks it to Gold (default 1 is
+RBY); `--port` remaps the host side. Both land in `server/.env` so a later
+start keeps them. From a checkout you already have:
+
 ```sh
+bash scripts/run-server.sh                  # this tree, gen 1
+bash scripts/run-server.sh --generation 2   # Gold
 cd server/
 docker compose up -d
 docker compose exec hub rby-mmo-hub invite list --reveal   # your join code
 ```
+
+Bare `docker compose up` does **not** force generation 1: compose leaves
+`RBY_MMO_GENERATION` empty when unset, and the hub then honours
+`config.json`. Write `RBY_MMO_GENERATION=2` into `server/.env` (or pass
+`--generation 2` to the script) for a Gold hub that has no file yet.
 
 The first `up` on an empty volume runs `rby-mmo-hub init --yes` for you, so
 the hub comes up *requiring* a join code — you cannot publish an open world by
@@ -1489,42 +1502,58 @@ still wants a pinhole.
 ### On a VPS, end to end
 
 Option 2 in full, on a fresh Ubuntu box — DigitalOcean, Hetzner, Linode, they
-are the same five commands. Run them as `root`:
+are the same one script. Run it as `root`:
 
 ```sh
-# 1. Docker, if the image you booted has none
-curl -fsSL https://get.docker.com | sh
-
-# 2. The code, at the newest release
-git clone --depth 1 https://github.com/alamops/RBYMMOMod.git
-cd RBYMMOMod/server
-
-# 3. Build and run
-docker compose up -d --build
-
-# 4. The passcode (see below -- it is deliberately not in `docker compose logs`)
-docker compose exec hub rby-mmo-hub invite list --reveal
-
-# 5. What the hub thinks of itself
-docker compose exec hub rby-mmo-hub doctor
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash
 ```
 
-**No version is written into that clone, on purpose.** A hub and the mods
-dialling it have to agree on `PROTOCOL` — a mismatch is refused by name and
-version, which is the whole point of the number — so a hub pinned to a release
-older than what your friends are playing refuses every one of them, and says
-so in a sentence they cannot act on from inside the game. This page used to
-name a tag, and it went stale the way every hand-copied version number does:
-it still said `v0.8.0`, twenty-nine tagged releases back, when that tag speaks
-`PROTOCOL` 7 and this one speaks 26 — so anyone following it stood up a hub
-that refused the very clients it was for, nineteen bumps out of date. Taking
-the default branch is what keeps the hub current with the mod people actually
-install. To pin a specific release instead, name one and check that its
-`src/Config.lua` `PROTOCOL` matches the copy your friends run:
+That is Docker (if the image you booted has none), a clone of the newest
+GitHub **release**, `compose up`, a wait until healthy, then the passcode
+printed on *this* terminal. Arguments still work through the pipe:
 
 ```sh
-# whichever tag github.com/alamops/RBYMMOMod/releases names
-git clone --depth 1 --branch v1.1.9 https://github.com/alamops/RBYMMOMod.git
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --port 25565
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 2
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --version vX.Y.Z
+```
+
+`--generation 2` (or `-g 2`) locks the hub to Gold. The default is `1`
+(Red/Blue/Yellow). `--port` remaps the host port friends type. Both are
+written into `server/.env` (`RBY_MMO_GENERATION`, `RBY_MMO_HOST_PORT`).
+Compose interpolates generation as empty when unset — the hub skips empty
+env, so `config.json` wins and a Gold volume is not forced back to 1.
+`upgrade-server.sh` keeps those locks. Friends on the other generation
+are refused.
+
+From a checkout you already have, the same file just starts it:
+
+```sh
+bash scripts/run-server.sh
+```
+
+**The script looks up `/releases/latest` at run time, on purpose.** A hub
+and the mods dialling it have to agree on `PROTOCOL` — a mismatch is refused
+by name and version, which is the whole point of the number — so a hub
+pinned to a release older than what your friends are playing refuses every
+one of them, and says so in a sentence they cannot act on from inside the
+game. This page used to name a tag, and it went stale the way every
+hand-copied version number does: it still said `v0.8.0`, twenty-nine tagged
+releases back, when that tag speaks `PROTOCOL` 7 and this one speaks 26 — so
+anyone following it stood up a hub that refused the very clients it was for.
+Cloning `main` is the other direction of the same bug: an unreleased
+PROTOCOL bump on the default branch refuses the zip people actually
+installed. The release channel is what both sides install from, so that is
+what the script clones. `--version` is how you pin, and it is a flag, not a
+number written into a file that will not be edited again.
+
+The code is **not** in `docker compose logs` after a first boot either — see
+[Reading the passcode out of a container](#reading-the-passcode-out-of-a-container)
+below, or:
+
+```sh
+docker compose exec hub rby-mmo-hub invite list --reveal
+docker compose exec hub rby-mmo-hub doctor
 ```
 
 #### Reading the passcode out of a container
@@ -1618,10 +1647,20 @@ running perfectly looks broken.
 
 **Afterwards.** `restart: unless-stopped` is already in `compose.yml`, so the
 hub comes back on reboot with no systemd unit to write. The passcode lives on
-the named volume, so it survives restarts and rebuilds — `git pull &&
-docker compose up -d --build` upgrades in place without your friends needing
-a new code. `docker compose down -v` destroys that volume, which is also how
-you deliberately rotate a code that has leaked.
+the named volume, so it survives restarts and rebuilds. To move onto a newer
+GitHub release without your friends needing a new code:
+
+```sh
+bash scripts/upgrade-server.sh                 # newest release
+bash scripts/upgrade-server.sh --version vX.Y.Z # a specific one
+bash scripts/upgrade-server.sh --generation 2  # keep or switch the gen lock
+```
+
+That fetches the tag, rebuilds, and leaves the volume alone. Generation and
+host port in `server/.env` stay unless you pass `--generation` / the
+published port changed. `docker compose down -v` destroys that volume, which
+is also how you deliberately rotate a code that has leaked. The upgrade
+script will not pass `-v`.
 
 **And the part that a public address changes.** Nothing here is encrypted
 (see [The link is still not encrypted](#the-link-is-still-not-encrypted)). On
@@ -1736,9 +1775,13 @@ What compose sets up:
   to match; and it dials loopback, so a `listen.host` bound to one specific
   non-loopback address reads as unhealthy.
 
-`ports: - "7788:7788"` is the most-edited line in `compose.yml`; the left
-number is the one on this machine and the one friends type.
-`127.0.0.1:7788:7788` keeps it local while you test.
+`ports: - "${RBY_MMO_HOST_PORT:-7788}:7788"` is the host mapping;
+`scripts/run-server.sh --port` writes `RBY_MMO_HOST_PORT` into `server/.env`
+so an upgrade does not need to edit this file. `RBY_MMO_GENERATION` is
+interpolated the same way, but **empty when unset** — the hub skips empty
+env, so `config.json` wins. `--generation 2` writes `2` into `.env`;
+upgrade sniffs `.env` then the volume's `config.json` so a Gold lock is
+not treated as RBY. `127.0.0.1:7788:7788` keeps it local while you test.
 
 ---
 
@@ -1896,10 +1939,10 @@ On the one path where no passcode is required — the `node hub.js` shim — the
 exchange is byte-identical to what it has always been: `hello`, then
 `welcome`.
 
-**`PROTOCOL` is 26**, and it lives in **`lib/relay.js`** (not `hub.js` any
+**`PROTOCOL` is 28**, and it lives in **`lib/relay.js`** (not `hub.js` any
 more) and in **`src/Config.lua`**. Bump both together on any incompatible
 change. The hub refuses a mismatched client by name and version — *"This game
-speaks protocol 26; yours speaks 25."* — rather than letting two dialects talk
+speaks protocol 28; yours speaks 27."* — rather than letting two dialects talk
 past each other, and the game renders that sentence.
 
 Every bump so far has been *additive*, and it is worth saying why an additive

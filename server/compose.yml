@@ -34,9 +34,13 @@ services:
     ports:
       # host:container. The left number is the port on *this machine* and the
       # one your friends type; the right one is fixed by the image.
-      - "7788:7788"
+      # RBY_MMO_HOST_PORT (compose interpolation, also server/.env) remaps the
+      # host side without editing this file — scripts/run-server.sh --port
+      # writes it. This is not RBY_MMO_PORT, which is the container listen
+      # port and a different variable.
+      - "${RBY_MMO_HOST_PORT:-7788}:7788"
       #
-      # Most-edited line in this file. Some variants:
+      # Most-edited line in this file, if you would rather write it out:
       # - "25565:7788"            # 7788 already taken, or you want camouflage
       # - "127.0.0.1:7788:7788"   # local only, for testing before you open up
       #
@@ -60,6 +64,14 @@ services:
       # RBY_MMO_MAX: "8"            # players at once, 2..64 (default 4)
       # RBY_MMO_PORT: "7788"        # container-side port; keep ports: in step
       # RBY_MMO_LOG_LEVEL: "debug"  # debug | info | warn | error | silent
+      #
+      # Hub generation lock (PROTOCOL 20+). 1 = RBY, 2 = Gold. Interpolated
+      # from server/.env / the host env. Empty on purpose: config.js skips
+      # empty env, so config.json wins. A Gold volume that only has
+      # generation: 2 in the file must not be forced back to 1 here.
+      # scripts/run-server.sh --generation writes 1 or 2 into server/.env
+      # so first-boot init still sees the operator's choice.
+      RBY_MMO_GENERATION: "${RBY_MMO_GENERATION:-}"
       #
       # There is deliberately no setting here that turns the passcode off.
       # RBY_MMO_AUTH_REQUIRED=false used to open the hub to anyone who could

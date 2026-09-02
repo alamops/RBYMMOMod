@@ -102,6 +102,11 @@ skills-lock.json
 # .env is machine-specific -- neither belongs in a distributed archive.
 tools/env.sh
 tools/play.sh
+# VPS install/upgrade: they clone from GitHub, so they are useless inside
+# a packed zip that already carries server/. Listed by name because a bare
+# scripts/ line would do nothing -- see the note at the top of this file.
+scripts/run-server.sh
+scripts/upgrade-server.sh
 # Regenerates assets/fonts/battle_hud.png; players need the PNG, not Pillow.
 tools/gen_battle_hud_font.py
 # Regenerates assets/battle/outdoor_grass_arena.png; players need the PNG.

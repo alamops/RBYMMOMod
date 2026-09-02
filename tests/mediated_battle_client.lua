@@ -606,7 +606,7 @@ play.sessions:onBattleReady({
 })
 eq(fight.mySide, "a", "the side the peer is not on is ours")
 eq(fight:mySlot(), 0, "side a takes field slot 0")
-eq(fight:foeSlot(), 2, "and side b slot 2, leaving the odd slots empty")
+eq(fight:foeSlot(), 3, "and side b slot 3, leaving slots 1-2 empty on a 1v1 field")
 eq(fight.phase, "play", "and the fight is under way")
 
 -- An event about somebody else's match is inert.
@@ -620,9 +620,9 @@ local function event(fields)
 end
 
 event({ seq = 1, t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
-event({ seq = 2, t = "send", slot = 2, text = "PIDGEY", hp = 24 })
-eq(fight.slots[2].species, "PIDGEY", "a send puts a name on the foe's box")
-eq(fight.slots[2].maxHp, 24, "and the first HP seen is taken as the maximum")
+event({ seq = 2, t = "send", slot = 3, text = "PIDGEY", hp = 24 })
+eq(fight.slots[3].species, "PIDGEY", "a send puts a name on the foe's box")
+eq(fight.slots[3].maxHp, 24, "and the first HP seen is taken as the maximum")
 eq(fight.active, 2, "our own send-out is matched back to the party we uploaded")
 
 -- Classic field helpers stay callable without a graphics device.
@@ -703,9 +703,9 @@ eq(cz[1] and cz[1].w, 160,
 eq(fight:speciesKeyFor("SQUIRTLE", true), "SQUIRTLE",
    "speciesKeyFor resolves an uploaded registry id")
 
-event({ seq = 3, t = "damage", slot = 2, hp = 9, amount = 15 })
-eq(fight.slots[2].hp, 9, "damage is applied from the event's own HP")
-eq(fight.slots[2].maxHp, 24, "and the bar still knows what it is out of")
+event({ seq = 3, t = "damage", slot = 3, hp = 9, amount = 15 })
+eq(fight.slots[3].hp, 9, "damage is applied from the event's own HP")
+eq(fight.slots[3].maxHp, 24, "and the bar still knows what it is out of")
 
 -- seq is what makes the stream a stream.
 event({ seq = 3, t = "msg", text = "again" })
@@ -859,14 +859,14 @@ do
     alone.sessions:onBattleEvent(fields)
   end
   ev({ seq = 1, t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
-  ev({ seq = 2, t = "send", slot = 2, text = "PIDGEY", hp = 24 })
-  local foe = f.slots[2]
+  ev({ seq = 2, t = "send", slot = 3, text = "PIDGEY", hp = 24 })
+  local foe = f.slots[3]
   foe.sprite = { id = "foe-pic" }
   -- Anim first (still in lines), then damage to 0, then faint — the old bug
   -- nil'd the sprite on faint while the anim row had not played yet.
   ev({ seq = 3, t = "anim", slot = 0, text = "TACKLE", side = "a" })
-  ev({ seq = 4, t = "damage", slot = 2, hp = 0 })
-  ev({ seq = 5, t = "faint", slot = 2, text = "PIDGEY" })
+  ev({ seq = 4, t = "damage", slot = 3, hp = 0 })
+  ev({ seq = 5, t = "faint", slot = 3, text = "PIDGEY" })
   check(foe.sprite ~= nil, "faint event does not clear the pic immediately")
   check(foe.koHold, "and marks the pic as held through the KO presentation")
   -- Drain until the anim row would have been taken (AnimPlayer may be absent
@@ -1225,13 +1225,13 @@ do
 
   -- The intro. Both seats are filled at parse and neither is drawn.
   ev({ t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
-  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
-  eq(a.slots[2].species, "PIDGEY", "the seat record follows the referee at parse")
-  eq(a:battlefieldSeat(2, false), nil,
+  ev({ t = "send", slot = 3, text = "PIDGEY", hp = 24 })
+  eq(a.slots[3].species, "PIDGEY", "the seat record follows the referee at parse")
+  eq(a:battlefieldSeat(3, false), nil,
      "...but nothing is on the arena until the spawn row: an empty seat is held")
   eq(a:battlefieldSeat(0, true), nil, "...on our own side too")
   check(drain() < 900, "the intro queue drains in bounded frames")
-  check(a:battlefieldSeat(2, false) ~= nil,
+  check(a:battlefieldSeat(3, false) ~= nil,
         "once the spawn rows have played, both seats draw")
   check(a:battlefieldSeat(0, true) ~= nil, "...ally included")
   check(a.spawnHide == nil or next(a.spawnHide) == nil,
@@ -1239,15 +1239,15 @@ do
 
   -- A replacement batched behind the KO: the seat is the fallen monster's
   -- until the swap, which is what lets its drain and sink play at all.
-  ev({ t = "damage", slot = 2, hp = 0, amount = 24 })
-  ev({ t = "faint", slot = 2, text = "PIDGEY" })
-  ev({ t = "send", slot = 2, text = "RATTATA", hp = 21 })
-  eq(a.slots[2].species, "PIDGEY",
+  ev({ t = "damage", slot = 3, hp = 0, amount = 24 })
+  ev({ t = "faint", slot = 3, text = "PIDGEY" })
+  ev({ t = "send", slot = 3, text = "RATTATA", hp = 21 })
+  eq(a.slots[3].species, "PIDGEY",
      "a send into an occupied seat does not relabel it")
-  eq(a.slots[2].pending and a.slots[2].pending.species, "RATTATA",
+  eq(a.slots[3].pending and a.slots[3].pending.species, "RATTATA",
      "...the arrival is parked instead")
-  eq(a.slots[2].hp, 0, "...and the fallen monster's own numbers are left alone")
-  local seat = a:battlefieldSeat(2, false)
+  eq(a.slots[3].hp, 0, "...and the fallen monster's own numbers are left alone")
+  local seat = a:battlefieldSeat(3, false)
   eq(seat and seat.name, "PIDGEY", "so the arena still shows who is falling")
   local sawSink, drawnBeforeSwap = false, nil
   local guard = 0
@@ -1256,7 +1256,7 @@ do
     for _, e in ipairs(a.fx or {}) do
       if e.kind == "faint" then sawSink = true end
     end
-    local live = a:battlefieldSeat(2, false)
+    local live = a:battlefieldSeat(3, false)
     if live and live.name == "RATTATA" and drawnBeforeSwap == nil then
       drawnBeforeSwap = sawSink
     end
@@ -1265,9 +1265,9 @@ do
   check(sawSink, "the KO sinks -- its rows still name the occupant they were filed for")
   eq(drawnBeforeSwap, true,
      "and the newcomer is first drawn only after that sink, at its own spawn row")
-  eq(a.slots[2].species, "RATTATA", "the seat changes hands exactly once, there")
-  eq(a.slots[2].pending, nil, "...leaving nothing parked")
-  eq(a.slots[2].shownHp, 21, "...and the bar starts where the referee put it")
+  eq(a.slots[3].species, "RATTATA", "the seat changes hands exactly once, there")
+  eq(a.slots[3].pending, nil, "...leaving nothing parked")
+  eq(a.slots[3].shownHp, 21, "...and the bar starts where the referee put it")
 
   -- ------- the hit that lands inside the window belongs to the newcomer
   --
@@ -1283,16 +1283,16 @@ do
   -- the HP it walked out with for the bar to start from.
   local hits = 0
   for _, e in ipairs(a.fx or {}) do if e.kind == "flash" then hits = hits + 1 end end
-  ev({ t = "switch", slot = 2, text = "NIDORAN", speciesId = 29, level = 6, mon = 2 })
-  ev({ t = "send", slot = 2, text = "NIDORAN", hp = 26, maxHp = 26,
+  ev({ t = "switch", slot = 3, text = "NIDORAN", speciesId = 29, level = 6, mon = 2 })
+  ev({ t = "send", slot = 3, text = "NIDORAN", hp = 26, maxHp = 26,
        speciesId = 29, level = 6, mon = 2 })
   ev({ t = "anim", slot = 0, side = "a", text = "TACKLE" })
-  ev({ t = "damage", slot = 2, hp = 17, amount = 9 })
-  eq(a.slots[2].species, "RATTATA",
+  ev({ t = "damage", slot = 3, hp = 17, amount = 9 })
+  eq(a.slots[3].species, "RATTATA",
      "the seat is still the departing monster's while the arrival is parked")
-  eq(a.slots[2].hp, 21, "...and the hit is not written to its numbers")
-  eq(a.slots[2].pending.hp, 17, "the referee's number lands on the newcomer")
-  eq(a.slots[2].pending.shownHp, 26,
+  eq(a.slots[3].hp, 21, "...and the hit is not written to its numbers")
+  eq(a.slots[3].pending.hp, 17, "the referee's number lands on the newcomer")
+  eq(a.slots[3].pending.shownHp, 26,
      "...whose bar still starts where it walked out")
   local filed = nil
   for _, row in ipairs(a.lines) do
@@ -1307,25 +1307,25 @@ do
   guard = 0
   while (#a.lines > 0 or a.draining) and guard < 1500 do
     a:update(1 / 60); guard = guard + 1
-    if a.slots[2].species == "NIDORAN" and walkedOutAt == nil then
-      walkedOutAt = a.slots[2].shownHp
+    if a.slots[3].species == "NIDORAN" and walkedOutAt == nil then
+      walkedOutAt = a.slots[3].shownHp
     end
     for _, e in ipairs(a.fx or {}) do if e.kind == "flash" then sawHit = true end end
   end
   check(guard < 1500, "the batch drains in bounded frames")
   eq(walkedOutAt, 26, "the newcomer is drawn whole, before the blow reads")
   check(sawHit, "...the hit reads on it (beat 3: the flash and the nudge)")
-  eq(a.slots[2].shownHp, 17, "...and the bar finishes where the referee put it")
-  eq(a.slots[2].hp, 17, "...with the seat's truth agreeing")
+  eq(a.slots[3].shownHp, 17, "...and the bar finishes where the referee put it")
+  eq(a.slots[3].hp, 17, "...with the seat's truth agreeing")
 
   -- Teardown: a battle ending mid-window strands neither a hold nor a park.
-  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
-  check(a.slots[2].pending ~= nil, "a fresh arrival is parked")
+  ev({ t = "send", slot = 3, text = "PIDGEY", hp = 24 })
+  check(a.slots[3].pending ~= nil, "a fresh arrival is parked")
   a:snapDisplay()
-  eq(a.slots[2].species, "PIDGEY",
+  eq(a.slots[3].species, "PIDGEY",
      "snapDisplay closes the window forwards -- the field is where the referee "
      .. "says it is, not where the queue had gotten to")
-  eq(a.slots[2].pending, nil, "...with nothing parked behind it")
+  eq(a.slots[3].pending, nil, "...with nothing parked behind it")
   eq(a.spawnHide, nil, "...and no seat left hidden")
 end
 
@@ -1375,7 +1375,7 @@ do
   end
 
   ev({ t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
-  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  ev({ t = "send", slot = 3, text = "PIDGEY", hp = 24 })
   check(drain() < 900, "the intro queue drains in bounded frames")
   a.fx = nil
 
@@ -1462,25 +1462,25 @@ do
   -- The wire's own token, which is what a `status` event really carries
   -- (Wire.STATUSES: SLP / PSN / BRN / FRZ / PAR / TOX) -- not the turn
   -- machine's internal long name. The catalogue keys both.
-  ev({ t = "status", slot = 2, side = "b", status = "BRN", text = "burned!" })
+  ev({ t = "status", slot = 3, side = "b", status = "BRN", text = "burned!" })
   local burnFiled = false
   for _, row in ipairs(a.lines) do
     if type(row) == "table" and row.vfxrow then burnFiled = true end
   end
   check(burnFiled, "a condition landing files a row")
-  eq(a.slots[2] and a.slots[2].status, "BRN",
+  eq(a.slots[3] and a.slots[3].status, "BRN",
      "...and writes the chip the plate draws")
   check(drain() < 900, "...which drains")
 
   local cleared = #a.lines
-  ev({ t = "status", slot = 2, side = "b", text = "is cured!" })
+  ev({ t = "status", slot = 3, side = "b", text = "is cured!" })
   local clearRows = 0
   for _, row in ipairs(a.lines) do
     if type(row) == "table" and row.vfxrow then clearRows = clearRows + 1 end
   end
   eq(clearRows, 0,
      "a condition lifting is a sentence rather than a sight -- no row filed")
-  eq(a.slots[2] and a.slots[2].status, nil,
+  eq(a.slots[3] and a.slots[3].status, nil,
      "...and the chip comes off, the same way a wake or an item cure must")
   check(#a.lines >= cleared, "...and nothing else is disturbed")
   check(drain() < 900, "the queue drains")
@@ -1532,14 +1532,14 @@ do
   local classic = setmetatable({
     game = { data = {} },
     usesBattlefield = function() return false end,
-    slots = { [2] = { species = "PIDGEY", hp = 24, maxHp = 24, shownHp = 24 } },
+    slots = { [3] = { species = "PIDGEY", hp = 24, maxHp = 24, shownHp = 24 } },
     lines = {},
   }, { __index = Mediated })
   check(not classic:usesBattlefield(), "the gate is down on this screen")
-  classic:noteSlot({ t = "send", slot = 2, text = "RATTATA", hp = 21 })
-  eq(classic.slots[2].species, "RATTATA",
+  classic:noteSlot({ t = "send", slot = 3, text = "RATTATA", hp = 21 })
+  eq(classic.slots[3].species, "RATTATA",
      "off the arena a send relabels at parse exactly as it always did")
-  eq(classic.slots[2].pending, nil, "...and parks nothing that could never land")
+  eq(classic.slots[3].pending, nil, "...and parks nothing that could never land")
 end
 
 -- ------------------------------------------------------------------
@@ -1655,17 +1655,17 @@ do
 
   -- Parked arrival: the departing monster keeps its chip; a cure in the
   -- window belongs to the newcomer.
-  screen:noteSlot({ t = "send", slot = 2, text = "PIDGEY", hp = 24,
+  screen:noteSlot({ t = "send", slot = 3, text = "PIDGEY", hp = 24,
                     status = "SLP" })
-  screen:noteSlot({ t = "send", slot = 2, text = "RATTATA", hp = 21,
+  screen:noteSlot({ t = "send", slot = 3, text = "RATTATA", hp = 21,
                     status = "PSN" })
-  eq(screen.slots[2].status, "SLP",
+  eq(screen.slots[3].status, "SLP",
      "the departing chip stays while the arrival is parked")
-  eq(screen.slots[2].pending.status, "PSN", "...the newcomer carries its own")
-  screen:noteSlot({ t = "status", slot = 2, text = "recovered" })
-  eq(screen.slots[2].status, "SLP",
+  eq(screen.slots[3].pending.status, "PSN", "...the newcomer carries its own")
+  screen:noteSlot({ t = "status", slot = 3, text = "recovered" })
+  eq(screen.slots[3].status, "SLP",
      "a cure in the window is not the departing mon's")
-  eq(screen.slots[2].pending.status, nil, "...it clears the newcomer")
+  eq(screen.slots[3].pending.status, nil, "...it clears the newcomer")
 end
 
 -- ------------------------------------------------------------------
@@ -1693,7 +1693,7 @@ do
     return screen, screen.slots[fields.slot]
   end
 
-  local screen, slot = seatFor({ t = "send", slot = 2, text = "MALBABISCO",
+  local screen, slot = seatFor({ t = "send", slot = 3, text = "MALBABISCO",
                                  speciesId = "SQUIRTLE", level = 8, hp = 24 })
   eq(slot.species, "MALBABISCO", "the seat keeps the name the fight narrates")
   eq(screen:seatSpeciesKey(slot, false), "SQUIRTLE",
@@ -1701,12 +1701,12 @@ do
   eq(slot.level, 8, "...with a level for the pill to print")
 
   -- A referee that predates the field, and the two cases it splits into.
-  local older, oldSlot = seatFor({ t = "send", slot = 2, text = "SQUIRTLE",
+  local older, oldSlot = seatFor({ t = "send", slot = 3, text = "SQUIRTLE",
                                    hp = 24 })
   eq(oldSlot.speciesId, nil, "a pre-22 referee states no id")
   eq(older:seatSpeciesKey(oldSlot, false), "SQUIRTLE",
      "...and the display-name scan still answers, exactly as it always did")
-  local blind, blindSlot = seatFor({ t = "send", slot = 2,
+  local blind, blindSlot = seatFor({ t = "send", slot = 3,
                                      text = "MALBABISCO", hp = 24 })
   eq(blind:seatSpeciesKey(blindSlot, false), nil,
      "...which is the one question a nickname could never answer")
@@ -1714,17 +1714,17 @@ do
   -- An id this build has no row for is not preferred over a name it can still
   -- resolve: a hub is free to relay a species from a copy of the game this one
   -- does not have.
-  local modded, moddedSlot = seatFor({ t = "send", slot = 2, text = "SQUIRTLE",
+  local modded, moddedSlot = seatFor({ t = "send", slot = 3, text = "SQUIRTLE",
                                        speciesId = "MISSINGNO", hp = 24 })
   eq(modded:seatSpeciesKey(moddedSlot, false), "SQUIRTLE",
      "an id with no pokedex row falls through to the name")
 
   -- And the seat changing hands takes both fields with it: the previous
   -- occupant's id left standing would draw the monster that just walked off.
-  screen:noteSlot({ t = "send", slot = 2, text = "CHARMANDER", hp = 30 })
-  eq(screen.slots[2].speciesId, nil, "a send with no id clears the last one")
-  eq(screen.slots[2].level, nil, "...and the level that went with it")
-  eq(screen:seatSpeciesKey(screen.slots[2], false), "CHARMANDER",
+  screen:noteSlot({ t = "send", slot = 3, text = "CHARMANDER", hp = 30 })
+  eq(screen.slots[3].speciesId, nil, "a send with no id clears the last one")
+  eq(screen.slots[3].level, nil, "...and the level that went with it")
+  eq(screen:seatSpeciesKey(screen.slots[3], false), "CHARMANDER",
      "...leaving the newcomer's own name to answer")
 end
 
@@ -1760,7 +1760,7 @@ do
       play.sessions:onBattleEvent(fields)
     end
     ev({ seq = 1, t = "send", slot = 0, text = "SQUIRTLE", hp = 30 })
-    ev({ seq = 2, t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+    ev({ seq = 2, t = "send", slot = 3, text = "PIDGEY", hp = 24 })
     return f, ev, play
   end
 
@@ -1817,9 +1817,9 @@ do
   -- (b) the FOE's knockout: a held line, no menu at all, until the send lands.
   do
     local f, ev = newFight()
-    ev({ seq = 3, t = "faint", slot = 2, text = "PIDGEY", amount = 1 })
-    ev({ seq = 4, t = "turn", amount = 2, slot = 2 })
-    eq(f.replaceWait, 2, "the solicitation names the foe's seat")
+    ev({ seq = 3, t = "faint", slot = 3, text = "PIDGEY", amount = 1 })
+    ev({ seq = 4, t = "turn", amount = 2, slot = 3 })
+    eq(f.replaceWait, 3, "the solicitation names the foe's seat")
     eq(f.pendingTurn, false, "no turn is pending: this is not a choice window")
     eq(f.mustReplace, false, "and our own picker is untouched")
     check(queued(f, "choosing"),
@@ -1847,7 +1847,7 @@ do
     eq(f.phase, "play", "no menu opens for somebody else's replacement")
     check(f:holdLine():find("choosing", 1, true) ~= nil,
           "and the band holds the line: " .. f:holdLine():gsub("\n", "|"))
-    ev({ seq = 5, t = "send", slot = 2, text = "RATTATA", hp = 20 })
+    ev({ seq = 5, t = "send", slot = 3, text = "RATTATA", hp = 20 })
     eq(f.replaceWait, nil, "the send ends the hold")
     check(f:holdLine():find("Waiting for", 1, true) ~= nil,
           "and the band goes back to the ordinary wait: "
@@ -1857,7 +1857,7 @@ do
     ev({ seq = 6, t = "turn", amount = 2 })
     drainLines(f)
     eq(f.phase, "choose", "and the slot-less turn opens the grid")
-    eq(f.slots[2].species, "RATTATA", "with the foe seat filled")
+    eq(f.slots[3].species, "RATTATA", "with the foe seat filled")
   end
 
   -- (c) an empty bench: a solicitation we cannot answer opens nothing.
@@ -1877,7 +1877,7 @@ do
   -- (d) an older referee, which never puts a `slot` on a `turn`.
   do
     local f, ev = newFight()
-    ev({ seq = 3, t = "damage", slot = 2, hp = 10 })
+    ev({ seq = 3, t = "damage", slot = 3, hp = 10 })
     ev({ seq = 4, t = "turn", amount = 2 })
     eq(f.pendingTurn, true, "a slot-less turn is still a turn")
     eq(f.replaceWait, nil, "and records no replace phase")
@@ -1903,15 +1903,15 @@ do
   -- drops it.  A hold that outlived the fight would band a finished screen.
   do
     local f, ev = newFight()
-    ev({ seq = 3, t = "faint", slot = 2, text = "PIDGEY", amount = 1 })
-    ev({ seq = 4, t = "turn", amount = 2, slot = 2 })
-    eq(f.replaceWait, 2, "the hold is up")
+    ev({ seq = 3, t = "faint", slot = 3, text = "PIDGEY", amount = 1 })
+    ev({ seq = 4, t = "turn", amount = 2, slot = 3 })
+    eq(f.replaceWait, 3, "the hold is up")
     f:snapDisplay()
     eq(f.replaceWait, nil, "and snapDisplay drops it")
 
     local g, gev = newFight()
-    gev({ seq = 3, t = "faint", slot = 2, text = "PIDGEY", amount = 1 })
-    gev({ seq = 4, t = "turn", amount = 2, slot = 2 })
+    gev({ seq = 3, t = "faint", slot = 3, text = "PIDGEY", amount = 1 })
+    gev({ seq = 4, t = "turn", amount = 2, slot = 3 })
     gev({ seq = 5, t = "over", text = "ko" })
     eq(g.replaceWait, nil, "and so does `over`")
   end
@@ -1973,7 +1973,7 @@ do
           if (f.slots[0] or {}).hp ~= nil and f.slots[0].hp <= 0 then
             violations[#violations + 1] = "grid open over our own KO'd seat"
           end
-          if (f.slots[2] or {}).hp ~= nil and f.slots[2].hp <= 0 then
+          if (f.slots[3] or {}).hp ~= nil and f.slots[3].hp <= 0 then
             violations[#violations + 1] = "grid open over the foe's KO'd seat"
           end
           break
@@ -2017,7 +2017,7 @@ do
           .. table.concat(violations, "; "))
     eq(f.slots[0].species, "CHARMANDER",
        "our seat ended up filled by the referee's replacement")
-    eq(f.slots[2].species, "RATTATA", "...and the foe's too")
+    eq(f.slots[3].species, "RATTATA", "...and the foe's too")
   end
 end
 
@@ -2311,7 +2311,7 @@ do
   local told = screen({
     mode = "1v1", peerId = "peer1", peerName = "BOB",
     mine = { { species = "A", hp = 20 }, { species = "B", hp = 0 } },
-    teams = { [0] = "ooxs", [2] = "ox" },
+    teams = { [0] = "ooxs", [3] = "ox" },
   }):battlefieldCtx()
   eq(told.allyHumans[1].party, "ooxs",
      "the referee's roster wins over the uploaded sheets on our own seat")
@@ -2323,7 +2323,7 @@ do
   local solo = screen({
     mode = "coop_npc", peerName = "LASS",
     trainer = { id = "OPP_LASS", name = "LASS" },
-    teams = { [2] = "ooo" },
+    teams = { [3] = "ooo" },
   }):battlefieldCtx()
   eq(solo.foeHumans[1].party, "ooo",
      "a solo trainer's roster comes off the same event a peer's does")
@@ -2333,7 +2333,7 @@ do
   local wildTeam = screen({
     mode = "wild", peerName = "WILD",
     mine = { { species = "A", hp = 20 } },
-    teams = { [0] = "o", [2] = "o" },
+    teams = { [0] = "o", [3] = "o" },
   }):battlefieldCtx()
   eq(#wildTeam.foeHumans, 0, "a wild fight still has nobody to put a chip under")
   eq(wildTeam.allyHumans[1].party, "o",
@@ -2352,9 +2352,9 @@ do
   }, { __index = Mediated })
 
   screen:onEvent({ battle = "b1", seq = 1, t = "team", slot = 0, team = "oox" })
-  screen:onEvent({ battle = "b1", seq = 2, t = "team", slot = 2, team = "x" })
+  screen:onEvent({ battle = "b1", seq = 2, t = "team", slot = 3, team = "x" })
   eq(screen.teams[0], "oox", "a team event lands on the seat it names")
-  eq(screen.teams[2], "x", "...on either side")
+  eq(screen.teams[3], "x", "...on either side")
   eq(screen.mustReplace, nil, "and decides nothing about whose turn it is")
 
   screen:onEvent({ battle = "b1", seq = 3, t = "team", slot = 0, team = "oxx" })
@@ -2425,38 +2425,38 @@ do
      "...over the pair of numbers the ally plate prints")
 
   -- With none stated, the older reading of this wire is still what happens.
-  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 24 })
+  ev({ t = "send", slot = 3, text = "PIDGEY", hp = 24 })
   check(settle(), "the intro queue drains in bounded frames")
-  eq(h.slots[2].maxHp, 24,
+  eq(h.slots[3].maxHp, 24,
      "a stream that states no maximum falls back to the largest HP seen")
 
   -- A maximum under the HP arriving with it is a stream disagreeing with
   -- itself; the bar still has to be a fraction, never past its own end.
-  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 30, maxHp = 10 })
+  ev({ t = "send", slot = 3, text = "PIDGEY", hp = 30, maxHp = 10 })
   check(settle(), "the swap queue drains in bounded frames")
-  eq(h.slots[2].maxHp, 30, "an under-stated maximum is lifted to the HP")
+  eq(h.slots[3].maxHp, 30, "an under-stated maximum is lifted to the HP")
 
   -- An HP UP moves the ceiling, and says so on the drain that announces it.
-  ev({ t = "send", slot = 2, text = "PIDGEY", hp = 100, maxHp = 200 })
+  ev({ t = "send", slot = 3, text = "PIDGEY", hp = 100, maxHp = 200 })
   check(settle(), "...and so does the one behind it")
-  ev({ t = "drain", slot = 2, amount = 2, hp = 102, maxHp = 202 })
-  eq(h.slots[2].hp, 102, "the rise lands")
-  eq(h.slots[2].maxHp, 202, "...and the ceiling it moved lands with it")
+  ev({ t = "drain", slot = 3, amount = 2, hp = 102, maxHp = 202 })
+  eq(h.slots[3].hp, 102, "the rise lands")
+  eq(h.slots[3].maxHp, 202, "...and the ceiling it moved lands with it")
 
   -- And through the arrival window: a send into an occupied seat is parked,
   -- so its maximum has to be parked with it and installed at the swap -- the
   -- bar underneath is still the departing monster's, drawn against theirs.
-  local before = h.slots[2].maxHp
-  ev({ t = "damage", slot = 2, hp = 0, amount = 102 })
-  ev({ t = "faint", slot = 2, text = "PIDGEY" })
-  ev({ t = "send", slot = 2, text = "RATTATA", hp = 9, maxHp = 60 })
-  eq(h.slots[2].maxHp, before,
+  local before = h.slots[3].maxHp
+  ev({ t = "damage", slot = 3, hp = 0, amount = 102 })
+  ev({ t = "faint", slot = 3, text = "PIDGEY" })
+  ev({ t = "send", slot = 3, text = "RATTATA", hp = 9, maxHp = 60 })
+  eq(h.slots[3].maxHp, before,
      "the seat keeps the falling monster's ceiling while the arrival is parked")
-  eq(h.slots[2].pending and h.slots[2].pending.maxHp, 60,
+  eq(h.slots[3].pending and h.slots[3].pending.maxHp, 60,
      "...and the newcomer's rides on the park")
   check(settle(), "the batched queue drains in bounded frames")
-  eq(h.slots[2].species, "RATTATA", "the seat changes hands at the swap")
-  eq(h.slots[2].maxHp, 60, "...and takes the ceiling that was parked with it")
+  eq(h.slots[3].species, "RATTATA", "the seat changes hands at the swap")
+  eq(h.slots[3].maxHp, 60, "...and takes the ceiling that was parked with it")
 end
 
 T.finish("mediated_battle_client")

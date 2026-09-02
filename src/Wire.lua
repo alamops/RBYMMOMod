@@ -312,6 +312,14 @@ M.BATTLE_OUTCOME   = "mmo.battle_outcome"
 -- connection it is arriving on may be a new one, so the intermediator cannot
 -- read which fight this is off a socket it has only just met.
 M.BATTLE_RECONNECT = "mmo.battle_reconnect"
+-- Mid-fight moveset for one of the sender's own party members: { battle, mon,
+-- moves }. `mon` is the 0-based uploaded-sheet index, the same space `exp.mon`
+-- and a switch `slot` already use. The referee holds no learnset, so a level-up
+-- that teaches (or a forget that replaces) can only be applied by the client
+-- that owns the save copy -- and without this type the FIGHT menu and the
+-- hub's sheet stay on the upload forever. Who it is from is the connection;
+-- a payload naming somebody else's seat is not a field this message has.
+M.BATTLE_MOVESET = "mmo.battle_moveset"
 
 M.FACINGS = { up = true, down = true, left = true, right = true }
 M.KINDS = { trade = true, battle = true }
@@ -709,7 +717,8 @@ M.LEVEL_MAX = 100
 -- `name` is required and `from` is not.  The name is what every one of the
 -- five sentences is about, so an event without one is not something any
 -- screen can show; the id is only there because the other party messages
--- carry one, and at PARTY_MAX = 2 there is exactly one player it could name.
+-- carry one, and at PARTY_MAX there is room for every other member the party
+-- may name (one at size 2, two at size 3).
 function M.partyEvent(raw)
   if type(raw) ~= "table" then return nil end
   local needs = M.PARTY_EVENTS[raw.kind]
@@ -757,9 +766,10 @@ end
 --   no        -- somebody in the four said no
 --   gone      -- somebody dropped
 --   timeout   -- nobody answered in time
+--   mismatch  -- party-vs-party size not equal / not 2-or-3 (hub refuse; T7 phrases)
 M.COOP_REASONS = {
   alone = true, left = true, started = true,
-  no = true, gone = true, timeout = true,
+  no = true, gone = true, timeout = true, mismatch = true,
 }
 
 function M.coopReason(value)
@@ -808,7 +818,7 @@ function M.badges(value)
   return out
 end
 
--- The assembled field, as it reaches the other three clients.
+-- The assembled field, as it reaches the other clients in the fight.
 --
 -- **This is the one payload that used to be taken on trust**, and it is the
 -- least defensible one to trust: the "host" is another player's client, not a
@@ -821,7 +831,7 @@ end
 --   * the slot **count** (3‥COOP_FIGHTERS), because `buildField` only ever
 --     checked it on the sending side -- so a modified host could send fifty
 --     and every client would build fifty. Three is a real shape: two players
---     against a one-monster trainer;
+--     against a one-monster trainer (and still valid for a 2v1 wild);
 --   * the **side**, because `targetsFor` reads it as one of two values and an
 --     arbitrary third makes "who may I attack" incoherent;
 --   * the **name**, because it is drawn on screen and interpolated into
@@ -835,9 +845,9 @@ end
 function M.coopField(raw)
   if type(raw) ~= "table" or type(raw.slots) ~= "table" then return nil end
   local n = #raw.slots
-  -- Floor is three: a co-op party needs two humans, and an NPC fight needs at
-  -- least one foe seat. Cap is the full four-fighter field (two parties, or a
-  -- trainer with enough monsters to fill both foe seats).
+  -- Floor is three: a co-op party needs two humans, and an NPC / wild fight
+  -- needs at least one foe seat. Cap is COOP_FIGHTERS (two parties of
+  -- PARTY_MAX, or a trainer filling every foe seat the side width allows).
   if n < 3 or n > Config.COOP_FIGHTERS then return nil end
 
   local slots = {}
@@ -1073,10 +1083,10 @@ M.AMOUNT_MAX = 9999
 -- the client's own Experience formula.  Twelve rather than BATTLE_MON_MAX
 -- because vanilla pays every mon that was ever in against the fallen foe and is
 -- still alive, benched included -- so a co-op faint can be split across two
--- full parties: BATTLE_MON_MAX (6) * COOP_SIDE (2) = 12.  One number that
--- covers both shapes beats two that have to be kept in step; it bounds a
--- foreign value before it enters a formula, it does not restate a game rule.
-M.PARTICIPANTS_MAX = 12
+-- full parties: BATTLE_MON_MAX * COOP_SIDE. One number that covers both shapes
+-- beats two that have to be kept in step. It bounds a foreign value before it
+-- enters a formula, it does not restate a game rule.
+M.PARTICIPANTS_MAX = Config.BATTLE_MON_MAX * Config.COOP_SIDE
 
 -- How long a reason token this build has never heard of may be.  Refused past it
 -- rather than trimmed -- a cut token matches nothing and is a value nobody sent.
@@ -1086,10 +1096,10 @@ M.REASON_MAX = 32
 --
 --   SLOT_MAX   a *party* index -- which of your six.  What `mon.slot` and
 --              `choice.slot` are bounded by.
---   FIELD_MAX  a position *on the field* -- four, because a party is a pair and
---              two parties meet.  What `choice.target` and `event.slot` are
---              bounded by: an event is about somebody who is out, not about a
---              bench position.
+--   FIELD_MAX  a position *on the field* -- COOP_FIGHTERS seats (two parties
+--              of PARTY_MAX), zero-based so FIELD_MAX = COOP_FIGHTERS - 1.
+--              What `choice.target` and `event.slot` are bounded by: an event
+--              is about somebody who is out, not about a bench position.
 --
 -- Written as offsets from Config's own numbers rather than as literals, so the
 -- day PARTY_MAX moves the field moves with it instead of being a number
@@ -1978,6 +1988,27 @@ function M.battleReconnect(raw)
   local battle = M.id(raw.battle)
   if not battle then return nil end
   return { battle = battle }
+end
+
+-- mmo.battle_moveset. One of the sender's own party members, as they now
+-- claim its moves. Bounded numbers, 1..BATTLE_MOVE_MAX long; a missing field
+-- refuses the message rather than applying a half-sheet over a live battler.
+-- The hub then allows only an append of one slot or a single-id replace.
+function M.battleMoveset(raw)
+  if type(raw) ~= "table" then return nil end
+  local battle = M.id(raw.battle)
+  local mon = M.int(raw.mon, 0, Config.BATTLE_MON_MAX - 1)
+  if not battle or mon == nil then return nil end
+  if type(raw.moves) ~= "table" then return nil end
+  local moves = {}
+  for _, entry in ipairs(raw.moves) do
+    if #moves >= Config.BATTLE_MOVE_MAX then return nil end
+    local move = M.battleMove(entry)
+    if not move then return nil end
+    moves[#moves + 1] = move
+  end
+  if #moves == 0 then return nil end
+  return { battle = battle, mon = mon, moves = moves }
 end
 
 -- The shapes a mediated fight comes in.

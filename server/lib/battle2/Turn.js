@@ -82,7 +82,7 @@ const VERSION = 1;
 // Mirrored from Config rather than required, for the reason in events.js: this
 // directory runs where Config does not.
 const MONS_PER_PARTY = 6; // Config.BATTLE_MON_MAX
-const FIGHTERS_PER_SIDE = 2; // Config.COOP_SIDE
+const FIGHTERS_PER_SIDE = 3; // Config.COOP_SIDE
 const CHOICE_TIMEOUT = 60; // Config.BATTLE_CHOICE_TIMEOUT
 const RECONNECT_GRACE = 60; // Config.BATTLE_RECONNECT_GRACE
 const RESOLVE_TIMEOUT = 30; // Config.BATTLE_RESOLVE_TIMEOUT
@@ -138,8 +138,9 @@ function foughtKey(slot, index) {
   return `${slot}:${index}`;
 }
 
-// Roster cap per side. coop_wild is 2v1 (humans on a, wild on b); other modes
-// keep a single per-side ceiling (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
+// Roster cap per side. coop_wild is N vs 1 wild (humans on a, wild on b) -- not
+// exactly 2v1; other modes keep a single per-side ceiling (1 for 1v1/wild,
+// FIGHTERS_PER_SIDE otherwise).
 function maxFighters(mode, side) {
   if (mode === 'coop_wild') {
     return side === 'a' ? FIGHTERS_PER_SIDE : 1;
@@ -396,6 +397,7 @@ function copyMon(raw, fallback) {
       moveIndex: Math.max(1, int(raw.charging.moveIndex, 1)),
       effect: Math.max(0, int(raw.charging.effect, 0)),
       targetSlot: int(raw.charging.targetSlot, null),
+      moveId: str(raw.charging.moveId),
     };
   }
 
@@ -996,7 +998,7 @@ class Battle {
   //
   // Indices arrive zero-based, because that is how they ride on the wire:
   // `move` is 0..3 into the monster's moves, `slot` is 0..5 into the party, and
-  // `target` is a 0..3 *field* slot. They are converted here, once, so nothing
+  // `target` is a 0..5 *field* slot. They are converted here, once, so nothing
   // downstream has to remember which of the three it is holding.
 
   _normaliseChoice(fighter, choice) {
@@ -2365,7 +2367,11 @@ class Battle {
     const mirrorCopy = opts.mirrorCopy === true;
 
     if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) move.pp -= 1;
-    this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
+    const chargingUp = Effects.isCharge(effectId) && !mon.charging;
+    this._emit('anim', {
+      slot: fighter.slot, side: fighter.side, text: move.id,
+      amount: chargingUp ? 1 : undefined,
+    });
     this._say(`${mon.species} used ${moveLabel(move)}`);
 
     if (choice.bideRelease && mon.bide) {
@@ -2387,9 +2393,10 @@ class Battle {
         moveIndex: choice.move,
         effect: effectId,
         targetSlot,
+        moveId: move.id,
       };
-      if (Effects.isFly(effectId)) mon.invulnerable = true;
-      this._say(Effects.chargeMessage(mon, effectId));
+      if (Effects.vanishes(effectId, move)) mon.invulnerable = true;
+      this._say(Effects.chargeMessage(mon, effectId, move.id));
       this._markLastMove(mon, choice.move);
       return;
     }
@@ -2400,13 +2407,20 @@ class Battle {
     }
 
     if (defender.invulnerable) {
-      this._say('But it failed');
-      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-      if (Effects.isJumpKick(effectId)) {
-        this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+      let chargeMoveId = defender.charging && defender.charging.moveId;
+      if (!chargeMoveId && defender.charging) {
+        const charged = defender.moves && defender.moves[defender.charging.moveIndex - 1];
+        chargeMoveId = charged && charged.id;
       }
-      this._markLastMove(mon, choice.move);
-      return;
+      if (!Effects.hitsInvulnerable(chargeMoveId, move)) {
+        this._say('But it failed');
+        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isJumpKick(effectId)) {
+          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+        }
+        this._markLastMove(mon, choice.move);
+        return;
+      }
     }
 
     if (Effects.isMirrorMove(effectId) && !mirrorCopy) {
@@ -3359,6 +3373,10 @@ function attempt(opts) {
     const sideMax = maxFighters(self.mode, side);
     if (roster.length > sideMax) {
       return refuse(`side ${side} has more fighters than ${self.mode} allows`);
+    }
+    // Hub opens coop_wild for 2 or 3 humans; a lone human is a solo wild.
+    if (self.mode === 'coop_wild' && side === 'a' && roster.length < 2) {
+      return refuse('side a has fewer fighters than coop_wild allows');
     }
     for (let index = 1; index <= roster.length; index += 1) {
       const entry = roster[index - 1];

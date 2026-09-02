@@ -708,6 +708,10 @@ M.MOVE_STYLE = {
   ICY_WIND     = { style = "gust", palette = "ICE" },
   POWDER_SNOW  = { style = "gust", palette = "ICE", scale = 0.9 },
 
+  -- Charge-turn looks (Dig / Fly vanish, SolarBeam-class glow). The *release*
+  -- strike still uses the type default or the entries above; MediatedBattle
+  -- reads CHARGE_STYLE only when anim.amount == 1.
+  --
   -- ------- acts on the user, not on anything opposite
   SWORDS_DANCE = selfBuff(),
   SHARPEN      = selfBuff(),
@@ -796,6 +800,18 @@ M.MOVE_STYLE = {
   THIEF        = { style = "shadow", palette = "DARK" },
   FLAIL        = { style = "impact", scale = 1.15 },
   REVERSAL     = { style = "impact", palette = "FIGHTING", scale = 1.15 },
+}
+
+-- Turn-one setup looks. Dig/Fly stay on the user (dust / gust) so the charge
+-- does not fire a foe projectile; SolarBeam-class glows in place. Release
+-- still uses MOVE_STYLE / the type default.
+M.CHARGE_STYLE = {
+  DIG          = { style = "quake", palette = "GROUND", delivery = "self", scale = 1.15 },
+  FLY          = { style = "gust", palette = "FLYING", delivery = "self", scale = 1.15 },
+  SOLARBEAM    = { style = "shine", palette = "GRASS", delivery = "self", scale = 1.20 },
+  SKULL_BASH   = { style = "shine", palette = "NORMAL", delivery = "self", scale = 1.10 },
+  RAZOR_WIND   = { style = "gust", palette = "NORMAL", delivery = "self", scale = 1.10 },
+  SKY_ATTACK   = { style = "shine", palette = "FLYING", delivery = "self", scale = 1.20 },
 }
 
 -- Moves that fire once per hit of a multi-hit or that a client sees twice in a
