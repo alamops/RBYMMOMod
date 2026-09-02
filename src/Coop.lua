@@ -2818,12 +2818,15 @@ function M:onBattleOver(result, game, state, toLearn)
   if blackout and not (handled and engineRitual) then self:blackout(game) end
 end
 
--- Moves a monster levelled into but had no room for.
---
--- Put to the player *after* the battle, one screen at a time. Opening a
--- forget-a-move menu mid-battle would stop a fight three other people are
--- still in -- and unlike everything else on that screen, this one is a choice
+-- Leftovers a monster levelled into but had no room for during a co-op
+-- fight. Free slots already landed mid-battle; this is only the fifth-move
+-- case. Put to the player *after* the battle, one screen at a time -- a
+-- forget menu mid-fight would stall the other humans through the hub's
+-- choice timeout, and unlike everything else on that screen this choice
 -- only its owner can make and only their own save records.
+--
+-- 1v1 / wild opens the same prompt mid-award (MediatedBattle + LearnMove.open).
+-- This path is the co-op leftover, plus any 1v1 prompt they left unanswered.
 --
 -- The engine's own MoveLearnMenu is pushed rather than a copy of it: it is the
 -- screen that already knows how to show four moves and their PP, and how to
@@ -2832,11 +2835,11 @@ end
 -- try it rather than silently dropping earned moves.
 --
 -- Sessions:offerForgets is this function's twin on the mediated 1v1 / wild
--- path, over the same `{ mon, move }` entries: a fight that is not a co-op
--- battle has no co-op state to hand this one, so it states the flow itself.
--- The two differ in how they sequence -- that one hands MoveLearnMenu its own
--- completion callback, this one paces with a "..." box -- and if this ever
--- needs revisiting, that is the version to copy.
+-- leftover path, over the same `{ mon, move }` entries: a fight that is not a
+-- co-op battle has no co-op state to hand this one, so it states the flow
+-- itself. The two differ in how they sequence -- that one hands MoveLearnMenu
+-- its own completion callback, this one paces with a "..." box -- and if this
+-- ever needs revisiting, that is the version to copy.
 function M:offerForgets(game, toLearn)
   if not (game and toLearn and #toLearn > 0) then return false end
   local pending = {}

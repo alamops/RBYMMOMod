@@ -959,7 +959,75 @@ testPartyGrowLeave();
 testCoopChallengeMismatch();
 testCoopChallengeSquare();
 testTradeRelayStillWorks();
+// PROTOCOL 28: a mid-fight learn replaces the live sheet so the next
+// fight choice executes the new move, not the uploaded one.
+function testMidFightMoveset() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'LEARNA');
+  const b = dial(relay, 'LEARNB');
+  const session = openBattle(relay, a, b);
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  const learner = {
+    ...mon(40),
+    moves: [
+      { id: 'OLD', pp: 10, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0 },
+    ],
+  };
+  uploadAndReady(relay, a, b, session, { aMons: [learner] });
+  const record = relay.battles.get(session.id);
+  ok(record && record.sim, 'the fight is live before the learn');
+  const sheet = (moves) => ({
+    type: 'mmo.battle_moveset', battle: session.id, mon: 0, moves,
+  });
+  const oldSlot = {
+    id: 'OLD', pp: 99, power: 999, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const newSlot = {
+    id: 'NEW', pp: 20, power: 80, accuracy: 255, type: 0, effect: 0, chance: 0,
+    name: 'New Move',
+  };
+  relay.handle(a.id, sheet([oldSlot, newSlot]));
+  const live = record.sim.byId.get(a.id).mons[0];
+  ok(live.moves.length === 2 && live.moves[1].id === 'NEW',
+    'the referee holds the learned move');
+  ok(live.moves[0].pp === 10,
+    'an unchanged slot keeps the hub PP, not a free refill');
+  ok(live.moves[0].power === 40,
+    'and the hub power, not a live rewrite of the same id');
+
+  relay.handle(a.id, sheet([
+    { id: 'AAA', pp: 20, power: 80, accuracy: 255, type: 0, effect: 0, chance: 0 },
+    { id: 'BBB', pp: 20, power: 80, accuracy: 255, type: 0, effect: 0, chance: 0 },
+  ]));
+  ok(live.moves[0].id === 'OLD' && live.moves[1].id === 'NEW',
+    'rewriting two slots is refused');
+
+  const swapped = {
+    id: 'SWAP', pp: 15, power: 60, accuracy: 255, type: 0, effect: 0, chance: 0,
+    name: 'Swap',
+  };
+  relay.handle(a.id, sheet([
+    { id: 'OLD', pp: 10, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0 },
+    swapped,
+  ]));
+  ok(live.moves[1].id === 'SWAP',
+    'replacing exactly one id is the forget case');
+
+  live.transformed = true;
+  const before = live.moves[1].id;
+  relay.handle(a.id, sheet([
+    { id: 'OLD', pp: 10, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0 },
+    swapped,
+    newSlot,
+  ]));
+  ok(live.transformed && live.moves[1].id === before,
+    'a transformed battler is left alone');
+}
+
 testBagProofs();
+testMidFightMoveset();
 
 // Wave 2 T2d: hub generation selects battle vs battle2 at construction.
 {

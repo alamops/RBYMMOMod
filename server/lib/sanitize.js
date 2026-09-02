@@ -1464,6 +1464,27 @@ function cleanBattleOutcome(raw) {
   return result;
 }
 
+// mmo.battle_moveset. One of the sender's own party members, as they now
+// claim its moves (PROTOCOL 28). Bounded numbers, 1..BATTLE_MOVE_MAX long;
+// a missing field refuses the message rather than applying a half-sheet
+// over a live battler. The hub then allows only add-one or replace-one.
+function cleanBattleMoveset(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const battle = cleanId(raw.battle);
+  const mon = cleanInt(raw.mon, 0, BATTLE_MON_MAX - 1);
+  if (!battle || mon === null) return null;
+  if (!Array.isArray(raw.moves) || raw.moves.length < 1) return null;
+  const moves = [];
+  for (const entry of raw.moves) {
+    if (moves.length >= BATTLE_MOVE_MAX) return null;
+    const move = cleanBattleMove(entry);
+    if (!move) return null;
+    moves.push(move);
+  }
+  if (moves.length === 0) return null;
+  return { battle, mon, moves };
+}
+
 // mmo.battle_reconnect. Names the fight and nothing else: who is rejoining is
 // the connection it arrived on, and a client that supplied its own identity
 // would be claiming somebody else's seat at the field.
@@ -1512,6 +1533,7 @@ module.exports = {
   cleanBattleTeam,
   cleanBattleOutcome,
   cleanBattleReconnect,
+  cleanBattleMoveset,
   payloadOk,
   FACINGS,
   KINDS,

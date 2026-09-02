@@ -1575,6 +1575,69 @@ function M:fillBattleParty(record, client, party)
   return true
 end
 
+-- A mid-fight learn may append one slot or change exactly one id. Same
+-- length with zero id changes is an idempotent retry. Twin of
+-- movesetDeltaOk in server/lib/relay.js.
+local function movesetDeltaOk(old, incoming)
+  local prevLen = type(old) == "table" and #old or 0
+  local nextLen = #incoming
+  if nextLen == prevLen then
+    local changed = 0
+    for i = 1, nextLen do
+      local prev = old[i]
+      if not (prev and prev.id == incoming[i].id) then
+        changed = changed + 1
+      end
+    end
+    return changed <= 1
+  end
+  if nextLen == prevLen + 1 then
+    for i = 1, prevLen do
+      local prev = old[i]
+      if not (prev and prev.id == incoming[i].id) then return false end
+    end
+    return true
+  end
+  return false
+end
+
+-- Mid-fight learn / replace (PROTOCOL 28). Twin of Relay.applyBattleMoveset.
+-- Unchanged ids keep the hub's PP and combat fields; a transformed battler
+-- is left alone so this does not end Transform a turn early.
+function M:applyBattleMoveset(record, client, payload)
+  if not (record and record.sim and payload) then return false end
+  local fighter = record.sim.byId and record.sim.byId[client.id]
+  if not (fighter and type(fighter.mons) == "table") then return false end
+  local mon = fighter.mons[payload.mon + 1]
+  if not mon or mon.transformed then return false end
+  local incoming = payload.moves
+  if type(incoming) ~= "table" or #incoming == 0 then return false end
+  local old = type(mon.moves) == "table" and mon.moves or {}
+  if not movesetDeltaOk(old, incoming) then return false end
+  local nextMoves = {}
+  for i, nm in ipairs(incoming) do
+    local prev = old[i]
+    if prev and prev.id == nm.id then
+      nextMoves[i] = {
+        id = prev.id, name = prev.name ~= nil and prev.name or nm.name,
+        pp = prev.pp,
+        maxPp = prev.maxPp ~= nil and prev.maxPp or nm.maxPp,
+        power = prev.power, accuracy = prev.accuracy,
+        type = prev.type ~= nil and prev.type or nm.type,
+        effect = prev.effect, chance = prev.chance,
+      }
+    else
+      nextMoves[i] = {
+        id = nm.id, name = nm.name, pp = nm.pp, maxPp = nm.maxPp,
+        power = nm.power, accuracy = nm.accuracy, type = nm.type,
+        effect = nm.effect, chance = nm.chance,
+      }
+    end
+  end
+  mon.moves = nextMoves
+  return true
+end
+
 -- List of `{id, count}` → lookup map. Empty / nil → empty map (no items).
 function M:bagMap(entries)
   local map = {}
@@ -3067,6 +3130,14 @@ end
 -- whose socket actually died cannot come back through here at all: identity on
 -- this hub is the connection, so the returning process is a new client with a
 -- new id and its fight forfeits when the grace runs out.
+handlers[Wire.BATTLE_MOVESET] = function(self, client, msg)
+  local record = mediatedOf(self, client)
+  if not record or not record.sim then return end
+  local payload = Wire.battleMoveset(msg)
+  if not payload or payload.battle ~= record.id then return end
+  self:applyBattleMoveset(record, client, payload)
+end
+
 handlers[Wire.BATTLE_RECONNECT] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or not record.sim then return end

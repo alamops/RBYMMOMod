@@ -233,7 +233,7 @@ M.MOD_ID = "rby_mmo"
 -- 23s already proved.  27 on this line means the party/field widen; a later
 -- tip that needs another bump takes the next free integer.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 27
+M.PROTOCOL = 29
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

@@ -312,6 +312,14 @@ M.BATTLE_OUTCOME   = "mmo.battle_outcome"
 -- connection it is arriving on may be a new one, so the intermediator cannot
 -- read which fight this is off a socket it has only just met.
 M.BATTLE_RECONNECT = "mmo.battle_reconnect"
+-- Mid-fight moveset for one of the sender's own party members: { battle, mon,
+-- moves }. `mon` is the 0-based uploaded-sheet index, the same space `exp.mon`
+-- and a switch `slot` already use. The referee holds no learnset, so a level-up
+-- that teaches (or a forget that replaces) can only be applied by the client
+-- that owns the save copy -- and without this type the FIGHT menu and the
+-- hub's sheet stay on the upload forever. Who it is from is the connection;
+-- a payload naming somebody else's seat is not a field this message has.
+M.BATTLE_MOVESET = "mmo.battle_moveset"
 
 M.FACINGS = { up = true, down = true, left = true, right = true }
 M.KINDS = { trade = true, battle = true }
@@ -1980,6 +1988,27 @@ function M.battleReconnect(raw)
   local battle = M.id(raw.battle)
   if not battle then return nil end
   return { battle = battle }
+end
+
+-- mmo.battle_moveset. One of the sender's own party members, as they now
+-- claim its moves. Bounded numbers, 1..BATTLE_MOVE_MAX long; a missing field
+-- refuses the message rather than applying a half-sheet over a live battler.
+-- The hub then allows only an append of one slot or a single-id replace.
+function M.battleMoveset(raw)
+  if type(raw) ~= "table" then return nil end
+  local battle = M.id(raw.battle)
+  local mon = M.int(raw.mon, 0, Config.BATTLE_MON_MAX - 1)
+  if not battle or mon == nil then return nil end
+  if type(raw.moves) ~= "table" then return nil end
+  local moves = {}
+  for _, entry in ipairs(raw.moves) do
+    if #moves >= Config.BATTLE_MOVE_MAX then return nil end
+    local move = M.battleMove(entry)
+    if not move then return nil end
+    moves[#moves + 1] = move
+  end
+  if #moves == 0 then return nil end
+  return { battle = battle, mon = mon, moves = moves }
 end
 
 -- The shapes a mediated fight comes in.

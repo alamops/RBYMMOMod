@@ -258,7 +258,7 @@ test('inbound client→hub message types match on both hubs', () => {
     'mmo.sprite',
     'mmo.friend_ask', 'mmo.friend_answer', 'mmo.friend_remove',
     'mmo.battle_ruleset', 'mmo.battle_party', 'mmo.battle_choice',
-    'mmo.battle_reconnect',
+    'mmo.battle_reconnect', 'mmo.battle_moveset',
   ];
   const hub = read('src/Hub.lua');
   const relay = read('server/lib/relay.js');

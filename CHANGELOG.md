@@ -4,7 +4,7 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [Unreleased]
+## [1.2.0] - 2026-09-01
 
 ### Changed
 
@@ -13,6 +13,24 @@ here must match `manifest.version`.
   Party PvP is 2-on-2 or 3-on-3 only (mismatch is refused). A 3-player
   party vs a trainer seats up to 3 foe mons; vs wild still one wild.
   **PROTOCOL is now 27.** Older hubs still pair-only / 4-slot field.
+
+## [1.1.10] - 2026-09-01
+
+### Fixed
+
+- **Mons can learn or replace a move during a mediated battle.** A
+  level-up (or the evolution that follows) used to write the new move
+  onto the save copy only — or bank a full moveset until after the
+  fight — so the FIGHT menu still showed the uploaded sheet and the
+  referee still executed the old move at that index. A free slot now
+  lands on the save mon *and* the fight sheet, then goes out as
+  `mmo.battle_moveset` (PROTOCOL 28) so the new move is usable this
+  fight. A full set on 1v1 / wild opens the generation's own forget
+  prompt mid-award (Gen 1 `MoveLearnMenu`, Gen 2 `Game2:learnMoveOn`)
+  and holds that client's queue until they answer. Co-op still banks
+  the fifth move for after the fight — a forget menu would stall the
+  other humans through the hub's choice timeout. Leftovers still ride
+  out with `toLearn` if they leave before answering. Both gens.
 
 ## [1.1.9] - 2026-08-31
 
