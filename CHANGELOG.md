@@ -36,6 +36,18 @@ here must match `manifest.version`.
   Both gens. No PROTOCOL bump: `mon` was already a legal battle-event
   field.
 
+## [1.2.1] - 2026-09-02
+
+### Added
+
+- **Custom battle backgrounds.** Drop 640×360 PNGs into
+  `assets/battle/custom/` as `wild.png`, `indoor.png`, and `gym.png` to
+  replace the ROM-stamped arena for that kind of fight. Optional
+  `wild_field.png` / `indoor_field.png` / `gym_field.png` draw on top of
+  the background (or on the ROM / authored fallback when only the field
+  file is present). A missing file keeps today's look. Next fight picks
+  the files up; no extra permission, no bytes shipped.
+
 ## [1.2.0] - 2026-09-01
 
 ### Changed

@@ -971,6 +971,20 @@ M.BATTLE_HUD_META_HEIGHT = 5
 -- caps so fill-scale can stretch it to the window.
 M.BATTLEFIELD_ARENA = "assets/battle/outdoor_grass_arena.png"
 M.BATTLEFIELD_ARENA_INDOOR = "assets/battle/indoor_house_arena.png"
+-- Player drop-ins. A present file beats ROM compose for that kind; a missing
+-- file is not an error. `{kind}.png` is the full 640×360 arena; optional
+-- `{kind}_field.png` is drawn on top (ROM / authored fallback underneath
+-- when only the field file exists).
+M.BATTLEFIELD_ARENA_CUSTOM = {
+  wild = "assets/battle/custom/wild.png",
+  indoor = "assets/battle/custom/indoor.png",
+  gym = "assets/battle/custom/gym.png",
+}
+M.BATTLEFIELD_ARENA_CUSTOM_FIELD = {
+  wild = "assets/battle/custom/wild_field.png",
+  indoor = "assets/battle/custom/indoor_field.png",
+  gym = "assets/battle/custom/gym_field.png",
+}
 M.BATTLEFIELD_WIDTH = 640
 M.BATTLEFIELD_HEIGHT = 360
 
