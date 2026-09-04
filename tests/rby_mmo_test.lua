@@ -14039,12 +14039,112 @@ end)()
         "arena art path ends with outdoor_grass_arena.png")
   check(Config.BATTLEFIELD_ARENA_INDOOR:match("indoor_house_arena%.png$") ~= nil,
         "indoor arena art path ends with indoor_house_arena.png")
+  eq(Config.BATTLEFIELD_ARENA_CUSTOM.wild,
+     "assets/battle/custom/wild.png",
+     "custom wild arena path")
+  eq(Config.BATTLEFIELD_ARENA_CUSTOM.indoor,
+     "assets/battle/custom/indoor.png",
+     "custom indoor arena path")
+  eq(Config.BATTLEFIELD_ARENA_CUSTOM.gym,
+     "assets/battle/custom/gym.png",
+     "custom gym arena path")
+  eq(Config.BATTLEFIELD_ARENA_CUSTOM_FIELD.wild,
+     "assets/battle/custom/wild_field.png",
+     "custom wild field overlay path")
+  eq(Config.BATTLEFIELD_ARENA_CUSTOM_FIELD.indoor,
+     "assets/battle/custom/indoor_field.png",
+     "custom indoor field overlay path")
+  eq(Config.BATTLEFIELD_ARENA_CUSTOM_FIELD.gym,
+     "assets/battle/custom/gym_field.png",
+     "custom gym field overlay path")
+  check(type(Battlefield.customArenaPath) == "function",
+        "customArenaPath is a Battlefield entry")
+  eq(Battlefield.customArenaPath("wild"),
+     "assets/battle/custom/wild.png", "wild bg drop-in")
+  eq(Battlefield.customArenaPath("indoor", "bg"),
+     "assets/battle/custom/indoor.png", "indoor bg drop-in")
+  eq(Battlefield.customArenaPath("gym", "field"),
+     "assets/battle/custom/gym_field.png", "gym field drop-in")
+  eq(Battlefield.customArenaPath("cave"), nil,
+     "unknown kind is not a path")
+  eq(Battlefield.customArenaPath("wild", "sky"),
+     "assets/battle/custom/wild.png",
+     "unknown layer is the full-arena bg, not a fourth file")
   check(type(Battlefield.composeRomArena) == "function",
         "ROM tileset compose is a Battlefield entry")
   eq(Battlefield.composeRomArena(nil), nil,
      "no game means no ROM compose (headless / no cache)")
   eq(Battlefield.composeRomArena({}), nil,
      "an empty game with no tilesets does not invent ROM art")
+  do
+    local savedRom = Battlefield.composeRomArena
+    local savedLayers = Battlefield.customArenaLayers
+    local savedComposite = Battlefield.compositeArena
+    local savedKind = Battlefield.arenaKindFromWorld
+    local savedOw = Battlefield.overworldFrom
+    local stubMod = { log = { warn = function() end }, assets = {
+      path = function(_, rel) return rel end,
+    } }
+    local function gymWorld()
+      return { map = { tileset = { id = "GYM" }, def = { tileset = "GYM" } } }
+    end
+    Battlefield.reloadArena()
+    Battlefield.composeRomArena = function() return "ROM" end
+    Battlefield.overworldFrom = gymWorld
+    local seenKind = nil
+    Battlefield.arenaKindFromWorld = function() return "gym" end
+    Battlefield.customArenaLayers = function(_, kind)
+      seenKind = kind
+      return { bg = "CUSTOM", field = nil }
+    end
+    eq(Battlefield.load(stubMod, {}), "CUSTOM",
+       "custom bg wins over ROM compose")
+    eq(seenKind, "gym", "custom layers are asked for the classified kind")
+    Battlefield.reloadArena()
+    Battlefield.overworldFrom = function() return nil end
+    Battlefield.arenaKindFromWorld = savedKind
+    Battlefield.customArenaLayers = function()
+      return { bg = "CUSTOM", field = nil }
+    end
+    eq(Battlefield.load(stubMod, {}), "ROM",
+       "a game table without a map does not lock custom wild")
+    Battlefield.reloadArena()
+    Battlefield.composeRomArena = function() return nil end
+    eq(Battlefield.load(stubMod, nil), nil,
+       "no game does not lock custom wild before the map is known")
+    Battlefield.composeRomArena = function() return "ROM" end
+    Battlefield.overworldFrom = gymWorld
+    Battlefield.reloadArena()
+    Battlefield.customArenaLayers = function()
+      return { bg = nil, field = nil }
+    end
+    eq(Battlefield.load(stubMod, {}), "ROM",
+       "missing custom falls through to ROM compose")
+    Battlefield.reloadArena()
+    Battlefield.customArenaLayers = function()
+      return { bg = nil, field = "FIELD" }
+    end
+    Battlefield.compositeArena = function(under, over)
+      return tostring(under) .. "+" .. tostring(over)
+    end
+    eq(Battlefield.load(stubMod, {}), "ROM+FIELD",
+       "field-only custom overlays the ROM stamp")
+    Battlefield.reloadArena()
+    Battlefield.overworldFrom = function() return nil end
+    Battlefield.composeRomArena = function() return nil end
+    Battlefield.customArenaLayers = function()
+      return { bg = nil, field = nil }
+    end
+    Battlefield.compositeArena = savedComposite
+    eq(Battlefield.load(stubMod, nil), nil,
+       "no game and no custom does not lock the authored PNG")
+    Battlefield.composeRomArena = savedRom
+    Battlefield.customArenaLayers = savedLayers
+    Battlefield.compositeArena = savedComposite
+    Battlefield.arenaKindFromWorld = savedKind
+    Battlefield.overworldFrom = savedOw
+    Battlefield.reloadArena()
+  end
   check(type(Battlefield.arenaFieldTileset) == "function",
         "arenaFieldTileset classifies indoor vs field")
   eq(Battlefield.arenaFieldTileset("HOUSE"), false,
@@ -14077,6 +14177,30 @@ end)()
      true, "Johto gyms stay on TILESET_GYM even though environment is INDOOR")
   eq(Battlefield.arenaIndoor("TILESET_GYM", { environment = "INDOOR" }), false,
      "TILESET_GYM is not the house indoor fallback")
+  check(type(Battlefield.arenaKind) == "function",
+        "arenaKind is the custom-bg bucket")
+  eq(Battlefield.arenaKind("OVERWORLD"), "wild", "OVERWORLD is wild")
+  eq(Battlefield.arenaKind("FOREST"), "wild", "FOREST is wild")
+  eq(Battlefield.arenaKind("CAVERN"), "wild", "caves bucket as wild")
+  eq(Battlefield.arenaKind(nil), "wild",
+     "no tileset is wild -- outdoor PNG stays the default")
+  eq(Battlefield.arenaKind("HOUSE"), "indoor", "HOUSE is indoor")
+  eq(Battlefield.arenaKind("REDS_HOUSE_2"), "indoor",
+     "REDS_HOUSE_2 is indoor")
+  eq(Battlefield.arenaKind(nil, { environment = "INDOOR" }), "indoor",
+     "Gen2 INDOOR environment is indoor")
+  eq(Battlefield.arenaKind("GYM"), "gym", "GYM is gym")
+  eq(Battlefield.arenaKind("DOJO"), "gym", "DOJO is gym")
+  eq(Battlefield.arenaKind("TILESET_GYM", { environment = "INDOOR" }), "gym",
+     "Johto gyms stay gym even though environment is INDOOR")
+  eq(Battlefield.arenaKind(nil, {
+       tileset = "TILESET_GYM", environment = "INDOOR",
+     }), "gym", "AZALEA_GYM-shaped def is gym")
+  eq(Battlefield.arenaKind("OVERWORLD", { outdoor = false }), "indoor",
+     "outdoor=false is indoor even on OVERWORLD")
+  eq(Battlefield.arenaKindFromWorld({
+       world = { map = { tileset = { id = "GYM" }, def = { tileset = "GYM" } } },
+     }), "gym", "Gold game.world gym map is gym")
   eq(Battlefield.arenaFieldTileset(nil, {
        tileset = "TILESET_GYM", environment = "INDOOR",
      }), true, "AZALEA_GYM-shaped def keeps TILESET_GYM")

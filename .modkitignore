@@ -148,6 +148,7 @@ docs/plans/nire-back-sprite-pixel-ratio.md
 docs/plans/non-blocking-avatars.md
 docs/plans/coop-joiner-refights-the-trainer.md
 docs/plans/in-game-notifications.md
+docs/plans/battle-custom-bg.md
 # The upstream issue behind the mod-sandbox migration: a request for storage
 # scoped to the copy rather than to one playthrough. Same footing as the plans
 # above -- it argues with the engine about Storage.lua, and a player who
