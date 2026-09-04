@@ -11,7 +11,7 @@ A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp).
 ![LÖVE 11.x](https://img.shields.io/badge/L%C3%96VE-11.x-e64998?style=for-the-badge)
 ![Players 2–64](https://img.shields.io/badge/players-2--64-3aa757?style=for-the-badge)
 ![No server needed](https://img.shields.io/badge/dedicated%20server-optional-4c8fd6?style=for-the-badge)
-![v1.2.0](https://img.shields.io/badge/version-1.2.0-3aa757?style=for-the-badge)
+![v1.2.1](https://img.shields.io/badge/version-1.2.1-3aa757?style=for-the-badge)
 ![MIT](https://img.shields.io/badge/licence-MIT-666?style=for-the-badge)
 
 **No server to rent. No accounts. No signup.** One of you hosts from inside
@@ -313,6 +313,13 @@ tileset into the two platforms — ROM pixels at runtime, never shipped.
   <img src="docs/screenshots/arena-gym.png" width="760" alt="Pewter Gym fight stamped from that room's own GYM tileset">
 </p>
 <p align="center"><em>Gym / cave — still that room's own sheet</em></p>
+
+Want your own look? Drop 640×360 PNGs in `assets/battle/custom/` named
+`wild.png`, `indoor.png`, and `gym.png`. Those replace the ROM stamp for
+that kind of fight (caves and routes use wild; houses use indoor; gyms
+use gym). An optional `wild_field.png` (same for indoor/gym) draws on
+top — keep the room and swap only the platforms, or ship both. Your art,
+not a ROM dump. A missing file keeps the default. The next battle reloads.
 
 ### 🤜 CO-OP — YOUR PARTY IS THE YES
 Walk into a trainer while you're partied and standing on the same map, and
@@ -1519,7 +1526,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `1.2.0` (`experimental: false` — on by default when installed). The full
+It's `1.2.1` (`experimental: false` — on by default when installed). The full
 list lives in `mod.card` under `differences.known`. The ones that'll actually
 bite you:
 
