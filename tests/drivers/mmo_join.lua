@@ -153,8 +153,9 @@ return function(game)
   -- is untypeable on it; the mod's digits page is what makes this screen
   -- answerable by somebody whose friend read them a number, and the only
   -- proof of that is putting one in through the d-pad. The second is B as an
-  -- eraser, which is the other half of the rule the screen prints under
-  -- itself ("B ERASES" with a character on the line, "B GOES BACK" without).
+  -- eraser, which is the other half of the rule the digits page prints
+  -- under itself ("B ERASES" with a character on the line, "B GOES BACK"
+  -- without). The five-row letters page fills the box and draws no hint.
   --
   -- Then it is cleared, deliberately, so what follows is unchanged: START on
   -- an *empty* line is what submits the stored default, and that is the path
@@ -238,15 +239,26 @@ return function(game)
     U.shot(game, SHOT_DIR .. "/join-code-asked.png")
 
     -- The same screen with something on its line, which is what it looks like
-    -- to somebody halfway through reading a code off a phone -- and the one
-    -- frame where the hint under the grid reads B ERASES rather than B GOES
-    -- BACK. Erased again straight after, so the entry below still starts from
-    -- an empty line the way a real attempt does.
+    -- to somebody halfway through reading a code off a phone. The letters
+    -- page (5 rows) fills the box and draws no hint; SELECT flips to digits
+    -- (4 rows), which is the frame that must show B ERASES inside the box.
+    -- Erased again straight after, so the entry below still starts from an
+    -- empty line the way a real attempt does.
     local codeScreen = H.codeGrid(game)
     if codeScreen then
       check(H.typeOnGrid(game, joinCode:sub(1, 3)),
             "the code grid takes characters mid-entry")
       U.shot(game, SHOT_DIR .. "/join-code-typing.png")
+      local rows = type(codeScreen.grid) == "function" and #codeScreen:grid() or 0
+      if rows ~= 4 then
+        U.tap(game, "select")
+        U.wait(2)
+      end
+      U.shot(game, SHOT_DIR .. "/join-code-digits.png")
+      if rows ~= 4 then
+        U.tap(game, "select")
+        U.wait(2)
+      end
       check(H.clearGrid(game, codeScreen), "and B erases them again")
     end
 

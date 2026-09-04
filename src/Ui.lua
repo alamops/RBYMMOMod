@@ -225,6 +225,20 @@ function M.fieldLayout(maxLen, glyphs)
   return math.floor((SCREEN_W - slots * SLOT_W) / 2), cells
 end
 
+-- Where "B ERASES" / "B GOES BACK" sits under an escapable naming grid.
+--
+-- NamingScreen paints cells at `24 + r*16` and the box as
+-- `drawBox(0, 4, 20, 11)`: last inner row y=104, bottom border y=112.
+-- One free 16px row under the last cell, and only if that row is still
+-- inside the box -- the 5-row letters page has no such row, so nil.
+function M.escapeHintY(rows)
+  rows = math.floor(tonumber(rows) or 0)
+  if rows <= 0 then return nil end
+  local y = 24 + (rows + 1) * 16
+  if y > 104 then return nil end
+  return y
+end
+
 -- ------- marking the characters that came with the mod
 --
 -- The CHARACTER list is 36 names the ROM carries and two the mod brings, and
@@ -1880,16 +1894,16 @@ function M:install()
     end
 
     -- Nothing in this game teaches "B on an empty line", so the screen says
-    -- it, on the row both of this mod's pages leave free under the grid --
-    -- and says something else the moment there is a character to erase,
-    -- which is the rule itself, drawn. A page tall enough to reach that row
-    -- keeps its own layout and goes without.
+    -- it, on the row both of this mod's shorter pages leave free under the
+    -- grid -- and says something else the moment there is a character to
+    -- erase, which is the rule itself, drawn. A page that already fills the
+    -- box (the 5-row letters page) keeps its own layout and goes without.
     screen.draw = function(self, ...)
       local out = baseDraw(self, ...)
       local Font = mod.ui.Font
       local rows = type(self.grid) == "function" and #self:grid() or 0
-      local y = 32 + (rows + 1) * 16
-      if not (Font and Font.draw) or rows == 0 or y > 136 then return out end
+      local y = M.escapeHintY(rows)
+      if not (Font and Font.draw) or not y then return out end
       -- the widget signs off with the colour set to white, which is the
       -- colour of its own background. Letters and spaces only: punctuation
       -- would ride on charmap entries a retheme is free to drop.

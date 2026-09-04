@@ -19,6 +19,7 @@ Working notes for features that were (or are being) implemented in this repo.
 | [`battle-sim-move-effects.md`](battle-sim-move-effects.md) | Complete; locked BattleSim decisions |
 | [`offline-solo-battles.md`](offline-solo-battles.md) | Solo wild + trainer fights on BattleSim, option default off, no wire change — in progress |
 | [`3x3-battles-and-3-player-parties.md`](3x3-battles-and-3-player-parties.md) | Party max 3; 3×3 PvP / 3×NPC / 3×Wild; PvP square-only — awaiting approval |
+| [`classic-battle-ui-option.md`](classic-battle-ui-option.md) | Default-off CLASSIC BATTLE UI toggle; 160×144 chrome + 2×2/3×3 thumbnails |
 
 ## Historical
 

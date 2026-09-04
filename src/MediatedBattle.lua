@@ -33,11 +33,11 @@
 -- modified client can lie on the sheet it sends, which is the accepted v1
 -- surface written down in src/Wire.lua's mediated-battle section.
 --
--- The screen draws a classic Gen1 1v1 field on Gen2 / when Battlefield is
--- off: foe front pic + top-left HUD, ally back pic + bottom HUD, message box,
--- optional AnimPlayer. On Gen1 with Battlefield.enabled, presentation is the
--- top-down arena theatre (640×360 fill) from src/Battlefield.lua. Co-op still
--- owns the four-slot renderer.
+-- The screen draws a classic Gen1 1v1 field when CLASSIC BATTLE UI is on
+-- (or Battlefield.enabled is false): foe front pic + top-left HUD, ally
+-- back pic + bottom HUD, message box, optional AnimPlayer. Otherwise
+-- presentation is the top-down arena theatre (640×360 fill) from
+-- src/Battlefield.lua. Co-op still owns the multi-slot renderer.
 
 local need, mod = ...
 local Config = need("Config")
@@ -60,6 +60,9 @@ local EvolveFx = need("EvolveFx")
 -- Free-slot apply + the generation's own forget prompt. Shared with
 -- CoopBattle so a 1v1 and a 2-on-2 cannot disagree about "already knows".
 local LearnMove = need("LearnMove")
+-- Classic 160×144 chrome option. Owns the key the manager row uses; this
+-- screen latches it at construct so a mid-fight flip cannot swap skins.
+local ClassicBattle = need("ClassicBattle")
 
 local M = {}
 M.__index = M
@@ -1443,8 +1446,8 @@ function M.new(opts)
     awaitingReconnect = false,
     reconnectSent = false,
     liveMoves   = nil,     -- referee-published list after Transform/Mimic
-    -- Gen1 Battlefield theatre (top-down arena). Unused on Gen2 / when
-    -- Battlefield.enabled is false.
+    -- Gen1 Battlefield theatre (top-down arena). Unused when classicUi is
+    -- latched or Battlefield.enabled is false.
     frame = 0,
     -- Display clock, arena only. `fx` is the list Battlefield renders from;
     -- `draining` / `faintFx` / `expFilling` are the three states that hold the
@@ -1490,6 +1493,10 @@ function M.new(opts)
     battlefieldLoaded = false,
     battlefieldBubbles = nil, -- { { side, humanIndex, text, born }, ... }
     targetIndex = 1,          -- field cursor when a target list exists
+    -- Latched at construct: the manager row is live, but swapping chrome
+    -- mid-fight would tear the 640×360 arena down under a queued drain.
+    -- `opts.classicUi` is the suite hook; nil reads the live row.
+    classicUi = ClassicBattle.latched(opts.classicUi),
   }, M)
 end
 
@@ -1510,13 +1517,15 @@ local TRAINER_MODES = { coop_npc = true }
 
 -- ------- Gen1 Battlefield theatre gate
 --
--- Hard-cut on Gen1 when Battlefield.enabled(game): wide fill canvas + arena
--- draw. Gen2 (and any generation that fails the gate) keeps the classic
--- 160×144 side-view path below untouched.
+-- Hard-cut when Battlefield.enabled(game) and CLASSIC BATTLE UI is off:
+-- wide fill canvas + arena draw. The option (latched on `classicUi`) and
+-- any generation that fails the theatre gate keep the classic 160×144
+-- side-view path below.
 
 local BUBBLE_LIFE = 90
 
 function M:usesBattlefield()
+  if self.classicUi then return false end
   return Battlefield.enabled(self.game)
 end
 
@@ -2972,9 +2981,10 @@ function M:gainExp(msg)
   -- (both foes down in one 2-on-2 turn) begins where the first fill stopped
   -- rather than rewinding under it.
   --
-  -- Battlefield only. The classic 160x144 readout has no exp strip: nothing
-  -- below is computed, nothing is queued, and its exp text flow is the plain
-  -- engine one -- the award still lands and still persists.
+  -- On-field only: the strip on this seat's HUD is the *standing* monster's.
+  -- Classic 160×144 now draws the same clock (a 1px bar on the player HUD);
+  -- a benched award still has nowhere to crawl. The award still lands and
+  -- still persists either way.
   --
   -- **And on-field only, which is the round-6 half of the same gate.** The
   -- strip on this seat's plate is the *standing* monster's -- one bar, one
@@ -2990,7 +3000,7 @@ function M:gainExp(msg)
   -- since seeding the *seat* off a *bench* monster is exactly the mix-up this
   -- gate exists to prevent.
   local onField = paidIndex == (self.active or 1)
-  local wide = self:usesBattlefield() and onField
+  local wide = onField
   local index = self:mySlot()
   local slot = self.slots[index]
   local fromFrac, fromLevel
@@ -3416,11 +3426,11 @@ function M:noteSlot(msg)
   end
   local fresh = false
   if msg.text and (msg.t == "send" or msg.t == "switch") then
-    -- Battlefield only. The classic 160x144 path queues no `spawnfx` row
-    -- (`queueSpawnFx` answers false off the arena), so there would be nothing
-    -- to install a parked arrival -- that path relabels at parse exactly as it
-    -- always has.
-    if slot.species ~= nil and self:usesBattlefield() then
+    -- Occupied seat: park the newcomer until the queued `spawnfx` row
+    -- (`applySwap`). Classic now queues that row too (no theatre ball), so
+    -- a switch-and-hit in one batch keeps the departing pic on screen and
+    -- the newcomer's bar starts where it walked out.
+    if slot.species ~= nil then
       -- Somebody is still on this seat -- draining, sinking, or merely waiting
       -- for the `clearPic` behind their faint line. Park the newcomer whole:
       -- everything the seat is rebuilt from at the swap, and nothing of it
@@ -5402,7 +5412,6 @@ end
 -- is the row that drops it.
 function M:queueSpawnFx(index, side)
   if index == nil then return false end
-  if not self:usesBattlefield() then return false end
   local slot = self.slots[index]
   local arrive = slot and slot.pending or nil
   local hide = nil
@@ -5411,7 +5420,9 @@ function M:queueSpawnFx(index, side)
     self.spawnHide[index] = true
     hide = true
   end
-  local thrown = self:sendThrows(index) or nil
+  -- Theatre only: the ball arc. Classic still queues the reveal row below
+  -- so `applySwap` can install a parked arrival.
+  local thrown = self:usesBattlefield() and self:sendThrows(index) or nil
   if thrown then
     -- Stamped with the same arrival the reveal row is, so both halves of one
     -- chain live or die together: a throw whose reveal has been superseded (or
@@ -5616,7 +5627,10 @@ end
 -- for the same reason (`showing`, src/CoopBattle.lua:3158).
 function M:queueDrain(index, residual)
   if index == nil then return false end
-  if not self:usesBattlefield() then return false end
+  -- Classic draws the same `shownHp` clock the arena does (`shownHpOf` on
+  -- both HUDs). Gating this on the theatre left a parked switch-in with
+  -- nowhere to fall: the newcomer appeared already low and the attack
+  -- that hit it showed nothing.
   local slot = self.slots[index]
   if not slot then return false end
   local occupant = slot.pending or slot
@@ -5776,8 +5790,9 @@ end
 -- own save file -- there is no wire field for a fraction and there must not be
 -- one -- so no other seat is ever seeded and no other seat draws a strip.
 --
--- Battlefield-only. The classic 160x144 readout has no strip and never reads
--- either clock, so nothing here is ever queued on that path (see `gainExp`).
+-- Classic 160×144 now draws the same clocks on the player HUD (a 1px bar).
+-- A benched award still has nowhere to crawl. The text flow is unchanged --
+-- the strip answers the "gained N EXP" line, it does not replace it.
 
 -- Seed the two display clocks off the save monster's own truth.
 --
@@ -6240,15 +6255,15 @@ function M:snapDisplay()
   -- The exp clocks are welded the same way, and only on the one seat that owns
   -- them: a battle that ends mid-fill would otherwise leave a strip frozen
   -- part-way and a pill a level behind the monster it names. Welding wider than
-  -- the own seat would invent clocks on plates that read none -- and spend a
-  -- Growth walk per slot on the classic path, which is documented as untouched
-  -- by any of this. nil stays nil: a monster with no fraction still shows none.
+  -- the own seat would invent clocks on plates that read none. nil stays nil:
+  -- a monster with no fraction still shows none. Classic 160×144 reads these
+  -- clocks too (the player-HUD exp bar), so the weld is not theatre-gated.
   --
   -- Queued `expfill` rows are deliberately *not* dropped here (this screen
   -- drops no queued rows -- see the drain rows, which stay too): a row that
   -- comes up after a weld finds its target already reached and answers false
   -- without crawling, which is the same outcome one fewer branch.
-  if self:usesBattlefield() then
+  do
     -- `or {}` for the same reason the loop above has one: `exit` calls this on
     -- any object holding the screen's methods, and the suite's stubs do not
     -- carry a field table.
@@ -6528,7 +6543,7 @@ function M:drawPlayerHUD(Font, HudTiles)
   elseif slot.confused then
     Font.draw("CNF", 120, 64)
   else
-    local level = slot.level
+    local level = slot.shownLevel or slot.level
       or (self.mine and self.mine[self.active] and self.mine[self.active].level)
     if level then
       if HudTiles and HudTiles.tile then
@@ -6553,6 +6568,15 @@ function M:drawPlayerHUD(Font, HudTiles)
     pcall(HudTiles.tile, 0x77, 144, 88)
     for i = 10, 17 do pcall(HudTiles.tile, 0x76, i * 8, 88) end
     pcall(HudTiles.tile, 0x6F, 72, 88)
+  end
+  -- Gen 2-style EXP track on the player underline. Seeded lazily so a
+  -- headless award that never drew still has a clock for the suite.
+  if slot.shownExpFrac == nil then
+    self:seedExpClock(slot, self:saveMon())
+  end
+  if slot.shownExpFrac ~= nil then
+    pcall(ClassicBattle.drawExpBar, slot.shownExpFrac,
+      ClassicBattle.hpBarFillX(10), 90, ClassicBattle.HP_BAR_PX)
   end
 end
 

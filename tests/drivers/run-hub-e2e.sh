@@ -414,8 +414,10 @@ enable_mod_for() {
   dir="$(save_dir_for "$1")"
   [ -n "$dir" ] || fail "could not determine LOVE's save directory for $1"
   mkdir -p "$dir"
-  printf 'return { mods = { rby_mmo = true%s }, modOptions = { rby_mmo = { hub = "%s", sprite = "%s" } } }\n' \
-    "$EXTRA_MODS" "$HUB_ADDRESS" "$2" > "$dir/options.lua"
+  local classic=""
+  if [ "${CLASSIC_UI:-}" = "1" ]; then classic=", classicui = true"; fi
+  printf 'return { mods = { rby_mmo = true%s }, modOptions = { rby_mmo = { hub = "%s", sprite = "%s"%s } } }\n' \
+    "$EXTRA_MODS" "$HUB_ADDRESS" "$2" "$classic" > "$dir/options.lua"
   echo "$dir"
 }
 A_SPRITE="${MMO_A_SPRITE:-SPRITE_RED}"

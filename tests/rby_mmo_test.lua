@@ -4506,6 +4506,13 @@ eq(#codeCells, Config.CODE_ENTRY_MAX, "a short field keeps all its slots")
 eq(table.concat(codeCells), "AB" .. ("-"):rep(Config.CODE_ENTRY_MAX - 2),
    "with dashes standing in for what is not typed yet")
 
+-- The JOIN CODE digits page is four rows. The naming box's last inner
+-- row is y=104 and its bottom border is y=112; the hint used to land on
+-- the border (32 + 5*16). Same origin as the grid, one row under it.
+eq(Ui.escapeHintY(4), 104, "digits-page hint sits inside the box")
+eq(Ui.escapeHintY(5), nil, "letters page already fills the last inner row")
+eq(Ui.escapeHintY(0), nil, "an empty grid draws no hint")
+
 -- ------- and the leaderboard row, which is the same question
 --
 -- Four columns want eighteen glyphs and the row is eighteen glyphs, so
@@ -4901,6 +4908,97 @@ stubOptions.solo = false
 eq(fresh:isOn(), false, "and back off just as live")
 
 stubOptions.solo = savedSoloOption
+
+-- ------------------------------------------------------------------
+-- 9b. CLASSIC BATTLE UI: the option row, and the theatre gate it flips
+-- ------------------------------------------------------------------
+--
+-- Off by default, same headline as SOLO BATTLES: a silent flip would yank
+-- every current fight onto 160×144 chrome. The key/label live on
+-- ClassicBattle so Client (which defines the row) and the two screens
+-- (which latch it) cannot drift.
+
+;(function()
+
+local ClassicBattle = need("ClassicBattle")
+local MediatedBattle = need("MediatedBattle")
+
+local schema = run.loader.optionSchemas["rby_mmo"]
+local row
+for _, r in ipairs(schema or {}) do
+  if r.key == ClassicBattle.OPTION then row = r end
+end
+check(row ~= nil, "the CLASSIC BATTLE UI row is in the schema")
+eq(row.key, ClassicBattle.OPTION,
+   "the row's key is ClassicBattle.OPTION, not a second spelling")
+eq(row.label, ClassicBattle.OPTION_LABEL,
+   "and so is the label")
+eq(row.type, "toggle", "a plain on/off")
+eq(Config.CLASSIC_BATTLE_UI_DEFAULT, false,
+   "CLASSIC_BATTLE_UI_DEFAULT is false")
+eq(row.default, Config.CLASSIC_BATTLE_UI_DEFAULT,
+   "the row's default is that same constant")
+eq(row.default, false, "so the row is confirmed off, explicitly")
+eq(row.label, row.label:upper(), "the label is ALL CAPS")
+check(#row.label <= 18,
+      "and short enough for the row -- " .. #row.label .. " characters")
+
+eq(ClassicBattle.latched(nil), false,
+   "latched(nil) reads the live row, which is off")
+eq(ClassicBattle.latched(true), true,
+   "latched(true) is the constructor override")
+eq(ClassicBattle.latched(false), false,
+   "latched(false) stays off even if the live row were on")
+
+eq(ClassicBattle.HP_BAR_PX, 48, "the HP fill span is six tiles")
+eq(ClassicBattle.hpBarFillX(10), 96,
+   "HudTiles.drawHPBar(tx=10) fills from tile+2")
+
+-- Width is the outer frame. Hung 1px outside (width+2 at px-1) is what
+-- made the EXP track read longer than the HP bar it sits under.
+local prevLove = love
+love = {
+  graphics = {
+    rectangle = function(mode, x, _, w, h)
+      if mode == "fill" and h == 3 then
+        love._expOuter = { x = x, w = w }
+      end
+    end,
+    setColor = function() end,
+  },
+}
+ClassicBattle.drawExpBar(0.5, 40, 20, 32)
+eq(love._expOuter and love._expOuter.x, 40,
+   "EXP outline starts at the same x as the HP bar")
+eq(love._expOuter and love._expOuter.w, 32,
+   "...and is the same outer width, not width+2")
+love = prevLove
+
+local gen1Game = { data = data }
+local theatre = MediatedBattle.new({
+  game = gen1Game, battle = "b-classic-opt", role = "host",
+})
+check(theatre:usesBattlefield(),
+      "default construct stays on the battlefield theatre")
+eq(theatre.classicUi, false, "...because classicUi latched off")
+
+local classic = MediatedBattle.new({
+  game = gen1Game, battle = "b-classic-on", role = "host", classicUi = true,
+})
+check(not classic:usesBattlefield(),
+      "classicUi=true forces the 160x144 path")
+eq(classic:uiSize(), 160,
+   "...and uiSize is the GB canvas")
+
+-- A mid-session flip of the stored row must not move a fight already
+-- constructed: the latch is the whole of that guarantee.
+local savedClassic = stubOptions.classicui
+stubOptions.classicui = true
+eq(theatre:usesBattlefield(), true,
+   "flipping the stored option does not tear down a live theatre fight")
+stubOptions.classicui = savedClassic
+
+end)()
 
 -- ------- kindOf: both generations' shapes for "this is a fight I take"
 
@@ -13738,11 +13836,11 @@ end)()
   CoopBattle.updateTarget(client, press("down"))
   eq(client.targetIndex, 2, "and wraps again at the bottom")
 
-  -- ------- field scale: both pairs at 1x, panels narrowed instead
+  -- ------- field scale: integer 1×/2× only (no lane-clamp shrink)
   eq(CoopBattle.FOE_SCALE, 1,
      "foe pair stays 1x in the top-right quarter")
-  eq(CoopBattle.ALLY_SCALE, 1.5,
-     "ally back targets 1.5x; picOriginFor clamps to the strip–HUD lane")
+  eq(CoopBattle.ALLY_SCALE, 2,
+     "ally back default is vanilla Gen 1 2x, not a 1.5x lane fit")
   eq(CoopBattle.FIELD_FLOOR, 96,
      "ally feet sit on the message-box top")
   eq(CoopBattle.ALLY_FOOT_INSET, 4,
@@ -13760,8 +13858,8 @@ end)()
      "ally HUD rests on the message-box lip (ty+th == 12)")
   eq(CoopBattle.STRIP_W, 16, "side-strip icons are 16px wide")
   eq(CoopBattle.SLIDE_FRAMES, 10, "focus changes slide over ten frames")
-  eq(CoopBattle.STAGE_ALLY.x, 16,
-     "ally stage floor is past the left strip")
+  eq(CoopBattle.STAGE_ALLY.x, 8,
+     "ally stage floor is vanilla backPlacement (x=8)")
   eq(CoopBattle.STAGE_FOE.x, 88,
      "foe pic sits just past the foe HUD, not under it")
   eq(CoopBattle.SLIDE_PX, 48, "focus slides clear a full pic width")
@@ -13775,17 +13873,23 @@ end)()
      "a 12px status tag shortens the bar by tag + gap")
   eq(CoopBattle.hpBarWidth(10, 20), 8,
      "a long tag still leaves an 8px bar floor")
-  -- 56px Gen1 back in the 56px strip–HUD lane (tx=9 → hudLeft 72) is 1x.
+  -- Slot-sized sheets stay 1x (doubling 56px would overflow). 32px Gen 1
+  -- backs use vanilla 2x. Neither path uses a fractional lane clamp.
   do
     local stub = {
       onStage = function() return true end,
       foeSide = function() return false end,
     }
-    local x, _, s = CoopBattle.picOriginFor(stub, 1,
+    local x56, _, s56 = CoopBattle.picOriginFor(stub, 1,
       { getDimensions = function() return 56, 56 end })
-    eq(s, 1,
-       "a 56px back fills the narrower strip–HUD lane at 1x")
-    eq(x, 16, "and right-aligns so its left edge clears the strip")
+    eq(s56, 1,
+       "a 56px sheet is already slot-sized and stays 1x")
+    eq(x56, 8, "vanilla left edge; never downscaled to fit the strip lane")
+    local x32, _, s32 = CoopBattle.picOriginFor(stub, 1,
+      { getDimensions = function() return 32, 32 end })
+    eq(s32, 2, "a 32px Gen 1 back draws at vanilla 2x")
+    eq(x32, 8, "and shares BattleState.backPlacement x")
+    eq(s32 % 1, 0, "field scale is an integer (no muddy 1.5x)")
   end
   local Config = need("Config")
   eq(Config.BATTLE_HUD_ADVANCE, 5,
@@ -13816,8 +13920,8 @@ end)()
   eq(CoopBattle.CMD_BOX_TW, 20, "command box is full width")
   eq(CoopBattle.CMD_COL0_X, 24, "FIGHT/ITEM sit in the left half")
   eq(CoopBattle.CMD_COL1_X, 112, "PKMN/RUN sit in the right half")
-  eq(CoopBattle.scaleFor(client, 1), 1.5, "from seat 1, own pair targets ALLY_SCALE")
-  eq(CoopBattle.scaleFor(client, 2), 1.5, "partner too")
+  eq(CoopBattle.scaleFor(client, 1), 2, "from seat 1, own pair targets vanilla 2x")
+  eq(CoopBattle.scaleFor(client, 2), 2, "partner too")
   eq(CoopBattle.scaleFor(client, 3), 1,
      "opponents stay 1x in the top-right quarter")
   eq(CoopBattle.scaleFor(client, 4), 1,
@@ -13834,8 +13938,8 @@ end)()
      "from seat 3, own slot draws in visual lane 1 (bottom-left)")
   eq(CoopBattle.viewPos(fromSlot3, 1), 3,
      "and the opposition occupies the far lanes")
-  eq(CoopBattle.scaleFor(fromSlot3, 3), 1.5,
-     "own pair targets ALLY_SCALE from seat 3 too")
+  eq(CoopBattle.scaleFor(fromSlot3, 3), 2,
+     "own pair targets vanilla 2x from seat 3 too")
   eq(CoopBattle.scaleFor(fromSlot3, 1), 1,
      "opposition stays 1x -- panels, not foe scale, buy their room")
 
@@ -13890,17 +13994,18 @@ end)()
 
   local allyRawX, allyRawY, allyRawScale = CoopBattle.picOriginFor(client, 1)
   local allyX, allyY, allyScale = CoopBattle.picOriginFor(client, 1, fakeSprite)
-  local laneScale = 56 / 56
-  eq(allyScale, laneScale,
-     "ally slots clamp to the strip–HUD lane (not the raw 1.5 target)")
-  eq(allyRawScale, laneScale, "fallback assumes 56px and clamps the same way")
-  eq(allyX, allyRawX, "left edge stays put when the sprite is known")
-  eq(allyRawX, 16, "right-aligned back clears the left strip")
-  eq(allyY, allyRawY,
-     "feet-anchor fallback assumes 56px, matching the fixture sprite")
+  eq(allyScale, 1,
+     "a 56px measured back stays 1x (slot-sized, not doubled)")
+  eq(allyRawScale, 2,
+     "fallback assumes a 32px Gen 1 back and uses vanilla 2x")
+  eq(allyX, 8, "measured back still uses vanilla left edge")
+  eq(allyRawX, 8, "unmeasured back does too")
   eq(allyY, CoopBattle.FIELD_FLOOR
-       - (56 - CoopBattle.ALLY_FOOT_INSET) * laneScale,
-     "ally top-left is FIELD_FLOOR minus clamped scaled height")
+       - (56 - CoopBattle.ALLY_FOOT_INSET) * allyScale,
+     "ally top-left is FIELD_FLOOR minus 1x slot-sized height")
+  eq(allyRawY, CoopBattle.FIELD_FLOOR
+       - (32 - CoopBattle.ALLY_FOOT_INSET) * allyRawScale,
+     "unmeasured fallback feet-anchors a 32px back at 2x")
 
   client.phase = "choose"
   eq(CoopBattle.picOriginFor(client, 2), nil,
@@ -13969,6 +14074,54 @@ end)()
        "foe strip is unchanged")
   end
 
+  -- The rail is stripSeats: every living field seat, including the one
+  -- already drawn at full size. The arrow (drawSideStrip) marks who is
+  -- in the middle. There is no second "extras" list.
+
+  do
+    local hex = fieldSim({
+      { side = "a", owner = "ann", name = "ANN",
+        party = { mon(60, 50, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "bob", name = "BOB",
+        party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "a", owner = "cal", name = "CAL",
+        party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "dee", name = "DEE",
+        party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "eve", name = "EVE",
+        party = { mon(60, 25, { { id = "FIX_TACKLE", pp = 20 } }) } },
+      { side = "b", owner = "fay", name = "FAY",
+        party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    })
+    local hexClient = setmetatable({
+      sim = hex, host = false, mine = 1, messages = {},
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+    eq(#CoopBattle.stripSeats(hexClient, false), 3,
+       "3x3 ally strip lists all three living seats, including the center")
+    eq(#CoopBattle.stripSeats(hexClient, true), 3,
+       "3x3 foe strip lists all three")
+  end
+
+  -- Side-strip art is the 16×N party-menu bag icon, never the 56×56 stage pic.
+  do
+    local bag = { kind = "bag", getDimensions = function() return 16, 32 end }
+    local stage = { kind = "stage", getDimensions = function() return 56, 56 end }
+    local slot = client.sim:slot(2)
+    local prevSprite = slot.battler.sprite
+    slot.battler.sprite = stage
+    slot._bfIcon = bag
+    slot._bfIconSpecies = slot.battler.mon.species
+    eq(CoopBattle.stripIconImage(client, 2), bag,
+       "classic strip uses the party-menu bag icon, not the stage pic")
+    slot._bfIcon = false
+    eq(CoopBattle.stripIconImage(client, 2), nil,
+       "a missing bag icon does not fall back to battler.sprite")
+    slot.battler.sprite = prevSprite
+    slot._bfIcon = nil
+    slot._bfIconSpecies = nil
+  end
+
   client.phase = "choose"
   client.acting = 2
   eq(CoopBattle.desiredAllyFocus(client), client.mine,
@@ -13977,6 +14130,27 @@ end)()
   client.targetIndex = 2
   eq(CoopBattle.desiredFoeFocus(client), 4,
      "target phase follows the hovered foe in the strip")
+  client.stageFoe = 3
+  client.slideFoe = nil
+  client:beginFocusSlides()
+  eq(client.slideFoe and client.slideFoe.out, 3,
+     "moving the Attack-who cursor slides the current center foe out")
+  eq(client.slideFoe and client.slideFoe.into, 4,
+     "...and the hovered target in")
+  -- A second pick mid-slide does not wait out the first animation.
+  -- Past the midpoint the incoming mon is the one on screen, so a move
+  -- back to the other foe slides from there.
+  client.targetIndex = 1
+  client.slideFoe.t = 8
+  client:beginFocusSlides()
+  eq(client.slideFoe and client.slideFoe.out, 4,
+     "past midpoint the incoming mon is now the stage")
+  eq(client.slideFoe and client.slideFoe.into, 3,
+     "...and a second cursor move slides to the new pick")
+  client.slideFoe = nil
+  client.stageFoe = nil
+  client.stageAlly = nil
+  client.targetIndex = 1
 
   -- ------- animOffset: FX track the drawn pic, not a fixed classic tile
   client.phase = "target"
@@ -13985,7 +14159,7 @@ end)()
     client.sim:slot(1).battler and client.sim:slot(1).battler.sprite)
   local allyDx, allyDy = CoopBattle.animOffset(client, { from = 1 })
   eq(allyDx, (allyOriginX or CoopBattle.STAGE_ALLY.x) - CoopBattle.STAGE_ALLY.x,
-     "ally attack FX track the drawn back (right-aligned in the strip–HUD lane)")
+     "ally attack FX track the drawn back (vanilla left edge)")
   eq(allyDy, 0,
      "ally attack FX keep classic Y -- a Y shift buried them under the "
      .. "message box")
@@ -21102,8 +21276,8 @@ end)()
   eq(ballFx and ballFx.side, "foe",
      "...landing on the foe seat the toss targets, not the thrower's own")
 
-  -- None of this exists on the classic path: with the theatre gate down there
-  -- is no arena for a pop to play on and no row for it.
+  -- Classic still queues the reveal row so `applySwap` can install a parked
+  -- arrival; the theatre ball / poof / spawn particles stay off.
   --
   -- Driven by the gate rather than by a generation, since round 7: Gold draws
   -- the arena too now (docs/plans/gen2-new-battle-system.md), so a Gen2-shaped
@@ -21117,11 +21291,13 @@ end)()
   classic:onEvent({
     battle = "b-fx-gold", seq = 1, t = "send", slot = 3, side = "b", hp = 30,
   })
-  local classicRow = false
+  local classicRow, classicBall = false, false
   for _, row in ipairs(classic.lines) do
     if type(row) == "table" and row.spawnfx ~= nil then classicRow = true end
+    if type(row) == "table" and row.sendball ~= nil then classicBall = true end
   end
-  check(not classicRow, "the classic path queues no spawn row at all")
+  check(classicRow, "classic still queues spawnfx so a parked arrival can land")
+  check(not classicBall, "...without a theatre ball arc")
   eq(classic.fx, nil, "...and emits no fx either")
 end)()
 
@@ -22911,7 +23087,9 @@ if eng and eng.Growth and eng.Experience then
     end
   end
 
-  -- ------- classic path (usesBattlefield false): byte-identical to before R4
+  -- ------- classic path (usesBattlefield false): text + EXP fill on the
+  -- focused-ally HUD. The old "no strip" pin was the decision this option
+  -- reversed -- classic now crawls the same clock the theatre does.
   do
     local mine = monAt(12)
     local fight = newFight({
@@ -22922,10 +23100,11 @@ if eng and eng.Growth and eng.Experience then
     fight.usesBattlefield = function() return false end
 
     fight:gainExp({ slot = 1, species = foeSpecies, level = 60, winners = 1 })
+    local sawFill = false
     for _, row in ipairs(fight.messages) do
-      check(not (type(row) == "table" and row.expfill),
-            "classic path: no expfill row is ever queued")
+      if type(row) == "table" and row.expfill then sawFill = true end
     end
+    check(sawFill, "classic path: an on-field award queues an expfill row")
     local sawGained, sawGrew = false, false
     for _, row in ipairs(fight.messages) do
       if isText(row) then
@@ -22935,11 +23114,12 @@ if eng and eng.Growth and eng.Experience then
       end
     end
     check(sawGained, "classic path: the gained-EXP text is still queued")
-    check(sawGrew, "...and the grow-text is too -- the classic flow is unchanged")
+    check(sawGrew, "...and the grow-text is too")
 
     local battler = fight.sim:slot(1).battler
-    eq(battler.shownExpFrac, nil, "classic path: shownExpFrac is never seeded")
-    eq(battler.shownLevel, nil, "...nor is shownLevel")
+    check(battler.shownExpFrac ~= nil,
+          "classic path: shownExpFrac is seeded for the ally HUD bar")
+    check(battler.shownLevel ~= nil, "...and shownLevel too")
   end
 
   -- ------- R4 fix-wave pin (a): EXP.ALL lands the pill + strip on the truth
@@ -23122,10 +23302,9 @@ if eng and eng.Growth and eng.Experience then
 
   -- ------- R4 fix-wave pin (d): snapDisplay's exp-clock gate
   --
-  -- Classic path: `usesBattlefield() == false` means no plate ever reads an
-  -- exp clock, so `snapDisplay` must not seed or weld one -- both clocks
-  -- stay nil forever -- while `shownHP` (which every readout uses) still
-  -- welds exactly as it always has.
+  -- Classic path: the focused-ally HUD now reads the exp clock, so
+  -- snapDisplay welds the owned seat the same way the theatre does.
+  -- Partners and foes still get no clock.
   do
     local mine = monAt(12)
     local partner = monAt(12)
@@ -23138,8 +23317,11 @@ if eng and eng.Growth and eng.Experience then
     fight.usesBattlefield = function() return false end
     fight:snapDisplay()
     local b1 = fight.sim:slot(1).battler
-    eq(b1.shownExpFrac, nil, "classic snapDisplay: the own battler's exp clock stays nil")
-    eq(b1.shownLevel, nil, "...and its shownLevel too")
+    local b2 = fight.sim:slot(2).battler
+    check(b1.shownExpFrac ~= nil,
+          "classic snapDisplay: the own battler's exp clock is welded")
+    check(b1.shownLevel ~= nil, "...and its shownLevel too")
+    eq(b2.shownExpFrac, nil, "...but the partner still has no clock")
     check(b1.shownHP ~= nil, "...while shownHP is still welded, unchanged")
   end
 
@@ -23470,8 +23652,9 @@ end
     stubMod.log.warn = function() end
   end
 
-  -- ------- classic path (no battlefield): text + save mutation only, no
-  -- rows or clocks -- exactly as it behaved before the strip existed
+  -- ------- classic path (no battlefield): text + save mutation + EXP fill
+  -- on the player HUD. The old "no strip" pin was reversed when CLASSIC
+  -- BATTLE UI started drawing the same clock.
   do
     local mine = monAt(12)
     local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-classic" })
@@ -23482,10 +23665,11 @@ end
     screen:gainExp({ slot = 0, species = foeSpecies, level = 60, participants = 1 })
     check(mine.exp > before, "classic path: the award still lands and persists")
 
+    local sawFill = false
     for _, row in ipairs(screen.lines) do
-      check(not (type(row) == "table" and row.expfill),
-            "classic path: no expfill row is ever queued")
+      if type(row) == "table" and row.expfill then sawFill = true end
     end
+    check(sawFill, "classic path: an on-field award queues an expfill row")
     local sawGained = false
     for _, row in ipairs(screen.lines) do
       if isText(row) then
@@ -23494,8 +23678,9 @@ end
       end
     end
     check(sawGained, "classic path: the gained-EXP text is still queued")
-    eq(screen.slots[0].shownExpFrac, nil, "classic path: shownExpFrac is never seeded")
-    eq(screen.slots[0].shownLevel, nil, "...nor shownLevel")
+    check(screen.slots[0].shownExpFrac ~= nil,
+          "classic path: shownExpFrac is seeded for the player HUD bar")
+    check(screen.slots[0].shownLevel ~= nil, "...and shownLevel too")
   end
 
   -- ------- battlefieldSeat: the clocks ride only this client's own seat

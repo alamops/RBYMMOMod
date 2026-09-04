@@ -30,6 +30,9 @@ local CoopBattle = need("CoopBattle")
 -- to it, and so the one gated on an option row rather than on a connection --
 -- src/SoloBattle.lua's header carries the whole argument.
 local SoloBattle = need("SoloBattle")
+-- Classic 160×144 battle chrome. Owns the option key/label the row below
+-- defines and the two battle screens read.
+local ClassicBattle = need("ClassicBattle")
 local Ui = need("Ui")
 local Overlay = need("Overlay")
 local Sessions = need("Sessions")
@@ -2513,6 +2516,15 @@ function M.install()
     -- agree on them, and this way they agree by construction.
     { key = SoloBattle.OPTION, label = SoloBattle.OPTION_LABEL,
       type = "toggle", default = Config.SOLO_BATTLES_DEFAULT },
+    -- The 160×144 GB battle skin: engine Font.drawBox / HudTiles from the
+    -- player's ROM, guild-focus thumbnails for 2x2 / 3x3. Off by default
+    -- because the 640×360 theatre is what every current fight draws; a
+    -- player who wants the cart look has to ask. Latched per fight (see
+    -- ClassicBattle.latched) so flipping mid-battle cannot swap chrome.
+    -- Key and label come from ClassicBattle so the row and the two screens
+    -- that read it cannot drift.
+    { key = ClassicBattle.OPTION, label = ClassicBattle.OPTION_LABEL,
+      type = "toggle", default = Config.CLASSIC_BATTLE_UI_DEFAULT },
   })
 
   ui:install()

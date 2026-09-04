@@ -18,6 +18,11 @@
 # e2e scratch output (the Gen 1 sibling predates this and is tracked)
 tmp/e2e-battlefield-gen2/
 tmp/e2e-solo-battle/
+# ROM-composited frames from screenshot drivers. lint does not catch a
+# whole frame (same rule as docs/screenshots/ in .modkitignore).
+tmp/e2e-classic/
+tmp/e2e-review/
+tmp/e2e-battlefield/*.log
 
 # Node-hub e2e referee dump (runtime scratch; item ids must never appear)
 npc_bags.txt

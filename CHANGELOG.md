@@ -6,7 +6,20 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-04
+
 ### Added
+
+- **CLASSIC BATTLE UI, off by default.** A mod-manager toggle that swaps
+  MMO fights onto the existing 160×144 Gen 1 chrome (engine `Font` /
+  `HudTiles` from the player's ROM — those pixels never ship). 2×2 and
+  3×3 keep one center pair and put every living field seat on side
+  thumbnails, including the one in the middle (the same 16×N party-menu
+  bag icons as the 6-member list, not scaled battle pics). Moving
+  "Attack who?" slides the center foe to the current target. On-field pics use integer 1×/2× like vanilla
+  (Gen 1 backs at 2×) — no 1.5× lane-clamp shrink. Turns, items, status,
+  PP, and an EXP bar on the focused ally all stay. The flip latches at
+  the next battle so a live fight cannot change skins mid-turn.
 
 - **One-shot Docker install, and a matching upgrade, for a dedicated hub.**
   `scripts/run-server.sh` is the VPS walkthrough as a script: Docker if the
@@ -21,6 +34,14 @@ here must match `manifest.version`.
   `RBY_MMO_GENERATION` into `server/.env`; upgrade keeps that lock so a
   Gold hub is not reset to 1. The VPS section of `server/README.md` now
   points at the pair instead of five commands to copy.
+
+### Fixed
+
+- **JOIN CODE "B ERASES" sat on the box border.** The hint used
+  `32 + (rows+1)*16`, which for the four-row digits page is y=112 —
+  the bottom border tile. It now uses the same origin as the grid
+  (`24 + (rows+1)*16` = 104) and stays off the five-row letters page,
+  which already fills the box.
 
 ## [1.2.0] - 2026-09-01
 
