@@ -2186,6 +2186,57 @@ do
   g.moveMemory[1] = 9
   eq(g:rememberedMove(), 1,
      "a remembered row past the end of the current sheet falls back to one")
+
+  -- Referee PP spend used to leave the upload snapshot on the menu: the hub
+  -- locked a 0-PP move, but FIGHT still printed the number from start().
+  local pp = client()
+  pp.battle = "b1"
+  pp.seq = 0
+  pp.phase = "move"
+  eq(pp:bandMoveRows()[1].right, "25/25", "the upload is what FIGHT opens on")
+  pp:onEvent({
+    battle = "b1", seq = 1, t = "moves", slot = 0, mon = 0,
+    moves = {
+      { id = "EMBER", pp = 24, maxPp = 25 },
+      { id = "GROWL", pp = 40, maxPp = 40 },
+      { id = "HYDRO", pp = 5, maxPp = 5 },
+    },
+  })
+  eq(pp:bandMoveRows()[1].right, "24/25",
+     "a same-ids moves event ticks the PP the menu draws")
+  eq(pp.mine[1].moves[1].pp, 24,
+     "...on the uploaded sheet, so a switch does not restore the old number")
+  eq(pp.liveMoves, nil,
+     "and is not a Transform overlay -- the real sheet is what changed")
+
+  -- Same ids, no `mon`: Transform into a mirror set must not write mine[].
+  local mirror = client()
+  mirror.battle = "b1"
+  mirror.seq = 0
+  mirror:onEvent({
+    battle = "b1", seq = 1, t = "moves", slot = 0,
+    moves = {
+      { id = "EMBER", pp = 3, maxPp = 25 },
+      { id = "GROWL", pp = 40, maxPp = 40 },
+      { id = "HYDRO", pp = 5, maxPp = 5 },
+    },
+  })
+  eq(mirror.mine[1].moves[1].pp, 25,
+     "Transform without mon leaves the real sheet's PP alone")
+  eq(mirror.liveMoves[1].pp, 3, "...and overlays the copied count")
+
+  -- Transform still overlays: different ids must not be written onto mine.
+  pp:onEvent({
+    battle = "b1", seq = 2, t = "moves", slot = 0,
+    moves = {
+      { id = "TACKLE", pp = 10, maxPp = 35 },
+    },
+  })
+  eq(pp.mine[1].moves[1].id, "EMBER",
+     "a rewritten list leaves the real sheet alone")
+  eq(pp.liveMoves[1].id, "TACKLE", "...and is what FIGHT reads until a send")
+  eq(pp:bandMoveRows()[1].right, "10/35",
+     "...including the live PP of the copied move")
 end
 
 -- ------------------------------------------------------------------

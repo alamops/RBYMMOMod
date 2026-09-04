@@ -22,6 +22,20 @@ here must match `manifest.version`.
   Gold hub is not reset to 1. The VPS section of `server/README.md` now
   points at the pair instead of five commands to copy.
 
+## [1.2.2] - 2026-09-02
+
+### Fixed
+
+- **FIGHT now shows live PP during a mediated battle.** The referee already
+  spent PP (a 0-PP move was locked), but the menu still printed the count
+  from the upload at `start()`. A `moves` event now follows a spend or an
+  Ether on the fielded mon, stamped with `mon` (the party index) so the
+  client writes that sheet. Transform and Mimic still omit `mon` and only
+  overlay the copied list — including a mirror match, where the ids are
+  the same. A bench Ether still restores PP and does not redraw FIGHT.
+  Both gens. No PROTOCOL bump: `mon` was already a legal battle-event
+  field.
+
 ## [1.2.0] - 2026-09-01
 
 ### Changed

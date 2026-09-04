@@ -74,9 +74,11 @@ M.MOD_ID = "rby_mmo"
 -- 11 is the mediated battle event `chose` -- a seat filed this turn's answer,
 -- so peers can keep the wait line accurate without an `act` fan-out -- and
 -- `unchose`, which clears that mark when a player cancels a choice they already
--- submitted.  From PROTOCOL 12, `moves` syncs the live move list after Transform
--- or Mimic.  A protocol-10 intermediator never emits either kind, so a newer
--- client's wait line would name players who have already answered, or keep
+-- submitted.  From PROTOCOL 12, `moves` syncs the live move list after
+-- Transform or Mimic (`mon` absent), and after PP is spent or restored
+-- (`mon` = party index).  A protocol-10
+-- intermediator never emits either kind, so a newer client's wait line would
+-- name players who have already answered, or keep
 -- naming players who walked their answer back, and neither failure looks like
 -- lag -- both read as "still choosing".  A refusal naming both versions is the
 -- only sentence either player can act on.  This number lives here and in

@@ -650,13 +650,17 @@ function Battle:_emit(kind, fields)
   return event
 end
 
-function Battle:_emitMoves(fighter, mon)
+-- `partyIndex` is 1-based into the fighter's party. Present on a PP
+-- spend/restore so the client can write that sheet; absent on
+-- Transform/Mimic so the overlay is not mistaken for the real set.
+function Battle:_emitMoves(fighter, mon, partyIndex)
   local moves = {}
   for i = 1, #mon.moves do
     local m = mon.moves[i]
     moves[#moves + 1] = {
       id = m.id or "move",
       pp = max(0, int(m.pp, 0)),
+      maxPp = max(0, int(m.maxPp, m.pp)),
       power = max(0, int(m.power, 0)),
       accuracy = max(0, int(m.accuracy, 255)),
       type = max(0, int(m.type, 0)),
@@ -664,9 +668,9 @@ function Battle:_emitMoves(fighter, mon)
       chance = max(0, int(m.chance, 0)),
     }
   end
-  return self:_emit("moves", {
-    slot = fighter.slot, side = fighter.side, moves = moves,
-  })
+  local fields = { slot = fighter.slot, side = fighter.side, moves = moves }
+  if partyIndex then fields.mon = partyIndex - 1 end
+  return self:_emit("moves", fields)
 end
 
 function Battle:_say(text)
@@ -2079,6 +2083,10 @@ function Battle:_resolveOneItem(fighter)
           if move.pp > before then
             self:_say(mon.species .. "'s PP was restored")
             applied = true
+            -- Fielded mon only: a bench Ether must not redraw FIGHT.
+            if partyIdx == fighter.active then
+              self:_emitMoves(fighter, mon, partyIdx)
+            end
           else
             self:_say("But it failed")
           end
@@ -2102,6 +2110,9 @@ function Battle:_resolveOneItem(fighter)
         if any then
           self:_say(mon.species .. "'s PP was restored")
           applied = true
+          if partyIdx == fighter.active then
+            self:_emitMoves(fighter, mon, partyIdx)
+          end
         else
           self:_say("But it failed")
         end
@@ -2371,6 +2382,12 @@ function Battle:_useMove(fighter, mon, opts)
 
   if not struggling and move.pp > 0 and not releasing and not choice.bideRelease then
     move.pp = move.pp - 1
+    -- FIGHT reads the uploaded sheet. Publish whenever PP actually moved
+    -- (Transform/Mimic already emit via movesChanged). Skip an override
+    -- copy -- Metronome/Mirror already spent the real slot on the first call.
+    if not opts.moveOverride then
+      self:_emitMoves(fighter, mon, fighter.active)
+    end
   end
   -- amount=1 is the charge/vanish setup beat (release omits it). SHAKE_ANIM
   -- already uses amount for rock count; DIG/FLY/SOLARBEAM are never shakes.

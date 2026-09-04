@@ -2831,8 +2831,51 @@ do
   drain(battle)
   battle:submitChoice("p1", { action = "item", item = "ETHER", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
-  drain(battle)
+  local events = drain(battle)
   eq(battle.fighters[1].mons[1].moves[1].pp, 11, "ETHER restores 10 PP")
+  local restored, restoredMon = nil, nil
+  for _, event in ipairs(events) do
+    if event.t == "moves" and event.slot == 0 and event.moves and event.moves[1] then
+      restored = event.moves[1]
+      restoredMon = event.mon
+    end
+  end
+  ok(restored ~= nil, "ETHER also publishes the list so FIGHT can redraw PP")
+  eq(restored and restored.pp, 11, "...at the restored count")
+  eq(restoredMon, 0, "...and names the fielded party index")
+end
+
+do
+  local battle = battleOf({
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 100, spd = 120,
+        moves = { move({ id = "thump", power = 40, pp = 10, maxPp = 20 }) },
+      }),
+      mon({
+        species = "Bench", maxHp = 100, spd = 1,
+        moves = { move({ id = "splash", power = 0, effect = 85, pp = 1, maxPp = 20 }) },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "item", item = "ETHER", move = 0, slot = 1 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local events = drain(battle)
+  eq(battle.fighters[1].mons[2].moves[1].pp, 11, "ETHER still restores a bench slot")
+  eq(battle.fighters[1].mons[1].moves[1].pp, 10, "...and leaves the fielded mon's PP")
+  local fieldMoves = false
+  for _, event in ipairs(events) do
+    if event.t == "moves" and event.slot == 0 then fieldMoves = true end
+  end
+  eq(fieldMoves, false,
+     "a bench Ether does not publish a moves list on the field seat")
 end
 
 do
@@ -2988,15 +3031,18 @@ do
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   local events = drain(battle)
-  local sawMoves, firstId = false, nil
+  local overlay = nil
   for _, event in ipairs(events) do
-    if event.t == "moves" and event.moves and event.moves[1] then
-      sawMoves = true
-      firstId = event.moves[1].id
+    if event.t == "moves" and event.slot == 0 and event.mon == nil
+       and event.moves and event.moves[1] then
+      overlay = event
     end
   end
-  ok(sawMoves, "Transform emits a moves event")
-  eq(firstId, "foe-one", "Transform moves event carries the foe's first move id")
+  ok(overlay ~= nil, "Transform emits a moves event")
+  eq(overlay and overlay.moves[1].id, "foe-one",
+     "Transform moves event carries the foe's first move id")
+  eq(overlay and overlay.mon, nil,
+     "Transform overlay omits mon so the client does not write mine[]")
 end
 
 do
@@ -3027,14 +3073,49 @@ do
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   local events = drain(battle)
-  local sawMimic = false
+  local sawMimic, mimicMon = false, "unset"
   for _, event in ipairs(events) do
-    if event.t == "moves" and event.moves and event.moves[1]
+    if event.t == "moves" and event.slot == 0 and event.moves and event.moves[1]
        and event.moves[1].id == "copied" then
       sawMimic = true
+      mimicMon = event.mon
     end
   end
   ok(sawMimic, "Mimic emits a moves event with the copied move id")
+  eq(mimicMon, nil, "Mimic overlay omits mon so the client does not write mine[]")
+end
+
+do
+  local battle = battleOf({
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 200, spd = 120,
+        moves = { move({ id = "thump", pp = 20, maxPp = 20, power = 40 }) },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local events = drain(battle)
+  local spent, spentMon = nil, nil
+  for _, event in ipairs(events) do
+    if event.t == "moves" and event.slot == 0 and event.moves and event.moves[1] then
+      spent = event.moves[1]
+      spentMon = event.mon
+    end
+  end
+  ok(spent ~= nil, "using a move emits a moves event so FIGHT can redraw PP")
+  eq(spent and spent.pp, 19, "...with the spent count")
+  eq(spent and spent.maxPp, 20, "...and the maximum the menu prints beside it")
+  eq(spent and spent.id, "thump", "...for the slot that was actually used")
+  eq(spentMon, 0, "...and names the fielded party index")
 end
 
 -- ------------------------------------------------------------------

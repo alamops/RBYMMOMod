@@ -2084,6 +2084,25 @@ function M:hasLivePP()
   return self.sim:hasPP(slot and slot.battler)
 end
 
+-- Write referee PP onto the list FIGHT already shows. Same-length, same-ids
+-- only -- a Transform/Mimic list still replaces via medMoveList.
+function M:syncLivePp(moves)
+  local current = self:liveMoves()
+  if type(current) ~= "table" or type(moves) ~= "table" then return false end
+  if #moves ~= #current or #current == 0 then return false end
+  for i, slot in ipairs(current) do
+    local incoming = moves[i]
+    if not (type(incoming) == "table" and incoming.id == slot.id) then
+      return false
+    end
+  end
+  for i, slot in ipairs(current) do
+    local pp = tonumber(moves[i].pp)
+    if pp then slot.pp = pp end
+  end
+  return true
+end
+
 -- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
 M.COMMANDS = { "FIGHT", "SWITCH", "ITEM", "RUN" }
 
@@ -9698,7 +9717,17 @@ function M:onBattleEvent(msg)
   if msg.t == "moves" then
     local index = self:medSlotOf(msg)
     if index == self.mine and type(msg.moves) == "table" then
-      self.medMoveList = msg.moves
+      -- `mon` marks a PP spend/restore. Absent is Transform/Mimic -- replace
+      -- the overlay even when the copied ids match the current list.
+      if msg.mon ~= nil then
+        if self.medMoveList then
+          self.medMoveList = msg.moves
+        else
+          self:syncLivePp(msg.moves)
+        end
+      else
+        self.medMoveList = msg.moves
+      end
     end
     return true
   end
