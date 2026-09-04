@@ -43,6 +43,32 @@ here must match `manifest.version`.
   (`24 + (rows+1)*16` = 104) and stays off the five-row letters page,
   which already fills the box.
 
+## [1.2.2] - 2026-09-02
+
+### Fixed
+
+- **FIGHT now shows live PP during a mediated battle.** The referee already
+  spent PP (a 0-PP move was locked), but the menu still printed the count
+  from the upload at `start()`. A `moves` event now follows a spend or an
+  Ether on the fielded mon, stamped with `mon` (the party index) so the
+  client writes that sheet. Transform and Mimic still omit `mon` and only
+  overlay the copied list — including a mirror match, where the ids are
+  the same. A bench Ether still restores PP and does not redraw FIGHT.
+  Both gens. No PROTOCOL bump: `mon` was already a legal battle-event
+  field.
+
+## [1.2.1] - 2026-09-02
+
+### Added
+
+- **Custom battle backgrounds.** Drop 640×360 PNGs into
+  `assets/battle/custom/` as `wild.png`, `indoor.png`, and `gym.png` to
+  replace the ROM-stamped arena for that kind of fight. Optional
+  `wild_field.png` / `indoor_field.png` / `gym_field.png` draw on top of
+  the background (or on the ROM / authored fallback when only the field
+  file is present). A missing file keeps today's look. Next fight picks
+  the files up; no extra permission, no bytes shipped.
+
 ## [1.2.0] - 2026-09-01
 
 ### Changed

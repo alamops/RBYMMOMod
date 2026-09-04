@@ -314,6 +314,13 @@ tileset into the two platforms — ROM pixels at runtime, never shipped.
 </p>
 <p align="center"><em>Gym / cave — still that room's own sheet</em></p>
 
+Want your own look? Drop 640×360 PNGs in `assets/battle/custom/` named
+`wild.png`, `indoor.png`, and `gym.png`. Those replace the ROM stamp for
+that kind of fight (caves and routes use wild; houses use indoor; gyms
+use gym). An optional `wild_field.png` (same for indoor/gym) draws on
+top — keep the room and swap only the platforms, or ship both. Your art,
+not a ROM dump. A missing file keeps the default. The next battle reloads.
+
 ### 🤜 CO-OP — YOUR PARTY IS THE YES
 Walk into a trainer while you're partied and standing on the same map, and
 the fight becomes a 2-on-2 by itself — no box, no cover, nothing to choose.

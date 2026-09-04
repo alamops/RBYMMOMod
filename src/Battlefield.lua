@@ -369,11 +369,13 @@ end
 
 -- ------- asset load
 --
--- Prefer the player's own ROM tiles at runtime (the overworld tileset the
--- fight is standing on). Those pixels never ship in this repo -- they live
--- in assets/generated/ after a ROM import, the same cache the sprites
--- already read. The authored PNG and the two-platform stand-in are only
--- what a headless boot or a missing cache falls back to.
+-- Prefer a player drop-in at assets/battle/custom/{wild,indoor,gym}.png
+-- (optional {kind}_field.png overlay) when that file loads. Otherwise stamp
+-- the player's own ROM tiles (the overworld tileset the fight is standing
+-- on). Those pixels never ship in this repo -- they live in assets/generated/
+-- after a ROM import, the same cache the sprites already read. The authored
+-- PNG and the two-platform stand-in are only what a headless boot or a
+-- missing cache falls back to.
 
 local function peekGame()
   local game = nil
@@ -384,38 +386,8 @@ local function peekGame()
   return nil
 end
 
-function M.load(modFacade, game)
-  modFacade = modFacade or mod
-  if arenaTried then return arenaImage end
-
-  game = game or peekGame()
-  if type(M.composeRomArena) == "function" then
-    local rom = M.composeRomArena(game)
-    if rom then
-      arenaImage = rom
-      arenaTried = true
-      return arenaImage
-    end
-  end
-  -- No game yet (fight entry before the world facade is live): do not lock
-  -- the PNG in, or the first draw could never upgrade to the ROM tiles.
-  if not game then return nil end
-
-  local indoor = false
-  pcall(function()
-    local ow = modFacade and modFacade.world and modFacade.world.overworld
-      and modFacade.world:overworld()
-    local map = ow and ow.map
-    local id = (map and map.tileset and map.tileset.id)
-      or (map and map.def and map.def.tileset)
-    indoor = M.arenaIndoor(id, map and map.def)
-  end)
-  local path = indoor and Config.BATTLEFIELD_ARENA_INDOOR or Config.BATTLEFIELD_ARENA
-  if type(path) ~= "string" or path == "" then
-    path = Config.BATTLEFIELD_ARENA
-  end
+local function resolveArenaPath(modFacade, path)
   if type(path) ~= "string" or path == "" then return nil end
-
   local resolved = path
   local assets = modFacade and modFacade.assets
   if assets and assets.path then
@@ -424,22 +396,166 @@ function M.load(modFacade, game)
       resolved = got
     end
   end
+  return resolved
+end
 
+local function loadArenaImage(modFacade, path)
+  local resolved = resolveArenaPath(modFacade, path)
+  if not resolved then return nil end
   if not (love and love.graphics and love.graphics.newImage) then
     return nil
   end
-
   local ok, img = pcall(love.graphics.newImage, resolved)
-  if ok and img then
-    pcall(function()
-      if img.setFilter then img:setFilter("nearest", "nearest") end
-    end)
-    arenaImage = img
-    arenaTried = true
-    return arenaImage
+  if not (ok and img) then return nil end
+  pcall(function()
+    if img.setFilter then img:setFilter("nearest", "nearest") end
+  end)
+  return img
+end
+
+-- kind is wild | indoor | gym. layer is "bg" (the full arena) or "field"
+-- (optional overlay). Unknown kind is no path. Any layer other than
+-- "field" is the full-arena bg.
+function M.customArenaPath(kind, layer)
+  if kind ~= "wild" and kind ~= "indoor" and kind ~= "gym" then
+    return nil
+  end
+  local pack = (layer == "field")
+    and Config.BATTLEFIELD_ARENA_CUSTOM_FIELD
+    or Config.BATTLEFIELD_ARENA_CUSTOM
+  if type(pack) ~= "table" then return nil end
+  local path = pack[kind]
+  if type(path) ~= "string" or path == "" then return nil end
+  return path
+end
+
+function M.customArenaLayers(modFacade, kind)
+  return {
+    bg = loadArenaImage(modFacade, M.customArenaPath(kind, "bg")),
+    field = loadArenaImage(modFacade, M.customArenaPath(kind, "field")),
+  }
+end
+
+-- Stretch both images onto the theatre canvas so a 640×360 drop-in and a
+-- differently sized overlay still line up with the seats.
+function M.compositeArena(under, over)
+  if over == nil then return under end
+  if under == nil then return over end
+  if not (love and love.graphics and love.graphics.newCanvas) then
+    return under
+  end
+  local okC, canvas = pcall(love.graphics.newCanvas, M.WIDTH, M.HEIGHT)
+  if not (okC and canvas) then return under end
+  local prev = nil
+  local painted = false
+  pcall(function()
+    prev = love.graphics.getCanvas()
+    love.graphics.setCanvas(canvas)
+    love.graphics.clear(0, 0, 0, 1)
+    love.graphics.setColor(1, 1, 1, 1)
+    local function blit(img)
+      if img == nil then return end
+      local iw, ih = M.WIDTH, M.HEIGHT
+      pcall(function() iw, ih = img:getDimensions() end)
+      love.graphics.draw(img, 0, 0, 0,
+        M.WIDTH / math.max(iw, 1), M.HEIGHT / math.max(ih, 1))
+    end
+    blit(under)
+    blit(over)
+    painted = true
+  end)
+  pcall(function() love.graphics.setCanvas(prev) end)
+  if not painted then return under end
+  pcall(function()
+    if canvas.setFilter then canvas:setFilter("nearest", "nearest") end
+  end)
+  return canvas
+end
+
+local function lockArena(img)
+  if img == nil then return nil end
+  arenaImage = img
+  arenaTried = true
+  return arenaImage
+end
+
+function M.load(modFacade, game)
+  modFacade = modFacade or mod
+  if arenaTried then return arenaImage end
+
+  game = game or peekGame()
+  -- Do not guess "wild" before the map is known: a gym fight's first
+  -- draw would otherwise lock wild.png and never upgrade. A game table
+  -- without an overworld map is not a classification -- only a live map is.
+  -- M.overworldFrom, not the local: this function is declared above that
+  -- helper, and a bare name here would be a global nil.
+  local kind = nil
+  local ow = nil
+  if type(M.overworldFrom) == "function" then
+    ow = M.overworldFrom(game)
+  end
+  if type(ow) == "table" and type(ow.map) == "table" then
+    kind = M.arenaKindFromWorld(game)
   end
 
-  if modFacade and modFacade.log and modFacade.log.warn then
+  local layers = { bg = nil, field = nil }
+  if kind and type(M.customArenaLayers) == "function" then
+    local ok, got = pcall(M.customArenaLayers, modFacade, kind)
+    if ok and type(got) == "table" then
+      layers.bg = got.bg
+      layers.field = got.field
+    end
+  end
+
+  local function withField(base)
+    if base == nil then return nil end
+    if layers.field == nil then return base end
+    if type(M.compositeArena) ~= "function" then return base end
+    local ok, mixed = pcall(M.compositeArena, base, layers.field)
+    if ok and mixed ~= nil then return mixed end
+    return base
+  end
+
+  -- Custom bg wins over ROM, but only once the kind is known.
+  if layers.bg ~= nil then
+    return lockArena(withField(layers.bg))
+  end
+
+  if type(M.composeRomArena) == "function" then
+    local rom = M.composeRomArena(game)
+    if rom then
+      return lockArena(withField(rom))
+    end
+  end
+  -- No game yet (fight entry before the world facade is live): do not lock
+  -- the PNG in, or the first draw could never upgrade to the ROM tiles.
+  -- Field-only custom waits here too, so it can sit on the ROM stamp.
+  if not game then return nil end
+
+  local indoor = (kind == "indoor")
+  if not indoor then
+    pcall(function()
+      local ow = M.overworldFrom(game)
+      local map = ow and ow.map
+      local id = (map and map.tileset and map.tileset.id)
+        or (map and map.def and map.def.tileset)
+      indoor = M.arenaIndoor(id, map and map.def)
+    end)
+  end
+  local path = indoor and Config.BATTLEFIELD_ARENA_INDOOR or Config.BATTLEFIELD_ARENA
+  if type(path) ~= "string" or path == "" then
+    path = Config.BATTLEFIELD_ARENA
+  end
+  local img = loadArenaImage(modFacade, path)
+  if img then
+    return lockArena(withField(img))
+  end
+  if layers.field ~= nil then
+    return lockArena(layers.field)
+  end
+
+  if type(path) == "string" and path ~= ""
+      and modFacade and modFacade.log and modFacade.log.warn then
     modFacade.log:warn("could not load battlefield arena %s; top-down "
       .. "theatre paints the two-platform stand-in -- reinstall the mod so "
       .. "%s is present", tostring(path), tostring(path))
@@ -2285,6 +2401,33 @@ function M.arenaIndoor(tilesetId, mapDef)
   end
   if type(tilesetId) ~= "string" or tilesetId == "" then return false end
   return true
+end
+
+-- The three drop-in buckets. Gym wins over a house environment (Johto).
+-- Empty input is wild -- same default as the outdoor authored PNG.
+function M.arenaKind(tilesetId, mapDef)
+  local id = tilesetId
+  if (type(id) ~= "string" or id == "") and type(mapDef) == "table" then
+    id = mapDef.tileset
+  end
+  if gymSheet(id) then return "gym" end
+  if M.arenaIndoor(tilesetId, mapDef) then return "indoor" end
+  return "wild"
+end
+
+function M.arenaKindFromWorld(game)
+  local ow = overworldFrom(game)
+  local map = ow and ow.map
+  local id = nil
+  if type(map) == "table" then
+    if type(map.tileset) == "table" then
+      id = map.tileset.id
+    end
+    if (type(id) ~= "string" or id == "") and type(map.def) == "table" then
+      id = map.def.tileset
+    end
+  end
+  return M.arenaKind(id, map and map.def)
 end
 
 local function lookupTileset(sets, id)

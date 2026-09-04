@@ -69,7 +69,7 @@ local floor = math.floor
 --   reconnect  -- a side that had dropped is back
 --   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 --   unchose    -- cancel cleared a filed answer
---   moves      -- mid-fight move-list sync after Transform/Mimic
+--   moves      -- mid-fight move-list sync after Transform/Mimic, and after PP spend/restore
 --   exp        -- a faint paid out; facts only, the client prices it
 --   team       -- a seat's party roster, as ball states: how many monsters it
 --                 brought and which are healthy / statused / down.  Ball
@@ -181,7 +181,8 @@ M.SHAPES = {
   reconnect = { side = true, text = true },
   chose     = { slot = true, side = true, text = "who answered" },
   unchose   = { slot = true, side = true, text = "who answered" },
-  moves     = { slot = true, side = true, moves = "sanitised move list" },
+  moves     = { slot = true, side = true, moves = "sanitised move list",
+                mon = "party index (0-5) on a PP spend/restore; absent means Transform/Mimic" },
   exp       = { slot = "the winner being paid", species = "the monster that fell",
                 speciesId = "its registry id, when the sheet named one",
                 level = "its level", participants = "how many shares split it",
