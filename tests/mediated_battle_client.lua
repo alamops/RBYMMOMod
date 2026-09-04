@@ -1521,8 +1521,9 @@ do
      nil, "...and emits none if asked directly")
 end
 
--- The classic 160x144 path queues no spawn row, so it must not park anything:
--- there would be nothing to install it.
+-- Classic parks and queues spawnfx (no theatre ball) so a switch-and-hit
+-- in one batch keeps the departing pic and the newcomer's bar starts where
+-- it walked out -- the same clocks the arena uses.
 --
 -- Driven by the gate rather than by a generation, since round 7: Gold takes
 -- the arena too (docs/plans/gen2-new-battle-system.md), so a Gen2-shaped game
@@ -1536,10 +1537,32 @@ do
     lines = {},
   }, { __index = Mediated })
   check(not classic:usesBattlefield(), "the gate is down on this screen")
-  classic:noteSlot({ t = "send", slot = 3, text = "RATTATA", hp = 21 })
-  eq(classic.slots[3].species, "RATTATA",
-     "off the arena a send relabels at parse exactly as it always did")
-  eq(classic.slots[3].pending, nil, "...and parks nothing that could never land")
+  classic:noteSlot({ t = "send", slot = 3, text = "RATTATA", hp = 21, maxHp = 21 })
+  eq(classic.slots[3].species, "PIDGEY",
+     "classic parks a send into an occupied seat")
+  eq(classic.slots[3].pending and classic.slots[3].pending.species, "RATTATA",
+     "...the arrival waits for spawnfx")
+  check(classic:queueSpawnFx(3, "b"), "classic still queues a spawnfx row")
+  local spawn = nil
+  for _, row in ipairs(classic.lines) do
+    if type(row) == "table" and row.spawnfx ~= nil then spawn = row end
+    check(not (type(row) == "table" and row.sendball ~= nil),
+          "classic queues no theatre ball")
+  end
+  check(spawn ~= nil, "a spawnfx row is on the queue")
+
+  classic:noteSlot({ t = "damage", slot = 3, hp = 12, amount = 9 })
+  eq(classic.slots[3].hp, 24, "the departing monster's numbers stay put")
+  eq(classic.slots[3].pending and classic.slots[3].pending.hp, 12,
+     "the hit lands on the parked newcomer")
+  eq(classic.slots[3].pending and classic.slots[3].pending.shownHp, 21,
+     "...whose bar still starts where it walked out")
+  check(classic:queueDrain(3), "classic queues the fall against the newcomer")
+  check(classic:applySwap(spawn), "applySwap installs the arrival")
+  eq(classic.slots[3].species, "RATTATA", "...on the seat")
+  eq(classic.slots[3].shownHp, 21, "...bar starts at walk-out HP")
+  eq(classic.slots[3].hp, 12, "...truth is already the post-hit number")
+  eq(classic.slots[3].pending, nil, "...and the park is empty")
 end
 
 -- ------------------------------------------------------------------
@@ -1721,7 +1744,19 @@ do
 
   -- And the seat changing hands takes both fields with it: the previous
   -- occupant's id left standing would draw the monster that just walked off.
+  -- Classic parks until `spawnfx` (`applySwap`); the departing id stays on
+  -- the seat until then, then both fields go with the swap.
   screen:noteSlot({ t = "send", slot = 3, text = "CHARMANDER", hp = 30 })
+  eq(screen.slots[3].species, "MALBABISCO",
+     "classic parks; the departing id stays on the seat")
+  eq(screen.slots[3].pending and screen.slots[3].pending.species, "CHARMANDER",
+     "...the newcomer waits behind it")
+  check(screen:queueSpawnFx(3, "b"), "classic queues the reveal")
+  local spawn
+  for _, row in ipairs(screen.lines) do
+    if type(row) == "table" and row.spawnfx ~= nil then spawn = row end
+  end
+  check(screen:applySwap(spawn), "applySwap hands the seat over")
   eq(screen.slots[3].speciesId, nil, "a send with no id clears the last one")
   eq(screen.slots[3].level, nil, "...and the level that went with it")
   eq(screen:seatSpeciesKey(screen.slots[3], false), "CHARMANDER",

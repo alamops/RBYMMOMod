@@ -86,6 +86,9 @@ local Mediated = need("MediatedBattle")
 -- Free-slot apply + the generation's own forget prompt. Shared with
 -- MediatedBattle so a 1v1 and a 2-on-2 cannot disagree about "already knows".
 local LearnMove = need("LearnMove")
+-- Classic 160×144 chrome option. Owns the key the manager row uses; this
+-- screen latches it at construct so a mid-fight flip cannot swap skins.
+local ClassicBattle = need("ClassicBattle")
 
 local M = {}
 M.__index = M
@@ -150,6 +153,10 @@ local function loadEngine(game)
   -- Soft: party icons + OW walk sheets for the Gen1 Battlefield theatre.
   grab("Sprites", "src.pokemon.Sprites")
   grab("SpriteRenderer", "src.render.SpriteRenderer")
+  -- Same 16×N bag icons the 6-member party list draws (PokemonIcon wraps
+  -- PartyMenu.drawIcon). Classic side strips use these, not stage pics.
+  grab("PokemonIcon", "src.ui.PokemonIcon")
+  grab("PartyMenu", "src.ui.PartyMenu")
 
   local generation = Gen.generation(game)
   if not parts.Protocol then
@@ -671,6 +678,10 @@ function M.new(game, opts)
     -- two directions (the anim row and the "X used MOVE" line beside it), and
     -- only the first of them may raise a shout. See `noteBattlefieldBubble`.
     calloutShout = nil,
+    -- Latched at construct: the manager row is live, but swapping chrome
+    -- mid-fight would tear the 640×360 arena down under a queued drain.
+    -- `opts.classicUi` is the suite hook; nil reads the live row.
+    classicUi = ClassicBattle.latched(opts.classicUi),
   }, M)
 
   local rng = function(a, b)
@@ -1207,7 +1218,7 @@ function M:enter()
   end
   -- Arena load once per fight (Gen1 theatre). Soft-fail if the asset is
   -- missing -- Battlefield.draw still paints a flat stand-in.
-  if Battlefield.enabled(self.game) then
+  if self:usesBattlefield() then
     self.battlefieldLoaded = true
     pcall(Battlefield.load, mod)
   end
@@ -2590,6 +2601,9 @@ function M:updateTarget(input)
     else
       self.targetIndex =
         math.max(1, math.min(#targets, self.targetIndex + step))
+      -- Same frame as the cursor: otherwise the slide waited for the next
+      -- update tick and the center pair lagged the "Attack who?" list.
+      self:beginFocusSlides()
     end
   elseif input:wasPressed("b") then
     self.phase = "choose"
@@ -3700,9 +3714,10 @@ end
 -- level pill prints; the gap between those two and the mon's own truth *is*
 -- the animation, exactly as `shownHP` is for the bar.
 --
--- Battlefield-only. The classic 160x144 readout has no exp strip and never
--- reads either clock, so nothing here is ever queued on that path (see
--- `gainExp`) and the classic exp text flow is byte-identical to what it was.
+-- Classic 160×144 now draws the same clocks on the focused-ally HUD (a 1px
+-- bar). A benched award still has nowhere to crawl. The text flow is
+-- unchanged -- the strip answers the "gained N EXP" line, it does not
+-- replace it.
 
 -- A whole bar in about 1.2 seconds, counted in frames because this screen's
 -- update runs on the engine's fixed 60Hz step (the drain counts the same way).
@@ -4191,13 +4206,11 @@ function M:snapDisplay()
   self.messages = kept
   if not self.sim then return end
   local data = self.game and self.game.data
-  -- Only the seat that owns a strip owns clocks to weld, and the rule is the
-  -- one `battlefieldSeats` draws by: this screen's own slot on the arena, and
-  -- nobody at all on the classic readout. Welding wider than that both invents
-  -- clocks on battlers no plate reads them off -- foes, the partner -- and
-  -- spends a `Growth` walk per battler per queue drain on the classic path,
-  -- which is documented as untouched by any of this.
-  local owns = self:usesBattlefield() and self.mine or nil
+  -- Only the seat that owns a strip owns clocks to weld: this screen's own
+  -- slot. Classic 160×144 reads the same clock on the focused-ally HUD, so
+  -- the weld is not theatre-gated. Welding wider would invent clocks on
+  -- battlers no plate reads them off -- foes, the partner.
+  local owns = self.mine
   for _, slot in ipairs(self.sim.slots or {}) do
     local battler = slot.battler
     if battler and battler.mon then
@@ -4275,14 +4288,16 @@ end
 -- Every glyph, box and HP bar is still the engine's own (Font, HudTiles), so a
 -- palette or asset mod owns the look of this exactly as it owns a wild battle.
 
--- Real size on the field. Foes stay 1x in the top-right quarter; the near
--- (bottom) pair draws larger and sits on the message-box lip -- there is
--- empty field under 1x backs that classic Gen 1 spent on a 2x player pic.
+-- Real size on the field. Integer scales only: fractional nearest-neighbor
+-- (the old 1.5× lane clamp) is what made pixels look muddy. Foes stay 1×
+-- in the top-right quarter. Ally backs match vanilla / MediatedBattle:
+-- Gen 1 32×32 sheets at 2×, already-slot-sized sheets (≥48) at 1×.
 local PIC_SCALE = 1
 local FOE_SCALE = 1
--- Target ally draw scale. picOriginFor clamps so the scaled back stays
--- between the left strip and the ally HUD (right-aligned toward the box).
-local ALLY_SCALE = 1.5
+local ALLY_SCALE = 2
+-- A sheet this wide is already the 7×7 slot (or a Gen 2 back). Doubling
+-- it would be 96–112px on a 160 canvas; leave those at 1×.
+local SLOT_SIZED_PX = 48
 -- Top of the bottom text/command box. Ally feet flush here (same rule as
 -- BattleState.backPlacement), so the pair reads against the box instead of
 -- floating mid-field.
@@ -4452,9 +4467,9 @@ end
 -- Classic 1v1 center stage: one ally back and one foe front, with side strips
 -- for the other living field seats. `y` on STAGE_ALLY is informational; ally
 -- feet still anchor on FIELD_FLOOR. Foe pic sits just past FOE_HUD's right
--- edge (not under it). Ally x is the strip-clear floor; picOriginFor
--- right-aligns the scaled back against the ally HUD.
-local STAGE_ALLY = { x = 16, y = 40 }
+-- edge (not under it). Ally x is BattleState.backPlacement (8): a 32×32
+-- back at 2× ends at the HUD (72). Never shrink to clear the left strip.
+local STAGE_ALLY = { x = 8, y = 40 }
 local STAGE_FOE = { x = 88, y = 0 }
 local SLIDE_FRAMES = 10
 -- How far a focus change travels (screen px). Must clear a ~56px pic so the
@@ -4462,13 +4477,17 @@ local SLIDE_FRAMES = 10
 local SLIDE_PX = 48
 local STRIP_W = 16
 local STRIP_ICON = 16
+-- Bag-icon resolver (seatIconFor) is defined with the battlefield helpers;
+-- drawStripIcon / stripIconImage call it at paint time.
+local seatIconFor
 -- Single-mon HUDs: name; level + HP nums; slim bar. th=5 = border + 3
 -- content + border so ~2px can sit between the three lines. The bar stays
 -- flush to the bottom content edge (no empty band under it).
 -- Ally HUD starts at tile 9 (x=72) so its right edge is at x=136: that leaves
 -- the right strip column (144..160) and its focus arrow (136..144) clear when
--- the foe strip grows downward. picOriginFor right-aligns the back against
--- this box, so the ally sprite shifts left with it. ty=7 keeps ty+th == 12.
+-- the foe strip grows downward. A vanilla 2× back (64px from x=8) meets this
+-- box; we do not downscale the pic to stay out of the left strip. ty=7 keeps
+-- ty+th == 12.
 local FOE_HUD = { tx = 3, ty = 0, tw = 8, th = 5 }
 local ALLY_HUD = { tx = 9, ty = 7, tw = 8, th = 5 }
 
@@ -4633,18 +4652,40 @@ function M:onStage(index)
     or (slide and (index == slide.out or index == slide.into))
 end
 
+-- Start (or retarget) a side's slide so the center pair is the desired
+-- focus. A cursor that moves again mid-slide jumps to whoever is more on
+-- screen and slides from there — otherwise the second pick waited out
+-- the first animation and the visible mon was not the current target.
+local function kickSlide(self, stageKey, slideKey, desired)
+  if not desired then return end
+  local stage = self[stageKey]
+  local slide = self[slideKey]
+  if not stage then
+    self[stageKey] = desired
+    return
+  end
+  if slide then
+    if slide.into == desired then return end
+    local mid = (slide.dur or SLIDE_FRAMES) / 2
+    stage = ((slide.t or 0) < mid) and slide.out or slide.into
+    self[stageKey] = stage
+    self[slideKey] = nil
+    if stage == desired then return end
+  elseif stage == desired then
+    return
+  end
+  self[slideKey] = { out = self[stageKey], into = desired, t = 0, dur = SLIDE_FRAMES }
+end
+
+function M:beginFocusSlides()
+  if not self.sim then return end
+  kickSlide(self, "stageAlly", "slideAlly", self:desiredAllyFocus())
+  kickSlide(self, "stageFoe", "slideFoe", self:desiredFoeFocus())
+end
+
 function M:stepFocusSlides()
   if not self.sim then return end
-  local da = self:desiredAllyFocus()
-  local df = self:desiredFoeFocus()
-  if not self.stageAlly then self.stageAlly = da end
-  if not self.stageFoe then self.stageFoe = df end
-  if da ~= self.stageAlly and not self.slideAlly then
-    self.slideAlly = { out = self.stageAlly, into = da, t = 0, dur = SLIDE_FRAMES }
-  end
-  if df ~= self.stageFoe and not self.slideFoe then
-    self.slideFoe = { out = self.stageFoe, into = df, t = 0, dur = SLIDE_FRAMES }
-  end
+  self:beginFocusSlides()
   local slide = self.slideAlly
   if slide then
     slide.t = (slide.t or 0) + 1
@@ -4758,7 +4799,7 @@ local function drawFittedText(Font, text, x, y, maxW)
   g.pop()
 end
 
-local function drawReadout(self, battler, panel, row, mine)
+local function drawReadout(self, battler, panel, row, mine, showExp)
   local Font, HudTiles = engine.Font, engine.HudTiles
   if not battler or not battler.mon then return end
   local tx = panel.tx + 1
@@ -4770,7 +4811,7 @@ local function drawReadout(self, battler, panel, row, mine)
   -- flush to the bottom content edge; pads open air between the lines.
   -- displayHP tracks shownHP through drains/heals the way classic BattleState does.
   local status = statusTag(battler)
-  local lv = battler.mon.level
+  local lv = battler.shownLevel or battler.mon.level
   local level = M.hudSanitize("L" .. tostring(lv ~= nil and lv or "?"))
   if status then status = M.hudSanitize(status) end
   local nameRaw = M.hudSanitize(battler.name or "?")
@@ -4809,7 +4850,10 @@ local function drawReadout(self, battler, panel, row, mine)
       -- Name at top, bar flush at bottom; park meta in the middle so the
       -- two gaps stay even (not a tight name/meta pair over a tall empty).
       local nameH = 7
-      local barY = oy + CONTENT_H - BAR_H
+      -- drawExpBar's outline is 3px (py-1 .. py+1). Reserve that under the
+      -- HP bar so the track sits in the content, not on the box border.
+      local expBand = showExp and 4 or 0
+      local barY = oy + CONTENT_H - BAR_H - expBand
       local metaY = oy + nameH + META_PAD
       local maxMetaY = barY - BAR_GAP - faceH
       if maxMetaY > metaY then
@@ -4860,6 +4904,13 @@ local function drawReadout(self, battler, panel, row, mine)
         local statusY = barY + math.floor((barH - faceH) / 2)
         g.print(status, barX + barW + STATUS_BAR_GAP, statusY)
       end
+      if showExp then
+        if battler.shownExpFrac == nil then self:seedExpClock(battler) end
+        if battler.shownExpFrac ~= nil then
+          ClassicBattle.drawExpBar(battler.shownExpFrac, barX, barY + barH + 2,
+            math.max(8, barW))
+        end
+      end
     end)
     if prev then pcall(g.setFont, g, prev) end
     if not ok then
@@ -4890,6 +4941,13 @@ local function drawReadout(self, battler, panel, row, mine)
     if status then
       -- Cap sits at tx+2+segments; status starts one tile past that.
       Font.draw(status, (tx + 2 + segments + 1) * 8, (ty + 2) * 8)
+    end
+    if showExp then
+      if battler.shownExpFrac == nil then self:seedExpClock(battler) end
+      if battler.shownExpFrac ~= nil then
+        ClassicBattle.drawExpBar(battler.shownExpFrac,
+          ClassicBattle.hpBarFillX(tx), oy + 25, segments * 8)
+      end
     end
   end
 end
@@ -5004,11 +5062,19 @@ function M:panelSlots(which)
   return rows
 end
 
--- How big slot `index` draws. Own side uses ALLY_SCALE so the backs fill
--- the field down to the text box; the far side stays FOE_SCALE.
+-- How big slot `index` draws. Own side uses the Gen 1 vanilla back (2×)
+-- unless the sheet is already slot-sized; the far side stays FOE_SCALE.
+-- `width` is optional; without it this is the Gen default (2 on Gen 1).
+function M.allyPicScale(game, width)
+  if Gen.generation(game) == 2 then return 1 end
+  local w = tonumber(width)
+  if w and w >= SLOT_SIZED_PX then return 1 end
+  return ALLY_SCALE
+end
+
 function M:scaleFor(index)
   if index == nil then return PIC_SCALE end
-  if not self:foeSide(index) then return ALLY_SCALE end
+  if not self:foeSide(index) then return M.allyPicScale(self.game) end
   return FOE_SCALE
 end
 
@@ -5030,7 +5096,6 @@ function M:picOriginFor(index, sprite)
   if not self:onStage(index) then return nil end
   local ally = not self:foeSide(index)
   local anchor = ally and STAGE_ALLY or STAGE_FOE
-  local scale = ally and ALLY_SCALE or FOE_SCALE
   local slide = ally and self.slideAlly or self.slideFoe
   local dx = slideDx(slide, index, ally)
   local x = anchor.x + dx
@@ -5040,20 +5105,13 @@ function M:picOriginFor(index, sprite)
     local ok, w, h = pcall(sprite.getDimensions, sprite)
     if ok then sw, sh = w, h end
   end
+  local scale = ally and M.allyPicScale(self.game, sw) or FOE_SCALE
   if ally then
-    local w = sw or 56
-    local h = sh or 56
-    -- Keep the back out of the left strip and out of the ally HUD: grow up
-    -- to ALLY_SCALE, then right-align against the box so it reads close to
-    -- the status panel without painting through it.
-    local stripRight = STRIP_ICON
-    local hudLeft = ALLY_HUD.tx * 8
-    local lane = math.max(8, hudLeft - stripRight)
-    if w > 0 then
-      scale = math.min(scale, lane / w)
-    end
-    x = hudLeft - w * scale + dx
-    if x < stripRight + dx then x = stripRight + dx end
+    -- Same left edge as BattleState.backPlacement / MediatedBattle. A
+    -- 32×32 back at 2× is 64px and meets the HUD at 72. Do not clamp
+    -- scale to the strip–HUD lane — that was the 1.5× / sub-1× shrink.
+    local h = sh or 32
+    x = STAGE_ALLY.x + dx
     local inset = ALLY_FOOT_INSET
     if inset > h - 8 then inset = 0 end
     y = FIELD_FLOOR - (h - inset) * scale
@@ -5105,33 +5163,94 @@ function M:paintOrder()
   return order
 end
 
-local function drawStripIcon(self, battler, x, y)
-  local Font = engine.Font
+-- The 6-member party list's icon registry is present. Without it,
+-- PartyMenu.drawIcon / PokemonIcon.draw no-op and we use the cached sheet.
+local function partyMenuIconsReady(game)
+  local icons = game and game.data and game.data.icons
+  if type(icons) ~= "table" then return false end
+  return icons.icons ~= nil or icons.bySpecies ~= nil
+      or icons.byDex ~= nil or icons.species ~= nil
+end
+
+-- Engine party-menu painter (OBP bake + frame/mirror). Gen 2's drawIcon is
+-- a method on a menu instance, so Gold falls through to the bag sheet.
+local function drawPartyMenuIcon(self, battler, x, y)
+  if not (engine and love and love.graphics) then return false end
+  if Gen.generation(self.game) == 2 then return false end
+  if not partyMenuIconsReady(self.game) then return false end
+  local mon = battler and battler.mon
+  if type(mon) ~= "table" or type(mon.species) ~= "string"
+      or mon.species == "" then
+    return false
+  end
+  local species = mon.species
+  local movie = self.evolving
+  if movie and movie.mon == mon then
+    species = EvolveFx.picSpecies(movie) or species
+  end
+  local hp = math.floor(tonumber(mon.hp) or 0)
+  local maxHp = math.floor(tonumber(mon.maxHp or (mon.stats and mon.stats.hp)) or 0)
+  if hp < 0 then hp = 0 end
+  if maxHp < 1 then maxHp = 1 end
+  if hp > maxHp then hp = maxHp end
+  love.graphics.setColor(1, 1, 1, 1)
+  local PokemonIcon = engine.PokemonIcon
+  if PokemonIcon and PokemonIcon.draw then
+    local ok, drawn = pcall(PokemonIcon.draw, self.game, {
+      species = species,
+      hp = hp,
+      maxHp = maxHp,
+    }, x, y, { selected = false, counter = 0 })
+    if ok and drawn == true then return true end
+  end
+  local PartyMenu = engine.PartyMenu
+  if PartyMenu and type(PartyMenu.drawIcon) == "function" then
+    local ok = pcall(PartyMenu.drawIcon, self.game, {
+      species = species,
+      hp = hp,
+      stats = { hp = maxHp },
+    }, x, y, false, 0)
+    if ok then return true end
+  end
+  return false
+end
+
+-- 16×N bag-icon sheet: paint frame 0 at native size. Do not squash the
+-- stack into a square (Battlefield's iconFrameQuad rule).
+local function drawBagIcon(img, x, y)
+  if not img then return false end
   local g = love and love.graphics
-  local sprite = battler and battler.sprite
-  if sprite and g and g.setScissor then
-    local sw, sh = 56, 56
-    local ok, w, h = pcall(sprite.getDimensions, sprite)
-    if ok and type(w) == "number" and w > 0 then sw, sh = w, h end
-    local scale = STRIP_ICON / math.max(sw, sh, 1)
-    local dw, dh = sw * scale, sh * scale
-    local ox = x + math.floor((STRIP_ICON - dw) / 2)
-    local oy = y + math.floor((STRIP_ICON - dh) / 2)
-    g.setColor(1, 1, 1, 1)
+  if not (g and g.draw) then return false end
+  love.graphics.setColor(1, 1, 1, 1)
+  if img.setFilter then pcall(function() img:setFilter("nearest", "nearest") end) end
+  local sw, sh = STRIP_ICON, STRIP_ICON
+  local ok, w, h = pcall(img.getDimensions, img)
+  if ok and type(w) == "number" and w > 0 then sw, sh = w, h end
+  if sh > STRIP_ICON and sw >= STRIP_ICON and g.newQuad then
+    local qok, quad = pcall(g.newQuad, 0, 0, STRIP_ICON, STRIP_ICON, sw, sh)
+    if qok and quad then
+      pcall(g.draw, img, quad, x, y)
+      return true
+    end
+  end
+  if g.setScissor and (sw > STRIP_ICON or sh > STRIP_ICON) then
     g.setScissor(x, y, STRIP_ICON, STRIP_ICON)
-    pcall(g.draw, sprite, ox, oy, 0, scale, scale)
+    pcall(g.draw, img, x, y)
     g.setScissor()
-    return
+    return true
   end
-  if sprite then
-    love.graphics.setColor(1, 1, 1, 1)
-    local sw, sh = 56, 56
-    local ok, w, h = pcall(sprite.getDimensions, sprite)
-    if ok and type(w) == "number" and w > 0 then sw, sh = w, h end
-    local scale = STRIP_ICON / math.max(sw, sh, 1)
-    love.graphics.draw(sprite, x, y, 0, scale, scale)
-    return
-  end
+  pcall(g.draw, img, x, y)
+  return true
+end
+
+-- Side-rail portrait: party-menu bag icon, never battler.sprite (56×56
+-- stage art). Letter is only for a missing ROM cache.
+local function drawStripIcon(self, index, x, y)
+  local battler = self:shownBattlerAt(index)
+  if drawPartyMenuIcon(self, battler, x, y) then return end
+  local icon = self:stripIconImage(index)
+  if drawBagIcon(icon, x, y) then return end
+  local Font = engine.Font
   local letter = "?"
   if battler and battler.name and battler.name ~= "" then
     letter = battler.name:sub(1, 1):upper()
@@ -5153,30 +5272,30 @@ local function drawSideStrip(self, seats, left, focused)
   local h = #seats * STRIP_ICON + math.max(0, #seats - 1) * 2
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", x, top, STRIP_ICON, h)
+  local focusY = nil
   for i, index in ipairs(seats) do
     local y = top + (i - 1) * (STRIP_ICON + 2)
-    local battler = self:shownBattlerAt(index)
-    drawStripIcon(self, battler, x, y)
-    if index == focused then
-      love.graphics.setColor(0, 0, 0, 1)
-      local ay = y + 4
-      if left then
-        -- 0xED is the right-pointing cursor; mirror it so the left strip's
-        -- arrow points at the icon (◀) rather than away into the field.
-        local ax = x + STRIP_ICON
-        if g and g.push and g.scale then
-          g.push()
-          g.translate(ax + 8, ay)
-          g.scale(-1, 1)
-          Font.drawCode(0xED, 0, 0)
-          g.pop()
-        else
-          Font.drawCode(0xED, ax, ay)
-        end
-      else
-        Font.drawCode(0xED, x - 8, ay)
-      end
+    drawStripIcon(self, index, x, y)
+    if index == focused then focusY = y end
+  end
+  -- Arrow on the seat that is (or is sliding to be) the center pair —
+  -- the current target while "Attack who?" is up.
+  if focusY == nil then return end
+  love.graphics.setColor(0, 0, 0, 1)
+  local ay = focusY + math.floor((STRIP_ICON - 8) / 2)
+  if left then
+    local ax = x + STRIP_ICON
+    if g and g.push and g.scale then
+      g.push()
+      g.translate(ax + 8, ay)
+      g.scale(-1, 1)
+      Font.drawCode(0xED, 0, 0)
+      g.pop()
+    else
+      Font.drawCode(0xED, ax, ay)
     end
+  else
+    Font.drawCode(0xED, x - 8, ay)
   end
 end
 
@@ -5234,29 +5353,30 @@ function M:drawField()
     if not ok then self.trainerPic = nil end
   end
   -- Strips after stage pics so a wide foe/ally sprite cannot cover an icon
-  -- or its focus arrow when they share the edge.
-  drawSideStrip(self, self:stripSeats(false), true, self:desiredAllyFocus())
-  drawSideStrip(self, self:stripSeats(true), false, self:desiredFoeFocus())
+  -- or its focus arrow when they share the edge. Every living seat, with
+  -- the arrow on the one that is (or is becoming) the center pair.
+  local allyFocus = self:desiredAllyFocus()
+  local foeFocus = self:desiredFoeFocus()
+  drawSideStrip(self, self:stripSeats(false), true, allyFocus)
+  drawSideStrip(self, self:stripSeats(true), false, foeFocus)
   self:drawEvolveCenterClassic()
-  local foe = self:desiredFoeFocus()
   local Font = engine.Font
-  if foe then
-    local battler = self:shownBattlerAt(foe)
-    local slot = self.sim:slot(foe)
+  if foeFocus then
+    local battler = self:shownBattlerAt(foeFocus)
+    local slot = self.sim:slot(foeFocus)
     if battler and not hidden(slot, battler)
-       and not (introHide and introHide[foe]) then
+       and not (introHide and introHide[foeFocus]) then
       Font.drawBox(FOE_HUD.tx, FOE_HUD.ty, FOE_HUD.tw, FOE_HUD.th)
-      drawReadout(self, battler, FOE_HUD, 1, foe == self.mine)
+      drawReadout(self, battler, FOE_HUD, 1, foeFocus == self.mine)
     end
   end
-  local ally = self:desiredAllyFocus()
-  if ally then
-    local battler = self:shownBattlerAt(ally)
-    local slot = self.sim:slot(ally)
+  if allyFocus then
+    local battler = self:shownBattlerAt(allyFocus)
+    local slot = self.sim:slot(allyFocus)
     if battler and not hidden(slot, battler)
-       and not (introHide and introHide[ally]) then
+       and not (introHide and introHide[allyFocus]) then
       Font.drawBox(ALLY_HUD.tx, ALLY_HUD.ty, ALLY_HUD.tw, ALLY_HUD.th)
-      drawReadout(self, battler, ALLY_HUD, 1, ally == self.mine)
+      drawReadout(self, battler, ALLY_HUD, 1, allyFocus == self.mine, true)
     end
   end
   self:drawIntroBalls()
@@ -5317,6 +5437,7 @@ end
 -- Gen1 hard-cut onto the top-down Battlefield theatre. Gen2 keeps the
 -- guild-focus classic stage (STAGE_*/strips) entirely.
 function M:usesBattlefield()
+  if self.classicUi then return false end
   return Battlefield.enabled(self.game) and true or false
 end
 
@@ -5558,8 +5679,9 @@ function M:evolveDrawSprite(battler, fallback)
 end
 
 -- Resolve a party bag icon to a cached Image on the sim slot (once per
--- species). Only used as a last-resort field fallback / strip helper.
-local function seatIconFor(self, slot, battler)
+-- species). Classic side strips prefer this (or PartyMenu.drawIcon) over
+-- the 56×56 stage pic; Battlefield still uses it as a last-resort fallback.
+function seatIconFor(self, slot, battler)
   if not battler then return nil end
   local mon = battler.mon
   local species = mon and mon.species
@@ -5616,6 +5738,14 @@ local function seatIconFor(self, slot, battler)
     slot._bfIconSpecies = species
   end
   return resolved
+end
+
+-- Party-menu bag icon for a side-strip seat. Never the 56×56 stage pic
+-- on `battler.sprite` — that is what the center pair draws.
+function M:stripIconImage(index)
+  local battler = self:shownBattlerAt(index)
+  local slot = self.sim and self.sim.slot and self.sim:slot(index)
+  return seatIconFor(self, slot, battler)
 end
 
 -- The same battle FRONT pic the arena draws, for a monster that is NOT on the
@@ -7864,16 +7994,13 @@ function M:gainExp(event)
   -- still nil, precisely so a second award in the same batch begins where the
   -- first fill stopped rather than rewinding to a fraction captured before it.
   --
-  -- Battlefield only. The classic 160x144 readout has no exp strip: nothing
-  -- below is computed, nothing is queued, and its exp text flow is exactly
-  -- what it always was.
-  --
-  -- **Active only**, for the same reason: the strip on screen belongs to the
-  -- monster standing there, and a benched award has no bar of its own to
-  -- crawl. Seeding or capturing off the active battler for somebody else's
-  -- award would move a clock that nothing is about to fill -- and a queued
-  -- fill row would drag the active's strip to the *bench's* fraction.
-  local wide = self:usesBattlefield()
+  -- **Active only**: the strip on screen belongs to the monster standing
+  -- there, and a benched award has no bar of its own to crawl. Seeding or
+  -- capturing off the active battler for somebody else's award would move a
+  -- clock that nothing is about to fill -- and a queued fill row would drag
+  -- the active's strip to the *bench's* fraction. Classic 160×144 reads the
+  -- same clock on the focused-ally HUD, so this is no longer theatre-gated.
+  local wide = active
   local fromFrac, fromLevel
   if wide and active then
     self:seedExpClock(battler)

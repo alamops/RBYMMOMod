@@ -709,6 +709,16 @@ M.BATTLE_METRONOME_POOL_MAX = 200
 -- next launch.
 M.SOLO_BATTLES_DEFAULT = false
 
+-- Classic 160×144 battle chrome (engine Font / HudTiles from the player's
+-- ROM) instead of the 640×360 Battlefield theatre.
+--
+-- Off, and a mod-manager row rather than a decision made here, because the
+-- theatre is what every current fight draws. A player who installed this for
+-- the arena should never meet the GB skin without asking. Read at battle
+-- construct (latched for that fight) so a flip mid-session lands on the next
+-- battle and a flip mid-fight cannot swap chrome under a live turn.
+M.CLASSIC_BATTLE_UI_DEFAULT = false
+
 -- Which BattleSim mode each solo fight is seated as.
 --
 -- Two modes rather than one, and the difference is mechanical rather than
