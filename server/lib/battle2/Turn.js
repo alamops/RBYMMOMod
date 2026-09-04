@@ -665,19 +665,23 @@ class Battle {
     return event;
   }
 
-  _emitMoves(fighter, mon) {
+  // partyIndex is 1-based into the fighter's party. Present on a PP
+  // spend/restore so the client can write that sheet; absent on
+  // Transform/Mimic so the overlay is not mistaken for the real set.
+  _emitMoves(fighter, mon, partyIndex) {
     const moves = mon.moves.map((m) => ({
       id: m.id || 'move',
       pp: Math.max(0, int(m.pp, 0)),
+      maxPp: Math.max(0, int(m.maxPp, m.pp)),
       power: Math.max(0, int(m.power, 0)),
       accuracy: Math.max(0, int(m.accuracy, 255)),
       type: Math.max(0, int(m.type, 0)),
       effect: Math.max(0, int(m.effect, 0)),
       chance: Math.max(0, int(m.chance, 0)),
     }));
-    return this._emit('moves', {
-      slot: fighter.slot, side: fighter.side, moves,
-    });
+    const fields = { slot: fighter.slot, side: fighter.side, moves };
+    if (partyIndex != null) fields.mon = partyIndex - 1;
+    return this._emit('moves', fields);
   }
 
   _say(text) {
@@ -2065,6 +2069,8 @@ class Battle {
             if (move.pp > before) {
               this._say(`${mon.species}'s PP was restored`);
               applied = true;
+              // Fielded mon only: a bench Ether must not redraw FIGHT.
+              if (partyIdx === fighter.active) this._emitMoves(fighter, mon, partyIdx);
             } else {
               this._say('But it failed');
             }
@@ -2083,6 +2089,7 @@ class Battle {
           if (any) {
             this._say(`${mon.species}'s PP was restored`);
             applied = true;
+            if (partyIdx === fighter.active) this._emitMoves(fighter, mon, partyIdx);
           } else {
             this._say('But it failed');
           }
@@ -2366,7 +2373,13 @@ class Battle {
       && Effects.isCharge(mon.charging.effect);
     const mirrorCopy = opts.mirrorCopy === true;
 
-    if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) move.pp -= 1;
+    if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) {
+      move.pp -= 1;
+      // FIGHT reads the uploaded sheet. Publish whenever PP actually moved
+      // (Transform/Mimic already emit via movesChanged). Skip an override
+      // copy -- Metronome/Mirror already spent the real slot on the first call.
+      if (!opts.moveOverride) this._emitMoves(fighter, mon, fighter.active);
+    }
     const chargingUp = Effects.isCharge(effectId) && !mon.charging;
     this._emit('anim', {
       slot: fighter.slot, side: fighter.side, text: move.id,

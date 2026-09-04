@@ -1442,7 +1442,7 @@ function M.new(opts)
     -- reconnect grace is running, and onTransportReady is what resumes it.
     awaitingReconnect = false,
     reconnectSent = false,
-    liveMoves   = nil,     -- referee-published list after Transform/Mimic
+    liveMoves   = nil,     -- Transform/Mimic overlay; PP-only syncs write mine[]
     -- Gen1 Battlefield theatre (top-down arena). Unused on Gen2 / when
     -- Battlefield.enabled is false.
     frame = 0,
@@ -2654,7 +2654,21 @@ function M:onEvent(msg)
 
   elseif kind == "moves" then
     if msg.slot == self:mySlot() and type(msg.moves) == "table" then
-      self.liveMoves = msg.moves
+      -- `mon` (0-based party index) is the PP-spend/restore discriminator.
+      -- Transform/Mimic omit it -- overlay only, even when the copied ids
+      -- match the upload (a mirror match). A present `mon` writes that
+      -- sheet unless a transform overlay is already up, in which case the
+      -- overlay is refreshed so FIGHT tracks the copied PP.
+      if msg.mon ~= nil then
+        local index = (tonumber(msg.mon) or 0) + 1
+        if self.liveMoves then
+          if index == (self.active or 1) then self.liveMoves = msg.moves end
+        else
+          self:syncMinePp(msg.moves, index)
+        end
+      else
+        self.liveMoves = msg.moves
+      end
     end
 
   elseif kind == "team" then
@@ -2666,6 +2680,29 @@ function M:onEvent(msg)
       self.teams[msg.slot] = msg.team
     end
   end
+end
+
+-- Keep `mine[index].moves[].pp` in step with the referee so the FIGHT menu
+-- (bandMoveRows / pickMove) shows the live count. Same-length, same-ids
+-- only: a mismatched list is not the real sheet.
+function M:syncMinePp(moves, index)
+  local mon = self.mine and self.mine[index or self.active]
+  if not (type(mon) == "table" and type(mon.moves) == "table") then return false end
+  if type(moves) ~= "table" or #moves ~= #mon.moves then return false end
+  for i, slot in ipairs(mon.moves) do
+    local incoming = moves[i]
+    if not (type(incoming) == "table" and incoming.id == slot.id) then
+      return false
+    end
+  end
+  for i, slot in ipairs(mon.moves) do
+    local incoming = moves[i]
+    local pp = tonumber(incoming.pp)
+    if pp then slot.pp = pp end
+    local maxPp = tonumber(incoming.maxPp)
+    if maxPp then slot.maxPp = maxPp end
+  end
+  return true
 end
 
 -- Keep `mine[].hp` in step with field damage so partyRows / mustReplace see

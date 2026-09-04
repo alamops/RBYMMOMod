@@ -1710,7 +1710,8 @@ end
 --   reconnect  -- a side that had dropped is back
 --   chose      -- a seat filed this turn's answer (wait-line peer accuracy)
 --   unchose    -- cancel cleared a filed answer
---   moves      -- mid-fight move-list sync after Transform/Mimic
+--   moves      -- mid-fight move-list sync: `mon` (party index) on a PP
+--                 spend/restore; absent on Transform/Mimic (overlay only)
 --   exp        -- a faint's spoils, as facts: who fell (species, level), how
 --                 many shares split it, and which of the paid side's six is
 --                 banking this share (`mon`, optional).  Not an amount: the hub

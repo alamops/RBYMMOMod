@@ -100,7 +100,8 @@ function defaultSpriteFor(generation) {
 // wait line would name players who have already answered, or keep naming players
 // who walked their answer back, and neither failure looks like lag -- both read
 // as "still choosing". 12 adds `moves` for mid-fight move-list sync after
-// Transform or Mimic. 13–15 extend ruleset / fight surface / bag proofs; 16 is
+// Transform or Mimic (`mon` absent), and after PP spend/restore (`mon` =
+// party index). 13–15 extend ruleset / fight surface / bag proofs; 16 is
 // persistent playerId seating (claim tickets gone). 17 is friends --
 // mmo.friend_ask, mmo.friend_answer and mmo.friend_remove -- which landed as
 // PROTOCOL 10 on the parallel main line while this branch claimed 10–16 for
