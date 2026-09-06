@@ -6,6 +6,25 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-06
+
+### Fixed
+
+- **Classic FIGHT shows TYPE and PP.** The 160×144 move list was names only
+  (and scrolled three at a time). It now lists all four known attacks and
+  the selected move's TYPE/ + current PP, same pane as co-op.
+- **Classic battle text stays inside the box.** Long lines such as "It's
+  not very effective" wrap to the 18-column grid instead of clipping the
+  right border; extra spaces collapse first.
+- **Classic HP bar crawls after the move.** Damage no longer snaps the
+  plate the instant the event arrives. The bar waits for the anim, then
+  drains to the new HP.
+- **Opponent remaining party on classic.** Trainer / PvP / 2×2 / 3×3 /
+  NPC fights draw one pokéball row on the foe HUD's bottom tile (filled
+  = living, hollow = fainted). Wild stays empty, like vanilla.
+- **Classic Dig and Fly wait a turn.** Charge hides the user; the landing
+  anim and HP drain wait for the release turn.
+
 ## [1.3.0] - 2026-09-04
 
 ### Added
