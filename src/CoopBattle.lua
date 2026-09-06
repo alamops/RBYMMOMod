@@ -1348,46 +1348,14 @@ end
 local BOX_COLS = 18
 local BOX_ROWS = 2
 
--- Soft-wrap one string into lines that fit the bottom box.
---
--- Prefers a break at the last space that still fits; otherwise hard-cuts. Keeps
--- author newlines as paragraph breaks so curated two-line pages stay two lines
--- when each half already fits.
+-- Soft-wrap / page the bottom box. ClassicBattle owns the algorithm so
+-- 1v1 and co-op cannot drift (whitespace collapse, 18×2 pages).
 local function wrapBoxLines(text, width)
-  width = width or BOX_COLS
-  local lines = {}
-  local raw = tostring(text or "")
-  if raw == "" then return { "" } end
-  for line in (raw .. "\n"):gmatch("(.-)\n") do
-    local rest = line
-    if rest == "" then
-      lines[#lines + 1] = ""
-    else
-      while #rest > width do
-        local chunk = rest:sub(1, width)
-        local space = chunk:match("^.*()%s")
-        local breakAt = width
-        if space and space > 1 then breakAt = space - 1 end
-        lines[#lines + 1] = rest:sub(1, breakAt):gsub("%s+$", "")
-        rest = rest:sub(breakAt + 1):gsub("^%s+", "")
-      end
-      lines[#lines + 1] = rest
-    end
-  end
-  return lines
+  return ClassicBattle.wrapBoxLines(text, width or BOX_COLS)
 end
 
--- Pages of at most BOX_ROWS lines, each line already <= BOX_COLS.
 local function pageBoxText(text)
-  local lines = wrapBoxLines(text, BOX_COLS)
-  local pages = {}
-  for i = 1, #lines, BOX_ROWS do
-    local page = lines[i]
-    if lines[i + 1] then page = page .. "\n" .. lines[i + 1] end
-    pages[#pages + 1] = page
-  end
-  if #pages == 0 then pages[1] = "" end
-  return pages
+  return ClassicBattle.pageBoxText(text, BOX_COLS)
 end
 
 -- One step on a vertical list. UP/DOWN move; LEFT/RIGHT are aliases (same habit
@@ -4773,9 +4741,9 @@ local function drawFittedText(Font, text, x, y, maxW)
     Font.draw(text, x, y)
     return
   end
-  -- Below ~3/4 width the glyphs smash into each other (CHARIZARD -> "CHRIZRI");
+  -- Below ~0.92 width the glyphs smash (THUNDERBOLT → "THJNDERBOLT");
   -- truncate with a dot instead of an unreadable squash.
-  local minScale = 0.75
+  local minScale = ClassicBattle.MOVE_NAME_MIN_SCALE or 0.75
   if maxW / w < minScale then
     local budget = math.max(1, math.floor(maxW / 8))
     if budget > 1 then
@@ -5315,6 +5283,7 @@ function M:drawField()
     local hideIntro = introHide and introHide[index]
     if sprite and x and not (hideFoes and theirs)
        and not (theirs and self.foePicHidden)
+       and not (self.vanishFlow and self.vanishFlow[index])
        and not hideIntro then
       if sinking then
         love.graphics.setColor(1, 1, 1, 1)
@@ -5379,7 +5348,35 @@ function M:drawField()
       drawReadout(self, battler, ALLY_HUD, 1, allyFocus == self.mine, true)
     end
   end
+  -- After the HUD boxes so a plate cannot cover the remaining-party row.
+  self:drawRemainingBalls()
   self:drawIntroBalls()
+end
+
+-- Live remaining-party chrome for classic fights (not the two-second intro
+-- row). Every opposing party flattens onto one row under the foe plate
+-- (max 6, identity-deduped). Theatre already draws roster chips; wild
+-- has none.
+function M:drawRemainingBalls()
+  if self.introBalls then return end
+  if self:usesBattlefield() then return end
+  if not ClassicBattle.wantsFoeBalls(self.mode) then return end
+  local BS = engine and engine.BattleState
+  -- Every opposing party on one row under the foe plate (see
+  -- ClassicBattle.FOE_BALL_*). Stacking a row per trainer walked the
+  -- balls into the foe pic and the ally HUD.
+  local combined
+  local seen = {}
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if self:foeSide(slot.index) and slot.party and not seen[slot.party] then
+      seen[slot.party] = true
+      combined = ClassicBattle.appendRoster(combined, slot.party)
+    end
+  end
+  if not combined then return end
+  if love and love.graphics then love.graphics.setColor(1, 1, 1, 1) end
+  ClassicBattle.drawBallRow(BS, combined,
+    ClassicBattle.FOE_BALL_X, ClassicBattle.FOE_BALL_Y, ClassicBattle.FOE_BALL_DX)
 end
 
 -- Party ball chrome under the opening appear line (both humans' parties).
@@ -6539,12 +6536,14 @@ function M:clearVanishAt(slotIndex)
 end
 
 function M:startVanish(kind, slotIndex)
-  if not self:usesBattlefield() then return nil end
   if not VANISH_HIDE_FX[kind] or slotIndex == nil then return nil end
-  self:dropVanishFx(slotIndex)
   self.vanishFlow = self.vanishFlow or {}
   self.vanishFlow[slotIndex] = kind
-  self:emitFx(kind, slotIndex)
+  -- Theatre particles only: classic hides the pic via vanishFlow in drawField.
+  if self:usesBattlefield() then
+    self:dropVanishFx(slotIndex)
+    self:emitFx(kind, slotIndex)
+  end
   return kind
 end
 
@@ -7681,6 +7680,31 @@ function M:startAnim(row)
       end
     else
       self:startBallFx(row)
+    end
+  elseif moveAnim then
+    -- Classic 160×144: same charge/release hold, no theatre particles.
+    local lunger = row.from
+    if lunger == nil then
+      local isFoe = self:actorIsFoe(row)
+      if isFoe ~= nil then lunger = self:seatOnSide(isFoe) end
+    end
+    if lunger ~= nil then
+      local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
+      local slideDown = row.anim == "SLIDE_DOWN_ANIM"
+      local flyCharge = row.anim == "TELEPORT" and self:slotVanishKind(lunger) == "fly"
+      local already = self.vanishFlow and self.vanishFlow[lunger]
+      local firstVanish = VANISH_MOVES[row.anim] and not already
+      if firstVanish or slideDown or flyCharge
+          or (VANISH_MOVES[row.anim] and setup and not already) then
+        self:startVanish((row.anim == "DIG" or slideDown) and "dig" or "fly", lunger)
+        self.pendingHit = nil
+        -- Skip the landing AnimPlayer: that clip is the strike.
+        self:playMoveAnimFallback(row)
+        self.animHold = (row.anim == "FLY" or flyCharge) and FX_SPAN.fly or FX_SPAN.dig
+        return true
+      elseif VANISH_MOVES[row.anim] and already then
+        self:clearVanishAt(lunger)
+      end
     end
   end
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
@@ -10281,10 +10305,11 @@ function M:drawMessage()
   local text = self:boxText()
   local y = 112
   -- Cap at BOX_ROWS: say() pages longer copy, and a wait line is authored to
-  -- two rows. Drawing more would paint into the border.
+  -- two rows. Drawing more would paint into the border. Wrap (don't just
+  -- clip) so "It's not very effective" does not run through the edge.
   local row = 0
-  for line in tostring(text):gmatch("[^\n]+") do
-    Font.draw(tostring(line):sub(1, BOX_COLS), 8, y)
+  for _, line in ipairs(wrapBoxLines(text, BOX_COLS)) do
+    Font.draw(line, 8, y)
     y = y + 16
     row = row + 1
     if row >= BOX_ROWS then break end

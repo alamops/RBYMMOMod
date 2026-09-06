@@ -127,15 +127,26 @@ return function(game)
   one.mine = {
     { species = mineSp, level = 25, nickname = "SPARKY",
       hp = 40, stats = { hp = 55 },
-      moves = { { id = "THUNDERBOLT", pp = 15, maxPp = 15 } } },
+      moves = {
+        { id = "THUNDERBOLT", pp = 10, maxPp = 15 },
+        { id = "QUICK_ATTACK", pp = 30, maxPp = 30 },
+        { id = "THUNDER_WAVE", pp = 5, maxPp = 20 },
+        { id = "GROWL", pp = 40, maxPp = 40 },
+      } },
   }
   one.active = 1
   one.slots[one:foeSlot()] = {
-    species = foeSp, level = 18, hp = 32, maxHp = 45,
+    species = foeSp, level = 18, hp = 32, maxHp = 45, shownHp = 32,
   }
   one.slots[one:mySlot()] = {
-    species = mineSp, level = 25, hp = 40, maxHp = 55,
+    species = mineSp, level = 25, hp = 40, maxHp = 55, shownHp = 40,
     shownExpFrac = 0.45,
+  }
+  -- Four living + two fainted so the foe ball row is readable.
+  one.teams = one.teams or {}
+  one.teams[one:foeSlot()] = "oooxxo"
+  one.npcParty = {
+    { hp = 20 }, { hp = 12 }, { hp = 8 }, { hp = 0 }, { hp = 0 }, { hp = 4 },
   }
   game.stack:push(one)
   U.wait(8)
@@ -160,6 +171,49 @@ return function(game)
     check(scale >= 1, "1v1 ally scale is not a shrink", tostring(scale))
   end
   shot("classic-1v1-choose.png")
+
+  -- FIGHT: all four moves + TYPE/PP of the cursor (the empty-right-pane bug).
+  one.phase = "move"
+  one.cursor = 1
+  U.wait(8)
+  shot("classic-1v1-fight.png")
+  one.cursor = 3
+  U.wait(4)
+  shot("classic-1v1-fight-wave.png")
+
+  -- Message wrap: the line that used to clip at "effect".
+  one.phase = "choose"
+  one.shown = "It's not very effective"
+  U.wait(6)
+  shot("classic-1v1-effective.png")
+  one.shown = "It's  not  very  effective"
+  U.wait(4)
+  shot("classic-1v1-effective-spaces.png")
+  one.shown = nil
+
+  -- HP mid-drain: shownHp trails truth so the bar is visibly in-between.
+  local drainSlot = one.slots[one:foeSlot()]
+  if drainSlot then
+    drainSlot.hp = 12
+    drainSlot.shownHp = 32
+    drainSlot.maxHp = 45
+  end
+  U.wait(6)
+  shot("classic-1v1-hp-mid.png")
+  if drainSlot then
+    drainSlot.shownHp = 12
+  end
+
+  -- Dig charge: the user vanishes; the pic must not still be on stage.
+  one:startVanish("dig", { slot = one:mySlot(), side = one.mySide })
+  U.wait(6)
+  check(one:seatVanished(one:mySlot()) == true, "1v1 Dig charge hides the ally")
+  shot("classic-1v1-dig-hide.png")
+  one:clearVanishAt(one:mySlot(), one.mySide)
+  check(one:seatVanished(one:mySlot()) == false, "1v1 Dig release restores the ally")
+  U.wait(4)
+  shot("classic-1v1-dig-back.png")
+
   pcall(function() game.stack:pop() end)
   U.wait(4)
 
@@ -224,15 +278,24 @@ return function(game)
     end
   end
 
+  local fainted = mon(firstPresent("RATTATA", "PIDGEY") or "RATTATA", 12)
+  fainted.hp = 0
   local two = buildCoop({
     { side = "a", owner = "host", name = "CLASSIC",
       party = { mon(firstPresent("CHARIZARD", "CHARMANDER") or "CHARMANDER", 50) } },
     { side = "a", owner = "friend", name = "FRIEND",
       party = { mon(firstPresent("BLASTOISE", "SQUIRTLE") or "SQUIRTLE", 50) } },
     { side = "b", owner = nil, name = "FOE",
-      party = { mon(firstPresent("VENUSAUR", "BULBASAUR") or "BULBASAUR", 50) } },
+      party = {
+        mon(firstPresent("VENUSAUR", "BULBASAUR") or "BULBASAUR", 50),
+        mon(firstPresent("ODDISH", "BELLSPROUT") or "ODDISH", 20),
+        fainted,
+      } },
     { side = "b", owner = nil, name = "FOE2",
-      party = { mon(firstPresent("PIDGEOT", "PIDGEY") or "PIDGEY", 45) } },
+      party = {
+        mon(firstPresent("PIDGEOT", "PIDGEY") or "PIDGEY", 45),
+        mon(firstPresent("SPEAROW", "PIDGEY") or "SPEAROW", 18),
+      } },
   }, "2x2")
   if two then
     game.stack:push(two)
@@ -241,6 +304,11 @@ return function(game)
     two.phase = "choose"
     U.wait(10)
     shot("classic-2x2-choose.png")
+    two.phase = "move"
+    two.moveIndex = 1
+    U.wait(8)
+    shot("classic-2x2-fight.png")
+    two.phase = "choose"
     two.phase = "target"
     two.targetIndex = 1
     two.stageFoe = nil
@@ -260,6 +328,8 @@ return function(game)
     U.wait(4)
   end
 
+  local hexFaint = mon(firstPresent("CATERPIE", "WEEDLE") or "RATTATA", 8)
+  hexFaint.hp = 0
   local hex = buildCoop({
     { side = "a", owner = "host", name = "CLASSIC",
       party = { mon(firstPresent("CHARIZARD", "CHARMANDER") or "CHARMANDER", 50) } },
@@ -268,9 +338,15 @@ return function(game)
     { side = "a", owner = "third", name = "THIRD",
       party = { mon(firstPresent("NIDOKING", "NIDORINO") or "RATTATA", 48) } },
     { side = "b", owner = nil, name = "FOE",
-      party = { mon(firstPresent("VENUSAUR", "BULBASAUR") or "BULBASAUR", 50) } },
+      party = {
+        mon(firstPresent("VENUSAUR", "BULBASAUR") or "BULBASAUR", 50),
+        hexFaint,
+      } },
     { side = "b", owner = nil, name = "FOE2",
-      party = { mon(firstPresent("PIDGEOT", "PIDGEY") or "PIDGEY", 45) } },
+      party = {
+        mon(firstPresent("PIDGEOT", "PIDGEY") or "PIDGEY", 45),
+        mon(firstPresent("FEAROW", "SPEAROW") or "SPEAROW", 30),
+      } },
     { side = "b", owner = nil, name = "FOE3",
       party = { mon(firstPresent("ARCANINE", "GROWLITHE") or "SPEAROW", 44) } },
   }, "3x3")

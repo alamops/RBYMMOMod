@@ -5000,6 +5000,81 @@ stubOptions.classicui = savedClassic
 
 end)()
 
+-- 9c. Classic follow-up: wrap, remaining balls, vanish hold
+;(function()
+  local ClassicBattle = need("ClassicBattle")
+  local MediatedBattle = need("MediatedBattle")
+  local CoopBattle = need("CoopBattle")
+
+  local wrapped = ClassicBattle.wrapBoxLines("It's not very effective")
+  eq(#wrapped, 2, "effectiveness wraps to two rows")
+  check(#wrapped[1] <= ClassicBattle.BOX_COLS,
+        "first wrap line fits the box (" .. #wrapped[1] .. ")")
+  check(#wrapped[2] <= ClassicBattle.BOX_COLS,
+        "second wrap line fits the box (" .. #wrapped[2] .. ")")
+  check(wrapped[1]:find("It's", 1, true), "first line keeps It's")
+  check(wrapped[2]:find("effective", 1, true), "second line keeps effective")
+
+  local spaced = ClassicBattle.wrapBoxLines("It's  not  very  effective")
+  eq(spaced[1], wrapped[1], "double spaces collapse before wrap")
+  eq(spaced[2], wrapped[2], "...so the pages match the single-spaced line")
+
+  local three = ClassicBattle.pageBoxText("No! There's no\nrunning from a\ntrainer battle!")
+  eq(#three, 2, "a third box line becomes a second page, not a clipped draw")
+  eq(CoopBattle.pageBoxText("It's not very effective")[1],
+     ClassicBattle.pageBoxText("It's not very effective")[1],
+     "co-op pages through the same wrap as 1v1")
+
+  local paged = MediatedBattle.new({
+    game = { data = {} }, battle = "b-page", role = "host", classicUi = true,
+  })
+  paged:say("No! There's no\nrunning from a\ntrainer battle!")
+  eq(#paged.lines, 2, "say() enqueues one page per two wrapped rows")
+
+  local party = ClassicBattle.partyFromRoster("ooxs")
+  eq(#party, 4, "roster string becomes one ball per token")
+  eq(party[1].hp, 1, "o is living")
+  eq(party[3].hp, 0, "x is fainted")
+  check(party[4].status ~= nil, "s carries a status")
+  eq(ClassicBattle.partyFromRoster({ { hp = 12 }, { hp = 0 } })[2].hp, 0,
+     "a party table keeps fainted hp")
+  eq(ClassicBattle.wantsFoeBalls("wild"), false, "wild has no foe ball row")
+  eq(ClassicBattle.wantsFoeBalls("coop_wild"), false, "nor party-vs-wild")
+  eq(ClassicBattle.wantsFoeBalls("coop_npc"), true, "NPCs do")
+  eq(ClassicBattle.wantsFoeBalls("1v1"), true, "and so does PvP")
+
+  eq(ClassicBattle.FOE_BALL_X, 24, "balls start at the foe HUD's left edge")
+  eq(ClassicBattle.FOE_BALL_Y, 32, "...on the plate's bottom tile")
+  check(ClassicBattle.FOE_BALL_X + 5 * ClassicBattle.FOE_BALL_DX + 8 <= 88,
+        "six balls stay left of the foe pic (x=88)")
+  check(ClassicBattle.FOE_BALL_Y + 8 <= CoopBattle.STAGE_ALLY.y,
+        "...and finish at the ally back-pic, not on it")
+  local merged = ClassicBattle.appendRoster(nil, "oo")
+  merged = ClassicBattle.appendRoster(merged, "oxs")
+  eq(#merged, 5, "two trainer parties flatten onto one row")
+  eq(merged[4].hp, 0, "the second party's fainted mon stays fainted")
+  local capped = ClassicBattle.appendRoster({ {}, {}, {}, {}, {} }, "ooo")
+  eq(#capped, 6, "a 3×3 flatten never exceeds six balls")
+
+  eq(ClassicBattle.MOVE_NAME_Y(4), 128, "the fourth FIGHT name sits on the last inner row")
+
+  local vanished = MediatedBattle.new({
+    game = { data = {} }, battle = "b-vanish", role = "host", classicUi = true,
+  })
+  check(not vanished:usesBattlefield(), "classicUi latched off the arena")
+  vanished:startVanish("dig", { slot = 3, side = "b" })
+  check(vanished:seatVanished(3), "classic Dig charge hides that seat")
+  eq(vanished.fx, nil, "...without theatre particles")
+  vanished:clearVanishAt(3, "b")
+  check(not vanished:seatVanished(3), "release clears the hide")
+
+  vanished:startAnim({ anim = "SLIDE_DOWN_ANIM", slot = 3, side = "b", amount = 1 })
+  check(vanished:seatVanished(3), "classic Gen2 Dig charge hides via SLIDE_DOWN")
+  vanished:clearVanishAt(3, "b")
+  vanished:startAnim({ anim = "TELEPORT", slot = 3, side = "b", amount = 1 })
+  check(vanished:seatVanished(3), "classic Gen2 Fly charge hides via TELEPORT")
+end)()
+
 -- ------- kindOf: both generations' shapes for "this is a fight I take"
 
 eq(SoloBattle.kindOf({ kind = "wild" }), "wild", "Gen 1: state.kind says wild")
@@ -22670,17 +22745,17 @@ end)()
      "classic path welds the display clock to truth on send")
   csend({ t = "damage", slot = 3, side = "b", hp = 18 })
   eq(classic.slots[3].hp, 18, "classic damage still lands on truth hp")
-  eq(classic.slots[3].shownHp, 18,
-     "...and the display clock is welded to it instantly -- no separate drain")
+  eq(classic.slots[3].shownHp, 30,
+     "...and the display clock stays put so the bar can crawl after the anim")
 
-  local hasQueuedFx = false
+  local hasDrain = false
   for _, row in ipairs(classic.lines) do
-    if type(row) == "table" and (row.drain ~= nil or row.faintfx ~= nil) then
-      hasQueuedFx = true
+    if type(row) == "table" and row.drain ~= nil then
+      hasDrain = true
     end
   end
-  check(not hasQueuedFx, "classic path queues no drain/faintfx rows at all")
-  eq(classic.fx, nil, "and emits no fx entries -- emitFx is a no-op off the gate")
+  check(hasDrain, "classic path queues a drain row like the arena")
+  eq(classic.fx, nil, "and emits no theatre fx -- emitFx is a no-op off the gate")
 
   classic.result = "win"
   classic:finish("win", "sweep")
@@ -28412,19 +28487,20 @@ do
   eq(mon.ot, "RED", "and the catcher owns what they caught")
 
   -- The new-entry line is queued in front of the line saying where it went,
-  -- which is the order the engine prints them in.
-  local dexLine, homeLine
-  for i, text in ipairs(f.lines) do
-    if type(text) == "string" then
-      if text:find("POK", 1, true) and text:find("data", 1, true) then
-        dexLine = dexLine or i
-      end
-      if text:find("added to the party", 1, true) then homeLine = homeLine or i end
-    end
+  -- which is the order the engine prints them in. `say` pages at 18×2, so
+  -- "added to the party!" (19 glyphs) spans two pages -- search the joined
+  -- stream, not one row.
+  local parts = {}
+  for _, text in ipairs(f.lines) do
+    if type(text) == "string" then parts[#parts + 1] = text end
   end
-  check(dexLine ~= nil, "a new species says so")
-  check(homeLine ~= nil, "and the monster's new home is announced")
-  check(dexLine and homeLine and dexLine < homeLine,
+  local joined = table.concat(parts, "\n")
+  local dexAt = joined:find("POK", 1, true)
+  local dataAt = joined:find("data", 1, true)
+  local homeAt = joined:find("added to the", 1, true)
+  check(dexAt ~= nil and dataAt ~= nil, "a new species says so")
+  check(homeAt ~= nil, "and the monster's new home is announced")
+  check(dexAt and homeAt and dexAt < homeAt,
         "...in that order -- the #DEX line first")
 end
 

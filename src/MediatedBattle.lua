@@ -2164,7 +2164,11 @@ end
 function M:say(text)
   if type(text) ~= "string" or text == "" then return end
   self.lines = self.lines or {}
-  self.lines[#self.lines + 1] = text
+  -- Page here so wrap cannot hide a third line at draw. Coop does the
+  -- same in `say`; drawBox paints one page, not "wrap and clip".
+  for _, page in ipairs(ClassicBattle.pageBoxText(text)) do
+    if page ~= "" then self.lines[#self.lines + 1] = page end
+  end
 end
 
 function M:mySlot() return slotOfSide(self.mySide) end
@@ -3248,13 +3252,10 @@ function M:syncLevelHp(paidIndex, oldMax, mon, onField)
   -- rather than snapping the plate (and the party sheet) to the old numbers.
   arena.levelHpGrown = (tonumber(arena.levelHpGrown) or 0) + grown
   -- Raise the ceiling before the climb so startDrain does not clamp `to`
-  -- against the old maximum. Battlefield queues the bar; classic has no
-  -- drain and welds the display clock to truth.
-  if self:usesBattlefield() then
-    self:queueDrain(index)
-  else
-    arena.shownHp = arena.hp
-  end
+  -- against the old maximum. Classic reads the same `shownHp` clock, so
+  -- it queues the climb too -- welding here snapped the bar past the
+  -- level-up line.
+  self:queueDrain(index)
 end
 
 -- What a level-up costs, wherever it happened: a line, whatever moves come
@@ -3543,7 +3544,11 @@ function M:noteSlot(msg)
   -- Seed the display clock, or keep it welded to truth where nothing draws
   -- from it. A monster that just walked on has nothing to animate down from,
   -- so its bar starts where the referee says it is.
-  if slot.shownHp == nil or fresh or not self:usesBattlefield() then
+  -- Seed the display clock, or keep it where it is so `queueDrain` can
+  -- crawl. Classic used to weld `shownHp` here (`not usesBattlefield()`),
+  -- which made every hit snap and left the queued drain with nothing to
+  -- fall. Fresh send-outs still start at truth -- they have no prior bar.
+  if slot.shownHp == nil or fresh then
     slot.shownHp = slot.hp
   end
   applyMsgStatus(slot, msg)
@@ -4669,6 +4674,15 @@ function M:tickMessages(dt, input)
       -- if more of the queue remains.
       return true
     end
+    -- Belt for strings that skipped `say` (same split Coop applies when
+    -- popping a hub line). Already-paged copy stays one entry.
+    if type(next) == "string" then
+      local pages = ClassicBattle.pageBoxText(next)
+      next = pages[1] or ""
+      for i = #pages, 2, -1 do
+        table.insert(self.lines, 1, pages[i])
+      end
+    end
     self.shown = next
     self.dwell = 0
     return true
@@ -4914,6 +4928,28 @@ function M:startAnim(row)
     self:playMoveAnimFallback(row)
     self:applyPendingHitFx()
     return
+  end
+  -- Classic 160×144: Dig/Fly charge hides the pic and skips the landing
+  -- AnimPlayer (that clip is the strike). Release clears the hold and
+  -- falls through so the hit waits on the second turn. Gen 2 host-sim
+  -- charges arrive as SLIDE_DOWN_ANIM / TELEPORT — same aliases Coop uses.
+  do
+    local already = self:seatVanished(row.slot)
+    local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
+    local slideDown = row.anim == "SLIDE_DOWN_ANIM"
+    local flyCharge = row.anim == "TELEPORT"
+      and (not already or self:slotVanishKind(row.slot) == "fly")
+    local firstVanish = VANISH_MOVES[row.anim] and not already
+    if firstVanish or slideDown or flyCharge
+        or (VANISH_MOVES[row.anim] and setup and not already) then
+      self:startVanish((row.anim == "DIG" or slideDown) and "dig" or "fly", row)
+      self.pendingHit = nil
+      self:playMoveAnimFallback(row)
+      self.animHold = (row.anim == "FLY" or flyCharge) and FX_SPAN.fly or FX_SPAN.dig
+      return
+    elseif VANISH_MOVES[row.anim] and already then
+      self:clearVanishAt(row.slot, row.side)
+    end
   end
   local player = self:ensureAnimPlayer()
   if not (player and player.start) then
@@ -5231,15 +5267,40 @@ function M:clearVanishAt(index, side)
 end
 
 function M:startVanish(kind, row)
-  if not self:usesBattlefield() then return nil end
   if not VANISH_HIDE_FX[kind] then return nil end
   local index = row and row.slot
   local fxSide = self:fxSideFor(index, row and row.side)
   self:dropVanishFx(fxSide, 1)
   self.vanishFlow = self.vanishFlow or {}
   self.vanishFlow[vanishKey(fxSide, 1)] = { kind = kind, index = index, side = fxSide }
-  self:emitFx(kind, index, row and row.side)
+  -- Theatre particles only: classic hides the pic via `seatVanished`.
+  if self:usesBattlefield() then
+    self:emitFx(kind, index, row and row.side)
+  end
   return kind
+end
+
+function M:seatVanished(index)
+  return self:slotVanishKind(index) ~= nil
+end
+
+-- Dig vs Fly on this seat. Prefers the hide we armed; falls back to a
+-- charge id on the slot so a Gen 2 TELEPORT charge still names Fly.
+function M:slotVanishKind(index)
+  if index == nil then return nil end
+  if self.vanishFlow then
+    local rec = self.vanishFlow[vanishKey(self:fxSideFor(index), 1)]
+    if type(rec) == "table" and rec.kind then return rec.kind end
+  end
+  local slot = self.slots and self.slots[index]
+  local id = slot and (slot.chargeMove or slot.charging)
+  if type(id) == "table" then id = id.id or id.moveId end
+  if type(id) == "string" then
+    id = string.upper(id)
+    if id == "DIG" then return "dig" end
+    if id == "FLY" then return "fly" end
+  end
+  return nil
 end
 
 function M:startChargeVfx(row)
@@ -6506,11 +6567,12 @@ function M:drawFieldPics()
   love.graphics.setColor(1, 1, 1, 1)
   -- Draw while the sprite is held -- including at 0 HP through the move flash
   -- and "X fainted!". `releasePic` (after that line) is what takes it down.
-  if foe and foe.sprite and not self.foePicHidden then
+  if foe and foe.sprite and not self.foePicHidden
+      and not self:seatVanished(self:foeSlot()) then
     local x, y = self:enemyPicXY(foe.sprite)
     pcall(love.graphics.draw, foe.sprite, x, y)
   end
-  if mine and mine.sprite then
+  if mine and mine.sprite and not self:seatVanished(self:mySlot()) then
     -- Move / item menus replace the lower pic rows on the GB tilemap.
     local clipMenus = self.phase == "move" or self.phase == "item"
       or self.phase == "item_party" or self.phase == "item_move"
@@ -6528,6 +6590,21 @@ function M:drawFieldPics()
       else love.graphics.setScissor() end
     end
   end
+end
+
+function M:drawRemainingBalls()
+  if not ClassicBattle.wantsFoeBalls(self.mode) then return end
+  local eng = loadEngine()
+  local BS = eng and eng.BattleState
+  local team = self.teams and self.teams[self:foeSlot()]
+  local party = ClassicBattle.partyFromRoster(team)
+  if not party then
+    party = ClassicBattle.partyFromRoster(self.npcParty)
+  end
+  if not party then return end
+  if love and love.graphics then love.graphics.setColor(1, 1, 1, 1) end
+  ClassicBattle.drawBallRow(BS, party,
+    ClassicBattle.FOE_BALL_X, ClassicBattle.FOE_BALL_Y, ClassicBattle.FOE_BALL_DX)
 end
 
 function M:drawEnemyHUD(Font, HudTiles)
@@ -6628,9 +6705,12 @@ function M:drawBox(Font, text, opts)
   Font.drawBox(0, 12, 20, 6)
   love.graphics.setColor(0, 0, 0, 1)
   local y = 112
-  for line in tostring(text or ""):gmatch("[^\n]+") do
+  local row = 0
+  for _, line in ipairs(ClassicBattle.wrapBoxLines(text, ClassicBattle.BOX_COLS)) do
     Font.draw(line, 8, y)
     y = y + 16
+    row = row + 1
+    if row >= ClassicBattle.BOX_ROWS then break end
   end
   -- Hold lines pass `{ hint = false }` so a page caret cannot look like
   -- "press A" while the player is waiting on the other seat. Other boxes
@@ -6685,11 +6765,49 @@ function M:drawMoves(Font)
     mon = (self.mine or {})[self.itemPartyIndex or self.active]
   end
   local moves = (mon and mon.moves) or {}
-  local rows = {}
-  for _, move in ipairs(moves) do
-    rows[#rows + 1] = tostring(move.id)
+  -- Vanilla RBY pane: every known move on the left, TYPE/ + PP of the
+  -- cursor on the right. `drawList` was names-only and capped at three.
+  Font.drawBox(0, 12, 13, 6)
+  Font.drawBox(12, 12, 8, 6)
+  if Font.BORDER then
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.rectangle("fill", 96, 96, 8, 8)
+    Font.drawCode(Font.BORDER.h, 96, 96)
   end
-  self:drawList(Font, rows, self.cursor)
+  love.graphics.setColor(0, 0, 0, 1)
+  local index = self.cursor or 1
+  if index < 1 then index = 1 end
+  if #moves > 0 and index > #moves then index = #moves end
+  local nameX, nameW = ClassicBattle.MOVE_NAME_X, ClassicBattle.MOVE_NAME_MAX_W
+  for i, move in ipairs(moves) do
+    if i > 4 then break end
+    local label = self:moveLabel(move.id) or tostring(move.id or "-")
+    ClassicBattle.drawFittedText(Font, label, nameX, ClassicBattle.MOVE_NAME_Y(i), nameW)
+  end
+  if #moves > 0 then
+    Font.drawCode(0xED, 8, ClassicBattle.MOVE_NAME_Y(index))
+  end
+  local pick = moves[index]
+  if not pick then return end
+  local typeName = self:moveTypeName(pick.id)
+  if typeName then
+    Font.draw("TYPE/", 104, ClassicBattle.MOVE_TYPE_LABEL_Y)
+    Font.draw(tostring(typeName):sub(1, 6), 104, ClassicBattle.MOVE_TYPE_NAME_Y)
+  end
+  local pp = tonumber(pick.pp)
+  local maxPp = tonumber(pick.maxPp)
+  if not maxPp then
+    local movesData = self.game and self.game.data and self.game.data.moves
+    local def = type(movesData) == "table" and movesData[pick.id] or nil
+    if def then
+      maxPp = (def.pp or 0) + (pick.ppUps or 0) * math.floor((def.pp or 0) / 5)
+    end
+  end
+  if pp and maxPp then
+    Font.draw(("%2d/%2d"):format(pp, maxPp), 104, ClassicBattle.MOVE_PP_Y)
+  elseif pp then
+    Font.draw(("PP %2d"):format(pp), 104, ClassicBattle.MOVE_PP_Y)
+  end
 end
 
 -- ------- the modern band (battlefield path only)
@@ -7091,6 +7209,7 @@ function M:drawSafe()
   self:drawEvolveCenterClassic()
   self:drawEnemyHUD(Font, HudTiles)
   self:drawPlayerHUD(Font, HudTiles)
+  self:drawRemainingBalls()
   self:drawAnim()
 
   if self.shown then
