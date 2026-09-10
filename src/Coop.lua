@@ -42,7 +42,9 @@
 --    this client is free, and the waiter's own clock is what ends a wait
 --    nobody ever takes. The outs did not go anywhere and are the whole reason
 --    no ask is needed: the SOLO_FALLBACK_AFTER self-release, STOP once a fight
---    is up -- and, for a player who wants none of this, cancelling the party.
+--    is up, the PARTY menu's WILD / NPC rows (off skips divert and auto-join
+--    of that kind; JOIN on the partner still takes a standing offer) -- and,
+--    for a player who wants none of this, cancelling the party.
 -- 2. **The fight cannot be dodged.**  Once a trainer has been triggered, every
 --    exit from every prompt this module raises ends in a battle.  The engine
 --    has already committed to the encounter by the time this module is called,
@@ -103,6 +105,43 @@ local SOLO_FALLBACK_AFTER = 6
 local M = {}
 M.__index = M
 
+-- Save keys for the PARTY-menu WILD / NPC rows. Not mod-manager options:
+-- they live next to MEMBERS / SAY / LEAVE because they only mean anything
+-- while partied. Defaults live on Config so a silent flip to off would be
+-- a test failure, not a comment.
+M.WILD_OPTION = "coopwild"
+M.NPC_OPTION = "coopnpc"
+
+local function savedBool(key, default)
+  default = default ~= false
+  local ok, value = pcall(function()
+    return mod.save and mod.save.get and mod.save:get(key)
+  end)
+  if not ok then return default end
+  if value == true then return true end
+  if value == false then return false end
+  return default
+end
+
+local function storeBool(key, value)
+  pcall(function()
+    if mod.save and mod.save.set then
+      mod.save:set(key, value and true or false)
+    end
+  end)
+end
+
+-- Labels the PARTY menu prints. ON/OFF is the current state, not "what
+-- pressing does" -- these are policy rows, and OPTIONS toggles already
+-- teach that reading. Both fit the PARTY box (tw = 11).
+function M.wildMenuLabel(on)
+  return on and "WILD: ON" or "WILD: OFF"
+end
+
+function M.npcMenuLabel(on)
+  return on and "NPC: ON" or "NPC: OFF"
+end
+
 function M.new(transport, ui, party, roster, chat)
   return setmetatable({
     transport = transport,
@@ -110,6 +149,13 @@ function M.new(transport, ui, party, roster, chat)
     party = party,
     roster = roster,
     chat = chat,
+    -- Party-menu coop divert. Initialized from mod.save so a flip survives
+    -- a disconnect; default ON. Read at the encounter, not latched at
+    -- party formation, so PARTY > WILD: OFF takes effect on the next grass
+    -- tile. Tests that want off assign the field directly (avoids polluting
+    -- the shared stub save).
+    wildCoop = savedBool(M.WILD_OPTION, Config.COOP_WILD_DEFAULT),
+    npcCoop = savedBool(M.NPC_OPTION, Config.COOP_NPC_DEFAULT),
     -- our own standing offer: { battle, label, map, start }
     waiting = nil,
     -- the partner's, as it arrived: { from, name, battle, label, map, clock }
@@ -164,6 +210,38 @@ function M.new(transport, ui, party, roster, chat)
     running = false,
     clock = 0,
   }, M)
+end
+
+-- Whether this client still wants co-op of that kind. Nil and true are ON
+-- (the default); only an explicit false is off. Instance field wins so a
+-- test can flip one side without writing the shared stub save.
+function M:wantsWild()
+  return self.wildCoop ~= false
+end
+
+function M:wantsNpc()
+  return self.npcCoop ~= false
+end
+
+function M:setWantsWild(on)
+  self.wildCoop = on ~= false
+  storeBool(M.WILD_OPTION, self.wildCoop)
+  return self.wildCoop
+end
+
+function M:setWantsNpc(on)
+  self.npcCoop = on ~= false
+  storeBool(M.NPC_OPTION, self.npcCoop)
+  return self.npcCoop
+end
+
+-- Trainer waits have no mode token on the wire (nil); wild waits send
+-- coop_wild. JOIN-from-menu does not consult this -- that row is the
+-- explicit override.
+function M:wantsOffer(offer)
+  if not offer then return false end
+  if offer.mode == "coop_wild" then return self:wantsWild() end
+  return self:wantsNpc()
 end
 
 -- ------- naming a fight
@@ -241,6 +319,12 @@ function M:reset()
   self.pendingWarp = nil
   self.running = false
   self.clock = 0
+  -- Re-read the PARTY toggles. Coop is a process-lifetime singleton, and
+  -- save.loaded / save.created call reset() after a playthrough swap: keeping
+  -- the previous file's ON/OFF would apply the last player's choice to this
+  -- one. Missing keys are the Config defaults (ON).
+  self.wildCoop = savedBool(M.WILD_OPTION, Config.COOP_WILD_DEFAULT)
+  self.npcCoop = savedBool(M.NPC_OPTION, Config.COOP_NPC_DEFAULT)
 end
 
 -- Let the encounter proceed, exactly once.
@@ -829,6 +913,10 @@ function M:onTrainerBattle(game, state, mapId)
   if kind ~= "trainer" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running then return false end
+  -- PARTY > NPC: OFF: fight the engine trainer, post nothing. Same answer
+  -- as "not in a party" -- co-op is an addition, and a player who turned
+  -- this row off must not be pulled into (or pull anyone into) an NPC fight.
+  if not self:wantsNpc() then return false end
   -- Every partner has to be standing on this map. Refused *before* the
   -- encounter is claimed and before anything is sent: no COOP_WAIT, no offer
   -- for anyone to hold, no wait to time out. A 3-person party with one person
@@ -951,6 +1039,10 @@ function M:onWildEncounter(game, state, mapId)
   if kind ~= "wild" then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running or self.waiting or self.ask then return false end
+  -- PARTY > WILD: OFF: leave the engine wild alone, including when the
+  -- partner already posted a coop_wild wait -- auto-join is the pull this
+  -- row turns off. JOIN on the partner still takes the standing offer.
+  if not self:wantsWild() then return false end
   if self.offer then
     if self.offer.mode ~= "coop_wild" then return false end
     -- Partner already waiting on grass: join them; do not start a local wait.
@@ -1304,6 +1396,21 @@ end
 function M:considerOffer(game, myMap)
   local offer = self.offer
   if not offer then return false end
+  -- Leave the offer standing: JOIN on the partner is the override, and
+  -- M:update would otherwise have nothing to retry if this were a drop.
+  -- Tell the hub once so a 3-person JOIN does not seat us. `skip` is not
+  -- a `no` -- that would force the host solo even if another partner wants
+  -- in. Must not fire while we ourselves are waiting: the same cancel would
+  -- clear *our* offer (the trap the offer-timeout `no` already names).
+  -- Sent even while busy or off-map, so an opted-out third is marked before
+  -- someone else joins.
+  if not self:wantsOffer(offer) then
+    if not self.waiting and not offer.skipped and self.transport:isReady() then
+      offer.skipped = true
+      self.transport:send(Wire.COOP_CANCEL, { reason = "skip" })
+    end
+    return false
+  end
   if self.ask or self.running then return false end
   if not (offer.map and myMap and offer.map == myMap) then return false end
 
@@ -1337,9 +1444,9 @@ end
 -- without a yes/no, which is the rule Party vs Wild always had and the rule
 -- the NPC path now shares. The outs are unchanged and all still cheap: the
 -- waiter's own clock goes in solo (SOLO_FALLBACK_AFTER), the ACTIONS > JOIN
--- row is there for an offer that could not be taken when it landed, STOP
--- leaves a fight that has started, and leaving the party ends every offer at
--- once.
+-- row is there for an offer that could not be taken when it landed (and for
+-- a player who turned WILD / NPC off on PARTY), STOP leaves a fight that
+-- has started, and leaving the party ends every offer at once.
 --
 -- Busy is a deferral and not a refusal: mid-fight, mid-ask and mid-trade all
 -- leave the offer standing for M:update's retry. That retry is the difference
@@ -1782,6 +1889,10 @@ function M:onJoined(game, msg)
   local wild = waiting.kind == "wild" or waiting.mode == "coop_wild"
   self.waiting = nil
   self:note(("%s joined the fight."):format(name))
+  -- Seated roster from the hub when present (skip-aware). Older hubs omit
+  -- it; the whole party is then the seat list, which is what those hubs
+  -- actually seated.
+  local allies = Wire.members(msg and msg.allies) or self.party:list()
   self:begin(game, {
     kind = wild and "wild" or "npc",
     mode = wild and "coop_wild" or nil,
@@ -1793,7 +1904,7 @@ function M:onJoined(game, msg)
     wildCatchMon = waiting.wildCatchMon or M.wildMonOf(waiting.engine),
     npcId = waiting.npcId,
     event = waiting.event,
-    allies = self.party:list(),
+    allies = allies,
     -- The player who was waiting is the one standing at the encounter, so they
     -- are the one that simulates.
     host = true,

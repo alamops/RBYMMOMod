@@ -732,6 +732,7 @@ return function(game)
   check(H.openMmo(game), "the MMO menu re-opens")
   if H.selectLabel(game, "PARTY") then
     U.wait(25)
+    shot("party-menu")
     check(H.selectLabel(game, "MEMBERS"), "the party menu opens the members list")
     U.wait(30)
     local rows = H.menuLabels(game)
@@ -1583,6 +1584,7 @@ return function(game)
       U.wait(25)
       if H.selectLabel(game, "PARTY") then
         U.wait(25)
+        shot("party-menu-leave")
         check(H.selectLabel(game, "LEAVE"), "the party menu offers a way out")
         -- the confirm box, and then "You left the party."
         H.drivePrompts(game, function() return #exports.party() == 0 end, 60)

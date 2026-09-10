@@ -2805,6 +2805,20 @@ handlers[Wire.COOP_CANCEL] = function(self, client, msg)
   if client.coopOffer then
     return self:clearCoopOffer(client, reason)
   end
+  -- Partner opted out of this wait (PARTY WILD/NPC off). Record them on the
+  -- waiter's offer so COOP_JOIN does not seat them, but do not clear the
+  -- offer and do not tell the host -- another partner can still join.
+  -- Must not reuse `no`: that would force the host solo.
+  if reason == "skip" then
+    for _, partner in ipairs(self:partnersOf(client)) do
+      if partner.coopOffer then
+        partner.coopOffer.skip = partner.coopOffer.skip or {}
+        partner.coopOffer.skip[client.id] = true
+        return
+      end
+    end
+    return
+  end
   -- Partner declined our invite: clear the waiter's offer and tell them so
   -- they can go in alone. Only `no` takes this path -- other reasons without
   -- an own offer are noise from a client that is not waiting.  Walk every
@@ -2847,19 +2861,30 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   host.coopOffer = nil
   client.coopOffer = nil
 
+  -- Seat host + joiner + every other party member who has not opted out of
+  -- this wait (`offer.skip`). The joiner is always seated -- JOIN is the
+  -- override after a skip. All-ON 3-person parties still seat everyone:
+  -- nobody skipped. A silent 2vN for an all-ON trio is the bug this keeps.
+  local skip = offer.skip or {}
   local members = {}
   local memberIds = {}
+  local seated = {}
+  local function seat(who)
+    if not who or seated[who.id] then return end
+    seated[who.id] = true
+    members[#members + 1] = { id = who.id, name = who.name }
+    memberIds[#memberIds + 1] = who.id
+  end
+  seat(host)
+  seat(client)
   for _, member in ipairs(self:partyMembers(client.partyId)) do
-    members[#members + 1] = { id = member.id, name = member.name }
-    memberIds[#memberIds + 1] = member.id
+    if not skip[member.id] then seat(member) end
   end
 
   -- The two sides of one agreement, told differently on purpose: the player
   -- who was waiting learns *who* joined (it is the answer they have been
   -- standing there for), and the player who joined is handed the roster,
   -- because they never had one.
-  -- Seat every current party member (hub order), not only host+joiner --
-  -- otherwise a 3-person party vs NPC is silently 2vN.
   --
   -- The mode is taken from the offer when the waiter named one: coop_wild for
   -- Party vs Wild (auto-join grass), otherwise coop_npc for the trainer path.
@@ -2879,7 +2904,7 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   -- fight silently stays on host CoopSim while the joiner alone holds `c*`.
   -- `id` remains the joiner (who joined), matching what clients already read.
   send(host, Wire.COOP_JOINED,
-    { id = client.id, name = client.name, plan = id })
+    { id = client.id, name = client.name, plan = id, allies = members })
   -- `host` names the client that simulates. It is the player who was already
   -- standing at the fight, because they are the one *guaranteed* to have
   -- walked into the encounter -- the joiner usually has too, but a join taken
@@ -2887,8 +2912,9 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   -- CoopBattle opens as coop_wild without re-deriving from a cleared offer.
   -- `npcId` / `event` (PROTOCOL 20) ride so a menu joiner can finish the
   -- trainer off without a local BattleState -- never fuzzy-matched by class.
-  -- Every non-host party member gets COOP_BATTLE so a third seat is not
-  -- left holding a mediated id with no screen.
+  -- Every seated non-host gets COOP_BATTLE so a third seat is not left
+  -- holding a mediated id with no screen -- and an opted-out member is
+  -- not handed one they turned off.
   local battleMsg = {
     id = id, side = "a", allies = members, battle = battle, host = host.id,
     mode = mode,

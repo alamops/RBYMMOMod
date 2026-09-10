@@ -94,12 +94,15 @@ M.RANKS         = "mmo.ranks"
 -- overworld NPC id and event-flag id from engine `checkpointOrigin`, so an
 -- invite joiner with no local BattleState can still mark the trainer beaten.
 -- COOP_CANCEL withdraws it with an optional reason (`alone` / `left` /
--- `timeout` from the waiter; `no` from the partner who declined the invite).
+-- `timeout` from the waiter; `no` from the partner who declined the invite;
+-- `skip` from a partner who turned that kind of coop off -- does *not*
+-- end the wait, so a remaining partner can still join).
 -- Naming which offer is unnecessary: there is only ever one per player.
 -- COOP_JOIN answers somebody else's offer with { to, battle }.
 --
 -- A partner decline (`COOP_CANCEL` reason `no`) is forwarded to the waiter as
 -- `COOP_DECLINE`, so they can leave the wait and fight the trainer alone.
+-- `skip` is recorded on the waiter's offer and is not a decline.
 M.COOP_WAIT      = "mmo.coop_wait"
 M.COOP_CANCEL    = "mmo.coop_cancel"
 M.COOP_JOIN      = "mmo.coop_join"
@@ -234,8 +237,10 @@ M.RANKING     = "mmo.ranking"
 -- very differently to the person who was going to join.
 M.COOP_OFFER     = "mmo.coop_offer"
 M.COOP_OFFER_END = "mmo.coop_offer_end"
--- Somebody accepted yours: { id, name }.  This is the message that ends the
--- waiting, and the only one that does.
+-- Somebody accepted yours: { id, name [, plan] [, allies] }.  This is the
+-- message that ends the waiting, and the only one that does.  Optional
+-- `allies` is the seated roster (host + joiner + anyone who did not skip);
+-- absent on older hubs, where the host falls back to the whole party.
 M.COOP_JOINED    = "mmo.coop_joined"
 -- The four-way ask, as it reaches the three players who did not start it:
 -- { id, from, name, side } -- who is asking, and which of the two sides this
@@ -767,9 +772,10 @@ end
 --   gone      -- somebody dropped
 --   timeout   -- nobody answered in time
 --   mismatch  -- party-vs-party size not equal / not 2-or-3 (hub refuse; T7 phrases)
+--   skip      -- a partner turned this kind of coop off; does not end the wait
 M.COOP_REASONS = {
   alone = true, left = true, started = true,
-  no = true, gone = true, timeout = true, mismatch = true,
+  no = true, gone = true, timeout = true, mismatch = true, skip = true,
 }
 
 function M.coopReason(value)

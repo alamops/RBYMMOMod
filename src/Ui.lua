@@ -20,6 +20,7 @@ local Gen = need("Gen")
 local Chars = need("Chars")
 local Cast = need("Cast")
 local Places = need("Places")
+local Coop = need("Coop")
 
 local M = {}
 M.__index = M
@@ -2471,7 +2472,8 @@ function M:install()
   -- because "party" means two different things depending on whether you are
   -- in one, and a menu of greyed-out rows would be the worse answer: it
   -- would say what you cannot do without saying what you can.
-  screens:register(SCREEN.PARTY, { new = function(game)
+  screens:register(SCREEN.PARTY, { new = function(game, opts)
+    opts = opts or {}
     local party = ctx.party
     if not party:has() then
       -- Not a dead end.  The sentence says how a party starts and then hands
@@ -2481,6 +2483,23 @@ function M:install()
         "No party yet.\nPick a player to\ninvite.", function()
           mod.ui.push(game, SCREEN.ROSTER)
         end)
+    end
+
+    -- WILD / NPC are policy for this client, not membership. Default ON
+    -- (forming the party is still the consent); OFF skips divert and
+    -- auto-join of that kind so two people can walk together and still
+    -- fight grass or trainers alone. LEAVE stays last: it is the one row
+    -- that cannot be undone by pressing it again.
+    local coop = ctx.coop
+    local wildOn = Config.COOP_WILD_DEFAULT ~= false
+    local npcOn = Config.COOP_NPC_DEFAULT ~= false
+    if type(coop) == "table" then
+      if type(coop.wantsWild) == "function" then
+        wildOn = coop:wantsWild() ~= false
+      end
+      if type(coop.wantsNpc) == "function" then
+        npcOn = coop:wantsNpc() ~= false
+      end
     end
 
     local items = {
@@ -2494,6 +2513,8 @@ function M:install()
           mod.ui.push(game, SCREEN.COMPOSE, { scope = "party" })
         end,
       },
+      { label = Coop.wildMenuLabel(wildOn), toggle = "wild" },
+      { label = Coop.npcMenuLabel(npcOn), toggle = "npc" },
       {
         label = "LEAVE",
         onSelect = function()
@@ -2517,10 +2538,41 @@ function M:install()
         end,
       },
     }
-    return mod.ui.Menu.new(game, items, {
+
+    local function reopen(row)
+      mod.ui.push(game, SCREEN.PARTY, { row = row })
+    end
+
+    for row, item in ipairs(items) do
+      local kind = item.toggle
+      if kind then
+        item.onSelect = function()
+          if type(coop) == "table" then
+            if kind == "wild" and type(coop.setWantsWild) == "function" then
+              coop:setWantsWild(not wildOn)
+            elseif kind == "npc" and type(coop.setWantsNpc) == "function" then
+              coop:setWantsNpc(not npcOn)
+            end
+          end
+          -- Menu pops itself before running a row, so reopening is what
+          -- "rebuilt" means -- the label now reads the other way, and the
+          -- cursor stays on this row so a second press puts it back.
+          reopen(row)
+        end
+      end
+    end
+
+    local menu = mod.ui.Menu.new(game, items, {
       tx = 9, ty = 0, tw = 11,
       onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
     })
+    if type(menu) == "table" then
+      menu.index = math.min(math.max(tonumber(opts.row) or 1, 1), #items)
+      if type(menu.clampScroll) == "function" then
+        menu:clampScroll()
+      end
+    end
+    return menu
   end })
 
   -- Who is in it, where they are, and their card.

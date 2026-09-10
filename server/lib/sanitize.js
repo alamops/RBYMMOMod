@@ -268,6 +268,8 @@ const COOP_REASONS = {
   alone: true, left: true, started: true, no: true, gone: true, timeout: true,
   // party-vs-party size not equal / not 2-or-3 (hub refuse; T7 phrases)
   mismatch: true,
+  // partner turned this kind of coop off; does not end the wait
+  skip: true,
 };
 
 function cleanSide(value) {
