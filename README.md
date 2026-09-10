@@ -85,7 +85,8 @@ Everyone on the same Wi-Fi or LAN can join straight away — no configuration,
 just the address and the passcode. Across the internet the host has to
 forward port **7788** — or nobody forwards anything and you all join a
 standalone hub on a box that already has a public address instead
-([server/README.md](server/README.md)).
+([the VPS scripts](#-a-dedicated-hub--configured-entirely-through-one-command),
+or the full operator book in [server/README.md](server/README.md)).
 
 That's the five-minute version. **[Setting a game up — both ways](#-setting-a-game-up--both-ways)**
 walks the full configuration of each path, screen by screen.
@@ -1046,30 +1047,129 @@ address.
 
 Lives in [`server/`](server/README.md). Node 22+, **zero dependencies**, or a
 container. Every setting is reachable from the CLI — nothing requires editing
-a file by hand. On a fresh VPS the whole Docker path is one script, which
-clones the newest GitHub release (the same channel as the mod zip) and
-prints the join code on that terminal:
+a file by hand. On a fresh VPS the Docker path is two scripts in
+[`scripts/`](scripts/): **`run-server.sh`** stands the hub up, and
+**`upgrade-server.sh`** moves it onto a later release without touching the
+join code.
+
+#### `scripts/run-server.sh` — install and start
+
+The whole first-boot story in one file: Docker if the box has none, a clone
+of the newest GitHub **release** (the same channel as the mod zip, not
+`main`), `compose up`, wait until healthy, then print the join code on
+*this* terminal. The code is kept out of `docker compose logs` on purpose —
+that log is a file on disk, and a join code is a credential.
+
+Run it as `root` on a fresh Ubuntu box. Arguments still work through the
+pipe — `bash -s --` is what keeps them from being eaten:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 2
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --port 25565
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --version vX.Y.Z
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 2 --port 25565 --open-firewall
 ```
 
-Default is generation 1 (Red/Blue/Yellow). `--generation 2` (or `-g 2`) is
-Gold. `--port` is the host port friends type (container port stays 7788).
-Both are written into `server/.env` (`RBY_MMO_GENERATION`,
-`RBY_MMO_HOST_PORT`) so a later `compose up` or
+From a checkout you already have, the same file starts **this** tree and
+does not fetch a release (unless you pass `--dir` to clone somewhere else).
+`--version` from inside a checkout is `upgrade-server.sh`, not this one:
+
+```sh
+bash scripts/run-server.sh
+bash scripts/run-server.sh --generation 2
+bash scripts/run-server.sh --port 25565 --open-firewall
+bash scripts/run-server.sh --help
+```
+
+| Flag | What it does |
+| --- | --- |
+| `--generation`, `-g` `1\|2` | Hub lock. `1` is Red/Blue/Yellow (the default), `2` is Gold. Friends on the other generation are refused. |
+| `--port <n>` | Host port friends type (default `7788`). The container still listens on 7788; this only remaps the host side. |
+| `--version`, `-v` `<tag>` | GitHub release to clone (`vX.Y.Z` or `X.Y.Z`). Default: the newest release, looked up live. Ignored when this script is run from a checkout and `--dir` is not given. |
+| `--dir <path>` | Where the repo lives / will be cloned. Default: this checkout, or `$RBY_MMO_DIR`, or `./RBYMMOMod`. |
+| `--open-firewall` | If `ufw` is on PATH, allow that port (and OpenSSH). Off by default — opening a port is a choice. |
+| `--no-start` | Fetch / install Docker and write `server/.env`, but do not `compose up`. |
+| `--dry-run` | Print the plan; change nothing. |
+| `--self-test` | Helper assertions; no Docker, no network fetch of the hub. |
+| `-h`, `--help` | The same table, from the script. |
+
+`--generation` and `--port` are written into `server/.env` as
+`RBY_MMO_GENERATION` and `RBY_MMO_HOST_PORT`, so a later `compose up` or
 `scripts/upgrade-server.sh` keeps them. Compose leaves generation empty
 when unset, so a Gold lock already in `config.json` is not forced back to
-1. Friends on the other generation are refused.
+1. `--generation` is how you switch.
 
-`scripts/upgrade-server.sh` later moves that box onto a newer release, or
-`--version vX.Y.Z`, without rotating the passcode or resetting those
-locks. The walkthrough, and what a protocol mismatch actually does, is in
+If you omit a flag, the script also honours the matching environment
+variable (`RBY_MMO_GENERATION`, `RBY_MMO_HOST_PORT`, `RBY_MMO_DIR`,
+`RBY_MMO_REPO`). `GH_TOKEN` / `GITHUB_TOKEN` is optional and only raises
+the GitHub API rate limit.
+
+Re-running is safe: an existing install is started, not rebuilt, and the
+named volume — the join code, the bans, the allowlist — is never touched.
+
+**After it prints "Hub is up."** Friends type `<public-ip>:<port>` and the
+passcode that landed on that terminal. A new VPS usually has **two**
+firewalls — `ufw` on the box, and one in the provider panel. Both have to
+allow TCP on the port you chose. `--open-firewall` does the box side; the
+cloud panel is yours. Check from your laptop before you hand the address
+out:
+
+```sh
+nc -vz <public-ip> 7788
+```
+
+The join code is not in `docker compose logs`. Read it again later, and
+operate the hub, from the clone's `server/` directory:
+
+```sh
+cd /path/to/RBYMMOMod/server
+docker compose exec -T hub rby-mmo-hub invite list --reveal
+docker compose exec hub rby-mmo-hub doctor
+docker compose exec hub rby-mmo-hub watch
+docker compose exec hub rby-mmo-hub invite          # another code
+```
+
+#### `scripts/upgrade-server.sh` — move onto a newer release
+
+Fetches a GitHub release tag in place, rebuilds the image, restarts the
+container, and leaves the named volume alone. Friends keep the passcode
+they already have. Generation and host port in `server/.env` stay unless
+you pass `--generation`. `docker compose down -v` is how you *destroy*
+that volume (and rotate a leaked code); this script will not run it.
+
+If `PROTOCOL` changed between the two releases, friends still on the old
+mod zip will be refused — they need `rby_mmo` from the **same** GitHub
+release (`MODS → Import mod .zip`).
+
+```sh
+bash scripts/upgrade-server.sh
+bash scripts/upgrade-server.sh --version vX.Y.Z
+bash scripts/upgrade-server.sh --generation 2
+bash scripts/upgrade-server.sh --reveal
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/upgrade-server.sh | bash -s -- --dir /path/to/RBYMMOMod
+```
+
+| Flag | What it does |
+| --- | --- |
+| `--version`, `-v` `<tag>` | Target release (`vX.Y.Z` or `X.Y.Z`). Default: the newest GitHub release, looked up live. |
+| `--dir <path>` | Existing checkout to update. Finds one from, in order: this flag, this script's repo, `$RBY_MMO_DIR`, the running container's compose working dir, then `./RBYMMOMod`. |
+| `--generation`, `-g` `1\|2` | Hub lock. Default: keep whatever this checkout / container already runs. |
+| `--reveal` | Print join codes after the restart (same as `invite list --reveal`). Off by default so an upgrade log is safe to keep. |
+| `--dry-run` | Print from → to; change nothing. |
+| `--self-test` | Helper assertions; no Docker, no fetch. |
+| `-h`, `--help` | The same table, from the script. |
+
+The rest of the operator surface — every `rby-mmo-hub` verb, every config
+key, what a protocol mismatch actually does — is in
 [server/README.md](server/README.md).
 
-**First run** writes a config at mode `0600` and prints the passcode once:
+#### Bare Node — the same CLI, no Docker
+
+Skip this if you used the scripts above: the first `compose up` already
+ran `init` onto the volume. This path is for a machine that already has
+Node 22+ and no container. **First run** writes a config at mode `0600`
+and prints the passcode once:
 
 ```console
 $ node server/bin/rby-mmo-hub.js init --yes --port 7788 --max 8
