@@ -1331,14 +1331,19 @@ function M.connect(a, b, c)
   -- silently replace whatever the player last typed into JOIN GAME with a
   -- hub they never chose as their default.
   local address = withPort(wanted) or M.joinAddress()
-  -- Official public hub is Gen 1-only until a Gen 2 deploy exists. Refuse
-  -- here (not only by hiding the SERVERS row) so a typed / options JOIN to
-  -- play.rbymmo.com on Gold gets a clear sentence instead of a generation
-  -- mismatch from the hub.
+  -- Official hubs are generation-locked. Refuse here (not only by hiding
+  -- the SERVERS row) so a typed / options JOIN to the other generation's
+  -- official gets a clear sentence instead of a generation mismatch from
+  -- the hub.
   if Servers.isFeaturedAddress(address)
-      and not Config.featuredServerAllowed(Gen.generation(game)) then
-    connectSay(
-      "Official server is\nGen 1 only for now.\nHost a Gold game\ninstead.")
+      and not Config.featuredServerAllowed(Gen.generation(game), address) then
+    local spec = Config.featuredServer(address)
+    local want = spec and spec.gens and spec.gens[1] or 1
+    if want == 1 then
+      connectSay("Official server is\nGen 1 only.\nPlay Red, Blue\nor Yellow.")
+    else
+      connectSay("Official server is\nGen 2 only.\nPlay Gold, Silver\nor Crystal.")
+    end
     return false
   end
 
@@ -1371,8 +1376,8 @@ end
 --
 -- CONNECT's own pre-flight is deliberately not repeated here beyond the two
 -- that decide whether to try at all -- M.connect refuses an open transport
--- and a Gen 2 boot dialling the official hub itself, and its sentences are
--- the ones the box ends up carrying.
+-- and a boot dialling the other generation's official hub, and its sentences
+-- are the ones the box ends up carrying.
 local function tryAutoJoin(game)
   if not World.current() then return end
   autoJoin.armed = false
@@ -1391,17 +1396,17 @@ local function tryAutoJoin(game)
     return
   end
   if not entry then
-    -- Armed, but at a row this boot cannot resolve: today that is only the
-    -- official hub on a Gen 2 game, which the menu hides and menuGet refuses
-    -- for the same reason M.connect would refuse the dial. Doing nothing is
-    -- the right answer -- there is nothing to reach -- but doing it *silently*
-    -- leaves a player who set this on Red wondering why Gold never connects,
-    -- with nothing in the log to find. No box: nobody pressed anything, and
-    -- this is a standing condition rather than a failure of this launch.
+    -- Armed, but at a row this boot cannot resolve: the other generation's
+    -- official, which the menu hides and menuGet refuses for the same reason
+    -- M.connect would refuse the dial. Doing nothing is the right answer --
+    -- there is nothing to reach -- but doing it *silently* leaves a player
+    -- who set this on Red wondering why Gold never connects, with nothing
+    -- in the log to find. No box: nobody pressed anything, and this is a
+    -- standing condition rather than a failure of this launch.
     if armed then
       mod.log:warn("auto-join is set to %s, which this game cannot reach -- "
-        .. "the official server is Gen 1 only for now; host a Gold game or "
-        .. "point AUTOJOIN at another row under START > MMO > SERVERS",
+        .. "that official server is for a different generation; point "
+        .. "AUTOJOIN at another row under START > MMO > SERVERS",
         tostring(armed))
     end
     return

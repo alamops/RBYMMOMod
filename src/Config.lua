@@ -1266,25 +1266,76 @@ M.RANK_REPORT_GRACE = 60
 -- src/Servers.lua keeps the list behind START > MMO > SERVERS; the argument
 -- for what it is and where it is written is in that file's header.
 
--- The product-owned row at the top of that list. Its port is explicit rather
+-- Product-owned rows at the top of that list. Ports are explicit rather
 -- than derived from DEFAULT_PORT: changing the port used by a local host must
--- not quietly point the official row at a different service. Servers projects
--- this into the menu without putting it in either persistence mirror.
+-- not quietly point an official row at a different service. Servers projects
+-- each into the menu without putting it in either persistence mirror.
 --
--- `FEATURED_SERVER_GENS` is which boots may see / dial it. The public hub at
--- play.rbymmo.com is Gen 1-locked for now; Gold players host locally (or join
--- a Gen 2 LAN hub) until an official Gen 2 deploy exists.
-M.FEATURED_SERVER_NAME = "RBY MMO OFFICIAL"
-M.FEATURED_SERVER_HOST = "play.rbymmo.com:7788"
-M.FEATURED_SERVER_CODE = "QG0251"
-M.FEATURED_SERVER_GENS = { 1 }
+-- `gens` is which boots may see / dial that row. RBY Official is Gen 1 only;
+-- GSC Official is Gen 2 only. A boot never sees the other generation's hub.
+M.FEATURED_SERVERS = {
+  {
+    name = "RBY MMO OFFICIAL",
+    host = "play.rbymmo.com:7788",
+    code = "QG0251",
+    gens = { 1 },
+  },
+  {
+    name = "GSC MMO OFFICIAL",
+    host = "play2.rbymmo.com:25565",
+    code = "NWH9PT",
+    gens = { 2 },
+  },
+}
 
-function M.featuredServerAllowed(generation)
-  local gens = M.FEATURED_SERVER_GENS
+-- Back-compat aliases: the Gen 1 official, which is what every existing
+-- caller and test means by FEATURED_SERVER_*.
+M.FEATURED_SERVER_NAME = M.FEATURED_SERVERS[1].name
+M.FEATURED_SERVER_HOST = M.FEATURED_SERVERS[1].host
+M.FEATURED_SERVER_CODE = M.FEATURED_SERVERS[1].code
+M.FEATURED_SERVER_GENS = M.FEATURED_SERVERS[1].gens
+
+local function gensAllow(gens, generation)
   if type(gens) ~= "table" or #gens == 0 then return true end
   local g = tonumber(generation) or 1
   for i = 1, #gens do
     if gens[i] == g then return true end
+  end
+  return false
+end
+
+-- The configured official matching `address`, or nil. Portless forms only
+-- match a featured host whose port is DEFAULT_PORT -- GSC's 25565 is not
+-- that, so "play2.rbymmo.com" without a port is not the official row.
+function M.featuredServer(address)
+  if type(address) ~= "string" then return nil end
+  local needle = address:gsub("%s+", ""):lower()
+  if needle == "" then return nil end
+  if not needle:find(":", 1, true) then
+    needle = needle .. ":" .. tostring(M.DEFAULT_PORT)
+  end
+  for i = 1, #M.FEATURED_SERVERS do
+    local spec = M.FEATURED_SERVERS[i]
+    if type(spec.host) == "string" and spec.host:lower() == needle then
+      return spec
+    end
+  end
+  return nil
+end
+
+-- Whether this boot may see / dial an official hub.
+--
+-- With `address`: that specific official, or true when the address is not
+-- one (the generation gate is only for product-owned hosts).
+-- Without `address`: whether any official row is offered on this generation.
+function M.featuredServerAllowed(generation, address)
+  if address ~= nil then
+    local spec = M.featuredServer(address)
+    if not spec then return true end
+    return gensAllow(spec.gens, generation)
+  end
+  for i = 1, #M.FEATURED_SERVERS do
+    if gensAllow(M.FEATURED_SERVERS[i].gens, generation) then return true end
   end
   return false
 end

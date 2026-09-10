@@ -25796,23 +25796,59 @@ do
   eq(featured.featured, true,
      "marked so the UI can protect product-owned fields")
 
+  local gsc = Config.FEATURED_SERVERS[2]
+  eq(gsc and gsc.name, "GSC MMO OFFICIAL",
+     "GSC Official is the second featured hub")
+  eq(gsc and gsc.host, "play2.rbymmo.com:25565",
+     "on play2 with its own port")
+  eq(gsc and gsc.code, "NWH9PT", "and its own join code")
+
   eq(Config.featuredServerAllowed(1), true,
-     "the official hub is offered on Gen 1")
-  eq(Config.featuredServerAllowed(2), false,
-     "and not on Gen 2 until a Gold deploy exists")
+     "an official hub is offered on Gen 1")
+  eq(Config.featuredServerAllowed(2), true,
+     "and a different official hub is offered on Gen 2")
+  eq(Config.featuredServerAllowed(1, Config.FEATURED_SERVER_HOST), true,
+     "RBY Official is allowed on Gen 1")
+  eq(Config.featuredServerAllowed(2, Config.FEATURED_SERVER_HOST), false,
+     "and refused on Gen 2")
+  eq(Config.featuredServerAllowed(2, gsc.host), true,
+     "GSC Official is allowed on Gen 2")
+  eq(Config.featuredServerAllowed(1, gsc.host), false,
+     "and refused on Gen 1")
   eq(Servers.isFeaturedAddress(Config.FEATURED_SERVER_HOST), true,
-     "isFeaturedAddress recognises the official host")
+     "isFeaturedAddress recognises the RBY official host")
   eq(Servers.isFeaturedAddress("play.rbymmo.com"), true,
      "including the form without an explicit port")
+  eq(Servers.isFeaturedAddress(gsc.host), true,
+     "and recognises the GSC official host")
+  eq(Servers.isFeaturedAddress("play2.rbymmo.com"), false,
+     "but a portless play2 is not the GSC official -- its port is not the default")
 
   local goldGame = {
     data = { type_chart = { generation = 2 }, gen2Statuses = {} },
   }
   local goldMenu = store:menuList(goldGame)
-  eq(#goldMenu, 0,
-     "Gen 2 hides the official row on a fresh SERVERS list")
+  eq(#goldMenu, 1,
+     "Gen 2 shows its own official row on a fresh SERVERS list")
+  eq(goldMenu[1] and goldMenu[1].name, gsc.name,
+     "under the GSC official label")
+  eq(goldMenu[1] and goldMenu[1].address, gsc.host,
+     "with the GSC official dial address")
+  eq(goldMenu[1] and goldMenu[1].code, gsc.code,
+     "and the GSC official join code")
   eq(store:menuGet(Config.FEATURED_SERVER_HOST, goldGame), nil,
-     "and menuGet refuses the official key on Gold")
+     "and menuGet refuses the RBY official key on Gold")
+  eq(store:menuGet(gsc.host, goldGame) ~= nil, true,
+     "while resolving the GSC official key")
+  local redGame = {
+    data = { type_chart = { generation = 1 } },
+  }
+  eq(store:menuGet(gsc.host, redGame), nil,
+     "and menuGet refuses the GSC official key on Red")
+  eq(#store:menuList(redGame), 1,
+     "Gen 1 still shows only RBY Official")
+  eq(store:menuList(redGame)[1].name, Config.FEATURED_SERVER_NAME,
+     "under the RBY official label")
 
   local resolved = store:menuGet(featured.key)
   check(resolved ~= nil, "menuGet resolves the synthetic row")
@@ -25893,6 +25929,20 @@ do
      "and leave its code unchanged")
   eq(#store:list(), 1,
      "while the ordinary persisted recent remains the only counted row")
+
+  local gsc = Config.FEATURED_SERVERS[2]
+  local gscKey = gsc.host:lower()
+  eq(store:rename(gscKey, "Renamed"), nil,
+     "the GSC official row cannot be renamed either")
+  eq(store:remove(gscKey), nil,
+     "or deleted")
+  eq(store:setAddress(ordinary.key, gsc.host), nil,
+     "and an ordinary recent cannot be moved onto the GSC official address")
+  local recorded = store:record(gsc.host, gsc.code)
+  check(recorded ~= nil and recorded.featured == true,
+        "a welcome from GSC Official returns the synthetic entry")
+  eq(#store:list(), 1,
+     "without turning it into a persisted recent")
 end
 
 -- ------- eviction: the cap, LRU order, favourites, and the row just written
@@ -26232,15 +26282,33 @@ do
      "and the official hub is still not a persisted recent")
 
   -- Generation-gated exactly as the menu is: a Gold boot cannot see the
-  -- official row, so it must not be able to dial one either.
+  -- RBY official row, so it must not be able to dial or arm that one.
   local goldGame = {
     data = { type_chart = { generation = 2 }, gen2Statuses = {} },
   }
   eq(store:autoJoinEntry(goldGame), nil,
-     "a Gen 2 boot resolves the official auto-join row to nothing")
+     "a Gen 2 boot resolves the RBY official auto-join row to nothing")
   eq(store:setAutoJoin(Config.FEATURED_SERVER_HOST, true, goldGame), nil,
-     "and cannot arm one either -- the row it would dial is not one that "
-     .. "boot is allowed to see")
+     "and cannot arm RBY Official either -- the row it would dial is not "
+     .. "one that boot is allowed to see")
+
+  local gsc = Config.FEATURED_SERVERS[2]
+  check(store:setAutoJoin(gsc.host, true, goldGame) ~= nil,
+        "but Gold can arm GSC Official")
+  local gscEntry = store:autoJoinEntry(goldGame)
+  eq(gscEntry and gscEntry.address, gsc.host,
+     "and autoJoinEntry on Gold hands back the GSC official address")
+  eq(gscEntry and gscEntry.code, gsc.code,
+     "with the GSC official code")
+  local redGame = {
+    data = { type_chart = { generation = 1 } },
+  }
+  eq(store:autoJoinEntry(redGame), nil,
+     "while a Gen 1 boot cannot resolve the GSC official auto-join")
+  -- Restore the RBY official arming this block started with, so the stub
+  -- assertions below still see one featured auto-join row.
+  check(store:setAutoJoin(Config.FEATURED_SERVER_HOST, true) ~= nil,
+        "and Red can take AUTOJOIN back onto RBY Official")
 
   -- The stub the mirror carries it in: a row with the key and the flag and
   -- nothing else, so a build that predates auto-join drops it on the way in
@@ -27389,8 +27457,8 @@ do
   -- The boot that cannot resolve the holder still has to ask.
   --
   -- The servers file is machine-level and shared by every boot, so a player
-  -- can arm the official row on Red and then open SERVERS on Gold -- where
-  -- menuGet refuses that key, because the official hub is Gen 1 only. Asking
+  -- can arm RBY Official on Red and then open SERVERS on Gold -- where
+  -- menuGet refuses that key, because that official is Gen 1 only. Asking
   -- "which row may I dial" there answers nil, and a screen that took that for
   -- "nothing is armed" would replace the setting without a word. The question
   -- is about which key is *held*, which every boot can answer.
