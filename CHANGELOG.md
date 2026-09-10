@@ -6,6 +6,17 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+### Added
+
+- **Party menu WILD / NPC coop toggles, on by default.** While partied,
+  PARTY offers separate `WILD: ON`/`OFF` and `NPC: ON`/`OFF` rows so you
+  can walk together and still fight grass or trainers alone. Off skips
+  divert and auto-join of that kind (Gen 1 and Gen 2); JOIN on the
+  partner still takes a standing offer. An opted-out member of a
+  3-person party is not pulled in when someone else joins (`skip` on
+  the wait, not a decline). Toggles re-read from the save on a
+  playthrough swap.
+
 ## [1.3.1] - 2026-09-06
 
 ### Fixed

@@ -719,6 +719,19 @@ M.SOLO_BATTLES_DEFAULT = false
 -- battle and a flip mid-fight cannot swap chrome under a live turn.
 M.CLASSIC_BATTLE_UI_DEFAULT = false
 
+-- Party-menu toggles for co-op divert: whether a partied player pulls (and
+-- is pulled into) wild encounters and NPC trainers.
+--
+-- On by default, because forming the party is still the consent -- these
+-- rows are the out for a player who wants to walk together and fight grass
+-- or gyms alone, without dissolving the party. Read at the encounter (and
+-- at auto-join), so a flip on PARTY takes effect on the next fight rather
+-- than on the next launch. Independent of each other, and of SOLO BATTLES:
+-- a partnered player with WILD: OFF still fights the engine's own grass,
+-- whatever that row says.
+M.COOP_WILD_DEFAULT = true
+M.COOP_NPC_DEFAULT = true
+
 -- Which BattleSim mode each solo fight is seated as.
 --
 -- Two modes rather than one, and the difference is mechanical rather than

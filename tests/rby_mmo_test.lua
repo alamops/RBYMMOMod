@@ -7012,6 +7012,7 @@ end)()
 
 local Ui = need("Ui")
 local Friends = need("Friends")
+local Coop = need("Coop")
 
 -- Saved and put back, never nil'd: stubMod is shared with every section after
 -- this one, and a field left nil is a field the next section finds missing
@@ -7059,7 +7060,18 @@ local friends = Friends.new(
 friends:setHub("screens:7788", "ME")
 
 local screenCtx = { roster = roster, party = party, friends = friends,
-                    coop = { pendingOffer = function() return nil end },
+                    coop = {
+                      pendingOffer = function() return nil end,
+                      wildOn = true, npcOn = true,
+                      wantsWild = function(self) return self.wildOn ~= false end,
+                      wantsNpc = function(self) return self.npcOn ~= false end,
+                      setWantsWild = function(self, on)
+                        self.wildOn = on ~= false
+                      end,
+                      setWantsNpc = function(self, on)
+                        self.npcOn = on ~= false
+                      end,
+                    },
                     client = { playerName = function() return "ME" end } }
 local screenUi = Ui.new(screenCtx)
 check(pcall(function() screenUi:install() end),
@@ -7231,6 +7243,62 @@ do
   eq(labelsOf(solo), Ui.FRIEND_MARK .. "BOB",
      "the only row on the list is marked, even though the cursor is on it")
   screenCtx.roster = kept
+end
+
+-- ------- PARTY: WILD / NPC coop toggles, on by default, independent
+
+do
+  local empty = registry[Ui.SCREEN.PARTY].new({})
+  eq(empty.kind, "text",
+     "with nobody in a party, PARTY is still the invite sentence")
+  check(empty.text:find("No party"), "and does not grow toggle rows")
+
+  party:onParty({ id = "1", members = { { id = "me", name = "ME" },
+                                        { id = "bob", name = "BOB" } } })
+  local menu = registry[Ui.SCREEN.PARTY].new({})
+  eq(menu.kind, "menu", "in a party, PARTY is a menu")
+  eq(labelsOf(menu), "MEMBERS,SAY,WILD: ON,NPC: ON,LEAVE",
+     "WILD and NPC sit between SAY and LEAVE, both ON -- forming the party "
+     .. "is still the consent; these rows are the out")
+  eq(menu.items[3].label, "WILD: ON", "wild encounters default on")
+  eq(menu.items[4].label, "NPC: ON", "and NPC trainers default on, separately")
+  check(#menu.items[3].label <= 11, "WILD: ON fits the PARTY box (tw=11)")
+  check(#menu.items[4].label <= 11, "NPC: ON fits too")
+  check(#Coop.wildMenuLabel(false) <= 11, "and so does WILD: OFF")
+  check(#Coop.npcMenuLabel(false) <= 11, "and NPC: OFF")
+  eq(menu.items[#menu.items].label, "LEAVE",
+     "LEAVE stays last -- it is the row that cannot be undone by pressing it")
+
+  eq(Config.COOP_WILD_DEFAULT, true, "Config pins wild coop on")
+  eq(Config.COOP_NPC_DEFAULT, true, "and NPC coop on -- a silent flip to "
+     .. "off would skip every party fight")
+
+  pushes = {}
+  menu.items[3].onSelect()
+  eq(pushes[1] and pushes[1].id, Ui.SCREEN.PARTY,
+     "pressing WILD rebuilds PARTY, the way FAVORITE rebuilds SERVERACT")
+  eq(pushes[1].opts.row, 3, "with the cursor still on WILD")
+  eq(screenCtx.coop.wildOn, false, "and the wild flag is now off")
+  eq(screenCtx.coop.npcOn, true, "without touching NPC")
+
+  local flipped = registry[Ui.SCREEN.PARTY].new({}, { row = 3 })
+  eq(labelsOf(flipped), "MEMBERS,SAY,WILD: OFF,NPC: ON,LEAVE",
+     "the rebuilt menu says WILD: OFF and leaves NPC: ON")
+  eq(flipped.index, 3, "and parks the cursor on the row that was pressed")
+
+  pushes = {}
+  flipped.items[4].onSelect()
+  eq(screenCtx.coop.npcOn, false, "pressing NPC turns that one off")
+  eq(screenCtx.coop.wildOn, false, "and leaves wild where it was")
+  local both = registry[Ui.SCREEN.PARTY].new({})
+  eq(labelsOf(both), "MEMBERS,SAY,WILD: OFF,NPC: OFF,LEAVE",
+     "so the two rows are independent")
+
+  -- Restore the party the friends tests left empty, and the flags ON, so a
+  -- later section that reuses this stub is not surprised.
+  screenCtx.coop.wildOn, screenCtx.coop.npcOn = true, true
+  party:reset()
+  party:setSelf("me")
 end
 
 stubMod.content.screens, stubMod.hooks, stubMod.ui = keptScreens, keptHooks,
@@ -8776,6 +8844,241 @@ eq(wBob.coop:joinFromMenu(wBob.game), false,
 wBob.coop.offer = { from = wAnn.id, battle = WILD_KEY, mode = "coop_wild" }
 eq(wBob.coop:joinFromMenu(wBob.game), true,
    "joinFromMenu on coop_wild auto-joins like considerOffer")
+
+-- ------- PARTY WILD / NPC toggles gate divert and auto-join
+--
+-- Forming the party is still the consent (defaults ON). OFF is the out for
+-- a player who wants to walk together and fight that kind alone. Gen 2
+-- BattleState has no `.kind` -- the shape lives on `state.battle` -- so
+-- both gens are pinned here, not only the Gen 1 fixtures above.
+
+resetCoopWild(wAnn); resetCoopWild(wBob)
+pump(wAnn); pump(wBob)
+
+eq(wAnn.coop:wantsWild(), true, "a fresh Coop wants wild coop -- default ON")
+eq(wAnn.coop:wantsNpc(), true, "and NPC coop -- default ON")
+eq(wAnn.coop.wildCoop, Config.COOP_WILD_DEFAULT,
+   "the instance field is Config.COOP_WILD_DEFAULT, not a second true")
+eq(wAnn.coop.npcCoop, Config.COOP_NPC_DEFAULT, "same for NPC")
+
+wAnn.coop.wildCoop = false
+eq(wildEngage(wAnn), false,
+   "WILD: OFF leaves the engine wild alone -- no COOP_WAIT")
+eq(wAnn.coop:isWaiting(), false, "the host posts no wait")
+eq(wAnn.coop.encounter, nil, "and never claims the encounter")
+pump(wBob)
+eq(wBob.coop:pendingOffer(), nil, "so the partner is never offered a join")
+resetCoopWild(wAnn); resetCoopWild(wBob)
+
+eq(Wire.coopReason("skip"), "skip",
+   "skip is a closed coop reason -- additive, no PROTOCOL bump")
+
+-- Gen 2 wild: no `.kind`, foe on state.battle.wild / battle.enemy.
+do
+  local battle = {
+    battle = {
+      wild = true,
+      enemy = { species = "FIXMON_A", level = 5 },
+    },
+    onDone = function(result) wAnn.finished = result end,
+  }
+  wAnn.engine = battle
+  wAnn.stack:push(battle)
+  eq(wAnn.coop:onWildEncounter(wAnn.game, battle, "FIX_TOWN"), false,
+     "Gen 2 wild is the same refusal -- kind is read off battle.wild")
+  eq(wAnn.coop:isWaiting(), false, "and still posts no wait")
+end
+resetCoopWild(wAnn)
+
+-- Same Gen 2 shape with WILD: ON must divert, or the OFF test is tautological
+-- (a kind-detection miss also returns false).
+do
+  wAnn.coop.wildCoop = true
+  local battle = {
+    battle = {
+      wild = true,
+      enemy = { species = "FIXMON_A", level = 5 },
+    },
+    onDone = function(result) wAnn.finished = result end,
+  }
+  wAnn.engine = battle
+  wAnn.stack:push(battle)
+  eq(wAnn.coop:onWildEncounter(wAnn.game, battle, "FIX_TOWN"), true,
+     "Gen 2 wild with WILD: ON diverts -- kind is read off battle.wild")
+  eq(wAnn.coop:isWaiting(), true, "and posts the wait")
+end
+resetCoopWild(wAnn)
+
+-- Wild off does not silence NPC coop.
+wAnn.coop.wildCoop = false
+wAnn.coop.npcCoop = true
+eq(engage(wAnn), true, "NPC: ON still diverts a trainer while WILD is off")
+eq(wAnn.coop:isWaiting(), true, "the trainer wait is out")
+resetCoopWild(wAnn); resetCoopWild(wBob)
+pump(wAnn); pump(wBob)
+
+wAnn.coop.wildCoop = true
+wAnn.coop.npcCoop = false
+eq(engage(wAnn), false,
+   "NPC: OFF leaves the engine trainer alone -- no COOP_WAIT")
+eq(wAnn.coop:isWaiting(), false, "no trainer wait")
+eq(wAnn.coop.encounter, nil, "and the encounter is not claimed")
+check(not said(wAnn, "too far"),
+      "the player is not told the partner was away -- this is a choice, "
+      .. "not a missing partner")
+resetCoopWild(wAnn)
+
+do
+  local battle = {
+    battle = {
+      trainer = { classId = "OPP_BUG_CATCHER" },
+      enemyParty = { { species = "FIXMON_A" }, { species = "FIXMON_B" } },
+    },
+    onDone = function(result) wAnn.finished = result end,
+  }
+  wAnn.engine = battle
+  wAnn.stack:push(battle)
+  eq(wAnn.coop:onTrainerBattle(wAnn.game, battle, "FIX_TOWN"), false,
+     "Gen 2 trainer is the same refusal -- kind is read off battle.trainer")
+end
+resetCoopWild(wAnn)
+
+do
+  wAnn.coop.npcCoop = true
+  local battle = {
+    battle = {
+      trainer = { classId = "OPP_BUG_CATCHER" },
+      enemyParty = { { species = "FIXMON_A" }, { species = "FIXMON_B" } },
+    },
+    onDone = function(result) wAnn.finished = result end,
+  }
+  wAnn.engine = battle
+  wAnn.stack:push(battle)
+  eq(wAnn.coop:onTrainerBattle(wAnn.game, battle, "FIX_TOWN"), true,
+     "Gen 2 trainer with NPC: ON diverts -- kind is read off battle.trainer")
+  eq(wAnn.coop:isWaiting(), true, "and posts the wait")
+end
+resetCoopWild(wAnn)
+
+-- NPC off does not silence Party vs Wild.
+wAnn.coop.npcCoop = false
+wAnn.coop.wildCoop = true
+eq(wildEngage(wAnn), true, "WILD: ON still diverts grass while NPC is off")
+eq(wAnn.coop:isWaiting(), true, "the coop_wild wait is out")
+resetCoopWild(wAnn); resetCoopWild(wBob)
+pump(wAnn); pump(wBob)
+
+-- Partner with WILD: OFF is not auto-pulled; JOIN still takes the offer.
+wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
+wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
+eq(wildEngage(wAnn), true, "host with WILD: ON posts the wait")
+wBob.coop.running = true
+pump(wBob)
+check(wBob.coop:pendingOffer() ~= nil, "the offer still lands")
+wBob.coop.running = false
+wBob.coop.wildCoop = false
+wBob.peer.outbox = {}
+eq(wBob.coop:considerOffer(wBob.game, wBob.mapId), false,
+   "considerOffer will not auto-join while WILD is off")
+check(wBob.coop:pendingOffer() ~= nil,
+      "the offer stays standing -- JOIN is the override")
+check(wAnn.client.coopOffer and wAnn.client.coopOffer.skip
+      and wAnn.client.coopOffer.skip[wBob.id],
+      "skip is recorded on the host offer, not a decline")
+eq(take(wAnn.peer, Wire.COOP_DECLINE), nil, "skip is not a no")
+eq(wAnn.coop:isWaiting(), true, "and the wait still stands")
+eq(wBob.coop:joinFromMenu(wBob.game), true,
+   "JOIN on the partner still takes a coop_wild offer with WILD: OFF")
+pump(wAnn)
+eq(wAnn.coop:isWaiting(), false, "the waiter is told they joined")
+
+resetCoopWild(wAnn); resetCoopWild(wBob)
+pump(wAnn); pump(wBob)
+wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
+wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
+
+-- Partner with NPC: OFF is not auto-pulled; JOIN still takes the trainer offer.
+eq(engage(wAnn), true, "host with NPC: ON posts the trainer wait")
+wBob.coop.running = true
+pump(wBob)
+check(wBob.coop:pendingOffer() ~= nil, "the trainer offer still lands")
+wBob.coop.running = false
+wBob.coop.npcCoop = false
+wBob.peer.outbox = {}
+eq(wBob.coop:considerOffer(wBob.game, wBob.mapId), false,
+   "considerOffer will not auto-join while NPC is off")
+check(wBob.coop:pendingOffer() ~= nil,
+      "the trainer offer stays standing -- JOIN is the override")
+eq(wBob.coop:joinFromMenu(wBob.game), true,
+   "JOIN on the partner still takes a trainer offer with NPC: OFF")
+pump(wAnn)
+eq(wAnn.coop:isWaiting(), false, "the trainer waiter is told they joined")
+
+resetCoopWild(wAnn); resetCoopWild(wBob)
+pump(wAnn); pump(wBob)
+wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
+wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
+
+-- reset() re-reads mod.save so a save-swap does not keep the last
+-- playthrough's toggles (Coop is a process-lifetime singleton).
+wAnn.coop:setWantsWild(false)
+eq(wAnn.coop:wantsWild(), false, "sanity: setWantsWild flipped the field")
+stubSave[Coop.WILD_OPTION] = nil
+wAnn.coop:reset()
+eq(wAnn.coop:wantsWild(), true,
+   "reset re-reads save; a missing key is the default ON")
+stubSave[Coop.WILD_OPTION] = nil
+stubSave[Coop.NPC_OPTION] = nil
+wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
+
+-- 3-person party: an opted-out member is not pulled when someone else joins.
+local wCal = coopSide(wildHub, "WCAL")
+pump(wAnn); pump(wBob); pump(wCal)
+wAnn.party:invite({ id = wCal.client.id, name = "WCAL" })
+pump(wCal); answerConfirm(wCal, true)
+pump(wAnn); pump(wBob); pump(wCal)
+eq(wAnn.party:count(), 3, "sanity: three on the wild harness")
+
+wCal.coop.wildCoop = false
+wBob.coop.wildCoop = true
+eq(wildEngage(wAnn), true, "host posts the wait in a party of three")
+pump(wCal)
+eq(wAnn.coop:isWaiting(), true, "skip does not end the wait")
+eq(take(wAnn.peer, Wire.COOP_DECLINE), nil, "skip is not a no in a trio either")
+check(wAnn.client.coopOffer and wAnn.client.coopOffer.skip
+      and wAnn.client.coopOffer.skip[wCal.id],
+      "the opted-out third is on the waiter's skip list")
+check(wCal.coop:pendingOffer() ~= nil,
+      "the offer stays for JOIN")
+pump(wBob)
+eq(take(wCal.peer, Wire.COOP_BATTLE), nil,
+   "opted-out third is not handed a screen")
+check(take(wBob.peer, Wire.COOP_BATTLE) ~= nil, "the joiner is seated")
+eq(wCal.client.coopBattleId, nil, "and is not in the hub group")
+check(wBob.client.coopBattleId ~= nil, "joiner has a hub group")
+pump(wAnn)
+eq(wAnn.coop:isWaiting(), false, "the waiter is told they joined")
+
+resetCoopWild(wAnn); resetCoopWild(wBob); resetCoopWild(wCal)
+pump(wAnn); pump(wBob); pump(wCal)
+wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
+wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
+wCal.coop.wildCoop, wCal.coop.npcCoop = true, true
+wCal.client.coopBattleId, wBob.client.coopBattleId = nil, nil
+wAnn.client.coopBattleId = nil
+
+-- All-ON trio: first JOIN still fans COOP_BATTLE to the third (nobody skipped).
+eq(wildEngage(wAnn), true, "all-ON host posts the wait")
+pump(wBob)
+check(take(wCal.peer, Wire.COOP_BATTLE) ~= nil,
+      "all-ON third still gets COOP_BATTLE without joining")
+check(wCal.client.coopBattleId ~= nil, "and is seated")
+
+resetCoopWild(wAnn); resetCoopWild(wBob); resetCoopWild(wCal)
+pump(wAnn); pump(wBob); pump(wCal)
+wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
+wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
+wCal.coop.wildCoop, wCal.coop.npcCoop = true, true
 
 -- ------- a ranked 2-on-2 needs all four to agree
 --

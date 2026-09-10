@@ -1526,6 +1526,7 @@ return function(game)
     -- expect rather than one this leg left half-arranged.
     if H.openMmo(game) and H.selectLabel(game, "PARTY") then
       U.wait(25)
+      U.shot(game, SHOT_DIR .. "/host-party-menu.png")
       H.selectLabel(game, "LEAVE")
       H.drivePrompts(game, function()
         return #exports.party() == 0

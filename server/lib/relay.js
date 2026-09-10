@@ -954,6 +954,20 @@ handlers['mmo.coop_cancel'] = (relay, client, msg) => {
     relay.clearCoopOffer(client, reason);
     return;
   }
+  // Partner opted out of this wait (PARTY WILD/NPC off). Record them on the
+  // waiter's offer so coop_join does not seat them, but do not clear the
+  // offer and do not tell the host -- another partner can still join.
+  // Must not reuse `no`: that would force the host solo.
+  if (reason === 'skip') {
+    for (const partner of relay.partnersOf(client)) {
+      if (partner.coopOffer) {
+        partner.coopOffer.skip = partner.coopOffer.skip || {};
+        partner.coopOffer.skip[client.id] = true;
+        return;
+      }
+    }
+    return;
+  }
   // Partner declined our invite: clear the waiter's offer and tell them so
   // they can go in alone. Only `no` takes this path. Walk every other member:
   // partnerOf alone can miss the waiter in a 3-person party.
@@ -996,15 +1010,29 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   host.coopOffer = null;
   client.coopOffer = null;
 
-  const party = relay.partyMembers(client.partyId);
-  const members = party.map((m) => ({ id: m.id, name: m.name }));
-  const memberIds = party.map((m) => m.id);
+  // Seat host + joiner + every other party member who has not opted out of
+  // this wait (`offer.skip`). The joiner is always seated -- JOIN is the
+  // override after a skip. All-ON 3-person parties still seat everyone:
+  // nobody skipped. A silent 2vN for an all-ON trio is the bug this keeps.
+  const skip = offer.skip || {};
+  const members = [];
+  const memberIds = [];
+  const seated = new Set();
+  const seat = (who) => {
+    if (!who || seated.has(who.id)) return;
+    seated.add(who.id);
+    members.push({ id: who.id, name: who.name });
+    memberIds.push(who.id);
+  };
+  seat(host);
+  seat(client);
+  for (const member of relay.partyMembers(client.partyId)) {
+    if (!skip[member.id]) seat(member);
+  }
 
   // Told differently on purpose: the player who was waiting learns *who*
   // joined -- it is the answer they have been standing there for -- and the
   // player who joined is handed the roster, because they never had one.
-  // Seat every current party member (hub order), not only host+joiner --
-  // otherwise a 3-person party vs NPC is silently 2vN.
   // The mode is taken from the offer when the waiter named one: coop_wild for
   // Party vs Wild (auto-join grass), otherwise coop_npc for the trainer path.
   // The four-way path below is the only one that makes a coop_pvp, because it
@@ -1022,7 +1050,7 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // fight silently stays on host CoopSim while the joiner alone holds `c*`.
   // `id` remains the joiner (who joined), matching what clients already read.
   relay.send(host, 'mmo.coop_joined',
-    { id: client.id, name: client.name, plan: battleId });
+    { id: client.id, name: client.name, plan: battleId, allies: members });
   // `host` names the client that simulates: the player who was already standing
   // at the fight, since they are the one guaranteed to have walked into the
   // encounter -- the joiner usually has too, but a join taken from the ACTIONS
@@ -1030,8 +1058,9 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // as coop_wild without re-deriving from an offer that is already cleared.
   // `npcId` / `event` (PROTOCOL 20) ride so a menu joiner can finish the
   // trainer off without a local BattleState -- never fuzzy-matched by class.
-  // Every non-host party member gets coop_battle so a third seat is not
-  // left holding a mediated id with no screen.
+  // Every seated non-host gets coop_battle so a third seat is not left
+  // holding a mediated id with no screen -- and an opted-out member is
+  // not handed one they turned off.
   const battleMsg = {
     id: battleId, side: 'a', allies: members, battle, host: host.id, mode,
   };
