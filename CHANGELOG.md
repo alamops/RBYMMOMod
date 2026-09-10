@@ -6,6 +6,15 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-09-09
+
+### Added
+
+- **GSC Official Server, Gen 2 only.** Gold / Silver / Crystal boots see
+  `GSC MMO OFFICIAL` (`play2.rbymmo.com:25565`, code `NWH9PT`) at the top
+  of SERVERS. Red / Blue / Yellow still see only `RBY MMO OFFICIAL`. Each
+  official refuses a typed join from the other generation.
+
 ## [1.4.0] - 2026-09-09
 
 ### Added

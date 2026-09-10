@@ -81,10 +81,10 @@ local function keyOf(address)
   return clean:lower()
 end
 
--- The one row that belongs to the product rather than to the player's
--- history. A fresh table is returned every time so a caller of the exported
--- list cannot rename the canonical copy in memory. The key is made by the
--- same normaliser as every remembered hub, which is what lets ingestion and
+-- The rows that belong to the product rather than to the player's history.
+-- A fresh table is returned every time so a caller of the exported list
+-- cannot rename the canonical copy in memory. The key is made by the same
+-- normaliser as every remembered hub, which is what lets ingestion and
 -- presentation recognise an old saved copy as the same server.
 --
 -- Resolved on first use and remembered, rather than computed while this chunk
@@ -93,42 +93,59 @@ end
 -- (Config.applyPort). A key baked at load would be keyed on the fallback port
 -- while every later keyOf() used the one the player set -- one hub filed under
 -- two keys, and isFeaturedAddress answering false for the official host.
--- FEATURED_SERVER_HOST carries an explicit port today, which makes that
--- harmless; this makes it harmless whatever that constant says next.
+-- Featured hosts carry an explicit port today, which makes that harmless;
+-- this makes it harmless whatever those constants say next.
 --
 -- A table rather than a plain local so "not resolved yet" stays distinct from
--- "resolved to nil", which is what a malformed FEATURED_SERVER_HOST gives.
-local featuredKeyMemo = {}
-local function featuredKey()
-  if not featuredKeyMemo.done then
-    featuredKeyMemo.done = true
-    featuredKeyMemo.key = keyOf(Config.FEATURED_SERVER_HOST)
+-- "resolved to nothing", which is what a malformed featured host gives.
+local featuredMemo = { done = false, byKey = {}, specs = {} }
+
+local function featuredIndex()
+  if not featuredMemo.done then
+    featuredMemo.done = true
+    for i = 1, #(Config.FEATURED_SERVERS or {}) do
+      local spec = Config.FEATURED_SERVERS[i]
+      local key = spec and keyOf(spec.host)
+      if key then
+        featuredMemo.byKey[key] = spec
+        featuredMemo.specs[#featuredMemo.specs + 1] = spec
+      end
+    end
   end
-  return featuredKeyMemo.key
+  return featuredMemo
 end
 
-local function featuredEntry()
+local function featuredSpec(key)
+  if not key then return nil end
+  return featuredIndex().byKey[key]
+end
+
+local function isFeaturedKey(key)
+  return featuredSpec(key) ~= nil
+end
+
+local function featuredEntry(spec)
   return {
-    key = featuredKey(),
-    address = Config.FEATURED_SERVER_HOST,
-    name = Config.FEATURED_SERVER_NAME,
+    key = keyOf(spec.host),
+    address = spec.host,
+    name = spec.name,
     fav = false,
-    code = Wire.code(Config.FEATURED_SERVER_CODE),
+    code = Wire.code(spec.code),
     last = 0,
     featured = true,
   }
 end
 
-local function featuredVisible(game)
-  return Config.featuredServerAllowed(Gen.generation(game))
+local function featuredAllowed(spec, game)
+  return Config.featuredServerAllowed(Gen.generation(game), spec.host)
 end
 
--- True when `address` is the product-owned official hub (any typing shape
--- that normalises to the same key). Used by Client to refuse a Gen 2 dial
--- that skipped the SERVERS menu.
+-- True when `address` is a product-owned official hub (any typing shape
+-- that normalises to the same key). Used by Client to refuse a dial of the
+-- other generation's official that skipped the SERVERS menu.
 function M.isFeaturedAddress(address)
   local id = keyOf(address)
-  return id ~= nil and id == featuredKey()
+  return id ~= nil and isFeaturedKey(id)
 end
 
 -- What a hub is called before anybody names it.
@@ -323,12 +340,12 @@ function M:_ingest(rows, only)
     if entry and not only and raw.auto == true and auto == nil then
       auto = entry.key
     end
-    -- Older builds may already have remembered the official address after a
+    -- Older builds may already have remembered an official address after a
     -- successful welcome. It is represented by the synthetic row now, so it
     -- is neither loaded into the persisted store nor counted by eviction --
-    -- but its `auto` flag above is still read, because the featured row is
+    -- but its `auto` flag above is still read, because a featured row is
     -- exactly the row that has nowhere else to record one.
-    if entry and entry.key ~= featuredKey() then
+    if entry and not isFeaturedKey(entry.key) then
       local known = self.entries[entry.key] ~= nil or self.dropped[entry.key]
       if not (only and known) then self.entries[entry.key] = entry end
     end
@@ -411,9 +428,9 @@ function M:_load()
   evict(self)
   -- A key that survived both readers but names no row is nothing this store
   -- can act on -- the row was evicted by the other half of the merge, or
-  -- deleted in an earlier session. The featured row is the exception: it is
-  -- synthetic and is always there to be dialled.
-  if self.autoKey and self.autoKey ~= featuredKey()
+  -- deleted in an earlier session. Featured rows are the exception: they are
+  -- synthetic and are always there to be dialled (on a boot that may see them).
+  if self.autoKey and not isFeaturedKey(self.autoKey)
       and not self.entries[self.autoKey] then
     self.autoKey = nil
   end
@@ -448,7 +465,7 @@ end
 -- would work perfectly in memory, vanish on relaunch, and fail no test,
 -- because sanitise would just fill its default back in on the way in.
 --
--- The featured row is appended when it is the one that auto-joins, and only
+-- A featured row is appended when it is the one that auto-joins, and only
 -- then. It is product configuration rather than history, so it is not on the
 -- list and must not consume one of SERVER_LIST_MAX's slots -- but "I dial the
 -- official hub on the way in" is a player setting like any other, and this
@@ -463,9 +480,10 @@ function M:_persistRows()
     if self.autoKey == entry.key then row.auto = true end
     out[#out + 1] = row
   end
-  if self.autoKey == featuredKey() then
-    out[#out + 1] = { key = featuredKey(),
-                      address = Config.FEATURED_SERVER_HOST, auto = true }
+  local spec = featuredSpec(self.autoKey)
+  if spec then
+    out[#out + 1] = { key = keyOf(spec.host),
+                      address = spec.host, auto = true }
   end
   return out
 end
@@ -546,37 +564,43 @@ function M:get(key)
   return self.entries[id]
 end
 
--- The SERVERS screen has one product-owned row in addition to persisted
+-- The SERVERS screen has product-owned rows in addition to persisted
 -- recents. Keep that projection separate from list/get so external callers
--- still see exactly the history they saw before the featured server existed.
--- `game` (optional) gates the official row by boot generation — Gen 2 hides
--- it while the public hub stays Gen 1-only.
+-- still see exactly the history they saw before featured servers existed.
+-- `game` (optional) gates each official by boot generation -- Gen 1 sees
+-- RBY Official, Gen 2 sees GSC Official, and a missing game is Gen 1.
 function M:menuList(game)
   self:_load()
   local out = {}
-  if featuredVisible(game) then
-    out[#out + 1] = featuredEntry()
+  for _, spec in ipairs(featuredIndex().specs) do
+    if featuredAllowed(spec, game) then
+      out[#out + 1] = featuredEntry(spec)
+    end
   end
   for _, entry in ipairs(self:_rows()) do
-    -- `_ingest` and `record` already keep this key out of entries. Retain the
-    -- guard at the projection boundary too: even a caller that has modified
-    -- the public entries table cannot make the official server appear twice.
-    if entry.key ~= featuredKey() then out[#out + 1] = entry end
+    -- `_ingest` and `record` already keep featured keys out of entries.
+    -- Retain the guard at the projection boundary too: even a caller that
+    -- has modified the public entries table cannot make an official appear
+    -- twice.
+    if not isFeaturedKey(entry.key) then out[#out + 1] = entry end
   end
   return out
 end
 
--- Resolves keys handed back by menuList(), including its synthetic first row.
+-- Resolves keys handed back by menuList(), including its synthetic rows.
 -- Normal get() intentionally does not: it remains the persisted-recents API.
--- When the official row is generation-gated off, menuGet returns nil for its
--- key the same way a deleted recent would.
+-- When an official row is generation-gated off, menuGet returns nil for its
+-- key the same way a deleted recent would -- but only when `game` is passed.
+-- Omitted, it still answers the canonical row so a name lookup for the
+-- auto-join holder works after a player armed the other generation's official.
 function M:menuGet(key, game)
   self:_load()
   local id = keyOf(key)
   if not id then return nil end
-  if id == featuredKey() then
-    if not featuredVisible(game) then return nil end
-    return featuredEntry()
+  local spec = featuredSpec(id)
+  if spec then
+    if game ~= nil and not featuredAllowed(spec, game) then return nil end
+    return featuredEntry(spec)
   end
   return self.entries[id]
 end
@@ -622,9 +646,10 @@ end
 -- stale menu row cannot switch off a setting that has since moved.
 --
 -- `game` is the boot the row is being resolved against, and it is here for
--- the same reason menuGet takes one: the featured row is generation-gated, so
--- a Gold game must not be able to arm a dial at a hub it is not allowed to
--- see. Absent, it resolves as Gen 1 -- which is what every headless caller is.
+-- the same reason menuGet takes one: official rows are generation-gated, so
+-- a Gold game must not be able to arm a dial at the RBY hub, and a Red game
+-- must not arm the GSC one. Absent, it resolves as Gen 1 -- which is what
+-- every headless caller is.
 function M:setAutoJoin(key, on, game)
   self:_load()
   local id = keyOf(key)
@@ -673,12 +698,13 @@ function M:record(address, code)
   end
 
   local key = clean:lower()
-  -- A welcome from the official hub proves the synthetic row works; it does
+  -- A welcome from an official hub proves the synthetic row works; it does
   -- not turn product configuration into player history. In particular this
   -- skips persistence and eviction, and keeps the configured code canonical.
-  if key == featuredKey() then
+  local spec = featuredSpec(key)
+  if spec then
     self.entries[key] = nil
-    return featuredEntry()
+    return featuredEntry(spec)
   end
   local entry = self.entries[key]
   if not entry then
@@ -703,7 +729,7 @@ end
 -- refused when nothing printable survives -- a blank row is a row nobody can
 -- tell from the one above it.
 function M:rename(key, name)
-  if keyOf(key) == featuredKey() then
+  if isFeaturedKey(keyOf(key)) then
     self:_warn("the featured server is built in and cannot be renamed")
     return nil
   end
@@ -729,7 +755,7 @@ function M:rename(key, name)
 end
 
 function M:setFavorite(key, fav)
-  if keyOf(key) == featuredKey() then
+  if isFeaturedKey(keyOf(key)) then
     self:_warn("the featured server is already pinned and cannot be changed")
     return nil
   end
@@ -757,7 +783,7 @@ end
 -- only answer that leaves one row per hub -- and the alternative, refusing the
 -- edit, would strand the player with two rows and no way to merge them.
 function M:setAddress(key, newAddress)
-  if keyOf(key) == featuredKey() then
+  if isFeaturedKey(keyOf(key)) then
     self:_warn("the featured server's address is built in and cannot be changed")
     return nil
   end
@@ -775,7 +801,7 @@ function M:setAddress(key, newAddress)
   end
 
   local id = clean:lower()
-  if entry.featured or id == featuredKey() then
+  if entry.featured or isFeaturedKey(id) then
     self:_warn("the featured server's address is built in and cannot be changed")
     return nil
   end
@@ -807,7 +833,7 @@ end
 -- through to the connect path and fail every challenge silently, which is the
 -- failure this validation exists to turn into a sentence.
 function M:setCode(key, code)
-  if keyOf(key) == featuredKey() then
+  if isFeaturedKey(keyOf(key)) then
     self:_warn("the featured server's join code is built in and cannot be changed")
     return nil
   end
@@ -849,7 +875,7 @@ end
 -- does: this is the one write that wants the list shorter, so the eviction
 -- that follows a fold-in has no row here to protect.
 function M:remove(key)
-  if keyOf(key) == featuredKey() then
+  if isFeaturedKey(keyOf(key)) then
     self:_warn("the featured server is built in and cannot be deleted")
     return nil
   end

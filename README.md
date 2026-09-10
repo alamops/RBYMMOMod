@@ -11,7 +11,7 @@ A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp).
 ![LÖVE 11.x](https://img.shields.io/badge/L%C3%96VE-11.x-e64998?style=for-the-badge)
 ![Players 2–64](https://img.shields.io/badge/players-2--64-3aa757?style=for-the-badge)
 ![No server needed](https://img.shields.io/badge/dedicated%20server-optional-4c8fd6?style=for-the-badge)
-![v1.4.0](https://img.shields.io/badge/version-1.4.0-3aa757?style=for-the-badge)
+![v1.4.1](https://img.shields.io/badge/version-1.4.1-3aa757?style=for-the-badge)
 ![MIT](https://img.shields.io/badge/licence-MIT-666?style=for-the-badge)
 
 **No server to rent. No accounts. No signup.** One of you hosts from inside
@@ -726,7 +726,8 @@ title screen, and never on its own: launching the game and stopping at the
 menu connects you to nothing. The armed row is marked `▼` on the list, so
 you can see which hub your game opens into without opening anything, and its
 own row reads `NO AUTOJOIN` — press it again to switch it off. `RBY MMO
-OFFICIAL` can be the armed one too; it's the only setting on that row that's
+OFFICIAL` (Red / Blue / Yellow) and `GSC MMO OFFICIAL` (Gold / Silver /
+Crystal) can be the armed one too; it's the only setting on that row that's
 yours rather than built in.
 
 **Only one server can auto-join.** Arming a second is what disarms the first,
@@ -1626,7 +1627,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `1.4.0` (`experimental: false` — on by default when installed). The full
+It's `1.4.1` (`experimental: false` — on by default when installed). The full
 list lives in `mod.card` under `differences.known`. The ones that'll actually
 bite you:
 

@@ -1255,9 +1255,9 @@ function M:install()
   --
   -- Resolved off the *key* the store holds rather than off autoJoinEntry, and
   -- that is the whole point of it existing: autoJoinEntry answers "the row
-  -- this boot may dial", which is nil for the official server on a Gen 2 game
+  -- this boot may dial", which is nil for the other generation's official
   -- -- and the servers file is machine-level, shared by every boot, so a
-  -- player who armed the official hub on Red and then opens SERVERS on Gold
+  -- player who armed RBY Official on Red and then opens SERVERS on Gold
   -- would have had it replaced without ever being asked. A name is available
   -- either way; the key is the honest fallback when even that is not.
   local function serverAutoJoinName()
