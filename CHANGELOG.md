@@ -6,6 +6,8 @@ here must match `manifest.version`.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-09
+
 ### Added
 
 - **Party menu WILD / NPC coop toggles, on by default.** While partied,
