@@ -62,10 +62,17 @@ The menu's **ADDRESS** row then shows something like `192.168.1.125:7788`
 with `CODE: A7K3P9` on the line under it — they're read out in the same
 breath, so they're shown in the same box.
 
-**4. Everyone else joins.** `START → MMO → JOIN GAME`, make their own
-trainer, then **the address and the passcode**, in that order, before
-anything is dialled. (**SELECT** flips the keyboard to digits — the vanilla
-one has none.)
+**4. Everyone else joins.** On iPhone, `START → MMO → JOIN QR` opens the
+camera. Point it at the host's QR screen and the address and passcode are
+filled in automatically; allow camera access when iOS asks. On desktop, or
+when the camera is unavailable, use `JOIN GAME`, make a trainer, and enter the
+**address and passcode** in that order. (**SELECT** flips the keyboard to
+digits — the vanilla one has none.)
+
+QR pairing is LAN-only and expires after two minutes. It does not replace the
+normal join-code handshake; it only saves typing. Internet play still needs a
+forwarded port, a VPN/overlay address, or a dedicated hub, so use the typed
+path for those addresses.
 
 An IP or a hostname both work — `192.168.1.125:7788` or
 `MYBOX.EXAMPLE.COM:7788` — and leaving the port off fills in **7788**. So does
