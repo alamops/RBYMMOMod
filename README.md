@@ -69,8 +69,9 @@ when the camera is unavailable, use `JOIN GAME`, make a trainer, and enter the
 **address and passcode** in that order. (**SELECT** flips the keyboard to
 digits — the vanilla one has none.)
 
-QR pairing is LAN-only and expires after two minutes. It does not replace the
-normal join-code handshake; it only saves typing. Internet play still needs a
+QR pairing is LAN-only and a scanned payload is accepted for two minutes.
+That is a client-side freshness check, not a replacement for the normal
+join-code handshake; it only saves typing. Internet play still needs a
 forwarded port, a VPN/overlay address, or a dedicated hub, so use the typed
 path for those addresses.
 

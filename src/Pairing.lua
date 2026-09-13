@@ -4,7 +4,9 @@
 -- the join code is carried so scanning is one step, but the client still
 -- proves it with the normal mmo.challenge/mmo.auth exchange. The payload is
 -- LAN-only because an address that is useful outside the local network needs
--- a different security and NAT story than this QR can provide.
+-- a different security and NAT story than this QR can provide. The expiry
+-- is a client-side freshness check; the join code remains the normal handshake
+-- credential and is not made single-use by this bootstrap payload.
 
 local need, mod = ...
 local Config = need("Config")
@@ -22,8 +24,15 @@ end
 local function privateIPv4(value)
   local a, b, c, d = tostring(value or ""):match(
     "^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
-  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
-  if not a or a > 255 or b > 255 or c > 255 or d > 255 then return false end
+  local function octet(text)
+    -- Do not let legacy socket parsers reinterpret a leading-zero octet as
+    -- octal after this validator has classified it as a private address.
+    if not text or (#text > 1 and text:sub(1, 1) == "0") then return nil end
+    local number = tonumber(text)
+    return number and number <= 255 and number or nil
+  end
+  a, b, c, d = octet(a), octet(b), octet(c), octet(d)
+  if not a or not b or not c or not d then return false end
   return a == 10 or (a == 172 and b >= 16 and b <= 31)
     or (a == 192 and b == 168)
 end
