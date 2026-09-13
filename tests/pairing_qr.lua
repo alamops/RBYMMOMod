@@ -56,4 +56,18 @@ for _, row in ipairs(matrix) do
   end
 end
 
+-- L/Mask 0 has the standard QR format word 0x77c4. Check the primary
+-- copy so a broken BCH remainder cannot pass a shape-only smoke test.
+local format = 0x77c4
+for i = 0, 14 do
+  local x, y
+  if i <= 5 then x, y = 9, i + 1
+  elseif i == 6 then x, y = 9, 8
+  elseif i == 7 then x, y = 9, 9
+  elseif i == 8 then x, y = 8, 9
+  else x, y = 15 - i, 9 end
+  check(matrix[y][x] == (math.floor(format / 2 ^ i) % 2 == 1),
+    "QR format bits are invalid")
+end
+
 print("pairing_qr: all checks passed")

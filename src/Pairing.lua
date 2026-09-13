@@ -90,7 +90,7 @@ function M.decode(text, at)
   code = Wire.code(code)
   if not code then return nil, "QR has no usable join code" end
   expires = tonumber(expires)
-  if not expires or expires < (tonumber(at) or now()) then
+  if not expires or expires <= (tonumber(at) or now()) then
     return nil, "join QR expired"
   end
   if #pairNonce < 8 or #pairNonce > 64 then

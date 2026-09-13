@@ -101,10 +101,10 @@ local function bch(value, poly)
   while p > 0 do degree = degree + 1; p = math.floor(p / 2) end
   local v = value * 2 ^ (degree - 1)
   while true do
-    local shift = 0; p = v
-    while p >= poly do p = math.floor(p / 2); shift = shift + 1 end
-    if shift == 0 then return v end
-    v = bxor(v, poly * 2 ^ shift)
+    local vDegree = 0; p = v
+    while p > 0 do vDegree = vDegree + 1; p = math.floor(p / 2) end
+    if vDegree < degree then return v end
+    v = bxor(v, poly * 2 ^ (vDegree - degree))
   end
 end
 
