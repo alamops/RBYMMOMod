@@ -3,10 +3,12 @@
 # Entries are exact relative file paths -- modkit matches them literally, so
 # a bare "tests/" silently does nothing. Add the file, not the directory.
 
-# The suite requires engine modules (tests.modkit, src.core.Data), which is a
-# private require against the shipped package, and `pack` treats warnings as
-# fatal.
+# The suites require engine modules (tests.modkit, src.core.Data), which are
+# private requires against the shipped package, and `pack` treats warnings as
+# fatal. The focused pairing suite is checkout validation too; no test code
+# belongs in a player's installed mod archive.
 tests/rby_mmo_test.lua
+tests/pairing_qr.lua
 
 # Test-fixture data, not mod content: the shared HMAC vectors that pin the Lua
 # client's auth answer against the Node hub's. Only tests/rby_mmo_test.lua
