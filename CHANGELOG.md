@@ -4,7 +4,16 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [Unreleased]
+## [1.4.2] - 2026-09-16
+
+### Changed
+
+- **Classic mid-battle PKMN is a full-page picker.** SWITCH, item-target,
+  and send-out stay on the fight screen (`Font.drawBox` / HudTiles, not the
+  engine PartyMenu). A 5-tile preview of the highlighted mon sits above a
+  6-row bag-icon list so a full party fits. HP:/XP: are 5px labels; the XP
+  pill uses the poke-card EXP blue inside the 2px HP trough. Healthy mons
+  leave the status slot blank.
 
 ## [1.4.1] - 2026-09-09
 
