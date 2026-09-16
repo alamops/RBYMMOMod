@@ -5773,6 +5773,36 @@ local function partyFrontFor(self, mon)
   return hit or nil
 end
 
+-- One classic full-page picker row from a party / bench mon. Front pic is
+-- the battle FRONT (foe-stage art); the list icon is the start-menu bag
+-- sprite. Types and exp come off the species def / save mon, never invented.
+local function classicPickerRow(self, mon, label)
+  if type(mon) ~= "table" then return nil end
+  local data = self.game and self.game.data
+  local pokemon = (data and data.pokemon) or {}
+  local def = pokemon[mon.species]
+  local hp = tonumber(mon.hp)
+  local maxHp = tonumber(mon.maxHp)
+    or (type(mon.stats) == "table" and tonumber(mon.stats.hp))
+  return {
+    label = tostring(label or mon.nickname or (def and def.name)
+      or mon.species or "?"),
+    level = mon.level,
+    status = mon.status,
+    hp = hp,
+    maxHp = maxHp,
+    types = ClassicBattle.typeNames(def, engine and engine.TypeChart),
+    expFrac = expFraction(self.game, mon),
+    fainted = (hp or 0) <= 0,
+    front = partyFrontFor(self, mon),
+    icon = seatIconFor(self, nil, { mon = mon }),
+    species = mon.species,
+    hpForIcon = hp,
+    maxHpForIcon = maxHp,
+  }
+end
+
+
 function M:evolveCenterFront()
   local movie = self.evolving
   if not (movie and movie.center) then return nil end
@@ -10396,6 +10426,53 @@ function M:drawReplace()
   self:drawList(rows, self.switchIndex or 1, "Who's next?")
 end
 
+-- Opaque 160×144 party screen for SWITCH / send-out / item target.
+-- Same row order as the input handlers. Returns false so an empty bench
+-- still uses the "no one else" box over the field.
+function M:drawClassicPartyPicker()
+  local Font = engine and engine.Font
+  local HudTiles = engine and engine.HudTiles
+  if not Font then return false end
+  local source
+  if self.replacing then
+    local seat = self.sim and self.sim:slot(self.mine)
+    source = seat and self:benchOf(seat) or {}
+  elseif self.phase == "switch" then
+    local mine = self:mySlot()
+    source = mine and self:benchOf(mine) or {}
+  elseif self.phase == "item_party" then
+    local seat = self:mySlot()
+    local party = (seat and seat.party) or {}
+    source = {}
+    for _, row in ipairs(self:itemPartyRows()) do
+      source[#source + 1] = { mon = party[row.index], label = row.label }
+    end
+  else
+    return false
+  end
+  local rows = {}
+  for _, entry in ipairs(source) do
+    local row = classicPickerRow(self, entry.mon, entry.label)
+    if row then rows[#rows + 1] = row end
+  end
+  if #rows == 0 then return false end
+  local counter = 0
+  if love and love.timer and love.timer.getTime then
+    local ok, t = pcall(love.timer.getTime)
+    if ok and type(t) == "number" then counter = math.floor(t * 60) end
+  end
+  return ClassicBattle.drawPartyPicker(Font, HudTiles, {
+    rows = rows,
+    cursor = self.switchIndex or 1,
+    game = self.game,
+    modules = engine and {
+      PokemonIcon = engine.PokemonIcon,
+      PartyMenu = engine.PartyMenu,
+    } or {},
+    counter = counter,
+  })
+end
+
 function M:drawSwitch()
   local bench = self:benchOf(self:mySlot())
   if #bench == 0 then
@@ -10682,6 +10759,10 @@ function M:drawSafe()
   end
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", 0, 0, 160, 144)
+  if self:drawClassicPartyPicker() then
+    love.graphics.setColor(1, 1, 1, 1)
+    return
+  end
   self:drawField()
   -- Trainer is painted inside drawField (under the panels) while the opening
   -- lines run; drawing it here again put the sprite over ally readouts.

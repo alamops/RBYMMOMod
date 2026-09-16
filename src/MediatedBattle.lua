@@ -135,6 +135,9 @@ local function loadEngine()
     -- levels, the plate simply draws no strip (see `expFraction`). Twin of
     -- CoopBattle's own grab, and for the same reason.
     Growth = grab("Growth", "src.pokemon.Growth"),
+    -- Start-menu bag icons for the classic full-page party picker.
+    PokemonIcon = grab("PokemonIcon", "src.ui.PokemonIcon"),
+    PartyMenu = grab("PartyMenu", "src.ui.PartyMenu"),
   }
   -- Optional SFX / music. Missing Sound or Music must not fail the whole
   -- load — headless / no-audio builds still fight without them.
@@ -4226,6 +4229,82 @@ function M:partyRows()
   return out
 end
 
+-- Same ordered list `updateSwitch` / `updateItemParty` index into, with the
+-- preview fields the full-page classic picker paints. `all` is the item
+-- menu (Revive wants the fainted one); SWITCH filters living non-active.
+function M:classicPickerRows(all)
+  local out = {}
+  local data = self.game and self.game.data
+  local pokemon = (data and data.pokemon) or {}
+  local TypeChart = (loadEngine() or {}).TypeChart
+  for _, row in ipairs(self:partyRows()) do
+    if all or (not row.fainted and (self.replaceOnly or not row.active)) then
+      local sheet = (self.mine or {})[row.index]
+      local save = self:saveMon(row.index)
+      local speciesKey = (save and save.species)
+        or (sheet and sheet.speciesId)
+        or (sheet and sheet.species)
+      local def = (speciesKey and pokemon[speciesKey])
+        or (sheet and pokemon[sheet.species])
+      local hp = sheet and tonumber(sheet.hp)
+      local maxHp = sheet and tonumber(sheet.maxHp)
+      if save then
+        if hp == nil then hp = tonumber(save.hp) end
+        if maxHp == nil then
+          maxHp = save.stats and tonumber(save.stats.hp)
+        end
+      end
+      local frac = expFraction(self.game, save)
+      -- The active seat's shownExpFrac is the bar the HUD already
+      -- animates; save exp is exact-level (0 fill) on a freshly built
+      -- Pokemon.new and would paint an empty track.
+      if row.active then
+        local slot = self.slots and self.slots[self:mySlot()]
+        if slot and type(slot.shownExpFrac) == "number" then
+          frac = slot.shownExpFrac
+        end
+      end
+      out[#out + 1] = {
+        label = row.label,
+        level = (sheet and sheet.level) or (save and save.level),
+        status = (sheet and sheet.status) or (save and save.status),
+        hp = hp,
+        maxHp = maxHp,
+        types = ClassicBattle.typeNames(def, TypeChart),
+        expFrac = frac,
+        fainted = row.fainted,
+        front = self:partyFront(row.index, save or sheet),
+        icon = (type(speciesKey) == "string" and speciesKey ~= "")
+          and self:seatIcon(speciesKey, save or sheet) or nil,
+        species = speciesKey,
+        hpForIcon = hp,
+        maxHpForIcon = maxHp,
+      }
+    end
+  end
+  return out
+end
+
+function M:drawClassicPartyPicker(Font, HudTiles)
+  local all = self.phase == "item_party"
+  local rows = self:classicPickerRows(all)
+  if #rows == 0 then return false end
+  local eng = loadEngine() or {}
+  local counter = 0
+  if love and love.timer and love.timer.getTime then
+    local ok, t = pcall(love.timer.getTime)
+    if ok and type(t) == "number" then counter = math.floor(t * 60) end
+  end
+  return ClassicBattle.drawPartyPicker(Font, HudTiles, {
+    rows = rows,
+    cursor = self.switchIndex or 1,
+    game = self.game,
+    modules = { PokemonIcon = eng.PokemonIcon, PartyMenu = eng.PartyMenu },
+    counter = counter,
+  })
+end
+
+
 function M:commitItem(partyIndex, moveIndex)
   local pick = self.itemPick
   if not pick then return false end
@@ -7205,7 +7284,15 @@ function M:drawSafe()
   local Font = eng.Font
   local HudTiles = eng.HudTiles
 
+  -- Full-page party picker covers the stage; faint/anim lines still use
+  -- the field + bottom box so a send-out is not painted over a KO.
+  if not self.shown and not self.anim
+      and (self.phase == "switch" or self.phase == "item_party") then
+    if self:drawClassicPartyPicker(Font, HudTiles) then return end
+  end
+
   self:drawFieldPics()
+
   self:drawEvolveCenterClassic()
   self:drawEnemyHUD(Font, HudTiles)
   self:drawPlayerHUD(Font, HudTiles)
