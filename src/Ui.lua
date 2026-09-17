@@ -21,6 +21,8 @@ local Chars = need("Chars")
 local Cast = need("Cast")
 local Places = need("Places")
 local Coop = need("Coop")
+local Pairing = need("Pairing")
+local Qr = need("Qr")
 
 local M = {}
 M.__index = M
@@ -132,6 +134,8 @@ local SCREEN = {
   HOSTSIZE = "RbyMmoHostSize",
   HOSTCODE = "RbyMmoHostCode",
   HOSTINFO = "RbyMmoHostInfo",
+  HOSTQR   = "RbyMmoHostQr",
+  JOINQR   = "RbyMmoJoinQr",
   JOINADDR = "RbyMmoJoinAddress",
   JOINCODE = "RbyMmoJoinCode",
   SERVERS  = "RbyMmoServers",
@@ -1145,6 +1149,225 @@ function M:install()
     return Wire.formatCode(code) or ""
   end
 
+  -- Generating a host QR is pure Lua and does not require the camera
+  -- scanner. Keep those capabilities separate: a host must be able to show
+  -- a QR even on a build where scanning is unavailable, while JOIN QR should
+  -- remain gated on the native camera bridge. Qr is shipped inside this mod
+  -- so host display does not depend on the optional Loader facade.
+  local function qrEncodeAvailable()
+    return Qr and type(Qr.encode) == "function"
+  end
+
+  local function qrScanAvailable()
+    return mod.qrcode and mod.qrcode.available
+      and mod.qrcode:available() == true
+  end
+
+  -- Host QR display is pure Lua and works independently of the optional
+  -- native camera bridge. On desktop it remains the old one-button address
+  -- box.
+  local function buildHostQr(client)
+    if not qrEncodeAvailable() then return nil, nil, "QR encoder unavailable" end
+    local address = client:hostAddress()
+    -- Keep the match as a standalone final call. Wrapping a multi-return
+    -- string.match in `and ... or ...` truncates its second return in Lua,
+    -- which made the visible port 7788 arrive at Pairing.new as nil.
+    local host, port
+    if type(address) == "string" then
+      host, port = address:match("^([^:]+):(%d+)$")
+    end
+    local payload, why = Pairing.new(host, port, client:hostJoinCode())
+    if not payload then return nil, nil, why end
+    local text = Pairing.encode(payload)
+    local ok, matrix, encodeError = pcall(Qr.encode, text)
+    if not ok then return payload, nil, tostring(matrix) end
+    return payload, matrix, encodeError
+  end
+
+  local HostInfo = {}
+  HostInfo.__index = HostInfo
+
+  function HostInfo.new(game)
+    local self = setmetatable({ game = game, payload = nil, qr = nil,
+                                error = nil }, HostInfo)
+    local platform = mod.platform
+    if platform and platform.requestLocalNetworkAccess then
+      pcall(platform.requestLocalNetworkAccess, platform)
+    end
+    self.payload, self.qr, self.error = buildHostQr(ctx.client)
+    return self
+  end
+
+  function HostInfo:update()
+    local input = self.game.input
+    if input:wasPressed("b") then
+      self.game.stack:pop()
+    elseif input:wasPressed("a") then
+      if self.qr then
+        mod.ui.push(self.game, SCREEN.HOSTQR, {
+          qr = self.qr, payload = self.payload,
+        })
+      else
+        self.game.stack:pop()
+      end
+    end
+  end
+
+  function HostInfo:draw()
+    local Font = mod.ui.Font
+    if not (Font and Font.draw) then return end
+    local client = ctx.client
+    local address = client:hostAddress()
+    local code = client:hostJoinCode()
+    Font.drawBox(0, 0, 20, 18)
+    Font.draw("HOSTING", 16, 8)
+    if type(address) == "string" and not address:find("^%?") then
+      Font.draw(address, 16, 32)
+    else
+      Font.draw(("PORT %s"):format(tostring(Config.DEFAULT_PORT)), 16, 32)
+      Font.draw("IP HIDDEN", 16, 48)
+    end
+    Font.draw(("CODE %s"):format(codeText(code)), 16, 64)
+    if self.qr then
+      Font.draw("A: SHOW QR", 16, 96)
+    elseif self.error then
+      Font.draw("QR UNAVAILABLE", 16, 96)
+      Font.draw(tostring(self.error):sub(1, 24), 16, 108)
+    end
+    Font.draw("B: BACK", 16, 124)
+  end
+
+  local HostQr = {}
+  HostQr.__index = HostQr
+  function HostQr.new(game, opts)
+    opts = opts or {}
+    local payload, qr, error = opts.payload, opts.qr, nil
+    -- Mint on entry rather than trusting the copy made for the ADDRESS page;
+    -- pairing payloads expire after two minutes.
+    local freshPayload, freshQr, why = buildHostQr(ctx.client)
+    if freshQr then
+      payload, qr = freshPayload, freshQr
+    elseif not qr then
+      error = why
+    end
+    return setmetatable({ game = game, qr = qr, payload = payload,
+                          error = error }, HostQr)
+  end
+
+  function HostQr:update()
+    local input = self.game.input
+    if input:wasPressed("a") or input:wasPressed("b") then
+      self.game.stack:pop()
+    end
+  end
+
+  function HostQr:draw()
+    local Font = mod.ui.Font
+    if not (Font and Font.draw) then return end
+    Font.drawBox(0, 0, 20, 18)
+    -- Keep the title clear of the top border; the QR backing starts below it.
+    Font.draw("SCAN TO JOIN", 16, 8)
+    local matrix = self.qr
+    if type(matrix) ~= "table" then
+      Font.draw("QR UNAVAILABLE", 16, 48)
+      if self.error then Font.draw(tostring(self.error):sub(1, 24), 16, 64) end
+      Font.draw("B: BACK", 16, 132)
+      return
+    end
+    local size = #matrix
+    local scale = math.floor(88 / size)
+    local total = size * scale
+    local quiet = scale * 4 -- QR readers require a four-module clear zone.
+    local x, y = math.floor((160 - total) / 2), 24
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.rectangle("fill", x - quiet, y - quiet,
+                            total + quiet * 2, total + quiet * 2)
+    love.graphics.setColor(0, 0, 0, 1)
+    for row, cells in ipairs(matrix) do
+      for col, dark in ipairs(cells) do
+        if dark then
+          love.graphics.rectangle("fill", x + (col - 1) * scale,
+                                  y + (row - 1) * scale, scale, scale)
+        end
+      end
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+    local code = self.payload and self.payload.code
+    Font.draw(code and ("CODE " .. codeText(code)) or "", 16, 116)
+    Font.draw("A/B: BACK", 16, 132)
+  end
+
+  local JoinQr = {}
+  JoinQr.__index = JoinQr
+  function JoinQr.new(game)
+    local self = setmetatable({ game = game, active = false,
+                                status = "POINT CAMERA AT HOST QR" }, JoinQr)
+    if qrScanAvailable() then
+      local ok, started = pcall(mod.qrcode.scan.start)
+      if ok and started ~= false then
+        self.active = true
+        self.status = "SCANNING..."
+      else
+        self.status = "CAMERA UNAVAILABLE"
+      end
+    else
+      self.status = "QR UNAVAILABLE"
+    end
+    return self
+  end
+
+  function JoinQr:finish(text)
+    if type(text) ~= "string" then return false end
+    local marker, detail = text:match("^__gen1recomp_qr:([%w_%-]+):?(.*)$")
+    if marker then
+      self.status = marker == "cancelled" and "SCAN CANCELLED"
+        or (detail ~= "" and ("SCAN FAILED: " .. detail) or "SCAN FAILED")
+      return false
+    end
+    local payload, why = Pairing.decode(text)
+    if not payload then
+      self.status = "INVALID QR: " .. tostring(why)
+      return false
+    end
+    if self.active then pcall(mod.qrcode.scan.cancel) end
+    self.active = false
+    local client = ctx.client
+    local address = ("%s:%d"):format(payload.address, payload.port)
+    client:setJoinAddress(address)
+    client:setJoinCode(address, payload.code)
+    self.game.stack:pop()
+    if not client:connect(self.game, address) then
+      return false
+    end
+    return true
+  end
+
+  function JoinQr:update()
+    local input = self.game.input
+    if input:wasPressed("b") then
+      if self.active then pcall(mod.qrcode.scan.cancel) end
+      self.game.stack:pop()
+      return
+    end
+    if not self.active then
+      if input:wasPressed("a") then self.game.stack:pop() end
+      return
+    end
+    local ok, result = pcall(mod.qrcode.scan.poll)
+    if ok and result then
+      self:finish(result)
+    end
+  end
+
+  function JoinQr:draw()
+    local Font = mod.ui.Font
+    if not (Font and Font.draw) then return end
+    Font.drawBox(0, 0, 20, 18)
+    Font.draw("JOIN BY QR", 16, 8)
+    Font.draw(self.status:sub(1, 18), 16, 48)
+    Font.draw(self.active and "B: CANCEL" or "A/B: BACK", 16, 112)
+  end
+
   screens:register(SCREEN.TEXT, { new = function(game, opts)
     opts = opts or {}
     return withUiPaper(mod.ui.TextBox.new(game, opts.text or "", opts.onDone))
@@ -1501,7 +1724,19 @@ function M:install()
           })
         end,
       }
-      -- The third row is the character, and it is deliberately not the code.
+      -- iOS and other builds with the native camera bridge get a one-step LAN
+      -- join. Keep the typed path above on every build; QR is a convenience,
+      -- not a reason for desktop/headless builds to lose their menu shape.
+      if mod.qrcode and mod.qrcode.available and mod.qrcode:available() then
+        items[#items + 1] = {
+          label = "JOIN QR",
+          onSelect = function()
+            mod.ui.push(game, SCREEN.JOINQR)
+          end,
+        }
+      end
+      -- The character row follows the join choices rather than splitting the
+      -- two ways to join apart from each other.
       --
       -- JOIN GAME asks for the address and then the code, so a row called
       -- JOIN CODE sitting under it read as the other half of joining rather
@@ -1808,22 +2043,15 @@ function M:install()
     if not client:isHosting() then
       return mod.ui.TextBox.new(game, "You aren't hosting.")
     end
-    local address = client:hostAddress()
-    -- The code belongs with the address, because they are read out in the
-    -- same breath: a friend needs both to get in, and a host who set one and
-    -- cannot find it again has a game nobody can join.
-    local code = client:hostJoinCode()
-    local codeRow = code and ("\nCODE: " .. codeText(code)) or ""
-    -- Net.lanIP() answers nil when it cannot work out which interface faces
-    -- the network, and "?:7788" tells a player nothing they can act on.
-    -- Name the port instead -- it is the half they need to forward anyway.
-    if type(address) ~= "string" or address:find("^%?") then
-      return mod.ui.TextBox.new(game, ("Hosting on port %d.\nYour IP is "
-        .. "hidden -- check\nyour network settings.%s")
-        :format(Config.DEFAULT_PORT, codeRow))
-    end
-    return mod.ui.TextBox.new(game,
-      ("Tell your friends:\n%s%s"):format(address, codeRow))
+    return HostInfo.new(game)
+  end })
+
+  screens:register(SCREEN.HOSTQR, { new = function(game, opts)
+    return HostQr.new(game, opts)
+  end })
+
+  screens:register(SCREEN.JOINQR, { new = function(game)
+    return JoinQr.new(game)
   end })
 
   -- ------- joining: where, then the code, then dial

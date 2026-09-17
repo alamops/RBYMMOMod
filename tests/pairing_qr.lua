@@ -1,0 +1,76 @@
+-- Focused tests for the LAN QR bootstrap modules.
+-- Run from a Gen1Recomp checkout with this mod under mods/rby_mmo, or directly
+-- from this checkout with: lua tests/pairing_qr.lua
+
+local source = debug.getinfo(1, "S").source:gsub("^@", "")
+local modRoot = source:match("^(.*)[/\\]tests[/\\][^/\\]+$") or "."
+local cache = {}
+local mod = {}
+local function need(name)
+  if cache[name] ~= nil then return cache[name] end
+  local chunk = assert(loadfile(modRoot .. "/src/" .. name .. ".lua"))
+  local value = chunk(need, mod)
+  cache[name] = value == nil and true or value
+  return cache[name]
+end
+
+local Pairing = need("Pairing")
+local Qr = need("Qr")
+local function check(condition, message)
+  assert(condition, message)
+end
+
+local at = 1700000000
+for _, address in ipairs({
+  "10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1",
+}) do
+  local payload, err = Pairing.new(address, 7788, "A7K3P9", at)
+  check(payload ~= nil, address .. ": " .. tostring(err))
+end
+for _, address in ipairs({
+  "9.0.0.1", "172.15.0.1", "172.32.0.1", "192.167.1.1",
+  "010.0.0.1", "192.168.001.1", "192.168.1.999",
+}) do
+  check(Pairing.new(address, 7788, "A7K3P9", at) == nil,
+    "public or non-canonical address accepted: " .. address)
+end
+
+local payload = assert(Pairing.new("192.168.1.217", 7788, "A7K3P9", at))
+local encoded = assert(Pairing.encode(payload))
+local decoded = assert(Pairing.decode(encoded, at))
+check(decoded.address == payload.address and decoded.port == payload.port,
+  "pairing round trip lost address or port")
+check(decoded.code == payload.code and decoded.expires == payload.expires,
+  "pairing round trip lost code or expiry")
+check(Pairing.decode(encoded, at + Pairing.TTL + 1) == nil,
+  "expired pairing was accepted")
+check(Pairing.decode(encoded:gsub(":1:", ":2:", 1), at) == nil,
+  "unsupported pairing version was accepted")
+
+local matrix = assert(Qr.encode(encoded))
+check(#matrix == 41 and #matrix[1] == 41, "unexpected QR matrix size")
+for y = 1, 41 do
+  local row = matrix[y]
+  check(type(row) == "table", "QR matrix is missing a row")
+  check(#row == 41, "QR rows are not square")
+  for x = 1, 41 do
+    check(type(row[x]) == "boolean",
+      "QR matrix cell is unset or not a boolean")
+  end
+end
+
+-- L/Mask 0 has the standard QR format word 0x77c4. Check the primary
+-- copy so a broken BCH remainder cannot pass a shape-only smoke test.
+local format = 0x77c4
+for i = 0, 14 do
+  local x, y
+  if i <= 5 then x, y = 9, i + 1
+  elseif i == 6 then x, y = 9, 8
+  elseif i == 7 then x, y = 9, 9
+  elseif i == 8 then x, y = 8, 9
+  else x, y = 15 - i, 9 end
+  check(matrix[y][x] == (math.floor(format / 2 ^ i) % 2 == 1),
+    "QR format bits are invalid")
+end
+
+print("pairing_qr: all checks passed")
