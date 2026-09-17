@@ -49,10 +49,13 @@ check(Pairing.decode(encoded:gsub(":1:", ":2:", 1), at) == nil,
 
 local matrix = assert(Qr.encode(encoded))
 check(#matrix == 41 and #matrix[1] == 41, "unexpected QR matrix size")
-for _, row in ipairs(matrix) do
+for y = 1, 41 do
+  local row = matrix[y]
+  check(type(row) == "table", "QR matrix is missing a row")
   check(#row == 41, "QR rows are not square")
-  for _, dark in ipairs(row) do
-    check(type(dark) == "boolean", "QR matrix contains a non-boolean cell")
+  for x = 1, 41 do
+    check(type(row[x]) == "boolean",
+      "QR matrix cell is unset or not a boolean")
   end
 end
 

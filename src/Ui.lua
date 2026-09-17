@@ -1364,7 +1364,7 @@ function M:install()
     if not (Font and Font.draw) then return end
     Font.drawBox(0, 0, 20, 18)
     Font.draw("JOIN BY QR", 16, 8)
-    Font.draw(self.status, 16, 48)
+    Font.draw(self.status:sub(1, 18), 16, 48)
     Font.draw(self.active and "B: CANCEL" or "A/B: BACK", 16, 112)
   end
 
