@@ -10759,9 +10759,13 @@ function M:drawSafe()
   end
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", 0, 0, 160, 144)
-  if self:drawClassicPartyPicker() then
-    love.graphics.setColor(1, 1, 1, 1)
-    return
+  -- Full-page picker covers the stage; faint/anim lines still use the
+  -- field + bottom box so a send-out is not painted over a KO.
+  if not self.shown and not self.anim then
+    if self:drawClassicPartyPicker() then
+      love.graphics.setColor(1, 1, 1, 1)
+      return
+    end
   end
   self:drawField()
   -- Trainer is painted inside drawField (under the panels) while the opening

@@ -5223,11 +5223,14 @@ end)()
     },
     cursor = 1,
   }) == true, "a healthy mon still draws the picker")
-  local sawOk = false
+  local sawStatusSlot = false
   for _, d in ipairs(stubFont.drawn) do
-    if d.text == "OK" then sawOk = true end
+    if d.x == ClassicBattle.PICKER_STATUS_X
+        and d.y == ClassicBattle.PICKER_META_Y then
+      sawStatusSlot = true
+    end
   end
-  check(not sawOk, "a healthy mon leaves the status slot blank")
+  check(not sawStatusSlot, "a healthy mon leaves the status slot blank")
 
   local pickerFight = MediatedBattle.new({
     game = { data = { pokemon = {
