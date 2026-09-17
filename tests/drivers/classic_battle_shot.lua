@@ -172,6 +172,71 @@ return function(game)
   end
   shot("classic-1v1-choose.png")
 
+  -- Full-page PKMN picker: living bench in the list, preview of the
+  -- highlighted mon (front pic + types / status / LV / HP / EXP).
+  local benchA = firstPresent("PIDGEY", "SPEAROW", "RATTATA") or "PIDGEY"
+  local benchB = firstPresent("SQUIRTLE", "CHARMANDER", "BULBASAUR") or "SQUIRTLE"
+  local benchC = firstPresent("ODDISH", "BELLSPROUT", "WEEDLE") or "ODDISH"
+  local benchD = firstPresent("SPEAROW", "EKANS", "VULPIX") or "SPEAROW"
+  local faintSp = firstPresent("RATTATA", "CATERPIE", "WEEDLE") or "RATTATA"
+  one.mine = {
+    { species = mineSp, speciesId = mineSp, level = 25,
+      hp = 40, maxHp = 55,
+      moves = one.mine[1].moves },
+    { species = benchA, speciesId = benchA, level = 18, hp = 32, maxHp = 40 },
+    { species = benchB, speciesId = benchB, level = 16, hp = 28, maxHp = 35,
+      status = "PAR" },
+    { species = benchC, speciesId = benchC, level = 14, hp = 22, maxHp = 28 },
+    { species = benchD, speciesId = benchD, level = 12, hp = 18, maxHp = 24 },
+    { species = faintSp, speciesId = faintSp, level = 8, hp = 0, maxHp = 22 },
+  }
+  one.active = 1
+  if game.save then
+    local saveParty = {
+      mon(mineSp, 25), mon(benchA, 18), mon(benchB, 16),
+      mon(benchC, 14), mon(benchD, 12), mon(faintSp, 8),
+    }
+    saveParty[1].hp = 40
+    saveParty[3].status = "PAR"
+    saveParty[6].hp = 0
+    -- Pokemon.new parks exp on the level floor (0 fill). Push each mon
+    -- partway to the next level so the picker EXP pill has a real fraction.
+    pcall(function()
+      local Growth = require("src.pokemon.Growth")
+      local rates = game.data and game.data.growth_rates
+      local fracs = { 0.45, 0.20, 0.70, 0.10, 0.85, 0 }
+      for i, m in ipairs(saveParty) do
+        local def = m.species and pokedex[m.species]
+        if def and Growth and Growth.expForLevel then
+          local base = Growth.expForLevel(def.growthRate, m.level, rates)
+          local after = Growth.expForLevel(def.growthRate, (m.level or 1) + 1, rates)
+          if type(base) == "number" and type(after) == "number" and after > base then
+            m.exp = base + math.floor((after - base) * (fracs[i] or 0.45))
+          end
+        end
+      end
+    end)
+    game.save.party = saveParty
+  end
+  one.shown = nil
+  one.anim = nil
+  one.phase = "switch"
+  one.switchIndex = 1
+  U.wait(16)
+  shot("classic-1v1-pkmn.png")
+  one.switchIndex = 2
+  U.wait(8)
+  shot("classic-1v1-pkmn-2.png")
+  one.phase = "item_party"
+  one.switchIndex = 1
+  U.wait(8)
+  shot("classic-1v1-item-party.png")
+  one.switchIndex = 6
+  U.wait(8)
+  shot("classic-1v1-item-party-scroll.png")
+  one.phase = "choose"
+  one.switchIndex = 1
+
   -- FIGHT: all four moves + TYPE/PP of the cursor (the empty-right-pane bug).
   one.phase = "move"
   one.cursor = 1
@@ -282,7 +347,12 @@ return function(game)
   fainted.hp = 0
   local two = buildCoop({
     { side = "a", owner = "host", name = "CLASSIC",
-      party = { mon(firstPresent("CHARIZARD", "CHARMANDER") or "CHARMANDER", 50) } },
+      party = {
+        mon(firstPresent("CHARIZARD", "CHARMANDER") or "CHARMANDER", 50),
+        mon(firstPresent("PIDGEY", "SPEAROW") or "PIDGEY", 22),
+        mon(firstPresent("SQUIRTLE", "WARTORTLE") or "SQUIRTLE", 20),
+        mon(firstPresent("ODDISH", "BELLSPROUT") or "ODDISH", 16),
+      } },
     { side = "a", owner = "friend", name = "FRIEND",
       party = { mon(firstPresent("BLASTOISE", "SQUIRTLE") or "SQUIRTLE", 50) } },
     { side = "b", owner = nil, name = "FOE",
@@ -304,6 +374,11 @@ return function(game)
     two.phase = "choose"
     U.wait(10)
     shot("classic-2x2-choose.png")
+    two.phase = "switch"
+    two.switchIndex = 1
+    U.wait(12)
+    shot("classic-2x2-pkmn.png")
+    two.phase = "choose"
     two.phase = "move"
     two.moveIndex = 1
     U.wait(8)

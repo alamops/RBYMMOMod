@@ -5058,6 +5058,219 @@ end)()
 
   eq(ClassicBattle.MOVE_NAME_Y(4), 128, "the fourth FIGHT name sits on the last inner row")
 
+  -- Full-page mid-battle picker: preview on top, start-menu icons in the
+  -- list. Input still indexes the same filtered rows; only the chrome grew.
+  eq(ClassicBattle.PICKER_VISIBLE, 6, "six party rows fit inside the list box")
+  eq(ClassicBattle.PICKER_LIST_Y + ClassicBattle.PICKER_VISIBLE
+       * ClassicBattle.PICKER_ROW_H, ClassicBattle.PICKER_LIST_BOTTOM,
+     "the sixth list row ends on the inner edge of the bottom border")
+  check(ClassicBattle.PICKER_LIST_BOTTOM <= 136,
+        "list icons stay above the full-screen box's bottom tile")
+  eq(ClassicBattle.PICKER_FRONT_X + ClassicBattle.PICKER_FRONT_BOX,
+     ClassicBattle.PICKER_NAME_X - 8,
+     "an 8px gutter sits between the front pic and the preview text")
+  eq(ClassicBattle.pickerScroll(1, 3), 1, "a short list does not scroll")
+  eq(ClassicBattle.pickerScroll(6, 6), 1, "six in six starts at the top")
+  eq(ClassicBattle.pickerScroll(7, 7), 2,
+     "a seventh mon would scroll the window down by one")
+  eq(ClassicBattle.pickerScroll(1, 6), 1, "the first of six stays at the top")
+  eq(ClassicBattle.pickerRowY(1), ClassicBattle.PICKER_LIST_Y,
+     "the first visible row sits on the preview divider")
+  eq(ClassicBattle.PICKER_ROW_TEXT_DY, 4,
+     "name/cursor drop 4px to the bag icon's midline")
+  eq(ClassicBattle.pickerRowTextY(1),
+     ClassicBattle.pickerRowY(1) + ClassicBattle.PICKER_ROW_TEXT_DY,
+     "list text is the icon y plus that midline offset")
+  eq(ClassicBattle.typeLine({ "FIRE", "FLYING" }), "FIRE/FLYING",
+     "dual types join with a slash")
+  eq(ClassicBattle.typeLine({ "PSYCHIC_TYPE" }), "PSYCHIC",
+     "the _TYPE suffix is stripped")
+  eq(ClassicBattle.typeLine({ "FIRE", "FIRE" }), "FIRE",
+     "a duplicated type is not printed twice")
+  eq(ClassicBattle.typeLine(nil), "", "no types is an empty preview line")
+  eq(ClassicBattle.typeNames({ types = { "WATER", "FLYING" } })[2], "FLYING",
+     "typeNames reads the species def without a TypeChart")
+  eq(ClassicBattle.PICKER_PREVIEW_TILES, 5, "the preview band is five tiles tall")
+  eq(ClassicBattle.PICKER_LIST_Y, ClassicBattle.PICKER_PREVIEW_TILES * 8,
+     "the list starts where the preview band ends")
+  eq(ClassicBattle.PICKER_HP_TY, 3, "HP sits under the type line")
+  eq(ClassicBattle.PICKER_EXP_TY, 4, "EXP sits on the last preview row")
+  eq(ClassicBattle.expBarPixels(0.45), 21, "45% of the 48px HP span is 21px")
+  eq(ClassicBattle.expBarPixels(0), 0, "exact-level exp is an empty track")
+  eq(ClassicBattle.expBarPixels(1), 48, "a full bar is the whole HP span")
+  eq(ClassicBattle.expBarPixels(0.01), 1, "any progress shows at least 1px")
+  eq(ClassicBattle.PICKER_FRONT_Y, 8,
+     "the front pic starts one tile under the preview top border")
+  local clipX, clipY, clipW, clipH = ClassicBattle.frontPicClip()
+  eq(clipX, ClassicBattle.PICKER_FRONT_X, "the pic clip matches the slot x")
+  eq(clipY, 8, "the pic clip starts inside the top border")
+  eq(clipY + clipH, ClassicBattle.PICKER_LIST_Y,
+     "...and ends where the list begins")
+  eq(clipW, ClassicBattle.PICKER_FRONT_BOX, "the clip is the 56px pic slot")
+  eq(clipH, 32, "the preview slot is 32px tall")
+  check(ClassicBattle.frontPicScale(56, 56) < 1,
+        "a 56px sheet scales down to the 32px clip")
+  local fx, fy = ClassicBattle.frontPicXY(24, 24)
+  check(fx >= ClassicBattle.PICKER_FRONT_X, "a fitted front pic stays in its slot")
+  eq(fy, ClassicBattle.PICKER_FRONT_Y, "...and hangs from that inset")
+  local sx, sy = ClassicBattle.frontPicXY(16, 16)
+  check(sx > ClassicBattle.PICKER_FRONT_X, "a smaller pic is centered on X")
+  eq(sy, ClassicBattle.PICKER_FRONT_Y, "...and hangs from the same inset")
+  local capturedExp
+  local stubHud = {
+    drawHPBar = function(_, tx, ty, mon, barType, grayFill, segments, pixels)
+      capturedExp = {
+        tx = tx, ty = ty, pixels = pixels, grayFill = grayFill,
+        barType = barType, hp = mon.hp, segments = segments,
+      }
+    end,
+  }
+  local expLabel, expLabelX
+  local stubExpFont = { draw = function(text, x)
+    expLabel = text
+    expLabelX = x
+  end }
+  local prevLoveExp = love
+  local capturedFill
+  local labelDots = 0
+  love = {
+    graphics = {
+      rectangle = function(mode, x, y, w, h)
+        if mode == "fill" and w == 1 and h == 1 then
+          labelDots = labelDots + 1
+        elseif mode == "fill" and h == ClassicBattle.EXP_FILL_H then
+          capturedFill = { x = x, y = y, w = w, h = h, color = love._color }
+        end
+      end,
+      setColor = function(c, gb, b, a)
+        if type(c) == "table" then
+          love._color = c
+        else
+          love._color = { c, gb, b, a }
+        end
+      end,
+    },
+  }
+  check(ClassicBattle.drawHudExpBar(stubExpFont, stubHud, {}, 9, 5, 0.45) == true,
+        "the picker EXP bar reuses the HP pill")
+  love = prevLoveExp
+  eq(capturedExp and capturedExp.pixels, 21, "...at the same 48px fill length")
+  eq(capturedExp and capturedExp.ty, 5, "...on the EXP tile row")
+  eq(capturedExp and capturedExp.grayFill, true, "...without HP green/yellow/red")
+  eq(capturedExp and capturedExp.barType, nil, "...with the same nub cap as HP")
+  eq(#ClassicBattle.HUD_BAR_LABELS.HP, 5, "HP/XP labels are 5px tall")
+  eq(#ClassicBattle.HUD_BAR_LABELS.XP[1], 7, "...and 7px wide, in the ligature slot")
+  check(labelDots > 10, "...blitted as mini pixels, not the 8px font")
+  eq(capturedFill and capturedFill.h, 2, "...fill sits in the 2px HP trough")
+  eq(capturedFill and capturedFill.y, 5 * 8 + ClassicBattle.EXP_FILL_DY,
+     "...inset to row 3, below the inner top black")
+  eq(capturedFill and capturedFill.w, 21, "...at the same 21px length")
+  eq(capturedFill and capturedFill.x, ClassicBattle.hpBarFillX(9),
+     "...flush with the HP fill's left edge")
+  eq(capturedFill and capturedFill.color, ClassicBattle.EXP_BAR_BLUE,
+     "...in the same blue as the poke-card EXP strip")
+  eq(ClassicBattle.EXP_BAR_BLUE[1], 0.3, "EXP_BAR_BLUE r matches drawExpBar")
+  eq(ClassicBattle.EXP_BAR_BLUE[2], 0.55, "EXP_BAR_BLUE g matches drawExpBar")
+  eq(ClassicBattle.EXP_BAR_BLUE[3], 0.95, "EXP_BAR_BLUE b matches drawExpBar")
+
+  eq(ClassicBattle.drawPartyPicker(nil, nil, { rows = { { label = "A" } } }),
+     false, "no Font means the picker does not claim the frame")
+  eq(ClassicBattle.drawPartyPicker({ draw = function() end }, nil, { rows = {} }),
+     false, "an empty list returns false so the no-one-else box still draws")
+  local stubFont = { drawn = {} }
+  function stubFont.draw(text, x, y)
+    stubFont.drawn[#stubFont.drawn + 1] = {
+      text = tostring(text), x = x, y = y,
+    }
+  end
+  function stubFont.drawBox() end
+  function stubFont.drawCode() end
+  function stubFont.width(text) return #tostring(text) * 8 end
+  check(ClassicBattle.drawPartyPicker(stubFont, nil, {
+    rows = {
+      { label = "PIKACHU", level = 12, types = { "ELECTRIC" },
+        hp = 35, maxHp = 35, status = "PAR" },
+      { label = "PIDGEY", level = 9, hp = 28, maxHp = 28 },
+    },
+    cursor = 1,
+  }) == true, "the picker draws with a stub Font and no HudTiles")
+  local sawName, sawType, sawStatus, sawLv = false, false, false, false
+  for _, d in ipairs(stubFont.drawn) do
+    if d.y == ClassicBattle.PICKER_NAME_Y
+        and d.x == ClassicBattle.PICKER_NAME_X
+        and d.text == "PIKACHU" then
+      sawName = true
+    end
+    if d.y == ClassicBattle.PICKER_TYPE_Y
+        and d.x == ClassicBattle.PICKER_NAME_X
+        and tostring(d.text):find("^ELEC") then
+      sawType = true
+    end
+    if d.text == "PAR" and d.y == ClassicBattle.PICKER_META_Y then
+      sawStatus = true
+    end
+    if d.text == "12" then sawLv = true end
+  end
+  check(sawName, "preview prints the highlighted name")
+  check(sawType, "preview prints the type line")
+  check(sawStatus, "preview prints the 3-letter status")
+  check(sawLv, "preview (or the list) prints the level")
+  stubFont.drawn = {}
+  check(ClassicBattle.drawPartyPicker(stubFont, nil, {
+    rows = {
+      { label = "PIDGEY", level = 9, types = { "NORMAL", "FLYING" },
+        hp = 28, maxHp = 28 },
+    },
+    cursor = 1,
+  }) == true, "a healthy mon still draws the picker")
+  local sawStatusSlot = false
+  for _, d in ipairs(stubFont.drawn) do
+    if d.x == ClassicBattle.PICKER_STATUS_X
+        and d.y == ClassicBattle.PICKER_META_Y then
+      sawStatusSlot = true
+    end
+  end
+  check(not sawStatusSlot, "a healthy mon leaves the status slot blank")
+
+  local pickerFight = MediatedBattle.new({
+    game = { data = { pokemon = {
+      PIKACHU = { types = { "ELECTRIC" } },
+      PIDGEY = { types = { "NORMAL", "FLYING" } },
+    } } },
+    battle = "b-picker", role = "host", classicUi = true,
+  })
+  pickerFight.mine = {
+    { species = "PIKACHU", level = 12, hp = 35, maxHp = 35 },
+    { species = "PIDGEY", level = 9, hp = 28, maxHp = 28 },
+    { species = "RATTATA", level = 8, hp = 0, maxHp = 22 },
+  }
+  pickerFight.active = 1
+  local switchRows = pickerFight:classicPickerRows(false)
+  eq(#switchRows, 1, "SWITCH hides the active fighter and the fainted one")
+  eq(switchRows[1].label, "PIDGEY", "...and offers the living bench mon")
+  eq(ClassicBattle.typeLine(switchRows[1].types), "NORMAL/FLYING",
+     "preview types come off the species def")
+  local itemRows = pickerFight:classicPickerRows(true)
+  eq(#itemRows, 3, "the item picker lists the whole party")
+  eq(itemRows[1].label, "PIKACHU", "...including the one already out")
+  eq(itemRows[3].fainted, true, "...and the fainted one a Revive wants")
+  pickerFight.slots = pickerFight.slots or {}
+  pickerFight.slots[pickerFight:mySlot()] = { shownExpFrac = 0.45 }
+  local expRows = pickerFight:classicPickerRows(true)
+  eq(expRows[1].expFrac, 0.45,
+     "the active mon preview uses the HUD exp fill")
+  pickerFight.phase = "item_party"
+  pickerFight.switchIndex = 1
+  eq(pickerFight:drawClassicPartyPicker({ draw = function() end }, nil), true,
+     "drawClassicPartyPicker reports it covered the frame")
+  pickerFight.mine = {
+    { species = "PIKACHU", level = 12, hp = 35, maxHp = 35 },
+  }
+  pickerFight.active = 1
+  pickerFight.phase = "switch"
+  eq(pickerFight:drawClassicPartyPicker({ draw = function() end }, nil), false,
+     "an empty SWITCH bench leaves the no-one-else box in place")
+
   local vanished = MediatedBattle.new({
     game = { data = {} }, battle = "b-vanish", role = "host", classicUi = true,
   })
