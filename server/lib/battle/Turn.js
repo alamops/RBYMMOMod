@@ -37,8 +37,8 @@
  *
  *   * *Speed ties* break on a single byte per tied group, below 128 leaving the
  *     side-a member first and otherwise reversing the group.
- *   * *Running* is a concession: one side loses with reason `run`, both is a
- *     draw.
+ *   * *Running* is mode-gated like Teleport: wild/coop_wild flee, 1v1/coop_pvp
+ *     concede, coop_npc refuses without finishing.
  *   * *Items* apply a hand-authored Gen1 heal/status table (not engine
  *     ItemEffects); unknown ids say "But it failed" and still spend the turn.
  *     Bags are client claims (sheet trust locked). Forced lock-in injects on
@@ -1724,12 +1724,18 @@ class Battle {
     }
   }
 
-  // Fleeing is a concession; see the policy note in the header.
+  // Fleeing is a concession in 1v1/coop_pvp, a wild escape in *wild modes,
+  // and a trainer refusal (no finish) everywhere else; see Effects.runEndsBattle.
   _resolveRuns() {
     const running = this.fighters.filter(
       (fighter) => fighter.choice && fighter.choice.action === 'run',
     );
     if (running.length === 0) return false;
+
+    if (!Effects.runEndsBattle(this.mode)) {
+      this._say("No! There's no running from a trainer battle!");
+      return false;
+    }
 
     const sides = { a: false, b: false };
     for (const fighter of running) {
