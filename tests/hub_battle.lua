@@ -406,6 +406,102 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 5c. SESSION_LEAVE during grace cannot start a second fight
+-- ------------------------------------------------------------------
+--
+-- endSession calls leaveBattle (grace, battleId kept) then clears sessionId.
+-- REQUEST / startSession used to look only at sessionId, so the same
+-- connection could open a new pairing; openMediatedBattle then overwrote
+-- member.battleId and left the old sim ticking toward a forfeit.
+
+do
+  local hub = Hub.new({ maxPlayers = 8 })
+  local fight = openFight(hub)
+  local id = fight.id
+  take(fight.ann.peer, Wire.BATTLE_READY)
+  take(fight.bob.peer, Wire.BATTLE_READY)
+  local bob = fight.bob.client
+  local cal, calPeer = join(hub, "CAL")
+  calPeer.outbox = {}
+
+  hub:receive(bob, { type = Wire.SESSION_LEAVE })
+  eq(bob.sessionId, nil, "the session is gone")
+  eq(bob.battleId, id, "but grace still binds them to the fight")
+  ok(hub.battles[id] ~= nil, "and the original record is still standing")
+
+  fight.bob.peer.outbox = {}
+  hub:receive(bob, { type = Wire.REQUEST, to = cal.id, kind = "duel" })
+  eq(take(fight.bob.peer, Wire.DECLINE), nil,
+     "a request with no valid kind earns no reply")
+
+  hub:receive(bob, { type = Wire.REQUEST, to = cal.id, kind = "battle" })
+  eq(take(calPeer, Wire.REQUEST), nil,
+     "the leaver cannot open a second pairing while grace runs")
+  local selfBusy = take(fight.bob.peer, Wire.DECLINE)
+  ok(selfBusy ~= nil, "the leaver is told no so their outgoing ask clears")
+  eq(selfBusy and selfBusy.reason, "busy", "as busy, because they still have a battle")
+  eq(selfBusy and selfBusy.kind, "battle", "naming the ask they sent")
+
+  hub:receive(cal, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  local declined = take(calPeer, Wire.DECLINE)
+  ok(declined ~= nil, "asking them is answered, not a new fight")
+  eq(declined.reason, "busy", "as busy, because they still have a battle")
+
+  hub:startSession(bob, cal, "battle")
+  eq(cal.sessionId, nil, "startSession itself refuses while they are bound")
+  eq(hub:openMediatedBattle("s999", { memberIds = { bob.id } }), nil,
+     "openMediatedBattle will not overwrite an unsettled battleId")
+  eq(bob.battleId, id, "so they stay on the original fight")
+  ok(hub.battles[id] ~= nil, "which is still the one record")
+
+  hub:update(Config.BATTLE_RECONNECT_GRACE + 2)
+  eq(hub.battles[id], nil, "past grace the original fight settles")
+  eq(bob.battleId, nil, "and they are let out of it")
+  calPeer.outbox = {}
+  hub:receive(bob, { type = Wire.REQUEST, to = cal.id, kind = "battle" })
+  ok(take(calPeer, Wire.REQUEST) ~= nil, "past grace a new ask is forwarded")
+end
+
+-- A stolen battleId is a drop of that seat, not a wipe of the field.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local fight = openFight(hub)
+  local id = fight.id
+  take(fight.ann.peer, Wire.BATTLE_READY)
+  take(fight.bob.peer, Wire.BATTLE_READY)
+  local ann, bob = fight.ann.client, fight.bob.client
+
+  bob.battleId = "stolen"
+  hub:tickBattles(hub.clock)
+  ok(hub.battles[id] ~= nil,
+     "a stolen seat does not abort the partner still bound")
+  eq(ann.battleId, id, "the partner stays on the original fight")
+  eq(bob.battleId, nil, "and the stolen pointer is forgotten")
+
+  ann.battleId = "stolen2"
+  hub:tickBattles(hub.clock)
+  eq(hub.battles[id], nil,
+     "when no connected member still points at it, the record is aborted")
+  eq(ann.battleId, nil, "and the second stolen pointer is forgotten")
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  hub:openCoopBattle("c-orphan", { ann.id, bob.id },
+    { mode = "coop_npc", hostId = ann.id })
+  ok(hub.coopBattles["c-orphan"] ~= nil, "a coop group opens with the fight")
+
+  ann.battleId, bob.battleId = "stolen", "stolen2"
+  hub:tickBattles(hub.clock)
+  eq(hub.battles["c-orphan"], nil, "the fight is gone")
+  eq(hub.coopBattles["c-orphan"], nil, "and the fan-out group closes with it")
+  eq(ann.coopBattleId, nil, "so neither member is still filed under it")
+  eq(bob.coopBattleId, nil, "both of them")
+end
+
+-- ------------------------------------------------------------------
 -- 5b. a throwing handler does not take the hub down
 -- ------------------------------------------------------------------
 
@@ -505,6 +601,7 @@ do
      "and somebody who is not in the fight fills no seat at all")
 
   -- An inferred plan still has to produce a field somebody can fight on.
+  hub:abortMediatedBattle(record, "gone")
   local pvp = hub:openMediatedBattle("pvp-1",
     { memberIds = { ann.id, bob.id, stranger.id } })
   eq(pvp.mode, "coop_pvp", "three humans infer coop_pvp without synthetic seats")
@@ -543,6 +640,7 @@ do
 
   -- A trainer with one monster is still a trainer, so the spare seat is given
   -- up rather than the fight being refused over a party nobody can fill.
+  hub:abortMediatedBattle(record, "gone")
   local lone = hub:openMediatedBattle("npc-3", {
     mode = "coop_npc", hostId = ann.id, memberIds = { ann.id, bob.id },
   })
@@ -560,13 +658,14 @@ end
 -- Turn.create answers a reason rather than raising, because every caller here
 -- is downstream of a mod callback where a bare error() is a loader rule
 -- violation.  What the hub owes in return is not to leave the fight half-open:
--- no sim, and the refusal charged to the authority whose upload produced it.
+-- abort the record, release the pairing, and tell both sides so they are
+-- not waiting for a battle_ready that will never come.
 
 do
   local hub = Hub.new({ maxPlayers = 4 })
-  local ann = join(hub, "ANN")
-  local bob = join(hub, "BOB")
-  local cal = join(hub, "CAL")
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  local cal, calPeer = join(hub, "CAL")
 
   -- Three fighters crowded onto one side of a 1v1: well-formed as messages,
   -- unfightable as a field.
@@ -580,11 +679,104 @@ do
     record.parties[seat.id] = { battle = "bad-1", mons = { mon() } }
   end
 
+  eq(ann.battleId, "bad-1", "the seats were marked before assembly")
   eq(hub:tryStartSim(record), false, "an unfightable field opens no sim")
-  eq(record.sim, nil, "and the record is left exactly as it was")
   eq(ann.relayDrops, 1, "with the refusal charged to the authority")
-  eq(hub.battles["bad-1"], record,
-     "the record stays: nothing was settled, so nothing is cleared")
+  eq(hub.battles["bad-1"], nil,
+     "the record is cleared rather than left half-open")
+  eq(ann.battleId, nil, "and the host is unmarked")
+  eq(bob.battleId, nil, "and so is the guest")
+  eq(cal.battleId, nil, "and the third seat too")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome and outcome.outcome == "draw" and outcome.reason == "agree",
+     "players hear it called off rather than waiting for battle_ready")
+  local bobOut = take(bobPeer, Wire.BATTLE_OUTCOME)
+  ok(bobOut and bobOut.reason == "agree", "both sides hear the abort")
+  local calOut = take(calPeer, Wire.BATTLE_OUTCOME)
+  ok(calOut and calOut.reason == "agree", "every marked seat hears it")
+end
+
+-- A REQUEST/RESPOND 1v1 still holds sessionId after abortMediatedBattle.
+-- Assembly failure has to drop that too, or busyNow keeps the pairing stuck.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local record = hub.battles[ann.sessionId]
+  record.ruleset = { chart = CHART, seed = 7 }
+  record.parties[ann.id] = { battle = record.id, mons = {} }
+  record.parties[bob.id] = { battle = record.id, mons = { mon() } }
+  eq(ann.sessionId, record.id, "the pairing is live")
+  ok(hub.matches[record.id] ~= nil, "ranked paperwork existed for the pairing")
+  eq(hub:tryStartSim(record), false, "an empty party opens no sim")
+  eq(ann.sessionId, nil, "the host is off the pairing")
+  eq(bob.sessionId, nil, "and so is the guest")
+  eq(ann.battleId, nil, "and unmarked for the fight")
+  eq(hub.matches[record.id], nil, "and the settlement record is dropped")
+  hub:receive(ann, { type = Wire.RESULT, session = record.id, outcome = "win" })
+  hub:receive(bob, { type = Wire.RESULT, session = record.id, outcome = "loss" })
+  eq(hub.matches[record.id], nil, "a leftover vote cannot resurrect it")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome and outcome.reason == "agree", "they hear it called off")
+  ok(take(bobPeer, Wire.SESSION_END) ~= nil, "the guest hears the pairing end")
+end
+
+-- Same for a co-op group: abort alone left coopBattleId set.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  local id = hub:openCoopBattle("c-bad", { ann.id, bob.id },
+    { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles[id]
+  record.ruleset = { chart = CHART, seed = 7 }
+  for _, seat in ipairs(hub:seatsNeeded(record)) do
+    record.parties[seat] = { battle = id, mons = { mon() } }
+  end
+  record.parties[record.npcIds[1]] = { battle = id, mons = {} }
+  hub.coopMatches[id] = {
+    a = {}, b = {}, reports = {}, everyone = { ann.id, bob.id },
+    startedAt = hub.clock,
+  }
+  eq(ann.coopBattleId, id, "the co-op group is live")
+  eq(hub:tryStartSim(record), false, "an empty npc seat opens no sim")
+  eq(ann.coopBattleId, nil, "the group is released")
+  eq(bob.coopBattleId, nil, "both members")
+  eq(hub.coopBattles[id], nil, "and forgotten")
+  eq(hub.coopMatches[id], nil, "and the settlement record is dropped")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome and outcome.reason == "agree", "they hear it called off")
+end
+
+-- A refused open must not leave a group, seat marks, or ranked paperwork.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  local cal = join(hub, "CAL")
+  local dee = join(hub, "DEE")
+  eq(hub:openCoopBattle("c-none", {}, { mode = "coop_pvp" }), nil,
+     "an empty roster opens nothing")
+  eq(hub.coopBattles["c-none"], nil, "and leaves no group")
+  eq(ann.coopBattleId, nil, "and marks no seat")
+  eq(hub.coopMatches["c-none"], nil, "and files no paperwork")
+
+  hub.coopAsks["c-miss"] = {
+    asker = ann.id,
+    sideA = { ann.id, bob.id },
+    sideB = { cal.id, dee.id },
+    everyone = {},
+    answers = {},
+    needed = 3,
+    startedAt = hub.clock,
+  }
+  hub:startCoopBattle("c-miss")
+  eq(hub.coopMatches["c-miss"], nil, "a refused start files no settlement record")
+  eq(hub.coopBattles["c-miss"], nil, "and leaves no group")
+  eq(hub.battles["c-miss"], nil, "and opens no fight")
+  eq(hub.coopAsks["c-miss"], nil, "and the ask is torn down")
 end
 
 -- ------------------------------------------------------------------
@@ -597,17 +789,19 @@ end
 -- fight inheriting a 1v1's parties, and a choice from one filed into the other.
 
 do
-  local hub = Hub.new({ maxPlayers = 4 })
+  local hub = Hub.new({ maxPlayers = 8 })
   local ann = join(hub, "ANN")
   local bob = join(hub, "BOB")
+  local cal = join(hub, "CAL")
+  local dee = join(hub, "DEE")
 
   hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
   hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
   eq(ann.sessionId, "s1", "a session id carries its own letter")
   eq(Wire.id(ann.sessionId), ann.sessionId, "and is still an id on the wire")
 
-  local coop = hub:openCoopBattle("c1", { ann.id, bob.id },
-    { mode = "coop_npc", hostId = ann.id })
+  local coop = hub:openCoopBattle("c1", { cal.id, dee.id },
+    { mode = "coop_npc", hostId = cal.id })
   eq(coop, "c1", "a co-op battle carries a different one")
   ok(hub.battles["s1"] ~= nil and hub.battles["c1"] ~= nil,
      "so both records exist at once rather than one overwriting the other")

@@ -109,6 +109,7 @@ local function move(o)
     chance = o.chance or 0,
   }
   if o.maxPp then out.maxPp = o.maxPp end
+  if o.highCrit then out.highCrit = true end
   return out
 end
 
@@ -134,6 +135,7 @@ local function mon(o)
   if o.catchRate ~= nil then out.catchRate = o.catchRate end
   if o.speciesId then out.speciesId = o.speciesId end
   if o.evs then out.evs = o.evs end
+  if o.baseSpd ~= nil then out.baseSpd = o.baseSpd end
   return out
 end
 
@@ -576,6 +578,45 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 4b. a dropped seat cannot file until reconnect()
+-- ------------------------------------------------------------------
+
+do
+  local battle = battleOf({ reconnectGrace = 60, choiceTimeout = 60 })
+  drain(battle)
+
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == false,
+     "a disconnected seat cannot file a choice")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "the seat that stayed may still file")
+  eq(battle:snapshot().turn, 1,
+     "the turn does not resolve on the dropped seat's leftover")
+
+  battle:reconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "reconnect restores the right to choose")
+  eq(battle:snapshot().turn, 2, "and the already-filed peer lets the turn complete")
+end
+
+do
+  local battle = battleOf({ reconnectGrace = 60, choiceTimeout = 60 })
+  drain(battle)
+
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "a connected seat may file before it drops")
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "the seat that stayed may still file after the drop")
+  eq(battle:snapshot().turn, 1,
+     "a leftover choice does not resolve the turn while a seat is away")
+
+  battle:reconnect("p1")
+  eq(battle:snapshot().turn, 2,
+     "reconnect completes the already-answered turn without a second pick")
+end
+
+-- ------------------------------------------------------------------
 -- 5. the choice clock: a timeout picks a move rather than ending the fight
 -- ------------------------------------------------------------------
 
@@ -660,6 +701,12 @@ do
      "switching to the monster already out is refused")
   ok(battle:submitChoice("p1", { action = "item" }) == false,
      "an item choice with no item is refused")
+  ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 2 }) == false,
+     "Potion on a fainted mon is refused")
+  ok(battle:submitChoice("p1", { action = "item", item = "PROTEIN", slot = 2 }) == false,
+     "Protein on a fainted mon is refused")
+  ok(battle:submitChoice("p1", { action = "item", item = "REVIVE", slot = 0 }) == false,
+     "Revive on a living mon is refused")
   ok(battle:submitChoice("p1", { action = "fight", move = 0, target = 1 }) == false,
      "a target nobody occupies is refused")
   ok(battle:submitChoice("p1", { action = "fight", move = 0, target = 0 }) == false,
@@ -715,6 +762,116 @@ do
     eq(drawn.losers, nil, "and no losers")
   end
   eq(kinds(drain(both)).run, 2, "both flights were announced")
+end
+
+-- ------------------------------------------------------------------
+-- 7b. trainer RUN does not forfeit; wild and pvp still end the fight
+-- ------------------------------------------------------------------
+--
+-- `_resolveRuns` used to be mode-blind: any run finished the fight and the
+-- runner lost. Hub-refereed gyms (mode coop_npc) then blacked the player out
+-- on RUN. Gated the same way Teleport already is.
+
+-- Exact: Wire.M.text strips newlines, so a three-line vanilla string would
+-- survive a `/running/` check as "norunning" and still display mangled.
+local TRAINER_RUN_REFUSAL = "No! There's no running from a trainer battle!"
+
+local function saidRunning(events)
+  for _, event in ipairs(events) do
+    if event.t == "msg" and event.text == TRAINER_RUN_REFUSAL then
+      return true
+    end
+  end
+  return false
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_npc",
+    aMons = { mon({ species = "Alpha", maxHp = 200 }) },
+    bMons = { mon({ species = "Beta", maxHp = 200, atk = 80 }) },
+  })
+  drain(battle)
+  local turnBefore = battle:snapshot().turn
+  local hpBefore = fighterIn(battle:snapshot(), "p1").hp
+  battle:submitChoice("p1", { action = "run" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local out = drain(battle)
+  eq(battle:outcome(), nil, "coop_npc RUN does not finish the fight")
+  ok(saidRunning(out), "and says there is no running from a trainer battle")
+  eq(kinds(out).over, nil, "with no over event")
+  eq(kinds(out).run, nil, "and no run event -- that kind means someone fled")
+  eq(battle:snapshot().turn, turnBefore + 1, "the runner's action still spends the turn")
+  ok(fighterIn(battle:snapshot(), "p1").hp < hpBefore,
+     "so the foe still gets its attack")
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_npc",
+    sides = {
+      a = {
+        { playerId = "p1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 200 }) } },
+        { playerId = "p2", name = "Abe",
+          mons = { mon({ species = "Gamma", maxHp = 200 }) } },
+      },
+      b = {
+        { playerId = "n1", name = "NpcA",
+          mons = { mon({ species = "Beta", maxHp = 200 }) } },
+        { playerId = "n2", name = "NpcB",
+          mons = { mon({ species = "Delta", maxHp = 200 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "run" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  battle:autoPick("n1")
+  battle:autoPick("n2")
+  local out = drain(battle)
+  eq(battle:outcome(), nil, "one partner's RUN does not forfeit a 2v2 gym")
+  ok(saidRunning(out), "the refusal is in the turn stream")
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_wild",
+    sides = {
+      a = {
+        { playerId = "p1", name = "Ann", mons = { mon({ species = "Alpha" }) } },
+        { playerId = "p2", name = "Abe", mons = { mon({ species = "Gamma" }) } },
+      },
+      b = {
+        { playerId = "wild", name = "Wild", mons = { mon({ species = "Beta" }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "run" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  battle:autoPick("wild")
+  drain(battle)
+  local out = battle:outcome()
+  ok(out ~= nil, "coop_wild RUN still ends the fight")
+  if out then
+    eq(out.reason, "run", "as a flee")
+    listEq(out.losers, { "p1", "p2" }, "the fleeing side loses")
+  end
+end
+
+do
+  local battle = battleOf({ mode = "coop_pvp" })
+  drain(battle)
+  battle:submitChoice("p1", { action = "run" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local out = battle:outcome()
+  ok(out ~= nil, "coop_pvp RUN is still a concession")
+  if out then
+    eq(out.reason, "run", "for the run reason")
+    listEq(out.losers, { "p1" }, "the runner loses")
+  end
 end
 
 -- ------------------------------------------------------------------
@@ -2815,6 +2972,33 @@ end
 
 do
   local battle = battleOf({
+    aBag = { POTION = 1 },
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 100, hp = 50, spd = 120,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+      mon({
+        species = "Bench", maxHp = 100, hp = 0, spd = 1,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+  })
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 1 }) == false,
+     "Potion on a fainted party slot does not file")
+  eq(battle.byId.p1.bag.POTION, 1, "...and the bag is not spent")
+  eq(battle.byId.p1.choice, nil, "...and the turn is still owed")
+end
+
+do
+  local battle = battleOf({
     aMons = {
       mon({
         species = "Alpha", maxHp = 100, spd = 120,
@@ -3171,6 +3355,73 @@ do
   ok(plainDmg and plainDmg > 0, "the unbadged attack lands")
   ok(boostedDmg and boostedDmg > plainDmg,
      "BOULDERBADGE raises mediated physical damage")
+end
+
+-- ------------------------------------------------------------------
+-- 12b2. Gen 1 crit uses species base Speed, not battle Speed; high-crit rides the move
+-- ------------------------------------------------------------------
+do
+  local function playCrit(seed, aOpts, badges)
+    local battle = battleOf({
+      seed = seed,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", badges = badges,
+                mons = { mon({
+                  maxHp = 200, hp = 200, atk = 80, spd = 80,
+                  baseSpd = aOpts.baseSpd,
+                  moves = { move({ power = 50, highCrit = aOpts.highCrit }) },
+                }) } } },
+        b = { { playerId = "p2", name = "Bob",
+                mons = { mon({
+                  species = "Beta", maxHp = 200, hp = 200, def = 80, spd = 10,
+                  moves = { move({ power = 1 }) },
+                }) } } },
+      },
+    })
+    drain(battle)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    return drain(battle)
+  end
+  local function sawCrit(events)
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text == "A critical hit" then return true end
+    end
+    return false
+  end
+
+  -- threshold(1) = 0: no roll is below 0, so battle Speed 80 cannot leak in.
+  ok(not sawCrit(playCrit(1, { baseSpd = 1 })),
+     "species base Speed 1 never crits, even with battle Speed 80")
+
+  -- threshold(100) = 50; high-crit ×8 → 255. Need a roll in [50, 254] so
+  -- ordinary odds miss and high-crit hits — otherwise dropping highCritMove
+  -- would still pass on a low roll.
+  local critSeed
+  for seed = 1, 400 do
+    if not sawCrit(playCrit(seed, { baseSpd = 100 }))
+       and sawCrit(playCrit(seed, { baseSpd = 100, highCrit = true })) then
+      critSeed = seed
+      break
+    end
+  end
+  ok(critSeed ~= nil,
+     "found a seed where ordinary odds miss and a high-crit move hits")
+  ok(not sawCrit(playCrit(critSeed, { baseSpd = 100 })),
+     "base Speed 100 without highCrit misses on that seed")
+  ok(sawCrit(playCrit(critSeed, { baseSpd = 100, highCrit = true })),
+     "highCrit on the move sheet raises the Gen 1 threshold")
+
+  -- Soul Badge must not change crit (Alpha still outspeeds either way).
+  local bare = dumpAll(playCrit(777002, { baseSpd = 80 }))
+  local badged = dumpAll(playCrit(777002, { baseSpd = 80 }, { SOULBADGE = true }))
+  eq(bare, badged, "SOULBADGE does not change crit rate or this turn's resolution")
+
+  -- Old sheet: omitted baseSpd falls back to stats.spd, still without the badge.
+  local fallbackBare = dumpAll(playCrit(777002, {}))
+  local fallbackBadged = dumpAll(playCrit(777002, {}, { SOULBADGE = true }))
+  eq(fallbackBare, fallbackBadged,
+     "omitted baseSpd still ignores SOULBADGE")
 end
 
 -- ------------------------------------------------------------------

@@ -545,6 +545,7 @@ function applyPrimary(ctx) {
       type: Math.max(0, int(source.type, 0)),
       effect: Math.max(0, int(source.effect, 0)),
       chance: Math.max(0, int(source.chance, 0)),
+      highCrit: source.highCrit === true,
     };
     out.messages.push(`${userMon.species} learned ${moveLabel(source)}`);
     out.movesChanged = true;
@@ -572,6 +573,7 @@ function applyPrimary(ctx) {
       type: Math.max(0, int(m.type, 0)),
       effect: Math.max(0, int(m.effect, 0)),
       chance: Math.max(0, int(m.chance, 0)),
+      highCrit: m.highCrit === true,
     }));
     userMon.transformed = true;
     out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
@@ -921,6 +923,16 @@ function itemEffect(itemId) {
   return { heal, clearStatuses: statuses, needsParty: true };
 }
 
+// Potion / Ether / status cure / vitamin cannot apply to a KO (Revive is
+// faintedOnly). Shared by the item picker and `_normaliseChoice` so a
+// submitted choice cannot spend the bag or the turn.
+function itemFailsOnFainted(effect) {
+  if (!effect || typeof effect !== 'object' || effect.faintedOnly) return false;
+  return Boolean(effect.heal || effect.healFull || effect.clearStatuses
+      || effect.clearAllStatus || effect.ppRestore || effect.ppRestoreAll
+      || effect.vitamin);
+}
+
 function applyVitamin(mon, itemId) {
   if (!mon || typeof mon !== 'object') return null;
   const effect = itemEffect(itemId);
@@ -1086,6 +1098,14 @@ function teleportRunAllowed(mode) {
   return typeof mode === 'string' && mode.includes('wild');
 }
 
+// RUN finishes the fight in wild/coop_wild (flee) and 1v1/coop_pvp
+// (concession). coop_npc -- and any other non-wild non-pvp mode -- refuses
+// without finishing, so a gym cannot be forfeited by pressing RUN.
+function runEndsBattle(mode) {
+  if (teleportRunAllowed(mode)) return true;
+  return mode === '1v1' || mode === 'coop_pvp';
+}
+
 function isPayDay(effectId) {
   return int(effectId, 0) === 16;
 }
@@ -1148,6 +1168,7 @@ module.exports = {
   screenDamage,
   isSpecialType,
   itemEffect,
+  itemFailsOnFainted,
   applyVitamin,
   caughtSheet,
   catchAttempt,
@@ -1160,6 +1181,7 @@ module.exports = {
   jumpKickCrash,
   isSwitchAndTeleport,
   teleportRunAllowed,
+  runEndsBattle,
   isPayDay,
   isMirrorMove,
   isMimic,
