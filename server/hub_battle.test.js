@@ -1026,8 +1026,97 @@ function testMidFightMoveset() {
     'a transformed battler is left alone');
 }
 
+// Parties + ruleset arrived, but Turn.attempt still refuses the field.
+// Leaving the record in battles with sim = null kept every player marked
+// in a pairing that never sent battle_ready.
+function testUnfightableFieldAborts() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  const c = dial(relay, 'CAL');
+  const record = relay.openMediatedBattle('bad-1', {
+    mode: '1v1', hostId: a.id,
+    memberIds: [a.id, b.id, c.id],
+    sides: { a: [a.id, b.id], b: [c.id] },
+  });
+  record.ruleset = { chart: [[100]], seed: 7 };
+  for (const player of [a, b, c]) {
+    record.parties.set(player.id, { battle: 'bad-1', mons: [mon(90)] });
+  }
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  c.peer.outbox = [];
+  ok(relay.clients.get(a.id).battleId === 'bad-1',
+    'the seats were marked before assembly');
+  ok(relay.tryStartSim(record) === false, 'an unfightable field opens no sim');
+  ok(!relay.battles.has('bad-1'),
+    'the record is cleared rather than left half-open');
+  ok(relay.clients.get(a.id).battleId == null, 'and the host is unmarked');
+  ok(relay.clients.get(b.id).battleId == null, 'and so is the guest');
+  ok(relay.clients.get(c.id).battleId == null, 'and the third seat too');
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && outcome.outcome === 'draw' && outcome.reason === 'agree',
+    'players hear it called off rather than waiting for battle_ready');
+  const bobOut = take(b, 'mmo.battle_outcome');
+  ok(bobOut && bobOut.reason === 'agree', 'both sides hear the abort');
+  const calOut = take(c, 'mmo.battle_outcome');
+  ok(calOut && calOut.reason === 'agree', 'every marked seat hears it');
+}
+
+// A REQUEST/RESPOND 1v1 still holds sessionId after abortMediatedBattle.
+// Assembly failure has to drop that too, or busyNow keeps the pairing stuck.
+function testUnfightableSessionReleasesPairing() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  const session = openBattle(relay, a, b);
+  const record = relay.battles.get(session.id);
+  record.ruleset = { chart: [[100]] };
+  record.parties.set(a.id, { battle: session.id, mons: [] });
+  record.parties.set(b.id, { battle: session.id, mons: [mon(90)] });
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  ok(relay.clients.get(a.id).sessionId === session.id, 'the pairing is live');
+  ok(relay.tryStartSim(record) === false, 'an empty party opens no sim');
+  ok(relay.clients.get(a.id).sessionId == null, 'the host is off the pairing');
+  ok(relay.clients.get(b.id).sessionId == null, 'and so is the guest');
+  ok(relay.clients.get(a.id).battleId == null, 'and unmarked for the fight');
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && outcome.reason === 'agree', 'they hear it called off');
+  ok(take(b, 'mmo.session_end') != null, 'the guest hears the pairing end');
+}
+
+// Same for a co-op group: abort alone left coopBattleId set.
+function testUnfightableCoopReleasesGroup() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  const id = relay.openCoopBattle('c-bad', [a.id, b.id],
+    { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get(id);
+  record.ruleset = { chart: [[100]] };
+  for (const seat of relay.seatsNeeded(record)) {
+    record.parties.set(seat, { battle: id, mons: [mon(90)] });
+  }
+  record.parties.set(record.npcIds[0], { battle: id, mons: [] });
+  a.peer.outbox = [];
+  ok(relay.clients.get(a.id).coopBattleId === id, 'the co-op group is live');
+  ok(relay.tryStartSim(record) === false, 'an empty npc seat opens no sim');
+  ok(relay.clients.get(a.id).coopBattleId == null, 'the group is released');
+  ok(relay.clients.get(b.id).coopBattleId == null, 'both members');
+  ok(!relay.coopBattles.has(id), 'and forgotten');
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && outcome.reason === 'agree', 'they hear it called off');
+}
+
 testBagProofs();
 testMidFightMoveset();
+testUnfightableFieldAborts();
+testUnfightableSessionReleasesPairing();
+testUnfightableCoopReleasesGroup();
 
 // Wave 2 T2d: hub generation selects battle vs battle2 at construction.
 {

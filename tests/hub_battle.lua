@@ -560,13 +560,14 @@ end
 -- Turn.create answers a reason rather than raising, because every caller here
 -- is downstream of a mod callback where a bare error() is a loader rule
 -- violation.  What the hub owes in return is not to leave the fight half-open:
--- no sim, and the refusal charged to the authority whose upload produced it.
+-- abort the record, release the pairing, and tell both sides so they are
+-- not waiting for a battle_ready that will never come.
 
 do
   local hub = Hub.new({ maxPlayers = 4 })
-  local ann = join(hub, "ANN")
-  local bob = join(hub, "BOB")
-  local cal = join(hub, "CAL")
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  local cal, calPeer = join(hub, "CAL")
 
   -- Three fighters crowded onto one side of a 1v1: well-formed as messages,
   -- unfightable as a field.
@@ -580,11 +581,65 @@ do
     record.parties[seat.id] = { battle = "bad-1", mons = { mon() } }
   end
 
+  eq(ann.battleId, "bad-1", "the seats were marked before assembly")
   eq(hub:tryStartSim(record), false, "an unfightable field opens no sim")
-  eq(record.sim, nil, "and the record is left exactly as it was")
   eq(ann.relayDrops, 1, "with the refusal charged to the authority")
-  eq(hub.battles["bad-1"], record,
-     "the record stays: nothing was settled, so nothing is cleared")
+  eq(hub.battles["bad-1"], nil,
+     "the record is cleared rather than left half-open")
+  eq(ann.battleId, nil, "and the host is unmarked")
+  eq(bob.battleId, nil, "and so is the guest")
+  eq(cal.battleId, nil, "and the third seat too")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome and outcome.outcome == "draw" and outcome.reason == "agree",
+     "players hear it called off rather than waiting for battle_ready")
+  local bobOut = take(bobPeer, Wire.BATTLE_OUTCOME)
+  ok(bobOut and bobOut.reason == "agree", "both sides hear the abort")
+  local calOut = take(calPeer, Wire.BATTLE_OUTCOME)
+  ok(calOut and calOut.reason == "agree", "every marked seat hears it")
+end
+
+-- A REQUEST/RESPOND 1v1 still holds sessionId after abortMediatedBattle.
+-- Assembly failure has to drop that too, or busyNow keeps the pairing stuck.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local record = hub.battles[ann.sessionId]
+  record.ruleset = { chart = CHART, seed = 7 }
+  record.parties[ann.id] = { battle = record.id, mons = {} }
+  record.parties[bob.id] = { battle = record.id, mons = { mon() } }
+  eq(ann.sessionId, record.id, "the pairing is live")
+  eq(hub:tryStartSim(record), false, "an empty party opens no sim")
+  eq(ann.sessionId, nil, "the host is off the pairing")
+  eq(bob.sessionId, nil, "and so is the guest")
+  eq(ann.battleId, nil, "and unmarked for the fight")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome and outcome.reason == "agree", "they hear it called off")
+  ok(take(bobPeer, Wire.SESSION_END) ~= nil, "the guest hears the pairing end")
+end
+
+-- Same for a co-op group: abort alone left coopBattleId set.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  local id = hub:openCoopBattle("c-bad", { ann.id, bob.id },
+    { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles[id]
+  record.ruleset = { chart = CHART, seed = 7 }
+  for _, seat in ipairs(hub:seatsNeeded(record)) do
+    record.parties[seat] = { battle = id, mons = { mon() } }
+  end
+  record.parties[record.npcIds[1]] = { battle = id, mons = {} }
+  eq(ann.coopBattleId, id, "the co-op group is live")
+  eq(hub:tryStartSim(record), false, "an empty npc seat opens no sim")
+  eq(ann.coopBattleId, nil, "the group is released")
+  eq(bob.coopBattleId, nil, "both members")
+  eq(hub.coopBattles[id], nil, "and forgotten")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome and outcome.reason == "agree", "they hear it called off")
 end
 
 -- ------------------------------------------------------------------

@@ -4,6 +4,18 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **A fight the turn machine refuses no longer leaves the pairing stuck.**
+  If parties and a ruleset had arrived but `Turn.attempt` / `Turn.create`
+  still would not open the field, the hub logged and returned. The record
+  stayed in `battles` with `sim = nil`, players kept `battleId` / `sessionId`,
+  and nobody ever heard `battle_ready`. Assembly failure now aborts the
+  mediated battle (`agree` — "The battle was called off."), drops the 1v1
+  session and any co-op group, and both sides get an outcome.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed

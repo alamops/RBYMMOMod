@@ -1746,6 +1746,9 @@ end
 --
 -- Answers false and changes nothing when anything is still missing, so it is
 -- safe to call from every message that could have been the last one needed.
+-- A field the turn machine refuses is the other false: the record is aborted
+-- rather than left in battles with sim = nil, which kept every seat marked
+-- in a pairing that will never send battle_ready.
 function M:tryStartSim(record)
   if not record or record.sim or record.settled then return false end
   if not record.ruleset then return false end
@@ -1813,11 +1816,14 @@ function M:tryStartSim(record)
     -- logger, so the refusal goes out the seam that already exists for "a
     -- message from this connection was not acted on" -- once per connection,
     -- charged to the authority whose ruleset and parties made the field.
+    -- Then the record is called off: leaving it half-open kept every seat
+    -- marked in a fight that will never start.
     local host = self.clients[record.hostId]
     if host then
       noteDrop(self, host,
         "this battle could not be assembled: " .. tostring(why))
     end
+    self:failMediatedAssembly(record)
     return false
   end
   record.sim = battle
@@ -1947,6 +1953,22 @@ function M:leaveBattle(client)
   -- one that was being assembled is called off.
   self:abortMediatedBattle(record, "gone")
   return false
+end
+
+-- Parties and a ruleset arrived, the turn machine still refused the field.
+-- abortMediatedBattle clears battleId; a 1v1 still holds sessionId (busyNow)
+-- and a co-op still holds coopBattleId. Those go too, or the seats stay
+-- hub-busy waiting for a battle_ready that will never come.
+--
+-- `agree` is the phrasebook token the screens already have a sentence for
+-- ("The battle was called off.") -- `gone` prints as a silent draw.
+function M:failMediatedAssembly(record)
+  if not record then return end
+  local id, hostId = record.id, record.hostId
+  self:abortMediatedBattle(record, "agree")
+  local host = hostId and self.clients[hostId]
+  if host and host.sessionId == id then self:endSession(host, "gone") end
+  if self.coopBattles[id] then self:closeCoopBattle(id) end
 end
 
 -- Call the fight off.  Everybody still owed a grace is disconnected and the

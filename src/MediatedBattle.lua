@@ -3832,6 +3832,7 @@ local REASONS = {
   disconnect = "The link was lost.",
   run        = "Someone ran away!",
   forfeit    = "Someone gave up.",
+  agree      = "The battle was\ncalled off.",
   catch      = "Gotcha!",
 }
 

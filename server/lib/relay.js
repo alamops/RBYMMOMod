@@ -3333,6 +3333,10 @@ class Relay {
     });
     if (!created.battle) {
       this.log.warn(`mediated battle ${record.id} refused: ${safe(created.reason)}`);
+      // Seats are filled and the turn machine still will not fight on this
+      // field. Leaving the record in battles with sim = null kept every
+      // player marked in a pairing that will never send battle_ready.
+      this.failMediatedAssembly(record);
       return false;
     }
     record.sim = created.battle;
@@ -3461,6 +3465,25 @@ class Relay {
     // Still collecting parties / ruleset: call the fight off.
     this.abortMediatedBattle(record, 'gone');
     return false;
+  }
+
+  /*
+   * Parties and a ruleset arrived, the turn machine still refused the field.
+   * abortMediatedBattle clears battleId; a 1v1 still holds sessionId (busyNow)
+   * and a co-op still holds coopBattleId. Those go too, or the seats stay
+   * hub-busy waiting for a battle_ready that will never come.
+   *
+   * `agree` is the phrasebook token the screens already have a sentence for
+   * ("The battle was called off.") — `gone` prints as a silent draw.
+   */
+  failMediatedAssembly(record) {
+    if (!record) return;
+    const id = record.id;
+    const hostId = record.hostId;
+    this.abortMediatedBattle(record, 'agree');
+    const host = hostId && this.clients.get(hostId);
+    if (host && host.sessionId === id) this.endSession(host, 'gone');
+    if (this.coopBattles.has(id)) this.closeCoopBattle(id);
   }
 
   abortMediatedBattle(record, reason) {
