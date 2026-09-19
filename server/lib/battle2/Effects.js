@@ -362,6 +362,20 @@ function resetStages(mon) {
   mon.stages.eva = 0;
 }
 
+// Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
+// Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
+// Substitute) and field-wide Haze still run; Conversion copies onto the user.
+function blockedBySubstitute(effectId) {
+  const statFx = STAT_EFFECTS[effectId];
+  if (statFx) return !statFx.selfTarget;
+  if (effectId === 24 || effectId === 25 || effectId === 46 || effectId === 47
+      || effectId === 56 || effectId === 64 || effectId === 65
+      || effectId === 79 || effectId === 85) {
+    return false;
+  }
+  return true;
+}
+
 // ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
 //      moveIndex (1-based), statusToWire
 function applyPrimary(ctx) {
@@ -375,6 +389,11 @@ function applyPrimary(ctx) {
     userMon, targetMon, userFighter, targetFighter, rng,
   } = c;
   const wire = c.statusToWire || {};
+
+  if (targetMon && (targetMon.substitute || 0) > 0 && blockedBySubstitute(effectId)) {
+    out.nothing = true;
+    return out;
+  }
 
   if (effectId === 85) {
     out.nothing = true;

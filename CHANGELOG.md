@@ -4,6 +4,15 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **Substitute blocks status and other foe-targeting primaries.** Sleep Powder,
+  Growl, Disable, Transform, and Mimic failed through a sub (auto-AI already
+  skipped those; humans and the hub did not). Recover, Swords Dance, Substitute,
+  and Haze still run. Lua and JS twins.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed

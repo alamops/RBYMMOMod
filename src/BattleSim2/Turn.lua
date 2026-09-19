@@ -2694,7 +2694,9 @@ function Battle:_useMove(fighter, mon, opts)
     self:_damage(fighter, mon, recoil, nil)
   end
 
-  if Effects.handlesPrimary(effectId) then
+  -- A substitute absorbs HP (including the breaking hit), so totalDealt stays
+  -- 0. Do not then apply a foe primary onto the mon behind it.
+  if Effects.handlesPrimary(effectId) and totalDealt > 0 then
     self:_applyPrimary(fighter, mon, target, defender, choice.move, effectId)
   end
 
