@@ -500,6 +500,14 @@ end
 -- accuracy on type 0 is a plain hit: weaker than assuming the best and far
 -- better than refusing the move, which would refuse the monster and then the
 -- whole party.
+--
+-- Engine Damage.lua HIGH_CRIT fallback for imported caches that predate the
+-- move-record `highCrit` field. The hub has no move table, so the client has
+-- to stamp the flag on the sheet.
+local HIGH_CRIT_MOVES = {
+  KARATE_CHOP = true, RAZOR_LEAF = true, CRABHAMMER = true, SLASH = true,
+}
+
 moveOf = function(data, slot, order, generation)
   if type(slot) ~= "table" then return nil end
   local id = Wire.id(slot.id)
@@ -533,7 +541,20 @@ moveOf = function(data, slot, order, generation)
 
   local pp = clamp(intOr(slot.pp, 0), 0, 99)
   local maxPp = clamp(intOr(slot.maxPp or slot.pp, pp), pp, 99)
-  return {
+  local highCrit = false
+  if def and def.highCrit ~= nil then
+    -- The move-record field wins, including an explicit false that opts a
+    -- vanilla high-crit id back to ordinary odds.
+    highCrit = def.highCrit == true
+  elseif generation ~= 2 and HIGH_CRIT_MOVES[id] then
+    highCrit = true
+  end
+  -- Gen 2 high-crit moves are EFFECT_ALWAYS_CRIT on the engine record; BattleSim2
+  -- reads `move.highCrit` the same way Gen 1 now does.
+  if generation == 2 and def and def.effect == "EFFECT_ALWAYS_CRIT" then
+    highCrit = true
+  end
+  local out = {
     id       = id,
     -- What the referee narrates this move under (PROTOCOL 26).  `id` is a
     -- registry key -- DOUBLE_KICK -- and every sentence the sim writes used to
@@ -551,6 +572,8 @@ moveOf = function(data, slot, order, generation)
     effect   = effect,
     chance   = chance,
   }
+  if highCrit then out.highCrit = true end
+  return out
 end
 
 -- Battle stats for the wire sheet.
@@ -738,6 +761,16 @@ function M.snapshotMons(game, party)
           local rate = def and tonumber(def.catchRate)
           if rate then
             out[#out].catchRate = clamp(floor(rate), 0, 255)
+          end
+          -- Species base Speed for Gen 1 crit. Not battle Speed: paralysis and
+          -- the Speed badge must not change the rate, and the hub has no
+          -- species table to look this up in.
+          if generation ~= 2 then
+            local base = def and type(def.baseStats) == "table"
+              and tonumber(def.baseStats.speed) or nil
+            if base ~= nil and base == base then
+              out[#out].baseSpd = clamp(floor(base), 0, 255)
+            end
           end
         end
       end
@@ -1090,6 +1123,7 @@ end
 -- player believes they spent.
 function M.submitChoice(transport, battle, fields)
   if not (transport and battle) then return false end
+  if transport.isReady and not transport:isReady() then return false end
   local out = { battle = battle }
   for key, value in pairs(fields or {}) do out[key] = value end
   if not Wire.battleChoice(out) then
@@ -3832,6 +3866,7 @@ local REASONS = {
   disconnect = "The link was lost.",
   run        = "Someone ran away!",
   forfeit    = "Someone gave up.",
+  agree      = "The battle was\ncalled off.",
   catch      = "Gotcha!",
 }
 
@@ -4043,6 +4078,14 @@ end
 -- the menu closes on a choice that actually went.
 function M:sendChoice(fields)
   if self.finished then return false end
+  -- The hub is in reconnect grace: filing now would mark the turn answered
+  -- locally even when the wire never takes it (or when the referee refuses
+  -- because fighter.connected is false).
+  if self.awaitingReconnect then return false end
+  if not (self.transport and self.transport.isReady
+          and self.transport:isReady()) then
+    return false
+  end
   if not M.submitChoice(self.transport, self.battle, fields) then return false end
   self.phase = "play"
   self.pendingTurn = false

@@ -4,7 +4,7 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [1.4.3] - 2026-09-17
+## [1.4.9] - 2026-09-19
 
 ### Fixed
 
@@ -15,6 +15,63 @@ here must match `manifest.version`.
   forfeited, and only if the choice actually went. Wild still flees. NPC
   trainers print the vanilla refuse line and do not file run, so an
   honest menu cannot forfeit a gym.
+
+## [1.4.8] - 2026-09-19
+
+### Fixed
+
+- **Gen 1 crit uses species base Speed; high-crit moves are wired.** Mediated
+  Slash / Karate Chop / Razor Leaf / Crabhammer used ordinary odds because
+  `_useMove` passed battle Speed (plus the Speed badge) into `Crit.check` and
+  never set `highCritMove`. The upload now carries `baseSpd` and `highCrit` on
+  the existing client sheet — the hub still has no ROM table.
+
+## [1.4.7] - 2026-09-19
+
+### Fixed
+
+- **Co-op FIGHT and ITEM lists wrap.** Co-op UP/DOWN used to clamp at both
+  ends while 1v1 FIGHT wraps like Gen 1. Move, bag, item-target, and
+  Ether-style item-move lists now ring the same way. SWITCH / send-out
+  still clamp.
+
+## [1.4.6] - 2026-09-19
+
+### Fixed
+
+- **A fight the turn machine refuses no longer leaves the pairing stuck.**
+  If parties and a ruleset had arrived but `Turn.attempt` / `Turn.create`
+  still would not open the field, the hub logged and returned. The record
+  stayed in `battles` with `sim = nil`, players kept `battleId` / `sessionId`,
+  and nobody ever heard `battle_ready`. Assembly failure now aborts the
+  mediated battle (`agree` — "The battle was called off."), drops the 1v1
+  session and any co-op group, clears leftover `matches` / `coopMatches`
+  so a later `mmo.result` cannot settle a fight that never opened, and
+  both sides get an outcome. A refused co-op open no longer files
+  settlement paperwork.
+
+## [1.4.5] - 2026-09-19
+
+### Fixed
+
+- **A second mediated fight can no longer stack on a live one.** Duplicate
+  `onSession` for a new named pairing drops the local screen (without
+  `SESSION_LEAVE`, which would abandon the fight the hub already moved
+  `battleId` to) and starts the new one. The same pairing is a no-op.
+  `beginWildMediated` refuses a second fight without leaving.
+
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **Disconnected seats cannot spend a turn.** After `disconnect()` (socket
+  drop or SESSION_LEAVE) the choice clock already paused, but `submitChoice`
+  still accepted answers from the same socket. The referee now refuses until
+  `reconnect()`, and `_maybeResolve` waits on the same flag so a leftover or
+  forced fill cannot complete the turn while anyone is away. The client
+  `sendChoice` / `sendMediatedChoice` paths also refuse while awaiting
+  reconnect or the transport is not ready, and do not mark the turn
+  answered.
 
 ## [1.4.2] - 2026-09-16
 

@@ -17814,11 +17814,11 @@ end)()
   eq(CoopBattle.CMD_BOX_TW, 20, "command box is full width")
 end)()
 
--- ------- the move list: one column, clamp at both ends
+-- ------- the move list: one column, wrap at both ends
 --
 -- Drawn vertically (full-width names) like classic Gen 1, not the old 2x2
 -- grid that clipped longer move names. UP/DOWN step; LEFT/RIGHT are aliases;
--- past either end holds.
+-- past either end wraps, matching MediatedBattle:updateMoveMenu / Gen 1 FIGHT.
 
 ;(function()
   local CoopBattle = need("CoopBattle")
@@ -17848,11 +17848,11 @@ end)()
 
   client.moveIndex = 3
   CoopBattle.updateMove(client, press("down"))
-  eq(client.moveIndex, 3, "DOWN on the last move holds")
+  eq(client.moveIndex, 1, "DOWN on the last move wraps to the first")
 
   client.moveIndex = 1
   CoopBattle.updateMove(client, press("up"))
-  eq(client.moveIndex, 1, "UP on the first holds")
+  eq(client.moveIndex, 3, "UP on the first wraps to the last")
 
   client.moveIndex = 1
   CoopBattle.updateMove(client, press("right"))
@@ -17882,6 +17882,79 @@ end)()
     CoopBattle.updateMove(loner, press(direction))
     eq(loner.moveIndex, 1, direction .. " holds with only one move on the list")
   end
+end)()
+
+-- ------- ITEM and item-move lists wrap the same way as FIGHT
+--
+-- 1v1 MediatedBattle:updateItemMenu / updateItemParty / updateItemMove wrap
+-- at both ends. Co-op used to clamp via listPress; the two UIs now share
+-- the Gen 1 habit. SWITCH / replace stay clamped (pinned below on
+-- updateReplace).
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local function press(key) return { wasPressed = function(_, k) return k == key end } end
+
+  local bag = setmetatable({
+    messages = {}, phase = "item", itemIndex = 1,
+    itemList = {
+      { id = "potion", name = "POTION", count = 1, effect = {} },
+      { id = "super-potion", name = "SUPER POTION", count = 1, effect = {} },
+      { id = "hyper-potion", name = "HYPER POTION", count = 1, effect = {} },
+    },
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  CoopBattle.updateItem(bag, press("down"))
+  eq(bag.itemIndex, 2, "DOWN from the first item lands on the second")
+  bag.itemIndex = 3
+  CoopBattle.updateItem(bag, press("down"))
+  eq(bag.itemIndex, 1, "DOWN on the last item wraps to the first")
+  CoopBattle.updateItem(bag, press("up"))
+  eq(bag.itemIndex, 3, "UP on the first wraps to the last")
+  CoopBattle.updateItem(bag, press("right"))
+  eq(bag.itemIndex, 1, "RIGHT aliases DOWN, including the wrap")
+
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = {
+        mon(60, 50, { { id = "FIX_TACKLE", pp = 20 },
+                      { id = "FIX_TACKLE", pp = 20 },
+                      { id = "FIX_TACKLE", pp = 20 } }),
+        mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }),
+        mon(60, 35, { { id = "FIX_TACKLE", pp = 20 } }),
+      } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local partyPick = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "item_party",
+    switchIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  eq(#CoopBattle.itemPartyRows(partyPick), 3, "three party rows for the item target")
+  partyPick.switchIndex = 3
+  CoopBattle.updateItemParty(partyPick, press("down"))
+  eq(partyPick.switchIndex, 1, "DOWN on the last party row wraps to the first")
+  CoopBattle.updateItemParty(partyPick, press("up"))
+  eq(partyPick.switchIndex, 3, "UP on the first party row wraps to the last")
+
+  local ether = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "item_move",
+    moveIndex = 1, itemPartyIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  eq(#(sim:slot(1).party[1].moves or {}), 3, "three moves on the Ether list")
+  ether.moveIndex = 3
+  CoopBattle.updateItemMove(ether, press("down"))
+  eq(ether.moveIndex, 1, "DOWN on the last item-move wraps to the first")
+  CoopBattle.updateItemMove(ether, press("up"))
+  eq(ether.moveIndex, 3, "UP on the first item-move wraps to the last")
 end)()
 
 -- ------- the gap between two lines is not a stage for the wait line
@@ -20657,7 +20730,8 @@ check((struggler.hp or 0) < (struggler.stats.hp or 0),
   eq(sent[1].slot, 1, "for this player's own slot")
   eq(sent[1].index, 2, "naming the monster they picked")
 
-  -- With two on the bench the cursor moves, and clamps (same as moves/target).
+  -- With two on the bench the cursor moves, and clamps. Party send-out stays
+  -- a bounded list; FIGHT / ITEM / item-target wrap.
   picker:slot(1).party[3].hp = 60
   client.replacing, client.switchIndex, sent = true, 1, {}
   eq(#CoopBattle.benchOf(client, picker:slot(1)), 2, "two reserves, two rows")
@@ -25466,6 +25540,28 @@ end)()
           "the PP sentence is shown")
     eq(ppClient.moveMemory[2], nil,
        "...and does not remember a move the hub never took")
+
+    -- SESSION_LEAVE leaves TCP up; sendMediatedChoice must not put a
+    -- BATTLE_CHOICE on the wire while the seat is awaiting reconnect.
+    local sent = {}
+    local dropClient = setmetatable({
+      mediated = true,
+      battleId = "b-drop",
+      awaitingReconnect = false,
+      messages = {},
+      transport = {
+        send = function(_, msgType, payload)
+          sent[#sent + 1] = { type = msgType, payload = payload }
+          return true
+        end,
+        isReady = function() return true end,
+      },
+    }, { __index = CoopBattle })
+    dropClient:onTransportLost()
+    eq(dropClient.awaitingReconnect, true, "onTransportLost holds the seat")
+    eq(dropClient:sendMediatedChoice({ kind = "run" }), false,
+       "sendMediatedChoice refuses after the drop")
+    eq(#sent, 0, "and puts no BATTLE_CHOICE on the wire")
 
     local items = CoopBattle.bandCommandItems({})
     eq(items[1].label, "FIGHT", "the grid keeps the classic FIGHT/SWITCH/ITEM/RUN order")

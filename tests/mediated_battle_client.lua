@@ -119,9 +119,16 @@ local DATA = {
     -- (HYDRO_PUMP / "HYDRO PUMP") and the only one that can tell the two
     -- fields apart.
     HYDRO   = { name = "HYDRO PUMP", power = 120, accuracy = 80, type = "WATER", pp = 5 },
+    SLASH   = { name = "SLASH", power = 70, accuracy = 100, type = "NORMAL", pp = 20,
+                highCrit = true },
+    -- Cache that predates the highCrit field: the client falls back to the
+    -- engine's HIGH_CRIT id list so Karate Chop still rides as high-crit.
+    KARATE_CHOP = { name = "KARATE CHOP", power = 50, accuracy = 100, type = "NORMAL",
+                    pp = 25 },
   },
   pokemon = {
-    CHARMANDER = { name = "CHARMANDER", types = { "FIRE" } },
+    CHARMANDER = { name = "CHARMANDER", types = { "FIRE" },
+                   baseStats = { speed = 65 } },
     SQUIRTLE   = { name = "SQUIRTLE", types = { "WATER" } },
   },
 }
@@ -217,6 +224,48 @@ eq(mons[2].moves[1].id, "HYDRO",
 -- twins carry the field the clients are already speaking it.
 eq(mons[1].types[1], 0, "a FIRE species claims type 0")
 eq(mons[2].types[1], 2, "and a WATER one type 2")
+eq(mons[1].baseSpd, 65, "species base Speed rides the sheet for Gen 1 crit")
+eq(mons[2].baseSpd, nil, "and is omitted when the species record has none")
+eq(mons[1].moves[1].highCrit, nil, "EMBER is not a high-crit move")
+
+local slashParty = Mediated.snapshotParty(gameWith(
+  { mon("CHARMANDER", { moves = { { id = "SLASH", pp = 20 },
+                                 { id = "KARATE_CHOP", pp = 25 } } }) }, DATA))
+eq(slashParty[1].moves[1].highCrit, true,
+   "highCrit on the move record stamps the sheet")
+eq(slashParty[1].moves[2].highCrit, true,
+   "...and KARATE_CHOP does too, from the engine HIGH_CRIT id fallback")
+local slashPacked = Wire.battleParty({ battle = "7", mons = slashParty })
+check(slashPacked ~= nil, "a high-crit snapshot survives Wire.battleParty")
+eq(slashPacked.mons[1].moves[1].highCrit, true,
+   "and the sanitiser keeps highCrit")
+eq(slashPacked.mons[1].baseSpd, 65, "...and species base Speed")
+check(Wire.battleMove({ id = "SLASH", pp = 20, power = 70, accuracy = 255,
+                        type = 1, effect = 0, chance = 0,
+                        highCrit = true }).highCrit == true,
+      "Wire.battleMove keeps highCrit = true")
+eq(Wire.battleMove({ id = "SLASH", pp = 20, power = 70, accuracy = 255,
+                     type = 1, effect = 0, chance = 0,
+                     highCrit = false }).highCrit, nil,
+   "highCrit = false is omitted rather than stored")
+check(Wire.battleMove({ id = "SLASH", pp = 20, power = 70, accuracy = 255,
+                        type = 1, effect = 0, chance = 0,
+                        highCrit = "yes" }) == nil,
+      "a non-boolean highCrit refuses the move")
+check(Wire.battleMon({
+  species = "CHARMANDER", level = 5, hp = 1, maxHp = 1,
+  stats = { atk = 1, def = 1, spd = 1, spc = 1 },
+  moves = { { id = "EMBER", pp = 1, power = 1, accuracy = 255,
+              type = 0, effect = 0, chance = 0 } },
+  baseSpd = 65,
+}).baseSpd == 65, "Wire.battleMon keeps baseSpd")
+check(Wire.battleMon({
+  species = "CHARMANDER", level = 5, hp = 1, maxHp = 1,
+  stats = { atk = 1, def = 1, spd = 1, spc = 1 },
+  moves = { { id = "EMBER", pp = 1, power = 1, accuracy = 255,
+              type = 0, effect = 0, chance = 0 } },
+  baseSpd = "fast",
+}) == nil, "an unreadable baseSpd refuses the battler")
 
 -- The strongest single assertion in this file: the real sanitiser, which is
 -- what the far end runs.
@@ -517,6 +566,67 @@ eq(host.pushed[1], host.sessions.fight, "and it is the fight itself")
 check(Sessions.isFightState(host.sessions.fight),
       "an invite must not pop over it")
 
+-- A new named onSession must follow the hub: it already moved battleId,
+-- so keeping the old screen would leave choices unroutable. SESSION_LEAVE
+-- would drop the new pairing, not the discarded one.
+local stacked = harness("host")
+stacked.open("7")
+local live = stacked.sessions.fight
+local warnBefore = #warns
+stacked.open("8")
+check(stacked.sessions.fight ~= live, "a new named pairing replaces the local fight")
+eq(stacked.sessions.fight.battle, "8", "and follows the hub's new battle id")
+eq(stacked.countSent(Wire.SESSION_LEAVE), 0,
+   "without leaving the pairing the hub just opened")
+check(live.left == true, "the discarded screen cannot endMediated later")
+check(#warns > warnBefore, "and says why")
+
+-- The same pairing delivered twice is already on screen: leaving it would
+-- forfeit the live fight.
+local twice = harness("host")
+twice.open("7")
+twice.open("7")
+eq(#twice.pushed, 1, "the same pairing does not re-push")
+eq(twice.countSent(Wire.SESSION_LEAVE), 0, "and does not leave the live fight")
+
+-- beginWildMediated occupancy is still the live fight, so a second call
+-- must not SESSION_LEAVE.
+local wilder = harness("host")
+check(wilder.sessions:beginWildMediated(wilder.game, "w1", {
+        mon = mon("CHARMANDER") }) == true,
+      "a wild mediated fight opens")
+eq(#wilder.pushed, 1, "the wild screen goes up")
+local wildLive = wilder.sessions.fight
+check(wilder.sessions:beginWildMediated(wilder.game, "w2", {
+        mon = mon("CHARMANDER") }) == false,
+      "a second wild fight is refused")
+eq(wilder.sessions.fight, wildLive, "the live wild fight stays")
+eq(#wilder.pushed, 1, "and no second wild screen")
+eq(wilder.countSent(Wire.SESSION_LEAVE), 0, "and does not leave the live fight")
+
+-- A finished screen is still on self.fight: onSession of a new pairing
+-- drops it (so onDone cannot fire under the replacement) then begins.
+local done = harness("host")
+done.open("7")
+done.sessions.fight:finish("win")
+local oldDone = done.sessions.fight
+check(done.sessions:beginMediated(done.game, "9", "peer1", "BOB", "host") == true,
+      "a new named pairing replaces a finished screen")
+check(done.sessions.fight ~= oldDone, "the buried screen is not self.fight")
+eq(done.sessions.fight.battle, "9", "the new fight is the one on the pointer")
+eq(done.countSent(Wire.SESSION_LEAVE), 0, "without leaving the new pairing")
+check(oldDone.left == true, "the old screen cannot endMediated later")
+
+-- Wild must not replace a finished 1v1 either, and must not leave it.
+local doneWild = harness("host")
+doneWild.open("7")
+doneWild.sessions.fight:finish("win")
+check(doneWild.sessions:beginWildMediated(doneWild.game, "w2", {
+        mon = mon("CHARMANDER") }) == false,
+      "wild does not replace a finished 1v1")
+eq(doneWild.sessions.fight.battle, "7", "the finished 1v1 stays")
+eq(doneWild.countSent(Wire.SESSION_LEAVE), 0, "and is not left")
+
 local guest = harness("guest")
 guest.open()
 check(guest.firstSent(Wire.BATTLE_PARTY) ~= nil, "the guest uploads a party too")
@@ -538,6 +648,17 @@ unnamed.sessions:onSession(unnamed.game, {
 })
 eq(unnamed.countSent(Wire.BATTLE_PARTY), 0, "an unnamed battle uploads nothing")
 eq(unnamed.sessions.fight, nil, "and does not open a screen to wait on")
+
+-- An unnamed SESSION while a fight is live must not SESSION_LEAVE: that
+-- message has no id, so it would forfeit the fight the player is in.
+local keep = harness("host")
+keep.open("7")
+keep.sessions:onSession(keep.game, {
+  peer = "peer1", peerName = "BOB", kind = "battle", role = "host",
+})
+eq(keep.sessions.fight.battle, "7", "an unnamed duplicate keeps the live fight")
+eq(#keep.pushed, 1, "and does not push another screen")
+eq(keep.countSent(Wire.SESSION_LEAVE), 0, "and does not leave it")
 
 -- A player with nothing to fight with is told so rather than left waiting.
 local empty = harness("host", {})
@@ -999,6 +1120,15 @@ check(not lost.sessions.fight.finished,
 check(lost.sessions.fight.awaitingReconnect == true,
       "and the screen says it is waiting to reconnect")
 
+-- A dropped link must not spend the turn: sendChoice used to ignore
+-- awaitingReconnect, put a choice on the wire, and set answeredTurn.
+eq(lost.sessions.fight:sendChoice({ action = "fight", move = 0 }), false,
+   "sendChoice refuses while awaiting reconnect")
+eq(lost.sessions.fight.answeredTurn, false,
+   "and does not mark the turn answered")
+eq(lost.countSent(Wire.BATTLE_CHOICE), 0,
+   "so no choice went on the wire")
+
 -- Coming back sends mmo.battle_reconnect once with the battle id.
 lost.dead = false
 lost.sessions:update(lost.game, 0)
@@ -1009,6 +1139,17 @@ eq(lost.firstSent(Wire.BATTLE_RECONNECT).battle, "7",
 lost.sessions:update(lost.game, 0)
 eq(lost.countSent(Wire.BATTLE_RECONNECT), 1,
    "and only once per drop cycle")
+
+-- isReady is its own gate: a live screen with a dead transport still
+-- must not file, even after the reconnect wait flag is cleared.
+lost.dead = true
+lost.sessions.fight.awaitingReconnect = false
+eq(lost.sessions.fight:sendChoice({ action = "fight", move = 0 }), false,
+   "sendChoice also refuses when the transport is not ready")
+eq(lost.sessions.fight.answeredTurn, false,
+   "and still does not mark the turn answered")
+eq(lost.countSent(Wire.BATTLE_CHOICE), 0,
+   "and still puts no choice on the wire")
 
 -- The same hook is reachable directly for a screen with no Sessions wrapper.
 local solo = harness("host")
