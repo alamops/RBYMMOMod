@@ -566,6 +566,67 @@ eq(host.pushed[1], host.sessions.fight, "and it is the fight itself")
 check(Sessions.isFightState(host.sessions.fight),
       "an invite must not pop over it")
 
+-- A new named onSession must follow the hub: it already moved battleId,
+-- so keeping the old screen would leave choices unroutable. SESSION_LEAVE
+-- would drop the new pairing, not the discarded one.
+local stacked = harness("host")
+stacked.open("7")
+local live = stacked.sessions.fight
+local warnBefore = #warns
+stacked.open("8")
+check(stacked.sessions.fight ~= live, "a new named pairing replaces the local fight")
+eq(stacked.sessions.fight.battle, "8", "and follows the hub's new battle id")
+eq(stacked.countSent(Wire.SESSION_LEAVE), 0,
+   "without leaving the pairing the hub just opened")
+check(live.left == true, "the discarded screen cannot endMediated later")
+check(#warns > warnBefore, "and says why")
+
+-- The same pairing delivered twice is already on screen: leaving it would
+-- forfeit the live fight.
+local twice = harness("host")
+twice.open("7")
+twice.open("7")
+eq(#twice.pushed, 1, "the same pairing does not re-push")
+eq(twice.countSent(Wire.SESSION_LEAVE), 0, "and does not leave the live fight")
+
+-- beginWildMediated occupancy is still the live fight, so a second call
+-- must not SESSION_LEAVE.
+local wilder = harness("host")
+check(wilder.sessions:beginWildMediated(wilder.game, "w1", {
+        mon = mon("CHARMANDER") }) == true,
+      "a wild mediated fight opens")
+eq(#wilder.pushed, 1, "the wild screen goes up")
+local wildLive = wilder.sessions.fight
+check(wilder.sessions:beginWildMediated(wilder.game, "w2", {
+        mon = mon("CHARMANDER") }) == false,
+      "a second wild fight is refused")
+eq(wilder.sessions.fight, wildLive, "the live wild fight stays")
+eq(#wilder.pushed, 1, "and no second wild screen")
+eq(wilder.countSent(Wire.SESSION_LEAVE), 0, "and does not leave the live fight")
+
+-- A finished screen is still on self.fight: onSession of a new pairing
+-- drops it (so onDone cannot fire under the replacement) then begins.
+local done = harness("host")
+done.open("7")
+done.sessions.fight:finish("win")
+local oldDone = done.sessions.fight
+check(done.sessions:beginMediated(done.game, "9", "peer1", "BOB", "host") == true,
+      "a new named pairing replaces a finished screen")
+check(done.sessions.fight ~= oldDone, "the buried screen is not self.fight")
+eq(done.sessions.fight.battle, "9", "the new fight is the one on the pointer")
+eq(done.countSent(Wire.SESSION_LEAVE), 0, "without leaving the new pairing")
+check(oldDone.left == true, "the old screen cannot endMediated later")
+
+-- Wild must not replace a finished 1v1 either, and must not leave it.
+local doneWild = harness("host")
+doneWild.open("7")
+doneWild.sessions.fight:finish("win")
+check(doneWild.sessions:beginWildMediated(doneWild.game, "w2", {
+        mon = mon("CHARMANDER") }) == false,
+      "wild does not replace a finished 1v1")
+eq(doneWild.sessions.fight.battle, "7", "the finished 1v1 stays")
+eq(doneWild.countSent(Wire.SESSION_LEAVE), 0, "and is not left")
+
 local guest = harness("guest")
 guest.open()
 check(guest.firstSent(Wire.BATTLE_PARTY) ~= nil, "the guest uploads a party too")
@@ -587,6 +648,17 @@ unnamed.sessions:onSession(unnamed.game, {
 })
 eq(unnamed.countSent(Wire.BATTLE_PARTY), 0, "an unnamed battle uploads nothing")
 eq(unnamed.sessions.fight, nil, "and does not open a screen to wait on")
+
+-- An unnamed SESSION while a fight is live must not SESSION_LEAVE: that
+-- message has no id, so it would forfeit the fight the player is in.
+local keep = harness("host")
+keep.open("7")
+keep.sessions:onSession(keep.game, {
+  peer = "peer1", peerName = "BOB", kind = "battle", role = "host",
+})
+eq(keep.sessions.fight.battle, "7", "an unnamed duplicate keeps the live fight")
+eq(#keep.pushed, 1, "and does not push another screen")
+eq(keep.countSent(Wire.SESSION_LEAVE), 0, "and does not leave it")
 
 -- A player with nothing to fight with is told so rather than left waiting.
 local empty = harness("host", {})
@@ -1048,6 +1120,15 @@ check(not lost.sessions.fight.finished,
 check(lost.sessions.fight.awaitingReconnect == true,
       "and the screen says it is waiting to reconnect")
 
+-- A dropped link must not spend the turn: sendChoice used to ignore
+-- awaitingReconnect, put a choice on the wire, and set answeredTurn.
+eq(lost.sessions.fight:sendChoice({ action = "fight", move = 0 }), false,
+   "sendChoice refuses while awaiting reconnect")
+eq(lost.sessions.fight.answeredTurn, false,
+   "and does not mark the turn answered")
+eq(lost.countSent(Wire.BATTLE_CHOICE), 0,
+   "so no choice went on the wire")
+
 -- Coming back sends mmo.battle_reconnect once with the battle id.
 lost.dead = false
 lost.sessions:update(lost.game, 0)
@@ -1058,6 +1139,17 @@ eq(lost.firstSent(Wire.BATTLE_RECONNECT).battle, "7",
 lost.sessions:update(lost.game, 0)
 eq(lost.countSent(Wire.BATTLE_RECONNECT), 1,
    "and only once per drop cycle")
+
+-- isReady is its own gate: a live screen with a dead transport still
+-- must not file, even after the reconnect wait flag is cleared.
+lost.dead = true
+lost.sessions.fight.awaitingReconnect = false
+eq(lost.sessions.fight:sendChoice({ action = "fight", move = 0 }), false,
+   "sendChoice also refuses when the transport is not ready")
+eq(lost.sessions.fight.answeredTurn, false,
+   "and still does not mark the turn answered")
+eq(lost.countSent(Wire.BATTLE_CHOICE), 0,
+   "and still puts no choice on the wire")
 
 -- The same hook is reachable directly for a screen with no Sessions wrapper.
 local solo = harness("host")
@@ -2321,6 +2413,67 @@ do
   eq(pp.liveMoves[1].id, "TACKLE", "...and is what FIGHT reads until a send")
   eq(pp:bandMoveRows()[1].right, "10/35",
      "...including the live PP of the copied move")
+end
+
+-- ------------------------------------------------------------------
+-- 14b. RUN: trainer refuses locally; 1v1 / coop_pvp concede without the lie
+-- ------------------------------------------------------------------
+--
+-- The command used to print the trainer sentence and then file `run` for every
+-- non-wild mode, so a 1v1 concession read as a gym refusal. Trainer (coop_npc)
+-- still says it and does not file; 1v1 / coop_pvp file a concession and do not
+-- pretend there is a trainer.
+
+local function saidTrainerRun(fight)
+  for _, row in ipairs(fight.lines or {}) do
+    local text = type(row) == "string" and row
+      or (type(row) == "table" and row.text)
+    if type(text) == "string" and text:lower():find("running", 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+do
+  eq(Mediated.COMMANDS[4], "RUN", "the fourth command is RUN")
+
+  local function pressRun(mode)
+    local sent = {}
+    local fight = setmetatable({
+      game = { data = DATA },
+      mode = mode,
+      phase = "choose",
+      commandIndex = 4,
+      lines = {},
+      answeredTurn = false,
+      sendChoice = function(_, choice)
+        sent[#sent + 1] = choice
+        return true
+      end,
+    }, { __index = Mediated })
+    local input = fakeInput()
+    input.press("a")
+    fight:updateCommand(input)
+    return fight, sent
+  end
+
+  local pvp, pvpSent = pressRun("1v1")
+  eq(#pvpSent, 1, "1v1 RUN is filed")
+  eq(pvpSent[1] and pvpSent[1].action, "run", "...as a concession")
+  check(not saidTrainerRun(pvp),
+        "and does not pretend a 1v1 is a trainer battle")
+
+  local ranked, rankedSent = pressRun("coop_pvp")
+  eq(#rankedSent, 1, "coop_pvp RUN is filed too")
+  eq(rankedSent[1] and rankedSent[1].action, "run", "...as a concession")
+  check(not saidTrainerRun(ranked),
+        "and does not use the trainer line for a player fight")
+
+  local npc, npcSent = pressRun("coop_npc")
+  eq(#npcSent, 0, "trainer RUN is not filed")
+  check(saidTrainerRun(npc),
+        "the screen says there is no running from a trainer battle")
 end
 
 -- ------------------------------------------------------------------

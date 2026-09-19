@@ -1123,6 +1123,7 @@ end
 -- player believes they spent.
 function M.submitChoice(transport, battle, fields)
   if not (transport and battle) then return false end
+  if transport.isReady and not transport:isReady() then return false end
   local out = { battle = battle }
   for key, value in pairs(fields or {}) do out[key] = value end
   if not Wire.battleChoice(out) then
@@ -3865,6 +3866,7 @@ local REASONS = {
   disconnect = "The link was lost.",
   run        = "Someone ran away!",
   forfeit    = "Someone gave up.",
+  agree      = "The battle was\ncalled off.",
   catch      = "Gotcha!",
 }
 
@@ -4076,6 +4078,14 @@ end
 -- the menu closes on a choice that actually went.
 function M:sendChoice(fields)
   if self.finished then return false end
+  -- The hub is in reconnect grace: filing now would mark the turn answered
+  -- locally even when the wire never takes it (or when the referee refuses
+  -- because fighter.connected is false).
+  if self.awaitingReconnect then return false end
+  if not (self.transport and self.transport.isReady
+          and self.transport:isReady()) then
+    return false
+  end
   if not M.submitChoice(self.transport, self.battle, fields) then return false end
   self.phase = "play"
   self.pendingTurn = false
@@ -4416,9 +4426,14 @@ function M:updateCommand(input)
     elseif command == "RUN" then
       if self.mode == "wild" then
         self:sendChoice({ action = "run" })
-      else
+      elseif TRAINER_MODES[self.mode] then
+        -- Vanilla refuses and returns to the menu without spending the turn.
+        -- Do not file `run`: the referee used to treat every run as a
+        -- concession, which forfeited the gym. It now no-ops a filed trainer
+        -- run (modified-client proof), but honest menus never send one.
         self:say("No! There's no\nrunning from a\ntrainer battle!")
-        -- Still spend the turn the way Gen 1 does against trainers.
+      else
+        -- 1v1 / coop_pvp: leaving is a concession, not a trainer refusal.
         self:sendChoice({ action = "run" })
       end
     end

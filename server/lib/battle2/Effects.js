@@ -1115,6 +1115,14 @@ function teleportRunAllowed(mode) {
   return typeof mode === 'string' && mode.includes('wild');
 }
 
+// RUN finishes the fight in wild/coop_wild (flee) and 1v1/coop_pvp
+// (concession). coop_npc -- and any other non-wild non-pvp mode -- refuses
+// without finishing, so a gym cannot be forfeited by pressing RUN.
+function runEndsBattle(mode) {
+  if (teleportRunAllowed(mode)) return true;
+  return mode === '1v1' || mode === 'coop_pvp';
+}
+
 function isPayDay(effectId) {
   return int(effectId, 0) === 16;
 }
@@ -1190,6 +1198,7 @@ module.exports = {
   jumpKickCrash,
   isSwitchAndTeleport,
   teleportRunAllowed,
+  runEndsBattle,
   isPayDay,
   isMirrorMove,
   isMimic,
