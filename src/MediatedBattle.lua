@@ -4383,9 +4383,14 @@ function M:updateCommand(input)
     elseif command == "RUN" then
       if self.mode == "wild" then
         self:sendChoice({ action = "run" })
-      else
+      elseif TRAINER_MODES[self.mode] then
+        -- Vanilla refuses and returns to the menu without spending the turn.
+        -- Do not file `run`: the referee used to treat every run as a
+        -- concession, which forfeited the gym. It now no-ops a filed trainer
+        -- run (modified-client proof), but honest menus never send one.
         self:say("No! There's no\nrunning from a\ntrainer battle!")
-        -- Still spend the turn the way Gen 1 does against trainers.
+      else
+        -- 1v1 / coop_pvp: leaving is a concession, not a trainer refusal.
         self:sendChoice({ action = "run" })
       end
     end

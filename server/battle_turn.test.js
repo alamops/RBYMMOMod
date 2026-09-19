@@ -1088,6 +1088,37 @@ test('the KO fight ends, and names who won', () => {
   );
 });
 
+test('coop_npc RUN refuses without finishing the fight', () => {
+  const battle = build({
+    id: 'npc-run', mode: 'coop_npc', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 200, moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, atk: 80, moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  const turnBefore = battle.snapshot().turn;
+  const hpBefore = battle.snapshot().field.find((f) => f.playerId === 'p1').hp;
+  battle.submitChoice('p1', { action: 'run' });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  const events = battle.drainEvents();
+  assert.strictEqual(battle.outcome(), null, 'the gym is not forfeited');
+  assert.ok(
+    events.some((event) => event.t === 'msg'
+      && event.text === "No! There's no running from a trainer battle!"),
+    'the trainer refusal is in the turn stream, Wire-safe',
+  );
+  assert.ok(!events.some((event) => event.t === 'over'), 'with no over event');
+  assert.ok(!events.some((event) => event.t === 'run'), 'and no run event');
+  assert.strictEqual(battle.snapshot().turn, turnBefore + 1, 'the turn was still spent');
+  assert.ok(
+    battle.snapshot().field.find((f) => f.playerId === 'p1').hp < hpBefore,
+    'so the foe still got its attack',
+  );
+});
+
 test('mid-turn-KO retargeting: the slower ally swings onto the survivor, not "has no target"', () => {
   const run = byName(jsRuns).get('retarget_ko');
   const events = run.events;

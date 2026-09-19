@@ -39,12 +39,12 @@
 --     side-a member goes first, otherwise the group reverses.  One draw per
 --     group rather than per pair, so a 2v2 with four equal speeds costs one
 --     byte on both runtimes.
---   * *Running* is a concession, not an escape.  A mediated fight is between
---     two people who agreed to it, and Gen 1's flee roll exists to let you
---     leave a wild encounter -- so one side running loses the battle with
---     reason `run`, and both sides running is a draw.  Mirrored: the policy
---     reads the same from either seat, which is what stops "I fled" and "they
---     fled" being two different stories.
+--   * *Running* is mode-gated, the same way Teleport is.  wild / coop_wild
+--     flee (the runner loses with reason `run`); 1v1 / coop_pvp is a
+--     concession, same bookkeeping, and both sides running is a draw;
+--     coop_npc -- and any other non-wild non-pvp mode -- emits the trainer
+--     refusal and does not finish, so a gym cannot be forfeited by pressing
+--     RUN.  Mirrored: the policy reads the same from either seat.
 --   * *Items* apply a hand-authored Gen1 heal/status table by id (Potion,
 --     Full Restore, Revive, Ether, …) — locked twin of public amounts, not a
 --     port of engine ItemEffects. Unknown ids announce "But it failed" and
@@ -1751,7 +1751,8 @@ function Battle:_resolveTurn()
   end
 end
 
--- Fleeing is a concession; see the policy note in the header.
+-- Fleeing is a concession in 1v1/coop_pvp, a wild escape in *wild modes,
+-- and a trainer refusal (no finish) everywhere else; see Effects.runEndsBattle.
 function Battle:_resolveRuns()
   local running = {}
   for _, fighter in ipairs(self.fighters) do
@@ -1760,6 +1761,11 @@ function Battle:_resolveRuns()
     end
   end
   if #running == 0 then return false end
+
+  if not Effects.runEndsBattle(self.mode) then
+    self:_say("No! There's no running from a trainer battle!")
+    return false
+  end
 
   local sides = {}
   for _, fighter in ipairs(running) do

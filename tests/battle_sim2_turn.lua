@@ -1314,6 +1314,38 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- trainer RUN does not forfeit; the Gen 1 twin owns the long version
+-- ------------------------------------------------------------------
+
+do
+  local battle = battleOf({
+    mode = "coop_npc",
+    seed = 90120,
+    sides = coopSides(
+      { { mon({ species = "Alpha", maxHp = 200, spe = 80 }) },
+        { mon({ species = "Gamma", maxHp = 200, spe = 70 }) } },
+      { mon({ species = "Beta", maxHp = 200, spe = 10, atk = 80 }) }
+    ),
+  })
+  drain(battle)
+  local turnBefore = battle:snapshot().turn
+  battle:submitChoice("a1", { action = "run" })
+  battle:submitChoice("a2", { action = "fight", move = 0 })
+  battle:autoPick("npc")
+  local out = drain(battle)
+  eq(battle:outcome(), nil, "coop_npc RUN does not finish the fight")
+  local refused = false
+  for _, event in ipairs(out) do
+    if event.t == "msg"
+       and event.text == "No! There's no running from a trainer battle!" then
+      refused = true
+    end
+  end
+  ok(refused, "and says the Wire-safe trainer refusal")
+  eq(battle:snapshot().turn, turnBefore + 1, "the runner's action still spends the turn")
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("battle_sim2_turn: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)
