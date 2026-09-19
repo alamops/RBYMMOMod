@@ -429,9 +429,18 @@ do
   eq(bob.battleId, id, "but grace still binds them to the fight")
   ok(hub.battles[id] ~= nil, "and the original record is still standing")
 
+  fight.bob.peer.outbox = {}
+  hub:receive(bob, { type = Wire.REQUEST, to = cal.id, kind = "duel" })
+  eq(take(fight.bob.peer, Wire.DECLINE), nil,
+     "a request with no valid kind earns no reply")
+
   hub:receive(bob, { type = Wire.REQUEST, to = cal.id, kind = "battle" })
   eq(take(calPeer, Wire.REQUEST), nil,
      "the leaver cannot open a second pairing while grace runs")
+  local selfBusy = take(fight.bob.peer, Wire.DECLINE)
+  ok(selfBusy ~= nil, "the leaver is told no so their outgoing ask clears")
+  eq(selfBusy and selfBusy.reason, "busy", "as busy, because they still have a battle")
+  eq(selfBusy and selfBusy.kind, "battle", "naming the ask they sent")
 
   hub:receive(cal, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
   local declined = take(calPeer, Wire.DECLINE)

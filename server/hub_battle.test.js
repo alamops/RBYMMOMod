@@ -324,9 +324,17 @@ function testSessionLeaveCannotStartSecondFight() {
   ok(bob.battleId === session.id, 'but grace still binds them to the fight');
   ok(relay.battles.has(session.id), 'and the original record is still standing');
 
+  b.peer.outbox = [];
+  relay.handle(b.id, { type: 'mmo.request', to: c.id, kind: 'duel' });
+  ok(take(b, 'mmo.decline') === null,
+    'a request with no valid kind earns no reply');
+
   relay.handle(b.id, { type: 'mmo.request', to: c.id, kind: 'battle' });
   ok(take(c, 'mmo.request') === null,
     'the leaver cannot open a second pairing while grace runs');
+  const selfBusy = take(b, 'mmo.decline');
+  ok(selfBusy && selfBusy.reason === 'busy' && selfBusy.kind === 'battle',
+    'the leaver is told busy so their outgoing ask clears');
 
   relay.handle(c.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
   const declined = take(c, 'mmo.decline');

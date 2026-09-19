@@ -2577,9 +2577,16 @@ handlers[Wire.CHAT] = function(self, client, msg)
 end
 
 handlers[Wire.REQUEST] = function(self, client, msg)
-  if not client.ready or client.sessionId or self:unsettledBattle(client) then return end
+  if not client.ready or client.sessionId then return end
   local kind = Wire.KINDS[msg.kind] and msg.kind or nil
   if not kind then return end
+  -- Silence here strands the asker the same way a vanished target used to:
+  -- the client holds `outgoing` until a decline or session lands.  Kind is
+  -- already known, so the reply can name the ask it is refusing.
+  if self:unsettledBattle(client) then
+    return send(client, Wire.DECLINE,
+      { name = client.name, kind = kind, reason = "busy" })
+  end
   local target = self.clients[Wire.id(msg.to) or ""]
   -- Asking somebody who is not here any more is answered, not dropped.
   --

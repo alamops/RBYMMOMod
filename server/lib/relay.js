@@ -617,9 +617,16 @@ handlers['mmo.chat'] = (relay, client, msg) => {
 };
 
 handlers['mmo.request'] = (relay, client, msg) => {
-  if (!client.ready || client.sessionId || relay.unsettledBattle(client)) return;
+  if (!client.ready || client.sessionId) return;
   const kind = KINDS.has(msg.kind) ? msg.kind : null;
   if (!kind) return;
+  // Silence here strands the asker the same way a vanished target used to:
+  // the client holds `outgoing` until a decline or session lands. Kind is
+  // already known, so the reply can name the ask it is refusing.
+  if (relay.unsettledBattle(client)) {
+    return relay.send(client, 'mmo.decline',
+      { name: client.name, kind, reason: 'busy' });
+  }
   const target = relay.get(cleanId(msg.to));
   // Asking somebody who is not here any more is answered, not dropped.
   //
