@@ -611,10 +611,15 @@ do
   record.parties[ann.id] = { battle = record.id, mons = {} }
   record.parties[bob.id] = { battle = record.id, mons = { mon() } }
   eq(ann.sessionId, record.id, "the pairing is live")
+  ok(hub.matches[record.id] ~= nil, "ranked paperwork existed for the pairing")
   eq(hub:tryStartSim(record), false, "an empty party opens no sim")
   eq(ann.sessionId, nil, "the host is off the pairing")
   eq(bob.sessionId, nil, "and so is the guest")
   eq(ann.battleId, nil, "and unmarked for the fight")
+  eq(hub.matches[record.id], nil, "and the settlement record is dropped")
+  hub:receive(ann, { type = Wire.RESULT, session = record.id, outcome = "win" })
+  hub:receive(bob, { type = Wire.RESULT, session = record.id, outcome = "loss" })
+  eq(hub.matches[record.id], nil, "a leftover vote cannot resurrect it")
   local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
   ok(outcome and outcome.reason == "agree", "they hear it called off")
   ok(take(bobPeer, Wire.SESSION_END) ~= nil, "the guest hears the pairing end")
@@ -633,13 +638,47 @@ do
     record.parties[seat] = { battle = id, mons = { mon() } }
   end
   record.parties[record.npcIds[1]] = { battle = id, mons = {} }
+  hub.coopMatches[id] = {
+    a = {}, b = {}, reports = {}, everyone = { ann.id, bob.id },
+    startedAt = hub.clock,
+  }
   eq(ann.coopBattleId, id, "the co-op group is live")
   eq(hub:tryStartSim(record), false, "an empty npc seat opens no sim")
   eq(ann.coopBattleId, nil, "the group is released")
   eq(bob.coopBattleId, nil, "both members")
   eq(hub.coopBattles[id], nil, "and forgotten")
+  eq(hub.coopMatches[id], nil, "and the settlement record is dropped")
   local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
   ok(outcome and outcome.reason == "agree", "they hear it called off")
+end
+
+-- A refused open must not leave a group, seat marks, or ranked paperwork.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  local cal = join(hub, "CAL")
+  local dee = join(hub, "DEE")
+  eq(hub:openCoopBattle("c-none", {}, { mode = "coop_pvp" }), nil,
+     "an empty roster opens nothing")
+  eq(hub.coopBattles["c-none"], nil, "and leaves no group")
+  eq(ann.coopBattleId, nil, "and marks no seat")
+  eq(hub.coopMatches["c-none"], nil, "and files no paperwork")
+
+  hub.coopAsks["c-miss"] = {
+    asker = ann.id,
+    sideA = { ann.id, bob.id },
+    sideB = { cal.id, dee.id },
+    everyone = {},
+    answers = {},
+    needed = 3,
+    startedAt = hub.clock,
+  }
+  hub:startCoopBattle("c-miss")
+  eq(hub.coopMatches["c-miss"], nil, "a refused start files no settlement record")
+  eq(hub.coopBattles["c-miss"], nil, "and leaves no group")
+  eq(hub.battles["c-miss"], nil, "and opens no fight")
+  eq(hub.coopAsks["c-miss"], nil, "and the ask is torn down")
 end
 
 -- ------------------------------------------------------------------

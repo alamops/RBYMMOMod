@@ -1079,10 +1079,15 @@ function testUnfightableSessionReleasesPairing() {
   a.peer.outbox = [];
   b.peer.outbox = [];
   ok(relay.clients.get(a.id).sessionId === session.id, 'the pairing is live');
+  ok(relay.matches.has(session.id), 'ranked paperwork existed for the pairing');
   ok(relay.tryStartSim(record) === false, 'an empty party opens no sim');
   ok(relay.clients.get(a.id).sessionId == null, 'the host is off the pairing');
   ok(relay.clients.get(b.id).sessionId == null, 'and so is the guest');
   ok(relay.clients.get(a.id).battleId == null, 'and unmarked for the fight');
+  ok(!relay.matches.has(session.id), 'and the settlement record is dropped');
+  relay.handle(a.id, { type: 'mmo.result', session: session.id, outcome: 'win' });
+  relay.handle(b.id, { type: 'mmo.result', session: session.id, outcome: 'loss' });
+  ok(!relay.matches.has(session.id), 'a leftover vote cannot resurrect it');
   const outcome = take(a, 'mmo.battle_outcome');
   ok(outcome && outcome.reason === 'agree', 'they hear it called off');
   ok(take(b, 'mmo.session_end') != null, 'the guest hears the pairing end');
@@ -1102,14 +1107,49 @@ function testUnfightableCoopReleasesGroup() {
     record.parties.set(seat, { battle: id, mons: [mon(90)] });
   }
   record.parties.set(record.npcIds[0], { battle: id, mons: [] });
+  relay.coopMatches.set(id, {
+    a: [], b: [], reports: new Map(), everyone: [a.id, b.id],
+    startedAt: clock.now(),
+  });
   a.peer.outbox = [];
   ok(relay.clients.get(a.id).coopBattleId === id, 'the co-op group is live');
   ok(relay.tryStartSim(record) === false, 'an empty npc seat opens no sim');
   ok(relay.clients.get(a.id).coopBattleId == null, 'the group is released');
   ok(relay.clients.get(b.id).coopBattleId == null, 'both members');
   ok(!relay.coopBattles.has(id), 'and forgotten');
+  ok(!relay.coopMatches.has(id), 'and the settlement record is dropped');
   const outcome = take(a, 'mmo.battle_outcome');
   ok(outcome && outcome.reason === 'agree', 'they hear it called off');
+}
+
+// A refused open must not leave a group, seat marks, or ranked paperwork.
+function testRefusedCoopOpenLeavesNoPaperwork() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  const c = dial(relay, 'CAL');
+  const d = dial(relay, 'DEE');
+  ok(relay.openCoopBattle('c-none', [], { mode: 'coop_pvp' }) == null,
+    'an empty roster opens nothing');
+  ok(!relay.coopBattles.has('c-none'), 'and leaves no group');
+  ok(relay.clients.get(a.id).coopBattleId == null, 'and marks no seat');
+  ok(!relay.coopMatches.has('c-none'), 'and files no paperwork');
+
+  relay.coopAsks.set('c-miss', {
+    asker: a.id,
+    sideA: [a.id, b.id],
+    sideB: [c.id, d.id],
+    everyone: [],
+    answers: new Set(),
+    needed: 3,
+    startedAt: clock.now(),
+  });
+  relay.startCoopBattle('c-miss');
+  ok(!relay.coopMatches.has('c-miss'), 'a refused start files no settlement record');
+  ok(!relay.coopBattles.has('c-miss'), 'and leaves no group');
+  ok(!relay.battles.has('c-miss'), 'and opens no fight');
+  ok(!relay.coopAsks.has('c-miss'), 'and the ask is torn down');
 }
 
 testBagProofs();
@@ -1117,6 +1157,7 @@ testMidFightMoveset();
 testUnfightableFieldAborts();
 testUnfightableSessionReleasesPairing();
 testUnfightableCoopReleasesGroup();
+testRefusedCoopOpenLeavesNoPaperwork();
 
 // Wave 2 T2d: hub generation selects battle vs battle2 at construction.
 {

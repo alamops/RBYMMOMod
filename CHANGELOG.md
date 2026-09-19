@@ -14,7 +14,10 @@ here must match `manifest.version`.
   stayed in `battles` with `sim = nil`, players kept `battleId` / `sessionId`,
   and nobody ever heard `battle_ready`. Assembly failure now aborts the
   mediated battle (`agree` — "The battle was called off."), drops the 1v1
-  session and any co-op group, and both sides get an outcome.
+  session and any co-op group, clears leftover `matches` / `coopMatches`
+  so a later `mmo.result` cannot settle a fight that never opened, and
+  both sides get an outcome. A refused co-op open no longer files
+  settlement paperwork.
 
 ## [1.4.2] - 2026-09-16
 

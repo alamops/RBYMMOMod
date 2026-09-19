@@ -2377,7 +2377,6 @@ class Relay {
       const member = this.clients.get(memberId);
       if (!member) continue;
       members.push(memberId);
-      member.coopBattleId = id;
     }
     // Reclaim any group whose battle never said goodbye -- a client that
     // crashed rather than disconnected. Swept here, where the table grows,
@@ -2388,12 +2387,16 @@ class Relay {
         this.closeCoopBattle(old);
       }
     }
+    // The mediated record first: a refused open must not leave a group or
+    // seat marks for a fight that does not exist.
+    const record = this.openMediatedBattle(id,
+      Object.assign({ memberIds: members }, plan || {}));
+    if (!record) return null;
+    for (const memberId of members) {
+      const member = this.clients.get(memberId);
+      if (member) member.coopBattleId = id;
+    }
     this.coopBattles.set(id, { members, startedAt: now });
-    // ...and the hub's own record of the fight, on the same id. Built even
-    // though nothing may ever arrive for it: a client that never uploads a
-    // ruleset simply leaves `sim` null, which is exactly how the legacy path
-    // stays open underneath this one.
-    this.openMediatedBattle(id, Object.assign({ memberIds: members }, plan || {}));
     return id;
   }
 
@@ -2461,10 +2464,14 @@ class Relay {
     // the hub is the only party that knows who they are. The two sides go with
     // it -- this is the moment they are known, and a mediated field cannot be
     // assembled from a flat list of four.
-    this.openCoopBattle(id, ask.everyone, {
+    const opened = this.openCoopBattle(id, ask.everyone, {
       mode: 'coop_pvp', hostId: ask.asker,
       sides: { a: ask.sideA.slice(), b: ask.sideB.slice() },
     });
+    if (!opened) {
+      this.coopAsks.set(id, ask);
+      return this.endCoopAsk(id, null, 'gone');
+    }
 
     // **Two sides, not two pairs.** A four-way is scored as one team match --
     // each player against the other pair's combined strength -- because that
@@ -3475,11 +3482,17 @@ class Relay {
    *
    * `agree` is the phrasebook token the screens already have a sentence for
    * ("The battle was called off.") — `gone` prints as a silent draw.
+   *
+   * Drop matches/coopMatches before the abort broadcast: RESULT is gated on
+   * mediated.sim, then leftover paperwork. A failed assembly never had a sim,
+   * so a leftover record would still take a vote.
    */
   failMediatedAssembly(record) {
     if (!record) return;
     const id = record.id;
     const hostId = record.hostId;
+    this.matches.delete(id);
+    this.coopMatches.delete(id);
     this.abortMediatedBattle(record, 'agree');
     const host = hostId && this.clients.get(hostId);
     if (host && host.sessionId === id) this.endSession(host, 'gone');
