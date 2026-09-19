@@ -25359,6 +25359,33 @@ end)()
        "PP Ups add a fifth of base pp each -- floor(20/5)*1 == 4 -> 24")
     check(not rows[2].dim, "a move with PP left is not dimmed")
 
+    -- Classic Ether picker: same names FIGHT uses, not the raw ids.
+    do
+      local listed
+      local etherClient = setmetatable({
+        itemPartyIndex = 1,
+        moveIndex = 1,
+        game = { data = data },
+        mySlot = function()
+          return {
+            active = 1,
+            party = { { moves = {
+              { id = "FIX_BOOST", pp = 5 },
+              { id = "MYSTERY_MOVE", pp = 1 },
+            } } },
+          }
+        end,
+        drawList = function(_, rows)
+          listed = rows
+        end,
+      }, { __index = CoopBattle })
+      etherClient:drawItemMove()
+      eq(listed[1], "FIX BOOST",
+         "the classic Ether picker lists the same display name FIGHT uses")
+      eq(listed[2], "MYSTERY_MOVE",
+         "...and a move with no dataset record still shows under its id")
+    end
+
     -- The POKeMON rows carry the arena's own front pic, so the band can draw
     -- the highlighted monster beside its list. Headless there is no engine to
     -- resolve one, so the cache the resolver writes through is seeded here --
