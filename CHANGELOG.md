@@ -4,6 +4,14 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **DIG turn-two test checks the foe's field slot.** 1v1 side-b is slot 3
+  (`Events.fieldSlot`); the SolarBeam case already used 3. DIG still
+  asserted slot 2, so "DIG turn two deals damage" was a false failure.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed

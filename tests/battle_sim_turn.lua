@@ -1577,7 +1577,7 @@ do
     if event.t == "anim" and event.text == "DIG" and event.amount == nil then
       released = true
     end
-    if event.t == "damage" and event.slot == 2 then foeDamaged = true end
+    if event.t == "damage" and event.slot == 3 then foeDamaged = true end
   end
   ok(released, "DIG turn two auto-releases without amount=1")
   ok(foeDamaged, "DIG turn two deals damage")
