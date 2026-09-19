@@ -4424,17 +4424,17 @@ function M:updateCommand(input)
       self.itemList = nil
       self.phase = "item"
     elseif command == "RUN" then
+      -- PvP RUN is a concession. The trainer refuse line belongs only to
+      -- NPC modes -- printing it on 1v1 then sending run made the match
+      -- look like a wasted turn. Honest trainer menus never file `run`
+      -- (#86): the sim no-ops a filed one as modified-client proof.
+      -- 1v1 says you forfeited only after the send lands.
       if self.mode == "wild" then
         self:sendChoice({ action = "run" })
       elseif TRAINER_MODES[self.mode] then
-        -- Vanilla refuses and returns to the menu without spending the turn.
-        -- Do not file `run`: the referee used to treat every run as a
-        -- concession, which forfeited the gym. It now no-ops a filed trainer
-        -- run (modified-client proof), but honest menus never send one.
         self:say("No! There's no\nrunning from a\ntrainer battle!")
-      else
-        -- 1v1 / coop_pvp: leaving is a concession, not a trainer refusal.
-        self:sendChoice({ action = "run" })
+      elseif self:sendChoice({ action = "run" }) then
+        self:say("You forfeited\nthe battle!")
       end
     end
   end

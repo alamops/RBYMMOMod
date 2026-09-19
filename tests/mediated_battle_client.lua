@@ -2747,4 +2747,67 @@ do
   eq(h.slots[3].maxHp, 60, "...and takes the ceiling that was parked with it")
 end
 
+-- ------------------------------------------------------------------
+-- 1v1 RUN is a forfeit, not a trainer refusal
+-- ------------------------------------------------------------------
+--
+-- The command menu used to print the vanilla trainer line for every non-wild
+-- fight and then send `{action=run}` anyway. In 1v1 that send is a concession
+-- and ends the match, so the refuse copy made players think the turn was
+-- wasted. Wild flees with no extra line. NPC prints the trainer refuse
+-- line and does not file run. 1v1 says it forfeited only if the send landed.
+
+do
+  local function runClient(mode)
+    local sent = {}
+    local fight = setmetatable({
+      mode = mode,
+      phase = "choose",
+      commandIndex = 4,
+      lines = {},
+    }, { __index = Mediated })
+    fight.sendChoice = function(_, fields)
+      sent[#sent + 1] = fields
+      return true
+    end
+    return fight, sent
+  end
+
+  local function pressRun(fight)
+    local input = fakeInput()
+    input.press("a")
+    fight:updateCommand(input)
+  end
+
+  eq(Mediated.COMMANDS[4], "RUN", "the fourth command is RUN")
+
+  local pvp, pvpSent = runClient("1v1")
+  pressRun(pvp)
+  eq(pvpSent[1] and pvpSent[1].action, "run",
+     "1v1 RUN still sends the concession")
+  local pvpSaid = table.concat(pvp.lines or {}, "\n")
+  check(pvpSaid:find("forfeit", 1, true),
+        "1v1 RUN says it is a forfeit")
+  check(not pvpSaid:find("trainer", 1, true),
+        "and does not borrow the trainer-battle refuse line")
+
+  local wild, wildSent = runClient("wild")
+  pressRun(wild)
+  eq(wildSent[1] and wildSent[1].action, "run", "wild RUN still flees")
+  eq(#(wild.lines or {}), 0, "without a refuse or forfeit line")
+
+  local npc, npcSent = runClient("coop_npc")
+  pressRun(npc)
+  eq(#npcSent, 0, "NPC RUN is not filed -- honest menus never send it")
+  check(table.concat(npc.lines or {}, "\n"):find("trainer", 1, true),
+        "and the screen still says there is no running from a trainer battle")
+
+  local failed, failedSent = runClient("1v1")
+  failed.sendChoice = function() return false end
+  pressRun(failed)
+  eq(#failedSent, 0, "a refused 1v1 send files nothing")
+  eq(#(failed.lines or {}), 0,
+     "and does not claim a forfeit the wire never took")
+end
+
 T.finish("mediated_battle_client")

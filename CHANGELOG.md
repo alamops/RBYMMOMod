@@ -4,6 +4,18 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.9] - 2026-09-19
+
+### Fixed
+
+- **1v1 RUN no longer pretends it's a trainer battle.** Picking RUN in a
+  player-vs-player fight is a concession and ends the match. The menu used
+  to print "No! There's no running from a trainer battle!" and then send
+  the run anyway, so it looked like a wasted turn. 1v1 now says you
+  forfeited, and only if the choice actually went. Wild still flees. NPC
+  trainers print the vanilla refuse line and do not file run, so an
+  honest menu cannot forfeit a gym.
+
 ## [1.4.8] - 2026-09-19
 
 ### Fixed
