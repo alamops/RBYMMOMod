@@ -576,6 +576,45 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 4b. a dropped seat cannot file until reconnect()
+-- ------------------------------------------------------------------
+
+do
+  local battle = battleOf({ reconnectGrace = 60, choiceTimeout = 60 })
+  drain(battle)
+
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == false,
+     "a disconnected seat cannot file a choice")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "the seat that stayed may still file")
+  eq(battle:snapshot().turn, 1,
+     "the turn does not resolve on the dropped seat's leftover")
+
+  battle:reconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "reconnect restores the right to choose")
+  eq(battle:snapshot().turn, 2, "and the already-filed peer lets the turn complete")
+end
+
+do
+  local battle = battleOf({ reconnectGrace = 60, choiceTimeout = 60 })
+  drain(battle)
+
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "a connected seat may file before it drops")
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "the seat that stayed may still file after the drop")
+  eq(battle:snapshot().turn, 1,
+     "a leftover choice does not resolve the turn while a seat is away")
+
+  battle:reconnect("p1")
+  eq(battle:snapshot().turn, 2,
+     "reconnect completes the already-answered turn without a second pick")
+end
+
+-- ------------------------------------------------------------------
 -- 5. the choice clock: a timeout picks a move rather than ending the fight
 -- ------------------------------------------------------------------
 
@@ -715,6 +754,116 @@ do
     eq(drawn.losers, nil, "and no losers")
   end
   eq(kinds(drain(both)).run, 2, "both flights were announced")
+end
+
+-- ------------------------------------------------------------------
+-- 7b. trainer RUN does not forfeit; wild and pvp still end the fight
+-- ------------------------------------------------------------------
+--
+-- `_resolveRuns` used to be mode-blind: any run finished the fight and the
+-- runner lost. Hub-refereed gyms (mode coop_npc) then blacked the player out
+-- on RUN. Gated the same way Teleport already is.
+
+-- Exact: Wire.M.text strips newlines, so a three-line vanilla string would
+-- survive a `/running/` check as "norunning" and still display mangled.
+local TRAINER_RUN_REFUSAL = "No! There's no running from a trainer battle!"
+
+local function saidRunning(events)
+  for _, event in ipairs(events) do
+    if event.t == "msg" and event.text == TRAINER_RUN_REFUSAL then
+      return true
+    end
+  end
+  return false
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_npc",
+    aMons = { mon({ species = "Alpha", maxHp = 200 }) },
+    bMons = { mon({ species = "Beta", maxHp = 200, atk = 80 }) },
+  })
+  drain(battle)
+  local turnBefore = battle:snapshot().turn
+  local hpBefore = fighterIn(battle:snapshot(), "p1").hp
+  battle:submitChoice("p1", { action = "run" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local out = drain(battle)
+  eq(battle:outcome(), nil, "coop_npc RUN does not finish the fight")
+  ok(saidRunning(out), "and says there is no running from a trainer battle")
+  eq(kinds(out).over, nil, "with no over event")
+  eq(kinds(out).run, nil, "and no run event -- that kind means someone fled")
+  eq(battle:snapshot().turn, turnBefore + 1, "the runner's action still spends the turn")
+  ok(fighterIn(battle:snapshot(), "p1").hp < hpBefore,
+     "so the foe still gets its attack")
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_npc",
+    sides = {
+      a = {
+        { playerId = "p1", name = "Ann",
+          mons = { mon({ species = "Alpha", maxHp = 200 }) } },
+        { playerId = "p2", name = "Abe",
+          mons = { mon({ species = "Gamma", maxHp = 200 }) } },
+      },
+      b = {
+        { playerId = "n1", name = "NpcA",
+          mons = { mon({ species = "Beta", maxHp = 200 }) } },
+        { playerId = "n2", name = "NpcB",
+          mons = { mon({ species = "Delta", maxHp = 200 }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "run" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  battle:autoPick("n1")
+  battle:autoPick("n2")
+  local out = drain(battle)
+  eq(battle:outcome(), nil, "one partner's RUN does not forfeit a 2v2 gym")
+  ok(saidRunning(out), "the refusal is in the turn stream")
+end
+
+do
+  local battle = battleOf({
+    mode = "coop_wild",
+    sides = {
+      a = {
+        { playerId = "p1", name = "Ann", mons = { mon({ species = "Alpha" }) } },
+        { playerId = "p2", name = "Abe", mons = { mon({ species = "Gamma" }) } },
+      },
+      b = {
+        { playerId = "wild", name = "Wild", mons = { mon({ species = "Beta" }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "run" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  battle:autoPick("wild")
+  drain(battle)
+  local out = battle:outcome()
+  ok(out ~= nil, "coop_wild RUN still ends the fight")
+  if out then
+    eq(out.reason, "run", "as a flee")
+    listEq(out.losers, { "p1", "p2" }, "the fleeing side loses")
+  end
+end
+
+do
+  local battle = battleOf({ mode = "coop_pvp" })
+  drain(battle)
+  battle:submitChoice("p1", { action = "run" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local out = battle:outcome()
+  ok(out ~= nil, "coop_pvp RUN is still a concession")
+  if out then
+    eq(out.reason, "run", "for the run reason")
+    listEq(out.losers, { "p1" }, "the runner loses")
+  end
 end
 
 -- ------------------------------------------------------------------

@@ -1228,6 +1228,14 @@ function M.teleportRunAllowed(mode)
   return type(mode) == "string" and mode:find("wild", 1, true) ~= nil
 end
 
+-- RUN finishes the fight in wild/coop_wild (flee) and 1v1/coop_pvp
+-- (concession). coop_npc -- and any other non-wild non-pvp mode -- refuses
+-- without finishing, so a gym cannot be forfeited by pressing RUN.
+function M.runEndsBattle(mode)
+  if M.teleportRunAllowed(mode) then return true end
+  return mode == "1v1" or mode == "coop_pvp"
+end
+
 function M.isPayDay(effectId)
   return int(effectId, 0) == 16
 end

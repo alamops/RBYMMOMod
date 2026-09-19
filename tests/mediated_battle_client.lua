@@ -1071,6 +1071,15 @@ check(not lost.sessions.fight.finished,
 check(lost.sessions.fight.awaitingReconnect == true,
       "and the screen says it is waiting to reconnect")
 
+-- A dropped link must not spend the turn: sendChoice used to ignore
+-- awaitingReconnect, put a choice on the wire, and set answeredTurn.
+eq(lost.sessions.fight:sendChoice({ action = "fight", move = 0 }), false,
+   "sendChoice refuses while awaiting reconnect")
+eq(lost.sessions.fight.answeredTurn, false,
+   "and does not mark the turn answered")
+eq(lost.countSent(Wire.BATTLE_CHOICE), 0,
+   "so no choice went on the wire")
+
 -- Coming back sends mmo.battle_reconnect once with the battle id.
 lost.dead = false
 lost.sessions:update(lost.game, 0)
@@ -1081,6 +1090,17 @@ eq(lost.firstSent(Wire.BATTLE_RECONNECT).battle, "7",
 lost.sessions:update(lost.game, 0)
 eq(lost.countSent(Wire.BATTLE_RECONNECT), 1,
    "and only once per drop cycle")
+
+-- isReady is its own gate: a live screen with a dead transport still
+-- must not file, even after the reconnect wait flag is cleared.
+lost.dead = true
+lost.sessions.fight.awaitingReconnect = false
+eq(lost.sessions.fight:sendChoice({ action = "fight", move = 0 }), false,
+   "sendChoice also refuses when the transport is not ready")
+eq(lost.sessions.fight.answeredTurn, false,
+   "and still does not mark the turn answered")
+eq(lost.countSent(Wire.BATTLE_CHOICE), 0,
+   "and still puts no choice on the wire")
 
 -- The same hook is reachable directly for a screen with no Sessions wrapper.
 local solo = harness("host")
@@ -2344,6 +2364,67 @@ do
   eq(pp.liveMoves[1].id, "TACKLE", "...and is what FIGHT reads until a send")
   eq(pp:bandMoveRows()[1].right, "10/35",
      "...including the live PP of the copied move")
+end
+
+-- ------------------------------------------------------------------
+-- 14b. RUN: trainer refuses locally; 1v1 / coop_pvp concede without the lie
+-- ------------------------------------------------------------------
+--
+-- The command used to print the trainer sentence and then file `run` for every
+-- non-wild mode, so a 1v1 concession read as a gym refusal. Trainer (coop_npc)
+-- still says it and does not file; 1v1 / coop_pvp file a concession and do not
+-- pretend there is a trainer.
+
+local function saidTrainerRun(fight)
+  for _, row in ipairs(fight.lines or {}) do
+    local text = type(row) == "string" and row
+      or (type(row) == "table" and row.text)
+    if type(text) == "string" and text:lower():find("running", 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+do
+  eq(Mediated.COMMANDS[4], "RUN", "the fourth command is RUN")
+
+  local function pressRun(mode)
+    local sent = {}
+    local fight = setmetatable({
+      game = { data = DATA },
+      mode = mode,
+      phase = "choose",
+      commandIndex = 4,
+      lines = {},
+      answeredTurn = false,
+      sendChoice = function(_, choice)
+        sent[#sent + 1] = choice
+        return true
+      end,
+    }, { __index = Mediated })
+    local input = fakeInput()
+    input.press("a")
+    fight:updateCommand(input)
+    return fight, sent
+  end
+
+  local pvp, pvpSent = pressRun("1v1")
+  eq(#pvpSent, 1, "1v1 RUN is filed")
+  eq(pvpSent[1] and pvpSent[1].action, "run", "...as a concession")
+  check(not saidTrainerRun(pvp),
+        "and does not pretend a 1v1 is a trainer battle")
+
+  local ranked, rankedSent = pressRun("coop_pvp")
+  eq(#rankedSent, 1, "coop_pvp RUN is filed too")
+  eq(rankedSent[1] and rankedSent[1].action, "run", "...as a concession")
+  check(not saidTrainerRun(ranked),
+        "and does not use the trainer line for a player fight")
+
+  local npc, npcSent = pressRun("coop_npc")
+  eq(#npcSent, 0, "trainer RUN is not filed")
+  check(saidTrainerRun(npc),
+        "the screen says there is no running from a trainer battle")
 end
 
 -- ------------------------------------------------------------------
