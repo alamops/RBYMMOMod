@@ -724,29 +724,30 @@ end
 -- the player's turn
 -- ------------------------------------------------------------------
 
--- **RUN is decided here, in both of the ways it can go, and nowhere else.**
+-- **RUN is decided here, in both of the ways it can go, on the solo path.**
 --
--- The referee's `_resolveRuns` is not gated on the mode and rolls no dice: a
--- `run` from either side ends the fight there and then, and the side that ran
--- is recorded as the loser. Online that is correct -- fleeing a duel is a
--- concession, and a duel has no escape odds -- but neither half of it is
--- single-player's answer, so both halves are answered at this boundary. The
--- referee never learns that RUN was pressed, which is the whole point:
--- `src/BattleSim/Turn.lua` has a JavaScript twin with parity fixtures over it
--- and does not move for this feature.
+-- The referee now gates `_resolveRuns` the way Teleport is gated: wild /
+-- coop_wild flee, 1v1 / coop_pvp concede, coop_npc refuses without finishing
+-- so a hub-refereed gym cannot be forfeited by a filed `run`. What it still
+-- does not do is Gen 1's wild escape roll, or return to the menu without
+-- spending the turn -- a trainer `run` that reaches the sim emits the refusal
+-- and the rest of the turn still happens. Solo intercepts both halves here
+-- so vanilla holds: trainer RUN does not spend the turn, wild RUN is a roll.
+-- The referee never learns that RUN was pressed, which is the whole point of
+-- this boundary.
 --
 -- ------- a trainer's RUN
 --
--- Forwarded, it would mean pressing RUN forfeits the gym, and a forfeit reads
--- as a loss, and a loss blacks the player out. Vanilla refuses: "No! There's
--- no running from a trainer battle!", `afterQueue = "menu"`, and the turn is
--- **not** spent (`BattleState:tryRun`'s trainer arm returns before the roll).
+-- Forwarded to the sim, a trainer RUN now refuses without finishing -- but
+-- it still spends the turn (the foe attacks). Vanilla refuses and does *not*
+-- spend the turn (`BattleState:tryRun`'s trainer arm returns before the roll).
 --
--- The refusal *line* is ours. `MediatedBattle:updateCommand` files the
--- choice without printing: a 1v1 send is a real concession, so the screen
--- must not borrow this sentence. The pump prints it once the intercept has
--- parked, then feeds the `turn` that reopens the menu. Vanilla is
--- `afterQueue = "menu"` and does not spend the turn.
+-- The refusal *line* is the screen's own -- `MediatedBattle:updateCommand`
+-- prints it and does not file the choice -- so all this owes, if a `run`
+-- still arrives (a call site that skipped the menu), is the `turn` that
+-- reopens the window without spending it. A second copy of the sentence fed
+-- from here is what the player used to read twice, in two consecutive boxes.
+-- Leave the line to the screen.
 --
 -- ------- a wild RUN
 --
@@ -945,17 +946,18 @@ function M:_pump()
   local sim, fight = self.sim, self.fight
   if not (sim and fight) then return false end
 
-  -- A RUN the trainer path refused last frame, answered now that the screen has
-  -- finished writing over its own choice state. See M:_choose.
+  -- A RUN a skipped-menu call site filed last frame, answered now that the
+  -- screen has finished writing over its own choice state. See M:_choose.
+  -- Honest trainer menus no longer send, so this is the backstop.
   --
-  -- Line first, then the `turn` that reopens the menu: vanilla prints
-  -- "No! There's no running from a trainer battle!" and returns with
-  -- `afterQueue = "menu"` without spending the turn. The screen no longer
-  -- prints this itself -- a 1v1 send is a real concession -- so a copy fed
-  -- from here is the only copy.
+  -- **The `turn` and nothing else.** The refusal line is the screen's own --
+  -- `MediatedBattle:updateCommand` prints "No! There's no\nrunning from a\n
+  -- trainer battle!" -- so a copy fed from here is the same sentence in a
+  -- second box. All this owes is the window: vanilla returns straight to the
+  -- menu (`afterQueue = "menu"`) and does not spend the turn, so the seat
+  -- still owes the referee an answer and the next choice resolves normally.
   if self.refuseRun then
     self.refuseRun = nil
-    self:_feed({ t = "msg", text = "No! There's no\nrunning from a\ntrainer battle!" })
     self:_feed({ t = "turn", amount = sim.turn })
   end
 

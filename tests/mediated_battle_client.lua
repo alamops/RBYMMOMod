@@ -2275,6 +2275,67 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 14b. RUN: trainer refuses locally; 1v1 / coop_pvp concede without the lie
+-- ------------------------------------------------------------------
+--
+-- The command used to print the trainer sentence and then file `run` for every
+-- non-wild mode, so a 1v1 concession read as a gym refusal. Trainer (coop_npc)
+-- still says it and does not file; 1v1 / coop_pvp file a concession and do not
+-- pretend there is a trainer.
+
+local function saidTrainerRun(fight)
+  for _, row in ipairs(fight.lines or {}) do
+    local text = type(row) == "string" and row
+      or (type(row) == "table" and row.text)
+    if type(text) == "string" and text:lower():find("running", 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+do
+  eq(Mediated.COMMANDS[4], "RUN", "the fourth command is RUN")
+
+  local function pressRun(mode)
+    local sent = {}
+    local fight = setmetatable({
+      game = { data = DATA },
+      mode = mode,
+      phase = "choose",
+      commandIndex = 4,
+      lines = {},
+      answeredTurn = false,
+      sendChoice = function(_, choice)
+        sent[#sent + 1] = choice
+        return true
+      end,
+    }, { __index = Mediated })
+    local input = fakeInput()
+    input.press("a")
+    fight:updateCommand(input)
+    return fight, sent
+  end
+
+  local pvp, pvpSent = pressRun("1v1")
+  eq(#pvpSent, 1, "1v1 RUN is filed")
+  eq(pvpSent[1] and pvpSent[1].action, "run", "...as a concession")
+  check(not saidTrainerRun(pvp),
+        "and does not pretend a 1v1 is a trainer battle")
+
+  local ranked, rankedSent = pressRun("coop_pvp")
+  eq(#rankedSent, 1, "coop_pvp RUN is filed too")
+  eq(rankedSent[1] and rankedSent[1].action, "run", "...as a concession")
+  check(not saidTrainerRun(ranked),
+        "and does not use the trainer line for a player fight")
+
+  local npc, npcSent = pressRun("coop_npc")
+  eq(#npcSent, 0, "trainer RUN is not filed")
+  check(saidTrainerRun(npc),
+        "the screen says there is no running from a trainer battle")
+end
+
+-- ------------------------------------------------------------------
 -- 15. who is standing on the foe edge of the arena
 -- ------------------------------------------------------------------
 --
@@ -2552,9 +2613,8 @@ end
 -- The command menu used to print the vanilla trainer line for every non-wild
 -- fight and then send `{action=run}` anyway. In 1v1 that send is a concession
 -- and ends the match, so the refuse copy made players think the turn was
--- wasted. Wild and NPC file the choice with no local line -- NPC copy is
--- SoloBattle's after it actually refuses. 1v1 says it forfeited only if
--- the send landed.
+-- wasted. Wild flees with no extra line. NPC prints the trainer refuse
+-- line and does not file run. 1v1 says it forfeited only if the send landed.
 
 do
   local function runClient(mode)
@@ -2597,10 +2657,9 @@ do
 
   local npc, npcSent = runClient("coop_npc")
   pressRun(npc)
-  eq(npcSent[1] and npcSent[1].action, "run",
-     "NPC RUN is still filed so SoloBattle can intercept it")
-  eq(#(npc.lines or {}), 0,
-     "and does not print the trainer line before the referee refuses")
+  eq(#npcSent, 0, "NPC RUN is not filed -- honest menus never send it")
+  check(table.concat(npc.lines or {}, "\n"):find("trainer", 1, true),
+        "and the screen still says there is no running from a trainer battle")
 
   local failed, failedSent = runClient("1v1")
   failed.sendChoice = function() return false end

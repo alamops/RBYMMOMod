@@ -12,8 +12,9 @@ here must match `manifest.version`.
   player-vs-player fight is a concession and ends the match. The menu used
   to print "No! There's no running from a trainer battle!" and then send
   the run anyway, so it looked like a wasted turn. 1v1 now says you
-  forfeited, and only if the choice actually went. Wild still flees; NPC
-  trainers keep the vanilla refuse line after the solo referee refuses.
+  forfeited, and only if the choice actually went. Wild still flees. NPC
+  trainers print the vanilla refuse line and do not file run, so an
+  honest menu cannot forfeit a gym.
 
 ## [1.4.2] - 2026-09-16
 

@@ -4381,12 +4381,15 @@ function M:updateCommand(input)
       self.itemList = nil
       self.phase = "item"
     elseif command == "RUN" then
-      -- PvP RUN is a concession (SoloBattle.lua). The trainer refuse line
-      -- belongs only to NPC modes, and only after that path actually refuses
-      -- -- printing it here then sending run made 1v1 look like a wasted
-      -- turn while the match ended. NPC copy is SoloBattle:_pump's.
-      if self.mode == "wild" or TRAINER_MODES[self.mode] then
+      -- PvP RUN is a concession. The trainer refuse line belongs only to
+      -- NPC modes -- printing it on 1v1 then sending run made the match
+      -- look like a wasted turn. Honest trainer menus never file `run`
+      -- (#86): the sim no-ops a filed one as modified-client proof.
+      -- 1v1 says you forfeited only after the send lands.
+      if self.mode == "wild" then
         self:sendChoice({ action = "run" })
+      elseif TRAINER_MODES[self.mode] then
+        self:say("No! There's no\nrunning from a\ntrainer battle!")
       elseif self:sendChoice({ action = "run" }) then
         self:say("You forfeited\nthe battle!")
       end
