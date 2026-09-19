@@ -406,6 +406,102 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 5c. SESSION_LEAVE during grace cannot start a second fight
+-- ------------------------------------------------------------------
+--
+-- endSession calls leaveBattle (grace, battleId kept) then clears sessionId.
+-- REQUEST / startSession used to look only at sessionId, so the same
+-- connection could open a new pairing; openMediatedBattle then overwrote
+-- member.battleId and left the old sim ticking toward a forfeit.
+
+do
+  local hub = Hub.new({ maxPlayers = 8 })
+  local fight = openFight(hub)
+  local id = fight.id
+  take(fight.ann.peer, Wire.BATTLE_READY)
+  take(fight.bob.peer, Wire.BATTLE_READY)
+  local bob = fight.bob.client
+  local cal, calPeer = join(hub, "CAL")
+  calPeer.outbox = {}
+
+  hub:receive(bob, { type = Wire.SESSION_LEAVE })
+  eq(bob.sessionId, nil, "the session is gone")
+  eq(bob.battleId, id, "but grace still binds them to the fight")
+  ok(hub.battles[id] ~= nil, "and the original record is still standing")
+
+  fight.bob.peer.outbox = {}
+  hub:receive(bob, { type = Wire.REQUEST, to = cal.id, kind = "duel" })
+  eq(take(fight.bob.peer, Wire.DECLINE), nil,
+     "a request with no valid kind earns no reply")
+
+  hub:receive(bob, { type = Wire.REQUEST, to = cal.id, kind = "battle" })
+  eq(take(calPeer, Wire.REQUEST), nil,
+     "the leaver cannot open a second pairing while grace runs")
+  local selfBusy = take(fight.bob.peer, Wire.DECLINE)
+  ok(selfBusy ~= nil, "the leaver is told no so their outgoing ask clears")
+  eq(selfBusy and selfBusy.reason, "busy", "as busy, because they still have a battle")
+  eq(selfBusy and selfBusy.kind, "battle", "naming the ask they sent")
+
+  hub:receive(cal, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  local declined = take(calPeer, Wire.DECLINE)
+  ok(declined ~= nil, "asking them is answered, not a new fight")
+  eq(declined.reason, "busy", "as busy, because they still have a battle")
+
+  hub:startSession(bob, cal, "battle")
+  eq(cal.sessionId, nil, "startSession itself refuses while they are bound")
+  eq(hub:openMediatedBattle("s999", { memberIds = { bob.id } }), nil,
+     "openMediatedBattle will not overwrite an unsettled battleId")
+  eq(bob.battleId, id, "so they stay on the original fight")
+  ok(hub.battles[id] ~= nil, "which is still the one record")
+
+  hub:update(Config.BATTLE_RECONNECT_GRACE + 2)
+  eq(hub.battles[id], nil, "past grace the original fight settles")
+  eq(bob.battleId, nil, "and they are let out of it")
+  calPeer.outbox = {}
+  hub:receive(bob, { type = Wire.REQUEST, to = cal.id, kind = "battle" })
+  ok(take(calPeer, Wire.REQUEST) ~= nil, "past grace a new ask is forwarded")
+end
+
+-- A stolen battleId is a drop of that seat, not a wipe of the field.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local fight = openFight(hub)
+  local id = fight.id
+  take(fight.ann.peer, Wire.BATTLE_READY)
+  take(fight.bob.peer, Wire.BATTLE_READY)
+  local ann, bob = fight.ann.client, fight.bob.client
+
+  bob.battleId = "stolen"
+  hub:tickBattles(hub.clock)
+  ok(hub.battles[id] ~= nil,
+     "a stolen seat does not abort the partner still bound")
+  eq(ann.battleId, id, "the partner stays on the original fight")
+  eq(bob.battleId, nil, "and the stolen pointer is forgotten")
+
+  ann.battleId = "stolen2"
+  hub:tickBattles(hub.clock)
+  eq(hub.battles[id], nil,
+     "when no connected member still points at it, the record is aborted")
+  eq(ann.battleId, nil, "and the second stolen pointer is forgotten")
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  hub:openCoopBattle("c-orphan", { ann.id, bob.id },
+    { mode = "coop_npc", hostId = ann.id })
+  ok(hub.coopBattles["c-orphan"] ~= nil, "a coop group opens with the fight")
+
+  ann.battleId, bob.battleId = "stolen", "stolen2"
+  hub:tickBattles(hub.clock)
+  eq(hub.battles["c-orphan"], nil, "the fight is gone")
+  eq(hub.coopBattles["c-orphan"], nil, "and the fan-out group closes with it")
+  eq(ann.coopBattleId, nil, "so neither member is still filed under it")
+  eq(bob.coopBattleId, nil, "both of them")
+end
+
+-- ------------------------------------------------------------------
 -- 5b. a throwing handler does not take the hub down
 -- ------------------------------------------------------------------
 
@@ -505,6 +601,7 @@ do
      "and somebody who is not in the fight fills no seat at all")
 
   -- An inferred plan still has to produce a field somebody can fight on.
+  hub:abortMediatedBattle(record, "gone")
   local pvp = hub:openMediatedBattle("pvp-1",
     { memberIds = { ann.id, bob.id, stranger.id } })
   eq(pvp.mode, "coop_pvp", "three humans infer coop_pvp without synthetic seats")
@@ -543,6 +640,7 @@ do
 
   -- A trainer with one monster is still a trainer, so the spare seat is given
   -- up rather than the fight being refused over a party nobody can fill.
+  hub:abortMediatedBattle(record, "gone")
   local lone = hub:openMediatedBattle("npc-3", {
     mode = "coop_npc", hostId = ann.id, memberIds = { ann.id, bob.id },
   })
@@ -691,17 +789,19 @@ end
 -- fight inheriting a 1v1's parties, and a choice from one filed into the other.
 
 do
-  local hub = Hub.new({ maxPlayers = 4 })
+  local hub = Hub.new({ maxPlayers = 8 })
   local ann = join(hub, "ANN")
   local bob = join(hub, "BOB")
+  local cal = join(hub, "CAL")
+  local dee = join(hub, "DEE")
 
   hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
   hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
   eq(ann.sessionId, "s1", "a session id carries its own letter")
   eq(Wire.id(ann.sessionId), ann.sessionId, "and is still an id on the wire")
 
-  local coop = hub:openCoopBattle("c1", { ann.id, bob.id },
-    { mode = "coop_npc", hostId = ann.id })
+  local coop = hub:openCoopBattle("c1", { cal.id, dee.id },
+    { mode = "coop_npc", hostId = cal.id })
   eq(coop, "c1", "a co-op battle carries a different one")
   ok(hub.battles["s1"] ~= nil and hub.battles["c1"] ~= nil,
      "so both records exist at once rather than one overwriting the other")
