@@ -4263,6 +4263,15 @@ function M:classicPickerRows(all)
         if slot and type(slot.shownExpFrac) == "number" then
           frac = slot.shownExpFrac
         end
+        -- Same clock the plate drains: picker HP used to print sheet.hp
+        -- and jump while the HUD bar crawled. Only overlay when the seat
+        -- actually has HP -- shownHpOf returns 0 for a table with neither
+        -- shownHp nor hp (an exp-only stub), which must not wipe the sheet.
+        if type(slot) == "table"
+           and (tonumber(slot.shownHp) ~= nil or tonumber(slot.hp) ~= nil) then
+          hp = self:shownHpOf(slot)
+          maxHp = tonumber(slot.maxHp) or maxHp
+        end
       end
       out[#out + 1] = {
         label = row.label,
@@ -6983,8 +6992,19 @@ function M:bandPartyRows(all)
         dim = row.fainted or nil,
         front = self:partyFront(row.index, mon),
       }
-      if mon and tonumber(mon.hp) and tonumber(mon.maxHp) then
-        entry.right = ("%d/%d"):format(mon.hp, mon.maxHp)
+      local hp = mon and tonumber(mon.shownHp)
+      if hp == nil then hp = mon and tonumber(mon.hp) end
+      local maxHp = mon and tonumber(mon.maxHp)
+      if row.active then
+        local slot = self.slots and self.slots[self:mySlot()]
+        if type(slot) == "table"
+           and (tonumber(slot.shownHp) ~= nil or tonumber(slot.hp) ~= nil) then
+          hp = self:shownHpOf(slot)
+          maxHp = tonumber(slot.maxHp) or maxHp
+        end
+      end
+      if hp ~= nil and maxHp then
+        entry.right = ("%d/%d"):format(hp, maxHp)
       end
       rows[#rows + 1] = entry
     end

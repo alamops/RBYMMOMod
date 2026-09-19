@@ -4,6 +4,16 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.3] - 2026-09-17
+
+### Fixed
+
+- **Band and picker HP follow the display clock.** Arena plates drain
+  `shownHp` while the list used to print truth `hp`, so SWITCH / item /
+  target rows jumped to the new number while the plate was still crawling.
+  Party and target HP text now prefer `shownHp` the way the target list
+  already did.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed
