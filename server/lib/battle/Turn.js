@@ -300,6 +300,9 @@ function copyMove(raw) {
     type: Math.max(0, int(raw.type, 0)),
     effect: Math.max(0, int(raw.effect, 0)),
     chance: Math.max(0, int(raw.chance, 0)),
+    // Optional sheet flag. Absent is a protocol-era client; Slash then uses
+    // ordinary odds. The hub has no move table to recover it from.
+    highCrit: raw.highCrit === true,
   };
 }
 
@@ -504,6 +507,11 @@ function copyMon(raw, fallback) {
   }
   const speciesId = str(raw.speciesId);
   if (speciesId) out.speciesId = speciesId;
+  // Species base Speed for Gen 1 crit. Optional: a sheet that omits it falls
+  // back to battle Speed without the badge boost.
+  if (raw.baseSpd !== undefined && raw.baseSpd !== null) {
+    out.baseSpd = Math.max(0, Math.min(255, int(raw.baseSpd, 0)));
+  }
   return out;
 }
 
@@ -2560,11 +2568,16 @@ class Battle {
     }
 
     const hits = Effects.hitCount(effectId, this.rng);
-    const critSpd = Effects.badgeBoost(mon.stats.spd, 'spd', fighter.badges);
+    // Species base Speed, not battle Speed: paralysis and the Speed badge must
+    // not change the crit rate. Absent `baseSpd` (old sheet) falls back to the
+    // current stat still without a badge boost.
+    const critSpd = mon.baseSpd !== undefined && mon.baseSpd !== null
+      ? mon.baseSpd : mon.stats.spd;
     const isCrit = Crit.check({
       baseSpeed: critSpd,
       roll: this.rng.byte(),
       focusEnergy: mon.focusEnergy,
+      highCritMove: move.highCrit === true,
     }).isCrit;
     const percents = this._typePercents(move.type, defender);
 

@@ -1309,6 +1309,14 @@ function M.battleMove(raw)
     out.name = M.moveName(raw.name)
     if out.name == nil then return nil end
   end
+  -- Optional high-crit flag. The hub has no move table, so Slash / Karate
+  -- Chop / Razor Leaf / Crabhammer have to state this on the sheet. Absent
+  -- is a protocol-era client (ordinary odds). Present-but-unreadable refuses,
+  -- same posture as a mangled name.
+  if raw.highCrit ~= nil then
+    if raw.highCrit ~= true and raw.highCrit ~= false then return nil end
+    if raw.highCrit == true then out.highCrit = true end
+  end
   return out
 end
 
@@ -1501,6 +1509,15 @@ function M.battleMon(raw)
   if raw.speciesId ~= nil then
     out.speciesId = M.id(raw.speciesId)
     if not out.speciesId then return nil end
+  end
+
+  -- Optional species base Speed for Gen 1 crit. The hub has no species table,
+  -- so this has to ride the sheet; Crit.check must not see battle Speed or the
+  -- Speed badge. Absent is a protocol-era client (sim falls back to stats.spd
+  -- without a badge boost). Present-but-unreadable refuses the battler.
+  if raw.baseSpd ~= nil then
+    out.baseSpd = M.int(raw.baseSpd, 0, 255)
+    if out.baseSpd == nil then return nil end
   end
 
   return out

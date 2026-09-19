@@ -220,6 +220,9 @@ local function copyMove(raw)
     type     = max(0, int(raw.type, 0)),
     effect   = max(0, int(raw.effect, 0)),
     chance   = max(0, int(raw.chance, 0)),
+    -- Optional sheet flag. Absent is a protocol-era client; Slash then uses
+    -- ordinary odds. The hub has no move table to recover it from.
+    highCrit = raw.highCrit == true,
   }
 end
 
@@ -403,6 +406,12 @@ local function copyMon(raw, fallback)
     xAccuracy = raw.xAccuracy == true,
     catchRate = max(0, min(255, int(raw.catchRate, 255))),
   }
+
+  -- Species base Speed for Gen 1 crit (Crit.lua). Optional: a sheet that
+  -- omits it falls back to battle Speed without the badge boost.
+  if raw.baseSpd ~= nil then
+    out.baseSpd = max(0, min(255, int(raw.baseSpd, 0)))
+  end
 
   -- Optional Stat Exp sheet (atk/def/spd/spc, optional hp). Absent keys stay 0
   -- at vitamin time; present values are what HP_UP / PROTEIN / … mutate.
@@ -2567,8 +2576,15 @@ function Battle:_useMove(fighter, mon, opts)
   end
 
   local hits = Effects.hitCount(effectId, self.rng)
-  local critSpd = Effects.badgeBoost(mon.stats.spd, "spd", fighter.badges)
-  local isCrit = Crit.check(critSpd, self.rng:byte(), { focusEnergy = mon.focusEnergy })
+  -- Species base Speed, not battle Speed: paralysis and the Speed badge must
+  -- not change the crit rate. Absent `baseSpd` (old sheet) falls back to the
+  -- current stat still without a badge boost.
+  local critSpd = mon.baseSpd
+  if critSpd == nil then critSpd = mon.stats.spd end
+  local isCrit = Crit.check(critSpd, self.rng:byte(), {
+    focusEnergy = mon.focusEnergy,
+    highCritMove = move.highCrit == true,
+  })
   local percents = self:_typePercents(move.type, defender)
 
   local immune = false

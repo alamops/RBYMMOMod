@@ -109,6 +109,7 @@ local function move(o)
     chance = o.chance or 0,
   }
   if o.maxPp then out.maxPp = o.maxPp end
+  if o.highCrit then out.highCrit = true end
   return out
 end
 
@@ -134,6 +135,7 @@ local function mon(o)
   if o.catchRate ~= nil then out.catchRate = o.catchRate end
   if o.speciesId then out.speciesId = o.speciesId end
   if o.evs then out.evs = o.evs end
+  if o.baseSpd ~= nil then out.baseSpd = o.baseSpd end
   return out
 end
 
@@ -3320,6 +3322,73 @@ do
   ok(plainDmg and plainDmg > 0, "the unbadged attack lands")
   ok(boostedDmg and boostedDmg > plainDmg,
      "BOULDERBADGE raises mediated physical damage")
+end
+
+-- ------------------------------------------------------------------
+-- 12b2. Gen 1 crit uses species base Speed, not battle Speed; high-crit rides the move
+-- ------------------------------------------------------------------
+do
+  local function playCrit(seed, aOpts, badges)
+    local battle = battleOf({
+      seed = seed,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", badges = badges,
+                mons = { mon({
+                  maxHp = 200, hp = 200, atk = 80, spd = 80,
+                  baseSpd = aOpts.baseSpd,
+                  moves = { move({ power = 50, highCrit = aOpts.highCrit }) },
+                }) } } },
+        b = { { playerId = "p2", name = "Bob",
+                mons = { mon({
+                  species = "Beta", maxHp = 200, hp = 200, def = 80, spd = 10,
+                  moves = { move({ power = 1 }) },
+                }) } } },
+      },
+    })
+    drain(battle)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    return drain(battle)
+  end
+  local function sawCrit(events)
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text == "A critical hit" then return true end
+    end
+    return false
+  end
+
+  -- threshold(1) = 0: no roll is below 0, so battle Speed 80 cannot leak in.
+  ok(not sawCrit(playCrit(1, { baseSpd = 1 })),
+     "species base Speed 1 never crits, even with battle Speed 80")
+
+  -- threshold(100) = 50; high-crit ×8 → 255. Need a roll in [50, 254] so
+  -- ordinary odds miss and high-crit hits — otherwise dropping highCritMove
+  -- would still pass on a low roll.
+  local critSeed
+  for seed = 1, 400 do
+    if not sawCrit(playCrit(seed, { baseSpd = 100 }))
+       and sawCrit(playCrit(seed, { baseSpd = 100, highCrit = true })) then
+      critSeed = seed
+      break
+    end
+  end
+  ok(critSeed ~= nil,
+     "found a seed where ordinary odds miss and a high-crit move hits")
+  ok(not sawCrit(playCrit(critSeed, { baseSpd = 100 })),
+     "base Speed 100 without highCrit misses on that seed")
+  ok(sawCrit(playCrit(critSeed, { baseSpd = 100, highCrit = true })),
+     "highCrit on the move sheet raises the Gen 1 threshold")
+
+  -- Soul Badge must not change crit (Alpha still outspeeds either way).
+  local bare = dumpAll(playCrit(777002, { baseSpd = 80 }))
+  local badged = dumpAll(playCrit(777002, { baseSpd = 80 }, { SOULBADGE = true }))
+  eq(bare, badged, "SOULBADGE does not change crit rate or this turn's resolution")
+
+  -- Old sheet: omitted baseSpd falls back to stats.spd, still without the badge.
+  local fallbackBare = dumpAll(playCrit(777002, {}))
+  local fallbackBadged = dumpAll(playCrit(777002, {}, { SOULBADGE = true }))
+  eq(fallbackBare, fallbackBadged,
+     "omitted baseSpd still ignores SOULBADGE")
 end
 
 -- ------------------------------------------------------------------

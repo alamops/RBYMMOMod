@@ -218,6 +218,7 @@ local function copyMove(raw)
     type     = max(0, int(raw.type, 0)),
     effect   = max(0, int(raw.effect, 0)),
     chance   = max(0, int(raw.chance, 0)),
+    highCrit = raw.highCrit == true,
   }
 end
 

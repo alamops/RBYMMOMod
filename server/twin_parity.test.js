@@ -27,7 +27,7 @@ const {
 const {
   PLAYER_ID_HEX, BATTLE_EVENT_TYPES, DECLINE_REASONS,
   TEAM_TOKENS, cleanBattleTeam, BATTLE_MON_MAX,
-  MOVE_NAME_MAX, cleanBattleMove,
+  MOVE_NAME_MAX, cleanBattleMove, cleanBattleMon,
 } = require('./lib/sanitize.js');
 
 function read(rel) {
@@ -142,6 +142,33 @@ test('a battle move sheet accepts a display name and survives without one', () =
     'a protocol-25 sheet states none, and that is not a refusal');
   assert.strictEqual(cleanBattleMove({ ...base, name: 42 }), null,
     'present-but-unreadable refuses the move rather than narrating under the id');
+});
+
+test('highCrit and baseSpd ride the battle sheet as optional fields', () => {
+  const move = {
+    id: 'SLASH', pp: 20, power: 70, accuracy: 255,
+    type: 0, effect: 0, chance: 0,
+  };
+  assert.strictEqual(cleanBattleMove({ ...move, highCrit: true }).highCrit, true,
+    'highCrit = true comes through');
+  assert.strictEqual(cleanBattleMove(move).highCrit, undefined,
+    'absent highCrit is not a refusal');
+  assert.strictEqual(cleanBattleMove({ ...move, highCrit: false }).highCrit, undefined,
+    'highCrit = false is omitted');
+  assert.strictEqual(cleanBattleMove({ ...move, highCrit: 'yes' }), null,
+    'a non-boolean highCrit refuses the move');
+
+  const mon = {
+    species: 'PERSIAN', level: 20, hp: 50, maxHp: 50,
+    stats: { atk: 1, def: 1, spd: 1, spc: 1 },
+    moves: [move],
+  };
+  assert.strictEqual(cleanBattleMon({ ...mon, baseSpd: 115 }).baseSpd, 115,
+    'species base Speed comes through');
+  assert.strictEqual(cleanBattleMon(mon).baseSpd, undefined,
+    'absent baseSpd is not a refusal');
+  assert.strictEqual(cleanBattleMon({ ...mon, baseSpd: 'fast' }), null,
+    'an unreadable baseSpd refuses the battler');
 });
 
 test('shared hello refuse strings stay twin-worded', () => {
