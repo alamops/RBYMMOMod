@@ -667,18 +667,31 @@ do
   eq(runner.runAsk.role, "fleeing", "leaving the player watching for the end")
   eq(#runner.relayed, 0, "and still nothing on the relay")
 
-  -- Against a trainer there was never a partner to ask -- the refusal is the
-  -- original's, resolved wherever the turn is -- so this one needs no branch at
-  -- all: it is a choice, and now it is the referee's choice.
+  -- Against a trainer there was never a partner to ask. Honest menus refuse
+  -- locally and never file `run` -- forwarding it used to forfeit the gym.
+  -- The referee still no-ops a filed run (modified-client proof).
   local fleeing = screen({ slots = npcSlots(), mine = 1, host = true,
                            mode = "coop_npc", selfId = "ann" })
   fleeing:uploadMediated()
   fleeing:onBattleReady({ battle = "cb1", mode = "coop_npc",
     sides = { a = { "ann", "bob" }, b = { "ann" } } })
   eq(fleeing:askToRun(), false, "an NPC battle asks nobody")
-  fleeing:commit({ slot = 1, kind = "run" })
-  eq(fleeing.firstSent(Wire.BATTLE_CHOICE).action, "run",
-     "and its RUN is a choice the intermediator answers")
+  fleeing.phase = "choose"
+  fleeing.commandIndex = 4
+  eq(CoopBattle.COMMANDS[4], "RUN", "the fourth command is RUN")
+  fleeing:updateCommand({ wasPressed = function(_, key) return key == "a" end })
+  eq(fleeing.countSent(Wire.BATTLE_CHOICE), 0,
+     "and its RUN is not filed with the intermediator")
+  local refused = false
+  for _, row in ipairs(fleeing.messages) do
+    local text = type(row) == "table" and row.text or row
+    if type(text) == "string" and text:lower():find("running", 1, true) then
+      refused = true
+    end
+  end
+  check(refused, "the screen says there is no running from a trainer battle")
+  eq(fleeing.phase, "messages", "the line plays")
+  eq(fleeing.after, "choose", "and the menu comes back without spending the turn")
 end
 
 -- ------------------------------------------------------------------
