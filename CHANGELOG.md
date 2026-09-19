@@ -4,6 +4,18 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.4] - 2026-09-18
+
+### Fixed
+
+- **Gen 2 double-battle status moves do something again.** Crystal sheets
+  name effects `EFFECT_SLEEP` / `EFFECT_DEFENSE_DOWN` / …, and BattleSim2
+  only mapped the charge/fly aliases. Every other status move packed as
+  effect 0 and announced "But nothing happened" — Leer, Screech, Hypnosis,
+  Lick's paralysis, Metronome, from players and NPCs. Engine 1v1 / solo
+  was fine because it never goes through that table. The rest of the
+  Gen 1-equivalent `EFFECT_*` names now map onto the existing handlers.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed
