@@ -2136,9 +2136,11 @@ function M:updateCommand(input)
       -- the choice goes straight to the referee (or host-sim commit).
       --
       -- Against a **trainer** it is the original's question, and the original's
-      -- answer: you cannot run from a trainer battle. Filed as an action rather
-      -- than answered here, so the refusal arrives in the turn's own message
-      -- flow and costs the turn exactly as the original's does.
+      -- answer: you cannot run from a trainer battle. Said here and never
+      -- filed -- forwarding RUN used to forfeit the gym because the referee
+      -- treated every run as a concession. The sim still no-ops a filed run
+      -- (so a modified client cannot forfeit), but honest menus never send one,
+      -- and the turn is not spent (`afterQueue = "menu"`).
       --
       -- Against **two other players** it is a question Gen 1 never had to ask,
       -- and the answer is neither the refusal nor a unilateral escape: leaving
@@ -2150,7 +2152,9 @@ function M:updateCommand(input)
       elseif self:partyBattle() then
         self:askToRun()
       else
-        self:commit({ slot = self.mine, kind = "run" })
+        self.phase = "messages"
+        self.after = "choose"
+        self:say("No! There's no\nrunning from a\ntrainer battle!")
       end
     end
   end
@@ -10223,6 +10227,7 @@ end
 -- list is the one that counts.
 function M:sendMediatedChoice(action)
   if not (self.mediated and self.battleId) then return false end
+  if self.awaitingReconnect then return false end
   action = action or {}
   local kind = action.kind or "move"
   local fields

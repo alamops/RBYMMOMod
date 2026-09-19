@@ -25541,6 +25541,28 @@ end)()
     eq(ppClient.moveMemory[2], nil,
        "...and does not remember a move the hub never took")
 
+    -- SESSION_LEAVE leaves TCP up; sendMediatedChoice must not put a
+    -- BATTLE_CHOICE on the wire while the seat is awaiting reconnect.
+    local sent = {}
+    local dropClient = setmetatable({
+      mediated = true,
+      battleId = "b-drop",
+      awaitingReconnect = false,
+      messages = {},
+      transport = {
+        send = function(_, msgType, payload)
+          sent[#sent + 1] = { type = msgType, payload = payload }
+          return true
+        end,
+        isReady = function() return true end,
+      },
+    }, { __index = CoopBattle })
+    dropClient:onTransportLost()
+    eq(dropClient.awaitingReconnect, true, "onTransportLost holds the seat")
+    eq(dropClient:sendMediatedChoice({ kind = "run" }), false,
+       "sendMediatedChoice refuses after the drop")
+    eq(#sent, 0, "and puts no BATTLE_CHOICE on the wire")
+
     local items = CoopBattle.bandCommandItems({})
     eq(items[1].label, "FIGHT", "the grid keeps the classic FIGHT/SWITCH/ITEM/RUN order")
     eq(items[2].label, "PKMN",
