@@ -1073,21 +1073,16 @@ function M:openCoopBattle(id, memberIds, plan)
       members[#members + 1] = memberId
     end
   end
-  self.coopBattles[id] = { members = members, startedAt = self.clock }
-  -- ...and the hub's own record of the fight, on the same id.  Built even
-  -- though nothing may ever arrive for it: a client that never uploads a
-  -- ruleset simply leaves `sim` nil, which is exactly how the legacy
-  -- client-simulated path stays open underneath this one.
+  -- The mediated record first: a refused open must not leave a group or
+  -- seat marks for a fight that does not exist.
   local shape = { memberIds = members }
   for key, value in pairs(plan or {}) do shape[key] = value end
-  if not self:openMediatedBattle(id, shape) then
-    self.coopBattles[id] = nil
-    return nil
-  end
+  if not self:openMediatedBattle(id, shape) then return nil end
   for _, memberId in ipairs(members) do
     local member = self.clients[memberId]
     if member then member.coopBattleId = id end
   end
+  self.coopBattles[id] = { members = members, startedAt = self.clock }
   return id
 end
 
@@ -1141,10 +1136,11 @@ function M:startCoopBattle(id)
   -- else, and the hub is the only party that knows who they are.  The two
   -- sides go with it -- this is the moment they are known, and a mediated
   -- field cannot be assembled from a flat list of four.
-  if not self:openCoopBattle(id, ask.everyone, {
+  local opened = self:openCoopBattle(id, ask.everyone, {
     mode = "coop_pvp", hostId = ask.asker,
     sides = { a = ask.sideA, b = ask.sideB },
-  }) then
+  })
+  if not opened then
     self.coopAsks[id] = ask
     -- `gone` is the closest closed coop_decline token; a seat is in another fight.
     return self:endCoopAsk(id, nil, "gone")
@@ -1779,6 +1775,9 @@ end
 --
 -- Answers false and changes nothing when anything is still missing, so it is
 -- safe to call from every message that could have been the last one needed.
+-- A field the turn machine refuses is the other false: the record is aborted
+-- rather than left in battles with sim = nil, which kept every seat marked
+-- in a pairing that will never send battle_ready.
 function M:tryStartSim(record)
   if not record or record.sim or record.settled then return false end
   if not record.ruleset then return false end
@@ -1846,11 +1845,14 @@ function M:tryStartSim(record)
     -- logger, so the refusal goes out the seam that already exists for "a
     -- message from this connection was not acted on" -- once per connection,
     -- charged to the authority whose ruleset and parties made the field.
+    -- Then the record is called off: leaving it half-open kept every seat
+    -- marked in a fight that will never start.
     local host = self.clients[record.hostId]
     if host then
       noteDrop(self, host,
         "this battle could not be assembled: " .. tostring(why))
     end
+    self:failMediatedAssembly(record)
     return false
   end
   record.sim = battle
@@ -2050,6 +2052,28 @@ function M:leaveBattle(client)
   -- one that was being assembled is called off.
   self:abortMediatedBattle(record, "gone")
   return false
+end
+
+-- Parties and a ruleset arrived, the turn machine still refused the field.
+-- abortMediatedBattle clears battleId; a 1v1 still holds sessionId (busyNow)
+-- and a co-op still holds coopBattleId. Those go too, or the seats stay
+-- hub-busy waiting for a battle_ready that will never come.
+--
+-- `agree` is the phrasebook token the screens already have a sentence for
+-- ("The battle was called off.") -- `gone` prints as a silent draw.
+--
+-- Drop matches/coopMatches before the abort broadcast: RESULT is gated on
+-- mediated.sim, then leftover paperwork. A failed assembly never had a sim,
+-- so a leftover record would still take a vote.
+function M:failMediatedAssembly(record)
+  if not record then return end
+  local id, hostId = record.id, record.hostId
+  self.matches[id] = nil
+  self.coopMatches[id] = nil
+  self:abortMediatedBattle(record, "agree")
+  local host = hostId and self.clients[hostId]
+  if host and host.sessionId == id then self:endSession(host, "gone") end
+  if self.coopBattles[id] then self:closeCoopBattle(id) end
 end
 
 -- Call the fight off.  Everybody still owed a grace is disconnected and the
