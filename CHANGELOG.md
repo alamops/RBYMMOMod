@@ -4,6 +4,16 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.5] - 2026-09-19
+
+### Fixed
+
+- **A second mediated fight can no longer stack on a live one.** Duplicate
+  `onSession` for a new named pairing drops the local screen (without
+  `SESSION_LEAVE`, which would abandon the fight the hub already moved
+  `battleId` to) and starts the new one. The same pairing is a no-op.
+  `beginWildMediated` refuses a second fight without leaving.
+
 ## [1.4.4] - 2026-09-17
 
 ### Fixed
