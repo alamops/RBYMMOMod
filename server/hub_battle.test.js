@@ -295,6 +295,117 @@ function testDisconnectForfeitAfterGrace() {
 }
 
 /*
+ * SESSION_LEAVE of a live fight starts reconnect grace and clears sessionId
+ * while keeping battleId. REQUEST / startSession used to look only at
+ * sessionId, so the same connection could open a new pairing and
+ * openMediatedBattle would overwrite member.battleId, leaving the old sim
+ * ticking toward a forfeit beside the new match.
+ */
+function testSessionLeaveCannotStartSecondFight() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'STAYA');
+  const b = dial(relay, 'LEAVEB');
+  const c = dial(relay, 'CAL');
+  const session = openBattle(relay, a, b);
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  uploadAndReady(relay, a, b, session, {
+    aMons: [mon(40)],
+    bMons: [mon(40)],
+  });
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  c.peer.outbox = [];
+
+  relay.handle(b.id, { type: 'mmo.session_leave' });
+  const bob = relay.get(b.id);
+  ok(bob.sessionId == null, 'the session is gone');
+  ok(bob.battleId === session.id, 'but grace still binds them to the fight');
+  ok(relay.battles.has(session.id), 'and the original record is still standing');
+
+  relay.handle(b.id, { type: 'mmo.request', to: c.id, kind: 'battle' });
+  ok(take(c, 'mmo.request') === null,
+    'the leaver cannot open a second pairing while grace runs');
+
+  relay.handle(c.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+  const declined = take(c, 'mmo.decline');
+  ok(declined && declined.reason === 'busy',
+    'asking them is a busy, not a new fight');
+
+  relay.startSession(bob, relay.get(c.id), 'battle');
+  ok(relay.get(c.id).sessionId == null,
+    'startSession itself refuses while they are bound');
+  ok(relay.openMediatedBattle('s999', { memberIds: [b.id] }) == null,
+    'openMediatedBattle will not overwrite an unsettled battleId');
+  ok(bob.battleId === session.id, 'so they stay on the original fight');
+  ok(relay.battles.has(session.id), 'which is still the one record');
+
+  clock.advance((60 + 2) * 1000);
+  relay.tickBattles();
+  ok(!relay.battles.has(session.id), 'past grace the original fight settles');
+  ok(bob.battleId == null, 'and they are let out of it');
+  c.peer.outbox = [];
+  relay.handle(b.id, { type: 'mmo.request', to: c.id, kind: 'battle' });
+  ok(take(c, 'mmo.request') !== null,
+    'past grace a new ask is forwarded');
+}
+
+/*
+ * A stolen battleId is a drop of that seat, not a wipe of the field.
+ * Abort (and closeCoopBattle) only when no connected member still points here.
+ */
+function testOrphanSweepDisconnectsStolenSeat() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'KEEPA');
+  const b = dial(relay, 'STEALB');
+  const session = openBattle(relay, a, b);
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  uploadAndReady(relay, a, b, session, {
+    aMons: [mon(40)],
+    bMons: [mon(40)],
+  });
+
+  const bob = relay.get(b.id);
+  const ann = relay.get(a.id);
+  bob.battleId = 'stolen';
+  relay.tickBattles();
+  ok(relay.battles.has(session.id),
+    'a stolen seat does not abort the partner still bound');
+  ok(ann.battleId === session.id, 'the partner stays on the original fight');
+  ok(bob.battleId == null, 'and the stolen pointer is forgotten');
+
+  ann.battleId = 'stolen2';
+  relay.tickBattles();
+  ok(!relay.battles.has(session.id),
+    'when no connected member still points at it, the record is aborted');
+  ok(ann.battleId == null, 'and the second stolen pointer is forgotten');
+}
+
+function testOrphanSweepClosesCoopGroup() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'COOPA');
+  const b = dial(relay, 'COOPB');
+  relay.openCoopBattle('c-orphan', [a.id, b.id],
+    { mode: 'coop_npc', hostId: a.id });
+  ok(relay.coopBattles.has('c-orphan'), 'a coop group opens with the fight');
+
+  const ann = relay.get(a.id);
+  const bob = relay.get(b.id);
+  ann.battleId = 'stolen';
+  bob.battleId = 'stolen2';
+  relay.tickBattles();
+  ok(!relay.battles.has('c-orphan'), 'the fight is gone');
+  ok(!relay.coopBattles.has('c-orphan'),
+    'and the fan-out group closes with it');
+  ok(ann.coopBattleId == null && bob.coopBattleId == null,
+    'so neither member is still filed under the dead group');
+}
+
+/*
  * A fight nobody won, and the shape of saying so.
  *
  * cleanBattleOutcome refuses an empty id list, so a draw carrying two of them is
@@ -612,6 +723,7 @@ function testCoopWildSeating() {
   ok(relay.battleSeat(record, relay.get(a.id), { side: 'b' }) === record.npcIds[0],
     "the host's side-b upload fills the wild seat");
 
+  relay.abortMediatedBattle(record, 'gone');
   const solo = relay.openMediatedBattle('cw-2', {
     mode: 'coop_wild',
     hostId: a.id,
@@ -945,6 +1057,9 @@ testMediatedOneVOneKo();
 testNicknamedMonKeepsItsId();
 testRelayHardCutDuringBattle();
 testDisconnectForfeitAfterGrace();
+testSessionLeaveCannotStartSecondFight();
+testOrphanSweepDisconnectsStolenSeat();
+testOrphanSweepClosesCoopGroup();
 testDrawCarriesNoLists();
 testCoopNpcMediated();
 testCoopNpcTrainerBagShared();
