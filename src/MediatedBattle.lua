@@ -4381,12 +4381,14 @@ function M:updateCommand(input)
       self.itemList = nil
       self.phase = "item"
     elseif command == "RUN" then
-      if self.mode == "wild" then
+      -- PvP RUN is a concession (SoloBattle.lua). The trainer refuse line
+      -- belongs only to NPC modes, and only after that path actually refuses
+      -- -- printing it here then sending run made 1v1 look like a wasted
+      -- turn while the match ended. NPC copy is SoloBattle:_pump's.
+      if self.mode == "wild" or TRAINER_MODES[self.mode] then
         self:sendChoice({ action = "run" })
-      else
-        self:say("No! There's no\nrunning from a\ntrainer battle!")
-        -- Still spend the turn the way Gen 1 does against trainers.
-        self:sendChoice({ action = "run" })
+      elseif self:sendChoice({ action = "run" }) then
+        self:say("You forfeited\nthe battle!")
       end
     end
   end

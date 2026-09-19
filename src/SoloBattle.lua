@@ -742,11 +742,11 @@ end
 -- no running from a trainer battle!", `afterQueue = "menu"`, and the turn is
 -- **not** spent (`BattleState:tryRun`'s trainer arm returns before the roll).
 --
--- The refusal *line* is not ours. `MediatedBattle:updateCommand` already says
--- it, on the screen, before it files the choice -- so all this owes is the
--- `turn` that reopens the window the screen believes it has already answered.
--- A second copy of the sentence fed from here is what the player used to read
--- twice, in two consecutive boxes. Leave the line to the screen.
+-- The refusal *line* is ours. `MediatedBattle:updateCommand` files the
+-- choice without printing: a 1v1 send is a real concession, so the screen
+-- must not borrow this sentence. The pump prints it once the intercept has
+-- parked, then feeds the `turn` that reopens the menu. Vanilla is
+-- `afterQueue = "menu"` and does not spend the turn.
 --
 -- ------- a wild RUN
 --
@@ -948,15 +948,14 @@ function M:_pump()
   -- A RUN the trainer path refused last frame, answered now that the screen has
   -- finished writing over its own choice state. See M:_choose.
   --
-  -- **The `turn` and nothing else.** The refusal line is the screen's own --
-  -- `MediatedBattle:updateCommand` prints "No! There's no\nrunning from a\n
-  -- trainer battle!" before it files the choice -- so a copy fed from here is
-  -- the same sentence in a second box. All this owes is the window: vanilla
-  -- returns straight to the menu (`afterQueue = "menu"`) and does not spend the
-  -- turn, so the seat still owes the referee an answer and the next choice
-  -- resolves normally.
+  -- Line first, then the `turn` that reopens the menu: vanilla prints
+  -- "No! There's no running from a trainer battle!" and returns with
+  -- `afterQueue = "menu"` without spending the turn. The screen no longer
+  -- prints this itself -- a 1v1 send is a real concession -- so a copy fed
+  -- from here is the only copy.
   if self.refuseRun then
     self.refuseRun = nil
+    self:_feed({ t = "msg", text = "No! There's no\nrunning from a\ntrainer battle!" })
     self:_feed({ t = "turn", amount = sim.turn })
   end
 

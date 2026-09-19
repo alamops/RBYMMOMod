@@ -633,11 +633,11 @@ end)()
 -- Forwarded, a trainer RUN would forfeit the gym, and a forfeit is a loss, and
 -- a loss blacks the player out. Vanilla refuses and does *not* spend the turn.
 --
--- The refusal line belongs to the screen -- `MediatedBattle:updateCommand`
--- prints it before it files the choice -- so all the referee owes is the `turn`
--- that reopens a window the screen believes it has answered. A second copy fed
--- from here is the sentence the player used to read twice, in two consecutive
--- boxes, which is exactly what this counts.
+-- The refusal line belongs to the referee -- `MediatedBattle:updateCommand`
+-- files the choice without printing, so a 1v1 send cannot borrow this
+-- sentence. The pump prints it once the intercept has parked, then feeds the
+-- `turn` that reopens the menu. A second copy was the sentence the player
+-- used to read twice; this counts that there is still only one.
 
 ;(function()
   local f = fightOf("trainer", {})
@@ -645,21 +645,21 @@ end)()
   local turnBefore = sim.turn
 
   -- The RUN slab, pressed. Driven through the command menu rather than through
-  -- sendChoice, because the duplicate line was the screen's own and only this
-  -- path prints it.
+  -- sendChoice, because that is the path that used to print the line too early.
   local input = { wasPressed = function(_, key) return key == "a" end }
   fight.commandIndex = 4
   eq(fight.COMMANDS[4], "RUN", "the fourth command is RUN")
   fight:updateCommand(input)
 
-  eq(saidTimes(fight, "running from"), 1, "the screen refuses, once")
+  eq(saidTimes(fight, "running from"), 0,
+     "the screen does not print before the referee refuses")
   eq(f.solo.refuseRun, true, "and the referee parked the refusal for the pump")
   eq(fight.answeredTurn, true, "the send is handled, so the menu closes")
   eq(fight.phase, "play", "until the pump feeds the turn that reopens it")
 
   f.solo:update(1 / 60, f.game)
   eq(saidTimes(fight, "running from"), 1,
-     "the pump adds no second copy of the sentence")
+     "the pump prints the refuse line once, after the intercept")
   eq(sim.turn, turnBefore, "the turn is not spent")
   eq(sim:outcome(), nil, "and nothing was forfeited")
   eq(sim.byId[PLAYER].choice, nil, "the seat still owes an answer")
