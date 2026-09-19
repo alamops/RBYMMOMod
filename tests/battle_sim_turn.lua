@@ -1921,6 +1921,108 @@ do
     aMons = {
       mon({
         species = "Alpha", maxHp = 200, spd = 120,
+        moves = {
+          move({ id = "sleep", power = 0, effect = 32, accuracy = 255 }),
+          move({ id = "growl", power = 0, effect = 18, accuracy = 255 }),
+          move({ id = "swords", power = 0, effect = 50, accuracy = 255 }),
+        },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1, substitute = 50,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+  })
+  drain(battle)
+
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local turn1 = drain(battle)
+  local beta = activeMonOf(battle, "p2")
+  eq(beta and beta.status, nil, "SLEEP_EFFECT fails through a substitute")
+  eq(beta and beta.substitute, 50, "SLEEP_EFFECT leaves the substitute standing")
+  local nothing = false
+  for _, event in ipairs(turn1) do
+    if event.t == "msg" and event.text == "But nothing happened" then
+      nothing = true
+    end
+  end
+  ok(nothing, "SLEEP_EFFECT vs substitute says nothing happened")
+
+  battle:submitChoice("p1", { action = "fight", move = 1 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  beta = activeMonOf(battle, "p2")
+  eq(beta and beta.stages.atk, 0, "Growl fails through a substitute")
+
+  battle:submitChoice("p1", { action = "fight", move = 2 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local alpha = activeMonOf(battle, "p1")
+  eq(alpha and alpha.stages.atk, 2,
+     "Swords Dance still works while the foe has a substitute")
+end
+
+do
+  local battle = battleOf({
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 200, spd = 120,
+        moves = { move({ id = "transform", power = 0, effect = 57, accuracy = 255 }) },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1, substitute = 40,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local alpha = activeMonOf(battle, "p1")
+  ok(alpha and not alpha.transformed, "TRANSFORM_EFFECT fails through a substitute")
+end
+
+do
+  -- Damaging hit with a foe primary: breaking the sub must not then Growl.
+  local battle = battleOf({
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 200, spd = 120, atk = 120, level = 50,
+        moves = {
+          move({ id = "thump", power = 60, effect = 18, accuracy = 255 }),
+        },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", hp = 200, maxHp = 200, spd = 1, substitute = 5,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local beta = activeMonOf(battle, "p2")
+  eq(beta and (beta.substitute or 0), 0, "damaging hit broke the substitute")
+  eq(beta and beta.stages.atk, 0,
+     "Growl primary does not land on the hit that broke the sub")
+  eq(fighterIn(battle:snapshot(), "p2").hp, 200,
+     "breaking the sub still does not cut HP")
+end
+
+do
+  local battle = battleOf({
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 200, spd = 120,
         moves = { move({ id = "transform", power = 0, effect = 57 }) },
       }),
     },

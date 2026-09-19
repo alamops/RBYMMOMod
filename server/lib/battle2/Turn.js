@@ -2684,7 +2684,9 @@ class Battle {
       this._damage(fighter, mon, recoil, null);
     }
 
-    if (Effects.handlesPrimary(effectId)) {
+    // A substitute absorbs HP (including the breaking hit), so totalDealt
+    // stays 0. Do not then apply a foe primary onto the mon behind it.
+    if (Effects.handlesPrimary(effectId) && totalDealt > 0) {
       this._applyPrimary(fighter, mon, target, defender, choice.move, effectId);
     }
 
