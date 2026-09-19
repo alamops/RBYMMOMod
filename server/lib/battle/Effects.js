@@ -545,6 +545,7 @@ function applyPrimary(ctx) {
       type: Math.max(0, int(source.type, 0)),
       effect: Math.max(0, int(source.effect, 0)),
       chance: Math.max(0, int(source.chance, 0)),
+      highCrit: source.highCrit === true,
     };
     out.messages.push(`${userMon.species} learned ${moveLabel(source)}`);
     out.movesChanged = true;
@@ -572,6 +573,7 @@ function applyPrimary(ctx) {
       type: Math.max(0, int(m.type, 0)),
       effect: Math.max(0, int(m.effect, 0)),
       chance: Math.max(0, int(m.chance, 0)),
+      highCrit: m.highCrit === true,
     }));
     userMon.transformed = true;
     out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);

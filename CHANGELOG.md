@@ -4,6 +4,16 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **Gen 1 crit uses species base Speed; high-crit moves are wired.** Mediated
+  Slash / Karate Chop / Razor Leaf / Crabhammer used ordinary odds because
+  `_useMove` passed battle Speed (plus the Speed badge) into `Crit.check` and
+  never set `highCritMove`. The upload now carries `baseSpd` and `highCrit` on
+  the existing client sheet — the hub still has no ROM table.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed

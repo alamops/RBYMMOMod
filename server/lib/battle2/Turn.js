@@ -277,6 +277,7 @@ function copyMove(raw) {
     type: Math.max(0, int(raw.type, 0)),
     effect: Math.max(0, int(raw.effect, 0)),
     chance: Math.max(0, int(raw.chance, 0)),
+    highCrit: raw.highCrit === true,
   };
 }
 

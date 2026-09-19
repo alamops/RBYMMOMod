@@ -607,6 +607,7 @@ function M.applyPrimary(ctx)
       type = max(0, int(source.type, 0)),
       effect = max(0, int(source.effect, 0)),
       chance = max(0, int(source.chance, 0)),
+      highCrit = source.highCrit == true,
     }
     out.messages[#out.messages + 1] =
       userMon.species .. " learned " .. moveLabel(source)
@@ -640,6 +641,7 @@ function M.applyPrimary(ctx)
         type = max(0, int(m.type, 0)),
         effect = max(0, int(m.effect, 0)),
         chance = max(0, int(m.chance, 0)),
+        highCrit = m.highCrit == true,
       }
     end
     userMon.moves = copied

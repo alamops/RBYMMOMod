@@ -119,9 +119,16 @@ local DATA = {
     -- (HYDRO_PUMP / "HYDRO PUMP") and the only one that can tell the two
     -- fields apart.
     HYDRO   = { name = "HYDRO PUMP", power = 120, accuracy = 80, type = "WATER", pp = 5 },
+    SLASH   = { name = "SLASH", power = 70, accuracy = 100, type = "NORMAL", pp = 20,
+                highCrit = true },
+    -- Cache that predates the highCrit field: the client falls back to the
+    -- engine's HIGH_CRIT id list so Karate Chop still rides as high-crit.
+    KARATE_CHOP = { name = "KARATE CHOP", power = 50, accuracy = 100, type = "NORMAL",
+                    pp = 25 },
   },
   pokemon = {
-    CHARMANDER = { name = "CHARMANDER", types = { "FIRE" } },
+    CHARMANDER = { name = "CHARMANDER", types = { "FIRE" },
+                   baseStats = { speed = 65 } },
     SQUIRTLE   = { name = "SQUIRTLE", types = { "WATER" } },
   },
 }
@@ -217,6 +224,48 @@ eq(mons[2].moves[1].id, "HYDRO",
 -- twins carry the field the clients are already speaking it.
 eq(mons[1].types[1], 0, "a FIRE species claims type 0")
 eq(mons[2].types[1], 2, "and a WATER one type 2")
+eq(mons[1].baseSpd, 65, "species base Speed rides the sheet for Gen 1 crit")
+eq(mons[2].baseSpd, nil, "and is omitted when the species record has none")
+eq(mons[1].moves[1].highCrit, nil, "EMBER is not a high-crit move")
+
+local slashParty = Mediated.snapshotParty(gameWith(
+  { mon("CHARMANDER", { moves = { { id = "SLASH", pp = 20 },
+                                 { id = "KARATE_CHOP", pp = 25 } } }) }, DATA))
+eq(slashParty[1].moves[1].highCrit, true,
+   "highCrit on the move record stamps the sheet")
+eq(slashParty[1].moves[2].highCrit, true,
+   "...and KARATE_CHOP does too, from the engine HIGH_CRIT id fallback")
+local slashPacked = Wire.battleParty({ battle = "7", mons = slashParty })
+check(slashPacked ~= nil, "a high-crit snapshot survives Wire.battleParty")
+eq(slashPacked.mons[1].moves[1].highCrit, true,
+   "and the sanitiser keeps highCrit")
+eq(slashPacked.mons[1].baseSpd, 65, "...and species base Speed")
+check(Wire.battleMove({ id = "SLASH", pp = 20, power = 70, accuracy = 255,
+                        type = 1, effect = 0, chance = 0,
+                        highCrit = true }).highCrit == true,
+      "Wire.battleMove keeps highCrit = true")
+eq(Wire.battleMove({ id = "SLASH", pp = 20, power = 70, accuracy = 255,
+                     type = 1, effect = 0, chance = 0,
+                     highCrit = false }).highCrit, nil,
+   "highCrit = false is omitted rather than stored")
+check(Wire.battleMove({ id = "SLASH", pp = 20, power = 70, accuracy = 255,
+                        type = 1, effect = 0, chance = 0,
+                        highCrit = "yes" }) == nil,
+      "a non-boolean highCrit refuses the move")
+check(Wire.battleMon({
+  species = "CHARMANDER", level = 5, hp = 1, maxHp = 1,
+  stats = { atk = 1, def = 1, spd = 1, spc = 1 },
+  moves = { { id = "EMBER", pp = 1, power = 1, accuracy = 255,
+              type = 0, effect = 0, chance = 0 } },
+  baseSpd = 65,
+}).baseSpd == 65, "Wire.battleMon keeps baseSpd")
+check(Wire.battleMon({
+  species = "CHARMANDER", level = 5, hp = 1, maxHp = 1,
+  stats = { atk = 1, def = 1, spd = 1, spc = 1 },
+  moves = { { id = "EMBER", pp = 1, power = 1, accuracy = 255,
+              type = 0, effect = 0, chance = 0 } },
+  baseSpd = "fast",
+}) == nil, "an unreadable baseSpd refuses the battler")
 
 -- The strongest single assertion in this file: the real sanitiser, which is
 -- what the far end runs.
