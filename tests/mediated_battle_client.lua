@@ -2092,6 +2092,28 @@ do
      .. "sheet has no flag to read")
   eq(rows[2].right, "26/26", "the HP column is unchanged by any of this")
 
+  -- Arena plates drain shownHp; party rows used to format sheet.hp and jump.
+  local draining = setmetatable({
+    game = { data = { pokemon = DATA.pokemon }, save = { party = {} } },
+    mine = {
+      { species = "SQUIRTLE", hp = 5, maxHp = 24, slot = 0 },
+      { species = "PIDGEY", hp = 20, maxHp = 20, slot = 1 },
+    },
+    active = 1,
+    slots = {},
+  }, { __index = Mediated })
+  draining.slots[draining:mySlot()] = { hp = 5, maxHp = 24, shownHp = 18 }
+  local drainRows = draining:bandPartyRows(true)
+  eq(drainRows[1].right, "18/24",
+     "the active party's HP column follows the display clock mid-drain")
+  eq(drainRows[2].right, "20/20",
+     "...and a benched mon still prints its own truth hp")
+  local pickerRows = draining:classicPickerRows(true)
+  eq(pickerRows[1].hp, 18,
+     "the classic picker preview uses the same clock")
+  eq(pickerRows[1].fainted, false,
+     "faint stays on truth hp so a bar crawling to 0 is not already FNT")
+
   -- No save behind the sheet (a party the save no longer matches): the sheet
   -- answers instead, so the panel shows a monster rather than a hole.
   local sheetOnly = setmetatable({

@@ -5259,6 +5259,9 @@ end)()
   local expRows = pickerFight:classicPickerRows(true)
   eq(expRows[1].expFrac, 0.45,
      "the active mon preview uses the HUD exp fill")
+  eq(expRows[1].hp, 35,
+     "an exp-only slot stub must not zero picker HP (shownHpOf would invent 0)")
+  eq(expRows[1].maxHp, 35, "...or the maximum")
   pickerFight.phase = "item_party"
   pickerFight.switchIndex = 1
   eq(pickerFight:drawClassicPartyPicker({ draw = function() end }, nil), true,
@@ -25378,6 +25381,56 @@ end)()
     eq(bench[2].front, "shiny-pic",
        "...and a shiny one gets its own, or the whole party would share a "
        .. "palette the first row happened to load")
+    eq(bench[1].right, "9/9", "with no display clock the HP column is truth hp")
+    local draining = benchClient:bandBenchRows({
+      { index = 2, mon = { species = species, hp = 5, shownHp = 21,
+                           stats = { hp = 30 } } },
+    })
+    eq(draining[1].right, "21/30",
+       "band HP text follows shownHp while the plate crawls, not truth hp")
+    local battlerDrain = benchClient:bandBenchRows({
+      { index = 2, mon = { species = species, hp = 5, stats = { hp = 30 } },
+        battler = { shownHP = 21, mon = { hp = 5, stats = { hp = 30 } } } },
+    })
+    eq(battlerDrain[1].right, "21/30",
+       "...and a nested battler clock is the same number the plate prints")
+
+    local targetClient = setmetatable({
+      mySlot = function() return { index = 1 } end,
+      sim = {
+        targetsFor = function()
+          return {
+            { battler = { name = "RATTATA", shownHP = 18,
+                          mon = { hp = 4, stats = { hp = 24 } } } },
+          }
+        end,
+      },
+    }, { __index = CoopBattle })
+    local targets = targetClient:bandTargetRows()
+    eq(targets[1].right, "18/24",
+       "ATTACK WHO? prints the display clock, matching MediatedBattle targets")
+    eq(targets[1].dim, nil, "dim still follows truth hp, not the crawling bar")
+
+    local itemPartyClient = setmetatable({
+      game = { data = data },
+      mySlot = function()
+        return {
+          index = 1, active = 1,
+          party = {
+            { species = species, nickname = "A", hp = 5, stats = { hp = 24 } },
+            { species = species, nickname = "B", hp = 20, stats = { hp = 20 } },
+          },
+          battler = { shownHP = 18, mon = { hp = 5, stats = { hp = 24 } } },
+        }
+      end,
+    }, { __index = CoopBattle })
+    local itemRows = itemPartyClient:bandItemPartyRows()
+    eq(#itemRows, 2, "the item menu lists the whole party")
+    eq(itemRows[1].right, "18/24",
+       "the fielded mon's HP column follows the battler display clock")
+    eq(itemRows[2].right, "20/20",
+       "...and a benched mon still prints its own truth hp")
+    check(not itemRows[1].dim, "dim follows truth hp, so a crawling bar is not FNT")
 
     -- ------- the move cursor remembers what this monster last used
     --
