@@ -4,6 +4,19 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **Disconnected seats cannot spend a turn.** After `disconnect()` (socket
+  drop or SESSION_LEAVE) the choice clock already paused, but `submitChoice`
+  still accepted answers from the same socket. The referee now refuses until
+  `reconnect()`, and `_maybeResolve` waits on the same flag so a leftover or
+  forced fill cannot complete the turn while anyone is away. The client
+  `sendChoice` / `sendMediatedChoice` paths also refuse while awaiting
+  reconnect or the transport is not ready, and do not mark the turn
+  answered.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed

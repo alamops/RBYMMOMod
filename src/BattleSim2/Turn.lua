@@ -80,7 +80,12 @@
 --     type normal), no PP spent, recoil floor(damage/4) minimum 1 after a hit.
 --   * The choice clock is *suspended while anybody is disconnected*, because
 --     the grace timer is already counting for that player and two deadlines
---     racing would decide the match on whichever fired first.
+--     racing would decide the match on whichever fired first.  `submitChoice`
+--     also refuses a seat whose `connected` is false until `reconnect()`, so a
+--     socket that is still delivering (SESSION_LEAVE) cannot resolve turns
+--     through the pause.  `_maybeResolve` waits on the same flag, so a leftover
+--     or forced fill from before the drop cannot complete the turn while anyone
+--     is away; `reconnect()` asks it again.
 --
 -- Nothing here raises.  Bad input is refused with a nil-plus-reason from
 -- `create` or a plain `false` from `submitChoice`, because every caller is
@@ -1131,15 +1136,18 @@ end
 
 -- Returns true when the choice is now held for this turn, false otherwise.
 -- False is the whole of the error report on purpose: the reasons a choice is
--- refused (wrong phase, unknown player, already answered, an index that names
--- nothing) are all things the client can see for itself, and a string here
--- would be a second vocabulary to keep in step across two runtimes.
+-- refused (wrong phase, unknown player, disconnected, already answered, an
+-- index that names nothing) are all things the client can see for itself, and a
+-- string here would be a second vocabulary to keep in step across two runtimes.
 function Battle:submitChoice(playerId, choice)
   if self.phase ~= "choice" and self.phase ~= "replace" then return false end
   if type(choice) ~= "table" then return false end
 
   local fighter = self.byId[str(playerId) or ""]
   if not fighter then return false end
+  -- disconnect() pauses the clock but used to keep taking answers from the
+  -- same socket (SESSION_LEAVE leaves TCP up). Refuse until reconnect().
+  if not fighter.connected then return false end
   if not ACTIONS[choice.action] then return false end
 
   -- The replace phase belongs to the seats that owe a send-out and to nobody
@@ -1198,6 +1206,10 @@ end
 
 function Battle:_maybeResolve()
   if self.phase ~= "choice" and self.phase ~= "replace" then return false end
+  -- A leftover or forced fill must not complete the turn while a seat is
+  -- away: the clock is paused for them, and resolving would spend it.
+  -- reconnect() calls this once everyone is back.
+  if self:_anyDisconnected() then return false end
   for _, fighter in ipairs(self.fighters) do
     if self:_owes(fighter) then return false end
   end
@@ -3258,6 +3270,9 @@ function Battle:reconnect(playerId)
      and not self:_anyDisconnected() and self.choiceTimeout > 0 then
     self.deadline = self.now + self.choiceTimeout
   end
+  -- A leftover or forced fill was held open by `_maybeResolve`'s disconnect
+  -- gate; close it now that everyone is back.
+  self:_maybeResolve()
   return true
 end
 
@@ -3280,8 +3295,9 @@ function Battle:tick(nowSeconds)
   end
 
   -- Forced-only turns opened by the previous resolve wait here so one drain
-  -- does not swallow a whole trap / recharge / thrash chain.
-  if self.forcedPending and self.phase == "choice" then
+  -- does not swallow a whole trap / recharge / thrash chain. Keep the flag
+  -- while a seat is away; reconnect()'s `_maybeResolve` closes the turn.
+  if self.forcedPending and self.phase == "choice" and not self:_anyDisconnected() then
     self.forcedPending = false
     if not self:_anyoneOwes() then
       self:_maybeResolve()

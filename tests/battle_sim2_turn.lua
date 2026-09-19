@@ -1313,6 +1313,57 @@ do
   ok(not damaged, "gen2: Swift deals no damage while the target is airborne")
 end
 
+-- A dropped seat cannot file until reconnect() -- twin of the Gen 1
+-- battle_sim_turn.lua 4b claim, so SESSION_LEAVE cannot resolve turns
+-- through the pause on the Gen 2 machine either.
+do
+  local battle = battleOf({
+    reconnectGrace = 60, choiceTimeout = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha" }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta" }) } } },
+    },
+  })
+  drain(battle)
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == false,
+     "gen2: a disconnected seat cannot file a choice")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "gen2: the seat that stayed may still file")
+  eq(battle:snapshot().turn, 1,
+     "gen2: the turn does not resolve on the dropped seat's leftover")
+  battle:reconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "gen2: reconnect restores the right to choose")
+  eq(battle:snapshot().turn, 2,
+     "gen2: and the already-filed peer lets the turn complete")
+end
+
+do
+  local battle = battleOf({
+    reconnectGrace = 60, choiceTimeout = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha" }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta" }) } } },
+    },
+  })
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "gen2: a connected seat may file before it drops")
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "gen2: the seat that stayed may still file after the drop")
+  eq(battle:snapshot().turn, 1,
+     "gen2: a leftover choice does not resolve the turn while a seat is away")
+  battle:reconnect("p1")
+  eq(battle:snapshot().turn, 2,
+     "gen2: reconnect completes the already-answered turn without a second pick")
+end
+
 -- ------------------------------------------------------------------
 -- trainer RUN does not forfeit; the Gen 1 twin owns the long version
 -- ------------------------------------------------------------------
