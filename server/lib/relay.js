@@ -318,11 +318,20 @@ function parseLine(line) {
  * flag costs at most one honest refusal rather than a battle nobody could
  * arrange. Twin of src/Hub.lua's busyNow.
  */
-function busyNow(client) {
-  return Boolean(client.sessionId) || client.busy === true;
+function busyNow(client, relay) {
+  // battleId outlives sessionId on purpose: SESSION_LEAVE of a live fight
+  // starts reconnect grace rather than ending it, and the player who walked
+  // off still has to sit that out. Listing them as free here is how they
+  // were asked into a second pairing while the first sim kept ticking.
+  // `relay` heals a stale pointer the same way request/startSession do;
+  // callers without one (exported presenceOf in tests) fall back to the field.
+  const inFight = relay
+    ? Boolean(relay.unsettledBattle(client))
+    : Boolean(client.battleId);
+  return Boolean(client.sessionId) || client.busy === true || inFight;
 }
 
-function presenceOf(client) {
+function presenceOf(client, relay) {
   return {
     id: client.id,
     name: client.name,
@@ -331,7 +340,7 @@ function presenceOf(client) {
     x: client.x,
     y: client.y,
     facing: client.facing,
-    busy: busyNow(client),
+    busy: busyNow(client, relay),
     // Whether they are in *a* party, never which one. It is the only thing
     // anyone outside that party needs -- it decides whether their menus
     // offer to invite this player -- and a party id on every presence would
@@ -504,7 +513,7 @@ handlers['mmo.move'] = (relay, client, msg) => {
   // against true is the one test Lua and JS answer identically for every
   // JSON value a malformed client can send.
   client.busy = msg.busy === true;
-  relay.broadcast('mmo.move', presenceOf(client), client.id);
+  relay.broadcast('mmo.move', presenceOf(client, relay), client.id);
   // Crossing into another map -- or out of the world entirely, into a battle
   // or a menu, which is what a null cell means -- is the only part of a step
   // an operator's list of places can see.
@@ -611,6 +620,13 @@ handlers['mmo.request'] = (relay, client, msg) => {
   if (!client.ready || client.sessionId) return;
   const kind = KINDS.has(msg.kind) ? msg.kind : null;
   if (!kind) return;
+  // Silence here strands the asker the same way a vanished target used to:
+  // the client holds `outgoing` until a decline or session lands. Kind is
+  // already known, so the reply can name the ask it is refusing.
+  if (relay.unsettledBattle(client)) {
+    return relay.send(client, 'mmo.decline',
+      { name: client.name, kind, reason: 'busy' });
+  }
   const target = relay.get(cleanId(msg.to));
   // Asking somebody who is not here any more is answered, not dropped.
   //
@@ -628,7 +644,7 @@ handlers['mmo.request'] = (relay, client, msg) => {
   }
   if (target.id === client.id) return;
 
-  if (target.sessionId) {
+  if (target.sessionId || relay.unsettledBattle(target)) {
     return relay.send(client, 'mmo.decline',
       { name: target.name, kind, reason: 'busy' });
   }
@@ -686,7 +702,8 @@ handlers['mmo.respond'] = (relay, client, msg) => {
     if (reason) out.reason = reason;
     return relay.send(asker, 'mmo.decline', out);
   }
-  if (client.sessionId || asker.sessionId) {
+  if (client.sessionId || asker.sessionId
+      || relay.unsettledBattle(client) || relay.unsettledBattle(asker)) {
     return relay.send(asker, 'mmo.decline',
       { name: client.name, kind, reason: 'busy' });
   }
@@ -1042,8 +1059,13 @@ handlers['mmo.coop_join'] = (relay, client, msg) => {
   // other.
   const battleId = `c${relay.nextCoopAsk++}`;
   const mode = offer.mode === 'coop_wild' ? 'coop_wild' : 'coop_npc';
-  relay.openCoopBattle(battleId, memberIds,
-    { mode, hostId: host.id });
+  if (!relay.openCoopBattle(battleId, memberIds,
+    { mode, hostId: host.id })) {
+    host.coopOffer = offer;
+    // `alone` is the closest closed coop_offer_end token; there is no `busy`.
+    relay.send(client, 'mmo.coop_offer_end', { reason: 'alone' });
+    return;
+  }
 
   // `plan` is the hub's mediated battle id (`c*`). Without it the waiting
   // host's CoopBattle has no battleId, uploadMediated is a no-op, and the
@@ -1814,7 +1836,7 @@ class Relay {
         map: client.map,
         x: client.x,
         y: client.y,
-        busy: busyNow(client),
+        busy: busyNow(client, this),
         party: Boolean(client.partyId),
         points: client.points,
         ranked: Boolean(client.ranked),
@@ -2038,7 +2060,7 @@ class Relay {
 
     const players = [];
     for (const other of this.clients.values()) {
-      if (other.ready && other.id !== client.id) players.push(presenceOf(other));
+      if (other.ready && other.id !== client.id) players.push(presenceOf(other, this));
     }
     const motd = cleanText(this.motd, MOTD_MAX);
 
@@ -2050,7 +2072,7 @@ class Relay {
       motd: motd || undefined,
       admin: client.admin || undefined,
     });
-    this.broadcast('mmo.join', { player: presenceOf(client) }, client.id);
+    this.broadcast('mmo.join', { player: presenceOf(client, this) }, client.id);
     this.log.info(`+ ${safe(client.name)} (${client.id}) -- ` +
       `${this.players} online`);
     // Anything this hub has been holding for the name they walked in under: a
@@ -2167,8 +2189,8 @@ class Relay {
     // ...and everyone else learns these two are spoken for, so the INVITE row
     // stops being offered against them. Same shape as startSession: presence
     // changed, so presence goes out.
-    this.broadcast('mmo.move', presenceOf(a), a.id);
-    this.broadcast('mmo.move', presenceOf(b), b.id);
+    this.broadcast('mmo.move', presenceOf(a, this), a.id);
+    this.broadcast('mmo.move', presenceOf(b, this), b.id);
     this.noteRosterChange();
     this.log.info(`party ${id}: ${safe(a.name)} + ${safe(b.name)}`);
   }
@@ -2192,7 +2214,7 @@ class Relay {
     for (const member of this.partyMembers(partyId)) {
       this.send(member, 'mmo.party', { id: partyId, members });
     }
-    this.broadcast('mmo.move', presenceOf(newbie), newbie.id);
+    this.broadcast('mmo.move', presenceOf(newbie, this), newbie.id);
     this.noteRosterChange();
     this.log.info(`party ${partyId}: + ${safe(newbie.name)}`);
     return true;
@@ -2234,7 +2256,7 @@ class Relay {
     // Remaining members are NOT sent party_end -- only the updated roster.
     if (this.clients.has(client.id)) {
       this.send(client, 'mmo.party_end', { reason: 'left' });
-      this.broadcast('mmo.move', presenceOf(client), client.id);
+      this.broadcast('mmo.move', presenceOf(client, this), client.id);
     }
     this.noteRosterChange();
   }
@@ -2261,7 +2283,7 @@ class Relay {
       if (other && other.id !== client.id && other.partyId === id) {
         other.partyId = null;
         this.send(other, 'mmo.party_end', { reason });
-        this.broadcast('mmo.move', presenceOf(other), other.id);
+        this.broadcast('mmo.move', presenceOf(other, this), other.id);
       }
     }
     // The leaver is told too, so a client whose party ended because the hub
@@ -2269,7 +2291,7 @@ class Relay {
     // a drop there is nothing left to tell.
     if (this.clients.has(client.id)) {
       this.send(client, 'mmo.party_end', { reason: 'left' });
-      this.broadcast('mmo.move', presenceOf(client), client.id);
+      this.broadcast('mmo.move', presenceOf(client, this), client.id);
     }
     this.noteRosterChange();
   }
@@ -2376,8 +2398,8 @@ class Relay {
     for (const memberId of memberIds || []) {
       const member = this.clients.get(memberId);
       if (!member) continue;
+      if (this.unsettledBattle(member) && member.battleId !== id) return null;
       members.push(memberId);
-      member.coopBattleId = id;
     }
     // Reclaim any group whose battle never said goodbye -- a client that
     // crashed rather than disconnected. Swept here, where the table grows,
@@ -2393,7 +2415,14 @@ class Relay {
     // though nothing may ever arrive for it: a client that never uploads a
     // ruleset simply leaves `sim` null, which is exactly how the legacy path
     // stays open underneath this one.
-    this.openMediatedBattle(id, Object.assign({ memberIds: members }, plan || {}));
+    if (!this.openMediatedBattle(id, Object.assign({ memberIds: members }, plan || {}))) {
+      this.coopBattles.delete(id);
+      return null;
+    }
+    for (const memberId of members) {
+      const member = this.clients.get(memberId);
+      if (member) member.coopBattleId = id;
+    }
     return id;
   }
 
@@ -2461,10 +2490,14 @@ class Relay {
     // the hub is the only party that knows who they are. The two sides go with
     // it -- this is the moment they are known, and a mediated field cannot be
     // assembled from a flat list of four.
-    this.openCoopBattle(id, ask.everyone, {
+    if (!this.openCoopBattle(id, ask.everyone, {
       mode: 'coop_pvp', hostId: ask.asker,
       sides: { a: ask.sideA.slice(), b: ask.sideB.slice() },
-    });
+    })) {
+      this.coopAsks.set(id, ask);
+      // `gone` is the closest closed coop_decline token; a seat is in another fight.
+      return this.endCoopAsk(id, null, 'gone');
+    }
 
     // **Two sides, not two pairs.** A four-way is scored as one team match --
     // each player against the other pair's combined strength -- because that
@@ -2707,6 +2740,9 @@ class Relay {
     // Leaving the session is leaving the field. A mediated fight starts its
     // reconnect grace here rather than ending on the spot, so a player who
     // backed out by accident has the same window a dropped socket gets.
+    // battleId stays until that fight settles: startSession / openMediatedBattle
+    // refuse a second pairing while it does, so SESSION_LEAVE cannot mint a
+    // new match beside the one still ticking toward forfeit.
     this.leaveBattle(client);
     const session = this.sessions.get(id);
     this.sessions.delete(id);
@@ -2730,11 +2766,11 @@ class Relay {
       if (other && other.sessionId === id) {
         other.sessionId = null;
         this.send(other, 'mmo.session_end', { reason });
-        this.broadcast('mmo.move', presenceOf(other), other.id);
+        this.broadcast('mmo.move', presenceOf(other, this), other.id);
       }
     }
     if (this.clients.has(client.id)) {
-      this.broadcast('mmo.move', presenceOf(client), client.id);
+      this.broadcast('mmo.move', presenceOf(client, this), client.id);
     }
     this.noteRosterChange();
   }
@@ -2751,6 +2787,7 @@ class Relay {
      * colon because these ids cross the wire and cleanId refuses anything
      * outside [\w-].
      */
+    if (this.unsettledBattle(a) || this.unsettledBattle(b)) return;
     const id = `s${this.nextSession++}`;
     this.sessions.set(id, { a: a.id, b: b.id, kind });
     a.sessionId = id;
@@ -2777,8 +2814,8 @@ class Relay {
     this.send(b, 'mmo.session',
       { peer: a.id, peerName: a.name, kind, role: 'guest', id });
 
-    this.broadcast('mmo.move', presenceOf(a), a.id);
-    this.broadcast('mmo.move', presenceOf(b), b.id);
+    this.broadcast('mmo.move', presenceOf(a, this), a.id);
+    this.broadcast('mmo.move', presenceOf(b, this), b.id);
     this.noteRosterChange();
     this.log.info(`session ${id}: ${safe(a.name)} <-> ${safe(b.name)} (${kind})`);
 
@@ -2823,6 +2860,13 @@ class Relay {
       }
     }
     if (!memberIds.length) return null;
+
+    for (const memberId of memberIds) {
+      const member = this.clients.get(memberId);
+      if (!member) continue;
+      const bound = this.unsettledBattle(member);
+      if (bound && bound.id !== id) return null;
+    }
 
     let mode = p.mode;
     if (mode !== '1v1' && mode !== 'coop_npc' && mode !== 'coop_pvp'
@@ -3433,12 +3477,73 @@ class Relay {
   }
 
   tickBattles(nowMs) {
+    this.sweepOrphanBattles();
     const now = battleSeconds(
       typeof nowMs === 'number' ? nowMs : this.now());
     for (const record of this.battles.values()) {
       if (!record.sim || record.settled) continue;
       record.sim.tick(now);
       this.flushBattle(record);
+    }
+  }
+
+  /*
+   * The fight this connection is still bound to, or null.
+   *
+   * SESSION_LEAVE of a live sim keeps battleId through reconnect grace so
+   * the player can resume -- and so startSession cannot mint a second match
+   * beside the one still ticking. A stale pointer (record gone or already
+   * settled) is forgotten here rather than blocking them forever.
+   */
+  unsettledBattle(client) {
+    if (!client || !client.battleId) return null;
+    const record = this.battles.get(client.battleId);
+    if (!record || record.settled) {
+      client.battleId = null;
+      return null;
+    }
+    return record;
+  }
+
+  /*
+   * Abort a fight whose live members no longer point at it.
+   *
+   * A stolen seat (connected, battleId elsewhere) is disconnected from this
+   * sim so the partner still bound keeps the field -- a drop, not a wipe.
+   * Abort only when no connected member still points here *and* at least one
+   * connected member was stolen. Everyone dropped is not an orphan: grace
+   * must still run toward forfeit. A coop group is the same event, so the
+   * abort goes through closeCoopBattle.
+   */
+  sweepOrphanBattles() {
+    const doomed = [];
+    for (const record of Array.from(this.battles.values())) {
+      if (record.settled) continue;
+      let stillBound = false;
+      const stolen = [];
+      for (const memberId of record.memberIds) {
+        const member = this.clients.get(memberId);
+        if (!member) continue;
+        if (member.battleId === record.id) stillBound = true;
+        else if (member.battleId && member.battleId !== record.id) {
+          stolen.push(memberId);
+        }
+      }
+      for (const memberId of stolen) {
+        if (record.sim && !record.settled) {
+          if (record.sim.disconnect(memberId)) this.flushBattle(record);
+        }
+      }
+      if (!record.settled && !stillBound && stolen.length) doomed.push(record);
+    }
+    for (const record of doomed) {
+      if (this.coopBattles.has(record.id)) this.closeCoopBattle(record.id);
+      else this.abortMediatedBattle(record, 'gone');
+    }
+    for (const client of this.clients.values()) {
+      if (client.battleId && !this.battles.has(client.battleId)) {
+        client.battleId = null;
+      }
     }
   }
 

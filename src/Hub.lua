@@ -469,11 +469,19 @@ end
 -- (see the REQUEST handler) -- that gate stays on the hub's own view, so a
 -- stale flag costs at most one honest refusal rather than a battle nobody
 -- could arrange.
-local function busyNow(client)
+local function busyNow(hub, client)
+  -- battleId outlives sessionId on purpose: SESSION_LEAVE of a live fight
+  -- starts reconnect grace rather than ending it, and the player who walked
+  -- off still has to sit that out. Listing them as free here is how they
+  -- were asked into a second pairing while the first sim kept ticking.
+  -- Goes through unsettledBattle so a stale pointer is healed the same way
+  -- REQUEST / startSession heal one, rather than publishing busy while an
+  -- ask would still be forwarded.
   return client.sessionId ~= nil or client.busy == true
+    or hub:unsettledBattle(client) ~= nil
 end
 
-local function presenceOf(client)
+local function presenceOf(hub, client)
   return {
     id = client.id,
     name = client.name,
@@ -482,7 +490,7 @@ local function presenceOf(client)
     x = client.x,
     y = client.y,
     facing = client.facing,
-    busy = busyNow(client),
+    busy = busyNow(hub, client),
     -- Whether, not which.  Everyone needs this -- it is what decides
     -- whether their menus offer to invite this player -- and nobody outside
     -- the party needs the id, so the id does not leave the hub.
@@ -643,14 +651,14 @@ function M:admit(client)
   local players = {}
   for id, other in pairs(self.clients) do
     if other.ready and id ~= client.id then
-      players[#players + 1] = presenceOf(other)
+      players[#players + 1] = presenceOf(self, other)
     end
   end
   send(client, Wire.WELCOME, {
     id = client.id, players = players, points = client.points,
     ranked = true,
   })
-  self:broadcast(Wire.JOIN, { player = presenceOf(client) }, client.id)
+  self:broadcast(Wire.JOIN, { player = presenceOf(self, client) }, client.id)
   -- Last, and after the welcome on purpose: a friend ask the hub has been
   -- holding is a box in front of this player, and a box needs a client that
   -- already knows who it is and which list it is answering from.  Also after
@@ -721,6 +729,9 @@ function M:endSession(client, reason)
   -- a player who backed out by accident gets the same window a dropped
   -- socket does -- and a player who backed out on purpose still has to sit
   -- out the grace rather than voiding a battle they were losing.
+  -- battleId stays until that fight settles: startSession / openMediatedBattle
+  -- refuse a second pairing while it does, so SESSION_LEAVE cannot mint a
+  -- new match beside the one still ticking toward forfeit.
   self:leaveBattle(client)
   local session = self.sessions[id]
   self.sessions[id] = nil
@@ -742,11 +753,11 @@ function M:endSession(client, reason)
     if other and other.sessionId == id then
       other.sessionId = nil
       send(other, Wire.SESSION_END, { reason = reason })
-      self:broadcast(Wire.MOVE, presenceOf(other), other.id)
+      self:broadcast(Wire.MOVE, presenceOf(self, other), other.id)
     end
   end
   if self.clients[client.id] then
-    self:broadcast(Wire.MOVE, presenceOf(client), client.id)
+    self:broadcast(Wire.MOVE, presenceOf(self, client), client.id)
   end
 end
 
@@ -760,6 +771,7 @@ function M:startSession(a, b, kind)
   -- other.  The letter is what keeps the two id spaces apart, and it is a letter
   -- rather than a colon because these ids cross the wire and Wire.id refuses
   -- anything outside [%w_-].
+  if self:unsettledBattle(a) or self:unsettledBattle(b) then return end
   local id = "s" .. tostring(self.nextSession)
   self.nextSession = self.nextSession + 1
   self.sessions[id] = { a = a.id, b = b.id, kind = kind }
@@ -788,8 +800,8 @@ function M:startSession(a, b, kind)
   send(b, Wire.SESSION,
     { peer = a.id, peerName = a.name, kind = kind, role = "guest", id = id })
 
-  self:broadcast(Wire.MOVE, presenceOf(a), a.id)
-  self:broadcast(Wire.MOVE, presenceOf(b), b.id)
+  self:broadcast(Wire.MOVE, presenceOf(self, a), a.id)
+  self:broadcast(Wire.MOVE, presenceOf(self, b), b.id)
 
   -- A battle session is also a mediated fight from the moment it opens, and
   -- the requester is its authority for the reason they were made host above.
@@ -840,8 +852,8 @@ function M:startParty(a, b)
   -- ...and everyone else learns these two are spoken for, so the INVITE row
   -- stops being offered against them.  Same shape as startSession: presence
   -- changed, so presence goes out.
-  self:broadcast(Wire.MOVE, presenceOf(a), a.id)
-  self:broadcast(Wire.MOVE, presenceOf(b), b.id)
+  self:broadcast(Wire.MOVE, presenceOf(self, a), a.id)
+  self:broadcast(Wire.MOVE, presenceOf(self, b), b.id)
 end
 
 -- Append an unattached player to an existing party that still has room.
@@ -865,7 +877,7 @@ function M:joinParty(partyId, newbie)
   for _, member in ipairs(self:partyMembers(partyId)) do
     send(member, Wire.PARTY, { id = partyId, members = members })
   end
-  self:broadcast(Wire.MOVE, presenceOf(newbie), newbie.id)
+  self:broadcast(Wire.MOVE, presenceOf(self, newbie), newbie.id)
   return true
 end
 
@@ -913,7 +925,7 @@ function M:leaveParty(client, reason)
   -- Remaining members are NOT sent party_end -- only the updated roster.
   if self.clients[client.id] then
     send(client, Wire.PARTY_END, { reason = "left" })
-    self:broadcast(Wire.MOVE, presenceOf(client), client.id)
+    self:broadcast(Wire.MOVE, presenceOf(self, client), client.id)
   end
 end
 
@@ -939,7 +951,7 @@ function M:endParty(client, reason)
     if other and other.id ~= client.id and other.partyId == id then
       other.partyId = nil
       send(other, Wire.PARTY_END, { reason = reason })
-      self:broadcast(Wire.MOVE, presenceOf(other), other.id)
+      self:broadcast(Wire.MOVE, presenceOf(self, other), other.id)
     end
   end
   -- The leaver is told too, so a client that did not initiate this locally
@@ -948,7 +960,7 @@ function M:endParty(client, reason)
   -- left to tell.
   if self.clients[client.id] then
     send(client, Wire.PARTY_END, { reason = "left" })
-    self:broadcast(Wire.MOVE, presenceOf(client), client.id)
+    self:broadcast(Wire.MOVE, presenceOf(self, client), client.id)
   end
 end
 
@@ -1056,8 +1068,9 @@ function M:openCoopBattle(id, memberIds, plan)
   for _, memberId in ipairs(memberIds or {}) do
     local member = self.clients[memberId]
     if member then
+      local bound = self:unsettledBattle(member)
+      if bound and bound.id ~= id then return nil end
       members[#members + 1] = memberId
-      member.coopBattleId = id
     end
   end
   self.coopBattles[id] = { members = members, startedAt = self.clock }
@@ -1067,7 +1080,14 @@ function M:openCoopBattle(id, memberIds, plan)
   -- client-simulated path stays open underneath this one.
   local shape = { memberIds = members }
   for key, value in pairs(plan or {}) do shape[key] = value end
-  self:openMediatedBattle(id, shape)
+  if not self:openMediatedBattle(id, shape) then
+    self.coopBattles[id] = nil
+    return nil
+  end
+  for _, memberId in ipairs(members) do
+    local member = self.clients[memberId]
+    if member then member.coopBattleId = id end
+  end
   return id
 end
 
@@ -1121,10 +1141,14 @@ function M:startCoopBattle(id)
   -- else, and the hub is the only party that knows who they are.  The two
   -- sides go with it -- this is the moment they are known, and a mediated
   -- field cannot be assembled from a flat list of four.
-  self:openCoopBattle(id, ask.everyone, {
+  if not self:openCoopBattle(id, ask.everyone, {
     mode = "coop_pvp", hostId = ask.asker,
     sides = { a = ask.sideA, b = ask.sideB },
-  })
+  }) then
+    self.coopAsks[id] = ask
+    -- `gone` is the closest closed coop_decline token; a seat is in another fight.
+    return self:endCoopAsk(id, nil, "gone")
+  end
 
   -- The paperwork for a ranked 2-on-2.
   --
@@ -1400,6 +1424,15 @@ function M:openMediatedBattle(id, plan)
     end
   end
   if #memberIds == 0 then return nil end
+
+  -- A player already bound to a different unsettled fight cannot be seated
+  -- here: overwriting member.battleId used to leave the old sim ticking
+  -- (grace → forfeit) while they were in a new match.
+  for _, memberId in ipairs(memberIds) do
+    local member = self.clients[memberId]
+    local bound = member and self:unsettledBattle(member)
+    if bound and bound.id ~= id then return nil end
+  end
 
   -- Accept coop_wild explicitly so seating works before Turn.MODES gains it (T3).
   local mode = (self.Turn.MODES[plan.mode] or plan.mode == "coop_wild") and plan.mode
@@ -1920,11 +1953,81 @@ end
 -- the only thing that fires a choice timeout or expires a reconnect grace: a
 -- fight whose players have all gone quiet has no other source of time.
 function M:tickBattles(now)
+  self:sweepOrphanBattles()
   local seconds = battleSeconds(now or self.clock)
   for _, record in pairs(self.battles) do
     if record.sim and not record.settled then
       record.sim:tick(seconds)
       self:flushBattle(record)
+    end
+  end
+end
+
+-- The fight this connection is still bound to, or nil.
+--
+-- SESSION_LEAVE of a live sim keeps battleId through reconnect grace so the
+-- player can resume -- and so startSession cannot mint a second match beside
+-- the one still ticking. A stale pointer (record gone or already settled) is
+-- forgotten here rather than blocking them forever.
+function M:unsettledBattle(client)
+  if not client or not client.battleId then return nil end
+  local record = self.battles[client.battleId]
+  if not record or record.settled then
+    client.battleId = nil
+    return nil
+  end
+  return record
+end
+
+-- Abort a fight whose live members no longer point at it.
+--
+-- A stolen seat (connected, battleId elsewhere) is disconnected from this
+-- sim so the partner still bound keeps the field -- a drop, not a wipe.
+-- Abort only when no connected member still points here *and* at least one
+-- connected member was stolen. Everyone dropped is not an orphan: grace
+-- must still run toward forfeit. A coop group is the same event, so the
+-- abort goes through closeCoopBattle.
+function M:sweepOrphanBattles()
+  local records = {}
+  for _, record in pairs(self.battles) do
+    records[#records + 1] = record
+  end
+  local doomed
+  for _, record in ipairs(records) do
+    if not record.settled then
+      local stillBound, stolen = false, nil
+      for _, memberId in ipairs(record.memberIds or {}) do
+        local member = self.clients[memberId]
+        if member then
+          if member.battleId == record.id then
+            stillBound = true
+          elseif member.battleId and member.battleId ~= record.id then
+            stolen = stolen or {}
+            stolen[#stolen + 1] = memberId
+          end
+        end
+      end
+      for _, memberId in ipairs(stolen or {}) do
+        if record.sim and not record.settled then
+          if record.sim:disconnect(memberId) then self:flushBattle(record) end
+        end
+      end
+      if not record.settled and not stillBound and stolen then
+        doomed = doomed or {}
+        doomed[#doomed + 1] = record
+      end
+    end
+  end
+  for _, record in ipairs(doomed or {}) do
+    if self.coopBattles[record.id] then
+      self:closeCoopBattle(record.id)
+    else
+      self:abortMediatedBattle(record, "gone")
+    end
+  end
+  for _, client in pairs(self.clients) do
+    if client.battleId and not self.battles[client.battleId] then
+      client.battleId = nil
     end
   end
 end
@@ -2368,7 +2471,7 @@ handlers[Wire.MOVE] = function(self, client, msg)
   -- against true is the one test Lua and JS answer identically for every
   -- JSON value a malformed client can send.
   client.busy = msg.busy == true
-  self:broadcast(Wire.MOVE, presenceOf(client), client.id)
+  self:broadcast(Wire.MOVE, presenceOf(self, client), client.id)
 end
 
 -- Smallest gap between two character changes from one player.  The chat
@@ -2477,6 +2580,13 @@ handlers[Wire.REQUEST] = function(self, client, msg)
   if not client.ready or client.sessionId then return end
   local kind = Wire.KINDS[msg.kind] and msg.kind or nil
   if not kind then return end
+  -- Silence here strands the asker the same way a vanished target used to:
+  -- the client holds `outgoing` until a decline or session lands.  Kind is
+  -- already known, so the reply can name the ask it is refusing.
+  if self:unsettledBattle(client) then
+    return send(client, Wire.DECLINE,
+      { name = client.name, kind = kind, reason = "busy" })
+  end
   local target = self.clients[Wire.id(msg.to) or ""]
   -- Asking somebody who is not here any more is answered, not dropped.
   --
@@ -2493,7 +2603,7 @@ handlers[Wire.REQUEST] = function(self, client, msg)
     return send(client, Wire.DECLINE, { kind = kind, reason = "gone" })
   end
   if target.id == client.id then return end
-  if target.sessionId then
+  if target.sessionId or self:unsettledBattle(target) then
     return send(client, Wire.DECLINE,
       { name = target.name, kind = kind, reason = "busy" })
   end
@@ -2545,7 +2655,8 @@ handlers[Wire.RESPOND] = function(self, client, msg)
     return send(asker, Wire.DECLINE, { name = client.name, kind = kind,
                                        reason = Wire.declineReason(msg.reason) })
   end
-  if client.sessionId or asker.sessionId then
+  if client.sessionId or asker.sessionId
+     or self:unsettledBattle(client) or self:unsettledBattle(asker) then
     return send(asker, Wire.DECLINE,
       { name = client.name, kind = kind, reason = "busy" })
   end
@@ -2896,8 +3007,13 @@ handlers[Wire.COOP_JOIN] = function(self, client, msg)
   local id = "c" .. tostring(self.nextCoopAsk)
   self.nextCoopAsk = self.nextCoopAsk + 1
   local mode = offer.mode == "coop_wild" and "coop_wild" or "coop_npc"
-  self:openCoopBattle(id, memberIds,
-    { mode = mode, hostId = host.id })
+  if not self:openCoopBattle(id, memberIds,
+    { mode = mode, hostId = host.id }) then
+    host.coopOffer = offer
+    -- `alone` is the closest closed COOP_OFFER_END token; there is no `busy`.
+    send(client, Wire.COOP_OFFER_END, { reason = "alone" })
+    return
+  end
 
   -- `plan` is the hub's mediated battle id (`c*`). Without it the waiting
   -- host's CoopBattle has no battleId, uploadMediated is a no-op, and the
