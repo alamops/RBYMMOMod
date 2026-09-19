@@ -7170,6 +7170,18 @@ function M:moveTypeName(id)
   return typeId
 end
 
+-- A move's name as FIGHT prints it -- the dataset's display name, or the
+-- id when this copy has no record. Every list that names a move uses this,
+-- including the Ether picker, so a player never has to read QUICK_ATTACK.
+function M:moveLabel(id)
+  if type(id) ~= "string" or id == "" then return nil end
+  local moves = self.game and self.game.data and self.game.data.moves
+  local def = type(moves) == "table" and moves[id] or nil
+  local name = def and def.name
+  if type(name) == "string" and name ~= "" then return name end
+  return id
+end
+
 -- The move list, and the strip that used to sit beside it. PP is the row's own
 -- right column and TYPE the column left of it -- on every row, because what
 -- the player is comparing four ways is on the four rows, not on a strip that
@@ -7180,7 +7192,7 @@ function M:bandMoveRows()
   local rows = {}
   for _, moveInst in ipairs(moves) do
     local def = (data and data.moves or {})[moveInst.id]
-    local row = { label = (def and def.name) or moveInst.id or "-" }
+    local row = { label = self:moveLabel(moveInst.id) or "-" }
     row.tag = self:moveTypeName(moveInst.id)
     local pp = tonumber(moveInst.pp)
     if def and tonumber(def.pp) then
@@ -7363,12 +7375,10 @@ function M:drawBandWidgets()
     local seat = self:mySlot()
     local party = (seat and seat.party) or {}
     local mon = party[self.itemPartyIndex or (seat and seat.active) or 1]
-    local data = self.game and self.game.data
     local rows = {}
     for _, move in ipairs((mon and mon.moves) or {}) do
-      local def = (data and data.moves or {})[move.id]
       rows[#rows + 1] = {
-        label = tostring((def and def.name) or move.id or "-"),
+        label = self:moveLabel(move.id) or "-",
         right = tonumber(move.pp) and tostring(math.floor(move.pp)) or nil,
       }
     end
@@ -10511,7 +10521,7 @@ function M:drawItemMove()
   local moves = (mon and mon.moves) or {}
   local rows = {}
   for _, move in ipairs(moves) do
-    rows[#rows + 1] = tostring(move.id or "-")
+    rows[#rows + 1] = self:moveLabel(move.id) or "-"
   end
   self:drawList(rows, self.moveIndex or 1)
 end
@@ -10575,8 +10585,7 @@ function M:drawMoves()
     love.graphics.setScissor(8, 104, 88, 32)
   end
   for i, moveInst in ipairs(moves) do
-    local def = (self.game.data.moves or {})[moveInst.id]
-    local label = (def and def.name) or moveInst.id or "-"
+    local label = self:moveLabel(moveInst.id) or "-"
     drawMoveName(Font, label, nameX, M.MOVE_NAME_Y(i), nameW)
   end
   if clipped then
