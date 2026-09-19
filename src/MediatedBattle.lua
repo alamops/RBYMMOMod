@@ -4510,7 +4510,15 @@ function M:updateItemParty(input)
   elseif input:wasPressed("a") then
     local row = rows[self.switchIndex]
     local effect = self.itemPick and self.itemPick.effect
-    if effect and effect.faintedOnly and not row.fainted then
+    -- Gen 1: Potion/Ether/status/vitamin on a fainted mon (and Revive on a
+    -- living one) print "It won't have any effect" and stay on the picker —
+    -- the bag is not spent and the turn is not committed. `_normaliseChoice`
+    -- refuses the same cases if a choice is submitted anyway.
+    local Effects = effectsFor(self.game)
+    if effect and (
+         (effect.faintedOnly and not row.fainted)
+         or (row.fainted and Effects.itemFailsOnFainted(effect))
+       ) then
       self:say("It won't have\nany effect.")
       return
     end

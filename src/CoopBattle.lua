@@ -2482,8 +2482,16 @@ function M:updateItemParty(input)
   elseif input:wasPressed("a") then
     local row = rows[self.switchIndex]
     local effect = self.itemPick and self.itemPick.effect
-    if effect and effect.faintedOnly and not row.fainted then
+    -- Same Gen 1 picker gate as MediatedBattle:updateItemParty. Co-op only
+    -- drains `messages` while phase is "messages"; stay on the picker after.
+    local Effects = need("BattleSim/Effects")
+    if effect and (
+         (effect.faintedOnly and not row.fainted)
+         or (row.fainted and Effects.itemFailsOnFainted(effect))
+       ) then
       self:say("It won't have\nany effect.")
+      self.phase = "messages"
+      self.after = "item_party"
       return
     end
     if effect and effect.needsMove then

@@ -1071,6 +1071,14 @@ function Battle:_normaliseChoice(fighter, choice)
     elseif effect and effect.needsMove then
       return nil
     end
+    -- Gen 1: Potion/Ether/status/vitamin on a KO, and Revive on a living
+    -- mon, never leave the picker. Refuse here so a submitted choice cannot
+    -- spend the bag or the turn.
+    local targetMon = fighter.mons[out.slot or fighter.active]
+    if targetMon then
+      if effect and effect.faintedOnly and targetMon.hp > 0 then return nil end
+      if targetMon.hp <= 0 and Effects.itemFailsOnFainted(effect) then return nil end
+    end
     return out
   end
 
@@ -2044,10 +2052,7 @@ function Battle:_resolveOneItem(fighter)
       self:_say("But it failed")
     elseif effect.faintedOnly and mon.hp > 0 then
       self:_say("But it failed")
-    elseif not effect.faintedOnly and mon.hp <= 0
-       and (effect.heal or effect.healFull or effect.clearStatuses
-            or effect.clearAllStatus or effect.ppRestore
-            or effect.ppRestoreAll) then
+    elseif mon.hp <= 0 and Effects.itemFailsOnFainted(effect) then
       self:_say("But it failed")
     else
       local applied = false

@@ -1065,6 +1065,14 @@ class Battle {
       } else if (effect && effect.needsMove) {
         return null;
       }
+      // Gen 1: Potion/Ether/status/vitamin on a KO, and Revive on a living
+      // mon, never leave the picker. Refuse here so a submitted choice cannot
+      // spend the bag or the turn.
+      const targetMon = monAt(fighter, out.slot != null ? out.slot : fighter.active);
+      if (targetMon) {
+        if (effect && effect.faintedOnly && targetMon.hp > 0) return null;
+        if (targetMon.hp <= 0 && Effects.itemFailsOnFainted(effect)) return null;
+      }
       return out;
     }
 
@@ -2035,10 +2043,7 @@ class Battle {
         this._say('But it failed');
       } else if (effect.faintedOnly && mon.hp > 0) {
         this._say('But it failed');
-      } else if (!effect.faintedOnly && mon.hp <= 0
-                 && (effect.heal || effect.healFull || effect.clearStatuses
-                     || effect.clearAllStatus || effect.ppRestore
-                     || effect.ppRestoreAll)) {
+      } else if (mon.hp <= 0 && Effects.itemFailsOnFainted(effect)) {
         this._say('But it failed');
       } else {
         let applied = false;
