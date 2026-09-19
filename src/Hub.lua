@@ -469,8 +469,19 @@ end
 -- (see the REQUEST handler) -- that gate stays on the hub's own view, so a
 -- stale flag costs at most one honest refusal rather than a battle nobody
 -- could arrange.
+--
+-- Hub-owned occupancy is more than sessionId.  A 1v1 battle takes a session
+-- *and* a battleId; a co-op mediated fight takes battleId / coopBattleId and
+-- never a sessionId.  Leaving those out published a fighter as free, and
+-- REQUEST delivered a second ask a modified client could accept.
+local function hubBusy(client)
+  return client.sessionId ~= nil
+      or client.battleId ~= nil
+      or client.coopBattleId ~= nil
+end
+
 local function busyNow(client)
-  return client.sessionId ~= nil or client.busy == true
+  return hubBusy(client) or client.busy == true
 end
 
 local function presenceOf(client)
@@ -500,6 +511,18 @@ local function presenceOf(client)
     -- hello. Every roster row and every trainer card reads this field.
     points = client.points or Config.RANK_START,
   }
+end
+
+-- Same broadcast startSession uses when a pairing opens: other players'
+-- menus read the last MOVE, not the hub's live table, so a co-op fight
+-- that never steps would otherwise stay listed as free until someone walked.
+local function publishOccupancy(hub, memberIds)
+  for _, memberId in ipairs(memberIds or {}) do
+    local member = hub.clients[memberId]
+    if member and member.ready then
+      hub:broadcast(Wire.MOVE, presenceOf(member), member.id)
+    end
+  end
 end
 
 function M:broadcast(msgType, payload, exceptId)
@@ -1068,6 +1091,7 @@ function M:openCoopBattle(id, memberIds, plan)
   local shape = { memberIds = members }
   for key, value in pairs(plan or {}) do shape[key] = value end
   self:openMediatedBattle(id, shape)
+  publishOccupancy(self, members)
   return id
 end
 
@@ -1077,7 +1101,8 @@ function M:closeCoopBattle(id)
   local group = self.coopBattles[id]
   if not group then return false end
   self.coopBattles[id] = nil
-  for _, memberId in ipairs(group.members or {}) do
+  local members = group.members or {}
+  for _, memberId in ipairs(members) do
     local member = self.clients[memberId]
     if member and member.coopBattleId == id then member.coopBattleId = nil end
   end
@@ -1087,6 +1112,7 @@ function M:closeCoopBattle(id)
   -- called off rather than left refereeing an empty room.
   local record = self.battles[id]
   if record then self:abortMediatedBattle(record, "gone") end
+  publishOccupancy(self, members)
   return true
 end
 
@@ -2474,7 +2500,7 @@ handlers[Wire.CHAT] = function(self, client, msg)
 end
 
 handlers[Wire.REQUEST] = function(self, client, msg)
-  if not client.ready or client.sessionId then return end
+  if not client.ready or hubBusy(client) then return end
   local kind = Wire.KINDS[msg.kind] and msg.kind or nil
   if not kind then return end
   local target = self.clients[Wire.id(msg.to) or ""]
@@ -2493,7 +2519,7 @@ handlers[Wire.REQUEST] = function(self, client, msg)
     return send(client, Wire.DECLINE, { kind = kind, reason = "gone" })
   end
   if target.id == client.id then return end
-  if target.sessionId then
+  if hubBusy(target) then
     return send(client, Wire.DECLINE,
       { name = target.name, kind = kind, reason = "busy" })
   end
@@ -2545,7 +2571,7 @@ handlers[Wire.RESPOND] = function(self, client, msg)
     return send(asker, Wire.DECLINE, { name = client.name, kind = kind,
                                        reason = Wire.declineReason(msg.reason) })
   end
-  if client.sessionId or asker.sessionId then
+  if hubBusy(client) or hubBusy(asker) then
     return send(asker, Wire.DECLINE,
       { name = client.name, kind = kind, reason = "busy" })
   end

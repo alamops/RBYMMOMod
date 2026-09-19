@@ -1178,6 +1178,75 @@ do
   })), false, "a transformed battler is left alone")
 end
 
+-- Co-op mediated fights set battleId / coopBattleId, not sessionId. Treating
+-- only sessionId as hub-busy published those players as free and delivered
+-- a second ask a modified client could accept.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local host, hostPeer = join(hub, "HOST")
+  local ally, allyPeer = join(hub, "ALLY")
+  local asker, askerPeer = join(hub, "ASKER")
+  hostPeer.outbox, allyPeer.outbox, askerPeer.outbox = {}, {}, {}
+
+  hub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "trade" })
+  ok(take(allyPeer, Wire.REQUEST) ~= nil, "the ask lands while they are free")
+
+  hub:openCoopBattle("c-busy", { host.id, ally.id },
+    { mode = "coop_npc", hostId = host.id })
+  eq(ally.sessionId, nil, "co-op does not take a sessionId")
+  ok(ally.battleId ~= nil, "it takes a battleId")
+  ok(ally.coopBattleId ~= nil, "and a coopBattleId")
+  eq((take(askerPeer, Wire.MOVE) or {}).busy, true,
+     "the hub publishes them busy without anyone stepping")
+
+  allyPeer.outbox, askerPeer.outbox = {}, {}
+  hub:receive(ally, { type = Wire.RESPOND, to = asker.id, kind = "trade",
+                      accept = true })
+  eq((take(askerPeer, Wire.DECLINE) or {}).reason, "busy",
+     "accepting after the fight opened is refused as busy")
+  eq(take(allyPeer, Wire.SESSION), nil, "and starts no second session")
+
+  askerPeer.outbox, allyPeer.outbox = {}, {}
+  hub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+  eq((take(askerPeer, Wire.DECLINE) or {}).reason, "busy",
+     "asking a fighter is declined at the hub")
+  eq(take(allyPeer, Wire.REQUEST), nil, "and never reaches them")
+
+  allyPeer.outbox, askerPeer.outbox = {}, {}
+  hub:receive(ally, { type = Wire.REQUEST, to = asker.id, kind = "trade" })
+  eq(take(askerPeer, Wire.REQUEST), nil,
+     "a fighter's own ask is dropped rather than forwarded")
+
+  askerPeer.outbox = {}
+  hub:closeCoopBattle("c-busy")
+  eq((take(askerPeer, Wire.MOVE) or {}).busy, false,
+     "and publishing them free when the fight ends")
+end
+
+-- Each occupancy field is a gate on its own: a fight record without a
+-- co-op group, or a group whose sim is already gone, must still look busy.
+do
+  local hub = Hub.new({ maxPlayers = 3 })
+  local _, _hostPeer = join(hub, "HOST")
+  local ally, allyPeer = join(hub, "ALLY")
+  local asker, askerPeer = join(hub, "ASKER")
+  allyPeer.outbox, askerPeer.outbox = {}, {}
+
+  ally.battleId = "c-only"
+  hub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+  eq((take(askerPeer, Wire.DECLINE) or {}).reason, "busy",
+     "battleId alone is hub-busy")
+  eq(take(allyPeer, Wire.REQUEST), nil)
+
+  ally.battleId = nil
+  ally.coopBattleId = "c-group"
+  askerPeer.outbox, allyPeer.outbox = {}, {}
+  hub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+  eq((take(askerPeer, Wire.DECLINE) or {}).reason, "busy",
+     "coopBattleId alone is hub-busy")
+  eq(take(allyPeer, Wire.REQUEST), nil)
+end
+
 -- Wave 2 T2d: hub generation selects BattleSim vs BattleSim2 at Hub.new.
 do
   local Turn1 = need("BattleSim/Turn")

@@ -416,6 +416,47 @@ scenarios[#scenarios + 1] = {
 }
 
 scenarios[#scenarios + 1] = {
+  name = "invite_busy_mediated_fight",
+  run = function()
+    local hub = makeHub()
+    local a = dial(hub, "HOST", ID_A)
+    local b = dial(hub, "ALLY", ID_B)
+    local c = dial(hub, "ASKER", ID_C)
+    take(a.peer, Wire.WELCOME); take(b.peer, Wire.WELCOME); take(c.peer, Wire.WELCOME)
+    takeAll(a.peer, Wire.JOIN); takeAll(b.peer, Wire.JOIN); takeAll(c.peer, Wire.JOIN)
+    a.peer.outbox, b.peer.outbox, c.peer.outbox = {}, {}, {}
+
+    hub:receive(c.client, { type = Wire.REQUEST, to = b.id, kind = "trade" })
+    take(b.peer, Wire.REQUEST)
+    a.peer.outbox, b.peer.outbox, c.peer.outbox = {}, {}, {}
+    hub:openCoopBattle("c-busy", { a.client.id, b.client.id },
+      { mode = "coop_npc", hostId = a.client.id })
+    local published = take(c.peer, Wire.MOVE)
+    b.peer.outbox, c.peer.outbox = {}, {}
+    hub:receive(b.client, { type = Wire.RESPOND, to = c.id, kind = "trade",
+                            accept = true })
+    local stacked = slimDecline(take(c.peer, Wire.DECLINE))
+    local stackedSession = take(c.peer, Wire.SESSION) or take(b.peer, Wire.SESSION)
+    c.peer.outbox, b.peer.outbox = {}, {}
+    hub:receive(c.client, { type = Wire.REQUEST, to = b.id, kind = "battle" })
+    local midFight = slimDecline(take(c.peer, Wire.DECLINE))
+    local reached = take(b.peer, Wire.REQUEST)
+    b.peer.outbox, c.peer.outbox = {}, {}
+    hub:receive(b.client, { type = Wire.REQUEST, to = c.id, kind = "trade" })
+    local fromFighter = take(c.peer, Wire.REQUEST)
+    return {
+      hadSession = b.client.sessionId ~= nil,
+      publishedBusy = published and published.busy == true,
+      stacked = stacked,
+      stackedSession = stackedSession ~= nil,
+      midFight = midFight,
+      reachedFighter = reached ~= nil,
+      fromFighter = fromFighter ~= nil,
+    }
+  end,
+}
+
+scenarios[#scenarios + 1] = {
   name = "mediated_ko_settle",
   run = function()
     local hub = makeHub()

@@ -2032,6 +2032,83 @@ eq(take(threePeer, Wire.SESSION), nil, "...on either side")
 
 end)()
 
+-- A co-op mediated fight never takes a sessionId, so treating only sessionId
+-- as hub-busy published those players as free and delivered a second ask.
+-- Vanilla clients refuse locally; a modified one could accept and stack it.
+;(function()
+
+local fightHub = Hub.new({ maxPlayers = 4 })
+local host, hostPeer = join(fightHub, "HOST", "PALLET", 5, 5)
+local ally, allyPeer = join(fightHub, "ALLY", "PALLET", 6, 5)
+local asker, askerPeer = join(fightHub, "ASKER", "PALLET", 7, 5)
+hostPeer.outbox, allyPeer.outbox, askerPeer.outbox = {}, {}, {}
+
+-- An outstanding ask, then the fight: RESPOND must still refuse rather than
+-- open a session on top of the mediated record.
+fightHub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "trade" })
+check(take(allyPeer, Wire.REQUEST) ~= nil, "the ask lands while they are free")
+eq(ally.sessionId, nil, "and they still have no session")
+
+fightHub:openCoopBattle("c-busy", { host.id, ally.id },
+  { mode = "coop_npc", hostId = host.id })
+eq(ally.sessionId, nil, "co-op does not take a sessionId")
+check(ally.battleId ~= nil, "it takes a battleId")
+check(ally.coopBattleId ~= nil, "and a coopBattleId")
+eq((take(askerPeer, Wire.MOVE) or {}).busy, true,
+   "the hub publishes them busy without anyone stepping")
+
+allyPeer.outbox, askerPeer.outbox = {}, {}
+fightHub:receive(ally, { type = Wire.RESPOND, to = asker.id, kind = "trade",
+                         accept = true })
+local stacked = take(askerPeer, Wire.DECLINE)
+check(stacked ~= nil, "accepting after the fight opened is refused")
+eq(stacked.reason, "busy", "as busy, not as a snub")
+eq(take(allyPeer, Wire.SESSION), nil, "and starts no second session")
+eq(take(askerPeer, Wire.SESSION), nil, "...on either side")
+
+askerPeer.outbox, allyPeer.outbox = {}, {}
+fightHub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+local midFight = take(askerPeer, Wire.DECLINE)
+check(midFight ~= nil, "asking a fighter is declined at the hub")
+eq(midFight.reason, "busy", "naming busy")
+eq(take(allyPeer, Wire.REQUEST), nil, "and never reaches them")
+
+allyPeer.outbox, askerPeer.outbox = {}, {}
+fightHub:receive(ally, { type = Wire.REQUEST, to = asker.id, kind = "trade" })
+eq(take(askerPeer, Wire.REQUEST), nil,
+   "a fighter's own ask is dropped rather than forwarded")
+
+askerPeer.outbox = {}
+fightHub:closeCoopBattle("c-busy")
+eq((take(askerPeer, Wire.MOVE) or {}).busy, false,
+   "and publishing them free when the fight ends")
+
+end)()
+
+;(function()
+
+local fieldHub = Hub.new({ maxPlayers = 3 })
+local _host, _hostPeer = join(fieldHub, "HOST", "PALLET", 5, 5)
+local ally, allyPeer = join(fieldHub, "ALLY", "PALLET", 6, 5)
+local asker, askerPeer = join(fieldHub, "ASKER", "PALLET", 7, 5)
+allyPeer.outbox, askerPeer.outbox = {}, {}
+
+ally.battleId = "c-only"
+fieldHub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+eq((take(askerPeer, Wire.DECLINE) or {}).reason, "busy",
+   "battleId alone is hub-busy")
+eq(take(allyPeer, Wire.REQUEST), nil)
+
+ally.battleId = nil
+ally.coopBattleId = "c-group"
+askerPeer.outbox, allyPeer.outbox = {}, {}
+fieldHub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+eq((take(askerPeer, Wire.DECLINE) or {}).reason, "busy",
+   "coopBattleId alone is hub-busy")
+eq(take(allyPeer, Wire.REQUEST), nil)
+
+end)()
+
 -- ------- parties
 --
 -- Driven on their own hub so the scenario is not reading traffic the trade

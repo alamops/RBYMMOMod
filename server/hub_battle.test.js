@@ -15,7 +15,7 @@
  * Run: node server/hub_battle.test.js
  */
 
-const { Relay, PROTOCOL, DEFAULT_SPRITE } = require('./lib/relay.js');
+const { Relay, PROTOCOL, DEFAULT_SPRITE, presenceOf } = require('./lib/relay.js');
 const { createLog } = require('./lib/log.js');
 
 let passed = 0;
@@ -1026,8 +1026,93 @@ function testMidFightMoveset() {
     'a transformed battler is left alone');
 }
 
+/*
+ * Co-op mediated fights set battleId / coopBattleId, not sessionId. Treating
+ * only sessionId as hub-busy published those players as free and delivered a
+ * second ask a modified client could accept.
+ */
+function testBusyNowMediatedFight() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const host = dial(relay, 'HOST');
+  const ally = dial(relay, 'ALLY');
+  const asker = dial(relay, 'ASKER');
+  take(host, 'mmo.welcome'); take(ally, 'mmo.welcome'); take(asker, 'mmo.welcome');
+  host.peer.outbox = []; ally.peer.outbox = []; asker.peer.outbox = [];
+
+  relay.handle(asker.id, { type: 'mmo.request', to: ally.id, kind: 'trade' });
+  ok(take(ally, 'mmo.request') !== null, 'the ask lands while they are free');
+
+  relay.openCoopBattle('c-busy', [host.id, ally.id],
+    { mode: 'coop_npc', hostId: host.id });
+  const fighter = relay.get(ally.id);
+  ok(!fighter.sessionId, 'co-op does not take a sessionId');
+  ok(fighter.battleId && fighter.coopBattleId,
+    'it takes a battleId and a coopBattleId');
+  const opened = take(asker, 'mmo.move');
+  ok(opened && opened.busy === true,
+    'the hub publishes them busy without anyone stepping');
+
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(ally.id, {
+    type: 'mmo.respond', to: asker.id, kind: 'trade', accept: true,
+  });
+  const stacked = take(asker, 'mmo.decline');
+  ok(stacked && stacked.reason === 'busy',
+    'accepting after the fight opened is refused as busy');
+  ok(take(ally, 'mmo.session') === null && take(asker, 'mmo.session') === null,
+    'and starts no second session');
+
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(asker.id, { type: 'mmo.request', to: ally.id, kind: 'battle' });
+  const midFight = take(asker, 'mmo.decline');
+  ok(midFight && midFight.reason === 'busy',
+    'asking a fighter is declined at the hub');
+  ok(take(ally, 'mmo.request') === null, 'and never reaches them');
+
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(ally.id, { type: 'mmo.request', to: asker.id, kind: 'trade' });
+  ok(take(asker, 'mmo.request') === null,
+    "a fighter's own ask is dropped rather than forwarded");
+
+  asker.peer.outbox = [];
+  relay.closeCoopBattle('c-busy');
+  const closed = take(asker, 'mmo.move');
+  ok(closed && closed.busy === false,
+    'and publishing them free when the fight ends');
+}
+
+function testHubBusyFields() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const ally = dial(relay, 'ALLY');
+  const asker = dial(relay, 'ASKER');
+  take(ally, 'mmo.welcome'); take(asker, 'mmo.welcome');
+  const fighter = relay.get(ally.id);
+
+  fighter.battleId = 'c-only';
+  fighter.coopBattleId = null;
+  ok(presenceOf(fighter).busy === true, 'battleId alone is hub-busy');
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(asker.id, { type: 'mmo.request', to: ally.id, kind: 'battle' });
+  const byBattle = take(asker, 'mmo.decline');
+  ok(byBattle && byBattle.reason === 'busy', 'and declines a request');
+  ok(take(ally, 'mmo.request') === null);
+
+  fighter.battleId = null;
+  fighter.coopBattleId = 'c-group';
+  ok(presenceOf(fighter).busy === true, 'coopBattleId alone is hub-busy');
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(asker.id, { type: 'mmo.request', to: ally.id, kind: 'battle' });
+  const byCoop = take(asker, 'mmo.decline');
+  ok(byCoop && byCoop.reason === 'busy', 'and declines a request');
+  ok(take(ally, 'mmo.request') === null);
+}
+
 testBagProofs();
 testMidFightMoveset();
+testBusyNowMediatedFight();
+testHubBusyFields();
 
 // Wave 2 T2d: hub generation selects battle vs battle2 at construction.
 {

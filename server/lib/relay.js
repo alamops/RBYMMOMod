@@ -317,9 +317,32 @@ function parseLine(line) {
  * mmo.request handler) -- that gate stays on the hub's own view, so a stale
  * flag costs at most one honest refusal rather than a battle nobody could
  * arrange. Twin of src/Hub.lua's busyNow.
+ *
+ * Hub-owned occupancy is more than sessionId. A 1v1 battle takes a session
+ * *and* a battleId; a co-op mediated fight takes battleId / coopBattleId and
+ * never a sessionId. Leaving those out published a fighter as free, and
+ * mmo.request delivered a second ask a modified client could accept.
  */
+function hubBusy(client) {
+  return Boolean(client.sessionId)
+    || Boolean(client.battleId)
+    || Boolean(client.coopBattleId);
+}
+
 function busyNow(client) {
-  return Boolean(client.sessionId) || client.busy === true;
+  return hubBusy(client) || client.busy === true;
+}
+
+// Same broadcast startSession uses when a pairing opens: other players'
+// menus read the last mmo.move, not the hub's live table, so a co-op fight
+// that never steps would otherwise stay listed as free until someone walked.
+function publishOccupancy(relay, memberIds) {
+  for (const memberId of memberIds || []) {
+    const member = relay.clients.get(memberId);
+    if (member && member.ready) {
+      relay.broadcast('mmo.move', presenceOf(member), member.id);
+    }
+  }
 }
 
 function presenceOf(client) {
@@ -608,7 +631,7 @@ handlers['mmo.chat'] = (relay, client, msg) => {
 };
 
 handlers['mmo.request'] = (relay, client, msg) => {
-  if (!client.ready || client.sessionId) return;
+  if (!client.ready || hubBusy(client)) return;
   const kind = KINDS.has(msg.kind) ? msg.kind : null;
   if (!kind) return;
   const target = relay.get(cleanId(msg.to));
@@ -628,7 +651,7 @@ handlers['mmo.request'] = (relay, client, msg) => {
   }
   if (target.id === client.id) return;
 
-  if (target.sessionId) {
+  if (hubBusy(target)) {
     return relay.send(client, 'mmo.decline',
       { name: target.name, kind, reason: 'busy' });
   }
@@ -686,7 +709,7 @@ handlers['mmo.respond'] = (relay, client, msg) => {
     if (reason) out.reason = reason;
     return relay.send(asker, 'mmo.decline', out);
   }
-  if (client.sessionId || asker.sessionId) {
+  if (hubBusy(client) || hubBusy(asker)) {
     return relay.send(asker, 'mmo.decline',
       { name: client.name, kind, reason: 'busy' });
   }
@@ -2394,6 +2417,8 @@ class Relay {
     // ruleset simply leaves `sim` null, which is exactly how the legacy path
     // stays open underneath this one.
     this.openMediatedBattle(id, Object.assign({ memberIds: members }, plan || {}));
+    publishOccupancy(this, members);
+    this.noteRosterChange();
     return id;
   }
 
@@ -2403,7 +2428,8 @@ class Relay {
     const group = this.coopBattles.get(id);
     if (!group) return false;
     this.coopBattles.delete(id);
-    for (const memberId of group.members || []) {
+    const members = group.members || [];
+    for (const memberId of members) {
       const member = this.clients.get(memberId);
       if (member && member.coopBattleId === id) member.coopBattleId = null;
     }
@@ -2413,6 +2439,8 @@ class Relay {
     // called off rather than left refereeing an empty room.
     const record = this.battles.get(id);
     if (record) this.abortMediatedBattle(record, 'gone');
+    publishOccupancy(this, members);
+    this.noteRosterChange();
     return true;
   }
 
