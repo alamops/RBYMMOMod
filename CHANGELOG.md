@@ -4,6 +4,15 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **Co-op faint line is not covered by WHO'S NEXT.** After a KO the
+  replace picker already waited for the message box in input, but draw
+  painted the bench list first, so the faint never appeared in the band.
+  Battlefield and classic menus now keep the line up until the box is idle.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed

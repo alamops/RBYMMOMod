@@ -7222,6 +7222,21 @@ function M:bandBenchRows(bench)
   return rows
 end
 
+-- True while the bottom box still owns the screen: a line is up, an effect is
+-- playing, or the queue has not been handed back. `update` returns in that
+-- window before it opens the replace picker (faint line → picker → send);
+-- draw must match, or WHO'S NEXT paints over the faint.
+function M:boxLive()
+  if self.shown then return true end
+  if self.anim or self.draining or self.faintFx
+     or self.expFilling or self.evolving then
+    return true
+  end
+  if self.phase == "messages" then return true end
+  local q = self.messages
+  return type(q) == "table" and #q > 0
+end
+
 -- Draw the band, and answer whether the band is now on the screen.
 --
 -- Wrapped by `M:drawModernBand` below, which is what callers use: the wrappers
@@ -7258,6 +7273,13 @@ function M:drawBandWidgets()
     Battlefield.drawBandBackdrop()
   end
 
+  -- Same order as update(): the box stays up while a line or queue is live.
+  -- Replacing is armed behind that queue, so painting the bench first hid
+  -- the faint line. MediatedBattle:drawModernBand checks `shown` first.
+  if self:boxLive() then
+    message(self:boxText())
+    return true
+  end
   if self.replacing then
     local seat = self.sim and self.sim:slot(self.mine)
     local bench = seat and self:benchOf(seat) or {}
@@ -7437,7 +7459,9 @@ function M:drawMenuBand()
 end
 
 function M:drawMenusClassic()
-  if self.replacing then
+  if self:boxLive() then
+    self:drawMessage()
+  elseif self.replacing then
     self:drawReplace()
   elseif self.runAsk and self.phase ~= "messages" then
     self:drawRunAsk()
@@ -10760,8 +10784,10 @@ function M:drawSafe()
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", 0, 0, 160, 144)
   -- Full-page picker covers the stage; faint/anim lines still use the
-  -- field + bottom box so a send-out is not painted over a KO.
-  if not self.shown and not self.anim then
+  -- field + bottom box so a send-out is not painted over a KO. Same
+  -- `boxLive` gate as the band: a queued faint with no page up yet still
+  -- owns the screen (`update` has not popped `shown`).
+  if not self:boxLive() then
     if self:drawClassicPartyPicker() then
       love.graphics.setColor(1, 1, 1, 1)
       return
