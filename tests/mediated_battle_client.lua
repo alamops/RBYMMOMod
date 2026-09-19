@@ -999,6 +999,15 @@ check(not lost.sessions.fight.finished,
 check(lost.sessions.fight.awaitingReconnect == true,
       "and the screen says it is waiting to reconnect")
 
+-- A dropped link must not spend the turn: sendChoice used to ignore
+-- awaitingReconnect, put a choice on the wire, and set answeredTurn.
+eq(lost.sessions.fight:sendChoice({ action = "fight", move = 0 }), false,
+   "sendChoice refuses while awaiting reconnect")
+eq(lost.sessions.fight.answeredTurn, false,
+   "and does not mark the turn answered")
+eq(lost.countSent(Wire.BATTLE_CHOICE), 0,
+   "so no choice went on the wire")
+
 -- Coming back sends mmo.battle_reconnect once with the battle id.
 lost.dead = false
 lost.sessions:update(lost.game, 0)
@@ -1009,6 +1018,17 @@ eq(lost.firstSent(Wire.BATTLE_RECONNECT).battle, "7",
 lost.sessions:update(lost.game, 0)
 eq(lost.countSent(Wire.BATTLE_RECONNECT), 1,
    "and only once per drop cycle")
+
+-- isReady is its own gate: a live screen with a dead transport still
+-- must not file, even after the reconnect wait flag is cleared.
+lost.dead = true
+lost.sessions.fight.awaitingReconnect = false
+eq(lost.sessions.fight:sendChoice({ action = "fight", move = 0 }), false,
+   "sendChoice also refuses when the transport is not ready")
+eq(lost.sessions.fight.answeredTurn, false,
+   "and still does not mark the turn answered")
+eq(lost.countSent(Wire.BATTLE_CHOICE), 0,
+   "and still puts no choice on the wire")
 
 -- The same hook is reachable directly for a screen with no Sessions wrapper.
 local solo = harness("host")

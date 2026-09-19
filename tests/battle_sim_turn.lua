@@ -576,6 +576,45 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 4b. a dropped seat cannot file until reconnect()
+-- ------------------------------------------------------------------
+
+do
+  local battle = battleOf({ reconnectGrace = 60, choiceTimeout = 60 })
+  drain(battle)
+
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == false,
+     "a disconnected seat cannot file a choice")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "the seat that stayed may still file")
+  eq(battle:snapshot().turn, 1,
+     "the turn does not resolve on the dropped seat's leftover")
+
+  battle:reconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "reconnect restores the right to choose")
+  eq(battle:snapshot().turn, 2, "and the already-filed peer lets the turn complete")
+end
+
+do
+  local battle = battleOf({ reconnectGrace = 60, choiceTimeout = 60 })
+  drain(battle)
+
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "a connected seat may file before it drops")
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "the seat that stayed may still file after the drop")
+  eq(battle:snapshot().turn, 1,
+     "a leftover choice does not resolve the turn while a seat is away")
+
+  battle:reconnect("p1")
+  eq(battle:snapshot().turn, 2,
+     "reconnect completes the already-answered turn without a second pick")
+end
+
+-- ------------------------------------------------------------------
 -- 5. the choice clock: a timeout picks a move rather than ending the fight
 -- ------------------------------------------------------------------
 

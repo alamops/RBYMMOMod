@@ -1090,6 +1090,7 @@ end
 -- player believes they spent.
 function M.submitChoice(transport, battle, fields)
   if not (transport and battle) then return false end
+  if transport.isReady and not transport:isReady() then return false end
   local out = { battle = battle }
   for key, value in pairs(fields or {}) do out[key] = value end
   if not Wire.battleChoice(out) then
@@ -4043,6 +4044,14 @@ end
 -- the menu closes on a choice that actually went.
 function M:sendChoice(fields)
   if self.finished then return false end
+  -- The hub is in reconnect grace: filing now would mark the turn answered
+  -- locally even when the wire never takes it (or when the referee refuses
+  -- because fighter.connected is false).
+  if self.awaitingReconnect then return false end
+  if not (self.transport and self.transport.isReady
+          and self.transport:isReady()) then
+    return false
+  end
   if not M.submitChoice(self.transport, self.battle, fields) then return false end
   self.phase = "play"
   self.pendingTurn = false

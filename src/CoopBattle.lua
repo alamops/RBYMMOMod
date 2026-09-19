@@ -10218,6 +10218,7 @@ end
 -- list is the one that counts.
 function M:sendMediatedChoice(action)
   if not (self.mediated and self.battleId) then return false end
+  if self.awaitingReconnect then return false end
   action = action or {}
   local kind = action.kind or "move"
   local fields
