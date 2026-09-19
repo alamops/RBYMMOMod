@@ -1670,6 +1670,12 @@ test('what a choice may say', () => {
   no('p1', { action: 'switch', slot: 2 }, 'switching to a fainted monster is refused');
   no('p1', { action: 'switch', slot: 0 }, 'switching to the monster already out is refused');
   no('p1', { action: 'item' }, 'an item choice with no item is refused');
+  no('p1', { action: 'item', item: 'POTION', slot: 2 },
+    'Potion on a fainted mon is refused');
+  no('p1', { action: 'item', item: 'PROTEIN', slot: 2 },
+    'Protein on a fainted mon is refused');
+  no('p1', { action: 'item', item: 'REVIVE', slot: 0 },
+    'Revive on a living mon is refused');
   no('p1', { action: 'fight', move: 0, target: 1 }, 'a target nobody occupies is refused');
   no('p1', { action: 'fight', move: 0, target: 0 }, 'and so is aiming at your own slot');
   no('p1', { action: 'cancel' }, 'cancelling nothing is refused');
@@ -1729,6 +1735,54 @@ test('the choice clock is suspended while anybody is away', () => {
   battle.tick(120);
   assert.strictEqual(battle.snapshot().turn, 1, 'the turn did not resolve behind their back');
   assert.strictEqual(battle.outcome(), null, 'and the grace has not run out either');
+});
+
+test('a dropped seat cannot file a choice until reconnect()', () => {
+  const battle = build({
+    id: 'dropped-choice', mode: '1v1', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  battle.disconnect('p1');
+  assert.strictEqual(battle.submitChoice('p1', { action: 'fight', move: 0 }), false,
+    'a disconnected seat cannot file a choice');
+  assert.strictEqual(battle.submitChoice('p2', { action: 'fight', move: 0 }), true,
+    'the seat that stayed may still file');
+  assert.strictEqual(battle.snapshot().turn, 1,
+    'the turn does not resolve on the dropped seat\'s leftover');
+  battle.reconnect('p1');
+  assert.strictEqual(battle.submitChoice('p1', { action: 'fight', move: 0 }), true,
+    'reconnect restores the right to choose');
+  assert.strictEqual(battle.snapshot().turn, 2,
+    'and the already-filed peer lets the turn complete');
+});
+
+test('a leftover choice does not resolve the turn until reconnect()', () => {
+  const battle = build({
+    id: 'leftover-choice', mode: '1v1', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  assert.strictEqual(battle.submitChoice('p1', { action: 'fight', move: 0 }), true,
+    'a connected seat may file before it drops');
+  battle.disconnect('p1');
+  assert.strictEqual(battle.submitChoice('p2', { action: 'fight', move: 0 }), true,
+    'the seat that stayed may still file after the drop');
+  assert.strictEqual(battle.snapshot().turn, 1,
+    'a leftover choice does not resolve the turn while a seat is away');
+  battle.reconnect('p1');
+  assert.strictEqual(battle.snapshot().turn, 2,
+    'reconnect completes the already-answered turn without a second pick');
 });
 
 test('a zero-length grace still expires', () => {

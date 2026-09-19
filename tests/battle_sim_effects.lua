@@ -188,6 +188,18 @@ do
   eq(Effects.applyVitamin(capped, "PROTEIN"), nil, "fails at Stat Exp ≥ 25600")
 end
 
+eq(Effects.itemFailsOnFainted(Effects.itemEffect("POTION")), true,
+   "Potion fails on a fainted mon")
+eq(Effects.itemFailsOnFainted(Effects.itemEffect("ETHER")), true,
+   "Ether fails on a fainted mon")
+eq(Effects.itemFailsOnFainted(Effects.itemEffect("ANTIDOTE")), true,
+   "Antidote fails on a fainted mon")
+eq(Effects.itemFailsOnFainted(Effects.itemEffect("PROTEIN")), true,
+   "Protein fails on a fainted mon")
+eq(Effects.itemFailsOnFainted(Effects.itemEffect("REVIVE")), false,
+   "Revive is faintedOnly, not a fail-on-fainted")
+eq(Effects.itemFailsOnFainted(nil), false, "nil effect is not fail-on-fainted")
+
 if failures > 0 then
   io.stderr:write(failures .. " failure(s)\n")
   os.exit(1)
