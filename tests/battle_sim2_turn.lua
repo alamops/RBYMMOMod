@@ -691,6 +691,27 @@ for _, mode in ipairs({ "wild", "coop_wild" }) do
   end
 end
 
+do
+  local battle = battleOf({
+    seed = 88021,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = {
+                mon({ species = "Alpha", maxHp = 100, hp = 50, spe = 90 }),
+                mon({ species = "Bench", maxHp = 100, hp = 0, spe = 1 }),
+              },
+              bag = { POTION = 1 } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 200, spe = 10 }) } } },
+    },
+  })
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 1 }) == false,
+     "Potion on a fainted party slot is refused")
+  eq(battle.byId.p1.bag.POTION, 1, "...and the bag is not spent")
+  eq(battle.byId.p1.choice, nil, "...and the turn is still owed")
+end
+
 -- ------------------------------------------------------------------
 -- 6. whom the referee swings at when nobody chose (`_autoTarget`)
 -- ------------------------------------------------------------------

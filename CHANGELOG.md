@@ -4,6 +4,18 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **Potion on a fainted mon no longer spends the turn.** The item-target
+  picker already refused Revive on a living Pokémon. A Potion, Ether,
+  status cure, or vitamin on a KO still committed, so the referee announced
+  the use, spent the bag, then failed. Gen 1 prints "It won't have any
+  effect" and stays on the picker. Co-op shows that line (then returns to
+  the picker). The referee also refuses the same cases, so a submitted
+  choice cannot spend the stack.
+
 ## [1.4.2] - 2026-09-16
 
 ### Changed

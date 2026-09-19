@@ -1053,6 +1053,16 @@ function M.itemEffect(itemId)
   return { heal = heal, clearStatuses = statuses, needsParty = true }
 end
 
+-- Potion / Ether / status cure / vitamin cannot apply to a KO (Revive is
+-- faintedOnly). Shared by the item picker and `_normaliseChoice` so a
+-- submitted choice cannot spend the bag or the turn.
+function M.itemFailsOnFainted(effect)
+  if type(effect) ~= "table" or effect.faintedOnly then return false end
+  return not not (effect.heal or effect.healFull or effect.clearStatuses
+      or effect.clearAllStatus or effect.ppRestore or effect.ppRestoreAll
+      or effect.vitamin)
+end
+
 -- Apply a Gen1 vitamin to a battle mon sheet. Mutates `mon.evs` and battle
 -- stats / maxHp. Returns result table or nil when it fails.
 function M.applyVitamin(mon, itemId)

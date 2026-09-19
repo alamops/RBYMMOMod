@@ -1639,6 +1639,12 @@ test('what a choice may say', () => {
   no('p1', { action: 'switch', slot: 2 }, 'switching to a fainted monster is refused');
   no('p1', { action: 'switch', slot: 0 }, 'switching to the monster already out is refused');
   no('p1', { action: 'item' }, 'an item choice with no item is refused');
+  no('p1', { action: 'item', item: 'POTION', slot: 2 },
+    'Potion on a fainted mon is refused');
+  no('p1', { action: 'item', item: 'PROTEIN', slot: 2 },
+    'Protein on a fainted mon is refused');
+  no('p1', { action: 'item', item: 'REVIVE', slot: 0 },
+    'Revive on a living mon is refused');
   no('p1', { action: 'fight', move: 0, target: 1 }, 'a target nobody occupies is refused');
   no('p1', { action: 'fight', move: 0, target: 0 }, 'and so is aiming at your own slot');
   no('p1', { action: 'cancel' }, 'cancelling nothing is refused');

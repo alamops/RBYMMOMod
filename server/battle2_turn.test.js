@@ -801,3 +801,25 @@ for (const mode of ['wild', 'coop_wild']) {
     );
   });
 }
+
+test('Potion on a fainted party slot is refused', () => {
+  const battle = build({
+    id: 'potion-faint', mode: '1v1', seed: 88021,
+    choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', bag: { POTION: 1 }, mons: [
+        mn({ species: 'Alpha', maxHp: 100, hp: 50, spe: 90, moves: [mv('thump', 40, 255, 0)] }),
+        mn({ species: 'Bench', maxHp: 100, hp: 0, spe: 1, moves: [mv('thump', 40, 255, 0)] }),
+      ] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, spe: 10, moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  assert.strictEqual(
+    battle.submitChoice('p1', { action: 'item', item: 'POTION', slot: 1 }), false,
+    'Potion on a fainted party slot is refused',
+  );
+  assert.strictEqual(battle.byId.get('p1').bag.POTION, 1, 'and the bag is not spent');
+  assert.strictEqual(battle.byId.get('p1').choice, null, 'and the turn is still owed');
+});

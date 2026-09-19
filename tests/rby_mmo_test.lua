@@ -5288,6 +5288,146 @@ end)()
   check(vanished:seatVanished(3), "classic Gen2 Fly charge hides via TELEPORT")
 end)()
 
+-- Potion / Ether / status cure on a fainted mon must not commit. The picker
+-- already refused Revive on a living target; the other direction still sent
+-- the choice, so the referee announced, spent the bag, then failed.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local CoopBattle = need("CoopBattle")
+  local Effects = need("BattleSim/Effects")
+  local pressA = { wasPressed = function(_, k) return k == "a" end }
+
+  local function saidNoEffect(lines)
+    for _, row in ipairs(lines or {}) do
+      if type(row) == "string" and row:find("won't have", 1, true) then
+        return true
+      end
+    end
+    return false
+  end
+
+  local function potionFight()
+    local fight = MediatedBattle.new({
+      game = { data = {}, save = { inventory = { POTION = 1, REVIVE = 1, ETHER = 1 } } },
+      battle = "b-potion-faint", role = "host",
+    })
+    fight.mine = {
+      { species = "PIKACHU", hp = 35, maxHp = 35,
+        moves = { { id = "THUNDERSHOCK", pp = 5, maxPp = 30 } } },
+      { species = "RATTATA", hp = 0, maxHp = 22,
+        moves = { { id = "TACKLE", pp = 5, maxPp = 35 } } },
+    }
+    fight.active = 1
+    fight.phase = "item_party"
+    fight.bagSheet = { POTION = 1, REVIVE = 1, ETHER = 1 }
+    local sent = {}
+    function fight:sendChoice(fields)
+      sent[#sent + 1] = fields
+      return true
+    end
+    return fight, sent
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "POTION", effect = Effects.itemEffect("POTION") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Potion on a fainted mon does not commit the turn")
+    eq(fight.phase, "item_party", "...and stays on the party picker")
+    check(saidNoEffect(fight.lines), "...and says it won't have any effect")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "ANTIDOTE", effect = Effects.itemEffect("ANTIDOTE") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Antidote on a fainted mon does not commit")
+    check(saidNoEffect(fight.lines), "...with the no-effect line")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "PROTEIN", effect = Effects.itemEffect("PROTEIN") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Protein on a fainted mon does not commit")
+    check(saidNoEffect(fight.lines), "...with the no-effect line")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "ETHER", effect = Effects.itemEffect("ETHER") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Ether on a fainted mon does not open the move picker")
+    eq(fight.phase, "item_party", "...it stays on the party list")
+    check(saidNoEffect(fight.lines), "...with the same no-effect line")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 1
+    fight.itemPick = { id = "POTION", effect = Effects.itemEffect("POTION") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 1, "Potion on a living mon still commits")
+    eq(sent[1] and sent[1].item, "POTION", "...naming the Potion")
+    eq(sent[1] and sent[1].slot, 0, "...on party slot 0")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "REVIVE", effect = Effects.itemEffect("REVIVE") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 1, "Revive on a fainted mon still commits")
+    eq(sent[1] and sent[1].item, "REVIVE", "...naming Revive")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 1
+    fight.itemPick = { id = "REVIVE", effect = Effects.itemEffect("REVIVE") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Revive on a living mon still refuses")
+    check(saidNoEffect(fight.lines), "...with the no-effect line")
+  end
+
+  local coop = setmetatable({
+    phase = "item_party",
+    switchIndex = 2,
+    itemPick = { id = "POTION", effect = Effects.itemEffect("POTION") },
+    mediated = true,
+    mine = 1,
+    bagSheet = { POTION = 1 },
+    messages = {},
+    game = { save = { inventory = { POTION = 1 } } },
+    sim = {
+      slot = function()
+        return {
+          party = {
+            { nickname = "PIKACHU", hp = 35 },
+            { nickname = "RATTATA", hp = 0 },
+          },
+          active = 1,
+        }
+      end,
+    },
+  }, { __index = CoopBattle })
+  local coopSent = {}
+  function coop:commit()
+    coopSent[#coopSent + 1] = true
+    return true
+  end
+  coop:updateItemParty(pressA)
+  eq(#coopSent, 0, "co-op Potion on a fainted mon does not commit either")
+  eq(coop.phase, "messages", "...and shows the no-effect line")
+  eq(coop.after, "item_party", "...then returns to the party picker")
+  check(saidNoEffect(coop.messages), "...with the same no-effect line")
+end)()
+
 -- ------- kindOf: both generations' shapes for "this is a fight I take"
 
 eq(SoloBattle.kindOf({ kind = "wild" }), "wild", "Gen 1: state.kind says wild")

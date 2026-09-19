@@ -660,6 +660,12 @@ do
      "switching to the monster already out is refused")
   ok(battle:submitChoice("p1", { action = "item" }) == false,
      "an item choice with no item is refused")
+  ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 2 }) == false,
+     "Potion on a fainted mon is refused")
+  ok(battle:submitChoice("p1", { action = "item", item = "PROTEIN", slot = 2 }) == false,
+     "Protein on a fainted mon is refused")
+  ok(battle:submitChoice("p1", { action = "item", item = "REVIVE", slot = 0 }) == false,
+     "Revive on a living mon is refused")
   ok(battle:submitChoice("p1", { action = "fight", move = 0, target = 1 }) == false,
      "a target nobody occupies is refused")
   ok(battle:submitChoice("p1", { action = "fight", move = 0, target = 0 }) == false,
@@ -2811,6 +2817,33 @@ do
   local bench = battle.fighters[1].mons[2]
   ok(bench.hp > 0, "REVIVE restores a fainted party slot")
   eq(bench.hp, 50, "REVIVE restores half max HP")
+end
+
+do
+  local battle = battleOf({
+    aBag = { POTION = 1 },
+    aMons = {
+      mon({
+        species = "Alpha", maxHp = 100, hp = 50, spd = 120,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+      mon({
+        species = "Bench", maxHp = 100, hp = 0, spd = 1,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+    bMons = {
+      mon({
+        species = "Beta", maxHp = 200, spd = 1,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) },
+      }),
+    },
+  })
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 1 }) == false,
+     "Potion on a fainted party slot does not file")
+  eq(battle.byId.p1.bag.POTION, 1, "...and the bag is not spent")
+  eq(battle.byId.p1.choice, nil, "...and the turn is still owed")
 end
 
 do

@@ -921,6 +921,16 @@ function itemEffect(itemId) {
   return { heal, clearStatuses: statuses, needsParty: true };
 }
 
+// Potion / Ether / status cure / vitamin cannot apply to a KO (Revive is
+// faintedOnly). Shared by the item picker and `_normaliseChoice` so a
+// submitted choice cannot spend the bag or the turn.
+function itemFailsOnFainted(effect) {
+  if (!effect || typeof effect !== 'object' || effect.faintedOnly) return false;
+  return Boolean(effect.heal || effect.healFull || effect.clearStatuses
+      || effect.clearAllStatus || effect.ppRestore || effect.ppRestoreAll
+      || effect.vitamin);
+}
+
 function applyVitamin(mon, itemId) {
   if (!mon || typeof mon !== 'object') return null;
   const effect = itemEffect(itemId);
@@ -1148,6 +1158,7 @@ module.exports = {
   screenDamage,
   isSpecialType,
   itemEffect,
+  itemFailsOnFainted,
   applyVitamin,
   caughtSheet,
   catchAttempt,
