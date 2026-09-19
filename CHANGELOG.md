@@ -4,6 +4,15 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.7] - 2026-09-19
+
+### Fixed
+
+- **Co-op FIGHT and ITEM lists wrap.** Co-op UP/DOWN used to clamp at both
+  ends while 1v1 FIGHT wraps like Gen 1. Move, bag, item-target, and
+  Ether-style item-move lists now ring the same way. SWITCH / send-out
+  still clamp.
+
 ## [1.4.6] - 2026-09-19
 
 ### Fixed
