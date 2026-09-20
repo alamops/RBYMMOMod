@@ -922,6 +922,14 @@ function cleanBattleMove(raw) {
     if (!name) return null;
     move.name = name;
   }
+  // Optional high-crit flag. The hub has no move table, so Slash / Karate
+  // Chop / Razor Leaf / Crabhammer have to state this on the sheet. Absent
+  // is a protocol-era client (ordinary odds). Present-but-unreadable refuses,
+  // same posture as a mangled name.
+  if (raw.highCrit !== undefined && raw.highCrit !== null) {
+    if (raw.highCrit !== true && raw.highCrit !== false) return null;
+    if (raw.highCrit === true) move.highCrit = true;
+  }
   return move;
 }
 
@@ -1071,6 +1079,16 @@ function cleanBattleMon(raw) {
     const speciesId = cleanId(raw.speciesId);
     if (!speciesId) return null;
     mon.speciesId = speciesId;
+  }
+
+  // Optional species base Speed for Gen 1 crit. The hub has no species table,
+  // so this has to ride the sheet; Crit.check must not see battle Speed or the
+  // Speed badge. Absent is a protocol-era client (sim falls back to stats.spd
+  // without a badge boost). Present-but-unreadable refuses the battler.
+  if (raw.baseSpd !== undefined && raw.baseSpd !== null) {
+    const baseSpd = cleanInt(raw.baseSpd, 0, 255);
+    if (baseSpd === null) return null;
+    mon.baseSpd = baseSpd;
   }
 
   return mon;

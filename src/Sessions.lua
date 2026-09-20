@@ -501,6 +501,38 @@ end
 -- -- the handshake, the verdict, the seed, the party pack, the lockstep loop --
 -- is either on the intermediator now or does not exist.
 
+-- True when this pairing is already the screen: a duplicate SESSION for
+-- the same battle must not re-push or leave, finished or not.
+function M:sameFight(battleId)
+  local fight = self.fight
+  return fight ~= nil and battleId ~= nil and fight.battle == battleId
+end
+
+-- Take the current screen off `self.fight` without talking to the hub.
+--
+-- SESSION_LEAVE would end whichever pairing the hub currently has -- and
+-- after a new onSession that is the fight we are about to join, not the
+-- discarded one. onDone is cleared and `left` is set first so a later pop
+-- of a buried screen cannot endMediated the replacement (offerForgets
+-- would run under the new fight).
+function M:dropLocalFight()
+  local fight = self.fight
+  self.fight = nil
+  if not fight then return end
+  fight.onDone = nil
+  if not fight.finished and fight.finish then
+    fight:finish("draw", "gone")
+  end
+  fight.left = true
+  local stack = fight.game and fight.game.stack
+  if stack and type(stack.pop) == "function" then
+    local top = stack.top and stack:top()
+    if top == fight then
+      pcall(function() stack:pop() end)
+    end
+  end
+end
+
 -- Put up the fight and upload what we are bringing.
 --
 -- The upload happens *here* rather than only in the screen's `enter`, and the
@@ -508,6 +540,23 @@ end
 -- stack at all -- the headless suite, and any build whose UI failed to come
 -- up.  MediatedBattle:start is idempotent, so `enter` doing it again is free.
 function M:beginMediated(game, sessionId, peerId, peerName, role)
+  if self:sameFight(sessionId) then return true end
+  if self.fight then
+    -- The hub already moved client.battleId before sending SESSION. Keep
+    -- and SESSION_LEAVE would leave the new pairing and keep a screen
+    -- whose choices the hub no longer routes. Unnamed has nothing to
+    -- follow, so that stays on the live screen.
+    if not sessionId then
+      mod.log:warn("beginMediated while a mediated fight is still on screen "
+        .. "-- keeping the one on screen; finish or leave that fight first, "
+        .. "and report this if a second pairing keeps arriving")
+      return false
+    end
+    mod.log:warn("beginMediated while a mediated fight is still on screen "
+      .. "-- dropping it to follow the pairing the hub already opened; "
+      .. "report this if a second pairing keeps arriving")
+    self:dropLocalFight()
+  end
   if not sessionId then
     -- Every mediated message names its battle, so a session with no id is a
     -- fight nothing could be uploaded to.  Left rather than sat in: the hub
@@ -545,6 +594,16 @@ end
 -- Does **not** divert overworld encounters — solo wild stays on the engine.
 function M:beginWildMediated(game, battleId, opts)
   opts = opts or {}
+  if self:sameFight(battleId) then return true end
+  -- Occupancy is still the live fight: this caller did not just receive a
+  -- SESSION that moved battleId. Leaving would pause or forfeit the screen
+  -- the player is looking at.
+  if self.fight then
+    mod.log:warn("beginWildMediated while a mediated fight is still on "
+      .. "screen -- keeping the one on screen; finish or leave that fight "
+      .. "first, and report this if a second pairing keeps arriving")
+    return false
+  end
   if not battleId then
     mod.log:warn("beginWildMediated needs a battle id from the hub")
     return false
