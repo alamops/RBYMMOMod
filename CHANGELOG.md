@@ -4,6 +4,14 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.15] - 2026-09-20
+
+### Fixed
+
+- **Classic Ether picker lists move names.** The 160×144 ITEM move list
+  printed raw ids (`QUICK_ATTACK`). It now uses the same display names
+  as FIGHT.
+
 ## [1.4.14] - 2026-09-20
 
 ### Fixed
