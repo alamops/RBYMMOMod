@@ -469,16 +469,24 @@ end
 -- (see the REQUEST handler) -- that gate stays on the hub's own view, so a
 -- stale flag costs at most one honest refusal rather than a battle nobody
 -- could arrange.
+--
+-- Hub-owned occupancy is more than sessionId.  A 1v1 battle takes a session
+-- *and* a battleId (SESSION_LEAVE keeps battleId through reconnect grace);
+-- a co-op mediated fight takes coopBattleId and may never have a sessionId.
+-- Leaving those out published a fighter as free, and REQUEST delivered a
+-- second ask a modified client could accept.  Fight occupancy goes through
+-- unsettledBattle so a stale pointer is healed the same way REQUEST /
+-- startSession heal one, rather than publishing busy while an ask would
+-- still be forwarded.  coopBattleId is occupancy on its own: the group can
+-- outlive a cleared fight pointer.
+local function hubBusy(hub, client)
+  return client.sessionId ~= nil
+      or client.coopBattleId ~= nil
+      or hub:unsettledBattle(client) ~= nil
+end
+
 local function busyNow(hub, client)
-  -- battleId outlives sessionId on purpose: SESSION_LEAVE of a live fight
-  -- starts reconnect grace rather than ending it, and the player who walked
-  -- off still has to sit that out. Listing them as free here is how they
-  -- were asked into a second pairing while the first sim kept ticking.
-  -- Goes through unsettledBattle so a stale pointer is healed the same way
-  -- REQUEST / startSession heal one, rather than publishing busy while an
-  -- ask would still be forwarded.
-  return client.sessionId ~= nil or client.busy == true
-    or hub:unsettledBattle(client) ~= nil
+  return hubBusy(hub, client) or client.busy == true
 end
 
 local function presenceOf(hub, client)
@@ -508,6 +516,18 @@ local function presenceOf(hub, client)
     -- hello. Every roster row and every trainer card reads this field.
     points = client.points or Config.RANK_START,
   }
+end
+
+-- Same broadcast startSession uses when a pairing opens: other players'
+-- menus read the last MOVE, not the hub's live table, so a co-op fight
+-- that never steps would otherwise stay listed as free until someone walked.
+local function publishOccupancy(hub, memberIds)
+  for _, memberId in ipairs(memberIds or {}) do
+    local member = hub.clients[memberId]
+    if member and member.ready then
+      hub:broadcast(Wire.MOVE, presenceOf(hub, member), member.id)
+    end
+  end
 end
 
 function M:broadcast(msgType, payload, exceptId)
@@ -1083,6 +1103,7 @@ function M:openCoopBattle(id, memberIds, plan)
     if member then member.coopBattleId = id end
   end
   self.coopBattles[id] = { members = members, startedAt = self.clock }
+  publishOccupancy(self, members)
   return id
 end
 
@@ -1092,7 +1113,8 @@ function M:closeCoopBattle(id)
   local group = self.coopBattles[id]
   if not group then return false end
   self.coopBattles[id] = nil
-  for _, memberId in ipairs(group.members or {}) do
+  local members = group.members or {}
+  for _, memberId in ipairs(members) do
     local member = self.clients[memberId]
     if member and member.coopBattleId == id then member.coopBattleId = nil end
   end
@@ -1102,6 +1124,7 @@ function M:closeCoopBattle(id)
   -- called off rather than left refereeing an empty room.
   local record = self.battles[id]
   if record then self:abortMediatedBattle(record, "gone") end
+  publishOccupancy(self, members)
   return true
 end
 
@@ -2606,8 +2629,10 @@ handlers[Wire.REQUEST] = function(self, client, msg)
   if not kind then return end
   -- Silence here strands the asker the same way a vanished target used to:
   -- the client holds `outgoing` until a decline or session lands.  Kind is
-  -- already known, so the reply can name the ask it is refusing.
-  if self:unsettledBattle(client) then
+  -- already known, so the reply can name the ask it is refusing.  A live
+  -- fight or co-op group is occupancy without a trade session, so it must
+  -- decline rather than drop.
+  if self:unsettledBattle(client) or client.coopBattleId then
     return send(client, Wire.DECLINE,
       { name = client.name, kind = kind, reason = "busy" })
   end
@@ -2627,7 +2652,7 @@ handlers[Wire.REQUEST] = function(self, client, msg)
     return send(client, Wire.DECLINE, { kind = kind, reason = "gone" })
   end
   if target.id == client.id then return end
-  if target.sessionId or self:unsettledBattle(target) then
+  if hubBusy(self, target) then
     return send(client, Wire.DECLINE,
       { name = target.name, kind = kind, reason = "busy" })
   end
@@ -2679,8 +2704,7 @@ handlers[Wire.RESPOND] = function(self, client, msg)
     return send(asker, Wire.DECLINE, { name = client.name, kind = kind,
                                        reason = Wire.declineReason(msg.reason) })
   end
-  if client.sessionId or asker.sessionId
-     or self:unsettledBattle(client) or self:unsettledBattle(asker) then
+  if hubBusy(self, client) or hubBusy(self, asker) then
     return send(asker, Wire.DECLINE,
       { name = client.name, kind = kind, reason = "busy" })
   end

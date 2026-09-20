@@ -4,6 +4,18 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.13] - 2026-09-19
+
+### Fixed
+
+- **Hub treats a mediated fight as busy.** Co-op fights set `battleId` /
+  `coopBattleId` and never a `sessionId`, so the roster still showed those
+  players as free and `mmo.request` delivered a second trade or battle ask.
+  Occupancy now includes an unsettled fight and `coopBattleId` (a stale
+  `battleId` pointer is healed, not treated as busy). The hub publishes
+  them busy when the fight opens, and refuses those asks (and a late
+  accept) as busy.
+
 ## [1.4.12] - 2026-09-19
 
 ### Fixed

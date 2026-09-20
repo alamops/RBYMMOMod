@@ -317,18 +317,40 @@ function parseLine(line) {
  * mmo.request handler) -- that gate stays on the hub's own view, so a stale
  * flag costs at most one honest refusal rather than a battle nobody could
  * arrange. Twin of src/Hub.lua's busyNow.
+ *
+ * Hub-owned occupancy is more than sessionId. A 1v1 battle takes a session
+ * *and* a battleId (SESSION_LEAVE keeps battleId through reconnect grace);
+ * a co-op mediated fight takes coopBattleId and may never have a sessionId.
+ * Leaving those out published a fighter as free, and mmo.request delivered
+ * a second ask a modified client could accept. Fight occupancy goes through
+ * unsettledBattle so a stale pointer is healed the same way request /
+ * startSession heal one. coopBattleId is occupancy on its own: the group
+ * can outlive a cleared fight pointer. Callers without a relay (exported
+ * presenceOf in tests) fall back to the raw battleId field.
  */
-function busyNow(client, relay) {
-  // battleId outlives sessionId on purpose: SESSION_LEAVE of a live fight
-  // starts reconnect grace rather than ending it, and the player who walked
-  // off still has to sit that out. Listing them as free here is how they
-  // were asked into a second pairing while the first sim kept ticking.
-  // `relay` heals a stale pointer the same way request/startSession do;
-  // callers without one (exported presenceOf in tests) fall back to the field.
+function hubBusy(client, relay) {
   const inFight = relay
     ? Boolean(relay.unsettledBattle(client))
     : Boolean(client.battleId);
-  return Boolean(client.sessionId) || client.busy === true || inFight;
+  return Boolean(client.sessionId)
+    || Boolean(client.coopBattleId)
+    || inFight;
+}
+
+function busyNow(client, relay) {
+  return hubBusy(client, relay) || client.busy === true;
+}
+
+// Same broadcast startSession uses when a pairing opens: other players'
+// menus read the last mmo.move, not the hub's live table, so a co-op fight
+// that never steps would otherwise stay listed as free until someone walked.
+function publishOccupancy(relay, memberIds) {
+  for (const memberId of memberIds || []) {
+    const member = relay.clients.get(memberId);
+    if (member && member.ready) {
+      relay.broadcast('mmo.move', presenceOf(member, relay), member.id);
+    }
+  }
 }
 
 function presenceOf(client, relay) {
@@ -622,8 +644,10 @@ handlers['mmo.request'] = (relay, client, msg) => {
   if (!kind) return;
   // Silence here strands the asker the same way a vanished target used to:
   // the client holds `outgoing` until a decline or session lands. Kind is
-  // already known, so the reply can name the ask it is refusing.
-  if (relay.unsettledBattle(client)) {
+  // already known, so the reply can name the ask it is refusing. A live
+  // fight or co-op group is occupancy without a trade session, so it must
+  // decline rather than drop.
+  if (relay.unsettledBattle(client) || client.coopBattleId) {
     return relay.send(client, 'mmo.decline',
       { name: client.name, kind, reason: 'busy' });
   }
@@ -644,7 +668,7 @@ handlers['mmo.request'] = (relay, client, msg) => {
   }
   if (target.id === client.id) return;
 
-  if (target.sessionId || relay.unsettledBattle(target)) {
+  if (hubBusy(target, relay)) {
     return relay.send(client, 'mmo.decline',
       { name: target.name, kind, reason: 'busy' });
   }
@@ -702,8 +726,7 @@ handlers['mmo.respond'] = (relay, client, msg) => {
     if (reason) out.reason = reason;
     return relay.send(asker, 'mmo.decline', out);
   }
-  if (client.sessionId || asker.sessionId
-      || relay.unsettledBattle(client) || relay.unsettledBattle(asker)) {
+  if (hubBusy(client, relay) || hubBusy(asker, relay)) {
     return relay.send(asker, 'mmo.decline',
       { name: client.name, kind, reason: 'busy' });
   }
@@ -2420,6 +2443,8 @@ class Relay {
       if (member) member.coopBattleId = id;
     }
     this.coopBattles.set(id, { members, startedAt: now });
+    publishOccupancy(this, members);
+    this.noteRosterChange();
     return id;
   }
 
@@ -2429,7 +2454,8 @@ class Relay {
     const group = this.coopBattles.get(id);
     if (!group) return false;
     this.coopBattles.delete(id);
-    for (const memberId of group.members || []) {
+    const members = group.members || [];
+    for (const memberId of members) {
       const member = this.clients.get(memberId);
       if (member && member.coopBattleId === id) member.coopBattleId = null;
     }
@@ -2439,6 +2465,8 @@ class Relay {
     // called off rather than left refereeing an empty room.
     const record = this.battles.get(id);
     if (record) this.abortMediatedBattle(record, 'gone');
+    publishOccupancy(this, members);
+    this.noteRosterChange();
     return true;
   }
 
