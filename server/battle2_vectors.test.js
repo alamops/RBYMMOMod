@@ -24,7 +24,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { damage, accuracy, crit, status, Rng } = require('./lib/battle2');
+const { damage, accuracy, crit, status, Rng, Effects } = require('./lib/battle2');
 
 const FIXTURE = path.join(__dirname, '..', 'tests', 'fixtures', 'battle_sim2_vectors.json');
 const vectors = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
@@ -253,4 +253,71 @@ test('Rng LCG matches the Lua twin for a known seed stream', () => {
   assert.strictEqual(live.byte(), restored.byte(), 'state restores');
   assert.strictEqual(Rng.create(1).below(1), 0, 'below(1) is 0');
   assert.ok(Rng.create(2).below(15) < 15, 'below(n) is in range');
+});
+
+function dummyMon2(o) {
+  const opts = o || {};
+  return {
+    species: opts.species || 'Alpha',
+    hp: opts.hp === undefined ? 100 : opts.hp,
+    maxHp: opts.maxHp === undefined ? 100 : opts.maxHp,
+    status: opts.status,
+    types: opts.types || [0],
+    stats: { atk: 40, def: 40, spe: 40, spa: 40, spd: 40 },
+    stages: { atk: 0, def: 0, spe: 0, spa: 0, spd: 0, acc: 0, eva: 0 },
+    moves: opts.moves || [{
+      id: 'thump', name: 'THUMP', pp: 10, power: 40,
+      accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+    lastMoveIndex: opts.lastMoveIndex === undefined ? 1 : opts.lastMoveIndex,
+    substitute: opts.substitute || 0,
+  };
+}
+
+function applyPrimary2(effectId, user, target) {
+  return Effects.applyPrimary({
+    effectId,
+    rng: { byte() { return 0; } },
+    userMon: user,
+    targetMon: target,
+    userFighter: { slot: 1, side: 'a' },
+    targetFighter: { slot: 2, side: 'b' },
+    moveIndex: 1,
+  });
+}
+
+test('gen2 applyPrimary fails foe-targeting effects through a substitute', () => {
+  const target = dummyMon2({ species: 'Beta', substitute: 40 });
+  const sleep = applyPrimary2(32, dummyMon2(), target);
+  assert.strictEqual(sleep.nothing, true, 'SLEEP_EFFECT vs substitute is nothing');
+  assert.strictEqual(target.status, undefined, 'SLEEP_EFFECT does not land through a substitute');
+
+  const growlTarget = dummyMon2({ species: 'Beta', substitute: 40 });
+  const growl = applyPrimary2(18, dummyMon2(), growlTarget);
+  assert.strictEqual(growl.nothing, true, 'Growl vs substitute is nothing');
+  assert.strictEqual(growlTarget.stages.atk, 0, 'Growl does not drop atk behind a substitute');
+
+  const swordsUser = dummyMon2();
+  const swords = applyPrimary2(50, swordsUser, dummyMon2({ species: 'Beta', substitute: 40 }));
+  assert.strictEqual(swords.nothing, false, 'Swords Dance is not nothing against a foe substitute');
+  assert.strictEqual(swordsUser.stages.atk, 2, 'Swords Dance still raises the user');
+
+  const transformUser = dummyMon2();
+  const transform = applyPrimary2(57, transformUser, dummyMon2({ species: 'Beta', substitute: 40 }));
+  assert.strictEqual(transform.nothing, true, 'TRANSFORM_EFFECT vs substitute is nothing');
+  assert.strictEqual(transformUser.transformed, undefined, 'TRANSFORM_EFFECT does not copy');
+
+  const hazeUser = dummyMon2();
+  hazeUser.stages.atk = 2;
+  const hazeTarget = dummyMon2({ species: 'Beta', substitute: 40 });
+  hazeTarget.stages.def = 2;
+  const haze = applyPrimary2(25, hazeUser, hazeTarget);
+  assert.strictEqual(haze.nothing, false, 'HAZE_EFFECT is not nothing against a substitute');
+  assert.strictEqual(hazeUser.stages.atk, 0, 'HAZE_EFFECT still resets the user');
+  assert.strictEqual(hazeTarget.stages.def, 0, 'HAZE_EFFECT still resets the foe');
+
+  const exposed = dummyMon2({ species: 'Beta' });
+  const lands = applyPrimary2(32, dummyMon2(), exposed);
+  assert.strictEqual(lands.nothing, false, 'SLEEP_EFFECT still lands with no substitute');
+  assert.strictEqual(exposed.status, 'sleep', 'SLEEP_EFFECT sets sleep when the target is exposed');
 });

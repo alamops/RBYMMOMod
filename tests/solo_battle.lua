@@ -634,10 +634,10 @@ end)()
 -- a loss blacks the player out. Vanilla refuses and does *not* spend the turn.
 --
 -- The refusal line belongs to the screen -- `MediatedBattle:updateCommand`
--- prints it before it files the choice -- so all the referee owes is the `turn`
--- that reopens a window the screen believes it has answered. A second copy fed
--- from here is the sentence the player used to read twice, in two consecutive
--- boxes, which is exactly what this counts.
+-- prints it and does not file the choice -- so the menu never closes and the
+-- turn is not spent. A `run` that still arrives (a skipped-menu call site)
+-- is parked on `refuseRun` so the pump can reopen the window without a
+-- second copy of the sentence.
 
 ;(function()
   local f = fightOf("trainer", {})
@@ -645,17 +645,15 @@ end)()
   local turnBefore = sim.turn
 
   -- The RUN slab, pressed. Driven through the command menu rather than through
-  -- sendChoice, because the duplicate line was the screen's own and only this
-  -- path prints it.
+  -- sendChoice, because that is the path that used to print the line too early.
   local input = { wasPressed = function(_, key) return key == "a" end }
   fight.commandIndex = 4
   eq(fight.COMMANDS[4], "RUN", "the fourth command is RUN")
   fight:updateCommand(input)
 
   eq(saidTimes(fight, "running from"), 1, "the screen refuses, once")
-  eq(f.solo.refuseRun, true, "and the referee parked the refusal for the pump")
-  eq(fight.answeredTurn, true, "the send is handled, so the menu closes")
-  eq(fight.phase, "play", "until the pump feeds the turn that reopens it")
+  eq(f.solo.refuseRun, nil, "and nothing is filed with the referee")
+  eq(fight.answeredTurn, false, "the menu is not closed as answered")
 
   f.solo:update(1 / 60, f.game)
   eq(saidTimes(fight, "running from"), 1,
@@ -663,8 +661,51 @@ end)()
   eq(sim.turn, turnBefore, "the turn is not spent")
   eq(sim:outcome(), nil, "and nothing was forfeited")
   eq(sim.byId[PLAYER].choice, nil, "the seat still owes an answer")
-  eq(fight.pendingTurn, true, "with the menu open again to give one")
-  eq(f.solo.refuseRun, nil, "and the parking space cleared")
+  eq(fight.answeredTurn, false, "and the command is still theirs to give")
+  eq(f.solo.refuseRun, nil, "and the parking space stayed empty")
+end)()
+
+-- ------------------------------------------------------------------
+-- 5b. RUN in a 1v1 is a concession, not a trainer refusal
+-- ------------------------------------------------------------------
+--
+-- MediatedBattle used to print the trainer sentence and then file `run` for
+-- every non-wild mode, so a duel read as a gym. 1v1 files the concession and
+-- does not lie; coop_npc still says the line and does not file.
+
+;(function()
+  local Mediated = need("MediatedBattle")
+  eq(Mediated.COMMANDS[4], "RUN", "the fourth command is RUN")
+
+  local function pressRun(mode)
+    local sent = {}
+    local fight = setmetatable({
+      mode = mode,
+      phase = "choose",
+      commandIndex = 4,
+      lines = {},
+      answeredTurn = false,
+      sendChoice = function(_, choice)
+        sent[#sent + 1] = choice
+        return true
+      end,
+    }, { __index = Mediated })
+    fight:updateCommand({ wasPressed = function(_, key) return key == "a" end })
+    return fight, sent
+  end
+
+  local pvp, pvpSent = pressRun("1v1")
+  eq(#pvpSent, 1, "1v1 RUN is filed")
+  eq(pvpSent[1] and pvpSent[1].action, "run", "...as a concession")
+  eq(saidTimes(pvp, "running from"), 0,
+     "and does not pretend a 1v1 is a trainer battle")
+  eq(saidTimes(pvp, "forfeit"), 1,
+     "and says it forfeited after the send landed")
+
+  local npc, npcSent = pressRun("coop_npc")
+  eq(#npcSent, 0, "trainer RUN is not filed")
+  eq(saidTimes(npc, "running from"), 1,
+     "the screen still says there is no running from a trainer battle")
 end)()
 
 -- ------------------------------------------------------------------

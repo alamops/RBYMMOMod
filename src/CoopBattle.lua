@@ -1359,14 +1359,20 @@ local function pageBoxText(text)
 end
 
 -- One step on a vertical list. UP/DOWN move; LEFT/RIGHT are aliases (same habit
--- as the target column and the move list). Clamped -- no wrap.
-local function listPress(index, count, input)
+-- as the target column and the move list). Clamped at both ends unless `wrap`
+-- is true -- then it rings like Gen 1 FIGHT / ITEM (and 1v1
+-- MediatedBattle:updateMoveMenu). SWITCH / replace / RUN stay clamped.
+local function listPress(index, count, input, wrap)
   if count < 1 then return nil end
   local step = 0
   if input:wasPressed("up") or input:wasPressed("left") then step = -1
   elseif input:wasPressed("down") or input:wasPressed("right") then step = 1 end
   if step == 0 then return nil end
-  return math.max(1, math.min(count, (index or 1) + step))
+  local want = (index or 1) + step
+  if wrap then
+    return ((want - 1) % count) + 1
+  end
+  return math.max(1, math.min(count, want))
 end
 
 -- The battle-command grid. Each arrow moves on its own axis and clamps at the
@@ -2130,9 +2136,11 @@ function M:updateCommand(input)
       -- the choice goes straight to the referee (or host-sim commit).
       --
       -- Against a **trainer** it is the original's question, and the original's
-      -- answer: you cannot run from a trainer battle. Filed as an action rather
-      -- than answered here, so the refusal arrives in the turn's own message
-      -- flow and costs the turn exactly as the original's does.
+      -- answer: you cannot run from a trainer battle. Said here and never
+      -- filed -- forwarding RUN used to forfeit the gym because the referee
+      -- treated every run as a concession. The sim still no-ops a filed run
+      -- (so a modified client cannot forfeit), but honest menus never send one,
+      -- and the turn is not spent (`afterQueue = "menu"`).
       --
       -- Against **two other players** it is a question Gen 1 never had to ask,
       -- and the answer is neither the refusal nor a unilateral escape: leaving
@@ -2144,7 +2152,9 @@ function M:updateCommand(input)
       elseif self:partyBattle() then
         self:askToRun()
       else
-        self:commit({ slot = self.mine, kind = "run" })
+        self.phase = "messages"
+        self.after = "choose"
+        self:say("No! There's no\nrunning from a\ntrainer battle!")
       end
     end
   end
@@ -2211,12 +2221,11 @@ function M:updateMove(input)
   local moves = self:liveMoves()
   if #moves == 0 then return end
   -- One name per row (drawMoves), so UP/DOWN step the list. LEFT/RIGHT stay
-  -- aliases -- same habit as the target column -- and both ends clamp.
-  local step = 0
-  if input:wasPressed("up") or input:wasPressed("left") then step = -1
-  elseif input:wasPressed("down") or input:wasPressed("right") then step = 1 end
-  if step ~= 0 then
-    self.moveIndex = math.max(1, math.min(#moves, (self.moveIndex or 1) + step))
+  -- aliases -- same habit as the target column -- and both ends wrap, matching
+  -- Gen 1 FIGHT and MediatedBattle:updateMoveMenu.
+  local moved = listPress(self.moveIndex or 1, #moves, input, true)
+  if moved then
+    self.moveIndex = moved
   elseif input:wasPressed("b") then
     self.phase = "choose"
   elseif input:wasPressed("a") then
@@ -2399,7 +2408,7 @@ function M:updateItem(input)
     self.after = "choose"
     return
   end
-  local moved = listPress(self.itemIndex or 1, #items, input)
+  local moved = listPress(self.itemIndex or 1, #items, input, true)
   if moved then
     self.itemIndex = moved
   elseif input:wasPressed("b") then
@@ -2464,7 +2473,7 @@ function M:updateItemParty(input)
     self.phase = "item"
     return
   end
-  local moved = listPress(self.switchIndex or 1, #rows, input)
+  local moved = listPress(self.switchIndex or 1, #rows, input, true)
   if moved then
     self.switchIndex = moved
   elseif input:wasPressed("b") then
@@ -2473,8 +2482,16 @@ function M:updateItemParty(input)
   elseif input:wasPressed("a") then
     local row = rows[self.switchIndex]
     local effect = self.itemPick and self.itemPick.effect
-    if effect and effect.faintedOnly and not row.fainted then
+    -- Same Gen 1 picker gate as MediatedBattle:updateItemParty. Co-op only
+    -- drains `messages` while phase is "messages"; stay on the picker after.
+    local Effects = need("BattleSim/Effects")
+    if effect and (
+         (effect.faintedOnly and not row.fainted)
+         or (row.fainted and Effects.itemFailsOnFainted(effect))
+       ) then
       self:say("It won't have\nany effect.")
+      self.phase = "messages"
+      self.after = "item_party"
       return
     end
     if effect and effect.needsMove then
@@ -2496,7 +2513,7 @@ function M:updateItemMove(input)
     self.phase = "item_party"
     return
   end
-  local moved = listPress(self.moveIndex or 1, #moves, input)
+  local moved = listPress(self.moveIndex or 1, #moves, input, true)
   if moved then
     self.moveIndex = moved
   elseif input:wasPressed("b") then
@@ -7234,6 +7251,21 @@ function M:bandBenchRows(bench)
   return rows
 end
 
+-- True while the bottom box still owns the screen: a line is up, an effect is
+-- playing, or the queue has not been handed back. `update` returns in that
+-- window before it opens the replace picker (faint line → picker → send);
+-- draw must match, or WHO'S NEXT paints over the faint.
+function M:boxLive()
+  if self.shown then return true end
+  if self.anim or self.draining or self.faintFx
+     or self.expFilling or self.evolving then
+    return true
+  end
+  if self.phase == "messages" then return true end
+  local q = self.messages
+  return type(q) == "table" and #q > 0
+end
+
 -- Draw the band, and answer whether the band is now on the screen.
 --
 -- Wrapped by `M:drawModernBand` below, which is what callers use: the wrappers
@@ -7270,6 +7302,13 @@ function M:drawBandWidgets()
     Battlefield.drawBandBackdrop()
   end
 
+  -- Same order as update(): the box stays up while a line or queue is live.
+  -- Replacing is armed behind that queue, so painting the bench first hid
+  -- the faint line. MediatedBattle:drawModernBand checks `shown` first.
+  if self:boxLive() then
+    message(self:boxText())
+    return true
+  end
   if self.replacing then
     local seat = self.sim and self.sim:slot(self.mine)
     local bench = seat and self:benchOf(seat) or {}
@@ -7447,7 +7486,9 @@ function M:drawMenuBand()
 end
 
 function M:drawMenusClassic()
-  if self.replacing then
+  if self:boxLive() then
+    self:drawMessage()
+  elseif self.replacing then
     self:drawReplace()
   elseif self.runAsk and self.phase ~= "messages" then
     self:drawRunAsk()
@@ -10228,6 +10269,7 @@ end
 -- list is the one that counts.
 function M:sendMediatedChoice(action)
   if not (self.mediated and self.battleId) then return false end
+  if self.awaitingReconnect then return false end
   action = action or {}
   local kind = action.kind or "move"
   local fields
@@ -10769,8 +10811,10 @@ function M:drawSafe()
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", 0, 0, 160, 144)
   -- Full-page picker covers the stage; faint/anim lines still use the
-  -- field + bottom box so a send-out is not painted over a KO.
-  if not self.shown and not self.anim then
+  -- field + bottom box so a send-out is not painted over a KO. Same
+  -- `boxLive` gate as the band: a queued faint with no page up yet still
+  -- owns the screen (`update` has not popped `shown`).
+  if not self:boxLive() then
     if self:drawClassicPartyPicker() then
       love.graphics.setColor(1, 1, 1, 1)
       return
