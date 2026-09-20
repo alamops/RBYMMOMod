@@ -66,7 +66,7 @@ local function need(name)
 end
 
 local BattleSim2 = need("BattleSim2/init")
-local Turn, Events = BattleSim2.Turn, BattleSim2.Events
+local Turn, Events, Effects = BattleSim2.Turn, BattleSim2.Events, BattleSim2.Effects
 
 -- ------------------------------------------------------------------
 -- assertions
@@ -123,7 +123,7 @@ end
 -- naming all five here is what keeps this suite on the Gen 2 branch of it.
 local function mon(o)
   o = o or {}
-  return {
+  local out = {
     species = o.species or "Alpha",
     level = o.level or 20,
     hp = o.hp,
@@ -136,6 +136,8 @@ local function mon(o)
     },
     moves = o.moves or { move() },
   }
+  if o.substitute then out.substitute = o.substitute end
+  return out
 end
 
 local function battleOf(o)
@@ -1383,6 +1385,141 @@ do
   battle:reconnect("p1")
   eq(battle:snapshot().turn, 2,
      "gen2: reconnect completes the already-answered turn without a second pick")
+end
+
+-- ------------------------------------------------------------------
+-- Substitute vs primary effects (cartridge: foe-targeting fails)
+-- ------------------------------------------------------------------
+
+local function dummyMon(o)
+  o = o or {}
+  return {
+    species = o.species or "Alpha",
+    hp = o.hp or 100,
+    maxHp = o.maxHp or 100,
+    status = o.status,
+    types = o.types or { 0 },
+    stats = { atk = 40, def = 40, spe = 40, spa = 40, spd = 40 },
+    stages = { atk = 0, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 },
+    moves = o.moves or {
+      { id = "thump", name = "THUMP", pp = 10, power = 40,
+        accuracy = 255, type = 0, effect = 0, chance = 0 },
+    },
+    lastMoveIndex = o.lastMoveIndex or 1,
+    substitute = o.substitute or 0,
+  }
+end
+
+local function applyPrimary(effectId, user, target)
+  return Effects.applyPrimary({
+    effectId = effectId,
+    rng = { byte = function() return 0 end },
+    userMon = user,
+    targetMon = target,
+    userFighter = { slot = 1, side = "a" },
+    targetFighter = { slot = 2, side = "b" },
+    moveIndex = 1,
+  })
+end
+
+do
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = applyPrimary(32, dummyMon(), target)
+  eq(out.nothing, true, "gen2: SLEEP_EFFECT vs substitute is nothing")
+  eq(target.status, nil, "gen2: SLEEP_EFFECT does not land through a substitute")
+end
+
+do
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = applyPrimary(18, dummyMon(), target)
+  eq(out.nothing, true, "gen2: Growl vs substitute is nothing")
+  eq(target.stages.atk, 0, "gen2: Growl does not drop atk behind a substitute")
+end
+
+do
+  local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
+  eq(applyPrimary(86, dummyMon(), target).nothing, true,
+     "gen2: DISABLE_EFFECT vs substitute is nothing")
+end
+
+do
+  local user = dummyMon()
+  eq(applyPrimary(57, user, dummyMon({ species = "Beta", substitute = 40 })).nothing,
+     true, "gen2: TRANSFORM_EFFECT vs substitute is nothing")
+  eq(user.transformed, nil, "gen2: TRANSFORM_EFFECT does not copy through a substitute")
+end
+
+do
+  local user = dummyMon()
+  local out = applyPrimary(50, user, dummyMon({ species = "Beta", substitute = 40 }))
+  eq(out.nothing, false, "gen2: Swords Dance is not nothing against a foe substitute")
+  eq(user.stages.atk, 2, "gen2: Swords Dance still raises the user's atk")
+end
+
+do
+  local user = dummyMon()
+  user.stages.atk = 2
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  target.stages.def = 2
+  local out = applyPrimary(25, user, target)
+  eq(out.nothing, false, "gen2: HAZE_EFFECT is not nothing against a substitute")
+  eq(user.stages.atk, 0, "gen2: HAZE_EFFECT still resets the user")
+  eq(target.stages.def, 0, "gen2: HAZE_EFFECT still resets the foe behind a substitute")
+end
+
+do
+  local battle = battleOf({
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({
+          species = "Alpha", maxHp = 200, spe = 120, atk = 120, level = 50,
+          moves = { move({ id = "sleep", power = 0, effect = 32, accuracy = 255 }) },
+        }),
+      } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mon({
+          species = "Beta", maxHp = 200, spe = 1, substitute = 50,
+          moves = { move({ id = "splash", power = 0, effect = 85 }) },
+        }),
+      } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local beta = battle.byId.p2
+  local betaMon = beta and beta.mons[beta.active]
+  eq(betaMon and betaMon.status, nil, "gen2: SLEEP_EFFECT fails through a substitute")
+  eq(betaMon and betaMon.substitute, 50, "gen2: SLEEP_EFFECT leaves the substitute standing")
+end
+
+do
+  local battle = battleOf({
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({
+          species = "Alpha", maxHp = 200, spe = 120, atk = 120, level = 50,
+          moves = { move({ id = "thump", power = 60, effect = 18, accuracy = 255 }) },
+        }),
+      } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mon({
+          species = "Beta", hp = 200, maxHp = 200, spe = 1, substitute = 5,
+          moves = { move({ id = "splash", power = 0, effect = 85 }) },
+        }),
+      } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local beta = battle.byId.p2
+  local betaMon = beta and beta.mons[beta.active]
+  eq(betaMon and (betaMon.substitute or 0), 0, "gen2: damaging hit broke the substitute")
+  eq(betaMon and betaMon.stages.atk, 0,
+     "gen2: Growl primary does not land on the hit that broke the sub")
 end
 
 -- ------------------------------------------------------------------

@@ -55,6 +55,125 @@ eq(Effects.category(72), "unused", "category unused slot")
 eq(Effects.idOf("NOT_AN_EFFECT"), nil, "idOf unknown")
 eq(Effects.nameOf(999), nil, "nameOf out of range")
 
+local function dummyMon(o)
+  o = o or {}
+  return {
+    species = o.species or "Alpha",
+    hp = o.hp or 100,
+    maxHp = o.maxHp or 100,
+    status = o.status,
+    types = o.types or { 0 },
+    stats = { atk = 40, def = 40, spd = 40, spc = 40 },
+    stages = { atk = 0, def = 0, spd = 0, spc = 0, acc = 0, eva = 0 },
+    moves = o.moves or {
+      { id = "thump", name = "THUMP", pp = 10, power = 40,
+        accuracy = 255, type = 0, effect = 0, chance = 0 },
+    },
+    lastMoveIndex = o.lastMoveIndex or 1,
+    substitute = o.substitute or 0,
+  }
+end
+
+local function dummyFighter(slot, side)
+  return { slot = slot or 1, side = side or "a" }
+end
+
+local function apply(effectId, user, target)
+  return Effects.applyPrimary({
+    effectId = effectId,
+    rng = { byte = function() return 0 end },
+    userMon = user,
+    targetMon = target,
+    userFighter = dummyFighter(1, "a"),
+    targetFighter = dummyFighter(2, "b"),
+    moveIndex = 1,
+  })
+end
+
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = apply(32, user, target)
+  eq(out.nothing, true, "SLEEP_EFFECT vs substitute is nothing")
+  eq(target.status, nil, "SLEEP_EFFECT does not land through a substitute")
+end
+
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = apply(18, user, target)
+  eq(out.nothing, true, "Growl vs substitute is nothing")
+  eq(target.stages.atk, 0, "Growl does not drop atk behind a substitute")
+end
+
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
+  local out = apply(86, user, target)
+  eq(out.nothing, true, "DISABLE_EFFECT vs substitute is nothing")
+  eq(target.disable, nil, "DISABLE_EFFECT does not lock a move behind a substitute")
+end
+
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = apply(57, user, target)
+  eq(out.nothing, true, "TRANSFORM_EFFECT vs substitute is nothing")
+  eq(user.transformed, nil, "TRANSFORM_EFFECT does not copy through a substitute")
+end
+
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
+  local out = apply(82, user, target)
+  eq(out.nothing, true, "MIMIC_EFFECT vs substitute is nothing")
+  eq(user.moves[1] and user.moves[1].id, "thump", "MIMIC_EFFECT does not copy through a substitute")
+end
+
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = apply(50, user, target)
+  eq(out.nothing, false, "Swords Dance is not nothing against a foe substitute")
+  eq(user.stages.atk, 2, "Swords Dance still raises the user's atk")
+  eq(target.stages.atk, 0, "Swords Dance does not touch the foe behind a substitute")
+end
+
+do
+  local user = dummyMon({ hp = 10, maxHp = 100 })
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = apply(56, user, target)
+  eq(out.nothing, false, "HEAL_EFFECT is not nothing against a foe substitute")
+  eq(#out.heals, 1, "HEAL_EFFECT still queues a heal")
+end
+
+do
+  local user = dummyMon({ hp = 100, maxHp = 100 })
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = apply(79, user, target)
+  eq(out.nothing, false, "SUBSTITUTE_EFFECT is not nothing against a foe substitute")
+  eq(user.substitute > 0, true, "user can still make their own substitute")
+end
+
+do
+  local user = dummyMon()
+  user.stages.atk = 2
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  target.stages.def = 2
+  local out = apply(25, user, target)
+  eq(out.nothing, false, "HAZE_EFFECT is not nothing against a substitute")
+  eq(user.stages.atk, 0, "HAZE_EFFECT still resets the user")
+  eq(target.stages.def, 0, "HAZE_EFFECT still resets the foe behind a substitute")
+end
+
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta" })
+  local out = apply(32, user, target)
+  eq(out.nothing, false, "SLEEP_EFFECT still lands with no substitute")
+  eq(target.status, "sleep", "SLEEP_EFFECT sets sleep when the target is exposed")
+end
+
 do
   local effect = Effects.itemEffect("PROTEIN")
   eq(effect and effect.vitaminStat, "atk", "PROTEIN is a vitamin for atk")

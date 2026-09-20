@@ -409,6 +409,20 @@ local function resetStages(mon)
   mon.stages.eva = 0
 end
 
+-- Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
+-- Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
+-- Substitute) and field-wide Haze still run; Conversion copies onto the user.
+local function blockedBySubstitute(effectId)
+  local statFx = STAT_EFFECTS[effectId]
+  if statFx then return not statFx.selfTarget end
+  if effectId == 24 or effectId == 25 or effectId == 46 or effectId == 47
+      or effectId == 56 or effectId == 64 or effectId == 65
+      or effectId == 79 or effectId == 85 then
+    return false
+  end
+  return true
+end
+
 -- ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
 --      moveIndex (1-based), statusToWire
 -- Returns { nothing, messages, events, heals } where heals = { amount } for user.
@@ -422,6 +436,11 @@ function M.applyPrimary(ctx)
   local targetFighter = ctx.targetFighter
   local wire = ctx.statusToWire or {}
   local rng = ctx.rng
+
+  if targetMon and (targetMon.substitute or 0) > 0 and blockedBySubstitute(effectId) then
+    out.nothing = true
+    return out
+  end
 
   if effectId == 85 then -- SPLASH_EFFECT
     out.nothing = true
