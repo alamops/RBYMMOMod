@@ -366,6 +366,48 @@ function runJs() {
       })(),
     },
     {
+      name: 'invite_busy_mediated_fight',
+      result: (() => {
+        const clock = makeClock();
+        const relay = makeRelay(clock);
+        const a = dial(relay, 'HOST', ID_A);
+        const b = dial(relay, 'ALLY', ID_B);
+        const c = dial(relay, 'ASKER', ID_C);
+        take(a, 'mmo.welcome'); take(b, 'mmo.welcome'); take(c, 'mmo.welcome');
+        takeAll(a, 'mmo.join'); takeAll(b, 'mmo.join'); takeAll(c, 'mmo.join');
+        a.peer.outbox = []; b.peer.outbox = []; c.peer.outbox = [];
+
+        relay.handle(c.id, { type: 'mmo.request', to: b.id, kind: 'trade' });
+        take(b, 'mmo.request');
+        a.peer.outbox = []; b.peer.outbox = []; c.peer.outbox = [];
+        relay.openCoopBattle('c-busy', [a.id, b.id],
+          { mode: 'coop_npc', hostId: a.id });
+        const published = take(c, 'mmo.move');
+        b.peer.outbox = []; c.peer.outbox = [];
+        relay.handle(b.id, {
+          type: 'mmo.respond', to: c.id, kind: 'trade', accept: true,
+        });
+        const stacked = slimDecline(take(c, 'mmo.decline'));
+        const stackedSession = take(c, 'mmo.session') || take(b, 'mmo.session');
+        c.peer.outbox = []; b.peer.outbox = [];
+        relay.handle(c.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+        const midFight = slimDecline(take(c, 'mmo.decline'));
+        const reached = take(b, 'mmo.request');
+        b.peer.outbox = []; c.peer.outbox = [];
+        relay.handle(b.id, { type: 'mmo.request', to: c.id, kind: 'trade' });
+        const fromFighter = take(c, 'mmo.request');
+        return {
+          hadSession: Boolean(relay.get(b.id) && relay.get(b.id).sessionId),
+          publishedBusy: Boolean(published && published.busy === true),
+          stacked,
+          stackedSession: stackedSession != null,
+          midFight,
+          reachedFighter: reached != null,
+          fromFighter: fromFighter != null,
+        };
+      })(),
+    },
+    {
       name: 'mediated_ko_settle',
       result: (() => {
         const clock = makeClock();

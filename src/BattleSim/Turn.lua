@@ -32,12 +32,12 @@
 --     side-a member goes first, otherwise the group reverses.  One draw per
 --     group rather than per pair, so a 2v2 with four equal speeds costs one
 --     byte on both runtimes.
---   * *Running* is a concession, not an escape.  A mediated fight is between
---     two people who agreed to it, and Gen 1's flee roll exists to let you
---     leave a wild encounter -- so one side running loses the battle with
---     reason `run`, and both sides running is a draw.  Mirrored: the policy
---     reads the same from either seat, which is what stops "I fled" and "they
---     fled" being two different stories.
+--   * *Running* is mode-gated, the same way Teleport is.  wild / coop_wild
+--     flee (the runner loses with reason `run`); 1v1 / coop_pvp is a
+--     concession, same bookkeeping, and both sides running is a draw;
+--     coop_npc -- and any other non-wild non-pvp mode -- emits the trainer
+--     refusal and does not finish, so a gym cannot be forfeited by pressing
+--     RUN.  Mirrored: the policy reads the same from either seat.
 --   * *Items* apply a hand-authored Gen1 heal/status table by id (Potion,
 --     Full Restore, Revive, Ether, …) — locked twin of public amounts, not a
 --     port of engine ItemEffects. Unknown ids announce "But it failed" and
@@ -82,7 +82,12 @@
 --     type normal), no PP spent, recoil floor(damage/4) minimum 1 after a hit.
 --   * The choice clock is *suspended while anybody is disconnected*, because
 --     the grace timer is already counting for that player and two deadlines
---     racing would decide the match on whichever fired first.
+--     racing would decide the match on whichever fired first.  `submitChoice`
+--     also refuses a seat whose `connected` is false until `reconnect()`, so a
+--     socket that is still delivering (SESSION_LEAVE) cannot resolve turns
+--     through the pause.  `_maybeResolve` waits on the same flag, so a leftover
+--     or forced fill from before the drop cannot complete the turn while anyone
+--     is away; `reconnect()` asks it again.
 --
 -- Nothing here raises.  Bad input is refused with a nil-plus-reason from
 -- `create` or a plain `false` from `submitChoice`, because every caller is
@@ -215,6 +220,9 @@ local function copyMove(raw)
     type     = max(0, int(raw.type, 0)),
     effect   = max(0, int(raw.effect, 0)),
     chance   = max(0, int(raw.chance, 0)),
+    -- Optional sheet flag. Absent is a protocol-era client; Slash then uses
+    -- ordinary odds. The hub has no move table to recover it from.
+    highCrit = raw.highCrit == true,
   }
 end
 
@@ -398,6 +406,12 @@ local function copyMon(raw, fallback)
     xAccuracy = raw.xAccuracy == true,
     catchRate = max(0, min(255, int(raw.catchRate, 255))),
   }
+
+  -- Species base Speed for Gen 1 crit (Crit.lua). Optional: a sheet that
+  -- omits it falls back to battle Speed without the badge boost.
+  if raw.baseSpd ~= nil then
+    out.baseSpd = max(0, min(255, int(raw.baseSpd, 0)))
+  end
 
   -- Optional Stat Exp sheet (atk/def/spd/spc, optional hp). Absent keys stay 0
   -- at vitamin time; present values are what HP_UP / PROTEIN / … mutate.
@@ -1054,6 +1068,14 @@ function Battle:_normaliseChoice(fighter, choice)
     elseif effect and effect.needsMove then
       return nil
     end
+    -- Gen 1: Potion/Ether/status/vitamin on a KO, and Revive on a living
+    -- mon, never leave the picker. Refuse here so a submitted choice cannot
+    -- spend the bag or the turn.
+    local targetMon = fighter.mons[out.slot or fighter.active]
+    if targetMon then
+      if effect and effect.faintedOnly and targetMon.hp > 0 then return nil end
+      if targetMon.hp <= 0 and Effects.itemFailsOnFainted(effect) then return nil end
+    end
     return out
   end
 
@@ -1120,15 +1142,18 @@ end
 
 -- Returns true when the choice is now held for this turn, false otherwise.
 -- False is the whole of the error report on purpose: the reasons a choice is
--- refused (wrong phase, unknown player, already answered, an index that names
--- nothing) are all things the client can see for itself, and a string here
--- would be a second vocabulary to keep in step across two runtimes.
+-- refused (wrong phase, unknown player, disconnected, already answered, an
+-- index that names nothing) are all things the client can see for itself, and a
+-- string here would be a second vocabulary to keep in step across two runtimes.
 function Battle:submitChoice(playerId, choice)
   if self.phase ~= "choice" and self.phase ~= "replace" then return false end
   if type(choice) ~= "table" then return false end
 
   local fighter = self.byId[str(playerId) or ""]
   if not fighter then return false end
+  -- disconnect() pauses the clock but used to keep taking answers from the
+  -- same socket (SESSION_LEAVE leaves TCP up). Refuse until reconnect().
+  if not fighter.connected then return false end
   if not ACTIONS[choice.action] then return false end
 
   -- The replace phase belongs to the seats that owe a send-out and to nobody
@@ -1187,6 +1212,10 @@ end
 
 function Battle:_maybeResolve()
   if self.phase ~= "choice" and self.phase ~= "replace" then return false end
+  -- A leftover or forced fill must not complete the turn while a seat is
+  -- away: the clock is paused for them, and resolving would spend it.
+  -- reconnect() calls this once everyone is back.
+  if self:_anyDisconnected() then return false end
   for _, fighter in ipairs(self.fighters) do
     if self:_owes(fighter) then return false end
   end
@@ -1740,7 +1769,8 @@ function Battle:_resolveTurn()
   end
 end
 
--- Fleeing is a concession; see the policy note in the header.
+-- Fleeing is a concession in 1v1/coop_pvp, a wild escape in *wild modes,
+-- and a trainer refusal (no finish) everywhere else; see Effects.runEndsBattle.
 function Battle:_resolveRuns()
   local running = {}
   for _, fighter in ipairs(self.fighters) do
@@ -1749,6 +1779,11 @@ function Battle:_resolveRuns()
     end
   end
   if #running == 0 then return false end
+
+  if not Effects.runEndsBattle(self.mode) then
+    self:_say("No! There's no running from a trainer battle!")
+    return false
+  end
 
   local sides = {}
   for _, fighter in ipairs(running) do
@@ -2014,10 +2049,7 @@ function Battle:_resolveOneItem(fighter)
       self:_say("But it failed")
     elseif effect.faintedOnly and mon.hp > 0 then
       self:_say("But it failed")
-    elseif not effect.faintedOnly and mon.hp <= 0
-       and (effect.heal or effect.healFull or effect.clearStatuses
-            or effect.clearAllStatus or effect.ppRestore
-            or effect.ppRestoreAll) then
+    elseif mon.hp <= 0 and Effects.itemFailsOnFainted(effect) then
       self:_say("But it failed")
     else
       local applied = false
@@ -2549,8 +2581,15 @@ function Battle:_useMove(fighter, mon, opts)
   end
 
   local hits = Effects.hitCount(effectId, self.rng)
-  local critSpd = Effects.badgeBoost(mon.stats.spd, "spd", fighter.badges)
-  local isCrit = Crit.check(critSpd, self.rng:byte(), { focusEnergy = mon.focusEnergy })
+  -- Species base Speed, not battle Speed: paralysis and the Speed badge must
+  -- not change the crit rate. Absent `baseSpd` (old sheet) falls back to the
+  -- current stat still without a badge boost.
+  local critSpd = mon.baseSpd
+  if critSpd == nil then critSpd = mon.stats.spd end
+  local isCrit = Crit.check(critSpd, self.rng:byte(), {
+    focusEnergy = mon.focusEnergy,
+    highCritMove = move.highCrit == true,
+  })
   local percents = self:_typePercents(move.type, defender)
 
   local immune = false
@@ -2670,7 +2709,9 @@ function Battle:_useMove(fighter, mon, opts)
     self:_damage(fighter, mon, recoil, nil)
   end
 
-  if Effects.handlesPrimary(effectId) then
+  -- A substitute absorbs HP (including the breaking hit), so totalDealt stays
+  -- 0. Do not then apply a foe primary onto the mon behind it.
+  if Effects.handlesPrimary(effectId) and totalDealt > 0 then
     self:_applyPrimary(fighter, mon, target, defender, choice.move, effectId)
   end
 
@@ -3256,6 +3297,9 @@ function Battle:reconnect(playerId)
      and not self:_anyDisconnected() and self.choiceTimeout > 0 then
     self.deadline = self.now + self.choiceTimeout
   end
+  -- A leftover or forced fill was held open by `_maybeResolve`'s disconnect
+  -- gate; close it now that everyone is back.
+  self:_maybeResolve()
   return true
 end
 
@@ -3278,8 +3322,9 @@ function Battle:tick(nowSeconds)
   end
 
   -- Forced-only turns opened by the previous resolve wait here so one drain
-  -- does not swallow a whole trap / recharge / thrash chain.
-  if self.forcedPending and self.phase == "choice" then
+  -- does not swallow a whole trap / recharge / thrash chain. Keep the flag
+  -- while a seat is away; reconnect()'s `_maybeResolve` closes the turn.
+  if self.forcedPending and self.phase == "choice" and not self:_anyDisconnected() then
     self.forcedPending = false
     if not self:_anyoneOwes() then
       self:_maybeResolve()
