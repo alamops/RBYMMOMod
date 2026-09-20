@@ -17993,6 +17993,172 @@ end)()
   stubMod.log.warn = function() end
 end)()
 
+-- ------- replace picker waits for the faint line in draw
+--
+-- update() drains messages while `shown` is set and only then opens the
+-- picker. drawBandWidgets / drawMenusClassic used to paint WHO'S NEXT first
+-- and return, so the faint line never appeared in the band.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local Battlefield = need("Battlefield")
+  local saveMessage, saveGrid, saveList =
+    Battlefield.drawMessagePanel, Battlefield.drawCommandGrid, Battlefield.drawListPanel
+  local saveBackdrop = Battlefield.drawBandBackdrop
+  Battlefield.drawBandBackdrop = function() end
+  Battlefield.drawCommandGrid = function() return true end
+
+  local painted = {}
+  Battlefield.drawMessagePanel = function(text)
+    painted[#painted + 1] = { kind = "message", text = text }
+    return true
+  end
+  Battlefield.drawListPanel = function(_, _, opts)
+    painted[#painted + 1] = { kind = "list", title = opts and opts.title }
+    return true
+  end
+
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(0, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, replacing = true, switchIndex = 1,
+    phase = "messages", shown = "SQUIRTLE fainted!",
+    messages = { { text = "NEXT" } },
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  check(CoopBattle.boxLive(client),
+        "a shown faint line keeps the box live")
+  painted = {}
+  eq(client:drawBandWidgets(), true, "the band still draws")
+  eq(#painted, 1, "exactly one widget")
+  eq(painted[1].kind, "message",
+     "the faint line wins the band over WHO'S NEXT")
+  eq(painted[1].text, "SQUIRTLE fainted!", "and it is the line that is up")
+
+  -- Last line of a batch: already popped into `shown`, queue empty.
+  client.messages = {}
+  check(CoopBattle.boxLive(client),
+        "the last line still owns the box after it leaves the queue")
+  painted = {}
+  eq(client:drawBandWidgets(), true, "last-line band still draws")
+  eq(painted[1].kind, "message", "and still the line, not the picker")
+
+  -- Queued but not yet shown.
+  client.shown = nil
+  client.messages = { { text = "SQUIRTLE fainted!" } }
+  check(CoopBattle.boxLive(client),
+        "a queued faint line is live before it is shown")
+  painted = {}
+  eq(client:drawBandWidgets(), true, "queued-line band still draws")
+  eq(painted[1].kind, "message", "the empty page gap, not WHO'S NEXT")
+
+  -- Idle box: picker opens.
+  client.shown = nil
+  client.messages = {}
+  client.phase = "wait"
+  check(not CoopBattle.boxLive(client), "an idle box is idle")
+  painted = {}
+  eq(client:drawBandWidgets(), true, "idle replace still draws")
+  eq(painted[1].kind, "list", "and now the bench list is the band")
+  eq(painted[1].title, "WHO'S NEXT?", "titled as a send-out, not SWITCH")
+
+  -- Classic menus: same order.
+  function client:drawMessage() self._classic = "message" end
+  function client:drawReplace() self._classic = "replace" end
+  client.shown = "SQUIRTLE fainted!"
+  client.messages = { { text = "NEXT" } }
+  client.phase = "messages"
+  client._classic = nil
+  client:drawMenusClassic()
+  eq(client._classic, "message", "classic menus keep the faint line too")
+  client.shown = nil
+  client.messages = {}
+  client.phase = "wait"
+  client._classic = nil
+  client:drawMenusClassic()
+  eq(client._classic, "replace", "and open the picker once the box is idle")
+
+  -- Classic full-page send-out: drawSafe used to gate only on shown/anim,
+  -- so a queued faint with no page up still opened WHO'S NEXT over the KO.
+  local function classicClient(extra)
+    local c = setmetatable({
+      sim = sim, host = false, mine = 1, replacing = true, switchIndex = 1,
+      classicUi = true,
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+    for k, v in pairs(extra) do c[k] = v end
+    return c
+  end
+  local queued = classicClient({
+    phase = "messages", shown = nil,
+    messages = { { text = "SQUIRTLE fainted!" } },
+  })
+  check(queued:boxLive(), "a queued faint keeps the classic picker closed")
+  local sinking = classicClient({
+    phase = "messages", shown = nil, messages = {},
+    faintFx = { frames = 1 },
+  })
+  check(sinking:boxLive(), "a faint sink keeps the classic picker closed")
+  local idleClassic = classicClient({
+    phase = "wait", shown = nil, messages = {},
+  })
+  check(not idleClassic:boxLive(), "an idle box lets the classic picker open")
+
+  if CoopBattle.loadEngine() then
+    local previous = rawget(_G, "love")
+    local previousGfx = previous and previous.graphics
+    _G.love = previous or {}
+    _G.love.graphics = {
+      setColor = function() end,
+      rectangle = function() end,
+    }
+    local function drive(c)
+      c._picker, c._menus = 0, 0
+      function c:drawClassicPartyPicker()
+        self._picker = self._picker + 1
+        return true
+      end
+      function c:drawField() end
+      function c:drawAnim() end
+      function c:drawMenusClassic()
+        self._menus = self._menus + 1
+      end
+      c:drawSafe()
+    end
+    drive(queued)
+    eq(queued._picker, 0,
+       "drawSafe does not cover the stage while the box is live")
+    eq(queued._menus, 1, "...and falls through to the message box")
+    drive(sinking)
+    eq(sinking._picker, 0, "nor during the faint sink")
+    eq(sinking._menus, 1, "...the box still owns that frame")
+    drive(idleClassic)
+    eq(idleClassic._picker, 1,
+       "drawSafe opens the full-page picker once the box is idle")
+    eq(idleClassic._menus, 0, "...and does not also paint the band list")
+    if previous then
+      previous.graphics = previousGfx
+    else
+      _G.love = nil
+    end
+  end
+
+  Battlefield.drawMessagePanel, Battlefield.drawCommandGrid, Battlefield.drawListPanel =
+    saveMessage, saveGrid, saveList
+  Battlefield.drawBandBackdrop = saveBackdrop
+end)()
+
 -- ------- box text fits the eighteen-column bottom box
 ;(function()
   local CoopBattle = need("CoopBattle")
