@@ -55,6 +55,11 @@
  *     SE damage, status / setup reading, and SE bench switches (deterministic
  *     heuristics — not a full TrainerAI port) -- and the fight goes on.
  *   * The choice clock is *suspended while anybody is disconnected*.
+ *     `submitChoice` also refuses a seat whose `connected` is false until
+ *     `reconnect()`, because SESSION_LEAVE leaves the TCP up and would
+ *     otherwise keep resolving turns through the pause. `_maybeResolve`
+ *     waits on the same flag, so a leftover or forced fill cannot complete
+ *     the turn while anyone is away; `reconnect()` asks it again.
  *
  * Two shape differences from the Lua, both forced by the language:
  *
@@ -277,6 +282,7 @@ function copyMove(raw) {
     type: Math.max(0, int(raw.type, 0)),
     effect: Math.max(0, int(raw.effect, 0)),
     chance: Math.max(0, int(raw.chance, 0)),
+    highCrit: raw.highCrit === true,
   };
 }
 
@@ -1050,6 +1056,14 @@ class Battle {
       } else if (effect && effect.needsMove) {
         return null;
       }
+      // Gen 1: Potion/Ether/status/vitamin on a KO, and Revive on a living
+      // mon, never leave the picker. Refuse here so a submitted choice cannot
+      // spend the bag or the turn.
+      const targetMon = monAt(fighter, out.slot != null ? out.slot : fighter.active);
+      if (targetMon) {
+        if (effect && effect.faintedOnly && targetMon.hp > 0) return null;
+        if (targetMon.hp <= 0 && Effects.itemFailsOnFainted(effect)) return null;
+      }
       return out;
     }
 
@@ -1114,9 +1128,10 @@ class Battle {
   /*
    * Returns true when the choice is now held for this turn, false otherwise.
    * False is the whole of the error report on purpose: the reasons a choice is
-   * refused (wrong phase, unknown player, already answered, an index that names
-   * nothing) are all things the client can see for itself, and a string here
-   * would be a second vocabulary to keep in step across two runtimes.
+   * refused (wrong phase, unknown player, disconnected, already answered, an
+   * index that names nothing) are all things the client can see for itself, and
+   * a string here would be a second vocabulary to keep in step across two
+   * runtimes.
    */
   submitChoice(playerId, choice) {
     if (this.phase !== 'choice' && this.phase !== 'replace') return false;
@@ -1124,6 +1139,9 @@ class Battle {
 
     const fighter = this.byId.get(str(playerId) || '');
     if (!fighter) return false;
+    // disconnect() pauses the clock but used to keep taking answers from the
+    // same socket (SESSION_LEAVE leaves TCP up). Refuse until reconnect().
+    if (!fighter.connected) return false;
     if (!has(ACTIONS, choice.action)) return false;
 
     // The replace phase belongs to the seats that owe a send-out and to nobody
@@ -1175,6 +1193,10 @@ class Battle {
 
   _maybeResolve() {
     if (this.phase !== 'choice' && this.phase !== 'replace') return false;
+    // A leftover or forced fill must not complete the turn while a seat is
+    // away: the clock is paused for them, and resolving would spend it.
+    // reconnect() calls this once everyone is back.
+    if (this._anyDisconnected()) return false;
     for (const fighter of this.fighters) {
       if (this._owes(fighter)) return false;
     }
@@ -2007,10 +2029,7 @@ class Battle {
         this._say('But it failed');
       } else if (effect.faintedOnly && mon.hp > 0) {
         this._say('But it failed');
-      } else if (!effect.faintedOnly && mon.hp <= 0
-                 && (effect.heal || effect.healFull || effect.clearStatuses
-                     || effect.clearAllStatus || effect.ppRestore
-                     || effect.ppRestoreAll)) {
+      } else if (mon.hp <= 0 && Effects.itemFailsOnFainted(effect)) {
         this._say('But it failed');
       } else {
         let applied = false;
@@ -2684,7 +2703,9 @@ class Battle {
       this._damage(fighter, mon, recoil, null);
     }
 
-    if (Effects.handlesPrimary(effectId)) {
+    // A substitute absorbs HP (including the breaking hit), so totalDealt
+    // stays 0. Do not then apply a foe primary onto the mon behind it.
+    if (Effects.handlesPrimary(effectId) && totalDealt > 0) {
       this._applyPrimary(fighter, mon, target, defender, choice.move, effectId);
     }
 
@@ -3212,6 +3233,9 @@ class Battle {
         && !this._anyDisconnected() && this.choiceTimeout > 0) {
       this.deadline = this.now + this.choiceTimeout;
     }
+    // A leftover or forced fill was held open by `_maybeResolve`'s disconnect
+    // gate; close it now that everyone is back.
+    this._maybeResolve();
     return true;
   }
 
@@ -3236,8 +3260,9 @@ class Battle {
     }
 
     // Forced-only turns opened by the previous resolve wait here so one drain
-    // does not swallow a whole trap / recharge / thrash chain.
-    if (this.forcedPending && this.phase === 'choice') {
+    // does not swallow a whole trap / recharge / thrash chain. Keep the flag
+    // while a seat is away; reconnect()'s `_maybeResolve` closes the turn.
+    if (this.forcedPending && this.phase === 'choice' && !this._anyDisconnected()) {
       this.forcedPending = false;
       if (!this._anyoneOwes()) {
         this._maybeResolve();

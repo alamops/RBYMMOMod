@@ -15,7 +15,7 @@
  * Run: node server/hub_battle.test.js
  */
 
-const { Relay, PROTOCOL, DEFAULT_SPRITE } = require('./lib/relay.js');
+const { Relay, PROTOCOL, DEFAULT_SPRITE, presenceOf } = require('./lib/relay.js');
 const { createLog } = require('./lib/log.js');
 
 let passed = 0;
@@ -1149,8 +1149,226 @@ function testMidFightMoveset() {
     'a transformed battler is left alone');
 }
 
+/*
+ * Co-op mediated fights set battleId / coopBattleId, not sessionId. Treating
+ * only sessionId as hub-busy published those players as free and delivered a
+ * second ask a modified client could accept.
+ */
+function testBusyNowMediatedFight() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const host = dial(relay, 'HOST');
+  const ally = dial(relay, 'ALLY');
+  const asker = dial(relay, 'ASKER');
+  take(host, 'mmo.welcome'); take(ally, 'mmo.welcome'); take(asker, 'mmo.welcome');
+  host.peer.outbox = []; ally.peer.outbox = []; asker.peer.outbox = [];
+
+  relay.handle(asker.id, { type: 'mmo.request', to: ally.id, kind: 'trade' });
+  ok(take(ally, 'mmo.request') !== null, 'the ask lands while they are free');
+
+  relay.openCoopBattle('c-busy', [host.id, ally.id],
+    { mode: 'coop_npc', hostId: host.id });
+  const fighter = relay.get(ally.id);
+  ok(!fighter.sessionId, 'co-op does not take a sessionId');
+  ok(fighter.battleId && fighter.coopBattleId,
+    'it takes a battleId and a coopBattleId');
+  const opened = take(asker, 'mmo.move');
+  ok(opened && opened.busy === true,
+    'the hub publishes them busy without anyone stepping');
+
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(ally.id, {
+    type: 'mmo.respond', to: asker.id, kind: 'trade', accept: true,
+  });
+  const stacked = take(asker, 'mmo.decline');
+  ok(stacked && stacked.reason === 'busy',
+    'accepting after the fight opened is refused as busy');
+  ok(take(ally, 'mmo.session') === null && take(asker, 'mmo.session') === null,
+    'and starts no second session');
+
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(asker.id, { type: 'mmo.request', to: ally.id, kind: 'battle' });
+  const midFight = take(asker, 'mmo.decline');
+  ok(midFight && midFight.reason === 'busy',
+    'asking a fighter is declined at the hub');
+  ok(take(ally, 'mmo.request') === null, 'and never reaches them');
+
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(ally.id, { type: 'mmo.request', to: asker.id, kind: 'trade' });
+  ok(take(asker, 'mmo.request') === null,
+    "a fighter's own ask is dropped rather than forwarded");
+
+  asker.peer.outbox = [];
+  relay.closeCoopBattle('c-busy');
+  const closed = take(asker, 'mmo.move');
+  ok(closed && closed.busy === false,
+    'and publishing them free when the fight ends');
+}
+
+function testHubBusyFields() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const ally = dial(relay, 'ALLY');
+  const asker = dial(relay, 'ASKER');
+  take(ally, 'mmo.welcome'); take(asker, 'mmo.welcome');
+  const fighter = relay.get(ally.id);
+
+  // A live unsettled record, not a dangling pointer: unsettledBattle heals
+  // a stale battleId rather than treating it as occupancy.
+  relay.battles.set('c-only', { id: 'c-only', settled: false, memberIds: [ally.id] });
+  fighter.battleId = 'c-only';
+  fighter.coopBattleId = null;
+  ok(presenceOf(fighter, relay).busy === true, 'battleId alone is hub-busy');
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(asker.id, { type: 'mmo.request', to: ally.id, kind: 'battle' });
+  const byBattle = take(asker, 'mmo.decline');
+  ok(byBattle && byBattle.reason === 'busy', 'and declines a request');
+  ok(take(ally, 'mmo.request') === null);
+
+  fighter.battleId = null;
+  fighter.coopBattleId = 'c-group';
+  ok(presenceOf(fighter, relay).busy === true, 'coopBattleId alone is hub-busy');
+  asker.peer.outbox = []; ally.peer.outbox = [];
+  relay.handle(asker.id, { type: 'mmo.request', to: ally.id, kind: 'battle' });
+  const byCoop = take(asker, 'mmo.decline');
+  ok(byCoop && byCoop.reason === 'busy', 'and declines a request');
+  ok(take(ally, 'mmo.request') === null);
+}
+
+// Parties + ruleset arrived, but Turn.attempt still refuses the field.
+// Leaving the record in battles with sim = null kept every player marked
+// in a pairing that never sent battle_ready.
+function testUnfightableFieldAborts() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  const c = dial(relay, 'CAL');
+  const record = relay.openMediatedBattle('bad-1', {
+    mode: '1v1', hostId: a.id,
+    memberIds: [a.id, b.id, c.id],
+    sides: { a: [a.id, b.id], b: [c.id] },
+  });
+  record.ruleset = { chart: [[100]], seed: 7 };
+  for (const player of [a, b, c]) {
+    record.parties.set(player.id, { battle: 'bad-1', mons: [mon(90)] });
+  }
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  c.peer.outbox = [];
+  ok(relay.clients.get(a.id).battleId === 'bad-1',
+    'the seats were marked before assembly');
+  ok(relay.tryStartSim(record) === false, 'an unfightable field opens no sim');
+  ok(!relay.battles.has('bad-1'),
+    'the record is cleared rather than left half-open');
+  ok(relay.clients.get(a.id).battleId == null, 'and the host is unmarked');
+  ok(relay.clients.get(b.id).battleId == null, 'and so is the guest');
+  ok(relay.clients.get(c.id).battleId == null, 'and the third seat too');
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && outcome.outcome === 'draw' && outcome.reason === 'agree',
+    'players hear it called off rather than waiting for battle_ready');
+  const bobOut = take(b, 'mmo.battle_outcome');
+  ok(bobOut && bobOut.reason === 'agree', 'both sides hear the abort');
+  const calOut = take(c, 'mmo.battle_outcome');
+  ok(calOut && calOut.reason === 'agree', 'every marked seat hears it');
+}
+
+// A REQUEST/RESPOND 1v1 still holds sessionId after abortMediatedBattle.
+// Assembly failure has to drop that too, or busyNow keeps the pairing stuck.
+function testUnfightableSessionReleasesPairing() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  const session = openBattle(relay, a, b);
+  const record = relay.battles.get(session.id);
+  record.ruleset = { chart: [[100]] };
+  record.parties.set(a.id, { battle: session.id, mons: [] });
+  record.parties.set(b.id, { battle: session.id, mons: [mon(90)] });
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  ok(relay.clients.get(a.id).sessionId === session.id, 'the pairing is live');
+  ok(relay.matches.has(session.id), 'ranked paperwork existed for the pairing');
+  ok(relay.tryStartSim(record) === false, 'an empty party opens no sim');
+  ok(relay.clients.get(a.id).sessionId == null, 'the host is off the pairing');
+  ok(relay.clients.get(b.id).sessionId == null, 'and so is the guest');
+  ok(relay.clients.get(a.id).battleId == null, 'and unmarked for the fight');
+  ok(!relay.matches.has(session.id), 'and the settlement record is dropped');
+  relay.handle(a.id, { type: 'mmo.result', session: session.id, outcome: 'win' });
+  relay.handle(b.id, { type: 'mmo.result', session: session.id, outcome: 'loss' });
+  ok(!relay.matches.has(session.id), 'a leftover vote cannot resurrect it');
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && outcome.reason === 'agree', 'they hear it called off');
+  ok(take(b, 'mmo.session_end') != null, 'the guest hears the pairing end');
+}
+
+// Same for a co-op group: abort alone left coopBattleId set.
+function testUnfightableCoopReleasesGroup() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  const id = relay.openCoopBattle('c-bad', [a.id, b.id],
+    { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get(id);
+  record.ruleset = { chart: [[100]] };
+  for (const seat of relay.seatsNeeded(record)) {
+    record.parties.set(seat, { battle: id, mons: [mon(90)] });
+  }
+  record.parties.set(record.npcIds[0], { battle: id, mons: [] });
+  relay.coopMatches.set(id, {
+    a: [], b: [], reports: new Map(), everyone: [a.id, b.id],
+    startedAt: clock.now(),
+  });
+  a.peer.outbox = [];
+  ok(relay.clients.get(a.id).coopBattleId === id, 'the co-op group is live');
+  ok(relay.tryStartSim(record) === false, 'an empty npc seat opens no sim');
+  ok(relay.clients.get(a.id).coopBattleId == null, 'the group is released');
+  ok(relay.clients.get(b.id).coopBattleId == null, 'both members');
+  ok(!relay.coopBattles.has(id), 'and forgotten');
+  ok(!relay.coopMatches.has(id), 'and the settlement record is dropped');
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && outcome.reason === 'agree', 'they hear it called off');
+}
+
+// A refused open must not leave a group, seat marks, or ranked paperwork.
+function testRefusedCoopOpenLeavesNoPaperwork() {
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  const c = dial(relay, 'CAL');
+  const d = dial(relay, 'DEE');
+  ok(relay.openCoopBattle('c-none', [], { mode: 'coop_pvp' }) == null,
+    'an empty roster opens nothing');
+  ok(!relay.coopBattles.has('c-none'), 'and leaves no group');
+  ok(relay.clients.get(a.id).coopBattleId == null, 'and marks no seat');
+  ok(!relay.coopMatches.has('c-none'), 'and files no paperwork');
+
+  relay.coopAsks.set('c-miss', {
+    asker: a.id,
+    sideA: [a.id, b.id],
+    sideB: [c.id, d.id],
+    everyone: [],
+    answers: new Set(),
+    needed: 3,
+    startedAt: clock.now(),
+  });
+  relay.startCoopBattle('c-miss');
+  ok(!relay.coopMatches.has('c-miss'), 'a refused start files no settlement record');
+  ok(!relay.coopBattles.has('c-miss'), 'and leaves no group');
+  ok(!relay.battles.has('c-miss'), 'and opens no fight');
+  ok(!relay.coopAsks.has('c-miss'), 'and the ask is torn down');
+}
+
 testBagProofs();
 testMidFightMoveset();
+testBusyNowMediatedFight();
+testHubBusyFields();
+testUnfightableFieldAborts();
+testUnfightableSessionReleasesPairing();
+testUnfightableCoopReleasesGroup();
+testRefusedCoopOpenLeavesNoPaperwork();
 
 // Wave 2 T2d: hub generation selects battle vs battle2 at construction.
 {

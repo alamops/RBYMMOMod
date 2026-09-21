@@ -349,6 +349,20 @@ function resetStages(mon) {
   mon.stages.eva = 0;
 }
 
+// Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
+// Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
+// Substitute) and field-wide Haze still run; Conversion copies onto the user.
+function blockedBySubstitute(effectId) {
+  const statFx = STAT_EFFECTS[effectId];
+  if (statFx) return !statFx.selfTarget;
+  if (effectId === 24 || effectId === 25 || effectId === 46 || effectId === 47
+      || effectId === 56 || effectId === 64 || effectId === 65
+      || effectId === 79 || effectId === 85) {
+    return false;
+  }
+  return true;
+}
+
 // ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
 //      moveIndex (1-based), statusToWire
 function applyPrimary(ctx) {
@@ -362,6 +376,11 @@ function applyPrimary(ctx) {
     userMon, targetMon, userFighter, targetFighter, rng,
   } = c;
   const wire = c.statusToWire || {};
+
+  if (targetMon && (targetMon.substitute || 0) > 0 && blockedBySubstitute(effectId)) {
+    out.nothing = true;
+    return out;
+  }
 
   if (effectId === 85) {
     out.nothing = true;
@@ -545,6 +564,7 @@ function applyPrimary(ctx) {
       type: Math.max(0, int(source.type, 0)),
       effect: Math.max(0, int(source.effect, 0)),
       chance: Math.max(0, int(source.chance, 0)),
+      highCrit: source.highCrit === true,
     };
     out.messages.push(`${userMon.species} learned ${moveLabel(source)}`);
     out.movesChanged = true;
@@ -572,6 +592,7 @@ function applyPrimary(ctx) {
       type: Math.max(0, int(m.type, 0)),
       effect: Math.max(0, int(m.effect, 0)),
       chance: Math.max(0, int(m.chance, 0)),
+      highCrit: m.highCrit === true,
     }));
     userMon.transformed = true;
     out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
@@ -921,6 +942,16 @@ function itemEffect(itemId) {
   return { heal, clearStatuses: statuses, needsParty: true };
 }
 
+// Potion / Ether / status cure / vitamin cannot apply to a KO (Revive is
+// faintedOnly). Shared by the item picker and `_normaliseChoice` so a
+// submitted choice cannot spend the bag or the turn.
+function itemFailsOnFainted(effect) {
+  if (!effect || typeof effect !== 'object' || effect.faintedOnly) return false;
+  return Boolean(effect.heal || effect.healFull || effect.clearStatuses
+      || effect.clearAllStatus || effect.ppRestore || effect.ppRestoreAll
+      || effect.vitamin);
+}
+
 function applyVitamin(mon, itemId) {
   if (!mon || typeof mon !== 'object') return null;
   const effect = itemEffect(itemId);
@@ -1156,6 +1187,7 @@ module.exports = {
   screenDamage,
   isSpecialType,
   itemEffect,
+  itemFailsOnFainted,
   applyVitamin,
   caughtSheet,
   catchAttempt,

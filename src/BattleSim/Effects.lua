@@ -404,6 +404,20 @@ local function resetStages(mon)
   mon.stages.eva = 0
 end
 
+-- Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
+-- Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
+-- Substitute) and field-wide Haze still run; Conversion copies onto the user.
+local function blockedBySubstitute(effectId)
+  local statFx = STAT_EFFECTS[effectId]
+  if statFx then return not statFx.selfTarget end
+  if effectId == 24 or effectId == 25 or effectId == 46 or effectId == 47
+      or effectId == 56 or effectId == 64 or effectId == 65
+      or effectId == 79 or effectId == 85 then
+    return false
+  end
+  return true
+end
+
 -- ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
 --      moveIndex (1-based), statusToWire
 -- Returns { nothing, messages, events, heals } where heals = { amount } for user.
@@ -417,6 +431,11 @@ function M.applyPrimary(ctx)
   local targetFighter = ctx.targetFighter
   local wire = ctx.statusToWire or {}
   local rng = ctx.rng
+
+  if targetMon and (targetMon.substitute or 0) > 0 and blockedBySubstitute(effectId) then
+    out.nothing = true
+    return out
+  end
 
   if effectId == 85 then -- SPLASH_EFFECT
     out.nothing = true
@@ -607,6 +626,7 @@ function M.applyPrimary(ctx)
       type = max(0, int(source.type, 0)),
       effect = max(0, int(source.effect, 0)),
       chance = max(0, int(source.chance, 0)),
+      highCrit = source.highCrit == true,
     }
     out.messages[#out.messages + 1] =
       userMon.species .. " learned " .. moveLabel(source)
@@ -640,6 +660,7 @@ function M.applyPrimary(ctx)
         type = max(0, int(m.type, 0)),
         effect = max(0, int(m.effect, 0)),
         chance = max(0, int(m.chance, 0)),
+        highCrit = m.highCrit == true,
       }
     end
     userMon.moves = copied
@@ -1031,6 +1052,16 @@ function M.itemEffect(itemId)
   local statuses = ITEM_STATUS[itemId]
   if not heal and not statuses then return nil end
   return { heal = heal, clearStatuses = statuses, needsParty = true }
+end
+
+-- Potion / Ether / status cure / vitamin cannot apply to a KO (Revive is
+-- faintedOnly). Shared by the item picker and `_normaliseChoice` so a
+-- submitted choice cannot spend the bag or the turn.
+function M.itemFailsOnFainted(effect)
+  if type(effect) ~= "table" or effect.faintedOnly then return false end
+  return not not (effect.heal or effect.healFull or effect.clearStatuses
+      or effect.clearAllStatus or effect.ppRestore or effect.ppRestoreAll
+      or effect.vitamin)
 end
 
 -- Apply a Gen1 vitamin to a battle mon sheet. Mutates `mon.evs` and battle

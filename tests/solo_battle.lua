@@ -645,8 +645,7 @@ end)()
   local turnBefore = sim.turn
 
   -- The RUN slab, pressed. Driven through the command menu rather than through
-  -- sendChoice, because the duplicate line was the screen's own and only this
-  -- path prints it.
+  -- sendChoice, because that is the path that used to print the line too early.
   local input = { wasPressed = function(_, key) return key == "a" end }
   fight.commandIndex = 4
   eq(fight.COMMANDS[4], "RUN", "the fourth command is RUN")
@@ -700,6 +699,8 @@ end)()
   eq(pvpSent[1] and pvpSent[1].action, "run", "...as a concession")
   eq(saidTimes(pvp, "running from"), 0,
      "and does not pretend a 1v1 is a trainer battle")
+  eq(saidTimes(pvp, "forfeit"), 1,
+     "and says it forfeited after the send landed")
 
   local npc, npcSent = pressRun("coop_npc")
   eq(#npcSent, 0, "trainer RUN is not filed")

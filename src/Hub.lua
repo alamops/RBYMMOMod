@@ -469,16 +469,24 @@ end
 -- (see the REQUEST handler) -- that gate stays on the hub's own view, so a
 -- stale flag costs at most one honest refusal rather than a battle nobody
 -- could arrange.
+--
+-- Hub-owned occupancy is more than sessionId.  A 1v1 battle takes a session
+-- *and* a battleId (SESSION_LEAVE keeps battleId through reconnect grace);
+-- a co-op mediated fight takes coopBattleId and may never have a sessionId.
+-- Leaving those out published a fighter as free, and REQUEST delivered a
+-- second ask a modified client could accept.  Fight occupancy goes through
+-- unsettledBattle so a stale pointer is healed the same way REQUEST /
+-- startSession heal one, rather than publishing busy while an ask would
+-- still be forwarded.  coopBattleId is occupancy on its own: the group can
+-- outlive a cleared fight pointer.
+local function hubBusy(hub, client)
+  return client.sessionId ~= nil
+      or client.coopBattleId ~= nil
+      or hub:unsettledBattle(client) ~= nil
+end
+
 local function busyNow(hub, client)
-  -- battleId outlives sessionId on purpose: SESSION_LEAVE of a live fight
-  -- starts reconnect grace rather than ending it, and the player who walked
-  -- off still has to sit that out. Listing them as free here is how they
-  -- were asked into a second pairing while the first sim kept ticking.
-  -- Goes through unsettledBattle so a stale pointer is healed the same way
-  -- REQUEST / startSession heal one, rather than publishing busy while an
-  -- ask would still be forwarded.
-  return client.sessionId ~= nil or client.busy == true
-    or hub:unsettledBattle(client) ~= nil
+  return hubBusy(hub, client) or client.busy == true
 end
 
 local function presenceOf(hub, client)
@@ -508,6 +516,18 @@ local function presenceOf(hub, client)
     -- hello. Every roster row and every trainer card reads this field.
     points = client.points or Config.RANK_START,
   }
+end
+
+-- Same broadcast startSession uses when a pairing opens: other players'
+-- menus read the last MOVE, not the hub's live table, so a co-op fight
+-- that never steps would otherwise stay listed as free until someone walked.
+local function publishOccupancy(hub, memberIds)
+  for _, memberId in ipairs(memberIds or {}) do
+    local member = hub.clients[memberId]
+    if member and member.ready then
+      hub:broadcast(Wire.MOVE, presenceOf(hub, member), member.id)
+    end
+  end
 end
 
 function M:broadcast(msgType, payload, exceptId)
@@ -1073,21 +1093,17 @@ function M:openCoopBattle(id, memberIds, plan)
       members[#members + 1] = memberId
     end
   end
-  self.coopBattles[id] = { members = members, startedAt = self.clock }
-  -- ...and the hub's own record of the fight, on the same id.  Built even
-  -- though nothing may ever arrive for it: a client that never uploads a
-  -- ruleset simply leaves `sim` nil, which is exactly how the legacy
-  -- client-simulated path stays open underneath this one.
+  -- The mediated record first: a refused open must not leave a group or
+  -- seat marks for a fight that does not exist.
   local shape = { memberIds = members }
   for key, value in pairs(plan or {}) do shape[key] = value end
-  if not self:openMediatedBattle(id, shape) then
-    self.coopBattles[id] = nil
-    return nil
-  end
+  if not self:openMediatedBattle(id, shape) then return nil end
   for _, memberId in ipairs(members) do
     local member = self.clients[memberId]
     if member then member.coopBattleId = id end
   end
+  self.coopBattles[id] = { members = members, startedAt = self.clock }
+  publishOccupancy(self, members)
   return id
 end
 
@@ -1097,7 +1113,8 @@ function M:closeCoopBattle(id)
   local group = self.coopBattles[id]
   if not group then return false end
   self.coopBattles[id] = nil
-  for _, memberId in ipairs(group.members or {}) do
+  local members = group.members or {}
+  for _, memberId in ipairs(members) do
     local member = self.clients[memberId]
     if member and member.coopBattleId == id then member.coopBattleId = nil end
   end
@@ -1107,6 +1124,7 @@ function M:closeCoopBattle(id)
   -- called off rather than left refereeing an empty room.
   local record = self.battles[id]
   if record then self:abortMediatedBattle(record, "gone") end
+  publishOccupancy(self, members)
   return true
 end
 
@@ -1141,10 +1159,11 @@ function M:startCoopBattle(id)
   -- else, and the hub is the only party that knows who they are.  The two
   -- sides go with it -- this is the moment they are known, and a mediated
   -- field cannot be assembled from a flat list of four.
-  if not self:openCoopBattle(id, ask.everyone, {
+  local opened = self:openCoopBattle(id, ask.everyone, {
     mode = "coop_pvp", hostId = ask.asker,
     sides = { a = ask.sideA, b = ask.sideB },
-  }) then
+  })
+  if not opened then
     self.coopAsks[id] = ask
     -- `gone` is the closest closed coop_decline token; a seat is in another fight.
     return self:endCoopAsk(id, nil, "gone")
@@ -1779,6 +1798,9 @@ end
 --
 -- Answers false and changes nothing when anything is still missing, so it is
 -- safe to call from every message that could have been the last one needed.
+-- A field the turn machine refuses is the other false: the record is aborted
+-- rather than left in battles with sim = nil, which kept every seat marked
+-- in a pairing that will never send battle_ready.
 function M:tryStartSim(record)
   if not record or record.sim or record.settled then return false end
   if not record.ruleset then return false end
@@ -1846,11 +1868,14 @@ function M:tryStartSim(record)
     -- logger, so the refusal goes out the seam that already exists for "a
     -- message from this connection was not acted on" -- once per connection,
     -- charged to the authority whose ruleset and parties made the field.
+    -- Then the record is called off: leaving it half-open kept every seat
+    -- marked in a fight that will never start.
     local host = self.clients[record.hostId]
     if host then
       noteDrop(self, host,
         "this battle could not be assembled: " .. tostring(why))
     end
+    self:failMediatedAssembly(record)
     return false
   end
   record.sim = battle
@@ -2050,6 +2075,28 @@ function M:leaveBattle(client)
   -- one that was being assembled is called off.
   self:abortMediatedBattle(record, "gone")
   return false
+end
+
+-- Parties and a ruleset arrived, the turn machine still refused the field.
+-- abortMediatedBattle clears battleId; a 1v1 still holds sessionId (busyNow)
+-- and a co-op still holds coopBattleId. Those go too, or the seats stay
+-- hub-busy waiting for a battle_ready that will never come.
+--
+-- `agree` is the phrasebook token the screens already have a sentence for
+-- ("The battle was called off.") -- `gone` prints as a silent draw.
+--
+-- Drop matches/coopMatches before the abort broadcast: RESULT is gated on
+-- mediated.sim, then leftover paperwork. A failed assembly never had a sim,
+-- so a leftover record would still take a vote.
+function M:failMediatedAssembly(record)
+  if not record then return end
+  local id, hostId = record.id, record.hostId
+  self.matches[id] = nil
+  self.coopMatches[id] = nil
+  self:abortMediatedBattle(record, "agree")
+  local host = hostId and self.clients[hostId]
+  if host and host.sessionId == id then self:endSession(host, "gone") end
+  if self.coopBattles[id] then self:closeCoopBattle(id) end
 end
 
 -- Call the fight off.  Everybody still owed a grace is disconnected and the
@@ -2582,8 +2629,10 @@ handlers[Wire.REQUEST] = function(self, client, msg)
   if not kind then return end
   -- Silence here strands the asker the same way a vanished target used to:
   -- the client holds `outgoing` until a decline or session lands.  Kind is
-  -- already known, so the reply can name the ask it is refusing.
-  if self:unsettledBattle(client) then
+  -- already known, so the reply can name the ask it is refusing.  A live
+  -- fight or co-op group is occupancy without a trade session, so it must
+  -- decline rather than drop.
+  if self:unsettledBattle(client) or client.coopBattleId then
     return send(client, Wire.DECLINE,
       { name = client.name, kind = kind, reason = "busy" })
   end
@@ -2603,7 +2652,7 @@ handlers[Wire.REQUEST] = function(self, client, msg)
     return send(client, Wire.DECLINE, { kind = kind, reason = "gone" })
   end
   if target.id == client.id then return end
-  if target.sessionId or self:unsettledBattle(target) then
+  if hubBusy(self, target) then
     return send(client, Wire.DECLINE,
       { name = target.name, kind = kind, reason = "busy" })
   end
@@ -2655,8 +2704,7 @@ handlers[Wire.RESPOND] = function(self, client, msg)
     return send(asker, Wire.DECLINE, { name = client.name, kind = kind,
                                        reason = Wire.declineReason(msg.reason) })
   end
-  if client.sessionId or asker.sessionId
-     or self:unsettledBattle(client) or self:unsettledBattle(asker) then
+  if hubBusy(self, client) or hubBusy(self, asker) then
     return send(asker, Wire.DECLINE,
       { name = client.name, kind = kind, reason = "busy" })
   end

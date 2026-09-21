@@ -317,18 +317,40 @@ function parseLine(line) {
  * mmo.request handler) -- that gate stays on the hub's own view, so a stale
  * flag costs at most one honest refusal rather than a battle nobody could
  * arrange. Twin of src/Hub.lua's busyNow.
+ *
+ * Hub-owned occupancy is more than sessionId. A 1v1 battle takes a session
+ * *and* a battleId (SESSION_LEAVE keeps battleId through reconnect grace);
+ * a co-op mediated fight takes coopBattleId and may never have a sessionId.
+ * Leaving those out published a fighter as free, and mmo.request delivered
+ * a second ask a modified client could accept. Fight occupancy goes through
+ * unsettledBattle so a stale pointer is healed the same way request /
+ * startSession heal one. coopBattleId is occupancy on its own: the group
+ * can outlive a cleared fight pointer. Callers without a relay (exported
+ * presenceOf in tests) fall back to the raw battleId field.
  */
-function busyNow(client, relay) {
-  // battleId outlives sessionId on purpose: SESSION_LEAVE of a live fight
-  // starts reconnect grace rather than ending it, and the player who walked
-  // off still has to sit that out. Listing them as free here is how they
-  // were asked into a second pairing while the first sim kept ticking.
-  // `relay` heals a stale pointer the same way request/startSession do;
-  // callers without one (exported presenceOf in tests) fall back to the field.
+function hubBusy(client, relay) {
   const inFight = relay
     ? Boolean(relay.unsettledBattle(client))
     : Boolean(client.battleId);
-  return Boolean(client.sessionId) || client.busy === true || inFight;
+  return Boolean(client.sessionId)
+    || Boolean(client.coopBattleId)
+    || inFight;
+}
+
+function busyNow(client, relay) {
+  return hubBusy(client, relay) || client.busy === true;
+}
+
+// Same broadcast startSession uses when a pairing opens: other players'
+// menus read the last mmo.move, not the hub's live table, so a co-op fight
+// that never steps would otherwise stay listed as free until someone walked.
+function publishOccupancy(relay, memberIds) {
+  for (const memberId of memberIds || []) {
+    const member = relay.clients.get(memberId);
+    if (member && member.ready) {
+      relay.broadcast('mmo.move', presenceOf(member, relay), member.id);
+    }
+  }
 }
 
 function presenceOf(client, relay) {
@@ -622,8 +644,10 @@ handlers['mmo.request'] = (relay, client, msg) => {
   if (!kind) return;
   // Silence here strands the asker the same way a vanished target used to:
   // the client holds `outgoing` until a decline or session lands. Kind is
-  // already known, so the reply can name the ask it is refusing.
-  if (relay.unsettledBattle(client)) {
+  // already known, so the reply can name the ask it is refusing. A live
+  // fight or co-op group is occupancy without a trade session, so it must
+  // decline rather than drop.
+  if (relay.unsettledBattle(client) || client.coopBattleId) {
     return relay.send(client, 'mmo.decline',
       { name: client.name, kind, reason: 'busy' });
   }
@@ -644,7 +668,7 @@ handlers['mmo.request'] = (relay, client, msg) => {
   }
   if (target.id === client.id) return;
 
-  if (target.sessionId || relay.unsettledBattle(target)) {
+  if (hubBusy(target, relay)) {
     return relay.send(client, 'mmo.decline',
       { name: target.name, kind, reason: 'busy' });
   }
@@ -702,8 +726,7 @@ handlers['mmo.respond'] = (relay, client, msg) => {
     if (reason) out.reason = reason;
     return relay.send(asker, 'mmo.decline', out);
   }
-  if (client.sessionId || asker.sessionId
-      || relay.unsettledBattle(client) || relay.unsettledBattle(asker)) {
+  if (hubBusy(client, relay) || hubBusy(asker, relay)) {
     return relay.send(asker, 'mmo.decline',
       { name: client.name, kind, reason: 'busy' });
   }
@@ -2410,19 +2433,18 @@ class Relay {
         this.closeCoopBattle(old);
       }
     }
-    this.coopBattles.set(id, { members, startedAt: now });
-    // ...and the hub's own record of the fight, on the same id. Built even
-    // though nothing may ever arrive for it: a client that never uploads a
-    // ruleset simply leaves `sim` null, which is exactly how the legacy path
-    // stays open underneath this one.
-    if (!this.openMediatedBattle(id, Object.assign({ memberIds: members }, plan || {}))) {
-      this.coopBattles.delete(id);
-      return null;
-    }
+    // The mediated record first: a refused open must not leave a group or
+    // seat marks for a fight that does not exist.
+    const record = this.openMediatedBattle(id,
+      Object.assign({ memberIds: members }, plan || {}));
+    if (!record) return null;
     for (const memberId of members) {
       const member = this.clients.get(memberId);
       if (member) member.coopBattleId = id;
     }
+    this.coopBattles.set(id, { members, startedAt: now });
+    publishOccupancy(this, members);
+    this.noteRosterChange();
     return id;
   }
 
@@ -2432,7 +2454,8 @@ class Relay {
     const group = this.coopBattles.get(id);
     if (!group) return false;
     this.coopBattles.delete(id);
-    for (const memberId of group.members || []) {
+    const members = group.members || [];
+    for (const memberId of members) {
       const member = this.clients.get(memberId);
       if (member && member.coopBattleId === id) member.coopBattleId = null;
     }
@@ -2442,6 +2465,8 @@ class Relay {
     // called off rather than left refereeing an empty room.
     const record = this.battles.get(id);
     if (record) this.abortMediatedBattle(record, 'gone');
+    publishOccupancy(this, members);
+    this.noteRosterChange();
     return true;
   }
 
@@ -2490,10 +2515,11 @@ class Relay {
     // the hub is the only party that knows who they are. The two sides go with
     // it -- this is the moment they are known, and a mediated field cannot be
     // assembled from a flat list of four.
-    if (!this.openCoopBattle(id, ask.everyone, {
+    const opened = this.openCoopBattle(id, ask.everyone, {
       mode: 'coop_pvp', hostId: ask.asker,
       sides: { a: ask.sideA.slice(), b: ask.sideB.slice() },
-    })) {
+    });
+    if (!opened) {
       this.coopAsks.set(id, ask);
       // `gone` is the closest closed coop_decline token; a seat is in another fight.
       return this.endCoopAsk(id, null, 'gone');
@@ -3377,6 +3403,10 @@ class Relay {
     });
     if (!created.battle) {
       this.log.warn(`mediated battle ${record.id} refused: ${safe(created.reason)}`);
+      // Seats are filled and the turn machine still will not fight on this
+      // field. Leaving the record in battles with sim = null kept every
+      // player marked in a pairing that will never send battle_ready.
+      this.failMediatedAssembly(record);
       return false;
     }
     record.sim = created.battle;
@@ -3566,6 +3596,31 @@ class Relay {
     // Still collecting parties / ruleset: call the fight off.
     this.abortMediatedBattle(record, 'gone');
     return false;
+  }
+
+  /*
+   * Parties and a ruleset arrived, the turn machine still refused the field.
+   * abortMediatedBattle clears battleId; a 1v1 still holds sessionId (busyNow)
+   * and a co-op still holds coopBattleId. Those go too, or the seats stay
+   * hub-busy waiting for a battle_ready that will never come.
+   *
+   * `agree` is the phrasebook token the screens already have a sentence for
+   * ("The battle was called off.") — `gone` prints as a silent draw.
+   *
+   * Drop matches/coopMatches before the abort broadcast: RESULT is gated on
+   * mediated.sim, then leftover paperwork. A failed assembly never had a sim,
+   * so a leftover record would still take a vote.
+   */
+  failMediatedAssembly(record) {
+    if (!record) return;
+    const id = record.id;
+    const hostId = record.hostId;
+    this.matches.delete(id);
+    this.coopMatches.delete(id);
+    this.abortMediatedBattle(record, 'agree');
+    const host = hostId && this.clients.get(hostId);
+    if (host && host.sessionId === id) this.endSession(host, 'gone');
+    if (this.coopBattles.has(id)) this.closeCoopBattle(id);
   }
 
   abortMediatedBattle(record, reason) {

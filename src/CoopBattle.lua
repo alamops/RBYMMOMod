@@ -1359,14 +1359,20 @@ local function pageBoxText(text)
 end
 
 -- One step on a vertical list. UP/DOWN move; LEFT/RIGHT are aliases (same habit
--- as the target column and the move list). Clamped -- no wrap.
-local function listPress(index, count, input)
+-- as the target column and the move list). Clamped at both ends unless `wrap`
+-- is true -- then it rings like Gen 1 FIGHT / ITEM (and 1v1
+-- MediatedBattle:updateMoveMenu). SWITCH / replace / RUN stay clamped.
+local function listPress(index, count, input, wrap)
   if count < 1 then return nil end
   local step = 0
   if input:wasPressed("up") or input:wasPressed("left") then step = -1
   elseif input:wasPressed("down") or input:wasPressed("right") then step = 1 end
   if step == 0 then return nil end
-  return math.max(1, math.min(count, (index or 1) + step))
+  local want = (index or 1) + step
+  if wrap then
+    return ((want - 1) % count) + 1
+  end
+  return math.max(1, math.min(count, want))
 end
 
 -- The battle-command grid. Each arrow moves on its own axis and clamps at the
@@ -2215,12 +2221,11 @@ function M:updateMove(input)
   local moves = self:liveMoves()
   if #moves == 0 then return end
   -- One name per row (drawMoves), so UP/DOWN step the list. LEFT/RIGHT stay
-  -- aliases -- same habit as the target column -- and both ends clamp.
-  local step = 0
-  if input:wasPressed("up") or input:wasPressed("left") then step = -1
-  elseif input:wasPressed("down") or input:wasPressed("right") then step = 1 end
-  if step ~= 0 then
-    self.moveIndex = math.max(1, math.min(#moves, (self.moveIndex or 1) + step))
+  -- aliases -- same habit as the target column -- and both ends wrap, matching
+  -- Gen 1 FIGHT and MediatedBattle:updateMoveMenu.
+  local moved = listPress(self.moveIndex or 1, #moves, input, true)
+  if moved then
+    self.moveIndex = moved
   elseif input:wasPressed("b") then
     self.phase = "choose"
   elseif input:wasPressed("a") then
@@ -2403,7 +2408,7 @@ function M:updateItem(input)
     self.after = "choose"
     return
   end
-  local moved = listPress(self.itemIndex or 1, #items, input)
+  local moved = listPress(self.itemIndex or 1, #items, input, true)
   if moved then
     self.itemIndex = moved
   elseif input:wasPressed("b") then
@@ -2468,7 +2473,7 @@ function M:updateItemParty(input)
     self.phase = "item"
     return
   end
-  local moved = listPress(self.switchIndex or 1, #rows, input)
+  local moved = listPress(self.switchIndex or 1, #rows, input, true)
   if moved then
     self.switchIndex = moved
   elseif input:wasPressed("b") then
@@ -2477,8 +2482,16 @@ function M:updateItemParty(input)
   elseif input:wasPressed("a") then
     local row = rows[self.switchIndex]
     local effect = self.itemPick and self.itemPick.effect
-    if effect and effect.faintedOnly and not row.fainted then
+    -- Same Gen 1 picker gate as MediatedBattle:updateItemParty. Co-op only
+    -- drains `messages` while phase is "messages"; stay on the picker after.
+    local Effects = need("BattleSim/Effects")
+    if effect and (
+         (effect.faintedOnly and not row.fainted)
+         or (row.fainted and Effects.itemFailsOnFainted(effect))
+       ) then
       self:say("It won't have\nany effect.")
+      self.phase = "messages"
+      self.after = "item_party"
       return
     end
     if effect and effect.needsMove then
@@ -2500,7 +2513,7 @@ function M:updateItemMove(input)
     self.phase = "item_party"
     return
   end
-  local moved = listPress(self.moveIndex or 1, #moves, input)
+  local moved = listPress(self.moveIndex or 1, #moves, input, true)
   if moved then
     self.moveIndex = moved
   elseif input:wasPressed("b") then
@@ -5780,12 +5793,20 @@ end
 -- One classic full-page picker row from a party / bench mon. Front pic is
 -- the battle FRONT (foe-stage art); the list icon is the start-menu bag
 -- sprite. Types and exp come off the species def / save mon, never invented.
-local function classicPickerRow(self, mon, label)
+--
+-- `shownHp` is the plate's display clock when this mon is the one draining
+-- on the field. Faint stays on truth hp so a bar still crawling to 0 is
+-- not already FNT in the list.
+local function classicPickerRow(self, mon, label, shownHp)
   if type(mon) ~= "table" then return nil end
   local data = self.game and self.game.data
   local pokemon = (data and data.pokemon) or {}
   local def = pokemon[mon.species]
-  local hp = tonumber(mon.hp)
+  local truth = tonumber(mon.hp)
+  local hp = tonumber(shownHp)
+  if hp == nil then hp = tonumber(mon.shownHp) end
+  if hp == nil then hp = tonumber(mon.shownHP) end
+  if hp == nil then hp = truth end
   local maxHp = tonumber(mon.maxHp)
     or (type(mon.stats) == "table" and tonumber(mon.stats.hp))
   return {
@@ -5797,7 +5818,7 @@ local function classicPickerRow(self, mon, label)
     maxHp = maxHp,
     types = ClassicBattle.typeNames(def, engine and engine.TypeChart),
     expFrac = expFraction(self.game, mon),
-    fainted = (hp or 0) <= 0,
+    fainted = (truth or 0) <= 0,
     front = partyFrontFor(self, mon),
     icon = seatIconFor(self, nil, { mon = mon }),
     species = mon.species,
@@ -7135,13 +7156,31 @@ end
 -- `drawMenusClassic`, which is byte-identical to what it always was.
 
 -- Right-hand column for a party row: the numbers the plates publish anyway.
-local function hpRight(mon)
-  if type(mon) ~= "table" then return nil end
-  local hp = tonumber(mon.hp)
+-- Prefer the display clock so a list drawn while a bar crawls matches the
+-- plate instead of jumping to sim truth. A battler (`shownHP` + nested
+-- `.mon`) is accepted the same way a party mon or a seat is.
+local function hpRight(src)
+  if type(src) ~= "table" then return nil end
+  local battler = type(src.mon) == "table" and src or nil
+  local mon = battler and src.mon or src
+  local hp
+  if battler then
+    hp = displayHP(battler)
+  else
+    hp = tonumber(mon.shownHp)
+    if hp == nil then hp = tonumber(mon.shownHP) end
+    if hp == nil then hp = tonumber(mon.hp) end
+  end
   local max = tonumber(mon.maxHp)
     or (type(mon.stats) == "table" and tonumber(mon.stats.hp))
-  if not (hp and max) then return nil end
+  if hp == nil or not max then return nil end
   return ("%d/%d"):format(hp, max)
+end
+
+-- Fielded battler for a party index, when that index is the one on the plate.
+local function fieldBattler(self, seat, partyIndex)
+  if not (seat and partyIndex and seat.active == partyIndex) then return nil end
+  return self:shownBattlerAt(seat.index) or seat.battler
 end
 
 -- The commands, with SWITCH under the name the player knows it by -- which is
@@ -7174,6 +7213,18 @@ function M:moveTypeName(id)
   return typeId
 end
 
+-- A move's name as FIGHT prints it -- the dataset's display name, or the
+-- id when this copy has no record. Every list that names a move uses this,
+-- including the Ether picker, so a player never has to read QUICK_ATTACK.
+function M:moveLabel(id)
+  if type(id) ~= "string" or id == "" then return nil end
+  local moves = self.game and self.game.data and self.game.data.moves
+  local def = type(moves) == "table" and moves[id] or nil
+  local name = def and def.name
+  if type(name) == "string" and name ~= "" then return name end
+  return id
+end
+
 -- The move list, and the strip that used to sit beside it. PP is the row's own
 -- right column and TYPE the column left of it -- on every row, because what
 -- the player is comparing four ways is on the four rows, not on a strip that
@@ -7184,7 +7235,7 @@ function M:bandMoveRows()
   local rows = {}
   for _, moveInst in ipairs(moves) do
     local def = (data and data.moves or {})[moveInst.id]
-    local row = { label = (def and def.name) or moveInst.id or "-" }
+    local row = { label = self:moveLabel(moveInst.id) or "-" }
     row.tag = self:moveTypeName(moveInst.id)
     local pp = tonumber(moveInst.pp)
     if def and tonumber(def.pp) then
@@ -7198,6 +7249,23 @@ function M:bandMoveRows()
     end
     if pp and pp <= 0 then row.dim = true end
     rows[#rows + 1] = row
+  end
+  return rows
+end
+
+-- Fielded targets, with HP from the same clock the plates drain.
+function M:bandTargetRows()
+  local rows = {}
+  local mine = self:mySlot()
+  local sim = self.sim
+  for _, entry in ipairs((mine and sim and sim.targetsFor and sim:targetsFor(mine)) or {}) do
+    local battler = entry.battler
+    local mon = battler and battler.mon
+    rows[#rows + 1] = {
+      label = (battler and battler.name) or "?",
+      right = hpRight(battler or mon),
+      dim = (mon and (mon.hp or 0) <= 0) or nil,
+    }
   end
   return rows
 end
@@ -7219,11 +7287,45 @@ function M:bandBenchRows(bench)
     local def = pokemon[mon.species]
     rows[#rows + 1] = {
       label = tostring(mon.nickname or (def and def.name) or mon.species or "?"),
-      right = hpRight(mon),
+      right = hpRight(entry.battler or mon),
       front = partyFrontFor(self, mon),
     }
   end
   return rows
+end
+
+-- Whole party for an item target, with the fielded mon's HP from the plate
+-- clock. Shown, not filtered: a Revive wants the fainted one, and
+-- `updateItemParty` indexes the whole party.
+function M:bandItemPartyRows()
+  local seat = self:mySlot()
+  local party = (seat and seat.party) or {}
+  local rows = {}
+  for _, row in ipairs(self:itemPartyRows()) do
+    local mon = party[row.index]
+    rows[#rows + 1] = {
+      label = row.label,
+      right = hpRight(fieldBattler(self, seat, row.index) or mon),
+      front = partyFrontFor(self, mon),
+      dim = row.fainted or nil,
+    }
+  end
+  return rows
+end
+
+-- True while the bottom box still owns the screen: a line is up, an effect is
+-- playing, or the queue has not been handed back. `update` returns in that
+-- window before it opens the replace picker (faint line → picker → send);
+-- draw must match, or WHO'S NEXT paints over the faint.
+function M:boxLive()
+  if self.shown then return true end
+  if self.anim or self.draining or self.faintFx
+     or self.expFilling or self.evolving then
+    return true
+  end
+  if self.phase == "messages" then return true end
+  local q = self.messages
+  return type(q) == "table" and #q > 0
 end
 
 -- Draw the band, and answer whether the band is now on the screen.
@@ -7262,6 +7364,13 @@ function M:drawBandWidgets()
     Battlefield.drawBandBackdrop()
   end
 
+  -- Same order as update(): the box stays up while a line or queue is live.
+  -- Replacing is armed behind that queue, so painting the bench first hid
+  -- the faint line. MediatedBattle:drawModernBand checks `shown` first.
+  if self:boxLive() then
+    message(self:boxText())
+    return true
+  end
   if self.replacing then
     local seat = self.sim and self.sim:slot(self.mine)
     local bench = seat and self:benchOf(seat) or {}
@@ -7306,18 +7415,7 @@ function M:drawBandWidgets()
     return true
   end
   if self.phase == "target" then
-    local rows = {}
-    local mine = self:mySlot()
-    for _, entry in ipairs((mine and self.sim:targetsFor(mine)) or {}) do
-      local battler = entry.battler
-      local mon = battler and battler.mon
-      rows[#rows + 1] = {
-        label = (battler and battler.name) or "?",
-        right = hpRight(mon),
-        dim = (mon and (mon.hp or 0) <= 0) or nil,
-      }
-    end
-    list(rows, self.targetIndex or 1, { title = "ATTACK WHO?" })
+    list(self:bandTargetRows(), self.targetIndex or 1, { title = "ATTACK WHO?" })
     return true
   end
   if self.phase == "switch" then
@@ -7347,19 +7445,7 @@ function M:drawBandWidgets()
     return true
   end
   if self.phase == "item_party" then
-    local seat = self:mySlot()
-    local party = (seat and seat.party) or {}
-    local rows = {}
-    for _, row in ipairs(self:itemPartyRows()) do
-      rows[#rows + 1] = {
-        label = row.label,
-        right = hpRight(party[row.index]),
-        front = partyFrontFor(self, party[row.index]),
-        -- Shown, not filtered: a Revive wants the fainted one, and
-        -- `updateItemParty` indexes the whole party.
-        dim = row.fainted or nil,
-      }
-    end
+    local rows = self:bandItemPartyRows()
     list(rows, self.switchIndex or 1, { title = "POKeMON" })
     return true
   end
@@ -7367,12 +7453,10 @@ function M:drawBandWidgets()
     local seat = self:mySlot()
     local party = (seat and seat.party) or {}
     local mon = party[self.itemPartyIndex or (seat and seat.active) or 1]
-    local data = self.game and self.game.data
     local rows = {}
     for _, move in ipairs((mon and mon.moves) or {}) do
-      local def = (data and data.moves or {})[move.id]
       rows[#rows + 1] = {
-        label = tostring((def and def.name) or move.id or "-"),
+        label = self:moveLabel(move.id) or "-",
         right = tonumber(move.pp) and tostring(math.floor(move.pp)) or nil,
       }
     end
@@ -7441,7 +7525,9 @@ function M:drawMenuBand()
 end
 
 function M:drawMenusClassic()
-  if self.replacing then
+  if self:boxLive() then
+    self:drawMessage()
+  elseif self.replacing then
     self:drawReplace()
   elseif self.runAsk and self.phase ~= "messages" then
     self:drawRunAsk()
@@ -10222,6 +10308,7 @@ end
 -- list is the one that counts.
 function M:sendMediatedChoice(action)
   if not (self.mediated and self.battleId) then return false end
+  if self.awaitingReconnect then return false end
   action = action or {}
   local kind = action.kind or "move"
   local fields
@@ -10449,14 +10536,19 @@ function M:drawClassicPartyPicker()
     local party = (seat and seat.party) or {}
     source = {}
     for _, row in ipairs(self:itemPartyRows()) do
-      source[#source + 1] = { mon = party[row.index], label = row.label }
+      local battler = fieldBattler(self, seat, row.index)
+      source[#source + 1] = {
+        mon = party[row.index],
+        label = row.label,
+        shownHp = battler and displayHP(battler) or nil,
+      }
     end
   else
     return false
   end
   local rows = {}
   for _, entry in ipairs(source) do
-    local row = classicPickerRow(self, entry.mon, entry.label)
+    local row = classicPickerRow(self, entry.mon, entry.label, entry.shownHp)
     if row then rows[#rows + 1] = row end
   end
   if #rows == 0 then return false end
@@ -10515,7 +10607,7 @@ function M:drawItemMove()
   local moves = (mon and mon.moves) or {}
   local rows = {}
   for _, move in ipairs(moves) do
-    rows[#rows + 1] = tostring(move.id or "-")
+    rows[#rows + 1] = self:moveLabel(move.id) or "-"
   end
   self:drawList(rows, self.moveIndex or 1)
 end
@@ -10579,8 +10671,7 @@ function M:drawMoves()
     love.graphics.setScissor(8, 104, 88, 32)
   end
   for i, moveInst in ipairs(moves) do
-    local def = (self.game.data.moves or {})[moveInst.id]
-    local label = (def and def.name) or moveInst.id or "-"
+    local label = self:moveLabel(moveInst.id) or "-"
     drawMoveName(Font, label, nameX, M.MOVE_NAME_Y(i), nameW)
   end
   if clipped then
@@ -10764,8 +10855,10 @@ function M:drawSafe()
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", 0, 0, 160, 144)
   -- Full-page picker covers the stage; faint/anim lines still use the
-  -- field + bottom box so a send-out is not painted over a KO.
-  if not self.shown and not self.anim then
+  -- field + bottom box so a send-out is not painted over a KO. Same
+  -- `boxLive` gate as the band: a queued faint with no page up yet still
+  -- owns the screen (`update` has not popped `shown`).
+  if not self:boxLive() then
     if self:drawClassicPartyPicker() then
       love.graphics.setColor(1, 1, 1, 1)
       return
