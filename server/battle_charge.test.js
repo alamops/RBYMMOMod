@@ -147,6 +147,12 @@ test('gen1 charge-family texts and DIG turn two', () => {
 test('gen2 EFFECT_* aliases and Earthquake reaches Dig', () => {
   assert.strictEqual(Battle2.Effects.idOf('EFFECT_FLY'), 43);
   assert.strictEqual(Battle2.Effects.idOf('EFFECT_SOLARBEAM'), 39);
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_DEFENSE_DOWN'), 19);
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_DEFENSE_DOWN_2'), 59);
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_SLEEP'), 32);
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_PARALYZE_HIT'), 6);
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_METRONOME'), 83);
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_PROTECT'), null);
   const battle = fight(Battle2.Turn, {
     seed: 5151,
     sides: gen2Sides(
@@ -159,4 +165,129 @@ test('gen2 EFFECT_* aliases and Earthquake reaches Dig', () => {
   const events = battle.drainEvents();
   assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('dug a hole')));
   assert.ok(events.some((e) => e.t === 'damage' && e.slot === 0));
+});
+
+test('gen2 2v2 Crystal status names actually apply', () => {
+  const leer = Battle2.Effects.idOf('EFFECT_DEFENSE_DOWN');
+  const sleep = Battle2.Effects.idOf('EFFECT_SLEEP');
+  const { battle, reason } = Battle2.Turn.attempt({
+    id: 's1',
+    mode: 'coop_pvp',
+    seed: 4242,
+    choiceTimeout: 60,
+    reconnectGrace: 60,
+    sides: {
+      a: [
+        {
+          playerId: 'a1', name: 'Ann',
+          mons: [{
+            species: 'Alpha', level: 20, maxHp: 200, hp: 200,
+            stats: { atk: 40, def: 40, spe: 90, spa: 40, spd: 40 },
+            moves: [mv({ id: 'leer', power: 0, accuracy: 0, effect: leer })],
+          }],
+        },
+        {
+          playerId: 'a2', name: 'Abe',
+          mons: [{
+            species: 'Gamma', level: 20, maxHp: 200, hp: 200,
+            stats: { atk: 40, def: 40, spe: 80, spa: 40, spd: 40 },
+            moves: [mv({ id: 'hypno', power: 0, accuracy: 0, effect: sleep })],
+          }],
+        },
+      ],
+      b: [
+        {
+          playerId: 'b1', name: 'Bob',
+          mons: [{
+            species: 'Beta', level: 20, maxHp: 200, hp: 200,
+            stats: { atk: 40, def: 80, spe: 5, spa: 40, spd: 40 },
+            moves: [mv({ id: 'thump', power: 1 })],
+          }],
+        },
+        {
+          playerId: 'b2', name: 'Bea',
+          mons: [{
+            species: 'Delta', level: 20, maxHp: 200, hp: 200,
+            stats: { atk: 40, def: 40, spe: 5, spa: 40, spd: 40 },
+            moves: [mv({ id: 'thump', power: 1 })],
+          }],
+        },
+      ],
+    },
+  });
+  assert.ok(battle, `refused: ${reason}`);
+  battle.drainEvents();
+  battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+  battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+  battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+  battle.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
+  const events = battle.drainEvents();
+  assert.ok(!events.some((e) => e.t === 'msg' && String(e.text).includes('nothing happened')),
+    'status moves do not no-op');
+  assert.ok(events.some((e) => e.t === 'msg' && String(e.text).includes('DEFENSE fell')),
+    'Leer drops Defense');
+  assert.ok(events.some((e) => e.t === 'msg' && String(e.text).includes('fell asleep')),
+    'Hypnosis inflicts sleep');
+  assert.strictEqual(battle.byId.get('b1').mons[0].stages.def, -1);
+  assert.strictEqual(battle.byId.get('b2').mons[0].status, 'sleep');
+});
+
+test('gen2 2v2 Metronome calls a move from the uploaded pool', () => {
+  const metro = Battle2.Effects.idOf('EFFECT_METRONOME');
+  const { battle, reason } = Battle2.Turn.attempt({
+    id: 'm1',
+    mode: 'coop_pvp',
+    seed: 7,
+    choiceTimeout: 60,
+    reconnectGrace: 60,
+    metronomePool: [mv({ id: 'pool-thump', power: 60, accuracy: 255 })],
+    sides: {
+      a: [
+        {
+          playerId: 'a1', name: 'Ann',
+          mons: [{
+            species: 'Alpha', level: 50, maxHp: 200, hp: 200,
+            stats: { atk: 100, def: 40, spe: 120, spa: 40, spd: 40 },
+            moves: [mv({ id: 'metronome', power: 0, accuracy: 0, effect: metro })],
+          }],
+        },
+        {
+          playerId: 'a2', name: 'Abe',
+          mons: [{
+            species: 'Gamma', level: 20, maxHp: 200, hp: 200,
+            stats: { atk: 40, def: 40, spe: 80, spa: 40, spd: 40 },
+            moves: [mv({ id: 'thump', power: 1 })],
+          }],
+        },
+      ],
+      b: [
+        {
+          playerId: 'b1', name: 'Bob',
+          mons: [{
+            species: 'Beta', level: 20, maxHp: 200, hp: 200,
+            stats: { atk: 40, def: 40, spe: 5, spa: 40, spd: 40 },
+            moves: [mv({ id: 'thump', power: 1 })],
+          }],
+        },
+        {
+          playerId: 'b2', name: 'Bea',
+          mons: [{
+            species: 'Delta', level: 20, maxHp: 200, hp: 200,
+            stats: { atk: 40, def: 40, spe: 5, spa: 40, spd: 40 },
+            moves: [mv({ id: 'thump', power: 1 })],
+          }],
+        },
+      ],
+    },
+  });
+  assert.ok(battle, `refused: ${reason}`);
+  battle.drainEvents();
+  const hpBefore = battle.byId.get('b1').mons[0].hp;
+  battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+  battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+  battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+  battle.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
+  const events = battle.drainEvents();
+  assert.ok(events.some((e) => e.t === 'anim' && e.text === 'pool-thump'));
+  assert.ok(battle.byId.get('b1').mons[0].hp < hpBefore);
 });

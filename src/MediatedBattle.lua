@@ -446,11 +446,19 @@ function M.snapshotRuleset(game)
       ids[#ids + 1] = id
     end
     table.sort(ids)
+    -- Exclude Metronome itself (either generation's name) and Struggle so a
+    -- call cannot recurse or land on the no-PP filler.  Use this boot's
+    -- Effects pack: Gen 1 Effects.idOf("METRONOME_EFFECT") is 83, and Gen 2
+    -- maps EFFECT_METRONOME onto the same id.  A Gen 1-only lookup would
+    -- still work after that alias, but comparing against the pack that
+    -- `moveOf` just used is the one that cannot drift.
+    local metroEffect = effectsFor(game).idOf("METRONOME_EFFECT")
     for _, id in ipairs(ids) do
       if #metronomePool >= Config.BATTLE_METRONOME_POOL_MAX then break end
       local sheet = moveOf(data, { id = id, pp = 5 }, order, Gen.generation(game))
-      if sheet and sheet.effect ~= Effects.idOf("METRONOME_EFFECT")
-         and id ~= "STRUGGLE" and id ~= "struggle" then
+      local idKey = type(id) == "string" and id:upper() or ""
+      if sheet and sheet.effect ~= metroEffect
+         and idKey ~= "STRUGGLE" and idKey ~= "METRONOME" then
         metronomePool[#metronomePool + 1] = sheet
       end
     end
@@ -528,7 +536,9 @@ moveOf = function(data, slot, order, generation)
   local chance = 0
   if def then
     if def.effect then
-      -- Gen 2 EFFECT_FLY / EFFECT_SOLARBEAM etc. only resolve on BattleSim2.
+      -- Gen 2 EFFECT_* names (Crystal moveEffectOrder) only resolve on
+      -- BattleSim2; an unmapped name becomes effect 0 and a status move
+      -- does nothing.
       local pack = Effects1
       if generation == 2 then
         if not Effects2 then Effects2 = need("BattleSim2/Effects") end

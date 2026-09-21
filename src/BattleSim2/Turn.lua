@@ -3,8 +3,10 @@
 -- Light port of BattleSim/Turn.lua onto BattleSim2 formulas.  Public API matches
 -- Gen1 Turn (`create`, `submitChoice`, `tick`, …).  Sheet stats are
 -- atk/def/spe/spa/spd (Sp.Def); legacy spd+spc still accepted on ingest.
--- Damage/crit/accuracy/status draws use Gen2 rules; Gen1 effect-id table and
--- item catalog are largely unchanged pending a Gen2 effects pass.
+-- Damage/crit/accuracy/status draws use Gen2 rules.  Crystal EFFECT_* names
+-- map onto the shared Gen1 effect-id handlers in Effects.idOf (so Leer /
+-- Hypnosis / Screech actually resolve); Gen2-only effects and the item
+-- catalog are still a follow-up.
 --
 -- Known gaps left for follow-up: Gen2-native effect jump table, held-item
 -- damage/accuracy hooks (type-boost, Bright Powder, Scope Lens mid-turn),

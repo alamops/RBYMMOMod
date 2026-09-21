@@ -190,15 +190,102 @@ local function int(value, fallback)
   return floor(n)
 end
 
--- Crystal names the same charge/vanish family with EFFECT_* strings whose
--- numbers are not 39/43. Map them onto the shared charge/fly ids so a Gold
--- host upload two-turns instead of resolving as a one-turn hit (idOf → 0).
+-- Crystal / Gold sheets name effects EFFECT_* (moveEffectOrder), not the
+-- pret/pokered *_EFFECT tokens this table is numbered by.  `moveOf` stores
+-- `idOf(def.effect) or 0`, so an unmapped name becomes NO_ADDITIONAL_EFFECT
+-- and every 0-power status move says "But nothing happened".  That is why
+-- Leer / Hypnosis / Screech worked in engine 1v1 (gen2/Battle.lua) and
+-- failed in every BattleSim2 fight -- 2v2 co-op, mediated PvP, solo-on.
+--
+-- Map every EFFECT_* that already has a handler onto that handler.  Gen 2
+-- only moves (Protect, Spikes, …) stay unmapped and still no-op honestly.
+-- Charge / vanish aliases keep the same ids as before.
 local GEN2_EFFECT_ID = {
+  EFFECT_NORMAL_HIT = 0,
+  EFFECT_SLEEP = 32,
+  EFFECT_POISON_HIT = 2,
+  EFFECT_LEECH_HIT = 3,
+  EFFECT_BURN_HIT = 4,
+  EFFECT_FREEZE_HIT = 5,
+  EFFECT_PARALYZE_HIT = 6,
+  EFFECT_SELFDESTRUCT = 7,
+  EFFECT_DREAM_EATER = 8,
+  EFFECT_MIRROR_MOVE = 9,
+  EFFECT_ATTACK_UP = 10,
+  EFFECT_DEFENSE_UP = 11,
+  EFFECT_DEFENSE_CURL = 11,
+  EFFECT_SPEED_UP = 12,
+  EFFECT_SP_ATK_UP = 13,
+  EFFECT_ACCURACY_UP = 14,
+  EFFECT_EVASION_UP = 15,
+  EFFECT_ALWAYS_HIT = 17,
+  EFFECT_ATTACK_DOWN = 18,
+  EFFECT_DEFENSE_DOWN = 19,
+  EFFECT_SPEED_DOWN = 20,
+  EFFECT_SP_ATK_DOWN = 21,
+  EFFECT_ACCURACY_DOWN = 22,
+  EFFECT_EVASION_DOWN = 23,
+  EFFECT_CONVERSION = 24,
+  EFFECT_RESET_STATS = 25,
+  EFFECT_BIDE = 26,
+  EFFECT_RAMPAGE = 27,
+  EFFECT_FORCE_SWITCH = 28,
+  EFFECT_MULTI_HIT = 29,
+  EFFECT_FLINCH_HIT = 31,
+  EFFECT_PAY_DAY = 16,
+  EFFECT_OHKO = 38,
   EFFECT_RAZOR_WIND = 39,
   EFFECT_SOLARBEAM = 39,
   EFFECT_SKULL_BASH = 39,
   EFFECT_SKY_ATTACK = 39,
+  EFFECT_SUPER_FANG = 40,
+  EFFECT_STATIC_DAMAGE = 41,
+  EFFECT_LEVEL_DAMAGE = 41,
+  EFFECT_PSYWAVE = 41,
+  EFFECT_TRAP_TARGET = 42,
   EFFECT_FLY = 43,
+  EFFECT_DOUBLE_HIT = 44,
+  EFFECT_JUMP_KICK = 45,
+  EFFECT_MIST = 46,
+  EFFECT_FOCUS_ENERGY = 47,
+  EFFECT_RECOIL_HIT = 48,
+  EFFECT_CONFUSE = 49,
+  EFFECT_ATTACK_UP_2 = 50,
+  EFFECT_DEFENSE_UP_2 = 51,
+  EFFECT_SPEED_UP_2 = 52,
+  EFFECT_SP_ATK_UP_2 = 53,
+  EFFECT_ACCURACY_UP_2 = 54,
+  EFFECT_EVASION_UP_2 = 55,
+  EFFECT_HEAL = 56,
+  EFFECT_MORNING_SUN = 56,
+  EFFECT_SYNTHESIS = 56,
+  EFFECT_MOONLIGHT = 56,
+  EFFECT_TRANSFORM = 57,
+  EFFECT_ATTACK_DOWN_2 = 58,
+  EFFECT_DEFENSE_DOWN_2 = 59,
+  EFFECT_SPEED_DOWN_2 = 60,
+  EFFECT_SP_ATK_DOWN_2 = 61,
+  EFFECT_ACCURACY_DOWN_2 = 62,
+  EFFECT_EVASION_DOWN_2 = 63,
+  EFFECT_LIGHT_SCREEN = 64,
+  EFFECT_REFLECT = 65,
+  EFFECT_POISON = 66,
+  EFFECT_TOXIC = 66,
+  EFFECT_PARALYZE = 67,
+  EFFECT_ATTACK_DOWN_HIT = 68,
+  EFFECT_DEFENSE_DOWN_HIT = 69,
+  EFFECT_SPEED_DOWN_HIT = 70,
+  EFFECT_SP_ATK_DOWN_HIT = 71,
+  EFFECT_CONFUSE_HIT = 76,
+  EFFECT_POISON_MULTI_HIT = 77,
+  EFFECT_SUBSTITUTE = 79,
+  EFFECT_HYPER_BEAM = 80,
+  EFFECT_RAGE = 81,
+  EFFECT_MIMIC = 82,
+  EFFECT_METRONOME = 83,
+  EFFECT_LEECH_SEED = 84,
+  EFFECT_SPLASH = 85,
+  EFFECT_DISABLE = 86,
 }
 
 function M.idOf(name)

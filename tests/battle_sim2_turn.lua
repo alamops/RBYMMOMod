@@ -147,6 +147,7 @@ local function battleOf(o)
     seed = o.seed or 12345,
     choiceTimeout = o.choiceTimeout or 60,
     reconnectGrace = o.reconnectGrace or 60,
+    metronomePool = o.metronomePool,
     sides = o.sides,
   })
   if not battle then error("fixture battle refused: " .. tostring(err), 0) end
@@ -1250,6 +1251,17 @@ do
   eq(Effects.idOf("EFFECT_SOLARBEAM"), 39, "gen2: EFFECT_SOLARBEAM maps onto CHARGE")
   eq(Effects.idOf("EFFECT_SKULL_BASH"), 39, "gen2: EFFECT_SKULL_BASH maps onto CHARGE")
   eq(Effects.idOf("FLY_EFFECT"), 43, "gen2: Gen1 FLY_EFFECT name still resolves")
+  -- Crystal status / stat-down names.  Before these aliases, moveOf stored 0
+  -- and every 0-power status move in a BattleSim2 fight (2v2 especially)
+  -- announced "But nothing happened".
+  eq(Effects.idOf("EFFECT_DEFENSE_DOWN"), 19, "gen2: EFFECT_DEFENSE_DOWN is Leer")
+  eq(Effects.idOf("EFFECT_DEFENSE_DOWN_2"), 59, "gen2: EFFECT_DEFENSE_DOWN_2 is Screech")
+  eq(Effects.idOf("EFFECT_SLEEP"), 32, "gen2: EFFECT_SLEEP is Hypnosis")
+  eq(Effects.idOf("EFFECT_PARALYZE_HIT"), 6, "gen2: EFFECT_PARALYZE_HIT is Lick")
+  eq(Effects.idOf("EFFECT_ATTACK_DOWN"), 18, "gen2: EFFECT_ATTACK_DOWN is Growl")
+  eq(Effects.idOf("EFFECT_PARALYZE"), 67, "gen2: EFFECT_PARALYZE is Thunder Wave")
+  eq(Effects.idOf("EFFECT_METRONOME"), 83, "gen2: EFFECT_METRONOME is Metronome")
+  eq(Effects.idOf("EFFECT_PROTECT"), nil, "gen2: Protect stays unmapped (no handler)")
   ok(Effects.hitsInvulnerable("FLY", { id = "GUST" }), "gen2: Gust reaches Fly")
   ok(Effects.hitsInvulnerable("FLY", { id = "TWISTER" }), "gen2: Twister reaches Fly")
   ok(Effects.hitsInvulnerable("FLY", { id = "WHIRLWIND" }), "gen2: Whirlwind reaches Fly")
@@ -1552,6 +1564,157 @@ do
   end
   ok(refused, "and says the Wire-safe trainer refusal")
   eq(battle:snapshot().turn, turnBefore + 1, "the runner's action still spends the turn")
+end
+
+-- ------------------------------------------------------------------
+-- Crystal status moves in a 2v2 (the player-report: Leer / Hypnosis /
+-- Screech / Lick do nothing in doubles, work in engine singles).
+-- ------------------------------------------------------------------
+--
+-- Sheets carry EFFECT_* names.  `idOf` is what `moveOf` uses; feeding the
+-- mapped id here is the same number a real Crystal upload now stores.
+
+do
+  local Effects = need("BattleSim2/Effects")
+  local leer = Effects.idOf("EFFECT_DEFENSE_DOWN")
+  local sleep = Effects.idOf("EFFECT_SLEEP")
+  local battle = battleOf({
+    mode = "coop_pvp", seed = 4242,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann",
+          mons = { mon({
+            species = "Alpha", maxHp = 200, spe = 90,
+            moves = { move({ id = "leer", power = 0, accuracy = 0,
+                             effect = leer }) },
+          }) } },
+        { playerId = "a2", name = "Abe",
+          mons = { mon({
+            species = "Gamma", maxHp = 200, spe = 80,
+            moves = { move({ id = "hypno", power = 0, accuracy = 0,
+                             effect = sleep }) },
+          }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob",
+          mons = { mon({
+            species = "Beta", maxHp = 200, spe = 5, def = 80,
+            moves = { move({ id = "thump", power = 1 }) },
+          }) } },
+        { playerId = "b2", name = "Bea",
+          mons = { mon({
+            species = "Delta", maxHp = 200, spe = 5,
+            moves = { move({ id = "thump", power = 1 }) },
+          }) } },
+      },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+  battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+
+  local nothing = false
+  local defFell, slept = false, false
+  for _, event in ipairs(events) do
+    if event.t == "msg" and type(event.text) == "string" then
+      if event.text:find("nothing happened", 1, true) then nothing = true end
+      if event.text:find("DEFENSE fell", 1, true) then defFell = true end
+      if event.text:find("fell asleep", 1, true) then slept = true end
+    end
+  end
+  ok(not nothing, "2v2: Crystal status moves do not no-op")
+  ok(defFell, "2v2: Leer (EFFECT_DEFENSE_DOWN) drops the aimed foe's Defense")
+  ok(slept, "2v2: Hypnosis (EFFECT_SLEEP) puts the aimed foe to sleep")
+  eq(battle.byId.b1.mons[1].stages.def, -1, "2v2: Bob's Defense stage is -1")
+  eq(battle.byId.b2.mons[1].status, "sleep", "2v2: Bea is asleep")
+end
+
+-- Metronome: same Crystal-name hole, plus it needs the uploaded pool.
+-- Party / official / hosted fights go through BattleSim2; engine solo does
+-- not.  Without EFFECT_METRONOME → 83 the move never consults the pool.
+
+do
+  local Effects = need("BattleSim2/Effects")
+  local metro = Effects.idOf("EFFECT_METRONOME")
+  local battle = battleOf({
+    seed = 7,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({
+                species = "Alpha", maxHp = 200, spe = 120,
+                moves = { move({ id = "metronome", power = 0, accuracy = 0,
+                                 effect = metro }) },
+              }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 200, spe = 1 }) } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local events = drain(battle)
+  local nothing = false
+  for _, event in ipairs(events) do
+    if event.t == "msg" and event.text == "But nothing happened" then
+      nothing = true
+    end
+  end
+  ok(nothing, "gen2: Metronome does nothing without a move pool")
+end
+
+do
+  local Effects = need("BattleSim2/Effects")
+  local metro = Effects.idOf("EFFECT_METRONOME")
+  local battle = battleOf({
+    mode = "coop_pvp", seed = 7,
+    metronomePool = {
+      move({ id = "pool-thump", power = 60, accuracy = 255, type = 0 }),
+    },
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann",
+          mons = { mon({
+            species = "Alpha", maxHp = 200, spe = 120, atk = 100, level = 50,
+            moves = { move({ id = "metronome", power = 0, accuracy = 0,
+                             effect = metro }) },
+          }) } },
+        { playerId = "a2", name = "Abe",
+          mons = { mon({
+            species = "Gamma", maxHp = 200, spe = 80,
+            moves = { move({ id = "thump", power = 1 }) },
+          }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob",
+          mons = { mon({
+            species = "Beta", maxHp = 200, spe = 5, def = 40,
+            moves = { move({ id = "thump", power = 1 }) },
+          }) } },
+        { playerId = "b2", name = "Bea",
+          mons = { mon({
+            species = "Delta", maxHp = 200, spe = 5,
+            moves = { move({ id = "thump", power = 1 }) },
+          }) } },
+      },
+    },
+  })
+  drain(battle)
+  local hpBefore = battle.byId.b1.mons[1].hp
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+  battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
+  local events = drain(battle)
+  local called = false
+  for _, event in ipairs(events) do
+    if event.t == "anim" and event.text == "pool-thump" then called = true end
+  end
+  ok(called, "2v2: Metronome (EFFECT_METRONOME) calls a move from the pool")
+  ok(battle.byId.b1.mons[1].hp < hpBefore,
+     "2v2: the Metronome-called move deals damage")
 end
 
 -- ------------------------------------------------------------------
