@@ -12,9 +12,10 @@ here must match `manifest.version`.
   `EFFECT_DEFENSE_DOWN` / …, and BattleSim2 only mapped the charge/fly
   aliases. Every other status move packed as effect 0 and announced "But
   nothing happened" — Leer, Screech, Hypnosis, Lick's paralysis, Metronome,
-  from players and NPCs. Engine 1v1 / solo was fine because it never goes
-  through that table. The rest of the Gen 1-equivalent `EFFECT_*` names
-  now map onto the existing handlers.
+  from players and NPCs. Engine 1v1 bypasses that table and was unaffected;
+  Gen 2 solo-on fights use BattleSim2 and were hit by the unmapped aliases.
+  The rest of the Gen 1-equivalent `EFFECT_*` names now map onto the
+  existing handlers.
 
 ## [1.4.16] - 2026-09-20
 

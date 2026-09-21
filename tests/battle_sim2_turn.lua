@@ -1704,7 +1704,7 @@ do
   drain(battle)
   local hpBefore = battle.byId.b1.mons[1].hp
   battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
-  battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
   battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
   battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
   local events = drain(battle)
