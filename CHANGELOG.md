@@ -4,7 +4,7 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [1.4.3] - 2026-09-17
+## [1.4.16] - 2026-09-20
 
 ### Fixed
 
@@ -13,6 +13,133 @@ here must match `manifest.version`.
   target rows jumped to the new number while the plate was still crawling.
   Party and target HP text now prefer `shownHp` the way the target list
   already did.
+
+## [1.4.15] - 2026-09-20
+
+### Fixed
+
+- **Classic Ether picker lists move names.** The 160×144 ITEM move list
+  printed raw ids (`QUICK_ATTACK`). It now uses the same display names
+  as FIGHT.
+
+## [1.4.14] - 2026-09-20
+
+### Fixed
+
+- **Co-op faint line is not covered by WHO'S NEXT.** After a KO the
+  replace picker already waited for the message box in input, but draw
+  painted the bench list first, so the faint never appeared in the band.
+  Battlefield and classic menus now keep the line up until the box is idle.
+
+## [1.4.13] - 2026-09-19
+
+### Fixed
+
+- **Hub treats a mediated fight as busy.** Co-op fights set `battleId` /
+  `coopBattleId` and never a `sessionId`, so the roster still showed those
+  players as free and `mmo.request` delivered a second trade or battle ask.
+  Occupancy now includes an unsettled fight and `coopBattleId` (a stale
+  `battleId` pointer is healed, not treated as busy). The hub publishes
+  them busy when the fight opens, and refuses those asks (and a late
+  accept) as busy.
+
+## [1.4.12] - 2026-09-19
+
+### Fixed
+
+- **Substitute blocks status and other foe-targeting primaries.** Sleep Powder,
+  Growl, Disable, Transform, and Mimic failed through a sub (auto-AI already
+  skipped those; humans and the hub did not). Recover, Swords Dance, Substitute,
+  and Haze still run. Lua and JS twins.
+
+## [1.4.11] - 2026-09-19
+
+### Fixed
+
+- **DIG turn-two test checks the foe's field slot.** 1v1 side-b is slot 3
+  (`Events.fieldSlot`); the SolarBeam case already used 3. DIG still
+  asserted slot 2, so "DIG turn two deals damage" was a false failure.
+
+## [1.4.10] - 2026-09-19
+
+### Fixed
+
+- **Potion on a fainted mon no longer spends the turn.** The item-target
+  picker already refused Revive on a living Pokémon. A Potion, Ether,
+  status cure, or vitamin on a KO still committed, so the referee announced
+  the use, spent the bag, then failed. Gen 1 prints "It won't have any
+  effect" and stays on the picker. Co-op shows that line (then returns to
+  the picker). The referee also refuses the same cases, so a submitted
+  choice cannot spend the stack.
+
+## [1.4.9] - 2026-09-19
+
+### Fixed
+
+- **1v1 RUN no longer pretends it's a trainer battle.** Picking RUN in a
+  player-vs-player fight is a concession and ends the match. The menu used
+  to print "No! There's no running from a trainer battle!" and then send
+  the run anyway, so it looked like a wasted turn. 1v1 now says you
+  forfeited, and only if the choice actually went. Wild still flees. NPC
+  trainers print the vanilla refuse line and do not file run, so an
+  honest menu cannot forfeit a gym.
+
+## [1.4.8] - 2026-09-19
+
+### Fixed
+
+- **Gen 1 crit uses species base Speed; high-crit moves are wired.** Mediated
+  Slash / Karate Chop / Razor Leaf / Crabhammer used ordinary odds because
+  `_useMove` passed battle Speed (plus the Speed badge) into `Crit.check` and
+  never set `highCritMove`. The upload now carries `baseSpd` and `highCrit` on
+  the existing client sheet — the hub still has no ROM table.
+
+## [1.4.7] - 2026-09-19
+
+### Fixed
+
+- **Co-op FIGHT and ITEM lists wrap.** Co-op UP/DOWN used to clamp at both
+  ends while 1v1 FIGHT wraps like Gen 1. Move, bag, item-target, and
+  Ether-style item-move lists now ring the same way. SWITCH / send-out
+  still clamp.
+
+## [1.4.6] - 2026-09-19
+
+### Fixed
+
+- **A fight the turn machine refuses no longer leaves the pairing stuck.**
+  If parties and a ruleset had arrived but `Turn.attempt` / `Turn.create`
+  still would not open the field, the hub logged and returned. The record
+  stayed in `battles` with `sim = nil`, players kept `battleId` / `sessionId`,
+  and nobody ever heard `battle_ready`. Assembly failure now aborts the
+  mediated battle (`agree` — "The battle was called off."), drops the 1v1
+  session and any co-op group, clears leftover `matches` / `coopMatches`
+  so a later `mmo.result` cannot settle a fight that never opened, and
+  both sides get an outcome. A refused co-op open no longer files
+  settlement paperwork.
+
+## [1.4.5] - 2026-09-19
+
+### Fixed
+
+- **A second mediated fight can no longer stack on a live one.** Duplicate
+  `onSession` for a new named pairing drops the local screen (without
+  `SESSION_LEAVE`, which would abandon the fight the hub already moved
+  `battleId` to) and starts the new one. The same pairing is a no-op.
+  `beginWildMediated` refuses a second fight without leaving.
+
+## [1.4.4] - 2026-09-17
+
+### Fixed
+
+- **Disconnected seats cannot spend a turn.** After `disconnect()` (socket
+  drop or SESSION_LEAVE) the choice clock already paused, but `submitChoice`
+  still accepted answers from the same socket. The referee now refuses until
+  `reconnect()`, and `_maybeResolve` waits on the same flag so a leftover or
+  forced fill cannot complete the turn while anyone is away. The client
+  `sendChoice` / `sendMediatedChoice` paths also refuse while awaiting
+  reconnect or the transport is not ready, and do not mark the turn
+  answered.
 
 ## [1.4.2] - 2026-09-16
 

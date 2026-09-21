@@ -32,7 +32,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { damage, accuracy, crit, status } = require('./lib/battle');
+const { damage, accuracy, crit, status, Effects } = require('./lib/battle');
 
 const FIXTURE = path.join(__dirname, '..', 'tests', 'fixtures', 'battle_sim_vectors.json');
 const vectors = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
@@ -304,4 +304,61 @@ test('JS formula edge inputs match Lua coercion', () => {
   );
   assert.strictEqual(selfHit.selfHit, true, 'roll 0 self-hits');
   assert.ok(selfHit.selfDamage > 0, 'atk/def aliases produce self-hit damage');
+});
+
+function dummyMon(o) {
+  const opts = o || {};
+  return {
+    species: opts.species || 'Alpha',
+    hp: opts.hp === undefined ? 100 : opts.hp,
+    maxHp: opts.maxHp === undefined ? 100 : opts.maxHp,
+    status: opts.status,
+    types: opts.types || [0],
+    stats: { atk: 40, def: 40, spd: 40, spc: 40 },
+    stages: { atk: 0, def: 0, spd: 0, spc: 0, acc: 0, eva: 0 },
+    moves: opts.moves || [{
+      id: 'thump', name: 'THUMP', pp: 10, power: 40,
+      accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+    lastMoveIndex: opts.lastMoveIndex === undefined ? 1 : opts.lastMoveIndex,
+    substitute: opts.substitute || 0,
+  };
+}
+
+function applyPrimary(effectId, user, target) {
+  return Effects.applyPrimary({
+    effectId,
+    rng: { byte() { return 0; } },
+    userMon: user,
+    targetMon: target,
+    userFighter: { slot: 1, side: 'a' },
+    targetFighter: { slot: 2, side: 'b' },
+    moveIndex: 1,
+  });
+}
+
+test('applyPrimary fails foe-targeting effects through a substitute', () => {
+  const user = dummyMon();
+  const target = dummyMon({ species: 'Beta', substitute: 40 });
+  const sleep = applyPrimary(32, user, target);
+  assert.strictEqual(sleep.nothing, true, 'SLEEP_EFFECT vs substitute is nothing');
+  assert.strictEqual(target.status, undefined, 'SLEEP_EFFECT does not land through a substitute');
+
+  const growl = applyPrimary(18, dummyMon(), dummyMon({ species: 'Beta', substitute: 40 }));
+  assert.strictEqual(growl.nothing, true, 'Growl vs substitute is nothing');
+  assert.strictEqual(growl.events.length, 0, 'Growl does not emit a stat event through a substitute');
+
+  const swordsUser = dummyMon();
+  const swords = applyPrimary(50, swordsUser, dummyMon({ species: 'Beta', substitute: 40 }));
+  assert.strictEqual(swords.nothing, false, 'Swords Dance is not nothing against a foe substitute');
+  assert.strictEqual(swordsUser.stages.atk, 2, 'Swords Dance still raises the user');
+
+  const heal = applyPrimary(56, dummyMon({ hp: 10 }), dummyMon({ species: 'Beta', substitute: 40 }));
+  assert.strictEqual(heal.nothing, false, 'HEAL_EFFECT is not nothing against a foe substitute');
+  assert.strictEqual(heal.heals.length, 1, 'HEAL_EFFECT still queues a heal');
+
+  const exposed = dummyMon({ species: 'Beta' });
+  const lands = applyPrimary(32, dummyMon(), exposed);
+  assert.strictEqual(lands.nothing, false, 'SLEEP_EFFECT still lands with no substitute');
+  assert.strictEqual(exposed.status, 'sleep', 'SLEEP_EFFECT sets sleep when the target is exposed');
 });

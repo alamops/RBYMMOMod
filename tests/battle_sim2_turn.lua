@@ -66,7 +66,7 @@ local function need(name)
 end
 
 local BattleSim2 = need("BattleSim2/init")
-local Turn, Events = BattleSim2.Turn, BattleSim2.Events
+local Turn, Events, Effects = BattleSim2.Turn, BattleSim2.Events, BattleSim2.Effects
 
 -- ------------------------------------------------------------------
 -- assertions
@@ -123,7 +123,7 @@ end
 -- naming all five here is what keeps this suite on the Gen 2 branch of it.
 local function mon(o)
   o = o or {}
-  return {
+  local out = {
     species = o.species or "Alpha",
     level = o.level or 20,
     hp = o.hp,
@@ -136,6 +136,8 @@ local function mon(o)
     },
     moves = o.moves or { move() },
   }
+  if o.substitute then out.substitute = o.substitute end
+  return out
 end
 
 local function battleOf(o)
@@ -689,6 +691,27 @@ for _, mode in ipairs({ "wild", "coop_wild" }) do
     ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 0 })
        == true, mode .. ": the player on side a still may")
   end
+end
+
+do
+  local battle = battleOf({
+    seed = 88021,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = {
+                mon({ species = "Alpha", maxHp = 100, hp = 50, spe = 90 }),
+                mon({ species = "Bench", maxHp = 100, hp = 0, spe = 1 }),
+              },
+              bag = { POTION = 1 } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta", maxHp = 200, spe = 10 }) } } },
+    },
+  })
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 1 }) == false,
+     "Potion on a fainted party slot is refused")
+  eq(battle.byId.p1.bag.POTION, 1, "...and the bag is not spent")
+  eq(battle.byId.p1.choice, nil, "...and the turn is still owed")
 end
 
 -- ------------------------------------------------------------------
@@ -1311,6 +1334,224 @@ do
   end
   ok(failed, "gen2: Swift misses a flying target")
   ok(not damaged, "gen2: Swift deals no damage while the target is airborne")
+end
+
+-- A dropped seat cannot file until reconnect() -- twin of the Gen 1
+-- battle_sim_turn.lua 4b claim, so SESSION_LEAVE cannot resolve turns
+-- through the pause on the Gen 2 machine either.
+do
+  local battle = battleOf({
+    reconnectGrace = 60, choiceTimeout = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha" }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta" }) } } },
+    },
+  })
+  drain(battle)
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == false,
+     "gen2: a disconnected seat cannot file a choice")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "gen2: the seat that stayed may still file")
+  eq(battle:snapshot().turn, 1,
+     "gen2: the turn does not resolve on the dropped seat's leftover")
+  battle:reconnect("p1")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "gen2: reconnect restores the right to choose")
+  eq(battle:snapshot().turn, 2,
+     "gen2: and the already-filed peer lets the turn complete")
+end
+
+do
+  local battle = battleOf({
+    reconnectGrace = 60, choiceTimeout = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              mons = { mon({ species = "Alpha" }) } } },
+      b = { { playerId = "p2", name = "Bob",
+              mons = { mon({ species = "Beta" }) } } },
+    },
+  })
+  drain(battle)
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }) == true,
+     "gen2: a connected seat may file before it drops")
+  battle:disconnect("p1")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }) == true,
+     "gen2: the seat that stayed may still file after the drop")
+  eq(battle:snapshot().turn, 1,
+     "gen2: a leftover choice does not resolve the turn while a seat is away")
+  battle:reconnect("p1")
+  eq(battle:snapshot().turn, 2,
+     "gen2: reconnect completes the already-answered turn without a second pick")
+end
+
+-- ------------------------------------------------------------------
+-- Substitute vs primary effects (cartridge: foe-targeting fails)
+-- ------------------------------------------------------------------
+
+local function dummyMon(o)
+  o = o or {}
+  return {
+    species = o.species or "Alpha",
+    hp = o.hp or 100,
+    maxHp = o.maxHp or 100,
+    status = o.status,
+    types = o.types or { 0 },
+    stats = { atk = 40, def = 40, spe = 40, spa = 40, spd = 40 },
+    stages = { atk = 0, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 },
+    moves = o.moves or {
+      { id = "thump", name = "THUMP", pp = 10, power = 40,
+        accuracy = 255, type = 0, effect = 0, chance = 0 },
+    },
+    lastMoveIndex = o.lastMoveIndex or 1,
+    substitute = o.substitute or 0,
+  }
+end
+
+local function applyPrimary(effectId, user, target)
+  return Effects.applyPrimary({
+    effectId = effectId,
+    rng = { byte = function() return 0 end },
+    userMon = user,
+    targetMon = target,
+    userFighter = { slot = 1, side = "a" },
+    targetFighter = { slot = 2, side = "b" },
+    moveIndex = 1,
+  })
+end
+
+do
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = applyPrimary(32, dummyMon(), target)
+  eq(out.nothing, true, "gen2: SLEEP_EFFECT vs substitute is nothing")
+  eq(target.status, nil, "gen2: SLEEP_EFFECT does not land through a substitute")
+end
+
+do
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = applyPrimary(18, dummyMon(), target)
+  eq(out.nothing, true, "gen2: Growl vs substitute is nothing")
+  eq(target.stages.atk, 0, "gen2: Growl does not drop atk behind a substitute")
+end
+
+do
+  local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
+  eq(applyPrimary(86, dummyMon(), target).nothing, true,
+     "gen2: DISABLE_EFFECT vs substitute is nothing")
+end
+
+do
+  local user = dummyMon()
+  eq(applyPrimary(57, user, dummyMon({ species = "Beta", substitute = 40 })).nothing,
+     true, "gen2: TRANSFORM_EFFECT vs substitute is nothing")
+  eq(user.transformed, nil, "gen2: TRANSFORM_EFFECT does not copy through a substitute")
+end
+
+do
+  local user = dummyMon()
+  local out = applyPrimary(50, user, dummyMon({ species = "Beta", substitute = 40 }))
+  eq(out.nothing, false, "gen2: Swords Dance is not nothing against a foe substitute")
+  eq(user.stages.atk, 2, "gen2: Swords Dance still raises the user's atk")
+end
+
+do
+  local user = dummyMon()
+  user.stages.atk = 2
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  target.stages.def = 2
+  local out = applyPrimary(25, user, target)
+  eq(out.nothing, false, "gen2: HAZE_EFFECT is not nothing against a substitute")
+  eq(user.stages.atk, 0, "gen2: HAZE_EFFECT still resets the user")
+  eq(target.stages.def, 0, "gen2: HAZE_EFFECT still resets the foe behind a substitute")
+end
+
+do
+  local battle = battleOf({
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({
+          species = "Alpha", maxHp = 200, spe = 120, atk = 120, level = 50,
+          moves = { move({ id = "sleep", power = 0, effect = 32, accuracy = 255 }) },
+        }),
+      } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mon({
+          species = "Beta", maxHp = 200, spe = 1, substitute = 50,
+          moves = { move({ id = "splash", power = 0, effect = 85 }) },
+        }),
+      } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local beta = battle.byId.p2
+  local betaMon = beta and beta.mons[beta.active]
+  eq(betaMon and betaMon.status, nil, "gen2: SLEEP_EFFECT fails through a substitute")
+  eq(betaMon and betaMon.substitute, 50, "gen2: SLEEP_EFFECT leaves the substitute standing")
+end
+
+do
+  local battle = battleOf({
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mon({
+          species = "Alpha", maxHp = 200, spe = 120, atk = 120, level = 50,
+          moves = { move({ id = "thump", power = 60, effect = 18, accuracy = 255 }) },
+        }),
+      } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mon({
+          species = "Beta", hp = 200, maxHp = 200, spe = 1, substitute = 5,
+          moves = { move({ id = "splash", power = 0, effect = 85 }) },
+        }),
+      } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  local beta = battle.byId.p2
+  local betaMon = beta and beta.mons[beta.active]
+  eq(betaMon and (betaMon.substitute or 0), 0, "gen2: damaging hit broke the substitute")
+  eq(betaMon and betaMon.stages.atk, 0,
+     "gen2: Growl primary does not land on the hit that broke the sub")
+end
+
+-- ------------------------------------------------------------------
+-- trainer RUN does not forfeit; the Gen 1 twin owns the long version
+-- ------------------------------------------------------------------
+
+do
+  local battle = battleOf({
+    mode = "coop_npc",
+    seed = 90120,
+    sides = coopSides(
+      { { mon({ species = "Alpha", maxHp = 200, spe = 80 }) },
+        { mon({ species = "Gamma", maxHp = 200, spe = 70 }) } },
+      { mon({ species = "Beta", maxHp = 200, spe = 10, atk = 80 }) }
+    ),
+  })
+  drain(battle)
+  local turnBefore = battle:snapshot().turn
+  battle:submitChoice("a1", { action = "run" })
+  battle:submitChoice("a2", { action = "fight", move = 0 })
+  battle:autoPick("npc")
+  local out = drain(battle)
+  eq(battle:outcome(), nil, "coop_npc RUN does not finish the fight")
+  local refused = false
+  for _, event in ipairs(out) do
+    if event.t == "msg"
+       and event.text == "No! There's no running from a trainer battle!" then
+      refused = true
+    end
+  end
+  ok(refused, "and says the Wire-safe trainer refusal")
+  eq(battle:snapshot().turn, turnBefore + 1, "the runner's action still spends the turn")
 end
 
 -- ------------------------------------------------------------------

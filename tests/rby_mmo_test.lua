@@ -2032,6 +2032,86 @@ eq(take(threePeer, Wire.SESSION), nil, "...on either side")
 
 end)()
 
+-- A co-op mediated fight never takes a sessionId, so treating only sessionId
+-- as hub-busy published those players as free and delivered a second ask.
+-- Vanilla clients refuse locally; a modified one could accept and stack it.
+;(function()
+
+local fightHub = Hub.new({ maxPlayers = 4 })
+local host, hostPeer = join(fightHub, "HOST", "PALLET", 5, 5)
+local ally, allyPeer = join(fightHub, "ALLY", "PALLET", 6, 5)
+local asker, askerPeer = join(fightHub, "ASKER", "PALLET", 7, 5)
+hostPeer.outbox, allyPeer.outbox, askerPeer.outbox = {}, {}, {}
+
+-- An outstanding ask, then the fight: RESPOND must still refuse rather than
+-- open a session on top of the mediated record.
+fightHub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "trade" })
+check(take(allyPeer, Wire.REQUEST) ~= nil, "the ask lands while they are free")
+eq(ally.sessionId, nil, "and they still have no session")
+
+fightHub:openCoopBattle("c-busy", { host.id, ally.id },
+  { mode = "coop_npc", hostId = host.id })
+eq(ally.sessionId, nil, "co-op does not take a sessionId")
+check(ally.battleId ~= nil, "it takes a battleId")
+check(ally.coopBattleId ~= nil, "and a coopBattleId")
+eq((take(askerPeer, Wire.MOVE) or {}).busy, true,
+   "the hub publishes them busy without anyone stepping")
+
+allyPeer.outbox, askerPeer.outbox = {}, {}
+fightHub:receive(ally, { type = Wire.RESPOND, to = asker.id, kind = "trade",
+                         accept = true })
+local stacked = take(askerPeer, Wire.DECLINE)
+check(stacked ~= nil, "accepting after the fight opened is refused")
+eq(stacked.reason, "busy", "as busy, not as a snub")
+eq(take(allyPeer, Wire.SESSION), nil, "and starts no second session")
+eq(take(askerPeer, Wire.SESSION), nil, "...on either side")
+
+askerPeer.outbox, allyPeer.outbox = {}, {}
+fightHub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+local midFight = take(askerPeer, Wire.DECLINE)
+check(midFight ~= nil, "asking a fighter is declined at the hub")
+eq(midFight.reason, "busy", "naming busy")
+eq(take(allyPeer, Wire.REQUEST), nil, "and never reaches them")
+
+allyPeer.outbox, askerPeer.outbox = {}, {}
+fightHub:receive(ally, { type = Wire.REQUEST, to = asker.id, kind = "trade" })
+eq(take(askerPeer, Wire.REQUEST), nil,
+   "a fighter's own ask is dropped rather than forwarded")
+
+askerPeer.outbox = {}
+fightHub:closeCoopBattle("c-busy")
+eq((take(askerPeer, Wire.MOVE) or {}).busy, false,
+   "and publishing them free when the fight ends")
+
+end)()
+
+;(function()
+
+local fieldHub = Hub.new({ maxPlayers = 3 })
+local _host, _hostPeer = join(fieldHub, "HOST", "PALLET", 5, 5)
+local ally, allyPeer = join(fieldHub, "ALLY", "PALLET", 6, 5)
+local asker, askerPeer = join(fieldHub, "ASKER", "PALLET", 7, 5)
+allyPeer.outbox, askerPeer.outbox = {}, {}
+
+-- A live unsettled record, not a dangling pointer: unsettledBattle heals
+-- a stale battleId rather than treating it as occupancy.
+fieldHub.battles["c-only"] = { id = "c-only", settled = false, memberIds = { ally.id } }
+ally.battleId = "c-only"
+fieldHub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+eq((take(askerPeer, Wire.DECLINE) or {}).reason, "busy",
+   "battleId alone is hub-busy")
+eq(take(allyPeer, Wire.REQUEST), nil)
+
+ally.battleId = nil
+ally.coopBattleId = "c-group"
+askerPeer.outbox, allyPeer.outbox = {}, {}
+fieldHub:receive(asker, { type = Wire.REQUEST, to = ally.id, kind = "battle" })
+eq((take(askerPeer, Wire.DECLINE) or {}).reason, "busy",
+   "coopBattleId alone is hub-busy")
+eq(take(allyPeer, Wire.REQUEST), nil)
+
+end)()
+
 -- ------- parties
 --
 -- Driven on their own hub so the scenario is not reading traffic the trade
@@ -5289,6 +5369,146 @@ end)()
   vanished:clearVanishAt(3, "b")
   vanished:startAnim({ anim = "TELEPORT", slot = 3, side = "b", amount = 1 })
   check(vanished:seatVanished(3), "classic Gen2 Fly charge hides via TELEPORT")
+end)()
+
+-- Potion / Ether / status cure on a fainted mon must not commit. The picker
+-- already refused Revive on a living target; the other direction still sent
+-- the choice, so the referee announced, spent the bag, then failed.
+
+;(function()
+  local MediatedBattle = need("MediatedBattle")
+  local CoopBattle = need("CoopBattle")
+  local Effects = need("BattleSim/Effects")
+  local pressA = { wasPressed = function(_, k) return k == "a" end }
+
+  local function saidNoEffect(lines)
+    for _, row in ipairs(lines or {}) do
+      if type(row) == "string" and row:find("won't have", 1, true) then
+        return true
+      end
+    end
+    return false
+  end
+
+  local function potionFight()
+    local fight = MediatedBattle.new({
+      game = { data = {}, save = { inventory = { POTION = 1, REVIVE = 1, ETHER = 1 } } },
+      battle = "b-potion-faint", role = "host",
+    })
+    fight.mine = {
+      { species = "PIKACHU", hp = 35, maxHp = 35,
+        moves = { { id = "THUNDERSHOCK", pp = 5, maxPp = 30 } } },
+      { species = "RATTATA", hp = 0, maxHp = 22,
+        moves = { { id = "TACKLE", pp = 5, maxPp = 35 } } },
+    }
+    fight.active = 1
+    fight.phase = "item_party"
+    fight.bagSheet = { POTION = 1, REVIVE = 1, ETHER = 1 }
+    local sent = {}
+    function fight:sendChoice(fields)
+      sent[#sent + 1] = fields
+      return true
+    end
+    return fight, sent
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "POTION", effect = Effects.itemEffect("POTION") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Potion on a fainted mon does not commit the turn")
+    eq(fight.phase, "item_party", "...and stays on the party picker")
+    check(saidNoEffect(fight.lines), "...and says it won't have any effect")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "ANTIDOTE", effect = Effects.itemEffect("ANTIDOTE") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Antidote on a fainted mon does not commit")
+    check(saidNoEffect(fight.lines), "...with the no-effect line")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "PROTEIN", effect = Effects.itemEffect("PROTEIN") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Protein on a fainted mon does not commit")
+    check(saidNoEffect(fight.lines), "...with the no-effect line")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "ETHER", effect = Effects.itemEffect("ETHER") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Ether on a fainted mon does not open the move picker")
+    eq(fight.phase, "item_party", "...it stays on the party list")
+    check(saidNoEffect(fight.lines), "...with the same no-effect line")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 1
+    fight.itemPick = { id = "POTION", effect = Effects.itemEffect("POTION") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 1, "Potion on a living mon still commits")
+    eq(sent[1] and sent[1].item, "POTION", "...naming the Potion")
+    eq(sent[1] and sent[1].slot, 0, "...on party slot 0")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 2
+    fight.itemPick = { id = "REVIVE", effect = Effects.itemEffect("REVIVE") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 1, "Revive on a fainted mon still commits")
+    eq(sent[1] and sent[1].item, "REVIVE", "...naming Revive")
+  end
+
+  do
+    local fight, sent = potionFight()
+    fight.switchIndex = 1
+    fight.itemPick = { id = "REVIVE", effect = Effects.itemEffect("REVIVE") }
+    fight:updateItemParty(pressA)
+    eq(#sent, 0, "Revive on a living mon still refuses")
+    check(saidNoEffect(fight.lines), "...with the no-effect line")
+  end
+
+  local coop = setmetatable({
+    phase = "item_party",
+    switchIndex = 2,
+    itemPick = { id = "POTION", effect = Effects.itemEffect("POTION") },
+    mediated = true,
+    mine = 1,
+    bagSheet = { POTION = 1 },
+    messages = {},
+    game = { save = { inventory = { POTION = 1 } } },
+    sim = {
+      slot = function()
+        return {
+          party = {
+            { nickname = "PIKACHU", hp = 35 },
+            { nickname = "RATTATA", hp = 0 },
+          },
+          active = 1,
+        }
+      end,
+    },
+  }, { __index = CoopBattle })
+  local coopSent = {}
+  function coop:commit()
+    coopSent[#coopSent + 1] = true
+    return true
+  end
+  coop:updateItemParty(pressA)
+  eq(#coopSent, 0, "co-op Potion on a fainted mon does not commit either")
+  eq(coop.phase, "messages", "...and shows the no-effect line")
+  eq(coop.after, "item_party", "...then returns to the party picker")
+  check(saidNoEffect(coop.messages), "...with the same no-effect line")
 end)()
 
 -- ------- kindOf: both generations' shapes for "this is a fight I take"
@@ -17776,6 +17996,172 @@ end)()
   stubMod.log.warn = function() end
 end)()
 
+-- ------- replace picker waits for the faint line in draw
+--
+-- update() drains messages while `shown` is set and only then opens the
+-- picker. drawBandWidgets / drawMenusClassic used to paint WHO'S NEXT first
+-- and return, so the faint line never appeared in the band.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local Battlefield = need("Battlefield")
+  local saveMessage, saveGrid, saveList =
+    Battlefield.drawMessagePanel, Battlefield.drawCommandGrid, Battlefield.drawListPanel
+  local saveBackdrop = Battlefield.drawBandBackdrop
+  Battlefield.drawBandBackdrop = function() end
+  Battlefield.drawCommandGrid = function() return true end
+
+  local painted = {}
+  Battlefield.drawMessagePanel = function(text)
+    painted[#painted + 1] = { kind = "message", text = text }
+    return true
+  end
+  Battlefield.drawListPanel = function(_, _, opts)
+    painted[#painted + 1] = { kind = "list", title = opts and opts.title }
+    return true
+  end
+
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = { mon(0, 50, { { id = "FIX_TACKLE", pp = 20 } }),
+                mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+
+  local client = setmetatable({
+    sim = sim, host = false, mine = 1, replacing = true, switchIndex = 1,
+    phase = "messages", shown = "SQUIRTLE fainted!",
+    messages = { { text = "NEXT" } },
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  check(CoopBattle.boxLive(client),
+        "a shown faint line keeps the box live")
+  painted = {}
+  eq(client:drawBandWidgets(), true, "the band still draws")
+  eq(#painted, 1, "exactly one widget")
+  eq(painted[1].kind, "message",
+     "the faint line wins the band over WHO'S NEXT")
+  eq(painted[1].text, "SQUIRTLE fainted!", "and it is the line that is up")
+
+  -- Last line of a batch: already popped into `shown`, queue empty.
+  client.messages = {}
+  check(CoopBattle.boxLive(client),
+        "the last line still owns the box after it leaves the queue")
+  painted = {}
+  eq(client:drawBandWidgets(), true, "last-line band still draws")
+  eq(painted[1].kind, "message", "and still the line, not the picker")
+
+  -- Queued but not yet shown.
+  client.shown = nil
+  client.messages = { { text = "SQUIRTLE fainted!" } }
+  check(CoopBattle.boxLive(client),
+        "a queued faint line is live before it is shown")
+  painted = {}
+  eq(client:drawBandWidgets(), true, "queued-line band still draws")
+  eq(painted[1].kind, "message", "the empty page gap, not WHO'S NEXT")
+
+  -- Idle box: picker opens.
+  client.shown = nil
+  client.messages = {}
+  client.phase = "wait"
+  check(not CoopBattle.boxLive(client), "an idle box is idle")
+  painted = {}
+  eq(client:drawBandWidgets(), true, "idle replace still draws")
+  eq(painted[1].kind, "list", "and now the bench list is the band")
+  eq(painted[1].title, "WHO'S NEXT?", "titled as a send-out, not SWITCH")
+
+  -- Classic menus: same order.
+  function client:drawMessage() self._classic = "message" end
+  function client:drawReplace() self._classic = "replace" end
+  client.shown = "SQUIRTLE fainted!"
+  client.messages = { { text = "NEXT" } }
+  client.phase = "messages"
+  client._classic = nil
+  client:drawMenusClassic()
+  eq(client._classic, "message", "classic menus keep the faint line too")
+  client.shown = nil
+  client.messages = {}
+  client.phase = "wait"
+  client._classic = nil
+  client:drawMenusClassic()
+  eq(client._classic, "replace", "and open the picker once the box is idle")
+
+  -- Classic full-page send-out: drawSafe used to gate only on shown/anim,
+  -- so a queued faint with no page up still opened WHO'S NEXT over the KO.
+  local function classicClient(extra)
+    local c = setmetatable({
+      sim = sim, host = false, mine = 1, replacing = true, switchIndex = 1,
+      classicUi = true,
+      game = { data = data, save = { inventory = {}, party = {} } },
+    }, { __index = CoopBattle })
+    for k, v in pairs(extra) do c[k] = v end
+    return c
+  end
+  local queued = classicClient({
+    phase = "messages", shown = nil,
+    messages = { { text = "SQUIRTLE fainted!" } },
+  })
+  check(queued:boxLive(), "a queued faint keeps the classic picker closed")
+  local sinking = classicClient({
+    phase = "messages", shown = nil, messages = {},
+    faintFx = { frames = 1 },
+  })
+  check(sinking:boxLive(), "a faint sink keeps the classic picker closed")
+  local idleClassic = classicClient({
+    phase = "wait", shown = nil, messages = {},
+  })
+  check(not idleClassic:boxLive(), "an idle box lets the classic picker open")
+
+  if CoopBattle.loadEngine() then
+    local previous = rawget(_G, "love")
+    local previousGfx = previous and previous.graphics
+    _G.love = previous or {}
+    _G.love.graphics = {
+      setColor = function() end,
+      rectangle = function() end,
+    }
+    local function drive(c)
+      c._picker, c._menus = 0, 0
+      function c:drawClassicPartyPicker()
+        self._picker = self._picker + 1
+        return true
+      end
+      function c:drawField() end
+      function c:drawAnim() end
+      function c:drawMenusClassic()
+        self._menus = self._menus + 1
+      end
+      c:drawSafe()
+    end
+    drive(queued)
+    eq(queued._picker, 0,
+       "drawSafe does not cover the stage while the box is live")
+    eq(queued._menus, 1, "...and falls through to the message box")
+    drive(sinking)
+    eq(sinking._picker, 0, "nor during the faint sink")
+    eq(sinking._menus, 1, "...the box still owns that frame")
+    drive(idleClassic)
+    eq(idleClassic._picker, 1,
+       "drawSafe opens the full-page picker once the box is idle")
+    eq(idleClassic._menus, 0, "...and does not also paint the band list")
+    if previous then
+      previous.graphics = previousGfx
+    else
+      _G.love = nil
+    end
+  end
+
+  Battlefield.drawMessagePanel, Battlefield.drawCommandGrid, Battlefield.drawListPanel =
+    saveMessage, saveGrid, saveList
+  Battlefield.drawBandBackdrop = saveBackdrop
+end)()
+
 -- ------- box text fits the eighteen-column bottom box
 ;(function()
   local CoopBattle = need("CoopBattle")
@@ -17817,11 +18203,11 @@ end)()
   eq(CoopBattle.CMD_BOX_TW, 20, "command box is full width")
 end)()
 
--- ------- the move list: one column, clamp at both ends
+-- ------- the move list: one column, wrap at both ends
 --
 -- Drawn vertically (full-width names) like classic Gen 1, not the old 2x2
 -- grid that clipped longer move names. UP/DOWN step; LEFT/RIGHT are aliases;
--- past either end holds.
+-- past either end wraps, matching MediatedBattle:updateMoveMenu / Gen 1 FIGHT.
 
 ;(function()
   local CoopBattle = need("CoopBattle")
@@ -17851,11 +18237,11 @@ end)()
 
   client.moveIndex = 3
   CoopBattle.updateMove(client, press("down"))
-  eq(client.moveIndex, 3, "DOWN on the last move holds")
+  eq(client.moveIndex, 1, "DOWN on the last move wraps to the first")
 
   client.moveIndex = 1
   CoopBattle.updateMove(client, press("up"))
-  eq(client.moveIndex, 1, "UP on the first holds")
+  eq(client.moveIndex, 3, "UP on the first wraps to the last")
 
   client.moveIndex = 1
   CoopBattle.updateMove(client, press("right"))
@@ -17885,6 +18271,79 @@ end)()
     CoopBattle.updateMove(loner, press(direction))
     eq(loner.moveIndex, 1, direction .. " holds with only one move on the list")
   end
+end)()
+
+-- ------- ITEM and item-move lists wrap the same way as FIGHT
+--
+-- 1v1 MediatedBattle:updateItemMenu / updateItemParty / updateItemMove wrap
+-- at both ends. Co-op used to clamp via listPress; the two UIs now share
+-- the Gen 1 habit. SWITCH / replace stay clamped (pinned below on
+-- updateReplace).
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local function press(key) return { wasPressed = function(_, k) return k == key end } end
+
+  local bag = setmetatable({
+    messages = {}, phase = "item", itemIndex = 1,
+    itemList = {
+      { id = "potion", name = "POTION", count = 1, effect = {} },
+      { id = "super-potion", name = "SUPER POTION", count = 1, effect = {} },
+      { id = "hyper-potion", name = "HYPER POTION", count = 1, effect = {} },
+    },
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  CoopBattle.updateItem(bag, press("down"))
+  eq(bag.itemIndex, 2, "DOWN from the first item lands on the second")
+  bag.itemIndex = 3
+  CoopBattle.updateItem(bag, press("down"))
+  eq(bag.itemIndex, 1, "DOWN on the last item wraps to the first")
+  CoopBattle.updateItem(bag, press("up"))
+  eq(bag.itemIndex, 3, "UP on the first wraps to the last")
+  CoopBattle.updateItem(bag, press("right"))
+  eq(bag.itemIndex, 1, "RIGHT aliases DOWN, including the wrap")
+
+  local sim = fieldSim({
+    { side = "a", owner = "ann", name = "ANN",
+      party = {
+        mon(60, 50, { { id = "FIX_TACKLE", pp = 20 },
+                      { id = "FIX_TACKLE", pp = 20 },
+                      { id = "FIX_TACKLE", pp = 20 } }),
+        mon(60, 40, { { id = "FIX_TACKLE", pp = 20 } }),
+        mon(60, 35, { { id = "FIX_TACKLE", pp = 20 } }),
+      } },
+    { side = "a", owner = "bob", name = "BOB",
+      party = { mon(60, 45, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "cal", name = "CAL",
+      party = { mon(60, 30, { { id = "FIX_TACKLE", pp = 20 } }) } },
+    { side = "b", owner = "dee", name = "DEE",
+      party = { mon(60, 20, { { id = "FIX_TACKLE", pp = 20 } }) } },
+  })
+  local partyPick = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "item_party",
+    switchIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+  eq(#CoopBattle.itemPartyRows(partyPick), 3, "three party rows for the item target")
+  partyPick.switchIndex = 3
+  CoopBattle.updateItemParty(partyPick, press("down"))
+  eq(partyPick.switchIndex, 1, "DOWN on the last party row wraps to the first")
+  CoopBattle.updateItemParty(partyPick, press("up"))
+  eq(partyPick.switchIndex, 3, "UP on the first party row wraps to the last")
+
+  local ether = setmetatable({
+    sim = sim, host = false, mine = 1, messages = {}, phase = "item_move",
+    moveIndex = 1, itemPartyIndex = 1,
+    game = { data = data, save = { inventory = {}, party = {} } },
+  }, { __index = CoopBattle })
+
+  eq(#(sim:slot(1).party[1].moves or {}), 3, "three moves on the Ether list")
+  ether.moveIndex = 3
+  CoopBattle.updateItemMove(ether, press("down"))
+  eq(ether.moveIndex, 1, "DOWN on the last item-move wraps to the first")
+  CoopBattle.updateItemMove(ether, press("up"))
+  eq(ether.moveIndex, 3, "UP on the first item-move wraps to the last")
 end)()
 
 -- ------- the gap between two lines is not a stage for the wait line
@@ -20660,7 +21119,8 @@ check((struggler.hp or 0) < (struggler.stats.hp or 0),
   eq(sent[1].slot, 1, "for this player's own slot")
   eq(sent[1].index, 2, "naming the monster they picked")
 
-  -- With two on the bench the cursor moves, and clamps (same as moves/target).
+  -- With two on the bench the cursor moves, and clamps. Party send-out stays
+  -- a bounded list; FIGHT / ITEM / item-target wrap.
   picker:slot(1).party[3].hp = 60
   client.replacing, client.switchIndex, sent = true, 1, {}
   eq(#CoopBattle.benchOf(client, picker:slot(1)), 2, "two reserves, two rows")
@@ -25362,6 +25822,33 @@ end)()
        "PP Ups add a fifth of base pp each -- floor(20/5)*1 == 4 -> 24")
     check(not rows[2].dim, "a move with PP left is not dimmed")
 
+    -- Classic Ether picker: same names FIGHT uses, not the raw ids.
+    do
+      local listed
+      local etherClient = setmetatable({
+        itemPartyIndex = 1,
+        moveIndex = 1,
+        game = { data = data },
+        mySlot = function()
+          return {
+            active = 1,
+            party = { { moves = {
+              { id = "FIX_BOOST", pp = 5 },
+              { id = "MYSTERY_MOVE", pp = 1 },
+            } } },
+          }
+        end,
+        drawList = function(_, rows)
+          listed = rows
+        end,
+      }, { __index = CoopBattle })
+      etherClient:drawItemMove()
+      eq(listed[1], "FIX BOOST",
+         "the classic Ether picker lists the same display name FIGHT uses")
+      eq(listed[2], "MYSTERY_MOVE",
+         "...and a move with no dataset record still shows under its id")
+    end
+
     -- The POKeMON rows carry the arena's own front pic, so the band can draw
     -- the highlighted monster beside its list. Headless there is no engine to
     -- resolve one, so the cache the resolver writes through is seeded here --
@@ -25519,6 +26006,28 @@ end)()
           "the PP sentence is shown")
     eq(ppClient.moveMemory[2], nil,
        "...and does not remember a move the hub never took")
+
+    -- SESSION_LEAVE leaves TCP up; sendMediatedChoice must not put a
+    -- BATTLE_CHOICE on the wire while the seat is awaiting reconnect.
+    local sent = {}
+    local dropClient = setmetatable({
+      mediated = true,
+      battleId = "b-drop",
+      awaitingReconnect = false,
+      messages = {},
+      transport = {
+        send = function(_, msgType, payload)
+          sent[#sent + 1] = { type = msgType, payload = payload }
+          return true
+        end,
+        isReady = function() return true end,
+      },
+    }, { __index = CoopBattle })
+    dropClient:onTransportLost()
+    eq(dropClient.awaitingReconnect, true, "onTransportLost holds the seat")
+    eq(dropClient:sendMediatedChoice({ kind = "run" }), false,
+       "sendMediatedChoice refuses after the drop")
+    eq(#sent, 0, "and puts no BATTLE_CHOICE on the wire")
 
     local items = CoopBattle.bandCommandItems({})
     eq(items[1].label, "FIGHT", "the grid keeps the classic FIGHT/SWITCH/ITEM/RUN order")
