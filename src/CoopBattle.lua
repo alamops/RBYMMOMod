@@ -5793,12 +5793,20 @@ end
 -- One classic full-page picker row from a party / bench mon. Front pic is
 -- the battle FRONT (foe-stage art); the list icon is the start-menu bag
 -- sprite. Types and exp come off the species def / save mon, never invented.
-local function classicPickerRow(self, mon, label)
+--
+-- `shownHp` is the plate's display clock when this mon is the one draining
+-- on the field. Faint stays on truth hp so a bar still crawling to 0 is
+-- not already FNT in the list.
+local function classicPickerRow(self, mon, label, shownHp)
   if type(mon) ~= "table" then return nil end
   local data = self.game and self.game.data
   local pokemon = (data and data.pokemon) or {}
   local def = pokemon[mon.species]
-  local hp = tonumber(mon.hp)
+  local truth = tonumber(mon.hp)
+  local hp = tonumber(shownHp)
+  if hp == nil then hp = tonumber(mon.shownHp) end
+  if hp == nil then hp = tonumber(mon.shownHP) end
+  if hp == nil then hp = truth end
   local maxHp = tonumber(mon.maxHp)
     or (type(mon.stats) == "table" and tonumber(mon.stats.hp))
   return {
@@ -5810,7 +5818,7 @@ local function classicPickerRow(self, mon, label)
     maxHp = maxHp,
     types = ClassicBattle.typeNames(def, engine and engine.TypeChart),
     expFrac = expFraction(self.game, mon),
-    fainted = (hp or 0) <= 0,
+    fainted = (truth or 0) <= 0,
     front = partyFrontFor(self, mon),
     icon = seatIconFor(self, nil, { mon = mon }),
     species = mon.species,
@@ -7148,13 +7156,31 @@ end
 -- `drawMenusClassic`, which is byte-identical to what it always was.
 
 -- Right-hand column for a party row: the numbers the plates publish anyway.
-local function hpRight(mon)
-  if type(mon) ~= "table" then return nil end
-  local hp = tonumber(mon.hp)
+-- Prefer the display clock so a list drawn while a bar crawls matches the
+-- plate instead of jumping to sim truth. A battler (`shownHP` + nested
+-- `.mon`) is accepted the same way a party mon or a seat is.
+local function hpRight(src)
+  if type(src) ~= "table" then return nil end
+  local battler = type(src.mon) == "table" and src or nil
+  local mon = battler and src.mon or src
+  local hp
+  if battler then
+    hp = displayHP(battler)
+  else
+    hp = tonumber(mon.shownHp)
+    if hp == nil then hp = tonumber(mon.shownHP) end
+    if hp == nil then hp = tonumber(mon.hp) end
+  end
   local max = tonumber(mon.maxHp)
     or (type(mon.stats) == "table" and tonumber(mon.stats.hp))
-  if not (hp and max) then return nil end
+  if hp == nil or not max then return nil end
   return ("%d/%d"):format(hp, max)
+end
+
+-- Fielded battler for a party index, when that index is the one on the plate.
+local function fieldBattler(self, seat, partyIndex)
+  if not (seat and partyIndex and seat.active == partyIndex) then return nil end
+  return self:shownBattlerAt(seat.index) or seat.battler
 end
 
 -- The commands, with SWITCH under the name the player knows it by -- which is
@@ -7227,6 +7253,23 @@ function M:bandMoveRows()
   return rows
 end
 
+-- Fielded targets, with HP from the same clock the plates drain.
+function M:bandTargetRows()
+  local rows = {}
+  local mine = self:mySlot()
+  local sim = self.sim
+  for _, entry in ipairs((mine and sim and sim.targetsFor and sim:targetsFor(mine)) or {}) do
+    local battler = entry.battler
+    local mon = battler and battler.mon
+    rows[#rows + 1] = {
+      label = (battler and battler.name) or "?",
+      right = hpRight(battler or mon),
+      dim = (mon and (mon.hp or 0) <= 0) or nil,
+    }
+  end
+  return rows
+end
+
 -- Just "MOVES" since the type moved onto the rows: the title used to carry
 -- `TYPE/x` for the highlighted move, and repeating on the header what every
 -- row already says is a header that only ever restates the cursor.
@@ -7244,8 +7287,27 @@ function M:bandBenchRows(bench)
     local def = pokemon[mon.species]
     rows[#rows + 1] = {
       label = tostring(mon.nickname or (def and def.name) or mon.species or "?"),
-      right = hpRight(mon),
+      right = hpRight(entry.battler or mon),
       front = partyFrontFor(self, mon),
+    }
+  end
+  return rows
+end
+
+-- Whole party for an item target, with the fielded mon's HP from the plate
+-- clock. Shown, not filtered: a Revive wants the fainted one, and
+-- `updateItemParty` indexes the whole party.
+function M:bandItemPartyRows()
+  local seat = self:mySlot()
+  local party = (seat and seat.party) or {}
+  local rows = {}
+  for _, row in ipairs(self:itemPartyRows()) do
+    local mon = party[row.index]
+    rows[#rows + 1] = {
+      label = row.label,
+      right = hpRight(fieldBattler(self, seat, row.index) or mon),
+      front = partyFrontFor(self, mon),
+      dim = row.fainted or nil,
     }
   end
   return rows
@@ -7353,18 +7415,7 @@ function M:drawBandWidgets()
     return true
   end
   if self.phase == "target" then
-    local rows = {}
-    local mine = self:mySlot()
-    for _, entry in ipairs((mine and self.sim:targetsFor(mine)) or {}) do
-      local battler = entry.battler
-      local mon = battler and battler.mon
-      rows[#rows + 1] = {
-        label = (battler and battler.name) or "?",
-        right = hpRight(mon),
-        dim = (mon and (mon.hp or 0) <= 0) or nil,
-      }
-    end
-    list(rows, self.targetIndex or 1, { title = "ATTACK WHO?" })
+    list(self:bandTargetRows(), self.targetIndex or 1, { title = "ATTACK WHO?" })
     return true
   end
   if self.phase == "switch" then
@@ -7394,19 +7445,7 @@ function M:drawBandWidgets()
     return true
   end
   if self.phase == "item_party" then
-    local seat = self:mySlot()
-    local party = (seat and seat.party) or {}
-    local rows = {}
-    for _, row in ipairs(self:itemPartyRows()) do
-      rows[#rows + 1] = {
-        label = row.label,
-        right = hpRight(party[row.index]),
-        front = partyFrontFor(self, party[row.index]),
-        -- Shown, not filtered: a Revive wants the fainted one, and
-        -- `updateItemParty` indexes the whole party.
-        dim = row.fainted or nil,
-      }
-    end
+    local rows = self:bandItemPartyRows()
     list(rows, self.switchIndex or 1, { title = "POKeMON" })
     return true
   end
@@ -10497,14 +10536,19 @@ function M:drawClassicPartyPicker()
     local party = (seat and seat.party) or {}
     source = {}
     for _, row in ipairs(self:itemPartyRows()) do
-      source[#source + 1] = { mon = party[row.index], label = row.label }
+      local battler = fieldBattler(self, seat, row.index)
+      source[#source + 1] = {
+        mon = party[row.index],
+        label = row.label,
+        shownHp = battler and displayHP(battler) or nil,
+      }
     end
   else
     return false
   end
   local rows = {}
   for _, entry in ipairs(source) do
-    local row = classicPickerRow(self, entry.mon, entry.label)
+    local row = classicPickerRow(self, entry.mon, entry.label, entry.shownHp)
     if row then rows[#rows + 1] = row end
   end
   if #rows == 0 then return false end
