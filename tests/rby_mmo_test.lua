@@ -3265,6 +3265,89 @@ end), "a message the encoder cannot take does not throw out of the host's "
 localNet:close()
 eq(hosted.hub.players, 1, "closing the local net frees the host's own slot")
 
+-- ------- MAX_LINE limits one line, not one tick's worth of lines
+--
+-- HostServer:read used to drop a guest the moment more than 64 KiB sat
+-- unread, complete lines included -- so ordinary messages that piled up
+-- while the host's frame was busy cost the guest their connection, with
+-- nothing on their screen. The Node hub had the same check and answered it
+-- "Message too long." Each socket here hands back exactly what luasocket
+-- would at settimeout(0): n bytes when n are there, else a timeout and the
+-- partial.
+do
+  local lineHost = HostServer.new()
+  lineHost.hub = Hub.new({ maxPlayers = 4 })
+  lineHost.running = true
+
+  local function wired(name, bytes)
+    local pos = 1
+    local sock = {}
+    function sock:receive(n)
+      if pos > #bytes then return nil, "timeout", "" end
+      local chunk = bytes:sub(pos, pos + n - 1)
+      pos = pos + #chunk
+      if #chunk == n then return chunk end
+      return nil, "timeout", chunk
+    end
+    function sock:left() return #bytes - pos + 1 end
+    local peer = fakePeer()
+    local conn = { sock = sock, rx = "", tx = "", dead = false, closing = false,
+                   peer = peer }
+    conn.client = lineHost.hub:accept(peer)
+    lineHost.hub:receive(conn.client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId(name), name = name })
+    check(take(peer, Wire.WELCOME) ~= nil, name .. " is welcomed")
+    return conn, peer, sock
+  end
+
+  local function tooLong(peer)
+    local err = take(peer, Wire.ERROR)
+    return err ~= nil and err.message == "Message too long."
+  end
+
+  local LINES = 10000
+  local pingLine = '{"type":"' .. Wire.PING .. '"}\n'
+  local burst, burstPeer, burstSock = wired("BURST", pingLine:rep(LINES))
+  check(#pingLine * LINES > 3 * HostServer.MAX_LINE,
+    "the burst is several MAX_LINEs of complete lines")
+  lineHost:read(burst)
+  check(not burst.dead and not burstPeer.closed,
+    "a tick's worth of short lines does not drop the guest")
+  check(not tooLong(burstPeer), "nor refuse them as too long")
+  check(burstSock:left() > 0,
+    "the read stops at its budget and leaves the rest for the next tick")
+  for _ = 1, 10 do
+    if burstSock:left() == 0 then break end
+    lineHost:read(burst)
+  end
+  local pongs = 0
+  for _, msg in ipairs(burstPeer.outbox) do
+    if msg.type == Wire.PONG then pongs = pongs + 1 end
+  end
+  eq(pongs, LINES, "every line in the burst is answered, over a few ticks")
+  check(not burst.dead and not burstPeer.closed, "and the guest is still on")
+
+  local long = ("x"):rep(HostServer.MAX_LINE + 1024)
+  local whole, wholePeer, wholeSock = wired("WHOLE",
+    '{"type":"' .. Wire.CHAT .. '","text":"' .. long .. '"}\n')
+  for _ = 1, 10 do
+    if wholeSock:left() == 0 then break end
+    lineHost:read(whole)
+  end
+  check(tooLong(wholePeer), "one complete line over MAX_LINE is refused, "
+    .. "in the sentence the Node hub uses")
+  check(wholePeer.closed and whole.client == nil,
+    "and that guest is closed and forgotten")
+
+  local open, openPeer, openSock = wired("OPEN",
+    '{"type":"' .. Wire.CHAT .. '","text":"' .. long)
+  for _ = 1, 10 do
+    if openSock:left() == 0 then break end
+    lineHost:read(open)
+  end
+  check(tooLong(openPeer), "so is an unterminated line past MAX_LINE")
+end
+
 -- ------------------------------------------------------------------
 -- 5. Avatar step routing
 -- ------------------------------------------------------------------

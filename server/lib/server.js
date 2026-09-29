@@ -967,17 +967,26 @@ function start(options = {}) {
       // timeout.
       limits.noteActivity(socket, { bytes: chunk.length, completedLine });
 
-      if (buffer.length > MAX_LINE) {
+      /*
+       * MAX_LINE is a ceiling on one line, so it is asked of one line: each
+       * line split out below, and whatever is left unterminated once they are
+       * gone. It used to be asked of `buffer` before the split, which also
+       * counted every *complete* line that arrived in the same read -- so a
+       * burst of ordinary messages the kernel handed over together (the hub's
+       * loop busy for a moment, a client flushing a backlog on a slow link)
+       * was refused as "Message too long." with no long message in it.
+       */
+      const tooLong = () => {
         const client = relay.get(id);
         if (client) relay.refuse(client, 'Message too long.');
         else socket.destroy();
-        return;
-      }
+      };
 
       let index;
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
+        if (line.length > MAX_LINE) return tooLong();
         if (!line) continue;
 
         const msg = parseLine(line);
@@ -1043,6 +1052,9 @@ function start(options = {}) {
           limits.markGreeted(socket);
         }
       }
+
+      // What is left has no newline yet: the one line still being written.
+      if (buffer.length > MAX_LINE) tooLong();
     });
 
     // Both fire for a socket that errors, which is the normal case rather

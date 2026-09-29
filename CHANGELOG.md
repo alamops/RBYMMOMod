@@ -4,7 +4,7 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
-## [1.4.18] - 2026-09-28
+## [1.4.19] - 2026-09-29
 
 ### Fixed
 
@@ -27,6 +27,21 @@ here must match `manifest.version`.
   set in window pixels, which on Gold is not the page's space. They now map
   through the page transform, so your own monster is no longer clipped out of
   sight.
+
+## [1.4.18] - 2026-09-28
+
+### Fixed
+
+- **"Message too long." on ordinary traffic.** The dedicated hub checked its
+  64 KiB line ceiling against everything received in one read rather than
+  against one line, so a burst of normal-sized messages arriving together
+  got the player refused with "Message too long." and disconnected — the
+  message a player reported getting when starting a trade. The ceiling now
+  applies to each line and to the
+  unfinished one only. A game hosted from START > MMO had the same check and
+  dropped the guest without saying anything; it now reads a bounded amount per
+  tick, leaves the rest for the next one, and refuses only a genuinely
+  over-long line, in the same words as the hub.
 
 ## [1.4.17] - 2026-09-20
 
