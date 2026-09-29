@@ -78,6 +78,7 @@ function M.new(deps, slots)
       save = deps.save,
       facingSide = deps.facingSide,
       onError = deps.onError,
+      picFor = deps.picFor,
     }
   end
 
@@ -110,6 +111,11 @@ function M.new(deps, slots)
     aiUses = deps.aiUses or 0,
     save = deps.save,
     onError = deps.onError,
+    -- `picFor(mon, facePlayer)` -> Image, the battle pic for a battler built
+    -- WITHOUT `makeBattler` (Gold has none, and it is makeBattler that attaches
+    -- the sprite on Gen 1). The classic stage draws `battler.sprite`; without
+    -- this a Gen 2 classic co-op fight had no monsters on it at all.
+    picFor = deps.picFor,
     -- Which side draws as the Gen 1 "player" half: back sprites, no "Enemy"
     -- name prefix, player-side move anims. Defaults to "a" (host / absolute
     -- layout). CoopBattle sets this to the local seat's side so a side-b
@@ -241,6 +247,10 @@ function M:sendOut(slot, index, trusted)
       badges = facePlayer and slot.badges or nil,
       badgeBoosts = self.data.constants and self.data.constants.badgeBoosts,
     }
+    if self.picFor then
+      local ok, pic = pcall(self.picFor, mon, facePlayer)
+      if ok and pic then slot.battler.sprite = pic end
+    end
   end
   -- Exp participation, both directions, on the one choke point every send-out
   -- goes through (construction, a chosen switch, a replacement after a faint,
