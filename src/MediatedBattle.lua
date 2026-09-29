@@ -1683,13 +1683,19 @@ end
 -- (`def.spriteFront`, which `src/ui/gen2/BattleState.lua:pic` reads), so the
 -- Gold arm is a lookup and a load rather than a probe.
 --
--- What the Gold arm deliberately does *not* try to reproduce from that engine
--- function: the Unown form row and the `pokemon.sprite` hook. Both need the
--- live battler's DVs, which a wire sheet does not carry -- the seat here is
--- built from `Wire.battleMon`, not from a save mon -- so re-deriving them would
--- be inventing a form and a skin off data this screen was never sent. A form
--- that resolves to nothing falls back to the species row, which is what the
--- cart draws for every Unown that is not its own letter anyway.
+-- It does raise `pokemon.sprite` (inside `Battlefield.gen2FrontImage`), the
+-- seam every Gen 2 mon pic goes through: a battle-sprite mod that reskins the
+-- solo fight has to reskin this arena too. `ctx.mon` is the SAVE mon when this
+-- client has one -- never a seat's `Wire.battleMon`, whose `species` is the
+-- display token -- and nil for a peer's or a wild's, so a hook keyed on species
+-- works for every seat and a per-instance skin only for the monsters we own.
+--
+-- What the Gold arm deliberately does *not* reproduce is the Unown form row.
+-- It needs the live battler's DVs, which a wire sheet does not carry -- the
+-- seat here is built from `Wire.battleMon`, not from a save mon -- so
+-- re-deriving it would be inventing a form off data this screen was never
+-- sent. A form that resolves to nothing falls back to the species row, which
+-- is what the cart draws for every Unown that is not its own letter anyway.
 function M:seatFront(speciesKey, monHint, slot, isOwn)
   if type(speciesKey) ~= "string" or speciesKey == "" then return nil end
   local movie = self.evolving
@@ -1750,10 +1756,9 @@ function M:seatFront(speciesKey, monHint, slot, isOwn)
     local def = data and type(data.pokemon) == "table" and data.pokemon[speciesKey]
     local path = type(def) == "table" and def.spriteFront or nil
     if type(path) == "string" and path ~= "" then
-      -- Baked, not loaded raw: a Gold front pic is a four-shade sheet whose
-      -- colour 0 is WHITE, so the raw image is a grey monster in an opaque
-      -- white box. `Battlefield.gen2FrontImage` keys colour 0 and applies the
-      -- species palette -- see its header.
+      -- Baked, not loaded raw: a Gold front pic is a grey four-shade sheet.
+      -- `Battlefield.gen2FrontImage` resolves it through `pokemon.sprite` and
+      -- applies the species palette -- see its header.
       -- **Shiny comes from whichever copy of the monster actually knows.**
       -- Two callers ask, and they hand in different shapes:
       --
@@ -1779,7 +1784,20 @@ function M:seatFront(speciesKey, monHint, slot, isOwn)
         shiny = (own and own.species == speciesKey and own.shiny)
           and true or false
       end
-      resolved = Battlefield.gen2FrontImage(self.game, speciesKey, path, shiny)
+      -- `pokemon.sprite`'s ctx.mon, on the same principle: the save copy
+      -- where there is one. A slot-less caller (the party preview, the
+      -- evolution movie) hands in the save mon -- `partyFront` falls back to
+      -- the sheet only when the save slot will not resolve -- and a seat's is
+      -- the one behind our own active, or nothing.
+      local known = nil
+      if slot == nil then
+        known = monHint
+      elseif isOwn then
+        local own = self:saveMon(self.active)
+        if own and own.species == speciesKey then known = own end
+      end
+      resolved = Battlefield.gen2FrontImage(self.game, speciesKey, path, shiny,
+        known)
       if not resolved then
         local ok, img = pcall(function()
           local Assets = require("src.render.Assets")
@@ -3722,21 +3740,18 @@ function M:refreshSlotSprite(index, isPlayer)
     monHint = self.mine and self.mine[self.active]
   end
 
-  -- Gen 2: Gen2Compat's BattleState has no makeBattler. Load spriteFront /
-  -- spriteBack the way ui/gen2/BattleState:pic does.
+  -- Gen 2: Gen2Compat's BattleState has no makeBattler. Resolve spriteFront /
+  -- spriteBack the way ui/gen2/BattleState:pic does -- through
+  -- `pokemon.sprite`, in the species palette (`Battlefield.gen2MonPic`) --
+  -- because this is the pic the classic stage draws, and its zone turns the
+  -- palette shader off: loaded raw it was a grey monster.
   if Gen.generation(self.game) == 2 then
-    local def = data.pokemon[key]
-    local path = isPlayer and def.spriteBack or def.spriteFront
-    if type(path) ~= "string" or path == "" then
-      slot.sprite = nil
-      return
-    end
-    local okImg, Assets = pcall(require, "src.render.Assets")
-    if not (okImg and Assets and type(Assets.image) == "function") then
-      slot.sprite = nil
-      return
-    end
-    local ok, image = pcall(Assets.image, path)
+    -- Only our own seat has a save mon behind it; see `seatFront`.
+    local own = isPlayer and self:saveMon(self.active) or nil
+    if own and own.species ~= key then own = nil end
+    local ok, image = pcall(Battlefield.gen2MonPic, self.game, key,
+      isPlayer and "back" or "front", (own and own.shiny) and true or false,
+      own)
     if ok and image then
       slot.sprite = image
       slot.level = (monHint and monHint.level) or slot.level or 1
@@ -6734,7 +6749,7 @@ function M:drawFieldPics()
     local scx, scy, scw, sch
     if clipMenus and love.graphics.getScissor then
       scx, scy, scw, sch = love.graphics.getScissor()
-      love.graphics.setScissor(0, 0, 160, 96)
+      ClassicBattle.setPageScissor(0, 0, 160, 96)
     end
     local x, y, scale = self:playerPicXY(mine.sprite)
     scale = scale or playerPicScale(self.game)
@@ -7320,6 +7335,18 @@ function M:drawWidescreen(winW, winH)
   winW = tonumber(winW) or 0
   winH = tonumber(winH) or 0
   if winW <= 0 or winH <= 0 then return end
+
+  -- **Also called with the arena OFF.** Gold asks an `isOpaque` screen whose
+  -- `drawsWidescreen()` said no for its SURROUND (`Game2:drawScene`'s
+  -- cleartilemap safety net), then blits the 160x144 page over it. Painting
+  -- the arena here put the whole theatre around and under the classic stage.
+  -- A classic page takes Gold's own paper white, the void it paints for a
+  -- page with no surround of its own.
+  if not self:usesBattlefield() then
+    G.setColor(1, 1, 1, 1)
+    G.rectangle("fill", 0, 0, winW, winH)
+    return
+  end
 
   -- The void around the arena. Black rather than Gold's paper white: the
   -- arena is its own dark chrome (the same vote `refreshLetterbox` withdraws

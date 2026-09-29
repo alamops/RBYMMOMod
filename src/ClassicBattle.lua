@@ -505,6 +505,32 @@ function M.typeNames(def, TypeChart)
   return out
 end
 
+-- Scissor a rect given in this page's own 160x144 coordinates.
+--
+-- `setScissor` takes WINDOW pixels. Gen 1 draws the page into a 160x144
+-- canvas at the identity transform, so the two agree. Gold blits it straight
+-- to the window under `translate + scale` (`Game2:drawScene`), where a raw
+-- (0, 0, 160, 96) is a sliver of the window's corner -- it clipped our own
+-- back pic away entirely. Mapped through the live transform the way Gold's own
+-- `Chrome.clipTo` does, which is a no-op on Gen 1's canvas.
+function M.setPageScissor(x, y, w, h)
+  local g = love and love.graphics
+  if not (g and g.setScissor) then return end
+  if g.transformPoint then
+    local okA, x1, y1 = pcall(g.transformPoint, x, y)
+    local okB, x2, y2 = pcall(g.transformPoint, x + w, y + h)
+    if okA and okB then
+      -- Floor the near edge, ceil the far one, and measure between them: a
+      -- width of ceil(|x2 - x1|) from a floored x falls a pixel short of a
+      -- fractional far edge.
+      x, y = math.floor(math.min(x1, x2)), math.floor(math.min(y1, y2))
+      w = math.ceil(math.max(x1, x2)) - x
+      h = math.ceil(math.max(y1, y2)) - y
+    end
+  end
+  pcall(g.setScissor, x, y, w, h)
+end
+
 -- Left slot of the preview band (inside the outer 8px border, down to
 -- the list). A 56px front sheet is taller than this; drawFrontPic
 -- scales and scissors to it.
@@ -551,8 +577,7 @@ function M.drawFrontPic(sprite, boxX, boxY)
   local scx, scy, scw, sch
   if g.getScissor then scx, scy, scw, sch = g.getScissor() end
   if g.setScissor then
-    local cx, cy, cw, ch = M.frontPicClip()
-    pcall(g.setScissor, cx, cy, cw, ch)
+    M.setPageScissor(M.frontPicClip())
   end
   local ok = pcall(g.draw, sprite, x, y, 0, scale, scale)
   if g.setScissor then
@@ -701,7 +726,7 @@ function M.drawPartyPicker(Font, HudTiles, spec)
   if g and g.setScissor then
     -- Inner pane of the full-screen box: never let a 16px icon bleed
     -- onto the divider or the bottom border.
-    pcall(g.setScissor, 8, M.PICKER_LIST_Y, 144,
+    M.setPageScissor(8, M.PICKER_LIST_Y, 144,
       M.PICKER_VISIBLE * M.PICKER_ROW_H)
   end
   for i = 0, M.PICKER_VISIBLE - 1 do

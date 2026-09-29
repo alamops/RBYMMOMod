@@ -30103,4 +30103,259 @@ end)()
   eq(coopLearnRow, nil, "...and does not open a forget prompt mid-fight")
 end)()
 
+-- ------- Gen 2 arena front pics: the sheet's own matte, and pokemon.sprite
+--
+-- A player report from Crystal: every white pixel INSIDE a monster (eyes,
+-- teeth, PIDGEY's breast) showed the arena through it, and a battle-sprite mod
+-- reskinned solo fights but never party ones. The bake keyed all of colour 0
+-- where the importer had already matted only the backdrop, and it read
+-- `def.spriteFront` raw instead of asking `pokemon.sprite`.
+
+;(function()
+  local Battlefield = need("Battlefield")
+
+  -- An ImageData stand-in, one char per pixel: `.` matted backdrop, `W` opaque
+  -- white, `L` / `D` the two middle shades, `K` black.
+  local SHADES = {
+    ["."] = { 1, 1, 1, 0 }, W = { 1, 1, 1, 1 },
+    L = { 2 / 3, 2 / 3, 2 / 3, 1 }, D = { 1 / 3, 1 / 3, 1 / 3, 1 },
+    K = { 0, 0, 0, 1 },
+  }
+  local function sheet(rows)
+    local px = {}
+    for y, row in ipairs(rows) do
+      for x = 1, #row do
+        local s = SHADES[row:sub(x, x)]
+        px[(y - 1) * #row + x] = { s[1], s[2], s[3], s[4] }
+      end
+    end
+    local w, h = #rows[1], #rows
+    local img = {}
+    function img:getDimensions() return w, h end
+    function img:getPixel(x, y)
+      local p = px[y * w + x + 1]
+      return p[1], p[2], p[3], p[4]
+    end
+    function img:setPixel(x, y, r, g, b, a) px[y * w + x + 1] = { r, g, b, a } end
+    function img:mapPixel(fn)
+      for y = 0, h - 1 do
+        for x = 0, w - 1 do
+          self:setPixel(x, y, fn(x, y, self:getPixel(x, y)))
+        end
+      end
+    end
+    return img
+  end
+  local PAL = { { 255, 255, 255 }, { 248, 160, 64 }, { 176, 64, 32 }, { 0, 0, 0 } }
+  local function rgb255(img, x, y)
+    local r, g, b, a = img:getPixel(x, y)
+    return { math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5),
+      math.floor(b * 255 + 0.5) }, a
+  end
+
+  -- What the importer writes: backdrop matted, the eye opaque white.
+  local matted = sheet({
+    ".....",
+    ".KKK.",
+    ".KWK.",
+    ".KLK.",
+    "..D..",
+  })
+  Battlefield.gen2BakePic(matted, PAL)
+  local _, _, _, backdrop = matted:getPixel(0, 0)
+  eq(backdrop, 0, "the importer's matted backdrop stays transparent")
+  local eye, eyeA = rgb255(matted, 2, 2)
+  eq(eyeA, 1, "white INSIDE the outline is not a hole in the monster")
+  T.same(eye, PAL[1], "...and is the palette's white, as the cart draws it")
+  T.same((rgb255(matted, 2, 3)), PAL[2], "the light shade takes the species colour")
+  T.same((rgb255(matted, 2, 4)), PAL[3], "the dark shade takes the other one")
+  T.same((rgb255(matted, 1, 1)), PAL[4], "black stays black")
+
+  -- A sheet with no alpha at all (an old cache, a mod's opaque PNG): matted
+  -- here by the importer's border flood, so it is never a white box.
+  local opaque = sheet({
+    "WWWWW",
+    "WKKKW",
+    "WKWKW",
+    "WKKKW",
+    "WWWWW",
+  })
+  Battlefield.gen2BakePic(opaque, PAL)
+  local _, _, _, corner = opaque:getPixel(0, 0)
+  local _, _, _, edge = opaque:getPixel(2, 4)
+  eq(corner, 0, "an unmatted sheet's border white is keyed")
+  eq(edge, 0, "...all of it that the flood reaches")
+  local _, _, _, enclosed = opaque:getPixel(2, 2)
+  eq(enclosed, 1, "...and the white the outline encloses is not")
+
+  -- No palette (true-colour art, or a species with no row): shades untouched.
+  local plain = sheet({ ".K.", "KWK", ".K." })
+  Battlefield.gen2BakePic(plain, nil)
+  local r, g, b, a = plain:getPixel(1, 1)
+  T.same({ r, g, b, a }, { 1, 1, 1, 1 }, "no palette leaves the art's own pixels")
+
+  -- pokemon.sprite: the real engine seam (src/pokemon/Sprites.lua), driven
+  -- through a hook bus of our own for the length of this block.
+  local okR, Runtime = pcall(require, "src.mods.Runtime")
+  local okS = pcall(require, "src.pokemon.Sprites")
+  if not (okR and okS) then
+    check(true, "(engine Sprites unavailable -- pokemon.sprite tests skipped)")
+    return
+  end
+  local game = { data = { pokemon = {
+    PIDGEY = { spriteFront = "assets/generated/battle/front/pidgey.png" },
+  } } }
+  local vanilla = game.data.pokemon.PIDGEY.spriteFront
+  local seen = nil
+  local saved = Runtime.hooks
+  Runtime.hooks = {
+    chains = { ["pokemon.sprite"] = {} },
+    call = function(_, name, vanillaFn, path, ctx)
+      if name ~= "pokemon.sprite" then return vanillaFn(path, ctx) end
+      seen = ctx
+      ctx.trueColor = true
+      return "mods/hd_sprites/pidgey.png"
+    end,
+  }
+  local mon = { species = "PIDGEY", shiny = true }
+  local okPath, path, trueColor = pcall(Battlefield.gen2PicPath,
+    game, "PIDGEY", vanilla, true, mon)
+  Runtime.hooks = saved
+  check(okPath, "gen2PicPath does not throw")
+  eq(path, "mods/hd_sprites/pidgey.png",
+     "a battle-sprite mod's answer is the art the arena bakes")
+  eq(trueColor, true, "...and its trueColor skips the recolour")
+  eq(seen and seen.species, "PIDGEY", "the hook is told the species")
+  eq(seen and seen.side, "front", "...the side")
+  eq(seen and seen.kind, "battle", "...the same kind the solo fight asks with")
+  eq(seen and seen.shiny, true, "...the shiny flag")
+  check(seen and seen.mon == mon, "...and the monster, when the caller has one")
+
+  Runtime.hooks = { call = function(_, _, vanillaFn, ...) return vanillaFn(...) end }
+  local okBare, barePath, bareTrue = pcall(Battlefield.gen2PicPath,
+    game, "PIDGEY", vanilla, false, nil)
+  Runtime.hooks = saved
+  check(okBare, "gen2PicPath does not throw with no subscriber")
+  eq(barePath, vanilla, "no subscriber: the species row's own pic")
+  eq(bareTrue, false, "...recoloured through the species palette")
+
+  local backSeen = nil
+  Runtime.hooks = {
+    chains = { ["pokemon.sprite"] = {} },
+    call = function(_, _, vanillaFn, p, ctx)
+      backSeen = ctx
+      return vanillaFn(p, ctx)
+    end,
+  }
+  pcall(Battlefield.gen2PicPath, game, "PIDGEY", vanilla, false, nil, "back")
+  Runtime.hooks = saved
+  eq(backSeen and backSeen.side, "back",
+     "the classic stage's back pic asks the hook as a back")
+end)()
+
+-- ------- Gen 2 classic co-op: one stage, and monsters on it
+--
+-- The same Crystal report, second half: with CLASSIC BATTLE UI on, the classic
+-- page drew over the whole arena. Gold calls an opaque screen's
+-- `drawWidescreen` for its surround even when `drawsWidescreen()` said no, and
+-- ours painted the theatre there. And the classic stage had no monsters of its
+-- own: Gold builds co-op battlers without `makeBattler`, the only thing that
+-- ever attached `battler.sprite` -- the mons on screen were the arena's.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local Mediated = need("MediatedBattle")
+  local CoopSim = need("CoopSim")
+  local goldGame = { data = { type_chart = { generation = 2 } } }
+
+  local savedLove = _G.love
+  local function paints(screen)
+    local calls = {}
+    _G.love = { graphics = setmetatable({}, { __index = function(_, name)
+      return function(...) calls[#calls + 1] = { name, ... } end
+    end }) }
+    local arena = false
+    screen.drawBattlefieldSafe = function() arena = true end
+    local ok = pcall(screen.drawWidescreen, screen, 800, 600)
+    _G.love = savedLove
+    return ok, calls, arena
+  end
+
+  for _, case in ipairs({ { "co-op", CoopBattle }, { "mediated", Mediated } }) do
+    local label, Screen = case[1], case[2]
+    local classic = setmetatable({ game = goldGame, classicUi = true },
+      { __index = Screen })
+    check(not classic:usesBattlefield(), label .. ": classic keeps off the arena")
+    check(not classic:drawsWidescreen(), "...and opts out of Gold's widescreen")
+    local ok, calls, arena = paints(classic)
+    check(ok, "...its drawWidescreen still answers the surround call")
+    check(not arena, label .. ": the arena is NOT painted under the classic page")
+    local filled = false
+    for _, c in ipairs(calls) do
+      if c[1] == "rectangle" and c[2] == "fill" and c[5] == 800 and c[6] == 600 then
+        filled = true
+      end
+    end
+    check(filled, "...the window gets a plain surround instead")
+
+    local wide = setmetatable({ game = goldGame, classicUi = false },
+      { __index = Screen })
+    local _, _, drew = paints(wide)
+    check(drew, label .. ": with classic off the arena still draws there")
+  end
+
+  -- A Gold co-op battler carries the pic the classic stage draws: a back for
+  -- our own side, a front for the far one.
+  local asked = {}
+  local sim = CoopSim.new({
+    data = { pokemon = { PIDGEY = { types = {} }, RATTATA = { types = {} } } },
+    game = goldGame,
+    ruleset = {},
+    rng = function(a) return a end,
+    facingSide = "a",
+    picFor = function(mon, facePlayer)
+      asked[#asked + 1] = { mon.species, facePlayer }
+      return (facePlayer and "back:" or "front:") .. mon.species
+    end,
+  }, {
+    { side = "a", owner = "ann", name = "ANN", party = { {
+      species = "PIDGEY", level = 5, hp = 20, stats = { hp = 20 },
+      moves = { { id = "TACKLE", pp = 35 } } } } },
+    { side = "b", name = "WILD", party = { {
+      species = "RATTATA", level = 3, hp = 15, stats = { hp = 15 },
+      moves = { { id = "TACKLE", pp = 35 } } } } },
+  })
+  eq(sim.slots[1].battler.sprite, "back:PIDGEY",
+     "our own side's Gold battler holds its back pic")
+  eq(sim.slots[2].battler.sprite, "front:RATTATA",
+     "...and the far side's its front pic")
+  eq(#asked, 2, "one pic per send-out")
+
+  -- A classic-page scissor is in page units; `setScissor` wants window
+  -- pixels. Gold draws the page under translate(112, 24) + scale(5), so the
+  -- menu clip that keeps our back pic above the box has to be mapped, or it
+  -- is a 160x96 sliver of the window's corner and the pic is never seen.
+  local ClassicBattle = need("ClassicBattle")
+  local function scissorWith(transform)
+    local got = nil
+    _G.love = { graphics = {
+      setScissor = function(...) got = { ... } end,
+      transformPoint = transform,
+    } }
+    ClassicBattle.setPageScissor(0, 0, 160, 96)
+    _G.love = savedLove
+    return got
+  end
+  T.same(scissorWith(nil), { 0, 0, 160, 96 },
+     "with no transform (Gen 1's own canvas) the rect passes through")
+  T.same(scissorWith(function(x, y) return x, y end), { 0, 0, 160, 96 },
+     "...and the identity transform leaves it alone")
+  T.same(scissorWith(function(x, y) return 112 + x * 5, 24 + y * 5 end),
+     { 112, 24, 800, 480 },
+     "Gold's page transform maps it onto the window the page is drawn in")
+  T.same(scissorWith(function(x, y) return 112.5 + x * 5, 24.5 + y * 5 end),
+     { 112, 24, 801, 481 },
+     "a fractional origin still reaches the far edge's partial pixel")
+end)()
+
 T.finish("rby_mmo")

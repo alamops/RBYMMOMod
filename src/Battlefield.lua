@@ -272,12 +272,12 @@ local arenaTried = false
 local humanCache = {} -- spriteId -> { image, quads } | false
 local iconCache = {} -- path string -> Image | false
 local quadCache = {} -- image -> 16x16 frame-0 quad
--- Baked Gen 2 front pics; see `M.gen2FrontImage` far below. Declared up here
+-- Baked Gen 2 mon pics; see `M.gen2PicImage` far below. Declared up here
 -- with its siblings so `reloadArena` can drop it -- it holds baked images with
 -- exactly the property that function exists for (only valid for the colour
 -- mode they were baked in), and being declared at its point of use meant it
 -- was the one cache that survived a reload.
-local monFrontCache = {} -- "species|shiny|mode|path" -> Image | false
+local monFrontCache = {} -- "species|side|shiny|mode|tc|path" -> Image | false
 
 -- Force a fresh arena load (e.g. after replacing outdoor_grass_arena.png).
 -- Also drops the derived sprite caches: fight entry is the one moment both the
@@ -2112,30 +2112,33 @@ end
 
 -- ------- Gen 2 front pics
 --
--- Gold's `def.spriteFront` is a raw four-shade DMG sheet: colour 0 is WHITE,
--- and on hardware that is the background the OBJ layer keys out. Loaded
--- straight through `Assets.image` and drawn over the arena it is therefore a
--- grey monster inside an opaque white box -- which is exactly what the first
--- Gold arena run produced.
+-- Gold's `def.spriteFront` is a four-shade DMG sheet, and on the cart it is
+-- BG tiles, not OBJ: colour 0 is drawn, as the palette's WHITE, over a white
+-- battle backdrop. Gold has no `makeBattler` to hand back a finished image the
+-- way Gen 1 does, so the mod finishes the sheet itself:
 --
--- Gen 1 never hit this because its front pic arrives already resolved: the
--- probe battler `BattleState.makeBattler` builds hands back a keyed, coloured
--- image. Gold has no such call, so the mod does the two steps the GBC hardware
--- does, in the order it does them:
+--   * **Transparency is the sheet's own.** The importer already mattes the
+--     backdrop -- `ImageWriter.matteColor0` flood-fills the white that touches
+--     the border to alpha 0 -- and leaves every white pixel INSIDE the outline
+--     opaque: eyes, teeth, PIDGEY's breast. This bake used to key every
+--     white pixel instead (OBJ rules, the wrong layer), which punched those
+--     through to the arena behind the monster. Only a sheet that arrives with
+--     no alpha at all (a cache from before the matte, or a mod's opaque PNG)
+--     is matted here, by the same border flood the importer runs, so it is
+--     never a white box either.
+--   * Shades map onto the species' own palette (`Palettes.monColors`, which
+--     `src/ui/gen2/BattleState.lua:drawPic` colours through), WHITE included,
+--     so PIKACHU is the yellow the cart draws and its eyes are still white.
+--   * **The art is the one the engine would draw.** The path goes through
+--     `pokemon.sprite` first (`M.gen2PicPath`), and a `trueColor` answer
+--     skips the recolour -- the Gen 2 seam contract ("every Gen 2 screen that
+--     draws a mon pic calls it"). Reading `def.spriteFront` raw meant a
+--     battle-sprite mod reskinned the player's solo fights and never the
+--     party ones.
 --
---   * key colour 0 to transparent;
---   * map the other three shades onto the species' own palette pair
---     (`src/world/gen2/Palettes.monColors`, the same table
---     `src/ui/gen2/BattleState.lua:601` colours its pics through), so a
---     PIKACHU on the arena is the yellow the cart draws and not a grey blob.
---
--- Shade thresholds are `bakeSheetColor`'s, and deliberately the same numbers:
--- the two bakes read the same kind of extracted sheet, and a second set of
--- cutoffs would be a second way for the same art to come out wrong.
---
--- A species with no palette row still gets the alpha key -- a keyed grey
--- monster is a far better picture than a white rectangle, and it is what the
--- engine's own fallback does when `monColors` answers nil.
+-- Shade cutoffs are the engine's own (`getImage` in src/battle/BattleState.lua
+-- and `bakeSheetColor` below): the same kind of extracted sheet, so one set.
+-- A species with no palette row keeps its grey shades.
 --
 -- The cache this fills (`monFrontCache`) is declared at the top of the file
 -- with `humanCache` and friends, not here, so `reloadArena` can drop it.
@@ -2153,56 +2156,180 @@ local function gen2MonColors(game, speciesKey, shiny)
   return colors
 end
 
--- `path` is the species record's own `spriteFront`. Returns an Image, or nil
--- when there is nothing to bake -- callers fall back to the raw load, which is
--- still a picture.
-function M.gen2FrontImage(game, speciesKey, path, shiny)
+-- The pic path the engine's own battle screen would draw, and whether that art
+-- is already coloured: `pokemon.sprite` raised with the ctx
+-- `src/ui/gen2/BattleState.lua:pic` builds, so one subscription reskins the
+-- solo fight, the arena and the classic stage alike. `side` is "front" (the
+-- default) or "back". `mon` is the caller's best copy of the monster and may
+-- be nil -- a hook that keys on species needs nothing else. What this does not
+-- pick is Unown's form row; see `MediatedBattle:seatFront`.
+-- Returns path, trueColor.
+function M.gen2PicPath(game, speciesKey, path, shiny, mon, side)
+  local data = game and game.data
+  local def = data and type(data.pokemon) == "table"
+    and data.pokemon[speciesKey] or nil
+  local trueColor = (type(def) == "table" and def.trueColor) and true or false
+  local ok, Sprites = pcall(require, "src.pokemon.Sprites")
+  if not (ok and type(Sprites) == "table" and type(Sprites.pic) == "function") then
+    return path, trueColor
+  end
+  local okPic, hooked, hookedTrueColor = pcall(Sprites.pic, path, {
+    species = speciesKey,
+    side = side == "back" and "back" or "front",
+    kind = "battle",
+    mon = mon,
+    trueColor = trueColor,
+    data = data,
+    shiny = shiny and true or false,
+  })
+  if okPic and type(hooked) == "string" and hooked ~= "" then
+    return hooked, hookedTrueColor and true or false
+  end
+  return path, trueColor
+end
+
+local function paperShade(r, g, b)
+  return r > 0.83 and g > 0.83 and b > 0.83
+end
+
+-- The pixel half of the bake, on anything shaped like an ImageData
+-- (`getDimensions` / `getPixel` / `setPixel` / `mapPixel`), in place. Pure so
+-- the suite can hold a sheet to it without LOVE. `colors` nil (true-colour art,
+-- or a species with no palette row) leaves the shades as they are.
+function M.gen2BakePic(data, colors)
+  local w, h = data:getDimensions()
+  local matted = false
+  for y = 0, h - 1 do
+    for x = 0, w - 1 do
+      local _, _, _, a = data:getPixel(x, y)
+      if a < 1 then
+        matted = true
+        break
+      end
+    end
+    if matted then break end
+  end
+  if not matted then
+    -- `ImageWriter.matteColor0`'s flood: 4-connected, from every border pixel.
+    local seen, qx, qy, head = {}, {}, {}, 1
+    local function add(x, y)
+      local k = y * w + x
+      if seen[k] then return end
+      seen[k] = true
+      local r, g, b = data:getPixel(x, y)
+      if paperShade(r, g, b) then
+        qx[#qx + 1], qy[#qy + 1] = x, y
+      end
+    end
+    for x = 0, w - 1 do add(x, 0); add(x, h - 1) end
+    for y = 0, h - 1 do add(0, y); add(w - 1, y) end
+    while head <= #qx do
+      local x, y = qx[head], qy[head]
+      head = head + 1
+      local r, g, b = data:getPixel(x, y)
+      data:setPixel(x, y, r, g, b, 0)
+      if x > 0 then add(x - 1, y) end
+      if x + 1 < w then add(x + 1, y) end
+      if y > 0 then add(x, y - 1) end
+      if y + 1 < h then add(x, y + 1) end
+    end
+  end
+  if not colors then return data end
+  data:mapPixel(function(_, _, r, gr, b, a)
+    if a == 0 then return r, gr, b, a end
+    local col = r > 0.83 and colors[1] or r > 0.5 and colors[2]
+      or r > 0.17 and colors[3] or colors[4]
+    return col[1] / 255, col[2] / 255, col[3] / 255, a
+  end)
+  return data
+end
+
+-- `path` is the species record's own `spriteFront` (or `spriteBack`, with
+-- `side` "back"); `mon` is optional, for `pokemon.sprite`. Returns an Image, or
+-- nil when there is nothing to bake -- callers fall back to the raw load, which
+-- is still a picture.
+function M.gen2PicImage(game, speciesKey, path, shiny, mon, side)
   if type(path) ~= "string" or path == "" then return nil end
   if not (love and love.image and love.image.newImageData
           and love.graphics and love.graphics.newImage) then
     return nil
   end
+  side = side == "back" and "back" or "front"
+  local vanilla = path
+  local trueColor
+  path, trueColor = M.gen2PicPath(game, speciesKey, path, shiny, mon, side)
   -- The colour mode is in the key for the same reason `humanCacheKey` puts it
   -- in its own: the options screen writes `PaletteFX.mode` live, and a bake is
-  -- only valid for the mode it was made under.
+  -- only valid for the mode it was made under. The path is the HOOKED one, so a
+  -- skin picked mid-session is a new bake rather than the old one handed back.
   local PF = paletteFX()
-  local key = tostring(speciesKey) .. "|" .. (shiny and "s" or "n")
-    .. "|" .. tostring((PF and PF.mode) or "?") .. "|" .. path
+  local key = tostring(speciesKey) .. "|" .. side .. "|" .. (shiny and "s" or "n")
+    .. "|" .. tostring((PF and PF.mode) or "?")
+    .. "|" .. (trueColor and "t" or "p") .. "|" .. path
   local hit = monFrontCache[key]
   if hit ~= nil then return hit or nil end
 
-  local colors = gen2MonColors(game, speciesKey, shiny)
-  local baked = nil
-  pcall(function()
-    local data = nil
-    local okA, Assets = pcall(require, "src.render.Assets")
-    if okA and type(Assets) == "table" and Assets.imageData then
-      data = Assets.imageData(path)
-    else
-      data = love.image.newImageData(path)
-    end
-    if not (data and data.mapPixel) then return end
-    -- `Assets.imageData` builds a fresh ImageData per call today
-    -- (`love.image.newImageData(Assets.resolve(path))` -- no cache), so this
-    -- is safe to map in place. Kept as a note rather than a defensive clone
-    -- because a clone would be a second full-size allocation per bake for a
-    -- hazard that does not exist; if that function ever starts caching, THIS
-    -- is the site that has to clone first.
-    data:mapPixel(function(_, _, r, gr, b, a)
-      if a == 0 then return r, gr, b, a end
-      if r > 0.83 then return r, gr, b, 0 end
-      if not colors then return r, gr, b, a end
-      local col = r > 0.5 and colors[2] or r > 0.17 and colors[3] or colors[4]
-      return col[1] / 255, col[2] / 255, col[3] / 255, a
+  local colors = (not trueColor) and gen2MonColors(game, speciesKey, shiny) or nil
+  local function bake(from, palette)
+    local baked = nil
+    pcall(function()
+      local data = nil
+      local okA, Assets = pcall(require, "src.render.Assets")
+      if okA and type(Assets) == "table" and Assets.imageData then
+        data = Assets.imageData(from)
+      else
+        data = love.image.newImageData(from)
+      end
+      if not (data and data.mapPixel) then return end
+      -- `Assets.imageData` builds a fresh ImageData per call today
+      -- (`love.image.newImageData(Assets.resolve(path))` -- no cache), so this
+      -- is safe to map in place. Kept as a note rather than a defensive clone
+      -- because a clone would be a second full-size allocation per bake for a
+      -- hazard that does not exist; if that function ever starts caching, THIS
+      -- is the site that has to clone first.
+      M.gen2BakePic(data, palette)
+      baked = love.graphics.newImage(data)
+      if baked.setFilter then
+        pcall(function() baked:setFilter("nearest", "nearest") end)
+      end
     end)
-    baked = love.graphics.newImage(data)
-    if baked.setFilter then
-      pcall(function() baked:setFilter("nearest", "nearest") end)
-    end
-  end)
+    return baked
+  end
+  local baked = bake(path, colors)
+  -- A skin whose file will not load costs the skin, not the monster.
+  if not baked and path ~= vanilla then
+    local def = game and game.data and type(game.data.pokemon) == "table"
+      and game.data.pokemon[speciesKey] or nil
+    local vanillaTrue = type(def) == "table" and def.trueColor
+    baked = bake(vanilla,
+      (not vanillaTrue) and gen2MonColors(game, speciesKey, shiny) or nil)
+  end
 
   monFrontCache[key] = baked or false
   return baked
+end
+
+function M.gen2FrontImage(game, speciesKey, path, shiny, mon)
+  return M.gen2PicImage(game, speciesKey, path, shiny, mon, "front")
+end
+
+-- The whole lookup for a pic the classic stage draws: the species row's own
+-- sheet for `side`, baked, else loaded raw. Nil when the row has no such pic.
+function M.gen2MonPic(game, speciesKey, side, shiny, mon)
+  local data = game and game.data
+  local def = data and type(data.pokemon) == "table"
+    and data.pokemon[speciesKey] or nil
+  if type(def) ~= "table" then return nil end
+  local path = side == "back" and def.spriteBack or def.spriteFront
+  if type(path) ~= "string" or path == "" then return nil end
+  local img = M.gen2PicImage(game, speciesKey, path, shiny, mon, side)
+  if img then return img end
+  local ok, raw = pcall(function()
+    local Assets = require("src.render.Assets")
+    if Assets and Assets.image then return Assets.image(path) end
+    return love.graphics.newImage(path)
+  end)
+  return ok and raw or nil
 end
 
 -- The bake is colour-mode dependent and the mode can change between battles

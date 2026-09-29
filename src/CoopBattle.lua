@@ -739,6 +739,13 @@ function M.new(game, opts)
         .. "battle continues -- report the move it happened on", tostring(err))
     end,
     rng = rng,
+    -- Gold has no makeBattler to attach one, and the classic stage draws
+    -- `battler.sprite`: backs for our own side, fronts for the far one.
+    picFor = gen2Mediated and function(mon, facePlayer)
+      if type(mon) ~= "table" then return nil end
+      return Battlefield.gen2MonPic(game, mon.species,
+        facePlayer and "back" or "front", mon.shiny and true or false, mon)
+    end or nil,
   }, opts.slots)
 
   if not self.sim then
@@ -5219,7 +5226,7 @@ local function drawBagIcon(img, x, y)
     end
   end
   if g.setScissor and (sw > STRIP_ICON or sh > STRIP_ICON) then
-    g.setScissor(x, y, STRIP_ICON, STRIP_ICON)
+    ClassicBattle.setPageScissor(x, y, STRIP_ICON, STRIP_ICON)
     pcall(g.draw, img, x, y)
     g.setScissor()
     return true
@@ -5622,9 +5629,10 @@ local function seatFrontFor(self, slot, battler)
       and data.pokemon[species] or nil
     local path = type(def) == "table" and def.spriteFront or nil
     if type(path) == "string" and path ~= "" then
-      -- Baked, not loaded raw -- see `Battlefield.gen2FrontImage`.
+      -- Baked, not loaded raw -- see `Battlefield.gen2FrontImage`, which also
+      -- raises `pokemon.sprite` so a battle-sprite mod reaches this seat.
       local shiny = (mon and mon.shiny) and true or false
-      resolved = Battlefield.gen2FrontImage(self.game, species, path, shiny)
+      resolved = Battlefield.gen2FrontImage(self.game, species, path, shiny, mon)
       if not resolved then
         local ok, img = pcall(function()
           local Assets = require("src.render.Assets")
@@ -10818,6 +10826,18 @@ function M:drawWidescreen(winW, winH)
   winW = tonumber(winW) or 0
   winH = tonumber(winH) or 0
   if winW <= 0 or winH <= 0 then return end
+
+  -- **Also called with the arena OFF.** Gold asks an `isOpaque` screen whose
+  -- `drawsWidescreen()` said no for its SURROUND (`Game2:drawScene`'s
+  -- cleartilemap safety net), then blits the 160x144 page over it. Painting
+  -- the arena here put the whole theatre -- mons, plates, band -- around and
+  -- under the classic stage. The paper white is what Gold paints for a page
+  -- with no surround of its own.
+  if not self:usesBattlefield() then
+    G.setColor(1, 1, 1, 1)
+    G.rectangle("fill", 0, 0, winW, winH)
+    return
+  end
 
   G.setColor(0, 0, 0, 1)
   G.rectangle("fill", 0, 0, winW, winH)

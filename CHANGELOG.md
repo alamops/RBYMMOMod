@@ -4,6 +4,30 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.19] - 2026-09-29
+
+### Fixed
+
+- **Gen 2 battle sprites no longer have see-through whites.** On the arena,
+  every white pixel inside a monster (eyes, teeth, PIDGEY's breast) showed the
+  field through it. The importer already cuts out only the backdrop; the mod
+  then keyed *all* white on top of that. Interior white is now the palette's
+  white, as the cart draws it.
+- **Battle-sprite mods reach party fights on Gen 2.** The arena and the
+  classic stage read the species sheet raw, so a mod on `pokemon.sprite`
+  reskinned solo fights only. Both now resolve the pic through that hook, and a
+  `trueColor` answer is drawn as-is instead of being re-shaded.
+- **CLASSIC BATTLE UI on Gen 2 is one stage again.** Gold asks an opaque
+  screen for its surround even when it opts out of widescreen, and the mod
+  painted the whole arena there, so the classic page sat on top of the arena
+  and its mons. It now paints a plain surround. Co-op battlers on Gen 2 also
+  carry their own classic pics (back for your side, front for the foes) in the
+  species palette. Before, the only monsters on screen were the arena's. The
+  classic stage's clips (your back pic above the menus, the PKMN picker) were
+  set in window pixels, which on Gold is not the page's space. They now map
+  through the page transform, so your own monster is no longer clipped out of
+  sight.
+
 ## [1.4.18] - 2026-09-28
 
 ### Fixed
