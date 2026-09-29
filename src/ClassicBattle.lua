@@ -520,8 +520,12 @@ function M.setPageScissor(x, y, w, h)
     local okA, x1, y1 = pcall(g.transformPoint, x, y)
     local okB, x2, y2 = pcall(g.transformPoint, x + w, y + h)
     if okA and okB then
+      -- Floor the near edge, ceil the far one, and measure between them: a
+      -- width of ceil(|x2 - x1|) from a floored x falls a pixel short of a
+      -- fractional far edge.
       x, y = math.floor(math.min(x1, x2)), math.floor(math.min(y1, y2))
-      w, h = math.ceil(math.abs(x2 - x1)), math.ceil(math.abs(y2 - y1))
+      w = math.ceil(math.max(x1, x2)) - x
+      h = math.ceil(math.max(y1, y2)) - y
     end
   end
   pcall(g.setScissor, x, y, w, h)

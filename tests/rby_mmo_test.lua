@@ -30270,6 +30270,9 @@ end)()
   T.same(scissorWith(function(x, y) return 112 + x * 5, 24 + y * 5 end),
      { 112, 24, 800, 480 },
      "Gold's page transform maps it onto the window the page is drawn in")
+  T.same(scissorWith(function(x, y) return 112.5 + x * 5, 24.5 + y * 5 end),
+     { 112, 24, 801, 481 },
+     "a fractional origin still reaches the far edge's partial pixel")
 end)()
 
 T.finish("rby_mmo")
