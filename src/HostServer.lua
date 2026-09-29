@@ -20,6 +20,15 @@ local Gen = need("Gen")
 local M = {}
 M.__index = M
 
+-- The ceiling on one line, the same number server/lib/server.js's MAX_LINE
+-- sets. It is asked of one line -- never of everything read in a tick, which
+-- also counts complete lines that happened to arrive together.
+M.MAX_LINE = 64 * 1024
+-- The most one connection is read for in one tick. Past it the rest waits in
+-- the kernel for the next tick, so a guest with a lot to say is slowed rather
+-- than cut off.
+M.READ_BUDGET = 64 * 1024
+
 local socketModule, socketTried
 local jsonModule, jsonTried
 local netModule, netTried
@@ -312,6 +321,20 @@ function M:accept()
   end
 end
 
+-- One line over MAX_LINE: told why and closed, in the sentence the Node hub
+-- uses, rather than dropped with nothing on the guest's screen. The client is
+-- forgotten here so the lines still queued behind it are never dispatched.
+local function refuseTooLong(self, conn)
+  conn.rx = ""
+  local client = conn.client
+  conn.client = nil
+  if client then
+    self.hub:refuseClient(client, "Message too long.")
+  else
+    conn.dead = true
+  end
+end
+
 local function drainLines(self, conn)
   local Json = json()
   while true do
@@ -319,6 +342,7 @@ local function drainLines(self, conn)
     if not nl then break end
     local line = conn.rx:sub(1, nl - 1)
     conn.rx = conn.rx:sub(nl + 1)
+    if #line > M.MAX_LINE then return refuseTooLong(self, conn) end
     if #line > 0 and conn.client then
       local msg = Json.decode(line)
       -- a line that will not decode is dropped, not fatal: one bad frame
@@ -358,7 +382,11 @@ function M:flush()
 end
 
 function M:read(conn)
-  while true do
+  -- A budget rather than a cap on conn.rx: that cap also counted complete
+  -- lines, so a guest whose ordinary messages piled up while the host's frame
+  -- was busy (a battle loading, a save) was dropped without a word.
+  local budget = M.READ_BUDGET
+  while budget > 0 do
     local ok, data, err, partial = pcall(function()
       return conn.sock:receive(8192)
     end)
@@ -367,7 +395,10 @@ function M:read(conn)
       return
     end
     local chunk = data or partial or ""
-    if #chunk > 0 then conn.rx = conn.rx .. chunk end
+    if #chunk > 0 then
+      conn.rx = conn.rx .. chunk
+      budget = budget - #chunk
+    end
     if err == "closed" then
       conn.dead = true
       return
@@ -375,14 +406,11 @@ function M:read(conn)
       conn.dead = true
       return
     end
-    -- guard against one peer monopolising the tick with a flood
-    if #conn.rx > 64 * 1024 then
-      conn.dead = true
-      return
-    end
     if not data then break end
   end
   drainLines(self, conn)
+  -- What is left has no newline yet: the one line still being written.
+  if not conn.dead and #conn.rx > M.MAX_LINE then refuseTooLong(self, conn) end
 end
 
 function M:update(dt)
