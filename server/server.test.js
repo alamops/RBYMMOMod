@@ -452,6 +452,60 @@ async function authOffTest() {
   }
 }
 
+// ------- MAX_LINE is a ceiling on one line, not on one read
+
+async function lineLimitTest() {
+  const handle = await startServer({
+    auth: { required: false, credentials: [] },
+    limits: { perIpConnections: 10 },
+  });
+  const opened = [];
+  const greet = async (name) => {
+    const client = new Client(handle.port);
+    opened.push(client);
+    await client.ready();
+    client.send('mmo.hello', { proto: PROTOCOL, playerId: testPlayerId(name), name });
+    await client.expect('mmo.welcome');
+    return client;
+  };
+  const tooLong = (client) => client.inbox.find((m) =>
+    m.type === 'mmo.error' && m.message === 'Message too long.');
+  try {
+    // Thousands of 20-byte lines in one write. Over loopback the hub reads
+    // them back in 64 KiB slices, so a read routinely holds more than
+    // MAX_LINE of *complete* lines -- which the old check, asked of the whole
+    // buffer, refused as "Message too long." without a long line in sight.
+    const burst = await greet('BURST');
+    const LINES = 10000;
+    burst.socket.write((JSON.stringify({ type: 'mmo.ping' }) + '\n').repeat(LINES));
+    const answered = await waitFor(
+      () => burst.inbox.filter((m) => m.type === 'mmo.pong').length === LINES, 5000);
+    ok(!tooLong(burst), 'a burst of short lines is not refused as "Message too long."');
+    ok(answered, `every one of the ${LINES} lines in the burst was answered`);
+    burst.inbox = burst.inbox.filter((m) => m.type !== 'mmo.pong');
+    burst.send('mmo.ping', {});
+    await burst.expect('mmo.pong');
+    ok(true, 'and the client is still connected after it');
+
+    // One line over the ceiling is still refused, whether its newline has
+    // arrived or not.
+    const long = 'x'.repeat(70 * 1024);
+    const whole = await greet('WHOLE');
+    whole.send('mmo.chat', { scope: 'global', text: long });
+    const refused = await whole.expect('mmo.error');
+    ok(refused.message === 'Message too long.', 'a complete line over MAX_LINE is refused');
+
+    const open = await greet('OPEN');
+    open.socket.write(JSON.stringify({ type: 'mmo.chat', scope: 'global', text: long }));
+    const refusal = await open.expect('mmo.error');
+    ok(refusal.message === 'Message too long.',
+      'an unterminated line over MAX_LINE is refused with the same sentence');
+  } finally {
+    for (const client of opened) client.close();
+    await handle.close();
+  }
+}
+
 // ------- the §3.6 regression: ungreeted sockets cannot lock out a real player
 
 async function silentSocketsDoNotLockOutTest() {
@@ -2116,6 +2170,7 @@ async function operatorFeaturesTest() {
 async function main() {
   await authHandshakeTest();
   await authOffTest();
+  await lineLimitTest();
   await silentSocketsDoNotLockOutTest();
   await capFilledByGreetedPlayersTest();
   await capHoldsWhenEveryoneGreetsBeforeAnswering();
