@@ -319,6 +319,40 @@ eq(unknown[1].moves[1].type, 0, "...and type 0")
 eq(unknown[1].moves[1].name, nil,
    "...and no name at all, so the referee narrates it under its id")
 
+-- sheetMoves -- the moveset a mid-fight learn republishes (PROTOCOL 28) --
+-- is encoded in the boot's own dialect.  It used to call `moveOf` with no
+-- generation, so on Gold every resend went through Gen 1's effect table: a
+-- learned Crystal EFFECT_* status move became effect 0 (a move that does
+-- nothing) and a Gen 1 high-crit id kept its crit.  The opening upload was
+-- always right, which is why the drift only showed after a level-up.
+do
+  local Effects2 = need("BattleSim2/Effects")
+  local goldData = {
+    moves = {
+      HYPNOSIS = { name = "HYPNOSIS", power = 0, accuracy = 60, type = "PSYCHIC_TYPE",
+                   pp = 20, effect = "EFFECT_SLEEP" },
+      CROSS_CHOP = { name = "CROSS CHOP", power = 100, accuracy = 80, type = "FIGHTING",
+                     pp = 5, effect = "EFFECT_ALWAYS_CRIT" },
+      KARATE_CHOP = { name = "KARATE CHOP", power = 50, accuracy = 100, type = "FIGHTING",
+                      pp = 25, effect = "EFFECT_NORMAL_HIT" },
+    },
+  }
+  local learner = { moves = { { id = "HYPNOSIS", pp = 20 }, { id = "CROSS_CHOP", pp = 5 },
+                              { id = "KARATE_CHOP", pp = 25 } } }
+  local gold = Mediated.sheetMoves({ generation = 2, data = goldData }, learner)
+  eq(#gold, 3, "Gold: every learned move is republished")
+  eq(gold[1].effect, Effects2.idOf("EFFECT_SLEEP"),
+     "Gold: a republished status move keeps its Crystal effect id")
+  check(gold[1].effect ~= 0, "...which is a real effect, not the do-nothing 0")
+  eq(gold[2].highCrit, true, "Gold: EFFECT_ALWAYS_CRIT still republishes as high-crit")
+  eq(gold[3].highCrit, nil,
+     "Gold: KARATE_CHOP takes no Gen 1 high-crit fallback on a Gen 2 resend")
+  -- ...and the Gen 1 resend is exactly what it was.
+  local red = Mediated.sheetMoves({ data = DATA },
+    { moves = { { id = "KARATE_CHOP", pp = 25 } } })
+  eq(red[1].highCrit, true, "Gen 1: the resend keeps the HIGH_CRIT fallback")
+end
+
 -- The edges that must not throw, because every one of them is a real build.
 eq(#Mediated.snapshotParty(gameWith({}, DATA)), 0, "an empty party snapshots empty")
 eq(#Mediated.snapshotParty(gameWith({ mon("CHARMANDER") }, nil)), 1,

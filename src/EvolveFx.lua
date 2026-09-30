@@ -18,10 +18,59 @@
 --
 -- No love. Engine modules are pcall'd so a headless suite can assert the
 -- clock with no ROM and no Evolution.lua.
+--
+-- ------- Gen 3
+--
+-- FireRed / LeafGreen / Emerald answer each question through the cart's own
+-- src/core/game3/evolution.lua (reached through src/Gen3.lua, so nothing of
+-- it is required on Red or Gold): `Evolution.levelTarget` is the qualify
+-- (Everstone, friendship / time / stat rules, the National Dex gate and the
+-- `evolution.check` hook all inside it), `Evolution.apply` the in-place
+-- species change (rename, stats, dex, Shedinja, `pokemon.evolved`), and the
+-- moves are the new species' learnset at the current level.  The mon keeps
+-- its numeric species, so every `from` / `into` below is a number there.  The
+-- after-battle fallback is the cart's EvolutionScene (there is no
+-- Gen2EvolutionAnim on Gen 3), one scene at a time, and -- as on the cart
+-- (pokefirered/src/battle_main.c FreeResetData_ReturnToOvOrDoEvolutions) --
+-- only after a fight that was won.
 
 local need = ...
 local Gen = need("Gen")
+local Gen3 = need("Gen3")
 local Exp2 = need("Exp2")
+
+local function isGen3(game)
+  return Gen.generation(game) == 3
+end
+
+-- The display name of a Gen 3 species number, or nil.
+local function gen3Name(species)
+  local name = Gen3.speciesName(species)
+  if type(name) == "string" and name ~= "" then return name end
+  return nil
+end
+
+-- A line of the cart's own evolution text (the scene's gText_* strings, the
+-- player's own ROM text through the engine's text pack), or nil off Gen 3 /
+-- without the pack, so the caller keeps its own sentence.
+local function gen3Text(key, vars)
+  if not Gen3.active() then return nil end
+  local RomText = Gen3.engine("src.core.game3.rom_text")
+  if not (RomText and type(RomText.ascii) == "function") then return nil end
+  local ok, text = pcall(RomText.ascii, key, { stringVars = vars })
+  if not ok or type(text) ~= "string" or text == "" then return nil end
+  -- The printer's own codes (\p, \l, \n) off the end, and as line breaks
+  -- inside: these lines are shown whole, one box at a time.
+  text = text:gsub("\\[pl]%s*$", ""):gsub("\\[pln]", "\n")
+  return (text:gsub("%s+$", ""))
+end
+
+-- The mon's own name as the cart prints it: its nickname, else its species.
+local function gen3MonName(mon)
+  local nick = mon and mon.nickname
+  if type(nick) == "string" and nick ~= "" then return nick end
+  return gen3Name(mon and (mon.species or mon.speciesId)) or "?"
+end
 
 local M = {}
 
@@ -126,18 +175,26 @@ end
 
 function M.evolvingLine(movie)
   local name = (movie and movie.name) or "?"
-  return "What? " .. name .. "\nis evolving!"
+  return gen3Text("gText_PkmnIsEvolving", { name })
+    or ("What? " .. name .. "\nis evolving!")
 end
 
 function M.stoppedLine(movie)
   local name = (movie and movie.name) or "?"
-  return "Huh? " .. name .. "\nstopped evolving!"
+  return gen3Text("gText_PkmnStoppedEvolving", { name })
+    or ("Huh? " .. name .. "\nstopped evolving!")
 end
 
 function M.evolvedLine(movie, game)
   local name = (movie and movie.name) or "?"
   local into = movie and movie.into
   local shown = into
+  if game and isGen3(game) then
+    -- The line the cart's scene prints (evolution_scene.c gText_CongratsPkmnEvolved).
+    local target = gen3Name(into) or tostring(into or "?")
+    return gen3Text("gText_CongratsPkmnEvolved", { name, target })
+      or (name .. " evolved\ninto " .. target .. "!")
+  end
   local data = game and game.data
   local def = data and data.pokemon and into and data.pokemon[into]
   if type(def) == "table" and type(def.name) == "string" and def.name ~= "" then
@@ -208,6 +265,18 @@ end
 -- the engine module is missing -- a missing module must not fail the fight.
 function M.pending(game, mon)
   if not (game and type(mon) == "table") then return nil end
+  if isGen3(game) then
+    local Evolution = Gen3.engine("src.core.game3.evolution")
+    if not (Evolution and type(Evolution.levelTarget) == "function") then return nil end
+    local ok, target = pcall(Evolution.levelTarget, mon, Gen3.session())
+    target = ok and tonumber(target) or nil
+    if not target then return nil end
+    return {
+      from = tonumber(mon.species or mon.speciesId),
+      into = target,
+      via = "LEVEL",
+    }
+  end
   if Gen.generation(game) == 2 then
     local ok, Evolution = pcall(require, "src.core.gen2.Evolution")
     if not (ok and type(Evolution) == "table"
@@ -255,9 +324,14 @@ function M.enqueue(queue, game, mon, holder)
   if holder and holder.evoResolved and holder.evoResolved[mon] then return nil end
   local pending = M.pending(game, mon)
   if not pending then return nil end
-  local def = game and game.data and game.data.pokemon
-      and game.data.pokemon[mon.species]
-  local name = mon.nickname or (def and def.name) or "?"
+  local name
+  if isGen3(game) then
+    name = gen3MonName(mon)
+  else
+    local def = game and game.data and game.data.pokemon
+        and game.data.pokemon[mon.species]
+    name = mon.nickname or (def and def.name) or "?"
+  end
   local row = {
     evolve = mon,
     from = pending.from,
@@ -336,6 +410,15 @@ function M.applyTo(game, movie, holder)
   local mon = movie.mon
   local into = movie.into
   if not into then return nil end
+  if isGen3(game) then
+    local Evolution = Gen3.engine("src.core.game3.evolution")
+    if not (Evolution and type(Evolution.apply) == "function") then return nil end
+    local session = Gen3.session()
+    local ok, applied = pcall(Evolution.apply, mon, tonumber(into), session,
+      session and session.bag, "level")
+    if not (ok and applied) then return nil end
+    return mon
+  end
   if Gen.generation(game) == 2 then
     local ok, Evolution = pcall(require, "src.core.gen2.Evolution")
     if not (ok and type(Evolution) == "table"
@@ -379,6 +462,16 @@ end
 -- only, and `:teach` is what announces it.
 function M.learnMoveIds(game, mon)
   if not (game and type(mon) == "table") then return {} end
+  if isGen3(game) then
+    -- pokefirered/src/evolution_scene.c:870 (MonTryLearningNewMove at the
+    -- evolved species' current level): the new species' learnset row.
+    local P = Gen3.engine("src.core.game3.pokemon")
+    local sp = tonumber(mon.species or mon.speciesId)
+    if not (P and sp and type(P.movesLearnedAt) == "function") then return {} end
+    local ok, got = pcall(P.movesLearnedAt, sp, tonumber(mon.level) or 1)
+    if ok and type(got) == "table" then return got end
+    return {}
+  end
   local data = game.data
   local def = data and data.pokemon and data.pokemon[mon.species]
   if Gen.generation(game) == 2 then
@@ -414,6 +507,11 @@ end
 
 -- Soft: missing Music must not fail the fight.
 function M.playMusic(game, Music)
+  if game and isGen3(game) then
+    -- The scene's own song (pret MUS_EVOLUTION, looped).
+    Gen3.audio.playSong("MUS_EVOLUTION")
+    return
+  end
   if not (game and Music and type(Music.play) == "function") then return end
   pcall(function()
     if Music.stop then Music.stop() end
@@ -429,6 +527,10 @@ function M.restoreBattleMusic(game, opts)
 end
 
 function M.playCry(game, Sound, species)
+  if game and species and isGen3(game) then
+    Gen3.audio.playCry(tonumber(species))
+    return
+  end
   if not (game and Sound and type(Sound.playCry) == "function" and species) then
     return
   end
@@ -441,6 +543,7 @@ end
 -- the wrapper that stamps mod.log / mod.ui. `opts.warn` is `function(fmt, ...)`
 -- and `opts.ui` is the facade with `:push` (Gen 2 only).
 local offerEvolutionsGen2
+local offerEvolutionsGen3
 
 function M.offerEvolutions(game, leveledUp, result, evoResolved, opts)
   leveledUp = M.withoutResolved(leveledUp, evoResolved)
@@ -455,6 +558,11 @@ function M.offerEvolutions(game, leveledUp, result, evoResolved, opts)
   local warn = opts.warn
   local function note(fmt, ...)
     if type(warn) == "function" then warn(fmt, ...) end
+  end
+
+  if isGen3(game) then
+    if result == "loss" or result == "lose" or result == "draw" then return false end
+    return offerEvolutionsGen3(leveledUp, note)
   end
 
   if Gen.generation(game) == 2 then
@@ -478,6 +586,51 @@ function M.offerEvolutions(game, leveledUp, result, evoResolved, opts)
       .. "level again in a wild fight or use a RARE CANDY", tostring(err))
     return false
   end
+  return true
+end
+
+-- The cart's own after-battle evolution (TryEvolvePokemon ->
+-- EvolutionScene), for every party mon that levelled and now qualifies, in
+-- party order, one scene at a time: each scene's onDone starts the next.
+-- EvolutionScene applies the change itself (Evolution.apply) and runs the
+-- evolved species' move learning before it closes, exactly as it does after
+-- one of the engine's own fights.
+offerEvolutionsGen3 = function(leveledUp, note)
+  local Evolution = Gen3.engine("src.core.game3.evolution")
+  local Scene = Gen3.engine("src.ui.game3.evolution_scene")
+  if not (Evolution and type(Evolution.levelTarget) == "function"
+      and Scene and type(Scene.start) == "function") then
+    note("the engine's Gen 3 evolution scene is unavailable, so POKéMON that "
+      .. "levelled in this battle were not offered evolutions -- level again "
+      .. "in a wild fight or use a RARE CANDY")
+    return false
+  end
+  local session = Gen3.session()
+  local party = Gen3.party() or {}
+  local pending = {}
+  for _, mon in ipairs(party) do
+    if leveledUp[mon] then
+      local ok, target = pcall(Evolution.levelTarget, mon, session)
+      if ok and tonumber(target) then
+        pending[#pending + 1] = { mon = mon, into = tonumber(target) }
+      end
+    end
+  end
+  if #pending == 0 then return false end
+  local function nextOne()
+    local row = table.remove(pending, 1)
+    if not row then return end
+    local ok, started = pcall(Scene.start, row.mon, row.into, {
+      canStop = true, session = session, bag = session and session.bag,
+      via = "level", onDone = function() nextOne() end,
+    })
+    if not (ok and started) then
+      note("could not open the evolution scene for %s; it can still evolve "
+        .. "by levelling again or with a RARE CANDY", gen3MonName(row.mon))
+      nextOne()
+    end
+  end
+  nextOne()
   return true
 end
 

@@ -38,12 +38,50 @@
 -- back pic + bottom HUD, message box, optional AnimPlayer. Otherwise
 -- presentation is the top-down arena theatre (640×360 fill) from
 -- src/Battlefield.lua. Co-op still owns the multi-slot renderer.
+--
+-- ------- Gen 3 (FireRed / LeafGreen / Emerald)
+--
+-- The same screen, the same queue, the same rules -- a Gen 3 arm at every
+-- place the generation shows, and nothing of Gen 1's engine reached on the
+-- way (a Gen 1 module name on Emerald is a boot error, and the rest only
+-- describe a Game Boy):
+--
+--   * the upload is src/Sheet3.lua's (contract C4): session-party sheets
+--     with IVs / EVs / nature already in the stats, ability, held item and
+--     its hold effect, Hidden Power, the ordered type chart and the compact
+--     move pool, the §4 bag from the session's pockets (numeric ids);
+--   * badge boosts are off and there are no vitamins (link rules, §6);
+--   * the referee is BattleSim3, so the stream carries Gen 3's six extra
+--     kinds (ability weather held form sub ball, C5 §7.2) -- each has a place
+--     in the queue below, and `held` is the writeback of a consumed / stolen
+--     item;
+--   * a knockout is priced by src/Exp3.lua on the session party (Cmd_getexp:
+--     Exp. Share, Lucky Egg, traded, trainer, EVs), a level's moves by the
+--     cart's learnset, a full moveset by the cart's own LearnMove exchange
+--     (src/LearnMove.lua), an evolution by the cart's evolution rules;
+--   * a catch goes into the session party or the PC with the dex, the OT and
+--     the ball written the way Catching.storeCaught writes them;
+--   * music and sound are the game3 m4a player's (Gen.playBattleMusic /
+--     Gen3.audio), pics are the cart's 64x64 battle pics (Gen3.frontPic /
+--     backPic);
+--   * the arena paints in window space from render.hud (drawsWidescreen, as
+--     on Gold), while CLASSIC BATTLE UI draws a GBA-shaped 240x160 page into
+--     the game3 canvas (ClassicBattle.drawGen3 when it has one, else the
+--     plain page at the end of this file); the screen closes with Gen3Ui.pop,
+--     there being no game.stack for it to pop itself from.
 
 local need, mod = ...
 local Config = need("Config")
 local Wire = need("Wire")
 local Effects1 = need("BattleSim/Effects")
 local Gen = need("Gen")
+-- The Gen 3 engine adapters and the modal-stack toolkit (lazy and guarded:
+-- nothing of src.core.game3.* is reached off a Gen 3 boot).
+local Gen3 = need("Gen3")
+local Gen3Ui = need("Gen3Ui")
+-- The Gen 3 upload (C4 sheets, ruleset, bag) and the Gen 3 award.
+local Sheet3 = need("Sheet3")
+local Exp3 = need("Exp3")
 local SoloBrain = need("SoloBrain")
 local Battlefield = need("Battlefield")
 -- Which particle effect a move / item / condition / stat stage wears. A
@@ -72,8 +110,19 @@ local floor, max, min = math.floor, math.max, math.min
 -- BattleSim vs BattleSim2 item tables — vitamins already gen-switched;
 -- bag upload / ball hints must match the hub sim generation too.
 local Effects2
+-- Gen 3's reading of the same three questions, answered by the BattleSim3 bag
+-- catalog through Sheet3 (numeric ids; no vitamins, no Metronome effect id --
+-- the Gen 3 pool is the whole move table and the sim filters it).
+local Effects3 = {
+  itemEffect = function(id) return Sheet3.itemEffect(id) end,
+  idOf = function() return nil end,
+  itemFailsOnFainted = function(effect) return Sheet3.itemFailsOnFainted(effect) end,
+}
+M.Effects3 = Effects3
 local function effectsFor(game)
-  if Gen.generation(game) == 2 then
+  local generation = Gen.generation(game)
+  if generation == 3 then return Effects3 end
+  if generation == 2 then
     if not Effects2 then Effects2 = need("BattleSim2/Effects") end
     return Effects2
   end
@@ -99,6 +148,14 @@ local engine, engineTried
 local function loadEngine()
   if engineTried then return engine end
   engineTried = true
+  -- Gen 3 has none of the modules below: src.battle.BattleState and
+  -- src.ui.PartyMenu are a boot error on Emerald, and the rest describe a Game
+  -- Boy screen.  Everything the Gen 3 arms need is reached through Gen3 /
+  -- Gen3Ui instead, so the engine bag is empty but for the marker.
+  if Gen3.active() then
+    engine = { gen3 = true }
+    return engine
+  end
   local ok, Font = pcall(require, "src.render.Font")
   if not ok then
     mod.log:warn("the engine's font module is unavailable, so a mediated "
@@ -181,6 +238,9 @@ M.loadEngine = loadEngine
 -- strip. Callers that only hold a dataset pass `{ data = data }`, which is the
 -- shape both branches read.
 local function expFraction(game, mon)
+  -- Gen 3 reads the cart's own curve off the mon itself (growth rate + exp);
+  -- see Exp3.fraction.
+  if type(mon) == "table" and Gen3.active() then return Exp3.fraction(mon) end
   local data = game and game.data
   if type(data) ~= "table" or type(mon) ~= "table" then return nil end
   if Gen.generation(game) == 2 then
@@ -222,7 +282,9 @@ M.CLASSIC_PLAYER = CLASSIC_PLAYER
 M.CLASSIC_ENEMY = CLASSIC_ENEMY
 
 local function playerPicScale(game)
-  if Gen.generation(game) == 2 then return PLAYER_PIC_SCALE_GEN2 end
+  local generation = Gen.generation(game)
+  -- Gen 3 back pics are full 64x64 frames, drawn at their own size.
+  if generation == 2 or generation == 3 then return PLAYER_PIC_SCALE_GEN2 end
   return PLAYER_PIC_SCALE_GEN1
 end
 
@@ -327,7 +389,13 @@ local moveOf
 -- into two languages would round differently on the two ends and the same
 -- attack would hit for different amounts depending on who was hosting.  So the
 -- rectangle is filled with EFF_NEUTRAL and the stated rows are written over it.
-function M.snapshotRuleset(game)
+function M.snapshotRuleset(game, opts)
+  -- Gen 3 uploads the cart's ordered chart and the compact move pool
+  -- (docs/plans/gen3-battle-sheet.md §3) -- no percent rectangle, so
+  -- NEUTRAL_TYPES never applies there: a missing `typeTable` is read by the
+  -- sim as every matchup neutral.  `opts.wild` lets a wild fight open under
+  -- the overworld's weather.
+  if Gen.generation(game) == 3 then return Sheet3.ruleset(game, opts) end
   local data = game and game.data
   local order = typeOrder(data)
   local width = order and #order.ids or M.NEUTRAL_TYPES
@@ -717,8 +785,14 @@ end
 -- Best-effort throughout: a monster that cannot be described is skipped rather
 -- than taking the party with it, because a party of five is a fight and a party
 -- of none is not.  An empty result is the caller's to refuse -- see M:start.
-function M.snapshotMons(game, party)
+function M.snapshotMons(game, party, opts)
   if type(party) ~= "table" then return {} end
+  -- Gen 3: the C4 sheet.  Every sheet built here carries its species' catch
+  -- rate (a wild seat reads it; Gen 1 / Gen 2 always sent one); the player's
+  -- own party goes through snapshotParty, which does not.
+  if Gen.generation(game) == 3 then
+    return Sheet3.mons(game, party, opts or { wild = true })
+  end
 
   local data = game and game.data
   local order = typeOrder(data)
@@ -791,6 +865,8 @@ end
 
 -- This player's own team.
 function M.snapshotParty(game)
+  -- Gen 3: the live session party, not game.save (a snapshot there).
+  if Gen.generation(game) == 3 then return Sheet3.party(game) end
   local save = game and game.save
   return M.snapshotMons(game, save and save.party)
 end
@@ -808,9 +884,9 @@ end
 -- but because two charts is a fight with no answer to "which", and both
 -- intermediators refuse a ruleset from anyone but the seat they brokered as
 -- host.
-function M.sendRuleset(transport, game)
+function M.sendRuleset(transport, game, opts)
   if not transport then return false end
-  transport:send(Wire.BATTLE_RULESET, M.snapshotRuleset(game))
+  transport:send(Wire.BATTLE_RULESET, M.snapshotRuleset(game, opts))
   return true
 end
 
@@ -828,7 +904,7 @@ function M.sendParty(transport, battle, mons, side, bag, badges)
   if badges then msg.badges = badges end
   -- Party-level generation when every mon agrees (Wire prefers this, then shape).
   local gen = mons[1] and mons[1].generation
-  if gen == 1 or gen == 2 then
+  if gen == 1 or gen == 2 or gen == 3 then
     local same = true
     for i = 2, #mons do
       if mons[i].generation ~= gen then same = false; break end
@@ -843,13 +919,21 @@ end
 -- used. A learn that wrote only `{ id, pp }` onto the save copy has to
 -- travel with power / accuracy / effect or the referee treats it as a
 -- 40-power type-0 hit.
+--
+-- **Stated with the boot's generation**, the way `snapshotMons` states it.
+-- It used to call `moveOf` with none, so every resend after a mid-fight learn
+-- was encoded through Gen 1's effect table and high-crit list -- on Gold that
+-- turned a learned EFFECT_* status move into effect 0 (a move that does
+-- nothing) for the rest of the fight.  Gen 3 rows come from Sheet3.
 function M.sheetMoves(game, mon)
+  local generation = Gen.generation(game)
+  if generation == 3 then return Sheet3.moves(mon) end
   local data = game and game.data
   local order = typeOrder(data)
   local moves = {}
   for _, slot in ipairs((mon and mon.moves) or {}) do
     if #moves >= Config.BATTLE_MOVE_MAX then break end
-    local move = moveOf(data, slot, order)
+    local move = moveOf(data, slot, order, generation)
     if move then moves[#moves + 1] = move end
   end
   return moves
@@ -875,6 +959,9 @@ end
 -- `data.constants.badgeBoosts`, then a soft Gen 2 Damage/Battle module, then
 -- Gen 1 Damage only on a Gen 1 boot; missing rows soft-degrade to no badges.
 function M.badgesOf(game)
+  -- Gen 3 mediated fights run under link rules: no badge boosts (the cart
+  -- turns them off in a link battle; docs/plans/gen3-battle-sheet.md §6).
+  if Gen.generation(game) == 3 then return nil end
   local data = game and game.data
   local save = game and game.save
   if not (data and save) then return nil end
@@ -925,6 +1012,9 @@ end
 -- Only ids BattleSim knows (`itemEffect`); vitamins included (fight-local EV).
 -- Truncated to BATTLE_BAG_MAX so the menu and the upload stay the same set.
 function M.itemIsBattleUsable(id, game)
+  -- Gen 3 ids are numbers (pret ITEM_*), and the §4 catalog is the whole of
+  -- what may be used: key items and TMs are simply not in it.
+  if Gen.generation(game) == 3 then return Sheet3.itemEffect(id) end
   if type(id) ~= "string" or id == "" then return nil end
   local effect = effectsFor(game).itemEffect(id)
   if not effect then return nil end
@@ -940,6 +1030,9 @@ end
 -- ids so an unknown class item cannot refuse the whole party sheet.
 function M.trainerBagEntries(trainer, game)
   if not trainer then return nil end
+  -- Gen 3: the trainer row's own item list (numeric ids), §4 only.  Never
+  -- SoloBrain's Gen 1 class kit, which would reach Gen 1's TrainerAI.
+  if Gen.generation(game) == 3 then return Sheet3.trainerBag(trainer) end
   local ok, entries = pcall(SoloBrain.bagEntries, trainer,
     game and game.data, Gen.generation(game))
   if not (ok and type(entries) == "table") then return nil end
@@ -987,6 +1080,9 @@ end
 -- Fight-local sheet mutation is the hub's job; permanence is the client's.
 -- Only call after an `item` event with amount=1 (vitamin applied).
 function M.writebackVitamin(game, partyIndex, itemId)
+  -- Gen 3 has no fight-local effort: a vitamin is not a battle item there
+  -- (the §4 bag excludes them), so there is never anything to write back.
+  if Gen.generation(game) == 3 then return false end
   -- Gen 2 resolves vitamins via BattleSim2/Effects only (spa/spe tokens);
   -- Gen 1 stays on BattleSim/Effects. Never try Gen1 Effects first on Gen2.
   local EffectsMod = Effects
@@ -1100,7 +1196,9 @@ end
 function M.bagCounts(list)
   local map = {}
   for _, entry in ipairs(list or {}) do
-    if type(entry) == "table" and type(entry.id) == "string"
+    -- Gen 3 bag ids are numbers; Gen 1 / Gen 2 ids are strings.
+    if type(entry) == "table"
+       and (type(entry.id) == "string" or type(entry.id) == "number")
        and type(entry.count) == "number" and entry.count > 0 then
       map[entry.id] = entry.count
     end
@@ -1109,6 +1207,9 @@ function M.bagCounts(list)
 end
 
 function M.snapshotBag(game)
+  -- Gen 3: the session's pockets, §4 ids, with display names for the
+  -- referee's "X used POTION!".
+  if Gen.generation(game) == 3 then return Sheet3.bag(game) end
   local out = {}
   local inventory = (game and game.save and game.save.inventory) or {}
   for id, count in pairs(inventory) do
@@ -1303,6 +1404,10 @@ local VFX_KEYS = {
   "fromSide", "fromSeat",
 }
 
+-- A Gen 3 ability visibly acting: a short shine on the seat that owns it, the
+-- same look the evolution movie's shine uses (a style Battlefield draws).
+local ABILITY_VFX = { style = "shine", palette = "NORMAL", delivery = "burst" }
+
 -- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
 -- number came off the wire, and a hub claiming a thousand would otherwise
 -- queue a thousand rows the player cannot skip past.
@@ -1377,6 +1482,35 @@ end
 -- `onEvent` is the one that banks it, and a local is only in scope after its
 -- own line.
 local EXP_PER_FAINT = 6
+
+-- The party this client's save keeps -- the one exp, a level's moves, a held
+-- item's writeback and a catch are written into.  Gen 3's is the live
+-- session party (game.save there is a snapshot rebuilt at save time).
+local function savePartyOf(game)
+  if Gen3.active() then
+    local party = Gen3.party()
+    if type(party) == "table" then return party end
+    local session = type(game) == "table" and game.session or nil
+    return type(session) == "table" and session.party or nil
+  end
+  return game and game.save and game.save.party
+end
+M.savePartyOf = savePartyOf
+
+-- The Gen 3 message box pages wider than the Game Boy's 18 columns: the
+-- referee writes sentences up to 60 characters (C5 §7) and the GBA box / the
+-- arena band carry two lines of about thirty.
+local GEN3_BOX_COLS = 30
+
+local function pageText(text)
+  if Gen3.active() then return ClassicBattle.pageBoxText(text, GEN3_BOX_COLS) end
+  return ClassicBattle.pageBoxText(text)
+end
+
+-- The command grid, row-major.  Gen 3 lays it out the cart's way: FIGHT BAG
+-- over POKeMON RUN (pokefirered battle_controller_player.c's action menu).
+local COMMANDS3 = { "FIGHT", "ITEM", "SWITCH", "RUN" }
+local COMMAND_LABEL3 = { FIGHT = "FIGHT", ITEM = "BAG", SWITCH = "POKéMON", RUN = "RUN" }
 
 function M.new(opts)
   opts = opts or {}
@@ -1614,6 +1748,19 @@ local function selfSpriteId()
   return nil
 end
 
+-- Soft: the peer's row off the live roster export, if any.
+local function peerRow(peerId)
+  if peerId == nil then return nil end
+  local ok, players = pcall(function()
+    return mod.exports and mod.exports.players and mod.exports.players()
+  end)
+  if not (ok and type(players) == "table") then return nil end
+  for _, row in ipairs(players) do
+    if type(row) == "table" and row.id == peerId then return row end
+  end
+  return nil
+end
+
 -- Soft: peer OW sprite from the live roster export, if any.
 local function peerSpriteId(peerId)
   if peerId == nil then return nil end
@@ -1631,6 +1778,13 @@ local function peerSpriteId(peerId)
 end
 
 local function playerName(game)
+  if Gen3.active() then
+    local player = Gen3.player()
+    local name = (player and player.name)
+      or (type(game) == "table" and type(game.session) == "table" and game.session.name)
+    if type(name) == "string" and name ~= "" then return name end
+    return "YOU"
+  end
   local name = game and game.save and game.save.player and game.save.player.name
   if type(name) == "string" and name ~= "" then return name end
   return "YOU"
@@ -1638,6 +1792,17 @@ end
 
 -- Bag icon for a field seat. Soft-fail to nil; Battlefield draws a stand-in.
 function M:seatIcon(speciesKey, monHint)
+  -- Gen 3's menu icon is the engine's own two-frame record (32x32 frames),
+  -- which the arena animates itself (Battlefield.gen3Icon / gen3IconFrame).
+  if self:generation() == 3 then
+    local sp = tonumber(speciesKey)
+    if sp and type(Battlefield.gen3Icon) == "function" then
+      local ok, icon = pcall(Battlefield.gen3Icon, (type(monHint) == "table"
+        and tonumber(monHint.species) == sp) and monHint or sp)
+      if ok then return icon end
+    end
+    return nil
+  end
   if type(speciesKey) ~= "string" or speciesKey == "" then return nil end
   local data = self.game and self.game.data
   if not data then return nil end
@@ -1697,6 +1862,9 @@ end
 -- sent. A form that resolves to nothing falls back to the species row, which
 -- is what the cart draws for every Unown that is not its own letter anyway.
 function M:seatFront(speciesKey, monHint, slot, isOwn)
+  -- A Gen 3 key is the internal species number (a number off EvolveFx, the
+  -- same number as a string off the wire).
+  if type(speciesKey) == "number" then speciesKey = tostring(speciesKey) end
   if type(speciesKey) ~= "string" or speciesKey == "" then return nil end
   local movie = self.evolving
   if movie and isOwn then
@@ -1708,6 +1876,30 @@ function M:seatFront(speciesKey, monHint, slot, isOwn)
     return (cached ~= false) and cached or nil
   end
   local resolved = nil
+  -- Gen 3: the cart's own 64x64 front pic, mon-aware (shiny from the OT and
+  -- personality, Unown letter, Spinda spots, Castform form) for a monster this
+  -- client owns, by species for anybody else's -- a wire sheet carries no
+  -- personality, so a peer's is drawn as its species, the honest answer.
+  if self:generation() == 3 then
+    local sp = tonumber(speciesKey)
+    local subject = sp
+    if slot == nil and type(monHint) == "table" and tonumber(monHint.species) == sp then
+      subject = monHint
+    elseif isOwn then
+      local own = self:saveMon(self.active)
+      if own and tonumber(own.species) == sp then subject = own end
+    end
+    local pic = sp and Gen3.frontPic(subject, { form = slot and slot.form }) or nil
+    resolved = pic and pic.image or nil
+    if movie and isOwn then
+      EvolveFx.formCachePut(movie, "front", speciesKey, resolved)
+    end
+    if slot then
+      slot._bfFront = resolved or false
+      slot._bfFrontSpecies = speciesKey
+    end
+    return resolved
+  end
   local eng = loadEngine()
   local data = self.game and self.game.data
   local save = self.game and self.game.save
@@ -1857,6 +2049,8 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     and self:saveMon(self.active) == movie.mon
   if evolvingHere then
     key = EvolveFx.picSpecies(movie) or key
+    -- Gen 3 species are numbers on the save mon and strings on the seat.
+    if type(key) == "number" then key = tostring(key) end
   end
   local acting = false
   if self.anim and self.anim.slot == slotIndex then acting = true end
@@ -1941,7 +2135,25 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     icon = icon,
     front = front,
     acting = acting,
+    -- Gen 3's field state on this seat (nil everywhere else): the substitute
+    -- doll standing in for the monster, Castform's form, and how far the cart
+    -- floats this species over its platform.
+    substitute = slot.substitute or nil,
+    form = slot.form,
+    elevation = self:seatElevation(key),
   }
+end
+
+-- pret gEnemyMonElevation for a Gen 3 species (Battlefield reads it off the
+-- engine's per-version pic coords); nil off Gen 3 and for a species that
+-- stands on the ground.
+function M:seatElevation(key)
+  if self:generation() ~= 3 or type(Battlefield.gen3Elevation) ~= "function" then
+    return nil
+  end
+  local ok, elev = pcall(Battlefield.gen3Elevation, tonumber(key))
+  if ok then return elev end
+  return nil
 end
 
 function M:pruneBattlefieldBubbles()
@@ -2034,6 +2246,22 @@ function M:battlefieldSeatName(slotIndex)
   return nil
 end
 
+-- The Gen 3 move row a token names, off the sheets this client uploaded (or
+-- the referee's Transform / Mimic overlay): the only move table a Gen 3
+-- screen holds.  nil for a move none of ours knows (the foe's).
+function M:gen3MoveRow(id)
+  if type(id) ~= "string" or id == "" then return nil end
+  for _, row in ipairs(self.liveMoves or {}) do
+    if type(row) == "table" and row.id == id then return row end
+  end
+  for _, sheet in ipairs(self.mine or {}) do
+    for _, row in ipairs((type(sheet) == "table" and sheet.moves) or {}) do
+      if type(row) == "table" and row.id == id then return row end
+    end
+  end
+  return nil
+end
+
 -- A move's display name, CoopBattle's lookup: the registry name when the build
 -- has one, the wire id otherwise.
 -- A move's type under the name the player reads on the classic TYPE/ strip.
@@ -2044,6 +2272,10 @@ end
 -- screen that never touched the chart. A build without the module at all falls
 -- through to the raw id, which still says something true.
 function M:moveTypeName(id)
+  if self:generation() == 3 then
+    local row = self:gen3MoveRow(id)
+    return row and Gen3.typeName(row.type) or nil
+  end
   local moves = self.game and self.game.data and self.game.data.moves
   local def = type(moves) == "table" and moves[id] or nil
   local typeId = def and def.type
@@ -2058,6 +2290,13 @@ end
 
 function M:moveLabel(id)
   if type(id) ~= "string" or id == "" then return nil end
+  -- Gen 3: the name the sheet carried, else the token spelled out (a foe's
+  -- move: the referee narrates it the same way, C4 "Move row").
+  if self:generation() == 3 then
+    local row = self:gen3MoveRow(id)
+    if row and type(row.name) == "string" and row.name ~= "" then return row.name end
+    return (id:gsub("_", " "))
+  end
   local moves = self.game and self.game.data and self.game.data.moves
   local def = type(moves) == "table" and moves[id] or nil
   local name = def and def.name
@@ -2103,6 +2342,14 @@ function M:battlefieldCtx()
     spriteId = selfSpriteId(),
     party = self:seatRoster(self:mySlot(), true),
   }}
+  local gen3 = self:generation() == 3
+  if gen3 then
+    -- Gen 3 maps a player's overworld graphic through their version and
+    -- gender (contract C3); ours are this boot's.
+    local player = Gen3.player()
+    allyHumans[1].version = Gen3.version()
+    allyHumans[1].gender = player and player.gender or nil
+  end
   local foeHumans = {}
   -- Who is standing on the foe edge: an NPC trainer, a peer, or nobody.
   --
@@ -2132,6 +2379,12 @@ function M:battlefieldCtx()
       spriteId = Gen.trainerWalkSpriteId(self.trainer, self.game),
       party = self:seatRoster(self:foeSlot(), false),
     }
+    -- A Gen 3 NPC stands on the field as the cart shows one: its own
+    -- TRAINER_PIC_* front pic (the engine trainer row names it).
+    local t = self.trainer
+    if gen3 and type(t) == "table" then
+      foeHumans[1].trainerPic = tonumber(t.trainerPic or t.pic or t.picId)
+    end
   elseif mode == "1v1" then
     foeHumans[1] = {
       id = self.peerId,
@@ -2139,6 +2392,11 @@ function M:battlefieldCtx()
       spriteId = peerSpriteId(self.peerId),
       party = self:seatRoster(self:foeSlot(), false),
     }
+    if gen3 then
+      local row = peerRow(self.peerId)
+      foeHumans[1].version = row and row.version or nil
+      foeHumans[1].gender = row and row.gender or nil
+    end
   end
 
   local ally = self:battlefieldSeat(self:mySlot(), true)
@@ -2152,7 +2410,7 @@ function M:battlefieldCtx()
   local showTarget = false
   if self.phase == "move" then
     showTarget = true
-  elseif self.phase == "choose" and M.COMMANDS[self.commandIndex or 1] == "FIGHT" then
+  elseif self.phase == "choose" and self:commandList()[self.commandIndex or 1] == "FIGHT" then
     showTarget = true
   elseif self.phase == "target" then
     showTarget = true
@@ -2193,6 +2451,10 @@ function M:battlefieldCtx()
     -- Bench / EXP.ALL movie: no plate to flash, so a front pic in the middle
     -- of the field. Nil when the evolving mon is on a seat.
     evolveCenter = self:evolveCenterCtx(),
+    -- Gen 3 weather over the field ("RAIN" | "SUN" | "SAND" | "HAIL"), as of
+    -- the queue's own position; nil when the sky is clear (and always off
+    -- Gen 3).
+    weather = self.weatherShown,
   }
 end
 
@@ -2228,10 +2490,22 @@ end
 
 function M:say(text)
   if type(text) ~= "string" or text == "" then return end
+  -- A Gen 3 line out of the cart's text pack still carries the printer's
+  -- codes (Exp3.cleanText): each `\p` starts a page of its own here, as it
+  -- does on the cart.
+  if Gen3.active() and text:find("\\", 1, true) then
+    text = Exp3.cleanText(text)
+    if text:find("\n\n", 1, true) then
+      for part in (text .. "\n\n"):gmatch("(.-)\n\n+") do
+        if part ~= "" then self:say(part) end
+      end
+      return
+    end
+  end
   self.lines = self.lines or {}
   -- Page here so wrap cannot hide a third line at draw. Coop does the
   -- same in `say`; drawBox paints one page, not "wrap and clip".
-  for _, page in ipairs(ClassicBattle.pageBoxText(text)) do
+  for _, page in ipairs(pageText(text)) do
     if page ~= "" then self.lines[#self.lines + 1] = page end
   end
 end
@@ -2267,7 +2541,7 @@ function M:start(game)
   self.mine = mons
 
   if self.role == "host" or self.mode == "wild" then
-    M.sendRuleset(self.transport, self.game)
+    M.sendRuleset(self.transport, self.game, { wild = self.mode == "wild" })
   end
   -- No side: a 1v1 has none to name. NPC uploads (wild / trainer) are side
   -- "b" from this client, the initiator. Wild carries no bag; a trainer
@@ -2322,7 +2596,15 @@ function M:onReady(msg)
 
   if self.phase == "setup" then
     self.phase = "play"
-    if self.mode == "wild" then
+    if self:generation() == 3 then
+      -- The cart's openings: "Wild X appeared!" / "X would like to battle!".
+      local wild = type(self.wildParty) == "table" and self.wildParty[1] or nil
+      if self.mode == "wild" then
+        self:say(("Wild %s\nappeared!"):format(tostring(wild and wild.species or "POKéMON")))
+      else
+        self:say(("%s would like\nto battle!"):format(self.peerName))
+      end
+    elseif self.mode == "wild" then
       self:say("A wild pokemon\nappeared!")
     else
       self:say(("%s wants to\nfight!"):format(self.peerName))
@@ -2350,6 +2632,9 @@ function M:onEvent(msg)
   if self.phase == "setup" then self.phase = "play" end
 
   local kind = msg.t
+  -- Gen 3 prices a knockout whole (Exp3): the `exp` events of one faint are
+  -- banked as they arrive and paid the moment anything else follows them.
+  if kind ~= "exp" and self.expBatch then self:flushExp3() end
   if kind == "msg" then
     self:say(msg.text)
 
@@ -2571,6 +2856,8 @@ function M:onEvent(msg)
       if (self.expCredit or 0) <= 0 then
         self:warnNoExp("the referee paid experience with no knockout ahead of "
           .. "it, which is not a payout this client can account for")
+      elseif self:generation() == 3 then
+        if self:bankExp3(msg) then self.expCredit = self.expCredit - 1 end
       elseif self:gainExp(msg) then
         self.expCredit = self.expCredit - 1
       end
@@ -2598,6 +2885,9 @@ function M:onEvent(msg)
     -- a referee that grows a drop event still draws the right arrows.
     local down = type(msg.text) == "string"
       and msg.text:lower():find("fell", 1, true) ~= nil
+    -- Gen 3 states the change itself (`delta`, C5 §7.1), which beats any
+    -- reading of a sentence.
+    if tonumber(msg.delta) then down = tonumber(msg.delta) < 0 end
     self:queueVfx(Vfx.forStat(down and -1 or 1), msg.slot)
 
   elseif kind == "item" then
@@ -2622,6 +2912,43 @@ function M:onEvent(msg)
       -- wire may have been somebody else's.
       if msg.slot == self:mySlot() then self.caughtBall = msg.text end
     end
+
+  -- ------- Gen 3's six (C5 §7.2).  Each is narrated by the referee's own
+  -- `msg` beside it; what arrives here is the sight and the state.
+  elseif kind == "ability" then
+    -- An ability visibly acted (Intimidate, Drizzle, Levitate...).  The seat
+    -- remembers which, and a shine plays on it in the stream's order.
+    local slot = msg.slot ~= nil and self.slots[msg.slot] or nil
+    if slot then slot.ability = { id = msg.amount, name = msg.text } end
+    self:queueVfx(ABILITY_VFX, msg.slot)
+
+  elseif kind == "weather" then
+    -- Started (1), continues (2), ended (0).  Applied when its row plays, so
+    -- the sky changes under the line that says so rather than at parse.
+    local sky = (msg.amount ~= 0) and msg.text or nil
+    self.lines[#self.lines + 1] = { stateRow = "weather", value = sky or false }
+
+  elseif kind == "held" then
+    -- A held item acted: Leftovers, a berry, a Focus Band, Thief / Knock Off /
+    -- Trick.  `holding` is what the mon holds now, and it is the writeback.
+    self:applyHeld(msg)
+    self:queueVfx(Vfx.forItem(msg.amount and tostring(msg.amount) or nil), msg.slot, msg.slot)
+
+  elseif kind == "form" then
+    -- The battler's picture changed: Castform's form, or Transform's species.
+    self.lines[#self.lines + 1] = {
+      stateRow = "form", slot = msg.slot, form = msg.amount,
+      speciesId = msg.speciesId,
+    }
+
+  elseif kind == "sub" then
+    self.lines[#self.lines + 1] = { stateRow = "sub", slot = msg.slot, value = msg.amount == 1 }
+
+  elseif kind == "ball" then
+    -- One throw, as the arena's ball flow already plays it (TOSS, POOF,
+    -- HIDEPIC, SHAKE, and POOF + SHOWPIC on a break-out) -- the rows Gen 1 and
+    -- Gen 2's referees emit one by one, stated by Gen 3's in one event.
+    self:queueBall3(msg)
 
   elseif kind == "turn" then
     -- Held rather than acted on: the lines this turn's events produced are
@@ -2818,7 +3145,11 @@ function M:syncMineStatus(msg)
   local sheet = self.mine and self.mine[self.active]
   if sheet then sheet.status = status end
   local save = self:saveMon()
-  if save then save.status = status end
+  if save then
+    save.status = status
+    -- A Gen 3 mon keeps its sleep counter beside the token; a cure takes it.
+    if status ~= "SLP" and save.sleep ~= nil then save.sleep = nil end
+  end
 end
 
 -- ------- exp
@@ -2867,7 +3198,7 @@ end
 
 -- The save-file monster behind a fight sheet index.
 function M:saveMon(index)
-  local party = self.game and self.game.save and self.game.save.party
+  local party = savePartyOf(self.game)
   local mon = party and party[self:savePartyIndex(index)]
   if type(mon) ~= "table" then return nil end
   return mon
@@ -3295,6 +3626,8 @@ end
 -- post-award HP.
 function M:syncLevelHp(paidIndex, oldMax, mon, onField)
   local newMax = tonumber(mon and mon.stats and mon.stats.hp)
+  -- A Gen 3 mon keeps its maximum flat on the mon (Pokemon.applyStats).
+  if self:generation() == 3 then newMax = tonumber(mon and mon.maxHp) end
   if not newMax or newMax ~= newMax then return end
   newMax = floor(newMax)
   local grown = newMax - floor(tonumber(oldMax) or newMax)
@@ -3376,6 +3709,7 @@ end
 -- Co-op banks the fifth move for after the fight instead (see CoopBattle).
 -- `toLearn` is the leftover if the player leaves before answering.
 function M:teach(mon, name, moveId)
+  if self:generation() == 3 then return self:teach3(mon, name, moveId) end
   local data = self.game and self.game.data
   local status = LearnMove.apply(mon, moveId, data)
   if status == "missing" or status == "known" then return false end
@@ -3417,6 +3751,270 @@ function M:syncFightMoves(mon)
   return M.sendMoveset(self.transport, self.battle, index - 1, moves)
 end
 
+-- ------- Gen 3: the award, the held items, the throw, the catch
+
+-- Bank one `exp` event of a knockout (see `flushExp3`).  True when it was
+-- taken, which is what spends the knockout's credit.
+function M:bankExp3(msg)
+  local paidIndex = self:paidSheetIndex(msg)
+  local mine = self.mine
+  if msg and msg.mon ~= nil and type(mine) == "table" and #mine > 0
+     and mine[paidIndex] == nil then
+    self:warnNoExp("the referee paid a party member this client never uploaded")
+    return false
+  end
+  local species = tonumber(msg and msg.speciesId)
+  local level = tonumber(msg and msg.level)
+  if not (species and level) then
+    self:warnNoExp("the referee's exp event named no species or level this "
+      .. "build could read")
+    return false
+  end
+  species, level = math.floor(species), math.max(1, math.floor(level))
+  local key = species .. ":" .. level
+  local batch = self.expBatch
+  if batch and batch.key ~= key then
+    self:flushExp3()
+    batch = nil
+  end
+  if not batch then
+    batch = { key = key, species = species, level = level, sentIn = {} }
+    self.expBatch = batch
+  end
+  batch.sentIn[self:savePartyIndex(paidIndex)] = true
+  return true
+end
+
+-- Price one knockout on the session party, the cart's way (Exp3.award:
+-- Cmd_getexp's split over the living participants, the Exp. Share holders'
+-- half, Lucky Egg / trainer / traded, the EVs), and queue what the cart shows
+-- for it: "X gained N EXP. Points!" for every mon paid, the strip filling on
+-- the plate of the one standing, then each level's line, its moves and any
+-- evolution.
+function M:flushExp3()
+  local batch = self.expBatch
+  if not batch then return false end
+  self.expBatch = nil
+  if not Exp3.available() then
+    self:warnNoExp("the engine's Gen 3 experience modules are unavailable")
+    return false
+  end
+  local party = savePartyOf(self.game)
+  if type(party) ~= "table" then
+    self:warnNoExp("this client holds no save party to pay")
+    return false
+  end
+  -- Where the standing monster's strip is *now*: Experience.apply mutates the
+  -- mon, so the start has to be read before the award lands.
+  local index = self:mySlot()
+  local slot = self.slots[index]
+  local activeParty = self:savePartyIndex(self.active)
+  local fromFrac, fromLevel
+  local fighter = party[activeParty]
+  if slot and type(fighter) == "table" then
+    self:seedExpClock(slot, fighter)
+    fromFrac = slot.shownExpFrac
+    fromLevel = slot.shownLevel or fighter.level or 1
+  end
+  local results, why = Exp3.award({
+    species = batch.species, level = batch.level,
+    isTrainer = TRAINER_MODES[self.mode] or false,
+    sentIn = batch.sentIn, party = party, session = Gen3.session(),
+  })
+  if not results then
+    self:warnNoExp(why or "the engine refused the award")
+    return false
+  end
+  for _, r in ipairs(results) do
+    local mon = r.mon
+    local sheetIndex = self:sheetIndexFor(mon)
+    local sheet = sheetIndex and self.mine and self.mine[sheetIndex] or nil
+    local name = (sheet and sheet.species)
+      or Sheet3.displayName(mon, tonumber(mon.species or mon.speciesId))
+    self.expPaid = (self.expPaid or 0) + 1
+    self:say(Exp3.gainedText(name, r.gained or r.amount, r.boosted))
+    local onField = r.index == activeParty
+    if onField and slot then
+      self.lines[#self.lines + 1] = {
+        expfill = index, mon = mon, name = name,
+        fromFrac = fromFrac, fromLevel = fromLevel, species = slot.species,
+      }
+    end
+    self:levelled3(mon, name, r.levels)
+    if sheetIndex then self:syncLevelHp(sheetIndex, r.fromMaxHp, mon, onField) end
+  end
+  return true
+end
+
+-- `levelled`, the Gen 3 way: each level's line in the cart's words, the
+-- moves the cart's learnset gives at that level, then the evolution check.
+function M:levelled3(mon, name, levels)
+  if not (type(levels) == "table" and #levels > 0) then return false end
+  name = name or Sheet3.displayName(mon, tonumber(mon.species or mon.speciesId))
+  for _, newLevel in ipairs(levels) do
+    self:say(Exp3.grewText(name, newLevel))
+    for _, moveId in ipairs(Exp3.movesLearnedAt(mon, newLevel)) do
+      self:teach(mon, name, moveId)
+    end
+  end
+  self.leveledUp = self.leveledUp or {}
+  self.leveledUp[mon] = true
+  self.lines = self.lines or {}
+  EvolveFx.enqueue(self.lines, self.game, mon, self)
+  return true
+end
+
+-- `teach`, with Gen 3's numeric move ids and the cart's sentence.
+function M:teach3(mon, name, moveId)
+  local id = tonumber(moveId)
+  local status = LearnMove.apply(mon, id, nil)
+  if status == "missing" or status == "known" then return false end
+  name = name or "?"
+  if status == "learned" then
+    self:say(Exp3.learnedText(name, Gen3.moveName(id) or tostring(id)))
+    self:syncFightMoves(mon)
+    return true
+  end
+  self.toLearn = self.toLearn or {}
+  self.toLearn[#self.toLearn + 1] = { mon = mon, move = id }
+  self.lines = self.lines or {}
+  self.lines[#self.lines + 1] = { learn = { mon = mon, move = id, name = name } }
+  return true
+end
+
+-- A `held` event: what the mon holds now.  Written back on our own side only
+-- (the referee's `mon` is the index into the party we uploaded), onto the
+-- fight sheet and the save mon both -- a berry eaten or an item stolen in a
+-- fight stays eaten or stolen after it (C5 §7.2).
+function M:applyHeld(msg)
+  if not (msg and msg.side ~= nil and msg.side == self.mySide) then return false end
+  local holding = tonumber(msg.holding)
+  if not holding or holding < 0 then return false end
+  holding = math.floor(holding)
+  local sheetIndex = tonumber(msg.mon) and (math.floor(tonumber(msg.mon)) + 1)
+    or self.active
+  local sheet = self.mine and self.mine[sheetIndex]
+  if type(sheet) == "table" then sheet.heldItem = holding end
+  local mon = self:saveMon(sheetIndex)
+  if type(mon) ~= "table" then return false end
+  mon.heldItem = holding
+  mon.item = holding
+  return true
+end
+
+-- One Gen 3 `ball` event as the ball-flow rows the arena and the classic page
+-- already play.  `amount` is the shakes (0..3) or 4 for a catch, which rocks
+-- three times and clicks.
+function M:queueBall3(msg)
+  local ballId = tonumber(msg.text)
+  local toss = (ballId == 4 and "TOSS_ANIM") or (ballId == 3 and "GREATTOSS_ANIM")
+    or "ULTRATOSS_ANIM"
+  local caught = tonumber(msg.amount) == 4
+  local shakes = caught and 3 or math.max(0, math.floor(tonumber(msg.amount) or 0))
+  local function anim(text, amount)
+    self.lines[#self.lines + 1] = {
+      anim = text, slot = msg.slot, side = msg.side, amount = amount,
+    }
+  end
+  anim(toss)
+  anim("POOF_ANIM")
+  if not caught and shakes == 0 then return end
+  anim("HIDEPIC_ANIM")
+  anim("SHAKE_ANIM", shakes)
+  if not caught then
+    anim("POOF_ANIM")
+    anim("SHOWPIC_ANIM")
+  end
+end
+
+-- A queued Gen 3 state change reaching the head of the queue: the sky, a
+-- picture, the substitute doll.  No hold -- the referee's sentence about it
+-- is the next row.
+function M:applyStateRow(row)
+  local what = row and row.stateRow
+  if what == "weather" then
+    self.weatherShown = row.value or nil
+    return true
+  end
+  local slot = row and row.slot ~= nil and self.slots[row.slot] or nil
+  if not slot then return false end
+  if what == "sub" then
+    slot.substitute = row.value == true or nil
+  elseif what == "form" then
+    if row.speciesId ~= nil then
+      slot.transformId = row.speciesId
+    else
+      slot.form = tonumber(row.form)
+    end
+    slot._bfFront = nil
+    slot._bfFrontSpecies = nil
+    slot.sprite = nil
+    self:refreshSlotSprite(row.slot, row.slot == self:mySlot())
+  end
+  return true
+end
+
+-- The catch, the way Catching.storeCaught writes it: the catcher as original
+-- trainer, the dex capture, where and when it was met (Gen.recordCatch ->
+-- Gen3.recordCatch), the ball it was caught in, the fight's own ending HP /
+-- status / held item, and a home -- the session party, else the PC by the
+-- cart's own box rule (Storage.sendMonToPC, which also heals it the way the
+-- PC does).
+function M:grantCatch3(msg)
+  local game = self.game
+  local caught = type(msg) == "table" and type(msg.caught) == "table" and msg.caught or nil
+  local mon = self.wildCatchMon
+  if type(mon) == "table" and caught then
+    Sheet3.applyToMon(mon, { hp = caught.hp, status = caught.status })
+    if tonumber(caught.heldItem) then
+      mon.heldItem = math.floor(tonumber(caught.heldItem))
+      mon.item = mon.heldItem
+    end
+  end
+  if type(mon) ~= "table" and caught then mon = Sheet3.monFromSheet(caught) end
+  if type(mon) ~= "table" then
+    self:say("Caught, but could not\nadd to the party.")
+    return
+  end
+  local session = Gen3.session() or (type(game) == "table" and game.session) or nil
+  if type(session) ~= "table" then return end
+  local ball = tonumber(self.caughtBall) or tonumber(caught and caught.ball)
+  mon.pokeball = ball or tonumber(mon.pokeball) or 4
+  local species = tonumber(mon.species or mon.speciesId)
+  local label = Sheet3.displayName({ nickname = "" }, species)
+  local isNew = Gen.recordCatch(game, mon)
+  session.party = type(session.party) == "table" and session.party or {}
+  local destination, placed
+  if #session.party < 6 then
+    session.party[#session.party + 1] = mon
+    destination = "party"
+  else
+    local Storage = Gen3.engine("src.core.game3.storage")
+    local ok, sent = false, false
+    if Storage and type(Storage.sendMonToPC) == "function" then
+      ok, sent = pcall(Storage.sendMonToPC, session, mon)
+    end
+    if not (ok and sent) then
+      self:say("But every BOX\nis full!")
+      return
+    end
+    destination = "box"
+    local okMsg, text = false, nil
+    if type(Storage.pcTransferMessage) == "function" then
+      okMsg, text = pcall(Storage.pcTransferMessage, session, label)
+    end
+    if okMsg and type(text) == "string" and text ~= "" then placed = text end
+  end
+  if isNew then self:say(Gen.dexAddedText(game, label)) end
+  if destination == "party" then
+    self:say(label .. " was\nadded to the party!")
+  else
+    self:say(placed or (label .. " was\nsent to the PC!"))
+  end
+  self:oweNickname(mon, label)
+  M.announceCaught(self, game, mon, destination, isNew, self.caughtBall)
+end
+
 function M:finishLearn(row, learned)
   self.learning = nil
   if type(row) ~= "table" then return end
@@ -3429,15 +4027,21 @@ function M:startLearn(row)
   self.learning = row
   local opened = LearnMove.open(self.game, row.mon, row.move, function(learned)
     self:finishLearn(row, learned)
-  end)
+  end, { ui = self.ui, battle = true })
   if opened then return true end
   -- No forget UI on this build: keep the toLearn leftover for after-battle
   -- and announce the try so the award sequence still reads as a level-up.
   self.learning = nil
-  local data = self.game and self.game.data
-  local def = type(data) == "table" and (data.moves or {})[row.move] or nil
+  local moveName
+  if self:generation() == 3 then
+    moveName = Gen3.moveName(row.move)
+  else
+    local data = self.game and self.game.data
+    local def = type(data) == "table" and (data.moves or {})[row.move] or nil
+    moveName = def and def.name
+  end
   self:say((row.name or "?") .. " is trying to\nlearn "
-    .. ((def and def.name) or tostring(row.move)) .. "!")
+    .. (moveName or tostring(row.move)) .. "!")
   return false
 end
 
@@ -3577,6 +4181,9 @@ function M:noteSlot(msg)
     slot.sprite = nil
     slot.icon = nil
     slot.koHold = nil
+    -- Gen 3's picture state belongs to the monster that left (a Transform, a
+    -- Castform form, the substitute doll); nil on every other generation.
+    slot.transformId, slot.form, slot.substitute = nil, nil, nil
     fresh = true
   end
   -- **The referee's own maximum, when it states one (PROTOCOL 24).**
@@ -3685,6 +4292,13 @@ end
 -- states none leaves the seat exactly where it was.
 function M:seatSpeciesKey(slot, isPlayer)
   if type(slot) ~= "table" then return nil end
+  -- Gen 3: the internal species number the referee stated (a Transform
+  -- overrides it for the picture), which needs no pokedex to be believed.
+  if self:generation() == 3 then
+    local id3 = slot.transformId or slot.speciesId
+    if tonumber(id3) then return tostring(math.floor(tonumber(id3))) end
+    return self:speciesKeyFor(slot.species, isPlayer)
+  end
   local id = slot.speciesId
   if type(id) == "string" and id ~= "" then
     local data = self.game and self.game.data
@@ -3723,6 +4337,24 @@ function M:refreshSlotSprite(index, isPlayer)
   local slot = self.slots[index]
   if not slot or not slot.species or (slot.hp or 0) <= 0 then
     if slot then slot.sprite = nil end
+    return
+  end
+  -- Gen 3: the cart's own 64x64 pics -- the back pic on our own seat, the
+  -- front pic opposite -- mon-aware for the monster this client owns.
+  if self:generation() == 3 then
+    local sp = tonumber(self:seatSpeciesKey(slot, isPlayer))
+    if not sp then
+      slot.sprite = nil
+      return
+    end
+    local own = isPlayer and self:saveMon(self.active) or nil
+    if own and (tonumber(own.species) ~= sp or slot.transformId) then own = nil end
+    local subject = own or sp
+    local opts = { form = slot.form }
+    local pic = isPlayer and Gen3.backPic(subject, opts) or Gen3.frontPic(subject, opts)
+    slot.sprite = pic and pic.image or nil
+    local monHint = isPlayer and self.mine and self.mine[self.active] or nil
+    slot.level = slot.level or (monHint and monHint.level) or 1
     return
   end
   local data = self.game and self.game.data
@@ -3841,6 +4473,7 @@ end
 function M:onOutcome(msg)
   if self.finished then return end
   if msg.battle ~= self.battle then return end
+  if self.expBatch then self:flushExp3() end
   self.pendingTurn = false
   self:finish(M.resultFor(msg, self.peerId), msg.reason, msg)
 end
@@ -3896,6 +4529,7 @@ local REASONS = {
 }
 
 function M:grantCatch(msg)
+  if self:generation() == 3 then return self:grantCatch3(msg) end
   local mon = self.wildCatchMon
   if not mon and msg and msg.caught then
     -- Sheet-only path: cannot rebuild a full engine mon without ROM data.
@@ -3973,11 +4607,21 @@ function M.announceCaught(screen, game, mon, destination, isNew, ball)
     local Runtime = require("src.mods.Runtime")
     if type(Runtime.emit) ~= "function" then return end
     if Runtime.wants and not Runtime.wants("pokemon.caught") then return end
-    Runtime.emit("pokemon.caught", {
+    local payload = {
       battle = screen, mon = mon, species = mon.species,
       isNew = isNew and true or false, ball = ball,
       destination = destination, game = game,
-    })
+    }
+    -- Gen 3's own emit (battle/catching.lua emit_caught) names the species
+    -- and the ball in words and carries the numbers beside them; a listener
+    -- written against the engine's catch sees the same keys here.
+    if Gen3.active() and type(mon.species) == "number" then
+      payload.species = Gen3.speciesName(mon.species) or mon.species
+      payload.speciesId = mon.species
+      payload.ballId = tonumber(ball)
+      payload.ball = tonumber(ball) and Gen3.itemName(tonumber(ball)) or ball
+    end
+    Runtime.emit("pokemon.caught", payload)
   end)
 end
 
@@ -4175,6 +4819,13 @@ end
 
 -- Classic Gen 1 order (row-major): FIGHT SWITCH / ITEM RUN.
 M.COMMANDS = { "FIGHT", "SWITCH", "ITEM", "RUN" }
+M.COMMANDS3 = COMMANDS3
+
+-- This boot's grid (the Gen 3 one is the cart's order; see COMMANDS3).
+function M:commandList()
+  if self:generation() == 3 then return COMMANDS3 end
+  return M.COMMANDS
+end
 
 -- One step around a `cols`-wide grid of `count` items, clamped at every edge
 -- (Gen 1 never wraps the command menu).
@@ -4214,6 +4865,7 @@ end
 
 function M:usableItems()
   if self.itemList then return self.itemList end
+  if self:generation() == 3 then return self:usableItems3() end
   local out = {}
   local inventory = (self.game and self.game.save and self.game.save.inventory) or {}
   local items = (self.game and self.game.data and self.game.data.items) or {}
@@ -4247,6 +4899,32 @@ function M:usableItems()
   return out
 end
 
+-- Gen 3: the uploaded bag sheet (numeric ids) against what the session's
+-- pockets still hold, named the cart's way, in bag-id order.
+function M:usableItems3()
+  local out = {}
+  for id, bagCount in pairs(type(self.bagSheet) == "table" and self.bagSheet or {}) do
+    local num = tonumber(id)
+    local effect = num and Sheet3.itemEffect(num)
+    if effect and (bagCount or 0) > 0 then
+      local have = Gen3.bag.count(num)
+      local count = effect.noConsume and ((have >= 1 or bagCount >= 1) and 1 or 0)
+        or math.min(bagCount, have)
+      if count > 0 then
+        out[#out + 1] = {
+          id = num,
+          name = Gen3.itemName(num) or ("ITEM " .. num),
+          count = count,
+          effect = effect,
+        }
+      end
+    end
+  end
+  table.sort(out, function(a, b) return a.id < b.id end)
+  self.itemList = out
+  return out
+end
+
 -- Hub resolved our pending item choice (`item` event on our seat).
 -- No `owed`: the hub already decremented; abandon must not refund a spent stack.
 -- `amount == 1` on a vitamin means the hub applied Stat Exp (writeback owed);
@@ -4254,6 +4932,7 @@ end
 function M:confirmPendingItem(itemId, amount)
   local id = self.pendingItem
   if not id then return false end
+  if self:generation() == 3 then return self:confirmPendingItem3(itemId) end
   if itemId and itemId ~= id then return false end
   local sheetIndex = self.pendingItemSlot or self.active
   self.pendingItem = nil
@@ -4279,6 +4958,28 @@ function M:confirmPendingItem(itemId, amount)
   if self.bagSheet and self.bagSheet[id] then
     self.bagSheet[id] = self.bagSheet[id] - 1
     if self.bagSheet[id] <= 0 then self.bagSheet[id] = nil end
+  end
+  self.itemList = nil
+  return true
+end
+
+-- Gen 3's debit: the event names the item as its number in a string, and the
+-- spend comes out of the session's own pocket (Bag.remove).
+function M:confirmPendingItem3(itemId)
+  local id = self.pendingItem
+  if itemId ~= nil and tostring(itemId) ~= tostring(id) then return false end
+  self.pendingItem = nil
+  self.pendingItemSlot = nil
+  local num = tonumber(id)
+  local effect = num and Sheet3.itemEffect(num)
+  if effect and effect.noConsume then
+    self.itemList = nil
+    return true
+  end
+  if not (num and Gen3.bag.remove(num, 1)) then return false end
+  if self.bagSheet and self.bagSheet[num] then
+    self.bagSheet[num] = self.bagSheet[num] - 1
+    if self.bagSheet[num] <= 0 then self.bagSheet[num] = nil end
   end
   self.itemList = nil
   return true
@@ -4399,9 +5100,16 @@ function M:commitItem(partyIndex, moveIndex)
     self.itemPick = nil
     return false
   end
+  local gen3 = self:generation() == 3
   if not effect.noConsume then
-    local inventory = self.game and self.game.save and self.game.save.inventory
-    if not (inventory and (inventory[pick.id] or 0) > 0) then
+    local have
+    if gen3 then
+      have = Gen3.bag.count(pick.id)
+    else
+      local inventory = self.game and self.game.save and self.game.save.inventory
+      have = inventory and (inventory[pick.id] or 0) or 0
+    end
+    if not (have > 0) then
       self:say("You have nothing\nto use!")
       self.phase = "choose"
       self.itemPick = nil
@@ -4411,7 +5119,12 @@ function M:commitItem(partyIndex, moveIndex)
   -- Do not debit yet: wait for the hub `item` event (or clear on turn/unchose).
   self.pendingItem = pick.id
   self.pendingItemSlot = partyIndex or self.active
-  local fields = { action = "item", item = pick.id }
+  -- Gen 3 names the item by its number, spelled as a string so the id
+  -- sanitiser takes it (the referee reads either).  A ball also says whether
+  -- this player's dex already has the wild species caught -- the Repeat
+  -- Ball's x3 (docs/plans/gen3-battle-sheet.md §1.2).
+  local fields = { action = "item", item = gen3 and tostring(pick.id) or pick.id }
+  if gen3 and effect.ball then fields.dexCaught = self:wildDexCaught() end
   if partyIndex then fields.slot = partyIndex - 1 end
   if moveIndex then fields.move = moveIndex - 1 end
   self.itemPick = nil
@@ -4434,19 +5147,34 @@ function M:commandCols()
   if not self:usesBattlefield() then return 2 end
   local cols = Battlefield and Battlefield.bandGridCols
   if type(cols) ~= "function" then return 2 end
-  local ok, got = pcall(cols, #M.COMMANDS)
+  local ok, got = pcall(cols, #self:commandList())
   got = ok and tonumber(got) or nil
   if not got or got < 1 then return 2 end
   return math.floor(got)
 end
 
+-- Does this player's dex already have the wild seat's species caught?
+function M:wildDexCaught()
+  local sheet = type(self.wildParty) == "table" and self.wildParty[1] or nil
+  local sp = sheet and tonumber(sheet.speciesNum or sheet.speciesId)
+  local session = Gen3.session()
+  local Dex = Gen3.engine("src.core.game3.dex")
+  if not (sp and session and type(session.dex) == "table" and Dex
+      and type(Dex.isCaught) == "function") then
+    return false
+  end
+  local ok, caught = pcall(Dex.isCaught, session.dex, sp)
+  return ok and caught == true
+end
+
 function M:updateCommand(input)
   self.commandIndex = self.commandIndex or 1
-  local moved = gridPress(self.commandIndex, #M.COMMANDS, input, self:commandCols())
+  local commands = self:commandList()
+  local moved = gridPress(self.commandIndex, #commands, input, self:commandCols())
   if moved then
     self.commandIndex = moved
   elseif input:wasPressed("a") then
-    local command = M.COMMANDS[self.commandIndex]
+    local command = commands[self.commandIndex]
     if command == "FIGHT" then
       self.cursor = self:rememberedMove()
       self.phase = "move"
@@ -4629,6 +5357,12 @@ end
 function M:playVictoryMusic()
   if self.result ~= "win" or self.victoryMusicPlayed then return end
   self.victoryMusicPlayed = true
+  -- Gen 3 plays the cart's own jingle through the m4a player; there is no
+  -- Gen 1 Music module to hand over.
+  if self:generation() == 3 then
+    Gen.playVictoryMusic(self.game, self:gen3MusicOpts())
+    return
+  end
   local eng = loadEngine()
   if not (eng and eng.Music and self.game) then return end
   -- Gen 1: kind .. "Win" (final→gym). Gen 2: BattleMusic victory label.
@@ -4644,11 +5378,25 @@ end
 -- enter/exit/update/draw is the whole of the engine's state interface, and
 -- src/Ui.lua's RbyMmoState screen hands this object straight to the stack.
 
+-- The battle opts Gen.playBattleMusic / playVictoryMusic read on Gen 3: the
+-- mode, and the NPC (a numeric Gen 3 trainer row) on a solo trainer fight.
+function M:gen3MusicOpts()
+  return { kind = self:musicKind(), mode = self.mode, trainer = self.trainer }
+end
+
+-- What the theme is restored with after an evolution movie.
+function M:battleMusicOpts(eng)
+  if self:generation() == 3 then return self:gen3MusicOpts() end
+  return { Music = eng and eng.Music, kind = self:musicKind(), mode = self.mode }
+end
+
 function M:enter()
   loadEngine()
   if self:usesBattlefield() then self:ensureBattlefield() end
   local eng = engine
-  if eng and eng.Music and self.game then
+  if self:generation() == 3 then
+    if self.game then Gen.playBattleMusic(self.game, self:gen3MusicOpts()) end
+  elseif eng and eng.Music and self.game then
     Gen.playBattleMusic(self.game, {
       Music = eng.Music,
       kind = self:musicKind(),
@@ -4676,7 +5424,9 @@ function M:exit()
   -- Map theme back unconditionally: victory jingles loop until something
   -- stops them (same reason the engine's BattleState:finish restores).
   local eng = loadEngine()
-  if eng and eng.Music and self.game then
+  if self:generation() == 3 then
+    if self.game then Gen.restoreMapMusic(self.game) end
+  elseif eng and eng.Music and self.game then
     Gen.restoreMapMusic(self.game, { Music = eng.Music })
   end
   -- Leftover `toLearn` rides out if the player left before answering a
@@ -4687,6 +5437,12 @@ function M:exit()
 end
 
 function M:leave()
+  -- Gen 3 has no game.stack: the screen is a game3 layer, and Gen3Ui.pop is
+  -- what takes it down (and runs `exit` on the way).
+  if self:generation() == 3 then
+    pcall(Gen3Ui.pop, self.game, self)
+    return
+  end
   if self.game and self.game.stack then
     pcall(function() self.game.stack:pop() end)
   end
@@ -4837,6 +5593,12 @@ function M:tickMessages(dt, input)
       self:startSpawnFx(next)
       return true
     end
+    if type(next) == "table" and next.stateRow ~= nil then
+      -- A Gen 3 state change (the sky, a picture, the doll): no dwell, the
+      -- line about it is the next row.
+      self:applyStateRow(next)
+      return true
+    end
     if type(next) == "table" and next.clearPic ~= nil then
       self:releasePic(next.clearPic, next)
       -- No dwell: the faint line ahead already held the screen. Keep ticking
@@ -4846,7 +5608,7 @@ function M:tickMessages(dt, input)
     -- Belt for strings that skipped `say` (same split Coop applies when
     -- popping a hub line). Already-paged copy stays one entry.
     if type(next) == "string" then
-      local pages = ClassicBattle.pageBoxText(next)
+      local pages = pageText(next)
       next = pages[1] or ""
       for i = #pages, 2, -1 do
         table.insert(self.lines, 1, pages[i])
@@ -4977,6 +5739,13 @@ function M:applyPendingHitFx()
   local hit = self.pendingHit
   self.pendingHit = nil
   if not hit or not hit.sfx then return end
+  -- Gen 3: the SE_* name Gen.sfx mapped (peekHitSfx), through the cart's own
+  -- sound-effect table.
+  if self:generation() == 3 then
+    local name = type(hit.sfx) == "table" and hit.sfx.sound or hit.sfx
+    if type(name) == "string" then Gen3.audio.playSe(name) end
+    return
+  end
   local eng = loadEngine()
   local Sound = eng and eng.Sound
   local data = self.game and self.game.data
@@ -4992,7 +5761,28 @@ function M:applyPendingHitFx()
   end
 end
 
+-- Gen 3's sounds for a queued row: a GROWL / ROAR is the user's cry, and the
+-- ball flow has the cart's own throw / wobble / break-out effects.
+local BALL_SE3 = {
+  TOSS_ANIM = "SE_BALL_THROW", GREATTOSS_ANIM = "SE_BALL_THROW",
+  ULTRATOSS_ANIM = "SE_BALL_THROW", SHAKE_ANIM = "SE_BALL",
+  POOF_ANIM = "SE_BALL_OPEN",
+}
+
+function M:playGen3RowSound(row)
+  if type(row) ~= "table" or type(row.anim) ~= "string" then return end
+  if row.anim == "GROWL" or row.anim == "ROAR" then
+    local slot = row.slot and self.slots and self.slots[row.slot]
+    local sp = slot and tonumber(self:seatSpeciesKey(slot, row.slot == self:mySlot()))
+    if sp then Gen3.audio.playCry(sp) end
+    return
+  end
+  local se = BALL_SE3[row.anim]
+  if se then Gen3.audio.playSe(se) end
+end
+
 function M:playMoveAnimFallback(row)
+  if self:generation() == 3 then return self:playGen3RowSound(row) end
   local eng = loadEngine()
   local Sound = eng and eng.Sound
   local data = self.game and self.game.data
@@ -5840,6 +6630,7 @@ function M:applySwap(row)
   slot.sprite = nil
   slot.icon = nil
   slot.koHold = nil
+  slot.transformId, slot.form, slot.substitute = nil, nil, nil
   -- Same reading of an arrival's numbers as `noteSlot`'s, and for the same
   -- reason: the maximum the referee stated for this monster (PROTOCOL 24) is
   -- what its bar is out of, and the older guess -- the biggest HP the seat has
@@ -6228,6 +7019,7 @@ function M:evolveCenterFront()
   local movie = self.evolving
   if not (movie and movie.center) then return nil end
   local species = EvolveFx.picSpecies(movie)
+  if type(species) == "number" then species = tostring(species) end
   if type(species) ~= "string" then return nil end
   local hit = EvolveFx.formCacheGet(movie, "front", species)
   if hit ~= nil then return hit or nil end
@@ -6324,11 +7116,7 @@ function M:stepEvolve(dt, input)
       if movie.slot then self:refreshSlotSprite(movie.slot, true) end
     end
   end
-  EvolveFx.restoreBattleMusic(self.game, {
-    Music = eng and eng.Music,
-    kind = self:musicKind(),
-    mode = self.mode,
-  })
+  EvolveFx.restoreBattleMusic(self.game, self:battleMusicOpts(eng))
   self.shown = line
   self.dwell = 0
 end
@@ -6337,7 +7125,15 @@ function M:refreshAfterEvolve(mon, snapMax, snapHp)
   if not mon then return end
   local data = self.game and self.game.data
   local def = data and data.pokemon and data.pokemon[mon.species]
+  if self:generation() == 3 then
+    -- The evolved species' name as the plate prints it (a nickname stays),
+    -- and its number as the seat's id: a stand-in for the species record the
+    -- two lines below read on Gen 1 / Gen 2.
+    local sp = tonumber(mon.species or mon.speciesId)
+    def = { name = Sheet3.displayName(mon, sp) }
+  end
   local saveMax = tonumber(mon.stats and mon.stats.hp) or tonumber(mon.maxHp)
+  if self:generation() == 3 then saveMax = tonumber(mon.maxHp) or saveMax end
   if saveMax and saveMax == saveMax and saveMax > 0 then
     saveMax = floor(saveMax)
     mon.maxHp = saveMax
@@ -6351,7 +7147,7 @@ function M:refreshAfterEvolve(mon, snapMax, snapHp)
         or (type(sheet) == "table" and tonumber(sheet.hp))
       local grown, newMax, newHp = EvolveFx.hpGrowth(oldMax, saveMax, oldHp)
       if type(sheet) == "table" then
-        sheet.speciesId = mon.species
+        sheet.speciesId = (self:generation() == 3) and tostring(mon.species) or mon.species
         if def and type(def.name) == "string" then
           sheet.species = def.name
         end
@@ -6363,7 +7159,7 @@ function M:refreshAfterEvolve(mon, snapMax, snapHp)
         local index = self:mySlot()
         local slot = index and self.slots[index]
         if type(slot) == "table" then
-          slot.speciesId = mon.species
+          slot.speciesId = (self:generation() == 3) and tostring(mon.species) or mon.species
           if def and type(def.name) == "string" then
             slot.species = def.name
           end
@@ -6477,11 +7273,7 @@ function M:snapDisplay()
   -- after-battle fallback still offers. Unplayed evolve rows stay in `lines`.
   if self.evolving then
     local eng = loadEngine()
-    EvolveFx.restoreBattleMusic(self.game, {
-      Music = eng and eng.Music,
-      kind = self:musicKind(),
-      mode = self.mode,
-    })
+    EvolveFx.restoreBattleMusic(self.game, self:battleMusicOpts(eng))
     self.evolving = nil
   end
   -- The arrival window closes here too, and it closes *forwards*: this is
@@ -6545,6 +7337,9 @@ end
 
 function M:update(dt)
   self.frame = (self.frame or 0) + 1
+  -- The last knockout of a batch is paid here when nothing followed its `exp`
+  -- events on the wire this frame.
+  if self.expBatch then self:flushExp3() end
   self:pruneBattlefieldBubbles()
   self:stepFx(dt)
   -- Held fanfare: the outcome was known before the arena had finished showing
@@ -6994,6 +7789,12 @@ end
 -- and the index are `M.COMMANDS`' own -- `updateCommand` steps that grid.
 function M:bandCommandItems()
   local items = {}
+  if self:generation() == 3 then
+    for i, command in ipairs(COMMANDS3) do
+      items[i] = { label = COMMAND_LABEL3[command] or command }
+    end
+    return items
+  end
   for i, command in ipairs(M.COMMANDS) do
     items[i] = { label = (command == "SWITCH") and "PKMN" or command }
   end
@@ -7044,6 +7845,8 @@ function M:partyFront(index, sheet)
   if type(mon) ~= "table" then mon = sheet end
   if type(mon) ~= "table" then return nil end
   local species = mon.species
+  -- A Gen 3 save mon's species is its number.
+  if type(species) == "number" then species = tostring(species) end
   if type(species) ~= "string" or species == "" then return nil end
   local key = species .. (mon.shiny and "*" or "")
   local cache = self._bfPartyFronts
@@ -7191,6 +7994,7 @@ end
 function M:drawBattlefieldMenus(Font)
   local ok, drew, why = pcall(self.drawModernBand, self)
   if ok and drew then return end
+  if not Font then return end
   -- The band failing is a visible downgrade in the middle of a fight, and the
   -- GB chrome hides it well enough that nobody would report it -- so it is
   -- said once, with what went wrong. `why == "unavailable"` is the one
@@ -7276,6 +8080,12 @@ function M:drawBattlefieldSafe()
   end
   pcall(Battlefield.draw, self, self:battlefieldCtx(), engBag)
 
+  -- Gen 3 has no Game Boy font to fall back on; the band widgets carry their
+  -- own, and a band that cannot draw simply stays empty.
+  if eng and eng.gen3 then
+    self:drawBattlefieldMenus(nil)
+    return
+  end
   if not (eng and eng.Font) then return end
   self:drawBattlefieldMenus(eng.Font)
 end
@@ -7325,8 +8135,13 @@ function M:generation()
   return gen
 end
 
+-- Gen 3 takes the same window-space path: its render.hud pass
+-- (Gen3Ui.drawWidescreen) paints a pushed state that says yes here edge to
+-- edge and the game3 layers above it at the game rect.  CLASSIC BATTLE UI says
+-- no and draws its 240x160 page into the game3 canvas instead.
 function M:drawsWidescreen()
-  if self:generation() ~= 2 then return false end
+  local gen = self:generation()
+  if gen ~= 2 and gen ~= 3 then return false end
   return self:usesBattlefield()
 end
 
@@ -7383,6 +8198,8 @@ function M:drawSafe()
   -- frame Game2 also blits the stack -- which it does the moment anything is
   -- pushed over the fight.
   if self:drawsWidescreen() then return end
+  -- Gen 3 without the arena: the 240x160 GBA page.
+  if self:generation() == 3 then return self:drawGen3Classic() end
   if self:usesBattlefield() then
     return self:drawBattlefieldSafe()
   end
@@ -7447,6 +8264,325 @@ function M:drawSafe()
     return self:drawBox(Font, "Getting ready...")
   end
   self:drawBox(Font, self:holdLine(), { hint = false })
+end
+
+-- ------- the Gen 3 page (CLASSIC BATTLE UI, or no arena)
+--
+-- What this screen hands a GBA-shaped renderer: the two seats as the plates
+-- show them (display clocks, not the referee's truth), whatever the box says
+-- or which menu is open, and the field's state -- the `view` of
+-- `ClassicBattle.drawGen3(view, state)` (the cart-chrome layout, see its
+-- contract in src/ClassicBattle.lua), which draws it when the cart's battle
+-- chrome is reachable; `drawGen3Plain` below is the plain 240x160 page
+-- otherwise (a headless load, a cache without the chrome).
+function M:gen3SeatModel(index, isPlayer)
+  local slot = self.slots[index]
+  if not (slot and slot.species) then return nil end
+  if (slot.hp or 0) <= 0 and not slot.sprite and not slot.koHold
+     and (slot.shownHp or 0) <= 0 then
+    return nil
+  end
+  if slot.sprite == nil then self:refreshSlotSprite(index, isPlayer) end
+  local sprite = slot.sprite
+  local movie = self.evolving
+  if isPlayer and movie and movie.slot == index then
+    sprite = slot.sprite
+  end
+  local hidden = self:seatVanished(index) or (not isPlayer and self.foePicHidden)
+    or (self.ballFlow and self.ballFlow.index == index and self.ballFlow.hidden) or false
+  local key = self:seatSpeciesKey(slot, isPlayer)
+  local seat = {
+    name = slot.species,
+    level = (isPlayer and slot.shownLevel) or slot.level or 1,
+    hp = self:shownHpOf(slot),
+    maxHp = slot.maxHp or 1,
+    status = slot.status,
+    confused = slot.confused or nil,
+    sprite = sprite,
+    hidden = hidden and true or false,
+    substitute = slot.substitute or nil,
+    speciesId = key or slot.speciesId,
+    form = slot.form,
+    elevation = (not isPlayer) and self:seatElevation(key) or nil,
+  }
+  if isPlayer then
+    if slot.shownExpFrac == nil then self:seedExpClock(slot, self:saveMon()) end
+    seat.expFrac = slot.shownExpFrac
+    local own = self:saveMon(self.active)
+    if own and tonumber(own.species) == tonumber(key) then
+      seat.mon = own
+      seat.gender = own.gender
+    end
+  else
+    -- The owned-ball marker a wild foe's box carries on the cart: this
+    -- player's dex already has its species caught.
+    if self.mode == "wild" then seat.caught = self:wildDexCaught() end
+    local sheet = type(self.wildParty) == "table" and self.wildParty[1] or nil
+    if sheet and sheet.speciesId == key then seat.gender = sheet.gender end
+  end
+  if seat.gender ~= "M" and seat.gender ~= "F" then seat.gender = nil end
+  return seat
+end
+
+function M:gen3ClassicModel()
+  local phase = self.phase
+  local model = {
+    foe = self:gen3SeatModel(self:foeSlot(), false),
+    ally = self:gen3SeatModel(self:mySlot(), true),
+    phase = phase,
+    mode = self.mode,
+    frame = self.frame,
+    weather = self.weatherShown,
+    message = self.shown or (self.anim and "" or nil),
+    -- ▼ under a line the player is being asked to read.
+    hint = self.shown ~= nil,
+    -- The foe's remaining party for the ball row (the referee's roster).
+    foeParty = self.teams and self.teams[self:foeSlot()] or nil,
+  }
+  local player = Gen3.player()
+  model.playerBack = { gender = player and player.gender or 0 }
+  if TRAINER_MODES[self.mode] and type(self.trainer) == "table" then
+    local pic = tonumber(self.trainer.trainerPic or self.trainer.pic or self.trainer.picId)
+    if pic then model.trainer = { pic = pic } end
+  end
+  local active = self.mine and self.mine[self.active]
+  model.prompt = ("What will\n%s do?"):format(tostring(active and active.species or "?"))
+  if phase == "choose" then
+    local items = {}
+    for i, entry in ipairs(self:bandCommandItems()) do items[i] = entry.label end
+    model.commands, model.commandIndex = items, self.commandIndex or 1
+  elseif phase == "move" or phase == "item_move" then
+    local mon = (phase == "item_move") and (self.mine or {})[self.itemPartyIndex or self.active]
+      or self:activeMon()
+    local rows = {}
+    for _, move in ipairs((mon and mon.moves) or {}) do
+      rows[#rows + 1] = {
+        label = self:moveLabel(move.id) or tostring(move.id),
+        -- The pret type number (the renderer names it in the cart's words);
+        -- a row without one falls back to the name off our sheets.
+        type = tonumber(move.type) or self:moveTypeName(move.id),
+        pp = tonumber(move.pp), maxPp = tonumber(move.maxPp),
+      }
+    end
+    model.moves, model.cursor = rows, self.cursor or 1
+  elseif phase == "item" then
+    local rows = {}
+    for _, item in ipairs(self:usableItems()) do
+      rows[#rows + 1] = { label = tostring(item.name or item.id), right = "x" .. tostring(item.count or 0) }
+    end
+    model.list = { title = "BAG", rows = rows, cursor = self.itemIndex or 1 }
+  elseif phase == "item_party" or phase == "switch" then
+    model.list = { title = "POKéMON", rows = self:gen3PartyRows(phase == "item_party"),
+                   cursor = self.switchIndex or 1 }
+  elseif phase == "target" then
+    local rows = {}
+    for _, seat in ipairs(self:battlefieldTargets()) do rows[#rows + 1] = { label = tostring(seat.name or "?") } end
+    model.list = { title = "TARGET", rows = rows, cursor = self.targetIndex or 1 }
+  end
+  if model.message == nil and not (model.commands or model.moves or model.list) then
+    if phase == "setup" then
+      model.message = "Getting ready..."
+    elseif phase == "over" then
+      model.message = ""
+    else
+      model.message, model.hold = self:holdLine(), true
+    end
+  end
+  local movie = self.evolving
+  if movie and movie.center then
+    model.evolveFront = self:evolveCenterFront()
+    model.evolveFlash = EvolveFx.flashPulse(movie)
+  end
+  return model
+end
+
+-- The POKeMON page's rows: the same set and order `updateSwitch` /
+-- `updateItemParty` index into, with what the cart's party page shows for
+-- each (front pic, icon, level, HP, condition).
+function M:gen3PartyRows(all)
+  local rows = {}
+  for _, row in ipairs(self:partyRows()) do
+    if all or (not row.fainted and (self.replaceOnly or not row.active)) then
+      local sheet = (self.mine or {})[row.index]
+      local save = self:saveMon(row.index)
+      local key = sheet and sheet.speciesId
+      local hp, maxHp = sheet and tonumber(sheet.hp), sheet and tonumber(sheet.maxHp)
+      if row.active then
+        local slot = self.slots and self.slots[self:mySlot()]
+        if type(slot) == "table" and (tonumber(slot.shownHp) ~= nil or tonumber(slot.hp) ~= nil) then
+          hp, maxHp = self:shownHpOf(slot), tonumber(slot.maxHp) or maxHp
+        end
+      end
+      rows[#rows + 1] = {
+        label = row.label,
+        dim = row.fainted or nil,
+        front = self:partyFront(row.index, sheet),
+        icon = key and self:seatIcon(key, save) or nil,
+        level = sheet and sheet.level,
+        hp = hp, maxHp = maxHp,
+        status = sheet and sheet.status,
+        right = (hp and maxHp) and ("%d/%d"):format(hp, maxHp) or nil,
+      }
+    end
+  end
+  return rows
+end
+
+function M:drawGen3Classic()
+  local model = self:gen3ClassicModel()
+  if type(ClassicBattle.drawGen3) == "function" then
+    local ok, drew = pcall(ClassicBattle.drawGen3, model, self)
+    if ok and drew ~= false then return end
+  end
+  return self:drawGen3Plain(model)
+end
+
+local GEN3_W, GEN3_H = 240, 160
+
+local function hpColor(frac)
+  if frac > 0.5 then return 0.25, 0.85, 0.35 end
+  if frac > 0.2 then return 0.95, 0.80, 0.15 end
+  return 0.95, 0.30, 0.25
+end
+
+-- One plate: name, level (or condition), the HP bar, and on our own the
+-- numbers and the exp strip.
+local function drawGen3Plate(g, Font, seat, x, y, w, own)
+  g.setColor(0.97, 0.97, 0.90, 1)
+  g.rectangle("fill", x, y, w, own and 38 or 28)
+  g.setColor(0.25, 0.30, 0.30, 1)
+  g.rectangle("line", x + 0.5, y + 0.5, w - 1, (own and 38 or 28) - 1)
+  Font.draw(Font.fit(tostring(seat.name or "?"), w - 44), x + 5, y + 1)
+  local tag = seat.status or (seat.confused and "CNF") or ("Lv" .. tostring(seat.level or 1))
+  Font.drawRight(tag, x + w - 5, y + 1)
+  local maxHp = math.max(1, tonumber(seat.maxHp) or 1)
+  local hp = math.max(0, math.min(maxHp, tonumber(seat.hp) or 0))
+  local frac = hp / maxHp
+  local bx, by, bw = x + w - 5 - 64, y + 18, 64
+  g.setColor(0.2, 0.2, 0.2, 1)
+  g.rectangle("fill", bx - 1, by - 1, bw + 2, 5)
+  g.setColor(hpColor(frac))
+  g.rectangle("fill", bx, by, math.floor(bw * frac + 0.5), 3)
+  if own then
+    Font.drawRight(("%d/%d"):format(hp, maxHp), x + w - 5, y + 21)
+    local exp = tonumber(seat.expFrac)
+    if exp then
+      g.setColor(0.2, 0.2, 0.2, 1)
+      g.rectangle("fill", x + 4, y + 34, w - 8, 3)
+      g.setColor(0.30, 0.55, 0.95, 1)
+      g.rectangle("fill", x + 5, y + 35, math.floor((w - 10) * math.max(0, math.min(1, exp)) + 0.5), 1)
+    end
+  end
+  g.setColor(1, 1, 1, 1)
+end
+
+local function drawGen3Pic(g, seat, cx, bottom, flip)
+  if not (seat and seat.sprite) or seat.hidden then return end
+  local ok, w, h = pcall(seat.sprite.getDimensions, seat.sprite)
+  if not ok then return end
+  g.setColor(1, 1, 1, 1)
+  pcall(g.draw, seat.sprite, math.floor(cx - w / 2), bottom - h)
+end
+
+function M:drawGen3Plain(model)
+  local g = love and love.graphics
+  if not g then return end
+  local Font = Gen3Ui.Font
+  -- The field: a sky over a ground line, the two platforms, the weather tint.
+  g.setColor(0.86, 0.93, 0.99, 1)
+  g.rectangle("fill", 0, 0, GEN3_W, 112)
+  g.setColor(0.72, 0.86, 0.58, 1)
+  g.rectangle("fill", 0, 64, GEN3_W, 48)
+  if g.ellipse then
+    g.setColor(0.60, 0.76, 0.46, 1)
+    g.ellipse("fill", 176, 70, 44, 9)
+    g.ellipse("fill", 72, 108, 52, 10)
+  end
+  local tint = ({ RAIN = { 0.3, 0.4, 0.8, 0.18 }, SUN = { 1.0, 0.8, 0.3, 0.18 },
+                  SAND = { 0.8, 0.65, 0.35, 0.22 }, HAIL = { 0.85, 0.9, 1.0, 0.25 } })[model.weather or ""]
+  if tint then
+    g.setColor(tint[1], tint[2], tint[3], tint[4])
+    g.rectangle("fill", 0, 0, GEN3_W, 112)
+  end
+  g.setColor(1, 1, 1, 1)
+  drawGen3Pic(g, model.foe, 176, 72)
+  drawGen3Pic(g, model.ally, 72, 112)
+  if model.evolveFront then
+    local ok, w, h = pcall(model.evolveFront.getDimensions, model.evolveFront)
+    if ok then
+      g.setColor(1, 1, 1, 1)
+      pcall(g.draw, model.evolveFront, math.floor((GEN3_W - w) / 2), math.floor((112 - h) / 2))
+    end
+  end
+  local flash = tonumber(model.evolveFlash) or 0
+  if flash > 0 then
+    g.setColor(1, 1, 1, math.min(1, flash))
+    g.rectangle("fill", 0, 0, GEN3_W, 112)
+  end
+  if model.foe then drawGen3Plate(g, Font, model.foe, 8, 8, 110, false) end
+  if model.ally then drawGen3Plate(g, Font, model.ally, 124, 70, 110, true) end
+
+  -- The bottom: the message box, or a menu.
+  if model.list then
+    local list = model.list
+    Gen3Ui.frame(2, 2, 26, 11)
+    Font.draw(list.title or "", 16, 16, { color = "BLUE" })
+    local rows, cursor = list.rows or {}, math.max(1, list.cursor or 1)
+    local first = math.max(1, math.min(cursor - 2, #rows - 4))
+    for i = 0, 4 do
+      local row = rows[first + i]
+      if row then
+        local y = 32 + i * 14
+        Font.draw(Font.fit(tostring(row.label or "?"), 150), 24, y,
+          { color = row.dim and "MUTED" or nil })
+        if row.right then Font.drawRight(tostring(row.right), 220, y) end
+        if first + i == cursor then Gen3Ui.cursor(14, y) end
+      end
+    end
+    Gen3Ui.dialogueFrame()
+    Font.draw("A: choose  B: back", 16, 121)
+    return
+  end
+  if model.moves then
+    Gen3Ui.frame(2, 15, 17, 4)
+    local cursor = math.max(1, model.cursor or 1)
+    for i, row in ipairs(model.moves) do
+      local col, line = (i - 1) % 2, math.floor((i - 1) / 2)
+      local x, y = 24 + col * 72, 121 + line * 16
+      Font.draw(Font.fit(row.label or "-", 62), x, y)
+      if i == cursor then Gen3Ui.cursor(x - 9, y) end
+    end
+    Gen3Ui.frame(21, 15, 7, 4)
+    local pick = model.moves[cursor]
+    if pick then
+      if pick.pp and pick.maxPp then
+        Font.draw(("PP %d/%d"):format(pick.pp, pick.maxPp), 172, 121)
+      end
+      local typeName = tonumber(pick.type) and Gen3.typeName(pick.type) or pick.type
+      Font.draw("TYPE/" .. Font.fit(tostring(typeName or "?"), 26), 172, 137)
+    end
+    return
+  end
+  if model.commands then
+    Gen3Ui.frame(2, 15, 12, 4)
+    local l1, l2 = tostring(model.prompt or ""):match("^([^\n]*)\n?(.*)$")
+    Font.draw(l1 or "", 16, 121, { color = "WHITE" })
+    Font.draw(l2 or "", 16, 137, { color = "WHITE" })
+    Gen3Ui.frame(16, 15, 12, 4)
+    for i, label in ipairs(model.commands) do
+      local col, line = (i - 1) % 2, math.floor((i - 1) / 2)
+      local x, y = 136 + col * 50, 121 + line * 16
+      Font.draw(label, x, y)
+      if i == (model.commandIndex or 1) then Gen3Ui.cursor(x - 9, y) end
+    end
+    return
+  end
+  Gen3Ui.dialogueFrame()
+  local text = tostring(model.message or "")
+  local lines = Font.wrap(text:gsub("\n", " "), 208)
+  for i = 1, math.min(2, #lines) do
+    Font.draw(lines[i], 16, 121 + (i - 1) * 16, { color = model.hold and "MUTED" or nil })
+  end
 end
 
 function M:draw()

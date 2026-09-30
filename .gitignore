@@ -17,6 +17,7 @@
 
 # e2e scratch output (the Gen 1 sibling predates this and is tracked)
 tmp/e2e-battlefield-gen2/
+tmp/e2e-battlefield-gen3/
 tmp/e2e-solo-battle/
 # ROM-composited frames from screenshot drivers. lint does not catch a
 # whole frame (same rule as docs/screenshots/ in .modkitignore).
