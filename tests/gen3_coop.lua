@@ -736,6 +736,18 @@ do
   eq(screen:needsTarget(battler.curMoves[3]), false, "SWORDS DANCE (USER) is aimed at nobody")
   eq(screen:drawsWidescreen(), screen:usesBattlefield(), "Gen 3 paints the arena in window space")
   eq(CoopBattle.allyPicScale(GAME), 1, "a 64x64 back is not doubled")
+
+  -- The arena callout names the move the way the cart does: Gen 3's anim
+  -- token is the sheet's move id, which data.moves does not key, so the live
+  -- run shouted "TAIL_WHIP!" over the partner.
+  check(screen:usesBattlefield(), "the Gen 3 co-op screen uses the arena (callout test below runs)")
+  if screen:usesBattlefield() then
+    local token = battler.curMoves[3].id
+    screen:splitCalloutBeat({ anim = token, from = 1 })
+    local bubble = screen.battlefieldBubbles and screen.battlefieldBubbles[1]
+    eq(bubble and bubble.moveName, "SWORDS DANCE",
+       "the callout shouts the move's name, not its token (" .. tostring(token) .. ")")
+  end
 end
 
 

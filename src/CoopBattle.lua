@@ -6612,10 +6612,22 @@ function M:splitCalloutBeat(row)
   if row.calledOut then return false end
 
   local moveName = row.anim
-  local def = self.game and self.game.data and self.game.data.moves
-    and self.game.data.moves[row.anim]
-  if def and type(def.name) == "string" and def.name ~= "" then
-    moveName = def.name
+  if Gen3.active() then
+    -- Gen 3's anim token is the sheet's move id (TAIL_WHIP), not a
+    -- data.moves key: the name comes from the move row, as MediatedBattle's
+    -- moveLabel reads it, else the token spelled out -- never the raw id.
+    local mrow = type(row.anim) == "string" and Sheet3.rowByToken(row.anim) or nil
+    if mrow and type(mrow.name) == "string" and mrow.name ~= "" then
+      moveName = mrow.name
+    elseif type(row.anim) == "string" then
+      moveName = (row.anim:gsub("_", " "))
+    end
+  else
+    local def = self.game and self.game.data and self.game.data.moves
+      and self.game.data.moves[row.anim]
+    if def and type(def.name) == "string" and def.name ~= "" then
+      moveName = def.name
+    end
   end
   -- Raised first, and whether anything was shouted at all is the gate: a seat
   -- with no human to hang a bubble on (a coop_wild foe) gets no shout, and a
