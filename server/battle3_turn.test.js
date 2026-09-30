@@ -106,6 +106,7 @@ function outcomeOf(out) {
   if (out.losers) o.losers = out.losers;
   if (out.catcher) o.catcher = out.catcher;
   if (out.caught) o.caughtSpecies = out.caught.species;
+  if (out.payDay) o.payDay = out.payDay;
   return o;
 }
 

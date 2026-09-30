@@ -42,7 +42,7 @@ battle:autoPick(playerId)                  -- true when a choice was filed (NPC 
 battle:tick(nowSeconds)                    -- true when something happened
 battle:drainEvents()                       -- { event, ... } since the last drain
 battle:disconnect(playerId) / battle:reconnect(playerId)
-battle:outcome()                           -- nil | { battle, outcome, winners, losers, reason, caught?, catcher? }
+battle:outcome()                           -- nil | { battle, outcome, winners, losers, reason, caught?, catcher?, payDay? }
 battle:snapshot()                          -- tests / logs only (same shape as BattleSim2 + field digest)
 ```
 
@@ -219,9 +219,11 @@ Amounts are the public in-battle amounts (hand-authored, as in BattleSim2).
 | escape (wild) | 80 Poké Doll, 81 Fluffy Tail |
 | field | 350 Poké Flute (FRLG key item: wakes every sleeper, never consumed) |
 
-Item turn order and spending follow BattleSim2 (spent after the announce, win or
-fail; balls resolve in speed order after other items). Poké Flute (350) is never
-spent (`noConsume`). Inside the sim `fighter.bag` is a map keyed by the **numeric**
+Items are spent after the announce, win or fail (BattleSim2). Non-ball items run
+with the switches, in battler order (§6); balls resolve in speed order after
+every other bag action (BattleSim2's policy, §9.1). Poké Flute (350) and the
+Blue / Yellow / Red Flutes (39–41) are never spent (`noConsume`; pret
+`party_menu.c` `IsItemFlute`). Inside the sim `fighter.bag` is a map keyed by the **numeric**
 id (`{ [13] = 2 }`); `create` accepts the list form or a map keyed by numbers or
 numeric strings. A hub that proves / spends bags by string key converts with
 `tostring` / `tonumber`, and its item-effect lookup is `Items.bagEffect(id)`
@@ -315,6 +317,14 @@ stat `n % 5` in the order Atk, Def, Spe, SpA, SpD (equal ⇒ neutral); the berry
 flavour of hold effect `10+f` maps f = 0 Spicy→Atk, 1 Dry→SpA, 2 Sweet→Spe,
 3 Bitter→SpD, 4 Sour→Def. A nature that *lowers* that stat dislikes it (confuses).
 
+Held items act at the cart's points (pret `ItemBattleEffects`): the status cures
+(Cheri … Lum, Persim), White Herb and Mental Herb act at every move end
+(`ITEMEFFECT_MOVE_END`, every battler) and on the post-action / `ENDTURN_ITEMS2`
+passes; the HP berries (Oran, Sitrus), Leppa, Leftovers, the confusion berries,
+the pinch stat berries, Lansat and Starf test `!moveTurn` and so act **only at the
+end of the turn** (`ENDTURN_ITEMS1`) -- a Sitrus holder knocked under half eats it
+after the turn's moves, not right after the blow.
+
 Lum Berry (hold effect 9) says **one** sentence however much it cures (pret
 `BattleScript_BerryCureChosenStatusRet`): "X's ITEM normalized its status!" when the
 post-action / end-of-turn check (`ITEMEFFECT_NORMAL`) cures a status and confusion
@@ -349,24 +359,36 @@ where `turn` counts completed turns (0 during the first turn, pret
   Pressure counting and the "moved last" checks apply. `BOTH` hits every standing
   foe; `FOES_AND_ALLY` hits every other standing battler; "partner" means the
   nearest living ally seat.
-* **Turn order** (pret `SetActionsAndBattlersTurnOrder`): runs, then switches (field
-  order, each preceded by any foe Pursuit aimed at it), then bag items (field
-  order, balls after in speed order), then moves by priority bracket then speed
-  (Quick Claw puts its holder first in its bracket). **Speed ties** break on one
-  `roll(0,255)` per tied group, `>= 128` reverses the group (BattleSim2's policy,
-  priority brackets added).
+* **Turn order** (pret `SetActionsAndBattlersTurnOrder`, `battle_main.c:3532`): runs,
+  then the switches and the bag items **together, in battler order** (a1, b1, a2, …;
+  each switch preceded by any foe Pursuit aimed at it) -- a1's Potion comes before
+  b1's switch -- then the balls (after every other bag action, fastest thrower first:
+  BattleSim2's policy, §9.1), then moves by priority bracket then speed (Quick Claw
+  puts its holder first in its bracket). **Speed ties** break on one `roll(0,255)`
+  per tied group, `>= 128` reverses the group (BattleSim2's policy, priority
+  brackets added).
 * **End of turn** runs Gen 3's order (field timers, wish, weather; then per battler
-  ingrain … yawn; then fainted-actions, Future Sight, Perish Song) over the battlers
-  re-sorted by this turn's move priority and speed with the same tie policy — not
-  BattleSim2's field order. This is the cart's `ENDTURN_ORDER`.
+  ingrain, abilities, `ENDTURN_ITEMS1` (the `!moveTurn` pass: HP / PP / confusion /
+  pinch berries, Leftovers), leech seed … taunt, yawn, `ENDTURN_ITEMS2` (the
+  `moveTurn` pass: status cures -- a Yawn sleep is cured by a Chesto in the same end
+  of turn); then the fainted-actions step (Intimidate / Trace / held items (moveTurn)
+  / Forecast, repeated until nothing acts), Future Sight, Perish Song) over the
+  battlers re-sorted by this turn's move priority and speed with the same tie policy
+  — not BattleSim2's field order. This is the cart's `ENDTURN_ORDER`. The same
+  fainted-actions step runs after every action (`battle_util.c:1208`), with no cap
+  on its passes (a 3v3 field's six Intimidates all resolve at once).
 * **Future Sight / Doom Desire** lands from its user's *seat* (pret stores a
   battler position, `futureSightAttacker`). The damage was fixed at use from the
   user's stats and level; at landing the attacker (its accuracy stage, Compound
   Eyes, who hit whom) is the seat's current occupant, or — when the user fainted
   and the seat is still empty — the fainted user itself, and the hit still lands.
-  The seat is empty either until the `replace` phase, which the sim runs after the
-  end of turn (the cart sends the replacement in first), or for good when the bench
-  is empty.
+  The user's seat is empty either until the `replace` phase, which the sim runs
+  after the end of turn, or for good when the bench is empty. The **target**
+  seat follows the cart too: the cart sends replacements in *before* the Future
+  Sight step (`HandleFaintedMonActions` precedes `HandleWishPerishSongOnTurnEnd`),
+  so a hit due on a seat emptied this turn waits (turns 0) and lands on the
+  newcomer right after the replace phase's switch-ins; a seat that will never be
+  refilled drops it (pret skips an absent battler for good).
 * **Focus Punch** "is tightening its focus" lines are said right after ordering,
   before any switch (pret `CheckFocusPunch_ClearVarsBeforeTurnStarts`).
 * **Running.** 1v1 / coop_pvp: RUN is a concession (always allowed). coop_npc: the
@@ -389,8 +411,15 @@ where `turn` counts completed turns (0 during the first turn, pret
 * **Timeout / NPC** auto-pick: BattleSim2's heuristic (bag cures/heals, super-effective
   damage, status/setup, SE bench switch) using Gen 3 effect ids, item ids and the
   ordered chart.
-* **Link rules**: no badge boosts, no disobedience, no Pay Day payout (the sentence
-  is said), no EXP in 1v1 / coop_pvp. `exp` events are facts (BattleSim2).
+* **Link rules**: no badge boosts, no disobedience, no EXP and no Pay Day coins in
+  1v1 / coop_pvp. `exp` events are facts (BattleSim2).
+* **Pay Day** adds `level × 5` to its side's tally (pret `gPaydayMoney`, a u16 that
+  saturates at 65535) and always says "Coins scattered everywhere!". Only a battle
+  side a **wins by KO** in `wild` / `coop_wild` / `coop_npc` pays (pret runs
+  `Cmd_givepaydaymoney` on `B_OUTCOME_WON` only): `outcome().payDay` is side a's
+  total, absent when 0 or in a PvP mode. The Amulet Coin doubling
+  (`moneyMultiplier`) and the wallet are the client's; `snapshot().payDay` shows
+  both sides' tallies for tests / logs.
 * **King's Rock** keeps the cart quirk: the flinch chance reads the hold-effect
   parameter of *battler 0* (field slot 0's active mon), pret
   `ItemBattleEffects(ITEMEFFECT_KINGSROCK_SHELLBELL, 0, …)`.
@@ -399,16 +428,65 @@ where `turn` counts completed turns (0 during the first turn, pret
   even through Rock Head.
 * **Pursuit** on a switching seat: the foe seats are asked in reverse field order;
   each Pursuit aimed at the leaving seat strikes first, doubled, and counts as that
-  seat's action for the turn.
+  seat's action for the turn. Like the cart's `BattleScript_PursuitDmgOnSwitchOut`
+  it has no `attackcanceler` and no `accuracycheck`: sleep / freeze / Truant were
+  checked when it was picked to strike, and paralysis, confusion, love, flinching,
+  Soundproof, absorbing abilities and the accuracy roll are not.
 * **Baton Pass** takes the `pass` party index from the fight choice (§1.2) instead
-  of opening a menu mid-move. Passed on (engine `performSwitch`, pret
-  `battle_main.c:2350`): stat stages, confusion, Focus Energy, Substitute, Leech
-  Seed, Ingrain, the Perish count, Curse, a Mean Look trap and Lock-On. Everything
-  else (Mud Sport / Water Sport included) ends with the user, as in the engine.
-  The switch-in then runs Spikes and its abilities.
+  of opening a menu mid-move. Passed on (pret `SwitchInClearSetData`,
+  `battle_main.c:2329`): stat stages, confusion, Focus Energy, Substitute, Leech
+  Seed, Ingrain, the Perish count, Curse, Mud Sport / Water Sport, being trapped
+  (Mean Look) and being Locked On. What the **passer holds on others** stays too,
+  because the cart stores it by battler position: a foe it trapped stays trapped
+  (its switch is refused), and a foe it Locked On to stays locked for the newcomer,
+  re-armed for two turns (`STATUS3_ALWAYS_HITS_TURN(2)`). Everything else ends with
+  the user. The switch-in then runs Spikes and its abilities.
 * **Roar / Whirlwind / Teleport** out of a wild fight end it for everyone with
   reason `run` (the cart ends a wild battle there); in a trainer / PvP fight Roar
   drags in a random living bench mon.
+* **Called moves** (Metronome, Sleep Talk, Mirror Move, Assist, Nature Power) nest
+  at most **3** deep (`Move.MAX_CALL_DEPTH`; the deepest cart chain is Metronome →
+  Assist → Nature Power → the terrain move); a deeper call says "But it failed!"
+  -- a sheet or pool row that calls itself can no longer recurse. A called row is
+  resolved from the caller's own move list, then the ruleset pool (pret reads
+  `gBattleMoves`), then the caller's own seat's party sheets -- never another
+  fighter's sheet. Sleep Talk and Assist refuse the four calling moves by number
+  (pret `IsInvalidForSleepTalkOrAssist`) **and by effect** (a calling effect under a
+  borrowed number); Sleep Talk also applies `CheckMoveLimitations` except PP
+  (Disable, Torment, Taunt, Imprison, Encore, Choice Band), and the called move
+  runs at the picked slot (`gCurrMovePos`: Mimic / Sketch write there) spending no
+  PP of its own.
+* **Grudge** empties the slot the attacker *chose* (`chosenMovePositions`: Metronome's
+  slot when Metronome called the knockout), only for a foe, never for Struggle.
+* **Follow Me** takes every `MOVE_TARGET_SELECTED` move and a *called* move's random
+  target (`GetMoveTarget`); a chosen random-target move (Thrash, Uproar) is not
+  pulled.
+* **Soundproof** is asked per target (`attackcanceler` runs for each target pass):
+  one Soundproof foe blocks a spread sound move for itself only, and a called
+  sound move is blocked too.
+* **Rage** ends at turn start unless the seat chose Rage (a bag / switch / run
+  choice is `MOVE_NONE`). **Fury Cutter** is not reset by choosing another move --
+  pret has no such check in Gen 3 -- but by a miss, a canceller stop
+  (`CancelMultiTurnMoves`), the bag or a failed run (`ClearFuryCutterDestinyBondGrudge`,
+  which also clears Destiny Bond and Grudge) or a switch.
+* **Multi-hit, Triple Kick and Beat Up** run the move end after **every strike**
+  (`moveendto MOVEEND_NEXT_TARGET`): Rage builds, contact abilities (Rough Skin,
+  Static, …) proc, the item checks run and King's Rock / Shell Bell act per strike;
+  the single secondary still comes at the end. Rage builds only on a hit that
+  reached the mon (`TARGET_TURN_DAMAGED`).
+* **A hit on the Substitute** leaves the doll's `STATUS2_SUBSTITUTE` bit set until
+  that strike's move end even when the doll just broke, so that strike's secondary
+  (a 100% Body Slam paralysis) and King's Rock are refused. A 100% *stat-drop*
+  secondary is not `MOVE_EFFECT_CERTAIN` on the cart (`ChangeStatBuffs` never gets
+  it): Clear Body / White Smoke / Keen Eye / Hyper Cutter / Mist stop it.
+* **Hidden Power / Weather Ball** have their in-battle type (sheet `hiddenPower.type`,
+  the weather's) *before* `attackcanceler`, so Volt / Water Absorb and Flash Fire,
+  Levitate and Hustle's accuracy read it. **OHKO** moves run `typecalc`, so a move
+  that is not super effective misses **Wonder Guard**.
+* **Recycle** brings back the last item consumed at the user's **battler position**
+  (pret `usedHeldItems[battler]`): the next mon to stand there may recycle it, the
+  partner in another seat may not. Thief, Knock Off and Trick lift the Choice Band
+  lock of whoever lost (or swapped) the band.
 * Nothing raises: bad input is `nil, reason` from `create` and `false` from
   `submitChoice`.
 
@@ -434,7 +512,8 @@ stat switch item run turn over wait reconnect chose unchose moves exp team`);
 | `send` / `switch` | as BattleSim2 | a switch-in's ability / Spikes / White Herb follow as their own events |
 | `item` | `slot`, `side`, `text` = the numeric item id as a string | bag use (no vitamins in Gen 3 battles) |
 | `moves` | `slot`, `side`, `moves` (Gen 3 move rows: `id name num pp maxPp power accuracy type effect chance target priority flags`), `mon` | `mon` present on a PP change of the real party list, absent on a Transform / Mimic overlay |
-| `faint`, `turn`, `over`, `wait`, `reconnect`, `chose`, `unchose`, `run`, `exp`, `team`, `msg` | unchanged | `over` reasons: `ko run catch disconnect timeout` (Roar/Whirlwind and Teleport out of a wild fight end it with `run`) |
+| `faint`, `turn`, `over`, `wait`, `reconnect`, `chose`, `unchose`, `run`, `team`, `msg` | unchanged | `over` reasons: `ko run catch disconnect timeout` (Roar/Whirlwind and Teleport out of a wild fight end it with `run`) |
+| `exp` | `slot`, `species`, `speciesId`, `level`, `participants`, `mon` | as BattleSim2: one per living participant (`mon` = its party index, `participants` = the share count). **New: the holders-only fact** -- `participants` **0** and **no `mon`** -- goes to a seat that fought the fallen foe but has no participant standing (all fainted, e.g. after Explosion), when it still has a living mon: pret `Cmd_getexp` pays the living Exp. Share holders regardless (`viaSentIn` 0 is a `SAFE_DIV`). The client prices it as a knockout with an **empty sentIn set**: `Exp3.split(calculated, 0, viaExpShare)` pays each living holder `floor(floor(calculated / 2) / viaExpShare)` (min 1) and nobody else. |
 
 ### 7.2 New kinds
 
@@ -481,7 +560,9 @@ in this order, and nowhere else; the list in the header of
    group tied on both priority and speed.
 3. **Runs** (wild modes): `roll(0,255)` for a runner slower than the wild mon (no
    draw for Smoke Ball, Run Away or a runner at least as fast).
-4. **Switches**: a foe Pursuit aimed at the leaving seat draws like any move (§6).
+4. **Switches** (interleaved in battler order with the non-ball bag items, which
+   draw nothing): a foe Pursuit aimed at the leaving seat draws like any move
+   minus the canceller's and the accuracy draws (§6).
 5. **Bag**: balls (after every other item, fastest thrower first) draw up to four
    `roll(0,65535)` — none for a Master Ball or odds > 254.
 6. **Per move**, in execution order, each only when reached:
@@ -504,13 +585,18 @@ in this order, and nowhere else; the list in the header of
    `roll(1,n)`, Roar's level check `roll(0,255)` and pick `roll(1,n)`, OHKO
    `roll(1,100)`); move end: contact abilities (Effect Spore `roll(0,9)` then
    `roll(0,3)` until non-zero, Static / Flame Body / Poison Point / Cute Charm
-   `roll(0,2)`), King's Rock `roll(0,99)`; after the action, held-item and
-   Trace draws as in 1.
+   `roll(0,2)`), King's Rock `roll(0,99)` -- after **every strike** of a
+   multi-hit, Triple Kick or Beat Up, plus King's Rock once more at a
+   multi-hit's close; after the action, Trace draws as in 1 (the post-action
+   item pass is the cart's `moveTurn` pass: no berry there draws). Sleep Talk's
+   `roll(1,n)` is over the slots that survive its exclusions (§6).
 7. **End of turn**: one `roll(0,255)` per tied group of the re-sort; then, in
    phase order, Shed Skin `roll(0,2)`, confusion-berry turns, Starf-type berry
    `roll(0,4)` until a raisable stat, Thrash fatigue confusion turns
    `roll(0,3)`, Yawn's sleep turns `roll(0,3)`, Future Sight accuracy
-   `roll(1,100)` then `roll(85,100)` [+ Focus Band `roll(0,99)`].
+   `roll(1,100)` then `roll(85,100)` [+ Focus Band `roll(0,99)`] -- a hit due on
+   a seat emptied this turn draws them in the replace phase, after its
+   switch-ins (§6).
 8. Residuals, switches, exp, items other than balls, and the clock draw nothing
    else. A battle replays from its seed plus the choice log.
 
@@ -532,7 +618,58 @@ The Node twin follows the sim, not the engine.
 | a cancelled move | keeps `lastResultingMove` | clears it too (Protect's streak resets) |
 | catch odds | float order, float square roots | integer order `floor(rate*mult/10)` first, integer `Sqrt` (§5.5) |
 | crit items | held item id | hold effect (identical on every cart item; the sheet carries the hold effect) |
-| disobedience, badge boosts, Pay Day money, Oak / Pokédude / ghost branches | present | off (link rules) |
+| disobedience, badge boosts, Oak / Pokédude / ghost branches | present | off (link rules) |
+| Pay Day money | present (the engine pays) | reported on a won wild / NPC outcome (`outcome().payDay`), none under link rules |
+
+**Corrected in RF5** (fidelity review R5; both twins, pinned by the turn fixture's
+RF5 scenarios): what the sim did before, and what it does now (pret).
+
+| topic | before | now (pret) |
+| --- | --- | --- |
+| HP / PP / confusion / pinch berries, Lansat, Starf | also fire on the post-action pass | only at the end of turn (`!moveTurn`, `ENDTURN_ITEMS1`); `ENDTURN_ITEMS2` after Yawn |
+| Baton Pass | drops the passer's traps and Lock-Ons; Mud / Water Sport end | the passer's traps and Lock-Ons stay (re-armed 2 turns); Mud / Water Sport pass (`SwitchInClearSetData`) |
+| multi-hit / Triple Kick / Beat Up move end | once, after the last strike | after every strike (`moveendto MOVEEND_NEXT_TARGET`) |
+| a strike that breaks a Substitute | its secondary applies | refused (the doll's bit lasts to the strike's move end) |
+| 100% stat-drop secondaries | `MOVE_EFFECT_CERTAIN`, pierce Clear Body / Mist | not certain (`ChangeStatBuffs` gets `affectsUser` only) |
+| Hidden Power / Weather Ball vs absorbers, Hustle | the row's type | the in-battle type (`hiddenpowercalc` / `setweatherballtype` precede `attackcanceler`) |
+| OHKO vs Wonder Guard | ignored | `typecalc` applies it |
+| Pursuit on a switching seat | canceller and accuracy run | neither (`BattleScript_PursuitDmgOnSwitchOut`) |
+| Grudge | the called move's slot; either side | the chosen slot (`chosenMovePositions`); a foe only; not Struggle |
+| Follow Me | pulls random-target moves | only `SELECTED` (and a called move's random target) |
+| Soundproof vs a spread / called sound move | first target only; called moves unchecked | every target pass (`attackcanceler`) |
+| Rage vs a bag / switch / run choice | kept | ends (`gChosenMoveByBattler` `MOVE_NONE`) |
+| Fury Cutter, Destiny Bond, Grudge on a bag action / failed run | kept | cleared (`ClearFuryCutterDestinyBondGrudge`) |
+| switches vs bag items | switches first | together, in battler order (`SetActionsAndBattlersTurnOrder`) |
+| Future Sight due on a seat emptied this turn | dropped | lands on the replacement (the cart replaces first) |
+| Intimidate / Trace passes | capped at 4 | until nothing acts |
+| Conversion 2 | stops at the Foresight marker | every row but the marker (Normal / Fighting → Ghost reachable) |
+| Heal Bell | cures a benched Soundproof mon | not (the party member's ability is read) |
+| Recycle | per side | per battler position (`usedHeldItems[battler]`) |
+| Thief / Knock Off / Trick | keep the Choice Band lock | lift it (`choicedMove` cleared) |
+| Blue / Yellow / Red Flute | consumed | never spent (`IsItemFlute`) |
+| Exp. Share with no participant standing | nothing | the holders are paid (holders-only `exp` fact, §7) |
+
+### 9.1 Remaining differences from the cart (disclosed)
+
+What the sim still does differently from pret, and why:
+
+| topic | cart (pret) | BattleSim3 | why |
+| --- | --- | --- | --- |
+| balls vs other bag actions | one bag action each, in battler order | balls after every other bag action, fastest thrower first | BattleSim2's mediated-fight policy for co-op throws (several humans may throw at one wild mon) |
+| post-action held-item pass | reads **battler 0** only (`ItemBattleEffects(ITEMEFFECT_NORMAL, 0, TRUE)`, `battle_util.c:1211`) | every standing battler, first that acts | the engine port's reading; on that pass only status cures and White / Mental Herb act, and `ITEMEFFECT_MOVE_END` already runs them for every battler at every move end, so a difference needs a condition set outside any move |
+| Future Sight vs Perish Song with a replacement pending | replacement, then Future Sight, then Perish Song | Perish Song at the end of turn, then the replace phase, then the waiting hit | the sim's replace phase follows the end of turn; only the order of the lines differs |
+| a Future Sight seat that is never refilled | the counter stays forever (absent battler) | the token is dropped | equivalent: nobody ever stands there again |
+| Magnet Pull in doubles | FRLG: foes only; Emerald (`ABILITYEFFECT_CHECK_FIELD_EXCEPT_BATTLER` with no side check): the holder's Steel partner is trapped too | foes only, for every fight | the sim carries no cart version per battle (a fight may mix FireRed and Emerald players) |
+| Roar / Whirlwind level check | applied in trainer fights too (`TryDoForceSwitchOut` runs in both branches of `Cmd_forcerandomswitch`, both carts) | the same | kept on purpose: it is the cart's rule, not a wild-only one |
+| Fury Cutter after another move | not reset (Gen 3 has no `TryClearRageAndFuryCutter`; `TryClearRageStatuses` clears Rage only) | the same | kept on purpose |
+| called-move depth | unbounded, but no cart row set nests deeper than 3 | "But it failed!" past 3 | robustness: crafted rows must not recurse |
+| where a called row comes from | `gBattleMoves` | the caller's own list, the pool, the caller's own party | the hub holds no move table; never another fighter's sheet |
+| Sleep Talk / Assist exclusions | by move number | by number and by calling effect | identical for cart rows; refuses crafted rows |
+| Conversion 2's draw | `Random() & 0x7F` rejection sampling (≤ 1000 tries), then a fixed scan | one `roll(1,n)` over the matching rows | the same set of results, a single draw |
+| Pursuit's move end on a switching seat | `moveendfromto ON_DAMAGE_ABILITIES, CHOICE_MOVE` only (contact abilities, immunity cures, attacker Synchronize) | the whole move end | not reproduced: the sim also runs defrost, target Synchronize, the item checks, King's Rock / Shell Bell and the last-move bookkeeping (a Shell Bell Pursuer heals, and its `lastMoveNum` becomes Pursuit, where the cart's do not) |
+| Hidden Power after Transform | the target's IVs (Transform copies the battle struct) | the user's own sheet `hiddenPower` | the sheet carries no IVs for the hub to recompute from |
+| King's Rock flinch chance | battler 0's hold-effect parameter | the same (§6) | kept as the quirk it is |
+| Pay Day's Amulet Coin doubling, the wallet | `moneyMultiplier`, `AddMoney` | reported only (`outcome().payDay`) | the client owns the save |
 
 **Engine cross-check** (run locally against the engine checkout with an imported
 FireRed cache; nothing it reads is committed): `Damage.calc` identical on all 81
@@ -555,7 +692,8 @@ battlers; crit stages 8/8; accuracy 13/13.
   running or Teleporting.
 * **Hold effects**: all 66. With no battle effect (never an event): EXP_SHARE,
   LUCKY_EGG, FRIENDSHIP_UP (exp / friendship are the client's, from the `exp`
-  facts), DOUBLE_PRIZE (no payout under link rules), REPEL (Cleanse Tag),
+  facts), DOUBLE_PRIZE (the Amulet Coin doubling of `outcome().payDay` and of
+  trainer prize money is the client's), REPEL (Cleanse Tag),
   PREVENT_EVOLVE, DRAGON_SCALE, UP_GRADE. Mail (item ids 121..132) has no hold
   effect; Thief / Covet and Trick refuse it and the Enigma Berry (175).
 * **Bag**: §4 in full.

@@ -561,7 +561,12 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     if (int(B.sideState(effBattler.side).safeguardTurns, 0) > 0) return false;
   }
   if (int(effBattler.mon.hp, 0) <= 0 && eff !== 'PAYDAY' && eff !== 'STEAL_ITEM') return false;
-  if (!truthy(affectsUser) && int(effBattler.substituteHP, 0) > 0) return false;
+  // STATUS2_SUBSTITUTE: the doll is up, or this strike hit it (the bit outlives
+  // a doll that just broke until MOVEEND_SUBSTITUTE -- Move.js C.subStrike).
+  if (!truthy(affectsUser) && (int(effBattler.substituteHP, 0) > 0
+      || (truthy(C.subStrike) && effBattler === C.target))) {
+    return false;
+  }
 
   if (own(EFFECT_TO_STATUS, eff)) {
     return applyStatusEffect(C, eff, primary, certain, effBattler);
@@ -597,8 +602,18 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     return true;
   }
   if (eff === 'PAYDAY') {
-    // battle_script_commands.c:2455: the coins are a link-free player bonus; a
-    // mediated fight says the line and pays nothing (sheet doc §6).
+    // pokefirered/src/battle_script_commands.c:2455: level x 5 into
+    // gPaydayMoney (a u16 that saturates) -- counted for either side here; who
+    // is paid, and the Amulet Coin doubling, is the outcome's reader's rule
+    // (Turn.js `_checkOver`, sheet doc §6).
+    const pay = B.payDay;
+    if (truthy(pay)) {
+      const { side } = user;
+      const before = int(pay[side], 0);
+      let after = before + int(user.mon.level, 1) * 5;
+      if (after > 0xFFFF) after = 0xFFFF;
+      pay[side] = after;
+    }
     B.say('Coins scattered everywhere!');
     return true;
   }
@@ -629,9 +644,12 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     return true;
   }
   if (own(STAT_EFFECTS, eff)) {
+    // pokefirered/src/battle_script_commands.c:2544: ChangeStatBuffs gets
+    // `affectsUser` alone, never MOVE_EFFECT_CERTAIN -- a 100% Icy Wind still
+    // stops at Clear Body / White Smoke / Keen Eye / Hyper Cutter / Mist.
     const spec = STAT_EFFECTS[eff];
     const res = M.changeStat(B, effBattler, spec[0], spec[1], {
-      user: affectsUser, certain, allowPtr: false,
+      user: affectsUser, certain: false, allowPtr: false,
     });
     return res === 'worked';
   }
@@ -662,6 +680,8 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     const lbl = B.itemLabel(target);
     Items.give(user, row);
     Items.give(target, null);
+    // :2668: the robbed battler's Choice Band lock goes with the band
+    delete target.choicedMove;
     Items.heldEvent(B, user, tItem, lbl);
     Items.heldEvent(B, target, tItem, lbl);
     B.say(nm(B, user) + ' stole ' + nm(B, target) + "'s " + lbl + '!');
@@ -745,6 +765,7 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     const lbl = B.itemLabel(effBattler);
     effBattler.mon.knockedOff = tItem;
     Items.give(effBattler, null);
+    delete effBattler.choicedMove; // :2757
     Items.heldEvent(B, effBattler, tItem, lbl);
     B.say(nm(B, user) + ' knocked off ' + nm(B, effBattler) + "'s " + lbl + '!');
     return true;
@@ -1335,11 +1356,14 @@ H[E.HEAL_BELL] = function effectHealBell(C) {
       delete ally.nightmare;
     }
   }
-  // The benched party: every mon of the user's seat that is not on the field.
+  // The benched party: every mon of the user's seat that is not on the field,
+  // except (Heal Bell only) a Soundproof one -- pokefirered/src/battle_script_
+  // commands.c:7995 reads each party member's species ability.
   const { mons } = user.fighter;
   for (let i = 1; i <= mons.length; i += 1) {
     const mon = mons[i - 1];
-    if (i !== user.fighter.active && mon.hp > 0 && truthy(Status.normalise(mon.status))) {
+    if (i !== user.fighter.active && mon.hp > 0 && truthy(Status.normalise(mon.status))
+        && !(isBell && Abilities.nameOf(mon.ability) === 'SOUNDPROOF')) {
       delete mon.status;
       delete mon.sleepTurns;
     }
@@ -1949,6 +1973,10 @@ H[E.CONVERSION_2] = function effectConversion2(C) {
   if (last === 0 || lastType == null) return C.fail();
   const foe = user.lastHitBy;
   if (truthy(foe) && truthy(B.isTwoTurnNum(last)) && truthy(foe.twoTurnNum)) return C.fail();
+  // The random draw (:7717) ranges over every row of gTypeEffectiveness, the
+  // two after the Foresight marker included (Normal / Fighting -> Ghost): the
+  // marker row itself never matches (its attack type is TYPE_FORESIGHT), and
+  // the rows past it are ordinary resistances.
   const valid = [];
   const t = truthy(B.typeTable) ? B.typeTable : [];
   let i = 1;
@@ -1956,8 +1984,9 @@ H[E.CONVERSION_2] = function effectConversion2(C) {
     const a = t[i - 1];
     const d = t[i];
     const m = t[i + 1];
-    if (a === Types.FORESIGHT_SENTINEL) break;
-    if (a === lastType && m <= 5 && !isType(user, d)) valid.push(d);
+    if (a !== Types.FORESIGHT_SENTINEL && a === lastType && m <= 5 && !isType(user, d)) {
+      valid.push(d);
+    }
     i += 3;
   }
   if (valid.length === 0) return C.fail();
@@ -2140,6 +2169,9 @@ H[E.TRICK] = function effectTrick(C) {
   const tlbl = B.itemLabel(t);
   Items.give(user, trow);
   Items.give(t, urow);
+  // :8862: both Choice Band locks are lifted
+  delete user.choicedMove;
+  delete t.choicedMove;
   C.attackAnimation();
   Items.heldEvent(B, user, ti, tlbl);
   Items.heldEvent(B, t, ui, ulbl);
@@ -2149,14 +2181,14 @@ H[E.TRICK] = function effectTrick(C) {
   return undefined;
 };
 
-// pokefirered/src/battle_script_commands.c:9366
+// pokefirered/src/battle_script_commands.c:9366: the last item consumed by
+// whoever stood at this battler position (gBattleStruct->usedHeldItems is kept
+// per position, not per mon or per side -- Items.consume).
 H[E.RECYCLE] = function effectRecycle(C) {
   const { B, user } = C;
-  const side = B.sideState(user.side);
-  const used = truthy(side.usedHeldItem) ? side.usedHeldItem : user.usedHeldItem;
+  const used = Items.usedAt(B, user.slot);
   if (!truthy(used) || int(user.mon.heldItem, 0) !== 0) return C.fail();
-  delete user.usedHeldItem;
-  delete side.usedHeldItem;
+  Items.clearUsedAt(B, user.slot);
   Items.give(user, used);
   C.attackAnimation();
   const lbl = B.itemLabel(user);

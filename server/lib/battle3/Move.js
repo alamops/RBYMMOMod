@@ -439,8 +439,39 @@ Bm.copyMove = function copyMove(row) {
   return out;
 };
 
+// The row a CALLED move resolves to (Nature Power's terrain move, Mirror Move,
+// a locked move that was called): the caller's own list (overlay first), then
+// the ruleset pool (the host's decoded move table -- pret reads gBattleMoves),
+// then the caller's seat's party sheets (an Assist-called lock with no pool).
+// Never another fighter's sheet: a row somebody else uploaded under a borrowed
+// number (Swift carrying EFFECT_NATURE_POWER, a 255-power "Swift") can never
+// become the caller's move.
+Bm.calledRowByNum = function calledRowByNum(numIn, caller) {
+  const num = int(numIn, 0);
+  if (num === 0) return null;
+  if (num === MOVE.STRUGGLE) return M.STRUGGLE;
+  const scan = (list) => {
+    const l = truthy(list) ? list : [];
+    for (let i = 1; i <= l.length; i += 1) {
+      if (int(l[i - 1].num, 0) === num) return l[i - 1];
+    }
+    return null;
+  };
+  let hit = truthy(caller) ? scan(caller.moves) : null;
+  if (truthy(hit)) return hit;
+  if (truthy(this.pool) && truthy(this.pool[num])) return this.pool[num];
+  const mons = (truthy(caller) && truthy(caller.fighter) && truthy(caller.fighter.mons))
+    ? caller.fighter.mons : [];
+  for (const mon of mons) {
+    hit = scan(mon.moves);
+    if (truthy(hit)) return hit;
+  }
+  return null;
+};
+
 // A move row by number: the hint battler's list, every battler on the field,
-// every party, then the ruleset pool.
+// every party, then the ruleset pool.  Labels and look-ups only; a row that is
+// going to be USED as a called move comes from `calledRowByNum`.
 Bm.moveRowByNum = function moveRowByNum(numIn, hint) {
   const num = int(numIn, 0);
   if (num === 0) return null;
@@ -512,14 +543,16 @@ Bm.emitMovesOf = function emitMovesOf(b, real) {
 };
 
 // pokefirered/src/battle_util.c:361 CheckMoveLimitations: the slots this
-// battler may NOT select, as { [slot]: true } over 1-based slots.
-Bm.moveLimitations = function moveLimitations(b) {
+// battler may NOT select, as { [slot]: true } over 1-based slots.  `ignorePP`
+// is the ~MOVE_LIMITATION_PP mask Sleep Talk passes (battle_script_commands.c
+// :7882): every limit but an empty slot's PP.
+Bm.moveLimitations = function moveLimitations(b, ignorePP) {
   const bad = {};
   const [he] = Items.of(b);
   for (let i = 1; i <= b.moves.length; i += 1) {
     const mv = b.moves[i - 1];
     const n = int(mv.num, 0);
-    if (n === 0 || int(mv.pp, 0) <= 0) bad[i] = true;
+    if (n === 0 || (!truthy(ignorePP) && int(mv.pp, 0) <= 0)) bad[i] = true;
     if (truthy(b.disabledNum) && n === b.disabledNum) bad[i] = true;
     if (truthy(b.tormented) && n === b.lastMoveNum) bad[i] = true;
     if (int(b.tauntTurns, 0) > 0 && int(mv.power, 0) === 0) bad[i] = true;
@@ -752,8 +785,12 @@ Ctx.tryFaintTarget = function tryFaintTarget() {
     B.loseHp(user, user.mon.hp);
     B._faintBattler(user);
   }
-  if (truthy(target.grudge) && truthy(this.slot) && user.mon.hp > 0) {
-    const mv = at(user.moves, this.slot);
+  // pokefirered/src/battle_script_commands.c:2894: a foe's Grudge, not
+  // Struggle, and the PP of the slot the attacker CHOSE (chosenMovePositions:
+  // Metronome's slot when Metronome called the KO).
+  if (truthy(target.grudge) && truthy(this.chosenSlot) && user.side !== target.side && user.mon.hp > 0
+      && this.mnum !== MOVE.STRUGGLE) {
+    const mv = at(user.moves, this.chosenSlot);
     if (truthy(mv)) {
       mv.pp = 0;
       B.say(`${B.nameOf(user)}'s ${B.moveLabel(mv)} lost all its PP due to the GRUDGE!`);
@@ -789,14 +826,17 @@ function followMe(B, user) {
 
 // The battler an action lands on. `aimed` is the chosen / stored target
 // battler (or null); `random` true re-picks a SELECTED move's target at random
-// (a called or Encored move).
-Bm._pickTarget = function _pickTarget(user, row, aimed, random) {
+// (a called or Encored move); `called` marks a called move (GetMoveTarget).
+Bm._pickTarget = function _pickTarget(user, row, aimed, random, called) {
   const ttype = int(row.target, 0);
   if (ttype === T.USER) return user;
-  // pokefirered/src/battle_main.c HandleAction_UseMove: an active Follow Me takes
-  // every single-target move (even one aimed at the ally) and every random one.
+  // An active Follow Me takes every MOVE_TARGET_SELECTED move, even one aimed
+  // at the ally (pokefirered/src/battle_main.c:4027 HandleAction_UseMove), and
+  // a called move's random target too (battle_util.c:3054 GetMoveTarget's
+  // MOVE_TARGET_RANDOM arm); a chosen random-target move (Thrash, Uproar) is
+  // not pulled.
   const fm = followMe(this, user);
-  if (truthy(fm) && (ttype === T.SELECTED || ttype === T.USER_OR_SELECTED || ttype === T.RANDOM)) {
+  if (truthy(fm) && (ttype === T.SELECTED || (truthy(called) && ttype === T.RANDOM))) {
     return fm;
   }
   if (ttype === T.RANDOM) {
@@ -1024,6 +1064,30 @@ Bm._selfHit = function _selfHit(C) {
   C.tryFaintUser();
 };
 
+// The per-strike move end, defined with the move end below (forward).
+let strikeEnd = null;
+
+// pret GET_MOVE_TYPE: the type the move has in battle.  Hidden Power's
+// `hiddenpowercalc` and Weather Ball's `setweatherballtype` run BEFORE
+// attackcanceler (battle_scripts_1.s BattleScript_EffectHiddenPower /
+// BattleScript_EffectWeatherBall), so the absorbing abilities, Levitate and
+// Hustle's accuracy all read this, not the row's Normal.
+function dynamicMoveType(C) {
+  let mt = int(C.move.type, 0);
+  if (C.effect === E.HIDDEN_POWER) {
+    const hpw = C.user.mon.hiddenPower;
+    if (isTable(hpw)) mt = int(hpw.type, mt);
+  } else if (C.effect === E.WEATHER_BALL) {
+    const w = C.B.weather();
+    if (w === 'RAIN') mt = Types.ID.WATER;
+    else if (w === 'SAND') mt = Types.ID.ROCK;
+    else if (w === 'SUN') mt = Types.ID.FIRE;
+    else if (w === 'HAIL') mt = Types.ID.ICE;
+  }
+  return mt;
+}
+M.dynamicMoveType = dynamicMoveType;
+
 // ------------------------------------------------------------------
 // the damaging path (effects/hit.lua)
 // ------------------------------------------------------------------
@@ -1074,6 +1138,10 @@ Bm._dealDamage = function _dealDamage(C, dmgIn, infoIn) {
       this.say(`${this.nameOf(target)}'s SUBSTITUTE faded!`);
     }
     C.hitSubstitute = true;
+    // The strike landed on the doll: its STATUS2_SUBSTITUTE bit stays set until
+    // this strike's move end (MOVEEND_SUBSTITUTE), even when the doll just broke,
+    // so the strike's secondary and King's Rock are refused (SetMoveEffect).
+    C.subStrike = true;
     if (int(C.firstDmg, 0) === 0) C.firstDmg = dmg;
     C.hpDealt = dealt;
     C.hitsLanded = int(C.hitsLanded, 0) + 1;
@@ -1289,7 +1357,7 @@ function flagsImmune(C, info) {
 }
 
 // pokefirered/src/battle_script_commands.c:1274 (Wonder Guard; not Struggle,
-// which returns before typecalc on the cart)
+// which returns before typecalc on the cart).  Also OHKO's typecalc.
 function wonderGuard(C, info) {
   const { B } = C;
   if (C.target.ability !== 'WONDER_GUARD') return false;
@@ -1427,12 +1495,18 @@ function tripleKick(C) {
     lastInfo = info;
     if (status !== 'ok' && status !== 'endured' && status !== 'hung') break;
     landed += 1;
+    if (status === 'hung') Items.focusBandMessage(B, target);
+    // battle_scripts_1.s:1414 moveendto MOVEEND_NEXT_TARGET, every kick (the
+    // endured one too: the FOE_ENDURED jump comes after it)
+    strikeEnd(C);
     if (status === 'endured') {
       B.say(`${B.nameOf(target)} endured the hit!`);
       break;
     }
-    if (status === 'hung') Items.focusBandMessage(B, target);
   }
+  // battle_scripts_1.s:1433: the kick loop ends with moveendfrom
+  // MOVEEND_UPDATE_LAST_MOVES only.
+  C.endFrom = 'last';
   if (landed > 0) {
     effectivenessLine(B, truthy(lastInfo) ? lastInfo.typeFlags : lastInfo);
     B.say(`Hit ${landed} time(s)!`);
@@ -1490,6 +1564,10 @@ function beatUp(C) {
       if (hung === 'endured') B.say(`${B.nameOf(target)} endured the hit!`);
       else if (hung === 'hung') Items.focusBandMessage(B, target);
       C.tryFaintTarget();
+      // battle_scripts_1.s:1964 moveendto MOVEEND_NEXT_TARGET per member; the
+      // loop's own end (BattleScript_BeatUpEnd) runs no move end after it.
+      strikeEnd(C);
+      C.endFrom = 'last';
     }
   }
   if (!any) {
@@ -1534,7 +1612,7 @@ function explosion(C) {
 // effects/hit.lua Hit.run
 M.hit = function hit(C) {
   const { B, user, effect: eff } = C;
-  C.moveType = int(C.move.type, 0);
+  C.moveType = dynamicMoveType(C);
 
   if (preChecks(C)) return;
   setMultipliers(C);
@@ -1571,7 +1649,10 @@ M.hit = function hit(C) {
     return;
   }
 
-  if (!C.accuracyCheck('normal', true)) {
+  // Pursuit on a switching target (battle_scripts_1.s:3081
+  // BattleScript_PursuitDmgOnSwitchOut) draws no accuracy: attackstring,
+  // ppreduce, then straight to critcalc / damagecalc.
+  if (!truthy(C.opts.pursuit) && !C.accuracyCheck('normal', true)) {
     onMiss(C);
     return;
   }
@@ -1671,6 +1752,9 @@ M.hit = function hit(C) {
     if (status !== 'ok' && status !== 'endured' && status !== 'hung') break;
     landed += 1;
     if (status === 'endured') {
+      // battle_scripts_1.s:638: a multi-hit strike's move end runs before the
+      // FOE_ENDURED jump; a single hit prints it straight away.
+      if (isMulti) strikeEnd(C);
       B.say(`${B.nameOf(target)} endured the hit!`);
       break;
     }
@@ -1681,7 +1765,13 @@ M.hit = function hit(C) {
       if (setDmg && !(eff === E.COUNTER || eff === E.MIRROR_COAT)) f = null;
       effectivenessLine(B, f);
     }
+    // battle_scripts_1.s:638 moveendto MOVEEND_NEXT_TARGET after every strike:
+    // Rage, contact abilities, the item checks, King's Rock / Shell Bell and
+    // the Substitute update run per strike; the loop's end (:654) runs the
+    // move end again from MOVEEND_SYNCHRONIZE_TARGET, skipping on-damage ones.
+    if (isMulti) strikeEnd(C);
   }
+  if (isMulti && landed > 0) C.endFrom = 'sync';
   if (isMulti && landed > 0) {
     if (lastStatus !== 'endured' && lastStatus !== 'hung') {
       effectivenessLine(B, truthy(lastInfo) ? lastInfo.typeFlags : lastInfo);
@@ -1802,6 +1892,13 @@ function ohko(C) {
     B.say(`It doesn't affect ${B.nameOf(target)}...`);
     return;
   }
+  // Cmd_typecalc (battle_scripts_1.s:766 runs it before tryKO) also applies
+  // Wonder Guard to a move with power: an OHKO move that is not super
+  // effective misses Shedinja.
+  if (int(C.move.power, 0) !== 0 && wonderGuard(C, { typeFlags: flags })) {
+    C.missed = true;
+    return;
+  }
   const banded = Items.rollFocusBand(B, target);
   delete target.focusBanded;
   if (target.ability === 'STURDY') {
@@ -1857,6 +1954,7 @@ function tryBounce(C) {
     C.user = target;
     C.target = user;
     C.slot = null;
+    C.chosenSlot = null;
     C.noPP = true;
     C.opts.bounced = true;
     return true;
@@ -1872,6 +1970,7 @@ function tryBounce(C) {
         C.user = b;
         C.target = user;
         C.slot = null;
+        C.chosenSlot = null;
         C.noPP = true;
         C.opts.bounced = true;
         return true;
@@ -1897,7 +1996,7 @@ function lightningRodTook(C) {
 function absorbCheck(C) {
   const { B, user, target } = C;
   if (!truthy(target) || target === user) return false;
-  const mt = int(C.move.type, 0);
+  const mt = C.moveType;
   const power = int(C.move.power, 0);
   if (!((target.ability === 'VOLT_ABSORB' && mt === Types.ID.ELECTRIC && power !== 0)
       || (target.ability === 'WATER_ABSORB' && mt === Types.ID.WATER && power !== 0)
@@ -1919,10 +2018,14 @@ function absorbCheck(C) {
 // move end (pokefirered/src/battle_script_commands.c:4056 / :4121)
 // ------------------------------------------------------------------
 
-function moveEndEffects(C) {
+// MOVEEND_SYNCHRONIZE_TARGET .. MOVEEND_KINGSROCK_SHELLBELL.  `skipOnDamage`
+// is the multi-hit loop's closing pass (moveendcase SYNCHRONIZE_TARGET, then
+// moveendfrom IMMUNITY_ABILITIES), whose strikes already ran the contact
+// abilities one by one.
+function moveEndEffects(C, skipOnDamage) {
   const { B, user, target } = C;
   if (truthy(target) && target !== user) Abilities.synchronize(B, C, target, user);
-  Abilities.onDamage(B, C);
+  if (!truthy(skipOnDamage)) Abilities.onDamage(B, C);
   Abilities.immunityCure(B);
   if (truthy(target) && target !== user) Abilities.synchronize(B, C, user, target);
   const chosen = truthy(C.opts.calledBy) ? C.opts.calledBy : C.move;
@@ -1961,10 +2064,12 @@ function moveEndEffects(C) {
   }
 }
 
-function moveEnd(C) {
+// MOVEEND_RAGE (TARGET_TURN_DAMAGED: a hit on the doll builds nothing) and
+// MOVEEND_DEFROST.
+function rageAndDefrost(C) {
   const { B, user, target } = C;
   if (truthy(target) && target !== user && truthy(target.rage) && target.mon.hp > 0
-      && user.side !== target.side && !truthy(C.noEffect) && int(C.hitsLanded, 0) > 0
+      && user.side !== target.side && !truthy(C.noEffect) && truthy(C.targetDamaged)
       && int(C.move.power, 0) > 0 && target.stages.atk < 6) {
     target.stages.atk += 1;
     const text = `${B.nameOf(target)}'s RAGE is building!`;
@@ -1983,7 +2088,27 @@ function moveEnd(C) {
       && C.moveType === Types.ID.FIRE) {
     B.cure(target, `${B.nameOf(target)} was defrosted!`);
   }
-  moveEndEffects(C);
+}
+
+// One strike's move end (pret `moveendto MOVEEND_NEXT_TARGET` inside the
+// multi-hit, Triple Kick and Beat Up loops): Rage, defrost, the contact
+// abilities, the item checks, King's Rock / Shell Bell, then MOVEEND_SUBSTITUTE
+// drops the strike's doll bit.  The last-move bookkeeping is left to the move's
+// closing pass (the same values either way).
+strikeEnd = function strikeEndFn(C) {
+  rageAndDefrost(C);
+  moveEndEffects(C, false);
+  delete C.subStrike;
+};
+
+// The move's closing move end.  `C.endFrom` says where the move's own script
+// resumes it: null = moveendall, 'sync' = the multi-hit close (no Rage / defrost
+// / on-damage), 'last' = Triple Kick / Beat Up (MOVEEND_UPDATE_LAST_MOVES on).
+function moveEnd(C) {
+  const { user, target } = C;
+  if (C.endFrom == null) rageAndDefrost(C);
+  if (C.endFrom !== 'last') moveEndEffects(C, C.endFrom === 'sync');
+  delete C.subStrike;
   const chosen = truthy(C.opts.calledBy) ? C.opts.calledBy : C.move;
   const chosenNum = int(chosen.num, 0);
   if (int(chosen.effect, -1) !== E.BATON_PASS) {
@@ -2011,26 +2136,45 @@ function moveEndLite(C) {
 // calling moves (engine.lua call_moves / run_called)
 // ------------------------------------------------------------------
 
-function runCalled(C, row, slot) {
+// How deep one action may nest called moves.  The deepest chain a cart can
+// build is three calls (Metronome -> Assist -> Nature Power -> the terrain
+// move: Metronome may pick Assist, Assist may pick Nature Power); a sheet or
+// pool row that calls itself (Swift carrying EFFECT_NATURE_POWER, a
+// "Sleep Talk" numbered like Pound) would otherwise recurse until the stack
+// overflows and wedge the fight in `resolving`.  Past the cap the call says
+// "But it failed!".
+M.MAX_CALL_DEPTH = 3;
+
+// extra: noPP (Sleep Talk's HITMARKER_NO_PPDEDUCT for the called slot).
+function runCalled(C, row, slot, extra) {
   const { B } = C;
-  if (!truthy(row)) {
+  const depth = int(C.opts.callDepth, 0) + 1;
+  if (!truthy(row) || depth > M.MAX_CALL_DEPTH) {
     C.failed = true;
     B.say('But it failed!');
     return undefined;
   }
-  const target = B._pickTarget(C.user, row, null, true);
+  const target = B._pickTarget(C.user, row, null, true, true);
   const opts = {
     called: true,
     calledBy: truthy(C.opts.calledBy) ? C.opts.calledBy : C.move,
     pursuit: C.opts.pursuit,
+    callDepth: depth,
+    chosenSlot: C.chosenSlot,
+    noPP: (truthy(extra) && truthy(extra.noPP)) ? extra.noPP : null,
   };
   return B._resolveMove(C.user, target, row, slot, opts);
 }
 
-// pokefirered/src/battle_script_commands.c:7834
-function invalidSleepTalk(num) {
+// pokefirered/src/battle_script_commands.c:7834 IsInvalidForSleepTalkOrAssist,
+// by number as on the cart -- and by effect, so a row that carries one of the
+// four calling effects under another number is refused the same way.
+const CALLER_EFFECT = {
+  [E.SLEEP_TALK]: true, [E.ASSIST]: true, [E.MIRROR_MOVE]: true, [E.METRONOME]: true,
+};
+function invalidSleepTalk(num, effect) {
   return num == null || num === 0 || num === MOVE.SLEEP_TALK || num === MOVE.ASSIST
-    || num === MOVE.MIRROR_MOVE || num === MOVE.METRONOME;
+    || num === MOVE.MIRROR_MOVE || num === MOVE.METRONOME || CALLER_EFFECT[int(effect, -1)] === true;
 }
 
 // pokefirered/src/battle_script_commands.c:7519: roll 1..511 until a legal pool
@@ -2076,14 +2220,17 @@ function callMoves(C) {
     B.say(`${B.nameOf(user)} is fast asleep.`);
     C.attackString();
     C.ppReduce();
+    // pokefirered/src/battle_script_commands.c:7866 Cmd_trychoosesleeptalkmove:
+    // the four callers, Focus Punch, Uproar and the two-turn moves, then
+    // CheckMoveLimitations with every limit but PP (Disable, Torment, Taunt,
+    // Imprison, Encore, Choice Band).
+    const bad = B.moveLimitations(user, true);
     const valid = [];
     for (let i = 1; i <= user.moves.length; i += 1) {
       const mv = user.moves[i - 1];
       const n = int(mv.num, 0);
-      if (!invalidSleepTalk(n) && n !== MOVE.FOCUS_PUNCH && n !== MOVE.UPROAR
-          && !truthy(TWO_TURN[int(mv.effect, -1)])
-          && !(truthy(user.disabledNum) && n === user.disabledNum)
-          && !(int(user.encoreTurns, 0) > 0 && truthy(user.encoreNum) && user.encoreNum !== n)) {
+      if (!truthy(bad[i]) && !invalidSleepTalk(n, mv.effect) && n !== MOVE.FOCUS_PUNCH
+          && n !== MOVE.UPROAR && !truthy(TWO_TURN[int(mv.effect, -1)])) {
         valid.push({ row: mv, slot: i });
       }
     }
@@ -2094,7 +2241,9 @@ function callMoves(C) {
     }
     const pick = valid[B.roll(1, valid.length) - 1];
     C.attackAnimation();
-    return runCalled(C, pick.row);
+    // gCurrMovePos = the picked slot (Mimic / Sketch write there), with
+    // HITMARKER_NO_PPDEDUCT: the called move spends no PP of its own.
+    return runCalled(C, pick.row, pick.slot, { noPP: true });
   }
   if (eff === E.MIRROR_MOVE) {
     // pokefirered/src/battle_script_commands.c:6350
@@ -2102,7 +2251,7 @@ function callMoves(C) {
     const num = user.lastTakenMove;
     if (truthy(num) && num !== 0) {
       C.ppReduce();
-      return runCalled(C, B.moveRowByNum(num));
+      return runCalled(C, B.calledRowByNum(num, user));
     }
     C.ppReduce();
     C.failed = true;
@@ -2120,7 +2269,7 @@ function callMoves(C) {
         const moves = truthy(mon.moves) ? mon.moves : [];
         for (let j = 1; j <= moves.length; j += 1) {
           const n = int(moves[j - 1].num, 0);
-          if (n !== 0 && !invalidSleepTalk(n) && !Effects.forbidden(n, false)) {
+          if (n !== 0 && !invalidSleepTalk(n, moves[j - 1].effect) && !Effects.forbidden(n, false)) {
             list.push(moves[j - 1]);
           }
         }
@@ -2140,7 +2289,7 @@ function callMoves(C) {
     C.attackString();
     const mapped = Field.NATURE_POWER_MOVE[B.terrain];
     const num = mapped !== undefined ? mapped : 129;
-    const row = B.moveRowByNum(num);
+    const row = B.calledRowByNum(num, user);
     if (!truthy(row)) {
       C.ppReduce();
       C.failed = true;
@@ -2174,6 +2323,8 @@ function resetTargetValues(C) {
   C.brokeWall = null;
   C.missed = false;
   C.absorbed = null;
+  C.endFrom = null;
+  C.subStrike = null;
 }
 
 function forEachTarget(C, body) {
@@ -2234,16 +2385,42 @@ function forEachTarget(C, body) {
 // run (engine.lua run) and resolveMove
 // ------------------------------------------------------------------
 
+// pokefirered/src/battle_util.c:1874 ABILITYEFFECT_MOVES_BLOCK, which
+// Cmd_attackcanceler runs for every target pass of a move (a spread move's
+// second foe, a called move) -- BattleScript_SoundproofProtected, then the move
+// end.  True when Soundproof stopped the move at this target.
+function soundproofBlocked(C) {
+  const { B, user, target } = C;
+  C.soundproofSeen = target;
+  if (!Abilities.soundproofBlocks((target !== user && truthy(target)) ? target : null, C.mnum)) return false;
+  if (truthy(user.lockedNum)) C.noPP = true;
+  C.attackString();
+  C.ppReduce();
+  B.emitAbility(target);
+  B.say(`${B.nameOf(target)}'s SOUNDPROOF blocks ${C.moveName()}!`);
+  C.missed = true;
+  C.noEffect = true;
+  moveEnd(C);
+  return true;
+}
+
 function body(C) {
   const { B } = C;
-  tryBounce(C);
-  lightningRodTook(C);
+  // Pursuit on a switching target skips attackcanceler whole (no Soundproof,
+  // Magic Coat, Snatch, Lightning Rod or absorbing ability): battle_scripts_1.s
+  // :3081 BattleScript_PursuitDmgOnSwitchOut.
+  if (!truthy(C.opts.pursuit)) {
+    if (C.soundproofSeen !== C.target && soundproofBlocked(C)) return;
+    tryBounce(C);
+    lightningRodTook(C);
+    C.moveType = dynamicMoveType(C);
+    if (absorbCheck(C)) {
+      moveEnd(C);
+      return;
+    }
+  }
   // The owner of the move context may have changed hands (Snatch / Magic Coat).
   const { user } = C;
-  if (absorbCheck(C)) {
-    moveEnd(C);
-    return;
-  }
   const eff = C.effect;
   if (eff === E.OHKO) {
     ohko(C);
@@ -2288,6 +2465,12 @@ function run(C) {
 
   if (!truthy(C.opts.called)) {
     user.movedThisTurn = true;
+  }
+  // Pursuit on a switching target never meets the canceller: sleep / freeze /
+  // Truant were checked when it was chosen to strike (Cmd_jumpifnopursuitswitchdmg)
+  // and paralysis, confusion, love and flinching are not rolled at all
+  // (battle_scripts_1.s:3081 has no attackcanceler).
+  if (!truthy(C.opts.called) && !truthy(C.opts.pursuit)) {
     const c = canceller(C);
     if (c === false) {
       delete user.lastMoveNum;
@@ -2300,18 +2483,12 @@ function run(C) {
       moveEnd(C);
       return undefined;
     }
-    // pokefirered/src/battle_util.c:1874 ABILITYEFFECT_MOVES_BLOCK
-    if (Abilities.soundproofBlocks((C.target !== user && truthy(C.target)) ? C.target : null, C.mnum)) {
-      if (truthy(user.lockedNum)) C.noPP = true;
-      C.attackString();
-      C.ppReduce();
-      B.emitAbility(C.target);
-      B.say(`${B.nameOf(C.target)}'s SOUNDPROOF blocks ${C.moveName()}!`);
-      C.missed = true;
-      C.noEffect = true;
-      moveEnd(C);
-      return undefined;
-    }
+    // Soundproof at the first target (the rest are asked per target in
+    // `body`); a doubles spread move asks every target there, the first too,
+    // so one Soundproof foe does not stop the move for the other.
+    const ttype = int(C.move.target, 0);
+    const spread = truthy(B.double) && (ttype === T.BOTH || ttype === T.FOES_AND_ALLY);
+    if (!spread && soundproofBlocked(C)) return undefined;
     if (truthy(C.slot) && truthy(at(user.moves, C.slot)) && int(at(user.moves, C.slot).pp, 0) === 0
         && !truthy(user.lockedNum) && C.mnum !== MOVE.STRUGGLE) {
       C.attackString();
@@ -2333,9 +2510,10 @@ function run(C) {
   }
 
   if (eff === E.FOCUS_PUNCH && (int(user.lastPhysDmg, 0) > 0 || int(user.lastSpecDmg, 0) > 0)) {
-    // pokefirered/data/battle_scripts_1.s:2255
+    // pokefirered/data/battle_scripts_1.s:2255 (then BattleScript_MoveEnd)
     C.ppReduce();
     B.say(`${B.nameOf(user)} lost its focus and couldn't move!`);
+    moveEnd(C);
     return undefined;
   }
 
@@ -2343,13 +2521,18 @@ function run(C) {
 }
 
 // One move, start to finish (engine.lua resolveMove). `target` is already
-// resolved; `opts` = { called, calledBy, pursuit, passSlot, chosenAlly }.
+// resolved; `opts` = { called, calledBy, pursuit, passSlot, chosenAlly, and for
+// a called move callDepth, chosenSlot (the caller's), noPP (Sleep Talk) }.
 Bm._resolveMove = function _resolveMove(user, target, row, slot, optsIn) {
   const opts = truthy(optsIn) ? optsIn : {};
   if (!truthy(user) || user.mon.hp <= 0 || user.fighter.b !== user) return undefined;
   const C = newCtx(this, user, target, row, slot, opts);
   C.passSlot = opts.passSlot;
   C.chosenAlly = opts.chosenAlly;
+  // pret chosenMovePositions: the slot the seat chose, which a called move
+  // inherits from its caller (Grudge empties that one).
+  if (truthy(opts.called)) C.chosenSlot = opts.chosenSlot; else C.chosenSlot = slot;
+  if (truthy(opts.noPP)) C.noPP = true;
   if (truthy(opts.called)) C.printedUsed = false;
   delete user.statLoweredMsg;
   if (truthy(target)) delete target.statLoweredMsg;
@@ -2366,10 +2549,14 @@ Bm._resolveMove = function _resolveMove(user, target, row, slot, optsIn) {
 };
 
 // pokefirered/src/battle_util.c:1208 (after every action that was not called):
-// Intimidate / Trace, held-item checks (berries), Forecast -- up to four passes.
+// Intimidate / Trace, held-item checks (berries), Forecast -- one thing per
+// pass, passes until nothing acts (the cart re-enters state 6 until it returns
+// FALSE, so a 3v3 field's six Intimidates all resolve now).  M.PASS_CAP only
+// bounds a runaway; every pass spends a pending flag, an item or a form change.
+M.PASS_CAP = 64;
 Bm._afterAction = function _afterAction() {
   if (truthy(this.result)) return;
-  for (let pass = 1; pass <= 4; pass += 1) {
+  for (let pass = 1; pass <= M.PASS_CAP; pass += 1) {
     let did = false;
     did = truthy(did) ? did : Abilities.runIntimidate(this);
     did = truthy(did) ? did : Abilities.runTrace(this);
@@ -2398,7 +2585,7 @@ Bm._actionMove = function _actionMove(b, choice) {
     let slot = b.lockedSlot;
     let row = truthy(slot) ? at(b.moves, slot) : slot;
     if (!truthy(row) || int(row.num, 0) !== b.lockedNum) {
-      row = this.moveRowByNum(b.lockedNum, b);
+      row = this.calledRowByNum(b.lockedNum, b);
       slot = this.slotOfNum(b, b.lockedNum);
     }
     if (truthy(row)) return [row, slot, 'locked'];
@@ -2452,7 +2639,7 @@ Bm._fightAction = function _fightAction(fighter, choice, optsIn) {
   }
   let chosenAlly = null;
   if (truthy(aimed) && aimed.side === user.side && aimed !== user) chosenAlly = aimed;
-  const target = this._pickTarget(user, row, aimed, why === 'encore');
+  const target = this._pickTarget(user, row, aimed, why === 'encore', false);
   if (truthy(slot)) user.lastSlot = slot;
   return this._resolveMove(user, target, row, slot, {
     pursuit: opts.pursuit, passSlot: choice.pass, chosenAlly,

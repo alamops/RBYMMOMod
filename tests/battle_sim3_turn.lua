@@ -28,7 +28,9 @@
 -- `create.typeTable == "$chart"` / `create.movePool == "$pool"` are replaced by
 -- the fixture's shared `typeTable` / `movePool` before Turn.create.
 --
--- `expect` = { events, batches, results, outcome, snapshot }, where snapshot is
+-- `expect` = { events, batches, results, outcome, snapshot }, where outcome is
+-- { battle, outcome, reason, winners?, losers?, catcher?, caughtSpecies?,
+-- payDay? } and snapshot is
 -- the digest { phase, turn, seq, now, deadline, rngState, weather, field =
 -- [{ slot, hp, party }] } -- rngState is the one number that proves both
 -- runtimes drew the same count.  Events compare as canonical JSON (sorted keys),
@@ -249,6 +251,7 @@ local function outcomeOf(out)
   if out.losers then o.losers = out.losers end
   if out.catcher then o.catcher = out.catcher end
   if out.caught then o.caughtSpecies = out.caught.species end
+  if out.payDay then o.payDay = out.payDay end
   return o
 end
 

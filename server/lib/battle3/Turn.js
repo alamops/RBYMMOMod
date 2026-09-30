@@ -25,13 +25,18 @@
  *      and a fighting mon holds QUICK_CLAW; one roll(0,255) per group tied on
  *      both priority and speed;
  *   3. runs (wild modes): roll(0,255) for a runner slower than the wild mon;
- *   4. switches: any foe Pursuit aimed at the leaving seat draws as a move;
+ *   4. switches (and, interleaved in battler order, the bag items that are
+ *      not balls -- those draw nothing): any foe Pursuit aimed at the leaving
+ *      seat draws as a move, minus the canceller's and the accuracy draws;
  *   5. bag: balls (after other items, fastest thrower first) draw up to four
  *      roll(0,65535) (none for a Master Ball or odds > 254);
  *   6. moves, in speed order, each drawing only at the points it reaches (the
- *      full list is in the Lua header and docs/plans/gen3-battle-sheet.md §8);
+ *      full list is in the Lua header and docs/plans/gen3-battle-sheet.md §8;
+ *      a multi-hit / Triple Kick / Beat Up strike runs its move end, contact
+ *      abilities and King's Rock included, after every strike);
  *   7. end of turn: one roll(0,255) per tied group of the re-sort, then the
- *      phases in order.
+ *      phases in order (a Future Sight due on a seat emptied this turn draws
+ *      in the replace phase instead, after the switch-ins).
  *
  * Nothing else rolls. A battle replays from its seed plus the choice log.
  *
@@ -449,6 +454,8 @@ function attempt(opts) {
     deadline: null,
     resolveDeadline: null,
     fleeAttempts: 0,
+    payDay: { a: 0, b: 0 }, // pret gPaydayMoney, per side (Effects PAYDAY)
+    usedHeldItems: {}, // Recycle's memory, per field slot (Items.consume)
   });
 
   if (isTable(opts.specialTypes)) {
@@ -1233,6 +1240,9 @@ Battle.prototype._closeReplace = function _closeReplace() {
       }
     }
   }
+  // A delayed hit that came due on an emptied seat lands on the newcomer, as
+  // the cart's replacement-first end of turn has it (Residual.js).
+  if (!truthy(this.result)) this._landPendingFutureSight();
   this._drainExp();
   this.phase = 'choice';
   if (!truthy(this.result)) this._checkOver();
@@ -1250,8 +1260,11 @@ Battle.prototype._closeReplace = function _closeReplace() {
 // ------------------------------------------------------------------
 
 // Drop every link another battler holds to one that is leaving
-// (pokefirered/src/battle_main.c:2373 / battle_script_commands.c:4966).
-Battle.prototype._unlink = function _unlink(old) {
+// (pokefirered/src/battle_main.c:2329 SwitchInClearSetData / battle_script_
+// commands.c:4966).  `baton`: a Baton Pass keeps the passer's Mean Look-style
+// traps and Lock-Ons standing -- the cart stores them by battler POSITION, so
+// the newcomer inherits them (`_switchIn` re-points them).
+Battle.prototype._unlink = function _unlink(old, baton) {
   for (const f of this.order) {
     const { b } = f;
     if (b && b !== old) {
@@ -1261,10 +1274,12 @@ Battle.prototype._unlink = function _unlink(old) {
         delete b.trapMove;
         delete b.trapSource;
       }
-      if (b.trappedBy === old) delete b.trappedBy;
-      if (b.lockedOnBy === old) {
-        delete b.lockedOnTurns;
-        delete b.lockedOnBy;
+      if (!truthy(baton)) {
+        if (b.trappedBy === old) delete b.trappedBy;
+        if (b.lockedOnBy === old) {
+          delete b.lockedOnTurns;
+          delete b.lockedOnBy;
+        }
       }
     }
   }
@@ -1279,14 +1294,16 @@ Battle.prototype._switchIn = function _switchIn(fighter, index, baton) {
   const old = fighter.b;
   if (old) {
     if (old.mon.hp > 0) Abilities.switchOut(this, old);
-    this._unlink(old);
+    this._unlink(old, baton != null);
     fighter.lastB = old;
   }
   fighter.active = index;
   fighter.mustReplace = null;
   const nb = this._newBattler(fighter, index);
   if (baton) {
-    // pokefirered/src/battle_main.c:2350
+    // pokefirered/src/battle_main.c:2350: status2 keeps confusion, Focus
+    // Energy, Substitute, escape prevention and Curse; status3 keeps Leech Seed,
+    // Lock-On, Perish Song, Ingrain and Mud / Water Sport.
     for (const k of Object.keys(baton.stages)) nb.stages[k] = baton.stages[k];
     nb.confusion = baton.confusion;
     nb.focusEnergy = baton.focusEnergy;
@@ -1298,6 +1315,21 @@ Battle.prototype._switchIn = function _switchIn(fighter, index, baton) {
     nb.trappedBy = baton.trappedBy;
     nb.lockedOnTurns = baton.lockedOnTurns;
     nb.lockedOnBy = baton.lockedOnBy;
+    nb.mudSport = baton.mudSport;
+    nb.waterSport = baton.waterSport;
+    // ...and what the passer held on others moves with the position: a foe it
+    // trapped stays trapped, and a foe it Locked On to is re-armed for two
+    // turns for the newcomer (:2356, STATUS3_ALWAYS_HITS_TURN(2)).
+    for (const f of this.order) {
+      const { b } = f;
+      if (b && b !== old) {
+        if (b.trappedBy === old) b.trappedBy = nb;
+        if (b.lockedOnBy === old) {
+          b.lockedOnBy = nb;
+          if (b.side !== nb.side) b.lockedOnTurns = 2;
+        }
+      }
+    }
   }
   fighter.b = nb;
   this._refield(fighter);
@@ -1404,6 +1436,13 @@ Battle.prototype._beginTurn = function _beginTurn() {
       rows.push({
         f, b, row, pri: row ? int(row.priority, 0) : 0, order: i,
       });
+    } else if (b) {
+      // A seat that chose no move (bag, switch, run) has gChosenMoveByBattler
+      // MOVE_NONE (battle_main.c:2993), which is not Rage.  The Fury Cutter
+      // counter is NOT cleared by choosing something else in Gen 3 (pret has
+      // no such check): a miss, the bag, a failed run, a switch or a canceller
+      // stop resets it (CancelMultiTurnMoves / ClearFuryCutterDestinyBondGrudge).
+      delete b.rage;
     }
   }
 
@@ -1543,6 +1582,11 @@ Battle.prototype._resolveRuns = function _resolveRuns() {
         this._finish('win', this._sidePlayers(other), this._sidePlayers(fighter.side), 'run');
         return true;
       }
+      // pokefirered/src/battle_main.c:4311: a failed escape clears Fury
+      // Cutter, Destiny Bond and Grudge like a bag action.
+      delete b.furyCutter;
+      delete b.destinyBond;
+      delete b.grudge;
       this.say("Can't escape!");
     }
   }
@@ -1575,6 +1619,11 @@ Battle.prototype._pursuitBefore = function _pursuitBefore(fighter) {
   }
 };
 
+// pokefirered/src/battle_main.c:3532 SetActionsAndBattlersTurnOrder: the
+// switch and bag actions go first, TOGETHER, in battler order (a1, b1, a2, ...),
+// ahead of every move -- a1's Potion before b1's switch.  Balls are the one
+// exception, BattleSim2's policy (sheet doc §6): they wait for the other bag
+// actions and are thrown fastest first (`_resolveItems`).
 Battle.prototype._resolveSwitches = function _resolveSwitches() {
   for (const fighter of this.order) {
     if (truthy(this.result)) return;
@@ -1591,19 +1640,15 @@ Battle.prototype._resolveSwitches = function _resolveSwitches() {
         this._drainExp();
         if (!truthy(this.result)) this._checkOver();
       }
-    }
-  }
-};
-
-Battle.prototype._resolveItems = function _resolveItems() {
-  for (const fighter of this.order) {
-    if (truthy(this.result)) return;
-    const { choice } = fighter;
-    if (choice && choice.action === 'item') {
+    } else if (choice && choice.action === 'item') {
       const effect = Items.bagEffect(choice.item);
       if (!(effect && truthy(effect.ball))) this._useItem(fighter);
     }
   }
+};
+
+// The balls, after every other bag action, fastest thrower first.
+Battle.prototype._resolveItems = function _resolveItems() {
   const balls = [];
   for (let i = 1; i <= this.order.length; i += 1) {
     const fighter = this.order[i - 1];
@@ -1682,6 +1727,13 @@ Battle.prototype._useItem = function _useItem(fighter) {
   const { choice } = fighter;
   if (!(choice && choice.action === 'item')) return;
   fighter.acted = true;
+  // pokefirered/src/battle_main.c:4155 HandleAction_UseItem:
+  // ClearFuryCutterDestinyBondGrudge on the seat's battler.
+  if (fighter.b) {
+    delete fighter.b.furyCutter;
+    delete fighter.b.destinyBond;
+    delete fighter.b.grudge;
+  }
   const { item } = choice;
   const effect = Items.bagEffect(item);
   this._emit('item', { slot: fighter.slot, side: fighter.side, text: String(item) });
@@ -1888,6 +1940,7 @@ function foughtKey(slot, index) {
 
 Battle.prototype._refield = function _refield(fighter) {
   fighter.fought = {};
+  fighter.foughtSeats = null;
   const mine = activeMon(fighter) ? fighter.active : null;
   const foes = this.bySide[fighter.side === 'a' ? 'b' : 'a'];
   for (const foe of foes) {
@@ -1915,9 +1968,17 @@ Battle.prototype._standingOpposition = function _standingOpposition(fighter) {
   return keys;
 };
 
+// A participant that faints stops being one (it earns nothing), but its SEAT
+// is remembered as having fought (`foughtSeats`): pret's sentIn bits outlive a
+// faint, and a seat whose participants all fell still pays its Exp. Share
+// holders (`_awardExp`).
 Battle.prototype._unfield = function _unfield(fighter, index) {
   const key = foughtKey(fighter.slot, index);
   for (const other of this.fighters) {
+    if (other.fought && truthy(other.fought[key])) {
+      other.foughtSeats = other.foughtSeats || {};
+      other.foughtSeats[fighter.slot] = true;
+    }
     if (other.fought) delete other.fought[key];
     const pending = other.pendingFought;
     if (pending) {
@@ -1937,12 +1998,17 @@ Battle.prototype._awardExp = function _awardExp(fallen, mon) {
   const fought = fallen.fought || {};
   let participants = 0;
   const alive = [];
+  const seatFought = new Set();
+  const seatPaid = new Set();
   for (const fighter of this.bySide[EXP_OWNER_SIDE]) {
+    if (fallen.foughtSeats && truthy(fallen.foughtSeats[fighter.slot])) seatFought.add(fighter);
     for (let index = 1; index <= fighter.mons.length; index += 1) {
       if (truthy(fought[foughtKey(fighter.slot, index)])) {
         participants += 1;
+        seatFought.add(fighter);
         if (fighter.mons[index - 1].hp > 0) {
           alive.push({ fighter, index });
+          seatPaid.add(fighter);
         }
       }
     }
@@ -1952,10 +2018,11 @@ Battle.prototype._awardExp = function _awardExp(fallen, mon) {
       if (activeMon(fighter)) {
         participants += 1;
         alive.push({ fighter, index: fighter.active });
+        seatFought.add(fighter);
+        seatPaid.add(fighter);
       }
     }
   }
-  if (alive.length === 0) return;
   for (const winner of alive) {
     this._emit('exp', {
       slot: winner.fighter.slot,
@@ -1965,6 +2032,23 @@ Battle.prototype._awardExp = function _awardExp(fallen, mon) {
       participants,
       mon: winner.index - 1,
     });
+  }
+  // pokefirered/src/battle_script_commands.c:3113 Cmd_getexp pays the living
+  // Exp. Share holders whether or not any participant still stands (viaSentIn
+  // 0 is a SAFE_DIV, :3170).  A seat that fought this foe but has nobody
+  // standing who did gets the holders-only fact: `participants` 0 and no
+  // `mon`.  Its client prices it as a knockout with an empty sentIn set, so
+  // only the holders' half is paid (sheet doc §7).
+  for (const fighter of this.bySide[EXP_OWNER_SIDE]) {
+    if (seatFought.has(fighter) && !seatPaid.has(fighter) && firstLiving(fighter.mons) != null) {
+      this._emit('exp', {
+        slot: fighter.slot,
+        species: mon.species,
+        speciesId: mon.speciesId,
+        level: mon.level,
+        participants: 0,
+      });
+    }
   }
 };
 
@@ -2023,7 +2107,14 @@ Battle.prototype._checkOver = function _checkOver() {
   if (!aliveA && !aliveB) {
     this._finish('draw', null, null, 'ko');
   } else if (aliveA) {
-    this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko');
+    const result = this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko');
+    // pokefirered/src/battle_main.c:3764: only a WON battle runs
+    // BattleScript_PayDayMoneyAndPickUpItems (Cmd_givepaydaymoney), and the
+    // coins are the player side's.  Link rules pay nothing (1v1 / coop_pvp); in
+    // the other modes side a is the player side.  The Amulet Coin doubling
+    // (gBattleStruct->moneyMultiplier) and the wallet are the client's.
+    const coins = int(this.payDay ? this.payDay.a : this.payDay, 0);
+    if (result && own(EXP_MODES, this.mode) && coins > 0) result.payDay = coins;
   } else {
     this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'ko');
   }
@@ -2185,6 +2276,7 @@ Battle.prototype.snapshot = function snapshot() {
     weather: this.field.weather,
     field,
     waiting,
+    payDay: { a: this.payDay.a, b: this.payDay.b },
   };
 };
 

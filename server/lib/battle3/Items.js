@@ -181,18 +181,29 @@ function heldEvent(B, b, actedItem, text) {
 }
 M.heldEvent = heldEvent;
 
+// Recycle's memory (pokefirered/src/battle_script_commands.c:5648 Cmd_removeitem
+// writes gBattleStruct->usedHeldItems[battler]): one slot per BATTLER POSITION,
+// so it outlives a switch and the next mon to stand there may recycle it; the
+// hold effect rides with the id (the hub holds no item table).
+M.usedAt = function usedAt(B, slot) {
+  if (!truthy(B.usedHeldItems)) return null;
+  const used = B.usedHeldItems[slot];
+  return truthy(used) ? used : null;
+};
+
+M.clearUsedAt = function clearUsedAt(B, slot) {
+  if (truthy(B.usedHeldItems)) delete B.usedHeldItems[slot];
+};
+
 M.consume = function consume(B, b) {
   const item = int(b.mon.heldItem, 0);
   if (item === 0) return;
-  const side = B.sideState(b.side);
-  // Recycle brings back the last item this SIDE used (pret gLastUsedItem per
-  // battler, engine side.expUsedHeldItem); the hold effect rides with it.
   const used = {
     item, effect: int(b.mon.holdEffect, 0), param: int(b.mon.holdParam, 0), name: b.mon.itemName,
   };
   if (used.name == null) delete used.name;
-  b.usedHeldItem = used;
-  side.usedHeldItem = used;
+  if (!truthy(B.usedHeldItems)) B.usedHeldItems = {};
+  B.usedHeldItems[b.slot] = used;
   b.mon.heldItem = 0;
   b.mon.holdEffect = 0;
   b.mon.holdParam = 0;
@@ -387,15 +398,20 @@ function healBerry(B, b, amount) {
   return [item, lbl];
 }
 
-// pokefirered/src/battle_util.c:2557 ITEMEFFECT_NORMAL. `moveTurn` true is the
-// after-action pass (Leftovers only ticks at the end of the turn).
+// pokefirered/src/battle_util.c:2557 ITEMEFFECT_NORMAL.  `moveTurn` true is the
+// post-action pass (battle_util.c:1211) and the end of turn's ENDTURN_ITEMS2;
+// false is ENDTURN_ITEMS1.  Under `moveTurn` the cart skips every branch that
+// tests `!moveTurn`: the HP berries, Leppa, Leftovers, the confusion berries,
+// the pinch stat berries, Lansat and Starf -- so a Sitrus holder hit under half
+// eats it at the end of the turn, not right after the blow.  The status cures,
+// White Herb and Mental Herb act on either pass.
 M.normal = function normal(B, b, moveTurn) {
   if (!truthy(b) || int(b.mon.hp, 0) <= 0) return false;
   const [he, param] = M.of(b);
   if (he === 0) return false;
   const { hp, maxHp } = b.mon;
   if (he === H.RESTORE_HP) {
-    if (hp <= Math.floor(maxHp / 2)) {
+    if (hp <= Math.floor(maxHp / 2) && !truthy(moveTurn)) {
       let amt = param;
       if (hp + param > maxHp) amt = maxHp - hp;
       const [item, lbl] = healBerry(B, b, amt);
@@ -404,6 +420,7 @@ M.normal = function normal(B, b, moveTurn) {
       return true;
     }
   } else if (he === H.RESTORE_PP) {
+    if (truthy(moveTurn)) return false;
     return leppa(B, b, param);
   } else if (he === H.RESTORE_STATS) {
     return whiteHerb(B, b);
@@ -419,7 +436,7 @@ M.normal = function normal(B, b, moveTurn) {
       return true;
     }
   } else if (he >= H.CONFUSE_SPICY && he <= H.CONFUSE_SOUR) {
-    if (hp <= Math.floor(maxHp / 2)) {
+    if (hp <= Math.floor(maxHp / 2) && !truthy(moveTurn)) {
       const flavor = he - H.CONFUSE_SPICY;
       let amt = Math.floor(maxHp / Math.max(1, param));
       if (amt === 0) amt = 1;
@@ -443,12 +460,12 @@ M.normal = function normal(B, b, moveTurn) {
     }
   } else if (he >= H.ATTACK_UP && he <= H.SP_DEFENSE_UP) {
     const stat = STAT_ORDER[he - H.ATTACK_UP];
-    if (hp <= Math.floor(maxHp / Math.max(1, param)) && b.stages[stat] < 6) {
+    if (hp <= Math.floor(maxHp / Math.max(1, param)) && !truthy(moveTurn) && b.stages[stat] < 6) {
       statUp(B, b, stat, 1);
       return true;
     }
   } else if (he === H.CRITICAL_UP) {
-    if (hp <= Math.floor(maxHp / Math.max(1, param)) && !truthy(b.focusEnergy)) {
+    if (hp <= Math.floor(maxHp / Math.max(1, param)) && !truthy(moveTurn) && !truthy(b.focusEnergy)) {
       b.focusEnergy = true;
       const item = int(b.mon.heldItem, 0);
       const lbl = label(B, b);
@@ -458,7 +475,7 @@ M.normal = function normal(B, b, moveTurn) {
       return true;
     }
   } else if (he === H.RANDOM_STAT_UP) {
-    if (hp <= Math.floor(maxHp / Math.max(1, param))) {
+    if (!truthy(moveTurn) && hp <= Math.floor(maxHp / Math.max(1, param))) {
       let any = false;
       for (const s of STAT_ORDER) {
         if (b.stages[s] < 6) any = true;
@@ -507,7 +524,7 @@ M.moveEnd = function moveEnd(B) {
 };
 
 // pokefirered/src/battle_util.c:2532 ITEMEFFECT_ON_SWITCH_IN (Amulet Coin's
-// money multiplier has no meaning on a mediated field; White Herb does).
+// money multiplier is the client's rule over `outcome().payDay`; White Herb acts).
 M.onSwitchIn = function onSwitchIn(B, b) {
   if (!truthy(b)) return false;
   const [he] = M.of(b);
@@ -583,9 +600,10 @@ M.BAG = {
   137: { cure: { FRZ: true } },
   140: { confusion: true },
   141: { cure: ALL, confusion: true },
-  39: { cure: { SLP: true } },
-  40: { confusion: true },
-  41: { attract: true },
+  // the three flutes are never spent (pret party_menu.c ItemUseCB_Medicine: IsItemFlute)
+  39: { cure: { SLP: true }, noConsume: true },
+  40: { confusion: true, noConsume: true },
+  41: { attract: true, noConsume: true },
   // revives (fainted only)
   24: { revive: 'half' },
   25: { revive: 'full' },

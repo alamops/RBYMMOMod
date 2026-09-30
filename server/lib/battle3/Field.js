@@ -30,11 +30,15 @@ const TRAP_CHIP_DENOM = 16;
 // pokefirered/src/battle_util.c:453
 const FIELD_PHASES = ['reflect', 'light_screen', 'mist', 'safeguard', 'wish', 'weather'];
 
-// pokefirered/src/battle_util.c:722
+// pokefirered/src/battle_util.c:722 (the enum order is the run order):
+// ENDTURN_ITEMS1 is `held_items` (ItemBattleEffects(NORMAL, battler, FALSE)),
+// ENDTURN_ITEMS2 after Yawn is `held_items2` (the same with moveTurn TRUE --
+// the status cures, a Yawn sleep included).  `volatiles` is the sim's own
+// per-turn bookkeeping, not a cart step.
 const BATTLER_PHASES = [
   'ingrain', 'abilities', 'held_items', 'leech_seed', 'status_chip', 'nightmare',
   'curse', 'partial_trap', 'uproar', 'thrash', 'disable', 'encore', 'lock_on',
-  'charge', 'taunt', 'yawn', 'volatiles',
+  'charge', 'taunt', 'yawn', 'held_items2', 'volatiles',
 ];
 
 // pokefirered/src/battle_util.c:1064
@@ -162,7 +166,6 @@ function newSide() {
     wish: [], // [{ turns, wisher (name), slot }]
     futureSight: [], // [{ turns, damage, moveNum, move, attackerSlot, targetSlot, doom }]
     followMe: null, // the battler drawing attacks this turn
-    usedHeldItem: null, // Recycle's memory
   };
 }
 

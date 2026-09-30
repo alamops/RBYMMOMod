@@ -316,7 +316,12 @@ function M.set(C, eff, primary, certain, affectsUser)
     if int(B:sideState(effBattler.side).safeguardTurns, 0) > 0 then return false end
   end
   if int(effBattler.mon.hp, 0) <= 0 and eff ~= "PAYDAY" and eff ~= "STEAL_ITEM" then return false end
-  if not affectsUser and int(effBattler.substituteHP, 0) > 0 then return false end
+  -- STATUS2_SUBSTITUTE: the doll is up, or this strike hit it (the bit outlives
+  -- a doll that just broke until MOVEEND_SUBSTITUTE -- Move.lua C.subStrike).
+  if not affectsUser and (int(effBattler.substituteHP, 0) > 0
+      or (C.subStrike and effBattler == C.target)) then
+    return false
+  end
 
   if EFFECT_TO_STATUS[eff] then
     return applyStatusEffect(C, eff, primary, certain, effBattler)
@@ -347,8 +352,18 @@ function M.set(C, eff, primary, certain, affectsUser)
     B:say(nm(B, effBattler) .. " caused an UPROAR!")
     return true
   elseif eff == "PAYDAY" then
-    -- battle_script_commands.c:2455: the coins are a link-free player bonus; a
-    -- mediated fight says the line and pays nothing (sheet doc §6).
+    -- pokefirered/src/battle_script_commands.c:2455: level x 5 into
+    -- gPaydayMoney (a u16 that saturates) -- counted for either side here; who
+    -- is paid, and the Amulet Coin doubling, is the outcome's reader's rule
+    -- (Turn.lua `_finish`, sheet doc §6).
+    local pay = B.payDay
+    if pay then
+      local side = user.side
+      local before = int(pay[side], 0)
+      local after = before + int(user.mon.level, 1) * 5
+      if after > 0xFFFF then after = 0xFFFF end
+      pay[side] = after
+    end
     B:say("Coins scattered everywhere!")
     return true
   elseif eff == "TRI_ATTACK" then
@@ -375,9 +390,12 @@ function M.set(C, eff, primary, certain, affectsUser)
     C.checkUserFaint = true
     return true
   elseif STAT_EFFECTS[eff] then
+    -- pokefirered/src/battle_script_commands.c:2544: ChangeStatBuffs gets
+    -- `affectsUser` alone, never MOVE_EFFECT_CERTAIN -- a 100% Icy Wind still
+    -- stops at Clear Body / White Smoke / Keen Eye / Hyper Cutter / Mist.
     local spec = STAT_EFFECTS[eff]
     local res = M.changeStat(B, effBattler, spec[1], spec[2], {
-      user = affectsUser, certain = certain, allowPtr = false,
+      user = affectsUser, certain = false, allowPtr = false,
     })
     return res == "worked"
   elseif eff == "RECHARGE" then
@@ -406,6 +424,8 @@ function M.set(C, eff, primary, certain, affectsUser)
     local lbl = B:itemLabel(target)
     Items.give(user, row)
     Items.give(target, nil)
+    -- :2668: the robbed battler's Choice Band lock goes with the band
+    target.choicedMove = nil
     Items.heldEvent(B, user, tItem, lbl)
     Items.heldEvent(B, target, tItem, lbl)
     B:say(nm(B, user) .. " stole " .. nm(B, target) .. "'s " .. lbl .. "!")
@@ -476,6 +496,7 @@ function M.set(C, eff, primary, certain, affectsUser)
     local lbl = B:itemLabel(effBattler)
     effBattler.mon.knockedOff = tItem
     Items.give(effBattler, nil)
+    effBattler.choicedMove = nil   -- :2757
     Items.heldEvent(B, effBattler, tItem, lbl)
     B:say(nm(B, user) .. " knocked off " .. nm(B, effBattler) .. "'s " .. lbl .. "!")
     return true
@@ -1020,9 +1041,12 @@ H[E.HEAL_BELL] = function(C)
       ally.nightmare = nil
     end
   end
-  -- The benched party: every mon of the user's seat that is not on the field.
+  -- The benched party: every mon of the user's seat that is not on the field,
+  -- except (Heal Bell only) a Soundproof one -- pokefirered/src/battle_script_
+  -- commands.c:7995 reads each party member's species ability.
   for i, mon in ipairs(user.fighter.mons) do
-    if i ~= user.fighter.active and mon.hp > 0 and Status.normalise(mon.status) then
+    if i ~= user.fighter.active and mon.hp > 0 and Status.normalise(mon.status)
+        and not (isBell and Abilities.nameOf(mon.ability) == "SOUNDPROOF") then
       mon.status, mon.sleepTurns = nil, nil
     end
   end
@@ -1562,13 +1586,18 @@ H[E.CONVERSION_2] = function(C)
   if last == 0 or lastType == nil then return C:fail() end
   local foe = user.lastHitBy
   if foe and B:isTwoTurnNum(last) and foe.twoTurnNum then return C:fail() end
+  -- The random draw (:7717) ranges over every row of gTypeEffectiveness, the
+  -- two after the Foresight marker included (Normal / Fighting -> Ghost): the
+  -- marker row itself never matches (its attack type is TYPE_FORESIGHT), and
+  -- the rows past it are ordinary resistances.
   local valid = {}
   local t = B.typeTable or {}
   local i = 1
   while i + 2 <= #t do
     local a, d, m = t[i], t[i + 1], t[i + 2]
-    if a == Types.FORESIGHT_SENTINEL then break end
-    if a == lastType and m <= 5 and not isType(user, d) then valid[#valid + 1] = d end
+    if a ~= Types.FORESIGHT_SENTINEL and a == lastType and m <= 5 and not isType(user, d) then
+      valid[#valid + 1] = d
+    end
     i = i + 3
   end
   if #valid == 0 then return C:fail() end
@@ -1730,6 +1759,8 @@ H[E.TRICK] = function(C)
   local ulbl, tlbl = B:itemLabel(user), B:itemLabel(t)
   Items.give(user, trow)
   Items.give(t, urow)
+  -- :8862: both Choice Band locks are lifted
+  user.choicedMove, t.choicedMove = nil, nil
   C:attackAnimation()
   Items.heldEvent(B, user, ti, tlbl)
   Items.heldEvent(B, t, ui, ulbl)
@@ -1738,13 +1769,14 @@ H[E.TRICK] = function(C)
   if ui ~= 0 then B:say(nm(B, t) .. " obtained " .. ulbl .. ".") end
 end
 
--- pokefirered/src/battle_script_commands.c:9366
+-- pokefirered/src/battle_script_commands.c:9366: the last item consumed by
+-- whoever stood at this battler position (gBattleStruct->usedHeldItems is kept
+-- per position, not per mon or per side -- Items.consume).
 H[E.RECYCLE] = function(C)
   local B, user = C.B, C.user
-  local side = B:sideState(user.side)
-  local used = side.usedHeldItem or user.usedHeldItem
+  local used = Items.usedAt(B, user.slot)
   if not used or int(user.mon.heldItem, 0) ~= 0 then return C:fail() end
-  user.usedHeldItem, side.usedHeldItem = nil, nil
+  Items.clearUsedAt(B, user.slot)
   Items.give(user, used)
   C:attackAnimation()
   local lbl = B:itemLabel(user)

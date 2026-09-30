@@ -112,16 +112,25 @@ local function heldEvent(B, b, actedItem, text)
 end
 M.heldEvent = heldEvent
 
+-- Recycle's memory (pokefirered/src/battle_script_commands.c:5648 Cmd_removeitem
+-- writes gBattleStruct->usedHeldItems[battler]): one slot per BATTLER POSITION,
+-- so it outlives a switch and the next mon to stand there may recycle it; the
+-- hold effect rides with the id (the hub holds no item table).
+function M.usedAt(B, slot)
+  return B.usedHeldItems and B.usedHeldItems[slot] or nil
+end
+
+function M.clearUsedAt(B, slot)
+  if B.usedHeldItems then B.usedHeldItems[slot] = nil end
+end
+
 function M.consume(B, b)
   local item = int(b.mon.heldItem, 0)
   if item == 0 then return end
-  local side = B:sideState(b.side)
-  -- Recycle brings back the last item this SIDE used (pret gLastUsedItem per
-  -- battler, engine side.expUsedHeldItem); the hold effect rides with it.
   local used = { item = item, effect = int(b.mon.holdEffect, 0), param = int(b.mon.holdParam, 0),
                  name = b.mon.itemName }
-  b.usedHeldItem = used
-  side.usedHeldItem = used
+  B.usedHeldItems = B.usedHeldItems or {}
+  B.usedHeldItems[b.slot] = used
   b.mon.heldItem, b.mon.holdEffect, b.mon.holdParam, b.mon.itemName = 0, 0, 0, nil
 end
 
@@ -280,14 +289,19 @@ local function healBerry(B, b, amount)
 end
 
 -- pokefirered/src/battle_util.c:2557 ITEMEFFECT_NORMAL.  `moveTurn` true is the
--- after-action pass (Leftovers only ticks at the end of the turn).
+-- post-action pass (battle_util.c:1211) and the end of turn's ENDTURN_ITEMS2;
+-- false is ENDTURN_ITEMS1.  Under `moveTurn` the cart skips every branch that
+-- tests `!moveTurn`: the HP berries, Leppa, Leftovers, the confusion berries,
+-- the pinch stat berries, Lansat and Starf -- so a Sitrus holder hit under half
+-- eats it at the end of the turn, not right after the blow.  The status cures,
+-- White Herb and Mental Herb act on either pass.
 function M.normal(B, b, moveTurn)
   if not b or int(b.mon.hp, 0) <= 0 then return false end
   local he, param = M.of(b)
   if he == 0 then return false end
   local hp, maxHp = b.mon.hp, b.mon.maxHp
   if he == H.RESTORE_HP then
-    if hp <= floor(maxHp / 2) then
+    if hp <= floor(maxHp / 2) and not moveTurn then
       local amt = param
       if hp + param > maxHp then amt = maxHp - hp end
       local item, lbl = healBerry(B, b, amt)
@@ -296,6 +310,7 @@ function M.normal(B, b, moveTurn)
       return true
     end
   elseif he == H.RESTORE_PP then
+    if moveTurn then return false end
     return leppa(B, b, param)
   elseif he == H.RESTORE_STATS then
     return whiteHerb(B, b)
@@ -310,7 +325,7 @@ function M.normal(B, b, moveTurn)
       return true
     end
   elseif he >= H.CONFUSE_SPICY and he <= H.CONFUSE_SOUR then
-    if hp <= floor(maxHp / 2) then
+    if hp <= floor(maxHp / 2) and not moveTurn then
       local flavor = he - H.CONFUSE_SPICY
       local amt = floor(maxHp / max(1, param))
       if amt == 0 then amt = 1 end
@@ -332,12 +347,12 @@ function M.normal(B, b, moveTurn)
     end
   elseif he >= H.ATTACK_UP and he <= H.SP_DEFENSE_UP then
     local stat = STAT_ORDER[he - H.ATTACK_UP + 1]
-    if hp <= floor(maxHp / max(1, param)) and b.stages[stat] < 6 then
+    if hp <= floor(maxHp / max(1, param)) and not moveTurn and b.stages[stat] < 6 then
       statUp(B, b, stat, 1)
       return true
     end
   elseif he == H.CRITICAL_UP then
-    if hp <= floor(maxHp / max(1, param)) and not b.focusEnergy then
+    if hp <= floor(maxHp / max(1, param)) and not moveTurn and not b.focusEnergy then
       b.focusEnergy = true
       local item, lbl = int(b.mon.heldItem, 0), label(B, b)
       M.consume(B, b)
@@ -346,7 +361,7 @@ function M.normal(B, b, moveTurn)
       return true
     end
   elseif he == H.RANDOM_STAT_UP then
-    if hp <= floor(maxHp / max(1, param)) then
+    if not moveTurn and hp <= floor(maxHp / max(1, param)) then
       local any = false
       for _, s in ipairs(STAT_ORDER) do
         if b.stages[s] < 6 then any = true end
@@ -395,7 +410,7 @@ function M.moveEnd(B)
 end
 
 -- pokefirered/src/battle_util.c:2532 ITEMEFFECT_ON_SWITCH_IN (Amulet Coin's
--- money multiplier has no meaning on a mediated field; White Herb does).
+-- money multiplier is the client's rule over `outcome().payDay`; White Herb acts).
 function M.onSwitchIn(B, b)
   if not b then return false end
   local he = M.of(b)
@@ -445,7 +460,9 @@ M.BAG = {
   [135] = { cure = { PSN = true, TOX = true } }, [136] = { cure = { BRN = true } },
   [137] = { cure = { FRZ = true } }, [140] = { confusion = true },
   [141] = { cure = ALL, confusion = true },
-  [39] = { cure = { SLP = true } }, [40] = { confusion = true }, [41] = { attract = true },
+  -- the three flutes are never spent (pret party_menu.c ItemUseCB_Medicine: IsItemFlute)
+  [39] = { cure = { SLP = true }, noConsume = true }, [40] = { confusion = true, noConsume = true },
+  [41] = { attract = true, noConsume = true },
   -- revives (fainted only)
   [24] = { revive = "half" }, [25] = { revive = "full" }, [33] = { revive = "full" },
   -- PP

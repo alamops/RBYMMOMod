@@ -24,7 +24,9 @@
 --      fighters tied on both priority and speed;
 --   3. runs (wild modes): roll(0,255) for a runner slower than the wild mon
 --      (no draw for Smoke Ball, Run Away or the faster runner);
---   4. switches: any foe Pursuit aimed at the leaving seat draws as a move;
+--   4. switches (and, interleaved in battler order, the bag items that are not
+--      balls -- those draw nothing): any foe Pursuit aimed at the leaving seat
+--      draws as a move, minus the canceller's and the accuracy draws;
 --   5. bag: balls (after other items, fastest thrower first) draw up to four
 --      roll(0,65535) (none for a Master Ball or odds > 254);
 --   6. moves, in speed order, each drawing only at the points it reaches:
@@ -45,12 +47,16 @@
 --      roll(1,n), Roar's level check roll(0,255) and pick roll(1,n), OHKO
 --      roll(1,100)); move end: Effect Spore roll(0,9) then roll(0,3) until
 --      non-zero, Static / Flame Body / Poison Point / Cute Charm roll(0,2),
---      King's Rock roll(0,99); after the action, berry / Trace draws as in 1;
+--      King's Rock roll(0,99) -- after EVERY strike of a multi-hit, Triple Kick
+--      or Beat Up, plus King's Rock once more at a multi-hit's close; after the
+--      action, Trace draws as in 1 (the post-action item pass is the cart's
+--      moveTurn pass: no berry there draws);
 --   7. end of turn: one roll(0,255) per tied group of the re-sort, then the
 --      phases in order (Shed Skin roll(0,2), confusion-berry turns, Starf-type
 --      berry roll(0,4) until raisable, Thrash fatigue roll(0,3), Yawn's sleep
 --      roll(0,3), Future Sight accuracy roll(1,100) + roll(85,100) [+ Focus
---      Band roll(0,99)]).
+--      Band roll(0,99)] -- a hit due on a seat emptied this turn draws them in
+--      the replace phase instead, after the switch-ins).
 --
 -- Nothing else rolls.  A battle replays from its seed plus the choice log.
 --
@@ -59,9 +65,10 @@
 --   * Seats, field slots and the replace phase are BattleSim2's.  A fight with
 --     more than one seat on a side is a doubles fight (spread moves, doubled
 --     screens, Helping Hand, Follow Me, Lightning Rod, Pressure counting).
---   * Order: runs, switches (each after any Pursuit aimed at it), bag items
---     (balls last, by speed), then moves by priority then speed, Quick Claw
---     first in its bracket; ties: one roll(0,255) per group, >= 128 reverses.
+--   * Order: runs, then switches and bag items together in battler order (each
+--     switch after any Pursuit aimed at it), balls after them by speed, then
+--     moves by priority then speed, Quick Claw first in its bracket; ties: one
+--     roll(0,255) per group, >= 128 reverses.
 --   * End of turn re-sorts the standing battlers by this turn's priority and
 --     speed (the cart's ENDTURN_ORDER), not BattleSim2's field order.
 --   * Running: 1v1 / coop_pvp concede; coop_npc refuses; wild modes run pret's
@@ -69,8 +76,9 @@
 --     are refused at submit.
 --   * Forced lock-in (no menu): recharge, a two-turn release, Bide, Thrash-type
 --     rampage, Uproar, Rollout.  A partial trap does not lock the victim.
---   * Link rules: no badge boosts, no disobedience, no Pay Day payout, no exp
---     in 1v1 / coop_pvp.  King's Rock keeps the cart's battler-0 quirk.
+--   * Link rules: no badge boosts, no disobedience, no exp and no Pay Day coins
+--     in 1v1 / coop_pvp (a won wild / coop_npc fight reports side a's coins as
+--     `outcome().payDay`).  King's Rock keeps the cart's battler-0 quirk.
 --   * Timeout / NPC auto-pick: BattleSim2's heuristic on Gen 3 ids.
 --
 -- Nothing here raises.  Bad input is refused with nil-plus-reason from `create`
@@ -419,6 +427,8 @@ function M.create(opts)
     result         = nil,
     resolveDeadline = nil,
     fleeAttempts   = 0,
+    payDay         = { a = 0, b = 0 },  -- pret gPaydayMoney, per side (Effects PAYDAY)
+    usedHeldItems  = {},                -- Recycle's memory, per field slot (Items.consume)
   }, Battle)
 
   if type(opts.specialTypes) == "table" then
@@ -1128,6 +1138,9 @@ function Battle:_closeReplace()
       end
     end
   end
+  -- A delayed hit that came due on an emptied seat lands on the newcomer, as
+  -- the cart's replacement-first end of turn has it (Residual.lua).
+  if not self.result then self:_landPendingFutureSight() end
   self:_drainExp()
   self.phase = "choice"
   if not self.result then self:_checkOver() end
@@ -1145,15 +1158,20 @@ end
 -- ------------------------------------------------------------------
 
 -- Drop every link another battler holds to one that is leaving
--- (pokefirered/src/battle_main.c:2373 / battle_script_commands.c:4966).
-function Battle:_unlink(old)
+-- (pokefirered/src/battle_main.c:2329 SwitchInClearSetData / battle_script_
+-- commands.c:4966).  `baton`: a Baton Pass keeps the passer's Mean Look-style
+-- traps and Lock-Ons standing -- the cart stores them by battler POSITION, so
+-- the newcomer inherits them (`_switchIn` re-points them).
+function Battle:_unlink(old, baton)
   for _, f in ipairs(self.order) do
     local b = f.b
     if b and b ~= old then
       if b.infatuatedWith == old then b.infatuatedWith = nil end
       if b.trapSource == old then b.trapTurns, b.trapMove, b.trapSource = nil, nil, nil end
-      if b.trappedBy == old then b.trappedBy = nil end
-      if b.lockedOnBy == old then b.lockedOnTurns, b.lockedOnBy = nil, nil end
+      if not baton then
+        if b.trappedBy == old then b.trappedBy = nil end
+        if b.lockedOnBy == old then b.lockedOnTurns, b.lockedOnBy = nil, nil end
+      end
     end
   end
   for _, side in ipairs(M.SIDES) do
@@ -1167,14 +1185,16 @@ function Battle:_switchIn(fighter, index, baton)
   local old = fighter.b
   if old then
     if old.mon.hp > 0 then Abilities.switchOut(self, old) end
-    self:_unlink(old)
+    self:_unlink(old, baton ~= nil)
     fighter.lastB = old
   end
   fighter.active = index
   fighter.mustReplace = nil
   local nb = self:_newBattler(fighter, index)
   if baton then
-    -- pokefirered/src/battle_main.c:2350
+    -- pokefirered/src/battle_main.c:2350: status2 keeps confusion, Focus
+    -- Energy, Substitute, escape prevention and Curse; status3 keeps Leech Seed,
+    -- Lock-On, Perish Song, Ingrain and Mud / Water Sport.
     for k, v in pairs(baton.stages) do nb.stages[k] = v end
     nb.confusion = baton.confusion
     nb.focusEnergy = baton.focusEnergy
@@ -1186,6 +1206,21 @@ function Battle:_switchIn(fighter, index, baton)
     nb.trappedBy = baton.trappedBy
     nb.lockedOnTurns = baton.lockedOnTurns
     nb.lockedOnBy = baton.lockedOnBy
+    nb.mudSport = baton.mudSport
+    nb.waterSport = baton.waterSport
+    -- ...and what the passer held on others moves with the position: a foe it
+    -- trapped stays trapped, and a foe it Locked On to is re-armed for two
+    -- turns for the newcomer (:2356, STATUS3_ALWAYS_HITS_TURN(2)).
+    for _, f in ipairs(self.order) do
+      local b = f.b
+      if b and b ~= old then
+        if b.trappedBy == old then b.trappedBy = nb end
+        if b.lockedOnBy == old then
+          b.lockedOnBy = nb
+          if b.side ~= nb.side then b.lockedOnTurns = 2 end
+        end
+      end
+    end
   end
   fighter.b = nb
   self:_refield(fighter)
@@ -1270,6 +1305,13 @@ function Battle:_beginTurn()
       local num = row and int(row.num, 0) or 0
       if b.rage and num ~= Move.MOVE.RAGE then b.rage = nil end
       rows[#rows + 1] = { f = f, b = b, row = row, pri = row and int(row.priority, 0) or 0, order = i }
+    elseif b then
+      -- A seat that chose no move (bag, switch, run) has gChosenMoveByBattler
+      -- MOVE_NONE (battle_main.c:2993), which is not Rage.  The Fury Cutter
+      -- counter is NOT cleared by choosing something else in Gen 3 (pret has
+      -- no such check): a miss, the bag, a failed run, a switch or a canceller
+      -- stop resets it (CancelMultiTurnMoves / ClearFuryCutterDestinyBondGrudge).
+      b.rage = nil
     end
   end
 
@@ -1401,6 +1443,9 @@ function Battle:_resolveRuns()
         self:_finish("win", self:_sidePlayers(other), self:_sidePlayers(fighter.side), "run")
         return true
       end
+      -- pokefirered/src/battle_main.c:4311: a failed escape clears Fury
+      -- Cutter, Destiny Bond and Grudge like a bag action.
+      b.furyCutter, b.destinyBond, b.grudge = nil, nil, nil
       self:say("Can't escape!")
     end
   end
@@ -1433,6 +1478,11 @@ function Battle:_pursuitBefore(fighter)
   end
 end
 
+-- pokefirered/src/battle_main.c:3532 SetActionsAndBattlersTurnOrder: the
+-- switch and bag actions go first, TOGETHER, in battler order (a1, b1, a2, ...),
+-- ahead of every move -- a1's Potion before b1's switch.  Balls are the one
+-- exception, BattleSim2's policy (sheet doc §6): they wait for the other bag
+-- actions and are thrown fastest first (`_resolveItems`).
 function Battle:_resolveSwitches()
   for _, fighter in ipairs(self.order) do
     if self.result then return end
@@ -1449,19 +1499,15 @@ function Battle:_resolveSwitches()
         self:_drainExp()
         if not self.result then self:_checkOver() end
       end
-    end
-  end
-end
-
-function Battle:_resolveItems()
-  for _, fighter in ipairs(self.order) do
-    if self.result then return end
-    local choice = fighter.choice
-    if choice and choice.action == "item" then
+    elseif choice and choice.action == "item" then
       local effect = Items.bagEffect(choice.item)
       if not (effect and effect.ball) then self:_useItem(fighter) end
     end
   end
+end
+
+-- The balls, after every other bag action, fastest thrower first.
+function Battle:_resolveItems()
   local balls = {}
   for i, fighter in ipairs(self.order) do
     local choice = fighter.choice
@@ -1505,6 +1551,11 @@ function Battle:_useItem(fighter)
   local choice = fighter.choice
   if not (choice and choice.action == "item") then return end
   fighter.acted = true
+  -- pokefirered/src/battle_main.c:4155 HandleAction_UseItem:
+  -- ClearFuryCutterDestinyBondGrudge on the seat's battler.
+  if fighter.b then
+    fighter.b.furyCutter, fighter.b.destinyBond, fighter.b.grudge = nil, nil, nil
+  end
   local item = choice.item
   local effect = Items.bagEffect(item)
   self:_emit("item", { slot = fighter.slot, side = fighter.side, text = tostring(item) })
@@ -1695,6 +1746,7 @@ end
 
 function Battle:_refield(fighter)
   fighter.fought = {}
+  fighter.foughtSeats = nil
   local mine = activeMon(fighter) and fighter.active or nil
   local foes = self.bySide[fighter.side == "a" and "b" or "a"]
   for _, foe in ipairs(foes) do
@@ -1722,9 +1774,17 @@ function Battle:_standingOpposition(fighter)
   return keys
 end
 
+-- A participant that faints stops being one (it earns nothing), but its SEAT
+-- is remembered as having fought (`foughtSeats`): pret's sentIn bits outlive a
+-- faint, and a seat whose participants all fell still pays its Exp. Share
+-- holders (`_awardExp`).
 function Battle:_unfield(fighter, index)
   local key = foughtKey(fighter.slot, index)
   for _, other in ipairs(self.fighters) do
+    if other.fought and other.fought[key] then
+      other.foughtSeats = other.foughtSeats or {}
+      other.foughtSeats[fighter.slot] = true
+    end
     if other.fought then other.fought[key] = nil end
     local pending = other.pendingFought
     if pending then
@@ -1743,12 +1803,16 @@ function Battle:_awardExp(fallen, mon)
   if fallen.side == EXP_OWNER_SIDE then return end
   local fought = fallen.fought or {}
   local participants, alive = 0, {}
+  local seatFought, seatPaid = {}, {}
   for _, fighter in ipairs(self.bySide[EXP_OWNER_SIDE]) do
+    if fallen.foughtSeats and fallen.foughtSeats[fighter.slot] then seatFought[fighter] = true end
     for index = 1, #fighter.mons do
       if fought[foughtKey(fighter.slot, index)] then
         participants = participants + 1
+        seatFought[fighter] = true
         if fighter.mons[index].hp > 0 then
           alive[#alive + 1] = { fighter = fighter, index = index }
+          seatPaid[fighter] = true
         end
       end
     end
@@ -1758,15 +1822,29 @@ function Battle:_awardExp(fallen, mon)
       if activeMon(fighter) then
         participants = participants + 1
         alive[#alive + 1] = { fighter = fighter, index = fighter.active }
+        seatFought[fighter], seatPaid[fighter] = true, true
       end
     end
   end
-  if #alive == 0 then return end
   for _, winner in ipairs(alive) do
     self:_emit("exp", {
       slot = winner.fighter.slot, species = mon.species, speciesId = mon.speciesId,
       level = mon.level, participants = participants, mon = winner.index - 1,
     })
+  end
+  -- pokefirered/src/battle_script_commands.c:3113 Cmd_getexp pays the living
+  -- Exp. Share holders whether or not any participant still stands (viaSentIn
+  -- 0 is a SAFE_DIV, :3170).  A seat that fought this foe but has nobody
+  -- standing who did gets the holders-only fact: `participants` 0 and no
+  -- `mon`.  Its client prices it as a knockout with an empty sentIn set, so
+  -- only the holders' half is paid (sheet doc §7).
+  for _, fighter in ipairs(self.bySide[EXP_OWNER_SIDE]) do
+    if seatFought[fighter] and not seatPaid[fighter] and firstLiving(fighter.mons) then
+      self:_emit("exp", {
+        slot = fighter.slot, species = mon.species, speciesId = mon.speciesId,
+        level = mon.level, participants = 0,
+      })
+    end
   end
 end
 
@@ -1823,7 +1901,14 @@ function Battle:_checkOver()
   if not aliveA and not aliveB then
     self:_finish("draw", nil, nil, "ko")
   elseif aliveA then
-    self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "ko")
+    local result = self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "ko")
+    -- pokefirered/src/battle_main.c:3764: only a WON battle runs
+    -- BattleScript_PayDayMoneyAndPickUpItems (Cmd_givepaydaymoney), and the
+    -- coins are the player side's.  Link rules pay nothing (1v1 / coop_pvp); in
+    -- the other modes side a is the player side.  The Amulet Coin doubling
+    -- (gBattleStruct->moneyMultiplier) and the wallet are the client's.
+    local coins = int(self.payDay and self.payDay.a, 0)
+    if result and EXP_MODES[self.mode] and coins > 0 then result.payDay = coins end
   else
     self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "ko")
   end
@@ -1967,6 +2052,7 @@ function Battle:snapshot()
     over = self.result ~= nil, reason = self.result and self.result.reason or nil,
     rngState = self.rng:state(), weather = self.field.weather,
     field = field, waiting = waiting,
+    payDay = { a = self.payDay.a, b = self.payDay.b },
   }
 end
 

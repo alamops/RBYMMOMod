@@ -102,7 +102,7 @@ Bm.switchInEffects = function switchInEffects(b, optsIn) {
   let did = Abilities.switchIn(this, b);
   if (!truthy(did)) did = Items.onSwitchIn(this, b);
   if (!truthy(opts.deferIntimidate)) {
-    for (let n = 1; n <= 4; n += 1) {
+    for (let n = 1; n <= Move.PASS_CAP; n += 1) {
       if (!(truthy(Abilities.runIntimidate(this)) || truthy(Abilities.runTrace(this)))) break;
       did = true;
     }
@@ -123,7 +123,7 @@ Bm._battleStart = function _battleStart() {
   for (const b of order) {
     if (!truthy(this.result)) Abilities.switchIn(this, b);
   }
-  for (let n = 1; n <= 4; n += 1) {
+  for (let n = 1; n <= Move.PASS_CAP; n += 1) {
     if (!(truthy(Abilities.runIntimidate(this)) || truthy(Abilities.runTrace(this)))) break;
   }
   for (const b of order) {
@@ -267,6 +267,9 @@ PHASE.ingrain = function ingrain(B, b) {
 PHASE.abilities = function abilities(B, b) { Abilities.endTurn(B, b); };
 
 PHASE.held_items = function heldItems(B, b) { Items.normal(B, b, false); };
+
+// ENDTURN_ITEMS2 (battle_util.c:785): the moveTurn pass, per battler.
+PHASE.held_items2 = function heldItems2(B, b) { Items.normal(B, b, true); };
 
 // pokefirered/src/battle_util.c:789
 PHASE.leech_seed = function leechSeed(B, b) {
@@ -491,6 +494,13 @@ Bm._futureSightHit = function _futureSightHit(tok, target) {
   }
 };
 
+// pokefirered/src/battle_util.c:1083.  On the cart the fainted-mon handling
+// (HandleFaintedMonActions) sends every replacement in BEFORE this step, so a
+// hit due at a seat emptied this turn lands on the newcomer.  Here the replace
+// phase follows the end of turn, so such a token waits at 0 (`pending`) and
+// `_landPendingFutureSight` fires it once the seat is filled.  A seat that will
+// never be filled (no living bench: pret's absent battler, skipped for good)
+// drops it.
 Bm._tickFutureSight = function _tickFutureSight() {
   for (const f of this.order) {
     const side = this.sides[f.side];
@@ -500,7 +510,12 @@ Bm._tickFutureSight = function _tickFutureSight() {
         tok.turns -= 1;
         if (tok.turns <= 0) {
           const target = this._standingAt(f.slot);
-          if (target) this._futureSightHit(tok, target);
+          if (target) {
+            this._futureSightHit(tok, target);
+          } else if (truthy(f.mustReplace)) {
+            tok.turns = 0;
+            keep.push(tok);
+          }
         } else {
           keep.push(tok);
         }
@@ -510,6 +525,33 @@ Bm._tickFutureSight = function _tickFutureSight() {
     }
     side.futureSight = keep;
     this._faintSweep();
+  }
+};
+
+// The due hits that waited for a replacement (above), after the replace
+// phase's switch-ins; one that still finds its seat empty keeps waiting only
+// while that seat is owed a mon.
+Bm._landPendingFutureSight = function _landPendingFutureSight() {
+  for (const f of this.order) {
+    if (truthy(this.result)) return;
+    const side = this.sides[f.side];
+    const keep = [];
+    let any = false;
+    for (const tok of side.futureSight) {
+      if (tok.targetSlot === f.slot && tok.turns <= 0) {
+        const target = this._standingAt(f.slot);
+        if (target) {
+          any = true;
+          this._futureSightHit(tok, target);
+        } else if (truthy(f.mustReplace)) {
+          keep.push(tok);
+        }
+      } else {
+        keep.push(tok);
+      }
+    }
+    side.futureSight = keep;
+    if (any) this._faintSweep();
   }
 };
 

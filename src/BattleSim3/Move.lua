@@ -328,8 +328,36 @@ function Bm:copyMove(row)
   }
 end
 
+-- The row a CALLED move resolves to (Nature Power's terrain move, Mirror Move,
+-- a locked move that was called): the caller's own list (overlay first), then
+-- the ruleset pool (the host's decoded move table -- pret reads gBattleMoves),
+-- then the caller's seat's party sheets (an Assist-called lock with no pool).
+-- Never another fighter's sheet: a row somebody else uploaded under a borrowed
+-- number (Swift carrying EFFECT_NATURE_POWER, a 255-power "Swift") can never
+-- become the caller's move.
+function Bm:calledRowByNum(num, caller)
+  num = int(num, 0)
+  if num == 0 then return nil end
+  if num == MOVE.STRUGGLE then return M.STRUGGLE end
+  local function scan(list)
+    for i = 1, #(list or {}) do
+      if int(list[i].num, 0) == num then return list[i] end
+    end
+    return nil
+  end
+  local hit = caller and scan(caller.moves) or nil
+  if hit then return hit end
+  if self.pool and self.pool[num] then return self.pool[num] end
+  for _, mon in ipairs(caller and caller.fighter and caller.fighter.mons or {}) do
+    hit = scan(mon.moves)
+    if hit then return hit end
+  end
+  return nil
+end
+
 -- A move row by number: the hint battler's list, every battler on the field,
--- every party, then the ruleset pool.
+-- every party, then the ruleset pool.  Labels and look-ups only; a row that is
+-- going to be USED as a called move comes from `calledRowByNum`.
 function Bm:moveRowByNum(num, hint)
   num = int(num, 0)
   if num == 0 then return nil end
@@ -398,14 +426,16 @@ function Bm:emitMovesOf(b, real)
 end
 
 -- pokefirered/src/battle_util.c:361 CheckMoveLimitations: the slots this
--- battler may NOT select.
-function Bm:moveLimitations(b)
+-- battler may NOT select.  `ignorePP` is the ~MOVE_LIMITATION_PP mask Sleep
+-- Talk passes (battle_script_commands.c:7882): every limit but an empty slot's
+-- PP.
+function Bm:moveLimitations(b, ignorePP)
   local bad = {}
   local he = Items.of(b)
   for i = 1, #b.moves do
     local mv = b.moves[i]
     local n = int(mv.num, 0)
-    if n == 0 or int(mv.pp, 0) <= 0 then bad[i] = true end
+    if n == 0 or (not ignorePP and int(mv.pp, 0) <= 0) then bad[i] = true end
     if b.disabledNum and n == b.disabledNum then bad[i] = true end
     if b.tormented and n == b.lastMoveNum then bad[i] = true end
     if int(b.tauntTurns, 0) > 0 and int(mv.power, 0) == 0 then bad[i] = true end
@@ -606,8 +636,12 @@ function Ctx:tryFaintTarget()
     B:loseHp(user, user.mon.hp)
     B:_faintBattler(user)
   end
-  if target.grudge and self.slot and user.mon.hp > 0 then
-    local mv = user.moves[self.slot]
+  -- pokefirered/src/battle_script_commands.c:2894: a foe's Grudge, not
+  -- Struggle, and the PP of the slot the attacker CHOSE (chosenMovePositions:
+  -- Metronome's slot when Metronome called the KO).
+  if target.grudge and self.chosenSlot and user.side ~= target.side and user.mon.hp > 0
+      and self.mnum ~= MOVE.STRUGGLE then
+    local mv = user.moves[self.chosenSlot]
     if mv then
       mv.pp = 0
       B:say(B:nameOf(user) .. "'s " .. B:moveLabel(mv) .. " lost all its PP due to the GRUDGE!")
@@ -643,14 +677,17 @@ end
 
 -- The battler an action lands on.  `aimed` is the chosen / stored target
 -- battler (or nil); `random` true re-picks a SELECTED move's target at random
--- (a called or Encored move).
-function Bm:_pickTarget(user, row, aimed, random)
+-- (a called or Encored move); `called` marks a called move (GetMoveTarget).
+function Bm:_pickTarget(user, row, aimed, random, called)
   local ttype = int(row.target, 0)
   if ttype == T.USER then return user end
-  -- pokefirered/src/battle_main.c HandleAction_UseMove: an active Follow Me takes
-  -- every single-target move (even one aimed at the ally) and every random one.
+  -- An active Follow Me takes every MOVE_TARGET_SELECTED move, even one aimed
+  -- at the ally (pokefirered/src/battle_main.c:4027 HandleAction_UseMove), and
+  -- a called move's random target too (battle_util.c:3054 GetMoveTarget's
+  -- MOVE_TARGET_RANDOM arm); a chosen random-target move (Thrash, Uproar) is
+  -- not pulled.
   local fm = followMe(self, user)
-  if fm and (ttype == T.SELECTED or ttype == T.USER_OR_SELECTED or ttype == T.RANDOM) then
+  if fm and (ttype == T.SELECTED or (called and ttype == T.RANDOM)) then
     return fm
   end
   if ttype == T.RANDOM then
@@ -864,6 +901,30 @@ function Bm:_selfHit(C)
   C:tryFaintUser()
 end
 
+-- The per-strike move end, defined with the move end below (forward).
+local strikeEnd
+
+-- pret GET_MOVE_TYPE: the type the move has in battle.  Hidden Power's
+-- `hiddenpowercalc` and Weather Ball's `setweatherballtype` run BEFORE
+-- attackcanceler (battle_scripts_1.s BattleScript_EffectHiddenPower /
+-- BattleScript_EffectWeatherBall), so the absorbing abilities, Levitate and
+-- Hustle's accuracy all read this, not the row's Normal.
+local function dynamicMoveType(C)
+  local mt = int(C.move.type, 0)
+  if C.effect == E.HIDDEN_POWER then
+    local hpw = C.user.mon.hiddenPower
+    if type(hpw) == "table" then mt = int(hpw.type, mt) end
+  elseif C.effect == E.WEATHER_BALL then
+    local w = C.B:weather()
+    if w == "RAIN" then mt = Types.ID.WATER
+    elseif w == "SAND" then mt = Types.ID.ROCK
+    elseif w == "SUN" then mt = Types.ID.FIRE
+    elseif w == "HAIL" then mt = Types.ID.ICE end
+  end
+  return mt
+end
+M.dynamicMoveType = dynamicMoveType
+
 -- ------------------------------------------------------------------
 -- the damaging path (effects/hit.lua)
 -- ------------------------------------------------------------------
@@ -900,6 +961,10 @@ function Bm:_dealDamage(C, dmg, info)
       self:say(self:nameOf(target) .. "'s SUBSTITUTE faded!")
     end
     C.hitSubstitute = true
+    -- The strike landed on the doll: its STATUS2_SUBSTITUTE bit stays set until
+    -- this strike's move end (MOVEEND_SUBSTITUTE), even when the doll just broke,
+    -- so the strike's secondary and King's Rock are refused (SetMoveEffect).
+    C.subStrike = true
     if int(C.firstDmg, 0) == 0 then C.firstDmg = dmg end
     C.hpDealt = dealt
     C.hitsLanded = int(C.hitsLanded, 0) + 1
@@ -1095,7 +1160,7 @@ local function flagsImmune(C, info)
 end
 
 -- pokefirered/src/battle_script_commands.c:1274 (Wonder Guard; not Struggle,
--- which returns before typecalc on the cart)
+-- which returns before typecalc on the cart).  Also OHKO's typecalc.
 local function wonderGuard(C, info)
   local B = C.B
   if C.target.ability ~= "WONDER_GUARD" then return false end
@@ -1227,12 +1292,18 @@ local function tripleKick(C)
     lastInfo = info
     if status ~= "ok" and status ~= "endured" and status ~= "hung" then break end
     landed = landed + 1
+    if status == "hung" then Items.focusBandMessage(B, target) end
+    -- battle_scripts_1.s:1414 moveendto MOVEEND_NEXT_TARGET, every kick (the
+    -- endured one too: the FOE_ENDURED jump comes after it)
+    strikeEnd(C)
     if status == "endured" then
       B:say(B:nameOf(target) .. " endured the hit!")
       break
     end
-    if status == "hung" then Items.focusBandMessage(B, target) end
   end
+  -- battle_scripts_1.s:1433: the kick loop ends with moveendfrom
+  -- MOVEEND_UPDATE_LAST_MOVES only.
+  C.endFrom = "last"
   if landed > 0 then
     effectivenessLine(B, lastInfo and lastInfo.typeFlags)
     B:say("Hit " .. landed .. " time(s)!")
@@ -1286,6 +1357,10 @@ local function beatUp(C)
       if hung == "endured" then B:say(B:nameOf(target) .. " endured the hit!")
       elseif hung == "hung" then Items.focusBandMessage(B, target) end
       C:tryFaintTarget()
+      -- battle_scripts_1.s:1964 moveendto MOVEEND_NEXT_TARGET per member; the
+      -- loop's own end (BattleScript_BeatUpEnd) runs no move end after it.
+      strikeEnd(C)
+      C.endFrom = "last"
     end
   end
   if not any then
@@ -1330,7 +1405,7 @@ end
 -- effects/hit.lua Hit.run
 function M.hit(C)
   local B, user, eff = C.B, C.user, C.effect
-  C.moveType = int(C.move.type, 0)
+  C.moveType = dynamicMoveType(C)
 
   if preChecks(C) then return end
   setMultipliers(C)
@@ -1358,7 +1433,10 @@ function M.hit(C)
   if eff == E.TRIPLE_KICK then return tripleKick(C) end
   if eff == E.BEAT_UP then return beatUp(C) end
 
-  if not C:accuracyCheck("normal", true) then
+  -- Pursuit on a switching target (battle_scripts_1.s:3081
+  -- BattleScript_PursuitDmgOnSwitchOut) draws no accuracy: attackstring,
+  -- ppreduce, then straight to critcalc / damagecalc.
+  if not C.opts.pursuit and not C:accuracyCheck("normal", true) then
     onMiss(C)
     return
   end
@@ -1444,6 +1522,9 @@ function M.hit(C)
     if status ~= "ok" and status ~= "endured" and status ~= "hung" then break end
     landed = landed + 1
     if status == "endured" then
+      -- battle_scripts_1.s:638: a multi-hit strike's move end runs before the
+      -- FOE_ENDURED jump; a single hit prints it straight away.
+      if isMulti then strikeEnd(C) end
       B:say(B:nameOf(target) .. " endured the hit!")
       break
     end
@@ -1454,7 +1535,13 @@ function M.hit(C)
       if setDmg and not (eff == E.COUNTER or eff == E.MIRROR_COAT) then f = nil end
       effectivenessLine(B, f)
     end
+    -- battle_scripts_1.s:638 moveendto MOVEEND_NEXT_TARGET after every strike:
+    -- Rage, contact abilities, the item checks, King's Rock / Shell Bell and
+    -- the Substitute update run per strike; the loop's end (:654) runs the
+    -- move end again from MOVEEND_SYNCHRONIZE_TARGET, skipping on-damage ones.
+    if isMulti then strikeEnd(C) end
   end
+  if isMulti and landed > 0 then C.endFrom = "sync" end
   if isMulti and landed > 0 then
     if lastStatus ~= "endured" and lastStatus ~= "hung" then
       effectivenessLine(B, lastInfo and lastInfo.typeFlags)
@@ -1566,6 +1653,13 @@ local function ohko(C)
     B:say("It doesn't affect " .. B:nameOf(target) .. "...")
     return
   end
+  -- Cmd_typecalc (battle_scripts_1.s:766 runs it before tryKO) also applies
+  -- Wonder Guard to a move with power: an OHKO move that is not super
+  -- effective misses Shedinja.
+  if int(C.move.power, 0) ~= 0 and wonderGuard(C, { typeFlags = flags }) then
+    C.missed = true
+    return
+  end
   local banded = Items.rollFocusBand(B, target)
   target.focusBanded = nil
   if target.ability == "STURDY" then
@@ -1618,7 +1712,7 @@ local function tryBounce(C)
     C:ppReduce()
     B:say(B:nameOf(user) .. "'s " .. C:moveName() .. " was bounced back by MAGIC COAT!")
     C.user, C.target = target, user
-    C.slot = nil
+    C.slot, C.chosenSlot = nil, nil
     C.noPP = true
     C.opts.bounced = true
     return true
@@ -1632,7 +1726,7 @@ local function tryBounce(C)
         C:ppReduce()
         B:say(B:nameOf(b) .. " snatched " .. B:nameOf(user) .. "'s move!")
         C.user, C.target = b, user
-        C.slot = nil
+        C.slot, C.chosenSlot = nil, nil
         C.noPP = true
         C.opts.bounced = true
         return true
@@ -1658,7 +1752,7 @@ end
 local function absorbCheck(C)
   local B, user, target = C.B, C.user, C.target
   if not target or target == user then return false end
-  local mt = int(C.move.type, 0)
+  local mt = C.moveType
   local power = int(C.move.power, 0)
   if not ((target.ability == "VOLT_ABSORB" and mt == Types.ID.ELECTRIC and power ~= 0)
       or (target.ability == "WATER_ABSORB" and mt == Types.ID.WATER and power ~= 0)
@@ -1680,10 +1774,14 @@ end
 -- move end (pokefirered/src/battle_script_commands.c:4056 / :4121)
 -- ------------------------------------------------------------------
 
-local function moveEndEffects(C)
+-- MOVEEND_SYNCHRONIZE_TARGET .. MOVEEND_KINGSROCK_SHELLBELL.  `skipOnDamage`
+-- is the multi-hit loop's closing pass (moveendcase SYNCHRONIZE_TARGET, then
+-- moveendfrom IMMUNITY_ABILITIES), whose strikes already ran the contact
+-- abilities one by one.
+local function moveEndEffects(C, skipOnDamage)
   local B, user, target = C.B, C.user, C.target
   if target and target ~= user then Abilities.synchronize(B, C, target, user) end
-  Abilities.onDamage(B, C)
+  if not skipOnDamage then Abilities.onDamage(B, C) end
   Abilities.immunityCure(B)
   if target and target ~= user then Abilities.synchronize(B, C, user, target) end
   local chosen = C.opts.calledBy or C.move
@@ -1722,10 +1820,12 @@ local function moveEndEffects(C)
   end
 end
 
-local function moveEnd(C)
+-- MOVEEND_RAGE (TARGET_TURN_DAMAGED: a hit on the doll builds nothing) and
+-- MOVEEND_DEFROST.
+local function rageAndDefrost(C)
   local B, user, target = C.B, C.user, C.target
   if target and target ~= user and target.rage and target.mon.hp > 0 and user.side ~= target.side
-      and not C.noEffect and int(C.hitsLanded, 0) > 0 and int(C.move.power, 0) > 0
+      and not C.noEffect and C.targetDamaged and int(C.move.power, 0) > 0
       and target.stages.atk < 6 then
     target.stages.atk = target.stages.atk + 1
     local text = B:nameOf(target) .. "'s RAGE is building!"
@@ -1737,7 +1837,27 @@ local function moveEnd(C)
       and C.specialHit and not C.noEffect and C.moveType == Types.ID.FIRE then
     B:cure(target, B:nameOf(target) .. " was defrosted!")
   end
-  moveEndEffects(C)
+end
+
+-- One strike's move end (pret `moveendto MOVEEND_NEXT_TARGET` inside the
+-- multi-hit, Triple Kick and Beat Up loops): Rage, defrost, the contact
+-- abilities, the item checks, King's Rock / Shell Bell, then MOVEEND_SUBSTITUTE
+-- drops the strike's doll bit.  The last-move bookkeeping is left to the move's
+-- closing pass (the same values either way).
+strikeEnd = function(C)
+  rageAndDefrost(C)
+  moveEndEffects(C, false)
+  C.subStrike = nil
+end
+
+-- The move's closing move end.  `C.endFrom` says where the move's own script
+-- resumes it: nil = moveendall, "sync" = the multi-hit close (no Rage / defrost
+-- / on-damage), "last" = Triple Kick / Beat Up (MOVEEND_UPDATE_LAST_MOVES on).
+local function moveEnd(C)
+  local B, user, target = C.B, C.user, C.target
+  if C.endFrom == nil then rageAndDefrost(C) end
+  if C.endFrom ~= "last" then moveEndEffects(C, C.endFrom == "sync") end
+  C.subStrike = nil
   local chosen = C.opts.calledBy or C.move
   local chosenNum = int(chosen.num, 0)
   if int(chosen.effect, -1) ~= E.BATON_PASS then
@@ -1764,22 +1884,41 @@ end
 -- calling moves (engine.lua call_moves / run_called)
 -- ------------------------------------------------------------------
 
-local function runCalled(C, row, slot)
+-- How deep one action may nest called moves.  The deepest chain a cart can
+-- build is three calls (Metronome -> Assist -> Nature Power -> the terrain
+-- move: Metronome may pick Assist, Assist may pick Nature Power); a sheet or
+-- pool row that calls itself (Swift carrying EFFECT_NATURE_POWER, a
+-- "Sleep Talk" numbered like Pound) would otherwise recurse until the stack
+-- overflows and wedge the fight in `resolving`.  Past the cap the call says
+-- "But it failed!".
+M.MAX_CALL_DEPTH = 3
+
+-- opts: noPP (Sleep Talk's HITMARKER_NO_PPDEDUCT for the called slot).
+local function runCalled(C, row, slot, extra)
   local B = C.B
-  if not row then
+  local depth = int(C.opts.callDepth, 0) + 1
+  if not row or depth > M.MAX_CALL_DEPTH then
     C.failed = true
     B:say("But it failed!")
     return
   end
-  local target = B:_pickTarget(C.user, row, nil, true)
-  local opts = { called = true, calledBy = C.opts.calledBy or C.move, pursuit = C.opts.pursuit }
+  local target = B:_pickTarget(C.user, row, nil, true, true)
+  local opts = {
+    called = true, calledBy = C.opts.calledBy or C.move, pursuit = C.opts.pursuit,
+    callDepth = depth, chosenSlot = C.chosenSlot, noPP = extra and extra.noPP or nil,
+  }
   return B:_resolveMove(C.user, target, row, slot, opts)
 end
 
--- pokefirered/src/battle_script_commands.c:7834
-local function invalidSleepTalk(num)
+-- pokefirered/src/battle_script_commands.c:7834 IsInvalidForSleepTalkOrAssist,
+-- by number as on the cart -- and by effect, so a row that carries one of the
+-- four calling effects under another number is refused the same way.
+local CALLER_EFFECT = {
+  [E.SLEEP_TALK] = true, [E.ASSIST] = true, [E.MIRROR_MOVE] = true, [E.METRONOME] = true,
+}
+local function invalidSleepTalk(num, effect)
   return num == nil or num == 0 or num == MOVE.SLEEP_TALK or num == MOVE.ASSIST
-    or num == MOVE.MIRROR_MOVE or num == MOVE.METRONOME
+    or num == MOVE.MIRROR_MOVE or num == MOVE.METRONOME or CALLER_EFFECT[int(effect, -1)] == true
 end
 
 -- pokefirered/src/battle_script_commands.c:7519: roll 1..511 until a legal pool
@@ -1823,14 +1962,17 @@ local function callMoves(C)
     B:say(B:nameOf(user) .. " is fast asleep.")
     C:attackString()
     C:ppReduce()
+    -- pokefirered/src/battle_script_commands.c:7866 Cmd_trychoosesleeptalkmove:
+    -- the four callers, Focus Punch, Uproar and the two-turn moves, then
+    -- CheckMoveLimitations with every limit but PP (Disable, Torment, Taunt,
+    -- Imprison, Encore, Choice Band).
+    local bad = B:moveLimitations(user, true)
     local valid = {}
     for i = 1, #user.moves do
       local mv = user.moves[i]
       local n = int(mv.num, 0)
-      if not invalidSleepTalk(n) and n ~= MOVE.FOCUS_PUNCH and n ~= MOVE.UPROAR
-          and not TWO_TURN[int(mv.effect, -1)]
-          and not (user.disabledNum and n == user.disabledNum)
-          and not (int(user.encoreTurns, 0) > 0 and user.encoreNum and user.encoreNum ~= n) then
+      if not bad[i] and not invalidSleepTalk(n, mv.effect) and n ~= MOVE.FOCUS_PUNCH
+          and n ~= MOVE.UPROAR and not TWO_TURN[int(mv.effect, -1)] then
         valid[#valid + 1] = { row = mv, slot = i }
       end
     end
@@ -1841,14 +1983,16 @@ local function callMoves(C)
     end
     local pick = valid[B:roll(1, #valid)]
     C:attackAnimation()
-    return runCalled(C, pick.row)
+    -- gCurrMovePos = the picked slot (Mimic / Sketch write there), with
+    -- HITMARKER_NO_PPDEDUCT: the called move spends no PP of its own.
+    return runCalled(C, pick.row, pick.slot, { noPP = true })
   elseif eff == E.MIRROR_MOVE then
     -- pokefirered/src/battle_script_commands.c:6350
     C:attackString()
     local num = user.lastTakenMove
     if num and num ~= 0 then
       C:ppReduce()
-      return runCalled(C, B:moveRowByNum(num))
+      return runCalled(C, B:calledRowByNum(num, user))
     end
     C:ppReduce()
     C.failed = true
@@ -1862,7 +2006,7 @@ local function callMoves(C)
       if i ~= user.partyIndex then
         for j = 1, #(mon.moves or {}) do
           local n = int(mon.moves[j].num, 0)
-          if n ~= 0 and not invalidSleepTalk(n) and not Effects.forbidden(n, false) then
+          if n ~= 0 and not invalidSleepTalk(n, mon.moves[j].effect) and not Effects.forbidden(n, false) then
             list[#list + 1] = mon.moves[j]
           end
         end
@@ -1880,7 +2024,7 @@ local function callMoves(C)
     -- pokefirered/src/battle_script_commands.c:8718
     C:attackString()
     local num = Field.NATURE_POWER_MOVE[B.terrain] or 129
-    local row = B:moveRowByNum(num)
+    local row = B:calledRowByNum(num, user)
     if not row then
       C:ppReduce()
       C.failed = true
@@ -1904,6 +2048,7 @@ local function resetTargetValues(C)
   C.brokeWall = nil
   C.missed = false
   C.absorbed = nil
+  C.endFrom, C.subStrike = nil, nil
 end
 
 local function forEachTarget(C, body)
@@ -1962,15 +2107,41 @@ end
 -- run (engine.lua run) and resolveMove
 -- ------------------------------------------------------------------
 
+-- pokefirered/src/battle_util.c:1874 ABILITYEFFECT_MOVES_BLOCK, which
+-- Cmd_attackcanceler runs for every target pass of a move (a spread move's
+-- second foe, a called move) -- BattleScript_SoundproofProtected, then the move
+-- end.  True when Soundproof stopped the move at this target.
+local function soundproofBlocked(C)
+  local B, user, target = C.B, C.user, C.target
+  C.soundproofSeen = target
+  if not Abilities.soundproofBlocks(target ~= user and target or nil, C.mnum) then return false end
+  if user.lockedNum then C.noPP = true end
+  C:attackString()
+  C:ppReduce()
+  B:emitAbility(target)
+  B:say(B:nameOf(target) .. "'s SOUNDPROOF blocks " .. C:moveName() .. "!")
+  C.missed = true
+  C.noEffect = true
+  moveEnd(C)
+  return true
+end
+
 local function body(C)
   local B, user = C.B, C.user
-  tryBounce(C)
-  lightningRodTook(C)
-  -- The owner of the move context may have changed hands (Snatch / Magic Coat).
-  user = C.user
-  if absorbCheck(C) then
-    moveEnd(C)
-    return
+  -- Pursuit on a switching target skips attackcanceler whole (no Soundproof,
+  -- Magic Coat, Snatch, Lightning Rod or absorbing ability): battle_scripts_1.s
+  -- :3081 BattleScript_PursuitDmgOnSwitchOut.
+  if not C.opts.pursuit then
+    if C.soundproofSeen ~= C.target and soundproofBlocked(C) then return end
+    tryBounce(C)
+    lightningRodTook(C)
+    -- The owner of the move context may have changed hands (Snatch / Magic Coat).
+    user = C.user
+    C.moveType = dynamicMoveType(C)
+    if absorbCheck(C) then
+      moveEnd(C)
+      return
+    end
   end
   local eff = C.effect
   if eff == E.OHKO then
@@ -2015,6 +2186,12 @@ local function run(C)
 
   if not C.opts.called then
     user.movedThisTurn = true
+  end
+  -- Pursuit on a switching target never meets the canceller: sleep / freeze /
+  -- Truant were checked when it was chosen to strike (Cmd_jumpifnopursuitswitchdmg)
+  -- and paralysis, confusion, love and flinching are not rolled at all
+  -- (battle_scripts_1.s:3081 has no attackcanceler).
+  if not C.opts.called and not C.opts.pursuit then
     local c = canceller(C)
     if c == false then
       user.lastMoveNum = nil
@@ -2027,18 +2204,12 @@ local function run(C)
       moveEnd(C)
       return
     end
-    -- pokefirered/src/battle_util.c:1874 ABILITYEFFECT_MOVES_BLOCK
-    if Abilities.soundproofBlocks(C.target ~= user and C.target or nil, C.mnum) then
-      if user.lockedNum then C.noPP = true end
-      C:attackString()
-      C:ppReduce()
-      B:emitAbility(C.target)
-      B:say(B:nameOf(C.target) .. "'s SOUNDPROOF blocks " .. C:moveName() .. "!")
-      C.missed = true
-      C.noEffect = true
-      moveEnd(C)
-      return
-    end
+    -- Soundproof at the first target (the rest are asked per target in
+    -- `body`); a doubles spread move asks every target there, the first too,
+    -- so one Soundproof foe does not stop the move for the other.
+    local ttype = int(C.move.target, 0)
+    local spread = B.double and (ttype == T.BOTH or ttype == T.FOES_AND_ALLY)
+    if not spread and soundproofBlocked(C) then return end
     if C.slot and user.moves[C.slot] and int(user.moves[C.slot].pp, 0) == 0
         and not user.lockedNum and C.mnum ~= MOVE.STRUGGLE then
       C:attackString()
@@ -2060,9 +2231,10 @@ local function run(C)
   end
 
   if eff == E.FOCUS_PUNCH and (int(user.lastPhysDmg, 0) > 0 or int(user.lastSpecDmg, 0) > 0) then
-    -- pokefirered/data/battle_scripts_1.s:2255
+    -- pokefirered/data/battle_scripts_1.s:2255 (then BattleScript_MoveEnd)
     C:ppReduce()
     B:say(B:nameOf(user) .. " lost its focus and couldn't move!")
+    moveEnd(C)
     return
   end
 
@@ -2070,13 +2242,18 @@ local function run(C)
 end
 
 -- One move, start to finish (engine.lua resolveMove).  `target` is already
--- resolved; `opts` = { called, calledBy, pursuit, passSlot, chosenAlly }.
+-- resolved; `opts` = { called, calledBy, pursuit, passSlot, chosenAlly, and for
+-- a called move callDepth, chosenSlot (the caller's), noPP (Sleep Talk) }.
 function Bm:_resolveMove(user, target, row, slot, opts)
   opts = opts or {}
   if not user or user.mon.hp <= 0 or user.fighter.b ~= user then return end
   local C = newCtx(self, user, target, row, slot, opts)
   C.passSlot = opts.passSlot
   C.chosenAlly = opts.chosenAlly
+  -- pret chosenMovePositions: the slot the seat chose, which a called move
+  -- inherits from its caller (Grudge empties that one).
+  if opts.called then C.chosenSlot = opts.chosenSlot else C.chosenSlot = slot end
+  if opts.noPP then C.noPP = true end
   if opts.called then C.printedUsed = false end
   user.statLoweredMsg = nil
   if target then target.statLoweredMsg = nil end
@@ -2093,10 +2270,14 @@ function Bm:_resolveMove(user, target, row, slot, opts)
 end
 
 -- pokefirered/src/battle_util.c:1208 (after every action that was not called):
--- Intimidate / Trace, held-item checks (berries), Forecast -- up to four passes.
+-- Intimidate / Trace, held-item checks (berries), Forecast -- one thing per
+-- pass, passes until nothing acts (the cart re-enters state 6 until it returns
+-- FALSE, so a 3v3 field's six Intimidates all resolve now).  M.PASS_CAP only
+-- bounds a runaway; every pass spends a pending flag, an item or a form change.
+M.PASS_CAP = 64
 function Bm:_afterAction()
   if self.result then return end
-  for _ = 1, 4 do
+  for _ = 1, M.PASS_CAP do
     local did = false
     did = did or Abilities.runIntimidate(self)
     did = did or Abilities.runTrace(self)
@@ -2121,7 +2302,7 @@ function Bm:_actionMove(b, choice)
     local slot = b.lockedSlot
     local row = slot and b.moves[slot]
     if not row or int(row.num, 0) ~= b.lockedNum then
-      row = self:moveRowByNum(b.lockedNum, b)
+      row = self:calledRowByNum(b.lockedNum, b)
       slot = self:slotOfNum(b, b.lockedNum)
     end
     if row then return row, slot, "locked" end
@@ -2173,7 +2354,7 @@ function Bm:_fightAction(fighter, choice, opts)
   end
   local chosenAlly = nil
   if aimed and aimed.side == user.side and aimed ~= user then chosenAlly = aimed end
-  local target = self:_pickTarget(user, row, aimed, why == "encore")
+  local target = self:_pickTarget(user, row, aimed, why == "encore", false)
   if slot then user.lastSlot = slot end
   return self:_resolveMove(user, target, row, slot, {
     pursuit = opts.pursuit, passSlot = choice.pass, chosenAlly = chosenAlly,

@@ -90,7 +90,7 @@ function Bm:switchInEffects(b, opts)
   local did = Abilities.switchIn(self, b)
   if not did then did = Items.onSwitchIn(self, b) end
   if not opts.deferIntimidate then
-    for _ = 1, 4 do
+    for _ = 1, Move.PASS_CAP do
       if not (Abilities.runIntimidate(self) or Abilities.runTrace(self)) then break end
       did = true
     end
@@ -110,7 +110,7 @@ function Bm:_battleStart()
   for _, b in ipairs(order) do
     if not self.result then Abilities.switchIn(self, b) end
   end
-  for _ = 1, 4 do
+  for _ = 1, Move.PASS_CAP do
     if not (Abilities.runIntimidate(self) or Abilities.runTrace(self)) then break end
   end
   for _, b in ipairs(order) do
@@ -242,6 +242,9 @@ end
 PHASE.abilities = function(B, b) Abilities.endTurn(B, b) end
 
 PHASE.held_items = function(B, b) Items.normal(B, b, false) end
+
+-- ENDTURN_ITEMS2 (battle_util.c:785): the moveTurn pass, per battler.
+PHASE.held_items2 = function(B, b) Items.normal(B, b, true) end
 
 -- pokefirered/src/battle_util.c:789
 PHASE.leech_seed = function(B, b)
@@ -447,6 +450,13 @@ function Bm:_futureSightHit(tok, target)
   end
 end
 
+-- pokefirered/src/battle_util.c:1083.  On the cart the fainted-mon handling
+-- (HandleFaintedMonActions) sends every replacement in BEFORE this step, so a
+-- hit due at a seat emptied this turn lands on the newcomer.  Here the replace
+-- phase follows the end of turn, so such a token waits at 0 (`pending`) and
+-- `_landPendingFutureSight` fires it once the seat is filled.  A seat that will
+-- never be filled (no living bench: pret's absent battler, skipped for good)
+-- drops it.
 function Bm:_tickFutureSight()
   for _, f in ipairs(self.order) do
     local side = self.sides[f.side]
@@ -456,7 +466,12 @@ function Bm:_tickFutureSight()
         tok.turns = tok.turns - 1
         if tok.turns <= 0 then
           local target = self:_standingAt(f.slot)
-          if target then self:_futureSightHit(tok, target) end
+          if target then
+            self:_futureSightHit(tok, target)
+          elseif f.mustReplace then
+            tok.turns = 0
+            keep[#keep + 1] = tok
+          end
         else
           keep[#keep + 1] = tok
         end
@@ -466,6 +481,32 @@ function Bm:_tickFutureSight()
     end
     side.futureSight = keep
     self:_faintSweep()
+  end
+end
+
+-- The due hits that waited for a replacement (above), after the replace
+-- phase's switch-ins; one that still finds its seat empty keeps waiting only
+-- while that seat is owed a mon.
+function Bm:_landPendingFutureSight()
+  for _, f in ipairs(self.order) do
+    if self.result then return end
+    local side = self.sides[f.side]
+    local keep, any = {}, false
+    for _, tok in ipairs(side.futureSight) do
+      if tok.targetSlot == f.slot and tok.turns <= 0 then
+        local target = self:_standingAt(f.slot)
+        if target then
+          any = true
+          self:_futureSightHit(tok, target)
+        elseif f.mustReplace then
+          keep[#keep + 1] = tok
+        end
+      else
+        keep[#keep + 1] = tok
+      end
+    end
+    side.futureSight = keep
+    if any then self:_faintSweep() end
   end
 end
 
