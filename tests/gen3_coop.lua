@@ -941,10 +941,21 @@ do
     return assert(CoopBattle.unpackParty(GAME, assert(CoopBattle.packParty(
       { monOf(sp, lv, { moves = { 33 }, pp = { 35 }, maxPp = { 35 }, hp = hp }) }, GAME))))
   end
-  local parties = { party(4, 30), party(16, 30), party(29, 8, 5), party(151, 8, 5) }
-  local slots = {}
-  for i = 1, 4 do
-    slots[i] = { side = i <= 2 and "a" or "b", owner = ids[i], name = names[i], party = parties[i] }
+  local specs = { { 4, 30 }, { 16, 30 }, { 29, 8, 5 }, { 151, 8, 5 } }
+  -- CAL (screen 3) is this process's own player: its seat is the live
+  -- session party, as src/Coop.lua hands it over; everybody else's seats are
+  -- copies unpacked off the wire, one set per client, as on four machines.
+  local calMon = monOf(29, 8, { moves = { 33 }, pp = { 35 }, maxPp = { 35 }, hp = 5 })
+  SESSION.party = { calMon }
+  local calExp, calLevel = calMon.exp, calMon.level
+  local function slotsFor(me)
+    local out = {}
+    for i = 1, 4 do
+      local p = (i == 3 and me == 3) and SESSION.party
+        or party(specs[i][1], specs[i][2], specs[i][3])
+      out[i] = { side = i <= 2 and "a" or "b", owner = ids[i], name = names[i], party = p }
+    end
+    return out
   end
   local screens, transports = {}, {}
   local linkAsked = {}
@@ -955,7 +966,7 @@ do
   end
   for i = 1, 4 do
     transports[i] = transportFor(hub, clients[i])
-    screens[i] = assert(CoopBattle.new(GAME, { slots = slots, mine = i, host = i == 1,
+    screens[i] = assert(CoopBattle.new(GAME, { slots = slotsFor(i), mine = i, host = i == 1,
       mode = "coop_pvp", transport = transports[i], battleId = "pv1",
       selfId = ids[i], ranksPoints = true }))
     screens[i]:enter()
@@ -994,6 +1005,16 @@ do
   eq(screens[2].result, "win", "on both of its screens")
   eq(screens[3].result, "loss", "and the other side loses")
   eq(screens[4].result, "loss", "on both of its screens")
+  -- Link rules (pokefirered cable_club.c LoadPlayerParty): the spar fought
+  -- with copies, and the session party is exactly as it was.
+  local calSeat = screens[3].sim:slot(3)
+  check(calSeat.party[1] ~= calMon, "a spar's own seat fights with a copy of the session mon")
+  eq(calSeat.party[1].hp, 0, "(which the fight knocked out)")
+  eq(calMon.hp, 5, "the session mon's HP is as it was before the spar")
+  eq(calMon.status, nil, "its status too")
+  eq(calMon.pp[1], 35, "and its PP")
+  eq(calMon.exp, calExp, "no EXP")
+  eq(calMon.level, calLevel, "and no level")
   eq(#gen1Asked, 0, "and no side asked for anything of Gen 1's")
 end
 
@@ -1698,6 +1719,19 @@ do
   eq(mine.pp[1], 31, "and a party encounter's")
   mine = ppScreen("coop_pvp")
   eq(mine.pp[1], 35, "a fight between players spends nothing in the save (link rules)")
+  -- An exp share that reached a spar anyway is not banked (link rules: no
+  -- EXP); the same share in a trainer fight is.
+  for _, mode in ipairs({ "coop_npc", "coop_pvp" }) do
+    local _, sc = ppScreen(mode)
+    sc.expCredit3 = 6
+    sc:medRows({ battle = "pp1", seq = 5, t = "exp", slot = 0, side = "a",
+                 speciesId = 16, level = 5, mon = 0, participants = 1 })
+    if mode == "coop_npc" then
+      check(sc.expBatch3 ~= nil, "(a trainer fight banks the share)")
+    else
+      eq(sc.expBatch3, nil, "a link battle banks no experience")
+    end
+  end
 end
 
 do
@@ -1882,6 +1916,22 @@ do
   local other = payScreen("coop_wild", "a", false, false, nil, { "p2" })
   eq(SESSION.money, 1000, "a player the outcome does not name a winner picks nothing up")
   eq(other.payDayPaid, nil, "(nothing owed)")
+end
+
+do
+  -- A spar lost is not a whiteout: no money, no warp (the cart reloads the
+  -- party after a link battle and carries on where the player stands).
+  newGame()
+  SESSION.party = { monOf(4, 10, { hp = 0 }) }
+  SESSION.money = 1000
+  local coop = coopWith(true)
+  coop.battle = { plan = { id = "pv2", allies = { { id = "me" }, { id = "p2" } },
+                           foes = { { id = "p3" }, { id = "p4" } } } }
+  coop:onBattleOver("loss", GAME, { mode = "coop_pvp" }, nil)
+  CoopField.pump3(100)
+  eq(recorded("moneyLoss"), 0, "a lost spar takes no whiteout money")
+  eq(recorded("respawn"), 0, "and sends nobody to a POKeMON CENTER")
+  eq(SESSION.money, 1000, "the wallet is untouched")
 end
 
 -- ------- walking into the trainer the partner is already waiting at

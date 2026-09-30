@@ -632,6 +632,13 @@ function M.new(game, opts)
       .. "resolve is disabled on this boot")
   end
 
+  -- Gen 3 link rules: a fight between players is a link battle, and the cart
+  -- reloads the party after one (pokefirered cable_club.c
+  -- CB2_ReturnFromCableClubBattle -> LoadPlayerParty) -- so this player's own
+  -- seat fights with copies of the session's monsters and nothing the fight
+  -- does to them (HP, status, a faint, PP, a held item) reaches the save.
+  if gen3 and Mediated.LINK_MODES[opts.mode] then opts = M.sparOpts3(opts) end
+
   local ruleset
   if gen3 then
     -- No Gen 1 / Gen 2 ruleset applies on Gen 3, and none is read: the field
@@ -11385,6 +11392,42 @@ function M.unpackParty3(Protocol, game, packed)
   return out
 end
 
+-- ------- a spar is a link battle
+
+-- One party monster, copied: plain data all the way down (a session mon is
+-- what the save serialises), bounded against anything that is not.
+local function copyData3(value, depth)
+  if type(value) ~= "table" or depth > 8 then return value end
+  local out = {}
+  for k, v in pairs(value) do out[k] = copyData3(v, depth + 1) end
+  return out
+end
+
+-- CoopBattle.new's opts for a Gen 3 fight between players, with this
+-- player's own seat fighting copies of its party (see the note in M.new).
+-- Everything else in the opts -- the other seats, which are already copies
+-- unpacked off the wire -- is handed on as it was.  The copies keep the
+-- party's order, so every party-addressed field on the wire (`mon`, a sheet's
+-- `slot`) still names the same position.
+function M.sparOpts3(opts)
+  local slots = type(opts) == "table" and opts.slots or nil
+  local mine = type(opts) == "table" and (opts.mine or 1) or nil
+  local own = type(slots) == "table" and slots[mine] or nil
+  if type(own) ~= "table" or type(own.party) ~= "table" then return opts end
+  local out = {}
+  for k, v in pairs(opts) do out[k] = v end
+  local seats = {}
+  for i, slot in ipairs(slots) do seats[i] = slot end
+  local seat = {}
+  for k, v in pairs(own) do seat[k] = v end
+  local party = {}
+  for i, mon in ipairs(own.party) do party[i] = copyData3(mon, 0) end
+  seat.party = party
+  seats[mine] = seat
+  out.slots = seats
+  return out
+end
+
 -- ------- a seat
 
 -- A Gen 3 battler, in the fields every draw / menu path above reads.  `mon` is
@@ -11543,7 +11586,9 @@ function M:medRows3(msg, rows, index, slot, say)
     return false
   end
   if kind == "exp" then
-    if index == self.mine then self:bankExp3(msg) end
+    -- A link battle pays no experience (the sheet's link rules; the referee
+    -- sends none there) -- and one that arrived anyway is not banked.
+    if index == self.mine and not Mediated.LINK_MODES[self.mode] then self:bankExp3(msg) end
     return true
   end
   if kind == "team" then

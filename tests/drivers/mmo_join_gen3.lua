@@ -606,8 +606,31 @@ return function(game)
         H.g3SetOption(game, "classicui", false)
         local placed = true
         if not catching then
-          local lead = H.g3SeedLead(game, B.coopGuest, B.coopGuestLevel)
-          check(lead ~= nil, ("%s: a level %d %s leads the guest's party"):format(name, B.coopGuestLevel, B.coopGuest))
+          -- Staged so this side's lead really acts, and so really spends PP
+          -- for the write-back check below.  The partner's lead knocks a
+          -- Route 1 / Route 101 wild out the moment it moves, and a wild fight
+          -- ends on that knockout -- so the guest's lead has to move first and
+          -- must not end the fight itself: a level that outspeeds the host's
+          -- lead whatever the IV / nature draw (+20), and a first turn spent
+          -- on TAIL WHIP (a status move: PP spent, the wild left standing for
+          -- the host's knockout, which is what the host's own PP check reads).
+          local level = B.coopGuestLevel + 20
+          local lead = H.g3SeedLead(game, B.coopGuest, level)
+          check(lead ~= nil, ("%s: a level %d %s leads the guest's party"):format(name, level, B.coopGuest))
+          local tailWhip = H.g3Const(game, "moves", "MOVE_TAIL_WHIP")
+          local hyperFang = H.g3Const(game, "moves", "MOVE_HYPER_FANG")
+          if lead and tailWhip and hyperFang then
+            local Moves = package.loaded["src.core.game3.battle.moves"]
+            local function ppOf(id, fallback)
+              local ok, row = pcall(function() return Moves and Moves.get(id) end)
+              return ok and type(row) == "table" and tonumber(row.pp) or fallback
+            end
+            lead.moves = { tailWhip, hyperFang }
+            lead.pp = { ppOf(tailWhip, 30), ppOf(hyperFang, 15) }
+            lead.maxPp = { lead.pp[1], lead.pp[2] }
+          end
+          check(lead ~= nil and lead.moves[1] == tailWhip,
+                name .. ": the guest's lead opens with TAIL WHIP (a status move)")
           local _, mate = H.g3GrassCells(game, B.wildMap)
           check(mate ~= nil, name .. ": a patch of tall grass on " .. B.wildMap)
           placed = mate ~= nil and H.g3Teleport(game, B.wildMap, mate.x, mate.y, "down")
@@ -622,8 +645,25 @@ return function(game)
                                      "the partner's grass fight to reach this side")
         check(joined, name .. ": the partner's encounter pulled this player into the co-op fight (auto-join)")
         if joined then
-          local res = H.g3PilotFight(game, { shot = shot, label = name, seconds = 300 })
+          -- Turn 1 on the wild leg: the status move (see the staging above);
+          -- after that, and on the catch, the pilot's own strongest move.
+          local pick = nil
+          if not catching then
+            pick = function(_, moves, turn)
+              if turn ~= 1 then return nil end
+              for i, mv in ipairs(moves) do
+                if (tonumber(mv.power) or 0) == 0 and (tonumber(mv.pp) or 0) > 0 then return i end
+              end
+              return nil
+            end
+          end
+          local res = H.g3PilotFight(game, { shot = shot, label = name, seconds = 300, pick = pick })
           coopResult(name, res, "coop_wild", 3)
+          if not catching then
+            local said = table.concat(res.said or {}, " | ")
+            check(said:find(B.coopGuest .. " used", 1, true) ~= nil,
+                  name .. ": this side's " .. B.coopGuest .. " acted in the fight (so it spent PP)")
+          end
           H.closeToOverworld(game)
           H.g3Settle(game, 600)
           check(H.g3Free(game), name .. ": back in the field, free to walk")
